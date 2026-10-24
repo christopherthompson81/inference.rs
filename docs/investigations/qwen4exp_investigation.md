@@ -699,3 +699,85 @@ inference bench --format gguf (UD-IQ4_XS) --moe-expert-cache 64 --pa-context-len
 Graphs halve a resident step and take about 4 ms (5%) off an offloaded one, as Run 12 estimated: the miss round trip
 per MoE layer still sets the offloaded step. Eager decode, which now always takes the host-function gather and the
 device plan, is within noise of master.
+
+## Run 20 - 2026-10-23 17:33
+
+Question: what does basalt (an MIT engine built only for this model, Blackwell, experts in RAM) do that we don't,
+and what does it suggest for one 3090 with offloaded experts?
+
+Read only, a survey of its docs and kernels. Its closest setup to ours, from its community table: one RTX 5080 16 GB
+with UD-Q4_K_XL (72 GiB of experts, most of them in RAM) decodes at 77.5 tok/s with MTP and prefills 16K at
+2835 tok/s; we decode at about 14 tok/s. Its quality runs put about 0.8% of routed experts on the CPU, so its
+headline numbers (325 tok/s, 5090 plus a second card) are not ours to compare.
+
+What it does in the miss path that we don't:
+- No host function and no per-token uploads. Per layer, a route kernel sorts the routed experts into tiers from
+  device-side residency tables, writes the CPU's expert ids and FFN input into mapped pinned memory and raises a
+  doorbell word; a host thread spins on it (`_mm_pause`, a `cudaStreamQuery` every 2 ms to keep the driver
+  submitting), the pool writes result rows into mapped memory and raises a flag, a GPU kernel spins on that flag
+  while the GPU's own experts run, and the combine reads the CPU rows from mapped memory. It once streamed missed
+  experts over PCIe for a share of them and dropped that for the CPU pool.
+- Residency by a routing-frequency profile ranked over a trace (shipped with the model), never evicting on a miss;
+  slow adaptive rounds swap up to 96 of the most-routed missing experts in for the least-routed resident ones (counts
+  decayed 0.85 a round), seeded at request start from the prompt's routing. The RAM copy is pinned
+  (`cudaHostRegister` on a buffer filled with O_DIRECT reads).
+- CPU pool: one worker per physical core less one, spinning 20 ms before parking, lock-free claims; every expert
+  split by rows over all workers (gate/up rows, quantize, down rows), so a few experts per layer still stream at all
+  cores' bandwidth. Verify windows decode each 32-value weight chunk once for every token. Idle workers prefetch the
+  likeliest CPU expert of the next layer into cache from an int8 copy of its router.
+- Speculation sized to the CPU share: a window costs the union of its tokens' CPU experts; the draft stops when the
+  product of acceptance estimates drops below a threshold that rises with the CPU's expert bytes. The MTP drafter's
+  512 experts are requantized to Q2_0 and all resident (708 MB), so drafting never reaches the CPU.
+- Prefill: dense projections always on the GPU, only experts split; chunks up to 16K; under 6144 tokens it stages
+  the routed experts, above that it streams every non-resident expert through a pinned ring.
+- PLE: rows read from the SSD with unbuffered 4 KiB reads behind a ~95 MB row cache, issued once the token id is
+  known and gathered before layer 1 (a keep-alive read holds the SSD out of its low-power state).
+- Fusions: a whole-layer kernel lost (288 against 325 tok/s with separate kernels); what stayed is the GDN middle
+  (qkv+z, recurrence, out) in one persistent kernel, the hc read plus router, QSA's KV post-ops, PLE post-ops. Their
+  fused kernels use TMA and PDL (sm_90+).
+
+Against our measurements: Run 12 found the per-layer miss round trip at ~32 ms a token, ~250 MB a token of expert
+fills over PCIe 3 (about 20 ms of DMA at ~12 GB/s), and 64 against 128 slots barely different. That fits basalt's
+choice: the fills and the round trip's fixed cost, not the hit rate.
+
+Plan, bottom-up: (1) measure what the fills cost by freezing the cache after a warm-up; (2) a frequency-ranked
+placement with rare swaps; (3) the doorbell miss path and a row-split spinning CPU pool; (4) dense prefill on the
+GPU. Fused hc/PLE kernels drop below these.
+
+## Run 21 - 2026-10-23 18:09
+
+Question: where does an offloaded Flash-Next decode step's time go, after Run 20's survey pointed at the miss path?
+
+Bottom-up probes in the offload's host function and prompt staging (removed after):
+```
+freeze the cache after 64 steps (no fills): misses 26% -> 88% of picks, 61-74 -> 98-106 ms a token
+CPU time per missed expert in the engine: ~310 us, 3.3-4.5 misses a layer, ~1.1 ms a layer, ~53 ms of a 64 ms token
+```
+So fills pay for themselves against a stale cache, and the CPU's misses are the step. A new ignored bench,
+`flash_next_offload_misses`, reproduces it with the UD-IQ4_XS types (IQ3_S gate/up, IQ4_NL down, 640 x 2560):
+```
+3 misses: 251 us an expert, 9.3 GB/s, 8 cores busy
+by shape (3 misses): 2048x512 IQ4_XS down 86 us (17.0 GB/s); 2560x512 103 us; 2560x768 128 us (21.3 GB/s);
+                     2048x640 IQ4_NL down 203 us (9.2 GB/s)
+```
+A 640-wide intermediate is not a multiple of 256, so the down projection takes the 32-wide family, and
+`vec_dot_32` was scalar for IQ4_NL and Q8_0. AVX2 kernels (`iq4_nl_32`, `q8_0_32`: a `pshufb` codebook lookup and
+the signed maddubs, as the QK_K kernels do) with a test against the generic ones:
+```
+3 misses: 108.7 us an expert, 21.4 GB/s (was 251 us, 9.3 GB/s); 10 misses 105.5 us, 22.1 GB/s
+real model, CPU time per miss ~150 us (was ~310)
+```
+The user saw one CPU thread busy for seconds per request: prompt staging. Each layer's routed experts (~410 MB at
+512 tokens, 96 layers' worth in a run) were copied from the pageable mapping by the driver, one thread at a time,
+8.6 GB/s. They now go through a pinned ring (4 x 16 MB) that the thread pool fills while the previous chunk is on the
+bus: 10.0 GB/s, eight threads busy through prefill. The 3090 links at PCIe 3 x16, so that is near the link.
+
+```
+inference bench --format gguf (UD-IQ4_XS) --moe-expert-cache 64 --pa-context-len 8192 --prompt-len 512 --gen-len 64
+  --iterations 3, alternating (master = LAN copy of 909132d8a)
+           round 1   round 2   round 3   mean
+  master   60.56     56.42     60.53     59.2 ms a token   TTFT 2.01-2.03 s
+  branch   41.61     46.04     40.22     42.6 ms a token   TTFT 1.97-2.05 s
+```
+Decode is 28% faster. TTFT does not move: the staging copies are bound by the link, so prefill needs fewer bytes
+(Run 20's basalt notes: more experts on the CPU share, or a streaming order that overlaps attention).

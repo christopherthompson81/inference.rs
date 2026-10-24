@@ -97,6 +97,19 @@ impl Q8Block32 {
 
 /// `row` holds `ys.len()` blocks of a 32-wide `ty`.
 pub(crate) fn vec_dot_32(ty: GgufType, row: &[u8], ys: &[Q8Block32]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2_fma() {
+        match ty {
+            // SAFETY: AVX2 and FMA were detected above
+            GgufType::Iq4Nl => return unsafe { avx2::iq4_nl_32(row, ys) },
+            GgufType::Q8_0 => return unsafe { avx2::q8_0_32(row, ys) },
+            _ => {}
+        }
+    }
+    vec_dot_32_generic(ty, row, ys)
+}
+
+fn vec_dot_32_generic(ty: GgufType, row: &[u8], ys: &[Q8Block32]) -> f32 {
     match ty {
         GgufType::Iq4Nl => row
             .as_chunks::<IQ4_NL_BYTES>()
@@ -377,9 +390,9 @@ mod avx2 {
     use inference_tensor::quantized::k_quants::{BlockQ8K, QK_K};
 
     use super::{
-        IQ3_S_BYTES, IQ3_S_QH, IQ3_S_QS, IQ3_S_SCALES, IQ3_S_SIGNS, IQ3S_GRID, IQ4_KSS_BYTES,
-        IQ4_KSS_ROW_SCALE, IQ4_KSS_SHIFT, IQ4_XS_BYTES, IQ4_XS_QS, KVALUES_IQ4NL, TileRow, f16_at,
-        iq4_xs_sub_scale, row_scale,
+        BLOCK32_QS, IQ3_S_BYTES, IQ3_S_QH, IQ3_S_QS, IQ3_S_SCALES, IQ3_S_SIGNS, IQ3S_GRID,
+        IQ4_KSS_BYTES, IQ4_KSS_ROW_SCALE, IQ4_KSS_SHIFT, IQ4_NL_BYTES, IQ4_XS_BYTES, IQ4_XS_QS,
+        KVALUES_IQ4NL, Q8_0_BYTES, Q8Block32, TileRow, f16_at, iq4_xs_sub_scale, row_scale,
     };
 
     // byte b of each 32-bit sign word spread over lanes 8b..8b+8, then each lane's bit
@@ -435,6 +448,46 @@ mod avx2 {
                 sumi = _mm256_add_epi32(sumi, _mm256_madd_epi16(p16, scale));
             }
             let d = _mm256_set1_ps(f16_at(block, 0) * y.d());
+            acc = _mm256_fmadd_ps(d, _mm256_cvtepi32_ps(sumi), acc);
+        }
+        hsum(acc)
+    }
+
+    // the i32 sums of `w * y` over a block's 32 signed bytes, as maddubs takes one unsigned side
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    fn signed_dot(w: __m256i, y: __m256i) -> __m256i {
+        let p16 = _mm256_maddubs_epi16(_mm256_sign_epi8(w, w), _mm256_sign_epi8(y, w));
+        _mm256_madd_epi16(p16, _mm256_set1_epi16(1))
+    }
+
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) fn iq4_nl_32(row: &[u8], ys: &[Q8Block32]) -> f32 {
+        // SAFETY: the codebook holds 16 bytes
+        let values = unsafe { _mm_loadu_si128(KVALUES_IQ4NL.as_ptr().cast()) };
+        let m4 = _mm_set1_epi8(0x0f);
+        let mut acc = _mm256_setzero_ps();
+        for (block, y) in row.as_chunks::<IQ4_NL_BYTES>().0.iter().zip(ys) {
+            // SAFETY: the 16 nibble bytes follow the block's scale
+            let bits = unsafe { _mm_loadu_si128(block[BLOCK32_QS..].as_ptr().cast()) };
+            // low nibbles pair with the first 16 activations, high ones with the last 16
+            let q4 = _mm256_set_m128i(
+                _mm_shuffle_epi8(values, _mm_and_si128(_mm_srli_epi16(bits, 4), m4)),
+                _mm_shuffle_epi8(values, _mm_and_si128(bits, m4)),
+            );
+            let sumi = signed_dot(q4, load_q8(&y.qs));
+            let d = _mm256_set1_ps(f16_at(block, 0) * y.d);
+            acc = _mm256_fmadd_ps(d, _mm256_cvtepi32_ps(sumi), acc);
+        }
+        hsum(acc)
+    }
+
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) fn q8_0_32(row: &[u8], ys: &[Q8Block32]) -> f32 {
+        let mut acc = _mm256_setzero_ps();
+        for (block, y) in row.as_chunks::<Q8_0_BYTES>().0.iter().zip(ys) {
+            let sumi = signed_dot(load(&block[BLOCK32_QS..]), load_q8(&y.qs));
+            let d = _mm256_set1_ps(f16_at(block, 0) * y.d);
             acc = _mm256_fmadd_ps(d, _mm256_cvtepi32_ps(sumi), acc);
         }
         hsum(acc)
@@ -1045,6 +1098,29 @@ mod tests {
                 assert!(
                     (many - dispatched).abs() < 1e-5 * expected.abs().max(1.0),
                     "{ty:?} {many}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn block32_dots_match_the_generic_kernels() {
+        let xs = (0..BLOCKS * QK32)
+            .map(|i| ((i * 37 % 101) as f32 - 50.0) / 13.0)
+            .collect::<Vec<_>>();
+        let mut ys = vec![Q8Block32::ZERO; BLOCKS];
+        Q8Block32::quantize(&xs, &mut ys);
+        for (ty, block_bytes) in [
+            (GgufType::Iq4Nl, IQ4_NL_BYTES),
+            (GgufType::Q8_0, Q8_0_BYTES),
+        ] {
+            for seed in 0..4 {
+                let row = row(block_bytes, seed);
+                let expected = vec_dot_32_generic(ty, &row, &ys);
+                let dispatched = vec_dot_32(ty, &row, &ys);
+                assert!(
+                    (dispatched - expected).abs() < 1e-4 * expected.abs().max(1.0),
+                    "{ty:?} {dispatched} vs {expected}"
                 );
             }
         }

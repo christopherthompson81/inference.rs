@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex, Weak};
 
 use inference_tensor::cuda_backend::cudarc::driver::{
-    CudaContext, CudaSlice, CudaStream, DevicePtr, SyncOnDrop, result, sys,
+    CudaContext, CudaEvent, CudaSlice, CudaStream, DevicePtr, SyncOnDrop, result, sys,
 };
 use inference_tensor::{CudaDevice, Device, Result, Shape};
 
@@ -11,6 +11,10 @@ use super::kernel::{GgufType, KernelWeight};
 
 // Zeroed bytes past the last expert, as the raw tensors pad theirs: the matmul kernels read whole tiles of K
 const ROW_PADDING_ELEMENTS: usize = 512;
+// A bounced upload's page-locked chunks: their size, how many are in flight, and the parts the pool splits each into
+const BOUNCE_CHUNK_BYTES: usize = 16 << 20;
+const BOUNCE_CHUNKS: usize = 4;
+const BOUNCE_PARTS: usize = 64;
 
 /// One projection's experts as their GGUF blocks in page-locked host memory mapped into the device: the CPU reads
 /// them in place, device copies from them run asynchronously, and the GPU kernels can read them over the bus.
@@ -215,6 +219,11 @@ impl HostExpertStack {
         self.len / self.dims()[0]
     }
 
+    /// Whether the experts are ordinary pageable memory, so an upload from them is best bounced (see [`BounceRing`]).
+    pub fn is_pageable(&self) -> bool {
+        matches!(self.storage, HostBlocks::Pageable(_))
+    }
+
     /// Every expert's blocks.
     pub fn bytes(&self) -> &[u8] {
         match &self.storage {
@@ -336,6 +345,30 @@ impl DeviceExpertStack {
         src: &[u8],
         stream: &CudaStream,
     ) -> Result<()> {
+        self.check_fill(first_slot, src)?;
+        let (base, _guard) = self.blocks.device_ptr(stream);
+        let dst = base + (first_slot * self.expert_bytes) as u64;
+        unsafe { result::memcpy_htod_async(dst, src, stream.cu_stream()) }
+            .map_err(inference_tensor::Error::wrap)
+    }
+
+    /// As [`Self::fill_async`], with a pageable `src` copied through `ring` by the whole thread pool.
+    /// # Safety
+    /// As [`Self::fill_async`].
+    pub unsafe fn fill_bounced_async(
+        &self,
+        first_slot: usize,
+        src: &[u8],
+        ring: &mut BounceRing,
+        stream: &CudaStream,
+    ) -> Result<()> {
+        self.check_fill(first_slot, src)?;
+        let (base, _guard) = self.blocks.device_ptr(stream);
+        let dst = base + (first_slot * self.expert_bytes) as u64;
+        unsafe { ring.upload(dst, src, stream) }
+    }
+
+    fn check_fill(&self, first_slot: usize, src: &[u8]) -> Result<()> {
         if !src.len().is_multiple_of(self.expert_bytes)
             || first_slot * self.expert_bytes + src.len() > self.slots() * self.expert_bytes
         {
@@ -344,10 +377,67 @@ impl DeviceExpertStack {
                 src.len()
             );
         }
-        let (base, _guard) = self.blocks.device_ptr(stream);
-        let dst = base + (first_slot * self.expert_bytes) as u64;
-        unsafe { result::memcpy_htod_async(dst, src, stream.cu_stream()) }
-            .map_err(inference_tensor::Error::wrap)
+        Ok(())
+    }
+}
+
+/// Page-locked chunks a pageable upload goes through: one thread's memcpy out of the page cache runs at about half the
+/// DMA's rate, so the thread pool fills each chunk while the one before it is on the bus.
+pub struct BounceRing {
+    chunks: Vec<(CudaSlice<u8>, CudaEvent)>,
+    next: usize,
+}
+
+impl BounceRing {
+    pub fn new(stream: &Arc<CudaStream>) -> Result<Self> {
+        let chunks = (0..BOUNCE_CHUNKS)
+            .map(|_| {
+                // SAFETY: every upload writes a chunk's bytes before its copy reads them
+                let chunk = unsafe { stream.alloc_mapped_host::<u8>(BOUNCE_CHUNK_BYTES) }
+                    .map_err(inference_tensor::Error::wrap)?;
+                let done = stream
+                    .context()
+                    .new_event(None)
+                    .map_err(inference_tensor::Error::wrap)?;
+                Ok((chunk, done))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self { chunks, next: 0 })
+    }
+
+    /// Queues `src` into the device memory at `dst` on `stream`.
+    /// # Safety
+    /// `dst..dst + src.len()` is device memory nothing reads until the copies complete on `stream`.
+    pub unsafe fn upload(&mut self, dst: u64, src: &[u8], stream: &CudaStream) -> Result<()> {
+        let wrap = inference_tensor::Error::wrap;
+        for (i, part) in src.chunks(BOUNCE_CHUNK_BYTES).enumerate() {
+            let (chunk, done) = &self.chunks[self.next];
+            self.next = (self.next + 1) % self.chunks.len();
+            // the chunk's last upload has left it
+            done.synchronize().map_err(wrap)?;
+            let host = chunk.mapped_host_ptr().expect("mapped allocation") as usize;
+            let piece = part.len().div_ceil(BOUNCE_PARTS);
+            inference_tensor::utils::barrier_pool().execute_chunked(BOUNCE_PARTS, |range| {
+                for p in range {
+                    let start = (p * piece).min(part.len());
+                    let end = (start + piece).min(part.len());
+                    // SAFETY: the chunk holds BOUNCE_CHUNK_BYTES and each part writes its own range of it
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            part[start..end].as_ptr(),
+                            (host as *mut u8).add(start),
+                            end - start,
+                        )
+                    };
+                }
+            });
+            // SAFETY: the chunk is page-locked and stays untouched until `done` passes this copy
+            let staged = unsafe { std::slice::from_raw_parts(host as *const u8, part.len()) };
+            let at = dst + (i * BOUNCE_CHUNK_BYTES) as u64;
+            unsafe { result::memcpy_htod_async(at, staged, stream.cu_stream()) }.map_err(wrap)?;
+            done.record(stream).map_err(wrap)?;
+        }
+        Ok(())
     }
 }
 
