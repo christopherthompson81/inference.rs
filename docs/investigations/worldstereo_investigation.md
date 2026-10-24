@@ -128,3 +128,25 @@ umT5-XXL (`text_encoder_matches_the_reference`; `dump_wan_text.py` on the CPU, t
 `shared.weight`, which `embed_tokens` ties to as the wrapper patches): token ids identical (31 tokens with EOS);
 our bf16 encoder against the reference's f32 states rel rms 2.0e-2, the reference's own bf16-autocast run 1.5e-2 from
 its f32 run. The pipeline's padded 512-token prompt with a mask equals the real tokens encoded alone, then zeros.
+
+## Run 6 - 2026-10-24 16:23
+
+Question: does a whole clip (I2V condition, render and memory latents, 4 DMD steps, decode) match the reference
+pipeline end to end?
+
+`dump_ws_clip.py` (scratch) runs the reference's own `RefKFDMDGeneratorPipeline` at real size (21 frames at 480 x 832,
+2 memory frames at ref_index [3, 12]) with its 40 blocks streamed by forward hooks (built on the meta device and
+assigned the bf16 tensors: an f32 construction was OOM-killed at 111 GB of host memory). Inputs are synthetic but
+structured: a sample-repo photo as the start frame, renders that shift it 6 px more each frame with masked holes, two
+other photos as memory frames, a synthetic trajectory; fixed noise; prompt states from the umT5 dump. 219 s.
+```
+wan::parity::clip_matches_the_reference (ours: VAE and CLIP in f32, transformer bf16 streamed), denoise 167 s
+after step 0: rel rms 3.2e-3   step 1: 7.6e-3   step 2: 2.4e-2   step 3 (final latents): 1.04e-1   frames: 7.7e-2
+reference against itself, FlashAttention 2 vs PyTorch SDPA (NO_FLASH=1 rerun):
+after step 0: rel rms 7.8e-4   step 1: 2.0e-3   step 2: 7.9e-3   step 3: 3.9e-2                     frames: 3.1e-2
+CLIP in bf16: final 9.3e-2; VAE in bf16: final 1.01e-1 (neither is the source)
+```
+The 4-step distilled sampler amplifies any difference ~30-50x over the steps, for the reference's own attention backend
+swap as for us; our starting difference is ~4x the backend swap's (f32 VAE and CLIP against the reference's bf16
+autocast). Side by side (frames 0, 10, 20: render, reference, ours) both fill the render holes with the same content,
+including a building and road that exist only in the generation. Parity at the level the sampler allows.

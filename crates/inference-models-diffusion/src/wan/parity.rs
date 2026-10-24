@@ -345,14 +345,28 @@ fn clip_matches_the_reference() -> Result<()> {
         seed: 0,
     };
     let t0 = std::time::Instant::now();
-    let latents = pipeline.denoise(&req)?;
+    let mut steps = Vec::new();
+    let latents = pipeline.denoise_observed(&req, &mut |i, l| steps.push((i, l.clone())))?;
+    for (i, l) in &steps {
+        if let Some(r) = refs.get(&format!("step{i}")) {
+            let (max, rel) = compare(l, r)?;
+            println!("after step {i}: max {max:.3e} rel rms {rel:.3e}");
+        }
+    }
     device.synchronize()?;
     println!("denoise {:.1} s", t0.elapsed().as_secs_f64());
     let (max, rel) = compare(&latents, &refs["latents"])?;
     println!("final latents: max {max:.3e} rel rms {rel:.3e}");
     let frames = pipeline.vae.decode(&latents.permute((1, 0, 2, 3))?)?;
     // the reference returns frames in [0, 1]
-    let (max, rel) = compare(&((frames + 1.0)? / 2.0)?, &refs["frames"])?;
+    let frames = ((frames + 1.0)? / 2.0)?;
+    if let Some(out) = env_path("WORLDSTEREO_CLIP_OUT") {
+        inference_tensor::safetensors::save(
+            &std::collections::HashMap::from([("frames", frames.to_device(&Device::Cpu)?)]),
+            out,
+        )?;
+    }
+    let (max, rel) = compare(&frames, &refs["frames"])?;
     println!("frames: max {max:.3e} rel rms {rel:.3e}");
     Ok(())
 }

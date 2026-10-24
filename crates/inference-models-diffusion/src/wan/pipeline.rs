@@ -59,6 +59,15 @@ impl WorldStereoPipeline {
 
     /// The clip's final latents `[16, F, H/8, W/8]` (normalized).
     pub fn denoise(&self, req: &ClipRequest) -> Result<Tensor> {
+        self.denoise_observed(req, &mut |_, _| {})
+    }
+
+    /// As [`Self::denoise`], handing `observe` the latents after each step.
+    pub fn denoise_observed(
+        &self,
+        req: &ClipRequest,
+        observe: &mut dyn FnMut(usize, &Tensor),
+    ) -> Result<Tensor> {
         let dev = &self.device;
         let (f, _, height, width) = req.renders.dims4()?;
         let (h, w) = (height / SPATIAL_SCALE, width / SPATIAL_SCALE);
@@ -129,6 +138,7 @@ impl WorldStereoPipeline {
             };
             let v = self.transformer.forward(&inputs, &cond)?;
             latents = self.schedule.step(&timesteps, i, &latents, &v)?;
+            observe(i, &latents);
         }
         Ok(latents)
     }
