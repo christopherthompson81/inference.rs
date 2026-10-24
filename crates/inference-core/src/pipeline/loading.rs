@@ -477,6 +477,10 @@ const PLANNED_SLOT_STEPS: usize = 64;
 // Longest prompt chunk an offloaded model's planner sizes: a chunk stages about every expert a layer routes to however
 // long it is, so prefill speeds up with the chunk well past the default
 const MAX_PLANNED_PROMPT_CHUNK: usize = 8192;
+// GPU memory a context-sized cache leaves free for what prompts allocate beyond the counted staging and chunk
+// activations: the staging's per-projection maxima, a step's transients and allocations outside the pool (about
+// 1.15 GB at a 22K-token prompt on Flash-Next, qwen4exp investigation Run 37)
+const OFFLOAD_RUNTIME_RESERVE_BYTES: usize = 1 << 30;
 // The paged cache an `auto` cache becomes when MoE experts leave the GPU: its room goes to cached experts, and 3-bit
 // K and V cost nothing measurable on the hybrid models tried (qwen4exp investigation Run 35)
 const OFFLOAD_CACHE_TYPE: crate::PagedCacheType = crate::PagedCacheType::Quant { k: 3, v: 3 };
@@ -706,6 +710,17 @@ fn offload_cache_type(
     })
 }
 
+// Whether the paged cache holds just the planned context, so the planner's slots take the rest: when it moves experts
+// off the GPU itself and no cache size or share was chosen (a share left at the default would hold back a tenth of
+// the GPU, about 20 cached experts on a 24 GB card, beyond what prompts use)
+fn sizes_cache_to_context(
+    expert_cache_asked: bool,
+    fits_resident: bool,
+    default_memory: bool,
+) -> bool {
+    !expert_cache_asked && !fits_resident && default_memory
+}
+
 // The context an offload plan keeps room for: a context-sized paged cache's own size (0 when none), else a usable
 // default within the model's window, and never less than the map's `max_seq_len`
 fn planned_offload_context(max_seq_len: usize, requested: usize, window: usize) -> usize {
@@ -811,24 +826,32 @@ pub(crate) fn resolve_map_setting(
             dtype,
             paged_attn_config,
         };
-        let chosen = offload_cache_type(
-            cache,
-            probe.offloadable_experts()?.is_some(),
-            sizing.moe_expert_cache.is_some(),
-            || {
-                let context = probe.planned_context(params)?;
-                probe.fits(None, &context, probe.activations(params)?)
-            },
-        )?;
-        if chosen != cache
-            && let Some(cfg) = paged_attn_config.as_mut()
-        {
-            info!(
-                cache = %chosen,
-                "MoE experts leave the GPU; quantizing the KV cache so more of them stay cached (`--pa-cache-type none` \
-                 keeps the model's dtype)"
-            );
-            cfg.cache_type = chosen;
+        let offloadable = probe.offloadable_experts()?.is_some();
+        let asked = sizing.moe_expert_cache.is_some();
+        // the planner moves experts off the GPU itself when the weights do not fit resident beside the planned context
+        let planned = probe.planned_context(params)?;
+        let fits_resident =
+            !offloadable || probe.fits(None, &planned, probe.activations(params)?)?;
+        let chosen = offload_cache_type(cache, offloadable, asked, || Ok(fits_resident))?;
+        if let Some(cfg) = paged_attn_config.as_mut() {
+            if chosen != cache {
+                info!(
+                    cache = %chosen,
+                    "MoE experts leave the GPU; quantizing the KV cache so more of them stay cached \
+                     (`--pa-cache-type none` keeps the model's dtype)"
+                );
+                cfg.cache_type = chosen;
+            }
+            if sizes_cache_to_context(asked, fits_resident, cfg.default_memory) {
+                let tokens = planned.max_seq_len() * planned.max_batch_size();
+                info!(
+                    tokens,
+                    "MoE experts leave the GPU; the KV cache holds the planned context and the rest caches experts \
+                     (`--pa-context-len` or `--pa-memory-fraction` chooses)"
+                );
+                cfg.mem_gpu = crate::MemoryGpuConfig::ContextSize(tokens);
+                *cfg = cfg.with_base_device_memory_reservation(OFFLOAD_RUNTIME_RESERVE_BYTES)?;
+            }
         }
     }
     let plan = ExpertCachePlan {
@@ -1459,6 +1482,14 @@ mod tests {
             assert_eq!(offload_cache_type(pinned, true, true, crowded)?, pinned);
         }
         Ok(())
+    }
+
+    #[test]
+    fn only_a_planned_offload_with_the_default_memory_sizes_the_cache_to_its_context() {
+        assert!(sizes_cache_to_context(false, false, true));
+        assert!(!sizes_cache_to_context(true, false, true));
+        assert!(!sizes_cache_to_context(false, true, true));
+        assert!(!sizes_cache_to_context(false, false, false));
     }
 
     #[test]

@@ -1232,11 +1232,10 @@ fn init_cache_config(
         paged_attn_supported(),
         no_paged_attn,
     ) {
-        (block_size, None, None, None, true, false) => Ok(Some(PagedAttentionConfig::new(
-            block_size,
-            MemoryGpuConfig::Utilization(0.9),
-            cache_type,
-        )?)),
+        (block_size, None, None, None, true, false) => Ok(Some(PagedAttentionConfig {
+            default_memory: true,
+            ..PagedAttentionConfig::new(block_size, MemoryGpuConfig::Utilization(0.9), cache_type)?
+        })),
         (block_size, None, None, Some(ctxt), true, false) => Ok(Some(PagedAttentionConfig::new(
             block_size,
             MemoryGpuConfig::ContextSize(ctxt),

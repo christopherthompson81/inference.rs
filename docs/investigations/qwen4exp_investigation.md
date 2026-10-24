@@ -1313,3 +1313,42 @@ q3 (1.5 GB)                120     36.9 / 35.9, 36.2 / 37.5                     
 ```
 Kept: the q3 default and the sixty-fourths. Open: the memory fraction's 10% (and the staging buffer it silently absorbs) is
 the next 20-odd slots for a model with no context asked for.
+
+## Run 37 - 2026-10-24 11:11
+
+Question: Run 36 found the memory fraction's 10% keeping ~20 slots off the GPU with no context asked for. Can an
+offloaded model's cache hold just the planned context and give the rest to cached experts?
+
+First attempt: with no flags and the planner offloading, size the paged cache to the planned context
+(`ContextSize`, so nothing is held back). 128 slots, decode 35.1 / 36.9, 37.0 / 39.7 tok/s, and a 24K-token prompt
+ran out of memory (21.5 GB after load, OOM in prefill). The 10% had been covering what prompts allocate.
+
+What prompts allocate, with the chunk fixed at 1024 (96 slots, 32K context-sized q3 cache), peak nvidia-smi above
+the post-load level: short prompt +1.8 GB, 5.6K tokens +2.3, 10.7K +3.0, 22.5K +3.0. The planner counts the staging
+(1.54 GB, the largest layer's experts) and the chunk's activations (0.35 GB). An nsys run with
+`--cuda-memory-usage=true` hung the server ~70 s into the prompt (0% CPU, no log lines; the same prompt runs without
+it), so the split came from the engine's own pool snapshot, logged at each prompt boundary (probe, removed after):
+```
+                          after load    long prompts
+async pool reserved       16,480 MiB    18,656-18,720   (staging 850 + 425 + 425, activations)
+async pool used           16,449        18,221 (per-step high 18,479)
+graph pool reserved       0             32 -> 96
+device available          6,220         3,975 -> 3,620
+```
+No fragmentation to trim: the pool's cached bytes stay ~0.5 GB. The gap is real allocations: the staging is sized
+per projection at the largest type across layers (one layer's Q8_0 down: 850 MiB), so 1.7 GB against the planner's
+1.54; a step's transients (~0.3-0.5 GB above steady use); and ~0.3-0.6 GB outside both pools.
+
+Built: when the planner moves experts off the GPU itself and the memory setting is the server's default
+(`PagedAttentionConfig::default_memory`, set only when no context, size or share was given), the cache holds the
+planned context and 1 GiB (`OFFLOAD_RUNTIME_RESERVE_BYTES`) is reserved for the above. Test
+`only_a_planned_offload_with_the_default_memory_sizes_the_cache_to_its_context`.
+```
+no flags: q3, 32K context, 120 slots, load 20,742 MiB
+prompt peaks   62 tokens 22,537   5.6K 22,870   10.7K 23,043   22.5K 22,996   29.6K (+300 decoded) 23,110 MiB
+A/B against --pa-memory-fraction 0.9 (the old default, 104 slots), three alternating rounds, two prompts:
+  120 slots   33.9 / 35.5   33.3 / 34.5   36.3 / 38.9    mean 35.4 tok/s
+  104 slots   32.1 / 29.9   32.6 / 33.6   35.2 / 34.9    mean 33.1
+```
++7%, every pair in favor, with about 1 GB of headroom at a full-context prompt. A longer context needs
+`--pa-context-len` or `--max-seq-len` now (the pool no longer stretches to 219K tokens by itself).
