@@ -1144,3 +1144,38 @@ Flash-Next   master   293 303 304           943 959 957
              branch   229 228 220           682 717 654    (-14% / -3%)
 ```
 That and Run 29's F16C are what basalt's AVX2 path has that ours lacked; the rest is either the same or slower here.
+
+## Run 31 - 2026-10-24 07:40
+
+Question: does batched decode work with offloaded experts, and what does it give?
+
+`batch_measure.sh` (scratch): `serve --moe-expert-cache 128 --pa-context-len 8192 --max-seqs 4`, 1, 2 and 4
+concurrent greedy requests of 300 tokens (four different prompts: code, an explanation, prose for a student, a
+story):
+```
+streams   per stream    total
+1         38.6 tok/s    38.6
+2         21.6          43.2
+4         10.6          42.4
+Captured 4 CUDA decode graphs through batch bucket 4; no errors, fill failures or eager fallbacks in the log
+```
+Correct: the outputs are coherent, and a prompt's batched output matches its single-stream one for the first ~490
+characters, then drifts (cache timing and the batched kernels' rounding, as the guide notes for single streams).
+Throughput is flat because each stream brings its own misses: four tokens route to about four times the experts the
+cache lacks, and the CPU's share grows with them, as a verify step's does (Run 23). Nothing to fix here; a larger
+cache is the lever.
+
+## Run 32 - 2026-10-24 07:53
+
+Question: can a prefix stored on disk before #606 (QSA's pooled keys then sat in a block's first cell) still be
+restored into today's build?
+
+The store keeps entries apart by a namespace: the model identity (source, dtype, ISQ, drafter), the block size,
+every paged layer's K/V shape and dtype, the recurrent state's shapes and layout, and the drafter's auxiliary
+signature. #606 moved where the indexer layers keep their pooled keys without changing a shape, so a pre-#606
+Flash-Next entry hashes to the same store and is restored with its pooled keys in the wrong cell.
+
+Fixed: every namespace opens with a layout header (`layout 1`), bumped when a model changes what its cached state
+means without changing its shapes; opening a store removes sibling stores under another header, which no store of
+the build could reach again. Test `a_store_under_another_layout_is_removed_on_open`. The one-time cost is a cold
+prefill per cached prefix, for every model, on the first start.

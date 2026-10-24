@@ -24,6 +24,9 @@ const ENTRIES_DIR: &str = "entries";
 const KEY_FILE: &str = "key.bin";
 const STATE_FILE: &str = "state.safetensors";
 const NAMESPACE_FILE: &str = "namespace.txt";
+// What every store's namespace opens with. Bump it when a model changes what its cached state means without changing
+// its shapes (QSA's pooled keys moving to a block's last cell): stores under another header are removed on open
+const LAYOUT_HEADER: &str = "layout 1";
 // the entry's TTL in whole seconds; an entry without one takes the store's default
 const TTL_FILE: &str = "ttl.txt";
 // how often the writer sweeps expired entries when no write wakes it
@@ -206,6 +209,22 @@ fn read_key(path: &Path) -> Option<Vec<u64>> {
 }
 
 impl DiskStore {
+    // stores under `dir` whose namespace opens with another layout header; no store of this build can reach them
+    fn remove_other_layouts(dir: &Path) -> Result<()> {
+        let Ok(stores) = fs::read_dir(dir) else {
+            return Ok(());
+        };
+        for store in stores.flatten() {
+            let Ok(namespace) = fs::read_to_string(store.path().join(NAMESPACE_FILE)) else {
+                continue;
+            };
+            if namespace.lines().next() != Some(LAYOUT_HEADER) {
+                fs::remove_dir_all(store.path()).map_err(io)?;
+            }
+        }
+        Ok(())
+    }
+
     /// The store for one model setup (`namespace`: weights, dtypes, cache layout) under `dir`, holding at most
     /// `capacity_bytes`; entries a crash left half written, and expired ones, are removed.
     fn open(
@@ -215,9 +234,11 @@ impl DiskStore {
         default_ttl: Duration,
     ) -> Result<Self> {
         use std::hash::{Hash, Hasher};
+        let namespace = format!("{LAYOUT_HEADER}\n{namespace}");
         let mut hasher = siphasher::sip::SipHasher13::new();
         namespace.hash(&mut hasher);
         let root = dir.join(format!("{:016x}", hasher.finish()));
+        Self::remove_other_layouts(dir)?;
         fs::create_dir_all(root.join(BLOCKS_DIR)).map_err(io)?;
         fs::create_dir_all(root.join(ENTRIES_DIR)).map_err(io)?;
         fs::write(root.join(NAMESPACE_FILE), namespace).map_err(io)?;
@@ -1064,6 +1085,24 @@ mod tests {
         // another setup never sees this one's entries
         let other = PrefixStore::open(Some(dir.path()), "another model", CAPACITY, 0, TTL)?;
         assert_eq!(other.longest_entry(&key, 0), None);
+        Ok(())
+    }
+
+    #[test]
+    fn a_store_under_another_layout_is_removed_on_open() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let current = {
+            let store = PrefixStore::open(Some(dir.path()), "other model", CAPACITY, 0, TTL)?;
+            write(&store, &[1, 2])?;
+            store.disk().root.clone()
+        };
+        let older = dir.path().join("00000000000000aa");
+        fs::create_dir_all(older.join(ENTRIES_DIR)).map_err(io)?;
+        fs::write(older.join(NAMESPACE_FILE), NAMESPACE).map_err(io)?;
+        let store = PrefixStore::open(Some(dir.path()), NAMESPACE, CAPACITY, 0, TTL)?;
+        assert!(!older.exists());
+        assert!(current.join(NAMESPACE_FILE).exists());
+        assert_eq!(store.longest_entry(&[1, 2], 0), None);
         Ok(())
     }
 
