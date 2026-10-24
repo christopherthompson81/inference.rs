@@ -25,6 +25,28 @@ pub use device::{
 pub use error::{CudaError, WrapErr};
 pub use utils::{Map1, Map1Any, Map2, Map2Any, Map2InPlace, Map3, S};
 
+const IM2COL_BLOCK: usize = 256;
+// Grid-stride elementwise kernels launch at most this many blocks; past it threads only add per-thread setup
+const ELEMENTWISE_MAX_BLOCKS: u32 = 4096;
+const ELEMENTWISE_BLOCK: u32 = 1024;
+
+fn grid_stride_config(elem_count: usize) -> LaunchConfig {
+    LaunchConfig {
+        grid_dim: (
+            (elem_count as u32)
+                .div_ceil(ELEMENTWISE_BLOCK)
+                .clamp(1, ELEMENTWISE_MAX_BLOCKS),
+            1,
+            1,
+        ),
+        block_dim: (ELEMENTWISE_BLOCK, 1, 1),
+        shared_mem_bytes: 0,
+    }
+}
+// The largest y and z grid dims, which im2col spends on the patch rows and the batch
+#[cfg(not(feature = "cudnn"))]
+const MAX_GRID_YZ: usize = 65535;
+
 type ParamCache = HashMap<(DeviceId, Vec<usize>), Arc<CudaSlice<usize>>>;
 
 static CUDA_PARAM_CACHE: OnceLock<Mutex<ParamCache>> = OnceLock::new();
@@ -169,7 +191,7 @@ impl Map1 for Affine {
         let shape = layout.shape();
         let dims = shape.dims();
         let el = shape.elem_count();
-        let cfg = LaunchConfig::for_num_elems(el as u32);
+        let cfg = grid_stride_config(el);
         let ds = SlicePtrOrNull::params_from_layout(dev, layout)?;
         let src = &src.slice(layout.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>("affine"), &kernels::AFFINE)?;
@@ -200,7 +222,7 @@ impl Map1 for Elu {
         let shape = layout.shape();
         let dims = shape.dims();
         let el = shape.elem_count();
-        let cfg = LaunchConfig::for_num_elems(el as u32);
+        let cfg = grid_stride_config(el);
         let ds = SlicePtrOrNull::params_from_layout(dev, layout)?;
         let src = &src.slice(layout.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>("uelu"), &kernels::UNARY)?;
@@ -292,25 +314,38 @@ impl Map1 for Im2Col {
         dev: &CudaDevice,
         layout: &Layout,
     ) -> Result<CudaSlice<T>> {
-        let shape = layout.shape();
-        let dims = shape.dims();
+        let dims = layout.shape().dims();
         let (h_out, w_out) = self.hw_out(dims[2], dims[3]);
-        let dst_el = dims[0] * h_out * w_out * dims[1] * self.h_k * self.w_k;
-        let cfg = LaunchConfig::for_num_elems(dst_el as u32);
+        let (taps, pixels) = (dims[1] * self.h_k * self.w_k, h_out * w_out);
+        let dst_el = dims[0] * taps * pixels;
+        let cfg = LaunchConfig {
+            grid_dim: (
+                pixels.div_ceil(IM2COL_BLOCK) as u32,
+                taps as u32,
+                dims[0] as u32,
+            ),
+            block_dim: (IM2COL_BLOCK as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
         let ds = SlicePtrOrNull::params_from_vec(dev, [dims, layout.stride()].concat())?;
         let src = &src.slice(layout.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>("im2col"), &kernels::CONV)?;
         // SAFETY: Set later by running the kernel.
         let dst = unsafe { dev.alloc::<T>(dst_el)? };
         let mut builder = func.builder();
-        barg!(builder, dst_el);
-        barg!(builder, h_out);
-        barg!(builder, w_out);
-        barg!(builder, self.h_k);
-        barg!(builder, self.w_k);
-        barg!(builder, self.stride);
-        barg!(builder, self.padding);
-        barg!(builder, self.dilation);
+        let args = [
+            pixels,
+            w_out,
+            self.h_k,
+            self.w_k,
+            self.stride,
+            self.padding,
+            self.dilation,
+        ]
+        .map(|v| v as u32);
+        for arg in &args {
+            builder.arg(arg);
+        }
         ds.builder_arg(&mut builder);
         builder.arg(src);
         builder.arg(&dst);
@@ -331,7 +366,7 @@ impl Map1 for Powf {
         let shape = layout.shape();
         let dims = shape.dims();
         let el = shape.elem_count();
-        let cfg = LaunchConfig::for_num_elems(el as u32);
+        let cfg = grid_stride_config(el);
         let ds = SlicePtrOrNull::params_from_layout(dev, layout)?;
         let src = &src.slice(layout.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>("upowf"), &kernels::UNARY)?;
@@ -459,7 +494,7 @@ impl Map1 for Unary {
         let shape = layout.shape();
         let dims = shape.dims();
         let el_count = shape.elem_count();
-        let cfg = LaunchConfig::for_num_elems(el_count as u32);
+        let cfg = grid_stride_config(el_count);
         let ds = SlicePtrOrNull::params_from_layout(dev, layout)?;
         let src = &src.slice(layout.start_offset()..);
         let func = dev.get_or_load_func(&kernel_name::<T>(self.0), &kernels::UNARY)?;
@@ -1183,7 +1218,7 @@ impl Map2 for Binary {
         let shape = lhs_l.shape();
         let dims = shape.dims();
         let elem_count = shape.elem_count();
-        let cfg = LaunchConfig::for_num_elems(elem_count as u32);
+        let cfg = grid_stride_config(elem_count);
         let dims_and_strides = if lhs_l.is_contiguous() && rhs_l.is_contiguous() {
             SlicePtrOrNull::Null
         } else {
@@ -1220,7 +1255,7 @@ impl Map2Any for Cmp {
         let shape = lhs_l.shape();
         let dims = shape.dims();
         let elem_count = shape.elem_count();
-        let cfg = LaunchConfig::for_num_elems(elem_count as u32);
+        let cfg = grid_stride_config(elem_count);
         let dims_and_strides = if lhs_l.is_contiguous() && rhs_l.is_contiguous() {
             SlicePtrOrNull::Null
         } else {
@@ -1602,7 +1637,7 @@ impl BackendStorage for CudaStorage {
         let shape = layout.shape();
         let dims = shape.dims();
         let el = shape.elem_count();
-        let cfg = LaunchConfig::for_num_elems(el as u32);
+        let cfg = grid_stride_config(el);
         let dev = self.device();
         let ds = SlicePtrOrNull::params_from_layout(dev, layout)?;
         let start_o = layout.start_offset();
@@ -2054,11 +2089,14 @@ impl BackendStorage for CudaStorage {
         params: &crate::conv::ParamsConv2D,
     ) -> Result<Self> {
         let device = self.device().clone();
-        if params.groups > 1 {
+        let b = params.b_size;
+        let n = params.c_out;
+        let k = params.k_h * params.k_w * params.c_in;
+        let m = params.out_h() * params.out_w();
+        if params.groups > 1 || k > MAX_GRID_YZ || b > MAX_GRID_YZ || m > u32::MAX as usize {
             let slice = Conv2D(params).map(&self.slice, l, &kernel.slice, kernel_l, &device)?;
             return Ok(Self { slice, device });
         }
-
         let col = Im2Col {
             h_k: params.k_h,
             w_k: params.k_w,
@@ -2068,35 +2106,22 @@ impl BackendStorage for CudaStorage {
         }
         .map(&self.slice, &device, l)?;
         let col = Self { slice: col, device };
-        let h_out = params.out_h();
-        let w_out = params.out_w();
-        let b = params.b_size;
-        let n = params.c_out;
-        let k = params.k_h * params.k_w * params.c_in;
-        let m = h_out * w_out;
-        let col_l = Layout::contiguous((b * m, k));
-        let res = if kernel_l.is_contiguous() {
-            let kernel_l =
-                Layout::contiguous_with_offset((n, k), kernel_l.start_offset()).transpose(0, 1)?;
-            col.matmul(kernel, (1, b * m, n, k), &col_l, &kernel_l)?
+        let col_l = Layout::contiguous((b, k, m));
+        // one GEMM per batch, `(n, k) x (k, m)`, lands straight in `(b, c_out, h_out * w_out)`
+        if kernel_l.is_contiguous() {
+            let kernel_l = Layout::contiguous_with_offset((n, k), kernel_l.start_offset())
+                .broadcast_as((b, n, k))?;
+            kernel.matmul(&col, (b, n, m, k), &kernel_l, &col_l)
         } else {
-            // Make the kernel contiguous if not already the case. copy_strided_src writes the
-            // materialized kernel starting at offset 0, so the matmul layout must use offset 0,
-            // not the original (strided) kernel's start offset.
+            // copy_strided_src writes the kernel from offset 0, so its layout starts there too
             let mut kernel_c = unsafe {
                 self.device()
                     .alloc_uninit(kernel_l.shape(), kernel.dtype())?
             };
             kernel.copy_strided_src(&mut kernel_c, 0, kernel_l)?;
-            let kernel_l = Layout::contiguous_with_offset((n, k), 0).transpose(0, 1)?;
-            col.matmul(&kernel_c, (1, b * m, n, k), &col_l, &kernel_l)?
-        };
-        let res_l = Layout::contiguous((b, h_out, w_out, n))
-            .transpose(1, 2)?
-            .transpose(1, 3)?;
-        let mut res_t = unsafe { self.device().alloc_uninit(res_l.shape(), res.dtype())? };
-        res.copy_strided_src(&mut res_t, 0, &res_l)?;
-        Ok(res_t)
+            let kernel_l = Layout::contiguous((n, k)).broadcast_as((b, n, k))?;
+            kernel_c.matmul(&col, (b, n, m, k), &kernel_l, &col_l)
+        }
     }
 
     #[cfg(feature = "cudnn")]
@@ -2397,7 +2422,7 @@ impl BackendStorage for CudaStorage {
         if el_count == 0 {
             return Ok(());
         }
-        let cfg = LaunchConfig::for_num_elems(el_count as u32);
+        let cfg = grid_stride_config(el_count);
         let dev = &self.device;
         let ds = SlicePtrOrNull::params_from_layout(dev, src_l)?;
         match (&self.slice, &mut dst.slice) {

@@ -21,6 +21,12 @@ extern "C" __global__ void FN_NAME( \
             out[i] = FUNC; \
         } \
     } else if (lhs_cont) { \
+        const unsigned int period = broadcast_period(num_dims, dims, rhs_strides); \
+        if (period) { \
+            for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) { \
+                TYPENAME x = lhs[i]; TYPENAME y = rhs[i % period]; out[i] = FUNC; \
+            } \
+        } else \
         for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) { \
             unsigned int tmp_i = i; \
             unsigned int rhs_i = 0; \
@@ -34,6 +40,12 @@ extern "C" __global__ void FN_NAME( \
             out[i] = FUNC; \
         } \
     } else if (rhs_cont) { \
+        const unsigned int period = broadcast_period(num_dims, dims, lhs_strides); \
+        if (period) { \
+            for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) { \
+                TYPENAME x = lhs[i % period]; TYPENAME y = rhs[i]; out[i] = FUNC; \
+            } \
+        } else \
         for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) { \
             unsigned int tmp_i = i; \
             unsigned int lhs_i = 0; \
@@ -115,6 +127,29 @@ extern "C" __global__ void FN_NAME( \
             } \
         } \
     } else if (lhs_cont) { \
+        const unsigned int period = broadcast_period(num_dims, dims, rhs_strides); \
+        if (period && period % 8 == 0 && is_aligned_16(lhs) && is_aligned_16(rhs) && is_aligned_16(out)) { \
+            const unsigned int vec_period = period / 8; \
+            const float4 *lhs4 = reinterpret_cast<const float4*>(lhs); \
+            const float4 *rhs4 = reinterpret_cast<const float4*>(rhs); \
+            float4 *out4 = reinterpret_cast<float4*>(out); \
+            const unsigned int step = blockDim.x * gridDim.x, step_mod = step % vec_period; \
+            unsigned int j = (blockIdx.x * blockDim.x + threadIdx.x) % vec_period; \
+            for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel / 8; i += step) { \
+                float4 a = lhs4[i], b = rhs4[j]; \
+                j += step_mod; \
+                j -= j >= vec_period ? vec_period : 0; \
+                __nv_bfloat162 *a2 = reinterpret_cast<__nv_bfloat162*>(&a); \
+                __nv_bfloat162 *b2 = reinterpret_cast<__nv_bfloat162*>(&b); \
+                _Pragma("unroll") \
+                for (int j = 0; j < 4; j++) { a2[j] = VEC2_OP(a2[j], b2[j]); } \
+                out4[i] = a; \
+            } \
+        } else if (period) { \
+            for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) { \
+                __nv_bfloat16 x = lhs[i]; __nv_bfloat16 y = rhs[i % period]; out[i] = SCALAR_FUNC; \
+            } \
+        } else \
         for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) { \
             unsigned int tmp_i = i; unsigned int rhs_i = 0; \
             for (int d = num_dims - 1; d >= 0; d--) { \
@@ -124,6 +159,12 @@ extern "C" __global__ void FN_NAME( \
             out[i] = SCALAR_FUNC; \
         } \
     } else if (rhs_cont) { \
+        const unsigned int period = broadcast_period(num_dims, dims, lhs_strides); \
+        if (period) { \
+            for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) { \
+                __nv_bfloat16 x = lhs[i % period]; __nv_bfloat16 y = rhs[i]; out[i] = SCALAR_FUNC; \
+            } \
+        } else \
         for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) { \
             unsigned int tmp_i = i; unsigned int lhs_i = 0; \
             for (int d = num_dims - 1; d >= 0; d--) { \
@@ -188,6 +229,26 @@ extern "C" __global__ void FN_NAME( \
             } \
         } \
     } else if (lhs_cont) { \
+        const unsigned int period = broadcast_period(num_dims, dims, rhs_strides); \
+        if (period && period % 4 == 0 && is_aligned_16(lhs) && is_aligned_16(rhs) && is_aligned_16(out)) { \
+            const unsigned int vec_period = period / 4; \
+            const float4 *lhs4 = reinterpret_cast<const float4*>(lhs); \
+            const float4 *rhs4 = reinterpret_cast<const float4*>(rhs); \
+            float4 *out4 = reinterpret_cast<float4*>(out); \
+            const unsigned int step = blockDim.x * gridDim.x, step_mod = step % vec_period; \
+            unsigned int j = (blockIdx.x * blockDim.x + threadIdx.x) % vec_period; \
+            for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel / 4; i += step) { \
+                float4 a = lhs4[i], b = rhs4[j]; \
+                j += step_mod; \
+                j -= j >= vec_period ? vec_period : 0; \
+                F4_BODY \
+                out4[i] = a; \
+            } \
+        } else if (period) { \
+            for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) { \
+                float x = lhs[i]; float y = rhs[i % period]; out[i] = SCALAR_FUNC; \
+            } \
+        } else \
         for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) { \
             unsigned int tmp_i = i; unsigned int rhs_i = 0; \
             for (int d = num_dims - 1; d >= 0; d--) { \
@@ -197,6 +258,12 @@ extern "C" __global__ void FN_NAME( \
             out[i] = SCALAR_FUNC; \
         } \
     } else if (rhs_cont) { \
+        const unsigned int period = broadcast_period(num_dims, dims, lhs_strides); \
+        if (period) { \
+            for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) { \
+                float x = lhs[i % period]; float y = rhs[i]; out[i] = SCALAR_FUNC; \
+            } \
+        } else \
         for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel; i += blockDim.x * gridDim.x) { \
             unsigned int tmp_i = i; unsigned int lhs_i = 0; \
             for (int d = num_dims - 1; d >= 0; d--) { \

@@ -1244,4 +1244,53 @@ mod tests {
         };
         rounds_once(&device)
     }
+
+    // Broadcast operands on the zero-stride-then-contiguous fast path (biases, scalars, either side) and off it
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn broadcast_binary_ops_on_cuda_match_the_cpu() -> crate::Result<()> {
+        use crate::{DType, Tensor};
+        let Ok(cuda) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let big = Tensor::randn(0f32, 1., (3, 5, 24), &Device::Cpu)?;
+        let odd = Tensor::randn(0f32, 1., (3, 5, 7), &Device::Cpu)?;
+        let cases = [
+            (big.clone(), Tensor::randn(0f32, 1., 24, &Device::Cpu)?),
+            (big.clone(), Tensor::randn(0f32, 1., (5, 24), &Device::Cpu)?),
+            (big.clone(), Tensor::randn(0f32, 1., (5, 1), &Device::Cpu)?),
+            (
+                big.clone(),
+                Tensor::randn(0f32, 1., (1, 1, 1), &Device::Cpu)?,
+            ),
+            (odd.clone(), Tensor::randn(0f32, 1., 7, &Device::Cpu)?),
+            (odd, Tensor::randn(0f32, 1., (3, 1, 7), &Device::Cpu)?),
+        ];
+        for dtype in [DType::F32, DType::BF16, DType::F16] {
+            for (a, b) in &cases {
+                let (a, b) = (a.to_dtype(dtype)?, b.to_dtype(dtype)?);
+                let (ga, gb) = (a.to_device(&cuda)?, b.to_device(&cuda)?);
+                for (got, want) in [
+                    (ga.broadcast_add(&gb)?, a.broadcast_add(&b)?),
+                    (ga.broadcast_mul(&gb)?, a.broadcast_mul(&b)?),
+                    (gb.broadcast_sub(&ga)?, b.broadcast_sub(&a)?),
+                ] {
+                    let diff = (got.to_device(&Device::Cpu)?.to_dtype(DType::F32)?
+                        - want.to_dtype(DType::F32)?)?
+                    .abs()?
+                    .flatten_all()?
+                    .max(0)?
+                    .to_scalar::<f32>()?;
+                    assert!(
+                        diff == 0.0,
+                        "{dtype:?} {:?} with {:?}: {diff}",
+                        a.dims(),
+                        b.dims()
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 }

@@ -33,6 +33,8 @@ fn main() -> Result<()> {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let fatbins = KernelBuilder::new()
         .source_dir("src") // Scan src/ for .cu files
+        // the shared headers, so editing one rebuilds the fatbins that include it
+        .watch(["src/compatibility.cuh", "src/cuda_utils.cuh", "src/binary_op_macros.cuh"])
         .arg("--expt-relaxed-constexpr")
         .arg("-std=c++17")
         .arg("-O3")

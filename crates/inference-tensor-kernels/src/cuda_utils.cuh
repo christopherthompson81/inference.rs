@@ -26,6 +26,25 @@ __device__ bool is_contiguous(
     return true;
 }
 
+// The period p when strides broadcast leading dims (stride 0) over a contiguous tail, so the index is i % p; else 0
+__device__ unsigned int broadcast_period(
+    const size_t num_dims,
+    const size_t *dims,
+    const size_t *strides
+) {
+    size_t acc = 1;
+    int d = num_dims - 1;
+    for (; d >= 0 && (dims[d] == 1 || strides[d] == acc); d--) {
+        acc *= dims[d];
+    }
+    for (; d >= 0; d--) {
+        if (dims[d] > 1 && strides[d] != 0) {
+            return 0;
+        }
+    }
+    return acc;
+}
+
 __device__ unsigned int get_strided_index(
     unsigned int idx,
     const size_t num_dims,
