@@ -938,3 +938,28 @@ bench, 128 slots, fused against unfused in one binary, seven alternating rounds 
 ```
 The wall time spreads by several ms between runs (the CPU's misses), so the 1.4 ms of kernel time is not resolved
 end to end; rounds 4-7 average 31.9 fused against 32.6 unfused.
+
+## Run 25 - 2026-10-23 21:30
+
+Question: does our Flash-Next (with today's fused kernels and the expert offload) agree with an independent
+implementation on the same weights?
+
+No Q8_0 base exists locally, so the reference is llama.cpp on the same UD-IQ4_XS GGUF. The perplexity example gained
+`--kld-base`: it reads a `llama-perplexity --kl-divergence-base` file, scores the same chunks' second halves with full
+logits, and computes KL(base || ours) as llama-perplexity does (base terms at or below -16 skipped), checking on the
+first row that a logits row predicts the token after it.
+```
+llama-perplexity (970b51ce7) -c 512 --chunks 20 -ngl 99 --n-cpu-moe 48 --kl-divergence-base   PPL 2.3442
+perplexity --gguf <3 shards> --moe-expert-cache 128 --pa-cache-type auto --kld-base <base>  (4.7 s a chunk)
+  5100 positions over 20 chunks of 512
+  PPL            2.3340 (base 2.3406, from the stored log-probs)
+  KLD mean       0.03469
+  KLD median     0.00292
+  KLD p99        0.49934
+  same top-1     94.65%
+```
+For scale (basalt's quality notes): two implementations of this model agree to KLD 0.023-0.024 once both read the
+hyper-connections in F32, and a stock llama.cpp base adds 0.01-0.02 of its own (its Q8_0 hc read quantizes the
+activations; basalt's Q8_0 against it, 0.0456 and 95.6%). Ours at 0.0347 and 94.65% sits in that range: no sign of a
+numerics fault in today's kernels. Whether our own hc read (also q8_1 activations through MMVQ) carries the same
+noise needs an F32 reference, which this does not give.
