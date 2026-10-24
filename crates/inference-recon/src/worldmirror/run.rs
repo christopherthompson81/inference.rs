@@ -115,6 +115,7 @@ struct Meta {
     scale: &'static str,
     intrinsics: &'static str,
     inputs: Vec<String>,
+    video: Option<VideoSource>,
     frames: usize,
     inference_width: usize,
     inference_height: usize,
@@ -145,7 +146,6 @@ pub fn reconstruct(
     out_dir: &Path,
     options: &ReconstructOptions,
 ) -> Result<RunReport> {
-    let start = Instant::now();
     let files = input_images(input)?;
     if files.is_empty() {
         inference_tensor::bail!(
@@ -160,21 +160,53 @@ pub fn reconstruct(
             files.len()
         );
     }
-    let images = files
+    let frames = files
         .iter()
-        .map(|f| decode(f))
+        .map(|f| Ok((f.display().to_string(), decode(f)?)))
         .collect::<Result<Vec<_>>>()?;
+    reconstruct_frames(model, checkpoint, frames, None, out_dir, options)
+}
+
+/// Where a run's frames came from when they were sampled from a video.
+#[derive(Clone, Debug, Serialize)]
+pub struct VideoSource {
+    pub path: String,
+    pub native_fps: f64,
+    pub sampling_fps: f64,
+    pub total_frames: usize,
+    pub sampled_frames: Vec<usize>,
+}
+
+/// Reconstructs from decoded frames, each with the name `meta.json` lists it under.
+pub fn reconstruct_frames(
+    model: &WorldMirror,
+    checkpoint: &Path,
+    frames: Vec<(String, RgbImage)>,
+    video: Option<VideoSource>,
+    out_dir: &Path,
+    options: &ReconstructOptions,
+) -> Result<RunReport> {
+    let start = Instant::now();
+    if frames.is_empty() {
+        inference_tensor::bail!("no frames to reconstruct from");
+    }
+    if frames.len() > MAX_FRAMES {
+        inference_tensor::bail!(
+            "{} frames given; WorldMirror takes at most {MAX_FRAMES}",
+            frames.len()
+        );
+    }
+    let (names, images): (Vec<String>, Vec<RgbImage>) = frames.into_iter().unzip();
     let size = adaptive_size(
         (images[0].width, images[0].height),
         options.target_size,
         PATCH,
     );
-    for (file, image) in files.iter().zip(&images) {
+    for (name, image) in names.iter().zip(&images) {
         let (w, h) = resized_dims(image.width, image.height, size, PATCH);
         if w < 2 * PATCH || h < 2 * PATCH {
             inference_tensor::bail!(
-                "{} ({}x{}) resizes to {w}x{h}, below the {}-pixel minimum side",
-                file.display(),
+                "{name} ({}x{}) resizes to {w}x{h}, below the {}-pixel minimum side",
                 image.width,
                 image.height,
                 2 * PATCH
@@ -208,7 +240,8 @@ pub fn reconstruct(
         handedness: "right",
         scale: "arbitrary (up to scale; depth, poses and splats share one unit)",
         intrinsics: "pixels of the inference image (inference_width x inference_height), principal point at its centre",
-        inputs: files.iter().map(|f| f.display().to_string()).collect(),
+        inputs: names,
+        video,
         frames: images.len(),
         inference_width: pred.width,
         inference_height: pred.height,

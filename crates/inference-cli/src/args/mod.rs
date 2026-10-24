@@ -277,7 +277,8 @@ pub enum Command {
         #[arg(long)]
         model: PathBuf,
 
-        /// A folder of images (jpg, jpeg, png, webp, read in name order) or one image
+        /// A folder of images (jpg, jpeg, png, webp, read in name order), one image, or a video (mp4, mov, avi,
+        /// mkv, webm, gif; FFmpeg for all but GIF)
         #[arg(long)]
         input: PathBuf,
 
@@ -288,6 +289,14 @@ pub enum Command {
         /// Longest edge to infer at: the first image's, capped at this and floored to a multiple of 14
         #[arg(long, default_value_t = inference_api::reconstruction::DEFAULT_TARGET_SIZE)]
         target_size: usize,
+
+        /// Frames a second sampled from a video input
+        #[arg(long, default_value_t = inference_api::reconstruction::DEFAULT_VIDEO_FPS)]
+        fps: f64,
+
+        /// The most frames sampled from a video input
+        #[arg(long, default_value_t = inference_api::reconstruction::DEFAULT_VIDEO_MAX_FRAMES)]
+        max_frames: usize,
 
         /// Keep pixels at depth and normal discontinuities
         #[arg(long)]

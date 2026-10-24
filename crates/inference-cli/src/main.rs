@@ -206,11 +206,15 @@ async fn main() -> Result<()> {
             input,
             out,
             target_size,
+            fps,
+            max_frames,
             no_edge_mask,
             no_sky_mask,
             cpu,
         } => {
-            use inference_api::reconstruction::{OutputSettings, ReconstructOptions, reconstruct};
+            use inference_api::reconstruction::{
+                OutputSettings, ReconstructOptions, VideoOptions, reconstruct,
+            };
             let options = ReconstructOptions {
                 target_size,
                 output: OutputSettings {
@@ -219,7 +223,8 @@ async fn main() -> Result<()> {
                     ..OutputSettings::default()
                 },
             };
-            let report = reconstruct(&model, &input, &out, &options, cpu)?;
+            let video = VideoOptions { fps, max_frames };
+            let report = reconstruct(&model, &input, &out, &options, video, cpu).await?;
             println!(
                 "{} frames at {}x{}: {} points, {} Gaussians in {} (forward {:.1} s, total {:.1} s)",
                 report.frames,
