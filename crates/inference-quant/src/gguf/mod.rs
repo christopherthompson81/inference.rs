@@ -439,6 +439,42 @@ fn try_fast_forward(w: &QMatMul, a: &Tensor) -> Result<Option<Tensor>> {
     Ok(Some(fast_mmq::plain(q.as_ref(), a)?))
 }
 
+/// `a @ w^T` with `a` (BF16 or F32) left unquantized and summed in F32, when `w` is a Q8_0 GGUF weight on CUDA: the
+/// matvec reads the Q8_0 blocks for up to `MMVQ_MAX_BATCH` rows, longer batches multiply its dequantized F32 copy.
+/// `None` for any other weight, which `forward` serves as before.
+pub fn unquantized_activation_forward(
+    w: &dyn crate::QuantMethod,
+    a: &Tensor,
+) -> Result<Option<Tensor>> {
+    #[cfg(feature = "cuda")]
+    {
+        let Some(weight) = w.kernel_weight() else {
+            return Ok(None);
+        };
+        if weight.gguf_type() != kernel::GgufType::Q8_0
+            || !weight.kernel_device().is_cuda()
+            || !matches!(a.dtype(), DType::BF16 | DType::F32)
+        {
+            return Ok(None);
+        }
+        let (_, cols) = weight.kernel_shape().dims2()?;
+        if a.elem_count() / cols.max(1) <= fast_mmvq::MMVQ_MAX_BATCH {
+            return fast_mmvq::exact(weight, a).map(Some);
+        }
+        let Some(q) = w.get_qtensor() else {
+            return Ok(None);
+        };
+        let dense = q.dequantize(&weight.kernel_device())?;
+        let out = a.to_dtype(DType::F32)?.broadcast_matmul(&dense.t()?)?;
+        out.to_dtype(a.dtype()).map(Some)
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = (w, a);
+        Ok(None)
+    }
+}
+
 /// `a @ w^T` for a candle `QMatMul`, through this crate's GGUF kernels wherever they cover the type.
 pub fn qmatmul_forward(w: &QMatMul, a: &Tensor) -> Result<Tensor> {
     #[cfg(feature = "cuda")]

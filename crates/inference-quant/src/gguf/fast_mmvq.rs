@@ -401,6 +401,67 @@ fn fused_qkv_launcher(input_ty: DType, dtype: GgufType) -> Option<FusedQkvLaunch
 /// The product of the leading input dimensions must be in `1..=8`.
 ///
 /// Output has the same leading dimensions as `xs` with the last axis replaced
+/// `xs @ w^T` for a Q8_0 `w` with the activations left unquantized (BF16 or F32, F32 sums), for up to
+/// `MMVQ_MAX_BATCH` rows; the output takes the input's dtype.
+pub fn exact<W: KernelWeight + ?Sized>(w: &W, xs: &Tensor) -> Result<Tensor> {
+    let Device::Cuda(dev) = w.kernel_device() else {
+        inference_tensor::bail!("fast_mmvq exact: weight must live on CUDA");
+    };
+    let (nrows, ncols) = w.kernel_shape().dims2()?;
+    let b_size = xs.elem_count() / ncols.max(1);
+    if w.gguf_type() != GgufType::Q8_0
+        || xs.dims().last() != Some(&ncols)
+        || b_size == 0
+        || b_size > MMVQ_MAX_BATCH
+    {
+        inference_tensor::bail!(
+            "fast_mmvq exact: takes 1..={MMVQ_MAX_BATCH} rows against a Q8_0 [{nrows}, {ncols}] weight, got {:?} {:?}",
+            w.gguf_type(),
+            xs.dims()
+        );
+    }
+    let stream = dev.cuda_stream();
+    let stream_ptr = stream.cu_stream() as *mut std::ffi::c_void;
+    let xs = xs.contiguous()?;
+    let (xs_storage, xs_layout) = xs.storage_and_layout();
+    let Storage::Cuda(xs_cuda) = &*xs_storage else {
+        inference_tensor::bail!("fast_mmvq exact: input must live on CUDA");
+    };
+    let (weight_ptr, _weight_guard) = w.kernel_ptr(&stream)?;
+    let weight_ptr = weight_ptr as *const std::ffi::c_void;
+    macro_rules! run {
+        ($ty:ty, $launch:ident) => {{
+            let slice = xs_cuda.as_cuda_slice::<$ty>()?;
+            let mut out = unsafe { dev.alloc::<$ty>(nrows * b_size)? };
+            {
+                let (xs_ptr, _xs_guard) =
+                    slice_ptr_on_stream(slice, xs_layout.start_offset(), &stream);
+                let (out_ptr, _out_guard) = slice_ptr_mut_on_stream(&mut out, 0, &stream);
+                // SAFETY: the weight holds nrows rows of ncols Q8_0 values, the input b_size rows of ncols, and the
+                // output b_size rows of nrows
+                unsafe {
+                    ffi::$launch(
+                        weight_ptr,
+                        xs_ptr as *const std::ffi::c_void,
+                        out_ptr as *mut std::ffi::c_void,
+                        ncols as i32,
+                        nrows as i32,
+                        b_size as i32,
+                        stream_ptr,
+                    )
+                };
+            }
+            Storage::Cuda(CudaStorage::wrap_cuda_slice(out, dev.clone()))
+        }};
+    }
+    let storage = match xs.dtype() {
+        DType::BF16 => run!(half::bf16, launch_mmvq_gguf_q8_0_bf16_exact),
+        DType::F32 => run!(f32, launch_mmvq_gguf_q8_0_f32_exact),
+        dtype => inference_tensor::bail!("fast_mmvq exact: does not take {dtype:?} activations"),
+    };
+    Ok(Tensor::from((storage, output_shape(&xs, nrows))))
+}
+
 /// by `w.shape().dims2()?.0` (nrows of the weight).
 ///
 /// The output dtype matches the input dtype (BF16 -> BF16, F16 -> F16, F32 -> F32).

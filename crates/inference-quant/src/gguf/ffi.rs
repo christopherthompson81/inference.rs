@@ -950,7 +950,8 @@ macro_rules! gguf_mmq_type_library {
     };
 }
 
-// the standard types, with fused gate/up and Q/K/V matvecs; `tc` adds the row-major tensor-core matvec (mmvq_tc_k.cuh)
+// the standard types, with fused gate/up and Q/K/V matvecs; `tc` adds the row-major tensor-core matvec (mmvq_tc_k.cuh),
+// `exact` the matvec against unquantized activations
 macro_rules! gguf_standard_types {
     ($( ($t:ident, $upper:literal $(, $tc:ident)?) ),* $(,)?) => {
         $( gguf_standard_type!($t, $upper; $($tc)?); )*
@@ -992,6 +993,29 @@ macro_rules! gguf_standard_type {
                 stride_col_dst: i32,
                 b_size: i32,
                 cfg: i32,
+                stream: *mut c_void,
+            );
+        }
+    };
+    ($t:ident, $upper:literal; exact) => {
+        gguf_standard_type! {
+            @lib $t, $upper;
+            pub fn [<launch_mmvq_gguf_ $t _bf16_exact>](
+                vx: *const c_void,
+                vy: *const c_void,
+                dst: *mut c_void,
+                ncols_x: i32,
+                nrows_x: i32,
+                b_size: i32,
+                stream: *mut c_void,
+            );
+            pub fn [<launch_mmvq_gguf_ $t _f32_exact>](
+                vx: *const c_void,
+                vy: *const c_void,
+                dst: *mut c_void,
+                ncols_x: i32,
+                nrows_x: i32,
+                b_size: i32,
                 stream: *mut c_void,
             );
         }
@@ -1135,7 +1159,7 @@ gguf_standard_types!(
     (q4_1, "Q4_1"),
     (q5_0, "Q5_0"),
     (q5_1, "Q5_1"),
-    (q8_0, "Q8_0"),
+    (q8_0, "Q8_0", exact),
     (q2_k, "Q2_K"),
     (q3_k, "Q3_K"),
     (q4_k, "Q4_K", tc),

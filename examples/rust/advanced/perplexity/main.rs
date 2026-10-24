@@ -4,7 +4,7 @@
 
 use std::{
     fs::{File, read_to_string},
-    io::{BufReader, Read},
+    io::{BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -26,6 +26,9 @@ const MIN_LLAMA_CPP_CTX: usize = 4;
 // llama-perplexity's `--kl-divergence-base` file opens with this, and skips base log-probs at or below the floor
 const KLD_BASE_MAGIC: &[u8; 8] = b"_logits_";
 const KLD_LOG_PROB_FLOOR: f32 = -16.0;
+// a base row keeps log-probs this far below its top as u16 steps between them (llama-perplexity's encoding)
+const KLD_BASE_RANGE: f32 = 16.0;
+const KLD_BASE_STEPS: f32 = 65535.0;
 // a row's logprob of its next token, from our logits against the engine's own, agrees to this
 const ROW_CHECK_TOLERANCE: f32 = 1e-3;
 
@@ -79,6 +82,11 @@ struct Args {
     /// printing our perplexity, the base's, the KL divergence from the base and how often the top token agrees.
     #[arg(long)]
     kld_base: Option<PathBuf>,
+
+    /// With `--kld-base`, also write our own log-probs as a base for the same chunks, so another setup of this model
+    /// can be scored against this one.
+    #[arg(long, requires = "kld_base")]
+    kld_base_out: Option<PathBuf>,
 }
 
 fn tokenize(text: String, add_special_tokens: bool) -> TokenizeRequest {
@@ -145,7 +153,7 @@ async fn main() -> Result<()> {
     };
 
     if let Some(base) = &args.kld_base {
-        return kl_divergence(&model, base).await;
+        return kl_divergence(&model, base, args.kld_base_out.as_deref()).await;
     }
     let text = read_to_string(&args.file)?;
     if let Some(ctx) = args.llama_cpp_ctx {
@@ -305,7 +313,35 @@ fn score_row(logits: &[f32], record: &[u8], next: usize) -> (f64, f64, f64, bool
     )
 }
 
-async fn kl_divergence(model: &Model, path: &Path) -> Result<()> {
+// `logits` as a base record of `n_vocab` codes, as llama-perplexity writes one: scale and floor as two f32, then a u16
+// per token (the ones past our vocab and those over the range below the top at 0)
+fn base_record(logits: &[f32], n_vocab: usize) -> Vec<u8> {
+    let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let min_logit = logits
+        .iter()
+        .copied()
+        .fold(f32::INFINITY, f32::min)
+        .max(max_logit - KLD_BASE_RANGE);
+    let log_sum_exp = logits
+        .iter()
+        .map(|v| f64::from((v - max_logit).exp()))
+        .sum::<f64>()
+        .ln() as f32;
+    let scale = (max_logit - min_logit) / KLD_BASE_STEPS;
+    let mut record = Vec::with_capacity(2 * n_vocab.div_ceil(2) * 2 + 8);
+    record.extend_from_slice(&scale.to_le_bytes());
+    record.extend_from_slice(&(min_logit - max_logit - log_sum_exp).to_le_bytes());
+    for i in 0..2 * n_vocab.div_ceil(2) {
+        let code = match logits.get(i) {
+            Some(&v) if scale > 0.0 && v > min_logit => ((v - min_logit) / scale).round() as u16,
+            _ => 0,
+        };
+        record.extend_from_slice(&code.to_le_bytes());
+    }
+    record
+}
+
+async fn kl_divergence(model: &Model, path: &Path, out: Option<&Path>) -> Result<()> {
     let mut reader = BufReader::new(File::open(path)?);
     let mut magic = [0u8; 8];
     reader.read_exact(&mut magic)?;
@@ -321,6 +357,19 @@ async fn kl_divergence(model: &Model, path: &Path) -> Result<()> {
     for _ in 0..n_chunk * n_ctx {
         tokens.push(u32::try_from(read_i32(&mut reader)?)?);
     }
+    let mut writer = out
+        .map(|out| -> Result<_> {
+            let mut writer = BufWriter::new(File::create(out)?);
+            writer.write_all(KLD_BASE_MAGIC)?;
+            for v in [n_ctx, n_vocab, n_chunk] {
+                writer.write_all(&i32::try_from(v)?.to_le_bytes())?;
+            }
+            for &token in &tokens {
+                writer.write_all(&i32::try_from(token)?.to_le_bytes())?;
+            }
+            Ok(writer)
+        })
+        .transpose()?;
     // llama-perplexity scores positions first..n_ctx - 1 of each chunk, each predicting the next token
     let first = n_ctx / 2;
     let record = 2 * n_vocab.div_ceil(2) + 4;
@@ -344,8 +393,11 @@ async fn kl_divergence(model: &Model, path: &Path) -> Result<()> {
         for row in first..n_ctx - 1 {
             reader.read_exact(&mut bytes)?;
             let next = chunk[row + 1] as usize;
-            let (kld, logprob, base_logprob, same) =
-                score_row(&logits[row * vocab..][..vocab], &bytes, next);
+            let row_logits = &logits[row * vocab..][..vocab];
+            let (kld, logprob, base_logprob, same) = score_row(row_logits, &bytes, next);
+            if let Some(writer) = writer.as_mut() {
+                writer.write_all(&base_record(row_logits, n_vocab))?;
+            }
             if c == 0 && row == first {
                 let engine =
                     scored.token_logprobs[row + 1].context("a scored token has no logprob")?;
@@ -370,6 +422,9 @@ async fn kl_divergence(model: &Model, path: &Path) -> Result<()> {
             100.0 * same_top as f64 / n,
             start.elapsed().as_secs_f32()
         );
+    }
+    if let Some(mut writer) = writer {
+        writer.flush()?;
     }
     let n = klds.len() as f64;
     let mean = klds.iter().sum::<f64>() / n;

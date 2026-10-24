@@ -57,6 +57,15 @@ impl GroupedRmsNorm {
     }
 }
 
+// The hyper-connection reads' projections: 8-bit activations here cost about 0.04 KLD against an F32 read, so a Q8_0
+// weight multiplies the activations as they are (investigation Run 33)
+fn hc_project(w: &Arc<dyn QuantMethod>, x: &Tensor) -> Result<Tensor> {
+    match inference_quant::unquantized_activation_forward(w.as_ref(), x)? {
+        Some(out) => Ok(out),
+        None => w.forward(x),
+    }
+}
+
 /// One block's read from and write into the hyper-connection streams (`Qwen4ExpTextGatedResidual`).
 pub(super) struct GatedResidual {
     hc_norm: GroupedRmsNorm,
@@ -118,16 +127,16 @@ impl GatedResidual {
         if inference_nn::cuda::hyper::supports(normed) {
             use inference_nn::cuda::hyper;
             #[allow(clippy::cast_possible_truncation)]
-            let down = hyper::scaled_silu(&self.mix_down.forward(normed)?, (1.0 / streams) as f32)?;
-            let up = self.mix_up.forward(&down)?.to_dtype(normed.dtype())?;
+            let down =
+                hyper::scaled_silu(&hc_project(&self.mix_down, normed)?, (1.0 / streams) as f32)?;
+            let up = hc_project(&self.mix_up, &down)?.to_dtype(normed.dtype())?;
             return hyper::mix(&up, normed, self.streams, self.hidden);
         }
-        let mix = (self.mix_down.forward(normed)? / streams)?;
-        let mix = inference_tensor::nn::ops::sigmoid(
-            &self
-                .mix_up
-                .forward(&inference_tensor::nn::ops::silu(&mix)?)?,
-        )?;
+        let mix = (hc_project(&self.mix_down, normed)? / streams)?;
+        let mix = inference_tensor::nn::ops::sigmoid(&hc_project(
+            &self.mix_up,
+            &inference_tensor::nn::ops::silu(&mix)?,
+        )?)?;
         let mut split = normed.dims().to_vec();
         split.pop();
         split.extend([self.streams, self.hidden]);
@@ -141,8 +150,8 @@ impl GatedResidual {
         let inject = self
             .inject
             .as_ref()
-            .expect("a block's hyper-connection writes back")
-            .forward(&normed)?;
+            .map(|inject| hc_project(inject, &normed))
+            .expect("a block's hyper-connection writes back")?;
         #[cfg(feature = "cuda")]
         let inject = if inference_nn::cuda::hyper::supports(&inject) {
             #[allow(clippy::cast_possible_truncation)]
