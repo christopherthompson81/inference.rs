@@ -61,6 +61,10 @@ const Q8_0_BYTES: usize = 34;
 // both blocks open with their f16 scale
 const BLOCK32_QS: usize = 2;
 const Q8_MAX: f32 = 127.0;
+// Bytes ahead of the block being dotted that a single-token dot prefetches: expert rows stream from DRAM, and the
+// hardware prefetcher alone leaves the dots waiting on them
+#[cfg(target_arch = "x86_64")]
+const PREFETCH_AHEAD: usize = 1024;
 
 /// Whether `vec_dot_32` serves this type.
 pub(crate) fn supports_32(ty: GgufType) -> bool {
@@ -394,7 +398,8 @@ mod avx2 {
     use super::{
         BLOCK32_QS, IQ3_S_BYTES, IQ3_S_QH, IQ3_S_QS, IQ3_S_SCALES, IQ3_S_SIGNS, IQ3S_GRID,
         IQ4_KSS_BYTES, IQ4_KSS_ROW_SCALE, IQ4_KSS_SHIFT, IQ4_NL_BYTES, IQ4_XS_BYTES, IQ4_XS_QS,
-        KVALUES_IQ4NL, Q8_0_BYTES, Q8Block32, TileRow, f16_at, iq4_xs_sub_scale, row_scale,
+        KVALUES_IQ4NL, PREFETCH_AHEAD, Q8_0_BYTES, Q8Block32, TileRow, f16_at, iq4_xs_sub_scale,
+        row_scale,
     };
 
     // byte b of each 32-bit sign word spread over lanes 8b..8b+8, then each lane's bit
@@ -428,6 +433,16 @@ mod avx2 {
         unsafe { _mm256_loadu_si256(qs.as_ptr().cast()) }
     }
 
+    // asks for `lines` cache lines `PREFETCH_AHEAD` bytes past `block`, which may lie past the row (a prefetch never faults)
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    fn prefetch_ahead(block: &[u8], lines: usize) {
+        let ahead = block.as_ptr().wrapping_add(PREFETCH_AHEAD).cast::<i8>();
+        for line in 0..lines {
+            _mm_prefetch::<_MM_HINT_T0>(ahead.wrapping_add(64 * line));
+        }
+    }
+
     #[target_feature(enable = "avx2,fma")]
     pub(super) fn iq4_xs_one(row: &[u8], ys: &[BlockQ8K]) -> f32 {
         // SAFETY: the codebook holds 16 bytes
@@ -435,6 +450,7 @@ mod avx2 {
         let m4 = _mm_set1_epi8(0x0f);
         let mut acc = _mm256_setzero_ps();
         for (block, y) in row.as_chunks::<IQ4_XS_BYTES>().0.iter().zip(ys) {
+            prefetch_ahead(block, 2);
             let mut sumi = _mm256_setzero_si256();
             for ib in 0..QK_K / 32 {
                 // SAFETY: a sub-block's 16 nibble bytes lie inside the block
@@ -481,6 +497,7 @@ mod avx2 {
         block_dot: impl Fn(&[u8; N], &Q8Block32) -> __m256i,
     ) -> f32 {
         let scaled = |block: &[u8; N], y: &Q8Block32, acc: __m256| {
+            prefetch_ahead(block, 1);
             let d = _mm256_set1_ps(f16c_at(block, 0) * y.d);
             _mm256_fmadd_ps(d, _mm256_cvtepi32_ps(block_dot(block, y)), acc)
         };
@@ -628,6 +645,7 @@ mod avx2 {
         let mut acc = _mm256_setzero_ps();
         let blocks = row[IQ4_KSS_ROW_SCALE..].as_chunks::<IQ4_KSS_BYTES>().0;
         for (block, y) in blocks.iter().zip(ys) {
+            prefetch_ahead(block, 2);
             let codes = iq4_kss_codes(block);
             let scales = iq4_kss_scales(&codes, places);
             let mut sumi = _mm256_setzero_si256();
@@ -649,6 +667,7 @@ mod avx2 {
         let qh_bit = _mm256_set1_epi32(256);
         let mut acc = _mm256_setzero_ps();
         for (block, y) in row.as_chunks::<IQ3_S_BYTES>().0.iter().zip(ys) {
+            prefetch_ahead(block, 2);
             let q8 = y.qs();
             let mut sumi = _mm256_setzero_si256();
             for ib32 in 0..QK_K / 32 {

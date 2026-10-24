@@ -1099,3 +1099,48 @@ engine, 128 slots (spec_measure, two rounds)   34.0 / 37.5 and 36.7 / 39.4 tok/s
 ```
 About 8% off the CPU's share, which is below the engine's run-to-run spread. Q8_0 CPU layers (#602) take the same
 kernel. The rest of the gap is IQ3_S's gather; the CPU miss item closes here.
+
+## Run 30 - 2026-10-24 07:26
+
+Question: does basalt's CPU expert path (fresh clone, 3d48edb) do anything on this machine's miss path that Run 29
+left out?
+
+Read: `src/kernels/cpu/{expert,iq_avx2,native_expert,pool}.cpp`, `src/core/verify.cpp`. Its AVX-512 path (VNNI and
+VBMI, Q2_0 packs) does not apply to this CPU; its AVX2 path is the one to compare.
+- IQ3_S: scalar grid loads into `set_epi32`, as llama.cpp. Run 23 measured that slower than our gather here.
+- IQ4_NL down: F16C scales, one accumulator, the same decode as ours since Run 29.
+- Pool: one worker per physical core, the host drains too, each expert's rows split over every worker (gate/up
+  rows, the intermediate's quantization, down rows), as ours.
+- Software prefetch: two lines 2 KB ahead of every QK_K block (one for a 32-wide block), inside the dot. Run 29's
+  prefetch (a whole row four rows ahead, issued per row) was slower; this form was not tried.
+- Next-layer warm-up: after layer l's doorbell the parked workers score layer l + 1's router (int8) on layer l's
+  FFN input, rank the experts only the CPU holds, and read the likeliest one into cache until the next batch.
+  No measurement of it in its docs.
+
+What a warm-up could buy, bounded by misses whose experts are already in cache (the bench with fixed experts):
+```
+flash_next_offload_misses       3 misses       10 misses (23 MB, past the 16 MB L3)
+cold                            306 us         960-1065 us
+cache-hot                       264-266 us     893-950 us
+```
+14% for experts entirely in cache: the kernel is mostly compute-bound. Warming one of a layer's ~3.5 missed experts
+bounds the gain near 4% of the CPU's share before mispredictions; not built.
+
+The prefetch, A/B against the committed kernels in alternating rounds (3 misses / 10 misses, us a step):
+```
+none           307.3 319.2 308.7 / 971.7 1014.4 981.0
+2048 ahead     283.0 291.6 282.2 / 906.0  925.3 890.6
+1024 ahead     286.2 277.3 278.2 / 910.8  864.0 899.7
+4096 ahead     284.2 294.9 310.2 / 906.7  958.6 960.4
+```
+Kept at 1024 bytes for the single-token IQ3_S, IQ4_XS, IQ4_KSS and 32-wide dots. The bench now also takes Qwen3.6-35B's
+shapes (`qwen36_offload_misses`: IQ3_S gate/up, IQ4_XS down, 256 experts of 512 x 2048); three alternating rounds
+against master:
+```
+                      3 misses              10 misses
+Flash-Next   master   293 303 304           943 959 957
+             branch   269 273 294           862 881 892    (-7% / -8%)
+35B-A3B      master   275 260 249           685 727 699
+             branch   229 228 220           682 717 654    (-14% / -3%)
+```
+That and Run 29's F16C are what basalt's AVX2 path has that ours lacked; the rest is either the same or slower here.

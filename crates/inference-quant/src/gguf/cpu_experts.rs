@@ -828,17 +828,19 @@ mod tests {
         );
     }
 
-    // one Qwen3.8-Flash-Next decode step's misses as the UD-IQ4_XS GGUF stores them (IQ3_S gate/up, IQ4_NL down, 640 x
-    // 2560): the time and bandwidth per missed expert, by how many a layer misses
-    #[test]
-    #[ignore = "benchmark"]
-    fn flash_next_offload_misses() -> Result<()> {
-        const N_EXPERTS: usize = 512;
+    // one decode step's misses from `n_experts` experts of `gate_up` gate/up and `down` down rows: the time and
+    // bandwidth per missed expert, by how many a layer misses
+    fn bench_offload_misses(
+        gate_up: GgufType,
+        down: GgufType,
+        hidden: usize,
+        inter: usize,
+        n_experts: usize,
+    ) -> Result<()> {
         const ITERS: usize = 200;
-        let (hidden, inter) = (2560, INTER_32);
         let bytes = |ty: GgufType, rows: usize, cols: usize, seed| {
             let mut b = random_bytes(
-                N_EXPERTS * rows * cols / ty.block_size() * ty.type_size(),
+                n_experts * rows * cols / ty.block_size() * ty.type_size(),
                 seed,
             );
             for block in b.chunks_exact_mut(ty.type_size()) {
@@ -846,10 +848,10 @@ mod tests {
             }
             b
         };
-        let (gate, up, down) = (
-            bytes(GgufType::Iq3S, inter, hidden, 1),
-            bytes(GgufType::Iq3S, inter, hidden, 2),
-            bytes(GgufType::Iq4Nl, hidden, inter, 3),
+        let (gate, up, down_bytes) = (
+            bytes(gate_up, inter, hidden, 1),
+            bytes(gate_up, inter, hidden, 2),
+            bytes(down, hidden, inter, 3),
         );
         let projection = |ty, bytes, rows, cols| CpuExpertProjection {
             ty,
@@ -858,12 +860,12 @@ mod tests {
             cols,
         };
         let experts = CpuExperts {
-            gate: projection(GgufType::Iq3S, &gate, inter, hidden),
-            up: projection(GgufType::Iq3S, &up, inter, hidden),
-            down: projection(GgufType::Iq4Nl, &down, hidden, inter),
+            gate: projection(gate_up, &gate, inter, hidden),
+            up: projection(gate_up, &up, inter, hidden),
+            down: projection(down, &down_bytes, hidden, inter),
             act: GluActivationType::Silu,
         };
-        let per_expert = (gate.len() + up.len() + down.len()) / N_EXPERTS;
+        let per_expert = (gate.len() + up.len() + down_bytes.len()) / n_experts;
         let xs = vec![0.01f32; hidden];
         let mut out = vec![0f32; hidden];
         for misses in [1, 3, 10] {
@@ -872,7 +874,7 @@ mod tests {
                 let routes = (0..misses)
                     .map(|k| CpuExpertRoute {
                         token: 0,
-                        expert: (step * 37 + k * 131) % N_EXPERTS,
+                        expert: (step * 37 + k * 131) % n_experts,
                         weight: 0.1,
                     })
                     .collect::<Vec<_>>();
@@ -888,6 +890,20 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    // Qwen3.8-Flash-Next as the UD-IQ4_XS GGUF stores it (IQ3_S gate/up, IQ4_NL down, 512 experts of 640 x 2560)
+    #[test]
+    #[ignore = "benchmark"]
+    fn flash_next_offload_misses() -> Result<()> {
+        bench_offload_misses(GgufType::Iq3S, GgufType::Iq4Nl, 2560, INTER_32, 512)
+    }
+
+    // Qwen3.6-35B-A3B as its UD-IQ4_XS GGUF stores most layers (IQ3_S gate/up, IQ4_XS down, 256 experts of 512 x 2048)
+    #[test]
+    #[ignore = "benchmark"]
+    fn qwen36_offload_misses() -> Result<()> {
+        bench_offload_misses(GgufType::Iq3S, GgufType::Iq4Xs, 2048, 512, 256)
     }
 
     // one Qwen3.8-Flash-Next layer whose down experts are Q8_0 (IQ3_S gate/up, 512 experts over 640 x 2560): the
