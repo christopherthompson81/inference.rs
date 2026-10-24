@@ -781,3 +781,38 @@ inference bench --format gguf (UD-IQ4_XS) --moe-expert-cache 64 --pa-context-len
 ```
 Decode is 28% faster. TTFT does not move: the staging copies are bound by the link, so prefill needs fewer bytes
 (Run 20's basalt notes: more experts on the CPU share, or a streaming order that overlaps attention).
+
+## Run 22 - 2026-10-23 19:00
+
+Question: with the CPU experts twice as fast (Run 21), where does an offloaded decode step go now, and does a bigger
+cache pay this time?
+
+A probe in the offload's host function (removed after), per layer over a 128-token decode at 64 slots:
+```
+host function 540-860 us (the CPU's ~3.5 misses), gap to the next layer's 390-420 us
+```
+48 x (gap + host function) is the 46 ms step. With no misses the step would be about 19 ms, so the misses still cost
+about 27 ms; the host function's dispatch sits inside the 400 us gap, so a doorbell can only win part of that.
+
+```
+--moe-expert-cache, --pa-context-len 8192 --prompt-len 512 --gen-len 128 --iterations 2, twice each
+  64 slots    45.9 / 42.1 ms   host function 525-642 us a layer
+  128 slots   29.9 / 30.2 ms   236-287 us
+  160 slots   31.2 / 27.9 ms   (shrinks to fit beside the context)
+```
+Unlike Run 12 (66.6 against 67.5 ms), doubling the cache now takes a third off: the CPU's share was the slow part.
+
+Without `--moe-expert-cache`, the planner chose 96 slots for a 32,768-token context although the paged cache was
+sized for 8,192 tokens: it planned for the larger of the asked context and its 32K default. An asked context now
+replaces the default (`planned_offload_context`, with a unit test):
+```
+no --moe-expert-cache, --pa-context-len 8192: before 96 slots, 34.4 ms; after 128 slots, 27.7 / 29.7 ms
+```
+
+The second 64-slot run above printed its results and then hung at exit after logging expert fills failing with
+`CUDA_ERROR_NOT_PERMITTED` (like Run 19's first graphs run). A guess that fills copied from pageable memory are refused
+while another stream captures was wrong: a test showed such a copy succeeds during a relaxed capture, and every
+capture here is relaxed. Ten clean runs of the build without the probe neither failed nor hung; both earlier hangs
+ran with something abnormal in flight (Run 19's garbage plan cells, this run's probe locking and printing inside a
+host function). Kept: a fill that fails now frees its slot (four failed fills used to stop the cache admitting
+experts at all), and fill errors name the step (the copy or the landing callback).
