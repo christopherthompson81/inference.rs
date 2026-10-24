@@ -128,13 +128,13 @@ pub fn view_rotations() -> Vec<Mat3> {
 }
 
 // ERP uv (u right, v down, both 0..1) of a direction, and back
-fn direction_to_uv(d: [f64; 3]) -> (f64, f64) {
+pub(crate) fn direction_to_uv(d: [f64; 3]) -> (f64, f64) {
     let d = normalize(d);
     let u = 1.0 - (d[1].atan2(d[0]) / (2.0 * std::f64::consts::PI)).rem_euclid(1.0);
     (u, d[2].clamp(-1.0, 1.0).acos() / std::f64::consts::PI)
 }
 
-fn uv_to_direction(u: f64, v: f64) -> [f64; 3] {
+pub(crate) fn uv_to_direction(u: f64, v: f64) -> [f64; 3] {
     let (theta, phi) = (
         (1.0 - u) * 2.0 * std::f64::consts::PI,
         v * std::f64::consts::PI,
@@ -225,22 +225,40 @@ fn resize_area_rgb8(img: &Rgb8, width: usize, height: usize) -> Rgb8 {
     }
 }
 
-/// One view of the panorama as split_panorama_image(INTER_AREA) makes it: remapped at a "safe" size (half the
-/// panorama height), then resized to `VIEW_SIZE`. 8-bit RGB.
+/// One 512 x 512 depth view of the panorama, as pred_pano_depth splits it.
 pub fn split_view(pano: &Rgb8, rot: &Mat3) -> Rgb8 {
-    let safe = pano.height / 2;
-    let f = 0.5 / (VIEW_FOV_DEG.to_radians() / 2.0).tan();
-    let mut safe_px = vec![0u8; safe * safe * 3];
+    split_perspective(
+        pano,
+        rot,
+        (VIEW_FOV_DEG, VIEW_FOV_DEG),
+        (VIEW_SIZE, VIEW_SIZE),
+    )
+}
+
+/// A perspective view of the panorama (camera at the origin, world-to-camera rotation `rot`) as
+/// split_panorama_image(INTER_AREA) makes it: remapped at a "safe" size (half the panorama height tall), then resized
+/// to `width x height` with OpenCV's area interpolation. 8-bit RGB.
+pub fn split_perspective(
+    pano: &Rgb8,
+    rot: &Mat3,
+    (fov_x, fov_y): (f64, f64),
+    (width, height): (usize, usize),
+) -> Rgb8 {
+    let safe_h = pano.height / 2;
+    let safe_w = (safe_h as f64 / height as f64 * width as f64).round() as usize;
+    let fx = 0.5 / (fov_x.to_radians() / 2.0).tan();
+    let fy = 0.5 / (fov_y.to_radians() / 2.0).tan();
+    let mut safe_px = vec![0u8; safe_w * safe_h * 3];
     safe_px
-        .par_chunks_mut(safe * 3)
+        .par_chunks_mut(safe_w * 3)
         .enumerate()
         .for_each(|(y, row)| {
-            for x in 0..safe {
+            for x in 0..safe_w {
                 let (u, v) = (
-                    (x as f64 + 0.5) / safe as f64,
-                    (y as f64 + 0.5) / safe as f64,
+                    (x as f64 + 0.5) / safe_w as f64,
+                    (y as f64 + 0.5) / safe_h as f64,
                 );
-                let cam = [(u - 0.5) / f, (v - 0.5) / f, 1.0];
+                let cam = [(u - 0.5) / fx, (v - 0.5) / fy, 1.0];
                 // camera to world is the transpose of the world-to-camera rotation
                 let world = [0, 1, 2].map(|j| (0..3).map(|i| rot[i][j] * cam[i]).sum::<f64>());
                 let (pu, pv) = direction_to_uv(world);
@@ -252,15 +270,39 @@ pub fn split_view(pano: &Rgb8, rot: &Mat3) -> Rgb8 {
                 row[x * 3..x * 3 + 3].copy_from_slice(&rgb);
             }
         });
-    let taps = area_up_taps(safe, VIEW_SIZE);
-    let mut out = vec![0u8; VIEW_SIZE * VIEW_SIZE * 3];
-    out.par_chunks_mut(VIEW_SIZE * 3)
+    let safe = Rgb8 {
+        width: safe_w,
+        height: safe_h,
+        pixels: safe_px,
+    };
+    resize_area(&safe, width, height)
+}
+
+// cv2.resize(INTER_AREA) of 8-bit RGB: area averaging when shrinking, OpenCV's area-linear taps when enlarging
+pub(crate) fn resize_area(img: &Rgb8, width: usize, height: usize) -> Rgb8 {
+    if (width, height) == (img.width, img.height) {
+        return Rgb8 {
+            width,
+            height,
+            pixels: img.pixels.clone(),
+        };
+    }
+    if width <= img.width && height <= img.height {
+        return resize_area_rgb8(img, width, height);
+    }
+    let (cols, rows) = (
+        area_up_taps(img.width, width),
+        area_up_taps(img.height, height),
+    );
+    let mut out = vec![0u8; width * height * 3];
+    out.par_chunks_mut(width * 3)
         .enumerate()
         .for_each(|(y, row)| {
-            let (y0, y1, fy) = taps[y];
-            for (x, &(x0, x1, fx)) in taps.iter().enumerate() {
+            let (y0, y1, fy) = rows[y];
+            for (x, &(x0, x1, fx)) in cols.iter().enumerate() {
                 for c in 0..3 {
-                    let at = |yy: usize, xx: usize| f64::from(safe_px[(yy * safe + xx) * 3 + c]);
+                    let at =
+                        |yy: usize, xx: usize| f64::from(img.pixels[(yy * img.width + xx) * 3 + c]);
                     let top = at(y0, x0) * (1.0 - fx) + at(y0, x1) * fx;
                     let bottom = at(y1, x0) * (1.0 - fx) + at(y1, x1) * fx;
                     row[x * 3 + c] =
@@ -269,8 +311,8 @@ pub fn split_view(pano: &Rgb8, rot: &Mat3) -> Rgb8 {
             }
         });
     Rgb8 {
-        width: VIEW_SIZE,
-        height: VIEW_SIZE,
+        width,
+        height,
         pixels: out,
     }
 }
@@ -352,7 +394,7 @@ pub fn pano_depth(moge: &MoGe, pano: &Rgb8, device: &Device) -> Result<PanoDepth
 }
 
 // numpy's linear-interpolation quantile
-fn quantile(values: &[f64], q: f64) -> f64 {
+pub(crate) fn quantile(values: &[f64], q: f64) -> f64 {
     let mut v = values.to_vec();
     v.sort_unstable_by(f64::total_cmp);
     if v.is_empty() {
