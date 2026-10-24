@@ -160,6 +160,15 @@ macro_rules! qwen3_5_text_loader {
                 )?;
                 Ok(Some(embed_tokens * dtype.size_in_bytes()))
             }
+            fn prompt_activation_bytes_per_token(&self, config: &str) -> Result<Option<usize>> {
+                if !$moe {
+                    return Ok(None);
+                }
+                let cfg = parse_qwen35_text_config(config, $moe)?;
+                Ok(Some(super::qwen3_5::prompt_activation_bytes_per_token(
+                    &cfg,
+                )))
+            }
             fn non_mapped_layer_sizes_in_bytes(
                 &self,
                 config: &str,

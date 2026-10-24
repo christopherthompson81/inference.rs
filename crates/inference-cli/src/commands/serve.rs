@@ -185,8 +185,12 @@ pub(crate) fn runtime_options_spec(
             runtime.mtp_draft_sampling,
             runtime.mtp_draft_isq.clone(),
         ),
-        max_num_batched_tokens: Some(runtime.max_num_batched_tokens.get()),
-        max_prefill_chunk_tokens: Some(runtime.max_prefill_chunk_tokens.get()),
+        max_num_batched_tokens: runtime
+            .max_num_batched_tokens
+            .map(std::num::NonZeroUsize::get),
+        max_prefill_chunk_tokens: runtime
+            .max_prefill_chunk_tokens
+            .map(std::num::NonZeroUsize::get),
         embeddings_on_host: Some(!runtime.no_embeddings_on_host),
         moe_expert_cache: runtime.moe_expert_cache,
         max_decode_steps_before_prefill: Some(runtime.max_decode_steps_before_prefill.get()),

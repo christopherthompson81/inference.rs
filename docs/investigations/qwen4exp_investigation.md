@@ -1004,3 +1004,64 @@ MTP is break-even at best at equal slots. The verify is the cost, not the head: 
 step's experts (Run 23), each distinct miss costs the CPU what it costs a plain step, and at ~15% of routes on the CPU
 the 2.5 tokens a step do not pay for it. A depth controller sized to the CPU share would pick no drafts here; not
 built. Kept: the two planner fixes (MTP servers now get the cache they fit) and an offload-guide note on head types.
+
+## Run 27 - 2026-10-23 23:06
+
+Question: is QSA's masked prefill (dense compute past the 2,048 budget) what holds offloaded prefill at ~250 tok/s,
+or is it the expert staging?
+
+Run 11 already put prefill at ~250 tok/s at every depth to 64K, and Run 21 found each 512-token chunk staging about
+410 MB of routed experts a layer over PCIe 3 (~2 s a chunk). If staging is the cost, a longer chunk pays it over
+more tokens: a chunk of a few thousand tokens routes to nearly every expert, so its bytes stop growing with its
+length. Recurrent prompt batches take `--max-prefill-chunk-tokens` (512) as their chunk even with nothing decoding.
+
+`pf_chunk.sh` (scratch): `serve --max-prefill-chunk-tokens N --max-num-batched-tokens max(N, 4096)
+--pa-context-len 8192 --max-seqs 1`, one prompt three times with a fresh nonce (no prefix hits), `max_tokens 1`:
+```
+128 slots, 5,243-token prompt          64 slots, 7,597-token prompt      peak VRAM (64 slots)
+chunk 512    118-122 tok/s             126 tok/s                          16,159 MiB
+chunk 1024   193-195                   -
+chunk 2048   301-305                   333                                16,831
+chunk 4096   CUDA OOM                  528-534                            17,533
+chunk 8192   -                         779-800                            18,749
+```
+Staging it is: 6.3x from the chunk alone, and the slope says more is there (basalt runs chunks to 16K and streams
+every non-resident expert above 6K). The attention mask is noise beside it, so QSA sparse prefill would not move
+TTFT on this machine; dropped from the list.
+
+Memory: about 0.34 MiB of activations a chunk token. At 128 slots the planner leaves ~0.65 GiB, which holds 2048
+but not 4096; the activation reservation (48 MiB here) is the attention estimate and knows nothing of the MoE
+intermediates. Next: an offloaded model's planner sizes the prefill chunk from what the slots leave, reserves its
+activations, and the scheduler takes it for recurrent prompt batches unless the flag is given.
+
+## Run 28 - 2026-10-23 23:28
+
+Question: can the loader pick the prompt chunk for an offloaded model, from the memory its expert cache leaves,
+without the OOM Run 27 hit at 4096 with 128 slots?
+
+A second model to fit the activations against (Qwen3.6-35B-A3B UD-IQ4_XS, 64 slots, the same 7,597-token prompt):
+```
+chunk 512    393 tok/s    8,243 MiB peak
+chunk 2048   1,104        8,689
+chunk 4096   1,794        9,201
+```
+0.25-0.29 MiB a chunk token here, 0.30-0.44 on Flash-Next (the first step includes allocator growth). Both fit
+`topk x (6 x hidden + 16 x moe_intermediate) + 40 x hidden` bytes a token within about 5% of the larger steps:
+0.234 MiB (35B-A3B: hidden 2048, top 8, 512 wide) and 0.342 MiB (Flash-Next: 2560, top 10, 640).
+
+Built: `prompt_activation_bytes_per_token` on the device-mapped loaders (the Qwen3.5-family MoE loaders implement it
+with that fit); the expert-cache planner, once the slots are settled, takes the longest chunk in 512s up to 8192
+whose activations fit beside them and the planned context, and reserves those bytes before the KV cache is sized;
+the chunk reaches the scheduler through `GeneralMetadata::prompt_chunk_tokens`. `--max-prefill-chunk-tokens` and
+`--max-num-batched-tokens` are now unset by default (512 and 4096, or the chunk when longer), so a given flag wins.
+
+```
+pf_chunk.sh auto (no chunk flags), 7,597-token prompt
+--moe-expert-cache 128 --pa-context-len 8192   chunk=1536   282-287 tok/s   (512: 126)   decode 35.9 / 37.8 tok/s
+--moe-expert-cache 64  --pa-context-len 8192   chunk=8192   774-787 tok/s   (512: 126)
+no flags (planner: 96 slots at the 32K floor)  chunk=3584   KV 3,121 MB
+Qwen3.6-35B-A3B, no flags                      resident, no chunk planned
+Qwen3.6-35B-A3B, --max-seq-len 262144          208 slots, no room past the context: 512
+```
+The policy keeps the slots first and gives the chunk what is left; a slot step traded for a long chunk would be the
+other way to spend it (64 slots and 8192 prefill 6x faster for 30% slower decode on Flash-Next), left to the flags.

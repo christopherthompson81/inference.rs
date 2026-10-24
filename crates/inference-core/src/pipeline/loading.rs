@@ -464,6 +464,8 @@ pub(crate) struct ResolvedMapSetting {
     /// Experts per layer an automatic map chose to cache on the GPU, keeping the rest in host memory (fewer than the
     /// requested cache when that does not fit).
     pub planned_moe_expert_cache: Option<usize>,
+    /// The prompt chunk an offloaded model's map reserved activations for.
+    pub prompt_chunk_tokens: Option<usize>,
 }
 
 // Context an automatic map keeps room for before it moves MoE experts to host memory (or less, for a model with a
@@ -472,6 +474,9 @@ const PLANNED_OFFLOAD_CONTEXT: usize = 32 * 1024;
 // The planner tries caching each multiple of 1/this of a layer's experts, most first, and then none (every expert
 // on the CPU)
 const PLANNED_SLOT_STEPS: usize = 16;
+// Longest prompt chunk an offloaded model's planner sizes: a chunk stages about every expert a layer routes to however
+// long it is, so prefill speeds up with the chunk well past the default
+const MAX_PLANNED_PROMPT_CHUNK: usize = 8192;
 
 struct ExpertCachePlan<'a> {
     sizing: super::isq_flow::AutoDeviceMapSizingInputs<'a>,
@@ -496,13 +501,23 @@ impl ExpertCachePlan<'_> {
     // Whether the weights with `slots` experts per layer cached (`None`: all resident) fit the primary GPU beside the
     // context `params` asks for, `activations`, the post-load reservations, a hybrid model's recurrent pool and the
     // share a utilization limit keeps free. Computed directly: an automatic map shrinks a paged cache to fit.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
     fn fits(
         &self,
         slots: Option<usize>,
         params: &AutoDeviceMapParams,
         activations: usize,
     ) -> Result<bool> {
+        Ok(self.spare(slots, params, activations)?.is_some())
+    }
+
+    // The bytes left on the primary GPU after what `fits` counts; `None` when that does not fit
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    fn spare(
+        &self,
+        slots: Option<usize>,
+        params: &AutoDeviceMapParams,
+        activations: usize,
+    ) -> Result<Option<usize>> {
         let (loader, config) = (self.sizing.loader, self.sizing.config);
         let sizes = super::isq_flow::auto_device_map_sizes(
             super::isq_flow::AutoDeviceMapSizingInputs {
@@ -540,13 +555,42 @@ impl ExpertCachePlan<'_> {
             }
             None => tokens * model.total_kv_cache_elements_per_token() * self.dtype.size_in_bytes(),
         };
-        Ok(sizes.total_model_size_in_bytes + activations + cache <= cap)
+        Ok(cap.checked_sub(sizes.total_model_size_in_bytes + activations + cache))
     }
 
-    // The most experts per layer to cache when a GGUF MoE model's layers do not all fit on the GPU beside a usable
-    // context, its routed experts staying in host memory; `None` when it fits resident or cannot offload. A requested
-    // cache that does not fit shrinks to one that does: the map would otherwise move whole layers to the CPU.
-    fn slots(&self, params: &AutoDeviceMapParams) -> Result<Option<usize>> {
+    // Activations as the load reserves them, for the requested map rather than the longer planned context (prompts
+    // run in chunks)
+    fn activations(&self, params: &AutoDeviceMapParams) -> Result<usize> {
+        let (loader, config) = (self.sizing.loader, self.sizing.config);
+        Ok(loader
+            .mapped_max_act_size_elems(config, params)?
+            .max(loader.non_mapped_max_act_size_elems(config, params)?)
+            * self.dtype.size_in_bytes())
+    }
+
+    // The tokens a paged cache sized by its context asks for, else 0
+    fn requested_context(&self) -> usize {
+        match self.paged_attn_config.as_ref().map(|cfg| cfg.mem_gpu) {
+            Some(crate::MemoryGpuConfig::ContextSize(tokens)) => tokens,
+            _ => 0,
+        }
+    }
+
+    fn planned_context(&self, params: &AutoDeviceMapParams) -> Result<AutoDeviceMapParams> {
+        let window = self
+            .sizing
+            .loader
+            .model_config(self.sizing.config)?
+            .max_seq_len();
+        Ok(params.with_max_seq_len(planned_offload_context(
+            params.max_seq_len(),
+            self.requested_context(),
+            window,
+        )))
+    }
+
+    // A layer's expert count when its experts can stay in host memory: one GPU and GGUF experts the CPU runs
+    fn offloadable_experts(&self) -> Result<Option<usize>> {
         // one GPU: the fit is the primary device's, as a split across GPUs would map layers instead
         let gpus = self.devices.iter().filter(|d| d.is_cuda()).count();
         if gpus != 1
@@ -562,26 +606,44 @@ impl ExpertCachePlan<'_> {
         let Some(source) = self.sizing.weight_source else {
             return Ok(None);
         };
-        let Some((_, experts)) = source.layer_expert_bytes()? else {
+        Ok(source.layer_expert_bytes()?.map(|(_, experts)| experts))
+    }
+
+    // The longest prompt chunk, in multiples of the default chunk up to MAX_PLANNED_PROMPT_CHUNK, whose activations fit
+    // beside `slots` cached experts a layer and the planned context, with the bytes it reserves; `None` for the default
+    fn prompt_chunk(
+        &self,
+        slots: usize,
+        params: &AutoDeviceMapParams,
+    ) -> Result<Option<(usize, usize)>> {
+        let (loader, config) = (self.sizing.loader, self.sizing.config);
+        let Some(per_token) = loader
+            .prompt_activation_bytes_per_token(config)?
+            .filter(|&bytes| bytes > 0)
+        else {
             return Ok(None);
         };
-        let window = self
-            .sizing
-            .loader
-            .model_config(self.sizing.config)?
-            .max_seq_len();
-        // activations as the load reserves them, for the requested map rather than the longer planned context (prompts
-        // run in chunks)
-        let (loader, config) = (self.sizing.loader, self.sizing.config);
-        let activations = loader
-            .mapped_max_act_size_elems(config, params)?
-            .max(loader.non_mapped_max_act_size_elems(config, params)?)
-            * self.dtype.size_in_bytes();
-        // a paged cache sized by its context asks for that many tokens too
-        let requested = match self.paged_attn_config.as_ref().map(|cfg| cfg.mem_gpu) {
-            Some(crate::MemoryGpuConfig::ContextSize(tokens)) => tokens,
-            _ => 0,
+        if self.paged_attn_config.is_none() || self.offloadable_experts()?.is_none() {
+            return Ok(None);
+        }
+        let context = self.planned_context(params)?;
+        let Some(spare) = self.spare(Some(slots), &context, self.activations(params)?)? else {
+            return Ok(None);
         };
+        let quantum = crate::scheduler::DEFAULT_MAX_PREFILL_CHUNK_TOKENS;
+        let chunk = (spare / per_token).min(MAX_PLANNED_PROMPT_CHUNK) / quantum * quantum;
+        Ok((chunk > quantum).then_some((chunk, chunk * per_token)))
+    }
+
+    // The most experts per layer to cache when a GGUF MoE model's layers do not all fit on the GPU beside a usable
+    // context, its routed experts staying in host memory; `None` when it fits resident or cannot offload. A requested
+    // cache that does not fit shrinks to one that does: the map would otherwise move whole layers to the CPU.
+    fn slots(&self, params: &AutoDeviceMapParams) -> Result<Option<usize>> {
+        let Some(experts) = self.offloadable_experts()? else {
+            return Ok(None);
+        };
+        let activations = self.activations(params)?;
+        let requested = self.requested_context();
         if let Some(asked) = self.sizing.moe_expert_cache {
             // the context the map and a context-sized paged cache ask for, not the planner's longer default
             let context = params.with_max_seq_len(params.max_seq_len().max(requested));
@@ -606,11 +668,7 @@ impl ExpertCachePlan<'_> {
             }
             return Ok(fitting);
         }
-        let target = params.with_max_seq_len(planned_offload_context(
-            params.max_seq_len(),
-            requested,
-            window,
-        ));
+        let target = self.planned_context(params)?;
         let plan = plan_expert_slots(experts, [&target, params], |slots, params| {
             self.fits(slots, params, activations)
         })?;
@@ -702,6 +760,7 @@ pub(crate) fn resolve_map_setting(
             setting: DeviceMapSetting::dummy(),
             max_kv_tokens: None,
             planned_moe_expert_cache: None,
+            prompt_chunk_tokens: None,
         });
     }
     if distributed {
@@ -711,6 +770,7 @@ pub(crate) fn resolve_map_setting(
             },
             max_kv_tokens: None,
             planned_moe_expert_cache: None,
+            prompt_chunk_tokens: None,
         });
     }
     let DeviceMapSetting::Auto(params) = &setting else {
@@ -718,17 +778,31 @@ pub(crate) fn resolve_map_setting(
             setting,
             max_kv_tokens: None,
             planned_moe_expert_cache: None,
+            prompt_chunk_tokens: None,
         });
     };
     let max_kv_tokens = Some(params.max_seq_len() * params.max_batch_size());
     let dtype = dtype.try_into_dtype(&available_devices.iter().collect::<Vec<_>>())?;
-    let planned_moe_expert_cache = ExpertCachePlan {
+    let plan = ExpertCachePlan {
         sizing,
         devices: available_devices,
         dtype,
         paged_attn_config,
+    };
+    let planned_moe_expert_cache = plan.slots(params)?;
+    let prompt_chunk = match planned_moe_expert_cache.or(sizing.moe_expert_cache) {
+        Some(slots) => plan.prompt_chunk(slots, params)?,
+        None => None,
+    };
+    if let Some((chunk, bytes)) = prompt_chunk
+        && let Some(cfg) = paged_attn_config.take()
+    {
+        info!(
+            chunk,
+            "prompt chunks sized to the memory the expert cache leaves (`--max-prefill-chunk-tokens` chooses)"
+        );
+        *paged_attn_config = Some(cfg.with_base_device_memory_reservation(bytes)?);
     }
-    .slots(params)?;
     let sizing = super::isq_flow::AutoDeviceMapSizingInputs {
         moe_expert_cache: planned_moe_expert_cache.or(sizing.moe_expert_cache),
         ..sizing
@@ -756,6 +830,7 @@ pub(crate) fn resolve_map_setting(
         setting: DeviceMapSetting::Map(map),
         max_kv_tokens,
         planned_moe_expert_cache,
+        prompt_chunk_tokens: prompt_chunk.map(|(chunk, _)| chunk),
     })
 }
 
@@ -918,6 +993,7 @@ pub(crate) struct LoadSession {
     pub uqff_reader: Option<Arc<UqffReader>>,
     pub weight_source: Option<Arc<dyn QuantizedWeightSource>>,
     pub max_kv_tokens: Option<usize>,
+    pub prompt_chunk_tokens: Option<usize>,
     pub pipeline_mapper: Box<dyn DeviceMapper + Send + Sync>,
     pub layer_devices: Vec<Option<Device>>,
     pub dtype: DType,
@@ -998,6 +1074,7 @@ pub(crate) fn open_load_session(
         setting: mapper,
         max_kv_tokens,
         planned_moe_expert_cache,
+        prompt_chunk_tokens,
     } = resolve_map_setting(
         MapSettingInputs {
             setting: mapper,
@@ -1100,6 +1177,7 @@ pub(crate) fn open_load_session(
             uqff_reader,
             weight_source,
             max_kv_tokens,
+            prompt_chunk_tokens,
             pipeline_mapper,
             layer_devices,
             dtype,

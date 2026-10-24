@@ -804,6 +804,8 @@ fn uses_recurrent_transition_log(cache: &EitherCache) -> bool {
 
 pub struct GeneralMetadata {
     pub max_seq_len: usize,
+    /// The prompt chunk the load reserved activations for, the scheduler's unless one is configured.
+    pub prompt_chunk_tokens: Option<usize>,
     /// Only None if it doesn't make sense for the model
     pub llg_factory: Option<Arc<llguidance::ParserFactory>>,
     pub no_kv_cache: bool,

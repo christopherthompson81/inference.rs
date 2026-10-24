@@ -20,10 +20,7 @@ pub use server::*;
 use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use inference_api::{
-    engine::{
-        DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL, DEFAULT_MAX_NUM_BATCHED_TOKENS,
-        DEFAULT_MAX_PREFILL_CHUNK_TOKENS, DEFAULT_MAX_SEQS, TokenSource,
-    },
+    engine::{DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL, DEFAULT_MAX_SEQS, TokenSource},
     engine_chat::ReasoningEffort,
 };
 use serde::Deserialize;
@@ -731,10 +728,10 @@ pub struct RuntimeOptions {
     #[serde(default = "default_max_seqs")]
     pub max_seqs: usize,
 
-    /// Maximum tokens processed in one paged-attention scheduler step
-    #[arg(long, default_value_t = default_max_num_batched_tokens())]
-    #[serde(default = "default_max_num_batched_tokens")]
-    pub max_num_batched_tokens: NonZeroUsize,
+    /// Maximum tokens processed in one paged-attention scheduler step [default: 4096, or the prompt chunk if longer]
+    #[arg(long)]
+    #[serde(default)]
+    pub max_num_batched_tokens: Option<NonZeroUsize>,
 
     /// Keep the token embedding in VRAM; by default an untied one lives in pinned host memory the GPU reads over the bus
     #[arg(long)]
@@ -746,10 +743,11 @@ pub struct RuntimeOptions {
     #[serde(default)]
     pub moe_expert_cache: Option<usize>,
 
-    /// CUDA prompt-token quantum used while decode is resident and for recurrent prefill batching
-    #[arg(long, default_value_t = default_max_prefill_chunk_tokens())]
-    #[serde(default = "default_max_prefill_chunk_tokens")]
-    pub max_prefill_chunk_tokens: NonZeroUsize,
+    /// CUDA prompt-token quantum used while decode is resident and for recurrent prefill batching [default: 512, or
+    /// for MoE experts in host memory the longest chunk the expert cache leaves room for, up to 8192]
+    #[arg(long)]
+    #[serde(default)]
+    pub max_prefill_chunk_tokens: Option<NonZeroUsize>,
 
     /// Maximum decode steps before a waiting prefill batch is admitted
     #[arg(long, default_value_t = default_max_decode_steps_before_prefill())]
@@ -1158,10 +1156,10 @@ impl Default for RuntimeOptions {
     fn default() -> Self {
         Self {
             max_seqs: DEFAULT_MAX_SEQS,
-            max_num_batched_tokens: default_max_num_batched_tokens(),
+            max_num_batched_tokens: None,
             no_embeddings_on_host: false,
             moe_expert_cache: None,
-            max_prefill_chunk_tokens: default_max_prefill_chunk_tokens(),
+            max_prefill_chunk_tokens: None,
             max_decode_steps_before_prefill: default_max_decode_steps_before_prefill(),
             no_kv_cache: false,
             prefix_cache_n: 16,
@@ -1216,14 +1214,6 @@ fn default_token_source() -> TokenSource {
 
 fn default_max_seqs() -> usize {
     DEFAULT_MAX_SEQS
-}
-
-fn default_max_num_batched_tokens() -> NonZeroUsize {
-    NonZeroUsize::new(DEFAULT_MAX_NUM_BATCHED_TOKENS).unwrap()
-}
-
-fn default_max_prefill_chunk_tokens() -> NonZeroUsize {
-    NonZeroUsize::new(DEFAULT_MAX_PREFILL_CHUNK_TOKENS).unwrap()
 }
 
 fn default_max_decode_steps_before_prefill() -> NonZeroUsize {

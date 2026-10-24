@@ -474,6 +474,7 @@ impl SpeechPipeline {
             model_id,
             model,
             metadata: Arc::new(GeneralMetadata {
+                prompt_chunk_tokens: None,
                 max_seq_len: 1024,
                 llg_factory: None,
                 no_prefix_cache: false,

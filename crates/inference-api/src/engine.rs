@@ -384,11 +384,12 @@ pub struct RuntimeSpec {
     pub paged_cache: PagedCacheSpec,
     #[serde(default)]
     pub mtp: Option<MtpSpec>,
-    /// Most tokens one scheduler step batches across sequences.
+    /// Most tokens one scheduler step batches across sequences; unset, 4096 or the prompt chunk if longer.
     #[serde(default)]
     #[schema(minimum = 1)]
     pub max_num_batched_tokens: Option<usize>,
-    /// Longest prompt chunk one prefill step takes.
+    /// Longest prompt chunk one prefill step takes; unset, 512, or for MoE experts in host memory the longest chunk the
+    /// expert cache leaves room for.
     #[serde(default)]
     #[schema(minimum = 1)]
     pub max_prefill_chunk_tokens: Option<usize>,

@@ -72,18 +72,34 @@ pub enum SchedulerConfig {
 /// How the paged-attention scheduler interleaves prefill and decode.
 #[derive(Clone, Copy, Debug)]
 pub struct SchedulerLimits {
-    pub max_num_batched_tokens: usize,
-    pub max_prefill_chunk_tokens: usize,
+    /// `None`: the default, or the prompt chunk when that is longer.
+    pub max_num_batched_tokens: Option<usize>,
+    /// `None`: the chunk the load planned (an offloaded MoE model's), else the default.
+    pub max_prefill_chunk_tokens: Option<usize>,
     pub max_decode_steps_before_prefill: usize,
 }
 
 impl Default for SchedulerLimits {
     fn default() -> Self {
         Self {
-            max_num_batched_tokens: DEFAULT_MAX_NUM_BATCHED_TOKENS,
-            max_prefill_chunk_tokens: DEFAULT_MAX_PREFILL_CHUNK_TOKENS,
+            max_num_batched_tokens: None,
+            max_prefill_chunk_tokens: None,
             max_decode_steps_before_prefill: DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL,
         }
+    }
+}
+
+impl SchedulerLimits {
+    // (batched tokens, prompt chunk) with `planned` standing in for an unset chunk
+    fn resolve(self, planned: Option<usize>) -> (usize, usize) {
+        let chunk = self
+            .max_prefill_chunk_tokens
+            .or(planned)
+            .unwrap_or(DEFAULT_MAX_PREFILL_CHUNK_TOKENS);
+        let batched = self
+            .max_num_batched_tokens
+            .unwrap_or(DEFAULT_MAX_NUM_BATCHED_TOKENS.max(chunk));
+        (batched, chunk)
     }
 }
 
@@ -95,13 +111,14 @@ impl SchedulerConfig {
         max_num_seqs: usize,
         limits: SchedulerLimits,
     ) -> anyhow::Result<Self> {
-        if paged_attn_requested
-            && let Some(config) = pipeline.lock().await.get_metadata().cache_config.clone()
-        {
+        let metadata = pipeline.lock().await.get_metadata();
+        if paged_attn_requested && let Some(config) = metadata.cache_config.clone() {
+            let (max_num_batched_tokens, max_prefill_chunk_tokens) =
+                limits.resolve(metadata.prompt_chunk_tokens);
             return Ok(Self::PagedAttentionMeta {
                 max_num_seqs,
-                max_num_batched_tokens: limits.max_num_batched_tokens,
-                max_prefill_chunk_tokens: limits.max_prefill_chunk_tokens,
+                max_num_batched_tokens,
+                max_prefill_chunk_tokens,
                 max_decode_steps_before_prefill: limits.max_decode_steps_before_prefill,
                 config,
             });
@@ -322,6 +339,25 @@ mod tests {
             layer_types: Vec::new(),
             kv_cache_group_ids: vec![0, 1],
         }
+    }
+
+    #[test]
+    fn a_planned_prompt_chunk_stands_in_for_an_unset_one() {
+        let unset = SchedulerLimits::default();
+        assert_eq!(
+            unset.resolve(None),
+            (
+                DEFAULT_MAX_NUM_BATCHED_TOKENS,
+                DEFAULT_MAX_PREFILL_CHUNK_TOKENS
+            )
+        );
+        assert_eq!(unset.resolve(Some(8192)), (8192, 8192));
+        let set = SchedulerLimits {
+            max_num_batched_tokens: Some(2048),
+            max_prefill_chunk_tokens: Some(1024),
+            ..unset
+        };
+        assert_eq!(set.resolve(Some(8192)), (2048, 1024));
     }
 
     #[test]

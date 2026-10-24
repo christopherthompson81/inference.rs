@@ -182,6 +182,9 @@ impl DeviceMappedModelLoader for AutoMultimodalLoader {
     ) -> Result<Vec<usize>> {
         Self::get_loader(config)?.non_mapped_layer_sizes_in_bytes(config, dtype, weight_pack_factor)
     }
+    fn prompt_activation_bytes_per_token(&self, config: &str) -> Result<Option<usize>> {
+        Self::get_loader(config)?.prompt_activation_bytes_per_token(config)
+    }
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
