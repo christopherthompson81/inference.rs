@@ -888,3 +888,53 @@ single_thread_rate IQ3_S: 3.87 -> 4.44 GB/s
 flash_next_offload_misses, 3 misses: 116.6 / 117.0 -> 112.5 / 109.8 us an expert (two runs each)
 ```
 About 5% off the CPU's share; the kernel still holds near 21 GB/s against the 33.5 GB/s eight threads read.
+
+## Run 24 - 2026-10-23 20:40
+
+Question: where do the GPU's 15 ms of a 28 ms offloaded step go, and what is worth cutting?
+
+```
+nsys profile -t cuda,osrt --cuda-graph-trace=node inference bench ... --moe-expert-cache 128 --prompt-len 512
+    --gen-len 64 (63 decode tokens, 28.7 ms each)
+kernel busy 15.4 ms a token (54%); the rest is the wait on the CPU's misses
+Q8_0 dense GEMVs (mmvq plain)   5.1 ms   by shape: GDN qkv 10240x2560, hc up 10240x320 (96 calls ~12 us),
+                                         GDN out, shared-expert down 2560x640 (48 calls ~4.3 us), QSA o_proj,
+                                         hc down 320x10240 (97 calls 5.7 us, ~616 GB/s)
+expert GEMVs (IQ3_S, IQ4_NL)    2.4 ms
+lm_head (Q6_K)                  0.69 ms  (~760 GB/s)
+~30 small elementwise launches a layer (bmul, affine, sum, sigmoid, badd, silu, casts, copies)  ~3 ms
+```
+The hc up projection runs at ~250 GB/s: a 320-wide Q8_0 row keeps 40 of the single-column kernel's 256 threads busy
+(8 warps over 2 rows, 4 threads a 32-value block). A short-row variant (one warp a block over 4 rows) for one token
+over rows up to 512 wide, with a test against MMQ (`short_row_mmvq_matches_mmq`, a row count 4 does not divide):
+```
+engine, per call: hc up 12.0 -> 8.4 us; shared-expert down (640 wide) 4.3 -> 5.6 us at a 1024 cutoff, so the cutoff
+is 512; kernel busy 15.40 -> 15.11 ms a token
+hot loop, 10240x320: 6.21 / 5.67 / 8.33 us at 4 / 8 / 16 rows a block (4 kept: a k-quant shape prefers it)
+bundle +0.09 MiB
+```
+About 0.3 ms of a step, a quarter of the estimate.
+
+The hyper-connection elementwise work, about 30 launches a layer (each block's read: grouped norm then a scale
+multiply, the low-rank activation's divide and silu, the up projection's sigmoid, multiply and mean over streams, the
+write-back weights' divide, sigmoid and doubling; and two write-backs of multiply and add), now runs in five kernels
+(`inference_nn::cuda::hyper`: grouped norm, scaled silu, mix, write-back weights, write-back), each tested against
+the tensor ops in F32 (`fused_ops_match_the_tensor_ops`, within 1e-5). A layer's feed-forward write-back now lands in
+its residual directly (`DecoderLayerOutput::branch` is `None`). CPU layers keep the tensor ops.
+
+The fused kernels accumulate in F32 and round once where the tensor ops rounded to BF16 between steps, so BF16
+decodes move: the tiny checkpoint's GPU score against the F32 CPU reference (`flash_next_split_across_gpu_and_cpu`'s
+mean logprob error) goes from 0.240 to 0.140, and the graph tests' pinned traces were re-pinned.
+
+The first grouped norm (a block of 256 threads per group, reading the slice twice) took 5.8 us a call, more than the
+rms norm plus multiply it replaced (2.0 + 2.3 us): one token gives it only four blocks. It now keeps a thread's
+values in registers with 1,024 threads a block.
+
+```
+nsys, 63 decode tokens: kernel busy 15.11 -> 13.73 ms a token, 3,544 -> 2,768 launches a token
+bench, 128 slots, fused against unfused in one binary, seven alternating rounds (ms a token):
+  unfused  36.32 32.23 36.26 30.05 37.20 30.90 32.35
+  fused    48.13 33.56 35.73 32.51 32.16 31.32 31.59
+```
+The wall time spreads by several ms between runs (the CPU's misses), so the 1.4 ms of kernel time is not resolved
+end to end; rounds 4-7 average 31.9 fused against 32.6 unfused.

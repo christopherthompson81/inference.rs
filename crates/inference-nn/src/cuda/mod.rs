@@ -6,6 +6,8 @@ pub mod dflash_context;
 pub mod dynamic_conv;
 pub mod ffi;
 #[cfg(feature = "cuda")]
+pub mod hyper;
+#[cfg(feature = "cuda")]
 pub mod lstm;
 #[cfg(feature = "cuda")]
 pub mod mapped;
