@@ -216,3 +216,19 @@ view1.traj0: 0.83 s / 21 frames; hole-mask flips 0.0008%; rgb rms 1.7e-4 (max 0.
 ```
 Collision checks reproduced a reference detail: only the first check measures distance to the mesh; the checks after
 a shortening use the mean distance to the 5 nearest cloud points.
+
+## Run 10 - 2026-10-24 16:54
+
+Question: does memory retrieval pick the reference's frames?
+
+`dump_ws_retrieval.py` (scratch, CPU) calls the reference's `PanoramaMemoryBank.retrieval` on a bank object holding the
+27 panorama-bank cameras (no images: the selector only runs past 8 distinct frames), for view0's aerial clip, then adds
+that clip's kept frames (`update_memory`: frames 3, 6, 9, 12, 14, 16, 18, 20) and retrieves for view0's right turn,
+which takes the shortcut path (forced aerial frames at targets 1, 2, 3, 5, 7, 9, 13, 17).
+```
+retrieval_matches_the_reference
+view0/traj2: per frame identical, ref_index [0, 2, 11] both
+view0/traj0: per frame identical (shortcut frames 27-34 where forced), ref_index [0, 3, 5, 6, 14, 16] both
+```
+`inference worldgen` wires the stages (scene, trajectories, umT5 caption, clip loop, WorldMirror on the bank with
+camera priors); the first full run is on the sample repo's indoor `case000`.
