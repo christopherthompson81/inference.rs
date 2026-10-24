@@ -163,7 +163,9 @@ fn f16_at(block: &[u8], at: usize) -> f32 {
 
 #[cfg(target_arch = "x86_64")]
 fn has_avx2_fma() -> bool {
-    std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+    std::arch::is_x86_feature_detected!("avx2")
+        && std::arch::is_x86_feature_detected!("fma")
+        && std::arch::is_x86_feature_detected!("f16c")
 }
 
 fn iq4_xs(row: &[u8], ys: &[BlockQ8K]) -> f32 {
@@ -461,13 +463,46 @@ mod avx2 {
         _mm256_madd_epi16(p16, _mm256_set1_epi16(1))
     }
 
-    #[target_feature(enable = "avx2,fma")]
+    // the f16 at `at`, converted in hardware; `half` reaches F16C only through a call per value
+    #[inline]
+    #[target_feature(enable = "avx2,fma,f16c")]
+    fn f16c_at(block: &[u8], at: usize) -> f32 {
+        let bits = i32::from(u16::from_le_bytes([block[at], block[at + 1]]));
+        _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtsi32_si128(bits)))
+    }
+
+    // sum over blocks of `block_dot(block, y)` scaled by the block's and y's scales, on two accumulators so
+    // consecutive blocks' multiply-adds overlap
+    #[inline]
+    #[target_feature(enable = "avx2,fma,f16c")]
+    fn sum_blocks_32<const N: usize>(
+        row: &[u8],
+        ys: &[Q8Block32],
+        block_dot: impl Fn(&[u8; N], &Q8Block32) -> __m256i,
+    ) -> f32 {
+        let scaled = |block: &[u8; N], y: &Q8Block32, acc: __m256| {
+            let d = _mm256_set1_ps(f16c_at(block, 0) * y.d);
+            _mm256_fmadd_ps(d, _mm256_cvtepi32_ps(block_dot(block, y)), acc)
+        };
+        let blocks = &row.as_chunks::<N>().0[..ys.len()];
+        let (pairs, rest) = blocks.as_chunks::<2>();
+        let (mut a0, mut a1) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+        for ([b0, b1], y) in pairs.iter().zip(ys.as_chunks::<2>().0) {
+            a0 = scaled(b0, &y[0], a0);
+            a1 = scaled(b1, &y[1], a1);
+        }
+        if let [b] = rest {
+            a0 = scaled(b, &ys[ys.len() - 1], a0);
+        }
+        hsum(_mm256_add_ps(a0, a1))
+    }
+
+    #[target_feature(enable = "avx2,fma,f16c")]
     pub(super) fn iq4_nl_32(row: &[u8], ys: &[Q8Block32]) -> f32 {
         // SAFETY: the codebook holds 16 bytes
         let values = unsafe { _mm_loadu_si128(KVALUES_IQ4NL.as_ptr().cast()) };
         let m4 = _mm_set1_epi8(0x0f);
-        let mut acc = _mm256_setzero_ps();
-        for (block, y) in row.as_chunks::<IQ4_NL_BYTES>().0.iter().zip(ys) {
+        sum_blocks_32::<IQ4_NL_BYTES>(row, ys, |block, y| {
             // SAFETY: the 16 nibble bytes follow the block's scale
             let bits = unsafe { _mm_loadu_si128(block[BLOCK32_QS..].as_ptr().cast()) };
             // low nibbles pair with the first 16 activations, high ones with the last 16
@@ -475,22 +510,15 @@ mod avx2 {
                 _mm_shuffle_epi8(values, _mm_and_si128(_mm_srli_epi16(bits, 4), m4)),
                 _mm_shuffle_epi8(values, _mm_and_si128(bits, m4)),
             );
-            let sumi = signed_dot(q4, load_q8(&y.qs));
-            let d = _mm256_set1_ps(f16_at(block, 0) * y.d);
-            acc = _mm256_fmadd_ps(d, _mm256_cvtepi32_ps(sumi), acc);
-        }
-        hsum(acc)
+            signed_dot(q4, load_q8(&y.qs))
+        })
     }
 
-    #[target_feature(enable = "avx2,fma")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     pub(super) fn q8_0_32(row: &[u8], ys: &[Q8Block32]) -> f32 {
-        let mut acc = _mm256_setzero_ps();
-        for (block, y) in row.as_chunks::<Q8_0_BYTES>().0.iter().zip(ys) {
-            let sumi = signed_dot(load(&block[BLOCK32_QS..]), load_q8(&y.qs));
-            let d = _mm256_set1_ps(f16_at(block, 0) * y.d);
-            acc = _mm256_fmadd_ps(d, _mm256_cvtepi32_ps(sumi), acc);
-        }
-        hsum(acc)
+        sum_blocks_32::<Q8_0_BYTES>(row, ys, |block, y| {
+            signed_dot(load(&block[BLOCK32_QS..]), load_q8(&y.qs))
+        })
     }
 
     // the IQ4_NL codebook in both lanes, and each u16 code's place in its sub-block's scale code
@@ -1108,13 +1136,14 @@ mod tests {
             (GgufType::Iq4Nl, IQ4_NL_BYTES),
             (GgufType::Q8_0, Q8_0_BYTES),
         ] {
-            for seed in 0..4 {
-                let row = row(block_bytes, seed);
-                let expected = vec_dot_32_generic(ty, &row, &ys);
-                let dispatched = vec_dot_32(ty, &row, &ys);
+            // an odd block count too, past the kernels' pairs
+            for (seed, n) in (0..4).flat_map(|seed| [(seed, BLOCKS), (seed, BLOCKS - 1)]) {
+                let row = &row(block_bytes, seed)[..n * block_bytes];
+                let expected = vec_dot_32_generic(ty, row, &ys[..n]);
+                let dispatched = vec_dot_32(ty, row, &ys[..n]);
                 assert!(
                     (dispatched - expected).abs() < 1e-4 * expected.abs().max(1.0),
-                    "{ty:?} {dispatched} vs {expected}"
+                    "{ty:?} {n} blocks: {dispatched} vs {expected}"
                 );
             }
         }
@@ -1196,6 +1225,33 @@ mod bench {
             println!(
                 "{ty:?}: {:.2} GB/s one thread ({acc})",
                 (200 * bytes.len()) as f64 / secs / 1e9
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark"]
+    fn single_thread_rate_32() {
+        for (ty, size) in [
+            (GgufType::Iq4Nl, IQ4_NL_BYTES),
+            (GgufType::Q8_0, Q8_0_BYTES),
+        ] {
+            let (rows, blocks) = (2048, 20);
+            let row_bytes = blocks * size;
+            let bytes = vec![3u8; rows * row_bytes];
+            let xs = vec![0.5f32; blocks * QK32];
+            let mut ys = vec![Q8Block32::ZERO; blocks];
+            Q8Block32::quantize(&xs, &mut ys);
+            let start = std::time::Instant::now();
+            let mut acc = 0f32;
+            for _ in 0..200 {
+                for row in bytes.chunks_exact(row_bytes) {
+                    acc += vec_dot_32(ty, row, &ys);
+                }
+            }
+            println!(
+                "{ty:?} 32: {:.2} GB/s one thread ({acc})",
+                (200 * bytes.len()) as f64 / start.elapsed().as_secs_f64() / 1e9
             );
         }
     }
