@@ -1259,3 +1259,25 @@ q4              518 MB (13 KB)      coherent, decode 26.4 tok/s; the indexer lay
 Not built. What remains of the idea: the offload planner could pick a quantized cache when its savings buy expert
 slots (needs a decode-side quality check), the indexer layers could take a quantized cache (~0.8 GB at 262K with q4
 main KV, about 7 slots), and a KV that grows into the expert cache at runtime (basalt's elastic KV) is still open.
+
+## Run 35 - 2026-10-24 09:38
+
+Question: does a quantized KV cache cost Flash-Next quality as decoding reads it? (Qwen3.8 27B takes q3 with no
+measurable loss; basalt ships int8 and publishes no numbers for its q4_0 or k8v4.)
+
+Prompt scoring never reads the cache, so the measure is decode-time teacher forcing (kv_cache_quant_investigation.md
+Run 6): each scored position is a one-token `/v1/completions` of the passage so far, and prefix caching serves the
+earlier tokens from the cache under test (hit rate 97.9-98.0% in every run). Six passages of a code-and-docs text, each
+a 3,072-token prefix (past QSA's 2,051-token dense limit, so attention reads the selected quantized cells) and 48
+scored positions; 64 slots, `--pa-context-len 16384`, one server per type (`kv_quality.sh`, scratch):
+```
+cache    ppl      top-1    vs auto   KV a token (main + indexer, 12 layers)
+auto     2.3820   75.7%              30.0 KB
+q8       2.3843   75.0%    +0.1%     ~18 KB
+q4       2.4156   74.3%    +1.4%     ~13 KB
+q3       2.3985   74.7%    +0.7%     ~11.5 KB (layer 3 at q8, the first cached layer)
+```
+q3 scoring better than q4 puts the noise of 288 positions near 1%; nothing here separates q8, q4 and q3 from each
+other by more than that. The indexer layers stay BF16 whatever the main type, so QSA's block selection cannot move;
+only attention over the selected cells reads the quantized values. The 27B's finding carries over within this
+measure's resolution. At 262K tokens q3 takes about 3.0 GB of KV against 7.9 GB in BF16, roughly 45 expert slots.
