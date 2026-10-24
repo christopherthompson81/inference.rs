@@ -473,9 +473,9 @@ impl WorldStereoTransformer {
             }
             _ => (video.narrow(1, 0, 0)?, video_rope),
         };
-        let control = self.controlnet.forward(inputs, &cond.temb, (f, h, w))?;
+        let mut control = self.controlnet.start(inputs, &cond.temb, (f, h, w))?;
         let (mut video, mut memory) = (video, memory);
-        for (i, block) in self.blocks.iter().enumerate() {
+        for block in &self.blocks {
             (video, memory) = if block.scale_shift_table.device().same_device(&self.device) {
                 block.forward(&video, &memory, cond, &rope)?
             } else {
@@ -483,7 +483,7 @@ impl WorldStereoTransformer {
                     .to_device(&self.device)?
                     .forward(&video, &memory, cond, &rope)?
             };
-            if let Some(c) = control.get(i) {
+            if let Some(c) = control.step()? {
                 video = (video + c)?;
             }
         }

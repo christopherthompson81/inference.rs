@@ -172,13 +172,14 @@ impl ControlNet {
             .to_dtype(ACT_DTYPE)
     }
 
-    /// One residual `[1, N, main dim]` per ControlNet block, for a latent grid of `f x h x w`.
-    pub(crate) fn forward(
-        &self,
+    /// The state the ControlNet blocks run on, for a latent grid of `f x h x w`; the blocks then step it one at a time
+    /// beside the main blocks, so only one residual exists at once.
+    pub(crate) fn start<'a>(
+        &'a self,
         inputs: &StepInputs,
-        temb: &Tensor,
+        temb: &'a Tensor,
         (f, h, w): (usize, usize, usize),
-    ) -> Result<Vec<Tensor>> {
+    ) -> Result<ControlState<'a>> {
         let input = Tensor::cat(
             &[
                 &inputs.latents.narrow(0, 0, LATENT_PREFIX_CHANNELS)?,
@@ -194,13 +195,34 @@ impl ControlNet {
         let c = cells.dim(1)?;
         let cells = cells.reshape((f, h, w, c))?.permute((3, 0, 1, 2))?;
         let tokens = (tokens + self.mask_zero_proj.forward(&cells)?)?;
-        let mut xs = self.proj_in.forward(&tokens.unsqueeze(0)?)?;
-        let rope = RopeTables::grid(self.head_dim, (f, h / 2, w / 2), inputs.latents.device())?;
-        let mut out = Vec::with_capacity(self.blocks.len());
-        for (block, proj) in self.blocks.iter().zip(&self.proj_out) {
-            xs = block.forward(&xs, temb, &rope)?;
-            out.push(proj.forward(&xs)?);
-        }
-        Ok(out)
+        Ok(ControlState {
+            net: self,
+            xs: self.proj_in.forward(&tokens.unsqueeze(0)?)?,
+            temb,
+            rope: RopeTables::grid(self.head_dim, (f, h / 2, w / 2), inputs.latents.device())?,
+            next: 0,
+        })
+    }
+}
+
+/// The ControlNet partway through its blocks.
+pub(crate) struct ControlState<'a> {
+    net: &'a ControlNet,
+    xs: Tensor,
+    temb: &'a Tensor,
+    rope: RopeTables,
+    next: usize,
+}
+
+impl ControlState<'_> {
+    /// The next block's residual `[1, N, main dim]`, or None once every block has run.
+    pub(crate) fn step(&mut self) -> Result<Option<Tensor>> {
+        let Some(block) = self.net.blocks.get(self.next) else {
+            return Ok(None);
+        };
+        self.xs = block.forward(&self.xs, self.temb, &self.rope)?;
+        let residual = self.net.proj_out[self.next].forward(&self.xs)?;
+        self.next += 1;
+        Ok(Some(residual))
     }
 }

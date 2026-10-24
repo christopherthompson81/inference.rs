@@ -210,7 +210,11 @@ fn full_size_streamed_step() -> Result<()> {
     };
     let model = WorldStereoTransformer::new_streamed(&cfg, &ws, vb)?;
     println!("loaded in {:.1} s", start.elapsed().as_secs_f64());
-    let (f, h, w) = (21, 60, 104);
+    let f: usize = std::env::var("WORLDSTEREO_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(21);
+    let (h, w) = (60, 104);
     let rand = |shape: &[usize]| -> Result<Tensor> {
         Tensor::randn(0f32, 1.0, shape, &device)?.to_dtype(DType::BF16)
     };
