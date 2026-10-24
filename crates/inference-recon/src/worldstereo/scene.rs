@@ -14,6 +14,8 @@ const CONTRACT_EPS: f64 = 1e-6;
 // the memory bank's views: three pitches, every 40 degrees around
 const BANK_PITCHES: [f64; 3] = [0.0, 0.5, -0.5];
 const BANK_STEP_DEG: f64 = 40.0;
+// without a caller's choice, a scene is outdoor when at least this share of the panorama is sky
+const OUTDOOR_SKY_SHARE: f64 = 0.005;
 
 /// A view of the scene from the panorama's centre.
 pub struct View {
@@ -68,12 +70,13 @@ fn depth_edges(d: &[f32], width: usize, height: usize) -> Vec<bool> {
 
 impl Scene {
     /// From the panorama and its merged distance; `outdoor` picks the far-field compression (the reference asks a VLM),
-    /// defaulting to whether any sky was found. Sky is what MoGe-2 found invalid in every view (the reference segments
+    /// defaulting to whether at least 0.5% of it is sky. Sky is what MoGe-2 found invalid in every view (the reference segments
     /// it with GroundingDINO and ZIM).
     pub fn new(pano: &Rgb8, depth: &PanoDepth, outdoor: Option<bool>) -> Self {
         let (w, h) = (depth.width, depth.height);
         let sky = depth.mask.iter().map(|m| !m).collect::<Vec<_>>();
-        let outdoor = outdoor.unwrap_or_else(|| sky.iter().any(|&s| s));
+        let sky_share = sky.iter().filter(|&&s| s).count() as f64 / sky.len() as f64;
+        let outdoor = outdoor.unwrap_or(sky_share >= OUTDOOR_SKY_SHARE);
         let mut distance = depth.distance.clone();
         let edges = depth_edges(&distance, w, h);
         let kept = (0..w * h)
@@ -140,6 +143,16 @@ impl Scene {
     fn rotation(c2w: &Mat4) -> [[f64; 3]; 3] {
         // world to camera: the transpose of the camera-to-world rotation
         [0, 1, 2].map(|i| [0, 1, 2].map(|j| c2w[j][i]))
+    }
+
+    /// The median (lower, as torch's) distance over the panorama's non-sky pixels: the memory bank's far-plane scale.
+    pub fn ground_median(&self) -> f64 {
+        lower_median(
+            (0..self.distance.len())
+                .filter(|&p| !self.sky[p])
+                .map(|p| f64::from(self.distance[p]))
+                .collect(),
+        )
     }
 
     /// A view from the centre along `c2w`, at the start views' size and fields of view.

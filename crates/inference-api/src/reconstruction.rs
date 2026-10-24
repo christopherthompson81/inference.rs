@@ -1,5 +1,6 @@
-//! Feed-forward 3D reconstruction (WorldMirror 2.0): images or a video in, cameras, depth, normals, a point cloud and
-//! Gaussian splats out, with a `meta.json` describing conventions and settings.
+//! 3D reconstruction and world generation: WorldMirror 2.0 (images or a video in; cameras, depth, normals, a point
+//! cloud and Gaussian splats out) and WorldStereo-2 (a panorama in, generated keyframes and a reconstruction out), each
+//! run writing a `meta.json`.
 
 use std::path::Path;
 
@@ -115,4 +116,32 @@ pub async fn reconstruct(
         )?,
     };
     Ok(report)
+}
+
+pub use inference_recon::worldstereo::run::{WorldGenModels, WorldGenOptions, WorldGenReport};
+
+/// Generates a world from an equirectangular panorama (an image file) into `out_dir` with WorldStereo-2: depth and a
+/// point cloud from MoGe-2, the regular trajectories, keyframes along each, then WorldMirror 2.0 on the frames. Runs on
+/// the first CUDA device.
+pub fn generate_world(
+    models: &WorldGenModels,
+    panorama: &Path,
+    out_dir: &Path,
+    options: &WorldGenOptions,
+) -> anyhow::Result<WorldGenReport> {
+    let img = image::open(panorama)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", panorama.display()))?
+        .to_rgb8();
+    let pano = inference_recon::worldstereo::panorama::Rgb8 {
+        width: img.width() as usize,
+        height: img.height() as usize,
+        pixels: img.into_raw(),
+    };
+    let device = Device::cuda_if_available(0)?;
+    if !device.is_cuda() {
+        anyhow::bail!("world generation needs a CUDA device");
+    }
+    Ok(inference_recon::worldstereo::run::generate_world(
+        models, &pano, out_dir, options, &device,
+    )?)
 }

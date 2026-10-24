@@ -20,6 +20,8 @@ const LEVELS: usize = 5;
 const SHIFT_FIT_SIZE: usize = 64;
 const SHIFT_ITERATIONS: usize = 50;
 const MASK_THRESHOLD: f32 = 0.5;
+// the memory selector's descriptor is taken at this input size
+const FEATURE_SIZE: usize = 224;
 
 #[derive(Debug, Clone, Deserialize)]
 struct EncoderConfig {
@@ -408,6 +410,40 @@ impl MoGe {
             mask,
             normal,
         })
+    }
+}
+
+impl MoGe {
+    /// An image descriptor for the memory selector: the encoder's last class token (normed) for the image PIL-resized
+    /// to 224 x 224 and ImageNet-normalized (the reference uses DINOv2-base's pooled output for the same job).
+    pub fn image_features(
+        &self,
+        pixels: &[u8],
+        (width, height): (usize, usize),
+    ) -> Result<Vec<f32>> {
+        let s = FEATURE_SIZE;
+        let resized = inference_vision::pil_resize_bicubic(pixels, (width, height), (s, s));
+        let chw = Tensor::from_vec(
+            resized
+                .iter()
+                .map(|&p| f32::from(p) / 255.0)
+                .collect::<Vec<_>>(),
+            (s, s, 3),
+            &Device::Cpu,
+        )?
+        .permute((2, 0, 1))?
+        .unsqueeze(0)?
+        .to_device(&self.device)?;
+        let normed = chw
+            .broadcast_sub(&self.image_mean)?
+            .broadcast_div(&self.image_std)?;
+        let last = *self.layers.last().expect("intermediate layers");
+        let layers = self.encoder.forward_layers(&normed, &[last])?;
+        layers[0]
+            .1
+            .flatten_all()?
+            .to_dtype(DType::F32)?
+            .to_vec1::<f32>()
     }
 }
 

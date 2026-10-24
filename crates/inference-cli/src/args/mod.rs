@@ -320,6 +320,49 @@ pub enum Command {
         cpu: bool,
     },
 
+    /// Generate a 3D world from an equirectangular panorama with WorldStereo-2: keyframes along camera trajectories,
+    /// then WorldMirror 2.0 on them for cameras, depth, points and 3D Gaussian splats
+    Worldgen {
+        /// The panorama (2:1 equirectangular image)
+        #[arg(long)]
+        panorama: PathBuf,
+
+        /// The output folder, created if missing
+        #[arg(long)]
+        out: PathBuf,
+
+        /// The WorldStereo checkpoint folder (worldstereo-memory-dmd: config.json and model.safetensors)
+        #[arg(long)]
+        worldstereo: PathBuf,
+
+        /// The Wan2.1-I2V-14B-480P diffusers folder (vae, image_encoder, text_encoder, tokenizer, transformer config)
+        #[arg(long)]
+        wan: PathBuf,
+
+        /// The MoGe-2 ViT-L normal folder (config.json and model.safetensors)
+        #[arg(long)]
+        moge: PathBuf,
+
+        /// The WorldMirror 2.0 checkpoint folder; without it the clips are written and the reconstruction skipped
+        #[arg(long)]
+        worldmirror: Option<PathBuf>,
+
+        /// The caption every clip is generated with
+        #[arg(
+            long,
+            default_value = "A photorealistic, detailed scene with natural lighting."
+        )]
+        prompt: String,
+
+        /// Treat the scene as outdoor (far distances compressed) or indoor; decided by detected sky when unset
+        #[arg(long, value_parser = ["outdoor", "indoor"])]
+        scene: Option<String>,
+
+        /// Seed of the first clip's noise (each later clip adds one)
+        #[arg(long, default_value_t = 1024)]
+        seed: u64,
+    },
+
     /// Run performance benchmarks for base or LoRA model generation.
     Bench {
         #[command(subcommand)]

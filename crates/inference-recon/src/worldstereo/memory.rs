@@ -395,3 +395,100 @@ impl MemoryBank {
         }
     }
 }
+
+#[cfg(test)]
+mod parity {
+    use inference_tensor::{DType, Device};
+
+    use super::super::panorama::Rgb8;
+    use super::super::trajectory::{self, Mat4};
+    use super::{MemoryBank, MemoryFrame};
+    use crate::geometry::invert4;
+
+    // WORLDSTEREO_SCENE_REF (trajectories) and WORLDSTEREO_RETRIEVAL_REF: the reference's retrieval on the panorama
+    // bank cameras for view0's aerial clip, then, with that clip's kept frames added, for view0's right turn
+    #[test]
+    #[ignore = "needs the scene and retrieval reference dumps"]
+    fn retrieval_matches_the_reference() -> inference_tensor::Result<()> {
+        let (Some(scene_ref), Some(retrieval_ref)) = (
+            std::env::var_os("WORLDSTEREO_SCENE_REF"),
+            std::env::var_os("WORLDSTEREO_RETRIEVAL_REF"),
+        ) else {
+            return Ok(());
+        };
+        let s = inference_tensor::safetensors::load(scene_ref, &Device::Cpu)?;
+        let r = inference_tensor::safetensors::load(retrieval_ref, &Device::Cpu)?;
+        let (w, h) = trajectory::view_size();
+        let k =
+            trajectory::intrinsics(w, h, trajectory::VIEW_FOV_X_DEG, trajectory::VIEW_FOV_Y_DEG);
+        let blank = || Rgb8 {
+            width: w,
+            height: h,
+            pixels: vec![0; w * h * 3],
+        };
+        // the bank's view directions, in the planner's order
+        let starts = [[-1.0, 0.0, 0.0], [-1.0, 0.0, 0.5], [-1.0, 0.0, -0.5]];
+        let mut dirs: Vec<[f64; 3]> = starts.to_vec();
+        for st in starts {
+            for i in 1..9 {
+                let a = (40.0 * i as f64).to_radians();
+                dirs.push([
+                    a.cos() * st[0] + a.sin() * st[1],
+                    -a.sin() * st[0] + a.cos() * st[1],
+                    st[2],
+                ]);
+            }
+        }
+        let frames = dirs
+            .iter()
+            .enumerate()
+            .map(|(i, &d)| MemoryFrame {
+                w2c: invert4(&trajectory::look_at_c2w(d)),
+                intrinsics: k,
+                image: blank(),
+                name: format!("render_results/pano_bank/{i:04}"),
+            })
+            .collect();
+        let mut bank = MemoryBank::new(frames, (w, h), 1.010_163_1);
+        for (step, traj) in ["traj2", "traj0"].iter().enumerate() {
+            let c2ws = s[&format!("view0.{traj}.c2w")]
+                .to_dtype(DType::F64)?
+                .to_vec3::<f64>()?;
+            let w2cs = c2ws
+                .iter()
+                .map(|m| {
+                    invert4(&std::array::from_fn::<_, 4, _>(|i| {
+                        std::array::from_fn(|j| m[i][j])
+                    }))
+                })
+                .collect::<Vec<Mat4>>();
+            let ks = vec![k; w2cs.len()];
+            let got = bank.retrieve("view0", traj, &w2cs, &ks, &mut |imgs| {
+                vec![vec![0.0]; imgs.len()]
+            });
+            let want = r[&format!("view0.{traj}.per_frame")]
+                .to_dtype(DType::U32)?
+                .to_vec1::<u32>()?;
+            let want_index = r[&format!("view0.{traj}.ref_index")]
+                .to_dtype(DType::U32)?
+                .to_vec1::<u32>()?;
+            let ours = got.per_frame.iter().map(|&i| i as u32).collect::<Vec<_>>();
+            let index = got.index.iter().map(|&i| i as u32).collect::<Vec<_>>();
+            println!(
+                "view0/{traj}: per frame {ours:?}\n  reference {want:?}; ref_index {index:?} vs {want_index:?}"
+            );
+            assert_eq!(ours, want);
+            assert_eq!(index, want_index);
+            if step == 0 {
+                bank.update(
+                    "view0",
+                    traj,
+                    &(0..21).map(|_| blank()).collect::<Vec<_>>(),
+                    &w2cs,
+                    &ks,
+                );
+            }
+        }
+        Ok(())
+    }
+}

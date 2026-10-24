@@ -4,5 +4,6 @@ pub mod cameras;
 pub mod memory;
 pub mod panorama;
 pub mod render;
+pub mod run;
 pub mod scene;
 pub mod trajectory;
