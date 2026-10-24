@@ -210,6 +210,8 @@ async fn main() -> Result<()> {
             max_frames,
             no_edge_mask,
             no_sky_mask,
+            prior_cameras,
+            prior_depth,
             cpu,
         } => {
             use inference_api::reconstruction::{
@@ -222,6 +224,8 @@ async fn main() -> Result<()> {
                     sky_mask: !no_sky_mask,
                     ..OutputSettings::default()
                 },
+                prior_cameras,
+                prior_depth,
             };
             let video = VideoOptions { fps, max_frames };
             let report = reconstruct(&model, &input, &out, &options, video, cpu).await?;

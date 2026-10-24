@@ -42,11 +42,15 @@ fn trunk_features_match_the_reference() -> Result<()> {
     let refs = inference_tensor::safetensors::load(&reference, &Device::Cpu)?;
     let model = WorldMirror::load(&dir, DType::BF16, &device)?;
     let mut first = None;
-    let out = model.trunk(&refs["input.img"], &mut |i, local, global| {
-        if i == 0 {
-            first = Some((local.clone(), global.clone()));
-        }
-    })?;
+    let out = model.trunk(
+        &refs["input.img"],
+        &Default::default(),
+        &mut |i, local, global| {
+            if i == 0 {
+                first = Some((local.clone(), global.clone()));
+            }
+        },
+    )?;
     let (local, global) = first.expect("layer 0 ran");
     let (lmax, lrms) = compare(&local, &refs["vgt.frame.0"])?;
     let (gmax, grms) = compare(
@@ -212,7 +216,7 @@ fn thirty_two_frames_forward() -> Result<()> {
     for round in 0..2 {
         device.synchronize()?;
         let start = std::time::Instant::now();
-        let out = model.trunk(&images, &mut |_, _, _| {})?;
+        let out = model.trunk(&images, &Default::default(), &mut |_, _, _| {})?;
         device.synchronize()?;
         let trunk = start.elapsed().as_secs_f64();
         println!("round {round}: trunk {trunk:.2} s, {}", used());
@@ -290,5 +294,37 @@ fn reconstruct_writes_every_output() -> Result<()> {
         &super::run::ReconstructOptions::default(),
     )?;
     println!("{report:?}");
+    Ok(())
+}
+
+// Priors from files (WORLDMIRROR_PRIORS: cameras.json and depth/), against the reference run with all three
+#[test]
+#[ignore = "needs the WorldMirror checkpoint, the prior files and dump, and a GPU"]
+fn priors_match_the_reference() -> Result<()> {
+    let (Some((dir, _)), Some(prior_dir)) = (paths(), std::env::var_os("WORLDMIRROR_PRIORS"))
+    else {
+        return Ok(());
+    };
+    let prior_dir = PathBuf::from(prior_dir);
+    let device = Device::new_cuda(0)?;
+    let refs = inference_tensor::safetensors::load(
+        prior_dir.join("../ref-park518-priors.safetensors"),
+        &Device::Cpu,
+    )?;
+    let model = WorldMirror::load(&dir, DType::BF16, &device)?;
+    let stems = ["image_0001", "image_0008", "image_0014"].map(String::from);
+    let inputs = super::priors::load_prior_files(
+        Some(&prior_dir.join("cameras.json")),
+        Some(&prior_dir.join("depth")),
+        &stems,
+    )?;
+    let pred = model.predict_with_priors(&refs["input.img"], &inputs, (960, 545))?;
+    let (max, rms) = compare(&pred.camera_params, &refs["pred.camera_params"].squeeze(0)?)?;
+    println!("camera params with priors: max {max:.3e} rms {rms:.3e}");
+    let (max, rms) = compare(&pred.depth, &refs["pred.depth"].squeeze(0)?)?;
+    println!("depth with priors: max {max:.3e} rms {rms:.3e}");
+    let plain = model.predict(&refs["input.img"])?;
+    let (max, rms) = compare(&plain.depth, &refs["pred.depth"].squeeze(0)?)?;
+    println!("depth without priors, same reference: max {max:.3e} rms {rms:.3e}");
     Ok(())
 }

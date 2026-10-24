@@ -136,3 +136,30 @@ Building against the reference run (out-building-f32), compare_out.py (scratch):
   splats 3,109,242 vs 3,098,474 (the reference's skyseg mask removes a little more); medians: scale_0 -6.933 vs
   -6.937, f_dc_0 0.032 vs 0.027, rot_0 0.455 vs 0.472, sigmoid(opacity) 0.417 vs 0.412; x extent -1.50..1.49 both
 ```
+
+## Run 6 - 2026-10-24 13:21
+
+Question: do priors (known poses, intrinsics, depth) condition the trunk as the reference's do?
+
+`priors.rs` ports the reference's normalization: poses relative to view 0 (the pipeline left-multiplies by the first
+pose's inverse), translations scaled into the unit cube with 0.1 padding (5%/95% quantiles above 10 views), PyTorch3D
+quaternions; intrinsics scaled from the first image's original size to the inference size, then as the 4-vector (fx/W, fy/H,
+cx/W, cy/H); depth resized and quantile-normalized (1%/99% of positive values), embedded per patch
+through the pixel-unshuffle MLP. Prior files: the reference's `cameras.json` (extrinsics and intrinsics by camera_id,
+an image stem or index) and a depth folder by stem (npy, 16-bit PNG in mm, EXR).
+
+Prior inputs were made from the reference's own Park run (dump_priors.py, scratch): its cameras at the original
+960x545 and its depth maps, then the reference forward with all three flags.
+```
+priors_match_the_reference (ignored test), Park at 518, bf16 trunk
+camera params with priors: max 5.7e-4 rms 3.3e-4
+depth with priors: max 6.3e-2 rms 1.6e-3
+depth without priors, same reference: max 1.29 rms 0.265     (so the priors do steer the result)
+
+inference reconstruct --prior-cameras park-priors/cameras.json --prior-depth park-priors/depth, Park at 952
+  ours: forward 3.0 s, total 4.4 s (wall 5.7 s); reference with the same priors: wall 19.7 s, 14.8 GB above idle
+  compare_out.py: c2w max |diff| 1.6e-3, fx rel 6.6e-4, depth rel rms 3.3e-3 mean
+  points 718,971 vs 707,000, splats 723,572 vs 708,779 (skyseg again); scale/f_dc/rot medians within 0.02
+```
+Outputs stay in the normalized frame (the first camera is the identity), as the reference leaves them; meta.json lists
+which priors a run used.

@@ -97,7 +97,7 @@ pub fn images_to_tensor(
         dims = Some((w, h));
         let resized = resize_bicubic(image, w, h);
         let mut chw = vec![0f32; 3 * w * h];
-        for (p, rgb) in resized.pixels.chunks_exact(3).enumerate() {
+        for (p, rgb) in resized.pixels.as_chunks::<3>().0.iter().enumerate() {
             for (c, &v) in rgb.iter().enumerate() {
                 chw[c * w * h + p] = f32::from(v) / 255.0;
             }

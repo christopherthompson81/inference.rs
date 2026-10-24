@@ -9,6 +9,7 @@ use serde::Serialize;
 use super::WorldMirror;
 use super::output::{OutputSettings, WrittenCounts, write_outputs};
 use super::preprocess::{RgbImage, adaptive_size, images_to_tensor, resized_dims};
+use super::priors::load_prior_files;
 
 /// The longest edge the reference infers at by default
 pub const DEFAULT_TARGET_SIZE: usize = 952;
@@ -25,6 +26,10 @@ pub struct ReconstructOptions {
     /// the longest edge to infer at (the first image's, capped at this and floored to 14)
     pub target_size: usize,
     pub output: OutputSettings,
+    /// known cameras: a JSON of `extrinsics` (camera-to-world) and `intrinsics` (original pixels) by `camera_id`
+    pub prior_cameras: Option<PathBuf>,
+    /// known z-depth maps named by image stem
+    pub prior_depth: Option<PathBuf>,
 }
 
 impl Default for ReconstructOptions {
@@ -32,6 +37,8 @@ impl Default for ReconstructOptions {
         Self {
             target_size: DEFAULT_TARGET_SIZE,
             output: OutputSettings::default(),
+            prior_cameras: None,
+            prior_depth: None,
         }
     }
 }
@@ -91,6 +98,13 @@ struct GaussianFormat {
 }
 
 #[derive(Serialize)]
+struct PriorsUsed {
+    camera_poses: bool,
+    intrinsics: bool,
+    depth: bool,
+}
+
+#[derive(Serialize)]
 struct Timings {
     load_and_preprocess_s: f64,
     forward_s: f64,
@@ -115,6 +129,7 @@ struct Meta {
     scale: &'static str,
     intrinsics: &'static str,
     inputs: Vec<String>,
+    priors: PriorsUsed,
     video: Option<VideoSource>,
     frames: usize,
     inference_width: usize,
@@ -213,10 +228,23 @@ pub fn reconstruct_frames(
             );
         }
     }
+    let stems = names
+        .iter()
+        .map(|n| {
+            Path::new(n)
+                .file_stem()
+                .map_or_else(|| n.clone(), |s| s.to_string_lossy().into_owned())
+        })
+        .collect::<Vec<_>>();
+    let priors = load_prior_files(
+        options.prior_cameras.as_deref(),
+        options.prior_depth.as_deref(),
+        &stems,
+    )?;
     let tensor = images_to_tensor(&images, options.target_size, PATCH, model.device())?;
     let loaded = start.elapsed().as_secs_f64();
     let forward_start = Instant::now();
-    let pred = model.predict(&tensor)?;
+    let pred = model.predict_with_priors(&tensor, &priors, (images[0].width, images[0].height))?;
     model.device().synchronize()?;
     let forward = forward_start.elapsed().as_secs_f64();
     let write_start = Instant::now();
@@ -235,12 +263,17 @@ pub fn reconstruct_frames(
             z: "forward",
         },
         extrinsics: "camera_to_world",
-        world_frame: "the first camera's frame (its pose is the identity)",
+        world_frame: "the first camera's frame (its pose is the identity), also when camera priors are given",
         world_up: "not gravity aligned; approximately -y of the first camera",
         handedness: "right",
         scale: "arbitrary (up to scale; depth, poses and splats share one unit)",
         intrinsics: "pixels of the inference image (inference_width x inference_height), principal point at its centre",
         inputs: names,
+        priors: PriorsUsed {
+            camera_poses: priors.camera_to_world.is_some(),
+            intrinsics: priors.intrinsics.is_some(),
+            depth: priors.depths.is_some(),
+        },
         video,
         frames: images.len(),
         inference_width: pred.width,

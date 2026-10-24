@@ -306,6 +306,15 @@ pub enum Command {
         #[arg(long)]
         no_sky_mask: bool,
 
+        /// Known cameras as JSON: `extrinsics` (4x4 camera-to-world, OpenCV) and `intrinsics` (3x3, original
+        /// pixels), each a list of {camera_id, matrix} with camera_id an image stem or index; either list may be omitted
+        #[arg(long)]
+        prior_cameras: Option<PathBuf>,
+
+        /// A folder of known z-depth maps named by image stem: .npy (float32), .png (16-bit millimetres) or .exr
+        #[arg(long)]
+        prior_depth: Option<PathBuf>,
+
         /// Run on the CPU (slow) instead of the first CUDA device
         #[arg(long)]
         cpu: bool,

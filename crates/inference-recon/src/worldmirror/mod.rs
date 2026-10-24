@@ -8,6 +8,7 @@ mod gaussians;
 mod layers;
 pub mod output;
 pub mod preprocess;
+pub mod priors;
 mod rope;
 pub mod run;
 mod trunk;
@@ -148,8 +149,25 @@ impl WorldMirror {
 
     /// Predicts everything for images `[frames, 3, H, W]` in [0, 1].
     pub fn predict(&self, images: &Tensor) -> Result<Prediction> {
+        self.predict_with_priors(
+            images,
+            &priors::PriorInputs::default(),
+            (images.dim(3)?, images.dim(2)?),
+        )
+    }
+
+    /// `predict` with known poses, intrinsics or depth for every frame; `original` is the first image's size before
+    /// resizing (its intrinsics are in its pixels).
+    pub fn predict_with_priors(
+        &self,
+        images: &Tensor,
+        inputs: &priors::PriorInputs,
+        original: (usize, usize),
+    ) -> Result<Prediction> {
         let images = images.to_device(&self.device)?.to_dtype(DType::F32)?;
-        let out = self.trunk(&images, &mut |_, _, _| {})?;
+        let (_, _, height, width) = images.dims4()?;
+        let priors = priors::normalize(inputs, original, height, width, &self.device)?;
+        let out = self.trunk(&images, &priors, &mut |_, _, _| {})?;
         self.heads(&out.features, out.patch_start, &images)
     }
 
@@ -205,10 +223,14 @@ impl WorldMirror {
     fn trunk(
         &self,
         images: &Tensor,
+        priors: &priors::Priors,
         inspect: &mut dyn FnMut(usize, &Tensor, &Tensor),
     ) -> Result<trunk::TrunkOutput> {
-        self.trunk
-            .forward_inspect(&normalize(&images.to_device(&self.device)?)?, inspect)
+        self.trunk.forward_inspect(
+            &normalize(&images.to_device(&self.device)?)?,
+            priors,
+            inspect,
+        )
     }
 }
 

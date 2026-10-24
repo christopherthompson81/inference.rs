@@ -115,15 +115,7 @@ impl Attention {
         })
     }
 
-    pub(crate) fn forward(
-        &self,
-        xs: &Tensor,
-        rope: Option<(&RopeTable, &Tensor)>,
-    ) -> Result<Tensor> {
-        self.forward_inspect(xs, rope, &mut |_, _| {})
-    }
-
-    // `forward`, handing `inspect` the normed q and the rotated q
+    // Attention, handing `inspect` the normed q and the rotated q
     pub(crate) fn forward_inspect(
         &self,
         xs: &Tensor,

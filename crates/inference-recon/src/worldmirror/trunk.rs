@@ -5,7 +5,8 @@ use inference_tensor::nn::VarBuilder;
 use inference_tensor::{DType, Result, Tensor};
 
 use super::dinov2::Dinov2;
-use super::layers::{Block, BlockSpec};
+use super::layers::{AmpLinear, Block, BlockSpec, Mlp};
+use super::priors::Priors;
 use super::rope::{RopeTable, frame_cells};
 
 // The trunk's LayerNorm epsilon
@@ -15,17 +16,45 @@ const HEAD_LAYERS: [usize; 4] = [4, 11, 17, 23];
 // Tokens before a frame's patches: camera, the registers, then the pose and ray prior tokens
 const CAMERA_TOKENS: usize = 1;
 const PRIOR_TOKENS: usize = 2;
+// A pose prior's encoding (translation and quaternion) and an intrinsics prior's (fx/W, fy/H, cx/W, cy/H)
+const POSE_PARAMS: usize = 7;
+const RAY_PARAMS: usize = 4;
 
 /// What the trunk hands the heads: the four `[frames, tokens, 2 * dim]` feature maps and where the patches start.
 pub(crate) struct TrunkOutput {
     pub features: Vec<Tensor>,
     pub patch_start: usize,
-    pub hp: usize,
-    pub wp: usize,
+}
+
+// A prior's two-layer embedding: Linear, SiLU, Linear
+struct PriorEmbed {
+    fc1: AmpLinear,
+    fc2: AmpLinear,
+}
+
+impl PriorEmbed {
+    fn load(input: usize, dim: usize, dtype: DType, vb: VarBuilder) -> Result<Self> {
+        Ok(Self {
+            fc1: AmpLinear::load(input, dim, true, dtype, vb.pp(0))?,
+            fc2: AmpLinear::load(dim, dim, true, dtype, vb.pp(2))?,
+        })
+    }
+
+    // one token `[frames, 1, dim]` (f32) per frame of `values` `[frames, input]`
+    fn forward(&self, values: &Tensor) -> Result<Tensor> {
+        let hidden = inference_tensor::nn::ops::silu(&self.fc1.forward(values)?)?;
+        self.fc2
+            .forward(&hidden)?
+            .to_dtype(DType::F32)?
+            .unsqueeze(1)
+    }
 }
 
 pub(crate) struct Trunk {
     dinov2: Dinov2,
+    pose_embed: PriorEmbed,
+    ray_embed: PriorEmbed,
+    depth_embed: Mlp,
     cam_token: Tensor,
     reg_token: Tensor,
     frame_blocks: Vec<Block>,
@@ -67,6 +96,15 @@ impl Trunk {
                 dtype,
                 vb.pp("patch_embed"),
             )?,
+            pose_embed: PriorEmbed::load(POSE_PARAMS, dim, dtype, vb.pp("pose_embed"))?,
+            ray_embed: PriorEmbed::load(RAY_PARAMS, dim, dtype, vb.pp("ray_embed"))?,
+            depth_embed: Mlp::load_with_hidden(
+                cfg.patch_size * cfg.patch_size,
+                4 * dim,
+                dim,
+                dtype,
+                vb.pp("depth_embed").pp("proj").pp(2),
+            )?,
             cam_token: vb.get((1, 2, 1, dim), "cam_token")?,
             reg_token: vb.get((1, 2, registers, dim), "reg_token")?,
             frame_blocks: blocks("frame_blocks")?,
@@ -79,6 +117,19 @@ impl Trunk {
     }
 
     /// The head features of normalized images `[frames, 3, H, W]`, with no priors (their tokens stay zero).
+    // the depth prior `[frames, 1, H, W]` as tokens `[frames, hp * wp, dim]`: each patch's pixels (pixel-unshuffled,
+    // row-major within the patch) through an MLP
+    fn embed_depth(&self, depth: &Tensor, hp: usize, wp: usize) -> Result<Tensor> {
+        let frames = depth.dim(0)?;
+        let p = self.patch;
+        let patches = depth
+            .reshape((frames, hp, p, wp, p))?
+            .permute((0, 1, 3, 2, 4))?
+            .reshape((frames, hp * wp, p * p))?;
+        self.depth_embed.forward(&patches)?.to_dtype(DType::F32)
+    }
+
+    #[cfg(test)]
     // The first frame block on `xs` `[frames, tokens, dim]` of an `hp x wp` grid, its insides to `inspect`
     pub(crate) fn first_frame_block(
         &self,
@@ -101,14 +152,11 @@ impl Trunk {
         self.frame_blocks[0].forward_inspect(xs, Some((&rope, &cells)), inspect)
     }
 
-    pub(crate) fn forward(&self, images: &Tensor) -> Result<TrunkOutput> {
-        self.forward_inspect(images, &mut |_, _, _| {})
-    }
-
-    // `forward`, handing `inspect` every layer's frame and global output
+    // The trunk forward, handing `inspect` every layer's frame and global output
     pub(crate) fn forward_inspect(
         &self,
         images: &Tensor,
+        priors: &Priors,
         inspect: &mut dyn FnMut(usize, &Tensor, &Tensor),
     ) -> Result<TrunkOutput> {
         let (frames, _, h, w) = images.dims4()?;
@@ -127,12 +175,26 @@ impl Trunk {
             }
             Tensor::cat(&[&first, &rest.broadcast_as((frames - 1, n, dim))?], 0)
         };
-        let priors = Tensor::zeros((frames, PRIOR_TOKENS, dim), DType::F32, device)?;
+        // a missing prior stays a zero token (or adds nothing to the patches)
+        let zero_token = || Tensor::zeros((frames, 1, dim), DType::F32, device);
+        let pose = match &priors.poses {
+            Some(p) => self.pose_embed.forward(p)?,
+            None => zero_token()?,
+        };
+        let ray = match &priors.rays {
+            Some(r) => self.ray_embed.forward(r)?,
+            None => zero_token()?,
+        };
+        let patches = match &priors.depths {
+            Some(d) => (patches + self.embed_depth(d, hp, wp)?)?,
+            None => patches,
+        };
         let mut xs = Tensor::cat(
             &[
                 &per_frame(&self.cam_token, CAMERA_TOKENS)?,
                 &per_frame(&self.reg_token, registers)?,
-                &priors,
+                &pose,
+                &ray,
                 &patches,
             ],
             1,
@@ -166,8 +228,6 @@ impl Trunk {
         Ok(TrunkOutput {
             features,
             patch_start: specials,
-            hp,
-            wp,
         })
     }
 }
