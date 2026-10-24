@@ -4,10 +4,10 @@
 use inference_tensor::nn::VarBuilder;
 use inference_tensor::{DType, Result, Tensor};
 
-use super::dinov2::Dinov2;
 use super::layers::{AmpLinear, Block, BlockSpec, Mlp};
 use super::priors::Priors;
 use super::rope::{RopeTable, frame_cells};
+use crate::dinov2::{Dinov2, Dinov2Spec, PosInterp};
 
 // The trunk's LayerNorm epsilon
 const TRUNK_EPS: f64 = 1e-5;
@@ -88,12 +88,15 @@ impl Trunk {
         let registers = cfg.num_register_tokens;
         Ok(Self {
             dinov2: Dinov2::load(
-                dim,
-                cfg.depth,
-                cfg.num_heads,
-                cfg.patch_size,
-                registers,
-                dtype,
+                Dinov2Spec {
+                    dim,
+                    depth: cfg.depth,
+                    heads: cfg.num_heads,
+                    patch: cfg.patch_size,
+                    registers,
+                    pos_interp: PosInterp::AntialiasedBicubic,
+                    dtype,
+                },
                 vb.pp("patch_embed"),
             )?,
             pose_embed: PriorEmbed::load(POSE_PARAMS, dim, dtype, vb.pp("pose_embed"))?,

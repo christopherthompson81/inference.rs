@@ -150,3 +150,25 @@ The 4-step distilled sampler amplifies any difference ~30-50x over the steps, fo
 swap as for us; our starting difference is ~4x the backend swap's (f32 VAE and CLIP against the reference's bf16
 autocast). Side by side (frames 0, 10, 20: render, reference, ours) both fill the render holes with the same content,
 including a building and road that exist only in the generation. Parity at the level the sampler allows.
+
+## Run 7 - 2026-10-24 16:30
+
+Tier 1 chosen (user: "Proceed" on the core loop: panorama depth and sky, simple trajectories, renders, memory,
+WorldStereo, then WorldMirror on the frames; no VLM, SAM3, navmesh or splat training yet).
+
+Question: does a native MoGe-2 (ViT-L with normals) reproduce `MoGeModel.infer` at a known field of view?
+
+`moge/mod.rs` (inference-recon): DINOv2 ViT-L/14 without registers, now shared with WorldMirror's (`dinov2.rs`, with
+the hub's plain bicubic position interpolation at offset 0.1 beside WorldMirror's antialiased one); intermediate layers
+5/11/17/23 projected and summed; the ConvStack neck and heads (stride-2 transposed convs and bilinear, replicate-padded
+3x3 convs); exp remap; the metric-scale MLP on the class token; the z-shift fit at the given focal on the 64 x 64
+nearest-downsampled map (Levenberg-Marquardt here, scipy's in the reference); depth back through the intrinsics.
+Weights converted once from `model.pt` to safetensors beside it. Reference `dump_moge.py` (scratch): a 512 x 512 crop at
+fov_x 90, as pred_pano_depth calls it (bf16 autocast outside, fp16 inside) and in plain f32.
+```
+moge::parity::moge_matches_the_reference
+f32 trunk vs reference f32:   depth rel rms 4.1e-4, normal 2.6e-4, mask flips 0.0000%
+f32 trunk vs reference amp:   depth rel rms 3.1e-3, normal 6.5e-4, mask flips 0.0004%
+bf16 trunk vs reference f32:  depth rel rms 1.16e-2, normal 5.5e-3, mask flips 0.0019%
+```
+(depth max differences sit on the far sky). The trunk runs in f32: 300M parameters, ~20 views a panorama.
