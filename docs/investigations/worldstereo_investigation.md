@@ -105,3 +105,23 @@ match the reference functions on a synthetic 21-frame trajectory to 1.3e-6.
 Fitting 24 GB: each forward is compute-bound (joint attention over ~45K tokens in 40 blocks), so the bf16 blocks can
 stay in host memory and stream in one at a time (`WorldStereoTransformer::new_streamed`); quantization becomes a speed
 option rather than a requirement. Next: time a real-size streamed step.
+
+## Run 5 - 2026-10-24 15:36
+
+Question: does the real-size forward fit in 24 GB, at what speed, and does umT5 match?
+
+Real-size step (`full_size_streamed_step`, random inputs, 21 latent frames at 60 x 104, 8 memory frames: 32,760 video
++ 12,480 memory tokens), the 40 bf16 blocks streamed from host memory:
+```
+first try        CUDA out of memory: the ControlNet kept all 20 residuals ([1, 32760, 5120] bf16 each, 6.7 GB)
+                 (5 frames: 6.3 GB in use after the ControlNet, 11 frames: 8.1 GB, growing with frames)
+interleaved      ControlNet block i runs just before main block i, its residual used at once
+                 21 frames + 8 memory: 55.5 s per step, ~5.5 GB in use between blocks
+block upload     0.075 s per block (~11 GB/s from the page cache), ~3 s of each step
+```
+A 4-step clip is ~3.7 min of transformer time.
+
+umT5-XXL (`text_encoder_matches_the_reference`; `dump_wan_text.py` on the CPU, the checkpoint stores only
+`shared.weight`, which `embed_tokens` ties to as the wrapper patches): token ids identical (31 tokens with EOS);
+our bf16 encoder against the reference's f32 states rel rms 2.0e-2, the reference's own bf16-autocast run 1.5e-2 from
+its f32 run. The pipeline's padded 512-token prompt with a mask equals the real tokens encoded alone, then zeros.

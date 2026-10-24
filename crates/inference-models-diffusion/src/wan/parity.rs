@@ -254,3 +254,155 @@ fn full_size_streamed_step() -> Result<()> {
     }
     Ok(())
 }
+
+// WORLDSTEREO_CLIP_REF: one real-size clip through the reference pipeline (inputs, noise, final latents, frames), the
+// main blocks streamed from host memory on both sides
+#[test]
+#[ignore = "needs the WorldStereo checkpoint, the Wan VAE and image encoder, a reference dump and a GPU"]
+fn clip_matches_the_reference() -> Result<()> {
+    let (Some(wan), Some(ckpt), Some(dump)) = (
+        env_path("WAN_DIR"),
+        env_path("WORLDSTEREO_DIR"),
+        env_path("WORLDSTEREO_CLIP_REF"),
+    ) else {
+        return Ok(());
+    };
+    use super::pipeline::{ClipRequest, MemoryFrames, WorldStereoPipeline};
+    use super::transformer::{WanConfig, WorldStereoConfig, WorldStereoTransformer};
+    let device = Device::new_cuda(0)?;
+    let refs = inference_tensor::safetensors::load(dump, &device)?;
+    let read = |p: PathBuf| -> Result<String> { Ok(std::fs::read_to_string(p)?) };
+    let json = |p: PathBuf| -> Result<serde_json::Value> {
+        serde_json::from_str(&read(p)?).map_err(inference_tensor::Error::wrap)
+    };
+    let sharded = |files: &[PathBuf], dtype: DType| {
+        // SAFETY: the weights files are not modified while the test runs
+        unsafe {
+            ShardedSafeTensors::sharded(files, dtype, &device, None, std::sync::Arc::new(|_| true))
+        }
+    };
+    let vae_cfg = serde_json::from_value(json(wan.join("vae/config.json"))?)
+        .map_err(inference_tensor::Error::wrap)?;
+    let vae = super::vae::WanVae::new(
+        sharded(
+            &[wan.join("vae/diffusion_pytorch_model.safetensors")],
+            DType::F32,
+        )?,
+        &vae_cfg,
+        DType::F32,
+    )?;
+    let clip_cfg = serde_json::from_value(json(wan.join("image_encoder/config.json"))?)
+        .map_err(inference_tensor::Error::wrap)?;
+    let image_encoder = super::clip::WanImageEncoder::new(
+        sharded(&[wan.join("image_encoder/model.safetensors")], DType::F32)?,
+        &clip_cfg,
+        DType::F32,
+    )?;
+    let cfg: WanConfig = serde_json::from_value(json(wan.join("transformer/config.json"))?)
+        .map_err(inference_tensor::Error::wrap)?;
+    let ws: WorldStereoConfig = serde_json::from_value(json(ckpt.join("config.json"))?)
+        .map_err(inference_tensor::Error::wrap)?;
+    let transformer = WorldStereoTransformer::new_streamed(
+        &cfg,
+        &ws,
+        sharded(&[ckpt.join("model.safetensors")], DType::BF16)?,
+    )?;
+    let pipeline = WorldStereoPipeline {
+        vae,
+        image_encoder,
+        transformer,
+        schedule: Default::default(),
+        device: device.clone(),
+    };
+    let start = refs["start"].clone();
+    // the reference's start frame in 8-bit, recovered exactly from its [-1, 1] tensor
+    let start_rgb = ((&start + 1.0)? * 127.5)?
+        .round()?
+        .permute((1, 2, 0))?
+        .flatten_all()?
+        .to_dtype(DType::U8)?
+        .to_vec1::<u8>()?;
+    let index = refs["ref_index"]
+        .to_dtype(DType::U32)?
+        .to_vec1::<u32>()?
+        .iter()
+        .map(|&i| i as usize)
+        .collect::<Vec<_>>();
+    let req = ClipRequest {
+        start: &start,
+        start_rgb: &start_rgb,
+        renders: &refs["renders"],
+        render_mask: &refs["render_mask"],
+        ray_embedding: &refs["ray_embedding"],
+        camera_qt: &refs["camera_qt"],
+        memory: Some(MemoryFrames {
+            frames: &refs["memory"],
+            camera_qt: &refs["camera_qt_ref"],
+            index: &index,
+        }),
+        text_states: &refs["prompt_embeds"],
+        noise: Some(&refs["noise"]),
+        seed: 0,
+    };
+    let t0 = std::time::Instant::now();
+    let latents = pipeline.denoise(&req)?;
+    device.synchronize()?;
+    println!("denoise {:.1} s", t0.elapsed().as_secs_f64());
+    let (max, rel) = compare(&latents, &refs["latents"])?;
+    println!("final latents: max {max:.3e} rel rms {rel:.3e}");
+    let frames = pipeline.vae.decode(&latents.permute((1, 0, 2, 3))?)?;
+    // the reference returns frames in [0, 1]
+    let (max, rel) = compare(&((frames + 1.0)? / 2.0)?, &refs["frames"])?;
+    println!("frames: max {max:.3e} rel rms {rel:.3e}");
+    Ok(())
+}
+
+// WAN_TEXT_REF: umT5 token ids and states (f32 and bf16-autocast, on the CPU) for the dump's prompt
+#[test]
+#[ignore = "needs the umT5 weights, a reference dump and a GPU"]
+fn text_encoder_matches_the_reference() -> Result<()> {
+    let (Some(wan), Some(dump)) = (env_path("WAN_DIR"), env_path("WAN_TEXT_REF")) else {
+        return Ok(());
+    };
+    const PROMPT: &str = "A quiet residential street lined with brick houses and tall maple trees under a clear blue \
+                          sky, the camera moving slowly forward along the sidewalk.";
+    let device = Device::new_cuda(0)?;
+    let refs = inference_tensor::safetensors::load(dump, &Device::Cpu)?;
+    let dir = wan.join("text_encoder");
+    let cfg: crate::t5::Config =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("config.json"))?)
+            .map_err(inference_tensor::Error::wrap)?;
+    let shards = (1..=5)
+        .map(|i| dir.join(format!("model-0000{i}-of-00005.safetensors")))
+        .collect::<Vec<_>>();
+    // SAFETY: the weights files are not modified while the test runs
+    let vb = unsafe {
+        ShardedSafeTensors::sharded(
+            &shards,
+            DType::BF16,
+            &device,
+            None,
+            std::sync::Arc::new(|_| true),
+        )?
+    };
+    let tokenizer = tokenizers::Tokenizer::from_file(wan.join("tokenizer/tokenizer.json"))
+        .map_err(inference_tensor::Error::msg)?;
+    let mut encoder = super::text::WanTextEncoder::new(vb, &cfg, tokenizer)?;
+    let ids = encoder.tokens(PROMPT)?;
+    let want = refs["ids"].to_dtype(DType::U32)?.to_vec1::<u32>()?;
+    assert_eq!(ids, want, "token ids");
+    let states = encoder.encode(PROMPT)?;
+    let n = ids.len();
+    let ours = states.squeeze(0)?.narrow(0, 0, n)?;
+    for name in ["f32", "bf16"] {
+        let (max, rel) = compare(&ours, &refs[&format!("{name}.states")])?;
+        println!("bf16 encoder against reference {name}: max {max:.3e} rel rms {rel:.3e}");
+    }
+    let (max, rel) = compare(&refs["bf16.states"], &refs["f32.states"])?;
+    println!("reference bf16 against reference f32: max {max:.3e} rel rms {rel:.3e}");
+    let tail = states
+        .squeeze(0)?
+        .narrow(0, n, super::text::MAX_PROMPT_TOKENS - n)?;
+    assert_eq!(tail.abs()?.sum_all()?.to_scalar::<f32>()?, 0.0);
+    Ok(())
+}
