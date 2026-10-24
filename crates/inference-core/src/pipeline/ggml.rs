@@ -229,6 +229,7 @@ impl Loader for GGMLLoader {
             chat_template: Arc::new(chat_template),
             model_id: self.model_id.clone(),
             metadata: Arc::new(GeneralMetadata {
+                prompt_chunk_tokens: None,
                 max_seq_len,
                 llg_factory: Some(llg_factory),
                 no_kv_cache: self.no_kv_cache,

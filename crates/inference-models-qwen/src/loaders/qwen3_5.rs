@@ -38,6 +38,12 @@ const FLASH_NEXT_ISQ: &[&str] = &[
 ];
 const FLASH_NEXT_MIXER_ISQ: &str = r"^(language_model\.model|model\.language_model|model)\.hyper_connection_mixer\.(input_mix_weight_down|input_mix_weight_up)\.weight$";
 const MTP_LAYERS: &str = r"^mtp\.layers\.(\d+)";
+// Bytes a prompt token takes in an MoE prefill chunk, per hidden or intermediate value of each routed expert and per
+// hidden value of the residual stream's temporaries: fit to peak memory over 512-8192 token chunks of two models
+// (Qwen3.6-35B-A3B and Qwen3.8-Flash-Next) with offloaded experts
+const PROMPT_ROUTED_HIDDEN_BYTES: usize = 6;
+const PROMPT_ROUTED_INTERMEDIATE_BYTES: usize = 16;
+const PROMPT_RESIDUAL_HIDDEN_BYTES: usize = 40;
 
 // Every pattern under both the main stack's and the built-in MTP head's layer prefixes.
 fn layer_regexes(patterns: &[&[&str]]) -> Result<Vec<Regex>> {
@@ -198,6 +204,12 @@ const MULTIMODAL_EMBEDDING_NAMES: [&str; 2] = [
     "language_model.model.embed_tokens.weight",
     "model.language_model.embed_tokens.weight",
 ];
+
+pub(super) fn prompt_activation_bytes_per_token(cfg: &TextConfig) -> usize {
+    let routed = PROMPT_ROUTED_HIDDEN_BYTES * cfg.hidden_size
+        + PROMPT_ROUTED_INTERMEDIATE_BYTES * cfg.moe_intermediate_size;
+    cfg.num_experts_per_tok * routed + PROMPT_RESIDUAL_HIDDEN_BYTES * cfg.hidden_size
+}
 
 pub(super) fn mtp_head_elems(cfg: &TextConfig, weight_pack_factor: usize) -> Result<usize> {
     let fc = 2 * cfg.hidden_size * cfg.hidden_size / weight_pack_factor;
@@ -464,6 +476,13 @@ macro_rules! qwen3_5_loader {
                     weight_pack_factor,
                 )?;
                 Ok(Some(embed_tokens * dtype.size_in_bytes()))
+            }
+            fn prompt_activation_bytes_per_token(&self, config: &str) -> Result<Option<usize>> {
+                if !$moe {
+                    return Ok(None);
+                }
+                let cfg = parse_config(config, $moe)?;
+                Ok(Some(prompt_activation_bytes_per_token(&cfg.text_config)))
             }
             fn non_mapped_layer_sizes_in_bytes(
                 &self,

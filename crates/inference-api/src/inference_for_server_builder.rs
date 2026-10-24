@@ -100,18 +100,13 @@ pub mod defaults {
 
     use std::sync::Arc;
 
-    use inference_core::{
-        DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL, DEFAULT_MAX_NUM_BATCHED_TOKENS,
-        DEFAULT_MAX_PREFILL_CHUNK_TOKENS, PagedCacheType,
-    };
+    use inference_core::{DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL, PagedCacheType};
 
     pub const DEVICE: Option<inference_tensor::Device> = None;
     pub const SEED: Option<u64> = None;
     pub const LOG: Option<String> = None;
     pub const MODEL: Option<inference_selection::ModelSelected> = None;
     pub const MAX_SEQS: usize = crate::engine::DEFAULT_MAX_SEQS;
-    pub const MAX_NUM_BATCHED_TOKENS: usize = DEFAULT_MAX_NUM_BATCHED_TOKENS;
-    pub const MAX_PREFILL_CHUNK_TOKENS: usize = DEFAULT_MAX_PREFILL_CHUNK_TOKENS;
     pub const MAX_DECODE_STEPS_BEFORE_PREFILL: usize = DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL;
     pub const NO_KV_CACHE: bool = false;
     pub const CHAT_TEMPLATE: Option<String> = None;
@@ -196,10 +191,10 @@ pub struct InferenceRsForServerBuilder {
     max_seqs: usize,
 
     /// Maximum tokens processed by one paged-attention scheduler step.
-    max_num_batched_tokens: NonZeroUsize,
+    max_num_batched_tokens: Option<NonZeroUsize>,
 
     /// Maximum chunkable CUDA text-prompt tokens in one paged-attention scheduler step.
-    max_prefill_chunk_tokens: NonZeroUsize,
+    max_prefill_chunk_tokens: Option<NonZeroUsize>,
     embeddings_on_host: bool,
     moe_expert_cache: Option<usize>,
 
@@ -319,11 +314,10 @@ impl Default for InferenceRsForServerBuilder {
             models: Vec::new(),
             default_model_id: None,
             max_seqs: defaults::MAX_SEQS,
-            max_num_batched_tokens: NonZeroUsize::new(defaults::MAX_NUM_BATCHED_TOKENS).unwrap(),
+            max_num_batched_tokens: None,
             embeddings_on_host: true,
             moe_expert_cache: None,
-            max_prefill_chunk_tokens: NonZeroUsize::new(defaults::MAX_PREFILL_CHUNK_TOKENS)
-                .unwrap(),
+            max_prefill_chunk_tokens: None,
             max_decode_steps_before_prefill: NonZeroUsize::new(
                 defaults::MAX_DECODE_STEPS_BEFORE_PREFILL,
             )
@@ -456,7 +450,7 @@ impl InferenceRsForServerBuilder {
 
     /// Sets the maximum number of tokens processed by one paged-attention scheduler step.
     pub fn with_max_num_batched_tokens(mut self, max_num_batched_tokens: NonZeroUsize) -> Self {
-        self.max_num_batched_tokens = max_num_batched_tokens;
+        self.max_num_batched_tokens = Some(max_num_batched_tokens);
         self
     }
 
@@ -474,7 +468,7 @@ impl InferenceRsForServerBuilder {
 
     /// Sets the maximum chunkable CUDA text-prompt tokens in one scheduler step.
     pub fn with_max_prefill_chunk_tokens(mut self, max_prefill_chunk_tokens: NonZeroUsize) -> Self {
-        self.max_prefill_chunk_tokens = max_prefill_chunk_tokens;
+        self.max_prefill_chunk_tokens = Some(max_prefill_chunk_tokens);
         self
     }
 
@@ -884,8 +878,8 @@ impl InferenceRsForServerBuilder {
 
     fn scheduler_limits(&self) -> SchedulerLimits {
         SchedulerLimits {
-            max_num_batched_tokens: self.max_num_batched_tokens.get(),
-            max_prefill_chunk_tokens: self.max_prefill_chunk_tokens.get(),
+            max_num_batched_tokens: self.max_num_batched_tokens.map(NonZeroUsize::get),
+            max_prefill_chunk_tokens: self.max_prefill_chunk_tokens.map(NonZeroUsize::get),
             max_decode_steps_before_prefill: self.max_decode_steps_before_prefill.get(),
         }
     }

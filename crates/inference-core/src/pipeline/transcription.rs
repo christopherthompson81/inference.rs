@@ -745,6 +745,7 @@ impl TranscriptionPipeline {
             model_id,
             model,
             metadata: Arc::new(GeneralMetadata {
+                prompt_chunk_tokens: None,
                 max_seq_len: METADATA_MAX_SEQ_LEN,
                 llg_factory: None,
                 no_prefix_cache: true,

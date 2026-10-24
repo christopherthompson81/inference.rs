@@ -142,6 +142,11 @@ pub trait DeviceMappedModelLoader {
     ) -> Result<Vec<usize>> {
         Ok(Vec::new())
     }
+    /// Activation bytes each prompt token adds to a prefill chunk, where the loader knows them: an MoE model whose
+    /// experts stay in host memory sizes its prompt chunk by them.
+    fn prompt_activation_bytes_per_token(&self, _config: &str) -> Result<Option<usize>> {
+        Ok(None)
+    }
     /// weight_pack_factor only applies to quantized weights.
     fn layer_sizes_in_bytes(
         &self,

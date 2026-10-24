@@ -34,7 +34,13 @@ The freed VRAM goes to the KV cache: the planner leaves the offloaded experts ou
 | `--moe-expert-cache 128` | 7.2 GiB | 98 | 467K tokens |
 | `--moe-expert-cache 64` | 3.6 GiB | 52-63 | 652K tokens |
 
-Decode speed depends on how fast the CPU reads memory (misses) and on the cache's hit rate. A prompt batch copies the experts it routes to onto the GPU (cached ones from VRAM, the rest over PCIe), so short prompts are cheap and long ones run at about 500 tokens a second on PCIe gen3 x16 for this model.
+Decode speed depends on how fast the CPU reads memory (misses) and on the cache's hit rate. A prompt chunk copies the experts it routes to onto the GPU (cached ones from VRAM, the rest over PCIe), and a chunk of a few thousand tokens routes to nearly every expert, so its copies cost about what a short chunk's do. The loader therefore sizes the prompt chunk to the memory the expert cache leaves, up to 8192 tokens, and logs it; `--max-prefill-chunk-tokens` sets it instead. A smaller cache trades decode speed for prefill:
+
+| Qwen3.8-Flash-Next (UD-IQ4_XS), RTX 3090, PCIe gen3 x16 | prompt chunk | prefill tok/s | decode tok/s |
+|---|---|---|---|
+| `--moe-expert-cache 128`, 512-token chunks | 512 | 126 | 37 |
+| `--moe-expert-cache 128` | 1536 (planned) | 286 | 37 |
+| `--moe-expert-cache 64` | 8192 (planned) | 787 | 26 |
 
 ## Notes
 

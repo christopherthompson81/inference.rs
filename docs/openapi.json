@@ -12453,7 +12453,7 @@
               "integer",
               "null"
             ],
-            "description": "Most tokens one scheduler step batches across sequences.",
+            "description": "Most tokens one scheduler step batches across sequences; unset, 4096 or the prompt chunk if longer.",
             "minimum": 1
           },
           "max_prefill_chunk_tokens": {
@@ -12461,7 +12461,7 @@
               "integer",
               "null"
             ],
-            "description": "Longest prompt chunk one prefill step takes.",
+            "description": "Longest prompt chunk one prefill step takes; unset, 512, or for MoE experts in host memory the longest chunk the\nexpert cache leaves room for.",
             "minimum": 1
           },
           "max_seqs": {
