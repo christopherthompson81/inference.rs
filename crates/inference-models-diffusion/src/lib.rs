@@ -9,6 +9,7 @@ pub mod hidream;
 pub mod noise;
 mod qlinear;
 mod t5;
+pub mod wan;
 
 pub use inference_nn::model::DiffusionGenerationParams;
 
