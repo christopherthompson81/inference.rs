@@ -123,6 +123,7 @@ export default defineConfig({
                 'guides/models/multimodal-input',
                 'guides/models/video-setup',
                 'guides/models/use-speech-models',
+                'guides/models/use-3d-reconstruction',
                 'guides/models/use-image-generation',
                 'guides/models/use-embeddings',
                 'guides/models/use-block-diffusion',

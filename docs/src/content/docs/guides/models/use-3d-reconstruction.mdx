@@ -1,0 +1,74 @@
+---
+title: 3D reconstruction
+description: WorldMirror 2.0 turns photos or a video into cameras, depth, normals, a point cloud and standard 3D Gaussian splats.
+---
+
+`inference reconstruct` runs Tencent's WorldMirror 2.0, a feed-forward multi-view model: one forward pass over up to
+64 frames predicts every frame's camera, a depth map, surface normals and per-pixel 3D Gaussians, which are merged into
+a point cloud and a standard 3DGS file.
+
+## Weights
+
+Download the checkpoint folder (a `config.json` and a 5 GB `model.safetensors`) from the
+[HY-World 2.0 repository](https://huggingface.co/tencent/HY-World-2.0/tree/main/HY-WorldMirror-2.0). The weights are
+under Tencent's own license; read it before use.
+
+## Run it
+
+```bash
+# a folder of photos, read in name order
+inference reconstruct --model HY-WorldMirror-2.0 --input photos/ --out recon/
+
+# a video, sampled at 1 frame a second up to 32 frames
+inference reconstruct --model HY-WorldMirror-2.0 --input walk.mp4 --fps 1 --max-frames 32 --out recon/
+
+# known cameras and depth as priors
+inference reconstruct --model HY-WorldMirror-2.0 --input photos/ --out recon/ \
+    --prior-cameras cameras.json --prior-depth depth/
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--target-size` | 952 | Longest edge to infer at: the first image's, capped at this and floored to a multiple of 14 |
+| `--fps`, `--max-frames` | 1, 32 | How a video input is sampled (FFmpeg for anything but GIF) |
+| `--no-edge-mask` | off | Keep pixels at depth and normal discontinuities |
+| `--no-sky-mask` | off | Keep pixels the model marks as sky |
+| `--prior-cameras` | none | JSON with `extrinsics` (4x4 camera-to-world, OpenCV) and `intrinsics` (3x3, pixels of the original image), each a list of `{camera_id, matrix}`; `camera_id` is an image's file stem or its index |
+| `--prior-depth` | none | Folder of z-depth maps named by image stem: `.npy` (float32), `.png` (16-bit millimetres) or `.exr` |
+| `--cpu` | off | Run on the CPU (slow) |
+
+Every frame must resize to the same size as the first (same aspect ratio). A run takes 1 to 64 frames; global
+attention grows with the square of the token count, so time and memory grow quickly with frames times resolution.
+
+## Outputs
+
+```
+recon/
+  meta.json               conventions, model, settings, counts, timings
+  camera_params.json      per-frame extrinsics (camera-to-world) and intrinsics
+  depth/depth_0000.npy    float32 z-depth, inference resolution
+  depth/depth_0000.png    min-max normalized preview
+  normal/normal_0000.png  normals as (n + 1) / 2
+  points.ply              coloured point cloud (voxel-merged, at most 2M points)
+  gaussians.ply           standard 3DGS binary PLY (at most 5M splats)
+```
+
+`gaussians.ply` holds `x y z nx ny nz f_dc_0..2 opacity scale_0..2 rot_0..3`, with opacity as a logit, scales as
+logs and the rotation as a unit quaternion `(w, x, y, z)`: the layout 3DGS viewers and importers read. Colours are
+degree-0 spherical harmonics.
+
+## Conventions
+
+`meta.json` states them for each run:
+
+- Cameras are OpenCV (x right, y down, z forward); extrinsics are camera-to-world.
+- The world frame is the first camera's (its pose is the identity), also when camera priors are given. It is not
+  gravity aligned; up is roughly the first camera's -y.
+- Right-handed, and the scale is arbitrary: depth, poses and splats share one unit, but it is not metres.
+- Intrinsics are in pixels of the inference image (`inference_width` x `inference_height`).
+
+## Differences from the reference pipeline
+
+- `gaussians.ply` writes opacity as a logit, as standard 3DGS files do; the reference writes the activated value.
+- The sky mask is the model's own; the reference also runs a separate sky segmentation network.
+- JPEG decoding differs from libjpeg-turbo by a few levels in some pixels, which moves depth by well under 1%.
