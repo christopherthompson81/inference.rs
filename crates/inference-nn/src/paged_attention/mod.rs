@@ -207,6 +207,8 @@ pub struct PagedAttentionConfig {
     pub recurrent_checkpoint_lanes: usize,
     pub recurrent_checkpoint_lanes_auto: bool,
     pub resolve_memory_utilization_after_load: bool,
+    /// `mem_gpu` is the server's default rather than a size or share someone chose, so a loader may size it instead.
+    pub default_memory: bool,
     /// Paged layers a drafter keeps after the model's own, so its context shares the target's blocks.
     pub auxiliary_layers: Option<AuxiliaryPagedLayers>,
 }
@@ -236,6 +238,7 @@ impl PagedAttentionConfig {
             recurrent_checkpoint_lanes: 1,
             recurrent_checkpoint_lanes_auto: false,
             resolve_memory_utilization_after_load: true,
+            default_memory: false,
             auxiliary_layers: None,
         })
     }

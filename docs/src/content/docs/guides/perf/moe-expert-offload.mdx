@@ -13,7 +13,7 @@ It applies to GGUF experts on a CUDA device whose type the CPU expert kernels ru
 
 ## Chosen automatically
 
-Without `--moe-expert-cache`, a GGUF MoE model on one GPU is loaded resident when its weights fit beside the context it is planned for: `--pa-context-len` when it is given (a shorter context leaves more room for cached experts), otherwise 32K tokens (or the model's own window, if shorter), or `--max-seq-len` when it asks for more. When they do not, the loader keeps the experts in host memory and caches the most experts per layer that leave room for that context, in sixty-fourths of a layer's experts, logging the choice. If no cache size leaves room, it plans for the shorter default context instead. The estimate counts the weights, the KV cache, the recurrent state of a hybrid model, a drafter's reservation and the share `--pa-memory-fraction` keeps free, so the planned context is a floor: the KV cache takes whatever is left.
+Without `--moe-expert-cache`, a GGUF MoE model on one GPU is loaded resident when its weights fit beside the context it is planned for: `--pa-context-len` when it is given (a shorter context leaves more room for cached experts), otherwise 32K tokens (or the model's own window, if shorter), or `--max-seq-len` when it asks for more. When they do not, the loader keeps the experts in host memory and caches the most experts per layer that leave room for that context, in sixty-fourths of a layer's experts, logging the choice. If no cache size leaves room, it plans for the shorter default context instead. The estimate counts the weights, the KV cache, the recurrent state of a hybrid model, a drafter's reservation and the share `--pa-memory-fraction` keeps free. When the loader moves experts off the GPU itself and no `--pa-context-len`, `--pa-memory-mb` or `--pa-memory-fraction` was given, the KV cache holds exactly the planned context and 1 GiB stays free for what prompts allocate (the staging buffers, a step's transients); everything else caches experts. Otherwise the planned context is a floor and the KV cache takes whatever is left.
 
 ```bash
 # 35B-A3B (IQ4_KSS) on an RTX 3090 with a BF16 cache: 176 experts per layer cached, 344K tokens of context
@@ -28,6 +28,8 @@ With experts in host memory, the default `--pa-cache-type auto` stores the KV ca
 |---|---|---|---|
 | `--pa-cache-type none` | BF16, 3.9 GB | 96 | 31.4 |
 | default | q3, 1.5 GB | 120 | 36.6 |
+
+With no flags, the same model plans a 32K-token q3 cache and 120 cached experts per layer (104 when the default memory share is given explicitly): 35.4 against 33.1 tok/s over three alternating rounds, and a 29.6K-token prompt peaks at 23.1 GB.
 
 ## What it costs and frees
 
