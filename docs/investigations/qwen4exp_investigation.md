@@ -1065,3 +1065,37 @@ Qwen3.6-35B-A3B, --max-seq-len 262144          208 slots, no room past the conte
 ```
 The policy keeps the slots first and gives the chunk what is left; a slot step traded for a long chunk would be the
 other way to spend it (64 slots and 8192 prefill 6x faster for 30% slower decode on Flash-Next), left to the flags.
+
+## Run 29 - 2026-10-24 07:11
+
+Question: what holds the CPU miss kernel near 21 GB/s against the 33.5 GB/s eight threads read (Run 23), and how
+much of it can a decode step get back?
+
+`flash_next_offload_misses` (UD-IQ4_XS types, 640 x 2560), and one-thread rates on cache-resident rows:
+```
+baseline, 3 misses          338 us a step, 20.7 GB/s, 8 cores
+one thread, one token       IQ3_S 4.34 GB/s, IQ4_XS 5.13, IQ4_KSS 9.20, IQ4_NL (32-wide) 4.84, Q8_0 (32-wide) 9.36
+CANDLE_NUM_THREADS 12 / 16  3 misses 23.6 / 22.8 GB/s, 10 misses 26.4 / 25.6
+software prefetch, 4 rows ahead of the dotted row      19.0 GB/s (worse; reverted)
+items per grab 16 / 8 / 4   within noise (22.4-23.4 GB/s at 3 misses)
+```
+Eight threads at about 4.4 GB/s each is the compute ceiling the IQ3_S gate and up projections (two thirds of a
+miss's bytes) can reach, and compute and memory stalls do not overlap fully: the kernel is compute-bound per thread,
+which is why hyper-threads lift it. They do not lift the engine: with the GPU's own host threads beside the pool,
+16 threads decode at 12 tok/s (37 at 8) and 12 threads is within noise of 8.
+
+Inside the IQ3_S dot (a probe replacing the grid gather with its indices: 4.34 -> 8.34 GB/s), the gather is half the
+time. Broadcasting the qh byte from memory and loading the 2s + 1 scale from a table (four fewer port 5 ops a
+sub-block) changed nothing (4.41 / 4.27): the gather's loads, not the shuffle port, set it. The grid is 512
+arbitrary entries, so no shuffle can stand in for it; left as is.
+
+The 32-wide kernels (IQ4_NL down) spent most of a block converting its f16 scale: `half` reaches F16C through a call
+per value. `f16c_at` converts in-line (F16C now part of the AVX2 dispatch check; every AVX2 CPU has it), and two
+accumulators let consecutive blocks' multiply-adds overlap (a `[acc; 2]` indexed by `i % 2` was slower, 6.2 GB/s):
+```
+one thread    IQ4_NL 4.84 -> 7.51 (F16C) -> 8.1 GB/s (pairs);  Q8_0 9.36 -> 14.7 -> 15.0
+3 misses      338 -> 305-313 us a step (20.7 -> 22.4-23 GB/s);  10 misses 21.6 -> 23.9-24.6 GB/s
+engine, 128 slots (spec_measure, two rounds)   34.0 / 37.5 and 36.7 / 39.4 tok/s   (Run 26 base 36.7 / 39.3)
+```
+About 8% off the CPU's share, which is below the engine's run-to-run spread. Q8_0 CPU layers (#602) take the same
+kernel. The rest of the gap is IQ3_S's gather; the CPU miss item closes here.
