@@ -3169,6 +3169,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-recon"
+version = "0.0.26"
+dependencies = [
+ "anyhow",
+ "half",
+ "inference-nn",
+ "inference-tensor",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "inference-sandbox"
 version = "0.0.26"
 dependencies = [
