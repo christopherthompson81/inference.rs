@@ -1179,3 +1179,44 @@ Fixed: every namespace opens with a layout header (`layout 1`), bumped when a mo
 means without changing its shapes; opening a store removes sibling stores under another header, which no store of
 the build could reach again. Test `a_store_under_another_layout_is_removed_on_open`. The one-time cost is a cold
 prefill per cached prefix, for every model, on the first start.
+
+## Run 33 - 2026-10-24 08:51
+
+Question: how much do the hyper-connection reads' 8-bit activations cost (basalt: 0.01-0.02 KLD), and does an F32
+read pay for its cost?
+
+The reads are three linears a block (`input_mix_weight_down` 10240 -> 320 and `_up` 320 -> 10240 in Q8_0, the inject
+10240 -> 4 in F32); MMVQ and MMQ quantize their activations to q8_1. The perplexity example gained `--kld-base-out`
+(write our own log-probs as a base over the same chunks). A temporary switch dequantized the Q8_0 weights to F32 at
+load (2.5 GB more VRAM, so every run at 64 slots):
+```
+current read, against our own base (written by the same build)   KLD 0.00000   (prompt scoring is deterministic)
+F32 read, against the current read's base                        KLD 0.04648   PPL 2.3340 -> 2.3500
+F32 read, against llama.cpp (q8_1 hc read)                       KLD 0.04658   (current read: 0.03469)
+```
+Against llama.cpp's base the F32 read looked worse, but that base quantizes the same activations, so it cannot rank
+the two. A copy of the GGUF with only the 194 hc down/up tensors dequantized to F32 (exact; llama.cpp then reads them
+in float), a new base from it (`llama-perplexity` 970b51ce7, same 20 chunks of 512; PPL 2.3425 against 2.3442):
+```
+against llama.cpp with F32 hc reads       KLD mean   median    p99      same top-1
+llama.cpp, q8_1 hc read                   0.04019    0.00340   0.5764   94.47%
+ours, q8_1 hc read                        0.04297    0.00367   0.5813   93.71%
+ours, F32 hc read                         0.03258    0.00274   0.4244   95.10%
+```
+The 8-bit activations cost about 0.04 KLD in either engine (more than basalt's figure), and the F32 read moves ours
+0.010 closer to the float reference.
+
+Built without the VRAM: `unquantized_activation_forward` (inference-quant) for a Q8_0 weight on CUDA runs a new matvec
+(`launch_mmvq_gguf_q8_0_{bf16,f32}_exact`: the Q8_0 blocks against BF16/F32 activations, F32 sums) for up to 8 rows,
+and a dequantized F32 copy for longer batches (0.02 ms to dequantize plus 0.2-0.4 ms of F32 GEMM a call at 512 rows,
+about 60 ms of a 5 s chunk). Flash-Next's hc reads take it. First version (a block of threads a row, a byte a lane)
+lost to the q8_1 path; a warp a row for rows up to 1024 wide and two values a lane (a `char2` weight load, a paired
+activation load) win. nsys, kernel time a call:
+```
+                      q8_1 path (quantize + mmvq)    exact
+320 x 10240, 1 row    1.41 + 4.78 us                 5.67 us
+10240 x 320, 1 row    1.41 + 5.49 us                 5.14 us
+3 rows                1.41 + ~9.3 us                 8.85 / 7.85 us
+```
+End to end: KLD 0.03292 against the F32-hc base (PPL 2.3421), decode at 128 slots 36.2 / 39.0 and 38.9 / 41.4 tok/s
+(before 34-39). Test `exact_q8_0_matvec_matches_the_dequantized_weight`.

@@ -1667,6 +1667,31 @@ mod tests {
         Ok(())
     }
 
+    // Q8_0 against unquantized activations equals the dequantized weight times them in F32, at the hyper-connection
+    // reads' shapes (10240 x 320 and 320 x 10240), a row count four does not divide, and 1, 3 and 8 rows
+    #[test]
+    fn exact_q8_0_matvec_matches_the_dequantized_weight() -> Result<()> {
+        let cuda = Device::new_cuda(0)?;
+        for (rows, cols) in [(10240, 320), (320, 10240), (2565, 640)] {
+            let weight =
+                QTensor::quantize_onto(&patterned((rows, cols), 7, 0.03)?, GgmlDType::Q8_0, &cuda)?;
+            let dense = weight.dequantize(&cuda)?;
+            for batch in [1, 3, 8] {
+                for xs_dtype in [DType::BF16, DType::F32] {
+                    let xs = patterned((batch, cols), 5, 0.2)?
+                        .to_dtype(xs_dtype)?
+                        .to_device(&cuda)?;
+                    let expected = xs
+                        .to_dtype(DType::F32)?
+                        .matmul(&dense.t()?)?
+                        .to_dtype(xs_dtype)?;
+                    assert_close(&fast_mmvq::exact(&weight, &xs)?, &expected)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn mmvq_q4k_rank4_unequal_qkv_matches_independent() -> Result<()> {
         let cuda = Device::new_cuda(0)?;

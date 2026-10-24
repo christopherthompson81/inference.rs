@@ -221,7 +221,6 @@ pub use fp8_config::{
     Fp8LinearSpec, Fp8ScaleNames, Fp8WeightScaleLayout, NVFP4_BLOCK_SIZE, Nvfp4ActivationMode,
     Nvfp4LinearSpec, Nvfp4ScaleNames, ScaleConvention,
 };
-pub use gguf::GgufMatMul;
 pub use gguf::archive::{
     GgufArchive, GgufDType, GgufEndian, GgufShardInfo, GgufTensorData, GgufTensorInfo, GgufVersion,
 };
@@ -248,6 +247,7 @@ pub use gguf::fast_mmvq::{
 };
 pub use gguf::kernel::GgufType;
 pub use gguf::mapped::MappedBlocks;
+pub use gguf::{GgufMatMul, unquantized_activation_forward};
 /// Runs `f`; without CUDA there are no tile-ordered matvecs to share an input's quantized activations.
 #[cfg(not(feature = "cuda"))]
 pub fn with_shared_input<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
