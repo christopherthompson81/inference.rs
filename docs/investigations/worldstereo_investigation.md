@@ -43,9 +43,12 @@ memory bank, MoGe-2, sky mask, trajectories).
 
 Orchestrator requirement (user, 2026-10-24): it loads and unloads models by available VRAM, prerequisite data and
 timings. Each stage declares its model, measured footprint, inputs and typical duration; work that does not depend on
-earlier clips is batched per model (every caption through umT5 up front, then freed), while the per-trajectory loop is
-sequential (clip k's memory retrieval needs clip k-1's depth alignment), so the transformer stays resident through it
-and the small helpers (VAE, MoGe-2, sky mask) sit beside it or swap in by measured headroom.
+earlier clips is batched per model (every caption through umT5 up front, then freed). Reading `retrieval_wm.py`
+corrected an assumption: between clips the memory bank only appends the generated frames and their cameras
+(`update_memory`); retrieval picks memory frames by frustum overlap (DINOv2 features break ties past 8), and depth
+(WorldMirror, MoGe-2) and sky masks (SAM3) run once after every clip. So the stages are: panorama depth, sky and point
+cloud, trajectories and renders, captions (all before generation); umT5 for every caption; the clip loop with VAE, CLIP
+and the transformer resident; then, with the transformer unloaded, WorldMirror, alignment and the scene point cloud.
 
 ## Run 2 - 2026-10-24 14:40
 
