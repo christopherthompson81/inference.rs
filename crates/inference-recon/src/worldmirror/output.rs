@@ -1,11 +1,11 @@
 //! A prediction to files: cameras (JSON), depth (npy and png), normals (png), a coloured point cloud and standard 3D
 //! Gaussian splats (binary PLY), with the masks and voxel merges the reference pipeline applies.
 
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
 use inference_tensor::{D, DType, Device, Result, Tensor};
+use rayon::prelude::*;
 use serde::Serialize;
 
 use super::{Camera, Prediction};
@@ -49,6 +49,9 @@ impl Default for OutputSettings {
 const SAMPLE_SEED: u64 = 42;
 // An opacity is clamped this far inside (0, 1) before it is written as a logit
 const OPACITY_EPS: f32 = 1e-6;
+// points.ply rows: xyz as f32, rgb as u8; gaussians.ply rows: 17 f32 fields
+const POINT_ROW_BYTES: usize = 3 * 4 + 3;
+const SPLAT_FIELDS: usize = 17;
 
 /// What a run wrote: counts for the report and `meta.json`.
 #[derive(Clone, Debug, Default, Serialize)]
@@ -71,17 +74,19 @@ pub fn write_outputs(
     let depth = host(&pred.depth.squeeze(D::Minus1)?)?;
     let gs_depth = host(&pred.gs_depth.squeeze(D::Minus1)?)?;
     let normals = host(&pred.normals)?;
-    for f in 0..frames {
-        let d = &depth[f * h * w..][..h * w];
-        write_npy(&dir.join(format!("depth/depth_{f:04}.npy")), d, h, w)?;
-        write_depth_png(&dir.join(format!("depth/depth_{f:04}.png")), d, h, w)?;
-        write_normal_png(
-            &dir.join(format!("normal/normal_{f:04}.png")),
-            &normals[f * h * w * 3..][..h * w * 3],
-            h,
-            w,
-        )?;
-    }
+    (0..frames)
+        .into_par_iter()
+        .try_for_each(|f| -> Result<()> {
+            let d = &depth[f * h * w..][..h * w];
+            write_npy(&dir.join(format!("depth/depth_{f:04}.npy")), d, h, w)?;
+            write_depth_png(&dir.join(format!("depth/depth_{f:04}.png")), d, h, w)?;
+            write_normal_png(
+                &dir.join(format!("normal/normal_{f:04}.png")),
+                &normals[f * h * w * 3..][..h * w * 3],
+                h,
+                w,
+            )
+        })?;
     let sky = if settings.sky_mask {
         let p = host(&inference_tensor::nn::ops::sigmoid(
             &pred.gs_depth_mask_logits,
@@ -96,29 +101,33 @@ pub fn write_outputs(
     };
     let mut points_mask = vec![true; frames * h * w];
     let mut gs_mask = vec![true; frames * h * w];
-    for f in 0..frames {
-        let range = f * h * w..(f + 1) * h * w;
-        if settings.edge_mask {
-            let n_edge = normals_edge(
-                &normals[f * h * w * 3..][..h * w * 3],
-                h,
-                w,
-                settings.edge_normal_degrees,
-            );
-            let d_edge = depth_edge(&depth[range.clone()], h, w, settings.edge_depth_rtol);
-            let g_edge = depth_edge(&gs_depth[range.clone()], h, w, settings.edge_depth_rtol);
-            for i in 0..h * w {
-                points_mask[f * h * w + i] &= !(d_edge[i] && n_edge[i]);
-                gs_mask[f * h * w + i] &= !(g_edge[i] && n_edge[i]);
+    points_mask
+        .par_chunks_mut(h * w)
+        .zip(gs_mask.par_chunks_mut(h * w))
+        .enumerate()
+        .for_each(|(f, (points_mask, gs_mask))| {
+            let range = f * h * w..(f + 1) * h * w;
+            if settings.edge_mask {
+                let n_edge = normals_edge(
+                    &normals[f * h * w * 3..][..h * w * 3],
+                    h,
+                    w,
+                    settings.edge_normal_degrees,
+                );
+                let d_edge = depth_edge(&depth[range.clone()], h, w, settings.edge_depth_rtol);
+                let g_edge = depth_edge(&gs_depth[range.clone()], h, w, settings.edge_depth_rtol);
+                for i in 0..h * w {
+                    points_mask[i] &= !(d_edge[i] && n_edge[i]);
+                    gs_mask[i] &= !(g_edge[i] && n_edge[i]);
+                }
             }
-        }
-        if let Some(sky) = &sky {
-            for i in range {
-                points_mask[i] &= sky[i];
-                gs_mask[i] &= sky[i];
+            if let Some(sky) = &sky {
+                for (i, s) in sky[range].iter().enumerate() {
+                    points_mask[i] &= s;
+                    gs_mask[i] &= s;
+                }
             }
-        }
-    }
+        });
     let points = write_points(dir, pred, images, &depth, &points_mask, settings)?;
     let gaussians = write_gaussians(&dir.join("gaussians.ply"), pred, &gs_mask, settings)?;
     Ok(WrittenCounts { points, gaussians })
@@ -238,11 +247,16 @@ fn depth_edge(depth: &[f32], h: usize, w: usize, rtol: f32) -> Vec<bool> {
 
 // pixels whose 3 x 3 neighbourhood (edge-padded) holds a normal more than `degrees` away, max-pooled again
 fn normals_edge(normals: &[f32], h: usize, w: usize, degrees: f32) -> Vec<bool> {
-    let unit = |i: usize| -> [f32; 3] {
-        let n = &normals[i * 3..][..3];
-        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt() + 1e-12;
-        [n[0] / len, n[1] / len, n[2] / len]
-    };
+    let units = normals
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|n| {
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt() + 1e-12;
+            [n[0] / len, n[1] / len, n[2] / len]
+        })
+        .collect::<Vec<_>>();
+    let unit = |i: usize| units[i];
     let mut angle = vec![0f32; h * w];
     for y in 0..h {
         for x in 0..w {
@@ -267,31 +281,71 @@ fn normals_edge(normals: &[f32], h: usize, w: usize, degrees: f32) -> Vec<bool> 
         .collect()
 }
 
-// Indices grouped by voxel (`floor(p / size)`, offset by the minimum), in increasing flat-index order
-fn voxel_groups(points: &[[f32; 3]], size: f32) -> Vec<Vec<usize>> {
+/// Indices grouped by voxel (`floor(p / size)`, offset by the minimum), groups in increasing flat-cell order and each
+/// group's indices increasing.
+struct VoxelGroups {
+    order: Vec<u32>,
+    /// group `g` is `order[starts[g]..starts[g + 1]]`
+    starts: Vec<usize>,
+}
+
+impl VoxelGroups {
+    fn len(&self) -> usize {
+        self.starts.len() - 1
+    }
+
+    fn group(&self, g: usize) -> &[u32] {
+        &self.order[self.starts[g]..self.starts[g + 1]]
+    }
+}
+
+fn voxel_groups(points: &[[f32; 3]], size: f32) -> VoxelGroups {
     let cells = points
-        .iter()
+        .par_iter()
         .map(|p| p.map(|v| (v / size).floor() as i64))
         .collect::<Vec<_>>();
-    let mut lo = [i64::MAX; 3];
-    let mut hi = [i64::MIN; 3];
-    for c in &cells {
-        for d in 0..3 {
-            lo[d] = lo[d].min(c[d]);
-            hi[d] = hi[d].max(c[d]);
+    let (lo, hi) = cells
+        .par_iter()
+        .fold(
+            || ([i64::MAX; 3], [i64::MIN; 3]),
+            |(mut lo, mut hi), c| {
+                for d in 0..3 {
+                    lo[d] = lo[d].min(c[d]);
+                    hi[d] = hi[d].max(c[d]);
+                }
+                (lo, hi)
+            },
+        )
+        .reduce(
+            || ([i64::MAX; 3], [i64::MIN; 3]),
+            |a, b| {
+                (
+                    [0, 1, 2].map(|d| a.0[d].min(b.0[d])),
+                    [0, 1, 2].map(|d| a.1[d].max(b.1[d])),
+                )
+            },
+        );
+    let extent = [hi[1] - lo[1] + 1, hi[2] - lo[2] + 1];
+    let mut keyed = cells
+        .par_iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let flat = ((c[0] - lo[0]) * extent[0] + (c[1] - lo[1])) * extent[1] + (c[2] - lo[2]);
+            (flat, i as u32)
+        })
+        .collect::<Vec<_>>();
+    keyed.par_sort_unstable();
+    let mut starts = Vec::with_capacity(keyed.len() + 1);
+    for (k, pair) in keyed.iter().enumerate() {
+        if k == 0 || pair.0 != keyed[k - 1].0 {
+            starts.push(k);
         }
     }
-    let extent = [hi[1] - lo[1] + 1, hi[2] - lo[2] + 1];
-    let flat = cells
-        .iter()
-        .map(|c| ((c[0] - lo[0]) * extent[0] + (c[1] - lo[1])) * extent[1] + (c[2] - lo[2]))
-        .collect::<Vec<_>>();
-    let mut order = (0..points.len()).collect::<Vec<_>>();
-    order.sort_unstable_by_key(|&i| flat[i]);
-    order
-        .chunk_by(|&a, &b| flat[a] == flat[b])
-        .map(<[usize]>::to_vec)
-        .collect()
+    starts.push(keyed.len());
+    VoxelGroups {
+        order: keyed.into_iter().map(|(_, i)| i).collect(),
+        starts,
+    }
 }
 
 // `count` of `0..n` without replacement, seeded: the cap's sample (a partial Fisher-Yates over a xorshift stream)
@@ -303,14 +357,12 @@ fn sample(n: usize, count: usize) -> Vec<usize> {
         state ^= state << 17;
         state
     };
-    let mut picked = HashMap::with_capacity(count);
+    let mut slots = (0..n as u32).collect::<Vec<_>>();
     (0..count)
         .map(|i| {
             let j = i + (next() % (n - i) as u64) as usize;
-            let at_j = *picked.get(&j).unwrap_or(&j);
-            let at_i = *picked.get(&i).unwrap_or(&i);
-            picked.insert(j, at_i);
-            at_j
+            slots.swap(i, j);
+            slots[i] as usize
         })
         .collect()
 }
@@ -335,11 +387,13 @@ fn write_points(
         }
     }
     let groups = voxel_groups(&points, settings.voxel_size);
-    let (mut points, mut colors): (Vec<[f32; 3]>, Vec<[u8; 3]>) = groups
-        .iter()
+    let (mut points, mut colors): (Vec<[f32; 3]>, Vec<[u8; 3]>) = (0..groups.len())
+        .into_par_iter()
         .map(|g| {
+            let g = groups.group(g);
             let n = g.len() as f64;
-            let mean = |pick: &dyn Fn(usize) -> f64| g.iter().map(|&i| pick(i)).sum::<f64>() / n;
+            let mean =
+                |pick: &dyn Fn(usize) -> f64| g.iter().map(|&i| pick(i as usize)).sum::<f64>() / n;
             let p = [0, 1, 2].map(|d| mean(&|i| f64::from(points[i][d])) as f32);
             let c = [0, 1, 2]
                 .map(|d| mean(&|i| f64::from(colors[i][d])).round().clamp(0.0, 255.0) as u8);
@@ -358,24 +412,32 @@ fn write_points(
          property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n",
         points.len()
     )?;
-    for (p, c) in points.iter().zip(&colors) {
-        for v in p {
-            out.write_all(&v.to_le_bytes())?;
-        }
-        out.write_all(c)?;
-    }
+    let mut body = vec![0u8; points.len() * POINT_ROW_BYTES];
+    body.par_chunks_mut(POINT_ROW_BYTES)
+        .zip(points.par_iter().zip(&colors))
+        .for_each(|(row, (p, c))| {
+            for (d, v) in p.iter().enumerate() {
+                row[d * 4..][..4].copy_from_slice(&v.to_le_bytes());
+            }
+            row[12..].copy_from_slice(c);
+        });
+    out.write_all(&body)?;
     out.flush()?;
     Ok(points.len())
 }
 
 // The `q` quantile (linear interpolation, as `torch.quantile`) of `values`
 fn quantile(values: &[f32], q: f32) -> f32 {
-    let mut sorted = values.to_vec();
-    sorted.sort_unstable_by(f32::total_cmp);
-    let pos = q * (sorted.len() - 1) as f32;
+    let mut values = values.to_vec();
+    let pos = q * (values.len() - 1) as f32;
     let (lo, frac) = (pos.floor() as usize, pos - pos.floor());
-    let hi = (lo + 1).min(sorted.len() - 1);
-    sorted[lo] + (sorted[hi] - sorted[lo]) * frac
+    let (_, &mut at_lo, above) = values.select_nth_unstable_by(lo, f32::total_cmp);
+    let at_hi = above
+        .iter()
+        .copied()
+        .min_by(f32::total_cmp)
+        .unwrap_or(at_lo);
+    at_lo + (at_hi - at_lo) * frac
 }
 
 fn write_gaussians(
@@ -394,13 +456,14 @@ fn write_gaussians(
     // a merged voxel: weighted means, scales and colours, the renormalized weighted quaternion, and opacity
     // sum(w^2) / sum(w) (the reference's merge, which builds it from the weights alone)
     let merged = groups.len() < keep.len();
-    let mut splats = groups
-        .iter()
+    let mut splats = (0..groups.len())
+        .into_par_iter()
         .map(|g| {
+            let g = groups.group(g);
             // with nothing merged the reference keeps every splat as predicted; once anything merges, every voxel
             // (a lone splat too) takes the merge formula
             if !merged {
-                let i = keep[g[0]];
+                let i = keep[g[0] as usize];
                 return (
                     vec3(&means, i),
                     vec3(&scales, i),
@@ -414,21 +477,29 @@ fn write_gaussians(
                     opacities[i],
                 );
             }
-            let wsum = g.iter().map(|&k| weights[keep[k]]).sum::<f32>().max(1e-8);
+            let wsum = g
+                .iter()
+                .map(|&k| weights[keep[k as usize]])
+                .sum::<f32>()
+                .max(1e-8);
             let avg = |v: &[f32], d: usize, n: usize| {
                 g.iter()
-                    .map(|&k| v[keep[k] * n + d] * weights[keep[k]])
+                    .map(|&k| v[keep[k as usize] * n + d] * weights[keep[k as usize]])
                     .sum::<f32>()
                     / wsum
             };
             let mut q = [0, 1, 2, 3].map(|d| {
                 g.iter()
-                    .map(|&k| quats[keep[k] * 4 + d] * weights[keep[k]])
+                    .map(|&k| quats[keep[k as usize] * 4 + d] * weights[keep[k as usize]])
                     .sum::<f32>()
             });
             let len = q.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-8);
             q = q.map(|v| v / len);
-            let opacity = g.iter().map(|&k| weights[keep[k]].powi(2)).sum::<f32>() / wsum;
+            let opacity = g
+                .iter()
+                .map(|&k| weights[keep[k as usize]].powi(2))
+                .sum::<f32>()
+                / wsum;
             (
                 [0, 1, 2].map(|d| avg(&means, d, 3)),
                 [0, 1, 2].map(|d| avg(&scales, d, 3)),
@@ -466,20 +537,22 @@ fn write_gaussians(
         writeln!(out, "property float {name}")?;
     }
     out.write_all(b"end_header\n")?;
-    for (mean, scale, quat, color, opacity) in &kept {
-        let o = opacity.clamp(OPACITY_EPS, 1.0 - OPACITY_EPS);
-        let log_scale = scale.map(f32::ln);
-        let mut row = Vec::with_capacity(17);
-        row.extend_from_slice(mean);
-        row.extend_from_slice(&[0.0; 3]);
-        row.extend_from_slice(color);
-        row.push((o / (1.0 - o)).ln());
-        row.extend_from_slice(&log_scale);
-        row.extend_from_slice(quat);
-        for v in row {
-            out.write_all(&v.to_le_bytes())?;
-        }
-    }
+    let mut body = vec![0u8; kept.len() * SPLAT_FIELDS * 4];
+    body.par_chunks_mut(SPLAT_FIELDS * 4).zip(&kept).for_each(
+        |(bytes, (mean, scale, quat, color, opacity))| {
+            let o = opacity.clamp(OPACITY_EPS, 1.0 - OPACITY_EPS);
+            let mut row = [0f32; SPLAT_FIELDS];
+            row[..3].copy_from_slice(mean);
+            row[6..9].copy_from_slice(color);
+            row[9] = (o / (1.0 - o)).ln();
+            row[10..13].copy_from_slice(&scale.map(f32::ln));
+            row[13..].copy_from_slice(quat);
+            for (d, v) in row.iter().enumerate() {
+                bytes[d * 4..][..4].copy_from_slice(&v.to_le_bytes());
+            }
+        },
+    );
+    out.write_all(&body)?;
     out.flush()?;
     Ok(kept.len())
 }

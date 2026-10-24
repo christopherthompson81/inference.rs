@@ -3178,6 +3178,7 @@ dependencies = [
  "image",
  "inference-nn",
  "inference-tensor",
+ "rayon",
  "serde",
  "serde_json",
 ]

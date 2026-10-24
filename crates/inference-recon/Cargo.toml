@@ -17,6 +17,7 @@ half.workspace = true
 image.workspace = true
 inference-nn.workspace = true
 inference-tensor.workspace = true
+rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
