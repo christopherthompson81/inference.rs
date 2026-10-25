@@ -167,6 +167,15 @@ pub const MANAGER_SAVED_MODEL_ROUTE: RouteInfo = RouteInfo::new(
 );
 pub const LAYOUT_DETECT_ROUTE: RouteInfo =
     RouteInfo::new("/v1/layout/detect", "POST", RouteKind::InferenceRs);
+pub const JOBS_ROUTE: RouteInfo = RouteInfo::new("/v1/jobs", "GET, POST", RouteKind::InferenceRs);
+pub const JOB_ROUTE: RouteInfo =
+    RouteInfo::new("/v1/jobs/{id}", "GET, DELETE", RouteKind::InferenceRs);
+pub const CANCEL_JOB_ROUTE: RouteInfo =
+    RouteInfo::new("/v1/jobs/{id}/cancel", "POST", RouteKind::InferenceRs);
+pub const JOB_EVENTS_ROUTE: RouteInfo =
+    RouteInfo::new("/v1/jobs/{id}/events", "GET", RouteKind::InferenceRs);
+pub const JOB_FILE_ROUTE: RouteInfo =
+    RouteInfo::new("/v1/jobs/{id}/files/{*file}", "GET", RouteKind::InferenceRs);
 
 pub const INFERENCE_RS_API_ROUTES: &[RouteInfo] = &[
     ROOT_ROUTE,
@@ -208,6 +217,11 @@ pub const INFERENCE_RS_API_ROUTES: &[RouteInfo] = &[
     CALIBRATION_START_ROUTE,
     CALIBRATION_STATUS_ROUTE,
     CALIBRATION_APPLY_ROUTE,
+    JOBS_ROUTE,
+    JOB_ROUTE,
+    CANCEL_JOB_ROUTE,
+    JOB_EVENTS_ROUTE,
+    JOB_FILE_ROUTE,
 ];
 
 /// Served with a model manager (`with_model_manager`).

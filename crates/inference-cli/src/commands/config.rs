@@ -28,8 +28,8 @@ pub async fn run_from_config(path: std::path::PathBuf) -> Result<()> {
     let config = load_cli_config(&path)?;
 
     match config {
-        CliConfig::Serve(cfg) => run_serve_config(cfg).await,
-        CliConfig::Run(cfg) => run_run_config(cfg).await,
+        CliConfig::Serve(cfg) => run_serve_config(*cfg).await,
+        CliConfig::Run(cfg) => run_run_config(*cfg).await,
     }
 }
 

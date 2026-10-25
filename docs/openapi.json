@@ -1102,6 +1102,215 @@
         }
       }
     },
+    "/v1/jobs": {
+      "get": {
+        "tags": [
+          "inference.rs"
+        ],
+        "operationId": "list_jobs",
+        "responses": {
+          "200": {
+            "description": "This owner's jobs, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobList"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "inference.rs"
+        ],
+        "operationId": "submit_job",
+        "requestBody": {
+          "description": "`request`: the job as JSON; `file`: its inputs, repeated",
+          "content": {
+            "multipart/form-data": {}
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The queued job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobRecord"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid job, or what it needs is not configured"
+          }
+        }
+      }
+    },
+    "/v1/jobs/{id}": {
+      "get": {
+        "tags": [
+          "inference.rs"
+        ],
+        "operationId": "get_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobRecord"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such job"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "inference.rs"
+        ],
+        "operationId": "delete_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The job and its folder removed"
+          },
+          "404": {
+            "description": "No such job"
+          },
+          "409": {
+            "description": "The job has not finished"
+          }
+        }
+      }
+    },
+    "/v1/jobs/{id}/cancel": {
+      "post": {
+        "tags": [
+          "inference.rs"
+        ],
+        "operationId": "cancel_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The job, asked to stop",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobRecord"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such job"
+          }
+        }
+      }
+    },
+    "/v1/jobs/{id}/events": {
+      "get": {
+        "tags": [
+          "inference.rs"
+        ],
+        "operationId": "job_events",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Server-sent events: `record` (the job as it stands) first, then each change (`JobEvent`), until it finishes",
+            "content": {
+              "text/event-stream": {}
+            }
+          },
+          "404": {
+            "description": "No such job"
+          }
+        }
+      }
+    },
+    "/v1/jobs/{id}/files/{file}": {
+      "get": {
+        "tags": [
+          "inference.rs"
+        ],
+        "operationId": "job_file",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "file",
+            "in": "path",
+            "description": "A preview's or output's path in the job's folder",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The file"
+          },
+          "404": {
+            "description": "No such job or file"
+          }
+        }
+      }
+    },
     "/v1/layout/detect": {
       "post": {
         "tags": [
@@ -6170,6 +6379,481 @@
           "moqe"
         ]
       },
+      "JobDeleted": {
+        "type": "object",
+        "description": "A job removed with its folder.",
+        "required": [
+          "id",
+          "deleted"
+        ],
+        "properties": {
+          "deleted": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          }
+        }
+      },
+      "JobEvent": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "status",
+              "type"
+            ],
+            "properties": {
+              "status": {
+                "$ref": "#/components/schemas/JobStatus"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "status"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "name",
+              "total",
+              "type"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "total": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "stage"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "done",
+              "total",
+              "type"
+            ],
+            "properties": {
+              "done": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "total": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "progress"
+                ]
+              }
+            }
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/JobPreview"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "preview"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "type": "object",
+            "required": [
+              "status",
+              "type"
+            ],
+            "properties": {
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "status": {
+                "$ref": "#/components/schemas/JobStatus"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "finished"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "A change to a running job."
+      },
+      "JobFilePath": {
+        "type": "object",
+        "description": "Where a job's file is on this machine.",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        }
+      },
+      "JobFileRequest": {
+        "type": "object",
+        "description": "A file in a job's folder, given relative to it.",
+        "required": [
+          "id",
+          "file"
+        ],
+        "properties": {
+          "file": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        }
+      },
+      "JobList": {
+        "type": "object",
+        "description": "This owner's jobs, newest first.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobRecord"
+            }
+          }
+        }
+      },
+      "JobOutput": {
+        "type": "object",
+        "description": "A file a job made.",
+        "required": [
+          "name",
+          "file"
+        ],
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "Relative to the job's folder"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "JobPreview": {
+        "type": "object",
+        "description": "An image that shows how the job is going.",
+        "required": [
+          "stage",
+          "caption",
+          "file"
+        ],
+        "properties": {
+          "caption": {
+            "type": "string"
+          },
+          "file": {
+            "type": "string",
+            "description": "Relative to the job's folder"
+          },
+          "stage": {
+            "type": "string"
+          }
+        }
+      },
+      "JobRecord": {
+        "type": "object",
+        "description": "A job's record: what it was asked, how far it got, and what it made.",
+        "required": [
+          "id",
+          "kind",
+          "status",
+          "created_at",
+          "request"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "number",
+            "format": "double",
+            "description": "Unix seconds"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "finished_at": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "id": {
+            "type": "string"
+          },
+          "inputs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The input files' names, in `input/`"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "outputs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobOutput"
+            }
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "previews": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobPreview"
+            }
+          },
+          "report": {
+            "type": "object",
+            "description": "What the run reported (its `meta.json` fields, a training summary)"
+          },
+          "request": {
+            "type": "object"
+          },
+          "stages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobStage"
+            }
+          },
+          "started_at": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          }
+        }
+      },
+      "JobRequest": {
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/WorldJob",
+                "description": "WorldStereo-2 keyframes along camera paths from a panorama, WorldMirror 2.0 on them, then Gaussian splats"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "world"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "WorldStereo-2 keyframes along camera paths from a panorama, WorldMirror 2.0 on them, then Gaussian splats"
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ReconstructJob",
+                "description": "WorldMirror 2.0 cameras, depth, points and splats from images or a video"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "reconstruct"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "WorldMirror 2.0 cameras, depth, points and splats from images or a video"
+          }
+        ],
+        "description": "What a job does."
+      },
+      "JobStage": {
+        "type": "object",
+        "required": [
+          "name",
+          "total",
+          "done",
+          "started_at"
+        ],
+        "properties": {
+          "done": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "finished_at": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "name": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "number",
+            "format": "double",
+            "description": "Unix seconds"
+          },
+          "total": {
+            "type": "integer",
+            "description": "Steps in the stage; 0 when it has no count",
+            "minimum": 0
+          }
+        }
+      },
+      "JobStatus": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "running",
+          "succeeded",
+          "failed",
+          "cancelled"
+        ]
+      },
+      "JobSubmission": {
+        "type": "object",
+        "description": "A job and the files it takes, by their paths on this machine.",
+        "required": [
+          "request"
+        ],
+        "properties": {
+          "inputs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "request": {
+            "$ref": "#/components/schemas/JobRequest"
+          }
+        }
+      },
+      "JobsConfig": {
+        "type": "object",
+        "description": "Where jobs keep their folders and which weights they run.",
+        "properties": {
+          "device_ordinal": {
+            "type": "integer",
+            "description": "The CUDA device jobs run on",
+            "default": 0,
+            "minimum": 0
+          },
+          "dir": {
+            "type": "string",
+            "description": "One folder per job: its record, inputs, previews and outputs",
+            "default": "/home/chris/.cache/inference-rs/engine-jobs"
+          },
+          "drain_timeout_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How long a job waits for the models on its device to go quiet before it fails, in seconds",
+            "default": 120,
+            "minimum": 0
+          },
+          "lpips": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "VGG16 features and the LPIPS heads, for splat training",
+            "default": null
+          },
+          "moge": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "MoGe-2 ViT-L normal, converted to safetensors",
+            "default": null
+          },
+          "wan": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The Wan2.1-I2V-14B-480P diffusers folder",
+            "default": null
+          },
+          "worldmirror": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "WorldMirror 2.0",
+            "default": null
+          },
+          "worldstereo": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `worldstereo-memory-dmd` folder",
+            "default": null
+          }
+        }
+      },
       "JsonSchemaResponseFormat": {
         "type": "object",
         "description": "JSON Schema for structured responses",
@@ -11212,6 +11896,36 @@
           "auto"
         ]
       },
+      "ReconstructJob": {
+        "type": "object",
+        "description": "WorldMirror 2.0 on the job's inputs: images, or one video.",
+        "properties": {
+          "fps": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Frames a second sampled from a video"
+          },
+          "max_frames": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The most frames sampled from a video",
+            "minimum": 0
+          },
+          "target_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The longest edge to infer at",
+            "minimum": 0
+          }
+        }
+      },
       "ResponseDeleted": {
         "type": "object",
         "description": "What deleting a response returns.",
@@ -12808,6 +13522,14 @@
           }
         }
       },
+      "SceneKind": {
+        "type": "string",
+        "description": "Indoor scenes keep far distances; outdoor ones compress them.",
+        "enum": [
+          "indoor",
+          "outdoor"
+        ]
+      },
       "SearchContextSize": {
         "type": "string",
         "enum": [
@@ -14311,6 +15033,50 @@
             }
           }
         ]
+      },
+      "WorldJob": {
+        "type": "object",
+        "description": "A world from a panorama, the job's one input.",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "The caption every clip is generated with"
+          },
+          "scene": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SceneKind",
+                "description": "Decided by the sky found in the panorama when unset"
+              }
+            ]
+          },
+          "seed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "splats": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Train Gaussian splats on the result (on by default)"
+          },
+          "steps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Splat training steps",
+            "minimum": 0
+          }
+        }
       }
     }
   },

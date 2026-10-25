@@ -89,6 +89,7 @@ mod form;
 pub mod handler_core;
 mod handlers;
 pub mod image_generation;
+pub mod jobs;
 pub mod lora_adapters;
 pub mod mcp_server;
 pub mod model_manager;

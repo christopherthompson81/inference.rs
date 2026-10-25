@@ -597,6 +597,30 @@ class JsonEngine:
     def file_content(self, file_id: str) -> Blob:
         return self._blob("inference_file_content", file_id)
 
+    def configure_jobs(self, config_json: str) -> str:
+        """Sets where jobs keep their folders and which weights they run (a JobsConfig); returns it."""
+        return self._call("inference_jobs_configure", config_json)
+
+    def submit_job(self, submission_json: str) -> str:
+        """Queues a world generation or reconstruction, {"request": JobRequest, "inputs": [paths]}; the JobRecord."""
+        return self._call("inference_job_submit", submission_json)
+
+    def list_jobs(self) -> str:
+        return self._get("inference_jobs_list")
+
+    def get_job(self, job_id: str) -> str:
+        return self._call("inference_job_get", job_id)
+
+    def cancel_job(self, job_id: str) -> str:
+        return self._call("inference_job_cancel", job_id)
+
+    def delete_job(self, job_id: str) -> str:
+        return self._call("inference_job_delete", job_id)
+
+    def job_file(self, request_json: str) -> str:
+        """Where a job's file is, {"id", "file"} to {"path"}."""
+        return self._call("inference_job_file", request_json)
+
     def list_container_files(self, container_id: str) -> str:
         """The files a Responses container (a code-running session) produced."""
         return self._call("inference_container_files_list", container_id)

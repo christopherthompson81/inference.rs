@@ -292,6 +292,14 @@ pub(crate) async fn serve_engine(spec: EngineSpec, server: &ServerOptions) -> Re
     });
     let token_source = spec.runtime.token_source.clone();
     let engine = Engine::load(spec).await?;
+    let mut jobs = inference_api::jobs::JobsConfig::default();
+    if let Some(dir) = &server.jobs_dir {
+        jobs.dir = dir.clone();
+    }
+    if let Some(root) = &server.world_models {
+        jobs = jobs.with_models_root(root);
+    }
+    engine.configure_jobs(jobs);
     let folders = server
         .model_folders
         .iter()

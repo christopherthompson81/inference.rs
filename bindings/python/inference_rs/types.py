@@ -981,6 +981,139 @@ class IsqOrganization(str, Enum):
 
 
 @dataclass(kw_only=True)
+class JobDeleted:
+    """A job removed with its folder."""
+
+    deleted: bool
+    id: str
+
+
+@dataclass(kw_only=True)
+class JobEventStatus:
+    status: JobStatus
+    type: Literal["status"] = "status"
+
+
+@dataclass(kw_only=True)
+class JobEventStage:
+    name: str
+    total: int
+    type: Literal["stage"] = "stage"
+
+
+@dataclass(kw_only=True)
+class JobEventProgress:
+    done: int
+    total: int
+    type: Literal["progress"] = "progress"
+
+
+@dataclass(kw_only=True)
+class JobEventFinished:
+    error: str | None = None
+    status: JobStatus
+    type: Literal["finished"] = "finished"
+
+
+@dataclass(kw_only=True)
+class JobFilePath:
+    """Where a job's file is on this machine."""
+
+    path: str
+
+
+@dataclass(kw_only=True)
+class JobFileRequest:
+    """A file in a job's folder, given relative to it."""
+
+    file: str
+    id: str
+
+
+@dataclass(kw_only=True)
+class JobList:
+    """This owner's jobs, newest first."""
+
+    data: list[JobRecord]
+
+
+@dataclass(kw_only=True)
+class JobOutput:
+    """A file a job made."""
+
+    file: str
+    name: str
+
+
+@dataclass(kw_only=True)
+class JobPreview:
+    """An image that shows how the job is going."""
+
+    caption: str
+    file: str
+    stage: str
+
+
+@dataclass(kw_only=True)
+class JobRecord:
+    """A job's record: what it was asked, how far it got, and what it made."""
+
+    created_at: float
+    error: str | None = None
+    finished_at: float | None = None
+    id: str
+    inputs: list[str] | None = None
+    kind: str
+    outputs: list[JobOutput] | None = None
+    owner: str | None = None
+    previews: list[JobPreview] | None = None
+    report: dict[str, Any] | None = None
+    request: dict[str, Any]
+    stages: list[JobStage] | None = None
+    started_at: float | None = None
+    status: JobStatus
+
+
+@dataclass(kw_only=True)
+class JobStage:
+    done: int
+    finished_at: float | None = None
+    name: str
+    started_at: float
+    total: int
+
+
+class JobStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+@dataclass(kw_only=True)
+class JobSubmission:
+    """A job and the files it takes, by their paths on this machine."""
+
+    inputs: list[str] | None = None
+    request: JobRequest
+
+
+@dataclass(kw_only=True)
+class JobsConfig:
+    """Where jobs keep their folders and which weights they run."""
+
+    device_ordinal: int | None = 0
+    dir: str | None = "/home/chris/.cache/inference-rs/engine-jobs"
+    drain_timeout_secs: int | None = 120
+    lpips: str | None = None
+    moge: str | None = None
+    wan: str | None = None
+    worldmirror: str | None = None
+    worldstereo: str | None = None
+
+
+@dataclass(kw_only=True)
 class JsonSchemaResponseFormat:
     """JSON Schema for structured responses"""
 
@@ -2323,6 +2456,15 @@ class ReasoningSummary(str, Enum):
 
 
 @dataclass(kw_only=True)
+class ReconstructJob:
+    """WorldMirror 2.0 on the job's inputs: images, or one video."""
+
+    fps: float | None = None
+    max_frames: int | None = None
+    target_size: int | None = None
+
+
+@dataclass(kw_only=True)
 class ResponseDeleted:
     """What deleting a response returns."""
 
@@ -2687,6 +2829,13 @@ class SavedModels:
     """The loads the manager keeps, by model id."""
 
     saved: dict[str, SavedModel]
+
+
+class SceneKind(str, Enum):
+    """Indoor scenes keep far distances; outdoor ones compress them."""
+
+    INDOOR = "indoor"
+    OUTDOOR = "outdoor"
 
 
 class SearchContextSize(str, Enum):
@@ -3158,6 +3307,17 @@ class WebSearchUserLocationApproximate:
     type: Literal["approximate"] = "approximate"
 
 
+@dataclass(kw_only=True)
+class WorldJob:
+    """A world from a panorama, the job's one input."""
+
+    prompt: str | None = None
+    scene: SceneKind | None = None
+    seed: int | None = None
+    splats: bool | None = None
+    steps: int | None = None
+
+
 AdapterSelection = Union[str, AdapterGenerationSelection]
 AllowedToolChoice = Union[AllowedToolChoiceFunction, AllowedToolChoiceWebSearchPreview, AllowedToolChoiceCodeInterpreter, AllowedToolChoiceShell]
 AnthropicMessageContent = Union[str, list[AnthropicContentBlock]]
@@ -3167,6 +3327,8 @@ CompletionPrompt = Union[str, list[int]]
 EmbeddingInput = Union[str, list[str], list[int], list[list[int]]]
 EmbeddingVector = Union[list[float], str]
 Grammar = Union[GrammarRegex, GrammarJsonSchema, GrammarLlguidance, GrammarLark]
+JobEvent = Union[JobEventStatus, JobEventStage, JobEventProgress, Any, JobEventFinished]
+JobRequest = Any
 McpServerSource = Union[McpServerSourceHttp, McpServerSourceProcess, McpServerSourceWebSocket]
 MessageInnerContent = Union[str, dict[str, str]]
 MessageContent = Union[str, list[dict[str, MessageInnerContent]]]

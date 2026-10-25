@@ -34,25 +34,27 @@ use crate::{
         set_default_model, system_doctor, system_info, tune_model, unload_model,
     },
     image_generation::{image_edit, image_generation},
+    jobs::{cancel_job, delete_job, get_job, job_events, job_file, list_jobs, submit_job},
     lora_adapters::{list_lora_adapters, load_lora_adapter, unload_lora_adapter},
     metrics::{ObservabilityConfig, ObservabilityState, metrics, metrics_disabled, observe_http},
     responses::{cancel_response, create_response, delete_response, get_response},
     route_registry::{
         ADD_MODEL_ROUTE, AGENT_APPROVAL_ROUTE, ANTHROPIC_COUNT_TOKENS_ROUTE,
         ANTHROPIC_MESSAGES_ROUTE, AUTH_SESSION_ROUTE, CALIBRATION_APPLY_ROUTE,
-        CALIBRATION_START_ROUTE, CALIBRATION_STATUS_ROUTE, CANCEL_RESPONSE_ROUTE,
+        CALIBRATION_START_ROUTE, CALIBRATION_STATUS_ROUTE, CANCEL_JOB_ROUTE, CANCEL_RESPONSE_ROUTE,
         CHAT_COMPLETIONS_ROUTE, COMPLETIONS_ROUTE, CONTAINER_FILE_CONTENT_ROUTE,
         CONTAINER_FILE_ROUTE, CONTAINER_FILES_ROUTE, DEFAULT_MODEL_ROUTE, DIARIZATION_ROUTE,
         EMBEDDINGS_ROUTE, FILE_CONTENT_ROUTE, FILE_ROUTE, FILES_ROUTE, HEALTH_ROUTE,
-        IMAGE_EDIT_ROUTE, IMAGE_GENERATION_ROUTE, LAYOUT_DETECT_ROUTE, LIST_LORA_ADAPTERS_ROUTE,
-        LOAD_LORA_ADAPTER_ROUTE, MANAGER_DELETE_ROUTE, MANAGER_DOWNLOAD_ROUTE,
-        MANAGER_INVENTORY_ROUTE, MANAGER_LOAD_ROUTE, MANAGER_MODELS_ROUTE,
-        MANAGER_SAVED_MODEL_ROUTE, MANAGER_SAVED_ROUTE, MANAGER_UNLOAD_ROUTE, MODEL_ALIAS_ROUTE,
-        MODEL_CACHE_STATS_ROUTE, MODEL_SPECULATIVE_STATS_ROUTE, MODEL_STATUS_ROUTE, MODELS_ROUTE,
-        RE_ISQ_ROUTE, REALTIME_ROUTE, RELOAD_MODEL_ROUTE, REMOVE_MODEL_ROUTE, RESPONSE_ROUTE,
-        RESPONSES_ROUTE, ROOT_ROUTE, SESSION_ROUTE, SKILL_VERSIONS_ROUTE, SKILLS_ROUTE,
-        SPEECH_GENERATION_ROUTE, SYSTEM_DOCTOR_ROUTE, SYSTEM_INFO_ROUTE, TRANSCRIPTION_ROUTE,
-        TUNE_MODEL_ROUTE, UNLOAD_LORA_ADAPTER_ROUTE, UNLOAD_MODEL_ROUTE, VOICE_ACTIVITY_ROUTE,
+        IMAGE_EDIT_ROUTE, IMAGE_GENERATION_ROUTE, JOB_EVENTS_ROUTE, JOB_FILE_ROUTE, JOB_ROUTE,
+        JOBS_ROUTE, LAYOUT_DETECT_ROUTE, LIST_LORA_ADAPTERS_ROUTE, LOAD_LORA_ADAPTER_ROUTE,
+        MANAGER_DELETE_ROUTE, MANAGER_DOWNLOAD_ROUTE, MANAGER_INVENTORY_ROUTE, MANAGER_LOAD_ROUTE,
+        MANAGER_MODELS_ROUTE, MANAGER_SAVED_MODEL_ROUTE, MANAGER_SAVED_ROUTE, MANAGER_UNLOAD_ROUTE,
+        MODEL_ALIAS_ROUTE, MODEL_CACHE_STATS_ROUTE, MODEL_SPECULATIVE_STATS_ROUTE,
+        MODEL_STATUS_ROUTE, MODELS_ROUTE, RE_ISQ_ROUTE, REALTIME_ROUTE, RELOAD_MODEL_ROUTE,
+        REMOVE_MODEL_ROUTE, RESPONSE_ROUTE, RESPONSES_ROUTE, ROOT_ROUTE, SESSION_ROUTE,
+        SKILL_VERSIONS_ROUTE, SKILLS_ROUTE, SPEECH_GENERATION_ROUTE, SYSTEM_DOCTOR_ROUTE,
+        SYSTEM_INFO_ROUTE, TRANSCRIPTION_ROUTE, TUNE_MODEL_ROUTE, UNLOAD_LORA_ADAPTER_ROUTE,
+        UNLOAD_MODEL_ROUTE, VOICE_ACTIVITY_ROUTE,
     },
     skills::{list_skill_versions, list_skills, upload_skill, upload_skill_version},
     speech_generation::speech_generation,
@@ -69,6 +71,8 @@ const METHOD_NOT_ALLOWED_MESSAGE: &str = "The requested HTTP method is not allow
 pub const DEFAULT_MAX_BODY_LIMIT: usize = N_INPUT_SIZE * MB_TO_B;
 /// The audio uploads' own limit, past the router's: 512 MiB is about 4.6 hours of 16 kHz mono 16-bit WAV.
 pub const AUDIO_MAX_BODY_LIMIT: usize = 512 * MB_TO_B;
+/// A job's uploads (a panorama, photos, a video).
+pub const JOB_MAX_BODY_LIMIT: usize = 2048 * MB_TO_B;
 
 /// A builder for creating a inference.rs server router with configurable options.
 ///
@@ -355,6 +359,21 @@ fn init_router(
         .route(IMAGE_GENERATION_ROUTE.path, post(image_generation))
         .route(IMAGE_EDIT_ROUTE.path, post(image_edit))
         .route(FILES_ROUTE.path, get(list_files).post(upload_file))
+        // a job evicts the device's models and holds it, so only admins start one
+        .route(
+            JOBS_ROUTE.path,
+            get(list_jobs).merge(
+                post(submit_job)
+                    .layer(DefaultBodyLimit::max(
+                        router_max_body_limit.max(JOB_MAX_BODY_LIMIT),
+                    ))
+                    .layer(middleware::from_fn(crate::auth::require_admin)),
+            ),
+        )
+        .route(JOB_ROUTE.path, get(get_job).delete(delete_job))
+        .route(CANCEL_JOB_ROUTE.path, post(cancel_job))
+        .route(JOB_EVENTS_ROUTE.path, get(job_events))
+        .route(JOB_FILE_ROUTE.path, get(job_file))
         .route(FILE_ROUTE.path, get(get_file).delete(delete_file))
         .route(FILE_CONTENT_ROUTE.path, get(get_file_content))
         .route(CONTAINER_FILES_ROUTE.path, get(list_container_files))
