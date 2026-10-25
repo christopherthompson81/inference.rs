@@ -444,3 +444,29 @@ Kept v4: 1.72x the bf16 flash attention, 57% of the int8/fp16 MMA peak. More nee
 scheduler that 240 registers allow. Model: small transformer 5.02e-3 / 5.41e-3; the real-size step 34.3 s (36.1); the
 whole-clip parity reproduces Run 18's numbers exactly (frames 9.162e-2): the FMA's single rounding vanishes at bf16
 output. Denoise of the reference clip 107.8 s.
+
+## Run 21 - 2026-10-24 20:55
+
+Question: does a ping-pong schedule (FlashAttention-3's, on Ampere) lift the int8 attention: two groups of four warps
+alternating turns on the tensor cores through named barriers (bar.sync / bar.arrive), so one group's softmax runs
+during the other's MMAs, with the stages tracked by mbarriers (full: cp.async.mbarrier.arrive.noinc from every thread;
+empty: every thread done) instead of the per-tile block barrier that kept the warps in step?
+
+`long_sequence_throughput`, same 45,240-token, 40-head case:
+```
+v4 (committed)                                   386 ms
+ping-pong, load of t + 2 after the softmax       391 ms   errors identical; 246 regs. ncu: tensor 60.6% (59),
+                                                          pipe throttle 0.94 (2.09), but "wait" 1.76, barrier 0.77,
+                                                          branch (mbarrier spin) 0.57
+  + K steps across all 8 key groups before the next (MMAs on one accumulator 8 apart), 4 partial maxima, 2 sums
+                                                 389 ms
+probe: ping-pong with no softmax math (P = scaled scores, no max, no exp)
+                                                 379 ms
+probe: no softmax math and no ldmatrix (register constants as fragments; output garbage)
+                                                 327 ms   (ideal tensor time at the int8 / fp16-accumulate peaks: ~234)
+```
+The softmax costs ~10 ms of the 386, so overlapping it can't pay; Run 17's reading (the non-MMA 47% is softmax) was
+wrong. The fragment loads cost ~52 ms (each 16-row warp loads the whole K and V tile, 8x over per block), and ~93 ms is
+MMA issue with two warps per scheduler. Both shrink only with more rows per warp (each fragment feeding more MMAs, more
+independent MMA chains), which needs the f32 output accumulator (64 registers at 16 rows) to fit at 32 rows. Reverted
+to v4; the ping-pong source is kept in the session scratch only.
