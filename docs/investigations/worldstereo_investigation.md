@@ -759,3 +759,21 @@ crossed-quad impostors read as large painted blobs, the saturation test sends de
 coloured stone to vegetation, so the structure mesh is mostly foliage blobs, and spawns land inside plants. The splats
 themselves look far better than any of it. Godot note: a capture directory inside the project never got created (run
 from outside it, fine).
+
+## Run 31 - 2026-10-25 05:13
+
+Question: the reference's "play inside the world" GIFs are its hosted product (the splats rendered, a character on
+the mesh's physics; the open code stops at the splats, the mesh and a viser viewer). Does the same work in Godot
+4.7.2 with the trained splats rendered directly instead of converted assets?
+
+Renderer: gdgs 3.3.0 (ReconWorldLab/godot-gaussian-splatting, MIT; compute backend: tile radix sort, depth-aware
+compositing through a CompositorEffect), cloned into the local Godot project only. Export (scratchpad
+assets/export_splat_scene.py): the park_native2 splats into the scene frame, x3.35 to metres, +y up; gdgs centres
+splats on import and turns its node 180 degrees about z, so the PLY is written pre-turned and the node placed at their
+mean. Collision: mesh_simplified.ply (61K triangles) as an invisible trimesh (Tab shows it). Import of 1.88M splats:
+1m45s.
+
+Six capture points (park_splats_godot/godot_splats.jpg): the park reads as the place (steps, benches, beds, the red
+maple, trees, sky from the splats' own dome); the walker stands on the floor at all six; the frame at (3, 3) m, near
+the edge of the reconstructed neighbourhood, smears. 36 to 62 fps at 1600x900 on the RTX 3090 (desktop running).
+Against Run 24's point cloud and Run 30's converted assets this is the first scene that looks like the frames.
