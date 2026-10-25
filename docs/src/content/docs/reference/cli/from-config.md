@@ -2,7 +2,7 @@
 title: "inference from-config"
 description: "Run from a full TOML configuration file"
 sidebar:
-  order: 16
+  order: 17
 ---
 
 <!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->
