@@ -16,6 +16,7 @@ use rayon::prelude::*;
 
 use super::data::{Mat4, SplatData, View};
 use super::lpips::Lpips;
+use super::mesh::{DepthFrame, Mesh, Tsdf, TsdfSettings};
 use super::ssim;
 use crate::geometry::invert4;
 use crate::worldstereo::trajectory::PointGrid;
@@ -62,6 +63,14 @@ const ALPHA_FLOOR: f64 = 1e-10;
 const SH_C0: f32 = 0.282_094_8;
 const SKY_OPACITY_LOGIT: f32 = 30.0;
 const SEED: u64 = 42;
+// world_gs_trainer's export_mesh, in the normalized frame's units
+// the share of the mesh's triangles the simplified copy keeps (its downsample_perc)
+const MESH_KEEP: f64 = 0.1;
+const MESH_TSDF: TsdfSettings = TsdfSettings {
+    voxel: 0.05,
+    sdf_trunc: 0.3,
+    depth_trunc: 5.0,
+};
 const LOG_EVERY: usize = 100;
 
 pub struct TrainOptions {
@@ -1082,6 +1091,8 @@ pub struct SplatReport {
     pub gaussians: usize,
     pub exported: usize,
     pub val_psnr: f64,
+    pub mesh_triangles: usize,
+    pub simplified_triangles: usize,
     pub seconds: f64,
     /// raw world to the normalized frame the splats are in, row-major
     pub transform: [[f32; 4]; 4],
@@ -1146,6 +1157,41 @@ impl Trainer {
     }
 }
 
+impl Trainer {
+    /// Every view rendered (rgb clamped, expected depth) with a fresh gate sample each, as the reference's export
+    /// does, fused into a TSDF; the largest connected piece of its surface.
+    pub fn mesh(&self) -> Result<Mesh> {
+        let mut tsdf = Tsdf::new(MESH_TSDF);
+        for (view, data) in self.views.iter().zip(&self.data.views) {
+            let (gate, _) = self.sample_gate()?;
+            let r = gsplat::render(&self.frame(view, Some(&gate)))?;
+            let rgb = r
+                .image
+                .narrow(2, 0, 3)?
+                .clamp(0f32, 1f32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
+            let depth = r
+                .image
+                .narrow(2, 3, 1)?
+                .squeeze(2)?
+                .div(&r.alpha.clamp(ALPHA_FLOOR as f32, f32::MAX)?)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
+            let rgb = rgb.as_chunks::<3>().0.to_vec();
+            tsdf.integrate(&DepthFrame {
+                depth: &depth,
+                rgb: &rgb,
+                width: data.width,
+                height: data.height,
+                w2c: invert4(&data.c2w),
+                k: data.k,
+            });
+        }
+        Ok(tsdf.extract().largest_component())
+    }
+}
+
 /// Trains splats on a `gs_data` directory and writes `splats.ply` and `splats.json` (the report) into `out_dir`.
 pub fn train_splats(
     data_dir: &Path,
@@ -1159,11 +1205,18 @@ pub fn train_splats(
     let mut trainer = Trainer::new(data, options, device)?;
     let val_psnr = trainer.train()?;
     let exported = trainer.write_ply(&out_dir.join("splats.ply"))?;
+    let mesh = trainer.mesh()?;
+    mesh.write_ply(&out_dir.join("mesh.ply"))?;
+    let mesh_triangles = mesh.triangles.len();
+    let simplified = mesh.decimate((mesh_triangles as f64 * MESH_KEEP) as usize);
+    simplified.write_ply(&out_dir.join("mesh_simplified.ply"))?;
     let report = SplatReport {
         steps: options.steps,
         gaussians: trainer.splats.len(),
         exported,
         val_psnr,
+        mesh_triangles,
+        simplified_triangles: simplified.triangles.len(),
         seconds: t.elapsed().as_secs_f64(),
         transform: trainer.transform(),
     };

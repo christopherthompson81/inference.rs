@@ -709,3 +709,53 @@ chased: candidates are the early Gaussian footprints (radii parity was only chec
 Gumbel noise statistics.
 
 Speed: 0.15 s/step against 0.12; the LPIPS VGG16 through im2col f32 convs is the obvious target.
+
+## Run 29 - 2026-10-25 05:02
+
+Question: with the mesh export and the gs_data stage native, does the whole reference pipeline run end to end
+without Python, and does it hold the Run 28 quality?
+
+Mesh export (`splatting::mesh`): every view rendered (fresh gate sample each, as the reference) as RGB and expected
+depth, fused into a sparse TSDF (8^3-voxel blocks; Open3D ScalableTSDFVolume's nearest-pixel projection and unit
+weights; voxel 0.05, truncation 0.3, depth cut 5.0 in the normalized frame), the surface by surface nets (one vertex
+per sign-changing cell, a quad per sign-changing edge) instead of marching cubes, the largest connected piece kept,
+then quadric edge collapse (Garland-Heckbert, boundary planes, flip check) to 10% for `mesh_simplified.ply`. A test
+fuses a sphere from six cameras: vertices within 0.03 of the radius, 0.05 after decimating to a tenth. 1500-step
+splats already give a mesh matching the reference's (gs_native_short/mesh_ref_vs_native.jpg); decimated, geometry
+holds and colours blur (62K triangles of vertex colour).
+
+gs_data (`worldstereo::gs_data`, run after the alignment): clip frames with the start view as frame 0 and aligned
+depth where aligned, 54 panorama + 40 polar crops (`Scene::view_depth`, now shared with `view_median_depth`),
+MoGe-2 normals, points.ply (aligned + panorama cloud at the adaptive voxel), sky_points.ply (sky at the eased max
+depth: box-mean diffusion from the foreground plus a smoothstep over an exact distance transform, voxel-thinned, capped
+at 300K). 189 s for 283 views.
+
+Dead end: the first native run filled 0 sky pixels (Python-made data: 20.17M) and still scored 24.63: MoGe's
+infer(apply_mask) zeroes normals where its mask is off, which the trainer's sky fill keys on; masked now.
+
+```
+park_native2 worldgen (clips reused):   gaussian splatting data 188.8 s, wall 524 s
+inference splat on its gs_data:         sky depth 232182 sky gaussians, 20167764 pixels filled
+                                        2444439 gaussians (1882398 exported), validation PSNR 24.580, 1236.8 s
+                                        mesh 612148 triangles, simplified 61213
+```
+Every stage of the reference pipeline now runs natively on one GPU (regular paths only, no VLM captions, MoGe sky).
+
+## Run 30 - 2026-10-25 05:02
+
+Question: a first game-asset bundle from the splats (scratchpad assets/export_assets.py, Godot scene in
+park_assets/godot, both outside the repo): does a terrain + structures + foliage impostors + sky split hold up?
+
+Split in the scene frame: sky r > 7.6 (the dome), backdrop 3 < r <= 7.6, near r <= 3 (about 10 m at the 3.35 m/unit
+scale). Ground: per 4 cm cell the 10th-percentile height of opaque splats and mesh vertices, a 15-cell grey opening,
+median and Gaussian smoothing. Classes per Gaussian: ground within 0.05 of it; above it vegetation if saturated
+(> 0.15), structure otherwise. Terrain albedo: the ground Gaussians rendered orthographically from above, uncovered
+texels from a normalized blur. Vegetation: canopy-height watershed, 27 plants, each an orthographic front/side
+impostor pair on crossed quads. Structures: mesh triangles above ground and grey, as glTF with vertex colours. Sky: the
+far Gaussians on a cubemap from the origin, holes inpainted, below the horizon the ground's colour.
+
+Result (godot_v1.jpg): the plaza terrain with its paving texture works and the sky works; the rest does not yet. The
+crossed-quad impostors read as large painted blobs, the saturation test sends desaturated canopy to structures and
+coloured stone to vegetation, so the structure mesh is mostly foliage blobs, and spawns land inside plants. The splats
+themselves look far better than any of it. Godot note: a capture directory inside the project never got created (run
+from outside it, fine).

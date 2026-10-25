@@ -70,6 +70,7 @@ world/
   clips/view0_traj0/cameras.json  per-frame camera_to_world and intrinsics, size, retrieved memory frames
   scene/                          the panorama's cleaned distance.npy, sky_mask.png, points.ply, start_frame_N.png
   aligned/                        memory frames' metric depth_NNNN.npy fitted to the panorama, frames.json, points.ply
+  gs_data/                        the splat training data: images/, depths/, normals/, cameras.json, points.ply, sky_points.ply
   reconstruction/                 WorldMirror outputs: camera_params.json, depth/, normal/, points.ply, gaussians.ply
 ```
 
@@ -83,8 +84,11 @@ its `gs_data` layout: `images/`, `depths/` (float16 bits in 16-bit PNG, 0 invali
 inference splat --data world/gs_data --out world/splats --lpips lpips_vgg.safetensors
 ```
 
-It writes `splats.ply` (standard 3DGS properties, degree-0 colour) and `splats.json` (Gaussian counts, validation
-PSNR, and the transform from the cameras' frame into the splats' normalized one). The loss includes LPIPS on VGG16
+Worldgen writes that folder itself (`world/gs_data`, with a WorldMirror checkpoint given). Training writes
+`splats.ply` (standard 3DGS properties, degree-0 colour), `mesh.ply` (a TSDF fusion of the splats' renders from every
+camera, its largest connected piece, vertex colours), `mesh_simplified.ply` (that mesh decimated to 10% of its
+triangles) and `splats.json` (Gaussian and triangle counts, validation PSNR, and the transform from the cameras' frame
+into the normalized one the splats and meshes are in). The loss includes LPIPS on VGG16
 features; `--lpips` takes torchvision's `vgg16` `features.*` weights and the LPIPS v0.1 heads (`lin0` to `lin4`) in one
 safetensors file, for example:
 

@@ -26,6 +26,7 @@ const REMAP_STEPS: f64 = 32.0;
 type Mat3 = [[f64; 3]; 3];
 
 /// An 8-bit RGB image, row-major.
+#[derive(Clone)]
 pub struct Rgb8 {
     pub width: usize,
     pub height: usize,
