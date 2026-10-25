@@ -10,6 +10,7 @@
 constexpr int kSaWarps = 8;
 constexpr int kSaRows = 16 * kSaWarps;
 constexpr int kSaKeys = 64;
+constexpr int kSaStages = 3;
 constexpr int kSaThreads = 32 * kSaWarps;
 constexpr float kSaInt8Max = 127.f;
 
@@ -20,7 +21,7 @@ template <int D> struct SaLayout {
   static constexpr int k_bytes = kSaKeys * k_pitch;
   static constexpr int v_bytes = kSaKeys * v_pitch;
   static constexpr int stage = k_bytes + v_bytes + kSaKeys * 4;
-  static constexpr int total = 2 * stage;
+  static constexpr int total = kSaStages * stage;
 };
 
 __device__ __forceinline__ void sa_cp_async(void *smem, const void *gmem, int bytes) {
@@ -124,31 +125,47 @@ __global__ void __launch_bounds__(kSaThreads, 1)
     o[nt][0] = o[nt][1] = o[nt][2] = o[nt][3] = 0.f;
   float m_a = -INFINITY, m_b = -INFINITY, l_a = 0.f, l_b = 0.f;
 
-  const int tiles = (n_kv + kSaKeys - 1) / kSaKeys;
-  sa_load_tile<D>(smem, kh, vh, ksh, 0, n_kv);
-  sa_commit();
-  for (int tile = 0; tile < tiles; ++tile) {
-    const uint8_t *cur = smem + (tile & 1) * L::stage;
-    if (tile + 1 < tiles)
-      sa_load_tile<D>(smem + ((tile + 1) & 1) * L::stage, kh, vh, ksh, (tile + 1) * kSaKeys, n_kv);
-    sa_commit();
-    sa_wait<1>();
-    __syncthreads();
-
-    int s[kSaKeys / 8][4];
+  // int8 Q.K^T of one key tile in a stage into s
+  auto scores = [&](const uint8_t *stage, int (&s)[kSaKeys / 8][4]) {
 #pragma unroll
     for (int j = 0; j < kSaKeys / 8; ++j) {
       s[j][0] = s[j][1] = s[j][2] = s[j][3] = 0;
 #pragma unroll
       for (int kk = 0; kk < KS; kk += 2) {
         uint32_t b[4];
-        sa_ldmatrix_x4(b, cur + (j * 8 + lane % 8) * L::k_pitch + kk * 32 + (lane / 8) * 16);
+        sa_ldmatrix_x4(b, stage + (j * 8 + lane % 8) * L::k_pitch + kk * 32 + (lane / 8) * 16);
         sa_mma_s8(s[j], qa[kk], b[0], b[1]);
         sa_mma_s8(s[j], qa[kk + 1], b[2], b[3]);
       }
     }
+  };
+
+  // S runs one tile ahead: tile t + 1's int8 MMAs are in flight while tile t's softmax and P.V run, with tiles t and
+  // t + 1 resident and t + 2 loading into the third stage
+  const int tiles = (n_kv + kSaKeys - 1) / kSaKeys;
+  sa_load_tile<D>(smem, kh, vh, ksh, 0, n_kv);
+  sa_commit();
+  if (tiles > 1)
+    sa_load_tile<D>(smem + L::stage, kh, vh, ksh, kSaKeys, n_kv);
+  sa_commit();
+  sa_wait<1>();
+  __syncthreads();
+  int s[kSaKeys / 8][4];
+  scores(smem, s);
+  for (int tile = 0; tile < tiles; ++tile) {
+    const uint8_t *cur = smem + (tile % kSaStages) * L::stage;
+    sa_wait<0>();
+    // tile + 1 visible to every warp, and every warp is past tile - 1, whose stage tile + 2 takes
+    __syncthreads();
+    if (tile + 2 < tiles)
+      sa_load_tile<D>(smem + ((tile + 2) % kSaStages) * L::stage, kh, vh, ksh, (tile + 2) * kSaKeys, n_kv);
+    sa_commit();
+    int s_next[kSaKeys / 8][4];
+    if (tile + 1 < tiles)
+      scores(smem + ((tile + 1) % kSaStages) * L::stage, s_next);
 
     const float *kscale = reinterpret_cast<const float *>(cur + L::k_bytes + L::v_bytes);
+    const bool full = (tile + 1) * kSaKeys <= n_kv;
     float p[kSaKeys / 8][4];
     float mx_a = m_a, mx_b = m_b;
 #pragma unroll
@@ -156,7 +173,7 @@ __global__ void __launch_bounds__(kSaThreads, 1)
 #pragma unroll
       for (int c = 0; c < 2; ++c) {
         const int col = j * 8 + 2 * t4 + c;
-        const bool ok = tile * kSaKeys + col < n_kv;
+        const bool ok = full || tile * kSaKeys + col < n_kv;
         const float kv = kscale[col];
         p[j][c] = ok ? static_cast<float>(s[j][c]) * (sqa * kv) : -INFINITY;
         p[j][2 + c] = ok ? static_cast<float>(s[j][2 + c]) * (sqb * kv) : -INFINITY;
@@ -183,13 +200,6 @@ __global__ void __launch_bounds__(kSaThreads, 1)
     }
     l_a = l_a * alpha_a + sum_a;
     l_b = l_b * alpha_b + sum_b;
-#pragma unroll
-    for (int nt = 0; nt < NT; ++nt) {
-      o[nt][0] *= alpha_a;
-      o[nt][1] *= alpha_a;
-      o[nt][2] *= alpha_b;
-      o[nt][3] *= alpha_b;
-    }
 
     const uint8_t *vs = cur + L::k_bytes;
     uint32_t acc[NT][2];
@@ -215,12 +225,18 @@ __global__ void __launch_bounds__(kSaThreads, 1)
     for (int nt = 0; nt < NT; ++nt) {
       const float2 lo = __half22float2(*reinterpret_cast<const __half2 *>(&acc[nt][0]));
       const float2 hi = __half22float2(*reinterpret_cast<const __half2 *>(&acc[nt][1]));
-      o[nt][0] += lo.x;
-      o[nt][1] += lo.y;
-      o[nt][2] += hi.x;
-      o[nt][3] += hi.y;
+      o[nt][0] = fmaf(o[nt][0], alpha_a, lo.x);
+      o[nt][1] = fmaf(o[nt][1], alpha_a, lo.y);
+      o[nt][2] = fmaf(o[nt][2], alpha_b, hi.x);
+      o[nt][3] = fmaf(o[nt][3], alpha_b, hi.y);
     }
-    __syncthreads();
+#pragma unroll
+    for (int j = 0; j < kSaKeys / 8; ++j) {
+      s[j][0] = s_next[j][0];
+      s[j][1] = s_next[j][1];
+      s[j][2] = s_next[j][2];
+      s[j][3] = s_next[j][3];
+    }
   }
 
   l_a += __shfl_xor_sync(0xffffffff, l_a, 1);

@@ -423,3 +423,24 @@ camera fit       2.4 cm / 0.85 deg (2.4 cm / 0.90)
 ```
 Frames side by side with Run 12's: the same scenes; differences only in invented detail (a lamp, a side cabinet).
 Left: the clip loop is still 92% of the run; per step attention ~16 s, GEMM ~14 s.
+
+## Run 20 - 2026-10-24 20:46
+
+Question: can the int8 attention overlap its softmax with its MMAs (Run 17: tensor pipes busy 53% of the time, the
+8 warps in lockstep through one barrier a tile, so both warps of a scheduler sat in softmax at once)?
+
+`long_sequence_throughput` (45,240 tokens, 40 heads of 128; bf16 flash 664 ms throughout):
+```
+v1                                      427 ms  98 TFLOP/s   208 regs
+S one tile ahead, 3 stages (v2)         398 ms  105          246 regs; ncu: tensor 59% (53), barrier stall 0.48 (1.17)
+v2 + ping-pong scores, fused rescale    399 ms               255 regs, 136 B spilled
+  + Q fragments from shared memory      419 ms               255 regs (the compiler spent the freed registers)
+v2 + O rescale fused into the add as one FMA + no bounds check on full tiles (v4)
+                                        386 ms  108.5        240 regs
+v4 + int-to-float by the magic-number add (off the XU pipe)
+                                        391 ms               (no gain; reverted)
+```
+Kept v4: 1.72x the bf16 flash attention, 57% of the int8/fp16 MMA peak. More needs a redesign around the 2 warps per
+scheduler that 240 registers allow. Model: small transformer 5.02e-3 / 5.41e-3; the real-size step 34.3 s (36.1); the
+whole-clip parity reproduces Run 18's numbers exactly (frames 9.162e-2): the FMA's single rounding vanishes at bf16
+output. Denoise of the reference clip 107.8 s.
