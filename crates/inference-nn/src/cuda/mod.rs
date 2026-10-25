@@ -8,6 +8,8 @@ pub mod dit;
 pub mod dynamic_conv;
 pub mod ffi;
 #[cfg(feature = "cuda")]
+pub mod gsplat;
+#[cfg(feature = "cuda")]
 pub mod hyper;
 #[cfg(feature = "cuda")]
 pub mod int8_attention;

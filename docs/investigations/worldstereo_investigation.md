@@ -618,3 +618,43 @@ TSDF over raw depths was blobby at a 12.7 cm median error). Porting the trainer 
 forward/backward (projection, tile binning, rasterization with antialiasing, depth and normal outputs), the
 MaskGaussian mask, SSIM/LPIPS/depth/normal losses, Adam with per-group rates, the default strategy's
 densify/prune, anchor protection, sky depth from the sky cloud, then the TSDF mesh export.
+
+## Run 27 - 2026-10-25 01:38
+
+Question: do native Gaussian splatting kernels (inference-nn `kernels/cuda/gsplat.cu`: EWA projection with the
+antialiasing compensation, tile intersection with a cub radix sort, RGB plus z rasterization with the MaskGaussian
+gate, and the backward passes, one camera, raw parameters in and gradients back to them) reproduce the reference fork
+on the trained park checkpoint?
+
+The fork differs from stock gsplat 1.5.3 only by the gate: the rasterizer composites with gate * alpha (the threshold
+test uses alpha alone), and the backward splits d/d(gate * alpha) into the opacity's and the gate's gradients. The
+port is from stock gsplat with that term; glm is replaced by a 100-line column-major matrix type.
+
+`scripts/gsplat_parity.sh <python> /mnt/data/build/gsplat_mg <ckpt_7999_rank0.pt>` (fixture by
+scripts/gsplat_parity.py: a camera at the median centre looking along the widest spread, the forward outputs and the
+gradients of a seeded random weighting of RGB+ED and alpha):
+```
+2571655 gaussians, 457926 visible
+radii equal for 1.000000 of gaussians
+rgb            max rel 4.73e-3  rms rel 3.00e-5
+depth          max rel 1.46e-4  rms rel 7.55e-7
+alpha          max rel 4.52e-4  rms rel 1.39e-6
+v_means2d      max rel 2.86e-4  rms rel 2.13e-4
+grad means     max rel 6.04e-4  rms rel 3.00e-4
+grad quats     max rel 6.21e-5  rms rel 4.56e-5
+grad scales    max rel 8.13e-6  rms rel 9.59e-6
+grad opacity   max rel 1.45e-4  rms rel 5.79e-5
+grad sh0       max rel 5.66e-5  rms rel 3.98e-5
+grad gate      max rel 9.85e-6  rms rel 1.40e-5
+```
+The residue is float atomics' summation order. Dead ends on the way: the first fixture's view matrix came from
+torch.linalg.inv, which numpy saved in Fortran order, and the test's reader took it as C order (every visible Gaussian
+culled; the reader now refuses Fortran order and the dump writes contiguous arrays); gsplat's rasterization() defaults
+to packed mode, while the trainer passes packed=False.
+
+Self-contained check (`gradients_match_finite_differences`, 24 random Gaussians, 64x48): analytic against central
+differences, cosine 0.998 (means) to 1.0 (sh0, gate); the geometry gradients' few percent come from what gsplat
+leaves out by design (radii and the tile set are not differentiated).
+
+Next: the trainer (losses through autograd with the render as the leaf, Adam, densification, MaskGaussian, the
+anchor protection, sky depth), against the reference's PSNR on the same data.
