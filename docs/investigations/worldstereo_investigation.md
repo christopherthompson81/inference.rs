@@ -510,3 +510,30 @@ estimate is ~3.5x small for a standing-height panorama; the indoor case001 gives
 1.7 m room). Scene construction does not rescale (only clips at the 0.98 quantile and contracts far distances
 outdoors), and the panorama depth matches the reference's, so the estimate is the model's. meta.json and the guide now
 call the scale approximate and say to fit it to known geometry.
+
+## Run 24 - 2026-10-24 22:20
+
+Question: can the park run be walked in Godot (4.7.2), and is a mesh fused from the reconstruction better than its
+point cloud for that?
+
+A standalone Godot project beside the run (not in any repo) builds the scene at load from exported binaries: the
+2M-point cloud (one draw call, a distance-scaled point-size shader), a ground heightfield (5th percentile of point
+heights per 25 cm cell, holes from the nearest seen cell, 5x5 median; HeightMapShape3D scaled uniformly by the cell),
+the source panorama as the sky, and a first-person walker kept inside the reconstruction's radius (17 m). The scene is
+rescaled x3.35 so the eye sits 1.6 m above the estimated ground (Run 23's small scale). It runs; the walker stands on
+the floor at every probe.
+
+Fused mesh: each depth map masked to the pixels its frame's points confirm (the point cloud already drops sky and
+edges; 83.4% of pixels kept), integrated into an open3d TSDF (4 cm voxels, 16 cm truncation) in the metric scene frame,
+meshed (8.1M triangles), components under 2000 triangles dropped, decimated to 400K, coloured from the 4 nearest points;
+in Godot it shows and collides as itself (M switches). open3d 0.18 segfaulted in integrate() under numpy 2.2; 0.19
+fixed it. 1m40s.
+```
+mesh vertex to nearest point: median 8.5 cm, 90th 18.5 cm (aligned: no transform error)
+point to nearest mesh surface: median 12.7 cm, 90th 42 cm, 99th 1.08 m
+```
+Side by side at the same 5 probes the mesh is blobby and wavy, its colours blurred, and the steps melt into a ramp,
+while the point cloud reads as the place. WorldMirror's 99 depth maps are predicted per view and disagree by around a
+decimetre; the TSDF averages the disagreement into blobs. The point cloud only looks crisper because the eye picks the
+dominant layer. Better geometry needs views made consistent (optimized splats, tier 3) or the scene split by kind: a
+terrain surface fitted to the ground, structures as planes, vegetation by an engine foliage system.
