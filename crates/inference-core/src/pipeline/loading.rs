@@ -778,6 +778,31 @@ fn shrink_expert_slots(
     Ok(None)
 }
 
+// The default paged cache (no size, share or context chosen) holds one sequence at the model's context (its window, or
+// max_model_len) instead of most of the free memory, so several models can share a device; it still takes only what
+// is free when that is less.
+fn need_sized_default_cache(
+    paged_attn_config: &mut Option<PagedAttentionConfig>,
+    sizing: &super::isq_flow::AutoDeviceMapSizingInputs<'_>,
+    dtype: DType,
+) -> Result<()> {
+    let Some(cfg) = paged_attn_config.as_mut() else {
+        return Ok(());
+    };
+    if !cfg.default_memory || !matches!(cfg.mem_gpu, crate::MemoryGpuConfig::Utilization(_)) {
+        return Ok(());
+    }
+    let model = sizing.loader.model_config(sizing.config)?;
+    let plan = crate::paged_attention::cache_plan(cfg.cache_type, &cfg.cache_layers, &*model);
+    let (num, den) = crate::paged_attention::kv_bytes_per_token(&plan, dtype, &*model);
+    let bytes = (model.max_seq_len() * num).div_ceil(den);
+    cfg.mem_gpu = crate::MemoryGpuConfig::BestEffortMbAmount {
+        target_mb: bytes.div_ceil(crate::pipeline::BYTES_PER_MIB).max(1),
+        min_mb: None,
+    };
+    Ok(())
+}
+
 /// UQFF writing loads unmapped, tensor parallelism shards instead of mapping, and an automatic map is sized here.
 pub(crate) fn resolve_map_setting(
     inputs: MapSettingInputs<'_>,
@@ -809,6 +834,8 @@ pub(crate) fn resolve_map_setting(
             prompt_chunk_tokens: None,
         });
     }
+    let dtype = dtype.try_into_dtype(&available_devices.iter().collect::<Vec<_>>())?;
+    need_sized_default_cache(paged_attn_config, &sizing, dtype)?;
     let DeviceMapSetting::Auto(params) = &setting else {
         return Ok(ResolvedMapSetting {
             setting,
@@ -818,7 +845,6 @@ pub(crate) fn resolve_map_setting(
         });
     };
     let max_kv_tokens = Some(params.max_seq_len() * params.max_batch_size());
-    let dtype = dtype.try_into_dtype(&available_devices.iter().collect::<Vec<_>>())?;
     if let Some(cache) = paged_attn_config.as_ref().map(|cfg| cfg.cache_type) {
         let probe = ExpertCachePlan {
             sizing,

@@ -77,7 +77,7 @@ The pool's size is set via one of three mutually exclusive flags:
 - `--pa-memory-fraction <f>`: KV cache budget as a fraction of VRAM.
 - `--pa-context-len <n>`: allocate KV cache sized for this context length.
 
-When none are set, the pool defaults to 90% of available VRAM.
+When none are set, the pool holds one sequence at the model's full context (its window, or `--max-model-len`), or what is free when that is less, so several models can share a GPU. `--pa-memory-fraction 0.9` gives a lone model most of the free VRAM for more concurrent sequences.
 
 Two more flags tune the cache itself:
 

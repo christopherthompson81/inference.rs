@@ -132,3 +132,31 @@ model fills the card and there is nothing to share; eviction is all-or-nothing. 
 of its own: size a model's pool for its context and sequences (`paged_context_len`, `max_seqs`) instead of the free
 memory, at least for models that should share a device, and let a model that runs alone take the rest. That has to be
 settled before phase 2's eviction can share a card between models.
+
+## Run 4 - 2026-10-25 09:21
+
+**Decision (user):** need-sized KV pools by default, so models can share a device; filling free memory stays available
+when configured.
+
+**Change:** at load, a paged cache left at its default (no `--pa-context-len`, `--pa-memory-mb` or
+`--pa-memory-fraction`) becomes a best-effort budget of one sequence at the model's context (its window after any
+`max_model_len`), fitted down to what is free when that is less (`need_sized_default_cache` in core
+`pipeline/loading.rs`). A planned MoE expert offload still overrides it with its planned context, as before. The
+docs that described the 90% default now describe this.
+
+**Command:** as Run 3 (Qwen2.5-Coder 3B Q4_K_M, default runtime settings), plus one chat request.
+
+**Raw finding:**
+```
+idle 1060 MiB, serving 4451 MiB, delta 3391 MiB
+/v1/models: loaded, memory_bytes 3160408064 (3014 MiB), max_model_len 32768
+Allocating 1152 MB for PagedAttention KV cache per GPU; 1024 GPU blocks: available context length is 32736 tokens
+max_num_seqs=4; the chat answered
+```
+**Implication:** 20.3 GB down to 3.0 GB for the same model and the same full context; a 24 GB card now has room for
+several such models, so eviction can be partial. Throughput-bound deployments that relied on the big pool for many
+concurrent long sequences set `--pa-memory-fraction` (the throughput guide says so).
+
+Seen once on this change's CUDA suite: `a_cuda_model_reports_its_memory` passed, then its process died with SIGSEGV
+during exit (3.6 s after "finished"). It did not recur in 25 runs of that test alone or in a full rerun of the suite;
+noted in case an exit-time crash after an unload shows up again.
