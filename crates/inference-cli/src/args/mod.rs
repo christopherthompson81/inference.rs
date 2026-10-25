@@ -365,6 +365,10 @@ pub enum Command {
         /// The longest edge WorldMirror reconstructs at (floored to a multiple of 14); memory grows with its square
         #[arg(long, default_value_t = 518)]
         reconstruct_size: usize,
+
+        /// WorldStereo's self-attention: int8 (int8 Q.K^T, ~1.5x faster) or bf16 (exact flash attention)
+        #[arg(long, default_value = "int8", value_parser = ["int8", "bf16"])]
+        attention: String,
     },
 
     /// Run performance benchmarks for base or LoRA model generation.

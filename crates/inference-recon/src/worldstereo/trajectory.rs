@@ -332,9 +332,126 @@ pub fn interpolate_poses(poses: &[Mat4], m: usize) -> Vec<Mat4> {
 
 /// The scene the planner keeps paths away from: the panorama mesh's triangles and its point cloud.
 pub struct Obstacles<'a> {
-    pub vertices: &'a [[f32; 3]],
-    pub triangles: &'a [[u32; 3]],
+    pub mesh: &'a MeshBvh,
     pub points: &'a PointGrid,
+}
+
+// triangles per BVH leaf
+const BVH_LEAF: usize = 8;
+
+struct BvhNode {
+    lo: [f64; 3],
+    hi: [f64; 3],
+    start: u32,
+    // a leaf's triangle count, 0 for an inner node (left child next, right child at `right`)
+    count: u32,
+    right: u32,
+}
+
+/// A mesh's triangles in a bounding-volume hierarchy, for exact nearest-distance queries.
+pub struct MeshBvh {
+    triangles: Vec<[[f64; 3]; 3]>,
+    nodes: Vec<BvhNode>,
+}
+
+impl MeshBvh {
+    pub fn new(vertices: &[[f32; 3]], triangles: &[[u32; 3]]) -> Self {
+        let mut tris = triangles
+            .iter()
+            .map(|t| t.map(|i| vertices[i as usize].map(f64::from)))
+            .collect::<Vec<_>>();
+        let mut nodes = Vec::with_capacity(2 * tris.len() / BVH_LEAF + 1);
+        if !tris.is_empty() {
+            Self::build(&mut tris, 0, &mut nodes);
+        }
+        Self {
+            triangles: tris,
+            nodes,
+        }
+    }
+
+    // median split on the longest axis of the centroids' bounds
+    fn build(tris: &mut [[[f64; 3]; 3]], start: usize, nodes: &mut Vec<BvhNode>) -> usize {
+        let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+        let (mut clo, mut chi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+        for t in tris.iter() {
+            for d in 0..3 {
+                let c = (t[0][d] + t[1][d] + t[2][d]) / 3.0;
+                clo[d] = clo[d].min(c);
+                chi[d] = chi[d].max(c);
+                for v in t {
+                    lo[d] = lo[d].min(v[d]);
+                    hi[d] = hi[d].max(v[d]);
+                }
+            }
+        }
+        let index = nodes.len();
+        nodes.push(BvhNode {
+            lo,
+            hi,
+            start: start as u32,
+            count: tris.len() as u32,
+            right: 0,
+        });
+        if tris.len() <= BVH_LEAF {
+            return index;
+        }
+        let axis = (0..3)
+            .max_by(|&a, &b| (chi[a] - clo[a]).total_cmp(&(chi[b] - clo[b])))
+            .unwrap_or(0);
+        let mid = tris.len() / 2;
+        let centroid = |t: &[[f64; 3]; 3]| t[0][axis] + t[1][axis] + t[2][axis];
+        tris.select_nth_unstable_by(mid, |a, b| centroid(a).total_cmp(&centroid(b)));
+        let (left, right) = tris.split_at_mut(mid);
+        nodes[index].count = 0;
+        Self::build(left, start, nodes);
+        let r = Self::build(right, start + mid, nodes);
+        nodes[index].right = r as u32;
+        index
+    }
+
+    fn box_distance(node: &BvhNode, q: [f64; 3]) -> f64 {
+        (0..3)
+            .map(|d| (node.lo[d] - q[d]).max(q[d] - node.hi[d]).max(0.0).powi(2))
+            .sum::<f64>()
+            .sqrt()
+    }
+
+    /// The distance from `q` to the nearest triangle (infinite for an empty mesh).
+    pub fn distance(&self, q: [f64; 3]) -> f64 {
+        let mut best = f64::INFINITY;
+        let Some(root) = self.nodes.first() else {
+            return best;
+        };
+        let mut stack = vec![(0usize, Self::box_distance(root, q))];
+        while let Some((n, d)) = stack.pop() {
+            if d > best {
+                continue;
+            }
+            let node = &self.nodes[n];
+            if node.count > 0 {
+                let start = node.start as usize;
+                for t in &self.triangles[start..start + node.count as usize] {
+                    best = best.min(point_triangle_distance(q, t[0], t[1], t[2]));
+                }
+                continue;
+            }
+            let (l, r) = (n + 1, node.right as usize);
+            let (dl, dr) = (
+                Self::box_distance(&self.nodes[l], q),
+                Self::box_distance(&self.nodes[r], q),
+            );
+            // nearer child popped first
+            if dl <= dr {
+                stack.push((r, dr));
+                stack.push((l, dl));
+            } else {
+                stack.push((l, dl));
+                stack.push((r, dr));
+            }
+        }
+        best
+    }
 }
 
 /// Points binned in a uniform grid, for nearest-neighbour queries.
@@ -481,15 +598,6 @@ fn point_triangle_distance(p: [f64; 3], a: [f64; 3], b: [f64; 3], c: [f64; 3]) -
     dot(d, d).sqrt()
 }
 
-fn mesh_distance(q: [f64; 3], obstacles: &Obstacles) -> f64 {
-    let v = |i: u32| obstacles.vertices[i as usize].map(f64::from);
-    obstacles
-        .triangles
-        .par_iter()
-        .map(|t| point_triangle_distance(q, v(t[0]), v(t[1]), v(t[2])))
-        .reduce(|| f64::INFINITY, f64::min)
-}
-
 /// One planned trajectory: camera-to-world per frame (the start first), or None when it collides too often.
 pub fn plan(
     c2w_start: &Mat4,
@@ -510,8 +618,8 @@ pub fn plan(
     };
     let centre = |m: &Mat4| [m[0][3], m[1][3], m[2][3]];
     let mut distances = dense(&c2ws)
-        .iter()
-        .map(|m| mesh_distance(centre(m), obstacles))
+        .par_iter()
+        .map(|m| obstacles.mesh.distance(centre(m)))
         .collect::<Vec<_>>();
     let mut iteration = 0;
     while distances.iter().copied().fold(f64::INFINITY, f64::min) < threshold
@@ -537,7 +645,7 @@ pub fn plan(
             }
         }
         distances = dense(&c2ws)
-            .iter()
+            .par_iter()
             .map(|m| obstacles.points.mean_knn(centre(m), RECHECK_NEIGHBOURS))
             .collect();
         iteration += 1;
@@ -546,4 +654,49 @@ pub fn plan(
         return None;
     }
     Some(std::iter::once(*c2w_start).chain(c2ws).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // a deterministic scatter of triangles of mixed sizes, queried inside, outside and on the bounds
+    #[test]
+    fn bvh_distance_equals_brute_force() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut vertices = Vec::new();
+        let mut triangles = Vec::new();
+        for i in 0..500u32 {
+            let centre = [
+                next() * 10.0 - 5.0,
+                next() * 10.0 - 5.0,
+                next() * 10.0 - 5.0,
+            ];
+            let size = if i % 50 == 0 { 4.0 } else { 0.3 };
+            for _ in 0..3 {
+                vertices.push([0, 1, 2].map(|d| (centre[d] + (next() - 0.5) * size) as f32));
+            }
+            triangles.push([3 * i, 3 * i + 1, 3 * i + 2]);
+        }
+        let bvh = MeshBvh::new(&vertices, &triangles);
+        let v = |i: u32| vertices[i as usize].map(f64::from);
+        for _ in 0..200 {
+            let q = [
+                next() * 16.0 - 8.0,
+                next() * 16.0 - 8.0,
+                next() * 16.0 - 8.0,
+            ];
+            let brute = triangles
+                .iter()
+                .map(|t| point_triangle_distance(q, v(t[0]), v(t[1]), v(t[2])))
+                .fold(f64::INFINITY, f64::min);
+            assert_eq!(bvh.distance(q), brute, "{q:?}");
+        }
+    }
 }

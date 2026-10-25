@@ -40,6 +40,7 @@ inference worldgen --panorama room.png --out world/ \
 | `--seed` | 1024 | The first clip's noise seed; each later clip adds one |
 | `--worldmirror` | none | Without it the clips are written and the reconstruction is skipped |
 | `--reconstruct-size` | 518 | The longest edge WorldMirror reconstructs at; its memory grows with the square of this |
+| `--attention` | int8 | WorldStereo's joint self-attention: `int8` multiplies Q and K in int8 (per-token scales, K less its mean) and P and V in fp16, about 1.5x the speed of `bf16` flash attention |
 
 An interrupted run restarts where it stopped: clips already written to `--out` are read back instead of generated
 again.
@@ -86,3 +87,7 @@ world/
 - The reconstruction runs at 518 pixels on the long edge by default; at the reference's 832, 99 frames do not fit in
   24 GB.
 - Only the regular paths are generated; the reference's optional VLM-planned paths are not run.
+- By default the joint self-attention runs with an int8 Q.K^T. Against the reference, a single transformer pass
+  differs by 0.5% either way; over a 4-step clip the sampler amplifies differences, and frames end 11% (int8) or 8%
+  (bf16) off the reference, mostly in content the model invents where the panorama saw nothing. `--attention bf16`
+  keeps the exact path.

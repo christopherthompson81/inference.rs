@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+pub use inference_models_diffusion::wan::AttentionKind;
 use inference_models_diffusion::wan::clip::WanImageEncoder;
 use inference_models_diffusion::wan::pipeline::{ClipRequest, MemoryFrames, WorldStereoPipeline};
 use inference_models_diffusion::wan::text::WanTextEncoder;
@@ -23,7 +24,7 @@ use super::memory::{MemoryBank, MemoryFrame};
 use super::panorama::{Rgb8, pano_depth};
 use super::render::render;
 use super::scene::{Scene, View};
-use super::trajectory::{self, Mat4, Obstacles, PointGrid};
+use super::trajectory::{self, Mat4, MeshBvh, Obstacles, PointGrid};
 use crate::geometry::invert4;
 use crate::moge::MoGe;
 use crate::worldmirror::priors::PriorInputs;
@@ -35,8 +36,9 @@ const TRAJECTORY_ORDER: [usize; 3] = [2, 0, 1];
 // WorldMirror runs on the whole memory bank (~99 frames); the reference's 832 is ~200K tokens, past a 24 GB card
 pub const DEFAULT_RECONSTRUCT_SIZE: usize = 518;
 const DEFAULT_SEED: u64 = 1024;
-const QUANTIZATION: &str = "none: WorldStereo transformer and umT5 in bf16 (transformer blocks streamed from host \
-                            memory); Wan VAE, CLIP image encoder and MoGe-2 in f32; WorldMirror as its own meta.json states";
+const QUANTIZATION: &str = "weights none: WorldStereo transformer and umT5 in bf16 (transformer blocks streamed from \
+                            host memory); Wan VAE, CLIP image encoder and MoGe-2 in f32; WorldMirror as its own meta.json \
+                            states. Activations: settings.attention";
 const DIFFERENCES_FROM_REFERENCE: [&str; 6] = [
     "sky from MoGe-2's validity mask instead of GroundingDINO and ZIM",
     "one caption for every clip instead of a vision-language model's caption per start view",
@@ -68,6 +70,8 @@ pub struct WorldGenOptions {
     pub seed: u64,
     /// WorldMirror's longest edge, floored to a multiple of 14
     pub reconstruct_size: usize,
+    /// how WorldStereo's joint self-attentions run
+    pub attention: AttentionKind,
 }
 
 impl Default for WorldGenOptions {
@@ -77,6 +81,7 @@ impl Default for WorldGenOptions {
             outdoor: None,
             seed: DEFAULT_SEED,
             reconstruct_size: DEFAULT_RECONSTRUCT_SIZE,
+            attention: AttentionKind::Int8Qk,
         }
     }
 }
@@ -120,6 +125,8 @@ pub struct WorldGenSettings {
     /// "--scene" when the caller chose, else "sky share" (outdoor when sky covers 0.5% of the panorama or more)
     pub scene_decided_by: &'static str,
     pub sampling_steps: usize,
+    /// "bf16", or "int8 QK" (int8 Q.K^T, fp16 P.V)
+    pub attention: &'static str,
     pub frames_per_clip: usize,
     pub frame_width: usize,
     pub frame_height: usize,
@@ -379,9 +386,9 @@ pub fn generate_world(
     // 2. trajectories and their point-cloud renders (CPU)
     let t = Instant::now();
     let grid = PointGrid::new(&scene.points);
+    let mesh = MeshBvh::new(&scene.mesh_vertices, &scene.mesh_triangles);
     let obstacles = Obstacles {
-        vertices: &scene.mesh_vertices,
-        triangles: &scene.mesh_triangles,
+        mesh: &mesh,
         points: &grid,
     };
     let mut planned = Vec::new();
@@ -447,15 +454,19 @@ pub fn generate_world(
             &clip_cfg,
             DType::F32,
         )?,
-        transformer: WorldStereoTransformer::new_streamed(
-            &wan_cfg,
-            &ws_cfg,
-            sharded(
-                &[models.worldstereo.join("model.safetensors")],
-                DType::BF16,
-                device,
-            )?,
-        )?,
+        transformer: {
+            let mut t = WorldStereoTransformer::new_streamed(
+                &wan_cfg,
+                &ws_cfg,
+                sharded(
+                    &[models.worldstereo.join("model.safetensors")],
+                    DType::BF16,
+                    device,
+                )?,
+            )?;
+            t.set_attention(options.attention);
+            t
+        },
         schedule: Default::default(),
         device: device.clone(),
     };
@@ -666,6 +677,10 @@ pub fn generate_world(
                 "sky share"
             },
             sampling_steps: schedule_steps,
+            attention: match options.attention {
+                AttentionKind::Bf16 => "bf16",
+                AttentionKind::Int8Qk => "int8 QK",
+            },
             frames_per_clip: trajectory::TRAJECTORY_FRAMES,
             frame_width: vw,
             frame_height: vh,

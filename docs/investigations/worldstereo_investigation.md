@@ -279,7 +279,7 @@ has reserved, not what is live: a scheduler needs the allocated peak, so each st
 high-water mark (reset at each stage start), and `--reconstruct-size` exposes WorldMirror's size. Next: a one-clip resume
 of this run to read those peaks, with the reconstruction at 644.
 
-## Run 13 - 2026-10-24 18:41
+## Run 13 - 2026-10-24 18:31
 
 Question: the one-clip resume of Run 12 with the new per-stage allocated peaks and the reconstruction at 644; then, since
 the clip loop is 92% of a run, where a real-size denoising step spends its 55 s.
@@ -317,7 +317,7 @@ Attention is half the step. Levers, by size: an int8 QK^T / fp16-accumulate PV a
 second stream or kept resident (~3 s); Q8_0 linears (~3.5 s, at a quality cost). Next: the fused norms and the upload
 overlap (exact), then the attention kernel.
 
-## Run 14 - 2026-10-24 19:20
+## Run 14 - 2026-10-24 18:42
 
 Question: what do fused kernels for the step's elementwise work buy (inference-nn `dit.cu`: LayerNorm + f32 affine +
 adaLN modulation, gated residual, full-width QK RMSNorm + interleaved RoPE written head-major; bf16 GELU directly)?
@@ -335,7 +335,7 @@ Attention and GEMM looked slower for the same work, which I first read as the po
 desktop during this run (see Run 15). fattn on Turing/Ampere accumulates KQ in f32 (half-rate MMA) and VKQ in fp16
 (full rate); an int8 QK (SageAttention's per-block quantized Q and mean-smoothed K, int32 accumulate) is the remaining attention lever.
 
-## Run 15 - 2026-10-24 19:38
+## Run 15 - 2026-10-24 18:53
 
 Question: with the desktop's other GPU clients closed, are step timings consistent, and what did the fusion really buy?
 
@@ -349,7 +349,7 @@ Run 14's 52.8 s ran beside other desktop load. The fusion saves 8.1 s a step (15
 work it removed; the power cap still bounds the big kernels, but it did not eat the gain. Timings repeat within 0.4 s
 on a quiet desktop.
 
-## Run 16 - 2026-10-24 19:55
+## Run 16 - 2026-10-24 19:00
 
 Question: does uploading block i+1 on a forked stream (`CudaDevice::fork_stream`, ordered with stream joins; a block is
 freed on the copy stream after the main stream has run it) hide the 3.6 s of copies?
@@ -357,3 +357,69 @@ freed on the copy stream after the main stream has run it) hide the 3.6 s of cop
 `full_size_streamed_step`, quiet desktop: 45.7 / 45.9 s (47.2 before). nsys: the copies (2.85 s, 32 GB) run on their
 own stream beside the kernels; per step flash_attn 28.1 s, GEMM 14.3 s, the rest ~1.5 s, ~1.8 s of gaps. Attention is
 61% of the step.
+
+## Run 17 - 2026-10-24 19:19
+
+Question: does an int8 Q.K^T attention (inference-nn `int8_attention.cu`: K less its per-head token mean, Q and K int8
+per token, int8 MMA for S, online softmax in f32, fp16 MMA for P.V accumulated in fp16 per 64-key tile into f32) speed
+up the joint self-attention, and what does it cost in output?
+
+Kernel against f32 attention on random inputs (std-2 Q and K, a large shared K offset): rel rms 1.8 to 2.1e-2 (bf16
+flash: 1.7 to 1.8e-3). First bug: a head's K scales start at `bh * n_kv` floats, unaligned for 16-byte cp.async when
+n_kv % 4 != 0 (head 0 right, later heads wrong); plain loads fixed it. `long_sequence_throughput` (45,240 tokens, 40
+heads of 128):
+```
+bf16 flash (fattn)   665 ms   63 TFLOP/s
+int8 QK              427 ms   98 TFLOP/s   (208 registers, 8 warps/SM; a warp-uniform skip of the O rescale was slower)
+```
+ncu: hmma active 35.6%, imma 17.8% of the time, which is each at its full rate; the other 47% is softmax and conversions
+not overlapping the MMAs (2 warps per scheduler). A 3-stage pipeline computing the next tile's S during this softmax,
+or fewer registers for more warps, is the next step for the kernel.
+
+Model effect (`WORLDSTEREO_ATTENTION=int8` in the parity tests):
+```
+small transformer   2 blocks rel rms 5.05e-3 (bf16 4.67e-3), 6 blocks 5.37e-3 (bf16 4.99e-3)
+real-size step      36.1 s (45.8 s)
+whole clip          after step 0: 1.9e-3 (bf16 3.3e-3); final latents 14.4% (bf16 10.2%), frames 11.2% (bf16 7.6%);
+                    denoise 111.7 s (136.9 s). The reference's own FA2 vs SDPA: 3.1% on frames
+```
+Side by side (frames 0, 10, 20 of the reference FA2, reference SDPA, ours bf16, ours int8): everything the render shows
+matches; the differences sit in content the model invents at the right edge of frame 20 (pool in both references and
+int8, road and building in bf16). int8 becomes worldgen's default (`--attention bf16` for the exact path). Later, after the kernel computed
+`s * (sqa * kv)` instead of `s * sqa * kv`, the same clip ended at frames 9.2% (reproduced exactly in a second process):
+one ulp in the logits moves the end of a clip by 2 points, the size of the bf16 / int8 gap.
+
+## Run 18 - 2026-10-24 20:08
+
+Question: the first full worldgen run with int8 attention and upload overlap died with CUDA out of memory in the first
+clip (288 s; nvidia-smi 19.1 GB above idle). Where does the memory go?
+
+Per-phase pool probes (temporary eprintln of the async pool's used/reserved high-water marks, reset each phase):
+```
+clip parity test   before clip 5.5 GB live; encodes peak 9.7; each step peak 12.2 (10.5 after chunking the FFN over
+                   8192-token pieces: its 13824-wide hidden state is 1.25 GB twice at 45K tokens); reserved peak 12.9
+worldgen           loop top / retrieval / renders 6.3 to 6.5 GB live; encodes peak 11.0; steps 11.8 to 12.2;
+                   decode peak 13.1; but the pool held 20.4 to 21.9 GB reserved by each clip's end (trimmed back to
+                   ~7 GB by the per-clip release); a second probed run survived 5 clips before my timeout
+```
+The live peak is ~13 GB; the rest is pool slack from phases of very different allocation shapes (the transformer's few
+large tensors, then the VAE decoder's many full-resolution ones) caching beside each other. The earlier bf16 runs had
+the same slack (nvidia-smi 21.7 to 23.5 GB with 17.6 GB live) and survived narrowly. Fix: the pipeline syncs and trims
+the pool after the encodes, after denoising and after decoding.
+
+## Run 19 - 2026-10-24 20:34
+
+Question: end to end on case001 (same prompt as Run 12) with the fused kernels, overlapped uploads, int8 attention,
+the chunked FFN, the pool trims and the trajectory BVH (mesh distance through a median-split BVH, exact: the scene test's
+9 trajectories match the reference as before, and a unit test pins it to brute force).
+```
+scene            43.3 s   (43.5)
+trajectories      8.1 s   (51.9)
+caption          34.6 s   (38.4)
+clips          1289.0 s   (1861.6; 143 s a clip, was 207)   allocated peak 13.2 GB (17.6)
+reconstruction   32.3 s   (30.5)
+wall           1408 s     (2027); nvidia-smi peak 16.9 GB above idle (22.0)
+camera fit       2.4 cm / 0.85 deg (2.4 cm / 0.90)
+```
+Frames side by side with Run 12's: the same scenes; differences only in invented detail (a lamp, a side cabinet).
+Left: the clip loop is still 92% of the run; per step attention ~16 s, GEMM ~14 s.

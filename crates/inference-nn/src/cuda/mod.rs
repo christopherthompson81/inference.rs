@@ -10,6 +10,8 @@ pub mod ffi;
 #[cfg(feature = "cuda")]
 pub mod hyper;
 #[cfg(feature = "cuda")]
+pub mod int8_attention;
+#[cfg(feature = "cuda")]
 pub mod lstm;
 #[cfg(feature = "cuda")]
 pub mod mapped;

@@ -7,13 +7,15 @@ use serde::Deserialize;
 
 use super::controlnet::{ControlNet, ControlNetConfig};
 use super::ops::{
-    ACT_DTYPE, LayerNorm, Linear, PatchConv, RmsNorm, RopeTables, attention, gated_residual,
-    gelu_tanh, heads,
+    ACT_DTYPE, AttentionKind, LayerNorm, Linear, PatchConv, RmsNorm, RopeTables, attention,
+    gated_residual, gelu_tanh, heads, self_attention,
 };
 
 const TIME_FREQ_LN_BASE: f64 = 10_000.0;
 // The image embedder's LayerNorms use torch's default eps
 const IMAGE_NORM_EPS: f64 = 1e-5;
+// Tokens per feed-forward pass; a 45K-token step's hidden activations otherwise take 2 x 1.25 GB
+const FFN_CHUNK_TOKENS: usize = 8192;
 // Modulation rows per block: shift, scale, gate for attention, then for the feed-forward
 const BLOCK_MODULATION: usize = 6;
 
@@ -172,7 +174,7 @@ impl SelfAttention {
     }
 
     /// Attention over all of `xs` `[1, tokens, dim]` with `rope` for every token.
-    fn forward(&self, xs: &Tensor, rope: &RopeTables) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor, rope: &RopeTables, kind: AttentionKind) -> Result<Tensor> {
         let q = self
             .norm_q
             .heads(&self.to_q.forward(xs)?, self.heads, Some(rope))?;
@@ -180,7 +182,7 @@ impl SelfAttention {
             .norm_k
             .heads(&self.to_k.forward(xs)?, self.heads, Some(rope))?;
         let v = heads(&self.to_v.forward(xs)?, self.heads)?;
-        self.to_out.forward(&attention(&q, &k, &v)?)
+        self.to_out.forward(&self_attention(&q, &k, &v, kind)?)
     }
 }
 
@@ -260,8 +262,20 @@ impl FeedForward {
         })
     }
 
+    // in token chunks: the hidden activations are 2.7x the model width
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        self.down.forward(&gelu_tanh(&self.up.forward(xs)?)?)
+        let n = xs.dim(1)?;
+        if n <= FFN_CHUNK_TOKENS {
+            return self.down.forward(&gelu_tanh(&self.up.forward(xs)?)?);
+        }
+        let chunks = (0..n)
+            .step_by(FFN_CHUNK_TOKENS)
+            .map(|start| {
+                let x = xs.narrow(1, start, FFN_CHUNK_TOKENS.min(n - start))?;
+                self.down.forward(&gelu_tanh(&self.up.forward(&x)?)?)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Tensor::cat(&chunks, 1)
     }
 
     fn to_device(&self, d: &Device) -> Result<Self> {
@@ -321,6 +335,7 @@ impl Block {
         memory: &Tensor,
         cond: &Conditions,
         rope: &RopeTables,
+        kind: AttentionKind,
     ) -> Result<(Tensor, Tensor)> {
         let m = (self.scale_shift_table.clone() + &cond.timestep_proj)?;
         let row = |i: usize| m.narrow(0, i, 1);
@@ -329,7 +344,7 @@ impl Block {
         let n_mem = memory.dim(1)?;
         let tokens = Tensor::cat(&[memory, video], 1)?;
         let normed = self.norm1.forward_act(&tokens, Some((&shift, &scale)))?;
-        let attn = self.attn1.forward(&normed, rope)?;
+        let attn = self.attn1.forward(&normed, rope, kind)?;
         let tokens = gated_residual(&tokens, &attn, &gate)?;
         let memory = tokens.narrow(1, 0, n_mem)?;
         let video = tokens.narrow(1, n_mem, tokens.dim(1)? - n_mem)?;
@@ -376,6 +391,7 @@ pub struct WorldStereoTransformer {
     scale_shift_table: Tensor,
     cfg: WanConfig,
     device: Device,
+    attention: AttentionKind,
 }
 
 // Host-resident blocks uploaded one ahead on a second stream, so each copy overlaps the block before it; a block's
@@ -479,7 +495,13 @@ impl WorldStereoTransformer {
                 .squeeze(0)?,
             cfg: cfg.clone(),
             device,
+            attention: AttentionKind::default(),
         })
+    }
+
+    /// How the joint self-attentions run, here and in the ControlNet.
+    pub fn set_attention(&mut self, kind: AttentionKind) {
+        self.attention = kind;
     }
 
     pub fn conditions(&self, t: f64, text: &Tensor, image: &Tensor) -> Result<Conditions> {
@@ -523,17 +545,22 @@ impl WorldStereoTransformer {
             }
             _ => (video.narrow(1, 0, 0)?, video_rope),
         };
-        let mut control = self.controlnet.start(inputs, &cond.temb, (f, h, w))?;
+        let mut control = self
+            .controlnet
+            .start(inputs, &cond.temb, (f, h, w), self.attention)?;
         let (mut video, mut memory) = (video, memory);
         let mut uploads = BlockUploads::new(&self.device)?;
         let mut next = uploads.upload(&self.blocks[0])?;
         for (i, block) in self.blocks.iter().enumerate() {
             let current = next.take();
             uploads.wait_for_upload()?;
-            (video, memory) = current
-                .as_ref()
-                .unwrap_or(block)
-                .forward(&video, &memory, cond, &rope)?;
+            (video, memory) = current.as_ref().unwrap_or(block).forward(
+                &video,
+                &memory,
+                cond,
+                &rope,
+                self.attention,
+            )?;
             if let Some(c) = control.step()? {
                 video = (video + c)?;
             }

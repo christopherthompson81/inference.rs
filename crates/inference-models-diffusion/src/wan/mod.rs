@@ -3,6 +3,7 @@
 pub mod clip;
 mod controlnet;
 mod ops;
+pub use ops::AttentionKind;
 pub mod pipeline;
 pub mod sampler;
 pub mod text;

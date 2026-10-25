@@ -247,6 +247,34 @@ impl RopeTables {
     }
 }
 
+/// How the long self-attentions run: bf16 flash attention, or with an int8 Q.K^T (faster, ~2% off f32 per call).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AttentionKind {
+    #[default]
+    Bf16,
+    Int8Qk,
+}
+
+/// Self-attention over `[b, heads, tokens, head_dim]` tensors as `kind` asks, output `[b, tokens, heads * head_dim]`.
+pub(crate) fn self_attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    kind: AttentionKind,
+) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if kind == AttentionKind::Int8Qk
+        && q.device().is_cuda()
+        && q.dtype() == ACT_DTYPE
+        && inference_nn::cuda::int8_attention::HEAD_DIMS.contains(&q.dim(3)?)
+    {
+        let scale = 1.0 / (q.dim(3)? as f32).sqrt();
+        return inference_nn::cuda::int8_attention::attention(q, k, v, scale);
+    }
+    let _ = kind;
+    attention(q, k, v)
+}
+
 /// Bidirectional attention over `[b, heads, tokens, head_dim]` tensors, output `[b, tokens, heads * head_dim]`.
 pub(crate) fn attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
     let (b, h, n, d) = q.dims4()?;

@@ -233,7 +233,7 @@ mod parity {
     use inference_tensor::{DType, Device};
 
     use super::super::panorama::{PanoDepth, Rgb8};
-    use super::super::trajectory::{self, Mat4, Obstacles, PointGrid};
+    use super::super::trajectory::{self, Mat4, MeshBvh, Obstacles, PointGrid};
 
     // PANO_REF (pred_pano_depth dump) and WORLDSTEREO_SCENE_REF: the reference's cleaned distance, point cloud, start
     // views and regular trajectories on it (dump_ws_scene.py)
@@ -289,9 +289,9 @@ mod parity {
         );
         let images = r["start_images"].flatten_all()?.to_vec1::<u8>()?;
         let grid = PointGrid::new(&scene.points);
+        let mesh = MeshBvh::new(&scene.mesh_vertices, &scene.mesh_triangles);
         let obstacles = Obstacles {
-            vertices: &scene.mesh_vertices,
-            triangles: &scene.mesh_triangles,
+            mesh: &mesh,
             points: &grid,
         };
         for (v, c2w) in trajectory::start_views().into_iter().enumerate() {

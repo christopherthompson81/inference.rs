@@ -10,6 +10,14 @@ fn env_path(name: &str) -> Option<PathBuf> {
     std::env::var_os(name).map(PathBuf::from)
 }
 
+// WORLDSTEREO_ATTENTION=int8 runs the joint self-attentions with the int8 Q.K^T kernel
+fn attention_kind() -> super::AttentionKind {
+    match std::env::var("WORLDSTEREO_ATTENTION").as_deref() {
+        Ok("int8") => super::AttentionKind::Int8Qk,
+        _ => super::AttentionKind::Bf16,
+    }
+}
+
 // max |a - b| and RMS(a - b) / RMS(b)
 fn compare(a: &Tensor, b: &Tensor) -> Result<(f32, f32)> {
     let a = a.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
@@ -145,7 +153,8 @@ fn small_transformer_matches_the_reference() -> Result<()> {
             std::sync::Arc::new(|_| true),
         )?
     };
-    let model = WorldStereoTransformer::new(&cfg, &ws, vb)?;
+    let mut model = WorldStereoTransformer::new(&cfg, &ws, vb)?;
+    model.set_attention(attention_kind());
     let bf = |k: &str| refs[k].to_dtype(DType::BF16);
     let t = refs["timestep"].to_vec1::<f32>()?[0] as f64;
     let cond = model.conditions(t, &bf("text")?.unsqueeze(0)?, &bf("image")?.unsqueeze(0)?)?;
@@ -208,7 +217,8 @@ fn full_size_streamed_step() -> Result<()> {
             std::sync::Arc::new(|_| true),
         )?
     };
-    let model = WorldStereoTransformer::new_streamed(&cfg, &ws, vb)?;
+    let mut model = WorldStereoTransformer::new_streamed(&cfg, &ws, vb)?;
+    model.set_attention(attention_kind());
     println!("loaded in {:.1} s", start.elapsed().as_secs_f64());
     let f: usize = std::env::var("WORLDSTEREO_FRAMES")
         .ok()
@@ -247,7 +257,7 @@ fn full_size_streamed_step() -> Result<()> {
             .map(|m| (m.total() - m.available()) >> 20)
             .unwrap_or_default();
         println!(
-            "round {round}: step {:.1} s, pred rms {:.3}, {used} MiB in use",
+            "round {round}: step {:.1} s, pred rms {:.9}, {used} MiB in use",
             start.elapsed().as_secs_f64(),
             pred.sqr()?.mean_all()?.sqrt()?.to_scalar::<f32>()?
         );
@@ -307,6 +317,8 @@ fn clip_matches_the_reference() -> Result<()> {
         &ws,
         sharded(&[ckpt.join("model.safetensors")], DType::BF16)?,
     )?;
+    let mut transformer = transformer;
+    transformer.set_attention(attention_kind());
     let pipeline = WorldStereoPipeline {
         vae,
         image_encoder,

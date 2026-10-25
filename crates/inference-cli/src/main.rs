@@ -253,8 +253,11 @@ async fn main() -> Result<()> {
             scene,
             seed,
             reconstruct_size,
+            attention,
         } => {
-            use inference_api::reconstruction::{WorldGenModels, WorldGenOptions, generate_world};
+            use inference_api::reconstruction::{
+                AttentionKind, WorldGenModels, WorldGenOptions, generate_world,
+            };
             let models = WorldGenModels {
                 worldstereo,
                 wan,
@@ -266,6 +269,11 @@ async fn main() -> Result<()> {
                 outdoor: scene.map(|s| s == "outdoor"),
                 seed,
                 reconstruct_size,
+                attention: if attention == "bf16" {
+                    AttentionKind::Bf16
+                } else {
+                    AttentionKind::Int8Qk
+                },
             };
             let report = generate_world(&models, &panorama, &out, &options)?;
             for stage in &report.stages {
