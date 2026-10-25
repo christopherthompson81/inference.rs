@@ -375,6 +375,27 @@ pub enum Command {
         weights: String,
     },
 
+    /// Train 3D Gaussian splats on a HY-World 2.0 gs_data folder (images, depths, normals, cameras.json,
+    /// points.ply, sky_points.ply): the 3DGS stage of world generation
+    Splat {
+        /// The gs_data folder
+        #[arg(long)]
+        data: PathBuf,
+
+        /// The output folder for splats.ply and splats.json, created if missing
+        #[arg(long)]
+        out: PathBuf,
+
+        /// Optimization steps; the densification schedule scales with it
+        #[arg(long, default_value_t = 8000)]
+        steps: usize,
+
+        /// LPIPS-VGG weights as safetensors: torchvision vgg16's features.{i}.weight/bias and the LPIPS v0.1 heads
+        /// lin{0..4}.model.1.weight
+        #[arg(long)]
+        lpips: PathBuf,
+    },
+
     /// Run performance benchmarks for base or LoRA model generation.
     Bench {
         #[command(subcommand)]

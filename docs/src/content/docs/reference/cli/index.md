@@ -25,6 +25,7 @@ sidebar:
 | [`inference kernels`](/reference/cli/kernels/) | Manage the CUDA kernel libraries: download them for offline use, prune old ones |
 | [`inference reconstruct`](/reference/cli/reconstruct/) | Reconstruct a scene from photos with WorldMirror 2.0: cameras, depth, normals, a point cloud and standard 3D Gaussian splats, written to a folder with a meta.json of conventions and settings |
 | [`inference worldgen`](/reference/cli/worldgen/) | Generate a 3D world from an equirectangular panorama with WorldStereo-2: keyframes along camera trajectories, then WorldMirror 2.0 on them for cameras, depth, points and 3D Gaussian splats |
+| [`inference splat`](/reference/cli/splat/) | Train 3D Gaussian splats on a HY-World 2.0 gs_data folder (images, depths, normals, cameras.json, points.ply, sky_points.ply): the 3DGS stage of world generation |
 | [`inference bench`](/reference/cli/bench/) | Run performance benchmarks for base or LoRA model generation |
 | [`inference from-config`](/reference/cli/from-config/) | Run from a full TOML configuration file |
 | [`inference update`](/reference/cli/update/) | Update or migrate an install using the installer |

@@ -587,7 +587,7 @@ fn voxel_key(p: [f32; 3], voxel: f64) -> i64 {
 }
 
 // voxel_downsample_fixed: the first point of each voxel, in key order as np.unique returns them
-fn voxel_first(points: &[[f32; 3]], voxel: f64) -> Vec<usize> {
+pub(crate) fn voxel_first(points: &[[f32; 3]], voxel: f64) -> Vec<usize> {
     let mut first: HashMap<i64, usize> = HashMap::new();
     for (i, &p) in points.iter().enumerate() {
         first.entry(voxel_key(p, voxel)).or_insert(i);
@@ -598,7 +598,7 @@ fn voxel_first(points: &[[f32; 3]], voxel: f64) -> Vec<usize> {
 }
 
 // adaptive_voxel_downsample's voxel size: a bisection for about `target` occupied voxels
-fn adaptive_voxel_size(points: &[[f32; 3]], target: usize) -> f64 {
+pub(crate) fn adaptive_voxel_size(points: &[[f32; 3]], target: usize) -> f64 {
     if points.len() <= target {
         return SMALL_CLOUD_VOXEL;
     }

@@ -45,6 +45,16 @@ pub struct Scene {
     pub outdoor: bool,
 }
 
+/// `d` turned `deg` degrees about +z the way rotate_around_z_axis turns (clockwise seen from above).
+pub fn turn_about_z(d: [f64; 3], deg: f64) -> [f64; 3] {
+    let a = deg.to_radians();
+    [
+        a.cos() * d[0] + a.sin() * d[1],
+        -a.sin() * d[0] + a.cos() * d[1],
+        d[2],
+    ]
+}
+
 // torch.median: the lower middle value
 fn lower_median(mut v: Vec<f64>) -> f64 {
     if v.is_empty() {
@@ -274,13 +284,13 @@ impl Scene {
         }
     }
 
-    /// The median z-depth the view sees of the cleaned scene, as the planner samples it (nearest panorama pixel per
-    /// view pixel, excluded pixels left out), or None when it sees nothing valid.
-    pub fn view_median_depth(&self, view: &View) -> Option<f64> {
+    /// The z-depth of the cleaned scene at each of the view's pixels, 0 where excluded: the nearest panorama pixel per
+    /// view pixel, the distance turned into z along the integer pixel's ray (split_panorama_depth's sampling).
+    pub fn view_depth(&self, view: &View) -> Vec<f32> {
         let (vw, vh) = trajectory::view_size();
         let k = view.intrinsics;
         let rot = Self::rotation(&view.c2w);
-        let mut depths = Vec::with_capacity(vw * vh);
+        let mut depths = vec![0f32; vw * vh];
         for y in 0..vh {
             for x in 0..vw {
                 let cam = [
@@ -299,16 +309,27 @@ impl Scene {
                 };
                 let p = at(v, self.height) * self.width + at(u, self.width);
                 if !self.excluded[p] {
-                    // distance to z-depth along the ray at the integer pixel, as split_panorama_depth converts it
                     let (rx, ry) = (
                         (x as f64 - k[0][2]) / k[0][0],
                         (y as f64 - k[1][2]) / k[1][1],
                     );
                     let len = (rx * rx + ry * ry + 1.0).sqrt();
-                    depths.push(f64::from(self.distance[p]) / len);
+                    depths[y * vw + x] = (f64::from(self.distance[p]) / len) as f32;
                 }
             }
         }
+        depths
+    }
+
+    /// The median z-depth the view sees of the cleaned scene, as the planner samples it, or None when it sees nothing
+    /// valid.
+    pub fn view_median_depth(&self, view: &View) -> Option<f64> {
+        let depths = self
+            .view_depth(view)
+            .into_iter()
+            .filter(|&d| d > 0.0)
+            .map(f64::from)
+            .collect();
         let m = lower_median(depths);
         (m.is_finite() && m > 0.0).then_some(m)
     }
@@ -321,13 +342,7 @@ impl Scene {
         let mut dirs = starts.to_vec();
         for s in starts {
             for i in 1..steps {
-                let a = (BANK_STEP_DEG * i as f64).to_radians();
-                // rotate_around_z_axis turns clockwise
-                dirs.push([
-                    a.cos() * s[0] + a.sin() * s[1],
-                    -a.sin() * s[0] + a.cos() * s[1],
-                    s[2],
-                ]);
+                dirs.push(turn_about_z(s, BANK_STEP_DEG * i as f64));
             }
         }
         dirs.into_iter()

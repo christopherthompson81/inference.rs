@@ -70,8 +70,38 @@ world/
   clips/view0_traj0/cameras.json  per-frame camera_to_world and intrinsics, size, retrieved memory frames
   scene/                          the panorama's cleaned distance.npy, sky_mask.png, points.ply, start_frame_N.png
   aligned/                        memory frames' metric depth_NNNN.npy fitted to the panorama, frames.json, points.ply
+  gs_data/                        the splat training data: images/, depths/, normals/, cameras.json, points.ply, sky_points.ply
   reconstruction/                 WorldMirror outputs: camera_params.json, depth/, normal/, points.ply, gaussians.ply
 ```
+
+## Gaussian splats
+
+`inference splat` runs the reference's 3DGS stage (its `world_gs_trainer.py` at the single-GPU length) on a folder in
+its `gs_data` layout: `images/`, `depths/` (float16 bits in 16-bit PNG, 0 invalid), `normals/`, `cameras.json`
+(OpenCV world-to-camera and pixel intrinsics per image), `points.ply` and `sky_points.ply`.
+
+```bash
+inference splat --data world/gs_data --out world/splats --lpips lpips_vgg.safetensors
+```
+
+Worldgen writes that folder itself (`world/gs_data`, with a WorldMirror checkpoint given). Training writes
+`splats.ply` (standard 3DGS properties, degree-0 colour), `mesh.ply` (a TSDF fusion of the splats' renders from every
+camera, its largest connected piece, vertex colours), `mesh_simplified.ply` (that mesh decimated to 10% of its
+triangles) and `splats.json` (Gaussian and triangle counts, validation PSNR, and the transform from the cameras' frame
+into the normalized one the splats and meshes are in). The loss includes LPIPS on VGG16
+features; `--lpips` takes torchvision's `vgg16` `features.*` weights and the LPIPS v0.1 heads (`lin0` to `lin4`) in one
+safetensors file, for example:
+
+```python
+import torch
+from safetensors.torch import save_file
+vgg = torch.hub.load_state_dict_from_url("https://download.pytorch.org/models/vgg16-397923af.pth")
+lin = torch.load("torchmetrics/functional/image/lpips_models/vgg.pth")  # from a torchmetrics install
+save_file({**{k: v for k, v in vgg.items() if k.startswith("features")}, **lin}, "lpips_vgg.safetensors")
+```
+
+On the outdoor test scene (283 views) 8000 steps take about 20 minutes on one RTX 3090, end with 2.4M Gaussians, and
+score 24.6 dB PSNR on the held-out frames (the reference trainer: 24.2).
 
 ## Conventions
 

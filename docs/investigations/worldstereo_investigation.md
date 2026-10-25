@@ -618,3 +618,162 @@ TSDF over raw depths was blobby at a 12.7 cm median error). Porting the trainer 
 forward/backward (projection, tile binning, rasterization with antialiasing, depth and normal outputs), the
 MaskGaussian mask, SSIM/LPIPS/depth/normal losses, Adam with per-group rates, the default strategy's
 densify/prune, anchor protection, sky depth from the sky cloud, then the TSDF mesh export.
+
+## Run 27 - 2026-10-25 01:38
+
+Question: do native Gaussian splatting kernels (inference-nn `kernels/cuda/gsplat.cu`: EWA projection with the
+antialiasing compensation, tile intersection with a cub radix sort, RGB plus z rasterization with the MaskGaussian
+gate, and the backward passes, one camera, raw parameters in and gradients back to them) reproduce the reference fork
+on the trained park checkpoint?
+
+The fork differs from stock gsplat 1.5.3 only by the gate: the rasterizer composites with gate * alpha (the threshold
+test uses alpha alone), and the backward splits d/d(gate * alpha) into the opacity's and the gate's gradients. The
+port is from stock gsplat with that term; glm is replaced by a 100-line column-major matrix type.
+
+`scripts/gsplat_parity.sh <python> /mnt/data/build/gsplat_mg <ckpt_7999_rank0.pt>` (fixture by
+scripts/gsplat_parity.py: a camera at the median centre looking along the widest spread, the forward outputs and the
+gradients of a seeded random weighting of RGB+ED and alpha):
+```
+2571655 gaussians, 457926 visible
+radii equal for 1.000000 of gaussians
+rgb            max rel 4.73e-3  rms rel 3.00e-5
+depth          max rel 1.46e-4  rms rel 7.55e-7
+alpha          max rel 4.52e-4  rms rel 1.39e-6
+v_means2d      max rel 2.86e-4  rms rel 2.13e-4
+grad means     max rel 6.04e-4  rms rel 3.00e-4
+grad quats     max rel 6.21e-5  rms rel 4.56e-5
+grad scales    max rel 8.13e-6  rms rel 9.59e-6
+grad opacity   max rel 1.45e-4  rms rel 5.79e-5
+grad sh0       max rel 5.66e-5  rms rel 3.98e-5
+grad gate      max rel 9.85e-6  rms rel 1.40e-5
+```
+The residue is float atomics' summation order. Dead ends on the way: the first fixture's view matrix came from
+torch.linalg.inv, which numpy saved in Fortran order, and the test's reader took it as C order (every visible Gaussian
+culled; the reader now refuses Fortran order and the dump writes contiguous arrays); gsplat's rasterization() defaults
+to packed mode, while the trainer passes packed=False.
+
+Self-contained check (`gradients_match_finite_differences`, 24 random Gaussians, 64x48): analytic against central
+differences, cosine 0.998 (means) to 1.0 (sh0, gate); the geometry gradients' few percent come from what gsplat
+leaves out by design (radii and the tile set are not differentiated).
+
+Next: the trainer (losses through autograd with the render as the leaf, Adam, densification, MaskGaussian, the
+anchor protection, sky depth), against the reference's PSNR on the same data.
+
+## Run 28 - 2026-10-25 03:23
+
+Question: does a native port of world_gs_trainer's run (inference-recon `splatting`, `inference splat`) train splats as
+good as the reference's on the same gs_data?
+
+Port, from a spec of the exact invocation (scratchpad gs_tools/trainer_spec.md, file:line referenced): the Parser's
+geometry-aware downsample to 1M (base + sky cloud), the camera similarity / principal-axes / z-flip normalization,
+kNN scale init, Adam (eps 1e-15, means lr decaying 100x), the sky depth pre-rendered from the sky cloud (classic
+mode), L1 + SSIM (valid windows) + LPIPS-VGG (inputs in [0, 1], no remap, as the reference) + disparity L1 + normals
+from rendered depth, the scale-ratio penalty every 10 steps, DefaultStrategy's grow/prune at 1066..3731, the
+MaskGaussian gate (Gumbel 0/1 with the straight-through soft gradient), its sparsity term and the one prune at 1066,
+and the stochastic export. The render is the autograd leaf: the losses run through inference-tensor's backprop, their
+gradients of the image and alpha go through the gsplat kernels' backward (Run 27).
+
+Two inference-tensor changes: conv2d backprop computes no gradient for an input off every path to a variable (a
+constant kernel's gradient is a conv with the image as the kernel), and a stride-1 conv's input gradient runs as a conv
+with the flipped kernel (im2col) instead of the direct transposed conv; a test pins both.
+
+Dead ends on the way, each a failed run:
+- every step leaked ~155 MB: the scale penalty's gradient (from its own small backward) carried its graph, and adding it
+  into the Adam moments chained every step's parameters to the last; detached.
+- the first detach was a string edit that silently no-oped after rustfmt reflowed the line (twice in this run; edits
+  now asserted).
+- the gate closed (95% open to 0.04% in 500 steps): NaN from the normal loss, where max(|v|, eps) taken after the
+  sqrt meets sqrt's infinite slope at zero vectors (0 * inf); now sqrt(max(|v|^2, eps^2)).
+- the quats and scales learning rates were swapped.
+- the mask prune left the densify statistics at the old length, and after reindexing them the refine's prune indexed
+  the pre-growth statistics (device assert); cleared before the prune.
+
+`inference splat --data park_aligned/gs_data --out park_aligned/gs_native --steps 8000 --lpips lpips_vgg.safetensors`:
+```
+splat init: 1000000 gaussians (231770 sky), 277 train / 6 val views, scene scale 4.7169
+step 1000: loss 0.1611 (l1 0.0388 ssim 0.2366 lpips 0.3356 depth 0.0307 normal 0.0958), 800194 of 1000000 open
+step 1066: 249686 duplicated, 999862 split, 61660 pruned; mask prune 203333, 1984555 gaussians
+step 3731: ... 2446483 gaussians
+step 8000: loss 0.1035, 1880488 of 2446483 open, 1223.6 s
+2446483 gaussians (1881126 exported), validation PSNR 24.570, wall 20m29s
+```
+Reference on the same data (Run 26): PSNR 24.191, 2571655 Gaussians, 928 s of steps (16.5 min wall). Its anchors:
+231747 (ours 231770: the downsample's random draws differ). Losses line up (reference tqdm at step ~1000: 0.14 to
+0.28). Novel views from the Run 26 cameras (gs_native/ref_vs_native.jpg): the same structure and sharpness, ours a
+little crisper in places.
+
+Open difference: the first refine. Ours duplicates 250K and splits 1.0M (almost every Gaussian passes the 2D-radius
+rule, max radius over 5% of 832 px), the reference 56K and 327K; ours mask-prunes 203K to its 71K and keeps fewer gates
+open through the run (77% to its ~92%). The later refines are close. The end state is as good, so it is noted, not
+chased: candidates are the early Gaussian footprints (radii parity was only checked on the trained checkpoint) and
+Gumbel noise statistics.
+
+Speed: 0.15 s/step against 0.12; the LPIPS VGG16 through im2col f32 convs is the obvious target.
+
+## Run 29 - 2026-10-25 05:02
+
+Question: with the mesh export and the gs_data stage native, does the whole reference pipeline run end to end
+without Python, and does it hold the Run 28 quality?
+
+Mesh export (`splatting::mesh`): every view rendered (fresh gate sample each, as the reference) as RGB and expected
+depth, fused into a sparse TSDF (8^3-voxel blocks; Open3D ScalableTSDFVolume's nearest-pixel projection and unit
+weights; voxel 0.05, truncation 0.3, depth cut 5.0 in the normalized frame), the surface by surface nets (one vertex
+per sign-changing cell, a quad per sign-changing edge) instead of marching cubes, the largest connected piece kept,
+then quadric edge collapse (Garland-Heckbert, boundary planes, flip check) to 10% for `mesh_simplified.ply`. A test
+fuses a sphere from six cameras: vertices within 0.03 of the radius, 0.05 after decimating to a tenth. 1500-step
+splats already give a mesh matching the reference's (gs_native_short/mesh_ref_vs_native.jpg); decimated, geometry
+holds and colours blur (62K triangles of vertex colour).
+
+gs_data (`worldstereo::gs_data`, run after the alignment): clip frames with the start view as frame 0 and aligned
+depth where aligned, 54 panorama + 40 polar crops (`Scene::view_depth`, now shared with `view_median_depth`),
+MoGe-2 normals, points.ply (aligned + panorama cloud at the adaptive voxel), sky_points.ply (sky at the eased max
+depth: box-mean diffusion from the foreground plus a smoothstep over an exact distance transform, voxel-thinned, capped
+at 300K). 189 s for 283 views.
+
+Dead end: the first native run filled 0 sky pixels (Python-made data: 20.17M) and still scored 24.63: MoGe's
+infer(apply_mask) zeroes normals where its mask is off, which the trainer's sky fill keys on; masked now.
+
+```
+park_native2 worldgen (clips reused):   gaussian splatting data 188.8 s, wall 524 s
+inference splat on its gs_data:         sky depth 232182 sky gaussians, 20167764 pixels filled
+                                        2444439 gaussians (1882398 exported), validation PSNR 24.580, 1236.8 s
+                                        mesh 612148 triangles, simplified 61213
+```
+Every stage of the reference pipeline now runs natively on one GPU (regular paths only, no VLM captions, MoGe sky).
+
+## Run 30 - 2026-10-25 05:02
+
+Question: a first game-asset bundle from the splats (scratchpad assets/export_assets.py, Godot scene in
+park_assets/godot, both outside the repo): does a terrain + structures + foliage impostors + sky split hold up?
+
+Split in the scene frame: sky r > 7.6 (the dome), backdrop 3 < r <= 7.6, near r <= 3 (about 10 m at the 3.35 m/unit
+scale). Ground: per 4 cm cell the 10th-percentile height of opaque splats and mesh vertices, a 15-cell grey opening,
+median and Gaussian smoothing. Classes per Gaussian: ground within 0.05 of it; above it vegetation if saturated
+(> 0.15), structure otherwise. Terrain albedo: the ground Gaussians rendered orthographically from above, uncovered
+texels from a normalized blur. Vegetation: canopy-height watershed, 27 plants, each an orthographic front/side
+impostor pair on crossed quads. Structures: mesh triangles above ground and grey, as glTF with vertex colours. Sky: the
+far Gaussians on a cubemap from the origin, holes inpainted, below the horizon the ground's colour.
+
+Result (godot_v1.jpg): the plaza terrain with its paving texture works and the sky works; the rest does not yet. The
+crossed-quad impostors read as large painted blobs, the saturation test sends desaturated canopy to structures and
+coloured stone to vegetation, so the structure mesh is mostly foliage blobs, and spawns land inside plants. The splats
+themselves look far better than any of it. Godot note: a capture directory inside the project never got created (run
+from outside it, fine).
+
+## Run 31 - 2026-10-25 05:13
+
+Question: the reference's "play inside the world" GIFs are its hosted product (the splats rendered, a character on
+the mesh's physics; the open code stops at the splats, the mesh and a viser viewer). Does the same work in Godot
+4.7.2 with the trained splats rendered directly instead of converted assets?
+
+Renderer: gdgs 3.3.0 (ReconWorldLab/godot-gaussian-splatting, MIT; compute backend: tile radix sort, depth-aware
+compositing through a CompositorEffect), cloned into the local Godot project only. Export (scratchpad
+assets/export_splat_scene.py): the park_native2 splats into the scene frame, x3.35 to metres, +y up; gdgs centres
+splats on import and turns its node 180 degrees about z, so the PLY is written pre-turned and the node placed at their
+mean. Collision: mesh_simplified.ply (61K triangles) as an invisible trimesh (Tab shows it). Import of 1.88M splats:
+1m45s.
+
+Six capture points (park_splats_godot/godot_splats.jpg): the park reads as the place (steps, benches, beds, the red
+maple, trees, sky from the splats' own dome); the walker stands on the floor at all six; the frame at (3, 3) m, near
+the edge of the reconstructed neighbourhood, smears. 36 to 62 fps at 1600x900 on the RTX 3090 (desktop running).
+Against Run 24's point cloud and Run 30's converted assets this is the first scene that looks like the frames.

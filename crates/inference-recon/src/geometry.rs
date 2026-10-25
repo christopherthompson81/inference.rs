@@ -78,50 +78,23 @@ pub(crate) fn quantile(values: &[f32], q: f32) -> f32 {
     sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f32)
 }
 
-/// The similarity `q ~ s R p + t` that best maps points `p` onto `q` in least squares (Horn's closed form: the
-/// rotation from the top eigenvector of his 4 x 4 matrix, then the scale and translation).
-pub(crate) fn similarity_fit(p: &[[f64; 3]], q: &[[f64; 3]]) -> (f64, [[f64; 3]; 3], [f64; 3]) {
-    let n = p.len() as f64;
-    let mean = |v: &[[f64; 3]]| [0, 1, 2].map(|d| v.iter().map(|x| x[d]).sum::<f64>() / n);
-    let (mp, mq) = (mean(p), mean(q));
-    let mut m = [[0.0; 3]; 3];
-    let mut norm_p = 0.0;
-    for (a, b) in p.iter().zip(q) {
-        let (x, y) = (
-            [0, 1, 2].map(|d| a[d] - mp[d]),
-            [0, 1, 2].map(|d| b[d] - mq[d]),
-        );
-        for i in 0..3 {
-            for j in 0..3 {
-                m[i][j] += x[i] * y[j];
-            }
-        }
-        norm_p += x.iter().map(|v| v * v).sum::<f64>();
+/// Eigenvalues and eigenvectors (the columns, `vecs[row][i]` for value `i`) of a symmetric matrix, by cyclic Jacobi
+/// rotations until the off-diagonal vanishes.
+pub(crate) fn symmetric_eigen<const N: usize>(mut k: [[f64; N]; N]) -> ([f64; N], [[f64; N]; N]) {
+    let mut vecs = [[0.0; N]; N];
+    for (i, row) in vecs.iter_mut().enumerate() {
+        row[i] = 1.0;
     }
-    let [[sxx, sxy, sxz], [syx, syy, syz], [szx, szy, szz]] = m;
-    let mut k = [
-        [sxx + syy + szz, syz - szy, szx - sxz, sxy - syx],
-        [syz - szy, sxx - syy - szz, sxy + syx, szx + sxz],
-        [szx - sxz, sxy + syx, -sxx + syy - szz, syz + szy],
-        [sxy - syx, szx + sxz, syz + szy, -sxx - syy + szz],
-    ];
-    let mut vecs = [
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ];
-    // cyclic Jacobi rotations until the off-diagonal vanishes
     for _ in 0..64 {
-        let off = (0..4)
-            .flat_map(|i| (0..4).filter(move |&j| j != i).map(move |j| (i, j)))
+        let off = (0..N)
+            .flat_map(|i| (0..N).filter(move |&j| j != i).map(move |j| (i, j)))
             .map(|(i, j)| k[i][j].abs())
             .sum::<f64>();
         if off < 1e-14 {
             break;
         }
-        for a in 0..3 {
-            for b in a + 1..4 {
+        for a in 0..N - 1 {
+            for b in a + 1..N {
                 if k[a][b].abs() < 1e-300 {
                     continue;
                 }
@@ -147,8 +120,39 @@ pub(crate) fn similarity_fit(p: &[[f64; 3]], q: &[[f64; 3]]) -> (f64, [[f64; 3];
             }
         }
     }
+    (std::array::from_fn(|i| k[i][i]), vecs)
+}
+
+/// The similarity `q ~ s R p + t` that best maps points `p` onto `q` in least squares (Horn's closed form: the
+/// rotation from the top eigenvector of his 4 x 4 matrix, then the scale and translation).
+pub(crate) fn similarity_fit(p: &[[f64; 3]], q: &[[f64; 3]]) -> (f64, [[f64; 3]; 3], [f64; 3]) {
+    let n = p.len() as f64;
+    let mean = |v: &[[f64; 3]]| [0, 1, 2].map(|d| v.iter().map(|x| x[d]).sum::<f64>() / n);
+    let (mp, mq) = (mean(p), mean(q));
+    let mut m = [[0.0; 3]; 3];
+    let mut norm_p = 0.0;
+    for (a, b) in p.iter().zip(q) {
+        let (x, y) = (
+            [0, 1, 2].map(|d| a[d] - mp[d]),
+            [0, 1, 2].map(|d| b[d] - mq[d]),
+        );
+        for i in 0..3 {
+            for j in 0..3 {
+                m[i][j] += x[i] * y[j];
+            }
+        }
+        norm_p += x.iter().map(|v| v * v).sum::<f64>();
+    }
+    let [[sxx, sxy, sxz], [syx, syy, syz], [szx, szy, szz]] = m;
+    let k = [
+        [sxx + syy + szz, syz - szy, szx - sxz, sxy - syx],
+        [syz - szy, sxx - syy - szz, sxy + syx, szx + sxz],
+        [szx - sxz, sxy + syx, -sxx + syy - szz, syz + szy],
+        [sxy - syx, szx + sxz, syz + szy, -sxx - syy + szz],
+    ];
+    let (values, vecs) = symmetric_eigen(k);
     let top = (0..4)
-        .max_by(|&i, &j| k[i][i].total_cmp(&k[j][j]))
+        .max_by(|&i, &j| values[i].total_cmp(&values[j]))
         .expect("four eigenvalues");
     let [w, x, y, z] = [0, 1, 2, 3].map(|r| vecs[r][top]);
     let r = [

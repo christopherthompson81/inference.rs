@@ -5,5 +5,6 @@ mod conv;
 mod dinov2;
 mod geometry;
 pub mod moge;
+pub mod splatting;
 pub mod worldmirror;
 pub mod worldstereo;

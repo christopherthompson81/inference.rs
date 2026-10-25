@@ -242,6 +242,34 @@ async fn main() -> Result<()> {
             );
         }
 
+        Command::Splat {
+            data,
+            out,
+            steps,
+            lpips,
+        } => {
+            #[cfg(feature = "cuda")]
+            {
+                use inference_api::reconstruction::{TrainOptions, train_splats};
+                let options = TrainOptions { steps, lpips };
+                let report = train_splats(&data, &out, &options)?;
+                println!(
+                    "{} gaussians ({} exported) after {} steps, validation PSNR {:.3}, {:.1} s; {}",
+                    report.gaussians,
+                    report.exported,
+                    report.steps,
+                    report.val_psnr,
+                    report.seconds,
+                    out.join("splats.ply").display()
+                );
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                let _ = (data, out, steps, lpips);
+                anyhow::bail!("splat training needs a CUDA build");
+            }
+        }
+
         Command::Worldgen {
             panorama,
             out,

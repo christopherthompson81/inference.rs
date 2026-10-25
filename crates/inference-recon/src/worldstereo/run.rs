@@ -22,6 +22,7 @@ use serde::Serialize;
 
 use super::align::{AlignFrame, Alignment, align};
 use super::cameras;
+use super::gs_data::{GsFrame, write_gs_data};
 use super::memory::{MemoryBank, MemoryFrame};
 use super::panorama::{Rgb8, pano_depth};
 use super::render::render;
@@ -321,7 +322,7 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
 }
 
 // an 8-bit image as `[3, H, W]` in [0, 1]
-fn image_unit_tensor(img: &Rgb8, device: &Device) -> Result<Tensor> {
+pub(crate) fn image_unit_tensor(img: &Rgb8, device: &Device) -> Result<Tensor> {
     let (w, h) = (img.width, img.height);
     let mut chw = vec![0f32; 3 * w * h];
     for (p, rgb) in img.pixels.as_chunks::<3>().0.iter().enumerate() {
@@ -800,6 +801,56 @@ pub fn generate_world(
         });
         drop(align_frames);
         stage("alignment (MoGe-2 masks, fit to the panorama)", t, device);
+
+        let t = Instant::now();
+        let moge = MoGe::load(&models.moge, DType::F32, device)?;
+        let by_name = alignment
+            .frames
+            .iter()
+            .map(|f| (f.name.as_str(), f))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut clip_frames = Vec::new();
+        for plan in &planned {
+            let (view_id, traj_id) = (format!("view{}", plan.view), format!("traj{}", plan.traj));
+            let dir = out_dir.join("clips").join(format!("{view_id}_{traj_id}"));
+            if let Some(mut frames) = load_clip(&dir, plan.c2ws.len()) {
+                // the clip's first frame is its start view (the reference swaps in start_frame.png)
+                frames[0] = views[plan.view].image.clone();
+                clip_frames.push((view_id, traj_id, plan, frames));
+            }
+        }
+        let gs_frames = clip_frames
+            .iter()
+            .flat_map(|(view_id, traj_id, plan, frames)| {
+                let by_name = &by_name;
+                frames.iter().enumerate().map(move |(i, image)| GsFrame {
+                    name: format!("{view_id}-{traj_id}_{i:06}"),
+                    image,
+                    c2w: plan.c2ws[i],
+                    intrinsics: k,
+                    depth: by_name
+                        .get(format!("{view_id}/{traj_id}/{i:04}").as_str())
+                        .map(|f| f.depth.as_slice())
+                        .filter(|d| d.iter().any(|&v| v > 0.0)),
+                })
+            })
+            .collect::<Vec<_>>();
+        write_gs_data(
+            &out_dir.join("gs_data"),
+            &gs_frames,
+            pano,
+            &scene,
+            &alignment,
+            &moge,
+            device,
+        )?;
+        drop(moge);
+        release(device)?;
+        stage(
+            "gaussian splatting data (gs_data, MoGe-2 normals)",
+            t,
+            device,
+        );
 
         let t = Instant::now();
         let frames = memory

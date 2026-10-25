@@ -476,9 +476,15 @@ impl PointGrid {
 
     /// The mean distance to the `k` nearest points (kd-tree query of the reference).
     pub fn mean_knn(&self, q: [f64; 3], k: usize) -> f64 {
+        let best = self.knn_sq(q, k);
+        best.iter().map(|d| d.sqrt()).sum::<f64>() / best.len().max(1) as f64
+    }
+
+    /// Squared distances to the `k` nearest points, ascending (a point in the set finds itself at 0).
+    pub fn knn_sq(&self, q: [f64; 3], k: usize) -> Vec<f64> {
         let mut best: Vec<f64> = Vec::with_capacity(k + 1);
         self.knn(0, 0, self.points.len(), q, k, &mut best);
-        best.iter().map(|d| d.sqrt()).sum::<f64>() / best.len().max(1) as f64
+        best
     }
 
     // best holds the squared distances found so far, ascending
