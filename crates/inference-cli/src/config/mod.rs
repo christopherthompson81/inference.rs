@@ -20,8 +20,8 @@ use inference_api::{
 #[derive(Deserialize)]
 #[serde(tag = "command", rename_all = "kebab-case")]
 pub enum CliConfig {
-    Serve(ServeConfig),
-    Run(RunConfig),
+    Serve(Box<ServeConfig>),
+    Run(Box<RunConfig>),
 }
 
 #[derive(Deserialize, Default)]
@@ -330,7 +330,7 @@ model_id = "google/gemma-4-E4B-it"
         .unwrap();
 
         let cfg = match config {
-            CliConfig::Serve(cfg) => cfg,
+            CliConfig::Serve(cfg) => *cfg,
             CliConfig::Run(_) => panic!("expected serve config"),
         };
 
@@ -372,7 +372,7 @@ model_id = "google/gemma-4-E4B-it"
         .unwrap();
 
         let cfg = match config {
-            CliConfig::Serve(cfg) => cfg,
+            CliConfig::Serve(cfg) => *cfg,
             CliConfig::Run(_) => panic!("expected serve config"),
         };
 
@@ -405,7 +405,7 @@ lora_max_bytes = 1048576
 
         validate_config(&config).unwrap();
         let cfg = match config {
-            CliConfig::Run(cfg) => cfg,
+            CliConfig::Run(cfg) => *cfg,
             CliConfig::Serve(_) => panic!("expected run config"),
         };
         assert_eq!(cfg.adapter.as_deref(), Some("code"));

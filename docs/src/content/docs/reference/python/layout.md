@@ -2,7 +2,7 @@
 title: Layout
 description: "PP-DocLayoutV3 document layout detection, in process and over HTTP."
 sidebar:
-  order: 8
+  order: 9
 ---
 ## `LayoutDetectRequest`
 

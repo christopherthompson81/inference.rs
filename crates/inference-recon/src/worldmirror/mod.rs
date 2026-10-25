@@ -182,10 +182,12 @@ impl WorldMirror {
         let (_, _, height, width) = images.dims4()?;
         let priors = priors::normalize(inputs, original, height, width, &self.device)?;
         let out = self.trunk(&images, &priors, &mut |_, _, _| {})?;
-        let none = &mut |_: usize, _: &dpt::DptOutput| Ok(());
+        // the trunk's and each chunk's transient shapes differ; cached beside each other they near fill a 24 GB card
+        trim_pool(&self.device)?;
+        let trim = &mut |_: usize, _: &dpt::DptOutput| trim_pool(&self.device);
         Ok(self
             .depth
-            .forward(&out.features, out.patch_start, &images, none)?
+            .forward(&out.features, out.patch_start, &images, trim)?
             .attr)
     }
 
@@ -195,7 +197,7 @@ impl WorldMirror {
         let last = features
             .last()
             .expect("the trunk returns its head features");
-        let camera_params = self.camera.forward(last)?;
+        let camera_params = self.camera.forward(&last.to_device(images.device())?)?;
         let cameras = decode_cameras(&camera_params, height, width)?;
         let images = images.clone();
         let none = &mut |_: usize, _: &dpt::DptOutput| Ok(());
@@ -261,6 +263,14 @@ fn normalize(images: &Tensor) -> Result<Tensor> {
         .to_dtype(DType::F32)?
         .broadcast_sub(&mean)?
         .broadcast_div(&std)
+}
+
+// returns the CUDA pool's free blocks to the device once the queued work is done
+fn trim_pool(device: &Device) -> Result<()> {
+    device.synchronize()?;
+    #[cfg(feature = "cuda")]
+    inference_nn::utils::memory_usage::MemoryUsage.trim_cuda_memory_pool(device, 0)?;
+    Ok(())
 }
 
 #[cfg(test)]

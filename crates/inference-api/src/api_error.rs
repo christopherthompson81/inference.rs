@@ -143,6 +143,12 @@ impl ApiError {
                 Some("model_state_conflict"),
                 Some("model"),
             ),
+            InferenceRsError::DeviceBusy(_) => Self::new(
+                ApiErrorKind::Conflict,
+                error.to_string(),
+                Some("device_busy"),
+                None,
+            ),
             InferenceRsError::NoLoaderConfig(_) => Self::new(
                 ApiErrorKind::InvalidRequest,
                 error.to_string(),

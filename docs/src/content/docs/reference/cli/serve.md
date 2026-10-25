@@ -71,6 +71,8 @@ inference serve [OPTIONS] [COMMAND]
 | `--access-log-health` | `false` | Include health, metrics, docs, and UI requests in HTTP access logs |
 | `--disable-request-id-header` | `false` | Disable the x-request-id response header |
 | `--disable-metrics` | `false` | Disable Prometheus HTTP metrics and the metrics recorder |
+| `--jobs-dir <DIR>` |  | Where jobs (world generation, reconstruction) keep their folders; defaults to the cache's `engine-jobs` |
+| `--world-models <DIR>` |  | A folder holding the world-generation checkpoints under their repository names (`WorldStereo/`, `Wan2.1-I2V-14B-480P-Diffusers/`, `moge-2-vitl-normal/`, `HY-World-2.0/`, `lpips-vgg/`), for jobs |
 | `--max-seqs <MAX_SEQS>` | `4` | Maximum concurrent sequences per model; each holds memory while it runs, so raise it for a busy shared server |
 | `--max-num-batched-tokens <MAX_NUM_BATCHED_TOKENS>` |  | Maximum tokens processed in one paged-attention scheduler step [default: 4096, or the prompt chunk if longer] |
 | `--no-embeddings-on-host` | `false` | Keep the token embedding in VRAM; by default an untied one lives in pinned host memory the GPU reads over the bus |

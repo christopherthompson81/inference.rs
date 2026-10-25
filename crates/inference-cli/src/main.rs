@@ -250,9 +250,9 @@ async fn main() -> Result<()> {
         } => {
             #[cfg(feature = "cuda")]
             {
-                use inference_api::reconstruction::{TrainOptions, train_splats};
+                use inference_api::reconstruction::{NoProgress, TrainOptions, train_splats};
                 let options = TrainOptions { steps, lpips };
-                let report = train_splats(&data, &out, &options)?;
+                let report = train_splats(&data, &out, &options, &NoProgress)?;
                 println!(
                     "{} gaussians ({} exported) after {} steps, validation PSNR {:.3}, {:.1} s; {}",
                     report.gaussians,
@@ -285,7 +285,8 @@ async fn main() -> Result<()> {
             weights,
         } => {
             use inference_api::reconstruction::{
-                AttentionKind, GgmlDType, WorldGenModels, WorldGenOptions, generate_world,
+                AttentionKind, GgmlDType, NoProgress, WorldGenModels, WorldGenOptions,
+                generate_world,
             };
             let models = WorldGenModels {
                 worldstereo,
@@ -305,7 +306,7 @@ async fn main() -> Result<()> {
                 },
                 block_weights: (weights == "q8_0").then_some(GgmlDType::Q8_0),
             };
-            let report = generate_world(&models, &panorama, &out, &options)?;
+            let report = generate_world(&models, &panorama, &out, &options, &NoProgress)?;
             for stage in &report.stages {
                 println!(
                     "{:<36} {:8.1} s  {:6} MiB allocated at peak, {:6} MiB in use at its end",

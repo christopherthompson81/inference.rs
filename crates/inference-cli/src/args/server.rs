@@ -101,6 +101,17 @@ pub struct ServerOptions {
     #[arg(long)]
     #[serde(default)]
     pub disable_metrics: bool,
+
+    /// Where jobs (world generation, reconstruction) keep their folders; defaults to the cache's `engine-jobs`.
+    #[arg(long, value_name = "DIR")]
+    #[serde(default)]
+    pub jobs_dir: Option<PathBuf>,
+
+    /// A folder holding the world-generation checkpoints under their repository names (`WorldStereo/`,
+    /// `Wan2.1-I2V-14B-480P-Diffusers/`, `moge-2-vitl-normal/`, `HY-World-2.0/`, `lpips-vgg/`), for jobs.
+    #[arg(long, value_name = "DIR")]
+    #[serde(default)]
+    pub world_models: Option<PathBuf>,
 }
 
 impl ServerOptions {
@@ -150,6 +161,8 @@ impl Default for ServerOptions {
             access_log_health: false,
             disable_request_id_header: false,
             disable_metrics: false,
+            jobs_dir: None,
+            world_models: None,
         }
     }
 }

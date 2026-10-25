@@ -21,6 +21,7 @@ pub mod hidream_gguf;
 pub(crate) mod inference_for_server_builder;
 #[doc(hidden)]
 pub mod input_files;
+pub mod jobs;
 pub mod logits_processors;
 pub mod lora_adapters;
 #[doc(hidden)]

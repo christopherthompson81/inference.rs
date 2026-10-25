@@ -6,6 +6,7 @@ fn empty_state() -> InferenceRs {
         engines: RwLock::new(HashMap::new()),
         unloaded_models: RwLock::new(HashMap::new()),
         reloading_models: RwLock::new(HashSet::new()),
+        leases: Default::default(),
         default_engine_id: RwLock::new(None),
         model_aliases: RwLock::new(HashMap::new()),
         log: None,

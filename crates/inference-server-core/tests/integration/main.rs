@@ -29,6 +29,7 @@ mod cancel;
 mod chat_route;
 mod flux;
 mod image_edit_route;
+mod jobs_route;
 mod keyed;
 mod mcp;
 mod model_manager;

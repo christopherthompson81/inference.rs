@@ -18,7 +18,7 @@ mod tests;
 
 pub use builder::*;
 pub use config::*;
-pub use residency::is_memory_error;
+pub use residency::{DeviceLease, is_memory_error};
 
 /// State preserved when a model is unloaded, or declared and not yet loaded: everything needed to load it on demand.
 #[derive(Clone)]
@@ -150,6 +150,8 @@ pub struct InferenceRs {
     unloaded_models: RwLock<HashMap<String, UnloadedModelState>>,
     /// Models currently being reloaded (to prevent concurrent reloads)
     reloading_models: RwLock<HashSet<String>>,
+    /// Devices a job holds to itself, and what holds each; taken alone, never beside the locks above
+    leases: residency::Leases,
     default_engine_id: RwLock<Option<String>>,
     /// Alternate IDs that resolve to primary model IDs.
     model_aliases: RwLock<HashMap<String, String>>,
@@ -227,6 +229,9 @@ pub enum InferenceRsError {
     /// Model is already unloaded
     #[error("model `{0}` is already unloaded")]
     ModelAlreadyUnloaded(String),
+    /// A job holds the device, or a model there keeps it from being taken
+    #[error("the device is busy: {0}")]
+    DeviceBusy(String),
     #[error(transparent)]
     LoraAdapter(#[from] LoraAdapterError),
     /// Other error with a message.
@@ -692,6 +697,7 @@ impl InferenceRs {
             engines: RwLock::new(HashMap::new()),
             unloaded_models: RwLock::new(HashMap::new()),
             reloading_models: RwLock::new(HashSet::new()),
+            leases: Default::default(),
             default_engine_id: RwLock::new(None),
             model_aliases: RwLock::new(HashMap::new()),
             log,
@@ -879,6 +885,7 @@ impl InferenceRs {
             engines: RwLock::new(engines),
             unloaded_models: RwLock::new(HashMap::new()),
             reloading_models: RwLock::new(HashSet::new()),
+            leases: Default::default(),
             default_engine_id: RwLock::new(Some(id.clone())),
             model_aliases: RwLock::new(alias_map),
             log,

@@ -231,3 +231,89 @@ under 16 busy cores, the memory, eviction and lazy-model tests, 40 stress iterat
 
 **Implication:** an unload is synchronous now: when it returns, the engine thread is gone and its memory is on the
 device again, which is what eviction measures against.
+
+## Run 7 - 2026-10-25 14:27
+
+**Question:** phases 3 and 4 (job runner, device leases, the world pipelines as jobs): does a job hold its device to
+itself, evicting what is there and keeping loads off it, and do world generation and reconstruction run as jobs with
+their stages, previews and outputs recorded?
+
+**Change:**
+- Core `lease_device` (`inference_rs/residency.rs`): records the holder (another lease or a pinned resident model
+  refuses it), then unloads each resident model on the device as it goes quiet, waiting out loads in flight, within a
+  drain timeout (120 s by default). While the lease lives, `load_with_room` and `Engine::add_model` refuse the device
+  with `DeviceBusy` (HTTP 409, `device_busy`). Requests for models on other devices are untouched.
+- inference-recon `progress::Progress`: stage, advance, preview and cancelled hooks with no-op defaults. World
+  generation reports its stages (scene, trajectories, caption, clips, alignment depth, alignment, splat data,
+  reconstruction), a preview per start view and per clip (its middle frame), and checks cancellation between stages
+  and clips; splat training reports training (every 10 steps), export and mesh, and renders a preview every 1000 steps.
+- inference-api `jobs`: one FIFO worker thread holding the engine only weakly (the exit race of Run 6); each job takes
+  its device's lease, runs, and records its stages, progress, previews (paths in the job folder), outputs and report
+  in `<dir>/<job id>/job.json`, written at each stage, preview and end (progress only goes to subscribers). Kinds: `world`
+  (panorama to keyframes, reconstruction, splat data, then splats and meshes unless `splats: false`) and
+  `reconstruct` (images or a video); `submit_task` runs caller code under the same lifecycle. Records left queued or
+  running by a stopped server read back as failed ("interrupted"); no resume yet. Owners see only their own jobs.
+
+**Tests:**
+```
+jobs::a_job_records_its_stages_previews_and_outputs                     CPU, submit_task
+jobs::a_cancelled_job_stops_and_a_cancelled_queued_job_never_starts     CPU
+jobs::a_device_job_evicts_the_idle_model_and_holds_the_device           CUDA: the idle model unloaded when the job ran,
+    a reload during it refused "the device is busy: held by job ... (hold)", the model loaded again after; a pinned
+    model made a device job fail ("model `pinned-copy` is pinned there")
+worldmirror_job (deep, real WorldMirror 2.0, the sample repo's 3 park photos)       pass, 7.2 s
+```
+
+## Run 8 - 2026-10-25 15:01
+
+**Question:** does a whole world job (deep test `world_job`, the sample repo's indoor panorama at 1280 x 640, splat
+training at 1000 steps) run through the job runner?
+
+**First attempt (14:27):** the machine powered off about 18 minutes in, during the clip loop (the last sample at 14:44:
+GPU 100% busy, 16.4 GB in use). The previous boot's journal simply stops at 14:45:04: no thermal, NVRM Xid, MCE or
+shutdown entries, so the cause is unknown; an abrupt loss of power (thermal or supply trip) fits, a software fault
+would have left a trace. The same stages ran to completion many times before (worldstereo Runs 19-25). The job's
+folder lived in /tmp and went with the reboot.
+
+**Second attempt (15:01):** rerun with an nvidia-smi sampler (temperature, power, SM clock, throttle reasons, fan,
+every 5 s) and the CPU package temperature (every 30 s) written to /mnt/data/build/job-runner-runs, so another power-off
+leaves a record.
+
+**Result:** the machine stayed up (GPU at 69-72 C, power-capped at ~345 W; CPU package up to 79 C of its 82 C "high"),
+but the job failed after 1342 s: `DriverError(CUDA_ERROR_OUT_OF_MEMORY)`. The samples place it at the end of the
+alignment-depth stage (WorldMirror 2.0 at 832 on all 99 memory frames): memory fell to 3.5 GB as the clip loop ended,
+then climbed to 22.8 GB in steps and the job died there.
+
+## Run 9 - 2026-10-25 16:31
+
+**Question:** is the alignment-depth stage too big for the card, or is the job's process the difference?
+
+The CLI on the same panorama (fresh folder, all stages): passes, alignment depth 18,104 MiB allocated at peak, and
+nvidia-smi at 23,593 MiB of 24,576 during it. The stage fits only by ~1 GB in a bare process; the job's process
+carries the engine's own CUDA state as well, and lost.
+
+The nvidia-smi steps during the stage are ~1.5 GB each, four of them inside the trunk: the four head feature maps
+`[99 frames, ~2000 tokens, 2048]` f32 (~1.6 GB each) the trunk keeps while its later layers run. Reruns on the same
+folder (clips reused, so only the late stages run):
+```
+                                   alignment depth           reconstruction (518)    nvidia-smi peak
+baseline                           107.3 s, 17,598 MiB       32.1 s,  8,734 MiB      23,569 MiB
+pool trims after trunk and chunks  (no change: the peak is inside the trunk)          23,569 MiB
+kept maps in host memory           179.4 s, 12,927 MiB      140.6 s,  8,347 MiB      20,487 MiB
+  + chunk slices copied out first  110.0 s, 12,927 MiB       29.9 s,  6,915 MiB      18,823 MiB
+```
+The trunk now moves its kept maps to host memory when the four together pass 2 GiB (the 99-frame passes; a 32-frame
+reconstruction keeps them on the card), and the DPT heads bring each chunk's slice over. The first try was slow
+because `Tensor::to_device` transfers a view's whole storage, so every 2-frame chunk uploaded the whole 1.6 GB map;
+copying the chunk out first fixed it. The pool trims stay (they cut the reconstruction's peak a little). Same values:
+the maps are copied, not recomputed.
+
+## Run 10 - 2026-10-25 17:01
+
+**Question:** with the kept maps in host memory, does the world job finish through the job runner?
+
+`scripts/deep_checks.sh -E 'test(/^world_job::/)'`: pass in 1708.7 s, with every stage from scene to mesh, a preview
+for the start views, each clip and the training render, and the splats and mesh written. nvidia-smi peak 18,344 MiB
+(the failed run reached 22,779 before dying); GPU at most 72 C, and the machine stayed up.
+
+**Implication:** the engine-side job path is whole; next, the full local checks and the HTTP, ABI and binding surface.

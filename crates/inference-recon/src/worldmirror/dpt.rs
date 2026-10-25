@@ -242,9 +242,18 @@ impl DptHead {
         let (mut attr, mut conf, mut masks) = (Vec::new(), Vec::new(), Vec::new());
         for start in (0..frames).step_by(FRAMES_PER_CHUNK) {
             let n = FRAMES_PER_CHUNK.min(frames - start);
+            // features the trunk kept in host memory come over a chunk at a time, copied out of the whole map first
+            // since a transfer moves the view's entire storage
             let chunk = features
                 .iter()
-                .map(|f| f.narrow(0, start, n))
+                .map(|f| {
+                    let view = f.narrow(0, start, n)?;
+                    if f.device().same_device(images.device()) {
+                        Ok(view)
+                    } else {
+                        view.force_contiguous()?.to_device(images.device())
+                    }
+                })
                 .collect::<Result<Vec<_>>>()?;
             let out = self.forward_frames(&chunk, patch_start, &images.narrow(0, start, n)?)?;
             per_chunk(start, &out)?;

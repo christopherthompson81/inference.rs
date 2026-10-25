@@ -294,6 +294,33 @@ internal static unsafe partial class NativeMethods
         IntPtr engine, byte* fileId, nuint fileIdLen, out IntPtr outBlob);
 
     [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_jobs_configure(
+        IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_job_submit(
+        IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_jobs_list(IntPtr engine, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_job_get(
+        IntPtr engine, byte* jobId, nuint jobIdLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_job_cancel(
+        IntPtr engine, byte* jobId, nuint jobIdLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_job_delete(
+        IntPtr engine, byte* jobId, nuint jobIdLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_job_file(
+        IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
     internal static partial InferenceStatus inference_container_files_list(
         IntPtr engine, byte* containerId, nuint containerIdLen, out IntPtr outResponse);
 

@@ -30,6 +30,7 @@ use super::scene::{Scene, View};
 use super::trajectory::{self, Mat4, MeshBvh, Obstacles, PointGrid};
 use crate::geometry::invert4;
 use crate::moge::MoGe;
+use crate::progress::{Progress, check};
 use crate::worldmirror::priors::PriorInputs;
 use crate::worldmirror::run::{
     Axes, OPENCV_AXES, ReconstructOptions, depth_with_priors, reconstruct_with_priors,
@@ -450,6 +451,7 @@ pub fn generate_world(
     out_dir: &Path,
     options: &WorldGenOptions,
     device: &Device,
+    progress: &dyn Progress,
 ) -> Result<WorldGenReport> {
     if pano.width != 2 * pano.height {
         inference_tensor::bail!(
@@ -472,6 +474,8 @@ pub fn generate_world(
     reset_pool_peak(device);
 
     // 1. scene: panorama depth from MoGe-2, cleanup, point cloud, mesh, start views, memory bank crops
+    check(progress)?;
+    progress.stage("scene", 0);
     let t = Instant::now();
     let moge = MoGe::load(&models.moge, DType::F32, device)?;
     let depth = pano_depth(&moge, pano, device)?;
@@ -489,6 +493,10 @@ pub fn generate_world(
         .map(|c2w| scene.view(pano, c2w))
         .collect::<Vec<View>>();
     write_scene(&out_dir.join("scene"), &scene, &views)?;
+    for i in 0..views.len() {
+        let path = out_dir.join("scene").join(format!("start_frame_{i}.png"));
+        progress.preview(&format!("start view {i}"), &path);
+    }
     let ground_median = scene.ground_median();
     let bank = scene
         .memory_bank(pano)
@@ -505,6 +513,8 @@ pub fn generate_world(
     stage("scene (MoGe-2 panorama depth)", t, device);
 
     // 2. trajectories and their point-cloud renders (CPU)
+    check(progress)?;
+    progress.stage("trajectories", 0);
     let t = Instant::now();
     let grid = PointGrid::new(&scene.points);
     let mesh = MeshBvh::new(&scene.mesh_vertices, &scene.mesh_triangles);
@@ -531,6 +541,8 @@ pub fn generate_world(
     stage("trajectories", t, device);
 
     // 3. the caption through umT5, then the encoder is dropped
+    check(progress)?;
+    progress.stage("caption", 0);
     let t = Instant::now();
     let text_states = {
         let te = models.wan.join("text_encoder");
@@ -551,6 +563,8 @@ pub fn generate_world(
     stage("caption (umT5-XXL)", t, device);
 
     // 4. the clip loop
+    check(progress)?;
+    progress.stage("clips", planned.len());
     let t = Instant::now();
     let vae_cfg: VaeConfig = read_json(&models.wan.join("vae/config.json"))?;
     let clip_cfg = read_json(&models.wan.join("image_encoder/config.json"))?;
@@ -597,7 +611,16 @@ pub fn generate_world(
     let schedule_steps = pipeline.schedule.steps;
     let mut clips = Vec::new();
     let mut total_frames = 0;
+    let clip_done = |i: usize, name: &str, dir: &Path| {
+        progress.advance(i + 1);
+        let middle = dir.join(format!(
+            "frame_{:02}.png",
+            trajectory::TRAJECTORY_FRAMES / 2
+        ));
+        progress.preview(&format!("clip {name}"), &middle);
+    };
     for (i, plan) in planned.iter().enumerate() {
+        check(progress)?;
         let (view_id, traj_id) = (format!("view{}", plan.view), format!("traj{}", plan.traj));
         let name = format!("{view_id}_{traj_id}");
         let w2cs = plan.c2ws.iter().map(invert4).collect::<Vec<_>>();
@@ -606,6 +629,7 @@ pub fn generate_world(
         if let Some(done) = load_clip(&dir, w2cs.len()) {
             memory.update(&view_id, &traj_id, &done, &w2cs, &ks);
             total_frames += done.len();
+            clip_done(i, &name, &dir);
             clips.push(name);
             continue;
         }
@@ -707,6 +731,7 @@ pub fn generate_world(
         )?;
         memory.update(&view_id, &traj_id, &generated, &w2cs, &ks);
         total_frames += generated.len();
+        clip_done(i, &name, &dir);
         clips.push(name);
         release(device)?;
     }
@@ -720,6 +745,8 @@ pub fn generate_world(
     let mut transform = None;
     let mut aligned_report = None;
     if let Some(wm_dir) = &models.worldmirror {
+        check(progress)?;
+        progress.stage("alignment depth", 0);
         let t = Instant::now();
         let model = WorldMirror::load(wm_dir, DType::BF16, device)?;
         let images = memory
@@ -752,6 +779,8 @@ pub fn generate_world(
         release(device)?;
         stage("alignment depth (WorldMirror 2.0)", t, device);
 
+        check(progress)?;
+        progress.stage("alignment", 0);
         let t = Instant::now();
         let moge = MoGe::load(&models.moge, DType::F32, device)?;
         let mut align_frames = Vec::with_capacity(memory.frames.len());
@@ -802,6 +831,8 @@ pub fn generate_world(
         drop(align_frames);
         stage("alignment (MoGe-2 masks, fit to the panorama)", t, device);
 
+        check(progress)?;
+        progress.stage("splat data", 0);
         let t = Instant::now();
         let moge = MoGe::load(&models.moge, DType::F32, device)?;
         let by_name = alignment
@@ -852,6 +883,8 @@ pub fn generate_world(
             device,
         );
 
+        check(progress)?;
+        progress.stage("reconstruction", 0);
         let t = Instant::now();
         let frames = memory
             .frames

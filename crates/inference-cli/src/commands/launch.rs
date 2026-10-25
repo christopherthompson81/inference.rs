@@ -56,7 +56,7 @@ pub async fn run_launch(request: LaunchRequest) -> Result<i32> {
         .config
         .as_deref()
         .map(|path| match load_cli_config(path)? {
-            CliConfig::Serve(cfg) => Ok(cfg),
+            CliConfig::Serve(cfg) => Ok(*cfg),
             CliConfig::Run(_) => bail!("{} configures `run`, not a server", path.display()),
         })
         .transpose()?;

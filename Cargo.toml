@@ -148,6 +148,7 @@ base64 = "0.22.1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tempfile = "3"
 half = "2.7.1"
+flate2 = "1.1.8"
 rayon = "1.11.0"
 url = "2.5.8"
 utoipa = "5.4.0"

@@ -284,7 +284,7 @@ impl From<inference_core::Footprint> for ModelMemory {
     }
 }
 
-fn core_error(error: InferenceRsError) -> ApiError {
+pub(crate) fn core_error(error: InferenceRsError) -> ApiError {
     ApiError::from_error(&error, ApiErrorKind::Internal)
 }
 

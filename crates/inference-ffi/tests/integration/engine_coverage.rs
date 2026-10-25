@@ -8,7 +8,7 @@ const FFI_SOURCES: [&str; 3] = [
 ];
 
 // Methods the ABI covers some other way, or that a binding has no use for.
-const NOT_EXPORTED: [(&str, &str); 9] = [
+const NOT_EXPORTED: [(&str, &str); 11] = [
     (
         "load_with_callbacks",
         "the ABI loads through load_json, which takes the callbacks",
@@ -35,6 +35,14 @@ const NOT_EXPORTED: [(&str, &str); 9] = [
     (
         "calibration",
         "exported as calibration_start, calibration_status and calibration_apply",
+    ),
+    (
+        "submit_task",
+        "it runs a Rust closure; a binding runs its own work in its own language",
+    ),
+    (
+        "job_events",
+        "a binding follows a job by polling inference_job_get",
     ),
 ];
 

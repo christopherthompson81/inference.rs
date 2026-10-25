@@ -3,6 +3,7 @@
 pub mod data;
 pub mod lpips;
 pub mod mesh;
+pub mod spz;
 pub mod ssim;
 #[cfg(feature = "cuda")]
 pub mod train;

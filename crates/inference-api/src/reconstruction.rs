@@ -9,6 +9,7 @@ use inference_recon::worldmirror::preprocess::RgbImage;
 use inference_recon::worldmirror::run::{VideoSource, reconstruct_frames};
 use inference_tensor::{DType, Device};
 
+pub use inference_recon::progress::{CANCELLED, NoProgress, Progress};
 pub use inference_recon::worldmirror::output::OutputSettings;
 pub use inference_recon::worldmirror::run::{
     DEFAULT_TARGET_SIZE, MAX_FRAMES, ReconstructOptions, RunReport,
@@ -57,6 +58,23 @@ pub async fn reconstruct(
     video: VideoOptions,
     cpu: bool,
 ) -> anyhow::Result<RunReport> {
+    let device = if cpu {
+        Device::Cpu
+    } else {
+        Device::cuda_if_available(0)?
+    };
+    reconstruct_on(checkpoint, input, out_dir, options, video, &device).await
+}
+
+/// [`reconstruct`] on `device`.
+pub async fn reconstruct_on(
+    checkpoint: &Path,
+    input: &Path,
+    out_dir: &Path,
+    options: &ReconstructOptions,
+    video: VideoOptions,
+    device: &Device,
+) -> anyhow::Result<RunReport> {
     let frames = if is_video(input) {
         if video.max_frames == 0 || video.max_frames > MAX_FRAMES {
             anyhow::bail!(
@@ -96,17 +114,12 @@ pub async fn reconstruct(
     } else {
         None
     };
-    let device = if cpu {
-        Device::Cpu
-    } else {
-        Device::cuda_if_available(0)?
-    };
     let dtype = if device.is_cuda() {
         DType::BF16
     } else {
         DType::F32
     };
-    let model = inference_recon::worldmirror::WorldMirror::load(checkpoint, dtype, &device)?;
+    let model = inference_recon::worldmirror::WorldMirror::load(checkpoint, dtype, device)?;
     let report = match frames {
         Some((frames, source)) => {
             reconstruct_frames(&model, checkpoint, frames, Some(source), out_dir, options)?
@@ -130,7 +143,30 @@ pub fn generate_world(
     panorama: &Path,
     out_dir: &Path,
     options: &WorldGenOptions,
+    progress: &dyn Progress,
 ) -> anyhow::Result<WorldGenReport> {
+    generate_world_on(
+        models,
+        panorama,
+        out_dir,
+        options,
+        progress,
+        &Device::cuda_if_available(0)?,
+    )
+}
+
+/// [`generate_world`] on `device`.
+pub fn generate_world_on(
+    models: &WorldGenModels,
+    panorama: &Path,
+    out_dir: &Path,
+    options: &WorldGenOptions,
+    progress: &dyn Progress,
+    device: &Device,
+) -> anyhow::Result<WorldGenReport> {
+    if !device.is_cuda() {
+        anyhow::bail!("world generation needs a CUDA device");
+    }
     let img = image::open(panorama)
         .map_err(|e| anyhow::anyhow!("{}: {e}", panorama.display()))?
         .to_rgb8();
@@ -139,12 +175,8 @@ pub fn generate_world(
         height: img.height() as usize,
         pixels: img.into_raw(),
     };
-    let device = Device::cuda_if_available(0)?;
-    if !device.is_cuda() {
-        anyhow::bail!("world generation needs a CUDA device");
-    }
     Ok(inference_recon::worldstereo::run::generate_world(
-        models, &pano, out_dir, options, &device,
+        models, &pano, out_dir, options, device, progress,
     )?)
 }
 
@@ -160,12 +192,30 @@ pub fn train_splats(
     data_dir: &Path,
     out_dir: &Path,
     options: &TrainOptions,
+    progress: &dyn Progress,
 ) -> anyhow::Result<SplatReport> {
-    let device = Device::cuda_if_available(0)?;
+    train_splats_on(
+        data_dir,
+        out_dir,
+        options,
+        progress,
+        &Device::cuda_if_available(0)?,
+    )
+}
+
+/// [`train_splats`] on `device`.
+#[cfg(feature = "cuda")]
+pub fn train_splats_on(
+    data_dir: &Path,
+    out_dir: &Path,
+    options: &TrainOptions,
+    progress: &dyn Progress,
+    device: &Device,
+) -> anyhow::Result<SplatReport> {
     if !device.is_cuda() {
         anyhow::bail!("splat training needs a CUDA device");
     }
     Ok(inference_recon::splatting::train::train_splats(
-        data_dir, out_dir, options, &device,
+        data_dir, out_dir, options, device, progress,
     )?)
 }

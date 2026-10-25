@@ -13,6 +13,7 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
+flate2.workspace = true
 half.workspace = true
 image.workspace = true
 inference-models-diffusion.workspace = true
@@ -29,6 +30,7 @@ tokenizers.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
+tempfile.workspace = true
 
 [features]
 cuda = ["inference-tensor/cuda", "inference-nn/cuda", "inference-models-diffusion/cuda"]
