@@ -22,7 +22,7 @@ Work through this list before a `inference serve` deployment receives traffic fr
 - [ ] Run `inference doctor` on the target host to confirm the expected accelerator and compiled features.
 - [ ] Run `inference tune -m <model>` for a starting quantization and memory plan (it estimates from configs; it does not load or benchmark the model).
 - [ ] Set `--max-seqs` deliberately (default 32).
-- [ ] Size the [paged-attention](/guides/perf/paged-attention/) KV pool explicitly instead of relying on the implicit 90% budget, with one of:
+- [ ] Size the [paged-attention](/guides/perf/paged-attention/) KV pool explicitly instead of relying on the default (one sequence at the model's full context), with one of:
   - `--pa-context-len`
   - `--pa-memory-mb`
   - `--pa-memory-fraction`
