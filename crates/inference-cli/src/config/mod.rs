@@ -128,6 +128,9 @@ pub struct ModelEntry {
     /// Registered without loading: the model loads on its first request, under its `model_id`.
     #[serde(default)]
     pub lazy: bool,
+    /// Never evicted to make room for another model.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 #[derive(Deserialize, Default, Clone)]

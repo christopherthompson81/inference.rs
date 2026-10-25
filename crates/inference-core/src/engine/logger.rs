@@ -283,6 +283,14 @@ impl IntervalLogger {
         metrics::counter!("inference_prefix_cache_hits_total").increment(1);
     }
 
+    pub fn num_running(&self) -> usize {
+        self.num_running.load(Ordering::Relaxed)
+    }
+
+    pub fn num_waiting(&self) -> usize {
+        self.num_waiting.load(Ordering::Relaxed)
+    }
+
     pub fn set_num_running(&self, running: usize) {
         self.num_running.store(running, Ordering::Relaxed);
         metrics::gauge!("inference_sequences_running").set(running as f64);

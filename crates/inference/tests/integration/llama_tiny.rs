@@ -532,3 +532,85 @@ async fn a_cuda_model_reports_its_memory() -> anyhow::Result<()> {
     assert_eq!(unloaded.memory.map(|m| m.bytes), Some(loaded.bytes));
     Ok(())
 }
+
+// With the device nearly full, a request for a lazy model evicts the idle resident model to load; with room again, the
+// evicted model loads back beside it on its next request.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_device_evicts_the_idle_model() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    #[cfg(feature = "cuda")]
+    {
+        use inference::{MemoryGpuConfig, PagedAttentionMetaBuilder};
+        use inference_nn::utils::memory_usage::MemoryUsage;
+        const LAZY_ID: &str = "lazy-copy";
+        // the resident model's KV pool, so its eviction frees far more than the lazy one needs
+        const RESIDENT_KV_MB: usize = 400;
+        // the loader keeps this much of a GPU free for what runs beside a load
+        const LOADER_RESERVE_BYTES: u64 = 512 << 20;
+        const CHUNK_BYTES: u64 = 256 << 20;
+        const IDLE: std::time::Duration = std::time::Duration::from_millis(1500);
+        let device = Device::new_cuda(0)?;
+        let checkpoint = tiny_llama_checkpoint()?;
+        let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+            .with_dtype(ModelDType::BF16)
+            .with_paged_attn(
+                PagedAttentionMetaBuilder::default()
+                    .with_gpu_memory(MemoryGpuConfig::MbAmount(RESIDENT_KV_MB))
+                    .build()?,
+            )
+            .build()
+            .await?;
+        let first = model
+            .models()?
+            .data
+            .into_iter()
+            .find(|m| m.default == Some(true))
+            .map(|m| m.id)
+            .ok_or_else(|| anyhow::anyhow!("no default model"))?;
+        let status = |id: &str| -> anyhow::Result<inference::ModelStatus> {
+            Ok(model
+                .model_status(inference::ModelOperationRequest {
+                    model_id: id.to_string(),
+                })?
+                .status)
+        };
+        let spec = serde_json::json!({
+            "model": {"Run": {"model_id": checkpoint.path(), "dtype": "bf16"}},
+            "model_id": LAZY_ID,
+            "lazy": true,
+        });
+        model.add_model_json(spec.to_string().as_bytes()).await?;
+        greedy_ids(&model).await?;
+        tokio::time::sleep(IDLE).await;
+
+        // fill the device to the loader's reserve, in synchronized chunks: a stream-ordered allocation reports running
+        // out only at a later sync
+        MemoryUsage.synchronize_cuda_context(&device)?;
+        MemoryUsage.trim_cuda_memory_pool(&device, 0)?;
+        let free = || -> anyhow::Result<u64> { Ok(MemoryUsage.query(&device)?.available() as u64) };
+        let mut ballast = Vec::new();
+        let mut chunk = CHUNK_BYTES;
+        while free()? > LOADER_RESERVE_BYTES {
+            chunk = chunk.min(free()? - LOADER_RESERVE_BYTES).max(1 << 20);
+            match Tensor::zeros((chunk / 4) as usize, inference_tensor::DType::F32, &device)
+                .and_then(|t| device.synchronize().map(|_| t))
+            {
+                Ok(t) => ballast.push(t),
+                Err(_) if chunk > 1 << 20 => chunk /= 2,
+                Err(_) => break,
+            }
+        }
+
+        greedy(&model, prompt_request().with_model(LAZY_ID), MAX_LEN).await?;
+        assert_eq!(status(LAZY_ID)?, inference::ModelStatus::Loaded);
+        assert_eq!(status(&first)?, inference::ModelStatus::Unloaded);
+
+        drop(ballast);
+        greedy_ids(&model).await?;
+        assert_eq!(status(&first)?, inference::ModelStatus::Loaded);
+        assert_eq!(status(LAZY_ID)?, inference::ModelStatus::Loaded);
+    }
+    Ok(())
+}

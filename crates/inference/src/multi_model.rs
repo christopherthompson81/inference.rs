@@ -42,6 +42,7 @@ fn per_model(model: ModelSelected, options: LoadOptions) -> ModelSpec {
         max_seqs: runtime.max_seqs,
         mtp: runtime.mtp,
         lazy: false,
+        pinned: false,
     }
 }
 

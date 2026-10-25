@@ -546,6 +546,7 @@ impl ModelManager {
             max_seqs: request.max_seqs,
             mtp: request.mtp,
             lazy: false,
+            pinned: false,
         };
         self.engine.add_model(spec).await?;
         let kind = match kind.or_else(|| self.served_kind(&id)) {

@@ -11,12 +11,14 @@ mod builder;
 mod config;
 mod lora;
 mod models;
+mod residency;
 mod sessions;
 #[cfg(test)]
 mod tests;
 
 pub use builder::*;
 pub use config::*;
+pub use residency::is_memory_error;
 
 /// State preserved when a model is unloaded, or declared and not yet loaded: everything needed to load it on demand.
 #[derive(Clone)]
@@ -30,6 +32,8 @@ pub struct UnloadedModelState {
     pub mcp_client_config: Option<McpClientConfig>,
     /// What the model held when last resident; None until it has loaded once
     pub footprint: Option<Footprint>,
+    /// Never evicted to make room for another model
+    pub pinned: bool,
 }
 
 /// How a model's scheduler is configured when it loads.
@@ -66,6 +70,9 @@ struct EngineInstance {
     /// Shared with the engine for fetch-by-id from the SDK/HTTP layer.
     pub(crate) file_store: files::FileStore,
     footprint: Option<Footprint>,
+    /// When a request last reached this engine (unix ms), for least-recently-used eviction
+    last_used: Arc<std::sync::atomic::AtomicU64>,
+    pinned: bool,
 }
 
 impl Drop for EngineInstance {
@@ -161,6 +168,7 @@ struct RebootState {
     /// Optional loader config for reloading after unload
     loader_config: Option<ModelLoaderConfig>,
     footprint: Option<Footprint>,
+    pinned: bool,
 }
 
 // Clears a model's reloading mark when its reload ends, however it ends.
@@ -266,6 +274,9 @@ impl InferenceRs {
         let engine = engines
             .get(&model_id)
             .ok_or_else(|| InferenceRsError::ModelNotFound(model_id.clone()))?;
+        engine
+            .last_used
+            .store(residency::now_ms(), std::sync::atomic::Ordering::Relaxed);
         if let Request::Normal(request) = request
             && let Some(selection) = request.adapter.as_mut()
         {
@@ -313,6 +324,7 @@ impl InferenceRs {
     /// Create an engine instance with the given configuration
     fn create_engine_instance(reboot_state: RebootState) -> Result<EngineInstance, String> {
         let reboot_state_footprint = reboot_state.footprint;
+        let reboot_state_pinned = reboot_state.pinned;
         let pipeline = reboot_state.pipeline.clone();
         let method = reboot_state.method.clone();
         let config = reboot_state.engine_config.clone();
@@ -464,6 +476,8 @@ impl InferenceRs {
             session_store,
             file_store,
             footprint: reboot_state_footprint,
+            last_used: Arc::new(std::sync::atomic::AtomicU64::new(residency::now_ms())),
+            pinned: reboot_state_pinned,
         })
     }
 
@@ -716,6 +730,7 @@ impl InferenceRs {
             defer_daemon_start,
             prefix_store,
             footprint,
+            pinned,
         } = config;
 
         Self::init_device_support(&get_mut_arcmutex!(pipeline).device());
@@ -764,6 +779,7 @@ impl InferenceRs {
             mcp_client_config: mcp_client_config.clone(),
             loader_config,
             footprint,
+            pinned,
         };
 
         let pipeline_name = pipeline.lock().await.name();
@@ -1039,20 +1055,11 @@ impl InferenceRs {
     }
 
     async fn send_request_async_inner(&self, mut request: Request) -> Result<(), InferenceRsError> {
-        // an unloaded (or declared) model loads here, without blocking the caller's runtime as get_sender's reload does
+        // an unloaded (or declared) model loads here, and one another request is loading is waited for, without
+        // blocking the caller's runtime as get_sender's reload does
         if let Request::Normal(normal) = &request {
             let model_id = self.resolve_alias_or_default(normal.model_id.as_deref())?;
-            let unloaded = self
-                .unloaded_models
-                .read()
-                .map_err(|_| InferenceRsError::EnginePoisoned)?
-                .contains_key(&model_id);
-            if unloaded {
-                match self.reload_model(&model_id).await {
-                    Ok(()) | Err(InferenceRsError::ModelAlreadyLoaded(_)) => {}
-                    Err(error) => return Err(error),
-                }
-            }
+            self.ensure_resident(&model_id).await?;
         }
         let sender = self.prepare_request_dispatch(&mut request)?;
         sender

@@ -160,3 +160,33 @@ concurrent long sequences set `--pa-memory-fraction` (the throughput guide says 
 Seen once on this change's CUDA suite: `a_cuda_model_reports_its_memory` passed, then its process died with SIGSEGV
 during exit (3.6 s after "finished"). It did not recur in 25 runs of that test alone or in a full rerun of the suite;
 noted in case an exit-time crash after an unload shows up again.
+## Run 5 - 2026-10-25 09:39
+
+**Question:** phase 2 (load-on-miss with eviction): does a request for a model that does not fit evict an idle one
+and load, and does the evicted model come back?
+
+**Change (core `inference_rs/residency.rs`):**
+- Each engine records when a request last reached it; a model is idle when its scheduler has nothing running or
+  waiting, its queue is empty and no request reached it in the last second. Evictable: idle, unpinned, on the load's
+  device. `evict_one` unloads the least recently used.
+- Reload (on a request or by hand) goes through `load_with_room`: a model with a known footprint first evicts until
+  that plus 512 MiB is free; then the load is tried with its default KV cache required in full (`need_floor`, the
+  best-effort budget's minimum set to the need); on a memory failure one more model is evicted and the load retried;
+  once nothing can go, the cache may take less than its need. Memory failures are told apart by message: an
+  allocation's out of memory, a best-effort minimum missed, "safely available", the device-map planner's "of usable
+  capacity", and the paged cache's "not enough memory" (loader errors are untyped strings).
+- `Engine::add_model` (also the manager's load) retries an eager load the same way.
+- Requests for a model another request is loading wait for it (`ensure_resident`) instead of a 409.
+- Unloading the default model no longer moves the default to another resident model (it now loads on its next
+  request); this also removes a lock taken out of the documented order.
+- `pinned` on `ModelSpec`, the add body and `[[models]]`; models are evictable by default (user decision).
+
+**Raw finding:** `a_full_device_evicts_the_idle_model` (CUDA): a resident tiny model with a 400 MB KV pool, a lazy
+copy declared, the device filled to the loader's 512 MiB reserve with synchronized ballast chunks (one big allocation
+failed only at a later sync, as stream-ordered allocations do). The lazy request's first strict load failed ("Num GPU
+blocks is 0 ... not enough memory"), the resident model was evicted, the retry loaded: lazy loaded, resident
+unloaded. Ballast dropped, a default request brought the resident model back beside it. The tiny-model setup needed
+the large resident pool: two 32 MiB models leave too little margin for the ballast's ~20 MiB allocation granularity.
+
+**Implication:** requests now drive residency. Next (phase 3): the job runner, leases for the self-loading pipelines,
+and a residency view in the API.

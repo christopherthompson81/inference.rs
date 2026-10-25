@@ -35,9 +35,10 @@ not (
 )
 """
 
-# This reads the device's free memory around a load, which other tests' allocations would move, so it runs alone.
+# These read the device's free memory (a load's footprint, and filling the card to force an eviction), which other
+# tests' allocations would move, so each runs alone.
 [[profile.cuda.overrides]]
-filter = 'package(inference) & test(/^llama_tiny::a_cuda_model_reports_its_memory$/)'
+filter = 'package(inference) & test(/^llama_tiny::(a_cuda_model_reports_its_memory|a_full_device_evicts_the_idle_model)$/)'
 threads-required = 'num-test-threads'
 
 [profile.deep]

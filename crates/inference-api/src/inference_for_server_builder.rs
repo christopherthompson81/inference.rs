@@ -64,6 +64,9 @@ pub struct ModelConfig {
     /// Registered without loading: it loads on its first request, under its alias or its configuration key.
     #[serde(default)]
     pub lazy: bool,
+    /// Never evicted to make room for another model.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 impl ModelConfig {
@@ -86,6 +89,7 @@ impl ModelConfig {
             max_seqs: None,
             mtp: None,
             lazy: false,
+            pinned: false,
         }
     }
 
@@ -871,6 +875,7 @@ impl InferenceRsForServerBuilder {
             code_exec_config: self.code_exec_config.clone(),
             shell_config: self.shell_config.clone(),
             footprint: None,
+            pinned: false,
         }
     }
 
@@ -1469,7 +1474,8 @@ impl ModelLoadSettings {
                 .add_model_config
                 .clone()
                 .with_loader_config(loader_config)
-                .with_footprint(footprint),
+                .with_footprint(footprint)
+                .with_pinned(model_config.pinned),
         })
     }
 
@@ -1504,6 +1510,7 @@ impl ModelLoadSettings {
             engine_config: config.engine_config,
             mcp_client_config: config.mcp_client_config,
             footprint: None,
+            pinned: model_config.pinned,
         })
     }
 
