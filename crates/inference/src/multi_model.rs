@@ -41,6 +41,7 @@ fn per_model(model: ModelSelected, options: LoadOptions) -> ModelSpec {
             .then_some(runtime.paged_cache.cache_layers),
         max_seqs: runtime.max_seqs,
         mtp: runtime.mtp,
+        lazy: false,
     }
 }
 

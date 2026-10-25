@@ -18,22 +18,36 @@ mod tests;
 pub use builder::*;
 pub use config::*;
 
-/// State preserved when a model is unloaded.
-/// This contains all the information needed to reload the model on demand.
+/// State preserved when a model is unloaded, or declared and not yet loaded: everything needed to load it on demand.
 #[derive(Clone)]
 pub struct UnloadedModelState {
     /// Configuration to recreate the loader
     pub loader_config: ModelLoaderConfig,
-    /// Scheduler configuration
-    pub scheduler_config: SchedulerConfig,
+    pub scheduler: SchedulerPlan,
     /// Engine configuration
     pub engine_config: EngineConfig,
     /// MCP client configuration
     pub mcp_client_config: Option<McpClientConfig>,
-    /// Model category (Text, Multimodal, etc.)
-    pub category: ModelCategory,
-    /// Model metadata configuration
-    pub inference_config: InferenceRsConfig,
+    /// What the model held when last resident; None until it has loaded once
+    pub footprint: Option<Footprint>,
+}
+
+/// How a model's scheduler is configured when it loads.
+#[derive(Clone)]
+pub enum SchedulerPlan {
+    /// From an earlier load, its paged cache refreshed from the new load's.
+    Realized(SchedulerConfig),
+    /// A declared model's first load: the scheduler is built for the pipeline, and the engine's tool callbacks set up.
+    FirstLoad(Box<FirstLoad>),
+}
+
+#[derive(Clone)]
+pub struct FirstLoad {
+    pub paged_attn_requested: bool,
+    pub max_num_seqs: usize,
+    pub limits: SchedulerLimits,
+    pub code_exec_config: Option<CodeExecutionConfig>,
+    pub shell_config: Option<ShellConfig>,
 }
 
 /// Internal structure to hold per-engine state
@@ -51,6 +65,7 @@ struct EngineInstance {
     session_store: Arc<std::sync::Mutex<engine::agentic_session::AgenticSessionStore>>,
     /// Shared with the engine for fetch-by-id from the SDK/HTTP layer.
     pub(crate) file_store: files::FileStore,
+    footprint: Option<Footprint>,
 }
 
 impl Drop for EngineInstance {
@@ -145,6 +160,7 @@ struct RebootState {
     mcp_client_config: Option<McpClientConfig>,
     /// Optional loader config for reloading after unload
     loader_config: Option<ModelLoaderConfig>,
+    footprint: Option<Footprint>,
 }
 
 // Clears a model's reloading mark when its reload ends, however it ends.
@@ -296,6 +312,7 @@ impl InferenceRs {
 
     /// Create an engine instance with the given configuration
     fn create_engine_instance(reboot_state: RebootState) -> Result<EngineInstance, String> {
+        let reboot_state_footprint = reboot_state.footprint;
         let pipeline = reboot_state.pipeline.clone();
         let method = reboot_state.method.clone();
         let config = reboot_state.engine_config.clone();
@@ -446,6 +463,7 @@ impl InferenceRs {
             logger,
             session_store,
             file_store,
+            footprint: reboot_state_footprint,
         })
     }
 
@@ -697,6 +715,7 @@ impl InferenceRs {
             shell_config,
             defer_daemon_start,
             prefix_store,
+            footprint,
         } = config;
 
         Self::init_device_support(&get_mut_arcmutex!(pipeline).device());
@@ -744,6 +763,7 @@ impl InferenceRs {
             engine_config,
             mcp_client_config: mcp_client_config.clone(),
             loader_config,
+            footprint,
         };
 
         let pipeline_name = pipeline.lock().await.name();
@@ -1019,6 +1039,21 @@ impl InferenceRs {
     }
 
     async fn send_request_async_inner(&self, mut request: Request) -> Result<(), InferenceRsError> {
+        // an unloaded (or declared) model loads here, without blocking the caller's runtime as get_sender's reload does
+        if let Request::Normal(normal) = &request {
+            let model_id = self.resolve_alias_or_default(normal.model_id.as_deref())?;
+            let unloaded = self
+                .unloaded_models
+                .read()
+                .map_err(|_| InferenceRsError::EnginePoisoned)?
+                .contains_key(&model_id);
+            if unloaded {
+                match self.reload_model(&model_id).await {
+                    Ok(()) | Err(InferenceRsError::ModelAlreadyLoaded(_)) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
         let sender = self.prepare_request_dispatch(&mut request)?;
         sender
             .send(request)

@@ -155,7 +155,8 @@ fn build_model_specs(
         let model = convert_to_model_selected(&model_type, &matformer)?;
         specs.push(ModelSpec {
             model,
-            model_id: None,
+            // a lazy model is named before it loads: by the id it is configured with
+            model_id: entry.lazy.then(|| entry.model_id.clone()),
             chat_template: entry
                 .chat_template
                 .as_ref()
@@ -177,6 +178,7 @@ fn build_model_specs(
             paged_cache_layers: None,
             max_seqs: entry.max_seqs,
             mtp: None,
+            lazy: entry.lazy,
         });
     }
     Ok((specs, cpu))

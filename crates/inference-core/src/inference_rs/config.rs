@@ -46,6 +46,8 @@ pub struct AddModelConfig {
     pub loader_config: Option<ModelLoaderConfig>,
     pub code_exec_config: Option<CodeExecutionConfig>,
     pub shell_config: Option<ShellConfig>,
+    /// What the model's load took on its device, when measured
+    pub footprint: Option<Footprint>,
 }
 
 impl AddModelConfig {
@@ -56,7 +58,13 @@ impl AddModelConfig {
             loader_config: None,
             code_exec_config: None,
             shell_config: None,
+            footprint: None,
         }
+    }
+
+    pub fn with_footprint(mut self, footprint: Option<Footprint>) -> Self {
+        self.footprint = footprint;
+        self
     }
 
     pub fn with_mcp_config(mut self, mcp_config: McpClientConfig) -> Self {
@@ -195,13 +203,33 @@ impl ModelLoaderConfig {
         })
     }
 
-    /// Load `loader` with this config, attaching MTP speculative decoding when configured.
+    /// Load `loader` with this config, attaching MTP speculative decoding when configured; with the device memory the
+    /// load took, on a CUDA device.
     pub fn load<'a>(
         &'a self,
         loader: &'a dyn Loader,
         mtp_runtime: MtpRuntimeConfig,
-    ) -> BoxFuture<'a, anyhow::Result<Arc<tokio::sync::Mutex<dyn Pipeline + Send + Sync>>>> {
-        Box::pin(self.load_inner(loader, mtp_runtime))
+    ) -> BoxFuture<'a, anyhow::Result<PipelineLoad>> {
+        Box::pin(async move {
+            let before = device_used_bytes(&self.device);
+            let pipeline = self.load_inner(loader, mtp_runtime).await?;
+            let footprint = match (before, device_used_bytes(&self.device)) {
+                (Some(before), Some(after)) => {
+                    self.device
+                        .location()
+                        .cuda_ordinal()
+                        .map(|device| Footprint {
+                            device,
+                            bytes: after.saturating_sub(before),
+                        })
+                }
+                _ => None,
+            };
+            Ok(PipelineLoad {
+                pipeline,
+                footprint,
+            })
+        })
     }
 
     async fn load_inner(
@@ -237,4 +265,37 @@ impl ModelLoaderConfig {
         }
         Ok(pipeline)
     }
+}
+
+/// The device memory one model holds: what its load added to the device's used memory, with the CUDA pool's cached
+/// blocks returned before both readings (weights, KV pool, workspaces; a concurrent load or request on the same device
+/// shows up in it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Footprint {
+    pub device: usize,
+    pub bytes: u64,
+}
+
+/// A loaded pipeline and what it took on its device.
+pub struct PipelineLoad {
+    pub pipeline: Arc<tokio::sync::Mutex<dyn Pipeline + Send + Sync>>,
+    pub footprint: Option<Footprint>,
+}
+
+// a CUDA device's used memory once its work is done and its pool's cached blocks are returned
+#[cfg(not(feature = "cuda"))]
+fn device_used_bytes(_device: &Device) -> Option<u64> {
+    None
+}
+
+#[cfg(feature = "cuda")]
+fn device_used_bytes(device: &Device) -> Option<u64> {
+    if !device.is_cuda() {
+        return None;
+    }
+    let usage = crate::utils::memory_usage::MemoryUsage;
+    usage.synchronize_cuda_context(device).ok()?;
+    usage.trim_cuda_memory_pool(device, 0).ok()?;
+    let memory = usage.query(device).ok()?;
+    Some(memory.total().saturating_sub(memory.available()) as u64)
 }

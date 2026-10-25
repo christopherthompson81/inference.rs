@@ -1288,6 +1288,14 @@ class ModelDType(str, Enum):
 
 
 @dataclass(kw_only=True)
+class ModelMemory:
+    """What one model's load took on its device: the device's used memory before and after it, with cached pool blocks returned first."""
+
+    bytes: int
+    device: int
+
+
+@dataclass(kw_only=True)
 class ModelModalities:
     input: list[Modality]
     output: list[Modality]
@@ -1306,6 +1314,8 @@ class ModelObject:
     max_model_len: int | None = None
     mcp_servers_connected: int | None = None
     mcp_tools_count: int | None = None
+    memory_bytes: int | None = None
+    memory_device: int | None = None
     modalities: ModelModalities | None = None
     object: str
     owned_by: str
@@ -1569,6 +1579,7 @@ class ModelSpec:
     hf_revision: str | None = None
     isq: str | None = None
     jinja_explicit: str | None = None
+    lazy: bool | None = None
     max_model_len: int | None = None
     max_seqs: int | None = None
     model: ModelSelected
@@ -1596,6 +1607,7 @@ class ModelStatus(str, Enum):
 
 @dataclass(kw_only=True)
 class ModelStatusResponse:
+    memory: ModelMemory | None = None
     model_id: str
     status: ModelStatus
 

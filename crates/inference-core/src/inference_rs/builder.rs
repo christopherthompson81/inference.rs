@@ -21,6 +21,7 @@ pub struct InferenceRsBuilder {
     pub(super) agent_runner: Option<Arc<dyn AgentRunner>>,
     pub(super) mcp_client_config: Option<McpClientConfig>,
     pub(super) loader_config: Option<ModelLoaderConfig>,
+    pub(super) footprint: Option<Footprint>,
     pub(super) code_exec_config: Option<CodeExecutionConfig>,
     pub(super) shell_config: Option<ShellConfig>,
     pub(super) defer_daemon_start: bool,
@@ -53,6 +54,7 @@ impl InferenceRsBuilder {
             agent_runner: None,
             mcp_client_config: None,
             loader_config: None,
+            footprint: None,
             code_exec_config: None,
             shell_config: None,
             defer_daemon_start: false,
@@ -72,8 +74,10 @@ impl InferenceRsBuilder {
             loader_config,
             code_exec_config,
             shell_config,
+            footprint,
         } = config;
         Self {
+            footprint,
             no_kv_cache: Some(engine_config.no_kv_cache),
             no_prefix_cache: Some(engine_config.no_prefix_cache),
             prefix_cache_n: Some(engine_config.prefix_cache_n),

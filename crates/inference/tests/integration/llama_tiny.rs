@@ -469,3 +469,66 @@ async fn a_model_split_across_gpu_and_cpu_scores_as_on_the_gpu() -> anyhow::Resu
     );
     Ok(())
 }
+
+// A lazy model is registered without loading, loads on its first request, and then decodes as the same checkpoint
+// loaded up front does.
+#[tokio::test]
+async fn a_lazy_model_loads_on_its_first_request() -> anyhow::Result<()> {
+    const LAZY_ID: &str = "lazy-copy";
+    let dir = tiny_llama_checkpoint()?;
+    let model = cpu_text_builder(dir.path()).build().await?;
+    let spec = serde_json::json!({
+        "model": {"Run": {"model_id": dir.path(), "dtype": "f32"}},
+        "model_id": LAZY_ID,
+        "lazy": true,
+    });
+    let added: serde_json::Value =
+        serde_json::from_str(&model.add_model_json(spec.to_string().as_bytes()).await?)?;
+    assert_eq!(added["status"], "unloaded", "{added}");
+    let status = || {
+        model.model_status(inference::ModelOperationRequest {
+            model_id: LAZY_ID.to_string(),
+        })
+    };
+    assert_eq!(status()?.status, inference::ModelStatus::Unloaded);
+
+    let eager = greedy_ids(&model).await?;
+    let (lazy, _) = greedy(&model, prompt_request().with_model(LAZY_ID), MAX_LEN).await?;
+    assert_eq!(status()?.status, inference::ModelStatus::Loaded);
+    let lazy = lazy.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+    assert_eq!(eager, lazy, "the lazy copy decoded differently");
+    Ok(())
+}
+
+// A model loaded on a CUDA device reports what its load took there, and keeps reporting it once unloaded.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cuda_model_reports_its_memory() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let checkpoint = tiny_llama_checkpoint()?;
+    let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .build()
+        .await?;
+    let id = model
+        .models()?
+        .data
+        .into_iter()
+        .find(|m| m.default == Some(true))
+        .map(|m| m.id)
+        .ok_or_else(|| anyhow::anyhow!("no default model"))?;
+    let op = || inference::ModelOperationRequest {
+        model_id: id.clone(),
+    };
+    let loaded = model
+        .model_status(op())?
+        .memory
+        .ok_or_else(|| anyhow::anyhow!("no memory reported"))?;
+    assert_eq!(loaded.device, 0);
+    assert!(loaded.bytes > 0, "{loaded:?}");
+    model.unload_model(op())?;
+    let unloaded = model.model_status(op())?;
+    assert_eq!(unloaded.memory.map(|m| m.bytes), Some(loaded.bytes));
+    Ok(())
+}

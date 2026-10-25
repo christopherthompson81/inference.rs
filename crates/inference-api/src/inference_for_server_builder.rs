@@ -61,6 +61,9 @@ pub struct ModelConfig {
     /// Speculative decoding for this model; the engine's MTP setting applies to its first model only.
     #[serde(skip)]
     pub mtp: Option<MtpConfig>,
+    /// Registered without loading: it loads on its first request, under its alias or its configuration key.
+    #[serde(default)]
+    pub lazy: bool,
 }
 
 impl ModelConfig {
@@ -82,6 +85,7 @@ impl ModelConfig {
             paged_cache_layers: None,
             max_seqs: None,
             mtp: None,
+            lazy: false,
         }
     }
 
@@ -866,6 +870,7 @@ impl InferenceRsForServerBuilder {
             loader_config: None,
             code_exec_config: self.code_exec_config.clone(),
             shell_config: self.shell_config.clone(),
+            footprint: None,
         }
     }
 
@@ -989,7 +994,11 @@ impl InferenceRsForServerBuilder {
         };
         let loader = loader_config.build_loader(self.no_kv_cache)?;
         inference_instance_info(&*loader);
-        let pipeline: LoadedPipeline = loader_config.load(&*loader, mtp_runtime).await?;
+        let inference_core::PipelineLoad {
+            pipeline,
+            footprint,
+        } = loader_config.load(&*loader, mtp_runtime).await?;
+        let add_model_config = add_model_config.with_footprint(footprint);
         info!("Model loaded.");
 
         let scheduler_config =
@@ -1019,10 +1028,18 @@ impl InferenceRsForServerBuilder {
 
         let settings = self.model_load_settings()?;
 
+        let lazy_models = self.models.iter().filter(|m| m.lazy).count();
+        if lazy_models > 0 && inference_quant::distributed::use_nccl() {
+            anyhow::bail!(
+                "a tensor-parallel engine loads every model at start; lazy models need a single-process engine"
+            );
+        }
+        // lazy models size their caches when they first load, so the split is over the others
         let paged_kv_plan = plan_paged_kv(
             &self
                 .models
                 .iter()
+                .filter(|model_config| !model_config.lazy)
                 .map(|model_config| PagedKvModelRequest {
                     paged_attn: settings.requested_cache,
                     max_num_seqs: settings.model_max_seqs(model_config),
@@ -1034,7 +1051,27 @@ impl InferenceRsForServerBuilder {
         let mut loaded_model_ids = Vec::new();
         let mut registered_ids = HashSet::new();
         let mut inference: Option<SharedInferenceRsState> = None;
+        let mut eager_index = 0;
         for (model_index, model_config) in self.models.iter().enumerate() {
+            if model_config.lazy {
+                let model_id = model_config
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| model_config.model_id.clone());
+                if !registered_ids.insert(model_id.clone()) {
+                    anyhow::bail!("Model ID conflict: '{model_id}' is already registered");
+                }
+                let state = settings.declare(model_config)?;
+                inference
+                    .get_or_insert_with(|| InferenceRs::empty(self.log.clone()))
+                    .declare_model(model_id.clone(), state)
+                    .map_err(|e| anyhow::anyhow!("Failed to declare model {model_id}: {e}"))?;
+                info!("Declared `{model_id}`: it loads on its first request");
+                loaded_model_ids.push(model_id);
+                continue;
+            }
+            let plan_index = eager_index;
+            eager_index += 1;
             if model_index > 0 {
                 info!(
                     "Loading additional model from config key: {}",
@@ -1048,7 +1085,7 @@ impl InferenceRsForServerBuilder {
                 .or_else(|| self.mtp_config.clone().filter(|_| model_index == 0));
             let paged_attn = settings.model_cache(
                 model_config,
-                paged_kv_plan.paged_attn[model_index],
+                paged_kv_plan.paged_attn[plan_index],
                 mtp_config.as_ref(),
             )?;
             let loaded = settings
@@ -1338,14 +1375,12 @@ impl ModelLoadSettings {
         self.in_situ_quant.is_some()
     }
 
-    async fn load(
+    fn loader_config(
         &self,
         model_config: &ModelConfig,
         paged_attn_config: Option<PagedAttentionConfig>,
         mtp_config: Option<MtpConfig>,
-        max_seqs: usize,
-        announce: bool,
-    ) -> Result<LoadedModel> {
+    ) -> Result<ModelLoaderConfig> {
         let model = model_config.model.clone();
         let dtype = get_model_dtype(&model)?;
         let mapper = init_mapper(
@@ -1393,11 +1428,26 @@ impl ModelLoadSettings {
             moe_expert_cache: self.moe_expert_cache,
             overrides: Default::default(),
         };
+        Ok(loader_config)
+    }
+
+    async fn load(
+        &self,
+        model_config: &ModelConfig,
+        paged_attn_config: Option<PagedAttentionConfig>,
+        mtp_config: Option<MtpConfig>,
+        max_seqs: usize,
+        announce: bool,
+    ) -> Result<LoadedModel> {
+        let loader_config = self.loader_config(model_config, paged_attn_config, mtp_config)?;
         let loader = loader_config.build_loader(self.no_kv_cache)?;
         if announce {
             inference_instance_info(&*loader);
         }
-        let pipeline: LoadedPipeline = loader_config.load(&*loader, self.mtp_runtime).await?;
+        let inference_core::PipelineLoad {
+            pipeline,
+            footprint,
+        } = loader_config.load(&*loader, self.mtp_runtime).await?;
         let scheduler_config = SchedulerConfig::for_pipeline(
             &pipeline,
             paged_attn_config.is_some(),
@@ -1418,7 +1468,42 @@ impl ModelLoadSettings {
             config: self
                 .add_model_config
                 .clone()
-                .with_loader_config(loader_config),
+                .with_loader_config(loader_config)
+                .with_footprint(footprint),
+        })
+    }
+
+    /// The unloaded state of a lazy model: its loader, and the scheduler and tool setup its first load completes.
+    pub(crate) fn declare(
+        &self,
+        model_config: &ModelConfig,
+    ) -> Result<inference_core::UnloadedModelState> {
+        let max_seqs = self.model_max_seqs(model_config);
+        // sized alone, from what is free when it first loads, as load_additional sizes a model added later
+        let plan = plan_paged_kv(
+            &[PagedKvModelRequest {
+                paged_attn: self.requested_cache,
+                max_num_seqs: max_seqs,
+            }],
+            Default::default(),
+        )?;
+        let mtp = model_config.mtp.clone();
+        let paged_attn = self.model_cache(model_config, plan.paged_attn[0], mtp.as_ref())?;
+        let config = self.add_model_config.clone();
+        Ok(inference_core::UnloadedModelState {
+            loader_config: self.loader_config(model_config, paged_attn, mtp)?,
+            scheduler: inference_core::SchedulerPlan::FirstLoad(Box::new(
+                inference_core::FirstLoad {
+                    paged_attn_requested: paged_attn.is_some(),
+                    max_num_seqs: max_seqs,
+                    limits: self.limits,
+                    code_exec_config: config.code_exec_config,
+                    shell_config: config.shell_config,
+                },
+            )),
+            engine_config: config.engine_config,
+            mcp_client_config: config.mcp_client_config,
+            footprint: None,
         })
     }
 

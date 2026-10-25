@@ -35,6 +35,11 @@ not (
 )
 """
 
+# This reads the device's free memory around a load, which other tests' allocations would move, so it runs alone.
+[[profile.cuda.overrides]]
+filter = 'package(inference) & test(/^llama_tiny::a_cuda_model_reports_its_memory$/)'
+threads-required = 'num-test-threads'
+
 [profile.deep]
 default-filter = """
 (package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|qwen3_5_tool_call|gguf_iq)::/))

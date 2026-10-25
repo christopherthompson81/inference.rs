@@ -71,8 +71,42 @@ declared model: lazy (declared, not loaded at start), pinned, idle eviction time
 5. Surface: HTTP, ABI, bindings, web UI with the splat viewer (compressed splat export first: the 1.9M-splat PLY is
    126 MB).
 
-**Open questions for the user.**
-- After an exclusive job, reload the models it evicted, or leave them for load-on-miss?
-- Default eviction policy for models loaded by hand in the manager: evictable, or pinned unless marked otherwise?
-- Multi-GPU: should a job be able to take a whole second card while the first keeps serving?
-- Persistence and resume across server restarts: required for long jobs in the first version, or later?
+**Decisions (user, 2026-10-25).**
+- After an exclusive job, evicted models are not reloaded: load-on-miss brings them back when asked for.
+- Models loaded by hand in the manager are evictable by default (pinning is opt-in).
+- Placement is a speed policy: a job may take the faster route (more devices, or evicting more) when the queue is
+  quiet, but not when it is busy. Configurable; the default is fastest.
+- Restart survival is not required in the first version; the persisted job records should make it possible later.
+
+## Run 2 - 2026-10-25 05:54
+
+**Question:** phase 1 (a measured footprint per model, and models declared without loading): does it hold on the
+tiny checkpoints, CPU and CUDA?
+
+**Change:**
+- `ModelLoaderConfig::load` returns the pipeline with its `Footprint` (device, bytes): the device's used memory before
+  and after the load, each read after a synchronize and a pool trim, so cached blocks are not counted. It covers
+  weights, the KV pool and load-time workspaces; a concurrent load or request on the same device leaks into it (loads
+  are serialised by the manager's gate; requests are not). Only the load's own device is measured, so a model split
+  over two GPUs is undercounted.
+- The footprint rides on the engine instance, survives an unload in `UnloadedModelState`, and is reported by
+  `/v1/models/status` (`memory`) and `/v1/models` (`memory_bytes`, `memory_device`).
+- `UnloadedModelState` now holds a `SchedulerPlan`: `Realized` (from an earlier load, as before) or `FirstLoad` (a
+  declared model: the scheduler is built for the pipeline and the tool callbacks set up when it first loads, as
+  `add_model` does for a model loaded up front). Its unused category and config fields are gone.
+- `InferenceRs::declare_model`; `lazy` on `ModelSpec`, `POST /v1/models/add` and `[[models]]` in the serve TOML. A
+  lazy model needs `model_id` (its pipeline name is only known after loading); its KV cache is planned alone, like a
+  model added later, and sized against what is free when it loads. A tensor-parallel engine refuses lazy models.
+- The async request path now loads an unloaded model with `reload_model().await`. Before, only `get_sender`'s
+  `reload_model_blocking` did, which refuses on a current-thread runtime (the first lazy request failed with an
+  opaque internal error in a `#[tokio::test]`) and blocks a runtime worker for the whole load.
+
+**Raw finding:**
+- `a_lazy_model_loads_on_its_first_request` (CPU, f32): declared, status unloaded, the first request loads it, status
+  loaded, greedy ids equal to the same checkpoint loaded up front. Passes, with every existing reload test.
+- `a_cuda_model_reports_its_memory` (BF16 on device 0): status reports device 0 and a positive byte count; after an
+  unload the status reports the same bytes. Passes.
+
+**Implication:** phase 2 can size evictions from measured footprints and load on a miss without blocking. Still to
+check on a real checkpoint: how close the footprint is to nvidia-smi's view, and how much noise a concurrent request
+adds.

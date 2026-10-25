@@ -1330,6 +1330,12 @@ pub struct ModelObject {
     /// Model status: "loaded", "unloaded", or "reloading"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// Device memory the model holds while resident, or held when last resident (measured on CUDA devices)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_bytes: Option<u64>,
+    /// The CUDA device `memory_bytes` is on
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_device: Option<usize>,
     /// Whether tools are available through MCP or tool callbacks
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools_available: Option<bool>,

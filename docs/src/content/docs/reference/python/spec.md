@@ -525,6 +525,7 @@ One of several models an engine serves; unset settings fall back to `runtime`'s.
 | `hf_revision` | `str \| None` | optional |
 | `isq` | `str \| None` | optional |
 | `jinja_explicit` | `str \| None` | optional |
+| `lazy` | `bool \| None` | optional |
 | `max_model_len` | `int \| None` | optional |
 | `max_seqs` | `int \| None` | optional |
 | `model` | `ModelSelected` | required |
