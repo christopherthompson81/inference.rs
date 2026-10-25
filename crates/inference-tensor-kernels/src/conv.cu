@@ -144,66 +144,42 @@ __device__ void col2im1d(
 
 template <typename T>
 __device__ void im2col(
-    const size_t dst_numel,
-    const size_t h_out,
-    const size_t w_out,
-    const size_t h_k,
-    const size_t w_k,
-    const size_t stride,
-    const size_t padding,
-    const size_t dilation,
+    const uint32_t m_total,
+    const uint32_t w_out,
+    const uint32_t h_k,
+    const uint32_t w_k,
+    const uint32_t stride,
+    const uint32_t padding,
+    const uint32_t dilation,
     const size_t *info,
     const T *src,
     T *dst
 ) {
-  const size_t dst_i = blockIdx.x * blockDim.x + threadIdx.x;
-  // dst: (b_size, h_out, w_out, c_in, h_k, w_k)
-  // src: (b_size, c_in, h_in, w_in)
-  if (dst_i >= dst_numel) {
+  // dst: (b_size, c_in * h_k * w_k, h_out * w_out), so a conv is one GEMM per batch landing in (c_out, h_out * w_out)
+  // src: (b_size, c_in, h_in, w_in); grid: x over output pixels, y over (c_in, h_k, w_k), z over the batch
+  const uint32_t m = blockIdx.x * blockDim.x + threadIdx.x;
+  if (m >= m_total) {
     return;
   }
+  const uint32_t k = blockIdx.y;
+  const uint32_t b = blockIdx.z;
   const size_t *src_dims = info;
   const size_t *src_s = info + 4;
-  const size_t c_in = src_dims[1];
-  const size_t h_in = src_dims[2];
-  const size_t w_in = src_dims[3];
-
-  const size_t dst_s4 = w_k;
-  const size_t dst_s3 = h_k * dst_s4;
-  const size_t dst_s2 = c_in * dst_s3;
-  const size_t dst_s1 = w_out * dst_s2;
-  const size_t dst_s0 = h_out * dst_s1;
-
-  size_t tmp_dst_i = dst_i;
-  const size_t b_idx = tmp_dst_i / dst_s0;
-  tmp_dst_i -= b_idx * dst_s0;
-  const size_t h_idx = tmp_dst_i / dst_s1;
-  tmp_dst_i -= h_idx * dst_s1;
-  const size_t w_idx = tmp_dst_i / dst_s2;
-  tmp_dst_i -= w_idx * dst_s2;
-  const size_t c_idx = tmp_dst_i / dst_s3;
-  tmp_dst_i -= c_idx * dst_s3;
-  const size_t h_k_idx = tmp_dst_i / dst_s4;
-  tmp_dst_i -= h_k_idx * dst_s4;
-  const size_t w_k_idx = tmp_dst_i;
-  size_t src_h_idx = h_idx * stride + h_k_idx * dilation;
-  size_t src_w_idx = w_idx * stride + w_k_idx * dilation;
-  if (src_h_idx < padding || src_h_idx >= h_in + padding) {
-    dst[dst_i] = static_cast<T>(0);
+  const int h_in = src_dims[2];
+  const int w_in = src_dims[3];
+  const uint32_t taps = h_k * w_k;
+  const uint32_t c = k / taps;
+  const uint32_t ky = (k - c * taps) / w_k;
+  const uint32_t kx = k - c * taps - ky * w_k;
+  const uint32_t y = m / w_out;
+  const uint32_t x = m - y * w_out;
+  const int iy = int(y * stride + ky * dilation) - int(padding);
+  const int ix = int(x * stride + kx * dilation) - int(padding);
+  T v = static_cast<T>(0);
+  if (iy >= 0 && iy < h_in && ix >= 0 && ix < w_in) {
+    v = src[b * src_s[0] + c * src_s[1] + size_t(iy) * src_s[2] + size_t(ix) * src_s[3]];
   }
-  else if (src_w_idx < padding || src_w_idx >= w_in + padding) {
-    dst[dst_i] = static_cast<T>(0);
-  }
-  else {
-    src_h_idx -= padding;
-    src_w_idx -= padding;
-    const size_t src_i =
-      b_idx * src_s[0]
-      + c_idx * src_s[1]
-      + src_h_idx * src_s[2]
-      + src_w_idx * src_s[3];
-    dst[dst_i] = src[src_i];
-  }
+  dst[(size_t(b) * gridDim.y + k) * m_total + m] = v;
 }
 
 // Direct conv2d, grouped the same way as conv1d.
@@ -699,19 +675,18 @@ extern "C" __global__ void FN_NAME(  \
 
 #define IM2COL_OP(TYPENAME, FN_NAME) \
 extern "C" __global__ void FN_NAME(  \
-    const size_t dst_numel, \
-    const size_t h_out, \
-    const size_t w_out, \
-    const size_t h_k, \
-    const size_t w_k, \
-    const size_t stride, \
-    const size_t padding, \
-    const size_t dilation, \
+    const uint32_t m_total, \
+    const uint32_t w_out, \
+    const uint32_t h_k, \
+    const uint32_t w_k, \
+    const uint32_t stride, \
+    const uint32_t padding, \
+    const uint32_t dilation, \
     const size_t *info, \
     const TYPENAME *src, \
     TYPENAME *dst \
 ) {  \
-  im2col<TYPENAME>(dst_numel, h_out, w_out, h_k, w_k, stride, padding, dilation, info, src, dst); \
+  im2col<TYPENAME>(m_total, w_out, h_k, w_k, stride, padding, dilation, info, src, dst); \
 } \
 
 #define CONVT1D_OP(TYPENAME, TYPEACC, FN_NAME) \

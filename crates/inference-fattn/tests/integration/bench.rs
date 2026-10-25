@@ -420,3 +420,32 @@ fn verify_long_context() -> Result<()> {
     }
     Ok(())
 }
+
+// Bidirectional attention over every frame's tokens, as a multi-view reconstruction trunk's global layers run it
+const LONG_BIDIRECTIONAL: [(usize, usize, usize); 3] =
+    [(16, 64, 4096), (16, 64, 20848), (16, 64, 41696)];
+
+#[test]
+#[ignore]
+fn long_bidirectional() -> Result<()> {
+    let dev = Device::new_cuda(0)?;
+    let dtype = if std::env::var_os(F16_ENV).is_some() {
+        DType::F16
+    } else {
+        DType::BF16
+    };
+    for (n_head, head_dim, seq) in LONG_BIDIRECTIONAL {
+        let rand = || -> Result<Tensor> {
+            Ok(Tensor::randn(0f32, 1., (1, seq, n_head, head_dim), &dev)?.to_dtype(dtype)?)
+        };
+        let (q, k, v) = (rand()?, rand()?, rand()?);
+        let opts = FattnOptions {
+            scale: 1. / (head_dim as f32).sqrt(),
+            ..Default::default()
+        };
+        let us = time(&dev, || flash_attn(&q, &k, &v, &opts))?;
+        let tflops = 4.0 * (seq * seq * n_head * head_dim) as f64 / us / 1e6;
+        println!("h {n_head} d {head_dim} seq {seq:>6}: {us:10.1} us, {tflops:5.1} TFLOP/s");
+    }
+    Ok(())
+}
