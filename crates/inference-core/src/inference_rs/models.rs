@@ -301,6 +301,7 @@ impl InferenceRs {
             mcp_client_config: config.mcp_client_config.clone(),
             loader_config: config.loader_config.clone(),
             footprint: config.footprint,
+            pinned: config.pinned,
         };
 
         let engine_instance = Self::create_engine_instance(reboot_state)?;
@@ -474,6 +475,7 @@ impl InferenceRs {
             engine_config: engine_instance.reboot_state.engine_config.clone(),
             mcp_client_config: engine_instance.reboot_state.mcp_client_config.clone(),
             footprint: engine_instance.footprint,
+            pinned: engine_instance.pinned,
         };
 
         // Send terminate signal to the engine
@@ -488,22 +490,7 @@ impl InferenceRs {
             .map_err(|_| InferenceRsError::EnginePoisoned)?;
         unloaded.insert(resolved_model_id.to_string(), unloaded_state);
 
-        // Update default if needed
-        let mut default_lock = self
-            .default_engine_id
-            .write()
-            .map_err(|_| InferenceRsError::EnginePoisoned)?;
-        if let Some(ref default_id) = *default_lock
-            && default_id == &resolved_model_id
-        {
-            // Set the first available engine as the new default
-            let engines = self
-                .engines
-                .read()
-                .map_err(|_| InferenceRsError::EnginePoisoned)?;
-            *default_lock = engines.keys().next().cloned();
-        }
-
+        // an unloaded default stays the default: the next request for it loads it again
         info!("Model {} unloaded successfully", resolved_model_id);
         Ok(())
     }
@@ -549,12 +536,12 @@ impl InferenceRs {
             .get(&resolved_model_id)
             .cloned()
             .ok_or_else(|| InferenceRsError::ModelNotFound(resolved_model_id.clone()))?;
-        self.do_reload_model(&resolved_model_id, unloaded_state)
+        self.load_with_room(&resolved_model_id, unloaded_state)
             .await
     }
 
     /// Internal method to perform the actual model reload
-    async fn do_reload_model(
+    pub(super) async fn do_reload_model(
         &self,
         model_id: &str,
         unloaded_state: UnloadedModelState,
@@ -633,6 +620,7 @@ impl InferenceRs {
             mcp_client_config: unloaded_state.mcp_client_config.clone(),
             loader_config: Some(unloaded_state.loader_config.clone()),
             footprint,
+            pinned: unloaded_state.pinned,
         };
 
         let engine_instance = Self::create_engine_instance(reboot_state)

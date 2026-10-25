@@ -211,6 +211,8 @@ pub struct PagedAttentionConfig {
     pub default_memory: bool,
     /// Paged layers a drafter keeps after the model's own, so its context shares the target's blocks.
     pub auxiliary_layers: Option<AuxiliaryPagedLayers>,
+    /// A default-sized cache must get its whole need, or the load fails (so a scheduler can make room and retry)
+    pub need_floor: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -240,6 +242,7 @@ impl PagedAttentionConfig {
             resolve_memory_utilization_after_load: true,
             default_memory: false,
             auxiliary_layers: None,
+            need_floor: false,
         })
     }
 

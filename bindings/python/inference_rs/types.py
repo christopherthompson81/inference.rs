@@ -1588,6 +1588,7 @@ class ModelSpec:
     paged_cache_layers: PagedCacheLayers | None = None
     paged_cache_type: PagedCacheType | None = None
     paged_context_len: int | None = None
+    pinned: bool | None = None
 
 
 @dataclass(kw_only=True)

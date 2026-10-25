@@ -796,9 +796,10 @@ fn need_sized_default_cache(
     let plan = crate::paged_attention::cache_plan(cfg.cache_type, &cfg.cache_layers, &*model);
     let (num, den) = crate::paged_attention::kv_bytes_per_token(&plan, dtype, &*model);
     let bytes = (model.max_seq_len() * num).div_ceil(den);
+    let target_mb = bytes.div_ceil(crate::pipeline::BYTES_PER_MIB).max(1);
     cfg.mem_gpu = crate::MemoryGpuConfig::BestEffortMbAmount {
-        target_mb: bytes.div_ceil(crate::pipeline::BYTES_PER_MIB).max(1),
-        min_mb: None,
+        target_mb,
+        min_mb: cfg.need_floor.then_some(target_mb),
     };
     Ok(())
 }

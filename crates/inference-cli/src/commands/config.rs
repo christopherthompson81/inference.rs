@@ -179,6 +179,7 @@ fn build_model_specs(
             max_seqs: entry.max_seqs,
             mtp: None,
             lazy: entry.lazy,
+            pinned: entry.pinned,
         });
     }
     Ok((specs, cpu))

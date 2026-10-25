@@ -207,6 +207,9 @@ pub struct ModelSpec {
     /// `model_id`, since its own id is only known once it has loaded.
     #[serde(default)]
     pub lazy: bool,
+    /// Never evicted to make room for another model; models are evictable by default.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 impl ModelSpec {
@@ -251,6 +254,7 @@ impl ModelSpec {
         config.paged_cache_layers = self.paged_cache_layers;
         config.max_seqs = self.max_seqs;
         config.lazy = self.lazy;
+        config.pinned = self.pinned;
         config.mtp = self.mtp.map(MtpSpec::into_config).transpose()?;
         if let Some(bytes) = self.encoder_cache_memory_bytes {
             config = config.with_encoder_cache_memory_bytes(bytes);
@@ -1459,11 +1463,19 @@ impl Engine {
                 memory: None,
             });
         }
-        let loaded = self
-            .models
-            .load_additional(&config)
-            .await
-            .map_err(|error| add_model_error(EngineLoadError::Load(error)))?;
+        // a load short of memory evicts the least recently used idle model and tries again
+        let loaded = loop {
+            match self.models.load_additional(&config).await {
+                Ok(loaded) => break loaded,
+                Err(error)
+                    if inference_core::is_memory_error(&format!("{error:#}"))
+                        && self
+                            .state()
+                            .evict_one(&config.model_id, self.models.device())
+                            .unwrap_or(false) => {}
+                Err(error) => return Err(add_model_error(EngineLoadError::Load(error))),
+            }
+        };
         self.unclaimed(&loaded.model_id)?;
         // A concurrent add that took the id first is the only way registration fails here.
         let model_id = loaded

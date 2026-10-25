@@ -48,6 +48,8 @@ pub struct AddModelConfig {
     pub shell_config: Option<ShellConfig>,
     /// What the model's load took on its device, when measured
     pub footprint: Option<Footprint>,
+    /// Never evicted to make room for another model
+    pub pinned: bool,
 }
 
 impl AddModelConfig {
@@ -59,7 +61,13 @@ impl AddModelConfig {
             code_exec_config: None,
             shell_config: None,
             footprint: None,
+            pinned: false,
         }
+    }
+
+    pub fn with_pinned(mut self, pinned: bool) -> Self {
+        self.pinned = pinned;
+        self
     }
 
     pub fn with_footprint(mut self, footprint: Option<Footprint>) -> Self {

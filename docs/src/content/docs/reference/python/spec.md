@@ -534,6 +534,7 @@ One of several models an engine serves; unset settings fall back to `runtime`'s.
 | `paged_cache_layers` | `PagedCacheLayers \| None` | optional |
 | `paged_cache_type` | `PagedCacheType \| None` | optional |
 | `paged_context_len` | `int \| None` | optional |
+| `pinned` | `bool \| None` | optional |
 
 
 ## `ModelSpeculativeStats`

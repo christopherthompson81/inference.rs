@@ -8744,6 +8744,10 @@
             ],
             "description": "Tokens of context this model's paged KV cache holds, in place of `runtime.paged_cache`'s size.",
             "minimum": 0
+          },
+          "pinned": {
+            "type": "boolean",
+            "description": "Never evicted to make room for another model; models are evictable by default."
           }
         },
         "additionalProperties": false
