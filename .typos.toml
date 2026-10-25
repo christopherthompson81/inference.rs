@@ -23,6 +23,8 @@ ignore-hidden = false
 
 [default]
 extend-ignore-re = [
+    # Wan's VAE config key, spelled so upstream
+    '"temperal_downsample"',
     # Kokoro g2p: the ded- spelling the de-/re- prefix rule carves out, and misaki phoneme strings
     'starts_with\("ded"\)',
     "ded- is the deduce family",

@@ -82,17 +82,17 @@ fn overlap(a: &[[f64; 3]; 8], b: &[[f64; 3]; 8], wa: &Mat4, wb: &Mat4) -> (f64, 
         let hi = [0, 1, 2].map(|d| c.iter().map(|p| p[d]).fold(f64::NEG_INFINITY, f64::max));
         (lo, hi)
     };
-    let ((alo, ahi), (blo, bhi)) = (bounds(a), bounds(b));
+    let ((a_min, a_max), (b_min, b_max)) = (bounds(a), bounds(b));
     let (ilo, ihi) = (
-        [0, 1, 2].map(|d| alo[d].max(blo[d])),
-        [0, 1, 2].map(|d| ahi[d].min(bhi[d])),
+        [0, 1, 2].map(|d| a_min[d].max(b_min[d])),
+        [0, 1, 2].map(|d| a_max[d].min(b_max[d])),
     );
     let valid = (0..3).all(|d| ihi[d] > ilo[d]);
     let vol =
         |lo: [f64; 3], hi: [f64; 3]| (0..3).map(|d| (hi[d] - lo[d]).max(0.0)).product::<f64>();
     let inter = vol(ilo, ihi);
     let iou = if valid {
-        inter / (vol(alo, ahi) + vol(blo, bhi) - inter + 1e-8)
+        inter / (vol(a_min, a_max) + vol(b_min, b_max) - inter + 1e-8)
     } else {
         0.0
     };

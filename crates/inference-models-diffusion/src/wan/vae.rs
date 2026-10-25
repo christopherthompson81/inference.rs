@@ -15,7 +15,8 @@ pub struct VaeConfig {
     pub z_dim: usize,
     pub dim_mult: Vec<usize>,
     pub num_res_blocks: usize,
-    pub temperal_downsample: Vec<bool>,
+    #[serde(rename = "temperal_downsample")]
+    pub temporal_downsample: Vec<bool>,
     pub latents_mean: Vec<f32>,
     pub latents_std: Vec<f32>,
 }
