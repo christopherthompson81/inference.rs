@@ -19,7 +19,7 @@ const NORM_EPS: f64 = 1e-8;
 
 pub struct Lpips {
     convs: Vec<Vec<(Tensor, Tensor)>>,
-    lins: Vec<Tensor>,
+    heads: Vec<Tensor>,
     shift: Tensor,
     scale: Tensor,
 }
@@ -48,12 +48,12 @@ impl Lpips {
                     .collect::<Result<Vec<_>>>()
             })
             .collect::<Result<Vec<_>>>()?;
-        let lins = (0..VGG_SLICES.len())
+        let heads = (0..VGG_SLICES.len())
             .map(|i| take(&format!("lin{i}.model.1.weight")))
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             convs,
-            lins,
+            heads,
             shift: Tensor::new(&SHIFT, device)?.reshape((1, 3, 1, 1))?,
             scale: Tensor::new(&SCALE, device)?.reshape((1, 3, 1, 1))?,
         })
@@ -80,7 +80,7 @@ impl Lpips {
     pub fn forward(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
         let (fa, fb) = (self.features(a)?, self.features(&b.detach())?);
         let mut total: Option<Tensor> = None;
-        for ((x, y), lin) in fa.iter().zip(&fb).zip(&self.lins) {
+        for ((x, y), lin) in fa.iter().zip(&fb).zip(&self.heads) {
             let d = (x - y)?
                 .sqr()?
                 .conv2d(lin, 0, 1, 1, 1)?
