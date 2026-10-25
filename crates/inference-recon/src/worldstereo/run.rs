@@ -16,6 +16,7 @@ use inference_models_diffusion::wan::transformer::{
 };
 use inference_models_diffusion::wan::vae::{VaeConfig, WanVae};
 use inference_quant::ShardedSafeTensors;
+pub use inference_tensor::quantized::GgmlDType;
 use inference_tensor::{DType, Device, Result, Tensor};
 use serde::Serialize;
 
@@ -36,9 +37,9 @@ const TRAJECTORY_ORDER: [usize; 3] = [2, 0, 1];
 // WorldMirror runs on the whole memory bank (~99 frames); the reference's 832 is ~200K tokens, past a 24 GB card
 pub const DEFAULT_RECONSTRUCT_SIZE: usize = 518;
 const DEFAULT_SEED: u64 = 1024;
-const QUANTIZATION: &str = "weights none: WorldStereo transformer and umT5 in bf16 (transformer blocks streamed from \
-                            host memory); Wan VAE, CLIP image encoder and MoGe-2 in f32; WorldMirror as its own meta.json \
-                            states. Activations: settings.attention";
+const QUANTIZATION: &str = "WorldStereo's main-block linears as settings.block_weights states (quantized at load, streamed \
+                            from host memory), its other weights and umT5 in bf16; Wan VAE, CLIP image encoder and MoGe-2 \
+                            in f32; WorldMirror as its own meta.json states. Attention: settings.attention";
 const DIFFERENCES_FROM_REFERENCE: [&str; 6] = [
     "sky from MoGe-2's validity mask instead of GroundingDINO and ZIM",
     "one caption for every clip instead of a vision-language model's caption per start view",
@@ -72,6 +73,8 @@ pub struct WorldGenOptions {
     pub reconstruct_size: usize,
     /// how WorldStereo's joint self-attentions run
     pub attention: AttentionKind,
+    /// the GGUF type WorldStereo's main-block linears are quantized to at load; None keeps them bf16
+    pub block_weights: Option<GgmlDType>,
 }
 
 impl Default for WorldGenOptions {
@@ -82,6 +85,7 @@ impl Default for WorldGenOptions {
             seed: DEFAULT_SEED,
             reconstruct_size: DEFAULT_RECONSTRUCT_SIZE,
             attention: AttentionKind::Int8Qk,
+            block_weights: Some(GgmlDType::Q8_0),
         }
     }
 }
@@ -127,6 +131,8 @@ pub struct WorldGenSettings {
     pub sampling_steps: usize,
     /// "bf16", or "int8 QK" (int8 Q.K^T, fp16 P.V)
     pub attention: &'static str,
+    /// the main blocks' linear weights: "bf16" or a GGUF type such as "Q8_0"
+    pub block_weights: String,
     pub frames_per_clip: usize,
     pub frame_width: usize,
     pub frame_height: usize,
@@ -465,6 +471,9 @@ pub fn generate_world(
                 )?,
             )?;
             t.set_attention(options.attention);
+            if let Some(dtype) = options.block_weights {
+                t.quantize_blocks(dtype)?;
+            }
             t
         },
         schedule: Default::default(),
@@ -681,6 +690,9 @@ pub fn generate_world(
                 AttentionKind::Bf16 => "bf16",
                 AttentionKind::Int8Qk => "int8 QK",
             },
+            block_weights: options
+                .block_weights
+                .map_or_else(|| "bf16".to_string(), |d| format!("{d:?}")),
             frames_per_clip: trajectory::TRAJECTORY_FRAMES,
             frame_width: vw,
             frame_height: vh,

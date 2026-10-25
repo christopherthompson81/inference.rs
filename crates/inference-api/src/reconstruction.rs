@@ -119,7 +119,7 @@ pub async fn reconstruct(
 }
 
 pub use inference_recon::worldstereo::run::{
-    AttentionKind, WorldGenModels, WorldGenOptions, WorldGenReport,
+    AttentionKind, GgmlDType, WorldGenModels, WorldGenOptions, WorldGenReport,
 };
 
 /// Generates a world from an equirectangular panorama (an image file) into `out_dir` with WorldStereo-2: depth and a

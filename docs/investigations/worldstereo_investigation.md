@@ -470,3 +470,24 @@ wrong. The fragment loads cost ~52 ms (each 16-row warp loads the whole K and V 
 MMA issue with two warps per scheduler. Both shrink only with more rows per warp (each fragment feeding more MMAs, more
 independent MMA chains), which needs the f32 output accumulator (64 registers at 16 rows) to fit at 32 rows. Reverted
 to v4; the ping-pong source is kept in the session scratch only.
+
+## Run 22 - 2026-10-24 21:30
+
+Question: Q8_0 linears in WorldStereo's 40 main blocks (quantized once at load on the host, streamed at half the bytes,
+run through the GGUF MMQ kernels): speed and quality?
+
+The Wan `Linear` gained a quantized variant (upload through `QStorage::from_data` on the copy stream's device handle).
+First streamed run: NaN. A unit test of one host-quantized, uploaded linear passed, so the layer was right; the cause
+was `fast_mmq::shared_lhs` launching on the weight's device handle, i.e. the copy stream, unordered against the
+activations. It now runs on the input's stream (normal GGUF inference has one stream for both, unchanged).
+```
+small transformer   2 blocks rel rms 6.30e-3, 6 blocks 6.39e-3 (int8 attention alone 5.02e-3 / 5.41e-3)
+quantize at load    9 s for the 40 host blocks (rayon across blocks)
+real-size step      30.4 s (34.3)
+whole clip          after step 0: 1.6e-3 (int8 alone 1.9e-3, bf16 3.3e-3); final latents 15.1%, frames 11.4%
+                    (int8 alone 9.2%, bf16 7.6%); denoise 94.6 s (107.8)
+case001 end to end  scene 42.6 s, trajectories 8.1, caption 39.4, clips 1110.4 (1289.0; ~122 s a clip), reconstruction
+                    31.3; wall 1233 s (1408); nvidia-smi peak 17.7 GB above idle; camera fit 2.3 cm / 0.85 deg
+```
+Side by side with Run 19's frames: the same rooms and detail. Q8_0 becomes worldgen's default (`--weights bf16` keeps
+the blocks dense).

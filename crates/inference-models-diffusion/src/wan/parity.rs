@@ -10,6 +10,26 @@ fn env_path(name: &str) -> Option<PathBuf> {
     std::env::var_os(name).map(PathBuf::from)
 }
 
+// WORLDSTEREO_WEIGHTS=q8_0 (or another GGUF type) quantizes the main blocks' linears
+fn quantize(model: &mut super::transformer::WorldStereoTransformer) -> Result<()> {
+    let Ok(name) = std::env::var("WORLDSTEREO_WEIGHTS") else {
+        return Ok(());
+    };
+    let dtype = match name.as_str() {
+        "q8_0" => inference_tensor::quantized::GgmlDType::Q8_0,
+        "q4k" => inference_tensor::quantized::GgmlDType::Q4K,
+        "q6k" => inference_tensor::quantized::GgmlDType::Q6K,
+        other => inference_tensor::bail!("unknown WORLDSTEREO_WEIGHTS {other}"),
+    };
+    let start = std::time::Instant::now();
+    model.quantize_blocks(dtype)?;
+    println!(
+        "quantized to {dtype:?} in {:.1} s",
+        start.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
 // WORLDSTEREO_ATTENTION=int8 runs the joint self-attentions with the int8 Q.K^T kernel
 fn attention_kind() -> super::AttentionKind {
     match std::env::var("WORLDSTEREO_ATTENTION").as_deref() {
@@ -155,6 +175,7 @@ fn small_transformer_matches_the_reference() -> Result<()> {
     };
     let mut model = WorldStereoTransformer::new(&cfg, &ws, vb)?;
     model.set_attention(attention_kind());
+    quantize(&mut model)?;
     let bf = |k: &str| refs[k].to_dtype(DType::BF16);
     let t = refs["timestep"].to_vec1::<f32>()?[0] as f64;
     let cond = model.conditions(t, &bf("text")?.unsqueeze(0)?, &bf("image")?.unsqueeze(0)?)?;
@@ -219,6 +240,7 @@ fn full_size_streamed_step() -> Result<()> {
     };
     let mut model = WorldStereoTransformer::new_streamed(&cfg, &ws, vb)?;
     model.set_attention(attention_kind());
+    quantize(&mut model)?;
     println!("loaded in {:.1} s", start.elapsed().as_secs_f64());
     let f: usize = std::env::var("WORLDSTEREO_FRAMES")
         .ok()
@@ -319,6 +341,7 @@ fn clip_matches_the_reference() -> Result<()> {
     )?;
     let mut transformer = transformer;
     transformer.set_attention(attention_kind());
+    quantize(&mut transformer)?;
     let pipeline = WorldStereoPipeline {
         vae,
         image_encoder,

@@ -41,6 +41,7 @@ inference worldgen --panorama room.png --out world/ \
 | `--worldmirror` | none | Without it the clips are written and the reconstruction is skipped |
 | `--reconstruct-size` | 518 | The longest edge WorldMirror reconstructs at; its memory grows with the square of this |
 | `--attention` | int8 | WorldStereo's joint self-attention: `int8` multiplies Q and K in int8 (per-token scales, K less its mean) and P and V in fp16, about 1.5x the speed of `bf16` flash attention |
+| `--weights` | q8_0 | WorldStereo's main-block linear weights: `q8_0` quantizes them at load (about 9 s) and runs them through int8 MMQ kernels, about 1.3x the speed of `bf16` matmuls and half the bytes streamed per step |
 
 An interrupted run restarts where it stopped: clips already written to `--out` are read back instead of generated
 again.
@@ -90,4 +91,5 @@ world/
 - By default the joint self-attention runs with an int8 Q.K^T. Against the reference, a single transformer pass
   differs by 0.5% either way; over a 4-step clip the sampler amplifies differences, and frames end 11% (int8) or 8%
   (bf16) off the reference, mostly in content the model invents where the panorama saw nothing. `--attention bf16`
-  keeps the exact path.
+  keeps the exact path. Q8_0 block weights (`--weights q8_0`, the default) add about as much again: a transformer pass
+  moves from 0.50% to 0.63% off the reference, frames over a clip from 9% to 11%, with images of the same sharpness.

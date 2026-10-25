@@ -254,9 +254,10 @@ async fn main() -> Result<()> {
             seed,
             reconstruct_size,
             attention,
+            weights,
         } => {
             use inference_api::reconstruction::{
-                AttentionKind, WorldGenModels, WorldGenOptions, generate_world,
+                AttentionKind, GgmlDType, WorldGenModels, WorldGenOptions, generate_world,
             };
             let models = WorldGenModels {
                 worldstereo,
@@ -274,6 +275,7 @@ async fn main() -> Result<()> {
                 } else {
                     AttentionKind::Int8Qk
                 },
+                block_weights: (weights == "q8_0").then_some(GgmlDType::Q8_0),
             };
             let report = generate_world(&models, &panorama, &out, &options)?;
             for stage in &report.stages {

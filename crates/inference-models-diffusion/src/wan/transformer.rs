@@ -2,6 +2,7 @@
 //! (reference) frame tokens, plus a per-frame camera embedding and ControlNet residuals from point-cloud renders.
 
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::quantized::GgmlDType;
 use inference_tensor::{DType, Device, Result, Tensor};
 use serde::Deserialize;
 
@@ -173,6 +174,18 @@ impl SelfAttention {
         })
     }
 
+    fn quantize(&mut self, dtype: GgmlDType) -> Result<()> {
+        for l in [
+            &mut self.to_q,
+            &mut self.to_k,
+            &mut self.to_v,
+            &mut self.to_out,
+        ] {
+            *l = l.quantized(dtype)?;
+        }
+        Ok(())
+    }
+
     /// Attention over all of `xs` `[1, tokens, dim]` with `rope` for every token.
     fn forward(&self, xs: &Tensor, rope: &RopeTables, kind: AttentionKind) -> Result<Tensor> {
         let q = self
@@ -231,6 +244,20 @@ impl CrossAttention {
         })
     }
 
+    fn quantize(&mut self, dtype: GgmlDType) -> Result<()> {
+        for l in [
+            &mut self.to_q,
+            &mut self.to_k,
+            &mut self.to_v,
+            &mut self.add_k,
+            &mut self.add_v,
+            &mut self.to_out,
+        ] {
+            *l = l.quantized(dtype)?;
+        }
+        Ok(())
+    }
+
     fn forward(&self, xs: &Tensor, cond: &Conditions) -> Result<Tensor> {
         let q = self
             .norm_q
@@ -260,6 +287,12 @@ impl FeedForward {
             up: Linear::load(dim, hidden, vb.pp("net").pp(0).pp("proj"))?,
             down: Linear::load(hidden, dim, vb.pp("net").pp(2))?,
         })
+    }
+
+    fn quantize(&mut self, dtype: GgmlDType) -> Result<()> {
+        self.up = self.up.quantized(dtype)?;
+        self.down = self.down.quantized(dtype)?;
+        Ok(())
     }
 
     // in token chunks: the hidden activations are 2.7x the model width
@@ -326,6 +359,12 @@ impl Block {
             ffn: self.ffn.to_device(d)?,
             scale_shift_table: self.scale_shift_table.to_device(d)?,
         })
+    }
+
+    fn quantize(&mut self, dtype: GgmlDType) -> Result<()> {
+        self.attn1.quantize(dtype)?;
+        self.attn2.quantize(dtype)?;
+        self.ffn.quantize(dtype)
     }
 
     /// Video tokens `[1, N, dim]` and memory tokens `[1, M, dim]` (M may be 0); `rope` covers memory then video.
@@ -497,6 +536,14 @@ impl WorldStereoTransformer {
             device,
             attention: AttentionKind::default(),
         })
+    }
+
+    /// The main blocks' linear weights quantized to `dtype` (GGUF, through the MMQ kernels), wherever the blocks live.
+    pub fn quantize_blocks(&mut self, dtype: GgmlDType) -> Result<()> {
+        use rayon::prelude::*;
+        self.blocks
+            .par_iter_mut()
+            .try_for_each(|b| b.quantize(dtype))
     }
 
     /// How the joint self-attentions run, here and in the ControlNet.
