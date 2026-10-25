@@ -170,6 +170,25 @@ impl WorldMirror {
         self.heads(&out.features, out.patch_start, &images)
     }
 
+    /// Z-depth `[frames, H, W, 1]` alone, with known priors: the trunk, then only the depth head (the reference's
+    /// worldgen runs WorldMirror so, its normal, point and Gaussian heads off, to align each frame's depth).
+    pub fn predict_depth_with_priors(
+        &self,
+        images: &Tensor,
+        inputs: &priors::PriorInputs,
+        original: (usize, usize),
+    ) -> Result<Tensor> {
+        let images = images.to_device(&self.device)?.to_dtype(DType::F32)?;
+        let (_, _, height, width) = images.dims4()?;
+        let priors = priors::normalize(inputs, original, height, width, &self.device)?;
+        let out = self.trunk(&images, &priors, &mut |_, _, _| {})?;
+        let none = &mut |_: usize, _: &dpt::DptOutput| Ok(());
+        Ok(self
+            .depth
+            .forward(&out.features, out.patch_start, &images, none)?
+            .attr)
+    }
+
     // every head over the trunk's four feature maps `[frames, tokens, 2 * dim]` and the [0, 1] images on the device
     fn heads(&self, features: &[Tensor], start: usize, images: &Tensor) -> Result<Prediction> {
         let (_, _, height, width) = images.dims4()?;

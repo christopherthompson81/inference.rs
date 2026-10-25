@@ -188,6 +188,39 @@ pub fn reconstruct(
     reconstruct_frames(model, checkpoint, frames, None, out_dir, options)
 }
 
+/// Each frame's z-depth from the depth head alone, inferred at `target_size` with `priors` and resized (nearest) back
+/// to the frame's size, all frames sharing the first one's size.
+pub fn depth_with_priors(
+    model: &WorldMirror,
+    images: &[RgbImage],
+    priors: &PriorInputs,
+    target_size: usize,
+) -> Result<Vec<Vec<f32>>> {
+    let Some(first) = images.first() else {
+        inference_tensor::bail!("no frames to infer depth for");
+    };
+    let (w, h) = (first.width, first.height);
+    let tensor = images_to_tensor(images, target_size, PATCH, model.device())?;
+    let depth = model
+        .predict_depth_with_priors(&tensor, priors, (w, h))?
+        .to_dtype(inference_tensor::DType::F32)?
+        .to_device(&inference_tensor::Device::Cpu)?;
+    let (frames, dh, dw, _) = depth.dims4()?;
+    let values = depth.flatten_all()?.to_vec1::<f32>()?;
+    Ok((0..frames)
+        .map(|f| {
+            let plane = &values[f * dh * dw..(f + 1) * dh * dw];
+            // cv2.INTER_NEAREST: source index floor(dst * src / dst_size)
+            (0..w * h)
+                .map(|p| {
+                    let (x, y) = (p % w, p / w);
+                    plane[(y * dh / h).min(dh - 1) * dw + (x * dw / w).min(dw - 1)]
+                })
+                .collect()
+        })
+        .collect())
+}
+
 /// Where a run's frames came from when they were sampled from a video.
 #[derive(Clone, Debug, Serialize)]
 pub struct VideoSource {

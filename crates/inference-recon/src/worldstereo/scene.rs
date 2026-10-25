@@ -16,6 +16,8 @@ const BANK_PITCHES: [f64; 3] = [0.0, 0.5, -0.5];
 const BANK_STEP_DEG: f64 = 40.0;
 // without a caller's choice, a scene is outdoor when at least this share of the panorama is sky
 const OUTDOOR_SKY_SHARE: f64 = 0.005;
+// the distance is blurred this much (pixels) before the panorama's normals are taken
+const NORMAL_SMOOTH_SIGMA: f64 = 0.5;
 
 /// A view of the scene from the panorama's centre.
 pub struct View {
@@ -34,6 +36,8 @@ pub struct Scene {
     pub excluded: Vec<bool>,
     pub points: Vec<[f32; 3]>,
     pub colors: Vec<[u8; 3]>,
+    /// each point's world normal, facing the panorama's centre (alignment compares frames' normals against them)
+    pub normals: Vec<[f32; 3]>,
     /// the panorama as a mesh (every pixel a vertex; quads touching sky dropped), for collision checks
     pub mesh_vertices: Vec<[f32; 3]>,
     pub mesh_triangles: Vec<[u32; 3]>,
@@ -51,7 +55,7 @@ fn lower_median(mut v: Vec<f64>) -> f64 {
 }
 
 // utils3d's depth_edge with rtol: (max - min) over each 3 x 3 window (outside ignored), relative to the depth
-fn depth_edges(d: &[f32], width: usize, height: usize) -> Vec<bool> {
+pub(crate) fn depth_edges(d: &[f32], width: usize, height: usize, rtol: f64) -> Vec<bool> {
     (0..height * width)
         .map(|p| {
             let (x, y) = (p % width, p / width);
@@ -63,7 +67,105 @@ fn depth_edges(d: &[f32], width: usize, height: usize) -> Vec<bool> {
                     hi = hi.max(v);
                 }
             }
-            f64::from(hi - lo) / f64::from(d[p]) > EDGE_RTOL
+            f64::from(hi - lo) / f64::from(d[p]) > rtol
+        })
+        .collect()
+}
+
+// cv2.GaussianBlur of a float image with ksize 0: a separable kernel of round(8 sigma + 1) | 1 taps, reflect-101 border
+fn gaussian_blur(src: &[f32], width: usize, height: usize, sigma: f64) -> Vec<f32> {
+    let taps = ((sigma * 8.0 + 1.0).round() as usize) | 1;
+    let half = (taps / 2) as isize;
+    let mut kernel = (0..taps as isize)
+        .map(|i| (-((i - half) as f64).powi(2) / (2.0 * sigma * sigma)).exp())
+        .collect::<Vec<_>>();
+    let total: f64 = kernel.iter().sum();
+    kernel.iter_mut().for_each(|k| *k /= total);
+    let reflect = |i: isize, n: usize| -> usize {
+        let n = n as isize;
+        let mut i = i;
+        if n == 1 {
+            return 0;
+        }
+        while i < 0 || i >= n {
+            i = if i < 0 { -i } else { 2 * (n - 1) - i };
+        }
+        i as usize
+    };
+    let mut rows = vec![0f32; src.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let acc: f64 = (0..taps)
+                .map(|t| {
+                    kernel[t]
+                        * f64::from(src[y * width + reflect(x as isize + t as isize - half, width)])
+                })
+                .sum();
+            rows[y * width + x] = acc as f32;
+        }
+    }
+    let mut out = vec![0f32; src.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let acc: f64 = (0..taps)
+                .map(|t| {
+                    kernel[t]
+                        * f64::from(
+                            rows[reflect(y as isize + t as isize - half, height) * width + x],
+                        )
+                })
+                .sum();
+            out[y * width + x] = acc as f32;
+        }
+    }
+    out
+}
+
+/// World normals of an equirectangular distance map, as erp_distance_ray_to_normal computes them: the distance
+/// blurred, points along each pixel's ray, central differences (wrapping horizontally, one-sided at the poles),
+/// Tu x Tv normalized, turned to face the panorama's centre.
+pub(crate) fn erp_normals(
+    distance: &[f32],
+    width: usize,
+    height: usize,
+    sigma: f64,
+) -> Vec<[f32; 3]> {
+    let d = if sigma > 0.0 {
+        gaussian_blur(distance, width, height, sigma)
+    } else {
+        distance.to_vec()
+    };
+    let ray = |x: usize, y: usize| {
+        uv_to_direction(
+            (x as f64 + 0.5) / width as f64,
+            (y as f64 + 0.5) / height as f64,
+        )
+    };
+    let point = |x: usize, y: usize| ray(x, y).map(|r| r * f64::from(d[y * width + x]));
+    let sub = |a: [f64; 3], b: [f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    (0..width * height)
+        .map(|p| {
+            let (x, y) = (p % width, p / width);
+            let tu = sub(point((x + 1) % width, y), point((x + width - 1) % width, y));
+            let tv = if y == 0 {
+                sub(point(x, 1), point(x, 0))
+            } else if y == height - 1 {
+                sub(point(x, y), point(x, y - 1))
+            } else {
+                sub(point(x, y + 1), point(x, y - 1))
+            };
+            let n = [
+                tu[1] * tv[2] - tu[2] * tv[1],
+                tu[2] * tv[0] - tu[0] * tv[2],
+                tu[0] * tv[1] - tu[1] * tv[0],
+            ];
+            let norm = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-10);
+            let mut n = n.map(|v| v / norm);
+            let r = ray(x, y);
+            if n[0] * r[0] + n[1] * r[1] + n[2] * r[2] > 0.0 {
+                n = n.map(|v| -v);
+            }
+            n.map(|v| v as f32)
         })
         .collect()
 }
@@ -78,7 +180,7 @@ impl Scene {
         let sky_share = sky.iter().filter(|&&s| s).count() as f64 / sky.len() as f64;
         let outdoor = outdoor.unwrap_or(sky_share >= OUTDOOR_SKY_SHARE);
         let mut distance = depth.distance.clone();
-        let edges = depth_edges(&distance, w, h);
+        let edges = depth_edges(&distance, w, h, EDGE_RTOL);
         let kept = (0..w * h)
             .filter(|&p| !(sky[p] || edges[p]))
             .map(|p| f64::from(distance[p]))
@@ -93,7 +195,7 @@ impl Scene {
                 }
             }
         }
-        let edges = depth_edges(&distance, w, h);
+        let edges = depth_edges(&distance, w, h, EDGE_RTOL);
         let excluded = (0..w * h).map(|p| sky[p] || edges[p]).collect::<Vec<_>>();
         let median_distance = lower_median(
             (0..w * h)
@@ -112,6 +214,11 @@ impl Scene {
             .filter(|&p| !excluded[p])
             .map(|p| (vertex(p), [0, 1, 2].map(|c| pano.pixels[p * 3 + c])))
             .unzip();
+        let normal_map = erp_normals(&distance, w, h, NORMAL_SMOOTH_SIGMA);
+        let normals = (0..w * h)
+            .filter(|&p| !excluded[p])
+            .map(|p| normal_map[p])
+            .collect();
         let mesh_vertices = (0..w * h).map(vertex).collect::<Vec<_>>();
         let mut mesh_triangles = Vec::new();
         for y in 0..h - 1 {
@@ -133,6 +240,7 @@ impl Scene {
             excluded,
             points,
             colors,
+            normals,
             mesh_vertices,
             mesh_triangles,
             median_distance,

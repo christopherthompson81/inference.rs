@@ -537,3 +537,84 @@ while the point cloud reads as the place. WorldMirror's 99 depth maps are predic
 decimetre; the TSDF averages the disagreement into blobs. The point cloud only looks crisper because the eye picks the
 dominant layer. Better geometry needs views made consistent (optimized splats, tier 3) or the scene split by kind: a
 terrain surface fitted to the ground, structures as planes, vegetation by an engine foliage system.
+
+## Run 25 - 2026-10-25 00:39
+
+Question: does the native port of the reference's depth alignment (retrieval_wm.py alignment(): WorldMirror depth at
+832 with the planned cameras as priors, fitted per frame in inverse depth by a constrained RANSAC line to the panorama
+cloud rendered into that view, anomalous fits borrowed from the clip's nearest inlier, per-clip statistical outlier
+removal, voxel-first downsample to 2M points) make the per-view depths agree, and what does it cost?
+
+Park run (clips reused), `inference worldgen ... --prompt <park caption>` into park_aligned:
+```
+alignment depth (WorldMirror 2.0)                  88.2 s   17598 MiB allocated at peak
+alignment (MoGe-2 masks, fit to the panorama)    6112.8 s    7329 MiB allocated at peak
+alignment: frames 99, fitted 89, borrowed 10, abandoned 0, points 2000000
+```
+Frame-pair reprojection agreement (scratchpad depth_agreement.py; per overlapping pair the median relative depth
+difference, then quantiles over pairs):
+```
+raw WorldMirror (518): 7127 pairs, p25 0.0234 p50 0.0366 p75 0.0551 p90 0.0872, valid 100%
+aligned (832):         7342 pairs, p25 0.0182 p50 0.0292 p75 0.0486 p90 0.0806, valid 77.6%
+```
+Alignment helps, but modestly (median 3.7% -> 2.9%); the views still disagree by a few percent of depth, about what
+the reference's own 3DGS stage exists to fix. The 22.4% invalid pixels are the masked edges, sky and depths past
+1.1x the panorama's maximum.
+
+The 6113 s was CPU-only with the GPU idle. Timing outlier_mask alone on the exported 2M points: 408.8 s. PointGrid
+sized its cells for points spread through the bounding volume, but these lie on surfaces, so cells held thousands of
+points while isolated far points walked up to 1024 empty rings. Replaced by a balanced kd-tree (median splits on the
+widest axis, 16-point leaves) behind the same API: 0.6 s, the same 1,898,409 points kept (the k nearest are exact
+either way); brute-force test added. The trajectory obstacle checks use it too.
+
+Rerun with the kd-tree (park_aligned2, then park_aligned with the scene dump below):
+```
+alignment depth (WorldMirror 2.0)                  91.1 s
+alignment (MoGe-2 masks, fit to the panorama)      81.8 s   (was 6112.8 s)
+alignment: frames 99, fitted 89, borrowed 10, abandoned 0, points 2000000
+exit 0, wall 331 s
+```
+Aligned depths between the two runs: most frames bit-identical, the worst frame's median relative difference 1.1e-3
+(GPU run-to-run noise in the depth model), no mask flips. worldgen now also writes `scene/` (the panorama's cleaned
+distance, the sky mask, the scene cloud and the start views), what the Gaussian training data is cut from.
+
+## Run 26 - 2026-10-25 01:16
+
+Question: trained on our data, does the reference's 3DGS stage (gen_gs_data.py, then world_gs_trainer.py with its
+gsplat fork) give geometry and novel views good enough to justify porting it, before writing any of it natively?
+
+Setup, all outside the repo:
+- gsplat_maskgaussian (the reference's fork of gsplat 1.5.3: MaskGaussian in the rasterizer, projection and
+  wrapper) built in place in /mnt/data/build/gsplat_mg (glm headers from the stock package, CUDA 12.8, sm_86,
+  2m46s) and put first on PYTHONPATH for the trainer only; the venv's stock gsplat is untouched. Installed into the
+  venv: viser, nerfview, splines, tyro, torchmetrics, tensorboard, fused-ssim (git build), scikit-image, tensorly,
+  pymeshlab.
+- scratchpad gs_tools/make_gs_data.py: gen_gs_data.py's --save_normal --split_sky path over a native run, calling the
+  reference's own helpers (split_panorama_image/depth, smooth_sky_depth_boundary, convert_rgbd2pcd_panorama,
+  adaptive_voxel_downsample, MoGe-2 normals). 189 clip frames (frame 0 the start view; aligned depth on the 81 aligned
+  frames), 54 panorama + 40 polar crops with the panorama's depth, 283 cameras; points.ply 3.11M (2M aligned + 1.11M
+  panorama at voxel 0.003), sky_points.ply 300K. 1m43s.
+- Training with the README's flags at the single-GPU length (--steps_scaler 5.3334: 8000 steps, refine 800 to 4000
+  every 533; scale2d stop set to 4000 by hand; spz and the viewer off).
+
+```
+Step 3731: 2571655 GSs after the last refine; Step 7999 mem 2.67 GB, 928 s of steps, wall 16m28s
+held-out views (every 32nd, 6): PSNR 24.191, SSIM 0.7549, LPIPS 0.203
+MaskGaussian export: kept 2242322/2571655 by stochastic sampling; point_cloud_7999.ply 126 MB
+mesh (the trainer's TSDF over its own rendered RGB+depth from all 283 cameras): 552742 triangles, simplified 10%
+```
+The trainer's mesh export failed in-run on the missing skimage import (caught, training finished); rerun from the
+checkpoint with scratchpad gs_tools/ref_eval_mesh.py (the trainer's eval plus its mesh block verbatim), 27 s.
+
+Novel views (gs_tools/novel_views.py: training cameras moved sideways 0.1 to 0.3 of the camera spread, about 0.5 to
+1.3 m, some turned 15 to 20 degrees; splats left, the fused mesh right; gs_novel.jpg beside the run): the splats stay
+sharp and coherent off the trajectories (steps, benches, flower beds, trees all hold). The splat-fused mesh is the
+first usable geometry: clean steps, benches, a flat plaza, walls; shrubs and beds become smooth blobs and colours
+soften (5 cm voxels in normalized units). Far larger moves (1x the spread) put the camera inside foliage and show
+nothing useful; the reconstruction is a walkable neighbourhood of the trajectories, not the whole park.
+
+Implication: the 3DGS stage is what turns WorldMirror's disagreeing per-view depths into one consistent scene (Run 24's
+TSDF over raw depths was blobby at a 12.7 cm median error). Porting the trainer is worth it. Its pieces: the gsplat
+forward/backward (projection, tile binning, rasterization with antialiasing, depth and normal outputs), the
+MaskGaussian mask, SSIM/LPIPS/depth/normal losses, Adam with per-group rates, the default strategy's
+densify/prune, anchor protection, sky depth from the sky cloud, then the TSDF mesh export.

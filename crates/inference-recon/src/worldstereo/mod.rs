@@ -1,5 +1,6 @@
 //! WorldStereo-2 orchestration: camera and render inputs for the transformer, memory frames, and the scene loop.
 
+pub mod align;
 pub mod cameras;
 pub mod memory;
 pub mod panorama;

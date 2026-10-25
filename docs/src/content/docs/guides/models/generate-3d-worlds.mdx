@@ -68,6 +68,8 @@ world/
   meta.json                       conventions, checkpoints, settings, stage timings, clips, reconstruction_to_scene
   clips/view0_traj0/frame_00.png  the clip's frames (frame_00 is the start view)
   clips/view0_traj0/cameras.json  per-frame camera_to_world and intrinsics, size, retrieved memory frames
+  scene/                          the panorama's cleaned distance.npy, sky_mask.png, points.ply, start_frame_N.png
+  aligned/                        memory frames' metric depth_NNNN.npy fitted to the panorama, frames.json, points.ply
   reconstruction/                 WorldMirror outputs: camera_params.json, depth/, normal/, points.ply, gaussians.ply
 ```
 

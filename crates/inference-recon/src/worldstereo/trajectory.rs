@@ -338,6 +338,7 @@ pub struct Obstacles<'a> {
 
 // triangles per BVH leaf
 const BVH_LEAF: usize = 8;
+const KD_LEAF: usize = 16;
 
 struct BvhNode {
     lo: [f64; 3],
@@ -454,103 +455,83 @@ impl MeshBvh {
     }
 }
 
-/// Points binned in a uniform grid, for nearest-neighbour queries.
+/// Points in a balanced kd-tree (median splits on the widest axis), for nearest-neighbour queries.
 pub struct PointGrid {
-    cell: f64,
-    origin: [f64; 3],
-    dims: [usize; 3],
-    starts: Vec<u32>,
-    order: Vec<u32>,
     points: Vec<[f32; 3]>,
+    // per node in heap order: split axis and value
+    splits: Vec<(u8, f32)>,
 }
 
 impl PointGrid {
     pub fn new(points: &[[f32; 3]]) -> Self {
-        let mut lo = [f64::MAX; 3];
-        let mut hi = [f64::MIN; 3];
-        for p in points {
-            for d in 0..3 {
-                lo[d] = lo[d].min(f64::from(p[d]));
-                hi[d] = hi[d].max(f64::from(p[d]));
-            }
-        }
-        // about one point per cell over the scene's bounds
-        let volume = (0..3).map(|d| (hi[d] - lo[d]).max(1e-6)).product::<f64>();
-        let cell = (volume / points.len().max(1) as f64).cbrt().max(1e-6) * 4.0;
-        let dims = [0, 1, 2].map(|d| (((hi[d] - lo[d]) / cell) as usize + 1).min(1 << 10));
-        let index = |p: &[f32; 3]| -> usize {
-            let c =
-                [0, 1, 2].map(|d| (((f64::from(p[d]) - lo[d]) / cell) as usize).min(dims[d] - 1));
-            (c[0] * dims[1] + c[1]) * dims[2] + c[2]
-        };
-        let cells = dims.iter().product::<usize>();
-        let mut counts = vec![0u32; cells + 1];
-        for p in points {
-            counts[index(p) + 1] += 1;
-        }
-        for i in 0..cells {
-            counts[i + 1] += counts[i];
-        }
-        let mut fill = counts.clone();
-        let mut order = vec![0u32; points.len()];
-        for (i, p) in points.iter().enumerate() {
-            let c = index(p);
-            order[fill[c] as usize] = i as u32;
-            fill[c] += 1;
-        }
-        Self {
-            cell,
-            origin: lo,
-            dims,
-            starts: counts,
-            order,
-            points: points.to_vec(),
-        }
+        let mut points = points.to_vec();
+        let depth = (points.len() / KD_LEAF + 1)
+            .next_power_of_two()
+            .trailing_zeros() as usize
+            + 1;
+        let mut splits = vec![(0, 0.0); 1 << depth];
+        kd_build(&mut points, 0, &mut splits);
+        Self { points, splits }
     }
 
-    /// The mean distance to the `k` nearest points (kd-tree query of the reference), searched ring by ring.
+    /// The mean distance to the `k` nearest points (kd-tree query of the reference).
     pub fn mean_knn(&self, q: [f64; 3], k: usize) -> f64 {
-        let c = [0, 1, 2].map(|d| ((q[d] - self.origin[d]) / self.cell).floor() as isize);
         let mut best: Vec<f64> = Vec::with_capacity(k + 1);
-        let max_ring = *self.dims.iter().max().unwrap_or(&1) as isize;
-        for ring in 0..=max_ring {
-            for x in c[0] - ring..=c[0] + ring {
-                for y in c[1] - ring..=c[1] + ring {
-                    for z in c[2] - ring..=c[2] + ring {
-                        let shell = (x - c[0]).abs().max((y - c[1]).abs()).max((z - c[2]).abs());
-                        if shell != ring {
-                            continue;
-                        }
-                        let inside = |v: isize, d: usize| v >= 0 && (v as usize) < self.dims[d];
-                        if !(inside(x, 0) && inside(y, 1) && inside(z, 2)) {
-                            continue;
-                        }
-                        let cell =
-                            (x as usize * self.dims[1] + y as usize) * self.dims[2] + z as usize;
-                        for &i in
-                            &self.order[self.starts[cell] as usize..self.starts[cell + 1] as usize]
-                        {
-                            let p = self.points[i as usize];
-                            let d = (0..3)
-                                .map(|d| (f64::from(p[d]) - q[d]).powi(2))
-                                .sum::<f64>()
-                                .sqrt();
-                            let at = best.partition_point(|&b| b < d);
-                            if at < k {
-                                best.insert(at, d);
-                                best.truncate(k);
-                            }
-                        }
-                    }
+        self.knn(0, 0, self.points.len(), q, k, &mut best);
+        best.iter().map(|d| d.sqrt()).sum::<f64>() / best.len().max(1) as f64
+    }
+
+    // best holds the squared distances found so far, ascending
+    fn knn(&self, node: usize, lo: usize, hi: usize, q: [f64; 3], k: usize, best: &mut Vec<f64>) {
+        if hi - lo <= KD_LEAF {
+            for p in &self.points[lo..hi] {
+                let d = (0..3)
+                    .map(|d| (f64::from(p[d]) - q[d]).powi(2))
+                    .sum::<f64>();
+                if best.len() < k || d < best[k - 1] {
+                    let at = best.partition_point(|&b| b < d);
+                    best.insert(at, d);
+                    best.truncate(k);
                 }
             }
-            // every point beyond this ring is at least `ring` cells away
-            if best.len() == k && best[k - 1] <= ring as f64 * self.cell {
-                break;
-            }
+            return;
         }
-        best.iter().sum::<f64>() / best.len().max(1) as f64
+        let mid = (lo + hi) / 2;
+        let (axis, split) = self.splits[node];
+        let diff = q[axis as usize] - f64::from(split);
+        let (near, far) = if diff < 0.0 {
+            ((2 * node + 1, lo, mid), (2 * node + 2, mid, hi))
+        } else {
+            ((2 * node + 2, mid, hi), (2 * node + 1, lo, mid))
+        };
+        self.knn(near.0, near.1, near.2, q, k, best);
+        if best.len() < k || diff * diff < best[k - 1] {
+            self.knn(far.0, far.1, far.2, q, k, best);
+        }
     }
+}
+
+fn kd_build(points: &mut [[f32; 3]], node: usize, splits: &mut [(u8, f32)]) {
+    if points.len() <= KD_LEAF {
+        return;
+    }
+    let mut lo = [f32::MAX; 3];
+    let mut hi = [f32::MIN; 3];
+    for p in points.iter() {
+        for d in 0..3 {
+            lo[d] = lo[d].min(p[d]);
+            hi[d] = hi[d].max(p[d]);
+        }
+    }
+    let axis = (0..3)
+        .max_by(|&a, &b| (hi[a] - lo[a]).total_cmp(&(hi[b] - lo[b])))
+        .expect("three axes");
+    let mid = points.len() / 2;
+    points.select_nth_unstable_by(mid, |a, b| a[axis].total_cmp(&b[axis]));
+    splits[node] = (axis as u8, points[mid][axis]);
+    let (left, right) = points.split_at_mut(mid);
+    kd_build(left, 2 * node + 1, splits);
+    kd_build(right, 2 * node + 2, splits);
 }
 
 // distance from p to triangle abc (Ericson's closest point on a triangle)
@@ -659,6 +640,43 @@ pub fn plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // clustered points with far stragglers, sized around a split boundary, against brute force
+    #[test]
+    fn point_grid_knn_matches_brute_force() {
+        let mut state = 7u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            (state >> 40) as f32 / (1u64 << 24) as f32
+        };
+        for n in [5, 16, 17, 1000, 4097] {
+            let points = (0..n)
+                .map(|i| {
+                    let spread = if i % 50 == 0 { 100.0 } else { 1.0 };
+                    [next() * spread, next() * spread, next() * 0.01]
+                })
+                .collect::<Vec<_>>();
+            let grid = PointGrid::new(&points);
+            for q in points.iter().step_by(7) {
+                let q = q.map(f64::from);
+                let mut d = points
+                    .iter()
+                    .map(|p| {
+                        (0..3)
+                            .map(|i| (f64::from(p[i]) - q[i]).powi(2))
+                            .sum::<f64>()
+                            .sqrt()
+                    })
+                    .collect::<Vec<_>>();
+                d.sort_by(f64::total_cmp);
+                let k = 11.min(n);
+                let want = d[..k].iter().sum::<f64>() / k as f64;
+                assert!((grid.mean_knn(q, 11) - want).abs() < 1e-12, "n {n}");
+            }
+        }
+    }
 
     // a deterministic scatter of triangles of mixed sizes, queried inside, outside and on the bounds
     #[test]

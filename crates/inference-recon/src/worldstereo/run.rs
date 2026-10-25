@@ -20,6 +20,7 @@ pub use inference_tensor::quantized::GgmlDType;
 use inference_tensor::{DType, Device, Result, Tensor};
 use serde::Serialize;
 
+use super::align::{AlignFrame, Alignment, align};
 use super::cameras;
 use super::memory::{MemoryBank, MemoryFrame};
 use super::panorama::{Rgb8, pano_depth};
@@ -29,13 +30,17 @@ use super::trajectory::{self, Mat4, MeshBvh, Obstacles, PointGrid};
 use crate::geometry::invert4;
 use crate::moge::MoGe;
 use crate::worldmirror::priors::PriorInputs;
-use crate::worldmirror::run::{Axes, OPENCV_AXES, ReconstructOptions, reconstruct_with_priors};
+use crate::worldmirror::run::{
+    Axes, OPENCV_AXES, ReconstructOptions, depth_with_priors, reconstruct_with_priors,
+};
 use crate::worldmirror::{WorldMirror, preprocess::RgbImage};
 
 // the reference generates each view's aerial move first, the two turns then lean on it
 const TRAJECTORY_ORDER: [usize; 3] = [2, 0, 1];
 // WorldMirror runs on the whole memory bank (~99 frames); the reference's 832 is ~200K tokens, past a 24 GB card
 pub const DEFAULT_RECONSTRUCT_SIZE: usize = 518;
+// the reference aligns depth inferred at 832 with WorldMirror's depth head alone
+const ALIGN_DEPTH_SIZE: usize = 832;
 const DEFAULT_SEED: u64 = 1024;
 const QUANTIZATION: &str = "WorldStereo's main-block linears as settings.block_weights states (quantized at load, streamed \
                             from host memory), its other weights and umT5 in bf16; Wan VAE, CLIP image encoder and MoGe-2 \
@@ -163,6 +168,17 @@ pub struct WorldGenReport {
     pub frames: usize,
     pub reconstructed_frames: usize,
     pub reconstruction_to_scene: Option<SceneTransform>,
+    /// the per-frame depth alignment (aligned/): frames fitted, borrowing a clip neighbour's fit, or left out
+    pub alignment: Option<AlignedReport>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AlignedReport {
+    pub frames: usize,
+    pub fitted: usize,
+    pub borrowed: usize,
+    pub abandoned: usize,
+    pub points: usize,
 }
 
 // the transform from WorldMirror's frame to the scene's, from its predicted cameras and the given ones
@@ -304,6 +320,103 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
         .map_err(|e| inference_tensor::Error::msg(format!("{}: {e}", path.display())))
 }
 
+// an 8-bit image as `[3, H, W]` in [0, 1]
+fn image_unit_tensor(img: &Rgb8, device: &Device) -> Result<Tensor> {
+    let (w, h) = (img.width, img.height);
+    let mut chw = vec![0f32; 3 * w * h];
+    for (p, rgb) in img.pixels.as_chunks::<3>().0.iter().enumerate() {
+        for c in 0..3 {
+            chw[c * w * h + p] = f32::from(rgb[c]) / 255.0;
+        }
+    }
+    Tensor::from_vec(chw, (3, h, w), device)
+}
+
+/// `aligned/`: each frame's metric depth (`depth_NNNN.npy`, 0 where left out), `frames.json` (name, planned
+/// world-to-camera, intrinsics, fit and its source) and the merged cloud `points.ply`.
+fn write_alignment(dir: &Path, alignment: &Alignment) -> Result<()> {
+    #[derive(Serialize)]
+    struct FrameMeta<'a> {
+        index: usize,
+        name: &'a str,
+        w2c: Mat4,
+        intrinsics: [[f64; 3]; 3],
+        inverse_depth_fit: Option<(f64, f64)>,
+        fit_source: String,
+        width: usize,
+        height: usize,
+    }
+    std::fs::create_dir_all(dir)?;
+    let mut metas = Vec::new();
+    for (i, f) in alignment.frames.iter().enumerate() {
+        let (w, h) = (
+            (f.intrinsics[0][2] * 2.0).round() as usize,
+            (f.intrinsics[1][2] * 2.0).round() as usize,
+        );
+        write_npy_f32(&dir.join(format!("depth_{i:04}.npy")), &f.depth, (h, w))?;
+        metas.push(FrameMeta {
+            index: i,
+            name: &f.name,
+            w2c: f.w2c,
+            intrinsics: f.intrinsics,
+            inverse_depth_fit: f.fit,
+            fit_source: format!("{:?}", f.source),
+            width: w,
+            height: h,
+        });
+    }
+    std::fs::write(
+        dir.join("frames.json"),
+        serde_json::to_string_pretty(&metas).map_err(inference_tensor::Error::wrap)?,
+    )?;
+    crate::worldmirror::output::write_points_ply(
+        &dir.join("points.ply"),
+        &alignment.points,
+        &alignment.colors,
+    )
+}
+
+/// `scene/`: the panorama's cleaned distance (`distance.npy`), `sky_mask.png` (255 off the sky), the point cloud
+/// (`points.ply`) and each start view (`start_frame_N.png`), the inputs the Gaussian training data is cut from.
+fn write_scene(dir: &Path, scene: &Scene, views: &[View]) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let (w, h) = (scene.width, scene.height);
+    write_npy_f32(&dir.join("distance.npy"), &scene.distance, (h, w))?;
+    let ground = scene.sky.iter().map(|&s| if s { 0 } else { 255 }).collect();
+    image::GrayImage::from_raw(w as u32, h as u32, ground)
+        .expect("one byte a pixel")
+        .save(dir.join("sky_mask.png"))
+        .map_err(inference_tensor::Error::wrap)?;
+    crate::worldmirror::output::write_points_ply(
+        &dir.join("points.ply"),
+        &scene.points,
+        &scene.colors,
+    )?;
+    for (i, v) in views.iter().enumerate() {
+        save_png(&v.image, &dir.join(format!("start_frame_{i}.png")))?;
+    }
+    Ok(())
+}
+
+// a float32 array (rows, cols) as a .npy file
+fn write_npy_f32(path: &Path, values: &[f32], (rows, cols): (usize, usize)) -> Result<()> {
+    let header = format!("{{'descr': '<f4', 'fortran_order': False, 'shape': ({rows}, {cols}), }}");
+    // magic, version 1.0, header length; the header padded with spaces to a 64-byte boundary, ending in a newline
+    let unpadded = 10 + header.len() + 1;
+    let padded = unpadded.div_ceil(64) * 64;
+    let mut out = Vec::with_capacity(padded + values.len() * 4);
+    out.extend_from_slice(b"\x93NUMPY\x01\x00");
+    out.extend_from_slice(&((padded - 10) as u16).to_le_bytes());
+    out.extend_from_slice(header.as_bytes());
+    out.extend(std::iter::repeat_n(b' ', padded - unpadded));
+    out.push(b'\n');
+    for v in values {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    std::fs::write(path, out)?;
+    Ok(())
+}
+
 // an 8-bit image as `[3, H, W]` in [-1, 1]
 fn image_tensor(img: &Rgb8, device: &Device) -> Result<Tensor> {
     let (w, h) = (img.width, img.height);
@@ -374,6 +487,7 @@ pub fn generate_world(
         .into_iter()
         .map(|c2w| scene.view(pano, c2w))
         .collect::<Vec<View>>();
+    write_scene(&out_dir.join("scene"), &scene, &views)?;
     let ground_median = scene.ground_median();
     let bank = scene
         .memory_bank(pano)
@@ -600,12 +714,94 @@ pub fn generate_world(
     release(device)?;
     stage("clips (WorldStereo-2)", t, device);
 
-    // 5. WorldMirror on the memory bank, the bank's cameras as priors
+    // 5. alignment: each memory frame's WorldMirror depth fitted to the panorama cloud, then the preview reconstruction
     let mut reconstructed = 0;
     let mut transform = None;
+    let mut aligned_report = None;
     if let Some(wm_dir) = &models.worldmirror {
         let t = Instant::now();
         let model = WorldMirror::load(wm_dir, DType::BF16, device)?;
+        let images = memory
+            .frames
+            .iter()
+            .map(|f| RgbImage {
+                width: f.image.width,
+                height: f.image.height,
+                pixels: f.image.pixels.clone(),
+            })
+            .collect::<Vec<_>>();
+        let bank_priors = PriorInputs {
+            camera_to_world: Some(
+                memory
+                    .frames
+                    .iter()
+                    .map(|f| invert4(&f.w2c).map(|r| r.map(|v| v as f32)))
+                    .collect(),
+            ),
+            intrinsics: Some(
+                memory
+                    .frames
+                    .iter()
+                    .map(|f| f.intrinsics.map(|r| r.map(|v| v as f32)))
+                    .collect(),
+            ),
+            depths: None,
+        };
+        let depths = depth_with_priors(&model, &images, &bank_priors, ALIGN_DEPTH_SIZE)?;
+        release(device)?;
+        stage("alignment depth (WorldMirror 2.0)", t, device);
+
+        let t = Instant::now();
+        let moge = MoGe::load(&models.moge, DType::F32, device)?;
+        let mut align_frames = Vec::with_capacity(memory.frames.len());
+        for (f, depth) in memory.frames.iter().zip(depths) {
+            let out = moge.infer(
+                &image_unit_tensor(&f.image, device)?,
+                trajectory::VIEW_FOV_X_DEG,
+            )?;
+            let mask = out
+                .mask
+                .to_dtype(DType::F32)?
+                .to_device(&Device::Cpu)?
+                .flatten_all()?
+                .to_vec1::<f32>()?
+                .into_iter()
+                .map(|m| m > 0.5)
+                .collect();
+            let normal = out
+                .normal
+                .to_dtype(DType::F32)?
+                .to_device(&Device::Cpu)?
+                .flatten_all()?
+                .to_vec1::<f32>()?
+                .as_chunks::<3>()
+                .0
+                .to_vec();
+            align_frames.push(AlignFrame {
+                name: &f.name,
+                image: &f.image,
+                w2c: f.w2c,
+                intrinsics: f.intrinsics,
+                depth,
+                mask,
+                normal,
+            });
+        }
+        drop(moge);
+        release(device)?;
+        let alignment = align(&align_frames, &scene);
+        write_alignment(&out_dir.join("aligned"), &alignment)?;
+        aligned_report = Some(AlignedReport {
+            frames: alignment.frames.len(),
+            fitted: alignment.fitted,
+            borrowed: alignment.borrowed,
+            abandoned: alignment.abandoned,
+            points: alignment.points.len(),
+        });
+        drop(align_frames);
+        stage("alignment (MoGe-2 masks, fit to the panorama)", t, device);
+
+        let t = Instant::now();
         let frames = memory
             .frames
             .iter()
@@ -705,6 +901,7 @@ pub fn generate_world(
         frames: total_frames,
         reconstructed_frames: reconstructed,
         reconstruction_to_scene: transform,
+        alignment: aligned_report,
     };
     std::fs::write(
         out_dir.join("meta.json"),
