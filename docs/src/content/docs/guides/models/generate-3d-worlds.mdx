@@ -74,7 +74,10 @@ world/
 ## Conventions
 
 - Clip cameras are OpenCV (x right, y down, z forward), camera-to-world, in the scene frame: the panorama's centre at
-  the origin, +z up, in metres as MoGe-2 estimates them.
+  the origin, +z up, in metres as MoGe-2 estimates them. Treat the scale as approximate: on an indoor and an outdoor
+  test panorama it came out 2 to 3.5 times too small (the camera about 0.45 m above the ground), so fit it to known
+  geometry. Outdoors, distances past twice the median are compressed before planning, so far objects sit closer than
+  they are.
 - The reconstruction is in WorldMirror's frame (the first input camera's, arbitrary scale).
   `reconstruction_to_scene` in `meta.json` maps it into the scene frame as `scene = scale * rotation * recon +
   translation`, fitted on the cameras; it also reports the median position and rotation residuals of the fit.

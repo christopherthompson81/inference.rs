@@ -491,3 +491,22 @@ case001 end to end  scene 42.6 s, trajectories 8.1, caption 39.4, clips 1110.4 (
 ```
 Side by side with Run 19's frames: the same rooms and detail. Q8_0 becomes worldgen's default (`--weights bf16` keeps
 the blocks dense).
+
+## Run 23 - 2026-10-24 21:57
+
+Question: does worldgen hold up on an outdoor panorama? A CC0 Poly Haven park panorama (an autumn garden terrace:
+paved plaza, stone steps, flower beds, trees, overcast sky), 1920 x 960, no `--scene` (decided by sky share), hand
+prompt, Q8_0 blocks and int8 attention.
+```
+scene 47.0 s, trajectories 1.2, caption 41.6, clips 1044.8 (~116 s a clip), reconstruction 28.7; wall 1164 s;
+nvidia-smi peak 17.7 GB above idle; decided outdoor (sky share); camera fit 1.8 cm / 1.05 deg; 2.0M points, 4.9M splats
+```
+Clips: the terraces, benches, beds and trees stay consistent across the 3 start views; the aerial move invents lawns and
+paths beyond the wall plausibly. The light drifts sunnier and more saturated as the aerial move climbs, despite "soft
+overcast" in the prompt; the fastest moves blur the nearest foliage. A top-down render of points.ply in the scene frame:
+the plaza, round bed, steps and the red shrub in place, far trees squeezed into a ring by the outdoor contraction.
+Scale: the ground sits 0.43 to 0.48 m below the camera (5th percentile of z in rings 0.3 to 3 m), so MoGe-2's metric
+estimate is ~3.5x small for a standing-height panorama; the indoor case001 gives floor -0.47 m and ceiling +1.24 m (a
+1.7 m room). Scene construction does not rescale (only clips at the 0.98 quantile and contracts far distances
+outdoors), and the panorama depth matches the reference's, so the estimate is the model's. meta.json and the guide now
+call the scale approximate and say to fit it to known geometry.

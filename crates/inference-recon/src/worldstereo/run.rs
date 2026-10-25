@@ -671,8 +671,9 @@ pub fn generate_world(
                       mapped into this one by reconstruction_to_scene",
         world_up: "+z (gravity aligned as far as the panorama is level)",
         handedness: "right",
-        scale: "metric for the clip cameras (MoGe-2's estimate, metres); the reconstruction is arbitrary until \
-                reconstruction_to_scene is applied",
+        scale: "approximately metric for the clip cameras (MoGe-2's estimate, metres; on the tested panoramas it ran 2 \
+                to 3.5x small, the camera ~0.45 m above the ground), so fit to known geometry; the reconstruction is \
+                arbitrary until reconstruction_to_scene is applied",
         intrinsics: "pixels of the clip frames (width x height in each cameras.json)",
         panorama_width: pano.width,
         panorama_height: pano.height,
