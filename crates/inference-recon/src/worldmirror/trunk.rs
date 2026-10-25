@@ -13,6 +13,9 @@ use crate::dinov2::{Dinov2, Dinov2Spec, PosInterp};
 const TRUNK_EPS: f64 = 1e-5;
 // Layers whose frame and global outputs, concatenated, feed the heads
 const HEAD_LAYERS: [usize; 4] = [4, 11, 17, 23];
+// past this the kept head features wait in host memory, so the later layers have the card (heads take them a chunk at
+// a time); 99 frames at 832 keep ~6.4 GB
+const HOST_FEATURE_BYTES: usize = 2 << 30;
 // Tokens before a frame's patches: camera, the registers, then the pose and ray prior tokens
 const CAMERA_TOKENS: usize = 1;
 const PRIOR_TOKENS: usize = 2;
@@ -209,6 +212,8 @@ impl Trunk {
         let frame_cells = Tensor::new(cells.as_slice(), device)?;
         let global_cells = Tensor::new(cells.repeat(frames).as_slice(), device)?;
         let mut features = Vec::with_capacity(HEAD_LAYERS.len());
+        let kept_bytes = HEAD_LAYERS.len() * frames * tokens * 2 * dim * xs.dtype().size_in_bytes();
+        let keep_on_host = device.is_cuda() && kept_bytes > HOST_FEATURE_BYTES;
         for (i, (frame_block, global_block)) in self
             .frame_blocks
             .iter()
@@ -224,7 +229,12 @@ impl Trunk {
                 .reshape((frames, tokens, dim))?;
             inspect(i, &local, &global);
             if HEAD_LAYERS.contains(&i) {
-                features.push(Tensor::cat(&[&local, &global], 2)?);
+                let kept = Tensor::cat(&[&local, &global], 2)?;
+                features.push(if keep_on_host {
+                    kept.to_device(&inference_tensor::Device::Cpu)?
+                } else {
+                    kept
+                });
             }
             xs = global;
         }

@@ -266,6 +266,11 @@ pub use inference_api::{
     engine_logits::{LogitsOutput, PromptInput, PromptLogits, PromptLogitsRequest},
     generation::SpeechAudio,
     initialize_logging,
+    jobs::{
+        JobContext, JobDeleted, JobEvent, JobInput, JobList, JobOutput, JobPreview, JobRecord,
+        JobRequest, JobResult, JobStage, JobStatus, JobsConfig, Progress, ReconstructJob,
+        SceneKind, WorldJob,
+    },
     logits_processors::{CustomLogitsProcessor, in_place},
     media_source::MediaAttachment,
     models::{ModelOperationRequest, ModelStatus},

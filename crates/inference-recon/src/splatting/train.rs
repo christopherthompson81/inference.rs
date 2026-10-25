@@ -17,8 +17,10 @@ use rayon::prelude::*;
 use super::data::{Mat4, SplatData, View};
 use super::lpips::Lpips;
 use super::mesh::{DepthFrame, Mesh, Tsdf, TsdfSettings};
+use super::spz::{SplatRows, write_spz};
 use super::ssim;
 use crate::geometry::invert4;
+use crate::progress::{Progress, check};
 use crate::worldstereo::trajectory::PointGrid;
 
 // the trainer's flags at 8000 single-GPU steps (README's 1500 x steps_scaler 5.3334); refine steps scale with steps
@@ -72,6 +74,9 @@ const MESH_TSDF: TsdfSettings = TsdfSettings {
     depth_trunc: 5.0,
 };
 const LOG_EVERY: usize = 100;
+// steps between progress reports (and cancellation checks), and between preview renders
+const PROGRESS_EVERY: usize = 10;
+const PREVIEW_EVERY: usize = 1000;
 
 pub struct TrainOptions {
     pub steps: usize,
@@ -875,8 +880,36 @@ impl Trainer {
         Ok(total / self.data.val.len().max(1) as f64)
     }
 
-    /// Runs the schedule; the final mean validation PSNR.
-    pub fn train(&mut self) -> Result<f64> {
+    /// The first validation view (or training view, without any) rendered with the open gates, as a PNG.
+    pub fn write_preview(&self, path: &Path) -> Result<()> {
+        let Some(&i) = self.data.val.first().or(self.data.train.first()) else {
+            return Ok(());
+        };
+        let s = &self.splats.mask_score;
+        let gate = s
+            .narrow(1, 0, 1)?
+            .gt(&s.narrow(1, 1, 1)?)?
+            .to_dtype(DType::F32)?
+            .squeeze(1)?;
+        let r = gsplat::render(&self.frame(&self.views[i], Some(&gate)))?;
+        let pixels = (r.image.narrow(2, 0, 3)?.clamp(0f32, 1f32)? * 255.0)?
+            .round()?
+            .to_dtype(DType::U8)?
+            .flatten_all()?
+            .to_vec1::<u8>()?;
+        let (w, h) = (self.data.views[i].width, self.data.views[i].height);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        image::RgbImage::from_raw(w as u32, h as u32, pixels)
+            .ok_or_else(|| inference_tensor::Error::msg("a preview render of the wrong size"))?
+            .save(path)
+            .map_err(|e| inference_tensor::Error::msg(format!("{}: {e}", path.display())))
+    }
+
+    /// Runs the schedule, reporting to `progress` and writing a preview render into `previews` now and then; the
+    /// final mean validation PSNR.
+    pub fn train(&mut self, progress: &dyn Progress, previews: &Path) -> Result<f64> {
         let scale = |s: usize| s * self.steps / DEFAULT_STEPS;
         let (start, stop, every) = (
             scale(REFINE_START),
@@ -887,6 +920,10 @@ impl Trainer {
         let started = Instant::now();
         let mut sum = Terms::default();
         for step in 0..self.steps {
+            if step % PROGRESS_EVERY == 0 {
+                check(progress)?;
+                progress.advance(step);
+            }
             if order.is_empty() {
                 order = self.data.train.clone();
                 order.shuffle(&mut self.rng);
@@ -931,7 +968,13 @@ impl Trainer {
                 );
                 sum = Terms::default();
             }
+            if (step + 1) % PREVIEW_EVERY == 0 {
+                let path = previews.join(format!("step_{:05}.png", step + 1));
+                self.write_preview(&path)?;
+                progress.preview(&format!("step {}", step + 1), &path);
+            }
         }
+        progress.advance(self.steps);
         self.eval()
     }
 
@@ -1098,11 +1141,62 @@ pub struct SplatReport {
     pub transform: [[f32; 4]; 4],
 }
 
-impl Trainer {
-    /// Writes the splats as a 3DGS PLY (x y z, f_dc, opacity logit, log scales, unit wxyz quaternion), each kept
-    /// with its mask's keep probability; the count written.
-    pub fn write_ply(&mut self, path: &Path) -> Result<usize> {
+/// The splats an export keeps, on the host.
+pub struct Exported {
+    pub means: Vec<[f32; 3]>,
+    pub sh0: Vec<[f32; 3]>,
+    pub logits: Vec<f32>,
+    pub log_scales: Vec<[f32; 3]>,
+    /// unit, w x y z
+    pub quats: Vec<[f32; 4]>,
+}
+
+impl Exported {
+    pub fn rows(&self) -> SplatRows<'_> {
+        SplatRows {
+            means: &self.means,
+            sh0: &self.sh0,
+            logits: &self.logits,
+            log_scales: &self.log_scales,
+            quats_wxyz: &self.quats,
+        }
+    }
+
+    /// Writes the splats as a 3DGS PLY (x y z, f_dc, opacity logit, log scales, unit wxyz quaternion); the count.
+    pub fn write_ply(&self, path: &Path) -> Result<usize> {
         use std::io::Write;
+        let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+        write!(
+            out,
+            "ply\nformat binary_little_endian 1.0\nelement vertex {}\n",
+            self.means.len()
+        )?;
+        for name in [
+            "x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2", "opacity", "scale_0", "scale_1",
+            "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",
+        ] {
+            writeln!(out, "property float {name}")?;
+        }
+        writeln!(out, "end_header")?;
+        for i in 0..self.means.len() {
+            let values = self.means[i]
+                .iter()
+                .chain(&self.sh0[i])
+                .chain(std::iter::once(&self.logits[i]))
+                .chain(&self.log_scales[i])
+                .chain(&self.quats[i]);
+            for v in values {
+                out.write_all(&v.to_le_bytes())?;
+            }
+        }
+        out.flush()?;
+        Ok(self.means.len())
+    }
+}
+
+impl Trainer {
+    /// The splats to export, each kept with its mask's keep probability, the non-finite ones left out.
+    pub fn export(&mut self) -> Result<Exported> {
         let keep = Self::host_f32(&self.splats.keep_prob()?)?;
         let kept = keep
             .iter()
@@ -1125,35 +1219,21 @@ impl Trainer {
                     .all(|v| v.is_finite())
             })
             .collect::<Vec<_>>();
-        let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
-        write!(
-            out,
-            "ply\nformat binary_little_endian 1.0\nelement vertex {}\n",
-            rows.len()
-        )?;
-        for name in [
-            "x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2", "opacity", "scale_0", "scale_1",
-            "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",
-        ] {
-            writeln!(out, "property float {name}")?;
-        }
-        writeln!(out, "end_header")?;
-        for &i in &rows {
-            let q = &quats[4 * i..4 * i + 4];
-            let norm = q.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-12);
-            let values = means[3 * i..3 * i + 3]
+        let three = |v: &[f32], i: usize| [v[3 * i], v[3 * i + 1], v[3 * i + 2]];
+        Ok(Exported {
+            means: rows.iter().map(|&i| three(&means, i)).collect(),
+            sh0: rows.iter().map(|&i| three(&sh0, i)).collect(),
+            logits: rows.iter().map(|&i| logits[i]).collect(),
+            log_scales: rows.iter().map(|&i| three(&scales, i)).collect(),
+            quats: rows
                 .iter()
-                .chain(&sh0[3 * i..3 * i + 3])
-                .chain(std::iter::once(&logits[i]))
-                .chain(&scales[3 * i..3 * i + 3])
-                .copied()
-                .chain(q.iter().map(|v| v / norm));
-            for v in values {
-                out.write_all(&v.to_le_bytes())?;
-            }
-        }
-        out.flush()?;
-        Ok(rows.len())
+                .map(|&i| {
+                    let q = &quats[4 * i..4 * i + 4];
+                    let norm = q.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-12);
+                    [q[0] / norm, q[1] / norm, q[2] / norm, q[3] / norm]
+                })
+                .collect(),
+        })
     }
 }
 
@@ -1192,19 +1272,30 @@ impl Trainer {
     }
 }
 
-/// Trains splats on a `gs_data` directory and writes `splats.ply` and `splats.json` (the report) into `out_dir`.
+/// Trains splats on a `gs_data` directory and writes `splats.ply`, `splats.spz` and `splats.json` (the report) into `out_dir`, with
+/// preview renders in its `previews` folder.
 pub fn train_splats(
     data_dir: &Path,
     out_dir: &Path,
     options: &TrainOptions,
     device: &Device,
+    progress: &dyn Progress,
 ) -> Result<SplatReport> {
     let t = Instant::now();
     std::fs::create_dir_all(out_dir)?;
+    check(progress)?;
+    progress.stage("training", options.steps);
     let data = SplatData::load(data_dir)?;
     let mut trainer = Trainer::new(data, options, device)?;
-    let val_psnr = trainer.train()?;
-    let exported = trainer.write_ply(&out_dir.join("splats.ply"))?;
+    let val_psnr = trainer.train(progress, &out_dir.join("previews"))?;
+    check(progress)?;
+    progress.stage("export", 0);
+    let splats = trainer.export()?;
+    let exported = splats.write_ply(&out_dir.join("splats.ply"))?;
+    write_spz(&out_dir.join("splats.spz"), &splats.rows())?;
+    drop(splats);
+    check(progress)?;
+    progress.stage("mesh", 0);
     let mesh = trainer.mesh()?;
     mesh.write_ply(&out_dir.join("mesh.ply"))?;
     let mesh_triangles = mesh.triangles.len();
