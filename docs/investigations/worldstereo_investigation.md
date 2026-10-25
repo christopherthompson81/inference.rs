@@ -316,3 +316,44 @@ Attention is half the step. Levers, by size: an int8 QK^T / fp16-accumulate PV a
 ~2x on that half; fused norm+modulate kernels in place of the composed f32 ops (~6 s); block uploads prefetched on a
 second stream or kept resident (~3 s); Q8_0 linears (~3.5 s, at a quality cost). Next: the fused norms and the upload
 overlap (exact), then the attention kernel.
+
+## Run 14 - 2026-10-24 19:20
+
+Question: what do fused kernels for the step's elementwise work buy (inference-nn `dit.cu`: LayerNorm + f32 affine +
+adaLN modulation, gated residual, full-width QK RMSNorm + interleaved RoPE written head-major; bf16 GELU directly)?
+
+`small_transformer_matches_the_reference`: 2 blocks rel rms 4.67e-3, 6 blocks 4.99e-3 (unchanged). nsys on
+`full_size_streamed_step`, per step:
+```
+flash_attn_ext_f16   31.09 s   (was 27.75)
+cuBLAS bf16 GEMM     15.78 s   (was 14.02)
+elementwise           ~2.0 s   (was 9.2)
+H2D uploads           3.63 s   (not overlapped)
+step                 52.8 s    (was 55.0)
+```
+Attention and GEMM looked slower for the same work, which I first read as the power cap; it was other load on the
+desktop during this run (see Run 15). fattn on Turing/Ampere accumulates KQ in f32 (half-rate MMA) and VKQ in fp16
+(full rate); an int8 QK (SageAttention's per-block quantized Q and mean-smoothed K, int32 accumulate) is the remaining attention lever.
+
+## Run 15 - 2026-10-24 19:38
+
+Question: with the desktop's other GPU clients closed, are step timings consistent, and what did the fusion really buy?
+
+`full_size_streamed_step`, quiet desktop, nvidia-smi sampling clocks, power and throttle reasons each second:
+```
+fused (HEAD)          47.0, 47.2, 47.3, 47.4 s   (two processes, two rounds each)
+pre-fusion (HEAD~1)   55.2, 55.4 s               (the three Wan files checked out, rebuilt, then restored)
+clocks                avg 1798 MHz, avg 320 W, 64 C; throttle reason mostly 0x4 (software power cap)
+```
+Run 14's 52.8 s ran beside other desktop load. The fusion saves 8.1 s a step (15%), about the 9.2 s of elementwise
+work it removed; the power cap still bounds the big kernels, but it did not eat the gain. Timings repeat within 0.4 s
+on a quiet desktop.
+
+## Run 16 - 2026-10-24 19:55
+
+Question: does uploading block i+1 on a forked stream (`CudaDevice::fork_stream`, ordered with stream joins; a block is
+freed on the copy stream after the main stream has run it) hide the 3.6 s of copies?
+
+`full_size_streamed_step`, quiet desktop: 45.7 / 45.9 s (47.2 before). nsys: the copies (2.85 s, 32 GB) run on their
+own stream beside the kernels; per step flash_attn 28.1 s, GEMM 14.3 s, the rest ~1.5 s, ~1.8 s of gaps. Attention is
+61% of the step.

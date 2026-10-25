@@ -378,6 +378,60 @@ pub struct WorldStereoTransformer {
     device: Device,
 }
 
+// Host-resident blocks uploaded one ahead on a second stream, so each copy overlaps the block before it; a block's
+// weights are freed on the copy stream once the main stream has run it
+struct BlockUploads {
+    device: Device,
+    copy: Option<Device>,
+}
+
+impl BlockUploads {
+    fn new(device: &Device) -> Result<Self> {
+        let copy = match device {
+            #[cfg(feature = "cuda")]
+            Device::Cuda(d) => Some(Device::Cuda(d.fork_stream()?)),
+            _ => None,
+        };
+        Ok(Self {
+            device: device.clone(),
+            copy,
+        })
+    }
+
+    // None when the block already lives on the device
+    fn upload(&mut self, block: &Block) -> Result<Option<Block>> {
+        if block.scale_shift_table.device().same_device(&self.device) {
+            return Ok(None);
+        }
+        block
+            .to_device(self.copy.as_ref().unwrap_or(&self.device))
+            .map(Some)
+    }
+
+    fn wait_for_upload(&self) -> Result<()> {
+        #[cfg(feature = "cuda")]
+        if let (Device::Cuda(main), Some(Device::Cuda(copy))) = (&self.device, &self.copy) {
+            main.cuda_stream()
+                .join(&copy.cuda_stream())
+                .map_err(inference_tensor::Error::wrap)?;
+        }
+        Ok(())
+    }
+
+    fn release(&self, block: Option<Block>) -> Result<()> {
+        #[cfg(feature = "cuda")]
+        if let (Some(_), Device::Cuda(main), Some(Device::Cuda(copy))) =
+            (&block, &self.device, &self.copy)
+        {
+            copy.cuda_stream()
+                .join(&main.cuda_stream())
+                .map_err(inference_tensor::Error::wrap)?;
+        }
+        drop(block);
+        Ok(())
+    }
+}
+
 impl WorldStereoTransformer {
     /// Every weight on the builder's device.
     pub fn new(cfg: &WanConfig, ws: &WorldStereoConfig, vb: ShardedVarBuilder) -> Result<Self> {
@@ -471,17 +525,22 @@ impl WorldStereoTransformer {
         };
         let mut control = self.controlnet.start(inputs, &cond.temb, (f, h, w))?;
         let (mut video, mut memory) = (video, memory);
-        for block in &self.blocks {
-            (video, memory) = if block.scale_shift_table.device().same_device(&self.device) {
-                block.forward(&video, &memory, cond, &rope)?
-            } else {
-                block
-                    .to_device(&self.device)?
-                    .forward(&video, &memory, cond, &rope)?
-            };
+        let mut uploads = BlockUploads::new(&self.device)?;
+        let mut next = uploads.upload(&self.blocks[0])?;
+        for (i, block) in self.blocks.iter().enumerate() {
+            let current = next.take();
+            uploads.wait_for_upload()?;
+            (video, memory) = current
+                .as_ref()
+                .unwrap_or(block)
+                .forward(&video, &memory, cond, &rope)?;
             if let Some(c) = control.step()? {
                 video = (video + c)?;
             }
+            if let Some(following) = self.blocks.get(i + 1) {
+                next = uploads.upload(following)?;
+            }
+            uploads.release(current)?;
         }
         let ss = self
             .scale_shift_table
