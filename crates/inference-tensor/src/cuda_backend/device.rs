@@ -356,6 +356,15 @@ impl CudaDevice {
         self.stream.clone()
     }
 
+    /// The same device on a new stream of its context, for copies that overlap the original stream's kernels. Tensors
+    /// made through it are allocated and freed on that stream, so the caller orders the two streams.
+    pub fn fork_stream(&self) -> Result<Self> {
+        Ok(Self {
+            stream: self.stream.fork().map_err(crate::Error::wrap)?,
+            ..self.clone()
+        })
+    }
+
     /// An event after the stream's queued work, which a waiting thread sleeps on: the context's default wait spins.
     pub fn sleeping_event(&self) -> Result<cudarc::driver::CudaEvent> {
         self.stream

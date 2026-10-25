@@ -6,8 +6,8 @@ use inference_tensor::{DType, Result, Tensor};
 use serde::Deserialize;
 
 use super::ops::{
-    ACT_DTYPE, LayerNorm, Linear, PatchConv, RmsNorm, RopeTables, attention, gated_residual,
-    gelu_tanh, heads, modulate,
+    ACT_DTYPE, AttentionKind, LayerNorm, Linear, PatchConv, RmsNorm, RopeTables, gated_residual,
+    gelu_tanh, heads, self_attention,
 };
 use super::transformer::StepInputs;
 
@@ -54,7 +54,7 @@ impl AdaNorm {
             m.narrow(1, dim, dim)?,
             m.narrow(1, 2 * dim, dim)?,
         );
-        Ok((modulate(&self.norm.forward(xs)?, &shift, &scale)?, gate))
+        Ok((self.norm.forward_act(xs, Some((&shift, &scale)))?, gate))
     }
 }
 
@@ -90,18 +90,26 @@ impl ControlBlock {
         })
     }
 
-    fn forward(&self, xs: &Tensor, temb: &Tensor, rope: &RopeTables) -> Result<Tensor> {
+    fn forward(
+        &self,
+        xs: &Tensor,
+        temb: &Tensor,
+        rope: &RopeTables,
+        kind: AttentionKind,
+    ) -> Result<Tensor> {
         let (normed, gate) = self.norm1.forward(xs, temb)?;
-        let q = rope.apply(&heads(
-            &self.norm_q.forward(&self.to_q.forward(&normed)?)?,
-            self.heads,
-        )?)?;
-        let k = rope.apply(&heads(
-            &self.norm_k.forward(&self.to_k.forward(&normed)?)?,
-            self.heads,
-        )?)?;
+        let q = self
+            .norm_q
+            .heads(&self.to_q.forward(&normed)?, self.heads, Some(rope))?;
+        let k = self
+            .norm_k
+            .heads(&self.to_k.forward(&normed)?, self.heads, Some(rope))?;
         let v = heads(&self.to_v.forward(&normed)?, self.heads)?;
-        let xs = gated_residual(xs, &self.to_out.forward(&attention(&q, &k, &v)?)?, &gate)?;
+        let xs = gated_residual(
+            xs,
+            &self.to_out.forward(&self_attention(&q, &k, &v, kind)?)?,
+            &gate,
+        )?;
         let (normed, gate) = self.norm2.forward(&xs, temb)?;
         let ff = self
             .ffn_down
@@ -179,6 +187,7 @@ impl ControlNet {
         inputs: &StepInputs,
         temb: &'a Tensor,
         (f, h, w): (usize, usize, usize),
+        attention: AttentionKind,
     ) -> Result<ControlState<'a>> {
         let input = Tensor::cat(
             &[
@@ -201,6 +210,7 @@ impl ControlNet {
             temb,
             rope: RopeTables::grid(self.head_dim, (f, h / 2, w / 2), inputs.latents.device())?,
             next: 0,
+            attention,
         })
     }
 }
@@ -212,6 +222,7 @@ pub(crate) struct ControlState<'a> {
     temb: &'a Tensor,
     rope: RopeTables,
     next: usize,
+    attention: AttentionKind,
 }
 
 impl ControlState<'_> {
@@ -220,7 +231,7 @@ impl ControlState<'_> {
         let Some(block) = self.net.blocks.get(self.next) else {
             return Ok(None);
         };
-        self.xs = block.forward(&self.xs, self.temb, &self.rope)?;
+        self.xs = block.forward(&self.xs, self.temb, &self.rope, self.attention)?;
         let residual = self.net.proj_out[self.next].forward(&self.xs)?;
         self.next += 1;
         Ok(Some(residual))

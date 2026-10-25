@@ -3,10 +3,14 @@ pub mod adain;
 #[cfg(feature = "cuda")]
 pub mod dflash_context;
 #[cfg(feature = "cuda")]
+pub mod dit;
+#[cfg(feature = "cuda")]
 pub mod dynamic_conv;
 pub mod ffi;
 #[cfg(feature = "cuda")]
 pub mod hyper;
+#[cfg(feature = "cuda")]
+pub mod int8_attention;
 #[cfg(feature = "cuda")]
 pub mod lstm;
 #[cfg(feature = "cuda")]

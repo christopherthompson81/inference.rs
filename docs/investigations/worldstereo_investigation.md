@@ -256,3 +256,365 @@ Reconstruction check (WorldMirror's predicted cameras against the trajectory cam
 fit over the 72 generated frames): position residual median 2.1 cm (max 8.0 cm) against a 69 cm mean camera spread;
 rotation residual median 1.0 deg (max 4.1). Outputs: 2.0M points, 4.9M Gaussians (318 MB standard 3DGS PLY).
 Next: write the reconstruction-to-scene transform into meta.json, per-clip timing on a clean run, the outdoor sample.
+
+## Run 12 - 2026-10-24 18:19
+
+Question: clean per-stage time and memory on a fresh run of the sample repo's second indoor panorama (`case001`, 1920 x
+960), with the scene type decided automatically.
+
+`ws_run.sh` with a hand-written prompt, no `--scene` (decided indoor by sky share).
+```
+scene (MoGe-2 panorama depth)     43.5 s    3037 MiB in use at its end
+trajectories                      51.9 s    (case000: 14.2 s; more kNN rechecks on this layout)
+caption (umT5-XXL)                38.4 s
+clips (WorldStereo-2)           1861.6 s    9 clips, 189 frames, 3:15 to 3:35 a clip
+reconstruction (WorldMirror 2.0)  30.5 s    at 518
+wall 2027 s; nvidia-smi peak 21989 MiB above idle
+nvidia-smi during the clip loop: 21.7 GB after clip 1, creeping to 23.5 GB by clip 7, dropping after the per-clip trim
+reconstruction_to_scene: scale 1.49, position residual median 2.4 cm, rotation 0.90 deg
+```
+Clips look right: the carved panels, round window and table hold across views; one turn into the right-hand corridor
+ends facing a dark door frame at close range (in the panorama, not a hole). The nvidia-smi figure is what the CUDA pool
+has reserved, not what is live: a scheduler needs the allocated peak, so each stage now records the pool's used
+high-water mark (reset at each stage start), and `--reconstruct-size` exposes WorldMirror's size. Next: a one-clip resume
+of this run to read those peaks, with the reconstruction at 644.
+
+## Run 13 - 2026-10-24 18:31
+
+Question: the one-clip resume of Run 12 with the new per-stage allocated peaks and the reconstruction at 644; then, since
+the clip loop is 92% of a run, where a real-size denoising step spends its 55 s.
+
+Resume (8 clips from disk, 1 generated, `--reconstruct-size 644`):
+```
+scene            43.8 s    4314 MiB allocated at peak
+trajectories     52.4 s    1262 MiB
+caption          36.1 s   12113 MiB
+clips           244.8 s   17639 MiB   (one clip with the model loads; the step itself sits at ~4.5 GB, so the VAE or
+                                       ControlNet inputs hold a ~13 GB transient)
+reconstruction   56.8 s   12092 MiB   at 644 x 378: forward 46.6 s (23.2 s at 518), camera fit 3.1 cm / 1.24 deg
+                                       (2.4 cm / 0.90 deg at 518)
+```
+644 doubles the reconstruction for no better camera fit; 518 stays the default.
+
+`large_batch_matmul_throughput` (inference-quant, new ignored bench), 45,056 tokens:
+```
+5120x5120    bf16 cuBLAS 33.7 ms  70.2 TFLOP/s   Q8_0 mmq 25.7 ms  92.0   Q4K mmq 26.8 ms  88.0
+5120x13824   bf16 cuBLAS 89.6 ms  71.2           Q8_0 mmq 69.5 ms  91.7   Q4K mmq 73.6 ms  86.7
+13824x5120   bf16 cuBLAS 84.9 ms  75.1           Q8_0 mmq 65.5 ms  97.4   Q4K mmq 69.2 ms  92.2
+```
+cuBLAS bf16 is at the 3090's fp32-accumulate peak (71); int8 mmq is only 1.3x faster here.
+
+nsys on `full_size_streamed_step` (32,760 video + 12,480 memory tokens, 2 rounds of 55 s), per step:
+```
+flash_attn_ext_f16   27.75 s   (128-wide heads: joint self-attention ~0.6 s a block, ~60 TFLOP/s; 64-wide: ControlNet)
+cuBLAS bf16 GEMM     14.0 s
+elementwise           9.2 s    (bf16/f32 casts 3.2 s, the composed f32 LayerNorm/RMSNorm/modulate ops ~5 s, gelu, copies)
+H2D block uploads     3.0 s    (33.6 GB, not overlapped with compute)
+total kernel time    51.5 s    + 3.0 s copies = the measured 55 s: the GPU never idles
+```
+Attention is half the step. Levers, by size: an int8 QK^T / fp16-accumulate PV attention (SageAttention's scheme) for
+~2x on that half; fused norm+modulate kernels in place of the composed f32 ops (~6 s); block uploads prefetched on a
+second stream or kept resident (~3 s); Q8_0 linears (~3.5 s, at a quality cost). Next: the fused norms and the upload
+overlap (exact), then the attention kernel.
+
+## Run 14 - 2026-10-24 18:42
+
+Question: what do fused kernels for the step's elementwise work buy (inference-nn `dit.cu`: LayerNorm + f32 affine +
+adaLN modulation, gated residual, full-width QK RMSNorm + interleaved RoPE written head-major; bf16 GELU directly)?
+
+`small_transformer_matches_the_reference`: 2 blocks rel rms 4.67e-3, 6 blocks 4.99e-3 (unchanged). nsys on
+`full_size_streamed_step`, per step:
+```
+flash_attn_ext_f16   31.09 s   (was 27.75)
+cuBLAS bf16 GEMM     15.78 s   (was 14.02)
+elementwise           ~2.0 s   (was 9.2)
+H2D uploads           3.63 s   (not overlapped)
+step                 52.8 s    (was 55.0)
+```
+Attention and GEMM looked slower for the same work, which I first read as the power cap; it was other load on the
+desktop during this run (see Run 15). fattn on Turing/Ampere accumulates KQ in f32 (half-rate MMA) and VKQ in fp16
+(full rate); an int8 QK (SageAttention's per-block quantized Q and mean-smoothed K, int32 accumulate) is the remaining attention lever.
+
+## Run 15 - 2026-10-24 18:53
+
+Question: with the desktop's other GPU clients closed, are step timings consistent, and what did the fusion really buy?
+
+`full_size_streamed_step`, quiet desktop, nvidia-smi sampling clocks, power and throttle reasons each second:
+```
+fused (HEAD)          47.0, 47.2, 47.3, 47.4 s   (two processes, two rounds each)
+pre-fusion (HEAD~1)   55.2, 55.4 s               (the three Wan files checked out, rebuilt, then restored)
+clocks                avg 1798 MHz, avg 320 W, 64 C; throttle reason mostly 0x4 (software power cap)
+```
+Run 14's 52.8 s ran beside other desktop load. The fusion saves 8.1 s a step (15%), about the 9.2 s of elementwise
+work it removed; the power cap still bounds the big kernels, but it did not eat the gain. Timings repeat within 0.4 s
+on a quiet desktop.
+
+## Run 16 - 2026-10-24 19:00
+
+Question: does uploading block i+1 on a forked stream (`CudaDevice::fork_stream`, ordered with stream joins; a block is
+freed on the copy stream after the main stream has run it) hide the 3.6 s of copies?
+
+`full_size_streamed_step`, quiet desktop: 45.7 / 45.9 s (47.2 before). nsys: the copies (2.85 s, 32 GB) run on their
+own stream beside the kernels; per step flash_attn 28.1 s, GEMM 14.3 s, the rest ~1.5 s, ~1.8 s of gaps. Attention is
+61% of the step.
+
+## Run 17 - 2026-10-24 19:19
+
+Question: does an int8 Q.K^T attention (inference-nn `int8_attention.cu`: K less its per-head token mean, Q and K int8
+per token, int8 MMA for S, online softmax in f32, fp16 MMA for P.V accumulated in fp16 per 64-key tile into f32) speed
+up the joint self-attention, and what does it cost in output?
+
+Kernel against f32 attention on random inputs (std-2 Q and K, a large shared K offset): rel rms 1.8 to 2.1e-2 (bf16
+flash: 1.7 to 1.8e-3). First bug: a head's K scales start at `bh * n_kv` floats, unaligned for 16-byte cp.async when
+n_kv % 4 != 0 (head 0 right, later heads wrong); plain loads fixed it. `long_sequence_throughput` (45,240 tokens, 40
+heads of 128):
+```
+bf16 flash (fattn)   665 ms   63 TFLOP/s
+int8 QK              427 ms   98 TFLOP/s   (208 registers, 8 warps/SM; a warp-uniform skip of the O rescale was slower)
+```
+ncu: hmma active 35.6%, imma 17.8% of the time, which is each at its full rate; the other 47% is softmax and conversions
+not overlapping the MMAs (2 warps per scheduler). A 3-stage pipeline computing the next tile's S during this softmax,
+or fewer registers for more warps, is the next step for the kernel.
+
+Model effect (`WORLDSTEREO_ATTENTION=int8` in the parity tests):
+```
+small transformer   2 blocks rel rms 5.05e-3 (bf16 4.67e-3), 6 blocks 5.37e-3 (bf16 4.99e-3)
+real-size step      36.1 s (45.8 s)
+whole clip          after step 0: 1.9e-3 (bf16 3.3e-3); final latents 14.4% (bf16 10.2%), frames 11.2% (bf16 7.6%);
+                    denoise 111.7 s (136.9 s). The reference's own FA2 vs SDPA: 3.1% on frames
+```
+Side by side (frames 0, 10, 20 of the reference FA2, reference SDPA, ours bf16, ours int8): everything the render shows
+matches; the differences sit in content the model invents at the right edge of frame 20 (pool in both references and
+int8, road and building in bf16). int8 becomes worldgen's default (`--attention bf16` for the exact path). Later, after the kernel computed
+`s * (sqa * kv)` instead of `s * sqa * kv`, the same clip ended at frames 9.2% (reproduced exactly in a second process):
+one ulp in the logits moves the end of a clip by 2 points, the size of the bf16 / int8 gap.
+
+## Run 18 - 2026-10-24 20:08
+
+Question: the first full worldgen run with int8 attention and upload overlap died with CUDA out of memory in the first
+clip (288 s; nvidia-smi 19.1 GB above idle). Where does the memory go?
+
+Per-phase pool probes (temporary eprintln of the async pool's used/reserved high-water marks, reset each phase):
+```
+clip parity test   before clip 5.5 GB live; encodes peak 9.7; each step peak 12.2 (10.5 after chunking the FFN over
+                   8192-token pieces: its 13824-wide hidden state is 1.25 GB twice at 45K tokens); reserved peak 12.9
+worldgen           loop top / retrieval / renders 6.3 to 6.5 GB live; encodes peak 11.0; steps 11.8 to 12.2;
+                   decode peak 13.1; but the pool held 20.4 to 21.9 GB reserved by each clip's end (trimmed back to
+                   ~7 GB by the per-clip release); a second probed run survived 5 clips before my timeout
+```
+The live peak is ~13 GB; the rest is pool slack from phases of very different allocation shapes (the transformer's few
+large tensors, then the VAE decoder's many full-resolution ones) caching beside each other. The earlier bf16 runs had
+the same slack (nvidia-smi 21.7 to 23.5 GB with 17.6 GB live) and survived narrowly. Fix: the pipeline syncs and trims
+the pool after the encodes, after denoising and after decoding.
+
+## Run 19 - 2026-10-24 20:34
+
+Question: end to end on case001 (same prompt as Run 12) with the fused kernels, overlapped uploads, int8 attention,
+the chunked FFN, the pool trims and the trajectory BVH (mesh distance through a median-split BVH, exact: the scene test's
+9 trajectories match the reference as before, and a unit test pins it to brute force).
+```
+scene            43.3 s   (43.5)
+trajectories      8.1 s   (51.9)
+caption          34.6 s   (38.4)
+clips          1289.0 s   (1861.6; 143 s a clip, was 207)   allocated peak 13.2 GB (17.6)
+reconstruction   32.3 s   (30.5)
+wall           1408 s     (2027); nvidia-smi peak 16.9 GB above idle (22.0)
+camera fit       2.4 cm / 0.85 deg (2.4 cm / 0.90)
+```
+Frames side by side with Run 12's: the same scenes; differences only in invented detail (a lamp, a side cabinet).
+Left: the clip loop is still 92% of the run; per step attention ~16 s, GEMM ~14 s.
+
+## Run 20 - 2026-10-24 20:46
+
+Question: can the int8 attention overlap its softmax with its MMAs (Run 17: tensor pipes busy 53% of the time, the
+8 warps in lockstep through one barrier a tile, so both warps of a scheduler sat in softmax at once)?
+
+`long_sequence_throughput` (45,240 tokens, 40 heads of 128; bf16 flash 664 ms throughout):
+```
+v1                                      427 ms  98 TFLOP/s   208 regs
+S one tile ahead, 3 stages (v2)         398 ms  105          246 regs; ncu: tensor 59% (53), barrier stall 0.48 (1.17)
+v2 + ping-pong scores, fused rescale    399 ms               255 regs, 136 B spilled
+  + Q fragments from shared memory      419 ms               255 regs (the compiler spent the freed registers)
+v2 + O rescale fused into the add as one FMA + no bounds check on full tiles (v4)
+                                        386 ms  108.5        240 regs
+v4 + int-to-float by the magic-number add (off the XU pipe)
+                                        391 ms               (no gain; reverted)
+```
+Kept v4: 1.72x the bf16 flash attention, 57% of the int8/fp16 MMA peak. More needs a redesign around the 2 warps per
+scheduler that 240 registers allow. Model: small transformer 5.02e-3 / 5.41e-3; the real-size step 34.3 s (36.1); the
+whole-clip parity reproduces Run 18's numbers exactly (frames 9.162e-2): the FMA's single rounding vanishes at bf16
+output. Denoise of the reference clip 107.8 s.
+
+## Run 21 - 2026-10-24 20:55
+
+Question: does a ping-pong schedule (FlashAttention-3's, on Ampere) lift the int8 attention: two groups of four warps
+alternating turns on the tensor cores through named barriers (bar.sync / bar.arrive), so one group's softmax runs
+during the other's MMAs, with the stages tracked by mbarriers (full: cp.async.mbarrier.arrive.noinc from every thread;
+empty: every thread done) instead of the per-tile block barrier that kept the warps in step?
+
+`long_sequence_throughput`, same 45,240-token, 40-head case:
+```
+v4 (committed)                                   386 ms
+ping-pong, load of t + 2 after the softmax       391 ms   errors identical; 246 regs. ncu: tensor 60.6% (59),
+                                                          pipe throttle 0.94 (2.09), but "wait" 1.76, barrier 0.77,
+                                                          branch (mbarrier spin) 0.57
+  + K steps across all 8 key groups before the next (MMAs on one accumulator 8 apart), 4 partial maxima, 2 sums
+                                                 389 ms
+probe: ping-pong with no softmax math (P = scaled scores, no max, no exp)
+                                                 379 ms
+probe: no softmax math and no ldmatrix (register constants as fragments; output garbage)
+                                                 327 ms   (ideal tensor time at the int8 / fp16-accumulate peaks: ~234)
+```
+The softmax costs ~10 ms of the 386, so overlapping it can't pay; Run 17's reading (the non-MMA 47% is softmax) was
+wrong. The fragment loads cost ~52 ms (each 16-row warp loads the whole K and V tile, 8x over per block), and ~93 ms is
+MMA issue with two warps per scheduler. Both shrink only with more rows per warp (each fragment feeding more MMAs, more
+independent MMA chains), which needs the f32 output accumulator (64 registers at 16 rows) to fit at 32 rows. Reverted
+to v4; the ping-pong source is kept in the session scratch only.
+
+## Run 22 - 2026-10-24 21:30
+
+Question: Q8_0 linears in WorldStereo's 40 main blocks (quantized once at load on the host, streamed at half the bytes,
+run through the GGUF MMQ kernels): speed and quality?
+
+The Wan `Linear` gained a quantized variant (upload through `QStorage::from_data` on the copy stream's device handle).
+First streamed run: NaN. A unit test of one host-quantized, uploaded linear passed, so the layer was right; the cause
+was `fast_mmq::shared_lhs` launching on the weight's device handle, i.e. the copy stream, unordered against the
+activations. It now runs on the input's stream (normal GGUF inference has one stream for both, unchanged).
+```
+small transformer   2 blocks rel rms 6.30e-3, 6 blocks 6.39e-3 (int8 attention alone 5.02e-3 / 5.41e-3)
+quantize at load    9 s for the 40 host blocks (rayon across blocks)
+real-size step      30.4 s (34.3)
+whole clip          after step 0: 1.6e-3 (int8 alone 1.9e-3, bf16 3.3e-3); final latents 15.1%, frames 11.4%
+                    (int8 alone 9.2%, bf16 7.6%); denoise 94.6 s (107.8)
+case001 end to end  scene 42.6 s, trajectories 8.1, caption 39.4, clips 1110.4 (1289.0; ~122 s a clip), reconstruction
+                    31.3; wall 1233 s (1408); nvidia-smi peak 17.7 GB above idle; camera fit 2.3 cm / 0.85 deg
+```
+Side by side with Run 19's frames: the same rooms and detail. Q8_0 becomes worldgen's default (`--weights bf16` keeps
+the blocks dense).
+
+## Run 23 - 2026-10-24 21:57
+
+Question: does worldgen hold up on an outdoor panorama? A CC0 Poly Haven park panorama (an autumn garden terrace:
+paved plaza, stone steps, flower beds, trees, overcast sky), 1920 x 960, no `--scene` (decided by sky share), hand
+prompt, Q8_0 blocks and int8 attention.
+```
+scene 47.0 s, trajectories 1.2, caption 41.6, clips 1044.8 (~116 s a clip), reconstruction 28.7; wall 1164 s;
+nvidia-smi peak 17.7 GB above idle; decided outdoor (sky share); camera fit 1.8 cm / 1.05 deg; 2.0M points, 4.9M splats
+```
+Clips: the terraces, benches, beds and trees stay consistent across the 3 start views; the aerial move invents lawns and
+paths beyond the wall plausibly. The light drifts sunnier and more saturated as the aerial move climbs, despite "soft
+overcast" in the prompt; the fastest moves blur the nearest foliage. A top-down render of points.ply in the scene frame:
+the plaza, round bed, steps and the red shrub in place, far trees squeezed into a ring by the outdoor contraction.
+Scale: the ground sits 0.43 to 0.48 m below the camera (5th percentile of z in rings 0.3 to 3 m), so MoGe-2's metric
+estimate is ~3.5x small for a standing-height panorama; the indoor case001 gives floor -0.47 m and ceiling +1.24 m (a
+1.7 m room). Scene construction does not rescale (only clips at the 0.98 quantile and contracts far distances
+outdoors), and the panorama depth matches the reference's, so the estimate is the model's. meta.json and the guide now
+call the scale approximate and say to fit it to known geometry.
+
+## Run 24 - 2026-10-24 22:20
+
+Question: can the park run be walked in Godot (4.7.2), and is a mesh fused from the reconstruction better than its
+point cloud for that?
+
+A standalone Godot project beside the run (not in any repo) builds the scene at load from exported binaries: the
+2M-point cloud (one draw call, a distance-scaled point-size shader), a ground heightfield (5th percentile of point
+heights per 25 cm cell, holes from the nearest seen cell, 5x5 median; HeightMapShape3D scaled uniformly by the cell),
+the source panorama as the sky, and a first-person walker kept inside the reconstruction's radius (17 m). The scene is
+rescaled x3.35 so the eye sits 1.6 m above the estimated ground (Run 23's small scale). It runs; the walker stands on
+the floor at every probe.
+
+Fused mesh: each depth map masked to the pixels its frame's points confirm (the point cloud already drops sky and
+edges; 83.4% of pixels kept), integrated into an open3d TSDF (4 cm voxels, 16 cm truncation) in the metric scene frame,
+meshed (8.1M triangles), components under 2000 triangles dropped, decimated to 400K, coloured from the 4 nearest points;
+in Godot it shows and collides as itself (M switches). open3d 0.18 segfaulted in integrate() under numpy 2.2; 0.19
+fixed it. 1m40s.
+```
+mesh vertex to nearest point: median 8.5 cm, 90th 18.5 cm (aligned: no transform error)
+point to nearest mesh surface: median 12.7 cm, 90th 42 cm, 99th 1.08 m
+```
+Side by side at the same 5 probes the mesh is blobby and wavy, its colours blurred, and the steps melt into a ramp,
+while the point cloud reads as the place. WorldMirror's 99 depth maps are predicted per view and disagree by around a
+decimetre; the TSDF averages the disagreement into blobs. The point cloud only looks crisper because the eye picks the
+dominant layer. Better geometry needs views made consistent (optimized splats, tier 3) or the scene split by kind: a
+terrain surface fitted to the ground, structures as planes, vegetation by an engine foliage system.
+
+## Run 25 - 2026-10-25 00:39
+
+Question: does the native port of the reference's depth alignment (retrieval_wm.py alignment(): WorldMirror depth at
+832 with the planned cameras as priors, fitted per frame in inverse depth by a constrained RANSAC line to the panorama
+cloud rendered into that view, anomalous fits borrowed from the clip's nearest inlier, per-clip statistical outlier
+removal, voxel-first downsample to 2M points) make the per-view depths agree, and what does it cost?
+
+Park run (clips reused), `inference worldgen ... --prompt <park caption>` into park_aligned:
+```
+alignment depth (WorldMirror 2.0)                  88.2 s   17598 MiB allocated at peak
+alignment (MoGe-2 masks, fit to the panorama)    6112.8 s    7329 MiB allocated at peak
+alignment: frames 99, fitted 89, borrowed 10, abandoned 0, points 2000000
+```
+Frame-pair reprojection agreement (scratchpad depth_agreement.py; per overlapping pair the median relative depth
+difference, then quantiles over pairs):
+```
+raw WorldMirror (518): 7127 pairs, p25 0.0234 p50 0.0366 p75 0.0551 p90 0.0872, valid 100%
+aligned (832):         7342 pairs, p25 0.0182 p50 0.0292 p75 0.0486 p90 0.0806, valid 77.6%
+```
+Alignment helps, but modestly (median 3.7% -> 2.9%); the views still disagree by a few percent of depth, about what
+the reference's own 3DGS stage exists to fix. The 22.4% invalid pixels are the masked edges, sky and depths past
+1.1x the panorama's maximum.
+
+The 6113 s was CPU-only with the GPU idle. Timing outlier_mask alone on the exported 2M points: 408.8 s. PointGrid
+sized its cells for points spread through the bounding volume, but these lie on surfaces, so cells held thousands of
+points while isolated far points walked up to 1024 empty rings. Replaced by a balanced kd-tree (median splits on the
+widest axis, 16-point leaves) behind the same API: 0.6 s, the same 1,898,409 points kept (the k nearest are exact
+either way); brute-force test added. The trajectory obstacle checks use it too.
+
+Rerun with the kd-tree (park_aligned2, then park_aligned with the scene dump below):
+```
+alignment depth (WorldMirror 2.0)                  91.1 s
+alignment (MoGe-2 masks, fit to the panorama)      81.8 s   (was 6112.8 s)
+alignment: frames 99, fitted 89, borrowed 10, abandoned 0, points 2000000
+exit 0, wall 331 s
+```
+Aligned depths between the two runs: most frames bit-identical, the worst frame's median relative difference 1.1e-3
+(GPU run-to-run noise in the depth model), no mask flips. worldgen now also writes `scene/` (the panorama's cleaned
+distance, the sky mask, the scene cloud and the start views), what the Gaussian training data is cut from.
+
+## Run 26 - 2026-10-25 01:16
+
+Question: trained on our data, does the reference's 3DGS stage (gen_gs_data.py, then world_gs_trainer.py with its
+gsplat fork) give geometry and novel views good enough to justify porting it, before writing any of it natively?
+
+Setup, all outside the repo:
+- gsplat_maskgaussian (the reference's fork of gsplat 1.5.3: MaskGaussian in the rasterizer, projection and
+  wrapper) built in place in /mnt/data/build/gsplat_mg (glm headers from the stock package, CUDA 12.8, sm_86,
+  2m46s) and put first on PYTHONPATH for the trainer only; the venv's stock gsplat is untouched. Installed into the
+  venv: viser, nerfview, splines, tyro, torchmetrics, tensorboard, fused-ssim (git build), scikit-image, tensorly,
+  pymeshlab.
+- scratchpad gs_tools/make_gs_data.py: gen_gs_data.py's --save_normal --split_sky path over a native run, calling the
+  reference's own helpers (split_panorama_image/depth, smooth_sky_depth_boundary, convert_rgbd2pcd_panorama,
+  adaptive_voxel_downsample, MoGe-2 normals). 189 clip frames (frame 0 the start view; aligned depth on the 81 aligned
+  frames), 54 panorama + 40 polar crops with the panorama's depth, 283 cameras; points.ply 3.11M (2M aligned + 1.11M
+  panorama at voxel 0.003), sky_points.ply 300K. 1m43s.
+- Training with the README's flags at the single-GPU length (--steps_scaler 5.3334: 8000 steps, refine 800 to 4000
+  every 533; scale2d stop set to 4000 by hand; spz and the viewer off).
+
+```
+Step 3731: 2571655 GSs after the last refine; Step 7999 mem 2.67 GB, 928 s of steps, wall 16m28s
+held-out views (every 32nd, 6): PSNR 24.191, SSIM 0.7549, LPIPS 0.203
+MaskGaussian export: kept 2242322/2571655 by stochastic sampling; point_cloud_7999.ply 126 MB
+mesh (the trainer's TSDF over its own rendered RGB+depth from all 283 cameras): 552742 triangles, simplified 10%
+```
+The trainer's mesh export failed in-run on the missing skimage import (caught, training finished); rerun from the
+checkpoint with scratchpad gs_tools/ref_eval_mesh.py (the trainer's eval plus its mesh block verbatim), 27 s.
+
+Novel views (gs_tools/novel_views.py: training cameras moved sideways 0.1 to 0.3 of the camera spread, about 0.5 to
+1.3 m, some turned 15 to 20 degrees; splats left, the fused mesh right; gs_novel.jpg beside the run): the splats stay
+sharp and coherent off the trajectories (steps, benches, flower beds, trees all hold). The splat-fused mesh is the
+first usable geometry: clean steps, benches, a flat plaza, walls; shrubs and beds become smooth blobs and colours
+soften (5 cm voxels in normalized units). Far larger moves (1x the spread) put the camera inside foliage and show
+nothing useful; the reconstruction is a walkable neighbourhood of the trajectories, not the whole park.
+
+Implication: the 3DGS stage is what turns WorldMirror's disagreeing per-view depths into one consistent scene (Run 24's
+TSDF over raw depths was blobby at a 12.7 cm median error). Porting the trainer is worth it. Its pieces: the gsplat
+forward/backward (projection, tile binning, rasterization with antialiasing, depth and normal outputs), the
+MaskGaussian mask, SSIM/LPIPS/depth/normal losses, Adam with per-group rates, the default strategy's
+densify/prune, anchor protection, sky depth from the sky cloud, then the TSDF mesh export.

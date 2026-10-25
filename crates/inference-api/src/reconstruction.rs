@@ -118,7 +118,9 @@ pub async fn reconstruct(
     Ok(report)
 }
 
-pub use inference_recon::worldstereo::run::{WorldGenModels, WorldGenOptions, WorldGenReport};
+pub use inference_recon::worldstereo::run::{
+    AttentionKind, GgmlDType, WorldGenModels, WorldGenOptions, WorldGenReport,
+};
 
 /// Generates a world from an equirectangular panorama (an image file) into `out_dir` with WorldStereo-2: depth and a
 /// point cloud from MoGe-2, the regular trajectories, keyframes along each, then WorldMirror 2.0 on the frames. Runs on

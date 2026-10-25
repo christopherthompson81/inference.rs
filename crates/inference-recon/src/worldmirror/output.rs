@@ -405,24 +405,7 @@ fn write_points(
         points = keep.iter().map(|&i| points[i]).collect();
         colors = keep.iter().map(|&i| colors[i]).collect();
     }
-    let mut out = std::io::BufWriter::new(std::fs::File::create(dir.join("points.ply"))?);
-    write!(
-        out,
-        "ply\nformat binary_little_endian 1.0\nelement vertex {}\nproperty float x\nproperty float y\nproperty float z\n\
-         property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n",
-        points.len()
-    )?;
-    let mut body = vec![0u8; points.len() * POINT_ROW_BYTES];
-    body.par_chunks_mut(POINT_ROW_BYTES)
-        .zip(points.par_iter().zip(&colors))
-        .for_each(|(row, (p, c))| {
-            for (d, v) in p.iter().enumerate() {
-                row[d * 4..][..4].copy_from_slice(&v.to_le_bytes());
-            }
-            row[12..].copy_from_slice(c);
-        });
-    out.write_all(&body)?;
-    out.flush()?;
+    write_points_ply(&dir.join("points.ply"), &points, &colors)?;
     Ok(points.len())
 }
 
@@ -555,4 +538,27 @@ fn write_gaussians(
     out.write_all(&body)?;
     out.flush()?;
     Ok(kept.len())
+}
+
+/// A coloured point cloud as a binary little-endian PLY (x y z float, red green blue uchar).
+pub fn write_points_ply(path: &Path, points: &[[f32; 3]], colors: &[[u8; 3]]) -> Result<()> {
+    let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+    write!(
+        out,
+        "ply\nformat binary_little_endian 1.0\nelement vertex {}\nproperty float x\nproperty float y\nproperty float z\n\
+         property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n",
+        points.len()
+    )?;
+    let mut body = vec![0u8; points.len() * POINT_ROW_BYTES];
+    body.par_chunks_mut(POINT_ROW_BYTES)
+        .zip(points.par_iter().zip(colors))
+        .for_each(|(row, (p, c))| {
+            for (d, v) in p.iter().enumerate() {
+                row[d * 4..][..4].copy_from_slice(&v.to_le_bytes());
+            }
+            row[12..].copy_from_slice(c);
+        });
+    out.write_all(&body)?;
+    out.flush()?;
+    Ok(())
 }

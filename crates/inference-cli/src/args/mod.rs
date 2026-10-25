@@ -361,6 +361,18 @@ pub enum Command {
         /// Seed of the first clip's noise (each later clip adds one)
         #[arg(long, default_value_t = 1024)]
         seed: u64,
+
+        /// The longest edge WorldMirror reconstructs at (floored to a multiple of 14); memory grows with its square
+        #[arg(long, default_value_t = 518)]
+        reconstruct_size: usize,
+
+        /// WorldStereo's self-attention: int8 (int8 Q.K^T, ~1.5x faster) or bf16 (exact flash attention)
+        #[arg(long, default_value = "int8", value_parser = ["int8", "bf16"])]
+        attention: String,
+
+        /// WorldStereo's main-block linear weights: q8_0 (quantized at load, ~1.3x faster matmuls) or bf16
+        #[arg(long, default_value = "q8_0", value_parser = ["q8_0", "bf16"])]
+        weights: String,
     },
 
     /// Run performance benchmarks for base or LoRA model generation.

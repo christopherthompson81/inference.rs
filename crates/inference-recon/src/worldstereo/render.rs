@@ -23,9 +23,89 @@ pub fn render(
     colors: &[[u8; 3]],
     w2c: &Mat4,
     intrinsics: &[[f64; 3]; 3],
-    (width, height): (usize, usize),
+    size: (usize, usize),
 ) -> Render {
-    let radius_px = RADIUS_NDC * width.min(height) as f64 / 2.0;
+    let r2 = radius_px(size).powi(2);
+    let pixels = rasterize(points, w2c, intrinsics, size, POINTS_PER_PIXEL, &|hits| {
+        let mut rgb = [0f64; 3];
+        let mut transmit = 1.0;
+        for &(_, d2, i) in hits {
+            let alpha = 1.0 - d2 / r2;
+            let c = colors[i as usize];
+            for k in 0..3 {
+                rgb[k] += alpha * transmit * (f64::from(c[k]) / 255.0 * 2.0 - 1.0);
+            }
+            transmit *= 1.0 - alpha;
+        }
+        (rgb, hits.is_empty())
+    });
+    let plane = size.0 * size.1;
+    let mut rgb = vec![0f32; 3 * plane];
+    let mut empty = vec![0f32; plane];
+    for (p, (c, e)) in pixels.into_iter().enumerate() {
+        for k in 0..3 {
+            rgb[k * plane + p] = c[k] as f32;
+        }
+        empty[p] = if e { 1.0 } else { 0.0 };
+    }
+    Render { rgb, empty }
+}
+
+/// A feature render: per pixel the composited features (over a zero background) and the nearest point's z, -1 where
+/// no point reaches (PyTorch3D's zbuf[..., 0]).
+pub struct FeatureRender {
+    pub features: Vec<[f32; 3]>,
+    pub depth: Vec<f32>,
+}
+
+/// Renders per-point `features` as `render` does colors, with `points_per_pixel` nearest points, and the depth.
+pub fn render_features(
+    points: &[[f32; 3]],
+    features: &[[f32; 3]],
+    w2c: &Mat4,
+    intrinsics: &[[f64; 3]; 3],
+    size: (usize, usize),
+    points_per_pixel: usize,
+) -> FeatureRender {
+    let r2 = radius_px(size).powi(2);
+    let pixels = rasterize(points, w2c, intrinsics, size, points_per_pixel, &|hits| {
+        let mut f = [0f64; 3];
+        let mut transmit = 1.0;
+        for &(_, d2, i) in hits {
+            let alpha = 1.0 - d2 / r2;
+            let v = features[i as usize];
+            for k in 0..3 {
+                f[k] += alpha * transmit * f64::from(v[k]);
+            }
+            transmit *= 1.0 - alpha;
+        }
+        (
+            f.map(|v| v as f32),
+            hits.first().map_or(-1.0, |h| h.0 as f32),
+        )
+    });
+    let (features, depth) = pixels.into_iter().unzip();
+    FeatureRender { features, depth }
+}
+
+fn radius_px((width, height): (usize, usize)) -> f64 {
+    RADIUS_NDC * width.min(height) as f64 / 2.0
+}
+
+// a pixel's hits (z, squared pixel distance, index), nearest first
+type PixelFn<'a, T> = dyn Fn(&[(f64, f64, u32)]) -> T + Sync + 'a;
+
+// every pixel's nearest `points_per_pixel` hits (z, squared pixel distance, index), nearest first, through `pixel`,
+// in row-major order
+fn rasterize<T: Send>(
+    points: &[[f32; 3]],
+    w2c: &Mat4,
+    intrinsics: &[[f64; 3]; 3],
+    (width, height): (usize, usize),
+    points_per_pixel: usize,
+    pixel: &PixelFn<'_, T>,
+) -> Vec<T> {
+    let radius_px = radius_px((width, height));
     let r2 = radius_px * radius_px;
     let (tiles_x, tiles_y) = (width.div_ceil(TILE), height.div_ceil(TILE));
     // project, and bin each point into every tile its disc reaches
@@ -80,35 +160,23 @@ pub fn render(
                         }
                     }
                     hits.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-                    hits.truncate(POINTS_PER_PIXEL);
-                    let mut rgb = [0f64; 3];
-                    let mut transmit = 1.0;
-                    for &(_, d2, i) in &hits {
-                        let alpha = 1.0 - d2 / r2;
-                        let c = colors[i as usize];
-                        for k in 0..3 {
-                            rgb[k] += alpha * transmit * (f64::from(c[k]) / 255.0 * 2.0 - 1.0);
-                        }
-                        transmit *= 1.0 - alpha;
-                    }
-                    out.push((y * width + x, rgb, hits.is_empty()));
+                    hits.truncate(points_per_pixel);
+                    out.push((y * width + x, pixel(&hits)));
                 }
             }
             out
         })
         .collect::<Vec<_>>();
-    let plane = width * height;
-    let mut rgb = vec![0f32; 3 * plane];
-    let mut empty = vec![0f32; plane];
+    let mut slots: Vec<Option<T>> = (0..width * height).map(|_| None).collect();
     for tile in tiles {
-        for (p, c, e) in tile {
-            for k in 0..3 {
-                rgb[k * plane + p] = c[k] as f32;
-            }
-            empty[p] = if e { 1.0 } else { 0.0 };
+        for (p, v) in tile {
+            slots[p] = Some(v);
         }
     }
-    Render { rgb, empty }
+    slots
+        .into_iter()
+        .map(|v| v.expect("every pixel belongs to a tile"))
+        .collect()
 }
 
 #[cfg(test)]

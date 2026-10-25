@@ -252,8 +252,13 @@ async fn main() -> Result<()> {
             prompt,
             scene,
             seed,
+            reconstruct_size,
+            attention,
+            weights,
         } => {
-            use inference_api::reconstruction::{WorldGenModels, WorldGenOptions, generate_world};
+            use inference_api::reconstruction::{
+                AttentionKind, GgmlDType, WorldGenModels, WorldGenOptions, generate_world,
+            };
             let models = WorldGenModels {
                 worldstereo,
                 wan,
@@ -264,12 +269,19 @@ async fn main() -> Result<()> {
                 prompt,
                 outdoor: scene.map(|s| s == "outdoor"),
                 seed,
+                reconstruct_size,
+                attention: if attention == "bf16" {
+                    AttentionKind::Bf16
+                } else {
+                    AttentionKind::Int8Qk
+                },
+                block_weights: (weights == "q8_0").then_some(GgmlDType::Q8_0),
             };
             let report = generate_world(&models, &panorama, &out, &options)?;
             for stage in &report.stages {
                 println!(
-                    "{:<36} {:8.1} s  {:6} MiB in use at its end",
-                    stage.stage, stage.seconds, stage.device_mib_at_end
+                    "{:<36} {:8.1} s  {:6} MiB allocated at peak, {:6} MiB in use at its end",
+                    stage.stage, stage.seconds, stage.allocated_peak_mib, stage.device_mib_at_end
                 );
             }
             println!(

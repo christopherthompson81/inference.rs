@@ -2,18 +2,21 @@
 //! (reference) frame tokens, plus a per-frame camera embedding and ControlNet residuals from point-cloud renders.
 
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::quantized::GgmlDType;
 use inference_tensor::{DType, Device, Result, Tensor};
 use serde::Deserialize;
 
 use super::controlnet::{ControlNet, ControlNetConfig};
 use super::ops::{
-    ACT_DTYPE, LayerNorm, Linear, PatchConv, RmsNorm, RopeTables, attention, gated_residual,
-    gelu_tanh, heads, modulate,
+    ACT_DTYPE, AttentionKind, LayerNorm, Linear, PatchConv, RmsNorm, RopeTables, attention,
+    gated_residual, gelu_tanh, heads, self_attention,
 };
 
 const TIME_FREQ_LN_BASE: f64 = 10_000.0;
 // The image embedder's LayerNorms use torch's default eps
 const IMAGE_NORM_EPS: f64 = 1e-5;
+// Tokens per feed-forward pass; a 45K-token step's hidden activations otherwise take 2 x 1.25 GB
+const FFN_CHUNK_TOKENS: usize = 8192;
 // Modulation rows per block: shift, scale, gate for attention, then for the feed-forward
 const BLOCK_MODULATION: usize = 6;
 
@@ -171,18 +174,28 @@ impl SelfAttention {
         })
     }
 
+    fn quantize(&mut self, dtype: GgmlDType) -> Result<()> {
+        for l in [
+            &mut self.to_q,
+            &mut self.to_k,
+            &mut self.to_v,
+            &mut self.to_out,
+        ] {
+            *l = l.quantized(dtype)?;
+        }
+        Ok(())
+    }
+
     /// Attention over all of `xs` `[1, tokens, dim]` with `rope` for every token.
-    fn forward(&self, xs: &Tensor, rope: &RopeTables) -> Result<Tensor> {
-        let q = rope.apply(&heads(
-            &self.norm_q.forward(&self.to_q.forward(xs)?)?,
-            self.heads,
-        )?)?;
-        let k = rope.apply(&heads(
-            &self.norm_k.forward(&self.to_k.forward(xs)?)?,
-            self.heads,
-        )?)?;
+    fn forward(&self, xs: &Tensor, rope: &RopeTables, kind: AttentionKind) -> Result<Tensor> {
+        let q = self
+            .norm_q
+            .heads(&self.to_q.forward(xs)?, self.heads, Some(rope))?;
+        let k = self
+            .norm_k
+            .heads(&self.to_k.forward(xs)?, self.heads, Some(rope))?;
         let v = heads(&self.to_v.forward(xs)?, self.heads)?;
-        self.to_out.forward(&attention(&q, &k, &v)?)
+        self.to_out.forward(&self_attention(&q, &k, &v, kind)?)
     }
 }
 
@@ -231,21 +244,31 @@ impl CrossAttention {
         })
     }
 
+    fn quantize(&mut self, dtype: GgmlDType) -> Result<()> {
+        for l in [
+            &mut self.to_q,
+            &mut self.to_k,
+            &mut self.to_v,
+            &mut self.add_k,
+            &mut self.add_v,
+            &mut self.to_out,
+        ] {
+            *l = l.quantized(dtype)?;
+        }
+        Ok(())
+    }
+
     fn forward(&self, xs: &Tensor, cond: &Conditions) -> Result<Tensor> {
-        let q = heads(&self.norm_q.forward(&self.to_q.forward(xs)?)?, self.heads)?;
-        let k = heads(
-            &self
-                .norm_k
-                .forward(&self.to_k.forward(&cond.text_context)?)?,
-            self.heads,
-        )?;
+        let q = self
+            .norm_q
+            .heads(&self.to_q.forward(xs)?, self.heads, None)?;
+        let k = self
+            .norm_k
+            .heads(&self.to_k.forward(&cond.text_context)?, self.heads, None)?;
         let v = heads(&self.to_v.forward(&cond.text_context)?, self.heads)?;
-        let k_img = heads(
-            &self
-                .norm_added_k
-                .forward(&self.add_k.forward(&cond.image_context)?)?,
-            self.heads,
-        )?;
+        let k_img =
+            self.norm_added_k
+                .heads(&self.add_k.forward(&cond.image_context)?, self.heads, None)?;
         let v_img = heads(&self.add_v.forward(&cond.image_context)?, self.heads)?;
         let text = attention(&q, &k, &v)?;
         let image = attention(&q, &k_img, &v_img)?;
@@ -266,8 +289,26 @@ impl FeedForward {
         })
     }
 
+    fn quantize(&mut self, dtype: GgmlDType) -> Result<()> {
+        self.up = self.up.quantized(dtype)?;
+        self.down = self.down.quantized(dtype)?;
+        Ok(())
+    }
+
+    // in token chunks: the hidden activations are 2.7x the model width
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        self.down.forward(&gelu_tanh(&self.up.forward(xs)?)?)
+        let n = xs.dim(1)?;
+        if n <= FFN_CHUNK_TOKENS {
+            return self.down.forward(&gelu_tanh(&self.up.forward(xs)?)?);
+        }
+        let chunks = (0..n)
+            .step_by(FFN_CHUNK_TOKENS)
+            .map(|start| {
+                let x = xs.narrow(1, start, FFN_CHUNK_TOKENS.min(n - start))?;
+                self.down.forward(&gelu_tanh(&self.up.forward(&x)?)?)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Tensor::cat(&chunks, 1)
     }
 
     fn to_device(&self, d: &Device) -> Result<Self> {
@@ -320,6 +361,12 @@ impl Block {
         })
     }
 
+    fn quantize(&mut self, dtype: GgmlDType) -> Result<()> {
+        self.attn1.quantize(dtype)?;
+        self.attn2.quantize(dtype)?;
+        self.ffn.quantize(dtype)
+    }
+
     /// Video tokens `[1, N, dim]` and memory tokens `[1, M, dim]` (M may be 0); `rope` covers memory then video.
     pub(crate) fn forward(
         &self,
@@ -327,6 +374,7 @@ impl Block {
         memory: &Tensor,
         cond: &Conditions,
         rope: &RopeTables,
+        kind: AttentionKind,
     ) -> Result<(Tensor, Tensor)> {
         let m = (self.scale_shift_table.clone() + &cond.timestep_proj)?;
         let row = |i: usize| m.narrow(0, i, 1);
@@ -334,17 +382,19 @@ impl Block {
         let (c_shift, c_scale, c_gate) = (row(3)?, row(4)?, row(5)?);
         let n_mem = memory.dim(1)?;
         let tokens = Tensor::cat(&[memory, video], 1)?;
-        let normed = modulate(&self.norm1.forward(&tokens)?, &shift, &scale)?;
-        let attn = self.attn1.forward(&normed, rope)?;
+        let normed = self.norm1.forward_act(&tokens, Some((&shift, &scale)))?;
+        let attn = self.attn1.forward(&normed, rope, kind)?;
         let tokens = gated_residual(&tokens, &attn, &gate)?;
         let memory = tokens.narrow(1, 0, n_mem)?;
         let video = tokens.narrow(1, n_mem, tokens.dim(1)? - n_mem)?;
         let cross = self
             .attn2
-            .forward(&self.norm2.forward(&video)?.to_dtype(ACT_DTYPE)?, cond)?;
+            .forward(&self.norm2.forward_act(&video, None)?, cond)?;
         let video = (video + cross)?;
         let tokens = Tensor::cat(&[&memory, &video], 1)?;
-        let normed = modulate(&self.norm3.forward(&tokens)?, &c_shift, &c_scale)?;
+        let normed = self
+            .norm3
+            .forward_act(&tokens, Some((&c_shift, &c_scale)))?;
         let tokens = gated_residual(&tokens, &self.ffn.forward(&normed)?, &c_gate)?;
         Ok((
             tokens.narrow(1, n_mem, tokens.dim(1)? - n_mem)?,
@@ -380,6 +430,61 @@ pub struct WorldStereoTransformer {
     scale_shift_table: Tensor,
     cfg: WanConfig,
     device: Device,
+    attention: AttentionKind,
+}
+
+// Host-resident blocks uploaded one ahead on a second stream, so each copy overlaps the block before it; a block's
+// weights are freed on the copy stream once the main stream has run it
+struct BlockUploads {
+    device: Device,
+    copy: Option<Device>,
+}
+
+impl BlockUploads {
+    fn new(device: &Device) -> Result<Self> {
+        let copy = match device {
+            #[cfg(feature = "cuda")]
+            Device::Cuda(d) => Some(Device::Cuda(d.fork_stream()?)),
+            _ => None,
+        };
+        Ok(Self {
+            device: device.clone(),
+            copy,
+        })
+    }
+
+    // None when the block already lives on the device
+    fn upload(&mut self, block: &Block) -> Result<Option<Block>> {
+        if block.scale_shift_table.device().same_device(&self.device) {
+            return Ok(None);
+        }
+        block
+            .to_device(self.copy.as_ref().unwrap_or(&self.device))
+            .map(Some)
+    }
+
+    fn wait_for_upload(&self) -> Result<()> {
+        #[cfg(feature = "cuda")]
+        if let (Device::Cuda(main), Some(Device::Cuda(copy))) = (&self.device, &self.copy) {
+            main.cuda_stream()
+                .join(&copy.cuda_stream())
+                .map_err(inference_tensor::Error::wrap)?;
+        }
+        Ok(())
+    }
+
+    fn release(&self, block: Option<Block>) -> Result<()> {
+        #[cfg(feature = "cuda")]
+        if let (Some(_), Device::Cuda(main), Some(Device::Cuda(copy))) =
+            (&block, &self.device, &self.copy)
+        {
+            copy.cuda_stream()
+                .join(&main.cuda_stream())
+                .map_err(inference_tensor::Error::wrap)?;
+        }
+        drop(block);
+        Ok(())
+    }
 }
 
 impl WorldStereoTransformer {
@@ -429,7 +534,21 @@ impl WorldStereoTransformer {
                 .squeeze(0)?,
             cfg: cfg.clone(),
             device,
+            attention: AttentionKind::default(),
         })
+    }
+
+    /// The main blocks' linear weights quantized to `dtype` (GGUF, through the MMQ kernels), wherever the blocks live.
+    pub fn quantize_blocks(&mut self, dtype: GgmlDType) -> Result<()> {
+        use rayon::prelude::*;
+        self.blocks
+            .par_iter_mut()
+            .try_for_each(|b| b.quantize(dtype))
+    }
+
+    /// How the joint self-attentions run, here and in the ControlNet.
+    pub fn set_attention(&mut self, kind: AttentionKind) {
+        self.attention = kind;
     }
 
     pub fn conditions(&self, t: f64, text: &Tensor, image: &Tensor) -> Result<Conditions> {
@@ -473,19 +592,29 @@ impl WorldStereoTransformer {
             }
             _ => (video.narrow(1, 0, 0)?, video_rope),
         };
-        let mut control = self.controlnet.start(inputs, &cond.temb, (f, h, w))?;
+        let mut control = self
+            .controlnet
+            .start(inputs, &cond.temb, (f, h, w), self.attention)?;
         let (mut video, mut memory) = (video, memory);
-        for block in &self.blocks {
-            (video, memory) = if block.scale_shift_table.device().same_device(&self.device) {
-                block.forward(&video, &memory, cond, &rope)?
-            } else {
-                block
-                    .to_device(&self.device)?
-                    .forward(&video, &memory, cond, &rope)?
-            };
+        let mut uploads = BlockUploads::new(&self.device)?;
+        let mut next = uploads.upload(&self.blocks[0])?;
+        for (i, block) in self.blocks.iter().enumerate() {
+            let current = next.take();
+            uploads.wait_for_upload()?;
+            (video, memory) = current.as_ref().unwrap_or(block).forward(
+                &video,
+                &memory,
+                cond,
+                &rope,
+                self.attention,
+            )?;
             if let Some(c) = control.step()? {
                 video = (video + c)?;
             }
+            if let Some(following) = self.blocks.get(i + 1) {
+                next = uploads.upload(following)?;
+            }
+            uploads.release(current)?;
         }
         let ss = self
             .scale_shift_table
@@ -493,7 +622,7 @@ impl WorldStereoTransformer {
         let (shift, scale) = (ss.narrow(0, 0, 1)?, ss.narrow(0, 1, 1)?);
         let out = self
             .proj_out
-            .forward(&modulate(&self.norm_out.forward(&video)?, &shift, &scale)?)?
+            .forward(&self.norm_out.forward_act(&video, Some((&shift, &scale)))?)?
             .to_dtype(DType::F32)?;
         // tokens (f, ph, pw) x (pt=1, kh, kw, c) to [c, f, h, w]
         let c = self.cfg.out_channels;

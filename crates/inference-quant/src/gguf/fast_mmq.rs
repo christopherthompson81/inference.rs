@@ -628,6 +628,10 @@ fn shared_lhs<W: KernelWeight + ?Sized>(weights: &[&W], xs: &Tensor) -> Result<V
     if !xs.device().same_device(&first.kernel_device()) {
         inference_tensor::bail!("fast_mmq shared_lhs: input and weights are on different devices");
     }
+    // the work runs on the input's stream: a weight uploaded through a forked stream's handle carries that stream
+    let Device::Cuda(dev) = xs.device().clone() else {
+        inference_tensor::bail!("fast_mmq shared_lhs: the input must live on CUDA");
+    };
 
     let Some((&k, batch_dims)) = xs.dims().split_last() else {
         inference_tensor::bail!("fast_mmq shared_lhs: input must have at least one dimension");

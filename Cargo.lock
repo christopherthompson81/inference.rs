@@ -3182,6 +3182,7 @@ dependencies = [
  "inference-quant",
  "inference-tensor",
  "inference-vision",
+ "rand 0.9.4",
  "rayon",
  "serde",
  "serde_json",

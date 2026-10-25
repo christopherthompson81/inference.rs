@@ -227,6 +227,39 @@ impl MemoryUsage {
         Ok(true)
     }
 
+    /// Restarts the memory pool's high-water marks from its current use, so the next query reports one phase's peak.
+    #[cfg(feature = "cuda")]
+    pub fn reset_cuda_memory_pool_high(&self, device: &Device) -> Result<bool> {
+        use inference_tensor::cuda_backend::WrapErr;
+        use inference_tensor::cuda_backend::cudarc::driver::sys;
+
+        let Device::Cuda(device) = device else {
+            return Ok(false);
+        };
+        let stream = device.cuda_stream();
+        stream.context().bind_to_thread().w()?;
+        if !stream.context().has_async_alloc() {
+            return Ok(false);
+        }
+        let mut pool = std::ptr::null_mut();
+        cuda_result(
+            unsafe { sys::cuDeviceGetMemPool(&mut pool, stream.context().cu_device()) },
+            "CUDA memory pool lookup",
+        )?;
+        for attr in [
+            sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_HIGH,
+            sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RESERVED_MEM_HIGH,
+        ] {
+            // the driver only accepts zero, which resets the mark to the current value
+            let mut zero = 0u64;
+            cuda_result(
+                unsafe { sys::cuMemPoolSetAttribute(pool, attr, (&mut zero as *mut u64).cast()) },
+                "CUDA memory pool high-water reset",
+            )?;
+        }
+        Ok(true)
+    }
+
     #[cfg(feature = "cuda")]
     pub fn synchronize_cuda_context(&self, device: &Device) -> Result<bool> {
         let Device::Cuda(device) = device else {

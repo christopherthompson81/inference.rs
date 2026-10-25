@@ -3,6 +3,9 @@
 
 use inference_nn::attention::{AttentionMask, FlashParams, Sdpa, SdpaParams};
 use inference_quant::ShardedVarBuilder;
+use std::sync::Arc;
+
+use inference_tensor::quantized::{GgmlDType, QMatMul, QStorage, QTensor};
 use inference_tensor::{D, DType, Device, Module, Result, Tensor};
 
 use crate::qlinear::MaybeQuantLinear;
@@ -10,20 +13,60 @@ use crate::qlinear::MaybeQuantLinear;
 pub(crate) const ACT_DTYPE: DType = DType::BF16;
 const ROPE_THETA: f64 = 10_000.0;
 
-/// A linear whose input is cast to the activation dtype first.
-pub(crate) struct Linear(MaybeQuantLinear);
+/// A linear whose input is cast to the activation dtype first: dense, or with GGUF-quantized weights (host-resident
+/// ones uploaded per use like dense ones).
+pub(crate) enum Linear {
+    Dense(MaybeQuantLinear),
+    Quantized {
+        weight: Arc<QTensor>,
+        bias: Option<Tensor>,
+    },
+}
 
 impl Linear {
     pub(crate) fn load(in_dim: usize, out_dim: usize, vb: ShardedVarBuilder) -> Result<Self> {
-        Ok(Self(MaybeQuantLinear::new(in_dim, out_dim, true, vb)?))
+        Ok(Self::Dense(MaybeQuantLinear::new(
+            in_dim, out_dim, true, vb,
+        )?))
     }
 
     pub(crate) fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        self.0.forward(&xs.to_dtype(ACT_DTYPE)?)
+        let xs = xs.to_dtype(ACT_DTYPE)?;
+        match self {
+            Self::Dense(l) => l.forward(&xs),
+            Self::Quantized { weight, bias } => {
+                let out =
+                    inference_quant::MatMul.qmatmul(&xs, &QMatMul::QTensor(weight.clone()))?;
+                match bias {
+                    Some(b) => out.broadcast_add(b),
+                    None => Ok(out),
+                }
+            }
+        }
     }
 
     pub(crate) fn to_device(&self, device: &Device) -> Result<Self> {
-        Ok(Self(self.0.to_device(device)?))
+        match self {
+            Self::Dense(l) => Ok(Self::Dense(l.to_device(device)?)),
+            Self::Quantized { weight, bias } => {
+                let storage = QStorage::from_data(weight.data()?, device, weight.dtype())?;
+                Ok(Self::Quantized {
+                    weight: Arc::new(QTensor::new(storage, weight.shape().clone())?),
+                    bias: bias.as_ref().map(|b| b.to_device(device)).transpose()?,
+                })
+            }
+        }
+    }
+
+    /// The same layer with its weight quantized to `dtype` where it lives; the bias stays in the activation dtype.
+    pub(crate) fn quantized(&self, dtype: GgmlDType) -> Result<Self> {
+        match self {
+            Self::Dense(MaybeQuantLinear::Dense(l)) => Ok(Self::Quantized {
+                weight: Arc::new(QTensor::quantize(l.weight(), dtype)?),
+                bias: l.bias().map(|b| b.to_dtype(ACT_DTYPE)).transpose()?,
+            }),
+            _ => inference_tensor::bail!("only a dense linear can be quantized"),
+        }
     }
 }
 
@@ -67,6 +110,33 @@ impl LayerNorm {
         })
     }
 
+    /// The norm (and affine) of `xs`, then `* (1 + scale) + shift` when given, in the activation dtype.
+    pub(crate) fn forward_act(
+        &self,
+        xs: &Tensor,
+        modulation: Option<(&Tensor, &Tensor)>,
+    ) -> Result<Tensor> {
+        #[cfg(feature = "cuda")]
+        if xs.device().is_cuda() && xs.dtype() == ACT_DTYPE {
+            let (shift, scale) = match modulation {
+                Some((shift, scale)) => (Some(shift.contiguous()?), Some(scale.contiguous()?)),
+                None => (None, None),
+            };
+            return inference_nn::cuda::dit::layer_norm(
+                xs,
+                self.weight.as_ref(),
+                self.bias.as_ref(),
+                scale.as_ref(),
+                shift.as_ref(),
+                self.eps as f32,
+            );
+        }
+        match modulation {
+            Some((shift, scale)) => modulate(&self.forward(xs)?, shift, scale),
+            None => self.forward(xs)?.to_dtype(ACT_DTYPE),
+        }
+    }
+
     pub(crate) fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let x = xs.to_dtype(DType::F32)?;
         let mean = x.mean_keepdim(D::Minus1)?;
@@ -104,6 +174,30 @@ impl RmsNorm {
         })
     }
 
+    /// The norm of `xs` `[b, tokens, heads * head_dim]` split into `[b, heads, tokens, head_dim]`, rotated by `rope`.
+    pub(crate) fn heads(
+        &self,
+        xs: &Tensor,
+        n_heads: usize,
+        rope: Option<&RopeTables>,
+    ) -> Result<Tensor> {
+        #[cfg(feature = "cuda")]
+        if xs.device().is_cuda() && xs.dtype() == ACT_DTYPE {
+            return inference_nn::cuda::dit::rms_norm_rope(
+                xs,
+                &self.weight,
+                rope.map(|r| (&r.cos, &r.sin)),
+                n_heads,
+                self.eps as f32,
+            );
+        }
+        let split = heads(&self.forward(xs)?, n_heads)?;
+        match rope {
+            Some(rope) => rope.apply(&split),
+            None => Ok(split),
+        }
+    }
+
     pub(crate) fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let x = xs.to_dtype(DType::F32)?;
         let rms = (x.sqr()?.mean_keepdim(D::Minus1)? + self.eps)?.sqrt()?;
@@ -123,6 +217,10 @@ pub(crate) fn modulate(normed: &Tensor, shift: &Tensor, scale: &Tensor) -> Resul
 
 /// `x + y * gate` in f32, back to the activation dtype.
 pub(crate) fn gated_residual(xs: &Tensor, ys: &Tensor, gate: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if xs.device().is_cuda() && xs.dtype() == ACT_DTYPE && ys.dtype() == ACT_DTYPE {
+        return inference_nn::cuda::dit::gated_residual(xs, ys, &gate.contiguous()?);
+    }
     (xs.to_dtype(DType::F32)? + ys.to_dtype(DType::F32)?.broadcast_mul(gate)?)?.to_dtype(ACT_DTYPE)
 }
 
@@ -192,6 +290,34 @@ impl RopeTables {
     }
 }
 
+/// How the long self-attentions run: bf16 flash attention, or with an int8 Q.K^T (faster, ~2% off f32 per call).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AttentionKind {
+    #[default]
+    Bf16,
+    Int8Qk,
+}
+
+/// Self-attention over `[b, heads, tokens, head_dim]` tensors as `kind` asks, output `[b, tokens, heads * head_dim]`.
+pub(crate) fn self_attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    kind: AttentionKind,
+) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if kind == AttentionKind::Int8Qk
+        && q.device().is_cuda()
+        && q.dtype() == ACT_DTYPE
+        && inference_nn::cuda::int8_attention::HEAD_DIMS.contains(&q.dim(3)?)
+    {
+        let scale = 1.0 / (q.dim(3)? as f32).sqrt();
+        return inference_nn::cuda::int8_attention::attention(q, k, v, scale);
+    }
+    let _ = kind;
+    attention(q, k, v)
+}
+
 /// Bidirectional attention over `[b, heads, tokens, head_dim]` tensors, output `[b, tokens, heads * head_dim]`.
 pub(crate) fn attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
     let (b, h, n, d) = q.dims4()?;
@@ -256,5 +382,47 @@ impl PatchConv {
 
 /// tanh-approximated GELU in f32, back to the activation dtype.
 pub(crate) fn gelu_tanh(xs: &Tensor) -> Result<Tensor> {
+    // the CUDA bf16 kernel computes in f32 already
+    if xs.device().is_cuda() && xs.dtype() == ACT_DTYPE {
+        return xs.gelu();
+    }
     xs.to_dtype(DType::F32)?.gelu()?.to_dtype(ACT_DTYPE)
+}
+
+#[cfg(all(test, feature = "cuda"))]
+mod quantized_tests {
+    use super::*;
+    use inference_tensor::nn::Linear as DenseLinear;
+
+    // a Q8_0 linear quantized on the host and uploaded, and one quantized on the device, against the dense layer
+    #[test]
+    fn host_quantized_linear_matches_after_upload() -> Result<()> {
+        let Ok(dev) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        const RELATIVE_TOLERANCE: f32 = 0.02;
+        let (n, k, m) = (64, 512, 256);
+        let w = (Tensor::randn(0f32, 1., (m, k), &Device::Cpu)? * 0.05)?.to_dtype(DType::BF16)?;
+        let b = Tensor::randn(0f32, 1., m, &Device::Cpu)?.to_dtype(DType::BF16)?;
+        let x = Tensor::randn(0f32, 1., (1, n, k), &dev)?.to_dtype(DType::BF16)?;
+        let dense = Linear::Dense(MaybeQuantLinear::Dense(DenseLinear::new(
+            w.clone(),
+            Some(b.clone()),
+        )));
+        let want = dense.to_device(&dev)?.forward(&x)?.to_dtype(DType::F32)?;
+        let scale = want.abs()?.max_all()?.to_scalar::<f32>()?;
+        for (name, layer) in [
+            ("host", dense.quantized(GgmlDType::Q8_0)?.to_device(&dev)?),
+            ("device", dense.to_device(&dev)?.quantized(GgmlDType::Q8_0)?),
+        ] {
+            let got = layer.forward(&x)?.to_dtype(DType::F32)?;
+            let err = (&got - &want)?.abs()?.max_all()?.to_scalar::<f32>()?;
+            println!("{name}: max err {err} of {scale}");
+            assert!(
+                err <= RELATIVE_TOLERANCE * scale,
+                "{name}: {err} of {scale}"
+            );
+        }
+        Ok(())
+    }
 }

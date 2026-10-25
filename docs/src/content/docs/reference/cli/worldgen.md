@@ -24,4 +24,7 @@ inference worldgen [OPTIONS] --panorama <PANORAMA> --out <OUT> --worldstereo <WO
 | `--prompt <PROMPT>` | `A photorealistic, detailed scene with natural lighting.` | The caption every clip is generated with |
 | `--scene <SCENE>` |  | Treat the scene as outdoor (far distances compressed) or indoor; decided by detected sky when unset. Possible values: `outdoor`, `indoor`. |
 | `--seed <SEED>` | `1024` | Seed of the first clip's noise (each later clip adds one) |
+| `--reconstruct-size <RECONSTRUCT_SIZE>` | `518` | The longest edge WorldMirror reconstructs at (floored to a multiple of 14); memory grows with its square |
+| `--attention <ATTENTION>` | `int8` | WorldStereo's self-attention: int8 (int8 Q.K^T, ~1.5x faster) or bf16 (exact flash attention). Possible values: `int8`, `bf16`. |
+| `--weights <WEIGHTS>` | `q8_0` | WorldStereo's main-block linear weights: q8_0 (quantized at load, ~1.3x faster matmuls) or bf16. Possible values: `q8_0`, `bf16`. |
 

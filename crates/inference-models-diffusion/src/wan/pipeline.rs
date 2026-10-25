@@ -42,6 +42,19 @@ pub struct ClipRequest<'a> {
     pub seed: u64,
 }
 
+// Returns the memory pool's free blocks to the driver between phases whose allocations differ in shape (the
+// transformer's few large tensors, the VAE's many full-resolution ones): otherwise each phase's cached blocks sit
+// beside the next phase's new ones, ~8 GB over a clip
+fn trim_pool(dev: &Device) -> Result<()> {
+    #[cfg(feature = "cuda")]
+    if dev.is_cuda() {
+        dev.synchronize()?;
+        inference_nn::utils::memory_usage::MemoryUsage.trim_cuda_memory_pool(dev, 0)?;
+    }
+    let _ = dev;
+    Ok(())
+}
+
 pub struct WorldStereoPipeline {
     pub vae: WanVae,
     pub image_encoder: WanImageEncoder,
@@ -54,7 +67,10 @@ impl WorldStereoPipeline {
     /// The clip's keyframes `[F, 3, H, W]` in [-1, 1].
     pub fn generate(&self, req: &ClipRequest) -> Result<Tensor> {
         let latents = self.denoise(req)?;
-        self.vae.decode(&latents.permute((1, 0, 2, 3))?)
+        trim_pool(&self.device)?;
+        let frames = self.vae.decode(&latents.permute((1, 0, 2, 3))?)?;
+        trim_pool(&self.device)?;
+        Ok(frames)
     }
 
     /// The clip's final latents `[16, F, H/8, W/8]` (normalized).
@@ -109,6 +125,7 @@ impl WorldStereoPipeline {
             }
             None => None,
         };
+        trim_pool(dev)?;
         let qt = req.camera_qt.to_dtype(DType::BF16)?;
         let qt_ref = req
             .memory
