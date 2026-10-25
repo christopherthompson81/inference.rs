@@ -110,3 +110,25 @@ tiny checkpoints, CPU and CUDA?
 **Implication:** phase 2 can size evictions from measured footprints and load on a miss without blocking. Still to
 check on a real checkpoint: how close the footprint is to nvidia-smi's view, and how much noise a concurrent request
 adds.
+
+## Run 3 - 2026-10-25 06:03
+
+**Question:** on a real checkpoint, how close is the measured footprint to nvidia-smi's view of the process?
+
+**Command:** `inference serve -p 1299 --format gguf -m /mnt/data/models -f Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf`
+(default runtime settings), nvidia-smi before start and once `/v1/models` answered, then `/v1/models`.
+
+**Raw finding:**
+```
+idle 1109 MiB, serving 21780 MiB, delta 20671 MiB
+/v1/models: loaded, memory_bytes 21313355776 (20326 MiB), memory_device 0
+```
+The footprint is within 345 MiB of the process's whole growth, about the per-process floor (CUDA context, kernel
+libraries, library handles) that no single model owns.
+
+**Implication:** the measurement is good enough to plan evictions with. But a 1.9 GB 3B model holds 20 GB: with the
+default paged-attention settings the KV pool takes most of the memory free at load. So under the current defaults one
+model fills the card and there is nothing to share; eviction is all-or-nothing. The scheduler needs a KV sizing policy
+of its own: size a model's pool for its context and sequences (`paged_context_len`, `max_seqs`) instead of the free
+memory, at least for models that should share a device, and let a model that runs alone take the rest. That has to be
+settled before phase 2's eviction can share a card between models.
