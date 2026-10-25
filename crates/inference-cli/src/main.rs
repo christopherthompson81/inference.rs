@@ -242,6 +242,45 @@ async fn main() -> Result<()> {
             );
         }
 
+        Command::Worldgen {
+            panorama,
+            out,
+            worldstereo,
+            wan,
+            moge,
+            worldmirror,
+            prompt,
+            scene,
+            seed,
+        } => {
+            use inference_api::reconstruction::{WorldGenModels, WorldGenOptions, generate_world};
+            let models = WorldGenModels {
+                worldstereo,
+                wan,
+                moge,
+                worldmirror,
+            };
+            let options = WorldGenOptions {
+                prompt,
+                outdoor: scene.map(|s| s == "outdoor"),
+                seed,
+            };
+            let report = generate_world(&models, &panorama, &out, &options)?;
+            for stage in &report.stages {
+                println!(
+                    "{:<36} {:8.1} s  {:6} MiB in use at its end",
+                    stage.stage, stage.seconds, stage.device_mib_at_end
+                );
+            }
+            println!(
+                "{} clips, {} frames; reconstruction from {} frames in {}",
+                report.clips.len(),
+                report.frames,
+                report.reconstructed_frames,
+                out.display()
+            );
+        }
+
         Command::Kernels { cmd } => match cmd {
             KernelsCommand::Fetch { types, all } => run_kernels_fetch(types, all)?,
             KernelsCommand::Prune { dry_run } => run_kernels_prune(dry_run)?,

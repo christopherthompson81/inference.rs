@@ -6,6 +6,7 @@ use inference_tensor::nn::VarBuilder;
 use inference_tensor::{D, DType, Device, Result, Tensor};
 
 use super::layers::F32LayerNorm;
+use crate::conv::{Conv, Upsample};
 
 // Channels of each projected scale, the fused width, and the output stack's widths
 const SCALE_CHANNELS: [usize; 4] = [256, 512, 1024, 1024];
@@ -38,96 +39,6 @@ impl Activation {
             Self::DepthWithMask => 3,
             Self::Points | Self::Normals => 4,
         }
-    }
-}
-
-struct Conv {
-    weight: Tensor,
-    bias: Option<Tensor>,
-    padding: usize,
-    stride: usize,
-}
-
-impl Conv {
-    fn load(
-        cin: usize,
-        cout: usize,
-        kernel: usize,
-        stride: usize,
-        padding: usize,
-        bias: bool,
-        vb: VarBuilder,
-    ) -> Result<Self> {
-        Ok(Self {
-            weight: vb.get((cout, cin, kernel, kernel), "weight")?,
-            bias: if bias {
-                Some(vb.get(cout, "bias")?)
-            } else {
-                None
-            },
-            padding,
-            stride,
-        })
-    }
-
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let (cout, cin, kh, kw) = self.weight.dims4()?;
-        // a pointwise conv is a matmul per frame, with no im2col copy
-        let ys = if (kh, kw, self.stride, self.padding) == (1, 1, 1, 0) {
-            let (frames, _, h, w) = xs.dims4()?;
-            let weight = self.weight.reshape((cout, cin))?;
-            let per_frame = (0..frames)
-                .map(|f| weight.matmul(&xs.get(f)?.reshape((cin, h * w))?))
-                .collect::<Result<Vec<_>>>()?;
-            Tensor::stack(&per_frame, 0)?.reshape((frames, cout, h, w))?
-        } else {
-            xs.conv2d(&self.weight, self.padding, self.stride, 1, 1)?
-        };
-        match &self.bias {
-            Some(b) => ys.broadcast_add(&b.reshape((1, (), 1, 1))?),
-            None => Ok(ys),
-        }
-    }
-}
-
-// A transposed conv whose stride equals its kernel: each input pixel paints its own k x k output block, so it is one
-// matmul per frame, `[cout * k * k, cin] x [cin, h * w]`, and a reshuffle
-struct Upsample {
-    // the kernel `[cin, cout, k, k]` as `[cout * k * k, cin]`
-    weight: Tensor,
-    bias: Tensor,
-    channels: usize,
-    kernel: usize,
-}
-
-impl Upsample {
-    fn load(channels: usize, kernel: usize, vb: VarBuilder) -> Result<Self> {
-        let weight = vb
-            .get((channels, channels, kernel, kernel), "weight")?
-            .reshape((channels, channels * kernel * kernel))?
-            .t()?
-            .contiguous()?;
-        Ok(Self {
-            weight,
-            bias: vb.get(channels, "bias")?,
-            channels,
-            kernel,
-        })
-    }
-
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let (frames, cin, h, w) = xs.dims4()?;
-        let (c, k) = (self.channels, self.kernel);
-        let per_frame = (0..frames)
-            .map(|f| {
-                self.weight
-                    .matmul(&xs.get(f)?.reshape((cin, h * w))?)?
-                    .reshape((c, k, k, h, w))?
-                    .permute((0, 3, 1, 4, 2))?
-                    .reshape((c, h * k, w * k))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Tensor::stack(&per_frame, 0)?.broadcast_add(&self.bias.reshape((1, (), 1, 1))?)
     }
 }
 

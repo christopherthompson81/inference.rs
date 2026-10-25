@@ -9,7 +9,7 @@ use serde::Serialize;
 use super::WorldMirror;
 use super::output::{OutputSettings, WrittenCounts, write_outputs};
 use super::preprocess::{RgbImage, adaptive_size, images_to_tensor, resized_dims};
-use super::priors::load_prior_files;
+use super::priors::{PriorInputs, load_prior_files};
 
 /// The longest edge the reference infers at by default
 pub const DEFAULT_TARGET_SIZE: usize = 952;
@@ -201,15 +201,41 @@ pub fn reconstruct_frames(
     out_dir: &Path,
     options: &ReconstructOptions,
 ) -> Result<RunReport> {
-    let start = Instant::now();
-    if frames.is_empty() {
-        inference_tensor::bail!("no frames to reconstruct from");
-    }
     if frames.len() > MAX_FRAMES {
         inference_tensor::bail!(
             "{} frames given; WorldMirror takes at most {MAX_FRAMES}",
             frames.len()
         );
+    }
+    let stems = frames
+        .iter()
+        .map(|(n, _)| {
+            Path::new(n)
+                .file_stem()
+                .map_or_else(|| n.clone(), |s| s.to_string_lossy().into_owned())
+        })
+        .collect::<Vec<_>>();
+    let priors = load_prior_files(
+        options.prior_cameras.as_deref(),
+        options.prior_depth.as_deref(),
+        &stems,
+    )?;
+    reconstruct_with_priors(model, checkpoint, frames, video, priors, out_dir, options)
+}
+
+/// As [`reconstruct_frames`] with the priors given directly and no frame cap (the caller bounds the count).
+pub fn reconstruct_with_priors(
+    model: &WorldMirror,
+    checkpoint: &Path,
+    frames: Vec<(String, RgbImage)>,
+    video: Option<VideoSource>,
+    priors: PriorInputs,
+    out_dir: &Path,
+    options: &ReconstructOptions,
+) -> Result<RunReport> {
+    let start = Instant::now();
+    if frames.is_empty() {
+        inference_tensor::bail!("no frames to reconstruct from");
     }
     let (names, images): (Vec<String>, Vec<RgbImage>) = frames.into_iter().unzip();
     let size = adaptive_size(
@@ -228,19 +254,6 @@ pub fn reconstruct_frames(
             );
         }
     }
-    let stems = names
-        .iter()
-        .map(|n| {
-            Path::new(n)
-                .file_stem()
-                .map_or_else(|| n.clone(), |s| s.to_string_lossy().into_owned())
-        })
-        .collect::<Vec<_>>();
-    let priors = load_prior_files(
-        options.prior_cameras.as_deref(),
-        options.prior_depth.as_deref(),
-        &stems,
-    )?;
     let tensor = images_to_tensor(&images, options.target_size, PATCH, model.device())?;
     let loaded = start.elapsed().as_secs_f64();
     let forward_start = Instant::now();

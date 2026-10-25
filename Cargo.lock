@@ -2890,6 +2890,7 @@ dependencies = [
  "inference-nn",
  "inference-quant",
  "inference-tensor",
+ "inference-vision",
  "rand 0.9.4",
  "rand_distr",
  "rand_isaac",
@@ -3176,11 +3177,15 @@ dependencies = [
  "anyhow",
  "half",
  "image",
+ "inference-models-diffusion",
  "inference-nn",
+ "inference-quant",
  "inference-tensor",
+ "inference-vision",
  "rayon",
  "serde",
  "serde_json",
+ "tokenizers",
 ]
 
 [[package]]

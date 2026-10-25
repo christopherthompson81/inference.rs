@@ -2,10 +2,9 @@
 //! set of images or video frames.
 
 mod camera;
-mod dinov2;
 mod dpt;
 mod gaussians;
-mod layers;
+pub(crate) mod layers;
 pub mod output;
 pub mod preprocess;
 pub mod priors;
