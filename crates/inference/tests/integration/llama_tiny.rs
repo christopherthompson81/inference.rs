@@ -500,15 +500,22 @@ async fn a_lazy_model_loads_on_its_first_request() -> anyhow::Result<()> {
     Ok(())
 }
 
-// A model loaded on a CUDA device reports what its load took there, and keeps reporting it once unloaded.
+// A CUDA model reports what its load took there, gives it back when unloaded, and keeps reporting it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cuda_model_reports_its_memory() -> anyhow::Result<()> {
+    // a KV pool well above the device's fixed per-process costs (cuBLAS workspace, kernel modules), which stay
+    const KV_MB: usize = 256;
     if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
         return Ok(());
     }
     let checkpoint = tiny_llama_checkpoint()?;
     let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
         .with_dtype(ModelDType::BF16)
+        .with_paged_attn(
+            inference::PagedAttentionMetaBuilder::default()
+                .with_gpu_memory(inference::MemoryGpuConfig::MbAmount(KV_MB))
+                .build()?,
+        )
         .build()
         .await?;
     let id = model
@@ -527,7 +534,24 @@ async fn a_cuda_model_reports_its_memory() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("no memory reported"))?;
     assert_eq!(loaded.device, 0);
     assert!(loaded.bytes > 0, "{loaded:?}");
+    #[cfg(feature = "cuda")]
+    let free = || -> anyhow::Result<u64> {
+        use inference_nn::utils::memory_usage::MemoryUsage;
+        Ok(MemoryUsage.query(&Device::new_cuda(0)?)?.available() as u64)
+    };
+    #[cfg(feature = "cuda")]
+    let before = free()?;
     model.unload_model(op())?;
+    // eviction reads free memory right after an unload, so the engine must have let go of it by then
+    #[cfg(feature = "cuda")]
+    {
+        let returned = free()?.saturating_sub(before);
+        assert!(
+            returned >= loaded.bytes / 2,
+            "{returned} of {} returned",
+            loaded.bytes
+        );
+    }
     let unloaded = model.model_status(op())?;
     assert_eq!(unloaded.memory.map(|m| m.bytes), Some(loaded.bytes));
     Ok(())

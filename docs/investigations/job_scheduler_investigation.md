@@ -190,3 +190,44 @@ the large resident pool: two 32 MiB models leave too little margin for the balla
 
 **Implication:** requests now drive residency. Next (phase 3): the job runner, leases for the self-loading pipelines,
 and a residency view in the API.
+
+## Run 6 - 2026-10-25 13:01
+
+**Question:** the Run 4 exit-time SIGSEGV in `a_cuda_model_reports_its_memory` came back in a full `local_ci.sh --cuda`
+run, and `a_full_device_evicts_the_idle_model` failed beside it ("Internal server error" from a load). What is it?
+
+**Reproduce:** both tests alone, 20 stress iterations (`cargo nextest run --profile cuda --features cuda -p inference
+-E <the two> --stress-count 20`): 20/20 pass. The suite runs the CUDA tests while the CPU lint and tests take every
+core, so again with 16 busy-loop shells beside it: 1 SIGSEGV in 20. Under gdb in a loop with the same load, the crash
+came on the 5th run:
+```
+Thread 32 (engine thread, inference_rs/mod.rs:457, the closure's end):
+  cublasDestroy_v2 <- CudaBlas::drop <- CudaDevice drop <- the engine thread's last Device clone
+Thread 1 (main): libcublasLt statics <- __run_exit_handlers <- exit
+```
+The test had returned and the process was exiting while the unloaded model's engine thread was still tearing down.
+
+**Cause:** `unload_model` removes the engine from the map, sends Terminate with `try_send` and drops the instance, so the
+thread runs on detached; `InferenceRs::drop` only joins engines still in the map. Eviction goes through the same
+unload, and `make_room` reads free memory right after it returns, before the evicted engine has let go of anything.
+With one candidate, a load that then runs out of memory has nothing left to evict, and the smaller-cache retry fails
+too: the likely source of the eviction test's failure (that one did not reproduce under load: 20 stress runs before the
+change, 80 after, so it is inferred, not seen).
+
+**Change:** unload terminates through `terminate()` (also the out-of-band instruction, as a full queue hides a queued
+Terminate), stores the unloaded state, joins the engine thread (within the 10 s drop deadline), drops the instance and
+then trims the device's pool. The trim has to come after the drop: the instance's reboot state holds the pipeline's
+last reference once the thread has ended, so the thread's own trim ran before the weights were freed.
+
+**Test:** `a_cuda_model_reports_its_memory` now checks that the load's memory is back when `unload_model` returns. On
+the tiny model's default load it could not: its whole 32 MiB footprint is per-process (cuBLAS workspace, kernel
+modules), and a probe polling free memory for 2 s after an unload saw none of it come back with or without the change.
+With a 256 MB KV pool:
+```
+master:  5/5 fail, "0 of 301989888 returned"
+change:  5/5 pass
+under 16 busy cores, the memory, eviction and lazy-model tests, 40 stress iterations: 40/40 pass (master: 1 SIGSEGV in 20)
+```
+
+**Implication:** an unload is synchronous now: when it returns, the engine thread is gone and its memory is on the
+device again, which is what eviction measures against.
