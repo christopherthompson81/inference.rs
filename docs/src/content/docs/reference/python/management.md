@@ -522,6 +522,16 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `ModelCategory.EMBEDDING` | `'embedding'` |
 
 
+## `ModelMemory`
+
+What one model's load took on its device: the device's used memory before and after it, with cached pool blocks returned first.
+
+| Field | Type |
+| --- | --- |
+| `bytes` | `int` |
+| `device` | `int` |
+
+
 ## `ModelModalities`
 
 | Field | Type |
@@ -545,6 +555,8 @@ Model information metadata about an available mode
 | `max_model_len` | `int \| None` | optional |
 | `mcp_servers_connected` | `int \| None` | optional |
 | `mcp_tools_count` | `int \| None` | optional |
+| `memory_bytes` | `int \| None` | optional |
+| `memory_device` | `int \| None` | optional |
 | `modalities` | `ModelModalities \| None` | optional |
 | `object` | `str` | required |
 | `owned_by` | `str` | required |
@@ -603,10 +615,11 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 
 ## `ModelStatusResponse`
 
-| Field | Type |
-| --- | --- |
-| `model_id` | `str` |
-| `status` | `ModelStatus` |
+| Field | Type | Default |
+| --- | --- | --- |
+| `memory` | `ModelMemory \| None` | optional |
+| `model_id` | `str` | required |
+| `status` | `ModelStatus` | required |
 
 
 ## `PromptInput`

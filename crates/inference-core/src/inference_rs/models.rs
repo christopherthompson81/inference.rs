@@ -180,6 +180,62 @@ impl InferenceRs {
         Box::pin(self.add_model_inner(model_id, pipeline, method, config))
     }
 
+    /// Registers a model without loading it: it loads on its first request, or on `reload_model`, from `state`. The
+    /// first declared or added model becomes the default.
+    pub fn declare_model(&self, model_id: String, state: UnloadedModelState) -> Result<(), String> {
+        let reloading = self
+            .reloading_models
+            .read()
+            .map_err(|_| "Failed to acquire read lock on reloading_models")?;
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| "Failed to acquire read lock on engines")?;
+        let mut unloaded = self
+            .unloaded_models
+            .write()
+            .map_err(|_| "Failed to acquire write lock on unloaded_models")?;
+        let mut default_lock = self
+            .default_engine_id
+            .write()
+            .map_err(|_| "Failed to acquire write lock on default_engine_id")?;
+        let aliases = self
+            .model_aliases
+            .read()
+            .map_err(|_| "Failed to acquire read lock on model_aliases")?;
+        if reloading.contains(&model_id)
+            || engines.contains_key(&model_id)
+            || unloaded.contains_key(&model_id)
+            || aliases.contains_key(&model_id)
+        {
+            return Err(format!("Model {model_id} already exists"));
+        }
+        if default_lock.is_none() {
+            *default_lock = Some(model_id.clone());
+        }
+        unloaded.insert(model_id, state);
+        Ok(())
+    }
+
+    /// What `model_id` holds on its device when resident, or held when last resident; None before its first load.
+    pub fn model_footprint(&self, model_id: &str) -> Result<Option<Footprint>, InferenceRsError> {
+        let resolved = self.resolve_alias(model_id)?;
+        if let Some(engine) = self
+            .engines
+            .read()
+            .map_err(|_| InferenceRsError::EnginePoisoned)?
+            .get(&resolved)
+        {
+            return Ok(engine.footprint);
+        }
+        Ok(self
+            .unloaded_models
+            .read()
+            .map_err(|_| InferenceRsError::EnginePoisoned)?
+            .get(&resolved)
+            .and_then(|state| state.footprint))
+    }
+
     async fn add_model_inner(
         &self,
         model_id: String,
@@ -244,6 +300,7 @@ impl InferenceRs {
             engine_config,
             mcp_client_config: config.mcp_client_config.clone(),
             loader_config: config.loader_config.clone(),
+            footprint: config.footprint,
         };
 
         let engine_instance = Self::create_engine_instance(reboot_state)?;
@@ -413,11 +470,10 @@ impl InferenceRs {
         // Create the unloaded state
         let unloaded_state = UnloadedModelState {
             loader_config,
-            scheduler_config: engine_instance.reboot_state.method.clone(),
+            scheduler: SchedulerPlan::Realized(engine_instance.reboot_state.method.clone()),
             engine_config: engine_instance.reboot_state.engine_config.clone(),
             mcp_client_config: engine_instance.reboot_state.mcp_client_config.clone(),
-            category: engine_instance.category.clone(),
-            inference_config: engine_instance.config.clone(),
+            footprint: engine_instance.footprint,
         };
 
         // Send terminate signal to the engine
@@ -515,7 +571,10 @@ impl InferenceRs {
         } else {
             unloaded_state.engine_config.prefix_cache_n
         };
-        let pipeline = loader_config
+        let PipelineLoad {
+            pipeline,
+            footprint,
+        } = loader_config
             .load(
                 &*loader,
                 MtpRuntimeConfig::for_prefix_cache(
@@ -525,23 +584,55 @@ impl InferenceRs {
             )
             .await
             .map_err(|e| InferenceRsError::ReloadFailed(format!("Failed to load model: {e}")))?;
-        let realized_cache_config = pipeline.lock().await.get_metadata().cache_config.clone();
-        let mut scheduler_config = unloaded_state.scheduler_config;
-        scheduler_config
-            .refresh_paged_cache_config(realized_cache_config)
-            .map_err(|e| {
-                InferenceRsError::ReloadFailed(format!(
-                    "Failed to refresh scheduler cache configuration: {e}"
-                ))
-            })?;
+        let mut engine_config = unloaded_state.engine_config;
+        let scheduler_config = match unloaded_state.scheduler {
+            SchedulerPlan::Realized(mut scheduler_config) => {
+                let realized_cache_config =
+                    pipeline.lock().await.get_metadata().cache_config.clone();
+                scheduler_config
+                    .refresh_paged_cache_config(realized_cache_config)
+                    .map_err(|e| {
+                        InferenceRsError::ReloadFailed(format!(
+                            "Failed to refresh scheduler cache configuration: {e}"
+                        ))
+                    })?;
+                scheduler_config
+            }
+            // what add_model does for a model loaded up front
+            SchedulerPlan::FirstLoad(first) => {
+                Self::init_device_support(&pipeline.lock().await.device());
+                let unsized_pipeline: Arc<tokio::sync::Mutex<dyn Pipeline>> = pipeline.clone();
+                Self::init_external_tool_callbacks(
+                    &unsized_pipeline,
+                    &mut engine_config.tool_callbacks,
+                    unloaded_state.mcp_client_config.as_ref(),
+                    first.code_exec_config.as_ref(),
+                    first.shell_config.as_ref(),
+                )
+                .await;
+                SchedulerConfig::for_pipeline(
+                    &pipeline,
+                    first.paged_attn_requested,
+                    first.max_num_seqs,
+                    first.limits,
+                )
+                .await
+                .map_err(|e| {
+                    InferenceRsError::ReloadFailed(format!(
+                        "Failed to configure the scheduler: {e}"
+                    ))
+                })?
+            }
+        };
 
         // Create the reboot state
         let reboot_state = RebootState {
             pipeline: pipeline.clone(),
             method: scheduler_config,
-            engine_config: unloaded_state.engine_config,
+            engine_config,
             mcp_client_config: unloaded_state.mcp_client_config.clone(),
             loader_config: Some(unloaded_state.loader_config.clone()),
+            footprint,
         };
 
         let engine_instance = Self::create_engine_instance(reboot_state)

@@ -545,6 +545,7 @@ impl ModelManager {
             paged_cache_layers: request.paged_cache_layers,
             max_seqs: request.max_seqs,
             mtp: request.mtp,
+            lazy: false,
         };
         self.engine.add_model(spec).await?;
         let kind = match kind.or_else(|| self.served_kind(&id)) {

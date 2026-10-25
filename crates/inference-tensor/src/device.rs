@@ -11,6 +11,15 @@ pub enum DeviceLocation {
     Metal { gpu_id: usize },
 }
 
+impl DeviceLocation {
+    pub fn cuda_ordinal(&self) -> Option<usize> {
+        match self {
+            Self::Cuda { gpu_id } => Some(*gpu_id),
+            _ => None,
+        }
+    }
+}
+
 /// Cpu, Cuda, or Metal
 #[derive(Debug, Clone)]
 pub enum Device {

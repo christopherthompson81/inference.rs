@@ -125,6 +125,9 @@ pub struct ModelEntry {
     /// Named slice to load from the MatFormer config.
     #[serde(default)]
     pub matformer_slice_name: Option<String>,
+    /// Registered without loading: the model loads on its first request, under its `model_id`.
+    #[serde(default)]
+    pub lazy: bool,
 }
 
 #[derive(Deserialize, Default, Clone)]

@@ -7188,6 +7188,26 @@
           "f32"
         ]
       },
+      "ModelMemory": {
+        "type": "object",
+        "description": "What one model's load took on its device: the device's used memory before and after it, with cached pool blocks\nreturned first.",
+        "required": [
+          "device",
+          "bytes"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "device": {
+            "type": "integer",
+            "description": "CUDA device ordinal",
+            "minimum": 0
+          }
+        }
+      },
       "ModelModalities": {
         "type": "object",
         "required": [
@@ -7285,6 +7305,23 @@
               "null"
             ],
             "description": "Number of tools available from MCP servers",
+            "minimum": 0
+          },
+          "memory_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Device memory the model holds while resident, or held when last resident (measured on CUDA devices)",
+            "minimum": 0
+          },
+          "memory_device": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The CUDA device `memory_bytes` is on",
             "minimum": 0
           },
           "modalities": {
@@ -8638,6 +8675,10 @@
               "null"
             ]
           },
+          "lazy": {
+            "type": "boolean",
+            "description": "Registered without loading: the model loads on its first request (and can be evicted later). Needs\n`model_id`, since its own id is only known once it has loaded."
+          },
           "max_model_len": {
             "type": [
               "integer",
@@ -8758,6 +8799,17 @@
           "status"
         ],
         "properties": {
+          "memory": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ModelMemory",
+                "description": "Device memory the model holds while resident, or held when last resident; absent before its first load and on\ndevices that are not measured (CPU, Metal)"
+              }
+            ]
+          },
           "model_id": {
             "type": "string",
             "example": "my-model"

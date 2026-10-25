@@ -260,6 +260,28 @@ pub struct ModelStatusResponse {
     #[schema(example = "my-model")]
     pub model_id: String,
     pub status: ModelStatus,
+    /// Device memory the model holds while resident, or held when last resident; absent before its first load and on
+    /// devices that are not measured (CPU, Metal)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<ModelMemory>,
+}
+
+/// What one model's load took on its device: the device's used memory before and after it, with cached pool blocks
+/// returned first.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, ToSchema)]
+pub struct ModelMemory {
+    /// CUDA device ordinal
+    pub device: usize,
+    pub bytes: u64,
+}
+
+impl From<inference_core::Footprint> for ModelMemory {
+    fn from(f: inference_core::Footprint) -> Self {
+        Self {
+            device: f.device,
+            bytes: f.bytes,
+        }
+    }
 }
 
 fn core_error(error: InferenceRsError) -> ApiError {
@@ -276,6 +298,8 @@ fn model_object(state: &SharedInferenceRsState, id: String) -> ModelObject {
         parent: None,
         adapter_generation: None,
         status: None,
+        memory_bytes: None,
+        memory_device: None,
         tools_available: None,
         mcp_tools_count: None,
         mcp_servers_connected: None,
@@ -367,6 +391,10 @@ pub(crate) fn list_models(state: &SharedInferenceRsState) -> Result<ModelObjects
             describe_loaded(state, Some(&model_id), &mut object);
         }
         object.status = Some(status.to_string());
+        if let Ok(Some(footprint)) = state.model_footprint(&model_id) {
+            object.memory_bytes = Some(footprint.bytes);
+            object.memory_device = Some(footprint.device);
+        }
         // A reloading model can be listed twice; only its first card is marked.
         if default_id.as_deref() == Some(model_id.as_str()) {
             object.default = default_id.take().map(|_| true);
@@ -417,7 +445,12 @@ pub(crate) fn model_status(
     request: ModelOperationRequest,
 ) -> Result<ModelStatusResponse, ApiError> {
     let result = state.get_model_status(&request.model_id);
-    status_result(request.model_id, result)
+    let memory = state
+        .model_footprint(&request.model_id)
+        .ok()
+        .flatten()
+        .map(ModelMemory::from);
+    status_result(request.model_id, result).map(|status| ModelStatusResponse { memory, ..status })
 }
 
 fn unload_result(
@@ -428,6 +461,7 @@ fn unload_result(
         Ok(()) | Err(InferenceRsError::ModelAlreadyUnloaded(_)) => Ok(ModelStatusResponse {
             model_id,
             status: ModelStatus::Unloaded,
+            memory: None,
         }),
         Err(error) => Err(core_error(error)),
     }
@@ -441,6 +475,7 @@ fn reload_result(
         Ok(()) | Err(InferenceRsError::ModelAlreadyLoaded(_)) => Ok(ModelStatusResponse {
             model_id,
             status: ModelStatus::Loaded,
+            memory: None,
         }),
         Err(error) => Err(core_error(error)),
     }
@@ -454,6 +489,7 @@ fn status_result(
         Some(status) => Ok(ModelStatusResponse {
             model_id,
             status: status.into(),
+            memory: None,
         }),
         None => Err(core_error(InferenceRsError::ModelNotFound(model_id))),
     }

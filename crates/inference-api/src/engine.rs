@@ -203,6 +203,10 @@ pub struct ModelSpec {
     /// Sequences this model serves at once, in place of `runtime.max_seqs`.
     #[serde(default)]
     pub max_seqs: Option<usize>,
+    /// Registered without loading: the model loads on its first request (and can be evicted later). Needs
+    /// `model_id`, since its own id is only known once it has loaded.
+    #[serde(default)]
+    pub lazy: bool,
 }
 
 impl ModelSpec {
@@ -226,6 +230,11 @@ impl ModelSpec {
         if self.max_seqs == Some(0) {
             return Err(zero("max_seqs"));
         }
+        if self.lazy && self.model_id.is_none() {
+            return Err(EngineLoadError::InvalidSpec(format!(
+                "{label}: a lazy model needs model_id, since its own id is only known once it has loaded"
+            )));
+        }
         // The builder names a model in its errors by this key; the alias is what requests use.
         let key = self.model_id.clone().unwrap_or_else(|| label.to_string());
         let mut config = ModelConfig::new(key, self.model);
@@ -241,6 +250,7 @@ impl ModelSpec {
         config.paged_cache_type = self.paged_cache_type;
         config.paged_cache_layers = self.paged_cache_layers;
         config.max_seqs = self.max_seqs;
+        config.lazy = self.lazy;
         config.mtp = self.mtp.map(MtpSpec::into_config).transpose()?;
         if let Some(bytes) = self.encoder_cache_memory_bytes {
             config = config.with_encoder_cache_memory_bytes(bytes);
@@ -1433,6 +1443,22 @@ impl Engine {
         .await
         .map_err(add_model_error)?;
         let config = spec.into_config(ADDED_MODEL).map_err(add_model_error)?;
+        if config.lazy {
+            let model_id = config.model_id.clone();
+            self.unclaimed(&model_id)?;
+            let state = self
+                .models
+                .declare(&config)
+                .map_err(|error| add_model_error(EngineLoadError::Load(error)))?;
+            self.state()
+                .declare_model(model_id.clone(), state)
+                .map_err(model_name_conflict)?;
+            return Ok(ModelStatusResponse {
+                model_id,
+                status: ModelStatus::Unloaded,
+                memory: None,
+            });
+        }
         let loaded = self
             .models
             .load_additional(&config)
@@ -1447,6 +1473,7 @@ impl Engine {
         Ok(ModelStatusResponse {
             model_id,
             status: ModelStatus::Loaded,
+            memory: None,
         })
     }
 
