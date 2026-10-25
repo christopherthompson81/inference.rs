@@ -163,6 +163,11 @@ impl Tensor {
 
     pub fn backward(&self) -> Result<GradStore> {
         let sorted_nodes = self.sorted_nodes();
+        // inputs off every path to a variable need no gradient (a constant conv kernel's would cost a full conv)
+        let tracked = sorted_nodes
+            .iter()
+            .map(|n| n.id())
+            .collect::<std::collections::HashSet<_>>();
         let mut grads = GradStore::new();
         grads.insert(self, self.ones_like()?.contiguous()?);
         for node in sorted_nodes.iter() {
@@ -279,36 +284,56 @@ impl Tensor {
                         stride,
                         dilation,
                     } => {
-                        // The output height for conv_transpose2d is:
-                        // (i_h - 1) * stride - 2 * padding + dilation * (k_h - 1) + out_padding + 1
-                        let grad_h = grad.dim(2)?;
-                        let k_h = kernel.dim(2)?;
-                        let out_size =
-                            (grad_h - 1) * stride + dilation * (k_h - 1) + 1 - 2 * padding;
-                        let out_padding = arg.dim(2)? - out_size;
-                        let grad_arg = grad.conv_transpose2d(
-                            kernel,
-                            *padding,
-                            out_padding,
-                            *stride,
-                            *dilation,
-                        )?;
-                        let sum_grad = grads.or_insert(arg)?;
-                        *sum_grad = sum_grad.add(&grad_arg)?;
-
-                        let grad_kernel = arg
-                            .transpose(0, 1)?
-                            .conv2d(&grad.transpose(0, 1)?, *padding, *dilation, *stride, 1)?
-                            .transpose(0, 1)?;
-                        let sum_grad = grads.or_insert(kernel)?;
-                        let (_, _, k0, k1) = kernel.dims4()?;
-                        let (_, _, g_k0, g_k1) = grad_kernel.dims4()?;
-                        let grad_kernel = if g_k0 != k0 || g_k1 != k1 {
-                            grad_kernel.narrow(2, 0, k0)?.narrow(3, 0, k1)?
-                        } else {
-                            grad_kernel
-                        };
-                        *sum_grad = sum_grad.add(&grad_kernel)?;
+                        let (_, _, k_h, k_w) = kernel.dims4()?;
+                        if tracked.contains(&arg.id()) {
+                            let grad_arg =
+                                if *stride == 1 && *dilation == 1 && k_h == k_w && k_h > *padding {
+                                    // a stride-1 conv's input gradient is a conv with the kernel flipped and its
+                                    // channels swapped, which takes the im2col path instead of the direct transpose
+                                    let flip = |n: usize| {
+                                        Tensor::new(
+                                            (0..n as u32).rev().collect::<Vec<_>>(),
+                                            kernel.device(),
+                                        )
+                                    };
+                                    let flipped = kernel
+                                        .index_select(&flip(k_h)?, 2)?
+                                        .index_select(&flip(k_w)?, 3)?
+                                        .transpose(0, 1)?
+                                        .contiguous()?;
+                                    grad.conv2d(&flipped, k_h - 1 - padding, 1, 1, 1)?
+                                } else {
+                                    // The output height for conv_transpose2d is:
+                                    // (i_h - 1) * stride - 2 * padding + dilation * (k_h - 1) + out_padding + 1
+                                    let grad_h = grad.dim(2)?;
+                                    let out_size = (grad_h - 1) * stride + dilation * (k_h - 1) + 1
+                                        - 2 * padding;
+                                    let out_padding = arg.dim(2)? - out_size;
+                                    grad.conv_transpose2d(
+                                        kernel,
+                                        *padding,
+                                        out_padding,
+                                        *stride,
+                                        *dilation,
+                                    )?
+                                };
+                            let sum_grad = grads.or_insert(arg)?;
+                            *sum_grad = sum_grad.add(&grad_arg)?;
+                        }
+                        if tracked.contains(&kernel.id()) {
+                            let grad_kernel = arg
+                                .transpose(0, 1)?
+                                .conv2d(&grad.transpose(0, 1)?, *padding, *dilation, *stride, 1)?
+                                .transpose(0, 1)?;
+                            let sum_grad = grads.or_insert(kernel)?;
+                            let (_, _, g_k0, g_k1) = grad_kernel.dims4()?;
+                            let grad_kernel = if g_k0 != k_h || g_k1 != k_w {
+                                grad_kernel.narrow(2, 0, k_h)?.narrow(3, 0, k_w)?
+                            } else {
+                                grad_kernel
+                            };
+                            *sum_grad = sum_grad.add(&grad_kernel)?;
+                        }
                     }
                     Op::ConvTranspose1D { .. } => Err(Error::BackwardNotSupported {
                         op: "conv-transpose1d",
@@ -790,5 +815,30 @@ impl GradStore {
     /// Get the tensor ids of the stored gradient tensors
     pub fn get_ids(&self) -> impl Iterator<Item = &TensorId> {
         self.0.keys()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{Device, Result, Tensor, Var};
+
+    // the stride-1 input gradient (a flipped-kernel conv) against the transposed conv it replaces; a constant kernel
+    // gets no gradient
+    #[test]
+    fn conv2d_input_gradient_matches_transposed_conv() -> Result<()> {
+        let dev = Device::Cpu;
+        for (k, padding) in [(3, 1), (3, 0), (5, 2), (1, 0)] {
+            let x = Var::from_tensor(&Tensor::randn(0f32, 1., (2, 3, 9, 7), &dev)?)?;
+            let w = Tensor::randn(0f32, 1., (4, 3, k, k), &dev)?;
+            let y = x.conv2d(&w, padding, 1, 1, 1)?;
+            let weights = Tensor::randn(0f32, 1., y.shape(), &dev)?;
+            let grads = (&y * &weights)?.sum_all()?.backward()?;
+            let got = grads.get(&x).expect("input gradient");
+            let want = weights.conv_transpose2d(&w, padding, 0, 1, 1)?;
+            let err = (got - &want)?.abs()?.max_all()?.to_scalar::<f32>()?;
+            assert!(err < 1e-4, "k {k} padding {padding}: {err}");
+            assert!(grads.get(&w).is_none(), "constant kernel got a gradient");
+        }
+        Ok(())
     }
 }
