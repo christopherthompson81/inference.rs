@@ -464,7 +464,7 @@ impl InferenceRs {
             .loader_config
             .clone()
             .ok_or_else(|| InferenceRsError::NoLoaderConfig(resolved_model_id.clone()))?;
-        let engine_instance = engines
+        let mut engine_instance = engines
             .remove(&resolved_model_id)
             .expect("engine was present while holding the write lock");
 
@@ -478,17 +478,21 @@ impl InferenceRs {
             pinned: engine_instance.pinned,
         };
 
-        // Send terminate signal to the engine
-        let _ = engine_instance.sender.try_send(Request::Terminate);
-
+        engine_instance.terminate();
         drop(engines);
 
-        // Store the unloaded state
-        let mut unloaded = self
-            .unloaded_models
+        #[cfg(feature = "cuda")]
+        let device = unloaded_state.loader_config.device.clone();
+        self.unloaded_models
             .write()
-            .map_err(|_| InferenceRsError::EnginePoisoned)?;
-        unloaded.insert(resolved_model_id.to_string(), unloaded_state);
+            .map_err(|_| InferenceRsError::EnginePoisoned)?
+            .insert(resolved_model_id.to_string(), unloaded_state);
+        // an eviction reads free memory next, and an engine thread left running races the exit-time CUDA teardown
+        engine_instance.join_until(Instant::now() + ENGINE_DROP_JOIN_TIMEOUT);
+        // the pipeline's last reference was this one, so its memory goes back only now
+        drop(engine_instance);
+        #[cfg(feature = "cuda")]
+        release_device_memory(&device);
 
         // an unloaded default stays the default: the next request for it loads it again
         info!("Model {} unloaded successfully", resolved_model_id);
