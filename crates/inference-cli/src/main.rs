@@ -252,6 +252,7 @@ async fn main() -> Result<()> {
             prompt,
             scene,
             seed,
+            reconstruct_size,
         } => {
             use inference_api::reconstruction::{WorldGenModels, WorldGenOptions, generate_world};
             let models = WorldGenModels {
@@ -264,12 +265,13 @@ async fn main() -> Result<()> {
                 prompt,
                 outdoor: scene.map(|s| s == "outdoor"),
                 seed,
+                reconstruct_size,
             };
             let report = generate_world(&models, &panorama, &out, &options)?;
             for stage in &report.stages {
                 println!(
-                    "{:<36} {:8.1} s  {:6} MiB in use at its end",
-                    stage.stage, stage.seconds, stage.device_mib_at_end
+                    "{:<36} {:8.1} s  {:6} MiB allocated at peak, {:6} MiB in use at its end",
+                    stage.stage, stage.seconds, stage.allocated_peak_mib, stage.device_mib_at_end
                 );
             }
             println!(

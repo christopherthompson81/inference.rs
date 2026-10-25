@@ -980,6 +980,52 @@ mod tests {
         Ok(())
     }
 
+    // a video diffusion block's projections at ~45K tokens: dense bf16 (cuBLAS) against each quantized type's mmq
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "benchmark"]
+    #[allow(clippy::cast_precision_loss)]
+    fn large_batch_matmul_throughput() -> Result<()> {
+        const TOKENS: usize = 45_056;
+        const SHAPES: [(usize, usize); 3] = [(5120, 5120), (5120, 13824), (13824, 5120)];
+        const REPEATS: usize = 5;
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let time = |f: &dyn Fn() -> Result<Tensor>| -> Result<f64> {
+            f()?;
+            device.synchronize()?;
+            let start = std::time::Instant::now();
+            for _ in 0..REPEATS {
+                f()?;
+            }
+            device.synchronize()?;
+            Ok(start.elapsed().as_secs_f64() / REPEATS as f64)
+        };
+        for (k, n) in SHAPES {
+            let flop = 2.0 * (TOKENS * k * n) as f64;
+            let x = Tensor::randn(0f32, 1., (TOKENS, k), &device)?.to_dtype(DType::BF16)?;
+            let weight = (Tensor::randn(0f32, 1., (n, k), &device)? * 0.02)?;
+            let dense = weight.to_dtype(DType::BF16)?;
+            let s = time(&|| x.matmul(&dense.t()?))?;
+            println!(
+                "{k}x{n} bf16 cublas  {:7.2} ms  {:6.1} TFLOP/s",
+                s * 1e3,
+                flop / s / 1e12
+            );
+            for dtype in [GgmlDType::Q8_0, GgmlDType::Q4K] {
+                let w = QMatMul::QTensor(Arc::new(QTensor::quantize(&weight, dtype)?));
+                let s = time(&|| qmatmul_forward(&w, &x))?;
+                println!(
+                    "{k}x{n} {dtype:?} mmq  {:7.2} ms  {:6.1} TFLOP/s",
+                    s * 1e3,
+                    flop / s / 1e12
+                );
+            }
+        }
+        Ok(())
+    }
+
     // candle's own QMatMul on CUDA dequantizes, for any caller that skips qmatmul_forward
     #[cfg(feature = "cuda")]
     #[test]

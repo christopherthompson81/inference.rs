@@ -181,6 +181,40 @@ inference_tensor::kernel_library! {
             row_bytes: i32,
             stream: i64,
         ) -> i32;
+        pub fn dit_layer_norm_bf16(
+            xs: *const c_void,
+            weight: *const c_void,
+            bias: *const c_void,
+            scale: *const c_void,
+            shift: *const c_void,
+            out: *mut c_void,
+            rows: i32,
+            cols: i32,
+            eps: f32,
+            stream: i64,
+        ) -> i32;
+        pub fn dit_gated_residual_bf16(
+            xs: *const c_void,
+            ys: *const c_void,
+            gate: *const c_void,
+            out: *mut c_void,
+            n: i64,
+            cols: i32,
+            stream: i64,
+        ) -> i32;
+        pub fn dit_rms_norm_rope_bf16(
+            xs: *const c_void,
+            weight: *const c_void,
+            cos: *const c_void,
+            sin: *const c_void,
+            out: *mut c_void,
+            batch: i32,
+            tokens: i32,
+            heads: i32,
+            head_dim: i32,
+            eps: f32,
+            stream: i64,
+        ) -> i32;
         pub fn adain_act_f32(
             xs: *const c_void,
             h: *const c_void,

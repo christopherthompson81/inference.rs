@@ -1,0 +1,88 @@
+---
+title: 3D worlds from a panorama
+description: WorldStereo-2 turns one equirectangular panorama into keyframes along camera paths, then WorldMirror 2.0 reconstructs them into cameras, depth, points and 3D Gaussian splats.
+---
+
+`inference worldgen` runs Tencent's HY-World 2.0 world generation on a single 360 degree panorama. It estimates the
+panorama's metric depth with MoGe-2, plans camera paths that leave the panorama's centre, generates the views along
+each path with WorldStereo-2 (a camera-controlled Wan2.1 video model with a memory of earlier views), and finally
+runs [WorldMirror 2.0](/guides/models/use-3d-reconstruction/) on the panorama views and generated keyframes with their
+known cameras as priors.
+
+## Weights
+
+| Folder | From | Size | What is read |
+|---|---|---|---|
+| `--worldstereo` | [`hanshanxue/WorldStereo`](https://huggingface.co/hanshanxue/WorldStereo), `worldstereo-memory-dmd` | 35 GB | `config.json`, `model.safetensors` (the full transformer, distilled to 4 steps) |
+| `--wan` | [`Wan-AI/Wan2.1-I2V-14B-480P-Diffusers`](https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-480P-Diffusers) | 23 GB | `vae/`, `image_encoder/`, `text_encoder/`, `tokenizer/`, `transformer/config.json`; the base transformer weights are not needed |
+| `--moge` | [`Ruicheng/moge-2-vitl-normal`](https://huggingface.co/Ruicheng/moge-2-vitl-normal) | 1.3 GB | `config.json`, `model.safetensors` |
+| `--worldmirror` | [`tencent/HY-World-2.0`](https://huggingface.co/tencent/HY-World-2.0/tree/main/HY-WorldMirror-2.0), `HY-WorldMirror-2.0` | 5 GB | as for `inference reconstruct` |
+
+MoGe-2 ships as a pickled `model.pt`; convert it once to `model.safetensors`, with its `model_config` saved as
+`config.json`. The weights carry their own licenses (Tencent's for WorldStereo and WorldMirror); read them before use.
+
+## Run it
+
+```bash
+inference worldgen --panorama room.png --out world/ \
+    --worldstereo WorldStereo/worldstereo-memory-dmd \
+    --wan Wan2.1-I2V-14B-480P-Diffusers \
+    --moge moge-2-vitl-normal \
+    --worldmirror HY-World-2.0/HY-WorldMirror-2.0 \
+    --prompt "A cozy stone library with tall wooden shelves and warm lamp light."
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--panorama` | required | A 2:1 equirectangular image |
+| `--prompt` | a generic caption | The caption every clip is generated with; describing the scene helps the generated views stay in it |
+| `--scene` | from detected sky | `outdoor` compresses far distances before planning; `indoor` keeps them. Unset, a scene is outdoor when MoGe-2 finds sky in at least 0.5% of the panorama |
+| `--seed` | 1024 | The first clip's noise seed; each later clip adds one |
+| `--worldmirror` | none | Without it the clips are written and the reconstruction is skipped |
+| `--reconstruct-size` | 518 | The longest edge WorldMirror reconstructs at; its memory grows with the square of this |
+
+An interrupted run restarts where it stopped: clips already written to `--out` are read back instead of generated
+again.
+
+## What it does
+
+1. Scene: MoGe-2 predicts distance in 40 perspective views of the panorama, merged into one metric distance map; the
+   map becomes a point cloud, a mesh and a memory bank of 27 views rendered from the centre.
+2. Paths: three start views a third of a turn apart, each with a right turn, a left turn and a rising orbit, 21 frames
+   each, shortened where they would pass too close to the mesh.
+3. Caption: umT5-XXL encodes the prompt once.
+4. Clips: for each of the 9 paths the scene is rendered along it (holes where the panorama saw nothing), the most
+   useful memory views are retrieved, and WorldStereo-2 generates the path's frames in 4 denoising steps. Each clip's
+   frames join the memory for the next.
+5. Reconstruction: WorldMirror 2.0 on the memory bank's frames with their cameras and intrinsics as priors.
+
+Each stage loads its models and drops them before the next, so one 24 GB card holds a single stage at a time. The
+WorldStereo transformer's blocks stream from host memory, so the run needs about 40 GB of free RAM.
+
+## Outputs
+
+```
+world/
+  meta.json                       conventions, checkpoints, settings, stage timings, clips, reconstruction_to_scene
+  clips/view0_traj0/frame_00.png  the clip's frames (frame_00 is the start view)
+  clips/view0_traj0/cameras.json  per-frame camera_to_world and intrinsics, size, retrieved memory frames
+  reconstruction/                 WorldMirror outputs: camera_params.json, depth/, normal/, points.ply, gaussians.ply
+```
+
+## Conventions
+
+- Clip cameras are OpenCV (x right, y down, z forward), camera-to-world, in the scene frame: the panorama's centre at
+  the origin, +z up, in metres as MoGe-2 estimates them.
+- The reconstruction is in WorldMirror's frame (the first input camera's, arbitrary scale).
+  `reconstruction_to_scene` in `meta.json` maps it into the scene frame as `scene = scale * rotation * recon +
+  translation`, fitted on the cameras; it also reports the median position and rotation residuals of the fit.
+
+## Differences from the reference pipeline
+
+- Sky comes from MoGe-2's validity mask; the reference segments it with GroundingDINO and ZIM.
+- One caption serves every clip; the reference captions each start view with a vision-language model.
+- Rendered conditions are used as rendered; the reference round-trips them through MP4 files.
+- Memory retrieval ranks views on MoGe-2's DINOv2-L features; the reference loads a separate DINOv2-base.
+- The reconstruction runs at 518 pixels on the long edge by default; at the reference's 832, 99 frames do not fit in
+  24 GB.
+- Only the regular paths are generated; the reference's optional VLM-planned paths are not run.

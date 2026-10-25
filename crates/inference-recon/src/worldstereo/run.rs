@@ -27,14 +27,24 @@ use super::trajectory::{self, Mat4, Obstacles, PointGrid};
 use crate::geometry::invert4;
 use crate::moge::MoGe;
 use crate::worldmirror::priors::PriorInputs;
-use crate::worldmirror::run::{ReconstructOptions, reconstruct_with_priors};
+use crate::worldmirror::run::{Axes, OPENCV_AXES, ReconstructOptions, reconstruct_with_priors};
 use crate::worldmirror::{WorldMirror, preprocess::RgbImage};
 
 // the reference generates each view's aerial move first, the two turns then lean on it
 const TRAJECTORY_ORDER: [usize; 3] = [2, 0, 1];
 // WorldMirror runs on the whole memory bank (~99 frames); the reference's 832 is ~200K tokens, past a 24 GB card
-const RECONSTRUCT_TARGET_SIZE: usize = 518;
+pub const DEFAULT_RECONSTRUCT_SIZE: usize = 518;
 const DEFAULT_SEED: u64 = 1024;
+const QUANTIZATION: &str = "none: WorldStereo transformer and umT5 in bf16 (transformer blocks streamed from host \
+                            memory); Wan VAE, CLIP image encoder and MoGe-2 in f32; WorldMirror as its own meta.json states";
+const DIFFERENCES_FROM_REFERENCE: [&str; 6] = [
+    "sky from MoGe-2's validity mask instead of GroundingDINO and ZIM",
+    "one caption for every clip instead of a vision-language model's caption per start view",
+    "rendered conditions used as rendered, not round-tripped through MP4",
+    "memory retrieval on MoGe-2's DINOv2-L features instead of a separate DINOv2-base",
+    "reconstruction at 518 on the long edge by default instead of 832, which does not fit 24 GB at ~99 frames",
+    "only the regular trajectories; no VLM-planned ones",
+];
 
 /// Where each model's weights live.
 #[derive(Clone, Debug)]
@@ -56,6 +66,8 @@ pub struct WorldGenOptions {
     /// outdoor scenes get far-field compression; None decides by whether any sky was found
     pub outdoor: Option<bool>,
     pub seed: u64,
+    /// WorldMirror's longest edge, floored to a multiple of 14
+    pub reconstruct_size: usize,
 }
 
 impl Default for WorldGenOptions {
@@ -64,6 +76,7 @@ impl Default for WorldGenOptions {
             prompt: String::new(),
             outdoor: None,
             seed: DEFAULT_SEED,
+            reconstruct_size: DEFAULT_RECONSTRUCT_SIZE,
         }
     }
 }
@@ -74,6 +87,8 @@ pub struct StageReport {
     pub stage: String,
     pub seconds: f64,
     pub device_mib_at_end: u64,
+    /// the peak of live allocations during the stage (weights and activations), without the CUDA context or pool slack
+    pub allocated_peak_mib: u64,
 }
 
 /// How the reconstruction's frame (the first bank camera's, OpenCV) maps into the scene's (the panorama's centre at the
@@ -88,8 +103,48 @@ pub struct SceneTransform {
     pub rotation_residual_median_deg: f64,
 }
 
+/// The weights a run read and how it ran them.
+#[derive(Debug, Serialize)]
+pub struct WorldGenCheckpoints {
+    pub worldstereo: String,
+    pub wan: String,
+    pub moge: String,
+    pub worldmirror: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorldGenSettings {
+    pub prompt: String,
+    pub seed: u64,
+    pub scene: &'static str,
+    /// "--scene" when the caller chose, else "sky share" (outdoor when sky covers 0.5% of the panorama or more)
+    pub scene_decided_by: &'static str,
+    pub sampling_steps: usize,
+    pub frames_per_clip: usize,
+    pub frame_width: usize,
+    pub frame_height: usize,
+    pub reconstruct_target_size: usize,
+}
+
+/// `meta.json` of a run: conventions, models and settings, then what each stage did.
 #[derive(Debug, Serialize)]
 pub struct WorldGenReport {
+    pub model: &'static str,
+    pub engine: String,
+    pub checkpoints: WorldGenCheckpoints,
+    pub quantization: &'static str,
+    pub camera_convention: &'static str,
+    pub camera_axes: Axes,
+    pub extrinsics: &'static str,
+    pub world_frame: &'static str,
+    pub world_up: &'static str,
+    pub handedness: &'static str,
+    pub scale: &'static str,
+    pub intrinsics: &'static str,
+    pub panorama_width: usize,
+    pub panorama_height: usize,
+    pub settings: WorldGenSettings,
+    pub differences_from_reference: [&'static str; 6],
     pub stages: Vec<StageReport>,
     pub clips: Vec<String>,
     pub frames: usize,
@@ -179,6 +234,24 @@ fn device_mib(device: &Device) -> u64 {
         .unwrap_or_default()
 }
 
+fn pool_peak_mib(device: &Device) -> u64 {
+    #[cfg(feature = "cuda")]
+    if let Ok(Some(snapshot)) =
+        inference_nn::utils::memory_usage::MemoryUsage.query_cuda_allocator(device)
+        && let Some(pool) = snapshot.async_pool
+    {
+        return (pool.used_high >> 20) as u64;
+    }
+    let _ = device;
+    0
+}
+
+fn reset_pool_peak(device: &Device) {
+    #[cfg(feature = "cuda")]
+    let _ = inference_nn::utils::memory_usage::MemoryUsage.reset_cuda_memory_pool_high(device);
+    let _ = device;
+}
+
 // Returns the memory pool's cached blocks to the driver once a stage's models are dropped: blocks cached for one stage's
 // sizes (umT5's weights) otherwise fragment the next stage's room
 fn release(device: &Device) -> Result<()> {
@@ -265,8 +338,11 @@ pub fn generate_world(
             stage: name.into(),
             seconds: start.elapsed().as_secs_f64(),
             device_mib_at_end: device_mib(device),
+            allocated_peak_mib: pool_peak_mib(device),
         });
+        reset_pool_peak(device);
     };
+    reset_pool_peak(device);
 
     // 1. scene: panorama depth from MoGe-2, cleanup, point cloud, mesh, start views, memory bank crops
     let t = Instant::now();
@@ -383,6 +459,7 @@ pub fn generate_world(
         schedule: Default::default(),
         device: device.clone(),
     };
+    let schedule_steps = pipeline.schedule.steps;
     let mut clips = Vec::new();
     let mut total_frames = 0;
     for (i, plan) in planned.iter().enumerate() {
@@ -540,7 +617,7 @@ pub fn generate_world(
         };
         reconstructed = frames.len();
         let options = ReconstructOptions {
-            target_size: RECONSTRUCT_TARGET_SIZE,
+            target_size: options.reconstruct_size,
             ..Default::default()
         };
         let recon_dir = out_dir.join("reconstruction");
@@ -556,7 +633,45 @@ pub fn generate_world(
         )?);
         stage("reconstruction (WorldMirror 2.0)", t, device);
     }
+    let path = |p: &Path| p.display().to_string();
     let report = WorldGenReport {
+        model: "Tencent HY-World 2.0 WorldStereo-2 (worldstereo-memory-dmd), WorldMirror 2.0 on its keyframes",
+        engine: format!("inference.rs {}", env!("CARGO_PKG_VERSION")),
+        checkpoints: WorldGenCheckpoints {
+            worldstereo: path(&models.worldstereo),
+            wan: path(&models.wan),
+            moge: path(&models.moge),
+            worldmirror: models.worldmirror.as_deref().map(path),
+        },
+        quantization: QUANTIZATION,
+        camera_convention: "opencv",
+        camera_axes: OPENCV_AXES,
+        extrinsics: "camera_to_world",
+        world_frame: "the scene frame: the panorama's centre at the origin; the reconstruction has its own frame, \
+                      mapped into this one by reconstruction_to_scene",
+        world_up: "+z (gravity aligned as far as the panorama is level)",
+        handedness: "right",
+        scale: "metric for the clip cameras (MoGe-2's estimate, metres); the reconstruction is arbitrary until \
+                reconstruction_to_scene is applied",
+        intrinsics: "pixels of the clip frames (width x height in each cameras.json)",
+        panorama_width: pano.width,
+        panorama_height: pano.height,
+        settings: WorldGenSettings {
+            prompt: options.prompt.clone(),
+            seed: options.seed,
+            scene: if scene.outdoor { "outdoor" } else { "indoor" },
+            scene_decided_by: if options.outdoor.is_some() {
+                "--scene"
+            } else {
+                "sky share"
+            },
+            sampling_steps: schedule_steps,
+            frames_per_clip: trajectory::TRAJECTORY_FRAMES,
+            frame_width: vw,
+            frame_height: vh,
+            reconstruct_target_size: options.reconstruct_size,
+        },
+        differences_from_reference: DIFFERENCES_FROM_REFERENCE,
         stages,
         clips,
         frames: total_frames,

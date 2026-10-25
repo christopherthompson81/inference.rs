@@ -361,6 +361,10 @@ pub enum Command {
         /// Seed of the first clip's noise (each later clip adds one)
         #[arg(long, default_value_t = 1024)]
         seed: u64,
+
+        /// The longest edge WorldMirror reconstructs at (floored to a multiple of 14); memory grows with its square
+        #[arg(long, default_value_t = 518)]
+        reconstruct_size: usize,
     },
 
     /// Run performance benchmarks for base or LoRA model generation.

@@ -24,4 +24,5 @@ inference worldgen [OPTIONS] --panorama <PANORAMA> --out <OUT> --worldstereo <WO
 | `--prompt <PROMPT>` | `A photorealistic, detailed scene with natural lighting.` | The caption every clip is generated with |
 | `--scene <SCENE>` |  | Treat the scene as outdoor (far distances compressed) or indoor; decided by detected sky when unset. Possible values: `outdoor`, `indoor`. |
 | `--seed <SEED>` | `1024` | Seed of the first clip's noise (each later clip adds one) |
+| `--reconstruct-size <RECONSTRUCT_SIZE>` | `518` | The longest edge WorldMirror reconstructs at (floored to a multiple of 14); memory grows with its square |
 

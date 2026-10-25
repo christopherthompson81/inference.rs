@@ -256,3 +256,63 @@ Reconstruction check (WorldMirror's predicted cameras against the trajectory cam
 fit over the 72 generated frames): position residual median 2.1 cm (max 8.0 cm) against a 69 cm mean camera spread;
 rotation residual median 1.0 deg (max 4.1). Outputs: 2.0M points, 4.9M Gaussians (318 MB standard 3DGS PLY).
 Next: write the reconstruction-to-scene transform into meta.json, per-clip timing on a clean run, the outdoor sample.
+
+## Run 12 - 2026-10-24 18:19
+
+Question: clean per-stage time and memory on a fresh run of the sample repo's second indoor panorama (`case001`, 1920 x
+960), with the scene type decided automatically.
+
+`ws_run.sh` with a hand-written prompt, no `--scene` (decided indoor by sky share).
+```
+scene (MoGe-2 panorama depth)     43.5 s    3037 MiB in use at its end
+trajectories                      51.9 s    (case000: 14.2 s; more kNN rechecks on this layout)
+caption (umT5-XXL)                38.4 s
+clips (WorldStereo-2)           1861.6 s    9 clips, 189 frames, 3:15 to 3:35 a clip
+reconstruction (WorldMirror 2.0)  30.5 s    at 518
+wall 2027 s; nvidia-smi peak 21989 MiB above idle
+nvidia-smi during the clip loop: 21.7 GB after clip 1, creeping to 23.5 GB by clip 7, dropping after the per-clip trim
+reconstruction_to_scene: scale 1.49, position residual median 2.4 cm, rotation 0.90 deg
+```
+Clips look right: the carved panels, round window and table hold across views; one turn into the right-hand corridor
+ends facing a dark door frame at close range (in the panorama, not a hole). The nvidia-smi figure is what the CUDA pool
+has reserved, not what is live: a scheduler needs the allocated peak, so each stage now records the pool's used
+high-water mark (reset at each stage start), and `--reconstruct-size` exposes WorldMirror's size. Next: a one-clip resume
+of this run to read those peaks, with the reconstruction at 644.
+
+## Run 13 - 2026-10-24 18:41
+
+Question: the one-clip resume of Run 12 with the new per-stage allocated peaks and the reconstruction at 644; then, since
+the clip loop is 92% of a run, where a real-size denoising step spends its 55 s.
+
+Resume (8 clips from disk, 1 generated, `--reconstruct-size 644`):
+```
+scene            43.8 s    4314 MiB allocated at peak
+trajectories     52.4 s    1262 MiB
+caption          36.1 s   12113 MiB
+clips           244.8 s   17639 MiB   (one clip with the model loads; the step itself sits at ~4.5 GB, so the VAE or
+                                       ControlNet inputs hold a ~13 GB transient)
+reconstruction   56.8 s   12092 MiB   at 644 x 378: forward 46.6 s (23.2 s at 518), camera fit 3.1 cm / 1.24 deg
+                                       (2.4 cm / 0.90 deg at 518)
+```
+644 doubles the reconstruction for no better camera fit; 518 stays the default.
+
+`large_batch_matmul_throughput` (inference-quant, new ignored bench), 45,056 tokens:
+```
+5120x5120    bf16 cuBLAS 33.7 ms  70.2 TFLOP/s   Q8_0 mmq 25.7 ms  92.0   Q4K mmq 26.8 ms  88.0
+5120x13824   bf16 cuBLAS 89.6 ms  71.2           Q8_0 mmq 69.5 ms  91.7   Q4K mmq 73.6 ms  86.7
+13824x5120   bf16 cuBLAS 84.9 ms  75.1           Q8_0 mmq 65.5 ms  97.4   Q4K mmq 69.2 ms  92.2
+```
+cuBLAS bf16 is at the 3090's fp32-accumulate peak (71); int8 mmq is only 1.3x faster here.
+
+nsys on `full_size_streamed_step` (32,760 video + 12,480 memory tokens, 2 rounds of 55 s), per step:
+```
+flash_attn_ext_f16   27.75 s   (128-wide heads: joint self-attention ~0.6 s a block, ~60 TFLOP/s; 64-wide: ControlNet)
+cuBLAS bf16 GEMM     14.0 s
+elementwise           9.2 s    (bf16/f32 casts 3.2 s, the composed f32 LayerNorm/RMSNorm/modulate ops ~5 s, gelu, copies)
+H2D block uploads     3.0 s    (33.6 GB, not overlapped with compute)
+total kernel time    51.5 s    + 3.0 s copies = the measured 55 s: the GPU never idles
+```
+Attention is half the step. Levers, by size: an int8 QK^T / fp16-accumulate PV attention (SageAttention's scheme) for
+~2x on that half; fused norm+modulate kernels in place of the composed f32 ops (~6 s); block uploads prefetched on a
+second stream or kept resident (~3 s); Q8_0 linears (~3.5 s, at a quality cost). Next: the fused norms and the upload
+overlap (exact), then the attention kernel.

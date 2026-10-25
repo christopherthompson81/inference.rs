@@ -80,12 +80,18 @@ fn decode(path: &Path) -> Result<RgbImage> {
     })
 }
 
-#[derive(Serialize)]
-struct Axes {
-    x: &'static str,
-    y: &'static str,
-    z: &'static str,
+#[derive(Debug, Serialize)]
+pub struct Axes {
+    pub x: &'static str,
+    pub y: &'static str,
+    pub z: &'static str,
 }
+
+pub const OPENCV_AXES: Axes = Axes {
+    x: "right",
+    y: "down",
+    z: "forward",
+};
 
 #[derive(Serialize)]
 struct GaussianFormat {
@@ -270,11 +276,7 @@ pub fn reconstruct_with_priors(
         trunk_dtype: format!("{:?}", model.trunk_dtype()),
         heads_dtype: "F32",
         camera_convention: "opencv",
-        camera_axes: Axes {
-            x: "right",
-            y: "down",
-            z: "forward",
-        },
+        camera_axes: OPENCV_AXES,
         extrinsics: "camera_to_world",
         world_frame: "the first camera's frame (its pose is the identity), also when camera priors are given",
         world_up: "not gravity aligned; approximately -y of the first camera",

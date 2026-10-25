@@ -67,6 +67,33 @@ impl LayerNorm {
         })
     }
 
+    /// The norm (and affine) of `xs`, then `* (1 + scale) + shift` when given, in the activation dtype.
+    pub(crate) fn forward_act(
+        &self,
+        xs: &Tensor,
+        modulation: Option<(&Tensor, &Tensor)>,
+    ) -> Result<Tensor> {
+        #[cfg(feature = "cuda")]
+        if xs.device().is_cuda() && xs.dtype() == ACT_DTYPE {
+            let (shift, scale) = match modulation {
+                Some((shift, scale)) => (Some(shift.contiguous()?), Some(scale.contiguous()?)),
+                None => (None, None),
+            };
+            return inference_nn::cuda::dit::layer_norm(
+                xs,
+                self.weight.as_ref(),
+                self.bias.as_ref(),
+                scale.as_ref(),
+                shift.as_ref(),
+                self.eps as f32,
+            );
+        }
+        match modulation {
+            Some((shift, scale)) => modulate(&self.forward(xs)?, shift, scale),
+            None => self.forward(xs)?.to_dtype(ACT_DTYPE),
+        }
+    }
+
     pub(crate) fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let x = xs.to_dtype(DType::F32)?;
         let mean = x.mean_keepdim(D::Minus1)?;
@@ -104,6 +131,30 @@ impl RmsNorm {
         })
     }
 
+    /// The norm of `xs` `[b, tokens, heads * head_dim]` split into `[b, heads, tokens, head_dim]`, rotated by `rope`.
+    pub(crate) fn heads(
+        &self,
+        xs: &Tensor,
+        n_heads: usize,
+        rope: Option<&RopeTables>,
+    ) -> Result<Tensor> {
+        #[cfg(feature = "cuda")]
+        if xs.device().is_cuda() && xs.dtype() == ACT_DTYPE {
+            return inference_nn::cuda::dit::rms_norm_rope(
+                xs,
+                &self.weight,
+                rope.map(|r| (&r.cos, &r.sin)),
+                n_heads,
+                self.eps as f32,
+            );
+        }
+        let split = heads(&self.forward(xs)?, n_heads)?;
+        match rope {
+            Some(rope) => rope.apply(&split),
+            None => Ok(split),
+        }
+    }
+
     pub(crate) fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let x = xs.to_dtype(DType::F32)?;
         let rms = (x.sqr()?.mean_keepdim(D::Minus1)? + self.eps)?.sqrt()?;
@@ -123,6 +174,10 @@ pub(crate) fn modulate(normed: &Tensor, shift: &Tensor, scale: &Tensor) -> Resul
 
 /// `x + y * gate` in f32, back to the activation dtype.
 pub(crate) fn gated_residual(xs: &Tensor, ys: &Tensor, gate: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if xs.device().is_cuda() && xs.dtype() == ACT_DTYPE && ys.dtype() == ACT_DTYPE {
+        return inference_nn::cuda::dit::gated_residual(xs, ys, &gate.contiguous()?);
+    }
     (xs.to_dtype(DType::F32)? + ys.to_dtype(DType::F32)?.broadcast_mul(gate)?)?.to_dtype(ACT_DTYPE)
 }
 
@@ -256,5 +311,9 @@ impl PatchConv {
 
 /// tanh-approximated GELU in f32, back to the activation dtype.
 pub(crate) fn gelu_tanh(xs: &Tensor) -> Result<Tensor> {
+    // the CUDA bf16 kernel computes in f32 already
+    if xs.device().is_cuda() && xs.dtype() == ACT_DTYPE {
+        return xs.gelu();
+    }
     xs.to_dtype(DType::F32)?.gelu()?.to_dtype(ACT_DTYPE)
 }

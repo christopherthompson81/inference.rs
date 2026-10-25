@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use super::ops::{
     ACT_DTYPE, LayerNorm, Linear, PatchConv, RmsNorm, RopeTables, attention, gated_residual,
-    gelu_tanh, heads, modulate,
+    gelu_tanh, heads,
 };
 use super::transformer::StepInputs;
 
@@ -54,7 +54,7 @@ impl AdaNorm {
             m.narrow(1, dim, dim)?,
             m.narrow(1, 2 * dim, dim)?,
         );
-        Ok((modulate(&self.norm.forward(xs)?, &shift, &scale)?, gate))
+        Ok((self.norm.forward_act(xs, Some((&shift, &scale)))?, gate))
     }
 }
 
@@ -92,14 +92,12 @@ impl ControlBlock {
 
     fn forward(&self, xs: &Tensor, temb: &Tensor, rope: &RopeTables) -> Result<Tensor> {
         let (normed, gate) = self.norm1.forward(xs, temb)?;
-        let q = rope.apply(&heads(
-            &self.norm_q.forward(&self.to_q.forward(&normed)?)?,
-            self.heads,
-        )?)?;
-        let k = rope.apply(&heads(
-            &self.norm_k.forward(&self.to_k.forward(&normed)?)?,
-            self.heads,
-        )?)?;
+        let q = self
+            .norm_q
+            .heads(&self.to_q.forward(&normed)?, self.heads, Some(rope))?;
+        let k = self
+            .norm_k
+            .heads(&self.to_k.forward(&normed)?, self.heads, Some(rope))?;
         let v = heads(&self.to_v.forward(&normed)?, self.heads)?;
         let xs = gated_residual(xs, &self.to_out.forward(&attention(&q, &k, &v)?)?, &gate)?;
         let (normed, gate) = self.norm2.forward(&xs, temb)?;

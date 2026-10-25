@@ -8,7 +8,7 @@ use serde::Deserialize;
 use super::controlnet::{ControlNet, ControlNetConfig};
 use super::ops::{
     ACT_DTYPE, LayerNorm, Linear, PatchConv, RmsNorm, RopeTables, attention, gated_residual,
-    gelu_tanh, heads, modulate,
+    gelu_tanh, heads,
 };
 
 const TIME_FREQ_LN_BASE: f64 = 10_000.0;
@@ -173,14 +173,12 @@ impl SelfAttention {
 
     /// Attention over all of `xs` `[1, tokens, dim]` with `rope` for every token.
     fn forward(&self, xs: &Tensor, rope: &RopeTables) -> Result<Tensor> {
-        let q = rope.apply(&heads(
-            &self.norm_q.forward(&self.to_q.forward(xs)?)?,
-            self.heads,
-        )?)?;
-        let k = rope.apply(&heads(
-            &self.norm_k.forward(&self.to_k.forward(xs)?)?,
-            self.heads,
-        )?)?;
+        let q = self
+            .norm_q
+            .heads(&self.to_q.forward(xs)?, self.heads, Some(rope))?;
+        let k = self
+            .norm_k
+            .heads(&self.to_k.forward(xs)?, self.heads, Some(rope))?;
         let v = heads(&self.to_v.forward(xs)?, self.heads)?;
         self.to_out.forward(&attention(&q, &k, &v)?)
     }
@@ -232,20 +230,16 @@ impl CrossAttention {
     }
 
     fn forward(&self, xs: &Tensor, cond: &Conditions) -> Result<Tensor> {
-        let q = heads(&self.norm_q.forward(&self.to_q.forward(xs)?)?, self.heads)?;
-        let k = heads(
-            &self
-                .norm_k
-                .forward(&self.to_k.forward(&cond.text_context)?)?,
-            self.heads,
-        )?;
+        let q = self
+            .norm_q
+            .heads(&self.to_q.forward(xs)?, self.heads, None)?;
+        let k = self
+            .norm_k
+            .heads(&self.to_k.forward(&cond.text_context)?, self.heads, None)?;
         let v = heads(&self.to_v.forward(&cond.text_context)?, self.heads)?;
-        let k_img = heads(
-            &self
-                .norm_added_k
-                .forward(&self.add_k.forward(&cond.image_context)?)?,
-            self.heads,
-        )?;
+        let k_img =
+            self.norm_added_k
+                .heads(&self.add_k.forward(&cond.image_context)?, self.heads, None)?;
         let v_img = heads(&self.add_v.forward(&cond.image_context)?, self.heads)?;
         let text = attention(&q, &k, &v)?;
         let image = attention(&q, &k_img, &v_img)?;
@@ -334,17 +328,19 @@ impl Block {
         let (c_shift, c_scale, c_gate) = (row(3)?, row(4)?, row(5)?);
         let n_mem = memory.dim(1)?;
         let tokens = Tensor::cat(&[memory, video], 1)?;
-        let normed = modulate(&self.norm1.forward(&tokens)?, &shift, &scale)?;
+        let normed = self.norm1.forward_act(&tokens, Some((&shift, &scale)))?;
         let attn = self.attn1.forward(&normed, rope)?;
         let tokens = gated_residual(&tokens, &attn, &gate)?;
         let memory = tokens.narrow(1, 0, n_mem)?;
         let video = tokens.narrow(1, n_mem, tokens.dim(1)? - n_mem)?;
         let cross = self
             .attn2
-            .forward(&self.norm2.forward(&video)?.to_dtype(ACT_DTYPE)?, cond)?;
+            .forward(&self.norm2.forward_act(&video, None)?, cond)?;
         let video = (video + cross)?;
         let tokens = Tensor::cat(&[&memory, &video], 1)?;
-        let normed = modulate(&self.norm3.forward(&tokens)?, &c_shift, &c_scale)?;
+        let normed = self
+            .norm3
+            .forward_act(&tokens, Some((&c_shift, &c_scale)))?;
         let tokens = gated_residual(&tokens, &self.ffn.forward(&normed)?, &c_gate)?;
         Ok((
             tokens.narrow(1, n_mem, tokens.dim(1)? - n_mem)?,
@@ -493,7 +489,7 @@ impl WorldStereoTransformer {
         let (shift, scale) = (ss.narrow(0, 0, 1)?, ss.narrow(0, 1, 1)?);
         let out = self
             .proj_out
-            .forward(&modulate(&self.norm_out.forward(&video)?, &shift, &scale)?)?
+            .forward(&self.norm_out.forward_act(&video, Some((&shift, &scale)))?)?
             .to_dtype(DType::F32)?;
         // tokens (f, ph, pw) x (pt=1, kh, kw, c) to [c, f, h, w]
         let c = self.cfg.out_channels;
