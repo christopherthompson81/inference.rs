@@ -190,6 +190,8 @@ struct GsProjectArgs {
   float viewmat[16], fx, fy, cx, cy;
   uint32_t n, width, height;
   float eps2d, near_plane, far_plane, radius_clip;
+  // 0: classic, opacity left uncompensated
+  int antialiased;
 };
 
 // per Gaussian: radii (x, y), pixel mean, z, conic, the compensation, opacity * compensation, and (rgb, z) colors
@@ -225,7 +227,7 @@ __global__ void gs_project_fwd_kernel(GsProjectArgs a, int32_t *radii, float *me
   const float det = cov2d[0][0] * cov2d[1][1] - cov2d[0][1] * cov2d[1][0];
   if (det <= 0.f)
     return;
-  const float compensation = sqrtf(fmaxf(0.f, det_orig / det));
+  const float compensation = a.antialiased ? sqrtf(fmaxf(0.f, det_orig / det)) : 1.f;
   const gmat2 conic = gs_inverse(cov2d);
   const float opacity = compensation / (1.f + expf(-a.logit_opacities[g]));
   if (opacity < kGsAlphaThreshold)
@@ -286,7 +288,7 @@ __global__ void gs_project_bwd_kernel(GsProjectArgs a, const int32_t *radii, con
       {{v_conics[3 * g], v_conics[3 * g + 1] * .5f}, {v_conics[3 * g + 1] * .5f, v_conics[3 * g + 2]}}};
   // inverse vjp, then add_blur's
   gmat2 v_cov2d = -1.f * (conic * v_conic * conic);
-  {
+  if (a.antialiased) {
     const float det_conic = conic[0][0] * conic[1][1] - conic[0][1] * conic[1][0];
     const float v_sqr = v_compensation * 0.5f / (compensation + 1e-6f);
     const float one_minus = 1.f - compensation * compensation;
@@ -633,6 +635,20 @@ __global__ void gs_raster_bwd_kernel(GsRasterArgs a, const float *alphas, const 
   }
 }
 
+// gsplat's DefaultStrategy statistics for one render: the pixel-space gradient norm of each visible centre (scaled to
+// NDC by half the image size), a visibility count, and the largest radius relative to the image
+__global__ void gs_densify_stats_kernel(const float *v_means2d, const int32_t *radii, uint32_t n, float half_w,
+                                        float half_h, float inv_max_side, float *grad2d, float *count,
+                                        float *max_radii) {
+  const uint32_t g = blockIdx.x * blockDim.x + threadIdx.x;
+  if (g >= n || radii[2 * g] <= 0 || radii[2 * g + 1] <= 0)
+    return;
+  const float gx = v_means2d[2 * g] * half_w, gy = v_means2d[2 * g + 1] * half_h;
+  grad2d[g] += sqrtf(gx * gx + gy * gy);
+  count[g] += 1.f;
+  max_radii[g] = fmaxf(max_radii[g], max(radii[2 * g], radii[2 * g + 1]) * inv_max_side);
+}
+
 static int gs_blocks(int64_t n) { return static_cast<int>((n + kGsThreads - 1) / kGsThreads); }
 
 static GsTiles gs_tiles(uint32_t width, uint32_t height, uint32_t tile_size) {
@@ -649,7 +665,7 @@ static GsTiles gs_tiles(uint32_t width, uint32_t height, uint32_t tile_size) {
 // viewmat (row-major 4x4 world-to-camera) and K (row-major 3x3) are host pointers
 static GsProjectArgs gs_project_args(const void *means, const void *quats, const void *log_scales,
                                      const void *logit_opacities, const void *sh0, const float *viewmat,
-                                     const float *K, int n, int width, int height, float eps2d) {
+                                     const float *K, int n, int width, int height, float eps2d, int antialiased) {
   GsProjectArgs a;
   a.means = static_cast<const float *>(means);
   a.quats = static_cast<const float *>(quats);
@@ -669,16 +685,17 @@ static GsProjectArgs gs_project_args(const void *means, const void *quats, const
   a.near_plane = 0.f;
   a.far_plane = 0.f;
   a.radius_clip = 0.f;
+  a.antialiased = antialiased;
   return a;
 }
 
 extern "C" int gs_project_fwd(const void *means, const void *quats, const void *log_scales,
                               const void *logit_opacities, const void *sh0, const float *viewmat, const float *K,
-                              int n, int width, int height, float eps2d, float near_plane, float far_plane,
-                              float radius_clip, void *radii, void *means2d, void *depths, void *conics,
+                              int n, int width, int height, float eps2d, int antialiased, float near_plane,
+                              float far_plane, float radius_clip, void *radii, void *means2d, void *depths, void *conics,
                               void *compensations, void *opacities, void *colors, int64_t stream) {
   GsProjectArgs a = gs_project_args(means, quats, log_scales, logit_opacities, sh0, viewmat, K, n, width, height,
-                                    eps2d);
+                                    eps2d, antialiased);
   a.near_plane = near_plane;
   a.far_plane = far_plane;
   a.radius_clip = radius_clip;
@@ -692,12 +709,13 @@ extern "C" int gs_project_fwd(const void *means, const void *quats, const void *
 
 extern "C" int gs_project_bwd(const void *means, const void *quats, const void *log_scales,
                               const void *logit_opacities, const void *sh0, const float *viewmat, const float *K,
-                              int n, int width, int height, float eps2d, const void *radii, const void *conics,
+                              int n, int width, int height, float eps2d, int antialiased, const void *radii,
+                              const void *conics,
                               const void *compensations, const void *v_means2d, const void *v_conics,
                               const void *v_colors, const void *v_opacities, void *v_means, void *v_quats,
                               void *v_log_scales, void *v_logit_opacities, void *v_sh0, int64_t stream) {
   const GsProjectArgs a = gs_project_args(means, quats, log_scales, logit_opacities, sh0, viewmat, K, n, width,
-                                          height, eps2d);
+                                          height, eps2d, antialiased);
   if (n > 0)
     gs_project_bwd_kernel<<<gs_blocks(n), kGsThreads, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
         a, static_cast<const int32_t *>(radii), static_cast<const float *>(conics),
@@ -808,5 +826,15 @@ extern "C" int gs_raster_bwd(const void *means2d, const void *conics, const void
   gs_raster_bwd_kernel<<<grid, block, smem, reinterpret_cast<cudaStream_t>(stream)>>>(
       a, static_cast<const float *>(alphas), static_cast<const int32_t *>(last_ids),
       static_cast<const float *>(v_render), static_cast<const float *>(v_alphas), o);
+  return static_cast<int>(cudaGetLastError());
+}
+
+extern "C" int gs_densify_stats(const void *v_means2d, const void *radii, int n, int width, int height, void *grad2d,
+                                void *count, void *max_radii, int64_t stream) {
+  if (n > 0)
+    gs_densify_stats_kernel<<<gs_blocks(n), kGsThreads, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+        static_cast<const float *>(v_means2d), static_cast<const int32_t *>(radii), static_cast<uint32_t>(n),
+        width * 0.5f, height * 0.5f, 1.f / static_cast<float>(width > height ? width : height),
+        static_cast<float *>(grad2d), static_cast<float *>(count), static_cast<float *>(max_radii));
   return static_cast<int>(cudaGetLastError());
 }

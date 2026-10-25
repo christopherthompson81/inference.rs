@@ -219,6 +219,7 @@ inference_tensor::kernel_library! {
             width: i32,
             height: i32,
             eps2d: f32,
+            antialiased: i32,
             near_plane: f32,
             far_plane: f32,
             radius_clip: f32,
@@ -243,6 +244,7 @@ inference_tensor::kernel_library! {
             width: i32,
             height: i32,
             eps2d: f32,
+            antialiased: i32,
             radii: *const c_void,
             conics: *const c_void,
             compensations: *const c_void,
@@ -255,6 +257,17 @@ inference_tensor::kernel_library! {
             v_log_scales: *mut c_void,
             v_logit_opacities: *mut c_void,
             v_sh0: *mut c_void,
+            stream: i64,
+        ) -> i32;
+        pub fn gs_densify_stats(
+            v_means2d: *const c_void,
+            radii: *const c_void,
+            n: i32,
+            width: i32,
+            height: i32,
+            grad2d: *mut c_void,
+            count: *mut c_void,
+            max_radii: *mut c_void,
             stream: i64,
         ) -> i32;
         pub fn gs_tiles_temp_bytes(n: i32, n_isects: i64, width: i32, height: i32, tile_size: i32) -> i64;

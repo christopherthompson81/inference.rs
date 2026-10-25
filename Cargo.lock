@@ -3183,6 +3183,7 @@ dependencies = [
  "inference-tensor",
  "inference-vision",
  "rand 0.9.4",
+ "rand_distr",
  "rayon",
  "serde",
  "serde_json",

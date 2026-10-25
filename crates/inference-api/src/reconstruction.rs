@@ -147,3 +147,25 @@ pub fn generate_world(
         models, &pano, out_dir, options, &device,
     )?)
 }
+
+#[cfg(feature = "cuda")]
+pub use inference_recon::splatting::train::{
+    DEFAULT_STEPS as SPLAT_DEFAULT_STEPS, SplatReport, TrainOptions,
+};
+
+/// Trains 3D Gaussian splats on a HY-World `gs_data` directory (images, depths, normals, cameras, the point clouds)
+/// and writes `splats.ply` and `splats.json` into `out_dir`. Runs on the first CUDA device.
+#[cfg(feature = "cuda")]
+pub fn train_splats(
+    data_dir: &Path,
+    out_dir: &Path,
+    options: &TrainOptions,
+) -> anyhow::Result<SplatReport> {
+    let device = Device::cuda_if_available(0)?;
+    if !device.is_cuda() {
+        anyhow::bail!("splat training needs a CUDA device");
+    }
+    Ok(inference_recon::splatting::train::train_splats(
+        data_dir, out_dir, options, &device,
+    )?)
+}

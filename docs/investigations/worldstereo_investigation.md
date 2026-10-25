@@ -658,3 +658,54 @@ leaves out by design (radii and the tile set are not differentiated).
 
 Next: the trainer (losses through autograd with the render as the leaf, Adam, densification, MaskGaussian, the
 anchor protection, sky depth), against the reference's PSNR on the same data.
+
+## Run 28 - 2026-10-25 03:23
+
+Question: does a native port of world_gs_trainer's run (inference-recon `splatting`, `inference splat`) train splats as
+good as the reference's on the same gs_data?
+
+Port, from a spec of the exact invocation (scratchpad gs_tools/trainer_spec.md, file:line referenced): the Parser's
+geometry-aware downsample to 1M (base + sky cloud), the camera similarity / principal-axes / z-flip normalization,
+kNN scale init, Adam (eps 1e-15, means lr decaying 100x), the sky depth pre-rendered from the sky cloud (classic
+mode), L1 + SSIM (valid windows) + LPIPS-VGG (inputs in [0, 1], no remap, as the reference) + disparity L1 + normals
+from rendered depth, the scale-ratio penalty every 10 steps, DefaultStrategy's grow/prune at 1066..3731, the
+MaskGaussian gate (Gumbel 0/1 with the straight-through soft gradient), its sparsity term and the one prune at 1066,
+and the stochastic export. The render is the autograd leaf: the losses run through inference-tensor's backprop, their
+gradients of the image and alpha go through the gsplat kernels' backward (Run 27).
+
+Two inference-tensor changes: conv2d backprop computes no gradient for an input off every path to a variable (a
+constant kernel's gradient is a conv with the image as the kernel), and a stride-1 conv's input gradient runs as a conv
+with the flipped kernel (im2col) instead of the direct transposed conv; a test pins both.
+
+Dead ends on the way, each a failed run:
+- every step leaked ~155 MB: the scale penalty's gradient (from its own small backward) carried its graph, and adding it
+  into the Adam moments chained every step's parameters to the last; detached.
+- the first detach was a string edit that silently no-oped after rustfmt reflowed the line (twice in this run; edits
+  now asserted).
+- the gate closed (95% open to 0.04% in 500 steps): NaN from the normal loss, where max(|v|, eps) taken after the
+  sqrt meets sqrt's infinite slope at zero vectors (0 * inf); now sqrt(max(|v|^2, eps^2)).
+- the quats and scales learning rates were swapped.
+- the mask prune left the densify statistics at the old length, and after reindexing them the refine's prune indexed
+  the pre-growth statistics (device assert); cleared before the prune.
+
+`inference splat --data park_aligned/gs_data --out park_aligned/gs_native --steps 8000 --lpips lpips_vgg.safetensors`:
+```
+splat init: 1000000 gaussians (231770 sky), 277 train / 6 val views, scene scale 4.7169
+step 1000: loss 0.1611 (l1 0.0388 ssim 0.2366 lpips 0.3356 depth 0.0307 normal 0.0958), 800194 of 1000000 open
+step 1066: 249686 duplicated, 999862 split, 61660 pruned; mask prune 203333, 1984555 gaussians
+step 3731: ... 2446483 gaussians
+step 8000: loss 0.1035, 1880488 of 2446483 open, 1223.6 s
+2446483 gaussians (1881126 exported), validation PSNR 24.570, wall 20m29s
+```
+Reference on the same data (Run 26): PSNR 24.191, 2571655 Gaussians, 928 s of steps (16.5 min wall). Its anchors:
+231747 (ours 231770: the downsample's random draws differ). Losses line up (reference tqdm at step ~1000: 0.14 to
+0.28). Novel views from the Run 26 cameras (gs_native/ref_vs_native.jpg): the same structure and sharpness, ours a
+little crisper in places.
+
+Open difference: the first refine. Ours duplicates 250K and splits 1.0M (almost every Gaussian passes the 2D-radius
+rule, max radius over 5% of 832 px), the reference 56K and 327K; ours mask-prunes 203K to its 71K and keeps fewer gates
+open through the run (77% to its ~92%). The later refines are close. The end state is as good, so it is noted, not
+chased: candidates are the early Gaussian footprints (radii parity was only checked on the trained checkpoint) and
+Gumbel noise statistics.
+
+Speed: 0.15 s/step against 0.12; the LPIPS VGG16 through im2col f32 convs is the obvious target.

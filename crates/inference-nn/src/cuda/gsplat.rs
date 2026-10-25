@@ -32,8 +32,10 @@ pub struct Camera {
 
 #[derive(Clone, Copy, Debug)]
 pub struct RasterSettings {
-    /// added to the projected covariance's diagonal; opacity is compensated (antialiased mode)
+    /// added to the projected covariance's diagonal
     pub eps2d: f32,
+    /// opacity scaled by the blur's area change (gsplat's antialiased mode), else left as is (classic)
+    pub antialiased: bool,
     pub near_plane: f32,
     pub far_plane: f32,
     pub radius_clip: f32,
@@ -44,6 +46,7 @@ impl Default for RasterSettings {
     fn default() -> Self {
         Self {
             eps2d: 0.3,
+            antialiased: true,
             near_plane: 0.01,
             far_plane: 1e10,
             radius_clip: 0.0,
@@ -235,6 +238,7 @@ pub fn render(frame: &Frame) -> Result<Render> {
                 wi,
                 hi,
                 settings.eps2d,
+                i32::from(settings.antialiased),
                 settings.near_plane,
                 settings.far_plane,
                 settings.radius_clip,
@@ -502,6 +506,7 @@ pub fn render_backward(
                 wi,
                 hi,
                 settings.eps2d,
+                i32::from(settings.antialiased),
                 p[5],
                 p[6],
                 p[7],
@@ -529,6 +534,43 @@ pub fn render_backward(
         means2d: v_means2d,
         means2d_abs: v_means2d_abs,
     })
+}
+
+/// Adds one render's DefaultStrategy statistics: `grad2d += |v_means2d * (w/2, h/2)|`, `count += 1` and
+/// `max_radii = max(max_radii, radius / max(w, h))` over the Gaussians the render saw (all three `[n]` f32).
+pub fn densify_stats(
+    render: &Render,
+    v_means2d: &Tensor,
+    camera: &Camera,
+    grad2d: &Tensor,
+    count: &Tensor,
+    max_radii: &Tensor,
+) -> Result<()> {
+    let n = render.radii.dim(0)?;
+    check(v_means2d, &[n, 2], "means2d gradient")?;
+    for (t, what) in [
+        (grad2d, "grad2d"),
+        (count, "count"),
+        (max_radii, "max radii"),
+    ] {
+        check(t, &[n], what)?;
+    }
+    let (ni, wi, hi) = (i32_of(n)?, i32_of(camera.width)?, i32_of(camera.height)?);
+    with_ptrs(
+        render.radii.device(),
+        &[
+            Some(v_means2d),
+            Some(&render.radii),
+            Some(grad2d),
+            Some(count),
+            Some(max_radii),
+        ],
+        |p, s| unsafe {
+            // SAFETY: n entries each, updated in place
+            super::ffi::gs_densify_stats(p[0], p[1], ni, wi, hi, p[2], p[3], p[4], s)
+        },
+        "gaussian densify stats",
+    )
 }
 
 #[cfg(test)]

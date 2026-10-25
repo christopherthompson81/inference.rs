@@ -73,6 +73,32 @@ world/
   reconstruction/                 WorldMirror outputs: camera_params.json, depth/, normal/, points.ply, gaussians.ply
 ```
 
+## Gaussian splats
+
+`inference splat` runs the reference's 3DGS stage (its `world_gs_trainer.py` at the single-GPU length) on a folder in
+its `gs_data` layout: `images/`, `depths/` (float16 bits in 16-bit PNG, 0 invalid), `normals/`, `cameras.json`
+(OpenCV world-to-camera and pixel intrinsics per image), `points.ply` and `sky_points.ply`.
+
+```bash
+inference splat --data world/gs_data --out world/splats --lpips lpips_vgg.safetensors
+```
+
+It writes `splats.ply` (standard 3DGS properties, degree-0 colour) and `splats.json` (Gaussian counts, validation
+PSNR, and the transform from the cameras' frame into the splats' normalized one). The loss includes LPIPS on VGG16
+features; `--lpips` takes torchvision's `vgg16` `features.*` weights and the LPIPS v0.1 heads (`lin0` to `lin4`) in one
+safetensors file, for example:
+
+```python
+import torch
+from safetensors.torch import save_file
+vgg = torch.hub.load_state_dict_from_url("https://download.pytorch.org/models/vgg16-397923af.pth")
+lin = torch.load("torchmetrics/functional/image/lpips_models/vgg.pth")  # from a torchmetrics install
+save_file({**{k: v for k, v in vgg.items() if k.startswith("features")}, **lin}, "lpips_vgg.safetensors")
+```
+
+On the outdoor test scene (283 views) 8000 steps take about 20 minutes on one RTX 3090, end with 2.4M Gaussians, and
+score 24.6 dB PSNR on the held-out frames (the reference trainer: 24.2).
+
 ## Conventions
 
 - Clip cameras are OpenCV (x right, y down, z forward), camera-to-world, in the scene frame: the panorama's centre at
