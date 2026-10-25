@@ -2545,6 +2545,7 @@ dependencies = [
  "inference-nn",
  "inference-protocol",
  "inference-quant",
+ "inference-recon",
  "inference-selection",
  "inference-tensor",
  "itertools 0.14.0",
@@ -3166,6 +3167,20 @@ dependencies = [
  "tokio",
  "tracing",
  "yoke",
+]
+
+[[package]]
+name = "inference-recon"
+version = "0.0.26"
+dependencies = [
+ "anyhow",
+ "half",
+ "image",
+ "inference-nn",
+ "inference-tensor",
+ "rayon",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

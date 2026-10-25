@@ -1,0 +1,29 @@
+[package]
+name = "inference-recon"
+readme = "../../README.md"
+authors = ["Chris Thompson"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "3D reconstruction models for inference.rs."
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[dependencies]
+half.workspace = true
+image.workspace = true
+inference-nn.workspace = true
+inference-tensor.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+
+[features]
+cuda = ["inference-tensor/cuda", "inference-nn/cuda"]
+metal = ["inference-tensor/metal", "inference-nn/metal"]

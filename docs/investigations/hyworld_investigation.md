@@ -1,0 +1,200 @@
+# HY-World 2.0 investigation
+
+Native support for Tencent's HY-World 2.0 models (WorldMirror 2.0 first, then WorldStereo-2), with the Tencent Python
+code as the reference. The model license's territory terms cover its Materials (the model, its outputs and derivative
+models); this engine implementation is not treated as one of them. Weights, sample outputs and reference dumps are
+never committed.
+
+## Run 1 - 2026-10-24 12:12
+
+Question: does the reference run here, and what does it cost on the 3090?
+
+Reference: github.com/Tencent-Hunyuan/HY-World-2.0 at df9988e, in a uv venv at /mnt/data/venvs/hyworld (Python 3.11,
+torch 2.7.1+cu128, flash-attn 2.8.3 wheel, gsplat 1.5.3 from its pt27cu128 index; the attention module imports
+flash-attn unconditionally, though its F32 path runs SDPA). Weights: HY-WorldMirror-2.0/model.safetensors (5.05 GB F32,
+sha256 9fff06539d3d...), skyseg.onnx for the sky mask, both fetched with curl.
+
+The model: DINOv2 ViT-L/14 with 4 registers as patch embedding, 24 alternating frame/global attention blocks at 1024
+wide with normalized 2D RoPE (base 100), camera, depth (with mask), normal, point and Gaussian heads; prior conditioning
+(camera token, depth via pow3r, intrinsics token). The checkpoint covers every parameter; the 48 keys it lacks are the
+blocks' RoPE `periods` buffers, computed from the base.
+
+`python -m hyworld2.worldrecon.pipeline --pretrained_model_name_or_path /mnt/data/models/HY-World-2.0 --subfolder
+HY-WorldMirror-2.0 --strict_output_path <out> --no_interactive [--enable_bf16]`, peak nvidia-smi above idle (100 ms):
+```
+sample (repo examples)          wall    case    forward   peak above idle
+Park, 3 x 960x545 JPEG, F32     21.5 s  6.7 s             14,833 MiB
+Park, BF16                      22.0 s                    11,057
+Building, 32 PNG frames, F32    51.7 s  39.1 s  7.80 s    21,915   (adaptive resolution 504)
+Building, BF16                  53.3 s  37.5 s  7.50 s    21,438
+```
+The forward is a fifth of a 32-frame case; saving the 3.16M voxel-pruned Gaussians (211 MB) and the point cloud (30 MB)
+takes most of the rest. Peak VRAM barely moves with BF16 on 32 frames, so activations, not weights, set it.
+
+## Run 2 - 2026-10-24 12:33
+
+Question: do the ported backbone and trunk (new crate `inference-recon`, `worldmirror::{dinov2, trunk, layers, rope}`)
+match the reference, and where does any gap come from?
+
+Reference dump (`dump_ref.py`, scratch): the Park sample at target 518 (3 frames of 518 x 294, 777 patches each),
+run as the pipeline runs it (CUDA, bf16 autocast outside, the trunk's own autocast inside); hooks save the input, the
+backbone's patch tokens, the trunk at layers 0/4/11/17/23, block 0's insides and every prediction. Ours: bf16 matmuls
+and attention, f32 norms and residuals (the reference's autocast split), RoPE table built with the reference's per-op
+bf16 rounding, the DINOv2 position embedding resampled with PyTorch's antialiased bicubic (a = -0.5) on the CPU.
+```
+relative rms (max |diff|) against the reference
+backbone patch tokens      3.6e-3 (2.6e-2)
+trunk layer 0 frame/global 1.8e-2 / 2.4e-2
+layer 4                    2.2e-2 / 2.3e-2
+layer 11                   2.0e-2 / 2.1e-2
+layer 17                   2.9e-2 / 2.2e-2
+layer 23                   1.7e-2 / 7.1e-3
+block 0 on the reference's own input: norm1 8e-8, q after q_norm 3.6e-3, after RoPE 4.0e-3, attention 3.3e-3,
+norm2 3.9e-4, MLP 3.1e-3, output 1.25e-2
+```
+The block's parts all agree to bf16 rounding, and rebuilding the reference's output from its own parts with our
+formula gives it exactly; the output is small next to its terms (rms: input 0.215, ls2 x MLP 0.184, output 0.055), so
+the MLP's 0.3% becomes ~1.2% of the output. That is the reference's own bf16 noise, not a port error.
+
+## Run 3 - 2026-10-24 12:40
+
+Question: do the camera head, the four DPT heads and the Gaussian parameters match, and is any end-to-end gap theirs
+or the trunk's?
+
+Camera head (f32; 4 refinement steps of adaptive-modulation blocks attending across frames) and decode
+(`decode_cameras`: quaternion scaled by 2/|q|^2, world-to-camera inverted in closed form, intrinsics from the two
+fields of view, principal point at the centre):
+```
+camera params rel rms 1.2e-3 (max 1.6e-3); camera-to-world max err 1.8e-5 / 4.2e-4 / 6.2e-4; fx rel err <= 1.8e-3
+frame 0 decodes to the identity pose (t ~ 1e-4, q ~ (0, 0, 0, 1)): the world frame is the first camera's
+```
+DPT heads (`dpt.rs`, f32; the residual units' skip is relu(x), as the reference's in-place ReLU makes it) and the
+Gaussian parameters (`gaussians.rs`), rel rms against the reference:
+```
+                     whole model   heads on the reference's trunk features
+depth                1.1e-2        2.2e-4
+depth mask logits    1.8e-2        3.9e-4
+points               2.4e-2        6.4e-4
+normals              1.4e-2        1.2e-4
+gs depth             6.8e-3        1.4e-4
+splat means          6.4e-3        1.3e-4
+splat quats          3.9e-2        1.2e-3
+splat scales         4.9e-2        8.4e-4
+splat opacities      1.6e-2        2.3e-4
+splat SH DC          4.0e-3        2.3e-4
+```
+On the same features the heads agree to f32 convolution order (PyTorch's cuDNN path uses TF32 on Ampere); the
+whole-model gap is the trunk's bf16 noise (Run 2) carried through, largest in the quaternions and scales.
+
+## Run 4 - 2026-10-24 12:57
+
+Question: does the forward fit and run at the repo's 32-frame size (504 x 504, 41,696 global-attention tokens), and
+where does its time go?
+
+`thirty_two_frames_forward` (ignored bench, random input, trunk and heads timed apart):
+```
+first try         heads OOM even at 16 frames: every head returned its full-resolution fused features for all
+                  frames (4.2 GB a head at 32 frames) and the splat convs ran on all frames at once; the CUDA conv2d
+                  (no cuDNN in our builds) is im2col, so a 3x3 conv over 8 full-resolution frames needs a ~9 GB column
+fixed             only the Gaussian head keeps its fused features, the splats are built per chunk of frames, chunks of 2
+                  32 frames: trunk 9.5 s, heads 18.6 s, peak 13.0 GB (chunks of 1: heads 32.7 s, peak 10.5 GB)
+position embed    built from two separable sin/cos tables on the GPU, not 32M CPU sin/cos per call: heads 11.9 s
+1x1 conv, convT   pointwise convs and the stride-equals-kernel transposed convs as one matmul per frame: heads 9.2 s
+bilinear kernel   inference-tensor's upsample_bilinear2d computed in double (1/64 rate on GA102) with 64-bit
+                  divisions; now PyTorch's CUDA formula in float: heads 8.1 s (kernel 1.9 -> 0.47 s)
+3x3 convs in bf16 heads 7.3 s, but head parity 8x worse (depth rel rms 2.2e-4 -> 1.7e-3); reverted
+```
+Parity on the reference's trunk features is unchanged by the kept changes (depth 2.2e-4, normals 1.2e-4, splat means
+1.3e-4). nsys per 32-frame forward (18.1 s of kernels): fattn's flash_attn_ext_f16 5.8 s (72 calls, mostly the 24
+global attentions over 41.7K tokens, ~40% of the 3090's bf16 tensor peak), im2col_f32 3.8 s (its layout reads across
+channel planes, five 64-bit divisions an element), f32 sgemm 1.9 s, trunk bf16 GEMMs 1.1 s. Reference: 7.8 s forward
+(FlashAttention-2, cuDNN convs). Next for speed: a long-sequence non-causal attention path and a better im2col or
+direct 3x3 conv.
+
+## Run 5 - 2026-10-24 13:04
+
+Question: does a whole run (decode, preprocess, forward, masks, writers, `meta.json`) produce the reference's outputs?
+
+Preprocessing (`preprocess.rs`): the reference's adaptive size and resize rule, and PIL's 8-bit bicubic ported (Keys
+a = -0.5, support scaled by the downscale, coefficients rounded to 22 fractional bits, horizontal pass first). On the
+Park photos re-encoded by PIL as PNG, our input equals the reference's tensor exactly (0 values differ); from the JPEGs
+themselves 23.5% of values differ by up to 3 levels: the image crate's JPEG decoder against libjpeg-turbo, not the
+resize.
+
+Outputs (`output.rs`, `run.rs`): camera_params.json, depth npy/png, normal png, edge masks (depth rtol 0.03 AND normals
+1 degree, 3 x 3 max pools), the model's sky mask (`sigmoid(gs_depth_mask_logits) > 0.45`; the reference's default also
+ANDs skyseg.onnx), points voxel-merged at 0.002 and capped at 2M, splats voxel-pruned (weighted averages; once anything
+merges, every voxel's opacity is sum(w^2)/sum(w), as the reference) and capped at 5M, the top 2% by largest scale
+dropped. gaussians.ply is standard 3DGS with opacity as a logit (the reference writes [0, 1]).
+```
+reconstruct (ignored test), bf16 trunk
+Park, 3 x 960x545 JPEG       952 x 546   forward 2.9 s, total 4.4 s    789,727 points, 785,745 splats
+Building, 32 x 512^2 PNG     504 x 504   forward 17.5 s, total 26.9 s  2,000,000 points, 3,109,242 splats
+Building against the reference run (out-building-f32), compare_out.py (scratch):
+  cameras: c2w max |diff| 2.2e-3, translation extent 1.638 vs 1.636, fx rel 2.9e-3
+  depth npy: rel rms 9.4e-3 mean, 3.2e-2 max over 32 frames
+  splats 3,109,242 vs 3,098,474 (the reference's skyseg mask removes a little more); medians: scale_0 -6.933 vs
+  -6.937, f_dc_0 0.032 vs 0.027, rot_0 0.455 vs 0.472, sigmoid(opacity) 0.417 vs 0.412; x extent -1.50..1.49 both
+```
+
+## Run 6 - 2026-10-24 13:21
+
+Question: do priors (known poses, intrinsics, depth) condition the trunk as the reference's do?
+
+`priors.rs` ports the reference's normalization: poses relative to view 0 (the pipeline left-multiplies by the first
+pose's inverse), translations scaled into the unit cube with 0.1 padding (5%/95% quantiles above 10 views), PyTorch3D
+quaternions; intrinsics scaled from the first image's original size to the inference size, then as the 4-vector (fx/W, fy/H,
+cx/W, cy/H); depth resized and quantile-normalized (1%/99% of positive values), embedded per patch
+through the pixel-unshuffle MLP. Prior files: the reference's `cameras.json` (extrinsics and intrinsics by camera_id,
+an image stem or index) and a depth folder by stem (npy, 16-bit PNG in mm, EXR).
+
+Prior inputs were made from the reference's own Park run (dump_priors.py, scratch): its cameras at the original
+960x545 and its depth maps, then the reference forward with all three flags.
+```
+priors_match_the_reference (ignored test), Park at 518, bf16 trunk
+camera params with priors: max 5.7e-4 rms 3.3e-4
+depth with priors: max 6.3e-2 rms 1.6e-3
+depth without priors, same reference: max 1.29 rms 0.265     (so the priors do steer the result)
+
+inference reconstruct --prior-cameras park-priors/cameras.json --prior-depth park-priors/depth, Park at 952
+  ours: forward 3.0 s, total 4.4 s (wall 5.7 s); reference with the same priors: wall 19.7 s, 14.8 GB above idle
+  compare_out.py: c2w max |diff| 1.6e-3, fx rel 6.6e-4, depth rel rms 3.3e-3 mean
+  points 718,971 vs 707,000, splats 723,572 vs 708,779 (skyseg again); scale/f_dc/rot medians within 0.02
+```
+Outputs stay in the normalized frame (the first camera is the identity), as the reference leaves them; meta.json lists
+which priors a run used.
+
+## Run 7 - 2026-10-24 13:49
+
+Question: where does the 32-frame forward lose to the reference, now that both are profiled the same way?
+
+nsys, kernel time per forward (reference: the pipeline on Building, 32 x 504^2; ours: `thirty_two_frames_forward`):
+```
+reference 7.65 s: FA2 flash_fwd (64, 128x128 tiles) 2.88 s, bf16 GEMMs 1.2 s, cuDNN implicit-GEMM TF32 convs ~1.4 s,
+                  elementwise/layernorm ~1.3 s, bilinear 0.18 s
+ours     17.6 s:  fattn flash_attn_ext_f16<64,64,64,1> 5.65 s, im2col_f32 3.69 s, f32 sgemm ~2.2 s, bf16 GEMMs 1.1 s,
+                  badd_bf16 0.92 s (385 calls, 1.4-6 ms each), badd_f32 0.78 s, ucopy 1.1 s, bilinear 0.44 s
+```
+Run 4's "~40% of peak" for attention was wrong: the 24 global attentions are 1.7e14 FLOP, so fattn runs at ~30
+TFLOP/s and FA2 at ~60. New bench `fattn bench::long_bidirectional` (h 16, d 64, non-causal): 33.5 TFLOP/s at 20K and
+41.7K tokens. Two causes visible in fattn-mma-f16.cuh: with ncols2 == 1 (no GQA) the kernel never pipelines its K/V
+loads (nstages 0; turning it on trips the OOB-check static asserts, since only the GQA path pads KV), and a warp's 16
+Q columns reuse each 16x16 K fragment for 2 MMAs where FA2's 32 rows reuse a half-size fragment for 2. Not fixed yet.
+
+Changes kept (all in shared code):
+```
+conv2d (CUDA, no cuDNN)   im2col now writes (b, c*kh*kw, h*w) with 32-bit index math and coalesced reads/writes,
+                          then one broadcast-weight batched GEMM lands in NCHW (no transpose copy after)
+                          heads 8.3 -> 4.95 s; im2col 3.69 -> 1.32 s; head parity unchanged (depth 2.2e-4)
+binary ops                a bias-shaped operand (zero strides then a contiguous tail) indexes by i % period
+                          (vectorized for bf16/f32 when the period allows) instead of a div/mod per dim
+grid-stride launches      binary, unary, affine, cast and copy kernels launch at most 4096 blocks of 1024; one block
+                          per 1024 elements made 7/8 of the threads of a vectorized kernel run only the stride setup
+                          [41696, 4096] bf16 bias add 5.1 -> 1.36 ms; same-shape add 2.1 -> 1.35 ms (wall, incl alloc)
+kernel build              inference-tensor-kernels never watched its headers: an edit to binary_op_macros.cuh or
+                          cuda_utils.cuh rebuilt nothing (the binary fatbin stayed at its old build while tests
+                          "passed"); it now watches them like the other kernel crates
+```
+32 frames: trunk 9.5 -> 8.2 s, heads 8.3 -> 4.8 s; kernels 17.6 -> ~13 s. Left: attention (2.8 s behind FA2), the
+head sgemms in full f32 where the reference's cuDNN runs TF32, remaining elementwise. inference-layout carries its own
+cols-last im2col (with a ones row for the bias) for the same reason; it can likely move onto conv2d now.

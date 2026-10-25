@@ -201,6 +201,47 @@ async fn main() -> Result<()> {
             CacheCommand::Delete { model_id } => run_cache_delete(&model_id)?,
         },
 
+        Command::Reconstruct {
+            model,
+            input,
+            out,
+            target_size,
+            fps,
+            max_frames,
+            no_edge_mask,
+            no_sky_mask,
+            prior_cameras,
+            prior_depth,
+            cpu,
+        } => {
+            use inference_api::reconstruction::{
+                OutputSettings, ReconstructOptions, VideoOptions, reconstruct,
+            };
+            let options = ReconstructOptions {
+                target_size,
+                output: OutputSettings {
+                    edge_mask: !no_edge_mask,
+                    sky_mask: !no_sky_mask,
+                    ..OutputSettings::default()
+                },
+                prior_cameras,
+                prior_depth,
+            };
+            let video = VideoOptions { fps, max_frames };
+            let report = reconstruct(&model, &input, &out, &options, video, cpu).await?;
+            println!(
+                "{} frames at {}x{}: {} points, {} Gaussians in {} (forward {:.1} s, total {:.1} s)",
+                report.frames,
+                report.width,
+                report.height,
+                report.written.points,
+                report.written.gaussians,
+                out.display(),
+                report.forward_seconds,
+                report.total_seconds
+            );
+        }
+
         Command::Kernels { cmd } => match cmd {
             KernelsCommand::Fetch { types, all } => run_kernels_fetch(types, all)?,
             KernelsCommand::Prune { dry_run } => run_kernels_prune(dry_run)?,

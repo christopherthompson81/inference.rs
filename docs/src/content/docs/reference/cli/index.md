@@ -23,6 +23,7 @@ sidebar:
 | [`inference login`](/reference/cli/login/) | Authenticate with Hugging Face Hub |
 | [`inference cache`](/reference/cli/cache/) | Manage the Hugging Face model cache |
 | [`inference kernels`](/reference/cli/kernels/) | Manage the CUDA kernel libraries: download them for offline use, prune old ones |
+| [`inference reconstruct`](/reference/cli/reconstruct/) | Reconstruct a scene from photos with WorldMirror 2.0: cameras, depth, normals, a point cloud and standard 3D Gaussian splats, written to a folder with a meta.json of conventions and settings |
 | [`inference bench`](/reference/cli/bench/) | Run performance benchmarks for base or LoRA model generation |
 | [`inference from-config`](/reference/cli/from-config/) | Run from a full TOML configuration file |
 | [`inference update`](/reference/cli/update/) | Update or migrate an install using the installer |

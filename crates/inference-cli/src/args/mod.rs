@@ -270,6 +270,56 @@ pub enum Command {
         cmd: KernelsCommand,
     },
 
+    /// Reconstruct a scene from photos with WorldMirror 2.0: cameras, depth, normals, a point cloud and standard 3D
+    /// Gaussian splats, written to a folder with a meta.json of conventions and settings
+    Reconstruct {
+        /// The WorldMirror checkpoint folder (config.json and model.safetensors)
+        #[arg(long)]
+        model: PathBuf,
+
+        /// A folder of images (jpg, jpeg, png, webp, read in name order), one image, or a video (mp4, mov, avi,
+        /// mkv, webm, gif; FFmpeg for all but GIF)
+        #[arg(long)]
+        input: PathBuf,
+
+        /// The output folder, created if missing
+        #[arg(long)]
+        out: PathBuf,
+
+        /// Longest edge to infer at: the first image's, capped at this and floored to a multiple of 14
+        #[arg(long, default_value_t = inference_api::reconstruction::DEFAULT_TARGET_SIZE)]
+        target_size: usize,
+
+        /// Frames a second sampled from a video input
+        #[arg(long, default_value_t = inference_api::reconstruction::DEFAULT_VIDEO_FPS)]
+        fps: f64,
+
+        /// The most frames sampled from a video input
+        #[arg(long, default_value_t = inference_api::reconstruction::DEFAULT_VIDEO_MAX_FRAMES)]
+        max_frames: usize,
+
+        /// Keep pixels at depth and normal discontinuities
+        #[arg(long)]
+        no_edge_mask: bool,
+
+        /// Keep pixels the model marks as sky
+        #[arg(long)]
+        no_sky_mask: bool,
+
+        /// Known cameras as JSON: `extrinsics` (4x4 camera-to-world, OpenCV) and `intrinsics` (3x3, original
+        /// pixels), each a list of {camera_id, matrix} with camera_id an image stem or index; either list may be omitted
+        #[arg(long)]
+        prior_cameras: Option<PathBuf>,
+
+        /// A folder of known z-depth maps named by image stem: .npy (float32), .png (16-bit millimetres) or .exr
+        #[arg(long)]
+        prior_depth: Option<PathBuf>,
+
+        /// Run on the CPU (slow) instead of the first CUDA device
+        #[arg(long)]
+        cpu: bool,
+    },
+
     /// Run performance benchmarks for base or LoRA model generation.
     Bench {
         #[command(subcommand)]
