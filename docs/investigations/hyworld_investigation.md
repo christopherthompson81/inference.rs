@@ -163,3 +163,38 @@ inference reconstruct --prior-cameras park-priors/cameras.json --prior-depth par
 ```
 Outputs stay in the normalized frame (the first camera is the identity), as the reference leaves them; meta.json lists
 which priors a run used.
+
+## Run 7 - 2026-10-24 13:49
+
+Question: where does the 32-frame forward lose to the reference, now that both are profiled the same way?
+
+nsys, kernel time per forward (reference: the pipeline on Building, 32 x 504^2; ours: `thirty_two_frames_forward`):
+```
+reference 7.65 s: FA2 flash_fwd (64, 128x128 tiles) 2.88 s, bf16 GEMMs 1.2 s, cuDNN implicit-GEMM TF32 convs ~1.4 s,
+                  elementwise/layernorm ~1.3 s, bilinear 0.18 s
+ours     17.6 s:  fattn flash_attn_ext_f16<64,64,64,1> 5.65 s, im2col_f32 3.69 s, f32 sgemm ~2.2 s, bf16 GEMMs 1.1 s,
+                  badd_bf16 0.92 s (385 calls, 1.4-6 ms each), badd_f32 0.78 s, ucopy 1.1 s, bilinear 0.44 s
+```
+Run 4's "~40% of peak" for attention was wrong: the 24 global attentions are 1.7e14 FLOP, so fattn runs at ~30
+TFLOP/s and FA2 at ~60. New bench `fattn bench::long_bidirectional` (h 16, d 64, non-causal): 33.5 TFLOP/s at 20K and
+41.7K tokens. Two causes visible in fattn-mma-f16.cuh: with ncols2 == 1 (no GQA) the kernel never pipelines its K/V
+loads (nstages 0; turning it on trips the OOB-check static asserts, since only the GQA path pads KV), and a warp's 16
+Q columns reuse each 16x16 K fragment for 2 MMAs where FA2's 32 rows reuse a half-size fragment for 2. Not fixed yet.
+
+Changes kept (all in shared code):
+```
+conv2d (CUDA, no cuDNN)   im2col now writes (b, c*kh*kw, h*w) with 32-bit index math and coalesced reads/writes,
+                          then one broadcast-weight batched GEMM lands in NCHW (no transpose copy after)
+                          heads 8.3 -> 4.95 s; im2col 3.69 -> 1.32 s; head parity unchanged (depth 2.2e-4)
+binary ops                a bias-shaped operand (zero strides then a contiguous tail) indexes by i % period
+                          (vectorized for bf16/f32 when the period allows) instead of a div/mod per dim
+grid-stride launches      binary, unary, affine, cast and copy kernels launch at most 4096 blocks of 1024; one block
+                          per 1024 elements made 7/8 of the threads of a vectorized kernel run only the stride setup
+                          [41696, 4096] bf16 bias add 5.1 -> 1.36 ms; same-shape add 2.1 -> 1.35 ms (wall, incl alloc)
+kernel build              inference-tensor-kernels never watched its headers: an edit to binary_op_macros.cuh or
+                          cuda_utils.cuh rebuilt nothing (the binary fatbin stayed at its old build while tests
+                          "passed"); it now watches them like the other kernel crates
+```
+32 frames: trunk 9.5 -> 8.2 s, heads 8.3 -> 4.8 s; kernels 17.6 -> ~13 s. Left: attention (2.8 s behind FA2), the
+head sgemms in full f32 where the reference's cuDNN runs TF32, remaining elementwise. inference-layout carries its own
+cols-last im2col (with a ones row for the bias) for the same reason; it can likely move onto conv2d now.
