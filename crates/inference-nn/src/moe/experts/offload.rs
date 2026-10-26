@@ -13,7 +13,7 @@ use inference_quant::cpu_experts::{CpuExpertProjection, CpuExpertRoute, CpuExper
 use inference_quant::{
     BounceRing, DeviceExpertStack, GluActivationType, HostExpertStack, KernelWeight,
 };
-use inference_tensor::cuda::cudarc::driver::{CudaSlice, CudaStream, result};
+use inference_tensor::cuda::cudarc::driver::{CudaSlice, CudaStream, DevicePtr, result};
 
 use crate::cuda::mapped::{mapped_buffer, mapped_host, tensor_ptr};
 use inference_tensor::{CudaDevice, DType, Device, Result, Tensor};
@@ -449,43 +449,54 @@ impl OffloadedExperts {
         let ex = &self.shared.exchange;
         let ids = forward.topk_ids.to_dtype(DType::U32)?.contiguous()?;
         let weights = forward.topk_weights.to_dtype(DType::F32)?.contiguous()?;
-        let xs = forward.xs_flat.to_dtype(DType::F32)?.contiguous()?;
-        let slot_ids = self
-            .shared
-            .table
-            .index_select(&ids.flatten_all()?, 0)?
-            .reshape((tokens, self.shared.topk))?;
+        let xs = match forward.xs_flat.dtype() {
+            DType::BF16 | DType::F32 => forward.xs_flat.contiguous()?,
+            _ => forward.xs_flat.to_dtype(DType::F32)?.contiguous()?,
+        };
+        // SAFETY: the preparation below writes every slot id before the cached experts' kernel reads one
+        let slot_ids = unsafe { Tensor::empty((tokens, self.shared.topk), DType::U32, device)? };
         let ys = Tensor::zeros((tokens, hidden), DType::F32, device)?;
         let wrap = inference_tensor::Error::wrap;
-        // SAFETY: the pinned buffers hold the largest split batch; the copies out precede the event the side stream
-        // waits on, the host function reads them after it, and the stream waits for the side stream's copy of the
-        // CPU result before it moves on, so the next step cannot overwrite a buffer still in use
+        let int = |n: usize| i32::try_from(n).expect("a split batch fits i32");
+        let mapped = |buffer: &CudaSlice<u32>| buffer.device_ptr(&main).0 as *mut std::ffi::c_void;
+        let mapped_f32 =
+            |buffer: &CudaSlice<f32>| buffer.device_ptr(&main).0 as *mut std::ffi::c_void;
+        let xs_ptr = if xs.dtype() == DType::BF16 {
+            tensor_ptr::<half::bf16>(&xs, &main)?
+        } else {
+            tensor_ptr::<f32>(&xs, &main)?
+        };
+        let table = {
+            let (storage, _) = self.shared.table.storage_and_layout();
+            let inference_tensor::Storage::Cuda(cuda) = &*storage else {
+                unreachable!("the slot table is built on CUDA")
+            };
+            cuda.as_cuda_slice::<u32>()?.device_ptr(&main).0
+        };
+        // SAFETY: the pinned buffers hold the largest split batch; the preparation writes them before the event the
+        // side stream waits on, the host function reads them after it, and the stream waits for the side stream's copy
+        // of the CPU result before it moves on, so the next step cannot overwrite a buffer still in use
         unsafe {
-            let cu = main.cu_stream();
-            result::memcpy_dtoh_async(
-                mapped_host(&ex.ids, picks),
-                tensor_ptr::<u32>(&ids, &main)?,
-                cu,
-            )
-            .map_err(wrap)?;
-            result::memcpy_dtoh_async(
-                mapped_host(&ex.weights, picks),
-                tensor_ptr::<f32>(&weights, &main)?,
-                cu,
-            )
-            .map_err(wrap)?;
-            result::memcpy_dtoh_async(
-                mapped_host(&ex.slots, picks),
-                tensor_ptr::<u32>(&slot_ids, &main)?,
-                cu,
-            )
-            .map_err(wrap)?;
-            result::memcpy_dtoh_async(
-                mapped_host(&ex.xs, tokens * hidden),
-                tensor_ptr::<f32>(&xs, &main)?,
-                cu,
-            )
-            .map_err(wrap)?;
+            let status = crate::cuda::ffi::moe_split_prepare(
+                tensor_ptr::<u32>(&ids, &main)? as *const std::ffi::c_void,
+                tensor_ptr::<f32>(&weights, &main)? as *const std::ffi::c_void,
+                xs_ptr as *const std::ffi::c_void,
+                i32::from(xs.dtype() == DType::BF16),
+                table as *const std::ffi::c_void,
+                tensor_ptr::<u32>(&slot_ids, &main)? as *mut std::ffi::c_void,
+                mapped(&ex.ids),
+                mapped_f32(&ex.weights),
+                mapped(&ex.slots),
+                mapped_f32(&ex.xs),
+                int(picks),
+                int(tokens * hidden),
+                main.cu_stream() as i64,
+            );
+            if status != 0 {
+                inference_tensor::bail!(
+                    "preparing the offloaded experts' split failed with CUDA error {status}"
+                );
+            }
             side.wait(&main.record_event(None).map_err(wrap)?)
                 .map_err(wrap)?;
             let call = &self.calls[tokens - 1] as *const SplitCall as *mut std::ffi::c_void;

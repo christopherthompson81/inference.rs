@@ -30,6 +30,21 @@ inference_tensor::kernel_library! {
             dst_pitch: i64,
             stream: i64,
         ) -> i32;
+        pub fn moe_split_prepare(
+            ids: *const c_void,
+            weights: *const c_void,
+            xs: *const c_void,
+            xs_bf16: i32,
+            table: *const c_void,
+            slots: *mut c_void,
+            host_ids: *mut c_void,
+            host_weights: *mut c_void,
+            host_slots: *mut c_void,
+            host_xs: *mut c_void,
+            picks: i32,
+            values: i32,
+            stream: i64,
+        ) -> i32;
         pub fn indexed_row_copy_bf16(
             src: *const c_void,
             dst: *mut c_void,
