@@ -457,16 +457,22 @@ impl QsaStep {
         // a prompt's context lens leave out its own tokens, so only a completion step's count this one
         let completion =
             !input_metadata.is_first_prompt_chunk && input_metadata.num_cached_tokens.is_none();
-        if query_len == 1
-            && completion
-            && rows.iter().all(|r| r.len == 1)
-            && let Some(context_lens) = context_lens
-        {
-            return Self::decode(&cfg, &table, &context_lens.to_device(device)?, block_size);
-        }
         // a verify step gives each query token its own table row, each covering up to its token; a sequence's last
         // row covers all of it
         let per_token = query_len > 1 && table.dim(0)? == rows.len() * query_len;
+        if completion
+            && (query_len == 1 || per_token)
+            && rows.iter().all(|r| r.len == query_len)
+            && let Some(context_lens) = context_lens
+        {
+            return Self::decode(
+                &cfg,
+                &table,
+                &context_lens.to_device(device)?,
+                block_size,
+                query_len,
+            );
+        }
         let table_row = move |row: usize| {
             if per_token {
                 row * query_len + query_len - 1
@@ -553,16 +559,20 @@ impl QsaStep {
 }
 
 impl QsaStep {
-    // A decode step's plan, all on the device: the same for every step of a table width, so a graph replays it.
+    // A decode or verify step's plan, all on the device: the same for every step of a table width, so a graph
+    // replays it. A verify's query tokens are rows of their own; tokens of one block pool it alike, from the cells
+    // the step has written.
     fn decode(
         cfg: &QsaConfig,
         table: &Tensor,
         context_lens: &Tensor,
         block_size: usize,
+        query_len: usize,
     ) -> Result<Self> {
         let ratio = cfg.compress_ratio;
         let k = cfg.budget / ratio;
-        let (batch, width) = table.dims2()?;
+        let (rows, width) = table.dims2()?;
+        let batch = rows / query_len;
         let capacity = width * block_size;
         let pools = capacity / ratio;
         let plan = qsa_decode_plan(table, context_lens, block_size, ratio, k, pools)?;
@@ -575,17 +585,27 @@ impl QsaStep {
         };
         // a table this short never reaches the budget, so every step of its width attends densely
         let selection = if capacity > cfg.dense_context_len() {
-            let positions = plan.narrow(1, ratio, 1)?.contiguous()?;
+            let positions = plan
+                .narrow(1, ratio, 1)?
+                .contiguous()?
+                .reshape((batch, query_len))?;
             let pages = qsa_cells_width(k, ratio).div_ceil(block_size);
-            let compact = (0..(batch * pages) as u32).collect::<Vec<_>>();
+            let compact = (0..(rows * pages) as u32).collect::<Vec<_>>();
+            // a sequence's pooled keys and length are its last query token's
+            let last = |t: &Tensor, cols: usize| -> Result<Tensor> {
+                t.reshape((batch, query_len, cols))?
+                    .narrow(1, query_len - 1, 1)?
+                    .reshape((batch, cols))?
+                    .contiguous()
+            };
             Some(Selection {
-                pool_cells: plan.narrow(1, ratio + 2, pools)?.contiguous()?,
-                seq_lens: context_lens.clone(),
+                pool_cells: last(&plan.narrow(1, ratio + 2, pools)?.contiguous()?, pools)?,
+                seq_lens: last(context_lens, 1)?.flatten_all()?,
                 n_kv: capacity,
                 gather: Some(Gather {
                     table: table.clone(),
                     kept: plan.narrow(1, ratio + 1, 1)?.flatten_all()?,
-                    compact_table: Tensor::from_vec(compact, (batch, pages), table.device())?,
+                    compact_table: Tensor::from_vec(compact, (rows, pages), table.device())?,
                 }),
                 positions,
             })

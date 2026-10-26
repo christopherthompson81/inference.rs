@@ -20,9 +20,12 @@ const SPLITMIX_M2: u64 = 0x94D0_49BB_1331_11EB;
 const LAYER_SEED_PRIME: u64 = 10_007;
 // the reference keeps the gate's square root away from zero
 const GATE_FLOOR: f64 = 1e-6;
-// decode rows one host gather serves: every graph batch bucket
+// query rows (batch rows times their tokens) one host gather serves: every graph batch bucket
 #[cfg(feature = "cuda")]
 const PLE_HOST_ROWS: usize = inference_nn::cuda::graph_capture::CUDA_GRAPH_MAX_BATCH_BUCKET;
+// the longest step a host gather serves: a speculative verify window
+#[cfg(feature = "cuda")]
+const PLE_HOST_TOKENS: usize = 8;
 
 fn splitmix64(value: u64) -> u64 {
     let value = value.wrapping_add(SPLITMIX_GAMMA);
@@ -465,25 +468,28 @@ impl PleLayer {
         // a CUDA decode step gathers in a host function, so it never waits on the host and a graph can replay it
         #[cfg(feature = "cuda")]
         if let Device::Cuda(cuda) = device
-            && len == 1
-            && batch <= PLE_HOST_ROWS
+            && len <= PLE_HOST_TOKENS
+            && batch * len <= PLE_HOST_ROWS
         {
             let preceding = self.preceding_tokens();
             let window = match tokens {
                 PleTokens::Device(window) => Some(window.clone()),
                 PleTokens::Host(window) => window
-                    .decode_rows(preceding)
+                    .decode_rows(preceding, len)
                     .map(|rows| {
                         Tensor::from_vec(
                             rows,
-                            (batch, TokenWindow::decode_width(preceding)),
+                            (batch, TokenWindow::decode_width(preceding, len)),
                             device,
                         )
                     })
                     .transpose()?,
             };
             if let Some(window) = window {
-                return Ok((self.host_gather(cuda)?.gather(&window)?, vec![1; batch]));
+                return Ok((
+                    self.host_gather(cuda)?.gather(&window, len)?,
+                    vec![len; batch],
+                ));
             }
         }
         let window = match tokens {
@@ -555,7 +561,7 @@ mod host_gather {
     use inference_tensor::cuda::cudarc::driver::{CudaSlice, CudaStream, result};
     use inference_tensor::{CudaDevice, DType, Device, Result, Tensor};
 
-    use super::{NgramLookup, PLE_HOST_ROWS, TokenWindow};
+    use super::{NgramLookup, PLE_HOST_ROWS, PLE_HOST_TOKENS, TokenWindow};
 
     /// What the host function reads and writes: the lookup and the mapped window and rows.
     struct Shared {
@@ -565,40 +571,49 @@ mod host_gather {
     }
 
     impl Shared {
-        fn width(&self) -> usize {
-            TokenWindow::decode_width(self.lookup.cfg.ngram_size - 1)
+        fn preceding(&self) -> usize {
+            self.lookup.cfg.ngram_size - 1
+        }
+
+        fn width(&self, len: usize) -> usize {
+            TokenWindow::decode_width(self.preceding(), len)
         }
 
         fn row_len(&self) -> usize {
             self.lookup.cfg.ngram_heads() * self.lookup.cfg.head_dim()
         }
 
-        fn gather(&self, batch: usize) -> Result<()> {
-            let preceding = self.lookup.cfg.ngram_size - 1;
+        fn gather(&self, batch: usize, len: usize) -> Result<()> {
             let window = TokenWindow::from_decode_rows(
-                mapped_host(&self.window, batch * self.width()),
-                preceding,
+                mapped_host(&self.window, batch * self.width(len)),
+                self.preceding(),
+                len,
             );
-            let (rows, _) = self.lookup.rows(&window, 1)?;
+            let (rows, _) = self.lookup.rows(&window, len)?;
             let rows = rows.flatten_all()?.to_vec1::<f32>()?;
             mapped_host(&self.rows, rows.len()).copy_from_slice(&rows);
             Ok(())
         }
     }
 
-    /// One batch size's host function argument; the layer owns it, so a pointer to one stays valid.
+    /// One step shape's host function argument; the layer owns it, so a pointer to one stays valid.
     struct Call {
         shared: Arc<Shared>,
         batch: usize,
+        len: usize,
     }
 
     unsafe extern "C" fn gather_host(data: *mut std::ffi::c_void) {
         // SAFETY: `data` is a `Call` the layer owns for its whole life
         let call = unsafe { &*data.cast::<Call>() };
-        if let Err(err) = call.shared.gather(call.batch) {
+        if let Err(err) = call.shared.gather(call.batch, call.len) {
             // the step then adds nothing rather than stale rows
             tracing::error!("PLE failed to gather its n-gram rows on the host: {err}");
-            mapped_host(&call.shared.rows, call.batch * call.shared.row_len()).fill(0.0);
+            mapped_host(
+                &call.shared.rows,
+                call.batch * call.len * call.shared.row_len(),
+            )
+            .fill(0.0);
         }
     }
 
@@ -606,7 +621,8 @@ mod host_gather {
     /// a host function on a side stream hashes and gathers, and the rows come back, joined before the stream moves on.
     pub(super) struct HostGather {
         shared: Arc<Shared>,
-        calls: Vec<Call>,
+        // by step length, then batch rows
+        calls: Vec<Vec<Call>>,
         side: Arc<CudaStream>,
         device: CudaDevice,
     }
@@ -614,17 +630,23 @@ mod host_gather {
     impl HostGather {
         pub(super) fn new(lookup: Arc<NgramLookup>, device: &CudaDevice) -> Result<Self> {
             let stream = device.cuda_stream();
-            let width = TokenWindow::decode_width(lookup.cfg.ngram_size - 1);
+            // a step's window is at most a one-token row's width per query row
+            let width = TokenWindow::decode_width(lookup.cfg.ngram_size - 1, 1);
             let row_len = lookup.cfg.ngram_heads() * lookup.cfg.head_dim();
             let shared = Arc::new(Shared {
                 lookup,
                 window: mapped_buffer(&stream, PLE_HOST_ROWS * width)?,
                 rows: mapped_buffer(&stream, PLE_HOST_ROWS * row_len)?,
             });
-            let calls = (1..=PLE_HOST_ROWS)
-                .map(|batch| Call {
-                    shared: shared.clone(),
-                    batch,
+            let calls = (1..=PLE_HOST_TOKENS)
+                .map(|len| {
+                    (1..=PLE_HOST_ROWS / len)
+                        .map(|batch| Call {
+                            shared: shared.clone(),
+                            batch,
+                            len,
+                        })
+                        .collect()
                 })
                 .collect();
             Ok(Self {
@@ -638,20 +660,25 @@ mod host_gather {
             })
         }
 
-        /// The rows of each window row, `[batch * heads, head_dim]` f32.
-        pub(super) fn gather(&self, window: &Tensor) -> Result<Tensor> {
+        /// The rows of each window row's `len` step tokens, `[batch * len * heads, head_dim]` f32.
+        pub(super) fn gather(&self, window: &Tensor, len: usize) -> Result<Tensor> {
             let (batch, width) = window.dims2()?;
-            if batch == 0 || batch > PLE_HOST_ROWS || width != self.shared.width() {
+            if batch == 0
+                || len == 0
+                || len > PLE_HOST_TOKENS
+                || batch * len > PLE_HOST_ROWS
+                || width != self.shared.width(len)
+            {
                 inference_tensor::bail!(
-                    "a PLE host gather serves up to {PLE_HOST_ROWS} rows of {} tokens, got {:?}",
-                    self.shared.width(),
+                    "a PLE host gather serves up to {PLE_HOST_ROWS} query rows of up to {PLE_HOST_TOKENS} tokens, got \
+                     {:?} for {len}",
                     window.shape()
                 );
             }
             let cfg = &self.shared.lookup.cfg;
             let window = window.to_dtype(DType::U32)?.contiguous()?;
             let out = Tensor::zeros(
-                (batch * cfg.ngram_heads(), cfg.head_dim()),
+                (batch * len * cfg.ngram_heads(), cfg.head_dim()),
                 DType::F32,
                 &Device::Cuda(self.device.clone()),
             )?;
@@ -670,12 +697,12 @@ mod host_gather {
                 .map_err(wrap)?;
                 side.wait(&main.record_event(None).map_err(wrap)?)
                     .map_err(wrap)?;
-                let call = &self.calls[batch - 1] as *const Call as *mut std::ffi::c_void;
+                let call = &self.calls[len - 1][batch - 1] as *const Call as *mut std::ffi::c_void;
                 result::stream::launch_host_function(side.cu_stream(), gather_host, call)
                     .map_err(wrap)?;
                 result::memcpy_htod_async(
                     tensor_ptr::<f32>(&out, side)?,
-                    mapped_host(&self.shared.rows, batch * self.shared.row_len()),
+                    mapped_host(&self.shared.rows, batch * len * self.shared.row_len()),
                     side.cu_stream(),
                 )
                 .map_err(wrap)?;

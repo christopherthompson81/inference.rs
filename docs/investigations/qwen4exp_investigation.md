@@ -1458,3 +1458,39 @@ carries Flash-Next's MTP inputs (the pre-mixer hyper-connection streams) is to b
 Plan: (1) a q-token window layout and PLE host gather, and precapture of the verify width for window models; (2) a
 device QSA plan for verify steps (each query token's table row and context, pooling ordered so the latest token's
 write of a shared block wins); (3) the MTP graph state for the streams; then measure against the rows above.
+
+## Run 41 - 2026-10-26 12:23
+
+Question: with verify steps graphed, does MTP pay? Built: the token window's decode layout carries `query_len` step
+tokens a row (`TokenWindow::decode_rows(preceding, query_len)`), PLE's host gather serves (batch, len) steps up to
+eight tokens, precapture captures the verify widths of a window model, QSA's device plan (`qsa_decode_plan`) runs a
+verify's per-token table rows as one-token rows (a sequence's pooled keys and length from its last token's row; tokens
+of one block pool it alike from the step's written cells), and the PLE conv history a verify commits from moves into
+the speculative graph state like the GDN stash. Bugs met on the way, from the tiny model's tests:
+- with the window fixed but QSA still host-planned, capture failed safely ("QSA reads the batch's token window") and
+  turned graphs off for every step;
+- `cuMemFreeAsync` returned INVALID_VALUE inside the verify capture (an nsys API trace of the tiny test: the first
+  non-zero return 0.6 ms into the capture): the forward replaced `ple_stash`, freeing the eager warm-up's history
+  inside the capture. Taking the stash with the graph state also keeps a replay's commit fed: before, the first
+  commit took it and later replays never refreshed it.
+The MTP and DFlash greedy tests now also assert every non-prompt step replayed (`assert_only_prompts_skip`).
+
+Real model, same client and server flags as Run 38:
+```
+                     prose                 code
+MTP, verify graphs   28.3 28.8 31.7        30.9 32.3 31.6     1,403 replays, no eager fallback; accept 76.9%
+no draft (same build) 41.4 42.6 42.1       35.9 36.5 37.3
+```
+The no-draft rows are above Run 38's 37.6 / 33.4 with that path unchanged (run-to-run spread). The host-call probe
+(Run 40's, re-applied and removed after): a verify step's layers 55.3 ms (CPU misses 35.3, between host calls 18.0
+against 38.3 eager) and 18.0 ms after the last layer (9.7 eager). A host timer around the speculative step (removed
+after), means over 100 verify steps:
+```
+target forward (waiting on its logits)   41-56 ms
+commit                                    2-4.5 ms
+propose (two head drafts, eager)          8-14 ms
+```
+Graphs took ~20 ms out of the verify's layers; MTP still loses to no drafting here. Left: the drafts (eager, the head's
+experts missing), the CPU's misses (~35 ms of the forward), and the real model's precapture still logging "CUDA graph
+captured forward failed" before the lazy captures succeed. nsys with `--cuda-graph-trace=graph` lost its records
+after 8 s again (5 graph launches recorded), so host-function graphs and CUPTI do not mix here.
