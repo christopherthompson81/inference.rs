@@ -1582,3 +1582,36 @@ hidden behind the CPU (10.4 ms for 2 tokens) is below ours for one. What separat
 - the route tail skip (lossy, +20-30%).
 Run 43's ceiling was MTP against our own plain decode with our drafting costs; with Strata's draft and commit costs a
 one-draft window pays here too.
+
+## Run 45 - 2026-10-26 13:46
+
+Question: Run 44 put our draft at ~4.5 ms against Strata's ~1. Where does it go, and does a resident head pay now?
+
+Probes (device syncs between phases; removed after), one draft (`--mtp-n-predict 1`):
+- the commit takes the replay path every window (the GDN state re-run for rows with a rejected draft): 0.6-1.6 ms,
+  PLE's 0.1 ms. The 2-4.5 ms of Run 41 also held the publish. Small; left.
+- a head forward over ~1.7 rows: host setup 0.3 ms, then 3.8-4.2 ms in the forward call (uploads from pageable memory
+  wait on the stream, so this is the GPU's time): input projections 0.23, the block 4.0-4.3 (attention 1.2, the MoE
+  side 2.1-2.2, which holds ~11 missed experts on the CPU), the mixer 0.05.
+
+The head's cache was sized like a layer's at Q8_0 (120 slots x 5.2 MB, ~0.63 GB) and its 5.2 MB experts set the
+prompt staging's group size (64 x 5.2 MB against 150 MB for the layers). Resident at Q2_K gate/up and IQ4_NL down
+(Run 26's file), 112 slots both, one draft (a temporary switch loading the head's MoE without the cache):
+```
+                         prose        code         accept
+head offloaded           37.3 39.0    35.1 34.6    90.3%
+head resident            40.9 43.5    38.7 37.5    85.7%
+```
+Built: with the model's experts offloaded the head's MoE loads resident, and when the weight source holds the head's
+experts the loader adds immediate-ISQ overrides for them (gate/up Q2_K; the 640-wide down Q4_0, as Q2_K/Q3_K need
+256-wide rows and IQ4_NL has no quantizer here). The stock Q8_0 head file, no flags but `--mtp`: load 24 s (~9 s of it
+the requantization), 120 slots, chunk 2,560, 21,953 MiB after load (128 slots without MTP: 21,360; eight slots free
+~0.9 GB, so the head holds ~1.5 GB with its dense weights, not the 2.6 GB of Q8_0 experts).
+```
+                                      prose        code         accept
+MTP 1 draft, resident head (120)      42.1 44.3    37.8 38.5    88.9%, 1.89 tokens a window
+MTP 2 drafts, resident head (120)     33.8 38.8    34.4 39.4    79.3%, 2.59    (round 0 cold)
+no draft (128)                        38.5-46.5    34.3-38.5
+```
+One draft now matches or beats no drafting. The planner still counts the head as a cached layer (120 Q8_0 slots and
+its staging, ~0.96 GB against ~1.0 GB resident); the 1 GiB reserve covers the difference.
