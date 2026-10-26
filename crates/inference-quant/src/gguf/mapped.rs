@@ -64,6 +64,11 @@ impl MappedBlocks {
             inference_tensor::Error::msg(format!("{:?} rows cannot hold {cols} values", self.ty))
         })?;
         let bytes = self.bytes();
+        for &id in ids {
+            if (id as usize) < rows {
+                will_need(&bytes[id as usize * row_bytes..][..row_bytes]);
+            }
+        }
         let mut out = Vec::with_capacity(ids.len() * cols);
         for &id in ids {
             let id = id as usize;
@@ -79,3 +84,21 @@ impl MappedBlocks {
         Ok(out)
     }
 }
+
+// Starts reading a mapped range's pages so a gather of scattered rows faults them in together, not one by one: a
+// Qwen3.8-Flash-Next PLE gather reads ~40 rows of 90 bytes from a 27 GiB table, each on its own page
+#[cfg(unix)]
+fn will_need(range: &[u8]) {
+    static PAGE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    // SAFETY: sysconf reads a constant of the system
+    let page = *PAGE.get_or_init(|| unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as usize);
+    let start = range.as_ptr() as usize & !(page - 1);
+    let end = range.as_ptr() as usize + range.len();
+    // SAFETY: the advice only schedules reads of pages the mapping already covers
+    unsafe {
+        libc::madvise(start as *mut libc::c_void, end - start, libc::MADV_WILLNEED);
+    }
+}
+
+#[cfg(not(unix))]
+fn will_need(_range: &[u8]) {}
