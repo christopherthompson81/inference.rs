@@ -477,6 +477,12 @@ const PLANNED_SLOT_STEPS: usize = 64;
 // Longest prompt chunk an offloaded model's planner sizes: a chunk stages about every expert a layer routes to however
 // long it is, so prefill speeds up with the chunk well past the default
 const MAX_PLANNED_PROMPT_CHUNK: usize = 8192;
+// Prompt chunk the planner keeps room for before it caches more experts: one slot step is a few percent of decode,
+// while a 512-token chunk reads prompts about 3x slower (qwen4exp investigation Runs 27 and 42)
+const MIN_PLANNED_PROMPT_CHUNK: usize = 2048;
+// Prefix snapshots a planned offload keeps in the recurrent pool: each holds a sequence's recurrent state (~111 MB on
+// Qwen3.8-Flash-Next), VRAM the expert cache would otherwise take
+const OFFLOAD_PREFIX_SNAPSHOTS: usize = 2;
 // GPU memory a context-sized cache leaves free for what prompts allocate beyond the counted staging and chunk
 // activations: the staging's per-projection maxima, a step's transients and allocations outside the pool (about
 // 1.15 GB at a 22K-token prompt on Flash-Next, qwen4exp investigation Run 37)
@@ -616,6 +622,17 @@ impl ExpertCachePlan<'_> {
         Ok(source.layer_expert_bytes()?.map(|(_, experts)| experts))
     }
 
+    // The activations of a MIN_PLANNED_PROMPT_CHUNK-token prompt chunk, for a loader that reports them
+    fn prompt_chunk_floor(&self) -> Result<usize> {
+        if self.paged_attn_config.is_none() {
+            return Ok(0);
+        }
+        let (loader, config) = (self.sizing.loader, self.sizing.config);
+        Ok(loader
+            .prompt_activation_bytes_per_token(config)?
+            .map_or(0, |bytes| bytes * MIN_PLANNED_PROMPT_CHUNK))
+    }
+
     // The longest prompt chunk, in multiples of the default chunk up to MAX_PLANNED_PROMPT_CHUNK, whose activations fit
     // beside `slots` cached experts a layer and the planned context, with the bytes it reserves; `None` for the default
     fn prompt_chunk(
@@ -676,8 +693,11 @@ impl ExpertCachePlan<'_> {
             return Ok(fitting);
         }
         let target = self.planned_context(params)?;
+        // an offload keeps room for a usable prompt chunk; fitting resident needs none
+        let chunk_floor = self.prompt_chunk_floor()?;
         let plan = plan_expert_slots(experts, [&target, params], |slots, params| {
-            self.fits(slots, params, activations)
+            let floor = if slots.is_some() { chunk_floor } else { 0 };
+            self.fits(slots, params, activations + floor)
         })?;
         if let Some((slots, params)) = plan {
             info!(
@@ -878,6 +898,12 @@ pub(crate) fn resolve_map_setting(
                 );
                 cfg.mem_gpu = crate::MemoryGpuConfig::ContextSize(tokens);
                 *cfg = cfg.with_base_device_memory_reservation(OFFLOAD_RUNTIME_RESERVE_BYTES)?;
+                let snapshots = cfg
+                    .recurrent_snapshot_slots
+                    .map_or(OFFLOAD_PREFIX_SNAPSHOTS, |slots| {
+                        slots.min(OFFLOAD_PREFIX_SNAPSHOTS)
+                    });
+                cfg.recurrent_snapshot_slots = Some(snapshots);
             }
         }
     }

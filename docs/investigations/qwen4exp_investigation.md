@@ -1525,3 +1525,8 @@ pad, and 7 kept for prefix snapshots), 51 spare. Those 7 snapshot slots are ~7 c
 Against Strata (Run 39): our verify misses 306 routes of 1,440 (21%, 79% hits) at ~115 us a miss; Strata hit 74-84%
 at ~133 us. The slot gap is mostly closed and the miss cost is now the same in both engines. What separates the verify
 steps is the drafting (8-14 ms here; Strata's head is resident) and the commit.
+
+Kept (user's call): an offloading plan reserves a 2,048-token chunk's activations while it picks slots
+(`MIN_PLANNED_PROMPT_CHUNK`), and keeps 2 prefix snapshots in the recurrent pool (`OFFLOAD_PREFIX_SNAPSHOTS`; a host
+prefix store already capped them at 2). No flags: 128 slots, chunk 2,560, the 14.6K-token prompt at 438 tok/s, decode
+38.5 / 42.4 prose and 34.3 / 37.5 code.
