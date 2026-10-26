@@ -69,6 +69,11 @@ impl FeedForward {
         }
     }
 
+    /// Whether a sparse block's experts live in host memory.
+    pub(super) fn is_offloaded(&self) -> bool {
+        matches!(self, Self::Sparse(moe) if moe.experts.is_offloaded())
+    }
+
     /// The feed-forward over an already normalized input.
     pub(super) fn forward(&self, x: &Tensor) -> Result<Tensor> {
         match self {
@@ -168,7 +173,7 @@ impl SparseMoeBlock {
         let (b_size, seq_len, hidden_dim) = xs.dims3()?;
         let xs_flat = xs.reshape(((), hidden_dim))?;
 
-        let router_logits = self.gate.forward(&xs_flat)?;
+        let router_logits = small_rows(&self.gate, &xs_flat)?;
         let router_logits = match &self.gate_lora {
             Some(site) => inference_quant::apply_dynamic_lora_delta(site, &xs_flat, router_logits)?,
             None => router_logits,
@@ -188,19 +193,33 @@ impl SparseMoeBlock {
             None,
         )?;
 
-        let mut y = self.experts.forward(xs, topk.values, &topk.indices)?;
-        y = y.reshape((b_size, seq_len, hidden_dim))?;
-
-        let shared_out = self.shared_expert.forward(xs)?;
-        let shared_gate = self.shared_expert_gate.forward(&xs_flat)?;
-        let shared_gate = match &self.shared_expert_gate_lora {
-            Some(site) => inference_quant::apply_dynamic_lora_delta(site, &xs_flat, shared_gate)?,
-            None => shared_gate,
+        // the shared expert runs while offloaded experts' misses are on the CPU
+        let mut shared = || -> Result<Tensor> {
+            let shared_out = self.shared_expert.forward(xs)?;
+            let shared_gate = small_rows(&self.shared_expert_gate, &xs_flat)?;
+            let shared_gate = match &self.shared_expert_gate_lora {
+                Some(site) => {
+                    inference_quant::apply_dynamic_lora_delta(site, &xs_flat, shared_gate)?
+                }
+                None => shared_gate,
+            };
+            let shared_gate = inference_tensor::nn::ops::sigmoid(&shared_gate)?;
+            let shared_gate = shared_gate.reshape((b_size, seq_len, 1))?;
+            shared_out.broadcast_mul(&shared_gate)
         };
-        let shared_gate = inference_tensor::nn::ops::sigmoid(&shared_gate)?;
-        let shared_gate = shared_gate.reshape((b_size, seq_len, 1))?;
-        let shared_out = shared_out.broadcast_mul(&shared_gate)?;
-
-        y + shared_out
+        let (y, shared_out) =
+            self.experts
+                .forward_overlapping(xs, topk.values, &topk.indices, &mut shared)?;
+        y.reshape((b_size, seq_len, hidden_dim))? + shared_out
     }
+}
+
+// A few rows (a speculative verify's) take the small-batch matvec: cuBLAS runs a split-K GEMM for them, ~5x the
+// one-row dot on Qwen3.8-Flash-Next's one-output shared-expert gate
+fn small_rows(linear: &Linear, x: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if inference_quant::should_use_gemv(x, linear.weight()) {
+        return inference_quant::gemv(x, linear.weight(), linear.bias());
+    }
+    linear.forward(x)
 }

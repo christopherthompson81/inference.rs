@@ -410,7 +410,13 @@ impl OffloadedExperts {
         self.shared.host[0].dims()[0]
     }
 
-    pub(super) fn forward(&self, forward: &MoEForward, config: MoEForwardConfig) -> Result<Tensor> {
+    /// The layer's output, and `overlap`'s: on a decode step it runs on the stream while the CPU computes the misses.
+    pub(super) fn forward(
+        &self,
+        forward: &MoEForward,
+        config: MoEForwardConfig,
+        overlap: Option<&mut dyn FnMut() -> Result<Tensor>>,
+    ) -> Result<(Tensor, Option<Tensor>)> {
         if forward.lora.is_some() {
             inference_tensor::bail!("offloaded MoE experts do not take LoRA adapters");
         }
@@ -421,14 +427,20 @@ impl OffloadedExperts {
             );
         }
         if forward.shape.num_tokens <= SPLIT_MAX_TOKENS {
-            self.forward_split(forward, config)
+            self.forward_split(forward, config, overlap)
         } else {
-            self.forward_staged(forward, config)
+            let ys = self.forward_staged(forward, config)?;
+            Ok((ys, overlap.map(|f| f()).transpose()?))
         }
     }
 
     // the cached experts on the stream, the misses through a host function on the side stream, joined at the end
-    fn forward_split(&self, forward: &MoEForward, config: MoEForwardConfig) -> Result<Tensor> {
+    fn forward_split(
+        &self,
+        forward: &MoEForward,
+        config: MoEForwardConfig,
+        overlap: Option<&mut dyn FnMut() -> Result<Tensor>>,
+    ) -> Result<(Tensor, Option<Tensor>)> {
         let (tokens, hidden) = forward.shape.flat();
         let picks = tokens * self.shared.topk;
         let device = forward.xs.device();
@@ -506,8 +518,9 @@ impl OffloadedExperts {
         let gpu = indexed_mmvq_with(cache, &hits, hit_config)?.ok_or_else(|| {
             inference_tensor::Error::msg("cached experts cannot run the indexed matvec")
         })?;
+        let side = overlap.map(|f| f()).transpose()?;
         main.wait(&cpu_done).map_err(wrap)?;
-        gpu + ys.to_dtype(forward.original_dtype)?
+        Ok(((gpu + ys.to_dtype(forward.original_dtype)?)?, side))
     }
 
     // the cached experts this batch routes to from their slots, then the rest over the bus a staging group at a time;
@@ -844,7 +857,7 @@ mod tests {
                     .collect::<Vec<_>>();
                 run.ids = Tensor::from_vec(ids, (tokens, TOPK), &device)?;
             }
-            let actual = offloaded.forward(&run.forward(), config)?;
+            let (actual, _) = offloaded.forward(&run.forward(), config, None)?;
             let xs = run
                 .xs_flat
                 .to_device(&Device::Cpu)?
@@ -946,7 +959,14 @@ mod tests {
         // later steps hit what earlier ones copied in, and evict as the routes move on
         for step in 0..12 {
             let run = run(&device, 2, step)?;
-            let actual = offloaded.forward(&run.forward(), config)?;
+            // work overlapped with the CPU's misses comes back beside the layer's output
+            let marker = f32::from(u8::try_from(step).expect("few steps"));
+            let mut side = || Tensor::full(marker, 3, &device);
+            let (actual, side) = offloaded.forward(&run.forward(), config, Some(&mut side))?;
+            assert_eq!(
+                side.expect("the overlap ran").to_vec1::<f32>()?,
+                vec![marker; 3]
+            );
             let expected = indexed_mmvq_with(resident, &run.forward(), config)?
                 .expect("Q4_K runs the indexed matvec");
             let err = relative_error(&actual, &expected)?;
@@ -958,13 +978,148 @@ mod tests {
         }
 
         let run = run(&device, PROMPT, 0)?;
-        let actual = offloaded.forward(&run.forward(), config)?;
+        let (actual, _) = offloaded.forward(&run.forward(), config, None)?;
         let expected =
             grouped_with(resident, &run.forward(), config)?.expect("Q4_K runs the grouped mmq");
         // the passes' sums add in another order than one reduce
         assert!(
             relative_error(&actual, &expected)? < 1e-5,
             "the staged prompt path runs the same kernels"
+        );
+        Ok(())
+    }
+
+    // The fixed cost of a decode step's host round trip: an offloaded layer whose experts are all cached (so the
+    // CPU computes nothing) against the same cached-expert kernel resident, eager and replayed from a graph
+    #[test]
+    #[ignore = "benchmark"]
+    fn split_round_trip_costs_a_fixed_latency() -> Result<()> {
+        use crate::cuda::graph_capture::CudaGraphHandle;
+        use inference_tensor::cuda::cudarc::driver::sys;
+        const BENCH_EXPERTS: usize = 64;
+        const BENCH_HIDDEN: usize = 2560;
+        const BENCH_INTER: usize = 256;
+        const BENCH_TOPK: usize = 10;
+        const STEPS: u32 = 500;
+        crate::skip_without_cuda!();
+        let device = Device::new_cuda(0)?;
+        let cuda = device.as_cuda_device()?;
+        let q4k = |rows: usize, cols: usize, salt: usize| -> Result<Vec<u8>> {
+            let weights = patterned(&[BENCH_EXPERTS, rows, cols], salt, 0.1)?;
+            Ok(QTensor::quantize(&weights, GgmlDType::Q4K)?
+                .data()?
+                .into_owned())
+        };
+        let bytes = [
+            q4k(BENCH_INTER, BENCH_HIDDEN, 1)?,
+            q4k(BENCH_INTER, BENCH_HIDDEN, 2)?,
+            q4k(BENCH_HIDDEN, BENCH_INTER, 3)?,
+        ];
+        let dims = [
+            [BENCH_EXPERTS, BENCH_INTER, BENCH_HIDDEN],
+            [BENCH_EXPERTS, BENCH_INTER, BENCH_HIDDEN],
+            [BENCH_EXPERTS, BENCH_HIDDEN, BENCH_INTER],
+        ];
+        let host = |p: usize| {
+            HostExpertStack::new(inference_quant::GgufType::Q4K, dims[p], &bytes[p], cuda)
+        };
+        let offloaded = OffloadedExperts::new(
+            [host(0)?, host(1)?, host(2)?],
+            BENCH_EXPERTS,
+            BENCH_TOPK,
+            cuda,
+            GluActivationType::Silu,
+        )?;
+        let resident = (0..PROJECTIONS)
+            .map(|p| {
+                let [_, rows, cols] = dims[p];
+                let stack = DeviceExpertStack::zeros(
+                    &[(inference_quant::GgufType::Q4K, rows, cols)],
+                    BENCH_EXPERTS,
+                    cuda,
+                )?;
+                // SAFETY: `bytes` outlives the test, and the synchronize below lands the copy before any read
+                unsafe { stack.fill_async(0, &bytes[p], &cuda.cuda_stream())? };
+                Ok(stack)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let resident = [
+            &resident[0] as &dyn KernelWeight,
+            &resident[1],
+            &resident[2],
+        ];
+        let config = MoEForwardConfig {
+            num_experts: BENCH_EXPERTS,
+            num_experts_per_tok: BENCH_TOPK,
+            act: Activation::Silu,
+        };
+        let xs = patterned(&[1, 1, BENCH_HIDDEN], 5, 1.0)?.to_device(&device)?;
+        let xs_flat = xs.reshape((1, BENCH_HIDDEN))?;
+        let ids = Tensor::from_vec(
+            (0..u32::try_from(BENCH_TOPK).expect("fits u32")).collect::<Vec<_>>(),
+            (1, BENCH_TOPK),
+            &device,
+        )?;
+        let weights = Tensor::full(0.1f32, (1, BENCH_TOPK), &device)?;
+        let forward = MoEForward {
+            xs: &xs,
+            xs_flat: &xs_flat,
+            topk_weights: &weights,
+            topk_ids: &ids,
+            original_dtype: DType::F32,
+            shape: MoEForwardShape::new(1, 1, BENCH_HIDDEN),
+            lora: None,
+        };
+        let stream = cuda.cuda_stream();
+        let sync = || stream.synchronize().map_err(inference_tensor::Error::wrap);
+        // the routed experts' fills land before the timing
+        for _ in 0..20 {
+            offloaded.forward(&forward, config, None)?;
+            sync()?;
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let time = |f: &dyn Fn() -> Result<()>| -> Result<f64> {
+            f()?;
+            sync()?;
+            let t = std::time::Instant::now();
+            for _ in 0..STEPS {
+                f()?;
+            }
+            sync()?;
+            Ok(t.elapsed().as_secs_f64() * 1e6 / f64::from(STEPS))
+        };
+        let graph = |f: &dyn Fn() -> Result<()>| -> Result<CudaGraphHandle> {
+            sync()?;
+            // as the engine captures: no pool reuse across the graph's allocations, uploads cached
+            let _pool = crate::cuda::graph_capture::prepare_cuda_graph_memory_pool(&stream)?;
+            let _htod = cuda.enable_cuda_graph_htod_cache();
+            // the warm-up fills the upload cache the capture reads
+            f()?;
+            sync()?;
+            let restore = crate::cuda::graph_capture::disable_event_tracking_for_capture(&stream);
+            stream
+                .begin_capture(sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
+                .map_err(inference_tensor::Error::wrap)?;
+            f()?;
+            let graph = CudaGraphHandle::end_capture(&stream)?.expect("a captured graph");
+            crate::cuda::graph_capture::restore_event_tracking_after_capture(&stream, restore);
+            Ok(graph)
+        };
+        let offloaded_step =
+            || -> Result<()> { offloaded.forward(&forward, config, None).map(|_| ()) };
+        let resident_step = || -> Result<()> {
+            indexed_mmvq_with(resident, &forward, config)?.expect("Q4_K runs the indexed matvec");
+            Ok(())
+        };
+        let eager_offloaded = time(&offloaded_step)?;
+        let eager_resident = time(&resident_step)?;
+        let offloaded_graph = graph(&offloaded_step)?;
+        let resident_graph = graph(&resident_step)?;
+        let graph_offloaded = time(&|| offloaded_graph.launch())?;
+        let graph_resident = time(&|| resident_graph.launch())?;
+        eprintln!(
+            "eager: offloaded {eager_offloaded:.1} us, resident {eager_resident:.1} us; graph: offloaded \
+             {graph_offloaded:.1} us, resident {graph_resident:.1} us"
         );
         Ok(())
     }

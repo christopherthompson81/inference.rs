@@ -116,7 +116,8 @@ impl MoEExpertsBackendImpl {
                 .map_err(|err| err.context("moe experts mapped cpu")),
             #[cfg(feature = "cuda")]
             Self::Offloaded(w) => w
-                .forward(forward, config)
+                .forward(forward, config, None)
+                .map(|(ys, _)| ys)
                 .map_err(|err| err.context("moe experts offloaded")),
         }
     }
@@ -537,6 +538,50 @@ impl MoEExperts {
         }
 
         ys.reshape(forward.shape.output())
+    }
+
+    /// As [`Self::forward`], also returning `overlap`'s output: with experts offloaded it runs on the GPU while the CPU
+    /// computes the step's missed experts, otherwise after the experts.
+    pub fn forward_overlapping(
+        &self,
+        xs: &Tensor,
+        topk_weights: Tensor,
+        topk_ids: &Tensor,
+        overlap: &mut dyn FnMut() -> Result<Tensor>,
+    ) -> Result<(Tensor, Tensor)> {
+        #[cfg(feature = "cuda")]
+        if let MoEExpertsBackendImpl::Offloaded(offloaded) = &self.backend
+            && self.world_size == 1
+        {
+            let (batch_size, seq_len, hidden_dim) = xs.dims3()?;
+            let shape = MoEForwardShape::new(batch_size, seq_len, hidden_dim);
+            let xs_flat = xs.reshape(shape.flat())?;
+            let forward = MoEForward {
+                xs,
+                xs_flat: &xs_flat,
+                topk_weights: &topk_weights,
+                topk_ids,
+                original_dtype: xs.dtype(),
+                shape,
+                lora: None,
+            };
+            let (ys, side) = offloaded
+                .forward(&forward, self.forward_config(), Some(overlap))
+                .map_err(|err| err.context("moe experts offloaded"))?;
+            let side = side.expect("an overlapping forward runs its overlap");
+            return Ok((ys.reshape(shape.output())?, side));
+        }
+        let ys = self.forward(xs, topk_weights, topk_ids)?;
+        Ok((ys, overlap()?))
+    }
+
+    /// Whether the experts live in host memory, a cache of them on the GPU.
+    pub fn is_offloaded(&self) -> bool {
+        #[cfg(feature = "cuda")]
+        if matches!(self.backend, MoEExpertsBackendImpl::Offloaded(_)) {
+            return true;
+        }
+        false
     }
 
     fn forward_config(&self) -> MoEForwardConfig {

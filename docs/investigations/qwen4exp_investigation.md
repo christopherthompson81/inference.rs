@@ -1632,3 +1632,148 @@ kept by removing one at a time on an RTX 3060 and an A4000 (drop-one cost in poi
 - `B6_MMVQ_ROWS` (0 / -1.7): rows per block in its matvec.
 None is a kernel we run. Transferable ideas: the mixer on a parallel graph branch and gate/up with SwiGLU fused, ~1%
 each by Strata's numbers. Left for later.
+
+## Run 47 - 2026-10-26 14:15
+
+Question: Strata leaves ~10 ms of a 2-token window's GPU work exposed (Run 44); a plain step here leaves 14 ms between
+host calls. What of ours could run while the CPU computes the misses?
+
+Read: Qwen3.5's MoE block ran the router, then the experts (offloaded: the cached ones on the stream, the misses through
+the host function, the stream waiting for its result), then the shared expert. The shared expert queued behind the
+wait; Strata's stage list runs `shared+quant` before its CPU waits. Built: `MoEExperts::forward_overlapping` takes work
+to overlap; offloaded experts run it after launching the cached experts' kernels and before the stream waits for the
+CPU, other backends after the experts. The shared expert and its gate go through it.
+
+No drafts, interleaved after / before / after / before, two rounds each (the first after round cold, left out):
+```
+          prose                    code
+after     41.4 40.5 41.6 (41.2)    33.9 36.9 34.9 (35.2)
+before    38.1 41.7 39.4 42.3      35.9 33.5 36.6 36.8
+```
+Within the spread. The host-call probe (Run 40's, applied and removed for each build), one code request each:
+```
+          step      CPU on misses   between host calls
+before    27.9 ms   11.4            13.97 ms (220 us min gap)
+after     25.4 ms   10.6            12.64 ms (201 us)
+```
+1.3 ms a step of the shared expert now runs beside the CPU (the CPU's share varies run to run). Kept.
+
+## Run 48 - 2026-10-26 14:31
+
+Question: which GPU work does a step leave exposed, and how does a one-draft window compare with Strata's?
+
+nsys with graphs off (`INFERENCE_RS_CUDA_GRAPHS=0`, `--delay 35 --duration 4`, ~97 tokens of the code request; a run
+without the window stops at exactly 40,000 kernel records, which is what truncated Runs 39-41's captures). Kernel time
+12.2 ms a token: Q8_0 dense matvecs 3.7 (the plain, fused-QKV and fused-GLU ones; ~82% of the 3090's bandwidth bound
+for those weights), cached experts 2.25 (IQ3_S 1.30, IQ4_NL 0.84, Q8_0 0.11), the hyper-connection reads and mixing
+~1.8 (`q8_0_exact_rows` 1.07), lm_head 0.62, attention 0.32, router 0.30, GDN recurrence 0.22, and ~1.5 of kernels of
+1-3 us (casts, adds, copies, gathers). Strata's GPU stages for a 2.8-token window sum to ~15 ms: per window it reads the
+weights once for every token in it.
+
+The host-call probe on `--mtp --mtp-n-predict 1`, the prose request (300 windows): median 36.5 ms, mean 39.4, p90 54.8,
+p99 75.3. The slowest tenth are miss bursts (274 missed experts, 34.4 ms of CPU, against 65 and 8.4 ms in the faster
+half). The faster half against Strata's `--spec 2` window (Run 44):
+```
+                         ours (faster half)   Strata
+CPU on misses            8.4 ms               14.4
+GPU not under the CPU    18.8                 10.4 (its GPU-reach wait)
+after the last layer     3.7                  ~6.4 (draft, commit, emit, other)
+window                   31.2                 32.4
+```
+Strata's exposed GPU (10.4-11 ms) is its GPU stages less what runs beside the CPU (cached experts, shared expert, the
+PCIe share). Ours is several ms more than its kernels account for. Each layer here pays a host-function round trip:
+four copies out (ids, weights, slots, activations), an event, the host function's launch on a side stream, a copy
+back. Strata and basalt use a doorbell instead (routes written to mapped memory by the GPU, a spinning host thread, a
+GPU kernel spinning on the result flag; Run 20). Next: measure that round trip's fixed cost per layer.
+
+## Run 49 - 2026-10-26 14:48
+
+Question: does the per-layer host round trip (Run 48's suspect) cost enough to replace it with a doorbell?
+
+`split_round_trip_costs_a_fixed_latency` (offload.rs, ignored benchmark): an offloaded layer of 64 Q4_K experts
+(2560 x 256, top 10) with every expert cached after a warm-up, so the host function computes nothing, against the same
+cached-expert kernel resident; 500 steps, eager and replayed from a graph. Ten runs:
+```
+          offloaded      resident
+eager     69-101 us      44-50 us
+graph     59-66 us       40-46 us      (~19 us a layer: ~0.9 ms over 48 layers)
+```
+With the cached experts' kernel this long, most of the round trip runs beside it. When the CPU's misses outlast that
+kernel (a 2-token window: ~175 us of CPU a layer against ~98 us of cached experts), the CPU cannot start before the
+host function does, so the round trip's latency, up to the ~55-60 us an empty one takes here, lands on every layer:
+up to ~2.6 ms a window. A doorbell (a GPU-written flag a spinning host thread watches) would start the CPU within a
+few us: worth perhaps 1.5-2.5 ms a window, 5-8%. Not the whole of Run 48's gap.
+
+Kernel time per 2-token verify window against a plain step (nsys, graphs off, `--mtp-n-predict 1`, 54 windows
+against 87 steps): 19.1 ms against 13.6. Dense Q8_0 matvecs 3.44 ms for two columns against 3.0 for one; cached
+experts +2.1 (two tokens route to ~twice the distinct experts); new in a window: cuBLAS GEMMs for the 2-row router
+and gate projections (`gemv_kernel_rowtile`, `Kernel2`, `splitKreduce`, ~1 ms) and an f32 `index_select` 37 times
+(`is_u32_f32`, 16 us each, 0.6 ms; GDN state copies for the rollback).
+
+A first version of the benchmark failed intermittently with CUDA_ERROR_ILLEGAL_ADDRESS on replay: it captured without
+the engine's preparation, and kernels whose parameter vectors are uploaded from the host replayed copies from freed
+host buffers. Capturing as the engine does (`prepare_cuda_graph_memory_pool`, the h2d parameter cache warmed by an
+eager call first) passes 10 of 10. Not an engine fault.
+
+## Run 50 - 2026-10-26 15:21
+
+Question: Run 49's two small projections that only a verify window pays for: why, and what does fixing them buy?
+
+Launch grids in the two nsys captures. The one-output shared-expert gate and the 512-output router are plain
+`Linear`s that call the tensor's matmul: one row runs cuBLAS's own `dot_kernel` (1.8 us), two rows a split-K GEMM
+(`Kernel2` + `splitKreduce`, ~8.7 us, 49 a window). The 4-output bf16 projections the layers run twice took the
+one-row-a-block gemv at one row (4 blocks, 3.1 us) and the row-tile gemv at two, 4 rows a block, so one block on one
+SM (6.1 us, 96 a window).
+
+Built: the MoE block's router and shared-expert gate take the small-batch matvec (`inference_quant::gemv`, now
+re-exported) when it fits, the matmul otherwise; the row tile needs 64 output rows or more (`ROWTILE_MIN_M`). Kernel
+time per 2-token window (nsys, graphs off, `--mtp-n-predict 1`): 19.14 -> 18.72 ms; the four kernels' 1.44 ms became
+1.05 ms of `gemv_kernel_batched`. ~0.4 ms, about 1%.
+
+(`gemv.cu` is not clang-format clean on master; only the touched lines follow it.)
+
+## Run 51 - 2026-10-26 15:43
+
+Question: does a doorbell in place of the per-layer host function (Run 49: worth 1.5-2.5 ms a CPU-bound window, if
+the host function's start latency sat on the critical path) pay?
+
+Built and measured, then dropped: a publish kernel wrote the picks and activations into the layer's mapped buffers
+and rang a sequence number; one host thread polled every layer's doorbell (spinning while decoding, parked 50 ms after
+the last ring or step start, which `forward_step` signalled), ran the same `split`, and answered; a wait kernel spun
+on the answer (2 s timeout) and copied the CPU's rows back. Both offload tests passed. The round-trip benchmark: graph
+61-68 us against 41-47 resident, the same ~20 us as the host function.
+
+`--mtp --mtp-n-predict 1`, two rounds each, after / before / after (a fourth server, before, did not start: below):
+```
+           2-token window (median)   between host calls   CPU      prose          code
+doorbell   40.2 ms / 38.2            16.6 / 14.9          16.6 / 16.2   37.2 42.8 / (23.0 cold) 43.7   39.0 37.8 / 38.8 39.7
+host fn    41.1 ms                   15.9                 16.2     38.5 41.9      34.3 39.0
+```
+At most 1-2%, within the spread, and the spinning thread takes a core from the CPU's expert pool while decoding. The
+host function's start latency is not the gap; dropped. The kernel source is kept outside the repo.
+
+A planner fault the A/B exposed: the fourth server stopped with "PagedAttention KV cache requires 410 MB but only 311
+MB is safely available after model loading". The planner counts a resident MTP head as a cached layer (Run 45:
+~0.96 GB counted against ~1.0 GB resident); with a little more of the GPU held elsewhere the KV cache no longer fit.
+Next: count the head at its resident, requantized size.
+
+Fixed: the planner counts a resident MTP head's experts at their requantized size (`MTP_HEAD_EXPERTS`: the
+projections, their GGUF types for sizing and ISQ types for the loader's overrides, one table) from the source's
+blocks, and only the mapped layers' experts size the prompt staging. `--mtp --mtp-n-predict 1`, no other flags: 120
+slots, chunk 2,048 (2,560 before, which the undercount had paid for), 22,031 MiB after load and 22,700 MiB at a
+14.6K-token prompt's peak, prose 35.3 and code 36.0 tok/s (one round).
+
+## Run 52 - 2026-10-26 16:04
+
+Question: where does the branch stand, on numbers firm enough to quote? Interleaved, no-draft / MTP / no-draft /
+MTP servers, three rounds each, the same client (no flags but `--mtp --mtp-n-predict 1`):
+```
+                      prose median (range)     code median (range)
+no draft (128 slots)  45.1 (43.9-46.0)         38.5 (38.1-39.2)
+MTP 1 draft (120)     45.1 (40.2-45.7)         39.6 (39.0-40.5)
+```
+Against the start of Run 38 (37.6 / 33.4) +20% / +15-19%; against Strata's exact one-draft window (51.9 / 42.0)
+-13% / -6%. One draft ties on prose and wins 3% on code; two lose (Run 43). Kept: an offloaded model's MTP head
+drafts one token unless `--mtp-n-predict` says otherwise (`DEFAULT_MTP_N_PREDICT_OFFLOADED`). With `--mtp` alone the
+log reads `n_predict=1`; the precapture now takes all 8 graphs (Run 41's "captured forward failed" is gone since the
+PLE history moved into the graph state), 70 replays and no failures over a request.

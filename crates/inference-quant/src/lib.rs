@@ -48,6 +48,8 @@ pub fn ensure_gguf_type_kernels(name: &str) -> std::result::Result<(), String> {
 mod fp8;
 mod fp8_config;
 mod gemv;
+#[cfg(feature = "cuda")]
+pub use gemv::{gemv, should_use_gemv};
 mod gguf;
 mod gptq;
 mod hqq;

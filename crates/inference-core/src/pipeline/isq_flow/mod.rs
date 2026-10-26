@@ -15,8 +15,8 @@ pub use online::CalibrationStatus;
 pub(crate) use online::{apply_calibration, begin_calibration, calibration_status};
 pub(crate) use plan::{
     AutoDeviceMapSizes, AutoDeviceMapSizing, AutoDeviceMapSizingInputs, IsqLoadPlan, IsqPlanInputs,
-    auto_device_map_sizes, resolve_and_install_isq_plan, resolve_auto_device_map_sizing,
-    resolve_weight_load_dtype,
+    MTP_HEAD_EXPERTS, auto_device_map_sizes, resolve_and_install_isq_plan,
+    resolve_auto_device_map_sizing, resolve_weight_load_dtype,
 };
 
 use std::{collections::HashMap, path::PathBuf};
