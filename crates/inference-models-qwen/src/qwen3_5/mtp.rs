@@ -168,13 +168,10 @@ impl Qwen3_5MtpHead {
             }
         };
         let vb_layer_quant = vb_quant.pp("layers").pp(0);
-        let mlp = FeedForward::load(
-            cfg,
-            vb_layer_quant.pp("mlp"),
-            device.clone(),
-            loading_isq,
-            &comm,
-        )?;
+        // with the model's experts offloaded the head's stay on the GPU, requantized small by the loader: its misses
+        // would cost each draft more than its forward
+        let mlp_vb = vb_layer_quant.pp("mlp").with_moe_expert_cache(None);
+        let mlp = FeedForward::load(cfg, mlp_vb, device.clone(), loading_isq, &comm)?;
         let (layer, output) = match (hc, cfg.qsa()) {
             (Some(hc), Some(qsa)) => (
                 DecoderLayer::load_hyper_qsa(
