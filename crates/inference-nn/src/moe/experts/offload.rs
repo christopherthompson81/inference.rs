@@ -410,7 +410,13 @@ impl OffloadedExperts {
         self.shared.host[0].dims()[0]
     }
 
-    pub(super) fn forward(&self, forward: &MoEForward, config: MoEForwardConfig) -> Result<Tensor> {
+    /// The layer's output, and `overlap`'s: on a decode step it runs on the stream while the CPU computes the misses.
+    pub(super) fn forward(
+        &self,
+        forward: &MoEForward,
+        config: MoEForwardConfig,
+        overlap: Option<&mut dyn FnMut() -> Result<Tensor>>,
+    ) -> Result<(Tensor, Option<Tensor>)> {
         if forward.lora.is_some() {
             inference_tensor::bail!("offloaded MoE experts do not take LoRA adapters");
         }
@@ -421,14 +427,20 @@ impl OffloadedExperts {
             );
         }
         if forward.shape.num_tokens <= SPLIT_MAX_TOKENS {
-            self.forward_split(forward, config)
+            self.forward_split(forward, config, overlap)
         } else {
-            self.forward_staged(forward, config)
+            let ys = self.forward_staged(forward, config)?;
+            Ok((ys, overlap.map(|f| f()).transpose()?))
         }
     }
 
     // the cached experts on the stream, the misses through a host function on the side stream, joined at the end
-    fn forward_split(&self, forward: &MoEForward, config: MoEForwardConfig) -> Result<Tensor> {
+    fn forward_split(
+        &self,
+        forward: &MoEForward,
+        config: MoEForwardConfig,
+        overlap: Option<&mut dyn FnMut() -> Result<Tensor>>,
+    ) -> Result<(Tensor, Option<Tensor>)> {
         let (tokens, hidden) = forward.shape.flat();
         let picks = tokens * self.shared.topk;
         let device = forward.xs.device();
@@ -506,8 +518,9 @@ impl OffloadedExperts {
         let gpu = indexed_mmvq_with(cache, &hits, hit_config)?.ok_or_else(|| {
             inference_tensor::Error::msg("cached experts cannot run the indexed matvec")
         })?;
+        let side = overlap.map(|f| f()).transpose()?;
         main.wait(&cpu_done).map_err(wrap)?;
-        gpu + ys.to_dtype(forward.original_dtype)?
+        Ok(((gpu + ys.to_dtype(forward.original_dtype)?)?, side))
     }
 
     // the cached experts this batch routes to from their slots, then the rest over the bus a staging group at a time;
@@ -844,7 +857,7 @@ mod tests {
                     .collect::<Vec<_>>();
                 run.ids = Tensor::from_vec(ids, (tokens, TOPK), &device)?;
             }
-            let actual = offloaded.forward(&run.forward(), config)?;
+            let (actual, _) = offloaded.forward(&run.forward(), config, None)?;
             let xs = run
                 .xs_flat
                 .to_device(&Device::Cpu)?
@@ -946,7 +959,13 @@ mod tests {
         // later steps hit what earlier ones copied in, and evict as the routes move on
         for step in 0..12 {
             let run = run(&device, 2, step)?;
-            let actual = offloaded.forward(&run.forward(), config)?;
+            // work overlapped with the CPU's misses comes back beside the layer's output
+            let mut side = || Tensor::full(step as f32, 3, &device);
+            let (actual, side) = offloaded.forward(&run.forward(), config, Some(&mut side))?;
+            assert_eq!(
+                side.expect("the overlap ran").to_vec1::<f32>()?,
+                vec![step as f32; 3]
+            );
             let expected = indexed_mmvq_with(resident, &run.forward(), config)?
                 .expect("Q4_K runs the indexed matvec");
             let err = relative_error(&actual, &expected)?;
@@ -958,7 +977,7 @@ mod tests {
         }
 
         let run = run(&device, PROMPT, 0)?;
-        let actual = offloaded.forward(&run.forward(), config)?;
+        let (actual, _) = offloaded.forward(&run.forward(), config, None)?;
         let expected =
             grouped_with(resident, &run.forward(), config)?.expect("Q4_K runs the grouped mmq");
         // the passes' sums add in another order than one reduce

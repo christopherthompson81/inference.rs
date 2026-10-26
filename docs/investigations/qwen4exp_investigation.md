@@ -1632,3 +1632,28 @@ kept by removing one at a time on an RTX 3060 and an A4000 (drop-one cost in poi
 - `B6_MMVQ_ROWS` (0 / -1.7): rows per block in its matvec.
 None is a kernel we run. Transferable ideas: the mixer on a parallel graph branch and gate/up with SwiGLU fused, ~1%
 each by Strata's numbers. Left for later.
+
+## Run 47 - 2026-10-26 14:15
+
+Question: Strata leaves ~10 ms of a 2-token window's GPU work exposed (Run 44); a plain step here leaves 14 ms between
+host calls. What of ours could run while the CPU computes the misses?
+
+Read: Qwen3.5's MoE block ran the router, then the experts (offloaded: the cached ones on the stream, the misses through
+the host function, the stream waiting for its result), then the shared expert. The shared expert queued behind the
+wait; Strata's stage list runs `shared+quant` before its CPU waits. Built: `MoEExperts::forward_overlapping` takes work
+to overlap; offloaded experts run it after launching the cached experts' kernels and before the stream waits for the
+CPU, other backends after the experts. The shared expert and its gate go through it.
+
+No drafts, interleaved after / before / after / before, two rounds each (the first after round cold, left out):
+```
+          prose                    code
+after     41.4 40.5 41.6 (41.2)    33.9 36.9 34.9 (35.2)
+before    38.1 41.7 39.4 42.3      35.9 33.5 36.6 36.8
+```
+Within the spread. The host-call probe (Run 40's, applied and removed for each build), one code request each:
+```
+          step      CPU on misses   between host calls
+before    27.9 ms   11.4            13.97 ms (220 us min gap)
+after     25.4 ms   10.6            12.64 ms (201 us)
+```
+1.3 ms a step of the shared expert now runs beside the CPU (the CPU's share varies run to run). Kept.
