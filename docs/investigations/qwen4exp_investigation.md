@@ -1424,3 +1424,37 @@ report's kernel records stop about 20 s in, before most of the decode (36.8K ker
 13 s recorded), and a run windowed onto the decode (`--delay 40 --duration 8`) recorded no kernels at all. Under the
 profiler the request decoded at 21.6 tok/s (28 without). Not resolved; the split needs another way in (the engine's
 own per-step timing, or nsys on a `bench` run without the server).
+
+## Run 40 - 2026-10-26 11:40
+
+Question: where does a verify step's time go? A probe in the offloaded experts' host function (env-gated, removed
+after) logged each call's layer, tokens, misses, start, CPU miss time and end; one code request (512 tokens) after a
+prose warm-up, built with debug-assertions and overflow-checks off, no flags (112 slots; 104 with `--mtp`).
+"Between calls" is the end of one layer's host call to the start of the next: the rest of the layer on the GPU, the
+next layer's attention and router, the copies and the host function's launch. Medians per step:
+```
+                       step      CPU on misses        between host calls        after the last layer
+plain, 1 token         29.2 ms   11.9 ms (83 misses)  14.2 ms (296 us a layer)   1.5 ms
+MTP verify, 3 tokens   79.4 ms   30.6 ms (293)        38.3 ms (800 us a layer)   9.7 ms (two drafts; head 11
+                                                                                  misses, 2.0 ms of CPU)
+```
+The CPU side scales as Run 23 found (104 us a miss in a verify, 144 in a plain step). The GPU side is the gap: a
+verify step's layers take 2.7x a plain step's between host calls, because verify steps (more than one query token)
+run eager while plain steps replay CUDA graphs (#609). At a plain step's 14 ms the verify would be ~55 ms, Strata's
+(Run 39: ~65 ms at its window), and 2.4 tokens a step would give ~43 tok/s against 33-35 without drafting.
+
+Next: capture verify steps in CUDA graphs.
+
+The server's `/metrics` after an MTP request: every verify step `inference_cuda_graph_dispatch_total{mode="skipped",
+reason="incompatible_shape"}` (54 of 54), from three one-token assumptions:
+- `TokenWindow::decode_rows` lays out one step token a row, and the graph attempt filters on `q_len == 1`; precapture
+  skips every verify width for a window model ("a window model graphs only one-token steps").
+- PLE's host gather (`ple.rs`, `host_gather`) serves `len == 1` rows only.
+- QSA's device plan (`QsaStep::decode`, `qsa_decode_plan`) is the one-token path; a verify step builds its pooling and
+  selection on the host from each row's start and length (per-token table rows), which a graph cannot replay.
+The speculative graph state itself exists (Qwen3.5's `take_speculative_graph_state`, with the PLE commit); whether it
+carries Flash-Next's MTP inputs (the pre-mixer hyper-connection streams) is to be checked.
+
+Plan: (1) a q-token window layout and PLE host gather, and precapture of the verify width for window models; (2) a
+device QSA plan for verify steps (each query token's table row and context, pooling ordered so the latest token's
+write of a shared block wins); (3) the MTP graph state for the streams; then measure against the rows above.
