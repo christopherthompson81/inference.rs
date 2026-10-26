@@ -44,6 +44,9 @@ pub const DEFAULT_MTP_N_PREDICT: usize = 2;
 // On larger models the verify forward dominates the step, so deeper drafting pays; measured on
 // Qwen3.8-27B: n=3 beats n=2 by ~5% while n=4 over-drafts (acceptance falls under 50%).
 pub const DEFAULT_MTP_N_PREDICT_LARGE: usize = 3;
+// With experts offloaded every verified token's missed experts run on the CPU; one draft ties or beats none on
+// Qwen3.8-Flash-Next and two lose (qwen4exp investigation Runs 43 and 52)
+pub const DEFAULT_MTP_N_PREDICT_OFFLOADED: usize = 1;
 const MTP_LARGE_HIDDEN_SIZE: usize = 4096;
 // Verify cost grows with block width and quantized targets accept shorter blocks anyway; deeper
 // drafting stays available via --mtp-n-predict.
@@ -1136,7 +1139,9 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
                 "The built-in MTP head was not loaded; pass `--mtp` when loading the model."
             );
         }
-        let default_n_predict = if self.cfg.hidden_size >= MTP_LARGE_HIDDEN_SIZE {
+        let default_n_predict = if self.experts_offloaded() {
+            DEFAULT_MTP_N_PREDICT_OFFLOADED
+        } else if self.cfg.hidden_size >= MTP_LARGE_HIDDEN_SIZE {
             DEFAULT_MTP_N_PREDICT_LARGE
         } else {
             DEFAULT_MTP_N_PREDICT

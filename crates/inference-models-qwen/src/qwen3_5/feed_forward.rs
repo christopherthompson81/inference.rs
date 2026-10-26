@@ -69,6 +69,11 @@ impl FeedForward {
         }
     }
 
+    /// Whether a sparse block's experts live in host memory.
+    pub(super) fn is_offloaded(&self) -> bool {
+        matches!(self, Self::Sparse(moe) if moe.experts.is_offloaded())
+    }
+
     /// The feed-forward over an already normalized input.
     pub(super) fn forward(&self, x: &Tensor) -> Result<Tensor> {
         match self {

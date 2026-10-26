@@ -2645,6 +2645,11 @@ impl Qwen3_5TextModel {
         Ok(())
     }
 
+    /// Whether any layer's MoE experts live in host memory.
+    pub(super) fn experts_offloaded(&self) -> bool {
+        self.layers.iter().any(|layer| layer.mlp.is_offloaded())
+    }
+
     pub(super) fn last_spec_capture(&self) -> Option<SpecCapture> {
         self.last_spec_capture
             .lock()

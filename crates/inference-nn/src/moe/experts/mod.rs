@@ -575,6 +575,15 @@ impl MoEExperts {
         Ok((ys, overlap()?))
     }
 
+    /// Whether the experts live in host memory, a cache of them on the GPU.
+    pub fn is_offloaded(&self) -> bool {
+        #[cfg(feature = "cuda")]
+        if matches!(self.backend, MoEExpertsBackendImpl::Offloaded(_)) {
+            return true;
+        }
+        false
+    }
+
     fn forward_config(&self) -> MoEForwardConfig {
         MoEForwardConfig {
             num_experts: self.num_experts,

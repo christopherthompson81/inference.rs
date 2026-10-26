@@ -1762,3 +1762,18 @@ projections, their GGUF types for sizing and ISQ types for the loader's override
 blocks, and only the mapped layers' experts size the prompt staging. `--mtp --mtp-n-predict 1`, no other flags: 120
 slots, chunk 2,048 (2,560 before, which the undercount had paid for), 22,031 MiB after load and 22,700 MiB at a
 14.6K-token prompt's peak, prose 35.3 and code 36.0 tok/s (one round).
+
+## Run 52 - 2026-10-26 16:04
+
+Question: where does the branch stand, on numbers firm enough to quote? Interleaved, no-draft / MTP / no-draft /
+MTP servers, three rounds each, the same client (no flags but `--mtp --mtp-n-predict 1`):
+```
+                      prose median (range)     code median (range)
+no draft (128 slots)  45.1 (43.9-46.0)         38.5 (38.1-39.2)
+MTP 1 draft (120)     45.1 (40.2-45.7)         39.6 (39.0-40.5)
+```
+Against the start of Run 38 (37.6 / 33.4) +20% / +15-19%; against Strata's exact one-draft window (51.9 / 42.0)
+-13% / -6%. One draft ties on prose and wins 3% on code; two lose (Run 43). Kept: an offloaded model's MTP head
+drafts one token unless `--mtp-n-predict` says otherwise (`DEFAULT_MTP_N_PREDICT_OFFLOADED`). With `--mtp` alone the
+log reads `n_predict=1`; the precapture now takes all 8 graphs (Run 41's "captured forward failed" is gone since the
+PLE history moved into the graph state), 70 replays and no failures over a request.
