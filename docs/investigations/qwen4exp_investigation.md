@@ -1530,3 +1530,28 @@ Kept (user's call): an offloading plan reserves a 2,048-token chunk's activation
 (`MIN_PLANNED_PROMPT_CHUNK`), and keeps 2 prefix snapshots in the recurrent pool (`OFFLOAD_PREFIX_SNAPSHOTS`; a host
 prefix store already capped them at 2). No flags: 128 slots, chunk 2,560, the 14.6K-token prompt at 438 tok/s, decode
 38.5 / 42.4 prose and 34.3 / 37.5 code.
+
+## Run 43 - 2026-10-26 13:06
+
+Question: what can the drafting work buy? A probe in `mtp_propose` (a device sync after each phase; removed after),
+means per proposal of two drafts over each 100 verify steps:
+```
+refresh forward (anchor + accepted rows)   2.2-6.4 ms
+chained forward (one row)                  2.0-4.5 ms
+lm_head + sampling, both drafts            1.5 ms
+```
+A forward is ~2 ms at its fastest; the spread is the head's missed experts, ~3-4 ms a proposal. Keeping the head's
+experts resident costs ~1 GB at Q2_K/IQ4_NL (Run 26), one slot step of the layers' cache (8 slots), which the head
+already costs: the MTP servers plan 120 slots against 128 without it. Graphing the head would take the ~4 ms of eager
+work down by part of it. With all of the drafting gone a verify step is ~61 ms for 2.5 tokens, ~41 tok/s: level with no
+drafting.
+
+Draft depth, verify graphs on, no flags otherwise:
+```
+                   slots   prose          code           accept
+no draft           128     38.5-46.5      34.3-38.5      -       (Runs 42 and its planner follow-up)
+MTP, 1 draft       120     38.6 40.2      35.8 35.9      84.7%, 1.85 tokens a step
+MTP, 2 drafts      120     34.7 35.6      34.7 35.9      78.8%, 2.58
+```
+One draft is level with no drafting; two lose. On this machine (PCIe 3, an AVX2 8-core CPU computing ~20% of routes)
+a verify's extra tokens cost the CPU nearly what they save, so the drafting work's ceiling is break-even. Not built.
