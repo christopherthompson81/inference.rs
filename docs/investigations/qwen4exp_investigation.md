@@ -1494,3 +1494,34 @@ Graphs took ~20 ms out of the verify's layers; MTP still loses to no drafting he
 experts missing), the CPU's misses (~35 ms of the forward), and the real model's precapture still logging "CUDA graph
 captured forward failed" before the lazy captures succeed. nsys with `--cuda-graph-trace=graph` lost its records
 after 8 s again (5 graph launches recorded), so host-function graphs and CUPTI do not mix here.
+
+## Run 42 - 2026-10-26 12:40
+
+Question: Run 41 left the CPU's misses as the cap. Strata caches 6,616 experts (~138 a layer) against our 120; how
+much VRAM does our offload hold idle during decode, and can it become slots?
+
+At decode 21.4 GB of 24.5 was in use; a 14.6K-token prompt peaked about 0.5 GB above that. Prompt staging held a
+whole layer's experts (1.7 GB) for the grouped kernels. Built: a prompt layer now runs its cached experts straight
+from the layer's cache stack, then its uncached ones over the bus `OFFLOAD_STAGING_EXPERTS` (64) at a time, each pass
+running every route with the routes of other passes parked: `grouped_parked_with` dispatches over one expert more than
+its kernels run and the parked routes carry weight 0, which the weighted reduce now skips (an unwritten row could hold
+a NaN). Staging and the planner's count take a group's room. `offloaded_experts_match_resident_ones` runs a cached
+pass and two staged groups (relative error < 1e-5 against all experts resident).
+
+```
+no flags, no draft         slots   chunk   decode prose      decode code       14.6K-token prompt
+before (Run 41 build)      120     1024    41.4 42.6 42.1    35.9 36.5 37.3    -
+group staging              128     2048    42.2 44.6 46.5    36.2 38.3 38.5    405 tok/s
+```
+Run 27 had the 2,048 chunk at 301-305 tok/s; the cached pass reads its experts in place instead of copying them into
+staging. Decode moved a few percent, within the spread. Slots move in steps of eight (`PLANNED_SLOT_STEPS`), and a
+second load, with the desktop holding a little less, planned 136 slots and shrank the prompt chunk to 512 (Run 27: ~120
+tok/s): slots first, chunk second turns one slot step into a 3x slower prefill.
+
+The planner's terms at 136 slots (a probe in `ExpertCachePlan::spare`, removed after): device available 22,315 MiB,
+weights 19,813, KV 380, the runtime reserve 1,024, the recurrent pool 998 (9 slots of ~111 MB: one sequence, the graph
+pad, and 7 kept for prefix snapshots), 51 spare. Those 7 snapshot slots are ~7 cached experts a layer.
+
+Against Strata (Run 39): our verify misses 306 routes of 1,440 (21%, 79% hits) at ~115 us a miss; Strata hit 74-84%
+at ~133 us. The slot gap is mostly closed and the miss cost is now the same in both engines. What separates the verify
+steps is the drafting (8-14 ms here; Strata's head is resident) and the commit.

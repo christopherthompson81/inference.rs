@@ -12,6 +12,10 @@ mod forward;
 #[cfg(feature = "cuda")]
 mod offload;
 
+/// Experts an offloaded layer's prompt stages on the device at once: its uncached experts run in groups of this many,
+/// so the staging takes a group's room rather than a whole layer's.
+pub const OFFLOAD_STAGING_EXPERTS: usize = 64;
+
 use inference_quant::{
     IsqType, LoraExpertExecution, LoraExpertProjectionNames, LoraExpertSiteHandle,
     LoraExpertSiteSpec, LoraSiteKey, QuantizedConfig, Shard, ShardedVarBuilder, SumAllReduce,
