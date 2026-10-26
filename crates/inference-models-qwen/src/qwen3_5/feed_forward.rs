@@ -168,7 +168,7 @@ impl SparseMoeBlock {
         let (b_size, seq_len, hidden_dim) = xs.dims3()?;
         let xs_flat = xs.reshape(((), hidden_dim))?;
 
-        let router_logits = self.gate.forward(&xs_flat)?;
+        let router_logits = small_rows(&self.gate, &xs_flat)?;
         let router_logits = match &self.gate_lora {
             Some(site) => inference_quant::apply_dynamic_lora_delta(site, &xs_flat, router_logits)?,
             None => router_logits,
@@ -191,7 +191,7 @@ impl SparseMoeBlock {
         // the shared expert runs while offloaded experts' misses are on the CPU
         let mut shared = || -> Result<Tensor> {
             let shared_out = self.shared_expert.forward(xs)?;
-            let shared_gate = self.shared_expert_gate.forward(&xs_flat)?;
+            let shared_gate = small_rows(&self.shared_expert_gate, &xs_flat)?;
             let shared_gate = match &self.shared_expert_gate_lora {
                 Some(site) => {
                     inference_quant::apply_dynamic_lora_delta(site, &xs_flat, shared_gate)?
@@ -207,4 +207,14 @@ impl SparseMoeBlock {
                 .forward_overlapping(xs, topk.values, &topk.indices, &mut shared)?;
         y.reshape((b_size, seq_len, hidden_dim))? + shared_out
     }
+}
+
+// A few rows (a speculative verify's) take the small-batch matvec: cuBLAS runs a split-K GEMM for them, ~5x the
+// one-row dot on Qwen3.8-Flash-Next's one-output shared-expert gate
+fn small_rows(linear: &Linear, x: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if inference_quant::should_use_gemv(x, linear.weight()) {
+        return inference_quant::gemv(x, linear.weight(), linear.bias());
+    }
+    linear.forward(x)
 }

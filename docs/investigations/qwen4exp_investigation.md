@@ -1714,3 +1714,20 @@ A first version of the benchmark failed intermittently with CUDA_ERROR_ILLEGAL_A
 the engine's preparation, and kernels whose parameter vectors are uploaded from the host replayed copies from freed
 host buffers. Capturing as the engine does (`prepare_cuda_graph_memory_pool`, the h2d parameter cache warmed by an
 eager call first) passes 10 of 10. Not an engine fault.
+
+## Run 50 - 2026-10-26 15:21
+
+Question: Run 49's two small projections that only a verify window pays for: why, and what does fixing them buy?
+
+Launch grids in the two nsys captures. The one-output shared-expert gate and the 512-output router are plain
+`Linear`s that call the tensor's matmul: one row runs cuBLAS's own `dot_kernel` (1.8 us), two rows a split-K GEMM
+(`Kernel2` + `splitKreduce`, ~8.7 us, 49 a window). The 4-output bf16 projections the layers run twice took the
+one-row-a-block gemv at one row (4 blocks, 3.1 us) and the row-tile gemv at two, 4 rows a block, so one block on one
+SM (6.1 us, 96 a window).
+
+Built: the MoE block's router and shared-expert gate take the small-batch matvec (`inference_quant::gemv`, now
+re-exported) when it fits, the matmul otherwise; the row tile needs 64 output rows or more (`ROWTILE_MIN_M`). Kernel
+time per 2-token window (nsys, graphs off, `--mtp-n-predict 1`): 19.14 -> 18.72 ms; the four kernels' 1.44 ms became
+1.05 ms of `gemv_kernel_batched`. ~0.4 ms, about 1%.
+
+(`gemv.cu` is not clang-format clean on master; only the touched lines follow it.)

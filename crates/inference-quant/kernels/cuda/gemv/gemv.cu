@@ -253,6 +253,9 @@ __host__ int get_optimal_block_size(int K) {
 #define ROWTILE_MAX_M 1024
 // a single input row is faster on the one-row-per-block kernel (3.5 against 6.1 us at M 96, K 5120)
 #define ROWTILE_MIN_BATCH 2
+// fewer rows leave the row tile a block or two (a 4-output projection is one block); the row-a-block kernel spreads
+// them wider
+#define ROWTILE_MIN_M 64
 
 template <typename T, int BATCH_SIZE, int ROWTILE_ROWS>
 __global__ void __launch_bounds__(ROWTILE_WARPS *WARP_SIZE)
@@ -331,7 +334,8 @@ __global__ void __launch_bounds__(ROWTILE_WARPS *WARP_SIZE)
 // whether the row-tile kernel takes this shape and these pointers (its loads are 16 bytes wide)
 __host__ bool use_rowtile(const void *A, const void *X, int M, int K, int batch_size) {
   const bool aligned = ((reinterpret_cast<uintptr_t>(A) | reinterpret_cast<uintptr_t>(X)) % 16) == 0;
-  return aligned && batch_size >= ROWTILE_MIN_BATCH && M <= ROWTILE_MAX_M && M % 4 == 0 &&
+  return aligned && batch_size >= ROWTILE_MIN_BATCH && M >= ROWTILE_MIN_M && M <= ROWTILE_MAX_M &&
+         M % 4 == 0 &&
          K % (ROWTILE_WARPS * WARP_SIZE * ROWTILE_VEC) == 0;
 }
 
