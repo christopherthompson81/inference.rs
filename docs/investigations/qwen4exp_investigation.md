@@ -1352,3 +1352,75 @@ A/B against --pa-memory-fraction 0.9 (the old default, 104 slots), three alterna
 ```
 +7%, every pair in favor, with about 1 GB of headroom at a full-context prompt. A longer context needs
 `--pa-context-len` or `--max-seq-len` now (the pool no longer stretches to 219K tokens by itself).
+
+## Run 38 - 2026-10-26 11:06
+
+Question: what does another engine decode at on the same weights and this machine? Basalt (Run 20) builds for sm_120
+only and refuses other targets. Strata (MIT, github.com/Niko1221/Strata, 4b9e05a2), the engine basalt forked, builds
+for sm_75 and up and lists UD-IQ4_XS among its Flash-Next packs; its docs say that file "has not been measured on
+NVIDIA".
+
+Setup: Strata built from source for sm_86 (CUDA 12.8, Release), its pack from our shard 1 (`tools/iq_pack.py
+--compat-bf16`, 1.4 GB, experts read from the GGUF in place), its MTP draft layer from the BF16 checkpoint's `mtp.*`
+tensors (`mtp_fetch`, `mtp_pack --experts q2_0`, `mtp_rt`: 512 Q2_0 experts, 708 MB, resident). Config as its setup
+writes for this file with all experts in RAM: `--resident-budget-gib 64 --expert-cache auto --prefill auto --spec 4
+--spec-min-p 0.5 --mtp mtp/rt --max-context 32768`, int8 KV, `STRATA_HC_Q8=1`, `STRATA_ROUTE_TAIL_SKIP=0`. Ours:
+`inference serve` built with debug-assertions and overflow-checks off, no flags (planner: q3 KV, 32K, 112 slots; 104
+with `--mtp`, n_predict 2). Client: one streamed chat request at a time, greedy, thinking off, 512 new tokens, a prose
+and a code prompt, three rounds after a warm-up; decode = tokens after the first over first-to-last token time. Round
+0 of the first server loaded was cold (experts paging in) and is left out of its means.
+
+```
+                                     prose (tok/s)          code (tok/s)
+ours, no draft (112 slots)           37.8 37.4              32.3 34.5
+ours, MTP (104 slots)                27.7 26.0 31.1         28.7 28.3 27.4
+Strata, MTP, tail skip off           48.4 48.6 47.9         42.5 43.8 43.8
+Strata, MTP, tail skip on (default)  59.0 56.8 57.7         56.9 56.8 55.0
+```
+
+Strata takes no run without drafting on a native pack ("needs --spec T (T >= 2)"). Its exact configuration decodes
+1.29x ours on prose and 1.31x on code. The route tail skip (a missed expert that every token of a verify window ranks
+7th or lower is neither copied nor computed) adds another 1.2-1.3x; Strata measures it at KL 0.056 -> 0.086 against
+Q8_0 on UD-Q4_K_XL with every expert in RAM, and its setup turns it off for these files when they fit in RAM.
+
+What its logs show for the exact run:
+- GPU cache 6,616 experts (14.9 GiB, ~138 a layer against our 112), filled by its shipped routing profile, with
+  adaptive swaps; the other 44 GiB page-locked in RAM. Decode hit rate 74-84% per request.
+- 3-6% of routed experts read by the GPU over PCIe (its `pcie_frac`, 0.35 from a 12.9 GB/s probe); the CPU computes
+  the rest of the misses.
+- MTP accepts 244-333 of 466-487 drafts per request (52-70%), `--spec 4` with an early stop at min-p 0.5; the head's
+  experts never leave the GPU. Ours at 104 slots is slower than no drafting (Run 26: verify misses ~6x).
+- sm_86 turns on nine "exact speed switches" by default (ADAPT_NOWAIT, ADAPT_LAG, CPU_IQ_ALL_EXACT1, SIDE_MIXER,
+  ATTN_DAILY, GR_UP75, GU_SWIGLU, QSA_ROWS, B6_MMVQ_ROWS).
+
+Implication: the gap is drafting that pays. Strata keeps the drafter's experts resident in Q2_0, so a draft costs no
+miss, and its verify windows run more slots (one cache sized by its profile, no MoE KV share). Next, in order: an MTP
+head with resident experts (Q2_0 or similar, ~0.7 GB) and a verify window sized to the CPU share, measured against
+these rows; then more GPU slots (the 14.9 GiB against ours) and a GPU share of the misses over PCIe.
+
+## Run 39 - 2026-10-26 11:20
+
+Question: Run 38's 1.3x, from which part of Strata? First, Run 26 already answers the plan Run 38 ended on: the head's
+experts resident (Q8_0, and a Q2_K/IQ4_NL head that frees slots) left MTP break-even; Run 23 put the verify at 9.5
+misses a layer (8.1 distinct) and 1,214 us of CPU against a plain step's 1.55 and 239 us, about 150 us a distinct
+expert either way.
+
+Strata exact (tail skip off) with its GPU share of the misses off (`--pcie-frac 0`), same client:
+```
+                         prose              code
+GPU share on (Run 38)    48.4 48.6 47.9     42.5 43.8 43.8
+--pcie-frac 0            47.8 49.9 46.0     42.2 39.4 41.8
+```
+The PCIe share is worth 1-5%. Its log, per request: 71-82% decode hit rate; on the code prompt 92.5K missed routes
+over ~187 verify steps (512 tokens, 325 drafts accepted), about 10.3 missed routes a layer a step, 65 ms a step,
+1.37 ms a layer. Ours (Run 23 numbers, Run 38 throughput): 9.5 missed routes a layer, ~86 ms a verify step, 1.8 ms
+a layer. The CPU's cost per miss is about the same in both; the gap is ~0.4 ms a layer outside the miss kernel
+(GPU work not hidden behind the CPU, the host function round trip, our head's own misses at 6.8 of 10 a draft).
+
+Next: an nsys profile of one of our MTP verify steps, to split those 0.4 ms before building anything.
+
+Profile attempt (`nsys profile --trace=cuda,nvtx --cuda-graph-trace=node`, one code request under `--mtp`): the
+report's kernel records stop about 20 s in, before most of the decode (36.8K kernels, 0.3 s of kernel time over the
+13 s recorded), and a run windowed onto the decode (`--delay 40 --duration 8`) recorded no kernels at all. Under the
+profiler the request decoded at 21.6 tok/s (28 without). Not resolved; the split needs another way in (the engine's
+own per-step timing, or nsys on a `bench` run without the server).
