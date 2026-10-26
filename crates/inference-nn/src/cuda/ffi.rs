@@ -30,6 +30,16 @@ inference_tensor::kernel_library! {
             dst_pitch: i64,
             stream: i64,
         ) -> i32;
+        pub fn moe_doorbell_ring(counter: *mut c_void, bell: *mut c_void, tokens: i32, stream: i64) -> i32;
+        pub fn moe_doorbell_wait(
+            counter: *const c_void,
+            done: *const c_void,
+            host_ys: *const c_void,
+            ys: *mut c_void,
+            values: i32,
+            timed_out: *mut c_void,
+            stream: i64,
+        ) -> i32;
         pub fn moe_split_prepare(
             ids: *const c_void,
             weights: *const c_void,

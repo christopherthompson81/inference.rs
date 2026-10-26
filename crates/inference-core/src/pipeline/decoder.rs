@@ -1235,6 +1235,9 @@ impl Pipeline for DecoderPipeline {
         inputs: Box<dyn Any>,
         return_raw_logits: bool,
     ) -> inference_tensor::Result<ForwardStepResult> {
+        // offloaded MoE layers ring a host thread this wakes; a replayed graph never runs their code
+        #[cfg(feature = "cuda")]
+        inference_nn::moe::offload_activity();
         let StepInputs {
             input_ids,
             seqlen_offsets,

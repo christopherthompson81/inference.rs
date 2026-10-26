@@ -2,12 +2,16 @@
 //! runs the misses, and prefill stages the experts each batch routes to on the GPU.
 //!
 //! A decode step never waits on the host, so it can be captured in a CUDA graph: the GPU looks each pick's slot up in a
-//! table in mapped host memory (0, the zeroed slot, for a miss) and runs the cached experts, while on a side stream the
-//! picks are copied into pinned buffers and a host function runs the misses on the CPU, and the two outputs are added.
-//! Cache fills run on a worker thread and a copy stream, and the table opens a slot once its copy has landed.
+//! table in mapped host memory (0, the zeroed slot, for a miss), writes the picks to mapped buffers and rings the
+//! layer's doorbell, runs the cached experts, and spins until a host thread polling the doorbells has run the misses on
+//! the CPU; the two outputs are added. A host function in their place costs a step ~2.5% on Qwen3.8-Flash-Next: its
+//! dispatch waits behind the fills' landing callbacks on the driver's one callback thread (qwen4exp investigation Run
+//! 55). Cache fills run on a worker thread and a copy stream, and the table opens a slot once its copy has landed.
 
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use inference_quant::cpu_experts::{CpuExpertProjection, CpuExpertRoute, CpuExperts};
 use inference_quant::{
@@ -31,6 +35,9 @@ const MAX_PENDING_FILLS: usize = 4;
 // The slot a miss maps to: left zeroed, so the GPU's share of a CPU-served pick is exactly 0 (a slot mid-copy could
 // hold non-finite scales)
 const MISS_SLOT: u32 = 0;
+// The doorbell thread spins this long after the last ring or step start, then parks, polling this often while parked
+const DOORBELL_IDLE: Duration = Duration::from_millis(50);
+const DOORBELL_PARKED_POLL: Duration = Duration::from_millis(1);
 
 /// Which projection of a layer, in `[gate, up, down]` order.
 const PROJECTIONS: usize = 3;
@@ -117,7 +124,13 @@ struct Shared {
     // expert -> slot in mapped host memory, which the GPU reads and only `state`'s holder writes
     table: Tensor,
     copy_stream: Arc<CudaStream>,
-    host_stream: Arc<CudaStream>,
+    // mapped: the sequence the GPU last rang and that ring's token count; the sequence the host thread last answered;
+    // set when the GPU gave up waiting for an answer
+    bell: CudaSlice<u32>,
+    done: CudaSlice<u32>,
+    timed_out: CudaSlice<u32>,
+    // on the device: the sequence the next ring takes, which the wait compares the answer with
+    counter: CudaSlice<u32>,
     act: GluActivationType,
     topk: usize,
 }
@@ -316,26 +329,135 @@ fn fills() -> &'static Sender<Fill> {
     })
 }
 
-/// A host function's view of one split batch size; the layer's list of them never changes, so a captured graph's
-/// pointer to one stays valid.
-struct SplitCall {
-    shared: Arc<Shared>,
-    tokens: usize,
+impl Shared {
+    fn word(buffer: &CudaSlice<u32>, index: usize) -> &AtomicU32 {
+        let word = &mut mapped_host(buffer, index + 1)[index];
+        // SAFETY: an aligned u32 of mapped memory the layer owns; the GPU and the host thread only touch it atomically
+        unsafe { AtomicU32::from_ptr(word) }
+    }
+
+    // On the doorbell thread: the ring's misses on the CPU, then the answer the GPU waits for
+    fn answer(self: &Arc<Self>, seq: u32) {
+        let tokens = Self::word(&self.bell, 1).load(Ordering::Acquire) as usize;
+        if let Err(err) = self.split(tokens) {
+            // the misses then add nothing rather than stale values
+            tracing::error!("offloaded MoE experts failed on the host: {err}");
+            mapped_host(&self.exchange.ys, tokens * self.hidden()).fill(0.0);
+        }
+        Self::word(&self.done, 0).store(seq, Ordering::Release);
+    }
 }
 
-unsafe extern "C" fn split_host(data: *mut std::ffi::c_void) {
-    // SAFETY: `data` is a `SplitCall` the layer owns for its whole life
-    let call = unsafe { &*data.cast::<SplitCall>() };
-    if let Err(err) = call.shared.split(call.tokens) {
-        // the misses then add nothing rather than stale values
-        tracing::error!("offloaded MoE experts failed on the host: {err}");
-        mapped_host(&call.shared.exchange.ys, call.tokens * call.shared.hidden()).fill(0.0);
+/// The host thread every offloaded layer's decode rings, and the layers it polls.
+struct Doorbell {
+    layers: Mutex<Vec<Arc<Shared>>>,
+    generation: AtomicUsize,
+    // nanoseconds past `epoch` of the latest step start
+    activity: AtomicU64,
+    epoch: Instant,
+    thread: OnceLock<std::thread::Thread>,
+}
+
+fn doorbell() -> &'static Doorbell {
+    static DOORBELL: OnceLock<Doorbell> = OnceLock::new();
+    DOORBELL.get_or_init(|| Doorbell {
+        layers: Mutex::new(Vec::new()),
+        generation: AtomicUsize::new(0),
+        activity: AtomicU64::new(0),
+        epoch: Instant::now(),
+        thread: OnceLock::new(),
+    })
+}
+
+impl Doorbell {
+    fn now(&self) -> u64 {
+        u64::try_from(self.epoch.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    fn register(&'static self, layer: Arc<Shared>) {
+        self.layers
+            .lock()
+            .expect("doorbell layers poisoned")
+            .push(layer);
+        self.generation.fetch_add(1, Ordering::Release);
+        self.thread.get_or_init(|| {
+            std::thread::Builder::new()
+                .name("moe-doorbell".into())
+                .spawn(move || self.run())
+                .expect("spawn the MoE doorbell thread")
+                .thread()
+                .clone()
+        });
+        offload_activity();
+    }
+
+    fn unregister(&self, layer: &Arc<Shared>) {
+        self.layers
+            .lock()
+            .expect("doorbell layers poisoned")
+            .retain(|l| !Arc::ptr_eq(l, layer));
+        self.generation.fetch_add(1, Ordering::Release);
+    }
+
+    fn run(&self) {
+        let (mut layers, mut answered, mut seen) = (Vec::new(), Vec::new(), usize::MAX);
+        let mut last_ring = self.now();
+        loop {
+            let generation = self.generation.load(Ordering::Acquire);
+            if generation != seen {
+                layers = self
+                    .layers
+                    .lock()
+                    .expect("doorbell layers poisoned")
+                    .clone();
+                answered = layers
+                    .iter()
+                    .map(|l: &Arc<Shared>| Shared::word(&l.done, 0).load(Ordering::Acquire))
+                    .collect();
+                seen = generation;
+            }
+            let mut rang = false;
+            for (layer, answered) in layers.iter().zip(answered.iter_mut()) {
+                let seq = Shared::word(&layer.bell, 0).load(Ordering::Acquire);
+                if seq != *answered {
+                    layer.answer(seq);
+                    *answered = seq;
+                    rang = true;
+                }
+            }
+            let now = self.now();
+            if rang {
+                last_ring = now;
+                continue;
+            }
+            let idle = now.saturating_sub(last_ring.max(self.activity.load(Ordering::Acquire)));
+            if idle > u64::try_from(DOORBELL_IDLE.as_nanos()).unwrap_or(u64::MAX) {
+                for layer in &layers {
+                    if Shared::word(&layer.timed_out, 0).swap(0, Ordering::AcqRel) != 0 {
+                        tracing::error!(
+                            "an offloaded MoE layer's decode gave up waiting for the CPU's experts"
+                        );
+                    }
+                }
+                std::thread::park_timeout(DOORBELL_PARKED_POLL);
+            } else {
+                std::hint::spin_loop();
+            }
+        }
+    }
+}
+
+/// Keeps the doorbell thread spinning: called as a step starts, so its first ring is answered at once.
+pub fn offload_activity() {
+    let bell = doorbell();
+    bell.activity.store(bell.now(), Ordering::Release);
+    if let Some(thread) = bell.thread.get() {
+        thread.unpark();
     }
 }
 
 pub(super) struct OffloadedExperts {
     shared: Arc<Shared>,
-    calls: Vec<SplitCall>,
     device: CudaDevice,
     // experts a prompt pass stages at once
     staging_experts: usize,
@@ -385,22 +507,18 @@ impl OffloadedExperts {
                 .context()
                 .new_stream()
                 .map_err(inference_tensor::Error::wrap)?,
-            host_stream: stream
-                .context()
-                .new_stream()
+            bell: zeroed_mapped(&stream, 2)?,
+            done: zeroed_mapped(&stream, 1)?,
+            timed_out: zeroed_mapped(&stream, 1)?,
+            counter: stream
+                .alloc_zeros(1)
                 .map_err(inference_tensor::Error::wrap)?,
             act,
             topk,
         });
-        let calls = (1..=SPLIT_MAX_TOKENS)
-            .map(|tokens| SplitCall {
-                shared: shared.clone(),
-                tokens,
-            })
-            .collect();
+        doorbell().register(shared.clone());
         Ok(Self {
             shared,
-            calls,
             device: device.clone(),
             staging_experts: OFFLOAD_STAGING_EXPERTS,
         })
@@ -445,7 +563,7 @@ impl OffloadedExperts {
         let picks = tokens * self.shared.topk;
         let device = forward.xs.device();
         let main = self.device.cuda_stream();
-        let side = &self.shared.host_stream;
+        offload_activity();
         let ex = &self.shared.exchange;
         let ids = forward.topk_ids.to_dtype(DType::U32)?.contiguous()?;
         let weights = forward.topk_weights.to_dtype(DType::F32)?.contiguous()?;
@@ -456,7 +574,6 @@ impl OffloadedExperts {
         // SAFETY: the preparation below writes every slot id before the cached experts' kernel reads one
         let slot_ids = unsafe { Tensor::empty((tokens, self.shared.topk), DType::U32, device)? };
         let ys = Tensor::zeros((tokens, hidden), DType::F32, device)?;
-        let wrap = inference_tensor::Error::wrap;
         let int = |n: usize| i32::try_from(n).expect("a split batch fits i32");
         let mapped = |buffer: &CudaSlice<u32>| buffer.device_ptr(&main).0 as *mut std::ffi::c_void;
         let mapped_f32 =
@@ -497,19 +614,16 @@ impl OffloadedExperts {
                     "preparing the offloaded experts' split failed with CUDA error {status}"
                 );
             }
-            side.wait(&main.record_event(None).map_err(wrap)?)
-                .map_err(wrap)?;
-            let call = &self.calls[tokens - 1] as *const SplitCall as *mut std::ffi::c_void;
-            result::stream::launch_host_function(side.cu_stream(), split_host, call)
-                .map_err(wrap)?;
-            result::memcpy_htod_async(
-                tensor_ptr::<f32>(&ys, side)?,
-                mapped_host(&ex.ys, tokens * hidden),
-                side.cu_stream(),
-            )
-            .map_err(wrap)?;
+            let status = crate::cuda::ffi::moe_doorbell_ring(
+                mapped(&self.shared.counter),
+                mapped(&self.shared.bell),
+                int(tokens),
+                main.cu_stream() as i64,
+            );
+            if status != 0 {
+                inference_tensor::bail!("ringing the MoE doorbell failed with CUDA error {status}");
+            }
         }
-        let cpu_done = side.record_event(None).map_err(wrap)?;
 
         let hits = MoEForward {
             xs: forward.xs,
@@ -530,8 +644,24 @@ impl OffloadedExperts {
             inference_tensor::Error::msg("cached experts cannot run the indexed matvec")
         })?;
         let side = overlap.map(|f| f()).transpose()?;
-        main.wait(&cpu_done).map_err(wrap)?;
-        Ok(((gpu + ys.to_dtype(forward.original_dtype)?)?, side))
+        // SAFETY: the wait reads the answer only once the host thread has written it, and the next ring of this layer
+        // comes after the stream has seen this one answered, so the host thread is done with the buffers by then
+        let status = unsafe {
+            crate::cuda::ffi::moe_doorbell_wait(
+                mapped(&self.shared.counter),
+                mapped(&self.shared.done),
+                mapped_f32(&ex.ys),
+                tensor_ptr::<f32>(&ys, &main)? as *mut std::ffi::c_void,
+                int(tokens * hidden),
+                mapped(&self.shared.timed_out),
+                main.cu_stream() as i64,
+            )
+        };
+        if status != 0 {
+            inference_tensor::bail!("waiting on the MoE doorbell failed with CUDA error {status}");
+        }
+        let out = (gpu + ys.to_dtype(forward.original_dtype)?)?;
+        Ok((out, side))
     }
 
     // the cached experts this batch routes to from their slots, then the rest over the bus a staging group at a time;
@@ -670,6 +800,18 @@ impl OffloadedExperts {
             inference_tensor::Error::msg("staged experts cannot run the grouped kernels")
         })
     }
+}
+
+impl Drop for OffloadedExperts {
+    fn drop(&mut self) {
+        doorbell().unregister(&self.shared);
+    }
+}
+
+fn zeroed_mapped(stream: &Arc<CudaStream>, len: usize) -> Result<CudaSlice<u32>> {
+    let buffer = mapped_buffer(stream, len)?;
+    mapped_host(&buffer, len).fill(0);
+    Ok(buffer)
 }
 
 /// The CUDA device a layer runs on, when it has one.
