@@ -1657,3 +1657,31 @@ before    27.9 ms   11.4            13.97 ms (220 us min gap)
 after     25.4 ms   10.6            12.64 ms (201 us)
 ```
 1.3 ms a step of the shared expert now runs beside the CPU (the CPU's share varies run to run). Kept.
+
+## Run 48 - 2026-10-26 14:31
+
+Question: which GPU work does a step leave exposed, and how does a one-draft window compare with Strata's?
+
+nsys with graphs off (`INFERENCE_RS_CUDA_GRAPHS=0`, `--delay 35 --duration 4`, ~97 tokens of the code request; a run
+without the window stops at exactly 40,000 kernel records, which is what truncated Runs 39-41's captures). Kernel time
+12.2 ms a token: Q8_0 dense matvecs 3.7 (the plain, fused-QKV and fused-GLU ones; ~82% of the 3090's bandwidth bound
+for those weights), cached experts 2.25 (IQ3_S 1.30, IQ4_NL 0.84, Q8_0 0.11), the hyper-connection reads and mixing
+~1.8 (`q8_0_exact_rows` 1.07), lm_head 0.62, attention 0.32, router 0.30, GDN recurrence 0.22, and ~1.5 of kernels of
+1-3 us (casts, adds, copies, gathers). Strata's GPU stages for a 2.8-token window sum to ~15 ms: per window it reads the
+weights once for every token in it.
+
+The host-call probe on `--mtp --mtp-n-predict 1`, the prose request (300 windows): median 36.5 ms, mean 39.4, p90 54.8,
+p99 75.3. The slowest tenth are miss bursts (274 missed experts, 34.4 ms of CPU, against 65 and 8.4 ms in the faster
+half). The faster half against Strata's `--spec 2` window (Run 44):
+```
+                         ours (faster half)   Strata
+CPU on misses            8.4 ms               14.4
+GPU not under the CPU    18.8                 10.4 (its GPU-reach wait)
+after the last layer     3.7                  ~6.4 (draft, commit, emit, other)
+window                   31.2                 32.4
+```
+Strata's exposed GPU (10.4-11 ms) is its GPU stages less what runs beside the CPU (cached experts, shared expert, the
+PCIe share). Ours is several ms more than its kernels account for. Each layer here pays a host-function round trip:
+four copies out (ids, weights, slots, activations), an event, the host function's launch on a side stream, a copy
+back. Strata and basalt use a doorbell instead (routes written to mapped memory by the GPU, a spinning host thread, a
+GPU kernel spinning on the result flag; Run 20). Next: measure that round trip's fixed cost per layer.
