@@ -1777,3 +1777,58 @@ Against the start of Run 38 (37.6 / 33.4) +20% / +15-19%; against Strata's exact
 drafts one token unless `--mtp-n-predict` says otherwise (`DEFAULT_MTP_N_PREDICT_OFFLOADED`). With `--mtp` alone the
 log reads `n_predict=1`; the precapture now takes all 8 graphs (Run 41's "captured forward failed" is gone since the
 PLE history moved into the graph state), 70 replays and no failures over a request.
+
+## Run 53 - 2026-10-26 16:34
+
+Question: where do a verify window's exposed GPU milliseconds go, stage by stage, inside replayed graphs?
+
+A probe (branch `probe/stage-marks`, local): a one-thread kernel writes `%globaltimer` to a mapped slot at named
+points (layer start, PLE, the GDN read, the mixer, the MLP read, the router, the split's launch, the cached experts,
+the shared expert, the CPU wait, the combine); slots are assigned in call order inside the target's `forward_step`,
+so a lazily captured graph replays them (the startup precapture is skipped while the probe is on, and a capture
+step's eager warm-up half is dropped in the analysis). `--mtp` (one draft), prose after a code warm-up, 435 2-token
+windows, medians summed over layers:
+```
+window (first to last mark)                 34.0 ms
+shared expert done -> the CPU's answer      13.3      (CPU-bound remainder)
+cached experts' kernel                       4.9      (beside the CPU)
+GDN mixer                                    3.9      Strata, 2.8-token window: 3.9
+hyper-connection read into GDN layers        1.66     Strata hc-read0: 0.43
+router -> split launched                     1.53     (casts, slot lookup, 4 copies; none in Strata)
+attention layers (12)                        2.34     Strata QSA stages: ~1.5
+PLE (host gather, inline)                    0.98     Strata: gathered before layer 1, off the critical path
+shared expert                                0.96
+hyper-connection write + MLP read            0.86
+router                                       0.60
+```
+Run 49-50's "unexplained" exposed GPU time is these pieces: the hc reads (unquantized activations since #620, for
+KLD 0.043 -> 0.033; `q8_0_exact_rows` at 6.2 us a call), PLE's inline gather, the per-layer preparation of the
+split, and attention. The CPU-bound span (cached experts + shared + wait, ~19 ms) is longer than Strata's per-layer
+host time (14.4 ms).
+
+Next, by size: a faster exact hc-read kernel (~1.2 ms a window), PLE's gather before the step launches (~1 ms), one
+kernel for the split's preparation (~1.5 ms), attention (~0.8 ms).
+
+## Run 54 - 2026-10-26 16:56
+
+Question: do the split's preparation in one kernel and a faster PLE gather take Run 53's milliseconds back?
+
+Built: one kernel prepares an offloaded layer's split (each pick's slot from the mapped table, the slot ids for the
+cached experts' kernel, and the picks, slots and f32 activations straight into the mapped exchange), in place of an
+activation cast, an `index_select` and four copies. The stage marks: router -> split launched 1.53 -> 0.47 ms a
+window. The window did not move in that run: PLE went 0.98 -> 3.95 ms.
+
+PLE's host gather reads its rows from the GGUF's 27 GiB n-gram table (`per_layer_token_embd.weight`, IQ4_NL
+[320,001,536 x 160], 90-byte rows) in place, one row after another; a row whose page the page cache no longer holds
+faults alone. A probe in `MappedBlocks::gather_rows` (removed after): 36-43 rows a call, 2.0 ms mean, 10 ms worst.
+Built: the gather first asks for every row's page (`madvise(MADV_WILLNEED)`), so the faults are in flight together:
+0.22 ms mean, 2 ms worst.
+
+Interleaved as Run 52 (two servers per setup, three rounds each):
+```
+                      prose median (range)     code median (range)
+no draft              48.3 (46.3-51.0)         41.2 (40.0-41.8)
+MTP 1 draft           48.4 (45.3-50.3)         41.1 (40.5-41.6)
+```
++7% on both against Run 52 (45.1 / 38.5, 45.1 / 39.6). Against Strata's exact one-draft window (51.9 / 42.0): -7% /
+-2%. One draft and none are level again here.
