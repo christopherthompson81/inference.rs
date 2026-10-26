@@ -3,6 +3,7 @@
 
 use inference_nn::attention::{AttentionMask, FlashParams, Sdpa, SdpaParams};
 use inference_quant::ShardedVarBuilder;
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use inference_tensor::quantized::{GgmlDType, QMatMul, QStorage, QTensor};
@@ -24,10 +25,29 @@ pub(crate) enum Linear {
 }
 
 impl Linear {
+    /// From safetensors, or from a GGUF: its quantized weights as stored, on the builder's device; its others dense.
     pub(crate) fn load(in_dim: usize, out_dim: usize, vb: ShardedVarBuilder) -> Result<Self> {
-        Ok(Self::Dense(MaybeQuantLinear::new(
-            in_dim, out_dim, true, vb,
-        )?))
+        let Some(source) = vb.weight_source() else {
+            return Ok(Self::Dense(MaybeQuantLinear::new(
+                in_dim, out_dim, true, vb,
+            )?));
+        };
+        let bias = vb.get(out_dim, "bias")?.to_dtype(ACT_DTYPE)?;
+        let quantized = source
+            .mapped_blocks(&vb.prefix())
+            .and_then(|blocks| Some((blocks.ty.candle()?, blocks)))
+            .filter(|(dtype, _)| dtype.block_size() > 1);
+        let Some((dtype, blocks)) = quantized else {
+            let weight = vb.get((out_dim, in_dim), "weight")?;
+            return Ok(Self::Dense(MaybeQuantLinear::Dense(
+                inference_tensor::nn::Linear::new(weight, Some(bias)),
+            )));
+        };
+        let storage = QStorage::from_data(Cow::Borrowed(blocks.bytes()), vb.device(), dtype)?;
+        Ok(Self::Quantized {
+            weight: Arc::new(QTensor::new(storage, blocks.dims.clone())?),
+            bias: Some(bias),
+        })
     }
 
     pub(crate) fn forward(&self, xs: &Tensor) -> Result<Tensor> {
@@ -42,6 +62,14 @@ impl Linear {
                     None => Ok(out),
                 }
             }
+        }
+    }
+
+    /// The weight's GGUF type; None when dense.
+    pub(crate) fn quant_dtype(&self) -> Option<GgmlDType> {
+        match self {
+            Self::Quantized { weight, .. } => Some(weight.dtype()),
+            Self::Dense(_) => None,
         }
     }
 
@@ -64,6 +92,11 @@ impl Linear {
             Self::Dense(MaybeQuantLinear::Dense(l)) => Ok(Self::Quantized {
                 weight: Arc::new(QTensor::quantize(l.weight(), dtype)?),
                 bias: l.bias().map(|b| b.to_dtype(ACT_DTYPE)).transpose()?,
+            }),
+            // already quantized (read from a GGUF), so it keeps its type
+            Self::Quantized { weight, bias } => Ok(Self::Quantized {
+                weight: weight.clone(),
+                bias: bias.clone(),
             }),
             _ => inference_tensor::bail!("only a dense linear can be quantized"),
         }

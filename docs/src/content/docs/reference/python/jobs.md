@@ -181,10 +181,12 @@ Where jobs keep their folders and which weights they run.
 | `dir` | `str \| None` | `'/home/chris/.cache/inference-rs/engine-jobs'` |
 | `drain_timeout_secs` | `int \| None` | `120` |
 | `lpips` | `str \| None` | optional |
+| `models_repo` | `str \| None` | optional |
 | `moge` | `str \| None` | optional |
 | `placement` | `Placement \| None` | `Placement.FASTEST` |
 | `wan` | `str \| None` | optional |
 | `worldmirror` | `str \| None` | optional |
+| `worldmirror_repo` | `str \| None` | `'tencent/HY-World-2.0'` |
 | `worldstereo` | `str \| None` | optional |
 
 

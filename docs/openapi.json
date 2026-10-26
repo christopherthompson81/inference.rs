@@ -6860,6 +6860,14 @@
             "description": "VGG16 features and the LPIPS heads, for splat training",
             "default": null
           },
+          "models_repo": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A Hugging Face repo laid out as a models root, fetched into the hub cache before a job that needs a checkpoint\nthe fields above leave unset",
+            "default": null
+          },
           "moge": {
             "type": [
               "string",
@@ -6892,6 +6900,14 @@
             ],
             "description": "WorldMirror 2.0",
             "default": null
+          },
+          "worldmirror_repo": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The repository WorldMirror 2.0 is fetched from when neither `worldmirror` nor the models repo provides it",
+            "default": "tencent/HY-World-2.0"
           },
           "worldstereo": {
             "type": [

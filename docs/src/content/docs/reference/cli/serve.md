@@ -72,7 +72,7 @@ inference serve [OPTIONS] [COMMAND]
 | `--disable-request-id-header` | `false` | Disable the x-request-id response header |
 | `--disable-metrics` | `false` | Disable Prometheus HTTP metrics and the metrics recorder |
 | `--jobs-dir <DIR>` |  | Where jobs (world generation, reconstruction) keep their folders; defaults to the cache's `engine-jobs` |
-| `--world-models <DIR>` |  | A folder holding the world-generation checkpoints under their repository names (`WorldStereo/`, `Wan2.1-I2V-14B-480P-Diffusers/`, `moge-2-vitl-normal/`, `HY-World-2.0/`, `lpips-vgg/`), for jobs |
+| `--world-models <DIR_OR_REPO>` |  | The world-generation checkpoints for jobs: a folder holding them under their repository names (`WorldStereo/`, `Wan2.1-I2V-14B-480P-Diffusers/`, `moge-2-vitl-normal/`, `HY-World-2.0/`, `lpips-vgg/`), or a Hugging Face repo laid out the same way, fetched by the first job. WorldMirror comes from `tencent/HY-World-2.0` when neither has it |
 | `--job-placement <JOB_PLACEMENT>` | `fastest` | How much a job may unload to run: whatever it needs (`fastest`), only idle models (`when-quiet`, waiting while a model in its way serves requests), or nothing (`no-eviction`, running only where it fits). Possible values: `fastest`, `when-quiet`, `no-eviction`. |
 | `--job-device <ORDINAL>` |  | A CUDA device jobs may run on; repeat for more. Every visible one by default |
 | `--max-seqs <MAX_SEQS>` | `4` | Maximum concurrent sequences per model; each holds memory while it runs, so raise it for a busy shared server |

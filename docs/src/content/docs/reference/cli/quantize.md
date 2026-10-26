@@ -207,3 +207,17 @@ inference quantize hidream-o1 [OPTIONS] --model-id <MODEL_ID> --output <OUTPUT_P
 | `--type <MATRICES>` | `q8_0` | The text stack's matrix type (`q8_0`, `q6_k`, `q5_0`, `q3_k`); norms, biases and the head stay finer |
 | `--keep <KEEP>` |  | `<name fragment>=<type>`, repeatable: the first fragment a matrix's name contains sets its type |
 
+## inference quantize worldgen
+
+The world-generation checkpoints laid out for distribution, WorldStereo-2 and umT5 as GGUFs
+
+```
+inference quantize worldgen [OPTIONS] --models <MODELS> --output <OUTPUT_PATH>
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `-m, --models <MODELS>` | required | A models root as `serve --world-models` takes it |
+| `-o, --output <OUTPUT_PATH>` | required | The folder to lay the package out in, as a models root |
+| `--type <MATRICES>` | `q8_0` | The type WorldStereo-2's main-block matrices and umT5's matrices take |
+

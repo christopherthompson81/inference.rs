@@ -180,8 +180,8 @@ struct T5DenseActDense {
 
 impl T5DenseActDense {
     fn load(vb: ShardedVarBuilder, cfg: &Config) -> Result<Self> {
-        let wi = MaybeQuantLinear::new(cfg.d_model, cfg.d_ff, false, vb.pp("wi"))?;
-        let wo = MaybeQuantLinear::new(cfg.d_ff, cfg.d_model, false, vb.pp("wo"))?;
+        let wi = MaybeQuantLinear::new_dequantizing(cfg.d_model, cfg.d_ff, vb.pp("wi"))?;
+        let wo = MaybeQuantLinear::new_dequantizing(cfg.d_ff, cfg.d_model, vb.pp("wo"))?;
         Ok(Self {
             wi,
             wo,
@@ -209,9 +209,9 @@ struct T5DenseGatedActDense {
 
 impl T5DenseGatedActDense {
     fn load(vb: ShardedVarBuilder, cfg: &Config) -> Result<Self> {
-        let wi_0 = MaybeQuantLinear::new(cfg.d_model, cfg.d_ff, false, vb.pp("wi_0"))?;
-        let wi_1 = MaybeQuantLinear::new(cfg.d_model, cfg.d_ff, false, vb.pp("wi_1"))?;
-        let wo = MaybeQuantLinear::new(cfg.d_ff, cfg.d_model, false, vb.pp("wo"))?;
+        let wi_0 = MaybeQuantLinear::new_dequantizing(cfg.d_model, cfg.d_ff, vb.pp("wi_0"))?;
+        let wi_1 = MaybeQuantLinear::new_dequantizing(cfg.d_model, cfg.d_ff, vb.pp("wi_1"))?;
+        let wo = MaybeQuantLinear::new_dequantizing(cfg.d_ff, cfg.d_model, vb.pp("wo"))?;
         Ok(Self {
             wi_0,
             wi_1,
@@ -313,10 +313,10 @@ impl T5Attention {
         cfg: &Config,
     ) -> Result<Self> {
         let inner_dim = cfg.num_heads * cfg.d_kv;
-        let q = MaybeQuantLinear::new(cfg.d_model, inner_dim, false, vb.pp("q"))?;
-        let k = MaybeQuantLinear::new(cfg.d_model, inner_dim, false, vb.pp("k"))?;
-        let v = MaybeQuantLinear::new(cfg.d_model, inner_dim, false, vb.pp("v"))?;
-        let o = MaybeQuantLinear::new(inner_dim, cfg.d_model, false, vb.pp("o"))?;
+        let q = MaybeQuantLinear::new_dequantizing(cfg.d_model, inner_dim, vb.pp("q"))?;
+        let k = MaybeQuantLinear::new_dequantizing(cfg.d_model, inner_dim, vb.pp("k"))?;
+        let v = MaybeQuantLinear::new_dequantizing(cfg.d_model, inner_dim, vb.pp("v"))?;
+        let o = MaybeQuantLinear::new_dequantizing(inner_dim, cfg.d_model, vb.pp("o"))?;
         let relative_attention_bias = if has_relative_attention_bias {
             let emb = dense_embedding(
                 cfg.relative_attention_num_buckets,
