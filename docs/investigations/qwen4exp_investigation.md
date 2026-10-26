@@ -1615,3 +1615,20 @@ no draft (128)                        38.5-46.5    34.3-38.5
 ```
 One draft now matches or beats no drafting. The planner still counts the head as a cached layer (120 Q8_0 slots and
 its staging, ~0.96 GB against ~1.0 GB resident); the 1 GiB reserve covers the difference.
+
+## Run 46 - 2026-10-26 13:50
+
+Question: what are Strata's nine sm86 switches (6-11% of its decode here, Run 44), and do any map onto our kernels?
+
+Read: `src/core/nv_defaults.cpp` and each switch's site. Each picks between bit-identical variants of Strata's own code,
+kept by removing one at a time on an RTX 3060 and an A4000 (drop-one cost in points, A4000 / 3060):
+- `ADAPT_NOWAIT` + `ADAPT_LAG=2` (-6.3 / -0.8): its adaptive expert-swap rounds stop waiting for their swaps. We fill
+  an LRU cache from the CPU's misses instead; no counterpart.
+- `CPU_IQ_ALL_EXACT1` (-3.3 / -0.6): which of its AVX2 IQ dot kernels a one-token expert group takes
+  (`native_expert.cpp`).
+- `SIDE_MIXER=2` (-1.2 / -2.3): the hyper-connection mixer on a branch of the window's graph (`verify.cpp`).
+- `ATTN_DAILY` (-1.2 / -1.3), `QSA_ROWS` (-0.5 / -1.2): variants of its QSA decode attention and block scores.
+- `GR_UP75` (-0.9 / -1.8), `GU_SWIGLU` (-0.8 / -1.4): its fused gate/up kernels (a 75-row tile; SwiGLU in the epilogue).
+- `B6_MMVQ_ROWS` (0 / -1.7): rows per block in its matvec.
+None is a kernel we run. Transferable ideas: the mixer on a parallel graph branch and gate/up with SwiGLU fused, ~1%
+each by Strata's numbers. Left for later.
