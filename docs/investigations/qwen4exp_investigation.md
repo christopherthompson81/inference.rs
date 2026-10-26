@@ -1555,3 +1555,30 @@ MTP, 2 drafts      120     34.7 35.6      34.7 35.9      78.8%, 2.58
 ```
 One draft is level with no drafting; two lose. On this machine (PCIe 3, an AVX2 8-core CPU computing ~20% of routes)
 a verify's extra tokens cost the CPU nearly what they save, so the drafting work's ceiling is break-even. Not built.
+
+## Run 44 - 2026-10-26 13:24
+
+Question: what takes Strata to 58 tok/s? Its own profile (`STRATA_DECODE_TIMING=1 STRATA_VERIFY_PROFILE=1`, the
+exact config of Run 38, tail skip off) and two ablations, same client, one round each.
+
+```
+Strata                          prose   code    per window (code unless noted)
+--spec 4 (default, adaptive)    49.4    43.1    62.3 ms, T 3.47, 2.68 tokens: verify 53.3 (GPU-reach wait 11.1 + CPU
+                                                40.7 for ~308 missed experts) + draft 2.2 + commit 0.04
+--spec 2 (one draft, as ours)   51.9    42.0    prose 32.4 ms, T 2.00, 1.68 tokens: GPU-reach 10.4 + CPU 14.4 (~107
+                                                misses) + draft 1.2 + commit 0.06 + ~5 other
+STRATA_SM86_PERF=0              44.4    40.4    the nine sm86 switches: 6-11%
+tail skip on (Run 38)           57.7    56.8
+```
+Ours at one draft (Run 43): 38.6-40.2 / 35.8-35.9, a 2-token verify at ~47 ms; a plain step 27-29 ms (CPU 11.9, GPU
+between host calls 14.2). Per miss the CPUs cost the same (~135 us Strata, 115-143 here), and Strata's GPU time not
+hidden behind the CPU (10.4 ms for 2 tokens) is below ours for one. What separates the windows:
+- the draft: ~1 ms a draft (its Q2_0 head resident, a draft vocabulary subset) against ~4.5 ms here plus 1.5 ms of
+  lm_head and sampling;
+- the commit: 0.04-0.06 ms against 2-4.5 ms here;
+- the GPU's part of a window: Strata hides more of it behind the CPU's misses and reads each weight once for the
+  window's tokens;
+- nine sm86 speed switches, 6-11%;
+- the route tail skip (lossy, +20-30%).
+Run 43's ceiling was MTP against our own plain decode with our drafting costs; with Strata's draft and commit costs a
+one-draft window pays here too.
