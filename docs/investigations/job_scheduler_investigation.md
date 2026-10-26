@@ -333,3 +333,45 @@ through ANGLE's EGL backend; its default SwiftShader WebGL could not draw ~800K 
 
 Walking first used a twentieth of the splats' bounding box a second, which the sky dome made huge: two seconds of W
 left the room. The speed is now a quarter of the median splat distance from the start a second. No console errors.
+
+## Run 12 - 2026-10-25 18:40
+
+**Question:** the placement half of phase 3 (the user's decision: a job takes the faster route when the queue is quiet,
+not when it is busy; configurable, fastest by default). What does a job need, and what may it displace?
+
+Reconstruction peaks, nvidia-smi sampled every 200 ms (idle 669 MiB):
+```
+3 park photos at 952 x 546      9,377 MiB   forward 1.7 s
+32 video frames at 504 x 504    9,409 MiB   forward 9.9 s
+```
+WorldMirror caps its tokens (the target size and 32 frames), so its need is ~8.7 GB above idle whatever the input; a
+world job peaks at ~18.4 GB (Runs 10-11) and gets the whole card.
+
+**Design:**
+- A job needs either a whole device (world) or a size (reconstruction: 10 GiB).
+- Placement modes: `fastest` (default; evicts what the need takes, idle models first, waiting out busy ones as
+  today), `when_quiet` (evicts only idle models; while a model it would have to displace is serving, the job waits in the
+  queue instead of failing), `no_eviction` (runs only where it fits beside what is resident).
+- The choice is a pure function over a snapshot of each candidate device (free memory, its resident models with
+  footprint, pinned and quiet, whether a job holds it): a device where the need already fits wins, then the one that
+  displaces least. With several GPUs a job goes where it fits without evictions; the pipelines run on one device, so
+  "more devices" is the choice of device, not a split.
+- A sized lease unloads only the models the plan chose and leaves the rest serving; loads onto the device still wait
+  for the job, since its memory is in flux. A whole-device lease is unchanged.
+- A waiting job shows why in its record (`waiting`) and as an event, and the worker retries it; a need no device can
+  ever meet (pinned models in the way, a card too small) fails at once.
+
+**Built** (core `inference_rs/placement.rs`; `jobs::Placement`, `--job-placement`, `--job-device`, the form's "Make
+room"): `place` over device snapshots (free and total memory, the holder, each resident model's footprint, pinned,
+quiet and last use; a model mid-load counts as busy); `lease_device` takes the models to unload; the worker keeps a job
+queued while the plan says wait, records the reason (`waiting`, a `waiting` event), retries every 2 s and still
+cancels; the record notes the device it ran on. `submit_task` takes a `JobNeed` (a whole device or a size) in place of
+a device.
+
+**Tests:** seven unit tests of `place` on synthetic one- to three-GPU snapshots (fits as is, least-recently-used idle
+first, only `fastest` displaces a serving model, the device that displaces least wins, a held device waits, pinned
+models and small cards refuse); CUDA: a 1 GiB task runs beside the resident model, which stays loaded, and a
+`no_eviction` whole-device task waits ("`<model>` is loaded there") until the model unloads, then runs. In the UI with
+Qwen3.5-0.8B loaded (5.3 GB): a `no_eviction` reconstruction ran on GPU 0 in 3 s with the model still loaded; a
+`no_eviction` world job sat queued showing "Waiting: GPU 0: model ... is loaded there" and cancelled cleanly. The
+multi-GPU choice is covered only by the unit tests: this machine has one card.

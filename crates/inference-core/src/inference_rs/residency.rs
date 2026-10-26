@@ -7,7 +7,7 @@ use inference_tensor::DeviceLocation;
 
 use crate::*;
 
-use super::{EngineInstance, InferenceRs, InferenceRsError, UnloadedModelState};
+use super::{EngineInstance, InferenceRs, InferenceRsError, UnloadedModelState, placement};
 
 // a model that took a request this recently is not idle yet, though its engine has not seen it
 const IDLE_GRACE_MS: u64 = 1_000;
@@ -84,6 +84,18 @@ fn free_bytes(device: &Device) -> Option<u64> {
 #[cfg(not(feature = "cuda"))]
 fn free_bytes(_device: &Device) -> Option<u64> {
     None
+}
+
+// (free, total) bytes on a CUDA device; nothing known off one
+fn memory(device: &Device) -> (u64, u64) {
+    #[cfg(feature = "cuda")]
+    if device.is_cuda()
+        && let Ok(memory) = crate::utils::memory_usage::MemoryUsage.query(device)
+    {
+        return (memory.available() as u64, memory.total() as u64);
+    }
+    let _ = device;
+    (0, 0)
 }
 
 impl InferenceRs {
@@ -211,6 +223,63 @@ impl InferenceRs {
         }
     }
 
+    /// `device` as a placement sees it: its memory, the job holding it, and its resident models (one loading there
+    /// counts as busy with no known size).
+    pub fn device_snapshot(
+        &self,
+        device: &Device,
+        ordinal: usize,
+    ) -> Result<placement::DeviceSnapshot, InferenceRsError> {
+        let (free, total) = memory(device);
+        let now = now_ms();
+        let reloading = self
+            .reloading_models
+            .read()
+            .map_err(|_| InferenceRsError::EnginePoisoned)?
+            .clone();
+        let mut models = self
+            .engines
+            .read()
+            .map_err(|_| InferenceRsError::EnginePoisoned)?
+            .iter()
+            .filter(|(_, engine)| on_device(engine, device))
+            .map(|(id, engine)| placement::ResidentModel {
+                id: id.clone(),
+                bytes: engine.footprint.map(|f| f.bytes),
+                pinned: engine.pinned,
+                quiet: is_quiet(engine, now),
+                last_used: engine.last_used.load(Ordering::Relaxed),
+            })
+            .collect::<Vec<_>>();
+        let unloaded = self
+            .unloaded_models
+            .read()
+            .map_err(|_| InferenceRsError::EnginePoisoned)?;
+        models.extend(
+            reloading
+                .iter()
+                .filter(|id| {
+                    unloaded
+                        .get(*id)
+                        .is_some_and(|state| same_device(&state.loader_config.device, device))
+                })
+                .map(|id| placement::ResidentModel {
+                    id: id.clone(),
+                    bytes: None,
+                    pinned: false,
+                    quiet: false,
+                    last_used: now,
+                }),
+        );
+        Ok(placement::DeviceSnapshot {
+            ordinal,
+            free,
+            total,
+            held_by: self.device_holder(device),
+            models,
+        })
+    }
+
     /// What holds `device`, when a job does.
     pub fn device_holder(&self, device: &Device) -> Option<String> {
         self.leases
@@ -228,13 +297,14 @@ impl InferenceRs {
         }
     }
 
-    /// Takes `device` for `holder`: from then on nothing loads there, and each model resident there is unloaded once
-    /// it goes quiet. Fails if another job holds it, a pinned model is resident there, or a model stays busy past
-    /// `drain_timeout`.
+    /// Takes `device` for `holder`: from then on nothing loads there, and each model resident there (or only those in
+    /// `unload`) is unloaded once it goes quiet. Fails if another job holds it, a pinned model would have to go, or a
+    /// model stays busy past `drain_timeout`.
     pub async fn lease_device(
         &self,
         device: &Device,
         holder: &str,
+        unload: Option<&[String]>,
         drain_timeout: Duration,
     ) -> Result<DeviceLease, InferenceRsError> {
         let location = device.location();
@@ -260,7 +330,9 @@ impl InferenceRs {
                 .read()
                 .map_err(|_| InferenceRsError::EnginePoisoned)?
                 .iter()
-                .filter(|(_, engine)| on_device(engine, device))
+                .filter(|(id, engine)| {
+                    on_device(engine, device) && unload.is_none_or(|ids| ids.contains(id))
+                })
                 .map(|(id, engine)| (id.clone(), engine.pinned, is_quiet(engine, now)))
                 .collect::<Vec<_>>();
             if let Some((id, ..)) = resident.iter().find(|(_, pinned, _)| *pinned) {

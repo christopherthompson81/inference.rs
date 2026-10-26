@@ -230,7 +230,11 @@ class Generator:
         return order
 
     def render(self) -> str:
-        for name in sorted(self.schemas):
+        # enums first: a class's field may default to one, and a default is evaluated where the class is defined
+        def is_enum(name):
+            return self.schemas[name].get("type") == "string" and "enum" in self.schemas[name]
+
+        for name in sorted(self.schemas, key=lambda name: (not is_enum(name), name)):
             self.schema(name, self.schemas[name])
         aliases = [f"{name} = {self.aliases[name]}" for name in self.ordered_aliases()]
         return HEADER + "\n\n\n".join(self.blocks) + "\n\n\n" + "\n".join(aliases) + "\n"

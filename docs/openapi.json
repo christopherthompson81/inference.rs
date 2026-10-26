@@ -6417,6 +6417,25 @@
           },
           {
             "type": "object",
+            "description": "A queued job can't start yet, and why.",
+            "required": [
+              "reason",
+              "type"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "waiting"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
             "required": [
               "name",
               "total",
@@ -6607,6 +6626,14 @@
             "format": "double",
             "description": "Unix seconds"
           },
+          "device": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The CUDA device it ran on",
+            "minimum": 0
+          },
           "error": {
             "type": [
               "string",
@@ -6673,6 +6700,13 @@
           },
           "status": {
             "$ref": "#/components/schemas/JobStatus"
+          },
+          "waiting": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why a queued job has not started: what it waits for"
           }
         }
       },
@@ -6794,11 +6828,17 @@
         "type": "object",
         "description": "Where jobs keep their folders and which weights they run.",
         "properties": {
-          "device_ordinal": {
-            "type": "integer",
-            "description": "The CUDA device jobs run on",
-            "default": 0,
-            "minimum": 0
+          "devices": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "The CUDA devices jobs may run on; every visible one when unset",
+            "default": null
           },
           "dir": {
             "type": "string",
@@ -6827,6 +6867,15 @@
             ],
             "description": "MoGe-2 ViT-L normal, converted to safetensors",
             "default": null
+          },
+          "placement": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Placement",
+                "description": "How much a job may displace to run, unless its request says otherwise"
+              }
+            ],
+            "default": "fastest"
           },
           "wan": {
             "type": [
@@ -11731,6 +11780,15 @@
         "type": "string",
         "description": "KV cache storage: `auto` (the activation dtype, or a quantized cache where that buys GPU room for offloaded MoE experts), `none` (the activation dtype), `f8e4m3`, `q2`..`q8` (K and V bits), or `qK/qV`."
       },
+      "Placement": {
+        "type": "string",
+        "description": "How much a job may displace to run.",
+        "enum": [
+          "fastest",
+          "when_quiet",
+          "no_eviction"
+        ]
+      },
       "PromptInput": {
         "oneOf": [
           {
@@ -11915,6 +11973,17 @@
             ],
             "description": "The most frames sampled from a video",
             "minimum": 0
+          },
+          "placement": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Placement",
+                "description": "How much it may displace to run, in place of the server's setting"
+              }
+            ]
           },
           "target_size": {
             "type": [
@@ -15038,6 +15107,17 @@
         "type": "object",
         "description": "A world from a panorama, the job's one input.",
         "properties": {
+          "placement": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Placement",
+                "description": "How much it may displace to run, in place of the server's setting"
+              }
+            ]
+          },
           "prompt": {
             "type": "string",
             "description": "The caption every clip is generated with"

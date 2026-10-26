@@ -2,6 +2,9 @@ import { apiRoot, authedFetch } from "./auth";
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
+/** How much a job may unload to run; null leaves it to the server. */
+export type Placement = "fastest" | "when_quiet" | "no_eviction";
+
 export interface JobStage {
   name: string;
   /** Steps in the stage; 0 when it has no count. */
@@ -36,11 +39,16 @@ export interface JobRecord {
   previews: JobPreview[];
   outputs: JobOutput[];
   error?: string | null;
+  /** Why a queued job has not started. */
+  waiting?: string | null;
+  /** The CUDA device it ran on. */
+  device?: number | null;
   report: unknown;
 }
 
 export type JobEvent =
   | { type: "status"; status: JobStatus }
+  | { type: "waiting"; reason: string }
   | { type: "stage"; name: string; total: number }
   | { type: "progress"; done: number; total: number }
   | ({ type: "preview" } & JobPreview)
@@ -52,12 +60,14 @@ export interface WorldOptions {
   seed: number | null;
   splats: boolean;
   steps: number | null;
+  placement: Placement | null;
 }
 
 export interface ReconstructOptions {
   target_size: number | null;
   fps: number | null;
   max_frames: number | null;
+  placement: Placement | null;
 }
 
 export function isFinished(status: JobStatus): boolean {

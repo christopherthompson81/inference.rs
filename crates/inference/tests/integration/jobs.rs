@@ -5,9 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use inference::{
-    JobEvent, JobOutput, JobRecord, JobResult, JobStatus, JobsConfig, Model, ModelDType,
-    ModelOperationRequest, ModelStatus, Progress, RequestBuilder, TextMessageRole, TextMessages,
-    TextModelBuilder,
+    JobEvent, JobNeed, JobOutput, JobRecord, JobResult, JobStatus, JobsConfig, Model, ModelDType,
+    ModelOperationRequest, ModelStatus, Placement, Progress, RequestBuilder, TextMessageRole,
+    TextMessages, TextModelBuilder,
 };
 
 #[path = "../support/llama_tiny.rs"]
@@ -23,6 +23,8 @@ const MAX_LEN: usize = 4;
 const CANCEL_POLL: Duration = Duration::from_millis(10);
 // a model that took a request this recently is not idle yet
 const IDLE: Duration = Duration::from_millis(1500);
+// far below what the tiny model leaves free on any card
+const SIZED_NEED_BYTES: u64 = 1 << 30;
 
 async fn cpu_model() -> anyhow::Result<(Model, tempfile::TempDir)> {
     let checkpoint = tiny_llama_checkpoint()?;
@@ -191,24 +193,20 @@ async fn a_device_job_evicts_the_idle_model_and_holds_the_device() -> anyhow::Re
 
     let engine = (*model).clone();
     let model_id = id.clone();
-    let held = model.submit_task(
-        "hold",
-        Some(inference_tensor::Device::new_cuda(0)?),
-        move |ctx| {
-            let op = || ModelOperationRequest {
-                model_id: model_id.clone(),
-            };
-            let status = engine.model_status(op())?.status;
-            let reload = ctx.block_on(engine.reload_model(op()));
-            Ok(JobResult {
-                outputs: Vec::new(),
-                report: serde_json::json!({
-                    "unloaded": status == ModelStatus::Unloaded,
-                    "reload": reload.err().map(|e| e.to_string()),
-                }),
-            })
-        },
-    )?;
+    let held = model.submit_task("hold", Some(JobNeed::Device), move |ctx| {
+        let op = || ModelOperationRequest {
+            model_id: model_id.clone(),
+        };
+        let status = engine.model_status(op())?.status;
+        let reload = ctx.block_on(engine.reload_model(op()));
+        Ok(JobResult {
+            outputs: Vec::new(),
+            report: serde_json::json!({
+                "unloaded": status == ModelStatus::Unloaded,
+                "reload": reload.err().map(|e| e.to_string()),
+            }),
+        })
+    })?;
     let done = finished(&model, &held.id).await?;
     assert_eq!(done.status, JobStatus::Succeeded, "{:?}", done.error);
     assert_eq!(done.report["unloaded"], true);
@@ -227,14 +225,105 @@ async fn a_device_job_evicts_the_idle_model_and_holds_the_device() -> anyhow::Re
         "pinned": true,
     });
     model.add_model_json(spec.to_string().as_bytes()).await?;
-    let blocked = model.submit_task(
-        "blocked",
-        Some(inference_tensor::Device::new_cuda(0)?),
-        |_| anyhow::bail!("ran beside a pinned model"),
-    )?;
+    let blocked = model.submit_task("blocked", Some(JobNeed::Device), |_| {
+        anyhow::bail!("ran beside a pinned model")
+    })?;
     let blocked = finished(&model, &blocked.id).await?;
     assert_eq!(blocked.status, JobStatus::Failed);
     let error = blocked.error.unwrap_or_default();
     assert!(error.contains("pinned"), "{error}");
+    Ok(())
+}
+
+async fn cuda_model() -> anyhow::Result<Option<(Model, tempfile::TempDir, String)>> {
+    if !cfg!(feature = "cuda") || inference_tensor::Device::new_cuda(0).is_err() {
+        return Ok(None);
+    }
+    let checkpoint = tiny_llama_checkpoint()?;
+    let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .build()
+        .await?;
+    let id = model
+        .models()?
+        .data
+        .into_iter()
+        .find(|m| m.default == Some(true))
+        .map(|m| m.id)
+        .ok_or_else(|| anyhow::anyhow!("no default model"))?;
+    Ok(Some((model, checkpoint, id)))
+}
+
+// A job that needs only some memory runs beside the resident model, which keeps serving.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sized_job_runs_beside_the_resident_model() -> anyhow::Result<()> {
+    let Some((model, _checkpoint, id)) = cuda_model().await? else {
+        return Ok(());
+    };
+    let _jobs = use_dir(&model)?;
+    let engine = (*model).clone();
+    let model_id = id.clone();
+    let sized = model.submit_task("sized", Some(JobNeed::Bytes(SIZED_NEED_BYTES)), move |_| {
+        let status = engine
+            .model_status(ModelOperationRequest { model_id })?
+            .status;
+        Ok(JobResult {
+            outputs: Vec::new(),
+            report: serde_json::json!({ "loaded": status == ModelStatus::Loaded }),
+        })
+    })?;
+    let done = finished(&model, &sized.id).await?;
+    assert_eq!(done.status, JobStatus::Succeeded, "{:?}", done.error);
+    assert_eq!(
+        done.report["loaded"], true,
+        "the resident model was unloaded"
+    );
+    assert_eq!(done.device, Some(0));
+    assert_eq!(
+        model
+            .model_status(ModelOperationRequest { model_id: id })?
+            .status,
+        ModelStatus::Loaded
+    );
+    Ok(())
+}
+
+// A whole-device job that may displace nothing waits while a model is loaded there, saying why, and runs once it
+// unloads.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_that_may_not_displace_waits_for_the_device_to_empty() -> anyhow::Result<()> {
+    let Some((model, _checkpoint, id)) = cuda_model().await? else {
+        return Ok(());
+    };
+    let jobs = tempfile::tempdir()?;
+    model.configure_jobs(JobsConfig {
+        dir: jobs.path().to_path_buf(),
+        placement: Placement::NoEviction,
+        ..Default::default()
+    });
+    let queued = model.submit_task("polite", Some(JobNeed::Device), |_| {
+        Ok(JobResult {
+            outputs: Vec::new(),
+            report: serde_json::Value::Null,
+        })
+    })?;
+    let (_, mut events) = model.job_events(&queued.id)?;
+    let reason = tokio::time::timeout(JOB_WAIT, async {
+        loop {
+            if let Ok(JobEvent::Waiting { reason }) = events.recv().await {
+                break reason;
+            }
+        }
+    })
+    .await?;
+    assert!(reason.contains(&format!("`{id}`")), "{reason}");
+    let record = model.job(&queued.id)?;
+    assert_eq!(record.status, JobStatus::Queued);
+    assert_eq!(record.waiting.as_deref(), Some(reason.as_str()));
+
+    model.unload_model(ModelOperationRequest { model_id: id })?;
+    let done = finished(&model, &queued.id).await?;
+    assert_eq!(done.status, JobStatus::Succeeded, "{:?}", done.error);
+    assert_eq!(done.waiting, None);
     Ok(())
 }

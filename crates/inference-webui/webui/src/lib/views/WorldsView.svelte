@@ -15,6 +15,7 @@
     type JobEvent,
     type JobRecord,
     type JobStatus,
+    type Placement,
   } from "../services/worlds";
 
   // what the job list and a dropped event stream poll at
@@ -46,6 +47,7 @@
   let splats = $state(true);
   let steps = $state<number | null>(null);
   let targetSize = $state<number | null>(null);
+  let placement = $state<"" | Placement>("");
   let busy = $state(false);
   let status = $state("");
   let now = $state(Date.now() / 1000);
@@ -98,10 +100,16 @@
   }
 
   function apply(id: string, event: JobEvent) {
+    // the list shows the followed job's status as it changes, not at the next poll
+    const listed = jobs.find((entry) => entry.id === id);
+    if (listed && (event.type === "status" || event.type === "finished")) listed.status = event.status;
     const job = selected;
     if (!job || job.id !== id) return;
     const at = Date.now() / 1000;
-    if (event.type === "status") job.status = event.status;
+    if (event.type === "status") {
+      job.status = event.status;
+      if (event.status === "running") job.waiting = null;
+    } else if (event.type === "waiting") job.waiting = event.reason;
     else if (event.type === "stage") {
       const last = job.stages.at(-1);
       if (last && last.finished_at == null) {
@@ -147,8 +155,9 @@
               seed,
               splats,
               steps: splats ? steps : null,
+              placement: placement || null,
             })
-          : await submitReconstruct(photos, { target_size: targetSize, fps: null, max_frames: null });
+          : await submitReconstruct(photos, { target_size: targetSize, fps: null, max_frames: null, placement: placement || null });
       await refresh();
       open(job);
     } catch (error) {
@@ -316,7 +325,16 @@
           </label>
         {/if}
 
-        <div>
+        <div class="flex flex-wrap items-end gap-3">
+          <label class="flex flex-col gap-1">
+            <span class="text-[11px] text-gray-500" title="What the job may unload from its GPU to make room">Make room</span>
+            <select class={field} bind:value={placement} disabled={busy}>
+              <option value="">The server's setting</option>
+              <option value="fastest">Unload what it needs</option>
+              <option value="when_quiet">Unload only idle models</option>
+              <option value="no_eviction">Unload nothing; wait for room</option>
+            </select>
+          </label>
           <button class={primary} onclick={submit} disabled={!ready || busy}>{busy ? "Starting..." : "Start"}</button>
         </div>
       {:else}
@@ -324,6 +342,9 @@
         <div class="flex flex-wrap items-center gap-2">
           <h2 class="min-w-0 flex-1 truncate text-lg font-medium">{title(job)}</h2>
           <span class="rounded px-2 py-0.5 text-xs font-medium {BADGES[job.status]}">{job.status}</span>
+          {#if job.device != null}
+            <span class="text-xs text-gray-500">GPU {job.device}</span>
+          {/if}
           {#if job.started_at}
             <span class="text-xs text-gray-500">{duration((job.finished_at ?? now) - job.started_at)}</span>
           {/if}
@@ -340,7 +361,7 @@
           <p class="rounded-md bg-red-50 px-3 py-2 text-sm text-red-800 dark:bg-red-950/40 dark:text-red-300">{job.error}</p>
         {/if}
         {#if job.status === "queued"}
-          <p class="text-sm text-gray-500">Waiting for the jobs ahead of it, then for the models on its GPU to finish their requests.</p>
+          <p class="text-sm text-gray-500">{job.waiting ? `Waiting: ${job.waiting}` : "Waiting for the jobs ahead of it, then for room on a GPU."}</p>
         {/if}
 
         {#if job.stages.length}

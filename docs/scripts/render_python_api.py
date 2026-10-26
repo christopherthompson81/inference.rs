@@ -211,7 +211,7 @@ GROUPS = [
         "Jobs",
         "jobs",
         "World generation and reconstruction jobs: what to run, their records, stages, previews, outputs and events.",
-        lambda n: n.startswith("Job") or n in {"WorldJob", "ReconstructJob", "SceneKind"},
+        lambda n: n.startswith("Job") or n in {"WorldJob", "ReconstructJob", "SceneKind", "Placement"},
     ),
     (
         "Layout",

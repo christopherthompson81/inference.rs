@@ -112,6 +112,17 @@ pub struct ServerOptions {
     #[arg(long, value_name = "DIR")]
     #[serde(default)]
     pub world_models: Option<PathBuf>,
+
+    /// How much a job may unload to run: whatever it needs (`fastest`), only idle models (`when-quiet`, waiting while
+    /// a model in its way serves requests), or nothing (`no-eviction`, running only where it fits).
+    #[arg(long, value_enum, default_value = "fastest")]
+    #[serde(default)]
+    pub job_placement: JobPlacementArg,
+
+    /// A CUDA device jobs may run on; repeat for more. Every visible one by default.
+    #[arg(long = "job-device", value_name = "ORDINAL")]
+    #[serde(default)]
+    pub job_devices: Vec<usize>,
 }
 
 impl ServerOptions {
@@ -163,6 +174,8 @@ impl Default for ServerOptions {
             disable_metrics: false,
             jobs_dir: None,
             world_models: None,
+            job_placement: JobPlacementArg::Fastest,
+            job_devices: Vec::new(),
         }
     }
 }
@@ -175,6 +188,25 @@ impl ServerOptions {
             access_log_format: self.access_log_format.into(),
             request_id_header: !self.disable_request_id_header,
             metrics: !self.disable_metrics,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum JobPlacementArg {
+    #[default]
+    Fastest,
+    WhenQuiet,
+    NoEviction,
+}
+
+impl From<JobPlacementArg> for inference_api::jobs::Placement {
+    fn from(placement: JobPlacementArg) -> Self {
+        match placement {
+            JobPlacementArg::Fastest => Self::Fastest,
+            JobPlacementArg::WhenQuiet => Self::WhenQuiet,
+            JobPlacementArg::NoEviction => Self::NoEviction,
         }
     }
 }

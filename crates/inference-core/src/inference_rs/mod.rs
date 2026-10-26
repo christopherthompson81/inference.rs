@@ -11,6 +11,7 @@ mod builder;
 mod config;
 mod lora;
 mod models;
+pub mod placement;
 mod residency;
 mod sessions;
 #[cfg(test)]

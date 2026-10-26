@@ -1944,18 +1944,18 @@ impl Engine {
         to_json(&self.submit_job(submission.request, inputs)?)
     }
 
-    /// Queues `work` as a job of `kind`, holding `device` to itself while it runs (none for work off the GPU); the
-    /// job's record as queued. Its context reports progress through [`crate::jobs::Progress`] and checks for
-    /// cancellation.
+    /// Queues `work` as a job of `kind`, placed on a device with room for `need` by the jobs' placement (none for work
+    /// off the GPU); the job's record as queued. Its context reports progress through [`crate::jobs::Progress`] and
+    /// checks for cancellation.
     pub fn submit_task(
         &self,
         kind: &str,
-        device: Option<Device>,
+        need: Option<crate::jobs::JobNeed>,
         work: impl FnOnce(&crate::jobs::JobContext) -> anyhow::Result<crate::jobs::JobResult>
         + Send
         + 'static,
     ) -> Result<crate::jobs::JobRecord, ApiError> {
-        self.jobs_submit_task(kind, device, work)
+        self.jobs_submit_task(kind, need, work)
     }
 
     /// A job's record.
