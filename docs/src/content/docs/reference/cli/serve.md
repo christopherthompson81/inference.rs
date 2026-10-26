@@ -73,6 +73,8 @@ inference serve [OPTIONS] [COMMAND]
 | `--disable-metrics` | `false` | Disable Prometheus HTTP metrics and the metrics recorder |
 | `--jobs-dir <DIR>` |  | Where jobs (world generation, reconstruction) keep their folders; defaults to the cache's `engine-jobs` |
 | `--world-models <DIR>` |  | A folder holding the world-generation checkpoints under their repository names (`WorldStereo/`, `Wan2.1-I2V-14B-480P-Diffusers/`, `moge-2-vitl-normal/`, `HY-World-2.0/`, `lpips-vgg/`), for jobs |
+| `--job-placement <JOB_PLACEMENT>` | `fastest` | How much a job may unload to run: whatever it needs (`fastest`), only idle models (`when-quiet`, waiting while a model in its way serves requests), or nothing (`no-eviction`, running only where it fits). Possible values: `fastest`, `when-quiet`, `no-eviction`. |
+| `--job-device <ORDINAL>` |  | A CUDA device jobs may run on; repeat for more. Every visible one by default |
 | `--max-seqs <MAX_SEQS>` | `4` | Maximum concurrent sequences per model; each holds memory while it runs, so raise it for a busy shared server |
 | `--max-num-batched-tokens <MAX_NUM_BATCHED_TOKENS>` |  | Maximum tokens processed in one paged-attention scheduler step [default: 4096, or the prompt chunk if longer] |
 | `--no-embeddings-on-host` | `false` | Keep the token embedding in VRAM; by default an untied one lives in pinned host memory the GPU reads over the bus |

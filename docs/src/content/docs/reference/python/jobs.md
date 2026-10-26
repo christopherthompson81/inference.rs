@@ -16,7 +16,7 @@ A job removed with its folder.
 
 ## `JobEvent`
 
-One of: `Union[JobEventStatus, JobEventStage, JobEventProgress, Any, JobEventFinished]`.
+One of: `Union[JobEventStatus, JobEventWaiting, JobEventStage, JobEventProgress, Any, JobEventFinished]`.
 
 
 ## `JobEventFinished`
@@ -52,6 +52,16 @@ One of: `Union[JobEventStatus, JobEventStage, JobEventProgress, Any, JobEventFin
 | --- | --- | --- |
 | `status` | `JobStatus` | required |
 | `type` | `Literal['status']` | `'status'` |
+
+
+## `JobEventWaiting`
+
+A queued job can't start yet, and why.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `reason` | `str` | required |
+| `type` | `Literal['waiting']` | `'waiting'` |
 
 
 ## `JobFilePath`
@@ -110,6 +120,7 @@ A job's record: what it was asked, how far it got, and what it made.
 | Field | Type | Default |
 | --- | --- | --- |
 | `created_at` | `float` | required |
+| `device` | `int \| None` | optional |
 | `error` | `str \| None` | optional |
 | `finished_at` | `float \| None` | optional |
 | `id` | `str` | required |
@@ -123,6 +134,7 @@ A job's record: what it was asked, how far it got, and what it made.
 | `stages` | `list[JobStage] \| None` | optional |
 | `started_at` | `float \| None` | optional |
 | `status` | `JobStatus` | required |
+| `waiting` | `str \| None` | optional |
 
 
 ## `JobStage`
@@ -165,14 +177,28 @@ Where jobs keep their folders and which weights they run.
 
 | Field | Type | Default |
 | --- | --- | --- |
-| `device_ordinal` | `int \| None` | `0` |
+| `devices` | `list[int] \| None` | optional |
 | `dir` | `str \| None` | `'/home/chris/.cache/inference-rs/engine-jobs'` |
 | `drain_timeout_secs` | `int \| None` | `120` |
 | `lpips` | `str \| None` | optional |
 | `moge` | `str \| None` | optional |
+| `placement` | `Placement \| None` | `Placement.FASTEST` |
 | `wan` | `str \| None` | optional |
 | `worldmirror` | `str \| None` | optional |
 | `worldstereo` | `str \| None` | optional |
+
+
+## `Placement`
+
+How much a job may displace to run.
+
+Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
+
+| Member | Wire/config name |
+| --- | --- |
+| `Placement.FASTEST` | `'fastest'` |
+| `Placement.WHEN_QUIET` | `'when_quiet'` |
+| `Placement.NO_EVICTION` | `'no_eviction'` |
 
 
 ## `ReconstructJob`
@@ -183,6 +209,7 @@ WorldMirror 2.0 on the job's inputs: images, or one video.
 | --- | --- | --- |
 | `fps` | `float \| None` | optional |
 | `max_frames` | `int \| None` | optional |
+| `placement` | `Placement \| None` | optional |
 | `target_size` | `int \| None` | optional |
 
 
@@ -204,6 +231,7 @@ A world from a panorama, the job's one input.
 
 | Field | Type | Default |
 | --- | --- | --- |
+| `placement` | `Placement \| None` | optional |
 | `prompt` | `str \| None` | optional |
 | `scene` | `SceneKind \| None` | optional |
 | `seed` | `int \| None` | optional |

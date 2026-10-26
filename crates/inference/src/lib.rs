@@ -267,9 +267,9 @@ pub use inference_api::{
     generation::SpeechAudio,
     initialize_logging,
     jobs::{
-        JobContext, JobDeleted, JobEvent, JobInput, JobList, JobOutput, JobPreview, JobRecord,
-        JobRequest, JobResult, JobStage, JobStatus, JobsConfig, Progress, ReconstructJob,
-        SceneKind, WorldJob,
+        JobContext, JobDeleted, JobEvent, JobInput, JobList, JobNeed, JobOutput, JobPreview,
+        JobRecord, JobRequest, JobResult, JobStage, JobStatus, JobsConfig, Placement, Progress,
+        ReconstructJob, SceneKind, WorldJob,
     },
     logits_processors::{CustomLogitsProcessor, in_place},
     media_source::MediaAttachment,

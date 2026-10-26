@@ -6,6 +6,406 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal, Union
 
+class AgentPermission(str, Enum):
+    AUTO = "auto"
+    ASK = "ask"
+    DENY = "deny"
+
+
+class AllowedToolsMode(str, Enum):
+    AUTO = "auto"
+    REQUIRED = "required"
+
+
+class AllowedToolsToolChoiceType(str, Enum):
+    ALLOWED_TOOLS = "allowed_tools"
+
+
+class ApprovalDecision(str, Enum):
+    APPROVE = "approve"
+    DENY = "deny"
+
+
+class AudioResponseFormat(str, Enum):
+    """Audio format options for speech generation responses."""
+
+    MP3 = "mp3"
+    OPUS = "opus"
+    AAC = "aac"
+    FLAC = "flac"
+    WAV = "wav"
+    PCM = "pcm"
+
+
+class BuiltinToolChoiceType(str, Enum):
+    WEB_SEARCH_PREVIEW = "web_search_preview"
+    CODE_INTERPRETER = "code_interpreter"
+    SHELL = "shell"
+
+
+class CodeExecutionPermission(str, Enum):
+    AUTO = "auto"
+    ASK = "ask"
+    DENY = "deny"
+
+
+class DiarizationResponseFormat(str, Enum):
+    """What a diarization answers with."""
+
+    JSON = "json"
+    RTTM = "rttm"
+
+
+class DiffusionLoaderType(str, Enum):
+    """The architecture to load the diffusion model as."""
+
+    FLUX = "flux"
+    FLUX_OFFLOADED = "flux-offloaded"
+    HIDREAM_O1 = "hidream-o1"
+    HIDREAM_O1_DEV = "hidream-o1-dev"
+
+
+class EmbeddingEncodingFormat(str, Enum):
+    FLOAT = "float"
+    BASE64 = "base64"
+
+
+class EmbeddingLoaderType(str, Enum):
+    """The architecture to load the embedding model as."""
+
+    EMBEDDINGGEMMA = "embeddinggemma"
+    QWEN3EMBEDDING = "qwen3embedding"
+
+
+class ImageGenerationResponseFormat(str, Enum):
+    """Image generation response format"""
+
+    URL = "url"
+    B64_JSON = "b64_json"
+
+
+class IncludeOption(str, Enum):
+    """Include options for response content."""
+
+    FILE_SEARCH_CALL_RESULTS = "file_search_call.results"
+    MESSAGE_INPUT_IMAGE_IMAGE_URL = "message.input_image.image_url"
+    COMPUTER_CALL_OUTPUT_OUTPUT_IMAGE_URL = "computer_call_output.output.image_url"
+    REASONING_ENCRYPTED_CONTENT = "reasoning.encrypted_content"
+
+
+class IncompleteReason(str, Enum):
+    """Reason for incomplete response"""
+
+    MAX_OUTPUT_TOKENS = "max_output_tokens"
+    CONTENT_FILTER = "content_filter"
+    INTERRUPTED = "interrupted"
+
+
+class IsqOrganization(str, Enum):
+    DEFAULT = "default"
+    MOQE = "moqe"
+
+
+class JobStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class LogitsOutput(str, Enum):
+    """What a scored prompt carries besides the token log-probabilities."""
+
+    LOGPROBS = "logprobs"
+    LOGITS = "logits"
+
+
+class ManagedKind(str, Enum):
+    """How a managed model serves requests."""
+
+    TEXT = "text"
+    MULTIMODAL = "multimodal"
+    EMBEDDING = "embedding"
+    IMAGE_GENERATION = "image_generation"
+    SPEECH = "speech"
+    TRANSCRIPTION = "transcription"
+    VOICE_ACTIVITY = "voice_activity"
+    DIARIZATION = "diarization"
+    LAYOUT = "layout"
+
+
+class MmprojSelection(str, Enum):
+    """How a GGUF spec without `mmproj_filename` gets its multimodal projector."""
+
+    GIVEN = "given"
+    ARTIFACT_REPO = "artifact_repo"
+    ANY = "any"
+    REQUIRED = "required"
+
+
+class Modality(str, Enum):
+    TEXT = "text"
+    AUDIO = "audio"
+    VISION = "vision"
+    VIDEO = "video"
+    EMBEDDING = "embedding"
+
+
+class ModelCategory(str, Enum):
+    TEXT = "text"
+    MULTIMODAL = "multimodal"
+    DIFFUSION = "diffusion"
+    TRANSCRIPTION = "transcription"
+    VOICE_ACTIVITY = "voice_activity"
+    DIARIZATION = "diarization"
+    SPEECH = "speech"
+    EMBEDDING = "embedding"
+
+
+class ModelDType(str, Enum):
+    """DType for the model."""
+
+    AUTO = "auto"
+    BF16 = "bf16"
+    F16 = "f16"
+    F32 = "f32"
+
+
+class ModelStatus(str, Enum):
+    LOADED = "loaded"
+    UNLOADED = "unloaded"
+    RELOADING = "reloading"
+
+
+class MtpDraftSampling(str, Enum):
+    AUTO = "auto"
+    GREEDY = "greedy"
+    PROBABILISTIC = "probabilistic"
+
+
+class MultimodalLoaderType(str, Enum):
+    """The architecture to load the multimodal model as."""
+
+    PHI3V = "phi3v"
+    IDEFICS2 = "idefics2"
+    LLAVA_NEXT = "llava_next"
+    LLAVA = "llava"
+    LFM2VL = "lfm2vl"
+    VLLAMA = "vllama"
+    QWEN2VL = "qwen2vl"
+    IDEFICS3 = "idefics3"
+    MINICPMO = "minicpmo"
+    PHI4MM = "phi4mm"
+    QWEN2_5VL = "qwen2_5vl"
+    GEMMA3 = "gemma3"
+    MISTRAL3 = "mistral3"
+    LLAMA4 = "llama4"
+    GEMMA3N = "gemma3n"
+    QWEN3VL = "qwen3vl"
+    QWEN3VLMOE = "qwen3vlmoe"
+    QWEN3_5 = "qwen3_5"
+    QWEN3_5MOE = "qwen3_5moe"
+    QWEN4EXP = "qwen4exp"
+    VOXTRAL = "voxtral"
+    GEMMA4 = "gemma4"
+    MUSE_GLIMMER = "muse_glimmer"
+    DIFFUSIONGEMMA = "diffusiongemma"
+    PADDLEOCR_VL = "paddleocr_vl"
+
+
+class NetworkMode(str, Enum):
+    """Network access permitted to sandboxed processes."""
+
+    NONE = "none"
+    LOOPBACK = "loopback"
+    FULL = "full"
+
+
+class NormalLoaderType(str, Enum):
+    """The architecture to load the normal model as."""
+
+    MISTRAL = "mistral"
+    GEMMA = "gemma"
+    MIXTRAL = "mixtral"
+    LLAMA = "llama"
+    PHI2 = "phi2"
+    PHI3 = "phi3"
+    QWEN2 = "qwen2"
+    GEMMA2 = "gemma2"
+    STARCODER2 = "starcoder2"
+    PHI3_5MOE = "phi3.5moe"
+    DEEPSEEKV2 = "deepseekv2"
+    DEEPSEEKV3 = "deepseekv3"
+    QWEN3 = "qwen3"
+    GLM4 = "glm4"
+    GLM4MOELITE = "glm4moelite"
+    GLM4MOE = "glm4moe"
+    QWEN3MOE = "qwen3moe"
+    SMOLLM3 = "smollm3"
+    GRANITEMOEHYBRID = "granitemoehybrid"
+    GPT_OSS = "gpt_oss"
+    HUNYUANV1DENSE = "hunyuanv1dense"
+    HUNYUANV1MOE = "hunyuanv1moe"
+    QWEN3NEXT = "qwen3next"
+    QWEN3_5 = "qwen3_5"
+    QWEN3_5MOE = "qwen3_5moe"
+    QWEN4EXP = "qwen4exp"
+    LFM2 = "lfm2"
+    LFM2_MOE = "lfm2_moe"
+
+
+class OpenAiCodeInterpreterContainerType(str, Enum):
+    AUTO = "auto"
+
+
+class OpenAiCodeInterpreterToolType(str, Enum):
+    CODE_INTERPRETER = "code_interpreter"
+
+
+class OpenAiFunctionToolType(str, Enum):
+    FUNCTION = "function"
+
+
+class OpenAiNamespaceToolType(str, Enum):
+    NAMESPACE = "namespace"
+
+
+class OpenAiShellToolType(str, Enum):
+    SHELL = "shell"
+
+
+class OpenAiWebSearchToolType(str, Enum):
+    WEB_SEARCH = "web_search"
+    WEB_SEARCH_PREVIEW = "web_search_preview"
+
+
+class Placement(str, Enum):
+    """How much a job may displace to run."""
+
+    FASTEST = "fastest"
+    WHEN_QUIET = "when_quiet"
+    NO_EVICTION = "no_eviction"
+
+
+class ReasoningEffort(str, Enum):
+    """Reasoning effort. `none` aliases `off`; `max` aliases `xhigh`."""
+
+    OFF = "off"
+    NONE = "none"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    XHIGH = "xhigh"
+    MAX = "max"
+
+
+class ReasoningSummary(str, Enum):
+    """Reasoning summary configuration"""
+
+    CONCISE = "concise"
+    DETAILED = "detailed"
+    AUTO = "auto"
+
+
+class ResponseStatus(str, Enum):
+    """Status of a response in the OpenResponses API"""
+
+    QUEUED = "queued"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    INCOMPLETE = "incomplete"
+    CANCELLED = "cancelled"
+
+
+class SandboxMode(str, Enum):
+    """Whether tools that run model-written code are sandboxed."""
+
+    AUTO = "auto"
+    ON = "on"
+    OFF = "off"
+
+
+class SandboxProfile(str, Enum):
+    """The starting policy for sandboxed tools: `restricted` or `developer` (toolchain paths, full network by default)."""
+
+    RESTRICTED = "restricted"
+    DEVELOPER = "developer"
+
+
+class SceneKind(str, Enum):
+    """Indoor scenes keep far distances; outdoor ones compress them."""
+
+    INDOOR = "indoor"
+    OUTDOOR = "outdoor"
+
+
+class SearchContextSize(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class SearchEmbeddingModel(str, Enum):
+    """Embedding model used for ranking web search results internally."""
+
+    EMBEDDING_GEMMA = "embedding_gemma"
+
+
+class SpeechLoaderType(str, Enum):
+    DIA = "dia"
+    KOKORO = "kokoro"
+
+
+class TimestampGranularity(str, Enum):
+    WORD = "word"
+    SEGMENT = "segment"
+
+
+class ToolType(str, Enum):
+    """Type of tool"""
+
+    FUNCTION = "function"
+
+
+class TranscriptionLoaderType(str, Enum):
+    PARAKEET = "parakeet"
+
+
+class TranscriptionResponseFormat(str, Enum):
+    """What a transcription answers with: OpenAI's formats."""
+
+    JSON = "json"
+    TEXT = "text"
+    SRT = "srt"
+    VERBOSE_JSON = "verbose_json"
+    VTT = "vtt"
+
+
+class TruncationStrategy(str, Enum):
+    """Truncation strategy for input"""
+
+    AUTO = "auto"
+    DISABLED = "disabled"
+
+
+class TuneProfileRequest(str, Enum):
+    QUALITY = "quality"
+    BALANCED = "balanced"
+    FAST = "fast"
+
+
+class WebSearchContentType(str, Enum):
+    TEXT = "text"
+    IMAGE = "image"
+
+
+class WebSearchReturnTokenBudget(str, Enum):
+    DEFAULT = "default"
+    UNLIMITED = "unlimited"
+
+
 @dataclass(kw_only=True)
 class AdapterGenerationSelection:
     """An exact immutable LoRA adapter generation."""
@@ -19,12 +419,6 @@ class AdapterSpec:
 
     root: str | None = None
     runtime_updates: bool | None = None
-
-
-class AgentPermission(str, Enum):
-    AUTO = "auto"
-    ASK = "ask"
-    DENY = "deny"
 
 
 @dataclass(kw_only=True)
@@ -62,20 +456,11 @@ class AllowedToolChoiceShell:
     type: Literal["shell"] = "shell"
 
 
-class AllowedToolsMode(str, Enum):
-    AUTO = "auto"
-    REQUIRED = "required"
-
-
 @dataclass(kw_only=True)
 class AllowedToolsToolChoice:
     mode: AllowedToolsMode
     tools: list[AllowedToolChoice]
     type: AllowedToolsToolChoiceType = "allowed_tools"
-
-
-class AllowedToolsToolChoiceType(str, Enum):
-    ALLOWED_TOOLS = "allowed_tools"
 
 
 @dataclass(kw_only=True)
@@ -330,11 +715,6 @@ class AnyMoeSpec:
     prefix: str
 
 
-class ApprovalDecision(str, Enum):
-    APPROVE = "approve"
-    DENY = "deny"
-
-
 @dataclass(kw_only=True)
 class ApprovalDecisionRequest:
     """Decision payload for a pending agentic tool approval."""
@@ -357,26 +737,9 @@ class ApproximateUserLocation:
     timezone: str | None = None
 
 
-class AudioResponseFormat(str, Enum):
-    """Audio format options for speech generation responses."""
-
-    MP3 = "mp3"
-    OPUS = "opus"
-    AAC = "aac"
-    FLAC = "flac"
-    WAV = "wav"
-    PCM = "pcm"
-
-
 @dataclass(kw_only=True)
 class BuiltinToolChoice:
     type: BuiltinToolChoiceType
-
-
-class BuiltinToolChoiceType(str, Enum):
-    WEB_SEARCH_PREVIEW = "web_search_preview"
-    CODE_INTERPRETER = "code_interpreter"
-    SHELL = "shell"
 
 
 @dataclass(kw_only=True)
@@ -521,12 +884,6 @@ class CodeExecutionConfig:
     sandbox_policy: SandboxPolicy | None = None
     timeout_secs: int | None = None
     working_directory: str | None = None
-
-
-class CodeExecutionPermission(str, Enum):
-    AUTO = "auto"
-    ASK = "ask"
-    DENY = "deny"
 
 
 @dataclass(kw_only=True)
@@ -679,13 +1036,6 @@ class DiarizationResponse:
     segments: list[DiarizationSegment]
 
 
-class DiarizationResponseFormat(str, Enum):
-    """What a diarization answers with."""
-
-    JSON = "json"
-    RTTM = "rttm"
-
-
 @dataclass(kw_only=True)
 class DiarizationSegment:
     """One speaker's turn, in seconds from the start of the audio; speakers are the model's output slots."""
@@ -695,32 +1045,11 @@ class DiarizationSegment:
     start: float
 
 
-class DiffusionLoaderType(str, Enum):
-    """The architecture to load the diffusion model as."""
-
-    FLUX = "flux"
-    FLUX_OFFLOADED = "flux-offloaded"
-    HIDREAM_O1 = "hidream-o1"
-    HIDREAM_O1_DEV = "hidream-o1-dev"
-
-
 @dataclass(kw_only=True)
 class EmbeddingData:
     embedding: EmbeddingVector
     index: int
     object: str
-
-
-class EmbeddingEncodingFormat(str, Enum):
-    FLOAT = "float"
-    BASE64 = "base64"
-
-
-class EmbeddingLoaderType(str, Enum):
-    """The architecture to load the embedding model as."""
-
-    EMBEDDINGGEMMA = "embeddinggemma"
-    QWEN3EMBEDDING = "qwen3embedding"
 
 
 @dataclass(kw_only=True)
@@ -927,13 +1256,6 @@ class ImageGenerationResponse:
     data: list[ImageChoice]
 
 
-class ImageGenerationResponseFormat(str, Enum):
-    """Image generation response format"""
-
-    URL = "url"
-    B64_JSON = "b64_json"
-
-
 @dataclass(kw_only=True)
 class ImageReference:
     """One image an edit request conditions on."""
@@ -941,28 +1263,11 @@ class ImageReference:
     image_url: str
 
 
-class IncludeOption(str, Enum):
-    """Include options for response content."""
-
-    FILE_SEARCH_CALL_RESULTS = "file_search_call.results"
-    MESSAGE_INPUT_IMAGE_IMAGE_URL = "message.input_image.image_url"
-    COMPUTER_CALL_OUTPUT_OUTPUT_IMAGE_URL = "computer_call_output.output.image_url"
-    REASONING_ENCRYPTED_CONTENT = "reasoning.encrypted_content"
-
-
 @dataclass(kw_only=True)
 class IncompleteDetails:
     """Details about incomplete responses"""
 
     reason: IncompleteReason
-
-
-class IncompleteReason(str, Enum):
-    """Reason for incomplete response"""
-
-    MAX_OUTPUT_TOKENS = "max_output_tokens"
-    CONTENT_FILTER = "content_filter"
-    INTERRUPTED = "interrupted"
 
 
 @dataclass(kw_only=True)
@@ -973,11 +1278,6 @@ class InputTokensDetails:
     cached_tokens: int | None = None
     image_tokens: int | None = None
     text_tokens: int | None = None
-
-
-class IsqOrganization(str, Enum):
-    DEFAULT = "default"
-    MOQE = "moqe"
 
 
 @dataclass(kw_only=True)
@@ -992,6 +1292,14 @@ class JobDeleted:
 class JobEventStatus:
     status: JobStatus
     type: Literal["status"] = "status"
+
+
+@dataclass(kw_only=True)
+class JobEventWaiting:
+    """A queued job can't start yet, and why."""
+
+    reason: str
+    type: Literal["waiting"] = "waiting"
 
 
 @dataclass(kw_only=True)
@@ -1059,6 +1367,7 @@ class JobRecord:
     """A job's record: what it was asked, how far it got, and what it made."""
 
     created_at: float
+    device: int | None = None
     error: str | None = None
     finished_at: float | None = None
     id: str
@@ -1072,6 +1381,7 @@ class JobRecord:
     stages: list[JobStage] | None = None
     started_at: float | None = None
     status: JobStatus
+    waiting: str | None = None
 
 
 @dataclass(kw_only=True)
@@ -1081,14 +1391,6 @@ class JobStage:
     name: str
     started_at: float
     total: int
-
-
-class JobStatus(str, Enum):
-    QUEUED = "queued"
-    RUNNING = "running"
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
 
 
 @dataclass(kw_only=True)
@@ -1103,11 +1405,12 @@ class JobSubmission:
 class JobsConfig:
     """Where jobs keep their folders and which weights they run."""
 
-    device_ordinal: int | None = 0
+    devices: list[int] | None = None
     dir: str | None = "/home/chris/.cache/inference-rs/engine-jobs"
     drain_timeout_secs: int | None = 120
     lpips: str | None = None
     moge: str | None = None
+    placement: Placement | None = Placement.FASTEST
     wan: str | None = None
     worldmirror: str | None = None
     worldstereo: str | None = None
@@ -1154,13 +1457,6 @@ class LoadLoraAdapterRequest:
     lora_name: str
     lora_path: str
     model: str | None = None
-
-
-class LogitsOutput(str, Enum):
-    """What a scored prompt carries besides the token log-probabilities."""
-
-    LOGPROBS = "logprobs"
-    LOGITS = "logits"
 
 
 @dataclass(kw_only=True)
@@ -1238,20 +1534,6 @@ class ManagedDownloadRequest:
     quant: str | None = None
     repo_id: str
     revision: str | None = None
-
-
-class ManagedKind(str, Enum):
-    """How a managed model serves requests."""
-
-    TEXT = "text"
-    MULTIMODAL = "multimodal"
-    EMBEDDING = "embedding"
-    IMAGE_GENERATION = "image_generation"
-    SPEECH = "speech"
-    TRANSCRIPTION = "transcription"
-    VOICE_ACTIVITY = "voice_activity"
-    DIARIZATION = "diarization"
-    LAYOUT = "layout"
 
 
 @dataclass(kw_only=True)
@@ -1367,23 +1649,6 @@ class Message:
     tool_calls: list[ToolCall] | None = None
 
 
-class MmprojSelection(str, Enum):
-    """How a GGUF spec without `mmproj_filename` gets its multimodal projector."""
-
-    GIVEN = "given"
-    ARTIFACT_REPO = "artifact_repo"
-    ANY = "any"
-    REQUIRED = "required"
-
-
-class Modality(str, Enum):
-    TEXT = "text"
-    AUDIO = "audio"
-    VISION = "vision"
-    VIDEO = "video"
-    EMBEDDING = "embedding"
-
-
 @dataclass(kw_only=True)
 class ModelAlias:
     """Another id requests can name a served model by."""
@@ -1398,26 +1663,6 @@ class ModelCacheStats:
     model_id: str
     prefix_cache_hits: int
     prefix_cache_sequences: int
-
-
-class ModelCategory(str, Enum):
-    TEXT = "text"
-    MULTIMODAL = "multimodal"
-    DIFFUSION = "diffusion"
-    TRANSCRIPTION = "transcription"
-    VOICE_ACTIVITY = "voice_activity"
-    DIARIZATION = "diarization"
-    SPEECH = "speech"
-    EMBEDDING = "embedding"
-
-
-class ModelDType(str, Enum):
-    """DType for the model."""
-
-    AUTO = "auto"
-    BF16 = "bf16"
-    F16 = "f16"
-    F32 = "f32"
 
 
 @dataclass(kw_only=True)
@@ -1733,23 +1978,11 @@ class ModelSpeculativeStats:
     model_id: str
 
 
-class ModelStatus(str, Enum):
-    LOADED = "loaded"
-    UNLOADED = "unloaded"
-    RELOADING = "reloading"
-
-
 @dataclass(kw_only=True)
 class ModelStatusResponse:
     memory: ModelMemory | None = None
     model_id: str
     status: ModelStatus
-
-
-class MtpDraftSampling(str, Enum):
-    AUTO = "auto"
-    GREEDY = "greedy"
-    PROBABILISTIC = "probabilistic"
 
 
 @dataclass(kw_only=True)
@@ -1762,81 +1995,10 @@ class MtpSpec:
     n_predict: int | None = None
 
 
-class MultimodalLoaderType(str, Enum):
-    """The architecture to load the multimodal model as."""
-
-    PHI3V = "phi3v"
-    IDEFICS2 = "idefics2"
-    LLAVA_NEXT = "llava_next"
-    LLAVA = "llava"
-    LFM2VL = "lfm2vl"
-    VLLAMA = "vllama"
-    QWEN2VL = "qwen2vl"
-    IDEFICS3 = "idefics3"
-    MINICPMO = "minicpmo"
-    PHI4MM = "phi4mm"
-    QWEN2_5VL = "qwen2_5vl"
-    GEMMA3 = "gemma3"
-    MISTRAL3 = "mistral3"
-    LLAMA4 = "llama4"
-    GEMMA3N = "gemma3n"
-    QWEN3VL = "qwen3vl"
-    QWEN3VLMOE = "qwen3vlmoe"
-    QWEN3_5 = "qwen3_5"
-    QWEN3_5MOE = "qwen3_5moe"
-    QWEN4EXP = "qwen4exp"
-    VOXTRAL = "voxtral"
-    GEMMA4 = "gemma4"
-    MUSE_GLIMMER = "muse_glimmer"
-    DIFFUSIONGEMMA = "diffusiongemma"
-    PADDLEOCR_VL = "paddleocr_vl"
-
-
 @dataclass(kw_only=True)
 class NamedFunctionToolChoice:
     name: str
     type: ToolType = "function"
-
-
-class NetworkMode(str, Enum):
-    """Network access permitted to sandboxed processes."""
-
-    NONE = "none"
-    LOOPBACK = "loopback"
-    FULL = "full"
-
-
-class NormalLoaderType(str, Enum):
-    """The architecture to load the normal model as."""
-
-    MISTRAL = "mistral"
-    GEMMA = "gemma"
-    MIXTRAL = "mixtral"
-    LLAMA = "llama"
-    PHI2 = "phi2"
-    PHI3 = "phi3"
-    QWEN2 = "qwen2"
-    GEMMA2 = "gemma2"
-    STARCODER2 = "starcoder2"
-    PHI3_5MOE = "phi3.5moe"
-    DEEPSEEKV2 = "deepseekv2"
-    DEEPSEEKV3 = "deepseekv3"
-    QWEN3 = "qwen3"
-    GLM4 = "glm4"
-    GLM4MOELITE = "glm4moelite"
-    GLM4MOE = "glm4moe"
-    QWEN3MOE = "qwen3moe"
-    SMOLLM3 = "smollm3"
-    GRANITEMOEHYBRID = "granitemoehybrid"
-    GPT_OSS = "gpt_oss"
-    HUNYUANV1DENSE = "hunyuanv1dense"
-    HUNYUANV1MOE = "hunyuanv1moe"
-    QWEN3NEXT = "qwen3next"
-    QWEN3_5 = "qwen3_5"
-    QWEN3_5MOE = "qwen3_5moe"
-    QWEN4EXP = "qwen4exp"
-    LFM2 = "lfm2"
-    LFM2_MOE = "lfm2_moe"
 
 
 @dataclass(kw_only=True)
@@ -1846,22 +2008,10 @@ class OpenAiCodeInterpreterAutoContainer:
     type: OpenAiCodeInterpreterContainerType = "auto"
 
 
-class OpenAiCodeInterpreterContainerType(str, Enum):
-    AUTO = "auto"
-
-
 @dataclass(kw_only=True)
 class OpenAiCodeInterpreterTool:
     container: OpenAiCodeInterpreterContainer
     type: OpenAiCodeInterpreterToolType = "code_interpreter"
-
-
-class OpenAiCodeInterpreterToolType(str, Enum):
-    CODE_INTERPRETER = "code_interpreter"
-
-
-class OpenAiFunctionToolType(str, Enum):
-    FUNCTION = "function"
 
 
 @dataclass(kw_only=True)
@@ -1872,10 +2022,6 @@ class OpenAiNamespaceTool:
     name: str
     tools: list[OpenAiNamespaceEntry] | None = None
     type: OpenAiNamespaceToolType = "namespace"
-
-
-class OpenAiNamespaceToolType(str, Enum):
-    NAMESPACE = "namespace"
 
 
 @dataclass(kw_only=True)
@@ -1924,10 +2070,6 @@ class OpenAiShellTool:
     type: OpenAiShellToolType = "shell"
 
 
-class OpenAiShellToolType(str, Enum):
-    SHELL = "shell"
-
-
 @dataclass(kw_only=True)
 class OpenAiWebSearchTool:
     external_web_access: bool | None = None
@@ -1938,11 +2080,6 @@ class OpenAiWebSearchTool:
     search_context_size: SearchContextSize | None = None
     type: OpenAiWebSearchToolType
     user_location: OpenAiWebSearchUserLocation | None = None
-
-
-class OpenAiWebSearchToolType(str, Enum):
-    WEB_SEARCH = "web_search"
-    WEB_SEARCH_PREVIEW = "web_search_preview"
 
 
 @dataclass(kw_only=True)
@@ -2435,32 +2572,13 @@ class ReasoningConfig:
     summary: ReasoningSummary | None = None
 
 
-class ReasoningEffort(str, Enum):
-    """Reasoning effort. `none` aliases `off`; `max` aliases `xhigh`."""
-
-    OFF = "off"
-    NONE = "none"
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    XHIGH = "xhigh"
-    MAX = "max"
-
-
-class ReasoningSummary(str, Enum):
-    """Reasoning summary configuration"""
-
-    CONCISE = "concise"
-    DETAILED = "detailed"
-    AUTO = "auto"
-
-
 @dataclass(kw_only=True)
 class ReconstructJob:
     """WorldMirror 2.0 on the job's inputs: images, or one video."""
 
     fps: float | None = None
     max_frames: int | None = None
+    placement: Placement | None = None
     target_size: int | None = None
 
 
@@ -2537,17 +2655,6 @@ class ResponseResource:
     top_p: float | None = None
     truncation: TruncationStrategy | None = None
     usage: ResponseUsage | None = None
-
-
-class ResponseStatus(str, Enum):
-    """Status of a response in the OpenResponses API"""
-
-    QUEUED = "queued"
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    INCOMPLETE = "incomplete"
-    CANCELLED = "cancelled"
 
 
 @dataclass(kw_only=True)
@@ -2785,14 +2892,6 @@ class SandboxLimits:
     network: NetworkMode | None = None
 
 
-class SandboxMode(str, Enum):
-    """Whether tools that run model-written code are sandboxed."""
-
-    AUTO = "auto"
-    ON = "on"
-    OFF = "off"
-
-
 @dataclass(kw_only=True)
 class SandboxPolicy:
     """Policy applied to a sandboxed process."""
@@ -2809,13 +2908,6 @@ class SandboxPolicy:
     strict: bool | None = False
 
 
-class SandboxProfile(str, Enum):
-    """The starting policy for sandboxed tools: `restricted` or `developer` (toolchain paths, full network by default)."""
-
-    RESTRICTED = "restricted"
-    DEVELOPER = "developer"
-
-
 @dataclass(kw_only=True)
 class SavedModel:
     """A load the manager keeps under its model id: the request its last successful load used, and whether the server loads it again when it starts."""
@@ -2829,25 +2921,6 @@ class SavedModels:
     """The loads the manager keeps, by model id."""
 
     saved: dict[str, SavedModel]
-
-
-class SceneKind(str, Enum):
-    """Indoor scenes keep far distances; outdoor ones compress them."""
-
-    INDOOR = "indoor"
-    OUTDOOR = "outdoor"
-
-
-class SearchContextSize(str, Enum):
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-
-
-class SearchEmbeddingModel(str, Enum):
-    """Embedding model used for ranking web search results internally."""
-
-    EMBEDDING_GEMMA = "embedding_gemma"
 
 
 @dataclass(kw_only=True)
@@ -2999,11 +3072,6 @@ class SpeechGenerationSpec:
     top_p: float | None = None
 
 
-class SpeechLoaderType(str, Enum):
-    DIA = "dia"
-    KOKORO = "kokoro"
-
-
 @dataclass(kw_only=True)
 class SpeechSegment:
     """A span of speech, in seconds from the start of the audio."""
@@ -3070,11 +3138,6 @@ class TextFormatJsonObject:
     type: Literal["json_object"] = "json_object"
 
 
-class TimestampGranularity(str, Enum):
-    WORD = "word"
-    SEGMENT = "segment"
-
-
 @dataclass(kw_only=True)
 class TokenizeRequest:
     add_special_tokens: bool | None = True
@@ -3104,21 +3167,11 @@ class ToolCall:
     type: ToolType = "function"
 
 
-class ToolType(str, Enum):
-    """Type of tool"""
-
-    FUNCTION = "function"
-
-
 @dataclass(kw_only=True)
 class TranscriptionDelta:
     """The text one push to a streamed transcription adds."""
 
     delta: str
-
-
-class TranscriptionLoaderType(str, Enum):
-    PARAKEET = "parakeet"
 
 
 @dataclass(kw_only=True)
@@ -3138,16 +3191,6 @@ class TranscriptionRequest:
 @dataclass(kw_only=True)
 class TranscriptionResponse:
     text: str
-
-
-class TranscriptionResponseFormat(str, Enum):
-    """What a transcription answers with: OpenAI's formats."""
-
-    JSON = "json"
-    TEXT = "text"
-    SRT = "srt"
-    VERBOSE_JSON = "verbose_json"
-    VTT = "vtt"
 
 
 @dataclass(kw_only=True)
@@ -3182,13 +3225,6 @@ class TranscriptionWord:
     word: str
 
 
-class TruncationStrategy(str, Enum):
-    """Truncation strategy for input"""
-
-    AUTO = "auto"
-    DISABLED = "disabled"
-
-
 @dataclass(kw_only=True)
 class TuneModelRequest:
     cpu: bool | None = None
@@ -3202,12 +3238,6 @@ class TuneModelRequest:
     profile: TuneProfileRequest | None = None
     requested_isq: str | None = None
     token_source: str | None = None
-
-
-class TuneProfileRequest(str, Enum):
-    QUALITY = "quality"
-    BALANCED = "balanced"
-    FAST = "fast"
 
 
 @dataclass(kw_only=True)
@@ -3266,11 +3296,6 @@ class VoiceActivityResponse:
     segments: list[SpeechSegment]
 
 
-class WebSearchContentType(str, Enum):
-    TEXT = "text"
-    IMAGE = "image"
-
-
 @dataclass(kw_only=True)
 class WebSearchFilters:
     allowed_domains: list[str] | None = None
@@ -3296,11 +3321,6 @@ class WebSearchOptions:
     user_location: WebSearchUserLocation | None = None
 
 
-class WebSearchReturnTokenBudget(str, Enum):
-    DEFAULT = "default"
-    UNLIMITED = "unlimited"
-
-
 @dataclass(kw_only=True)
 class WebSearchUserLocationApproximate:
     approximate: ApproximateUserLocation
@@ -3311,6 +3331,7 @@ class WebSearchUserLocationApproximate:
 class WorldJob:
     """A world from a panorama, the job's one input."""
 
+    placement: Placement | None = None
     prompt: str | None = None
     scene: SceneKind | None = None
     seed: int | None = None
@@ -3327,7 +3348,7 @@ CompletionPrompt = Union[str, list[int]]
 EmbeddingInput = Union[str, list[str], list[int], list[list[int]]]
 EmbeddingVector = Union[list[float], str]
 Grammar = Union[GrammarRegex, GrammarJsonSchema, GrammarLlguidance, GrammarLark]
-JobEvent = Union[JobEventStatus, JobEventStage, JobEventProgress, Any, JobEventFinished]
+JobEvent = Union[JobEventStatus, JobEventWaiting, JobEventStage, JobEventProgress, Any, JobEventFinished]
 JobRequest = Any
 McpServerSource = Union[McpServerSourceHttp, McpServerSourceProcess, McpServerSourceWebSocket]
 MessageInnerContent = Union[str, dict[str, str]]

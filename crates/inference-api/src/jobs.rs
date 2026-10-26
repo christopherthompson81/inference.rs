@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use inference_core::InferenceRs;
+pub use inference_core::placement::JobNeed;
+use inference_core::placement::{Displace, Placed, place};
 use inference_recon::progress::CANCELLED;
 pub use inference_recon::progress::Progress;
 use inference_tensor::Device;
@@ -32,6 +34,10 @@ const INPUT_DIR: &str = "input";
 const DEFAULT_DRAIN_TIMEOUT_SECS: u64 = 120;
 const EVENT_CAPACITY: usize = 256;
 const INTERRUPTED: &str = "interrupted: the server stopped before the job finished";
+// a reconstruction's peak above idle is ~8.7 GB whatever its input: WorldMirror caps its tokens
+const RECONSTRUCT_NEED_BYTES: u64 = 10 << 30;
+// how often a job waiting for room looks again
+const WAIT_POLL: Duration = Duration::from_secs(2);
 // a world job's subfolders
 const WORLD_DIR: &str = "world";
 #[cfg(feature = "cuda")]
@@ -45,6 +51,29 @@ const WAN_DIR: &str = "Wan2.1-I2V-14B-480P-Diffusers";
 const MOGE_DIR: &str = "moge-2-vitl-normal";
 const WORLDMIRROR_DIR: &str = "HY-World-2.0/HY-WorldMirror-2.0";
 const LPIPS_FILE: &str = "lpips-vgg/lpips_vgg.safetensors";
+
+/// How much a job may displace to run.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Placement {
+    /// Unload what the job needs, idle models first, waiting for busy ones to finish their requests
+    #[default]
+    Fastest,
+    /// Unload only idle models; while one that is serving requests is in the way, wait
+    WhenQuiet,
+    /// Run only where the job fits beside the loaded models
+    NoEviction,
+}
+
+impl Placement {
+    fn displace(self) -> Displace {
+        match self {
+            Self::Fastest => Displace::Busy,
+            Self::WhenQuiet => Displace::Idle,
+            Self::NoEviction => Displace::Nothing,
+        }
+    }
+}
 
 /// Where jobs keep their folders and which weights they run.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
@@ -68,8 +97,10 @@ pub struct JobsConfig {
     /// VGG16 features and the LPIPS heads, for splat training
     #[schema(value_type = Option<String>)]
     pub lpips: Option<PathBuf>,
-    /// The CUDA device jobs run on
-    pub device_ordinal: usize,
+    /// The CUDA devices jobs may run on; every visible one when unset
+    pub devices: Option<Vec<usize>>,
+    /// How much a job may displace to run, unless its request says otherwise
+    pub placement: Placement,
     /// How long a job waits for the models on its device to go quiet before it fails, in seconds
     pub drain_timeout_secs: u64,
 }
@@ -83,7 +114,8 @@ impl Default for JobsConfig {
             moge: None,
             worldmirror: None,
             lpips: None,
-            device_ordinal: 0,
+            devices: None,
+            placement: Placement::Fastest,
             drain_timeout_secs: DEFAULT_DRAIN_TIMEOUT_SECS,
         }
     }
@@ -142,6 +174,9 @@ pub struct WorldJob {
     /// Splat training steps
     #[serde(default)]
     pub steps: Option<usize>,
+    /// How much it may displace to run, in place of the server's setting
+    #[serde(default)]
+    pub placement: Option<Placement>,
 }
 
 /// WorldMirror 2.0 on the job's inputs: images, or one video.
@@ -156,6 +191,9 @@ pub struct ReconstructJob {
     /// The most frames sampled from a video
     #[serde(default)]
     pub max_frames: Option<usize>,
+    /// How much it may displace to run, in place of the server's setting
+    #[serde(default)]
+    pub placement: Option<Placement>,
 }
 
 /// What a job does.
@@ -255,6 +293,12 @@ pub struct JobRecord {
     pub outputs: Vec<JobOutput>,
     #[serde(default)]
     pub error: Option<String>,
+    /// Why a queued job has not started: what it waits for
+    #[serde(default)]
+    pub waiting: Option<String>,
+    /// The CUDA device it ran on
+    #[serde(default)]
+    pub device: Option<usize>,
     /// What the run reported (its `meta.json` fields, a training summary)
     #[serde(default)]
     #[schema(value_type = Object)]
@@ -267,6 +311,10 @@ pub struct JobRecord {
 pub enum JobEvent {
     Status {
         status: JobStatus,
+    },
+    /// A queued job can't start yet, and why.
+    Waiting {
+        reason: String,
     },
     Stage {
         name: String,
@@ -525,9 +573,16 @@ impl Progress for JobContext {
     }
 }
 
+// what a job takes, and where it may look for it
+struct Target {
+    need: JobNeed,
+    devices: Vec<usize>,
+    displace: Displace,
+}
+
 struct Queued {
     job: Arc<Job>,
-    device: Option<Device>,
+    target: Option<Target>,
     work: Work,
 }
 
@@ -628,31 +683,17 @@ fn run_queue(rx: std::sync::mpsc::Receiver<Queued>, state: Weak<InferenceRs>, dr
             return;
         }
     };
-    for Queued { job, device, work } in rx {
+    for Queued { job, target, work } in rx {
         if job.cancel.load(Ordering::Relaxed) {
             job.finish(Err(anyhow::anyhow!(CANCELLED)));
             continue;
         }
-        job.update(
-            true,
-            Some(JobEvent::Status {
-                status: JobStatus::Running,
-            }),
-            |record| {
-                record.status = JobStatus::Running;
-                record.started_at = Some(now());
-            },
-        );
-        let lease = match (&device, state.upgrade()) {
-            (Some(device), Some(state)) => {
-                let holder = {
-                    let record = job.record();
-                    format!("job {} ({})", record.id, record.kind)
-                };
-                match runtime.block_on(state.lease_device(device, &holder, drain)) {
-                    Ok(lease) => Some(lease),
+        let (device, lease) = match (&target, state.upgrade()) {
+            (Some(target), Some(state)) => {
+                match runtime.block_on(take_device(&state, &job, target, drain)) {
+                    Ok((device, lease)) => (Some(device), Some(lease)),
                     Err(error) => {
-                        job.finish(Err(error.into()));
+                        job.finish(Err(error));
                         continue;
                     }
                 }
@@ -661,8 +702,19 @@ fn run_queue(rx: std::sync::mpsc::Receiver<Queued>, state: Weak<InferenceRs>, dr
                 job.finish(Err(anyhow::anyhow!("the engine has shut down")));
                 continue;
             }
-            (None, _) => None,
+            (None, _) => (None, None),
         };
+        job.update(
+            true,
+            Some(JobEvent::Status {
+                status: JobStatus::Running,
+            }),
+            |record| {
+                record.status = JobStatus::Running;
+                record.started_at = Some(now());
+                record.waiting = None;
+            },
+        );
         let context = JobContext {
             job: job.clone(),
             device,
@@ -674,6 +726,77 @@ fn run_queue(rx: std::sync::mpsc::Receiver<Queued>, state: Weak<InferenceRs>, dr
         drop(lease);
         job.finish(outcome);
     }
+}
+
+// waits until a placement takes a device for the job, then leases it; fails when none ever could
+async fn take_device(
+    state: &InferenceRs,
+    job: &Job,
+    target: &Target,
+    drain: Duration,
+) -> anyhow::Result<(Device, inference_core::DeviceLease)> {
+    let holder = {
+        let record = job.record();
+        format!("job {} ({})", record.id, record.kind)
+    };
+    let devices = target
+        .devices
+        .iter()
+        .map(|&ordinal| Ok((ordinal, Device::new_cuda(ordinal)?)))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    loop {
+        if job.cancel.load(Ordering::Relaxed) {
+            anyhow::bail!(CANCELLED);
+        }
+        let snapshots = devices
+            .iter()
+            .map(|(ordinal, device)| state.device_snapshot(device, *ordinal))
+            .collect::<Result<Vec<_>, _>>()?;
+        match place(&snapshots, target.need, target.displace) {
+            Placed::Run { ordinal, evict } => {
+                let (_, device) = devices
+                    .iter()
+                    .find(|(o, _)| *o == ordinal)
+                    .expect("the plan names a candidate");
+                let unload = (target.need != JobNeed::Device).then_some(evict.as_slice());
+                let lease = state.lease_device(device, &holder, unload, drain).await?;
+                job.update(true, None, |record| record.device = Some(ordinal));
+                return Ok((device.clone(), lease));
+            }
+            Placed::Wait(reason) => {
+                let changed = job.record().waiting.as_deref() != Some(reason.as_str());
+                if changed {
+                    let event = JobEvent::Waiting {
+                        reason: reason.clone(),
+                    };
+                    job.update(true, Some(event), |record| record.waiting = Some(reason));
+                }
+                tokio::time::sleep(WAIT_POLL).await;
+            }
+            Placed::Never(reason) => anyhow::bail!("no device can take this job: {reason}"),
+        }
+    }
+}
+
+// the CUDA devices jobs may use: the configured ones, or every visible one
+fn candidate_devices(config: &JobsConfig) -> Result<Vec<usize>, ApiError> {
+    #[cfg(feature = "cuda")]
+    let visible = inference_tensor::cuda_backend::device_count().unwrap_or(0);
+    #[cfg(not(feature = "cuda"))]
+    let visible = 0;
+    let devices = match &config.devices {
+        Some(devices) => devices.clone(),
+        None => (0..visible).collect(),
+    };
+    if devices.is_empty() || devices.iter().any(|&d| d >= visible) {
+        return Err(ApiError::new(
+            ApiErrorKind::Unavailable,
+            format!("jobs need a CUDA device; {visible} visible, {devices:?} configured"),
+            Some("device_unavailable"),
+            None,
+        ));
+    }
+    Ok(devices)
 }
 
 fn now() -> f64 {
@@ -890,12 +1013,12 @@ impl Engine {
         inputs: Vec<JobInput>,
     ) -> Result<JobRecord, ApiError> {
         let config = self.job_runner().config();
-        let work = match request.clone() {
+        let (need, placement, work) = match request.clone() {
             JobRequest::World(job) => {
                 if inputs.len() != 1 {
                     return Err(ApiError::invalid_request("a world job takes one panorama"));
                 }
-                world_work(&config, job)?
+                (JobNeed::Device, job.placement, world_work(&config, job)?)
             }
             JobRequest::Reconstruct(job) => {
                 if inputs.is_empty() {
@@ -903,35 +1026,42 @@ impl Engine {
                         "a reconstruction takes images or a video",
                     ));
                 }
-                reconstruct_work(&config, job)?
+                let placement = job.placement;
+                let work = reconstruct_work(&config, job)?;
+                (JobNeed::Bytes(RECONSTRUCT_NEED_BYTES), placement, work)
             }
         };
-        let device = Device::new_cuda(config.device_ordinal).map_err(|error| {
-            ApiError::new(
-                ApiErrorKind::Unavailable,
-                format!("jobs need CUDA device {}: {error}", config.device_ordinal),
-                Some("device_unavailable"),
-                None,
-            )
-        })?;
+        let target = Target {
+            need,
+            devices: candidate_devices(&config)?,
+            displace: placement.unwrap_or(config.placement).displace(),
+        };
         let kind = request.kind();
         let request = serde_json::to_value(&request).map_err(|_| ApiError::internal())?;
-        self.enqueue(&config, kind, request, inputs, Some(device), work)
+        self.enqueue(&config, kind, request, inputs, Some(target), work)
     }
 
     pub(crate) fn jobs_submit_task(
         &self,
         kind: &str,
-        device: Option<Device>,
+        need: Option<JobNeed>,
         work: impl FnOnce(&JobContext) -> anyhow::Result<JobResult> + Send + 'static,
     ) -> Result<JobRecord, ApiError> {
         let config = self.job_runner().config();
+        let target = match need {
+            Some(need) => Some(Target {
+                need,
+                devices: candidate_devices(&config)?,
+                displace: config.placement.displace(),
+            }),
+            None => None,
+        };
         self.enqueue(
             &config,
             kind,
             serde_json::Value::Null,
             Vec::new(),
-            device,
+            target,
             Box::new(work),
         )
     }
@@ -942,7 +1072,7 @@ impl Engine {
         kind: &str,
         request: serde_json::Value,
         inputs: Vec<JobInput>,
-        device: Option<Device>,
+        target: Option<Target>,
         work: Work,
     ) -> Result<JobRecord, ApiError> {
         let runner = self.job_runner();
@@ -990,6 +1120,8 @@ impl Engine {
             previews: Vec::new(),
             outputs: Vec::new(),
             error: None,
+            waiting: None,
+            device: None,
             report: serde_json::Value::Null,
         };
         let job = Arc::new(Job::new(record.clone(), dir));
@@ -1003,7 +1135,7 @@ impl Engine {
             .insert(id, job.clone());
         runner
             .sender(self.state())
-            .send(Queued { job, device, work })
+            .send(Queued { job, target, work })
             .map_err(|_| ApiError::internal())?;
         Ok(record)
     }

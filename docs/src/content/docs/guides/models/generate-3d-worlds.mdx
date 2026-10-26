@@ -122,9 +122,19 @@ training renders as they appear, and opens the finished splats in a viewer (drag
 up and down). The same jobs are at `/v1/jobs` (submit as multipart: `request`, the job as JSON, and its `file`s; then
 follow `/v1/jobs/{id}/events` and fetch `/v1/jobs/{id}/files/...`) and in the C ABI's `inference_job_*` calls.
 
-A job holds its GPU to itself: it waits for the models there to finish their requests, unloads them, and loads stay
-off that GPU until it ends (they load again on their next request). Only admins start jobs. A world job peaks at about
-18 GB, so it needs the whole of a 24 GB card.
+A world job takes a whole GPU (it peaks at about 18 GB, so it needs all of a 24 GB card); a reconstruction needs about
+10 GB and runs beside whatever leaves room. What a job may unload to make room is `--job-placement` (and each job's
+own `placement`, or the form's "Make room"):
+
+| Placement | Makes room by |
+|---|---|
+| `fastest` (default) | unloading what the job needs, idle models first, waiting for busy ones to finish their requests |
+| `when-quiet` | unloading only idle models; while one serving requests is in the way, the job waits in the queue |
+| `no-eviction` | unloading nothing; the job runs where it fits beside the loaded models, or waits |
+
+A waiting job says what it waits for. With several GPUs (`--job-device` to limit them) a job goes where it fits
+without unloading anything, else where it unloads the least. Loads stay off a job's GPU until it ends; unloaded models
+load again on their next request. Only admins start jobs.
 
 ## Conventions
 

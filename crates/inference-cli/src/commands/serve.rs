@@ -299,6 +299,10 @@ pub(crate) async fn serve_engine(spec: EngineSpec, server: &ServerOptions) -> Re
     if let Some(root) = &server.world_models {
         jobs = jobs.with_models_root(root);
     }
+    jobs.placement = server.job_placement.into();
+    if !server.job_devices.is_empty() {
+        jobs.devices = Some(server.job_devices.clone());
+    }
     engine.configure_jobs(jobs);
     let folders = server
         .model_folders
