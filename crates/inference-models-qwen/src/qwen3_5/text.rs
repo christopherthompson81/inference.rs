@@ -1004,6 +1004,7 @@ pub(super) struct SpecCapture {
 
 /// Per-GDN-layer inputs and pre-forward states of the last multi-token decode, so a rejected tail
 /// can be undone by replaying only the accepted prefix.
+#[derive(Clone)]
 struct PleStash {
     indices: Tensor,
     history: Tensor,
@@ -1299,6 +1300,8 @@ pub(super) struct SpecGraphState {
     spec_capture: Option<SpecCapture>,
     full_capture: Option<SpecCapture>,
     gdn_stash: Option<GdnReplayStash>,
+    // PLE's conv history a verify commits from; its indices are the graph's slot buffer, which a replay refreshes
+    ple_stash: Option<PleStash>,
 }
 
 impl crate::speculative::SpeculativeGraphState for SpecGraphState {
@@ -1330,6 +1333,9 @@ impl crate::speculative::SpeculativeGraphState for SpecGraphState {
                     GdnLayerRollback::Transition(_) => {}
                 }
             }
+        }
+        if let Some(stash) = &self.ple_stash {
+            out.push(stash.history.clone());
         }
         out
     }
@@ -1374,6 +1380,9 @@ impl crate::speculative::SpeculativeGraphState for SpecGraphState {
                 }
             }
         }
+        if let Some(stash) = state.ple_stash.as_mut() {
+            stash.history = next()?;
+        }
         Ok(Box::new(state))
     }
 
@@ -1390,6 +1399,23 @@ impl crate::speculative::SpeculativeGraphState for SpecGraphState {
         }
         if let Some(stash) = state.gdn_stash.as_mut() {
             narrow_gdn_replay_stash(stash, real_batch)?;
+        }
+        if let Some(stash) = state.ple_stash.as_mut() {
+            let captured_batch = stash.history.dim(0)?;
+            stash.history = narrow_spec_graph_tensor(
+                &stash.history,
+                0,
+                captured_batch,
+                real_batch,
+                "PLE history",
+            )?;
+            stash.indices = narrow_spec_graph_tensor(
+                &stash.indices,
+                0,
+                captured_batch,
+                real_batch,
+                "PLE indices",
+            )?;
         }
         Ok(Box::new(state))
     }
@@ -2590,6 +2616,7 @@ impl Qwen3_5TextModel {
                 .lock()
                 .expect("gdn stash poisoned")
                 .take(),
+            ple_stash: self.ple_stash.lock().expect("ple stash poisoned").take(),
         })
     }
 
@@ -2614,6 +2641,7 @@ impl Qwen3_5TextModel {
             .lock()
             .expect("spec capture poisoned") = full_capture;
         *self.gdn_replay_stash.lock().expect("gdn stash poisoned") = gdn_stash;
+        *self.ple_stash.lock().expect("ple stash poisoned") = state.ple_stash.clone();
         Ok(())
     }
 
@@ -2687,10 +2715,29 @@ impl Qwen3_5TextModel {
             })
             .map(Some);
         }
-        let window = ctx
-            .token_window()
-            .ok_or_else(|| inference_tensor::Error::msg("QSA reads the batch's token window"))?;
+        let query_len = xs.dim(1)?;
         let offsets = ctx.seqlen_offsets();
+        // a captured verify step has no window; its rows are full, as the graph's fixed width makes them
+        let Some(window) = ctx.token_window() else {
+            if ctx.decode_token_window().is_none() {
+                inference_tensor::bail!("QSA reads the batch's token window");
+            }
+            let rows = offsets
+                .iter()
+                .map(|&start| QsaRow {
+                    start,
+                    len: query_len,
+                })
+                .collect::<Vec<_>>();
+            return QsaStep::new(QsaStepInput {
+                cfg,
+                rows: &rows,
+                query_len,
+                input_metadata,
+                device: xs.device(),
+            })
+            .map(Some);
+        };
         if offsets.len() != window.rows.len() {
             inference_tensor::bail!(
                 "QSA has {} sequence offsets for {} batch rows",
@@ -2709,7 +2756,7 @@ impl Qwen3_5TextModel {
         QsaStep::new(QsaStepInput {
             cfg,
             rows: &rows,
-            query_len: xs.dim(1)?,
+            query_len,
             input_metadata,
             device: xs.device(),
         })
@@ -3317,7 +3364,7 @@ mod tests {
     use inference_tensor::{DType, Device, Tensor};
 
     use super::{
-        GdnLayerRollback, GdnLayerStash, GdnReplayBatch, GdnReplayStash, SpecCapture,
+        GdnLayerRollback, GdnLayerStash, GdnReplayBatch, GdnReplayStash, PleStash, SpecCapture,
         SpecGraphState, gdn_transition_keep_rows, group_gdn_replay_batches,
         recurrent_checkpoint_devices_supported, refresh_gdn_stash_slots, should_stash_gdn_replay,
         terminal_gdn_transition_slots,
@@ -3538,11 +3585,18 @@ mod tests {
                     state_layout: RecurrentStateLayout::GdnValueMajor,
                 }],
             }),
+            ple_stash: Some(PleStash {
+                indices: Tensor::zeros(16, DType::U32, &device).unwrap(),
+                history: Tensor::zeros((16, 6, 8), DType::F32, &device).unwrap(),
+            }),
         };
 
         let state = state.for_real_batch(9).unwrap();
         let state = state.as_any().downcast_ref::<SpecGraphState>().unwrap();
 
+        let ple = state.ple_stash.as_ref().unwrap();
+        assert_eq!(ple.indices.dims(), &[9]);
+        assert_eq!(ple.history.dims(), &[9, 6, 8]);
         let text_capture = state.spec_capture.as_ref().unwrap();
         assert_eq!(text_capture.hidden.dims(), &[9, 8, 32]);
         assert_eq!(text_capture.positions.dims(), &[9, 8]);
@@ -3583,6 +3637,7 @@ mod tests {
                     state_layout: RecurrentStateLayout::GdnValueMajor,
                 }],
             }),
+            ple_stash: None,
         };
 
         let state = state.for_real_batch(9).unwrap();
@@ -3604,6 +3659,7 @@ mod tests {
                 slots: vec![10],
                 layers: Vec::new(),
             }),
+            ple_stash: None,
         };
         assert!(state.for_real_batch(2).is_err());
     }

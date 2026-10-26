@@ -1757,9 +1757,30 @@ pub(super) fn indexed_mmvq_with(
 /// The grouped mmq over `[gate, up, down]` kernel weights, for prefill-sized batches.
 #[cfg(feature = "cuda")]
 pub(super) fn grouped_with(
+    weights: [&dyn inference_quant::KernelWeight; 3],
+    forward: &MoEForward,
+    config: MoEForwardConfig,
+) -> Result<Option<Tensor>> {
+    grouped_routes_with(weights, forward, config, false)
+}
+
+/// As [`grouped_with`], but a route to expert `config.num_experts` is parked: sorted past the experts the kernels run
+/// and never computed. Its routing weight must be 0, which the weighted reduce skips.
+#[cfg(feature = "cuda")]
+pub(super) fn grouped_parked_with(
+    weights: [&dyn inference_quant::KernelWeight; 3],
+    forward: &MoEForward,
+    config: MoEForwardConfig,
+) -> Result<Option<Tensor>> {
+    grouped_routes_with(weights, forward, config, true)
+}
+
+#[cfg(feature = "cuda")]
+fn grouped_routes_with(
     [gate_qt, up_qt, down_qt]: [&dyn inference_quant::KernelWeight; 3],
     forward: &MoEForward,
     config: MoEForwardConfig,
+    parked: bool,
 ) -> Result<Option<Tensor>> {
     {
         let topk = config.num_experts_per_tok;
@@ -1792,7 +1813,7 @@ pub(super) fn grouped_with(
             inference_quant::moe_dispatch_build(
                 ti_u32_slice,
                 total_assignments,
-                num_experts,
+                num_experts + usize::from(parked),
                 topk,
                 dev,
             )?;

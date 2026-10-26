@@ -510,9 +510,13 @@ async fn flash_next_dflash_drafts_and_keeps_greedy_output() -> anyhow::Result<()
     if !cfg!(feature = "cuda") || inference_tensor::Device::new_cuda(0).is_err() {
         return Ok(());
     }
+    let snapshotter = decode_graphs::recorder();
     for budget in [DENSE_BUDGET, SPARSE_BUDGET] {
         dflash_keeps_greedy_output(budget).await?;
     }
+    let counters = decode_graphs::Counters::take(&snapshotter);
+    decode_graphs::assert_replayed(&counters);
+    decode_graphs::assert_only_prompts_skip(&counters);
     Ok(())
 }
 
@@ -576,12 +580,13 @@ fn same_up_to_ties(
 }
 
 // Flash-Next's built-in MTP head drafts from the target's pre-mixer streams through its own QSA + MoE block and
-// mixer, and greedy output holds up to BF16 near ties.
+// mixer, and greedy output holds up to BF16 near ties; verify steps replay graphs as decode steps do.
 #[tokio::test]
 async fn flash_next_builtin_mtp_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") || inference_tensor::Device::new_cuda(0).is_err() {
         return Ok(());
     }
+    let snapshotter = decode_graphs::recorder();
     for budget in [DENSE_BUDGET, SPARSE_BUDGET] {
         let checkpoint = tiny_flash_next_with(budget, true)?;
         let plain = paged_prefix_model(&checkpoint).await?;
@@ -603,6 +608,9 @@ async fn flash_next_builtin_mtp_drafts_and_keeps_greedy_output() -> anyhow::Resu
         anyhow::ensure!(drafts > 0, "MTP never drafted at budget {budget}");
         same_up_to_ties(&actual, &expected, &format!("MTP, budget {budget}"))?;
     }
+    let counters = decode_graphs::Counters::take(&snapshotter);
+    decode_graphs::assert_replayed(&counters);
+    decode_graphs::assert_only_prompts_skip(&counters);
     Ok(())
 }
 

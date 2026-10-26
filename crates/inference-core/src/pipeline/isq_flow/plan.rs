@@ -3,6 +3,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
+use inference_nn::moe::OFFLOAD_STAGING_EXPERTS;
 use inference_quant::{IsqType, QuantizedWeightSource};
 use inference_tensor::{DType, Device};
 use tracing::info;
@@ -145,8 +146,8 @@ impl AutoDeviceMapSizes {
 }
 
 impl AutoDeviceMapSizes {
-    // Offloaded experts leave a layer's budget but for its cache slots (one more stays zeroed); the largest layer's
-    // full stack is staged on the device for prompts
+    // Offloaded experts leave a layer's budget but for its cache slots (one more stays zeroed); prompts stage a group of
+    // the largest layer's experts on the device
     fn without_offloaded_experts(
         self,
         inputs: &AutoDeviceMapSizingInputs<'_>,
@@ -163,12 +164,13 @@ impl AutoDeviceMapSizes {
 
     fn with_experts_cached(mut self, expert_bytes: &[usize], experts: usize, slots: usize) -> Self {
         let cached = (slots + 1).min(experts + 1);
+        let staged = OFFLOAD_STAGING_EXPERTS.min(experts);
         let mapped = self.layer_sizes_in_bytes.len();
         let mut staging = 0;
         for (size, &bytes) in self.layer_sizes_in_bytes.iter_mut().zip(expert_bytes) {
             let kept = bytes / experts * cached;
             *size = size.saturating_sub(bytes) + kept;
-            staging = staging.max(bytes);
+            staging = staging.max(bytes / experts * staged);
         }
         // an MTP head's experts stay in host memory too, cached like a mapped layer's
         for (size, &bytes) in self
@@ -180,7 +182,7 @@ impl AutoDeviceMapSizes {
             self.non_mapped_size_in_bytes =
                 self.non_mapped_size_in_bytes.saturating_sub(*size) + kept;
             *size = kept;
-            staging = staging.max(bytes);
+            staging = staging.max(bytes / experts * staged);
         }
         self.non_mapped_size_in_bytes += staging;
         self.total_model_size_in_bytes =

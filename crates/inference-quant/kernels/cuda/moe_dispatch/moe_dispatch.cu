@@ -67,7 +67,10 @@ static __global__ void moe_weighted_reduce_flat_kernel(
   const size_t input_base = (size_t)token * topk * hidden + h;
   float acc = 0.0f;
   for (int slot = 0; slot < topk; ++slot) {
-    acc += (float)inputs[input_base + (size_t)slot * hidden] * weights[slot];
+    // a zero-weight route may be one the grouped kernels parked and never wrote
+    if (weights[slot] != 0.0f) {
+      acc += (float)inputs[input_base + (size_t)slot * hidden] * weights[slot];
+    }
   }
   outputs[(size_t)token * hidden + h] = (OutputT)acc;
 }

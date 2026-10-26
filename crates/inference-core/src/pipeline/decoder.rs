@@ -638,9 +638,8 @@ impl DecoderPipeline {
         let token_window = match self.token_window_preceding() {
             None => None,
             Some(preceding) => {
-                let Some(rows) = token_window
-                    .filter(|_| q_len == 1)
-                    .and_then(|window| window.decode_rows(preceding))
+                let Some(rows) =
+                    token_window.and_then(|window| window.decode_rows(preceding, q_len))
                 else {
                     record_cuda_graph_dispatch(
                         CudaGraphComponent::Target,
@@ -649,7 +648,7 @@ impl DecoderPipeline {
                     );
                     return Ok(None);
                 };
-                let width = crate::model::TokenWindow::decode_width(preceding);
+                let width = crate::model::TokenWindow::decode_width(preceding, q_len);
                 Some(Tensor::from_vec(rows, (batch, width), &Device::Cpu)?)
             }
         };
@@ -801,15 +800,8 @@ impl DecoderPipeline {
             .filter(|plan| cuda_graph_startup_capture_allowed(1 + plan.proposal_len))
             .collect::<Vec<_>>();
         let mut widths = vec![(1usize, usize::MAX)];
-        let token_window = self
-            .token_window_preceding()
-            .map(|preceding| {
-                let width = crate::model::TokenWindow::decode_width(preceding);
-                Tensor::zeros((1, width), DType::U32, &Device::Cpu)
-            })
-            .transpose()?;
-        // a window model graphs only one-token steps
-        for plan in graph_plans.iter().filter(|_| token_window.is_none()) {
+        let preceding = self.token_window_preceding();
+        for plan in &graph_plans {
             if plan.proposal_len > 0 {
                 widths.push((
                     1 + plan.proposal_len,
@@ -879,6 +871,12 @@ impl DecoderPipeline {
         ));
         for (q_len, max_bucket) in widths {
             let inputs = CudaGraphPrecaptureInputs::new(ctx, q_len, &device, self.device_mapper())?;
+            let token_window = preceding
+                .map(|preceding| {
+                    let width = crate::model::TokenWindow::decode_width(preceding, q_len);
+                    Tensor::zeros((1, width), DType::U32, &Device::Cpu)
+                })
+                .transpose()?;
             let live = hybrid_slots.map(|pad_slot| vec![pad_slot]);
             let recurrent_batch_kind = if q_len == 1 {
                 RecurrentBatchKind::Decode

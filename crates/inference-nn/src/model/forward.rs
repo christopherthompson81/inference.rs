@@ -178,37 +178,38 @@ pub struct TokenWindowRow {
 }
 
 impl TokenWindow {
-    /// The u32s of a one-token row in [`Self::decode_rows`]: its count of real preceding tokens, then `preceding`
-    /// slots holding them right-aligned, then the step's token.
-    pub fn decode_width(preceding: usize) -> usize {
-        preceding + 2
+    /// The u32s of a row in [`Self::decode_rows`] for a step of `query_len` tokens: its count of real preceding
+    /// tokens, then `preceding` slots holding them right-aligned, then the step's tokens.
+    pub fn decode_width(preceding: usize, query_len: usize) -> usize {
+        preceding + 1 + query_len
     }
 
-    /// Every row in the fixed layout of [`Self::decode_width`], or `None` unless each row carries one token.
-    pub fn decode_rows(&self, preceding: usize) -> Option<Vec<u32>> {
-        let width = Self::decode_width(preceding);
+    /// Every row in the fixed layout of [`Self::decode_width`], or `None` unless each row carries `query_len` tokens.
+    pub fn decode_rows(&self, preceding: usize, query_len: usize) -> Option<Vec<u32>> {
+        let width = Self::decode_width(preceding, query_len);
         let mut out = vec![0u32; self.rows.len() * width];
         for (row, slots) in self.rows.iter().zip(out.chunks_mut(width)) {
-            if row.tokens.len() != row.preceding + 1 {
+            if row.tokens.len() != row.preceding + query_len {
                 return None;
             }
             let real = row.preceding.min(preceding);
             slots[0] = u32::try_from(real).ok()?;
-            slots[width - 1 - real..].copy_from_slice(&row.tokens[row.tokens.len() - 1 - real..]);
+            let kept = real + query_len;
+            slots[width - kept..].copy_from_slice(&row.tokens[row.tokens.len() - kept..]);
         }
         Some(out)
     }
 
     /// The window [`Self::decode_rows`] laid out.
-    pub fn from_decode_rows(rows: &[u32], preceding: usize) -> Self {
-        let width = Self::decode_width(preceding);
+    pub fn from_decode_rows(rows: &[u32], preceding: usize, query_len: usize) -> Self {
+        let width = Self::decode_width(preceding, query_len);
         Self {
             rows: rows
                 .chunks(width)
                 .map(|slots| {
                     let real = (slots[0] as usize).min(preceding);
                     TokenWindowRow {
-                        tokens: slots[width - 1 - real..].to_vec(),
+                        tokens: slots[width - query_len - real..].to_vec(),
                         preceding: real,
                     }
                 })
@@ -769,9 +770,9 @@ mod tests {
         let window = TokenWindow {
             rows: vec![row(&[7, 8, 9], 2), row(&[5], 0), row(&[1, 2, 3, 4], 3)],
         };
-        let rows = window.decode_rows(2).unwrap();
+        let rows = window.decode_rows(2, 1).unwrap();
         assert_eq!(rows, vec![2, 7, 8, 9, 0, 0, 0, 5, 2, 2, 3, 4]);
-        let back = TokenWindow::from_decode_rows(&rows, 2);
+        let back = TokenWindow::from_decode_rows(&rows, 2, 1);
         let tokens = back
             .rows
             .iter()
@@ -786,9 +787,31 @@ mod tests {
             TokenWindow {
                 rows: vec![row(&[1, 2], 0)]
             }
-            .decode_rows(2)
+            .decode_rows(2, 1)
             .is_none()
         );
+    }
+
+    #[test]
+    fn a_verify_window_keeps_every_query_token() {
+        let row = |tokens: &[u32], preceding| TokenWindowRow {
+            tokens: tokens.to_vec(),
+            preceding,
+        };
+        let window = TokenWindow {
+            rows: vec![row(&[6, 7, 8, 9, 10], 2), row(&[4, 5, 6], 0)],
+        };
+        let rows = window.decode_rows(2, 3).unwrap();
+        assert_eq!(rows, vec![2, 6, 7, 8, 9, 10, 0, 0, 0, 4, 5, 6]);
+        let back = TokenWindow::from_decode_rows(&rows, 2, 3);
+        let tokens = back
+            .rows
+            .iter()
+            .map(|r| (r.tokens.clone(), r.preceding))
+            .collect::<Vec<_>>();
+        assert_eq!(tokens, vec![(vec![6, 7, 8, 9, 10], 2), (vec![4, 5, 6], 0)]);
+        // a row with one token too few for the step
+        assert!(window.decode_rows(2, 4).is_none());
     }
 
     #[test]

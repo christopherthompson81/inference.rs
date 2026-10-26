@@ -1352,3 +1352,206 @@ A/B against --pa-memory-fraction 0.9 (the old default, 104 slots), three alterna
 ```
 +7%, every pair in favor, with about 1 GB of headroom at a full-context prompt. A longer context needs
 `--pa-context-len` or `--max-seq-len` now (the pool no longer stretches to 219K tokens by itself).
+
+## Run 38 - 2026-10-26 11:06
+
+Question: what does another engine decode at on the same weights and this machine? Basalt (Run 20) builds for sm_120
+only and refuses other targets. Strata (MIT, github.com/Niko1221/Strata, 4b9e05a2), the engine basalt forked, builds
+for sm_75 and up and lists UD-IQ4_XS among its Flash-Next packs; its docs say that file "has not been measured on
+NVIDIA".
+
+Setup: Strata built from source for sm_86 (CUDA 12.8, Release), its pack from our shard 1 (`tools/iq_pack.py
+--compat-bf16`, 1.4 GB, experts read from the GGUF in place), its MTP draft layer from the BF16 checkpoint's `mtp.*`
+tensors (`mtp_fetch`, `mtp_pack --experts q2_0`, `mtp_rt`: 512 Q2_0 experts, 708 MB, resident). Config as its setup
+writes for this file with all experts in RAM: `--resident-budget-gib 64 --expert-cache auto --prefill auto --spec 4
+--spec-min-p 0.5 --mtp mtp/rt --max-context 32768`, int8 KV, `STRATA_HC_Q8=1`, `STRATA_ROUTE_TAIL_SKIP=0`. Ours:
+`inference serve` built with debug-assertions and overflow-checks off, no flags (planner: q3 KV, 32K, 112 slots; 104
+with `--mtp`, n_predict 2). Client: one streamed chat request at a time, greedy, thinking off, 512 new tokens, a prose
+and a code prompt, three rounds after a warm-up; decode = tokens after the first over first-to-last token time. Round
+0 of the first server loaded was cold (experts paging in) and is left out of its means.
+
+```
+                                     prose (tok/s)          code (tok/s)
+ours, no draft (112 slots)           37.8 37.4              32.3 34.5
+ours, MTP (104 slots)                27.7 26.0 31.1         28.7 28.3 27.4
+Strata, MTP, tail skip off           48.4 48.6 47.9         42.5 43.8 43.8
+Strata, MTP, tail skip on (default)  59.0 56.8 57.7         56.9 56.8 55.0
+```
+
+Strata takes no run without drafting on a native pack ("needs --spec T (T >= 2)"). Its exact configuration decodes
+1.29x ours on prose and 1.31x on code. The route tail skip (a missed expert that every token of a verify window ranks
+7th or lower is neither copied nor computed) adds another 1.2-1.3x; Strata measures it at KL 0.056 -> 0.086 against
+Q8_0 on UD-Q4_K_XL with every expert in RAM, and its setup turns it off for these files when they fit in RAM.
+
+What its logs show for the exact run:
+- GPU cache 6,616 experts (14.9 GiB, ~138 a layer against our 112), filled by its shipped routing profile, with
+  adaptive swaps; the other 44 GiB page-locked in RAM. Decode hit rate 74-84% per request.
+- 3-6% of routed experts read by the GPU over PCIe (its `pcie_frac`, 0.35 from a 12.9 GB/s probe); the CPU computes
+  the rest of the misses.
+- MTP accepts 244-333 of 466-487 drafts per request (52-70%), `--spec 4` with an early stop at min-p 0.5; the head's
+  experts never leave the GPU. Ours at 104 slots is slower than no drafting (Run 26: verify misses ~6x).
+- sm_86 turns on nine "exact speed switches" by default (ADAPT_NOWAIT, ADAPT_LAG, CPU_IQ_ALL_EXACT1, SIDE_MIXER,
+  ATTN_DAILY, GR_UP75, GU_SWIGLU, QSA_ROWS, B6_MMVQ_ROWS).
+
+Implication: the gap is drafting that pays. Strata keeps the drafter's experts resident in Q2_0, so a draft costs no
+miss, and its verify windows run more slots (one cache sized by its profile, no MoE KV share). Next, in order: an MTP
+head with resident experts (Q2_0 or similar, ~0.7 GB) and a verify window sized to the CPU share, measured against
+these rows; then more GPU slots (the 14.9 GiB against ours) and a GPU share of the misses over PCIe.
+
+## Run 39 - 2026-10-26 11:20
+
+Question: Run 38's 1.3x, from which part of Strata? First, Run 26 already answers the plan Run 38 ended on: the head's
+experts resident (Q8_0, and a Q2_K/IQ4_NL head that frees slots) left MTP break-even; Run 23 put the verify at 9.5
+misses a layer (8.1 distinct) and 1,214 us of CPU against a plain step's 1.55 and 239 us, about 150 us a distinct
+expert either way.
+
+Strata exact (tail skip off) with its GPU share of the misses off (`--pcie-frac 0`), same client:
+```
+                         prose              code
+GPU share on (Run 38)    48.4 48.6 47.9     42.5 43.8 43.8
+--pcie-frac 0            47.8 49.9 46.0     42.2 39.4 41.8
+```
+The PCIe share is worth 1-5%. Its log, per request: 71-82% decode hit rate; on the code prompt 92.5K missed routes
+over ~187 verify steps (512 tokens, 325 drafts accepted), about 10.3 missed routes a layer a step, 65 ms a step,
+1.37 ms a layer. Ours (Run 23 numbers, Run 38 throughput): 9.5 missed routes a layer, ~86 ms a verify step, 1.8 ms
+a layer. The CPU's cost per miss is about the same in both; the gap is ~0.4 ms a layer outside the miss kernel
+(GPU work not hidden behind the CPU, the host function round trip, our head's own misses at 6.8 of 10 a draft).
+
+Next: an nsys profile of one of our MTP verify steps, to split those 0.4 ms before building anything.
+
+Profile attempt (`nsys profile --trace=cuda,nvtx --cuda-graph-trace=node`, one code request under `--mtp`): the
+report's kernel records stop about 20 s in, before most of the decode (36.8K kernels, 0.3 s of kernel time over the
+13 s recorded), and a run windowed onto the decode (`--delay 40 --duration 8`) recorded no kernels at all. Under the
+profiler the request decoded at 21.6 tok/s (28 without). Not resolved; the split needs another way in (the engine's
+own per-step timing, or nsys on a `bench` run without the server).
+
+## Run 40 - 2026-10-26 11:40
+
+Question: where does a verify step's time go? A probe in the offloaded experts' host function (env-gated, removed
+after) logged each call's layer, tokens, misses, start, CPU miss time and end; one code request (512 tokens) after a
+prose warm-up, built with debug-assertions and overflow-checks off, no flags (112 slots; 104 with `--mtp`).
+"Between calls" is the end of one layer's host call to the start of the next: the rest of the layer on the GPU, the
+next layer's attention and router, the copies and the host function's launch. Medians per step:
+```
+                       step      CPU on misses        between host calls        after the last layer
+plain, 1 token         29.2 ms   11.9 ms (83 misses)  14.2 ms (296 us a layer)   1.5 ms
+MTP verify, 3 tokens   79.4 ms   30.6 ms (293)        38.3 ms (800 us a layer)   9.7 ms (two drafts; head 11
+                                                                                  misses, 2.0 ms of CPU)
+```
+The CPU side scales as Run 23 found (104 us a miss in a verify, 144 in a plain step). The GPU side is the gap: a
+verify step's layers take 2.7x a plain step's between host calls, because verify steps (more than one query token)
+run eager while plain steps replay CUDA graphs (#609). At a plain step's 14 ms the verify would be ~55 ms, Strata's
+(Run 39: ~65 ms at its window), and 2.4 tokens a step would give ~43 tok/s against 33-35 without drafting.
+
+Next: capture verify steps in CUDA graphs.
+
+The server's `/metrics` after an MTP request: every verify step `inference_cuda_graph_dispatch_total{mode="skipped",
+reason="incompatible_shape"}` (54 of 54), from three one-token assumptions:
+- `TokenWindow::decode_rows` lays out one step token a row, and the graph attempt filters on `q_len == 1`; precapture
+  skips every verify width for a window model ("a window model graphs only one-token steps").
+- PLE's host gather (`ple.rs`, `host_gather`) serves `len == 1` rows only.
+- QSA's device plan (`QsaStep::decode`, `qsa_decode_plan`) is the one-token path; a verify step builds its pooling and
+  selection on the host from each row's start and length (per-token table rows), which a graph cannot replay.
+The speculative graph state itself exists (Qwen3.5's `take_speculative_graph_state`, with the PLE commit); whether it
+carries Flash-Next's MTP inputs (the pre-mixer hyper-connection streams) is to be checked.
+
+Plan: (1) a q-token window layout and PLE host gather, and precapture of the verify width for window models; (2) a
+device QSA plan for verify steps (each query token's table row and context, pooling ordered so the latest token's
+write of a shared block wins); (3) the MTP graph state for the streams; then measure against the rows above.
+
+## Run 41 - 2026-10-26 12:23
+
+Question: with verify steps graphed, does MTP pay? Built: the token window's decode layout carries `query_len` step
+tokens a row (`TokenWindow::decode_rows(preceding, query_len)`), PLE's host gather serves (batch, len) steps up to
+eight tokens, precapture captures the verify widths of a window model, QSA's device plan (`qsa_decode_plan`) runs a
+verify's per-token table rows as one-token rows (a sequence's pooled keys and length from its last token's row; tokens
+of one block pool it alike from the step's written cells), and the PLE conv history a verify commits from moves into
+the speculative graph state like the GDN stash. Bugs met on the way, from the tiny model's tests:
+- with the window fixed but QSA still host-planned, capture failed safely ("QSA reads the batch's token window") and
+  turned graphs off for every step;
+- `cuMemFreeAsync` returned INVALID_VALUE inside the verify capture (an nsys API trace of the tiny test: the first
+  non-zero return 0.6 ms into the capture): the forward replaced `ple_stash`, freeing the eager warm-up's history
+  inside the capture. Taking the stash with the graph state also keeps a replay's commit fed: before, the first
+  commit took it and later replays never refreshed it.
+The MTP and DFlash greedy tests now also assert every non-prompt step replayed (`assert_only_prompts_skip`).
+
+Real model, same client and server flags as Run 38:
+```
+                     prose                 code
+MTP, verify graphs   28.3 28.8 31.7        30.9 32.3 31.6     1,403 replays, no eager fallback; accept 76.9%
+no draft (same build) 41.4 42.6 42.1       35.9 36.5 37.3
+```
+The no-draft rows are above Run 38's 37.6 / 33.4 with that path unchanged (run-to-run spread). The host-call probe
+(Run 40's, re-applied and removed after): a verify step's layers 55.3 ms (CPU misses 35.3, between host calls 18.0
+against 38.3 eager) and 18.0 ms after the last layer (9.7 eager). A host timer around the speculative step (removed
+after), means over 100 verify steps:
+```
+target forward (waiting on its logits)   41-56 ms
+commit                                    2-4.5 ms
+propose (two head drafts, eager)          8-14 ms
+```
+Graphs took ~20 ms out of the verify's layers; MTP still loses to no drafting here. Left: the drafts (eager, the head's
+experts missing), the CPU's misses (~35 ms of the forward), and the real model's precapture still logging "CUDA graph
+captured forward failed" before the lazy captures succeed. nsys with `--cuda-graph-trace=graph` lost its records
+after 8 s again (5 graph launches recorded), so host-function graphs and CUPTI do not mix here.
+
+## Run 42 - 2026-10-26 12:40
+
+Question: Run 41 left the CPU's misses as the cap. Strata caches 6,616 experts (~138 a layer) against our 120; how
+much VRAM does our offload hold idle during decode, and can it become slots?
+
+At decode 21.4 GB of 24.5 was in use; a 14.6K-token prompt peaked about 0.5 GB above that. Prompt staging held a
+whole layer's experts (1.7 GB) for the grouped kernels. Built: a prompt layer now runs its cached experts straight
+from the layer's cache stack, then its uncached ones over the bus `OFFLOAD_STAGING_EXPERTS` (64) at a time, each pass
+running every route with the routes of other passes parked: `grouped_parked_with` dispatches over one expert more than
+its kernels run and the parked routes carry weight 0, which the weighted reduce now skips (an unwritten row could hold
+a NaN). Staging and the planner's count take a group's room. `offloaded_experts_match_resident_ones` runs a cached
+pass and two staged groups (relative error < 1e-5 against all experts resident).
+
+```
+no flags, no draft         slots   chunk   decode prose      decode code       14.6K-token prompt
+before (Run 41 build)      120     1024    41.4 42.6 42.1    35.9 36.5 37.3    -
+group staging              128     2048    42.2 44.6 46.5    36.2 38.3 38.5    405 tok/s
+```
+Run 27 had the 2,048 chunk at 301-305 tok/s; the cached pass reads its experts in place instead of copying them into
+staging. Decode moved a few percent, within the spread. Slots move in steps of eight (`PLANNED_SLOT_STEPS`), and a
+second load, with the desktop holding a little less, planned 136 slots and shrank the prompt chunk to 512 (Run 27: ~120
+tok/s): slots first, chunk second turns one slot step into a 3x slower prefill.
+
+The planner's terms at 136 slots (a probe in `ExpertCachePlan::spare`, removed after): device available 22,315 MiB,
+weights 19,813, KV 380, the runtime reserve 1,024, the recurrent pool 998 (9 slots of ~111 MB: one sequence, the graph
+pad, and 7 kept for prefix snapshots), 51 spare. Those 7 snapshot slots are ~7 cached experts a layer.
+
+Against Strata (Run 39): our verify misses 306 routes of 1,440 (21%, 79% hits) at ~115 us a miss; Strata hit 74-84%
+at ~133 us. The slot gap is mostly closed and the miss cost is now the same in both engines. What separates the verify
+steps is the drafting (8-14 ms here; Strata's head is resident) and the commit.
+
+Kept (user's call): an offloading plan reserves a 2,048-token chunk's activations while it picks slots
+(`MIN_PLANNED_PROMPT_CHUNK`), and keeps 2 prefix snapshots in the recurrent pool (`OFFLOAD_PREFIX_SNAPSHOTS`; a host
+prefix store already capped them at 2). No flags: 128 slots, chunk 2,560, the 14.6K-token prompt at 438 tok/s, decode
+38.5 / 42.4 prose and 34.3 / 37.5 code.
+
+## Run 43 - 2026-10-26 13:06
+
+Question: what can the drafting work buy? A probe in `mtp_propose` (a device sync after each phase; removed after),
+means per proposal of two drafts over each 100 verify steps:
+```
+refresh forward (anchor + accepted rows)   2.2-6.4 ms
+chained forward (one row)                  2.0-4.5 ms
+lm_head + sampling, both drafts            1.5 ms
+```
+A forward is ~2 ms at its fastest; the spread is the head's missed experts, ~3-4 ms a proposal. Keeping the head's
+experts resident costs ~1 GB at Q2_K/IQ4_NL (Run 26), one slot step of the layers' cache (8 slots), which the head
+already costs: the MTP servers plan 120 slots against 128 without it. Graphing the head would take the ~4 ms of eager
+work down by part of it. With all of the drafting gone a verify step is ~61 ms for 2.5 tokens, ~41 tok/s: level with no
+drafting.
+
+Draft depth, verify graphs on, no flags otherwise:
+```
+                   slots   prose          code           accept
+no draft           128     38.5-46.5      34.3-38.5      -       (Runs 42 and its planner follow-up)
+MTP, 1 draft       120     38.6 40.2      35.8 35.9      84.7%, 1.85 tokens a step
+MTP, 2 drafts      120     34.7 35.6      34.7 35.9      78.8%, 2.58
+```
+One draft is level with no drafting; two lose. On this machine (PCIe 3, an AVX2 8-core CPU computing ~20% of routes)
+a verify's extra tokens cost the CPU nearly what they save, so the drafting work's ceiling is break-even. Not built.
