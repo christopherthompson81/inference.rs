@@ -1731,3 +1731,28 @@ time per 2-token window (nsys, graphs off, `--mtp-n-predict 1`): 19.14 -> 18.72 
 1.05 ms of `gemv_kernel_batched`. ~0.4 ms, about 1%.
 
 (`gemv.cu` is not clang-format clean on master; only the touched lines follow it.)
+
+## Run 51 - 2026-10-26 15:43
+
+Question: does a doorbell in place of the per-layer host function (Run 49: worth 1.5-2.5 ms a CPU-bound window, if
+the host function's start latency sat on the critical path) pay?
+
+Built and measured, then dropped: a publish kernel wrote the picks and activations into the layer's mapped buffers
+and rang a sequence number; one host thread polled every layer's doorbell (spinning while decoding, parked 50 ms after
+the last ring or step start, which `forward_step` signalled), ran the same `split`, and answered; a wait kernel spun
+on the answer (2 s timeout) and copied the CPU's rows back. Both offload tests passed. The round-trip benchmark: graph
+61-68 us against 41-47 resident, the same ~20 us as the host function.
+
+`--mtp --mtp-n-predict 1`, two rounds each, after / before / after (a fourth server, before, did not start: below):
+```
+           2-token window (median)   between host calls   CPU      prose          code
+doorbell   40.2 ms / 38.2            16.6 / 14.9          16.6 / 16.2   37.2 42.8 / (23.0 cold) 43.7   39.0 37.8 / 38.8 39.7
+host fn    41.1 ms                   15.9                 16.2     38.5 41.9      34.3 39.0
+```
+At most 1-2%, within the spread, and the spinning thread takes a core from the CPU's expert pool while decoding. The
+host function's start latency is not the gap; dropped. The kernel source is kept outside the repo.
+
+A planner fault the A/B exposed: the fourth server stopped with "PagedAttention KV cache requires 410 MB but only 311
+MB is safely available after model loading". The planner counts a resident MTP head as a cached layer (Run 45:
+~0.96 GB counted against ~1.0 GB resident); with a little more of the GPU held elsewhere the KV cache no longer fit.
+Next: count the head at its resident, requantized size.
