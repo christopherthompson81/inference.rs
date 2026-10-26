@@ -29,6 +29,7 @@ inference-recon.workspace = true
 inference-agent.workspace = true
 inference-selection = { workspace = true, features = ["utoipa"] }
 inference-quant.workspace = true
+hf-hub.workspace = true
 itertools.workspace = true
 serde.workspace = true
 serde_json.workspace = true

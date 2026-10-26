@@ -1409,10 +1409,12 @@ class JobsConfig:
     dir: str | None = "/home/chris/.cache/inference-rs/engine-jobs"
     drain_timeout_secs: int | None = 120
     lpips: str | None = None
+    models_repo: str | None = None
     moge: str | None = None
     placement: Placement | None = Placement.FASTEST
     wan: str | None = None
     worldmirror: str | None = None
+    worldmirror_repo: str | None = "tencent/HY-World-2.0"
     worldstereo: str | None = None
 
 

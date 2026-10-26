@@ -296,8 +296,15 @@ pub(crate) async fn serve_engine(spec: EngineSpec, server: &ServerOptions) -> Re
     if let Some(dir) = &server.jobs_dir {
         jobs.dir = dir.clone();
     }
-    if let Some(root) = &server.world_models {
-        jobs = jobs.with_models_root(root);
+    if let Some(models) = &server.world_models {
+        let root = Path::new(models);
+        if root.is_dir() {
+            jobs = jobs.with_models_root(root);
+        } else if models.contains('/') && !root.exists() {
+            jobs.models_repo = Some(models.clone());
+        } else {
+            anyhow::bail!("--world-models `{models}` is neither a folder nor a Hugging Face repo");
+        }
     }
     jobs.placement = server.job_placement.into();
     if !server.job_devices.is_empty() {

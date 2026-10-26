@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use inference_models_diffusion::gguf;
 pub use inference_models_diffusion::wan::AttentionKind;
 use inference_models_diffusion::wan::clip::WanImageEncoder;
 use inference_models_diffusion::wan::pipeline::{ClipRequest, MemoryFrames, WorldStereoPipeline};
@@ -44,8 +45,9 @@ pub const DEFAULT_RECONSTRUCT_SIZE: usize = 518;
 // the reference aligns depth inferred at 832 with WorldMirror's depth head alone
 const ALIGN_DEPTH_SIZE: usize = 832;
 const DEFAULT_SEED: u64 = 1024;
-const QUANTIZATION: &str = "WorldStereo's main-block linears as settings.block_weights states (quantized at load, streamed \
-                            from host memory), its other weights and umT5 in bf16; Wan VAE, CLIP image encoder and MoGe-2 \
+const QUANTIZATION: &str = "WorldStereo's main-block linears as settings.block_weights states (quantized at load or read \
+                            from a GGUF, streamed from host memory), its other weights in bf16, umT5 in bf16 or as its \
+                            GGUF stores it; Wan VAE, CLIP image encoder and MoGe-2 \
                             in f32; WorldMirror as its own meta.json states. Attention: settings.attention";
 const DIFFERENCES_FROM_REFERENCE: [&str; 6] = [
     "sky from MoGe-2's validity mask instead of GroundingDINO and ZIM",
@@ -59,7 +61,7 @@ const DIFFERENCES_FROM_REFERENCE: [&str; 6] = [
 /// Where each model's weights live.
 #[derive(Clone, Debug)]
 pub struct WorldGenModels {
-    /// the `worldstereo-memory-dmd` folder (config.json, model.safetensors)
+    /// the `worldstereo-memory-dmd` folder (config.json, and model.safetensors or one GGUF)
     pub worldstereo: PathBuf,
     /// the Wan2.1-I2V-14B-480P diffusers folder (vae, image_encoder, text_encoder, tokenizer, transformer/config.json)
     pub wan: PathBuf,
@@ -80,7 +82,8 @@ pub struct WorldGenOptions {
     pub reconstruct_size: usize,
     /// how WorldStereo's joint self-attentions run
     pub attention: AttentionKind,
-    /// the GGUF type WorldStereo's main-block linears are quantized to at load; None keeps them bf16
+    /// the GGUF type WorldStereo's main-block linears are quantized to at load; None keeps them bf16 (a GGUF's keep
+    /// their stored type)
     pub block_weights: Option<GgmlDType>,
 }
 
@@ -315,6 +318,18 @@ fn sharded(
 ) -> Result<inference_quant::ShardedVarBuilder> {
     // SAFETY: the weights files are not modified while the models are loaded
     unsafe { ShardedSafeTensors::sharded(files, dtype, device, None, Arc::new(|_| true)) }
+}
+
+// The one GGUF in `dir`, which a packaged checkpoint ships in place of its safetensors
+fn folder_gguf(dir: &Path) -> Result<Option<PathBuf>> {
+    let mut ggufs = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == gguf::GGUF_EXTENSION))
+        .collect::<Vec<_>>();
+    if ggufs.len() > 1 {
+        inference_tensor::bail!("`{}` holds more than one GGUF", dir.display());
+    }
+    Ok(ggufs.pop())
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
@@ -555,8 +570,11 @@ pub fn generate_world(
         let tokenizer =
             tokenizers::Tokenizer::from_file(models.wan.join("tokenizer/tokenizer.json"))
                 .map_err(inference_tensor::Error::msg)?;
-        let mut encoder =
-            WanTextEncoder::new(sharded(&shards, DType::BF16, device)?, &cfg, tokenizer)?;
+        let vb = match folder_gguf(&te)? {
+            Some(gguf) => gguf::var_builder(&gguf, gguf::t5_native_name, DType::BF16, device)?.0,
+            None => sharded(&shards, DType::BF16, device)?,
+        };
+        let mut encoder = WanTextEncoder::new(vb, &cfg, tokenizer)?;
         encoder.encode(&options.prompt)?
     };
     release(device)?;
@@ -570,6 +588,23 @@ pub fn generate_world(
     let clip_cfg = read_json(&models.wan.join("image_encoder/config.json"))?;
     let wan_cfg: WanConfig = read_json(&models.wan.join("transformer/config.json"))?;
     let ws_cfg: WorldStereoConfig = read_json(&models.worldstereo.join("config.json"))?;
+    let transformer = {
+        let vb = match folder_gguf(&models.worldstereo)? {
+            Some(gguf) => gguf::var_builder(&gguf, |n| Some(n.to_string()), DType::BF16, device)?.0,
+            None => sharded(
+                &[models.worldstereo.join("model.safetensors")],
+                DType::BF16,
+                device,
+            )?,
+        };
+        let mut t = WorldStereoTransformer::new_streamed(&wan_cfg, &ws_cfg, vb)?;
+        t.set_attention(options.attention);
+        if let Some(dtype) = options.block_weights {
+            t.quantize_blocks(dtype)?;
+        }
+        t
+    };
+    let block_weights = transformer.block_weights();
     let pipeline = WorldStereoPipeline {
         vae: WanVae::new(
             sharded(
@@ -589,22 +624,7 @@ pub fn generate_world(
             &clip_cfg,
             DType::F32,
         )?,
-        transformer: {
-            let mut t = WorldStereoTransformer::new_streamed(
-                &wan_cfg,
-                &ws_cfg,
-                sharded(
-                    &[models.worldstereo.join("model.safetensors")],
-                    DType::BF16,
-                    device,
-                )?,
-            )?;
-            t.set_attention(options.attention);
-            if let Some(dtype) = options.block_weights {
-                t.quantize_blocks(dtype)?;
-            }
-            t
-        },
+        transformer,
         schedule: Default::default(),
         device: device.clone(),
     };
@@ -971,9 +991,7 @@ pub fn generate_world(
                 AttentionKind::Bf16 => "bf16",
                 AttentionKind::Int8Qk => "int8 QK",
             },
-            block_weights: options
-                .block_weights
-                .map_or_else(|| "bf16".to_string(), |d| format!("{d:?}")),
+            block_weights: block_weights.map_or_else(|| "bf16".to_string(), |d| format!("{d:?}")),
             frames_per_clip: trajectory::TRAJECTORY_FRAMES,
             frame_width: vw,
             frame_height: vh,

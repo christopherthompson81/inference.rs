@@ -46,11 +46,19 @@ const RECONSTRUCTION_DIR: &str = "reconstruction";
 // files read as a video rather than images
 const VIDEO_EXTENSIONS: [&str; 7] = ["mp4", "m4v", "mov", "avi", "mkv", "webm", "gif"];
 // the checkpoints' places under a models root, as their repositories lay them out
-const WORLDSTEREO_DIR: &str = "WorldStereo/worldstereo-memory-dmd";
-const WAN_DIR: &str = "Wan2.1-I2V-14B-480P-Diffusers";
-const MOGE_DIR: &str = "moge-2-vitl-normal";
-const WORLDMIRROR_DIR: &str = "HY-World-2.0/HY-WorldMirror-2.0";
-const LPIPS_FILE: &str = "lpips-vgg/lpips_vgg.safetensors";
+pub(crate) const WORLDSTEREO_DIR: &str = "WorldStereo/worldstereo-memory-dmd";
+pub(crate) const WAN_DIR: &str = "Wan2.1-I2V-14B-480P-Diffusers";
+pub(crate) const MOGE_DIR: &str = "moge-2-vitl-normal";
+pub(crate) const WORLDMIRROR_DIR: &str = "HY-World-2.0/HY-WorldMirror-2.0";
+pub(crate) const LPIPS_FILE: &str = "lpips-vgg/lpips_vgg.safetensors";
+/// Where WorldMirror 2.0 is fetched from when no checkpoint is configured.
+pub const WORLDMIRROR_REPO: &str = "tencent/HY-World-2.0";
+const WORLDMIRROR_FILES: [&str; 2] = ["config.json", "model.safetensors"];
+// a models repo's files no job reads
+const REPO_SKIPPED: [&str; 2] = [".gitattributes", "README.md"];
+// a file every models repo holds, which finds its snapshot in the hub cache when the hub cannot be reached
+const MODELS_REPO_MARKER: &str = "WorldStereo/worldstereo-memory-dmd/config.json";
+const DOWNLOAD_STAGE: &str = "download";
 
 /// How much a job may displace to run.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -97,6 +105,11 @@ pub struct JobsConfig {
     /// VGG16 features and the LPIPS heads, for splat training
     #[schema(value_type = Option<String>)]
     pub lpips: Option<PathBuf>,
+    /// A Hugging Face repo laid out as a models root, fetched into the hub cache before a job that needs a checkpoint
+    /// the fields above leave unset
+    pub models_repo: Option<String>,
+    /// The repository WorldMirror 2.0 is fetched from when neither `worldmirror` nor the models repo provides it
+    pub worldmirror_repo: Option<String>,
     /// The CUDA devices jobs may run on; every visible one when unset
     pub devices: Option<Vec<usize>>,
     /// How much a job may displace to run, unless its request says otherwise
@@ -114,6 +127,8 @@ impl Default for JobsConfig {
             moge: None,
             worldmirror: None,
             lpips: None,
+            models_repo: None,
+            worldmirror_repo: Some(WORLDMIRROR_REPO.to_string()),
             devices: None,
             placement: Placement::Fastest,
             drain_timeout_secs: DEFAULT_DRAIN_TIMEOUT_SECS,
@@ -137,6 +152,90 @@ impl JobsConfig {
         self.lpips = found(LPIPS_FILE);
         self
     }
+
+    // whether a checkpoint is set, or will be fetched from a repository before the job runs
+    fn provides(&self, path: &Option<PathBuf>) -> bool {
+        path.is_some() || self.models_repo.is_some()
+    }
+
+    // this config with the checkpoints it leaves to repositories fetched into the hub cache; a reconstruction
+    // (`world` false) reads only WorldMirror, which the models repo does not hold
+    fn fetched(&self, world: bool, progress: &dyn Progress) -> anyhow::Result<Self> {
+        let mut config = self.clone();
+        let world_unset = [&self.worldstereo, &self.wan, &self.moge, &self.lpips]
+            .iter()
+            .any(|path| path.is_none());
+        if let Some(repo) = self.models_repo.as_deref().filter(|_| world && world_unset) {
+            let found = Self::default().with_models_root(&fetch_models_repo(repo, progress)?);
+            config.worldstereo = config.worldstereo.or(found.worldstereo);
+            config.wan = config.wan.or(found.wan);
+            config.moge = config.moge.or(found.moge);
+            config.lpips = config.lpips.or(found.lpips);
+            config.worldmirror = config.worldmirror.or(found.worldmirror);
+        }
+        if config.worldmirror.is_none()
+            && let Some(repo) = &self.worldmirror_repo
+        {
+            let folder = Path::new(WORLDMIRROR_DIR)
+                .file_name()
+                .and_then(|f| f.to_str())
+                .expect("a checkpoint folder name");
+            let repo = hub_api()?.model(repo.clone());
+            progress.stage(DOWNLOAD_STAGE, WORLDMIRROR_FILES.len());
+            for (i, file) in WORLDMIRROR_FILES.iter().enumerate() {
+                inference_recon::progress::check(progress)?;
+                let path = repo.get(&format!("{folder}/{file}"))?;
+                config.worldmirror = path.parent().map(Path::to_path_buf);
+                progress.advance(i + 1);
+            }
+        }
+        Ok(config)
+    }
+}
+
+fn hub_api() -> anyhow::Result<hf_hub::api::sync::Api> {
+    inference_core::build_api_with_cache(&inference_core::TokenSource::CacheToken, false, None)
+}
+
+// The models repo's files in the hub cache, downloading what is missing; returns its snapshot folder
+fn fetch_models_repo(repo: &str, progress: &dyn Progress) -> anyhow::Result<PathBuf> {
+    let api = hub_api()?.model(repo.to_string());
+    let files = match api.info() {
+        Ok(info) => info
+            .siblings
+            .into_iter()
+            .map(|s| s.rfilename)
+            .filter(|f| !REPO_SKIPPED.contains(&f.as_str()))
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            // the hub is out of reach: a snapshot fetched before serves
+            let cached = inference_core::hf_hub_cache_dir().and_then(|dir| {
+                hf_hub::Cache::new(dir)
+                    .model(repo.to_string())
+                    .get(MODELS_REPO_MARKER)
+            });
+            return cached
+                .and_then(|marker| {
+                    marker
+                        .ancestors()
+                        .nth(Path::new(MODELS_REPO_MARKER).components().count())
+                        .map(Path::to_path_buf)
+                })
+                .ok_or_else(|| anyhow::anyhow!("fetching `{repo}`: {error}"));
+        }
+    };
+    progress.stage(DOWNLOAD_STAGE, files.len());
+    let mut root = None;
+    for (i, file) in files.iter().enumerate() {
+        inference_recon::progress::check(progress)?;
+        let path = api.get(file)?;
+        root = path
+            .ancestors()
+            .nth(Path::new(file).components().count())
+            .map(Path::to_path_buf);
+        progress.advance(i + 1);
+    }
+    root.ok_or_else(|| anyhow::anyhow!("`{repo}` holds no files"))
 }
 
 /// `$XDG_CACHE_HOME/inference-rs/engine-jobs`, or under `~/.cache`.
@@ -386,6 +485,8 @@ pub struct JobResult {
 }
 
 type Work = Box<dyn FnOnce(&JobContext) -> anyhow::Result<JobResult> + Send>;
+// what a job does before it takes a device, such as fetching checkpoints
+type Prepare = Box<dyn FnOnce(&JobContext) -> anyhow::Result<()> + Send>;
 
 struct Job {
     record: Mutex<JobRecord>,
@@ -580,10 +681,16 @@ struct Target {
     displace: Displace,
 }
 
+// a job's device need, its steps before taking the device and its work
+struct Task {
+    target: Option<Target>,
+    prepare: Option<Prepare>,
+    work: Work,
+}
+
 struct Queued {
     job: Arc<Job>,
-    target: Option<Target>,
-    work: Work,
+    task: Task,
 }
 
 /// The jobs of one engine: their records, the queue and the worker that runs it.
@@ -683,10 +790,32 @@ fn run_queue(rx: std::sync::mpsc::Receiver<Queued>, state: Weak<InferenceRs>, dr
             return;
         }
     };
-    for Queued { job, target, work } in rx {
+    for Queued {
+        job,
+        task: Task {
+            target,
+            prepare,
+            work,
+        },
+    } in rx
+    {
         if job.cancel.load(Ordering::Relaxed) {
             job.finish(Err(anyhow::anyhow!(CANCELLED)));
             continue;
+        }
+        if let Some(prepare) = prepare {
+            let context = JobContext {
+                job: job.clone(),
+                device: None,
+                runtime: runtime.handle().clone(),
+            };
+            let prepared =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prepare(&context)))
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("the job panicked")));
+            if let Err(error) = prepared {
+                job.finish(Err(error));
+                continue;
+            }
         }
         let (device, lease) = match (&target, state.upgrade()) {
             (Some(target), Some(state)) => {
@@ -847,21 +976,40 @@ fn output(dir: &Path, file: &str, name: &str) -> Option<JobOutput> {
     })
 }
 
-fn world_work(config: &JobsConfig, job: WorldJob) -> Result<Work, ApiError> {
-    let need =
-        |path: &Option<PathBuf>, what: &str| path.clone().ok_or_else(|| not_configured(what));
-    let models = WorldGenModels {
-        worldstereo: need(&config.worldstereo, "the WorldStereo-2 checkpoint")?,
-        wan: need(&config.wan, "the Wan 2.1 I2V checkpoint")?,
-        moge: need(&config.moge, "the MoGe-2 checkpoint")?,
-        worldmirror: Some(need(&config.worldmirror, "the WorldMirror 2.0 checkpoint")?),
+// The job's config with its repositories' checkpoints, which its prepare step fetches before the work runs
+fn fetching(config: &JobsConfig, world: bool) -> (Prepare, Arc<std::sync::OnceLock<JobsConfig>>) {
+    let fetched = Arc::new(std::sync::OnceLock::new());
+    let (config, slot) = (config.clone(), fetched.clone());
+    let prepare: Prepare = Box::new(move |ctx: &JobContext| {
+        let _ = slot.set(config.fetched(world, ctx)?);
+        Ok(())
+    });
+    (prepare, fetched)
+}
+
+// a checkpoint a fetched config should hold
+fn fetched_path(path: &Option<PathBuf>, what: &str) -> anyhow::Result<PathBuf> {
+    path.clone()
+        .ok_or_else(|| anyhow::anyhow!("the models repo holds no {what}"))
+}
+
+fn world_work(config: &JobsConfig, job: WorldJob) -> Result<(Prepare, Work), ApiError> {
+    let need = |path: &Option<PathBuf>, what: &str| {
+        config
+            .provides(path)
+            .then_some(())
+            .ok_or_else(|| not_configured(what))
     };
+    need(&config.worldstereo, "the WorldStereo-2 checkpoint")?;
+    need(&config.wan, "the Wan 2.1 I2V checkpoint")?;
+    need(&config.moge, "the MoGe-2 checkpoint")?;
+    if !config.provides(&config.worldmirror) && config.worldmirror_repo.is_none() {
+        return Err(not_configured("the WorldMirror 2.0 checkpoint"));
+    }
     let splats = job.splats.unwrap_or(true);
-    let lpips = if splats {
-        Some(need(&config.lpips, "the LPIPS weights for splat training")?)
-    } else {
-        None
-    };
+    if splats {
+        need(&config.lpips, "the LPIPS weights for splat training")?;
+    }
     if splats && !cfg!(feature = "cuda") {
         return Err(ApiError::invalid_request(
             "splat training needs a CUDA build",
@@ -876,7 +1024,21 @@ fn world_work(config: &JobsConfig, job: WorldJob) -> Result<Work, ApiError> {
         options.seed = seed;
     }
     let steps = job.steps;
-    Ok(Box::new(move |ctx: &JobContext| {
+    let (prepare, fetched) = fetching(config, true);
+    let work: Work = Box::new(move |ctx: &JobContext| {
+        let config = fetched.get().expect("prepared before the work runs");
+        let models = WorldGenModels {
+            worldstereo: fetched_path(&config.worldstereo, "WorldStereo-2 checkpoint")?,
+            wan: fetched_path(&config.wan, "Wan 2.1 I2V checkpoint")?,
+            moge: fetched_path(&config.moge, "MoGe-2 checkpoint")?,
+            worldmirror: Some(fetched_path(
+                &config.worldmirror,
+                "WorldMirror 2.0 checkpoint",
+            )?),
+        };
+        let lpips = splats
+            .then(|| fetched_path(&config.lpips, "LPIPS weights"))
+            .transpose()?;
         let device = ctx.device()?.clone();
         let panorama = ctx
             .inputs()
@@ -907,7 +1069,8 @@ fn world_work(config: &JobsConfig, job: WorldJob) -> Result<Work, ApiError> {
         .filter_map(|(name, file)| output(dir, file, name))
         .collect();
         Ok(JobResult { outputs, report })
-    }))
+    });
+    Ok((prepare, work))
 }
 
 #[cfg(feature = "cuda")]
@@ -939,11 +1102,11 @@ fn train_world_splats(
     anyhow::bail!("splat training needs a CUDA build")
 }
 
-fn reconstruct_work(config: &JobsConfig, job: ReconstructJob) -> Result<Work, ApiError> {
-    let checkpoint = config
-        .worldmirror
-        .clone()
-        .ok_or_else(|| not_configured("the WorldMirror 2.0 checkpoint"))?;
+fn reconstruct_work(config: &JobsConfig, job: ReconstructJob) -> Result<(Prepare, Work), ApiError> {
+    if config.worldmirror.is_none() && config.worldmirror_repo.is_none() {
+        return Err(not_configured("the WorldMirror 2.0 checkpoint"));
+    }
+    let (prepare, fetched) = fetching(config, false);
     let mut options = ReconstructOptions::default();
     if let Some(size) = job.target_size {
         options.target_size = size;
@@ -955,7 +1118,9 @@ fn reconstruct_work(config: &JobsConfig, job: ReconstructJob) -> Result<Work, Ap
     if let Some(max_frames) = job.max_frames {
         video.max_frames = max_frames;
     }
-    Ok(Box::new(move |ctx: &JobContext| {
+    let work: Work = Box::new(move |ctx: &JobContext| {
+        let config = fetched.get().expect("prepared before the work runs");
+        let checkpoint = fetched_path(&config.worldmirror, "WorldMirror 2.0 checkpoint")?;
         let device = ctx.device()?.clone();
         let inputs = ctx.inputs();
         let input = match inputs.as_slice() {
@@ -995,7 +1160,8 @@ fn reconstruct_work(config: &JobsConfig, job: ReconstructJob) -> Result<Work, Ap
             "total_seconds": run.total_seconds,
         });
         Ok(JobResult { outputs, report })
-    }))
+    });
+    Ok((prepare, work))
 }
 
 impl Engine {
@@ -1013,7 +1179,7 @@ impl Engine {
         inputs: Vec<JobInput>,
     ) -> Result<JobRecord, ApiError> {
         let config = self.job_runner().config();
-        let (need, placement, work) = match request.clone() {
+        let (need, placement, (prepare, work)) = match request.clone() {
             JobRequest::World(job) => {
                 if inputs.len() != 1 {
                     return Err(ApiError::invalid_request("a world job takes one panorama"));
@@ -1038,7 +1204,12 @@ impl Engine {
         };
         let kind = request.kind();
         let request = serde_json::to_value(&request).map_err(|_| ApiError::internal())?;
-        self.enqueue(&config, kind, request, inputs, Some(target), work)
+        let task = Task {
+            target: Some(target),
+            prepare: Some(prepare),
+            work,
+        };
+        self.enqueue(&config, kind, request, inputs, task)
     }
 
     pub(crate) fn jobs_submit_task(
@@ -1056,14 +1227,12 @@ impl Engine {
             }),
             None => None,
         };
-        self.enqueue(
-            &config,
-            kind,
-            serde_json::Value::Null,
-            Vec::new(),
+        let task = Task {
             target,
-            Box::new(work),
-        )
+            prepare: None,
+            work: Box::new(work),
+        };
+        self.enqueue(&config, kind, serde_json::Value::Null, Vec::new(), task)
     }
 
     fn enqueue(
@@ -1072,8 +1241,7 @@ impl Engine {
         kind: &str,
         request: serde_json::Value,
         inputs: Vec<JobInput>,
-        target: Option<Target>,
-        work: Work,
+        task: Task,
     ) -> Result<JobRecord, ApiError> {
         let runner = self.job_runner();
         let id = format!("{JOB_ID_PREFIX}{}", uuid::Uuid::new_v4().simple());
@@ -1135,7 +1303,7 @@ impl Engine {
             .insert(id, job.clone());
         runner
             .sender(self.state())
-            .send(Queued { job, target, work })
+            .send(Queued { job, task })
             .map_err(|_| ApiError::internal())?;
         Ok(record)
     }

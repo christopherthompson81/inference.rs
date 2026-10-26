@@ -47,34 +47,67 @@ pub fn hidream_native_name(gguf_name: &str) -> Option<String> {
     (!HIDREAM_UNREAD.iter().any(|p| gguf_name.starts_with(p))).then(|| gguf_name.to_string())
 }
 
+// llama.cpp's `t5encoder` names outside the blocks, and each block tensor's, against the Hugging Face encoder's
+const T5_TOP_NAMES: [(&str, &str); 2] = [
+    ("token_embd.weight", "shared.weight"),
+    ("enc.output_norm.weight", "encoder.final_layer_norm.weight"),
+];
+const T5_BLOCK_NAMES: [(&str, &str); 10] = [
+    ("attn_q.weight", "layer.0.SelfAttention.q.weight"),
+    ("attn_k.weight", "layer.0.SelfAttention.k.weight"),
+    ("attn_v.weight", "layer.0.SelfAttention.v.weight"),
+    ("attn_o.weight", "layer.0.SelfAttention.o.weight"),
+    (
+        "attn_rel_b.weight",
+        "layer.0.SelfAttention.relative_attention_bias.weight",
+    ),
+    ("attn_norm.weight", "layer.0.layer_norm.weight"),
+    ("ffn_gate.weight", "layer.1.DenseReluDense.wi_0.weight"),
+    ("ffn_up.weight", "layer.1.DenseReluDense.wi_1.weight"),
+    ("ffn_down.weight", "layer.1.DenseReluDense.wo.weight"),
+    ("ffn_norm.weight", "layer.1.layer_norm.weight"),
+];
+const T5_GGUF_BLOCK: &str = "enc.blk.";
+const T5_HF_BLOCK: &str = "encoder.block.";
+
 /// llama.cpp's `t5encoder` tensor names as the Hugging Face T5 encoder names the T5 model loads.
 pub fn t5_native_name(gguf_name: &str) -> Option<String> {
-    match gguf_name {
-        "token_embd.weight" => return Some("shared.weight".to_string()),
-        "enc.output_norm.weight" => return Some("encoder.final_layer_norm.weight".to_string()),
-        _ => {}
+    translate_t5(gguf_name, T5_GGUF_BLOCK, T5_HF_BLOCK, |(gguf, hf)| {
+        (gguf, hf)
+    })
+}
+
+/// A Hugging Face T5 encoder tensor's llama.cpp `t5encoder` name.
+pub fn t5_gguf_name(native_name: &str) -> Option<String> {
+    translate_t5(native_name, T5_HF_BLOCK, T5_GGUF_BLOCK, |(gguf, hf)| {
+        (hf, gguf)
+    })
+}
+
+fn translate_t5(
+    name: &str,
+    from_block: &str,
+    to_block: &str,
+    direction: impl Fn((&'static str, &'static str)) -> (&'static str, &'static str),
+) -> Option<String> {
+    if let Some((_, to)) = T5_TOP_NAMES
+        .into_iter()
+        .map(&direction)
+        .find(|(from, _)| *from == name)
+    {
+        return Some(to.to_string());
     }
-    let rest = gguf_name.strip_prefix("enc.blk.")?;
-    let (block, tensor) = rest.split_once('.')?;
-    let native = match tensor {
-        "attn_q.weight" => "layer.0.SelfAttention.q.weight",
-        "attn_k.weight" => "layer.0.SelfAttention.k.weight",
-        "attn_v.weight" => "layer.0.SelfAttention.v.weight",
-        "attn_o.weight" => "layer.0.SelfAttention.o.weight",
-        "attn_rel_b.weight" => "layer.0.SelfAttention.relative_attention_bias.weight",
-        "attn_norm.weight" => "layer.0.layer_norm.weight",
-        "ffn_gate.weight" => "layer.1.DenseReluDense.wi_0.weight",
-        "ffn_up.weight" => "layer.1.DenseReluDense.wi_1.weight",
-        "ffn_down.weight" => "layer.1.DenseReluDense.wo.weight",
-        "ffn_norm.weight" => "layer.1.layer_norm.weight",
-        _ => return None,
-    };
-    Some(format!("encoder.block.{block}.{native}"))
+    let (block, tensor) = name.strip_prefix(from_block)?.split_once('.')?;
+    let (_, to) = T5_BLOCK_NAMES
+        .into_iter()
+        .map(&direction)
+        .find(|(from, _)| *from == tensor)?;
+    Some(format!("{to_block}{block}.{to}"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{flux_native_name, hidream_native_name, t5_native_name};
+    use super::{flux_native_name, hidream_native_name, t5_gguf_name, t5_native_name};
 
     #[test]
     fn hidream_names_keep_the_vision_tower_and_skip_lm_head() {
@@ -114,7 +147,12 @@ mod tests {
         ];
         for (gguf, native) in cases {
             assert_eq!(t5_native_name(gguf).as_deref(), Some(native), "{gguf}");
+            assert_eq!(t5_gguf_name(native).as_deref(), Some(gguf), "{native}");
         }
         assert_eq!(t5_native_name("dec.blk.0.attn_q.weight"), None);
+        assert_eq!(
+            t5_gguf_name("decoder.block.0.layer.0.SelfAttention.q.weight"),
+            None
+        );
     }
 }

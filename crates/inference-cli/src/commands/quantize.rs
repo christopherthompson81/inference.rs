@@ -22,7 +22,7 @@ use crate::args::{
     HiDreamQuantizeOptions, MatformerSelection, ModelSourceOptions, ModelType,
     MultimodalAdapterOptions, MultimodalOptions, QuantizationOptions, QuantizeDeviceOptions,
     QuantizeModelSourceOptions, QuantizeModelType, QuantizeMultimodalOptions,
-    QuantizeQuantizationOptions,
+    QuantizeQuantizationOptions, WorldgenQuantizeOptions,
 };
 
 const MIB: f64 = (1u64 << 20) as f64;
@@ -109,6 +109,33 @@ pub fn run_hidream_quantize(options: HiDreamQuantizeOptions, global: GlobalOptio
         &options.keep,
     )?;
     report_gguf(&options.output_path, &summary);
+    Ok(())
+}
+
+/// Lays the world-generation checkpoints out for distribution.
+pub fn run_worldgen_quantize(options: WorldgenQuantizeOptions) -> Result<()> {
+    initialize_logging();
+    let files = inference_api::worldgen_package::write_worldgen_package(
+        &options.models,
+        &options.output_path,
+        &options.matrices,
+    )?;
+    for file in &files {
+        match &file.gguf {
+            Some(summary) => report_gguf(&file.path, summary),
+            None => info!(
+                "Placed {} ({:.1} MiB)",
+                file.path.display(),
+                file.bytes as f64 / MIB
+            ),
+        }
+    }
+    let total: u64 = files.iter().map(|f| f.bytes).sum();
+    info!(
+        "{} files, {:.1} GiB",
+        files.len(),
+        total as f64 / MIB / 1024.0
+    );
     Ok(())
 }
 
@@ -577,7 +604,9 @@ mod tests {
         };
         match resolve_quantize_command(model_type, default_quantize).unwrap() {
             QuantizeCommand::Uqff(model_type) => *model_type,
-            QuantizeCommand::Asr(_) | QuantizeCommand::HiDreamO1(_) => {
+            QuantizeCommand::Asr(_)
+            | QuantizeCommand::HiDreamO1(_)
+            | QuantizeCommand::Worldgen(_) => {
                 unreachable!("these tests quantize UQFF")
             }
         }

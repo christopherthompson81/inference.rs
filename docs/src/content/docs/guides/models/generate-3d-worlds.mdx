@@ -21,6 +21,22 @@ known cameras as priors.
 MoGe-2 ships as a pickled `model.pt`; convert it once to `model.safetensors`, with its `model_config` saved as
 `config.json`. The weights carry their own licenses (Tencent's for WorldStereo and WorldMirror); read them before use.
 
+### Packaged weights
+
+[`christopherthompson81/inference-rs-worldgen`](https://huggingface.co/christopherthompson81/inference-rs-worldgen)
+holds everything but WorldMirror in 27 GB instead of 59: WorldStereo-2 with its main blocks in Q8_0 (the same bytes
+`--weights q8_0` makes at load), umT5-XXL in Q8_0, and the rest of Wan, MoGe-2 (already converted) and the LPIPS
+weights as they are, laid out as the folders above. A `--worldstereo` folder holding one `.gguf` loads it in place of
+`model.safetensors`, and a `text_encoder/` folder holding one loads it in place of its shards.
+
+umT5's GGUF weights are dequantized for each matmul rather than run through int8 kernels: T5's activations carry
+outliers that 8-bit activation blocks cannot hold (one token's state on a test prompt fell to 0.26 cosine against
+fp32). Run so, Q8_0 lands no further from fp32 than the bf16 encoder the pipeline otherwise runs (worst token cosine
+0.983 against bf16's 0.958, mean relative error 5.1% against 5.5%).
+
+`inference quantize worldgen -m /models -o /package` writes that layout from the original checkpoints in a models
+root (below).
+
 ## Run it
 
 ```bash
@@ -107,14 +123,22 @@ score 24.6 dB PSNR on the held-out frames (the reference trainer: 24.2).
 
 ## In the web UI and over HTTP
 
-`inference serve` runs world generation and reconstruction as jobs. Give it the checkpoints in one folder, under
-their repositories' names:
+`inference serve` runs world generation and reconstruction as jobs. Give it the packaged repo, fetched into the
+Hugging Face cache by the first world job (before it takes a GPU, so the download unloads nothing):
+
+```bash
+inference serve --world-models christopherthompson81/inference-rs-worldgen
+```
+
+or the checkpoints in one folder, under their repositories' names:
 
 ```bash
 inference serve --world-models /models --jobs-dir /data/jobs
 # /models/WorldStereo/worldstereo-memory-dmd, /models/Wan2.1-I2V-14B-480P-Diffusers,
 # /models/moge-2-vitl-normal, /models/HY-World-2.0/HY-WorldMirror-2.0, /models/lpips-vgg/lpips_vgg.safetensors
 ```
+
+When neither holds WorldMirror, a job fetches it from `tencent/HY-World-2.0`.
 
 The web UI's **Worlds** tab starts one from a panorama (the whole pipeline above, then splats and meshes) or from
 photos or a video (WorldMirror alone), shows each stage as it runs with the start views, every generated clip and the

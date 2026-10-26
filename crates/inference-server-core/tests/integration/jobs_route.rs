@@ -69,6 +69,7 @@ async fn admins_start_jobs_and_owners_follow_and_fetch_them() -> anyhow::Result<
     let jobs = tempfile::tempdir()?;
     engine.configure_jobs(JobsConfig {
         dir: jobs.path().to_path_buf(),
+        worldmirror_repo: None,
         ..Default::default()
     });
     let local = router(&engine, LOOPBACK).await?;

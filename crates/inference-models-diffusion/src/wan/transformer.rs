@@ -546,6 +546,11 @@ impl WorldStereoTransformer {
             .try_for_each(|b| b.quantize(dtype))
     }
 
+    /// The GGUF type of the main blocks' linear weights; None when they are bf16.
+    pub fn block_weights(&self) -> Option<GgmlDType> {
+        self.blocks.first()?.attn1.to_q.quant_dtype()
+    }
+
     /// How the joint self-attentions run, here and in the ControlNet.
     pub fn set_attention(&mut self, kind: AttentionKind) {
         self.attention = kind;

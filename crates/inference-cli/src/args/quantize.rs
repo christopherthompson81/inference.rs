@@ -19,6 +19,24 @@ pub enum QuantizeCommand {
     /// HiDream-O1-Image (or -Dev) checkpoint to a GGUF, its text stack quantized
     #[command(name = "hidream-o1")]
     HiDreamO1(HiDreamQuantizeOptions),
+
+    /// The world-generation checkpoints laid out for distribution, WorldStereo-2 and umT5 as GGUFs
+    Worldgen(WorldgenQuantizeOptions),
+}
+
+#[derive(Args, Clone)]
+pub struct WorldgenQuantizeOptions {
+    /// A models root as `serve --world-models` takes it
+    #[arg(short = 'm', long)]
+    pub models: PathBuf,
+
+    /// The folder to lay the package out in, as a models root
+    #[arg(short = 'o', long = "output")]
+    pub output_path: PathBuf,
+
+    /// The type WorldStereo-2's main-block matrices and umT5's matrices take
+    #[arg(long = "type", default_value = "q8_0")]
+    pub matrices: String,
 }
 
 #[derive(Args, Clone)]
@@ -499,7 +517,11 @@ pub fn resolve_quantize_command(
 ) -> anyhow::Result<QuantizeCommand> {
     let mut model_type = match command {
         Some(QuantizeCommand::Uqff(model_type)) => *model_type,
-        Some(other @ (QuantizeCommand::Asr(_) | QuantizeCommand::HiDreamO1(_))) => {
+        Some(
+            other @ (QuantizeCommand::Asr(_)
+            | QuantizeCommand::HiDreamO1(_)
+            | QuantizeCommand::Worldgen(_)),
+        ) => {
             return Ok(other);
         }
         None => {
@@ -559,7 +581,9 @@ mod tests {
         };
         match resolve_quantize_command(model_type, default_quantize)? {
             QuantizeCommand::Uqff(model_type) => Ok(*model_type),
-            QuantizeCommand::Asr(_) | QuantizeCommand::HiDreamO1(_) => {
+            QuantizeCommand::Asr(_)
+            | QuantizeCommand::HiDreamO1(_)
+            | QuantizeCommand::Worldgen(_) => {
                 unreachable!("these tests quantize UQFF")
             }
         }

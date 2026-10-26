@@ -48,6 +48,7 @@ pub mod types;
 pub mod uqff;
 pub mod util;
 pub mod video;
+pub mod worldgen_package;
 
 pub use engine::{Engine, EngineLoadError, EngineSpec};
 /// What a GGUF writer (`asr_gguf`, `hidream_gguf`) reports.

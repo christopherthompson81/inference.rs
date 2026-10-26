@@ -107,11 +107,12 @@ pub struct ServerOptions {
     #[serde(default)]
     pub jobs_dir: Option<PathBuf>,
 
-    /// A folder holding the world-generation checkpoints under their repository names (`WorldStereo/`,
-    /// `Wan2.1-I2V-14B-480P-Diffusers/`, `moge-2-vitl-normal/`, `HY-World-2.0/`, `lpips-vgg/`), for jobs.
-    #[arg(long, value_name = "DIR")]
+    /// The world-generation checkpoints for jobs: a folder holding them under their repository names (`WorldStereo/`,
+    /// `Wan2.1-I2V-14B-480P-Diffusers/`, `moge-2-vitl-normal/`, `HY-World-2.0/`, `lpips-vgg/`), or a Hugging Face repo
+    /// laid out the same way, fetched by the first job. WorldMirror comes from `tencent/HY-World-2.0` when neither has it.
+    #[arg(long, value_name = "DIR_OR_REPO")]
     #[serde(default)]
-    pub world_models: Option<PathBuf>,
+    pub world_models: Option<String>,
 
     /// How much a job may unload to run: whatever it needs (`fastest`), only idle models (`when-quiet`, waiting while
     /// a model in its way serves requests), or nothing (`no-eviction`, running only where it fits).

@@ -2,6 +2,7 @@
 
 pub mod clip;
 mod controlnet;
+pub mod gguf_writer;
 mod ops;
 pub use ops::AttentionKind;
 pub mod pipeline;
