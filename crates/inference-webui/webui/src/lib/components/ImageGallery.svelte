@@ -15,7 +15,7 @@
     start = 0,
     onClose,
     onAnchor,
-  }: { items: GalleryItem[]; start?: number; onClose: () => void; onAnchor: (item: GalleryItem) => void } = $props();
+  }: { items: GalleryItem[]; start?: number; onClose: () => void; onAnchor?: (item: GalleryItem) => void } = $props();
 
   let index = $state(0);
   let dialog = $state<HTMLDivElement | null>(null);
@@ -58,7 +58,9 @@
       <span class="font-mono text-xs text-white/70">{index + 1} / {items.length}</span>
       <span class="min-w-0 flex-1 truncate" title={item.caption}>{item.caption}</span>
       <a class={button} href={item.url} download={item.filename}>Download</a>
-      <button class={button} onclick={() => onAnchor(item)} title="Use this image as the subject of the next edit">Anchor for editing</button>
+      {#if onAnchor}
+        <button class={button} onclick={() => onAnchor(item)} title="Use this image as the subject of the next edit">Anchor for editing</button>
+      {/if}
       <button class={button} onclick={onClose} aria-label="Close gallery">Close</button>
     </div>
 

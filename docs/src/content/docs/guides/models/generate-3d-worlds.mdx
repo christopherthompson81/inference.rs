@@ -85,7 +85,9 @@ inference splat --data world/gs_data --out world/splats --lpips lpips_vgg.safete
 ```
 
 Worldgen writes that folder itself (`world/gs_data`, with a WorldMirror checkpoint given). Training writes
-`splats.ply` (standard 3DGS properties, degree-0 colour), `mesh.ply` (a TSDF fusion of the splats' renders from every
+`splats.ply` (standard 3DGS properties, degree-0 colour), `splats.spz` (the same splats as
+[SPZ](https://github.com/nianticlabs/spz) version 3, about a tenth of the size, which web viewers such as Spark read),
+`mesh.ply` (a TSDF fusion of the splats' renders from every
 camera, its largest connected piece, vertex colours), `mesh_simplified.ply` (that mesh decimated to 10% of its
 triangles) and `splats.json` (Gaussian and triangle counts, validation PSNR, and the transform from the cameras' frame
 into the normalized one the splats and meshes are in). The loss includes LPIPS on VGG16
@@ -102,6 +104,27 @@ save_file({**{k: v for k, v in vgg.items() if k.startswith("features")}, **lin},
 
 On the outdoor test scene (283 views) 8000 steps take about 20 minutes on one RTX 3090, end with 2.4M Gaussians, and
 score 24.6 dB PSNR on the held-out frames (the reference trainer: 24.2).
+
+## In the web UI and over HTTP
+
+`inference serve` runs world generation and reconstruction as jobs. Give it the checkpoints in one folder, under
+their repositories' names:
+
+```bash
+inference serve --world-models /models --jobs-dir /data/jobs
+# /models/WorldStereo/worldstereo-memory-dmd, /models/Wan2.1-I2V-14B-480P-Diffusers,
+# /models/moge-2-vitl-normal, /models/HY-World-2.0/HY-WorldMirror-2.0, /models/lpips-vgg/lpips_vgg.safetensors
+```
+
+The web UI's **Worlds** tab starts one from a panorama (the whole pipeline above, then splats and meshes) or from
+photos or a video (WorldMirror alone), shows each stage as it runs with the start views, every generated clip and the
+training renders as they appear, and opens the finished splats in a viewer (drag to look, WASD to move, E and Q for
+up and down). The same jobs are at `/v1/jobs` (submit as multipart: `request`, the job as JSON, and its `file`s; then
+follow `/v1/jobs/{id}/events` and fetch `/v1/jobs/{id}/files/...`) and in the C ABI's `inference_job_*` calls.
+
+A job holds its GPU to itself: it waits for the models there to finish their requests, unloads them, and loads stay
+off that GPU until it ends (they load again on their next request). Only admins start jobs. A world job peaks at about
+18 GB, so it needs the whole of a 24 GB card.
 
 ## Conventions
 

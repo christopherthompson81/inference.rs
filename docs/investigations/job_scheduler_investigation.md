@@ -317,3 +317,19 @@ for the start views, each clip and the training render, and the splats and mesh 
 (the failed run reached 22,779 before dying); GPU at most 72 C, and the machine stayed up.
 
 **Implication:** the engine-side job path is whole; next, the full local checks and the HTTP, ABI and binding surface.
+
+## Run 11 - 2026-10-25 18:15
+
+**Question:** does the web UI's Worlds tab run a whole world job and show the result?
+
+`inference serve --world-models /mnt/data/models --jobs-dir ...`, driven by Playwright (headless Chromium on the GPU
+through ANGLE's EGL backend; its default SwiftShader WebGL could not draw ~800K splats a frame):
+- a reconstruction from the sample repo's 3 park photos: 3 s, the depth preview, the outputs, and the splats in the
+  viewer upright (OpenCV frame turned half about x);
+- a world job from the indoor sample panorama with 2000 training steps: 2101 s, nvidia-smi peak 18,386 MiB, GPU at most
+  72 C. The page showed the stages with live progress (clips 7 of 9 at 15 min), the start views and each clip's middle
+  frame as they came, then the outputs; the viewer opened inside the room (the splats' training transform undone, +z
+  turned to +y).
+
+Walking first used a twentieth of the splats' bounding box a second, which the sky dome made huge: two seconds of W
+left the room. The speed is now a quarter of the median splat distance from the start a second. No console errors.
