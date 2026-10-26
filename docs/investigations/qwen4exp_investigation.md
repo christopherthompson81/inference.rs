@@ -1685,3 +1685,32 @@ PCIe share). Ours is several ms more than its kernels account for. Each layer he
 four copies out (ids, weights, slots, activations), an event, the host function's launch on a side stream, a copy
 back. Strata and basalt use a doorbell instead (routes written to mapped memory by the GPU, a spinning host thread, a
 GPU kernel spinning on the result flag; Run 20). Next: measure that round trip's fixed cost per layer.
+
+## Run 49 - 2026-10-26 14:48
+
+Question: does the per-layer host round trip (Run 48's suspect) cost enough to replace it with a doorbell?
+
+`split_round_trip_costs_a_fixed_latency` (offload.rs, ignored benchmark): an offloaded layer of 64 Q4_K experts
+(2560 x 256, top 10) with every expert cached after a warm-up, so the host function computes nothing, against the same
+cached-expert kernel resident; 500 steps, eager and replayed from a graph. Ten runs:
+```
+          offloaded      resident
+eager     69-101 us      44-50 us
+graph     59-66 us       40-46 us      (~19 us a layer: ~0.9 ms over 48 layers)
+```
+With the cached experts' kernel this long, most of the round trip runs beside it. When the CPU's misses outlast that
+kernel (a 2-token window: ~175 us of CPU a layer against ~98 us of cached experts), the CPU cannot start before the
+host function does, so the round trip's latency, up to the ~55-60 us an empty one takes here, lands on every layer:
+up to ~2.6 ms a window. A doorbell (a GPU-written flag a spinning host thread watches) would start the CPU within a
+few us: worth perhaps 1.5-2.5 ms a window, 5-8%. Not the whole of Run 48's gap.
+
+Kernel time per 2-token verify window against a plain step (nsys, graphs off, `--mtp-n-predict 1`, 54 windows
+against 87 steps): 19.1 ms against 13.6. Dense Q8_0 matvecs 3.44 ms for two columns against 3.0 for one; cached
+experts +2.1 (two tokens route to ~twice the distinct experts); new in a window: cuBLAS GEMMs for the 2-row router
+and gate projections (`gemv_kernel_rowtile`, `Kernel2`, `splitKreduce`, ~1 ms) and an f32 `index_select` 37 times
+(`is_u32_f32`, 16 us each, 0.6 ms; GDN state copies for the rollback).
+
+A first version of the benchmark failed intermittently with CUDA_ERROR_ILLEGAL_ADDRESS on replay: it captured without
+the engine's preparation, and kernels whose parameter vectors are uploaded from the host replayed copies from freed
+host buffers. Capturing as the engine does (`prepare_cuda_graph_memory_pool`, the h2d parameter cache warmed by an
+eager call first) passes 10 of 10. Not an engine fault.
