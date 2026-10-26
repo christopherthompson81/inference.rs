@@ -480,11 +480,6 @@ const MAX_PLANNED_PROMPT_CHUNK: usize = 8192;
 // Prompt chunk the planner keeps room for before it caches more experts: one slot step is a few percent of decode,
 // while a 512-token chunk reads prompts about 3x slower (qwen4exp investigation Runs 27 and 42)
 const MIN_PLANNED_PROMPT_CHUNK: usize = 2048;
-// A built-in MTP head's experts stay on the GPU when the model's leave it, quantized small: missing them cost a draft
-// more than its forward (qwen4exp investigation Run 45). Gate and up take Q2_K, the down's 640-wide rows the 32-wide Q4_0
-const MTP_HEAD_GATE_EXPERTS: &str = "mtp.layers.0.mlp.experts.gate_proj.weight";
-const MTP_HEAD_GATE_UP_PATTERN: &str = r"^mtp\.layers\.\d+\.mlp\.experts\.(gate|up)_proj\.";
-const MTP_HEAD_DOWN_PATTERN: &str = r"^mtp\.layers\.\d+\.mlp\.experts\.down_proj\.";
 // Prefix snapshots a planned offload keeps in the recurrent pool: each holds a sequence's recurrent state (~111 MB on
 // Qwen3.8-Flash-Next), VRAM the expert cache would otherwise take
 const OFFLOAD_PREFIX_SNAPSHOTS: usize = 2;
@@ -1135,18 +1130,17 @@ pub(crate) struct LoadSession {
 
 // Requantizes a built-in MTP head's experts for the GPU, where they stay while the model's are offloaded
 fn mtp_head_expert_overrides() -> Result<Vec<inference_quant::ImmediateIsqOverride>> {
-    let ty = |pattern: &str, ty| -> Result<_> {
-        Ok(inference_quant::ImmediateIsqOverride {
-            predicate: Some(regex::Regex::new(pattern)?),
-            layer_range: None,
-            ty: Some(ty),
-            device: None,
+    super::isq_flow::MTP_HEAD_EXPERTS
+        .iter()
+        .map(|(name, _, ty)| {
+            Ok(inference_quant::ImmediateIsqOverride {
+                predicate: Some(regex::Regex::new(&format!("^{}$", regex::escape(name)))?),
+                layer_range: None,
+                ty: Some(*ty),
+                device: None,
+            })
         })
-    };
-    Ok(vec![
-        ty(MTP_HEAD_GATE_UP_PATTERN, inference_quant::IsqType::Q2K)?,
-        ty(MTP_HEAD_DOWN_PATTERN, inference_quant::IsqType::Q4_0)?,
-    ])
+        .collect()
 }
 
 /// Whether the config declares its head untied from the token embedding (on the model or its text model), so the
@@ -1291,7 +1285,7 @@ pub(crate) fn open_load_session(
             if offloaded
                 && weight_source
                     .as_ref()
-                    .is_some_and(|source| source.contains(MTP_HEAD_GATE_EXPERTS))
+                    .is_some_and(|source| source.contains(super::isq_flow::MTP_HEAD_EXPERTS[0].0))
             {
                 overrides.extend(mtp_head_expert_overrides()?);
             }

@@ -1756,3 +1756,9 @@ A planner fault the A/B exposed: the fourth server stopped with "PagedAttention 
 MB is safely available after model loading". The planner counts a resident MTP head as a cached layer (Run 45:
 ~0.96 GB counted against ~1.0 GB resident); with a little more of the GPU held elsewhere the KV cache no longer fit.
 Next: count the head at its resident, requantized size.
+
+Fixed: the planner counts a resident MTP head's experts at their requantized size (`MTP_HEAD_EXPERTS`: the
+projections, their GGUF types for sizing and ISQ types for the loader's overrides, one table) from the source's
+blocks, and only the mapped layers' experts size the prompt staging. `--mtp --mtp-n-predict 1`, no other flags: 120
+slots, chunk 2,048 (2,560 before, which the undercount had paid for), 22,031 MiB after load and 22,700 MiB at a
+14.6K-token prompt's peak, prose 35.3 and code 36.0 tok/s (one round).

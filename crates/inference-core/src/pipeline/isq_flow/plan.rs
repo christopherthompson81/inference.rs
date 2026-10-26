@@ -4,6 +4,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use inference_nn::moe::OFFLOAD_STAGING_EXPERTS;
+use inference_quant::GgufType;
 use inference_quant::{IsqType, QuantizedWeightSource};
 use inference_tensor::{DType, Device};
 use tracing::info;
@@ -145,6 +146,39 @@ impl AutoDeviceMapSizes {
     }
 }
 
+/// A built-in MTP head's expert projections, and the types the loader requantizes them to: while the model's experts
+/// are offloaded the head's stay on the GPU (qwen4exp investigation Run 45). The 640-wide down takes the 32-wide Q4_0,
+/// as Q2_K needs 256-wide rows.
+pub(crate) const MTP_HEAD_EXPERTS: [(&str, GgufType, IsqType); 3] = [
+    (
+        "mtp.layers.0.mlp.experts.gate_proj.weight",
+        GgufType::Q2K,
+        IsqType::Q2K,
+    ),
+    (
+        "mtp.layers.0.mlp.experts.up_proj.weight",
+        GgufType::Q2K,
+        IsqType::Q2K,
+    ),
+    (
+        "mtp.layers.0.mlp.experts.down_proj.weight",
+        GgufType::Q4_0,
+        IsqType::Q4_0,
+    ),
+];
+
+// The bytes a source's MTP head experts take on the GPU at the types they are requantized to, when it holds them
+fn mtp_head_resident_bytes(source: &dyn QuantizedWeightSource) -> Option<usize> {
+    MTP_HEAD_EXPERTS
+        .iter()
+        .map(|(name, ty, _)| {
+            let blocks = source.mapped_blocks(name)?;
+            let elements = blocks.dims.iter().product::<usize>();
+            Some(elements / ty.block_size() * ty.type_size())
+        })
+        .sum()
+}
+
 impl AutoDeviceMapSizes {
     // Offloaded experts leave a layer's budget but for its cache slots (one more stays zeroed); prompts stage a group of
     // the largest layer's experts on the device
@@ -159,10 +193,22 @@ impl AutoDeviceMapSizes {
         let Some((expert_bytes, experts)) = source.layer_expert_bytes()? else {
             return Ok(self);
         };
-        Ok(self.with_experts_cached(&expert_bytes, experts, slots))
+        Ok(self.with_experts_cached(
+            &expert_bytes,
+            experts,
+            slots,
+            mtp_head_resident_bytes(source),
+        ))
     }
 
-    fn with_experts_cached(mut self, expert_bytes: &[usize], experts: usize, slots: usize) -> Self {
+    // `head`: an MTP head's experts' bytes when they stay on the GPU requantized, rather than cached like a layer's
+    fn with_experts_cached(
+        mut self,
+        expert_bytes: &[usize],
+        experts: usize,
+        slots: usize,
+        head: Option<usize>,
+    ) -> Self {
         let cached = (slots + 1).min(experts + 1);
         let staged = OFFLOAD_STAGING_EXPERTS.min(experts);
         let mapped = self.layer_sizes_in_bytes.len();
@@ -172,17 +218,23 @@ impl AutoDeviceMapSizes {
             *size = size.saturating_sub(bytes) + kept;
             staging = staging.max(bytes / experts * staged);
         }
-        // an MTP head's experts stay in host memory too, cached like a mapped layer's
+        // an MTP head's experts stay on the GPU requantized, or in host memory cached like a mapped layer's
         for (size, &bytes) in self
             .non_mapped_layer_sizes_in_bytes
             .iter_mut()
             .zip(&expert_bytes[mapped.min(expert_bytes.len())..])
         {
-            let kept = size.saturating_sub(bytes) + bytes / experts * cached;
+            let kept = size.saturating_sub(bytes)
+                + match head {
+                    Some(resident) => resident,
+                    None => {
+                        staging = staging.max(bytes / experts * staged);
+                        bytes / experts * cached
+                    }
+                };
             self.non_mapped_size_in_bytes =
                 self.non_mapped_size_in_bytes.saturating_sub(*size) + kept;
             *size = kept;
-            staging = staging.max(bytes / experts * staged);
         }
         self.non_mapped_size_in_bytes += staging;
         self.total_model_size_in_bytes =
@@ -1116,10 +1168,28 @@ mod tests {
             total_model_size_in_bytes: 750,
         }
         .with_source_layers(vec![100, 100, 300])
-        .with_experts_cached(&[80, 80, 240], 4, 2);
+        .with_experts_cached(&[80, 80, 240], 4, 2, None);
         assert_eq!(sizes.layer_sizes_in_bytes, [80, 80]);
         assert_eq!(sizes.non_mapped_layer_sizes_in_bytes, [240]);
         assert_eq!(sizes.non_mapped_size_in_bytes, 50 + 240 + 240);
         assert_eq!(sizes.total_model_size_in_bytes, 160 + 530);
+    }
+
+    // The same head with its experts resident at 90 bytes requantized: it keeps no slots, and only the mapped layers'
+    // experts size the staging (80)
+    #[test]
+    fn a_resident_mtp_head_takes_its_requantized_bytes_and_no_staging() {
+        let sizes = AutoDeviceMapSizes {
+            layer_sizes_in_bytes: vec![100, 100],
+            non_mapped_size_in_bytes: 550,
+            non_mapped_layer_sizes_in_bytes: vec![500],
+            total_model_size_in_bytes: 750,
+        }
+        .with_source_layers(vec![100, 100, 300])
+        .with_experts_cached(&[80, 80, 240], 4, 2, Some(90));
+        assert_eq!(sizes.layer_sizes_in_bytes, [80, 80]);
+        assert_eq!(sizes.non_mapped_layer_sizes_in_bytes, [150]);
+        assert_eq!(sizes.non_mapped_size_in_bytes, 50 + 150 + 80);
+        assert_eq!(sizes.total_model_size_in_bytes, 160 + 280);
     }
 }
