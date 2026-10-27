@@ -224,7 +224,7 @@ fn bind_flash_next(
 ) -> Result<()> {
     let family = QwenMultimodalFamily::Qwen4Exp;
     let model = "model.language_model";
-    let hyper = |bindings: &mut GgufBindingMap, native: &str, source: &str| {
+    let hyper = |bindings: &mut GgufBindingMap, native: &str, source: &str| -> Result<()> {
         bind_text_norm(
             inventory,
             bindings,
@@ -244,6 +244,33 @@ fn bind_flash_next(
                 format!("{source}_{role}.weight"),
             );
         }
+        // llama.cpp converts the down and inject projections, which read the same normed streams, as one `[down |
+        // inject]` weight; the up projection's width says where the down rows end
+        let merged = format!("{source}_down_inject.weight");
+        if inventory.contains(&merged) {
+            let &[rows, _] = inventory.shape(&merged)? else {
+                bail!("Flash-Next hyper-connection `{merged}` must be rank 2");
+            };
+            let up = format!("{source}_up.weight");
+            let &[_, low_rank] = inventory.shape(&up)? else {
+                bail!("Flash-Next hyper-connection `{up}` must be rank 2");
+            };
+            if low_rank >= rows {
+                bail!(
+                    "Flash-Next hyper-connection `{merged}` has {rows} rows for a {low_rank}-wide down"
+                );
+            }
+            for (target, start, len) in [
+                ("input_mix_weight_down", 0, low_rank),
+                ("block_inject_weight", low_rank, rows - low_rank),
+            ] {
+                bindings.insert(
+                    format!("{native}.{target}.weight"),
+                    GgufTensorBinding::tensor(&merged).slice(0, start, len),
+                );
+            }
+        }
+        Ok(())
     };
     // llama.cpp splits the indexer's fused `index_qk_proj` into its query and key halves
     let indexer = |bindings: &mut GgufBindingMap, native: &str, source: &str| {
@@ -270,7 +297,7 @@ fn bind_flash_next(
         bindings,
         &format!("{model}.hyper_connection_mixer"),
         "output_hc",
-    );
+    )?;
     // the built-in MTP head's block (after the main stack, in the model's file or its own) and its own mixer
     if let Some(first) = mtp_first_block(archive)? {
         let source = format!("blk.{first}");
@@ -278,18 +305,18 @@ fn bind_flash_next(
             bindings,
             "mtp.layers.0.attn_hyper_connection",
             &format!("{source}.hc_attn"),
-        );
+        )?;
         hyper(
             bindings,
             "mtp.layers.0.mlp_hyper_connection",
             &format!("{source}.hc_ffn"),
-        );
+        )?;
         indexer(bindings, "mtp.layers.0", &source);
         hyper(
             bindings,
             "mtp.hyper_connection_mixer",
             &format!("{source}.nextn.hc_head"),
-        );
+        )?;
     }
     for layer in inventory.layer_indices("blk.") {
         let native = format!("{model}.layers.{layer}");
@@ -297,12 +324,12 @@ fn bind_flash_next(
             bindings,
             &format!("{native}.attn_hyper_connection"),
             &format!("blk.{layer}.hc_attn"),
-        );
+        )?;
         hyper(
             bindings,
             &format!("{native}.mlp_hyper_connection"),
             &format!("blk.{layer}.hc_ffn"),
-        );
+        )?;
         for (target, role) in [("key_proj", "ple_key"), ("value_proj", "ple_value")] {
             bind(
                 inventory,
@@ -754,24 +781,62 @@ fn bind_gdn(
 ) -> Result<()> {
     let native = format!("{native}.linear_attn");
     let qkv = format!("{source}.attn_qkv.weight");
+    let value_dim = metadata.value_dim()?;
+    let qkv_rows = metadata
+        .key_dim()?
+        .checked_mul(2)
+        .and_then(|qk| qk.checked_add(value_dim))
+        .context("Qwen3.5 GDN projection dimension overflow")?;
     if inventory.contains(&qkv) {
         let shape = inventory.shape(&qkv)?;
         let &[rows, _] = shape else {
             bail!("Qwen3.5 GDN tensor `{qkv}` must be rank 2");
         };
-        let value_dim = metadata.value_dim()?;
-        let expected_rows = metadata
-            .key_dim()?
-            .checked_mul(2)
-            .and_then(|qk| qk.checked_add(value_dim))
-            .context("Qwen3.5 GDN projection dimension overflow")?;
-        if rows != expected_rows {
+        if rows != qkv_rows {
             bail!("Qwen3.5 GDN tensor `{qkv}` has incompatible shape {shape:?}");
         }
         bindings.insert(
             format!("{native}.in_proj_qkv.weight"),
             GgufTensorBinding::tensor(&qkv),
         );
+    }
+    // llama.cpp converts Flash-Next's projections that read the same input as one weight each: `[qkv | gate]` and
+    // `[beta | alpha]`
+    let value_heads = metadata.value_heads;
+    for (merged, halves) in [
+        (
+            "attn_qkv_gate",
+            [
+                ("in_proj_qkv", 0, qkv_rows),
+                ("in_proj_z", qkv_rows, value_dim),
+            ],
+        ),
+        (
+            "ssm_beta_alpha",
+            [
+                ("in_proj_b", 0, value_heads),
+                ("in_proj_a", value_heads, value_heads),
+            ],
+        ),
+    ] {
+        let merged = format!("{source}.{merged}.weight");
+        if !inventory.contains(&merged) {
+            continue;
+        }
+        let shape = inventory.shape(&merged)?;
+        let &[rows, _] = shape else {
+            bail!("Qwen3.5 GDN tensor `{merged}` must be rank 2");
+        };
+        let (_, start, len) = halves[1];
+        if rows != start + len {
+            bail!("Qwen3.5 GDN tensor `{merged}` has incompatible shape {shape:?}");
+        }
+        for (target, start, len) in halves {
+            bindings.insert(
+                format!("{native}.{target}.weight"),
+                GgufTensorBinding::tensor(&merged).slice(0, start, len),
+            );
+        }
     }
     for (target, role) in [
         ("in_proj_z.weight", "attn_gate.weight"),
@@ -1132,6 +1197,22 @@ mod tests {
         let beta = q4k_ones(TINY_VALUE_HEADS as usize, TINY_HIDDEN_SIZE)?;
         let alpha = q4k_ones(TINY_VALUE_HEADS as usize, TINY_HIDDEN_SIZE)?;
         let output = q4k_ones(TINY_HIDDEN_SIZE, TINY_VALUE_DIM as usize)?;
+        tiny_gdn_archive(
+            architecture,
+            &[
+                ("blk.0.attn_qkv.weight", &qkv),
+                ("blk.0.attn_gate.weight", &gate),
+                ("blk.0.ssm_beta.weight", &beta),
+                ("blk.0.ssm_alpha.weight", &alpha),
+                ("blk.0.ssm_out.weight", &output),
+            ],
+        )
+    }
+
+    fn tiny_gdn_archive(
+        architecture: &str,
+        tensors: &[(&str, &QTensor)],
+    ) -> Result<(NamedTempFile, Arc<GgufArchive>)> {
         let metadata = [
             (
                 GENERAL_ARCHITECTURE.to_string(),
@@ -1158,31 +1239,36 @@ mod tests {
                 Value::U32(TINY_VALUE_DIM),
             ),
         ];
+        let mut metadata = metadata.to_vec();
+        if architecture == "qwen4exp" {
+            metadata.push((
+                "qwen4exp.ple.layers".to_string(),
+                Value::Array(vec![Value::U32(1)]),
+            ));
+        }
         let metadata = metadata
             .iter()
             .map(|(key, value)| (key.as_str(), value))
             .collect::<Vec<_>>();
 
         let mut file = NamedTempFile::new()?;
-        gguf_file::write(
-            file.as_file_mut(),
-            &metadata,
-            &[
-                ("blk.0.attn_qkv.weight", &qkv),
-                ("blk.0.attn_gate.weight", &gate),
-                ("blk.0.ssm_beta.weight", &beta),
-                ("blk.0.ssm_alpha.weight", &alpha),
-                ("blk.0.ssm_out.weight", &output),
-            ],
-        )?;
+        gguf_file::write(file.as_file_mut(), &metadata, tensors)?;
         file.as_file_mut().flush()?;
         let archive = Arc::new(GgufArchive::open_file(file.path())?);
         Ok((file, archive))
     }
 
     fn q4k_ones(rows: usize, cols: usize) -> Result<QTensor> {
-        let weight = Tensor::ones((rows, cols), DType::F32, &Device::Cpu)?;
-        QTensor::quantize(&weight, GgmlDType::Q4K).map_err(Into::into)
+        q4k_rows(&[(rows, 1.0)], cols)
+    }
+
+    // runs of rows, each run all one value, as one Q4_K tensor
+    fn q4k_rows(runs: &[(usize, f64)], cols: usize) -> Result<QTensor> {
+        let weight = runs
+            .iter()
+            .map(|&(rows, value)| Tensor::full(value as f32, (rows, cols), &Device::Cpu))
+            .collect::<inference_tensor::Result<Vec<_>>>()?;
+        QTensor::quantize(&Tensor::cat(&weight, 0)?, GgmlDType::Q4K).map_err(Into::into)
     }
 
     #[test]
@@ -1669,6 +1755,92 @@ mod tests {
                     "{architecture} {projection}"
                 );
             }
+        }
+        Ok(())
+    }
+
+    // llama.cpp converts Flash-Next's same-input projections as one weight each; their halves load as the separate
+    // tensors do, packed
+    #[test]
+    fn flash_next_merged_projections_load_as_their_halves() -> Result<()> {
+        const HC_DIM: usize = 4 * TINY_HIDDEN_SIZE;
+        const HC_LOW_RANK: usize = 8;
+        const HC_STREAMS: usize = 4;
+        let (qkv_rows, value_dim, value_heads) = (
+            TINY_QKV_ROWS,
+            TINY_VALUE_DIM as usize,
+            TINY_VALUE_HEADS as usize,
+        );
+        let output = q4k_ones(TINY_HIDDEN_SIZE, value_dim)?;
+        let hc_up = q4k_rows(&[(HC_DIM, 1.0)], HC_LOW_RANK * 32)?;
+        let split = [
+            q4k_rows(&[(qkv_rows, 1.0)], TINY_HIDDEN_SIZE)?,
+            q4k_rows(&[(value_dim, 2.0)], TINY_HIDDEN_SIZE)?,
+            q4k_rows(&[(value_heads, 3.0)], TINY_HIDDEN_SIZE)?,
+            q4k_rows(&[(value_heads, 4.0)], TINY_HIDDEN_SIZE)?,
+        ];
+        let (_split_file, split_archive) = tiny_gdn_archive(
+            "qwen4exp",
+            &[
+                ("blk.0.attn_qkv.weight", &split[0]),
+                ("blk.0.attn_gate.weight", &split[1]),
+                ("blk.0.ssm_beta.weight", &split[2]),
+                ("blk.0.ssm_alpha.weight", &split[3]),
+                ("blk.0.ssm_out.weight", &output),
+            ],
+        )?;
+        let qkv_gate = q4k_rows(&[(qkv_rows, 1.0), (value_dim, 2.0)], TINY_HIDDEN_SIZE)?;
+        let beta_alpha = q4k_rows(&[(value_heads, 3.0), (value_heads, 4.0)], TINY_HIDDEN_SIZE)?;
+        let down_inject = q4k_rows(&[(HC_LOW_RANK * 32, 5.0), (HC_STREAMS, 6.0)], HC_DIM)?;
+        let (_merged_file, merged_archive) = tiny_gdn_archive(
+            "qwen4exp",
+            &[
+                ("blk.0.attn_qkv_gate.weight", &qkv_gate),
+                ("blk.0.ssm_beta_alpha.weight", &beta_alpha),
+                ("blk.0.ssm_out.weight", &output),
+                ("blk.0.hc_attn_up.weight", &hc_up),
+                ("blk.0.hc_attn_down_inject.weight", &down_inject),
+            ],
+        )?;
+        let load =
+            |archive: &Arc<GgufArchive>, projection: &str| -> Result<(GgmlDType, Vec<f32>)> {
+                let bindings = build_qwen_multimodal_bindings(archive)?;
+                let source = GgufWeightSource::new(archive.clone(), &bindings, DType::F32)?;
+                let layer = source
+                    .load_linear(
+                        &format!("model.language_model.layers.0.linear_attn.{projection}"),
+                        &Device::Cpu,
+                        Shard::default(),
+                    )?
+                    .unwrap();
+                let qweight = layer
+                    .get_qtensor()
+                    .unwrap_or_else(|| panic!("{projection} did not stay packed"));
+                Ok((
+                    qweight.dtype(),
+                    qweight.dequantize(&Device::Cpu)?.flatten_all()?.to_vec1()?,
+                ))
+            };
+        for projection in ["in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a"] {
+            let merged = load(&merged_archive, projection)?;
+            assert_eq!(merged.0, GgmlDType::Q4K, "{projection}");
+            assert_eq!(merged, load(&split_archive, projection)?, "{projection}");
+        }
+        let bindings = build_qwen_multimodal_bindings(&merged_archive)?;
+        for (target, expected_start, expected_len) in [
+            ("input_mix_weight_down", 0, HC_LOW_RANK * 32),
+            ("block_inject_weight", HC_LOW_RANK * 32, HC_STREAMS),
+        ] {
+            assert!(
+                matches!(
+                    bindings.get(&format!(
+                        "model.language_model.layers.0.attn_hyper_connection.{target}.weight"
+                    )),
+                    Some(GgufTensorBinding::Slice { dim: 0, start, len, .. })
+                        if *start == expected_start && *len == expected_len
+                ),
+                "{target}"
+            );
         }
         Ok(())
     }
