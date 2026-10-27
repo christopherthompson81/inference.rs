@@ -1293,6 +1293,40 @@ unsafe impl Send for CudaGraphHandle {}
 // The allocation owns the pointer and all accesses require an exclusive borrow.
 unsafe impl<T: Send> Send for CudaGraphPinnedAllocation<T> {}
 
+/// Releases a graph after the resources its replays read: waits for the stream, drops them, then the graph.
+pub fn release_cuda_graph_resources<T>(
+    component: CudaGraphComponent,
+    graph: CudaGraphHandle,
+    resources: T,
+) -> (Arc<CudaStream>, inference_tensor::Result<()>) {
+    let label = component.label();
+    let stream = graph.stream().clone();
+    let mut release_result = stream
+        .synchronize()
+        .map_err(inference_tensor::Error::wrap)
+        .map_err(|err| err.context(format!("{label} CUDA graph entry release wait failed")));
+    drop(resources);
+    if let Err(err) = stream.context().check_err()
+        && release_result.is_ok()
+    {
+        release_result = Err(inference_tensor::Error::wrap(err)
+            .context(format!("{label} CUDA graph entry storage release failed")));
+    }
+    let storage_result = stream
+        .synchronize()
+        .map_err(inference_tensor::Error::wrap)
+        .map_err(|err| {
+            err.context(format!(
+                "{label} CUDA graph entry storage release wait failed"
+            ))
+        });
+    if release_result.is_ok() {
+        release_result = storage_result;
+    }
+    drop(graph);
+    (stream, release_result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1678,38 +1712,4 @@ mod tests {
         assert_eq!(memory_pool_release_threshold(pool)?, original);
         Ok(())
     }
-}
-
-/// Releases a graph after the resources its replays read: waits for the stream, drops them, then the graph.
-pub fn release_cuda_graph_resources<T>(
-    component: CudaGraphComponent,
-    graph: CudaGraphHandle,
-    resources: T,
-) -> (Arc<CudaStream>, inference_tensor::Result<()>) {
-    let label = component.label();
-    let stream = graph.stream().clone();
-    let mut release_result = stream
-        .synchronize()
-        .map_err(inference_tensor::Error::wrap)
-        .map_err(|err| err.context(format!("{label} CUDA graph entry release wait failed")));
-    drop(resources);
-    if let Err(err) = stream.context().check_err()
-        && release_result.is_ok()
-    {
-        release_result = Err(inference_tensor::Error::wrap(err)
-            .context(format!("{label} CUDA graph entry storage release failed")));
-    }
-    let storage_result = stream
-        .synchronize()
-        .map_err(inference_tensor::Error::wrap)
-        .map_err(|err| {
-            err.context(format!(
-                "{label} CUDA graph entry storage release wait failed"
-            ))
-        });
-    if release_result.is_ok() {
-        release_result = storage_result;
-    }
-    drop(graph);
-    (stream, release_result)
 }
