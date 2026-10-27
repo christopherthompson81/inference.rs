@@ -27,6 +27,7 @@ const PROMPT: [u32; 18] = [
     11, 57, 203, 4, 98, 140, 33, 77, EOS, 19, 64, 222, 5, 180, 91, 42, 7, 130,
 ];
 const GENERATED: usize = 12;
+const MTP_COMPONENT: &str = "mtp";
 const STEP_LOGPROB_TOLERANCE: f32 = 1e-3;
 const PREFIX_CACHE_SEQS: usize = 4;
 // a few paged blocks, so the prefix snapshot lands inside the prompt
@@ -611,6 +612,7 @@ async fn flash_next_builtin_mtp_drafts_and_keeps_greedy_output() -> anyhow::Resu
     let counters = decode_graphs::Counters::take(&snapshotter);
     decode_graphs::assert_replayed(&counters);
     decode_graphs::assert_only_prompts_skip(&counters);
+    decode_graphs::assert_component_replayed(&counters, MTP_COMPONENT);
     Ok(())
 }
 

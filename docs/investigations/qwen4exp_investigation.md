@@ -1953,3 +1953,71 @@ And 9 and 10, interleaved with 8 again:
 ```
 Still no gain from 9 to 12 threads, and 16 collapses: the doorbell thread spins one core, and sixteen pool threads leave
 no core for it or the host. Eight (the physical cores) stays.
+
+## Run 58 - 2026-10-26 20:38
+
+Question: with `perf` now allowed (`kernel.perf_event_paranoid` 2), which threads hold the CPU during a decode, and
+does the cache-fill thread cost the CPU misses anything?
+
+`perf record -F 4999 -g --call-graph dwarf -p <server>` for 4 s of a code decode (MTP 1 draft): nine threads at a
+full core each (the doorbell thread, the seven pool workers, `moe-expert-fill`), the launching thread at 0.6% of
+the samples. The fill thread spends 83% of its samples in a libcuda SSE load / non-temporal store loop: the driver
+staging each pageable `cuMemcpyHtoDAsync` through its own pinned buffer. The pool workers split about evenly between
+the dot kernels and the barrier's spin.
+
+`flash_next_offload_misses` beside a stand-in for that thread (one thread copying 3 MB chunks with SSE loads and
+non-temporal stores; dev profile):
+```
+                          1 miss      3 misses    10 misses (us a step)
+8 threads alone           137         329-331     1049-1074
+8 + copy at 5 GB/s        147         414         1229
+8 + copy unpaced (12.7)   157         414         1228
+7 threads alone           132         390         1104
+7 + copy at 5 GB/s        154         406         1342
+6 threads alone           151         410         1277
+6 + copy at 5 GB/s        157         414         1297
+```
+The copy costs the kernel 15-26% at eight threads, the same paced or not: a core more than bandwidth.
+
+In the engine the fill thread copies only because the experts are pageable: registering the GGUF mapping fails
+(CUDA_ERROR_NOT_SUPPORTED; the kernel refuses long-term pins of file-backed ext4 pages). A probe copied the 55.4
+GiB of routed experts into pinned memory at load (`HostExpertStack::new`, removed after), so fills DMA with no CPU
+copy. Interleaved A/B, a warm round before each measured three:
+```
+                      prose median     code median
+pageable (master)     52.0             44.1
+pinned                52.2             44.7
+```
+Level, and the pinned load took 1 min 42 s against 11 s (allocating, locking and copying 55 GiB on one thread),
+holding 55 GiB of the machine's 125. The first, unwarmed run read 38.0 / 41.7 for pageable: the pinned server had
+evicted the page cache the pageable one reads from. Not pursued.
+
+## Run 59 - 2026-10-26 21:12
+
+Question: replayed from a CUDA graph, how much of the MTP head's 2.2 ms eager span (Run 57) comes back?
+
+Built: the head's drafter forward (embedding, hyper-connections, the QSA attention block, its resident MoE) captured
+per row shape and replayed (`qwen3_5::mtp_graph`). Its paged metadata goes through decode rows
+(`make_paged_rows_decode_rows`, block tables as wide as the paged context) into the decode-graph metadata buffers
+core's target graphs use, now in `inference_nn::cuda::graph_metadata`; tokens, MRoPE positions and target hidden
+states are staged into fixed buffers. A shape's first run warms eagerly over those buffers under the parameter
+upload cache, its second captures, and a failed capture or replay leaves the shape eager. The draft lm_head and the
+sampler stay eager. The QSA plan takes its device decode path from the buffers' context lengths.
+
+nsys, code decode, MTP 1 draft:
+```
+                          eager (Run 57)                      graph
+MTP head                  115 launches, 2.14 ms span          108-node graph 0.47 ms span (0.41 ms kernels)
+draft lm_head + top-1     (in the above)                      7 launches, 0.72 ms
+gap before the head       0.22 ms                             0.39 ms (0.11 ms staging, ~0.09 ms graph launch)
+```
+About 0.8 ms a step. Acceptance on the real model is unchanged (69-89% over the run against 63-91% eager), and
+a unit test replays one shape with changing tokens, positions, hidden states and context lengths against the same
+forward run eagerly; skipping the token staging fails it at the first replay. Interleaved A/B (as Run 56, a warm
+round before each measured three):
+```
+                      prose median     code median
+master (#644)         52.5             45.2
+MTP graph             52.7             46.2
+```
++0.5% / +2.2%.

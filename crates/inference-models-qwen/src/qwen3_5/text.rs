@@ -1464,6 +1464,8 @@ pub struct Qwen3_5TextModel {
     pub(super) dflash: Mutex<Option<Arc<crate::dflash::DFlashDraftModel>>>,
     pub(super) pending_prompt_tails:
         Mutex<std::collections::HashMap<usize, super::speculative::PendingPromptTail>>,
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    pub(super) mtp_graphs: super::mtp_graph::MtpGraphs,
 }
 
 impl Qwen3_5TextModel {
@@ -1813,6 +1815,8 @@ impl Qwen3_5TextModel {
             draft_lm_head: Mutex::new(None),
             dflash: Mutex::new(None),
             pending_prompt_tails: Mutex::new(std::collections::HashMap::new()),
+            #[cfg(all(feature = "cuda", target_family = "unix"))]
+            mtp_graphs: Default::default(),
             store_spec_hidden: AtomicBool::new(false),
             last_spec_capture: Mutex::new(None),
             last_full_capture: Mutex::new(None),

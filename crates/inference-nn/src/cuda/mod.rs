@@ -35,6 +35,8 @@ pub mod graph;
 #[cfg(feature = "cuda")]
 pub mod graph_capture;
 #[cfg(feature = "cuda")]
+pub mod graph_metadata;
+#[cfg(feature = "cuda")]
 pub mod indexed_copy;
 #[cfg(feature = "cuda")]
 pub mod input_packing;

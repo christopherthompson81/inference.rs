@@ -119,6 +119,16 @@ struct DraftRow {
     mrope: [u32; MROPE_DIMS],
 }
 
+/// One drafter forward's device inputs: `[b, rows]` tokens, `[3, b, rows]` MRoPE positions and `[b, rows, hidden]`
+/// target hidden states in the head's dtype, with the rows' paged metadata and target positions.
+pub(super) struct MtpForwardInputs<'a> {
+    pub(super) tokens: &'a Tensor,
+    pub(super) positions: &'a Tensor,
+    pub(super) target_hidden: &'a Tensor,
+    pub(super) metadata: &'a crate::paged_attention::PagedAttentionInputMetadata,
+    pub(super) starts: &'a [usize],
+}
+
 /// The target's paged cache for a drafter that keeps its layers there.
 fn dflash_paged_cache<'a>(
     drafter: &DFlashDraftModel,
@@ -190,43 +200,97 @@ impl Qwen3_5TextModel {
     ) -> Result<MtpDraft> {
         let device = head.device();
         let n = rows.len();
-        let mtp_kv = kv_cache
-            .get(head.kv_layer_idx())
-            .ok_or_else(|| inference_tensor::Error::msg("paged cache has no MTP layer"))?
-            .clone();
+        // QSA plans each sequence's rows together, so a QSA head runs its rows as a batch of one-row sequences
+        let shape = if head.qsa().is_some() { (n, 1) } else { (1, n) };
         let seq_ids = rows.iter().map(|row| row.seq_id).collect::<Vec<_>>();
         let context_lens = rows.iter().map(|row| row.position + 1).collect::<Vec<_>>();
-        let metadata = make_paged_rows_metadata(&seq_ids, &context_lens, paged_meta, device)?;
-        let qsa = head.qsa();
-        // QSA plans each sequence's rows together, so a QSA head runs its rows as a batch of one-row sequences
-        let shape = if qsa.is_some() { (n, 1) } else { (1, n) };
-        let tokens = Tensor::from_vec(
-            rows.iter().map(|row| row.token).collect::<Vec<_>>(),
-            shape,
-            device,
-        )?;
+        let tokens = rows.iter().map(|row| row.token).collect::<Vec<_>>();
+        let starts = rows.iter().map(|row| row.position).collect::<Vec<_>>();
         let mut mrope = Vec::with_capacity(MROPE_DIMS * n);
         for dim in 0..MROPE_DIMS {
             mrope.extend(rows.iter().map(|row| row.mrope[dim]));
         }
+        let target_hidden = target_hidden
+            .to_device(device)?
+            .to_dtype(head.dtype())?
+            .reshape((shape.0, shape.1, ()))?;
+        let forward =
+            |inputs: MtpForwardInputs<'_>| self.drafter_forward_inputs(head, inputs, kv_cache);
+        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        if paged_meta.sliding_window.is_none() {
+            let kv = mtp_kv_layers(head)
+                .map(|layer| {
+                    kv_cache
+                        .get(layer)
+                        .map(|(k, v)| [k.id(), v.id()])
+                        .ok_or_else(|| inference_tensor::Error::msg("paged cache has no MTP layer"))
+                })
+                .collect::<Result<Vec<_>>>()?
+                .concat();
+            let run = super::mtp_graph::MtpGraphRun {
+                shape,
+                tokens: &tokens,
+                mrope: &mrope,
+                positions: &context_lens,
+                starts: &starts,
+                target_hidden: &target_hidden.contiguous()?,
+                decode_rows: crate::speculative::paged_rows::make_paged_rows_decode_rows(
+                    &seq_ids,
+                    &context_lens,
+                    paged_meta,
+                    device,
+                )?,
+                kv,
+            };
+            if let Some(draft) = self.mtp_graphs.forward(&run, &forward)? {
+                return Ok(draft);
+            }
+        }
+        let metadata = make_paged_rows_metadata(&seq_ids, &context_lens, paged_meta, device)?;
+        let tokens = Tensor::from_vec(tokens, shape, device)?;
         let positions = Tensor::from_vec(mrope, (MROPE_DIMS, shape.0, shape.1), device)?;
-        let embeds = self.embed_tokens(&tokens)?.to_dtype(head.dtype())?;
-        let target_hidden = target_hidden.to_device(device)?.to_dtype(head.dtype())?;
-        let target_hidden = target_hidden.reshape((shape.0, shape.1, ()))?;
+        forward(MtpForwardInputs {
+            tokens: &tokens,
+            positions: &positions,
+            target_hidden: &target_hidden,
+            metadata: &metadata,
+            starts: &starts,
+        })
+    }
+
+    fn drafter_forward_inputs(
+        &self,
+        head: &Qwen3_5MtpHead,
+        inputs: MtpForwardInputs<'_>,
+        kv_cache: &[(Tensor, Tensor)],
+    ) -> Result<MtpDraft> {
+        let MtpForwardInputs {
+            tokens,
+            positions,
+            target_hidden,
+            metadata,
+            starts,
+        } = inputs;
+        let device = head.device();
+        let (batch, len) = tokens.dims2()?;
+        let n = batch * len;
+        let mtp_kv = kv_cache
+            .get(head.kv_layer_idx())
+            .ok_or_else(|| inference_tensor::Error::msg("paged cache has no MTP layer"))?
+            .clone();
+        let qsa = head.qsa();
+        let embeds = self.embed_tokens(tokens)?.to_dtype(head.dtype())?;
         let step = qsa
             .map(|(cfg, _)| {
-                let qsa_rows = rows
+                let qsa_rows = starts
                     .iter()
-                    .map(|row| QsaRow {
-                        start: row.position,
-                        len: 1,
-                    })
+                    .map(|&start| QsaRow { start, len: 1 })
                     .collect::<Vec<_>>();
                 QsaStep::new(QsaStepInput {
                     cfg,
                     rows: &qsa_rows,
                     query_len: 1,
-                    input_metadata: &metadata,
+                    input_metadata: metadata,
                     device,
                 })
             })
@@ -240,11 +304,11 @@ impl Qwen3_5TextModel {
             .transpose()?;
         let draft = head.forward(
             &embeds,
-            &target_hidden,
-            &positions,
+            target_hidden,
+            positions,
             MtpAttentionInputs {
                 kv_cache: mtp_kv,
-                metadata: &metadata,
+                metadata,
                 attention_mask: &AttentionMask::None,
                 flash_params: &FlashParams::empty(false),
             },
@@ -1077,6 +1141,12 @@ struct CaptureView {
     mrope: Vec<Vec<Vec<u32>>>,
 }
 
+// The paged layers a drafter forward writes: the head's own, and its QSA indexer's
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+fn mtp_kv_layers(head: &Qwen3_5MtpHead) -> impl Iterator<Item = usize> {
+    std::iter::once(head.kv_layer_idx()).chain(head.qsa().map(|(_, layer)| layer))
+}
+
 fn capture_view(capture: &SpecCapture) -> Result<CaptureView> {
     let hidden = match capture.hidden.rank() {
         3 => capture.hidden.clone(),
@@ -1358,10 +1428,14 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
     }
 
     fn evict_speculative_cuda_graphs(&self, max_entries: usize) -> usize {
+        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        let mtp = self.mtp_graphs.evict_lru(max_entries);
+        #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+        let mtp = 0;
         let Some(drafter) = self.dflash.lock().expect("dflash poisoned").clone() else {
-            return 0;
+            return mtp;
         };
-        drafter.evict_cuda_graphs_lru(max_entries)
+        mtp + drafter.evict_cuda_graphs_lru(max_entries - mtp)
     }
 
     fn speculative_bypass(&mut self, seq_ids: &[usize]) -> Result<()> {

@@ -119,6 +119,7 @@ const DFLASH_N_PREDICT: usize = 2;
 // every drafter layer windowed, which its decode graphs need
 const DFLASH_WINDOW: usize = 32;
 const DFLASH_COMPONENT: &str = "dflash";
+const MTP_COMPONENT: &str = "mtp";
 // DSpark drafts from the anchor row too, so its block of 3 rows yields as many drafts as DFlash's 4
 const DSPARK_BLOCK: usize = 3;
 const DSPARK_MARKOV_RANK: usize = 8;
@@ -211,7 +212,7 @@ async fn hybrid_paged_gpu_decode_without_cuda_graphs_matches() -> anyhow::Result
     decode_graphs::assert_rounds_without_graphs(paged_gpu_rounds, &GRAPH_TRACES).await
 }
 
-// With a drafter attached, decode graphs capture the fixed-width verify steps and greedy output is unchanged.
+// With a drafter attached, graphs capture the fixed-width verify steps and the head's drafts; greedy output holds.
 #[tokio::test]
 async fn hybrid_builtin_mtp_replays_verify_graphs() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
@@ -223,6 +224,7 @@ async fn hybrid_builtin_mtp_replays_verify_graphs() -> anyhow::Result<()> {
     let counters = decode_graphs::Counters::take(&snapshotter);
     decode_graphs::assert_replayed(&counters);
     decode_graphs::assert_only_prompts_skip(&counters);
+    decode_graphs::assert_component_replayed(&counters, MTP_COMPONENT);
     let drafts: usize = model
         .speculative_stats()?
         .data
