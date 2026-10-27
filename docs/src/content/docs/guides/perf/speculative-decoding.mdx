@@ -85,7 +85,10 @@ a fixed one: per-position acceptance, scaled for each sequence, and the measured
 batch size give each depth an expected rate of committed tokens. Steps that overlap a prompt or a CUDA graph capture
 are left out of the timing, a depth not yet timed is probed now and then, and the batch switches only when another
 depth is expected to be at least 3% faster. Built-in heads choose between 1, 2, 3 and 4 drafts and DFlash drafters
-between 3, 5 and 7; `--mtp-n-predict`, when given, is the most a step drafts.
+between 3, 5 and 7; `--mtp-n-predict`, when given, is the most a step drafts. Where a model's default depth is
+already its best one the probes only cost time: on Qwen3.8-Flash-Next with offloaded experts and on Qwen3.8-27B with
+its DFlash 2 drafter it decodes 1-5% slower than the fixed default, so it is for a target or workload whose best depth
+is not known.
 
 A GGUF that leaves the head out can take it from a separate file, as llama.cpp's MTP heads ship (for example
 unsloth's `mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf`): list it after the model's files and pass `--mtp`. The head file's
