@@ -466,9 +466,12 @@ pub struct MtpSpec {
     /// Assistant model id or path; unset uses the checkpoint's own MTP head.
     #[serde(default)]
     pub model: Option<String>,
-    /// Draft tokens proposed per target step.
+    /// Draft tokens proposed per target step; with `auto_depth`, the most a step drafts.
     #[serde(default)]
     pub n_predict: Option<usize>,
+    /// Each step drafts the depth that has paid best so far, from acceptance and measured step time.
+    #[serde(default)]
+    pub auto_depth: bool,
     #[serde(default)]
     pub draft_sampling: MtpDraftSampling,
     /// The assistant model's weight type, e.g. `q4k` or `q8_0`; unset, the model's ISQ (none for a GGUF, so BF16).
@@ -511,7 +514,8 @@ impl MtpSpec {
             None => MtpConfig::builtin(self.n_predict),
         }
         .with_draft_sampling_method(self.draft_sampling.into())
-        .with_drafter_isq(draft_isq))
+        .with_drafter_isq(draft_isq)
+        .with_auto_depth(self.auto_depth))
     }
 }
 

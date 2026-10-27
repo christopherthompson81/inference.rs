@@ -2021,3 +2021,32 @@ master (#644)         52.5             45.2
 MTP graph             52.7             46.2
 ```
 +0.5% / +2.2%.
+
+## Run 60 - 2026-10-26 22:35
+
+Question: issue #558 review. What changed upstream since our reference, and does mistral.rs's speculative depth
+autotuner (3f2515e9b, `speculative/autotuner.rs`) pay here?
+
+llama.cpp 970b51ce7..7aca0d2ea, the commits touching `qwen4exp`: 2280f0fd1 converts the same-input projections
+as one weight each (`hc_attn_down_inject`, `hc_ffn_down_inject`, `attn_qkv_gate` on linear layers, `ssm_beta_alpha`)
+and moves the hyper-connection `1/hc` scale from the combine to the mix (same math). A file converted since then
+failed here: the schema wanted `.ssm_alpha.` / `.ssm_beta.` tensors and the bindings the halves. Fixed in #646 (row
+slices of the merged weights, packed). 5c3114268 builds llama.cpp's QSA selection without its kq_mask (graph-internal);
+74bca3950 pads PLE's history in llama.cpp's token-less embedding batches with the image token (ours carry the
+prompt's real ids). Nothing else to take.
+
+The autotuner, ported nearly as is (`inference_core::speculative::autotuner`): per-position acceptance scaled per
+sequence and calibrated per depth, a step's seconds (proposal to verification) per batch size and depth with
+outlier rejection, warm-up and neighbor probes, a 3% switch margin. Opt-in (`mtp.auto_depth`, `--mtp-auto-depth`);
+built-in heads choose from 1-4 drafts, DFlash from 3, 5 and 7. Interleaved A/B, a warm round then three measured:
+```
+                                          prose median        code median
+Flash-Next, built-in MTP, fixed 1         52.7                45.1
+Flash-Next, built-in MTP, auto            50.5                44.7
+Qwen3.8-27B recipe A + DFlash 2, fixed 7  89.3                177.5
+Qwen3.8-27B recipe A + DFlash 2, auto     84.4                171.8
+```
+Both trail the tuned fixed depths (-1% to -5.5%). Its debug log on Flash-Next: depths 1 and 2 score within 1.5%
+(43.1 / 42.5 tok/s per sequence), so the CPU misses' step-time noise flips it between them, and probes of 3 and 4
+(26-33) each cost a slow step. On the 27B it holds near 7 and probes 3 and 5. Where the fixed default is already
+the best depth, adaptation only adds probes; the tuner is for a target or workload whose best depth is not known.

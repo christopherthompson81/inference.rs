@@ -58,7 +58,8 @@ quant = "4"
 | `matformer_slice_name` | `--matformer-slice-name` | not set | MatFormer slice to load. Requires `matformer_config_path`. |
 | `mtp` | `--mtp` | false | MTP speculative decoding with the head built into the checkpoint. Conflicts with `mtp_model`. |
 | `mtp_model` | `--mtp-model` | not set | [MTP (multi-token prediction)](/guides/perf/speculative-decoding/) assistant model id or path. |
-| `mtp_n_predict` | `--mtp-n-predict` | not set | MTP draft tokens proposed per target step. |
+| `mtp_n_predict` | `--mtp-n-predict` | not set | MTP draft tokens proposed per target step; with `mtp_auto_depth`, the most a step drafts. |
+| `mtp_auto_depth` | `--mtp-auto-depth` | false | Each step drafts the depth that has paid best so far, from acceptance and measured step time. |
 | `mtp_draft_sampling` | `--mtp-draft-sampling` | `auto` | MTP draft policy: `auto`, `greedy`, or `probabilistic`. |
 | `mcp_config` | `--mcp-config` | not set | [MCP (Model Context Protocol)](/guides/agents/connect-mcp-server/) client configuration JSON for outbound servers. Also reads `MCP_CONFIG_PATH` if unset. |
 | `agent` | `--agent` (alias `--agentic`) | false | Shortcut for `enable_search = true` + `enable_code_execution = true` + `enable_shell = true`. |

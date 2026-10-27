@@ -344,6 +344,15 @@ macro_rules! load_options_methods {
             self
         }
 
+        /// Each step drafts the depth that has paid best, up to the MTP's `n_predict`; applies to the MTP set by
+        /// `with_mtp_model` or `with_builtin_mtp` before it.
+        pub fn with_mtp_auto_depth(mut self) -> Self {
+            if let Some(mtp) = self.options.runtime.mtp.as_mut() {
+                mtp.auto_depth = true;
+            }
+            self
+        }
+
         /// How MTP drafts its tokens; applies to the MTP set by `with_mtp_model` or `with_builtin_mtp` before it.
         pub fn with_mtp_draft_sampling(mut self, sampling: $crate::MtpDraftSampling) -> Self {
             if let Some(mtp) = self.options.runtime.mtp.as_mut() {

@@ -7,7 +7,10 @@ pub mod target;
 
 pub use config::{MtpConfig, MtpDraftSamplingMethod, MtpRuntimeConfig, SpeculativeConfig};
 pub use logging::{SpeculativeAttachInfo, SpeculativeAttachKind};
-pub use policy::{SpeculativeBatchObservation, SpeculativeBatchPlan, SpeculativeGraphPlan};
+pub use policy::{
+    AUTO_DEPTHS, AUTO_MAX_DEPTH, SpeculativeBatchObservation, SpeculativeBatchPlan,
+    SpeculativeGraphPlan, auto_depth_graph_plans, depths_up_to,
+};
 pub use proposer::{
     DraftSequence, SparseSpeculativeProbs, SpeculativeCommitRow, SpeculativeKvCache,
     SpeculativePrefillCtx, SpeculativeProposal, SpeculativeProposalBatch,

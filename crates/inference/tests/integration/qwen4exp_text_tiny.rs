@@ -28,6 +28,10 @@ const PROMPT: [u32; 18] = [
 ];
 const GENERATED: usize = 12;
 const MTP_COMPONENT: &str = "mtp";
+// enough steps for the depth tuner's warm-up probes, which come every few decisions
+const AUTO_DEPTH_GENERATED: usize = 48;
+// the built-in head's largest automatic depth (`inference_nn::speculative::AUTO_MAX_DEPTH`)
+const AUTO_MAX_DEPTH: usize = 4;
 const STEP_LOGPROB_TOLERANCE: f32 = 1e-3;
 const PREFIX_CACHE_SEQS: usize = 4;
 // a few paged blocks, so the prefix snapshot lands inside the prompt
@@ -614,6 +618,36 @@ async fn flash_next_builtin_mtp_drafts_and_keeps_greedy_output() -> anyhow::Resu
     decode_graphs::assert_only_prompts_skip(&counters);
     decode_graphs::assert_component_replayed(&counters, MTP_COMPONENT);
     Ok(())
+}
+
+// With an autotuned depth the built-in MTP head drafts more than one depth over a run (the tuner probes the ones
+// it has not timed), and greedy output holds up to BF16 near ties.
+#[tokio::test]
+async fn flash_next_autotuned_mtp_varies_its_depth_and_keeps_greedy_output() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || inference_tensor::Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let checkpoint = tiny_flash_next_with(DENSE_BUDGET, true)?;
+    let plain = paged_prefix_model(&checkpoint).await?;
+    let (expected, _) = complete(&plain, &PROMPT, AUTO_DEPTH_GENERATED).await?;
+    drop(plain);
+    let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        .with_builtin_mtp(None)
+        .with_mtp_auto_depth()
+        .build()
+        .await?;
+    let (actual, _) = complete(&model, &PROMPT, AUTO_DEPTH_GENERATED).await?;
+    let stats = model.speculative_stats()?;
+    let drafts: usize = stats.data.iter().map(|m| m.drafts).sum();
+    let proposed: usize = stats.data.iter().map(|m| m.draft_tokens_proposed).sum();
+    anyhow::ensure!(drafts > 0, "MTP never drafted");
+    anyhow::ensure!(
+        (1..=AUTO_MAX_DEPTH).all(|depth| proposed != drafts * depth),
+        "every step drafted one depth: {proposed} draft tokens over {drafts} verified sequences"
+    );
+    same_up_to_ties(&actual, &expected, "autotuned MTP")
 }
 
 // A repeated prompt restores PLE's state with the recurrent snapshot and decodes as the cold run did.

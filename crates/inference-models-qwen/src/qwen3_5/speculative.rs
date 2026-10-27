@@ -23,12 +23,13 @@ use crate::{
     layers::CausalMasker,
     layers::masker::CausalMaskConfig,
     speculative::{
-        MtpRuntimeConfig, SpeculativeAttachInfo, SpeculativeBatchPlan, SpeculativeCommitRow,
-        SpeculativeConfig, SpeculativeGraphPlan, SpeculativeGraphState, SpeculativeKvCache,
-        SpeculativePrefillCtx, SpeculativePrefixReplay, SpeculativeProposal,
+        AUTO_DEPTHS, AUTO_MAX_DEPTH, MtpRuntimeConfig, SpeculativeAttachInfo, SpeculativeBatchPlan,
+        SpeculativeCommitRow, SpeculativeConfig, SpeculativeGraphPlan, SpeculativeGraphState,
+        SpeculativeKvCache, SpeculativePrefillCtx, SpeculativePrefixReplay, SpeculativeProposal,
         SpeculativeProposalBatch, SpeculativeProposeBatchCtx, SpeculativeProposePreparation,
         SpeculativeProposePrepareCtx, SpeculativeTapRouting, SpeculativeTargetMixin,
-        TargetAttentionInputs, paged_rows::make_paged_rows_metadata, proposer::sample_draft_rows,
+        TargetAttentionInputs, auto_depth_graph_plans, depths_up_to,
+        paged_rows::make_paged_rows_metadata, proposer::sample_draft_rows,
     },
 };
 
@@ -466,6 +467,9 @@ impl Qwen3_5TextModel {
         let paged_kv = !windowed_kv && drafter.enable_paged_kv(self.cfg.num_layers);
         self.set_dflash_tap_layers(drafter.target_layer_ids.clone());
         self.mtp_n_predict.store(n_predict, Ordering::Relaxed);
+        self.mtp_auto_depth
+            .store(config.auto_depth, Ordering::Relaxed);
+        self.mtp_primary_depth.store(n_predict, Ordering::Relaxed);
         self.set_store_spec_hidden(true);
         if let Some(ty) = config.draft_lm_head_isq {
             let head = self.lm_head().clone().apply_isq(
@@ -1196,6 +1200,7 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
     ) -> Result<Option<SpeculativeAttachInfo>> {
         let SpeculativeConfig::Mtp(config) = config else {
             self.mtp_n_predict.store(0, Ordering::Relaxed);
+            self.mtp_auto_depth.store(false, Ordering::Relaxed);
             self.set_store_spec_hidden(false);
             self.set_dflash_tap_layers(Vec::new());
             *self.dflash.lock().expect("dflash poisoned") = None;
@@ -1216,11 +1221,19 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
         } else {
             DEFAULT_MTP_N_PREDICT
         };
-        let n_predict = config.n_predict.unwrap_or(default_n_predict);
+        let n_predict = match (config.n_predict, config.auto_depth) {
+            (Some(n_predict), _) => n_predict,
+            (None, true) => AUTO_MAX_DEPTH,
+            (None, false) => default_n_predict,
+        };
         if n_predict == 0 {
             inference_tensor::bail!("MTP n_predict must be at least 1.");
         }
         self.mtp_n_predict.store(n_predict, Ordering::Relaxed);
+        self.mtp_auto_depth
+            .store(config.auto_depth, Ordering::Relaxed);
+        self.mtp_primary_depth
+            .store(default_n_predict.min(n_predict), Ordering::Relaxed);
         self.set_store_spec_hidden(true);
         // The promoted (sensitive) lm_head is read once per draft; a base-type copy makes the
         // drafter cheaper without touching what the target verifies with
@@ -1411,10 +1424,27 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
         if n == 0 {
             return Vec::new();
         }
+        if self.mtp_auto_depth.load(Ordering::Relaxed) {
+            return auto_depth_graph_plans(
+                &self.speculative_depth_candidates(),
+                self.mtp_primary_depth.load(Ordering::Relaxed),
+            );
+        }
         if let Some(drafter) = self.dflash.lock().expect("dflash poisoned").as_ref() {
             return drafter.graph_plans(n);
         }
         vec![SpeculativeGraphPlan::new(n, None)]
+    }
+
+    fn speculative_depth_candidates(&self) -> Vec<usize> {
+        let n = self.mtp_n_predict();
+        if n == 0 || !self.mtp_auto_depth.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
+        if self.dflash.lock().expect("dflash poisoned").is_some() {
+            return depths_up_to(&crate::dflash::AUTO_DEPTHS, n);
+        }
+        depths_up_to(&AUTO_DEPTHS, n)
     }
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]

@@ -222,6 +222,11 @@ pub trait SpeculativeTargetMixin {
         0
     }
 
+    /// Depths an autotuned proposer chooses between each step; empty drafts the plan's depth.
+    fn speculative_depth_candidates(&self) -> Vec<usize> {
+        Vec::new()
+    }
+
     fn speculative_observe(&self, _observation: SpeculativeBatchObservation) {}
 
     fn speculative_bypass(&mut self, seq_ids: &[usize]) -> Result<()> {
@@ -483,6 +488,12 @@ macro_rules! delegate_speculative_target {
                 <$inner as $crate::speculative::SpeculativeTargetMixin>::evict_speculative_cuda_graphs(
                     &self.$field,
                     max_entries,
+                )
+            }
+
+            fn speculative_depth_candidates(&self) -> Vec<usize> {
+                <$inner as $crate::speculative::SpeculativeTargetMixin>::speculative_depth_candidates(
+                    &self.$field,
                 )
             }
 

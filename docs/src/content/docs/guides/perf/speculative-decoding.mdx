@@ -80,6 +80,16 @@ inference serve -m Qwen/Qwen3.8-27B --quant 4 --mtp
 
 The head keeps its own paged KV cache alongside the target's, so the KV budget grows by one attention layer. `--mtp-n-predict` defaults to 2 for these heads (3 on models with a hidden size of 4096 or more), and to 1 when the model's MoE experts are offloaded to host memory: every drafted token's missed experts then run on the CPU, and a second draft costs more than it saves. Greedy output is equivalent to non-MTP decoding up to floating-point tie-breaks in the hybrid recurrent layers. UQFF artifacts must include the `mtp.*` tensors to use `--mtp`.
 
+`--mtp-auto-depth` (`mtp.auto_depth` in a spec) lets each step draft the depth that has paid best so far instead of
+a fixed one: per-position acceptance, scaled for each sequence, and the measured time of a step at each depth and
+batch size give each depth an expected rate of committed tokens. Steps that overlap a prompt or a CUDA graph capture
+are left out of the timing, a depth not yet timed is probed now and then, and the batch switches only when another
+depth is expected to be at least 3% faster. Built-in heads choose between 1, 2, 3 and 4 drafts and DFlash drafters
+between 3, 5 and 7; `--mtp-n-predict`, when given, is the most a step drafts. Where a model's default depth is
+already its best one the probes only cost time: on Qwen3.8-Flash-Next with offloaded experts and on Qwen3.8-27B with
+its DFlash 2 drafter it decodes 1-5% slower than the fixed default, so it is for a target or workload whose best depth
+is not known.
+
 A GGUF that leaves the head out can take it from a separate file, as llama.cpp's MTP heads ship (for example
 unsloth's `mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf`): list it after the model's files and pass `--mtp`. The head file's
 `nextn` block extends the model it is listed with and borrows its embeddings and `lm_head`:

@@ -116,6 +116,8 @@ const DRAFTER_TARGET: tiny_drafter::DrafterTarget = tiny_drafter::DrafterTarget 
     taps: &[1, 3],
 };
 const DFLASH_N_PREDICT: usize = 2;
+// up to 7 drafts, so an autotuned drafter chooses between 3, 5 and 7
+const AUTO_DFLASH_BLOCK: usize = 8;
 // every drafter layer windowed, which its decode graphs need
 const DFLASH_WINDOW: usize = 32;
 const DFLASH_COMPONENT: &str = "dflash";
@@ -291,6 +293,42 @@ async fn hybrid_dflash_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
     decode_graphs::assert_replayed(&counters);
     decode_graphs::assert_only_prompts_skip(&counters);
     decode_graphs::assert_component_replayed(&counters, DFLASH_COMPONENT);
+    let drafts: usize = model
+        .speculative_stats()?
+        .data
+        .iter()
+        .map(|m| m.drafts)
+        .sum();
+    assert!(drafts > 0, "DFlash never drafted");
+    decode_graphs::assert_traces(&rounds, &GRAPH_TRACES);
+    Ok(())
+}
+
+// An autotuned DFlash drafter drafts shorter blocks than its largest, and greedy output holds.
+#[tokio::test]
+async fn hybrid_autotuned_dflash_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let drafter = tiny_drafter::tiny_drafter(
+        &DRAFTER_TARGET,
+        serde_json::json!({
+            "architectures": ["DFlashDraftModel"],
+            "block_size": AUTO_DFLASH_BLOCK,
+            "layer_types": ["sliding_attention"],
+            "sliding_window": DFLASH_WINDOW,
+        }),
+        None,
+    )?;
+    let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
+    let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        .with_mtp_model(drafter.path().to_string_lossy(), None)
+        .with_mtp_auto_depth()
+        .build()
+        .await?;
+    let rounds = decode_graphs::rounds(&model, GRAPH_MAX_LEN).await?;
     let drafts: usize = model
         .speculative_stats()?
         .data

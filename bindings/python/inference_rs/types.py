@@ -1991,6 +1991,7 @@ class ModelStatusResponse:
 class MtpSpec:
     """MTP speculative decoding, drafting with an assistant model or the head built into the checkpoint."""
 
+    auto_depth: bool | None = None
     draft_isq: str | None = None
     draft_sampling: MtpDraftSampling | None = None
     model: str | None = None

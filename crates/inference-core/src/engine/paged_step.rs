@@ -107,6 +107,10 @@ impl Engine {
             #[cfg(feature = "cuda")]
             cuda_prompt_preemption_workspace,
         } = ctx;
+        // a prompt step between a proposal and its verification is no measure of that step's cost
+        if is_prompt {
+            crate::speculative::autotuner::note_interruption();
+        }
         if !preempted_sequence_ids.is_empty()
             && let Err(err) = get_mut_arcmutex!(self.pipeline)
                 .release_speculative_sequences(&preempted_sequence_ids)
