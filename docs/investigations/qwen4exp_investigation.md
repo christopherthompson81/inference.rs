@@ -1991,3 +1991,33 @@ pinned                52.2             44.7
 Level, and the pinned load took 1 min 42 s against 11 s (allocating, locking and copying 55 GiB on one thread),
 holding 55 GiB of the machine's 125. The first, unwarmed run read 38.0 / 41.7 for pageable: the pinned server had
 evicted the page cache the pageable one reads from. Not pursued.
+
+## Run 59 - 2026-10-26 21:12
+
+Question: replayed from a CUDA graph, how much of the MTP head's 2.2 ms eager span (Run 57) comes back?
+
+Built: the head's drafter forward (embedding, hyper-connections, the QSA attention block, its resident MoE) captured
+per row shape and replayed (`qwen3_5::mtp_graph`). Its paged metadata goes through decode rows
+(`make_paged_rows_decode_rows`, block tables as wide as the paged context) into the decode-graph metadata buffers
+core's target graphs use, now in `inference_nn::cuda::graph_metadata`; tokens, MRoPE positions and target hidden
+states are staged into fixed buffers. A shape's first run warms eagerly over those buffers under the parameter
+upload cache, its second captures, and a failed capture or replay leaves the shape eager. The draft lm_head and the
+sampler stay eager. The QSA plan takes its device decode path from the buffers' context lengths.
+
+nsys, code decode, MTP 1 draft:
+```
+                          eager (Run 57)                      graph
+MTP head                  115 launches, 2.14 ms span          108-node graph 0.47 ms span (0.41 ms kernels)
+draft lm_head + top-1     (in the above)                      7 launches, 0.72 ms
+gap before the head       0.22 ms                             0.39 ms (0.11 ms staging, ~0.09 ms graph launch)
+```
+About 0.8 ms a step. Acceptance on the real model is unchanged (69-89% over the run against 63-91% eager), and
+a unit test replays one shape with changing tokens, positions, hidden states and context lengths against the same
+forward run eagerly; skipping the token staging fails it at the first replay. Interleaved A/B (as Run 56, a warm
+round before each measured three):
+```
+                      prose median     code median
+master (#644)         52.5             45.2
+MTP graph             52.7             46.2
+```
++0.5% / +2.2%.
