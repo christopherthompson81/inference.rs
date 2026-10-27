@@ -1,4 +1,4 @@
-//! Models from other families: DeepSeek 2/3, GLM-4 and its MoE variants, GPT-OSS, Granite, Hunyuan, LFM2 and StarCoder2 text models, and LFM2-VL and PaddleOCR-VL.
+//! Models from other families: BERT-family encoders, DeepSeek 2/3, GLM-4 and its MoE variants, GPT-OSS, Granite, Hunyuan, LFM2 and StarCoder2 text models, and LFM2-VL and PaddleOCR-VL.
 #![deny(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use inference_nn::serde_default_fn;
@@ -7,6 +7,7 @@ use inference_nn::{
     model, moe, ops, paged_attention, speculative, utils,
 };
 
+pub mod bert;
 pub mod deepseek2;
 pub mod deepseek3;
 pub mod deepseek_family;
@@ -35,6 +36,7 @@ pub mod starcoder2;
 mod starcoder2_tests;
 
 inference_nn::json_config!(
+    bert::Config,
     deepseek2::DeepSeekV2Config,
     deepseek3::DeepSeekV3Config,
     glm4::Config,

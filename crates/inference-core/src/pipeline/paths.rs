@@ -23,7 +23,7 @@ const SAFETENSOR_MATCH: &str = r"model-\d+-of-\d+\.safetensors\b";
 const QUANT_SAFETENSOR_MATCH: &str = r"model\.safetensors\b";
 const CONSOLIDATED_SAFETENSOR_MATCH: &str = r"consolidated\.safetensors\b";
 const SAFETENSOR_INDEX: &str = "model.safetensors.index.json";
-const PICKLE_MATCH: &str = r"pytorch_model-\d{5}-of-\d{5}.((pth)|(pt)|(bin))\b";
+const PICKLE_MATCH: &str = r"pytorch_model(-\d{5}-of-\d{5})?\.((pth)|(pt)|(bin))\b";
 
 #[derive(Clone, Debug)]
 pub struct ResolvedLoraAdapter {
@@ -690,6 +690,8 @@ pub(crate) fn get_embedding_paths(
         request.quantized_filenames,
         request.loading_uqff,
     )?;
+    // read beside config.json by the loader
+    repo.get_listed(crate::pipeline::embedding::SENTENCE_BERT_CONFIG)?;
     let modules_path = if repo.model_id.exists() {
         repo.model_id.join("modules.json")
     } else {

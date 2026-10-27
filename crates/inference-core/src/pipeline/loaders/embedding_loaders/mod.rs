@@ -32,7 +32,21 @@ pub enum EmbeddingLoaderType {
     EmbeddingGemma,
     #[serde(rename = "qwen3embedding")]
     Qwen3Embedding,
+    #[serde(rename = "bert")]
+    Bert,
 }
+
+// Encoder-only classes (BERT, RoBERTa, XLM-R, CamemBERT): checkpoints that can only be embedders
+const BERT_CLASSES: &[&str] = &[
+    "BertModel",
+    "BertForMaskedLM",
+    "RobertaModel",
+    "RobertaForMaskedLM",
+    "XLMRobertaModel",
+    "XLMRobertaForMaskedLM",
+    "CamembertModel",
+    "CamembertForMaskedLM",
+];
 
 // https://github.com/huggingface/transformers/blob/cff06aac6fad28019930be03f5d467055bf62177/src/transformers/models/auto/modeling_auto.py#L448
 impl EmbeddingLoaderType {
@@ -40,10 +54,16 @@ impl EmbeddingLoaderType {
         match name {
             "Gemma3TextModel" => Ok(Self::EmbeddingGemma),
             "Qwen3ForCausalLM" => Ok(Self::Qwen3Embedding),
+            name if BERT_CLASSES.contains(&name) => Ok(Self::Bert),
             other => anyhow::bail!(
                 "Unsupported Hugging Face Transformers model class `{other}`. Please raise an issue."
             ),
         }
+    }
+
+    /// The architecture of a class that only ever runs as an embedder, so needs no sentence-transformers marker.
+    pub fn from_encoder_name(name: &str) -> Option<Self> {
+        BERT_CLASSES.contains(&name).then_some(Self::Bert)
     }
 
     /// The HF `config.json` `architectures` string, the inverse of `from_causal_lm_name`.
@@ -51,6 +71,7 @@ impl EmbeddingLoaderType {
         match self {
             Self::EmbeddingGemma => "Gemma3TextModel",
             Self::Qwen3Embedding => "Qwen3ForCausalLM",
+            Self::Bert => "BertModel",
         }
     }
 }
@@ -74,6 +95,14 @@ impl EmbeddingLoaderType {
                     "architecture `{self}` is not built in; enable the `models-qwen` feature"
                 )
             }
+            #[cfg(feature = "models-other")]
+            Self::Bert => Ok(BertLoader::boxed()),
+            #[cfg(not(feature = "models-other"))]
+            Self::Bert => {
+                anyhow::bail!(
+                    "architecture `{self}` is not built in; enable the `models-other` feature"
+                )
+            }
         }
     }
 }
@@ -84,8 +113,9 @@ impl FromStr for EmbeddingLoaderType {
         match s {
             "embeddinggemma" => Ok(Self::EmbeddingGemma),
             "qwen3embedding" => Ok(Self::Qwen3Embedding),
+            "bert" => Ok(Self::Bert),
             a => Err(format!(
-                "Unknown architecture `{a}`. Possible architectures: `embeddinggemma`, `qwen3embedding`."
+                "Unknown architecture `{a}`. Possible architectures: `embeddinggemma`, `qwen3embedding`, `bert`."
             )),
         }
     }
@@ -96,6 +126,7 @@ impl Display for EmbeddingLoaderType {
         match self {
             Self::EmbeddingGemma => write!(f, "embeddinggemma"),
             Self::Qwen3Embedding => write!(f, "qwen3embedding"),
+            Self::Bert => write!(f, "bert"),
         }
     }
 }
@@ -218,6 +249,8 @@ where
 
 #[cfg(feature = "models-gemma")]
 pub use inference_models_gemma::loaders::EmbeddingGemmaLoader;
+#[cfg(feature = "models-other")]
+pub use inference_models_other::loaders::BertLoader;
 #[cfg(feature = "models-qwen")]
 pub use inference_models_qwen::loaders::Qwen3EmbeddingLoader;
 

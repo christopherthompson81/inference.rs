@@ -37,6 +37,22 @@ use tokenizers::Tokenizer;
 use tokio::sync::Mutex;
 use tracing::{debug, trace, warn};
 
+/// sentence-transformers' Transformer module settings, beside `config.json`.
+pub(crate) const SENTENCE_BERT_CONFIG: &str = "sentence_bert_config.json";
+
+#[derive(serde::Deserialize)]
+struct SentenceBertConfig {
+    max_seq_length: Option<usize>,
+}
+
+/// The prompt length sentence-transformers truncates to, which may be shorter than the positions the model has.
+fn sentence_max_seq_length(config_filename: &std::path::Path) -> Option<usize> {
+    let path = config_filename.parent()?.join(SENTENCE_BERT_CONFIG);
+    let config: SentenceBertConfig =
+        serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    config.max_seq_length
+}
+
 pub struct EmbeddingPipeline {
     model: Box<dyn EmbeddingModel + Send + Sync>,
     tracked_modules: Vec<inference_quant::TrackedModule>,
@@ -326,7 +342,9 @@ impl EmbeddingLoader {
         }
 
         let has_causal_attention = self.inner.has_causal_attention(&config)?;
-        let max_seq_len = self.inner.model_config(&config)?.max_seq_len();
+        let model_max_seq_len = self.inner.model_config(&config)?.max_seq_len();
+        let max_seq_len = sentence_max_seq_length(paths.get_config_filename())
+            .map_or(model_max_seq_len, |len| len.min(model_max_seq_len));
         let tracked_modules = tracker.get().clone();
         // rank-sliced layers re-slice at source read; inexpressible slices fall back per layer
         let source_weight_files =

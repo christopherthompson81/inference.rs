@@ -1,6 +1,6 @@
 ---
 title: Use embedding models
-description: Generate dense vector representations of text with EmbeddingGemma, Qwen3-Embedding, and others.
+description: Generate dense vector representations of text with EmbeddingGemma, Qwen3-Embedding, BERT-family encoders, and others.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
@@ -23,6 +23,22 @@ Use `Qwen/Qwen3-Embedding-0.6B` the same way:
 ```bash
 inference serve -m Qwen/Qwen3-Embedding-0.6B
 ```
+
+### BERT-family encoders
+
+Sentence-transformers checkpoints built on BERT, RoBERTa, XLM-RoBERTa or CamemBERT (`BertModel`, `RobertaModel`, `XLMRobertaModel`, `CamembertModel` and their `*ForMaskedLM` classes) load the same way. The class alone marks them as embedders, so they need no `--arch`. Checked against transformers on:
+
+- `sentence-transformers/all-MiniLM-L6-v2`: 22M parameters, 384-dim vectors, mean pooling.
+- `BAAI/bge-small-en-v1.5`: 33M parameters, 384-dim vectors, CLS pooling.
+- `intfloat/multilingual-e5-small`: 118M parameters, 384-dim vectors, multilingual (prefix inputs with `query: ` or `passage: `).
+- `sentence-transformers/all-distilroberta-v1`: 82M parameters, 768-dim vectors.
+- `BAAI/bge-m3`: 568M parameters (XLM-RoBERTa), 1024-dim dense vectors, inputs up to 8192 tokens. Its sparse and multi-vector outputs are not served.
+
+```bash
+inference serve -m sentence-transformers/all-MiniLM-L6-v2
+```
+
+The pooling and normalization come from the repository's `modules.json`, and a `max_seq_length` in `sentence_bert_config.json` caps the input length (256 tokens for all-MiniLM-L6-v2), as sentence-transformers does. `--isq q8_0` keeps these models close to full precision, but 4-bit types lose noticeably on 384-wide layers.
 
 ## Requesting an embedding
 
@@ -129,7 +145,7 @@ Beyond `model` and `input`:
 
 - `encoding_format`: `"float"` (default) returns float arrays. `"base64"` returns each vector as base64-encoded little-endian f32 bytes. This matches OpenAI's compact form.
 - `dimensions`: not supported. Passing it returns a validation error rather than silently truncating.
-- `truncate_sequence`: inference.rs extension. `true` truncates inputs that exceed the model's context length instead of erroring.
+- `truncate_sequence`: inference.rs extension. `true` truncates inputs that exceed the model's context length (or a sentence-transformers `max_seq_length`) to their start instead of erroring.
 
 ## Normalization
 

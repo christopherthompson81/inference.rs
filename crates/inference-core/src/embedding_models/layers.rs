@@ -1,6 +1,12 @@
+#![allow(clippy::cast_precision_loss)]
+
 use inference_tensor::nn::Module;
 use inference_tensor::{D, IndexOp, Result, Tensor};
 use serde::Deserialize;
+
+fn include_prompt() -> bool {
+    true
+}
 
 /// Pooling layer
 #[derive(Deserialize, Debug, Clone)]
@@ -10,8 +16,12 @@ pub struct Pooling {
     pub pooling_mode_mean_tokens: bool,
     pub pooling_mode_max_tokens: bool,
     pub pooling_mode_mean_sqrt_len_tokens: bool,
+    // older sentence-transformers configs predate these fields
+    #[serde(default)]
     pub pooling_mode_weightedmean_tokens: bool,
+    #[serde(default)]
     pub pooling_mode_lasttoken: bool,
+    #[serde(default = "include_prompt")]
     pub include_prompt: bool,
 }
 
@@ -25,27 +35,26 @@ impl Module for Pooling {
             inference_tensor::bail!("xs does not match the expected embedding dimension.");
         }
 
+        // batches hold equal-length prompts, so every token is real and the mask is all ones
+        let seq_len = xs.dim(1)?;
         let mut outputs = Vec::new();
         if self.pooling_mode_cls_token {
-            unimplemented!();
+            outputs.push(xs.i((.., 0, ..))?);
         }
         if self.pooling_mode_mean_tokens {
-            // Assume full attention mask. Otherwise this must be updated
-
-            let sum_embeddings = xs.sum(1)?;
-            outputs.push(sum_embeddings);
+            outputs.push((xs.sum(1)? / seq_len as f64)?);
         }
         if self.pooling_mode_max_tokens {
-            unimplemented!();
+            outputs.push(xs.max(1)?);
         }
         if self.pooling_mode_mean_sqrt_len_tokens {
-            unimplemented!();
+            outputs.push((xs.sum(1)? / (seq_len as f64).sqrt())?);
         }
         if self.pooling_mode_weightedmean_tokens {
-            unimplemented!();
+            inference_tensor::bail!("weighted-mean pooling is not supported");
         }
         if self.pooling_mode_lasttoken {
-            outputs.push(xs.i((.., xs.dim(D::Minus2)? - 1, ..))?);
+            outputs.push(xs.i((.., seq_len - 1, ..))?);
         }
 
         Tensor::cat(&outputs, 1)
@@ -77,4 +86,54 @@ pub struct Dense {
     pub out_features: usize,
     pub bias: bool,
     pub activation_function: DenseActivation,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inference_tensor::Device;
+
+    // one sequence of three 2-wide token states
+    const STATES: [f32; 6] = [1.0, -4.0, 3.0, 2.0, 5.0, 8.0];
+    const SEQ_LEN: usize = 3;
+    const WIDTH: usize = 2;
+
+    fn pooled(config: &str) -> Vec<f32> {
+        let pooling: Pooling = serde_json::from_str(config).unwrap();
+        let xs = Tensor::from_slice(&STATES, (1, SEQ_LEN, WIDTH), &Device::Cpu).unwrap();
+        pooling
+            .forward(&xs)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap()
+    }
+
+    fn config(mode: &str) -> String {
+        let mut config = serde_json::json!({
+            "word_embedding_dimension": WIDTH,
+            "pooling_mode_cls_token": false,
+            "pooling_mode_mean_tokens": false,
+            "pooling_mode_max_tokens": false,
+            "pooling_mode_mean_sqrt_len_tokens": false,
+        });
+        config[mode] = true.into();
+        config.to_string()
+    }
+
+    #[test]
+    fn each_pooling_mode_reduces_the_tokens_as_sentence_transformers_does() {
+        assert_eq!(pooled(&config("pooling_mode_cls_token")), [1.0, -4.0]);
+        assert_eq!(pooled(&config("pooling_mode_mean_tokens")), [3.0, 2.0]);
+        assert_eq!(pooled(&config("pooling_mode_max_tokens")), [5.0, 8.0]);
+        let sqrt_len = (SEQ_LEN as f32).sqrt();
+        let sums = [9.0 / sqrt_len, 6.0 / sqrt_len];
+        let got = pooled(&config("pooling_mode_mean_sqrt_len_tokens"));
+        assert!(
+            got.iter().zip(sums).all(|(g, s)| (g - s).abs() < 1e-6),
+            "{got:?}"
+        );
+        assert_eq!(pooled(&config("pooling_mode_lasttoken")), [5.0, 8.0]);
+    }
 }

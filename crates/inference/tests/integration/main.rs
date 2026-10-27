@@ -2,6 +2,7 @@
 // Each fixture includes the recording helpers itself, so server-core and ffi can include one fixture alone.
 #![allow(clippy::duplicate_mod)]
 
+mod bert_embedding_tiny;
 mod embedding_tiny;
 mod gemma3_tiny;
 mod gguf_iq;

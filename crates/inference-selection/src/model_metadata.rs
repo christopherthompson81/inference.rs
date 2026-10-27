@@ -373,6 +373,11 @@ impl SupportedArch for EmbeddingLoaderType {
                 modalities: &[Embedding],
                 examples: &[ex!("Qwen/Qwen3-Embedding-0.6B")],
             },
+            Self::Bert => ArchMetadata {
+                families: &["BERT", "RoBERTa", "XLM-RoBERTa", "CamemBERT"],
+                modalities: &[Embedding],
+                examples: &[ex!("sentence-transformers/all-MiniLM-L6-v2")],
+            },
         }
     }
 }

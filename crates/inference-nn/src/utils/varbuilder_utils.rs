@@ -15,6 +15,8 @@ use crate::utils::progress::{NiceProgressBar, multi_progress_unless_silent};
 use indicatif::MultiProgress;
 
 const INFERENCE_RS_NO_MMAP: &str = "INFERENCE_RS_NO_MMAP";
+const SAFETENSORS_EXTENSION: &str = "safetensors";
+const PICKLE_EXTENSIONS: &[&str] = &["pth", "pt", "bin"];
 
 trait TensorLoaderBackend {
     fn get_names(&self) -> Vec<String>;
@@ -98,7 +100,13 @@ fn load_safetensors(
     predicate: Arc<dyn Fn(String) -> bool + Send + Sync + 'static>,
     get_device_for_tensor: Arc<dyn Fn(String) -> DeviceForLoadTensor + Send + Sync + 'static>,
 ) -> Result<ShardedVarBuilder> {
-    let use_no_mmap = std::env::var(INFERENCE_RS_NO_MMAP).is_ok_and(|x| x == "1");
+    // only safetensors map in place; pickle checkpoints read through the per-file loader
+    let has_pickle = paths.iter().any(|path| {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| PICKLE_EXTENSIONS.contains(&ext))
+    });
+    let use_no_mmap = std::env::var(INFERENCE_RS_NO_MMAP).is_ok_and(|x| x == "1") || has_pickle;
     if !use_no_mmap {
         if !silent {
             tracing::debug!("Loading model using mmap strategy.");
@@ -191,7 +199,9 @@ fn load_tensors_from_path(load: TensorLoad<'_>) -> Result<HashMap<String, Tensor
         .to_str()
         .expect("Expected to convert")
     {
-        "safetensors" => Box::new(SafetensorBackend(unsafe { MmapedSafetensors::new(path)? })),
+        SAFETENSORS_EXTENSION => {
+            Box::new(SafetensorBackend(unsafe { MmapedSafetensors::new(path)? }))
+        }
         "pth" | "pt" | "bin" => Box::new(PickleBackend(inference_tensor::pickle::PthTensors::new(
             path, None,
         )?)),

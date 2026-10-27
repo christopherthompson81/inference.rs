@@ -508,6 +508,17 @@ fn detect(model_id: &str, artifacts: &ConfigArtifacts) -> Result<Detected> {
         return Ok(Detected::Embedding(None));
     }
 
+    if let Some(ref config) = artifacts.contents
+        && let Ok(cfg) = serde_json::from_str::<AutoConfig>(config)
+        && let Some(tp) = cfg
+            .architectures
+            .first()
+            .and_then(|name| EmbeddingLoaderType::from_encoder_name(name))
+    {
+        info!("Detected an encoder-only architecture; using embedding loader `{tp}`.");
+        return Ok(Detected::Embedding(Some(tp)));
+    }
+
     // Detect Mistral-native models that use params.json instead of config.json
     if artifacts.contents.is_none() && artifacts.repo_files.iter().any(|f| f == "params.json") {
         // Voxtral uses params.json with a "multimodal" key containing "whisper_model_args"

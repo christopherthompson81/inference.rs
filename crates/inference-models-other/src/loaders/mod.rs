@@ -21,6 +21,7 @@ use regex::Regex;
 use crate::lfm2_vl::{Lfm2VlModel, config::Config as Lfm2VlConfig};
 use crate::paddleocr_vl::{PaddleOcrVlModel, config::Config as PaddleOcrVlConfig};
 
+mod bert;
 mod deepseek2;
 mod deepseek3;
 mod deepseek_family;
@@ -39,6 +40,7 @@ mod starcoder2;
 #[cfg(test)]
 mod sizing_tests;
 
+pub use bert::*;
 pub use deepseek2::*;
 pub use deepseek3::*;
 pub use glm4::*;
@@ -68,3 +70,4 @@ inference_nn::boxed_loaders!(
     Starcoder2Loader,
 );
 inference_nn::boxed_loaders!(MultimodalModelLoader: Lfm2VlLoader, PaddleOcrVlLoader);
+inference_nn::boxed_loaders!(EmbeddingModelLoader: BertLoader);

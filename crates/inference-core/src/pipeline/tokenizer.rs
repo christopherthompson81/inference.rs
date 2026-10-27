@@ -219,6 +219,11 @@ pub(crate) fn get_tokenizer<P: AsRef<Path> + Clone>(
         let raw_fixed = repair_tokenizer_json(raw)?;
         tokenizer_from_bytes(&raw_fixed)?
     };
+    // the engine fits prompts itself; a saved fixed padding (as sentence-transformers exports) would pad every prompt
+    tokenizer.with_padding(None);
+    tokenizer
+        .with_truncation(None)
+        .map_err(anyhow::Error::msg)?;
     if let Some(added_tokens) = processor_added_tokens {
         tokenizer
             .add_special_tokens(

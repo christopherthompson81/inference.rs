@@ -120,6 +120,7 @@ The `Architecture` column is the `config.json` `architectures` value. Per-family
 |---|---|---|
 | `Gemma3TextModel` | EmbeddingGemma | <details><summary><code>google/embeddinggemma-300m</code></summary><code>inference run -m google/embeddinggemma-300m</code></details> |
 | `Qwen3ForCausalLM` | Qwen3 Embedding | <details><summary><code>Qwen/Qwen3-Embedding-0.6B</code></summary><code>inference run -m Qwen/Qwen3-Embedding-0.6B</code></details> |
+| `BertModel` | BERT, RoBERTa, XLM-RoBERTa, CamemBERT | <details><summary><code>sentence-transformers/all-MiniLM-L6-v2</code></summary><code>inference run -m sentence-transformers/all-MiniLM-L6-v2</code></details> |
 
 ## Format and quantization notes
 
