@@ -55,6 +55,7 @@ const DEEPSEEK_V3_REGEXES: &[&str] = &[
 const GPT4O_REGEX: &str = "[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}])([^a-z]))*((?=[\\p{L}])([^A-Z]))+(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}])([^a-z]))+((?=[\\p{L}])([^A-Z]))*(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
 const TEKKEN_REGEX: &str = "[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}])([^a-z]))*((?=[\\p{L}])([^A-Z]))+|[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}])([^a-z]))+((?=[\\p{L}])([^A-Z]))*|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
 const GGML_TOKEN_TYPE_NORMAL: i32 = 1;
+const GGML_TOKEN_TYPE_CONTROL: i32 = 3;
 const GGML_TOKEN_TYPE_BYTE: i32 = 6;
 // Matched whole but decoded as text, as transformers and llama.cpp do (Ernie's digits, Qwen's think and tool tags)
 const GGML_TOKEN_TYPE_USER_DEFINED: i32 = 4;
@@ -231,6 +232,8 @@ pub fn convert_gguf_metadata_to_hf_tokenizer(
         "replit" => unigram_tokenizer(&props)?,
         "gemma4" => gemma4_tokenizer(&props)?,
         "gpt2" => bpe_tokenizer(&props)?,
+        WORDPIECE_TOKENIZER_MODEL => wordpiece_tokenizer(&props, &token_types, values)?,
+        SPM_UNIGRAM_TOKENIZER_MODEL => spm_unigram_tokenizer(&props, values)?,
         other => {
             anyhow::bail!("Tokenizer model `{other}` not supported.");
         }
@@ -313,12 +316,223 @@ fn added_token_kind(model: &str, ty: i32) -> Option<AddedTokenKind> {
     }
 }
 
-// TODO: Add support for additional tokenizer models: WordPiece, WordLevel
+// llama.cpp's name for a BERT WordPiece vocabulary
+const WORDPIECE_TOKENIZER_MODEL: &str = "bert";
+// llama.cpp marks a word-initial WordPiece token with this prefix and leaves continuations bare
+const WORDPIECE_WORD_START: char = '\u{2581}';
+const WORDPIECE_CONTINUATION: &str = "##";
+const WORDPIECE_MAX_CHARS: usize = 100;
+const LOWERCASE_KEY: &str = "tokenizer.ggml.normalizer.lowercase";
+const SEPARATOR_KEY: &str = "tokenizer.ggml.seperator_token_id";
+
+/// BERT's WordPiece from llama.cpp's GGUF vocabulary: `\u{2581}word` back to `word`, a bare continuation back to
+/// `##piece`, control tokens as they are; BERT's normalizer and pre-tokenizer, and `[CLS] $A [SEP]` around inputs.
+fn wordpiece_tokenizer(
+    p: &PropsGGUF,
+    token_types: &[i32],
+    values: &HashMap<String, Value>,
+) -> Result<(Tokenizer, TokenizerKind)> {
+    use tokenizers::models::wordpiece::WordPiece;
+    use tokenizers::normalizers::bert::BertNormalizer;
+    use tokenizers::pre_tokenizers::bert::BertPreTokenizer;
+    use tokenizers::processors::template::TemplateProcessing;
+
+    let vocab: AHashMap<String, u32> = p
+        .tokens
+        .iter()
+        .enumerate()
+        .map(|(id, token)| {
+            let piece = if token_types.get(id) == Some(&GGML_TOKEN_TYPE_CONTROL) {
+                token.clone()
+            } else {
+                match token.strip_prefix(WORDPIECE_WORD_START) {
+                    Some(word) => word.to_string(),
+                    None => format!("{WORDPIECE_CONTINUATION}{token}"),
+                }
+            };
+            (piece, id as u32)
+        })
+        .collect();
+    let unk = p
+        .unk
+        .map(|id| p.tokens[id as usize].clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!("a WordPiece GGUF needs `tokenizer.ggml.unknown_token_id`")
+        })?;
+    let model = WordPiece::builder()
+        .vocab(vocab)
+        .unk_token(unk)
+        .continuing_subword_prefix(WORDPIECE_CONTINUATION.to_string())
+        .max_input_chars_per_word(WORDPIECE_MAX_CHARS)
+        .build()
+        .map_err(anyhow::Error::msg)?;
+    // older converters wrote no flag; llama.cpp's WPM tokenizer lowercased regardless
+    let lowercase = values
+        .get(LOWERCASE_KEY)
+        .map(|v| v.to_bool())
+        .transpose()?
+        .unwrap_or(true);
+    let cls = p.bos.ok_or_else(|| {
+        anyhow::anyhow!("a WordPiece GGUF needs its [CLS] as `tokenizer.ggml.bos_token_id`")
+    })?;
+    let sep = values
+        .get(SEPARATOR_KEY)
+        .map(|v| v.to_u32())
+        .transpose()?
+        .unwrap_or(p.eos);
+    let (cls_token, sep_token) = (
+        p.tokens[cls as usize].clone(),
+        p.tokens[sep as usize].clone(),
+    );
+    let post = TemplateProcessing::builder()
+        .try_single(format!("{cls_token}:0 $A:0 {sep_token}:0"))
+        .map_err(anyhow::Error::msg)?
+        .try_pair(format!(
+            "{cls_token}:0 $A:0 {sep_token}:0 $B:1 {sep_token}:1"
+        ))
+        .map_err(anyhow::Error::msg)?
+        .special_tokens(vec![(cls_token, cls), (sep_token, sep)])
+        .build()
+        .map_err(anyhow::Error::msg)?;
+    let mut tokenizer = Tokenizer::new(ModelWrapper::WordPiece(model));
+    tokenizer
+        .with_normalizer(Some(NormalizerWrapper::BertNormalizer(
+            BertNormalizer::new(true, true, None, lowercase),
+        )))
+        .map_err(anyhow::Error::msg)?;
+    tokenizer.with_pre_tokenizer(Some(PreTokenizerWrapper::BertPreTokenizer(
+        BertPreTokenizer,
+    )));
+    tokenizer.with_post_processor(Some(processors::PostProcessorWrapper::Template(post)));
+    tokenizer.with_decoder(Some(DecoderWrapper::WordPiece(
+        decoders::wordpiece::WordPiece::default(),
+    )));
+    Ok((tokenizer, TokenizerKind::WordPiece))
+}
+
+// llama.cpp's name for a SentencePiece Unigram vocabulary (T5, XLM-R) with its precompiled normalizer
+const SPM_UNIGRAM_TOKENIZER_MODEL: &str = "t5";
+const CHARSMAP_KEY: &str = "tokenizer.ggml.precompiled_charsmap";
+const REMOVE_EXTRA_WHITESPACES_KEY: &str = "tokenizer.ggml.remove_extra_whitespaces";
+const ADD_EOS_KEY: &str = "tokenizer.ggml.add_eos_token";
+const ADD_SEP_KEY: &str = "tokenizer.ggml.add_sep_token";
+const METASPACE: char = '\u{2581}';
+
+/// A SentencePiece Unigram vocabulary with its scores, normalized by the model's precompiled charsmap, split on
+/// Metaspace, and wrapped as the GGUF's add_bos / add_eos / add_sep flags say: `<s> $A </s>`, with an XLM-R pair
+/// `<s> $A </s> </s> $B </s>`.
+fn spm_unigram_tokenizer(
+    p: &PropsGGUF,
+    values: &HashMap<String, Value>,
+) -> Result<(Tokenizer, TokenizerKind)> {
+    use tokenizers::normalizers::precompiled::Precompiled;
+    use tokenizers::pre_tokenizers::metaspace::{Metaspace, PrependScheme};
+    use tokenizers::processors::template::TemplateProcessing;
+
+    let flag = |key: &str| -> Result<bool> {
+        Ok(values
+            .get(key)
+            .map(|v| v.to_bool())
+            .transpose()?
+            .unwrap_or(false))
+    };
+    let Some(scores) = p.scores.as_ref() else {
+        anyhow::bail!("a SentencePiece Unigram GGUF needs `tokenizer.ggml.scores`");
+    };
+    let vocab = p
+        .tokens
+        .iter()
+        .cloned()
+        .zip(scores.iter().map(|&score| score as f64))
+        .collect();
+    let model =
+        Unigram::from(vocab, p.unk.map(|id| id as usize), false).map_err(anyhow::Error::msg)?;
+    let mut normalizers = Vec::new();
+    if let Some(charsmap) = values.get(CHARSMAP_KEY) {
+        let bytes = charsmap
+            .to_vec()?
+            .iter()
+            .map(|v| v.to_u8())
+            .collect::<std::result::Result<Vec<u8>, _>>()?;
+        normalizers.push(NormalizerWrapper::Precompiled(
+            Precompiled::from(&bytes).map_err(anyhow::Error::msg)?,
+        ));
+    }
+    if flag(REMOVE_EXTRA_WHITESPACES_KEY)? {
+        normalizers.push(NormalizerWrapper::Replace(
+            Replace::new(
+                tokenizers::normalizers::replace::ReplacePattern::Regex(" {2,}".to_string()),
+                " ",
+            )
+            .map_err(anyhow::Error::msg)?,
+        ));
+    }
+    let prepend = if p.add_space_prefix.unwrap_or(true) {
+        PrependScheme::Always
+    } else {
+        PrependScheme::Never
+    };
+    let token = |id: u32| p.tokens[id as usize].clone();
+    let (bos, eos) = (
+        p.bos.filter(|_| p.add_bos).map(token),
+        flag(ADD_EOS_KEY)?.then(|| token(p.eos)),
+    );
+    let wrap = |input: &str, type_id: u32, lead: bool| {
+        let mut parts = Vec::new();
+        if lead && let Some(bos) = &bos {
+            parts.push(format!("{bos}:{type_id}"));
+        }
+        parts.push(format!("{input}:{type_id}"));
+        if let Some(eos) = &eos {
+            parts.push(format!("{eos}:{type_id}"));
+        }
+        parts.join(" ")
+    };
+    // XLM-R's pair repeats the separator before the second segment
+    let second = match (&eos, flag(ADD_SEP_KEY)?) {
+        (Some(eos), true) => format!("{eos}:0 {}", wrap("$B", 0, false)),
+        _ => wrap("$B", 1, false),
+    };
+    let mut specials = Vec::new();
+    if let (Some(bos), Some(id)) = (&bos, p.bos) {
+        specials.push((bos.clone(), id));
+    }
+    if let Some(eos) = &eos {
+        specials.push((eos.clone(), p.eos));
+    }
+    let post = TemplateProcessing::builder()
+        .try_single(wrap("$A", 0, true))
+        .map_err(anyhow::Error::msg)?
+        .try_pair(format!("{} {second}", wrap("$A", 0, true)))
+        .map_err(anyhow::Error::msg)?
+        .special_tokens(specials)
+        .build()
+        .map_err(anyhow::Error::msg)?;
+    let mut tokenizer = Tokenizer::new(ModelWrapper::Unigram(model));
+    if !normalizers.is_empty() {
+        tokenizer
+            .with_normalizer(Some(NormalizerWrapper::Sequence(
+                normalizers::Sequence::new(normalizers),
+            )))
+            .map_err(anyhow::Error::msg)?;
+    }
+    tokenizer.with_pre_tokenizer(Some(PreTokenizerWrapper::Metaspace(Metaspace::new(
+        METASPACE, prepend, true,
+    ))));
+    tokenizer.with_post_processor(Some(processors::PostProcessorWrapper::Template(post)));
+    tokenizer.with_decoder(Some(DecoderWrapper::Metaspace(
+        decoders::metaspace::Metaspace::new(METASPACE, prepend, true),
+    )));
+    Ok((tokenizer, TokenizerKind::Unigram))
+}
+
+// TODO: Add support for additional tokenizer models: WordLevel
 // https://docs.rs/tokenizers/latest/tokenizers/models/enum.ModelWrapper.html
 #[derive(Debug)]
 enum TokenizerKind {
     Unigram,
     Bpe,
+    WordPiece,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1554,6 +1768,122 @@ mod tests {
         let gguf_decoded = decode(&gguf_tokenizer, &tokens, true)?;
         assert_eq!(hf_decoded, gguf_decoded);
 
+        Ok(())
+    }
+
+    fn vocab_metadata(
+        model: &str,
+        tokens: &[&str],
+        types: &[i32],
+        extra: Vec<(&str, Value)>,
+    ) -> HashMap<String, Value> {
+        let mut values = HashMap::from([
+            (
+                "tokenizer.ggml.model".to_string(),
+                Value::String(model.to_string()),
+            ),
+            (
+                "tokenizer.ggml.tokens".to_string(),
+                Value::Array(
+                    tokens
+                        .iter()
+                        .map(|t| Value::String(t.to_string()))
+                        .collect(),
+                ),
+            ),
+            (
+                "tokenizer.ggml.token_type".to_string(),
+                Value::Array(types.iter().map(|&t| Value::I32(t)).collect()),
+            ),
+        ]);
+        values.extend(extra.into_iter().map(|(k, v)| (k.to_string(), v)));
+        values
+    }
+
+    // llama.cpp's BERT vocabulary: U+2581 starts a word, a bare piece continues one, control tokens stay as they are
+    #[test]
+    fn a_wordpiece_gguf_tokenizes_as_bert_with_cls_and_sep() -> Result<()> {
+        const CONTROL: i32 = 3;
+        let tokens = [
+            "[PAD]",
+            "[UNK]",
+            "[CLS]",
+            "[SEP]",
+            "\u{2581}hello",
+            "\u{2581}world",
+            "ing",
+            "\u{2581}test",
+        ];
+        let types = [CONTROL, CONTROL, CONTROL, CONTROL, 1, 1, 1, 1];
+        let values = vocab_metadata(
+            "bert",
+            &tokens,
+            &types,
+            vec![
+                ("tokenizer.ggml.unknown_token_id", Value::U32(1)),
+                ("tokenizer.ggml.bos_token_id", Value::U32(2)),
+                ("tokenizer.ggml.eos_token_id", Value::U32(3)),
+                ("tokenizer.ggml.seperator_token_id", Value::U32(3)),
+                ("tokenizer.ggml.normalizer.lowercase", Value::Bool(true)),
+            ],
+        );
+        let tokenizer = convert_gguf_metadata_to_hf_tokenizer(&values)?.tokenizer;
+        let single = tokenizer
+            .encode("Hello testing world", true)
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(single.get_ids(), [2, 4, 7, 6, 5, 3]);
+        let pair = tokenizer
+            .encode(("hello", "world"), true)
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(pair.get_ids(), [2, 4, 3, 5, 3]);
+        assert_eq!(pair.get_type_ids(), [0, 0, 0, 1, 1]);
+        Ok(())
+    }
+
+    // XLM-R's: Unigram scores, `<s> $A </s>`, and a pair that repeats `</s>` before its second segment
+    #[test]
+    fn an_xlm_r_unigram_gguf_wraps_inputs_as_roberta() -> Result<()> {
+        const CONTROL: i32 = 3;
+        const UNKNOWN: i32 = 2;
+        let tokens = [
+            "<s>",
+            "<pad>",
+            "</s>",
+            "<unk>",
+            "\u{2581}hello",
+            "\u{2581}world",
+            "\u{2581}",
+        ];
+        let types = [CONTROL, CONTROL, CONTROL, UNKNOWN, 1, 1, 1];
+        let scores = [0., 0., 0., 0., -1., -1., -5.];
+        let values = vocab_metadata(
+            "t5",
+            &tokens,
+            &types,
+            vec![
+                (
+                    "tokenizer.ggml.scores",
+                    Value::Array(scores.iter().map(|&s| Value::F32(s)).collect()),
+                ),
+                ("tokenizer.ggml.unknown_token_id", Value::U32(3)),
+                ("tokenizer.ggml.bos_token_id", Value::U32(0)),
+                ("tokenizer.ggml.eos_token_id", Value::U32(2)),
+                ("tokenizer.ggml.add_bos_token", Value::Bool(true)),
+                ("tokenizer.ggml.add_eos_token", Value::Bool(true)),
+                ("tokenizer.ggml.add_sep_token", Value::Bool(true)),
+                ("tokenizer.ggml.add_space_prefix", Value::Bool(true)),
+                ("tokenizer.ggml.remove_extra_whitespaces", Value::Bool(true)),
+            ],
+        );
+        let tokenizer = convert_gguf_metadata_to_hf_tokenizer(&values)?.tokenizer;
+        let single = tokenizer
+            .encode("hello  world", true)
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(single.get_ids(), [0, 4, 5, 2]);
+        let pair = tokenizer
+            .encode(("hello", "world"), true)
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(pair.get_ids(), [0, 4, 2, 2, 5, 2]);
         Ok(())
     }
 }

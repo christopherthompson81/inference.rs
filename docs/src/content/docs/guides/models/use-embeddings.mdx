@@ -66,6 +66,16 @@ The Jina v5 embedders (task adapters inside Llama-style layers) do not load yet,
 
 The pooling and normalization come from the repository's `modules.json`, and a `max_seq_length` in `sentence_bert_config.json` caps the input length (256 tokens for all-MiniLM-L6-v2), as sentence-transformers does. `--isq q8_0` keeps these models close to full precision, but 4-bit types lose noticeably on 384-wide layers.
 
+### GGUF embedders
+
+Encoder GGUFs as llama.cpp's converter writes them load with `--format gguf`: the `bert` architecture (BERT, RoBERTa and XLM-RoBERTa checkpoints, such as all-MiniLM, bge and bge-m3) and `nomic-bert` (nomic-embed-text v1 / v1.5), quantized or not.
+
+```bash
+inference serve --format gguf -m nomic-ai/nomic-embed-text-v1.5-GGUF -f nomic-embed-text-v1.5.Q8_0.gguf
+```
+
+The tokenizer is rebuilt from the GGUF's own vocabulary (BERT's WordPiece, or XLM-RoBERTa's SentencePiece with its normalization table), the pooling comes from its `pooling_type`, and the embedding is L2-normalized, as llama.cpp normalizes by default. GGUF rerankers (`pooling_type` rank) and the other encoder architectures (`modern-bert`, `jina-bert-v2`, `nomic-bert-moe`, `neo-bert`) load from safetensors only for now.
+
 ## Requesting an embedding
 
 <Tabs>

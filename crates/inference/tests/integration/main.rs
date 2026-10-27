@@ -5,6 +5,7 @@
 mod bert_embedding_tiny;
 mod embedding_tiny;
 mod gemma3_tiny;
+mod gguf_embedding_tiny;
 mod gguf_iq;
 mod gguf_lora_tiny;
 mod hidream_o1_tiny;

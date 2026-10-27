@@ -1,4 +1,8 @@
 use super::{Loader, ModelKind, ModelPaths, QuantizationKind, TokenSource};
+use crate::gguf::embedding_gguf::{
+    EmbeddingGgufArchitecture, build_embedding_bindings, embedding_pooling,
+    synthesize_embedding_config,
+};
 use crate::gguf::{
     GgufTokenizerConversion,
     base_model::infer_hf_base_model_id,
@@ -34,6 +38,7 @@ use crate::pipeline::loading::PreparedSource;
 use crate::pipeline::multimodal::{MultimodalLoaderBuilder, MultimodalSpecificConfig};
 use crate::pipeline::normal::{NormalLoaderBuilder, NormalSpecificConfig};
 use crate::pipeline::tokenizer::get_tokenizer;
+use crate::pipeline::{EmbeddingLoaderBuilder, EmbeddingLoaderType, EmbeddingSpecificConfig};
 use crate::utils::progress::ProgressScopeGuard;
 use crate::{
     LocalModelPaths, LoraAdapterSpec, LoraRuntimeConfig, MultimodalLoaderType, Pipeline, Topology,
@@ -442,6 +447,9 @@ impl GGUFLoader {
             }
             None => bail!("GGUF metadata is missing `general.architecture`"),
         };
+        if let Some(encoder) = EmbeddingGgufArchitecture::from_architecture(architecture) {
+            return self.load_native_embedding(archive, encoder, paths, options);
+        }
         #[cfg(not(feature = "models-gemma"))]
         if architecture.eq_ignore_ascii_case("gemma3") {
             bail!("GGUF Gemma 3 models are not built in; enable the `models-gemma` feature");
@@ -541,6 +549,47 @@ impl GGUFLoader {
             loader = loader.with_lora(dynamic_lora.adapters.clone(), dynamic_lora.runtime);
         }
         let loader = loader.build_with_source(loader_type, source, self.kind.clone())?;
+        loader.load_model_from_path(paths, options)
+    }
+
+    /// An encoder GGUF (BERT, Nomic BERT) as an embedding model: its synthesized config, its tensors by their
+    /// native names, and the pooling its metadata names.
+    fn load_native_embedding(
+        &self,
+        archive: Arc<inference_quant::GgufArchive>,
+        encoder: EmbeddingGgufArchitecture,
+        paths: &dyn ModelPaths,
+        options: LoadOptions<'_>,
+    ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        let config = synthesize_embedding_config(&archive, encoder)?;
+        let bindings = build_embedding_bindings(&archive, encoder)?;
+        let pooling = embedding_pooling(&archive, encoder)?;
+        // encoders take no rope layout stamp; the pairing is unused past the source
+        let source = self.prepare_source(
+            &archive,
+            &bindings,
+            paths,
+            &options,
+            config,
+            RopePairing::HalfSplit,
+        )?;
+        let loader_type = match encoder {
+            EmbeddingGgufArchitecture::Bert => EmbeddingLoaderType::Bert,
+            EmbeddingGgufArchitecture::NomicBert => EmbeddingLoaderType::NomicBert,
+        };
+        let loader = EmbeddingLoaderBuilder::new(
+            EmbeddingSpecificConfig {
+                topology: self.config.topology.clone(),
+                write_uqff: self.config.write_uqff.clone(),
+                imatrix: self.config.imatrix.clone(),
+                calibration_file: self.config.calibration_file.clone(),
+                hf_cache_path: self.config.hf_cache_path.clone(),
+                ..Default::default()
+            },
+            None,
+            Some(self.quantized_model_id.clone()),
+        )
+        .build_with_source(loader_type, source, pooling)?;
         loader.load_model_from_path(paths, options)
     }
 

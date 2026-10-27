@@ -1,5 +1,6 @@
 #![allow(clippy::cast_precision_loss)]
 
+use inference_gguf::embedding_gguf::EmbeddingGgufPooling;
 use inference_tensor::nn::Module;
 use inference_tensor::{D, IndexOp, Result, Tensor};
 use serde::Deserialize;
@@ -28,14 +29,19 @@ pub struct Pooling {
 impl Pooling {
     /// Mean pooling over every token, the module sentence-transformers adds to a model that ships none.
     pub fn mean(word_embedding_dimension: usize) -> Self {
+        Self::from_gguf(EmbeddingGgufPooling::Mean, word_embedding_dimension)
+    }
+
+    /// The one pooling a GGUF's `pooling_type` names.
+    pub fn from_gguf(pooling: EmbeddingGgufPooling, word_embedding_dimension: usize) -> Self {
         Self {
             word_embedding_dimension,
-            pooling_mode_cls_token: false,
-            pooling_mode_mean_tokens: true,
+            pooling_mode_cls_token: pooling == EmbeddingGgufPooling::Cls,
+            pooling_mode_mean_tokens: pooling == EmbeddingGgufPooling::Mean,
             pooling_mode_max_tokens: false,
             pooling_mode_mean_sqrt_len_tokens: false,
             pooling_mode_weightedmean_tokens: false,
-            pooling_mode_lasttoken: false,
+            pooling_mode_lasttoken: pooling == EmbeddingGgufPooling::Last,
             include_prompt: true,
         }
     }
