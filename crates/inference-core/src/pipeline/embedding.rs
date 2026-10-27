@@ -24,6 +24,7 @@ use crate::utils::progress::ProgressScopeGuard;
 use crate::{DeviceMapSetting, PagedAttentionConfig, Pipeline, Topology, TryIntoDType};
 use anyhow::Result;
 use futures::future::BoxFuture;
+use inference_gguf::embedding_gguf::EmbeddingGgufPooling;
 use inference_quant::IsqType;
 use inference_quant::safetensors::MmapedSafetensors;
 use inference_tensor::nn::{Linear, Module};
@@ -77,6 +78,8 @@ pub struct EmbeddingLoader {
     from_uqff: RwLock<Option<Vec<PathBuf>>>,
     hf_cache_path: Option<PathBuf>,
     load_context: EmbeddingLoadContext,
+    // a GGUF's config, weights and tokenizer, with the pooling its metadata names
+    prepared: Option<(super::loading::PreparedSource, EmbeddingGgufPooling)>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -158,6 +161,28 @@ impl EmbeddingLoaderBuilder {
             from_uqff: RwLock::new(None),
             hf_cache_path: self.hf_cache_path,
             load_context: self.load_context,
+            prepared: None,
+        }))
+    }
+
+    /// Over a GGUF's prepared config, weights and tokenizer, pooled as its metadata says and normalized as
+    /// llama.cpp normalizes embeddings by default.
+    pub(crate) fn build_with_source(
+        self,
+        loader: EmbeddingLoaderType,
+        source: super::loading::PreparedSource,
+        pooling: EmbeddingGgufPooling,
+    ) -> anyhow::Result<Box<dyn Loader>> {
+        Ok(Box::new(EmbeddingLoader {
+            inner: loader.loader()?,
+            model_id: self.model_id.unwrap(),
+            config: self.config,
+            kind: self.kind,
+            tokenizer_json: self.tokenizer_json,
+            from_uqff: RwLock::new(None),
+            hf_cache_path: self.hf_cache_path,
+            load_context: self.load_context,
+            prepared: Some((source, pooling)),
         }))
     }
 }
@@ -188,8 +213,9 @@ impl EmbeddingLoader {
         };
         let from_uqff_files = self.from_uqff.read().unwrap();
         let uqff_files = uqff.reload_files().or(from_uqff_files.as_deref());
+        let prepared = self.prepared.as_ref().map(|(source, _)| source);
         let config = super::loading::prepare_model_config(
-            None,
+            prepared,
             paths.get_config_filename(),
             uqff.reads(),
             None,
@@ -222,7 +248,7 @@ impl EmbeddingLoader {
                 mapper,
                 in_situ_quant,
                 uqff_files,
-                prepared: None,
+                prepared,
                 has_lora: false,
                 matformer: None,
                 matformer_sizing: false,
@@ -239,7 +265,7 @@ impl EmbeddingLoader {
         // a classifier scores each input itself; an embedder pools through its sentence-transformers modules
         let is_classifier = self.inner.is_classifier(&config)?;
         let modules_config: Vec<_> = match paths.get_modules() {
-            _ if is_classifier => Vec::new(),
+            _ if is_classifier || self.prepared.is_some() => Vec::new(),
             Some(modules) if !modules.is_empty() => modules.to_vec(),
             _ => {
                 warn!(
@@ -259,7 +285,11 @@ impl EmbeddingLoader {
         }
 
         let mut modules: Vec<Box<dyn Module + Send + Sync>> = Vec::new();
-        if modules_config.is_empty() && !is_classifier {
+        if let Some((_, pooling)) = &self.prepared {
+            let hidden = self.inner.model_config(&config)?.hidden_size();
+            modules.push(Box::new(Pooling::from_gguf(*pooling, hidden)));
+            modules.push(Box::new(Normalize));
+        } else if modules_config.is_empty() && !is_classifier {
             modules.push(Box::new(Pooling::mean(
                 self.inner.model_config(&config)?.hidden_size(),
             )));
@@ -309,7 +339,7 @@ impl EmbeddingLoader {
                 organization: IsqOrganization::Default,
                 from_uqff: uqff.reads(),
                 write_uqff: uqff.write().is_some(),
-                prepared: None,
+                prepared,
                 lora: None,
             },
         )?;
@@ -321,7 +351,10 @@ impl EmbeddingLoader {
         } = session;
         let load_device = plan.load_device.clone();
 
-        let tokenizer = get_tokenizer(paths.get_tokenizer_filename(), None)?;
+        let tokenizer = match prepared {
+            Some(source) => source.tokenizer.clone(),
+            None => get_tokenizer(paths.get_tokenizer_filename(), None)?,
+        };
 
         let modules_json = EmbeddingModulePaths::serialize_modules(&modules_config);
         // cloned out so the tracker lock is not held through calibration and the UQFF write

@@ -301,3 +301,61 @@ base weights load from `parametrizations.weight.original`), so ISQ leaves it as 
 
 Implication: Jina v3 is served. Jina v5 puts its task adapters (separate PEFT LoRAs) inside Llama-style layers on
 the shared decoder stack, which would need the same per-row delta there; left for later.
+## Run 13 - 2026-10-27 14:35
+
+Question: do encoder GGUFs, as llama.cpp's converter writes them (`bert`, `nomic-bert`), load and embed as the
+safetensors checkpoints do?
+
+Command: `convert_hf_to_gguf.py --outtype f32` (and `q8_0`) at llama.cpp 970b51ce7 on all-MiniLM-L6-v2,
+bge-small-en-v1.5 and nomic-embed-text-v1.5 (multilingual-e5-small does not convert: `BertModel` there carries
+XLM-R's SentencePiece vocabulary, which the converter's BERT path rejects), then
+`inference serve --cpu --dtype f32 --format gguf -m <dir> -f <file>` against `ref.py` (transformers on the original
+checkpoint) and against `llama-embedding` (rebuilt at 970b51ce7; the build_cuda binary was from August and missing its
+library) on the same GGUF.
+
+```
+                          vs transformers (f32 GGUF)   vs llama-embedding (f32)   vs llama-embedding (q8_0)
+all-MiniLM-L6-v2          1.000000 (max_abs 1.6e-7)    0.999998                    0.99975
+bge-small-en-v1.5         1.000000 (max_abs 1.4e-7)
+nomic-embed-text-v1.5     1.000000                     1.000000                    0.99216
+```
+
+Finding: the F32 GGUFs match transformers to F32 rounding, so the WordPiece tokenizer rebuilt from the GGUF
+(llama.cpp stores word-initial pieces with a U+2581 prefix and continuations bare; control tokens as they are) and
+the tensor bindings are right. llama.cpp's own F32 MiniLM differs from transformers by about 2.6e-4. The Q8_0 gap
+with llama.cpp on Nomic is ours: against the transformers F32 reference, our CPU Q8_0 GGUF gives 0.9911 to 0.9967
+where llama.cpp's gives 0.9981 to 0.9986, while our CUDA Q8_0 gives 0.9981 to 0.9985 (llama.cpp's level). ISQ Q8_0
+on the safetensors checkpoint shows the same split (CPU 0.9904, GPU 0.9982), so it is the CPU quantized matmul, not
+the GGUF path.
+
+The cause: the x86 repacked matmul (`repack_x86::select`, Q8_0 added in #523) quantizes the activations of every
+repacked type to Q8_K, one scale per 256 values. ggml pairs Q8_0 weights with Q8_0 activations (one scale per 32);
+Q8_K is the right pairing only for the K-quants. Nomic's FFN inputs carry outliers, so one scale over 256 values
+costs it about 0.008 in cosine; MiniLM barely moves (0.99954 against llama.cpp's 0.99962).
+
+Implication: a CPU accuracy issue for every Q8_0 model on x86 (GGUF or ISQ), outside #586. Either Q8_0 leaves the
+repacked path (ggml-exact, slower prefill), or its tiles take per-32 activation scales.
+
+## Run 14 - 2026-10-27 15:05
+
+Question: does an XLM-R GGUF (llama.cpp's `bert` architecture with a `t5` SentencePiece Unigram vocabulary) load
+and embed as the original does?
+
+Command: `convert_hf_to_gguf.py --outtype f32` on BAAI/bge-m3 (the converter needed the `sentencepiece` package,
+installed to the user site), then `inference serve --cpu --dtype f32 --format gguf` against `ref.py` on the
+original checkpoint (CLS pooling, normalized), a French prompt and a 422-token one included.
+
+```
+bge-m3 f32 GGUF vs transformers: worst cos 1.000000, max_abs <= 4.2e-7
+```
+
+Finding: matches. The vocabulary converts to a Unigram model over the GGUF's scores, normalized by its
+`precompiled_charsmap` (and `remove_extra_whitespaces` collapsing runs of spaces), split on Metaspace with the space
+prefix `add_space_prefix` asks for, and wrapped as `add_bos` / `add_eos` / `add_sep` say: `<s> $A </s>`, with the
+XLM-R pair `<s> $A </s> </s> $B </s>`. T5's own GGUFs carry the same `t5` model without `add_bos`, which the flags
+keep right. The converter trims XLM-R's position table to start at 0 (`position_embd` is 8192 rows here), so the
+GGUF runs as BERT with no position offset. The synthesized `vocab_size` comes from `token_embd.weight`'s rows, not
+the token count, since a converter may pad the table.
+
+Implication: GGUF embedders load for `bert` and `nomic-bert`. Not yet: GGUF rerankers (`pooling_type` 4, the `cls`
+head), and the other encoder architectures llama.cpp writes. The CPU Q8_0 accuracy gap of Run 13 is #655.

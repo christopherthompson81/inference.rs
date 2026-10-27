@@ -1,5 +1,6 @@
 pub mod base_model;
 mod chat_template;
+pub mod embedding_gguf;
 #[cfg(any(test, feature = "models-gemma"))]
 pub mod gemma3_bindings;
 #[cfg(any(test, feature = "models-gemma"))]

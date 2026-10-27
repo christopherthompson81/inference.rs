@@ -25,6 +25,8 @@ ignore-hidden = false
 extend-ignore-re = [
     # Wan's VAE config key, spelled so upstream
     '"temperal_downsample"',
+    # llama.cpp's GGUF tokenizer key, spelled so upstream
+    'tokenizer\.ggml\.seperator_token_id',
     # Kokoro g2p: the ded- spelling the de-/re- prefix rule carves out, and misaki phoneme strings
     'starts_with\("ded"\)',
     "ded- is the deduce family",
