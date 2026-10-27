@@ -120,8 +120,8 @@ The `Architecture` column is the `config.json` `architectures` value. Per-family
 |---|---|---|
 | `Gemma3TextModel` | EmbeddingGemma | <details><summary><code>google/embeddinggemma-300m</code></summary><code>inference run -m google/embeddinggemma-300m</code></details> |
 | `Qwen3ForCausalLM` | Qwen3 Embedding | <details><summary><code>Qwen/Qwen3-Embedding-0.6B</code></summary><code>inference run -m Qwen/Qwen3-Embedding-0.6B</code></details> |
-| `BertModel` | BERT, RoBERTa, XLM-RoBERTa, CamemBERT | <details><summary><code>sentence-transformers/all-MiniLM-L6-v2</code></summary><code>inference run -m sentence-transformers/all-MiniLM-L6-v2</code></details> |
-| `NomicBertModel` | Nomic Embed | <details><summary><code>nomic-ai/nomic-embed-text-v1.5</code></summary><code>inference run -m nomic-ai/nomic-embed-text-v1.5</code></details> |
+| `BertModel` | BERT, RoBERTa, XLM-RoBERTa, CamemBERT, Jina BERT v2 | <details><summary><code>sentence-transformers/all-MiniLM-L6-v2</code></summary><code>inference run -m sentence-transformers/all-MiniLM-L6-v2</code></details> |
+| `NomicBertModel` | Nomic Embed, Nomic Embed MoE | <details><summary><code>nomic-ai/nomic-embed-text-v1.5</code></summary><code>inference run -m nomic-ai/nomic-embed-text-v1.5</code></details> |
 | `ModernBertModel` | ModernBERT | <details><summary><code>ibm-granite/granite-embedding-english-r2</code></summary><code>inference run -m ibm-granite/granite-embedding-english-r2</code></details> |
 | `NeoBERT` | NeoBERT | <details><summary><code>chandar-lab/NeoBERT</code></summary><code>inference run -m chandar-lab/NeoBERT</code></details> |
 | `LlamaBidirectionalModel` | EuroBERT, Llama bidirectional | <details><summary><code>nvidia/llama-embed-nemotron-8b</code></summary><code>inference run -m nvidia/llama-embed-nemotron-8b</code></details> |

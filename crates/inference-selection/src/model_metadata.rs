@@ -374,12 +374,18 @@ impl SupportedArch for EmbeddingLoaderType {
                 examples: &[ex!("Qwen/Qwen3-Embedding-0.6B")],
             },
             Self::Bert => ArchMetadata {
-                families: &["BERT", "RoBERTa", "XLM-RoBERTa", "CamemBERT"],
+                families: &[
+                    "BERT",
+                    "RoBERTa",
+                    "XLM-RoBERTa",
+                    "CamemBERT",
+                    "Jina BERT v2",
+                ],
                 modalities: &[Embedding],
                 examples: &[ex!("sentence-transformers/all-MiniLM-L6-v2")],
             },
             Self::NomicBert => ArchMetadata {
-                families: &["Nomic Embed"],
+                families: &["Nomic Embed", "Nomic Embed MoE"],
                 modalities: &[Embedding],
                 examples: &[ex!("nomic-ai/nomic-embed-text-v1.5")],
             },

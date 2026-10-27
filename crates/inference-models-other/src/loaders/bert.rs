@@ -1,5 +1,5 @@
 use super::*;
-use crate::bert::{Config as BertConfig, Model as BertModel};
+use crate::bert::{Config as BertConfig, Model as BertModel, ORIGINAL_FFN};
 use inference_nn::model::EmbeddingModel;
 
 // BERT numbers its layers `encoder.layer.N`, not `layers.N`
@@ -57,6 +57,7 @@ impl IsqModelLoader for BertLoader {
             r"layer\.(\d+)\.attention\.output\.dense\.(weight|bias)$",
             r"layer\.(\d+)\.intermediate\.dense\.(weight|bias)$",
             r"layer\.(\d+)\.output\.dense\.(weight|bias)$",
+            r"layer\.(\d+)\.mlp\.(gated_layers|wo)\.(weight|bias)$",
         ])
     }
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
@@ -123,9 +124,16 @@ fn layer_shape(cfg: &BertConfig) -> DecoderLayerShape {
         qk_norm: false,
         // two LayerNorms, each with a bias
         norms: 4,
-        mlp: MlpShape::Plain {
-            intermediate_size: cfg.intermediate_size,
-            bias: true,
+        // a GLU FFN's fused gate-and-up projection holds two intermediate-wide halves
+        mlp: if cfg.feed_forward_type == ORIGINAL_FFN {
+            MlpShape::Plain {
+                intermediate_size: cfg.intermediate_size,
+                bias: true,
+            }
+        } else {
+            MlpShape::Gated {
+                intermediate_size: cfg.intermediate_size,
+            }
         },
     }
 }

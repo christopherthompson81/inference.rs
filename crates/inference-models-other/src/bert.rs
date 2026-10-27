@@ -1,12 +1,12 @@
-//! BERT-family encoders (BERT, RoBERTa, XLM-R, CamemBERT): learned positions, post-LayerNorm and a GELU FFN,
-//! with the `*ForSequenceClassification` heads that cross-encoder rerankers add.
+//! BERT-family encoders (BERT, RoBERTa, XLM-R, CamemBERT, Jina BERT v2): learned or ALiBi positions,
+//! post-LayerNorm and a GELU or GLU FFN, with the `*ForSequenceClassification` heads that cross-encoder rerankers add.
 #![allow(clippy::cast_precision_loss)]
 
 use std::sync::Arc;
 
 use inference_quant::{QuantMethod, ShardedVarBuilder};
 use inference_tensor::nn::{Embedding, LayerNorm, Module};
-use inference_tensor::{Device, IndexOp, Result, Tensor};
+use inference_tensor::{D, DType, Device, IndexOp, Result, Tensor};
 use serde::Deserialize;
 
 use crate::{
@@ -24,6 +24,9 @@ const WORD_EMBEDDINGS: &str = "embeddings.word_embeddings.weight";
 // RoBERTa-style models number positions from `pad_token_id + 1`
 const ROBERTA_MODEL_TYPES: &[&str] = &["roberta", "xlm-roberta", "camembert"];
 const ABSOLUTE_POSITIONS: &str = "absolute";
+// Jina BERT v2: no position table, a per-head linear bias on |i - j| instead
+const ALIBI_POSITIONS: &str = "alibi";
+pub const ORIGINAL_FFN: &str = "original";
 const CLASSIFIER_SUFFIX: &str = "ForSequenceClassification";
 // transformers' PretrainedConfig default when a config lists no labels
 const DEFAULT_NUM_LABELS: usize = 2;
@@ -35,6 +38,7 @@ serde_default_fn!(
     position_embedding_type,
     ABSOLUTE_POSITIONS.to_string()
 );
+serde_default_fn!(String, feed_forward_type, ORIGINAL_FFN.to_string());
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -58,6 +62,9 @@ pub struct Config {
     pub architectures: Vec<String>,
     #[serde(default)]
     pub id2label: Option<std::collections::HashMap<String, String>>,
+    /// Jina BERT v2's `geglu` / `reglu`: one fused gate-and-up projection with a LayerNorm inside the MLP.
+    #[serde(default = "feed_forward_type")]
+    pub feed_forward_type: String,
 }
 
 impl Config {
@@ -95,6 +102,20 @@ impl Config {
         self.hidden_size / self.num_attention_heads
     }
 
+    pub fn alibi(&self) -> bool {
+        self.position_embedding_type == ALIBI_POSITIONS
+    }
+
+    /// The activation of a GLU FFN; `None` for BERT's own intermediate / output pair.
+    pub fn glu_activation(&self) -> Result<Option<Activation>> {
+        Ok(match self.feed_forward_type.as_str() {
+            ORIGINAL_FFN => None,
+            "geglu" => Some(Activation::Gelu),
+            "reglu" => Some(Activation::Relu),
+            other => inference_tensor::bail!("BERT feed_forward_type `{other}` is not supported"),
+        })
+    }
+
     // `*ForMaskedLM` / `*ForSequenceClassification` checkpoints keep the encoder under the base model prefix
     fn base_prefix(&self) -> &'static str {
         if self.roberta_style() {
@@ -105,9 +126,30 @@ impl Config {
     }
 }
 
+/// ALiBi's per-head slopes (Press et al.): a geometric series for a power-of-two head count, with the odd terms of
+/// the next power's series filling the rest.
+fn alibi_slopes(heads: usize) -> Vec<f32> {
+    let power_of_two = |n: usize| -> Vec<f32> {
+        let start = 2f32.powf(-8.0 / n as f32);
+        std::iter::successors(Some(start), |slope| Some(slope * start))
+            .take(n)
+            .collect()
+    };
+    let closest = 1 << heads.ilog2();
+    let mut slopes = power_of_two(closest);
+    slopes.extend(
+        power_of_two(2 * closest)
+            .into_iter()
+            .step_by(2)
+            .take(heads - closest),
+    );
+    slopes
+}
+
 struct Embeddings {
     word: Embedding,
-    position: Embedding,
+    // absent with ALiBi
+    position: Option<Embedding>,
     token_type: Embedding,
     norm: LayerNorm,
     position_offset: usize,
@@ -116,11 +158,15 @@ struct Embeddings {
 impl Embeddings {
     fn forward(&self, input_ids: &Tensor, token_type_ids: Option<&Tensor>) -> Result<Tensor> {
         let (_, seq_len) = input_ids.dims2()?;
-        let positions = self
-            .position
-            .embeddings()
-            .narrow(0, self.position_offset, seq_len)?;
-        let xs = self.word.forward(input_ids)?.broadcast_add(&positions)?;
+        let xs = self.word.forward(input_ids)?;
+        let xs = match &self.position {
+            Some(position) => xs.broadcast_add(&position.embeddings().narrow(
+                0,
+                self.position_offset,
+                seq_len,
+            )?)?,
+            None => xs,
+        };
         // a one-row table (RoBERTa, XLM-R) has a single segment whatever the tokenizer numbers it
         let xs = match token_type_ids {
             Some(types) if self.token_type.embeddings().dim(0)? > 1 => {
@@ -201,7 +247,7 @@ struct Attention {
 }
 
 impl Attention {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor, mask: &AttentionMask) -> Result<Tensor> {
         let (b_sz, seq_len, hidden) = xs.dims3()?;
         let heads = |proj: &Arc<dyn QuantMethod>| {
             proj.forward(xs)?
@@ -217,24 +263,31 @@ impl Attention {
             sinks: None,
             chunk: None,
         };
-        // batches hold equal-length prompts, so there is no padding to mask
-        let attn = Sdpa.run_attention(
-            &q,
-            &k,
-            &v,
-            &AttentionMask::None,
-            Some(&FlashParams::empty(false)),
-            &params,
-        )?;
+        // batches hold equal-length prompts, so only ALiBi masks
+        let attn =
+            Sdpa.run_attention(&q, &k, &v, mask, Some(&FlashParams::empty(false)), &params)?;
         let attn = attn.transpose(1, 2)?.reshape((b_sz, seq_len, hidden))?;
         self.norm.forward(&(self.output.forward(&attn)? + xs)?)
     }
 }
 
+enum Ffn {
+    /// BERT's `intermediate.dense`, the activation, `output.dense`.
+    Plain {
+        intermediate: Arc<dyn QuantMethod>,
+        output: Arc<dyn QuantMethod>,
+    },
+    /// Jina's `mlp.gated_layers` (activated half, then linear half) into `mlp.wo`.
+    Glu {
+        gated: Arc<dyn QuantMethod>,
+        wo: Arc<dyn QuantMethod>,
+    },
+}
+
 struct Layer {
     attention: Attention,
-    intermediate: Arc<dyn QuantMethod>,
-    output: Arc<dyn QuantMethod>,
+    ffn: Ffn,
+    // `output.LayerNorm`, or `mlp.layernorm` with a GLU FFN
     norm: LayerNorm,
     act: Activation,
 }
@@ -259,6 +312,8 @@ impl Layer {
         let vb_attn = vb.pp("attention");
         let vb_self = vb_attn.pp("self");
         let linear = |i, o, vb| inference_quant::linear(i, o, &None, place(vb));
+        let inter = cfg.intermediate_size;
+        let glu = cfg.glu_activation()?;
         Ok(Self {
             attention: Attention {
                 query: linear(hidden, hidden, vb_self.pp("query"))?,
@@ -269,22 +324,48 @@ impl Layer {
                 num_heads: cfg.num_attention_heads,
                 head_dim: cfg.head_dim(),
             },
-            intermediate: linear(
-                hidden,
-                cfg.intermediate_size,
-                vb.pp("intermediate").pp("dense"),
-            )?,
-            output: linear(cfg.intermediate_size, hidden, vb.pp("output").pp("dense"))?,
-            norm: norm(vb.pp("output"))?,
-            act: cfg.hidden_act,
+            ffn: match glu {
+                None => Ffn::Plain {
+                    intermediate: linear(hidden, inter, vb.pp("intermediate").pp("dense"))?,
+                    output: linear(inter, hidden, vb.pp("output").pp("dense"))?,
+                },
+                Some(_) => Ffn::Glu {
+                    gated: inference_quant::linear_b(
+                        hidden,
+                        2 * inter,
+                        false,
+                        &None,
+                        place(vb.pp("mlp").pp("gated_layers")),
+                    )?,
+                    wo: linear(inter, hidden, vb.pp("mlp").pp("wo"))?,
+                },
+            },
+            norm: match glu {
+                None => norm(vb.pp("output"))?,
+                Some(_) => layer_norm(
+                    hidden,
+                    cfg.layer_norm_eps,
+                    mapper.set_device(layer_idx, vb.pp("mlp").pp("layernorm"), false),
+                )?,
+            },
+            act: glu.unwrap_or(cfg.hidden_act),
         })
     }
 
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let xs = self.attention.forward(xs)?;
-        let ffn = self
-            .output
-            .forward(&self.act.forward(&self.intermediate.forward(&xs)?)?)?;
+    fn forward(&self, xs: &Tensor, mask: &AttentionMask) -> Result<Tensor> {
+        let xs = self.attention.forward(xs, mask)?;
+        let ffn = match &self.ffn {
+            Ffn::Plain {
+                intermediate,
+                output,
+            } => output.forward(&self.act.forward(&intermediate.forward(&xs)?)?)?,
+            Ffn::Glu { gated, wo } => {
+                let gated = gated.forward(&xs)?;
+                let half = gated.dim(D::Minus1)? / 2;
+                let activated = self.act.forward(&gated.narrow(D::Minus1, 0, half)?)?;
+                wo.forward(&(activated * gated.narrow(D::Minus1, half, half)?)?)?
+            }
+        };
         self.norm.forward(&(ffn + xs)?)
     }
 }
@@ -294,6 +375,8 @@ pub struct Model {
     embeddings: Embeddings,
     layers: Vec<Layer>,
     head: Option<Head>,
+    // `[heads, 1, 1]`, negated: each head's bias is slope * -|i - j|
+    alibi_slopes: Option<Tensor>,
     // the base model prefix the encoder's weights sit under, kept for the UQFF residual
     prefix: Option<&'static str>,
     mapper: Box<dyn DeviceMapper + Send + Sync>,
@@ -310,7 +393,7 @@ impl Model {
         if !matches!(attention_mechanism, AttentionImplementation::Eager) {
             inference_tensor::bail!("Expected AttentionImplementation::Eager");
         }
-        if cfg.position_embedding_type != ABSOLUTE_POSITIONS {
+        if cfg.position_embedding_type != ABSOLUTE_POSITIONS && !cfg.alibi() {
             inference_tensor::bail!(
                 "BERT position_embedding_type `{}` is not supported",
                 cfg.position_embedding_type
@@ -332,12 +415,16 @@ impl Model {
         let hidden = cfg.hidden_size;
         let embeddings = Embeddings {
             word: dense_embedding(cfg.vocab_size, hidden, vb_e.pp("word_embeddings"), &None)?,
-            position: dense_embedding(
-                cfg.max_position_embeddings,
-                hidden,
-                vb_e.pp("position_embeddings"),
-                &None,
-            )?,
+            position: (!cfg.alibi())
+                .then(|| {
+                    dense_embedding(
+                        cfg.max_position_embeddings,
+                        hidden,
+                        vb_e.pp("position_embeddings"),
+                        &None,
+                    )
+                })
+                .transpose()?,
             token_type: dense_embedding(
                 cfg.type_vocab_size,
                 hidden,
@@ -361,10 +448,23 @@ impl Model {
                 )
             })
             .transpose()?;
+        let alibi_slopes = cfg
+            .alibi()
+            .then(|| {
+                let slopes = alibi_slopes(cfg.num_attention_heads);
+                let heads = slopes.len();
+                Tensor::from_vec(
+                    slopes.into_iter().map(|s| -s).collect(),
+                    (heads, 1, 1),
+                    &real_device,
+                )
+            })
+            .transpose()?;
         Ok(Self {
             embeddings,
             layers,
             head,
+            alibi_slopes,
             prefix,
             mapper,
             device: real_device,
@@ -376,9 +476,9 @@ impl Model {
     fn add_encoder_residual(&self, uvb: &UnVarBuilder) {
         let uvb_e = uvb.pp("embeddings");
         uvb_e.pp("word_embeddings").add(&self.embeddings.word);
-        uvb_e
-            .pp("position_embeddings")
-            .add(&self.embeddings.position);
+        if let Some(position) = &self.embeddings.position {
+            uvb_e.pp("position_embeddings").add(position);
+        }
         uvb_e
             .pp("token_type_embeddings")
             .add(&self.embeddings.token_type);
@@ -390,7 +490,10 @@ impl Model {
                 .pp("output")
                 .pp("LayerNorm")
                 .add(&layer.attention.norm);
-            uvb_l.pp("output").pp("LayerNorm").add(&layer.norm);
+            match layer.ffn {
+                Ffn::Plain { .. } => uvb_l.pp("output").pp("LayerNorm").add(&layer.norm),
+                Ffn::Glu { .. } => uvb_l.pp("mlp").pp("layernorm").add(&layer.norm),
+            }
         }
     }
 }
@@ -408,6 +511,19 @@ impl IsqModel for Model {
     }
 }
 
+/// `(1, heads, seq, seq)`: each head's `-slope * |i - j|`, built on the slopes' device at the start of a forward.
+fn alibi_bias(slopes: &Tensor, seq_len: usize, dtype: DType) -> Result<Tensor> {
+    let positions = Tensor::arange(0f32, seq_len as f32, slopes.device())?;
+    let distance = positions
+        .unsqueeze(1)?
+        .broadcast_sub(&positions.unsqueeze(0)?)?
+        .abs()?;
+    slopes
+        .broadcast_mul(&distance.unsqueeze(0)?)?
+        .unsqueeze(0)?
+        .to_dtype(dtype)
+}
+
 impl EmbeddingModel for Model {
     fn forward(
         &self,
@@ -416,8 +532,18 @@ impl EmbeddingModel for Model {
         _flash_params: &FlashParams,
     ) -> Result<Tensor> {
         let mut xs = self.embeddings.forward(input_ids, token_type_ids)?;
+        let alibi = self
+            .alibi_slopes
+            .as_ref()
+            .map(|slopes| alibi_bias(slopes, input_ids.dim(1)?, xs.dtype()))
+            .transpose()?;
         for (i, layer) in self.layers.iter().enumerate() {
-            xs = layer.forward(&self.mapper.map(xs, i)?)?;
+            xs = self.mapper.map(xs, i)?;
+            let mask = match &alibi {
+                Some(bias) => AttentionMask::Custom(bias.to_device(xs.device())?),
+                None => AttentionMask::None,
+            };
+            xs = layer.forward(&xs, &mask)?;
         }
         let xs = xs.to_device(&self.device)?;
         match &self.head {
@@ -431,3 +557,21 @@ impl EmbeddingModel for Model {
 }
 
 impl AnyMoeBaseModelMixin for Model {}
+
+#[cfg(test)]
+mod tests {
+    use super::alibi_slopes;
+
+    #[test]
+    fn alibi_slopes_follow_the_power_of_two_series_and_fill_with_the_next_ones_odd_terms() {
+        let slopes = alibi_slopes(12);
+        // 8 heads: 2^-1 .. 2^-8; the other 4: 2^-0.5, 2^-1.5, 2^-2.5, 2^-3.5
+        let expected = [
+            -1.0, -2.0, -3.0, -4.0, -5.0, -6.0, -7.0, -8.0, -0.5, -1.5, -2.5, -3.5,
+        ]
+        .map(|exp: f32| 2f32.powf(exp));
+        for (slope, want) in slopes.iter().zip(expected) {
+            assert!((slope - want).abs() < 1e-6, "{slopes:?}");
+        }
+    }
+}
