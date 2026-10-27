@@ -417,6 +417,15 @@ const QWEN35_MOE_TENSORS: &[&str] = &[
     ".ssm_beta.",
 ];
 const QWEN35_TENSORS: &[&str] = &[".ssm_a", ".ssm_conv1d.", ".ssm_alpha.", ".ssm_beta."];
+// llama.cpp converts Flash-Next's beta and alpha as one `ssm_beta_alpha` weight, or as the two
+const QWEN4EXP_TENSORS: &[&str] = &[
+    ".ffn_gate_inp.",
+    ".ffn_gate_exps.",
+    ".ffn_up_exps.",
+    ".ffn_down_exps.",
+    ".ssm_a",
+    ".ssm_conv1d.",
+];
 const SHORTCONV_TENSORS: &[&str] = &[".shortconv.conv.", ".shortconv.in_proj."];
 
 const GLM_MROPE_UNSUPPORTED: &[&str] = &["{arch}.rope.dimension_sections"];
@@ -565,7 +574,7 @@ pub const GGUF_SCHEMAS: &[GgufSchema; CANONICAL_GGUF_ARCHITECTURE_COUNT] = &[
         compatible_loaders: QWEN4EXP_LOADERS,
         rope_pairing: RopePairing::HalfSplit,
         required_metadata: QWEN35_MOE_METADATA,
-        required_tensors: QWEN35_MOE_TENSORS,
+        required_tensors: QWEN4EXP_TENSORS,
         unsupported_metadata: NO_REQUIREMENTS,
     },
     GgufSchema {
@@ -1495,6 +1504,18 @@ mod tests {
         let resolved = resolve_native_adapter(&descriptor, None).unwrap();
         assert_eq!(resolved.adapter.loader, NormalLoaderType::Qwen3_5Moe);
         assert_eq!(resolved.reason, ResolutionReason::SingleCandidate);
+    }
+
+    #[test]
+    fn qwen4exp_with_merged_beta_alpha_resolves_to_flash_next() {
+        let schema = schema_for(CanonicalGgufArchitecture::Qwen4Exp);
+        let (metadata, mut tensors) = valid_fixture(schema, &[], &[]);
+        tensors.retain(|name| !name.contains(".ssm_alpha.") && !name.contains(".ssm_beta."));
+        tensors.push("blk.0.ssm_beta_alpha.weight".to_string());
+        let descriptor = descriptor_from_fixture(schema, &metadata, &tensors);
+        schema.validate(&descriptor).unwrap();
+        let resolved = resolve_native_adapter(&descriptor, None).unwrap();
+        assert_eq!(resolved.adapter.loader, NormalLoaderType::Qwen4Exp);
     }
 
     #[test]
