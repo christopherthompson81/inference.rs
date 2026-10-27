@@ -1832,3 +1832,29 @@ MTP 1 draft           48.4 (45.3-50.3)         41.1 (40.5-41.6)
 ```
 +7% on both against Run 52 (45.1 / 38.5, 45.1 / 39.6). Against Strata's exact one-draft window (51.9 / 42.0): -7% /
 -2%. One draft and none are level again here.
+
+## Run 55 - 2026-10-26 17:49
+
+Question: with PLE's noise gone (Run 54), does the doorbell Run 51 dismissed pay after all?
+
+Run 51's A/B ran while PLE's gather faulted pages one at a time (0.98-3.95 ms a window), so its spread hid a
+difference of a few percent; that dismissal was confounded. A probe on master timing each layer's host function
+from inside (its CPU work) and from the stream's side (copy-out to copy-back) put ~132 us a layer of round trip
+outside the function itself. The fills' landing callbacks run on the same driver callback thread, and ~45 us of that
+is the host function queued behind them.
+
+Built: the split's preparation kernel writes the picks to mapped buffers as before, then a one-thread kernel rings the
+layer's doorbell (a sequence number and the token count in mapped memory); a `moe-doorbell` host thread polls every
+offloaded layer's bell, runs the misses on the CPU, and writes the sequence back; a wait kernel spins on that reply
+(2 s timeout, then the step adds nothing and the thread logs it) and copies the rows in. No host function and no
+side stream. The thread spins one core while decode steps arrive and parks to a 1 ms poll after 50 ms without
+activity (the decoder marks each step).
+
+Interleaved A/B, MTP 1 draft, two servers per setup, three rounds each:
+```
+                      prose median             code median (range)
+doorbell              50.3                     42.9 (41.3-43.2)
+host function         49.0                     41.8 (38.8-43.0)
+```
++2.7% / +2.6%. Against Strata's exact one-draft window (51.9 / 42.0): -3% / +2%. Shipped; the cost is one spinning
+host core while a model with offloaded experts is decoding.
