@@ -71,6 +71,7 @@ impl Config {
                         .unwrap_or_default()
                 })
                 .collect(),
+            adapters: Vec::new(),
         }
     }
 

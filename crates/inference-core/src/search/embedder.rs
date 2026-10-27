@@ -128,6 +128,7 @@ impl SearchEmbedder {
                 input_ids: chunk.input,
                 extras: Default::default(),
                 flash_meta: chunk.flash_meta,
+                tasks: vec![None; chunk_entries.len()],
             });
             let mut pipeline = get_mut_arcmutex!(self.model);
             let ForwardInputsResult::Embeddings { embeddings } =

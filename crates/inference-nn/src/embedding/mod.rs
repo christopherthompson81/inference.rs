@@ -1,18 +1,58 @@
 //! What an embedding model takes beside its token ids: a pair's segment ids and each row's task adapter.
 
 use inference_tensor::{D, DType, Result, Tensor};
+use serde::Deserialize;
+
+const JINA_V5_MODEL_TYPE: &str = "jina_embeddings_v5";
+// Jina v5's retrieval adapter serves both sides of a search, told apart by their prefix
+const JINA_V5_RETRIEVAL: &str = "retrieval";
+const JINA_V5_QUERY: (&str, &str) = ("retrieval.query", "Query: ");
+const JINA_V5_PASSAGE: (&str, &str) = ("retrieval.passage", "Document: ");
+const JINA_V5_DOCUMENT_PREFIX: &str = "Document: ";
 
 /// The tasks a model's adapters serve, with the instruction each prepends to a text prompt.
 #[derive(Clone, Debug, Default)]
 pub struct EmbeddingTasks {
     pub names: Vec<String>,
     pub instructions: Vec<String>,
+    /// Each task's adapter, by the name it ships under in `adapters/`; empty when they are in the model's weights.
+    pub adapters: Vec<String>,
 }
 
 impl EmbeddingTasks {
     pub fn index(&self, task: &str) -> Option<usize> {
         self.names.iter().position(|name| name == task)
     }
+}
+
+#[derive(Deserialize)]
+struct JinaV5Config {
+    #[serde(default)]
+    model_type: String,
+    #[serde(default)]
+    task_names: Vec<String>,
+}
+
+/// Jina v5's tasks, under the names Jina's API takes: one per shipped adapter, retrieval split by side.
+pub fn jina_v5_tasks(config: &str) -> serde_json::Result<Option<EmbeddingTasks>> {
+    let config: JinaV5Config = serde_json::from_str(config)?;
+    if config.model_type != JINA_V5_MODEL_TYPE {
+        return Ok(None);
+    }
+    let mut tasks = EmbeddingTasks::default();
+    for adapter in config.task_names {
+        let sides = if adapter == JINA_V5_RETRIEVAL {
+            vec![JINA_V5_QUERY, JINA_V5_PASSAGE]
+        } else {
+            vec![(adapter.as_str(), JINA_V5_DOCUMENT_PREFIX)]
+        };
+        for (name, prefix) in sides {
+            tasks.names.push(name.to_string());
+            tasks.instructions.push(prefix.to_string());
+            tasks.adapters.push(adapter.clone());
+        }
+    }
+    Ok(Some(tasks))
 }
 
 /// Each row's task: `ids` (u32, `[batch]`) picks an adapter, `active` (f32, `[batch]`) is 0 for a row with none.

@@ -24,6 +24,10 @@ const QUANT_SAFETENSOR_MATCH: &str = r"model\.safetensors\b";
 const CONSOLIDATED_SAFETENSOR_MATCH: &str = r"consolidated\.safetensors\b";
 const SAFETENSOR_INDEX: &str = "model.safetensors.index.json";
 const PICKLE_MATCH: &str = r"pytorch_model(-\d{5}-of-\d{5})?\.((pth)|(pt)|(bin))\b";
+// where a task embedder (Jina v5) ships one PEFT adapter per task
+const BUNDLED_ADAPTERS_DIR: &str = "adapters";
+const ADAPTER_CONFIG: &str = "adapter_config.json";
+const ADAPTER_WEIGHTS: &str = "adapter_model.safetensors";
 
 #[derive(Clone, Debug)]
 pub struct ResolvedLoraAdapter {
@@ -724,9 +728,53 @@ pub(crate) fn get_embedding_paths(
         tokenizer_filename,
         config_filename,
         filenames,
-        adapter_paths: AdapterPaths::None,
+        adapter_paths: bundled_adapters(&repo)?,
         modules,
     })
+}
+
+/// The PEFT adapters under the repository's `adapters/<name>/`, each loaded under its folder's name.
+fn bundled_adapters(repo: &RepoFiles<'_>) -> Result<AdapterPaths> {
+    let config_in = |name: &str| format!("{BUNDLED_ADAPTERS_DIR}/{name}/{ADAPTER_CONFIG}");
+    // a local directory lists only its top level
+    let mut names: Vec<String> = if repo.model_id.exists() {
+        match fs::read_dir(repo.model_id.join(BUNDLED_ADAPTERS_DIR)) {
+            Ok(dir) => dir
+                .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+                .filter(|name| repo.model_id.join(config_in(name)).is_file())
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    } else {
+        repo.listed
+            .iter()
+            .filter_map(|file| {
+                file.strip_prefix(BUNDLED_ADAPTERS_DIR)?
+                    .strip_prefix('/')?
+                    .strip_suffix(ADAPTER_CONFIG)?
+                    .strip_suffix('/')
+            })
+            .map(str::to_string)
+            .collect()
+    };
+    if names.is_empty() {
+        return Ok(AdapterPaths::None);
+    }
+    names.sort();
+    let adapters = names
+        .into_iter()
+        .map(|name| {
+            Ok(ResolvedLoraAdapter {
+                config_path: repo.get(&config_in(&name))?,
+                weights_path: repo
+                    .get(&format!("{BUNDLED_ADAPTERS_DIR}/{name}/{ADAPTER_WEIGHTS}"))?,
+                source: repo.model_id.display().to_string(),
+                revision: (!repo.model_id.exists()).then(|| repo.revision.clone()),
+                alias: name,
+            })
+        })
+        .collect::<Result<_>>()?;
+    Ok(AdapterPaths::Lora(adapters))
 }
 
 /// What a GGUF model's file lookup takes from its loader.

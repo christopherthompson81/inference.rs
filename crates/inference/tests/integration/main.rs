@@ -9,6 +9,7 @@ mod gguf_embedding_tiny;
 mod gguf_iq;
 mod gguf_lora_tiny;
 mod hidream_o1_tiny;
+mod jina_v5_tiny;
 mod jobs;
 mod kokoro_tiny;
 mod llama_head_dim_tiny;

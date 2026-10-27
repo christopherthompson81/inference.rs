@@ -104,6 +104,8 @@ pub(crate) fn prepare_model_config(
         Some(overrides) => overrides.apply(&config)?,
         None => config,
     };
+    // after the overrides, so one of `rope_parameters` is what the older fields take
+    let config = super::loaders::lift_rope_parameters(&config)?;
     if mtp {
         super::loaders::inject_mtp_config_flag(&config)
     } else {
