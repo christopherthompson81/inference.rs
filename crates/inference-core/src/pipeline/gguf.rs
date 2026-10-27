@@ -1,6 +1,6 @@
 use super::{Loader, ModelKind, ModelPaths, QuantizationKind, TokenSource};
 use crate::gguf::embedding_gguf::{
-    EmbeddingGgufArchitecture, build_embedding_bindings, embedding_pooling,
+    EmbeddingGgufArchitecture, add_encoder_specials, build_embedding_bindings, embedding_pooling,
     synthesize_embedding_config,
 };
 use crate::gguf::{
@@ -565,7 +565,7 @@ impl GGUFLoader {
         let bindings = build_embedding_bindings(&archive, encoder)?;
         let pooling = embedding_pooling(&archive, encoder)?;
         // encoders take no rope layout stamp; the pairing is unused past the source
-        let source = self.prepare_source(
+        let mut source = self.prepare_source(
             &archive,
             &bindings,
             paths,
@@ -573,9 +573,16 @@ impl GGUFLoader {
             config,
             RopePairing::HalfSplit,
         )?;
+        add_encoder_specials(&mut source.tokenizer, archive.metadata())?;
         let loader_type = match encoder {
-            EmbeddingGgufArchitecture::Bert => EmbeddingLoaderType::Bert,
-            EmbeddingGgufArchitecture::NomicBert => EmbeddingLoaderType::NomicBert,
+            EmbeddingGgufArchitecture::Bert | EmbeddingGgufArchitecture::JinaBertV2 => {
+                EmbeddingLoaderType::Bert
+            }
+            EmbeddingGgufArchitecture::NomicBert | EmbeddingGgufArchitecture::NomicBertMoe => {
+                EmbeddingLoaderType::NomicBert
+            }
+            EmbeddingGgufArchitecture::ModernBert => EmbeddingLoaderType::ModernBert,
+            EmbeddingGgufArchitecture::NeoBert => EmbeddingLoaderType::NeoBert,
         };
         let loader = EmbeddingLoaderBuilder::new(
             EmbeddingSpecificConfig {

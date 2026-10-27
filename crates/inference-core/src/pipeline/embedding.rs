@@ -285,7 +285,11 @@ impl EmbeddingLoader {
         }
 
         let mut modules: Vec<Box<dyn Module + Send + Sync>> = Vec::new();
-        if let Some((_, pooling)) = &self.prepared {
+        if let Some((_, pooling)) = self
+            .prepared
+            .as_ref()
+            .filter(|(_, pooling)| *pooling != EmbeddingGgufPooling::Rank)
+        {
             let hidden = self.inner.model_config(&config)?.hidden_size();
             modules.push(Box::new(Pooling::from_gguf(*pooling, hidden)));
             modules.push(Box::new(Normalize));

@@ -359,3 +359,45 @@ the token count, since a converter may pad the table.
 
 Implication: GGUF embedders load for `bert` and `nomic-bert`. Not yet: GGUF rerankers (`pooling_type` 4, the `cls`
 head), and the other encoder architectures llama.cpp writes. The CPU Q8_0 accuracy gap of Run 13 is #655.
+
+## Run 15 - 2026-10-27 15:33
+
+Question: do the other encoder GGUFs llama.cpp's converter writes (`modern-bert`, `jina-bert-v2`, `neo-bert`,
+`nomic-bert-moe`) and its rerankers (`pooling_type` 4) load and score as the originals?
+
+Command: `convert_hf_to_gguf.py --outtype f32` (llama.cpp 970b51ce7) on a ModernBERT embedder (granite r2), Jina
+Embeddings v2, NeoBERT, nomic-embed-text v2 MoE, bge-reranker-base and an ms-marco MiniLM cross-encoder, then
+`inference serve --cpu --dtype f32 --format gguf` against the reference scripts on the originals (their own remote
+code where the model has it) and against llama.cpp's `llama-embedding` on the same GGUF.
+
+```
+modern-bert      vs transformers         cos 1.000000
+jina-bert-v2     vs Jina's code          cos 1.000000
+neo-bert         vs NeoBERT's code (CLS) cos 1.000000   (llama.cpp on the same GGUF: 0.02)
+nomic-bert-moe   vs llama.cpp            cos 0.99999
+nomic-bert-moe   vs Nomic's code         cos 0.887
+bge-reranker-base GGUF logit 4.71547     transformers 4.71546
+ms-marco MiniLM GGUF                      no `cls.weight` (pooler dropped)
+```
+
+Finding: the four architectures bind under the converter's names, with configs from its metadata: ModernBERT's
+alternating window from `attention.sliding_window`, `sliding_window_pattern` and `rope.freq_base_swa`; NeoBERT's
+`feed_forward_length` is the SwiGLU width, 2/3 of `intermediate_size`; Nomic MoE's `ffn_up_exps` / `ffn_down_exps`
+stacks reshape back to megablocks' `w1` / `w2`. Encoder BPE vocabularies (`gpt2` model, ModernBERT and Jina v2) need
+CLS/SEP wrapping from `add_bos` / `add_eos`, and `modern-bert` joins the gpt-2 pre-tokenizer group. The token-type
+count comes from `token_types.weight`'s rows: the metadata default of 2 is wrong for Nomic MoE's single row.
+
+Three conversion losses upstream, for reporting there:
+- the converter drops `mlp.experts.bias` for `nomic-bert-moe`, the whole 0.887 gap (zeroed in the source, ours
+  matches the GGUF to F32 rounding);
+- the converter drops BERT's `pooler.dense`, which `BertForSequenceClassification` scores through, so BERT
+  rerankers score wrong (RoBERTa's `classifier.dense` survives as `cls`); we refuse such a GGUF with a pointer to
+  the safetensors checkpoint;
+- llama.cpp's `build_qkv` reads NeoBERT's `qkv` as a stacked Q/K/V block while the converter keeps NeoBERT's
+  per-head interleave, hence its 0.02; our encoder reads the per-head layout as NeoBERT's own weights have it. EuroBERT does not convert
+  (`EuroBertForMaskedLM` unsupported).
+
+Tests: `gguf_embedding_tiny.rs` writes tiny GGUFs under llama.cpp's names for all six architectures (F32 and Q8_0
+against the safetensors source by cosine) and checks the pooler-less reranker refusal.
+
+Implication: GGUF loading covers every encoder architecture llama.cpp writes. Left in #586: Jina v5.

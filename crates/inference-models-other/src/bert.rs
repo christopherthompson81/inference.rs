@@ -199,7 +199,8 @@ impl Head {
         let (hidden, labels) = (cfg.hidden_size, cfg.num_labels());
         let linear = |i, o, vb| inference_quant::linear(i, o, &None, vb);
         let classifier = root.pp("classifier");
-        Ok(if cfg.roberta_style() {
+        // by what the checkpoint holds: an XLM-R reranker GGUF names its model type `bert`
+        Ok(if classifier.contains_tensor("dense.weight") {
             Self::Projected {
                 dense: linear(hidden, hidden, classifier.pp("dense"))?,
                 out_proj: linear(hidden, labels, classifier.pp("out_proj"))?,

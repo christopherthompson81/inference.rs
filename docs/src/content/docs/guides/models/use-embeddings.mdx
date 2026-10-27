@@ -68,13 +68,18 @@ The pooling and normalization come from the repository's `modules.json`, and a `
 
 ### GGUF embedders
 
-Encoder GGUFs as llama.cpp's converter writes them load with `--format gguf`: the `bert` architecture (BERT, RoBERTa and XLM-RoBERTa checkpoints, such as all-MiniLM, bge and bge-m3) and `nomic-bert` (nomic-embed-text v1 / v1.5), quantized or not.
+Encoder GGUFs as llama.cpp's converter writes them load with `--format gguf`, quantized or not: `bert` (BERT, RoBERTa and XLM-RoBERTa checkpoints, such as all-MiniLM, bge and bge-m3), `nomic-bert` (nomic-embed-text v1 / v1.5), `nomic-bert-moe` (nomic-embed-text v2), `jina-bert-v2`, `modern-bert` and `neo-bert`.
 
 ```bash
 inference serve --format gguf -m nomic-ai/nomic-embed-text-v1.5-GGUF -f nomic-embed-text-v1.5.Q8_0.gguf
 ```
 
-The tokenizer is rebuilt from the GGUF's own vocabulary (BERT's WordPiece, or XLM-RoBERTa's SentencePiece with its normalization table), the pooling comes from its `pooling_type`, and the embedding is L2-normalized, as llama.cpp normalizes by default. GGUF rerankers (`pooling_type` rank) and the other encoder architectures (`modern-bert`, `jina-bert-v2`, `nomic-bert-moe`, `neo-bert`) load from safetensors only for now.
+The tokenizer is rebuilt from the GGUF's own vocabulary (BERT's WordPiece, or XLM-RoBERTa's SentencePiece with its normalization table), the pooling comes from its `pooling_type`, and the embedding is L2-normalized, as llama.cpp normalizes by default. A GGUF with `pooling_type` rank loads as a reranker and serves `/v1/rerank`.
+
+Some conversions lose weights the original uses, so they cannot match it:
+
+- llama.cpp's converter drops the pooler of a BERT `*ForSequenceClassification` reranker (such as the ms-marco cross-encoders), which these rerankers score through. Such a GGUF is refused; load the safetensors checkpoint instead. RoBERTa and XLM-RoBERTa rerankers (bge-reranker) keep their head and load.
+- nomic-embed-text v2 GGUFs lack the experts' output bias, so they embed as llama.cpp does but not quite as the original (cosine about 0.89 on a short prompt). The safetensors checkpoint is exact.
 
 ## Requesting an embedding
 
