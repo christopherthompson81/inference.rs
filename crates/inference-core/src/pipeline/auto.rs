@@ -491,7 +491,7 @@ fn detect(model_id: &str, artifacts: &ConfigArtifacts) -> Result<Detected> {
         if let Some(ref config) = artifacts.contents {
             let cfg: AutoConfig = serde_json::from_str(config)?;
             if let Some(name) = cfg.architectures.first()
-                && let Ok(tp) = EmbeddingLoaderType::from_causal_lm_name(name)
+                && let Ok(tp) = EmbeddingLoaderType::from_config(name, config)
             {
                 info!(
                     "Detected `config_sentence_transformers.json`; using embedding loader `{tp}`."

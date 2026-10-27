@@ -335,6 +335,10 @@ pub trait EmbeddingModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModel
     fn embedding_tasks(&self, _config: &str) -> Result<Option<crate::embedding::EmbeddingTasks>> {
         Ok(None)
     }
+    /// Whether the model's own code pools the last token, for a `modules.json` that lists no pooling.
+    fn pools_last_token(&self, _config: &str) -> Result<bool> {
+        Ok(false)
+    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>>;
     fn get_device_for_tensor(
         &self,

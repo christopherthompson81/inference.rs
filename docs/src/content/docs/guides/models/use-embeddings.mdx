@@ -62,7 +62,9 @@ curl http://localhost:1234/v1/embeddings \
   -d '{"model": "default", "input": "how do I reset my password?", "task": "retrieval.query"}'
 ```
 
-The Jina v5 embedders (task adapters inside Llama-style layers) do not load yet, nor do the Jina v1 rerankers, whose configs name the base `JinaBertModel` class rather than a classifier.
+The Jina v5 text embedders take `task` the same way. `jinaai/jina-embeddings-v5-text-small` (Qwen3-0.6B, 1024-dim vectors, inputs up to 32K tokens) and `jinaai/jina-embeddings-v5-text-nano` (EuroBERT-210m, 768-dim vectors, inputs up to 8192 tokens) ship one adapter per task in `adapters/`, which load beside the base weights and apply per request, so requests with different tasks still batch together. The tasks are `retrieval.query` and `retrieval.passage` (one retrieval adapter, with a `Query: ` or `Document: ` prefix), `text-matching`, `clustering` and `classification` (each with `Document: `). Name a task on every request: Jina's code has no task-free mode, and without one the base weights embed. The per-task repositories (`jinaai/jina-embeddings-v5-text-small-retrieval` and the rest) have the adapter merged into the weights; they load as plain Qwen3 or EuroBERT embedders, and take the prefix in the input text itself. Their license is CC BY-NC 4.0.
+
+The Jina v1 rerankers do not load yet: their configs name the base `JinaBertModel` class rather than a classifier.
 
 The pooling and normalization come from the repository's `modules.json`, and a `max_seq_length` in `sentence_bert_config.json` caps the input length (256 tokens for all-MiniLM-L6-v2), as sentence-transformers does. `--isq q8_0` keeps these models close to full precision, but 4-bit types lose noticeably on 384-wide layers.
 
@@ -186,7 +188,7 @@ Beyond `model` and `input`:
 
 - `encoding_format`: `"float"` (default) returns float arrays. `"base64"` returns each vector as base64-encoded little-endian f32 bytes. This matches OpenAI's compact form.
 - `dimensions`: not supported. Passing it returns a validation error rather than silently truncating.
-- `task`: inference.rs extension, as Jina's API takes it. Picks one of the model's task adapters and prepends its instruction to text inputs; a model without adapters, or an unknown task, is a validation error that names the model's tasks.
+- `task`: inference.rs extension, as Jina's API takes it. Picks one of the model's task adapters and prepends its instruction or prefix to text inputs; a model without adapters, or an unknown task, is a validation error that names the model's tasks.
 - `truncate_sequence`: inference.rs extension. `true` truncates inputs that exceed the model's context length (or a sentence-transformers `max_seq_length`) to their start instead of erroring.
 
 ## Normalization

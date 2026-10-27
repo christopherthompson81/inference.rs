@@ -66,6 +66,8 @@ pub struct EmbeddingPipeline {
     // Embedding runs keep no KV cache, but the engine reads the cache kind of every pipeline it starts.
     dummy_cache: EitherCache,
     embedding_tasks: Option<Arc<inference_nn::embedding::EmbeddingTasks>>,
+    // the task adapters a model ships beside its weights, applied per row
+    task_lora: Option<Arc<crate::DynamicLoraRuntime>>,
 }
 
 /// A loader for an embedding (non-quantized) model.
@@ -222,6 +224,23 @@ impl EmbeddingLoader {
             false,
         )?;
 
+        let embedding_tasks = self.inner.embedding_tasks(&config)?.map(Arc::new);
+        let task_adapters = embedding_tasks
+            .as_ref()
+            .is_some_and(|tasks| !tasks.adapters.is_empty());
+        if task_adapters {
+            let shipped = match paths.get_adapter_paths() {
+                super::AdapterPaths::Lora(adapters) => adapters.as_slice(),
+                super::AdapterPaths::None => &[],
+            };
+            for adapter in embedding_tasks.iter().flat_map(|tasks| &tasks.adapters) {
+                anyhow::ensure!(
+                    shipped.iter().any(|shipped| &shipped.alias == adapter),
+                    "the model's `{adapter}` task adapter is missing: expected `adapters/{adapter}/` beside its weights"
+                );
+            }
+        }
+
         if paged_attn_config.is_some() {
             warn!("PagedAttention is not supported for embedding models, disabling it.");
             paged_attn_config = None;
@@ -249,7 +268,7 @@ impl EmbeddingLoader {
                 in_situ_quant,
                 uqff_files,
                 prepared,
-                has_lora: false,
+                has_lora: task_adapters,
                 matformer: None,
                 matformer_sizing: false,
                 non_mapped_unpacked: false,
@@ -284,6 +303,12 @@ impl EmbeddingLoader {
             );
         }
 
+        let pools_last_token = self.prepared.is_none()
+            && !is_classifier
+            && self.inner.pools_last_token(&config)?
+            && !modules_config
+                .iter()
+                .any(|module| matches!(module, EmbeddingModulePaths::Pooling { .. }));
         let mut modules: Vec<Box<dyn Module + Send + Sync>> = Vec::new();
         if let Some((_, pooling)) = self
             .prepared
@@ -292,6 +317,13 @@ impl EmbeddingLoader {
         {
             let hidden = self.inner.model_config(&config)?.hidden_size();
             modules.push(Box::new(Pooling::from_gguf(*pooling, hidden)));
+            modules.push(Box::new(Normalize));
+        } else if pools_last_token {
+            let hidden = self.inner.model_config(&config)?.hidden_size();
+            modules.push(Box::new(Pooling::from_gguf(
+                EmbeddingGgufPooling::Last,
+                hidden,
+            )));
             modules.push(Box::new(Normalize));
         } else if modules_config.is_empty() && !is_classifier {
             modules.push(Box::new(Pooling::mean(
@@ -332,7 +364,7 @@ impl EmbeddingLoader {
                 }
             }
         }
-        let (model, tracker, _) = super::loading::load_model(
+        let (model, tracker, task_lora) = super::loading::load_model(
             &*self.inner,
             &session,
             mapper,
@@ -344,7 +376,7 @@ impl EmbeddingLoader {
                 from_uqff: uqff.reads(),
                 write_uqff: uqff.write().is_some(),
                 prepared,
-                lora: None,
+                lora: task_adapters.then(crate::LoraRuntimeConfig::default),
             },
         )?;
         let super::loading::LoadSession {
@@ -397,7 +429,6 @@ impl EmbeddingLoader {
         }
 
         let has_causal_attention = self.inner.has_causal_attention(&config)?;
-        let embedding_tasks = self.inner.embedding_tasks(&config)?.map(Arc::new);
         let model_max_seq_len = self.inner.model_config(&config)?.max_seq_len();
         let max_seq_len = sentence_max_seq_length(paths.get_config_filename())
             .map_or(model_max_seq_len, |len| len.min(model_max_seq_len));
@@ -410,6 +441,7 @@ impl EmbeddingLoader {
             EmbeddingPipeline {
                 dummy_cache: EitherCache::Full(crate::pipeline::Cache::new(0)),
                 embedding_tasks,
+                task_lora,
                 model,
                 tracked_modules,
                 source_weight_files,
@@ -568,6 +600,31 @@ impl CacheManagerMixin for EmbeddingPipeline {
     }
 }
 
+impl EmbeddingPipeline {
+    /// Each row's task adapter for a forward over `seq_len` tokens; `None` when no row names a task.
+    fn task_execution(
+        &self,
+        tasks: &[Option<usize>],
+        seq_len: usize,
+    ) -> inference_tensor::Result<Option<Arc<inference_quant::LoraExecution>>> {
+        let (Some(runtime), Some(names)) = (&self.task_lora, &self.embedding_tasks) else {
+            return Ok(None);
+        };
+        if tasks.iter().all(Option::is_none) {
+            return Ok(None);
+        }
+        let leases = tasks
+            .iter()
+            .map(|task| {
+                task.map(|task| runtime.resolve_alias(&names.adapters[task]))
+                    .transpose()
+                    .map_err(inference_tensor::Error::msg)
+            })
+            .collect::<inference_tensor::Result<Vec<_>>>()?;
+        runtime.execution(&leases, seq_len).map(Some)
+    }
+}
+
 impl MetadataMixin for EmbeddingPipeline {
     fn device(&self) -> Device {
         self.model.device().clone()
@@ -596,9 +653,13 @@ impl Pipeline for EmbeddingPipeline {
             input_ids,
             extras,
             flash_meta,
+            tasks,
         } = *inputs.downcast::<ModelInputs>().expect("Downcast failed.");
 
-        let mut xs = self.model.forward(&input_ids, &extras, &flash_meta)?;
+        let execution = self.task_execution(&tasks, input_ids.dim(1)?)?;
+        let mut xs = inference_quant::with_lora_execution(execution, || {
+            self.model.forward(&input_ids, &extras, &flash_meta)
+        })?;
         for module in &self.modules {
             xs = module.forward(&xs)?;
         }

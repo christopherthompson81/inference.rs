@@ -369,7 +369,7 @@ impl SupportedArch for EmbeddingLoaderType {
                 examples: &[ex!("google/embeddinggemma-300m")],
             },
             Self::Qwen3Embedding => ArchMetadata {
-                families: &["Qwen3 Embedding"],
+                families: &["Qwen3 Embedding", "Jina Embeddings v5"],
                 modalities: &[Embedding],
                 examples: &[ex!("Qwen/Qwen3-Embedding-0.6B")],
             },
@@ -400,7 +400,7 @@ impl SupportedArch for EmbeddingLoaderType {
                 examples: &[ex!("chandar-lab/NeoBERT")],
             },
             Self::LlamaEmbedding => ArchMetadata {
-                families: &["EuroBERT", "Llama bidirectional"],
+                families: &["EuroBERT", "Llama bidirectional", "Jina Embeddings v5 nano"],
                 modalities: &[Embedding],
                 examples: &[ex!("nvidia/llama-embed-nemotron-8b")],
             },

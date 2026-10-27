@@ -63,6 +63,9 @@ use crate::{DeviceMapSetting, PagedAttentionConfig, TryIntoDType};
 use super::{Pipeline, paths::AdapterPaths};
 
 const LEGACY_MODEL_OPT_CONFIG: &str = "hf_quant_config.json";
+const ROPE_PARAMETERS: &str = "rope_parameters";
+const ROPE_THETA: &str = "rope_theta";
+const ROPE_SCALING: &str = "rope_scaling";
 /// Set on the model config JSON when the checkpoint's built-in MTP head should be loaded.
 pub const MTP_CONFIG_KEY: &str = "_inference_mtp";
 
@@ -84,6 +87,42 @@ pub(crate) fn load_model_config(
     }
     let model_opt = std::fs::read_to_string(model_opt_path)?;
     inject_legacy_model_opt_config(&config, &model_opt)
+}
+
+/// transformers 5 writes `rope_theta` and the scaling as one `rope_parameters`; fills the older fields from it.
+pub(crate) fn lift_rope_parameters(config: &str) -> Result<String> {
+    let mut value: serde_json::Value = serde_json::from_str(config)?;
+    let mut lifted = false;
+    let lift = |config: &mut serde_json::Value| {
+        let Some(rope) = config.get(ROPE_PARAMETERS).cloned() else {
+            return false;
+        };
+        // per-layer-type parameters (Gemma 4, Qwen3.5) have no single theta; their configs read them as they are
+        if !rope[ROPE_THETA].is_number() || config.get(ROPE_THETA).is_some_and(|v| !v.is_null()) {
+            return false;
+        }
+        config[ROPE_THETA] = rope[ROPE_THETA].clone();
+        let scaled = rope["rope_type"]
+            .as_str()
+            .is_some_and(|kind| kind != "default");
+        if scaled
+            && config
+                .get(ROPE_SCALING)
+                .is_none_or(serde_json::Value::is_null)
+        {
+            config[ROPE_SCALING] = rope;
+        }
+        true
+    };
+    lifted |= lift(&mut value);
+    if let Some(text) = value.get_mut("text_config").filter(|text| text.is_object()) {
+        lifted |= lift(text);
+    }
+    Ok(if lifted {
+        serde_json::to_string(&value)?
+    } else {
+        config.to_string()
+    })
 }
 
 fn normalize_compression_config(config: &str) -> Result<String> {
@@ -588,6 +627,32 @@ pub trait Loader: Send + Sync {
 #[cfg(test)]
 mod model_config_tests {
     use super::*;
+
+    #[test]
+    fn rope_parameters_fill_the_older_fields() -> Result<()> {
+        let lifted = |config: serde_json::Value| -> Result<serde_json::Value> {
+            Ok(serde_json::from_str(&lift_rope_parameters(
+                &config.to_string(),
+            )?)?)
+        };
+        let plain = lifted(serde_json::json!({
+            "rope_parameters": {"rope_type": "default", "rope_theta": 1e6}
+        }))?;
+        assert_eq!(plain["rope_theta"], 1e6);
+        assert!(plain.get("rope_scaling").is_none());
+
+        let scaled = serde_json::json!({"rope_type": "llama3", "rope_theta": 5e5, "factor": 8.0});
+        let config = lifted(serde_json::json!({"text_config": {"rope_parameters": scaled}}))?;
+        assert_eq!(config["text_config"]["rope_theta"], 5e5);
+        assert_eq!(config["text_config"]["rope_scaling"], scaled);
+
+        let kept = serde_json::json!({"rope_theta": 1e4, "rope_parameters": {"rope_theta": 1e6}});
+        assert_eq!(lifted(kept.clone())?, kept);
+        let per_layer =
+            serde_json::json!({"rope_parameters": {"full_attention": {"rope_theta": 1e6}}});
+        assert_eq!(lifted(per_layer.clone())?, per_layer);
+        Ok(())
+    }
 
     #[test]
     fn legacy_model_opt_config_is_embedded() -> Result<()> {

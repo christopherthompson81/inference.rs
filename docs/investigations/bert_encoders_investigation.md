@@ -401,3 +401,61 @@ Tests: `gguf_embedding_tiny.rs` writes tiny GGUFs under llama.cpp's names for al
 against the safetensors source by cosine) and checks the pooler-less reranker refusal.
 
 Implication: GGUF loading covers every encoder architecture llama.cpp writes. Left in #586: Jina v5.
+
+## Run 16 - 2026-10-27 15:59
+
+Question: how is Jina v5 built, and do its merged per-task repos already load?
+
+Command: read the remote code and configs of `jina-embeddings-v5-text-small` (Qwen3-0.6B base) and `-text-nano`
+(EuroBERT-210m base); `jina5_merged.py` compares each `-retrieval` repo with its base plus the retrieval adapter
+(weights, and the last-token embedding against Jina's `encode`); `jina5_ref.py` saves Jina's own `encode` (PEFT,
+F32) per task and prompt on a short and a 1.7K-character text; then `inference serve --cpu --dtype f32` on each
+`-retrieval` repo.
+
+```
+small: merged weights vs base + B A: max abs 3.755e-03   embed cos 0.999997
+nano:  merged weights vs base + B A: max abs 1.927e-03   embed cos 0.999996
+serve small-retrieval: Unsupported Hugging Face Transformers model class `Qwen3Model`
+serve nano-retrieval:  missing field `rope_theta`
+```
+
+Finding: the base repos are `JinaEmbeddingsV5Model`, a `PeftMixedModel` over a plain Qwen3Model / EuroBertModel
+(unprefixed `layers.N` keys) with one standard PEFT LoRA per task under `adapters/<task>/` (r 32, alpha 32, on
+q/k/v/o and gate/up/down; adapter keys `base_model.model.layers.N...`). Pooling is the last unpadded token,
+L2-normalized; texts get a `Query: ` or `Document: ` prefix (`document` by default), for every task. The Qwen3
+tokenizer adds no special tokens, so the last token is the text's own; the EuroBERT one appends `<|end_of_text|>`,
+and EuroBERT attends bidirectionally. Each merged repo is the base plus its adapter merged (the gap is bf16
+rounding), with `modules.json` last-token pooling and the prefixes left to the caller. Two load gaps: `Qwen3Model`
+has no embedding mapping, and the nano repos' transformers 5 config keeps `rope_theta` under `rope_parameters`.
+
+Implication: fix the two config gaps, which loads the merged repos; for the base repos, a `JinaEmbeddingsV5Model`
+loader that registers the decoder stack's linears for dynamic LoRA, preloads the four adapters, and scopes each
+embedding batch to its rows' tasks (`retrieval.query` / `retrieval.passage` share the retrieval adapter).
+
+## Run 17 - 2026-10-27 16:12
+
+Question: with the two config gaps fixed and a `JinaEmbeddingsV5Model` path, do the merged and base v5 repos embed
+as Jina's code does, per task?
+
+Command: `inference serve --cpu --dtype f32` on each `-retrieval` repo (`jina5_cmp.py --merged`: `Query: ` /
+`Document: ` prefixed by hand, no task) and on each base repo (`jina5_cmp.py`: every task by `task`), against Run 16's
+saved `encode` outputs; then the base repos on CUDA at the default BF16, the tasks of each text sent at once.
+
+```
+small-retrieval (merged) f32 CPU   worst cos 0.999995    nano-retrieval (merged) f32 CPU   worst cos 0.999993
+small base, 5 tasks      f32 CPU   worst cos 1.000000    nano base, 5 tasks      f32 CPU   worst cos 1.000000
+small base, 5 tasks     bf16 CUDA  worst cos 0.999946    nano base, 5 tasks     bf16 CUDA  worst cos 0.999944
+unknown task: "unknown task `nope`; this model's tasks are: retrieval.query, retrieval.passage, text-matching,
+clustering, classification"
+```
+
+Finding: exact on the base repos. Config preparation (after any `--hf-overrides`) lifts transformers 5's
+`rope_parameters` into `rope_theta` / `rope_scaling` when those are absent (the root and `text_config`; per-layer-type parameters are left alone), and
+`Qwen3Model` maps to the Qwen3 embedder. The base repos route by `is_decoder` (false: the bidirectional Llama
+embedder, else Qwen3); `adapters/<name>/` folders become the embedding paths' LoRA adapters, which the dynamic LoRA
+runtime preloads (4 x rank 32); each forward is scoped to its rows' adapters, so mixed tasks batch. With no Pooling
+module in `modules.json`, the last token is pooled and normalized. The merged repos' residual (5e-6) is their bf16
+merge, not ours.
+
+Implication: commit with a tiny-checkpoint test (adapters checked against the merged weights, mixed tasks in one
+batch) and docs.

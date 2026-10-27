@@ -129,6 +129,8 @@ pub struct ModelInputs {
     pub input_ids: Tensor,
     pub extras: EmbeddingExtras,
     pub flash_meta: FlashParams,
+    /// Each row's task, on the host, for the adapters a LoRA runtime applies.
+    pub tasks: Vec<Option<usize>>,
 }
 
 /// Each row's task adapter; `None` when no sequence named a task.
@@ -224,6 +226,7 @@ impl InputsProcessor for EmbeddingInputsProcessor {
             input_ids,
             extras,
             flash_meta,
+            tasks: input_seqs.iter().map(|seq| seq.embedding_task()).collect(),
         });
         Ok(InputProcessorOutput {
             inputs,

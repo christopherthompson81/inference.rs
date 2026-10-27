@@ -73,18 +73,33 @@ const BERT_CLASSES: &[&str] = &[
     "JinaBertForSequenceClassification",
 ];
 
+const JINA_V5_CLASS: &str = "JinaEmbeddingsV5Model";
+
 // https://github.com/huggingface/transformers/blob/cff06aac6fad28019930be03f5d467055bf62177/src/transformers/models/auto/modeling_auto.py#L448
 impl EmbeddingLoaderType {
     pub fn from_causal_lm_name(name: &str) -> Result<Self> {
         match name {
             "Gemma3TextModel" => Ok(Self::EmbeddingGemma),
-            "Qwen3ForCausalLM" => Ok(Self::Qwen3Embedding),
+            "Qwen3ForCausalLM" | "Qwen3Model" => Ok(Self::Qwen3Embedding),
             other => Self::from_encoder_name(other).ok_or_else(|| {
                 anyhow::anyhow!(
                     "Unsupported Hugging Face Transformers model class `{other}`. Please raise an issue."
                 )
             }),
         }
+    }
+
+    /// As [`Self::from_causal_lm_name`], with the classes whose base the config tells apart.
+    pub fn from_config(name: &str, config: &str) -> Result<Self> {
+        if name != JINA_V5_CLASS {
+            return Self::from_causal_lm_name(name);
+        }
+        // Jina v5 wraps Qwen3 (small) or EuroBERT (nano), which attends both ways
+        let config: serde_json::Value = serde_json::from_str(config)?;
+        Ok(match config["is_decoder"].as_bool() {
+            Some(false) => Self::LlamaEmbedding,
+            _ => Self::Qwen3Embedding,
+        })
     }
 
     /// The architecture of a class that only ever runs as an embedder, so needs no sentence-transformers marker.
@@ -333,9 +348,7 @@ impl AutoEmbeddingLoader {
             anyhow::bail!("Expected to have one name for `architectures` config field.")
         }
 
-        let name = &auto_cfg.architectures[0];
-
-        let tp = EmbeddingLoaderType::from_causal_lm_name(name)?;
+        let tp = EmbeddingLoaderType::from_config(&auto_cfg.architectures[0], config)?;
 
         once_log_debug(format!("Automatic loader type determined to be `{tp}`"));
 
@@ -367,6 +380,9 @@ impl EmbeddingModelLoader for AutoEmbeddingLoader {
         config: &str,
     ) -> Result<Option<inference_nn::embedding::EmbeddingTasks>> {
         Self::get_loader(config)?.embedding_tasks(config)
+    }
+    fn pools_last_token(&self, config: &str) -> Result<bool> {
+        Self::get_loader(config)?.pools_last_token(config)
     }
     fn is_gptx(&self, config: &str) -> Result<bool> {
         Self::get_loader(config)?.is_gptx(config)

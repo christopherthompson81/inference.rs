@@ -27,6 +27,15 @@ impl EmbeddingModelLoader for LlamaEmbeddingLoader {
     fn has_causal_attention(&self, _: &str) -> Result<bool> {
         Ok(false)
     }
+    fn embedding_tasks(
+        &self,
+        config: &str,
+    ) -> Result<Option<inference_nn::embedding::EmbeddingTasks>> {
+        Ok(inference_nn::embedding::jina_v5_tasks(config)?)
+    }
+    fn pools_last_token(&self, config: &str) -> Result<bool> {
+        Ok(inference_nn::embedding::jina_v5_tasks(config)?.is_some())
+    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         Ok(Box::new(LlamaEmbeddingConfig::from_json(config)?))
     }
