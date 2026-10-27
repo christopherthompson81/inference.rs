@@ -565,12 +565,15 @@ fn bpe_pre_tokenizer_spec(pre: Option<&str>) -> Result<BpePreTokenizerSpec> {
         )
     })?;
     let spec = match pre {
-        "llama3" | "llama-v3" | "llama-bpe" | "lfm2" | "pixtral" => BpePreTokenizerSpec {
-            kind: BpePreTokenizerKind::Llama3,
-            regexes: &[LLAMA3_REGEX],
-            ignore_merges: true,
-            normalize_nfc: false,
-        },
+        // Jina v5 nano's EuroBERT vocabulary takes Llama 3's split, as llama.cpp reads it
+        "llama3" | "llama-v3" | "llama-bpe" | "lfm2" | "pixtral" | "jina-v5-nano" => {
+            BpePreTokenizerSpec {
+                kind: BpePreTokenizerKind::Llama3,
+                regexes: &[LLAMA3_REGEX],
+                ignore_merges: true,
+                normalize_nfc: false,
+            }
+        }
         "dbrx" => BpePreTokenizerSpec {
             kind: BpePreTokenizerKind::Dbrx,
             regexes: &[LLAMA3_REGEX],
@@ -1514,6 +1517,7 @@ mod tests {
         let cases = [
             ("llama3", BpePreTokenizerKind::Llama3, true, false, 1),
             ("llama-bpe", BpePreTokenizerKind::Llama3, true, false, 1),
+            ("jina-v5-nano", BpePreTokenizerKind::Llama3, true, false, 1),
             ("lfm2", BpePreTokenizerKind::Llama3, true, false, 1),
             ("dbrx", BpePreTokenizerKind::Dbrx, false, false, 1),
             ("qwen2", BpePreTokenizerKind::Qwen2, false, false, 1),

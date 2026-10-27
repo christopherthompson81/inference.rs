@@ -1,7 +1,7 @@
 use super::{Loader, ModelKind, ModelPaths, QuantizationKind, TokenSource};
 use crate::gguf::embedding_gguf::{
-    EmbeddingGgufArchitecture, add_encoder_specials, build_embedding_bindings, embedding_pooling,
-    synthesize_embedding_config,
+    DecoderEmbeddingGguf, EmbeddingGgufArchitecture, EmbeddingGgufPooling, add_encoder_specials,
+    build_embedding_bindings, embedding_pooling, synthesize_embedding_config,
 };
 use crate::gguf::{
     GgufTokenizerConversion,
@@ -309,6 +309,13 @@ impl GGUFLoaderBuilder {
     }
 }
 
+/// `config` as `class` reads it: the decoder translation's fields under an embedding model's class.
+fn with_architecture(config: &str, class: &str) -> Result<String> {
+    let mut config: serde_json::Value = serde_json::from_str(config)?;
+    config["architectures"] = serde_json::json!([class]);
+    Ok(serde_json::to_string(&config)?)
+}
+
 impl GGUFLoader {
     fn dynamic_lora_adapters(&self) -> Option<&[LoraAdapterSpec]> {
         self.dynamic_lora
@@ -437,9 +444,13 @@ impl GGUFLoader {
         args: NativeNormalLoadArgs<'_>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
         let NativeNormalLoadArgs { paths, options } = args;
-        let archive = Arc::new(inference_quant::GgufArchive::open(
-            paths.get_weight_filenames(),
-        )?);
+        let mut archive = inference_quant::GgufArchive::open(paths.get_weight_filenames())?;
+        // read through its decoder's translation, then loaded as an embedder
+        let decoder_embedding = DecoderEmbeddingGguf::from_metadata(archive.metadata());
+        if let Some(decoder) = decoder_embedding {
+            archive.rename_architecture(decoder.decoder_architecture())?;
+        }
+        let archive = Arc::new(archive);
         let architecture = match archive.metadata_value("general.architecture") {
             Some(inference_tensor::quantized::gguf_file::Value::String(value)) => value.as_str(),
             Some(value) => {
@@ -487,19 +498,24 @@ impl GGUFLoader {
                 metadata_string("general.basename"),
             );
 
-        let external_config = if paths.get_config_filename().as_os_str().is_empty() {
-            None
-        } else {
-            Some(fs::read_to_string(paths.get_config_filename())?)
-        };
+        // a repository's safetensors config describes the encoder, not the decoder translation the GGUF takes
+        let external_config =
+            if paths.get_config_filename().as_os_str().is_empty() || decoder_embedding.is_some() {
+                None
+            } else {
+                Some(fs::read_to_string(paths.get_config_filename())?)
+            };
         let explicit_loader = external_config
             .as_deref()
             .map(normal_loader_hint_from_external_config)
             .transpose()?;
         let explicit_loader = explicit_loader.flatten();
         let resolved = resolve_native_adapter(&descriptor, explicit_loader)?;
-        let rope_pairing =
-            crate::gguf::normal_registry::schema_for(descriptor.architecture).rope_pairing;
+        let rope_pairing = decoder_embedding
+            .and_then(DecoderEmbeddingGguf::rope_pairing)
+            .unwrap_or(
+                crate::gguf::normal_registry::schema_for(descriptor.architecture).rope_pairing,
+            );
         debug!(
             "Loading GGUF architecture `{}` through native {:?} ({:?}, layouts {:?})",
             descriptor.architecture,
@@ -523,6 +539,25 @@ impl GGUFLoader {
         };
         let config = stamp_qk_rope_layout(&config, rope_pairing)?;
         let bindings = build_normal_bindings(&archive, &loader_type, descriptor.architecture)?;
+        if let Some(decoder) = decoder_embedding {
+            let config = with_architecture(&config, decoder.class())?;
+            let mut source =
+                self.prepare_source(&archive, &bindings, paths, &options, config, rope_pairing)?;
+            add_encoder_specials(&mut source.tokenizer, archive.metadata())?;
+            let loader_type = match decoder {
+                DecoderEmbeddingGguf::EuroBert | DecoderEmbeddingGguf::LlamaEmbed => {
+                    EmbeddingLoaderType::LlamaEmbedding
+                }
+                DecoderEmbeddingGguf::Qwen3 => EmbeddingLoaderType::Qwen3Embedding,
+            };
+            return self.load_prepared_embedding(
+                loader_type,
+                source,
+                decoder.pooling(&archive)?,
+                paths,
+                options,
+            );
+        }
         let source =
             self.prepare_source(&archive, &bindings, paths, &options, config, rope_pairing)?;
         let mut loader = NormalLoaderBuilder::new(
@@ -584,6 +619,18 @@ impl GGUFLoader {
             EmbeddingGgufArchitecture::ModernBert => EmbeddingLoaderType::ModernBert,
             EmbeddingGgufArchitecture::NeoBert => EmbeddingLoaderType::NeoBert,
         };
+        self.load_prepared_embedding(loader_type, source, pooling, paths, options)
+    }
+
+    /// A GGUF translated to `loader_type`'s config and tensor names, run as an embedder pooled as it names.
+    fn load_prepared_embedding(
+        &self,
+        loader_type: EmbeddingLoaderType,
+        source: PreparedSource,
+        pooling: EmbeddingGgufPooling,
+        paths: &dyn ModelPaths,
+        options: LoadOptions<'_>,
+    ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
         let loader = EmbeddingLoaderBuilder::new(
             EmbeddingSpecificConfig {
                 topology: self.config.topology.clone(),

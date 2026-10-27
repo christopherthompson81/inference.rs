@@ -1,5 +1,6 @@
 //! Tiny encoders written as GGUFs under llama.cpp's tensor names and metadata (BERT, Nomic BERT and its MoE,
-//! Jina BERT v2, ModernBERT, NeoBERT), against the safetensors checkpoints they came from.
+//! Jina BERT v2, ModernBERT, NeoBERT, and the decoder-layout EuroBERT, Llama bidirectional and Qwen3 embedders),
+//! against the safetensors checkpoints they came from.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -10,6 +11,8 @@ use inference_tensor::{Device, Tensor};
 
 #[path = "../support/bert_embedding_tiny.rs"]
 mod bert;
+#[path = "../support/qwen3_embedding_tiny.rs"]
+mod qwen3;
 #[path = "../support/rope_encoders_tiny.rs"]
 mod rope;
 
@@ -29,6 +32,7 @@ const EPS: f32 = 1e-12;
 const NORM_EPS: f32 = 1e-5;
 const NEO_EPS: f32 = 1e-6;
 const NOMIC_EXPERTS: usize = 4;
+const POOLING_LAST: u32 = 3;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Arch {
@@ -38,9 +42,16 @@ enum Arch {
     NomicBertMoe,
     ModernBert,
     NeoBert,
+    EuroBert,
+    LlamaEmbed,
+    Qwen3,
 }
 
 impl Arch {
+    fn decoder(self) -> bool {
+        matches!(self, Self::EuroBert | Self::LlamaEmbed | Self::Qwen3)
+    }
+
     fn name(self) -> &'static str {
         match self {
             Self::Bert => "bert",
@@ -49,6 +60,9 @@ impl Arch {
             Self::NomicBertMoe => "nomic-bert-moe",
             Self::ModernBert => "modern-bert",
             Self::NeoBert => "neo-bert",
+            Self::EuroBert => "eurobert",
+            Self::LlamaEmbed => "llama-embed",
+            Self::Qwen3 => "qwen3",
         }
     }
 
@@ -58,6 +72,7 @@ impl Arch {
             Self::NomicBert | Self::NomicBertMoe => "encoder.layers.",
             Self::ModernBert => "layers.",
             Self::NeoBert => "transformer_encoder.",
+            Self::EuroBert | Self::LlamaEmbed | Self::Qwen3 => "layers.",
         }
     }
 
@@ -73,7 +88,8 @@ impl Arch {
                 Some("token_embd_norm.weight")
             }
             "embeddings.LayerNorm.bias" | "emb_ln.bias" => Some("token_embd_norm.bias"),
-            "final_norm.weight" => Some("output_norm.weight"),
+            "final_norm.weight" | "norm.weight" => Some("output_norm.weight"),
+            "embed_tokens.weight" => Some("token_embd.weight"),
             "layer_norm.weight" => Some("enc.output_norm.weight"),
             _ => None,
         };
@@ -97,6 +113,17 @@ impl Arch {
             (_, "attn_norm" | "attention_norm") => "attn_norm",
             (_, "mlp_norm" | "ffn_norm") => "ffn_norm",
             (_, "mlp.router.layer") => "ffn_gate_inp",
+            (_, "self_attn.q_proj") => "attn_q",
+            (_, "self_attn.k_proj") => "attn_k",
+            (_, "self_attn.v_proj") => "attn_v",
+            (_, "self_attn.o_proj") => "attn_output",
+            (_, "self_attn.q_norm") => "attn_q_norm",
+            (_, "self_attn.k_norm") => "attn_k_norm",
+            (_, "mlp.gate_proj") => "ffn_gate",
+            (_, "mlp.up_proj") => "ffn_up",
+            (_, "mlp.down_proj") => "ffn_down",
+            (_, "input_layernorm") => "attn_norm",
+            (_, "post_attention_layernorm") => "ffn_norm",
             _ => return None,
         };
         Some(format!("blk.{block}.{role}.{part}"))
@@ -106,9 +133,14 @@ impl Arch {
         use gguf_file::Value::{F32, U32};
         let key = |k: &str| format!("{}.{k}", self.name());
         let num = |k: &str| U32(cfg[k].as_u64().unwrap_or_default() as u32);
+        let heads = if self.decoder() {
+            num("num_attention_heads")
+        } else {
+            U32(HEADS)
+        };
         let mut metadata = vec![
             (key("embedding_length"), U32(HIDDEN)),
-            (key("attention.head_count"), U32(HEADS)),
+            (key("attention.head_count"), heads),
         ];
         match self {
             Self::Bert | Self::JinaBertV2 => metadata.extend([
@@ -170,9 +202,40 @@ impl Arch {
                     (key("pooling_type"), U32(POOLING_MEAN)),
                 ]);
             }
+            Self::EuroBert | Self::LlamaEmbed | Self::Qwen3 => {
+                let float = |k: &str| F32(cfg[k].as_f64().unwrap_or_default() as f32);
+                metadata.extend([
+                    (key("block_count"), num("num_hidden_layers")),
+                    (key("feed_forward_length"), num("intermediate_size")),
+                    (key("context_length"), num("max_position_embeddings")),
+                    (key("attention.head_count_kv"), num("num_key_value_heads")),
+                    (key("attention.key_length"), num("head_dim")),
+                    (key("attention.value_length"), num("head_dim")),
+                    (
+                        key("attention.layer_norm_rms_epsilon"),
+                        float("rms_norm_eps"),
+                    ),
+                    (key("rope.freq_base"), float("rope_theta")),
+                ]);
+                match self {
+                    // llama.cpp's Llama converter writes no pooling for `llama-embed`
+                    Self::LlamaEmbed => {}
+                    Self::EuroBert => metadata.push((key("pooling_type"), U32(POOLING_CLS))),
+                    _ => metadata.push((key("pooling_type"), U32(POOLING_LAST))),
+                }
+            }
         }
         metadata
     }
+}
+
+/// llama.cpp's Llama converter reorders each head's Q/K rows from half-split to adjacent RoPE pairs.
+fn llama_cpp_permute(weight: &Tensor, heads: usize) -> anyhow::Result<Tensor> {
+    let (rows, cols) = weight.dims2()?;
+    Ok(weight
+        .reshape((heads, 2, rows / heads / 2, cols))?
+        .transpose(1, 2)?
+        .reshape((rows, cols))?)
 }
 
 fn tokens_by_id(tokenizer_json: &Path) -> anyhow::Result<Vec<gguf_file::Value>> {
@@ -233,6 +296,20 @@ fn write_gguf(
     if arch == Arch::NomicBertMoe {
         named.extend(nomic_experts(&weights)?);
     }
+    let cfg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(checkpoint.join("config.json"))?)?;
+    if arch == Arch::LlamaEmbed {
+        for (gguf, tensor) in named.iter_mut() {
+            let heads = match gguf.rsplit('.').nth(1) {
+                Some("attn_q") => cfg["num_attention_heads"].as_u64(),
+                Some("attn_k") => cfg["num_key_value_heads"].as_u64(),
+                _ => None,
+            };
+            if let Some(heads) = heads {
+                *tensor = llama_cpp_permute(tensor, heads as usize)?;
+            }
+        }
+    }
     for (gguf, tensor) in named {
         let quantizable = tensor.rank() >= 2
             && !gguf.starts_with("token_types")
@@ -245,8 +322,6 @@ fn write_gguf(
         };
         tensors.push((gguf, QTensor::quantize(&tensor, dtype)?));
     }
-    let cfg: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(checkpoint.join("config.json"))?)?;
     let mut metadata = arch.metadata(&cfg);
     metadata.push((
         "general.architecture".to_string(),
@@ -416,4 +491,38 @@ async fn a_bert_reranker_gguf_without_its_pooler_is_refused() -> anyhow::Result<
     };
     anyhow::ensure!(error.to_string().contains("no pooler"), "{error}");
     Ok(())
+}
+
+#[tokio::test]
+async fn a_qwen3_gguf_that_names_a_pooling_embeds_as_its_source() -> anyhow::Result<()> {
+    let checkpoint = qwen3::tiny_embedding_checkpoint()?;
+    assert_gguf_embeds_as_its_source(checkpoint.path(), Arch::Qwen3).await
+}
+
+/// The tiny bidirectional Llama without the llama3 rope scaling llama.cpp writes as `rope_freqs`, pooled as `mode`.
+fn bidirectional_llama(mode: &str) -> anyhow::Result<tempfile::TempDir> {
+    let checkpoint = rope::tiny_llama_embedding_checkpoint(|config| {
+        config
+            .as_object_mut()
+            .map(|config| config.remove("rope_scaling"));
+    })?;
+    let pooling = checkpoint.path().join("1_Pooling/config.json");
+    let mut config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&pooling)?)?;
+    config["pooling_mode_cls_token"] = (mode == "cls").into();
+    config["pooling_mode_mean_tokens"] = (mode == "mean").into();
+    std::fs::write(pooling, config.to_string())?;
+    Ok(checkpoint)
+}
+
+#[tokio::test]
+async fn a_eurobert_gguf_embeds_as_its_source() -> anyhow::Result<()> {
+    let checkpoint = bidirectional_llama("cls")?;
+    assert_gguf_embeds_as_its_source(checkpoint.path(), Arch::EuroBert).await
+}
+
+// its Q/K rows permuted as llama.cpp's Llama converter writes them, and no pooling_type, which means mean
+#[tokio::test]
+async fn a_llama_embed_gguf_embeds_as_its_source() -> anyhow::Result<()> {
+    let checkpoint = bidirectional_llama("mean")?;
+    assert_gguf_embeds_as_its_source(checkpoint.path(), Arch::LlamaEmbed).await
 }

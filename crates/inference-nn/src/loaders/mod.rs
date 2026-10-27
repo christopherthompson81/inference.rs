@@ -323,8 +323,12 @@ pub trait EmbeddingModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModel
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn EmbeddingModel + Send + Sync>>;
-    fn is_gptx(&self, _config: &str) -> Result<bool> {
-        Ok(true)
+    /// Half-split RoPE, unless a GGUF translation stamped the adjacent pairs llama.cpp's Llama converter writes.
+    fn is_gptx(&self, config: &str) -> Result<bool> {
+        Ok(!matches!(
+            qk_rope_layout_from_config(config)?,
+            Some(RopePairing::Adjacent)
+        ))
     }
     fn has_causal_attention(&self, config: &str) -> Result<bool>;
     /// A classifier outputs its logits per input, with no sentence-transformers modules after it.

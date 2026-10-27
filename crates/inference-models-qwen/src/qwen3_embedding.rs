@@ -15,8 +15,13 @@ use crate::{
 
 pub use crate::qwen3::Config;
 
+const EMBED_TOKENS: &str = "embed_tokens.weight";
+// a GGUF's decoder translation keeps Qwen3ForCausalLM's `model.`
+const BASE_PREFIX: &str = "model";
+
 pub struct Model {
     stack: DecoderStack,
+    prefix: Option<&'static str>,
 }
 
 impl Model {
@@ -30,7 +35,13 @@ impl Model {
         if !matches!(attention_mechanism, AttentionImplementation::Eager) {
             inference_tensor::bail!("Expected AttentionImplementation::Eager");
         }
+        let prefix = (!vb.contains_tensor(EMBED_TOKENS)).then_some(BASE_PREFIX);
+        let vb = match prefix {
+            Some(prefix) => vb.pp(prefix),
+            None => vb,
+        };
         Ok(Self {
+            prefix,
             stack: DecoderStack::new(
                 &cfg.decoder_spec(),
                 vb,
@@ -57,9 +68,11 @@ impl Model {
 
 impl IsqModel for Model {
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
-        let uvb = UnVarBuilder::new();
-        self.stack.residual_uvb(&uvb, false);
-        uvb.to_safetensors()
+        let root = UnVarBuilder::new();
+        let prefixed = self.prefix.map(|prefix| root.pp(prefix));
+        self.stack
+            .residual_uvb(prefixed.as_ref().unwrap_or(&root), false);
+        root.to_safetensors()
     }
 }
 

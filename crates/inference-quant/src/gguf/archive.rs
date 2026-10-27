@@ -682,6 +682,26 @@ impl GgufArchive {
         })
     }
 
+    /// Files the metadata under `to`'s keys, for a GGUF that shares that architecture's layout under another name.
+    pub fn rename_architecture(&mut self, to: &str) -> Result<()> {
+        let Some(Value::String(from)) = self.metadata.get(GENERAL_ARCHITECTURE).cloned() else {
+            inference_tensor::bail!("GGUF metadata is missing `{GENERAL_ARCHITECTURE}`");
+        };
+        let prefix = format!("{from}.");
+        self.metadata = std::mem::take(&mut self.metadata)
+            .into_iter()
+            .map(|(key, value)| match key.strip_prefix(&prefix) {
+                Some(rest) => (format!("{to}.{rest}"), value),
+                None => (key, value),
+            })
+            .collect();
+        self.metadata.insert(
+            GENERAL_ARCHITECTURE.to_string(),
+            Value::String(to.to_string()),
+        );
+        Ok(())
+    }
+
     pub fn open_file(path: impl AsRef<Path>) -> Result<Self> {
         Self::open([path])
     }

@@ -4,11 +4,13 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
+use inference_nn::model::RopePairing;
 use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
 use inference_tensor::quantized::gguf_file::Value;
 use serde_json::{Value as Json, json};
 use tokenizers::Tokenizer;
 
+const ARCHITECTURE_KEY: &str = "general.architecture";
 const TOKEN_EMBEDDINGS: &str = "token_embd.weight";
 const TOKEN_TYPES: &str = "token_types.weight";
 const TOKEN_TYPE_COUNT_KEY: &str = "tokenizer.ggml.token_type_count";
@@ -291,14 +293,14 @@ pub fn embedding_pooling(
     archive: &GgufArchive,
     architecture: EmbeddingGgufArchitecture,
 ) -> Result<EmbeddingGgufPooling> {
-    let meta = metadata(archive, architecture);
-    let pooling = match meta.optional("pooling_type") {
+    pooling_under(archive, architecture.prefix())
+}
+
+fn pooling_under(archive: &GgufArchive, prefix: &str) -> Result<EmbeddingGgufPooling> {
+    let pooling = match archive.metadata().get(&format!("{prefix}.pooling_type")) {
         Some(pooling) => pooling.to_u32()?,
         None if is_classifier(archive) => POOLING_RANK,
-        None => bail!(
-            "GGUF metadata is missing `{}.pooling_type`",
-            architecture.prefix()
-        ),
+        None => bail!("GGUF metadata is missing `{prefix}.pooling_type`"),
     };
     Ok(match pooling {
         POOLING_MEAN => EmbeddingGgufPooling::Mean,
@@ -307,6 +309,63 @@ pub fn embedding_pooling(
         POOLING_RANK => EmbeddingGgufPooling::Rank,
         other => bail!("GGUF pooling_type {other} is not supported for embeddings"),
     })
+}
+
+/// A decoder-layout GGUF llama.cpp runs as an embedder: EuroBERT and Llama bidirectional under Llama's names and
+/// metadata, and a Qwen3 that names a pooling (Qwen3-Embedding, Jina v5 small).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecoderEmbeddingGguf {
+    EuroBert,
+    LlamaEmbed,
+    Qwen3,
+}
+
+impl DecoderEmbeddingGguf {
+    pub fn from_metadata(metadata: &HashMap<String, Value>) -> Option<Self> {
+        let Some(Value::String(architecture)) = metadata.get(ARCHITECTURE_KEY) else {
+            return None;
+        };
+        match architecture.as_str() {
+            "eurobert" => Some(Self::EuroBert),
+            "llama-embed" => Some(Self::LlamaEmbed),
+            "qwen3" if metadata.contains_key("qwen3.pooling_type") => Some(Self::Qwen3),
+            _ => None,
+        }
+    }
+
+    /// The decoder architecture whose metadata keys and tensor names it shares.
+    pub fn decoder_architecture(self) -> &'static str {
+        match self {
+            Self::EuroBert | Self::LlamaEmbed => "llama",
+            Self::Qwen3 => "qwen3",
+        }
+    }
+
+    /// The Q/K row order when it is not the decoder's: llama.cpp converts EuroBERT without Llama's RoPE permute.
+    pub fn rope_pairing(self) -> Option<RopePairing> {
+        match self {
+            Self::EuroBert => Some(RopePairing::HalfSplit),
+            Self::LlamaEmbed | Self::Qwen3 => None,
+        }
+    }
+
+    /// The transformers class the embedding loader reads it as.
+    pub fn class(self) -> &'static str {
+        match self {
+            Self::EuroBert | Self::LlamaEmbed => "LlamaBidirectionalModel",
+            Self::Qwen3 => "Qwen3Model",
+        }
+    }
+
+    /// Its pooling, read once the archive is filed under the decoder architecture.
+    pub fn pooling(self, archive: &GgufArchive) -> Result<EmbeddingGgufPooling> {
+        let key = format!("{}.pooling_type", self.decoder_architecture());
+        // llama.cpp's Llama converter writes none for `llama-embed`, whose embedders (Nemotron) mean-pool
+        if self == Self::LlamaEmbed && !archive.metadata().contains_key(&key) {
+            return Ok(EmbeddingGgufPooling::Mean);
+        }
+        pooling_under(archive, self.decoder_architecture())
+    }
 }
 
 /// `(native name, GGUF name)` of the tensors outside the blocks.
