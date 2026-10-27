@@ -99,8 +99,7 @@ impl DeviceMappedModelLoader for BertLoader {
         // the embedding LayerNorm's weight and bias
         let mut elems = rows * hidden + 2 * hidden;
         if cfg.is_classifier() {
-            // a hidden-to-hidden dense layer and the label projection, both biased
-            elems += hidden * hidden + hidden + hidden * labels + labels;
+            elems += crate::classifier::head_elems(hidden, labels);
         }
         Ok(elems * dtype.size_in_bytes())
     }

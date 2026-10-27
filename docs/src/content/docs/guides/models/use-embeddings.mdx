@@ -253,11 +253,13 @@ inference.rs handles steps 1, 2, and (with a cross-encoder, below) 4. The rest i
 
 ## Reranking with a cross-encoder
 
-A cross-encoder reads the query and a document together and scores the pair, which ranks a short candidate list more accurately than comparing two embeddings. Load a `*ForSequenceClassification` checkpoint with one label (a BERT, RoBERTa, XLM-RoBERTa, CamemBERT or DistilBERT one) and send `POST /v1/rerank`:
+A cross-encoder reads the query and a document together and scores the pair, which ranks a short candidate list more accurately than comparing two embeddings. Load a `*ForSequenceClassification` checkpoint with one label (a BERT, RoBERTa, XLM-RoBERTa, CamemBERT, DistilBERT, ModernBERT or NeoBERT one) and send `POST /v1/rerank`:
 
 - `cross-encoder/ms-marco-MiniLM-L6-v2`: 22M parameters, English.
 - `BAAI/bge-reranker-base`: 278M parameters, multilingual.
 - `ml6team/cross-encoder-mmarco-german-distilbert-base` (DistilBERT): 66M parameters, German.
+- `Alibaba-NLP/gte-reranker-modernbert-base` (ModernBERT): 149M parameters, English, inputs up to 8192 tokens.
+- `tomaarsen/reranker-NeoBERT-gooaq-bce` (NeoBERT): 250M parameters, English.
 
 ```bash
 inference serve -m cross-encoder/ms-marco-MiniLM-L6-v2

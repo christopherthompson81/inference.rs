@@ -10,6 +10,7 @@ use serde::Deserialize;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::{AttentionMask, FlashParams},
+    classifier::{self, ClassifierHead, HeadActivation, HeadPooling, HeadSpec},
     device_map::DeviceMapper,
     layers::{RmsNorm, dense_embedding},
     model::{EmbeddingModel, IsqModel, NormalLoadingMetadata},
@@ -40,9 +41,38 @@ pub struct Config {
     pub norm_eps: f64,
     #[serde(default = "max_length")]
     pub max_length: usize,
+    #[serde(default)]
+    pub architectures: Vec<String>,
+    #[serde(default)]
+    pub id2label: Option<std::collections::HashMap<String, String>>,
 }
 
 impl Config {
+    pub fn is_classifier(&self) -> bool {
+        classifier::is_classifier(&self.architectures)
+    }
+
+    pub fn num_labels(&self) -> usize {
+        classifier::num_labels(self.id2label.as_ref())
+    }
+
+    /// `dense` and tanh over the first token, then `classifier`.
+    fn head(&self, root: &ShardedVarBuilder) -> Result<ClassifierHead> {
+        ClassifierHead::new(
+            &HeadSpec {
+                hidden: self.hidden_size,
+                labels: self.num_labels(),
+                pooling: HeadPooling::First,
+                dense: "dense",
+                dense_bias: true,
+                activation: HeadActivation::Tanh,
+                norm: None,
+                out: "classifier",
+            },
+            root,
+        )
+    }
+
     pub fn ffn_size(&self) -> usize {
         (2 * self.intermediate_size / 3).div_ceil(FFN_MULTIPLE) * FFN_MULTIPLE
     }
@@ -77,6 +107,7 @@ pub struct Model {
     layers: Vec<Layer>,
     layer_norm: RmsNorm,
     prefix: Option<&'static str>,
+    head: Option<ClassifierHead>,
     mapper: Box<dyn DeviceMapper + Send + Sync>,
     device: Device,
 }
@@ -92,6 +123,7 @@ impl Model {
             inference_tensor::bail!("Expected AttentionImplementation::Eager");
         }
         let prefix = (!vb.contains_tensor(TOKEN_EMBEDDINGS)).then_some(BASE_PREFIX);
+        let root = vb.clone();
         let vb = match prefix {
             Some(prefix) => vb.pp(prefix),
             None => vb,
@@ -172,6 +204,10 @@ impl Model {
                 mapper.set_nm_device(vb.pp("layer_norm"), false),
             )?,
             prefix,
+            head: cfg
+                .is_classifier()
+                .then(|| cfg.head(&mapper.set_nm_device(root, false)))
+                .transpose()?,
             mapper,
             device: real_device,
         })
@@ -190,6 +226,9 @@ impl IsqModel for Model {
             uvb_l.pp("attention_norm").add(&layer.attention_norm);
             uvb_l.pp("ffn_norm").add(&layer.ffn_norm);
         }
+        if let Some(head) = &self.head {
+            head.add_residual(&root);
+        }
         root.to_safetensors()
     }
 }
@@ -205,7 +244,11 @@ impl EmbeddingModel for Model {
         for (i, layer) in self.layers.iter().enumerate() {
             xs = layer.forward(&self.mapper.map(xs, i)?)?;
         }
-        self.layer_norm.forward(&xs.to_device(&self.device)?)
+        let xs = self.layer_norm.forward(&xs.to_device(&self.device)?)?;
+        match &self.head {
+            Some(head) => head.forward(&xs),
+            None => Ok(xs),
+        }
     }
     fn device(&self) -> &Device {
         &self.device

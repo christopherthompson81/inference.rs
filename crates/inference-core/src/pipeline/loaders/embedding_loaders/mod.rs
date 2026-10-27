@@ -45,8 +45,16 @@ pub enum EmbeddingLoaderType {
 }
 
 const NOMIC_BERT_CLASSES: &[&str] = &["NomicBertModel"];
-const MODERN_BERT_CLASSES: &[&str] = &["ModernBertModel", "ModernBertForMaskedLM"];
-const NEO_BERT_CLASSES: &[&str] = &["NeoBERT", "NeoBERTLMHead"];
+const MODERN_BERT_CLASSES: &[&str] = &[
+    "ModernBertModel",
+    "ModernBertForMaskedLM",
+    "ModernBertForSequenceClassification",
+];
+const NEO_BERT_CLASSES: &[&str] = &[
+    "NeoBERT",
+    "NeoBERTLMHead",
+    "NeoBERTForSequenceClassification",
+];
 // Llama layers run without a causal mask: EuroBERT, and Llama bidirectional embedders
 const LLAMA_EMBEDDING_CLASSES: &[&str] = &[
     "EuroBertModel",

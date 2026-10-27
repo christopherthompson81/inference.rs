@@ -6,12 +6,13 @@ use std::sync::Arc;
 
 use inference_quant::{QuantMethod, ShardedVarBuilder};
 use inference_tensor::nn::{Embedding, LayerNorm, Module};
-use inference_tensor::{D, DType, Device, IndexOp, Result, Tensor};
+use inference_tensor::{D, DType, Device, Result, Tensor};
 use serde::Deserialize;
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::{AttentionMask, FlashParams, SdpaParams},
+    classifier::{self, ClassifierHead, HeadActivation, HeadPooling, HeadSpec},
     device_map::DeviceMapper,
     layers::{Activation, Sdpa, dense_embedding, layer_norm},
     model::{EmbeddingModel, IsqModel, NormalLoadingMetadata},
@@ -29,11 +30,7 @@ const ABSOLUTE_POSITIONS: &str = "absolute";
 // Jina BERT v2: no position table, a per-head linear bias on |i - j| instead
 const ALIBI_POSITIONS: &str = "alibi";
 pub const ORIGINAL_FFN: &str = "original";
-const CLASSIFIER_SUFFIX: &str = "ForSequenceClassification";
 const PRE_CLASSIFIER: &str = "pre_classifier";
-const PRE_CLASSIFIER_WEIGHT: &str = "pre_classifier.weight";
-// transformers' PretrainedConfig default when a config lists no labels
-const DEFAULT_NUM_LABELS: usize = 2;
 
 serde_default_fn!(usize, type_vocab_size, 2);
 serde_default_fn!(f64, layer_norm_eps, 1e-12);
@@ -120,15 +117,48 @@ impl Config {
 
     /// A cross-encoder: a classification head over the first token, scoring rather than embedding.
     pub fn is_classifier(&self) -> bool {
-        self.architectures
-            .iter()
-            .any(|arch| arch.ends_with(CLASSIFIER_SUFFIX))
+        classifier::is_classifier(&self.architectures)
     }
 
     pub fn num_labels(&self) -> usize {
-        self.id2label
-            .as_ref()
-            .map_or(DEFAULT_NUM_LABELS, |labels| labels.len())
+        classifier::num_labels(self.id2label.as_ref())
+    }
+
+    /// BERT's pooler, RoBERTa's `classifier.dense` or DistilBERT's `pre_classifier`, by what `root` holds.
+    fn head(&self, root: &ShardedVarBuilder, prefix: Option<&str>) -> Result<ClassifierHead> {
+        let pooler = match prefix {
+            Some(prefix) => format!("{prefix}.pooler.dense"),
+            None => "pooler.dense".to_string(),
+        };
+        // by what the checkpoint holds: an XLM-R reranker GGUF names its model type `bert`
+        let (dense, activation, out) = if root.contains_tensor("classifier.dense.weight") {
+            (
+                "classifier.dense",
+                HeadActivation::Tanh,
+                "classifier.out_proj",
+            )
+        } else if root.contains_tensor(&format!("{PRE_CLASSIFIER}.weight")) {
+            (
+                PRE_CLASSIFIER,
+                HeadActivation::Act(Activation::Relu),
+                "classifier",
+            )
+        } else {
+            (pooler.as_str(), HeadActivation::Tanh, "classifier")
+        };
+        ClassifierHead::new(
+            &HeadSpec {
+                hidden: self.hidden_size,
+                labels: self.num_labels(),
+                pooling: HeadPooling::First,
+                dense,
+                dense_bias: true,
+                activation,
+                norm: None,
+                out,
+            },
+            root,
+        )
     }
 
     pub fn head_dim(&self) -> usize {
@@ -249,86 +279,6 @@ impl Embeddings {
             (Some(table), _) => xs.broadcast_add(&table.embeddings().narrow(0, 0, 1)?)?,
         };
         self.norm.forward(&xs)
-    }
-}
-
-/// A sequence-classification head over the first token's state.
-enum Head {
-    /// BERT: the pooler's tanh dense layer, then `classifier`.
-    Pooled {
-        pooler: Arc<dyn QuantMethod>,
-        classifier: Arc<dyn QuantMethod>,
-    },
-    /// RoBERTa / XLM-R: `classifier.dense`, tanh, then `classifier.out_proj`.
-    Projected {
-        dense: Arc<dyn QuantMethod>,
-        out_proj: Arc<dyn QuantMethod>,
-    },
-    /// DistilBERT: `pre_classifier`, ReLU, then `classifier`.
-    PreClassified {
-        pre_classifier: Arc<dyn QuantMethod>,
-        classifier: Arc<dyn QuantMethod>,
-    },
-}
-
-impl Head {
-    fn new(cfg: &Config, root: &ShardedVarBuilder, encoder: &ShardedVarBuilder) -> Result<Self> {
-        let (hidden, labels) = (cfg.hidden_size, cfg.num_labels());
-        let linear = |i, o, vb| inference_quant::linear(i, o, &None, vb);
-        let classifier = root.pp("classifier");
-        // by what the checkpoint holds: an XLM-R reranker GGUF names its model type `bert`
-        Ok(if classifier.contains_tensor("dense.weight") {
-            Self::Projected {
-                dense: linear(hidden, hidden, classifier.pp("dense"))?,
-                out_proj: linear(hidden, labels, classifier.pp("out_proj"))?,
-            }
-        } else if root.contains_tensor(PRE_CLASSIFIER_WEIGHT) {
-            Self::PreClassified {
-                pre_classifier: linear(hidden, hidden, root.pp(PRE_CLASSIFIER))?,
-                classifier: linear(hidden, labels, classifier)?,
-            }
-        } else {
-            Self::Pooled {
-                pooler: linear(hidden, hidden, encoder.pp("pooler").pp("dense"))?,
-                classifier: linear(hidden, labels, classifier)?,
-            }
-        })
-    }
-
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let first = xs.i((.., 0, ..))?.contiguous()?;
-        match self {
-            Self::Pooled { pooler, classifier } => {
-                classifier.forward(&pooler.forward(&first)?.tanh()?)
-            }
-            Self::Projected { dense, out_proj } => {
-                out_proj.forward(&dense.forward(&first)?.tanh()?)
-            }
-            Self::PreClassified {
-                pre_classifier,
-                classifier,
-            } => classifier.forward(&pre_classifier.forward(&first)?.relu()?),
-        }
-    }
-
-    fn add_residual(&self, root: &UnVarBuilder, encoder: &UnVarBuilder) {
-        match self {
-            Self::Pooled { pooler, classifier } => {
-                encoder.pp("pooler").pp("dense").add(pooler);
-                root.pp("classifier").add(classifier);
-            }
-            Self::Projected { dense, out_proj } => {
-                root.pp("classifier").pp("dense").add(dense);
-                root.pp("classifier").pp("out_proj").add(out_proj);
-            }
-            Self::PreClassified {
-                pre_classifier,
-                classifier,
-            } => {
-                root.pp(PRE_CLASSIFIER).add(pre_classifier);
-                root.pp("classifier").add(classifier);
-            }
-        }
     }
 }
 
@@ -469,7 +419,7 @@ impl Layer {
 pub struct Model {
     embeddings: Embeddings,
     layers: Vec<Layer>,
-    head: Option<Head>,
+    head: Option<ClassifierHead>,
     // `[heads, 1, 1]`, negated: each head's bias is slope * -|i - j|
     alibi_slopes: Option<Tensor>,
     // the base model prefix the encoder's weights sit under, kept for the UQFF residual
@@ -540,13 +490,7 @@ impl Model {
             .collect::<Result<Vec<_>>>()?;
         let head = cfg
             .is_classifier()
-            .then(|| {
-                Head::new(
-                    cfg,
-                    &mapper.set_nm_device(root, false),
-                    &mapper.set_nm_device(vb.clone(), false),
-                )
-            })
+            .then(|| cfg.head(&mapper.set_nm_device(root, false), prefix))
             .transpose()?;
         let alibi_slopes = cfg
             .alibi()
@@ -604,7 +548,7 @@ impl IsqModel for Model {
         let encoder = encoder.as_ref().unwrap_or(&root);
         self.add_encoder_residual(encoder);
         if let Some(head) = &self.head {
-            head.add_residual(&root, encoder);
+            head.add_residual(&root);
         }
         root.to_safetensors()
     }
