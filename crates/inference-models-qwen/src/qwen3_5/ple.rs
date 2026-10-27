@@ -468,29 +468,12 @@ impl PleLayer {
         // a CUDA decode step gathers in a host function, so it never waits on the host and a graph can replay it
         #[cfg(feature = "cuda")]
         if let Device::Cuda(cuda) = device
-            && len <= PLE_HOST_TOKENS
-            && batch * len <= PLE_HOST_ROWS
+            && let Some(window) = self.decode_window(tokens, batch, len, device)?
         {
-            let preceding = self.preceding_tokens();
-            let window = match tokens {
-                PleTokens::Device(window) => Some(window.clone()),
-                PleTokens::Host(window) => window
-                    .decode_rows(preceding, len)
-                    .map(|rows| {
-                        Tensor::from_vec(
-                            rows,
-                            (batch, TokenWindow::decode_width(preceding, len)),
-                            device,
-                        )
-                    })
-                    .transpose()?,
-            };
-            if let Some(window) = window {
-                return Ok((
-                    self.host_gather(cuda)?.gather(&window, len)?,
-                    vec![len; batch],
-                ));
-            }
+            return Ok((
+                self.host_gather(cuda)?.gather(&window, len)?,
+                vec![len; batch],
+            ));
         }
         let window = match tokens {
             PleTokens::Host(window) => window,
@@ -507,6 +490,57 @@ impl PleLayer {
         }
         let (rows, real_lens) = self.lookup.rows(window, len)?;
         Ok((rows.to_device(device)?, real_lens))
+    }
+
+    // A CUDA decode step's token window in `TokenWindow::decode_rows`' layout on `device`, when the host gather serves it
+    #[cfg(feature = "cuda")]
+    fn decode_window(
+        &self,
+        tokens: PleTokens<'_>,
+        batch: usize,
+        len: usize,
+        device: &Device,
+    ) -> Result<Option<Tensor>> {
+        if len > PLE_HOST_TOKENS || batch * len > PLE_HOST_ROWS {
+            return Ok(None);
+        }
+        let preceding = self.preceding_tokens();
+        match tokens {
+            PleTokens::Device(window) => Ok(Some(window.clone())),
+            PleTokens::Host(window) => window
+                .decode_rows(preceding, len)
+                .map(|rows| {
+                    Tensor::from_vec(
+                        rows,
+                        (batch, TokenWindow::decode_width(preceding, len)),
+                        device,
+                    )
+                })
+                .transpose(),
+        }
+    }
+
+    /// Starts a CUDA decode step's host gather when the step starts, so it overlaps the layers before this one; the
+    /// layer's forward joins it.
+    #[cfg(feature = "cuda")]
+    pub(super) fn gather_ahead(
+        &self,
+        tokens: PleTokens<'_>,
+        batch: usize,
+        len: usize,
+    ) -> Result<()> {
+        let device = self.conv.device();
+        let Device::Cuda(cuda) = device else {
+            return Ok(());
+        };
+        let gather = self.host_gather(cuda)?;
+        match self.decode_window(tokens, batch, len, device)? {
+            Some(window) => gather.start(&window, len),
+            None => {
+                gather.forget();
+                Ok(())
+            }
+        }
     }
 
     #[cfg(feature = "cuda")]
@@ -558,7 +592,7 @@ mod host_gather {
     use std::sync::Arc;
 
     use inference_nn::cuda::mapped::{mapped_buffer, mapped_host, tensor_ptr};
-    use inference_tensor::cuda::cudarc::driver::{CudaSlice, CudaStream, result};
+    use inference_tensor::cuda::cudarc::driver::{CudaEvent, CudaSlice, CudaStream, result};
     use inference_tensor::{CudaDevice, DType, Device, Result, Tensor};
 
     use super::{NgramLookup, PLE_HOST_ROWS, PLE_HOST_TOKENS, TokenWindow};
@@ -625,6 +659,15 @@ mod host_gather {
         calls: Vec<Vec<Call>>,
         side: Arc<CudaStream>,
         device: CudaDevice,
+        ahead: std::sync::Mutex<Option<Pending>>,
+    }
+
+    /// A gather started ahead of its layer: the rows it lands in, and the side stream's event once they have.
+    struct Pending {
+        rows: Tensor,
+        landed: CudaEvent,
+        batch: usize,
+        len: usize,
     }
 
     impl HostGather {
@@ -657,11 +700,38 @@ mod host_gather {
                     .new_stream()
                     .map_err(inference_tensor::Error::wrap)?,
                 device: device.clone(),
+                ahead: std::sync::Mutex::new(None),
             })
         }
 
-        /// The rows of each window row's `len` step tokens, `[batch * len * heads, head_dim]` f32.
+        /// The rows of each window row's `len` step tokens, `[batch * len * heads, head_dim]` f32: the gather `start`
+        /// began for this step when there is one, else a new one.
         pub(super) fn gather(&self, window: &Tensor, len: usize) -> Result<Tensor> {
+            let batch = window.dim(0)?;
+            let pending = match self.ahead.lock().expect("PLE gather poisoned").take() {
+                Some(pending) if pending.batch == batch && pending.len == len => pending,
+                _ => self.launch(window, len)?,
+            };
+            self.device
+                .cuda_stream()
+                .wait(&pending.landed)
+                .map_err(inference_tensor::Error::wrap)?;
+            Ok(pending.rows)
+        }
+
+        /// Queues the gather of a step's rows for its layer's `gather` to join.
+        pub(super) fn start(&self, window: &Tensor, len: usize) -> Result<()> {
+            let pending = self.launch(window, len)?;
+            *self.ahead.lock().expect("PLE gather poisoned") = Some(pending);
+            Ok(())
+        }
+
+        /// Drops a started gather nothing joined, so a later step cannot take its rows.
+        pub(super) fn forget(&self) {
+            self.ahead.lock().expect("PLE gather poisoned").take();
+        }
+
+        fn launch(&self, window: &Tensor, len: usize) -> Result<Pending> {
             let (batch, width) = window.dims2()?;
             if batch == 0
                 || len == 0
@@ -687,7 +757,7 @@ mod host_gather {
             let wrap = inference_tensor::Error::wrap;
             // SAFETY: the mapped buffers hold the largest batch; the window's copy out precedes the event the side
             // stream waits on, the host function reads it after that, and the stream waits for the side stream's copy
-            // of the rows before it moves on, so the next step cannot overwrite a buffer still in use
+            // of the rows within the step, so the next step cannot overwrite a buffer still in use
             unsafe {
                 result::memcpy_dtoh_async(
                     mapped_host(&self.shared.window, batch * width),
@@ -707,9 +777,12 @@ mod host_gather {
                 )
                 .map_err(wrap)?;
             }
-            main.wait(&side.record_event(None).map_err(wrap)?)
-                .map_err(wrap)?;
-            Ok(out)
+            Ok(Pending {
+                rows: out,
+                landed: side.record_event(None).map_err(wrap)?,
+                batch,
+                len,
+            })
         }
     }
 }
