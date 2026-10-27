@@ -1,0 +1,19 @@
+{
+  "architectures": ["ModernBertModel"],
+  "model_type": "modernbert",
+  "vocab_size": 266,
+  "hidden_size": 32,
+  "intermediate_size": 48,
+  "num_hidden_layers": 3,
+  "num_attention_heads": 2,
+  "max_position_embeddings": 64,
+  "norm_eps": 1e-5,
+  "norm_bias": false,
+  "attention_bias": false,
+  "mlp_bias": false,
+  "hidden_activation": "gelu",
+  "global_attn_every_n_layers": 3,
+  "local_attention": 4,
+  "global_rope_theta": 160000.0,
+  "local_rope_theta": 10000.0
+}

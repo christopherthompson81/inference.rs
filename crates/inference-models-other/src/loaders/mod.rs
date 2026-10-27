@@ -34,6 +34,8 @@ mod hunyuan_v1_dense;
 mod hunyuan_v1_moe;
 mod lfm2;
 mod lfm2vl;
+mod modern_bert;
+mod nomic_bert;
 mod paddleocr_vl;
 mod starcoder2;
 
@@ -52,6 +54,8 @@ pub use hunyuan_v1_dense::*;
 pub use hunyuan_v1_moe::*;
 pub use lfm2::*;
 pub use lfm2vl::*;
+pub use modern_bert::*;
+pub use nomic_bert::*;
 pub use paddleocr_vl::*;
 pub use starcoder2::*;
 
@@ -70,4 +74,4 @@ inference_nn::boxed_loaders!(
     Starcoder2Loader,
 );
 inference_nn::boxed_loaders!(MultimodalModelLoader: Lfm2VlLoader, PaddleOcrVlLoader);
-inference_nn::boxed_loaders!(EmbeddingModelLoader: BertLoader);
+inference_nn::boxed_loaders!(EmbeddingModelLoader: BertLoader, ModernBertLoader, NomicBertLoader);

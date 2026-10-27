@@ -24,6 +24,7 @@ mod qwen3_5_tool_call;
 mod qwen3_sliding_window_tiny;
 mod qwen4exp_text_tiny;
 mod qwen_vl_tiny;
+mod rope_encoder_embedding_tiny;
 mod silero_tiny;
 mod sortformer_tiny;
 mod world_job;

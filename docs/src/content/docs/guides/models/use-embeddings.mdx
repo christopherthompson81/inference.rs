@@ -38,6 +38,15 @@ Sentence-transformers checkpoints built on BERT, RoBERTa, XLM-RoBERTa or CamemBE
 inference serve -m sentence-transformers/all-MiniLM-L6-v2
 ```
 
+### RoPE encoders
+
+Two encoder families with rotary positions load the same way, detected by their class:
+
+- `nomic-ai/nomic-embed-text-v1.5` (`NomicBertModel`): 137M parameters, 768-dim vectors, inputs up to 8192 tokens. Prefix inputs with `search_query: ` or `search_document: ` as its model card describes.
+- `ibm-granite/granite-embedding-english-r2` (`ModernBertModel`): 149M parameters, 768-dim vectors, inputs up to 8192 tokens. ModernBERT alternates global layers with 128-token sliding-window ones.
+
+The Nomic MoE variant (`nomic-embed-text-v2-moe`) does not load yet.
+
 The pooling and normalization come from the repository's `modules.json`, and a `max_seq_length` in `sentence_bert_config.json` caps the input length (256 tokens for all-MiniLM-L6-v2), as sentence-transformers does. `--isq q8_0` keeps these models close to full precision, but 4-bit types lose noticeably on 384-wide layers.
 
 ## Requesting an embedding

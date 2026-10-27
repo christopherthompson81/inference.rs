@@ -34,7 +34,14 @@ pub enum EmbeddingLoaderType {
     Qwen3Embedding,
     #[serde(rename = "bert")]
     Bert,
+    #[serde(rename = "nomicbert")]
+    NomicBert,
+    #[serde(rename = "modernbert")]
+    ModernBert,
 }
+
+const NOMIC_BERT_CLASSES: &[&str] = &["NomicBertModel"];
+const MODERN_BERT_CLASSES: &[&str] = &["ModernBertModel", "ModernBertForMaskedLM"];
 
 // Encoder-only classes (BERT, RoBERTa, XLM-R, CamemBERT): checkpoints that can only be embedders
 const BERT_CLASSES: &[&str] = &[
@@ -58,16 +65,23 @@ impl EmbeddingLoaderType {
         match name {
             "Gemma3TextModel" => Ok(Self::EmbeddingGemma),
             "Qwen3ForCausalLM" => Ok(Self::Qwen3Embedding),
-            name if BERT_CLASSES.contains(&name) => Ok(Self::Bert),
-            other => anyhow::bail!(
-                "Unsupported Hugging Face Transformers model class `{other}`. Please raise an issue."
-            ),
+            other => Self::from_encoder_name(other).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unsupported Hugging Face Transformers model class `{other}`. Please raise an issue."
+                )
+            }),
         }
     }
 
     /// The architecture of a class that only ever runs as an embedder, so needs no sentence-transformers marker.
     pub fn from_encoder_name(name: &str) -> Option<Self> {
-        BERT_CLASSES.contains(&name).then_some(Self::Bert)
+        [
+            (BERT_CLASSES, Self::Bert),
+            (NOMIC_BERT_CLASSES, Self::NomicBert),
+            (MODERN_BERT_CLASSES, Self::ModernBert),
+        ]
+        .into_iter()
+        .find_map(|(classes, tp)| classes.contains(&name).then_some(tp))
     }
 
     /// The HF `config.json` `architectures` string, the inverse of `from_causal_lm_name`.
@@ -76,6 +90,8 @@ impl EmbeddingLoaderType {
             Self::EmbeddingGemma => "Gemma3TextModel",
             Self::Qwen3Embedding => "Qwen3ForCausalLM",
             Self::Bert => "BertModel",
+            Self::NomicBert => "NomicBertModel",
+            Self::ModernBert => "ModernBertModel",
         }
     }
 }
@@ -101,8 +117,12 @@ impl EmbeddingLoaderType {
             }
             #[cfg(feature = "models-other")]
             Self::Bert => Ok(BertLoader::boxed()),
+            #[cfg(feature = "models-other")]
+            Self::NomicBert => Ok(NomicBertLoader::boxed()),
+            #[cfg(feature = "models-other")]
+            Self::ModernBert => Ok(ModernBertLoader::boxed()),
             #[cfg(not(feature = "models-other"))]
-            Self::Bert => {
+            Self::Bert | Self::NomicBert | Self::ModernBert => {
                 anyhow::bail!(
                     "architecture `{self}` is not built in; enable the `models-other` feature"
                 )
@@ -118,8 +138,10 @@ impl FromStr for EmbeddingLoaderType {
             "embeddinggemma" => Ok(Self::EmbeddingGemma),
             "qwen3embedding" => Ok(Self::Qwen3Embedding),
             "bert" => Ok(Self::Bert),
+            "nomicbert" => Ok(Self::NomicBert),
+            "modernbert" => Ok(Self::ModernBert),
             a => Err(format!(
-                "Unknown architecture `{a}`. Possible architectures: `embeddinggemma`, `qwen3embedding`, `bert`."
+                "Unknown architecture `{a}`. Possible architectures: `embeddinggemma`, `qwen3embedding`, `bert`, `nomicbert`, `modernbert`."
             )),
         }
     }
@@ -131,6 +153,8 @@ impl Display for EmbeddingLoaderType {
             Self::EmbeddingGemma => write!(f, "embeddinggemma"),
             Self::Qwen3Embedding => write!(f, "qwen3embedding"),
             Self::Bert => write!(f, "bert"),
+            Self::NomicBert => write!(f, "nomicbert"),
+            Self::ModernBert => write!(f, "modernbert"),
         }
     }
 }
@@ -254,7 +278,7 @@ where
 #[cfg(feature = "models-gemma")]
 pub use inference_models_gemma::loaders::EmbeddingGemmaLoader;
 #[cfg(feature = "models-other")]
-pub use inference_models_other::loaders::BertLoader;
+pub use inference_models_other::loaders::{BertLoader, ModernBertLoader, NomicBertLoader};
 #[cfg(feature = "models-qwen")]
 pub use inference_models_qwen::loaders::Qwen3EmbeddingLoader;
 
