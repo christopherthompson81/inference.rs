@@ -948,10 +948,15 @@ pub struct RuntimeOptions {
     #[serde(default)]
     pub mtp_model: Option<String>,
 
-    /// Number of MTP draft tokens to propose per target step.
+    /// Number of MTP draft tokens to propose per target step; with `--mtp-auto-depth`, the most a step drafts.
     #[arg(long)]
     #[serde(default)]
     pub mtp_n_predict: Option<usize>,
+
+    /// Draft the depth that has paid best so far each step, from acceptance and measured step time.
+    #[arg(long)]
+    #[serde(default)]
+    pub mtp_auto_depth: bool,
 
     /// MTP draft sampling policy. Auto uses probabilistic DFlash2 drafting when supported.
     #[arg(long, value_enum, default_value_t)]
@@ -1141,9 +1146,13 @@ pub struct BenchRuntimeOptions {
     #[arg(long)]
     pub mtp_model: Option<String>,
 
-    /// Number of MTP draft tokens to propose per target step.
+    /// Number of MTP draft tokens to propose per target step; with `--mtp-auto-depth`, the most a step drafts.
     #[arg(long)]
     pub mtp_n_predict: Option<usize>,
+
+    /// Draft the depth that has paid best so far each step, from acceptance and measured step time.
+    #[arg(long)]
+    pub mtp_auto_depth: bool,
 
     /// MTP draft sampling policy. Auto uses probabilistic DFlash2 drafting when supported.
     #[arg(long, value_enum, default_value_t)]
@@ -1301,6 +1310,7 @@ impl Default for RuntimeOptions {
             mtp: false,
             mtp_model: None,
             mtp_n_predict: None,
+            mtp_auto_depth: false,
             mtp_draft_sampling: MtpDraftSamplingArg::default(),
             mtp_draft_isq: None,
             mcp_config: None,
@@ -1866,6 +1876,7 @@ mod tests {
                 runtime.mtp,
                 runtime.mtp_model.clone(),
                 runtime.mtp_n_predict,
+                runtime.mtp_auto_depth,
                 runtime.mtp_draft_sampling,
                 runtime.mtp_draft_isq.clone(),
             )
@@ -1893,6 +1904,7 @@ mod tests {
                 runtime.mtp,
                 runtime.mtp_model.clone(),
                 runtime.mtp_n_predict,
+                runtime.mtp_auto_depth,
                 runtime.mtp_draft_sampling,
                 runtime.mtp_draft_isq.clone(),
             )
@@ -1920,6 +1932,7 @@ mod tests {
                 runtime.mtp,
                 runtime.mtp_model.clone(),
                 runtime.mtp_n_predict,
+                runtime.mtp_auto_depth,
                 runtime.mtp_draft_sampling,
                 runtime.mtp_draft_isq.clone(),
             )

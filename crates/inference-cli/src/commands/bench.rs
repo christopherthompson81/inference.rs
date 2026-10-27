@@ -39,6 +39,7 @@ fn bench_spec(
                 runtime.mtp,
                 runtime.mtp_model.clone(),
                 runtime.mtp_n_predict,
+                runtime.mtp_auto_depth,
                 runtime.mtp_draft_sampling,
                 runtime.mtp_draft_isq.clone(),
             ),

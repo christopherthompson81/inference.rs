@@ -25,6 +25,9 @@ pub struct MtpConfig {
     pub draft_lm_head_isq: Option<inference_quant::IsqType>,
     /// An assistant drafter's own weight type (DFlash); unset, the draft head's (`draft_lm_head_isq`).
     pub drafter_isq: Option<inference_quant::IsqType>,
+    /// Each step drafts the depth that has paid best, up to `n_predict` (unset, the proposer's largest
+    /// automatic depth), instead of always `n_predict`.
+    pub auto_depth: bool,
 }
 
 #[doc(hidden)]
@@ -63,6 +66,7 @@ impl MtpConfig {
             draft_sampling_method: MtpDraftSamplingMethod::default(),
             draft_lm_head_isq: None,
             drafter_isq: None,
+            auto_depth: false,
         }
     }
 
@@ -73,6 +77,7 @@ impl MtpConfig {
             draft_sampling_method: MtpDraftSamplingMethod::default(),
             draft_lm_head_isq: None,
             drafter_isq: None,
+            auto_depth: false,
         }
     }
 
@@ -88,6 +93,11 @@ impl MtpConfig {
 
     pub fn with_drafter_isq(mut self, isq: Option<inference_quant::IsqType>) -> Self {
         self.drafter_isq = isq;
+        self
+    }
+
+    pub fn with_auto_depth(mut self, auto_depth: bool) -> Self {
+        self.auto_depth = auto_depth;
         self
     }
 

@@ -1354,6 +1354,7 @@ impl Engine {
                     }
                 };
 
+                crate::speculative::autotuner::note_interruption();
                 pipeline
                     .step(
                         &mut scheduled.prompt,

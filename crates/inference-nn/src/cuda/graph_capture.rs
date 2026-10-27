@@ -264,8 +264,18 @@ impl CudaGraphEventGuard {
     }
 }
 
+static CUDA_GRAPH_CAPTURES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Graph captures attempted so far, by every component: a step timed across one also paid for the capture.
+pub fn cuda_graph_capture_count() -> u64 {
+    CUDA_GRAPH_CAPTURES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 impl Drop for CudaGraphEventGuard {
     fn drop(&mut self) {
+        if self.event == CudaGraphEvent::Capture {
+            CUDA_GRAPH_CAPTURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         record_cuda_graph_event(self.component, self.event, self.outcome);
         if self.outcome == CudaGraphOutcome::Success && self.event == CudaGraphEvent::EagerFallback
         {

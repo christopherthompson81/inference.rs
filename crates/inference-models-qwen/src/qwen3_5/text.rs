@@ -1458,6 +1458,10 @@ pub struct Qwen3_5TextModel {
     pub(super) yarn_rope_config: Option<YarnRopeConfig>,
     // Draft tokens per speculative step; 0 while no proposer is attached
     pub(super) mtp_n_predict: std::sync::atomic::AtomicUsize,
+    // With an autotuned depth, each step drafts one of the candidates up to mtp_n_predict; the primary depth is
+    // the one graphed at every batch size
+    pub(super) mtp_auto_depth: AtomicBool,
+    pub(super) mtp_primary_depth: std::sync::atomic::AtomicUsize,
     // Draft-only lm_head at the base ISQ type; the target verifies with the promoted head
     pub(super) draft_lm_head: Mutex<Option<Arc<dyn QuantMethod>>>,
     // External DFlash block-diffusion drafter, replacing the built-in MTP head when attached
@@ -1812,6 +1816,8 @@ impl Qwen3_5TextModel {
             weight_prefix,
             mtp,
             mtp_n_predict: std::sync::atomic::AtomicUsize::new(0),
+            mtp_auto_depth: AtomicBool::new(false),
+            mtp_primary_depth: std::sync::atomic::AtomicUsize::new(0),
             draft_lm_head: Mutex::new(None),
             dflash: Mutex::new(None),
             pending_prompt_tails: Mutex::new(std::collections::HashMap::new()),

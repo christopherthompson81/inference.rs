@@ -182,6 +182,7 @@ pub(crate) fn runtime_options_spec(
             runtime.mtp,
             runtime.mtp_model.clone(),
             runtime.mtp_n_predict,
+            runtime.mtp_auto_depth,
             runtime.mtp_draft_sampling,
             runtime.mtp_draft_isq.clone(),
         ),
@@ -247,12 +248,14 @@ pub(crate) fn mtp_spec(
     builtin: bool,
     model: Option<String>,
     n_predict: Option<usize>,
+    auto_depth: bool,
     draft_sampling: crate::args::MtpDraftSamplingArg,
     draft_isq: Option<String>,
 ) -> Option<MtpSpec> {
     (builtin || model.is_some()).then(|| MtpSpec {
         model: if builtin { None } else { model },
         n_predict,
+        auto_depth,
         draft_sampling: draft_sampling.into(),
         draft_isq,
     })

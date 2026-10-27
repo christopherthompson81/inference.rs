@@ -1,3 +1,4 @@
+pub mod autotuner;
 pub mod cache;
 pub mod config;
 #[cfg(feature = "models-qwen")]
@@ -28,6 +29,7 @@ mod tests {
             draft_sampling_method: MtpDraftSamplingMethod::Probabilistic,
             draft_lm_head_isq: None,
             drafter_isq: None,
+            auto_depth: false,
         };
 
         assert_eq!(config.n_predict, Some(3));

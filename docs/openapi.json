@@ -9584,6 +9584,10 @@
         "type": "object",
         "description": "MTP speculative decoding, drafting with an assistant model or the head built into the checkpoint.",
         "properties": {
+          "auto_depth": {
+            "type": "boolean",
+            "description": "Each step drafts the depth that has paid best so far, from acceptance and measured step time."
+          },
           "draft_isq": {
             "type": [
               "string",
@@ -9606,7 +9610,7 @@
               "integer",
               "null"
             ],
-            "description": "Draft tokens proposed per target step.",
+            "description": "Draft tokens proposed per target step; with `auto_depth`, the most a step drafts.",
             "minimum": 0
           }
         },

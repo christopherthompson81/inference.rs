@@ -523,6 +523,12 @@ impl crate::speculative::driver::SpeculativePipelineExt for DecoderPipeline {
     ) -> &StdMutex<Option<crate::speculative::CudaSparseRejectionWorkspace>> {
         &self.core.cuda_sparse_rejection
     }
+
+    fn speculative_autotuner(
+        &self,
+    ) -> &StdMutex<crate::speculative::autotuner::SpeculativeAutotuner> {
+        &self.core.speculative_autotuner
+    }
 }
 
 impl DecoderPipeline {
