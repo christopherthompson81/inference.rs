@@ -6,7 +6,7 @@
   </picture>
 </p>
 
-<p align="center"><b>One Rust engine for text, vision, speech and images.</b><br>
+<p align="center"><b>One Rust engine for text, vision, speech, images and 3D.</b><br>
 Serve it over OpenAI- and Anthropic-compatible HTTP, or embed it from Rust, Python, C# or C.</p>
 
 <p align="center">
@@ -36,13 +36,14 @@ bindings over that ABI, so every surface does the same things.
 
 | | |
 |---|---|
-| **Text** | Llama, Qwen 2-3.8 and Qwen3-Next, Gemma 1-4, Mistral, Phi, DeepSeek V2/V3/R1, GLM-4, GPT-OSS, Granite 4, HunYuan, LFM2 and more, dense and MoE; block-diffusion text with DiffusionGemma |
-| **Vision and video** | Qwen-VL 2-3.6, Gemma 3/3n/4, Llama 3.2 Vision and Llama 4, Mistral Small 3, Muse Glimmer, LLaVA, Idefics, SmolVLM, Phi-4-multimodal, MiniCPM-o, PaddleOCR-VL |
+| **Text** | Llama, Qwen 2-3.8, Qwen3-Next and Qwen3.8-Flash-Next, Gemma 1-4, Mistral, Phi, DeepSeek V2/V3/R1, GLM-4, GPT-OSS, Granite 4, HunYuan, LFM2 and more, dense and MoE; block-diffusion text with DiffusionGemma |
+| **Vision and video** | Qwen-VL 2-3.6 and Qwen3.8-Flash-Next, Gemma 3/3n/4, Llama 3.2 Vision and Llama 4, Mistral Small 3, Muse Glimmer, LLaVA, Idefics, SmolVLM, Phi-4-multimodal, MiniCPM-o, PaddleOCR-VL |
 | **Speech recognition** | NVIDIA Parakeet (CTC, RNN-T, TDT) and Nemotron streaming ASR, from transformers, `.nemo` or GGUF, with word timestamps and beam search; Voxtral Realtime |
 | **Speaker and voice activity** | Nemotron-3 Diarization and Streaming Sortformer (who speaks when), Silero VAD |
 | **Speech synthesis** | Kokoro (9 languages) and Dia |
 | **Image generation** | FLUX.1 and HiDream-O1-Image (text to image, editing and subject references), from safetensors or GGUF |
 | **Embeddings and documents** | EmbeddingGemma, Qwen3 Embedding; PP-DocLayoutV3 document layout detection |
+| **3D** | WorldMirror 2.0 reconstruction (cameras, depth, normals, points and 3D Gaussian splats from photos or a video); HY-World 2.0 world generation from one panorama with WorldStereo-2 |
 
 The **[supported models reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/supported-models.md)** lists every architecture
 with a copy-paste command. It is generated from the engine's loader registry.
@@ -86,8 +87,8 @@ inference serve -m google/gemma-4-E4B-it
 ```
 
 The [web UI](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/serve/with-web-ui.md)
-at `http://localhost:1234/ui` has a tab per job: chat, a coding agent, speech to text, text to speech, images and
-document OCR, each with its own model. Started with no `-m`, the server loads nothing until you pick models in the UI's
+at `http://localhost:1234/ui` has a tab per job: chat, a coding agent, speech to text, text to speech, images,
+document OCR and 3D worlds, each with its own model. Started with no `-m`, the server loads nothing until you pick models in the UI's
 model manager, which also downloads from the Hugging Face Hub.
 
 The same command serves the other model kinds through their OpenAI-style endpoints:
@@ -108,6 +109,16 @@ curl localhost:1234/v1/images/generations -H "Content-Type: application/json" \
   -d '{"prompt": "a lighthouse at dusk", "width": 1024, "height": 1024, "response_format": "b64_json"}'
 ```
 
+3D runs from the CLI, or as a server job:
+
+```bash
+# photos or a video to cameras, depth, a point cloud and 3D Gaussian splats
+inference reconstruct --model HY-WorldMirror-2.0 --input walk.mp4 --fps 1 --max-frames 32 --out recon/
+```
+
+[3D reconstruction](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-3d-reconstruction.mdx) and
+[3D worlds from a panorama](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/generate-3d-worlds.mdx) list the weights each needs.
+
 <details>
   <summary><b>Web UI demo</b></summary>
   <br>
@@ -125,6 +136,7 @@ models at runtime.
 | Audio | `/v1/audio/transcriptions`, `/v1/audio/speech`, `/v1/audio/diarization`, `/v1/audio/vad`, Realtime WebSocket transcription at `/v1/realtime` |
 | Images, documents and embeddings | `/v1/images/generations`, `/v1/images/edits`, `/v1/layout/detect`, `/v1/embeddings` |
 | Agents and files | `/v1/files`, `/v1/containers`, `/v1/skills`, `/v1/sessions`, agent approvals |
+| Long-running jobs | `/v1/jobs` (3D reconstruction and world generation, queued beside the models, with progress events and cancel) |
 | Operations | `/v1/models` (add, unload, reload, alias, tune), `/v1/manager` (inventory, download, load), `/metrics` (Prometheus), `/v1/system/doctor` |
 
 - **API keys:** keyed mode gives each client its own sessions and files. Without keys, admin actions are open to
@@ -151,9 +163,9 @@ another language gets everything the HTTP server can do.
 
 - **Batching and caching:** continuous batching everywhere. [PagedAttention](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/perf/paged-attention.mdx) and prefix caching (multimodal included) on CUDA and Apple Silicon.
 - **Attention kernels:** FlashAttention on CUDA, including FP8 and paged variants; Metal kernels on macOS.
-- **Speculative decoding:** [DFlash and DFlash 2 block drafters and built-in MTP heads](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/perf/speculative-decoding.mdx) for Qwen3.5/3.8 and Gemma 4, with drafting, sampling and verification on the GPU. A 27B Qwen3.8 decodes at about 100 tok/s across a 262K window on one RTX 3090.
+- **Speculative decoding:** [DFlash and DFlash 2 block drafters and built-in MTP heads](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/perf/speculative-decoding.mdx) for Qwen3.5/3.8, Qwen3.8-Flash-Next and Gemma 4, with drafting, sampling and verification on the GPU, and an optional depth autotuner. A 27B Qwen3.8 decodes at about 100 tok/s across a 262K window on one RTX 3090.
 - **Long context:** a [quantized KV cache](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/perf/paged-attention.mdx#kv-cache-quantization) at 2-8 bits, K and V set separately and per layer. A prefix cache in host memory and on disk lets agent sessions resume after eviction and restarts, including the recurrent state of hybrid models.
-- **MoE offload:** a GGUF MoE model's [experts can stay in host memory](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/perf/moe-expert-offload.mdx) behind a GPU cache, chosen automatically when they would crowd out the context.
+- **MoE offload:** a GGUF MoE model's [experts can stay in host memory](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/perf/moe-expert-offload.mdx) behind a GPU cache, chosen automatically when they would crowd out the context. Missed experts run on the CPU while the GPU runs the cached ones: the 180B Qwen3.8-Flash-Next decodes at about 50 tok/s on one RTX 3090 with one MTP draft.
 - **Scaling:** [multi-GPU and distributed inference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/perf/distributed-inference.mdx) (tensor parallel, layer mapping, multi-node).
 - **Quantization:**
   - [GGUF](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/gguf-support.md) at 2-8 bits, including the IQ and trellis types and ik_llama.cpp's IQ_K family (IQ4_KS, IQ4_KSS, ...);
@@ -186,7 +198,7 @@ CUDA build. [Architecture](https://github.com/christopherthompson81/inference.rs
 ## Documentation
 
 - [Quickstart](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/quickstart.mdx): install, first run, first server
-- [CLI reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/cli/index.md): `run`, `serve`, `agent`, `launch`, `bench`, `tune`, `quantize`, `kernels`, `doctor` and the rest
+- [CLI reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/cli/index.md): `run`, `serve`, `agent`, `launch`, `reconstruct`, `worldgen`, `bench`, `tune`, `quantize`, `kernels`, `doctor` and the rest
 - [Speech models](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-speech-models.mdx), [image generation](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-image-generation.mdx), [multimodal input](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/multimodal-input.mdx), [embeddings](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-embeddings.mdx)
 - [Quantization types](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/quantization-types.md) and [hardware support](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/hardware-support.md)
 - [Troubleshooting](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/troubleshooting.md) and [environment variables](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/environment-variables.md)
@@ -196,7 +208,7 @@ CUDA build. [Architecture](https://github.com/christopherthompson81/inference.rs
 inference.rs began as a fork of [mistral.rs](https://github.com/EricLBuehler/mistral.rs) by Eric Buehler, and its
 engine still builds on that work. Its tensor layer derives from Hugging Face's
 [Candle](https://github.com/huggingface/candle). It was renamed because it outgrew language models: speech, image,
-diarization and document models now sit beside the LLMs, behind a C ABI for other languages.
+diarization, document and 3D models now sit beside the LLMs, behind a C ABI for other languages.
 
 Crates are `inference-*` (the Rust SDK is `inference`), the binary is `inference`, the Python package is
 `inference_rs`, and environment variables use `INFERENCE_RS_*`. inference.rs is not affiliated with Mistral AI. See
