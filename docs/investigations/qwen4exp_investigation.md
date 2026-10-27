@@ -1903,3 +1903,45 @@ functions cached      51.6 (48.3-52.8)         44.8 (43.5-45.8)
 +2.6% / +5.9%. Against Strata exact one draft (51.9 / 42.0): level on prose, +7% on code. Next, by size: the spin
 (CPU misses; Strata's GPU share over PCIe was worth 1-5% there, Run 39), the ~1.8 ms of host gaps around sampling,
 and the small kernels outside the spin.
+
+## Run 57 - 2026-10-26 19:21
+
+Question: after Run 56, what is each remaining idle piece of a decode step, and which can be taken back?
+
+A step (code decode, MTP 1 draft, nsys over two streams) now runs: one graph (embedding, the 48 layers, lm_head),
+top-1 sampling, a host read of the token, the MTP head eager (refresh over the anchor and accepted rows, draft
+lm_head, top-1), a host read of the draft, the next graph. Per step, of ~37 ms:
+```
+doorbell spin (CPU misses)                    ~17-19 ms
+graph kernels                                 ~17 ms
+MTP head, eager                               2.2 ms span: 1.15 ms kernels (0.70 of it the Q6_K draft lm_head), 1.24 ms between launches
+draft top-1 -> next graph's first kernel      0.56 ms: ~80 us blocking-sync wake, ~340 us host work, ~250 us launch to first kernel
+verify top-1 -> MTP head                      0.27 + 0.21 ms
+PLE gather inside the graph                   0.23-0.37 ms (layer 0 -> 1)
+```
+PLE: the gather ran when its layer (1) reached it: the window's copy out, the host function on a side stream (on
+the driver's callback thread), the rows back, and the stream waited for all of it. Built: the step starts the gather
+before layer 0 (`PleLayer::gather_ahead`; `HostGather` keeps it pending and the layer's forward joins it). The layer
+0 -> 1 gap goes (334 us a step on average); a ~112 us gap opens after the step's first 11 kernels where the graph
+moves its main branch to another stream around the host node. Steps in 2.6 s: 63 -> 66. Interleaved A/B (as Run 56):
+```
+                      prose median     code median
+master (#643)         51.1             45.1
+PLE gathered ahead    51.7             45.1
+```
+Within noise, as ~0.2 ms of 37 would be.
+
+The draft lm_head reads 521 MB (Q6_K, 248,320 x 2560) in 0.70 ms, ~750 GB/s: near the bandwidth, so only a smaller
+draft vocabulary (FR-Spec style) would shrink it, at some acceptance. The 1.24 ms between the head's 115 launches is
+eager overhead (~11 us a launch); a graph needs its paged metadata (block tables, slot mappings, the QSA plan, the
+flashinfer views) in resident buffers as core's decode graphs keep the target's.
+
+CPU pool size, now that misses no longer go through host functions (Run 29 had 16 threads at 12 tok/s, 12 level
+with 8). Interleaved, same build:
+```
+                      prose median     code median
+CANDLE_NUM_THREADS 8  50.6             45.4
+12                    50.7             45.6
+16                    23.8             18.5
+```
+Still no gain: the doorbell thread spins one core, and sixteen pool threads leave no core for it or the host.
