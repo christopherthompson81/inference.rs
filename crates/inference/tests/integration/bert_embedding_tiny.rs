@@ -350,3 +350,52 @@ async fn only_a_single_logit_classifier_reranks() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+fn jina_v2(config: &mut serde_json::Value) {
+    config["architectures"] = serde_json::json!(["JinaBertModel"]);
+    config["position_embedding_type"] = "alibi".into();
+    config["feed_forward_type"] = "geglu".into();
+}
+
+// with no position table, a mean pool of a bidirectional encoder sees a bag of tokens; ALiBi makes order count
+#[tokio::test]
+async fn jina_v2_alibi_makes_token_order_count_and_reloads_from_uqff() -> anyhow::Result<()> {
+    let checkpoint = tiny_bert_checkpoint(jina_v2)?;
+    let pooling = checkpoint.path().join("1_Pooling/config.json");
+    let mut config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&pooling)?)?;
+    config["pooling_mode_cls_token"] = false.into();
+    config["pooling_mode_mean_tokens"] = true.into();
+    std::fs::write(&pooling, serde_json::to_string(&config)?)?;
+    let model = cpu_embedding_builder(checkpoint.path()).build().await?;
+    let forward = embed_tokens(&model, &TOKENS[..4], false).await?;
+    // not a reversal: that keeps every |i - j|, which symmetric ALiBi cannot tell apart
+    let swapped =
+        embed_tokens(&model, &[TOKENS[1], TOKENS[0], TOKENS[2], TOKENS[3]], false).await?;
+    assert!(
+        max_diff(&forward, &swapped) > EMBEDDING_TOLERANCE,
+        "swapping two tokens left the embedding unchanged"
+    );
+    drop(model);
+
+    let uqff_dir = tempfile::tempdir()?;
+    let quantized = cpu_embedding_builder(checkpoint.path())
+        .with_isq(IsqType::Q8_0)
+        .write_uqff(uqff_dir.path().join("model.uqff"))
+        .build()
+        .await?;
+    let expected = quantized.generate_embedding(PROMPT).await?;
+    drop(quantized);
+    let written = uqff_files(uqff_dir.path())?;
+    anyhow::ensure!(!written.is_empty(), "no UQFF written");
+    let reloaded = UqffEmbeddingModelBuilder::new(
+        checkpoint.path().to_string_lossy(),
+        vec![written[0].clone()],
+    )
+    .into_inner()
+    .with_dtype(ModelDType::F32)
+    .with_force_cpu()
+    .build()
+    .await?;
+    assert_eq!(reloaded.generate_embedding(PROMPT).await?, expected);
+    Ok(())
+}

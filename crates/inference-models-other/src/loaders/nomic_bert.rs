@@ -1,5 +1,5 @@
 use super::*;
-use crate::nomic_bert::{Config as NomicBertConfig, Model as NomicBertModel};
+use crate::nomic_bert::{Config as NomicBertConfig, Model as NomicBertModel, SWIGLU};
 use inference_nn::model::EmbeddingModel;
 
 /// `EmbeddingModelLoader` for Nomic BERT encoders (nomic-embed-text).
@@ -36,7 +36,7 @@ impl IsqModelLoader for NomicBertLoader {
     fn isq_layer_regexes(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[
             r"layers\.(\d+)\.attn\.(Wqkv|out_proj)\.(weight|bias)$",
-            r"layers\.(\d+)\.mlp\.(fc11|fc12|fc2)\.(weight|bias)$",
+            r"layers\.(\d+)\.mlp\.(fc1|fc11|fc12|fc2)\.(weight|bias)$",
         ])
     }
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
@@ -67,24 +67,36 @@ impl DeviceMappedModelLoader for NomicBertLoader {
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
         let cfg = NomicBertConfig::from_json(config)?;
-        Ok(layer_shape(&cfg).layer_sizes_in_bytes(
-            cfg.num_hidden_layers(),
-            dtype,
-            weight_pack_factor,
-        ))
+        let (hidden, inter) = (cfg.hidden_size(), cfg.intermediate_size());
+        Ok((0..cfg.num_hidden_layers())
+            .map(|i| {
+                let elems = if cfg.is_moe_layer(i) {
+                    // unquantized experts and router beside the quantizable attention
+                    let attention = layer_shape(&cfg, 0).elems(weight_pack_factor);
+                    let experts = 2 * cfg.num_experts * inter * hidden + hidden;
+                    attention + experts + cfg.num_experts * hidden
+                } else {
+                    layer_shape(&cfg, inter).elems(weight_pack_factor)
+                };
+                elems * dtype.size_in_bytes()
+            })
+            .collect())
     }
 
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg = NomicBertConfig::from_json(config)?;
-        Ok(Box::new(layer_shape(&cfg).model_config(
-            cfg.num_hidden_layers(),
-            cfg.max_positions,
-            None,
-        )))
+        Ok(Box::new(
+            layer_shape(&cfg, cfg.intermediate_size()).model_config(
+                cfg.num_hidden_layers(),
+                cfg.max_positions,
+                None,
+            ),
+        ))
     }
 }
 
-fn layer_shape(cfg: &NomicBertConfig) -> DecoderLayerShape {
+// `intermediate_size` 0 leaves the FFN out, for a layer whose experts are counted on their own
+fn layer_shape(cfg: &NomicBertConfig, intermediate_size: usize) -> DecoderLayerShape {
     DecoderLayerShape {
         hidden_size: cfg.hidden_size(),
         num_attention_heads: cfg.num_attention_heads(),
@@ -95,8 +107,13 @@ fn layer_shape(cfg: &NomicBertConfig) -> DecoderLayerShape {
         qk_norm: false,
         // two LayerNorms, each with a bias
         norms: 4,
-        mlp: MlpShape::Gated {
-            intermediate_size: cfg.intermediate_size(),
+        mlp: if cfg.activation_function == SWIGLU {
+            MlpShape::Gated { intermediate_size }
+        } else {
+            MlpShape::Plain {
+                intermediate_size,
+                bias: cfg.mlp_fc1_bias,
+            }
         },
     }
 }

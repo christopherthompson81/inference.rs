@@ -50,18 +50,16 @@ fn checkpoint(
     Ok(out)
 }
 
-pub fn tiny_nomic_bert_checkpoint() -> anyhow::Result<tempfile::TempDir> {
-    checkpoint(
-        NOMIC,
-        |_| {},
-        |config, files| {
-            let cfg: nomic_bert::Config = serde_json::from_value(config.clone())?;
-            recording::record_checkpoint(files, cfg.num_hidden_layers(), &[], |vb, metadata| {
-                nomic_bert::Model::new(&cfg, vb, metadata, AttentionImplementation::Eager)
-                    .map(|_| ())
-            })
-        },
-    )
+/// The committed Nomic config, edited by `edit_config`, recorded with Nomic BERT's weights.
+pub fn tiny_nomic_bert_checkpoint(
+    edit_config: impl FnOnce(&mut serde_json::Value),
+) -> anyhow::Result<tempfile::TempDir> {
+    checkpoint(NOMIC, edit_config, |config, files| {
+        let cfg: nomic_bert::Config = serde_json::from_value(config.clone())?;
+        recording::record_checkpoint(files, cfg.num_hidden_layers(), &[], |vb, metadata| {
+            nomic_bert::Model::new(&cfg, vb, metadata, AttentionImplementation::Eager).map(|_| ())
+        })
+    })
 }
 
 /// The committed config, edited by `edit_config`, recorded with ModernBERT's weights.
@@ -74,6 +72,18 @@ pub fn tiny_modern_bert_checkpoint(
             modern_bert::Model::new(&cfg, vb, metadata, AttentionImplementation::Eager).map(|_| ())
         })
     })
+}
+
+/// Nomic's MoE variant (nomic-embed-text-v2-moe): GELU FFNs, biased projections, and 4 experts every other layer.
+pub fn nomic_moe_config(config: &mut serde_json::Value) {
+    config["activation_function"] = "gelu".into();
+    config["qkv_proj_bias"] = true.into();
+    config["mlp_fc1_bias"] = true.into();
+    config["mlp_fc2_bias"] = true.into();
+    config["type_vocab_size"] = 1.into();
+    config["moe_every_n_layers"] = 2.into();
+    config["num_experts"] = 4.into();
+    config["moe_top_k"] = 2.into();
 }
 
 /// A NeoBERT with no `modules.json`, so the pipeline pools it as sentence-transformers does by default.

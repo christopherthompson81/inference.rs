@@ -13,7 +13,7 @@ mod support;
 #[path = "../support/traces.rs"]
 mod traces;
 use support::{
-    prefix_weights, tiny_llama_embedding_checkpoint, tiny_modern_bert_checkpoint,
+    nomic_moe_config, prefix_weights, tiny_llama_embedding_checkpoint, tiny_modern_bert_checkpoint,
     tiny_neo_bert_checkpoint, tiny_nomic_bert_checkpoint,
 };
 use traces::uqff_files;
@@ -85,7 +85,7 @@ async fn assert_uqff_reload_matches(dir: &Path) -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn rope_encoders_are_detected_by_class_and_embed_to_unit_length() -> anyhow::Result<()> {
-    assert_unit_embedding(tiny_nomic_bert_checkpoint()?.path()).await?;
+    assert_unit_embedding(tiny_nomic_bert_checkpoint(|_| {})?.path()).await?;
     assert_unit_embedding(tiny_modern_bert_checkpoint(|_| {})?.path()).await
 }
 
@@ -120,7 +120,7 @@ async fn modern_bert_sliding_layers_see_only_their_window() -> anyhow::Result<()
 
 #[tokio::test]
 async fn an_isq_nomic_bert_and_a_reload_of_its_uqff_embed_alike() -> anyhow::Result<()> {
-    assert_uqff_reload_matches(tiny_nomic_bert_checkpoint()?.path()).await
+    assert_uqff_reload_matches(tiny_nomic_bert_checkpoint(|_| {})?.path()).await
 }
 
 #[tokio::test]
@@ -166,4 +166,32 @@ async fn a_neo_bert_without_modules_mean_pools_and_reloads_from_uqff() -> anyhow
     drop(model);
     prefix_weights(checkpoint.path(), "model")?;
     assert_uqff_reload_matches(checkpoint.path()).await
+}
+
+#[tokio::test]
+async fn a_nomic_moe_routes_tokens_and_reloads_from_uqff() -> anyhow::Result<()> {
+    let top_two = tiny_nomic_bert_checkpoint(nomic_moe_config)?;
+    assert_unit_embedding(top_two.path()).await?;
+    // the same weights routed to one expert per token
+    let top_one = tiny_nomic_bert_checkpoint(|config| {
+        nomic_moe_config(config);
+        config["moe_top_k"] = 1.into();
+    })?;
+    let diff = max_diff(
+        &embed_tokens(
+            &cpu_embedding_builder(top_two.path()).build().await?,
+            &PAST_WINDOW,
+        )
+        .await?,
+        &embed_tokens(
+            &cpu_embedding_builder(top_one.path()).build().await?,
+            &PAST_WINDOW,
+        )
+        .await?,
+    );
+    assert!(
+        diff > EMBEDDING_TOLERANCE,
+        "top-k left the embedding unchanged"
+    );
+    assert_uqff_reload_matches(top_two.path()).await
 }

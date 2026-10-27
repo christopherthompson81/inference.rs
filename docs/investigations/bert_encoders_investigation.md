@@ -219,3 +219,53 @@ Implication: EuroBERT, NeoBERT and Llama bidirectional embedders load. The 8B ll
 checked here (a 16 GB BF16 download); it runs the same bidirectional decoder stack as EuroBERT, with GQA and Llama 3
 rope scaling, which the tiny checkpoint covers. Left in #586: nomic-bert-moe, Jina v2 (ALiBi), Jina v3 and v5 (task
 LoRA adapters), and GGUF loading for embedders.
+
+## Run 10 - 2026-10-27 13:23
+
+Question: does nomic-embed-text-v2-moe (Nomic BERT with GELU FFNs and an 8-expert top-2 MoE every other layer) match
+Nomic's own code?
+
+Command: as Run 8, first with `ref.py` (transformers' native `nomic_bert`), then with `nomic_remote_ref.py`: Nomic's
+remote `modeling_hf_nomic_bert.py` (read first; its `os` use is only local weight paths), with transformers 4's
+`get_extended_attention_mask` supplied since transformers 5 dropped it.
+
+```
+ref.py (native nomic_bert)       cpu f32 worst cos 0.007
+nomic_remote_ref.py, v2-moe      cpu f32 1.000000 (max_abs <= 1.9e-7)   gpu bf16 0.99983
+nomic_remote_ref.py, v1.5        cpu f32 1.000000                       gpu bf16 0.99993
+```
+
+Finding: the first comparison was against the wrong reference. transformers' native `nomic_bert` has no MoE, so
+AutoModel built the expert layers from random init; the remote code is the real one. Semantics from it: the router
+softmaxes in F32 over the experts and keeps the top 2 without renormalizing; expert e is
+`gelu(x @ w1[e]^T) @ w2[e]` with both stacks `[experts * 3072, 768]`; one bias is added after the weighted sum; layer
+i is MoE when `i % moe_every_n_layers == 1`. Ours runs the experts densely: `gelu(x @ w1^T)` over every expert,
+scaled per expert by the router weight (zero outside the top k), then one matmul with `w2`. That is exact, with no
+gather or host sync, at 4x the expert FLOPs of a top-2 gather. (The unquantized `gather_forward` copies each
+selected expert's matrices per token, about 1.9e9 floats for a 400-token prompt, which rules it out for an encoder.)
+The first GPU run failed with `no cuda implementation for argsort`; the k-th largest router weight now comes from k
+masked maxima. v1.5 agrees with the remote reference too (its max_abs differs only because the script normalizes
+and v1.5 ships no Normalize module).
+
+## Run 11 - 2026-10-27 13:30
+
+Question: does Jina BERT v2 (ALiBi in place of positions, GeGLU FFN with an inner LayerNorm) match Jina's own code?
+
+Command: as Run 8 on jinaai/jina-embeddings-v2-base-en with `jina2_ref.py`: Jina's remote `modeling_bert.py`
+(jina-bert-implementation), run with stand-ins for what transformers 5 removed (`find_pruneable_heads_and_indices`,
+`prune_linear_layer`, `transformers.onnx.OnnxConfig`, `get_extended_attention_mask`, `get_head_mask`, and
+PretrainedConfig defaults such as `is_decoder`).
+
+```
+cpu f32   worst cos 1.000000 (max_abs <= 5.6e-8)
+gpu bf16  worst cos 0.99997
+```
+
+Finding: matches, a 402-token prompt included. Each head adds `-slope_h * |i - j|`; the slopes are the
+power-of-two series with the next power's odd terms filling a non-power head count (12 heads: 2^-1 .. 2^-8, then
+2^-0.5, 2^-1.5, 2^-2.5, 2^-3.5), the same as ggml's `max_bias = 8`. The bias is a per-head additive mask, which
+fattn declines (it takes one mask for every head), so ALiBi layers run eager attention; fattn's `max_bias` with one
+shared `-|i - j|` mask (how llama.cpp runs jina-bert-v2) would avoid the per-head tensor at long inputs. A tiny test
+first compared a sequence with its reversal, which symmetric ALiBi cannot tell apart (every |i - j| is kept); it now
+swaps two tokens, and fails with the bias dropped. jinaai/jina-reranker-v1-tiny-en is a classifier checkpoint whose
+config names the base `JinaBertModel`, so it loads as an embedder, not a reranker.

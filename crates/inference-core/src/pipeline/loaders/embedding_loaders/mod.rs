@@ -68,6 +68,9 @@ const BERT_CLASSES: &[&str] = &[
     "RobertaForSequenceClassification",
     "XLMRobertaForSequenceClassification",
     "CamembertForSequenceClassification",
+    "JinaBertModel",
+    "JinaBertForMaskedLM",
+    "JinaBertForSequenceClassification",
 ];
 
 // https://github.com/huggingface/transformers/blob/cff06aac6fad28019930be03f5d467055bf62177/src/transformers/models/auto/modeling_auto.py#L448
