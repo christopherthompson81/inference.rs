@@ -2587,6 +2587,41 @@ class ReconstructJob:
 
 
 @dataclass(kw_only=True)
+class RerankDocument:
+    text: str
+
+
+@dataclass(kw_only=True)
+class RerankRequest:
+    """Rerank request: score each document against the query with a cross-encoder (Cohere / Jina shape)."""
+
+    documents: list[str]
+    model: str | None = None
+    query: str
+    raw_scores: bool | None = None
+    return_documents: bool | None = None
+    top_n: int | None = None
+    truncate_sequence: bool | None = None
+
+
+@dataclass(kw_only=True)
+class RerankResponse:
+    """Results ordered from the most to the least relevant."""
+
+    model: str
+    object: str
+    results: list[RerankResult]
+    usage: EmbeddingUsage
+
+
+@dataclass(kw_only=True)
+class RerankResult:
+    document: RerankDocument | None = None
+    index: int
+    relevance_score: float
+
+
+@dataclass(kw_only=True)
 class ResponseDeleted:
     """What deleting a response returns."""
 

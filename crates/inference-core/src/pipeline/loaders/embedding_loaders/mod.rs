@@ -46,6 +46,10 @@ const BERT_CLASSES: &[&str] = &[
     "XLMRobertaForMaskedLM",
     "CamembertModel",
     "CamembertForMaskedLM",
+    "BertForSequenceClassification",
+    "RobertaForSequenceClassification",
+    "XLMRobertaForSequenceClassification",
+    "CamembertForSequenceClassification",
 ];
 
 // https://github.com/huggingface/transformers/blob/cff06aac6fad28019930be03f5d467055bf62177/src/transformers/models/auto/modeling_auto.py#L448
@@ -294,6 +298,9 @@ impl EmbeddingModelLoader for AutoEmbeddingLoader {
     }
     fn has_causal_attention(&self, config: &str) -> Result<bool> {
         Self::get_loader(config)?.has_causal_attention(config)
+    }
+    fn is_classifier(&self, config: &str) -> Result<bool> {
+        Self::get_loader(config)?.is_classifier(config)
     }
     fn is_gptx(&self, config: &str) -> Result<bool> {
         Self::get_loader(config)?.is_gptx(config)

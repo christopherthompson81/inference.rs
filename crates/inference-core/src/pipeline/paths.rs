@@ -692,13 +692,14 @@ pub(crate) fn get_embedding_paths(
     )?;
     // read beside config.json by the loader
     repo.get_listed(crate::pipeline::embedding::SENTENCE_BERT_CONFIG)?;
+    // a cross-encoder ships no modules.json
     let modules_path = if repo.model_id.exists() {
-        repo.model_id.join("modules.json")
+        Some(repo.model_id.join("modules.json")).filter(|path| path.exists())
     } else {
-        repo.get("modules.json")?
+        repo.get_listed("modules.json")?
     };
     let mut modules = Vec::new();
-    if modules_path.exists() {
+    if let Some(modules_path) = modules_path {
         let listed: Vec<crate::pipeline::EmbeddingModule> =
             serde_json::from_str(&fs::read_to_string(&modules_path)?)?;
         for module in listed {

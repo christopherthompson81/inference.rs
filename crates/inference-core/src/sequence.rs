@@ -46,6 +46,8 @@ pub enum OneShotParams {
     TranscriptionStream(crate::TranscriptionStreamRequest),
     VoiceActivity(inference_models_speech::silero::SegmentOptions),
     Diarization(inference_models_speech::diarization::DiarizationOptions),
+    /// The segment id of each prompt token, for an encoder that embeds a text pair.
+    TokenTypes(Vec<u32>),
 }
 
 pub type SeqPreallocatedCache = Vec<Option<(Tensor, Tensor)>>;
@@ -1689,6 +1691,13 @@ impl Sequence {
     ) -> Option<&inference_models_speech::diarization::DiarizationOptions> {
         match &self.one_shot {
             Some(OneShotParams::Diarization(options)) => Some(options),
+            _ => None,
+        }
+    }
+
+    pub fn token_type_ids(&self) -> Option<&[u32]> {
+        match &self.one_shot {
+            Some(OneShotParams::TokenTypes(types)) => Some(types),
             _ => None,
         }
     }

@@ -97,12 +97,13 @@ GROUPS = [
     (
         "Chat and completions",
         "chat",
-        "Chat completion, completion and embedding requests and responses, tools and output formats.",
+        "Chat completion, completion, embedding and rerank requests and responses, tools and output formats.",
         lambda n: n.startswith(
             (
                 "ChatCompletion",
                 "Completion",
                 "Embedding",
+                "Rerank",
                 "Message",
                 "Tool",
                 "Function",

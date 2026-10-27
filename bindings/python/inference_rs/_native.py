@@ -122,6 +122,7 @@ SIGNATURES = {
     "inference_completion": (status, (c_void_p, *buffer, out)),
     "inference_completion_stream_open": (status, (c_void_p, *buffer, out)),
     "inference_embeddings": (status, (c_void_p, *buffer, out)),
+    "inference_rerank": (status, (c_void_p, *buffer, out)),
     "inference_anthropic_messages": (status, (c_void_p, *buffer, out)),
     "inference_anthropic_messages_stream_open": (status, (c_void_p, *buffer, out)),
     "inference_anthropic_count_tokens": (status, (c_void_p, *buffer, out)),

@@ -13,6 +13,7 @@ pub mod engine_chat;
 pub mod engine_completion;
 pub mod engine_embeddings;
 pub mod engine_logits;
+mod engine_rerank;
 #[cfg(test)]
 mod engine_tests;
 pub mod files;

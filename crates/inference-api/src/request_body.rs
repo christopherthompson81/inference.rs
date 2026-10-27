@@ -58,6 +58,7 @@ json_requests!(
     inference_protocol::openai::ChatCompletionRequest,
     inference_protocol::openai::CompletionRequest,
     inference_protocol::openai::EmbeddingRequest,
+    inference_protocol::openai::RerankRequest,
     inference_protocol::openai::ImageGenerationRequest,
     inference_protocol::openai::ImageEditRequest,
     inference_protocol::openai::SpeechGenerationRequest,

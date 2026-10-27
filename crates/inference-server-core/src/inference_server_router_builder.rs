@@ -21,7 +21,7 @@ use crate::{
     audio_analysis::{diarization, transcription, voice_activity},
     chat_completion::chatcompletions,
     completions::completions,
-    embeddings::embeddings,
+    embeddings::{embeddings, rerank},
     files::{
         delete_file, get_container_file, get_container_file_content, get_file, get_file_content,
         list_container_files, list_files, upload_file,
@@ -51,10 +51,10 @@ use crate::{
         MANAGER_MODELS_ROUTE, MANAGER_SAVED_MODEL_ROUTE, MANAGER_SAVED_ROUTE, MANAGER_UNLOAD_ROUTE,
         MODEL_ALIAS_ROUTE, MODEL_CACHE_STATS_ROUTE, MODEL_SPECULATIVE_STATS_ROUTE,
         MODEL_STATUS_ROUTE, MODELS_ROUTE, RE_ISQ_ROUTE, REALTIME_ROUTE, RELOAD_MODEL_ROUTE,
-        REMOVE_MODEL_ROUTE, RESPONSE_ROUTE, RESPONSES_ROUTE, ROOT_ROUTE, SESSION_ROUTE,
-        SKILL_VERSIONS_ROUTE, SKILLS_ROUTE, SPEECH_GENERATION_ROUTE, SYSTEM_DOCTOR_ROUTE,
-        SYSTEM_INFO_ROUTE, TRANSCRIPTION_ROUTE, TUNE_MODEL_ROUTE, UNLOAD_LORA_ADAPTER_ROUTE,
-        UNLOAD_MODEL_ROUTE, VOICE_ACTIVITY_ROUTE,
+        REMOVE_MODEL_ROUTE, RERANK_ROUTE, RESPONSE_ROUTE, RESPONSES_ROUTE, ROOT_ROUTE,
+        SESSION_ROUTE, SKILL_VERSIONS_ROUTE, SKILLS_ROUTE, SPEECH_GENERATION_ROUTE,
+        SYSTEM_DOCTOR_ROUTE, SYSTEM_INFO_ROUTE, TRANSCRIPTION_ROUTE, TUNE_MODEL_ROUTE,
+        UNLOAD_LORA_ADAPTER_ROUTE, UNLOAD_MODEL_ROUTE, VOICE_ACTIVITY_ROUTE,
     },
     skills::{list_skill_versions, list_skills, upload_skill, upload_skill_version},
     speech_generation::speech_generation,
@@ -336,6 +336,7 @@ fn init_router(
         )
         .route(COMPLETIONS_ROUTE.path, post(completions))
         .route(EMBEDDINGS_ROUTE.path, post(embeddings))
+        .route(RERANK_ROUTE.path, post(rerank))
         .route(MODELS_ROUTE.path, get(models))
         .route(LIST_LORA_ADAPTERS_ROUTE.path, get(list_lora_adapters))
         .route(MODEL_STATUS_ROUTE.path, post(get_model_status))

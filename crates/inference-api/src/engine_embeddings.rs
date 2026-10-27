@@ -22,10 +22,10 @@ use crate::{
     util::validate_model_name,
 };
 
-struct EmbeddingWithUsage {
-    embedding: Vec<f32>,
-    prompt_tokens: usize,
-    total_tokens: usize,
+pub(crate) struct EmbeddingWithUsage {
+    pub(crate) embedding: Vec<f32>,
+    pub(crate) prompt_tokens: usize,
+    pub(crate) total_tokens: usize,
 }
 
 /// Why an embeddings request failed: the caller's request, or the engine. Kept as `anyhow` so the cause survives.
@@ -96,9 +96,9 @@ async fn embed_inner(
                 let state = state.clone();
                 let model_override = model_override.clone();
                 async move {
-                    fetch_embedding(
+                    fetch(
                         state,
-                        prompt,
+                        RequestMessage::Embedding { prompt },
                         model_override.as_deref(),
                         oairequest.truncate_sequence.unwrap_or(false),
                     )
@@ -139,9 +139,9 @@ async fn embed_inner(
                 let state = state.clone();
                 let model_override = model_override.clone();
                 async move {
-                    fetch_embedding_tokens(
+                    fetch(
                         state,
-                        tokens,
+                        RequestMessage::EmbeddingTokens { prompt: tokens },
                         model_override.as_deref(),
                         oairequest.truncate_sequence.unwrap_or(false),
                     )
@@ -227,9 +227,10 @@ fn normalize_inputs(input: EmbeddingInput) -> Result<Inputs> {
     }
 }
 
-async fn fetch_embedding(
+/// One input's embedding (or a classifier's logits) and its token counts.
+pub(crate) async fn fetch(
     state: SharedInferenceRsState,
-    prompt: String,
+    message: RequestMessage,
     model_id: Option<&str>,
     truncate_sequence: bool,
 ) -> Result<EmbeddingWithUsage> {
@@ -239,35 +240,7 @@ async fn fetch_embedding(
         model_id: model_id.map(|m| m.to_string()),
         truncate_sequence,
         ..NormalRequest::new_simple(
-            RequestMessage::Embedding { prompt },
-            SamplingParams::deterministic(),
-            tx,
-            state.next_request_id(),
-            None,
-            None,
-        )
-    }));
-
-    send_request_with_model(&state, request, model_id)
-        .await
-        .context("Failed to dispatch embedding request")?;
-
-    process_embedding_response(&mut rx, state.clone()).await
-}
-
-async fn fetch_embedding_tokens(
-    state: SharedInferenceRsState,
-    tokens: Vec<u32>,
-    model_id: Option<&str>,
-    truncate_sequence: bool,
-) -> Result<EmbeddingWithUsage> {
-    let (tx, mut rx) = create_response_channel(Some(1));
-
-    let request = Request::Normal(Box::new(NormalRequest {
-        model_id: model_id.map(|m| m.to_string()),
-        truncate_sequence,
-        ..NormalRequest::new_simple(
-            RequestMessage::EmbeddingTokens { prompt: tokens },
+            message,
             SamplingParams::deterministic(),
             tx,
             state.next_request_id(),
@@ -358,7 +331,7 @@ fn encode_embedding_base64(embedding: &[f32]) -> String {
     BASE64_STANDARD.encode(bytes)
 }
 
-fn saturating_to_u32(value: usize) -> u32 {
+pub(crate) fn saturating_to_u32(value: usize) -> u32 {
     if value > u32::MAX as usize {
         u32::MAX
     } else {

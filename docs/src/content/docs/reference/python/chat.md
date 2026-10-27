@@ -1,6 +1,6 @@
 ---
 title: Chat and completions
-description: "Chat completion, completion and embedding requests and responses, tools and output formats."
+description: "Chat completion, completion, embedding and rerank requests and responses, tools and output formats."
 sidebar:
   order: 4
 ---
@@ -736,6 +736,49 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `ReasoningEffort.HIGH` | `'high'` |
 | `ReasoningEffort.XHIGH` | `'xhigh'` |
 | `ReasoningEffort.MAX` | `'max'` |
+
+
+## `RerankDocument`
+
+| Field | Type |
+| --- | --- |
+| `text` | `str` |
+
+
+## `RerankRequest`
+
+Rerank request: score each document against the query with a cross-encoder (Cohere / Jina shape).
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `documents` | `list[str]` | required |
+| `model` | `str \| None` | optional |
+| `query` | `str` | required |
+| `raw_scores` | `bool \| None` | optional |
+| `return_documents` | `bool \| None` | optional |
+| `top_n` | `int \| None` | optional |
+| `truncate_sequence` | `bool \| None` | optional |
+
+
+## `RerankResponse`
+
+Results ordered from the most to the least relevant.
+
+| Field | Type |
+| --- | --- |
+| `model` | `str` |
+| `object` | `str` |
+| `results` | `list[RerankResult]` |
+| `usage` | `EmbeddingUsage` |
+
+
+## `RerankResult`
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `document` | `RerankDocument \| None` | optional |
+| `index` | `int` | required |
+| `relevance_score` | `float` | required |
 
 
 ## `ResponseFormat`

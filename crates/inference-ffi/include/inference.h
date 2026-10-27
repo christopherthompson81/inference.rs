@@ -339,6 +339,10 @@ INFERENCE_API inference_status inference_completion_stream_open(const inference_
 /* Embeds every input of an embeddings request (the POST /v1/embeddings body); out_response receives the list JSON. */
 INFERENCE_API inference_status inference_embeddings(const inference_engine *engine, const char *request,
                                                    size_t request_len, inference_string **out_response);
+/* Scores each document against the query with a cross-encoder (the POST /v1/rerank body); out_response receives the
+ * results JSON, most relevant first. */
+INFERENCE_API inference_status inference_rerank(const inference_engine *engine, const char *request,
+                                               size_t request_len, inference_string **out_response);
 
 /* Runs an Anthropic Messages request (the POST /v1/messages body) to its end; out_response receives the message JSON.
  * Failures leave the Anthropic error JSON ({"type": "error", "error": {"type", "message"}}) in inference_last_error().

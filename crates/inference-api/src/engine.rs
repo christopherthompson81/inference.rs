@@ -53,9 +53,9 @@ use crate::{
     openai::{
         ChatCompletionRequest, CompletionRequest, DiarizationOutput, DiarizationRequest,
         EmbeddingRequest, EmbeddingResponse, ImageEditRequest, ImageGenerationRequest,
-        ModelObjects, OpenAiToolSurface, SpeechGenerationRequest, TranscriptionOutput,
-        TranscriptionRequest, TranscriptionSessionRequest, VoiceActivityRequest,
-        VoiceActivityResponse,
+        ModelObjects, OpenAiToolSurface, RerankRequest, RerankResponse, SpeechGenerationRequest,
+        TranscriptionOutput, TranscriptionRequest, TranscriptionSessionRequest,
+        VoiceActivityRequest, VoiceActivityResponse,
     },
     operations::{
         self, CalibrationApplyRequest, CalibrationTarget, DetokenizeRequest, DetokenizeResponse,
@@ -2157,6 +2157,25 @@ impl Engine {
 
     pub async fn embeddings_json(&self, request: &[u8]) -> Result<String, ApiError> {
         let response = self.embeddings(parse_json(request)?).await?;
+        to_json(&response)
+    }
+
+    /// Scores each document against the query with a cross-encoder, most relevant first.
+    pub async fn rerank(&self, request: RerankRequest) -> Result<RerankResponse, ApiError> {
+        crate::engine_rerank::rerank(self.state().clone(), request)
+            .await
+            .map_err(|error| match error {
+                EmbeddingError::Validation(error) => {
+                    ApiError::from_error(error.as_ref(), ApiErrorKind::InvalidRequest)
+                }
+                EmbeddingError::Internal(error) => {
+                    ApiError::from_error(error.as_ref(), ApiErrorKind::Internal)
+                }
+            })
+    }
+
+    pub async fn rerank_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        let response = self.rerank(parse_json(request)?).await?;
         to_json(&response)
     }
 }

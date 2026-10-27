@@ -138,6 +138,14 @@ public sealed unsafe class InferenceEngine : IDisposable
         return Text(status, response, nameof(NativeMethods.inference_embeddings));
     }
 
+    public string Rerank(string requestJson)
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_rerank(engine.Handle, request.Pointer, request.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_rerank));
+    }
+
     /// <summary>An Anthropic Messages request; failures carry the Anthropic error envelope.</summary>
     public string AnthropicMessages(string requestJson)
     {
