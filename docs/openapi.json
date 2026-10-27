@@ -5540,7 +5540,8 @@
         "description": "The architecture to load the embedding model as.",
         "enum": [
           "embeddinggemma",
-          "qwen3embedding"
+          "qwen3embedding",
+          "bert"
         ]
       },
       "EmbeddingRequest": {

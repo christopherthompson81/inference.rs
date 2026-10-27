@@ -325,7 +325,8 @@ impl GgufMatMul {
 
     fn add_bias(&self, x: Tensor) -> Result<Tensor> {
         if let Some(ref b) = self.b {
-            x.broadcast_add(b)
+            // the bias is kept in F32 while a CUDA matmul returns the activation dtype
+            x.broadcast_add(&b.to_dtype(x.dtype())?)
         } else {
             Ok(x)
         }

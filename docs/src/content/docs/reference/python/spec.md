@@ -131,6 +131,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | --- | --- |
 | `EmbeddingLoaderType.EMBEDDINGGEMMA` | `'embeddinggemma'` |
 | `EmbeddingLoaderType.QWEN3EMBEDDING` | `'qwen3embedding'` |
+| `EmbeddingLoaderType.BERT` | `'bert'` |
 
 
 ## `EngineSpec`
