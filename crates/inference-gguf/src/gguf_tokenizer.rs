@@ -589,7 +589,7 @@ fn bpe_pre_tokenizer_spec(pre: Option<&str>) -> Result<BpePreTokenizerSpec> {
             ignore_merges: false,
             normalize_nfc: true,
         },
-        "gpt-2" | "phi-2" => BpePreTokenizerSpec {
+        "gpt-2" | "phi-2" | "modern-bert" => BpePreTokenizerSpec {
             kind: BpePreTokenizerKind::Gpt2,
             regexes: &[GPT2_REGEX],
             ignore_merges: false,
