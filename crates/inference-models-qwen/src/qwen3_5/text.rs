@@ -2930,6 +2930,17 @@ impl Qwen3_5TextModel {
             None
         };
 
+        let ple_tokens = || match (ctx.decode_token_window(), ctx.token_window()) {
+            (Some(window), _) => Ok(PleTokens::Device(window)),
+            (None, Some(window)) => Ok(PleTokens::Host(window)),
+            (None, None) => inference_tensor::bail!("PLE needs the batch's token window"),
+        };
+        #[cfg(feature = "cuda")]
+        if let Some(ple) = self.layers.iter().find_map(|layer| layer.ple.as_ref()) {
+            let (batch, len, _) = xs.dims3()?;
+            ple.gather_ahead(ple_tokens()?, batch, len)?;
+        }
+
         (|| -> Result<Tensor> {
             let mut normalized_x = None;
             for (i, layer) in self.layers.iter().enumerate() {
@@ -2943,13 +2954,7 @@ impl Qwen3_5TextModel {
                     normalized_x = None;
                 }
                 if let Some(ple) = &layer.ple {
-                    let tokens = match (ctx.decode_token_window(), ctx.token_window()) {
-                        (Some(window), _) => PleTokens::Device(window),
-                        (None, Some(window)) => PleTokens::Host(window),
-                        (None, None) => {
-                            inference_tensor::bail!("PLE needs the batch's token window")
-                        }
-                    };
+                    let tokens = ple_tokens()?;
                     // the one PLE state follows the layers' caches
                     let state = self.layer_types.len();
                     let indices =
