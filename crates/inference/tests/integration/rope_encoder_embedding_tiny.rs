@@ -1,4 +1,5 @@
-//! Tiny random-weight Nomic BERT and ModernBERT embedders: detection, ModernBERT's sliding window, ISQ and UQFF.
+//! Tiny random-weight RoPE encoders (Nomic BERT, ModernBERT, NeoBERT, bidirectional Llama): detection, ModernBERT's
+//! sliding window, bidirectional Llama layers, pooling without `modules.json`, ISQ and UQFF.
 
 use std::path::Path;
 
@@ -11,7 +12,10 @@ use inference::{
 mod support;
 #[path = "../support/traces.rs"]
 mod traces;
-use support::{prefix_weights, tiny_modern_bert_checkpoint, tiny_nomic_bert_checkpoint};
+use support::{
+    prefix_weights, tiny_llama_embedding_checkpoint, tiny_modern_bert_checkpoint,
+    tiny_neo_bert_checkpoint, tiny_nomic_bert_checkpoint,
+};
 use traces::uqff_files;
 
 const PROMPT: &str = "hello there";
@@ -23,6 +27,8 @@ const EMBEDDING_TOLERANCE: f32 = 1e-5;
 const INSIDE_WINDOW: [u32; 3] = [40, 41, 42];
 const PAST_WINDOW: [u32; 9] = [40, 41, 42, 43, 44, 45, 46, 47, 48];
 const WIDE_LOCAL_ATTENTION: usize = 64;
+// Prompts that differ only after their first token: CLS pooling sees the change only through bidirectional attention.
+const CHANGED_LATER: [[u32; 3]; 2] = [[40, 41, 42], [40, 41, 43]];
 
 fn cpu_embedding_builder(dir: &Path) -> EmbeddingModelBuilder {
     EmbeddingModelBuilder::new(dir.to_string_lossy())
@@ -122,6 +128,42 @@ async fn a_prefixed_isq_modern_bert_and_a_reload_of_its_uqff_embed_alike() -> an
     let checkpoint = tiny_modern_bert_checkpoint(|config| {
         config["architectures"] = serde_json::json!(["ModernBertForMaskedLM"]);
     })?;
+    prefix_weights(checkpoint.path(), "model")?;
+    assert_uqff_reload_matches(checkpoint.path()).await
+}
+
+#[tokio::test]
+async fn a_bidirectional_llama_lets_its_first_token_see_later_ones() -> anyhow::Result<()> {
+    let checkpoint = tiny_llama_embedding_checkpoint(|_| {})?;
+    assert_unit_embedding(checkpoint.path()).await?;
+    let model = cpu_embedding_builder(checkpoint.path()).build().await?;
+    let diff = max_diff(
+        &embed_tokens(&model, &CHANGED_LATER[0]).await?,
+        &embed_tokens(&model, &CHANGED_LATER[1]).await?,
+    );
+    assert!(
+        diff > EMBEDDING_TOLERANCE,
+        "a later token left the first token's state unchanged"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_prefixed_isq_euro_bert_and_a_reload_of_its_uqff_embed_alike() -> anyhow::Result<()> {
+    let checkpoint = tiny_llama_embedding_checkpoint(|config| {
+        config["architectures"] = serde_json::json!(["EuroBertForMaskedLM"]);
+    })?;
+    prefix_weights(checkpoint.path(), "model")?;
+    assert_uqff_reload_matches(checkpoint.path()).await
+}
+
+#[tokio::test]
+async fn a_neo_bert_without_modules_mean_pools_and_reloads_from_uqff() -> anyhow::Result<()> {
+    let checkpoint = tiny_neo_bert_checkpoint()?;
+    let model = cpu_embedding_builder(checkpoint.path()).build().await?;
+    let embedding = model.generate_embedding(PROMPT).await?;
+    assert_eq!(embedding.len(), HIDDEN_SIZE);
+    drop(model);
     prefix_weights(checkpoint.path(), "model")?;
     assert_uqff_reload_matches(checkpoint.path()).await
 }

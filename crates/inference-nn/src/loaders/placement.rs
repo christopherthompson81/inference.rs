@@ -7,6 +7,8 @@ use regex::Regex;
 use crate::utils::varbuilder_utils::DeviceForLoadTensor;
 
 pub const LAYER_INDEX_PATTERN: &str = r"\.layers\.(\d+)\.";
+/// As [`LAYER_INDEX_PATTERN`], also matching a checkpoint whose layers sit at the root (`layers.N`).
+pub const ROOT_OR_NESTED_LAYER_INDEX_PATTERN: &str = r"(?:^|\.)layers\.(\d+)\.";
 
 const NON_MAPPED_COMPONENTS: &[&str] = &[
     "audio",

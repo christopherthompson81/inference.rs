@@ -37,6 +37,7 @@ use crate::voxtral::config::VoxtralConfig;
 mod idefics2;
 mod idefics3;
 mod llama;
+mod llama_embedding;
 mod llava;
 mod llava_next;
 mod mistral;
@@ -52,6 +53,7 @@ mod voxtral;
 pub use idefics2::*;
 pub use idefics3::*;
 pub use llama::*;
+pub use llama_embedding::*;
 pub use llava::*;
 pub use llava_next::*;
 pub use mistral::*;
@@ -69,6 +71,7 @@ inference_nn::boxed_loaders!(
     MixtralLoader,
     SmolLm3Loader,
 );
+inference_nn::boxed_loaders!(EmbeddingModelLoader: LlamaEmbeddingLoader);
 inference_nn::boxed_loaders!(
     MultimodalModelLoader:
     Idefics2Loader,

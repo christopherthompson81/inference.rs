@@ -78,6 +78,8 @@ class EmbeddingLoaderType(str, Enum):
     BERT = "bert"
     NOMICBERT = "nomicbert"
     MODERNBERT = "modernbert"
+    NEOBERT = "neobert"
+    LLAMAEMBEDDING = "llamaembedding"
 
 
 class ImageGenerationResponseFormat(str, Enum):

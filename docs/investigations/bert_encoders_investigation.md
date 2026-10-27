@@ -182,3 +182,40 @@ checkpoint stored in BF16, with the cosine at 1.0.
 Implication: both load. The tiny ModernBERT test fails when the sliding mask is dropped (checked by mutation).
 Left for later in #586: nomic-bert-moe, Jina v2 (ALiBi), Jina v3 (XLM-R with RoPE and task LoRA), Jina v5 / EuroBERT,
 NeoBERT, the Llama bidirectional embedder.
+
+## Run 9 - 2026-10-27 12:48
+
+Question: do the Llama-style encoders (EuroBERT on the shared decoder stack with a bidirectional mask, NeoBERT on the
+RoPE encoder block) match their references, with no `modules.json` (mean pooling, as sentence-transformers falls
+back to)?
+
+Command: as Run 8 on EuroBERT/EuroBERT-210m (transformers' native `eurobert`) and chandar-lab/NeoBERT, whose only
+reference is its own remote `model.py`. That file was read first (it defines the model and touches no files or
+network) and run with a stand-in for `xformers.ops.SwiGLU` (`w12` split in halves, `silu(first) * second` into `w3`),
+which is not installed here (`neobert_ref.py`, scratchpad). NeoBERT differs from the Nomic / ModernBERT block in two
+ways the block now takes as options: its fused QKV is laid out per head (`view(b, s, heads, 3 * d).chunk(3)`), and
+its rotary is Llama 1's complex-pair (interleaved) form. Its SwiGLU is 2/3 of `intermediate_size`, rounded up to a
+multiple of 8.
+
+```
+                 cpu f32 worst cos   gpu bf16 worst cos
+EuroBERT-210m    1.000000            first run: HTTP 500 at 381 tokens
+NeoBERT          1.000000            0.99923
+```
+
+Finding: both match in F32. The BF16 failure was `CUDA_ERROR_MISALIGNED_ADDRESS` in inference-fattn, and it is not
+EuroBERT's: ModernBERT on the GPU embeds 200 tokens and fails at 201 (and every request after, the context being
+poisoned). fattn's mma kernel copies mask rows with 16-byte `cp.async`, so every mask row has to start on a 16-byte
+boundary; llama.cpp only ever hands it masks padded to its KV stride, and ours had the key length as its row stride
+(201 or 381 f16 = 402 or 762 bytes). `fattn_mask` now gives the mask a row stride padded to 8 f16, keeping the
+logical key length. A GPU test runs fattn at key lengths 201 and 381 (full and windowed masks, head dim 64) against
+the CPU, and fails with the padding removed.
+
+After the fix, EuroBERT BF16 worst cosine is 0.99951 over the same prompts, 381 tokens included. That is BF16
+arithmetic on a base MLM's raw mean-pooled states, not the port: transformers' own BF16 against its F32 gives
+0.99987 and 0.99959 on two of the prompts.
+
+Implication: EuroBERT, NeoBERT and Llama bidirectional embedders load. The 8B llama-embed-nemotron is not parity
+checked here (a 16 GB BF16 download); it runs the same bidirectional decoder stack as EuroBERT, with GQA and Llama 3
+rope scaling, which the tiny checkpoint covers. Left in #586: nomic-bert-moe, Jina v2 (ALiBi), Jina v3 and v5 (task
+LoRA adapters), and GGUF loading for embedders.

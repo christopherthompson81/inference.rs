@@ -99,7 +99,7 @@ impl DeviceMappedModelLoader for LlamaLoader {
     }
 }
 
-fn decoder_shape(cfg: &crate::llama::Config) -> DecoderLayerShape {
+pub(super) fn decoder_shape(cfg: &crate::llama::Config) -> DecoderLayerShape {
     DecoderLayerShape {
         hidden_size: cfg.hidden_size,
         num_attention_heads: cfg.num_attention_heads,

@@ -388,6 +388,16 @@ impl SupportedArch for EmbeddingLoaderType {
                 modalities: &[Embedding],
                 examples: &[ex!("ibm-granite/granite-embedding-english-r2")],
             },
+            Self::NeoBert => ArchMetadata {
+                families: &["NeoBERT"],
+                modalities: &[Embedding],
+                examples: &[ex!("chandar-lab/NeoBERT")],
+            },
+            Self::LlamaEmbedding => ArchMetadata {
+                families: &["EuroBERT", "Llama bidirectional"],
+                modalities: &[Embedding],
+                examples: &[ex!("nvidia/llama-embed-nemotron-8b")],
+            },
         }
     }
 }

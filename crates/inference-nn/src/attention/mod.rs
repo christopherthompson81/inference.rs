@@ -1078,6 +1078,90 @@ mod tests {
         Ok(())
     }
 
+    // An encoder's mask at a key length off fattn's 16-byte row alignment: its mask rows get a padded stride
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn custom_masks_at_unaligned_key_lengths_match_the_cpu() -> CandleResult<()> {
+        crate::skip_without_cuda!();
+        let dev = Device::new_cuda(0)?;
+        // bidirectional encoder attention at head dim 64, one KV head per query head
+        let (h, d, window) = (12, 64, 65);
+        let sdpa_params = SdpaParams {
+            n_kv_groups: 1,
+            softcap: None,
+            softmax_scale: 1. / (d as f32).sqrt(),
+            sliding_window: None,
+            sinks: None,
+            chunk: None,
+        };
+        for len in [201, 381] {
+            let masks = [
+                ("full", Tensor::zeros((len, len), DType::F32, &Device::Cpu)?),
+                (
+                    "window",
+                    Tensor::from_vec(
+                        (0..len * len)
+                            .map(|x| {
+                                let (i, j) = (x / len, x % len);
+                                if i.abs_diff(j) < window {
+                                    0.
+                                } else {
+                                    f32::NEG_INFINITY
+                                }
+                            })
+                            .collect::<Vec<f32>>(),
+                        (len, len),
+                        &Device::Cpu,
+                    )?,
+                ),
+            ];
+            for (label, mask) in masks {
+                let rand = || {
+                    Tensor::randn(0f32, 1., (1, h, len, d), &Device::Cpu)?
+                        .to_dtype(DType::BF16)?
+                        .to_dtype(DType::F32)
+                };
+                let (q, k, v) = (rand()?, rand()?, rand()?);
+                let expected = Sdpa.run_attention(
+                    &q,
+                    &k,
+                    &v,
+                    &AttentionMask::Custom(mask.clone()),
+                    None,
+                    &sdpa_params,
+                )?;
+                let on_gpu = |t: &Tensor| t.to_device(&dev)?.to_dtype(DType::BF16);
+                let gpu_mask = mask.to_device(&dev)?.to_dtype(DType::BF16)?;
+                let (q, k, v) = (on_gpu(&q)?, on_gpu(&k)?, on_gpu(&v)?);
+                assert!(
+                    masked_flash_attn(&q, &k, &v, &gpu_mask, &sdpa_params)?.is_some(),
+                    "{label} {len}: fattn declined"
+                );
+                let out = Sdpa
+                    .run_attention(
+                        &q,
+                        &k,
+                        &v,
+                        &AttentionMask::Custom(gpu_mask),
+                        None,
+                        &sdpa_params,
+                    )?
+                    .to_dtype(DType::F32)?
+                    .to_device(&Device::Cpu)?;
+                let diff = (out - &expected)?
+                    .abs()?
+                    .flatten_all()?
+                    .max(0)?
+                    .to_scalar::<f32>()?;
+                assert!(
+                    diff < SINKS_BF16_TOLERANCE,
+                    "{label} {len}: max abs diff {diff}"
+                );
+            }
+        }
+        Ok(())
+    }
+
     // A custom mask on CUDA runs fattn when one mask serves every head; the CPU's fused path is the reference
     #[cfg(feature = "cuda")]
     #[test]

@@ -19,7 +19,6 @@ pub fn rotary(
     device: &Device,
     dtype: DType,
 ) -> Result<Arc<RotaryEmbedding>> {
-    // NeoX-style halves, as transformers' rotate_half applies them
     Ok(Arc::new(RotaryEmbedding::new(
         base,
         head_dim,
@@ -30,42 +29,81 @@ pub fn rotary(
     )?))
 }
 
+/// How the fused projection orders its output rows.
+#[derive(Clone, Copy)]
+pub enum QkvLayout {
+    /// All of q, then k, then v.
+    Stacked,
+    /// q, k and v of head 0, then of head 1, and so on.
+    PerHead,
+}
+
+/// Which dims a rotation pairs.
+#[derive(Clone, Copy)]
+pub enum RopeStyle {
+    /// The two halves of the head (transformers' rotate_half).
+    NeoX,
+    /// Adjacent pairs (Llama 1's complex rotation).
+    Interleaved,
+}
+
 pub struct RopeSelfAttention {
     qkv: Arc<dyn QuantMethod>,
     out: Arc<dyn QuantMethod>,
     rotary: Arc<RotaryEmbedding>,
     num_heads: usize,
     head_dim: usize,
+    layout: QkvLayout,
+    style: RopeStyle,
+}
+
+/// The shape of one attention block.
+#[derive(Clone, Copy)]
+pub struct RopeAttentionShape {
+    pub hidden: usize,
+    pub num_heads: usize,
+    pub bias: bool,
+    pub layout: QkvLayout,
+    pub style: RopeStyle,
 }
 
 impl RopeSelfAttention {
-    /// `qkv` holds q, k and v stacked along its output rows.
     pub fn new(
-        hidden: usize,
-        num_heads: usize,
-        bias: bool,
+        shape: &RopeAttentionShape,
         rotary: Arc<RotaryEmbedding>,
         qkv: ShardedVarBuilder,
         out: ShardedVarBuilder,
     ) -> Result<Self> {
+        let RopeAttentionShape {
+            hidden,
+            num_heads,
+            bias,
+            layout,
+            style,
+        } = *shape;
         Ok(Self {
             qkv: inference_quant::linear_b(hidden, 3 * hidden, bias, &None, qkv)?,
             out: inference_quant::linear_b(hidden, hidden, bias, &None, out)?,
             rotary,
             num_heads,
             head_dim: hidden / num_heads,
+            layout,
+            style,
         })
     }
 
     pub fn forward(&self, xs: &Tensor, mask: &AttentionMask) -> Result<Tensor> {
         let (b_sz, seq_len, hidden) = xs.dims3()?;
-        let qkv =
-            self.qkv
-                .forward(xs)?
-                .reshape((b_sz, seq_len, 3, self.num_heads, self.head_dim))?;
+        let qkv = self.qkv.forward(xs)?;
+        let (h, d) = (self.num_heads, self.head_dim);
+        // (b, seq, 3, heads, d) or (b, seq, heads, 3, d), sliced on the `3` axis
+        let (qkv, axis) = match self.layout {
+            QkvLayout::Stacked => (qkv.reshape((b_sz, seq_len, 3, h, d))?, 2),
+            QkvLayout::PerHead => (qkv.reshape((b_sz, seq_len, h, 3, d))?, 3),
+        };
         let part = |i| {
-            qkv.narrow(2, i, 1)?
-                .squeeze(2)?
+            qkv.narrow(axis, i, 1)?
+                .squeeze(axis)?
                 .transpose(1, 2)?
                 .contiguous()
         };
@@ -76,7 +114,7 @@ impl RopeSelfAttention {
             &k,
             &cos.narrow(0, 0, seq_len)?,
             &sin.narrow(0, 0, seq_len)?,
-            true,
+            matches!(self.style, RopeStyle::NeoX),
         )?;
         let params = SdpaParams {
             n_kv_groups: 1,

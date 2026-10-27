@@ -12,6 +12,9 @@ const FATTN_HEAD_DIMS: [usize; 6] = [64, 80, 96, 112, 128, 256];
 const FATTN_SOFTCAP_HEAD_DIMS: [usize; 2] = [128, 256];
 // Head dims only fattn's tile kernel takes (no mma, paged or packed instance): SigLIP-style vision towers (72)
 const FATTN_TILE_HEAD_DIMS: [usize; 2] = [40, 72];
+// f16 elements per 16-byte mask row chunk
+#[cfg(feature = "cuda")]
+const FATTN_MASK_ROW_ALIGN: usize = 8;
 
 pub fn fattn_supports(head_dim: usize, has_softcap: bool) -> bool {
     #[cfg(feature = "cuda")]
@@ -181,7 +184,13 @@ fn fattn_mask(mask: &Tensor, b_sz: usize, seq_q: usize, seq_kv: usize) -> Result
         .broadcast_as(mask.shape())?;
     let zero = Tensor::zeros((), inference_tensor::DType::F16, mask.device())?
         .broadcast_as(mask.shape())?;
-    Ok(Some(unattended.where_cond(&zero, &mask)?.contiguous()?))
+    let mask = unattended.where_cond(&zero, &mask)?;
+    // fattn copies mask rows 16 bytes at a time, so each row starts on a whole number of them
+    let padded = seq_kv.next_multiple_of(FATTN_MASK_ROW_ALIGN);
+    Ok(Some(
+        mask.pad_with_zeros(2, 0, padded - seq_kv)?
+            .narrow(2, 0, seq_kv)?,
+    ))
 }
 
 /// fattn over `(b, seq, heads, head_dim)` with an additive mask carrying all the masking; None for per-head masks.

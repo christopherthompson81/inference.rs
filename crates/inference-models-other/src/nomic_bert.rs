@@ -14,7 +14,7 @@ use crate::{
     layers::{dense_embedding, layer_norm},
     model::{EmbeddingModel, IsqModel, NormalLoadingMetadata},
     paged_attention::AttentionImplementation,
-    rope_encoder::{RopeSelfAttention, rotary},
+    rope_encoder::{QkvLayout, RopeAttentionShape, RopeSelfAttention, RopeStyle, rotary},
     serde_default_fn,
     utils::unvarbuilder::UnVarBuilder,
 };
@@ -190,9 +190,13 @@ impl Model {
                 let vb_mlp = vb.pp("mlp");
                 Ok(Layer {
                     attn: RopeSelfAttention::new(
-                        hidden,
-                        cfg.num_attention_heads(),
-                        cfg.qkv_proj_bias,
+                        &RopeAttentionShape {
+                            hidden,
+                            num_heads: cfg.num_attention_heads(),
+                            bias: cfg.qkv_proj_bias,
+                            layout: QkvLayout::Stacked,
+                            style: RopeStyle::NeoX,
+                        },
                         layer_rotary,
                         place(vb.pp("attn").pp("Wqkv")),
                         place(vb.pp("attn").pp("out_proj")),

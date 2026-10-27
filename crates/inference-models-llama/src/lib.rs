@@ -1,4 +1,4 @@
-//! Llama-family models: the Llama, Mistral, Mixtral and SmolLM3 text models, and LLaVA, Idefics 2/3, Mistral 3, Mllama, Llama 4 and Voxtral.
+//! Llama-family models: the Llama, Mistral, Mixtral and SmolLM3 text models, bidirectional Llama encoders, and LLaVA, Idefics 2/3, Mistral 3, Mllama, Llama 4 and Voxtral.
 #![deny(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use inference_nn::serde_default_fn;
@@ -15,6 +15,7 @@ pub mod idefics3;
 mod idefics_vision_tests;
 pub mod llama;
 pub mod llama4;
+pub mod llama_embedding;
 pub mod llava;
 #[cfg(test)]
 mod llava_tests;
