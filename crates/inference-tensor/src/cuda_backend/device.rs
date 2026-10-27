@@ -120,7 +120,31 @@ impl Drop for CudaGraphHtodCacheGuard {
 }
 
 pub struct ModuleStore {
-    mdls: [Option<Arc<cudarc::driver::CudaModule>>; kernels::ALL_IDS.len()],
+    mdls: [Option<LoadedModule>; kernels::ALL_IDS.len()],
+}
+
+// cuModuleGetFunction takes a driver lock another thread's pageable copy holds throughout, so each is looked up once
+struct LoadedModule {
+    module: Arc<cudarc::driver::CudaModule>,
+    funcs: HashMap<String, CudaFunction>,
+}
+
+impl LoadedModule {
+    fn new(module: Arc<cudarc::driver::CudaModule>) -> Self {
+        Self {
+            module,
+            funcs: HashMap::new(),
+        }
+    }
+
+    fn function(&mut self, fn_name: &str) -> Result<CudaFunction> {
+        if let Some(func) = self.funcs.get(fn_name) {
+            return Ok(func.clone());
+        }
+        let func = self.module.load_function(fn_name).w()?;
+        self.funcs.insert(fn_name.to_string(), func.clone());
+        Ok(func)
+    }
 }
 
 #[derive(Clone)]
@@ -128,7 +152,7 @@ pub struct CudaDevice {
     id: DeviceId,
     context: Arc<cudarc::driver::CudaContext>,
     modules: Arc<std::sync::RwLock<ModuleStore>>,
-    custom_modules: Arc<std::sync::RwLock<HashMap<String, Arc<cudarc::driver::CudaModule>>>>,
+    custom_modules: Arc<std::sync::RwLock<HashMap<String, LoadedModule>>>,
     stream: Arc<cudarc::driver::CudaStream>,
     pub(crate) blas: Arc<cudarc::cublas::CudaBlas>,
     // Created on first use, so a device that never draws random numbers never loads libcurand.
@@ -428,18 +452,23 @@ impl CudaDevice {
         module: impl FnOnce() -> cudarc::nvrtc::Ptx,
     ) -> Result<CudaFunc> {
         let ms = self.custom_modules.read().unwrap();
-        if let Some(mdl) = ms.get(module_name).as_ref() {
-            let func = mdl.load_function(fn_name).w()?;
+        if let Some(func) = ms.get(module_name).and_then(|m| m.funcs.get(fn_name)) {
             return Ok(CudaFunc {
-                func,
+                func: func.clone(),
                 stream: self.stream.clone(),
             });
         }
         drop(ms);
         let mut ms = self.custom_modules.write().unwrap();
-        let cuda_module = self.context.load_module(module()).w()?;
-        ms.insert(module_name.to_string(), cuda_module.clone());
-        let func = cuda_module.load_function(fn_name).w()?;
+        let loaded = match ms.get_mut(module_name) {
+            Some(loaded) => loaded,
+            None => {
+                let cuda_module = self.context.load_module(module()).w()?;
+                ms.entry(module_name.to_string())
+                    .or_insert(LoadedModule::new(cuda_module))
+            }
+        };
+        let func = loaded.function(fn_name)?;
         Ok(CudaFunc {
             func,
             stream: self.stream.clone(),
@@ -448,19 +477,26 @@ impl CudaDevice {
 
     pub fn get_or_load_func(&self, fn_name: &str, mdl: &kernels::Module) -> Result<CudaFunc> {
         let ms = self.modules.read().unwrap();
-        if let Some(mdl) = ms.mdls[mdl.index()].as_ref() {
-            let func = mdl.load_function(fn_name).w()?;
+        if let Some(func) = ms.mdls[mdl.index()]
+            .as_ref()
+            .and_then(|m| m.funcs.get(fn_name))
+        {
             return Ok(CudaFunc {
-                func,
+                func: func.clone(),
                 stream: self.stream.clone(),
             });
         }
         drop(ms);
         let mut ms = self.modules.write().unwrap();
-        let image = cudarc::nvrtc::Ptx::from_binary(mdl.image().to_vec());
-        let cuda_module = self.context.load_module(image).w()?;
-        ms.mdls[mdl.index()] = Some(cuda_module.clone());
-        let func = cuda_module.load_function(fn_name).w()?;
+        let loaded = match &mut ms.mdls[mdl.index()] {
+            Some(loaded) => loaded,
+            slot @ None => {
+                let image = cudarc::nvrtc::Ptx::from_binary(mdl.image().to_vec());
+                let cuda_module = self.context.load_module(image).w()?;
+                slot.insert(LoadedModule::new(cuda_module))
+            }
+        };
+        let func = loaded.function(fn_name)?;
         Ok(CudaFunc {
             func,
             stream: self.stream.clone(),

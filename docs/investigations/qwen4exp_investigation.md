@@ -1858,3 +1858,48 @@ host function         49.0                     41.8 (38.8-43.0)
 ```
 +2.7% / +2.6%. Against Strata's exact one-draft window (51.9 / 42.0): -3% / +2%. Shipped; the cost is one spinning
 host core while a model with offloaded experts is decoding.
+
+## Run 56 - 2026-10-26 18:15
+
+Question: nvtop showed GPU headroom during the speed tests; where is the GPU idle in a decode step, and can it be used?
+
+Measured: `nvidia-smi --query-gpu=utilization.gpu -lms 100` through four 512-token decodes (MTP 1 draft) reads 96%
+median, but that counter (nvtop's too) is "a kernel is resident", and the doorbell's wait kernel is resident while it
+spins. An nsys capture of 2.6 s of code decode with GPU metrics (`--gpu-metrics-set=ga10x`) and graph nodes traced:
+```
+                                   all     during doorbell spin    outside it
+GPU Active (what nvtop shows) %    93.9    99.9                    90.0
+SMs Active %                       30.8     3.8                    48.5
+DRAM read bandwidth %              19.8     2.0                    31.5
+PCIe RX %                          43.6    29.3                    52.8
+```
+On the main stream: 39% of the time is the doorbell spin (the GPU waiting for the CPU's misses, ~17 ms a step), 43%
+kernels, 16% gaps. Of the gaps, 354 of 419 ms fall inside the eager (non-graph) run between a step's graph replays
+(sampling, accept/rollback, GDN state commits, the MTP head): 6.7 ms a step of span for 1.2 ms of kernels, with ~70
+us between consecutive eager kernels. The launching thread spent 3.5 ms of each run in `pthread_rwlock_wrlock`,
+called from `cuModuleGetFunction` (cudarc `get_function`): `CudaDevice::get_or_load_func` looked every launch's
+function up again, and that driver lock is held by the `moe-expert-fill` thread's `cuMemcpyHtoDAsync` from the
+pageable GGUF mapping (60-150 us a call, three a fill; registering the mapping fails with CUDA_ERROR_NOT_SUPPORTED).
+
+Built: each module keeps the functions looked up in it (`LoadedModule` in `cuda_backend/device.rs`). Same capture:
+```
+                                   before      after
+eager run span (median)            6657 us     2840 us
+  its kernels                      1167 us     1162 us
+  launcher rwlock waits            3465 us       31 us
+main-stream gaps                   16.2%       7.6%
+steps in 2.6 s                     60          63
+```
+The spin is now 46% of the time. What is left idle: the spin (CPU misses, ~19 ms a step) and ~1.8 ms a step of host
+gaps around sampling (top1 -> next step's embedding 0.69 ms, top1 -> draft 0.53 ms, hc_inject_add -> cast 0.33 ms,
+row copy -> embedding 0.22 ms). Outside the spin only ~half the SMs are busy (small decode kernels).
+
+Interleaved A/B against master (MTP 1 draft, two servers per build, three rounds each):
+```
+                      prose median (range)     code median (range)
+master                50.3 (47.5-51.1)         42.3 (41.0-43.0)
+functions cached      51.6 (48.3-52.8)         44.8 (43.5-45.8)
+```
++2.6% / +5.9%. Against Strata exact one draft (51.9 / 42.0): level on prose, +7% on code. Next, by size: the spin
+(CPU misses; Strata's GPU share over PCIe was worth 1-5% there, Run 39), the ~1.8 ms of host gaps around sampling,
+and the small kernels outside the spin.
