@@ -1944,4 +1944,12 @@ CANDLE_NUM_THREADS 8  50.6             45.4
 12                    50.7             45.6
 16                    23.8             18.5
 ```
-Still no gain: the doorbell thread spins one core, and sixteen pool threads leave no core for it or the host.
+And 9 and 10, interleaved with 8 again:
+```
+                      prose median (range)     code median (range)
+8                     51.9 (48.4-54.5)         45.2 (44.0-45.9)
+9                     51.1 (49.1-54.0)         45.1 (44.4-45.8)
+10                    51.7 (49.5-54.5)         45.4 (44.4-46.0)
+```
+Still no gain from 9 to 12 threads, and 16 collapses: the doorbell thread spins one core, and sixteen pool threads leave
+no core for it or the host. Eight (the physical cores) stays.
