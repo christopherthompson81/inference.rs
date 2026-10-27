@@ -3,7 +3,7 @@
 
 use inference_nn::serde_default_fn;
 use inference_nn::{
-    amoe, attention, decoder, device_map, flashinfer, gdn, kv_cache, layers, matformer,
+    amoe, attention, decoder, device_map, embedding, flashinfer, gdn, kv_cache, layers, matformer,
     media_inputs, model, moe, ops, paged_attention, speculative, utils, vision,
 };
 

@@ -373,12 +373,12 @@ impl EmbeddingModel for Model {
     fn forward(
         &self,
         input_ids: &Tensor,
-        token_type_ids: Option<&Tensor>,
+        extras: &crate::embedding::EmbeddingExtras,
         _flash_params: &FlashParams,
     ) -> Result<Tensor> {
         let xs = self.word.forward(input_ids)?;
         // a one-row table (nomic-bert-moe) has a single segment whatever the tokenizer numbers it
-        let xs = match token_type_ids {
+        let xs = match extras.token_type_ids.as_ref() {
             Some(types) if self.token_type.embeddings().dim(0)? > 1 => {
                 (xs + self.token_type.forward(types)?)?
             }

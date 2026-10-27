@@ -147,7 +147,7 @@ fn embedding_gemma_hidden_states() -> Result<()> {
     );
     let input = Tensor::new(&PROMPT, &Device::Cpu)?.unsqueeze(0)?;
     let hidden = model
-        .forward(&input, None, &FlashParams::empty(false))?
+        .forward(&input, &Default::default(), &FlashParams::empty(false))?
         .to_dtype(DType::F32)?;
     assert_snapshot(
         &hidden,

@@ -95,10 +95,11 @@ async fn embed_inner(
             let futures = prompts.into_iter().map(|prompt| {
                 let state = state.clone();
                 let model_override = model_override.clone();
+                let task = oairequest.task.clone();
                 async move {
                     fetch(
                         state,
-                        RequestMessage::Embedding { prompt },
+                        RequestMessage::Embedding { prompt, task },
                         model_override.as_deref(),
                         oairequest.truncate_sequence.unwrap_or(false),
                     )
@@ -138,10 +139,14 @@ async fn embed_inner(
             let futures = batches.into_iter().map(|tokens| {
                 let state = state.clone();
                 let model_override = model_override.clone();
+                let task = oairequest.task.clone();
                 async move {
                     fetch(
                         state,
-                        RequestMessage::EmbeddingTokens { prompt: tokens },
+                        RequestMessage::EmbeddingTokens {
+                            prompt: tokens,
+                            task,
+                        },
                         model_override.as_deref(),
                         oairequest.truncate_sequence.unwrap_or(false),
                     )

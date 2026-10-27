@@ -285,7 +285,7 @@ impl EmbeddingModel for Model {
     fn forward(
         &self,
         input_ids: &Tensor,
-        _token_type_ids: Option<&Tensor>,
+        _extras: &crate::embedding::EmbeddingExtras,
         _flash_params: &FlashParams,
     ) -> Result<Tensor> {
         let mut xs = self

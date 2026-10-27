@@ -1771,6 +1771,11 @@ pub struct EmbeddingRequest {
     #[schema(example = json!(Option::None::<bool>))]
     #[serde(default)]
     pub truncate_sequence: Option<bool>,
+    /// The task adapter to embed with, for models that carry several (as Jina's `task`); its instruction is
+    /// prepended to text inputs. Without one, the base weights embed.
+    #[schema(example = json!(Option::None::<String>))]
+    #[serde(default)]
+    pub task: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]

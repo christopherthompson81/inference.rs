@@ -362,6 +362,12 @@ impl EmbeddingModelLoader for AutoEmbeddingLoader {
     fn is_classifier(&self, config: &str) -> Result<bool> {
         Self::get_loader(config)?.is_classifier(config)
     }
+    fn embedding_tasks(
+        &self,
+        config: &str,
+    ) -> Result<Option<inference_nn::embedding::EmbeddingTasks>> {
+        Self::get_loader(config)?.embedding_tasks(config)
+    }
     fn is_gptx(&self, config: &str) -> Result<bool> {
         Self::get_loader(config)?.is_gptx(config)
     }

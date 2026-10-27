@@ -57,6 +57,8 @@ pub struct Config {
     pub pad_token_id: usize,
     #[serde(default = "position_embedding_type")]
     pub position_embedding_type: String,
+    // Jina v3's config names no model type
+    #[serde(default)]
     pub model_type: String,
     #[serde(default)]
     pub architectures: Vec<String>,
@@ -528,10 +530,12 @@ impl EmbeddingModel for Model {
     fn forward(
         &self,
         input_ids: &Tensor,
-        token_type_ids: Option<&Tensor>,
+        extras: &crate::embedding::EmbeddingExtras,
         _flash_params: &FlashParams,
     ) -> Result<Tensor> {
-        let mut xs = self.embeddings.forward(input_ids, token_type_ids)?;
+        let mut xs = self
+            .embeddings
+            .forward(input_ids, extras.token_type_ids.as_ref())?;
         let alibi = self
             .alibi_slopes
             .as_ref()

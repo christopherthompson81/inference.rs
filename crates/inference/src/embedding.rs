@@ -18,6 +18,7 @@ pub struct EmbeddingRequestBuilder {
     model: Option<String>,
     dimensions: Option<usize>,
     truncate_sequence: Option<bool>,
+    task: Option<String>,
 }
 
 impl EmbeddingRequestBuilder {
@@ -68,6 +69,12 @@ impl EmbeddingRequestBuilder {
         self
     }
 
+    /// Embeds with one of the model's task adapters (Jina v3's `retrieval.query`, ...), its instruction prepended.
+    pub fn with_task(mut self, task: impl Into<String>) -> Self {
+        self.task = Some(task.into());
+        self
+    }
+
     pub fn build(self) -> Result<EmbeddingRequest> {
         let input = match (self.texts.is_empty(), self.tokens.is_empty()) {
             (false, true) => EmbeddingInput::Multiple(self.texts),
@@ -82,6 +89,7 @@ impl EmbeddingRequestBuilder {
         }
         request.dimensions = self.dimensions;
         request.truncate_sequence = self.truncate_sequence;
+        request.task = self.task;
         Ok(request)
     }
 }

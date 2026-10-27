@@ -8,6 +8,7 @@ use inference_tensor::{DType, Device, Result, Tensor};
 
 use crate::{
     attention::{AttentionMask, FlashParams, SdpaParams},
+    embedding::{TaskLora, TaskRows},
     layers::{RotaryEmbedding, Sdpa, apply_rotary_preselected_qk},
 };
 
@@ -55,6 +56,8 @@ pub struct RopeSelfAttention {
     head_dim: usize,
     layout: QkvLayout,
     style: RopeStyle,
+    // per-task adapters on the fused qkv and the output projection (Jina v3)
+    lora: Option<(TaskLora, TaskLora)>,
 }
 
 /// The shape of one attention block.
@@ -74,27 +77,60 @@ impl RopeSelfAttention {
         qkv: ShardedVarBuilder,
         out: ShardedVarBuilder,
     ) -> Result<Self> {
-        let RopeAttentionShape {
-            hidden,
-            num_heads,
-            bias,
-            layout,
-            style,
-        } = *shape;
-        Ok(Self {
-            qkv: inference_quant::linear_b(hidden, 3 * hidden, bias, &None, qkv)?,
-            out: inference_quant::linear_b(hidden, hidden, bias, &None, out)?,
+        let hidden = shape.hidden;
+        Ok(Self::from_projections(
+            shape,
             rotary,
-            num_heads,
-            head_dim: hidden / num_heads,
-            layout,
-            style,
-        })
+            inference_quant::linear_b(hidden, 3 * hidden, shape.bias, &None, qkv)?,
+            inference_quant::linear_b(hidden, hidden, shape.bias, &None, out)?,
+            None,
+        ))
+    }
+
+    /// Over projections the caller built, with optional task adapters on each.
+    pub fn from_projections(
+        shape: &RopeAttentionShape,
+        rotary: Arc<RotaryEmbedding>,
+        qkv: Arc<dyn QuantMethod>,
+        out: Arc<dyn QuantMethod>,
+        lora: Option<(TaskLora, TaskLora)>,
+    ) -> Self {
+        Self {
+            qkv,
+            out,
+            rotary,
+            num_heads: shape.num_heads,
+            head_dim: shape.hidden / shape.num_heads,
+            layout: shape.layout,
+            style: shape.style,
+            lora,
+        }
     }
 
     pub fn forward(&self, xs: &Tensor, mask: &AttentionMask) -> Result<Tensor> {
+        self.forward_tasks(xs, mask, None)
+    }
+
+    /// As `forward`, adding each row's task adapter where the block has them.
+    pub fn forward_tasks(
+        &self,
+        xs: &Tensor,
+        mask: &AttentionMask,
+        tasks: Option<&TaskRows>,
+    ) -> Result<Tensor> {
         let (b_sz, seq_len, hidden) = xs.dims3()?;
-        let qkv = self.qkv.forward(xs)?;
+        let adapted = |proj: &Arc<dyn QuantMethod>, lora: Option<&TaskLora>, x: &Tensor| {
+            let y = proj.forward(x)?;
+            match (lora, tasks) {
+                (Some(lora), Some(rows)) => y + lora.delta(x, rows)?,
+                _ => Ok(y),
+            }
+        };
+        let (qkv_lora, out_lora) = match &self.lora {
+            Some((qkv, out)) => (Some(qkv), Some(out)),
+            None => (None, None),
+        };
+        let qkv = adapted(&self.qkv, qkv_lora, xs)?;
         let (h, d) = (self.num_heads, self.head_dim);
         // (b, seq, 3, heads, d) or (b, seq, heads, 3, d), sliced on the `3` axis
         let (qkv, axis) = match self.layout {
@@ -126,7 +162,10 @@ impl RopeSelfAttention {
         };
         let attn =
             Sdpa.run_attention(&q, &k, &v, mask, Some(&FlashParams::empty(false)), &params)?;
-        self.out
-            .forward(&attn.transpose(1, 2)?.reshape((b_sz, seq_len, hidden))?)
+        adapted(
+            &self.out,
+            out_lora,
+            &attn.transpose(1, 2)?.reshape((b_sz, seq_len, hidden))?,
+        )
     }
 }

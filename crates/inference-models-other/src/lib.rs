@@ -3,8 +3,8 @@
 
 use inference_nn::serde_default_fn;
 use inference_nn::{
-    amoe, attention, cuda, decoder, device_map, gdn, kv_cache, layers, media_inputs, metal, mla,
-    model, moe, ops, paged_attention, speculative, utils,
+    amoe, attention, cuda, decoder, device_map, embedding, gdn, kv_cache, layers, media_inputs,
+    metal, mla, model, moe, ops, paged_attention, speculative, utils,
 };
 
 pub mod bert;
@@ -25,6 +25,7 @@ mod hunyuan_dense_tests;
 mod hunyuan_rope;
 pub mod hunyuan_v1_dense;
 pub mod hunyuan_v1_moe;
+pub mod jina_v3;
 pub mod lfm2;
 pub mod lfm2_vl;
 pub mod loaders;
@@ -41,6 +42,7 @@ mod starcoder2_tests;
 
 inference_nn::json_config!(
     bert::Config,
+    jina_v3::Config,
     modern_bert::Config,
     neo_bert::Config,
     nomic_bert::Config,

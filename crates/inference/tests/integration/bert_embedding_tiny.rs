@@ -12,7 +12,10 @@ use inference::{
 mod support;
 #[path = "../support/traces.rs"]
 mod traces;
-use support::{prefix_encoder_weights, tiny_bert_checkpoint};
+use support::{
+    JINA_V3_INSTRUCTION, JINA_V3_TASKS, prefix_encoder_weights, tiny_bert_checkpoint,
+    tiny_jina_v3_checkpoint,
+};
 use traces::uqff_files;
 
 const HIDDEN_SIZE: usize = 32;
@@ -397,5 +400,89 @@ async fn jina_v2_alibi_makes_token_order_count_and_reloads_from_uqff() -> anyhow
     .build()
     .await?;
     assert_eq!(reloaded.generate_embedding(PROMPT).await?, expected);
+    Ok(())
+}
+
+async fn embed_with_task(
+    model: &Model,
+    text: &str,
+    task: Option<&str>,
+) -> anyhow::Result<Vec<f32>> {
+    let mut request = EmbeddingRequestBuilder::new().add_prompt(text);
+    if let Some(task) = task {
+        request = request.with_task(task);
+    }
+    let response = serde_json::to_value(model.generate_embeddings(request.build()?).await?)?;
+    Ok(serde_json::from_value(
+        response["data"][0]["embedding"].clone(),
+    )?)
+}
+
+#[tokio::test]
+async fn a_task_picks_its_adapter_and_prepends_its_instruction() -> anyhow::Result<()> {
+    let checkpoint = tiny_jina_v3_checkpoint()?;
+    let model = cpu_embedding_builder(checkpoint.path()).build().await?;
+    let base = embed_with_task(&model, PROMPT, None).await?;
+    // the second task has no instruction, so only its adapter moves the embedding
+    let adapted = embed_with_task(&model, PROMPT, Some(JINA_V3_TASKS[1])).await?;
+    assert!(
+        max_diff(&base, &adapted) > EMBEDDING_TOLERANCE,
+        "the adapter changed nothing"
+    );
+
+    // the first task's text request equals its tokens with the instruction already in them
+    let tokenizer = tokenizers::Tokenizer::from_file(checkpoint.path().join("tokenizer.json"))
+        .map_err(anyhow::Error::msg)?;
+    let instructed = tokenizer
+        .encode(format!("{JINA_V3_INSTRUCTION}{PROMPT}"), true)
+        .map_err(anyhow::Error::msg)?;
+    let request = EmbeddingRequestBuilder::new()
+        .add_tokens(instructed.get_ids().to_vec())
+        .with_task(JINA_V3_TASKS[0])
+        .build()?;
+    let response = serde_json::to_value(model.generate_embeddings(request).await?)?;
+    let from_tokens: Vec<f32> = serde_json::from_value(response["data"][0]["embedding"].clone())?;
+    let from_text = embed_with_task(&model, PROMPT, Some(JINA_V3_TASKS[0])).await?;
+    assert!(max_diff(&from_text, &from_tokens) < EMBEDDING_TOLERANCE);
+    Ok(())
+}
+
+#[tokio::test]
+async fn requests_with_different_tasks_embed_as_they_do_alone() -> anyhow::Result<()> {
+    let checkpoint = tiny_jina_v3_checkpoint()?;
+    let model = cpu_embedding_builder(checkpoint.path()).build().await?;
+    let tasks = [None, Some(JINA_V3_TASKS[0]), Some(JINA_V3_TASKS[1])];
+    let mut alone = Vec::new();
+    for task in tasks {
+        alone.push(embed_with_task(&model, PROMPT, task).await?);
+    }
+    // the same three at once, which the scheduler may batch together
+    let together = futures::future::try_join_all(
+        tasks
+            .iter()
+            .map(|task| embed_with_task(&model, PROMPT, *task)),
+    )
+    .await?;
+    for (a, t) in alone.iter().zip(&together) {
+        assert!(max_diff(a, t) < EMBEDDING_TOLERANCE);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unknown_task_or_a_model_without_adapters_is_rejected() -> anyhow::Result<()> {
+    let jina = tiny_jina_v3_checkpoint()?;
+    let model = cpu_embedding_builder(jina.path()).build().await?;
+    let error = embed_with_task(&model, PROMPT, Some("summarization"))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains(JINA_V3_TASKS[0]), "{error}");
+
+    let bert = tiny_bert_checkpoint(|_| {})?;
+    let model = cpu_embedding_builder(bert.path()).build().await?;
+    let error = embed_with_task(&model, PROMPT, Some(JINA_V3_TASKS[0]))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("no task adapters"), "{error}");
     Ok(())
 }
