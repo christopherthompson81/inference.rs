@@ -379,6 +379,7 @@ impl SupportedArch for EmbeddingLoaderType {
                     "RoBERTa",
                     "XLM-RoBERTa",
                     "CamemBERT",
+                    "DistilBERT",
                     "Jina BERT v2",
                 ],
                 modalities: &[Embedding],

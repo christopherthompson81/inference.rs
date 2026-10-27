@@ -7,7 +7,7 @@ use inference_nn::model::EmbeddingModel;
 // BERT numbers its layers `encoder.layer.N`, not `layers.N`
 const BERT_LAYER_INDEX_PATTERN: &str = r"\.layer\.(\d+)\.";
 
-/// `EmbeddingModelLoader` for BERT-family encoders (BERT, RoBERTa, XLM-R, CamemBERT).
+/// `EmbeddingModelLoader` for BERT-family encoders (BERT, RoBERTa, XLM-R, CamemBERT, DistilBERT).
 pub struct BertLoader;
 
 impl EmbeddingModelLoader for BertLoader {
@@ -74,6 +74,9 @@ impl IsqModelLoader for BertLoader {
             r"layer\.(\d+)\.intermediate\.dense\.(weight|bias)$",
             r"layer\.(\d+)\.output\.dense\.(weight|bias)$",
             r"layer\.(\d+)\.mlp\.(gated_layers|wo)\.(weight|bias)$",
+            // DistilBERT
+            r"layer\.(\d+)\.attention\.(q_lin|k_lin|v_lin|out_lin)\.(weight|bias)$",
+            r"layer\.(\d+)\.ffn\.(lin1|lin2)\.(weight|bias)$",
         ])
     }
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
@@ -92,7 +95,7 @@ impl DeviceMappedModelLoader for BertLoader {
     ) -> Result<usize> {
         let cfg = BertConfig::from_json(config)?;
         let (hidden, labels) = (cfg.hidden_size, cfg.num_labels());
-        let rows = cfg.vocab_size + cfg.max_position_embeddings + cfg.type_vocab_size;
+        let rows = cfg.vocab_size + cfg.max_position_embeddings + cfg.token_type_rows();
         // the embedding LayerNorm's weight and bias
         let mut elems = rows * hidden + 2 * hidden;
         if cfg.is_classifier() {

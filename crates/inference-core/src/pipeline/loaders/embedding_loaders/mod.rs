@@ -54,7 +54,7 @@ const LLAMA_EMBEDDING_CLASSES: &[&str] = &[
     "LlamaBidirectionalModel",
 ];
 
-// Encoder-only classes (BERT, RoBERTa, XLM-R, CamemBERT): checkpoints that can only be embedders
+// Encoder-only classes (BERT, RoBERTa, XLM-R, CamemBERT, DistilBERT): checkpoints that can only be embedders
 const BERT_CLASSES: &[&str] = &[
     "BertModel",
     "BertForMaskedLM",
@@ -68,6 +68,9 @@ const BERT_CLASSES: &[&str] = &[
     "RobertaForSequenceClassification",
     "XLMRobertaForSequenceClassification",
     "CamembertForSequenceClassification",
+    "DistilBertModel",
+    "DistilBertForMaskedLM",
+    "DistilBertForSequenceClassification",
     "JinaBertModel",
     "JinaBertForMaskedLM",
     "JinaBertForSequenceClassification",

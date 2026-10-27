@@ -459,3 +459,26 @@ merge, not ours.
 
 Implication: commit with a tiny-checkpoint test (adapters checked against the merged weights, mixed tasks in one
 batch) and docs.
+
+## Run 18 - 2026-10-27 16:47
+
+Question: after reopening #586 for the scope it lists that was still open, does DistilBERT (embedder and
+`DistilBertForSequenceClassification` cross-encoder) run on the BERT encoder under its own names?
+
+Command: `inference serve --cpu --dtype f32` on `sentence-transformers/multi-qa-distilbert-cos-v1` against `ref.py`
+(five texts, one of 402 tokens) and on `ml6team/cross-encoder-mmarco-german-distilbert-base` (one label) against
+`rerank_ref.py`.
+
+```
+multi-qa-distilbert-cos-v1: worst cos 1.000000, max_abs <= 2.5e-7
+mmarco german distilbert reranker: worst score diff 9.7e-8, same order
+```
+
+Finding: DistilBERT is BERT's post-LayerNorm block with no segment table, under other names (`transformer.layer.N`,
+`attention.{q,k,v,out}_lin`, `sa_layer_norm`, `ffn.lin1/lin2`, `output_layer_norm`; `distilbert.` under the task
+heads) and config keys (`dim`, `n_layers`, `n_heads`, `hidden_dim`, `activation`). The BERT encoder reads them
+through a per-architecture name table and serde aliases. Its classifier is `pre_classifier`, ReLU, `classifier` on
+the first token, with no pooler. Tests: a tiny BERT renamed by hand to DistilBERT embeds as the BERT (segment table
+zeroed), and the classifier's logit equals that head applied by hand to the first-token state.
+
+Implication: DistilBERT done. Next on #586: the ModernBERT and NeoBERT classifier classes.
