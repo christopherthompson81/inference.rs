@@ -155,3 +155,30 @@ Finding: two failures, both real.
   first-token slice is a strided view, which the quantized matmul rejects. The slice is now made contiguous.
 
 After both: 11 of 11 pass.
+
+## Run 8 - 2026-10-27 12:03
+
+Question: do the RoPE encoders (Nomic BERT, ModernBERT) match transformers, including ModernBERT's sliding-window
+layers?
+
+Command: as Run 1 (`--cpu --dtype f32`) and Run 3 (`--dtype bf16`, GPU), with a fifth, 402-token prompt so ModernBERT's
+sliding layers (128-token window, |i - j| <= 64) mask. Checkpoints: nomic-ai/nomic-embed-text-v1.5 (`NomicBertModel`,
+post-norm, fused unbiased QKV, RoPE base 1000, SwiGLU with `fc11` up and `fc12` gate, mean pooling) and
+ibm-granite/granite-embedding-english-r2 (`ModernBertModel`, pre-norm, bias-free LayerNorms, GeGLU, global layer
+every 3rd with RoPE theta 80000, the rest sliding with theta 10000, CLS pooling). Reference: transformers 5.19's
+native `nomic_bert` and `modernbert` modules.
+
+```
+                               cpu f32 worst cos  max_abs   gpu bf16 worst cos
+nomic-embed-text-v1.5          1.000000           <= 7.2e-6   0.99992
+granite-embedding-english-r2   1.000000           <= 7.6e-6   0.99994
+```
+
+Finding: both match at every length, 402 tokens included. Nomic's v1.5 config carries both its GPT-2 names (`n_embd`,
+`n_layer`, `n_head`, `n_inner`) and the BERT names, so serde aliases collided (`duplicate field hidden_size`); the
+config now reads either. ModernBERT's max_abs is larger than BERT's (7.6e-6 against 2e-7) over 22 layers of a
+checkpoint stored in BF16, with the cosine at 1.0.
+
+Implication: both load. The tiny ModernBERT test fails when the sliding mask is dropped (checked by mutation).
+Left for later in #586: nomic-bert-moe, Jina v2 (ALiBi), Jina v3 (XLM-R with RoPE and task LoRA), Jina v5 / EuroBERT,
+NeoBERT, the Llama bidirectional embedder.

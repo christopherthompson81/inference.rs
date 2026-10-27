@@ -76,6 +76,8 @@ class EmbeddingLoaderType(str, Enum):
     EMBEDDINGGEMMA = "embeddinggemma"
     QWEN3EMBEDDING = "qwen3embedding"
     BERT = "bert"
+    NOMICBERT = "nomicbert"
+    MODERNBERT = "modernbert"
 
 
 class ImageGenerationResponseFormat(str, Enum):

@@ -378,6 +378,16 @@ impl SupportedArch for EmbeddingLoaderType {
                 modalities: &[Embedding],
                 examples: &[ex!("sentence-transformers/all-MiniLM-L6-v2")],
             },
+            Self::NomicBert => ArchMetadata {
+                families: &["Nomic Embed"],
+                modalities: &[Embedding],
+                examples: &[ex!("nomic-ai/nomic-embed-text-v1.5")],
+            },
+            Self::ModernBert => ArchMetadata {
+                families: &["ModernBERT"],
+                modalities: &[Embedding],
+                examples: &[ex!("ibm-granite/granite-embedding-english-r2")],
+            },
         }
     }
 }

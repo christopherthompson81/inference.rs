@@ -5571,7 +5571,9 @@
         "enum": [
           "embeddinggemma",
           "qwen3embedding",
-          "bert"
+          "bert",
+          "nomicbert",
+          "modernbert"
         ]
       },
       "EmbeddingRequest": {
