@@ -2,9 +2,6 @@ use super::*;
 use crate::modern_bert::{Config as ModernBertConfig, Model as ModernBertModel};
 use inference_nn::model::EmbeddingModel;
 
-// layers sit at the root (`layers.N`) or under `model.`
-const MODERN_BERT_LAYER_INDEX_PATTERN: &str = r"(?:^|\.)layers\.(\d+)\.";
-
 /// `EmbeddingModelLoader` for ModernBERT encoders.
 pub struct ModernBertLoader;
 
@@ -37,7 +34,7 @@ impl EmbeddingModelLoader for ModernBertLoader {
         loading_isq: bool,
     ) -> Result<Arc<dyn Fn(String) -> DeviceForLoadTensor + Send + Sync + 'static>> {
         layer_indexed_device(
-            MODERN_BERT_LAYER_INDEX_PATTERN,
+            ROOT_OR_NESTED_LAYER_INDEX_PATTERN,
             ModernBertConfig::from_json(config)?.num_hidden_layers,
             loading_isq,
         )

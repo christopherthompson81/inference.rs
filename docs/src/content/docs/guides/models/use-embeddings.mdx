@@ -45,7 +45,14 @@ Two encoder families with rotary positions load the same way, detected by their 
 - `nomic-ai/nomic-embed-text-v1.5` (`NomicBertModel`): 137M parameters, 768-dim vectors, inputs up to 8192 tokens. Prefix inputs with `search_query: ` or `search_document: ` as its model card describes.
 - `ibm-granite/granite-embedding-english-r2` (`ModernBertModel`): 149M parameters, 768-dim vectors, inputs up to 8192 tokens. ModernBERT alternates global layers with 128-token sliding-window ones.
 
-The Nomic MoE variant (`nomic-embed-text-v2-moe`) does not load yet.
+Encoders built from Llama-style layers (RMSNorm, SwiGLU, rotary positions) load too:
+
+- `nvidia/llama-embed-nemotron-8b` (`LlamaBidirectionalModel`): Llama 3 layers run bidirectionally, 4096-dim vectors. Its license is NVIDIA's customized non-commercial one.
+- EuroBERT (`EuroBertModel`, `EuroBertForMaskedLM`) and NeoBERT (`NeoBERT`, `NeoBERTLMHead`) checkpoints, and embedders fine-tuned from them.
+
+A checkpoint with no `modules.json` (a base encoder such as `EuroBERT/EuroBERT-210m` or `chandar-lab/NeoBERT`) is mean pooled without normalization, the module sentence-transformers adds when it wraps a plain transformers model.
+
+The Nomic MoE variant (`nomic-embed-text-v2-moe`) and the Jina v2, v3 and v5 embedders do not load yet.
 
 The pooling and normalization come from the repository's `modules.json`, and a `max_seq_length` in `sentence_bert_config.json` caps the input length (256 tokens for all-MiniLM-L6-v2), as sentence-transformers does. `--isq q8_0` keeps these models close to full precision, but 4-bit types lose noticeably on 384-wide layers.
 

@@ -25,6 +25,22 @@ pub struct Pooling {
     pub include_prompt: bool,
 }
 
+impl Pooling {
+    /// Mean pooling over every token, the module sentence-transformers adds to a model that ships none.
+    pub fn mean(word_embedding_dimension: usize) -> Self {
+        Self {
+            word_embedding_dimension,
+            pooling_mode_cls_token: false,
+            pooling_mode_mean_tokens: true,
+            pooling_mode_max_tokens: false,
+            pooling_mode_mean_sqrt_len_tokens: false,
+            pooling_mode_weightedmean_tokens: false,
+            pooling_mode_lasttoken: false,
+            include_prompt: true,
+        }
+    }
+}
+
 impl Module for Pooling {
     // https://github.com/huggingface/sentence-transformers/blob/85ec64559f4414aa536eca4bf53538291e0a333f/sentence_transformers/models/Pooling.py#L26
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {

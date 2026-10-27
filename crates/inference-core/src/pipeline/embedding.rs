@@ -240,9 +240,14 @@ impl EmbeddingLoader {
         let modules_config: Vec<_> = match paths.get_modules() {
             _ if is_classifier => Vec::new(),
             Some(modules) if !modules.is_empty() => modules.to_vec(),
-            _ => anyhow::bail!("Embedding models require the `modules.json` file."),
+            _ => {
+                warn!(
+                    "No `modules.json`: mean pooling the encoder's output, as sentence-transformers does."
+                );
+                Vec::new()
+            }
         };
-        if !is_classifier {
+        if !modules_config.is_empty() {
             anyhow::ensure!(
                 matches!(
                     modules_config.first(),
@@ -253,6 +258,11 @@ impl EmbeddingLoader {
         }
 
         let mut modules: Vec<Box<dyn Module + Send + Sync>> = Vec::new();
+        if modules_config.is_empty() && !is_classifier {
+            modules.push(Box::new(Pooling::mean(
+                self.inner.model_config(&config)?.hidden_size(),
+            )));
+        }
         for module in &modules_config {
             match module {
                 EmbeddingModulePaths::Transformer { .. } => (),

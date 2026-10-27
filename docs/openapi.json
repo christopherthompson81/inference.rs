@@ -5573,7 +5573,9 @@
           "qwen3embedding",
           "bert",
           "nomicbert",
-          "modernbert"
+          "modernbert",
+          "neobert",
+          "llamaembedding"
         ]
       },
       "EmbeddingRequest": {

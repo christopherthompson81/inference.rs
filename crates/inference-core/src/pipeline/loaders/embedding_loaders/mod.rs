@@ -38,10 +38,21 @@ pub enum EmbeddingLoaderType {
     NomicBert,
     #[serde(rename = "modernbert")]
     ModernBert,
+    #[serde(rename = "neobert")]
+    NeoBert,
+    #[serde(rename = "llamaembedding")]
+    LlamaEmbedding,
 }
 
 const NOMIC_BERT_CLASSES: &[&str] = &["NomicBertModel"];
 const MODERN_BERT_CLASSES: &[&str] = &["ModernBertModel", "ModernBertForMaskedLM"];
+const NEO_BERT_CLASSES: &[&str] = &["NeoBERT", "NeoBERTLMHead"];
+// Llama layers run without a causal mask: EuroBERT, and Llama bidirectional embedders
+const LLAMA_EMBEDDING_CLASSES: &[&str] = &[
+    "EuroBertModel",
+    "EuroBertForMaskedLM",
+    "LlamaBidirectionalModel",
+];
 
 // Encoder-only classes (BERT, RoBERTa, XLM-R, CamemBERT): checkpoints that can only be embedders
 const BERT_CLASSES: &[&str] = &[
@@ -79,6 +90,8 @@ impl EmbeddingLoaderType {
             (BERT_CLASSES, Self::Bert),
             (NOMIC_BERT_CLASSES, Self::NomicBert),
             (MODERN_BERT_CLASSES, Self::ModernBert),
+            (NEO_BERT_CLASSES, Self::NeoBert),
+            (LLAMA_EMBEDDING_CLASSES, Self::LlamaEmbedding),
         ]
         .into_iter()
         .find_map(|(classes, tp)| classes.contains(&name).then_some(tp))
@@ -92,6 +105,8 @@ impl EmbeddingLoaderType {
             Self::Bert => "BertModel",
             Self::NomicBert => "NomicBertModel",
             Self::ModernBert => "ModernBertModel",
+            Self::NeoBert => "NeoBERT",
+            Self::LlamaEmbedding => "LlamaBidirectionalModel",
         }
     }
 }
@@ -115,14 +130,24 @@ impl EmbeddingLoaderType {
                     "architecture `{self}` is not built in; enable the `models-qwen` feature"
                 )
             }
+            #[cfg(feature = "models-llama")]
+            Self::LlamaEmbedding => Ok(LlamaEmbeddingLoader::boxed()),
+            #[cfg(not(feature = "models-llama"))]
+            Self::LlamaEmbedding => {
+                anyhow::bail!(
+                    "architecture `{self}` is not built in; enable the `models-llama` feature"
+                )
+            }
             #[cfg(feature = "models-other")]
             Self::Bert => Ok(BertLoader::boxed()),
             #[cfg(feature = "models-other")]
             Self::NomicBert => Ok(NomicBertLoader::boxed()),
             #[cfg(feature = "models-other")]
             Self::ModernBert => Ok(ModernBertLoader::boxed()),
+            #[cfg(feature = "models-other")]
+            Self::NeoBert => Ok(NeoBertLoader::boxed()),
             #[cfg(not(feature = "models-other"))]
-            Self::Bert | Self::NomicBert | Self::ModernBert => {
+            Self::Bert | Self::NomicBert | Self::ModernBert | Self::NeoBert => {
                 anyhow::bail!(
                     "architecture `{self}` is not built in; enable the `models-other` feature"
                 )
@@ -140,8 +165,10 @@ impl FromStr for EmbeddingLoaderType {
             "bert" => Ok(Self::Bert),
             "nomicbert" => Ok(Self::NomicBert),
             "modernbert" => Ok(Self::ModernBert),
+            "neobert" => Ok(Self::NeoBert),
+            "llamaembedding" => Ok(Self::LlamaEmbedding),
             a => Err(format!(
-                "Unknown architecture `{a}`. Possible architectures: `embeddinggemma`, `qwen3embedding`, `bert`, `nomicbert`, `modernbert`."
+                "Unknown architecture `{a}`. Possible architectures: `embeddinggemma`, `qwen3embedding`, `bert`, `nomicbert`, `modernbert`, `neobert`, `llamaembedding`."
             )),
         }
     }
@@ -155,6 +182,8 @@ impl Display for EmbeddingLoaderType {
             Self::Bert => write!(f, "bert"),
             Self::NomicBert => write!(f, "nomicbert"),
             Self::ModernBert => write!(f, "modernbert"),
+            Self::NeoBert => write!(f, "neobert"),
+            Self::LlamaEmbedding => write!(f, "llamaembedding"),
         }
     }
 }
@@ -277,8 +306,12 @@ where
 
 #[cfg(feature = "models-gemma")]
 pub use inference_models_gemma::loaders::EmbeddingGemmaLoader;
+#[cfg(feature = "models-llama")]
+pub use inference_models_llama::loaders::LlamaEmbeddingLoader;
 #[cfg(feature = "models-other")]
-pub use inference_models_other::loaders::{BertLoader, ModernBertLoader, NomicBertLoader};
+pub use inference_models_other::loaders::{
+    BertLoader, ModernBertLoader, NeoBertLoader, NomicBertLoader,
+};
 #[cfg(feature = "models-qwen")]
 pub use inference_models_qwen::loaders::Qwen3EmbeddingLoader;
 

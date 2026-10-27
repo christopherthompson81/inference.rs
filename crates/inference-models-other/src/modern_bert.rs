@@ -15,7 +15,7 @@ use crate::{
     layers::{Activation, dense_embedding, layer_norm, masker::BidirectionalMasker},
     model::{EmbeddingModel, IsqModel, NormalLoadingMetadata},
     paged_attention::AttentionImplementation,
-    rope_encoder::{RopeSelfAttention, rotary},
+    rope_encoder::{QkvLayout, RopeAttentionShape, RopeSelfAttention, RopeStyle, rotary},
     serde_default_fn,
     utils::unvarbuilder::UnVarBuilder,
 };
@@ -206,9 +206,13 @@ impl Model {
                 Ok(Layer {
                     attn_norm: (i > 0).then(|| norm("attn_norm")).transpose()?,
                     attn: RopeSelfAttention::new(
-                        hidden,
-                        cfg.num_attention_heads,
-                        cfg.attention_bias,
+                        &RopeAttentionShape {
+                            hidden,
+                            num_heads: cfg.num_attention_heads,
+                            bias: cfg.attention_bias,
+                            layout: QkvLayout::Stacked,
+                            style: RopeStyle::NeoX,
+                        },
                         if sliding { local } else { global },
                         place(vb_attn.pp("Wqkv")),
                         place(vb_attn.pp("Wo")),
