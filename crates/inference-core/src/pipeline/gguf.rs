@@ -1,7 +1,7 @@
 use super::{Loader, ModelKind, ModelPaths, QuantizationKind, TokenSource};
 use crate::gguf::embedding_gguf::{
     DecoderEmbeddingGguf, EmbeddingGgufArchitecture, EmbeddingGgufPooling, add_encoder_specials,
-    build_embedding_bindings, embedding_pooling, synthesize_embedding_config,
+    build_embedding_bindings, embedding_pooling, synthesize_embedding_config, task_adapter_prefix,
 };
 use crate::gguf::{
     GgufTokenizerConversion,
@@ -309,6 +309,59 @@ impl GGUFLoaderBuilder {
     }
 }
 
+const JINA_BERT_V3: &str = "jina-bert-v3";
+const TASK_ADAPTER_FILE_PREFIX: &str = "lora-";
+const GGUF_EXTENSION: &str = ".gguf";
+const LORA_TASK_NAME: &str = "adapter.lora.task_name";
+
+fn is_architecture(archive: &inference_quant::GgufArchive, architecture: &str) -> bool {
+    matches!(
+        archive.metadata_value("general.architecture"),
+        Some(inference_tensor::quantized::gguf_file::Value::String(value)) if value == architecture
+    )
+}
+
+fn is_task_adapter_file(name: &str) -> bool {
+    name.starts_with(TASK_ADAPTER_FILE_PREFIX) && name.ends_with(GGUF_EXTENSION)
+}
+
+/// Merges the `lora-<task>-*.gguf` adapters beside `weights`, one per task, so the encoder runs each task.
+fn merge_task_adapters(
+    archive: &mut inference_quant::GgufArchive,
+    weights: &[PathBuf],
+) -> Result<()> {
+    let Some(dir) = weights.first().and_then(|weight| weight.parent()) else {
+        return Ok(());
+    };
+    let mut files = fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(is_task_adapter_file)
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+    let mut tasks = std::collections::HashSet::new();
+    for file in files {
+        let adapter = inference_quant::GgufArchive::open_file(&file)?;
+        let Some(inference_tensor::quantized::gguf_file::Value::String(task)) =
+            adapter.metadata_value(LORA_TASK_NAME).cloned()
+        else {
+            continue;
+        };
+        // a repository may carry one task in several precisions
+        if tasks.insert(task.clone()) {
+            info!(
+                "Loading the `{task}` task adapter from `{}`",
+                file.display()
+            );
+            archive.merge_adapter(adapter, &task_adapter_prefix(tasks.len() - 1))?;
+        }
+    }
+    Ok(())
+}
+
 /// `config` as `class` reads it: the decoder translation's fields under an embedding model's class.
 fn with_architecture(config: &str, class: &str) -> Result<String> {
     let mut config: serde_json::Value = serde_json::from_str(config)?;
@@ -449,6 +502,9 @@ impl GGUFLoader {
         let decoder_embedding = DecoderEmbeddingGguf::from_metadata(archive.metadata());
         if let Some(decoder) = decoder_embedding {
             archive.rename_architecture(decoder.decoder_architecture())?;
+        }
+        if is_architecture(&archive, JINA_BERT_V3) {
+            merge_task_adapters(&mut archive, paths.get_weight_filenames())?;
         }
         let archive = Arc::new(archive);
         let architecture = match archive.metadata_value("general.architecture") {
@@ -610,9 +666,9 @@ impl GGUFLoader {
         )?;
         add_encoder_specials(&mut source.tokenizer, archive.metadata())?;
         let loader_type = match encoder {
-            EmbeddingGgufArchitecture::Bert | EmbeddingGgufArchitecture::JinaBertV2 => {
-                EmbeddingLoaderType::Bert
-            }
+            EmbeddingGgufArchitecture::Bert
+            | EmbeddingGgufArchitecture::JinaBertV2
+            | EmbeddingGgufArchitecture::JinaBertV3 => EmbeddingLoaderType::Bert,
             EmbeddingGgufArchitecture::NomicBert | EmbeddingGgufArchitecture::NomicBertMoe => {
                 EmbeddingLoaderType::NomicBert
             }
@@ -796,6 +852,25 @@ impl GGUFLoader {
         }
         let loader = loader.build_with_source(loader_type, source, self.kind.clone())?;
         loader.load_model_from_path(paths, options)
+    }
+
+    /// The `lora-*.gguf` files the GGUF repository lists beside its weights.
+    fn repository_task_adapters(
+        &self,
+        token_source: &TokenSource,
+        revision: &str,
+        silent: bool,
+    ) -> Result<Vec<String>> {
+        let api = build_api(token_source, !silent)?.repo(Repo::with_revision(
+            self.quantized_model_id.clone(),
+            RepoType::Model,
+            revision.to_string(),
+        ));
+        let files = list_repo_files(&api, Path::new(&self.quantized_model_id), true, revision)?;
+        Ok(files
+            .into_iter()
+            .filter(|file| is_task_adapter_file(file))
+            .collect())
     }
 
     fn infer_multimodal_asset_paths(
@@ -987,6 +1062,22 @@ impl Loader for GGUFLoader {
             request(&self.quantized_filenames),
             self.dynamic_lora_adapters(),
         )?;
+        // a jina-bert-v3 GGUF's task adapters, fetched beside it for the load to find
+        if is_architecture(
+            &inference_quant::GgufArchive::open(paths.get_weight_filenames())?,
+            JINA_BERT_V3,
+        ) {
+            let adapters = self.repository_task_adapters(&token_source, &revision, silent)?;
+            if !adapters.is_empty() {
+                super::paths::get_paths_gguf(
+                    super::paths::GgufPathsRequest {
+                        quantized_filenames: &adapters,
+                        ..request(&self.quantized_filenames)
+                    },
+                    None,
+                )?;
+            }
+        }
         if let Some(mmproj_filenames) = self.mmproj_filenames.as_ref() {
             let mmproj_paths = super::paths::get_paths_gguf(request(mmproj_filenames), None)?;
             let inferred_paths = self.infer_multimodal_asset_paths(

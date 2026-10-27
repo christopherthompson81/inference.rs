@@ -563,7 +563,7 @@ impl QTensor {
         let shape = src.shape();
         let block_size = dtype.block_size();
         check_shape(shape, block_size)?;
-        let src = src.to_dtype(crate::DType::F32)?.flatten_all()?;
+        let src = dense_f32(src)?;
         let elem_count = shape.elem_count();
         if !elem_count.is_multiple_of(block_size) {
             crate::bail!(
@@ -599,7 +599,7 @@ impl QTensor {
         let shape = src.shape();
         let block_size = dtype.block_size();
         check_shape(shape, block_size)?;
-        let src = src.to_dtype(crate::DType::F32)?.flatten_all()?;
+        let src = dense_f32(src)?;
         let elem_count = shape.elem_count();
         if !elem_count.is_multiple_of(block_size) {
             crate::bail!(
@@ -627,7 +627,7 @@ impl QTensor {
         let shape = src.shape();
         let block_size = dtype.block_size();
         check_shape(shape, block_size)?;
-        let src = src.to_dtype(crate::DType::F32)?.flatten_all()?;
+        let src = dense_f32(src)?;
         let elem_count = shape.elem_count();
         if !elem_count.is_multiple_of(block_size) {
             crate::bail!(
@@ -1247,7 +1247,32 @@ impl crate::Module for QMatMul {
 #[cfg(test)]
 mod parallel_quantize_tests {
     use super::{GgmlDType, QTensor};
-    use crate::{Device, Tensor};
+    use crate::{DType, Device, Tensor};
+
+    // a slice of a larger tensor (first row at offset 0, the last at an offset) quantizes as its own copy does
+    #[test]
+    fn a_view_quantizes_as_its_own_storage_does() -> crate::Result<()> {
+        const ROWS: usize = 3;
+        const COLS: usize = 64;
+        let dev = Device::Cpu;
+        let src = Tensor::randn(0f32, 1., (ROWS, COLS), &dev)?;
+        for source in [src.clone(), src.to_dtype(DType::BF16)?] {
+            for row in [0, ROWS - 1] {
+                let view = source.get(row)?;
+                let own =
+                    Tensor::from_vec(view.to_dtype(DType::F32)?.to_vec1::<f32>()?, COLS, &dev)?;
+                for dtype in [GgmlDType::F32, GgmlDType::Q8_0] {
+                    let quantized = QTensor::quantize(&view, dtype)?.data()?.to_vec();
+                    assert_eq!(
+                        quantized,
+                        QTensor::quantize(&own, dtype)?.data()?.to_vec(),
+                        "{dtype:?} row {row}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 
     // Many tasks' worth of rows, quantized at once, give the bytes each row gets alone
     #[test]
@@ -1257,7 +1282,7 @@ mod parallel_quantize_tests {
         let dev = Device::Cpu;
         let src = Tensor::randn(0f32, 1., (ROWS, COLS), &dev)?;
         let host = src.to_vec2::<f32>()?;
-        // each row in storage of its own: quantize reads a source's whole storage
+        // each row quantized alone, from storage of its own
         let row = |r: usize| Tensor::from_slice(&host[r], (1, COLS), &dev);
         let imatrix = (0..COLS).map(|i| 1.0 + (i % 7) as f32).collect::<Vec<_>>();
         for dtype in [
@@ -1412,5 +1437,16 @@ mod cpu_matvec_bench {
             (n * k * 4 * iters) as f64 / secs / 1e9
         );
         Ok(())
+    }
+}
+
+/// `src` as F32 values filling a storage of their own, which every backend's quantizer reads whole, without a layout.
+fn dense_f32(src: &Tensor) -> Result<Tensor> {
+    if src.dtype() == crate::DType::F32 {
+        // an F32 source may be a view (a narrowed or indexed slice) into a larger storage
+        src.flatten_all()?.force_contiguous()
+    } else {
+        // the conversion writes a storage of exactly the tensor's elements
+        src.to_dtype(crate::DType::F32)?.flatten_all()
     }
 }

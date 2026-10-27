@@ -458,7 +458,8 @@ fn spm_unigram_tokenizer(
             Precompiled::from(&bytes).map_err(anyhow::Error::msg)?,
         ));
     }
-    if flag(REMOVE_EXTRA_WHITESPACES_KEY)? {
+    let merge_spaces = flag(REMOVE_EXTRA_WHITESPACES_KEY)?;
+    if merge_spaces {
         normalizers.push(NormalizerWrapper::Replace(
             Replace::new(
                 tokenizers::normalizers::replace::ReplacePattern::Regex(" {2,}".to_string()),
@@ -467,7 +468,8 @@ fn spm_unigram_tokenizer(
             .map_err(anyhow::Error::msg)?,
         ));
     }
-    let prepend = if p.add_space_prefix.unwrap_or(true) {
+    // llama.cpp's UGM normalizer prefixes the first word whenever it merges spaces, whatever add_space_prefix says
+    let prepend = if p.add_space_prefix.unwrap_or(true) || merge_spaces {
         PrependScheme::Always
     } else {
         PrependScheme::Never
@@ -1888,6 +1890,18 @@ mod tests {
             .encode(("hello", "world"), true)
             .map_err(anyhow::Error::msg)?;
         assert_eq!(pair.get_ids(), [0, 4, 2, 2, 5, 2]);
+
+        // an older conversion's add_space_prefix false: merging spaces still prefixes the first word, as in llama.cpp
+        let mut older = values.clone();
+        older.insert(
+            "tokenizer.ggml.add_space_prefix".to_string(),
+            Value::Bool(false),
+        );
+        let tokenizer = convert_gguf_metadata_to_hf_tokenizer(&older)?.tokenizer;
+        let single = tokenizer
+            .encode("hello  world", true)
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(single.get_ids(), [0, 4, 5, 2]);
         Ok(())
     }
 }

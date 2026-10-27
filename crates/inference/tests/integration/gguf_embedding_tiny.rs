@@ -526,3 +526,211 @@ async fn a_llama_embed_gguf_embeds_as_its_source() -> anyhow::Result<()> {
     let checkpoint = bidirectional_llama("mean")?;
     assert_gguf_embeds_as_its_source(checkpoint.path(), Arch::LlamaEmbed).await
 }
+
+const JINA_V3_ROOT: [(&str, &str); 4] = [
+    ("emb_ln.weight", "token_embd_norm.weight"),
+    ("emb_ln.bias", "token_embd_norm.bias"),
+    (
+        "embeddings.word_embeddings.parametrizations.weight.original",
+        "token_embd.weight",
+    ),
+    (
+        "embeddings.token_type_embeddings.parametrizations.weight.original",
+        "token_types.weight",
+    ),
+];
+const JINA_V3_BLOCK: [(&str, &str); 6] = [
+    ("mixer.Wqkv", "attn_qkv"),
+    ("mixer.out_proj", "attn_output"),
+    ("mlp.fc1", "ffn_up"),
+    ("mlp.fc2", "ffn_down"),
+    ("norm1", "attn_output_norm"),
+    ("norm2", "layer_output_norm"),
+];
+
+fn write(
+    out: &Path,
+    metadata: &[(String, gguf_file::Value)],
+    tensors: &[(String, Tensor)],
+) -> anyhow::Result<()> {
+    let tensors = tensors
+        .iter()
+        .map(|(name, t)| Ok((name.clone(), QTensor::quantize(t, GgmlDType::F32)?)))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let metadata = metadata
+        .iter()
+        .map(|(k, v)| (k.as_str(), v))
+        .collect::<Vec<_>>();
+    let tensors = tensors
+        .iter()
+        .map(|(k, v)| (k.as_str(), v))
+        .collect::<Vec<_>>();
+    gguf_file::write(&mut std::fs::File::create(out)?, &metadata, &tensors)?;
+    Ok(())
+}
+
+/// The tiny Jina v3 as llama.cpp writes it: a `jina-bert-v3` base, and a `lora-<task>-*.gguf` per task, with the
+/// word table's lora_b transposed and the segment table's two halves swapped.
+fn write_jina_v3_gguf(checkpoint: &Path, dir: &Path) -> anyhow::Result<()> {
+    use gguf_file::Value::{F32, String as Text, U32};
+    let weights =
+        inference_tensor::safetensors::load(checkpoint.join("model.safetensors"), &Device::Cpu)?;
+    let cfg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(checkpoint.join("config.json"))?)?;
+    let layers = cfg["num_hidden_layers"].as_u64().unwrap_or_default();
+    let mut base = Vec::new();
+    let mut adapted = Vec::new();
+    for (native, gguf) in JINA_V3_ROOT {
+        base.push((gguf.to_string(), weights[native].clone()));
+        if let Some(module) = native.strip_suffix(".original") {
+            adapted.push((module.to_string(), gguf.to_string()));
+        }
+    }
+    for block in 0..layers {
+        for (native, role) in JINA_V3_BLOCK {
+            let native = format!("encoder.layers.{block}.{native}");
+            for part in ["weight", "bias"] {
+                let name = match (part, weights.contains_key(&format!("{native}.{part}"))) {
+                    (_, true) => format!("{native}.{part}"),
+                    ("weight", false) => format!("{native}.parametrizations.weight.original"),
+                    _ => continue,
+                };
+                base.push((format!("blk.{block}.{role}.{part}"), weights[&name].clone()));
+            }
+            if !role.ends_with("norm") {
+                adapted.push((
+                    format!("{native}.parametrizations.weight"),
+                    format!("blk.{block}.{role}.weight"),
+                ));
+            }
+        }
+    }
+    let key = |k: &str| format!("jina-bert-v3.{k}");
+    let num = |k: &str| U32(cfg[k].as_u64().unwrap_or_default() as u32);
+    let pad = cfg["pad_token_id"].as_u64().unwrap_or_default();
+    let context = cfg["max_position_embeddings"].as_u64().unwrap_or_default() - pad - 1;
+    let metadata = vec![
+        (
+            "general.architecture".to_string(),
+            Text("jina-bert-v3".into()),
+        ),
+        (key("block_count"), num("num_hidden_layers")),
+        (key("embedding_length"), num("hidden_size")),
+        (key("feed_forward_length"), num("intermediate_size")),
+        (key("attention.head_count"), num("num_attention_heads")),
+        (key("context_length"), U32(context as u32)),
+        (
+            key("attention.layer_norm_epsilon"),
+            F32(cfg["layer_norm_eps"].as_f64().unwrap_or_default() as f32),
+        ),
+        (
+            key("rope.freq_base"),
+            F32(cfg["rotary_emb_base"].as_f64().unwrap_or_default() as f32),
+        ),
+        (key("pooling_type"), U32(POOLING_MEAN)),
+        (
+            "tokenizer.ggml.padding_token_id".to_string(),
+            U32(pad as u32),
+        ),
+        (
+            "tokenizer.ggml.tokens".to_string(),
+            gguf_file::Value::Array(tokens_by_id(&checkpoint.join("tokenizer.json"))?),
+        ),
+    ];
+    write(&dir.join(GGUF_FILE), &metadata, &base)?;
+
+    for (index, task) in bert::JINA_V3_TASKS.iter().enumerate() {
+        let mut tensors = Vec::new();
+        for (module, gguf) in &adapted {
+            let module = module.trim_end_matches(".parametrizations.weight");
+            let param = format!("{module}.parametrizations.weight.0");
+            let a = weights[&format!("{param}.lora_A")].get(index)?;
+            let b = weights[&format!("{param}.lora_B")].get(index)?;
+            let (a, b) = match gguf.as_str() {
+                "token_embd.weight" => (a, b.t()?.contiguous()?),
+                "token_types.weight" => (b, a),
+                _ => (a, b),
+            };
+            tensors.push((format!("{gguf}.lora_a"), a));
+            tensors.push((format!("{gguf}.lora_b"), b));
+        }
+        let mut metadata = vec![
+            (
+                "general.architecture".to_string(),
+                Text("jina-bert-v3".into()),
+            ),
+            ("general.type".to_string(), Text("adapter".into())),
+            ("adapter.type".to_string(), Text("lora".into())),
+            (
+                "adapter.lora.alpha".to_string(),
+                F32(cfg["lora_alpha"].as_f64().unwrap_or_default() as f32),
+            ),
+            ("adapter.lora.task_name".to_string(), Text(task.to_string())),
+        ];
+        let instruction = cfg["task_instructions"][task].as_str().unwrap_or_default();
+        if !instruction.is_empty() {
+            metadata.push((
+                "adapter.lora.prompt_prefix".to_string(),
+                Text(instruction.into()),
+            ));
+        }
+        write(
+            &dir.join(format!("lora-{task}-tiny.gguf")),
+            &metadata,
+            &tensors,
+        )?;
+    }
+    Ok(())
+}
+
+async fn embed_task(model: &Model, task: Option<&str>) -> anyhow::Result<Vec<f32>> {
+    let mut request = inference::EmbeddingRequestBuilder::new().add_prompt(PROMPT);
+    if let Some(task) = task {
+        request = request.with_task(task);
+    }
+    let response = serde_json::to_value(model.generate_embeddings(request.build()?).await?)?;
+    Ok(serde_json::from_value(
+        response["data"][0]["embedding"].clone(),
+    )?)
+}
+
+#[tokio::test]
+async fn a_jina_bert_v3_gguf_runs_each_task_from_the_adapter_files_beside_it() -> anyhow::Result<()>
+{
+    let checkpoint = bert::tiny_jina_v3_checkpoint()?;
+    let dir = tempfile::tempdir()?;
+    write_jina_v3_gguf(checkpoint.path(), dir.path())?;
+    let source = EmbeddingModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .with_force_cpu()
+        .build()
+        .await?;
+    let gguf = gguf_model(checkpoint.path(), dir.path()).await?;
+    for task in [
+        None,
+        Some(bert::JINA_V3_TASKS[0]),
+        Some(bert::JINA_V3_TASKS[1]),
+    ] {
+        let cos = cosine(
+            &embed_task(&source, task).await?,
+            &embed_task(&gguf, task).await?,
+        );
+        anyhow::ensure!(cos > F32_MIN_COSINE, "{task:?}: cosine {cos}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_jina_bert_v3_gguf_without_its_adapters_is_refused() -> anyhow::Result<()> {
+    let checkpoint = bert::tiny_jina_v3_checkpoint()?;
+    let dir = tempfile::tempdir()?;
+    write_jina_v3_gguf(checkpoint.path(), dir.path())?;
+    for task in bert::JINA_V3_TASKS {
+        std::fs::remove_file(dir.path().join(format!("lora-{task}-tiny.gguf")))?;
+    }
+    let Err(error) = gguf_model(checkpoint.path(), dir.path()).await else {
+        anyhow::bail!("a jina-bert-v3 GGUF without its adapters loaded");
+    };
+    anyhow::ensure!(error.to_string().contains("task adapters"), "{error}");
+    Ok(())
+}
