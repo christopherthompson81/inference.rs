@@ -179,6 +179,12 @@ impl BlockingEngine {
         })
     }
 
+    pub fn rerank_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        self.call(request, |engine, request| async move {
+            engine.rerank_json(&request).await
+        })
+    }
+
     pub fn image_generation_json(&self, request: &[u8]) -> Result<String, ApiError> {
         self.call(request, |engine, request| async move {
             engine.image_generation_json(&request).await

@@ -22,7 +22,6 @@ use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
 use crate::utils::progress::ProgressScopeGuard;
 use crate::{DeviceMapSetting, PagedAttentionConfig, Pipeline, Topology, TryIntoDType};
-use anyhow::Context;
 use anyhow::Result;
 use futures::future::BoxFuture;
 use inference_quant::IsqType;
@@ -236,14 +235,22 @@ impl EmbeddingLoader {
         )?;
         trace!("Model config: {:?}", self.inner.get_config_repr(&config)?);
 
-        let modules_config: Vec<_> = paths
-            .get_modules()
-            .context("Embedding models require the `modules.json` file.")?
-            .to_vec();
-        assert!(matches!(
-            modules_config.first(),
-            Some(EmbeddingModulePaths::Transformer { .. })
-        ));
+        // a classifier scores each input itself; an embedder pools through its sentence-transformers modules
+        let is_classifier = self.inner.is_classifier(&config)?;
+        let modules_config: Vec<_> = match paths.get_modules() {
+            _ if is_classifier => Vec::new(),
+            Some(modules) if !modules.is_empty() => modules.to_vec(),
+            _ => anyhow::bail!("Embedding models require the `modules.json` file."),
+        };
+        if !is_classifier {
+            anyhow::ensure!(
+                matches!(
+                    modules_config.first(),
+                    Some(EmbeddingModulePaths::Transformer { .. })
+                ),
+                "an embedding model's first module is its Transformer"
+            );
+        }
 
         let mut modules: Vec<Box<dyn Module + Send + Sync>> = Vec::new();
         for module in &modules_config {
@@ -537,10 +544,13 @@ impl Pipeline for EmbeddingPipeline {
     ) -> inference_tensor::Result<ForwardInputsResult> {
         let ModelInputs {
             input_ids,
+            token_type_ids,
             flash_meta,
         } = *inputs.downcast::<ModelInputs>().expect("Downcast failed.");
 
-        let mut xs = self.model.forward(&input_ids, &flash_meta)?;
+        let mut xs = self
+            .model
+            .forward(&input_ids, token_type_ids.as_ref(), &flash_meta)?;
         for module in &self.modules {
             xs = module.forward(&xs)?;
         }

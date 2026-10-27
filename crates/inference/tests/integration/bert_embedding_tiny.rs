@@ -1,17 +1,18 @@
-//! A tiny random-weight BERT embedder: encoder detection, bidirectional attention, tokenizer and length limits, ISQ.
+//! A tiny random-weight BERT embedder and cross-encoder: encoder detection, bidirectional attention, tokenizer and
+//! length limits, ISQ, and reranking with pair segment ids.
 
 use std::path::Path;
 
 use inference::{
-    EmbeddingModelBuilder, EmbeddingRequestBuilder, IsqType, Model, ModelDType,
-    UqffEmbeddingModelBuilder,
+    EmbeddingModelBuilder, EmbeddingRequestBuilder, IsqType, Model, ModelDType, RerankRequest,
+    RerankResponse, UqffEmbeddingModelBuilder,
 };
 
 #[path = "../support/bert_embedding_tiny.rs"]
 mod support;
 #[path = "../support/traces.rs"]
 mod traces;
-use support::tiny_bert_checkpoint;
+use support::{prefix_encoder_weights, tiny_bert_checkpoint};
 use traces::uqff_files;
 
 const HIDDEN_SIZE: usize = 32;
@@ -30,6 +31,10 @@ const TOKENS: [u32; 9] = [40, 41, 42, 43, 44, 45, 46, 47, 48];
 // RoBERTa positions start at pad_token_id + 1, so 10 position rows hold 8 tokens.
 const ROBERTA_PAD_TOKEN_ID: usize = 1;
 const ROBERTA_POSITIONS: usize = 10;
+const QUERY: &str = "hello";
+const DOCUMENTS: [&str; 3] = ["hello there", "goodbye", "hello hello"];
+const TOP_N: usize = 2;
+const SCORE_TOLERANCE: f32 = 1e-5;
 
 fn cpu_embedding_builder(dir: &Path) -> EmbeddingModelBuilder {
     EmbeddingModelBuilder::new(dir.to_string_lossy())
@@ -209,5 +214,139 @@ async fn a_bf16_gpu_encoder_with_biased_isq_layers_embeds() -> anyhow::Result<()
         .build()
         .await?;
     assert_eq!(model.generate_embedding(PROMPT).await?.len(), HIDDEN_SIZE);
+    Ok(())
+}
+
+fn classifier(labels: usize) -> impl FnOnce(&mut serde_json::Value) {
+    move |config| {
+        config["architectures"] = serde_json::json!(["BertForSequenceClassification"]);
+        config["id2label"] = (0..labels)
+            .map(|i| (i.to_string(), format!("LABEL_{i}").into()))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+    }
+}
+
+async fn rerank(model: &Model, request: serde_json::Value) -> anyhow::Result<RerankResponse> {
+    let request: RerankRequest = serde_json::from_value(request)?;
+    Ok(model.rerank(request).await?)
+}
+
+fn raw_scores(response: &RerankResponse) -> Vec<f32> {
+    let mut scores = vec![0f32; response.results.len()];
+    for result in &response.results {
+        scores[result.index] = result.relevance_score;
+    }
+    scores
+}
+
+#[tokio::test]
+async fn a_cross_encoder_ranks_documents_most_relevant_first() -> anyhow::Result<()> {
+    let checkpoint = tiny_bert_checkpoint(classifier(1))?;
+    let model = cpu_embedding_builder(checkpoint.path()).build().await?;
+    let scored = rerank(
+        &model,
+        serde_json::json!({"query": QUERY, "documents": DOCUMENTS, "return_documents": true}),
+    )
+    .await?;
+    let scores: Vec<f32> = scored.results.iter().map(|r| r.relevance_score).collect();
+    assert!(
+        scores.windows(2).all(|pair| pair[0] >= pair[1]),
+        "{scores:?}"
+    );
+    assert!(scores.iter().all(|score| (0.0..=1.0).contains(score)));
+    for result in &scored.results {
+        let text = result.document.as_ref().map(|d| d.text.as_str());
+        assert_eq!(text, Some(DOCUMENTS[result.index]));
+    }
+
+    let raw = rerank(
+        &model,
+        serde_json::json!({"query": QUERY, "documents": DOCUMENTS, "raw_scores": true}),
+    )
+    .await?;
+    for (logit, result) in raw_scores(&raw).iter().zip(raw_scores(&scored)) {
+        let sigmoid = 1.0 / (1.0 + (-logit).exp());
+        assert!((sigmoid - result).abs() < SCORE_TOLERANCE);
+    }
+
+    let top = rerank(
+        &model,
+        serde_json::json!({"query": QUERY, "documents": DOCUMENTS, "top_n": TOP_N}),
+    )
+    .await?;
+    assert_eq!(top.results.len(), TOP_N);
+    assert_eq!(top.results[0].index, scored.results[0].index);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_pair_reaches_the_model_with_its_segment_ids() -> anyhow::Result<()> {
+    let checkpoint = tiny_bert_checkpoint(classifier(1))?;
+    let model = cpu_embedding_builder(checkpoint.path()).build().await?;
+    let tokenizer = tokenizers::Tokenizer::from_file(checkpoint.path().join("tokenizer.json"))
+        .map_err(anyhow::Error::msg)?;
+    let pair = tokenizer
+        .encode((QUERY, DOCUMENTS[0]), true)
+        .map_err(anyhow::Error::msg)?;
+    assert!(
+        pair.get_type_ids().contains(&1),
+        "the pair has no second segment"
+    );
+
+    let reranked = rerank(
+        &model,
+        serde_json::json!({"query": QUERY, "documents": [DOCUMENTS[0]], "raw_scores": true}),
+    )
+    .await?;
+    // the same ids as one segment
+    let single_segment = embed_tokens(&model, pair.get_ids(), false).await?;
+    let diff = (reranked.results[0].relevance_score - single_segment[0]).abs();
+    assert!(
+        diff > SCORE_TOLERANCE,
+        "the segment ids left the score unchanged"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_prefixed_cross_encoder_and_a_reload_of_its_uqff_score_alike() -> anyhow::Result<()> {
+    let checkpoint = tiny_bert_checkpoint(classifier(1))?;
+    prefix_encoder_weights(checkpoint.path(), "bert")?;
+    let request = serde_json::json!({"query": QUERY, "documents": DOCUMENTS, "raw_scores": true});
+    let uqff_dir = tempfile::tempdir()?;
+    let quantized = cpu_embedding_builder(checkpoint.path())
+        .with_isq(IsqType::Q8_0)
+        .write_uqff(uqff_dir.path().join("model.uqff"))
+        .build()
+        .await?;
+    let expected = raw_scores(&rerank(&quantized, request.clone()).await?);
+    drop(quantized);
+
+    let written = uqff_files(uqff_dir.path())?;
+    anyhow::ensure!(!written.is_empty(), "no UQFF written");
+    let reloaded = UqffEmbeddingModelBuilder::new(
+        checkpoint.path().to_string_lossy(),
+        vec![written[0].clone()],
+    )
+    .into_inner()
+    .with_dtype(ModelDType::F32)
+    .with_force_cpu()
+    .build()
+    .await?;
+    assert_eq!(raw_scores(&rerank(&reloaded, request).await?), expected);
+    Ok(())
+}
+
+#[tokio::test]
+async fn only_a_single_logit_classifier_reranks() -> anyhow::Result<()> {
+    let request = serde_json::json!({"query": QUERY, "documents": DOCUMENTS});
+    let embedder = tiny_bert_checkpoint(|_| {})?;
+    let two_labels = tiny_bert_checkpoint(classifier(2))?;
+    for checkpoint in [&embedder, &two_labels] {
+        let model = cpu_embedding_builder(checkpoint.path()).build().await?;
+        let error = rerank(&model, request.clone()).await.unwrap_err();
+        assert!(error.to_string().contains("one logit"), "{error}");
+    }
     Ok(())
 }

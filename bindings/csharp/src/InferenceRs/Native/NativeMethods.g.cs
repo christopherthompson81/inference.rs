@@ -134,6 +134,10 @@ internal static unsafe partial class NativeMethods
         IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
 
     [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_rerank(
+        IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
     internal static partial InferenceStatus inference_anthropic_messages(
         IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
 

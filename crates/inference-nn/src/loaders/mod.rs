@@ -327,6 +327,10 @@ pub trait EmbeddingModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModel
         Ok(true)
     }
     fn has_causal_attention(&self, config: &str) -> Result<bool>;
+    /// A classifier outputs its logits per input, with no sentence-transformers modules after it.
+    fn is_classifier(&self, _config: &str) -> Result<bool> {
+        Ok(false)
+    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>>;
     fn get_device_for_tensor(
         &self,

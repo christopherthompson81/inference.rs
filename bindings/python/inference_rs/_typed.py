@@ -84,6 +84,9 @@ class Engine:
     def embeddings(self, request: types.EmbeddingRequest | str) -> types.EmbeddingResponse:
         return from_json(types.EmbeddingResponse, self.json.embeddings(to_json(request)))
 
+    def rerank(self, request: types.RerankRequest | str) -> types.RerankResponse:
+        return from_json(types.RerankResponse, self.json.rerank(to_json(request)))
+
     def anthropic_messages(self, request: types.AnthropicMessagesRequest | str) -> types.AnthropicMessageResponse:
         return from_json(
             types.AnthropicMessageResponse,

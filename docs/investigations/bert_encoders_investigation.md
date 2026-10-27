@@ -102,3 +102,56 @@ bge-m3 bf16  worst cos 0.999906
 
 Implication: bge-m3's dense embedding is served; its sparse (`sparse_linear.pt`) and ColBERT (`colbert_linear.pt`)
 heads are outside sentence-transformers' modules and not loaded.
+
+## Run 5 - 2026-10-27 10:40
+
+Question: do the `*ForSequenceClassification` heads and pair token types score (query, document) pairs as
+transformers does?
+
+Command: `inference serve --dtype {f32,bf16} -m <reranker>` on GPU, then `rerank_ref.py <reranker> 8095`
+(scratchpad): one query and four documents through `/v1/rerank`, against transformers
+`AutoModelForSequenceClassification` on the tokenizer's pair encoding, sigmoid of the single logit.
+Checkpoints: cross-encoder/ms-marco-MiniLM-L6-v2 (`BertForSequenceClassification`, two token types, `bert.` prefix,
+pooler + classifier) and BAAI/bge-reranker-base (`XLMRobertaForSequenceClassification`, one token type, `roberta.`
+prefix, dense + out_proj).
+
+```
+                       f32 worst |diff|  bf16 worst |diff|  order
+ms-marco-MiniLM-L6-v2  1.6e-6            2.3e-4             same
+bge-reranker-base      5.7e-5            1.1e-3             same in f32; bf16 swaps two docs tied at 0.000037
+```
+
+Finding: MiniLM's F32 match means the segment ids reach the model (its type 1 row differs from type 0, so dropping
+them would move every score). bge-reranker-base's F32 gap was larger than rounding, so Run 6 checks it on CPU.
+
+## Run 6 - 2026-10-27 10:43
+
+Question: is bge-reranker-base's F32 gap a model error or GPU F32 arithmetic?
+
+Command: as Run 5 with `--cpu --dtype f32`.
+
+```
+bge-reranker-base      worst |diff| 5.7e-8
+ms-marco-MiniLM-L6-v2  worst |diff| 8.3e-9
+```
+
+Finding: exact on CPU, so the GPU F32 gap (about 1.3e-3 in the logit over 12 layers of 768-wide matmuls) is the
+GPU path's arithmetic, not the head.
+
+## Run 7 - 2026-10-27 10:55
+
+Question: do the tiny-checkpoint rerank tests hold (pair segment ids reach the model; a `bert.`-prefixed cross-encoder
+reloads from its UQFF with the same scores)?
+
+Command: `cargo nextest run -p inference -E 'test(/^bert_embedding_tiny::/)'`.
+
+Finding: two failures, both real.
+- The segment-id test saw all-zero type ids. tokenizers 0.23.2's `encode_fast` builds tokens on its offset-free path
+  with a hardcoded type id 0 (`tokenizer/pre_tokenizer.rs`, `into_encoding`, `OffsetType::None`), so a pair's second
+  segment loses its ids unless a post-processor (BERT's `TemplateProcessing`) assigns them again. That is why
+  ms-marco-MiniLM still matched in Run 5; the tiny tokenizer has no post-processor. The pair now goes through
+  `encode`.
+- The Q8_0 cross-encoder failed with `input tensor is not contiguous` (shape [2, 32], stride [576, 1]): the head's
+  first-token slice is a strided view, which the quantized matmul rejects. The slice is now made contiguous.
+
+After both: 11 of 11 pass.

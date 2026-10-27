@@ -123,9 +123,9 @@ impl MessageExtras {
                 extras.audios = Some(vec![audio.clone()]);
                 extras.one_shot = Some(OneShotParams::Diarization(options.clone()));
             }
-            RequestMessage::Embedding { .. } | RequestMessage::EmbeddingTokens { .. } => {
-                extras.seq_step_type = SeqStepType::OneShot
-            }
+            RequestMessage::Embedding { .. }
+            | RequestMessage::EmbeddingTokens { .. }
+            | RequestMessage::EmbeddingPair { .. } => extras.seq_step_type = SeqStepType::OneShot,
         }
         extras
     }
@@ -299,7 +299,7 @@ impl Engine {
             None => None,
         };
         self.validate_request_kind(&request)?;
-        let extras = MessageExtras::of(&request.messages);
+        let mut extras = MessageExtras::of(&request.messages);
         let truncate_sequence = request.truncate_sequence;
 
         let has_tools = request.tools.as_ref().is_some_and(|t| !t.is_empty());
@@ -319,12 +319,19 @@ impl Engine {
             request.messages,
             RequestMessage::Chat { .. } | RequestMessage::MultimodalChat { .. }
         );
-        let (prompt_tokens, prompt_text) = self.render_prompt(
-            request.messages,
-            request.tools.as_deref(),
-            request.tool_choice.as_ref(),
-            preferred_tool_call_format,
-        )?;
+        let (prompt_tokens, prompt_text) = match request.messages {
+            RequestMessage::EmbeddingPair { first, second } => {
+                let (tokens, text, types) = self.encode_pair(first, second)?;
+                extras.one_shot = Some(OneShotParams::TokenTypes(types));
+                (tokens, text)
+            }
+            messages => self.render_prompt(
+                messages,
+                request.tools.as_deref(),
+                request.tool_choice.as_ref(),
+                preferred_tool_call_format,
+            )?,
+        };
         if prompt_tokens.is_empty() {
             return Err(Box::new(Response::ValidationError(
                 "Received an empty prompt.".into(),
@@ -599,7 +606,9 @@ impl Engine {
             }
             (
                 ModelCategory::Embedding,
-                RequestMessage::Embedding { .. } | RequestMessage::EmbeddingTokens { .. },
+                RequestMessage::Embedding { .. }
+                | RequestMessage::EmbeddingTokens { .. }
+                | RequestMessage::EmbeddingPair { .. },
             ) => Ok(()),
             _ => Err(Box::new(Response::ValidationError(
                 "Received a request incompatible for this model's category.".into(),
@@ -684,6 +693,28 @@ impl Engine {
         })
     }
 
+    /// A text pair through the tokenizer's pair template: its tokens, its text, and each token's segment id.
+    fn encode_pair(
+        &self,
+        first: String,
+        second: String,
+    ) -> Result<(Vec<u32>, String, Vec<u32>), Box<Response>> {
+        let Some(tokenizer) = &get_mut_arcmutex!(self.pipeline).tokenizer() else {
+            return Err(Box::new(Response::ValidationError(
+                "Pair embedding requests require the pipeline to have a tokenizer".into(),
+            )));
+        };
+        // not encode_fast: its offset-free path gives every token type id 0, dropping the second segment's
+        let encoding = tokenizer
+            .encode((first.clone(), second.clone()), true)
+            .map_err(|e| Box::new(Response::InternalError(anyhow::Error::msg(e).into())))?;
+        Ok((
+            encoding.get_ids().to_vec(),
+            format!("{first}\n{second}"),
+            encoding.get_type_ids().to_vec(),
+        ))
+    }
+
     fn render_prompt(
         &self,
         messages: RequestMessage,
@@ -748,6 +779,9 @@ impl Engine {
             | RequestMessage::TranscriptionStream { .. }
             | RequestMessage::VoiceActivity { .. }
             | RequestMessage::Diarization { .. } => Ok((vec![u32::MAX], String::new())),
+            RequestMessage::EmbeddingPair { .. } => {
+                unreachable!("a pair is encoded by encode_pair")
+            }
             RequestMessage::CompletionTokens(it)
             | RequestMessage::EmbeddingTokens { prompt: it } => {
                 let Some(tokenizer) = &get_mut_arcmutex!(self.pipeline).tokenizer() else {

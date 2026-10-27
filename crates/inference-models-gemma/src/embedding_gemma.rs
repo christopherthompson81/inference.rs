@@ -93,7 +93,12 @@ impl IsqModel for EmbeddingGemma {
 }
 
 impl EmbeddingModel for EmbeddingGemma {
-    fn forward(&self, input_ids: &Tensor, flash_params: &FlashParams) -> Result<Tensor> {
+    fn forward(
+        &self,
+        input_ids: &Tensor,
+        _token_type_ids: Option<&Tensor>,
+        flash_params: &FlashParams,
+    ) -> Result<Tensor> {
         self.forward_embeds(input_ids, self.embed_tokens(input_ids)?, flash_params)
     }
     fn device(&self) -> &Device {

@@ -1841,6 +1841,61 @@ pub struct EmbeddingResponse {
     pub usage: EmbeddingUsage,
 }
 
+/// Rerank request: score each document against the query with a cross-encoder (Cohere / Jina shape).
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct RerankRequest {
+    /// Model ID; "default" targets the only loaded model.
+    #[schema(example = "default")]
+    #[serde(default = "default_model")]
+    pub model: String,
+    /// The query every document is scored against.
+    #[schema(example = "how do I reset my password?")]
+    pub query: String,
+    /// The documents to score.
+    #[schema(example = json!(["Open Settings and choose Reset password.", "The office opens at nine."]))]
+    pub documents: Vec<String>,
+    /// Return only the best `top_n` results.
+    #[schema(example = json!(Option::None::<usize>))]
+    #[serde(default)]
+    pub top_n: Option<usize>,
+    /// Include each document's text in its result.
+    #[schema(example = false)]
+    #[serde(default)]
+    pub return_documents: bool,
+    /// Return the classifier's logit instead of its sigmoid.
+    #[schema(example = false)]
+    #[serde(default)]
+    pub raw_scores: bool,
+    /// Truncate query and document pairs that exceed the model's context length instead of erroring.
+    #[schema(example = json!(Option::None::<bool>))]
+    #[serde(default)]
+    pub truncate_sequence: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RerankDocument {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RerankResult {
+    /// The document's position in the request.
+    pub index: usize,
+    /// The sigmoid of the cross-encoder's logit, or the logit itself with `raw_scores`.
+    pub relevance_score: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document: Option<RerankDocument>,
+}
+
+/// Results ordered from the most to the least relevant.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct RerankResponse {
+    pub object: &'static str,
+    pub model: String,
+    pub results: Vec<RerankResult>,
+    pub usage: EmbeddingUsage,
+}
+
 /// Image generation request
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct ImageGenerationRequest {

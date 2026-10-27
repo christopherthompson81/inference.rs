@@ -27,6 +27,9 @@ impl EmbeddingModelLoader for BertLoader {
     fn has_causal_attention(&self, _: &str) -> Result<bool> {
         Ok(false)
     }
+    fn is_classifier(&self, config: &str) -> Result<bool> {
+        Ok(BertConfig::from_json(config)?.is_classifier())
+    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         Ok(Box::new(BertConfig::from_json(config)?))
     }
@@ -71,9 +74,14 @@ impl DeviceMappedModelLoader for BertLoader {
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
         let cfg = BertConfig::from_json(config)?;
+        let (hidden, labels) = (cfg.hidden_size, cfg.num_labels());
         let rows = cfg.vocab_size + cfg.max_position_embeddings + cfg.type_vocab_size;
         // the embedding LayerNorm's weight and bias
-        let elems = rows * cfg.hidden_size + 2 * cfg.hidden_size;
+        let mut elems = rows * hidden + 2 * hidden;
+        if cfg.is_classifier() {
+            // a hidden-to-hidden dense layer and the label projection, both biased
+            elems += hidden * hidden + hidden + hidden * labels + labels;
+        }
         Ok(elems * dtype.size_in_bytes())
     }
 

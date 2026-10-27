@@ -13,7 +13,8 @@ use inference_api::{
     media_source::{ATTACHMENT_PREFIX, Media, MediaAttachments},
     openai::{
         EmbeddingInput, EmbeddingRequest, EmbeddingResponse, Grammar, ImageEditRequest,
-        ImageGenerationRequest, ImageReference, SpeechGenerationRequest,
+        ImageGenerationRequest, ImageReference, RerankRequest, RerankResult,
+        SpeechGenerationRequest,
     },
     response::ChatCompletionResponse,
 };
@@ -198,6 +199,24 @@ impl Model {
                 inference_api::openai::EmbeddingVector::Base64(_) => None,
             })
             .ok_or(Error::Empty)
+    }
+
+    /// Each document scored against `query` by a cross-encoder, most relevant first.
+    pub async fn rerank_documents<I, S>(
+        &self,
+        query: impl Into<String>,
+        documents: I,
+    ) -> Result<Vec<RerankResult>>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let request: RerankRequest = serde_json::from_value(serde_json::json!({
+            "query": query.into(),
+            "documents": documents.into_iter().map(Into::into).collect::<Vec<String>>(),
+        }))
+        .expect("a rerank request needs only its query and documents");
+        Ok(self.engine.rerank(request).await?.results)
     }
 
     pub async fn generate_image(

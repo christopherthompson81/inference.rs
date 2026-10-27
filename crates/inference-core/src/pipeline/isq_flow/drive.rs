@@ -85,7 +85,7 @@ pub(crate) struct EmbeddingCalibrationDrive<'a>(pub &'a dyn EmbeddingModel);
 impl CalibrationDrive for EmbeddingCalibrationDrive<'_> {
     fn calibration_forward(&self, inputs: &InputMetadata) -> inference_tensor::Result<()> {
         let input = inputs.input.to_device(self.0.device())?;
-        self.0.forward(&input, &inputs.flash_meta)?;
+        self.0.forward(&input, None, &inputs.flash_meta)?;
         Ok(())
     }
 }

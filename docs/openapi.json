@@ -2152,6 +2152,36 @@
         }
       }
     },
+    "/v1/rerank": {
+      "post": {
+        "tags": [
+          "inference.rs"
+        ],
+        "operationId": "rerank",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RerankRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Documents ordered by relevance",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RerankResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/responses": {
       "post": {
         "tags": [
@@ -12013,6 +12043,131 @@
             ],
             "description": "The longest edge to infer at",
             "minimum": 0
+          }
+        }
+      },
+      "RerankDocument": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "RerankRequest": {
+        "type": "object",
+        "description": "Rerank request: score each document against the query with a cross-encoder (Cohere / Jina shape).",
+        "required": [
+          "query",
+          "documents"
+        ],
+        "properties": {
+          "documents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The documents to score.",
+            "example": [
+              "Open Settings and choose Reset password.",
+              "The office opens at nine."
+            ]
+          },
+          "model": {
+            "type": "string",
+            "description": "Model ID; \"default\" targets the only loaded model.",
+            "example": "default"
+          },
+          "query": {
+            "type": "string",
+            "description": "The query every document is scored against.",
+            "example": "how do I reset my password?"
+          },
+          "raw_scores": {
+            "type": "boolean",
+            "description": "Return the classifier's logit instead of its sigmoid.",
+            "example": false
+          },
+          "return_documents": {
+            "type": "boolean",
+            "description": "Include each document's text in its result.",
+            "example": false
+          },
+          "top_n": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Return only the best `top_n` results.",
+            "example": null,
+            "minimum": 0
+          },
+          "truncate_sequence": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Truncate query and document pairs that exceed the model's context length instead of erroring.",
+            "example": null
+          }
+        }
+      },
+      "RerankResponse": {
+        "type": "object",
+        "description": "Results ordered from the most to the least relevant.",
+        "required": [
+          "object",
+          "model",
+          "results",
+          "usage"
+        ],
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "object": {
+            "type": "string"
+          },
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RerankResult"
+            }
+          },
+          "usage": {
+            "$ref": "#/components/schemas/EmbeddingUsage"
+          }
+        }
+      },
+      "RerankResult": {
+        "type": "object",
+        "required": [
+          "index",
+          "relevance_score"
+        ],
+        "properties": {
+          "document": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RerankDocument"
+              }
+            ]
+          },
+          "index": {
+            "type": "integer",
+            "description": "The document's position in the request.",
+            "minimum": 0
+          },
+          "relevance_score": {
+            "type": "number",
+            "format": "float",
+            "description": "The sigmoid of the cross-encoder's logit, or the logit itself with `raw_scores`."
           }
         }
       },

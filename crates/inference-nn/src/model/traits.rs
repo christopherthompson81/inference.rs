@@ -133,10 +133,11 @@ pub trait MultimodalModel:
 }
 
 pub trait EmbeddingModel: IsqModel + AnyMoeBaseModelMixin {
-    #[allow(clippy::too_many_arguments)]
+    /// `token_type_ids` are the segment ids of a text pair; models without segment embeddings ignore them.
     fn forward(
         &self,
         input_ids: &Tensor,
+        token_type_ids: Option<&Tensor>,
         flash_params: &FlashParams,
     ) -> inference_tensor::Result<Tensor>;
     fn device(&self) -> &Device;

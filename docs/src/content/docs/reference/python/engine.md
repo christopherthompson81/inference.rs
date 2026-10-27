@@ -103,6 +103,12 @@ embeddings(
 ) -> types.EmbeddingResponse
 ```
 
+### `Engine.rerank`
+
+```text
+rerank(request: types.RerankRequest | str) -> types.RerankResponse
+```
+
 ### `Engine.anthropic_messages`
 
 ```text
@@ -823,6 +829,14 @@ completion_stream(request_json: str) -> Stream
 ```text
 embeddings(request_json: str) -> str
 ```
+
+### `JsonEngine.rerank`
+
+```text
+rerank(request_json: str) -> str
+```
+
+Scores each document against the query with a cross-encoder, most relevant first.
 
 ### `JsonEngine.anthropic_messages`
 

@@ -204,4 +204,32 @@ Standard pipeline:
 4. Optionally rerank top results with a reranker.
 5. Feed retrieved documents as language model context.
 
-inference.rs handles steps 1, 2, and (with a reranker) 4. The rest is the vector store and application logic. The [web search guide](/guides/agents/web-search/) covers using embeddings to rerank search results within an agent.
+inference.rs handles steps 1, 2, and (with a cross-encoder, below) 4. The rest is the vector store and application logic. The [web search guide](/guides/agents/web-search/) covers using embeddings to rerank search results within an agent.
+
+## Reranking with a cross-encoder
+
+A cross-encoder reads the query and a document together and scores the pair, which ranks a short candidate list more accurately than comparing two embeddings. Load a `*ForSequenceClassification` checkpoint with one label (a BERT, RoBERTa, XLM-RoBERTa or CamemBERT one) and send `POST /v1/rerank`:
+
+- `cross-encoder/ms-marco-MiniLM-L6-v2`: 22M parameters, English.
+- `BAAI/bge-reranker-base`: 278M parameters, multilingual.
+
+```bash
+inference serve -m cross-encoder/ms-marco-MiniLM-L6-v2
+
+curl http://localhost:1234/v1/rerank \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "default",
+    "query": "how do I reset my password?",
+    "documents": [
+      "Open Settings, choose Account, then select Reset password.",
+      "The office opens at nine and closes at five."
+    ],
+    "top_n": 1,
+    "return_documents": true
+  }'
+```
+
+The response lists `results`, most relevant first. Each result has its document's `index` in the request, its `relevance_score`, and with `return_documents` the document's `text`. The score is the sigmoid of the model's logit, as sentence-transformers' `CrossEncoder.predict` returns; `raw_scores: true` returns the logit itself. Each pair is tokenized with the tokenizer's pair template, segment ids included, and `truncate_sequence` truncates a pair that is too long. A model that does not score a pair with a single logit (an embedding model, or a classifier with several labels) is rejected.
+
+The Rust SDK has `model.rerank_documents(query, documents)`, the Python SDK `engine.rerank(...)`, and the C ABI `inference_rerank`.

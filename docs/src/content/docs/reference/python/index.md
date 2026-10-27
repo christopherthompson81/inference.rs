@@ -22,7 +22,7 @@ pip install -e bindings/python
 | --- | --- |
 | [Engine](/reference/python/engine/) | Load a model and serve requests; streams, results, errors and host callbacks. |
 | [Engine spec](/reference/python/spec/) | What to load and how to run it: EngineSpec, the ModelSelected variants and their options. |
-| [Chat and completions](/reference/python/chat/) | Chat completion, completion and embedding requests and responses, tools and output formats. |
+| [Chat and completions](/reference/python/chat/) | Chat completion, completion, embedding and rerank requests and responses, tools and output formats. |
 | [Responses](/reference/python/responses/) | OpenResponses requests, resources and stream events. |
 | [Anthropic](/reference/python/anthropic/) | Anthropic Messages requests, responses and skill listings. |
 | [Models, adapters, files and skills](/reference/python/management/) | Model status and cache counters, the model manager, LoRA adapters, files, skills, approvals, sessions, MCP tools, calibration, tokenization, prompt scoring and the media generation calls. |

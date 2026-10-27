@@ -115,6 +115,11 @@ pub enum RequestMessage {
     EmbeddingTokens {
         prompt: Vec<u32>,
     },
+    /// A text pair encoded as one input with its segment ids, as a cross-encoder scores it.
+    EmbeddingPair {
+        first: String,
+        second: String,
+    },
 }
 
 fn default_responder<T>() -> Sender<T> {

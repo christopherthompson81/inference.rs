@@ -21,6 +21,8 @@ const CONFIG: &str = "config.json";
 // sentence-transformers keeps each module's config in its own directory.
 const POOLING_DIR: &str = "1_Pooling";
 const POOLING_CONFIG: &str = "pooling_config.json";
+// the classification head sits beside the base model prefix, not under it
+const CLASSIFIER_HEAD: &str = "classifier";
 
 /// The committed tiny config, edited by `edit_config`, with a shared tokenizer and random weights.
 pub fn tiny_bert_checkpoint(
@@ -47,4 +49,19 @@ pub fn tiny_bert_checkpoint(
         dir.path().join(POOLING_DIR).join(CONFIG),
     )?;
     Ok(dir)
+}
+
+/// Moves the encoder's weights under `prefix`, as `*ForSequenceClassification` checkpoints store them.
+pub fn prefix_encoder_weights(dir: &Path, prefix: &str) -> anyhow::Result<()> {
+    let path = dir.join("model.safetensors");
+    let tensors = inference_tensor::safetensors::load(&path, &inference_tensor::Device::Cpu)?;
+    let renamed = tensors
+        .into_iter()
+        .map(|(name, tensor)| match name.starts_with(CLASSIFIER_HEAD) {
+            true => (name, tensor),
+            false => (format!("{prefix}.{name}"), tensor),
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    inference_tensor::safetensors::save(&renamed, &path)?;
+    Ok(())
 }

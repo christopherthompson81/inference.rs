@@ -319,6 +319,10 @@ class JsonEngine:
     def embeddings(self, request_json: str) -> str:
         return self._call("inference_embeddings", request_json)
 
+    def rerank(self, request_json: str) -> str:
+        """Scores each document against the query with a cross-encoder, most relevant first."""
+        return self._call("inference_rerank", request_json)
+
     def anthropic_messages(self, request_json: str) -> str:
         """An Anthropic Messages request; failures carry the Anthropic error envelope."""
         return self._call("inference_anthropic_messages", request_json)

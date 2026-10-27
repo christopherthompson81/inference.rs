@@ -126,7 +126,33 @@ pub(crate) fn get_prompt_input<T: WithDType + std::fmt::Debug>(
 #[derive(Clone)]
 pub struct ModelInputs {
     pub input_ids: Tensor,
+    /// Each token's segment id; `None` when every sequence is a single segment.
+    pub token_type_ids: Option<Tensor>,
     pub flash_meta: FlashParams,
+}
+
+/// The batch's segment ids, padded and truncated like its tokens; `None` when no sequence is a pair.
+fn token_type_ids(input_seqs: &[&mut Sequence], device: &Device) -> Result<Option<Tensor>> {
+    if input_seqs.iter().all(|seq| seq.token_type_ids().is_none()) {
+        return Ok(None);
+    }
+    let max_len = input_seqs
+        .iter()
+        .map(|seq| seq.get_toks().len())
+        .max()
+        .unwrap_or(0);
+    let mut types = Vec::with_capacity(input_seqs.len() * max_len);
+    for seq in input_seqs {
+        let seq_types = seq.token_type_ids().unwrap_or_default();
+        let kept = seq_types.len().min(seq.get_toks().len());
+        types.extend_from_slice(&seq_types[..kept]);
+        types.extend(std::iter::repeat_n(0, max_len - kept));
+    }
+    Ok(Some(Tensor::from_vec(
+        types,
+        (input_seqs.len(), max_len),
+        device,
+    )?))
 }
 
 pub struct EmbeddingInputsProcessor {
@@ -169,8 +195,10 @@ impl InputsProcessor for EmbeddingInputsProcessor {
                 },
             seq_indices,
         } = metadata;
+        let token_type_ids = token_type_ids(input_seqs, device)?;
         let inputs: Box<dyn Any> = Box::new(ModelInputs {
             input_ids,
+            token_type_ids,
             flash_meta,
         });
         Ok(InputProcessorOutput {
