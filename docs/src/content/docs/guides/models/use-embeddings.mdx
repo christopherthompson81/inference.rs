@@ -26,12 +26,13 @@ inference serve -m Qwen/Qwen3-Embedding-0.6B
 
 ### BERT-family encoders
 
-Sentence-transformers checkpoints built on BERT, RoBERTa, XLM-RoBERTa or CamemBERT (`BertModel`, `RobertaModel`, `XLMRobertaModel`, `CamembertModel` and their `*ForMaskedLM` classes) load the same way. The class alone marks them as embedders, so they need no `--arch`. Checked against transformers on:
+Sentence-transformers checkpoints built on BERT, RoBERTa, XLM-RoBERTa, CamemBERT or DistilBERT (`BertModel`, `RobertaModel`, `XLMRobertaModel`, `CamembertModel`, `DistilBertModel` and their `*ForMaskedLM` classes) load the same way. The class alone marks them as embedders, so they need no `--arch`. Checked against transformers on:
 
 - `sentence-transformers/all-MiniLM-L6-v2`: 22M parameters, 384-dim vectors, mean pooling.
 - `BAAI/bge-small-en-v1.5`: 33M parameters, 384-dim vectors, CLS pooling.
 - `intfloat/multilingual-e5-small`: 118M parameters, 384-dim vectors, multilingual (prefix inputs with `query: ` or `passage: `).
 - `sentence-transformers/all-distilroberta-v1`: 82M parameters, 768-dim vectors.
+- `sentence-transformers/multi-qa-distilbert-cos-v1` (DistilBERT): 66M parameters, 768-dim vectors, mean pooling.
 - `BAAI/bge-m3`: 568M parameters (XLM-RoBERTa), 1024-dim dense vectors, inputs up to 8192 tokens. Its sparse and multi-vector outputs are not served.
 
 ```bash
@@ -252,10 +253,13 @@ inference.rs handles steps 1, 2, and (with a cross-encoder, below) 4. The rest i
 
 ## Reranking with a cross-encoder
 
-A cross-encoder reads the query and a document together and scores the pair, which ranks a short candidate list more accurately than comparing two embeddings. Load a `*ForSequenceClassification` checkpoint with one label (a BERT, RoBERTa, XLM-RoBERTa or CamemBERT one) and send `POST /v1/rerank`:
+A cross-encoder reads the query and a document together and scores the pair, which ranks a short candidate list more accurately than comparing two embeddings. Load a `*ForSequenceClassification` checkpoint with one label (a BERT, RoBERTa, XLM-RoBERTa, CamemBERT, DistilBERT, ModernBERT or NeoBERT one) and send `POST /v1/rerank`:
 
 - `cross-encoder/ms-marco-MiniLM-L6-v2`: 22M parameters, English.
 - `BAAI/bge-reranker-base`: 278M parameters, multilingual.
+- `ml6team/cross-encoder-mmarco-german-distilbert-base` (DistilBERT): 66M parameters, German.
+- `Alibaba-NLP/gte-reranker-modernbert-base` (ModernBERT): 149M parameters, English, inputs up to 8192 tokens.
+- `tomaarsen/reranker-NeoBERT-gooaq-bce` (NeoBERT): 250M parameters, English.
 
 ```bash
 inference serve -m cross-encoder/ms-marco-MiniLM-L6-v2

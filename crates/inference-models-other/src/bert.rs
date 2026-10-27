@@ -1,4 +1,4 @@
-//! BERT-family encoders (BERT, RoBERTa, XLM-R, CamemBERT, Jina BERT v2): learned or ALiBi positions,
+//! BERT-family encoders (BERT, RoBERTa, XLM-R, CamemBERT, DistilBERT, Jina BERT v2): learned or ALiBi positions,
 //! post-LayerNorm and a GELU or GLU FFN, with the `*ForSequenceClassification` heads that cross-encoder rerankers add.
 #![allow(clippy::cast_precision_loss)]
 
@@ -6,12 +6,13 @@ use std::sync::Arc;
 
 use inference_quant::{QuantMethod, ShardedVarBuilder};
 use inference_tensor::nn::{Embedding, LayerNorm, Module};
-use inference_tensor::{D, DType, Device, IndexOp, Result, Tensor};
+use inference_tensor::{D, DType, Device, Result, Tensor};
 use serde::Deserialize;
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::{AttentionMask, FlashParams, SdpaParams},
+    classifier::{self, ClassifierHead, HeadActivation, HeadPooling, HeadSpec},
     device_map::DeviceMapper,
     layers::{Activation, Sdpa, dense_embedding, layer_norm},
     model::{EmbeddingModel, IsqModel, NormalLoadingMetadata},
@@ -23,13 +24,13 @@ use crate::{
 const WORD_EMBEDDINGS: &str = "embeddings.word_embeddings.weight";
 // RoBERTa-style models number positions from `pad_token_id + 1`
 const ROBERTA_MODEL_TYPES: &[&str] = &["roberta", "xlm-roberta", "camembert"];
+// BERT's block under other names, with no segment embeddings
+const DISTILBERT_MODEL_TYPE: &str = "distilbert";
 const ABSOLUTE_POSITIONS: &str = "absolute";
 // Jina BERT v2: no position table, a per-head linear bias on |i - j| instead
 const ALIBI_POSITIONS: &str = "alibi";
 pub const ORIGINAL_FFN: &str = "original";
-const CLASSIFIER_SUFFIX: &str = "ForSequenceClassification";
-// transformers' PretrainedConfig default when a config lists no labels
-const DEFAULT_NUM_LABELS: usize = 2;
+const PRE_CLASSIFIER: &str = "pre_classifier";
 
 serde_default_fn!(usize, type_vocab_size, 2);
 serde_default_fn!(f64, layer_norm_eps, 1e-12);
@@ -43,10 +44,16 @@ serde_default_fn!(String, feed_forward_type, ORIGINAL_FFN.to_string());
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub vocab_size: usize,
+    // DistilBERT's config keys
+    #[serde(alias = "dim")]
     pub hidden_size: usize,
+    #[serde(alias = "n_layers")]
     pub num_hidden_layers: usize,
+    #[serde(alias = "n_heads")]
     pub num_attention_heads: usize,
+    #[serde(alias = "hidden_dim")]
     pub intermediate_size: usize,
+    #[serde(alias = "activation")]
     pub hidden_act: Activation,
     pub max_position_embeddings: usize,
     #[serde(default = "type_vocab_size")]
@@ -74,6 +81,27 @@ impl Config {
         ROBERTA_MODEL_TYPES.contains(&self.model_type.as_str())
     }
 
+    fn distilbert(&self) -> bool {
+        self.model_type == DISTILBERT_MODEL_TYPE
+    }
+
+    /// The segment-embedding rows; DistilBERT has none.
+    pub fn token_type_rows(&self) -> usize {
+        if self.distilbert() {
+            0
+        } else {
+            self.type_vocab_size
+        }
+    }
+
+    fn names(&self) -> &'static LayerNames {
+        if self.distilbert() {
+            &DISTILBERT_NAMES
+        } else {
+            &BERT_NAMES
+        }
+    }
+
     /// The first position id a sequence takes.
     pub fn position_offset(&self) -> usize {
         if self.roberta_style() {
@@ -89,15 +117,48 @@ impl Config {
 
     /// A cross-encoder: a classification head over the first token, scoring rather than embedding.
     pub fn is_classifier(&self) -> bool {
-        self.architectures
-            .iter()
-            .any(|arch| arch.ends_with(CLASSIFIER_SUFFIX))
+        classifier::is_classifier(&self.architectures)
     }
 
     pub fn num_labels(&self) -> usize {
-        self.id2label
-            .as_ref()
-            .map_or(DEFAULT_NUM_LABELS, |labels| labels.len())
+        classifier::num_labels(self.id2label.as_ref())
+    }
+
+    /// BERT's pooler, RoBERTa's `classifier.dense` or DistilBERT's `pre_classifier`, by what `root` holds.
+    fn head(&self, root: &ShardedVarBuilder, prefix: Option<&str>) -> Result<ClassifierHead> {
+        let pooler = match prefix {
+            Some(prefix) => format!("{prefix}.pooler.dense"),
+            None => "pooler.dense".to_string(),
+        };
+        // by what the checkpoint holds: an XLM-R reranker GGUF names its model type `bert`
+        let (dense, activation, out) = if root.contains_tensor("classifier.dense.weight") {
+            (
+                "classifier.dense",
+                HeadActivation::Tanh,
+                "classifier.out_proj",
+            )
+        } else if root.contains_tensor(&format!("{PRE_CLASSIFIER}.weight")) {
+            (
+                PRE_CLASSIFIER,
+                HeadActivation::Act(Activation::Relu),
+                "classifier",
+            )
+        } else {
+            (pooler.as_str(), HeadActivation::Tanh, "classifier")
+        };
+        ClassifierHead::new(
+            &HeadSpec {
+                hidden: self.hidden_size,
+                labels: self.num_labels(),
+                pooling: HeadPooling::First,
+                dense,
+                dense_bias: true,
+                activation,
+                norm: None,
+                out,
+            },
+            root,
+        )
     }
 
     pub fn head_dim(&self) -> usize {
@@ -122,11 +183,50 @@ impl Config {
     fn base_prefix(&self) -> &'static str {
         if self.roberta_style() {
             "roberta"
+        } else if self.distilbert() {
+            "distilbert"
         } else {
             "bert"
         }
     }
 }
+
+/// Where an encoder's layers and their weights sit, under the base prefix.
+struct LayerNames {
+    layers: &'static str,
+    query: &'static str,
+    key: &'static str,
+    value: &'static str,
+    attention_output: &'static str,
+    attention_norm: &'static str,
+    intermediate: &'static str,
+    output: &'static str,
+    output_norm: &'static str,
+}
+
+const BERT_NAMES: LayerNames = LayerNames {
+    layers: "encoder.layer",
+    query: "attention.self.query",
+    key: "attention.self.key",
+    value: "attention.self.value",
+    attention_output: "attention.output.dense",
+    attention_norm: "attention.output.LayerNorm",
+    intermediate: "intermediate.dense",
+    output: "output.dense",
+    output_norm: "output.LayerNorm",
+};
+
+const DISTILBERT_NAMES: LayerNames = LayerNames {
+    layers: "transformer.layer",
+    query: "attention.q_lin",
+    key: "attention.k_lin",
+    value: "attention.v_lin",
+    attention_output: "attention.out_lin",
+    attention_norm: "sa_layer_norm",
+    intermediate: "ffn.lin1",
+    output: "ffn.lin2",
+    output_norm: "output_layer_norm",
+};
 
 /// ALiBi's per-head slopes (Press et al.): a geometric series for a power-of-two head count, with the odd terms of
 /// the next power's series filling the rest.
@@ -152,7 +252,8 @@ struct Embeddings {
     word: Embedding,
     // absent with ALiBi
     position: Option<Embedding>,
-    token_type: Embedding,
+    // absent in DistilBERT
+    token_type: Option<Embedding>,
     norm: LayerNorm,
     position_offset: usize,
 }
@@ -170,72 +271,14 @@ impl Embeddings {
             None => xs,
         };
         // a one-row table (RoBERTa, XLM-R) has a single segment whatever the tokenizer numbers it
-        let xs = match token_type_ids {
-            Some(types) if self.token_type.embeddings().dim(0)? > 1 => {
-                (xs + self.token_type.forward(types)?)?
+        let xs = match (&self.token_type, token_type_ids) {
+            (None, _) => xs,
+            (Some(table), Some(types)) if table.embeddings().dim(0)? > 1 => {
+                (xs + table.forward(types)?)?
             }
-            _ => xs.broadcast_add(&self.token_type.embeddings().narrow(0, 0, 1)?)?,
+            (Some(table), _) => xs.broadcast_add(&table.embeddings().narrow(0, 0, 1)?)?,
         };
         self.norm.forward(&xs)
-    }
-}
-
-/// A sequence-classification head over the first token's state.
-enum Head {
-    /// BERT: the pooler's tanh dense layer, then `classifier`.
-    Pooled {
-        pooler: Arc<dyn QuantMethod>,
-        classifier: Arc<dyn QuantMethod>,
-    },
-    /// RoBERTa / XLM-R: `classifier.dense`, tanh, then `classifier.out_proj`.
-    Projected {
-        dense: Arc<dyn QuantMethod>,
-        out_proj: Arc<dyn QuantMethod>,
-    },
-}
-
-impl Head {
-    fn new(cfg: &Config, root: &ShardedVarBuilder, encoder: &ShardedVarBuilder) -> Result<Self> {
-        let (hidden, labels) = (cfg.hidden_size, cfg.num_labels());
-        let linear = |i, o, vb| inference_quant::linear(i, o, &None, vb);
-        let classifier = root.pp("classifier");
-        // by what the checkpoint holds: an XLM-R reranker GGUF names its model type `bert`
-        Ok(if classifier.contains_tensor("dense.weight") {
-            Self::Projected {
-                dense: linear(hidden, hidden, classifier.pp("dense"))?,
-                out_proj: linear(hidden, labels, classifier.pp("out_proj"))?,
-            }
-        } else {
-            Self::Pooled {
-                pooler: linear(hidden, hidden, encoder.pp("pooler").pp("dense"))?,
-                classifier: linear(hidden, labels, classifier)?,
-            }
-        })
-    }
-
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let first = xs.i((.., 0, ..))?.contiguous()?;
-        match self {
-            Self::Pooled { pooler, classifier } => {
-                classifier.forward(&pooler.forward(&first)?.tanh()?)
-            }
-            Self::Projected { dense, out_proj } => {
-                out_proj.forward(&dense.forward(&first)?.tanh()?)
-            }
-        }
-    }
-
-    fn add_residual(&self, root: &UnVarBuilder, encoder: &UnVarBuilder) {
-        match self {
-            Self::Pooled { pooler, classifier } => {
-                encoder.pp("pooler").pp("dense").add(pooler);
-                root.pp("classifier").add(classifier);
-            }
-            Self::Projected { dense, out_proj } => {
-                root.pp("classifier").pp("dense").add(dense);
-                root.pp("classifier").pp("out_proj").add(out_proj);
-            }
-        }
     }
 }
 
@@ -304,33 +347,32 @@ impl Layer {
         loading_isq: bool,
     ) -> Result<Self> {
         let hidden = cfg.hidden_size;
+        let names = cfg.names();
         let place = |vb: ShardedVarBuilder| mapper.set_device(layer_idx, vb, loading_isq);
         let norm = |vb: ShardedVarBuilder| {
             layer_norm(
                 hidden,
                 cfg.layer_norm_eps,
-                mapper.set_device(layer_idx, vb.pp("LayerNorm"), false),
+                mapper.set_device(layer_idx, vb, false),
             )
         };
-        let vb_attn = vb.pp("attention");
-        let vb_self = vb_attn.pp("self");
-        let linear = |i, o, vb| inference_quant::linear(i, o, &None, place(vb));
+        let linear = |i, o, name| inference_quant::linear(i, o, &None, place(vb.pp(name)));
         let inter = cfg.intermediate_size;
         let glu = cfg.glu_activation()?;
         Ok(Self {
             attention: Attention {
-                query: linear(hidden, hidden, vb_self.pp("query"))?,
-                key: linear(hidden, hidden, vb_self.pp("key"))?,
-                value: linear(hidden, hidden, vb_self.pp("value"))?,
-                output: linear(hidden, hidden, vb_attn.pp("output").pp("dense"))?,
-                norm: norm(vb_attn.pp("output"))?,
+                query: linear(hidden, hidden, names.query)?,
+                key: linear(hidden, hidden, names.key)?,
+                value: linear(hidden, hidden, names.value)?,
+                output: linear(hidden, hidden, names.attention_output)?,
+                norm: norm(vb.pp(names.attention_norm))?,
                 num_heads: cfg.num_attention_heads,
                 head_dim: cfg.head_dim(),
             },
             ffn: match glu {
                 None => Ffn::Plain {
-                    intermediate: linear(hidden, inter, vb.pp("intermediate").pp("dense"))?,
-                    output: linear(inter, hidden, vb.pp("output").pp("dense"))?,
+                    intermediate: linear(hidden, inter, names.intermediate)?,
+                    output: linear(inter, hidden, names.output)?,
                 },
                 Some(_) => Ffn::Glu {
                     gated: inference_quant::linear_b(
@@ -340,11 +382,11 @@ impl Layer {
                         &None,
                         place(vb.pp("mlp").pp("gated_layers")),
                     )?,
-                    wo: linear(inter, hidden, vb.pp("mlp").pp("wo"))?,
+                    wo: linear(inter, hidden, "mlp.wo")?,
                 },
             },
             norm: match glu {
-                None => norm(vb.pp("output"))?,
+                None => norm(vb.pp(names.output_norm))?,
                 Some(_) => layer_norm(
                     hidden,
                     cfg.layer_norm_eps,
@@ -377,11 +419,12 @@ impl Layer {
 pub struct Model {
     embeddings: Embeddings,
     layers: Vec<Layer>,
-    head: Option<Head>,
+    head: Option<ClassifierHead>,
     // `[heads, 1, 1]`, negated: each head's bias is slope * -|i - j|
     alibi_slopes: Option<Tensor>,
     // the base model prefix the encoder's weights sit under, kept for the UQFF residual
     prefix: Option<&'static str>,
+    names: &'static LayerNames,
     mapper: Box<dyn DeviceMapper + Send + Sync>,
     device: Device,
 }
@@ -428,28 +471,26 @@ impl Model {
                     )
                 })
                 .transpose()?,
-            token_type: dense_embedding(
-                cfg.type_vocab_size,
-                hidden,
-                vb_e.pp("token_type_embeddings"),
-                &None,
-            )?,
+            token_type: (cfg.token_type_rows() > 0)
+                .then(|| {
+                    dense_embedding(
+                        cfg.token_type_rows(),
+                        hidden,
+                        vb_e.pp("token_type_embeddings"),
+                        &None,
+                    )
+                })
+                .transpose()?,
             norm: layer_norm(hidden, cfg.layer_norm_eps, vb_e.pp("LayerNorm"))?,
             position_offset: cfg.position_offset(),
         };
-        let vb_l = vb.pp("encoder").pp("layer");
+        let vb_l = vb.pp(cfg.names().layers);
         let layers = (0..cfg.num_hidden_layers)
             .map(|i| Layer::new(cfg, vb_l.pp(i), i, &*mapper, loading_isq))
             .collect::<Result<Vec<_>>>()?;
         let head = cfg
             .is_classifier()
-            .then(|| {
-                Head::new(
-                    cfg,
-                    &mapper.set_nm_device(root, false),
-                    &mapper.set_nm_device(vb.clone(), false),
-                )
-            })
+            .then(|| cfg.head(&mapper.set_nm_device(root, false), prefix))
             .transpose()?;
         let alibi_slopes = cfg
             .alibi()
@@ -469,6 +510,7 @@ impl Model {
             head,
             alibi_slopes,
             prefix,
+            names: cfg.names(),
             mapper,
             device: real_device,
         })
@@ -482,19 +524,17 @@ impl Model {
         if let Some(position) = &self.embeddings.position {
             uvb_e.pp("position_embeddings").add(position);
         }
-        uvb_e
-            .pp("token_type_embeddings")
-            .add(&self.embeddings.token_type);
+        if let Some(token_type) = &self.embeddings.token_type {
+            uvb_e.pp("token_type_embeddings").add(token_type);
+        }
         uvb_e.pp("LayerNorm").add(&self.embeddings.norm);
         for (i, layer) in self.layers.iter().enumerate() {
-            let uvb_l = uvb.pp("encoder").pp("layer").pp(i);
+            let uvb_l = uvb.pp(self.names.layers).pp(i);
             uvb_l
-                .pp("attention")
-                .pp("output")
-                .pp("LayerNorm")
+                .pp(self.names.attention_norm)
                 .add(&layer.attention.norm);
             match layer.ffn {
-                Ffn::Plain { .. } => uvb_l.pp("output").pp("LayerNorm").add(&layer.norm),
+                Ffn::Plain { .. } => uvb_l.pp(self.names.output_norm).add(&layer.norm),
                 Ffn::Glu { .. } => uvb_l.pp("mlp").pp("layernorm").add(&layer.norm),
             }
         }
@@ -508,7 +548,7 @@ impl IsqModel for Model {
         let encoder = encoder.as_ref().unwrap_or(&root);
         self.add_encoder_residual(encoder);
         if let Some(head) = &self.head {
-            head.add_residual(&root, encoder);
+            head.add_residual(&root);
         }
         root.to_safetensors()
     }

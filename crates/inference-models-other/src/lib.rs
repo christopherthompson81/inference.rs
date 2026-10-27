@@ -8,6 +8,7 @@ use inference_nn::{
 };
 
 pub mod bert;
+pub mod classifier;
 pub mod deepseek2;
 pub mod deepseek3;
 pub mod deepseek_family;

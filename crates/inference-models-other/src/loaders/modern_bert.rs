@@ -24,6 +24,9 @@ impl EmbeddingModelLoader for ModernBertLoader {
     fn has_causal_attention(&self, _: &str) -> Result<bool> {
         Ok(false)
     }
+    fn is_classifier(&self, config: &str) -> Result<bool> {
+        Ok(ModernBertConfig::from_json(config)?.is_classifier())
+    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         Ok(Box::new(ModernBertConfig::from_json(config)?))
     }
@@ -67,7 +70,10 @@ impl DeviceMappedModelLoader for ModernBertLoader {
     ) -> Result<usize> {
         let cfg = ModernBertConfig::from_json(config)?;
         // token rows, the embedding norm and the final norm
-        let elems = (cfg.vocab_size + 2) * cfg.hidden_size;
+        let mut elems = (cfg.vocab_size + 2) * cfg.hidden_size;
+        if cfg.is_classifier() {
+            elems += crate::classifier::head_elems(cfg.hidden_size, cfg.num_labels());
+        }
         Ok(elems * dtype.size_in_bytes())
     }
 

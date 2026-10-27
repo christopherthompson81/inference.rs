@@ -27,6 +27,9 @@ impl EmbeddingModelLoader for NeoBertLoader {
     fn has_causal_attention(&self, _: &str) -> Result<bool> {
         Ok(false)
     }
+    fn is_classifier(&self, config: &str) -> Result<bool> {
+        Ok(NeoBertConfig::from_json(config)?.is_classifier())
+    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         Ok(Box::new(NeoBertConfig::from_json(config)?))
     }
@@ -70,7 +73,10 @@ impl DeviceMappedModelLoader for NeoBertLoader {
     ) -> Result<usize> {
         let cfg = NeoBertConfig::from_json(config)?;
         // the token rows and the final norm
-        let elems = (cfg.vocab_size + 1) * cfg.hidden_size;
+        let mut elems = (cfg.vocab_size + 1) * cfg.hidden_size;
+        if cfg.is_classifier() {
+            elems += crate::classifier::head_elems(cfg.hidden_size, cfg.num_labels());
+        }
         Ok(elems * dtype.size_in_bytes())
     }
 

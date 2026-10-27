@@ -486,3 +486,150 @@ async fn an_unknown_task_or_a_model_without_adapters_is_rejected() -> anyhow::Re
     assert!(error.to_string().contains("no task adapters"), "{error}");
     Ok(())
 }
+
+// BERT's names to DistilBERT's, written out apart from the model's own table
+const DISTILBERT_RENAMES: [(&str, &str); 9] = [
+    ("encoder.layer.", "transformer.layer."),
+    ("attention.self.query", "attention.q_lin"),
+    ("attention.self.key", "attention.k_lin"),
+    ("attention.self.value", "attention.v_lin"),
+    ("attention.output.dense", "attention.out_lin"),
+    ("attention.output.LayerNorm", "sa_layer_norm"),
+    ("intermediate.dense", "ffn.lin1"),
+    ("output.dense", "ffn.lin2"),
+    ("output.LayerNorm", "output_layer_norm"),
+];
+const TOKEN_TYPES: &str = "embeddings.token_type_embeddings.weight";
+
+/// A tiny BERT with a zero segment table, and the same weights as DistilBERT, which has no segment embeddings.
+fn bert_and_its_distilbert() -> anyhow::Result<(tempfile::TempDir, tempfile::TempDir)> {
+    let bert = tiny_bert_checkpoint(|_| {})?;
+    let path = bert.path().join("model.safetensors");
+    let mut weights = inference_tensor::safetensors::load(&path, &inference_tensor::Device::Cpu)?;
+    let zeros = weights[TOKEN_TYPES].zeros_like()?;
+    weights.insert(TOKEN_TYPES.to_string(), zeros);
+    inference_tensor::safetensors::save(&weights, &path)?;
+
+    let distil = tempfile::tempdir()?;
+    let renamed = weights
+        .into_iter()
+        .filter(|(name, _)| name != TOKEN_TYPES)
+        .map(|(mut name, tensor)| {
+            for (from, to) in DISTILBERT_RENAMES {
+                name = name.replace(from, to);
+            }
+            (name, tensor)
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    inference_tensor::safetensors::save(&renamed, distil.path().join("model.safetensors"))?;
+    for file in ["tokenizer.json", "modules.json"] {
+        std::fs::copy(bert.path().join(file), distil.path().join(file))?;
+    }
+    std::fs::create_dir(distil.path().join("1_Pooling"))?;
+    std::fs::copy(
+        bert.path().join("1_Pooling/config.json"),
+        distil.path().join("1_Pooling/config.json"),
+    )?;
+    let bert_config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(bert.path().join("config.json"))?)?;
+    let config = serde_json::json!({
+        "architectures": ["DistilBertModel"],
+        "model_type": "distilbert",
+        "vocab_size": bert_config["vocab_size"],
+        "dim": bert_config["hidden_size"],
+        "n_layers": bert_config["num_hidden_layers"],
+        "n_heads": bert_config["num_attention_heads"],
+        "hidden_dim": bert_config["intermediate_size"],
+        "activation": bert_config["hidden_act"],
+        "max_position_embeddings": bert_config["max_position_embeddings"],
+        "pad_token_id": 0,
+    });
+    std::fs::write(distil.path().join("config.json"), config.to_string())?;
+    Ok((bert, distil))
+}
+
+#[tokio::test]
+async fn a_distilbert_embeds_as_the_bert_with_its_weights() -> anyhow::Result<()> {
+    let (bert, distil) = bert_and_its_distilbert()?;
+    let expected = embed_tokens(
+        &cpu_embedding_builder(bert.path()).build().await?,
+        &TOKENS,
+        false,
+    )
+    .await?;
+    let embedding = embed_tokens(
+        &cpu_embedding_builder(distil.path()).build().await?,
+        &TOKENS,
+        false,
+    )
+    .await?;
+    let diff = max_diff(&expected, &embedding);
+    assert!(diff < EMBEDDING_TOLERANCE, "max diff {diff}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_distilbert_classifier_scores_its_first_token_through_pre_classifier_and_relu()
+-> anyhow::Result<()> {
+    use inference_tensor::{Device, Tensor};
+    let (_bert, distil) = bert_and_its_distilbert()?;
+    // the raw first-token state, without the Normalize module
+    std::fs::write(
+        distil.path().join("modules.json"),
+        serde_json::json!([
+            {"idx": 0, "name": "0", "path": "", "type": "sentence_transformers.models.Transformer"},
+            {"idx": 1, "name": "1", "path": "1_Pooling", "type": "sentence_transformers.models.Pooling"},
+        ])
+        .to_string(),
+    )?;
+    let first = embed_tokens(
+        &cpu_embedding_builder(distil.path()).build().await?,
+        &TOKENS,
+        false,
+    )
+    .await?;
+
+    let path = distil.path().join("model.safetensors");
+    let mut weights = inference_tensor::safetensors::load(&path, &Device::Cpu)?;
+    let random = |shape: &[usize]| Tensor::randn(0f32, 0.5, shape, &Device::Cpu);
+    let head = [
+        (
+            "pre_classifier.weight",
+            random(&[HIDDEN_SIZE, HIDDEN_SIZE])?,
+        ),
+        ("pre_classifier.bias", random(&[HIDDEN_SIZE])?),
+        ("classifier.weight", random(&[1, HIDDEN_SIZE])?),
+        ("classifier.bias", random(&[1])?),
+    ];
+    let state = Tensor::from_vec(first, (1, HIDDEN_SIZE), &Device::Cpu)?;
+    let hidden = state
+        .matmul(&head[0].1.t()?)?
+        .broadcast_add(&head[1].1)?
+        .relu()?;
+    let expected = hidden
+        .matmul(&head[2].1.t()?)?
+        .broadcast_add(&head[3].1)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    weights.extend(head.map(|(name, tensor)| (name.to_string(), tensor)));
+    inference_tensor::safetensors::save(&weights, &path)?;
+    let config_path = distil.path().join("config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_path)?)?;
+    config["architectures"] = serde_json::json!(["DistilBertForSequenceClassification"]);
+    config["id2label"] = serde_json::json!({"0": "LABEL_0"});
+    std::fs::write(&config_path, config.to_string())?;
+
+    let logit = embed_tokens(
+        &cpu_embedding_builder(distil.path()).build().await?,
+        &TOKENS,
+        false,
+    )
+    .await?;
+    let diff = max_diff(&expected, &logit);
+    assert!(
+        diff < SCORE_TOLERANCE,
+        "logit {logit:?}, expected {expected:?}"
+    );
+    Ok(())
+}

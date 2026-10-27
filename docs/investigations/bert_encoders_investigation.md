@@ -459,3 +459,55 @@ merge, not ours.
 
 Implication: commit with a tiny-checkpoint test (adapters checked against the merged weights, mixed tasks in one
 batch) and docs.
+
+## Run 18 - 2026-10-27 16:47
+
+Question: after reopening #586 for the scope it lists that was still open, does DistilBERT (embedder and
+`DistilBertForSequenceClassification` cross-encoder) run on the BERT encoder under its own names?
+
+Command: `inference serve --cpu --dtype f32` on `sentence-transformers/multi-qa-distilbert-cos-v1` against `ref.py`
+(five texts, one of 402 tokens) and on `ml6team/cross-encoder-mmarco-german-distilbert-base` (one label) against
+`rerank_ref.py`.
+
+```
+multi-qa-distilbert-cos-v1: worst cos 1.000000, max_abs <= 2.5e-7
+mmarco german distilbert reranker: worst score diff 9.7e-8, same order
+```
+
+Finding: DistilBERT is BERT's post-LayerNorm block with no segment table, under other names (`transformer.layer.N`,
+`attention.{q,k,v,out}_lin`, `sa_layer_norm`, `ffn.lin1/lin2`, `output_layer_norm`; `distilbert.` under the task
+heads) and config keys (`dim`, `n_layers`, `n_heads`, `hidden_dim`, `activation`). The BERT encoder reads them
+through a per-architecture name table and serde aliases. Its classifier is `pre_classifier`, ReLU, `classifier` on
+the first token, with no pooler. Tests: a tiny BERT renamed by hand to DistilBERT embeds as the BERT (segment table
+zeroed), and the classifier's logit equals that head applied by hand to the first-token state.
+
+Implication: DistilBERT done. Next on #586: the ModernBERT and NeoBERT classifier classes.
+
+## Run 19 - 2026-10-27 17:04
+
+Question: do the ModernBERT and NeoBERT classifier classes #586 lists score as their references, and what is
+`ModernBertDecisionModel`?
+
+Command: `inference serve --cpu --dtype f32` on `Alibaba-NLP/gte-reranker-modernbert-base`
+(`ModernBertForSequenceClassification`, mean pooled) against `rerank_ref.py`, and on
+`tomaarsen/reranker-NeoBERT-gooaq-bce` against `neobert_rerank_ref.py` (NeoBERT's own
+`NeoBERTForSequenceClassification`, each pair alone); read llama.cpp 970b51ce7 `conversion/bert.py` for the decision
+model.
+
+```
+gte-reranker-modernbert-base: worst score diff 2.95e-6, same order
+reranker-NeoBERT-gooaq-bce:   worst score diff 2.05e-7, same order
+```
+
+Finding: both match. The five heads (BERT's pooler, RoBERTa's `classifier.dense`, DistilBERT's `pre_classifier`,
+ModernBERT's `head`, NeoBERT's `dense`) are one shape: pool (first token, or mean for ModernBERT's
+`classifier_pooling`), a dense layer, tanh / ReLU / the classifier activation, an optional LayerNorm (ModernBERT's
+`head.norm`), the label projection. They now share one `ClassifierHead`, each encoder naming its weights.
+
+`ModernBertDecisionModel` is not a transformers class: llama.cpp's converter names it for two RL decision checkpoints
+(`convaiinnovations/laya`, `SupersonicLabs/Julia-1`), a ModernBERT encoder with extra head blocks over `[MASK]`
+option slots, a decision prompt template and per-option-type temperatures. It is a decision-serving feature, not an
+embedder or reranker.
+
+Implication: classifiers done. Next on #586: the `jina-bert-v3`, `eurobert` and `llama-embed` GGUF architectures;
+the decision model needs its own scope.

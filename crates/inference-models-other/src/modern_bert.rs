@@ -11,6 +11,7 @@ use serde::Deserialize;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::{AttentionMask, FlashParams},
+    classifier::{self, ClassifierHead, HeadActivation, HeadPooling, HeadSpec},
     device_map::DeviceMapper,
     layers::{Activation, dense_embedding, layer_norm, masker::BidirectionalMasker},
     model::{EmbeddingModel, IsqModel, NormalLoadingMetadata},
@@ -24,6 +25,7 @@ const TOK_EMBEDDINGS: &str = "embeddings.tok_embeddings.weight";
 // `*ForMaskedLM` / `*ForSequenceClassification` checkpoints keep the encoder under `model.`
 const BASE_PREFIX: &str = "model";
 const SLIDING_LAYER: &str = "sliding_attention";
+const MEAN_POOLING: &str = "mean";
 
 serde_default_fn!(f64, norm_eps, 1e-5);
 serde_default_fn!(usize, global_attn_every_n_layers, 3);
@@ -31,6 +33,7 @@ serde_default_fn!(usize, local_attention, 128);
 serde_default_fn!(f32, global_rope_theta, 160_000.0);
 serde_default_fn!(f32, local_rope_theta, 10_000.0);
 serde_default_fn!(Activation, hidden_activation, Activation::Gelu);
+serde_default_fn!(String, classifier_pooling, "cls".to_string());
 
 #[derive(Debug, Clone, Deserialize)]
 struct RopeTheta {
@@ -75,9 +78,49 @@ pub struct Config {
     layer_types: Option<Vec<String>>,
     #[serde(default)]
     rope_parameters: Option<RopeParameters>,
+    #[serde(default)]
+    pub architectures: Vec<String>,
+    #[serde(default)]
+    pub id2label: Option<std::collections::HashMap<String, String>>,
+    #[serde(default = "classifier_pooling")]
+    pub classifier_pooling: String,
+    #[serde(default = "hidden_activation")]
+    pub classifier_activation: Activation,
+    #[serde(default)]
+    pub classifier_bias: bool,
 }
 
 impl Config {
+    pub fn is_classifier(&self) -> bool {
+        classifier::is_classifier(&self.architectures)
+    }
+
+    pub fn num_labels(&self) -> usize {
+        classifier::num_labels(self.id2label.as_ref())
+    }
+
+    /// `head.dense`, the classifier activation and `head.norm` over the CLS or mean state, then `classifier`.
+    fn head(&self, root: &ShardedVarBuilder) -> Result<ClassifierHead> {
+        let pooling = if self.classifier_pooling == MEAN_POOLING {
+            HeadPooling::Mean
+        } else {
+            HeadPooling::First
+        };
+        ClassifierHead::new(
+            &HeadSpec {
+                hidden: self.hidden_size,
+                labels: self.num_labels(),
+                pooling,
+                dense: "head.dense",
+                dense_bias: self.classifier_bias,
+                activation: HeadActivation::Act(self.classifier_activation),
+                norm: Some(("head.norm", self.norm_config())),
+                out: "classifier",
+            },
+            root,
+        )
+    }
+
     pub fn is_sliding(&self, layer: usize) -> bool {
         match &self.layer_types {
             Some(types) => types.get(layer).is_some_and(|t| t == SLIDING_LAYER),
@@ -137,6 +180,7 @@ pub struct Model {
     // distance < window: `local_attention / 2` each way, inclusive
     window: usize,
     prefix: Option<&'static str>,
+    head: Option<ClassifierHead>,
     mapper: Box<dyn DeviceMapper + Send + Sync>,
     device: Device,
 }
@@ -152,6 +196,7 @@ impl Model {
             inference_tensor::bail!("Expected AttentionImplementation::Eager");
         }
         let prefix = (!vb.contains_tensor(TOK_EMBEDDINGS)).then_some(BASE_PREFIX);
+        let root = vb.clone();
         let vb = match prefix {
             Some(prefix) => vb.pp(prefix),
             None => vb,
@@ -254,6 +299,10 @@ impl Model {
             )?,
             window: cfg.local_attention / 2 + 1,
             prefix,
+            head: cfg
+                .is_classifier()
+                .then(|| cfg.head(&mapper.set_nm_device(root, false)))
+                .transpose()?,
             mapper,
             device: real_device,
         })
@@ -277,6 +326,9 @@ impl IsqModel for Model {
             uvb_l.pp("mlp_norm").add(&layer.mlp_norm);
         }
         uvb.pp("final_norm").add(&self.final_norm);
+        if let Some(head) = &self.head {
+            head.add_residual(&root);
+        }
         root.to_safetensors()
     }
 }
@@ -310,7 +362,11 @@ impl EmbeddingModel for Model {
             };
             xs = layer.forward(&xs, &mask)?;
         }
-        self.final_norm.forward(&xs.to_device(&self.device)?)
+        let xs = self.final_norm.forward(&xs.to_device(&self.device)?)?;
+        match &self.head {
+            Some(head) => head.forward(&xs),
+            None => Ok(xs),
+        }
     }
     fn device(&self) -> &Device {
         &self.device

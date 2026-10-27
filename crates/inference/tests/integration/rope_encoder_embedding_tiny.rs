@@ -195,3 +195,159 @@ async fn a_nomic_moe_routes_tokens_and_reloads_from_uqff() -> anyhow::Result<()>
     );
     assert_uqff_reload_matches(top_two.path()).await
 }
+
+const CLASSIFIER_TOLERANCE: f32 = 1e-4;
+const HEAD_STD: f32 = 0.5;
+const MODERN_NORM_EPS: f64 = 1e-5;
+
+/// The checkpoint's pooled last hidden state, through a lone Pooling module of `mode`.
+async fn pooled_state(dir: &Path, mode: &str) -> anyhow::Result<Vec<f32>> {
+    std::fs::create_dir_all(dir.join("1_Pooling"))?;
+    std::fs::write(
+        dir.join("1_Pooling/config.json"),
+        serde_json::json!({
+            "word_embedding_dimension": HIDDEN_SIZE,
+            "pooling_mode_cls_token": mode == "cls",
+            "pooling_mode_mean_tokens": mode == "mean",
+            "pooling_mode_max_tokens": false,
+            "pooling_mode_mean_sqrt_len_tokens": false,
+        })
+        .to_string(),
+    )?;
+    std::fs::write(
+        dir.join("modules.json"),
+        serde_json::json!([
+            {"idx": 0, "name": "0", "path": "", "type": "sentence_transformers.models.Transformer"},
+            {"idx": 1, "name": "1", "path": "1_Pooling", "type": "sentence_transformers.models.Pooling"},
+        ])
+        .to_string(),
+    )?;
+    let state = embed_tokens(&cpu_embedding_builder(dir).build().await?, &PAST_WINDOW).await?;
+    std::fs::remove_file(dir.join("modules.json"))?;
+    std::fs::remove_dir_all(dir.join("1_Pooling"))?;
+    Ok(state)
+}
+
+/// Makes `dir` a one-label `class` with the encoder under `model.` and `head` beside it.
+fn as_classifier(
+    dir: &Path,
+    class: &str,
+    head: Vec<(&str, inference_tensor::Tensor)>,
+    edit: impl FnOnce(&mut serde_json::Value),
+) -> anyhow::Result<()> {
+    prefix_weights(dir, "model")?;
+    let path = dir.join("model.safetensors");
+    let mut weights = inference_tensor::safetensors::load(&path, &inference_tensor::Device::Cpu)?;
+    weights.extend(head.into_iter().map(|(name, t)| (name.to_string(), t)));
+    inference_tensor::safetensors::save(&weights, &path)?;
+    let config_path = dir.join("config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_path)?)?;
+    config["architectures"] = serde_json::json!([class]);
+    config["id2label"] = serde_json::json!({"0": "LABEL_0"});
+    edit(&mut config);
+    std::fs::write(config_path, config.to_string())?;
+    Ok(())
+}
+
+fn random(shape: &[usize]) -> anyhow::Result<inference_tensor::Tensor> {
+    Ok(inference_tensor::Tensor::randn(
+        0f32,
+        HEAD_STD,
+        shape,
+        &inference_tensor::Device::Cpu,
+    )?)
+}
+
+#[tokio::test]
+async fn a_modern_bert_classifier_scores_its_mean_state_through_its_head() -> anyhow::Result<()> {
+    use inference_tensor::{D, Device, Tensor};
+    let checkpoint = tiny_modern_bert_checkpoint(|_| {})?;
+    let mean = pooled_state(checkpoint.path(), "mean").await?;
+    let (dense, norm, out, out_bias) = (
+        random(&[HIDDEN_SIZE, HIDDEN_SIZE])?,
+        random(&[HIDDEN_SIZE])?,
+        random(&[1, HIDDEN_SIZE])?,
+        random(&[1])?,
+    );
+    // dense (no bias), exact GELU, a bias-free LayerNorm, then the label projection
+    let xs = Tensor::from_vec(mean, (1, HIDDEN_SIZE), &Device::Cpu)?
+        .matmul(&dense.t()?)?
+        .gelu_erf()?;
+    let centered = xs.broadcast_sub(&xs.mean_keepdim(D::Minus1)?)?;
+    let var = centered.sqr()?.mean_keepdim(D::Minus1)?;
+    let normed = centered
+        .broadcast_div(&(var + MODERN_NORM_EPS)?.sqrt()?)?
+        .broadcast_mul(&norm)?;
+    let expected = normed
+        .matmul(&out.t()?)?
+        .broadcast_add(&out_bias)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    as_classifier(
+        checkpoint.path(),
+        "ModernBertForSequenceClassification",
+        vec![
+            ("head.dense.weight", dense),
+            ("head.norm.weight", norm),
+            ("classifier.weight", out),
+            ("classifier.bias", out_bias),
+        ],
+        |config| config["classifier_pooling"] = "mean".into(),
+    )?;
+    let logit = embed_tokens(
+        &cpu_embedding_builder(checkpoint.path()).build().await?,
+        &PAST_WINDOW,
+    )
+    .await?;
+    let diff = max_diff(&expected, &logit);
+    assert!(
+        diff < CLASSIFIER_TOLERANCE,
+        "logit {logit:?}, expected {expected:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_neo_bert_classifier_scores_its_first_token_through_dense_and_tanh() -> anyhow::Result<()>
+{
+    use inference_tensor::{Device, Tensor};
+    let checkpoint = tiny_neo_bert_checkpoint()?;
+    let first = pooled_state(checkpoint.path(), "cls").await?;
+    let (dense, dense_bias, out, out_bias) = (
+        random(&[HIDDEN_SIZE, HIDDEN_SIZE])?,
+        random(&[HIDDEN_SIZE])?,
+        random(&[1, HIDDEN_SIZE])?,
+        random(&[1])?,
+    );
+    let expected = Tensor::from_vec(first, (1, HIDDEN_SIZE), &Device::Cpu)?
+        .matmul(&dense.t()?)?
+        .broadcast_add(&dense_bias)?
+        .tanh()?
+        .matmul(&out.t()?)?
+        .broadcast_add(&out_bias)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    as_classifier(
+        checkpoint.path(),
+        "NeoBERTForSequenceClassification",
+        vec![
+            ("dense.weight", dense),
+            ("dense.bias", dense_bias),
+            ("classifier.weight", out),
+            ("classifier.bias", out_bias),
+        ],
+        |_| {},
+    )?;
+    let logit = embed_tokens(
+        &cpu_embedding_builder(checkpoint.path()).build().await?,
+        &PAST_WINDOW,
+    )
+    .await?;
+    let diff = max_diff(&expected, &logit);
+    assert!(
+        diff < CLASSIFIER_TOLERANCE,
+        "logit {logit:?}, expected {expected:?}"
+    );
+    Ok(())
+}
