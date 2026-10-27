@@ -1063,6 +1063,7 @@ class EmbeddingRequest:
     encoding_format: EmbeddingEncodingFormat | None = None
     input: EmbeddingInput
     model: str | None = None
+    task: str | None = None
     truncate_sequence: bool | None = None
     user: str | None = None
 

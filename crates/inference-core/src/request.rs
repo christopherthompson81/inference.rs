@@ -109,11 +109,14 @@ pub enum RequestMessage {
         #[serde(skip)]
         request: TranscriptionStreamRequest,
     },
+    /// `task` names one of the model's task adapters, whose instruction is prepended to the prompt.
     Embedding {
         prompt: String,
+        task: Option<String>,
     },
     EmbeddingTokens {
         prompt: Vec<u32>,
+        task: Option<String>,
     },
     /// A text pair encoded as one input with its segment ids, as a cross-encoder scores it.
     EmbeddingPair {

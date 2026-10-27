@@ -121,7 +121,7 @@ fn qwen3_embedding_hidden_states() -> Result<()> {
     );
     let input = Tensor::new(&PROMPT, &Device::Cpu)?.unsqueeze(0)?;
     let hidden = model
-        .forward(&input, None, &FlashParams::empty(false))?
+        .forward(&input, &Default::default(), &FlashParams::empty(false))?
         .to_dtype(DType::F32)?;
     let expected = Snapshot {
         probes: [0.3702855, -0.797998, -1.040941, 1.9468331],

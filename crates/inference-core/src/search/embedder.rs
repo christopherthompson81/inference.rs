@@ -126,7 +126,7 @@ impl SearchEmbedder {
             )?;
             let inputs = Box::new(ModelInputs {
                 input_ids: chunk.input,
-                token_type_ids: None,
+                extras: Default::default(),
                 flash_meta: chunk.flash_meta,
             });
             let mut pipeline = get_mut_arcmutex!(self.model);

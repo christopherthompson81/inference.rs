@@ -1,5 +1,7 @@
 use super::*;
 use crate::bert::{Config as BertConfig, Model as BertModel, ORIGINAL_FFN};
+use crate::jina_v3::{Config as JinaV3Config, Model as JinaV3Model, ROTARY_POSITIONS};
+use inference_nn::embedding::EmbeddingTasks;
 use inference_nn::model::EmbeddingModel;
 
 // BERT numbers its layers `encoder.layer.N`, not `layers.N`
@@ -17,12 +19,26 @@ impl EmbeddingModelLoader for BertLoader {
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn EmbeddingModel + Send + Sync>> {
         let cfg = BertConfig::from_json(config)?;
+        if cfg.position_embedding_type == ROTARY_POSITIONS {
+            return Ok(Box::new(JinaV3Model::new(
+                &JinaV3Config::from_json(config)?,
+                vb,
+                normal_loading_metadata,
+                attention_mechanism,
+            )?));
+        }
         Ok(Box::new(BertModel::new(
             &cfg,
             vb,
             normal_loading_metadata,
             attention_mechanism,
         )?))
+    }
+    fn embedding_tasks(&self, config: &str) -> Result<Option<EmbeddingTasks>> {
+        let cfg = BertConfig::from_json(config)?;
+        Ok((cfg.position_embedding_type == ROTARY_POSITIONS)
+            .then(|| JinaV3Config::from_json(config).map(|cfg| cfg.tasks()))
+            .transpose()?)
     }
     fn has_causal_attention(&self, _: &str) -> Result<bool> {
         Ok(false)

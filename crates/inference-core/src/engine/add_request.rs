@@ -5,7 +5,7 @@ use crate::{
     pipeline::{KvCache, NormalCache, is_inputs_processor_validation_error},
     prefix_cacher::MatchingCache,
     request::{DetokenizationRequest, NormalRequest, TokenizationRequest},
-    sequence::{OneShotParams, SeqPreallocatedCache, SeqStepType},
+    sequence::{EmbeddingParams, OneShotParams, SeqPreallocatedCache, SeqStepType},
     tools::{ToolCallFormat, ToolCallState, ToolChoice},
 };
 use either::Either;
@@ -300,6 +300,7 @@ impl Engine {
         };
         self.validate_request_kind(&request)?;
         let mut extras = MessageExtras::of(&request.messages);
+        let embedding_task = self.resolve_embedding_task(&mut request.messages)?;
         let truncate_sequence = request.truncate_sequence;
 
         let has_tools = request.tools.as_ref().is_some_and(|t| !t.is_empty());
@@ -322,7 +323,10 @@ impl Engine {
         let (prompt_tokens, prompt_text) = match request.messages {
             RequestMessage::EmbeddingPair { first, second } => {
                 let (tokens, text, types) = self.encode_pair(first, second)?;
-                extras.one_shot = Some(OneShotParams::TokenTypes(types));
+                extras.one_shot = Some(OneShotParams::Embedding(EmbeddingParams {
+                    token_types: Some(types),
+                    task: None,
+                }));
                 (tokens, text)
             }
             messages => self.render_prompt(
@@ -332,6 +336,12 @@ impl Engine {
                 preferred_tool_call_format,
             )?,
         };
+        if embedding_task.is_some() {
+            extras.one_shot = Some(OneShotParams::Embedding(EmbeddingParams {
+                token_types: None,
+                task: embedding_task,
+            }));
+        }
         if prompt_tokens.is_empty() {
             return Err(Box::new(Response::ValidationError(
                 "Received an empty prompt.".into(),
@@ -693,6 +703,39 @@ impl Engine {
         })
     }
 
+    /// The adapter index of the task an embedding request names, with its instruction prepended to a text prompt.
+    fn resolve_embedding_task(
+        &self,
+        messages: &mut RequestMessage,
+    ) -> Result<Option<usize>, Box<Response>> {
+        let (task, prompt) = match messages {
+            RequestMessage::Embedding {
+                task: Some(task),
+                prompt,
+            } => (task.clone(), Some(prompt)),
+            RequestMessage::EmbeddingTokens {
+                task: Some(task), ..
+            } => (task.clone(), None),
+            _ => return Ok(None),
+        };
+        let validation = |message: String| Box::new(Response::ValidationError(message.into()));
+        let Some(tasks) = get_mut_arcmutex!(self.pipeline).embedding_tasks() else {
+            return Err(validation(format!(
+                "task `{task}` was given, but this model has no task adapters"
+            )));
+        };
+        let Some(index) = tasks.index(&task) else {
+            return Err(validation(format!(
+                "unknown task `{task}`; this model's tasks are: {}",
+                tasks.names.join(", ")
+            )));
+        };
+        if let Some(prompt) = prompt {
+            prompt.insert_str(0, &tasks.instructions[index]);
+        }
+        Ok(Some(index))
+    }
+
     /// A text pair through the tokenizer's pair template: its tokens, its text, and each token's segment id.
     fn encode_pair(
         &self,
@@ -756,7 +799,7 @@ impl Engine {
                 })
             }
             RequestMessage::Completion { text, .. }
-            | RequestMessage::Embedding { prompt: text } => {
+            | RequestMessage::Embedding { prompt: text, .. } => {
                 let Some(tokenizer) = &get_mut_arcmutex!(self.pipeline).tokenizer() else {
                     return Err(Box::new(Response::ValidationError(
                         "Completion requests require the pipeline to have a tokenizer".into(),
@@ -783,7 +826,7 @@ impl Engine {
                 unreachable!("a pair is encoded by encode_pair")
             }
             RequestMessage::CompletionTokens(it)
-            | RequestMessage::EmbeddingTokens { prompt: it } => {
+            | RequestMessage::EmbeddingTokens { prompt: it, .. } => {
                 let Some(tokenizer) = &get_mut_arcmutex!(self.pipeline).tokenizer() else {
                     return Err(Box::new(Response::ValidationError(
                             "Completion requests w/ raw tokens require the pipeline to have a tokenizer".into(),

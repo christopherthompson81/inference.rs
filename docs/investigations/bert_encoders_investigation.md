@@ -269,3 +269,35 @@ shared `-|i - j|` mask (how llama.cpp runs jina-bert-v2) would avoid the per-hea
 first compared a sequence with its reversal, which symmetric ALiBi cannot tell apart (every |i - j| is kept); it now
 swaps two tokens, and fails with the bias dropped. jinaai/jina-reranker-v1-tiny-en is a classifier checkpoint whose
 config names the base `JinaBertModel`, so it loads as an embedder, not a reranker.
+
+## Run 12 - 2026-10-27 14:05
+
+Question: with a per-request `task` (the user's choice over a load-time task), does Jina v3 match Jina's own code
+for every task, and with no task?
+
+Command: `inference serve --cpu --dtype f32` (then `--dtype bf16` on GPU) on jinaai/jina-embeddings-v3, then
+`jina3_ref.py`: Jina's remote `XLMRobertaLoRA` (xlm-roberta-flash-implementation, read first) on the checkpoint,
+called with `adapter_mask` set to the task and the task's instruction prepended (as its `encode` does), mean pooled
+and normalized, against `/v1/embeddings` with the same `task`.
+
+Semantics, from `modeling_lora.py`: a linear layer's task weight is `W + (alpha / rank) * B_t A_t`
+(`lora_A` `[tasks, rank, in]`, `lora_B` `[tasks, out, rank]`); an embedding table's is `E + (alpha / rank) * A_t B_t`
+(`lora_A` `[tasks, vocab, rank]`, `lora_B` `[tasks, rank, hidden]`); no task leaves the base weights. The encoder
+is Nomic BERT's layout (fused `mixer.Wqkv`, GELU `mlp.fc1` / `fc2`, post-norm), rotary base 20000 from position 0.
+
+```
+                     cpu f32 worst cos (max_abs)       gpu bf16 worst cos
+no task              1.000000 (<= 3.9e-7)              0.99974
+retrieval.query      1.000000 (<= 5.1e-7)              0.99987
+retrieval.passage    1.000000 (<= 8.0e-7)              0.99984
+text-matching        1.000000 (<= 3.9e-7)              0.99991
+```
+
+Finding: every task matches, at 9 to 434 tokens. Ours adds each row's adapter as a low-rank delta
+(`x A_t^T B_t^T`, and `A_t[ids] B_t` for the tables) rather than merging weights, so one batch can hold rows of
+different tasks; a row with no task scales its delta by 0. The first load failed with `missing field model_type`:
+Jina v3's config names none, and the BERT config now defaults it. Nothing in Jina v3 is quantized in place (its
+base weights load from `parametrizations.weight.original`), so ISQ leaves it as it is.
+
+Implication: Jina v3 is served. Jina v5 puts its task adapters (separate PEFT LoRAs) inside Llama-style layers on
+the shared decoder stack, which would need the same per-row delta there; left for later.

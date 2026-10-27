@@ -133,11 +133,10 @@ pub trait MultimodalModel:
 }
 
 pub trait EmbeddingModel: IsqModel + AnyMoeBaseModelMixin {
-    /// `token_type_ids` are the segment ids of a text pair; models without segment embeddings ignore them.
     fn forward(
         &self,
         input_ids: &Tensor,
-        token_type_ids: Option<&Tensor>,
+        extras: &crate::embedding::EmbeddingExtras,
         flash_params: &FlashParams,
     ) -> inference_tensor::Result<Tensor>;
     fn device(&self) -> &Device;

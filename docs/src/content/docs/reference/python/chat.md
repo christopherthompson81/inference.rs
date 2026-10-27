@@ -371,6 +371,7 @@ One of: `Union[str, list[str], list[int], list[list[int]]]`.
 | `encoding_format` | `EmbeddingEncodingFormat \| None` | optional |
 | `input` | `EmbeddingInput` | required |
 | `model` | `str \| None` | optional |
+| `task` | `str \| None` | optional |
 | `truncate_sequence` | `bool \| None` | optional |
 | `user` | `str \| None` | optional |
 

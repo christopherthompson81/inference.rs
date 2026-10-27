@@ -37,6 +37,15 @@ pub(crate) use inference_nn::media_inputs::media::{
     MultimodalData, clamp_prefix_cache_len_for_mm_features,
 };
 
+/// What an embedding sequence carries beside its tokens.
+#[derive(Clone, Debug, Default)]
+pub struct EmbeddingParams {
+    /// The segment id of each prompt token, for an encoder that embeds a text pair.
+    pub token_types: Option<Vec<u32>>,
+    /// The index of the task adapter the request named.
+    pub task: Option<usize>,
+}
+
 /// What a one-shot generation request asked for beyond its prompt; media live in `MultimodalData`.
 #[derive(Clone, Debug)]
 pub enum OneShotParams {
@@ -46,8 +55,7 @@ pub enum OneShotParams {
     TranscriptionStream(crate::TranscriptionStreamRequest),
     VoiceActivity(inference_models_speech::silero::SegmentOptions),
     Diarization(inference_models_speech::diarization::DiarizationOptions),
-    /// The segment id of each prompt token, for an encoder that embeds a text pair.
-    TokenTypes(Vec<u32>),
+    Embedding(EmbeddingParams),
 }
 
 pub type SeqPreallocatedCache = Vec<Option<(Tensor, Tensor)>>;
@@ -1697,7 +1705,14 @@ impl Sequence {
 
     pub fn token_type_ids(&self) -> Option<&[u32]> {
         match &self.one_shot {
-            Some(OneShotParams::TokenTypes(types)) => Some(types),
+            Some(OneShotParams::Embedding(params)) => params.token_types.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn embedding_task(&self) -> Option<usize> {
+        match &self.one_shot {
+            Some(OneShotParams::Embedding(params)) => params.task,
             _ => None,
         }
     }

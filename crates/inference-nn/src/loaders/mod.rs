@@ -331,6 +331,10 @@ pub trait EmbeddingModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModel
     fn is_classifier(&self, _config: &str) -> Result<bool> {
         Ok(false)
     }
+    /// The tasks a request may name, each picking one of the model's adapters; `None` for a model without them.
+    fn embedding_tasks(&self, _config: &str) -> Result<Option<crate::embedding::EmbeddingTasks>> {
+        Ok(None)
+    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>>;
     fn get_device_for_tensor(
         &self,

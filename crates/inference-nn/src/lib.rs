@@ -27,6 +27,7 @@ pub mod attention;
 pub mod cuda;
 pub mod decoder;
 pub mod device_map;
+pub mod embedding;
 pub mod flashinfer;
 pub mod gdn;
 pub mod gguf;

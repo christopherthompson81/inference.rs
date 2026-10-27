@@ -16,6 +16,7 @@ use crate::{
     },
     sequence::Sequence,
 };
+use inference_nn::embedding::{EmbeddingExtras, TaskRows};
 
 fn _make_tensor_with_pad<D: WithDType>(
     x: Vec<Vec<D>>,
@@ -126,9 +127,29 @@ pub(crate) fn get_prompt_input<T: WithDType + std::fmt::Debug>(
 #[derive(Clone)]
 pub struct ModelInputs {
     pub input_ids: Tensor,
-    /// Each token's segment id; `None` when every sequence is a single segment.
-    pub token_type_ids: Option<Tensor>,
+    pub extras: EmbeddingExtras,
     pub flash_meta: FlashParams,
+}
+
+/// Each row's task adapter; `None` when no sequence named a task.
+fn task_rows(input_seqs: &[&mut Sequence], device: &Device) -> Result<Option<TaskRows>> {
+    if input_seqs.iter().all(|seq| seq.embedding_task().is_none()) {
+        return Ok(None);
+    }
+    let tasks: Vec<Option<usize>> = input_seqs.iter().map(|seq| seq.embedding_task()).collect();
+    // a row with no task reads adapter 0 and scales its delta by 0
+    let ids = tasks
+        .iter()
+        .map(|t| t.unwrap_or(0) as u32)
+        .collect::<Vec<_>>();
+    let active = tasks
+        .iter()
+        .map(|t| if t.is_some() { 1f32 } else { 0. })
+        .collect::<Vec<_>>();
+    Ok(Some(TaskRows {
+        ids: Tensor::from_vec(ids, tasks.len(), device)?,
+        active: Tensor::from_vec(active, tasks.len(), device)?,
+    }))
 }
 
 /// The batch's segment ids, padded and truncated like its tokens; `None` when no sequence is a pair.
@@ -195,10 +216,13 @@ impl InputsProcessor for EmbeddingInputsProcessor {
                 },
             seq_indices,
         } = metadata;
-        let token_type_ids = token_type_ids(input_seqs, device)?;
+        let extras = EmbeddingExtras {
+            token_type_ids: token_type_ids(input_seqs, device)?,
+            tasks: task_rows(input_seqs, device)?,
+        };
         let inputs: Box<dyn Any> = Box::new(ModelInputs {
             input_ids,
-            token_type_ids,
+            extras,
             flash_meta,
         });
         Ok(InputProcessorOutput {

@@ -5613,6 +5613,14 @@
             "description": "Model ID; \"default\" targets the only loaded model.",
             "example": "default"
           },
+          "task": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The task adapter to embed with, for models that carry several (as Jina's `task`); its instruction is\nprepended to text inputs. Without one, the base weights embed.",
+            "example": null
+          },
           "truncate_sequence": {
             "type": [
               "boolean",

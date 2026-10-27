@@ -1304,6 +1304,11 @@ pub trait Pipeline:
         None
     }
 
+    /// The task adapters an embedding request may name.
+    fn embedding_tasks(&self) -> Option<Arc<inference_nn::embedding::EmbeddingTasks>> {
+        None
+    }
+
     fn forward_inputs(
         &mut self,
         inputs: Box<dyn Any>,
