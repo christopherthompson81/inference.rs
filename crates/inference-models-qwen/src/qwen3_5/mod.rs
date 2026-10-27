@@ -31,6 +31,8 @@ pub mod config;
 mod feed_forward;
 mod hyper;
 pub mod mtp;
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+mod mtp_graph;
 pub mod packed_gdn;
 pub mod packed_visual;
 mod ple;

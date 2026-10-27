@@ -2,7 +2,8 @@
 //! query with its own context length (one row per sequence for decode-style drafting, or several rows
 //! per sequence when refreshing a drafter over accepted tokens).
 
-use crate::paged_attention::PagedAttentionInputMetadata;
+use crate::paged_attention::input_metadata::DecodePagedRows;
+use crate::paged_attention::{AttentionBackendKind, PagedAttentionInputMetadata};
 use std::{collections::HashMap, sync::Arc};
 
 use inference_tensor::{Device, Result, Tensor};
@@ -33,28 +34,7 @@ pub fn make_paged_rows_metadata(
         );
     }
 
-    let kv_mgr = get_mut_arcmutex!(paged_meta.kv_cache_manager);
-    let mut table_indices_by_seq = HashMap::new();
-    let mut tables = Vec::new();
-    let mut row_table_indices = Vec::with_capacity(seq_ids.len());
-    for seq_id in seq_ids {
-        let table_idx = if let Some(&table_idx) = table_indices_by_seq.get(seq_id) {
-            table_idx
-        } else {
-            let table = Arc::<[usize]>::from(kv_mgr.get_block_ids(*seq_id).ok_or_else(|| {
-                inference_tensor::Error::Msg(format!(
-                    "sequence {seq_id} has no paged attention blocks"
-                ))
-            })?);
-            let table_idx = tables.len();
-            tables.push(table);
-            table_indices_by_seq.insert(*seq_id, table_idx);
-            table_idx
-        };
-        row_table_indices.push(table_idx);
-    }
-    drop(kv_mgr);
-    let full_tables = BlockTableSnapshot::from_mapped_tables(tables, row_table_indices);
+    let full_tables = row_tables(seq_ids, paged_meta)?;
 
     let mut block_table_ranges = Vec::with_capacity(seq_ids.len());
     let mut context_lens_windowed = Vec::with_capacity(seq_ids.len());
@@ -70,19 +50,7 @@ pub fn make_paged_rows_metadata(
         block_table_ranges.push(block_range);
         context_lens_windowed.push(context_len_windowed);
 
-        let block_pos = context_len.saturating_sub(1);
-        let block_number = full_table
-            .get(block_pos / paged_meta.block_size)
-            .copied()
-            .ok_or_else(|| {
-                inference_tensor::Error::Msg(format!(
-                    "paged rows block table is too small: position={block_pos}, block_size={}, table_len={}",
-                    paged_meta.block_size,
-                    full_table.len()
-                ))
-            })?;
-        let slot = block_number * paged_meta.block_size + block_pos % paged_meta.block_size;
-        slot_mappings.push(slot as i64);
+        slot_mappings.push(row_slot(full_table, context_len, paged_meta.block_size)?);
     }
     let windowed_block_tables = BlockTableRanges::new(&full_tables, block_table_ranges);
 
@@ -223,6 +191,94 @@ pub fn make_paged_rows_metadata(
         cu_seqlens_kv: None,
         decode_rows: None,
     })
+}
+
+// Each row's sequence block table, a sequence listed more than once sharing one
+fn row_tables(seq_ids: &[usize], paged_meta: &PagedAttentionMeta) -> Result<BlockTableSnapshot> {
+    let kv_mgr = get_mut_arcmutex!(paged_meta.kv_cache_manager);
+    let mut table_indices_by_seq = HashMap::new();
+    let mut tables = Vec::new();
+    let mut row_table_indices = Vec::with_capacity(seq_ids.len());
+    for seq_id in seq_ids {
+        let table_idx = if let Some(&table_idx) = table_indices_by_seq.get(seq_id) {
+            table_idx
+        } else {
+            let table = Arc::<[usize]>::from(kv_mgr.get_block_ids(*seq_id).ok_or_else(|| {
+                inference_tensor::Error::Msg(format!(
+                    "sequence {seq_id} has no paged attention blocks"
+                ))
+            })?);
+            let table_idx = tables.len();
+            tables.push(table);
+            table_indices_by_seq.insert(*seq_id, table_idx);
+            table_idx
+        };
+        row_table_indices.push(table_idx);
+    }
+    drop(kv_mgr);
+    Ok(BlockTableSnapshot::from_mapped_tables(
+        tables,
+        row_table_indices,
+    ))
+}
+
+// The cache slot a row's K/V go to: its position's cell in its block table
+fn row_slot(table: &[usize], context_len: usize, block_size: usize) -> Result<i64> {
+    let block_pos = context_len.saturating_sub(1);
+    let block_number = table.get(block_pos / block_size).copied().ok_or_else(|| {
+        inference_tensor::Error::Msg(format!(
+            "paged rows block table is too small: position={block_pos}, block_size={block_size}, table_len={}",
+            table.len()
+        ))
+    })?;
+    Ok((block_number * block_size + block_pos % block_size) as i64)
+}
+
+/// As [`make_paged_rows_metadata`], as decode rows: what a captured graph's metadata buffers take on each replay,
+/// with block tables as wide as the paged context.
+pub fn make_paged_rows_decode_rows(
+    seq_ids: &[usize],
+    context_lens: &[usize],
+    paged_meta: &PagedAttentionMeta,
+    device: &Device,
+) -> Result<Arc<DecodePagedRows>> {
+    if seq_ids.len() != context_lens.len() {
+        inference_tensor::bail!(
+            "paged rows metadata batch mismatch: seq_ids={}, context_lens={}",
+            seq_ids.len(),
+            context_lens.len()
+        );
+    }
+    let block_tables = row_tables(seq_ids, paged_meta)?;
+    let mut slot_mappings = Vec::with_capacity(seq_ids.len());
+    let mut windowed = Vec::with_capacity(seq_ids.len());
+    for (row, &context_len) in context_lens.iter().enumerate() {
+        let table = block_tables.row(row);
+        slot_mappings.push(vec![row_slot(table, context_len, paged_meta.block_size)?]);
+        windowed.push(
+            paged_row_window(
+                table.len(),
+                context_len,
+                paged_meta.sliding_window,
+                paged_meta.block_size,
+            )
+            .1,
+        );
+    }
+    Ok(Arc::new(DecodePagedRows {
+        slot_mappings,
+        block_tables,
+        context_lens: windowed,
+        full_context_lens: context_lens.to_vec(),
+        query_len: 1,
+        block_size: paged_meta.block_size,
+        use_standard_metadata: paged_meta.attention_backend == AttentionBackendKind::Standard,
+        max_paged_context_len: paged_meta.max_paged_context_len,
+        sliding_window: paged_meta.sliding_window,
+        decode_window: 1,
+        devices: vec![device.clone()],
+        num_kv_heads: paged_meta.prefill_key_value_heads,
+    }))
 }
 
 fn paged_row_window(

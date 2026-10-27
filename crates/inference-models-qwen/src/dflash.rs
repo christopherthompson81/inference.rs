@@ -1760,38 +1760,14 @@ impl DFlashCudaGraphEntry {
             host_rows,
             graph,
         } = self;
-        let release = release_dflash_cuda_graph_resources(graph, (staging, buffers, host_rows));
+        let release = crate::cuda::graph_capture::release_cuda_graph_resources(
+            CudaGraphComponent::DFlash,
+            graph,
+            (staging, buffers, host_rows),
+        );
         drop((token_embedding, lm_head));
         release
     }
-}
-
-#[cfg(all(feature = "cuda", target_family = "unix"))]
-fn release_dflash_cuda_graph_resources<T>(
-    graph: crate::cuda::graph_capture::CudaGraphHandle,
-    resources: T,
-) -> (Arc<CudaStream>, Result<()>) {
-    let stream = graph.stream().clone();
-    let mut release_result = stream
-        .synchronize()
-        .map_err(inference_tensor::Error::wrap)
-        .map_err(|err| err.context("DFlash CUDA graph entry release wait failed"));
-    drop(resources);
-    if let Err(err) = stream.context().check_err()
-        && release_result.is_ok()
-    {
-        release_result = Err(inference_tensor::Error::wrap(err)
-            .context("DFlash CUDA graph entry storage release failed"));
-    }
-    let storage_result = stream
-        .synchronize()
-        .map_err(inference_tensor::Error::wrap)
-        .map_err(|err| err.context("DFlash CUDA graph entry storage release wait failed"));
-    if release_result.is_ok() {
-        release_result = storage_result;
-    }
-    drop(graph);
-    (stream, release_result)
 }
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -4508,10 +4484,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     use super::{CandidateSelectorCudaSpec, validate_candidate_selector_cuda};
     #[cfg(all(feature = "cuda", target_family = "unix"))]
-    use super::{
-        release_dflash_cuda_graph_resources, windowed_kv_checkpoint_capacity,
-        windowed_kv_fits_fattn,
-    };
+    use super::{windowed_kv_checkpoint_capacity, windowed_kv_fits_fattn};
     #[cfg(feature = "cuda")]
     use crate::cuda::graph_capture::{
         CUDA_GRAPH_MAX_BATCH_BUCKET, CudaGraphComponent, cuda_graph_precapture_batches,
@@ -4965,8 +4938,11 @@ mod tests {
         graph.launch()?;
         staging.record_graph_complete()?;
         let detached = copy_dflash_graph_output_rows(&output.as_detached_tensor(), 1)?;
-        let (_, release_result) =
-            release_dflash_cuda_graph_resources(graph, (staging, input, output, captured));
+        let (_, release_result) = crate::cuda::graph_capture::release_cuda_graph_resources(
+            crate::cuda::graph_capture::CudaGraphComponent::DFlash,
+            graph,
+            (staging, input, output, captured),
+        );
         release_result?;
 
         assert_eq!(detached.to_vec2::<f32>()?, vec![vec![3.0, 5.0, 7.0]]);

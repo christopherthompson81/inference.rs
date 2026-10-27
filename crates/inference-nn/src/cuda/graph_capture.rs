@@ -37,6 +37,7 @@ static CUDA_GRAPH_MEMORY_POOL_SCOPES: OnceLock<Mutex<HashMap<usize, MemoryPoolSc
 pub enum CudaGraphComponent {
     Target,
     DFlash,
+    Mtp,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -61,6 +62,7 @@ impl CudaGraphComponent {
         match self {
             Self::Target => "target",
             Self::DFlash => "dflash",
+            Self::Mtp => "mtp",
         }
     }
 }
@@ -1676,4 +1678,38 @@ mod tests {
         assert_eq!(memory_pool_release_threshold(pool)?, original);
         Ok(())
     }
+}
+
+/// Releases a graph after the resources its replays read: waits for the stream, drops them, then the graph.
+pub fn release_cuda_graph_resources<T>(
+    component: CudaGraphComponent,
+    graph: CudaGraphHandle,
+    resources: T,
+) -> (Arc<CudaStream>, inference_tensor::Result<()>) {
+    let label = component.label();
+    let stream = graph.stream().clone();
+    let mut release_result = stream
+        .synchronize()
+        .map_err(inference_tensor::Error::wrap)
+        .map_err(|err| err.context(format!("{label} CUDA graph entry release wait failed")));
+    drop(resources);
+    if let Err(err) = stream.context().check_err()
+        && release_result.is_ok()
+    {
+        release_result = Err(inference_tensor::Error::wrap(err)
+            .context(format!("{label} CUDA graph entry storage release failed")));
+    }
+    let storage_result = stream
+        .synchronize()
+        .map_err(inference_tensor::Error::wrap)
+        .map_err(|err| {
+            err.context(format!(
+                "{label} CUDA graph entry storage release wait failed"
+            ))
+        });
+    if release_result.is_ok() {
+        release_result = storage_result;
+    }
+    drop(graph);
+    (stream, release_result)
 }
