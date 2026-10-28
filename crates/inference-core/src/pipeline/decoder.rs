@@ -1124,6 +1124,19 @@ impl DecoderPipeline {
 }
 
 impl Pipeline for DecoderPipeline {
+    fn joint_decision(
+        &self,
+        hidden: &Tensor,
+        layout: &inference_nn::decision::JointLayout,
+    ) -> Result<Vec<f32>, inference_tensor::Error> {
+        match &self.model {
+            DecoderModel::Text(model) => model.joint_decision(hidden, layout),
+            DecoderModel::Multimodal(_) => {
+                inference_tensor::bail!("this model has no joint decision head")
+            }
+        }
+    }
+
     fn requires_uniform_prompt_batch(&self) -> bool {
         match &self.model {
             DecoderModel::Text(_) => text_requires_uniform_prompt_batch(

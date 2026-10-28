@@ -245,6 +245,12 @@ impl Engine {
             }
             Request::Tokenize(req) => self.tokenize_text(req).await,
             Request::Detokenize(req) => self.detokenize_text(req).await,
+            Request::JointDecision(req) => {
+                let scores = get_mut_arcmutex!(self.pipeline)
+                    .joint_decision(&req.hidden, &req.layout)
+                    .map_err(anyhow::Error::from);
+                let _ = req.response.send(scores).await;
+            }
             Request::Terminate => (),
             Request::TerminateAllSeqsNextStep => {
                 TERMINATE_ALL_NEXT_STEP.store(true, Ordering::SeqCst)
@@ -598,7 +604,7 @@ impl Engine {
                 .get_metadata()
                 .label_decision
                 .as_ref()
-                .is_some_and(|decision| decision.family.reads_pointer())
+                .is_some_and(|decision| decision.family.decision_only())
         {
             return Err(Box::new(Response::ValidationError(
                 "this model's output is a decision head: it answers decisions, not generation requests".into(),

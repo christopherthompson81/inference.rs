@@ -48,6 +48,14 @@ pub trait NormalModel: IsqModel + AnyMoeBaseModelMixin + SpeculativeTargetMixin 
     fn bidirectional_prompt(&self) -> bool {
         false
     }
+    /// A joint decision head's option scores over a prompt's normed hidden states (clef).
+    fn joint_decision(
+        &self,
+        _hidden: &Tensor,
+        _layout: &crate::decision::JointLayout,
+    ) -> inference_tensor::Result<Vec<f32>> {
+        inference_tensor::bail!("this model has no joint decision head")
+    }
     #[cfg(feature = "cuda")]
     fn supports_cuda_decode_graphs(&self) -> bool {
         false

@@ -30,6 +30,7 @@ use crate::{
 pub mod config;
 mod feed_forward;
 mod hyper;
+pub mod joint_head;
 pub mod mtp;
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 mod mtp_graph;

@@ -20,7 +20,7 @@ laya's `multilingual/` and `typed-decisions/` variants load from a local copy of
 
 ### Chat models with a decision profile
 
-Some decision models are chat models fine-tuned to answer with the code of an option. Their GGUFs, as llama.cpp's converter writes them, carry a decision profile: `<arch>.decision.type`, a `systemone` chat template that renders a question as a prompt, and temperatures. Such a GGUF loads like any other, and `/v1/decisions` then renders each question with that template and reads the next-token logits of one label token per option (no text is generated). These types are supported: `nimble`, `openjev`, `lev`, `pplx-decider`, `vllm-d3`, `h2o-lightning`, `lfm2-d1` and `kev`.
+Some decision models are chat models fine-tuned to answer with the code of an option. Their GGUFs, as llama.cpp's converter writes them, carry a decision profile: `<arch>.decision.type`, a `systemone` chat template that renders a question as a prompt, and temperatures. Such a GGUF loads like any other, and `/v1/decisions` then renders each question with that template and reads the next-token logits of one label token per option (no text is generated). These types are supported: `nimble`, `openjev`, `lev`, `pplx-decider`, `vllm-d3`, `h2o-lightning`, `lfm2-d1`, `kev` and `clef`.
 
 ```bash
 inference serve --format gguf -m <repo or folder> -f <file>.gguf
@@ -34,7 +34,9 @@ inference serve --format gguf -m <repo or folder> -f <file>.gguf
 
 `lfm2-d1` chooses each question's labels from its type and keys (a choice's single-letter keys, else `A`, `B`, ...; a score's level digits; `yes` / `no` for a noul) and scores each by its best spelling. It and `vllm-d3` accept a null `state`.
 
-The other llama.cpp decision types (`granite-switch`, `clef`, `lfm2-d1-omni`, `vllm-decision2`) are not supported, and no decision type takes images yet.
+`clef` (its own `clef` architecture over Qwen3.5) decides every question of a request together: one prompt lists them all, and a joint head scores each option from the question and option spans of that prompt. Like `kev`, it answers decisions only.
+
+The other llama.cpp decision types (`granite-switch`, `lfm2-d1-omni`, `vllm-decision2`) are not supported, and no decision type takes images yet.
 
 ## Asking questions
 

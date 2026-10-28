@@ -414,6 +414,15 @@ pub struct DetokenizationRequest {
     pub response: Sender<anyhow::Result<String>>,
 }
 
+/// A prompt's normed hidden states (from a raw-logits pass of a joint decision model) and the spans its joint head
+/// reads; answered with one score per option.
+#[derive(Clone)]
+pub struct JointDecisionRequest {
+    pub hidden: inference_tensor::Tensor,
+    pub layout: inference_nn::decision::JointLayout,
+    pub response: Sender<anyhow::Result<Vec<f32>>>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 /// Online calibration lifecycle action.
 pub enum CalibrationAction {
@@ -452,6 +461,8 @@ pub enum Request {
     Calibration(CalibrationRequest),
     Tokenize(TokenizationRequest),
     Detokenize(DetokenizationRequest),
+    #[serde(skip)]
+    JointDecision(JointDecisionRequest),
     // Sending a terminate request causes the `run` function to return to the thread created in `InferenceRs::new`,
     // and then Engine will be dropped.
     Terminate,
@@ -485,6 +496,9 @@ impl Debug for Request {
             }
             Request::Detokenize(req) => {
                 write!(f, "Tokenization Request {:?}", req.tokens)
+            }
+            Request::JointDecision(req) => {
+                write!(f, "Joint Decision Request {:?}", req.hidden.shape())
             }
             Request::Terminate => write!(f, "Termination Request"),
             Request::TerminateAllSeqsNextStep => write!(f, "Terminate All Seqs Next Step"),

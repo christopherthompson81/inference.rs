@@ -34,6 +34,15 @@ pub const LEV_NOUL_RATINGS: usize = 9;
 /// Where a decoder's decision head sits in the native weights, beside `lm_head`, whose place it takes.
 pub const DECISION_HEAD: &str = "decision_head";
 
+/// The spans a joint decision head reads, as prompt token positions: each question's type and span, each option's
+/// question and span, in prompt order; with the prompt's tokens, whose output embeddings the option spans also read.
+#[derive(Clone, Debug, Default)]
+pub struct JointLayout {
+    pub tokens: Vec<u32>,
+    pub questions: Vec<(QuestionKind, std::ops::Range<usize>)>,
+    pub options: Vec<(usize, std::ops::Range<usize>)>,
+}
+
 /// How a checkpoint renders its options; the model and its budgets are otherwise the same.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -288,6 +297,8 @@ pub enum LabelFamily {
     H2oLightning,
     /// labels chosen per question (codes by question type), each scored by its best spelling
     Lfm2D1,
+    /// one prompt for every question, scored together by a joint head over the question and option spans
+    Clef,
 }
 
 impl LabelFamily {
@@ -302,6 +313,7 @@ impl LabelFamily {
             "kev" => Self::Kev,
             "h2o-lightning" => Self::H2oLightning,
             "lfm2-d1" => Self::Lfm2D1,
+            "clef" => Self::Clef,
             _ => return None,
         })
     }
@@ -317,7 +329,7 @@ impl LabelFamily {
                     .collect(),
                 true,
             ),
-            Self::Kev | Self::H2oLightning | Self::Lfm2D1 => (Vec::new(), false),
+            Self::Kev | Self::H2oLightning | Self::Lfm2D1 | Self::Clef => (Vec::new(), false),
             _ => {
                 let letters = || 'A'..='Z';
                 let codes = letters()
@@ -330,7 +342,25 @@ impl LabelFamily {
 
     /// noul's options as the template lists them: `[true, false]` for openjev, `[false, true]` otherwise.
     pub fn noul_true_first(self) -> bool {
-        matches!(self, Self::OpenJev | Self::H2oLightning | Self::Lfm2D1)
+        matches!(
+            self,
+            Self::OpenJev | Self::H2oLightning | Self::Lfm2D1 | Self::Clef
+        )
+    }
+
+    /// All the questions share one prompt, which a joint head scores at once (clef).
+    pub fn joint(self) -> bool {
+        self == Self::Clef
+    }
+
+    /// A choice's options are read sorted by key.
+    pub fn sorts_choices(self) -> bool {
+        self == Self::Clef
+    }
+
+    /// The model's output is a decision head, so it answers decisions only.
+    pub fn decision_only(self) -> bool {
+        matches!(self, Self::Kev | Self::Clef)
     }
 
     /// The labels follow each question's type and keys (d1's `prompt.py`), so they are chosen per question.
@@ -585,7 +615,10 @@ impl LabelDecision {
 
     /// The most options a question can have: one per label, or llama.cpp's request limit for a pointer head.
     pub fn max_options(&self) -> usize {
-        match self.family.reads_pointer() || self.family.labels_per_question() {
+        match self.family.reads_pointer()
+            || self.family.labels_per_question()
+            || self.family.joint()
+        {
             true => MAX_LABELS,
             false => self.labels.len(),
         }
