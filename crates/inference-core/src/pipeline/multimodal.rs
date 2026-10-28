@@ -586,6 +586,9 @@ impl MultimodalLoader {
                 .prepared_source
                 .as_ref()
                 .and_then(|source| source.label_decision.clone()),
+            prompt_activation_bytes_per_token: self
+                .inner
+                .prompt_activation_bytes_per_token(&config)?,
         })?;
         Ok(super::loading::LoadOutcome::Pipeline(Arc::new(Mutex::new(
             DecoderPipeline::new(

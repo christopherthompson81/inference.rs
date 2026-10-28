@@ -371,6 +371,7 @@ impl Engine {
             device_is_cuda,
             has_sliding_window,
             fa3_num_sm_by_layer,
+            prompt_activation_bytes_per_token,
         ) = {
             let pipeline = get_mut_arcmutex!(self.pipeline);
             let metadata = pipeline.get_metadata();
@@ -392,6 +393,9 @@ impl Engine {
                     .cache_engine
                     .as_ref()
                     .map(|engine| engine.fa3_prefill_num_sm_by_layer().to_vec())
+                    .unwrap_or_default(),
+                metadata
+                    .prompt_activation_bytes_per_token
                     .unwrap_or_default(),
             )
         };
@@ -480,7 +484,16 @@ impl Engine {
                     ));
                 }
             };
-            let workspace_bytes = workspace.bytes;
+            // a batch of prompts multiplies the step's activations, so they decide whether to split it; one prompt's
+            // chunk is admitted on its attention workspace alone, the estimate covering more than it needs
+            let workspace_bytes = if output.scheduled.len() > 1 {
+                workspace.bytes.saturating_add(
+                    prompt_activation_bytes_per_token
+                        .saturating_mul(query_lens.iter().sum::<usize>()),
+                )
+            } else {
+                workspace.bytes
+            };
             let memory_status = self.maintain_cuda_prompt_memory(cuda_memory_pool, workspace_bytes);
             let previous = output.scheduled.len();
             match cuda_memory::prompt_batch_memory_action(

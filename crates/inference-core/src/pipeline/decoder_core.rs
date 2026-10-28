@@ -71,6 +71,7 @@ pub(crate) struct DecoderCoreArgs<'a> {
     pub source_weight_source: Option<Arc<dyn inference_quant::QuantizedWeightSource>>,
     pub dynamic_lora: Option<Arc<DynamicLoraRuntime>>,
     pub label_decision: Option<Arc<crate::decision::LabelDecision>>,
+    pub prompt_activation_bytes_per_token: Option<usize>,
 }
 
 impl DecoderCore {
@@ -160,6 +161,7 @@ impl DecoderCore {
                 modalities: args.modalities,
                 loaded_for_uqff_write: args.loaded_for_uqff_write,
                 label_decision: args.label_decision,
+                prompt_activation_bytes_per_token: args.prompt_activation_bytes_per_token,
                 prompt_chunk_tokens: args.prompt_chunk_tokens,
             }),
             tokenizer: args.tokenizer.into(),

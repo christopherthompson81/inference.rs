@@ -44,6 +44,10 @@ const MTP_LAYERS: &str = r"^mtp\.layers\.(\d+)";
 const PROMPT_ROUTED_HIDDEN_BYTES: usize = 6;
 const PROMPT_ROUTED_INTERMEDIATE_BYTES: usize = 16;
 const PROMPT_RESIDUAL_HIDDEN_BYTES: usize = 40;
+// A dense model's prefill bytes a token: the most peak memory a token took over 512-4096 token chunks of Qwen3.5 0.8B,
+// 9B and 27B (135, 266 and 397 KB against intermediate sizes 3584, 12288 and 17408), covered by base plus slope
+const PROMPT_DENSE_BASE_BYTES: usize = 66 * 1024;
+const PROMPT_DENSE_INTERMEDIATE_BYTES: usize = 19;
 
 // Every pattern under both the main stack's and the built-in MTP head's layer prefixes.
 fn layer_regexes(patterns: &[&[&str]]) -> Result<Vec<Regex>> {
@@ -206,6 +210,10 @@ const MULTIMODAL_EMBEDDING_NAMES: [&str; 2] = [
 ];
 
 pub(super) fn prompt_activation_bytes_per_token(cfg: &TextConfig) -> usize {
+    if cfg.num_experts == 0 {
+        return PROMPT_DENSE_BASE_BYTES
+            + PROMPT_DENSE_INTERMEDIATE_BYTES * cfg.intermediate_size.unwrap_or_default();
+    }
     let routed = PROMPT_ROUTED_HIDDEN_BYTES * cfg.hidden_size
         + PROMPT_ROUTED_INTERMEDIATE_BYTES * cfg.moe_intermediate_size;
     cfg.num_experts_per_tok * routed + PROMPT_RESIDUAL_HIDDEN_BYTES * cfg.hidden_size
@@ -478,9 +486,6 @@ macro_rules! qwen3_5_loader {
                 Ok(Some(embed_tokens * dtype.size_in_bytes()))
             }
             fn prompt_activation_bytes_per_token(&self, config: &str) -> Result<Option<usize>> {
-                if !$moe {
-                    return Ok(None);
-                }
                 let cfg = parse_config(config, $moe)?;
                 Ok(Some(prompt_activation_bytes_per_token(&cfg.text_config)))
             }
