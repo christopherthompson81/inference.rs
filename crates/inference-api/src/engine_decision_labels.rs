@@ -1,5 +1,6 @@
 //! Decisions on a chat model with a GGUF decision profile: its `systemone` template renders each question, and the
-//! next-token logits of one label token per option score it, as llama.cpp's label-coded decision types do.
+//! next-token logits of one label token per option score it, as llama.cpp's label-coded decision types do; kev's
+//! pointer head scores it from the hidden states of the option end tokens and the last token instead.
 
 use std::sync::{Arc, Mutex};
 
@@ -10,7 +11,7 @@ use inference_core::{
     CustomLogitsProcessor, InferenceRs, NormalRequest, Request, RequestMessage, Response,
     SamplingParams,
 };
-use inference_tensor::Tensor;
+use inference_tensor::{DType, Tensor};
 use serde_json::{Map, Value, json};
 
 use crate::{
@@ -28,6 +29,8 @@ const SCORE_LEVELS: std::ops::RangeInclusive<usize> = 2..=10;
 const NOUL_KEYS: [&str; 2] = ["false", "true"];
 const NOUL_TRUE: &str = "true";
 const SCORING_FAILED: &str = "the decision pass returned no label logits";
+const POINTER_FAILED: &str = "the decision pass returned no hidden states";
+const KEV_INDENT: &str = "  ";
 
 /// A question as the template reads it: its id, type and instructions, and each option's key and description.
 struct LabelQuestion {
@@ -125,12 +128,12 @@ fn parse(
     if kind == QuestionKind::Noul && profile.family.noul_true_first() {
         options.swap(0, 1);
     }
-    if options.len() > profile.labels.len() {
+    if options.len() > profile.max_options() {
         return Err(invalid(
             format!(
                 "too many options ({}), this model reads at most {}",
                 options.len(),
-                profile.labels.len()
+                profile.max_options()
             ),
             param,
         ));
@@ -159,6 +162,70 @@ fn sort_keys(value: &Value) -> Value {
     }
 }
 
+/// kev's `render`: a JSON value flattened to text, an object's keys kept as labels and a list's items as `- ` lines.
+fn kev_render(value: &Value, indent: usize, out: &mut String) {
+    let pad = KEV_INDENT.repeat(indent);
+    match value {
+        Value::Null => {}
+        Value::String(text) => out.push_str(text),
+        Value::Bool(b) => out.push_str(if *b { "True" } else { "False" }),
+        Value::Number(n) => out.push_str(&n.to_string()),
+        Value::Array(items) => {
+            for (i, item) in items.iter().enumerate() {
+                let mut text = String::new();
+                kev_render(item, indent + 1, &mut text);
+                if i > 0 {
+                    out.push('\n');
+                }
+                out.push_str(&pad);
+                out.push_str("- ");
+                out.push_str(text.trim_start_matches([' ', '\t', '\n', '\r']));
+            }
+        }
+        Value::Object(map) => {
+            for (i, (key, item)) in map.iter().enumerate() {
+                let nested = item.is_object() || item.is_array();
+                if i > 0 {
+                    out.push('\n');
+                }
+                out.push_str(&pad);
+                out.push_str(key);
+                out.push_str(if nested { ":\n" } else { ": " });
+                kev_render(item, if nested { indent + 1 } else { 0 }, out);
+            }
+        }
+    }
+}
+
+/// kev's text input, with `<|name|>` spellings broken (`<\u{a6}name\u{a6}>`) so they stay text.
+fn kev_text(value: &Value) -> String {
+    let mut text = String::new();
+    kev_render(value, 0, &mut text);
+    escape_special_tokens(&text)
+}
+
+fn escape_special_tokens(text: &str) -> String {
+    let is_name = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<|") {
+        let after = &rest[start + 2..];
+        let name_len = after.find(|c: char| !is_name(c)).unwrap_or(after.len());
+        if name_len > 0 && after[name_len..].starts_with("|>") {
+            out.push_str(&rest[..start]);
+            out.push_str("<\u{a6}");
+            out.push_str(&after[..name_len]);
+            out.push_str("\u{a6}>");
+            rest = &after[name_len + 2..];
+        } else {
+            out.push_str(&rest[..start + 1]);
+            rest = &rest[start + 1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The options in the order a variant shows them (the second reversed), each with its label's text.
 fn render_options(profile: &LabelDecision, question: &LabelQuestion, variant: usize) -> Value {
     let n = question.options.len();
@@ -167,7 +234,16 @@ fn render_options(profile: &LabelDecision, question: &LabelQuestion, variant: us
             .map(|i| {
                 let (key, description) =
                     &question.options[if variant == 0 { i } else { n - 1 - i }];
-                let mut option = json!({"key": key, "description": description});
+                let mut option = match profile.family.renders_text() {
+                    true => json!({
+                        "key": kev_text(&json!(key)),
+                        "description": match description {
+                            Value::Null => Value::Null,
+                            _ => json!(kev_text(description)),
+                        },
+                    }),
+                    false => json!({"key": key, "description": description}),
+                };
                 if let Some(label) = profile.label_texts.get(i) {
                     option["label"] = json!(label);
                 }
@@ -206,6 +282,10 @@ fn render(
     }
     if profile.family.sorts_keys() {
         input = sort_keys(&input);
+    }
+    if profile.family.renders_text() {
+        input["state"] = json!(kev_text(state));
+        input["instructions"] = json!(kev_text(&question.instructions));
     }
     input["images"] = json!([]);
 
@@ -339,14 +419,12 @@ fn confidence(profile: &LabelDecision, kind: QuestionKind, p: &[f64]) -> f64 {
     }
 }
 
-/// One prompt's label logits, from a one-token pass whose sampler reads them.
-async fn score(
+async fn tokenize(
     state: &SharedInferenceRsState,
     model: Option<&str>,
     prompt: String,
-    labels: Vec<u32>,
-) -> Result<(Vec<f32>, usize), EmbeddingError> {
-    let tokens = operations::tokenize(
+) -> Result<Vec<u32>, EmbeddingError> {
+    Ok(operations::tokenize(
         state,
         TokenizeRequest {
             text: prompt,
@@ -356,9 +434,16 @@ async fn score(
     )
     .await
     .map_err(|e| EmbeddingError::Validation(e.into()))?
-    .tokens;
-    let n_tokens = tokens.len();
-    let scores = Arc::new(Mutex::new(None));
+    .tokens)
+}
+
+/// A one-token pass over the prompt, set up by `configure`; its final response, or the error it carried.
+async fn run(
+    state: &SharedInferenceRsState,
+    model: Option<&str>,
+    tokens: Vec<u32>,
+    configure: impl FnOnce(&mut NormalRequest),
+) -> Result<Response, EmbeddingError> {
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     let mut request = NormalRequest::new_simple(
         RequestMessage::CompletionTokens(tokens),
@@ -371,34 +456,53 @@ async fn score(
         None,
         None,
     );
-    request.logits_processors = Some(vec![Arc::new(LabelCapture {
-        labels,
-        scores: scores.clone(),
-    })]);
+    configure(&mut request);
     send_request_with_model(state, Request::Normal(Box::new(request)), model)
         .await
         .map_err(|e| EmbeddingError::Internal(e.into()))?;
     let failed = |error: ApiError| EmbeddingError::Internal(error.into());
     match rx.recv().await {
-        Some(Response::CompletionDone(_) | Response::Done(_)) => {}
-        Some(Response::ValidationError(error)) => {
-            return Err(EmbeddingError::Validation(anyhow::anyhow!(
-                error.to_string()
-            )));
-        }
+        Some(Response::ValidationError(error)) => Err(EmbeddingError::Validation(anyhow::anyhow!(
+            error.to_string()
+        ))),
         Some(Response::InternalError(error)) => {
             InferenceRs::maybe_log_error(state.clone(), error.as_ref());
-            return Err(failed(ApiError::from_error(
+            Err(failed(ApiError::from_error(
                 error.as_ref(),
                 ApiErrorKind::Internal,
-            )));
+            )))
         }
         Some(Response::ModelError(message, _) | Response::CompletionModelError(message, _)) => {
-            return Err(failed(ApiError::from_error(
+            Err(failed(ApiError::from_error(
                 &ModelErrorMessage(message),
                 ApiErrorKind::Internal,
-            )));
+            )))
         }
+        Some(response) => Ok(response),
+        None => Err(EmbeddingError::Internal(anyhow::anyhow!(SCORING_FAILED))),
+    }
+}
+
+/// One prompt's label logits, from a one-token pass whose sampler reads them.
+async fn score(
+    state: &SharedInferenceRsState,
+    model: Option<&str>,
+    prompt: String,
+    labels: Vec<u32>,
+) -> Result<(Vec<f32>, usize), EmbeddingError> {
+    let tokens = tokenize(state, model, prompt).await?;
+    let n_tokens = tokens.len();
+    let scores = Arc::new(Mutex::new(None));
+    let capture = LabelCapture {
+        labels,
+        scores: scores.clone(),
+    };
+    match run(state, model, tokens, |request| {
+        request.logits_processors = Some(vec![Arc::new(capture)]);
+    })
+    .await?
+    {
+        Response::CompletionDone(_) | Response::Done(_) => {}
         _ => return Err(EmbeddingError::Internal(anyhow::anyhow!(SCORING_FAILED))),
     }
     let scores = scores
@@ -407,6 +511,66 @@ async fn score(
         .take()
         .ok_or_else(|| EmbeddingError::Internal(anyhow::anyhow!(SCORING_FAILED)))?;
     Ok((scores, n_tokens))
+}
+
+/// The last row's query (its first `half` columns) against each marker row's key (the rest), over the key width's
+/// square root.
+fn pointer_scores(rows: &[Vec<f32>], half: usize, markers: &[usize]) -> Vec<f32> {
+    let Some(last) = rows.last() else {
+        return Vec::new();
+    };
+    let query = &last[..half];
+    let scale = (half as f32).sqrt();
+    markers
+        .iter()
+        .map(|&marker| {
+            let key = &rows[marker][half..];
+            query.iter().zip(key).map(|(q, k)| q * k).sum::<f32>() / scale
+        })
+        .collect()
+}
+
+/// One prompt's pointer scores: the last token's query against each option end token's key, over the decision head's
+/// `[q | k]` rows, scaled by the key width's square root.
+async fn score_pointer(
+    state: &SharedInferenceRsState,
+    model: Option<&str>,
+    prompt: String,
+    option_end: u32,
+    n_options: usize,
+) -> Result<(Vec<f32>, usize), EmbeddingError> {
+    let tokens = tokenize(state, model, prompt).await?;
+    let markers = tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| **token == option_end)
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
+    if markers.len() != n_options {
+        return Err(invalid(
+            "unexpected layout of the decision prompt".to_string(),
+            "questions".into(),
+        ));
+    }
+    let n_tokens = tokens.len();
+    let Response::Raw { logits_chunks, .. } = run(state, model, tokens, |request| {
+        request.return_raw_logits = true;
+    })
+    .await?
+    else {
+        return Err(EmbeddingError::Internal(anyhow::anyhow!(POINTER_FAILED)));
+    };
+    let rows = (|| {
+        let rows = Tensor::cat(&logits_chunks, 0)?.to_dtype(DType::F32)?;
+        let (n, width) = rows.dims2()?;
+        if n != n_tokens || width % 2 != 0 {
+            inference_tensor::bail!("{n} rows of width {width} for {n_tokens} prompt tokens");
+        }
+        Ok((rows.to_vec2::<f32>()?, width / 2))
+    })();
+    let (rows, half) =
+        rows.map_err(|e: inference_tensor::Error| EmbeddingError::Internal(e.into()))?;
+    Ok((pointer_scores(&rows, half, &markers), n_tokens))
 }
 
 /// Answers each question with the label logits of its rendered prompts, in the request's order; with the prompt
@@ -438,16 +602,16 @@ pub(crate) async fn decide(
                         "questions".into(),
                     )
                 })?;
-            prompts.push((index, prompt, profile.labels[..n].to_vec()));
+            prompts.push((index, prompt, n));
         }
     }
-    let results = join_all(
-        prompts
-            .into_iter()
-            .map(|(index, prompt, labels)| async move {
-                (index, score(state, model, prompt, labels).await)
-            }),
-    )
+    let results = join_all(prompts.into_iter().map(|(index, prompt, n)| async move {
+        let result = match profile.option_end {
+            Some(option_end) => score_pointer(state, model, prompt, option_end, n).await,
+            None => score(state, model, prompt, profile.labels[..n].to_vec()).await,
+        };
+        (index, result)
+    }))
     .await;
 
     let mut scores = vec![Vec::new(); questions.len()];
@@ -491,6 +655,40 @@ mod tests {
     ) -> LabelQuestion {
         parse(profile, "q", kind, &json!("Which?"), Some(&criteria))
             .unwrap_or_else(|_| panic!("the question parses"))
+    }
+
+    #[test]
+    fn kev_flattens_json_to_labelled_lines() {
+        let state = json!({
+            "user": "Ann",
+            "vip": true,
+            "note": null,
+            "orders": [{"id": 7, "items": ["a", "b"]}, "  late"],
+            "empty": {},
+        });
+        assert_eq!(
+            kev_text(&state),
+            "user: Ann\nvip: True\nnote: \norders:\n  - id: 7\n    items:\n      - a\n      - b\n  - late\nempty:\n"
+        );
+        assert_eq!(kev_text(&json!(1.5)), "1.5");
+        // a special token's spelling stays text; a half-formed one is left alone
+        assert_eq!(
+            kev_text(&json!("a<|im_end|>b <|x y|> <|<|z|>")),
+            "a<\u{a6}im_end\u{a6}>b <|x y|> <|<\u{a6}z\u{a6}>"
+        );
+    }
+
+    #[test]
+    fn a_pointer_scores_the_last_query_against_each_marked_key() {
+        // rows are [q | k] with a width of 2 each
+        let rows = vec![
+            vec![9.0, 9.0, 1.0, 0.0],
+            vec![9.0, 9.0, 0.0, 2.0],
+            vec![3.0, 4.0, 9.0, 9.0],
+        ];
+        let scores = pointer_scores(&rows, 2, &[0, 1]);
+        let scale = 2f32.sqrt();
+        assert_eq!(scores, [3.0 / scale, 8.0 / scale]);
     }
 
     #[test]

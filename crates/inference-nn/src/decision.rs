@@ -1,6 +1,7 @@
 //! Decision models: a typed question about a state, answered by scoring one `[MASK]` marker per option in a
 //! `[CLS] question [SEP] [MASK] option ... [SEP] state [SEP]` sequence (laya, Julia-1), or by a chat model's
-//! next-token logits of one label per option (`LabelDecision`).
+//! next-token logits of one label per option (`LabelDecision`), or by a pointer head over a chat model's hidden states
+//! (kev).
 // positions within a prompt the model's budget keeps far below u32::MAX
 #![allow(clippy::cast_possible_truncation)]
 
@@ -21,8 +22,12 @@ const LAYA_NOUL_FALSE: &str = "no, the statement does not hold";
 const LAYA_NOUL_TRUE: &str = "yes, the statement holds";
 // llama.cpp reads at most this many label codes, the largest option count its requests allow
 const MAX_LABELS: usize = 255;
+/// kev reads an option's hidden state at the token that closes it
+pub const KEV_OPTION_END: &str = "<|box_end|>";
 /// lev answers a noul by rating it on this many levels
 pub const LEV_NOUL_RATINGS: usize = 9;
+/// Where a decoder's decision head sits in the native weights, beside `lm_head`, whose place it takes.
+pub const DECISION_HEAD: &str = "decision_head";
 
 /// How a checkpoint renders its options; the model and its budgets are otherwise the same.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -272,6 +277,8 @@ pub enum LabelFamily {
     Nimble,
     PplxDecider,
     VllmD3,
+    /// a pointer head: the last token's query against each option's end-token key
+    Kev,
 }
 
 impl LabelFamily {
@@ -283,6 +290,7 @@ impl LabelFamily {
             "nimble" => Self::Nimble,
             "pplx-decider" => Self::PplxDecider,
             "vllm-d3" => Self::VllmD3,
+            "kev" => Self::Kev,
             _ => return None,
         })
     }
@@ -298,6 +306,7 @@ impl LabelFamily {
                     .collect(),
                 true,
             ),
+            Self::Kev => (Vec::new(), false),
             _ => {
                 let letters = || 'A'..='Z';
                 let codes = letters()
@@ -355,6 +364,17 @@ impl LabelFamily {
         matches!(self, Self::PplxDecider | Self::VllmD3)
     }
 
+    /// The model's output rows are a decision head's `[q | k]`, read at the option end tokens and the last token, not
+    /// label logits.
+    pub fn reads_pointer(self) -> bool {
+        self == Self::Kev
+    }
+
+    /// The template takes the state, instructions and option texts flattened to text (kev's `render`).
+    pub fn renders_text(self) -> bool {
+        self == Self::Kev
+    }
+
     /// The confidence is one minus the normalized entropy, not TypeSafe's per-type formulas.
     pub fn entropy_confidence(self) -> bool {
         self == Self::VllmD3
@@ -374,6 +394,8 @@ pub struct LabelDecision {
     /// the token read for each option, in order, and the text the template shows for it
     pub labels: Vec<u32>,
     pub label_texts: Vec<String>,
+    /// the token that ends each option, where a pointer head reads it
+    pub option_end: Option<u32>,
 }
 
 impl LabelDecision {
@@ -410,7 +432,16 @@ impl LabelDecision {
             score_bias,
             labels,
             label_texts,
+            option_end: None,
         })
+    }
+
+    /// The most options a question can have: one per label, or llama.cpp's request limit for a pointer head.
+    pub fn max_options(&self) -> usize {
+        match self.family.reads_pointer() {
+            true => MAX_LABELS,
+            false => self.labels.len(),
+        }
     }
 
     /// The temperature for a question type and option count, in the buckets it was fit over; 1 without one.

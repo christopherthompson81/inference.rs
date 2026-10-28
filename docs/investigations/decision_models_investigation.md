@@ -303,3 +303,20 @@ Finding:
 
 Implication: a request's questions no longer exhaust memory; the load-time reserve is left alone (raising it would
 take KV room from tuned setups), and the per-token figure is reported for dense Qwen3.5 only.
+
+## Run 13 - 2026-10-28 08:22
+
+Question: does kev (`ggml-org/Kev-0.8B-GGUF`, Q8_0) answer as llama.cpp's `/v1/systemone` does, with its pointer head
+loaded in place of Qwen3.5's LM head and read from the raw-logits rows?
+
+Command: `llama-server -m Kev-0.8B-Q8_0.gguf -np 1 -ngl 99` and `server_ref.py kev_ref.json`; then `inference serve
+--format gguf -m .../kev -f Kev-0.8B-Q8_0.gguf` and `compare.py kev_ref.json` over the same three requests.
+
+Finding:
+- The GGUF is Qwen3.5 with `embedding_length_out 512`, `cls.output.{weight (Q8_0), bias}`, tied embeddings and no
+  `output.weight`; one temperature (2.351) for all three types. llama.cpp's readout: the `[q | k]` rows of the last
+  prompt token and of each `<|box_end|>`, `q_last . k_option / sqrt(256)`, then the shared softmax.
+- Ours: same prompt token counts (106 / 156 / 1475), same choice on all 8 questions, worst difference 1.33e-2 (a noul),
+  the rest 4.9e-4 to 8.5e-3. A chat request to the model is refused (its output is the head, not vocabulary logits).
+
+Implication: kev is supported; the remaining gap is of the size the label families show (bf16 activations).
