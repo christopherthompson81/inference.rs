@@ -20,13 +20,13 @@ laya's `multilingual/` and `typed-decisions/` variants load from a local copy of
 
 ### Chat models with a decision profile
 
-Some decision models are chat models fine-tuned to answer with the code of an option. Their GGUFs, as llama.cpp's converter writes them, carry a decision profile: `<arch>.decision.type`, a `systemone` chat template that renders a question as a prompt, and temperatures. Such a GGUF loads like any other, and `/v1/decisions` then renders each question with that template and reads the next-token logits of one label token per option (no text is generated). These types are supported: `nimble`, `openjev` and `lev`.
+Some decision models are chat models fine-tuned to answer with the code of an option. Their GGUFs, as llama.cpp's converter writes them, carry a decision profile: `<arch>.decision.type`, a `systemone` chat template that renders a question as a prompt, and temperatures. Such a GGUF loads like any other, and `/v1/decisions` then renders each question with that template and reads the next-token logits of one label token per option (no text is generated). These types are supported: `nimble`, `openjev`, `lev`, `pplx-decider` and `vllm-d3`.
 
 ```bash
 inference serve --format gguf -m <repo or folder> -f <file>.gguf
 ```
 
-`pplx-decider` and `vllm-d3` checkpoints read their prompt with non-causal attention, which is not supported yet; they load as chat models without decisions. The other llama.cpp decision types (`granite-switch`, `kev`, `clef`, `lfm2-d1`, `h2o-lightning`, `vllm-decision2`) are not supported either.
+`pplx-decider` and `vllm-d3` (Qwen3.5 checkpoints) read their prompt with non-causal full attention: the whole prompt runs in one pass, and the server keeps no prefix cache for such a model. The other llama.cpp decision types (`granite-switch`, `kev`, `clef`, `lfm2-d1`, `h2o-lightning`, `vllm-decision2`) are not supported.
 
 ## Asking questions
 

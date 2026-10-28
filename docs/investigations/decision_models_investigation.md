@@ -229,3 +229,24 @@ Finding:
 
 Implication: nimble and openjev match llama.cpp up to bf16 logit rounding. Left for later: f32 logits, non-causal
 full attention (pplx-decider, vllm-d3), the activation reserve for concurrent prefill, lev (no GGUF to test).
+
+## Run 10 - 2026-10-27 22:13
+
+Question: with Qwen3.5's full-attention layers reading the prompt bidirectionally, does vllm-d3-nano match llama.cpp?
+
+Command: Qwen3.5 `is_causal` (from the GGUF's `attention.causal`, or forced for the pplx-decider / vllm-d3 families):
+prompt steps of the full-attention layers get an all-zero mask and `causal: false` flash params, the model refuses a
+prompt with cached or earlier-chunk positions, packed prefill is off, and the pipeline sets no prefix cache and a
+whole-context prompt chunk. `serve --format gguf ... vllm-d3-nano-Q8_0.gguf` with default flags, then `compare.py`
+against Run 7's single-slot `d3_ref.json`.
+
+Finding:
+- First try (with `--prefix-cache-n 0 --max-prefill-chunk-tokens 8192`): `packed prefill requires causal varlen
+  attention support` on the batched questions; packed prefill now reports unsupported for such a model.
+- Then, with default flags: same choice on every question, worst probability difference 8.3e-3 (Run 7, causal:
+  0.124); route 1.7e-4, kind 3.3e-4, repro 2.7e-4.
+- Tiny Qwen3.5 checkpoint (CPU f32 and paged CUDA bf16): with `is_causal: false` the first row's logits move when
+  the last token changes, with the causal default they do not.
+
+Implication: vllm-d3 is served; pplx-decider takes the same path (forced non-causal, since llama.cpp's converter
+does not write the flag for it) but has no llama.cpp-converted GGUF to check against.

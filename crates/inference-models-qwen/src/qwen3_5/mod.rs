@@ -428,6 +428,10 @@ impl MultimodalModel for Qwen3_5Model {
         NormalModel::supports_packed_prefill(&self.text)
     }
 
+    fn bidirectional_prompt(&self) -> bool {
+        NormalModel::bidirectional_prompt(&self.text)
+    }
+
     fn token_window(&self) -> Option<usize> {
         NormalModel::token_window(&self.text)
     }

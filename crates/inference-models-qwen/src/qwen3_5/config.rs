@@ -398,6 +398,9 @@ pub struct TextConfig {
     pub mtp_num_hidden_layers: usize,
     #[serde(default)]
     pub mtp_use_dedicated_embeddings: bool,
+    /// False for checkpoints whose full-attention layers read the prompt bidirectionally (the decision models').
+    #[serde(default = "default_true")]
+    pub is_causal: bool,
     #[serde(flatten)]
     pub flash_next: FlashNextConfig,
 }
