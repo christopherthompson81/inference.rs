@@ -101,16 +101,9 @@ pub trait DeviceMappedModelLoader {
         config: &str,
         params: &AutoDeviceMapParams,
     ) -> Result<usize> {
-        let AutoDeviceMapParams::Text {
-            max_seq_len,
-            max_batch_size,
-        } = params
-        else {
-            anyhow::bail!("Expected text AutoDeviceMapParams for this model!")
-        };
-        Ok(max_batch_size
+        Ok(params.max_batch_size()
             * self.model_config(config)?.num_attn_heads()
-            * max_seq_len.min(&ATTENTION_CHUNK_SIZE).pow(2))
+            * params.max_seq_len().min(ATTENTION_CHUNK_SIZE).pow(2))
     }
     /// weight_pack_factor only applies to quantized weights.
     fn non_mapped_size_in_bytes(

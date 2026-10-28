@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 // NeMo's and transformers' default when a config leaves it out
 const DEFAULT_MAX_SYMBOLS_PER_STEP: usize = 10;
@@ -8,7 +8,7 @@ const DEFAULT_MAX_SYMBOLS_PER_STEP: usize = 10;
 pub const STREAMING_ENCODER_TYPE: &str = "nemotron_asr_streaming_encoder";
 
 /// The encoder half of a Parakeet `config.json` (transformers' `ParakeetEncoderConfig`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EncoderConfig {
     pub hidden_size: usize,
     pub intermediate_size: usize,

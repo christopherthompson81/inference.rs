@@ -357,6 +357,7 @@ impl Engine {
                     decision: Some(crate::sequence::DecisionInput {
                         kind: prompt.kind.index(),
                         markers: prompt.markers,
+                        media: prompt.media,
                     }),
                     ..Default::default()
                 }));
@@ -832,6 +833,7 @@ impl Engine {
             crate::sequence::DecisionInput {
                 kind: prompt.kind.index(),
                 markers: prompt.markers,
+                media: None,
             },
         ))
     }

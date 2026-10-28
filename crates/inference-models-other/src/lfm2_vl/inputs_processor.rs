@@ -19,7 +19,10 @@ use crate::media_inputs::{
 };
 use crate::paged_attention::{PagedAttentionMeta, block_hash::MultimodalKind};
 
-use super::{Lfm2VlSpecificArgs, config::Config};
+use super::{
+    Lfm2VlSpecificArgs,
+    config::{Config, Tiling},
+};
 
 pub const IMAGE_TOKEN: &str = "<image>";
 pub const IMAGE_START: &str = "<|image_start|>";
@@ -68,7 +71,7 @@ struct PreprocessedForSeq {
 }
 
 impl Lfm2VlProcessorSettings {
-    fn from_config(config: &Config, preprocessor_config: &PreProcessorConfig) -> Self {
+    fn from_tiling(config: &Tiling, preprocessor_config: &PreProcessorConfig) -> Self {
         let do_image_splitting = preprocessor_config
             .do_image_splitting
             .unwrap_or(config.do_image_splitting);
@@ -121,8 +124,13 @@ impl Lfm2VlProcessorSettings {
 
 impl Lfm2VlImageProcessor {
     pub fn new(config: &Config, preprocessor_config: &PreProcessorConfig) -> Self {
+        Self::with_tiling(&config.tiling(), preprocessor_config)
+    }
+
+    /// Over a tiling of its own, for a model that runs LFM2-VL's tower without its config (d1-omni).
+    pub fn with_tiling(tiling: &Tiling, preprocessor_config: &PreProcessorConfig) -> Self {
         Self {
-            settings: Lfm2VlProcessorSettings::from_config(config, preprocessor_config),
+            settings: Lfm2VlProcessorSettings::from_tiling(tiling, preprocessor_config),
         }
     }
 

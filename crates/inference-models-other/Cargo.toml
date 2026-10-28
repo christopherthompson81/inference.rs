@@ -16,6 +16,8 @@ homepage.workspace = true
 anyhow.workspace = true
 inference-tensor.workspace = true
 image.workspace = true
+inference-audio.workspace = true
+inference-models-speech.workspace = true
 inference-nn.workspace = true
 inference-quant.workspace = true
 inference-vision.workspace = true
@@ -34,5 +36,5 @@ safetensors.workspace = true
 tempfile.workspace = true
 
 [features]
-cuda = ["inference-tensor/cuda", "inference-quant/cuda", "inference-nn/cuda"]
-metal = ["inference-tensor/metal", "inference-quant/metal", "inference-nn/metal"]
+cuda = ["inference-tensor/cuda", "inference-quant/cuda", "inference-nn/cuda", "inference-models-speech/cuda"]
+metal = ["inference-tensor/metal", "inference-quant/metal", "inference-nn/metal", "inference-models-speech/metal"]

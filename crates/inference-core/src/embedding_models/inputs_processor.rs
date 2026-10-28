@@ -163,6 +163,7 @@ fn decision_rows(input_seqs: &[&mut Sequence]) -> Result<Option<DecisionRows>> {
     let mut rows = DecisionRows {
         kinds: Vec::with_capacity(input_seqs.len()),
         markers: Vec::with_capacity(input_seqs.len()),
+        media: Vec::with_capacity(input_seqs.len()),
     };
     for seq in input_seqs {
         let Some(input) = seq.decision_input() else {
@@ -170,6 +171,7 @@ fn decision_rows(input_seqs: &[&mut Sequence]) -> Result<Option<DecisionRows>> {
         };
         rows.kinds.push(input.kind);
         rows.markers.push(input.markers.clone());
+        rows.media.push(input.media.clone());
     }
     Ok(Some(rows))
 }

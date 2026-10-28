@@ -25,6 +25,14 @@ pub fn build_lfm2_vl_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
     build_lfm2_vl_bindings_from_parts(&TensorInventory::from_archive(archive), text)
 }
 
+/// The projector GGUF's vision tower and projector under LFM2-VL's names, added to `bindings` (d1-omni's projector
+/// carries LFM2-VL's tower).
+pub fn bind_lfm2_vl_vision(archive: &GgufArchive, bindings: &mut GgufBindingMap) -> Result<()> {
+    let inventory = TensorInventory::from_archive(archive);
+    bind_lfm2_projector(&inventory, bindings)?;
+    bind_lfm2_vision(&inventory, bindings)
+}
+
 fn build_lfm2_vl_bindings_from_parts(
     inventory: &TensorInventory<'_>,
     text: GgufBindingMap,

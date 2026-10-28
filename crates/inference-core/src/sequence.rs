@@ -53,6 +53,7 @@ pub struct EmbeddingParams {
 pub struct DecisionInput {
     pub kind: u32,
     pub markers: Vec<u32>,
+    pub media: Option<std::sync::Arc<inference_nn::decision::DecisionMedia>>,
 }
 
 /// What a one-shot generation request asked for beyond its prompt; media live in `MultimodalData`.

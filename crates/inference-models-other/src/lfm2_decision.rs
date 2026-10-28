@@ -4,19 +4,25 @@
 //! its tensor names. The logits are left uncalibrated: the decision profile applies the temperatures.
 #![allow(clippy::cast_precision_loss)]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use inference_audio::nemo::{NemoMel, NemoMelConfig};
+use inference_models_speech::parakeet::{Encoder as AudioEncoder, EncoderConfig};
 use inference_quant::{QuantMethod, QuantMethodConfig, ShardedVarBuilder, UnquantLinear};
-use inference_tensor::nn::{Embedding, LayerNorm, LayerNormConfig, Module};
+use inference_tensor::nn::{Embedding, LayerNorm, LayerNormConfig, Linear, Module, VarBuilder};
 use inference_tensor::{D, DType, Device, Result, Tensor};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::{AttentionMask, FlashParams, SdpaParams},
+    decision::{DecisionMedia, DecisionRows},
     layers::{
         RmsNorm, RotaryEmbedding, Sdpa, apply_rotary_preselected_qk, dense_embedding, layer_norm,
     },
+    lfm2_vl,
+    media_inputs::{image_processor::ImagePreProcessor, preprocessor_config::PreProcessorConfig},
     model::{EmbeddingModel, IsqModel, NormalLoadingMetadata},
     modern_bert_decision::{self, Block},
     utils::unvarbuilder::UnVarBuilder,
@@ -26,6 +32,48 @@ const BLOCKS: &str = "blk";
 const QUESTION_TYPES: usize = 3;
 // the short convolutions' taps: the previous token, the token, the next one
 const CONV_TAPS: usize = 3;
+// the projector GGUF's tensors under LFM2-VL's names (`lfm2_vl_bindings`)
+const VISION_TOWER: &str = "model.vision_tower";
+const PROJECTOR: &str = "model.multi_modal_projector";
+// PIL's bilinear filter id, which llama.cpp's LFM2 image preprocessor resizes with
+const BILINEAR: usize = 2;
+// the projector GGUF's audio tensors: the FastConformer, its adapter (`mlp.0` to `mlp.3`) and the residual block after
+const AUDIO_ENCODER: &str = "a";
+const AUDIO_ADAPTER: &str = "mm.a.mlp";
+// llama.cpp's d1-omni audio front end: 16 kHz NeMo features, clips padded to half a second and cut at 30 s
+const AUDIO_SAMPLE_RATE: u32 = 16000;
+const AUDIO_N_FFT: usize = 512;
+const AUDIO_WINDOW: usize = 400;
+const AUDIO_HOP: usize = 160;
+const AUDIO_PREEMPHASIS: f32 = 0.97;
+const AUDIO_MIN_SAMPLES: usize = AUDIO_SAMPLE_RATE as usize / 2;
+const AUDIO_MAX_SAMPLES: usize = 30 * AUDIO_SAMPLE_RATE as usize;
+const AUDIO_NORM_EPS: f64 = 1e-5;
+// the dw_striding pre-encode's module indices: conv, (relu), depthwise, pointwise, (relu), depthwise, pointwise
+const PRE_ENCODE_CONVS: [usize; 5] = [0, 2, 3, 5, 6];
+// llama.cpp's block tensor stems (the name up to its first dot) against our encoder's, transformers' Parakeet names
+const AUDIO_BLOCK_NAMES: [(&str, &str); 20] = [
+    ("ffn_norm", "norm_feed_forward1"),
+    ("ffn_up", "feed_forward1.linear1"),
+    ("ffn_down", "feed_forward1.linear2"),
+    ("ln1", "norm_self_att"),
+    ("attn_q", "self_attn.q_proj"),
+    ("attn_k", "self_attn.k_proj"),
+    ("attn_v", "self_attn.v_proj"),
+    ("attn_out", "self_attn.o_proj"),
+    ("linear_pos", "self_attn.relative_k_proj"),
+    ("norm_conv", "norm_conv"),
+    ("conv_pw1", "conv.pointwise_conv1"),
+    ("conv_dw", "conv.depthwise_conv"),
+    ("conv_norm", "conv.norm"),
+    ("conv_pw2", "conv.pointwise_conv2"),
+    ("ffn_norm_1", "norm_feed_forward2"),
+    ("ffn_up_1", "feed_forward2.linear1"),
+    ("ffn_down_1", "feed_forward2.linear2"),
+    ("ln2", "norm_out"),
+    ("pos_bias_u", "self_attn.bias_u"),
+    ("pos_bias_v", "self_attn.bias_v"),
+];
 
 /// The trunk and head sizes, from the GGUF's `lfm2.*` keys.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -41,6 +89,20 @@ pub struct Config {
     pub max_position_embeddings: usize,
     pub rms_norm_eps: f64,
     pub layer_norm_eps: f64,
+    /// the projector GGUF's vision tower, when one loads beside the model
+    #[serde(default)]
+    pub vision: Option<VisionConfig>,
+    /// the projector GGUF's audio encoder, from its `clip.audio.*` keys
+    #[serde(default)]
+    pub audio: Option<EncoderConfig>,
+}
+
+/// LFM2-VL's tower and the projector's MLP width, from the projector GGUF's `clip.vision.*` keys.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct VisionConfig {
+    pub tower: lfm2_vl::config::VisionConfig,
+    pub projector_hidden_size: usize,
+    pub downsample_factor: usize,
 }
 
 impl Config {
@@ -61,7 +123,8 @@ struct ShortConv {
 }
 
 impl ShortConv {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+    /// The last of `media_len` media entries does not read the text on its right.
+    fn forward(&self, xs: &Tensor, media_len: usize) -> Result<Tensor> {
         let (b_sz, seq_len, width) = xs.dims3()?;
         let bcx = self.in_proj.forward(xs)?;
         let part = |i: usize| bcx.narrow(D::Minus1, i * width, width);
@@ -71,7 +134,14 @@ impl ShortConv {
             // a tap outside the sequence reads zero
             let zero = Tensor::zeros((b_sz, 1, width), bx.dtype(), bx.device())?;
             let prev = Tensor::cat(&[&zero, &bx.narrow(1, 0, seq_len - 1)?], 1)?;
-            let next = Tensor::cat(&[&bx.narrow(1, 1, seq_len - 1)?, &zero], 1)?;
+            let mut next = Tensor::cat(&[&bx.narrow(1, 1, seq_len - 1)?, &zero], 1)?;
+            if media_len > 0 && media_len < seq_len {
+                let mut keep = vec![1f32; seq_len];
+                keep[media_len - 1] = 0.0;
+                let keep =
+                    Tensor::from_vec(keep, (1, seq_len, 1), bx.device())?.to_dtype(bx.dtype())?;
+                next = next.broadcast_mul(&keep)?;
+            }
             y = (y + prev.broadcast_mul(&self.taps[0])?)?;
             y = (y + next.broadcast_mul(&self.taps[2])?)?;
         }
@@ -94,7 +164,7 @@ struct Attention {
 }
 
 impl Attention {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor, mask: &AttentionMask) -> Result<Tensor> {
         let (b_sz, seq_len, width) = xs.dims3()?;
         let heads = |proj: &Arc<dyn QuantMethod>, n: usize, norm: Option<&RmsNorm>| {
             let x = proj
@@ -125,14 +195,8 @@ impl Attention {
             sinks: None,
             chunk: None,
         };
-        let attn = Sdpa.run_attention(
-            &q,
-            &k,
-            &v,
-            &AttentionMask::None,
-            Some(&FlashParams::empty(false)),
-            &params,
-        )?;
+        let attn =
+            Sdpa.run_attention(&q, &k, &v, mask, Some(&FlashParams::empty(false)), &params)?;
         self.o
             .forward(&attn.transpose(1, 2)?.reshape((b_sz, seq_len, width))?)
     }
@@ -153,11 +217,11 @@ struct TrunkLayer {
 }
 
 impl TrunkLayer {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor, mask: &AttentionMask, media_len: usize) -> Result<Tensor> {
         let normed = self.norm.forward(xs)?;
         let mixed = match &self.mixer {
-            Mixer::Conv(conv) => conv.forward(&normed)?,
-            Mixer::Attention(attn) => attn.forward(&normed)?,
+            Mixer::Conv(conv) => conv.forward(&normed, media_len)?,
+            Mixer::Attention(attn) => attn.forward(&normed, mask)?,
         };
         let xs = (xs + mixed)?;
         let normed = self.ffn_norm.forward(&xs)?;
@@ -166,7 +230,139 @@ impl TrunkLayer {
     }
 }
 
+/// LFM2-VL's tower, projector and image processor; d1-omni's projector uses the exact GELU and no input norm.
+struct Vision {
+    tower: lfm2_vl::vision::VisionModel,
+    projector: lfm2_vl::MultiModalProjector,
+    processor: lfm2_vl::inputs_processor::Lfm2VlImageProcessor,
+    preprocessor: PreProcessorConfig,
+    device: Device,
+}
+
+/// The projector's FastConformer (as our Parakeet encoder, in f32 as llama.cpp runs it), its adapter into the
+/// trunk's width and the residual block after it, with NeMo's features.
+struct Audio {
+    encoder: AudioEncoder,
+    mel: NemoMel,
+    adapter: [Linear; 2],
+    adapter_norm: LayerNorm,
+    residual: [Linear; 2],
+    residual_norm: LayerNorm,
+    device: Device,
+}
+
+/// The projector's `a.*` tensors under our encoder's names, in PyTorch's conv layouts.
+fn audio_encoder_weights(vb: &ShardedVarBuilder, layers: usize) -> Result<HashMap<String, Tensor>> {
+    let get = |name: &str| vb.get_unchecked_dtype(name, DType::F32);
+    let mut weights = HashMap::new();
+    for i in PRE_ENCODE_CONVS {
+        let conv = format!("subsampling.layers.{i}");
+        weights.insert(
+            format!("{conv}.weight"),
+            get(&format!("conv1d.{i}.weight"))?,
+        );
+        weights.insert(
+            format!("{conv}.bias"),
+            get(&format!("conv1d.{i}.bias"))?.flatten_all()?,
+        );
+    }
+    for suffix in ["weight", "bias"] {
+        weights.insert(
+            format!("subsampling.linear.{suffix}"),
+            get(&format!("pre_encode.out.{suffix}"))?,
+        );
+    }
+    for layer in 0..layers {
+        let block = vb.pp("blk").pp(layer);
+        for (theirs, ours) in AUDIO_BLOCK_NAMES {
+            let ours = format!("layers.{layer}.{ours}");
+            if block.contains_tensor(theirs) {
+                weights.insert(ours, block.get_unchecked_dtype(theirs, DType::F32)?);
+                continue;
+            }
+            for suffix in ["weight", "bias"] {
+                let name = format!("{theirs}.{suffix}");
+                if !block.contains_tensor(&name) {
+                    continue;
+                }
+                let t = block.get_unchecked_dtype(&name, DType::F32)?;
+                // the 1x1 convs are stored as matrices and the depthwise one without its group axis
+                let t = match (theirs, suffix) {
+                    ("conv_pw1" | "conv_pw2", "weight") => t.unsqueeze(2)?,
+                    ("conv_dw", "weight") => t.unsqueeze(1)?,
+                    _ => t,
+                };
+                weights.insert(format!("{ours}.{suffix}"), t);
+            }
+        }
+    }
+    Ok(weights)
+}
+
+impl Audio {
+    fn new(cfg: &EncoderConfig, vb: ShardedVarBuilder) -> Result<Self> {
+        let device = vb.device().clone();
+        let weights = audio_encoder_weights(&vb.pp(AUDIO_ENCODER), cfg.num_hidden_layers)?;
+        let encoder =
+            AudioEncoder::new(cfg, VarBuilder::from_tensors(weights, DType::F32, &device))?;
+        let mlp = vb.pp(AUDIO_ADAPTER);
+        let get = |i: usize, suffix: &str| mlp.pp(i).get_unchecked_dtype(suffix, DType::F32);
+        let linear = |i: usize| -> Result<Linear> {
+            Ok(Linear::new(get(i, "weight")?, Some(get(i, "bias")?)))
+        };
+        let norm = |i: usize| -> Result<LayerNorm> {
+            Ok(LayerNorm::new(
+                get(i, "weight")?,
+                get(i, "bias")?,
+                AUDIO_NORM_EPS,
+            ))
+        };
+        let mel = NemoMel::new(NemoMelConfig {
+            sample_rate: AUDIO_SAMPLE_RATE,
+            n_fft: AUDIO_N_FFT,
+            win_length: AUDIO_WINDOW,
+            hop_length: AUDIO_HOP,
+            n_mels: cfg.num_mel_bins,
+            preemphasis: Some(AUDIO_PREEMPHASIS),
+            normalize: true,
+        });
+        Ok(Self {
+            encoder,
+            mel,
+            adapter_norm: norm(0)?,
+            adapter: [linear(1)?, linear(3)?],
+            residual_norm: norm(4)?,
+            residual: [linear(5)?, linear(6)?],
+            device,
+        })
+    }
+
+    /// One clip's `(rows, width)` embeddings: NeMo features over at most 30 s, the encoder, then the adapter.
+    fn embeds(&self, audio: &inference_audio::AudioInput) -> Result<Tensor> {
+        let mut pcm =
+            inference_audio::mel::resample(&audio.to_mono(), audio.sample_rate, AUDIO_SAMPLE_RATE)
+                .map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
+        pcm.truncate(AUDIO_MAX_SAMPLES);
+        if pcm.len() < AUDIO_MIN_SAMPLES {
+            pcm.resize(AUDIO_MIN_SAMPLES, 0.0);
+        }
+        let (features, frames) = self
+            .mel
+            .features(&pcm)
+            .map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
+        let n_mels = self.mel.config().n_mels;
+        let features = Tensor::from_vec(features, (1, frames, n_mels), &self.device)?;
+        let xs = self.encoder.forward(&features)?.squeeze(0)?;
+        let mlp =
+            |[up, down]: &[Linear; 2], xs: &Tensor| down.forward(&up.forward(xs)?.gelu_erf()?);
+        let xs = mlp(&self.adapter, &self.adapter_norm.forward(&xs)?)?;
+        &xs + mlp(&self.residual, &self.residual_norm.forward(&xs)?)?
+    }
+}
+
 pub struct Model {
+    vision: Option<Vision>,
+    audio: Option<Audio>,
     embed_tokens: Embedding,
     layers: Vec<TrunkLayer>,
     norm: RmsNorm,
@@ -175,6 +371,7 @@ pub struct Model {
     scorer_norm: LayerNorm,
     scorer_hidden: Arc<dyn QuantMethod>,
     scorer_out: Arc<dyn QuantMethod>,
+    max_positions: usize,
     device: Device,
 }
 
@@ -287,7 +484,54 @@ impl Model {
                 Some(cls.pp("output").get(1, "bias")?),
             ),
         ))?);
+        let vision = cfg
+            .vision
+            .as_ref()
+            .map(|vision| -> Result<Vision> {
+                let shape = lfm2_vl::ProjectorShape {
+                    downsample_factor: vision.downsample_factor,
+                    use_layernorm: false,
+                    hidden_size: vision.projector_hidden_size,
+                    out_size: width,
+                    bias: true,
+                    activation: crate::layers::Activation::Gelu,
+                };
+                let tiling = lfm2_vl::config::Tiling {
+                    downsample_factor: vision.downsample_factor,
+                    ..Default::default()
+                };
+                // llama.cpp resizes bilinearly (PIL's 2), the pixels normalized to [-1, 1]
+                let preprocessor = PreProcessorConfig {
+                    resampling: Some(BILINEAR),
+                    ..Default::default()
+                };
+                Ok(Vision {
+                    tower: lfm2_vl::vision::VisionModel::new(
+                        &vision.tower,
+                        head.pp(VISION_TOWER).pp("vision_model"),
+                    )?,
+                    projector: lfm2_vl::MultiModalProjector::with_shape(
+                        vision.tower.hidden_size,
+                        &shape,
+                        head.pp(PROJECTOR),
+                    )?,
+                    processor: lfm2_vl::inputs_processor::Lfm2VlImageProcessor::with_tiling(
+                        &tiling,
+                        &preprocessor,
+                    ),
+                    preprocessor,
+                    device: head.device().clone(),
+                })
+            })
+            .transpose()?;
+        let audio = cfg
+            .audio
+            .as_ref()
+            .map(|audio| Audio::new(audio, head.clone()))
+            .transpose()?;
         Ok(Self {
+            vision,
+            audio,
             embed_tokens: dense_embedding(cfg.vocab_size, width, vb.pp("token_embd"), &None)?,
             layers,
             norm: RmsNorm::new(width, cfg.rms_norm_eps, head.pp("token_embd_norm"))?,
@@ -300,6 +544,7 @@ impl Model {
             scorer_norm: norm(cls.pp("norm"))?,
             scorer_hidden: linear(width, width, true, cls.clone())?,
             scorer_out,
+            max_positions: cfg.max_position_embeddings,
             device,
         })
     }
@@ -316,6 +561,100 @@ impl IsqModel for Model {
     }
 }
 
+impl Model {
+    /// A row's media as embeddings ahead of its text: its audio clip through the encoder and adapter, or each
+    /// image's crops through the tower and projector.
+    fn media_embeds(&self, media: &DecisionMedia, dtype: DType) -> Result<Tensor> {
+        if let [audio] = media.audios.as_slice() {
+            let Some(encoder) = &self.audio else {
+                inference_tensor::bail!(
+                    "d1-omni reads audio with its projector, which did not load"
+                );
+            };
+            return encoder
+                .embeds(audio)?
+                .to_device(&self.device)?
+                .to_dtype(dtype);
+        }
+        let Some(vision) = &self.vision else {
+            inference_tensor::bail!("d1-omni reads images with its projector, which did not load");
+        };
+        let device = &vision.device;
+        let processed = vision.processor.preprocess(
+            media.images.clone(),
+            Vec::new(),
+            &vision.preprocessor,
+            device,
+            (media.images.len(), 1),
+        )?;
+        let (Some(mask), Some(shapes)) = (processed.pixel_attention_mask, processed.tgt_sizes)
+        else {
+            inference_tensor::bail!("the LFM2-VL processor gave no patch masks");
+        };
+        lfm2_vl::image_features(
+            &vision.tower,
+            &vision.projector,
+            &processed.pixel_values.to_device(device)?,
+            &mask.to_device(device)?,
+            &shapes.to_device(device)?,
+            self.embed_tokens.hidden_size(),
+        )?
+        .to_device(&self.device)?
+        .to_dtype(dtype)
+    }
+
+    /// The trunk and the norm over `xs`, whose first `media_len` entries are media the text is not read by.
+    fn trunk(&self, xs: Tensor, media_len: usize) -> Result<Tensor> {
+        let mask = match media_len {
+            0 => AttentionMask::None,
+            m => AttentionMask::Custom(kind_mask(xs.dim(1)?, m, false, xs.dtype(), xs.device())?),
+        };
+        let mut xs = xs;
+        for layer in &self.layers {
+            xs = layer.forward(&xs, &mask, media_len)?;
+        }
+        self.norm.forward(&xs)
+    }
+
+    /// The head blocks over the trunk's states with each row's question-type embedding added.
+    fn head(&self, xs: &Tensor, kinds: &[u32], media_len: usize) -> Result<Tensor> {
+        let kinds = Tensor::new(kinds, xs.device())?;
+        let mut xs = xs.broadcast_add(&self.type_emb.forward(&kinds)?.unsqueeze(1)?)?;
+        let mask = match media_len {
+            0 => AttentionMask::None,
+            m => AttentionMask::Custom(kind_mask(xs.dim(1)?, m, true, xs.dtype(), xs.device())?),
+        };
+        for block in &self.blocks {
+            xs = block.forward_masked(&xs, &mask)?;
+        }
+        Ok(xs)
+    }
+}
+
+/// The additive mask over `[media | text]`: media rows never read text; in the head, each kind reads only its own.
+fn kind_mask(
+    len: usize,
+    media_len: usize,
+    own_kind_only: bool,
+    dtype: DType,
+    device: &Device,
+) -> Result<Tensor> {
+    let mut mask = vec![0f32; len * len];
+    for i in 0..len {
+        for j in 0..len {
+            let (row_media, col_media) = (i < media_len, j < media_len);
+            let hidden = match own_kind_only {
+                true => row_media != col_media,
+                false => row_media && !col_media,
+            };
+            if hidden {
+                mask[i * len + j] = f32::NEG_INFINITY;
+            }
+        }
+    }
+    Tensor::from_vec(mask, (1, 1, len, len), device)?.to_dtype(dtype)
+}
+
 impl EmbeddingModel for Model {
     fn forward(
         &self,
@@ -326,16 +665,85 @@ impl EmbeddingModel for Model {
         let Some(rows) = &extras.decision else {
             inference_tensor::bail!("a decision model answers decision questions only");
         };
-        let mut xs = self.embed_tokens.forward(input_ids)?;
-        for layer in &self.layers {
-            xs = layer.forward(&xs)?;
-        }
-        let xs = self.norm.forward(&xs)?;
-        let kinds = Tensor::new(rows.kinds.as_slice(), xs.device())?;
-        let mut xs = xs.broadcast_add(&self.type_emb.forward(&kinds)?.unsqueeze(1)?)?;
-        for block in &self.blocks {
-            xs = block.forward(&xs)?;
-        }
+        let text = self.embed_tokens.forward(input_ids)?;
+        let xs = match rows.media.iter().any(Option::is_some) {
+            false => {
+                let xs = self.trunk(text, 0)?;
+                self.head(&xs, &rows.kinds, 0)?
+            }
+            // a row with media runs alone, its media ahead of its text and its markers moved past them
+            true => {
+                let mut picked = Vec::with_capacity(rows.kinds.len());
+                for (row, media) in rows.media.iter().enumerate() {
+                    let text = text.narrow(0, row, 1)?;
+                    let (xs, media_len) = match media {
+                        Some(media) => {
+                            let embeds = match media.embeds.get() {
+                                Some(embeds) => embeds.to_device(&self.device)?,
+                                None => {
+                                    let embeds = self.media_embeds(media, text.dtype())?;
+                                    // the request drops it off the engine thread, where a device free has no context
+                                    let _ = media.embeds.set(embeds.to_device(&Device::Cpu)?);
+                                    embeds
+                                }
+                            };
+                            let embeds = embeds.unsqueeze(0)?;
+                            let media_len = embeds.dim(1)?;
+                            // llama.cpp cuts the text to the room the media leave; the API cuts it before it knows
+                            if media_len + text.dim(1)? > self.max_positions {
+                                inference_tensor::bail!(
+                                    "the media take {media_len} of the {} positions, send fewer images",
+                                    self.max_positions
+                                );
+                            }
+                            (Tensor::cat(&[&embeds, &text], 1)?, media_len)
+                        }
+                        None => (text, 0),
+                    };
+                    let xs = self.trunk(xs, media_len)?;
+                    let xs = self.head(&xs, &rows.kinds[row..=row], media_len)?;
+                    let shift = u32::try_from(media_len)
+                        .map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
+                    let one = DecisionRows {
+                        kinds: vec![rows.kinds[row]],
+                        markers: vec![rows.markers[row].iter().map(|m| m + shift).collect()],
+                        media: vec![None],
+                    };
+                    picked.push(modern_bert_decision::Model::markers(&xs, &one)?);
+                }
+                let most = picked
+                    .iter()
+                    .map(|p| p.dim(1))
+                    .collect::<Result<Vec<_>>>()?;
+                let most = most.into_iter().max().unwrap_or(0);
+                let picked = picked
+                    .into_iter()
+                    .map(|p| {
+                        let pad = most - p.dim(1)?;
+                        match pad {
+                            0 => Ok(p),
+                            pad => Tensor::cat(
+                                &[
+                                    &p,
+                                    &Tensor::zeros((1, pad, p.dim(2)?), p.dtype(), p.device())?,
+                                ],
+                                1,
+                            ),
+                        }
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let picked = Tensor::cat(&picked, 0)?;
+                let hidden = self
+                    .scorer_hidden
+                    .forward(&self.scorer_norm.forward(&picked)?)?
+                    .gelu_erf()?;
+                return self
+                    .scorer_out
+                    .forward(&hidden)?
+                    .squeeze(D::Minus1)?
+                    .to_dtype(DType::F32);
+            }
+        };
         let picked = modern_bert_decision::Model::markers(&xs, rows)?;
         let hidden = self
             .scorer_hidden
@@ -377,6 +785,8 @@ mod tests {
             max_position_embeddings: 32,
             rms_norm_eps: 1e-5,
             layer_norm_eps: 1e-5,
+            vision: None,
+            audio: None,
         }
     }
 
@@ -471,6 +881,7 @@ mod tests {
             decision: Some(DecisionRows {
                 kinds: vec![0],
                 markers: vec![vec![1]],
+                media: vec![None],
             }),
             ..Default::default()
         };
@@ -496,5 +907,36 @@ mod tests {
         assert_ne!(score(&model, &[3, 4, 5, 6, 9]), base);
         // and the same prompt scores the same
         assert_eq!(score(&model, &[3, 4, 5, 6, 7]), base);
+    }
+
+    // media ahead of the prompt never read the text, through either mixer, while the text reads them
+    #[test]
+    fn media_rows_do_not_read_the_text() {
+        let model = model();
+        let media = Tensor::from_vec(
+            (0..2 * WIDTH).map(|i| (i as f32 * 0.21).cos()).collect(),
+            (1, 2, WIDTH),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let trunk = |tokens: &[u32], media: &Tensor| {
+            let ids = Tensor::new(tokens, &Device::Cpu)
+                .unwrap()
+                .unsqueeze(0)
+                .unwrap();
+            let text = model.embed_tokens.forward(&ids).unwrap();
+            let xs = Tensor::cat(&[media, &text], 1).unwrap();
+            let out = model.trunk(xs, 2).unwrap();
+            let rows = |start, len| out.narrow(1, start, len).unwrap().flatten_all().unwrap();
+            (
+                rows(0, 2).to_vec1::<f32>().unwrap(),
+                rows(2, tokens.len()).to_vec1::<f32>().unwrap(),
+            )
+        };
+        let (media_rows, text_rows) = trunk(&[3, 4, 5], &media);
+        let (other_media_rows, _) = trunk(&[9, 8, 7], &media);
+        assert_eq!(media_rows, other_media_rows);
+        let (_, other_text_rows) = trunk(&[3, 4, 5], &(&media * 2.0).unwrap());
+        assert_ne!(text_rows, other_text_rows);
     }
 }
