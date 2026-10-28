@@ -21,6 +21,7 @@ const SEP: &str = "</s>";
 const MASK: &str = "<|IMAGE_PLACEHOLDER|>";
 const WEIGHT_STD: f32 = 0.5;
 const PROBABILITY_SUM_TOLERANCE: f64 = 1e-6;
+const BATCH_TOLERANCE: f64 = 1e-6;
 // a choice of three falls in laya's `choice:3-5` bucket, which takes precedence over the per-type temperature
 const CHOICE_3_5_TEMPERATURE: f64 = 2.5;
 
@@ -237,6 +238,23 @@ async fn a_choice_takes_its_option_count_temperature() -> anyhow::Result<()> {
     Ok(())
 }
 
+// a batch's f32 matmuls sum in another order than one row's
+fn same_answer(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    match (a, b) {
+        (serde_json::Value::Number(a), serde_json::Value::Number(b)) => {
+            (a.as_f64().unwrap_or(f64::NAN) - b.as_f64().unwrap_or(f64::NAN)).abs()
+                < BATCH_TOLERANCE
+        }
+        (serde_json::Value::Object(a), serde_json::Value::Object(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b)
+                    .all(|((ka, va), (kb, vb))| ka == kb && same_answer(va, vb))
+        }
+        _ => a == b,
+    }
+}
+
 // questions batched together answer as they do alone
 #[tokio::test]
 async fn each_question_answers_as_it_does_alone() -> anyhow::Result<()> {
@@ -249,10 +267,13 @@ async fn each_question_answers_as_it_does_alone() -> anyhow::Result<()> {
                 serde_json::json!({ id.clone(): question.clone() }),
             )?)
             .await?;
-        assert_eq!(
+        let (alone, together) = (
             serde_json::to_value(&alone.answers[id])?,
             serde_json::to_value(&together.answers[id])?,
-            "{id}"
+        );
+        assert!(
+            same_answer(&alone, &together),
+            "{id}: {alone} vs {together}"
         );
     }
     Ok(())

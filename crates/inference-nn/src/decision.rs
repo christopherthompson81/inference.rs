@@ -1,5 +1,6 @@
-//! Decision models (laya, Julia-1): a typed question about a state, answered by scoring one `[MASK]` marker per
-//! option in a `[CLS] question [SEP] [MASK] option ... [SEP] state [SEP]` sequence.
+//! Decision models: a typed question about a state, answered by scoring one `[MASK]` marker per option in a
+//! `[CLS] question [SEP] [MASK] option ... [SEP] state [SEP]` sequence (laya, Julia-1), or by a chat model's
+//! next-token logits of one label per option (`LabelDecision`).
 // positions within a prompt the model's budget keeps far below u32::MAX
 #![allow(clippy::cast_possible_truncation)]
 
@@ -18,6 +19,10 @@ const NOUL_TRUE: &str = "true";
 // laya's noul options when the question names no criteria
 const LAYA_NOUL_FALSE: &str = "no, the statement does not hold";
 const LAYA_NOUL_TRUE: &str = "yes, the statement holds";
+// llama.cpp reads at most this many label codes, the largest option count its requests allow
+const MAX_LABELS: usize = 255;
+/// lev answers a noul by rating it on this many levels
+pub const LEV_NOUL_RATINGS: usize = 9;
 
 /// How a checkpoint renders its options; the model and its budgets are otherwise the same.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -258,6 +263,175 @@ impl DecisionSpec {
     }
 }
 
+/// How a chat model reads a decision from its next-token logits, one label token per option (llama.cpp's
+/// label-coded decision types).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LabelFamily {
+    OpenJev,
+    Lev,
+    Nimble,
+    PplxDecider,
+    VllmD3,
+}
+
+impl LabelFamily {
+    /// The `<arch>.decision.type` a GGUF names the family by.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "openjev" => Self::OpenJev,
+            "lev" => Self::Lev,
+            "nimble" => Self::Nimble,
+            "pplx-decider" => Self::PplxDecider,
+            "vllm-d3" => Self::VllmD3,
+            _ => return None,
+        })
+    }
+
+    /// The family's label texts in option order; openjev's letters must all be single tokens, the others keep the
+    /// codes that are.
+    fn label_codes(self) -> (Vec<String>, bool) {
+        match self {
+            Self::OpenJev => (
+                ('A'..='Z')
+                    .chain('a'..='z')
+                    .map(|c| c.to_string())
+                    .collect(),
+                true,
+            ),
+            _ => {
+                let letters = || 'A'..='Z';
+                let codes = letters()
+                    .map(|a| a.to_string())
+                    .chain(letters().flat_map(move |a| letters().map(move |b| format!("{a}{b}"))));
+                (codes.collect(), false)
+            }
+        }
+    }
+
+    /// noul's options as the template lists them: `[true, false]` for openjev, `[false, true]` otherwise.
+    pub fn noul_true_first(self) -> bool {
+        self == Self::OpenJev
+    }
+
+    /// A score's legend reports a non-text description as its key-sorted JSON.
+    pub fn canonical_legend(self) -> bool {
+        self == Self::VllmD3
+    }
+
+    /// The template reads each option's label text (openjev's letters are implied by position).
+    pub fn shows_labels(self) -> bool {
+        self != Self::OpenJev
+    }
+
+    /// The template lists every question of the request, not only the asked one.
+    pub fn lists_questions(self) -> bool {
+        self == Self::Nimble
+    }
+
+    /// The template input's object keys are sorted, as the model was trained.
+    pub fn sorts_keys(self) -> bool {
+        self == Self::Lev
+    }
+
+    /// A choice runs once per option order (lev: as given and reversed), to cancel the preference for the first label.
+    pub fn variants(self, kind: QuestionKind, n_options: usize) -> usize {
+        match (self, kind) {
+            (Self::Lev, QuestionKind::Choice) if n_options > 1 => 2,
+            _ => 1,
+        }
+    }
+
+    /// The labels read for a question: lev rates a noul on a scale at its first labels.
+    pub fn outputs(self, kind: QuestionKind, n_options: usize) -> usize {
+        match (self, kind) {
+            (Self::Lev, QuestionKind::Noul) => LEV_NOUL_RATINGS,
+            _ => n_options,
+        }
+    }
+
+    /// The checkpoint reads its prompt with non-causal full attention (`noncausal_full_attention` in its decision
+    /// config), whether or not its GGUF says so.
+    pub fn non_causal(self) -> bool {
+        matches!(self, Self::PplxDecider | Self::VllmD3)
+    }
+
+    /// The confidence is one minus the normalized entropy, not TypeSafe's per-type formulas.
+    pub fn entropy_confidence(self) -> bool {
+        self == Self::VllmD3
+    }
+}
+
+/// A label-coded decision model's prompt template and calibration, from its GGUF metadata.
+#[derive(Clone, Debug)]
+pub struct LabelDecision {
+    pub family: LabelFamily,
+    /// the `systemone` chat template, rendered with the question, its options and the state
+    pub template: String,
+    /// by `<type>.<bucket>` or `<type>`
+    pub temperatures: HashMap<String, f32>,
+    /// by level count, added to a score's logits
+    pub score_bias: HashMap<usize, Vec<f32>>,
+    /// the token read for each option, in order, and the text the template shows for it
+    pub labels: Vec<u32>,
+    pub label_texts: Vec<String>,
+}
+
+impl LabelDecision {
+    /// The labels from the family's codes; `encode` tokenizes a code without specials.
+    pub fn new<E: std::fmt::Display>(
+        family: LabelFamily,
+        template: String,
+        temperatures: HashMap<String, f32>,
+        score_bias: HashMap<usize, Vec<f32>>,
+        mut encode: impl FnMut(&str) -> Result<Vec<u32>, E>,
+    ) -> Result<Self, String> {
+        let (codes, all_single) = family.label_codes();
+        let mut labels = Vec::new();
+        let mut label_texts = Vec::new();
+        for code in codes {
+            match encode(&code).map_err(|e| e.to_string())?.as_slice() {
+                [token] if labels.len() < MAX_LABELS => {
+                    labels.push(*token);
+                    label_texts.push(code);
+                }
+                _ if all_single => {
+                    return Err(format!("decision label `{code}` is not a single token"));
+                }
+                _ => {}
+            }
+        }
+        if !family.shows_labels() {
+            label_texts.clear();
+        }
+        Ok(Self {
+            family,
+            template,
+            temperatures,
+            score_bias,
+            labels,
+            label_texts,
+        })
+    }
+
+    /// The temperature for a question type and option count, in the buckets it was fit over; 1 without one.
+    pub fn temperature(&self, kind: QuestionKind, n_options: usize) -> f32 {
+        let bucket = match (self.family, n_options) {
+            (LabelFamily::Lev, 0..=8) => "small",
+            (LabelFamily::Lev, 9..=26) => "mid",
+            (LabelFamily::Lev, _) => "large",
+            (_, 0..=2) => "2",
+            (_, 3..=5) => "3_5",
+            (_, 6..=10) => "6_10",
+            _ => "11",
+        };
+        self.temperatures
+            .get(&format!("{}.{bucket}", kind.name()))
+            .or_else(|| self.temperatures.get(kind.name()))
+            .copied()
+            .unwrap_or(1.0)
+    }
+}
+
 fn described(option: &DecisionOption) -> Option<&str> {
     option
         .description
@@ -421,5 +595,71 @@ mod tests {
             ..spec
         };
         assert_eq!(uncalibrated.temperature(QuestionKind::Score, 5), 1.0);
+    }
+
+    // a vocabulary whose single letters are single tokens and whose two-letter codes are not, except "AB"
+    fn encode_codes(code: &str) -> Result<Vec<u32>, String> {
+        Ok(match code {
+            "AB" => vec![1000],
+            _ => code.bytes().map(u32::from).collect(),
+        })
+    }
+
+    fn decision(family: LabelFamily, temperatures: &[(&str, f32)]) -> LabelDecision {
+        let temperatures = temperatures
+            .iter()
+            .map(|(name, t)| (name.to_string(), *t))
+            .collect();
+        LabelDecision::new(
+            family,
+            String::new(),
+            temperatures,
+            HashMap::new(),
+            encode_codes,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn coded_labels_keep_the_single_token_codes_in_order() {
+        let nimble = decision(LabelFamily::Nimble, &[]);
+        assert_eq!(nimble.labels.len(), 27);
+        assert_eq!(nimble.label_texts[..2], ["A", "B"]);
+        assert_eq!(nimble.label_texts[26], "AB");
+        assert_eq!(nimble.labels[26], 1000);
+        let openjev = decision(LabelFamily::OpenJev, &[]);
+        assert_eq!(openjev.labels.len(), 52);
+        assert_eq!(openjev.labels[26], u32::from(b'a'));
+        assert!(openjev.label_texts.is_empty());
+    }
+
+    #[test]
+    fn openjev_needs_every_letter_as_one_token() {
+        let split = |code: &str| -> Result<Vec<u32>, String> {
+            Ok(match code {
+                "q" => vec![1, 2],
+                _ => vec![3],
+            })
+        };
+        let err = LabelDecision::new(
+            LabelFamily::OpenJev,
+            String::new(),
+            HashMap::new(),
+            HashMap::new(),
+            split,
+        )
+        .unwrap_err();
+        assert!(err.contains("`q`"), "{err}");
+    }
+
+    #[test]
+    fn temperature_takes_the_bucket_then_the_type() {
+        let nimble = decision(LabelFamily::Nimble, &[("choice.3_5", 2.0), ("choice", 3.0)]);
+        assert_eq!(nimble.temperature(QuestionKind::Choice, 4), 2.0);
+        assert_eq!(nimble.temperature(QuestionKind::Choice, 6), 3.0);
+        assert_eq!(nimble.temperature(QuestionKind::Score, 4), 1.0);
+        let lev = decision(LabelFamily::Lev, &[("choice.mid", 5.0)]);
+        assert_eq!(lev.temperature(QuestionKind::Choice, 9), 5.0);
+        assert_eq!(lev.temperature(QuestionKind::Choice, 8), 1.0);
     }
 }

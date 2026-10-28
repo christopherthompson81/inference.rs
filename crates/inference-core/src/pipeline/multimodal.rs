@@ -576,6 +576,10 @@ impl MultimodalLoader {
             source_weight_files,
             source_weight_source: weight_source,
             dynamic_lora,
+            label_decision: self
+                .prepared_source
+                .as_ref()
+                .and_then(|source| source.label_decision.clone()),
         })?;
         Ok(super::loading::LoadOutcome::Pipeline(Arc::new(Mutex::new(
             DecoderPipeline::new(

@@ -106,6 +106,7 @@ pub struct InferenceRsConfig {
     pub modalities: Modalities,
     pub max_seq_len: Option<usize>,
     pub generation_defaults: Option<ModelGenerationDefaults>,
+    pub label_decision: Option<Arc<crate::decision::LabelDecision>>,
 }
 
 /// What a model was loaded from, able to build its loader again; `inference_selection::ModelSelected` is the usual one.

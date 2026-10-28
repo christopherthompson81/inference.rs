@@ -12,6 +12,7 @@ pub mod engine;
 pub mod engine_chat;
 pub mod engine_completion;
 mod engine_decision;
+mod engine_decision_labels;
 pub mod engine_embeddings;
 pub mod engine_logits;
 mod engine_rerank;

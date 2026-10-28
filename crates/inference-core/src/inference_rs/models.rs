@@ -169,6 +169,22 @@ impl InferenceRs {
         }
     }
 
+    /// How a model answers decisions by label logits, when its GGUF carries a decision profile.
+    pub fn label_decision(
+        &self,
+        model_id: Option<&str>,
+    ) -> Result<Option<Arc<crate::decision::LabelDecision>>, InferenceRsError> {
+        let resolved_model_id = self.resolve_alias_or_default(model_id)?;
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| InferenceRsError::EnginePoisoned)?;
+        engines
+            .get(&resolved_model_id)
+            .map(|engine_instance| engine_instance.config.label_decision.clone())
+            .ok_or(InferenceRsError::EnginePoisoned)
+    }
+
     /// Add a new model engine to the InferenceRs instance
     pub fn add_model<'a>(
         &'a self,

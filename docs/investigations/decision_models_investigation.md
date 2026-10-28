@@ -100,3 +100,132 @@ Finding: both load from their folders alone, through `/v1/decisions` (the descri
 TypeSafe's alias), and the multilingual variant is exact. `typed-decisions/` was only loaded, not compared.
 
 Implication: phase 1 is complete for the ModernBERT decision models: laya (three variants) and Julia-1.
+
+## Run 5 - 2026-10-27 20:20
+
+Question: phase 2, the label-logit types: what does llama.cpp's runtime do for them, where does each type's prompt
+come from, and what does our engine lack?
+
+Command: read `tools/server/server-decision.cpp` (`init`, `render_options`, `render`, `fill_task`,
+`get_temperature`, `get_decision_confidence`, `format_answer`), `conversion/qwen.py` (`OpenJevModel`), openjev's
+`helper/shim.py`; our `engine_logits.rs`, `pipeline/step.rs`, `pipeline/inputs_processor.rs`.
+
+Finding:
+- Prompts: llama.cpp's converter writes each type's prompt as a `systemone` chat template (ported from the model
+  repo's shim; openjev's is a Qwen chat turn listing `[A] key: description` options and ending in an empty `<think>`
+  block), its temperatures (`<arch>.decision.temperature.<type>[.<bucket>]`, buckets `2`, `3_5`, `6_10`, `11`; lev
+  `small`/`mid`/`large`), score biases and `<arch>.decision.type`. The runtime renders the template with the state,
+  the question and its options (each with a `label` for the coded types), tokenizes with special tokens parsed, and
+  reads the logits of one label token per option at the last prompt position.
+- Labels: openjev A-Z then a-z, each a single token; lev / granite-switch / nimble / pplx-decider / vllm-d3 the codes
+  A-Z then AA-ZZ that are single tokens; h2o-lightning the `<arch>.decision.labels` texts; lfm2-d1 per question type,
+  groups of tokens per option. Noul's options are `[true, false]` for openjev, granite-switch, lfm2-d1 and
+  h2o-lightning. lev shows a choice in two orders and averages the reversed one back; its noul is read as a rating
+  scale (9 labels) and answered as the expected rating.
+- Answers: softmax at the temperature, plus the score bias for its level count; the variants averaged. Confidence is
+  per type: TypeSafe's published formulas (choice `(p_max - 1/k) / (1 - 1/k)`, score one minus the mean distance to
+  the mode over a uniform's) for most, normalized entropy for vllm-d3 and vllm-decision2. llama.cpp also uses
+  TypeSafe's for laya, where laya's own code (and phase 1) uses normalized entropy; phase 1 follows laya.
+- Our engine: `engine_logits` returns every position's full logits (`return_raw_logits` widens the logits window to
+  the whole prompt in the inputs processor); a decision needs one position's.
+
+Implication: (1) a last-position raw-logits mode: the forward returns logits instead of sampling, the inputs
+processor keeps its usual last-token window; (2) the label-logit runtime ported from llama.cpp, driven by a decision
+profile the GGUF's metadata gives (the safetensors checkpoints get built-in profiles, from the converter's templates,
+later); (3) parity against llama.cpp's `/v1/systemone` on the same GGUF, starting with the smallest checkpoints.
+
+## Run 6 - 2026-10-27 20:43
+
+Question: does the label path (GGUF decision profile, `systemone` template rendered with a llama.cpp-style
+`tojson`, label logits read by a capture logits processor on a one-token pass) match llama.cpp's `/v1/systemone` on
+the nimble GGUF (Qwen3.5 9B, Q4_K_M)?
+
+Command: llama.cpp `build_cuda/bin/llama-server -m Bespoke-Nimble-9B-v3-Q4_K_M.gguf -ngl 99 -c 8192 [-np 1]`;
+ours `target/debug/inference serve --format gguf -m <dir> -f Bespoke-Nimble-9B-v3-Q4_K_M.gguf` (CUDA, bf16);
+`scratchpad/decision/server_ref.py` (saves a server's answers over the synthetic `decision_requests.py` set),
+`compare.py`, and `logit_check.py` (renders one prompt with jinja2, tokenizes it on llama.cpp, then both servers'
+next-token top logprobs on those ids).
+
+Finding:
+- Engine: no new raw-logits mode was needed. A `CustomLogitsProcessor` sees the last position's logits before
+  sampling (no penalties in deterministic sampling), so a `max_len: 1` completion over the rendered token ids with a
+  capture processor yields the label logits; the prefix cache shares the request's common prompt.
+- Prompt: token counts per request equal llama.cpp's (944, 1270, 1838), and both servers agree on the top labels.
+- llama.cpp is not deterministic with its default 4 slots: the same request gave noul 0.398 then 0.373. With `-np 1`
+  it repeats exactly, and its decision answer equals the one its own `/completion` logits give.
+- Against the single-slot reference: same choice on every question; probabilities differ by up to 5.7e-2 (route
+  3e-5, kind 9e-5; the near-even ones most). Our logprobs come in multiples of 1/16: the logits leave lm_head in bf16,
+  whose step at magnitude 8-16 is 0.0625, so a label gap carries up to ~0.06 of rounding, which is the size of the
+  differences. `--dtype f32` to rule it out fails on this model (`fused_decode_recurrence_cuda only supports
+  f16/bf16`).
+
+Implication: the label path matches up to bf16 logit rounding; f32 logits (lm_head in f32) would tighten every
+label-type answer and is its own change across the models' heads. Next: a second family with the other options
+(noul true first, canonical legend, entropy confidence), then tests.
+
+## Run 7 - 2026-10-27 20:50
+
+Question: does a second label family (vllm-d3-nano, Qwen3.5 2B, Q8_0: canonical legend, entropy confidence) match?
+
+Command: as Run 6 with `ggml-org/vllm-d3-nano-GGUF` `vllm-d3-nano-Q8_0.gguf`; llama.cpp needs `-b 4096 -ub 4096`
+here (`input (810 tokens) is too large to process. increase the physical batch size`), then `compare.py` and
+`logit_check.py` on the `kind` question.
+
+Finding:
+- Same choices and prompt token counts (326, 388, 1621), but probabilities off by up to 0.12 and confidences far
+  apart (kind 0.978 vs 0.702), more than bf16 rounding on a Q8_0 model explains.
+- On identical token ids the raw next-token logprobs differ (llama.cpp top label -0.04, ours -0.39), so the gap is
+  the forward, not the decision path.
+- The GGUF sets `qwen35.attention.causal = false`: llama.cpp's `vllm_d3.py` converter writes it ("the full attention
+  layers see the whole prompt", the checkpoint's `attention_mode: noncausal_full_attention`) and llama.cpp reads it
+  into `hparams.causal_attn`, which also forces the whole prompt into one ubatch (the batch-size error above). We
+  run the full-attention layers causally.
+
+Implication: vllm-d3 needs a non-causal prompt pass in Qwen3.5's full-attention layers, with no prefix cache and no
+chunked prefill for such a model; that is a model-side change of its own. Until then a GGUF whose decision profile
+needs non-causal attention loads without the profile (with a warning), and `/v1/decisions` on a model without one
+fails with a clear message instead of answering wrong.
+
+## Run 8 - 2026-10-27 21:01
+
+Question: can pplx-decider be checked against llama.cpp, and does OpenJev-Flash carry a profile?
+
+Command: dumped the decision metadata of `perplexity-ai/pplx-decider-flash-gguf-v1.2` (`decider-flash-v1.2-q8_0.gguf`)
+and `openjev/OpenJev-Flash-9B-GGUF` (`OpenJev-Flash-9B-Q4_K_M.gguf`); read pplx-decider-flash-v1.2's
+`decision_config.json` and grepped llama.cpp's conversion and runtime for `noncausal` / `attention_mode`.
+
+Finding:
+- Neither GGUF has `<arch>.decision.*` or a `systemone` template (their publishers converted them, not llama.cpp's
+  decision converter), so neither server serves them as decision models. Both deleted.
+- Perplexity's GGUF sets `qwen35.attention.causal = false`, and the checkpoint's `decision_config.json` says
+  `attention_mode: noncausal_full_attention` (with `pooling: last`).
+- llama.cpp writes `causal = false` only in `VllmD3Model` (a subclass of `PplxDeciderModel`); `PplxDeciderModel`
+  itself does not, and nothing else reads `attention_mode`. So a pplx-decider GGUF from llama.cpp's converter would
+  run causally there (read from the code and config, not run). A candidate upstream report.
+- The tiny decision test also passed under `nimble` after moving it off `pplx-decider`.
+
+Implication: pplx-decider and vllm-d3 both need non-causal full attention; their families now load without a
+decision profile whatever the GGUF's causal flag says. Supported and checked: nimble (Run 6); openjev next on
+`ggml-org/OpenJev-GGUF` Q4_K_M (19.4 GB); lev has no GGUF to check against yet.
+
+## Run 9 - 2026-10-27 21:41
+
+Question: does openjev (letter labels, noul listed true first, per-type temperatures) match llama.cpp?
+
+Command: `ggml-org/OpenJev-GGUF` `OpenJev-Q4_K_M.gguf` (Qwen3.5 27B, causal, `temperature.choice/score = 0.85`,
+`noul = 1.555`); llama.cpp `llama-server -ngl 99 -c 8192 -np 1` alone on the GPU for `server_ref.py`, then ours
+`serve --format gguf` alone, then `compare.py`.
+
+Finding:
+- First attempt: the llama.cpp server was still running (20 GB), so our auto device map put layers 2-63 on the CPU
+  (17-19 prompt tok/s). Rerun with the GPU free: all 64 layers on cuda[0].
+- With the default sequence count our third request failed with `CUDA_ERROR_OUT_OF_MEMORY`: the plan reserved 48 MB of
+  activations (`max_seq_len: 4096, max_batch_size: 1`) for a 19.4 GB model on the 24 GB card, while a request's
+  questions prefill together. `--max-seqs 1` serves it. A planning gap of its own (the concurrent prefill a decision
+  request makes is not in the activation reserve), not a decision-path bug.
+- With `--max-seqs 1`: token counts equal (239, 298, 1550), same choice on every question, probabilities within
+  5.5e-2 (route 2e-5, kind 4e-5, repro noul 0.0332 vs 0.0330, which confirms the true-first order and noul's
+  temperature); the near-even answers differ most, as in Run 6 (bf16 logits).
+
+Implication: nimble and openjev match llama.cpp up to bf16 logit rounding. Left for later: f32 logits, non-causal
+full attention (pplx-decider, vllm-d3), the activation reserve for concurrent prefill, lev (no GGUF to test).
