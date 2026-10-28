@@ -21,7 +21,8 @@ const SEP: &str = "</s>";
 const MASK: &str = "<|IMAGE_PLACEHOLDER|>";
 const WEIGHT_STD: f32 = 0.5;
 const PROBABILITY_SUM_TOLERANCE: f64 = 1e-6;
-const BATCH_TOLERANCE: f64 = 1e-6;
+// a batched pass sums in another order than a lone one; on a GPU that moves an answer by about 1e-6
+const BATCH_TOLERANCE: f64 = 1e-5;
 // a choice of three falls in laya's `choice:3-5` bucket, which takes precedence over the per-type temperature
 const CHOICE_3_5_TEMPERATURE: f64 = 2.5;
 
