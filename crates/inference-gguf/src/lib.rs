@@ -9,7 +9,7 @@ pub mod gemma3_config;
 pub mod gemma3n_bindings;
 mod gguf_tokenizer;
 pub mod idefics3_bindings;
-mod lfm2_vl_bindings;
+pub mod lfm2_vl_bindings;
 pub mod llama4_bindings;
 pub mod metadata;
 mod mistral3_bindings;

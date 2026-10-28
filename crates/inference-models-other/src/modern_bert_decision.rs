@@ -92,6 +92,11 @@ impl Block {
     }
 
     pub(crate) fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        self.forward_masked(xs, &AttentionMask::None)
+    }
+
+    /// As `forward`, under an attention mask (d1-omni's media and text read only their own kind).
+    pub(crate) fn forward_masked(&self, xs: &Tensor, mask: &AttentionMask) -> Result<Tensor> {
         let (b_sz, seq_len, width) = xs.dims3()?;
         let head_dim = width / self.heads;
         let qkv = self.in_proj.forward(&self.norm1.forward(xs)?)?;
@@ -114,7 +119,7 @@ impl Block {
             &heads(0)?,
             &heads(1)?,
             &heads(2)?,
-            &AttentionMask::None,
+            mask,
             Some(&FlashParams::empty(false)),
             &params,
         )?;

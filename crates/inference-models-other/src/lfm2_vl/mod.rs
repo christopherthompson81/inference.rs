@@ -20,7 +20,17 @@ use crate::{
 
 pub use config::Config;
 
-struct MultiModalProjector {
+/// The projector's sizes: the pixel unshuffle factor, an optional input LayerNorm, the MLP's widths and activation.
+pub struct ProjectorShape {
+    pub downsample_factor: usize,
+    pub use_layernorm: bool,
+    pub hidden_size: usize,
+    pub out_size: usize,
+    pub bias: bool,
+    pub activation: crate::layers::Activation,
+}
+
+pub struct MultiModalProjector {
     factor: usize,
     layer_norm: Option<LayerNorm>,
     linear_1: Linear,
@@ -30,27 +40,43 @@ struct MultiModalProjector {
 
 impl MultiModalProjector {
     fn new(config: &Config, vb: ShardedVarBuilder) -> Result<Self> {
-        let in_channels = config.vision_config.hidden_size * config.downsample_factor.pow(2);
+        let shape = ProjectorShape {
+            downsample_factor: config.downsample_factor,
+            use_layernorm: config.projector_use_layernorm,
+            hidden_size: config.projector_hidden_size,
+            out_size: config.text_config.hidden_size,
+            bias: config.projector_bias,
+            activation: config.projector_hidden_act,
+        };
+        Self::with_shape(config.vision_config.hidden_size, &shape, vb)
+    }
+
+    pub fn with_shape(
+        vision_hidden: usize,
+        shape: &ProjectorShape,
+        vb: ShardedVarBuilder,
+    ) -> Result<Self> {
+        let in_channels = vision_hidden * shape.downsample_factor.pow(2);
         Ok(Self {
-            factor: config.downsample_factor,
-            layer_norm: if config.projector_use_layernorm {
+            factor: shape.downsample_factor,
+            layer_norm: if shape.use_layernorm {
                 Some(layer_norm(in_channels, 1e-5, vb.pp("layer_norm"))?)
             } else {
                 None
             },
             linear_1: linear_b(
                 in_channels,
-                config.projector_hidden_size,
-                config.projector_bias,
+                shape.hidden_size,
+                shape.bias,
                 vb.pp("linear_1"),
             )?,
             linear_2: linear_b(
-                config.projector_hidden_size,
-                config.text_config.hidden_size,
-                config.projector_bias,
+                shape.hidden_size,
+                shape.out_size,
+                shape.bias,
                 vb.pp("linear_2"),
             )?,
-            activation: config.projector_hidden_act,
+            activation: shape.activation,
         })
     }
 
@@ -93,6 +119,40 @@ impl MultiModalProjector {
         uvb.pp("linear_2").add(&self.linear_2);
         uvb.to_safetensors()
     }
+}
+
+/// Each crop's tower states, cut to its patches, through the projector: `[image tokens, hidden]`, crops in order.
+pub fn image_features(
+    vision_tower: &VisionModel,
+    projector: &MultiModalProjector,
+    pixel_values: &Tensor,
+    pixel_attention_mask: &Tensor,
+    spatial_shapes: &Tensor,
+    hidden: usize,
+) -> Result<Tensor> {
+    let last_hidden_state =
+        vision_tower.forward(pixel_values, pixel_attention_mask, spatial_shapes)?;
+    let mask_lengths = pixel_attention_mask
+        .sum(1)?
+        .to_dtype(DType::U32)?
+        .to_device(&Device::Cpu)?
+        .to_vec1::<u32>()?;
+    let shapes = spatial_shapes
+        .to_dtype(DType::U32)?
+        .to_device(&Device::Cpu)?
+        .to_vec2::<u32>()?;
+    let mut features = Vec::with_capacity(last_hidden_state.dim(0)?);
+    for image_idx in 0..last_hidden_state.dim(0)? {
+        let feature_len = mask_lengths[image_idx] as usize;
+        let height = shapes[image_idx][0] as usize;
+        let width = shapes[image_idx][1] as usize;
+        let feature = last_hidden_state
+            .get(image_idx)?
+            .narrow(0, 0, feature_len)?
+            .reshape((1, height, width, ()))?;
+        features.push(projector.forward(&feature)?.reshape(((), hidden))?);
+    }
+    Tensor::cat(&features, 0)
 }
 
 pub struct Lfm2VlModel {
@@ -150,34 +210,14 @@ impl Lfm2VlModel {
         pixel_attention_mask: &Tensor,
         spatial_shapes: &Tensor,
     ) -> Result<Tensor> {
-        let last_hidden_state =
-            self.vision_tower
-                .forward(pixel_values, pixel_attention_mask, spatial_shapes)?;
-        let mask_lengths = pixel_attention_mask
-            .sum(1)?
-            .to_dtype(DType::U32)?
-            .to_device(&Device::Cpu)?
-            .to_vec1::<u32>()?;
-        let shapes = spatial_shapes
-            .to_dtype(DType::U32)?
-            .to_device(&Device::Cpu)?
-            .to_vec2::<u32>()?;
-        let mut image_features = Vec::with_capacity(last_hidden_state.dim(0)?);
-        for image_idx in 0..last_hidden_state.dim(0)? {
-            let feature_len = mask_lengths[image_idx] as usize;
-            let height = shapes[image_idx][0] as usize;
-            let width = shapes[image_idx][1] as usize;
-            let feature = last_hidden_state
-                .get(image_idx)?
-                .narrow(0, 0, feature_len)?
-                .reshape((1, height, width, ()))?;
-            image_features.push(
-                self.multi_modal_projector
-                    .forward(&feature)?
-                    .reshape(((), self.language_model.config().hidden_size))?,
-            );
-        }
-        Tensor::cat(&image_features, 0)
+        image_features(
+            &self.vision_tower,
+            &self.multi_modal_projector,
+            pixel_values,
+            pixel_attention_mask,
+            spatial_shapes,
+            self.language_model.config().hidden_size,
+        )
     }
 
     fn forward_inner(

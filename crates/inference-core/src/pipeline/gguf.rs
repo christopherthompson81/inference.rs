@@ -72,6 +72,17 @@ const D1_OMNI_TYPE: &str = "lfm2-d1-omni";
 // the prompt length d1-omni was trained for, which llama.cpp's server cuts its prompts to
 const D1_OMNI_MAX_TOKENS: usize = 16384;
 const MASK_TOKEN_KEY: &str = "tokenizer.ggml.mask_token_id";
+// the projector GGUF's vision tensors that say it is there and size it
+const D1_OMNI_PATCH_TENSOR: &str = "v.patch_embd.weight";
+const D1_OMNI_POSITIONS_TENSOR: &str = "v.position_embd.weight";
+const D1_OMNI_PROJECTOR_TENSOR: &str = "mm.1.weight";
+const D1_OMNI_AUDIO_CONV_TENSOR: &str = "a.conv1d.0.weight";
+const D1_OMNI_AUDIO_DEPTHWISE_TENSOR: &str = "a.blk.0.conv_dw.weight";
+// NeMo's dw_striding to 8x: three stride-2 convs
+const D1_OMNI_AUDIO_STRIDE: usize = 2;
+const D1_OMNI_AUDIO_SUBSAMPLING: usize = 8;
+// the marker its template puts for each file; the API reads a placeholder as "loaded with a projector"
+const D1_OMNI_MEDIA_MARKER: &str = "<__media__>";
 const DECISION_TEMPLATE_KEY: &str = "tokenizer.chat_template.systemone";
 // llama.cpp's bounds on a score's level count
 const SCORE_BIAS_LEVELS: std::ops::RangeInclusive<usize> = 2..=255;
@@ -464,6 +475,13 @@ fn option_head_config(config: &str, archive: &inference_quant::GgufArchive) -> R
     Ok(serde_json::to_string(&config)?)
 }
 
+fn is_d1_omni(archive: &inference_quant::GgufArchive) -> bool {
+    is_architecture(archive, D1_OMNI_ARCHITECTURE)
+        && archive
+            .metadata_value(&format!("{D1_OMNI_ARCHITECTURE}.decision.type"))
+            .is_some_and(|value| value.to_string().is_ok_and(|kind| kind == D1_OMNI_TYPE))
+}
+
 /// d1-omni's config from its `lfm2.*` keys: per-block KV heads (0 for a short convolution) and feed-forward widths,
 /// the trunk followed by the head.
 fn d1_omni_config(archive: &inference_quant::GgufArchive) -> Result<String> {
@@ -494,7 +512,78 @@ fn d1_omni_config(archive: &inference_quant::GgufArchive) -> Result<String> {
         "max_position_embeddings": D1_OMNI_MAX_TOKENS,
         "rms_norm_eps": key("attention.layer_norm_rms_epsilon")?.to_f32()?,
         "layer_norm_eps": key("attention.layer_norm_epsilon")?.to_f32()?,
+        "vision": d1_omni_vision(archive)?,
+        "audio": d1_omni_audio(archive)?,
     }))?)
+}
+
+/// The FastConformer as the projector GGUF's `clip.audio.*` keys and conv shapes size it, as our Parakeet encoder's
+/// config; null without an audio tower.
+fn d1_omni_audio(archive: &inference_quant::GgufArchive) -> Result<serde_json::Value> {
+    if !archive.tensors().contains_key(D1_OMNI_AUDIO_CONV_TENSOR) {
+        return Ok(serde_json::Value::Null);
+    }
+    let key = |name: &str| {
+        let key = format!("clip.audio.{name}");
+        archive
+            .metadata_value(&key)
+            .with_context(|| format!("d1-omni projector has no `{key}`"))
+    };
+    let shape =
+        |name: &str| -> Result<Vec<usize>> { Ok(archive.tensor_info(name)?.shape().to_vec()) };
+    let first_conv = shape(D1_OMNI_AUDIO_CONV_TENSOR)?;
+    let depthwise = shape(D1_OMNI_AUDIO_DEPTHWISE_TENSOR)?;
+    Ok(serde_json::json!({
+        "hidden_size": key("embedding_length")?.to_u32()?,
+        "intermediate_size": key("feed_forward_length")?.to_u32()?,
+        "num_hidden_layers": key("block_count")?.to_u32()?,
+        "num_attention_heads": key("attention.head_count")?.to_u32()?,
+        "num_mel_bins": key("num_mel_bins")?.to_u32()?,
+        "conv_kernel_size": depthwise.last().copied().unwrap_or_default(),
+        "subsampling_conv_channels": first_conv.first().copied().unwrap_or_default(),
+        "subsampling_conv_kernel_size": first_conv.last().copied().unwrap_or_default(),
+        "subsampling_conv_stride": D1_OMNI_AUDIO_STRIDE,
+        "subsampling_factor": D1_OMNI_AUDIO_SUBSAMPLING,
+        "attention_bias": true,
+        "convolution_bias": true,
+    }))
+}
+
+/// LFM2-VL's tower as the projector GGUF's `clip.vision.*` keys size it; null without a projector.
+fn d1_omni_vision(archive: &inference_quant::GgufArchive) -> Result<serde_json::Value> {
+    if !archive.tensors().contains_key(D1_OMNI_PATCH_TENSOR) {
+        return Ok(serde_json::Value::Null);
+    }
+    let key = |name: &str| {
+        let key = format!("clip.vision.{name}");
+        archive
+            .metadata_value(&key)
+            .with_context(|| format!("d1-omni projector has no `{key}`"))
+    };
+    let rows = |name: &str| -> Result<usize> {
+        Ok(*archive
+            .tensor_info(name)?
+            .shape()
+            .first()
+            .with_context(|| format!("`{name}` has no shape"))?)
+    };
+    let positions = archive
+        .tensor_info(D1_OMNI_POSITIONS_TENSOR)?
+        .shape()
+        .to_vec();
+    Ok(serde_json::json!({
+        "tower": {
+            "hidden_size": key("embedding_length")?.to_u32()?,
+            "intermediate_size": key("feed_forward_length")?.to_u32()?,
+            "num_hidden_layers": key("block_count")?.to_u32()?,
+            "num_attention_heads": key("attention.head_count")?.to_u32()?,
+            "patch_size": key("patch_size")?.to_u32()?,
+            "num_patches": positions.first().copied().unwrap_or_default(),
+            "layer_norm_eps": key("attention.layer_norm_epsilon")?.to_f32()?,
+        },
+        "projector_hidden_size": rows(D1_OMNI_PROJECTOR_TENSOR)?,
+        "downsample_factor": key("projector.scale_factor")?.to_u32()?,
+    }))
 }
 
 /// The label-coded decision profile a GGUF carries (`<arch>.decision.*` and its `systemone` template), if any.
@@ -769,11 +858,7 @@ impl GGUFLoader {
         if is_architecture(&archive, JINA_BERT_V3) {
             merge_task_adapters(&mut archive, paths.get_weight_filenames())?;
         }
-        if is_architecture(&archive, D1_OMNI_ARCHITECTURE)
-            && archive
-                .metadata_value(&format!("{D1_OMNI_ARCHITECTURE}.decision.type"))
-                .is_some_and(|value| value.to_string().is_ok_and(|kind| kind == D1_OMNI_TYPE))
-        {
+        if is_d1_omni(&archive) {
             return self.load_d1_omni(Arc::new(archive), paths, options);
         }
         let archive = Arc::new(archive);
@@ -963,7 +1048,11 @@ impl GGUFLoader {
                 inference_quant::GgufTensorBinding::tensor(name.clone()),
             );
         }
-        let source = self.prepare_source(
+        let has_vision = archive.tensors().contains_key(D1_OMNI_PATCH_TENSOR);
+        if has_vision {
+            crate::gguf::lfm2_vl_bindings::bind_lfm2_vl_vision(&archive, &mut bindings)?;
+        }
+        let mut source = self.prepare_source(
             &archive,
             &bindings,
             paths,
@@ -971,6 +1060,14 @@ impl GGUFLoader {
             config,
             RopePairing::HalfSplit,
         )?;
+        let has_audio = archive.tensors().contains_key(D1_OMNI_AUDIO_CONV_TENSOR);
+        if has_vision || has_audio {
+            source.label_decision = source.label_decision.map(|decision| {
+                let mut decision = (*decision).clone();
+                decision.image_placeholder = Some(D1_OMNI_MEDIA_MARKER.to_string());
+                Arc::new(decision)
+            });
+        }
         self.load_prepared_embedding(
             EmbeddingLoaderType::Lfm2Decision,
             source,
@@ -1064,6 +1161,12 @@ impl GGUFLoader {
         }
         let mut archive = inference_quant::GgufArchive::open(paths.get_weight_filenames())?;
         alias_decision_architecture(&mut archive)?;
+        // d1-omni runs as an embedder with its projector's towers in the same load
+        if is_d1_omni(&archive) {
+            archive
+                .merge_components(inference_quant::GgufArchive::open_components(mmproj_paths)?)?;
+            return self.load_d1_omni(Arc::new(archive), paths, options);
+        }
         let architecture = match archive.metadata_value("general.architecture") {
             Some(inference_tensor::quantized::gguf_file::Value::String(value)) => value.clone(),
             Some(value) => {

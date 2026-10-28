@@ -109,12 +109,48 @@ pub struct DecisionTokens {
     pub mask_text: String,
 }
 
-/// One question's model input: its tokens, where each option's marker sits, and its type embedding row.
+/// One question's model input: its tokens, where each option's marker sits, and its type embedding row; with the
+/// media a d1-omni prompt reads before its text.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DecisionPrompt {
     pub ids: Vec<u32>,
     pub markers: Vec<u32>,
     pub kind: QuestionKind,
+    #[serde(skip)]
+    pub media: Option<std::sync::Arc<DecisionMedia>>,
+}
+
+/// A request's images, or its one audio clip, for a decision model that reads them ahead of its prompt; with their
+/// embeddings (on the host) once a question has projected them, which the request's other questions reuse.
+#[derive(Clone, Debug, Default)]
+pub struct DecisionMedia {
+    pub images: Vec<image::DynamicImage>,
+    pub audios: Vec<inference_audio::AudioInput>,
+    pub embeds: std::sync::OnceLock<inference_tensor::Tensor>,
+}
+
+impl DecisionMedia {
+    pub fn new(images: Vec<image::DynamicImage>, audios: Vec<inference_audio::AudioInput>) -> Self {
+        Self {
+            images,
+            audios,
+            embeds: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// The prompt rows the media took, once projected.
+    pub fn rows(&self) -> usize {
+        self.embeds
+            .get()
+            .and_then(|embeds| embeds.dims().first().copied())
+            .unwrap_or_default()
+    }
+}
+
+impl PartialEq for DecisionMedia {
+    fn eq(&self, other: &Self) -> bool {
+        self.images == other.images && self.audios == other.audios
+    }
 }
 
 /// A decision checkpoint's budgets and calibration, from the `decision` section of its merged config.
@@ -147,6 +183,8 @@ struct WithDecision {
 pub struct DecisionRows {
     pub kinds: Vec<u32>,
     pub markers: Vec<Vec<u32>>,
+    /// each row's media, read before its tokens; the markers count from the first token
+    pub media: Vec<Option<std::sync::Arc<DecisionMedia>>>,
 }
 
 impl DecisionSpec {
@@ -275,6 +313,7 @@ impl DecisionSpec {
             return Ok(None);
         }
         Ok(Some(DecisionPrompt {
+            media: None,
             ids,
             markers,
             kind: question.kind,

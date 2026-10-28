@@ -89,3 +89,68 @@ pub struct Config {
     #[serde(default = "default_max_pixels_tolerance")]
     pub max_pixels_tolerance: f64,
 }
+
+/// How images are tiled and sized for the vision tower: the config's, or LFM2-VL's defaults.
+#[derive(Clone, Debug)]
+pub struct Tiling {
+    pub downsample_factor: usize,
+    pub do_image_splitting: bool,
+    pub min_tiles: usize,
+    pub max_tiles: usize,
+    pub use_thumbnail: bool,
+    pub min_image_tokens: usize,
+    pub max_image_tokens: usize,
+    pub encoder_patch_size: usize,
+    pub tile_size: usize,
+    pub max_pixels_tolerance: f64,
+}
+
+impl Default for Tiling {
+    fn default() -> Self {
+        Self {
+            downsample_factor: default_downsample_factor(),
+            do_image_splitting: default_true(),
+            min_tiles: default_min_tiles(),
+            max_tiles: default_max_tiles(),
+            use_thumbnail: default_true(),
+            min_image_tokens: default_min_image_tokens(),
+            max_image_tokens: default_max_image_tokens(),
+            encoder_patch_size: default_encoder_patch_size(),
+            tile_size: default_tile_size(),
+            max_pixels_tolerance: default_max_pixels_tolerance(),
+        }
+    }
+}
+
+impl Config {
+    pub fn tiling(&self) -> Tiling {
+        Tiling {
+            downsample_factor: self.downsample_factor,
+            do_image_splitting: self.do_image_splitting,
+            min_tiles: self.min_tiles,
+            max_tiles: self.max_tiles,
+            use_thumbnail: self.use_thumbnail,
+            min_image_tokens: self.min_image_tokens,
+            max_image_tokens: self.max_image_tokens,
+            encoder_patch_size: self.encoder_patch_size,
+            tile_size: self.tile_size,
+            max_pixels_tolerance: self.max_pixels_tolerance,
+        }
+    }
+}
+
+impl Default for VisionConfig {
+    fn default() -> Self {
+        Self {
+            hidden_size: default_hidden_size(),
+            intermediate_size: default_intermediate_size(),
+            num_hidden_layers: default_num_hidden_layers(),
+            num_attention_heads: default_num_attention_heads(),
+            num_channels: default_num_channels(),
+            num_patches: default_num_patches(),
+            patch_size: default_patch_size(),
+            hidden_act: default_vision_hidden_act(),
+            layer_norm_eps: default_layer_norm_eps(),
+        }
+    }
+}

@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use futures::future::join_all;
 use indexmap::IndexMap;
-use inference_core::decision::{DecisionPrompt, JointLayout, LabelDecision, QuestionKind};
+use inference_core::decision::{
+    DecisionMedia, DecisionPrompt, JointLayout, LabelDecision, QuestionKind,
+};
 use inference_core::{
     CustomLogitsProcessor, InferenceRs, JointDecisionRequest, NormalRequest, Request,
     RequestMessage, Response, SamplingParams,
@@ -61,6 +63,7 @@ const H2O_STATE: PythonJson = PythonJson {
 const SCORING_FAILED: &str = "the decision pass returned no label logits";
 // llama.cpp's media marker, which its server makes plain text in a request's own values
 const MEDIA_MARKER: &str = "<__media__>";
+const NO_PROJECTOR: &str = "this server does not take images for decisions; load the model with its projector (`--mmproj`)";
 const MEDIA_TEMPERATURE: &str = "image";
 const MAX_MEDIA: usize = 8;
 const DATA_URL: &str = "data:";
@@ -83,6 +86,9 @@ const D1OMNI_MARK_QUESTION: &str = "<<d1omni:question>>";
 const D1OMNI_MARK_OPTION: &str = "<<d1omni:option>>";
 // the model's max_length; the options share up to half, at least `D1OMNI_MIN_OPTION_BUDGET`
 const D1OMNI_MAX_TOKENS: usize = 16384;
+// its image_text_length and audio_text_length: the text's room beside images or an audio clip
+const D1OMNI_MAX_IMAGE_TOKENS: usize = 896;
+const D1OMNI_MAX_AUDIO_TOKENS: usize = 15360;
 const D1OMNI_MIN_OPTION_BUDGET: usize = 96;
 const D1OMNI_OPTION_TOKENS: usize = 24;
 const D1OMNI_OPTION_BASE: usize = 32;
@@ -737,9 +743,9 @@ fn escape_values(value: &Value) -> Value {
 
 /// The most tokens an option and the question may keep: the options share `max(96, min(24 n + 32, 16384 / 2))`, less
 /// three tokens of framing each.
-fn d1omni_budgets(n_options: usize) -> (usize, usize) {
+fn d1omni_budgets(n_options: usize, max_tokens: usize) -> (usize, usize) {
     let budget = D1OMNI_MIN_OPTION_BUDGET
-        .max((D1OMNI_OPTION_TOKENS * n_options + D1OMNI_OPTION_BASE).min(D1OMNI_MAX_TOKENS / 2));
+        .max((D1OMNI_OPTION_TOKENS * n_options + D1OMNI_OPTION_BASE).min(max_tokens / 2));
     let option_max = D1OMNI_MIN_OPTION_TOKENS
         .max(budget.saturating_sub(D1OMNI_OPTION_OVERHEAD * n_options) / n_options.max(1));
     (option_max, D1OMNI_MIN_QUESTION_TOKENS.max(budget))
@@ -752,6 +758,7 @@ async fn d1omni_prompt(
     profile: &LabelDecision,
     request_state: &Value,
     question: &LabelQuestion,
+    media: Option<&Arc<DecisionMedia>>,
     model: Option<&str>,
 ) -> Result<DecisionPrompt, EmbeddingError> {
     let input = json!({
@@ -762,8 +769,12 @@ async fn d1omni_prompt(
         "options": render_options(profile, question, 0),
     });
     let mut input = replace_text(&escape_values(&input), D1OMNI_MARKER, D1OMNI_MARKER_ESCAPED);
-    input["audio"] = json!(false);
-    input["images"] = json!([]);
+    let n_media = media.map_or(0, |media| media.images.len() + media.audios.len());
+    let is_audio = media.is_some_and(|media| !media.audios.is_empty());
+    // one marker a file; the media themselves go ahead of the text
+    let media_markers = MEDIA_MARKER.repeat(n_media);
+    input["audio"] = json!(is_audio);
+    input["images"] = json!(vec![MEDIA_MARKER; n_media]);
     input["sep"] = json!(D1OMNI_SEP);
     input["mark_state"] = json!(D1OMNI_MARK_STATE);
     input["mark_question"] = json!(D1OMNI_MARK_QUESTION);
@@ -775,10 +786,15 @@ async fn d1omni_prompt(
         )
     })?;
     let n = question.options.len();
-    let (option_max, question_max) = d1omni_budgets(n);
+    // beside media the text gets the model's image or audio text length
+    let max_tokens = match (n_media, is_audio) {
+        (0, _) => D1OMNI_MAX_TOKENS,
+        (_, true) => D1OMNI_MAX_AUDIO_TOKENS,
+        (_, false) => D1OMNI_MAX_IMAGE_TOKENS,
+    };
+    let (option_max, question_max) = d1omni_budgets(n, max_tokens);
     let mut pieces = prompt.split(D1OMNI_SEP);
-    // the media markers come first; text requests have none
-    if pieces.next() != Some("") {
+    if pieces.next() != Some(media_markers.as_str()) {
         return Err(layout_error());
     }
     let (mut head, mut body, mut tail) = (Vec::new(), None, Vec::new());
@@ -804,11 +820,11 @@ async fn d1omni_prompt(
         }
     }
     let mut body = body.ok_or_else(layout_error)?;
-    body.truncate(D1OMNI_MAX_TOKENS.saturating_sub(head.len() + tail.len()));
+    body.truncate(max_tokens.saturating_sub(head.len() + tail.len()));
     let mut ids = head;
     ids.extend(body);
     ids.extend(tail);
-    ids.truncate(D1OMNI_MAX_TOKENS);
+    ids.truncate(max_tokens);
     let marker = profile.marker.ok_or_else(layout_error)?;
     let markers = ids
         .iter()
@@ -823,6 +839,7 @@ async fn d1omni_prompt(
         ));
     }
     Ok(DecisionPrompt {
+        media: media.cloned(),
         ids,
         markers,
         kind: question.kind,
@@ -835,9 +852,10 @@ async fn score_markers(
     profile: &LabelDecision,
     request_state: &Value,
     question: &LabelQuestion,
+    media: Option<&Arc<DecisionMedia>>,
     model: Option<&str>,
 ) -> Result<(Vec<f32>, usize), EmbeddingError> {
-    let prompt = d1omni_prompt(state, profile, request_state, question, model).await?;
+    let prompt = d1omni_prompt(state, profile, request_state, question, media, model).await?;
     let result = fetch(
         state.clone(),
         RequestMessage::DecisionTokens { prompt },
@@ -851,7 +869,9 @@ async fn score_markers(
         .get(..question.options.len())
         .ok_or_else(|| EmbeddingError::Internal(anyhow::anyhow!(SCORING_FAILED)))?
         .to_vec();
-    Ok((logits, result.prompt_tokens))
+    // the media rows are the model's, ahead of the prompt it was sent
+    let media_rows = media.map_or(0, |media| media.rows());
+    Ok((logits, result.prompt_tokens + media_rows))
 }
 
 fn layout_error() -> EmbeddingError {
@@ -975,6 +995,8 @@ fn answer(
         .outputs(question.kind, question.options.len());
     // a model may have its own temperature for requests with media
     let temperature = match profile.temperatures.get(MEDIA_TEMPERATURE) {
+        // d1-omni has no calibration for media
+        _ if with_media && profile.family.scores_markers() => 1.0,
         Some(&media) if with_media => f64::from(media),
         _ => f64::from(profile.temperature(question.kind, question.options.len())),
     };
@@ -1363,16 +1385,21 @@ fn check_media(profile: &LabelDecision, media: &Media) -> Result<(), EmbeddingEr
     if !profile.family.takes_images() {
         return fail("this decision model's prompt has no place for images");
     }
+    // d1-omni reads images or one audio clip ahead of its prompt
+    if profile.family.scores_markers() {
+        if !media.audios.is_empty() && (media.audios.len() > 1 || !media.images.is_empty()) {
+            return fail("a request takes images or one audio clip, not both");
+        }
+        if profile.image_placeholder.is_none() {
+            return fail(NO_PROJECTOR);
+        }
+        return Ok(());
+    }
     if !media.audios.is_empty() {
         return fail("this decision model does not take audio");
     }
-    if profile.family.scores_markers() {
-        return fail("images are not supported for this decision type yet");
-    }
     if profile.image_placeholder.is_none() {
-        return fail(
-            "this server does not take images for decisions; load the model with its projector (`--mmproj`)",
-        );
+        return fail(NO_PROJECTOR);
     }
     Ok(())
 }
@@ -1434,11 +1461,18 @@ pub(crate) async fn decide(
         false => request_state,
     };
     if profile.family.scores_markers() {
-        let runs = join_all(
-            questions
-                .iter()
-                .map(|question| score_markers(state, profile, &input_state, question, model)),
-        )
+        let Media { images, audios } = media;
+        let media = with_media.then(|| Arc::new(DecisionMedia::new(images, audios)));
+        let runs = join_all(questions.iter().map(|question| {
+            score_markers(
+                state,
+                profile,
+                &input_state,
+                question,
+                media.as_ref(),
+                model,
+            )
+        }))
         .await;
         let mut answers = IndexMap::with_capacity(questions.len());
         let mut input_tokens = 0usize;
@@ -1813,13 +1847,15 @@ mod tests {
     #[test]
     fn d1omni_budgets_follow_llama_cpp() {
         // 3 options: max(96, 104) = 104 shared, (104 - 9) / 3 = 31 an option
-        assert_eq!(d1omni_budgets(3), (31, 104));
+        assert_eq!(d1omni_budgets(3, D1OMNI_MAX_TOKENS), (31, 104));
         // 1 option: the 96 floor, (96 - 3) / 1
-        assert_eq!(d1omni_budgets(1), (93, 96));
+        assert_eq!(d1omni_budgets(1, D1OMNI_MAX_TOKENS), (93, 96));
         // 40 options: 992 shared, (992 - 120) / 40 = 21
-        assert_eq!(d1omni_budgets(40), (21, 992));
+        assert_eq!(d1omni_budgets(40, D1OMNI_MAX_TOKENS), (21, 992));
         // 400 options: capped at half the context, (8192 - 1200) / 400 = 17
-        assert_eq!(d1omni_budgets(400), (17, 8192));
+        assert_eq!(d1omni_budgets(400, D1OMNI_MAX_TOKENS), (17, 8192));
+        // beside images the text has 896 tokens, the options at most half of it: (448 - 120) / 40 = 8
+        assert_eq!(d1omni_budgets(40, D1OMNI_MAX_IMAGE_TOKENS), (8, 448));
     }
 
     fn png_url() -> String {

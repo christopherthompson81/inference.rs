@@ -416,12 +416,18 @@ impl ConvModule {
         let norm = vb.pp("norm");
         let gamma = norm.get(h, "weight")?;
         let beta = norm.get(h, "bias")?;
-        let mean = norm.get(h, "running_mean")?;
-        let var = norm.get(h, "running_var")?;
-        let inv_std = (var + BATCH_NORM_EPS)?.sqrt()?.recip()?;
-        let gain = (gamma * inv_std)?;
+        // llama.cpp's converter folds the running statistics into the scale and shift
+        let (gain, shift) = match norm.contains_tensor("running_mean") {
+            true => {
+                let mean = norm.get(h, "running_mean")?;
+                let var = norm.get(h, "running_var")?;
+                let gain = (gamma * (var + BATCH_NORM_EPS)?.sqrt()?.recip()?)?;
+                (gain.clone(), (beta - (mean * gain)?)?)
+            }
+            false => (gamma, beta),
+        };
         let depthwise = dw.broadcast_mul(&gain.unsqueeze(1)?)?;
-        let depthwise_bias = (((dw_bias - mean)? * gain)? + beta)?;
+        let depthwise_bias = ((dw_bias * gain)? + shift)?;
         Ok(Self {
             pointwise1,
             depthwise,
@@ -793,6 +799,70 @@ mod tests {
             .filter(|(_, m)| **m == 0.)
             .map(|(i, _)| block.keys_from + i)
             .collect())
+    }
+
+    // llama.cpp's GGUF stores the conv's batch norm folded into a scale and shift; both forms compute the same
+    #[test]
+    fn a_folded_conv_norm_matches_its_running_statistics() -> Result<()> {
+        let (h, k) = (4, 3);
+        let cfg: EncoderConfig = serde_json::from_value(serde_json::json!({
+            "hidden_size": h, "intermediate_size": 8, "num_hidden_layers": 1, "num_attention_heads": 1,
+            "num_mel_bins": 8, "conv_kernel_size": k, "subsampling_conv_channels": 2,
+            "subsampling_conv_kernel_size": 3, "subsampling_conv_stride": 2, "subsampling_factor": 2,
+            "convolution_bias": true,
+        }))
+        .map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
+        let dev = Device::Cpu;
+        let values = |n: usize, seed: f32| {
+            (0..n)
+                .map(|i| (i as f32 * 0.7 + seed).sin())
+                .collect::<Vec<_>>()
+        };
+        let t =
+            |n: usize, seed: f32, shape: &[usize]| Tensor::from_vec(values(n, seed), shape, &dev);
+        let mut shared = std::collections::HashMap::new();
+        shared.insert(
+            "pointwise_conv1.weight".to_string(),
+            t(2 * h * h, 0.1, &[2 * h, h, 1])?,
+        );
+        shared.insert("pointwise_conv1.bias".to_string(), t(2 * h, 0.2, &[2 * h])?);
+        shared.insert(
+            "pointwise_conv2.weight".to_string(),
+            t(h * h, 0.3, &[h, h, 1])?,
+        );
+        shared.insert("pointwise_conv2.bias".to_string(), t(h, 0.4, &[h])?);
+        shared.insert(
+            "depthwise_conv.weight".to_string(),
+            t(h * k, 0.5, &[h, 1, k])?,
+        );
+        shared.insert("depthwise_conv.bias".to_string(), t(h, 0.6, &[h])?);
+        let (gamma, beta) = (t(h, 0.7, &[h])?, t(h, 0.8, &[h])?);
+        let mean = t(h, 0.9, &[h])?;
+        let var = (t(h, 1.0, &[h])?.abs()? + 0.5)?;
+        let mut stats = shared.clone();
+        stats.insert("norm.weight".to_string(), gamma.clone());
+        stats.insert("norm.bias".to_string(), beta.clone());
+        stats.insert("norm.running_mean".to_string(), mean.clone());
+        stats.insert("norm.running_var".to_string(), var.clone());
+        let gain = (gamma * (var + BATCH_NORM_EPS)?.sqrt()?.recip()?)?;
+        let mut folded = shared;
+        folded.insert("norm.bias".to_string(), (beta - (mean * &gain)?)?);
+        folded.insert("norm.weight".to_string(), gain);
+        let module =
+            |weights| ConvModule::new(&cfg, VarBuilder::from_tensors(weights, DType::F32, &dev));
+        let xs = t(5 * h, 1.1, &[1, 5, h])?;
+        let a = module(stats)?
+            .forward(&xs)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let b = module(folded)?
+            .forward(&xs)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        for (a, b) in a.iter().zip(&b) {
+            assert!((a - b).abs() < 1e-5, "{a} against {b}");
+        }
+        Ok(())
     }
 
     #[test]

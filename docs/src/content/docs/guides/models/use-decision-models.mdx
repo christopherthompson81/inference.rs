@@ -38,13 +38,13 @@ inference serve --format gguf -m <repo or folder> -f <file>.gguf
 
 `vllm-decision2` (its own architecture over Qwen3) scores each question in its own prompt with an option head at the end of each option and of the question, and checks requests as its reference does (a state, instructions and descriptions that are text, an object or an array; at least two choice options). Load it from llama.cpp's conversion of the safetensors checkpoint (`convert_hf_to_gguf.py`): the GGUFs vllm-sr publishes use another layout, which llama.cpp does not load either. Like `kev` and `clef`, it answers decisions only.
 
-`lfm2-d1-omni` (LiquidAI's d1-omni, an LFM2 encoder read both ways under a laya-style head) loads as a decision model of its own, not a chat model. Its prompt is cut to the budgets llama.cpp uses: the question and each option to a share of the options' budget, the state to what the 16384-token context leaves. It takes text only for now.
+`lfm2-d1-omni` (LiquidAI's d1-omni, an LFM2 encoder read both ways under a laya-style head) loads as a decision model of its own, not a chat model. Its prompt is cut to the budgets llama.cpp uses: the question and each option to a share of the options' budget, the state to what the 16384-token context leaves. With its projector it also reads images or an audio clip (below).
 
 The other llama.cpp decision type, `granite-switch`, is not supported (#679).
 
-### Images
+### Images and audio
 
-`openjev`, `pplx-decider`, `vllm-d3`, `lfm2-d1`, `h2o-lightning` and `clef` read images when the model loads with its projector (an `mmproj*.gguf` beside the model, or `--mmproj`). Send them as data URLs in `files` (or `images`), or as `image_url` parts of a chat-message `state`, which leave the state:
+`openjev`, `pplx-decider`, `vllm-d3`, `lfm2-d1`, `h2o-lightning`, `clef` and `lfm2-d1-omni` read images when the model loads with its projector (an `mmproj*.gguf` beside the model, or `--mmproj`). Send them as data URLs in `files` (or `images`), or as `image_url` parts of a chat-message `state`, which leave the state:
 
 ```json
 {"state": "A photo from the street.",
@@ -53,7 +53,9 @@ The other llama.cpp decision type, `granite-switch`, is not supported (#679).
                          "criteria": {"red": null, "blue": null}}}}
 ```
 
-A request takes up to 8. A model may calibrate its answers on images apart (h2o-lightning's `image` temperature). `lfm2-d1-omni` does not take images or audio yet.
+A request takes up to 8. A model may calibrate its answers on images apart (h2o-lightning's `image` temperature).
+
+`lfm2-d1-omni` also reads one audio clip (a WAV, MP3, FLAC or OGG data URL in `files`, or an `input_audio` part of a chat-message `state`), resampled to 16 kHz, padded to half a second and cut at 30 s. A request has images or one clip, not both. The media go ahead of the prompt, which is then cut to 896 tokens beside images and 15360 beside audio, and its answers with media are uncalibrated (temperature 1), as llama.cpp's are. Where many large images leave the prompt no room in the 16384 positions, the request is refused (llama.cpp would cut the prompt further).
 
 ## Asking questions
 

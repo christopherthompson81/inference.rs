@@ -478,3 +478,77 @@ Finding:
 
 Implication: clef takes images. lfm2-d1-omni's images and audio need its own vision and audio encoders under the
 LFM2 encoder, the remaining media item.
+
+## Run 22 - 2026-10-28 14:30
+
+Question: what does lfm2-d1-omni's image and audio input take, from llama.cpp's code (`conversion/lfm2.py`
+`D1OmniMmprojModel`, `tools/mtmd/models/{siglip,conformer}.cpp`, `mtmd.cpp`, `mtmd-audio.cpp`, `src/models/lfm2.cpp`,
+`server-decision.cpp` `fill_task_d1omni`) and `mmproj-d1-omni-600M-Q8_0.gguf`'s metadata?
+
+Finding:
+- One projector GGUF with two towers under llama.cpp's clip names. Vision (`v.*`, `mm.1` / `mm.2`): LFM2-VL's
+  SigLIP2 NaFlex tower (768 wide, 12 blocks, patch 16, learned positions resized), pixel unshuffle by 2, the projector
+  MLP with the exact (erf) GELU and no input norm; images normalized to [-1, 1]; LFM2-VL's tiles and thumbnail
+  without separator tokens. Audio (`a.*`, `mm.a.mlp.*`): a NeMo FastConformer (512 wide, 17 blocks, 8 heads, dw
+  striding to 8x, relative positions, 128 mel bins), its adapter (LayerNorm, MLP with erf GELU) and a residual block
+  (LayerNorm, down, up); features as NeMo's (preemphasis 0.97, natural log, per-feature normalization, symmetric
+  Hann window), clips padded to 0.5 s and cut to 30 s, one frame per hop.
+- The media embeddings come first in the batch, positions continuing into the text. In the trunk the media never
+  read the text; in the head the text and the media read only their own kind; a short convolution's last media entry
+  does not read the text on its right.
+- The prompt budget becomes 896 tokens with images and 15360 with audio (capped by what the media leave of 16384);
+  the markers move by the media's length; answers with media are uncalibrated (temperature 1). A request has images
+  or one audio clip, not both.
+
+Implication: our pieces cover most of it (LFM2-VL's tower and image processor; Parakeet's FastConformer and NeMo
+features, under other names). Plan: images first (the projector merged into the d1-omni load, the vision tower,
+the media prefix and its masks, media carried by `DecisionTokens`), checked against llama.cpp; then audio.
+
+## Run 23 - 2026-10-28 14:40
+
+Question: do lfm2-d1-omni's image answers and token counts match llama.cpp's?
+
+Command: `llama-server -m d1-omni-600M-Q8_0.gguf --mmproj mmproj-d1-omni-600M-Q8_0.gguf -np 1 -ngl 99 -b 16384
+-ub 16384 -c 16384` against `inference serve ... --mmproj mmproj-d1-omni-600M-Q8_0.gguf` (CUDA, BF16), over
+`media_requests.py` (two 320x240 synthetic images, a data URL and a chat-state `image_url` part), then two more: a
+1200x800 synthetic chart (tiled) and two images in one request.
+
+Finding:
+- The first load failed: `Expected text AutoDeviceMapParams for this model!`. The `--mmproj` path hands the
+  embedding loader multimodal params, and the default activation estimate only took text ones; it now reads the
+  sequence length and batch from either.
+- Answers matched at once (worst 9.9e-4, same choices), but usage was 57 / 109 against 217 / 269: the media rows
+  (80 an image here) are built inside the model, so the sequence never counted them. The model now keeps a
+  request's projected media in `DecisionMedia` (computed once, shared by its questions) and the API adds their rows.
+- Then: usage equal on all four requests (217, 269, 3630 tiled, 185 for two images); worst differences 9.9e-4,
+  1.7e-3 and 1.8e-2 (the two-image question), same choices everywhere.
+- llama.cpp caps the text at min(896, 16384 - media rows) and refuses below 64. The API cuts the text before the
+  rows are known, so the model refuses a prompt whose media and text overflow the 16384 positions (llama.cpp would
+  cut the text further). Only many large tiled images reach it; audio (at most 375 rows) cannot.
+
+Implication: images work. Audio next: the projector's FastConformer and adapter.
+
+## Run 24 - 2026-10-28 14:46
+
+Question: does lfm2-d1-omni's audio path (our Parakeet encoder over the projector's `a.*` tensors, NeMo features,
+the adapter and its residual block) match llama.cpp's?
+
+Command: the same two servers over three synthetic clips sent as `files` data URLs: a 3 s 440 Hz tone, 1.7 s of
+white noise at 22.05 kHz (resampled) and a 0.125 s blip (padded to 0.5 s).
+
+Finding:
+- llama.cpp's graph (`models/conformer.cpp`, shared with LFM2-Audio) is NeMo's FastConformer: dw_striding to 8x,
+  macaron SiLU feed-forwards at half weight, Transformer-XL relative attention with no input scaling, a symmetric
+  kernel-9 depthwise conv with the batch norm folded into a scale and shift, then the adapter (LayerNorm, MLP with
+  erf GELU) and `x + up(gelu(down(LayerNorm(x))))`. Its features normalize over `samples / hop` frames, as our
+  `NemoMel` does; the positions are the same sinusoid table.
+- Our encoder takes llama.cpp's tensors renamed, the 1x1 and depthwise convs reshaped to PyTorch's layouts and the
+  conv norm read as already folded when the GGUF has no running statistics.
+- First run: usage equal (144, 112, 82); worst differences 1.6e-3, 3.7e-3, 4.5e-3 on the choices and 7.9e-3,
+  8.5e-3, 1.7e-2 on the noul questions; same choices on all six.
+- Every media request logged `CUDA memory maintenance failed ... CUDA_ERROR_INVALID_CONTEXT` (images too; none for
+  text). With the media cache disabled it went away: the cached device tensor was freed when the request dropped
+  its `DecisionMedia`, off the engine thread. The cache now holds a host copy; no warnings since, answers unchanged.
+- Images with audio, or two clips, are refused with a 400 before any model work.
+
+Implication: d1-omni takes images and audio with llama.cpp's token counts. Left: unit tests, the guide, full CI.
