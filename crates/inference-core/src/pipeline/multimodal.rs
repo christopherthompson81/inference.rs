@@ -403,7 +403,7 @@ impl MultimodalLoader {
             &mut paged_attn_config,
         )?;
         trace!("Model config: {:?}", self.inner.get_config_repr(&config)?);
-        let (model, tracker, dynamic_lora) = super::loading::load_model(
+        let (model, tracker, dynamic_lora, _) = super::loading::load_model(
             &*self.inner,
             &session,
             mapper,
@@ -582,6 +582,7 @@ impl MultimodalLoader {
             source_weight_files,
             source_weight_source: weight_source,
             dynamic_lora,
+            switch_adapters: None,
             label_decision: self
                 .prepared_source
                 .as_ref()

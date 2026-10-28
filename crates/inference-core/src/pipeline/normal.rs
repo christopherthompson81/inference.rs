@@ -289,7 +289,7 @@ impl NormalLoader {
             &mut paged_attn_config,
         )?;
         trace!("Model config: {:?}", self.inner.get_config_repr(&config)?);
-        let (model, tracker, dynamic_lora) = super::loading::load_model(
+        let (model, tracker, dynamic_lora, switch_adapters) = super::loading::load_model(
             &*self.inner,
             &session,
             mapper,
@@ -431,6 +431,7 @@ impl NormalLoader {
             source_weight_files,
             source_weight_source: weight_source,
             dynamic_lora,
+            switch_adapters,
             label_decision: self
                 .prepared_source
                 .as_ref()

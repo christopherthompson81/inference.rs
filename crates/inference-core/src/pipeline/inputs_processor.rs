@@ -1276,6 +1276,8 @@ pub mod text_models_inputs_processor {
         pub recurrent_batch_kind: RecurrentBatchKind,
         pub adapter_leases: Arc<[Option<AdapterLease>]>,
         pub token_window: Option<crate::model::TokenWindow>,
+        /// each flattened token row's switched adapter slot (granite-switch), 0 for the base model
+        pub switch_slots: Option<Vec<u32>>,
     }
 
     /// Each row's chunk `seqlen_offset..position_id` of its sequence, led by up to `preceding` earlier tokens.
@@ -1341,6 +1343,61 @@ pub mod text_models_inputs_processor {
             .transpose()
     }
 
+    /// granite-switch: each flattened token row's adapter slot, and the ids with control tokens read as their
+    /// substitutes; for other models, no slots and the ids as they are.
+    fn switch_inputs(
+        other_config: Option<&Arc<dyn Any>>,
+        input_seqs: &[&mut Sequence],
+        rows: (&[usize], &[usize], &[usize]),
+        input_ids: Tensor,
+        packed: bool,
+    ) -> Result<(Tensor, Option<Vec<u32>>)> {
+        let Some(routing) =
+            other_config.and_then(|config| config.downcast_ref::<crate::adapter::SwitchRouting>())
+        else {
+            return Ok((input_ids, None));
+        };
+        let (seq_indices, seqlen_offsets, position_ids) = rows;
+        let (batch, width) = input_ids.dims2()?;
+        let mut slots = Vec::with_capacity(batch * width);
+        let mut controls = false;
+        for ((&index, &start), &end) in seq_indices.iter().zip(seqlen_offsets).zip(position_ids) {
+            let toks = input_seqs[index].get_toks();
+            if end > toks.len() || start > end {
+                anyhow::bail!(
+                    "switched adapters read the {start}..{end} chunk of a {}-token sequence; drafted tokens are not supported",
+                    toks.len()
+                );
+            }
+            controls |= toks[start..end]
+                .iter()
+                .any(|&token| routing.is_control(token));
+            slots.extend(routing.slots(toks, start, end));
+            if !packed {
+                // a row is right-padded to the batch's widest
+                slots.resize(slots.len() + width.saturating_sub(end - start), 0);
+            }
+        }
+        if slots.len() != batch * width {
+            anyhow::bail!("{} switched slots for a {batch}x{width} batch", slots.len());
+        }
+        let input_ids = match controls {
+            true => {
+                let ids = input_ids
+                    .to_dtype(inference_tensor::DType::U32)?
+                    .flatten_all()?
+                    .to_vec1::<u32>()?
+                    .into_iter()
+                    .map(|token| routing.substitute(token))
+                    .collect::<Vec<_>>();
+                Tensor::from_vec(ids, (batch, width), input_ids.device())?
+                    .to_dtype(input_ids.dtype())?
+            }
+            false => input_ids,
+        };
+        Ok((input_ids, Some(slots)))
+    }
+
     fn adapter_leases<S: std::ops::Deref<Target = Sequence>>(
         input_seqs: &[S],
         seq_indices: &[usize],
@@ -1404,6 +1461,13 @@ pub mod text_models_inputs_processor {
                     &seqlen_offsets,
                     &position_ids,
                 )?;
+                let (input_ids, switch_slots) = switch_inputs(
+                    other_config.as_ref(),
+                    input_seqs,
+                    (&seq_indices, &seqlen_offsets, &position_ids),
+                    input_ids,
+                    flash_meta.packed,
+                )?;
                 let inputs: Box<dyn Any> = Box::new(ModelInputs {
                     input_ids,
                     seqlen_offsets,
@@ -1414,6 +1478,7 @@ pub mod text_models_inputs_processor {
                     recurrent_batch_kind: RecurrentBatchKind::Prefill,
                     adapter_leases,
                     token_window,
+                    switch_slots,
                 });
                 Ok(InputProcessorOutput {
                     inputs,
@@ -1458,6 +1523,13 @@ pub mod text_models_inputs_processor {
                     &seqlen_offsets,
                     &position_ids,
                 )?;
+                let (input_ids, switch_slots) = switch_inputs(
+                    other_config.as_ref(),
+                    input_seqs,
+                    (&seq_indices, &seqlen_offsets, &position_ids),
+                    input_ids,
+                    flash_meta.packed,
+                )?;
                 let inputs: Box<dyn Any> = Box::new(ModelInputs {
                     input_ids,
                     seqlen_offsets,
@@ -1468,6 +1540,7 @@ pub mod text_models_inputs_processor {
                     recurrent_batch_kind,
                     adapter_leases,
                     token_window,
+                    switch_slots,
                 });
                 Ok(InputProcessorOutput {
                     inputs,

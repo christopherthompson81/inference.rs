@@ -1,6 +1,7 @@
 mod registry;
 mod runtime;
 mod selection;
+mod switch;
 
 pub use crate::lora::generation::{
     AdapterGenerationId, AdapterGenerationParseError, LoraAdapterInfo, LoraAdapterRoute,
@@ -15,3 +16,4 @@ pub use selection::AdapterSelection;
 
 pub(crate) use registry::AdapterLease;
 pub use runtime::DynamicLoraRuntime;
+pub use switch::{DEFAULT_ROUTER_GAIN, SwitchAdapters, SwitchRouting};

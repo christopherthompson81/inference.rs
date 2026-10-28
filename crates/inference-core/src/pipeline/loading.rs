@@ -239,6 +239,8 @@ pub(crate) struct PreparedSource {
     pub source_weight_files: Vec<PathBuf>,
     pub rope_pairing: crate::gguf::normal_registry::RopePairing,
     pub label_decision: Option<Arc<crate::decision::LabelDecision>>,
+    /// adapters the checkpoint embeds and switches per token (granite-switch), their factors among `weights`
+    pub switch: Option<Arc<crate::adapter::SwitchRouting>>,
 }
 
 pub(crate) struct HubPathsRequest<'a> {
@@ -1403,6 +1405,7 @@ pub(crate) type LoadedModel<M> = (
     Box<M>,
     inference_quant::Tracker,
     Option<Arc<crate::DynamicLoraRuntime>>,
+    Option<Arc<crate::adapter::SwitchAdapters>>,
 );
 
 /// What [`load_model`] reads beyond the session.
@@ -1434,6 +1437,12 @@ pub(crate) fn load_model<L: BuildModel + ?Sized>(
         prepared,
         lora,
     } = inputs;
+    let switch = prepared.and_then(|source| source.switch.clone());
+    if switch.is_some() && (lora.is_some() || session.tensor_parallelism.is_enabled()) {
+        anyhow::bail!(
+            "a model with embedded switched adapters takes no runtime LoRA adapters and no tensor parallelism"
+        );
+    }
     let prepared = prepared.map(|source| (&source.weights, source.rope_pairing));
     let loading_isq = session.plan.loading_isq;
     let distributed = session.tensor_parallelism.is_enabled();
@@ -1508,10 +1517,15 @@ pub(crate) fn load_model<L: BuildModel + ?Sized>(
     let layers = lora
         .map(|_| super::normal::new_dynamic_lora_registry(config, lora_rope_pairing))
         .transpose()?;
-    let vb = match &layers {
-        Some(layers) => vb.with_lora_registry(layers.clone()),
-        None => vb,
+    // the embedded factors are stored in the checkpoint's own Q/K row layout, so the sites take them as they are
+    let switch_layers = switch
+        .as_ref()
+        .map(|_| Arc::new(inference_quant::LoraLayerRegistry::new()));
+    let vb = match (&layers, &switch_layers) {
+        (Some(layers), _) | (None, Some(layers)) => vb.with_lora_registry(layers.clone()),
+        (None, None) => vb,
     };
+    let factors = vb.clone();
     let vb = vb
         .with_embeddings_on_host(session.embeddings_on_host)
         .with_moe_expert_cache(session.moe_expert_cache);
@@ -1531,7 +1545,15 @@ pub(crate) fn load_model<L: BuildModel + ?Sized>(
         )?),
         _ => None,
     };
-    Ok((model, tracker, dynamic_lora))
+    let switch = match (switch, switch_layers) {
+        (Some(routing), Some(layers)) => Some(Arc::new(crate::adapter::SwitchAdapters::load(
+            routing,
+            layers,
+            &factors.without_lora_registry(),
+        )?)),
+        _ => None,
+    };
+    Ok((model, tracker, dynamic_lora, switch))
 }
 
 #[cfg(test)]

@@ -552,3 +552,60 @@ Finding:
 - Images with audio, or two clips, are refused with a 400 before any model work.
 
 Implication: d1-omni takes images and audio with llama.cpp's token counts. Left: unit tests, the guide, full CI.
+
+## Run 25 - 2026-10-28 16:00
+
+Question: what does granite-switch (#679) take, from llama.cpp's code (`src/models/granite-switch.cpp`,
+`conversion/granite.py` `GraniteSwitchModel`, `server-decision.cpp`) and the 3B preview's `config.json` /
+`adapter_index.json`, and which of our pieces can carry it?
+
+Finding:
+- A dense, all-attention Granite (embedding, residual, attention and logit multipliers; fused `attn_qkv` in the
+  GGUF; the checkpoint's `num_hidden_layers` counts weightless switch layers the converter drops). Every q, k, v,
+  o, gate, up and down projection carries stacked LoRA factors `{slots, rank, in}` / `{slots, out, rank}`; slot 0
+  is zero (the base model) and slot `i + 1` adapter `i`. The 3B preview lists 12 adapters (citations, query
+  rewrite, hallucination detection, answerability, guardrails, ...), each `lora` or `alora`, each with a control
+  token; a GGUF with a `decision` adapter is a decision model.
+- Routing: a one-head attention layer after the blocks, K = +gain (15) at a control token and -gain elsewhere,
+  V = the token's slot, Q = 1, causal. A token's slot is the rounded mean of the slots of the control tokens at or
+  before it (one visible control token outweighs the rest by e^30), 0 with none. The control token's own input
+  embedding is that of a substitute token (`adapter.token_ids_substitute`).
+- Decisions: a label-logit type, codes A..Z then the two-letter codes that are one token, noul true first. The
+  `systemone` template opens the question turn with `<|decision|> DECISION` (the control token stands for the
+  first token of `### DECISION`), so everything after it runs the decision aLoRA.
+- Ours: the runtime LoRA path already applies per-row (per-token) slots: `LoraExecution` keeps `row_slots` over the
+  flattened tokens, filled today per sequence from the request's adapter lease, and every linear built with a
+  registry is wrapped (`maybe_wrap_dynamic_lora`). Granite exists (`granite.rs`, the GGUF `granite` architecture).
+
+Implication: plan
+1. the `graniteswitch` GGUF loaded as our dense Granite (fused qkv split, multipliers);
+2. its stacked factors registered as resident runtime adapters, one per slot;
+3. each step's execution given per-token row slots from the control tokens (the router's rule, computed on the
+   host from the sequence's tokens);
+4. the substitute embeddings for control tokens;
+5. the decision profile on the label path, then parity against llama.cpp with the 8B Q8_0 GGUF.
+
+## Run 26 - 2026-10-28 16:22
+
+Question: does granite-switch, built as planned in Run 25, match llama.cpp on decisions and on chat?
+
+Command: `inference serve -m <dir> -f granite-switch-4.1-8b-Q8_0.gguf` against `llama-server -np 1 -ngl 99 -c 16384`,
+over `decision_requests.py` (`server_ref.py`), then greedy raw completions (`chat_cmp.py`): one through the base
+model, one with `<|guardian-core|>` in the prompt. Negative control: the same decisions with the step's switched
+execution dropped.
+
+Finding:
+- The 8B Q8_0 GGUF: 40 blocks, fused `attn_qkv`, tied embeddings, 2 adapters (`<|guardian-core|>` slot 1,
+  `<|decision|>` slot 2, substitutes `<` and `###`), rank 64, BF16 factors `{slots, rank, in}` / `{slots, out, rank}`.
+- First load: `hybrid cache has no recurrent state pool`. Our Granite always kept a hybrid cache, and the engine
+  reserves recurrent state for any hybrid cache; an all-attention Granite now keeps a normal one.
+- Then decisions matched on the first run: usage equal (209, 263, 1534), worst difference 1.3e-2 (a score question),
+  same choices on all eight.
+- Control (no adapter deltas, substitution kept): worst 0.435 (a choice's probability), so the decision adapter
+  carries the answers.
+- Chat: the same greedy text and token counts on both ("The capital of France is Paris.", 20 + 8 tokens; "Yes" from
+  the guardian adapter, 34 + 2).
+- A unit test of the routing rule failed on a tie (slots 1 and 2 visible: llama.cpp rounds 1.5 up); the e^-30 leak
+  computed in f64 left 1.49999999999997. The slot is now computed in f32, as the router's softmax runs.
+
+Implication: granite-switch decides and chats through its adapters. Left: tests, the guide, full CI.
