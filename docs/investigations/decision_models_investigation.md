@@ -274,3 +274,32 @@ the rounding at no measurable cost; the rest is activation precision and batchin
   551.5 / 549.6 after (about 0.4%, on a model whose 248K-row head is a large share of each step).
 - Test: a tiny llama GGUF with a Q8_0 head, loaded in bf16 on the CPU, returns logits with nonzero low 16 bits; it
   fails without the change (an F32 GGUF head loads as a plain tensor and is left alone).
+
+## Run 12 - 2026-10-27 22:55
+
+Question: why does openjev 27B run out of memory on a request's batched questions (Run 9), and what should reserve
+for it?
+
+Command: `scratchpad/reserve/measure.sh`: a fresh `serve --prefix-cache-n 0 --max-prefill-chunk-tokens N
+--max-num-batched-tokens N` per N, GPU memory sampled every 20 ms during one N-token completion, peak minus the
+loaded level; Qwen3.5 0.8B Q8_0, nimble 9B and openjev 27B Q4_K_M. Then openjev's three requests twice in a row.
+
+Finding:
+- Peak prefill memory grows linearly: 0.8B 66 / 130 / 258 / 514 MiB at 512 / 1024 / 2048 / 4096 tokens; 9B 130 /
+  226 / 482 / 962; 27B 194 / 354 MiB at 512 / 1024, and 1280 fails. The card exposes ~24143 MiB, so after loading
+  the 27B (23689 MiB in use) about 450 MiB is left, against a planned activation reserve of 48 MB: the Qwen3.5
+  estimate counts eager attention scores, which flash attention never materializes, and nothing else.
+- The prompt pre-flight before each step (trim the pool, split the batch, or refuse) sized only the attention
+  workspace, so a batch of the request's questions passed it and then failed in the forward. Request 2 alone
+  succeeds on a fresh server; after requests 0 and 1 the pool holds ~300 MiB of other-shaped blocks.
+- Per token, the most any length took: 135 / 266 / 397 KB (the 27B's 512-token point carries a fixed ~34 MiB). Dense
+  Qwen3.5 now reports `66 KiB + 19 B x intermediate_size` (135.7 / 301 / 398 KB), which covers each.
+- The pre-flight adds that estimate times the step's prompt tokens for a batch of more than one sequence. Applied to a
+  single sequence too, it refused request 2's lone 512-token chunk (204 MB estimated, ~194 MiB real): one prompt's
+  chunk is admitted on its attention workspace as before.
+- Result: the six requests all succeed, `inference_cuda_prompt_batch_reductions_total 4`, no rejections, no OOM;
+  openjev parity unchanged (worst 4.6e-2). A single sequence with a chunk past the headroom (`--max-prefill-chunk-tokens
+  1536` on the 27B) still fails in the forward, as before.
+
+Implication: a request's questions no longer exhaust memory; the load-time reserve is left alone (raising it would
+take KV room from tuned setups), and the per-token figure is reported for dense Qwen3.5 only.

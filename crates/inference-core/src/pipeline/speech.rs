@@ -493,6 +493,7 @@ impl SpeechPipeline {
                 },
                 loaded_for_uqff_write: false,
                 label_decision: None,
+                prompt_activation_bytes_per_token: None,
             }),
             dummy_cache: EitherCache::Full(Cache::new(0)),
             cfg,

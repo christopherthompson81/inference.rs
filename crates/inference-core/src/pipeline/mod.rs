@@ -824,6 +824,8 @@ pub struct GeneralMetadata {
     pub loaded_for_uqff_write: bool,
     /// How the model answers decision questions by label logits, from its GGUF.
     pub label_decision: Option<Arc<crate::decision::LabelDecision>>,
+    /// What a prompt token's activations take beyond the attention workspace, for a model whose loader reports it.
+    pub prompt_activation_bytes_per_token: Option<usize>,
 }
 
 impl GeneralMetadata {

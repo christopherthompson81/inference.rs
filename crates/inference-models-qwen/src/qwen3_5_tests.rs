@@ -274,3 +274,30 @@ fn text_loader_reserves_the_mtp_layer_when_asked() -> Result<()> {
     );
     Ok(())
 }
+
+// the most peak prefill memory a token took on Qwen3.5 0.8B, 9B and 27B (by intermediate size), which the estimate covers
+const MEASURED_DENSE_PREFILL: [(usize, usize); 3] =
+    [(3584, 135_168), (12_288, 266_240), (17_408, 397_312)];
+
+#[test]
+fn dense_prompt_activations_cover_the_measured_peaks() -> Result<()> {
+    for (intermediate, measured) in MEASURED_DENSE_PREFILL {
+        let text = patched(text(), json!({ "intermediate_size": intermediate }));
+        for (loader, config) in [
+            (
+                &Qwen3_5TextLoader as &dyn DeviceMappedModelLoader,
+                text.clone(),
+            ),
+            (&Qwen3_5Loader, config(text.clone())),
+        ] {
+            let estimate = loader
+                .prompt_activation_bytes_per_token(&config.to_string())?
+                .expect("a dense Qwen3.5 reports its prefill activations");
+            assert!(
+                estimate >= measured,
+                "{estimate} < {measured} at {intermediate}"
+            );
+        }
+    }
+    Ok(())
+}

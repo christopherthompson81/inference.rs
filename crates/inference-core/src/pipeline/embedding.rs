@@ -470,6 +470,7 @@ impl EmbeddingLoader {
                     },
                     loaded_for_uqff_write: uqff.write().is_some(),
                     label_decision: None,
+                    prompt_activation_bytes_per_token: None,
                 }),
                 mapper: pipeline_mapper,
                 modules,
