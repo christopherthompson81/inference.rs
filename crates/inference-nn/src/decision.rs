@@ -405,6 +405,20 @@ impl LabelFamily {
         self == Self::Lfm2D1Omni
     }
 
+    /// The prompt has a place for images (llama.cpp's `can_use_images`).
+    pub fn takes_images(self) -> bool {
+        matches!(
+            self,
+            Self::OpenJev
+                | Self::Clef
+                | Self::PplxDecider
+                | Self::VllmD3
+                | Self::Lfm2D1
+                | Self::Lfm2D1Omni
+                | Self::H2oLightning
+        )
+    }
+
     /// A noul's descriptions may also sit under `yes` and `no`.
     pub fn noul_aliases(self) -> bool {
         matches!(self, Self::H2oLightning | Self::Lfm2D1Omni)
@@ -506,6 +520,8 @@ pub struct LabelDecision {
     pub quoted_spellings: Vec<String>,
     /// the token a family that scores markers reads each option at (d1-omni's `[MASK]`)
     pub marker: Option<u32>,
+    /// the text one image takes in the rendered prompt, when the model loaded with its projector
+    pub image_placeholder: Option<String>,
     /// the codes a per-question family may label with (`d1_codes`) that are one token, with and without a leading
     /// space
     pub single_tokens: HashMap<String, u32>,
@@ -549,6 +565,7 @@ impl LabelDecision {
             quoted_spellings: Vec::new(),
             single_tokens: HashMap::new(),
             marker: None,
+            image_placeholder: None,
         })
     }
 

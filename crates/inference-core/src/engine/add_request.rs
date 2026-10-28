@@ -94,6 +94,10 @@ impl MessageExtras {
                 extras.best_of = *best_of;
             }
             RequestMessage::CompletionTokens(_) => {}
+            RequestMessage::MultimodalTokens { images, audios, .. } => {
+                extras.images = Some(images.clone());
+                extras.audios = Some(audios.clone());
+            }
             RequestMessage::ImageGeneration {
                 generation_params, ..
             } => {
@@ -586,6 +590,7 @@ impl Engine {
             RequestMessage::Chat { .. }
                 | RequestMessage::Completion { .. }
                 | RequestMessage::CompletionTokens(_)
+                | RequestMessage::MultimodalTokens { .. }
                 | RequestMessage::MultimodalChat { .. }
         );
         if is_text_generation && request.sampling_params.max_len == Some(0) {
@@ -637,7 +642,8 @@ impl Engine {
                 RequestMessage::Chat { .. }
                 | RequestMessage::MultimodalChat { .. }
                 | RequestMessage::Completion { .. }
-                | RequestMessage::CompletionTokens(_),
+                | RequestMessage::CompletionTokens(_)
+                | RequestMessage::MultimodalTokens { .. },
             ) => Ok(()),
             (ModelCategory::Diffusion, RequestMessage::ImageGeneration { .. }) => {
                 options_check.map_err(|err| Box::new(Response::ValidationError(err.into())))
@@ -919,6 +925,7 @@ impl Engine {
                 unreachable!("a decision question is encoded by encode_decision")
             }
             RequestMessage::CompletionTokens(it)
+            | RequestMessage::MultimodalTokens { tokens: it, .. }
             | RequestMessage::EmbeddingTokens { prompt: it, .. } => {
                 let Some(tokenizer) = &get_mut_arcmutex!(self.pipeline).tokenizer() else {
                     return Err(Box::new(Response::ValidationError(

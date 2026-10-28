@@ -40,7 +40,20 @@ inference serve --format gguf -m <repo or folder> -f <file>.gguf
 
 `lfm2-d1-omni` (LiquidAI's d1-omni, an LFM2 encoder read both ways under a laya-style head) loads as a decision model of its own, not a chat model. Its prompt is cut to the budgets llama.cpp uses: the question and each option to a share of the options' budget, the state to what the 16384-token context leaves. It takes text only for now.
 
-The other llama.cpp decision type, `granite-switch`, is not supported, and no decision type takes images or audio yet.
+The other llama.cpp decision type, `granite-switch`, is not supported (#679).
+
+### Images
+
+`openjev`, `pplx-decider`, `vllm-d3`, `lfm2-d1` and `h2o-lightning` read images when the model loads with its projector (an `mmproj*.gguf` beside the model, or `--mmproj`). Send them as data URLs in `files` (or `images`), or as `image_url` parts of a chat-message `state`, which leave the state:
+
+```json
+{"state": "A photo from the street.",
+ "images": ["data:image/png;base64,..."],
+ "questions": {"color": {"type": "choice", "instructions": "What color is the sign?",
+                         "criteria": {"red": null, "blue": null}}}}
+```
+
+A request takes up to 8. A model may calibrate its answers on images apart (h2o-lightning's `image` temperature). `clef` and `lfm2-d1-omni` do not take images yet, and no type takes audio yet.
 
 ## Asking questions
 

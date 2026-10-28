@@ -1316,6 +1316,11 @@ pub trait Pipeline:
     fn decision_spec(&self) -> Option<Arc<inference_nn::decision::DecisionSpec>> {
         None
     }
+    /// The model reads its prompt bidirectionally, so a prompt runs in one pass, never split at a chunk or a media
+    /// boundary.
+    fn whole_prompt(&self) -> bool {
+        false
+    }
     /// A joint decision head's option scores over a prompt's normed hidden states (clef).
     fn joint_decision(
         &self,

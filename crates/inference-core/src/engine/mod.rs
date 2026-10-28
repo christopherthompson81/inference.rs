@@ -696,7 +696,7 @@ impl Engine {
                 pipeline.requires_uniform_media_batch(),
                 pipeline.supports_packed_prefill(),
                 pipeline.cache().is_hybrid(),
-                pipeline.device().is_cuda(),
+                pipeline.device().is_cuda() && !pipeline.whole_prompt(),
                 pipeline.cache().is_hybrid(),
                 pipeline.speculative_prefix_checkpoint_policy(),
             )

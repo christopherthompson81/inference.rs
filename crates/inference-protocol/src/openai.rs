@@ -1946,6 +1946,12 @@ pub struct DecisionRequest {
     /// Question id to question; each is answered on its own.
     #[schema(value_type = Object)]
     pub questions: IndexMap<String, DecisionRequestQuestion>,
+    /// Images as data URLs, for the decision types whose prompt has a place for them; `images` names the same.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
+    /// As `files`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
 }
 
 /// A question's answer, shaped by its type.

@@ -1124,6 +1124,13 @@ impl DecoderPipeline {
 }
 
 impl Pipeline for DecoderPipeline {
+    fn whole_prompt(&self) -> bool {
+        match &self.model {
+            DecoderModel::Text(model) => model.bidirectional_prompt(),
+            DecoderModel::Multimodal(model) => model.bidirectional_prompt(),
+        }
+    }
+
     fn joint_decision(
         &self,
         hidden: &Tensor,

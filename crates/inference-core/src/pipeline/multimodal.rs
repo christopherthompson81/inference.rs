@@ -585,7 +585,12 @@ impl MultimodalLoader {
             label_decision: self
                 .prepared_source
                 .as_ref()
-                .and_then(|source| source.label_decision.clone()),
+                .and_then(|source| source.label_decision.clone())
+                .map(|decision| {
+                    let mut decision = (*decision).clone();
+                    decision.image_placeholder = processor.image_placeholder();
+                    Arc::new(decision)
+                }),
             prompt_activation_bytes_per_token: self
                 .inner
                 .prompt_activation_bytes_per_token(&config)?,

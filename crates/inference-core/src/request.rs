@@ -69,6 +69,15 @@ pub enum RequestMessage {
         best_of: Option<usize>,
     },
     CompletionTokens(Vec<u32>),
+    /// A prompt the caller rendered itself (a decision template), with the model's image placeholders where its
+    /// images go, expanded as a chat's are.
+    MultimodalTokens {
+        tokens: Vec<u32>,
+        #[serde(skip)]
+        images: Vec<image::DynamicImage>,
+        #[serde(skip)]
+        audios: Vec<AudioInput>,
+    },
     MultimodalChat {
         #[serde(skip)]
         images: Vec<image::DynamicImage>,

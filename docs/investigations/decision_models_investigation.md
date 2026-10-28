@@ -432,3 +432,27 @@ Finding:
   which a 4.3e-3 difference flips.
 
 Implication: lfm2-d1-omni is supported for text (#672). Images and audio, through its mmproj, stay open.
+
+## Run 20 - 2026-10-28 13:24
+
+Question: do the label-coded types answer image questions as llama.cpp does, through the multimodal pipelines?
+
+Command: two synthetic PNGs (a red sign reading STOP, a receipt-like card; `scratchpad/media`), sent once as `images`
+and once as an `image_url` part of a chat-message state (`media_requests.py`), to `llama-server --mmproj ...` and
+to ours (the projector found beside the GGUF), for h2o-lightning-4b (Qwen3.5), d1-3B (LFM2-VL) and vllm-d3-nano
+(Qwen3.5, bidirectional); `media_compare.py` side by side.
+
+Finding:
+- The prompt renders each image as the model's own one-image placeholder (`<|vision_start|><|image_pad|><|vision_end|>`
+  for Qwen, `<image>` for LFM2-VL), which a `MultimodalTokens` request carries with the images; the inputs processor
+  expands it as it does a chat's. Prompt token counts then equal llama.cpp's on every request (h2o 332 / 365, d1
+  236 / 318, d3 356 / 403), so the image spans are the same length.
+- The usage first counted one placeholder an image (174 against 332); it now reads the prompt tokens of the pass.
+- vllm-d3 failed: `a bidirectional Qwen3.5 prompt runs in one pass` with offsets 42, the prompt split at the image by
+  the media-aware chunk planner. A model that reads its prompt both ways now gets no scheduler-visible prompt
+  chunks and no step-level plan.
+- Same choice on every question; worst difference h2o 6.8e-3, d1 7.8e-4, d3 2.5e-2.
+
+Implication: images work for the label types (openjev, pplx-decider and vllm-d3 share h2o's Qwen path; openjev and
+pplx not run). clef (images in its joint prompt) and lfm2-d1-omni (images and audio through its own encoders) are
+next.

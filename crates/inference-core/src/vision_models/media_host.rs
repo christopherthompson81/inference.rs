@@ -502,10 +502,21 @@ pub(crate) fn media_processor(
     special_tokens: &'static [&'static str],
     template_action: MessagesAction,
 ) -> Arc<dyn Processor + Send + Sync> {
+    media_processor_with_placeholder(inputs, special_tokens, template_action, None)
+}
+
+/// As [`media_processor`], with the text one image takes in a prompt the caller renders.
+pub(crate) fn media_processor_with_placeholder(
+    inputs: impl MultimodalInputsProcessor + 'static,
+    special_tokens: &'static [&'static str],
+    template_action: MessagesAction,
+    image_placeholder: Option<String>,
+) -> Arc<dyn Processor + Send + Sync> {
     Arc::new(MediaProcessor {
         inputs: Arc::new(inputs),
         special_tokens,
         template_action,
+        image_placeholder,
     })
 }
 
@@ -513,9 +524,14 @@ struct MediaProcessor {
     inputs: Arc<dyn MultimodalInputsProcessor>,
     special_tokens: &'static [&'static str],
     template_action: MessagesAction,
+    image_placeholder: Option<String>,
 }
 
 impl Processor for MediaProcessor {
+    fn image_placeholder(&self) -> Option<String> {
+        self.image_placeholder.clone()
+    }
+
     fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
         Arc::new(MediaInputsProcessor(self.inputs.clone()))
     }
