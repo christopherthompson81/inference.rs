@@ -40,18 +40,18 @@ pub(crate) fn invalid(message: impl Into<String>, param: String) -> EmbeddingErr
 
 /// `json.dumps`'s layout: an indent (one line without), the separators between items and after keys, ASCII escaping,
 /// and whether floats take Python's `repr`.
-pub(crate) struct PythonJson {
+pub(crate) struct PythonJson<'a> {
     pub indent: Option<usize>,
-    pub item_sep: &'static str,
-    pub key_sep: &'static str,
+    pub item_sep: &'a str,
+    pub key_sep: &'a str,
     pub ensure_ascii: bool,
     pub python_floats: bool,
 }
 
-impl PythonJson {
+impl PythonJson<'_> {
     /// `json.dumps(value, ensure_ascii=...)`'s defaults, with serde's float text.
-    pub(crate) const fn default_layout(ensure_ascii: bool) -> Self {
-        Self {
+    pub(crate) const fn default_layout(ensure_ascii: bool) -> PythonJson<'static> {
+        PythonJson {
             indent: None,
             item_sep: ", ",
             key_sep: ": ",

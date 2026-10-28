@@ -338,3 +338,22 @@ Finding:
   all 12 questions; worst difference 5.85e-2 (a score), most under 1e-2; the long state within 3e-3.
 
 Implication: h2o-lightning is supported for text. Image input (its mmproj) stays open with the other families'.
+
+## Run 15 - 2026-10-28 09:11
+
+Question: does lfm2-d1 (`LiquidAI/d1-3B-GGUF`, Q8_0, LFM2) answer as llama.cpp does, with labels chosen per question
+and each scored by the best logit of its spellings?
+
+Command: `llama-server -np 1 -ngl 99` with `server_ref_d1.py` over the shared set plus two d1 requests (a null state;
+an object state with floats, letter keys, underscore keys, 30 options, a described noul); ours with `compare_d1.py`.
+
+Finding:
+- The GGUF has no temperatures (all 1) and a template that writes a non-text state with `tojson(indent=2)`, which our
+  `tojson` did not take; it now takes `indent`, `separators` and `ensure_ascii`, and writes floats as Python's `repr`,
+  as llama.cpp's jinja does.
+- Prompt token counts equal on all five requests (152 / 239 / 1498 / 27 / 576), same choice on all 13 questions, worst
+  difference 1.10e-2 (a noul), most under 5e-3.
+- A first tiny-model check failed on a test bug, not the code: the tiny GGUF's choice temperature is 2.0 and the
+  expected value used 1.0.
+
+Implication: lfm2-d1 is supported for text. Its noul needs single-token `yes` / `no` (as in llama.cpp).

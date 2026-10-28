@@ -22,14 +22,14 @@ const CHOICE_TEMPERATURE: f32 = 2.0;
 const STATE: &str = "the app closes on upload";
 const PROBABILITY_TOLERANCE: f64 = 1e-5;
 
-async fn model() -> anyhow::Result<(Model, tempfile::TempDir)> {
+async fn model(family: &str) -> anyhow::Result<(Model, tempfile::TempDir)> {
     let checkpoint = tiny_llama_checkpoint()?;
     let dir = tempfile::tempdir()?;
     write_tiny_gguf(
         checkpoint.path(),
         &dir.path().join(GGUF_FILE),
         &[
-            ("llama.decision.type", Value::String("nimble".into())),
+            ("llama.decision.type", Value::String(family.into())),
             (
                 "llama.decision.temperature.choice",
                 Value::F32(CHOICE_TEMPERATURE),
@@ -67,6 +67,20 @@ async fn label_softmax(
     n: usize,
     temperature: f64,
 ) -> anyhow::Result<Vec<f64>> {
+    let labels = ('A'..)
+        .take(n)
+        .map(|c| vec![c.to_string()])
+        .collect::<Vec<_>>();
+    group_softmax(model, prompt, &labels, temperature).await
+}
+
+/// As [`label_softmax`], each output scored by the best logit of its spellings that are one token.
+async fn group_softmax(
+    model: &Model,
+    prompt: &str,
+    groups: &[Vec<String>],
+    temperature: f64,
+) -> anyhow::Result<Vec<f64>> {
     let ids = tokens(model, prompt).await?;
     let scored = model
         .prompt_logits(PromptLogitsRequest {
@@ -77,12 +91,16 @@ async fn label_softmax(
         .await?;
     let logits = scored.logits.expect("the request asked for logits");
     let last = &logits[(ids.len() - 1) * scored.vocab_size..];
-    let mut scores = Vec::with_capacity(n);
-    for label in ('A'..).take(n) {
-        let [id] = tokens(model, &label.to_string()).await?[..] else {
-            anyhow::bail!("label {label} is not one token");
-        };
-        scores.push(f64::from(last[id as usize]) / temperature);
+    let mut scores = Vec::with_capacity(groups.len());
+    for group in groups {
+        let mut best = f64::NEG_INFINITY;
+        for form in group {
+            if let [id] = tokens(model, form).await?[..] {
+                best = best.max(f64::from(last[id as usize]));
+            }
+        }
+        anyhow::ensure!(best.is_finite(), "no spelling of {group:?} is one token");
+        scores.push(best / temperature);
     }
     let max = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let exp = scores.iter().map(|s| (s - max).exp()).collect::<Vec<_>>();
@@ -103,7 +121,7 @@ fn assert_close(got: &[f64], want: &[f64], what: &str) {
 
 #[tokio::test]
 async fn a_gguf_decision_profile_answers_by_label_logits() -> anyhow::Result<()> {
-    let (model, _checkpoint) = model().await?;
+    let (model, _checkpoint) = model("nimble").await?;
     let request: DecisionRequest = serde_json::from_value(serde_json::json!({
         "state": STATE,
         "questions": {
@@ -135,5 +153,55 @@ async fn a_gguf_decision_profile_answers_by_label_logits() -> anyhow::Result<()>
         DecisionAnswer::Noul { noul } => assert_close(&[*noul], &want[1..], "angry"),
         other => panic!("angry: {other:?}"),
     }
+    Ok(())
+}
+
+// lfm2-d1 picks its labels per question: a choice's single-letter keys are its codes, a score reads its level digits
+#[tokio::test]
+async fn per_question_labels_score_by_their_best_spelling() -> anyhow::Result<()> {
+    let (model, _checkpoint) = model("lfm2-d1").await?;
+    let request: DecisionRequest = serde_json::from_value(serde_json::json!({
+        "state": STATE,
+        "questions": {
+            "pick": {"type": "choice", "instructions": "Which?", "criteria": {"x": null, "y": null}},
+            "level": {"type": "score", "instructions": "How bad?", "criteria": ["fine", "bad"]},
+        },
+    }))?;
+    let response = model.decide(request).await?;
+    let spelled = |code: &str| vec![code.to_string(), format!(" {code}")];
+    let pick = format!("{STATE}\nWhich?\nx: x\ny: y\nCode:");
+    let want = group_softmax(
+        &model,
+        &pick,
+        &[spelled("x"), spelled("y")],
+        f64::from(CHOICE_TEMPERATURE),
+    )
+    .await?;
+    match &response.answers["pick"] {
+        DecisionAnswer::Choice { probabilities, .. } => assert_close(
+            &probabilities.values().copied().collect::<Vec<_>>(),
+            &want,
+            "pick",
+        ),
+        other => panic!("pick: {other:?}"),
+    }
+    let level = format!("{STATE}\nHow bad?\n0: 0\n1: 1\nCode:");
+    let digits = [vec!["0".to_string()], vec!["1".to_string()]];
+    let want = group_softmax(&model, &level, &digits, 1.0).await?;
+    match &response.answers["level"] {
+        DecisionAnswer::Score { probabilities, .. } => assert_close(
+            &probabilities.values().copied().collect::<Vec<_>>(),
+            &want,
+            "level",
+        ),
+        other => panic!("level: {other:?}"),
+    }
+    // a noul reads yes / no, which this vocabulary has no single tokens for
+    let request: DecisionRequest = serde_json::from_value(serde_json::json!({
+        "state": STATE,
+        "questions": {"angry": {"type": "noul", "instructions": "Angry?"}},
+    }))?;
+    let err = model.decide(request).await.unwrap_err().to_string();
+    assert!(err.contains("not a single token"), "{err}");
     Ok(())
 }

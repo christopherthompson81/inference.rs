@@ -465,6 +465,13 @@ fn label_decision(
             .set_labels(texts, encode)
             .map_err(anyhow::Error::msg)?;
     }
+    if family.labels_per_question() {
+        for form in crate::decision::d1_label_forms() {
+            if let Ok([token]) = encode(&form).as_deref() {
+                decision.single_tokens.insert(form, *token);
+            }
+        }
+    }
     if family.prepares_texts() {
         let mut spellings = tokenizer
             .get_added_tokens_decoder()
