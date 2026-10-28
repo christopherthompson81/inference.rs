@@ -2096,6 +2096,9 @@ impl GraniteMoeHybrid {
         ));
 
         let num_attention_heads = cfg.num_attention_heads / mapper.get_comm_for(0)?.world_size();
+        let has_mamba = layer_types
+            .iter()
+            .any(|layer_type| matches!(layer_type, GraniteLayerType::Mamba));
 
         Ok(Self {
             wte,
@@ -2105,7 +2108,14 @@ impl GraniteMoeHybrid {
             lm_head,
             dtype,
             hybrid_cache,
-            kv_cache: EitherCache::Hybrid(pipeline_cache),
+            // an all-attention Granite keeps plain KV caches: a hybrid one would reserve recurrent state it has none of
+            kv_cache: match has_mamba {
+                true => EitherCache::Hybrid(pipeline_cache),
+                false => EitherCache::Normal(crate::kv_cache::NormalCache::new(
+                    cfg.num_hidden_layers,
+                    cfg.max_position_embeddings,
+                )),
+            },
             device: normal_loading_metadata.real_device,
             cfg: ModelConfigMetadata {
                 max_seq_len: cfg.max_position_embeddings,
@@ -2138,7 +2148,10 @@ impl GraniteMoeHybrid {
 
         // Get both internal cache and pipeline cache
         let mut internal_cache = self.hybrid_cache.lock().unwrap();
-        let mut pipeline_cache = self.kv_cache.hybrid();
+        let mut normal_cache =
+            matches!(self.kv_cache, EitherCache::Normal(_)).then(|| self.kv_cache.normal());
+        let mut pipeline_cache =
+            matches!(self.kv_cache, EitherCache::Hybrid(_)).then(|| self.kv_cache.hybrid());
 
         let recurrent_metadata = ctx.recurrent_metadata().cloned();
         let has_mamba_layers = self
@@ -2193,10 +2206,11 @@ impl GraniteMoeHybrid {
             .unwrap_or(RecurrentBatchKind::Prefill);
 
         let paged_mask_cache = ForwardMaskCache::Paged(ctx.seqlen_offsets());
-        let mask_cache = if ctx.is_paged() {
-            &paged_mask_cache as &dyn PastKvLenCache
-        } else {
-            &*pipeline_cache as &dyn PastKvLenCache
+        let mask_cache = match (&normal_cache, &pipeline_cache) {
+            _ if ctx.is_paged() => &paged_mask_cache as &dyn PastKvLenCache,
+            (Some(normal), _) => &normal.0 as &dyn PastKvLenCache,
+            (None, Some(hybrid)) => &**hybrid as &dyn PastKvLenCache,
+            (None, None) => unreachable!("Granite keeps a normal or a hybrid cache"),
         };
         let mask = CausalMasker.make_causal_mask(
             input_ids,
@@ -2216,8 +2230,18 @@ impl GraniteMoeHybrid {
 
             match layer {
                 DecoderLayer::Attention(block) => {
-                    if let Some(HybridLayerCache::Attention(kv_cache)) =
-                        pipeline_cache.get_mut(layer_idx)
+                    if let Some(normal) = normal_cache.as_mut() {
+                        let mask_for_layer = &mask.get(x.device());
+                        x = block.forward(
+                            &x,
+                            mask_for_layer,
+                            &mut normal.0[layer_idx],
+                            ctx,
+                            layer_idx,
+                        )?;
+                    } else if let Some(HybridLayerCache::Attention(kv_cache)) = pipeline_cache
+                        .as_mut()
+                        .and_then(|cache| cache.get_mut(layer_idx))
                     {
                         let mask_for_layer = &mask.get(x.device());
                         x = block.forward(&x, mask_for_layer, kv_cache, ctx, layer_idx)?;
@@ -2229,7 +2253,9 @@ impl GraniteMoeHybrid {
                     }
                 }
                 DecoderLayer::Mamba(block) => {
-                    if let Some(metadata) = recurrent_metadata.as_ref() {
+                    if let (Some(metadata), Some(pipeline_cache)) =
+                        (recurrent_metadata.as_ref(), pipeline_cache.as_mut())
+                    {
                         let indices = pipeline_cache
                             .state_indices_for_layer(layer_idx)?
                             .ok_or_else(|| {

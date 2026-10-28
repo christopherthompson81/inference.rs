@@ -376,6 +376,7 @@ impl Pipeline for GGMLPipeline {
             recurrent_batch_kind: _,
             adapter_leases: _adapter_leases,
             token_window: _,
+            switch_slots: _,
         } = *inputs.downcast().expect("Downcast failed.");
         let logits = self
             .model

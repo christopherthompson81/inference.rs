@@ -365,7 +365,7 @@ impl EmbeddingLoader {
                 }
             }
         }
-        let (model, tracker, task_lora) = super::loading::load_model(
+        let (model, tracker, task_lora, _) = super::loading::load_model(
             &*self.inner,
             &session,
             mapper,

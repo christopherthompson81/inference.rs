@@ -41,6 +41,8 @@ pub fn build_normal_bindings(
 }
 
 const DECISION_HEAD_PREFIX: &str = "decision.";
+// granite-switch fuses q, k and v into one tensor; Granite's attention takes them apart
+const FUSED_QKV_ROLE: &str = "attn_qkv";
 
 fn bind_root_tensors(
     archive: &GgufArchive,
@@ -128,6 +130,9 @@ fn bind_block_tensor(
     bindings: &mut GgufBindingMap,
 ) -> Result<()> {
     let p = format!("model.layers.{layer}");
+    if role == FUSED_QKV_ROLE && matches!(loader, NormalLoaderType::GraniteMoeHybrid) {
+        return bind_granite_qkv(archive, &p, suffix, source, bindings);
+    }
     let gpt_oss_mxfp4_expert = matches!(loader, NormalLoaderType::GptOss)
         && matches!(role, "ffn_gate_exps" | "ffn_up_exps" | "ffn_down_exps")
         && archive.tensor_info(source)?.dtype().raw() == 39;
@@ -659,6 +664,46 @@ fn bind_gpt_oss(archive: &GgufArchive, layer: usize, bindings: &mut GgufBindingM
                 GgufTensorBinding::tensor(down_bias),
             );
         }
+    }
+    Ok(())
+}
+
+/// A fused `attn_qkv` as Granite's q, k and v projections, row slices of the heads' widths.
+fn bind_granite_qkv(
+    archive: &GgufArchive,
+    layer: &str,
+    suffix: &str,
+    source: &str,
+    bindings: &mut GgufBindingMap,
+) -> Result<()> {
+    let architecture = match archive.metadata_value("general.architecture") {
+        Some(Value::String(architecture)) => architecture.clone(),
+        _ => bail!("GGUF metadata is missing `general.architecture`"),
+    };
+    let key = |name: &str| -> Result<usize> {
+        let key = format!("{architecture}.{name}");
+        let value = archive
+            .metadata_value(&key)
+            .with_context(|| format!("a fused attn_qkv needs `{key}`"))?;
+        // a per-layer array or one value
+        let value = match value {
+            Value::Array(values) => values.first().context("an empty head count")?,
+            value => value,
+        };
+        Ok(value.to_u64().or_else(|_| value.to_u32().map(u64::from))? as usize)
+    };
+    let (heads, kv_heads) = (
+        key("attention.head_count")?,
+        key("attention.head_count_kv")?,
+    );
+    let head_dim = key("attention.key_length")
+        .or_else(|_| Ok::<_, anyhow::Error>(key("embedding_length")? / heads))?;
+    let (q, kv) = (heads * head_dim, kv_heads * head_dim);
+    for (name, start, len) in [("q_proj", 0, q), ("k_proj", q, kv), ("v_proj", q + kv, kv)] {
+        bindings.insert(
+            format!("{layer}.self_attn.{name}.{suffix}"),
+            GgufTensorBinding::tensor(source).slice(0, start, len),
+        );
     }
     Ok(())
 }

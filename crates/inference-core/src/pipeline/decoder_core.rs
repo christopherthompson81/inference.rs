@@ -34,6 +34,7 @@ pub(crate) struct DecoderCore {
     pub source_weight_files: Vec<PathBuf>,
     pub source_weight_source: Option<Arc<dyn inference_quant::QuantizedWeightSource>>,
     pub dynamic_lora: Option<Arc<DynamicLoraRuntime>>,
+    pub switch_adapters: Option<Arc<crate::adapter::SwitchAdapters>>,
 }
 
 /// What the constructor reads from a loaded model.
@@ -70,6 +71,7 @@ pub(crate) struct DecoderCoreArgs<'a> {
     pub source_weight_files: Vec<PathBuf>,
     pub source_weight_source: Option<Arc<dyn inference_quant::QuantizedWeightSource>>,
     pub dynamic_lora: Option<Arc<DynamicLoraRuntime>>,
+    pub switch_adapters: Option<Arc<crate::adapter::SwitchAdapters>>,
     pub label_decision: Option<Arc<crate::decision::LabelDecision>>,
     pub prompt_activation_bytes_per_token: Option<usize>,
 }
@@ -178,6 +180,7 @@ impl DecoderCore {
             source_weight_files: args.source_weight_files,
             source_weight_source: args.source_weight_source,
             dynamic_lora: args.dynamic_lora,
+            switch_adapters: args.switch_adapters,
         })
     }
 }

@@ -67,6 +67,10 @@ const DECISION2_ARCHITECTURE: &str = "vllm-decision2";
 const DECISION2_TRUNK: &str = "qwen3";
 const OPTION_HEAD_TENSOR: &str = "decision.key.weight";
 // d1-omni's GGUF is `lfm2` read bidirectionally with laya's head; it runs as an embedder over d1-omni's prompts
+// granite-switch: a dense Granite whose projections carry per-token switched LoRA factors
+const SWITCH_ARCHITECTURE: &str = "graniteswitch";
+const SWITCH_TRUNK: &str = "granite";
+const SWITCH_FACTOR_SUFFIXES: [&str; 2] = [".lora_a", ".lora_b"];
 const D1_OMNI_ARCHITECTURE: &str = "lfm2";
 const D1_OMNI_TYPE: &str = "lfm2-d1-omni";
 // the prompt length d1-omni was trained for, which llama.cpp's server cuts its prompts to
@@ -414,10 +418,39 @@ fn bidirectional_config(config: &str) -> Result<String> {
 
 /// A decision model's GGUF filed under its trunk's architecture (clef is Qwen3.5, vllm-decision2 is Qwen3), so the
 /// trunk loads as that model does.
+/// granite-switch's control tokens and router gain, from the `<arch>.adapters.*` keys its aliased GGUF keeps.
+fn switch_routing(
+    archive: &inference_quant::GgufArchive,
+) -> Result<Option<crate::adapter::SwitchRouting>> {
+    let key = |name: &str| archive.metadata_value(&format!("{SWITCH_TRUNK}.adapters.{name}"));
+    let Some(activate) = key("token_ids_activate") else {
+        return Ok(None);
+    };
+    let ids = |value: &inference_tensor::quantized::gguf_file::Value| -> Result<Vec<u32>> {
+        value
+            .to_vec()?
+            .iter()
+            .map(|id| Ok(u32::try_from(id.to_i32()?)?))
+            .collect()
+    };
+    let substitute =
+        key("token_ids_substitute").context("granite-switch GGUF has no substitute tokens")?;
+    let gain = match key("router_gain") {
+        Some(gain) => f64::from(gain.to_f32()?),
+        None => crate::adapter::DEFAULT_ROUTER_GAIN,
+    };
+    Ok(Some(crate::adapter::SwitchRouting::new(
+        &ids(activate)?,
+        &ids(substitute)?,
+        gain,
+    )?))
+}
+
 fn alias_decision_architecture(archive: &mut inference_quant::GgufArchive) -> Result<()> {
     for (architecture, trunk) in [
         (CLEF_ARCHITECTURE, CLEF_TRUNK),
         (DECISION2_ARCHITECTURE, DECISION2_TRUNK),
+        (SWITCH_ARCHITECTURE, SWITCH_TRUNK),
     ] {
         if is_architecture(archive, architecture) {
             archive.rename_architecture(trunk)?;
@@ -765,6 +798,7 @@ impl GGUFLoader {
             source_weight_files: paths.get_weight_filenames().to_vec(),
             rope_pairing,
             label_decision,
+            switch: None,
         })
     }
 
@@ -969,8 +1003,24 @@ impl GGUFLoader {
                 options,
             );
         }
-        let source =
+        let switch = switch_routing(&archive)?;
+        let mut bindings = bindings;
+        if switch.is_some() {
+            // the stacked adapter factors, read under their own names once the model's LoRA sites exist
+            for name in archive.tensors().keys().filter(|name| {
+                SWITCH_FACTOR_SUFFIXES
+                    .iter()
+                    .any(|suffix| name.ends_with(suffix))
+            }) {
+                bindings.insert(
+                    name.clone(),
+                    inference_quant::GgufTensorBinding::tensor(name.clone()),
+                );
+            }
+        }
+        let mut source =
             self.prepare_source(&archive, &bindings, paths, &options, config, rope_pairing)?;
+        source.switch = switch.map(Arc::new);
         let mut loader = NormalLoaderBuilder::new(
             NormalSpecificConfig {
                 topology: self.config.topology.clone(),

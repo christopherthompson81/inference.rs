@@ -342,6 +342,8 @@ pub enum LabelFamily {
     VllmDecision2,
     /// laya's head over an LFM2 encoder, its prompt cut into pieces to token budgets, one `[MASK]` per option
     Lfm2D1Omni,
+    /// Granite with embedded per-token adapters, its decision adapter switched on by a control token in the prompt
+    GraniteSwitch,
 }
 
 impl LabelFamily {
@@ -359,6 +361,7 @@ impl LabelFamily {
             "clef" => Self::Clef,
             "vllm-decision2" => Self::VllmDecision2,
             "lfm2-d1-omni" => Self::Lfm2D1Omni,
+            "granite-switch" => Self::GraniteSwitch,
             _ => return None,
         })
     }
@@ -394,7 +397,7 @@ impl LabelFamily {
     pub fn noul_true_first(self) -> bool {
         matches!(
             self,
-            Self::OpenJev | Self::H2oLightning | Self::Lfm2D1 | Self::Clef
+            Self::OpenJev | Self::H2oLightning | Self::Lfm2D1 | Self::Clef | Self::GraniteSwitch
         )
     }
 

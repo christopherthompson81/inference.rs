@@ -290,6 +290,7 @@ struct StepInputs {
     recurrent_batch_kind: RecurrentBatchKind,
     adapter_leases: Arc<[Option<crate::AdapterLease>]>,
     token_window: Option<crate::model::TokenWindow>,
+    switch_slots: Option<Vec<u32>>,
 }
 
 impl StepInputs {
@@ -311,6 +312,7 @@ impl StepInputs {
                     recurrent_batch_kind: inputs.recurrent_batch_kind,
                     adapter_leases: inputs.adapter_leases,
                     token_window: inputs.token_window,
+                    switch_slots: inputs.switch_slots,
                 }
             }
             DecoderModel::Multimodal(_) => {
@@ -327,6 +329,7 @@ impl StepInputs {
                     recurrent_batch_kind: inputs.recurrent_batch_kind,
                     adapter_leases: inputs.adapter_leases,
                     token_window: inputs.token_window,
+                    switch_slots: None,
                 }
             }
         }
@@ -349,6 +352,12 @@ impl PreProcessingMixin for DecoderPipeline {
                     token_window,
                 },
             ) as Arc<dyn Any>),
+            // granite-switch reads no token window: its processor finds each token's adapter instead
+            (None, None) if self.core.switch_adapters.is_some() => self
+                .core
+                .switch_adapters
+                .as_ref()
+                .map(|adapters| adapters.routing().clone() as Arc<dyn Any>),
             (None, token_window) => token_window.map(|request| Arc::new(request) as Arc<dyn Any>),
         }
     }
@@ -1274,14 +1283,18 @@ impl Pipeline for DecoderPipeline {
             recurrent_batch_kind,
             adapter_leases,
             token_window,
+            switch_slots,
         } = StepInputs::from_processor_output(&self.model, inputs);
-        let lora_execution = super::resolve_lora_execution(
-            self.core.dynamic_lora.as_deref(),
-            &input_ids,
-            paged_attn_meta.as_ref(),
-            &flash_meta,
-            &adapter_leases,
-        )?;
+        let lora_execution = match (&self.core.switch_adapters, &switch_slots) {
+            (Some(adapters), Some(slots)) => adapters.execution(slots)?,
+            _ => super::resolve_lora_execution(
+                self.core.dynamic_lora.as_deref(),
+                &input_ids,
+                paged_attn_meta.as_ref(),
+                &flash_meta,
+                &adapter_leases,
+            )?,
+        };
         let metadata = self.get_metadata();
         let paged_attn_meta = match (&metadata.cache_engine, &paged_attn_meta) {
             (Some(engine), Some(meta)) => Some((engine.get_kv_cache().clone(), meta)),
