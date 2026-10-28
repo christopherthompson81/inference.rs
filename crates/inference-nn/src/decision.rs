@@ -24,6 +24,11 @@ const LAYA_NOUL_TRUE: &str = "yes, the statement holds";
 const MAX_LABELS: usize = 255;
 /// kev reads an option's hidden state at the token that closes it
 pub const KEV_OPTION_END: &str = "<|box_end|>";
+// d1 reads a noul's answer as any of these spellings
+const D1_YES: [&str; 3] = ["yes", "Yes", "YES"];
+const D1_NO: [&str; 3] = ["no", "No", "NO"];
+// d1's score levels, as digits
+const D1_LEVELS: usize = 10;
 /// lev answers a noul by rating it on this many levels
 pub const LEV_NOUL_RATINGS: usize = 9;
 /// Where a decoder's decision head sits in the native weights, beside `lm_head`, whose place it takes.
@@ -281,6 +286,8 @@ pub enum LabelFamily {
     Kev,
     /// labels from the GGUF (`<arch>.decision.labels`), read after an answer prefill
     H2oLightning,
+    /// labels chosen per question (codes by question type), each scored by its best spelling
+    Lfm2D1,
 }
 
 impl LabelFamily {
@@ -294,6 +301,7 @@ impl LabelFamily {
             "vllm-d3" => Self::VllmD3,
             "kev" => Self::Kev,
             "h2o-lightning" => Self::H2oLightning,
+            "lfm2-d1" => Self::Lfm2D1,
             _ => return None,
         })
     }
@@ -309,7 +317,7 @@ impl LabelFamily {
                     .collect(),
                 true,
             ),
-            Self::Kev | Self::H2oLightning => (Vec::new(), false),
+            Self::Kev | Self::H2oLightning | Self::Lfm2D1 => (Vec::new(), false),
             _ => {
                 let letters = || 'A'..='Z';
                 let codes = letters()
@@ -322,7 +330,17 @@ impl LabelFamily {
 
     /// noul's options as the template lists them: `[true, false]` for openjev, `[false, true]` otherwise.
     pub fn noul_true_first(self) -> bool {
-        matches!(self, Self::OpenJev | Self::H2oLightning)
+        matches!(self, Self::OpenJev | Self::H2oLightning | Self::Lfm2D1)
+    }
+
+    /// The labels follow each question's type and keys (d1's `prompt.py`), so they are chosen per question.
+    pub fn labels_per_question(self) -> bool {
+        self == Self::Lfm2D1
+    }
+
+    /// The prompt reads without a state, for example to ask about images only.
+    pub fn accepts_null_state(self) -> bool {
+        matches!(self, Self::VllmD3 | Self::Lfm2D1)
     }
 
     /// A score's legend reports a non-text description as its key-sorted JSON.
@@ -419,6 +437,9 @@ pub struct LabelDecision {
     pub option_end: Option<u32>,
     /// the texts of the tokenizer's added tokens, longest first, which h2o-lightning quotes in its input
     pub quoted_spellings: Vec<String>,
+    /// the codes a per-question family may label with (`d1_codes`) that are one token, with and without a leading
+    /// space
+    pub single_tokens: HashMap<String, u32>,
 }
 
 impl LabelDecision {
@@ -457,7 +478,84 @@ impl LabelDecision {
             label_texts,
             option_end: None,
             quoted_spellings: Vec::new(),
+            single_tokens: HashMap::new(),
         })
+    }
+
+    /// d1's question labels: each label's text and the tokens that spell it, whose best logit scores it. A score
+    /// reads its level digits, a noul `yes` / `no` in three cases; a choice its single-letter keys, else `A`, `B`, ...
+    /// (or `00`, `01`, ... past 26), each falling back to the first unused code of the pool when it is not one token.
+    pub fn question_labels(
+        &self,
+        kind: QuestionKind,
+        keys: &[&str],
+    ) -> Result<(Vec<String>, Vec<Vec<u32>>), String> {
+        let single = |forms: &[String]| {
+            let mut out = Vec::new();
+            for form in forms {
+                if let Some(&token) = self.single_tokens.get(form)
+                    && !out.contains(&token)
+                {
+                    out.push(token);
+                }
+            }
+            out
+        };
+        if kind != QuestionKind::Choice {
+            let mut texts = Vec::with_capacity(keys.len());
+            let mut groups = Vec::with_capacity(keys.len());
+            for &key in keys {
+                let forms = match kind {
+                    QuestionKind::Score => vec![key.to_string()],
+                    _ if key == NOUL_TRUE => D1_YES.map(String::from).to_vec(),
+                    _ => D1_NO.map(String::from).to_vec(),
+                };
+                let group = single(&forms);
+                if group.is_empty() {
+                    return Err(format!("decision label is not a single token: {key}"));
+                }
+                texts.push(key.to_string());
+                groups.push(group);
+            }
+            return Ok((texts, groups));
+        }
+        let letters = keys
+            .iter()
+            .all(|key| key.len() == 1 && key.as_bytes()[0].is_ascii_alphabetic());
+        let pool = d1_codes();
+        let mut used = Vec::new();
+        let mut texts = Vec::with_capacity(keys.len());
+        let mut groups = Vec::with_capacity(keys.len());
+        for (i, key) in keys.iter().enumerate() {
+            let code = match (letters, keys.len()) {
+                (true, _) => key.to_string(),
+                (false, 0..=26) => char::from(b'A' + i as u8).to_string(),
+                _ => format!("{i:02}"),
+            };
+            let taken = std::iter::once(&code).chain(&pool).find_map(|code| {
+                let &token = self.single_tokens.get(code)?;
+                if used.contains(&token) {
+                    return None;
+                }
+                let mut group = vec![token];
+                group.extend(
+                    single(&[format!(" {code}")])
+                        .into_iter()
+                        .filter(|&t| t != token),
+                );
+                Some((code.clone(), token, group))
+            });
+            let Some((code, token, group)) = taken else {
+                return Err(format!(
+                    "no single-token label left for {} options",
+                    keys.len()
+                ));
+            };
+            used.push(token);
+            texts.push(code);
+            groups.push(group);
+        }
+        Ok((texts, groups))
     }
 
     /// The GGUF's own labels in option order, each of which must be one distinct token.
@@ -487,7 +585,7 @@ impl LabelDecision {
 
     /// The most options a question can have: one per label, or llama.cpp's request limit for a pointer head.
     pub fn max_options(&self) -> usize {
-        match self.family.reads_pointer() {
+        match self.family.reads_pointer() || self.family.labels_per_question() {
             true => MAX_LABELS,
             false => self.labels.len(),
         }
@@ -510,6 +608,31 @@ impl LabelDecision {
             .copied()
             .unwrap_or(1.0)
     }
+}
+
+/// d1's label pool in the order it is tried: `A`..`Z`, `00`..`99`, `a`..`z`, `#0`..`#199`, `AA`..`ZZ`.
+fn d1_codes() -> Vec<String> {
+    let upper = || ('A'..='Z').map(String::from);
+    upper()
+        .chain((0..100).map(|i| format!("{i:02}")))
+        .chain(('a'..='z').map(String::from))
+        .chain((0..200).map(|i| format!("#{i}")))
+        .chain(('A'..='Z').flat_map(|a| ('A'..='Z').map(move |b| format!("{a}{b}"))))
+        .collect()
+}
+
+/// Every text d1's labels may be read as: the pool, the score digits and the noul words, each also after a space.
+pub fn d1_label_forms() -> Vec<String> {
+    let bare = d1_codes()
+        .into_iter()
+        .chain((0..D1_LEVELS).map(|i| i.to_string()))
+        .chain(D1_YES.iter().chain(&D1_NO).map(|word| word.to_string()))
+        .collect::<Vec<_>>();
+    let spaced = bare
+        .iter()
+        .map(|text| format!(" {text}"))
+        .collect::<Vec<_>>();
+    bare.into_iter().chain(spaced).collect()
 }
 
 fn described(option: &DecisionOption) -> Option<&str> {
@@ -745,6 +868,40 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("`A`"), "{err}");
         assert!(h2o.set_labels(vec!["BC".into()], encode_codes).is_err());
+    }
+
+    #[test]
+    fn d1_labels_follow_the_question_and_fall_back_to_the_pool() {
+        let mut d1 = decision(LabelFamily::Lfm2D1, &[]);
+        // single letters and digits are one token each, "A" also with a space, "B" is not one token
+        let mut id = 0;
+        for form in d1_label_forms() {
+            let single = match form.as_str() {
+                " A" | "yes" | "Yes" | "no" => true,
+                "B" => false,
+                text => text.len() == 1,
+            };
+            if single {
+                id += 1;
+                d1.single_tokens.insert(form, id);
+            }
+        }
+        let (texts, groups) = d1
+            .question_labels(QuestionKind::Choice, &["billing", "shipping", "x"])
+            .unwrap();
+        // B is not one token, so the second option takes the pool's next unused code
+        assert_eq!(texts, ["A", "C", "D"]);
+        assert_eq!(groups[0].len(), 2);
+        let (texts, _) = d1
+            .question_labels(QuestionKind::Choice, &["x", "y"])
+            .unwrap();
+        assert_eq!(texts, ["x", "y"]);
+        let (texts, groups) = d1
+            .question_labels(QuestionKind::Noul, &["true", "false"])
+            .unwrap();
+        assert_eq!(texts, ["true", "false"]);
+        assert_eq!((groups[0].len(), groups[1].len()), (2, 1));
+        assert!(d1.question_labels(QuestionKind::Score, &["0", "1"]).is_ok());
     }
 
     #[test]

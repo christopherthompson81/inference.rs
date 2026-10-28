@@ -18,7 +18,7 @@ use crate::{
     api_error::{ApiError, ApiErrorKind, ModelErrorMessage},
     dispatch::send_request_with_model,
     engine_decision::{
-        PythonJson, first_max, invalid, kind_of, python_json, required_instructions, required_kind,
+        PythonJson, first_max, invalid, kind_of, required_instructions, required_kind,
     },
     engine_embeddings::EmbeddingError,
     openai::{DecisionAnswer, DecisionQuestionType, DecisionRequest, DecisionRequestQuestion},
@@ -68,11 +68,14 @@ struct LabelQuestion {
     kind: QuestionKind,
     instructions: Value,
     options: Vec<(String, Value)>,
+    /// the text the template shows for each option's label, and the tokens whose best logit scores each output
+    label_texts: Vec<String>,
+    label_groups: Vec<Vec<u32>>,
 }
 
 /// The logits of the labels at the prompt's last position, kept as the engine samples its one token.
 struct LabelCapture {
-    labels: Vec<u32>,
+    groups: Vec<Vec<u32>>,
     scores: Arc<Mutex<Option<Vec<f32>>>>,
 }
 
@@ -80,12 +83,17 @@ impl CustomLogitsProcessor for LabelCapture {
     fn apply(&self, logits: &Tensor, _context: &[u32]) -> inference_tensor::Result<Tensor> {
         let all = logits.to_vec1::<f32>()?;
         let scores = self
-            .labels
+            .groups
             .iter()
-            .map(|&label| {
-                all.get(label as usize)
-                    .copied()
-                    .unwrap_or(f32::NEG_INFINITY)
+            .map(|group| {
+                group
+                    .iter()
+                    .map(|&label| {
+                        all.get(label as usize)
+                            .copied()
+                            .unwrap_or(f32::NEG_INFINITY)
+                    })
+                    .fold(f32::NEG_INFINITY, f32::max)
             })
             .collect();
         *self
@@ -180,11 +188,41 @@ fn parse(
             param,
         ));
     }
+    let (label_texts, label_groups) = match profile.family.labels_per_question() {
+        true => {
+            let keys = options
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>();
+            profile
+                .question_labels(kind, &keys)
+                .map_err(|message| invalid(message, param))?
+        }
+        false => {
+            let n = profile.family.outputs(kind, options.len());
+            (
+                profile
+                    .label_texts
+                    .iter()
+                    .take(options.len())
+                    .cloned()
+                    .collect(),
+                profile
+                    .labels
+                    .iter()
+                    .take(n)
+                    .map(|&label| vec![label])
+                    .collect(),
+            )
+        }
+    };
     Ok(LabelQuestion {
         id: id.to_string(),
         kind,
         instructions,
         options,
+        label_texts,
+        label_groups,
     })
 }
 
@@ -306,7 +344,7 @@ fn h2o_input(profile: &LabelDecision, state: &Value, question: &LabelQuestion) -
                     }
                 }
             }
-            json!({"label": profile.label_texts[i], "key": key, "description": description})
+            json!({"label": question.label_texts[i], "key": key, "description": description})
         })
         .collect::<Vec<_>>();
     json!({
@@ -399,7 +437,7 @@ fn render_options(profile: &LabelDecision, question: &LabelQuestion, variant: us
                     }),
                     false => json!({"key": key, "description": description}),
                 };
-                if let Some(label) = profile.label_texts.get(i) {
+                if let Some(label) = question.label_texts.get(i) {
                     option["label"] = json!(label);
                 }
                 option
@@ -449,15 +487,31 @@ fn render(
 
     let mut env = minijinja::Environment::new();
     env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
-    // llama.cpp's tojson, which these templates were converted for: json.dumps's separators, no ASCII escaping
-    env.add_filter("tojson", |value: minijinja::Value| {
-        let value = serde_json::to_value(&value).map_err(|e| {
-            minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, e.to_string())
-        })?;
-        let mut out = String::new();
-        python_json(&value, false, &mut out);
-        Ok(minijinja::Value::from_safe_string(out))
-    });
+    // llama.cpp's tojson, which these templates were converted for: json.dumps's layout and float repr, no ASCII
+    // escaping unless asked
+    env.add_filter(
+        "tojson",
+        |value: minijinja::Value, kwargs: minijinja::value::Kwargs| {
+            let value = serde_json::to_value(&value).map_err(|e| {
+                minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, e.to_string())
+            })?;
+            let indent = kwargs.get::<Option<usize>>("indent")?;
+            let separators = kwargs
+                .get::<Option<Vec<String>>>("separators")?
+                .unwrap_or_default();
+            let layout = PythonJson {
+                indent,
+                item_sep: separators
+                    .first()
+                    .map_or(if indent.is_some() { "," } else { ", " }, String::as_str),
+                key_sep: separators.get(1).map_or(": ", String::as_str),
+                ensure_ascii: kwargs.get::<Option<bool>>("ensure_ascii")?.unwrap_or(false),
+                python_floats: true,
+            };
+            kwargs.assert_all_used()?;
+            Ok(minijinja::Value::from_safe_string(layout.dumps(&value)))
+        },
+    );
     env.add_filter("trim", |text: String| {
         text.trim_matches(TRIM_CHARS).to_string()
     });
@@ -649,13 +703,13 @@ async fn score(
     state: &SharedInferenceRsState,
     model: Option<&str>,
     prompt: String,
-    labels: Vec<u32>,
+    groups: Vec<Vec<u32>>,
 ) -> Result<(Vec<f32>, usize), EmbeddingError> {
     let tokens = tokenize(state, model, prompt).await?;
     let n_tokens = tokens.len();
     let scores = Arc::new(Mutex::new(None));
     let capture = LabelCapture {
-        labels,
+        groups,
         scores: scores.clone(),
     };
     match run(state, model, tokens, |request| {
@@ -747,15 +801,15 @@ pub(crate) async fn decide(
         .iter()
         .map(|(id, q)| parse(profile, id, q))
         .collect::<Result<Vec<_>, _>>()?;
+    if request.state.is_null() && !profile.family.accepts_null_state() {
+        return Err(invalid("`state` must be provided", "state".into()));
+    }
     let input_state = match profile.family.prepares_texts() {
         true => h2o_state(state, model, profile, &request.state).await?,
         false => request.state.clone(),
     };
     let mut prompts = Vec::new();
     for (index, question) in questions.iter().enumerate() {
-        let n = profile
-            .family
-            .outputs(question.kind, question.options.len());
         for variant in 0..profile
             .family
             .variants(question.kind, question.options.len())
@@ -767,13 +821,17 @@ pub(crate) async fn decide(
                         "questions".into(),
                     )
                 })?;
-            prompts.push((index, prompt, n));
+            prompts.push((index, prompt));
         }
     }
-    let results = join_all(prompts.into_iter().map(|(index, prompt, n)| async move {
+    let all = &questions;
+    let results = join_all(prompts.into_iter().map(|(index, prompt)| async move {
+        let question = &all[index];
         let result = match profile.option_end {
-            Some(option_end) => score_pointer(state, model, prompt, option_end, n).await,
-            None => score(state, model, prompt, profile.labels[..n].to_vec()).await,
+            Some(option_end) => {
+                score_pointer(state, model, prompt, option_end, question.options.len()).await
+            }
+            None => score(state, model, prompt, question.label_groups.clone()).await,
         };
         (index, result)
     }))
@@ -958,6 +1016,26 @@ mod tests {
         assert_eq!(
             render(&lev, &state, &[], &q, 1).unwrap(),
             "{\"a\": \"é<\\u0001\", \"b\": 1, \"c\": [true, null]}|A=y;B=x;"
+        );
+    }
+
+    #[test]
+    fn tojson_takes_python_layouts() {
+        let nimble = profile(
+            LabelFamily::Nimble,
+            "{{ state | tojson(indent=2) }}|{{ state | tojson(separators=[',', ':'], ensure_ascii=true) }}",
+        );
+        let q = question(&nimble, DecisionQuestionType::Choice, json!({"x": null}));
+        assert_eq!(
+            render(
+                &nimble,
+                &json!({"a": [1, 2.0], "b": {}, "c": "é"}),
+                &[],
+                &q,
+                0
+            )
+            .unwrap(),
+            "{\n  \"a\": [\n    1,\n    2.0\n  ],\n  \"b\": {},\n  \"c\": \"é\"\n}|{\"a\":[1,2.0],\"b\":{},\"c\":\"\\u00e9\"}"
         );
     }
 
