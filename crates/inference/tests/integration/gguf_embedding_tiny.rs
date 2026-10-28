@@ -456,35 +456,16 @@ async fn a_bert_reranker_gguf_without_its_pooler_is_refused() -> anyhow::Result<
         &dir.path().join(GGUF_FILE),
     )?;
     // add the label projection llama.cpp writes as `cls.output`
-    let path = dir.path().join(GGUF_FILE);
-    let mut file = std::fs::File::open(&path)?;
-    let content = gguf_file::Content::read(&mut file)?;
-    let mut tensors = content
-        .tensor_infos
-        .keys()
-        .map(|name| Ok((name.clone(), content.tensor(&mut file, name, &Device::Cpu)?)))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    tensors.push((
-        "cls.output.weight".to_string(),
-        QTensor::quantize(
-            &Tensor::zeros(
-                (1, HIDDEN as usize),
-                inference_tensor::DType::F32,
-                &Device::Cpu,
-            )?,
-            GgmlDType::F32,
-        )?,
-    ));
-    let metadata = content
-        .metadata
-        .iter()
-        .map(|(k, v)| (k.as_str(), v))
-        .collect::<Vec<_>>();
-    let tensors = tensors
-        .iter()
-        .map(|(k, v)| (k.as_str(), v))
-        .collect::<Vec<_>>();
-    gguf_file::write(&mut std::fs::File::create(&path)?, &metadata, &tensors)?;
+    let zeros = Tensor::zeros(
+        (1, HIDDEN as usize),
+        inference_tensor::DType::F32,
+        &Device::Cpu,
+    )?;
+    add_tensors(
+        &dir.path().join(GGUF_FILE),
+        vec![("cls.output.weight".to_string(), zeros)],
+        |_| {},
+    )?;
 
     let Err(error) = gguf_model(checkpoint.path(), dir.path()).await else {
         anyhow::bail!("a reranker GGUF without a pooler loaded");
@@ -732,5 +713,88 @@ async fn a_jina_bert_v3_gguf_without_its_adapters_is_refused() -> anyhow::Result
         anyhow::bail!("a jina-bert-v3 GGUF without its adapters loaded");
     };
     anyhow::ensure!(error.to_string().contains("task adapters"), "{error}");
+    Ok(())
+}
+
+/// Rewrites the GGUF at `path` with `extra` tensors, at F32, beside its own, and its metadata edited.
+fn add_tensors(
+    path: &Path,
+    extra: Vec<(String, Tensor)>,
+    edit: impl FnOnce(&mut HashMap<String, gguf_file::Value>),
+) -> anyhow::Result<()> {
+    let mut file = std::fs::File::open(path)?;
+    let mut content = gguf_file::Content::read(&mut file)?;
+    edit(&mut content.metadata);
+    let mut tensors = content
+        .tensor_infos
+        .keys()
+        .map(|name| Ok((name.clone(), content.tensor(&mut file, name, &Device::Cpu)?)))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    for (name, tensor) in extra {
+        tensors.push((name, QTensor::quantize(&tensor, GgmlDType::F32)?));
+    }
+    let metadata = content
+        .metadata
+        .iter()
+        .map(|(k, v)| (k.as_str(), v))
+        .collect::<Vec<_>>();
+    let tensors = tensors
+        .iter()
+        .map(|(k, v)| (k.as_str(), v))
+        .collect::<Vec<_>>();
+    gguf_file::write(&mut std::fs::File::create(path)?, &metadata, &tensors)?;
+    Ok(())
+}
+
+// an older XLM-R reranker conversion: `cls` / `cls.output` with the one-label projection as a bare vector, no labels
+#[tokio::test]
+async fn a_reranker_gguf_with_a_bare_one_label_projection_scores_as_its_source()
+-> anyhow::Result<()> {
+    let checkpoint = bert::tiny_bert_checkpoint(|config| {
+        config["architectures"] = serde_json::json!(["BertForSequenceClassification"]);
+        config["id2label"] = serde_json::json!({"0": "LABEL_0"});
+    })?;
+    let expected = safetensors_embedding(checkpoint.path()).await?;
+    let weights = inference_tensor::safetensors::load(
+        checkpoint.path().join("model.safetensors"),
+        &Device::Cpu,
+    )?;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join(GGUF_FILE);
+    write_gguf(checkpoint.path(), Arch::Bert, GgmlDType::F32, &path)?;
+    add_tensors(
+        &path,
+        vec![
+            (
+                "cls.weight".to_string(),
+                weights["classifier.dense.weight"].clone(),
+            ),
+            (
+                "cls.bias".to_string(),
+                weights["classifier.dense.bias"].clone(),
+            ),
+            (
+                "cls.output.weight".to_string(),
+                weights["classifier.out_proj.weight"].flatten_all()?,
+            ),
+            (
+                "cls.output.bias".to_string(),
+                weights["classifier.out_proj.bias"].clone(),
+            ),
+        ],
+        // a reranker names no pooling, so it ranks
+        |metadata| {
+            metadata.remove("bert.pooling_type");
+        },
+    )?;
+    let logit = gguf_model(checkpoint.path(), dir.path())
+        .await?
+        .generate_embedding(PROMPT)
+        .await?;
+    let diff = (logit[0] - expected[0]).abs();
+    anyhow::ensure!(
+        logit.len() == 1 && diff < 1e-5,
+        "logit {logit:?}, expected {expected:?}"
+    );
     Ok(())
 }

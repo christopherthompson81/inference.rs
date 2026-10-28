@@ -285,7 +285,13 @@ pub fn synthesize_embedding_config(
         EmbeddingGgufArchitecture::JinaBertV3 => unreachable!("Jina v3's config is built above"),
     };
     if is_classifier(archive) {
-        let labels = meta.labels()?;
+        let mut labels = meta.labels()?;
+        // older conversions name no labels; the projection's rows count them (one for a bare vector)
+        if labels.is_empty() {
+            let shape = archive.tensor_info(CLASSIFIER_OUTPUT)?.shape();
+            let rows = if shape.len() == 1 { 1 } else { shape[0] };
+            labels = (0..rows).map(|i| format!("LABEL_{i}")).collect();
+        }
         config["architectures"] = json!(["BertForSequenceClassification"]);
         config["id2label"] = labels
             .iter()
@@ -493,9 +499,10 @@ fn bind(archive: &GgufArchive, bindings: &mut GgufBindingMap, native: String, gg
         return;
     }
     let binding = GgufTensorBinding::tensor(gguf.as_str());
-    // older converters write a one-row segment table as a bare `[hidden]` vector
+    // older converters write a one-row matrix (the segment table, a one-label head) as a bare `[hidden]` vector
+    let one_row = gguf == TOKEN_TYPES || gguf == CLASSIFIER_OUTPUT;
     let binding = match archive.tensor_info(&gguf).map(|info| info.shape().to_vec()) {
-        Ok(shape) if gguf == TOKEN_TYPES && shape.len() == 1 => binding.reshape(vec![1, shape[0]]),
+        Ok(shape) if one_row && shape.len() == 1 => binding.reshape(vec![1, shape[0]]),
         _ => binding,
     };
     bindings.insert(native, binding);
