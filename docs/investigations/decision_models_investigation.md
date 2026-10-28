@@ -250,3 +250,27 @@ Finding:
 
 Implication: vllm-d3 is served; pplx-decider takes the same path (forced non-causal, since llama.cpp's converter
 does not write the flag for it) but has no llama.cpp-converted GGUF to check against.
+
+## Run 11 - 2026-10-27 22:26
+
+Question: how much of the nimble gap (Run 6, worst 5.7e-2) does an f32 lm_head output close?
+
+Command: `ModelForwardContext::lm_head` feeds a GGUF head an f32 input (its kernels sum in f32 and write the input's
+dtype, so the logits come out f32); nimble `compare.py` against `nimble_ref1.json`, then `logit_check.py` on
+`repro` and `next` with llama.cpp (`-np 1`) beside ours.
+
+Finding:
+- Our logprobs no longer come in 1/16 steps.
+- Decision answers: angry 1.0e-2 -> 4.1e-3, urgency 3.1e-2 -> 1.2e-2, route 3e-5 -> 6e-6; repro (5.7e-2 -> 5.1e-2)
+  and next (3.5e-2 -> 5.3e-2) stay. Worst 5.25e-2.
+- Raw logits on llama.cpp's token ids: next's A-B gap 0.864 vs llama.cpp 0.878 (close), so its decision gap comes
+  from how the request's questions run (prefix reuse and batching on both sides), not the forward. repro's gap 2.06
+  vs 1.50: the forward itself differs there, from bf16 activations over 32 layers (llama.cpp keeps f32
+  activations); f32 activations are not an option for Qwen3.5 on CUDA (Run 6).
+
+Implication: Run 6's "bf16 logit rounding is the size of the differences" was only part of it. The f32 head removes
+the rounding at no measurable cost; the rest is activation precision and batching, not the decision path.
+- Cost: `inference bench` on Qwen3.5-0.8B Q8_0 (CUDA), decode 128 tokens at depth 4: 553.1 / 553.2 tok/s before,
+  551.5 / 549.6 after (about 0.4%, on a model whose 248K-row head is a large share of each step).
+- Test: a tiny llama GGUF with a Q8_0 head, loaded in bf16 on the CPU, returns logits with nonzero low 16 bits; it
+  fails without the change (an F32 GGUF head loads as a plain tensor and is left alone).
