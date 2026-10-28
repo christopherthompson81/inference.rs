@@ -1430,6 +1430,8 @@ pub struct Qwen3_5TextModel {
     pub(super) norm: OutputNorm,
     // the residual's hyper-connection streams, 1 without them
     hyper_streams: usize,
+    // the full-attention layers read a prompt bidirectionally (decision checkpoints)
+    bidirectional_prompt: bool,
     layers: Vec<DecoderLayer>,
     pub(super) layer_types: Vec<LayerType>,
     mapper: Box<dyn DeviceMapper + Send + Sync>,
@@ -1791,6 +1793,7 @@ impl Qwen3_5TextModel {
             embed_tokens,
             norm,
             hyper_streams: cfg.hyper_connections().map_or(1, |hc| hc.streams),
+            bidirectional_prompt: !cfg.is_causal,
             layers,
             layer_types: layer_types.clone(),
             lm_head,
@@ -2788,7 +2791,7 @@ impl Qwen3_5TextModel {
         mut xs: Tensor,
         attention_mask: &AttentionMask,
         position_ids: &Tensor,
-        _seqlen_offsets: &[usize],
+        seqlen_offsets: &[usize],
         ctx: &ModelForwardContext<'_>,
         visual_pos_masks: Option<&Tensor>,
         deepstack_visual_embeds: Option<&[Tensor]>,
@@ -2838,7 +2841,28 @@ impl Qwen3_5TextModel {
             }
         };
 
-        let attention_mask = DeviceMappedMask::new(attention_mask.clone(), &*self.mapper)?;
+        let bidirectional = self.bidirectional_prompt && query_len > 1;
+        let attention_mask = if bidirectional {
+            // every row sees the whole prompt, which must then arrive in one pass with nothing cached before it
+            if !ctx.is_first_prompt_chunk() || seqlen_offsets.iter().any(|&offset| offset > 0) {
+                inference_tensor::bail!(
+                    "a bidirectional Qwen3.5 prompt runs in one pass, without a cached prefix or chunks"
+                );
+            }
+            AttentionMask::Custom(Tensor::zeros(
+                (query_len, query_len),
+                xs.dtype(),
+                xs.device(),
+            )?)
+        } else {
+            attention_mask.clone()
+        };
+        let bidirectional_flash = bidirectional.then(|| FlashParams {
+            causal: false,
+            ..ctx.flash_params().clone()
+        });
+        let flash_params = bidirectional_flash.as_ref().unwrap_or(ctx.flash_params());
+        let attention_mask = DeviceMappedMask::new(attention_mask, &*self.mapper)?;
         let qsa_step = self.qsa_step(&xs, ctx)?;
 
         let speculative_gdn = checkpoint_lanes > 1
@@ -3019,7 +3043,7 @@ impl Qwen3_5TextModel {
                             &cos_sin,
                             Some(kv_cache),
                             ctx.paged_layer(i),
-                            ctx.flash_params(),
+                            flash_params,
                             qsa,
                         )?
                     }
@@ -3355,8 +3379,12 @@ impl NormalModel for Qwen3_5TextModel {
     }
 
     fn supports_packed_prefill(&self) -> bool {
-        // PLE pairs each batch row with its own token history
-        !self.has_ple()
+        // PLE pairs each batch row with its own token history; packed varlen attention is causal only
+        !self.has_ple() && !self.bidirectional_prompt
+    }
+
+    fn bidirectional_prompt(&self) -> bool {
+        self.bidirectional_prompt
     }
 
     #[cfg(feature = "cuda")]

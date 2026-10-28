@@ -1933,6 +1933,10 @@ fn qwen35_text_config(
         ),
     );
     config.insert(GDN_V_HEAD_LAYOUT_CONFIG_KEY.into(), json!("tiled"));
+    // decision checkpoints whose full-attention layers see the whole prompt
+    if metadata.optional_bool("attention.causal")? == Some(false) {
+        config.insert("is_causal".into(), json!(false));
+    }
     Ok(config)
 }
 
@@ -3162,7 +3166,15 @@ mod tests {
             inference_nn::gdn::GdnConfig::v_head_layout(&native),
             inference_nn::gdn::GdnVHeadLayout::Tiled
         );
+        assert!(native.is_causal);
         assert_native_config_deserializes(&loader, config);
+
+        // a decision checkpoint's full-attention layers read the prompt bidirectionally
+        insert_bool(&mut metadata, architecture, "attention.causal", false);
+        let config = synthesize_normal_config_value(&loader, &metadata, &tensors).unwrap();
+        let native =
+            inference_models_qwen::qwen3_5::TextConfig::from_json(&config.to_string()).unwrap();
+        assert!(!native.is_causal);
     }
 
     #[test]

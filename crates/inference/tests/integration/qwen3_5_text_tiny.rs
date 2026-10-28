@@ -1,7 +1,8 @@
 //! A tiny random-weight Qwen3.5 text checkpoint: the one text loader whose runtime config differs from the checkpoint's.
 
 use inference::{
-    IsqType, Model, ModelDType, RequestBuilder, TextMessageRole, TextMessages, TextModelBuilder,
+    IsqType, LogitsOutput, Model, ModelDType, PromptInput, PromptLogitsRequest, RequestBuilder,
+    TextMessageRole, TextMessages, TextModelBuilder,
 };
 use inference_models_qwen::qwen3_5::{Qwen3_5TextModel, TextConfig};
 use inference_nn::paged_attention::AttentionImplementation;
@@ -28,6 +29,15 @@ const PARTIAL_ROTARY_FACTOR: f64 = 0.25;
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
 fn tiny_qwen3_5_text(head_dim: usize, mtp: bool) -> anyhow::Result<tempfile::TempDir> {
+    tiny_qwen3_5_text_with(head_dim, mtp, serde_json::json!({}))
+}
+
+/// As [`tiny_qwen3_5_text`], with `patch`'s keys overriding the config's; weights are seeded by name, so alike.
+fn tiny_qwen3_5_text_with(
+    head_dim: usize,
+    mtp: bool,
+    patch: serde_json::Value,
+) -> anyhow::Result<tempfile::TempDir> {
     let rotary_pairs = (head_dim as f64 * PARTIAL_ROTARY_FACTOR) as usize / 2;
     // split 2:1:1 over the rotated pairs, the shape of Qwen3.5's own sections
     let section = rotary_pairs / 4;
@@ -58,6 +68,9 @@ fn tiny_qwen3_5_text(head_dim: usize, mtp: bool) -> anyhow::Result<tempfile::Tem
     });
     if mtp {
         config["mtp_num_hidden_layers"] = 1.into();
+    }
+    for (key, value) in patch.as_object().expect("a config patch is a JSON object") {
+        config[key] = value.clone();
     }
     let scratch = tempfile::tempdir()?;
     let config_path = scratch.path().join("config.json");
@@ -105,6 +118,79 @@ async fn a_uqff_keeps_the_checkpoint_context_when_written_under_max_model_len() 
         serde_json::from_str(&std::fs::read_to_string(uqff.path().join("config.json"))?)?;
     assert_eq!(written["max_position_embeddings"], DECLARED_CONTEXT);
     Ok(())
+}
+
+// two prompts that differ only in their last token
+const PROMPT: [u32; 4] = [40, 41, 42, 43];
+const OTHER_LAST: u32 = 44;
+const BIDIRECTIONAL_DIFF: f32 = 1e-4;
+
+async fn first_row_logits(model: &Model, prompt: &[u32]) -> anyhow::Result<Vec<f32>> {
+    let scored = model
+        .prompt_logits(PromptLogitsRequest {
+            model: None,
+            prompt: PromptInput::Tokens(prompt.to_vec()),
+            output: LogitsOutput::Logits,
+        })
+        .await?;
+    let logits = scored.logits.expect("the request asked for logits");
+    Ok(logits[..scored.vocab_size].to_vec())
+}
+
+/// How far the first row's logits move when the prompt's last token changes.
+async fn first_row_shift(model: &Model) -> anyhow::Result<f32> {
+    let mut other = PROMPT;
+    other[PROMPT.len() - 1] = OTHER_LAST;
+    let (a, b) = (
+        first_row_logits(model, &PROMPT).await?,
+        first_row_logits(model, &other).await?,
+    );
+    Ok(a.iter()
+        .zip(&b)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0, f32::max))
+}
+
+async fn assert_bidirectional_prompt(cuda: bool) -> anyhow::Result<()> {
+    for causal in [true, false] {
+        let checkpoint = tiny_qwen3_5_text_with(
+            GRAPH_HEAD_DIM,
+            false,
+            serde_json::json!({"is_causal": causal}),
+        )?;
+        let builder = TextModelBuilder::new(checkpoint.path().to_string_lossy());
+        let builder = if cuda {
+            builder
+                .with_dtype(ModelDType::BF16)
+                .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        } else {
+            builder.with_dtype(ModelDType::F32).with_force_cpu()
+        };
+        let shift = first_row_shift(&builder.build().await?).await?;
+        // the recurrent layers stay causal, so only the full-attention layers carry the later token back
+        if causal {
+            assert_eq!(shift, 0.0, "a causal first row saw a later token");
+        } else {
+            assert!(
+                shift > BIDIRECTIONAL_DIFF,
+                "a bidirectional first row moved {shift}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_bidirectional_prompt_reaches_back_from_later_tokens() -> anyhow::Result<()> {
+    assert_bidirectional_prompt(false).await
+}
+
+#[tokio::test]
+async fn a_paged_gpu_bidirectional_prompt_reaches_back_from_later_tokens() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    assert_bidirectional_prompt(true).await
 }
 
 const GRAPH_MAX_LEN: usize = 8;

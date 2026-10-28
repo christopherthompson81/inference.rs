@@ -412,9 +412,14 @@ impl NormalLoader {
             mapper: pipeline_mapper,
             silent,
             max_kv_tokens,
-            prompt_chunk_tokens,
+            // a bidirectional prompt must arrive whole, and a cached prefix's rows never saw what follows it
+            prompt_chunk_tokens: if model.bidirectional_prompt() {
+                Some(model.max_seq_len())
+            } else {
+                prompt_chunk_tokens
+            },
             no_kv_cache: self.no_kv_cache,
-            no_prefix_cache: false,
+            no_prefix_cache: model.bidirectional_prompt(),
             kind: self.kind.clone(),
             model_id: self.model_id.clone(),
             modalities: Modalities {

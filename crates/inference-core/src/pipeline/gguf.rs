@@ -55,6 +55,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+// the architecture whose full-attention layers can read a prompt bidirectionally
+const BIDIRECTIONAL_ARCHITECTURE: &str = "qwen35";
 const DECISION_TEMPLATE_KEY: &str = "tokenizer.chat_template.systemone";
 // llama.cpp's bounds on a score's level count
 const SCORE_BIAS_LEVELS: std::ops::RangeInclusive<usize> = 2..=255;
@@ -373,6 +375,17 @@ fn with_architecture(config: &str, class: &str) -> Result<String> {
     Ok(serde_json::to_string(&config)?)
 }
 
+/// The config with its text model's full-attention layers reading prompts bidirectionally.
+fn bidirectional_config(config: &str) -> Result<String> {
+    let mut config: serde_json::Value = serde_json::from_str(config)?;
+    let text = match config.get_mut("text_config") {
+        Some(text) => text,
+        None => &mut config,
+    };
+    text["is_causal"] = serde_json::Value::Bool(false);
+    Ok(serde_json::to_string(&config)?)
+}
+
 /// The label-coded decision profile a GGUF carries (`<arch>.decision.*` and its `systemone` template), if any.
 fn label_decision(
     metadata: &HashMap<String, inference_tensor::quantized::gguf_file::Value>,
@@ -398,9 +411,10 @@ fn label_decision(
     let causal = metadata
         .get(&format!("{architecture}.attention.causal"))
         .and_then(|value| value.to_bool().ok());
-    if causal == Some(false) || family.non_causal() {
+    if (causal == Some(false) || family.non_causal()) && architecture != BIDIRECTIONAL_ARCHITECTURE
+    {
         warn!(
-            "GGUF decision type `{kind}` needs non-causal attention, not supported yet; it loads without decisions"
+            "GGUF decision type `{kind}` needs non-causal attention, which `{architecture}` does not run; it loads without decisions"
         );
         return Ok(None);
     }
@@ -472,6 +486,11 @@ impl GGUFLoader {
             .or_else(|| GenerationConfig::from_gguf_metadata(archive.metadata()));
         let label_decision =
             label_decision(archive.metadata(), &tokenizer.conversion.tokenizer)?.map(Arc::new);
+        // a converter may leave out the causal flag of a family trained with bidirectional prompts
+        let config = match &label_decision {
+            Some(decision) if decision.family.non_causal() => bidirectional_config(&config)?,
+            _ => config,
+        };
         let chat_template =
             if paths.get_template_filename().is_none() && self.chat_template.is_none() {
                 get_gguf_chat_template_from_metadata(archive.metadata())?
