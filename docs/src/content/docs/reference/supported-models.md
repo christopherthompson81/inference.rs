@@ -125,6 +125,7 @@ The `Architecture` column is the `config.json` `architectures` value. Per-family
 | `ModernBertModel` | ModernBERT | <details><summary><code>ibm-granite/granite-embedding-english-r2</code></summary><code>inference run -m ibm-granite/granite-embedding-english-r2</code></details> |
 | `NeoBERT` | NeoBERT | <details><summary><code>chandar-lab/NeoBERT</code></summary><code>inference run -m chandar-lab/NeoBERT</code></details> |
 | `LlamaBidirectionalModel` | EuroBERT, Llama bidirectional, Jina Embeddings v5 nano | <details><summary><code>nvidia/llama-embed-nemotron-8b</code></summary><code>inference run -m nvidia/llama-embed-nemotron-8b</code></details> |
+| `ModernBertDecisionModel` | Laya, Julia-1 | <details><summary><code>convaiinnovations/laya</code></summary><code>inference run -m convaiinnovations/laya</code></details> |
 
 ## Format and quantization notes
 

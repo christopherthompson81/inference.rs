@@ -3,6 +3,7 @@
 #![allow(clippy::duplicate_mod)]
 
 mod bert_embedding_tiny;
+mod decision_tiny;
 mod embedding_tiny;
 mod gemma3_tiny;
 mod gguf_embedding_tiny;

@@ -1308,6 +1308,10 @@ pub trait Pipeline:
     fn embedding_tasks(&self) -> Option<Arc<inference_nn::embedding::EmbeddingTasks>> {
         None
     }
+    /// A decision model's budgets and calibration; `None` for every other model.
+    fn decision_spec(&self) -> Option<Arc<inference_nn::decision::DecisionSpec>> {
+        None
+    }
 
     fn forward_inputs(
         &mut self,

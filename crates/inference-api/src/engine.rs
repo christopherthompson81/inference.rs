@@ -51,11 +51,11 @@ use crate::{
         speculative_stats, unload_model,
     },
     openai::{
-        ChatCompletionRequest, CompletionRequest, DiarizationOutput, DiarizationRequest,
-        EmbeddingRequest, EmbeddingResponse, ImageEditRequest, ImageGenerationRequest,
-        ModelObjects, OpenAiToolSurface, RerankRequest, RerankResponse, SpeechGenerationRequest,
-        TranscriptionOutput, TranscriptionRequest, TranscriptionSessionRequest,
-        VoiceActivityRequest, VoiceActivityResponse,
+        ChatCompletionRequest, CompletionRequest, DecisionRequest, DecisionResponse,
+        DiarizationOutput, DiarizationRequest, EmbeddingRequest, EmbeddingResponse,
+        ImageEditRequest, ImageGenerationRequest, ModelObjects, OpenAiToolSurface, RerankRequest,
+        RerankResponse, SpeechGenerationRequest, TranscriptionOutput, TranscriptionRequest,
+        TranscriptionSessionRequest, VoiceActivityRequest, VoiceActivityResponse,
     },
     operations::{
         self, CalibrationApplyRequest, CalibrationTarget, DetokenizeRequest, DetokenizeResponse,
@@ -2176,6 +2176,25 @@ impl Engine {
 
     pub async fn rerank_json(&self, request: &[u8]) -> Result<String, ApiError> {
         let response = self.rerank(parse_json(request)?).await?;
+        to_json(&response)
+    }
+
+    /// Answers typed questions (choice, score, noul) about a state with a decision model .
+    pub async fn decide(&self, request: DecisionRequest) -> Result<DecisionResponse, ApiError> {
+        crate::engine_decision::decide(self.state().clone(), request)
+            .await
+            .map_err(|error| match error {
+                EmbeddingError::Validation(error) => {
+                    ApiError::from_error(error.as_ref(), ApiErrorKind::InvalidRequest)
+                }
+                EmbeddingError::Internal(error) => {
+                    ApiError::from_error(error.as_ref(), ApiErrorKind::Internal)
+                }
+            })
+    }
+
+    pub async fn decide_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        let response = self.decide(parse_json(request)?).await?;
         to_json(&response)
     }
 }

@@ -125,7 +125,8 @@ impl MessageExtras {
             }
             RequestMessage::Embedding { .. }
             | RequestMessage::EmbeddingTokens { .. }
-            | RequestMessage::EmbeddingPair { .. } => extras.seq_step_type = SeqStepType::OneShot,
+            | RequestMessage::EmbeddingPair { .. }
+            | RequestMessage::Decision { .. } => extras.seq_step_type = SeqStepType::OneShot,
         }
         extras
     }
@@ -325,9 +326,17 @@ impl Engine {
                 let (tokens, text, types) = self.encode_pair(first, second)?;
                 extras.one_shot = Some(OneShotParams::Embedding(EmbeddingParams {
                     token_types: Some(types),
-                    task: None,
+                    ..Default::default()
                 }));
                 (tokens, text)
+            }
+            RequestMessage::Decision { state, question } => {
+                let (tokens, input) = self.encode_decision(&state, &question)?;
+                extras.one_shot = Some(OneShotParams::Embedding(EmbeddingParams {
+                    decision: Some(input),
+                    ..Default::default()
+                }));
+                (tokens, state)
             }
             messages => self.render_prompt(
                 messages,
@@ -338,8 +347,8 @@ impl Engine {
         };
         if embedding_task.is_some() {
             extras.one_shot = Some(OneShotParams::Embedding(EmbeddingParams {
-                token_types: None,
                 task: embedding_task,
+                ..Default::default()
             }));
         }
         if prompt_tokens.is_empty() {
@@ -618,7 +627,8 @@ impl Engine {
                 ModelCategory::Embedding,
                 RequestMessage::Embedding { .. }
                 | RequestMessage::EmbeddingTokens { .. }
-                | RequestMessage::EmbeddingPair { .. },
+                | RequestMessage::EmbeddingPair { .. }
+                | RequestMessage::Decision { .. },
             ) => Ok(()),
             _ => Err(Box::new(Response::ValidationError(
                 "Received a request incompatible for this model's category.".into(),
@@ -736,6 +746,57 @@ impl Engine {
         Ok(Some(index))
     }
 
+    /// A decision question's tokens within the model's budgets, with its type and option markers.
+    fn encode_decision(
+        &self,
+        state: &str,
+        question: &inference_nn::decision::DecisionQuestion,
+    ) -> Result<(Vec<u32>, crate::sequence::DecisionInput), Box<Response>> {
+        let validation = |message: String| Box::new(Response::ValidationError(message.into()));
+        let (spec, tokenizer) = {
+            let pipeline = get_mut_arcmutex!(self.pipeline);
+            (pipeline.decision_spec(), pipeline.tokenizer())
+        };
+        let Some(spec) = spec else {
+            return Err(validation("this model is not a decision model".into()));
+        };
+        let Some(tokenizer) = tokenizer else {
+            return Err(validation("a decision model needs a tokenizer".into()));
+        };
+        let special = |text: &str| {
+            tokenizer.token_to_id(text).ok_or_else(|| {
+                Box::new(Response::InternalError(
+                    anyhow::anyhow!("the tokenizer has no `{text}` token").into(),
+                ))
+            })
+        };
+        let tokens = inference_nn::decision::DecisionTokens {
+            cls: special(&spec.cls_token)?,
+            sep: special(&spec.sep_token)?,
+            mask: special(&spec.mask_token)?,
+            mask_text: spec.mask_token.clone(),
+        };
+        let encode = |text: &str| {
+            tokenizer
+                .encode_fast(text, false)
+                .map(|encoding| encoding.get_ids().to_vec())
+                .map_err(|e| Box::new(Response::InternalError(anyhow::Error::msg(e).into())))
+        };
+        let Some(prompt) = spec.prompt(question, state, &tokens, encode)? else {
+            return Err(validation(format!(
+                "the question's options do not fit in the model's {} tokens",
+                spec.max_len
+            )));
+        };
+        Ok((
+            prompt.ids,
+            crate::sequence::DecisionInput {
+                kind: prompt.kind.index(),
+                markers: prompt.markers,
+            },
+        ))
+    }
+
     /// A text pair through the tokenizer's pair template: its tokens, its text, and each token's segment id.
     fn encode_pair(
         &self,
@@ -824,6 +885,9 @@ impl Engine {
             | RequestMessage::Diarization { .. } => Ok((vec![u32::MAX], String::new())),
             RequestMessage::EmbeddingPair { .. } => {
                 unreachable!("a pair is encoded by encode_pair")
+            }
+            RequestMessage::Decision { .. } => {
+                unreachable!("a decision question is encoded by encode_decision")
             }
             RequestMessage::CompletionTokens(it)
             | RequestMessage::EmbeddingTokens { prompt: it, .. } => {

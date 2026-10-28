@@ -127,6 +127,7 @@ export default defineConfig({
                 'guides/models/generate-3d-worlds',
                 'guides/models/use-image-generation',
                 'guides/models/use-embeddings',
+                'guides/models/use-decision-models',
                 'guides/models/use-block-diffusion',
               ],
             },

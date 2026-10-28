@@ -16,6 +16,7 @@ use crate::{
     },
     sequence::Sequence,
 };
+use inference_nn::decision::DecisionRows;
 use inference_nn::embedding::{EmbeddingExtras, TaskRows};
 
 fn _make_tensor_with_pad<D: WithDType>(
@@ -154,6 +155,25 @@ fn task_rows(input_seqs: &[&mut Sequence], device: &Device) -> Result<Option<Tas
     }))
 }
 
+/// Each row's question type and option markers; `None` when no sequence is a decision question.
+fn decision_rows(input_seqs: &[&mut Sequence]) -> Result<Option<DecisionRows>> {
+    if input_seqs.iter().all(|seq| seq.decision_input().is_none()) {
+        return Ok(None);
+    }
+    let mut rows = DecisionRows {
+        kinds: Vec::with_capacity(input_seqs.len()),
+        markers: Vec::with_capacity(input_seqs.len()),
+    };
+    for seq in input_seqs {
+        let Some(input) = seq.decision_input() else {
+            anyhow::bail!("a decision batch holds a sequence without a question");
+        };
+        rows.kinds.push(input.kind);
+        rows.markers.push(input.markers.clone());
+    }
+    Ok(Some(rows))
+}
+
 /// The batch's segment ids, padded and truncated like its tokens; `None` when no sequence is a pair.
 fn token_type_ids(input_seqs: &[&mut Sequence], device: &Device) -> Result<Option<Tensor>> {
     if input_seqs.iter().all(|seq| seq.token_type_ids().is_none()) {
@@ -221,6 +241,7 @@ impl InputsProcessor for EmbeddingInputsProcessor {
         let extras = EmbeddingExtras {
             token_type_ids: token_type_ids(input_seqs, device)?,
             tasks: task_rows(input_seqs, device)?,
+            decision: decision_rows(input_seqs)?,
         };
         let inputs: Box<dyn Any> = Box::new(ModelInputs {
             input_ids,

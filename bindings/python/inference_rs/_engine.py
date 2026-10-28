@@ -323,6 +323,10 @@ class JsonEngine:
         """Scores each document against the query with a cross-encoder, most relevant first."""
         return self._call("inference_rerank", request_json)
 
+    def decide(self, request_json: str) -> str:
+        """Answers typed questions (choice, score, noul) about a state with a decision model."""
+        return self._call("inference_decide", request_json)
+
     def anthropic_messages(self, request_json: str) -> str:
         """An Anthropic Messages request; failures carry the Anthropic error envelope."""
         return self._call("inference_anthropic_messages", request_json)

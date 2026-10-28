@@ -554,6 +554,8 @@ entry_points! {
     /// Safety: as for `inference_chat`.
     json inference_rerank => |engine, request| engine.rerank_json(request).map_err(api_failure);
     /// Safety: as for `inference_chat`.
+    json inference_decide => |engine, request| engine.decide_json(request).map_err(api_failure);
+    /// Safety: as for `inference_chat`.
     json inference_anthropic_messages =>
         |engine, request| engine.anthropic_messages_json(request).map_err(anthropic_failure);
     /// Safety: as for `inference_chat_stream_open`.

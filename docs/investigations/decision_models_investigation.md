@@ -1,0 +1,102 @@
+# Decision models investigation (#660)
+
+Decision models answer typed questions (choice, score, noul) about a `state` in one forward pass, generating no
+tokens. #660 was filed for `ModernBertDecisionModel` (laya, Julia-1); this investigation scopes the whole class.
+
+## Run 1 - 2026-10-27 19:18
+
+Question: what does llama.cpp (970b51ce7, the reference) support as decision models, through what API, and which
+checkpoints exist?
+
+Command: read `tools/server/server-decision.{h,cpp}`, `common/common.h` (`common_decision_type`),
+`src/models/{modern-bert,vllm-decision2,clef}.cpp`, `gguf-py/gguf/constants.py` (`Keys.Decision`),
+`conversion/bert.py`, and the `/v1/systemone` section of `tools/server/README.md`; Hub searches by type name.
+
+Finding: one endpoint, `POST /v1/systemone`, TypeSafe-compatible (typesafe.ai API): a `state` (text, object, array, or
+chat messages with images), `files` / `images`, and `questions` keyed by id, each `choice` (criteria: option ->
+description), `score` (2-10 level descriptions) or `noul` (optional true / false descriptions). The answer per
+question: `choice` + `probabilities` + `confidence`; `score` (expected level) + `legend` + `probabilities` +
+`confidence`; `noul` (P(true)). Probabilities are scaled by temperatures stored in the model
+(`<arch>.decision.temperature.<type>[.<n-options bucket>]`, plus `score_bias`). Prompts come from a `systemone` chat
+template in the model; a question can be evaluated in several option orders ("variants") and averaged.
+
+Thirteen types, by how they read the answer:
+- label logits at the last prompt token, on an ordinary causal LLM: openjev, lev (noul on a rating scale), nimble (all
+  questions in the prompt), pplx-decider (1-2 letter labels), lfm2-d1 (labels by question type), granite-switch (a
+  decision aLoRA), h2o-lightning (labels after an answer prefill), vllm-d3 (non-causal attention);
+- hidden-state dot products: kev (last token against one end token per option);
+- decision heads reading the embeddings output: laya / Julia-1 (ModernBERT plus `head_layers` pre-norm blocks, one
+  marker token per option, three token types for the question types), lfm2-d1-omni (laya-like, another layout),
+  vllm-decision2 (its own `vllm-decision2` architecture, options marked in the batch), clef (its own architecture, all
+  questions in one prompt, decided jointly).
+
+Checkpoints with real use (Hub downloads): clef-flash (Cloudflare, ~77K GGUF + 44K), laya (convaiinnovations, 58K;
+multilingual 16K), kev-4b / 0.8b (52K GGUF), vllm-d3 (36K), h2o-lightning-4b (21K), Bespoke-Nimble-9B (21K),
+OpenJev (14K), Julia-1 (12K), pplx-decider (11K), vllm Decision-2.0 (3.5K), granite-switch 4.1 (3K). Sizes run from
+0.8B to 27B.
+
+Implication: a scope decision. The endpoint, request parsing, answer formatting and temperatures are shared by all
+types; the label-logit family rides on decoders we already run; laya / Julia-1, lfm2-d1-omni, vllm-decision2 and clef
+each need a model head; kev needs hidden-state outputs.
+
+## Run 2 - 2026-10-27 19:43
+
+Question: does the first `/v1/systemone` path (decision checkpoints detected by their files, configs merged, the
+ModernBERT decision head, prompts as laya's `build_sequence` / Julia-1's `sequence` build them) answer as the models'
+own code does?
+
+Command: `laya_ref.py` / `julia_ref.py` (laya's `RLAgent.system_one`, Julia-1's `TransformerEngine` +
+`predict_typed`, CPU F32) over `decision_requests.py` (three states, eight questions: choice with 2/3/5 options,
+score with 4/5 levels, noul with and without criteria, an object state, a state past laya's 512 tokens); then
+`inference serve --cpu --dtype f32` on each checkpoint and `compare.py` (answers) / `compare_logits.py` (laya's
+unrounded logits at its temperatures).
+
+```
+laya vs its rounded answers:      worst 4.70e-05, every choice the same (laya rounds to 4 decimals)
+laya vs its logits + temperatures: worst 8.00e-07
+Julia-1 vs its answers:           worst 9.63e-01, two choices differ
+```
+
+Finding: laya is exact. Julia-1 is not, though it runs the same model code, so the difference is in what reaches it
+(its option rendering, its budgets, or its mmBERT tokenizer's encoding), not the head.
+
+Implication: debug Julia-1 from its token ids (ours against `julia.data.sequence`) before its scores.
+
+## Run 3 - 2026-10-27 19:48
+
+Question: is Run 2's Julia-1 mismatch in its rendering, budgets or tokenizer?
+
+Command: Julia-1's server log, then `ss -ltnp` on the port; rerun `compare.py` against `julia_ref.json` once the port
+was free.
+
+```
+Error: Failed to bind the HTTP server to 0.0.0.0:18431 ... Address already in use (os error 98)
+LISTEN 0.0.0.0:18431 users:(("inference",pid=561208)) - the laya server of the logits run, still up
+Julia-1 vs its answers (its own server this time): worst 5.47e-06, every choice the same
+```
+
+Finding: none of the three. Run 2's Julia-1 run never served Julia-1: a laya server left from the run before still
+held the port, so laya answered Julia-1's questions. Served on its own, Julia-1 matches its own engine to F32
+precision, with its description-only options, its 256-token head budget and its 8192-token context.
+
+Implication: both phase-1 checkpoints are exact. Next: the C ABI, the Python / C# / Rust SDK, tiny-checkpoint tests
+and the docs, with `/v1/decisions` as the route and `/v1/systemone` as its TypeSafe alias.
+
+## Run 4 - 2026-10-27 19:59
+
+Question: do laya's variant folders (`multilingual/`, `typed-decisions/`, no root `config.json`) load by their files,
+and does the multilingual one (its own encoder and tokenizer) match laya's code?
+
+Command: `inference serve --cpu --dtype f32` on each folder, one request to `/v1/decisions`; `laya_ref.py` on
+`multilingual/` (laya's code from the repository root on the path) and `compare_logits.py`.
+
+```
+multilingual:    loads, route -> billing (0.99999), angry 0.059
+typed-decisions: loads, route -> billing (0.843),   angry 0.683
+multilingual vs laya's logits + temperatures: worst 1.42e-06
+```
+
+Finding: both load from their folders alone, through `/v1/decisions` (the descriptive route; `/v1/systemone` stays
+TypeSafe's alias), and the multilingual variant is exact. `typed-decisions/` was only loaded, not compared.
+
+Implication: phase 1 is complete for the ModernBERT decision models: laya (three variants) and Julia-1.

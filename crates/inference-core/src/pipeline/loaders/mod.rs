@@ -64,6 +64,15 @@ use super::{Pipeline, paths::AdapterPaths};
 
 const LEGACY_MODEL_OPT_CONFIG: &str = "hf_quant_config.json";
 const ROPE_PARAMETERS: &str = "rope_parameters";
+/// A decision checkpoint (laya, Julia-1) keeps its encoder's config, its tokenizer and its own config apart.
+pub(crate) const DECISION_CONFIGS: [&str; 2] = [LAYA_CONFIG, JULIA_CONFIG];
+pub(crate) const DECISION_ENCODER_CONFIG: &str = "encoder/config.json";
+pub(crate) const DECISION_TOKENIZER: &str = "tokenizer/tokenizer.json";
+pub(crate) const DECISION_TOKENIZER_CONFIG: &str = "tokenizer/tokenizer_config.json";
+const LAYA_CONFIG: &str = "rl_agent_config.json";
+const JULIA_CONFIG: &str = "julia_config.json";
+// Julia-1's own engine reads 256 question-and-option tokens and the encoder's whole context
+const JULIA_HEAD_MAX_LEN: usize = 256;
 const ROPE_THETA: &str = "rope_theta";
 const ROPE_SCALING: &str = "rope_scaling";
 /// Set on the model config JSON when the checkpoint's built-in MTP head should be loaded.
@@ -74,6 +83,12 @@ pub(crate) fn load_model_config(
     use_checkpoint_quantization: bool,
 ) -> Result<String> {
     let config = std::fs::read_to_string(config_path)?;
+    let config = match config_path.file_name().and_then(|name| name.to_str()) {
+        Some(name) if DECISION_CONFIGS.contains(&name) => {
+            merge_decision_config(config_path, &config)?
+        }
+        _ => config,
+    };
     if !use_checkpoint_quantization {
         return Ok(config);
     }
@@ -87,6 +102,59 @@ pub(crate) fn load_model_config(
     }
     let model_opt = std::fs::read_to_string(model_opt_path)?;
     inject_legacy_model_opt_config(&config, &model_opt)
+}
+
+/// A decision checkpoint's encoder config with the decision head's settings and the tokenizer's specials beside it.
+fn merge_decision_config(config_path: &std::path::Path, decision: &str) -> Result<String> {
+    let dir = config_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("a decision config has no directory"))?;
+    let read = |name: &str| -> Result<serde_json::Value> {
+        Ok(serde_json::from_str(&std::fs::read_to_string(
+            dir.join(name),
+        )?)?)
+    };
+    let decision: serde_json::Value = serde_json::from_str(decision)?;
+    let mut config = read(DECISION_ENCODER_CONFIG)?;
+    let tokenizer = read(DECISION_TOKENIZER_CONFIG)?;
+    let special = |key: &str| tokenizer[key].as_str().map(str::to_string);
+    let laya = config_path
+        .file_name()
+        .is_some_and(|name| name == LAYA_CONFIG);
+    let mut head = serde_json::json!({
+        "family": if laya { "laya" } else { "julia" },
+        "head_layers": decision["head_layers"],
+        "cls_token": special("cls_token"),
+        "sep_token": special("sep_token"),
+        "mask_token": special("mask_token"),
+    });
+    if laya {
+        // an uncalibrated checkpoint has no temperatures
+        for key in [
+            "max_len",
+            "head_max_len",
+            "temperature",
+            "temperature_by_options",
+        ] {
+            if let Some(value) = decision.get(key).filter(|value| !value.is_null()) {
+                head[key] = value.clone();
+            }
+        }
+    } else {
+        head["max_len"] = config["max_position_embeddings"].clone();
+        head["head_max_len"] = JULIA_HEAD_MAX_LEN.into();
+    }
+    config["architectures"] = serde_json::json!([embedding_loaders::MODERN_BERT_DECISION_CLASS]);
+    config["decision"] = head;
+    Ok(serde_json::to_string(&config)?)
+}
+
+/// Which decision config `files` hold beside an encoder config, the layout llama.cpp's converter detects too.
+pub(crate) fn decision_config(files: &[String]) -> Option<&'static str> {
+    let has = |name: &str| files.iter().any(|file| file == name);
+    has(DECISION_ENCODER_CONFIG)
+        .then(|| DECISION_CONFIGS.into_iter().find(|name| has(name)))
+        .flatten()
 }
 
 /// transformers 5 writes `rope_theta` and the scaling as one `rope_parameters`; fills the older fields from it.

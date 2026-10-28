@@ -109,6 +109,12 @@ embeddings(
 rerank(request: types.RerankRequest | str) -> types.RerankResponse
 ```
 
+### `Engine.decide`
+
+```text
+decide(request: types.DecisionRequest | str) -> types.DecisionResponse
+```
+
 ### `Engine.anthropic_messages`
 
 ```text
@@ -837,6 +843,14 @@ rerank(request_json: str) -> str
 ```
 
 Scores each document against the query with a cross-encoder, most relevant first.
+
+### `JsonEngine.decide`
+
+```text
+decide(request_json: str) -> str
+```
+
+Answers typed questions (choice, score, noul) about a state with a decision model.
 
 ### `JsonEngine.anthropic_messages`
 

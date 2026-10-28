@@ -518,6 +518,28 @@ impl<'a> RepoFiles<'a> {
         super::hf::get_file(&self.api, self.model_id, file, &self.revision)
     }
 
+    /// Every file, with its path under the repository; a local directory lists only its top level, so it is walked.
+    pub fn files(&self) -> Vec<String> {
+        if !self.model_id.exists() {
+            return self.listed.clone();
+        }
+        fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
+            let Ok(entries) = fs::read_dir(dir) else {
+                return;
+            };
+            for path in entries.filter_map(|entry| entry.ok().map(|entry| entry.path())) {
+                if path.is_dir() {
+                    walk(root, &path, out);
+                } else if let Ok(relative) = path.strip_prefix(root) {
+                    out.push(relative.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(self.model_id, self.model_id, &mut out);
+        out
+    }
+
     /// `file` when the repository lists it.
     pub fn get_listed(&self, file: &str) -> Result<Option<PathBuf>> {
         self.has(file).then(|| self.get(file)).transpose()
@@ -675,17 +697,24 @@ pub(crate) fn get_embedding_paths(
         request.revision,
         request.silent,
     )?;
+    // a decision checkpoint's config merges in its encoder's and its tokenizer's, which come down beside it
+    let decision = super::loaders::decision_config(&repo.files());
+    if decision.is_some() {
+        repo.get(super::loaders::DECISION_ENCODER_CONFIG)?;
+        repo.get(super::loaders::DECISION_TOKENIZER_CONFIG)?;
+    }
     let tokenizer_filename = match request.tokenizer_json {
         Some(path) => PathBuf::from(path),
+        None if decision.is_some() => repo.get(super::loaders::DECISION_TOKENIZER)?,
         None if !repo.has("tokenizer.json") && repo.has("tekken.json") => {
             repo.get("tekken.json")?
         }
         None => repo.get("tokenizer.json")?,
     };
-    let config_filename = if repo.has("params.json") {
-        repo.get("params.json")?
-    } else {
-        repo.get("config.json")?
+    let config_filename = match decision {
+        Some(name) => repo.get(name)?,
+        None if repo.has("params.json") => repo.get("params.json")?,
+        None => repo.get("config.json")?,
     };
     repo.get_listed("hf_quant_config.json")?;
     let filenames = repo.weights(

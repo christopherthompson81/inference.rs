@@ -37,6 +37,11 @@ pub const COMPLETIONS_ROUTE: RouteInfo =
     RouteInfo::new("/v1/completions", "POST", RouteKind::OpenAi);
 pub const EMBEDDINGS_ROUTE: RouteInfo = RouteInfo::new("/v1/embeddings", "POST", RouteKind::OpenAi);
 pub const RERANK_ROUTE: RouteInfo = RouteInfo::new("/v1/rerank", "POST", RouteKind::InferenceRs);
+pub const DECISIONS_ROUTE: RouteInfo =
+    RouteInfo::new("/v1/decisions", "POST", RouteKind::InferenceRs);
+// TypeSafe's name for the same request, which llama.cpp and laya's own server answer too
+pub const SYSTEMONE_ROUTE: RouteInfo =
+    RouteInfo::new("/v1/systemone", "POST", RouteKind::InferenceRs);
 pub const MODELS_ROUTE: RouteInfo = RouteInfo::new("/v1/models", "GET", RouteKind::OpenAi);
 pub const LOAD_LORA_ADAPTER_ROUTE: RouteInfo =
     RouteInfo::new("/v1/load_lora_adapter", "POST", RouteKind::InferenceRs);
@@ -203,6 +208,8 @@ pub const INFERENCE_RS_API_ROUTES: &[RouteInfo] = &[
     COMPLETIONS_ROUTE,
     EMBEDDINGS_ROUTE,
     RERANK_ROUTE,
+    DECISIONS_ROUTE,
+    SYSTEMONE_ROUTE,
     IMAGE_GENERATION_ROUTE,
     IMAGE_EDIT_ROUTE,
     SPEECH_GENERATION_ROUTE,

@@ -87,6 +87,9 @@ class Engine:
     def rerank(self, request: types.RerankRequest | str) -> types.RerankResponse:
         return from_json(types.RerankResponse, self.json.rerank(to_json(request)))
 
+    def decide(self, request: types.DecisionRequest | str) -> types.DecisionResponse:
+        return from_json(types.DecisionResponse, self.json.decide(to_json(request)))
+
     def anthropic_messages(self, request: types.AnthropicMessagesRequest | str) -> types.AnthropicMessageResponse:
         return from_json(
             types.AnthropicMessageResponse,
