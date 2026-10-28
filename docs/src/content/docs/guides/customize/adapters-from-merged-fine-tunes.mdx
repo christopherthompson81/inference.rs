@@ -1,0 +1,85 @@
+---
+title: Adapters from merged fine-tunes
+description: Tell whether a full-weight fine-tune is a merged LoRA, recover the adapter, and serve it on a base you already run.
+---
+
+Many fine-tunes are trained as LoRA adapters but published as full weights, with the adapter merged into the base. Each one then costs as much memory as its base, and two of them on the same base hold two copies of it. When the difference from the base is low-rank, it can be pulled back out as an adapter and served with [LoRA adapters](/guides/customize/lora-adapters/) on one shared base, at a fraction of the size.
+
+`scripts/lora_from_merged.py` does this in two steps: `measure` tells whether a fine-tune is a merged LoRA and of what rank, and `extract` writes the adapter. A third, `rename`, fixes the module names of an adapter that was published as one but trained on an inner model. It needs `torch`, `safetensors` and, to read from the Hub, `huggingface_hub`; a GPU makes it faster but is not required.
+
+## Measure
+
+```bash
+python3 scripts/lora_from_merged.py measure <base repo or dir> <fine-tune repo or dir>
+```
+
+`measure` reads a handful of weight matrices that both checkpoints have, by range requests when they are Hub repos, so nothing is downloaded. For each it prints how large the difference is and how much of the fine-tuned weight a rank-r truncation of that difference leaves out:
+
+```text
+359 matching weight matrices, 4 sampled; left after rank r, relative to the weight:
+  model.language_model.layers.13.mlp.down_proj.weight (4096, 12288): delta 0.053 | r16 0.0362  r32 0.0316  r64 0.0255  r128 0.0172  r256 0.0016  r512 0.0015 | knee 256
+  ...
+suggested rank 256: what is left falls to the weights' rounding floor there, a merged LoRA
+an adapter at rank 256 on every matching matrix: at most 1.64 GB in bf16 (unchanged ones drop out), against 19.06 GB of fine-tuned weights
+```
+
+How to read it:
+
+- A merged LoRA of rank r leaves a difference of exactly rank r. The column falls by an order of magnitude at r, to about 0.15%, and stays there: that is the rounding of the merged weights to bf16, not signal. The rank of that fall is the adapter's rank.
+- A full fine-tune decays smoothly with no fall. `measure` then says so; a low-rank adapter would only approximate it.
+- `unchanged` matrices (often a vision tower the fine-tune left alone) drop out of the adapter.
+- `--tensors N` samples more matrices, `--ranks` sets the ranks tried. Pass a local directory to measure weights you have.
+
+Measured on decision checkpoints:
+
+| Fine-tune | Base | Result | Adapter (bf16) | Full weights |
+|---|---|---|---|---|
+| `Cloudflare/clef-flash` | `Qwen/Qwen3.5-9B` | merged LoRA, rank 256 | at most 1.64 GB | 19.06 GB |
+| `h2oai/h2o-lightning-4b` | `Qwen/Qwen3.5-4B` | merged LoRA, rank 64 | at most 0.32 GB | 9.32 GB |
+| `LiquidAI/d1-3B` | `LiquidAI/LFM2.5-VL-3B` | full fine-tune (delta 26-34% of the weights) | - | 6.25 GB |
+
+Some publish the adapter itself, which needs no extraction: kev 0.8B to 9B (rank 16 on the Qwen3.5 *Base* models, 43-173 MB) and Bespoke-Nimble-9B-v3 (rank 64 on Qwen3.5-9B, 693 MB). Such an adapter may still need [`rename`](#rename-a-published-adapter).
+
+## Extract
+
+`extract` reads every matching tensor, so it needs both checkpoints on disk:
+
+```bash
+hf download Qwen/Qwen3.5-9B --local-dir base
+hf download Cloudflare/clef-flash --local-dir tuned
+python3 scripts/lora_from_merged.py extract base tuned clef-adapter --rank 256 --base-id Qwen/Qwen3.5-9B
+```
+
+It writes a PEFT adapter, the format inference.rs loads:
+
+- `adapter_config.json` and `adapter_model.safetensors`: for each changed weight matrix, the rank-r truncation of its difference as bf16 `lora_A` / `lora_B` factors (`lora_alpha` equal to `r`, so the scale is 1).
+- `extraction_report.json`: what each matrix still leaves out (`residual`, which should sit at the rounding floor for a merged LoRA), the changed tensors an adapter on linear layers cannot hold (`left_out`: norms, biases, embeddings and output heads, with how many embedding rows changed), and the fine-tune's tensors with no base counterpart (`unmatched`, such as an added classifier head).
+
+Read the report before relying on the adapter. Changed norms, embedding rows or a new head mean the adapter alone does not reproduce the fine-tune: those parts were trained too and live outside it.
+
+## Rename a published adapter
+
+An adapter trained on a text model alone names its modules from there (`layers.0.mlp.down_proj`), while a full checkpoint such as Qwen3.5's, which carries a vision tower, loads them under `model.language_model.`. inference.rs then refuses it with `adapter contains tensors not consumed by registered LoRA sites`. `rename` adds the prefix and checks that every renamed module is a weight of the base:
+
+```bash
+python3 scripts/lora_from_merged.py rename ./kev-0.8b ./qwen3.5-0.8b-base ./kev-0.8b-renamed --prefix model.language_model.
+```
+
+An adapter from `extract` already uses the checkpoint's names.
+
+## Serve
+
+```bash
+inference serve -m Qwen/Qwen3.5-9B --lora clef=./clef-adapter
+```
+
+Requests that name the `clef` adapter run with it, and the others run the plain base, all on one copy of the weights; see [LoRA adapters](/guides/customize/lora-adapters/) for routing, hot loading and the support matrix. The default rank limit is 256 (`--lora-max-rank`).
+
+Checked end to end on Qwen3.5-0.8B-Base, with kev-0.8b's rank-16 adapter merged in bf16 as a stand-in for a full-weight release: `extract` recovered every matrix to the bf16 floor (21.7 MB), and the base served with that adapter gave the merged model's greedy text on every prompt, token log-probabilities within 0.07.
+
+The base must be the exact checkpoint the fine-tune started from (the one `measure` was run against): a different revision, or the instruct model in place of the pretrained one, gives an adapter that rebuilds nothing. kev's adapters, for example, sit on Qwen3.5's pretrained *Base* models, not on the chat models.
+
+## Limits
+
+- A decision model is more than its weights: `/v1/decisions` reads its prompt template, labels and calibration (and a head, for kev and clef) from the decision profile in its converted GGUF (see [decision models](/guides/models/use-decision-models/)). An adapter recovers the fine-tuned trunk, but decisions still load the model's GGUF today.
+- An adapter recovered from a merged checkpoint is a copy of the fine-tune's weights in another form: the fine-tune's license applies to it as it does to the original.

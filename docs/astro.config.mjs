@@ -187,6 +187,7 @@ export default defineConfig({
                 'guides/customize/chat-templates',
                 'guides/customize/sampling',
                 'guides/customize/lora-adapters',
+                'guides/customize/adapters-from-merged-fine-tunes',
               ],
             },
             {
