@@ -5,12 +5,13 @@ use anyhow::Error as AnyhowError;
 use futures::future::join_all;
 use indexmap::IndexMap;
 use inference_core::decision::{DecisionOption, DecisionQuestion, QuestionKind};
-use inference_core::{InferenceRs, RequestMessage};
+use inference_core::{InferenceRs, ModelCategory, RequestMessage};
 use serde_json::Value;
 
 use crate::{
     api_error::{ApiError, ApiErrorKind},
     dispatch::response_model_id,
+    engine_decision_labels,
     engine_embeddings::{EmbeddingError, EmbeddingWithUsage, fetch, saturating_to_u32},
     openai::{
         DecisionAnswer, DecisionQuestionType, DecisionRequest, DecisionRequestQuestion,
@@ -24,10 +25,11 @@ use crate::{
 const MAX_CHOICE_OPTIONS: usize = 255;
 const SCORE_LEVELS: std::ops::RangeInclusive<usize> = 2..=10;
 const NOUL_KEYS: [&str; 2] = ["false", "true"];
+const NO_DECISIONS: &str = "this model answers no decisions: it is neither a decision model nor a GGUF with a decision profile";
 // laya's floor on probabilities in the entropy
 const ENTROPY_FLOOR: f64 = 1e-12;
 
-fn invalid(message: impl Into<String>, param: String) -> EmbeddingError {
+pub(crate) fn invalid(message: impl Into<String>, param: String) -> EmbeddingError {
     EmbeddingError::Validation(AnyhowError::new(ApiError::new(
         ApiErrorKind::InvalidRequest,
         message.into(),
@@ -37,7 +39,7 @@ fn invalid(message: impl Into<String>, param: String) -> EmbeddingError {
 }
 
 /// JSON as Python's `json.dumps` writes it, `", "` and `": "` between items, which the models read their inputs as.
-fn python_json(value: &Value, ensure_ascii: bool, out: &mut String) {
+pub(crate) fn python_json(value: &Value, ensure_ascii: bool, out: &mut String) {
     match value {
         Value::String(text) => python_string(text, ensure_ascii, out),
         Value::Array(items) => {
@@ -109,6 +111,14 @@ fn description(value: &Value, param: &str) -> Result<Option<String>, EmbeddingEr
             "a criterion's description must be text or null",
             param.to_string(),
         )),
+    }
+}
+
+pub(crate) fn kind_of(kind: DecisionQuestionType) -> QuestionKind {
+    match kind {
+        DecisionQuestionType::Choice => QuestionKind::Choice,
+        DecisionQuestionType::Score => QuestionKind::Score,
+        DecisionQuestionType::Noul => QuestionKind::Noul,
     }
 }
 
@@ -189,11 +199,7 @@ fn question(
             ));
         }
     };
-    let kind = match question.kind {
-        DecisionQuestionType::Choice => QuestionKind::Choice,
-        DecisionQuestionType::Score => QuestionKind::Score,
-        DecisionQuestionType::Noul => QuestionKind::Noul,
-    };
+    let kind = kind_of(question.kind);
     match kind {
         QuestionKind::Choice if !(2..=MAX_CHOICE_OPTIONS).contains(&options.len()) => {
             return Err(invalid(
@@ -246,11 +252,7 @@ fn answer(question: &DecisionQuestion, logits: &[f32]) -> DecisionAnswer {
     let (p, confidence) = probabilities(logits);
     match question.kind {
         QuestionKind::Choice => {
-            let best = p
-                .iter()
-                .enumerate()
-                .max_by(|a, b| a.1.total_cmp(b.1))
-                .map_or(0, |(i, _)| i);
+            let best = first_max(&p);
             DecisionAnswer::Choice {
                 choice: question.options[best].key.clone(),
                 probabilities: question
@@ -270,7 +272,7 @@ fn answer(question: &DecisionQuestion, logits: &[f32]) -> DecisionAnswer {
                 .map(|option| {
                     (
                         option.key.clone(),
-                        option.description.clone().unwrap_or_default(),
+                        Value::String(option.description.clone().unwrap_or_default()),
                     )
                 })
                 .collect(),
@@ -280,6 +282,11 @@ fn answer(question: &DecisionQuestion, logits: &[f32]) -> DecisionAnswer {
         // the model reads noul's options as [false, true]
         QuestionKind::Noul => DecisionAnswer::Noul { noul: p[1] },
     }
+}
+
+/// The index of the largest probability, the first among equals as numpy's and C++'s argmax take it.
+pub(crate) fn first_max(p: &[f64]) -> usize {
+    (1..p.len()).fold(0, |best, i| if p[i] > p[best] { i } else { best })
 }
 
 /// The number of options the model scores for a question.
@@ -307,13 +314,32 @@ pub(crate) async fn decide(
             "questions".into(),
         ));
     }
+    let model_override = (request.model != "default").then(|| request.model.clone());
+    if let Ok(Some(profile)) = state.label_decision(model_override.as_deref()) {
+        let (answers, input_tokens) =
+            engine_decision_labels::decide(&state, &profile, &request, model_override.as_deref())
+                .await
+                .inspect_err(|e| {
+                    if let EmbeddingError::Internal(e) = e {
+                        InferenceRs::maybe_log_error(state.clone(), e.as_ref());
+                    }
+                })?;
+        return Ok(respond(&state, request, answers, input_tokens));
+    }
+    if !matches!(
+        state.get_model_category(model_override.as_deref()),
+        Ok(ModelCategory::Embedding)
+    ) {
+        return Err(EmbeddingError::Validation(AnyhowError::new(
+            ApiError::invalid_request(NO_DECISIONS),
+        )));
+    }
     let questions = request
         .questions
         .iter()
         .map(|(id, q)| question(id, q).map(|question| (id.clone(), question)))
         .collect::<Result<Vec<_>, _>>()?;
     let state_text = as_text(&request.state, false);
-    let model_override = (request.model != "default").then(|| request.model.clone());
     let futures = questions.iter().map(|(_, question)| {
         let state = state.clone();
         let model_override = model_override.clone();
@@ -346,8 +372,17 @@ pub(crate) async fn decide(
         input_tokens = input_tokens.saturating_add(prompt_tokens);
     }
 
+    Ok(respond(&state, request, answers, input_tokens))
+}
+
+fn respond(
+    state: &SharedInferenceRsState,
+    request: DecisionRequest,
+    answers: IndexMap<String, DecisionAnswer>,
+    input_tokens: usize,
+) -> DecisionResponse {
     let response = DecisionResponse {
-        model: response_model_id(&state, request.model.clone(), &request.model)
+        model: response_model_id(state, request.model.clone(), &request.model)
             .unwrap_or(request.model),
         answers,
         usage: DecisionUsage {
@@ -356,7 +391,7 @@ pub(crate) async fn decide(
         },
     };
     InferenceRs::maybe_log_response(state.clone(), &response);
-    Ok(response)
+    response
 }
 
 #[cfg(test)]

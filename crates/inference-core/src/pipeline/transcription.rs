@@ -763,6 +763,7 @@ impl TranscriptionPipeline {
                     output,
                 },
                 loaded_for_uqff_write: false,
+                label_decision: None,
             }),
             dummy_cache: EitherCache::Full(Cache::new(0)),
             sessions: HashMap::new(),

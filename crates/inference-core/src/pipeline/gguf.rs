@@ -1,4 +1,5 @@
 use super::{Loader, ModelKind, ModelPaths, QuantizationKind, TokenSource};
+use crate::decision::{LabelDecision, LabelFamily};
 use crate::gguf::embedding_gguf::{
     DecoderEmbeddingGguf, EmbeddingGgufArchitecture, EmbeddingGgufPooling, add_encoder_specials,
     build_embedding_bindings, embedding_pooling, synthesize_embedding_config, task_adapter_prefix,
@@ -54,6 +55,9 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+const DECISION_TEMPLATE_KEY: &str = "tokenizer.chat_template.systemone";
+// llama.cpp's bounds on a score's level count
+const SCORE_BIAS_LEVELS: std::ops::RangeInclusive<usize> = 2..=255;
 const PROJECTOR_REQUIRED_ARCHITECTURES: &[&str] = &[
     "gemma3n",
     "gemma4",
@@ -369,6 +373,77 @@ fn with_architecture(config: &str, class: &str) -> Result<String> {
     Ok(serde_json::to_string(&config)?)
 }
 
+/// The label-coded decision profile a GGUF carries (`<arch>.decision.*` and its `systemone` template), if any.
+fn label_decision(
+    metadata: &HashMap<String, inference_tensor::quantized::gguf_file::Value>,
+    tokenizer: &tokenizers::Tokenizer,
+) -> Result<Option<LabelDecision>> {
+    let Some(architecture) = metadata
+        .get("general.architecture")
+        .and_then(|value| value.to_string().ok())
+    else {
+        return Ok(None);
+    };
+    let prefix = format!("{architecture}.decision.");
+    let Some(kind) = metadata
+        .get(&format!("{prefix}type"))
+        .and_then(|value| value.to_string().ok())
+    else {
+        return Ok(None);
+    };
+    let Some(family) = LabelFamily::from_name(kind) else {
+        warn!("GGUF decision type `{kind}` is not supported; the model loads without decisions");
+        return Ok(None);
+    };
+    let causal = metadata
+        .get(&format!("{architecture}.attention.causal"))
+        .and_then(|value| value.to_bool().ok());
+    if causal == Some(false) || family.non_causal() {
+        warn!(
+            "GGUF decision type `{kind}` needs non-causal attention, not supported yet; it loads without decisions"
+        );
+        return Ok(None);
+    }
+    let template = metadata
+        .get(DECISION_TEMPLATE_KEY)
+        .and_then(|value| value.to_string().ok())
+        .with_context(|| format!("decision model has no `{DECISION_TEMPLATE_KEY}`"))?
+        .clone();
+    let mut temperatures = HashMap::new();
+    let mut score_bias: HashMap<usize, Vec<f32>> = HashMap::new();
+    let temperature_prefix = format!("{prefix}temperature.");
+    let bias_prefix = format!("{prefix}score_bias.");
+    for (key, value) in metadata {
+        if let Some(name) = key.strip_prefix(&temperature_prefix) {
+            let temperature = value.to_f32()?;
+            anyhow::ensure!(temperature > 0.0, "invalid decision temperature `{key}`");
+            temperatures.insert(name.to_string(), temperature);
+        } else if let Some(name) = key.strip_prefix(&bias_prefix) {
+            let parsed = name
+                .split_once('.')
+                .and_then(|(n, level)| {
+                    Some((n.parse::<usize>().ok()?, level.parse::<usize>().ok()?))
+                })
+                .filter(|&(n, level)| SCORE_BIAS_LEVELS.contains(&n) && level < n);
+            let Some((n, level)) = parsed else {
+                bail!("invalid decision score bias `{key}`");
+            };
+            score_bias.entry(n).or_insert_with(|| vec![0.0; n])[level] = value.to_f32()?;
+        }
+    }
+    let decision = LabelDecision::new(family, template, temperatures, score_bias, |code| {
+        tokenizer
+            .encode_fast(code, false)
+            .map(|encoding| encoding.get_ids().to_vec())
+    })
+    .map_err(anyhow::Error::msg)?;
+    info!(
+        "Decision model type `{kind}`, {} labels",
+        decision.labels.len()
+    );
+    Ok(Some(decision))
+}
+
 impl GGUFLoader {
     fn dynamic_lora_adapters(&self) -> Option<&[LoraAdapterSpec]> {
         self.dynamic_lora
@@ -395,6 +470,8 @@ impl GGUFLoader {
         let generation_config = self
             .resolve_generation_config(paths, &tokenizer)
             .or_else(|| GenerationConfig::from_gguf_metadata(archive.metadata()));
+        let label_decision =
+            label_decision(archive.metadata(), &tokenizer.conversion.tokenizer)?.map(Arc::new);
         let chat_template =
             if paths.get_template_filename().is_none() && self.chat_template.is_none() {
                 get_gguf_chat_template_from_metadata(archive.metadata())?
@@ -414,6 +491,7 @@ impl GGUFLoader {
             preprocessor_config: None,
             source_weight_files: paths.get_weight_filenames().to_vec(),
             rope_pairing,
+            label_decision,
         })
     }
 

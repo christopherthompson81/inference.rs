@@ -822,6 +822,8 @@ pub struct GeneralMetadata {
     pub modalities: Modalities,
     // a UQFF-writing load kept on the host (artifact-only, or a CPU load) skips the warm-up run
     pub loaded_for_uqff_write: bool,
+    /// How the model answers decision questions by label logits, from its GGUF.
+    pub label_decision: Option<Arc<crate::decision::LabelDecision>>,
 }
 
 impl GeneralMetadata {

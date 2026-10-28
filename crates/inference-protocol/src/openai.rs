@@ -1955,15 +1955,15 @@ pub enum DecisionAnswer {
         /// Each option's probability; they sum to 1.
         #[schema(value_type = Object)]
         probabilities: IndexMap<String, f64>,
-        /// From 0 (all options equally likely) to 1: one minus the normalized entropy.
+        /// From 0 (all options equally likely) to 1 (certain).
         confidence: f64,
     },
     Score {
         /// The expected level index, weighted by probability; it can fall between two levels.
         score: f64,
-        /// Each level index's description.
+        /// Each level index's description, as the request gave it.
         #[schema(value_type = Object)]
-        legend: IndexMap<String, String>,
+        legend: IndexMap<String, Value>,
         /// Each level index's probability; they sum to 1.
         #[schema(value_type = Object)]
         probabilities: IndexMap<String, f64>,

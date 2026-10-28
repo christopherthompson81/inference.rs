@@ -5390,7 +5390,7 @@
               "confidence": {
                 "type": "number",
                 "format": "double",
-                "description": "From 0 (all options equally likely) to 1: one minus the normalized entropy."
+                "description": "From 0 (all options equally likely) to 1 (certain)."
               },
               "probabilities": {
                 "type": "object",
@@ -5420,7 +5420,7 @@
               },
               "legend": {
                 "type": "object",
-                "description": "Each level index's description."
+                "description": "Each level index's description, as the request gave it."
               },
               "probabilities": {
                 "type": "object",

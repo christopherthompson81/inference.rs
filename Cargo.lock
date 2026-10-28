@@ -2550,6 +2550,8 @@ dependencies = [
  "inference-selection",
  "inference-tensor",
  "itertools 0.14.0",
+ "minijinja",
+ "minijinja-contrib",
  "rand 0.9.4",
  "rand_distr",
  "serde",

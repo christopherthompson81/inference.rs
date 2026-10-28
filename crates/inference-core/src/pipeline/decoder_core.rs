@@ -70,6 +70,7 @@ pub(crate) struct DecoderCoreArgs<'a> {
     pub source_weight_files: Vec<PathBuf>,
     pub source_weight_source: Option<Arc<dyn inference_quant::QuantizedWeightSource>>,
     pub dynamic_lora: Option<Arc<DynamicLoraRuntime>>,
+    pub label_decision: Option<Arc<crate::decision::LabelDecision>>,
 }
 
 impl DecoderCore {
@@ -158,6 +159,7 @@ impl DecoderCore {
                 model_metadata: Some(args.model.config),
                 modalities: args.modalities,
                 loaded_for_uqff_write: args.loaded_for_uqff_write,
+                label_decision: args.label_decision,
                 prompt_chunk_tokens: args.prompt_chunk_tokens,
             }),
             tokenizer: args.tokenizer.into(),

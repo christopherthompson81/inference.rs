@@ -255,6 +255,7 @@ impl Loader for DiffusionLoader {
                     output: vec![SupportedModality::Vision],
                 },
                 loaded_for_uqff_write: false,
+                label_decision: None,
             }),
             dummy_cache: EitherCache::Full(Cache::new(0)),
         })))

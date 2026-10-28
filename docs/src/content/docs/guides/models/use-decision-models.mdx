@@ -18,6 +18,16 @@ inference serve -m convaiinnovations/laya
 
 laya's `multilingual/` and `typed-decisions/` variants load from a local copy of their folder.
 
+### Chat models with a decision profile
+
+Some decision models are chat models fine-tuned to answer with the code of an option. Their GGUFs, as llama.cpp's converter writes them, carry a decision profile: `<arch>.decision.type`, a `systemone` chat template that renders a question as a prompt, and temperatures. Such a GGUF loads like any other, and `/v1/decisions` then renders each question with that template and reads the next-token logits of one label token per option (no text is generated). These types are supported: `nimble`, `openjev` and `lev`.
+
+```bash
+inference serve --format gguf -m <repo or folder> -f <file>.gguf
+```
+
+`pplx-decider` and `vllm-d3` checkpoints read their prompt with non-causal attention, which is not supported yet; they load as chat models without decisions. The other llama.cpp decision types (`granite-switch`, `kev`, `clef`, `lfm2-d1`, `h2o-lightning`, `vllm-decision2`) are not supported either.
+
 ## Asking questions
 
 `POST /v1/decisions` takes a `state` and `questions`, a map of question ids to questions. The request and answer follow TypeSafe's System One API, which `/v1/systemone` also serves, so a client of that API (or of llama.cpp's server, or laya's own) only changes its base URL.
@@ -49,12 +59,12 @@ A `state` that is not a string reaches the model as JSON text. Questions are ans
 
 `answers` maps each question id to its answer, in the request's order:
 
-- `choice`: `choice` (the most probable option), `probabilities` (one per option, summing to 1) and `confidence` (from 0, every option equally likely, to 1: one minus the normalized entropy).
+- `choice`: `choice` (the most probable option), `probabilities` (one per option, summing to 1) and `confidence` (from 0, every option equally likely, to 1). laya and Julia-1 report one minus the normalized entropy; the chat models TypeSafe's formulas, `(p_max - 1/k) / (1 - 1/k)` for a choice and, for a score, one minus the mean distance to the most probable level relative to a uniform distribution's.
 - `score`: `score` (the expected level index, which can fall between two levels), `legend` (each level's description), `probabilities` and `confidence`.
 - `noul`: `noul`, the probability that the statement holds.
 
 `usage.input_tokens` counts every question's prompt tokens; `output_tokens` is always 0.
 
-The probabilities are scaled by the temperatures the checkpoint ships (laya fits them per question type and option count); they are not guaranteed to be calibrated for your data. Long questions and options are cut to the model's budget for them (192 tokens for laya, 256 for Julia-1), and a long state to what the rest of the input leaves; a question whose options cannot all fit is refused.
+The probabilities are scaled by the temperatures the checkpoint ships (laya fits them per question type and option count); they are not guaranteed to be calibrated for your data. A chat model reads at most as many options as it has single-token labels (52 for openjev, up to 255 for the others). Long questions and options are cut to the model's budget for them (192 tokens for laya, 256 for Julia-1), and a long state to what the rest of the input leaves; a question whose options cannot all fit is refused.
 
 The Rust SDK has `model.decide(request)`, the Python SDK `engine.decide(...)`, the C# binding `Decide(...)`, and the C ABI `inference_decide`.

@@ -238,6 +238,7 @@ pub(crate) struct PreparedSource {
     pub preprocessor_config: Option<String>,
     pub source_weight_files: Vec<PathBuf>,
     pub rope_pairing: crate::gguf::normal_registry::RopePairing,
+    pub label_decision: Option<Arc<crate::decision::LabelDecision>>,
 }
 
 pub(crate) struct HubPathsRequest<'a> {

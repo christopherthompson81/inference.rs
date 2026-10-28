@@ -31,8 +31,10 @@ inference-selection = { workspace = true, features = ["utoipa"] }
 inference-quant.workspace = true
 hf-hub.workspace = true
 itertools.workspace = true
+minijinja.workspace = true
+minijinja-contrib.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
 serde_path_to_error.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
