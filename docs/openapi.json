@@ -5479,6 +5479,20 @@
           "questions"
         ],
         "properties": {
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Images as data URLs, for the decision types whose prompt has a place for them; `images` names the same."
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "As `files`."
+          },
           "model": {
             "type": "string",
             "description": "Model ID; \"default\" targets the only loaded model.",

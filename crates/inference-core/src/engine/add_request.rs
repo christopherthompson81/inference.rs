@@ -58,6 +58,7 @@ struct MessageExtras {
     videos: Option<Vec<VideoInput>>,
     seq_step_type: SeqStepType,
     one_shot: Option<OneShotParams>,
+    keep_prompt_tokens: bool,
 }
 
 impl MessageExtras {
@@ -71,6 +72,7 @@ impl MessageExtras {
             videos: None,
             seq_step_type: SeqStepType::PromptAndDecode,
             one_shot: None,
+            keep_prompt_tokens: false,
         };
         match messages {
             RequestMessage::Chat { .. } => extras.is_chat = true,
@@ -94,6 +96,11 @@ impl MessageExtras {
                 extras.best_of = *best_of;
             }
             RequestMessage::CompletionTokens(_) => {}
+            RequestMessage::MultimodalTokens { images, audios, .. } => {
+                extras.images = Some(images.clone());
+                extras.audios = Some(audios.clone());
+                extras.keep_prompt_tokens = true;
+            }
             RequestMessage::ImageGeneration {
                 generation_params, ..
             } => {
@@ -518,6 +525,7 @@ impl Engine {
             seq.set_prefix_warmup(request.prefix_warmup);
             seq.set_prefix_cache_ttl(request.prefix_cache_ttl);
             self.enable_template_reasoning(&mut seq);
+            seq.multimodal.keep_prompt_tokens = extras.keep_prompt_tokens;
             self.prepare_multimodal_prompt(&mut seq)?;
             seq.set_checkpoint_hints(self.checkpoint_hints(&seq, is_chat));
             if request.response.is_closed() {
@@ -586,6 +594,7 @@ impl Engine {
             RequestMessage::Chat { .. }
                 | RequestMessage::Completion { .. }
                 | RequestMessage::CompletionTokens(_)
+                | RequestMessage::MultimodalTokens { .. }
                 | RequestMessage::MultimodalChat { .. }
         );
         if is_text_generation && request.sampling_params.max_len == Some(0) {
@@ -637,7 +646,8 @@ impl Engine {
                 RequestMessage::Chat { .. }
                 | RequestMessage::MultimodalChat { .. }
                 | RequestMessage::Completion { .. }
-                | RequestMessage::CompletionTokens(_),
+                | RequestMessage::CompletionTokens(_)
+                | RequestMessage::MultimodalTokens { .. },
             ) => Ok(()),
             (ModelCategory::Diffusion, RequestMessage::ImageGeneration { .. }) => {
                 options_check.map_err(|err| Box::new(Response::ValidationError(err.into())))
@@ -919,6 +929,7 @@ impl Engine {
                 unreachable!("a decision question is encoded by encode_decision")
             }
             RequestMessage::CompletionTokens(it)
+            | RequestMessage::MultimodalTokens { tokens: it, .. }
             | RequestMessage::EmbeddingTokens { prompt: it, .. } => {
                 let Some(tokenizer) = &get_mut_arcmutex!(self.pipeline).tokenizer() else {
                     return Err(Box::new(Response::ValidationError(

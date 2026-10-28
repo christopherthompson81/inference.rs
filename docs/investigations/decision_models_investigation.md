@@ -432,3 +432,49 @@ Finding:
   which a 4.3e-3 difference flips.
 
 Implication: lfm2-d1-omni is supported for text (#672). Images and audio, through its mmproj, stay open.
+
+## Run 20 - 2026-10-28 13:24
+
+Question: do the label-coded types answer image questions as llama.cpp does, through the multimodal pipelines?
+
+Command: two synthetic PNGs (a red sign reading STOP, a receipt-like card; `scratchpad/media`), sent once as `images`
+and once as an `image_url` part of a chat-message state (`media_requests.py`), to `llama-server --mmproj ...` and
+to ours (the projector found beside the GGUF), for h2o-lightning-4b (Qwen3.5), d1-3B (LFM2-VL) and vllm-d3-nano
+(Qwen3.5, bidirectional); `media_compare.py` side by side.
+
+Finding:
+- The prompt renders each image as the model's own one-image placeholder (`<|vision_start|><|image_pad|><|vision_end|>`
+  for Qwen, `<image>` for LFM2-VL), which a `MultimodalTokens` request carries with the images; the inputs processor
+  expands it as it does a chat's. Prompt token counts then equal llama.cpp's on every request (h2o 332 / 365, d1
+  236 / 318, d3 356 / 403), so the image spans are the same length.
+- The usage first counted one placeholder an image (174 against 332); it now reads the prompt tokens of the pass.
+- vllm-d3 failed: `a bidirectional Qwen3.5 prompt runs in one pass` with offsets 42, the prompt split at the image by
+  the media-aware chunk planner. A model that reads its prompt both ways now gets no scheduler-visible prompt
+  chunks and no step-level plan.
+- Same choice on every question; worst difference h2o 6.8e-3, d1 7.8e-4, d3 2.5e-2.
+
+Implication: images work for the label types (openjev, pplx-decider and vllm-d3 share h2o's Qwen path; openjev and
+pplx not run). clef (images in its joint prompt) and lfm2-d1-omni (images and audio through its own encoders) are
+next.
+
+## Run 21 - 2026-10-28 13:52
+
+Question: does clef answer image questions as llama.cpp does?
+
+Command: `llama-server --mmproj mmproj-Clef-Flash-Q8_0.gguf -np 1 -b 8192 -ub 8192 -c 16384` over `media_requests.py`;
+ours (the projector beside the GGUF) the same; `media_compare.py`.
+
+Finding:
+- First run: `multimodal GGUF architecture clef is not supported`: the multimodal and config-synthesis paths open the
+  archive without the `clef` -> `qwen35` rename. One helper now aliases clef and vllm-decision2 wherever a model
+  archive opens; Qwen3.5's multimodal model passes `joint_decision` to its text model.
+- Second run: two choices wrong (worst 0.86) and 289 / 304 tokens against 299 / 314. The Qwen inputs processor
+  detokenizes the prompt, expands each image placeholder and tokenizes the whole text again, which merges tokens
+  across clef's piece boundaries and moves the spans. A prompt that arrives as tokens (`MultimodalTokens`) now keeps
+  them: each image placeholder is replaced by the run of pads the expansion gives it, and later passes keep the
+  sequence's tokens. Its spans then move by the images' expansion (they all come after the images).
+- Then: prompt token counts equal (299 / 314), same choice on all four questions, worst difference 9.2e-3; h2o's
+  image answers unchanged (6.8e-3).
+
+Implication: clef takes images. lfm2-d1-omni's images and audio need its own vision and audio encoders under the
+LFM2 encoder, the remaining media item.

@@ -1040,6 +1040,8 @@ class DecisionAnswerNoul:
 class DecisionRequest:
     """Decision request: typed questions about a state, each answered by a decision model in one pass. It takes the shape of TypeSafe's System One API, which `/v1/systemone` also serves."""
 
+    files: list[str] | None = None
+    images: list[str] | None = None
     model: str | None = None
     questions: dict[str, Any]
     state: dict[str, Any]

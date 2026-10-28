@@ -392,6 +392,8 @@ Decision request: typed questions about a state, each answered by a decision mod
 
 | Field | Type | Default |
 | --- | --- | --- |
+| `files` | `list[str] \| None` | optional |
+| `images` | `list[str] \| None` | optional |
 | `model` | `str \| None` | optional |
 | `questions` | `dict[str, Any]` | required |
 | `state` | `dict[str, Any]` | required |

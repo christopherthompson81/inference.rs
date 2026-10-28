@@ -401,6 +401,20 @@ fn bidirectional_config(config: &str) -> Result<String> {
     Ok(serde_json::to_string(&config)?)
 }
 
+/// A decision model's GGUF filed under its trunk's architecture (clef is Qwen3.5, vllm-decision2 is Qwen3), so the
+/// trunk loads as that model does.
+fn alias_decision_architecture(archive: &mut inference_quant::GgufArchive) -> Result<()> {
+    for (architecture, trunk) in [
+        (CLEF_ARCHITECTURE, CLEF_TRUNK),
+        (DECISION2_ARCHITECTURE, DECISION2_TRUNK),
+    ] {
+        if is_architecture(archive, architecture) {
+            archive.rename_architecture(trunk)?;
+        }
+    }
+    Ok(())
+}
+
 /// The config with clef's joint head: its block and head counts and norm epsilon from the metadata, its widths from
 /// the tensors (the converter writes no keys for them).
 fn joint_head_config(config: &str, archive: &inference_quant::GgufArchive) -> Result<String> {
@@ -751,12 +765,7 @@ impl GGUFLoader {
         if let Some(decoder) = decoder_embedding {
             archive.rename_architecture(decoder.decoder_architecture())?;
         }
-        if is_architecture(&archive, CLEF_ARCHITECTURE) {
-            archive.rename_architecture(CLEF_TRUNK)?;
-        }
-        if is_architecture(&archive, DECISION2_ARCHITECTURE) {
-            archive.rename_architecture(DECISION2_TRUNK)?;
-        }
+        alias_decision_architecture(&mut archive)?;
         if is_architecture(&archive, JINA_BERT_V3) {
             merge_task_adapters(&mut archive, paths.get_weight_filenames())?;
         }
@@ -1054,6 +1063,7 @@ impl GGUFLoader {
             bail!("multimodal GGUF does not support legacy GGUF adapters");
         }
         let mut archive = inference_quant::GgufArchive::open(paths.get_weight_filenames())?;
+        alias_decision_architecture(&mut archive)?;
         let architecture = match archive.metadata_value("general.architecture") {
             Some(inference_tensor::quantized::gguf_file::Value::String(value)) => value.clone(),
             Some(value) => {
@@ -1186,7 +1196,8 @@ impl GGUFLoader {
         }
 
         let config_missing = paths.get_config_filename().as_os_str().is_empty();
-        let model_archive = inference_quant::GgufArchive::open(paths.get_weight_filenames())?;
+        let mut model_archive = inference_quant::GgufArchive::open(paths.get_weight_filenames())?;
+        alias_decision_architecture(&mut model_archive)?;
         let projector_archives = inference_quant::GgufArchive::open_components(mmproj_paths)?;
         let projector_labels = projector_archives
             .iter()

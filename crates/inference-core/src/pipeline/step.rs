@@ -495,6 +495,9 @@ impl dyn Pipeline {
         block_size: usize,
     ) -> Option<Vec<Vec<PromptChunkPlan>>> {
         let chunk_size = chunk_size?;
+        if self.whole_prompt() {
+            return None;
+        }
         let has_deferred_multimodal_prompt = input_seqs.iter().any(|seq| {
             (seq.has_images() || seq.has_audios() || seq.has_videos())
                 && seq.mm_features().is_empty()

@@ -59,6 +59,13 @@ const H2O_STATE: PythonJson = PythonJson {
     python_floats: true,
 };
 const SCORING_FAILED: &str = "the decision pass returned no label logits";
+// llama.cpp's media marker, which its server makes plain text in a request's own values
+const MEDIA_MARKER: &str = "<__media__>";
+const MEDIA_TEMPERATURE: &str = "image";
+const MAX_MEDIA: usize = 8;
+const DATA_URL: &str = "data:";
+const DATA_AUDIO: &str = "data:audio/";
+const DEFAULT_AUDIO_FORMAT: &str = "wav";
 const POINTER_FAILED: &str = "the decision pass returned no hidden states";
 const KEV_INDENT: &str = "  ";
 // clef's template splits its prompt into pieces at `sep` and marks the start of a question or option span
@@ -543,13 +550,20 @@ fn render_options(profile: &LabelDecision, question: &LabelQuestion, variant: us
     )
 }
 
+/// What every question's prompt of a request shares: the state, the questions, and the placeholder of each image.
+struct Prompt<'a> {
+    state: &'a Value,
+    questions: &'a [LabelQuestion],
+    images: Value,
+}
+
 fn render(
     profile: &LabelDecision,
-    state: &Value,
-    questions: &[LabelQuestion],
+    prompt: &Prompt<'_>,
     question: &LabelQuestion,
     variant: usize,
 ) -> Result<String, minijinja::Error> {
+    let (state, questions) = (prompt.state, prompt.questions);
     let mut input = match profile.family.prepares_texts() {
         true => h2o_input(profile, state, question),
         false => json!({
@@ -580,7 +594,7 @@ fn render(
         input["state"] = json!(kev_text(state));
         input["instructions"] = json!(kev_text(&question.instructions));
     }
-    input["images"] = json!([]);
+    input["images"] = prompt.images.clone();
     render_template(profile, &input)
 }
 
@@ -650,6 +664,7 @@ fn joint_pieces(
     profile: &LabelDecision,
     state: &Value,
     questions: &[LabelQuestion],
+    images: &Value,
 ) -> Result<Vec<(String, Piece)>, EmbeddingError> {
     let input = json!({
         "state": state,
@@ -668,7 +683,7 @@ fn joint_pieces(
     });
     // the template is given sorted keys, and no marker of its own in the input
     let mut input = replace_text(&sort_keys(&input), CLEF_MARKER, CLEF_MARKER_ESCAPED);
-    input["images"] = json!([]);
+    input["images"] = images.clone();
     input["sep"] = json!(CLEF_SEP);
     input["mark_question"] = json!(CLEF_MARK_QUESTION);
     input["mark_option"] = json!(CLEF_MARK_OPTION);
@@ -680,7 +695,19 @@ fn joint_pieces(
     })?;
     let mut kinds = questions.iter().map(|q| q.kind);
     let mut pieces = Vec::new();
-    for piece in prompt.split(CLEF_SEP) {
+    let mut split = prompt.split(CLEF_SEP).peekable();
+    // the text before the images is tokenized with them, as llama.cpp's server does
+    if let Some(placeholder) = images.get(0).and_then(Value::as_str) {
+        let mut head = String::new();
+        while !head.contains(placeholder) {
+            head.push_str(split.next().ok_or_else(layout_error)?);
+        }
+        if head.contains(CLEF_MARKER) {
+            return Err(layout_error());
+        }
+        pieces.push((head, Piece::Text));
+    }
+    for piece in split {
         let (text, role) = if let Some(text) = piece.strip_prefix(CLEF_MARK_QUESTION) {
             let kind = kinds.next().ok_or_else(layout_error)?;
             (text, Piece::Question(kind))
@@ -835,13 +862,14 @@ fn layout_error() -> EmbeddingError {
 async fn decide_joint(
     state: &SharedInferenceRsState,
     profile: &LabelDecision,
-    request_state: &Value,
+    prompt: &Prompt<'_>,
     questions: &[LabelQuestion],
+    media: &Media,
     model: Option<&str>,
 ) -> Result<(Vec<Vec<f32>>, usize), EmbeddingError> {
     // the model was trained with the pieces tokenized one by one
     let mut layout = JointLayout::default();
-    for (text, role) in joint_pieces(profile, request_state, questions)? {
+    for (text, role) in joint_pieces(profile, prompt.state, questions, &prompt.images)? {
         let tokens = tokenize(state, model, text).await?;
         let span = layout.tokens.len()..layout.tokens.len() + tokens.len();
         if role != Piece::Text && span.is_empty() {
@@ -872,14 +900,44 @@ async fn decide_joint(
     if layout.questions.len() != questions.len() || layout.options.len() != n_options {
         return Err(layout_error());
     }
-    let n_tokens = layout.tokens.len();
-    let Response::Raw { logits_chunks, .. } = run(state, model, layout.tokens.clone(), |request| {
+    let message = match media.is_empty() {
+        true => RequestMessage::CompletionTokens(layout.tokens.clone()),
+        false => RequestMessage::MultimodalTokens {
+            tokens: layout.tokens.clone(),
+            images: media.images.clone(),
+            audios: media.audios.clone(),
+        },
+    };
+    let Response::Raw {
+        logits_chunks,
+        tokens,
+    } = run(state, model, message, |request| {
         request.return_raw_logits = true;
     })
     .await?
     else {
         return Err(EmbeddingError::Internal(anyhow::anyhow!(POINTER_FAILED)));
     };
+    // the images sit before every span, so their expansion moves each span by the same count
+    let shift = tokens
+        .len()
+        .checked_sub(layout.tokens.len())
+        .ok_or_else(layout_error)?;
+    if shift > 0 {
+        let moved = |span: &std::ops::Range<usize>| span.start + shift..span.end + shift;
+        layout.questions = layout
+            .questions
+            .iter()
+            .map(|(kind, span)| (*kind, moved(span)))
+            .collect();
+        layout.options = layout
+            .options
+            .iter()
+            .map(|(q, span)| (*q, moved(span)))
+            .collect();
+        layout.tokens = tokens;
+    }
+    let n_tokens = layout.tokens.len();
     let hidden = Tensor::cat(&logits_chunks, 0).map_err(|e| EmbeddingError::Internal(e.into()))?;
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     let request = Request::JointDecision(JointDecisionRequest {
@@ -910,11 +968,16 @@ fn answer(
     profile: &LabelDecision,
     question: &LabelQuestion,
     scores: &[Vec<f32>],
+    with_media: bool,
 ) -> DecisionAnswer {
     let n = profile
         .family
         .outputs(question.kind, question.options.len());
-    let temperature = f64::from(profile.temperature(question.kind, question.options.len()));
+    // a model may have its own temperature for requests with media
+    let temperature = match profile.temperatures.get(MEDIA_TEMPERATURE) {
+        Some(&media) if with_media => f64::from(media),
+        _ => f64::from(profile.temperature(question.kind, question.options.len())),
+    };
     let bias = (question.kind == QuestionKind::Score)
         .then(|| profile.score_bias.get(&n))
         .flatten();
@@ -1041,12 +1104,12 @@ async fn tokenize(
 async fn run(
     state: &SharedInferenceRsState,
     model: Option<&str>,
-    tokens: Vec<u32>,
+    message: RequestMessage,
     configure: impl FnOnce(&mut NormalRequest),
 ) -> Result<Response, EmbeddingError> {
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     let mut request = NormalRequest::new_simple(
-        RequestMessage::CompletionTokens(tokens),
+        message,
         SamplingParams {
             max_len: Some(1),
             ..SamplingParams::deterministic()
@@ -1089,22 +1152,32 @@ async fn score(
     model: Option<&str>,
     prompt: String,
     groups: Vec<Vec<u32>>,
+    media: &Media,
 ) -> Result<(Vec<f32>, usize), EmbeddingError> {
     let tokens = tokenize(state, model, prompt).await?;
-    let n_tokens = tokens.len();
     let scores = Arc::new(Mutex::new(None));
     let capture = LabelCapture {
         groups,
         scores: scores.clone(),
     };
-    match run(state, model, tokens, |request| {
+    let message = match media.is_empty() {
+        true => RequestMessage::CompletionTokens(tokens),
+        false => RequestMessage::MultimodalTokens {
+            tokens,
+            images: media.images.clone(),
+            audios: media.audios.clone(),
+        },
+    };
+    let n_tokens = match run(state, model, message, |request| {
         request.logits_processors = Some(vec![Arc::new(capture)]);
     })
     .await?
     {
-        Response::CompletionDone(_) | Response::Done(_) => {}
+        // the prompt as the model read it, with each image's tokens in place of its placeholder
+        Response::CompletionDone(done) => done.usage.prompt_tokens,
+        Response::Done(done) => done.usage.prompt_tokens,
         _ => return Err(EmbeddingError::Internal(anyhow::anyhow!(SCORING_FAILED))),
-    }
+    };
     let scores = scores
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1153,9 +1226,14 @@ async fn score_pointer(
         ));
     }
     let n_tokens = tokens.len();
-    let Response::Raw { logits_chunks, .. } = run(state, model, tokens, |request| {
-        request.return_raw_logits = true;
-    })
+    let Response::Raw { logits_chunks, .. } = run(
+        state,
+        model,
+        RequestMessage::CompletionTokens(tokens),
+        |request| {
+            request.return_raw_logits = true;
+        },
+    )
     .await?
     else {
         return Err(EmbeddingError::Internal(anyhow::anyhow!(POINTER_FAILED)));
@@ -1171,6 +1249,132 @@ async fn score_pointer(
     let (rows, half) =
         rows.map_err(|e: inference_tensor::Error| EmbeddingError::Internal(e.into()))?;
     Ok((pointer_scores(&rows, half, &markers), n_tokens))
+}
+
+/// A request's images and audio clips, decoded, in the order the prompt places them.
+#[derive(Default)]
+struct Media {
+    images: Vec<image::DynamicImage>,
+    audios: Vec<inference_core::AudioInput>,
+}
+
+impl Media {
+    fn is_empty(&self) -> bool {
+        self.images.is_empty() && self.audios.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.images.len() + self.audios.len()
+    }
+}
+
+/// One data URL as an image, or an audio clip when it says so.
+async fn load_media(url: &Value, media: &mut Media) -> Result<(), EmbeddingError> {
+    let fail = |message: String| invalid(message, "files".into());
+    let Some(url) = url.as_str().filter(|url| url.starts_with(DATA_URL)) else {
+        return Err(fail(
+            "media must be data URLs (data:image/...;base64,... or data:audio/...;base64,...)"
+                .into(),
+        ));
+    };
+    if media.len() >= MAX_MEDIA {
+        return Err(fail(format!(
+            "too many media files, the maximum is {MAX_MEDIA}"
+        )));
+    }
+    if url.starts_with(DATA_AUDIO) {
+        let audio = crate::util::parse_audio_url(url)
+            .await
+            .map_err(|e| fail(e.to_string()))?;
+        media.audios.push(audio);
+    } else {
+        let image = crate::util::parse_image_url(url)
+            .await
+            .map_err(|e| fail(e.to_string()))?;
+        media.images.push(image);
+    }
+    Ok(())
+}
+
+/// The request's media: `files` and `images`, then the image and audio parts of a chat-message state, which leave
+/// the state (llama.cpp's `parse_state`).
+async fn collect_media(request: &DecisionRequest) -> Result<(Value, Media), EmbeddingError> {
+    let mut media = Media::default();
+    for url in request.files.iter().chain(&request.images) {
+        load_media(&json!(url), &mut media).await?;
+    }
+    let wrapped = request.state.get("messages").is_some_and(Value::is_array);
+    let messages = match wrapped {
+        true => &request.state["messages"],
+        false => &request.state,
+    };
+    let Value::Array(messages) = messages else {
+        return Ok((request.state.clone(), media));
+    };
+    let mut kept = Vec::with_capacity(messages.len());
+    for message in messages {
+        let Some(Value::Array(parts)) = message.get("content") else {
+            kept.push(message.clone());
+            continue;
+        };
+        let mut content = Vec::with_capacity(parts.len());
+        for part in parts {
+            match part.get("type").and_then(Value::as_str) {
+                Some("image_url") if part.get("image_url").is_some() => {
+                    let image_url = &part["image_url"];
+                    load_media(image_url.get("url").unwrap_or(image_url), &mut media).await?;
+                }
+                Some("input_audio") if part.get("input_audio").is_some() => {
+                    let audio = &part["input_audio"];
+                    let format = audio
+                        .get("format")
+                        .and_then(Value::as_str)
+                        .unwrap_or(DEFAULT_AUDIO_FORMAT);
+                    let Some(data) = audio.get("data").and_then(Value::as_str) else {
+                        return Err(invalid("audio must be base64 data", "state".into()));
+                    };
+                    load_media(
+                        &json!(format!("{DATA_AUDIO}{format};base64,{data}")),
+                        &mut media,
+                    )
+                    .await?;
+                }
+                _ => content.push(part.clone()),
+            }
+        }
+        let mut message = message.clone();
+        message["content"] = Value::Array(content);
+        kept.push(message);
+    }
+    let state = match wrapped {
+        true => {
+            let mut state = request.state.clone();
+            state["messages"] = Value::Array(kept);
+            state
+        }
+        false => Value::Array(kept),
+    };
+    Ok((state, media))
+}
+
+/// Media the model can read: a type whose prompt has a place for images, loaded with its projector.
+fn check_media(profile: &LabelDecision, media: &Media) -> Result<(), EmbeddingError> {
+    let fail = |message: &str| Err(invalid(message, "files".into()));
+    if !profile.family.takes_images() {
+        return fail("this decision model's prompt has no place for images");
+    }
+    if !media.audios.is_empty() {
+        return fail("this decision model does not take audio");
+    }
+    if profile.family.scores_markers() {
+        return fail("images are not supported for this decision type yet");
+    }
+    if profile.image_placeholder.is_none() {
+        return fail(
+            "this server does not take images for decisions; load the model with its projector (`--mmproj`)",
+        );
+    }
+    Ok(())
 }
 
 /// Answers each question with the label logits of its rendered prompts, in the request's order; with the prompt
@@ -1195,9 +1399,39 @@ pub(crate) async fn decide(
             "state".into(),
         ));
     }
+    let (request_state, media) = collect_media(request).await?;
+    if !media.is_empty() {
+        check_media(profile, &media)?;
+    }
+    let with_media = !media.is_empty();
+    // the input's own media markers stay text, as llama.cpp's server makes them
+    let request_state = match with_media {
+        true => replace_text(&request_state, MEDIA_MARKER, " "),
+        false => request_state,
+    };
+    let questions = match with_media {
+        true => questions
+            .into_iter()
+            .map(|mut q| {
+                q.instructions = replace_text(&q.instructions, MEDIA_MARKER, " ");
+                q.options = q
+                    .options
+                    .into_iter()
+                    .map(|(key, description)| {
+                        (
+                            key.replace(MEDIA_MARKER, " "),
+                            replace_text(&description, MEDIA_MARKER, " "),
+                        )
+                    })
+                    .collect();
+                q
+            })
+            .collect(),
+        false => questions,
+    };
     let input_state = match profile.family.prepares_texts() {
-        true => h2o_state(state, model, profile, &request.state).await?,
-        false => request.state.clone(),
+        true => h2o_state(state, model, profile, &request_state).await?,
+        false => request_state,
     };
     if profile.family.scores_markers() {
         let runs = join_all(
@@ -1210,11 +1444,20 @@ pub(crate) async fn decide(
         let mut input_tokens = 0usize;
         for (question, run) in questions.iter().zip(runs) {
             let (logits, n) = run?;
-            answers.insert(question.id.clone(), answer(profile, question, &[logits]));
+            answers.insert(
+                question.id.clone(),
+                answer(profile, question, &[logits], with_media),
+            );
             input_tokens = input_tokens.saturating_add(n);
         }
         return Ok((answers, input_tokens));
     }
+    let placeholder = profile.image_placeholder.clone().unwrap_or_default();
+    let shared = Prompt {
+        state: &input_state,
+        questions: &questions,
+        images: json!(vec![placeholder; media.images.len()]),
+    };
     if profile.family.joint() {
         let (scores, input_tokens) = match profile.family.joint_per_question() {
             // one prompt each, run together
@@ -1223,8 +1466,9 @@ pub(crate) async fn decide(
                     decide_joint(
                         state,
                         profile,
-                        &input_state,
+                        &shared,
                         std::slice::from_ref(question),
+                        &media,
                         model,
                     )
                 }))
@@ -1238,12 +1482,17 @@ pub(crate) async fn decide(
                 }
                 (scores, tokens)
             }
-            false => decide_joint(state, profile, &input_state, &questions, model).await?,
+            false => decide_joint(state, profile, &shared, &questions, &media, model).await?,
         };
         let answers = questions
             .iter()
             .zip(scores)
-            .map(|(question, scores)| (question.id.clone(), answer(profile, question, &[scores])))
+            .map(|(question, scores)| {
+                (
+                    question.id.clone(),
+                    answer(profile, question, &[scores], with_media),
+                )
+            })
             .collect();
         return Ok((answers, input_tokens));
     }
@@ -1253,24 +1502,24 @@ pub(crate) async fn decide(
             .family
             .variants(question.kind, question.options.len())
         {
-            let prompt =
-                render(profile, &input_state, &questions, question, variant).map_err(|e| {
-                    invalid(
-                        format!("rendering the decision prompt failed: {e}"),
-                        "questions".into(),
-                    )
-                })?;
+            let prompt = render(profile, &shared, question, variant).map_err(|e| {
+                invalid(
+                    format!("rendering the decision prompt failed: {e}"),
+                    "questions".into(),
+                )
+            })?;
             prompts.push((index, prompt));
         }
     }
     let all = &questions;
+    let media = &media;
     let results = join_all(prompts.into_iter().map(|(index, prompt)| async move {
         let question = &all[index];
         let result = match profile.option_end {
             Some(option_end) => {
                 score_pointer(state, model, prompt, option_end, question.options.len()).await
             }
-            None => score(state, model, prompt, question.label_groups.clone()).await,
+            None => score(state, model, prompt, question.label_groups.clone(), media).await,
         };
         (index, result)
     }))
@@ -1286,7 +1535,12 @@ pub(crate) async fn decide(
     let answers = questions
         .iter()
         .zip(&scores)
-        .map(|(question, scores)| (question.id.clone(), answer(profile, question, scores)))
+        .map(|(question, scores)| {
+            (
+                question.id.clone(),
+                answer(profile, question, scores, with_media),
+            )
+        })
         .collect();
     Ok((answers, input_tokens))
 }
@@ -1298,6 +1552,14 @@ mod tests {
     use inference_core::decision::LabelFamily;
 
     use super::*;
+
+    fn plain(state: &Value) -> Prompt<'_> {
+        Prompt {
+            state,
+            questions: &[],
+            images: json!([]),
+        }
+    }
 
     fn profile(family: LabelFamily, template: &str) -> LabelDecision {
         LabelDecision::new(
@@ -1442,7 +1704,7 @@ mod tests {
             json!({"x": null, "y": "d"}),
         );
         assert_eq!(
-            render(&nimble, &state, &[], &q, 0).unwrap(),
+            render(&nimble, &plain(&state), &q, 0).unwrap(),
             "{\"b\": 1, \"a\": \"é<\\u0001\", \"c\": [true, null]}|A=x;B=y;"
         );
         // lev sorts the keys, and its second variant shows the options reversed under the same labels
@@ -1453,7 +1715,7 @@ mod tests {
             json!({"x": null, "y": "d"}),
         );
         assert_eq!(
-            render(&lev, &state, &[], &q, 1).unwrap(),
+            render(&lev, &plain(&state), &q, 1).unwrap(),
             "{\"a\": \"é<\\u0001\", \"b\": 1, \"c\": [true, null]}|A=y;B=x;"
         );
     }
@@ -1471,8 +1733,13 @@ mod tests {
             json!({"z": null, "a": null}),
         );
         let noul = question(&clef, DecisionQuestionType::Noul, Value::Null);
-        let pieces = joint_pieces(&clef, &json!({"y": "<<clef:sep>>", "b": 1}), &[q, noul])
-            .unwrap_or_else(|_| panic!("the prompt renders"));
+        let pieces = joint_pieces(
+            &clef,
+            &json!({"y": "<<clef:sep>>", "b": 1}),
+            &[q, noul],
+            &json!([]),
+        )
+        .unwrap_or_else(|_| panic!("the prompt renders"));
         let shown = pieces
             .iter()
             .map(|(text, role)| (text.as_str(), *role))
@@ -1555,6 +1822,93 @@ mod tests {
         assert_eq!(d1omni_budgets(400), (17, 8192));
     }
 
+    fn png_url() -> String {
+        use base64::Engine as _;
+        let mut png = Vec::new();
+        image::DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(png)
+        )
+    }
+
+    fn request(state: Value, images: Vec<String>) -> DecisionRequest {
+        serde_json::from_value(json!({
+            "state": state,
+            "images": images,
+            "questions": {"q": {"type": "noul", "instructions": "x"}},
+        }))
+        .unwrap()
+    }
+
+    // `images` and a chat state's image parts both load, and the parts leave the state
+    #[tokio::test]
+    async fn media_come_from_the_request_and_its_chat_state() {
+        let state = json!({"messages": [{"role": "user", "content": [
+            {"type": "text", "text": "see"},
+            {"type": "image_url", "image_url": {"url": png_url()}},
+        ]}]});
+        let Ok((state, media)) = collect_media(&request(state, vec![png_url()])).await else {
+            panic!("the media load");
+        };
+        assert_eq!(media.images.len(), 2);
+        assert_eq!(
+            state,
+            json!({"messages": [{"role": "user", "content": [{"type": "text", "text": "see"}]}]})
+        );
+        let remote = request(json!("s"), vec!["https://example.com/a.png".into()]);
+        assert!(collect_media(&remote).await.is_err());
+    }
+
+    #[test]
+    fn media_need_a_family_with_a_place_for_them_and_a_projector() {
+        let media = Media {
+            images: vec![image::DynamicImage::new_rgb8(2, 2)],
+            audios: Vec::new(),
+        };
+        assert!(check_media(&profile(LabelFamily::Nimble, ""), &media).is_err());
+        let mut d3 = profile(LabelFamily::VllmD3, "");
+        assert!(check_media(&d3, &media).is_err());
+        d3.image_placeholder = Some("<img>".into());
+        assert!(check_media(&d3, &media).is_ok());
+    }
+
+    #[test]
+    fn each_image_takes_the_model_placeholder() {
+        let d3 = profile(
+            LabelFamily::VllmD3,
+            "{% for image in images %}{{ image }}{% endfor %}|{{ state }}",
+        );
+        let q = question(&d3, DecisionQuestionType::Noul, Value::Null);
+        let prompt = Prompt {
+            state: &json!("s"),
+            questions: &[],
+            images: json!(["<img>", "<img>"]),
+        };
+        assert_eq!(render(&d3, &prompt, &q, 0).unwrap(), "<img><img>|s");
+    }
+
+    // the text up to the images is one piece with them, tokenized together as llama.cpp's server does
+    #[test]
+    fn a_joint_prompt_keeps_its_images_with_the_text_before_them() {
+        let template = "S{{ sep }}{% for image in images %}{{ image }}{% endfor %}\
+            |{{ sep }}{{ state }}{% for q in questions %}{{ sep }}{{ mark_question }}{{ q.instructions }}\
+            {% for o in q.options %}{{ sep }}{{ mark_option }}{{ o.key }}{% endfor %}{% endfor %}";
+        let clef = profile(LabelFamily::Clef, template);
+        let q = question(
+            &clef,
+            DecisionQuestionType::Choice,
+            json!({"a": null, "b": null}),
+        );
+        let pieces = joint_pieces(&clef, &json!("s"), &[q], &json!(["<img>"]))
+            .unwrap_or_else(|_| panic!("the prompt renders"));
+        assert_eq!(pieces[0], ("S<img>|".to_string(), Piece::Text));
+        assert_eq!(pieces[1], ("s".to_string(), Piece::Text));
+        assert_eq!(pieces.len(), 5);
+    }
+
     #[test]
     fn tojson_takes_python_layouts() {
         let nimble = profile(
@@ -1565,8 +1919,7 @@ mod tests {
         assert_eq!(
             render(
                 &nimble,
-                &json!({"a": [1, 2.0], "b": {}, "c": "é"}),
-                &[],
+                &plain(&json!({"a": [1, 2.0], "b": {}, "c": "é"})),
                 &q,
                 0
             )
@@ -1581,7 +1934,7 @@ mod tests {
         let jev = profile(LabelFamily::OpenJev, "");
         let q = question(&jev, DecisionQuestionType::Noul, criteria.clone());
         assert_eq!(q.options[0], ("true".to_string(), json!("holds")));
-        let answer = answer(&jev, &q, &[vec![2.0, 0.0]]);
+        let answer = answer(&jev, &q, &[vec![2.0, 0.0]], false);
         let DecisionAnswer::Noul { noul } = answer else {
             panic!()
         };
@@ -1604,7 +1957,7 @@ mod tests {
             probabilities,
             choice,
             ..
-        } = answer(&lev, &q, &[vec![1.0, 0.0, 0.0], vec![1.0, 0.0, 0.0]])
+        } = answer(&lev, &q, &[vec![1.0, 0.0, 0.0], vec![1.0, 0.0, 0.0]], false)
         else {
             panic!()
         };
@@ -1614,7 +1967,7 @@ mod tests {
         let q = question(&lev, DecisionQuestionType::Noul, Value::Null);
         let mut ratings = vec![f32::NEG_INFINITY; 9];
         ratings[6] = 0.0;
-        let DecisionAnswer::Noul { noul } = answer(&lev, &q, &[ratings]) else {
+        let DecisionAnswer::Noul { noul } = answer(&lev, &q, &[ratings], false) else {
             panic!()
         };
         assert!((noul - 0.75).abs() < 1e-12);
@@ -1629,7 +1982,7 @@ mod tests {
             legend,
             confidence: even,
             ..
-        } = answer(&d3, &q, &[vec![0.0, 0.0]])
+        } = answer(&d3, &q, &[vec![0.0, 0.0]], false)
         else {
             panic!()
         };
@@ -1637,7 +1990,8 @@ mod tests {
         assert!(even.abs() < 1e-12);
         let nimble = profile(LabelFamily::Nimble, "");
         let q = question(&nimble, DecisionQuestionType::Score, levels);
-        let DecisionAnswer::Score { legend, .. } = answer(&nimble, &q, &[vec![0.0, 0.0]]) else {
+        let DecisionAnswer::Score { legend, .. } = answer(&nimble, &q, &[vec![0.0, 0.0]], false)
+        else {
             panic!()
         };
         assert_eq!(legend["1"], json!({"b": 1, "a": 2}));

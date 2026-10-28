@@ -206,6 +206,9 @@ pub struct MultimodalData {
     /// Fixed offset between token indices and post-media MRoPE positions.
     pub mrope_position_delta: Option<i64>,
     pub has_changed_prompt: bool,
+    /// The prompt arrived as tokens (a decision template tokenized piece by piece), so expansion splices each image's
+    /// placeholder run into them instead of re-tokenizing the expanded text.
+    pub keep_prompt_tokens: bool,
     /// Per-item multimodal feature positions for prefix caching block hashing.
     /// Each entry records which token range a multimodal item (image/audio) occupies,
     /// so that only blocks overlapping with that item include its content hash.
@@ -233,6 +236,7 @@ impl MultimodalData {
             rope_vid_grid_thw: None,
             mrope_position_delta: None,
             has_changed_prompt: false,
+            keep_prompt_tokens: false,
             mm_features: Vec::new(),
         }
     }
@@ -401,6 +405,35 @@ impl MultimodalData {
 /// Used by multimodal model input processors to find where each image's placeholder
 /// tokens are in the expanded token sequence, so that `MultiModalFeature` entries
 /// can be built for position-aware prefix cache block hashing.
+/// `original` with each `pad` replaced by the run of pads `expanded` has in its place, in order: the expanded prompt's
+/// media spans over the original's own tokens.
+pub fn splice_placeholder_runs(
+    original: &[u32],
+    expanded: &[u32],
+    pad: u32,
+) -> anyhow::Result<Vec<u32>> {
+    let mut runs = expanded
+        .chunk_by(|a, b| a == b)
+        .filter(|run| run[0] == pad)
+        .map(<[u32]>::len);
+    let mut out = Vec::with_capacity(expanded.len());
+    for &token in original {
+        match token == pad {
+            true => {
+                let n = runs.next().ok_or_else(|| {
+                    anyhow::anyhow!("the expanded prompt has fewer media spans than placeholders")
+                })?;
+                out.extend(std::iter::repeat_n(pad, n));
+            }
+            false => out.push(token),
+        }
+    }
+    if runs.next().is_some() {
+        anyhow::bail!("the expanded prompt has more media spans than placeholders");
+    }
+    Ok(out)
+}
+
 pub fn find_image_placeholder_ranges(tokens: &[u32], placeholder_id: u32) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
     let mut i = 0;
@@ -565,6 +598,21 @@ pub fn build_mm_features_from_ranges_with_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // the original's own tokens stay, each placeholder grows to the run the expansion gave it
+    #[test]
+    fn placeholder_runs_splice_into_the_original_tokens() {
+        const PAD: u32 = 9;
+        let original = [1, 2, PAD, 3, PAD, 4];
+        // a re-tokenization that merged 1 and 2 into 12, which the splice must not take
+        let expanded = [12, PAD, PAD, PAD, 3, PAD, PAD, 4];
+        assert_eq!(
+            splice_placeholder_runs(&original, &expanded, PAD).unwrap(),
+            [1, 2, PAD, PAD, PAD, 3, PAD, PAD, 4]
+        );
+        assert!(splice_placeholder_runs(&original, &[PAD, 3], PAD).is_err());
+        assert!(splice_placeholder_runs(&[1], &[PAD], PAD).is_err());
+    }
 
     #[test]
     fn image_hash_distinguishes_geometry() {

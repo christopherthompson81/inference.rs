@@ -433,6 +433,14 @@ impl MultimodalModel for Qwen3_5Model {
         NormalModel::bidirectional_prompt(&self.text)
     }
 
+    fn joint_decision(
+        &self,
+        hidden: &Tensor,
+        layout: &inference_nn::decision::JointLayout,
+    ) -> Result<Vec<f32>> {
+        NormalModel::joint_decision(&self.text, hidden, layout)
+    }
+
     fn token_window(&self) -> Option<usize> {
         NormalModel::token_window(&self.text)
     }

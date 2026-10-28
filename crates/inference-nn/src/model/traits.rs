@@ -112,6 +112,14 @@ pub trait MultimodalModel:
     fn supports_mixed_media_batches(&self) -> bool {
         false
     }
+    /// As `NormalModel::joint_decision`, for a text model under a vision tower.
+    fn joint_decision(
+        &self,
+        _hidden: &Tensor,
+        _layout: &crate::decision::JointLayout,
+    ) -> inference_tensor::Result<Vec<f32>> {
+        inference_tensor::bail!("this model has no joint decision head")
+    }
     /// As `NormalModel::token_window`.
     fn token_window(&self) -> Option<usize> {
         None

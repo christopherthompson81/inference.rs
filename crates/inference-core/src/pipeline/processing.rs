@@ -58,6 +58,11 @@ pub trait Processor {
         )
     }
     fn inputs_processor(&self) -> Arc<dyn InputsProcessor>;
+    /// The text that stands for one image in a prompt the caller renders itself (a decision template), which the
+    /// inputs processor expands as it does a chat template's.
+    fn image_placeholder(&self) -> Option<String> {
+        None
+    }
     fn retain_prefix_cached_images(&self) -> bool {
         false
     }
