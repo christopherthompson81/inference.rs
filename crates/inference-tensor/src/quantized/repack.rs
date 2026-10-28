@@ -240,12 +240,16 @@ pub(crate) fn try_matmul_f32(
             return Ok(false);
         }
         let dtype = storage.dtype();
-        let lhs_q = super::repack_x86::quantize_lhs(lhs, m, k);
-        if m >= 32 && dtype == super::GgmlDType::Q4K && super::repack_x86::amx_available() {
+        let lhs_q = super::repack_x86::quantize_lhs(dtype, lhs, m, k);
+        if let super::repack_x86::PackedLhs::Q8K(q8k) = &lhs_q
+            && m >= 32
+            && dtype == super::GgmlDType::Q4K
+            && super::repack_x86::amx_available()
+        {
             let tiles = packed
                 .x86_amx
                 .get_or_init(|| super::repack_x86::pack_q4k_amx(storage, n, k));
-            super::repack_x86::matmul_amx_q4k(tiles, &lhs_q, m, k, n, dst);
+            super::repack_x86::matmul_amx_q4k(tiles, q8k, m, k, n, dst);
             return Ok(true);
         }
         let tiles = packed

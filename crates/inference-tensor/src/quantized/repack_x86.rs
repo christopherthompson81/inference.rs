@@ -1,8 +1,8 @@
 //! x86 repacked quantized kernels: weights tiled [n/16][k-blocks][16 rows] so one
 //! vpdpbusd (AVX512-VNNI) produces 16 output columns for 4 k-values per instruction.
-//! Activations are BlockQ8K rows; q4k/q6k quants are unsigned so vpdpbusd applies
-//! directly with the min/offset terms corrected through the q8k bsums, and q8_0
-//! weights are stored offset by +128 with the same correction.
+//! K-quant activations are BlockQ8K rows; q4k/q6k quants are unsigned so vpdpbusd applies
+//! directly with the min/offset terms corrected through the q8k bsums. q8_0 weights are
+//! stored offset by +128 and take q8_0 activations (a scale per 32), as ggml pairs them.
 
 use super::k_quants::{BlockQ4K, BlockQ6K, BlockQ8_0, BlockQ8K, QK_K, QK8_0};
 use super::{GgmlType, QuantizedType};
@@ -38,6 +38,51 @@ pub(crate) enum PackedX86 {
     Q4K(Vec<TileQ4K>),
     Q6K(Vec<TileQ6K>),
     Q8_0(Vec<TileQ8_0>),
+}
+
+const Q8_0_PER_SUPERBLOCK: usize = QK_K / QK8_0;
+
+// One superblock's 256 activations for q8_0 tiles: eight 32-value q8_0 blocks, each with its scale and integer sum
+#[derive(Clone)]
+#[repr(C)]
+pub(crate) struct ActQ8_0 {
+    pub(crate) d: [f32; Q8_0_PER_SUPERBLOCK],
+    pub(crate) sums: [i32; Q8_0_PER_SUPERBLOCK],
+    pub(crate) qs: [i8; QK_K],
+}
+
+impl ActQ8_0 {
+    const ZERO: Self = Self {
+        d: [0.0; Q8_0_PER_SUPERBLOCK],
+        sums: [0; Q8_0_PER_SUPERBLOCK],
+        qs: [0; QK_K],
+    };
+
+    // ggml's quantize_row_q8_0 per 32 values, f16 scales included, so it matches the compact q8_0 path
+    fn quantize_row(row: &[f32], out: &mut [Self]) {
+        let mut blocks: [BlockQ8_0; Q8_0_PER_SUPERBLOCK] =
+            std::array::from_fn(|_| BlockQ8_0::zeros());
+        for (xs, act) in row.as_chunks::<QK_K>().0.iter().zip(out) {
+            BlockQ8_0::from_float(xs, &mut blocks);
+            for (j, blk) in blocks.iter().enumerate() {
+                act.d[j] = blk.d.to_f32();
+                act.sums[j] = blk.qs.iter().map(|&q| q as i32).sum();
+                act.qs[j * QK8_0..(j + 1) * QK8_0].copy_from_slice(&blk.qs);
+            }
+        }
+    }
+}
+
+/// Activation rows quantized as the packed weights pair with them: Q8_K for the K-quants, Q8_0 for Q8_0.
+pub(crate) enum PackedLhs {
+    Q8K(Vec<BlockQ8K>),
+    Q8_0(Vec<ActQ8_0>),
+}
+
+// The rows m0..m0+mt of superblock b, padded with the last so the array is full.
+#[inline(always)]
+fn act_rows<T>(lhs: &[T], m0: usize, mt: usize, kb: usize, b: usize) -> [&T; kernels::MAX_MT] {
+    std::array::from_fn(|i| &lhs[(m0 + i.min(mt - 1)) * kb + b])
 }
 
 pub(crate) fn select(dtype: super::GgmlDType, m: usize, n: usize, k: usize) -> bool {
@@ -302,7 +347,7 @@ mod kernels {
     pub(crate) unsafe fn q8_0_tile2(
         t0: &TileQ8_0,
         t1: &TileQ8_0,
-        acts: &[&BlockQ8K],
+        acts: &[&ActQ8_0],
         sub32: usize,
         acc: &mut [[__m512; 1]],
     ) {
@@ -325,11 +370,14 @@ mod kernels {
             for (blk, isum, tile) in [(sub32, &isum_a, t0), (sub32 + 1, &isum_b, t1)] {
                 let dw = _mm512_cvtph_ps(_mm256_loadu_si256(tile.d.as_ptr() as *const _));
                 for (m, act) in acts.iter().enumerate() {
-                    let bsum = (act.bsums[blk * 2] as i32 + act.bsums[blk * 2 + 1] as i32) as f32;
+                    let bsum = act.sums[blk] as f32;
                     let f =
                         _mm512_sub_ps(_mm512_cvtepi32_ps(isum[m]), _mm512_set1_ps(128.0 * bsum));
-                    acc[m][0] =
-                        _mm512_fmadd_ps(f, _mm512_mul_ps(dw, _mm512_set1_ps(act.d)), acc[m][0]);
+                    acc[m][0] = _mm512_fmadd_ps(
+                        f,
+                        _mm512_mul_ps(dw, _mm512_set1_ps(act.d[blk])),
+                        acc[m][0],
+                    );
                 }
             }
         }
@@ -345,7 +393,7 @@ mod kernels {
 #[allow(clippy::too_many_arguments)]
 unsafe fn matmul_unit_512(
     packed: &PackedX86,
-    lhs_q: &[BlockQ8K],
+    lhs_q: &PackedLhs,
     kb: usize,
     nt: usize,
     m0: usize,
@@ -355,31 +403,33 @@ unsafe fn matmul_unit_512(
 ) {
     unsafe {
         use core::arch::x86_64::*;
-        let mut act_refs: [&BlockQ8K; kernels::MAX_MT] = [&lhs_q[m0 * kb]; kernels::MAX_MT];
         let mut acc = [[_mm512_setzero_ps(); 1]; kernels::MAX_MT];
         for b in 0..kb {
-            for (i, a) in act_refs.iter_mut().enumerate().take(mt) {
-                *a = &lhs_q[(m0 + i) * kb + b];
-            }
-            match packed {
-                PackedX86::Q4K(tiles) => {
-                    kernels::q4k_tile(&tiles[nt * kb + b], &act_refs[..mt], &mut acc)
-                }
-                PackedX86::Q6K(tiles) => {
-                    kernels::q6k_tile(&tiles[nt * kb + b], &act_refs[..mt], &mut acc)
-                }
-                PackedX86::Q8_0(tiles) => {
-                    // q8_0 tiles cover 32 k-values each; 8 tiles per q8k superblock
+            match (packed, lhs_q) {
+                (PackedX86::Q4K(tiles), PackedLhs::Q8K(lhs)) => kernels::q4k_tile(
+                    &tiles[nt * kb + b],
+                    &act_rows(lhs, m0, mt, kb, b)[..mt],
+                    &mut acc,
+                ),
+                (PackedX86::Q6K(tiles), PackedLhs::Q8K(lhs)) => kernels::q6k_tile(
+                    &tiles[nt * kb + b],
+                    &act_rows(lhs, m0, mt, kb, b)[..mt],
+                    &mut acc,
+                ),
+                (PackedX86::Q8_0(tiles), PackedLhs::Q8_0(lhs)) => {
+                    let acts = act_rows(lhs, m0, mt, kb, b);
+                    // q8_0 tiles cover 32 k-values each; 8 tiles per superblock
                     for s in (0..8).step_by(2) {
                         kernels::q8_0_tile2(
                             &tiles[nt * (kb * 8) + b * 8 + s],
                             &tiles[nt * (kb * 8) + b * 8 + s + 1],
-                            &act_refs[..mt],
+                            &acts[..mt],
                             s,
                             &mut acc,
                         );
                     }
                 }
+                _ => unreachable!("quantize_lhs pairs activations with the packed dtype"),
             }
         }
         for (i, row) in acc[..mt].iter().enumerate() {
@@ -393,7 +443,7 @@ unsafe fn matmul_unit_512(
 #[allow(clippy::too_many_arguments)]
 unsafe fn matmul_unit_256(
     packed: &PackedX86,
-    lhs_q: &[BlockQ8K],
+    lhs_q: &PackedLhs,
     kb: usize,
     nt: usize,
     m0: usize,
@@ -404,42 +454,40 @@ unsafe fn matmul_unit_256(
 ) {
     unsafe {
         use core::arch::x86_64::*;
-        let mut act_refs: [&BlockQ8K; kernels::MAX_MT] = [&lhs_q[m0 * kb]; kernels::MAX_MT];
         let mut acc = [[_mm256_setzero_ps(); 2]; kernels::MAX_MT];
         for b in 0..kb {
-            for (i, a) in act_refs.iter_mut().enumerate().take(mt) {
-                *a = &lhs_q[(m0 + i) * kb + b];
-            }
-            match packed {
-                PackedX86::Q4K(tiles) => {
-                    let t = &tiles[nt * kb + b];
+            match (packed, lhs_q) {
+                (PackedX86::Q4K(tiles), PackedLhs::Q8K(lhs)) => {
+                    let (t, acts) = (&tiles[nt * kb + b], act_rows(lhs, m0, mt, kb, b));
                     if vnni {
-                        kernels256::q4k_tile_avxvnni(t, &act_refs[..mt], &mut acc)
+                        kernels256::q4k_tile_avxvnni(t, &acts[..mt], &mut acc)
                     } else {
-                        kernels256::q4k_tile_avx2(t, &act_refs[..mt], &mut acc)
+                        kernels256::q4k_tile_avx2(t, &acts[..mt], &mut acc)
                     }
                 }
-                PackedX86::Q6K(tiles) => {
-                    let t = &tiles[nt * kb + b];
+                (PackedX86::Q6K(tiles), PackedLhs::Q8K(lhs)) => {
+                    let (t, acts) = (&tiles[nt * kb + b], act_rows(lhs, m0, mt, kb, b));
                     if vnni {
-                        kernels256::q6k_tile_avxvnni(t, &act_refs[..mt], &mut acc)
+                        kernels256::q6k_tile_avxvnni(t, &acts[..mt], &mut acc)
                     } else {
-                        kernels256::q6k_tile_avx2(t, &act_refs[..mt], &mut acc)
+                        kernels256::q6k_tile_avx2(t, &acts[..mt], &mut acc)
                     }
                 }
-                PackedX86::Q8_0(tiles) => {
+                (PackedX86::Q8_0(tiles), PackedLhs::Q8_0(lhs)) => {
+                    let acts = act_rows(lhs, m0, mt, kb, b);
                     for s in (0..8).step_by(2) {
                         let (t0, t1) = (
                             &tiles[nt * (kb * 8) + b * 8 + s],
                             &tiles[nt * (kb * 8) + b * 8 + s + 1],
                         );
                         if vnni {
-                            kernels256::q8_0_tile2_avxvnni(t0, t1, &act_refs[..mt], s, &mut acc);
+                            kernels256::q8_0_tile2_avxvnni(t0, t1, &acts[..mt], s, &mut acc);
                         } else {
-                            kernels256::q8_0_tile2_avx2(t0, t1, &act_refs[..mt], s, &mut acc);
+                            kernels256::q8_0_tile2_avx2(t0, t1, &acts[..mt], s, &mut acc);
                         }
                     }
                 }
+                _ => unreachable!("quantize_lhs pairs activations with the packed dtype"),
             }
         }
         for (i, row) in acc[..mt].iter().enumerate() {
@@ -451,7 +499,7 @@ unsafe fn matmul_unit_256(
 
 pub(crate) fn matmul_tiles(
     packed: &PackedX86,
-    lhs_q: &[BlockQ8K],
+    lhs_q: &PackedLhs,
     m: usize,
     k: usize,
     n: usize,
@@ -514,21 +562,47 @@ pub(crate) fn pack(
     }
 }
 
-// Quantize lhs rows to BlockQ8K, parallelizing only when there are multiple rows.
-pub(crate) fn quantize_lhs(lhs: &[f32], m: usize, k: usize) -> Vec<BlockQ8K> {
+// Quantize lhs rows as `dtype`'s tiles read them, parallelizing only when there are multiple rows.
+pub(crate) fn quantize_lhs(dtype: super::GgmlDType, lhs: &[f32], m: usize, k: usize) -> PackedLhs {
+    if dtype == super::GgmlDType::Q8_0 {
+        PackedLhs::Q8_0(quantize_rows(
+            lhs,
+            m,
+            k,
+            ActQ8_0::ZERO,
+            ActQ8_0::quantize_row,
+        ))
+    } else {
+        PackedLhs::Q8K(quantize_rows(
+            lhs,
+            m,
+            k,
+            BlockQ8K::zeros(),
+            BlockQ8K::from_float,
+        ))
+    }
+}
+
+fn quantize_rows<T: Clone + Send>(
+    lhs: &[f32],
+    m: usize,
+    k: usize,
+    zero: T,
+    quantize: fn(&[f32], &mut [T]),
+) -> Vec<T> {
     let kb = k / QK_K;
-    let mut out = vec![BlockQ8K::zeros(); m * kb];
+    let mut out = vec![zero; m * kb];
     if m == 1 {
-        BlockQ8K::from_float(&lhs[..k], &mut out);
+        quantize(&lhs[..k], &mut out);
         return out;
     }
     let out_ptr = out.as_mut_ptr() as usize;
     crate::utils::barrier_pool().execute_chunked(m, |range| {
-        let out_ptr = out_ptr as *mut BlockQ8K;
+        let out_ptr = out_ptr as *mut T;
         for r in range {
             let row = &lhs[r * k..(r + 1) * k];
             let dst = unsafe { std::slice::from_raw_parts_mut(out_ptr.add(r * kb), kb) };
-            BlockQ8K::from_float(row, dst);
+            quantize(row, dst);
         }
     });
     out
@@ -539,7 +613,7 @@ pub(crate) fn quantize_lhs(lhs: &[f32], m: usize, k: usize) -> Vec<BlockQ8K> {
 // per-unit body reuses matmul_unit_512 so intrinsics inline in portable builds.
 pub(crate) fn gemv_fused(
     parts: &[(&PackedX86, usize)],
-    lhs_q: &[BlockQ8K],
+    lhs_q: &PackedLhs,
     m: usize,
     k: usize,
     dsts: &mut [Vec<f32>],
@@ -1086,7 +1160,7 @@ mod kernels256 {
     pub(crate) unsafe fn q8_0_tile2_avx2(
         t0: &TileQ8_0,
         t1: &TileQ8_0,
-        acts: &[&BlockQ8K],
+        acts: &[&ActQ8_0],
         sub32: usize,
         acc: &mut [[__m256; 2]],
     ) {
@@ -1121,14 +1195,14 @@ mod kernels256 {
                     }
                 }
             }
-            for (isum, tile) in [(&isum_a, t0), (&isum_b, t1)] {
+            for (blk, isum, tile) in [(sub32, &isum_a, t0), (sub32 + 1, &isum_b, t1)] {
                 for h in 0..2 {
                     let dw =
                         _mm256_cvtph_ps(_mm_loadu_si128(tile.d.as_ptr().add(h * 8) as *const _));
                     for (m, act) in acts.iter().enumerate() {
                         acc[m][h] = _mm256_fmadd_ps(
                             _mm256_cvtepi32_ps(isum[m][h]),
-                            _mm256_mul_ps(dw, _mm256_set1_ps(act.d)),
+                            _mm256_mul_ps(dw, _mm256_set1_ps(act.d[blk])),
                             acc[m][h],
                         );
                     }
@@ -1142,7 +1216,7 @@ mod kernels256 {
     pub(crate) unsafe fn q8_0_tile2_avxvnni(
         t0: &TileQ8_0,
         t1: &TileQ8_0,
-        acts: &[&BlockQ8K],
+        acts: &[&ActQ8_0],
         sub32: usize,
         acc: &mut [[__m256; 2]],
     ) {
@@ -1176,14 +1250,16 @@ mod kernels256 {
                     let dw =
                         _mm256_cvtph_ps(_mm_loadu_si128(tile.d.as_ptr().add(h * 8) as *const _));
                     for (m, act) in acts.iter().enumerate() {
-                        let bsum =
-                            (act.bsums[blk * 2] as i32 + act.bsums[blk * 2 + 1] as i32) as f32;
+                        let bsum = act.sums[blk] as f32;
                         let f = _mm256_sub_ps(
                             _mm256_cvtepi32_ps(isum[m][h]),
                             _mm256_set1_ps(128.0 * bsum),
                         );
-                        acc[m][h] =
-                            _mm256_fmadd_ps(f, _mm256_mul_ps(dw, _mm256_set1_ps(act.d)), acc[m][h]);
+                        acc[m][h] = _mm256_fmadd_ps(
+                            f,
+                            _mm256_mul_ps(dw, _mm256_set1_ps(act.d[blk])),
+                            acc[m][h],
+                        );
                     }
                 }
             }
