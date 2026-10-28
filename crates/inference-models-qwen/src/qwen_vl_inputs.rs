@@ -762,11 +762,26 @@ impl QwenVlInputs<'_> {
         if seq.mm_features().is_empty() && !seq.has_images() && !seq.has_videos() {
             return Ok(seq.get_toks().to_vec());
         }
-        let ids = tokenizer
+        let keep = seq.multimodal().keep_prompt_tokens;
+        if keep && seq.multimodal().has_changed_prompt {
+            return Ok(seq.get_toks().to_vec());
+        }
+        let mut ids = tokenizer
             .encode_fast(detok.as_str(), false)
             .map_err(anyhow::Error::msg)?
             .get_ids()
             .to_vec();
+        if keep {
+            if seq.has_videos() {
+                anyhow::bail!("a prompt given as tokens takes images, not videos");
+            }
+            let pad = token_id(tokenizer, IMAGE_PAD, "image pad")?;
+            ids = inference_nn::media_inputs::media::splice_placeholder_runs(
+                seq.get_toks(),
+                &ids,
+                pad,
+            )?;
+        }
         if seq.multimodal().has_changed_prompt {
             return Ok(ids);
         }

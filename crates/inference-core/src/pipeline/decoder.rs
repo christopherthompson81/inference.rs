@@ -1138,9 +1138,7 @@ impl Pipeline for DecoderPipeline {
     ) -> Result<Vec<f32>, inference_tensor::Error> {
         match &self.model {
             DecoderModel::Text(model) => model.joint_decision(hidden, layout),
-            DecoderModel::Multimodal(_) => {
-                inference_tensor::bail!("this model has no joint decision head")
-            }
+            DecoderModel::Multimodal(model) => model.joint_decision(hidden, layout),
         }
     }
 

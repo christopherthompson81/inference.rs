@@ -44,7 +44,7 @@ The other llama.cpp decision type, `granite-switch`, is not supported (#679).
 
 ### Images
 
-`openjev`, `pplx-decider`, `vllm-d3`, `lfm2-d1` and `h2o-lightning` read images when the model loads with its projector (an `mmproj*.gguf` beside the model, or `--mmproj`). Send them as data URLs in `files` (or `images`), or as `image_url` parts of a chat-message `state`, which leave the state:
+`openjev`, `pplx-decider`, `vllm-d3`, `lfm2-d1`, `h2o-lightning` and `clef` read images when the model loads with its projector (an `mmproj*.gguf` beside the model, or `--mmproj`). Send them as data URLs in `files` (or `images`), or as `image_url` parts of a chat-message `state`, which leave the state:
 
 ```json
 {"state": "A photo from the street.",
@@ -53,7 +53,7 @@ The other llama.cpp decision type, `granite-switch`, is not supported (#679).
                          "criteria": {"red": null, "blue": null}}}}
 ```
 
-A request takes up to 8. A model may calibrate its answers on images apart (h2o-lightning's `image` temperature). `clef` and `lfm2-d1-omni` do not take images yet, and no type takes audio yet.
+A request takes up to 8. A model may calibrate its answers on images apart (h2o-lightning's `image` temperature). `lfm2-d1-omni` does not take images or audio yet.
 
 ## Asking questions
 

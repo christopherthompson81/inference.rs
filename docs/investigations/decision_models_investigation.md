@@ -456,3 +456,25 @@ Finding:
 Implication: images work for the label types (openjev, pplx-decider and vllm-d3 share h2o's Qwen path; openjev and
 pplx not run). clef (images in its joint prompt) and lfm2-d1-omni (images and audio through its own encoders) are
 next.
+
+## Run 21 - 2026-10-28 13:52
+
+Question: does clef answer image questions as llama.cpp does?
+
+Command: `llama-server --mmproj mmproj-Clef-Flash-Q8_0.gguf -np 1 -b 8192 -ub 8192 -c 16384` over `media_requests.py`;
+ours (the projector beside the GGUF) the same; `media_compare.py`.
+
+Finding:
+- First run: `multimodal GGUF architecture clef is not supported`: the multimodal and config-synthesis paths open the
+  archive without the `clef` -> `qwen35` rename. One helper now aliases clef and vllm-decision2 wherever a model
+  archive opens; Qwen3.5's multimodal model passes `joint_decision` to its text model.
+- Second run: two choices wrong (worst 0.86) and 289 / 304 tokens against 299 / 314. The Qwen inputs processor
+  detokenizes the prompt, expands each image placeholder and tokenizes the whole text again, which merges tokens
+  across clef's piece boundaries and moves the spans. A prompt that arrives as tokens (`MultimodalTokens`) now keeps
+  them: each image placeholder is replaced by the run of pads the expansion gives it, and later passes keep the
+  sequence's tokens. Its spans then move by the images' expansion (they all come after the images).
+- Then: prompt token counts equal (299 / 314), same choice on all four questions, worst difference 9.2e-3; h2o's
+  image answers unchanged (6.8e-3).
+
+Implication: clef takes images. lfm2-d1-omni's images and audio need its own vision and audio encoders under the
+LFM2 encoder, the remaining media item.

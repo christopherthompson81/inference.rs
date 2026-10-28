@@ -664,6 +664,7 @@ fn joint_pieces(
     profile: &LabelDecision,
     state: &Value,
     questions: &[LabelQuestion],
+    images: &Value,
 ) -> Result<Vec<(String, Piece)>, EmbeddingError> {
     let input = json!({
         "state": state,
@@ -682,7 +683,7 @@ fn joint_pieces(
     });
     // the template is given sorted keys, and no marker of its own in the input
     let mut input = replace_text(&sort_keys(&input), CLEF_MARKER, CLEF_MARKER_ESCAPED);
-    input["images"] = json!([]);
+    input["images"] = images.clone();
     input["sep"] = json!(CLEF_SEP);
     input["mark_question"] = json!(CLEF_MARK_QUESTION);
     input["mark_option"] = json!(CLEF_MARK_OPTION);
@@ -694,7 +695,19 @@ fn joint_pieces(
     })?;
     let mut kinds = questions.iter().map(|q| q.kind);
     let mut pieces = Vec::new();
-    for piece in prompt.split(CLEF_SEP) {
+    let mut split = prompt.split(CLEF_SEP).peekable();
+    // the text before the images is tokenized with them, as llama.cpp's server does
+    if let Some(placeholder) = images.get(0).and_then(Value::as_str) {
+        let mut head = String::new();
+        while !head.contains(placeholder) {
+            head.push_str(split.next().ok_or_else(layout_error)?);
+        }
+        if head.contains(CLEF_MARKER) {
+            return Err(layout_error());
+        }
+        pieces.push((head, Piece::Text));
+    }
+    for piece in split {
         let (text, role) = if let Some(text) = piece.strip_prefix(CLEF_MARK_QUESTION) {
             let kind = kinds.next().ok_or_else(layout_error)?;
             (text, Piece::Question(kind))
@@ -849,13 +862,14 @@ fn layout_error() -> EmbeddingError {
 async fn decide_joint(
     state: &SharedInferenceRsState,
     profile: &LabelDecision,
-    request_state: &Value,
+    prompt: &Prompt<'_>,
     questions: &[LabelQuestion],
+    media: &Media,
     model: Option<&str>,
 ) -> Result<(Vec<Vec<f32>>, usize), EmbeddingError> {
     // the model was trained with the pieces tokenized one by one
     let mut layout = JointLayout::default();
-    for (text, role) in joint_pieces(profile, request_state, questions)? {
+    for (text, role) in joint_pieces(profile, prompt.state, questions, &prompt.images)? {
         let tokens = tokenize(state, model, text).await?;
         let span = layout.tokens.len()..layout.tokens.len() + tokens.len();
         if role != Piece::Text && span.is_empty() {
@@ -886,19 +900,44 @@ async fn decide_joint(
     if layout.questions.len() != questions.len() || layout.options.len() != n_options {
         return Err(layout_error());
     }
-    let n_tokens = layout.tokens.len();
-    let Response::Raw { logits_chunks, .. } = run(
-        state,
-        model,
-        RequestMessage::CompletionTokens(layout.tokens.clone()),
-        |request| {
-            request.return_raw_logits = true;
+    let message = match media.is_empty() {
+        true => RequestMessage::CompletionTokens(layout.tokens.clone()),
+        false => RequestMessage::MultimodalTokens {
+            tokens: layout.tokens.clone(),
+            images: media.images.clone(),
+            audios: media.audios.clone(),
         },
-    )
+    };
+    let Response::Raw {
+        logits_chunks,
+        tokens,
+    } = run(state, model, message, |request| {
+        request.return_raw_logits = true;
+    })
     .await?
     else {
         return Err(EmbeddingError::Internal(anyhow::anyhow!(POINTER_FAILED)));
     };
+    // the images sit before every span, so their expansion moves each span by the same count
+    let shift = tokens
+        .len()
+        .checked_sub(layout.tokens.len())
+        .ok_or_else(layout_error)?;
+    if shift > 0 {
+        let moved = |span: &std::ops::Range<usize>| span.start + shift..span.end + shift;
+        layout.questions = layout
+            .questions
+            .iter()
+            .map(|(kind, span)| (*kind, moved(span)))
+            .collect();
+        layout.options = layout
+            .options
+            .iter()
+            .map(|(q, span)| (*q, moved(span)))
+            .collect();
+        layout.tokens = tokens;
+    }
+    let n_tokens = layout.tokens.len();
     let hidden = Tensor::cat(&logits_chunks, 0).map_err(|e| EmbeddingError::Internal(e.into()))?;
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     let request = Request::JointDecision(JointDecisionRequest {
@@ -1327,7 +1366,7 @@ fn check_media(profile: &LabelDecision, media: &Media) -> Result<(), EmbeddingEr
     if !media.audios.is_empty() {
         return fail("this decision model does not take audio");
     }
-    if profile.family.joint() || profile.family.scores_markers() {
+    if profile.family.scores_markers() {
         return fail("images are not supported for this decision type yet");
     }
     if profile.image_placeholder.is_none() {
@@ -1413,6 +1452,12 @@ pub(crate) async fn decide(
         }
         return Ok((answers, input_tokens));
     }
+    let placeholder = profile.image_placeholder.clone().unwrap_or_default();
+    let shared = Prompt {
+        state: &input_state,
+        questions: &questions,
+        images: json!(vec![placeholder; media.images.len()]),
+    };
     if profile.family.joint() {
         let (scores, input_tokens) = match profile.family.joint_per_question() {
             // one prompt each, run together
@@ -1421,8 +1466,9 @@ pub(crate) async fn decide(
                     decide_joint(
                         state,
                         profile,
-                        &input_state,
+                        &shared,
                         std::slice::from_ref(question),
+                        &media,
                         model,
                     )
                 }))
@@ -1436,7 +1482,7 @@ pub(crate) async fn decide(
                 }
                 (scores, tokens)
             }
-            false => decide_joint(state, profile, &input_state, &questions, model).await?,
+            false => decide_joint(state, profile, &shared, &questions, &media, model).await?,
         };
         let answers = questions
             .iter()
@@ -1450,12 +1496,6 @@ pub(crate) async fn decide(
             .collect();
         return Ok((answers, input_tokens));
     }
-    let placeholder = profile.image_placeholder.clone().unwrap_or_default();
-    let shared = Prompt {
-        state: &input_state,
-        questions: &questions,
-        images: json!(vec![placeholder; media.images.len()]),
-    };
     let mut prompts = Vec::new();
     for (index, question) in questions.iter().enumerate() {
         for variant in 0..profile
@@ -1693,8 +1733,13 @@ mod tests {
             json!({"z": null, "a": null}),
         );
         let noul = question(&clef, DecisionQuestionType::Noul, Value::Null);
-        let pieces = joint_pieces(&clef, &json!({"y": "<<clef:sep>>", "b": 1}), &[q, noul])
-            .unwrap_or_else(|_| panic!("the prompt renders"));
+        let pieces = joint_pieces(
+            &clef,
+            &json!({"y": "<<clef:sep>>", "b": 1}),
+            &[q, noul],
+            &json!([]),
+        )
+        .unwrap_or_else(|_| panic!("the prompt renders"));
         let shown = pieces
             .iter()
             .map(|(text, role)| (text.as_str(), *role))
@@ -1843,6 +1888,25 @@ mod tests {
             images: json!(["<img>", "<img>"]),
         };
         assert_eq!(render(&d3, &prompt, &q, 0).unwrap(), "<img><img>|s");
+    }
+
+    // the text up to the images is one piece with them, tokenized together as llama.cpp's server does
+    #[test]
+    fn a_joint_prompt_keeps_its_images_with_the_text_before_them() {
+        let template = "S{{ sep }}{% for image in images %}{{ image }}{% endfor %}\
+            |{{ sep }}{{ state }}{% for q in questions %}{{ sep }}{{ mark_question }}{{ q.instructions }}\
+            {% for o in q.options %}{{ sep }}{{ mark_option }}{{ o.key }}{% endfor %}{% endfor %}";
+        let clef = profile(LabelFamily::Clef, template);
+        let q = question(
+            &clef,
+            DecisionQuestionType::Choice,
+            json!({"a": null, "b": null}),
+        );
+        let pieces = joint_pieces(&clef, &json!("s"), &[q], &json!(["<img>"]))
+            .unwrap_or_else(|_| panic!("the prompt renders"));
+        assert_eq!(pieces[0], ("S<img>|".to_string(), Piece::Text));
+        assert_eq!(pieces[1], ("s".to_string(), Piece::Text));
+        assert_eq!(pieces.len(), 5);
     }
 
     #[test]
