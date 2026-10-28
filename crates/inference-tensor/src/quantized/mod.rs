@@ -934,7 +934,7 @@ impl QTensor {
             let slice = cpu.as_slice::<f32>()?;
             let offset = lhs.layout().start_offset();
             let lhs_data = &slice[offset..offset + m * k];
-            let lhs_q = repack_x86::quantize_lhs(lhs_data, m, k);
+            let lhs_q = repack_x86::quantize_lhs(dtype, lhs_data, m, k);
             let packs: Vec<&repack_x86::PackedX86> = ts
                 .iter()
                 .enumerate()
@@ -1327,6 +1327,52 @@ mod parallel_quantize_tests {
 mod cpu_matmul_tests {
     use super::{GgmlDType, QMatMul, QTensor};
     use crate::{Device, Module, Tensor};
+
+    // Q8_0 weights pair with Q8_0 activations, a scale per 32 values, as ggml's vec_dot_q8_0_q8_0 does; an outlier
+    // every 64 values puts one scale per 256 far off, so the tiled kernels must give each 32 values their own
+    #[test]
+    fn q8_0_matmuls_take_a_scale_per_32_activations() -> crate::Result<()> {
+        use super::GgmlType;
+        use super::k_quants::{BlockQ8_0, QK8_0};
+        const K: usize = 1024;
+        const N: usize = 32;
+        const OUTLIER_EVERY: usize = 64;
+        const OUTLIER: f32 = 60.0;
+        let dev = Device::Cpu;
+        let w = Tensor::randn(0f32, 1., (N, K), &dev)?;
+        let qmm = QMatMul::from_qtensor(QTensor::quantize(&w, GgmlDType::Q8_0)?)?;
+        let rows = |x: &[f32]| {
+            let mut blocks = vec![BlockQ8_0::zeros(); x.len() / QK8_0];
+            BlockQ8_0::from_float(x, &mut blocks);
+            blocks
+        };
+        let w_rows = w.to_vec2::<f32>()?;
+        for m in [1, 4, 9] {
+            let mut x = Tensor::randn(0f32, 1., (m, K), &dev)?.to_vec2::<f32>()?;
+            for row in x.iter_mut() {
+                for v in row.iter_mut().step_by(OUTLIER_EVERY) {
+                    *v *= OUTLIER;
+                }
+            }
+            let actual = qmm
+                .forward(&Tensor::new(x.clone(), &dev)?)?
+                .to_vec2::<f32>()?;
+            for (r, row) in x.iter().enumerate() {
+                let a = rows(row);
+                for (c, w_row) in w_rows.iter().enumerate() {
+                    let expected = BlockQ8_0::vec_dot(K, &rows(w_row), &a);
+                    let got = actual[r][c];
+                    // the same integer products, summed in another order
+                    let tolerance = 1e-4 * expected.abs().max(1.0);
+                    assert!(
+                        (got - expected).abs() <= tolerance,
+                        "m={m} [{r}][{c}]: {got} against ggml's {expected}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 
     // the tiled CPU kernels (taken past one row, and for every row count of Q4_K) against a dequantized matmul
     #[test]
