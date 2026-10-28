@@ -35,6 +35,7 @@ mod hunyuan_v1_moe;
 mod lfm2;
 mod lfm2vl;
 mod modern_bert;
+mod modern_bert_decision;
 mod neo_bert;
 mod nomic_bert;
 mod paddleocr_vl;
@@ -56,6 +57,7 @@ pub use hunyuan_v1_moe::*;
 pub use lfm2::*;
 pub use lfm2vl::*;
 pub use modern_bert::*;
+pub use modern_bert_decision::*;
 pub use neo_bert::*;
 pub use nomic_bert::*;
 pub use paddleocr_vl::*;
@@ -79,6 +81,7 @@ inference_nn::boxed_loaders!(MultimodalModelLoader: Lfm2VlLoader, PaddleOcrVlLoa
 inference_nn::boxed_loaders!(
     EmbeddingModelLoader: BertLoader,
     ModernBertLoader,
+    ModernBertDecisionLoader,
     NeoBertLoader,
     NomicBertLoader,
 );

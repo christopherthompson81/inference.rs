@@ -78,6 +78,8 @@ pub struct EmbeddingExtras {
     /// The segment ids of a text pair; models without segment embeddings ignore them.
     pub token_type_ids: Option<Tensor>,
     pub tasks: Option<TaskRows>,
+    /// A decision model's question type and option markers per row.
+    pub decision: Option<crate::decision::DecisionRows>,
 }
 
 /// A linear layer's adapters, one per task, stacked: `a` is `[tasks, rank, in]`, `b` `[tasks, out, rank]`.

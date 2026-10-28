@@ -136,6 +136,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `EmbeddingLoaderType.MODERNBERT` | `'modernbert'` |
 | `EmbeddingLoaderType.NEOBERT` | `'neobert'` |
 | `EmbeddingLoaderType.LLAMAEMBEDDING` | `'llamaembedding'` |
+| `EmbeddingLoaderType.MODERNBERTDECISION` | `'modernbertdecision'` |
 
 
 ## `EngineSpec`

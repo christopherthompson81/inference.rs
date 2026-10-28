@@ -13,6 +13,7 @@ use crate::{
 };
 use anyhow::{Result, bail};
 use either::Either;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::{
@@ -1899,6 +1900,96 @@ pub struct RerankResponse {
     pub model: String,
     pub results: Vec<RerankResult>,
     pub usage: EmbeddingUsage,
+}
+
+/// The kind of a decision question, which sets the shape of its criteria and of its answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DecisionQuestionType {
+    /// One of several named options.
+    Choice,
+    /// A level on an ordered scale.
+    Score,
+    /// Whether a statement holds.
+    Noul,
+}
+
+/// One typed question about the request's state.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct DecisionRequestQuestion {
+    #[serde(rename = "type")]
+    pub kind: DecisionQuestionType,
+    /// The question: text, or any JSON value, which the model reads as JSON text.
+    #[schema(value_type = Object, example = "Which team should handle this?")]
+    pub instructions: Value,
+    /// `choice`: option to its description (or null); `score`: 2 to 10 level descriptions, lowest first; `noul`:
+    /// optional descriptions of `true` and `false`.
+    #[serde(default)]
+    #[schema(value_type = Option<Object>, example = json!({"billing": null, "shipping": null}))]
+    pub criteria: Option<Value>,
+}
+
+/// Decision request: typed questions about a state, each answered by a decision model in one pass. It takes the shape
+/// of TypeSafe's System One API, which `/v1/systemone` also serves.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct DecisionRequest {
+    /// Model ID; "default" targets the only loaded model.
+    #[schema(example = "default")]
+    #[serde(default = "default_model")]
+    pub model: String,
+    /// The content to evaluate: text, or any JSON value, which the model reads as JSON text.
+    #[schema(value_type = Object, example = "Customer message: I was charged twice for my order.")]
+    pub state: Value,
+    /// Question id to question; each is answered on its own.
+    #[schema(value_type = Object)]
+    pub questions: IndexMap<String, DecisionRequestQuestion>,
+}
+
+/// A question's answer, shaped by its type.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum DecisionAnswer {
+    Choice {
+        /// The most probable option.
+        choice: String,
+        /// Each option's probability; they sum to 1.
+        #[schema(value_type = Object)]
+        probabilities: IndexMap<String, f64>,
+        /// From 0 (all options equally likely) to 1: one minus the normalized entropy.
+        confidence: f64,
+    },
+    Score {
+        /// The expected level index, weighted by probability; it can fall between two levels.
+        score: f64,
+        /// Each level index's description.
+        #[schema(value_type = Object)]
+        legend: IndexMap<String, String>,
+        /// Each level index's probability; they sum to 1.
+        #[schema(value_type = Object)]
+        probabilities: IndexMap<String, f64>,
+        confidence: f64,
+    },
+    Noul {
+        /// The probability that the statement holds.
+        noul: f64,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DecisionUsage {
+    /// The prompt tokens of every question.
+    pub input_tokens: u32,
+    /// Always 0: a decision generates no tokens.
+    pub output_tokens: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DecisionResponse {
+    pub model: String,
+    /// Question id to its answer, in the request's order.
+    #[schema(value_type = Object)]
+    pub answers: IndexMap<String, DecisionAnswer>,
+    pub usage: DecisionUsage,
 }
 
 /// Image generation request

@@ -343,6 +343,10 @@ pub trait EmbeddingModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModel
     fn pools_last_token(&self, _config: &str) -> Result<bool> {
         Ok(false)
     }
+    /// A decision model's budgets and calibration; `None` for an embedder or a reranker.
+    fn decision_spec(&self, _config: &str) -> Result<Option<crate::decision::DecisionSpec>> {
+        Ok(None)
+    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>>;
     fn get_device_for_tensor(
         &self,

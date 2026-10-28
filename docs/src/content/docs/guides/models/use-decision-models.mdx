@@ -1,0 +1,60 @@
+---
+title: Use decision models
+description: Answer typed questions about text (choose an option, score on a scale, decide whether a statement holds) in one forward pass, with calibrated probabilities.
+---
+
+A decision model reads a **state** (a message, a ticket, a document, any JSON) and answers **typed questions** about it, one forward pass per question and no generated text. Each answer comes with probabilities over its options, so routing, triage, moderation and scoring code can act on them directly, without parsing model output.
+
+## Loading a decision model
+
+These checkpoints load by their file layout (an `encoder/` folder, a `tokenizer/` folder and the model's own config beside the weights), so they need no `--arch`:
+
+- `convaiinnovations/laya`: ModernBERT-large with a two-block decision head, 512-token inputs, temperatures fitted per question type and option count.
+- `SupersonicLabs/Julia-1`: mmBERT-small (multilingual) with the same head, inputs up to 8192 tokens, uncalibrated.
+
+```bash
+inference serve -m convaiinnovations/laya
+```
+
+laya's `multilingual/` and `typed-decisions/` variants load from a local copy of their folder.
+
+## Asking questions
+
+`POST /v1/decisions` takes a `state` and `questions`, a map of question ids to questions. The request and answer follow TypeSafe's System One API, which `/v1/systemone` also serves, so a client of that API (or of llama.cpp's server, or laya's own) only changes its base URL.
+
+```bash
+curl http://localhost:1234/v1/decisions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "state": "Customer message: I was charged twice for my order last week and nobody has replied.",
+    "questions": {
+      "route": {"type": "choice", "instructions": "Which team should handle this?",
+                "criteria": {"billing": null, "shipping": null, "technical": null}},
+      "angry": {"type": "noul", "instructions": "Is the customer angry?"},
+      "urgency": {"type": "score", "instructions": "How urgent is this?",
+                  "criteria": ["can wait", "this week", "today", "right now"]}
+    }
+  }'
+```
+
+Each question has a `type`, its `instructions` (text, or any JSON value), and `criteria` whose shape the type sets:
+
+- `choice`: an object mapping each option (2 to 255) to its description, or `null`. An array of option names works too.
+- `score`: an array of 2 to 10 level descriptions, lowest level first.
+- `noul`: optional; an object with descriptions of `true` and `false`.
+
+A `state` that is not a string reaches the model as JSON text. Questions are answered independently, and a request's questions batch together.
+
+## Answers
+
+`answers` maps each question id to its answer, in the request's order:
+
+- `choice`: `choice` (the most probable option), `probabilities` (one per option, summing to 1) and `confidence` (from 0, every option equally likely, to 1: one minus the normalized entropy).
+- `score`: `score` (the expected level index, which can fall between two levels), `legend` (each level's description), `probabilities` and `confidence`.
+- `noul`: `noul`, the probability that the statement holds.
+
+`usage.input_tokens` counts every question's prompt tokens; `output_tokens` is always 0.
+
+The probabilities are scaled by the temperatures the checkpoint ships (laya fits them per question type and option count); they are not guaranteed to be calibrated for your data. Long questions and options are cut to the model's budget for them (192 tokens for laya, 256 for Julia-1), and a long state to what the rest of the input leaves; a question whose options cannot all fit is refused.
+
+The Rust SDK has `model.decide(request)`, the Python SDK `engine.decide(...)`, the C# binding `Decide(...)`, and the C ABI `inference_decide`.

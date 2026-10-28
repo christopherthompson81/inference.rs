@@ -405,6 +405,11 @@ impl SupportedArch for EmbeddingLoaderType {
                 modalities: &[Embedding],
                 examples: &[ex!("nvidia/llama-embed-nemotron-8b")],
             },
+            Self::ModernBertDecision => ArchMetadata {
+                families: &["Laya", "Julia-1"],
+                modalities: &[Embedding],
+                examples: &[ex!("convaiinnovations/laya")],
+            },
         }
     }
 }

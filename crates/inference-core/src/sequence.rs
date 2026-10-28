@@ -44,6 +44,15 @@ pub struct EmbeddingParams {
     pub token_types: Option<Vec<u32>>,
     /// The index of the task adapter the request named.
     pub task: Option<usize>,
+    /// A decision question's type embedding row and where each option's marker sits.
+    pub decision: Option<DecisionInput>,
+}
+
+/// A decision question as the model reads it beside its tokens.
+#[derive(Clone, Debug)]
+pub struct DecisionInput {
+    pub kind: u32,
+    pub markers: Vec<u32>,
 }
 
 /// What a one-shot generation request asked for beyond its prompt; media live in `MultimodalData`.
@@ -1706,6 +1715,13 @@ impl Sequence {
     pub fn token_type_ids(&self) -> Option<&[u32]> {
         match &self.one_shot {
             Some(OneShotParams::Embedding(params)) => params.token_types.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn decision_input(&self) -> Option<&DecisionInput> {
+        match &self.one_shot {
+            Some(OneShotParams::Embedding(params)) => params.decision.as_ref(),
             _ => None,
         }
     }

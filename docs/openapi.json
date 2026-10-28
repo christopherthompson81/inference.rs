@@ -767,6 +767,36 @@
         }
       }
     },
+    "/v1/decisions": {
+      "post": {
+        "tags": [
+          "inference.rs"
+        ],
+        "operationId": "decisions",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Each question's answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecisionResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/embeddings": {
       "post": {
         "tags": [
@@ -5342,6 +5372,193 @@
           }
         }
       },
+      "DecisionAnswer": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "choice",
+              "probabilities",
+              "confidence",
+              "type"
+            ],
+            "properties": {
+              "choice": {
+                "type": "string",
+                "description": "The most probable option."
+              },
+              "confidence": {
+                "type": "number",
+                "format": "double",
+                "description": "From 0 (all options equally likely) to 1: one minus the normalized entropy."
+              },
+              "probabilities": {
+                "type": "object",
+                "description": "Each option's probability; they sum to 1."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "choice"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "score",
+              "legend",
+              "probabilities",
+              "confidence",
+              "type"
+            ],
+            "properties": {
+              "confidence": {
+                "type": "number",
+                "format": "double"
+              },
+              "legend": {
+                "type": "object",
+                "description": "Each level index's description."
+              },
+              "probabilities": {
+                "type": "object",
+                "description": "Each level index's probability; they sum to 1."
+              },
+              "score": {
+                "type": "number",
+                "format": "double",
+                "description": "The expected level index, weighted by probability; it can fall between two levels."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "score"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "noul",
+              "type"
+            ],
+            "properties": {
+              "noul": {
+                "type": "number",
+                "format": "double",
+                "description": "The probability that the statement holds."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "noul"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "A question's answer, shaped by its type."
+      },
+      "DecisionQuestionType": {
+        "type": "string",
+        "description": "The kind of a decision question, which sets the shape of its criteria and of its answer.",
+        "enum": [
+          "choice",
+          "score",
+          "noul"
+        ]
+      },
+      "DecisionRequest": {
+        "type": "object",
+        "description": "Decision request: typed questions about a state, each answered by a decision model in one pass. It takes the shape\nof TypeSafe's System One API, which `/v1/systemone` also serves.",
+        "required": [
+          "state",
+          "questions"
+        ],
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "Model ID; \"default\" targets the only loaded model.",
+            "example": "default"
+          },
+          "questions": {
+            "type": "object",
+            "description": "Question id to question; each is answered on its own."
+          },
+          "state": {
+            "type": "object",
+            "description": "The content to evaluate: text, or any JSON value, which the model reads as JSON text."
+          }
+        }
+      },
+      "DecisionRequestQuestion": {
+        "type": "object",
+        "description": "One typed question about the request's state.",
+        "required": [
+          "type",
+          "instructions"
+        ],
+        "properties": {
+          "criteria": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "`choice`: option to its description (or null); `score`: 2 to 10 level descriptions, lowest first; `noul`:\noptional descriptions of `true` and `false`."
+          },
+          "instructions": {
+            "type": "object",
+            "description": "The question: text, or any JSON value, which the model reads as JSON text."
+          },
+          "type": {
+            "$ref": "#/components/schemas/DecisionQuestionType"
+          }
+        }
+      },
+      "DecisionResponse": {
+        "type": "object",
+        "required": [
+          "model",
+          "answers",
+          "usage"
+        ],
+        "properties": {
+          "answers": {
+            "type": "object",
+            "description": "Question id to its answer, in the request's order."
+          },
+          "model": {
+            "type": "string"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/DecisionUsage"
+          }
+        }
+      },
+      "DecisionUsage": {
+        "type": "object",
+        "required": [
+          "input_tokens",
+          "output_tokens"
+        ],
+        "properties": {
+          "input_tokens": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The prompt tokens of every question.",
+            "minimum": 0
+          },
+          "output_tokens": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Always 0: a decision generates no tokens.",
+            "minimum": 0
+          }
+        }
+      },
       "DefaultModel": {
         "type": "object",
         "description": "The model a request without `model`, or naming `default`, goes to.",
@@ -5575,7 +5792,8 @@
           "nomicbert",
           "modernbert",
           "neobert",
-          "llamaembedding"
+          "llamaembedding",
+          "modernbertdecision"
         ]
       },
       "EmbeddingRequest": {

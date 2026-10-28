@@ -44,7 +44,7 @@ mod generated {
         auth::{__path_sign_in, __path_sign_out, SignInRequest},
         chat_completion::__path_chatcompletions,
         completions::__path_completions,
-        embeddings::{__path_embeddings, __path_rerank},
+        embeddings::{__path_decisions, __path_embeddings, __path_rerank},
         files::{
             __path_delete_file, __path_get_container_file, __path_get_container_file_content,
             __path_get_file, __path_get_file_content, __path_list_container_files,
@@ -76,12 +76,14 @@ mod generated {
         },
         openai::{
             AdapterGenerationSelection, AdapterSelection, AudioResponseFormat,
-            ChatCompletionRequest, CompletionRequest, DiarizationRequest, DiarizationResponse,
-            DiarizationResponseFormat, DiarizationSegment, EmbeddingData, EmbeddingEncodingFormat,
-            EmbeddingInput, EmbeddingRequest, EmbeddingResponse, EmbeddingUsage, EmbeddingVector,
-            FunctionCalled, Grammar, ImageEditRequest, ImageGenerationRequest, ImageReference,
-            JsonSchemaResponseFormat, Message, MessageContent, MessageInnerContent, ModelObject,
-            ModelObjects, OpenAiCodeInterpreterAutoContainer, OpenAiCodeInterpreterContainer,
+            ChatCompletionRequest, CompletionRequest, DecisionAnswer, DecisionQuestionType,
+            DecisionRequest, DecisionRequestQuestion, DecisionResponse, DecisionUsage,
+            DiarizationRequest, DiarizationResponse, DiarizationResponseFormat, DiarizationSegment,
+            EmbeddingData, EmbeddingEncodingFormat, EmbeddingInput, EmbeddingRequest,
+            EmbeddingResponse, EmbeddingUsage, EmbeddingVector, FunctionCalled, Grammar,
+            ImageEditRequest, ImageGenerationRequest, ImageReference, JsonSchemaResponseFormat,
+            Message, MessageContent, MessageInnerContent, ModelObject, ModelObjects,
+            OpenAiCodeInterpreterAutoContainer, OpenAiCodeInterpreterContainer,
             OpenAiCodeInterpreterContainerType, OpenAiCodeInterpreterTool,
             OpenAiCodeInterpreterToolType, OpenAiFunctionToolType, OpenAiResponsesFunctionTool,
             OpenAiShellEnvironment, OpenAiShellSkill, OpenAiShellTool, OpenAiShellToolType,
@@ -122,7 +124,7 @@ mod generated {
     pub(super) fn doc() -> utoipa::openapi::OpenApi {
         #[derive(OpenApi)]
         #[openapi(
-            paths(models, model_cache_stats, model_speculative_stats, health, chatcompletions, anthropic_messages, anthropic_count_tokens, completions, embeddings, rerank, re_isq, calibration_start, calibration_status, calibration_apply, image_generation, image_edit, speech_generation, transcription, voice_activity, diarization, create_response, get_response, delete_response, cancel_response, upload_skill, list_skills, upload_skill_version, list_skill_versions, load_lora_adapter, unload_lora_adapter, list_lora_adapters, unload_model, reload_model, get_model_status, add_model, remove_model, set_default_model, add_model_alias, tune_model, system_info, system_doctor, get_session, put_session, delete_session, list_files, upload_file, get_file, get_file_content, delete_file, list_container_files, get_container_file, get_container_file_content, resolve_agent_approval, sign_in, sign_out, metrics, inventory, managed_models, load, unload, download, delete, saved, save, forget, detect_layout, submit_job, list_jobs, get_job, delete_job, cancel_job, job_events, job_file),
+            paths(models, model_cache_stats, model_speculative_stats, health, chatcompletions, anthropic_messages, anthropic_count_tokens, completions, embeddings, rerank, decisions, re_isq, calibration_start, calibration_status, calibration_apply, image_generation, image_edit, speech_generation, transcription, voice_activity, diarization, create_response, get_response, delete_response, cancel_response, upload_skill, list_skills, upload_skill_version, list_skill_versions, load_lora_adapter, unload_lora_adapter, list_lora_adapters, unload_model, reload_model, get_model_status, add_model, remove_model, set_default_model, add_model_alias, tune_model, system_info, system_doctor, get_session, put_session, delete_session, list_files, upload_file, get_file, get_file_content, delete_file, list_container_files, get_container_file, get_container_file_content, resolve_agent_approval, sign_in, sign_out, metrics, inventory, managed_models, load, unload, download, delete, saved, save, forget, detect_layout, submit_job, list_jobs, get_job, delete_job, cancel_job, job_events, job_file),
             components(schemas(
                 // Not a route's body: the engine spec the C ABI and bindings load from, typed from this document.
                 inference_api::EngineSpec,
@@ -201,6 +203,12 @@ mod generated {
                 RerankRequest,
                 RerankResponse,
                 RerankResult,
+                DecisionQuestionType,
+                DecisionAnswer,
+                DecisionRequestQuestion,
+                DecisionRequest,
+                DecisionResponse,
+                DecisionUsage,
                 ContainerFileMetadata,
                 FileMetadata,
                 FileCitation,

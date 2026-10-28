@@ -11,6 +11,7 @@ pub mod dispatch;
 pub mod engine;
 pub mod engine_chat;
 pub mod engine_completion;
+mod engine_decision;
 pub mod engine_embeddings;
 pub mod engine_logits;
 mod engine_rerank;

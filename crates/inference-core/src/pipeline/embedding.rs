@@ -68,6 +68,7 @@ pub struct EmbeddingPipeline {
     embedding_tasks: Option<Arc<inference_nn::embedding::EmbeddingTasks>>,
     // the task adapters a model ships beside its weights, applied per row
     task_lora: Option<Arc<crate::DynamicLoraRuntime>>,
+    decision_spec: Option<Arc<inference_nn::decision::DecisionSpec>>,
 }
 
 /// A loader for an embedding (non-quantized) model.
@@ -429,6 +430,7 @@ impl EmbeddingLoader {
         }
 
         let has_causal_attention = self.inner.has_causal_attention(&config)?;
+        let decision_spec = self.inner.decision_spec(&config)?.map(Arc::new);
         let model_max_seq_len = self.inner.model_config(&config)?.max_seq_len();
         let max_seq_len = sentence_max_seq_length(paths.get_config_filename())
             .map_or(model_max_seq_len, |len| len.min(model_max_seq_len));
@@ -442,6 +444,7 @@ impl EmbeddingLoader {
                 dummy_cache: EitherCache::Full(crate::pipeline::Cache::new(0)),
                 embedding_tasks,
                 task_lora,
+                decision_spec,
                 model,
                 tracked_modules,
                 source_weight_files,
@@ -681,6 +684,9 @@ impl Pipeline for EmbeddingPipeline {
     }
     fn embedding_tasks(&self) -> Option<Arc<inference_nn::embedding::EmbeddingTasks>> {
         self.embedding_tasks.clone()
+    }
+    fn decision_spec(&self) -> Option<Arc<inference_nn::decision::DecisionSpec>> {
+        self.decision_spec.clone()
     }
 }
 

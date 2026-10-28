@@ -1,13 +1,13 @@
-//! OpenAI-compatible embeddings endpoint, and reranking with a cross-encoder.
+//! OpenAI-compatible embeddings endpoint, reranking with a cross-encoder, and answers from a decision model.
 
 use axum::response::Response;
 
 use crate::handler_core::{ApiJson, ApiJsonRejection};
 #[cfg(test)]
-use crate::openai::{EmbeddingResponse, RerankResponse};
+use crate::openai::{DecisionResponse, EmbeddingResponse, RerankResponse};
 use crate::{
     handler_core::{json_response, openai_error_response},
-    openai::{EmbeddingRequest, RerankRequest},
+    openai::{DecisionRequest, EmbeddingRequest, RerankRequest},
     types::OwnedEngine,
 };
 
@@ -41,6 +41,23 @@ pub async fn rerank(
 ) -> Response {
     match payload {
         Ok(ApiJson(request)) => json_response(engine.rerank(request).await),
+        Err(ApiJsonRejection(error)) => openai_error_response(error),
+    }
+}
+
+#[cfg_attr(test, utoipa::path(
+    post,
+    tag = "inference.rs",
+    path = "/v1/decisions",
+    request_body = DecisionRequest,
+    responses((status = 200, description = "Each question's answer", body = DecisionResponse))
+))]
+pub async fn decisions(
+    OwnedEngine(engine): OwnedEngine,
+    payload: Result<ApiJson<DecisionRequest>, ApiJsonRejection>,
+) -> Response {
+    match payload {
+        Ok(ApiJson(request)) => json_response(engine.decide(request).await),
         Err(ApiJsonRejection(error)) => openai_error_response(error),
     }
 }

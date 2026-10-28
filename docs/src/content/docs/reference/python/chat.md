@@ -1,6 +1,6 @@
 ---
 title: Chat and completions
-description: "Chat completion, completion, embedding and rerank requests and responses, tools and output formats."
+description: "Chat completion, completion, embedding, rerank and decision requests and responses, tools and output formats."
 sidebar:
   order: 4
 ---
@@ -337,6 +337,92 @@ Legacy OpenAI compatible text completion request
 | `total_prompt_time_sec` | `float` | required |
 | `total_time_sec` | `float` | required |
 | `total_tokens` | `int` | required |
+
+
+## `DecisionAnswer`
+
+One of: `Union[DecisionAnswerChoice, DecisionAnswerScore, DecisionAnswerNoul]`.
+
+
+## `DecisionAnswerChoice`
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `choice` | `str` | required |
+| `confidence` | `float` | required |
+| `probabilities` | `dict[str, Any]` | required |
+| `type` | `Literal['choice']` | `'choice'` |
+
+
+## `DecisionAnswerNoul`
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `noul` | `float` | required |
+| `type` | `Literal['noul']` | `'noul'` |
+
+
+## `DecisionAnswerScore`
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `confidence` | `float` | required |
+| `legend` | `dict[str, Any]` | required |
+| `probabilities` | `dict[str, Any]` | required |
+| `score` | `float` | required |
+| `type` | `Literal['score']` | `'score'` |
+
+
+## `DecisionQuestionType`
+
+The kind of a decision question, which sets the shape of its criteria and of its answer.
+
+Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
+
+| Member | Wire/config name |
+| --- | --- |
+| `DecisionQuestionType.CHOICE` | `'choice'` |
+| `DecisionQuestionType.SCORE` | `'score'` |
+| `DecisionQuestionType.NOUL` | `'noul'` |
+
+
+## `DecisionRequest`
+
+Decision request: typed questions about a state, each answered by a decision model in one pass. It takes the shape of TypeSafe's System One API, which `/v1/systemone` also serves.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `model` | `str \| None` | optional |
+| `questions` | `dict[str, Any]` | required |
+| `state` | `dict[str, Any]` | required |
+
+
+## `DecisionRequestQuestion`
+
+One typed question about the request's state.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `criteria` | `dict[str, Any] \| None` | optional |
+| `instructions` | `dict[str, Any]` | required |
+| `type` | `DecisionQuestionType` | required |
+
+
+## `DecisionResponse`
+
+| Field | Type |
+| --- | --- |
+| `answers` | `dict[str, Any]` |
+| `model` | `str` |
+| `usage` | `DecisionUsage` |
+
+
+## `DecisionUsage`
+
+| Field | Type |
+| --- | --- |
+| `input_tokens` | `int` |
+| `output_tokens` | `int` |
 
 
 ## `EmbeddingData`

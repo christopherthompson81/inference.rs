@@ -458,6 +458,12 @@ impl AutoLoader {
 }
 
 fn detect(model_id: &str, artifacts: &ConfigArtifacts) -> Result<Detected> {
+    if super::loaders::decision_config(&artifacts.repo_files).is_some() {
+        info!("Detected a decision checkpoint; using embedding loader `modernbertdecision`.");
+        return Ok(Detected::Embedding(Some(
+            EmbeddingLoaderType::ModernBertDecision,
+        )));
+    }
     if let Some(tp) = DiffusionLoaderType::auto_detect_from_files(&artifacts.repo_files) {
         return Ok(Detected::Diffusion(tp));
     }

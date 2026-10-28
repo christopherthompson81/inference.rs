@@ -333,13 +333,9 @@ impl IsqModel for Model {
     }
 }
 
-impl EmbeddingModel for Model {
-    fn forward(
-        &self,
-        input_ids: &Tensor,
-        _extras: &crate::embedding::EmbeddingExtras,
-        _flash_params: &FlashParams,
-    ) -> Result<Tensor> {
+impl Model {
+    /// The encoder's last hidden states, after its final norm.
+    pub fn hidden_states(&self, input_ids: &Tensor) -> Result<Tensor> {
         let mut xs = self
             .emb_norm
             .forward(&self.tok_embeddings.forward(input_ids)?)?;
@@ -362,7 +358,18 @@ impl EmbeddingModel for Model {
             };
             xs = layer.forward(&xs, &mask)?;
         }
-        let xs = self.final_norm.forward(&xs.to_device(&self.device)?)?;
+        self.final_norm.forward(&xs.to_device(&self.device)?)
+    }
+}
+
+impl EmbeddingModel for Model {
+    fn forward(
+        &self,
+        input_ids: &Tensor,
+        _extras: &crate::embedding::EmbeddingExtras,
+        _flash_params: &FlashParams,
+    ) -> Result<Tensor> {
+        let xs = self.hidden_states(input_ids)?;
         match &self.head {
             Some(head) => head.forward(&xs),
             None => Ok(xs),

@@ -3,8 +3,8 @@
 
 use inference_nn::serde_default_fn;
 use inference_nn::{
-    amoe, attention, cuda, decoder, device_map, embedding, gdn, kv_cache, layers, media_inputs,
-    metal, mla, model, moe, ops, paged_attention, speculative, utils,
+    amoe, attention, cuda, decision, decoder, device_map, embedding, gdn, kv_cache, layers,
+    media_inputs, metal, mla, model, moe, ops, paged_attention, speculative, utils,
 };
 
 pub mod bert;
@@ -31,6 +31,7 @@ pub mod lfm2;
 pub mod lfm2_vl;
 pub mod loaders;
 pub mod modern_bert;
+pub mod modern_bert_decision;
 pub mod neo_bert;
 pub mod nomic_bert;
 pub mod paddleocr_vl;

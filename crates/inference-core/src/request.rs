@@ -123,6 +123,11 @@ pub enum RequestMessage {
         first: String,
         second: String,
     },
+    /// One typed question about a state, for a decision model, which scores each of its options.
+    Decision {
+        state: String,
+        question: inference_nn::decision::DecisionQuestion,
+    },
 }
 
 fn default_responder<T>() -> Sender<T> {

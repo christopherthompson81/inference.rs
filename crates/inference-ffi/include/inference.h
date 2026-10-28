@@ -343,6 +343,10 @@ INFERENCE_API inference_status inference_embeddings(const inference_engine *engi
  * results JSON, most relevant first. */
 INFERENCE_API inference_status inference_rerank(const inference_engine *engine, const char *request,
                                                size_t request_len, inference_string **out_response);
+/* Answers typed questions about a state with a decision model (the POST /v1/decisions body); out_response receives
+ * each question's answer JSON. */
+INFERENCE_API inference_status inference_decide(const inference_engine *engine, const char *request,
+                                               size_t request_len, inference_string **out_response);
 
 /* Runs an Anthropic Messages request (the POST /v1/messages body) to its end; out_response receives the message JSON.
  * Failures leave the Anthropic error JSON ({"type": "error", "error": {"type", "message"}}) in inference_last_error().

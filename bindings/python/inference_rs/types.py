@@ -49,6 +49,14 @@ class CodeExecutionPermission(str, Enum):
     DENY = "deny"
 
 
+class DecisionQuestionType(str, Enum):
+    """The kind of a decision question, which sets the shape of its criteria and of its answer."""
+
+    CHOICE = "choice"
+    SCORE = "score"
+    NOUL = "noul"
+
+
 class DiarizationResponseFormat(str, Enum):
     """What a diarization answers with."""
 
@@ -80,6 +88,7 @@ class EmbeddingLoaderType(str, Enum):
     MODERNBERT = "modernbert"
     NEOBERT = "neobert"
     LLAMAEMBEDDING = "llamaembedding"
+    MODERNBERTDECISION = "modernbertdecision"
 
 
 class ImageGenerationResponseFormat(str, Enum):
@@ -1001,6 +1010,60 @@ class ContainerFileMetadata:
     mime_type: str
     object: str
     source: SourceMeta
+
+
+@dataclass(kw_only=True)
+class DecisionAnswerChoice:
+    choice: str
+    confidence: float
+    probabilities: dict[str, Any]
+    type: Literal["choice"] = "choice"
+
+
+@dataclass(kw_only=True)
+class DecisionAnswerScore:
+    confidence: float
+    legend: dict[str, Any]
+    probabilities: dict[str, Any]
+    score: float
+    type: Literal["score"] = "score"
+
+
+@dataclass(kw_only=True)
+class DecisionAnswerNoul:
+    noul: float
+    type: Literal["noul"] = "noul"
+
+
+@dataclass(kw_only=True)
+class DecisionRequest:
+    """Decision request: typed questions about a state, each answered by a decision model in one pass. It takes the shape of TypeSafe's System One API, which `/v1/systemone` also serves."""
+
+    model: str | None = None
+    questions: dict[str, Any]
+    state: dict[str, Any]
+
+
+@dataclass(kw_only=True)
+class DecisionRequestQuestion:
+    """One typed question about the request's state."""
+
+    criteria: dict[str, Any] | None = None
+    instructions: dict[str, Any]
+    type: DecisionQuestionType
+
+
+@dataclass(kw_only=True)
+class DecisionResponse:
+    answers: dict[str, Any]
+    model: str
+    usage: DecisionUsage
+
+
+@dataclass(kw_only=True)
+class DecisionUsage:
+    input_tokens: int
+    output_tokens: int
 
 
 @dataclass(kw_only=True)
@@ -3389,6 +3452,7 @@ AnthropicMessageContent = Union[str, list[AnthropicContentBlock]]
 AnthropicSystem = Union[str, list[AnthropicContentBlock]]
 AnyMoeExpertType = Union[Literal["fine_tuned"], AnyMoeExpertTypeLoraAdapter]
 CompletionPrompt = Union[str, list[int]]
+DecisionAnswer = Union[DecisionAnswerChoice, DecisionAnswerScore, DecisionAnswerNoul]
 EmbeddingInput = Union[str, list[str], list[int], list[list[int]]]
 EmbeddingVector = Union[list[float], str]
 Grammar = Union[GrammarRegex, GrammarJsonSchema, GrammarLlguidance, GrammarLark]

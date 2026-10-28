@@ -146,6 +146,15 @@ public sealed unsafe class InferenceEngine : IDisposable
         return Text(status, response, nameof(NativeMethods.inference_rerank));
     }
 
+    /// <summary>Answers typed questions (choice, score, noul) about a state with a decision model.</summary>
+    public string Decide(string requestJson)
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_decide(engine.Handle, request.Pointer, request.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_decide));
+    }
+
     /// <summary>An Anthropic Messages request; failures carry the Anthropic error envelope.</summary>
     public string AnthropicMessages(string requestJson)
     {
