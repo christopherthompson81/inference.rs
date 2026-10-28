@@ -511,3 +511,68 @@ embedder or reranker.
 
 Implication: classifiers done. Next on #586: the `jina-bert-v3`, `eurobert` and `llama-embed` GGUF architectures;
 the decision model needs its own scope.
+
+## Run 20 - 2026-10-27 17:20
+
+Question: do the decoder-layout embedding GGUFs llama.cpp writes (`eurobert`, `llama-embed`, and `qwen3` with a
+`pooling_type`) embed as their sources, through the decoder GGUF translation we already have?
+
+Command: llama.cpp 970b51ce7 `convert_hf_to_gguf.py --outtype f32` on `jina-embeddings-v5-text-nano-retrieval`
+(`eurobert`; its `clf_pooling: late` makes the converter raise, so a copy with `classifier_pooling: mean`),
+`jina-embeddings-v5-text-small-retrieval` (`qwen3`) and `nvidia/llama-nemotron-embed-1b-v2` (`llama-embed`; a copy
+with `model_type: llama` and no `auto_map`, else the converter stops at a remote-code prompt); Jina's published Q8_0
+GGUFs and a community Q8_0 of the Nemotron. `inference serve --cpu --dtype f32 --format gguf` against Run 16's
+saved Jina references (`jina5_cmp.py --merged`) and `ref_remote.py` (transformers with the repo's remote code).
+
+```
+v5 nano  f32 (converted)  worst cos 0.999993    Q8_0 (Jina's)       0.999255
+v5 small f32 (converted)  worst cos 0.999995    Q8_0 (Jina's)       0.999219
+nemotron-embed-1b safetensors 1.000000   f32 GGUF 1.000000   Q8_0 (community) 0.998844
+```
+
+Finding: matches at F32 (the v5 residual is the merged repos' own bf16 merge, as in Run 17). The GGUF is filed under
+its decoder architecture (`eurobert` / `llama-embed` keys become `llama.*`; their tensors already have Llama's
+names), translated by the decoder path, and loaded by the bidirectional Llama or Qwen3 embedder (which now takes the
+translation's `model.` prefix). llama.cpp converts EuroBERT without Llama's Q/K permute, so it stays half-split; the
+`llama-embed` rows are adjacent pairs, which the embedding loaders now read from the RoPE layout stamp. `llama-embed`
+GGUFs carry no `pooling_type` (llama.cpp falls back to no pooling and asks for `--pooling`); Nemotron embedders
+mean-pool, so that is the default. `jina-v5-nano` is llama.cpp's Llama 3 pre-tokenizer. A GGUF repository's own
+`config.json` (Jina's ships the safetensors one) is ignored for these. The Q8_0 gaps are the CPU Q8_0 path (#655).
+
+Implication: commit with tiny GGUFs for the three; then `jina-bert-v3` with its per-task LoRA GGUFs.
+
+## Run 21 - 2026-10-27 17:51
+
+Question: does a `jina-bert-v3` GGUF run its tasks from the `lora-<task>-*.gguf` adapters llama.cpp's converter
+writes beside it, as Jina's own code does?
+
+Command: llama.cpp 970b51ce7 `convert_hf_to_gguf.py --outtype f32` on `jinaai/jina-embeddings-v3` (a base and five
+adapter GGUFs); `second-state/jina-embeddings-v3-GGUF` from the Hub (f16 and Q8_0 bases, f16 adapters); each served
+with `--format gguf` against `jina3_ref.py` (Jina's remote code per task), and the older f16 file against
+`llama-embedding` too.
+
+```
+converted f32, 5 adapters:        worst cos 1.000000 (no task and every task)
+second-state Q8_0, first try:     shape mismatch: token_types.weight is [1024], not [1, 1024]
+second-state f16 (1-D fixed):     no task, short text 0.989309; other cases 0.9988-0.99999
+  same file, HF's tokenizer:      worst cos 1.000000
+  llama.cpp on the file vs HF:    worst cos 0.999988
+second-state f16 (tokenizer fix): worst cos 0.99999994    Q8_0: 0.999585
+```
+
+Finding: the adapter files share tensor names, so each is merged into the base archive under `task<i>.` (tensors and
+metadata), and Jina v3's stacked `[tasks, ...]` adapters bind as a stack of the per-task tensors. llama.cpp writes
+the word table's `lora_b` transposed and the segment table's two halves swapped, which the bindings undo (checked
+tensor by tensor against the safetensors slices). Task names, prompt prefixes and alpha come from each file's
+`adapter.lora.*` metadata; a Hub repository's adapters are listed and fetched with the base. Two things older
+conversions do differently: a one-row segment table written as a bare `[hidden]` vector (now read as one row), and
+`add_space_prefix: false` on XLM-R. llama.cpp's UGM normalizer prefixes the first word whenever
+`remove_extra_whitespaces` is set, whatever `add_space_prefix` says, so the tokenizer conversion now does too.
+
+Along the way: `QTensor::quantize` handed the quantizers a tensor's whole storage, so a view (an indexed or narrowed
+slice) failed a debug assertion and, at a nonzero offset, quantized the wrong elements in release (CUDA sized its
+result by the whole storage). An F32 source now quantizes from a copy of its own; other dtypes already convert into
+one.
+
+Implication: every GGUF architecture #586 lists loads. Left out of #586: `ModernBertDecisionModel` (a decision
+model, its own issue).

@@ -4,13 +4,21 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
+use inference_nn::model::RopePairing;
 use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
 use inference_tensor::quantized::gguf_file::Value;
 use serde_json::{Value as Json, json};
 use tokenizers::Tokenizer;
 
+const ARCHITECTURE_KEY: &str = "general.architecture";
 const TOKEN_EMBEDDINGS: &str = "token_embd.weight";
 const TOKEN_TYPES: &str = "token_types.weight";
+const LORA_TASK_NAME_KEY: &str = "adapter.lora.task_name";
+const LORA_PROMPT_PREFIX_KEY: &str = "adapter.lora.prompt_prefix";
+const LORA_ALPHA_KEY: &str = "adapter.lora.alpha";
+const PADDING_KEY: &str = "tokenizer.ggml.padding_token_id";
+// XLM-R's `<pad>`
+const XLM_R_PAD: u32 = 1;
 const TOKEN_TYPE_COUNT_KEY: &str = "tokenizer.ggml.token_type_count";
 const TOKENIZER_MODEL_KEY: &str = "tokenizer.ggml.model";
 const BOS_KEY: &str = "tokenizer.ggml.bos_token_id";
@@ -38,6 +46,8 @@ pub enum EmbeddingGgufArchitecture {
     NomicBert,
     NomicBertMoe,
     JinaBertV2,
+    /// Jina v3: XLM-R with rotary positions, its task LoRAs in `lora-<task>-*.gguf` files beside it.
+    JinaBertV3,
     ModernBert,
     NeoBert,
 }
@@ -58,6 +68,7 @@ impl EmbeddingGgufArchitecture {
             "nomic-bert" => Some(Self::NomicBert),
             "nomic-bert-moe" => Some(Self::NomicBertMoe),
             "jina-bert-v2" => Some(Self::JinaBertV2),
+            "jina-bert-v3" => Some(Self::JinaBertV3),
             "modern-bert" => Some(Self::ModernBert),
             "neo-bert" => Some(Self::NeoBert),
             _ => None,
@@ -70,6 +81,7 @@ impl EmbeddingGgufArchitecture {
             Self::NomicBert => "nomic-bert",
             Self::NomicBertMoe => "nomic-bert-moe",
             Self::JinaBertV2 => "jina-bert-v2",
+            Self::JinaBertV3 => "jina-bert-v3",
             Self::ModernBert => "modern-bert",
             Self::NeoBert => "neo-bert",
         }
@@ -79,7 +91,7 @@ impl EmbeddingGgufArchitecture {
     fn layers(self) -> &'static str {
         match self {
             Self::Bert | Self::JinaBertV2 => "encoder.layer",
-            Self::NomicBert | Self::NomicBertMoe => "encoder.layers",
+            Self::NomicBert | Self::NomicBertMoe | Self::JinaBertV3 => "encoder.layers",
             Self::ModernBert => "layers",
             Self::NeoBert => "transformer_encoder",
         }
@@ -168,12 +180,7 @@ pub fn synthesize_embedding_config(
         .context("GGUF `token_embd.weight` has no rows")?;
     // the table's rows over the metadata count, which some converters write as the default
     let token_types = if archive.contains_tensor(TOKEN_TYPES) {
-        archive
-            .tensor_info(TOKEN_TYPES)?
-            .shape()
-            .first()
-            .copied()
-            .unwrap_or_default() as u32
+        token_type_rows(archive)? as u32
     } else {
         archive
             .metadata()
@@ -190,6 +197,9 @@ pub fn synthesize_embedding_config(
         meta.u32("feed_forward_length")?,
         meta.u32("context_length")?,
     );
+    if architecture == EmbeddingGgufArchitecture::JinaBertV3 {
+        return jina_v3_config(archive, &meta, vocab_size, token_types);
+    }
     let mut config = match architecture {
         EmbeddingGgufArchitecture::Bert | EmbeddingGgufArchitecture::JinaBertV2 => {
             let mut config = json!({
@@ -272,6 +282,7 @@ pub fn synthesize_embedding_config(
             "norm_eps": meta.f32("attention.layer_norm_rms_epsilon")?,
             "max_length": context,
         }),
+        EmbeddingGgufArchitecture::JinaBertV3 => unreachable!("Jina v3's config is built above"),
     };
     if is_classifier(archive) {
         let labels = meta.labels()?;
@@ -291,14 +302,14 @@ pub fn embedding_pooling(
     archive: &GgufArchive,
     architecture: EmbeddingGgufArchitecture,
 ) -> Result<EmbeddingGgufPooling> {
-    let meta = metadata(archive, architecture);
-    let pooling = match meta.optional("pooling_type") {
+    pooling_under(archive, architecture.prefix())
+}
+
+fn pooling_under(archive: &GgufArchive, prefix: &str) -> Result<EmbeddingGgufPooling> {
+    let pooling = match archive.metadata().get(&format!("{prefix}.pooling_type")) {
         Some(pooling) => pooling.to_u32()?,
         None if is_classifier(archive) => POOLING_RANK,
-        None => bail!(
-            "GGUF metadata is missing `{}.pooling_type`",
-            architecture.prefix()
-        ),
+        None => bail!("GGUF metadata is missing `{prefix}.pooling_type`"),
     };
     Ok(match pooling {
         POOLING_MEAN => EmbeddingGgufPooling::Mean,
@@ -309,12 +320,71 @@ pub fn embedding_pooling(
     })
 }
 
+/// A decoder-layout GGUF llama.cpp runs as an embedder: EuroBERT and Llama bidirectional under Llama's names and
+/// metadata, and a Qwen3 that names a pooling (Qwen3-Embedding, Jina v5 small).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecoderEmbeddingGguf {
+    EuroBert,
+    LlamaEmbed,
+    Qwen3,
+}
+
+impl DecoderEmbeddingGguf {
+    pub fn from_metadata(metadata: &HashMap<String, Value>) -> Option<Self> {
+        let Some(Value::String(architecture)) = metadata.get(ARCHITECTURE_KEY) else {
+            return None;
+        };
+        match architecture.as_str() {
+            "eurobert" => Some(Self::EuroBert),
+            "llama-embed" => Some(Self::LlamaEmbed),
+            "qwen3" if metadata.contains_key("qwen3.pooling_type") => Some(Self::Qwen3),
+            _ => None,
+        }
+    }
+
+    /// The decoder architecture whose metadata keys and tensor names it shares.
+    pub fn decoder_architecture(self) -> &'static str {
+        match self {
+            Self::EuroBert | Self::LlamaEmbed => "llama",
+            Self::Qwen3 => "qwen3",
+        }
+    }
+
+    /// The Q/K row order when it is not the decoder's: llama.cpp converts EuroBERT without Llama's RoPE permute.
+    pub fn rope_pairing(self) -> Option<RopePairing> {
+        match self {
+            Self::EuroBert => Some(RopePairing::HalfSplit),
+            Self::LlamaEmbed | Self::Qwen3 => None,
+        }
+    }
+
+    /// The transformers class the embedding loader reads it as.
+    pub fn class(self) -> &'static str {
+        match self {
+            Self::EuroBert | Self::LlamaEmbed => "LlamaBidirectionalModel",
+            Self::Qwen3 => "Qwen3Model",
+        }
+    }
+
+    /// Its pooling, read once the archive is filed under the decoder architecture.
+    pub fn pooling(self, archive: &GgufArchive) -> Result<EmbeddingGgufPooling> {
+        let key = format!("{}.pooling_type", self.decoder_architecture());
+        // llama.cpp's Llama converter writes none for `llama-embed`, whose embedders (Nemotron) mean-pool
+        if self == Self::LlamaEmbed && !archive.metadata().contains_key(&key) {
+            return Ok(EmbeddingGgufPooling::Mean);
+        }
+        pooling_under(archive, self.decoder_architecture())
+    }
+}
+
 /// `(native name, GGUF name)` of the tensors outside the blocks.
 fn root_tensors(
     architecture: EmbeddingGgufArchitecture,
 ) -> &'static [(&'static str, &'static str)] {
     use EmbeddingGgufArchitecture as A;
     match architecture {
+        // bound with its adapters by `jina_v3_bindings`
+        A::JinaBertV3 => &[],
         A::Bert | A::JinaBertV2 => &[
             ("embeddings.word_embeddings.weight", "token_embd.weight"),
             (
@@ -357,6 +427,7 @@ fn block_tensors(
 ) -> &'static [(&'static str, &'static str)] {
     use EmbeddingGgufArchitecture as A;
     match architecture {
+        A::JinaBertV3 => &[],
         A::Bert => &[
             ("attention.self.query", "attn_q"),
             ("attention.self.key", "attn_k"),
@@ -418,9 +489,22 @@ fn block_tensors(
 }
 
 fn bind(archive: &GgufArchive, bindings: &mut GgufBindingMap, native: String, gguf: String) {
-    if archive.contains_tensor(&gguf) {
-        bindings.insert(native, GgufTensorBinding::tensor(gguf));
+    if !archive.contains_tensor(&gguf) {
+        return;
     }
+    let binding = GgufTensorBinding::tensor(gguf.as_str());
+    // older converters write a one-row segment table as a bare `[hidden]` vector
+    let binding = match archive.tensor_info(&gguf).map(|info| info.shape().to_vec()) {
+        Ok(shape) if gguf == TOKEN_TYPES && shape.len() == 1 => binding.reshape(vec![1, shape[0]]),
+        _ => binding,
+    };
+    bindings.insert(native, binding);
+}
+
+/// The segment table's rows: one for a bare `[hidden]` vector.
+fn token_type_rows(archive: &GgufArchive) -> Result<usize> {
+    let shape = archive.tensor_info(TOKEN_TYPES)?.shape();
+    Ok(if shape.len() == 1 { 1 } else { shape[0] })
 }
 
 /// Native tensor names to the GGUF's own.
@@ -429,6 +513,9 @@ pub fn build_embedding_bindings(
     architecture: EmbeddingGgufArchitecture,
 ) -> Result<GgufBindingMap> {
     let blocks = metadata(archive, architecture).u32("block_count")?;
+    if architecture == EmbeddingGgufArchitecture::JinaBertV3 {
+        return jina_v3_bindings(archive, blocks, task_adapters(archive).len());
+    }
     let mut bindings = GgufBindingMap::new();
     for (native, gguf) in root_tensors(architecture) {
         bind(archive, &mut bindings, native.to_string(), gguf.to_string());
@@ -560,4 +647,178 @@ pub fn add_encoder_specials(
         .map_err(anyhow::Error::msg)?;
     tokenizer.with_post_processor(Some(PostProcessorWrapper::Template(post)));
     Ok(())
+}
+
+/// Where a merged task adapter's tensors and metadata sit in the base archive.
+pub fn task_adapter_prefix(index: usize) -> String {
+    format!("task{index}.")
+}
+
+/// The task adapters merged into the archive: each one's task name and the prompt prefix it reads, in merge order.
+pub fn task_adapters(archive: &GgufArchive) -> Vec<(String, String)> {
+    (0..)
+        .map_while(|index| {
+            let prefix = task_adapter_prefix(index);
+            let read = |key: &str| match archive.metadata().get(&format!("{prefix}{key}")) {
+                Some(Value::String(value)) => Some(value.clone()),
+                _ => None,
+            };
+            Some((
+                read(LORA_TASK_NAME_KEY)?,
+                read(LORA_PROMPT_PREFIX_KEY).unwrap_or_default(),
+            ))
+        })
+        .collect()
+}
+
+/// Jina v3's config as `jina_v3::Config` and BERT's loader read it, with a task per merged adapter.
+fn jina_v3_config(
+    archive: &GgufArchive,
+    meta: &Metadata<'_>,
+    vocab_size: usize,
+    token_types: u32,
+) -> Result<String> {
+    let tasks = task_adapters(archive);
+    if tasks.is_empty() {
+        bail!(
+            "a jina-bert-v3 GGUF runs with its task adapters: put its `lora-<task>-*.gguf` files beside it"
+        );
+    }
+    let first = task_adapter_prefix(0);
+    // `[rank, hidden]`, as the converter slices each task's lora_A
+    let rank = archive
+        .tensor_info(&format!("{first}blk.0.attn_qkv.weight.lora_a"))?
+        .shape()
+        .first()
+        .copied()
+        .context("a jina-bert-v3 adapter has no `blk.0.attn_qkv.weight.lora_a`")?;
+    let alpha = archive
+        .metadata()
+        .get(&format!("{first}{LORA_ALPHA_KEY}"))
+        .map(|v| v.to_f32())
+        .transpose()?
+        .unwrap_or(1.0);
+    let pad = archive
+        .metadata()
+        .get(PADDING_KEY)
+        .map(|v| v.to_u32())
+        .transpose()?
+        .unwrap_or(XLM_R_PAD);
+    let config = json!({
+        "architectures": ["XLMRobertaModel"],
+        "model_type": "xlm-roberta",
+        "vocab_size": vocab_size,
+        "hidden_size": meta.u32("embedding_length")?,
+        "num_hidden_layers": meta.u32("block_count")?,
+        "num_attention_heads": meta.u32("attention.head_count")?,
+        "intermediate_size": meta.u32("feed_forward_length")?,
+        "hidden_act": "gelu",
+        // XLM-R numbers positions from pad + 1, which the context length leaves out
+        "max_position_embeddings": meta.u32("context_length")? + pad + 1,
+        "type_vocab_size": token_types,
+        "layer_norm_eps": meta.f32("attention.layer_norm_epsilon")?,
+        "pad_token_id": pad,
+        "position_embedding_type": "rotary",
+        "rotary_emb_base": meta.f32("rope.freq_base")?,
+        "lora_adaptations": tasks.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+        "task_instructions": tasks.iter().cloned().collect::<HashMap<_, _>>(),
+        "lora_rank": rank,
+        "lora_alpha": alpha,
+    });
+    Ok(serde_json::to_string(&config)?)
+}
+
+/// Jina v3's torch-parametrize names, each adapter stacked over the merged tasks as `jina_v3` reads them.
+fn jina_v3_bindings(archive: &GgufArchive, blocks: u32, tasks: usize) -> Result<GgufBindingMap> {
+    let mut bindings = GgufBindingMap::new();
+    let stacked = |gguf: &str, part: &str, transpose: bool| {
+        let per_task = (0..tasks)
+            .map(|task| {
+                let tensor = GgufTensorBinding::tensor(format!(
+                    "{}{gguf}.{part}",
+                    task_adapter_prefix(task)
+                ));
+                if transpose {
+                    tensor.transpose(0, 1)
+                } else {
+                    tensor
+                }
+            })
+            .collect();
+        GgufTensorBinding::stack(per_task, 0)
+    };
+    // (native module, GGUF tensor, lora_A from, lora_B from, transpose lora_B): the converter writes the word
+    // table's lora_b transposed and the segment table's two halves swapped
+    let mut adapted = vec![
+        (
+            "embeddings.word_embeddings".to_string(),
+            TOKEN_EMBEDDINGS.to_string(),
+            "lora_a",
+            "lora_b",
+            true,
+        ),
+        (
+            "embeddings.token_type_embeddings".to_string(),
+            TOKEN_TYPES.to_string(),
+            "lora_b",
+            "lora_a",
+            false,
+        ),
+    ];
+    for block in 0..blocks {
+        for (native, role) in [
+            ("mixer.Wqkv", "attn_qkv"),
+            ("mixer.out_proj", "attn_output"),
+            ("mlp.fc1", "ffn_up"),
+            ("mlp.fc2", "ffn_down"),
+        ] {
+            let native = format!("encoder.layers.{block}.{native}");
+            bind(
+                archive,
+                &mut bindings,
+                format!("{native}.bias"),
+                format!("blk.{block}.{role}.bias"),
+            );
+            adapted.push((
+                native,
+                format!("blk.{block}.{role}.weight"),
+                "lora_a",
+                "lora_b",
+                false,
+            ));
+        }
+        for (native, role) in [
+            ("norm1", "attn_output_norm"),
+            ("norm2", "layer_output_norm"),
+        ] {
+            for part in ["weight", "bias"] {
+                bind(
+                    archive,
+                    &mut bindings,
+                    format!("encoder.layers.{block}.{native}.{part}"),
+                    format!("blk.{block}.{role}.{part}"),
+                );
+            }
+        }
+    }
+    for (native, gguf, a, b, transpose_b) in adapted {
+        let param = format!("{native}.parametrizations.weight");
+        bind(
+            archive,
+            &mut bindings,
+            format!("{param}.original"),
+            gguf.clone(),
+        );
+        bindings.insert(format!("{param}.0.lora_A"), stacked(&gguf, a, false));
+        bindings.insert(format!("{param}.0.lora_B"), stacked(&gguf, b, transpose_b));
+    }
+    for part in ["weight", "bias"] {
+        bind(
+            archive,
+            &mut bindings,
+            format!("emb_ln.{part}"),
+            format!("token_embd_norm.{part}"),
+        );
+    }
+    Ok(bindings)
 }

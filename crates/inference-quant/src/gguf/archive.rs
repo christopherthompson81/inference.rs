@@ -45,6 +45,7 @@ const MMPROJ_TYPE: &str = "mmproj";
 // Older converters wrote this type, or none at all with the clip architecture; llama.cpp loads either
 const CLIP_VISION_TYPE: &str = "clip-vision";
 const GENERAL_ARCHITECTURE: &str = "general.architecture";
+const ADAPTER_TYPE: &str = "adapter";
 const CLIP_ARCHITECTURE: &str = "clip";
 // an untyped clip archive is a projector only if it names one; a bare text CLIP is not
 const CLIP_PROJECTOR_TYPE: &str = "clip.projector_type";
@@ -682,6 +683,26 @@ impl GgufArchive {
         })
     }
 
+    /// Files the metadata under `to`'s keys, for a GGUF that shares that architecture's layout under another name.
+    pub fn rename_architecture(&mut self, to: &str) -> Result<()> {
+        let Some(Value::String(from)) = self.metadata.get(GENERAL_ARCHITECTURE).cloned() else {
+            inference_tensor::bail!("GGUF metadata is missing `{GENERAL_ARCHITECTURE}`");
+        };
+        let prefix = format!("{from}.");
+        self.metadata = std::mem::take(&mut self.metadata)
+            .into_iter()
+            .map(|(key, value)| match key.strip_prefix(&prefix) {
+                Some(rest) => (format!("{to}.{rest}"), value),
+                None => (key, value),
+            })
+            .collect();
+        self.metadata.insert(
+            GENERAL_ARCHITECTURE.to_string(),
+            Value::String(to.to_string()),
+        );
+        Ok(())
+    }
+
     pub fn open_file(path: impl AsRef<Path>) -> Result<Self> {
         Self::open([path])
     }
@@ -741,6 +762,34 @@ impl GgufArchive {
             self.mappings.extend(mappings);
             self.shards.extend(shards);
         }
+        Ok(())
+    }
+
+    /// Adds a LoRA adapter GGUF with its tensors and metadata under `prefix`, so adapters sharing names sit side by side.
+    pub fn merge_adapter(&mut self, adapter: Self, prefix: &str) -> Result<()> {
+        if !matches!(adapter.metadata_value(GENERAL_TYPE), Some(Value::String(t)) if t == ADAPTER_TYPE)
+        {
+            inference_tensor::bail!("GGUF `{GENERAL_TYPE}` of an adapter must be `{ADAPTER_TYPE}`");
+        }
+        let shard_offset = self.shards.len();
+        let Self {
+            mappings,
+            shards,
+            metadata,
+            tensors,
+        } = adapter;
+        for (key, value) in metadata {
+            if !key.starts_with(GENERAL_PREFIX) {
+                self.metadata.insert(format!("{prefix}{key}"), value);
+            }
+        }
+        for (name, mut tensor) in tensors {
+            tensor.shard_index += shard_offset;
+            tensor.name = format!("{prefix}{name}");
+            self.tensors.insert(tensor.name.clone(), tensor);
+        }
+        self.mappings.extend(mappings);
+        self.shards.extend(shards);
         Ok(())
     }
 

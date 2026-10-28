@@ -79,6 +79,14 @@ inference serve --format gguf -m nomic-ai/nomic-embed-text-v1.5-GGUF -f nomic-em
 
 The tokenizer is rebuilt from the GGUF's own vocabulary (BERT's WordPiece, or XLM-RoBERTa's SentencePiece with its normalization table), the pooling comes from its `pooling_type`, and the embedding is L2-normalized, as llama.cpp normalizes by default. A GGUF with `pooling_type` rank loads as a reranker and serves `/v1/rerank`.
 
+`jina-bert-v3` (Jina Embeddings v3) loads with its task adapters: llama.cpp's converter writes each task's LoRA as a `lora-<task>-*.gguf` file beside the base, and the files in the same directory or repository (fetched with the base from a Hub repository such as `second-state/jina-embeddings-v3-GGUF`) become the tasks `task` names on a request, each with the prompt prefix its file carries. The base needs at least one of them.
+
+Embedders with decoder-style layers load from GGUF too: `eurobert` (EuroBERT, and Jina v5 nano's per-task GGUFs), `llama-embed` (Llama bidirectional embedders such as `llama-nemotron-embed-1b-v2`), and a `qwen3` GGUF that names a `pooling_type` (Qwen3-Embedding, Jina v5 small's per-task GGUFs). They are read like the matching chat-model GGUFs and run bidirectionally where the original does. A `llama-embed` GGUF carries no pooling type; it is mean pooled, as its embedders are. Jina's per-task GGUFs take the `Query: ` / `Document: ` prefix in the input text:
+
+```bash
+inference serve --format gguf -m jinaai/jina-embeddings-v5-text-small-retrieval -f v5-small-retrieval-Q8_0.gguf
+```
+
 Some conversions lose weights the original uses, so they cannot match it:
 
 - llama.cpp's converter drops the pooler of a BERT `*ForSequenceClassification` reranker (such as the ms-marco cross-encoders), which these rerankers score through. Such a GGUF is refused; load the safetensors checkpoint instead. RoBERTa and XLM-RoBERTa rerankers (bge-reranker) keep their head and load.
