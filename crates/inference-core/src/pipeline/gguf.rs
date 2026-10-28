@@ -445,12 +445,37 @@ fn label_decision(
             score_bias.entry(n).or_insert_with(|| vec![0.0; n])[level] = value.to_f32()?;
         }
     }
-    let mut decision = LabelDecision::new(family, template, temperatures, score_bias, |code| {
+    let encode = |text: &str| {
         tokenizer
-            .encode_fast(code, false)
+            .encode_fast(text, false)
             .map(|encoding| encoding.get_ids().to_vec())
-    })
-    .map_err(anyhow::Error::msg)?;
+    };
+    let mut decision = LabelDecision::new(family, template, temperatures, score_bias, encode)
+        .map_err(anyhow::Error::msg)?;
+    if family.labels_from_metadata() {
+        let key = format!("{prefix}labels");
+        let texts = metadata
+            .get(&key)
+            .with_context(|| format!("decision model has no `{key}`"))?
+            .to_vec()?
+            .iter()
+            .map(|value| value.to_string().cloned())
+            .collect::<inference_tensor::Result<Vec<_>>>()?;
+        decision
+            .set_labels(texts, encode)
+            .map_err(anyhow::Error::msg)?;
+    }
+    if family.prepares_texts() {
+        let mut spellings = tokenizer
+            .get_added_tokens_decoder()
+            .into_values()
+            .map(|token| token.content)
+            .filter(|content| !content.is_empty())
+            .collect::<Vec<_>>();
+        // longest first, so a spelling that starts another is tried after it
+        spellings.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        decision.quoted_spellings = spellings;
+    }
     if family.reads_pointer() {
         decision.option_end = Some(
             tokenizer

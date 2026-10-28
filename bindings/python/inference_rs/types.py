@@ -1049,8 +1049,8 @@ class DecisionRequestQuestion:
     """One typed question about the request's state."""
 
     criteria: dict[str, Any] | None = None
-    instructions: dict[str, Any]
-    type: DecisionQuestionType
+    instructions: dict[str, Any] | None = None
+    type: DecisionQuestionType | None = None
 
 
 @dataclass(kw_only=True)

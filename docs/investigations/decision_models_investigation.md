@@ -320,3 +320,21 @@ Finding:
   the rest 4.9e-4 to 8.5e-3. A chat request to the model is refused (its output is the head, not vocabulary logits).
 
 Implication: kev is supported; the remaining gap is of the size the label families show (bf16 activations).
+
+## Run 14 - 2026-10-28 08:48
+
+Question: does h2o-lightning (`h2oai/h2o-lightning-4b-gguf`, Q4_K_M) answer as llama.cpp does, with its texts written
+the way its Python shim writes them?
+
+Command: `llama-server -np 1 -ngl 99` with `server_ref_h2o.py` over the shared set plus one h2o request (no type and
+no instructions, `yes`/`no` noul aliases, a one-level score, `<|im_end|>` and `</think>` in the state, floats such as
+1e20 and 1e-7, non-ASCII object instructions, a trailing-space last option); then ours with `compare_h2o.py`. Also
+`h2o_long.py`: one ~140 KB log state past the 32000-token budget, against both (llama.cpp with `-c 40000`).
+
+Finding:
+- The GGUF (h2oai's own) carries `decision.labels` (255, each with a leading space, after the `Answer:` prefill), per-type
+  temperatures (0.75 / 0.65 / 0.8) and `image` 1.0, a `qwen2` pre-tokenizer on `qwen35`.
+- Prompt token counts equal on all four requests (297 / 343 / 1595 / 635) and on the long one (64158); same choice on
+  all 12 questions; worst difference 5.85e-2 (a score), most under 1e-2; the long state within 3e-3.
+
+Implication: h2o-lightning is supported for text. Image input (its mmproj) stays open with the other families'.

@@ -5497,10 +5497,6 @@
       "DecisionRequestQuestion": {
         "type": "object",
         "description": "One typed question about the request's state.",
-        "required": [
-          "type",
-          "instructions"
-        ],
         "properties": {
           "criteria": {
             "type": [
@@ -5511,10 +5507,18 @@
           },
           "instructions": {
             "type": "object",
-            "description": "The question: text, or any JSON value, which the model reads as JSON text."
+            "description": "The question: text, or any JSON value, which the model reads as JSON text. Required, except by vllm-d3 and\nh2o-lightning, whose prompts have a default question."
           },
           "type": {
-            "$ref": "#/components/schemas/DecisionQuestionType"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DecisionQuestionType",
+                "description": "Required, except by h2o-lightning, which then asks a `choice`."
+              }
+            ]
           }
         }
       },
