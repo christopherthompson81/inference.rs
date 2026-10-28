@@ -66,6 +66,12 @@ const JOINT_FEEDFORWARD_TENSOR: &str = "dec.blk.0.ffn_up.weight";
 const DECISION2_ARCHITECTURE: &str = "vllm-decision2";
 const DECISION2_TRUNK: &str = "qwen3";
 const OPTION_HEAD_TENSOR: &str = "decision.key.weight";
+// d1-omni's GGUF is `lfm2` read bidirectionally with laya's head; it runs as an embedder over d1-omni's prompts
+const D1_OMNI_ARCHITECTURE: &str = "lfm2";
+const D1_OMNI_TYPE: &str = "lfm2-d1-omni";
+// the prompt length d1-omni was trained for, which llama.cpp's server cuts its prompts to
+const D1_OMNI_MAX_TOKENS: usize = 16384;
+const MASK_TOKEN_KEY: &str = "tokenizer.ggml.mask_token_id";
 const DECISION_TEMPLATE_KEY: &str = "tokenizer.chat_template.systemone";
 // llama.cpp's bounds on a score's level count
 const SCORE_BIAS_LEVELS: std::ops::RangeInclusive<usize> = 2..=255;
@@ -444,6 +450,39 @@ fn option_head_config(config: &str, archive: &inference_quant::GgufArchive) -> R
     Ok(serde_json::to_string(&config)?)
 }
 
+/// d1-omni's config from its `lfm2.*` keys: per-block KV heads (0 for a short convolution) and feed-forward widths,
+/// the trunk followed by the head.
+fn d1_omni_config(archive: &inference_quant::GgufArchive) -> Result<String> {
+    let key = |name: &str| {
+        let key = format!("{D1_OMNI_ARCHITECTURE}.{name}");
+        archive
+            .metadata_value(&key)
+            .with_context(|| format!("d1-omni GGUF has no `{key}`"))
+    };
+    // the converter writes per-block counts as signed or unsigned integers
+    let count = |value: &inference_tensor::quantized::gguf_file::Value| -> Result<u64> {
+        match value.to_i32() {
+            Ok(v) => u64::try_from(v).context("a negative per-block count"),
+            Err(_) => Ok(value.to_u64()?),
+        }
+    };
+    let per_block =
+        |name: &str| -> Result<Vec<u64>> { key(name)?.to_vec()?.iter().map(count).collect() };
+    Ok(serde_json::to_string(&serde_json::json!({
+        "architectures": [crate::pipeline::loaders::LFM2_DECISION_CLASS],
+        "vocab_size": key("vocab_size")?.to_u32()?,
+        "hidden_size": key("embedding_length")?.to_u32()?,
+        "num_attention_heads": key("attention.head_count")?.to_u32()?,
+        "num_key_value_heads": per_block("attention.head_count_kv")?,
+        "intermediate_sizes": per_block("feed_forward_length")?,
+        "head_layers": key("decision.block_count")?.to_u32()?,
+        "rope_theta": key("rope.freq_base")?.to_f32()?,
+        "max_position_embeddings": D1_OMNI_MAX_TOKENS,
+        "rms_norm_eps": key("attention.layer_norm_rms_epsilon")?.to_f32()?,
+        "layer_norm_eps": key("attention.layer_norm_epsilon")?.to_f32()?,
+    }))?)
+}
+
 /// The label-coded decision profile a GGUF carries (`<arch>.decision.*` and its `systemone` template), if any.
 fn label_decision(
     metadata: &HashMap<String, inference_tensor::quantized::gguf_file::Value>,
@@ -469,7 +508,10 @@ fn label_decision(
     let causal = metadata
         .get(&format!("{architecture}.attention.causal"))
         .and_then(|value| value.to_bool().ok());
-    if (causal == Some(false) || family.non_causal()) && architecture != BIDIRECTIONAL_ARCHITECTURE
+    // d1-omni's encoder reads its prompt both ways by construction
+    if (causal == Some(false) || family.non_causal())
+        && architecture != BIDIRECTIONAL_ARCHITECTURE
+        && !family.scores_markers()
     {
         warn!(
             "GGUF decision type `{kind}` needs non-causal attention, which `{architecture}` does not run; it loads without decisions"
@@ -540,6 +582,14 @@ fn label_decision(
         // longest first, so a spelling that starts another is tried after it
         spellings.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
         decision.quoted_spellings = spellings;
+    }
+    if family.scores_markers() {
+        decision.marker = Some(
+            metadata
+                .get(MASK_TOKEN_KEY)
+                .with_context(|| format!("decision model has no `{MASK_TOKEN_KEY}`"))?
+                .to_u32()?,
+        );
     }
     if family.reads_pointer() {
         decision.option_end = Some(
@@ -709,6 +759,13 @@ impl GGUFLoader {
         }
         if is_architecture(&archive, JINA_BERT_V3) {
             merge_task_adapters(&mut archive, paths.get_weight_filenames())?;
+        }
+        if is_architecture(&archive, D1_OMNI_ARCHITECTURE)
+            && archive
+                .metadata_value(&format!("{D1_OMNI_ARCHITECTURE}.decision.type"))
+                .is_some_and(|value| value.to_string().is_ok_and(|kind| kind == D1_OMNI_TYPE))
+        {
+            return self.load_d1_omni(Arc::new(archive), paths, options);
         }
         let archive = Arc::new(archive);
         let architecture = match archive.metadata_value("general.architecture") {
@@ -880,6 +937,38 @@ impl GGUFLoader {
             EmbeddingGgufArchitecture::NeoBert => EmbeddingLoaderType::NeoBert,
         };
         self.load_prepared_embedding(loader_type, source, pooling, paths, options)
+    }
+
+    /// d1-omni: its trunk and head under their GGUF names, with the decision profile that renders its prompts.
+    fn load_d1_omni(
+        &self,
+        archive: Arc<inference_quant::GgufArchive>,
+        paths: &dyn ModelPaths,
+        options: LoadOptions<'_>,
+    ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        let config = d1_omni_config(&archive)?;
+        let mut bindings = inference_quant::GgufBindingMap::new();
+        for name in archive.tensors().keys() {
+            bindings.insert(
+                name.clone(),
+                inference_quant::GgufTensorBinding::tensor(name.clone()),
+            );
+        }
+        let source = self.prepare_source(
+            &archive,
+            &bindings,
+            paths,
+            &options,
+            config,
+            RopePairing::HalfSplit,
+        )?;
+        self.load_prepared_embedding(
+            EmbeddingLoaderType::Lfm2Decision,
+            source,
+            EmbeddingGgufPooling::Rank,
+            paths,
+            options,
+        )
     }
 
     /// A GGUF translated to `loader_type`'s config and tensor names, run as an embedder pooled as it names.

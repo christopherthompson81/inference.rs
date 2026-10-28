@@ -128,6 +128,10 @@ pub enum RequestMessage {
         state: String,
         question: inference_nn::decision::DecisionQuestion,
     },
+    /// A decision prompt built by the caller (d1-omni's template): its tokens and option markers.
+    DecisionTokens {
+        prompt: inference_nn::decision::DecisionPrompt,
+    },
 }
 
 fn default_responder<T>() -> Sender<T> {

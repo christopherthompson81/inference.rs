@@ -5797,7 +5797,8 @@
           "modernbert",
           "neobert",
           "llamaembedding",
-          "modernbertdecision"
+          "modernbertdecision",
+          "lfm2decision"
         ]
       },
       "EmbeddingRequest": {

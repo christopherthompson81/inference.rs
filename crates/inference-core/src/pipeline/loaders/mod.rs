@@ -50,7 +50,7 @@ pub(crate) use multimodal_loaders::{MultimodalLoaderTypeExt, MultimodalProcessor
 
 pub use embedding_loaders::{
     AutoEmbeddingLoader, EmbeddingLoaderType, EmbeddingModel, EmbeddingModelLoader,
-    EmbeddingModule, EmbeddingModulePaths, EmbeddingModuleType,
+    EmbeddingModule, EmbeddingModulePaths, EmbeddingModuleType, LFM2_DECISION_CLASS,
 };
 
 pub use diffusion_loaders::{

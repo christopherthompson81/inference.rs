@@ -126,7 +126,8 @@ impl MessageExtras {
             RequestMessage::Embedding { .. }
             | RequestMessage::EmbeddingTokens { .. }
             | RequestMessage::EmbeddingPair { .. }
-            | RequestMessage::Decision { .. } => extras.seq_step_type = SeqStepType::OneShot,
+            | RequestMessage::Decision { .. }
+            | RequestMessage::DecisionTokens { .. } => extras.seq_step_type = SeqStepType::OneShot,
         }
         extras
     }
@@ -343,6 +344,16 @@ impl Engine {
                     ..Default::default()
                 }));
                 (tokens, state)
+            }
+            RequestMessage::DecisionTokens { prompt } => {
+                extras.one_shot = Some(OneShotParams::Embedding(EmbeddingParams {
+                    decision: Some(crate::sequence::DecisionInput {
+                        kind: prompt.kind.index(),
+                        markers: prompt.markers,
+                    }),
+                    ..Default::default()
+                }));
+                (prompt.ids, String::new())
             }
             messages => self.render_prompt(
                 messages,
@@ -645,7 +656,8 @@ impl Engine {
                 RequestMessage::Embedding { .. }
                 | RequestMessage::EmbeddingTokens { .. }
                 | RequestMessage::EmbeddingPair { .. }
-                | RequestMessage::Decision { .. },
+                | RequestMessage::Decision { .. }
+                | RequestMessage::DecisionTokens { .. },
             ) => Ok(()),
             _ => Err(Box::new(Response::ValidationError(
                 "Received a request incompatible for this model's category.".into(),
@@ -903,7 +915,7 @@ impl Engine {
             RequestMessage::EmbeddingPair { .. } => {
                 unreachable!("a pair is encoded by encode_pair")
             }
-            RequestMessage::Decision { .. } => {
+            RequestMessage::Decision { .. } | RequestMessage::DecisionTokens { .. } => {
                 unreachable!("a decision question is encoded by encode_decision")
             }
             RequestMessage::CompletionTokens(it)

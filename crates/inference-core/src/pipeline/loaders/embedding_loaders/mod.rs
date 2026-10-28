@@ -44,10 +44,14 @@ pub enum EmbeddingLoaderType {
     LlamaEmbedding,
     #[serde(rename = "modernbertdecision")]
     ModernBertDecision,
+    #[serde(rename = "lfm2decision")]
+    Lfm2Decision,
 }
 
 /// The class a decision checkpoint's merged config names (laya, Julia-1 have no transformers class of their own).
 pub const MODERN_BERT_DECISION_CLASS: &str = "ModernBertDecisionModel";
+/// The class d1-omni's synthesized config names (it loads from llama.cpp's GGUF only).
+pub const LFM2_DECISION_CLASS: &str = "Lfm2DecisionModel";
 
 const NOMIC_BERT_CLASSES: &[&str] = &["NomicBertModel"];
 const MODERN_BERT_CLASSES: &[&str] = &[
@@ -127,6 +131,7 @@ impl EmbeddingLoaderType {
             (NEO_BERT_CLASSES, Self::NeoBert),
             (LLAMA_EMBEDDING_CLASSES, Self::LlamaEmbedding),
             (&[MODERN_BERT_DECISION_CLASS], Self::ModernBertDecision),
+            (&[LFM2_DECISION_CLASS], Self::Lfm2Decision),
         ]
         .into_iter()
         .find_map(|(classes, tp)| classes.contains(&name).then_some(tp))
@@ -143,6 +148,7 @@ impl EmbeddingLoaderType {
             Self::NeoBert => "NeoBERT",
             Self::LlamaEmbedding => "LlamaBidirectionalModel",
             Self::ModernBertDecision => MODERN_BERT_DECISION_CLASS,
+            Self::Lfm2Decision => LFM2_DECISION_CLASS,
         }
     }
 }
@@ -184,12 +190,15 @@ impl EmbeddingLoaderType {
             Self::NeoBert => Ok(NeoBertLoader::boxed()),
             #[cfg(feature = "models-other")]
             Self::ModernBertDecision => Ok(ModernBertDecisionLoader::boxed()),
+            #[cfg(feature = "models-other")]
+            Self::Lfm2Decision => Ok(Lfm2DecisionLoader::boxed()),
             #[cfg(not(feature = "models-other"))]
             Self::Bert
             | Self::NomicBert
             | Self::ModernBert
             | Self::NeoBert
-            | Self::ModernBertDecision => {
+            | Self::ModernBertDecision
+            | Self::Lfm2Decision => {
                 anyhow::bail!(
                     "architecture `{self}` is not built in; enable the `models-other` feature"
                 )
@@ -210,8 +219,9 @@ impl FromStr for EmbeddingLoaderType {
             "neobert" => Ok(Self::NeoBert),
             "llamaembedding" => Ok(Self::LlamaEmbedding),
             "modernbertdecision" => Ok(Self::ModernBertDecision),
+            "lfm2decision" => Ok(Self::Lfm2Decision),
             a => Err(format!(
-                "Unknown architecture `{a}`. Possible architectures: `embeddinggemma`, `qwen3embedding`, `bert`, `nomicbert`, `modernbert`, `neobert`, `llamaembedding`, `modernbertdecision`."
+                "Unknown architecture `{a}`. Possible architectures: `embeddinggemma`, `qwen3embedding`, `bert`, `nomicbert`, `modernbert`, `neobert`, `llamaembedding`, `modernbertdecision`, `lfm2decision`."
             )),
         }
     }
@@ -228,6 +238,7 @@ impl Display for EmbeddingLoaderType {
             Self::NeoBert => write!(f, "neobert"),
             Self::LlamaEmbedding => write!(f, "llamaembedding"),
             Self::ModernBertDecision => write!(f, "modernbertdecision"),
+            Self::Lfm2Decision => write!(f, "lfm2decision"),
         }
     }
 }
@@ -354,7 +365,8 @@ pub use inference_models_gemma::loaders::EmbeddingGemmaLoader;
 pub use inference_models_llama::loaders::LlamaEmbeddingLoader;
 #[cfg(feature = "models-other")]
 pub use inference_models_other::loaders::{
-    BertLoader, ModernBertDecisionLoader, ModernBertLoader, NeoBertLoader, NomicBertLoader,
+    BertLoader, Lfm2DecisionLoader, ModernBertDecisionLoader, ModernBertLoader, NeoBertLoader,
+    NomicBertLoader,
 };
 #[cfg(feature = "models-qwen")]
 pub use inference_models_qwen::loaders::Qwen3EmbeddingLoader;

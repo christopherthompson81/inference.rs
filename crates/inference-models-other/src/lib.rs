@@ -28,6 +28,7 @@ pub mod hunyuan_v1_dense;
 pub mod hunyuan_v1_moe;
 pub mod jina_v3;
 pub mod lfm2;
+pub mod lfm2_decision;
 pub mod lfm2_vl;
 pub mod loaders;
 pub mod modern_bert;
