@@ -110,7 +110,7 @@ pub struct DecisionTokens {
 }
 
 /// One question's model input: its tokens, where each option's marker sits, and its type embedding row.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DecisionPrompt {
     pub ids: Vec<u32>,
     pub markers: Vec<u32>,
@@ -301,6 +301,8 @@ pub enum LabelFamily {
     Clef,
     /// one prompt per question, scored by an option head at the end of each option span and of the question span
     VllmDecision2,
+    /// laya's head over an LFM2 encoder, its prompt cut into pieces to token budgets, one `[MASK]` per option
+    Lfm2D1Omni,
 }
 
 impl LabelFamily {
@@ -317,6 +319,7 @@ impl LabelFamily {
             "lfm2-d1" => Self::Lfm2D1,
             "clef" => Self::Clef,
             "vllm-decision2" => Self::VllmDecision2,
+            "lfm2-d1-omni" => Self::Lfm2D1Omni,
             _ => return None,
         })
     }
@@ -332,9 +335,12 @@ impl LabelFamily {
                     .collect(),
                 true,
             ),
-            Self::Kev | Self::H2oLightning | Self::Lfm2D1 | Self::Clef | Self::VllmDecision2 => {
-                (Vec::new(), false)
-            }
+            Self::Kev
+            | Self::H2oLightning
+            | Self::Lfm2D1
+            | Self::Clef
+            | Self::VllmDecision2
+            | Self::Lfm2D1Omni => (Vec::new(), false),
             _ => {
                 let letters = || 'A'..='Z';
                 let codes = letters()
@@ -391,7 +397,17 @@ impl LabelFamily {
 
     /// The prompt reads without a state, for example to ask about images only.
     pub fn accepts_null_state(self) -> bool {
-        matches!(self, Self::VllmD3 | Self::Lfm2D1)
+        matches!(self, Self::VllmD3 | Self::Lfm2D1 | Self::Lfm2D1Omni)
+    }
+
+    /// The prompt's pieces are cut to token budgets and each option's `[MASK]` marker scored by the model (d1-omni).
+    pub fn scores_markers(self) -> bool {
+        self == Self::Lfm2D1Omni
+    }
+
+    /// A noul's descriptions may also sit under `yes` and `no`.
+    pub fn noul_aliases(self) -> bool {
+        matches!(self, Self::H2oLightning | Self::Lfm2D1Omni)
     }
 
     /// A score's legend reports a non-text description as its key-sorted JSON.
@@ -488,6 +504,8 @@ pub struct LabelDecision {
     pub option_end: Option<u32>,
     /// the texts of the tokenizer's added tokens, longest first, which h2o-lightning quotes in its input
     pub quoted_spellings: Vec<String>,
+    /// the token a family that scores markers reads each option at (d1-omni's `[MASK]`)
+    pub marker: Option<u32>,
     /// the codes a per-question family may label with (`d1_codes`) that are one token, with and without a leading
     /// space
     pub single_tokens: HashMap<String, u32>,
@@ -530,6 +548,7 @@ impl LabelDecision {
             option_end: None,
             quoted_spellings: Vec::new(),
             single_tokens: HashMap::new(),
+            marker: None,
         })
     }
 
@@ -639,6 +658,7 @@ impl LabelDecision {
         match self.family.reads_pointer()
             || self.family.labels_per_question()
             || self.family.joint()
+            || self.family.scores_markers()
         {
             true => MAX_LABELS,
             false => self.labels.len(),

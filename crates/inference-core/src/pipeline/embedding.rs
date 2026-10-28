@@ -469,7 +469,7 @@ impl EmbeddingLoader {
                         output: vec![SupportedModality::Embedding],
                     },
                     loaded_for_uqff_write: uqff.write().is_some(),
-                    label_decision: None,
+                    label_decision: prepared.and_then(|source| source.label_decision.clone()),
                     prompt_activation_bytes_per_token: None,
                 }),
                 mapper: pipeline_mapper,

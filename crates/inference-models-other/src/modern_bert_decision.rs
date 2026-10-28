@@ -43,7 +43,7 @@ fn linear(i: usize, o: usize, vb: ShardedVarBuilder) -> Result<Arc<dyn QuantMeth
 }
 
 /// torch's pre-norm `TransformerEncoderLayer`: `x + attn(norm1(x))`, then `x + linear2(relu(linear1(norm2(x))))`.
-struct Block {
+pub(crate) struct Block {
     norm1: LayerNorm,
     in_proj: Arc<dyn QuantMethod>,
     out_proj: Arc<dyn QuantMethod>,
@@ -73,7 +73,25 @@ impl Block {
         })
     }
 
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+    /// A block from its parts, under whatever names a checkpoint gives them.
+    pub(crate) fn from_parts(
+        norms: (LayerNorm, LayerNorm),
+        attention: (Arc<dyn QuantMethod>, Arc<dyn QuantMethod>),
+        mlp: (Arc<dyn QuantMethod>, Arc<dyn QuantMethod>),
+        width: usize,
+    ) -> Self {
+        Self {
+            norm1: norms.0,
+            in_proj: attention.0,
+            out_proj: attention.1,
+            norm2: norms.1,
+            linear1: mlp.0,
+            linear2: mlp.1,
+            heads: (width / HEAD_DIM).max(1),
+        }
+    }
+
+    pub(crate) fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let (b_sz, seq_len, width) = xs.dims3()?;
         let head_dim = width / self.heads;
         let qkv = self.in_proj.forward(&self.norm1.forward(xs)?)?;
@@ -157,7 +175,7 @@ impl Model {
         })
     }
 
-    fn markers(xs: &Tensor, rows: &DecisionRows) -> Result<Tensor> {
+    pub(crate) fn markers(xs: &Tensor, rows: &DecisionRows) -> Result<Tensor> {
         let width = xs.dim(D::Minus1)?;
         let most = rows.markers.iter().map(Vec::len).max().unwrap_or(0);
         let picked = rows

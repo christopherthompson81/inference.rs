@@ -89,6 +89,7 @@ class EmbeddingLoaderType(str, Enum):
     NEOBERT = "neobert"
     LLAMAEMBEDDING = "llamaembedding"
     MODERNBERTDECISION = "modernbertdecision"
+    LFM2DECISION = "lfm2decision"
 
 
 class ImageGenerationResponseFormat(str, Enum):

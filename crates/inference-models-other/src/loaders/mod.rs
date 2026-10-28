@@ -33,6 +33,7 @@ mod granite;
 mod hunyuan_v1_dense;
 mod hunyuan_v1_moe;
 mod lfm2;
+mod lfm2_decision;
 mod lfm2vl;
 mod modern_bert;
 mod modern_bert_decision;
@@ -55,6 +56,7 @@ pub use granite::*;
 pub use hunyuan_v1_dense::*;
 pub use hunyuan_v1_moe::*;
 pub use lfm2::*;
+pub use lfm2_decision::*;
 pub use lfm2vl::*;
 pub use modern_bert::*;
 pub use modern_bert_decision::*;
@@ -80,6 +82,7 @@ inference_nn::boxed_loaders!(
 inference_nn::boxed_loaders!(MultimodalModelLoader: Lfm2VlLoader, PaddleOcrVlLoader);
 inference_nn::boxed_loaders!(
     EmbeddingModelLoader: BertLoader,
+    Lfm2DecisionLoader,
     ModernBertLoader,
     ModernBertDecisionLoader,
     NeoBertLoader,

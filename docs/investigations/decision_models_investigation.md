@@ -407,3 +407,28 @@ Finding:
   the key-sorted legend is the same; both refuse the numeric instruction with the same check.
 
 Implication: vllm-decision2 is supported from llama.cpp's conversion (#671).
+
+## Run 19 - 2026-10-28 12:17
+
+Question: does lfm2-d1-omni (`LiquidAI/d1-omni-600M-GGUF`, Q8_0) answer text questions as llama.cpp does?
+
+Command: `llama-server -np 1 -ngl 99 -b 16384 -ub 16384 -c 16384` with `server_ref.py` over the shared set, then
+`server_ref_omni.py` with three more requests (a null state; yes/no noul descriptions, special-token text and a
+literal `<<d1omni:sep>>` in the state, 40 long options past their budget; a ~4000-line state past the 16384-token
+limit); ours with `compare.py` / `compare_omni.py`.
+
+Finding:
+- The GGUF is `lfm2` with `attention.causal false`, 16 trunk blocks (short convolutions, attention blocks with 8 KV
+  heads) and 2 head blocks (fused qkv, LayerNorms and a ReLU MLP with biases, 16 heads), `token_types`, a `cls.*`
+  scorer, the mask token in `tokenizer.ggml.mask_token_id`, temperatures by question type and option bucket.
+- Ours loads it as an embedding model (`lfm2decision`): the trunk under its GGUF names with centred three-tap
+  convolutions and non-causal attention, laya's head blocks and scorer. The API renders the template, cuts the
+  question and option pieces to their budgets and the state to the room left, and sends the tokens with their
+  `[MASK]` markers (`RequestMessage::DecisionTokens`).
+- The profile was first dropped: the non-causal check written for Qwen3.5's types refused `lfm2`; it does not apply
+  to an encoder.
+- Prompt token counts equal on all six requests (152 / 224 / 1496 / 37 / 1055 / 16384); same choice on 11 of 12
+  questions, worst difference 2.0e-2. The other is a near-tie of 40 options (0.0562 against 0.0532 at the top),
+  which a 4.3e-3 difference flips.
+
+Implication: lfm2-d1-omni is supported for text (#672). Images and audio, through its mmproj, stay open.

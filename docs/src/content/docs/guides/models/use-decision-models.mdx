@@ -20,7 +20,7 @@ laya's `multilingual/` and `typed-decisions/` variants load from a local copy of
 
 ### Chat models with a decision profile
 
-Some decision models are chat models fine-tuned to answer with the code of an option. Their GGUFs, as llama.cpp's converter writes them, carry a decision profile: `<arch>.decision.type`, a `systemone` chat template that renders a question as a prompt, and temperatures. Such a GGUF loads like any other, and `/v1/decisions` then renders each question with that template and reads the next-token logits of one label token per option (no text is generated). These types are supported: `nimble`, `openjev`, `lev`, `pplx-decider`, `vllm-d3`, `h2o-lightning`, `lfm2-d1`, `kev`, `clef` and `vllm-decision2`.
+Some decision models are chat models fine-tuned to answer with the code of an option. Their GGUFs, as llama.cpp's converter writes them, carry a decision profile: `<arch>.decision.type`, a `systemone` chat template that renders a question as a prompt, and temperatures. Such a GGUF loads like any other, and `/v1/decisions` then renders each question with that template and reads the next-token logits of one label token per option (no text is generated). These types are supported: `nimble`, `openjev`, `lev`, `pplx-decider`, `vllm-d3`, `h2o-lightning`, `lfm2-d1`, `kev`, `clef`, `vllm-decision2` and `lfm2-d1-omni`.
 
 ```bash
 inference serve --format gguf -m <repo or folder> -f <file>.gguf
@@ -38,7 +38,9 @@ inference serve --format gguf -m <repo or folder> -f <file>.gguf
 
 `vllm-decision2` (its own architecture over Qwen3) scores each question in its own prompt with an option head at the end of each option and of the question, and checks requests as its reference does (a state, instructions and descriptions that are text, an object or an array; at least two choice options). Load it from llama.cpp's conversion of the safetensors checkpoint (`convert_hf_to_gguf.py`): the GGUFs vllm-sr publishes use another layout, which llama.cpp does not load either. Like `kev` and `clef`, it answers decisions only.
 
-The other llama.cpp decision types (`granite-switch`, `lfm2-d1-omni`) are not supported, and no decision type takes images yet.
+`lfm2-d1-omni` (LiquidAI's d1-omni, an LFM2 encoder read both ways under a laya-style head) loads as a decision model of its own, not a chat model. Its prompt is cut to the budgets llama.cpp uses: the question and each option to a share of the options' budget, the state to what the 16384-token context leaves. It takes text only for now.
+
+The other llama.cpp decision type, `granite-switch`, is not supported, and no decision type takes images or audio yet.
 
 ## Asking questions
 

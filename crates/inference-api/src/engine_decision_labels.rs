@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::future::join_all;
 use indexmap::IndexMap;
-use inference_core::decision::{JointLayout, LabelDecision, QuestionKind};
+use inference_core::decision::{DecisionPrompt, JointLayout, LabelDecision, QuestionKind};
 use inference_core::{
     CustomLogitsProcessor, InferenceRs, JointDecisionRequest, NormalRequest, Request,
     RequestMessage, Response, SamplingParams,
@@ -20,7 +20,7 @@ use crate::{
     engine_decision::{
         PythonJson, first_max, invalid, kind_of, required_instructions, required_kind,
     },
-    engine_embeddings::EmbeddingError,
+    engine_embeddings::{EmbeddingError, fetch},
     openai::{DecisionAnswer, DecisionQuestionType, DecisionRequest, DecisionRequestQuestion},
     operations::{self, DetokenizeRequest, TokenizeRequest},
     types::SharedInferenceRsState,
@@ -67,6 +67,21 @@ const CLEF_MARKER_ESCAPED: &str = "<<clef ";
 const CLEF_SEP: &str = "<<clef:sep>>";
 const CLEF_MARK_QUESTION: &str = "<<clef:question>>";
 const CLEF_MARK_OPTION: &str = "<<clef:option>>";
+// d1-omni's template marks its pieces so they are cut to token budgets; the input's own markers are escaped
+const D1OMNI_MARKER: &str = "<<d1omni:";
+const D1OMNI_MARKER_ESCAPED: &str = "<<d1omni ";
+const D1OMNI_SEP: &str = "<<d1omni:sep>>";
+const D1OMNI_MARK_STATE: &str = "<<d1omni:state>>";
+const D1OMNI_MARK_QUESTION: &str = "<<d1omni:question>>";
+const D1OMNI_MARK_OPTION: &str = "<<d1omni:option>>";
+// the model's max_length; the options share up to half, at least `D1OMNI_MIN_OPTION_BUDGET`
+const D1OMNI_MAX_TOKENS: usize = 16384;
+const D1OMNI_MIN_OPTION_BUDGET: usize = 96;
+const D1OMNI_OPTION_TOKENS: usize = 24;
+const D1OMNI_OPTION_BASE: usize = 32;
+const D1OMNI_OPTION_OVERHEAD: usize = 3;
+const D1OMNI_MIN_OPTION_TOKENS: usize = 2;
+const D1OMNI_MIN_QUESTION_TOKENS: usize = 16;
 
 /// A question as the template reads it: its id, type and instructions, and each option's key and description.
 struct LabelQuestion {
@@ -168,9 +183,13 @@ fn parse(
             .map(|key| {
                 // h2o-lightning also reads the descriptions under `yes` and `no`
                 let alias = if *key == NOUL_TRUE { NOUL_YES } else { NOUL_NO };
-                let description = criteria
-                    .get(*key)
-                    .or_else(|| relaxed.then(|| criteria.get(alias)).flatten());
+                let description = criteria.get(*key).or_else(|| {
+                    profile
+                        .family
+                        .noul_aliases()
+                        .then(|| criteria.get(alias))
+                        .flatten()
+                });
                 (key.to_string(), description.cloned().unwrap_or(Value::Null))
             })
             .collect(),
@@ -675,6 +694,139 @@ fn joint_pieces(
     Ok(pieces)
 }
 
+/// `value` with special token spellings broken in every string and object key (d1-omni's `prompt.py` `escape`).
+fn escape_values(value: &Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(escape_special_tokens(text)),
+        Value::Array(items) => Value::Array(items.iter().map(escape_values).collect()),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (escape_special_tokens(k), escape_values(v)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// The most tokens an option and the question may keep: the options share `max(96, min(24 n + 32, 16384 / 2))`, less
+/// three tokens of framing each.
+fn d1omni_budgets(n_options: usize) -> (usize, usize) {
+    let budget = D1OMNI_MIN_OPTION_BUDGET
+        .max((D1OMNI_OPTION_TOKENS * n_options + D1OMNI_OPTION_BASE).min(D1OMNI_MAX_TOKENS / 2));
+    let option_max = D1OMNI_MIN_OPTION_TOKENS
+        .max(budget.saturating_sub(D1OMNI_OPTION_OVERHEAD * n_options) / n_options.max(1));
+    (option_max, D1OMNI_MIN_QUESTION_TOKENS.max(budget))
+}
+
+/// d1-omni's prompt for one question, as llama.cpp's server builds it: the template's pieces tokenized one by one,
+/// the question and each option cut to their budgets, the state to the room the rest leaves.
+async fn d1omni_prompt(
+    state: &SharedInferenceRsState,
+    profile: &LabelDecision,
+    request_state: &Value,
+    question: &LabelQuestion,
+    model: Option<&str>,
+) -> Result<DecisionPrompt, EmbeddingError> {
+    let input = json!({
+        "id": question.id,
+        "type": question.kind.name(),
+        "instructions": question.instructions,
+        "state": request_state,
+        "options": render_options(profile, question, 0),
+    });
+    let mut input = replace_text(&escape_values(&input), D1OMNI_MARKER, D1OMNI_MARKER_ESCAPED);
+    input["audio"] = json!(false);
+    input["images"] = json!([]);
+    input["sep"] = json!(D1OMNI_SEP);
+    input["mark_state"] = json!(D1OMNI_MARK_STATE);
+    input["mark_question"] = json!(D1OMNI_MARK_QUESTION);
+    input["mark_option"] = json!(D1OMNI_MARK_OPTION);
+    let prompt = render_template(profile, &input).map_err(|e| {
+        invalid(
+            format!("rendering the decision prompt failed: {e}"),
+            "questions".into(),
+        )
+    })?;
+    let n = question.options.len();
+    let (option_max, question_max) = d1omni_budgets(n);
+    let mut pieces = prompt.split(D1OMNI_SEP);
+    // the media markers come first; text requests have none
+    if pieces.next() != Some("") {
+        return Err(layout_error());
+    }
+    let (mut head, mut body, mut tail) = (Vec::new(), None, Vec::new());
+    for piece in pieces {
+        let (text, limit, is_state) = if let Some(text) = piece.strip_prefix(D1OMNI_MARK_STATE) {
+            (text, None, true)
+        } else if let Some(text) = piece.strip_prefix(D1OMNI_MARK_QUESTION) {
+            (text, Some(question_max), false)
+        } else if let Some(text) = piece.strip_prefix(D1OMNI_MARK_OPTION) {
+            (text, Some(option_max), false)
+        } else {
+            (piece, None, false)
+        };
+        let mut tokens = tokenize(state, model, text.to_string()).await?;
+        if let Some(limit) = limit {
+            tokens.truncate(limit);
+        }
+        match (is_state, &body) {
+            (true, None) => body = Some(tokens),
+            (true, Some(_)) => return Err(layout_error()),
+            (false, None) => head.extend(tokens),
+            (false, Some(_)) => tail.extend(tokens),
+        }
+    }
+    let mut body = body.ok_or_else(layout_error)?;
+    body.truncate(D1OMNI_MAX_TOKENS.saturating_sub(head.len() + tail.len()));
+    let mut ids = head;
+    ids.extend(body);
+    ids.extend(tail);
+    ids.truncate(D1OMNI_MAX_TOKENS);
+    let marker = profile.marker.ok_or_else(layout_error)?;
+    let markers = ids
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| **token == marker)
+        .map(|(i, _)| i as u32)
+        .collect::<Vec<_>>();
+    if markers.len() != n {
+        return Err(invalid(
+            "the options do not fit in the context",
+            "questions".into(),
+        ));
+    }
+    Ok(DecisionPrompt {
+        ids,
+        markers,
+        kind: question.kind,
+    })
+}
+
+/// d1-omni's marker logits for one question, from the model's decision pass over its prompt.
+async fn score_markers(
+    state: &SharedInferenceRsState,
+    profile: &LabelDecision,
+    request_state: &Value,
+    question: &LabelQuestion,
+    model: Option<&str>,
+) -> Result<(Vec<f32>, usize), EmbeddingError> {
+    let prompt = d1omni_prompt(state, profile, request_state, question, model).await?;
+    let result = fetch(
+        state.clone(),
+        RequestMessage::DecisionTokens { prompt },
+        model,
+        false,
+    )
+    .await
+    .map_err(EmbeddingError::Internal)?;
+    let logits = result
+        .embedding
+        .get(..question.options.len())
+        .ok_or_else(|| EmbeddingError::Internal(anyhow::anyhow!(SCORING_FAILED)))?
+        .to_vec();
+    Ok((logits, result.prompt_tokens))
+}
+
 fn layout_error() -> EmbeddingError {
     EmbeddingError::Internal(anyhow::anyhow!("unexpected layout of the decision prompt"))
 }
@@ -1047,6 +1199,22 @@ pub(crate) async fn decide(
         true => h2o_state(state, model, profile, &request.state).await?,
         false => request.state.clone(),
     };
+    if profile.family.scores_markers() {
+        let runs = join_all(
+            questions
+                .iter()
+                .map(|question| score_markers(state, profile, &input_state, question, model)),
+        )
+        .await;
+        let mut answers = IndexMap::with_capacity(questions.len());
+        let mut input_tokens = 0usize;
+        for (question, run) in questions.iter().zip(runs) {
+            let (logits, n) = run?;
+            answers.insert(question.id.clone(), answer(profile, question, &[logits]));
+            input_tokens = input_tokens.saturating_add(n);
+        }
+        return Ok((answers, input_tokens));
+    }
     if profile.family.joint() {
         let (scores, input_tokens) = match profile.family.joint_per_question() {
             // one prompt each, run together
@@ -1373,6 +1541,18 @@ mod tests {
             };
         assert_eq!(first(json!({"true": "yes", "false": "no"})), "true");
         assert_eq!(first(json!({"false": "no", "true": "yes"})), "false");
+    }
+
+    #[test]
+    fn d1omni_budgets_follow_llama_cpp() {
+        // 3 options: max(96, 104) = 104 shared, (104 - 9) / 3 = 31 an option
+        assert_eq!(d1omni_budgets(3), (31, 104));
+        // 1 option: the 96 floor, (96 - 3) / 1
+        assert_eq!(d1omni_budgets(1), (93, 96));
+        // 40 options: 992 shared, (992 - 120) / 40 = 21
+        assert_eq!(d1omni_budgets(40), (21, 992));
+        // 400 options: capped at half the context, (8192 - 1200) / 400 = 17
+        assert_eq!(d1omni_budgets(400), (17, 8192));
     }
 
     #[test]

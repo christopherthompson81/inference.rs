@@ -410,6 +410,11 @@ impl SupportedArch for EmbeddingLoaderType {
                 modalities: &[Embedding],
                 examples: &[ex!("convaiinnovations/laya")],
             },
+            Self::Lfm2Decision => ArchMetadata {
+                families: &["d1-omni"],
+                modalities: &[Embedding],
+                examples: &[ex!("LiquidAI/d1-omni-600M-GGUF")],
+            },
         }
     }
 }
