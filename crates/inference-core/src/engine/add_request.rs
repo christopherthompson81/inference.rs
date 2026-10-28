@@ -593,6 +593,17 @@ impl Engine {
 
         let pipeline = get_mut_arcmutex!(self.pipeline);
         let category = pipeline.category();
+        if !request.return_raw_logits
+            && pipeline
+                .get_metadata()
+                .label_decision
+                .as_ref()
+                .is_some_and(|decision| decision.family.reads_pointer())
+        {
+            return Err(Box::new(Response::ValidationError(
+                "this model's output is a decision head: it answers decisions, not generation requests".into(),
+            )));
+        }
         let options_check = match &request.messages {
             RequestMessage::SpeechGeneration { options, .. } => {
                 pipeline.validate_speech_options(options)

@@ -1726,7 +1726,18 @@ impl Qwen3_5TextModel {
                 mapper.set_nm_device(vb_m.pp("norm"), false),
             )?),
         };
-        let lm_head = if !tie {
+        let lm_head = if let Some(size) = cfg.decision_head_size {
+            ReplicatedLayer::new(
+                cfg.hidden_size,
+                size,
+                &cfg.quantization_config,
+                true,
+                mapper.set_nm_device(
+                    vb.pp(inference_nn::decision::DECISION_HEAD),
+                    normal_loading_metadata.loading_isq,
+                ),
+            )?
+        } else if !tie {
             ReplicatedLayer::new(
                 cfg.hidden_size,
                 cfg.vocab_size,

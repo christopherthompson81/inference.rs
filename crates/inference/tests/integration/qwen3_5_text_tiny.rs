@@ -193,6 +193,34 @@ async fn a_paged_gpu_bidirectional_prompt_reaches_back_from_later_tokens() -> an
     assert_bidirectional_prompt(true).await
 }
 
+// wider than the vocabulary, so every prompt token indexes a row
+const DECISION_HEAD_SIZE: usize = 300;
+
+#[tokio::test]
+async fn a_decision_head_replaces_the_vocabulary_logits() -> anyhow::Result<()> {
+    let checkpoint = tiny_qwen3_5_text_with(
+        HEAD_DIM,
+        false,
+        serde_json::json!({"decision_head_size": DECISION_HEAD_SIZE}),
+    )?;
+    let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .with_force_cpu()
+        .build()
+        .await?;
+    let scored = model
+        .prompt_logits(PromptLogitsRequest {
+            model: None,
+            prompt: PromptInput::Tokens(PROMPT.to_vec()),
+            output: LogitsOutput::Logits,
+        })
+        .await?;
+    assert_eq!(scored.vocab_size, DECISION_HEAD_SIZE);
+    let rows = scored.logits.expect("the request asked for logits");
+    assert!(rows.iter().all(|v| v.is_finite()) && rows.iter().any(|v| *v != 0.0));
+    Ok(())
+}
+
 const GRAPH_MAX_LEN: usize = 8;
 const MTP_N_PREDICT: usize = 2;
 const DFLASH_BLOCK: usize = 4;

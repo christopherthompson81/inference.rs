@@ -1,5 +1,5 @@
 use super::{Loader, ModelKind, ModelPaths, QuantizationKind, TokenSource};
-use crate::decision::{LabelDecision, LabelFamily};
+use crate::decision::{KEV_OPTION_END, LabelDecision, LabelFamily};
 use crate::gguf::embedding_gguf::{
     DecoderEmbeddingGguf, EmbeddingGgufArchitecture, EmbeddingGgufPooling, add_encoder_specials,
     build_embedding_bindings, embedding_pooling, synthesize_embedding_config, task_adapter_prefix,
@@ -445,12 +445,19 @@ fn label_decision(
             score_bias.entry(n).or_insert_with(|| vec![0.0; n])[level] = value.to_f32()?;
         }
     }
-    let decision = LabelDecision::new(family, template, temperatures, score_bias, |code| {
+    let mut decision = LabelDecision::new(family, template, temperatures, score_bias, |code| {
         tokenizer
             .encode_fast(code, false)
             .map(|encoding| encoding.get_ids().to_vec())
     })
     .map_err(anyhow::Error::msg)?;
+    if family.reads_pointer() {
+        decision.option_end = Some(
+            tokenizer
+                .token_to_id(KEV_OPTION_END)
+                .with_context(|| format!("decision model has no `{KEV_OPTION_END}` token"))?,
+        );
+    }
     info!(
         "Decision model type `{kind}`, {} labels",
         decision.labels.len()

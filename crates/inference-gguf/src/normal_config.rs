@@ -1937,6 +1937,10 @@ fn qwen35_text_config(
     if metadata.optional_bool("attention.causal")? == Some(false) {
         config.insert("is_causal".into(), json!(false));
     }
+    // a decision head (kev's `cls.output`) projects the normed hidden states in place of the LM head
+    if let Some(size) = metadata.optional_usize("embedding_length_out")? {
+        config.insert("decision_head_size".into(), json!(size));
+    }
     Ok(config)
 }
 
@@ -3175,6 +3179,13 @@ mod tests {
         let native =
             inference_models_qwen::qwen3_5::TextConfig::from_json(&config.to_string()).unwrap();
         assert!(!native.is_causal);
+        assert_eq!(native.decision_head_size, None);
+
+        insert_u32(&mut metadata, architecture, "embedding_length_out", 512);
+        let config = synthesize_normal_config_value(&loader, &metadata, &tensors).unwrap();
+        let native =
+            inference_models_qwen::qwen3_5::TextConfig::from_json(&config.to_string()).unwrap();
+        assert_eq!(native.decision_head_size, Some(512));
     }
 
     #[test]

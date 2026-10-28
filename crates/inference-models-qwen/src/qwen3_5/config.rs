@@ -401,6 +401,9 @@ pub struct TextConfig {
     /// False for checkpoints whose full-attention layers read the prompt bidirectionally (the decision models').
     #[serde(default = "default_true")]
     pub is_causal: bool,
+    /// The width of a decision head that replaces the LM head (kev's `[q | k]` pointer projection, with a bias).
+    #[serde(default)]
+    pub decision_head_size: Option<usize>,
     #[serde(flatten)]
     pub flash_next: FlashNextConfig,
 }

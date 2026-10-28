@@ -653,6 +653,19 @@ fn bind_text(
         "output_norm.weight",
     );
     bind(inventory, bindings, "lm_head.weight", "output.weight");
+    let head = inference_nn::decision::DECISION_HEAD;
+    bind(
+        inventory,
+        bindings,
+        format!("{head}.weight"),
+        "cls.output.weight",
+    );
+    bind(
+        inventory,
+        bindings,
+        format!("{head}.bias"),
+        "cls.output.bias",
+    );
 
     for layer in inventory.layer_indices("blk.") {
         let native = format!("{model}.layers.{layer}");
@@ -1663,6 +1676,31 @@ mod tests {
                 "{target}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn a_decision_head_binds_beside_the_tied_embeddings() -> Result<()> {
+        let inventory = inventory(&[
+            ("token_embd.weight", &[32, 8]),
+            ("output_norm.weight", &[8]),
+            ("cls.output.weight", &[8, 4]),
+            ("cls.output.bias", &[4]),
+        ]);
+        let bindings = build_qwen_multimodal_bindings_from_inventory(
+            &inventory,
+            QwenMultimodalFamily::Qwen35,
+            None,
+            None,
+        )?;
+        let head = inference_nn::decision::DECISION_HEAD;
+        for (target, source) in [("weight", "cls.output.weight"), ("bias", "cls.output.bias")] {
+            assert!(matches!(
+                bindings.get(&format!("{head}.{target}")),
+                Some(GgufTensorBinding::Tensor(actual)) if actual == source
+            ));
+        }
+        assert!(bindings.get("lm_head.weight").is_none());
         Ok(())
     }
 
