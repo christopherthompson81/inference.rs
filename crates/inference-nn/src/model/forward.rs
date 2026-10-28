@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use inference_quant::QuantMethod;
-use inference_tensor::{Device, DeviceLocation, Tensor};
+use inference_tensor::{DType, Device, DeviceLocation, Tensor};
 
 use crate::{
     attention::FlashParams,
@@ -476,6 +476,10 @@ impl<'a> ModelForwardContext<'a> {
     /// discards this forward's logits.
     pub fn lm_head(&self, head: &dyn QuantMethod, xs: &Tensor) -> inference_tensor::Result<Tensor> {
         if self.needs_logits() {
+            // a GGUF head sums in f32 whatever it reads, so an f32 input keeps the logits from rounding to bf16
+            if head.get_qtensor().is_some() && xs.dtype() != DType::F32 {
+                return head.forward(&xs.to_dtype(DType::F32)?);
+            }
             return head.forward(xs);
         }
         let mut dims = xs.dims().to_vec();

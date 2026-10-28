@@ -95,6 +95,16 @@ pub fn write_tiny_gguf(
     out: &Path,
     extra: &[(&str, gguf_file::Value)],
 ) -> anyhow::Result<()> {
+    write_tiny_gguf_with_head(checkpoint, out, extra, GgmlDType::F32)
+}
+
+/// As [`write_tiny_gguf`], with the output head stored as `head`.
+pub fn write_tiny_gguf_with_head(
+    checkpoint: &Path,
+    out: &Path,
+    extra: &[(&str, gguf_file::Value)],
+    head: GgmlDType,
+) -> anyhow::Result<()> {
     let weights =
         inference_tensor::safetensors::load(checkpoint.join("model.safetensors"), &Device::Cpu)?;
     let mut tensors = Vec::new();
@@ -107,7 +117,12 @@ pub fn write_tiny_gguf(
         } else {
             tensor.clone()
         };
-        tensors.push((gguf, QTensor::quantize(&tensor, GgmlDType::F32)?));
+        let dtype = if gguf == "output.weight" {
+            head
+        } else {
+            GgmlDType::F32
+        };
+        tensors.push((gguf, QTensor::quantize(&tensor, dtype)?));
     }
     let metadata = [
         (
