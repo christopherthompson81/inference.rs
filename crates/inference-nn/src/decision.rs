@@ -299,6 +299,8 @@ pub enum LabelFamily {
     Lfm2D1,
     /// one prompt for every question, scored together by a joint head over the question and option spans
     Clef,
+    /// one prompt per question, scored by an option head at the end of each option span and of the question span
+    VllmDecision2,
 }
 
 impl LabelFamily {
@@ -314,6 +316,7 @@ impl LabelFamily {
             "h2o-lightning" => Self::H2oLightning,
             "lfm2-d1" => Self::Lfm2D1,
             "clef" => Self::Clef,
+            "vllm-decision2" => Self::VllmDecision2,
             _ => return None,
         })
     }
@@ -329,7 +332,9 @@ impl LabelFamily {
                     .collect(),
                 true,
             ),
-            Self::Kev | Self::H2oLightning | Self::Lfm2D1 | Self::Clef => (Vec::new(), false),
+            Self::Kev | Self::H2oLightning | Self::Lfm2D1 | Self::Clef | Self::VllmDecision2 => {
+                (Vec::new(), false)
+            }
             _ => {
                 let letters = || 'A'..='Z';
                 let codes = letters()
@@ -350,7 +355,23 @@ impl LabelFamily {
 
     /// All the questions share one prompt, which a joint head scores at once (clef).
     pub fn joint(self) -> bool {
-        self == Self::Clef
+        matches!(self, Self::Clef | Self::VllmDecision2)
+    }
+
+    /// A joint head that reads one question a prompt, so each question has its own prompt (vllm-decision2).
+    pub fn joint_per_question(self) -> bool {
+        self == Self::VllmDecision2
+    }
+
+    /// The request is checked as the reference checks it: a state, instructions and descriptions that are text, an
+    /// object or an array, non-empty instructions and option keys, at least two choice options.
+    pub fn strict_payloads(self) -> bool {
+        self == Self::VllmDecision2
+    }
+
+    /// A noul's options follow its criteria: true first when the criteria name `true` then `false`.
+    pub fn noul_criteria_order(self) -> bool {
+        self == Self::VllmDecision2
     }
 
     /// A choice's options are read sorted by key.
@@ -360,7 +381,7 @@ impl LabelFamily {
 
     /// The model's output is a decision head, so it answers decisions only.
     pub fn decision_only(self) -> bool {
-        matches!(self, Self::Kev | Self::Clef)
+        matches!(self, Self::Kev | Self::Clef | Self::VllmDecision2)
     }
 
     /// The labels follow each question's type and keys (d1's `prompt.py`), so they are chosen per question.
@@ -375,7 +396,7 @@ impl LabelFamily {
 
     /// A score's legend reports a non-text description as its key-sorted JSON.
     pub fn canonical_legend(self) -> bool {
-        self == Self::VllmD3
+        matches!(self, Self::VllmD3 | Self::VllmDecision2)
     }
 
     /// The template reads each option's label text (openjev's letters are implied by position).
@@ -446,7 +467,7 @@ impl LabelFamily {
 
     /// The confidence is one minus the normalized entropy, not TypeSafe's per-type formulas.
     pub fn entropy_confidence(self) -> bool {
-        self == Self::VllmD3
+        matches!(self, Self::VllmD3 | Self::VllmDecision2)
     }
 }
 

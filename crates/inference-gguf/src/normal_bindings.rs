@@ -40,6 +40,8 @@ pub fn build_normal_bindings(
     Ok(bindings)
 }
 
+const DECISION_HEAD_PREFIX: &str = "decision.";
+
 fn bind_root_tensors(
     archive: &GgufArchive,
     loader: &NormalLoaderType,
@@ -72,6 +74,12 @@ fn bind_root_tensors(
     );
     bind(archive, bindings, "lm_head.weight", "output.weight");
     bind(archive, bindings, "lm_head.bias", "output.bias");
+    // vllm-decision2's option head keeps llama.cpp's names
+    for name in archive.tensors().keys() {
+        if name.starts_with(DECISION_HEAD_PREFIX) {
+            bindings.insert(name.clone(), GgufTensorBinding::tensor(name.clone()));
+        }
+    }
     match loader {
         NormalLoaderType::Phi2 => {
             bind(

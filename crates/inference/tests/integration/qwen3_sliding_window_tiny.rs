@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use inference::{
-    Model, ModelDType, RequestBuilder, TextMessageRole, TextMessages, TextModelBuilder,
+    LogitsOutput, Model, ModelDType, PromptInput, PromptLogitsRequest, RequestBuilder,
+    TextMessageRole, TextMessages, TextModelBuilder,
 };
 use inference_models_qwen::{qwen3, qwen3_moe};
 use inference_nn::paged_attention::AttentionImplementation;
@@ -196,4 +197,53 @@ async fn a_qwen3_moe_window_reaches_only_its_sliding_layers() -> anyhow::Result<
         },
     )
     .await
+}
+
+// within the tiny model's 32-wide hidden state, so each prompt token indexes a row
+const OPTION_HEAD_PROMPT: [u32; 4] = [3, 4, 5, 6];
+
+// vllm-decision2's option head loads after the stack, whose output is then the normed hidden state
+#[tokio::test]
+async fn a_qwen3_option_head_returns_the_hidden_states() -> anyhow::Result<()> {
+    let mut config = tiny_config()?;
+    config["option_head"] = serde_json::json!({"head_dim": 8, "norm_eps": 1e-5});
+    let cfg: qwen3::Config = serde_json::from_value(config.clone())?;
+    let staging = tempfile::tempdir()?;
+    let config_path = staging.path().join("config.json");
+    std::fs::write(&config_path, serde_json::to_string(&config)?)?;
+    let mut files = recording::fixture_files(LLAMA)?;
+    files.retain(|path| path.file_name().is_some_and(|name| name != "config.json"));
+    files.push(config_path);
+    files.push(TOKENIZER.into());
+    let files = files.iter().map(|path| path.as_path()).collect::<Vec<_>>();
+    let checkpoint = recording::record_checkpoint_with_shapes(
+        &files,
+        cfg.num_hidden_layers,
+        &[],
+        HashMap::new(),
+        |vb, metadata| {
+            qwen3::Model::new(
+                &cfg.decoder_spec(),
+                vb,
+                true,
+                metadata,
+                AttentionImplementation::Eager,
+            )
+            .map(|_| ())
+        },
+    )?;
+    let model: Model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .with_force_cpu()
+        .build()
+        .await?;
+    let scored = model
+        .prompt_logits(PromptLogitsRequest {
+            model: None,
+            prompt: PromptInput::Tokens(OPTION_HEAD_PROMPT.to_vec()),
+            output: LogitsOutput::Logits,
+        })
+        .await?;
+    assert_eq!(scored.vocab_size, cfg.hidden_size);
+    Ok(())
 }

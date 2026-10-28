@@ -229,6 +229,8 @@ pub struct DecoderSpec {
     pub lm_head_bias: bool,
     /// The lm_head is stored unquantized even in a quantized checkpoint.
     pub unquantized_lm_head: bool,
+    /// A decision head after the stack (vllm-decision2); the model then outputs the normed hidden states.
+    pub option_head: Option<crate::option_head::OptionHeadConfig>,
     /// Eager attention runs in f32 whatever the model's dtype.
     pub eager_attention_f32: bool,
 }
@@ -1530,6 +1532,7 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
 pub struct CausalLm<A = AttentionBlock, F = Ffn> {
     stack: DecoderStack<A, F>,
     lm_head: Arc<dyn QuantMethod>,
+    option_head: Option<crate::option_head::OptionHead>,
     final_logit_softcap: Option<f32>,
     mlp: MlpKind,
     cache: EitherCache,
@@ -1545,14 +1548,23 @@ impl CausalLm {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
-        Self::new_inner(
+        let mut model = Self::new_inner(
             spec,
             vb.pp("model"),
             vb.pp("lm_head"),
             is_gptx,
             normal_loading_metadata,
             attention_mechanism,
-        )
+        )?;
+        if let Some(head) = &spec.option_head {
+            let vb = model.stack.mapper.set_nm_device(vb.pp("decision"), false);
+            model.option_head = Some(crate::option_head::OptionHead::new(
+                head,
+                spec.hidden_size,
+                vb,
+            )?);
+        }
+        Ok(model)
     }
 
     /// As [`CausalLm::new`] with the stack and head under the prefixes a multimodal checkpoint gives them.
@@ -1667,6 +1679,7 @@ impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {
         Ok(Self {
             stack,
             lm_head,
+            option_head: None,
             final_logit_softcap: shape.final_logit_softcap,
             mlp: shape.mlp,
             cache: EitherCache::Normal(NormalCache::from_types(cache_types)),
@@ -1739,6 +1752,9 @@ impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {
             .stack
             .forward_hooked(xs, masks, Some(cache), ctx, after_layer)?;
         let xs = ctx.logits(&xs)?;
+        if self.option_head.is_some() {
+            return Ok(xs);
+        }
         let logits = ctx.lm_head(&*self.lm_head, &xs)?;
         match self.final_logit_softcap {
             Some(cap) => inference_quant::softcap(&logits, cap)?.to_dtype(logits.dtype()),
@@ -1777,6 +1793,16 @@ impl<A: LayerAttention, F: LayerFfn> crate::speculative::SpeculativeTargetMixin 
 impl<A: LayerAttention, F: LayerFfn> NormalModel for CausalLm<A, F> {
     fn forward(&self, input_ids: &Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
         self.forward(input_ids, ctx)
+    }
+    fn joint_decision(
+        &self,
+        hidden: &Tensor,
+        layout: &crate::decision::JointLayout,
+    ) -> Result<Vec<f32>> {
+        match &self.option_head {
+            Some(head) => head.forward(hidden, layout),
+            None => inference_tensor::bail!("this model has no joint decision head"),
+        }
     }
     fn cache(&self) -> &EitherCache {
         &self.cache

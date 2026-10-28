@@ -20,7 +20,7 @@ laya's `multilingual/` and `typed-decisions/` variants load from a local copy of
 
 ### Chat models with a decision profile
 
-Some decision models are chat models fine-tuned to answer with the code of an option. Their GGUFs, as llama.cpp's converter writes them, carry a decision profile: `<arch>.decision.type`, a `systemone` chat template that renders a question as a prompt, and temperatures. Such a GGUF loads like any other, and `/v1/decisions` then renders each question with that template and reads the next-token logits of one label token per option (no text is generated). These types are supported: `nimble`, `openjev`, `lev`, `pplx-decider`, `vllm-d3`, `h2o-lightning`, `lfm2-d1`, `kev` and `clef`.
+Some decision models are chat models fine-tuned to answer with the code of an option. Their GGUFs, as llama.cpp's converter writes them, carry a decision profile: `<arch>.decision.type`, a `systemone` chat template that renders a question as a prompt, and temperatures. Such a GGUF loads like any other, and `/v1/decisions` then renders each question with that template and reads the next-token logits of one label token per option (no text is generated). These types are supported: `nimble`, `openjev`, `lev`, `pplx-decider`, `vllm-d3`, `h2o-lightning`, `lfm2-d1`, `kev`, `clef` and `vllm-decision2`.
 
 ```bash
 inference serve --format gguf -m <repo or folder> -f <file>.gguf
@@ -36,7 +36,9 @@ inference serve --format gguf -m <repo or folder> -f <file>.gguf
 
 `clef` (its own `clef` architecture over Qwen3.5) decides every question of a request together: one prompt lists them all, and a joint head scores each option from the question and option spans of that prompt. Like `kev`, it answers decisions only.
 
-The other llama.cpp decision types (`granite-switch`, `lfm2-d1-omni`, `vllm-decision2`) are not supported, and no decision type takes images yet.
+`vllm-decision2` (its own architecture over Qwen3) scores each question in its own prompt with an option head at the end of each option and of the question, and checks requests as its reference does (a state, instructions and descriptions that are text, an object or an array; at least two choice options). Load it from llama.cpp's conversion of the safetensors checkpoint (`convert_hf_to_gguf.py`): the GGUFs vllm-sr publishes use another layout, which llama.cpp does not load either. Like `kev` and `clef`, it answers decisions only.
+
+The other llama.cpp decision types (`granite-switch`, `lfm2-d1-omni`) are not supported, and no decision type takes images yet.
 
 ## Asking questions
 
