@@ -23,6 +23,7 @@ pub mod conv;
 mod convert;
 pub mod cpu;
 pub mod cpu_backend;
+mod cpu_lease;
 #[cfg(feature = "cuda")]
 pub mod cuda_backend;
 mod custom_op;

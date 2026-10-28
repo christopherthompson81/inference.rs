@@ -1469,6 +1469,7 @@ impl Map2 for MatMul {
         let dst_cs = dst_strides[1];
 
         let mut dst = vec![T::zero(); b * m * n];
+        // gemm's result follows its thread count, so it keeps the pool's width rather than the lease's
         let num_threads = crate::utils::get_num_threads();
         let parallelism = if num_threads > 1 {
             Parallelism::Rayon(num_threads)
