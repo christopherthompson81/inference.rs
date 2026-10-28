@@ -381,3 +381,29 @@ Finding:
 
 Implication: clef is supported for text (#670). The hidden rows go to the host between the two steps (16 KB a token
 at 4096 wide), fine for its prompts; image input stays open.
+
+## Run 18 - 2026-10-28 11:16
+
+Question: does vllm-decision2 (`vllm-sr/Decision-2.0-Kai-0.6B`, Qwen3 with an option head) answer as llama.cpp does?
+
+Command: the published `vllm-sr/Decision-2.0-Kai-0.6B-GGUF` (Q8_0) in `llama-server`; then llama.cpp's
+`convert_hf_to_gguf.py --outtype q8_0` on the safetensors repo, served with `-np 1 -b 8192 -ub 8192 -c 16384`;
+`server_ref.py` over the shared set and `server_ref_d2.py` with one more request (noul criteria listing `true` first,
+a 5-level score with an object level, object instructions and descriptions), and one with a numeric instruction;
+ours with `compare.py` / `compare_d2.py`.
+
+Finding:
+- vllm-sr's own GGUFs are another layout (`general.architecture qwen3`, `decision.type decision2`,
+  `decision2.candidate_*` tensors, no `systemone` template): llama.cpp refuses them (`wrong number of tensors;
+  expected 320, got 310`). Only llama.cpp's conversion is supported, here and there.
+- The conversion: `general.architecture vllm-decision2` with qwen3's keys under it, `decision.{option_norm,
+  query_norm, key, query, option_mlp, query_mlp, scorer_out}` in F32 (head width 256), LayerNorm eps 1e-5, a score bias
+  for 5 levels, and a template with one question per prompt whose option spans come before the question span.
+- Ours renames the architecture to `qwen3`, loads the head on the shared decoder (its output is then the normed
+  hidden state), and reuses clef's piece layout and `JointDecision` request, one prompt per question. The first run
+  failed on that order: options were tied to the question before them; in a one-question prompt they now belong to
+  it.
+- Prompt token counts equal (284 / 361 / 1568 / 342), same choice on all 11 questions, worst difference 2.1e-2;
+  the key-sorted legend is the same; both refuse the numeric instruction with the same check.
+
+Implication: vllm-decision2 is supported from llama.cpp's conversion (#671).

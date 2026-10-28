@@ -62,6 +62,10 @@ const CLEF_ARCHITECTURE: &str = "clef";
 const CLEF_TRUNK: &str = "qwen35";
 const JOINT_WIDTH_TENSOR: &str = "decision.proj_memory.weight";
 const JOINT_FEEDFORWARD_TENSOR: &str = "dec.blk.0.ffn_up.weight";
+// vllm-decision2's GGUF is Qwen3 under its own name, with an option head after the trunk
+const DECISION2_ARCHITECTURE: &str = "vllm-decision2";
+const DECISION2_TRUNK: &str = "qwen3";
+const OPTION_HEAD_TENSOR: &str = "decision.key.weight";
 const DECISION_TEMPLATE_KEY: &str = "tokenizer.chat_template.systemone";
 // llama.cpp's bounds on a score's level count
 const SCORE_BIAS_LEVELS: std::ops::RangeInclusive<usize> = 2..=255;
@@ -423,6 +427,23 @@ fn joint_head_config(config: &str, archive: &inference_quant::GgufArchive) -> Re
     Ok(serde_json::to_string(&config)?)
 }
 
+/// The config with vllm-decision2's option head: its width from the key projection, its norm epsilon from the metadata.
+fn option_head_config(config: &str, archive: &inference_quant::GgufArchive) -> Result<String> {
+    let eps_key = format!("{DECISION2_TRUNK}.attention.layer_norm_epsilon");
+    let norm_eps = archive
+        .metadata_value(&eps_key)
+        .with_context(|| format!("decision model has no `{eps_key}`"))?
+        .to_f32()?;
+    let head_dim = *archive
+        .tensor_info(OPTION_HEAD_TENSOR)?
+        .shape()
+        .first()
+        .with_context(|| format!("`{OPTION_HEAD_TENSOR}` has no shape"))?;
+    let mut config: serde_json::Value = serde_json::from_str(config)?;
+    config["option_head"] = serde_json::json!({"head_dim": head_dim, "norm_eps": norm_eps});
+    Ok(serde_json::to_string(&config)?)
+}
+
 /// The label-coded decision profile a GGUF carries (`<arch>.decision.*` and its `systemone` template), if any.
 fn label_decision(
     metadata: &HashMap<String, inference_tensor::quantized::gguf_file::Value>,
@@ -565,6 +586,9 @@ impl GGUFLoader {
         // a converter may leave out the causal flag of a family trained with bidirectional prompts
         let config = match &label_decision {
             Some(decision) if decision.family.non_causal() => bidirectional_config(&config)?,
+            Some(decision) if decision.family.joint_per_question() => {
+                option_head_config(&config, archive)?
+            }
             Some(decision) if decision.family.joint() => joint_head_config(&config, archive)?,
             _ => config,
         };
@@ -679,6 +703,9 @@ impl GGUFLoader {
         }
         if is_architecture(&archive, CLEF_ARCHITECTURE) {
             archive.rename_architecture(CLEF_TRUNK)?;
+        }
+        if is_architecture(&archive, DECISION2_ARCHITECTURE) {
+            archive.rename_architecture(DECISION2_TRUNK)?;
         }
         if is_architecture(&archive, JINA_BERT_V3) {
             merge_task_adapters(&mut archive, paths.get_weight_filenames())?;

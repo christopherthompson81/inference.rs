@@ -181,10 +181,26 @@ fn parse(
             ));
         }
     };
+    if profile.family.strict_payloads() {
+        strict_question(
+            id,
+            kind,
+            &instructions,
+            question.criteria.as_ref(),
+            &options,
+        )?;
+    }
     if kind == QuestionKind::Choice && profile.family.sorts_choices() {
         options.sort_by(|a, b| a.0.cmp(&b.0));
     }
-    if kind == QuestionKind::Noul && profile.family.noul_true_first() {
+    let criteria_true_first = matches!(
+        question.criteria.as_ref(),
+        Some(Value::Object(criteria)) if criteria.len() == 2 && criteria.keys().next().map(String::as_str) == Some(NOUL_TRUE)
+    );
+    if kind == QuestionKind::Noul
+        && (profile.family.noul_true_first()
+            || (profile.family.noul_criteria_order() && criteria_true_first))
+    {
         options.swap(0, 1);
     }
     if options.len() > profile.max_options() {
@@ -233,6 +249,59 @@ fn parse(
         label_texts,
         label_groups,
     })
+}
+
+/// Text, an object or an array: what vllm-decision2's reference takes as a state, instructions or description.
+fn is_payload(value: &Value) -> bool {
+    matches!(value, Value::String(_) | Value::Object(_) | Value::Array(_))
+}
+
+/// vllm-decision2's checks on a question, as its reference makes them.
+fn strict_question(
+    id: &str,
+    kind: QuestionKind,
+    instructions: &Value,
+    criteria: Option<&Value>,
+    options: &[(String, Value)],
+) -> Result<(), EmbeddingError> {
+    let fail = |message: &str| Err(invalid(message, format!("questions.{id}")));
+    if !is_payload(instructions) || instructions.as_str() == Some("") {
+        return fail("`instructions` must be non-empty text, an object or an array");
+    }
+    match kind {
+        QuestionKind::Choice => {
+            if options.iter().any(|(key, description)| {
+                key.is_empty() || !(description.is_null() || is_payload(description))
+            }) {
+                return fail(
+                    "option keys must be non-empty, descriptions must be null, text, an object or an array",
+                );
+            }
+            if options.len() < 2 {
+                return fail("`criteria` must have at least 2 options");
+            }
+        }
+        QuestionKind::Score => {
+            if options
+                .iter()
+                .any(|(_, description)| !is_payload(description))
+            {
+                return fail("level descriptions must be text, an object or an array");
+            }
+        }
+        QuestionKind::Noul => {
+            if let Some(Value::Object(criteria)) = criteria
+                && criteria.iter().any(|(key, description)| {
+                    !NOUL_KEYS.contains(&key.as_str()) || !is_payload(description)
+                })
+            {
+                return fail(
+                    "`criteria` may only describe `false` and `true` with text, an object or an array",
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn sort_keys(value: &Value) -> Value {
@@ -631,12 +700,16 @@ async fn decide_joint(
         }
         match role {
             Piece::Question(kind) => layout.questions.push((kind, span)),
+            // an option belongs to the question before it; a prompt of one question may list them first
             Piece::Option => {
-                let question = layout
-                    .questions
-                    .len()
-                    .checked_sub(1)
-                    .ok_or_else(layout_error)?;
+                let question = match questions.len() {
+                    1 => 0,
+                    _ => layout
+                        .questions
+                        .len()
+                        .checked_sub(1)
+                        .ok_or_else(layout_error)?,
+                };
                 layout.options.push((question, span));
             }
             Piece::Text => {}
@@ -964,13 +1037,41 @@ pub(crate) async fn decide(
     if request.state.is_null() && !profile.family.accepts_null_state() {
         return Err(invalid("`state` must be provided", "state".into()));
     }
+    if profile.family.strict_payloads() && !is_payload(&request.state) {
+        return Err(invalid(
+            "`state` must be text, an object or an array",
+            "state".into(),
+        ));
+    }
     let input_state = match profile.family.prepares_texts() {
         true => h2o_state(state, model, profile, &request.state).await?,
         false => request.state.clone(),
     };
     if profile.family.joint() {
-        let (scores, input_tokens) =
-            decide_joint(state, profile, &input_state, &questions, model).await?;
+        let (scores, input_tokens) = match profile.family.joint_per_question() {
+            // one prompt each, run together
+            true => {
+                let runs = join_all(questions.iter().map(|question| {
+                    decide_joint(
+                        state,
+                        profile,
+                        &input_state,
+                        std::slice::from_ref(question),
+                        model,
+                    )
+                }))
+                .await;
+                let mut scores = Vec::with_capacity(questions.len());
+                let mut tokens = 0usize;
+                for run in runs {
+                    let (mut own, n) = run?;
+                    scores.append(&mut own);
+                    tokens = tokens.saturating_add(n);
+                }
+                (scores, tokens)
+            }
+            false => decide_joint(state, profile, &input_state, &questions, model).await?,
+        };
         let answers = questions
             .iter()
             .zip(scores)
@@ -1223,6 +1324,55 @@ mod tests {
                 ("E", Piece::Text),
             ]
         );
+    }
+
+    #[test]
+    fn decision2_checks_payloads_and_follows_the_noul_criteria() {
+        let d2 = profile(LabelFamily::VllmDecision2, "");
+        let parse_with = |kind, instructions: Value, criteria: Value| {
+            let question = DecisionRequestQuestion {
+                kind: Some(kind),
+                instructions,
+                criteria: Some(criteria),
+            };
+            parse(&d2, "q", &question)
+        };
+        let two = json!({"a": null, "b": null});
+        assert!(parse_with(DecisionQuestionType::Choice, json!(5), two.clone()).is_err());
+        assert!(parse_with(DecisionQuestionType::Choice, json!(""), two.clone()).is_err());
+        assert!(
+            parse_with(
+                DecisionQuestionType::Choice,
+                json!("Which?"),
+                json!({"a": null})
+            )
+            .is_err()
+        );
+        assert!(
+            parse_with(
+                DecisionQuestionType::Choice,
+                json!("Which?"),
+                json!({"a": 1, "b": null})
+            )
+            .is_err()
+        );
+        assert!(
+            parse_with(
+                DecisionQuestionType::Noul,
+                json!("Is it?"),
+                json!({"maybe": "x"})
+            )
+            .is_err()
+        );
+        assert!(parse_with(DecisionQuestionType::Choice, json!({"ask": "x"}), two).is_ok());
+        // true first only when the criteria name it first
+        let first =
+            |criteria| match parse_with(DecisionQuestionType::Noul, json!("Is it?"), criteria) {
+                Ok(q) => q.options[0].0.clone(),
+                Err(_) => panic!("the noul parses"),
+            };
+        assert_eq!(first(json!({"true": "yes", "false": "no"})), "true");
+        assert_eq!(first(json!({"false": "no", "true": "yes"})), "false");
     }
 
     #[test]

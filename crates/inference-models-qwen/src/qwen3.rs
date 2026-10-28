@@ -30,6 +30,9 @@ pub struct Config {
     pub tie_word_embeddings: bool,
     pub max_window_layers: usize,
     pub use_sliding_window: bool,
+    /// vllm-decision2's decision head after the stack.
+    #[serde(default)]
+    pub option_head: Option<inference_nn::option_head::OptionHeadConfig>,
 }
 
 impl Config {
@@ -68,6 +71,7 @@ impl Config {
                 .collect(),
             tie_word_embeddings: self.tie_word_embeddings,
             quantization_config: self.quantization_config.clone(),
+            option_head: self.option_head.clone(),
             ..Default::default()
         }
     }
