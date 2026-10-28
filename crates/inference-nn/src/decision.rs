@@ -279,6 +279,8 @@ pub enum LabelFamily {
     VllmD3,
     /// a pointer head: the last token's query against each option's end-token key
     Kev,
+    /// labels from the GGUF (`<arch>.decision.labels`), read after an answer prefill
+    H2oLightning,
 }
 
 impl LabelFamily {
@@ -291,6 +293,7 @@ impl LabelFamily {
             "pplx-decider" => Self::PplxDecider,
             "vllm-d3" => Self::VllmD3,
             "kev" => Self::Kev,
+            "h2o-lightning" => Self::H2oLightning,
             _ => return None,
         })
     }
@@ -306,7 +309,7 @@ impl LabelFamily {
                     .collect(),
                 true,
             ),
-            Self::Kev => (Vec::new(), false),
+            Self::Kev | Self::H2oLightning => (Vec::new(), false),
             _ => {
                 let letters = || 'A'..='Z';
                 let codes = letters()
@@ -319,7 +322,7 @@ impl LabelFamily {
 
     /// noul's options as the template lists them: `[true, false]` for openjev, `[false, true]` otherwise.
     pub fn noul_true_first(self) -> bool {
-        self == Self::OpenJev
+        matches!(self, Self::OpenJev | Self::H2oLightning)
     }
 
     /// A score's legend reports a non-text description as its key-sorted JSON.
@@ -370,6 +373,24 @@ impl LabelFamily {
         self == Self::Kev
     }
 
+    /// The labels are the GGUF's `<arch>.decision.labels`, each one distinct token.
+    pub fn labels_from_metadata(self) -> bool {
+        self == Self::H2oLightning
+    }
+
+    /// The template takes texts as h2o-lightning's shim writes them: the state as compact JSON cut to a token budget,
+    /// the other values as `json.dumps` writes them, special token spellings quoted. Its questions may leave out the
+    /// type (a choice) and the instructions, a score may have one level, and a noul's descriptions may sit under
+    /// `yes` and `no`.
+    pub fn prepares_texts(self) -> bool {
+        self == Self::H2oLightning
+    }
+
+    /// The prompt has a default question, so the instructions may be left out.
+    pub fn default_question(self) -> bool {
+        matches!(self, Self::VllmD3 | Self::H2oLightning)
+    }
+
     /// The template takes the state, instructions and option texts flattened to text (kev's `render`).
     pub fn renders_text(self) -> bool {
         self == Self::Kev
@@ -396,6 +417,8 @@ pub struct LabelDecision {
     pub label_texts: Vec<String>,
     /// the token that ends each option, where a pointer head reads it
     pub option_end: Option<u32>,
+    /// the texts of the tokenizer's added tokens, longest first, which h2o-lightning quotes in its input
+    pub quoted_spellings: Vec<String>,
 }
 
 impl LabelDecision {
@@ -433,7 +456,33 @@ impl LabelDecision {
             labels,
             label_texts,
             option_end: None,
+            quoted_spellings: Vec::new(),
         })
+    }
+
+    /// The GGUF's own labels in option order, each of which must be one distinct token.
+    pub fn set_labels<E: std::fmt::Display>(
+        &mut self,
+        texts: Vec<String>,
+        mut encode: impl FnMut(&str) -> Result<Vec<u32>, E>,
+    ) -> Result<(), String> {
+        let mut labels = Vec::with_capacity(texts.len());
+        for text in &texts {
+            match encode(text).map_err(|e| e.to_string())?.as_slice() {
+                [token] if !labels.contains(token) => labels.push(*token),
+                _ => {
+                    return Err(format!(
+                        "decision label `{text}` is not a single distinct token"
+                    ));
+                }
+            }
+        }
+        if labels.is_empty() {
+            return Err("decision model has no labels".to_string());
+        }
+        self.labels = labels;
+        self.label_texts = texts;
+        Ok(())
     }
 
     /// The most options a question can have: one per label, or llama.cpp's request limit for a pointer head.
@@ -681,6 +730,21 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("`q`"), "{err}");
+    }
+
+    #[test]
+    fn metadata_labels_must_be_distinct_tokens() {
+        let mut h2o = decision(LabelFamily::H2oLightning, &[]);
+        assert!(h2o.labels.is_empty());
+        h2o.set_labels(vec!["A".into(), "AB".into()], encode_codes)
+            .unwrap();
+        assert_eq!(h2o.labels, [u32::from(b'A'), 1000]);
+        assert_eq!(h2o.label_texts, ["A", "AB"]);
+        let err = h2o
+            .set_labels(vec!["A".into(), "A".into()], encode_codes)
+            .unwrap_err();
+        assert!(err.contains("`A`"), "{err}");
+        assert!(h2o.set_labels(vec!["BC".into()], encode_codes).is_err());
     }
 
     #[test]

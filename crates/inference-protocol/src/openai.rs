@@ -1917,9 +1917,12 @@ pub enum DecisionQuestionType {
 /// One typed question about the request's state.
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct DecisionRequestQuestion {
-    #[serde(rename = "type")]
-    pub kind: DecisionQuestionType,
-    /// The question: text, or any JSON value, which the model reads as JSON text.
+    /// Required, except by h2o-lightning, which then asks a `choice`.
+    #[serde(rename = "type", default)]
+    pub kind: Option<DecisionQuestionType>,
+    /// The question: text, or any JSON value, which the model reads as JSON text. Required, except by vllm-d3 and
+    /// h2o-lightning, whose prompts have a default question.
+    #[serde(default)]
     #[schema(value_type = Object, example = "Which team should handle this?")]
     pub instructions: Value,
     /// `choice`: option to its description (or null); `score`: 2 to 10 level descriptions, lowest first; `noul`:

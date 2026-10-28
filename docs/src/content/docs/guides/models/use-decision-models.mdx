@@ -20,7 +20,7 @@ laya's `multilingual/` and `typed-decisions/` variants load from a local copy of
 
 ### Chat models with a decision profile
 
-Some decision models are chat models fine-tuned to answer with the code of an option. Their GGUFs, as llama.cpp's converter writes them, carry a decision profile: `<arch>.decision.type`, a `systemone` chat template that renders a question as a prompt, and temperatures. Such a GGUF loads like any other, and `/v1/decisions` then renders each question with that template and reads the next-token logits of one label token per option (no text is generated). These types are supported: `nimble`, `openjev`, `lev`, `pplx-decider`, `vllm-d3` and `kev`.
+Some decision models are chat models fine-tuned to answer with the code of an option. Their GGUFs, as llama.cpp's converter writes them, carry a decision profile: `<arch>.decision.type`, a `systemone` chat template that renders a question as a prompt, and temperatures. Such a GGUF loads like any other, and `/v1/decisions` then renders each question with that template and reads the next-token logits of one label token per option (no text is generated). These types are supported: `nimble`, `openjev`, `lev`, `pplx-decider`, `vllm-d3`, `h2o-lightning` and `kev`.
 
 ```bash
 inference serve --format gguf -m <repo or folder> -f <file>.gguf
@@ -30,7 +30,9 @@ inference serve --format gguf -m <repo or folder> -f <file>.gguf
 
 `kev` (Qwen3.5, e.g. `ggml-org/Kev-4B-GGUF`) scores options with a pointer head instead of labels: each option in its prompt ends with a `<|box_end|>` token, and an option's score is the dot product of the last token's query with that token's key, both projected from the hidden states. The head takes the place of the model's vocabulary output, so a kev model answers decisions only and refuses chat and completion requests.
 
-The other llama.cpp decision types (`granite-switch`, `clef`, `lfm2-d1`, `h2o-lightning`, `vllm-decision2`) are not supported.
+`h2o-lightning` reads its labels from the GGUF and relaxes the request: a question may leave out its `type` (a `choice`) and its `instructions`, a `score` may have a single level, and a `noul` may describe its sides under `yes` and `no`. A state longer than 32000 tokens keeps its first and last 16000 around a `...` line. `vllm-d3` also accepts a question without instructions.
+
+The other llama.cpp decision types (`granite-switch`, `clef`, `lfm2-d1`, `vllm-decision2`) are not supported, and no decision type takes images yet.
 
 ## Asking questions
 

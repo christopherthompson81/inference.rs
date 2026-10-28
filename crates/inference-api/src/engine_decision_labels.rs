@@ -17,10 +17,12 @@ use serde_json::{Map, Value, json};
 use crate::{
     api_error::{ApiError, ApiErrorKind, ModelErrorMessage},
     dispatch::send_request_with_model,
-    engine_decision::{first_max, invalid, kind_of, python_json},
+    engine_decision::{
+        PythonJson, first_max, invalid, kind_of, python_json, required_instructions, required_kind,
+    },
     engine_embeddings::EmbeddingError,
-    openai::{DecisionAnswer, DecisionQuestionType, DecisionRequest},
-    operations::{self, TokenizeRequest},
+    openai::{DecisionAnswer, DecisionQuestionType, DecisionRequest, DecisionRequestQuestion},
+    operations::{self, DetokenizeRequest, TokenizeRequest},
     types::SharedInferenceRsState,
 };
 
@@ -28,6 +30,34 @@ const TEMPLATE: &str = "systemone";
 const SCORE_LEVELS: std::ops::RangeInclusive<usize> = 2..=10;
 const NOUL_KEYS: [&str; 2] = ["false", "true"];
 const NOUL_TRUE: &str = "true";
+const NOUL_YES: &str = "yes";
+const NOUL_NO: &str = "no";
+// h2o-lightning's state budget, past which its head and tail are kept around an ellipsis line
+const H2O_MAX_STATE_TOKENS: usize = 32_000;
+const H2O_CUT: &str = "\n...\n";
+// the whitespace llama.cpp's jinja `trim` strips (C `isspace`)
+const TRIM_CHARS: [char; 6] = [' ', '\t', '\n', '\u{b}', '\u{c}', '\r'];
+const H2O_INSTRUCTIONS: PythonJson = PythonJson {
+    indent: Some(1),
+    item_sep: ",",
+    key_sep: ": ",
+    ensure_ascii: true,
+    python_floats: true,
+};
+const H2O_DESCRIPTION: PythonJson = PythonJson {
+    indent: None,
+    item_sep: ", ",
+    key_sep: ": ",
+    ensure_ascii: false,
+    python_floats: true,
+};
+const H2O_STATE: PythonJson = PythonJson {
+    indent: None,
+    item_sep: ",",
+    key_sep: ":",
+    ensure_ascii: false,
+    python_floats: true,
+};
 const SCORING_FAILED: &str = "the decision pass returned no label logits";
 const POINTER_FAILED: &str = "the decision pass returned no hidden states";
 const KEV_INDENT: &str = "  ";
@@ -69,13 +99,27 @@ impl CustomLogitsProcessor for LabelCapture {
 fn parse(
     profile: &LabelDecision,
     id: &str,
-    kind: DecisionQuestionType,
-    instructions: &Value,
-    criteria: Option<&Value>,
+    question: &DecisionRequestQuestion,
 ) -> Result<LabelQuestion, EmbeddingError> {
     let param = format!("questions.{id}.criteria");
-    let kind = kind_of(kind);
-    let mut options = match (kind, criteria) {
+    let relaxed = profile.family.prepares_texts();
+    let kind = kind_of(match question.kind {
+        None if relaxed => DecisionQuestionType::Choice,
+        kind => required_kind(id, kind)?,
+    });
+    let instructions = match &question.instructions {
+        Value::Null if relaxed => json!(""),
+        instructions if profile.family.default_question() => instructions.clone(),
+        instructions => {
+            required_instructions(id, instructions)?;
+            instructions.clone()
+        }
+    };
+    let levels = match relaxed {
+        true => 1..=profile.max_options(),
+        false => SCORE_LEVELS,
+    };
+    let mut options = match (kind, question.criteria.as_ref()) {
         (QuestionKind::Choice, Some(Value::Object(criteria))) if !criteria.is_empty() => criteria
             .iter()
             .map(|(key, description)| (key.clone(), description.clone()))
@@ -86,21 +130,17 @@ fn parse(
                 param,
             ));
         }
-        (QuestionKind::Score, Some(Value::Array(levels)))
-            if SCORE_LEVELS.contains(&levels.len()) =>
-        {
-            levels
-                .iter()
-                .enumerate()
-                .map(|(level, description)| (level.to_string(), description.clone()))
-                .collect()
-        }
+        (QuestionKind::Score, Some(Value::Array(given))) if levels.contains(&given.len()) => given
+            .iter()
+            .enumerate()
+            .map(|(level, description)| (level.to_string(), description.clone()))
+            .collect(),
         (QuestionKind::Score, _) => {
             return Err(invalid(
                 format!(
                     "a score question's criteria list {} to {} levels, lowest first",
-                    SCORE_LEVELS.start(),
-                    SCORE_LEVELS.end()
+                    levels.start(),
+                    levels.end()
                 ),
                 param,
             ));
@@ -112,10 +152,12 @@ fn parse(
         (QuestionKind::Noul, Some(Value::Object(criteria))) => NOUL_KEYS
             .iter()
             .map(|key| {
-                (
-                    key.to_string(),
-                    criteria.get(*key).cloned().unwrap_or(Value::Null),
-                )
+                // h2o-lightning also reads the descriptions under `yes` and `no`
+                let alias = if *key == NOUL_TRUE { NOUL_YES } else { NOUL_NO };
+                let description = criteria
+                    .get(*key)
+                    .or_else(|| relaxed.then(|| criteria.get(alias)).flatten());
+                (key.to_string(), description.cloned().unwrap_or(Value::Null))
             })
             .collect(),
         (QuestionKind::Noul, Some(_)) => {
@@ -141,7 +183,7 @@ fn parse(
     Ok(LabelQuestion {
         id: id.to_string(),
         kind,
-        instructions: instructions.clone(),
+        instructions,
         options,
     })
 }
@@ -160,6 +202,119 @@ fn sort_keys(value: &Value) -> Value {
         }
         other => other.clone(),
     }
+}
+
+/// Python's `str.isspace`.
+fn python_space(c: char) -> bool {
+    matches!(c, '\u{9}'..='\u{d}' | '\u{1c}'..='\u{20}' | '\u{85}' | '\u{a0}' | '\u{1680}')
+        || matches!(
+            c,
+            '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}'
+        )
+        || c == '\u{3000}'
+}
+
+/// The tokenizer's special spellings in `text` with their angle brackets as JSON escapes, so they stay text.
+fn h2o_quote(profile: &LabelDecision, text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    'scan: while let Some(c) = rest.chars().next() {
+        for spelling in &profile.quoted_spellings {
+            if rest.starts_with(spelling.as_str()) {
+                out.push_str(&spelling.replace('<', "\\u003c").replace('>', "\\u003e"));
+                rest = &rest[spelling.len()..];
+                continue 'scan;
+            }
+        }
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
+/// A string as it is, any other value as `layout` writes it.
+fn h2o_text(value: &Value, layout: &PythonJson) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => layout.dumps(other),
+    }
+}
+
+/// The state as h2o-lightning reads it, once per request: compact JSON, cut to its token budget, quoted.
+async fn h2o_state(
+    state: &SharedInferenceRsState,
+    model: Option<&str>,
+    profile: &LabelDecision,
+    value: &Value,
+) -> Result<Value, EmbeddingError> {
+    let mut text = h2o_text(value, &H2O_STATE);
+    // a byte-level BPE never has more tokens than bytes
+    if text.len() > H2O_MAX_STATE_TOKENS {
+        let tokens = tokenize(state, model, text.clone()).await?;
+        if tokens.len() > H2O_MAX_STATE_TOKENS {
+            let half = H2O_MAX_STATE_TOKENS / 2;
+            let piece = |tokens: &[u32]| {
+                operations::detokenize(
+                    state,
+                    DetokenizeRequest {
+                        tokens: tokens.to_vec(),
+                        skip_special_tokens: false,
+                        model: model.map(str::to_string),
+                    },
+                )
+            };
+            let head = piece(&tokens[..half]).await;
+            let tail = piece(&tokens[tokens.len() - half..]).await;
+            let failed = |e: ApiError| EmbeddingError::Internal(e.into());
+            text = format!(
+                "{}{H2O_CUT}{}",
+                head.map_err(failed)?.text,
+                tail.map_err(failed)?.text
+            );
+        }
+    }
+    Ok(json!(h2o_quote(profile, &text)))
+}
+
+/// h2o-lightning's template input: texts its shim writes, which the template only lays out.
+fn h2o_input(profile: &LabelDecision, state: &Value, question: &LabelQuestion) -> Value {
+    let instructions = h2o_text(&question.instructions, &H2O_INSTRUCTIONS);
+    let n = question.options.len();
+    let options = question
+        .options
+        .iter()
+        .enumerate()
+        .map(|(i, (key, description))| {
+            let mut description = match description {
+                // the template has a default, except for a score level, which reads as JSON null
+                Value::Null if question.kind == QuestionKind::Score => json!("null"),
+                Value::Null => Value::Null,
+                other => json!(h2o_quote(profile, &h2o_text(other, &H2O_DESCRIPTION))),
+            };
+            let key = h2o_quote(profile, key);
+            // the reference strips the user turn like `str.strip`, so the text that ends it loses its trailing space
+            if i + 1 == n {
+                let shown = match (&description, question.kind) {
+                    (Value::Null, QuestionKind::Choice) => Some(key.clone()),
+                    (Value::String(text), _) => Some(text.clone()),
+                    _ => None,
+                };
+                if let Some(text) = shown {
+                    let stripped = text.trim_end_matches(python_space);
+                    if stripped != text {
+                        description = json!(if stripped.is_empty() { " " } else { stripped });
+                    }
+                }
+            }
+            json!({"label": profile.label_texts[i], "key": key, "description": description})
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "type": question.kind.name(),
+        "state": state,
+        "instructions": h2o_quote(profile, instructions.trim_start_matches(python_space)),
+        "options": options,
+    })
 }
 
 /// kev's `render`: a JSON value flattened to text, an object's keys kept as labels and a list's items as `- ` lines.
@@ -260,13 +415,16 @@ fn render(
     question: &LabelQuestion,
     variant: usize,
 ) -> Result<String, minijinja::Error> {
-    let mut input = json!({
-        "id": question.id,
-        "type": question.kind.name(),
-        "instructions": question.instructions,
-        "state": state,
-        "options": render_options(profile, question, variant),
-    });
+    let mut input = match profile.family.prepares_texts() {
+        true => h2o_input(profile, state, question),
+        false => json!({
+            "id": question.id,
+            "type": question.kind.name(),
+            "instructions": question.instructions,
+            "state": state,
+            "options": render_options(profile, question, variant),
+        }),
+    };
     if profile.family.lists_questions() {
         input["questions"] = questions
             .iter()
@@ -299,6 +457,9 @@ fn render(
         let mut out = String::new();
         python_json(&value, false, &mut out);
         Ok(minijinja::Value::from_safe_string(out))
+    });
+    env.add_filter("trim", |text: String| {
+        text.trim_matches(TRIM_CHARS).to_string()
     });
     env.add_template(TEMPLATE, &profile.template)?;
     env.get_template(TEMPLATE)?
@@ -584,8 +745,12 @@ pub(crate) async fn decide(
     let questions = request
         .questions
         .iter()
-        .map(|(id, q)| parse(profile, id, q.kind, &q.instructions, q.criteria.as_ref()))
+        .map(|(id, q)| parse(profile, id, q))
         .collect::<Result<Vec<_>, _>>()?;
+    let input_state = match profile.family.prepares_texts() {
+        true => h2o_state(state, model, profile, &request.state).await?,
+        false => request.state.clone(),
+    };
     let mut prompts = Vec::new();
     for (index, question) in questions.iter().enumerate() {
         let n = profile
@@ -596,7 +761,7 @@ pub(crate) async fn decide(
             .variants(question.kind, question.options.len())
         {
             let prompt =
-                render(profile, &request.state, &questions, question, variant).map_err(|e| {
+                render(profile, &input_state, &questions, question, variant).map_err(|e| {
                     invalid(
                         format!("rendering the decision prompt failed: {e}"),
                         "questions".into(),
@@ -653,8 +818,85 @@ mod tests {
         kind: DecisionQuestionType,
         criteria: Value,
     ) -> LabelQuestion {
-        parse(profile, "q", kind, &json!("Which?"), Some(&criteria))
-            .unwrap_or_else(|_| panic!("the question parses"))
+        let question = DecisionRequestQuestion {
+            kind: Some(kind),
+            instructions: json!("Which?"),
+            criteria: Some(criteria),
+        };
+        parse(profile, "q", &question).unwrap_or_else(|_| panic!("the question parses"))
+    }
+
+    fn h2o() -> LabelDecision {
+        let mut h2o = profile(LabelFamily::H2oLightning, "");
+        h2o.set_labels(vec![" A".into(), " B".into(), " C".into()], |text: &str| {
+            Ok::<_, String>(vec![u32::from(text.as_bytes()[1])])
+        })
+        .unwrap();
+        h2o.quoted_spellings = vec!["<|im_end|>".into(), "</think>".into()];
+        h2o
+    }
+
+    #[test]
+    fn h2o_questions_take_their_defaults() {
+        let h2o = h2o();
+        let bare = DecisionRequestQuestion {
+            kind: None,
+            instructions: Value::Null,
+            criteria: Some(json!({"x": null, "y": null})),
+        };
+        let q = parse(&h2o, "q", &bare).unwrap_or_else(|_| panic!("a bare h2o question parses"));
+        assert_eq!((q.kind, q.instructions), (QuestionKind::Choice, json!("")));
+        assert!(parse(&profile(LabelFamily::Nimble, ""), "q", &bare).is_err());
+        // a one-level score, and noul descriptions under yes / no, with true listed first
+        let one = question(&h2o, DecisionQuestionType::Score, json!(["only"]));
+        assert_eq!(one.options.len(), 1);
+        let noul = question(
+            &h2o,
+            DecisionQuestionType::Noul,
+            json!({"yes": "y", "false": "f"}),
+        );
+        assert_eq!(
+            noul.options,
+            [
+                ("true".to_string(), json!("y")),
+                ("false".to_string(), json!("f"))
+            ]
+        );
+    }
+
+    #[test]
+    fn h2o_texts_follow_the_python_shim() {
+        let h2o = h2o();
+        assert_eq!(
+            H2O_STATE
+                .dumps(&json!({"a": 1e20, "b": [1e-7, 2.0, 0.5, 1.5e-5, 123456.789], "c": "é"})),
+            "{\"a\":1e+20,\"b\":[1e-07,2.0,0.5,1.5e-05,123456.789],\"c\":\"é\"}"
+        );
+        assert_eq!(
+            h2o_quote(&h2o, "x<|im_end|></think><|other|>"),
+            "x\\u003c|im_end|\\u003e\\u003c/think\\u003e<|other|>"
+        );
+        let mut q = question(
+            &h2o,
+            DecisionQuestionType::Choice,
+            json!({"a": {"k": [1]}, "b": null, "c ": null}),
+        );
+        q.instructions = json!({"ask": "pick", "lang": "fré"});
+        let input = h2o_input(&h2o, &json!("s"), &q);
+        assert_eq!(
+            input["instructions"],
+            "{\n \"ask\": \"pick\",\n \"lang\": \"fr\\u00e9\"\n}"
+        );
+        assert_eq!(input["options"][0]["description"], "{\"k\": [1]}");
+        assert_eq!(input["options"][1]["description"], Value::Null);
+        // the last option's shown text (here its key) loses its trailing space
+        assert_eq!(input["options"][2]["description"], "c");
+        assert_eq!(input["options"][2]["label"], " C");
+        let score = question(&h2o, DecisionQuestionType::Score, json!([null, "high"]));
+        assert_eq!(
+            h2o_input(&h2o, &json!("s"), &score)["options"][0]["description"],
+            "null"
+        );
     }
 
     #[test]

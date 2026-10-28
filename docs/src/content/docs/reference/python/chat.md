@@ -404,8 +404,8 @@ One typed question about the request's state.
 | Field | Type | Default |
 | --- | --- | --- |
 | `criteria` | `dict[str, Any] \| None` | optional |
-| `instructions` | `dict[str, Any]` | required |
-| `type` | `DecisionQuestionType` | required |
+| `instructions` | `dict[str, Any] \| None` | optional |
+| `type` | `DecisionQuestionType \| None` | optional |
 
 
 ## `DecisionResponse`

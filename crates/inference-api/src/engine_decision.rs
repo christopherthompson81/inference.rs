@@ -38,33 +38,121 @@ pub(crate) fn invalid(message: impl Into<String>, param: String) -> EmbeddingErr
     )))
 }
 
+/// `json.dumps`'s layout: an indent (one line without), the separators between items and after keys, ASCII escaping,
+/// and whether floats take Python's `repr`.
+pub(crate) struct PythonJson {
+    pub indent: Option<usize>,
+    pub item_sep: &'static str,
+    pub key_sep: &'static str,
+    pub ensure_ascii: bool,
+    pub python_floats: bool,
+}
+
+impl PythonJson {
+    /// `json.dumps(value, ensure_ascii=...)`'s defaults, with serde's float text.
+    pub(crate) const fn default_layout(ensure_ascii: bool) -> Self {
+        Self {
+            indent: None,
+            item_sep: ", ",
+            key_sep: ": ",
+            ensure_ascii,
+            python_floats: false,
+        }
+    }
+
+    pub(crate) fn dumps(&self, value: &Value) -> String {
+        let mut out = String::new();
+        self.write(value, 0, &mut out);
+        out
+    }
+
+    fn newline(&self, level: usize, out: &mut String) {
+        if let Some(indent) = self.indent {
+            out.push('\n');
+            out.push_str(&" ".repeat(indent * level));
+        }
+    }
+
+    fn write(&self, value: &Value, level: usize, out: &mut String) {
+        match value {
+            Value::String(text) => python_string(text, self.ensure_ascii, out),
+            Value::Number(n) if self.python_floats && n.is_f64() => {
+                python_float(n.as_f64().unwrap_or_default(), out);
+            }
+            Value::Array(items) if !items.is_empty() => {
+                out.push('[');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(self.item_sep);
+                    }
+                    self.newline(level + 1, out);
+                    self.write(item, level + 1, out);
+                }
+                self.newline(level, out);
+                out.push(']');
+            }
+            Value::Object(map) if !map.is_empty() => {
+                out.push('{');
+                for (i, (key, item)) in map.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(self.item_sep);
+                    }
+                    self.newline(level + 1, out);
+                    python_string(key, self.ensure_ascii, out);
+                    out.push_str(self.key_sep);
+                    self.write(item, level + 1, out);
+                }
+                self.newline(level, out);
+                out.push('}');
+            }
+            Value::Array(_) => out.push_str("[]"),
+            Value::Object(_) => out.push_str("{}"),
+            other => out.push_str(&other.to_string()),
+        }
+    }
+}
+
 /// JSON as Python's `json.dumps` writes it, `", "` and `": "` between items, which the models read their inputs as.
 pub(crate) fn python_json(value: &Value, ensure_ascii: bool, out: &mut String) {
-    match value {
-        Value::String(text) => python_string(text, ensure_ascii, out),
-        Value::Array(items) => {
-            out.push('[');
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                python_json(item, ensure_ascii, out);
-            }
-            out.push(']');
+    PythonJson::default_layout(ensure_ascii).write(value, 0, out);
+}
+
+/// Python's `repr` of a float: the shortest digits that read back, in exponent form below 1e-4 and from 1e16.
+fn python_float(value: f64, out: &mut String) {
+    let sci = format!("{value:e}");
+    let (mantissa, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
+    let exp = exp.parse::<i32>().unwrap_or_default();
+    let sign = if mantissa.starts_with('-') { "-" } else { "" };
+    let digits = mantissa
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect::<String>();
+    let n = digits.len() as i32;
+    out.push_str(sign);
+    if !(-4..16).contains(&exp) {
+        out.push_str(&digits[..1]);
+        if n > 1 {
+            out.push('.');
+            out.push_str(&digits[1..]);
         }
-        Value::Object(map) => {
-            out.push('{');
-            for (i, (key, item)) in map.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                python_string(key, ensure_ascii, out);
-                out.push_str(": ");
-                python_json(item, ensure_ascii, out);
-            }
-            out.push('}');
-        }
-        other => out.push_str(&other.to_string()),
+        out.push_str(&format!(
+            "e{}{:02}",
+            if exp < 0 { '-' } else { '+' },
+            exp.abs()
+        ));
+    } else if exp >= n - 1 {
+        out.push_str(&digits);
+        out.push_str(&"0".repeat((exp - (n - 1)) as usize));
+        out.push_str(".0");
+    } else if exp >= 0 {
+        let point = (exp + 1) as usize;
+        out.push_str(&digits[..point]);
+        out.push('.');
+        out.push_str(&digits[point..]);
+    } else {
+        out.push_str("0.");
+        out.push_str(&"0".repeat((-exp - 1) as usize));
+        out.push_str(&digits);
     }
 }
 
@@ -79,7 +167,7 @@ fn python_string(text: &str, ensure_ascii: bool, out: &mut String) {
             '\t' => out.push_str("\\t"),
             '\u{8}' => out.push_str("\\b"),
             '\u{c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 || (ensure_ascii && !c.is_ascii()) => {
+            c if (c as u32) < 0x20 || (ensure_ascii && (!c.is_ascii() || c == '\u{7f}')) => {
                 let mut units = [0u16; 2];
                 for unit in c.encode_utf16(&mut units) {
                     out.push_str(&format!("\\u{unit:04x}"));
@@ -114,6 +202,30 @@ fn description(value: &Value, param: &str) -> Result<Option<String>, EmbeddingEr
     }
 }
 
+/// The question's type, which a model without a default needs.
+pub(crate) fn required_kind(
+    id: &str,
+    kind: Option<DecisionQuestionType>,
+) -> Result<DecisionQuestionType, EmbeddingError> {
+    kind.ok_or_else(|| {
+        invalid(
+            "`type` must be one of: choice, score, noul",
+            format!("questions.{id}.type"),
+        )
+    })
+}
+
+/// The question's instructions, which a model without a default question needs.
+pub(crate) fn required_instructions(id: &str, instructions: &Value) -> Result<(), EmbeddingError> {
+    match instructions {
+        Value::Null => Err(invalid(
+            "`instructions` must be provided",
+            format!("questions.{id}.instructions"),
+        )),
+        _ => Ok(()),
+    }
+}
+
 pub(crate) fn kind_of(kind: DecisionQuestionType) -> QuestionKind {
     match kind {
         DecisionQuestionType::Choice => QuestionKind::Choice,
@@ -128,7 +240,9 @@ fn question(
     question: &DecisionRequestQuestion,
 ) -> Result<DecisionQuestion, EmbeddingError> {
     let param = format!("questions.{id}.criteria");
-    let options = match (question.kind, &question.criteria) {
+    let question_kind = required_kind(id, question.kind)?;
+    required_instructions(id, &question.instructions)?;
+    let options = match (question_kind, &question.criteria) {
         (DecisionQuestionType::Choice, Some(Value::Object(criteria))) => criteria
             .iter()
             .map(|(key, value)| {
@@ -199,7 +313,7 @@ fn question(
             ));
         }
     };
-    let kind = kind_of(question.kind);
+    let kind = kind_of(question_kind);
     match kind {
         QuestionKind::Choice if !(2..=MAX_CHOICE_OPTIONS).contains(&options.len()) => {
             return Err(invalid(
