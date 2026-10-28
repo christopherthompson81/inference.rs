@@ -576,3 +576,25 @@ one.
 
 Implication: every GGUF architecture #586 lists loads. Left out of #586: `ModernBertDecisionModel` (a decision
 model, its own issue).
+
+## Run 22 - 2026-10-27 18:20
+
+Question: before closing #586, do the example checkpoints it names that no earlier run used load and match?
+
+Command: `inference serve --cpu --dtype f32` on `BAAI/bge-reranker-v2-m3` (safetensors) and a community Q4_K_M GGUF
+of it against `rerank_ref.py`; `gpustack/bge-m3-GGUF` (FP16, Q8_0) against `ref.py` on `BAAI/bge-m3`.
+
+```
+bge-reranker-v2-m3 safetensors        worst score diff 2.6e-7, same order
+bge-reranker-v2-m3 Q4_K_M GGUF        "native linear `classifier.out_proj` resolves to rank-1 transformed GGUF tensor"
+  after the fix (own or HF tokenizer) worst score diff 1.2e-2, same order
+gpustack bge-m3 FP16                  worst cos 0.99999994      Q8_0  0.997038
+```
+
+Finding: the reranker GGUF is an older conversion that writes its one-label projection `cls.output.weight` (and its
+segment table) as bare `[hidden]` vectors and names no labels. Both now read as one-row matrices, and a classifier
+GGUF without `classifier.output_labels` takes its label count from the projection's rows. The Q4_K_M gap is its
+4-bit weights; the Q8_0 bge-m3 gap is the CPU Q8_0 path (#655). `nvidia/llama-embed-nemotron-8b` was not rerun here
+(16 GB); its class and GGUF architecture are covered by the 1B Nemotron in Run 20.
+
+Implication: with this, every class, architecture and named example in #586 loads, except the decision model (#660).
