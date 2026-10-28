@@ -962,9 +962,10 @@ impl Engine {
             Request::Normal(request) => admission::AdmissionClass::Workload {
                 sequences: request.sampling_params.n_choices.max(1),
             },
-            Request::Tokenize(_) | Request::Detokenize(_) | Request::TerminateAllSeqsNextStep => {
-                admission::AdmissionClass::BypassControl
-            }
+            Request::Tokenize(_)
+            | Request::Detokenize(_)
+            | Request::JointDecision(_)
+            | Request::TerminateAllSeqsNextStep => admission::AdmissionClass::BypassControl,
             Request::Terminate => admission::AdmissionClass::Shutdown,
             Request::ReIsq(_) | Request::Calibration(_) => {
                 admission::AdmissionClass::OrderedControl

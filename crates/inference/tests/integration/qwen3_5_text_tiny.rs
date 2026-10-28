@@ -221,6 +221,32 @@ async fn a_decision_head_replaces_the_vocabulary_logits() -> anyhow::Result<()> 
     Ok(())
 }
 
+// a joint decision head (clef) loads after the trunk, whose output is then the normed hidden state
+#[tokio::test]
+async fn a_joint_head_returns_the_hidden_states() -> anyhow::Result<()> {
+    let checkpoint = tiny_qwen3_5_text_with(
+        HEAD_DIM,
+        false,
+        serde_json::json!({"joint_head": {
+            "width": 16, "feedforward": 32, "heads": 2, "routing_layers": 1, "layers": 1, "norm_eps": 1e-5
+        }}),
+    )?;
+    let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .with_force_cpu()
+        .build()
+        .await?;
+    let scored = model
+        .prompt_logits(PromptLogitsRequest {
+            model: None,
+            prompt: PromptInput::Tokens(PROMPT.to_vec()),
+            output: LogitsOutput::Logits,
+        })
+        .await?;
+    assert_eq!(scored.vocab_size, HIDDEN);
+    Ok(())
+}
+
 const GRAPH_MAX_LEN: usize = 8;
 const MTP_N_PREDICT: usize = 2;
 const DFLASH_BLOCK: usize = 4;

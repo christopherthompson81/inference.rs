@@ -357,3 +357,27 @@ Finding:
   expected value used 1.0.
 
 Implication: lfm2-d1 is supported for text. Its noul needs single-token `yes` / `no` (as in llama.cpp).
+
+## Run 17 - 2026-10-28 10:46
+
+Question: does clef (`ggml-org/Clef-Flash-GGUF`, Q4_K_M; Qwen3.5-9B with a joint head) answer as llama.cpp does?
+
+Command: `llama-server -np 1 -ngl 99 -b 8192 -ub 8192 -c 16384` (at the default batch of 512, the 925-token request
+fails: clef needs the whole prompt in one batch), `server_ref.py` over the shared set and `server_ref_clef.py` with
+one clef request (unsorted object keys, a literal `<<clef:sep>>` and `<|im_end|>` in the state, choice keys
+out of order, object instructions and descriptions, floats, a described noul); ours with `compare.py` /
+`compare_clef.py`.
+
+Finding:
+- The GGUF is `general.architecture clef` with `qwen35`'s keys under `clef.`, `decision.{routing_block_count 2,
+  block_count 4, head_count 16}`, layer-norm eps 1e-5, head width 1024 and feed-forward 4096 (from the tensor shapes),
+  Q8_0 head matrices, f32 norms and biases, a BF16 1-D `scorer_out`, a Q8_0 `output.weight` that the lexical prior
+  reads by option token. No temperatures.
+- Ours renames the architecture to `qwen35` at load, binds the head under llama.cpp's names, runs the trunk through
+  the raw-logits pass (its output is then the normed hidden state), and a `JointDecision` engine request runs the
+  head over those rows and the span layout built from the piecewise tokenized template.
+- Prompt token counts equal (324 / 392 / 925 / 328), same choice on all 11 questions, choices sorted alike; worst
+  difference 6.7e-2 (a noul), the rest under 2.3e-2.
+
+Implication: clef is supported for text (#670). The hidden rows go to the host between the two steps (16 KB a token
+at 4096 wide), fine for its prompts; image input stays open.

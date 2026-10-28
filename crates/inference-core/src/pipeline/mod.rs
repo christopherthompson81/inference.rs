@@ -1316,6 +1316,14 @@ pub trait Pipeline:
     fn decision_spec(&self) -> Option<Arc<inference_nn::decision::DecisionSpec>> {
         None
     }
+    /// A joint decision head's option scores over a prompt's normed hidden states (clef).
+    fn joint_decision(
+        &self,
+        _hidden: &Tensor,
+        _layout: &inference_nn::decision::JointLayout,
+    ) -> Result<Vec<f32>, inference_tensor::Error> {
+        inference_tensor::bail!("this model has no joint decision head")
+    }
 
     fn forward_inputs(
         &mut self,

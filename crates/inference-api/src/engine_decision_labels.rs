@@ -6,10 +6,10 @@ use std::sync::{Arc, Mutex};
 
 use futures::future::join_all;
 use indexmap::IndexMap;
-use inference_core::decision::{LabelDecision, QuestionKind};
+use inference_core::decision::{JointLayout, LabelDecision, QuestionKind};
 use inference_core::{
-    CustomLogitsProcessor, InferenceRs, NormalRequest, Request, RequestMessage, Response,
-    SamplingParams,
+    CustomLogitsProcessor, InferenceRs, JointDecisionRequest, NormalRequest, Request,
+    RequestMessage, Response, SamplingParams,
 };
 use inference_tensor::{DType, Tensor};
 use serde_json::{Map, Value, json};
@@ -61,6 +61,12 @@ const H2O_STATE: PythonJson = PythonJson {
 const SCORING_FAILED: &str = "the decision pass returned no label logits";
 const POINTER_FAILED: &str = "the decision pass returned no hidden states";
 const KEV_INDENT: &str = "  ";
+// clef's template splits its prompt into pieces at `sep` and marks the start of a question or option span
+const CLEF_MARKER: &str = "<<clef:";
+const CLEF_MARKER_ESCAPED: &str = "<<clef ";
+const CLEF_SEP: &str = "<<clef:sep>>";
+const CLEF_MARK_QUESTION: &str = "<<clef:question>>";
+const CLEF_MARK_OPTION: &str = "<<clef:option>>";
 
 /// A question as the template reads it: its id, type and instructions, and each option's key and description.
 struct LabelQuestion {
@@ -175,6 +181,9 @@ fn parse(
             ));
         }
     };
+    if kind == QuestionKind::Choice && profile.family.sorts_choices() {
+        options.sort_by(|a, b| a.0.cmp(&b.0));
+    }
     if kind == QuestionKind::Noul && profile.family.noul_true_first() {
         options.swap(0, 1);
     }
@@ -484,7 +493,11 @@ fn render(
         input["instructions"] = json!(kev_text(&question.instructions));
     }
     input["images"] = json!([]);
+    render_template(profile, &input)
+}
 
+/// The profile's `systemone` template rendered over `input`, with llama.cpp's filters.
+fn render_template(profile: &LabelDecision, input: &Value) -> Result<String, minijinja::Error> {
     let mut env = minijinja::Environment::new();
     env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
     // llama.cpp's tojson, which these templates were converted for: json.dumps's layout and float repr, no ASCII
@@ -517,7 +530,154 @@ fn render(
     });
     env.add_template(TEMPLATE, &profile.template)?;
     env.get_template(TEMPLATE)?
-        .render(minijinja::Value::from_serialize(&input))
+        .render(minijinja::Value::from_serialize(input))
+}
+
+/// `value` with `from` replaced by `to` in every string and object key.
+fn replace_text(value: &Value, from: &str, to: &str) -> Value {
+    match value {
+        Value::String(text) => Value::String(text.replace(from, to)),
+        Value::Array(items) => {
+            Value::Array(items.iter().map(|v| replace_text(v, from, to)).collect())
+        }
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.replace(from, to), replace_text(v, from, to)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// What a piece of clef's prompt is: text between spans, a question's span, or an option's span.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Piece {
+    Text,
+    Question(QuestionKind),
+    Option,
+}
+
+/// clef's one prompt for every question, split at its piece markers into each piece's text and role.
+fn joint_pieces(
+    profile: &LabelDecision,
+    state: &Value,
+    questions: &[LabelQuestion],
+) -> Result<Vec<(String, Piece)>, EmbeddingError> {
+    let input = json!({
+        "state": state,
+        "questions": questions
+            .iter()
+            .map(|q| json!({
+                "id": q.id,
+                "type": q.kind.name(),
+                "instructions": q.instructions,
+                "options": q.options
+                    .iter()
+                    .map(|(key, description)| json!({"key": key, "description": description}))
+                    .collect::<Vec<_>>(),
+            }))
+            .collect::<Vec<_>>(),
+    });
+    // the template is given sorted keys, and no marker of its own in the input
+    let mut input = replace_text(&sort_keys(&input), CLEF_MARKER, CLEF_MARKER_ESCAPED);
+    input["images"] = json!([]);
+    input["sep"] = json!(CLEF_SEP);
+    input["mark_question"] = json!(CLEF_MARK_QUESTION);
+    input["mark_option"] = json!(CLEF_MARK_OPTION);
+    let prompt = render_template(profile, &input).map_err(|e| {
+        invalid(
+            format!("rendering the decision prompt failed: {e}"),
+            "questions".into(),
+        )
+    })?;
+    let mut kinds = questions.iter().map(|q| q.kind);
+    let mut pieces = Vec::new();
+    for piece in prompt.split(CLEF_SEP) {
+        let (text, role) = if let Some(text) = piece.strip_prefix(CLEF_MARK_QUESTION) {
+            let kind = kinds.next().ok_or_else(layout_error)?;
+            (text, Piece::Question(kind))
+        } else if let Some(text) = piece.strip_prefix(CLEF_MARK_OPTION) {
+            (text, Piece::Option)
+        } else {
+            (piece, Piece::Text)
+        };
+        pieces.push((text.to_string(), role));
+    }
+    Ok(pieces)
+}
+
+fn layout_error() -> EmbeddingError {
+    EmbeddingError::Internal(anyhow::anyhow!("unexpected layout of the decision prompt"))
+}
+
+/// clef: the questions decided together, one prompt and one pass, then the joint head over the prompt's hidden states.
+async fn decide_joint(
+    state: &SharedInferenceRsState,
+    profile: &LabelDecision,
+    request_state: &Value,
+    questions: &[LabelQuestion],
+    model: Option<&str>,
+) -> Result<(Vec<Vec<f32>>, usize), EmbeddingError> {
+    // the model was trained with the pieces tokenized one by one
+    let mut layout = JointLayout::default();
+    for (text, role) in joint_pieces(profile, request_state, questions)? {
+        let tokens = tokenize(state, model, text).await?;
+        let span = layout.tokens.len()..layout.tokens.len() + tokens.len();
+        if role != Piece::Text && span.is_empty() {
+            return Err(invalid(
+                "the instructions and the options of a question must not be empty",
+                "questions".into(),
+            ));
+        }
+        match role {
+            Piece::Question(kind) => layout.questions.push((kind, span)),
+            Piece::Option => {
+                let question = layout
+                    .questions
+                    .len()
+                    .checked_sub(1)
+                    .ok_or_else(layout_error)?;
+                layout.options.push((question, span));
+            }
+            Piece::Text => {}
+        }
+        layout.tokens.extend(tokens);
+    }
+    let n_options = questions.iter().map(|q| q.options.len()).sum::<usize>();
+    if layout.questions.len() != questions.len() || layout.options.len() != n_options {
+        return Err(layout_error());
+    }
+    let n_tokens = layout.tokens.len();
+    let Response::Raw { logits_chunks, .. } = run(state, model, layout.tokens.clone(), |request| {
+        request.return_raw_logits = true;
+    })
+    .await?
+    else {
+        return Err(EmbeddingError::Internal(anyhow::anyhow!(POINTER_FAILED)));
+    };
+    let hidden = Tensor::cat(&logits_chunks, 0).map_err(|e| EmbeddingError::Internal(e.into()))?;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let request = Request::JointDecision(JointDecisionRequest {
+        hidden,
+        layout,
+        response: tx,
+    });
+    send_request_with_model(state, request, model)
+        .await
+        .map_err(|e| EmbeddingError::Internal(e.into()))?;
+    let scores = rx
+        .recv()
+        .await
+        .ok_or_else(|| EmbeddingError::Internal(anyhow::anyhow!(POINTER_FAILED)))?
+        .map_err(EmbeddingError::Internal)?;
+    let mut rest = scores.as_slice();
+    let mut per_question = Vec::with_capacity(questions.len());
+    for question in questions {
+        let (own, tail) = rest.split_at(question.options.len());
+        per_question.push(own.to_vec());
+        rest = tail;
+    }
+    Ok((per_question, n_tokens))
 }
 
 /// The answer from each variant's label logits: a softmax at the calibrated temperature, averaged over the variants.
@@ -808,6 +968,16 @@ pub(crate) async fn decide(
         true => h2o_state(state, model, profile, &request.state).await?,
         false => request.state.clone(),
     };
+    if profile.family.joint() {
+        let (scores, input_tokens) =
+            decide_joint(state, profile, &input_state, &questions, model).await?;
+        let answers = questions
+            .iter()
+            .zip(scores)
+            .map(|(question, scores)| (question.id.clone(), answer(profile, question, &[scores])))
+            .collect();
+        return Ok((answers, input_tokens));
+    }
     let mut prompts = Vec::new();
     for (index, question) in questions.iter().enumerate() {
         for variant in 0..profile
@@ -1016,6 +1186,42 @@ mod tests {
         assert_eq!(
             render(&lev, &state, &[], &q, 1).unwrap(),
             "{\"a\": \"é<\\u0001\", \"b\": 1, \"c\": [true, null]}|A=y;B=x;"
+        );
+    }
+
+    #[test]
+    fn a_joint_prompt_splits_into_marked_spans() {
+        // a clef-shaped template: the state, then each question's instructions and options as marked pieces
+        let template = "S{{ sep }}{{ state | tojson(separators=[',', ':']) }}\
+            {% for q in questions %}{{ sep }}{{ mark_question }}{{ q.instructions }}\
+            {% for o in q.options %}{{ sep }}{{ mark_option }}{{ o.key }}{% endfor %}{% endfor %}{{ sep }}E";
+        let clef = profile(LabelFamily::Clef, template);
+        let q = question(
+            &clef,
+            DecisionQuestionType::Choice,
+            json!({"z": null, "a": null}),
+        );
+        let noul = question(&clef, DecisionQuestionType::Noul, Value::Null);
+        let pieces = joint_pieces(&clef, &json!({"y": "<<clef:sep>>", "b": 1}), &[q, noul])
+            .unwrap_or_else(|_| panic!("the prompt renders"));
+        let shown = pieces
+            .iter()
+            .map(|(text, role)| (text.as_str(), *role))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shown,
+            [
+                ("S", Piece::Text),
+                // keys sorted, and the input's own marker made plain text
+                ("{\"b\":1,\"y\":\"<<clef sep>>\"}", Piece::Text),
+                ("Which?", Piece::Question(QuestionKind::Choice)),
+                ("a", Piece::Option),
+                ("z", Piece::Option),
+                ("Which?", Piece::Question(QuestionKind::Noul)),
+                ("true", Piece::Option),
+                ("false", Piece::Option),
+                ("E", Piece::Text),
+            ]
         );
     }
 

@@ -56,6 +56,8 @@ impl QwenMultimodalFamily {
     }
 }
 
+const JOINT_HEAD_PREFIXES: [&str; 3] = ["decision.", "dec.blk.", "token_types."];
+
 struct TensorInventory {
     shapes: HashMap<String, Vec<usize>>,
 }
@@ -666,6 +668,15 @@ fn bind_text(
         format!("{head}.bias"),
         "cls.output.bias",
     );
+    // clef's joint decision head keeps llama.cpp's names
+    for name in inventory.shapes.keys() {
+        if JOINT_HEAD_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+        {
+            bindings.insert(name.clone(), GgufTensorBinding::tensor(name.clone()));
+        }
+    }
 
     for layer in inventory.layer_indices("blk.") {
         let native = format!("{model}.layers.{layer}");
@@ -1686,6 +1697,9 @@ mod tests {
             ("output_norm.weight", &[8]),
             ("cls.output.weight", &[8, 4]),
             ("cls.output.bias", &[4]),
+            ("decision.proj_memory.weight", &[4, 8]),
+            ("dec.blk.0.ffn_up.weight", &[8, 4]),
+            ("token_types.weight", &[3, 4]),
         ]);
         let bindings = build_qwen_multimodal_bindings_from_inventory(
             &inventory,
@@ -1701,6 +1715,17 @@ mod tests {
             ));
         }
         assert!(bindings.get("lm_head.weight").is_none());
+        // clef's joint head keeps llama.cpp's names
+        for name in [
+            "decision.proj_memory.weight",
+            "dec.blk.0.ffn_up.weight",
+            "token_types.weight",
+        ] {
+            assert!(matches!(
+                bindings.get(name),
+                Some(GgufTensorBinding::Tensor(actual)) if actual == name
+            ));
+        }
         Ok(())
     }
 

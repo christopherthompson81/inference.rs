@@ -404,6 +404,9 @@ pub struct TextConfig {
     /// The width of a decision head that replaces the LM head (kev's `[q | k]` pointer projection, with a bias).
     #[serde(default)]
     pub decision_head_size: Option<usize>,
+    /// clef's joint decision head, after the trunk; the model then outputs its normed hidden states, not logits.
+    #[serde(default)]
+    pub joint_head: Option<super::joint_head::JointHeadConfig>,
     #[serde(flatten)]
     pub flash_next: FlashNextConfig,
 }

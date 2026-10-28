@@ -2,6 +2,7 @@
 
 use crate::attention::FlashParams;
 use crate::paged_attention::PagedAttentionInputMetadata;
+use inference_nn::decision::JointLayout;
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{
@@ -1466,6 +1467,7 @@ pub struct Qwen3_5TextModel {
     pub(super) mtp_primary_depth: std::sync::atomic::AtomicUsize,
     // Draft-only lm_head at the base ISQ type; the target verifies with the promoted head
     pub(super) draft_lm_head: Mutex<Option<Arc<dyn QuantMethod>>>,
+    joint_head: Option<super::joint_head::JointHead>,
     // External DFlash block-diffusion drafter, replacing the built-in MTP head when attached
     pub(super) dflash: Mutex<Option<Arc<crate::dflash::DFlashDraftModel>>>,
     pub(super) pending_prompt_tails:
@@ -1749,6 +1751,18 @@ impl Qwen3_5TextModel {
             embed_tokens.clone()
         };
 
+        let joint_head = cfg
+            .joint_head
+            .as_ref()
+            .map(|head| {
+                super::joint_head::JointHead::new(
+                    head,
+                    cfg.hidden_size,
+                    mapper.set_nm_device(vb.clone(), false),
+                )
+            })
+            .transpose()?;
+
         // Create pipeline hybrid cache
         let pipeline_layer_types: Vec<HybridLayerType> = layer_types
             .iter()
@@ -1833,6 +1847,7 @@ impl Qwen3_5TextModel {
             mtp_auto_depth: AtomicBool::new(false),
             mtp_primary_depth: std::sync::atomic::AtomicUsize::new(0),
             draft_lm_head: Mutex::new(None),
+            joint_head,
             dflash: Mutex::new(None),
             pending_prompt_tails: Mutex::new(std::collections::HashMap::new()),
             #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -3251,7 +3266,10 @@ impl Qwen3_5TextModel {
                     taps,
                 });
             }
-            ctx.lm_head(&*self.lm_head, &xs)
+            match self.joint_head {
+                Some(_) => Ok(xs),
+                None => ctx.lm_head(&*self.lm_head, &xs),
+            }
         })()
     }
 }
@@ -3328,7 +3346,33 @@ impl IsqModel for Qwen3_5TextModel {
 #[cfg(feature = "cuda")]
 const SUPPORTS_CUDA_DECODE_GRAPHS: bool = true;
 
+impl Qwen3_5TextModel {
+    /// The joint head's option scores over the prompt's normed hidden states, with the output embeddings of the
+    /// option tokens as its lexical input.
+    fn run_joint_head(&self, hidden: &Tensor, layout: &JointLayout) -> Result<Vec<f32>> {
+        let Some(head) = &self.joint_head else {
+            inference_tensor::bail!("this model has no joint decision head");
+        };
+        let device = self.lm_head.dtype_and_device().1;
+        let ids = layout
+            .options
+            .iter()
+            .flat_map(|(_, span)| layout.tokens[span.clone()].iter().copied())
+            .collect::<Vec<_>>();
+        let ids = Tensor::new(ids, &device)?;
+        let lexical = match self.lm_head.get_qtensor() {
+            Some(qtensor) => qtensor.embedding(&ids)?,
+            None => self.lm_head.dequantize_w()?.index_select(&ids, 0)?,
+        };
+        head.forward(&hidden.to_device(&device)?, &lexical, layout)
+    }
+}
+
 impl NormalModel for Qwen3_5TextModel {
+    fn joint_decision(&self, hidden: &Tensor, layout: &JointLayout) -> Result<Vec<f32>> {
+        self.run_joint_head(hidden, layout)
+    }
+
     fn forward(&self, input_ids: &Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
         let input_embeds = self.embed_tokens(input_ids)?;
         let attention_mask = if ctx.is_paged() {

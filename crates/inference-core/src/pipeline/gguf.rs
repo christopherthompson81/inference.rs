@@ -57,6 +57,11 @@ use tracing::{debug, info, warn};
 
 // the architecture whose full-attention layers can read a prompt bidirectionally
 const BIDIRECTIONAL_ARCHITECTURE: &str = "qwen35";
+// clef's GGUF is Qwen3.5 under its own name, with a joint decision head after the trunk
+const CLEF_ARCHITECTURE: &str = "clef";
+const CLEF_TRUNK: &str = "qwen35";
+const JOINT_WIDTH_TENSOR: &str = "decision.proj_memory.weight";
+const JOINT_FEEDFORWARD_TENSOR: &str = "dec.blk.0.ffn_up.weight";
 const DECISION_TEMPLATE_KEY: &str = "tokenizer.chat_template.systemone";
 // llama.cpp's bounds on a score's level count
 const SCORE_BIAS_LEVELS: std::ops::RangeInclusive<usize> = 2..=255;
@@ -386,6 +391,38 @@ fn bidirectional_config(config: &str) -> Result<String> {
     Ok(serde_json::to_string(&config)?)
 }
 
+/// The config with clef's joint head: its block and head counts and norm epsilon from the metadata, its widths from
+/// the tensors (the converter writes no keys for them).
+fn joint_head_config(config: &str, archive: &inference_quant::GgufArchive) -> Result<String> {
+    let key = |name: &str| {
+        let key = format!("{CLEF_TRUNK}.{name}");
+        archive
+            .metadata_value(&key)
+            .with_context(|| format!("decision model has no `{key}`"))
+    };
+    let rows = |name: &str| -> Result<usize> {
+        Ok(*archive
+            .tensor_info(name)?
+            .shape()
+            .first()
+            .with_context(|| format!("`{name}` has no shape"))?)
+    };
+    let mut config: serde_json::Value = serde_json::from_str(config)?;
+    let text = match config.get_mut("text_config") {
+        Some(text) => text,
+        None => &mut config,
+    };
+    text["joint_head"] = serde_json::json!({
+        "width": rows(JOINT_WIDTH_TENSOR)?,
+        "feedforward": rows(JOINT_FEEDFORWARD_TENSOR)?,
+        "heads": key("decision.head_count")?.to_u32()?,
+        "routing_layers": key("decision.routing_block_count")?.to_u32()?,
+        "layers": key("decision.block_count")?.to_u32()?,
+        "norm_eps": key("attention.layer_norm_epsilon")?.to_f32()?,
+    });
+    Ok(serde_json::to_string(&config)?)
+}
+
 /// The label-coded decision profile a GGUF carries (`<arch>.decision.*` and its `systemone` template), if any.
 fn label_decision(
     metadata: &HashMap<String, inference_tensor::quantized::gguf_file::Value>,
@@ -528,6 +565,7 @@ impl GGUFLoader {
         // a converter may leave out the causal flag of a family trained with bidirectional prompts
         let config = match &label_decision {
             Some(decision) if decision.family.non_causal() => bidirectional_config(&config)?,
+            Some(decision) if decision.family.joint() => joint_head_config(&config, archive)?,
             _ => config,
         };
         let chat_template =
@@ -638,6 +676,9 @@ impl GGUFLoader {
         let decoder_embedding = DecoderEmbeddingGguf::from_metadata(archive.metadata());
         if let Some(decoder) = decoder_embedding {
             archive.rename_architecture(decoder.decoder_architecture())?;
+        }
+        if is_architecture(&archive, CLEF_ARCHITECTURE) {
+            archive.rename_architecture(CLEF_TRUNK)?;
         }
         if is_architecture(&archive, JINA_BERT_V3) {
             merge_task_adapters(&mut archive, paths.get_weight_filenames())?;
