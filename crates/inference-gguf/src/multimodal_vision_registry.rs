@@ -6,6 +6,9 @@ use inference_nn::loaders::MultimodalLoaderType;
 #[cfg(any(test, feature = "models-gemma"))]
 use super::{gemma3_bindings::build_gemma3_bindings, gemma3n_bindings::build_gemma3n_bindings};
 use super::{
+    granite_multimodal_bindings::{
+        self, build_granite_speech_bindings, build_granite4_vision_bindings,
+    },
     idefics3_bindings::build_idefics3_bindings,
     lfm2_vl_bindings::build_lfm2_vl_bindings,
     llama4_bindings::build_llama4_bindings,
@@ -20,6 +23,8 @@ use super::{
 pub enum NativeMultimodalGgufFamily {
     Gemma3,
     Gemma3n,
+    Granite4Vision,
+    GraniteSpeech,
     Idefics3,
     Mistral3,
     Llama4,
@@ -54,6 +59,8 @@ impl NativeMultimodalGgufFamily {
         match self {
             Self::Gemma3 => MultimodalLoaderType::Gemma3,
             Self::Gemma3n => MultimodalLoaderType::Gemma3n,
+            Self::Granite4Vision => MultimodalLoaderType::Granite4Vision,
+            Self::GraniteSpeech => MultimodalLoaderType::GraniteSpeech,
             Self::Idefics3 => MultimodalLoaderType::Idefics3,
             Self::Mistral3 => MultimodalLoaderType::Mistral3,
             Self::Llama4 => MultimodalLoaderType::Llama4,
@@ -69,9 +76,12 @@ impl NativeMultimodalGgufFamily {
             Self::Gemma3 | Self::Gemma3n | Self::Lfm2Vl | Self::PaddleOcrVl => {
                 RopePairing::HalfSplit
             }
-            Self::Idefics3 | Self::Mistral3 | Self::Llama4 | Self::MuseGlimmer => {
-                RopePairing::Adjacent
-            }
+            Self::Granite4Vision
+            | Self::GraniteSpeech
+            | Self::Idefics3
+            | Self::Mistral3
+            | Self::Llama4
+            | Self::MuseGlimmer => RopePairing::Adjacent,
         }
     }
 
@@ -85,6 +95,8 @@ impl NativeMultimodalGgufFamily {
             Self::Gemma3 | Self::Gemma3n => {
                 bail!("GGUF Gemma 3 models are not built in; enable the `models-gemma` feature")
             }
+            Self::Granite4Vision => build_granite4_vision_bindings(archive),
+            Self::GraniteSpeech => build_granite_speech_bindings(archive),
             Self::Idefics3 => build_idefics3_bindings(archive),
             Self::Mistral3 => build_mistral3_bindings(archive),
             Self::Llama4 => build_llama4_bindings(archive),
@@ -96,9 +108,19 @@ impl NativeMultimodalGgufFamily {
 }
 
 // (vision projector type, the text architecture it pairs with, family)
-const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 8] = [
+const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 10] = [
     ("gemma3", "gemma3", NativeMultimodalGgufFamily::Gemma3),
     ("gemma3nv", "gemma3n", NativeMultimodalGgufFamily::Gemma3n),
+    (
+        granite_multimodal_bindings::VISION_PROJECTOR,
+        granite_multimodal_bindings::TEXT_ARCHITECTURE,
+        NativeMultimodalGgufFamily::Granite4Vision,
+    ),
+    (
+        granite_multimodal_bindings::SPEECH_PROJECTOR,
+        granite_multimodal_bindings::TEXT_ARCHITECTURE,
+        NativeMultimodalGgufFamily::GraniteSpeech,
+    ),
     ("idefics3", "llama", NativeMultimodalGgufFamily::Idefics3),
     ("pixtral", "mistral3", NativeMultimodalGgufFamily::Mistral3),
     ("llama4", "llama4", NativeMultimodalGgufFamily::Llama4),
