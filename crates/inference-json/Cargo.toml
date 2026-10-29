@@ -1,0 +1,19 @@
+[package]
+name = "inference-json"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "JSON decoding for inference.rs types through shared per-field helpers instead of per-type serde visitors"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+indexmap.workspace = true
+inference-json-derive.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+serde = { workspace = true, features = ["derive"] }

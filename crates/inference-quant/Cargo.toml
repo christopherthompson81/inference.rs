@@ -13,6 +13,7 @@ license = "MIT AND Apache-2.0"
 homepage.workspace = true
 
 [dependencies]
+inference-json.workspace = true
 inference-tensor.workspace = true
 half.workspace = true
 siphasher.workspace = true

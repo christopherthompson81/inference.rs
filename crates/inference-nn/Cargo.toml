@@ -13,6 +13,7 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
+inference-json.workspace = true
 akin.workspace = true
 anyhow.workspace = true
 inference-tensor.workspace = true

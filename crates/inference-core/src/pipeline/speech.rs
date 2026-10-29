@@ -26,7 +26,7 @@ use inference_tensor::nn::VarBuilder;
 use inference_tensor::{Device, Tensor};
 use rand_isaac::Isaac64Rng;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::any::Any;
 use std::env;
 use std::path::PathBuf;
@@ -41,7 +41,7 @@ const KOKORO_SAFETENSORS: &str = "model.safetensors";
 const KOKORO_CONFIG: &str = "config.json";
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, strum::EnumIter)]
+#[derive(Clone, Copy, Debug, inference_json::FromJson, Serialize, PartialEq, strum::EnumIter)]
 pub enum SpeechLoaderType {
     #[serde(rename = "dia")]
     Dia,

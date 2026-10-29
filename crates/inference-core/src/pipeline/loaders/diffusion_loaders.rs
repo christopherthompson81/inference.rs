@@ -161,7 +161,7 @@ fn flux_local_files(dir: &Path) -> Result<Option<FluxLocalFiles>> {
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq, strum::EnumIter)]
+#[derive(Clone, Debug, inference_json::FromJson, serde::Serialize, PartialEq, strum::EnumIter)]
 /// The architecture to load the diffusion model as.
 pub enum DiffusionLoaderType {
     #[serde(rename = "flux")]

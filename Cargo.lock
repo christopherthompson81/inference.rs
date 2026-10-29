@@ -2679,6 +2679,7 @@ dependencies = [
  "inference-audio",
  "inference-code-exec",
  "inference-gguf",
+ "inference-json",
  "inference-mcp",
  "inference-models-diffusion",
  "inference-models-gemma",
@@ -2807,6 +2808,25 @@ dependencies = [
  "tempfile",
  "tokenizers",
  "tracing",
+]
+
+[[package]]
+name = "inference-json"
+version = "0.0.26"
+dependencies = [
+ "indexmap",
+ "inference-json-derive",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "inference-json-derive"
+version = "0.0.26"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -3066,6 +3086,7 @@ dependencies = [
  "inference-audio",
  "inference-fattn",
  "inference-flash-attn-v3",
+ "inference-json",
  "inference-kernel-build",
  "inference-paged-attn",
  "inference-quant",
@@ -3155,6 +3176,7 @@ dependencies = [
  "half",
  "indexmap",
  "indicatif 0.18.3",
+ "inference-json",
  "inference-kernel-build",
  "inference-metal-compile",
  "inference-tensor",
@@ -3224,6 +3246,7 @@ dependencies = [
  "hf-hub",
  "inference-core",
  "inference-gguf",
+ "inference-json",
  "inference-nn",
  "inference-quant",
  "inference-tensor",

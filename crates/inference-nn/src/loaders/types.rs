@@ -3,7 +3,6 @@
 use std::{fmt::Display, str::FromStr};
 
 use anyhow::Result;
-use serde::Deserialize;
 
 macro_rules! normal_loader_types {
     ($($variant:ident {
@@ -14,7 +13,7 @@ macro_rules! normal_loader_types {
         $(, feature: $feature:literal)? $(,)?
     }),* $(,)?) => {
         #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-        #[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq, strum::EnumIter)]
+        #[derive(Clone, Debug, inference_json::FromJson, serde::Serialize, PartialEq, strum::EnumIter)]
         /// The architecture to load the normal model as.
         pub enum NormalLoaderType {
             $(#[serde(rename = $cli)] $variant,)*
@@ -77,7 +76,7 @@ macro_rules! multimodal_loader_types {
         $(, feature: $feature:literal)? $(,)?
     }),* $(,)?) => {
         #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-        #[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq, strum::EnumIter)]
+        #[derive(Clone, Debug, inference_json::FromJson, serde::Serialize, PartialEq, strum::EnumIter)]
         /// The architecture to load the multimodal model as.
         pub enum MultimodalLoaderType {
             $(#[serde(rename = $cli)] $variant,)*
