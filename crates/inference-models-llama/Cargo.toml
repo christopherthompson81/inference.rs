@@ -25,7 +25,6 @@ itertools.workspace = true
 ordered-float.workspace = true
 regex.workspace = true
 regex-automata.workspace = true
-rubato.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokenizers.workspace = true

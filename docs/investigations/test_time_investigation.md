@@ -208,3 +208,29 @@ Finding:
 
 Implication: the CPU suite no longer sets the pace; what remains is the builds (lint, test and bundle, after an edit
 low in the stack) and the CUDA suite, whose slowest tests are now Parakeet and Kokoro on the GPU.
+
+## Run 11 - 2026-10-29 10:44
+
+Question: where does the full local CI stand after the Granite and OLMo ports? The OLMo PR's run had the CUDA suite at
+140.2 s against Run 10's 101.6 s.
+
+Command: `/usr/bin/time scripts/local_ci.sh --lint --tests --cuda --bindings --size --sweep`, the same flags as
+Run 10, then `scripts/housekeeping.sh --slow-tests` on the log (and on the OLMo PR's log).
+
+Finding:
+- Wall 312.0 s (Run 10: 284.4 s), every check passing. CPU suite 22.8 s (OLMo run 20.2 s, Run 10 24.2 s); CUDA suite
+  126.8 s (OLMo run 140.2 s, Run 10 101.6 s). Two runs of the same tree differ by 13 s on the CUDA suite, so part of
+  the growth is noise; the rest is ~25 s more than Run 10.
+- CPU: Kokoro tiny is 67.2 s of test time in 5 tests (repeats-exactly 22.4 s, reads-English 18.9 s, phonemes 14.4 s,
+  GGUF 7.4 s), then Kokoro's g2p unit tests 15.4 s (21), Parakeet tiny 13.1 s (11).
+- CUDA, slowest tests: Parakeet each-head-repeats 25.7 s, qwen4exp DFlash / MTP / autotuned MTP / sparse prefix 9.4-12.2
+  s each, llama4 CPU vs GPU 10.4 s, GDN speculative commit 10.1 s, doclayout batched 9.3 s, Qwen2-VL prefix cache and
+  Qwen3.5 (MoE) MTP 8.7-8.9 s.
+- CUDA, slowest modules by summed time: inference-nn `ops` 146.7 s (40 tests), `cuda::gdn` 127.9 s (26),
+  `qwen3_5_text_tiny` 112.9 s (26), `qwen_vl_tiny` 96.2 s (14), paged attention `fattn_tests` 86.3 s (17),
+  quant `gguf::packed_affine` 74.5 s (18), `qwen4exp_text_tiny` 71.9 s (10), fattn parity 68.7 s (17).
+
+Implication: the CUDA suite's wall is set by its long single tests (Parakeet at 25.7 s alone is a fifth of it) more
+than by its sum; Parakeet's repeat test, Kokoro's three long CPU tests and the qwen4exp speculative tests are the
+first to look at. Run 10 kept no per-test times, so the ~25 s is not attributed to specific tests; this run's lists
+are the baseline for the next round.
