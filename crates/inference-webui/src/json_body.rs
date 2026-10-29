@@ -23,18 +23,22 @@ impl<S: Send + Sync, T: FromJson> FromRequest<S> for JsonBody<T> {
         let body = Bytes::from_request(request, state)
             .await
             .map_err(IntoResponse::into_response)?;
-        let value = inference_json::parse_slice(&body).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("Failed to parse the request body as JSON: {e}"),
-            )
-                .into_response()
+        let value = inference_json::parse_slice(&body).map_err(|e| match e.is_syntax() {
+            true => {
+                let message = format!("Failed to parse the request body as JSON: {e}");
+                (StatusCode::BAD_REQUEST, message).into_response()
+            }
+            false => data_rejection(&e),
         })?;
-        T::from_json(&value).map(Self).map_err(|e| {
-            let message = format!("Failed to deserialize the JSON body into the target type: {e}");
-            (StatusCode::UNPROCESSABLE_ENTITY, message).into_response()
-        })
+        T::from_json(&value)
+            .map(Self)
+            .map_err(|e| data_rejection(&e))
     }
+}
+
+fn data_rejection(e: &inference_json::JsonError) -> Response {
+    let message = format!("Failed to deserialize the JSON body into the target type: {e}");
+    (StatusCode::UNPROCESSABLE_ENTITY, message).into_response()
 }
 
 // axum's rule: `application/json` or any `application/*+json`

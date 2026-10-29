@@ -18,6 +18,7 @@ name = "inference_ffi"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+inference-json.workspace = true
 mimalloc = { workspace = true, features = ["local_dynamic_tls"] }
 anyhow.workspace = true
 inference-tensor.workspace = true

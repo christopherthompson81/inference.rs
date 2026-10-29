@@ -66,6 +66,7 @@ fn text_scalar(v: &Value) -> Option<&str> {
 pub struct JsonError {
     path: String,
     message: String,
+    syntax: bool,
 }
 
 impl JsonError {
@@ -73,6 +74,7 @@ impl JsonError {
         Self {
             path: String::new(),
             message: message.into(),
+            syntax: false,
         }
     }
 
@@ -143,7 +145,16 @@ impl JsonError {
     }
 
     fn serde(e: serde_json::Error) -> Self {
-        Self::new(e.to_string())
+        let syntax = e.classify() != serde_json::error::Category::Data;
+        Self {
+            syntax,
+            ..Self::new(e.to_string())
+        }
+    }
+
+    /// The text was not JSON, as against JSON of the wrong shape (a repeated key, a mismatched type).
+    pub fn is_syntax(&self) -> bool {
+        self.syntax
     }
 }
 
@@ -213,11 +224,93 @@ pub fn from_slice<T: FromJson>(src: &[u8]) -> Result<T, JsonError> {
 
 /// serde_json's parser, compiled once here for every type.
 pub fn parse_str(src: &str) -> Result<Value, JsonError> {
-    serde_json::from_str(src).map_err(JsonError::serde)
+    serde_json::from_str::<Unique>(src)
+        .map(|u| u.0)
+        .map_err(JsonError::serde)
 }
 
 pub fn parse_slice(src: &[u8]) -> Result<Value, JsonError> {
-    serde_json::from_slice(src).map_err(JsonError::serde)
+    serde_json::from_slice::<Unique>(src)
+        .map(|u| u.0)
+        .map_err(JsonError::serde)
+}
+
+/// A `Value` whose objects may not repeat a key: serde's derive rejected a repeated field, and a `Value` would keep the
+/// last one silently. The derived `Deserialize` bridge does not use it, so files from other writers still load.
+struct Unique(Value);
+
+impl<'de> serde::Deserialize<'de> for Unique {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_any(UniqueVisitor).map(Unique)
+    }
+}
+
+struct UniqueVisitor;
+
+impl<'de> serde::de::Visitor<'de> for UniqueVisitor {
+    type Value = Value;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("any JSON value")
+    }
+
+    fn visit_bool<E>(self, b: bool) -> Result<Value, E> {
+        Ok(Value::Bool(b))
+    }
+
+    fn visit_i64<E>(self, n: i64) -> Result<Value, E> {
+        Ok(Value::from(n))
+    }
+
+    fn visit_u64<E>(self, n: u64) -> Result<Value, E> {
+        Ok(Value::from(n))
+    }
+
+    fn visit_f64<E>(self, f: f64) -> Result<Value, E> {
+        Ok(serde_json::Number::from_f64(f).map_or(Value::Null, Value::Number))
+    }
+
+    fn visit_str<E>(self, s: &str) -> Result<Value, E> {
+        Ok(Value::String(s.to_owned()))
+    }
+
+    fn visit_string<E>(self, s: String) -> Result<Value, E> {
+        Ok(Value::String(s))
+    }
+
+    fn visit_unit<E>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_none<E>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_some<D: serde::Deserializer<'de>>(self, d: D) -> Result<Value, D::Error> {
+        d.deserialize_any(self)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut items = Vec::new();
+        while let Some(Unique(v)) = seq.next_element()? {
+            items.push(v);
+        }
+        Ok(Value::Array(items))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        let mut o = Map::new();
+        while let Some(k) = map.next_key::<String>()? {
+            let Unique(v) = map.next_value()?;
+            if o.contains_key(&k) {
+                return Err(serde::de::Error::custom(format_args!(
+                    "duplicate field `{k}`"
+                )));
+            }
+            o.insert(k, v);
+        }
+        Ok(Value::Object(o))
+    }
 }
 
 /// `FromJson` through a type's own `Deserialize`, for types whose decoding is hand-written.

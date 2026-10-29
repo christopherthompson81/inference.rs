@@ -2767,6 +2767,7 @@ dependencies = [
  "image",
  "indicatif 0.18.3",
  "inference-api",
+ "inference-json",
  "inference-layout",
  "inference-models-other",
  "inference-models-speech",

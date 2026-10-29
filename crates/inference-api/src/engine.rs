@@ -982,7 +982,7 @@ impl Engine {
         spec: &[u8],
         callbacks: EngineCallbacks,
     ) -> Result<Self, EngineLoadError> {
-        let spec = serde_json::from_slice(spec)
+        let spec = inference_json::from_slice(spec)
             .map_err(|error| EngineLoadError::InvalidSpec(error.to_string()))?;
         Self::load_with_callbacks(spec, callbacks).await
     }
