@@ -119,3 +119,24 @@ After the fixes:
 The 0.016 logprob spread is in line with our CatmullRom resize against PIL's bicubic in the crops.
 
 **Next:** a tiny-checkpoint engine test; `granite-4.0-3b-vision` ships its text weights partly as a PEFT adapter (`adapter_model.safetensors`), not checked here; the GGUF mmproj (`granite4_vision`) and Granite Speech remain.
+
+## Run 8 - 2026-10-28 22:15
+
+**Question:** does Granite Speech (CTC Conformer encoder with block-local Shaw relative attention and a mid-stack CTC feedback, windowed BLIP-2 Q-Former projector, torchaudio-style log-mel front end) match transformers on `ibm-granite/granite-speech-4.1-2b`?
+
+**Command:** `gsp/ref.py` (transformers 5.19.0 `AutoModelForSpeechSeq2Seq`, f32 CPU) and our server (`/v1/chat/completions`, an `audio_url` data URL), on a synthetic espeak-ng clip ("The quick brown fox jumps over the lazy dog near the river bank.", 4.46 s), resampled once to 16 kHz with torchaudio so both sides read the same samples, "can you transcribe the speech into a written format?", 32 greedy tokens.
+
+**Findings, in order:**
+
+1. Same transcription, same top 5, but our logprob gaps were 8x narrower (second token -5.2 against -42.5). transformers' `GraniteSpeechForConditionalGeneration` applies its own `lm_head` to the base `GraniteModel`'s states, so it never divides by `logits_scaling` (8); our Granite model did. Speech now builds the text model without it.
+2. 63 prompt tokens against 64. The expanded prompt strings are identical; transformers 5's tokenizer splits `?\n` into `?` and `\n`, while the checkpoint's `tokenizer.json` (what transformers 4 and the tokenizers library read) keeps `?\n` as one token. We follow `tokenizer.json`; the reference was rerun on the same ids.
+
+After both:
+
+| | ours | transformers |
+|---|---|---|
+| prompt tokens | 63 (45 audio) | 63 |
+| first token top 5 | 1820 0.0, 64 -41.517, 438 -57.581, 28863 -60.467, 1 -70.427 | 1820 0.0, 64 -41.516, 438 -57.589, 28863 -60.464, 1 -70.433 |
+| transcription | "the quick brown fox jumps over the lazy dog near the riverbank" | identical |
+
+**Next:** tiny-checkpoint engine test; Granite Speech Plus (`cat_hidden_layers`) loads through the same code but is not checked against its reference here; GGUF projectors remain.

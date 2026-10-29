@@ -2287,10 +2287,24 @@ impl GraniteMoeHybrid {
         self.forward_embeds(input_ids, x, ctx, &|_, x| Ok(x))
     }
 
+    /// Leaves the logits undivided by `logits_scaling`, as Granite Speech's own `lm_head` does in transformers.
+    pub fn without_logits_scaling(mut self) -> Self {
+        self.logits_scaling = 1.0;
+        self
+    }
+
     /// The token embeddings, scaled by the embedding multiplier.
     pub fn embed(&self, input_ids: &Tensor) -> Result<Tensor> {
-        let x = self.wte.embedding_forward(input_ids, self.dtype)?;
-        scale_tensor(x, self.embedding_multiplier)
+        self.scale_embeddings(self.wte.embedding_forward(input_ids, self.dtype)?)
+    }
+
+    /// The token embeddings before the embedding multiplier, which transformers applies to whatever it is given.
+    pub fn token_embeddings(&self, input_ids: &Tensor) -> Result<Tensor> {
+        self.wte.embedding_forward(input_ids, self.dtype)
+    }
+
+    pub fn scale_embeddings(&self, embeddings: Tensor) -> Result<Tensor> {
+        scale_tensor(embeddings, self.embedding_multiplier)
     }
 
     pub fn forward_embeds(

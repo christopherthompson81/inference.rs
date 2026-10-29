@@ -9905,6 +9905,7 @@
           "llava_next",
           "llava",
           "granite4_vision",
+          "granite_speech",
           "lfm2vl",
           "vllama",
           "qwen2vl",
