@@ -133,6 +133,13 @@ Granite 4 Vision (`Granite4VisionForConditionalGeneration`, e.g. `ibm-granite/gr
 
 Granite Speech (`GraniteSpeechForConditionalGeneration` and `GraniteSpeechPlusForConditionalGeneration`, e.g. `ibm-granite/granite-speech-4.1-2b`) reads one or more audio clips, resampled to 16 kHz mono, through a Conformer encoder and a windowed Q-Former; each clip takes 3 tokens per 15 encoder frames (0.3 s). Send the audio with a text request such as "can you transcribe the speech into a written format?". Checkpoints that switch a LoRA adapter on for audio (`has_lora_adapter`) are refused.
 
+Both also load from llama.cpp's GGUFs: the text GGUF with its projector (`--mmproj`, an `mmproj-*.gguf` that `convert_hf_to_gguf.py --mmproj` writes), and the original repo for `config.json` and the processor files (`--tok-model-id`):
+
+```bash
+inference serve --format gguf -m <dir> -f granite-vision-Q8_0.gguf --mmproj <dir>/mmproj-granite-vision-f16.gguf \
+  --tok-model-id ibm-granite/granite-vision-4.1-4b
+```
+
 ## LFM2 and LFM2.5
 
 LiquidAI LFM2 and LFM2.5 dense and MoE checkpoints are supported. LFM2-VL and LFM2.5-VL are supported for image input.

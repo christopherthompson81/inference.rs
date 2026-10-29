@@ -140,3 +140,17 @@ After both:
 | transcription | "the quick brown fox jumps over the lazy dog near the riverbank" | identical |
 
 **Next:** tiny-checkpoint engine test; Granite Speech Plus (`cat_hidden_layers`) loads through the same code but is not checked against its reference here; GGUF projectors remain.
+
+## Run 9 - 2026-10-28 22:50
+
+**Question:** do llama.cpp's Granite 4 Vision and Granite Speech GGUFs (text `granite` plus mmproj `granite4_vision` / `granite_speech`) load with the original `config.json`, and match?
+
+**Command:** `convert_hf_to_gguf.py` (text Q8_0, `--mmproj` f16) for both checkpoints; our server with `--format gguf --mmproj ... --tok-model-id <hf dir>`, same requests as Runs 7 and 8; `llama-mtmd-cli` on the same files (the llama.cpp build was relinked first: `llama-mtmd-cli` failed with an undefined symbol, a stale build, which is also why `llama-tokenize` segfaulted in Run 6, not a llama.cpp bug).
+
+**Findings:**
+
+- Speech maps one-to-one apart from llama.cpp's folds: `to_kv` split into `attn_k` / `attn_v` (concatenated back), the pointwise and depthwise convolutions' unit dimensions squeezed (reshaped back), and BatchNorm's running statistics folded into `conv_norm`'s weight and bias (the encoder takes a missing `running_mean` as already folded). Result: 63 prompt tokens, first token top 5 the same as Run 8 within 0.4 (Q8_0 text), identical transcription. llama.cpp gives the same transcription with `--jinja` (without it, it throws on the template).
+- Vision's first load generated a worse description. Comparing the mmproj tensors with the safetensors ones: spatial projectors matched, layerwise ones did not, block for block. llama.cpp writes the layerwise projectors from the deepest tower layer up (`feature_layer` 26, 20, 14, 8), transformers' config lists them from the shallowest (-19, -13, -7, -1): block b is layerwise projector 3 - b. The bindings now name each layerwise block by its feature layer's rank. `post_norm` is the Q-Former's input `layernorm`, `norm` the projector's.
+- After that, Vision: 535 prompt tokens, first token top 5 the same tokens as Run 7 (791 -0.121 against -0.129). The greedy text follows transformers for 8 tokens, then takes "text" (-0.916) over "piece" (-0.943), a 0.03 near-tie under Q8_0; llama.cpp on the same files follows transformers' wording.
+
+**Next:** the 4.0 vision PEFT adapter (fold at load).

@@ -35,6 +35,7 @@ Fine-tunes and model sizes within a family use the same entry.
 | Granite dense | `granite` |
 | Granite MoE | `granitemoe` |
 | Granite hybrid | `granitehybrid` |
+| Granite SWA (swash) dense and MoE | `granite_swa` |
 | GPT-OSS | `gpt-oss` |
 | Hunyuan dense | `hunyuan-dense` |
 | Hunyuan MoE | `hunyuan-moe` |
@@ -59,6 +60,8 @@ files when the repository and GGUF metadata identify them unambiguously. The dir
 | Gemma 3 | `gemma3` |
 | Gemma 3n | `gemma3n` |
 | Gemma 4 dense and MoE | `gemma4` |
+| Granite 4 Vision | `granite` (projector `granite4_vision`) |
+| Granite Speech | `granite` (projector `granite_speech`) |
 | Idefics3 and SmolVLM | `llama` |
 | Mistral 3 and Pixtral | `mistral3` |
 | Llama 4 | `llama4` |

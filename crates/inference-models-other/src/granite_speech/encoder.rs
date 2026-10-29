@@ -163,8 +163,16 @@ impl ConvModule {
         let bn = vb.pp("batch_norm");
         let weight = bn.get(inner, "weight")?;
         let bias = bn.get(inner, "bias")?;
-        let mean = bn.get(inner, "running_mean")?;
-        let var = bn.get(inner, "running_var")?;
+        // llama.cpp's GGUF stores the statistics folded in: its weight and bias are the scale and shift
+        let (mean, var) = if crate::layers::contains_tensor_or_weight_source(&bn, "running_mean") {
+            (
+                bn.get(inner, "running_mean")?,
+                bn.get(inner, "running_var")?,
+            )
+        } else {
+            let zeros = weight.zeros_like()?;
+            (zeros.clone(), (zeros + (1.0 - NORM_EPS))?)
+        };
         let bn_scale = weight.broadcast_div(&(var.clone() + NORM_EPS)?.sqrt()?)?;
         let bn_shift = (&bias - mean.mul(&bn_scale)?)?;
         if cfg.conv_kernel_size.is_multiple_of(2) {
