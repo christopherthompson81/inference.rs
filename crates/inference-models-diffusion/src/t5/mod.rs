@@ -42,7 +42,7 @@ fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: f32) -> Result<Tensor>
     Ok(m)
 }
 
-#[derive(Debug, Deserialize, Default, Clone, PartialEq)]
+#[derive(Debug, inference_json::FromJson, Default, Clone, PartialEq)]
 pub struct ActivationWithOptionalGating {
     pub gated: bool,
     pub activation: inference_tensor::nn::Activation,
@@ -73,7 +73,7 @@ where
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, inference_json::FromJson)]
 pub struct Config {
     pub vocab_size: usize,
     pub d_model: usize,

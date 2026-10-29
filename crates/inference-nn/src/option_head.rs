@@ -7,12 +7,12 @@
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::nn::{LayerNorm, Module};
 use inference_tensor::{DType, Result, Tensor};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::decision::JointLayout;
 
 /// The head's width, from its key projection, and its LayerNorms' epsilon.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson)]
 pub struct OptionHeadConfig {
     pub head_dim: usize,
     pub norm_eps: f64,

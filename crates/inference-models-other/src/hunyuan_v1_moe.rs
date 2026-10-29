@@ -7,7 +7,7 @@ use inference_quant::{
     ShardedVarBuilder,
 };
 use inference_tensor::{DType, Device, Module, Result, Tensor};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::{collections::HashMap, sync::Arc};
 
 use crate::kv_cache::EitherCache;
@@ -37,7 +37,7 @@ serde_default_fn!(bool, norm_topk_prob_default, true);
 serde_default_fn!(f64, routed_scaling_factor_default, 1.0);
 serde_default_fn!(usize, pretraining_tp_default, 1);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 #[serde(untagged)]
 pub enum PerLayerValue {
     Scalar(usize),
@@ -113,7 +113,7 @@ impl PerLayerValue {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct Config {
     pub vocab_size: usize,
     pub hidden_size: usize,

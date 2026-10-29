@@ -1,5 +1,5 @@
 /// How probabilities become speech segments: the reference `get_speech_timestamps`'s parameters and defaults.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, inference_json::FromJson)]
 #[serde(default)]
 pub struct SegmentOptions {
     /// Probability at which speech starts.

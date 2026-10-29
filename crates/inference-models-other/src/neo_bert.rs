@@ -5,7 +5,6 @@ use std::sync::Arc;
 use inference_quant::{QuantMethod, ShardedVarBuilder};
 use inference_tensor::nn::{Embedding, Module};
 use inference_tensor::{D, Device, Result, Tensor};
-use serde::Deserialize;
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
@@ -30,7 +29,7 @@ const FFN_MULTIPLE: usize = 8;
 serde_default_fn!(f64, norm_eps, 1e-6);
 serde_default_fn!(usize, max_length, 1024);
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Config {
     pub vocab_size: usize,
     pub hidden_size: usize,

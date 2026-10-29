@@ -10,7 +10,6 @@ use inference_quant::ShardedVarBuilder;
 use inference_tensor::nn::Linear;
 use inference_tensor::{D, DType, Device, Result, Tensor};
 use rand_isaac::Isaac64Rng;
-use serde::Deserialize;
 
 use crate::{
     attention::{AttentionMask, SdpaParams},
@@ -30,7 +29,7 @@ use super::{
     text::{ProportionalRotaryEmbedding, first_kv_shared_layer_idx},
 };
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 struct Gemma4AssistantConfig {
     #[serde(default)]
     model_type: String,
@@ -56,7 +55,7 @@ fn default_centroid_top_k() -> usize {
     32
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 struct AssistantGenerationConfig {
     num_assistant_tokens: Option<usize>,
 }

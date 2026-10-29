@@ -3,7 +3,6 @@
 
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::{DType, Result, Tensor};
-use serde::Deserialize;
 
 use super::ops::{
     ACT_DTYPE, AttentionKind, LayerNorm, Linear, PatchConv, RmsNorm, RopeTables, gated_residual,
@@ -19,7 +18,7 @@ const GROUP_NORM_EPS: f64 = 1e-5;
 // GroupNorm groups are mid_channels / 8
 const CHANNELS_PER_GROUP: usize = 8;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct ControlNetConfig {
     pub conv_out_dim: usize,
     pub dim: usize,

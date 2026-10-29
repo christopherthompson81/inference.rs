@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 
-use serde::Deserialize;
-
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct IstftNetConfig {
     pub upsample_kernel_sizes: Vec<usize>,
     pub upsample_rates: Vec<usize>,
@@ -13,7 +11,7 @@ pub struct IstftNetConfig {
     pub upsample_initial_channel: usize,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct PlBertConfig {
     pub hidden_size: usize,
     pub num_attention_heads: usize,
@@ -23,7 +21,7 @@ pub struct PlBertConfig {
 }
 
 /// The release's `config.json`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct KokoroConfig {
     pub istftnet: IstftNetConfig,
     pub hidden_dim: usize,

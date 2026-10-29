@@ -40,7 +40,7 @@ impl Diarizer {
 pub const DEFAULT_THRESHOLD: f32 = 0.5;
 
 /// What a diarization request asks for beyond its audio.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, inference_json::FromJson)]
 pub struct DiarizationOptions {
     /// Probability at which a speaker counts as speaking; unset is `DEFAULT_THRESHOLD`.
     pub threshold: Option<f32>,

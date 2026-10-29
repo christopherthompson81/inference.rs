@@ -21,7 +21,7 @@ serde_default_fn!(
     vec![7, 15, 23, 31]
 );
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct VisionConfig {
     #[serde(default = "default_depth")]
     pub depth: usize,

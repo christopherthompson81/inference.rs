@@ -10,7 +10,6 @@ use inference_quant::{QuantMethod, ReplicatedLayer, ShardedVarBuilder};
 use inference_tensor::nn::LayerNorm;
 use inference_tensor::nn::ops::softmax_last_dim;
 use inference_tensor::{DType, Module, Result, Tensor};
-use serde::Deserialize;
 
 // F.normalize's floor on a norm
 const L2_EPS: f64 = 1e-12;
@@ -21,7 +20,7 @@ const JOINT_SCALE: usize = 1;
 const RESIDUAL_GATE: usize = 2;
 
 /// The joint head's sizes, from the GGUF's `decision.*` keys and tensor shapes.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, inference_json::FromJson)]
 pub struct JointHeadConfig {
     pub width: usize,
     pub feedforward: usize,

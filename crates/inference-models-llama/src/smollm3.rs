@@ -1,7 +1,7 @@
 //! SmolLM3: the Llama decoder with RoPE skipped on every `no_rope_layer_interval`-th layer (NoPE).
 
 use inference_quant::QuantizedConfig;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{
     decoder::{DecoderSpec, RopeKind},
@@ -11,7 +11,7 @@ use crate::{
 
 serde_default_fn!(bool, word_emb_default, true);
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct Config {
     pub hidden_act: Activation,
     pub hidden_size: usize,

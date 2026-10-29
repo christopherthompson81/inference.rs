@@ -3,7 +3,7 @@
 
 use inference_quant::QuantizedConfig;
 use inference_tensor::Result;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{
     decoder::{AttentionTemperature, DecoderSpec, RopeKind},
@@ -15,7 +15,7 @@ serde_default_fn!(bool, tie_word_embeddings, false);
 serde_default_fn!(f64, default_rope_theta, 10000.0);
 
 /// RoPE type for Mistral models
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum MistralRopeType {
     #[default]
@@ -26,7 +26,7 @@ pub enum MistralRopeType {
 }
 
 /// RoPE parameters for Mistral models, supporting YARN scaling
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct MistralRopeParameters {
     pub rope_theta: f64,
     #[serde(default)]
@@ -42,7 +42,7 @@ pub struct MistralRopeParameters {
     pub llama_4_scaling_beta: Option<f32>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, inference_json::FromJson)]
 pub struct Config {
     pub vocab_size: usize,
     pub hidden_size: usize,

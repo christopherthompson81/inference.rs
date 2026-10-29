@@ -1,5 +1,3 @@
-use serde::Deserialize;
-
 use crate::serde_default_fn;
 use inference_nn::vision::siglip::SiglipVisionConfig;
 
@@ -13,7 +11,7 @@ serde_default_fn!(f64, default_qformer_eps, 1e-12);
 const QFORMER_HEAD_DIM: usize = 64;
 
 /// The Window Q-Former projectors' BLIP-2 Q-Former, as `Granite4VisionConfig` defaults it.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct QFormerConfig {
     pub hidden_size: Option<usize>,
     pub num_attention_heads: Option<usize>,
@@ -54,7 +52,7 @@ impl QFormerConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Config {
     pub text_config: crate::granite::Config,
     pub vision_config: SiglipVisionConfig,

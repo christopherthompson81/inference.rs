@@ -7,7 +7,6 @@ use std::sync::Arc;
 use inference_quant::{QuantMethod, ShardedVarBuilder};
 use inference_tensor::nn::{Embedding, LayerNorm, Module};
 use inference_tensor::{D, DType, Device, Result, Tensor};
-use serde::Deserialize;
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
@@ -41,7 +40,7 @@ serde_default_fn!(
 );
 serde_default_fn!(String, feed_forward_type, ORIGINAL_FFN.to_string());
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Config {
     pub vocab_size: usize,
     // DistilBERT's config keys

@@ -16,7 +16,7 @@ const SNAKE_EPS: f64 = 1e-9;
 fn snake(channels: usize, vb: VarBuilder) -> Result<Snake1d> {
     Snake1d::new(vb.get((1, channels, 1), "alpha")?, SNAKE_EPS)
 }
-#[derive(serde::Deserialize, Debug, Clone)]
+#[derive(inference_json::FromJson, Debug, Clone)]
 pub struct Config {
     pub num_codebooks: usize,
     pub codebook_size: usize,

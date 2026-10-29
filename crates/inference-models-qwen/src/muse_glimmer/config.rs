@@ -36,21 +36,21 @@ serde_default_fn!(usize, default_out_hidden_size, 6144);
 serde_default_fn!(usize, default_projector_hidden_size, 4096);
 serde_default_fn!(Activation, default_projector_activation, Activation::Gelu);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, inference_json::FromJson)]
 #[serde(rename_all = "snake_case")]
 pub enum TextAttentionType {
     FullAttention,
     SlidingAttention,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, inference_json::FromJson)]
 #[serde(rename_all = "snake_case")]
 pub enum VisionAttentionType {
     FullAttention,
     WindowAttention,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct RopeParameters {
     #[serde(default = "default_text_rope_theta")]
     pub rope_theta: f64,
@@ -64,7 +64,7 @@ impl Default for RopeParameters {
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct VisionRopeParameters {
     #[serde(default = "default_vision_rope_theta")]
     pub rope_theta: f64,
@@ -78,7 +78,7 @@ impl Default for VisionRopeParameters {
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct TextConfig {
     #[serde(default = "default_vocab_size")]
     pub vocab_size: usize,
@@ -212,7 +212,7 @@ impl TextConfig {
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct VisionConfig {
     #[serde(default = "default_vision_hidden_size")]
     pub hidden_size: usize,
@@ -305,7 +305,7 @@ impl VisionConfig {
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Config {
     pub text_config: TextConfig,
     pub vision_config: VisionConfig,

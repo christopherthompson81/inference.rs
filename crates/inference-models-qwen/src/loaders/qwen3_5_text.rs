@@ -7,7 +7,7 @@ pub struct Qwen3_5TextLoader;
 pub struct Qwen3_5MoeTextLoader;
 
 // The loader injects the MTP flag at the top level, which for this loader is the text config itself.
-#[derive(serde::Deserialize)]
+#[derive(inference_json::FromJson)]
 struct MtpFlag {
     #[serde(default, rename = "_inference_mtp")]
     mtp: bool,

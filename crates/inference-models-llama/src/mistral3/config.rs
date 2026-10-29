@@ -1,11 +1,10 @@
 use inference_quant::QuantizedConfig;
-use serde::Deserialize;
 
 use crate::{layers::Activation, mistral};
 
 use super::vision;
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(inference_json::FromJson, Debug, Clone)]
 pub struct Mistral3Config {
     pub image_token_index: usize,
     pub multimodal_projector_bias: bool,

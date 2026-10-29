@@ -20,7 +20,7 @@ serde_default_fn!(usize, sliding_window_pattern, 6);
 serde_default_fn!(usize, num_attention_heads, 8);
 serde_default_fn!(usize, num_key_value_heads, 4);
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Gemma3TextConfig {
     #[serde(default, rename = "_inference_use_language_model_prefix")]
     pub use_language_model_prefix: bool,
@@ -60,7 +60,7 @@ pub struct Gemma3TextConfig {
     pub rope_scaling: Option<Gemma3RopeScalingConfig>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub enum Gemma3Config {
     #[serde(untagged)]
     WithVision {

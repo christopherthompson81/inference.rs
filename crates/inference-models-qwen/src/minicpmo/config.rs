@@ -1,6 +1,6 @@
 use crate::{qwen2, vision::siglip};
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct MiniCpmOConfig {
     #[serde(flatten)]
     pub text_config: qwen2::Config,

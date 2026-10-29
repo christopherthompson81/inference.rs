@@ -16,7 +16,7 @@ fn default_max_position_embeddings() -> usize {
 
 serde_default_fn!(bool, word_emb_default, false);
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, Default)]
+#[derive(inference_json::FromJson, serde::Serialize, Debug, Clone, Default)]
 pub struct Config {
     pub attention_bias: bool,
     pub head_dim: usize,

@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{layers::Activation, serde_default_fn};
 
@@ -30,7 +30,7 @@ serde_default_fn!(usize, default_encoder_patch_size, 16);
 serde_default_fn!(usize, default_tile_size, 512);
 serde_default_fn!(f64, default_max_pixels_tolerance, 2.0);
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct VisionConfig {
     #[serde(default = "default_hidden_size")]
     pub hidden_size: usize,
@@ -52,7 +52,7 @@ pub struct VisionConfig {
     pub layer_norm_eps: f64,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct Config {
     pub text_config: crate::lfm2::Config,
     pub vision_config: VisionConfig,

@@ -35,7 +35,7 @@ use crate::vision::clip;
 
 const ENCODER_CACHE_ENTRIES: usize = 32;
 
-#[derive(Debug, Clone, serde::Deserialize, Default)]
+#[derive(Debug, Clone, inference_json::FromJson, Default)]
 pub struct EmbedLayerConfig {
     pub hd_transform_order: Option<String>,
     pub projection_cls: Option<String>,
@@ -43,7 +43,7 @@ pub struct EmbedLayerConfig {
     pub with_learnable_separator: Option<bool>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, Default)]
+#[derive(Debug, Clone, inference_json::FromJson, Default)]
 pub struct ImageProcessorConfig {
     pub image_dim_out: usize,
     pub name: String,
@@ -54,7 +54,7 @@ pub struct ImageProcessorConfig {
 
 serde_default_fn!(bool, word_emb_default, false);
 
-#[derive(Debug, Clone, serde::Deserialize, Default)]
+#[derive(Debug, Clone, inference_json::FromJson, Default)]
 pub struct Config {
     pub vocab_size: usize,
     pub hidden_act: Activation,

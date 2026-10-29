@@ -5,11 +5,10 @@ use inference_quant::ShardedVarBuilder;
 use inference_tensor::nn;
 use inference_tensor::nn::Module;
 use inference_tensor::{D, DType, Device, IndexOp, Result, Tensor};
-use serde::Deserialize;
 
 use crate::layers::{self, MatMul};
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, inference_json::FromJson)]
 pub enum Activation {
     #[serde(rename = "quick_gelu")]
     QuickGelu,
@@ -23,7 +22,7 @@ impl Module for Activation {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct ClipTextConfig {
     pub vocab_size: usize,
     pub projection_dim: usize,
@@ -34,7 +33,7 @@ pub struct ClipTextConfig {
     pub num_attention_heads: usize,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct ClipConfig {
     pub text_config: ClipTextConfig,
 }

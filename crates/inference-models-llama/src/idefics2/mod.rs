@@ -6,7 +6,6 @@ use inference_nn::vision::siglip::SiglipVisionTransformer;
 use inference_quant::{QuantizedConfig, ShardedVarBuilder};
 use inference_tensor::nn::Module;
 use inference_tensor::{D, DType, Device, IndexOp, Result, Tensor};
-use serde::Deserialize;
 use std::{
     any::Any,
     sync::{Arc, Mutex},
@@ -108,7 +107,7 @@ fn default_224() -> usize {
     224
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, inference_json::FromJson)]
 pub struct PerceiverConfig {
     #[serde(default = "default_act")]
     pub hidden_act: Activation,
@@ -126,7 +125,7 @@ pub struct PerceiverConfig {
     pub attention_dropout: f32,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, inference_json::FromJson)]
 pub struct VisionConfig {
     #[serde(default = "default_768")]
     pub hidden_size: usize,
@@ -168,7 +167,7 @@ impl VisionConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct TextConfig {
     #[serde(default = "default_32000")]
     pub vocab_size: usize,
@@ -256,7 +255,7 @@ mod quantization_config_tests {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Config {
     pub perceiver_config: PerceiverConfig,
     pub vision_config: VisionConfig,

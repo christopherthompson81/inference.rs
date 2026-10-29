@@ -398,6 +398,12 @@ impl FromJson for Value {
     }
 }
 
+impl FromJson for serde::de::IgnoredAny {
+    fn from_json(_: &Value) -> Result<Self, JsonError> {
+        Ok(serde::de::IgnoredAny)
+    }
+}
+
 impl FromJson for Map<String, Value> {
     fn from_json(v: &Value) -> Result<Self, JsonError> {
         __private::object(v, "a map").cloned()

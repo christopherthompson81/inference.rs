@@ -20,7 +20,7 @@ use inference_tensor::{
     Context, D, DType, Device, IndexOp, Result, Tensor,
     quantized::{QMatMul, QTensor},
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 pub use crate::attention::Sdpa;
 pub use crate::layers::masker::{CausalMaskConfig, CausalMasker};
@@ -707,7 +707,7 @@ pub struct PhiRotaryEmbedding {
     original_max_position_embeddings: usize,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ScaledRopeType {
     #[serde(alias = "su")]
@@ -736,7 +736,7 @@ impl FromStr for ScaledRopeType {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 #[serde(untagged)]
 pub enum PhiRopeScalingConfig {
     Classic {
@@ -1075,7 +1075,7 @@ impl PhiRotaryEmbedding {
 #[derive(Debug, Clone)]
 pub struct Llama3RotaryEmbedding(RotaryEmbedding);
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, Default)]
 pub enum Llama3RopeType {
     #[serde(rename = "llama3")]
     Llama3,
@@ -1086,7 +1086,7 @@ pub enum Llama3RopeType {
     Default,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, Default)]
 pub struct Llama3RopeConfig {
     pub factor: f32,
     pub low_freq_factor: Option<f32>,
@@ -1559,7 +1559,7 @@ pub struct DeepSeekV2RotaryEmbedding {
     cos: Tensor,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 #[serde(untagged)]
 pub enum DeepSeekV2RopeScaling {
     Yarn {
@@ -1738,14 +1738,14 @@ impl DeepSeekV2RotaryEmbedding {
 #[derive(Debug, Clone)]
 pub struct Gemma3RotaryEmbedding(RotaryEmbedding);
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Gemma3ScaledRopeType {
     #[serde(alias = "linear")]
     Linear,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct Gemma3RopeScalingConfig {
     factor: f64,
     rope_type: Gemma3ScaledRopeType,
@@ -2532,7 +2532,7 @@ impl GptOssRotaryEmbedding {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, inference_json::FromJson, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Activation {
     #[default]

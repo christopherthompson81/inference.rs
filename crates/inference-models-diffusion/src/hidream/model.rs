@@ -5,7 +5,6 @@ use std::sync::OnceLock;
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::nn::Linear;
 use inference_tensor::{DType, Device, Module, Result, Tensor};
-use serde::Deserialize;
 
 use super::references::References;
 use crate::attention::{AttentionMask, FlashParams};
@@ -33,7 +32,7 @@ pub const NO_VISION_TOWER: &str = "these HiDream-O1 weights have no vision tower
     reference images need; rewrite the GGUF from the checkpoint";
 
 /// The fields of the checkpoint's `Qwen3VLForConditionalGeneration` config the denoiser reads.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Config {
     pub text_config: TextConfig,
     pub vision_config: VisionConfig,

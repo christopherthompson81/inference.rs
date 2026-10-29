@@ -4,7 +4,6 @@
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::quantized::GgmlDType;
 use inference_tensor::{DType, Device, Result, Tensor};
-use serde::Deserialize;
 
 use super::controlnet::{ControlNet, ControlNetConfig};
 use super::ops::{
@@ -21,7 +20,7 @@ const FFN_CHUNK_TOKENS: usize = 8192;
 const BLOCK_MODULATION: usize = 6;
 
 /// The Wan base's transformer config (`transformer/config.json`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct WanConfig {
     pub num_attention_heads: usize,
     pub attention_head_dim: usize,
@@ -36,7 +35,7 @@ pub struct WanConfig {
 }
 
 /// The WorldStereo checkpoint's `config.json` parts the forward needs.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct WorldStereoConfig {
     pub controlnet_cfg: ControlNetConfig,
 }

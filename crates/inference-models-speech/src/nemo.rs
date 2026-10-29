@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use inference_tensor::nn::VarBuilder;
 use inference_tensor::pickle::PthTensors;
 use inference_tensor::{DType, Device, Error, Result, Tensor};
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
 use inference_audio::nemo::NemoMelConfig;
@@ -45,7 +44,7 @@ pub struct NemoArchive {
     members: HashMap<String, (u64, u64)>,
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct Target {
     target: Option<String>,
 }
@@ -302,7 +301,7 @@ fn default_preemphasis() -> f32 {
 }
 
 /// The `preprocessor:` section: NeMo's log-mel frontend.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct NemoPreprocessorConfig {
     pub sample_rate: u32,
     pub window_size: f64,
@@ -352,7 +351,7 @@ fn default_style() -> String {
 }
 
 /// `att_context_size`: one `[left, right]`, or a multi-lookahead model's several, the first the default.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 #[serde(untagged)]
 pub enum AttentionContext {
     One(Vec<i64>),
@@ -373,7 +372,7 @@ impl AttentionContext {
 }
 
 /// `conv_context_size`: `causal`, or an explicit `[left, right]`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 #[serde(untagged)]
 pub enum ConvContext {
     Named(String),
@@ -381,7 +380,7 @@ pub enum ConvContext {
 }
 
 /// The `encoder:` section of a FastConformer checkpoint's config.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct NemoEncoderConfig {
     pub feat_in: usize,
     pub n_layers: usize,

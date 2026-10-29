@@ -1,5 +1,3 @@
-use serde::Deserialize;
-
 use crate::serde_default_fn;
 
 serde_default_fn!(usize, default_window_size, 15);
@@ -7,7 +5,7 @@ serde_default_fn!(usize, default_downsample_rate, 5);
 serde_default_fn!(f64, default_qformer_eps, 1e-12);
 
 /// The CTC Conformer encoder's sizes (`GraniteSpeechEncoderConfig`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct EncoderConfig {
     pub input_dim: usize,
     pub hidden_dim: usize,
@@ -28,7 +26,7 @@ pub struct EncoderConfig {
 }
 
 /// The projector's BLIP-2 Q-Former.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct ProjectorConfig {
     pub hidden_size: usize,
     pub num_attention_heads: usize,
@@ -39,7 +37,7 @@ pub struct ProjectorConfig {
     pub encoder_hidden_size: usize,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Config {
     pub text_config: crate::granite::Config,
     pub encoder_config: EncoderConfig,

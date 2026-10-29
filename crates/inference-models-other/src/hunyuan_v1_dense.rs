@@ -4,7 +4,7 @@
 use super::hunyuan_rope::{RopeScalingConfig, effective_rope_theta};
 use inference_quant::QuantizedConfig;
 use inference_tensor::Result;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{
     decoder::{DecoderSpec, QkNorm, RopeKind},
@@ -16,7 +16,7 @@ serde_default_fn!(bool, tie_word_embeddings_default, false);
 serde_default_fn!(bool, use_cla_default, false);
 serde_default_fn!(usize, pretraining_tp_default, 1);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct Config {
     pub vocab_size: usize,
     pub hidden_size: usize,

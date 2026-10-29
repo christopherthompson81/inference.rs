@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use inference_quant::{QuantizedConfig, StaticLoraConfig};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{
     conformer::config::ConformerEncoderConfig,
@@ -9,7 +9,7 @@ use crate::{
     layers::{Activation, PhiRopeConfig, PhiRopeScalingConfig, ScaledRopeType},
 };
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, inference_json::FromJson, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Phi4MMScaledRopeType {
     #[serde(alias = "longrope")]
@@ -18,7 +18,7 @@ pub enum Phi4MMScaledRopeType {
     Default,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct Phi4MMRopeScalingConfig {
     short_factor: Option<Vec<f64>>,
     long_factor: Option<Vec<f64>>,
@@ -26,7 +26,7 @@ pub struct Phi4MMRopeScalingConfig {
     scaling_type: Phi4MMScaledRopeType,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, inference_json::FromJson, Debug, Clone)]
 pub struct Phi4MMImageEmbedConfig {
     pub n_embd: Option<usize>,
     pub crop_size: Option<usize>,
@@ -39,7 +39,7 @@ pub struct Phi4MMImageEmbedConfig {
     pub with_learnable_separator: Option<bool>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, inference_json::FromJson, Debug, Clone)]
 pub struct Phi4MMAudioEmbedConfig {
     pub n_embd: Option<usize>,
     pub compression_rate: usize,
@@ -48,25 +48,25 @@ pub struct Phi4MMAudioEmbedConfig {
     pub projection_cls: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, inference_json::FromJson, Debug, Clone)]
 pub struct Phi4MMEmbdLayerConfig {
     pub image_embd_layer: Option<Phi4MMImageEmbedConfig>,
     pub audio_embd_layer: Option<Phi4MMAudioEmbedConfig>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, inference_json::FromJson, Debug, Clone)]
 pub struct Phi4MMImgProcessorConfig {
     pub layer_idx: Option<isize>,
     pub type_feature: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, inference_json::FromJson, Debug, Clone)]
 pub struct Phi4MMAudioConfig {
     pub config: ConformerEncoderConfig,
     pub name: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, inference_json::FromJson, Debug, Clone)]
 pub struct Phi4MMConfig {
     pub vocab_size: usize,
     pub hidden_size: usize,

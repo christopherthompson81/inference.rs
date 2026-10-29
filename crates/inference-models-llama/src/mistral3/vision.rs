@@ -39,12 +39,12 @@ fn default_rope_theta() -> f64 {
 }
 
 /// RoPE parameters for Mistral3 vision model
-#[derive(serde::Deserialize, Debug, Clone)]
+#[derive(inference_json::FromJson, Debug, Clone)]
 pub struct Mistral3VisionRopeParameters {
     pub rope_theta: f64,
 }
 
-#[derive(serde::Deserialize, Debug, Clone)]
+#[derive(inference_json::FromJson, Debug, Clone)]
 pub struct Mistral3VisionConfig {
     #[serde(default = "default_hidden_size")]
     pub hidden_size: usize,

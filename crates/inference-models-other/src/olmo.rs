@@ -4,7 +4,7 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use inference_quant::QuantizedConfig;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{
     decoder::{DecoderSpec, MoeRouting, MoeSpec, NormKind, NormNames, QkNorm, RopeKind},
@@ -35,7 +35,7 @@ const FULL_WIDTH_QK_NORM: QkNorm = QkNorm::FullWidth {
 };
 
 /// The fields every OLMo config shares.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct Common {
     pub vocab_size: usize,
     pub hidden_size: usize,
@@ -92,7 +92,7 @@ impl Common {
 }
 
 /// `OlmoForCausalLM`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct OlmoConfig {
     #[serde(flatten)]
     pub common: Common,
@@ -106,7 +106,7 @@ impl OlmoConfig {
 }
 
 /// A YaRN `rope_scaling` (or one layer type's `rope_parameters`).
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct RopeParameters {
     #[serde(alias = "type")]
     pub rope_type: Option<String>,
@@ -119,7 +119,7 @@ pub struct RopeParameters {
 }
 
 /// `Olmo2ForCausalLM` and `Olmo3ForCausalLM`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct Olmo2Config {
     #[serde(flatten)]
     pub common: Common,
@@ -206,7 +206,7 @@ impl Olmo2Config {
 }
 
 /// `OlmoeForCausalLM`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct OlmoeConfig {
     #[serde(flatten)]
     pub common: Common,

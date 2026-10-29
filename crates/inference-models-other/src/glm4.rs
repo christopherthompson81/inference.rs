@@ -6,7 +6,7 @@
 )]
 
 use inference_quant::QuantizedConfig;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{
     decoder::{DecoderSpec, MlpKind, NormNames, RopeKind},
@@ -25,7 +25,7 @@ pub const SANDWICH_NORMS: NormNames = NormNames {
 serde_default_fn!(bool, tie_word_embeddings, false);
 serde_default_fn!(usize, max_position_embeddings, 32768);
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, inference_json::FromJson)]
 pub struct Config {
     pub vocab_size: usize,
     pub hidden_size: usize,

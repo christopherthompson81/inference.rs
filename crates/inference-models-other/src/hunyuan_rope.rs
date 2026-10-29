@@ -1,7 +1,7 @@
 use inference_tensor::Result;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct RopeScalingConfig {
     #[serde(default)]
     pub alpha: Option<f64>,
