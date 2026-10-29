@@ -156,3 +156,19 @@ Finding:
 
 Implication: the suites are no longer the bulk. Left: the bundle build (`--size`, needed only for kernel or
 dependency changes), and the long-pole tests (the HiDream tiny tests make 4.2 MP images).
+
+## Run 8 - 2026-10-28 17:56
+
+Question: does the `--size` bundle build (2 min 25 s, last and alone in Run 7) fit beside the suites?
+
+Command: `local_ci.sh` starting `cargo build --profile bundle -p inference-ffi --features cuda` in the background once
+the CPU test binaries are built (its own `target/bundle` lock, so no cargo lock is shared), and checking the size at
+the end; the same flags as Run 7, after touching `crates/inference-tensor/src/utils.rs`.
+
+Finding:
+- Wall 369.4 s (6 min 9 s), every check passing, against 442.6 s.
+- The bundle build took 3 min 31 s beside the suites (its crate compiles share the cores before the single-core fat
+  LTO), and slowed them: CPU suite 140.5 s (94.5 s), CUDA suite 179.6 s (125.7 s). The run still saves 73 s.
+
+Implication: keep it. Left: the HiDream tiny tests, the slowest of the CPU suite (31 s, 23 s alone), which make
+4.2 MP images: 3600-4000 patch tokens through quadratic attention at every step.
