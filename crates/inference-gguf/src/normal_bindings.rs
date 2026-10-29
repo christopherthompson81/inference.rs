@@ -169,6 +169,9 @@ fn bind_block_tensor(
         "post_ffw_norm" => Some(match loader {
             NormalLoaderType::Gemma2 => format!("{p}.post_feedforward_layernorm.{suffix}"),
             NormalLoaderType::GLM4 => format!("{p}.post_mlp_layernorm.{suffix}"),
+            NormalLoaderType::Olmo2 | NormalLoaderType::Olmo3 => {
+                format!("{p}.post_feedforward_layernorm.{suffix}")
+            }
             _ => return Ok(()),
         }),
         "attn_q" if !matches!(loader, NormalLoaderType::Phi3) => {

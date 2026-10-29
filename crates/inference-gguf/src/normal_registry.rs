@@ -2,8 +2,8 @@ use inference_nn::loaders::NormalLoaderType;
 pub use inference_nn::model::RopePairing;
 use std::{error::Error, fmt, str::FromStr};
 
-pub const NORMAL_LOADER_TYPE_COUNT: usize = 33;
-pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 28;
+pub const NORMAL_LOADER_TYPE_COUNT: usize = 37;
+pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 31;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CanonicalGgufArchitecture {
@@ -30,6 +30,9 @@ pub enum CanonicalGgufArchitecture {
     GraniteMoe,
     GraniteHybrid,
     GraniteSwa,
+    Olmo,
+    Olmo2,
+    Olmoe,
     GptOss,
     HunYuanDense,
     HunYuanMoe,
@@ -63,6 +66,9 @@ impl CanonicalGgufArchitecture {
             Self::GraniteMoe => "granitemoe",
             Self::GraniteHybrid => "granitehybrid",
             Self::GraniteSwa => "granite_swa",
+            Self::Olmo => "olmo",
+            Self::Olmo2 => "olmo2",
+            Self::Olmoe => "olmoe",
             Self::GptOss => "gpt-oss",
             Self::HunYuanDense => "hunyuan-dense",
             Self::HunYuanMoe => "hunyuan-moe",
@@ -106,6 +112,9 @@ impl FromStr for CanonicalGgufArchitecture {
             "granitemoe" => Ok(Self::GraniteMoe),
             "granitehybrid" => Ok(Self::GraniteHybrid),
             "granite_swa" => Ok(Self::GraniteSwa),
+            "olmo" => Ok(Self::Olmo),
+            "olmo2" => Ok(Self::Olmo2),
+            "olmoe" => Ok(Self::Olmoe),
             "gpt-oss" => Ok(Self::GptOss),
             "hunyuan-dense" => Ok(Self::HunYuanDense),
             "hunyuan-moe" => Ok(Self::HunYuanMoe),
@@ -466,6 +475,10 @@ const GRANITE_MOE_LOADERS: &[NormalLoaderType] = &[
     NormalLoaderType::GraniteMoeShared,
 ];
 const GRANITE_HYBRID_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::GraniteMoeHybrid];
+const OLMO_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Olmo];
+// Olmo 3 converts as olmo2 with a sliding-window pattern
+const OLMO2_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Olmo2, NormalLoaderType::Olmo3];
+const OLMOE_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Olmoe];
 const GRANITE_SWA_LOADERS: &[NormalLoaderType] = &[
     NormalLoaderType::GraniteSwa,
     NormalLoaderType::GraniteMoeSwa,
@@ -663,6 +676,31 @@ pub const GGUF_SCHEMAS: &[GgufSchema; CANONICAL_GGUF_ARCHITECTURE_COUNT] = &[
         rope_pairing: RopePairing::Adjacent,
         required_metadata: GRANITE_SWA_METADATA,
         required_tensors: NO_REQUIREMENTS,
+        unsupported_metadata: NO_REQUIREMENTS,
+    },
+    // llama.cpp permutes OLMo 1's q/k as Llama's, not OLMo 2's or OLMoE's
+    GgufSchema {
+        architecture: CanonicalGgufArchitecture::Olmo,
+        compatible_loaders: OLMO_LOADERS,
+        rope_pairing: RopePairing::Adjacent,
+        required_metadata: NO_REQUIREMENTS,
+        required_tensors: NO_REQUIREMENTS,
+        unsupported_metadata: NO_REQUIREMENTS,
+    },
+    GgufSchema {
+        architecture: CanonicalGgufArchitecture::Olmo2,
+        compatible_loaders: OLMO2_LOADERS,
+        rope_pairing: RopePairing::HalfSplit,
+        required_metadata: NO_REQUIREMENTS,
+        required_tensors: NO_REQUIREMENTS,
+        unsupported_metadata: NO_REQUIREMENTS,
+    },
+    GgufSchema {
+        architecture: CanonicalGgufArchitecture::Olmoe,
+        compatible_loaders: OLMOE_LOADERS,
+        rope_pairing: RopePairing::HalfSplit,
+        required_metadata: MOE_METADATA,
+        required_tensors: MOE_TENSORS,
         unsupported_metadata: NO_REQUIREMENTS,
     },
     GgufSchema {
@@ -896,6 +934,34 @@ pub const NORMAL_MODEL_ADAPTERS: &[NativeModelAdapter; NORMAL_LOADER_TYPE_COUNT]
         ],
     },
     NativeModelAdapter {
+        loader: NormalLoaderType::Olmo,
+        architectures: &[CanonicalGgufArchitecture::Olmo],
+        layouts: &[
+            GgufLayout::Direct,
+            GgufLayout::ConverterPermutedQk,
+            GgufLayout::PerLayerInventory,
+        ],
+    },
+    NativeModelAdapter {
+        loader: NormalLoaderType::Olmo2,
+        architectures: &[CanonicalGgufArchitecture::Olmo2],
+        layouts: &[GgufLayout::Direct, GgufLayout::PerLayerInventory],
+    },
+    NativeModelAdapter {
+        loader: NormalLoaderType::Olmo3,
+        architectures: &[CanonicalGgufArchitecture::Olmo2],
+        layouts: &[GgufLayout::Direct, GgufLayout::PerLayerInventory],
+    },
+    NativeModelAdapter {
+        loader: NormalLoaderType::Olmoe,
+        architectures: &[CanonicalGgufArchitecture::Olmoe],
+        layouts: &[
+            GgufLayout::Direct,
+            GgufLayout::StackedExperts,
+            GgufLayout::PerLayerInventory,
+        ],
+    },
+    NativeModelAdapter {
         loader: NormalLoaderType::GptOss,
         architectures: &[CanonicalGgufArchitecture::GptOss],
         layouts: &[
@@ -1112,6 +1178,18 @@ pub fn resolve_native_adapter(
         return Ok(ResolvedNativeModelAdapter {
             adapter: adapter_for(&loader).expect("deepseek2 resolver references a missing adapter"),
             reason,
+        });
+    }
+
+    if descriptor.architecture == CanonicalGgufArchitecture::Olmo2 {
+        let loader = if descriptor.has_metadata("{arch}.attention.sliding_window_pattern") {
+            NormalLoaderType::Olmo3
+        } else {
+            NormalLoaderType::Olmo2
+        };
+        return Ok(ResolvedNativeModelAdapter {
+            adapter: adapter_for(&loader).expect("olmo2 resolver references a missing adapter"),
+            reason: ResolutionReason::SlidingWindow,
         });
     }
 
@@ -1341,6 +1419,7 @@ mod tests {
             CanonicalGgufArchitecture::GraniteMoe,
             CanonicalGgufArchitecture::GraniteHybrid,
             CanonicalGgufArchitecture::GraniteSwa,
+            CanonicalGgufArchitecture::Olmo,
         ];
         for architecture in adjacent {
             assert_eq!(schema_for(architecture).rope_pairing, RopePairing::Adjacent);

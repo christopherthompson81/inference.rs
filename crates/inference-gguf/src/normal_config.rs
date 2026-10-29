@@ -143,6 +143,22 @@ pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; NORMAL_LOADER_TYPE_COUN
         build: build_granite,
     },
     NormalConfigBuilder {
+        loader: NormalLoaderType::Olmo,
+        build: build_olmo,
+    },
+    NormalConfigBuilder {
+        loader: NormalLoaderType::Olmo2,
+        build: build_olmo2,
+    },
+    NormalConfigBuilder {
+        loader: NormalLoaderType::Olmo3,
+        build: build_olmo2,
+    },
+    NormalConfigBuilder {
+        loader: NormalLoaderType::Olmoe,
+        build: build_olmoe,
+    },
+    NormalConfigBuilder {
         loader: NormalLoaderType::GptOss,
         build: build_gpt_oss,
     },
@@ -1344,6 +1360,102 @@ fn build_qwen3(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     config.insert("head_dim".into(), json!(fields.head_dim));
     config.insert("use_sliding_window".into(), json!(use_sliding_window));
     config.insert("max_window_layers".into(), json!(max_window_layers));
+    Ok(JsonValue::Object(config))
+}
+
+fn olmo_core(
+    metadata: &MetadataView<'_>,
+    intermediate_size: usize,
+) -> SynthesisResult<JsonMap<String, JsonValue>> {
+    let fields = StandardFields::read_with_intermediate_size(metadata, None, intermediate_size)?;
+    let mut config = fields.rms_json();
+    config.insert("hidden_act".into(), json!("silu"));
+    config.insert(
+        "attention_bias".into(),
+        json!(metadata.has_tensor_marker(".attn_q.bias")),
+    );
+    config.insert(
+        "clip_qkv".into(),
+        json!(metadata.optional_f64("attention.clamp_kqv")?),
+    );
+    Ok(config)
+}
+
+fn build_olmo(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
+    reject_unsupported_rope_scaling(metadata, "OLMo")?;
+    let config = olmo_core(
+        metadata,
+        metadata.required_uniform_usize("feed_forward_length")?,
+    )?;
+    Ok(JsonValue::Object(config))
+}
+
+fn build_olmo2(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
+    let layers = transformer_block_count(metadata)?;
+    let mut config = olmo_core(
+        metadata,
+        metadata.required_uniform_usize("feed_forward_length")?,
+    )?;
+    if let Some(pattern) = metadata.sliding_pattern(layers)? {
+        let layer_types = pattern
+            .iter()
+            .map(|&sliding| {
+                if sliding {
+                    "sliding_attention"
+                } else {
+                    "full_attention"
+                }
+            })
+            .collect::<Vec<_>>();
+        config.insert("layer_types".into(), json!(layer_types));
+        config.insert(
+            "sliding_window".into(),
+            json!(metadata.required_usize("attention.sliding_window")?),
+        );
+    }
+    let rope_scaling = match metadata.optional_string("rope.scaling.type")? {
+        None | Some("none") => JsonValue::Null,
+        Some("yarn") => json!({
+            "rope_type": "yarn",
+            "factor": metadata.required_f64("rope.scaling.factor")?,
+            "original_max_position_embeddings": metadata.required_usize("rope.scaling.original_context_length")?,
+            "beta_fast": metadata.required_f64("rope.scaling.yarn_beta_fast")?,
+            "beta_slow": metadata.required_f64("rope.scaling.yarn_beta_slow")?,
+            "attention_factor": metadata.optional_f64("rope.scaling.yarn_attn_factor")?,
+        }),
+        Some(scaling_type) => {
+            return Err(NormalConfigSynthesisError::new(format!(
+                "Standalone OLMo 2 config cannot represent GGUF RoPE scaling type `{scaling_type}`"
+            )));
+        }
+    };
+    config.insert("rope_scaling".into(), rope_scaling);
+    Ok(JsonValue::Object(config))
+}
+
+fn build_olmoe(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
+    reject_unsupported_rope_scaling(metadata, "OLMoE")?;
+    let intermediate_size = match metadata.optional_usize("expert_feed_forward_length")? {
+        Some(size) => size,
+        None => metadata.required_uniform_usize("feed_forward_length")?,
+    };
+    let mut config = olmo_core(metadata, intermediate_size)?;
+    config.insert(
+        "num_experts".into(),
+        json!(metadata.required_usize("expert_count")?),
+    );
+    config.insert(
+        "num_experts_per_tok".into(),
+        json!(metadata.required_usize("expert_used_count")?),
+    );
+    config.insert(
+        "norm_topk_prob".into(),
+        json!(
+            metadata
+                .optional_bool("expert_weights_norm")?
+                .unwrap_or(false)
+        ),
+    );
     Ok(JsonValue::Object(config))
 }
 
@@ -2731,7 +2843,7 @@ mod tests {
         pub use inference_models_llama::{llama, mistral, mixtral, smollm3};
         pub use inference_models_other::{
             deepseek2, deepseek3, glm4, glm4_moe, glm4_moe_lite, gpt_oss, granite,
-            hunyuan_v1_dense, hunyuan_v1_moe, lfm2, starcoder2,
+            hunyuan_v1_dense, hunyuan_v1_moe, lfm2, olmo, starcoder2,
         };
         pub use inference_models_phi::{phi2, phi3, phi3_5_moe};
         pub use inference_models_qwen::{qwen2, qwen3, qwen3_moe, qwen3_next};
@@ -2821,6 +2933,7 @@ mod tests {
                 | NormalLoaderType::GraniteMoeShared
                 | NormalLoaderType::GraniteMoeHybrid
                 | NormalLoaderType::GraniteMoeSwa
+                | NormalLoaderType::Olmoe
         )
     }
 
@@ -3161,6 +3274,15 @@ mod tests {
             ),
             NormalLoaderType::Lfm2 | NormalLoaderType::Lfm2Moe => {
                 assert_deserializes(loader, config, models::lfm2::Config::from_json)
+            }
+            NormalLoaderType::Olmo => {
+                assert_deserializes(loader, config, models::olmo::OlmoConfig::from_json)
+            }
+            NormalLoaderType::Olmo2 | NormalLoaderType::Olmo3 => {
+                assert_deserializes(loader, config, models::olmo::Olmo2Config::from_json)
+            }
+            NormalLoaderType::Olmoe => {
+                assert_deserializes(loader, config, models::olmo::OlmoeConfig::from_json)
             }
         }
     }

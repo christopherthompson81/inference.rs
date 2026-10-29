@@ -36,6 +36,9 @@ Fine-tunes and model sizes within a family use the same entry.
 | Granite MoE | `granitemoe` |
 | Granite hybrid | `granitehybrid` |
 | Granite SWA (swash) dense and MoE | `granite_swa` |
+| OLMo 1 | `olmo` |
+| OLMo 2 and Olmo 3 | `olmo2` |
+| OLMoE | `olmoe` |
 | GPT-OSS | `gpt-oss` |
 | Hunyuan dense | `hunyuan-dense` |
 | Hunyuan MoE | `hunyuan-moe` |

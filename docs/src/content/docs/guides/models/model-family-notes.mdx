@@ -140,6 +140,10 @@ inference serve --format gguf -m <dir> -f granite-vision-Q8_0.gguf --mmproj <dir
   --tok-model-id ibm-granite/granite-vision-4.1-4b
 ```
 
+## OLMo
+
+AllenAI's OLMo 1 (`OlmoForCausalLM`, e.g. `allenai/OLMo-1B-0724-hf`), OLMo 2 (`Olmo2ForCausalLM`), Olmo 3 (`Olmo3ForCausalLM`, whose sliding-window layers take plain RoPE beside YaRN full ones) and OLMoE (`OlmoeForCausalLM`) load through auto-detection, from safetensors or from llama.cpp's GGUFs (`olmo`, `olmo2`, `olmoe`). The original pre-HF OLMo 1 checkpoints (`OLMoForCausalLM`, `model.transformer.blocks.*`) are not supported; use their `-hf` conversions.
+
 ## LFM2 and LFM2.5
 
 LiquidAI LFM2 and LFM2.5 dense and MoE checkpoints are supported. LFM2-VL and LFM2.5-VL are supported for image input.

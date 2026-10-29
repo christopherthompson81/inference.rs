@@ -18,7 +18,7 @@ const MLP_PROJECTIONS: &[AnyMoeLoraTarget; 2] =
 
 // attention and MLP both read the one input norm
 const PARALLEL_NORMS: NormNames = NormNames {
-    input: "input_layernorm",
+    input: Some("input_layernorm"),
     pre_ffn: None,
     post_attn: None,
     post_ffn: None,
