@@ -2,7 +2,7 @@ use inference_nn::loaders::NormalLoaderType;
 pub use inference_nn::model::RopePairing;
 use std::{error::Error, fmt, str::FromStr};
 
-pub const NORMAL_LOADER_TYPE_COUNT: usize = 28;
+pub const NORMAL_LOADER_TYPE_COUNT: usize = 31;
 pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 27;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -457,7 +457,12 @@ const DEEPSEEK2_LOADERS: &[NormalLoaderType] = &[
 const GLM4_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::GLM4];
 const GLM4_MOE_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::GLM4Moe];
 const SMOLLM3_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::SmolLm3];
-const GRANITE_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::GraniteMoeHybrid];
+const GRANITE_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Granite];
+const GRANITE_MOE_LOADERS: &[NormalLoaderType] = &[
+    NormalLoaderType::GraniteMoe,
+    NormalLoaderType::GraniteMoeShared,
+];
+const GRANITE_HYBRID_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::GraniteMoeHybrid];
 const GPT_OSS_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::GptOss];
 const HUNYUAN_DENSE_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::HunYuanDenseV1];
 const HUNYUAN_MOE_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::HunYuanMoEV1];
@@ -627,7 +632,7 @@ pub const GGUF_SCHEMAS: &[GgufSchema; CANONICAL_GGUF_ARCHITECTURE_COUNT] = &[
     },
     GgufSchema {
         architecture: CanonicalGgufArchitecture::GraniteMoe,
-        compatible_loaders: GRANITE_LOADERS,
+        compatible_loaders: GRANITE_MOE_LOADERS,
         rope_pairing: RopePairing::Adjacent,
         required_metadata: MOE_METADATA,
         required_tensors: MOE_TENSORS,
@@ -635,7 +640,7 @@ pub const GGUF_SCHEMAS: &[GgufSchema; CANONICAL_GGUF_ARCHITECTURE_COUNT] = &[
     },
     GgufSchema {
         architecture: CanonicalGgufArchitecture::GraniteHybrid,
-        compatible_loaders: GRANITE_LOADERS,
+        compatible_loaders: GRANITE_HYBRID_LOADERS,
         rope_pairing: RopePairing::Adjacent,
         required_metadata: GRANITE_HYBRID_METADATA,
         required_tensors: SSM_TENSORS,
@@ -806,12 +811,40 @@ pub const NORMAL_MODEL_ADAPTERS: &[NativeModelAdapter; NORMAL_LOADER_TYPE_COUNT]
         layouts: &[GgufLayout::Direct, GgufLayout::ConverterPermutedQk],
     },
     NativeModelAdapter {
-        loader: NormalLoaderType::GraniteMoeHybrid,
-        architectures: &[
-            CanonicalGgufArchitecture::Granite,
-            CanonicalGgufArchitecture::GraniteMoe,
-            CanonicalGgufArchitecture::GraniteHybrid,
+        loader: NormalLoaderType::Granite,
+        architectures: &[CanonicalGgufArchitecture::Granite],
+        layouts: &[
+            GgufLayout::Direct,
+            GgufLayout::ConverterPermutedQk,
+            GgufLayout::PerLayerInventory,
+            GgufLayout::GraniteSplitGateUp,
         ],
+    },
+    NativeModelAdapter {
+        loader: NormalLoaderType::GraniteMoe,
+        architectures: &[CanonicalGgufArchitecture::GraniteMoe],
+        layouts: &[
+            GgufLayout::Direct,
+            GgufLayout::ConverterPermutedQk,
+            GgufLayout::StackedExperts,
+            GgufLayout::PerLayerInventory,
+            GgufLayout::GraniteSplitGateUp,
+        ],
+    },
+    NativeModelAdapter {
+        loader: NormalLoaderType::GraniteMoeShared,
+        architectures: &[CanonicalGgufArchitecture::GraniteMoe],
+        layouts: &[
+            GgufLayout::Direct,
+            GgufLayout::ConverterPermutedQk,
+            GgufLayout::StackedExperts,
+            GgufLayout::PerLayerInventory,
+            GgufLayout::GraniteSplitGateUp,
+        ],
+    },
+    NativeModelAdapter {
+        loader: NormalLoaderType::GraniteMoeHybrid,
+        architectures: &[CanonicalGgufArchitecture::GraniteHybrid],
         layouts: &[
             GgufLayout::Direct,
             GgufLayout::ConverterPermutedQk,
@@ -1038,6 +1071,20 @@ pub fn resolve_native_adapter(
         return Ok(ResolvedNativeModelAdapter {
             adapter: adapter_for(&loader).expect("deepseek2 resolver references a missing adapter"),
             reason,
+        });
+    }
+
+    if descriptor.architecture == CanonicalGgufArchitecture::GraniteMoe {
+        // llama.cpp writes Granite MoE with a shared expert under `granitemoe`, plus the shexp tensors
+        let loader = if descriptor.has_tensor(".ffn_gate_shexp.") {
+            NormalLoaderType::GraniteMoeShared
+        } else {
+            NormalLoaderType::GraniteMoe
+        };
+        return Ok(ResolvedNativeModelAdapter {
+            adapter: adapter_for(&loader)
+                .expect("granitemoe resolver references a missing adapter"),
+            reason: ResolutionReason::TensorInventory,
         });
     }
 

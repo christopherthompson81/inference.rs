@@ -154,6 +154,21 @@ impl SupportedArch for NormalLoaderType {
                 modalities: m,
                 examples: &[ex!("ibm-granite/granite-4.0-micro")],
             },
+            Self::Granite => ArchMetadata {
+                families: &["Granite 3.x", "Granite 4.1"],
+                modalities: m,
+                examples: &[ex!("ibm-granite/granite-4.1-3b")],
+            },
+            Self::GraniteMoe => ArchMetadata {
+                families: &["Granite 3.x MoE"],
+                modalities: m,
+                examples: &[ex!("ibm-granite/granite-3.1-1b-a400m-instruct")],
+            },
+            Self::GraniteMoeShared => ArchMetadata {
+                families: &["Granite MoE (shared expert)"],
+                modalities: m,
+                examples: &[ex!("ibm-research/moe-7b-1b-active-shared-experts")],
+            },
             Self::GptOss => ArchMetadata {
                 families: &["GPT-OSS"],
                 modalities: m,

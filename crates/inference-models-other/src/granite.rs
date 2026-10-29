@@ -1477,13 +1477,11 @@ impl MambaBlock {
             cfg,
             isq_target_device,
         )?;
-        let mlp_vb = mapper.set_device(layer_idx, vb.clone(), loading_isq);
-        let shared_input_vb = mlp_vb.pp("shared_mlp").pp("input_linear");
-        let mlp = if crate::layers::contains_tensor_or_weight_source(&shared_input_vb, "weight") {
-            Some(Box::new(GraniteMlp::new(mlp_vb, cfg, comm)?) as Box<dyn MlpLayer>)
-        } else {
-            None
-        };
+        let mlp = load_dense_ffn(
+            mapper.set_device(layer_idx, vb.clone(), loading_isq),
+            cfg,
+            comm,
+        )?;
         // Load MoE if num_local_experts > 0
         let block_sparse_moe = if cfg.num_local_experts > 0 {
             Some(GraniteMoE::new(
@@ -1728,13 +1726,11 @@ impl Block {
             paged_attn,
             comm,
         )?;
-        let mlp_vb = mapper.set_device(layer_idx, vb.clone(), loading_isq);
-        let shared_input_vb = mlp_vb.pp("shared_mlp").pp("input_linear");
-        let mlp = if crate::layers::contains_tensor_or_weight_source(&shared_input_vb, "weight") {
-            Some(Box::new(GraniteMlp::new(mlp_vb, cfg, comm)?) as Box<dyn MlpLayer>)
-        } else {
-            None
-        };
+        let mlp = load_dense_ffn(
+            mapper.set_device(layer_idx, vb.clone(), loading_isq),
+            cfg,
+            comm,
+        )?;
         // Load MoE if num_local_experts > 0
         let block_sparse_moe = if cfg.num_local_experts > 0 {
             Some(GraniteMoE::new(
@@ -1771,6 +1767,32 @@ fn scale_tensor(tensor: Tensor, scale: f32) -> Result<Tensor> {
     } else {
         tensor.affine(scale as f64, 0.)
     }
+}
+
+// Granite 4 fuses gate and up into shared_mlp.input_linear; dense Granite 3.x / 4.1 keeps a Llama-style mlp.
+fn load_dense_ffn(
+    vb: ShardedVarBuilder,
+    cfg: &Config,
+    comm: &Arc<inference_quant::Comm>,
+) -> Result<Option<Box<dyn MlpLayer>>> {
+    if crate::layers::contains_tensor_or_weight_source(
+        &vb.pp("shared_mlp").pp("input_linear"),
+        "weight",
+    ) {
+        return Ok(Some(Box::new(GraniteMlp::new(vb, cfg, comm)?)));
+    }
+    let mlp_vb = vb.pp("mlp");
+    if crate::layers::contains_tensor_or_weight_source(&mlp_vb.pp("gate_proj"), "weight") {
+        return Ok(Some(Box::new(crate::layers::Mlp::new(
+            mlp_vb,
+            cfg.hidden_size,
+            cfg.intermediate_size,
+            &cfg.quantization_config,
+            crate::layers::Activation::Silu,
+            comm,
+        )?)));
+    }
+    Ok(None)
 }
 
 fn granite_ffn_forward(
