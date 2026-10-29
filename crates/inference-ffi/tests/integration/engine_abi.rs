@@ -446,131 +446,6 @@ fn completion_and_stream_agree_and_embeddings_need_an_embedding_model() {
     unsafe { inference_engine_free(engine) };
 }
 
-fn anthropic_request(stream: bool) -> String {
-    json!({
-        "model": "default",
-        "max_tokens": MAX_TOKENS,
-        "messages": [{"role": "user", "content": PROMPT}],
-        "temperature": 0.0,
-        "top_k": 1,
-        "stream": stream,
-    })
-    .to_string()
-}
-
-#[test]
-fn anthropic_messages_and_stream_agree_and_errors_use_the_anthropic_shape() {
-    let dir = support::tiny_checkpoint().unwrap();
-    let (status, engine) = load(&spec(dir.path()));
-    assert_eq!(status, INFERENCE_OK, "{}", last_error());
-
-    let request = anthropic_request(false);
-    let mut response = null_mut();
-    let status = unsafe {
-        inference_anthropic_messages(
-            engine,
-            request.as_ptr().cast::<c_char>(),
-            request.len(),
-            &mut response,
-        )
-    };
-    assert_eq!(status, INFERENCE_OK, "{}", last_error());
-    let response: Value = serde_json::from_str(&take_string(response)).unwrap();
-    assert_eq!(response["type"], "message", "{response}");
-    let text: String = response["content"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|block| block["type"] == "text")
-        .filter_map(|block| block["text"].as_str())
-        .collect();
-
-    let request = anthropic_request(true);
-    let mut stream = null_mut();
-    let status = unsafe {
-        inference_anthropic_messages_stream_open(
-            engine,
-            request.as_ptr().cast::<c_char>(),
-            request.len(),
-            &mut stream,
-        )
-    };
-    assert_eq!(status, INFERENCE_OK, "{}", last_error());
-    let (mut names, mut streamed) = (Vec::new(), String::new());
-    loop {
-        let (mut event, mut done) = (null_mut(), 0);
-        let status =
-            unsafe { inference_stream_next(stream, POLL_TIMEOUT_MS, &mut event, &mut done) };
-        assert_eq!(status, INFERENCE_OK, "{}", last_error());
-        if done == 1 {
-            break;
-        }
-        assert!(!event.is_null(), "a {POLL_TIMEOUT_MS} ms poll timed out");
-        let event: Value = serde_json::from_str(&take_string(event)).unwrap();
-        let name = event["event"].as_str().unwrap().to_string();
-        if name == "content_block_delta" && event["data"]["delta"]["type"] == "text_delta" {
-            streamed.push_str(event["data"]["delta"]["text"].as_str().unwrap());
-        }
-        names.push(name);
-    }
-    unsafe { inference_stream_free(stream) };
-    assert_eq!(
-        names.first().map(String::as_str),
-        Some("message_start"),
-        "{names:?}"
-    );
-    assert_eq!(
-        names.last().map(String::as_str),
-        Some("message_stop"),
-        "{names:?}"
-    );
-    assert_eq!(streamed, text);
-
-    let request =
-        json!({"model": "default", "messages": [{"role": "user", "content": "hi"}]}).to_string();
-    let mut response = null_mut();
-    let status = unsafe {
-        inference_anthropic_messages(
-            engine,
-            request.as_ptr().cast::<c_char>(),
-            request.len(),
-            &mut response,
-        )
-    };
-    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{}", last_error());
-    let error: Value = serde_json::from_str(&last_error()).unwrap();
-    assert_eq!(error["type"], "error", "{error}");
-    assert_eq!(error["error"]["type"], "invalid_request_error", "{error}");
-
-    // a streamed request may ask for tool approvals; this model calls no tools, so it simply finishes
-    let ask = json!({
-        "model": "default",
-        "max_tokens": MAX_TOKENS,
-        "messages": [{"role": "user", "content": "hi"}],
-        "stream": true,
-        "agent_permission": "ask",
-    })
-    .to_string();
-    let mut stream = null_mut();
-    let status = unsafe {
-        inference_anthropic_messages_stream_open(
-            engine,
-            ask.as_ptr().cast::<c_char>(),
-            ask.len(),
-            &mut stream,
-        )
-    };
-    assert_eq!(status, INFERENCE_OK, "{}", last_error());
-    let events = drain(stream);
-    assert_eq!(
-        events.last().unwrap()["event"],
-        "message_stop",
-        "{events:?}"
-    );
-
-    unsafe { inference_engine_free(engine) };
-}
-
 // How long a background response may take on the tiny checkpoint before the test calls it hung.
 const BACKGROUND_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 const BACKGROUND_POLL: std::time::Duration = std::time::Duration::from_millis(50);
@@ -1701,11 +1576,6 @@ fn what_a_server_needs_beyond_requests_is_exported() {
         (INFERENCE_OK, json!([])),
         "{tools}"
     );
-    let request = json!({"model": "default", "max_tokens": 8, "messages": [{"role": "user", "content": PROMPT}]});
-    let (status, counted) = request_call(inference_anthropic_count_tokens, engine, &request);
-    assert_eq!(status, INFERENCE_OK, "{counted}");
-    assert!(counted["input_tokens"].as_u64().unwrap() > 0, "{counted}");
-
     let (status, listed) = by_id(inference_container_files_list, engine, "cntr_unused");
     assert_eq!(
         (status, listed["data"].clone()),
@@ -2252,13 +2122,6 @@ fn a_chat_tokenizes_as_its_template_renders_it_and_counts_the_same() {
             .any(|window| window == plain.as_slice())
     );
 
-    let anthropic = json!({"model": "default", "messages": [{"role": "user", "content": PROMPT}]});
-    let (status, counted) = request_call(inference_anthropic_count_tokens, engine, &anthropic);
-    assert_eq!(status, INFERENCE_OK, "{counted}");
-    assert_eq!(
-        counted["input_tokens"].as_u64(),
-        Some(templated.len() as u64)
-    );
     unsafe { inference_engine_free(engine) };
 }
 

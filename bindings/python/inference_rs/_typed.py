@@ -90,24 +90,6 @@ class Engine:
     def decide(self, request: types.DecisionRequest | str) -> types.DecisionResponse:
         return from_json(types.DecisionResponse, self.json.decide(to_json(request)))
 
-    def anthropic_messages(self, request: types.AnthropicMessagesRequest | str) -> types.AnthropicMessageResponse:
-        return from_json(
-            types.AnthropicMessageResponse,
-            self.json.anthropic_messages(to_json(request)),
-        )
-
-    def anthropic_count_tokens(
-        self, request: types.AnthropicMessagesRequest | str
-    ) -> types.AnthropicCountTokensResponse:
-        return from_json(
-            types.AnthropicCountTokensResponse,
-            self.json.anthropic_count_tokens(to_json(request)),
-        )
-
-    def anthropic_messages_stream(self, request: types.AnthropicMessagesRequest | str) -> Stream:
-        """Anthropic stream events, as parsed JSON."""
-        return self.json.anthropic_messages_stream(to_json(request))
-
     def create_response(self, request: types.OpenResponsesCreateRequest | str) -> types.ResponseResource:
         return from_json(types.ResponseResource, self.json.create_response(to_json(request)))
 

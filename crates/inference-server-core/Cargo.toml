@@ -28,6 +28,7 @@ http-body-util.workspace = true
 futures.workspace = true
 hound.workspace = true
 inference-api.workspace = true
+inference-chat-protocols.workspace = true
 serde.workspace = true
 sha2.workspace = true
 symphonia.workspace = true

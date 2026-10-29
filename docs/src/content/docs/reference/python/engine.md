@@ -115,32 +115,6 @@ rerank(request: types.RerankRequest | str) -> types.RerankResponse
 decide(request: types.DecisionRequest | str) -> types.DecisionResponse
 ```
 
-### `Engine.anthropic_messages`
-
-```text
-anthropic_messages(
-    request: types.AnthropicMessagesRequest | str,
-) -> types.AnthropicMessageResponse
-```
-
-### `Engine.anthropic_count_tokens`
-
-```text
-anthropic_count_tokens(
-    request: types.AnthropicMessagesRequest | str,
-) -> types.AnthropicCountTokensResponse
-```
-
-### `Engine.anthropic_messages_stream`
-
-```text
-anthropic_messages_stream(
-    request: types.AnthropicMessagesRequest | str,
-) -> Stream
-```
-
-Anthropic stream events, as parsed JSON.
-
 ### `Engine.create_response`
 
 ```text
@@ -851,28 +825,6 @@ decide(request_json: str) -> str
 ```
 
 Answers typed questions (choice, score, noul) about a state with a decision model.
-
-### `JsonEngine.anthropic_messages`
-
-```text
-anthropic_messages(request_json: str) -> str
-```
-
-An Anthropic Messages request; failures carry the Anthropic error envelope.
-
-### `JsonEngine.anthropic_count_tokens`
-
-```text
-anthropic_count_tokens(request_json: str) -> str
-```
-
-The prompt tokens an Anthropic Messages request would use: {"input_tokens"}.
-
-### `JsonEngine.anthropic_messages_stream`
-
-```text
-anthropic_messages_stream(request_json: str) -> Stream
-```
 
 ### `JsonEngine.create_response`
 

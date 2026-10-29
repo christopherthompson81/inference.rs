@@ -447,7 +447,7 @@ fn unauthorized(path: &str) -> Response {
         None,
     );
     if path.starts_with(ANTHROPIC_MESSAGES_ROUTE.path) {
-        let body = inference_api::anthropic::anthropic_error_body(&error);
+        let body = inference_chat_protocols::anthropic::anthropic_error_body(&error);
         return (StatusCode::UNAUTHORIZED, Json(body)).into_response();
     }
     openai_error_response(error)

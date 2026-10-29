@@ -16,10 +16,6 @@ use crate::transcription_session::TranscriptionSession;
 use crate::{
     agentic::AgenticDefaults,
     agentic::{ApprovalDecisionRequest, ApprovalDecisionResponse, resolve_approval},
-    anthropic::{
-        AnthropicCountTokensResponse, AnthropicMessageResponse, AnthropicMessagesRequest,
-        AnthropicStream, MessagesFailure, collect_messages, count_tokens, prepare_messages,
-    },
     api_error::{ApiError, ApiErrorKind, ModelErrorMessage},
     engine_chat::{ChatEngine, ChatStream, ChatStreamEvent, collect_chat, tokenize_chat},
     engine_completion::{CompletionStream, collect_completion, prepare_completion},
@@ -1241,69 +1237,6 @@ impl Engine {
         request: &[u8],
     ) -> Result<CompletionStream, ApiError> {
         self.completion_stream(parse_json(request)?).await
-    }
-
-    /// Runs an Anthropic Messages request to its end.
-    pub async fn anthropic_messages(
-        &self,
-        mut request: AnthropicMessagesRequest,
-    ) -> Result<AnthropicMessageResponse, ApiError> {
-        request.stream = Some(false);
-        let state = self.state().clone();
-        let prepared = prepare_messages(&self.chat, request)
-            .await
-            .map_err(|error| error.into_api_error(state.clone()))?;
-        let (omit_thinking, model_override) =
-            (prepared.omit_thinking, prepared.chat.model_override);
-        let mut rx = prepared.chat.rx;
-        collect_messages(&mut rx, state, model_override.as_deref(), omit_thinking)
-            .await
-            .map_err(|failure| match failure {
-                MessagesFailure::Validation(error) => {
-                    ApiError::from_error(error.as_ref(), ApiErrorKind::InvalidRequest)
-                }
-                MessagesFailure::Internal(error) => {
-                    ApiError::from_error(error.as_ref(), ApiErrorKind::Internal)
-                }
-                MessagesFailure::Model(_) => ApiError::model_error(),
-            })
-    }
-
-    /// Starts a streaming Anthropic Messages request. Dropping the stream abandons the request.
-    pub async fn anthropic_messages_stream(
-        &self,
-        mut request: AnthropicMessagesRequest,
-    ) -> Result<AnthropicStream, ApiError> {
-        request.stream = Some(true);
-        let state = self.state().clone();
-        let prepared = prepare_messages(&self.chat, request)
-            .await
-            .map_err(|error| error.into_api_error(state.clone()))?;
-        Ok(AnthropicStream::new(prepared, state, None))
-    }
-
-    pub async fn anthropic_messages_json(&self, request: &[u8]) -> Result<String, ApiError> {
-        let response = self.anthropic_messages(parse_json(request)?).await?;
-        to_json(&response)
-    }
-
-    pub async fn anthropic_messages_stream_json(
-        &self,
-        request: &[u8],
-    ) -> Result<AnthropicStream, ApiError> {
-        self.anthropic_messages_stream(parse_json(request)?).await
-    }
-
-    /// Counts the prompt tokens an Anthropic Messages request would use.
-    pub async fn count_tokens(
-        &self,
-        request: AnthropicMessagesRequest,
-    ) -> Result<AnthropicCountTokensResponse, ApiError> {
-        count_tokens(self.state(), request, self.owner()).await
-    }
-
-    pub async fn count_tokens_json(&self, request: &[u8]) -> Result<String, ApiError> {
-        to_json(&self.count_tokens(parse_json(request)?).await?)
     }
 
     /// Runs a Responses request to its end, or queues it when it asks for `background` and returns it queued.

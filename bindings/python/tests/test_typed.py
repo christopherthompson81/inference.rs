@@ -213,14 +213,6 @@ class TypedEngine(unittest.TestCase):
             )
         )
         self.assertIsInstance(completion.choices[0], t.CompletionResponseChoice)
-        message = self.engine.anthropic_messages(
-            t.AnthropicMessagesRequest(
-                model="default",
-                max_tokens=MAX_TOKENS,
-                messages=[t.AnthropicMessage(role="user", content=PROMPT)],
-            )
-        )
-        self.assertIsInstance(message, t.AnthropicMessageResponse)
         model_id = next(m.id for m in self.engine.list_models().data if m.id != "default")
         self.assertEqual(self.engine.unload_model(model_id).status, t.ModelStatus.UNLOADED)
         self.assertEqual(self.engine.reload_model(model_id).status, t.ModelStatus.LOADED)
@@ -284,8 +276,6 @@ class TypedEngine(unittest.TestCase):
         self.assertTrue(self.engine.model_served("default"))
         self.assertFalse(self.engine.model_served("no-such-model"))
         self.assertEqual(self.engine.list_mcp_tools().data, [])
-        request = {"model": "default", "max_tokens": 8, "messages": [{"role": "user", "content": "Reply with ok"}]}
-        self.assertGreater(self.engine.anthropic_count_tokens(json.dumps(request)).input_tokens, 0)
         self.assertEqual(self.engine.list_container_files("cntr_unused").data, [])
         for call in (self.engine.get_container_file, self.engine.container_file_content):
             with self.assertRaises(ir.InferenceError) as outside:

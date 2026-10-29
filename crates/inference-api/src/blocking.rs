@@ -131,33 +131,6 @@ impl BlockingEngine {
         })
     }
 
-    pub fn anthropic_messages_json(&self, request: &[u8]) -> Result<String, ApiError> {
-        self.call(request, |engine, request| async move {
-            engine.anthropic_messages_json(&request).await
-        })
-    }
-
-    pub fn count_tokens_json(&self, request: &[u8]) -> Result<String, ApiError> {
-        self.call(request, |engine, request| async move {
-            engine.count_tokens_json(&request).await
-        })
-    }
-
-    pub fn anthropic_messages_stream_json(
-        &self,
-        request: &[u8],
-    ) -> Result<BlockingStream, ApiError> {
-        self.stream(request, |engine, request| async move {
-            engine
-                .anthropic_messages_stream_json(&request)
-                .await
-                .map(|stream| {
-                    let cancellation = stream.cancellation();
-                    (stream.map(|item| item.to_json()), cancellation)
-                })
-        })
-    }
-
     pub fn responses_json(&self, request: &[u8]) -> Result<String, ApiError> {
         self.call(request, |engine, request| async move {
             engine.responses_json(&request).await

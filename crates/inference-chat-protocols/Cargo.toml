@@ -1,0 +1,24 @@
+[package]
+name = "inference-chat-protocols"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Chat protocols a server offers over the inference.rs engine's chat operation: Anthropic Messages"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+anyhow.workspace = true
+either.workspace = true
+futures.workspace = true
+inference-api.workspace = true
+inference-json.workspace = true
+inference-protocol = { workspace = true, features = ["openai"] }
+serde.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
+utoipa.workspace = true
+
+[dev-dependencies]
+inference-mcp.workspace = true

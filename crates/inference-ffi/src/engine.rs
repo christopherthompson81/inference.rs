@@ -7,7 +7,6 @@ use std::{
 
 use inference_api::{
     Engine, EngineLoadError,
-    anthropic::anthropic_error_body,
     api_error::{ApiError, ApiErrorKind},
     blocking::{
         BlockingEngine, BlockingStream, BlockingTranscriptionSession, StreamPoll,
@@ -162,11 +161,6 @@ fn api_status(error: &ApiError) -> inference_status {
 
 fn api_failure(error: ApiError) -> Failure {
     Failure::new(api_status(&error), error.to_openai_body().to_string())
-}
-
-// Same statuses as `api_failure`, with the Anthropic error envelope, for calls made in the Anthropic protocol.
-fn anthropic_failure(error: ApiError) -> Failure {
-    Failure::new(api_status(&error), anthropic_error_body(&error).to_string())
 }
 
 fn load_failure(error: EngineLoadError) -> Failure {
@@ -555,12 +549,6 @@ entry_points! {
     json inference_rerank => |engine, request| engine.rerank_json(request).map_err(api_failure);
     /// Safety: as for `inference_chat`.
     json inference_decide => |engine, request| engine.decide_json(request).map_err(api_failure);
-    /// Safety: as for `inference_chat`.
-    json inference_anthropic_messages =>
-        |engine, request| engine.anthropic_messages_json(request).map_err(anthropic_failure);
-    /// Safety: as for `inference_chat_stream_open`.
-    stream inference_anthropic_messages_stream_open =>
-        |engine, request| engine.anthropic_messages_stream_json(request).map_err(anthropic_failure);
     /// Safety: as for `inference_chat`.
     json inference_responses_create => |engine, request| engine.responses_json(request).map_err(api_failure);
     /// Safety: as for `inference_chat_stream_open`.
@@ -1446,12 +1434,6 @@ fn utf8<'a>(bytes: &'a [u8], name: &str) -> FfiResult<&'a str> {
 // Safety: `data` is valid for `len` bytes.
 unsafe fn arg_utf8<'a>(data: *const c_char, len: usize, name: &str) -> FfiResult<&'a str> {
     unsafe { utf8(arg_bytes(data, len, name)?, name) }
-}
-
-entry_points! {
-    /// Safety: as for `inference_chat`.
-    json inference_anthropic_count_tokens =>
-        |engine, request| engine.count_tokens_json(request).map_err(anthropic_failure);
 }
 
 /// Safety: as for `inference_file_get`, with `container_id` in place of `file_id`.

@@ -122,22 +122,6 @@ class EngineTest(unittest.TestCase):
         with self.engine.completion_stream(completion) as stream:
             self.assertTrue(all(event.name == "chunk" for event in stream))
 
-        messages = json.dumps(
-            {
-                "model": "default",
-                "max_tokens": MAX_TOKENS,
-                "temperature": 0.0,
-                "top_k": 1,
-                "messages": [{"role": "user", "content": PROMPT}],
-            }
-        )
-        self.assertEqual(json.loads(self.engine.anthropic_messages(messages))["type"], "message")
-        with self.engine.anthropic_messages_stream(messages) as stream:
-            names = []
-            while (event := stream.next(POLL_TIMEOUT)) is not None:
-                names.append(event.name)
-        self.assertEqual((names[0], names[-1]), ("message_start", "message_stop"))
-
         request = {
             "model": "default",
             "input": PROMPT,

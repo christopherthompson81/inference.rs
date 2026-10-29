@@ -1,7 +1,6 @@
 //! The inference.rs engine surface, free of HTTP: the HTTP server is built on it and the C ABI exposes it.
 
 pub mod agentic;
-pub mod anthropic;
 pub mod api_error;
 pub mod asr_gguf;
 pub mod background_tasks;

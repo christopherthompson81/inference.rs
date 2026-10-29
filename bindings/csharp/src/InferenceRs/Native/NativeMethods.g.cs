@@ -142,18 +142,6 @@ internal static unsafe partial class NativeMethods
         IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
 
     [LibraryImport(Library)]
-    internal static partial InferenceStatus inference_anthropic_messages(
-        IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
-
-    [LibraryImport(Library)]
-    internal static partial InferenceStatus inference_anthropic_messages_stream_open(
-        IntPtr engine, byte* request, nuint requestLen, out IntPtr outStream);
-
-    [LibraryImport(Library)]
-    internal static partial InferenceStatus inference_anthropic_count_tokens(
-        IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
-
-    [LibraryImport(Library)]
     internal static partial InferenceStatus inference_responses_create(
         IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
 
