@@ -426,6 +426,19 @@ impl Encoder {
         Ok(Self { layers })
     }
 
+    fn forward_all_hidden_states(&self, xs: &Tensor) -> Result<Vec<Tensor>> {
+        let mut states = Vec::with_capacity(self.layers.len() + 1);
+        states.push(xs.clone());
+        for layer in &self.layers {
+            let next = layer.forward(
+                states.last().expect("starts with the input"),
+                &AttentionMask::None,
+            )?;
+            states.push(next);
+        }
+        Ok(states)
+    }
+
     fn forward_get_hidden_states(
         &self,
         xs: &Tensor,
@@ -520,6 +533,22 @@ impl SiglipVisionTransformer {
             hidden_states_index + 1,
         )?;
         hidden_states.apply(&self.post_layernorm)
+    }
+
+    /// transformers' `hidden_states` for full, unmasked images: the embeddings, then each layer's output.
+    pub fn forward_all_hidden_states(&self, pixel_values: &Tensor) -> Result<Vec<Tensor>> {
+        let patch_size = self.config.patch_size;
+        let mask = Tensor::ones(
+            (
+                pixel_values.dim(0)?,
+                pixel_values.dim(2)? / patch_size,
+                pixel_values.dim(3)? / patch_size,
+            ),
+            DType::U8,
+            pixel_values.device(),
+        )?;
+        let embeddings = self.embeddings.forward(pixel_values, &mask, None)?;
+        self.encoder.forward_all_hidden_states(&embeddings)
     }
 
     pub fn dtype(&self) -> DType {

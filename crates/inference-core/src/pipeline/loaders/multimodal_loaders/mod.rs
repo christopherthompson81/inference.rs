@@ -133,7 +133,7 @@ pub use inference_models_llama::loaders::{
     VLlamaLoader, VoxtralLoader,
 };
 #[cfg(feature = "models-other")]
-pub use inference_models_other::loaders::{Lfm2VlLoader, PaddleOcrVlLoader};
+pub use inference_models_other::loaders::{Granite4VisionLoader, Lfm2VlLoader, PaddleOcrVlLoader};
 #[cfg(feature = "models-phi")]
 pub use inference_models_phi::loaders::{Phi3VLoader, Phi4MMLoader};
 #[cfg(feature = "models-qwen")]

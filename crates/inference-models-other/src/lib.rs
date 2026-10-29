@@ -21,6 +21,7 @@ pub mod glm4_moe_lite;
 mod glm4_tests;
 pub mod gpt_oss;
 pub mod granite;
+pub mod granite4_vision;
 #[cfg(test)]
 mod hunyuan_dense_tests;
 mod hunyuan_rope;
@@ -56,6 +57,7 @@ inference_nn::json_config!(
     glm4_moe_lite::Glm4MoeLiteConfig,
     gpt_oss::Config,
     granite::Config,
+    granite4_vision::config::Config,
     hunyuan_v1_dense::Config,
     hunyuan_v1_moe::Config,
     lfm2::Config,

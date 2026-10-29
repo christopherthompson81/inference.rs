@@ -591,6 +591,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `MultimodalLoaderType.IDEFICS2` | `'idefics2'` |
 | `MultimodalLoaderType.LLAVA_NEXT` | `'llava_next'` |
 | `MultimodalLoaderType.LLAVA` | `'llava'` |
+| `MultimodalLoaderType.GRANITE4_VISION` | `'granite4_vision'` |
 | `MultimodalLoaderType.LFM2VL` | `'lfm2vl'` |
 | `MultimodalLoaderType.VLLAMA` | `'vllama'` |
 | `MultimodalLoaderType.QWEN2VL` | `'qwen2vl'` |
