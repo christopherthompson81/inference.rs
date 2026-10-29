@@ -27,7 +27,7 @@ mod macos_profile;
 
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use thiserror::Error;
 
 pub use null::NullSandbox;
@@ -106,7 +106,7 @@ pub enum SandboxError {
 
 /// Whether tools that run model-written code are sandboxed.
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, inference_json::FromJson)]
 #[serde(rename_all = "kebab-case")]
 pub enum SandboxMode {
     /// Sandboxed on Linux/macOS, unsandboxed on Windows; `INFERENCE_RS_SANDBOX` may override it.
@@ -140,7 +140,7 @@ impl SandboxMode {
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 /// Network access permitted to sandboxed processes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, inference_json::FromJson)]
 #[serde(rename_all = "kebab-case")]
 pub enum NetworkMode {
     /// No sockets at all (denied at syscall level on Linux).
@@ -154,7 +154,7 @@ pub enum NetworkMode {
 
 /// The starting policy for sandboxed tools: `restricted` or `developer` (toolchain paths, full network by default).
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, inference_json::FromJson)]
 #[serde(rename_all = "kebab-case")]
 pub enum SandboxProfile {
     #[default]
@@ -189,7 +189,7 @@ impl SandboxProfile {
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 /// Policy applied to a sandboxed process.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson)]
 #[serde(default, deny_unknown_fields)]
 pub struct SandboxPolicy {
     /// Address-space cap in MB where resource limits are supported.

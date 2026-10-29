@@ -5,7 +5,7 @@ use inference_core::{
     InferenceRsError, ModelCategory as CoreModelCategory, ModelGenerationDefaults,
     ModelStatus as CoreModelStatus, SupportedModality,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use utoipa::ToSchema;
 
 use crate::{
@@ -24,14 +24,14 @@ const MODEL_OWNER: &str = "local";
 
 /// Cache counters for each loaded model, counted since it loaded (the prefix ones since its engine last started);
 /// a caller diffs two readings to see what the requests between them used.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct CacheStats {
     #[schema(example = "list")]
     pub object: String,
     pub data: Vec<ModelCacheStats>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct ModelCacheStats {
     pub model_id: String,
     /// Prompt sequences that reused a cached prefix.
@@ -44,7 +44,7 @@ pub struct ModelCacheStats {
     pub encoder_cache: Option<EncoderCacheStats>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Copy, inference_json::FromJson, Serialize, ToSchema)]
 pub struct EncoderCacheStats {
     pub hits: usize,
     pub misses: usize,
@@ -80,14 +80,14 @@ pub(crate) fn cache_stats(state: &SharedInferenceRsState) -> Result<CacheStats, 
 }
 
 /// Speculative decoding counters for each loaded model, counted since it loaded; all zero without a proposer.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct SpeculativeStats {
     #[schema(example = "list")]
     pub object: String,
     pub data: Vec<ModelSpeculativeStats>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct ModelSpeculativeStats {
     pub model_id: String,
     /// Sequences verified: one per sequence per step that ran speculative verification.
@@ -139,7 +139,7 @@ pub struct DefaultModel {
 }
 
 /// Another id requests can name a served model by.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ModelAlias {
     pub alias: String,
@@ -231,13 +231,13 @@ pub struct ModelServed {
 }
 
 /// The body of an unload, reload or status request.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct ModelOperationRequest {
     #[schema(example = "my-model")]
     pub model_id: String,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, inference_json::FromJson, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelStatus {
     Loaded,
@@ -255,7 +255,7 @@ impl From<CoreModelStatus> for ModelStatus {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct ModelStatusResponse {
     #[schema(example = "my-model")]
     pub model_id: String,
@@ -268,7 +268,7 @@ pub struct ModelStatusResponse {
 
 /// What one model's load took on its device: the device's used memory before and after it, with cached pool blocks
 /// returned first.
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Copy, inference_json::FromJson, Serialize, ToSchema)]
 pub struct ModelMemory {
     /// CUDA device ordinal
     pub device: usize,

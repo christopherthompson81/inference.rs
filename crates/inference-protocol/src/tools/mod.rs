@@ -43,7 +43,7 @@ pub struct ToolCallingMatcher {
 }
 
 // Same as CalledFunction, but has different cases for variations on the names
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, inference_json::FromJson)]
 pub struct CalledFunctionParameters {
     #[serde(alias = "function")]
     pub name: String,

@@ -14,8 +14,9 @@ base from growing copies of itself. Each round measures, ranks, and lands the be
 # Duplicated code and unused dependencies (builds nothing)
 scripts/housekeeping.sh
 
-# LLVM IR lines per heavy crate, and incremental rebuild times after touching nn, core and a model family
-scripts/housekeeping.sh --ir --incremental
+# LLVM IR lines per heavy crate, rebuild times after touching nn, core and a model family, and the compile time of
+# each crate that ends a build
+scripts/housekeeping.sh --ir --incremental --crate-time
 
 # Slowest tests and test modules of a full local CI run
 /usr/bin/time -f "wall %e s" scripts/local_ci.sh --lint --tests --cuda --bindings --size --sweep 2>&1 | tee ci.log
@@ -32,6 +33,10 @@ scripts/housekeeping.sh --slow-tests ci.log
   and large to ship; the top functions of `cargo llvm-lines -p <crate> --lib` show where it is.
 - **Incremental rebuilds**: seconds for `cargo check --workspace --tests` and the nextest test build after a `touch` of
   a crate low in the stack. An edit low in the stack is what everyday iteration pays for.
+  A `touch` costs the dependents' re-check and the links, while rustc's incremental cache makes the touched crate
+  itself nearly free, so it barely moves when one crate's code shrinks.
+- **Crate compile time**: each crate that ends a build (core, api, server-core, web UI) compiled whole on its own.
+  This is what an IR cut buys, and the serial tail of a build after an edit below them.
 - **Test time**: per nextest run, the slowest tests and the modules whose tests sum the most. A module of many medium
   tests matters as much as one slow test.
 

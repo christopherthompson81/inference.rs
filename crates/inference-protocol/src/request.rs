@@ -5,17 +5,17 @@ use serde_json::Value;
 
 pub type LlguidanceGrammar = llguidance::api::TopLevelGrammar;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, inference_json::FromJson)]
 /// Control the constraint with llguidance.
 pub enum Constraint {
     Regex(String),
     Lark(String),
     JsonSchema(serde_json::Value),
-    Llguidance(LlguidanceGrammar),
+    Llguidance(#[json(serde)] LlguidanceGrammar),
     None,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Serialize, inference_json::FromJson, PartialEq)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 /// Image generation response format
 #[serde(rename_all = "snake_case")]
@@ -119,6 +119,8 @@ impl std::str::FromStr for ReasoningEffort {
     }
 }
 
+inference_json::via_serde!(ReasoningEffort);
+
 impl<'de> Deserialize<'de> for ReasoningEffort {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -173,7 +175,7 @@ pub fn resolve_reasoning_controls(
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Clone, Copy, Debug, Serialize, inference_json::FromJson, PartialEq, Default)]
 pub enum SearchContextSize {
     #[serde(rename = "low")]
     Low,
@@ -185,7 +187,7 @@ pub enum SearchContextSize {
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson, PartialEq)]
 pub struct ApproximateUserLocation {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub city: Option<String>,
@@ -198,7 +200,7 @@ pub struct ApproximateUserLocation {
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson, PartialEq)]
 #[serde(tag = "type")]
 pub enum WebSearchUserLocation {
     #[serde(rename = "approximate")]
@@ -208,7 +210,7 @@ pub enum WebSearchUserLocation {
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson, PartialEq, Default)]
 pub struct WebSearchOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub search_context_size: Option<SearchContextSize>,
@@ -233,7 +235,7 @@ pub struct WebSearchOptions {
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson, PartialEq, Default)]
 pub struct WebSearchFilters {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_domains: Option<Vec<String>>,
@@ -242,7 +244,7 @@ pub struct WebSearchFilters {
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WebSearchContentType {
     Text,
@@ -250,7 +252,7 @@ pub enum WebSearchContentType {
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, inference_json::FromJson, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WebSearchReturnTokenBudget {
     Default,
@@ -258,7 +260,7 @@ pub enum WebSearchReturnTokenBudget {
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson, PartialEq, Default)]
 pub struct WebSearchImageSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_results: Option<usize>,

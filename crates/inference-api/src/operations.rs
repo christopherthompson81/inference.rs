@@ -8,7 +8,7 @@ use inference_core::{
     CalibrationRequest, DetokenizationRequest, InferenceRsError, RequantizeRequest, Request,
     TokenizationRequest, parse_isq_value,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use utoipa::ToSchema;
 
 use crate::api_error::{ApiError, ApiErrorKind};
@@ -21,7 +21,7 @@ const CALIBRATION_FAILED: &str = "calibration_failed";
 const REQUANTIZE_FAILED: &str = "requantize_failed";
 const TOKENIZATION_FAILED: &str = "tokenization_failed";
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct ReIsqRequest {
     /// The ISQ type to requantize to, e.g. `Q4K`; numeric shorthands resolve as they would on the CPU.
     #[schema(example = "Q4K")]
@@ -32,12 +32,12 @@ pub struct ReIsqRequest {
 }
 
 /// Answered once the model is requantized; a model not loaded with ISQ is a `requantize_failed` error.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct ReIsqResponse {
     pub ggml_type: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct CalibrationApplyRequest {
     /// Also save the collected importance matrix to this `.cimatrix` path; over HTTP, a bare file name written to
     /// the server's working directory.
@@ -49,12 +49,15 @@ pub struct CalibrationApplyRequest {
 }
 
 /// The model a calibration start or status acts on; the default model when absent.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Default, serde::Deserialize, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CalibrationTarget {
     #[serde(default)]
     pub model: Option<String>,
 }
+
+// also a URL query, where serde's duplicate-field check matters (a `Value` keeps the last)
+inference_json::via_serde!(CalibrationTarget);
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct SessionList {
@@ -62,7 +65,7 @@ pub struct SessionList {
 }
 
 /// Branches a session into a new one, named by the engine, with the source's first `num_turns` turns (0 copies all).
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SessionForkRequest {
     pub num_turns: usize,
@@ -94,7 +97,7 @@ pub struct SessionDeleted {
     pub deleted: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TokenizeRequest {
     #[serde(default)]
@@ -105,12 +108,12 @@ pub struct TokenizeRequest {
     pub add_special_tokens: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct TokenizeResponse {
     pub tokens: Vec<u32>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DetokenizeRequest {
     #[serde(default)]
@@ -121,7 +124,7 @@ pub struct DetokenizeRequest {
     pub skip_special_tokens: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct DetokenizeResponse {
     pub text: String,
 }

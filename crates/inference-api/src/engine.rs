@@ -10,7 +10,7 @@ use inference_core::{
 };
 use inference_selection::quant;
 use inference_tensor::Device;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::transcription_session::TranscriptionSession;
 use crate::{
@@ -134,7 +134,7 @@ pub const DEFAULT_MAX_SEQS: usize = 4;
 
 /// What to load and how to run it: the JSON form of the options `inference serve` takes. With neither `model` nor
 /// `models` the engine starts empty, and `add_model` loads what it serves.
-#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Default, inference_json::FromJson, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EngineSpec {
     /// The one model to serve; give `models` instead to serve several.
@@ -163,7 +163,7 @@ pub struct EngineSpec {
 }
 
 /// One of several models an engine serves; unset settings fall back to `runtime`'s.
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, inference_json::FromJson, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ModelSpec {
     pub model: ModelSelected,
@@ -264,7 +264,7 @@ impl ModelSpec {
 }
 
 /// Where uploaded skills are kept; requests reference them from the shell tool.
-#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Default, inference_json::FromJson, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SkillsSpec {
     /// Kept across loads and shareable between engines, each reading it as it was at load; without a root the engine
@@ -307,7 +307,7 @@ pub use inference_core::load_progress::{
 };
 
 /// Runtime LoRA adapter management; listing adapters is always allowed.
-#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Default, inference_json::FromJson, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AdapterSpec {
     /// Allow loading and unloading adapters while the engine runs.
@@ -331,7 +331,7 @@ impl AdapterSpec {
     }
 }
 
-#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Default, inference_json::FromJson, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSpec {
     /// `auto` (the best available), `cpu`, `cuda:N` or `metal:N`.
@@ -436,7 +436,7 @@ fn nonzero(field: &str, value: usize) -> Result<std::num::NonZeroUsize, EngineLo
 }
 
 /// How much the paged-attention KV cache holds; at most one of `context_len`, `memory_mb` and `memory_fraction`.
-#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Default, inference_json::FromJson, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PagedCacheSpec {
     /// Tokens of context to allocate for; without a size the cache takes 90% of free device memory.
@@ -460,7 +460,7 @@ pub struct PagedCacheSpec {
 }
 
 /// MTP speculative decoding, drafting with an assistant model or the head built into the checkpoint.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Default, inference_json::FromJson, Serialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MtpSpec {
     /// Assistant model id or path; unset uses the checkpoint's own MTP head.
@@ -479,7 +479,17 @@ pub struct MtpSpec {
     pub draft_isq: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    inference_json::FromJson,
+    Serialize,
+    utoipa::ToSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum MtpDraftSampling {
     /// Probabilistic drafting where the model supports it, else greedy.
@@ -519,7 +529,7 @@ impl MtpSpec {
     }
 }
 
-#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Default, inference_json::FromJson, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgenticSpec {
     #[serde(default)]
@@ -553,7 +563,7 @@ pub struct AgenticSpec {
 }
 
 /// Limits that replace a sandbox profile's; unset ones keep the profile's.
-#[derive(Debug, Default, Clone, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Default, Clone, inference_json::FromJson, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxLimits {
     /// Per-session memory cap in MiB.
@@ -597,7 +607,7 @@ fn default_policy(
     Some(policy)
 }
 
-#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Default, inference_json::FromJson, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SearchSpec {
     #[serde(default)]

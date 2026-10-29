@@ -10,7 +10,7 @@ use futures::future::BoxFuture;
 use inference_core::{
     LoraAdapterFiles, LoraAdapterInfo, LoraAdapterLoadPolicy, MAX_LORA_ALIAS_BYTES,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use utoipa::{IntoParams, ToSchema};
 
@@ -292,7 +292,7 @@ pub fn runtime_lora_updates_enabled() -> bool {
         })
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LoadLoraAdapterRequest {
     /// Request-facing adapter alias.
@@ -316,7 +316,7 @@ pub struct LoadLoraAdapterRequest {
     pub model: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UnloadLoraAdapterRequest {
     pub lora_name: String,
@@ -331,12 +331,15 @@ pub struct UnloadLoraAdapterRequest {
     pub model: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, IntoParams)]
+#[derive(Debug, Clone, Default, serde::Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct ListLoraAdaptersQuery {
     #[serde(default)]
     pub model: Option<String>,
 }
+
+// also a URL query, where serde's duplicate-field check matters (a `Value` keeps the last)
+inference_json::via_serde!(ListLoraAdaptersQuery);
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct LoraAdapterObject {

@@ -12,6 +12,7 @@ repository.workspace = true
 readme = "../../README.md"
 
 [dependencies]
+inference-json.workspace = true
 libc.workspace = true
 serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true

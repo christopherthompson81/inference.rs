@@ -1,7 +1,6 @@
 //! Request bodies parsed once, here, for both the HTTP server and the C ABI.
 
-use serde::de::DeserializeOwned;
-use serde_json::error::Category;
+use inference_json::FromJson;
 
 use crate::api_error::{ApiError, ApiErrorKind};
 
@@ -16,23 +15,16 @@ pub trait JsonRequest: Sized {
 }
 
 /// Parses `body` as `T` with the failing field's path; call it only from a [`JsonRequest`] impl.
-pub fn parse_json<T: DeserializeOwned>(body: &[u8]) -> Result<T, ApiError> {
-    let mut deserializer = serde_json::Deserializer::from_slice(body);
-    let value = serde_path_to_error::deserialize(&mut deserializer).map_err(path_error)?;
-    deserializer.end().map_err(|error| syntax_error(&error))?;
-    Ok(value)
-}
-
-fn path_error(error: serde_path_to_error::Error<serde_json::Error>) -> ApiError {
-    match error.inner().classify() {
-        Category::Data => ApiError::new(
+pub fn parse_json<T: FromJson>(body: &[u8]) -> Result<T, ApiError> {
+    let value = inference_json::parse_slice(body).map_err(|error| syntax_error(&error))?;
+    T::from_json(&value).map_err(|error| {
+        ApiError::new(
             ApiErrorKind::InvalidRequest,
             format!("{DATA_ERROR_PREFIX}: {error}"),
             Some(INVALID_REQUEST_BODY),
             None,
-        ),
-        Category::Syntax | Category::Eof | Category::Io => syntax_error(&error),
-    }
+        )
+    })
 }
 
 fn syntax_error(error: &dyn std::fmt::Display) -> ApiError {
@@ -93,22 +85,24 @@ mod tests {
 
     #[test]
     fn syntax_and_data_errors_get_distinct_codes() {
-        let syntax = ReIsqRequest::from_json(b"{").unwrap_err();
+        let syntax = <ReIsqRequest as JsonRequest>::from_json(b"{").unwrap_err();
         assert_eq!(syntax.code.as_deref(), Some(MALFORMED_JSON));
         assert!(syntax.message.starts_with(SYNTAX_ERROR_PREFIX));
 
-        let data = ReIsqRequest::from_json(b"{}").unwrap_err();
+        let data = <ReIsqRequest as JsonRequest>::from_json(b"{}").unwrap_err();
         assert_eq!(data.code.as_deref(), Some(INVALID_REQUEST_BODY));
         assert!(data.message.starts_with(DATA_ERROR_PREFIX));
 
-        let wrong_type = ReIsqRequest::from_json(br#"{"ggml_type": 5}"#).unwrap_err();
+        let wrong_type =
+            <ReIsqRequest as JsonRequest>::from_json(br#"{"ggml_type": 5}"#).unwrap_err();
         assert!(
             wrong_type.message.contains("ggml_type: invalid type"),
             "{}",
             wrong_type.message
         );
 
-        let trailing = ReIsqRequest::from_json(br#"{"ggml_type": "q4k"} x"#).unwrap_err();
+        let trailing =
+            <ReIsqRequest as JsonRequest>::from_json(br#"{"ggml_type": "q4k"} x"#).unwrap_err();
         assert_eq!(trailing.code.as_deref(), Some(MALFORMED_JSON));
     }
 }

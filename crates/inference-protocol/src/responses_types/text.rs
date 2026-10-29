@@ -1,11 +1,11 @@
 //! Text output configuration for the OpenResponses API.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use utoipa::ToSchema;
 
 /// Text output configuration
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct TextConfig {
     /// Format for text output
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -13,7 +13,7 @@ pub struct TextConfig {
 }
 
 /// Text format configuration
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(tag = "type")]
 pub enum TextFormat {
     /// Plain text output

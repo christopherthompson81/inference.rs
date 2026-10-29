@@ -12,7 +12,7 @@ use std::{
 use anyhow::{Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
 use inference_core::ShellSkillMount;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use utoipa::ToSchema;
 
@@ -40,7 +40,7 @@ pub struct SkillStore {
     skills: Arc<RwLock<HashMap<String, SkillMetadata>>>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize)]
 struct SkillMetadata {
     id: String,
     name: String,
@@ -52,7 +52,7 @@ struct SkillMetadata {
     owner: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize)]
 struct SkillVersionMetadata {
     version: u64,
     created_at: u64,
@@ -86,7 +86,8 @@ pub struct SkillListObject {
     pub data: Vec<SkillObject>,
 }
 
-#[derive(Clone, Debug, Deserialize, ToSchema)]
+// a URL query: serde_urlencoded reads numbers from strings, which a `Value` would not
+#[derive(Clone, Debug, serde::Deserialize, ToSchema)]
 pub struct SkillListQuery {
     #[serde(default)]
     pub source: Option<String>,

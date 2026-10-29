@@ -529,7 +529,7 @@ pub async fn require_admin(request: Request, next: Next) -> Response {
 }
 
 /// `{"key"}` to sign a browser in.
-#[derive(serde::Deserialize, utoipa::ToSchema)]
+#[derive(inference_json::FromJson, utoipa::ToSchema)]
 pub struct SignInRequest {
     pub key: String,
 }

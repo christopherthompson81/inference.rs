@@ -8,7 +8,7 @@ use std::{
 use inference_quant::{ShardedSafeTensors, ShardedVarBuilder};
 use inference_tensor::nn::{Linear, ModuleT, VarMap};
 use inference_tensor::{D, DType, Device, Result, Tensor, Var, safetensors};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 mod inputs;
 mod macros;
@@ -277,7 +277,7 @@ serde_default_fn!(usize, default_bs, 4);
 serde_default_fn!(bool, default_true, true);
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, inference_json::FromJson, Clone, Debug)]
 pub enum AnyMoeExpertType {
     #[serde(rename = "fine_tuned")]
     FineTuned,
@@ -290,7 +290,7 @@ pub enum AnyMoeExpertType {
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, inference_json::FromJson, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct AnyMoeConfig {
     pub hidden_size: usize,

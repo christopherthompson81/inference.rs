@@ -10,7 +10,7 @@ use syn::{
     parse_macro_input, parse_quote,
 };
 
-#[proc_macro_derive(FromJson, attributes(serde))]
+#[proc_macro_derive(FromJson, attributes(serde, json))]
 pub fn derive_from_json(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     expand(&input)
@@ -39,8 +39,34 @@ struct Member {
     default: Option<Option<Path>>,
     skip: bool,
     flatten: bool,
-    deserialize_with: Option<Path>,
+    decoder: Decoder,
     other: bool,
+    untagged: bool,
+}
+
+/// How a field's value becomes its type.
+#[derive(Default)]
+enum Decoder {
+    #[default]
+    FromJson,
+    /// A serde `deserialize_with` function, fed the `Value` as its deserializer.
+    Serde(Path),
+    /// A `fn(&Value) -> Result<T, JsonError>`: `either::serde_untagged` done natively, or `#[json(serde)]`.
+    Json(Tokens),
+}
+
+/// `with = "module"`: the Either adapters decode natively; any other module through its serde function.
+fn with_module(mut module: Path) -> Decoder {
+    let name = quote!(#module).to_string().replace(' ', "");
+    let pv = private();
+    match name.as_str() {
+        "either::serde_untagged" => Decoder::Json(quote!(#pv::either_untagged)),
+        "either::serde_untagged_optional" => Decoder::Json(quote!(#pv::either_untagged_optional)),
+        _ => {
+            module.segments.push(parse_quote!(deserialize));
+            Decoder::Serde(module)
+        }
+    }
 }
 
 fn lit_str(m: &ParseNestedMeta) -> syn::Result<LitStr> {
@@ -136,13 +162,13 @@ fn member_attrs(attrs: &[Attribute]) -> syn::Result<Member> {
             } else if p.is_ident("flatten") {
                 f.flatten = true;
             } else if p.is_ident("deserialize_with") {
-                f.deserialize_with = Some(lit_str(&m)?.parse()?);
+                f.decoder = Decoder::Serde(lit_str(&m)?.parse()?);
             } else if p.is_ident("with") {
-                let mut module: Path = lit_str(&m)?.parse()?;
-                module.segments.push(parse_quote!(deserialize));
-                f.deserialize_with = Some(module);
+                f.decoder = with_module(lit_str(&m)?.parse()?);
             } else if p.is_ident("other") {
                 f.other = true;
+            } else if p.is_ident("untagged") {
+                f.untagged = true;
             } else if p.is_ident("skip_serializing")
                 || p.is_ident("skip_serializing_if")
                 || p.is_ident("serialize_with")
@@ -155,6 +181,16 @@ fn member_attrs(attrs: &[Attribute]) -> syn::Result<Member> {
                 return Err(m.error("FromJson: unsupported #[serde] field or variant attribute"));
             }
             Ok(())
+        })?;
+    }
+    for a in attrs.iter().filter(|a| a.path().is_ident("json")) {
+        a.parse_nested_meta(|m| {
+            if m.path.is_ident("serde") {
+                f.decoder = Decoder::Json(quote!(::inference_json::from_serde));
+                Ok(())
+            } else {
+                Err(m.error("FromJson: unsupported #[json] attribute"))
+            }
         })?;
     }
     Ok(f)
@@ -269,22 +305,34 @@ fn named_fields(
         } else {
             keys.push(key.clone());
             keys.extend(aliases.iter().cloned());
-            if let Some(with) = &a.deserialize_with {
-                let default = match &default_value {
-                    Some(d) => quote!(::core::option::Option::Some(#d)),
-                    None => quote!(::core::option::Option::None),
-                };
-                quote!(#pv::field_with::<#ty>(o, #key, &[#(#aliases),*], #default, |v| #with(v))?)
-            } else {
-                match default_value {
+            let default = match &default_value {
+                Some(d) => quote!(::core::option::Option::Some(#d)),
+                None => quote!(::core::option::Option::None),
+            };
+            match &a.decoder {
+                Decoder::Serde(with) => {
+                    quote!(#pv::field_with::<#ty>(o, #key, &[#(#aliases),*], #default, |v| #with(v))?)
+                }
+                Decoder::Json(f) => {
+                    quote!(#pv::field_json::<#ty>(o, #key, &[#(#aliases),*], #default, |v| #f(v))?)
+                }
+                Decoder::FromJson => match default_value {
                     Some(d) => quote!(#pv::field_or::<#ty>(o, #key, &[#(#aliases),*], #d)?),
                     None => quote!(#pv::field::<#ty>(o, #key, &[#(#aliases),*])?),
-                }
+                },
             }
         };
         inits.push(quote!(#ident: #init));
     }
     Ok(NamedFields { inits, keys })
+}
+
+fn decode_value(ty: &Type, decoder: &Decoder, value: &Tokens) -> Tokens {
+    match decoder {
+        Decoder::FromJson => quote!(<#ty as ::inference_json::FromJson>::from_json(#value)?),
+        Decoder::Serde(with) => quote!(#with(#value).map_err(::inference_json::JsonError::from)?),
+        Decoder::Json(f) => quote!(#f(#value)?),
+    }
 }
 
 /// A tuple struct's or variant's fields from `value`, built with `ctor` (`Self` or `Self::Variant`).
@@ -293,21 +341,26 @@ fn tuple_fields(
     expected: &str,
     value: &Tokens,
     ctor: Tokens,
-) -> Tokens {
+) -> syn::Result<Tokens> {
     let pv = private();
     let n = fields.unnamed.len();
     if n == 1 {
-        let ty = &fields.unnamed[0].ty;
-        return quote!(#ctor(<#ty as ::inference_json::FromJson>::from_json(#value)?));
+        let f = &fields.unnamed[0];
+        let body = decode_value(&f.ty, &member_attrs(&f.attrs)?.decoder, value);
+        return Ok(quote!(#ctor(#body)));
     }
-    let items = fields.unnamed.iter().enumerate().map(|(i, f)| {
+    let mut items = Vec::new();
+    for (i, f) in fields.unnamed.iter().enumerate() {
         let ty = &f.ty;
-        quote!(#pv::item::<#ty>(a, #i)?)
-    });
-    quote!({
+        items.push(match member_attrs(&f.attrs)?.decoder {
+            Decoder::FromJson => quote!(#pv::item::<#ty>(a, #i)?),
+            other => decode_value(ty, &other, &quote!(&a[#i])),
+        });
+    }
+    Ok(quote!({
         let a = #pv::tuple(#value, #n, #expected)?;
         #ctor(#(#items),*)
-    })
+    }))
 }
 
 fn expand_struct(s: &syn::DataStruct, c: &Container, label: &str) -> syn::Result<Tokens> {
@@ -352,7 +405,7 @@ fn expand_struct(s: &syn::DataStruct, c: &Container, label: &str) -> syn::Result
             })
         }
         Fields::Unnamed(u) => {
-            let body = tuple_fields(u, &expected, &quote!(v), quote!(Self));
+            let body = tuple_fields(u, &expected, &quote!(v), quote!(Self))?;
             Ok(quote!(::core::result::Result::Ok(#body)))
         }
         Fields::Unit => Ok(quote! {
@@ -374,7 +427,7 @@ fn variant_body(
     let expected = format!("{label}::{}", ident_name(vi));
     Ok(match &var.fields {
         Fields::Unit => quote!(Self::#vi),
-        Fields::Unnamed(u) => tuple_fields(u, &expected, value, quote!(Self::#vi)),
+        Fields::Unnamed(u) => tuple_fields(u, &expected, value, quote!(Self::#vi))?,
         Fields::Named(named) => {
             // variant fields follow rename_all_fields, which nothing here sets, not the enum's rename_all
             let fc = Container {
@@ -404,9 +457,14 @@ fn expand_enum(e: &syn::DataEnum, c: &Container, label: &str) -> syn::Result<Tok
     let mut names = Vec::new();
     let mut variants = Vec::new();
     let mut other = None;
+    let mut loose = Vec::new();
     for var in &e.variants {
         let a = member_attrs(&var.attrs)?;
         if a.skip {
+            continue;
+        }
+        if a.untagged && !c.untagged {
+            loose.push(var);
             continue;
         }
         if a.other {
@@ -435,34 +493,15 @@ fn expand_enum(e: &syn::DataEnum, c: &Container, label: &str) -> syn::Result<Tok
     };
 
     if c.untagged {
-        let mut tries = Vec::new();
-        for (var, _) in &variants {
-            let body = match &var.fields {
-                Fields::Unit => {
-                    let vi = &var.ident;
-                    quote!(if v.is_null() { return ::core::result::Result::Ok(Self::#vi); })
-                }
-                _ => {
-                    let build = variant_body(var, c, label, &quote!(v))?;
-                    quote! {
-                        let attempt = (|| -> ::core::result::Result<Self, ::inference_json::JsonError> {
-                            ::core::result::Result::Ok(#build)
-                        })();
-                        if let ::core::result::Result::Ok(x) = attempt {
-                            return ::core::result::Result::Ok(x);
-                        }
-                    }
-                }
-            };
-            tries.push(body);
-        }
+        let all: Vec<&syn::Variant> = variants.iter().map(|(v, _)| *v).collect();
+        let tries = untagged_tries(&all, c, label)?;
         let err = c
             .expecting
             .clone()
             .map(|m| quote!(::inference_json::JsonError::new(#m)))
             .unwrap_or_else(|| quote!(::inference_json::JsonError::untagged(#label)));
         return Ok(quote! {
-            #(#tries)*
+            #tries
             ::core::result::Result::Err(#err)
         });
     }
@@ -490,12 +529,13 @@ fn expand_enum(e: &syn::DataEnum, c: &Container, label: &str) -> syn::Result<Tok
             };
             arms.push(quote!(#(#all)|* => #body));
         }
-        return Ok(quote! {
+        let tagged = quote! {
             ::core::result::Result::Ok(match #pv::internal(v, #tag, #expected)? {
                 #(#arms,)*
                 #unknown,
             })
-        });
+        };
+        return with_loose(tagged, &loose, c, label);
     }
 
     let mut arms = Vec::new();
@@ -518,12 +558,59 @@ fn expand_enum(e: &syn::DataEnum, c: &Container, label: &str) -> syn::Result<Tok
         };
         arms.push(quote!(#(#all)|* => #body));
     }
-    Ok(quote! {
+    let tagged = quote! {
         let (name, payload) = #pv::external(v, #expected)?;
         ::core::result::Result::Ok(match name {
             #(#arms,)*
             #unknown,
         })
+    };
+    with_loose(tagged, &loose, c, label)
+}
+
+/// Each variant tried on the whole value in order, returning the first that decodes.
+fn untagged_tries(variants: &[&syn::Variant], c: &Container, label: &str) -> syn::Result<Tokens> {
+    let mut tries = Vec::new();
+    for var in variants {
+        tries.push(match &var.fields {
+            Fields::Unit => {
+                let vi = &var.ident;
+                quote!(if v.is_null() { return ::core::result::Result::Ok(Self::#vi); })
+            }
+            _ => {
+                let build = variant_body(var, c, label, &quote!(v))?;
+                quote! {
+                    let attempt = (|| -> ::core::result::Result<Self, ::inference_json::JsonError> {
+                        ::core::result::Result::Ok(#build)
+                    })();
+                    if let ::core::result::Result::Ok(x) = attempt {
+                        return ::core::result::Result::Ok(x);
+                    }
+                }
+            }
+        });
+    }
+    Ok(quote!(#(#tries)*))
+}
+
+/// serde's `#[serde(untagged)]` variants of a tagged enum: tried in order once the tagged ones do not match.
+fn with_loose(
+    tagged: Tokens,
+    loose: &[&syn::Variant],
+    c: &Container,
+    label: &str,
+) -> syn::Result<Tokens> {
+    if loose.is_empty() {
+        return Ok(tagged);
+    }
+    let tries = untagged_tries(loose, c, label)?;
+    Ok(quote! {
+        let tagged = (|| -> ::core::result::Result<Self, ::inference_json::JsonError> { #tagged })();
+        if tagged.is_ok() {
+            return tagged;
+        }
+        #tries
+        tagged
     })
 }
 

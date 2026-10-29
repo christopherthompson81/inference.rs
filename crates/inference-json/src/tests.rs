@@ -127,6 +127,33 @@ twins! {
     }
 
     #[derive(Debug)]
+    #[serde(rename_all = "lowercase")]
+    pub enum Choice {
+        Auto,
+        None,
+        #[serde(untagged)]
+        Named(Named),
+        #[serde(untagged)]
+        Free(String),
+    }
+
+    #[derive(Debug)]
+    pub struct Named {
+        name: String,
+    }
+
+    #[derive(Debug)]
+    pub struct Content(#[serde(with = "either::serde_untagged")] either::Either<String, Vec<u8>>);
+
+    #[derive(Debug)]
+    pub struct MaybeContent {
+        #[serde(default, with = "either::serde_untagged_optional")]
+        inner: Option<either::Either<u8, String>>,
+        tagged: either::Either<u8, String>,
+        count: std::num::NonZero<u32>,
+    }
+
+    #[derive(Debug)]
     pub struct Generic<T> {
         item: T,
         items: Vec<T>,
@@ -216,6 +243,27 @@ fn enums_decode_as_serde_does() {
     ] {
         let _ = same!(Adjacent, v);
     }
+    for v in [
+        json!("auto"),
+        json!("none"),
+        json!({"name": "f"}),
+        json!("free text"),
+        json!(3),
+    ] {
+        let _ = same!(Choice, v);
+    }
+    for v in [json!("text"), json!([1, 2]), json!(3)] {
+        let _ = same!(Content, v);
+    }
+    for v in [
+        json!({"tagged": {"Left": 1}, "count": 2}),
+        json!({"inner": "s", "tagged": {"Right": "r"}, "count": 1}),
+        json!({"inner": null, "tagged": {"Left": 1}, "count": 1}),
+        json!({"tagged": {"Up": 1}, "count": 1}),
+        json!({"tagged": {"Left": 1}, "count": 0}),
+    ] {
+        let _ = same!(MaybeContent, v);
+    }
     for v in [json!("QUIET_ONE"), json!("anything")] {
         let _ = same!(Loud, v);
     }
@@ -253,6 +301,17 @@ fn errors_name_the_path_to_the_failing_value() {
         e.to_string(),
         "unknown variant `middle`, expected `before_all` or `after`"
     );
+}
+
+#[test]
+fn a_json_serde_field_decodes_through_its_own_deserialize() {
+    #[derive(crate::FromJson, Debug)]
+    struct Foreign(#[json(serde)] std::net::Ipv4Addr);
+    assert_eq!(
+        crate::from_value::<Foreign>(&json!("10.0.0.1")).unwrap().0,
+        std::net::Ipv4Addr::new(10, 0, 0, 1)
+    );
+    assert!(crate::from_value::<Foreign>(&json!("nope")).is_err());
 }
 
 #[test]

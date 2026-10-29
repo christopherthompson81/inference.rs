@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::json_body::JsonBody;
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{Extension, Multipart, Path as UrlPath, Query, Request};
@@ -83,7 +84,7 @@ pub struct ListJobsQuery {
     pub kind: String,
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 pub struct DeleteJobRequest {
     pub id: String,
 }
@@ -276,7 +277,7 @@ async fn keep_files(multipart: &mut Multipart, dir: &Path) -> Result<Vec<String>
 
 pub async fn delete_job(
     Extension(app): Extension<Arc<AppState>>,
-    Json(req): Json<DeleteJobRequest>,
+    JsonBody(req): JsonBody<DeleteJobRequest>,
 ) -> Response {
     let Some(dir) = job_dir(&app.jobs_dir, &req.id) else {
         return bad_request("invalid job id").into_response();

@@ -11,7 +11,7 @@ pub use inference_selection::{
     SystemInfo, TuneProfile, auto_tune,
 };
 use inference_selection::{ModelSelected, collect_system_info, run_doctor};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use utoipa::ToSchema;
 
 use crate::api_error::{ApiError, ApiErrorKind};
@@ -33,7 +33,7 @@ pub fn system_doctor_json() -> Result<String, ApiError> {
     serde_json::to_string(&system_doctor()).map_err(|_| ApiError::internal())
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Copy, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum TuneProfileRequest {
     Quality,
@@ -51,7 +51,7 @@ impl From<TuneProfileRequest> for TuneProfile {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct TuneModelRequest {
     #[schema(example = "meta-llama/Llama-3.2-3B-Instruct")]
     pub model_id: String,

@@ -166,7 +166,7 @@ pub use types::McpToolResult;
 
 pub use rust_mcp_schema;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -175,7 +175,7 @@ use uuid::Uuid;
 ///
 /// Defines the different ways to connect to MCP servers, each optimized for
 /// specific use cases and deployment scenarios.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 #[serde(tag = "type")]
 pub enum McpServerSource {
     /// HTTP-based MCP server using JSON-RPC over HTTP
@@ -226,7 +226,7 @@ pub enum McpServerSource {
 /// This structure defines how the MCP client should connect to and manage
 /// multiple MCP servers, including authentication, tool registration, and
 /// execution policies.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 #[serde(default)]
 pub struct McpClientConfig {
     /// List of MCP servers to connect to
@@ -253,7 +253,7 @@ pub struct McpClientConfig {
 ///
 /// Defines connection parameters, authentication, and tool management
 /// settings for a single MCP server instance.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct McpServerConfig {
     /// Unique identifier for this server
     ///

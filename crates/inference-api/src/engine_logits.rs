@@ -4,7 +4,7 @@ use inference_core::{
     InferenceRs, ModelCategory, NormalRequest, Request, RequestMessage, Response, SamplingParams,
 };
 use inference_tensor::{DType, Tensor};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use utoipa::ToSchema;
 
 use crate::{
@@ -19,7 +19,7 @@ use crate::{
 const SCORING_FAILED: &str = "prompt scoring did not return logits";
 
 /// The prompt to score, as text (tokenized with the model's special tokens) or as token ids.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(untagged)]
 pub enum PromptInput {
     Text(String),
@@ -27,7 +27,9 @@ pub enum PromptInput {
 }
 
 /// What a scored prompt carries besides the token log-probabilities.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, inference_json::FromJson, Serialize, ToSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum LogitsOutput {
     #[default]
@@ -36,7 +38,7 @@ pub enum LogitsOutput {
     Logits,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PromptLogitsRequest {
     #[serde(default)]

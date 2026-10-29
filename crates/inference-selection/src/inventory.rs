@@ -14,7 +14,7 @@ use inference_gguf::base_model::source_hf_base_model_id;
 use inference_nn::paged_attention::{KvFingerprint, kv_profile_name};
 use inference_quant::GgufDType;
 use inference_tensor::quantized::gguf_file::{self, Value};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::quant::{
     is_auxiliary_gguf, is_gguf, is_projector, parse_split, projector_belongs, quant_label,
@@ -121,7 +121,7 @@ pub struct InventoryModel {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, inference_json::FromJson)]
 #[serde(deny_unknown_fields)]
 pub struct ScanRequest {
     /// Folders searched for models, a few levels deep.

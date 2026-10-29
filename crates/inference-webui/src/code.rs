@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
 use axum::Json;
+
+use crate::json_body::JsonBody;
 use axum::extract::{Extension, Query};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -221,7 +223,7 @@ pub(crate) async fn list_sessions(
     Json(json!({"project": project, "sessions": sessions})).into_response()
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 pub(crate) struct OpenRequest {
     #[serde(default)]
     project: String,
@@ -235,7 +237,7 @@ pub(crate) struct OpenRequest {
 pub(crate) async fn open_session(
     Extension(code): Extension<Arc<CodeState>>,
     Extension(app): Extension<Arc<AppState>>,
-    Json(request): Json<OpenRequest>,
+    JsonBody(request): JsonBody<OpenRequest>,
 ) -> Response {
     let live = match &request.session_id {
         Some(id) => match code.live(id) {
@@ -301,7 +303,7 @@ pub(crate) async fn open_session(
 pub(crate) async fn start_demo(
     Extension(code): Extension<Arc<CodeState>>,
     Extension(app): Extension<Arc<AppState>>,
-    Json(request): Json<DemoRequest>,
+    JsonBody(request): JsonBody<DemoRequest>,
 ) -> Response {
     let project = match make_demo_project() {
         Ok(project) => project,
@@ -337,7 +339,7 @@ pub(crate) async fn start_demo(
         .into_response()
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 pub(crate) struct DemoRequest {
     #[serde(default)]
     model: Option<String>,
@@ -399,7 +401,7 @@ async fn load(
     Ok(live)
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 pub(crate) struct SendRequest {
     session_id: String,
     prompt: String,
@@ -418,7 +420,7 @@ pub(crate) struct SendRequest {
 pub(crate) async fn send(
     Extension(code): Extension<Arc<CodeState>>,
     Extension(app): Extension<Arc<AppState>>,
-    Json(request): Json<SendRequest>,
+    JsonBody(request): JsonBody<SendRequest>,
 ) -> Response {
     let Some(live) = code.live(&request.session_id) else {
         return not_found(&request.session_id);
@@ -483,7 +485,7 @@ pub(crate) async fn send(
         .into_response()
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 pub(crate) struct ApproveRequest {
     session_id: String,
     approval_id: String,
@@ -493,7 +495,7 @@ pub(crate) struct ApproveRequest {
 
 pub(crate) async fn approve(
     Extension(code): Extension<Arc<CodeState>>,
-    Json(request): Json<ApproveRequest>,
+    JsonBody(request): JsonBody<ApproveRequest>,
 ) -> Response {
     let Some(live) = code.live(&request.session_id) else {
         return not_found(&request.session_id);
@@ -519,14 +521,14 @@ pub(crate) async fn approve(
     StatusCode::NO_CONTENT.into_response()
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 pub(crate) struct InterruptRequest {
     session_id: String,
 }
 
 pub(crate) async fn interrupt(
     Extension(code): Extension<Arc<CodeState>>,
-    Json(request): Json<InterruptRequest>,
+    JsonBody(request): JsonBody<InterruptRequest>,
 ) -> Response {
     let Some(live) = code.live(&request.session_id) else {
         return not_found(&request.session_id);

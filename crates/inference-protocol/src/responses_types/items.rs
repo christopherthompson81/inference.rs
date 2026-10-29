@@ -1,6 +1,6 @@
 //! Input and output item types for the OpenResponses API.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use utoipa::{
     PartialSchema, ToSchema,
     openapi::{ArrayBuilder, ObjectBuilder, OneOfBuilder, RefOr, Schema, Type, schema::SchemaType},
@@ -12,7 +12,7 @@ use super::{
 };
 
 /// Message content that can be a string or array of content parts
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 #[serde(untagged)]
 pub enum MessageContentParam {
     /// Simple string content
@@ -78,7 +78,7 @@ impl MessageContentParam {
 }
 
 /// Message item parameter for input
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct MessageItemParam {
     /// The role of the message sender
     pub role: String,
@@ -90,7 +90,7 @@ pub struct MessageItemParam {
 }
 
 /// Tagged input item types (with explicit "type" field)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 #[serde(tag = "type")]
 pub enum TaggedInputItem {
     /// A message item with explicit type
@@ -142,7 +142,7 @@ pub enum TaggedInputItem {
 /// This enum supports both:
 /// - Explicitly typed items with `"type": "message"`, `"type": "item_reference"`, etc.
 /// - Bare messages with just `role` and `content` (no type field) for compatibility with OpenAI's format
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 #[serde(untagged)]
 pub enum InputItem {
     /// Explicitly typed input item (has "type" field)
@@ -368,7 +368,7 @@ fn input_item_schema() -> Schema {
 }
 
 /// Output item types for the OpenResponses API
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 #[serde(tag = "type")]
 pub enum OutputItem {
     /// A message item
@@ -426,26 +426,26 @@ pub enum OutputItem {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 #[serde(tag = "type")]
 pub enum ReasoningSummaryPart {
     #[serde(rename = "summary_text")]
     SummaryText { text: String },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 #[serde(tag = "type")]
 pub enum ReasoningContentPart {
     #[serde(rename = "reasoning_text")]
     ReasoningText { text: String },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct ShellCallAction {
     pub commands: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 #[serde(tag = "type")]
 pub enum ShellCallOutputPart {
     #[serde(rename = "stdout")]
@@ -876,7 +876,7 @@ impl OutputItem {
 }
 
 /// Input that can be a string, array of input items, or array of messages
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 #[serde(untagged)]
 pub enum ResponsesInput {
     /// Simple string input
