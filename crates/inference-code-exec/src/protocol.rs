@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// One requested output file. The executor reads it from the working dir after user code runs.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, Default)]
 pub struct ExecuteOutputSpec {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -21,7 +21,7 @@ pub enum ExecutorRequest<'a> {
     Reset,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, inference_json::FromJson)]
 pub struct ExecuteResponse {
     pub stdout: String,
     pub stderr: String,
@@ -39,13 +39,13 @@ pub struct ExecuteResponse {
     pub execution_time_ms: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, inference_json::FromJson)]
 pub struct ImageOutput {
     pub data_base64: String,
 }
 
 /// A file read from the working directory. Exactly one of `text`, `data_base64`, or `error` is set.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct ExecuteFile {
     pub name: String,
     /// Lowercased extension or explicit override.
@@ -72,5 +72,5 @@ impl ExecuteFile {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, inference_json::FromJson)]
 pub struct ResetResponse {}

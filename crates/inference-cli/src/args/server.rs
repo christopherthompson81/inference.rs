@@ -7,10 +7,9 @@ use inference_server_core::{
     auth::{API_KEY_ENV, ApiKeys, ENV_KEY_OWNER},
     metrics::{AccessLogFormat, ObservabilityConfig},
 };
-use serde::Deserialize;
 
 /// HTTP server configuration
-#[derive(Args, Clone, Deserialize)]
+#[derive(Args, Clone, inference_json::FromJson)]
 pub struct ServerOptions {
     /// HTTP server port
     #[arg(short = 'p', long, default_value_t = 1234)]
@@ -193,7 +192,7 @@ impl ServerOptions {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum, inference_json::FromJson)]
 #[serde(rename_all = "kebab-case")]
 pub enum JobPlacementArg {
     #[default]
@@ -212,7 +211,7 @@ impl From<JobPlacementArg> for inference_api::jobs::Placement {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum, inference_json::FromJson)]
 #[serde(rename_all = "kebab-case")]
 pub enum AccessLogFormatArg {
     #[default]

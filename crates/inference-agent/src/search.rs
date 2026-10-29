@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use html2text::{config, render::PlainDecorator};
 use scraper::{Html, Selector};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::env::consts::{ARCH, FAMILY, OS};
 use tokenizers::Tokenizer;
@@ -83,7 +83,7 @@ pub(crate) fn source_domains<'a>(urls: impl IntoIterator<Item = &'a str>) -> Vec
     domains
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+#[derive(Debug, Serialize, inference_json::FromJson, Default, Clone)]
 pub struct ExtractResult {
     pub url: String,
     pub content: String,
@@ -99,7 +99,7 @@ pub fn truncate_to_tokens(text: String, tokenizer: &Tokenizer, size: usize) -> R
         .map_err(anyhow::Error::msg)
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, inference_json::FromJson)]
 pub struct ExtractFunctionParameters {
     pub url: String,
 }

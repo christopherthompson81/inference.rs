@@ -9,7 +9,6 @@ use inference_quant::log::once_log_debug;
 use inference_tensor::DType;
 
 use regex::Regex;
-use serde::Deserialize;
 
 use super::{
     AutoDeviceMapQuantization, DeviceMappedModelLoader, NonMappedSubModel, NormalLoadingMetadata,

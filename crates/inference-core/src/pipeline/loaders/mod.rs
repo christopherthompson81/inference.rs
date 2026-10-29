@@ -21,7 +21,6 @@ use anyhow::Result;
 use as_any::AsAny;
 use inference_quant::{IsqType, QuantizedConfig};
 use inference_tensor::{DType, Device};
-use serde::Deserialize;
 use tokio::sync::Mutex;
 
 #[cfg(feature = "models-gemma")]
@@ -519,7 +518,7 @@ impl ModelPaths for EmbeddingModelPaths<PathBuf> {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, inference_json::FromJson)]
 /// The source of the HF token.
 pub enum TokenSource {
     Literal(String),
@@ -611,7 +610,7 @@ impl ModelKind {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 pub struct QuantizationConfigShim {
     quantization_config: Option<QuantizedConfig>,
 }

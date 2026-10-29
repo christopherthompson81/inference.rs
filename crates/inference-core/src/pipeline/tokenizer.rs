@@ -4,7 +4,6 @@ use ahash::AHashMap;
 use anyhow::{Result, anyhow};
 use base64::Engine;
 use inference_nn::utils::tokenizer::tokenizer_from_bytes;
-use serde::Deserialize;
 use serde_json::Value;
 use tokenizers::{
     decoders::byte_level::ByteLevel as ByteLevelDecoder,
@@ -20,7 +19,7 @@ use tokenizers::{
 
 use super::tiktoken::token_bytes_to_string;
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct AddedToken {
     id: usize,
     content: String,
@@ -50,26 +49,26 @@ fn repair_tokenizer_json(raw: Vec<u8>) -> Result<Vec<u8>> {
     Ok(serde_json::to_vec(&tokenizer)?)
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct TekkenVocabEntry {
     rank: usize,
     token_bytes: String,
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct TekkenSpecialToken {
     rank: usize,
     token_str: String,
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct TekkenConfig {
     pattern: String,
     default_vocab_size: usize,
     default_num_special_tokens: usize,
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct TekkenTokenizer {
     config: TekkenConfig,
     vocab: Vec<TekkenVocabEntry>,

@@ -12,7 +12,6 @@ use hf_hub::api::sync::ApiRepo;
 use inference_quant::ShardedVarBuilder;
 
 use regex::Regex;
-use serde::Deserialize;
 
 use super::{ModelPaths, NormalLoadingMetadata};
 use inference_models_diffusion::flux::{
@@ -42,13 +41,13 @@ const DEFAULT_REVISION: &str = "main";
 // a hub cache snapshot sits under `models--<org>--<name>/snapshots/<sha>`
 const HUB_CACHE_PREFIX: &str = "models--";
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct ArchitecturesOnly {
     #[serde(default)]
     architectures: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct WeightIndex {
     weight_map: HashMap<String, String>,
 }

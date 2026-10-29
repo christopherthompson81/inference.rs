@@ -828,7 +828,7 @@ pub(crate) mod tests {
     // Rows of one tensor quantized by ik_llama.cpp, plain and repacked (tests/fixtures/gguf_ik_repack/make_goldens.py)
     const GOLDENS: &str = include_str!("../../tests/fixtures/gguf_ik_repack/goldens.json");
 
-    #[derive(serde::Deserialize)]
+    #[derive(inference_json::FromJson)]
     pub(crate) struct Golden {
         pub ty: String,
         pub id: u32,

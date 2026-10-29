@@ -551,7 +551,7 @@ fn resolve_immediate_isq(params: &ImmediateIsqParams, prefix: &str) -> Option<Im
     None
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, inference_json::FromJson)]
 #[serde(rename_all = "lowercase")]
 pub enum Fp8ActivationScheme {
     Dynamic,
@@ -598,7 +598,7 @@ pub enum QuantizedConfig {
 }
 
 // Common fields for all variants
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct RawConfig {
     quant_method: Option<String>,
     bits: Option<usize>,

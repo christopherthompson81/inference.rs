@@ -1,6 +1,4 @@
-use serde::Deserialize;
-
-#[derive(Deserialize, Debug, Default)]
+#[derive(inference_json::FromJson, Debug, Default)]
 pub struct ProcessorConfig {
     pub chat_template: Option<String>,
     #[serde(alias = "image_seq_length")]

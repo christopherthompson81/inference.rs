@@ -9,7 +9,7 @@ use inference_mcp::{
     ToolOutput,
 };
 use inference_sandbox::{NetworkMode, Sandbox, SandboxPolicy};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
@@ -128,7 +128,7 @@ pub struct ShellManager {
     sandbox_policy: SandboxPolicy,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, inference_json::FromJson)]
 struct ShellArgs {
     commands: Vec<String>,
     #[serde(default)]
@@ -137,7 +137,7 @@ struct ShellArgs {
     max_output_length: Option<usize>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, inference_json::FromJson)]
 struct SurfaceOutputsArgs {
     outputs: Vec<ExecuteOutputSpec>,
 }

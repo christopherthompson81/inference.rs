@@ -489,7 +489,7 @@ pub struct AdapterFold {
     targets: HashMap<String, (String, String, f64)>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(inference_json::FromJson)]
 struct PeftConfig {
     r: usize,
     lora_alpha: f64,

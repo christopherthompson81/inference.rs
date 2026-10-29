@@ -213,7 +213,7 @@ impl DeviceMappedModelLoader for AutoMultimodalLoader {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct AutoMultimodalLoaderConfig {
     #[serde(default)]
     architectures: Vec<String>,

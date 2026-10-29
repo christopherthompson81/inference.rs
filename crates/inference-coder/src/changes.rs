@@ -9,7 +9,7 @@ use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use similar::{ChangeTag, TextDiff};
 
 const CHANGES_EXT: &str = "changes";
@@ -26,7 +26,7 @@ const BINARY_SNIFF_BYTES: usize = 8000;
 // past this a diff settles for a coarser answer rather than stall on a huge rewrite
 const DIFF_TIMEOUT: Duration = Duration::from_secs(1);
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Serialize, inference_json::FromJson)]
 struct Index {
     /// Path (relative when inside the project) to its kept copy's file name, or `None` when there was no file.
     originals: BTreeMap<String, Option<String>>,

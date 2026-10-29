@@ -18,7 +18,7 @@ use inference_tensor::DType;
 use inference_quant::ShardedVarBuilder;
 
 use regex::Regex;
-use serde::{Deserialize, Deserializer, Serialize, de::Visitor};
+use serde::{Deserializer, Serialize, de::Visitor};
 
 use super::{AutoDeviceMapParams, DeviceMappedModelLoader};
 
@@ -243,7 +243,7 @@ impl Display for EmbeddingLoaderType {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, inference_json::FromJson)]
 pub enum EmbeddingModulePaths {
     Transformer {
         path: String,
@@ -309,7 +309,7 @@ impl EmbeddingModulePaths {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, inference_json::FromJson)]
 pub struct EmbeddingModule {
     pub path: String,
     #[serde(rename = "type", deserialize_with = "deserialize_module_type")]
@@ -374,7 +374,7 @@ pub use inference_models_qwen::loaders::Qwen3EmbeddingLoader;
 /// Load a model based on the Hugging Face Transformers -CausalLM model class
 pub struct AutoEmbeddingLoader;
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct AutoEmbeddingLoaderConfig {
     architectures: Vec<String>,
 }

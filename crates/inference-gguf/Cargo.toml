@@ -13,6 +13,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+inference-json.workspace = true
 inference-nn.workspace = true
 inference-quant.workspace = true
 inference-models-gemma = { workspace = true, optional = true }

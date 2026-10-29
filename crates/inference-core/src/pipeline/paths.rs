@@ -395,7 +395,7 @@ pub(crate) fn get_chat_template(
         let new_chat_template = if chat_template_explicit.ends_with(".jinja") {
             ct
         } else {
-            #[derive(Debug, serde::Deserialize)]
+            #[derive(Debug, inference_json::FromJson)]
             struct AutomaticTemplate {
                 chat_template: String,
             }
@@ -427,7 +427,7 @@ pub(crate) fn get_chat_template(
         template.chat_template = Some(ChatTemplateValue(Either::Left(ct)));
     }
 
-    #[derive(Debug, serde::Deserialize)]
+    #[derive(Debug, inference_json::FromJson)]
     struct SpecifiedTemplate {
         chat_template: String,
         bos_token: Option<String>,

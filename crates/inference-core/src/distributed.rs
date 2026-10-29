@@ -7,7 +7,7 @@ use inference_tensor::{DType, Device};
 use interprocess::local_socket::traits::{Listener, Stream};
 use interprocess::local_socket::{GenericNamespaced, Name, ToNsName};
 use interprocess::local_socket::{ListenerOptions, Stream as LocalStream};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_big_array::BigArray;
 use std::env;
 use std::io::{BufRead, BufReader, Write};
@@ -422,11 +422,11 @@ async fn handle_daemon_request(req: Request, dispatch: &DaemonDispatch<'_>) {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, inference_json::FromJson, Debug)]
 #[serde(transparent)]
 pub(crate) struct BigCCharArray(#[serde(with = "BigArray")] pub(crate) [c_char; 128]);
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, inference_json::FromJson, Debug)]
 pub(crate) enum WorkerTransferData {
     Init {
         id: BigCCharArray,

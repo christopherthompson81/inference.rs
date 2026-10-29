@@ -16,7 +16,6 @@ use std::path::Path;
 
 use inference_tensor::nn::VarBuilder;
 use inference_tensor::{DType, Device, Result, Tensor};
-use serde::Deserialize;
 
 pub use camera::{Camera, decode_cameras};
 pub use gaussians::{Splats, unproject};
@@ -30,7 +29,7 @@ const IMAGE_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGE_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
 /// The fields of the checkpoint's `config.json` the inference path reads.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, inference_json::FromJson)]
 pub struct WorldMirrorConfig {
     pub embed_dim: usize,
     pub depth: usize,

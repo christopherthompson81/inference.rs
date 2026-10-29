@@ -29,7 +29,7 @@ pub use dynamic::{
 use indexmap::IndexMap;
 use inference_tensor::Result;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 pub use static_lora::linear_no_bias_static_lora;
 
 const LORA_REGEX_CACHE_CAPACITY: usize = 256;
@@ -41,14 +41,14 @@ pub struct StaticLoraConfig {
     pub r: usize,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, inference_json::FromJson, Eq, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum LoraTargetModules {
     Pattern(String),
     Modules(HashSet<String>),
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize)]
 pub struct LoraConfig {
     #[serde(default)]
     pub peft_type: Option<String>,

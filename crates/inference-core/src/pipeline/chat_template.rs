@@ -4,7 +4,6 @@ use anyhow::Result;
 use either::Either;
 use inference_protocol::chat_template::ChatTemplate;
 use itertools::Itertools;
-use serde::Deserialize;
 use tokenizers::Tokenizer;
 use tracing::{trace, warn};
 
@@ -126,7 +125,7 @@ pub fn calculate_eos_tokens(
     eos_toks
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, inference_json::FromJson)]
 pub struct GenerationConfig {
     #[serde(default)]
     #[serde(with = "either::serde_untagged_optional")]

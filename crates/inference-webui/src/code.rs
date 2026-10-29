@@ -24,7 +24,6 @@ use inference_coder::{
     default_tools,
     prompt::system_prompt,
 };
-use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, oneshot};
 
@@ -188,7 +187,7 @@ async fn chat_model(app: &AppState, requested: Option<&str>) -> Result<String, R
         .ok_or_else(|| bad_request("no chat model is loaded"))
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 pub(crate) struct SessionsQuery {
     #[serde(default)]
     project: String,
@@ -660,7 +659,7 @@ impl AgentUi for WebUi {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 pub(crate) struct ChangesQuery {
     session_id: String,
     #[serde(default)]

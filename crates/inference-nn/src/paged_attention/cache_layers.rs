@@ -134,7 +134,7 @@ impl utoipa::PartialSchema for PagedCacheLayers {
 impl utoipa::ToSchema for PagedCacheLayers {}
 
 /// The shape a profile recognizes a model by, the same for every quantization of its weights.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, inference_json::FromJson)]
 pub struct KvFingerprint {
     pub layers: usize,
     pub hidden: usize,
@@ -156,7 +156,7 @@ impl KvFingerprint {
 }
 
 /// Lowest bits a layer's K and V take when the cache is quantized; unset keeps the base type's.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, inference_json::FromJson)]
 #[serde(deny_unknown_fields)]
 struct Floor {
     #[serde(default)]
@@ -166,7 +166,7 @@ struct Floor {
 }
 
 /// A measured model's per-layer floors; an empty map means no layer needs one (and the general rule is not applied).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, inference_json::FromJson)]
 #[serde(deny_unknown_fields)]
 struct Profile {
     name: String,

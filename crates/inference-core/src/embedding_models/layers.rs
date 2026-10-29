@@ -3,14 +3,13 @@
 use inference_gguf::embedding_gguf::EmbeddingGgufPooling;
 use inference_tensor::nn::Module;
 use inference_tensor::{D, IndexOp, Result, Tensor};
-use serde::Deserialize;
 
 fn include_prompt() -> bool {
     true
 }
 
 /// Pooling layer
-#[derive(Deserialize, Debug, Clone)]
+#[derive(inference_json::FromJson, Debug, Clone)]
 pub struct Pooling {
     pub word_embedding_dimension: usize,
     pub pooling_mode_cls_token: bool,
@@ -84,7 +83,7 @@ impl Module for Pooling {
 }
 
 /// Normalize layer
-#[derive(Deserialize, Debug, Clone)]
+#[derive(inference_json::FromJson, Debug, Clone)]
 pub struct Normalize;
 
 impl Module for Normalize {
@@ -95,14 +94,14 @@ impl Module for Normalize {
     }
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(inference_json::FromJson, Debug, Clone)]
 pub enum DenseActivation {
     #[serde(alias = "torch.nn.modules.linear.Identity")]
     Identity,
 }
 
 /// Dense layer
-#[derive(Deserialize, Debug, Clone)]
+#[derive(inference_json::FromJson, Debug, Clone)]
 pub struct Dense {
     pub in_features: usize,
     pub out_features: usize,

@@ -79,7 +79,7 @@ pub(crate) const TTFT_METRIC: &str = "inference_time_to_first_token_seconds";
 pub(crate) const ITL_METRIC: &str = "inference_inter_token_latency_seconds";
 const REQUEST_OUTCOME_METRIC: &str = "inference_request_outcomes_total";
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, inference_json::FromJson)]
 #[serde(rename_all = "kebab-case")]
 pub enum AccessLogFormat {
     #[default]
@@ -87,7 +87,7 @@ pub enum AccessLogFormat {
     Json,
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, inference_json::FromJson)]
 pub struct ObservabilityConfig {
     #[serde(default = "default_true")]
     pub access_log: bool,

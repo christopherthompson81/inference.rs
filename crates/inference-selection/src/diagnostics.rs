@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use hf_hub::{Cache, api::sync::ApiBuilder};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sysinfo::{Disks, System};
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
@@ -17,7 +17,7 @@ const NVIDIA_SMI: &str = "nvidia-smi";
 const XCODEBUILD: &str = "xcodebuild";
 const NVCC_RELEASE_MARKER: &str = "release ";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct CpuInfo {
     pub brand: Option<String>,
     pub logical_cores: usize,
@@ -28,13 +28,13 @@ pub struct CpuInfo {
     pub fma: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct MemoryInfo {
     pub total_bytes: u64,
     pub available_bytes: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct DeviceInfo {
     pub kind: String,
     pub ordinal: Option<usize>,
@@ -64,7 +64,7 @@ const FLASH_ATTN_MIN_COMPUTE: (u32, u32) = (7, 5);
 #[cfg(feature = "cuda")]
 const FLASH_ATTN_V3_COMPUTE: (u32, u32) = (9, 0);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct BuildInfo {
     pub version: String,
     pub cuda: bool,
@@ -85,7 +85,7 @@ pub struct BuildInfo {
 }
 
 /// Versions of the local tools the build's backends run against; each is `None` when not installed or not probed.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, inference_json::FromJson)]
 pub struct ToolchainInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvcc: Option<String>,
@@ -98,7 +98,7 @@ pub struct ToolchainInfo {
     pub xcode: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct HfConnectivityInfo {
     /// Whether HuggingFace is reachable
     pub reachable: bool,
@@ -113,7 +113,7 @@ pub struct HfConnectivityInfo {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct SystemInfo {
     pub os: Option<String>,
     pub kernel: Option<String>,
@@ -124,7 +124,7 @@ pub struct SystemInfo {
     pub hf_cache_path: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 #[serde(rename_all = "lowercase")]
 pub enum DoctorStatus {
     Ok,
@@ -132,7 +132,7 @@ pub enum DoctorStatus {
     Error,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct DoctorCheck {
     pub name: String,
     pub status: DoctorStatus,
@@ -141,7 +141,7 @@ pub struct DoctorCheck {
     pub suggestion: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct DoctorReport {
     pub system: SystemInfo,
     // Probing spawns nvcc/nvidia-smi/xcodebuild, so only the doctor pays for it, not `system_info`.

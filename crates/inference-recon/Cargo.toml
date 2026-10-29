@@ -13,6 +13,7 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
+inference-json.workspace = true
 flate2.workspace = true
 half.workspace = true
 image.workspace = true

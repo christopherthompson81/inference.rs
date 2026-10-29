@@ -10,14 +10,14 @@ use inference_tensor::{Device, Error, Result, Tensor};
 use rand::distr::{Distribution, weighted::WeightedIndex};
 use rand_isaac::Isaac64Rng;
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokenizers::Tokenizer;
 
 static DRY_SEQUENCE_BREAKERS: LazyLock<Vec<String>> =
     LazyLock::new(|| ["\n", ":", "\"", "*"].map(String::from).to_vec());
 const SUPPRESS_TOKEN_LOGIT_BIAS: f32 = -1.0e9;
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, inference_json::FromJson, PartialEq)]
 /// Optional generation defaults parsed from a model's `generation_config.json`.
 ///
 /// These defaults are descriptive and opt-in: consumers may choose to apply them,
@@ -49,13 +49,13 @@ impl ModelGenerationDefaults {
 }
 
 /// What ends a generation besides EOS: strings, and token ids.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, inference_json::FromJson)]
 pub struct StopTokens {
     pub seqs: Vec<String>,
     pub ids: Vec<u32>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson)]
 /// Sampling params are used to control sampling.
 pub struct SamplingParams {
     pub temperature: Option<f64>,
@@ -182,7 +182,7 @@ impl SamplingParams {
 }
 
 /// Parameters for DRY (Don't Repeat Yourself) sampling to reduce repetition.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson)]
 pub struct DrySamplingParams {
     pub sequence_breakers: Vec<String>,
     pub multiplier: f32,
@@ -653,7 +653,7 @@ pub fn is_active_filter(value: f32) -> bool {
     value > 0.0 && value < 1.0
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, PartialEq)]
 /// Top-n logprobs element
 pub struct TopLogprob {
     pub token: u32,
@@ -661,7 +661,7 @@ pub struct TopLogprob {
     pub bytes: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct Logprobs {
     pub token: u32,
     pub logprob: f32,

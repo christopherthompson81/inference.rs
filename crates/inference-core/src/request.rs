@@ -3,7 +3,7 @@ use image::DynamicImage;
 use indexmap::IndexMap;
 use inference_audio::AudioInput;
 use inference_quant::IsqType;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::VideoInput;
 
@@ -54,7 +54,7 @@ pub struct TranscriptionStreamUpdate {
     pub transcription: Option<inference_models_speech::Transcription>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson)]
 /// Message or messages for a [`Request`].
 pub enum RequestMessage {
     Chat {
@@ -147,7 +147,7 @@ fn default_responder<T>() -> Sender<T> {
     let (sender, _) = tokio::sync::mpsc::channel(1);
     sender
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, inference_json::FromJson)]
 /// A normal request request to the `InferenceRs`.
 /// - `messages`: Messages for the request
 /// - `sampling_params`: Sampling parameters for generation
@@ -402,7 +402,7 @@ impl NormalRequest {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, inference_json::FromJson)]
 /// Request to tokenize some messages or some text.
 /// - `add_generation_prompt` is only applicable if chat messages are provided and not a raw string.
 pub struct TokenizationRequest {
@@ -417,7 +417,7 @@ pub struct TokenizationRequest {
     pub response: Sender<anyhow::Result<Vec<u32>>>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, inference_json::FromJson)]
 /// Request to detokenize some text.
 pub struct DetokenizationRequest {
     pub tokens: Vec<u32>,
@@ -436,7 +436,7 @@ pub struct JointDecisionRequest {
     pub response: Sender<anyhow::Result<Vec<f32>>>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson)]
 /// Online calibration lifecycle action.
 pub enum CalibrationAction {
     /// Begin collecting activation statistics from live traffic.
@@ -449,7 +449,7 @@ pub enum CalibrationAction {
     },
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, inference_json::FromJson)]
 pub struct CalibrationRequest {
     pub action: CalibrationAction,
     #[serde(default = "default_responder")]
@@ -457,7 +457,7 @@ pub struct CalibrationRequest {
     pub response: Sender<anyhow::Result<crate::CalibrationStatus>>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, inference_json::FromJson)]
 pub struct RequantizeRequest {
     pub isq: IsqType,
     #[serde(default = "default_responder")]
@@ -465,7 +465,7 @@ pub struct RequantizeRequest {
     pub response: Sender<anyhow::Result<()>>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, inference_json::FromJson)]
 /// A request to the Engine, encapsulating the various parameters as well as
 /// the `mpsc` response `Sender` used to return the [`Response`].
 pub enum Request {

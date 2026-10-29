@@ -15,7 +15,7 @@ enum AdapterSelectionState {
     Pinned(AdapterLease),
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(inference_json::FromJson, Serialize)]
 #[serde(untagged)]
 enum AdapterSelectionWire {
     Alias(String),
@@ -111,6 +111,8 @@ impl Serialize for AdapterSelection {
         wire.serialize(serializer)
     }
 }
+
+inference_json::via_serde!(AdapterSelection);
 
 impl<'de> Deserialize<'de> for AdapterSelection {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>

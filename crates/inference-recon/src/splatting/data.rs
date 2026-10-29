@@ -334,7 +334,7 @@ fn principal_axes(points: &[[f64; 3]]) -> Mat4 {
     t
 }
 
-#[derive(serde::Deserialize)]
+#[derive(inference_json::FromJson)]
 struct CameraEntry {
     extrinsic: [[f64; 4]; 4],
     intrinsic: [[f64; 3]; 3],

@@ -33,7 +33,7 @@ use inference_models_speech::silero::{SegmentOptions, SileroVad, is_silero_gguf,
 use inference_quant::IsqType;
 use inference_tensor::{Device, Tensor};
 use rand_isaac::Isaac64Rng;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::any::Any;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -295,7 +295,7 @@ pub struct TranscriptionLoader {
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, strum::EnumIter)]
+#[derive(Clone, Copy, Debug, inference_json::FromJson, Serialize, PartialEq, strum::EnumIter)]
 pub enum DiarizationLoaderType {
     #[serde(rename = "nemotron3")]
     Nemotron3,

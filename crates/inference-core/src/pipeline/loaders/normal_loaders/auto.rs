@@ -3,7 +3,7 @@ use super::*;
 /// Load a model based on the Hugging Face Transformers -CausalLM model class
 pub struct AutoNormalLoader;
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct AutoNormalLoaderConfig {
     architectures: Vec<String>,
 }

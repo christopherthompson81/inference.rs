@@ -40,7 +40,7 @@ use tracing::{debug, trace, warn};
 /// sentence-transformers' Transformer module settings, beside `config.json`.
 pub(crate) const SENTENCE_BERT_CONFIG: &str = "sentence_bert_config.json";
 
-#[derive(serde::Deserialize)]
+#[derive(inference_json::FromJson)]
 struct SentenceBertConfig {
     max_seq_length: Option<usize>,
 }

@@ -23,7 +23,6 @@ use inference_api::{
     engine::{DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL, DEFAULT_MAX_SEQS, TokenSource},
     engine_chat::ReasoningEffort,
 };
-use serde::Deserialize;
 use std::{num::NonZeroUsize, path::PathBuf};
 
 /// Fast LLM inference engine
@@ -822,7 +821,7 @@ pub enum ModelType {
 }
 
 /// Global options that apply to all commands
-#[derive(clap::Args, Clone, Deserialize)]
+#[derive(clap::Args, Clone, inference_json::FromJson)]
 pub struct GlobalOptions {
     /// Random seed for reproducibility
     #[arg(long, global = true)]
@@ -847,7 +846,7 @@ pub struct GlobalOptions {
 }
 
 /// Runtime options for inference
-#[derive(clap::Args, Clone, Deserialize)]
+#[derive(clap::Args, Clone, inference_json::FromJson)]
 pub struct RuntimeOptions {
     /// Maximum concurrent sequences per model; each holds memory while it runs, so raise it for a busy shared server
     #[arg(long, default_value_t = DEFAULT_MAX_SEQS)]
@@ -1177,13 +1176,13 @@ impl BenchRuntimeOptions {
 }
 
 /// Search embedding model options
-#[derive(Clone, Copy, ValueEnum, Deserialize)]
+#[derive(Clone, Copy, ValueEnum, inference_json::FromJson)]
 #[serde(rename_all = "kebab-case")]
 pub enum SearchEmbeddingModelArg {
     EmbeddingGemma,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, inference_json::FromJson)]
 #[serde(rename_all = "kebab-case")]
 pub enum MtpDraftSamplingArg {
     #[default]
@@ -1202,7 +1201,7 @@ impl From<MtpDraftSamplingArg> for inference_api::engine::MtpDraftSampling {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, inference_json::FromJson)]
 #[serde(rename_all = "kebab-case")]
 pub enum CodeExecPermissionArg {
     #[default]

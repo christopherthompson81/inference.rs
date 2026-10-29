@@ -141,7 +141,7 @@ impl GdnDims {
 mod tests {
     use super::*;
 
-    #[derive(serde::Deserialize)]
+    #[derive(inference_json::FromJson)]
     struct StateDTypeConfig {
         #[serde(default)]
         mamba_ssm_dtype: GdnStateDType,

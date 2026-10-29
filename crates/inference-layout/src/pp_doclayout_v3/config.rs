@@ -1,5 +1,4 @@
 use inference_tensor::nn::Activation;
-use serde::Deserialize;
 
 /// Paddle `inference.yml` label order; HF's `id2label` collapses several of these (e.g. both formula kinds).
 pub const LABELS: [&str; 25] = [
@@ -30,12 +29,12 @@ pub const LABELS: [&str; 25] = [
     "vision_footnote",
 ];
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct BackboneConfig {
     pub arch: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct PPDocLayoutV3Config {
     pub backbone_config: BackboneConfig,
     pub d_model: usize,
@@ -108,13 +107,13 @@ impl PPDocLayoutV3Config {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Size {
     pub height: usize,
     pub width: usize,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct PPDocLayoutV3PreprocessorConfig {
     pub size: Size,
     pub rescale_factor: f64,
