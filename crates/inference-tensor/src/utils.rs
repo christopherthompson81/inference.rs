@@ -378,30 +378,6 @@ impl BarrierPool {
     }
 }
 
-#[cfg(test)]
-mod barrier_pool_tests {
-    use super::*;
-
-    // a kernel that reduces per range must see the same ranges whatever the lease grants
-    #[test]
-    fn the_chunked_ranges_do_not_follow_the_workers() {
-        let pool = BarrierPool::new(3);
-        let ranges = |active| {
-            let seen = Mutex::new(Vec::new());
-            pool.chunked_on(active, 100, |range| seen.lock().unwrap().push(range));
-            let mut seen = seen.into_inner().unwrap();
-            seen.sort_by_key(|range| range.start);
-            seen
-        };
-        let all = ranges(3);
-        assert_eq!(all.first().map(|r| r.start), Some(0));
-        assert_eq!(all.last().map(|r| r.end), Some(100));
-        for active in 0..3 {
-            assert_eq!(ranges(active), all);
-        }
-    }
-}
-
 impl Drop for BarrierPool {
     fn drop(&mut self) {
         if self.threads.is_empty() {
@@ -686,5 +662,29 @@ mod tests {
         assert_eq!(linux_parse_cpu_list(""), None);
         assert_eq!(linux_parse_cpu_list("9-5"), None);
         assert_eq!(linux_parse_cpu_list("5,a"), None);
+    }
+}
+
+#[cfg(test)]
+mod barrier_pool_tests {
+    use super::*;
+
+    // a kernel that reduces per range must see the same ranges whatever the lease grants
+    #[test]
+    fn the_chunked_ranges_do_not_follow_the_workers() {
+        let pool = BarrierPool::new(3);
+        let ranges = |active| {
+            let seen = Mutex::new(Vec::new());
+            pool.chunked_on(active, 100, |range| seen.lock().unwrap().push(range));
+            let mut seen = seen.into_inner().unwrap();
+            seen.sort_by_key(|range| range.start);
+            seen
+        };
+        let all = ranges(3);
+        assert_eq!(all.first().map(|r| r.start), Some(0));
+        assert_eq!(all.last().map(|r| r.end), Some(100));
+        for active in 0..3 {
+            assert_eq!(ranges(active), all);
+        }
     }
 }

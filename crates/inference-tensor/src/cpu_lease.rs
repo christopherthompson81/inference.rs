@@ -73,7 +73,6 @@ enum Plan {
     Release,
 }
 
-#[cfg(unix)]
 mod imp {
     use super::*;
     use std::fs::{File, OpenOptions};
@@ -196,21 +195,6 @@ mod imp {
                 Some(opened)
             })
             .as_ref()
-    }
-}
-
-#[cfg(not(unix))]
-mod imp {
-    pub(super) struct Lease;
-
-    impl Lease {
-        pub(super) fn workers(&self, want: usize) -> usize {
-            want
-        }
-    }
-
-    pub(super) fn lease() -> Option<&'static Lease> {
-        None
     }
 }
 
