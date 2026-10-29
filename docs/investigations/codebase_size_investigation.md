@@ -2847,3 +2847,47 @@ CUDA and Metal actually share is `validate_kv_cache_scales` (18 lines, `cuda/bac
 Decision: not taken. Sharing the 35 lines touches Metal code this machine cannot build (only GitHub's macOS jobs
 see it), for ~20 lines net; the in-file dispatch repeats are the dtype-generic launch pattern each kernel family
 writes once per dtype. This closes Run 71's list.
+
+## Run 93 - 2026-10-29 10:44
+
+Question: three weeks and many model ports after Run 71's list closed, where do IR, incremental build time,
+duplication and dependencies stand? First round with the committed tooling (`scripts/housekeeping.sh`).
+
+Commands: `scripts/housekeeping.sh --dups --deps --ir --incremental`; `scripts/dup_scan.py --pair A B` on the top
+pairs; `cargo llvm-lines -p inference-api --lib` grouped by module and by serde type.
+
+Raw findings:
+- IR lines (CPU test features): inference-api 1,916,996; inference-core 1,767,510; inference-server-core 1,170,517;
+  inference-quant 867,100; inference-nn 839,182; models-qwen 757,866; models-other 630,478; models-llama 549,284;
+  models-gemma 549,069; models-phi 300,695. inference-api was 1,093,479 after the boxed-async change
+  (core_responsibilities Run 9) and 1,248,410 in Run 18's follow-up.
+- inference-api by kind: serde 668,686 (35%), of which 314,107 sit under `serde_path_to_error` (`request_body::parse_json`,
+  every `JsonRequest` type) and 79,424 under `serde_json::Value`; utoipa schemas 119,133; `ModelSelected`'s
+  deserializer alone 67,273 (12 variants, each compiled for both the plain and the path-to-error map/seq access).
+  By module: `engine_decision_labels` 56,487, `engine` 43,696, `jobs` 40,758, `responses` 39,201, `anthropic` 27,152;
+  the image decoders (image, exr, zune_jpeg, webp, tiff) ~141k together.
+- Incremental rebuild (s, workspace `cargo check --tests` / nextest test build): touch inference-nn 8 / 16, core 9 / 10,
+  models-other 8 / 12. Run 71: nn 6.7 / 12.2, core - / 8.1.
+- Duplication (12-line windows over `crates/`, no third_party): 1,364 files, 483,074 normalized lines, 29,118
+  duplicated. By crate: quant 6,712, nn 3,425, models-qwen 3,120, models-llama 3,064, tensor 2,856, models-gemma 1,757,
+  core 1,693, models-other 1,631.
+- Verified spans (`--pair`):
+  - `loaders/qwen3vl.rs:89-262` = `loaders/qwen3vl_moe.rs:108-281`, 174 lines, identical but for comments (the
+    device-map sizing impl).
+  - `blockwise_fp8/mod.rs:928-1078` vs `pertensor_fp8/mod.rs:525-668`: the `apply_isq` requantize match, identical but
+    for stale comments; `unquantized/mod.rs` shares ~40 lines of it and `hqq` the HQQ arm.
+  - `qwen3_5/mod.rs` vs `qwen3_vl/mod.rs`: 8 spans, ~255 lines (deepstack merge of image and video features,
+    `forward`, the media helpers).
+  - `qwen2_5_vl/vision.rs` vs `qwen2vl/vision.rs`: 8 spans, ~260 lines; `qwen2vl` vs `qwen3_vl` inputs processors:
+    10 spans, ~280 lines.
+  - Still listed but not yet diffed: llava15 vs llava_next (95 windows), Normal vs Multimodal pipeline (83), the
+    llava/llava_next/phi3_vision inputs processors (57-83), gemma3n vs gemma4 audio (76), phi3_vision vs phi4 image
+    embedding (63).
+- machete: `rubato` unused in inference-models-llama (removed in this run's PR).
+
+Implication: incremental builds grew ~20% and stay short. inference-api is now the heaviest crate by IR, and a
+third of it is serde: the path-to-error copy of every request deserializer is the largest single item, but it is what
+puts the failing field in a 400's message, so cutting it means another way to report the path, not dropping it.
+Ranked next items: (1) Qwen3-VL loader sizing share, (2) FP8 `apply_isq` through the unquantized path, (3) Qwen3.5 /
+Qwen3-VL multimodal wrapper share, (4) Qwen2-VL / Qwen2.5-VL vision, (5) inference-api serde: one `ModelSelected`
+access flavor, then the path-to-error question.
