@@ -9977,6 +9977,8 @@
           "granite",
           "granitemoe",
           "granitemoeshared",
+          "granite_swa",
+          "granitemoe_swa",
           "gpt_oss",
           "hunyuanv1dense",
           "hunyuanv1moe",

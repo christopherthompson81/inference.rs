@@ -135,6 +135,14 @@ pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; NORMAL_LOADER_TYPE_COUN
         build: build_granite,
     },
     NormalConfigBuilder {
+        loader: NormalLoaderType::GraniteSwa,
+        build: build_granite,
+    },
+    NormalConfigBuilder {
+        loader: NormalLoaderType::GraniteMoeSwa,
+        build: build_granite,
+    },
+    NormalConfigBuilder {
         loader: NormalLoaderType::GptOss,
         build: build_gpt_oss,
     },
@@ -794,6 +802,35 @@ impl<'a> MetadataView<'a> {
                 "GGUF metadata `{key}` value {value} does not fit a token id"
             ))
         })
+    }
+
+    fn bool_array(&self, suffix: &str, layer_count: usize) -> SynthesisResult<Option<Vec<bool>>> {
+        let Some(value) = self.value(suffix) else {
+            return Ok(None);
+        };
+        let key = self.key(suffix);
+        let GgufValue::Array(values) = value else {
+            return Err(NormalConfigSynthesisError::new(format!(
+                "GGUF metadata `{key}` must be a boolean array"
+            )));
+        };
+        if values.len() != layer_count {
+            return Err(NormalConfigSynthesisError::new(format!(
+                "GGUF metadata `{key}` has {} entries for {layer_count} layers",
+                values.len()
+            )));
+        }
+        values
+            .iter()
+            .map(|value| {
+                value_bool(value).ok_or_else(|| {
+                    NormalConfigSynthesisError::new(format!(
+                        "GGUF metadata `{key}` must contain only booleans"
+                    ))
+                })
+            })
+            .collect::<SynthesisResult<Vec<_>>>()
+            .map(Some)
     }
 
     fn sliding_pattern(&self, layer_count: usize) -> SynthesisResult<Option<Vec<bool>>> {
@@ -1459,7 +1496,9 @@ fn build_granite(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
         })?;
     let num_key_value_heads =
         uniform_nonzero_values(metadata, "attention.head_count_kv", &kv_heads)?;
-    let layer_types = granite_layer_types(metadata, &kv_heads, num_hidden_layers);
+    let sliding = metadata.sliding_pattern(num_hidden_layers)?;
+    let layer_types =
+        granite_layer_types(metadata, &kv_heads, sliding.as_deref(), num_hidden_layers);
     let is_hybrid = layer_types.contains(&"mamba");
     let mut config = JsonMap::new();
     config.insert("vocab_size".into(), json!(metadata.vocab_size()?));
@@ -1491,6 +1530,23 @@ fn build_granite(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
         json!(metadata.tie_word_embeddings()),
     );
     config.insert("layer_types".into(), json!(layer_types));
+    if sliding.is_some() {
+        config.insert(
+            "sliding_window".into(),
+            json!(metadata.required_usize("attention.sliding_window")?),
+        );
+    }
+    if let Some(rope_pattern) = metadata.bool_array("attention.rope_pattern", num_hidden_layers)? {
+        config.insert(
+            "no_rope_layers".into(),
+            json!(
+                rope_pattern
+                    .iter()
+                    .map(|&rope| u8::from(rope))
+                    .collect::<Vec<_>>()
+            ),
+        );
+    }
     config.insert(
         "attention_multiplier".into(),
         json!(metadata.optional_f64("attention.scale")?.unwrap_or(1.0)),
@@ -2595,12 +2651,15 @@ fn dense_layer_indices(metadata: &MetadataView<'_>, layer_count: usize) -> Vec<u
 fn granite_layer_types(
     metadata: &MetadataView<'_>,
     kv_heads: &[usize],
+    sliding: Option<&[bool]>,
     layer_count: usize,
 ) -> Vec<&'static str> {
     (0..layer_count)
         .map(|layer| {
             if kv_heads[layer] == 0 || metadata.layer_has_tensor(layer, ".ssm_") {
                 "mamba"
+            } else if sliding.is_some_and(|sliding| sliding[layer]) {
+                "sliding_attention"
             } else {
                 "attention"
             }
@@ -2761,6 +2820,7 @@ mod tests {
                 | NormalLoaderType::GraniteMoe
                 | NormalLoaderType::GraniteMoeShared
                 | NormalLoaderType::GraniteMoeHybrid
+                | NormalLoaderType::GraniteMoeSwa
         )
     }
 
@@ -2969,6 +3029,22 @@ mod tests {
             tensors.push("blk.1.ffn_gate_shexp.weight".to_string());
         }
 
+        if matches!(
+            loader,
+            NormalLoaderType::GraniteSwa | NormalLoaderType::GraniteMoeSwa
+        ) {
+            insert_u32(&mut metadata, architecture, "attention.sliding_window", 128);
+            metadata.insert(
+                format!("{}.attention.sliding_window_pattern", architecture.as_str()),
+                GgufValue::Array(
+                    [false, true, true, true]
+                        .into_iter()
+                        .map(GgufValue::Bool)
+                        .collect(),
+                ),
+            );
+        }
+
         (metadata, tensors)
     }
 
@@ -3059,7 +3135,9 @@ mod tests {
             NormalLoaderType::GraniteMoeHybrid
             | NormalLoaderType::Granite
             | NormalLoaderType::GraniteMoe
-            | NormalLoaderType::GraniteMoeShared => {
+            | NormalLoaderType::GraniteMoeShared
+            | NormalLoaderType::GraniteSwa
+            | NormalLoaderType::GraniteMoeSwa => {
                 assert_deserializes(loader, config, models::granite::Config::from_json)
             }
             NormalLoaderType::GptOss => {
@@ -3315,6 +3393,34 @@ mod tests {
                 "{loader:?}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn granite_swa_configs_carry_sliding_and_nope_layers() {
+        let loader = NormalLoaderType::GraniteSwa;
+        let (architecture, mut metadata, tensors) = default_fixture(&loader);
+        metadata.insert(
+            format!("{}.attention.rope_pattern", architecture.as_str()),
+            GgufValue::Array(
+                [true, true, false, true]
+                    .into_iter()
+                    .map(GgufValue::Bool)
+                    .collect(),
+            ),
+        );
+        let config = synthesize_normal_config_value(&loader, &metadata, &tensors).unwrap();
+        assert_eq!(
+            config["layer_types"],
+            json!([
+                "attention",
+                "sliding_attention",
+                "sliding_attention",
+                "sliding_attention"
+            ])
+        );
+        assert_eq!(config["sliding_window"], json!(128));
+        assert_eq!(config["no_rope_layers"], json!([1, 1, 0, 1]));
+        assert_deserializes(&loader, config, models::granite::Config::from_json);
     }
 
     #[test]

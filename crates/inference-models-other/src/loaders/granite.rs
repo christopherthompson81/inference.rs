@@ -51,13 +51,17 @@ impl IsqModelLoader for GraniteMoeHybridLoader {
             r"layers\.(\d+)\.shared_mlp\.output_linear\.(weight|bias)$",
             r"layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.(weight|bias)$",
             r"layers\.(\d+)\.block_sparse_moe\.(input_linear|output_linear)\.weight$",
+            r"layers\.(\d+)\.block_sparse_moe\.experts\.(gate_up_proj|down_proj)$",
         ])
     }
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
         self.isq_layer_regexes(config)
     }
     fn isq_layer_regexes_moqe(&self, _config: &str) -> Result<Vec<Regex>> {
-        isq_regexes(&[r"layers\.(\d+)\.block_sparse_moe\.(input_linear|output_linear)\.weight$"])
+        isq_regexes(&[
+            r"layers\.(\d+)\.block_sparse_moe\.(input_linear|output_linear)\.weight$",
+            r"layers\.(\d+)\.block_sparse_moe\.experts\.(gate_up_proj|down_proj)$",
+        ])
     }
     fn immediate_isq_predicates_moqe(&self, config: &str) -> Result<Vec<Regex>> {
         self.isq_layer_regexes_moqe(config)
@@ -144,7 +148,8 @@ impl DeviceMappedModelLoader for GraniteMoeHybridLoader {
             .into_iter()
             .map(|layer_type| {
                 let operator_elems = match layer_type {
-                    crate::granite::GraniteLayerType::Attention => attention_elems,
+                    crate::granite::GraniteLayerType::Attention
+                    | crate::granite::GraniteLayerType::SlidingAttention => attention_elems,
                     crate::granite::GraniteLayerType::Mamba => mamba_elems,
                 };
                 (common_elems + operator_elems) * dtype.size_in_bytes()
