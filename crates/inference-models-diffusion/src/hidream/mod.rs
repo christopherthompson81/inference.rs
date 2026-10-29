@@ -19,7 +19,7 @@ use crate::noise::SeededNoise;
 use inference_nn::device_map::DummyDeviceMapper;
 use inference_nn::model::MAX_REFERENCE_IMAGES;
 use inference_nn::model::{DiffusionModel, NormalLoadingMetadata};
-use model::{Conditioning, HiDreamO1, PATCH_DIM, PATCH_SIZE};
+use model::{Conditioning, HiDreamO1, PATCH_DIM, PATCH_SIZE, TRAINED_EDGE};
 use references::References;
 use sampling::{DEV_TIMESTEPS, NUM_TRAIN_TIMESTEPS, Schedule, UniPc};
 
@@ -212,12 +212,15 @@ fn is_weight_shard(name: &str) -> bool {
             })
 }
 
-/// The resolution among [`RESOLUTIONS`] whose aspect is closest to `width` x `height`, first on ties.
-pub fn closest_resolution(width: usize, height: usize) -> (usize, usize) {
+/// The resolution among [`RESOLUTIONS`], scaled from [`TRAINED_EDGE`] to `edge` in whole patches, whose aspect is
+/// closest to `width` x `height`, first on ties.
+pub fn closest_resolution(width: usize, height: usize, edge: usize) -> (usize, usize) {
+    let scale =
+        |side: usize| ((side * edge).div_ceil(TRAINED_EDGE * PATCH_SIZE)).max(1) * PATCH_SIZE;
     let ratio = width as f64 / height as f64;
-    let mut best = RESOLUTIONS[0];
+    let mut best = (scale(RESOLUTIONS[0].0), scale(RESOLUTIONS[0].1));
     let mut best_diff = f64::INFINITY;
-    for (w, h) in RESOLUTIONS {
+    for (w, h) in RESOLUTIONS.map(|(w, h)| (scale(w), scale(h))) {
         let diff = (w as f64 / h as f64 - ratio).abs();
         if diff < best_diff {
             best_diff = diff;
@@ -458,12 +461,14 @@ impl DiffusionModel for HiDreamO1Pipeline {
         let settings =
             self.variant
                 .settings(params.steps, params.guidance_scale, images_in.len())?;
-        let snapped = closest_resolution(params.width, params.height);
+        let edge = self.model.image_edge();
+        let snapped = closest_resolution(params.width, params.height, edge);
         let (references, (width, height)) = if images_in.is_empty() {
             (None, snapped)
         } else {
             let size = (!params.match_reference).then_some(snapped);
-            let (references, size) = References::prepare(images_in, size, self.model.device())?;
+            let (references, size) =
+                References::prepare(images_in, size, edge, self.model.device())?;
             (Some(references), size)
         };
         let mut images = Vec::with_capacity(prompts.len());
@@ -506,9 +511,10 @@ impl DiffusionModel for HiDreamO1Pipeline {
                 .iter()
                 .map(|i| (i.width() as usize, i.height() as usize))
                 .collect();
-            let size =
-                (!params.match_reference).then(|| closest_resolution(params.width, params.height));
-            References::output_size(&dims, size).map_err(|err| err.to_string())?;
+            let edge = self.model.image_edge();
+            let size = (!params.match_reference)
+                .then(|| closest_resolution(params.width, params.height, edge));
+            References::output_size(&dims, size, edge).map_err(|err| err.to_string())?;
         }
         self.variant
             .settings(params.steps, params.guidance_scale, references)
@@ -518,5 +524,20 @@ impl DiffusionModel for HiDreamO1Pipeline {
 
     fn max_seq_len(&self) -> usize {
         usize::MAX
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // a real checkpoint's edge keeps the trained table; a smaller one scales it in whole patches
+    #[test]
+    fn the_size_table_scales_from_the_edge() {
+        for (w, h) in RESOLUTIONS {
+            assert_eq!(closest_resolution(w, h, TRAINED_EDGE), (w, h));
+        }
+        assert_eq!(closest_resolution(1920, 1080, TRAINED_EDGE), (2560, 1440));
+        assert_eq!(closest_resolution(1920, 1080, 256), (320, 192));
     }
 }

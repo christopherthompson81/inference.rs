@@ -6,7 +6,8 @@
 # --slim lints inference-core with no model families and with each family alone, so feature gates stay intact; it is
 # skipped when nothing inference-core builds on differs from origin/master.
 # With --cuda, the GPU-bound CUDA suite runs in the background while the CPU lint and tests run; the binding tests run
-# in the background too, and the slim lint and docs check overlap both, since only cargo needs the build lock.
+# in the background too, and the slim lint and docs check overlap both, since only cargo needs the build lock. With
+# --tests, the --size bundle builds beside the suites too (under its own target/bundle lock).
 # --bindings builds libinference_ffi and runs the C# (needs the .NET SDK) and Python binding tests on the tiny checkpoint.
 # --docs checks the docs of the crates whose files differ from origin/master (rustdoc is never incremental), not their
 # dependents; --docs-all checks every crate. Neither renders HTML; `cargo doc` does.
@@ -75,11 +76,22 @@ if [[ $tests -eq 1 || $cuda -eq 1 || $metal -eq 1 ]] && ! cargo nextest --versio
 fi
 # RLIMIT_NPROC counts every process the user runs, so this test never shares the machine with another suite.
 ALONE='package(inference-sandbox) & test(rlimit_nproc_caps_processes)'
-cuda_pid= bindings_pid= cuda_log= bindings_log= tiny= live=
+cuda_pid= bindings_pid= size_pid= cuda_log= bindings_log= size_log= tiny= live=
 cleanup() {
     if [[ -n $cuda_pid ]]; then kill "$cuda_pid" 2> /dev/null || true; fi
     if [[ -n $bindings_pid ]]; then kill "$bindings_pid" 2> /dev/null || true; fi
-    rm -rf "$cuda_log" "$bindings_log" "$tiny" "$live"
+    if [[ -n $size_pid ]]; then kill "$size_pid" 2> /dev/null || true; fi
+    rm -rf "$cuda_log" "$bindings_log" "$size_log" "$tiny" "$live"
+}
+# What the wheels bundle: the default model set, fat LTO, stripped, no host-specific codegen (build_wheels.py). Its
+# fat LTO runs mostly on one core under target/bundle's own lock, so it builds while the suites run.
+size_build() { RUSTFLAGS= cargo build --profile bundle -p inference-ffi --features cuda; }
+start_size_build() {
+    if [[ $size -eq 1 && -z $size_pid && $OSTYPE == linux* ]]; then
+        size_log=$(mktemp)
+        size_build > "$size_log" 2>&1 &
+        size_pid=$!
+    fi
 }
 trap cleanup EXIT
 if [[ $cuda -eq 1 ]]; then
@@ -106,6 +118,8 @@ if [[ $lint -eq 1 ]]; then
     cargo "${CLIPPY[@]}" -- -D warnings || failed=1
 fi
 if [[ $tests -eq 1 ]]; then
+    cargo nextest run --no-run "${TEST_TARGETS[@]}"
+    start_size_build
     if [[ -n $cuda_pid ]]; then
         cargo nextest run --no-fail-fast "${TEST_TARGETS[@]}" -E "not ($ALONE)" || failed=1
     else
@@ -201,8 +215,16 @@ if [[ $size -eq 1 ]]; then
     compute_cap=${CUDA_COMPUTE_CAP:-$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1)}
     # the toolkit decides which kernels build (cuTile from 13.2), so the baseline holds for one
     cuda_version=$(nvcc --version | grep -o 'release [0-9.]*' | cut -d' ' -f2)
-    # what the wheels bundle: the default model set, fat LTO, stripped, no host-specific codegen (build_wheels.py)
-    RUSTFLAGS= cargo build --profile bundle -p inference-ffi --features cuda
+    if [[ -n $size_pid ]]; then
+        size_status=0
+        wait "$size_pid" || size_status=$?
+        size_pid=
+        echo "---- bundle build ----"
+        cat "$size_log"
+        [[ $size_status -eq 0 ]] || exit 1
+    else
+        size_build
+    fi
     size_args=(target/bundle/libinference_ffi.so "$compute_cap" "$cuda_version")
     if [[ $size_update -eq 1 ]]; then size_args+=(--update); fi
     scripts/bundle_size.py "${size_args[@]}"

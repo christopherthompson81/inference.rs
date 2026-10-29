@@ -47,6 +47,8 @@ pub struct BarrierPool {
     threads: Vec<std::thread::JoinHandle<()>>,
     /// Workers that main signals directly
     root_workers: Vec<usize>,
+    /// Every worker is a root, so an op can run on any prefix of them (a clustered tree runs them all)
+    flat: bool,
     /// Serializes concurrent callers. Stores the current generation.
     call_lock: Mutex<usize>,
 }
@@ -223,6 +225,7 @@ impl BarrierPool {
         BarrierPool {
             inner,
             threads,
+            flat: root_workers.len() == n_workers,
             root_workers,
             call_lock: Mutex::new(0),
         }
@@ -259,8 +262,21 @@ impl Drop for BarrierGuard<'_> {
 }
 
 impl BarrierPool {
+    // the workers the next op runs beside the caller: those the machine-wide lease grants
+    fn active_workers(&self) -> usize {
+        match self.flat {
+            true => crate::cpu_lease::extra_workers(self.threads.len()),
+            false => self.threads.len(),
+        }
+    }
+
+    /// Runs `f` on the caller and up to every worker, as many as the machine-wide lease grants; the caller's id is the
+    /// count of workers that ran beside it, the workers' `0..` that count.
     pub fn execute<F: Fn(usize) + Sync>(&self, f: F) {
-        let n = self.threads.len();
+        self.execute_on(self.active_workers(), f);
+    }
+
+    fn execute_on<F: Fn(usize) + Sync>(&self, n: usize, f: F) {
         if n == 0 {
             f(0);
             return;
@@ -276,8 +292,13 @@ impl BarrierPool {
             work.data = &f as *const F as *const ();
         }
 
+        // a flat tree's first `n` workers are its first `n` roots; a clustered one runs them all
+        let roots = match self.flat {
+            true => &self.root_workers[..n],
+            false => &self.root_workers[..],
+        };
         let handles = self.inner.handles.get().unwrap();
-        for &root in &self.root_workers {
+        for &root in roots {
             self.inner.slots[root].go.store(new_gen, Ordering::Release);
             handles[root].unpark();
         }
@@ -285,7 +306,7 @@ impl BarrierPool {
         // Guard waits for workers and propagates panics on drop.
         let _guard = BarrierGuard {
             inner: &self.inner,
-            roots: &self.root_workers,
+            roots,
             generation: new_gen,
         };
 
@@ -294,8 +315,7 @@ impl BarrierPool {
         // _guard drops here, waiting for root workers.
     }
 
-    // Uniform, short work units can avoid shared-cursor contention by assigning
-    // one contiguous range per thread.
+    // Uniform, short work units take one slice per pool thread, so the cursor is touched once a thread.
     pub(crate) fn execute_static<F: Fn(std::ops::Range<usize>) + Sync>(
         &self,
         n_items: usize,
@@ -308,10 +328,15 @@ impl BarrierPool {
             f(0..n_items);
             return;
         }
+        // the slices follow the pool's width, not the lease, so a kernel's result never depends on its workers
         let chunk = n_items.div_ceil(self.threads.len() + 1);
-        self.execute(|tid| {
-            let start = tid * chunk;
-            if start < n_items {
+        let cursor = AtomicUsize::new(0);
+        self.execute_on(self.active_workers(), |_| {
+            loop {
+                let start = cursor.fetch_add(chunk, Ordering::Relaxed);
+                if start >= n_items {
+                    break;
+                }
                 f(start..n_items.min(start + chunk));
             }
         });
@@ -328,11 +353,20 @@ impl BarrierPool {
             f(0..n_items);
             return;
         }
-        let n_threads = self.threads.len() + 1;
-        // ~8 grabs per thread amortizes cursor contention while keeping tail imbalance small
-        let chunk = n_items.div_ceil(n_threads * 8).max(1);
+        self.chunked_on(self.active_workers(), n_items, f);
+    }
+
+    fn chunked_on<F: Fn(std::ops::Range<usize>) + Sync>(
+        &self,
+        active: usize,
+        n_items: usize,
+        f: F,
+    ) {
+        // ~8 grabs per thread amortizes cursor contention while keeping tail imbalance small; sized by the pool's width,
+        // not the lease, so the ranges (and any per-range reduction) are the same however many workers run
+        let chunk = n_items.div_ceil((self.threads.len() + 1) * 8).max(1);
         let cursor = AtomicUsize::new(0);
-        self.execute(|_| {
+        self.execute_on(active, |_| {
             loop {
                 let start = cursor.fetch_add(chunk, Ordering::Relaxed);
                 if start >= n_items {
@@ -628,5 +662,29 @@ mod tests {
         assert_eq!(linux_parse_cpu_list(""), None);
         assert_eq!(linux_parse_cpu_list("9-5"), None);
         assert_eq!(linux_parse_cpu_list("5,a"), None);
+    }
+}
+
+#[cfg(test)]
+mod barrier_pool_tests {
+    use super::*;
+
+    // a kernel that reduces per range must see the same ranges whatever the lease grants
+    #[test]
+    fn the_chunked_ranges_do_not_follow_the_workers() {
+        let pool = BarrierPool::new(3);
+        let ranges = |active| {
+            let seen = Mutex::new(Vec::new());
+            pool.chunked_on(active, 100, |range| seen.lock().unwrap().push(range));
+            let mut seen = seen.into_inner().unwrap();
+            seen.sort_by_key(|range| range.start);
+            seen
+        };
+        let all = ranges(3);
+        assert_eq!(all.first().map(|r| r.start), Some(0));
+        assert_eq!(all.last().map(|r| r.end), Some(100));
+        for active in 0..3 {
+            assert_eq!(ranges(active), all);
+        }
     }
 }

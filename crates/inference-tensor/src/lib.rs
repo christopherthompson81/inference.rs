@@ -23,6 +23,15 @@ pub mod conv;
 mod convert;
 pub mod cpu;
 pub mod cpu_backend;
+#[cfg(unix)]
+mod cpu_lease;
+// lock-file slots need `flock`; elsewhere every op takes the workers it asks for
+#[cfg(not(unix))]
+mod cpu_lease {
+    pub fn extra_workers(want: usize) -> usize {
+        want
+    }
+}
 #[cfg(feature = "cuda")]
 pub mod cuda_backend;
 mod custom_op;

@@ -194,7 +194,8 @@ fn main() -> Result<()> {
             .map(|p| image::open(p).with_context(|| format!("reading {p}")))
             .collect::<Result<Vec<_>>>()?;
         let size = (!keep_aspect).then_some((width, height));
-        let (mut references, size) = References::prepare(&images, size, &device)?;
+        let (mut references, size) =
+            References::prepare(&images, size, pipeline.model().image_edge(), &device)?;
         failed |= !check_references(&references, size, (width, height), &tensors)?;
         if args.their_inputs {
             references.vit_pixels = get("ref.pixel_values")?.to_device(&device)?;
