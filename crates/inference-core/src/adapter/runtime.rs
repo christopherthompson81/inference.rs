@@ -39,7 +39,7 @@ static LORA_STAGING_LOCK: Mutex<()> = Mutex::new(());
 static LORA_ASYNC_LOAD_GATE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, inference_json::FromJson, Eq, PartialEq, Serialize)]
 #[serde(default)]
 /// Admission limits for a dynamic LoRA runtime.
 pub struct LoraRuntimeConfig {

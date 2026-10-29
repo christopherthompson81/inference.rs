@@ -113,6 +113,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 - `crates/inference-code-exec/` - The Python code-execution tool the agent layer runs
 - `crates/inference-sandbox/` - OS-level sandboxing for the subprocesses tools spawn
 - `crates/inference-macros/` - Proc macros for defining tools
+- `crates/inference-json/` - JSON decoding through shared per-field helpers (`FromJson`), cheaper to compile than serde's per-type visitors; `#[derive(FromJson)]` (`inference-json-derive`) reads the type's `#[serde]` attributes and also implements `Deserialize` through a `Value`, so swapping `Deserialize` for `inference_json::FromJson` in a derive list is the whole migration
 - `crates/inference-tensor/` - The tensor layer every crate builds on (`Tensor`, devices, CPU/CUDA/Metal backends, quantized storage, safetensors/pickle/npy) with neural-net building blocks under `nn`; derived from candle-core and candle-nn, owned here (its README lists what changed)
 - `crates/inference-tensor-kernels/` - The CUDA kernels inference-tensor's backend loads, built into SASS fatbins under the `cuda` feature
 - `crates/inference-flash-attn-v3/` - FlashAttention-3 for Hopper prefill, from candle-flash-attn-v3; excluded from `--workspace` builds (its sm90 CUTLASS instances are heavy), built by inference-nn's `flash-attn-v3` feature

@@ -8,7 +8,7 @@ use inference_core::{
 
 /// Speech sampling for every generation of the loaded model; an unset field keeps the architecture's default.
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, inference_json::FromJson, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpeechGenerationSpec {
     #[serde(default)]
@@ -84,7 +84,9 @@ fn default_max_image_length() -> usize {
 
 /// How a GGUF spec without `mmproj_filename` gets its multimodal projector.
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, inference_json::FromJson, serde::Serialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum MmprojSelection {
     /// Only `mmproj_filename`, except that a `quant` resolved in a GGUF artifact repo also picks its projector.
@@ -99,7 +101,7 @@ pub enum MmprojSelection {
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, serde::Serialize)]
 pub enum ModelSelected {
     /// Select a model for running via auto loader
     Run {

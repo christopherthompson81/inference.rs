@@ -25,7 +25,7 @@ use super::{AutoDeviceMapParams, DeviceMappedModelLoader};
 pub use inference_nn::loaders::EmbeddingModelLoader;
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq, strum::EnumIter)]
+#[derive(Clone, Debug, inference_json::FromJson, serde::Serialize, PartialEq, strum::EnumIter)]
 /// The architecture to load the embedding model as.
 pub enum EmbeddingLoaderType {
     #[serde(rename = "embeddinggemma")]

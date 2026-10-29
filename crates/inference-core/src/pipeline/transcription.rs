@@ -56,7 +56,7 @@ const STREAM_SESSION_IDLE: Duration = Duration::from_secs(10 * 60);
 const MAX_STREAM_SESSIONS: usize = 64;
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, strum::EnumIter)]
+#[derive(Clone, Copy, Debug, inference_json::FromJson, Serialize, PartialEq, strum::EnumIter)]
 pub enum TranscriptionLoaderType {
     #[serde(rename = "parakeet")]
     Parakeet,

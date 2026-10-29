@@ -13,7 +13,6 @@ use inference_quant::{
 };
 use inference_tensor::Tensor;
 use regex::Regex;
-use serde::Deserialize;
 use tokenizers::Tokenizer;
 use tracing::info;
 
@@ -491,7 +490,7 @@ pub(crate) fn read_uqff_report_file(path: &Path) -> Result<UqffReport> {
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Debug, Copy, Default, Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Copy, Default, inference_json::FromJson, serde::Serialize)]
 pub enum IsqOrganization {
     #[default]
     #[serde(rename = "default")]
@@ -527,7 +526,8 @@ pub struct UqffFullSer<'a> {
     pub preprocessor_filename: &'a Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, Default, serde::Serialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, inference_json::FromJson)]
+#[serde(from = "UqffWriteSpec")]
 pub struct UqffWriteConfig {
     pub output: PathBuf,
     #[serde(default)]
@@ -543,7 +543,7 @@ pub struct UqffWriteConfig {
 
 /// How a spec names a UQFF to write: an output path, or the path with the ISQ types and report metadata.
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 #[serde(untagged)]
 pub enum UqffWriteSpec {
     #[cfg_attr(feature = "utoipa", schema(value_type = String))]
@@ -562,19 +562,16 @@ pub enum UqffWriteSpec {
     },
 }
 
-impl<'de> Deserialize<'de> for UqffWriteConfig {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        match UqffWriteSpec::deserialize(deserializer)? {
-            UqffWriteSpec::Path(output) => Ok(Self::from_output(output)),
+impl From<UqffWriteSpec> for UqffWriteConfig {
+    fn from(spec: UqffWriteSpec) -> Self {
+        match spec {
+            UqffWriteSpec::Path(output) => Self::from_output(output),
             UqffWriteSpec::Config {
                 output,
                 types,
                 base_model,
                 repo_id,
-            } => Ok(Self::with_types(output, types).with_report_metadata(base_model, repo_id)),
+            } => Self::with_types(output, types).with_report_metadata(base_model, repo_id),
         }
     }
 }

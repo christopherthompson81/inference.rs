@@ -6,12 +6,12 @@ use std::{fmt::Display, str::FromStr};
 use anyhow::Result;
 use inference_quant::log::once_log_info;
 use inference_tensor::{DType, Device, Tensor};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 #[cfg(feature = "cuda")]
 use tracing::debug;
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Copy, Default, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Copy, Default, Debug, inference_json::FromJson, Serialize, PartialEq)]
 /// DType for the model.
 ///
 /// If the model is quantized, this is ignored so it is reasonable to use the [`Default`] impl.
