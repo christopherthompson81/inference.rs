@@ -13,6 +13,8 @@ A fine-tune published as full weights is often a merged LoRA; [Adapters from mer
 
 ## Enable and preload LoRA
 
+A checkpoint that ships a PEFT adapter beside its own safetensors weights (`adapter_config.json` and `adapter_model.safetensors` in the model folder or repository) has it folded into the weights it targets on load, as transformers does; it is part of the model rather than a runtime adapter. DoRA, `modules_to_save`, per-module rank or alpha, and adapter biases are refused there.
+
 Give every preloaded adapter an explicit alias with `--lora ALIAS=SOURCE`. `SOURCE` can be a Hugging Face repository ID or local adapter directory. Repeat the option to preload more than one adapter:
 
 ```bash

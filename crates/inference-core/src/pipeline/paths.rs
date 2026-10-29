@@ -186,7 +186,8 @@ pub fn get_model_paths(
                 .filter(|file| file.as_str() == UQFF_RESIDUAL_SAFETENSORS)
                 .cloned()
                 .collect::<Vec<_>>();
-            let files = if !safetensors.is_empty() {
+            let safetensor_weights = !safetensors.is_empty();
+            let files = if safetensor_weights {
                 // Always prefer safetensors
                 safetensors
             } else if !pickles.is_empty() {
@@ -208,6 +209,16 @@ pub fn get_model_paths(
                 filenames.push(crate::pipeline::hf::get_file(
                     api, model_id, &rfilename, &revision,
                 )?);
+            }
+            // a PEFT adapter beside the weights, which transformers folds in on load, lands beside them too
+            if safetensor_weights
+                && [ADAPTER_CONFIG, ADAPTER_WEIGHTS]
+                    .iter()
+                    .all(|name| repo_files.iter().any(|file| file == name))
+            {
+                for name in [ADAPTER_CONFIG, ADAPTER_WEIGHTS] {
+                    crate::pipeline::hf::get_file(api, model_id, name, &revision)?;
+                }
             }
             Ok(filenames)
         }

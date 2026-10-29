@@ -7,7 +7,10 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use inference_quant::{ShardedSafeTensors, ShardedVarBuilder, safetensors::MmapedSafetensors};
+use inference_quant::{
+    ShardedSafeTensors, ShardedVarBuilder,
+    safetensors::{AdapterFold, MmapedSafetensors},
+};
 use inference_tensor::{DType, Device, Result, Tensor, pickle::PthTensors};
 use regex::Regex;
 
@@ -17,6 +20,9 @@ use indicatif::MultiProgress;
 const INFERENCE_RS_NO_MMAP: &str = "INFERENCE_RS_NO_MMAP";
 const SAFETENSORS_EXTENSION: &str = "safetensors";
 const PICKLE_EXTENSIONS: &[&str] = &["pth", "pt", "bin"];
+// a PEFT adapter shipped beside a checkpoint's weights
+pub const CHECKPOINT_ADAPTER_CONFIG: &str = "adapter_config.json";
+pub const CHECKPOINT_ADAPTER_WEIGHTS: &str = "adapter_model.safetensors";
 
 trait TensorLoaderBackend {
     fn get_names(&self) -> Vec<String>;
@@ -107,17 +113,19 @@ fn load_safetensors(
             .is_some_and(|ext| PICKLE_EXTENSIONS.contains(&ext))
     });
     let use_no_mmap = std::env::var(INFERENCE_RS_NO_MMAP).is_ok_and(|x| x == "1") || has_pickle;
+    let fold = checkpoint_adapter(&paths)?;
     if !use_no_mmap {
         if !silent {
             tracing::debug!("Loading model using mmap strategy.");
         }
         return Ok(unsafe {
-            ShardedSafeTensors::sharded(
+            ShardedSafeTensors::sharded_with_fold(
                 &paths,
                 dtype.unwrap_or(DType::F16),
                 base_device,
                 make_dummy_regexes,
                 predicate,
+                fold,
             )?
         });
     }
@@ -159,6 +167,14 @@ fn load_safetensors(
     for h in handles {
         ws.extend(h.join().unwrap()?);
     }
+    if let Some(fold) = fold {
+        for target in fold.targets() {
+            if let Some(weight) = ws.get_mut(target) {
+                let delta = fold.delta(target, weight.device())?.expect("a target");
+                *weight = (weight.to_dtype(DType::F32)? + delta)?.to_dtype(weight.dtype())?;
+            }
+        }
+    }
 
     // TODO(EricLBuehler): separation of concerns.
     // This is to have WNA16 for GPTQ which is required. No bf16 for GPTQ
@@ -168,6 +184,27 @@ fn load_safetensors(
         base_device.clone(),
         make_dummy_regexes,
     ))
+}
+
+/// The PEFT adapter a checkpoint ships beside its weight files, which transformers folds in on load.
+fn checkpoint_adapter(paths: &[PathBuf]) -> Result<Option<Arc<AdapterFold>>> {
+    let Some(dir) = paths.first().and_then(|path| path.parent()) else {
+        return Ok(None);
+    };
+    let (config, weights) = (
+        dir.join(CHECKPOINT_ADAPTER_CONFIG),
+        dir.join(CHECKPOINT_ADAPTER_WEIGHTS),
+    );
+    if !config.is_file() || !weights.is_file() || paths.contains(&weights) {
+        return Ok(None);
+    }
+    let fold = unsafe { AdapterFold::open(&config, &weights)? };
+    tracing::info!(
+        "Folding the checkpoint's adapter `{}` into {} weights.",
+        weights.display(),
+        fold.len()
+    );
+    Ok(Some(Arc::new(fold)))
 }
 
 /// One checkpoint file to load and how to place and filter its tensors.
@@ -254,4 +291,108 @@ fn load_tensors_from_path(load: TensorLoad<'_>) -> Result<HashMap<String, Tensor
     }
 
     Ok(loaded_tensors)
+}
+
+#[cfg(test)]
+#[allow(clippy::cast_precision_loss)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use inference_quant::Shard;
+    use inference_tensor::{DType, Device, Tensor};
+
+    use super::{
+        CHECKPOINT_ADAPTER_CONFIG, CHECKPOINT_ADAPTER_WEIGHTS, DeviceForLoadTensor,
+        from_mmaped_safetensors,
+    };
+
+    const OUT: usize = 4;
+    const IN: usize = 3;
+    const RANK: usize = 2;
+    const ALPHA: f64 = 4.0;
+
+    fn write_checkpoint(dir: &std::path::Path, config: serde_json::Value) -> anyhow::Result<()> {
+        let w = Tensor::arange(0f32, (OUT * IN) as f32, &Device::Cpu)?.reshape((OUT, IN))?;
+        let other = Tensor::ones(IN, DType::F32, &Device::Cpu)?;
+        inference_tensor::safetensors::save(
+            &HashMap::from([("layer.proj.weight", w), ("layer.norm.weight", other)]),
+            dir.join("model.safetensors"),
+        )?;
+        let a = Tensor::arange(0f32, (RANK * IN) as f32, &Device::Cpu)?.reshape((RANK, IN))?;
+        let b =
+            (Tensor::arange(0f32, (OUT * RANK) as f32, &Device::Cpu)?.reshape((OUT, RANK))? * 0.1)?;
+        inference_tensor::safetensors::save(
+            &HashMap::from([
+                ("base_model.model.layer.proj.lora_A.weight", a),
+                ("base_model.model.layer.proj.lora_B.weight", b),
+            ]),
+            dir.join(CHECKPOINT_ADAPTER_WEIGHTS),
+        )?;
+        std::fs::write(dir.join(CHECKPOINT_ADAPTER_CONFIG), config.to_string())?;
+        Ok(())
+    }
+
+    fn load(dir: &std::path::Path) -> inference_tensor::Result<inference_quant::ShardedVarBuilder> {
+        from_mmaped_safetensors(
+            vec![dir.join("model.safetensors")],
+            Some(DType::F32),
+            &Device::Cpu,
+            vec![],
+            true,
+            None,
+            |_| true,
+            Arc::new(|_| DeviceForLoadTensor::Base),
+        )
+    }
+
+    #[test]
+    fn a_checkpoint_adapter_folds_into_the_weights_it_targets() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        write_checkpoint(
+            dir.path(),
+            serde_json::json!({"r": RANK, "lora_alpha": ALPHA}),
+        )?;
+        let vb = load(dir.path())?;
+        let w = Tensor::arange(0f32, (OUT * IN) as f32, &Device::Cpu)?.reshape((OUT, IN))?;
+        let a = Tensor::arange(0f32, (RANK * IN) as f32, &Device::Cpu)?.reshape((RANK, IN))?;
+        let b =
+            (Tensor::arange(0f32, (OUT * RANK) as f32, &Device::Cpu)?.reshape((OUT, RANK))? * 0.1)?;
+        let expected = (w + (b.matmul(&a)? * (ALPHA / RANK as f64))?)?;
+        let folded = vb.pp("layer").pp("proj").get((OUT, IN), "weight")?;
+        assert_eq!(folded.to_vec2::<f32>()?, expected.to_vec2::<f32>()?);
+        // a tensor-parallel rank reads its rows of the folded weight
+        let half = vb.pp("layer").pp("proj").get_with_hints(
+            (OUT / 2, IN),
+            "weight",
+            Shard::Simple {
+                dim: 0,
+                rank: 1,
+                world_size: 2,
+            },
+        )?;
+        assert_eq!(
+            half.to_vec2::<f32>()?,
+            expected.narrow(0, OUT / 2, OUT / 2)?.to_vec2::<f32>()?
+        );
+        // an untargeted weight reads as stored
+        let norm = vb.pp("layer").pp("norm").get(IN, "weight")?;
+        assert_eq!(norm.to_vec1::<f32>()?, vec![1f32; IN]);
+        Ok(())
+    }
+
+    #[test]
+    fn adapters_it_cannot_fold_are_refused() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        write_checkpoint(
+            dir.path(),
+            serde_json::json!({"r": RANK, "lora_alpha": ALPHA, "use_dora": true}),
+        )?;
+        let error = load(dir.path())
+            .err()
+            .expect("a DoRA adapter is refused")
+            .to_string();
+        assert!(error.contains("DoRA"), "{error}");
+        Ok(())
+    }
 }

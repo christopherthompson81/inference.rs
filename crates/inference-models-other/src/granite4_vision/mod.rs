@@ -84,6 +84,7 @@ pub struct Granite4VisionModel {
     layerwise: Vec<Projection>,
     spatial: Vec<Projection>,
     config: Config,
+    tower_at_root: bool,
 }
 
 impl Granite4VisionModel {
@@ -99,10 +100,26 @@ impl Granite4VisionModel {
             .clone()
             .without_lora_registry()
             .pp("model")
-            .set_device(device);
+            .set_device(device.clone());
+        // granite-4.0-3b-vision keeps its tower at the top level, as older LLaVA-Next checkpoints do
+        let tower_at_root = !crate::layers::contains_tensor_or_weight_source(
+            &vision_vb
+                .pp("vision_tower")
+                .pp("vision_model")
+                .pp("embeddings")
+                .pp("patch_embedding"),
+            "weight",
+        );
+        let tower_vb = match tower_at_root {
+            true => vb
+                .clone()
+                .without_lora_registry()
+                .set_device(device.clone()),
+            false => vision_vb.clone(),
+        };
         let vision_tower = SiglipVisionTransformer::new(
             &config.vision_config,
-            vision_vb.pp("vision_tower").pp("vision_model"),
+            tower_vb.pp("vision_tower").pp("vision_model"),
         )?;
         let image_newline = config
             .use_image_newline_parameter
@@ -166,6 +183,7 @@ impl Granite4VisionModel {
             layerwise,
             spatial,
             config: config.clone(),
+            tower_at_root,
         })
     }
 
@@ -300,7 +318,8 @@ impl IsqModel for Granite4VisionModel {
             self.language_model
                 .residual_tensors_m(model.pp("language_model")),
         );
-        model
+        let tower = if self.tower_at_root { &uvb } else { &model };
+        tower
             .pp("vision_tower")
             .pp("vision_model")
             .extend(self.vision_tower.residual_tensors());
