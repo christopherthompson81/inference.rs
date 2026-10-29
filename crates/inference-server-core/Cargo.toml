@@ -13,7 +13,7 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
-inference-json.workspace = true
+inference-json = { workspace = true, features = ["axum"] }
 anyhow.workspace = true
 axum = { workspace = true, features = ["tokio", "multipart", "ws"] }
 base64.workspace = true

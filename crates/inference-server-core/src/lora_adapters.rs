@@ -1,9 +1,7 @@
 //! The LoRA adapter routes: HTTP framing over the engine's adapter management.
 
-use axum::{
-    extract::{Query, rejection::QueryRejection},
-    response::Response,
-};
+use axum::response::Response;
+use inference_json::{QueryParams, QueryParamsRejection};
 
 use crate::handler_core::{ApiJson, ApiJsonRejection};
 pub use crate::lora_adapters_api::{
@@ -95,10 +93,10 @@ pub(crate) async fn unload_lora_adapter(
 ))]
 pub(crate) async fn list_lora_adapters(
     OwnedEngine(engine): OwnedEngine,
-    payload: Result<Query<ListLoraAdaptersQuery>, QueryRejection>,
+    payload: Result<QueryParams<ListLoraAdaptersQuery>, QueryParamsRejection>,
 ) -> Response {
     match payload {
-        Ok(Query(query)) => json_response(engine.lora_adapters(query).await),
+        Ok(QueryParams(query)) => json_response(engine.lora_adapters(query).await),
         Err(error) => openai_error_response(ApiError::new(
             ApiErrorKind::InvalidRequest,
             error.body_text(),

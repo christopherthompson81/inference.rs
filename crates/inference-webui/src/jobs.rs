@@ -7,10 +7,11 @@ use std::sync::Arc;
 use crate::json_body::JsonBody;
 use axum::Json;
 use axum::body::Body;
-use axum::extract::{Extension, Multipart, Path as UrlPath, Query, Request};
+use axum::extract::{Extension, Multipart, Path as UrlPath, Request};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
+use inference_json::QueryParams;
 use serde::Serialize;
 use serde_json::json;
 use tokio::fs;
@@ -79,7 +80,7 @@ struct SaveJob {
     data: serde_json::Value,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(inference_json::FromJson)]
 pub struct ListJobsQuery {
     pub kind: String,
 }
@@ -132,7 +133,7 @@ fn bad_request(message: impl Into<String>) -> Refusal {
 
 pub async fn list_jobs(
     Extension(app): Extension<Arc<AppState>>,
-    Query(query): Query<ListJobsQuery>,
+    QueryParams(query): QueryParams<ListJobsQuery>,
 ) -> impl IntoResponse {
     let mut jobs = Vec::new();
     if let Ok(mut entries) = fs::read_dir(&app.jobs_dir).await {

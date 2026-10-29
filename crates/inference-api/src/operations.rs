@@ -49,15 +49,12 @@ pub struct CalibrationApplyRequest {
 }
 
 /// The model a calibration start or status acts on; the default model when absent.
-#[derive(Debug, Clone, Default, serde::Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Default, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CalibrationTarget {
     #[serde(default)]
     pub model: Option<String>,
 }
-
-// also a URL query, where serde's duplicate-field check matters (a `Value` keeps the last)
-inference_json::via_serde!(CalibrationTarget);
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct SessionList {

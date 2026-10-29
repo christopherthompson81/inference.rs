@@ -1,6 +1,6 @@
 //! ## General inference.rs server route handlers.
 
-use axum::extract::{Json, Path, Query};
+use axum::extract::{Json, Path};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 #[cfg(test)]
@@ -12,6 +12,7 @@ use inference_api::{
     },
     system::TuneModelRequest,
 };
+use inference_json::QueryParams;
 
 use crate::handler_core::{ApiJson, ApiJsonRejection};
 pub use crate::models_api::ModelOperationRequest;
@@ -143,7 +144,7 @@ fn http_save_cimatrix_path(name: &str) -> Result<std::path::PathBuf, ApiError> {
 ))]
 pub async fn calibration_start(
     OwnedEngine(engine): OwnedEngine,
-    Query(target): Query<CalibrationTarget>,
+    QueryParams(target): QueryParams<CalibrationTarget>,
 ) -> Response {
     json_response(
         engine
@@ -161,7 +162,7 @@ pub async fn calibration_start(
 ))]
 pub async fn calibration_status(
     OwnedEngine(engine): OwnedEngine,
-    Query(target): Query<CalibrationTarget>,
+    QueryParams(target): QueryParams<CalibrationTarget>,
 ) -> Response {
     json_response(
         engine

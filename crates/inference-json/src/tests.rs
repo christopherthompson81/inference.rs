@@ -339,3 +339,38 @@ fn the_derived_deserialize_nests_in_serde_containers() {
     let e = serde_json::from_str::<Holder>(r#"{"inner": {"unitWords": [1]}}"#).unwrap_err();
     assert!(e.to_string().contains("unitWords[0]: invalid type"), "{e}");
 }
+
+#[derive(crate::FromJson, Debug, PartialEq)]
+struct Listing {
+    source: Option<String>,
+    limit: Option<usize>,
+    #[serde(default)]
+    verbose: bool,
+    ratio: Option<f32>,
+}
+
+#[test]
+fn query_strings_read_their_scalars_from_text() {
+    let q: Listing = crate::from_query("source=a%20b&limit=5&verbose=true&ratio=0.5").unwrap();
+    let expected = Listing {
+        source: Some("a b".into()),
+        limit: Some(5),
+        verbose: true,
+        ratio: Some(0.5),
+    };
+    assert_eq!(q, expected);
+    assert_eq!(crate::from_query::<Listing>("").unwrap().limit, None);
+    let e = crate::from_query::<Listing>("limit=many").unwrap_err();
+    assert_eq!(
+        e.to_string(),
+        "limit: invalid value: string \"many\", expected usize"
+    );
+    let e = crate::from_query::<Listing>("source=a&source=b").unwrap_err();
+    assert_eq!(e.to_string(), "duplicate field `source`");
+}
+
+#[test]
+fn text_scalars_stay_inside_their_call() {
+    assert!(crate::from_query::<Listing>("limit=5").is_ok());
+    assert!(crate::from_value::<u32>(&json!("5")).is_err());
+}

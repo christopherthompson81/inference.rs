@@ -9,14 +9,14 @@ use anyhow::Result;
 use axum::{
     Json,
     extract::{
-        FromRequestParts, Multipart, Path as AxumPath, Query, RawQuery,
+        FromRequestParts, Multipart, Path as AxumPath, RawQuery,
         multipart::{MultipartError, MultipartRejection},
-        rejection::QueryRejection,
     },
     http::{HeaderMap, StatusCode, request::Parts},
     response::IntoResponse,
 };
 use inference_api::Engine;
+use inference_json::{QueryParams, QueryParamsRejection};
 
 use crate::skill_store::{
     ANTHROPIC_SKILL_SOURCE, CUSTOM_SKILL_SOURCE, invalid_skill_upload, skill_api_error,
@@ -110,7 +110,7 @@ fn multipart_rejection_error(error: MultipartRejection) -> ApiError {
     ApiError::new(kind, error.body_text(), Some(code), Some("files"))
 }
 
-fn query_rejection_error(error: QueryRejection) -> ApiError {
+fn query_rejection_error(error: QueryParamsRejection) -> ApiError {
     ApiError::new(
         ApiErrorKind::InvalidRequest,
         error.body_text(),
@@ -197,11 +197,11 @@ pub async fn upload_skill(
 pub async fn list_skills(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
-    payload: std::result::Result<Query<SkillListQuery>, QueryRejection>,
+    payload: std::result::Result<QueryParams<SkillListQuery>, QueryParamsRejection>,
     skills: OwnerSkills,
 ) -> axum::response::Response {
     let query = match payload {
-        Ok(Query(query)) => query,
+        Ok(QueryParams(query)) => query,
         Err(error) => {
             let anthropic = prefers_anthropic_shape(&headers, None, raw_query.as_deref());
             return protocol_error_response(query_rejection_error(error), anthropic);
@@ -444,7 +444,7 @@ mod tests {
         let (_root, store) = test_store();
         let raw_query = "source=custom&limit=invalid";
         let uri: Uri = format!("/v1/skills?{raw_query}").parse().unwrap();
-        let payload = Query::<SkillListQuery>::try_from_uri(&uri);
+        let payload = QueryParams::<SkillListQuery>::try_from_uri(&uri);
         assert!(payload.is_err());
 
         let response = list_skills(
@@ -465,7 +465,7 @@ mod tests {
         let (_root, store) = test_store();
         let raw_query = "source=unknown";
         let uri: Uri = format!("/v1/skills?{raw_query}").parse().unwrap();
-        let payload = Query::<SkillListQuery>::try_from_uri(&uri);
+        let payload = QueryParams::<SkillListQuery>::try_from_uri(&uri);
 
         let response = list_skills(
             HeaderMap::new(),
