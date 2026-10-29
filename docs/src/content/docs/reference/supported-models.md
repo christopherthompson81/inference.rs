@@ -57,6 +57,10 @@ The `Architecture` column is the `config.json` `architectures` value. Per-family
 | `Qwen3_5ForCausalLM` | Qwen3.5 | No published example |
 | `Qwen3_5MoeForCausalLM` | Qwen3.5 MoE | No published example |
 | `Qwen4ExpForCausalLM` | Qwen3.8-Flash-Next | No published example |
+| `OlmoForCausalLM` | OLMo 1 | <details><summary><code>allenai/OLMo-1B-0724-hf</code></summary><code>inference run -m allenai/OLMo-1B-0724-hf</code></details> |
+| `Olmo2ForCausalLM` | OLMo 2 | <details><summary><code>allenai/OLMo-2-0425-1B-Instruct</code></summary><code>inference run -m allenai/OLMo-2-0425-1B-Instruct</code></details> |
+| `Olmo3ForCausalLM` | Olmo 3 | <details><summary><code>allenai/Olmo-3-7B-Instruct</code></summary><code>inference run -m allenai/Olmo-3-7B-Instruct</code></details> |
+| `OlmoeForCausalLM` | OLMoE | <details><summary><code>allenai/OLMoE-1B-7B-0125-Instruct</code></summary><code>inference run -m allenai/OLMoE-1B-7B-0125-Instruct</code></details> |
 | `Lfm2ForCausalLM` | LFM2, LFM2.5 | <details><summary><code>LiquidAI/LFM2.5-1.2B-Instruct</code> (LFM2.5), <code>LiquidAI/LFM2-1.2B</code> (LFM2)</summary><code>inference run -m LiquidAI/LFM2.5-1.2B-Instruct</code><br><code>inference run -m LiquidAI/LFM2-1.2B</code></details> |
 | `Lfm2MoeForCausalLM` | LFM2 MoE, LFM2.5 MoE | <details><summary><code>LiquidAI/LFM2.5-8B-A1B</code> (LFM2.5), <code>LiquidAI/LFM2-8B-A1B</code> (LFM2)</summary><code>inference run -m LiquidAI/LFM2.5-8B-A1B</code><br><code>inference run -m LiquidAI/LFM2-8B-A1B</code></details> |
 

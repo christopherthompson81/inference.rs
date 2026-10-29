@@ -9988,6 +9988,10 @@
           "qwen3_5",
           "qwen3_5moe",
           "qwen4exp",
+          "olmo",
+          "olmo2",
+          "olmo3",
+          "olmoe",
           "lfm2",
           "lfm2_moe"
         ]

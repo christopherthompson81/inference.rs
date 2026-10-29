@@ -15,7 +15,7 @@ use crate::{
 };
 
 pub const SANDWICH_NORMS: NormNames = NormNames {
-    input: "input_layernorm",
+    input: Some("input_layernorm"),
     pre_ffn: Some("post_attention_layernorm"),
     post_attn: Some("post_self_attn_layernorm"),
     post_ffn: Some("post_mlp_layernorm"),

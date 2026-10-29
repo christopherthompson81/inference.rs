@@ -599,8 +599,8 @@ fn bpe_pre_tokenizer_spec(pre: Option<&str>) -> Result<BpePreTokenizerSpec> {
             ignore_merges: false,
             normalize_nfc: true,
         },
-        // granite-docling shares llama.cpp's GPT-2 case
-        "gpt-2" | "phi-2" | "modern-bert" | "granite-docling" => BpePreTokenizerSpec {
+        // granite-docling and olmo share llama.cpp's GPT-2 case
+        "gpt-2" | "phi-2" | "modern-bert" | "granite-docling" | "olmo" => BpePreTokenizerSpec {
             kind: BpePreTokenizerKind::Gpt2,
             regexes: &[GPT2_REGEX],
             ignore_merges: false,

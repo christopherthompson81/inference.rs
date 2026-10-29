@@ -41,6 +41,7 @@ mod modern_bert;
 mod modern_bert_decision;
 mod neo_bert;
 mod nomic_bert;
+mod olmo;
 mod paddleocr_vl;
 mod starcoder2;
 
@@ -66,6 +67,7 @@ pub use modern_bert::*;
 pub use modern_bert_decision::*;
 pub use neo_bert::*;
 pub use nomic_bert::*;
+pub use olmo::*;
 pub use paddleocr_vl::*;
 pub use starcoder2::*;
 
@@ -81,6 +83,9 @@ inference_nn::boxed_loaders!(
     HunYuanDenseV1Loader,
     HunYuanMoEV1Loader,
     Lfm2Loader,
+    Olmo2Loader,
+    OlmoLoader,
+    OlmoeLoader,
     Starcoder2Loader,
 );
 inference_nn::boxed_loaders!(

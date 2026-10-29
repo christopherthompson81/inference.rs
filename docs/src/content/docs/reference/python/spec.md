@@ -668,6 +668,10 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `NormalLoaderType.QWEN3_5` | `'qwen3_5'` |
 | `NormalLoaderType.QWEN3_5MOE` | `'qwen3_5moe'` |
 | `NormalLoaderType.QWEN4EXP` | `'qwen4exp'` |
+| `NormalLoaderType.OLMO` | `'olmo'` |
+| `NormalLoaderType.OLMO2` | `'olmo2'` |
+| `NormalLoaderType.OLMO3` | `'olmo3'` |
+| `NormalLoaderType.OLMOE` | `'olmoe'` |
 | `NormalLoaderType.LFM2` | `'lfm2'` |
 | `NormalLoaderType.LFM2_MOE` | `'lfm2_moe'` |
 

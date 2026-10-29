@@ -179,6 +179,26 @@ impl SupportedArch for NormalLoaderType {
                 modalities: m,
                 examples: &[ex!("ibm-granite/granite-swash-3b-a600m")],
             },
+            Self::Olmo => ArchMetadata {
+                families: &["OLMo 1"],
+                modalities: m,
+                examples: &[ex!("allenai/OLMo-1B-0724-hf")],
+            },
+            Self::Olmo2 => ArchMetadata {
+                families: &["OLMo 2"],
+                modalities: m,
+                examples: &[ex!("allenai/OLMo-2-0425-1B-Instruct")],
+            },
+            Self::Olmo3 => ArchMetadata {
+                families: &["Olmo 3"],
+                modalities: m,
+                examples: &[ex!("allenai/Olmo-3-7B-Instruct")],
+            },
+            Self::Olmoe => ArchMetadata {
+                families: &["OLMoE"],
+                modalities: m,
+                examples: &[ex!("allenai/OLMoE-1B-7B-0125-Instruct")],
+            },
             Self::GptOss => ArchMetadata {
                 families: &["GPT-OSS"],
                 modalities: m,

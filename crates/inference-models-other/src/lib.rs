@@ -38,6 +38,7 @@ pub mod modern_bert;
 pub mod modern_bert_decision;
 pub mod neo_bert;
 pub mod nomic_bert;
+pub mod olmo;
 pub mod paddleocr_vl;
 #[cfg(test)]
 mod paddleocr_vl_tests;
@@ -64,6 +65,9 @@ inference_nn::json_config!(
     hunyuan_v1_dense::Config,
     hunyuan_v1_moe::Config,
     lfm2::Config,
+    olmo::OlmoConfig,
+    olmo::Olmo2Config,
+    olmo::OlmoeConfig,
     lfm2_vl::config::Config,
     paddleocr_vl::config::Config,
     starcoder2::Config,

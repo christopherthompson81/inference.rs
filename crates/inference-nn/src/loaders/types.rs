@@ -202,6 +202,10 @@ macro_rules! normal_loader_table {
             Qwen3_5 { cli: "qwen3_5", hf: "Qwen3_5ForCausalLM", model_type: "qwen3_5_text", loader: Qwen3_5TextLoader, feature: "models-qwen" },
             Qwen3_5Moe { cli: "qwen3_5moe", hf: "Qwen3_5MoeForCausalLM", model_type: "qwen3_5_moe_text", loader: Qwen3_5MoeTextLoader, feature: "models-qwen" },
             Qwen4Exp { cli: "qwen4exp", hf: "Qwen4ExpForCausalLM", model_type: "qwen4_exp_text", loader: Qwen3_5MoeTextLoader, feature: "models-qwen" },
+            Olmo { cli: "olmo", hf: "OlmoForCausalLM", model_type: "olmo", loader: OlmoLoader, feature: "models-other" },
+            Olmo2 { cli: "olmo2", hf: "Olmo2ForCausalLM", model_type: "olmo2", loader: Olmo2Loader, feature: "models-other" },
+            Olmo3 { cli: "olmo3", hf: "Olmo3ForCausalLM", model_type: "olmo3", loader: Olmo2Loader, feature: "models-other" },
+            Olmoe { cli: "olmoe", hf: "OlmoeForCausalLM", model_type: "olmoe", loader: OlmoeLoader, feature: "models-other" },
             Lfm2 { cli: "lfm2", hf: "Lfm2ForCausalLM", model_type: "lfm2", loader: Lfm2Loader, feature: "models-other" },
             Lfm2Moe { cli: "lfm2_moe", hf: "Lfm2MoeForCausalLM", model_type: "lfm2_moe", loader: Lfm2Loader, feature: "models-other" },
         }

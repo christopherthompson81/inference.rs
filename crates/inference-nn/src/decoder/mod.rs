@@ -107,12 +107,15 @@ pub enum NormKind {
     Gemma,
     Layer,
     F32Rms,
+    /// A LayerNorm with no weight or bias (OLMo 1).
+    LayerNoAffine,
 }
 
 /// A layer's norm names; a sandwich adds post norms (Gemma 2, GLM4), no `pre_ffn` makes it parallel (Phi-2).
 #[derive(Clone, Copy, Debug)]
 pub struct NormNames {
-    pub input: &'static str,
+    /// The norm before attention; `None` in a post-norm layer, which norms each sublayer's output instead (OLMo 2).
+    pub input: Option<&'static str>,
     pub pre_ffn: Option<&'static str>,
     pub post_attn: Option<&'static str>,
     pub post_ffn: Option<&'static str>,
@@ -122,7 +125,7 @@ pub struct NormNames {
 
 impl NormNames {
     pub const PRE: Self = Self {
-        input: "input_layernorm",
+        input: Some("input_layernorm"),
         pre_ffn: Some("post_attention_layernorm"),
         post_attn: None,
         post_ffn: None,
@@ -139,8 +142,19 @@ impl Default for NormNames {
 /// Per-head q/k norm under the given names, before RoPE (fused into it for RMS norms) or after it.
 #[derive(Clone, Copy, Debug)]
 pub enum QkNorm {
-    BeforeRope { q: &'static str, k: &'static str },
-    AfterRope { q: &'static str, k: &'static str },
+    BeforeRope {
+        q: &'static str,
+        k: &'static str,
+    },
+    AfterRope {
+        q: &'static str,
+        k: &'static str,
+    },
+    /// One norm over the whole q and k projections, before the head split (OLMo 2, OLMoE).
+    FullWidth {
+        q: &'static str,
+        k: &'static str,
+    },
 }
 
 impl QkNorm {
@@ -151,7 +165,9 @@ impl QkNorm {
 
     fn names(self) -> (&'static str, &'static str) {
         match self {
-            Self::BeforeRope { q, k } | Self::AfterRope { q, k } => (q, k),
+            Self::BeforeRope { q, k } | Self::AfterRope { q, k } | Self::FullWidth { q, k } => {
+                (q, k)
+            }
         }
     }
 }
@@ -194,6 +210,8 @@ pub struct DecoderSpec {
     pub rope: RopeKind,
     pub max_position_embeddings: usize,
     pub qkv_bias: bool,
+    /// q, k and v clamped to `[-clip, clip]` after their projections (OLMo 1).
+    pub clip_qkv: Option<f64>,
     pub qk_norm: Option<QkNorm>,
     /// Layers that skip RoPE (NoPE).
     pub no_rope_layers: Vec<usize>,
@@ -474,6 +492,7 @@ pub struct AttentionBlock {
     o_proj: Arc<dyn QuantMethod>,
     o_proj_name: &'static str,
     qk_norm: Option<(QkNorm, Norm, Norm)>,
+    clip_qkv: Option<f64>,
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
@@ -825,15 +844,22 @@ impl AttentionBlock {
             .qk_norm
             .map(|placement| -> Result<_> {
                 let (q, k) = placement.names();
-                let norm = |name| {
+                let (q_width, k_width) = match placement {
+                    QkNorm::FullWidth { .. } if world_size > 1 => inference_tensor::bail!(
+                        "a q/k norm over the whole projection does not split across tensor-parallel ranks"
+                    ),
+                    QkNorm::FullWidth { .. } => (spec.num_heads * head_dim, spec.num_kv_heads * head_dim),
+                    _ => (head_dim, head_dim),
+                };
+                let norm = |name, width| {
                     Norm::new(
                         spec.qk_norm_kind.unwrap_or(spec.norm),
-                        head_dim,
+                        width,
                         spec.rms_norm_eps,
                         mapper.set_device(layer_idx, vb.pp(name), false),
                     )
                 };
-                Ok((placement, norm(q)?, norm(k)?))
+                Ok((placement, norm(q, q_width)?, norm(k, k_width)?))
             })
             .transpose()?;
         let num_heads = spec.num_heads / world_size;
@@ -843,6 +869,7 @@ impl AttentionBlock {
             o_proj,
             o_proj_name,
             qk_norm,
+            clip_qkv: spec.clip_qkv,
             num_heads,
             num_kv_heads,
             head_dim,
@@ -885,6 +912,21 @@ impl AttentionBlock {
                     qkv.narrow(D::Minus1, q_size + kv_size, kv_size)?,
                 )
             }
+        };
+        // OLMoE norms the whole projections, then clamps
+        let (q, k) = match &self.qk_norm {
+            Some((QkNorm::FullWidth { .. }, q_norm, k_norm)) => {
+                (q_norm.forward(&q)?, k_norm.forward(&k)?)
+            }
+            _ => (q, k),
+        };
+        let (q, k, v) = match self.clip_qkv {
+            Some(clip) => (
+                q.clamp(-clip, clip)?,
+                k.clamp(-clip, clip)?,
+                v.clamp(-clip, clip)?,
+            ),
+            None => (q, k, v),
         };
         let heads = |t: Tensor, n: usize| -> Result<Tensor> {
             if q_len != 1 {
@@ -1005,7 +1047,10 @@ impl AttentionBlock {
                 let (q, k) = rope.forward(&q, &k, positions, &position_ids)?;
                 (q_norm.forward(&q)?, k_norm.forward(&k)?)
             }
-            None => rope.forward(&q, &k, positions, &position_ids)?,
+            // already normed before the head split
+            Some((QkNorm::FullWidth { .. }, ..)) | None => {
+                rope.forward(&q, &k, positions, &position_ids)?
+            }
         };
         let Some(AttentionTemperature { scale, floor_scale }) = self.attention_temperature else {
             return Ok((q, k));
@@ -1078,6 +1123,8 @@ pub enum Norm {
     Gemma(GemmaRmsNorm),
     Layer(LayerNorm),
     F32Rms(F32RmsNorm),
+    /// No stored weights: unit scale, zero shift.
+    Bare(LayerNorm),
 }
 
 impl Norm {
@@ -1087,6 +1134,11 @@ impl Norm {
             NormKind::Gemma => Self::Gemma(GemmaRmsNorm::new(size, eps, vb)?),
             NormKind::Layer => Self::Layer(layer_norm(size, eps, vb)?),
             NormKind::F32Rms => Self::F32Rms(F32RmsNorm::new(size, eps, vb)?),
+            NormKind::LayerNoAffine => Self::Bare(LayerNorm::new(
+                Tensor::ones(size, vb.dtype(), vb.device())?,
+                Tensor::zeros(size, vb.dtype(), vb.device())?,
+                eps,
+            )),
         })
     }
 
@@ -1094,7 +1146,7 @@ impl Norm {
         match self {
             Self::Rms(norm) => norm.forward(xs),
             Self::Gemma(norm) => norm.forward(xs),
-            Self::Layer(norm) => norm.forward(xs),
+            Self::Layer(norm) | Self::Bare(norm) => norm.forward(xs),
             Self::F32Rms(norm) => norm.forward(xs),
         }
     }
@@ -1105,7 +1157,7 @@ impl Norm {
             Self::Rms(norm) => norm.forward_residual(x, residual),
             Self::Gemma(norm) => norm.forward_residual(x, residual),
             Self::F32Rms(norm) => norm.forward_residual(x, residual),
-            Self::Layer(_) => self.forward(x)? + residual,
+            Self::Layer(_) | Self::Bare(_) => self.forward(x)? + residual,
         }
     }
 
@@ -1126,7 +1178,7 @@ impl Norm {
             (Self::F32Rms(norm), Self::F32Rms(next)) => {
                 norm.forward_residual_then_rms_norm(x, residual, next)
             }
-            (Self::Layer(_), Self::Layer(_)) => {
+            (Self::Layer(_), Self::Layer(_)) | (Self::Bare(_), Self::Bare(_)) => {
                 let xs = self.forward_residual(x, residual)?;
                 let normed = next.forward(&xs)?;
                 Ok((xs, normed))
@@ -1141,6 +1193,7 @@ impl Norm {
             Self::Gemma(norm) => uvb.add(norm),
             Self::Layer(norm) => uvb.add(norm),
             Self::F32Rms(norm) => uvb.add(norm),
+            Self::Bare(_) => {}
         }
     }
 
@@ -1149,14 +1202,14 @@ impl Norm {
         match self {
             Self::Rms(norm) => Some((norm.weight(), norm.eps())),
             Self::Gemma(norm) => Some((norm.weight(), norm.eps())),
-            Self::Layer(_) | Self::F32Rms(_) => None,
+            Self::Layer(_) | Self::F32Rms(_) | Self::Bare(_) => None,
         }
     }
 }
 
 /// A layer's norms under [`NormNames`]: pre-norm, or the sandwich with norms after attention and feed-forward too.
 struct LayerNorms {
-    input: Norm,
+    input: Option<Norm>,
     pre_ffn: Option<Norm>,
     post: Option<(Norm, Norm)>,
 }
@@ -1179,11 +1232,20 @@ impl<A: LayerAttention, F: LayerFfn> DecoderLayer<A, F> {
         flash: Option<&FlashParams>,
     ) -> Result<Tensor> {
         let residual = xs;
-        let normed = self.norms.input.forward(xs)?;
+        let normed = match &self.norms.input {
+            Some(input) => input.forward(xs)?,
+            None => xs.clone(),
+        };
         let xs =
             self.self_attn
                 .forward(&normed, attention_mask, kv_cache, ctx, layer_idx, flash)?;
         let Some(pre_ffn) = &self.norms.pre_ffn else {
+            if let Some((post_attn, post_ffn)) = &self.norms.post {
+                // post-norm: each sublayer's output is normed before its residual add
+                let xs = post_attn.forward_residual(&xs, residual)?;
+                let mlp_out = self.mlp.forward(&xs)?;
+                return post_ffn.forward_residual(&mlp_out, &xs);
+            }
             return (xs + self.mlp.forward(&normed)?)? + residual;
         };
         let Some((post_attn, post_ffn)) = &self.norms.post else {
@@ -1377,18 +1439,20 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
                 )
             };
             let names = shape.norm_names;
-            let post = match (names.post_attn, names.post_ffn, names.pre_ffn) {
-                (Some(post_attn), Some(post_ffn), Some(_)) => {
+            let post = match (names.input, names.post_attn, names.post_ffn, names.pre_ffn) {
+                (_, Some(post_attn), Some(post_ffn), Some(_)) | (None, Some(post_attn), Some(post_ffn), None) => {
                     Some((norm(post_attn)?, norm(post_ffn)?))
                 }
-                (None, None, _) => None,
-                _ => inference_tensor::bail!("a sandwich layer names both post norms and pre_ffn"),
+                (Some(_), None, None, _) => None,
+                _ => inference_tensor::bail!(
+                    "a layer is pre-norm, a sandwich naming both post norms and pre_ffn, or post-norm with both post norms only"
+                ),
             };
             Ok(DecoderLayer {
                 self_attn,
                 mlp,
                 norms: LayerNorms {
-                    input: norm(names.input)?,
+                    input: names.input.map(norm).transpose()?,
                     pre_ffn: names.pre_ffn.map(norm).transpose()?,
                     post,
                 },
@@ -1507,7 +1571,9 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
         for (layer_idx, layer) in self.layers.iter().enumerate() {
             let uvb_l = uvb_m.pp("layers").pp(layer_idx);
             let names = self.norm_names;
-            layer.norms.input.add_residual(&uvb_l.pp(names.input));
+            if let (Some(input), Some(name)) = (&layer.norms.input, names.input) {
+                input.add_residual(&uvb_l.pp(name));
+            }
             if let (Some(pre_ffn), Some(name)) = (&layer.norms.pre_ffn, names.pre_ffn) {
                 pre_ffn.add_residual(&uvb_l.pp(name));
             }

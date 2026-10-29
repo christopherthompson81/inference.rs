@@ -13,7 +13,7 @@ use crate::{
 serde_default_fn!(bool, word_emb_default, false);
 
 pub const SANDWICH_NORMS: NormNames = NormNames {
-    input: "input_layernorm",
+    input: Some("input_layernorm"),
     pre_ffn: Some("pre_feedforward_layernorm"),
     post_attn: Some("post_attention_layernorm"),
     post_ffn: Some("post_feedforward_layernorm"),
