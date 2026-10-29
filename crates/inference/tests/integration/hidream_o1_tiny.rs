@@ -19,7 +19,10 @@ const ON_GPU: bool = cfg!(any(feature = "cuda", feature = "metal"));
 const Q8_0_MEAN_DIFF: f64 = 4.0;
 // a 4:3 reference, which the output matches at about 2048 x 2048's area, both sides patch-aligned
 const REFERENCE_SIZE: (u32, u32) = (640, 480);
-const MATCHED_SIZE: (u32, u32) = (2336, 1760);
+// a 16:9 request at the tiny checkpoint's 256-pixel edge (2560x1440 at the trained 2048)
+const SNAPPED_SIZE: (u32, u32) = (320, 192);
+// a 640x480 reference fit whole-patch at the 256-pixel edge (2336x1760 at the trained 2048)
+const MATCHED_SIZE: (u32, u32) = (288, 192);
 const VISION_PREFIX: &str = "model.visual.";
 const LITERAL_PAD_PROMPT: &str = "a cube labelled <|image_pad|>";
 
@@ -85,7 +88,7 @@ async fn hidream_o1_is_detected_and_seeds_repeat_at_the_snapped_size() -> anyhow
     }
     let model = builder.build().await?;
     let first = image(&model, request(Some(2), SEED)).await?;
-    assert_eq!(first.dimensions(), (2560, 1440));
+    assert_eq!(first.dimensions(), SNAPPED_SIZE);
     assert_eq!(first, image(&model, request(Some(2), SEED)).await?);
     let other_seed = image(&model, request(Some(2), SEED + 1)).await?;
     assert_ne!(first, other_seed);
@@ -185,7 +188,7 @@ async fn hidream_o1_dev_samples_its_fixed_schedule_only() -> anyhow::Result<()> 
     };
     assert!(error_text(model.generate_image(guided).await).contains("without guidance"));
     let first = image(&model, request(None, SEED)).await?;
-    assert_eq!(first.dimensions(), (2560, 1440));
+    assert_eq!(first.dimensions(), SNAPPED_SIZE);
     assert_eq!(first, image(&model, request(None, SEED)).await?);
     Ok(())
 }
@@ -209,7 +212,7 @@ async fn an_edit_keeps_the_reference_size_and_follows_the_reference() -> anyhow:
         ..edit(SEED)
     };
     let placed = edited(&model, scene, vec![reference(0), reference(200)]).await?;
-    assert_eq!(placed.dimensions(), (2560, 1440));
+    assert_eq!(placed.dimensions(), SNAPPED_SIZE);
     let half_sized = ImageEditRequest {
         width: Some(640),
         ..edit(SEED)

@@ -15,7 +15,10 @@ const BOUNDARY: &str = "inference-image-edit-boundary";
 const ROUTE: &str = "/v1/images/edits";
 // a 4:3 reference, which an edit without a size matches at about 2048 x 2048's area
 const REFERENCE: (u32, u32) = (640, 480);
-const MATCHED: (u32, u32) = (2336, 1760);
+// a 16:9 request at the tiny checkpoint's 256-pixel edge (2560x1440 at the trained 2048)
+const SNAPPED_SIZE: (u32, u32) = (320, 192);
+// a 640x480 reference fit whole-patch at the 256-pixel edge (2336x1760 at the trained 2048)
+const MATCHED: (u32, u32) = (288, 192);
 
 async fn router(dir: &std::path::Path) -> anyhow::Result<axum::Router> {
     let spec = serde_json::from_value(json!({
@@ -136,7 +139,7 @@ async fn the_form_and_the_json_body_edit_alike() -> anyhow::Result<()> {
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     let scene = decoded(&serde_json::from_str(&body_text(response).await?)?);
-    assert_eq!(scene.dimensions(), (2560, 1440));
+    assert_eq!(scene.dimensions(), SNAPPED_SIZE);
     Ok(())
 }
 

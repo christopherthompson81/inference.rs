@@ -22,6 +22,8 @@ pub const CHANNELS: usize = 3;
 pub const PATCH_DIM: usize = PATCH_SIZE * PATCH_SIZE * CHANNELS;
 /// The target patches' M-RoPE offset on every axis; a prompt must end before it.
 pub const FIX_POINT: u32 = 4096;
+/// The edge, in pixels, HiDream-O1's size table and a matched reference are set at.
+pub const TRAINED_EDGE: usize = 2048;
 const FREQUENCY_EMBEDDING_SIZE: usize = 256;
 const MAX_PERIOD: f64 = 10000.0;
 // the ViT's first tensor, which a GGUF written for text-to-image alone leaves out
@@ -36,6 +38,13 @@ pub struct Config {
     pub text_config: TextConfig,
     pub vision_config: VisionConfig,
     pub image_token_id: u32,
+    /// The edge the output sizes scale from: the trained 2048 unless set, which only tiny test checkpoints do
+    #[serde(default = "trained_edge")]
+    pub image_edge: usize,
+}
+
+fn trained_edge() -> usize {
+    TRAINED_EDGE
 }
 
 /// One prompt laid out for the denoiser: its tokens, every row's M-RoPE position and the attention mask.
@@ -103,6 +112,7 @@ pub struct HiDreamO1 {
     stack: DecoderStack,
     vision: Option<LazyVision>,
     image_token_id: u32,
+    image_edge: usize,
     hidden: usize,
     x_proj1: Linear,
     x_proj2: Linear,
@@ -113,6 +123,11 @@ pub struct HiDreamO1 {
 }
 
 impl HiDreamO1 {
+    /// The edge the output sizes scale from ([`TRAINED_EDGE`] for a real checkpoint).
+    pub fn image_edge(&self) -> usize {
+        self.image_edge
+    }
+
     pub fn new(
         cfg: &Config,
         vb: ShardedVarBuilder,
@@ -131,6 +146,7 @@ impl HiDreamO1 {
         Ok(Self {
             vision,
             image_token_id: cfg.image_token_id,
+            image_edge: cfg.image_edge,
             hidden,
             x_proj1: layers::linear_no_bias(PATCH_DIM, hidden / 4, x.pp("proj1"))?,
             x_proj2: layers::linear(hidden / 4, hidden, x.pp("proj2"))?,

@@ -7,8 +7,6 @@ use super::model::{CHANNELS, PATCH_DIM, PATCH_SIZE};
 
 /// The ViT's input size for up to 4 references; more shrink it, as the reference pipeline does.
 const CONDITION_IMAGE_SIZE: usize = 384;
-// with exactly one reference and no requested size, the output takes the reference's own size at this edge
-const MATCHED_SIZE: usize = 2048;
 // the reference pipeline's reference counts at which each image's patches and ViT input shrink
 const FEW_REFERENCES: usize = 4;
 const SEVERAL_REFERENCES: usize = 8;
@@ -43,18 +41,21 @@ pub struct References {
 }
 
 impl References {
-    /// The output size for references of `dims` (width, height) and the snapped requested `size`, from sizes alone.
+    /// The output size for references of `dims` (width, height) and the snapped requested `size`, from sizes alone;
+    /// with one reference and no size, the reference's own aspect at the model's `edge`.
     pub fn output_size(
         dims: &[(usize, usize)],
         size: Option<(usize, usize)>,
+        edge: usize,
     ) -> Result<(usize, usize)> {
-        Ok(size.unwrap_or(checked_plans(dims, size)?[0].out))
+        Ok(size.unwrap_or(checked_plans(dims, size, edge)?[0].out))
     }
 
     /// `images` for an output of `size`, the snapped requested one; `None` takes the only image's own size.
     pub fn prepare(
         images: &[DynamicImage],
         size: Option<(usize, usize)>,
+        edge: usize,
         device: &Device,
     ) -> Result<(Self, (usize, usize))> {
         let rgb: Vec<RgbImage> = images.iter().map(DynamicImage::to_rgb8).collect();
@@ -62,7 +63,7 @@ impl References {
             .iter()
             .map(|img| (img.width() as usize, img.height() as usize))
             .collect();
-        let plans = checked_plans(&dims, size)?;
+        let plans = checked_plans(&dims, size, edge)?;
         let size = size.unwrap_or(plans[0].out);
         let condition_size = condition_size(images.len());
         let mut vit_pixels = Vec::new();
@@ -114,10 +115,15 @@ impl References {
 }
 
 // each image's fit at the edge its count leaves, refusing (from sizes alone) one too narrow for the patches or the ViT
-fn checked_plans(dims: &[(usize, usize)], size: Option<(usize, usize)>) -> Result<Vec<Fit>> {
+fn checked_plans(
+    dims: &[(usize, usize)],
+    size: Option<(usize, usize)>,
+    matched: usize,
+) -> Result<Vec<Fit>> {
     let edge = match size {
         Some((w, h)) => reference_size(dims.len(), w.max(h)),
-        None if dims.len() == 1 => MATCHED_SIZE,
+        // one reference and no requested size: the output takes the reference's own aspect at the model's edge
+        None if dims.len() == 1 => matched,
         None => inference_tensor::bail!("several reference images need an output size"),
     };
     let plans: Vec<Fit> = dims

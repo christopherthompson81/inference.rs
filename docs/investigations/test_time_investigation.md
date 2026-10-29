@@ -172,3 +172,39 @@ Finding:
 
 Implication: keep it. Left: the HiDream tiny tests, the slowest of the CPU suite (31 s, 23 s alone), which make
 4.2 MP images: 3600-4000 patch tokens through quadratic attention at every step.
+
+## Run 9 - 2026-10-28 18:11
+
+Question: can the HiDream tiny tests (the CPU suite's long poles, 41-96 s each beside the CUDA suite in Run 6) stop
+making 4.2 MP images, without changing what a real checkpoint does?
+
+Command: an `image_edge` config field (default the trained 2048, which every real checkpoint keeps, since none sets
+it) that the size table and the matched-reference size scale from, rounded up to whole 32 px patches; the tiny
+fixture sets 256. `cargo nextest run -p inference -p inference-server-core -E 'test(/^hidream_o1_tiny::/) |
+test(/^image_edit_route::/)'`.
+
+Finding:
+- Why they were slow: at 2560x1440 a tiny model (hidden 128, 2 layers) still sees 80 x 45 = 3600 patch tokens through
+  quadratic attention at every step (Dev's fixed 28, twice); an edit at 2336x1760 about 4000 plus the reference.
+- At edge 256: generation snaps to 320x192 and a 640x480 reference matches at 288x192. The seven tests take
+  0.06-0.64 s each (7-31 s alone before), all passing. At the trained edge the scaled table is the table itself (a
+  unit test checks each entry), so real-checkpoint sizes and the parity script are unchanged.
+
+Implication: the CPU suite's long poles are gone; measure the whole run again.
+
+## Run 10 - 2026-10-28 18:16
+
+Question: what does the whole `local_ci.sh` run take now, with the lease, the overlapped bundle build and the small
+HiDream images?
+
+Command: `/usr/bin/time scripts/local_ci.sh --lint --tests --cuda --bindings --size --sweep`, the same flags as
+Runs 7 and 8.
+
+Finding:
+- Wall 284.4 s (4 min 44 s), every check passing: against about 10 minutes (Run 1), 442.6 s (Run 7) and 369.4 s
+  (Run 8).
+- CPU suite 24.2 s (140.5 s in Run 8, 94.5 s in Run 7); CUDA suite 101.6 s (179.6 s, 125.7 s); the bundle build
+  2 min 09 s beside them.
+
+Implication: the CPU suite no longer sets the pace; what remains is the builds (lint, test and bundle, after an edit
+low in the stack) and the CUDA suite, whose slowest tests are now Parakeet and Kokoro on the GPU.
