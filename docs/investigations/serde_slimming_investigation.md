@@ -272,3 +272,35 @@ their tests pass.
 - An axum `QueryParams<T: FromJson>` extractor in place of `Query<T>` (server-core, web UI), and matformer reads
   its CSV with `csv::StringRecord`s into string maps.
 - TOML and YAML need nothing new: their parsers fill a `Value` through the bridge already.
+
+## Run 8 - 2026-10-29 15:07
+
+**Question (user):** the query and CSV exceptions are missing parsers, not reasons to keep serde. Can they decode
+through `FromJson` too?
+
+**Change:**
+- A text-scalar scope in the runtime (a thread-local, set only while `from_text_map` runs and reset on the way out):
+  inside it, the integer, float and bool impls read a string as their text. The derive's output is unchanged, and a
+  `Value` from JSON never sees it.
+- `from_query` parses `application/x-www-form-urlencoded` (`form_urlencoded`, already in the tree under url and
+  serde_urlencoded) into a map of strings and decodes it in that scope; a repeated key fails with "duplicate field",
+  as serde's derive did.
+- `QueryParams<T: FromJson>` (feature `axum`) replaces axum's `Query<T>` in server-core and the web UI, rejecting
+  as `Query` does (400, "Failed to deserialize query string: ..."), with `try_from_uri` for the skills tests. The
+  feature is on only in the crates above axum: the C ABI library's graph has no axum.
+- matformer reads its CSV as string records zipped with the header row, decoded through `from_text_map`.
+- The 7 query types (`SkillListQuery`, `ListLoraAdaptersQuery`, `CalibrationTarget`, `RealtimeQuery`,
+  `ListJobsQuery`, `SessionsQuery`, `ChangesQuery`) and `CsvRecord` derive `FromJson`; the two `via_serde!` shims
+  go.
+
+**Finding:**
+- CPU suite 3004 passed (the new query tests included; `?model=a&model=b` still answers 400 `invalid_query`); lint
+  clean; `docs-regen` unchanged.
+- IR lines (before: Run 7): inference-api 1,402,113 -> 1,385,396 (-16,717, step 2's figure; the URL query copies and
+  shims go), server-core 977,384 -> 972,796, web UI 413,047 -> 409,886, nn flat.
+- Left on serde's derive, by design: inference-kernel-build (a build dependency, no reason to reach for the runtime),
+  the `#[tool]` macros (the SDK's public extension point: a user's argument types implement serde's `Deserialize`,
+  not ours), the parity tests' serde side, one quant test.
+
+**Implication:** the workspace's own types all decode through `FromJson`; serde stays for `Serialize`, the derived
+`Deserialize` bridge, and third-party formats' parsers (toml, YAML) that fill a `Value`.

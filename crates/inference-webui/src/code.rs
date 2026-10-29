@@ -8,9 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
 use axum::Json;
+use inference_json::QueryParams;
 
 use crate::json_body::JsonBody;
-use axum::extract::{Extension, Query};
+use axum::extract::Extension;
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -187,7 +188,7 @@ async fn chat_model(app: &AppState, requested: Option<&str>) -> Result<String, R
         .ok_or_else(|| bad_request("no chat model is loaded"))
 }
 
-#[derive(serde::Deserialize)]
+#[derive(inference_json::FromJson)]
 pub(crate) struct SessionsQuery {
     #[serde(default)]
     project: String,
@@ -196,7 +197,7 @@ pub(crate) struct SessionsQuery {
 /// The project's sessions, newest first.
 pub(crate) async fn list_sessions(
     Extension(code): Extension<Arc<CodeState>>,
-    Query(query): Query<SessionsQuery>,
+    QueryParams(query): QueryParams<SessionsQuery>,
 ) -> Response {
     let project = match code.project(&query.project) {
         Ok(project) => project,
@@ -659,7 +660,7 @@ impl AgentUi for WebUi {
     }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(inference_json::FromJson)]
 pub(crate) struct ChangesQuery {
     session_id: String,
     #[serde(default)]
@@ -687,7 +688,7 @@ async fn with_changes<T: serde::Serialize + Send + 'static>(
 /// The files the session has changed, with their line counts.
 pub(crate) async fn changes(
     Extension(code): Extension<Arc<CodeState>>,
-    Query(query): Query<ChangesQuery>,
+    QueryParams(query): QueryParams<ChangesQuery>,
 ) -> Response {
     with_changes(&code, &query.session_id, |changes| {
         changes.list().map(|files| Some(json!({"files": files})))
@@ -698,7 +699,7 @@ pub(crate) async fn changes(
 /// One file's diff against its copy from before the session changed it.
 pub(crate) async fn diff(
     Extension(code): Extension<Arc<CodeState>>,
-    Query(query): Query<ChangesQuery>,
+    QueryParams(query): QueryParams<ChangesQuery>,
 ) -> Response {
     with_changes(&code, &query.session_id, move |changes| {
         changes.diff(&query.path)
@@ -709,7 +710,7 @@ pub(crate) async fn diff(
 /// One directory of the project, for the file tree.
 pub(crate) async fn tree(
     Extension(code): Extension<Arc<CodeState>>,
-    Query(query): Query<ChangesQuery>,
+    QueryParams(query): QueryParams<ChangesQuery>,
 ) -> Response {
     with_changes(&code, &query.session_id, move |changes| {
         Ok(changes

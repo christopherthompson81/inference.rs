@@ -4,10 +4,7 @@
 use std::time::Duration;
 
 use axum::{
-    extract::{
-        Query,
-        ws::{Message, WebSocket, WebSocketUpgrade},
-    },
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
     http::HeaderMap,
     response::{IntoResponse, Response},
 };
@@ -20,6 +17,7 @@ use inference_api::{
     openai::{TranscriptionResponseFormat, TranscriptionSessionRequest},
     transcription_session::{PCM16_BYTES, PCM16_SCALE, TranscriptionSession},
 };
+use inference_json::QueryParams;
 use serde_json::{Value, json};
 
 use crate::{handler_core::openai_error_response, types::OwnedEngine};
@@ -48,7 +46,7 @@ const VAD_FRAME_MS: u64 = 20;
 const QUIETEST_SPEECH_DBFS: f64 = -60.0;
 const LOUDEST_THRESHOLD_DBFS: f64 = -20.0;
 
-#[derive(serde::Deserialize)]
+#[derive(inference_json::FromJson)]
 pub struct RealtimeQuery {
     intent: Option<String>,
     model: Option<String>,
@@ -57,7 +55,7 @@ pub struct RealtimeQuery {
 /// The Realtime WebSocket, for transcription sessions only.
 pub async fn realtime(
     OwnedEngine(engine): OwnedEngine,
-    Query(query): Query<RealtimeQuery>,
+    QueryParams(query): QueryParams<RealtimeQuery>,
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {

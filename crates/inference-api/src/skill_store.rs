@@ -86,8 +86,7 @@ pub struct SkillListObject {
     pub data: Vec<SkillObject>,
 }
 
-// a URL query: serde_urlencoded reads numbers from strings, which a `Value` would not
-#[derive(Clone, Debug, serde::Deserialize, ToSchema)]
+#[derive(Clone, Debug, inference_json::FromJson, ToSchema)]
 pub struct SkillListQuery {
     #[serde(default)]
     pub source: Option<String>,

@@ -33,7 +33,7 @@ impl MatformerSliceConfig {
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, inference_json::FromJson)]
 struct CsvRecord {
     name: String,
     #[serde(rename = "# Effective Params (B)")]
@@ -53,9 +53,17 @@ impl MatformerConfig {
 
         let mut rdr = csv::Reader::from_reader(reader);
         let mut slices = HashMap::new();
+        let headers = rdr
+            .headers()
+            .context("Failed to read the CSV header")?
+            .clone();
 
-        for result in rdr.deserialize() {
-            let record: CsvRecord = result.context("Failed to parse CSV record")?;
+        for result in rdr.records() {
+            let row = result.context("Failed to parse CSV record")?;
+            let fields = headers.iter().zip(row.iter());
+            let row = fields.map(|(k, v)| (k.to_string(), v.into())).collect();
+            let record: CsvRecord = inference_json::from_text_map(&serde_json::Value::Object(row))
+                .context("Failed to parse CSV record")?;
 
             let ffn_hidden_dimensions = parse_ffn_hidden_dims(&record.ffn_hidden_dims)
                 .with_context(|| format!("Failed to parse FFN hidden dims for {}", record.name))?;

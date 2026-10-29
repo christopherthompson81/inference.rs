@@ -4,6 +4,7 @@
 //! schemas keep agreeing with the decoder, and it also implements `Deserialize` by way of a `Value`, so a migrated type
 //! still nests in serde-derived containers and non-JSON formats.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::hash::{BuildHasher, Hash};
@@ -16,6 +17,49 @@ use serde_json::{Map, Value};
 extern crate self as inference_json;
 
 pub use inference_json_derive::FromJson;
+
+#[cfg(feature = "axum")]
+mod query;
+#[cfg(feature = "axum")]
+pub use query::{QueryParams, QueryParamsRejection};
+
+thread_local! {
+    // set while a URL query or CSV row decodes: its scalars arrive as text
+    static TEXT_SCALARS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Decodes `v` with numbers and bools read from strings, for sources whose values are all text.
+pub fn from_text_map<T: FromJson>(v: &Value) -> Result<T, JsonError> {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEXT_SCALARS.with(|t| t.set(self.0));
+        }
+    }
+    let _reset = Reset(TEXT_SCALARS.with(|t| t.replace(true)));
+    T::from_json(v)
+}
+
+/// A URL query string (`a=1&b=x`) decoded into `T`; a repeated key is an error, as in serde's derive.
+pub fn from_query<T: FromJson>(query: &str) -> Result<T, JsonError> {
+    let mut map = Map::new();
+    for (k, v) in form_urlencoded::parse(query.as_bytes()) {
+        if map
+            .insert(k.to_string(), Value::String(v.into_owned()))
+            .is_some()
+        {
+            return Err(JsonError::new(format!("duplicate field `{k}`")));
+        }
+    }
+    from_text_map(&Value::Object(map))
+}
+
+fn text_scalar(v: &Value) -> Option<&str> {
+    match v {
+        Value::String(s) if TEXT_SCALARS.with(Cell::get) => Some(s),
+        _ => None,
+    }
+}
 
 /// A decode failure: the message and the path to the value that failed (`models[0].model.Plain.dtype`).
 #[derive(Debug, Clone, PartialEq)]
@@ -451,6 +495,11 @@ impl FromJson for char {
 
 impl FromJson for bool {
     fn from_json(v: &Value) -> Result<Self, JsonError> {
+        if let Some(s) = text_scalar(v) {
+            return s
+                .parse()
+                .map_err(|_| JsonError::invalid_value(v, "a boolean"));
+        }
         v.as_bool()
             .ok_or_else(|| JsonError::invalid_type(v, "a boolean"))
     }
@@ -466,6 +515,13 @@ impl FromJson for () {
 }
 
 fn integer<T: TryFrom<u64> + TryFrom<i64>>(v: &Value, name: &str) -> Result<T, JsonError> {
+    if let Some(s) = text_scalar(v) {
+        let parsed = match s.parse::<u64>() {
+            Ok(u) => T::try_from(u).ok(),
+            Err(_) => s.parse::<i64>().ok().and_then(|i| T::try_from(i).ok()),
+        };
+        return parsed.ok_or_else(|| JsonError::invalid_value(v, name));
+    }
     let n = match v {
         Value::Number(n) => n,
         _ => return Err(JsonError::invalid_type(v, name)),
@@ -503,12 +559,18 @@ nonzero!(u8, u16, u32, u64, usize);
 
 impl FromJson for f64 {
     fn from_json(v: &Value) -> Result<Self, JsonError> {
+        if let Some(s) = text_scalar(v) {
+            return s.parse().map_err(|_| JsonError::invalid_value(v, "f64"));
+        }
         v.as_f64().ok_or_else(|| JsonError::invalid_type(v, "f64"))
     }
 }
 
 impl FromJson for f32 {
     fn from_json(v: &Value) -> Result<Self, JsonError> {
+        if let Some(s) = text_scalar(v) {
+            return s.parse().map_err(|_| JsonError::invalid_value(v, "f32"));
+        }
         v.as_f64()
             .map(|f| f as f32)
             .ok_or_else(|| JsonError::invalid_type(v, "f32"))

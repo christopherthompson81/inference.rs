@@ -10,11 +10,17 @@ repository.workspace = true
 readme = "../../README.md"
 
 [dependencies]
+axum = { workspace = true, optional = true }
+form_urlencoded.workspace = true
 either.workspace = true
 indexmap.workspace = true
 inference-json-derive.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[features]
+# `QueryParams<T>`, an axum extractor decoding the URL query through `FromJson`
+axum = ["dep:axum"]
 
 [dev-dependencies]
 serde = { workspace = true, features = ["derive"] }

@@ -2821,7 +2821,9 @@ dependencies = [
 name = "inference-json"
 version = "0.0.26"
 dependencies = [
+ "axum",
  "either",
+ "form_urlencoded",
  "indexmap",
  "inference-json-derive",
  "serde",
