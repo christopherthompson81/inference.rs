@@ -16,15 +16,20 @@ pub trait JsonRequest: Sized {
 
 /// Parses `body` as `T` with the failing field's path; call it only from a [`JsonRequest`] impl.
 pub fn parse_json<T: FromJson>(body: &[u8]) -> Result<T, ApiError> {
-    let value = inference_json::parse_slice(body).map_err(|error| syntax_error(&error))?;
-    T::from_json(&value).map_err(|error| {
-        ApiError::new(
-            ApiErrorKind::InvalidRequest,
-            format!("{DATA_ERROR_PREFIX}: {error}"),
-            Some(INVALID_REQUEST_BODY),
-            None,
-        )
-    })
+    let value = inference_json::parse_slice(body).map_err(|error| match error.is_syntax() {
+        true => syntax_error(&error),
+        false => data_error(&error),
+    })?;
+    T::from_json(&value).map_err(|error| data_error(&error))
+}
+
+fn data_error(error: &inference_json::JsonError) -> ApiError {
+    ApiError::new(
+        ApiErrorKind::InvalidRequest,
+        format!("{DATA_ERROR_PREFIX}: {error}"),
+        Some(INVALID_REQUEST_BODY),
+        None,
+    )
 }
 
 fn syntax_error(error: &dyn std::fmt::Display) -> ApiError {
@@ -99,6 +104,17 @@ mod tests {
             wrong_type.message.contains("ggml_type: invalid type"),
             "{}",
             wrong_type.message
+        );
+
+        let repeated = <ReIsqRequest as JsonRequest>::from_json(
+            br#"{"ggml_type": "q4k", "ggml_type": "q8_0"}"#,
+        )
+        .unwrap_err();
+        assert_eq!(repeated.code.as_deref(), Some(INVALID_REQUEST_BODY));
+        assert!(
+            repeated.message.contains("duplicate field `ggml_type`"),
+            "{}",
+            repeated.message
         );
 
         let trailing =

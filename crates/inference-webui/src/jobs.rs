@@ -165,7 +165,7 @@ pub async fn save_job(
         },
         _ => return bad_request(format!("the first part must be `{JOB_FIELD}`")).into_response(),
     };
-    let job: SaveJob = match serde_json::from_str(&job) {
+    let job: SaveJob = match inference_json::from_str(&job) {
         Ok(job) => job,
         Err(e) => return bad_request(format!("invalid job: {e}")).into_response(),
     };

@@ -47,7 +47,7 @@ twins! {
     #[derive(Debug, Default)]
     #[serde(default)]
     pub struct AllDefault {
-        x: u16,
+        pub x: u16,
         y: String,
     }
 
@@ -373,4 +373,28 @@ fn query_strings_read_their_scalars_from_text() {
 fn text_scalars_stay_inside_their_call() {
     assert!(crate::from_query::<Listing>("limit=5").is_ok());
     assert!(crate::from_value::<u32>(&json!("5")).is_err());
+}
+
+#[test]
+fn parsed_text_may_not_repeat_a_key() {
+    let e = crate::from_str::<serde_json::Value>(r#"{"a": 1, "b": {"c": 1, "c": 2}}"#).unwrap_err();
+    assert!(e.to_string().starts_with("duplicate field `c`"), "{e}");
+    assert!(!e.is_syntax());
+    assert!(
+        crate::from_str::<serde_json::Value>(r#"{"a": "#)
+            .unwrap_err()
+            .is_syntax()
+    );
+    let v = crate::parse_str(r#"{"a": [1, -2, 2.5, "x", null, true, {"b": {}}]}"#).unwrap();
+    assert_eq!(v, json!({"a": [1, -2, 2.5, "x", null, true, {"b": {}}]}));
+}
+
+#[test]
+fn files_read_through_the_bridge_keep_the_last_of_a_repeated_key() {
+    #[derive(serde::Deserialize)]
+    struct Holder {
+        inner: json_side::AllDefault,
+    }
+    let h: Holder = serde_json::from_str(r#"{"inner": {"x": 1, "x": 2}}"#).unwrap();
+    assert_eq!(h.inner.x, 2);
 }

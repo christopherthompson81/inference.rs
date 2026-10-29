@@ -304,3 +304,21 @@ through `FromJson` too?
 
 **Implication:** the workspace's own types all decode through `FromJson`; serde stays for `Serialize`, the derived
 `Deserialize` bridge, and third-party formats' parsers (toml, YAML) that fill a `Value`.
+
+## Run 9 - 2026-10-29 15:25
+
+**Question (user):** a repeated key in a request should be an error again, as serde's derive made it.
+
+**Change:** `parse_str` / `parse_slice` (and so `from_str`, `from_slice`, request bodies, the web UI's `JsonBody`)
+build their `Value` through a visitor that fails on a key repeated in any object ("duplicate field `k` at line L
+column C"). `JsonError::is_syntax` tells that apart from malformed text, so a repeated key answers
+`invalid_request_body` (422 in the web UI), as serde's data error did, and broken JSON still answers
+`malformed_json` (400). The engine spec (`Engine::load_json`, the C ABI's load), a host tool's definition and the web
+UI's job upload switch to `inference_json::from_slice` / `from_str`.
+
+Stricter than serde in one way: serde's derive rejected a repeat of a field the type declares, and ignored repeats
+of unknown keys; the parser cannot tell the two apart, so it rejects both. The derived `Deserialize` bridge keeps
+serde_json's `Value` (last key wins), so files from other writers (a hand-edited `config.json`, our own session and
+chat sidecars) still load.
+
+**Finding:** CPU suite 3006 passed; tests cover a nested repeat, the syntax / data split, and the bridge staying lenient.

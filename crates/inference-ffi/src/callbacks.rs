@@ -151,7 +151,7 @@ pub(crate) fn host_tool(
             &format!("{label}.definition"),
         )?
     };
-    let definition: Tool = serde_json::from_slice(definition)
+    let definition: Tool = inference_json::from_slice(definition)
         .map_err(|error| Failure::invalid(format!("{label}.definition: {error}")))?;
     let user_data = UserData(tool.user_data);
     let tool_name = c_string(&definition.function.name);
