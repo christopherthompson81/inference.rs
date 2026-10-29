@@ -1,3 +1,4 @@
+//! LLaVA-Next image tiling: the any-resolution grid, padding and unpadding, shared by the models built on it.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
@@ -11,11 +12,7 @@ use image::{
 use inference_tensor::{DType, Device, Result, Tensor};
 use std::cmp::min;
 
-pub(crate) use super::anyres::{
-    get_anyres_image_grid_shape, get_num_samples, select_best_resolution,
-};
-
-pub(crate) fn calculate_unpad(size: (u32, u32), original_size: (u32, u32)) -> (u32, u32) {
+pub fn calculate_unpad(size: (u32, u32), original_size: (u32, u32)) -> (u32, u32) {
     let (original_width, original_height) = original_size;
     let (current_width, current_height) = size;
     let original_aspect_ratio = (original_width as f32) / (original_height as f32);
@@ -33,10 +30,7 @@ pub(crate) fn calculate_unpad(size: (u32, u32), original_size: (u32, u32)) -> (u
     }
 }
 
-pub(crate) fn resize_and_pad_image(
-    image: &DynamicImage,
-    target_resolution: (u32, u32),
-) -> DynamicImage {
+pub fn resize_and_pad_image(image: &DynamicImage, target_resolution: (u32, u32)) -> DynamicImage {
     let (original_width, original_height) = image.dimensions();
     let original_width_f = original_width as f32;
     let original_height_f = original_height as f32;
@@ -74,7 +68,7 @@ pub(crate) fn resize_and_pad_image(
     new_image
 }
 
-pub(crate) fn divide_to_samples(image: &DynamicImage, crop_size: (u32, u32)) -> Vec<DynamicImage> {
+pub fn divide_to_samples(image: &DynamicImage, crop_size: (u32, u32)) -> Vec<DynamicImage> {
     let (width, height) = image.dimensions();
     let mut samples = Vec::new();
     for y in (0..height).step_by(crop_size.1 as usize) {
@@ -86,7 +80,7 @@ pub(crate) fn divide_to_samples(image: &DynamicImage, crop_size: (u32, u32)) -> 
     samples
 }
 
-pub(crate) fn calculate_middle(image_size: (u32, u32), center_size: (u32, u32)) -> (u32, u32) {
+pub fn calculate_middle(image_size: (u32, u32), center_size: (u32, u32)) -> (u32, u32) {
     let (width, height) = image_size;
     let (center_width, center_height) = center_size;
     let left = if width <= center_width {
@@ -102,7 +96,7 @@ pub(crate) fn calculate_middle(image_size: (u32, u32), center_size: (u32, u32)) 
     (left, top)
 }
 
-pub(crate) fn expand2square(image: &DynamicImage, background_color: Rgb<u8>) -> DynamicImage {
+pub fn expand2square(image: &DynamicImage, background_color: Rgb<u8>) -> DynamicImage {
     let (width, height) = image.dimensions();
     match width.cmp(&height) {
         std::cmp::Ordering::Less => {
@@ -212,5 +206,93 @@ impl LLaVAImageProcessor {
         Self::to_channel_dimension_format(&pixel_value)?
             .to_dtype(dtype)?
             .to_device(device)
+    }
+}
+
+pub fn get_anyres_image_grid_shape(
+    image_size: (u32, u32),
+    grid_pinpoints: &[(u32, u32)],
+    patch_size: u32,
+) -> (u32, u32) {
+    let (width, height) = select_best_resolution(image_size, grid_pinpoints);
+    (width / patch_size, height / patch_size)
+}
+
+pub fn get_num_samples(
+    image_size: (u32, u32),
+    grid_pinpoints: &[(u32, u32)],
+    crop_size: (u32, u32),
+) -> u32 {
+    let (width, height) = select_best_resolution(image_size, grid_pinpoints);
+    width / crop_size.0 * height / crop_size.1 + 1
+}
+
+pub fn select_best_resolution(
+    original_size: (u32, u32),
+    possible_resolutions: &[(u32, u32)],
+) -> (u32, u32) {
+    let (original_width, original_height) = original_size;
+    let mut best_fit = (0, 0);
+    let original_width_f = original_width as f32;
+    let original_height_f = original_height as f32;
+    let mut max_effective_resolution = 0_u32;
+    let mut min_wasted_resolution = u32::MAX;
+    for (width, height) in possible_resolutions {
+        let width_f = *width as f32;
+        let height_f = *height as f32;
+        let scale = (width_f / original_width_f).min(height_f / original_height_f);
+        let (downscaled_width, downscaled_height) = (
+            (original_width_f * scale) as u32,
+            (original_height_f * scale) as u32,
+        );
+        // transformers caps it at the original's area: upscaling past the image earns nothing
+        let effective_resolution = std::cmp::min(
+            original_width * original_height,
+            downscaled_width * downscaled_height,
+        );
+        let wasted_resolution = (*width) * (*height) - effective_resolution;
+        if effective_resolution > max_effective_resolution
+            || (effective_resolution == max_effective_resolution
+                && wasted_resolution < min_wasted_resolution)
+        {
+            best_fit = (*width, *height);
+            max_effective_resolution = effective_resolution;
+            min_wasted_resolution = wasted_resolution;
+        }
+    }
+    best_fit
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_best_resolution;
+
+    // transformers' `select_best_resolution` on these sizes; both sides read `(height, width)`
+    #[test]
+    fn best_resolution_matches_transformers() {
+        let llava = [(336, 672), (672, 336), (672, 672), (1008, 336), (336, 1008)];
+        let granite = [
+            (384, 384),
+            (384, 768),
+            (768, 384),
+            (768, 768),
+            (1152, 384),
+            (1920, 768),
+        ];
+        for (size, pinpoints, expected) in [
+            ((420, 700), &llava[..], (672, 672)),
+            ((1000, 300), &llava[..], (1008, 336)),
+            ((200, 200), &llava[..], (336, 672)),
+            ((420, 700), &granite[..], (768, 768)),
+            ((1000, 300), &granite[..], (1152, 384)),
+            ((384, 384), &granite[..], (384, 384)),
+            ((2000, 500), &granite[..], (1920, 768)),
+        ] {
+            assert_eq!(
+                select_best_resolution(size, pinpoints),
+                expected,
+                "{size:?}"
+            );
+        }
     }
 }

@@ -217,6 +217,7 @@ macro_rules! multimodal_loader_table {
             Idefics2 { cli: "idefics2", hf: "Idefics2ForConditionalGeneration", loader: Idefics2Loader, feature: "models-llama" },
             LLaVANext { cli: "llava_next", hf: "LlavaNextForConditionalGeneration", loader: LLaVANextLoader, feature: "models-llama" },
             LLaVA { cli: "llava", hf: "LlavaForConditionalGeneration", loader: LLaVALoader, feature: "models-llama" },
+            Granite4Vision { cli: "granite4_vision", hf: "Granite4VisionForConditionalGeneration", loader: Granite4VisionLoader, feature: "models-other" },
             Lfm2Vl { cli: "lfm2vl" | "lfm2_vl", hf: "Lfm2VlForConditionalGeneration", loader: Lfm2VlLoader, feature: "models-other" },
             VLlama { cli: "vllama", hf: "MllamaForConditionalGeneration", loader: VLlamaLoader, feature: "models-llama" },
             Qwen2VL { cli: "qwen2vl", hf: "Qwen2VLForConditionalGeneration", loader: Qwen2VLLoader, feature: "models-qwen" },

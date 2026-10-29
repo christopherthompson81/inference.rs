@@ -95,3 +95,27 @@ After both:
 **Tokenizer (upstream, for a llama.cpp report):** llama.cpp tags swash's tokenizer `granite-docling` (the hash of its check text), whose case in `llama-vocab.cpp` is the GPT-2 split. granite-docling-258M's own tokenizer is indeed plain ByteLevel, but swash's (like Granite 4.0 / 4.1 / Switch, same 100352 merges) splits with the Llama 3 regex (`\p{N}{1,3}`, `[^\r\n\p{L}\p{N}]?\p{L}+`, newline runs). llama-server's `/tokenize` on README.md gives 5609 tokens against 4742 from the HF tokenizer; on `x=3.14159` it gives `14`, `159` where HF gives `141`, `59`. Granite 4.1 converts as `dbrx` (the right split): its vocab differs from swash's in some entries, so the hash differs. We follow the GGUF's tag like llama.cpp, so a swash GGUF tokenizes as llama.cpp's does. (`llama-tokenize` segfaults on every model in this build; the server endpoint works.)
 
 **Next:** Granite 4 Vision and Granite Speech.
+
+## Run 7 - 2026-10-28 21:40
+
+**Question:** does Granite 4 Vision (SigLIP tower, Window Q-Former projectors from four tower states plus four spatial ones, deepstack injection before text layers 0/3/6/9/12/15/18/21, LLaVA-Next tiling) match transformers on `ibm-granite/granite-vision-4.1-4b`?
+
+**Command:** `g4v/ref.py` (transformers 5.19.0 `AutoModelForImageTextToText`, f32 CPU) and our server (`inference serve --cpu --dtype f32`, `/v1/chat/completions` with `logprobs`), one synthetic 700x420 image of shapes and a text label, "Describe the shapes and the text in this image.", 24 greedy tokens.
+
+**Findings, in order:**
+
+1. 500: `unknown method: string has no method named index (in chat_template:15)`. The template calls Python's `str.index`, which minijinja's pycompat lacks (it has `find` / `rfind`). Added `index` / `rindex` around the pycompat callback, byte offsets like its `find`, since the template compares the two.
+2. 400: two `<image>` markers for one image. The loader's prompt prefixer also prepended one; the template already writes `<image>\n` per image part, so the prefixer leaves the prompt alone (as LFM2-VL's does).
+3. 1169 prompt tokens against transformers' 535, first token right. Our `select_best_resolution` capped a candidate's effective resolution at its own area; transformers caps it at the original image's, so upscaling past the image earns nothing and it takes the smallest covering grid (768x768 here, we took 768x1536). Fixed in the shared LLaVA-Next tiling (now `inference_nn::vision::llava_tiling`, which LLaVA-Next uses too), with a test of seven sizes against transformers' choices.
+
+After the fixes:
+
+| | ours | transformers |
+|---|---|---|
+| prompt tokens | 535 | 535 (494 image) |
+| first token top 5 | 791 -0.129, 644 -3.236, 2028 -3.512, 50384 -4.423, 27 -4.653 | 791 -0.129, 644 -3.222, 2028 -3.496, 50384 -4.434, 27 -4.668 |
+| 24-token greedy text | identical | |
+
+The 0.016 logprob spread is in line with our CatmullRom resize against PIL's bicubic in the crops.
+
+**Next:** a tiny-checkpoint engine test; `granite-4.0-3b-vision` ships its text weights partly as a PEFT adapter (`adapter_model.safetensors`), not checked here; the GGUF mmproj (`granite4_vision`) and Granite Speech remain.

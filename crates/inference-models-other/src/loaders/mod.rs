@@ -30,6 +30,7 @@ mod glm4_moe;
 mod glm4_moe_lite;
 mod gpt_oss;
 mod granite;
+mod granite4_vision;
 mod hunyuan_v1_dense;
 mod hunyuan_v1_moe;
 mod lfm2;
@@ -53,6 +54,7 @@ pub use glm4_moe::*;
 pub use glm4_moe_lite::*;
 pub use gpt_oss::*;
 pub use granite::*;
+pub use granite4_vision::*;
 pub use hunyuan_v1_dense::*;
 pub use hunyuan_v1_moe::*;
 pub use lfm2::*;
@@ -79,7 +81,11 @@ inference_nn::boxed_loaders!(
     Lfm2Loader,
     Starcoder2Loader,
 );
-inference_nn::boxed_loaders!(MultimodalModelLoader: Lfm2VlLoader, PaddleOcrVlLoader);
+inference_nn::boxed_loaders!(
+    MultimodalModelLoader: Granite4VisionLoader,
+    Lfm2VlLoader,
+    PaddleOcrVlLoader
+);
 inference_nn::boxed_loaders!(
     EmbeddingModelLoader: BertLoader,
     Lfm2DecisionLoader,

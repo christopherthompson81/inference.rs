@@ -2007,6 +2007,9 @@ pub struct GraniteMoeHybrid {
     has_sinks: bool,
 }
 
+/// Runs before decoder layer `layer_idx` on its input hidden states, as Granite 4 Vision injects image features.
+pub type GraniteLayerHook<'a> = &'a dyn Fn(usize, Tensor) -> Result<Tensor>;
+
 impl GraniteMoeHybrid {
     pub fn new(
         cfg: &Config,
@@ -2015,12 +2018,10 @@ impl GraniteMoeHybrid {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
-        let vb_m = vb.pp("model");
-        let vb_lm_head = vb.pp("lm_head");
         Self::new_inner(
             cfg,
-            vb_m,
-            vb_lm_head,
+            vb.pp("model"),
+            vb.pp("lm_head"),
             is_gptx,
             normal_loading_metadata,
             attention_mechanism,
@@ -2282,11 +2283,23 @@ impl GraniteMoeHybrid {
     }
 
     pub fn forward(&self, input_ids: &Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
-        let (_batch_size, _seq_len) = input_ids.dims2()?;
-        let mut x = self.wte.embedding_forward(input_ids, self.dtype)?;
-        // Scale embeddings
-        x = scale_tensor(x, self.embedding_multiplier)?;
+        let x = self.embed(input_ids)?;
+        self.forward_embeds(input_ids, x, ctx, &|_, x| Ok(x))
+    }
 
+    /// The token embeddings, scaled by the embedding multiplier.
+    pub fn embed(&self, input_ids: &Tensor) -> Result<Tensor> {
+        let x = self.wte.embedding_forward(input_ids, self.dtype)?;
+        scale_tensor(x, self.embedding_multiplier)
+    }
+
+    pub fn forward_embeds(
+        &self,
+        input_ids: &Tensor,
+        mut x: Tensor,
+        ctx: &mut ModelForwardContext<'_>,
+        before_layer: GraniteLayerHook<'_>,
+    ) -> Result<Tensor> {
         // Get both internal cache and pipeline cache
         let mut internal_cache = self.hybrid_cache.lock().unwrap();
         let mut normal_cache =
@@ -2386,6 +2399,7 @@ impl GraniteMoeHybrid {
 
         for (layer_idx, layer) in self.layers.iter().enumerate() {
             x = self.mapper.map(x, layer_idx)?;
+            x = before_layer(layer_idx, x)?;
 
             match layer {
                 DecoderLayer::Attention(block) => {

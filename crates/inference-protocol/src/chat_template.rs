@@ -498,6 +498,27 @@ fn preprocess_gemma4_tool_messages(messages: &mut Vec<IndexMap<String, MessageCo
     *messages = result;
 }
 
+/// pycompat's Python methods, plus `str.index` / `str.rindex`, which it lacks (Granite 4 Vision's template uses
+/// `index`). Like its `find`, they return a byte offset, so templates may compare the two.
+fn python_method(
+    state: &minijinja::State,
+    value: &Value,
+    method: &str,
+    args: &[Value],
+) -> std::result::Result<Value, Error> {
+    if let (Some(text), "index" | "rindex") = (value.as_str(), method) {
+        let (needle,): (&str,) = minijinja::value::from_args(args)?;
+        let found = match method {
+            "index" => text.find(needle),
+            _ => text.rfind(needle),
+        };
+        return found
+            .map(|offset| Value::from(offset as i64))
+            .ok_or_else(|| Error::new(ErrorKind::InvalidOperation, "substring not found"));
+    }
+    minijinja_contrib::pycompat::unknown_method_callback(state, value, method, args)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn apply_chat_template_to(
     mut messages: Vec<IndexMap<String, MessageContent>>,
@@ -513,7 +534,7 @@ pub fn apply_chat_template_to(
     let mut env = Environment::new();
 
     // enable python methods such as .strip()
-    env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
+    env.set_unknown_method_callback(python_method);
 
     // https://github.com/huggingface/transformers/blob/76a33a10923ccc1074917f6b6a1e719e626b7dc9/src/transformers/tokenization_utils_base.py#L1842
     env.set_lstrip_blocks(true);
@@ -711,6 +732,33 @@ mod tests {
             ("role".to_string(), Either::Left("user".to_string())),
             ("content".to_string(), Either::Left(text.to_string())),
         ])
+    }
+
+    #[test]
+    fn templates_get_python_string_index_and_rindex() {
+        let render = |source: &str| {
+            apply_chat_template_to(
+                vec![user_text_message("a<b>c<b>")],
+                false,
+                Some(DEFAULT_ENABLE_THINKING),
+                None,
+                &ChatTemplateValue(Either::Left(source.to_string())),
+                None,
+                None,
+                None,
+                Vec::new(),
+            )
+        };
+        let found = render(
+            "{{ messages[0].content.index('<b>') }} {{ messages[0].content.rindex('<b>') }} \
+             {{ messages[0].content.find('<b>') }}",
+        )
+        .unwrap();
+        assert_eq!(
+            found.split_whitespace().collect::<Vec<_>>(),
+            ["1", "5", "1"]
+        );
+        assert!(render("{{ messages[0].content.index('<d>') }}").is_err());
     }
 
     #[test]

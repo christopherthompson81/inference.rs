@@ -260,6 +260,11 @@ impl SupportedArch for MultimodalLoaderType {
                 modalities: &[Text, Vision],
                 examples: &[ex!("llava-hf/llava-1.5-7b-hf")],
             },
+            Self::Granite4Vision => ArchMetadata {
+                families: &["Granite 4 Vision"],
+                modalities: &[Text, Vision],
+                examples: &[ex!("ibm-granite/granite-vision-4.1-4b")],
+            },
             Self::Lfm2Vl => ArchMetadata {
                 families: &["LFM2-VL", "LFM2.5-VL"],
                 modalities: &[Text, Vision],

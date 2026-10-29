@@ -129,6 +129,8 @@ Overrides merge recursively, so the checkpoint's `rope_theta`, `partial_rotary_f
 
 IBM Granite 4.0 checkpoints (e.g. `ibm-granite/granite-4.0-micro`) mix Mamba-2 recurrent layers with attention layers. The dense Granite 3.x and 4.1 models (`GraniteForCausalLM`, e.g. `ibm-granite/granite-4.1-3b`), Granite MoE (`GraniteMoeForCausalLM`, e.g. `ibm-granite/granite-3.1-1b-a400m-instruct`), Granite MoE with a shared expert (`GraniteMoeSharedForCausalLM`) and the interleaved sliding-window Granite SWA models (`GraniteSWAForCausalLM` and `GraniteMoeSWAForCausalLM`, e.g. `ibm-granite/granite-swash-2b`, with per-head attention sinks) run on the same model with every layer attention. All of them load through auto-detection like any other text model, from safetensors or from llama.cpp's GGUFs. llama.cpp tags the swash tokenizer `granite-docling` and splits it as GPT-2 does, unlike the checkpoint's own tokenizer; a swash GGUF tokenizes as it does in llama.cpp.
 
+Granite 4 Vision (`Granite4VisionForConditionalGeneration`, e.g. `ibm-granite/granite-vision-4.1-4b`) reads images: a SigLIP tower tiled as LLaVA-Next tiles, whose layers feed Window Q-Former projectors that add their features at the image positions before several text layers. `ibm-granite/granite-4.0-3b-vision` ships part of its text weights as a PEFT adapter (`adapter_model.safetensors`), which is not applied on load: merge it into the checkpoint first.
+
 ## LFM2 and LFM2.5
 
 LiquidAI LFM2 and LFM2.5 dense and MoE checkpoints are supported. LFM2-VL and LFM2.5-VL are supported for image input.

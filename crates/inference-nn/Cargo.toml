@@ -22,6 +22,7 @@ csv.workspace = true
 float8.workspace = true
 half.workspace = true
 image.workspace = true
+inference-vision.workspace = true
 indexmap.workspace = true
 indicatif.workspace = true
 inference-audio.workspace = true
