@@ -1,6 +1,6 @@
 use super::*;
 
-/// `NormalLoader` for a GraniteMoeHybrid model (IBM Granite 4.0).
+/// `NormalLoader` for IBM Granite: 4.0 hybrids, dense 3.x / 4.1 and the MoE variants, all on one model.
 pub struct GraniteMoeHybridLoader;
 
 impl NormalModelLoader for GraniteMoeHybridLoader {
@@ -47,9 +47,9 @@ impl IsqModelLoader for GraniteMoeHybridLoader {
             r"layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$",
             r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$",
             r"layers\.(\d+)\.mamba\.(in_proj|out_proj)\.(weight|bias)$",
-            // MLP (GraniteMLP uses shared_mlp.input_linear and shared_mlp.output_linear)
             r"layers\.(\d+)\.shared_mlp\.input_linear\.(weight|bias)$",
             r"layers\.(\d+)\.shared_mlp\.output_linear\.(weight|bias)$",
+            r"layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.(weight|bias)$",
             r"layers\.(\d+)\.block_sparse_moe\.(input_linear|output_linear)\.weight$",
         ])
     }

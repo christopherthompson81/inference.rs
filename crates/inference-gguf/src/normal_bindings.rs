@@ -130,14 +130,14 @@ fn bind_block_tensor(
     bindings: &mut GgufBindingMap,
 ) -> Result<()> {
     let p = format!("model.layers.{layer}");
-    if role == FUSED_QKV_ROLE && matches!(loader, NormalLoaderType::GraniteMoeHybrid) {
+    if role == FUSED_QKV_ROLE && is_granite(loader) {
         return bind_granite_qkv(archive, &p, suffix, source, bindings);
     }
     let gpt_oss_mxfp4_expert = matches!(loader, NormalLoaderType::GptOss)
         && matches!(role, "ffn_gate_exps" | "ffn_up_exps" | "ffn_down_exps")
         && archive.tensor_info(source)?.dtype().raw() == 39;
     if role == "ffn_gate_up_exps" {
-        if matches!(loader, NormalLoaderType::GraniteMoeHybrid) {
+        if is_granite(loader) {
             bindings.insert(
                 format!("{p}.block_sparse_moe.input_linear.{suffix}"),
                 GgufTensorBinding::tensor(source),
@@ -196,38 +196,26 @@ fn bind_block_tensor(
         "attn_q_norm" => Some(format!("{p}.self_attn.{}.{suffix}", q_norm_name(loader))),
         "attn_k_norm" => Some(format!("{p}.self_attn.{}.{suffix}", k_norm_name(loader))),
         "attn_sinks" => Some(format!("{p}.self_attn.sinks")),
-        "ffn_gate" if !matches!(loader, NormalLoaderType::GraniteMoeHybrid) => {
-            dense_mlp_target(loader, &p, "gate", suffix)
-        }
-        "ffn_up" if !matches!(loader, NormalLoaderType::GraniteMoeHybrid) => {
-            dense_mlp_target(loader, &p, "up", suffix)
-        }
-        "ffn_down" if !matches!(loader, NormalLoaderType::GraniteMoeHybrid) => {
-            dense_mlp_target(loader, &p, "down", suffix)
-        }
+        "ffn_gate" if !is_granite(loader) => dense_mlp_target(loader, &p, "gate", suffix),
+        "ffn_up" if !is_granite(loader) => dense_mlp_target(loader, &p, "up", suffix),
+        "ffn_down" if !is_granite(loader) => dense_mlp_target(loader, &p, "down", suffix),
         "ffn_gate_inp" => Some(router_target(loader, &p, suffix)),
-        "ffn_gate_exps"
-            if !matches!(loader, NormalLoaderType::GraniteMoeHybrid) && !gpt_oss_mxfp4_expert =>
-        {
+        "ffn_gate_exps" if !is_granite(loader) && !gpt_oss_mxfp4_expert => {
             Some(expert_target(loader, &p, "gate", suffix))
         }
-        "ffn_up_exps"
-            if !matches!(loader, NormalLoaderType::GraniteMoeHybrid) && !gpt_oss_mxfp4_expert =>
-        {
+        "ffn_up_exps" if !is_granite(loader) && !gpt_oss_mxfp4_expert => {
             Some(expert_target(loader, &p, "up", suffix))
         }
-        "ffn_down_exps"
-            if !matches!(loader, NormalLoaderType::GraniteMoeHybrid) && !gpt_oss_mxfp4_expert =>
-        {
+        "ffn_down_exps" if !is_granite(loader) && !gpt_oss_mxfp4_expert => {
             Some(expert_target(loader, &p, "down", suffix))
         }
-        "ffn_gate_shexp" if !matches!(loader, NormalLoaderType::GraniteMoeHybrid) => {
+        "ffn_gate_shexp" if !is_granite(loader) => {
             Some(shared_expert_target(loader, &p, "gate", suffix))
         }
-        "ffn_up_shexp" if !matches!(loader, NormalLoaderType::GraniteMoeHybrid) => {
+        "ffn_up_shexp" if !is_granite(loader) => {
             Some(shared_expert_target(loader, &p, "up", suffix))
         }
-        "ffn_down_shexp" if !matches!(loader, NormalLoaderType::GraniteMoeHybrid) => {
+        "ffn_down_shexp" if !is_granite(loader) => {
             Some(shared_expert_target(loader, &p, "down", suffix))
         }
         "ffn_gate_inp_shexp" => Some(format!("{p}.mlp.shared_expert_gate.{suffix}")),
@@ -329,7 +317,7 @@ fn bind_composite_tensors(
             }
             NormalLoaderType::Qwen3Next => bind_qwen3_next(archive, architecture, layer, bindings)?,
             NormalLoaderType::GptOss => bind_gpt_oss(archive, layer, bindings)?,
-            NormalLoaderType::GraniteMoeHybrid => bind_granite(archive, layer, bindings),
+            loader if is_granite(loader) => bind_granite(archive, layer, bindings),
             _ => {}
         }
     }
@@ -708,6 +696,16 @@ fn bind_granite_qkv(
     Ok(())
 }
 
+fn is_granite(loader: &NormalLoaderType) -> bool {
+    matches!(
+        loader,
+        NormalLoaderType::Granite
+            | NormalLoaderType::GraniteMoe
+            | NormalLoaderType::GraniteMoeShared
+            | NormalLoaderType::GraniteMoeHybrid
+    )
+}
+
 fn bind_granite(archive: &GgufArchive, layer: usize, bindings: &mut GgufBindingMap) {
     for suffix in ["weight", "bias"] {
         let shared_gate = format!("blk.{layer}.ffn_gate_shexp.{suffix}");
@@ -814,9 +812,7 @@ fn router_target(loader: &NormalLoaderType, p: &str, suffix: &str) -> String {
         NormalLoaderType::Phi3_5MoE | NormalLoaderType::Mixtral => {
             format!("{p}.block_sparse_moe.gate.{suffix}")
         }
-        NormalLoaderType::GraniteMoeHybrid => {
-            format!("{p}.block_sparse_moe.router.layer.{suffix}")
-        }
+        loader if is_granite(loader) => format!("{p}.block_sparse_moe.router.layer.{suffix}"),
         NormalLoaderType::HunYuanMoEV1 => format!("{p}.mlp.gate.wg.{suffix}"),
         NormalLoaderType::Lfm2 | NormalLoaderType::Lfm2Moe => {
             format!("{p}.feed_forward.gate.{suffix}")

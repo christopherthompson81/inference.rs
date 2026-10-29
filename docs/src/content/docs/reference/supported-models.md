@@ -45,6 +45,9 @@ The `Architecture` column is the `config.json` `architectures` value. Per-family
 | `Qwen3MoeForCausalLM` | Qwen3 MoE | <details><summary><code>Qwen/Qwen3-30B-A3B</code></summary><code>inference run -m Qwen/Qwen3-30B-A3B</code></details> |
 | `SmolLM3ForCausalLM` | SmolLM3 | <details><summary><code>HuggingFaceTB/SmolLM3-3B</code></summary><code>inference run -m HuggingFaceTB/SmolLM3-3B</code></details> |
 | `GraniteMoeHybridForCausalLM` | Granite 4.0 | <details><summary><code>ibm-granite/granite-4.0-micro</code></summary><code>inference run -m ibm-granite/granite-4.0-micro</code></details> |
+| `GraniteForCausalLM` | Granite 3.x, Granite 4.1 | <details><summary><code>ibm-granite/granite-4.1-3b</code></summary><code>inference run -m ibm-granite/granite-4.1-3b</code></details> |
+| `GraniteMoeForCausalLM` | Granite 3.x MoE | <details><summary><code>ibm-granite/granite-3.1-1b-a400m-instruct</code></summary><code>inference run -m ibm-granite/granite-3.1-1b-a400m-instruct</code></details> |
+| `GraniteMoeSharedForCausalLM` | Granite MoE (shared expert) | <details><summary><code>ibm-research/moe-7b-1b-active-shared-experts</code></summary><code>inference run -m ibm-research/moe-7b-1b-active-shared-experts</code></details> |
 | `GptOssForCausalLM` | GPT-OSS | <details><summary><code>openai/gpt-oss-20b</code> (20b), <code>openai/gpt-oss-120b</code> (120b)</summary><code>inference run -m openai/gpt-oss-20b</code><br><code>inference run -m openai/gpt-oss-120b</code></details> |
 | `HunYuanDenseV1ForCausalLM` | HunYuan | <details><summary><code>tencent/Hunyuan-7B-Instruct</code></summary><code>inference run -m tencent/Hunyuan-7B-Instruct</code></details> |
 | `HunYuanMoEV1ForCausalLM` | HunYuan MoE | <details><summary><code>tencent/Hunyuan-A13B-Instruct</code></summary><code>inference run -m tencent/Hunyuan-A13B-Instruct</code></details> |

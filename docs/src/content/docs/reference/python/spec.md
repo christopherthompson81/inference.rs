@@ -654,6 +654,9 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `NormalLoaderType.QWEN3MOE` | `'qwen3moe'` |
 | `NormalLoaderType.SMOLLM3` | `'smollm3'` |
 | `NormalLoaderType.GRANITEMOEHYBRID` | `'granitemoehybrid'` |
+| `NormalLoaderType.GRANITE` | `'granite'` |
+| `NormalLoaderType.GRANITEMOE` | `'granitemoe'` |
+| `NormalLoaderType.GRANITEMOESHARED` | `'granitemoeshared'` |
 | `NormalLoaderType.GPT_OSS` | `'gpt_oss'` |
 | `NormalLoaderType.HUNYUANV1DENSE` | `'hunyuanv1dense'` |
 | `NormalLoaderType.HUNYUANV1MOE` | `'hunyuanv1moe'` |

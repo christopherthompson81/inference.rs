@@ -1,4 +1,6 @@
-use super::normal_registry::{CanonicalGgufArchitecture, GgufDescriptor, schema_for};
+use super::normal_registry::{
+    CanonicalGgufArchitecture, GgufDescriptor, NORMAL_LOADER_TYPE_COUNT, schema_for,
+};
 #[cfg(test)]
 use super::normal_registry::{NORMAL_MODEL_ADAPTERS, NativeModelAdapter};
 use inference_nn::{gdn::GDN_V_HEAD_LAYOUT_CONFIG_KEY, loaders::NormalLoaderType};
@@ -43,7 +45,7 @@ pub struct NormalConfigBuilder {
     build: BuilderFn,
 }
 
-pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; 28] = &[
+pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; NORMAL_LOADER_TYPE_COUNT] = &[
     NormalConfigBuilder {
         loader: NormalLoaderType::Mistral,
         build: build_mistral,
@@ -115,6 +117,18 @@ pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; 28] = &[
     NormalConfigBuilder {
         loader: NormalLoaderType::SmolLm3,
         build: build_smollm3,
+    },
+    NormalConfigBuilder {
+        loader: NormalLoaderType::Granite,
+        build: build_granite,
+    },
+    NormalConfigBuilder {
+        loader: NormalLoaderType::GraniteMoe,
+        build: build_granite,
+    },
+    NormalConfigBuilder {
+        loader: NormalLoaderType::GraniteMoeShared,
+        build: build_granite,
     },
     NormalConfigBuilder {
         loader: NormalLoaderType::GraniteMoeHybrid,
@@ -2744,6 +2758,9 @@ mod tests {
                 | NormalLoaderType::Qwen3_5Moe
                 | NormalLoaderType::Qwen4Exp
                 | NormalLoaderType::Lfm2Moe
+                | NormalLoaderType::GraniteMoe
+                | NormalLoaderType::GraniteMoeShared
+                | NormalLoaderType::GraniteMoeHybrid
         )
     }
 
@@ -2866,6 +2883,13 @@ mod tests {
             insert_u32(&mut metadata, architecture, "ssm.group_count", 4);
         }
 
+        if matches!(loader, NormalLoaderType::GraniteMoeHybrid) {
+            tensors.extend(
+                ["blk.1.ssm_a.weight", "blk.1.ssm_conv1d.weight"]
+                    .into_iter()
+                    .map(str::to_string),
+            );
+        }
         if matches!(
             loader,
             NormalLoaderType::Qwen3Next
@@ -3032,7 +3056,10 @@ mod tests {
             NormalLoaderType::SmolLm3 => {
                 assert_deserializes(loader, config, models::smollm3::Config::from_json)
             }
-            NormalLoaderType::GraniteMoeHybrid => {
+            NormalLoaderType::GraniteMoeHybrid
+            | NormalLoaderType::Granite
+            | NormalLoaderType::GraniteMoe
+            | NormalLoaderType::GraniteMoeShared => {
                 assert_deserializes(loader, config, models::granite::Config::from_json)
             }
             NormalLoaderType::GptOss => {

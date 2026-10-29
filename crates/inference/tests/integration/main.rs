@@ -11,6 +11,7 @@ mod gguf_embedding_tiny;
 mod gguf_iq;
 mod gguf_logits_tiny;
 mod gguf_lora_tiny;
+mod granite_tiny;
 mod hidream_o1_tiny;
 mod jina_v5_tiny;
 mod jobs;

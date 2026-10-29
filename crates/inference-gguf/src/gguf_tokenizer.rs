@@ -605,7 +605,8 @@ fn bpe_pre_tokenizer_spec(pre: Option<&str>) -> Result<BpePreTokenizerSpec> {
             ignore_merges: false,
             normalize_nfc: false,
         },
-        "starcoder" | "smollm" => BpePreTokenizerSpec {
+        // Granite 3.x / 4.1 convert as refact: llama.cpp splits it exactly as starcoder
+        "starcoder" | "smollm" | "refact" => BpePreTokenizerSpec {
             kind: BpePreTokenizerKind::Starcoder,
             regexes: &["\\p{N}", GPT2_REGEX],
             ignore_merges: false,
@@ -1602,6 +1603,7 @@ mod tests {
             ("phi-2", BpePreTokenizerKind::Gpt2, false, false, 1),
             ("starcoder", BpePreTokenizerKind::Starcoder, false, false, 2),
             ("smollm", BpePreTokenizerKind::Starcoder, false, false, 2),
+            ("refact", BpePreTokenizerKind::Starcoder, false, false, 2),
             ("glm4", BpePreTokenizerKind::Glm4, false, false, 1),
             (
                 "deepseek-llm",
