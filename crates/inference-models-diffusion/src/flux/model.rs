@@ -7,7 +7,6 @@ use inference_tensor::{D, DType, Device, IndexOp, Result, Tensor};
 
 use crate::qlinear::MaybeQuantLinear;
 use inference_quant::ShardedVarBuilder;
-use serde::Deserialize;
 
 use crate::layers::{MatMul, RmsNorm};
 
@@ -16,7 +15,7 @@ const HIDDEN_SIZE: usize = 3072;
 const AXES_DIM: &[usize] = &[16, 56, 56];
 const THETA: usize = 10000;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Config {
     pub in_channels: usize,
     pub pooled_projection_dim: usize,

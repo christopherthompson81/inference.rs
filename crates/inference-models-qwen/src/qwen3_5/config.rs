@@ -22,7 +22,7 @@ serde_default_fn!(u64, default_ngram_seed, 1234);
 serde_default_fn!(u64, default_ngram_vocab_base, 20_000_000);
 serde_default_fn!(usize, default_ngram_vocab_divisor, 128);
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, serde::Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, inference_json::FromJson)]
 #[serde(rename_all = "snake_case")]
 pub enum RopeType {
     #[default]
@@ -31,7 +31,7 @@ pub enum RopeType {
     Yarn,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, inference_json::FromJson)]
 #[serde(rename_all = "snake_case")]
 pub enum LayerType {
     // Qwen3.8-Flash-Next names its QSA layers `indexed_attention` in transformers
@@ -41,7 +41,7 @@ pub enum LayerType {
 }
 
 /// Qwen3.8-Flash-Next's additions to the Qwen3.5 MoE text model; all absent on Qwen3.5 and Qwen3.8 checkpoints.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, inference_json::FromJson)]
 pub struct FlashNextConfig {
     // hyper-connections: `hc_count` residual streams in place of every layer norm
     #[serde(default)]
@@ -85,7 +85,7 @@ pub struct FlashNextConfig {
     pub indexer_compress_ratio: Option<usize>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 #[serde(untagged)]
 pub enum EosTokenId {
     One(u32),
@@ -103,7 +103,7 @@ impl EosTokenId {
 }
 
 /// PLE's n-gram hash: one odd multiplier per n-gram position, and each hash head's table size (a prime) and offset.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, inference_json::FromJson, serde::Serialize)]
 pub struct PleHash {
     pub layer_multipliers: Vec<u64>,
     pub head_offsets: Vec<u64>,
@@ -160,7 +160,7 @@ impl QsaConfig {
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct RopeParameters {
     #[serde(default, alias = "type")]
     pub rope_type: RopeType,
@@ -345,7 +345,7 @@ pub fn apply_max_model_len(config: &str, max_model_len: usize) -> inference_tens
     serde_json::to_string(&config).map_err(|err| inference_tensor::Error::msg(err.to_string()))
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct TextConfig {
     pub head_dim: usize,
     pub vocab_size: usize,
@@ -807,7 +807,7 @@ impl TextConfig {
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Config {
     pub text_config: TextConfig,
     pub vision_config: VisionConfig,

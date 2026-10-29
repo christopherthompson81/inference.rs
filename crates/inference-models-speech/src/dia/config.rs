@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct DataConfig {
     pub text_length: usize,
     pub audio_length: usize,
@@ -12,7 +12,7 @@ pub struct DataConfig {
     pub delay_pattern: Vec<i32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct EncoderConfig {
     pub n_layer: usize,
     pub n_embd: usize,
@@ -21,7 +21,7 @@ pub struct EncoderConfig {
     pub head_dim: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct DecoderConfig {
     pub n_layer: usize,
     pub n_embd: usize,
@@ -33,7 +33,7 @@ pub struct DecoderConfig {
     pub cross_head_dim: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct ModelConfig {
     pub encoder: EncoderConfig,
     pub decoder: DecoderConfig,
@@ -45,7 +45,7 @@ pub struct ModelConfig {
     pub rope_max_timescale: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct DiaConfig {
     pub version: String,
     pub model: ModelConfig,

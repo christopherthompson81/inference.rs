@@ -13,7 +13,7 @@ use inference_quant::{
 };
 use inference_tensor::nn::{Conv1d, Conv1dConfig, Linear};
 use inference_tensor::{D, DType, Device, Module, Result, Tensor};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::gdn::RecurrentBatchKind;
 use crate::kv_cache::EitherCache;
@@ -61,7 +61,7 @@ serde_default_fn!(f64, default_block_ffn_dim_multiplier, 1.0);
 serde_default_fn!(f64, default_rope_theta, 1_000_000.0);
 serde_default_fn!(f64, default_routed_scaling_factor, 1.0);
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct RopeParameters {
     #[serde(default = "default_rope_theta")]
     pub rope_theta: f64,
@@ -78,7 +78,7 @@ impl Default for RopeParameters {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct Config {
     #[serde(default)]
     pub model_type: Option<String>,

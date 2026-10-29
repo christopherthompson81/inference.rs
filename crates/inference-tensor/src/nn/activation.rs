@@ -2,7 +2,7 @@
 //!
 use crate::{Result, Tensor};
 
-#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, inference_json::FromJson, serde::Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Activation {
     #[default]

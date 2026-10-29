@@ -14,7 +14,7 @@ use crate::{
     utils::unvarbuilder::UnVarBuilder,
 };
 
-#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, inference_json::FromJson)]
 pub enum Activation {
     #[serde(alias = "quick_gelu")]
     QuickGelu,

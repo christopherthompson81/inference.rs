@@ -3,7 +3,7 @@ use inference_quant::QuantizedConfig;
 pub use crate::vision::qwen3_vl::VisionConfig;
 pub use inference_nn::decoder::qwen3_vl::{MRopeScaling, TextConfig};
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Config {
     pub text_config: TextConfig,
     pub vision_config: VisionConfig,

@@ -3,11 +3,10 @@
 use inference_quant::{Convolution, ShardedVarBuilder};
 use inference_tensor::nn::{Conv2d, GroupNorm};
 use inference_tensor::{D, Result, Tensor};
-use serde::Deserialize;
 
 use crate::layers::{MatMul, conv2d, group_norm};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Config {
     pub in_channels: usize,
     pub out_channels: usize,

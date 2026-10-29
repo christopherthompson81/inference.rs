@@ -20,7 +20,7 @@ pub const SANDWICH_NORMS: NormNames = NormNames {
     last: "norm",
 };
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, inference_json::FromJson)]
 pub struct Config {
     pub attention_bias: bool,
     pub head_dim: usize,

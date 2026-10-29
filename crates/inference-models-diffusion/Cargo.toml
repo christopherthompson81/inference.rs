@@ -13,6 +13,7 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
+inference-json.workspace = true
 anyhow.workspace = true
 image.workspace = true
 indicatif.workspace = true

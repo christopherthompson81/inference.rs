@@ -9,7 +9,6 @@ use std::sync::Arc;
 use inference_quant::{QuantMethod, QuantMethodConfig, ShardedVarBuilder, UnquantLinear};
 use inference_tensor::nn::{Embedding, LayerNorm, Linear, Module};
 use inference_tensor::{Device, Result, Tensor};
-use serde::Deserialize;
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
@@ -33,7 +32,7 @@ const ORIGINAL: &str = "original";
 // torch's parametrize keeps the first parametrization of `weight` at index 0
 const FIRST: usize = 0;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Config {
     pub vocab_size: usize,
     pub hidden_size: usize,

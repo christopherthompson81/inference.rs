@@ -8,7 +8,7 @@ use inference_quant::{
 };
 use inference_tensor::nn::Linear;
 use inference_tensor::{D, DType, Device, Module, Result, Tensor};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::{collections::HashMap, sync::Arc};
 
 use crate::kv_cache::EitherCache;
@@ -39,7 +39,7 @@ serde_default_fn!(f64, default_beta_fast, 32.0);
 serde_default_fn!(f64, default_beta_slow, 1.0);
 
 /// YARN rope scaling configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct RopeScaling {
     pub rope_type: String,
     pub factor: f64,
@@ -52,14 +52,14 @@ pub struct RopeScaling {
     pub truncate: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 #[serde(rename_all = "snake_case")]
 pub enum LayerType {
     SlidingAttention,
     FullAttention,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, inference_json::FromJson)]
 pub struct Config {
     pub vocab_size: usize,
     pub hidden_size: usize,

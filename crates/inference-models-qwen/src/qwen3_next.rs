@@ -7,7 +7,7 @@ use inference_quant::{
 };
 use inference_tensor::nn::Linear;
 use inference_tensor::{D, DType, Device, Module, Result, Tensor};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::{
     collections::HashMap,
     ops::Range,
@@ -53,7 +53,7 @@ serde_default_fn!(usize, default_decoder_sparse_step, 1);
 serde_default_fn!(f64, default_partial_rotary_factor, 0.25);
 serde_default_fn!(bool, default_norm_topk_prob, true);
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct Config {
     pub vocab_size: usize,
     pub hidden_size: usize,

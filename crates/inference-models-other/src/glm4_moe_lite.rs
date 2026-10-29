@@ -1,5 +1,4 @@
 use inference_quant::QuantizedConfig;
-use serde::Deserialize;
 
 use crate::deepseek_family::{
     FamilyConfig, FamilyModel, MlaAttention, MlaConfig, MoeSpec, SharedExpert, mla_softmax_scale,
@@ -19,7 +18,7 @@ serde_default_fn!(usize, n_group, 1);
 serde_default_fn!(usize, topk_group, 1);
 serde_default_fn!(bool, norm_topk_prob, true);
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(inference_json::FromJson, Clone, Debug)]
 pub struct Glm4MoeLiteConfig {
     pub vocab_size: usize,
     pub hidden_size: usize,

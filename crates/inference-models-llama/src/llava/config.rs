@@ -1,5 +1,4 @@
 use inference_quant::QuantizedConfig;
-use serde::Deserialize;
 
 use crate::decoder::DecoderSpec;
 use crate::layers::{Activation, Llama3RopeConfig};
@@ -9,7 +8,7 @@ use crate::llama::Config as LLaMAConfig;
 use crate::mistral::Config as MistralConfig;
 use crate::vision::clip::{Activation as ClipActivation, ClipConfig};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Config {
     pub image_grid_pinpoints: Option<Vec<(u32, u32)>>,
     pub projector_hidden_act: String,
@@ -19,7 +18,7 @@ pub struct Config {
     pub vision_feature_select_strategy: String,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(inference_json::FromJson, Debug, Clone)]
 pub struct LLaVATextConfig {
     #[serde(default = "default_hidden_size")]
     pub hidden_size: usize,
@@ -63,7 +62,7 @@ serde_default_fn!(usize, default_num_key_value_heads, 32);
 serde_default_fn!(f32, default_rope_theta, 10000.0);
 serde_default_fn!(usize, default_vocab_size, 32064);
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(inference_json::FromJson, Debug, Clone)]
 pub struct LLaVAVisionConfig {
     pub hidden_size: usize,
     pub image_size: usize,

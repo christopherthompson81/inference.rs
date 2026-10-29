@@ -2,7 +2,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use inference_quant::QuantizedConfig;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{
     amoe::AnyMoeLoraTarget,
@@ -31,7 +31,7 @@ const QK_LAYERNORM: QkNorm = QkNorm::BeforeRope {
 };
 
 // https://huggingface.co/microsoft/phi-2/blob/main/configuration_phi.py
-#[derive(Debug, Clone, Deserialize, Default, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Default, Serialize)]
 pub struct Config {
     pub vocab_size: usize,
     pub hidden_size: usize,

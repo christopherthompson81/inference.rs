@@ -6,7 +6,6 @@ use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, RowParallelLayer, ShardedVarBuilder,
 };
 use inference_tensor::{DType, Device, Result, Tensor};
-use serde::Deserialize;
 
 use crate::decoder::LayerAttention;
 use crate::deepseek_family::{
@@ -33,7 +32,7 @@ serde_default_fn!(bool, norm_topk_prob, true);
 serde_default_fn!(bool, use_qk_norm, false);
 serde_default_fn!(bool, attention_bias, false);
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(inference_json::FromJson, Clone, Debug)]
 pub struct Glm4MoeConfig {
     pub vocab_size: usize,
     pub hidden_size: usize,

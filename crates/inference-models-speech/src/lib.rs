@@ -50,7 +50,7 @@ impl SpeechGenerationConfig {
 }
 
 /// What one speech request asks for beyond its input text; each model reads the fields it understands.
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, inference_json::FromJson)]
 pub struct SpeechOptions {
     /// A voice name, or several separated by commas to blend them.
     pub voice: Option<String>,

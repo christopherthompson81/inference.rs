@@ -34,7 +34,7 @@ pub use static_lora::linear_no_bias_static_lora;
 
 const LORA_REGEX_CACHE_CAPACITY: usize = 256;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, inference_json::FromJson, Debug, Clone)]
 pub struct StaticLoraConfig {
     pub layer: String,
     pub lora_alpha: f64,

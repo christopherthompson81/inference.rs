@@ -16,7 +16,7 @@ const MLP_PROJECTIONS: &[AnyMoeLoraTarget; 2] = &[
     AnyMoeLoraTarget::down("c_proj"),
 ];
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, Default)]
+#[derive(Debug, Clone, inference_json::FromJson, serde::Serialize, Default)]
 pub struct Config {
     pub vocab_size: usize,
     pub hidden_size: usize,

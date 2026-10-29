@@ -1,7 +1,7 @@
 //! Mixtral: the shared decoder with a sparse-MoE feed-forward under `block_sparse_moe`.
 
 use inference_quant::QuantizedConfig;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{
     decoder::{BLOCK_SPARSE_MOE, DecoderSpec, MoeRouting, MoeSpec, RopeKind},
@@ -13,7 +13,7 @@ use crate::{
 serde_default_fn!(bool, word_emb_default, false);
 
 /// <https://github.com/huggingface/transformers/blob/1a585c1222a56bcaecc070966d558d4a9d862e83/src/transformers/models/mixtral/configuration_mixtral.py#L113>
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct Config {
     pub vocab_size: usize,
     pub hidden_size: usize,

@@ -20,7 +20,7 @@ pub struct Transcription {
 }
 
 /// What one transcription request asks for beyond its audio.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, inference_json::FromJson)]
 pub struct TranscriptionOptions {
     /// The audio's language, for a model that takes one; others identify it themselves.
     pub language: Option<String>,

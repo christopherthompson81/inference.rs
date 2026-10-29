@@ -6,7 +6,6 @@ use std::path::Path;
 use inference_audio::nemo::NemoMel;
 use inference_tensor::nn::{LayerNorm, Linear, Module, VarBuilder, layer_norm, linear, ops};
 use inference_tensor::{DType, Device, Error, Result, Tensor};
-use serde::Deserialize;
 
 use super::cache::{CacheConfig, Silence, SpeakerCache};
 use super::{DEFAULT_THRESHOLD, Diarization, speaker_segments};
@@ -23,7 +22,7 @@ fn msg(e: impl std::fmt::Display) -> Error {
     Error::Msg(e.to_string())
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 struct TransformerConfig {
     num_layers: usize,
     hidden_size: usize,
@@ -33,7 +32,7 @@ struct TransformerConfig {
     pre_ln: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 struct ModulesConfig {
     num_spks: usize,
     fc_d_model: usize,
@@ -54,7 +53,7 @@ struct ModulesConfig {
 }
 
 /// The parts of a Sortformer `model_config.yaml` inference reads.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct SortformerConfig {
     preprocessor: NemoPreprocessorConfig,
     encoder: NemoEncoderConfig,
@@ -62,13 +61,13 @@ pub struct SortformerConfig {
     sortformer_modules: ModulesConfig,
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct ModuleTarget {
     #[serde(rename = "_target_")]
     target: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct Probe {
     target: Option<String>,
     encoder: Option<ModuleTarget>,

@@ -10,14 +10,14 @@ serde_default_fn!(Activation, default_vision_hidden_act, Activation::QuickGelu);
 serde_default_fn!(usize, default_in_channels, 3);
 serde_default_fn!(usize, default_max_window_layers, 28);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, inference_json::FromJson)]
 #[serde(rename_all = "snake_case")]
 pub enum AttentionType {
     FullAttention,
     SlidingAttention,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct VisionConfig {
     pub depth: usize,
     pub embed_dim: usize,
@@ -33,7 +33,7 @@ pub struct VisionConfig {
     pub temporal_patch_size: usize,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct MRopeScaling {
     pub mrope_section: Vec<usize>,
 }
@@ -41,7 +41,7 @@ pub struct MRopeScaling {
 pub type Config = QwenVlConfig<VisionConfig>;
 
 /// The text model and token ids Qwen2-VL and Qwen2.5-VL share; `V` is the family member's vision config.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct QwenVlConfig<V> {
     pub vocab_size: usize,
     pub hidden_size: usize,

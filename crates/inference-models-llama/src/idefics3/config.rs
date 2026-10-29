@@ -1,8 +1,6 @@
-use serde::Deserialize;
-
 use crate::layers::Activation;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Idefics3VisionConfig {
     pub hidden_size: usize,
     pub intermediate_size: usize,
@@ -31,7 +29,7 @@ impl Idefics3VisionConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Idefics3Config {
     pub image_token_id: usize,
     pub vision_config: Idefics3VisionConfig,

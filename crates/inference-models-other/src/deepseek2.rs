@@ -1,5 +1,4 @@
 use inference_quant::QuantizedConfig;
-use serde::Deserialize;
 
 use crate::deepseek_family::{
     FamilyConfig, FamilyModel, MlaAttention, MlaConfig, MoeSpec, SharedExpert, mla_softmax_scale,
@@ -19,7 +18,7 @@ serde_default_fn!(ScoringFunc, scoring_func, ScoringFunc::Softmax);
 serde_default_fn!(Activation, hidden_act, Activation::Silu);
 serde_default_fn!(bool, tie_word_embeddings, false);
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(inference_json::FromJson, Clone, Debug)]
 enum TopkMethod {
     #[serde(rename = "greedy")]
     Greedy,
@@ -27,13 +26,13 @@ enum TopkMethod {
     GroupLimitedGreedy,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(inference_json::FromJson, Clone, Debug)]
 enum ScoringFunc {
     #[serde(rename = "softmax")]
     Softmax,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(inference_json::FromJson, Clone, Debug)]
 pub struct DeepSeekV2Config {
     pub vocab_size: usize,
     pub hidden_size: usize,

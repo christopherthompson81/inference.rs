@@ -23,7 +23,7 @@ serde_default_fn!(usize, patch_size, 16);
 serde_default_fn!(Activation, hidden_act, Activation::GeluPytorchTanh);
 serde_default_fn!(f64, layer_norm_eps, 1e-6);
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct SiglipVisionConfig {
     #[serde(default = "hidden_size")]
     pub hidden_size: usize,

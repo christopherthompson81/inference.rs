@@ -4,12 +4,11 @@
 
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::{DType, Result, Tensor};
-use serde::Deserialize;
 
 // Frames run this many at a time, which bounds the full-resolution im2col buffers
 const FRAMES_PER_CHUNK: usize = 2;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct VaeConfig {
     pub base_dim: usize,
     pub z_dim: usize,

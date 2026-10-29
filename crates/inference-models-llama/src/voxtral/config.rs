@@ -4,8 +4,6 @@
     dead_code
 )]
 
-use serde::Deserialize;
-
 use crate::serde_default_fn;
 
 serde_default_fn!(bool, default_false, false);
@@ -15,7 +13,7 @@ serde_default_fn!(f64, default_norm_eps, 1e-5);
 serde_default_fn!(usize, default_ada_dim, 32);
 
 /// Audio encoding parameters for mel spectrogram computation.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct AudioEncodingArgs {
     pub sampling_rate: u32,
     pub frame_rate: f64,
@@ -26,13 +24,13 @@ pub struct AudioEncodingArgs {
 }
 
 /// Downsampling configuration for the temporal adapter.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct DownsampleArgs {
     pub downsample_factor: usize,
 }
 
 /// Whisper-based causal encoder configuration.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct WhisperEncoderArgs {
     pub audio_encoding_args: AudioEncodingArgs,
     pub dim: usize,
@@ -53,20 +51,20 @@ pub struct WhisperEncoderArgs {
 }
 
 /// Whisper model arguments containing encoder and downsampling config.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct WhisperModelArgs {
     pub encoder_args: WhisperEncoderArgs,
     pub downsample_args: DownsampleArgs,
 }
 
 /// Multimodal configuration section.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct VoxtralMultimodalConfig {
     pub whisper_model_args: WhisperModelArgs,
 }
 
 /// Top-level Voxtral configuration, deserialized from params.json.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct VoxtralConfig {
     pub dim: usize,
     pub n_layers: usize,

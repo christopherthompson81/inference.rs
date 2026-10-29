@@ -7,7 +7,7 @@ use inference_quant::{
 };
 use inference_tensor::nn::Module;
 use inference_tensor::{DType, Device, IndexOp, Result, Tensor};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::{
     collections::HashMap,
     ops::Range,
@@ -56,7 +56,7 @@ serde_default_fn!(usize, default_num_local_experts, 0);
 serde_default_fn!(usize, default_num_experts_per_tok, 2);
 serde_default_fn!(String, default_position_embedding_type, "rope".to_string());
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, Default, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum GraniteLayerType {
     #[default]
@@ -73,12 +73,12 @@ impl GraniteLayerType {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct GraniteRopeParameters {
     pub rope_theta: Option<f32>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum GraniteRopeType {
     #[default]
@@ -86,7 +86,7 @@ pub enum GraniteRopeType {
     Granite,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, Default)]
 pub struct GraniteRopeConfig {
     pub factor: Option<f32>,
     pub low_freq_factor: Option<f32>,
@@ -96,7 +96,7 @@ pub struct GraniteRopeConfig {
     pub rope_type: GraniteRopeType,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct Config {
     pub hidden_size: usize,
     pub intermediate_size: usize,

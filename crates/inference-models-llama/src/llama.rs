@@ -1,7 +1,7 @@
 //! Llama: the shared decoder with Llama 3 RoPE scaling and the checkpoint's `rope_freqs` factors.
 
 use inference_quant::QuantizedConfig;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{
     decoder::{DecoderSpec, RopeKind},
@@ -11,7 +11,7 @@ use crate::{
 
 serde_default_fn!(bool, word_emb_default, false);
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, Default)]
 pub struct Config {
     pub hidden_act: Activation,
     pub hidden_size: usize,

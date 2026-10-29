@@ -1,5 +1,4 @@
 use inference_tensor::{D, DType, Device, Result, Tensor};
-use serde::Deserialize;
 
 use super::DiffusionGemmaModel;
 use crate::model::BlockDenoisingProgressEmitter;
@@ -39,12 +38,12 @@ impl Default for DiffusionParams {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct RawSamplerConfig {
     entropy_bound: Option<f64>,
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct RawGenerationConfig {
     max_denoising_steps: Option<usize>,
     sampler_config: Option<RawSamplerConfig>,

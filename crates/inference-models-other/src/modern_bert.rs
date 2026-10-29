@@ -6,7 +6,6 @@ use std::sync::Arc;
 use inference_quant::{QuantMethod, ShardedVarBuilder};
 use inference_tensor::nn::{Embedding, LayerNorm, LayerNormConfig, Module};
 use inference_tensor::{D, Device, Result, Tensor};
-use serde::Deserialize;
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
@@ -35,19 +34,19 @@ serde_default_fn!(f32, local_rope_theta, 10_000.0);
 serde_default_fn!(Activation, hidden_activation, Activation::Gelu);
 serde_default_fn!(String, classifier_pooling, "cls".to_string());
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 struct RopeTheta {
     rope_theta: f32,
 }
 
 /// transformers 5 writes the two thetas as `rope_parameters`; older configs as `global_rope_theta` / `local_rope_theta`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 struct RopeParameters {
     full_attention: RopeTheta,
     sliding_attention: RopeTheta,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Config {
     pub vocab_size: usize,
     pub hidden_size: usize,

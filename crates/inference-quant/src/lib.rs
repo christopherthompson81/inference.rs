@@ -633,6 +633,12 @@ impl<'de> Deserialize<'de> for QuantizedConfig {
     }
 }
 
+impl inference_json::FromJson for QuantizedConfig {
+    fn from_json(v: &serde_json::Value) -> std::result::Result<Self, inference_json::JsonError> {
+        Self::from_value(v.clone()).map_err(inference_json::JsonError::from)
+    }
+}
+
 impl QuantizedConfig {
     // non-generic, so it compiles once here rather than in every crate whose config holds one
     fn from_value(value: serde_json::Value) -> serde_json::Result<Self> {

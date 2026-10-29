@@ -12,14 +12,14 @@ use crate::{
 serde_default_fn!(bool, word_emb_default, false);
 serde_default_fn!(usize, max_window_layers_default, 28);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, inference_json::FromJson, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Qwen2AttentionType {
     FullAttention,
     SlidingAttention,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, serde::Serialize)]
 pub struct Config {
     pub vocab_size: usize,
     pub hidden_size: usize,

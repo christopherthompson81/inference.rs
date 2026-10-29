@@ -21,7 +21,7 @@ pub struct DiffusionGemmaConfig {
     pub vision_soft_tokens_per_image: Option<usize>,
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct DiffusionGemmaRawConfig {
     text_config: Gemma4TextConfig,
     vision_config: Option<Gemma4VisionConfig>,

@@ -1,10 +1,10 @@
 use inference_quant::QuantizedConfig;
 use inference_tensor::DType;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 pub const GDN_V_HEAD_LAYOUT_CONFIG_KEY: &str = "_inference_gdn_v_head_layout";
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, inference_json::FromJson, Eq, PartialEq, Serialize)]
 pub enum GdnStateDType {
     #[serde(rename = "float16", alias = "f16", alias = "half")]
     F16,
@@ -25,7 +25,7 @@ impl GdnStateDType {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, inference_json::FromJson, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GdnVHeadLayout {
     #[default]
@@ -43,7 +43,7 @@ impl GdnVHeadLayout {
 }
 
 /// The activation on the gate of the GDN output's gated RMSNorm.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, inference_json::FromJson, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GdnOutputGate {
     #[default]
@@ -141,7 +141,7 @@ impl GdnDims {
 mod tests {
     use super::*;
 
-    #[derive(Deserialize)]
+    #[derive(serde::Deserialize)]
     struct StateDTypeConfig {
         #[serde(default)]
         mamba_ssm_dtype: GdnStateDType,

@@ -1,7 +1,7 @@
 //! Qwen3: the shared decoder with per-head q/k norm and layer windows past `max_window_layers`.
 
 use inference_quant::QuantizedConfig;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{
     decoder::{DecoderSpec, QkNorm, RopeKind},
@@ -11,7 +11,7 @@ use crate::{
 
 serde_default_fn!(bool, tie_word_embeddings, false);
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, inference_json::FromJson)]
 pub struct Config {
     pub vocab_size: usize,
     pub hidden_size: usize,

@@ -27,12 +27,14 @@ pub enum IntermediateSize {
     Matformer(Vec<usize>, Vec<usize>),
 }
 
+inference_json::via_serde!(IntermediateSize);
+
 impl<'de> serde::Deserialize<'de> for IntermediateSize {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        #[derive(serde::Deserialize)]
+        #[derive(inference_json::FromJson)]
         #[serde(untagged)]
         enum IntermediateSizeHelper {
             Single(usize),
@@ -46,7 +48,7 @@ impl<'de> serde::Deserialize<'de> for IntermediateSize {
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Gemma3nTextConfig {
     #[serde(default = "attention_bias")]
     pub attention_bias: bool,
@@ -105,7 +107,7 @@ serde_default_fn!(i64, vision_vocab_offset, 262144);
 
 serde_default_fn!(usize, vision_vocab_size, 262400);
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Gemma3nVisionConfig {
     #[serde(default = "vision_hidden_size")]
     pub hidden_size: usize,
@@ -144,7 +146,7 @@ serde_default_fn!(f64, sscp_conv_group_norm_eps, 1e-3);
 serde_default_fn!(f64, audio_rms_norm_eps, 1e-6);
 serde_default_fn!(i64, audio_vocab_offset, 262272); // text vocab size (262144) + vision vocab size (128)
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Gemma3nAudioConfig {
     #[serde(default = "audio_input_feat_size")]
     pub input_feat_size: usize,
@@ -186,7 +188,7 @@ pub struct Gemma3nAudioConfig {
     pub vocab_offset: i64,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Gemma3nConfig {
     pub text_config: Gemma3nTextConfig,
     pub vision_config: Gemma3nVisionConfig,

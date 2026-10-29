@@ -204,3 +204,32 @@ report-then-abort. Not pursued unless the boundary's promise changes.
   `NonZero`, `#[json(serde)]`) decode as serde does.
 
 **Next:** step 3, the model configs.
+
+## Run 6 - 2026-10-29 13:55
+
+**Question:** step 3: the model crates' configs (`config.json` readers) through `FromJson`. What does it save?
+
+**Change:** every `Deserialize` derive in the seven model crates (204) swapped, plus the config types they reach in nn
+(activations, rope scaling types, the Qwen3-VL / SigLIP configs, GDN options, static LoRA) found by compiling.
+`QuantizedConfig`, already decoded from a `Value` by hand, gets a direct `FromJson` impl; Gemma 3n's
+`IntermediateSize` `via_serde!`; the runtime gains `IgnoredAny`. The loaders' `serde_json::from_str` calls stay:
+the derived `Deserialize` goes through a `Value`, whose deserializer compiles once per crate.
+
+**Finding:**
+- CPU suite 3001 passed; lint clean.
+- IR lines (before: master, Run 93; nn from step 1, core from step 2):
+
+| crate | before | after | change |
+|---|---|---|---|
+| inference-models-other | 630,478 | 523,966 | -106,512 (-16.9%) |
+| inference-models-phi | 300,695 | 253,919 | -46,776 (-15.6%) |
+| inference-models-gemma | 549,069 | 480,607 | -68,462 (-12.5%) |
+| inference-models-qwen | 757,866 | 664,267 | -93,599 (-12.4%) |
+| inference-models-llama | 549,284 | 485,022 | -64,262 (-11.7%) |
+| inference-nn | 842,749 (step 1) | 854,669 | +11,920, the config decoders it now holds |
+| inference-core | 1,717,207 | 1,705,253 | -11,954 |
+
+- Whole-crate compile (s; the step 2 branch, whose model crates equal master's, against this one, switched in place):
+  models-other 10.42 -> 6.67, qwen 10.50 -> 7.98, gemma 6.97 -> 5.19, nn 12.42 -> 12.38.
+
+**Next:** step 4, the remaining derives (core, nn, quant, selection, layout and the rest).

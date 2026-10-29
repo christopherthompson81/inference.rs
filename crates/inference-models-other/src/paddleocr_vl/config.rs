@@ -73,12 +73,12 @@ impl Default for VisionConfig {
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct MRopeScaling {
     pub mrope_section: Vec<usize>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct VisionConfigRaw {
     pub hidden_size: usize,
     pub num_hidden_layers: usize,
@@ -92,7 +92,7 @@ pub struct VisionConfigRaw {
 }
 
 // LM fields sit flat at the top level with only `vision_config` nested, unlike qwen3_vl.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Config {
     pub hidden_size: usize,
     pub num_hidden_layers: usize,

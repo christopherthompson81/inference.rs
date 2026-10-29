@@ -1,7 +1,7 @@
 //! Qwen3-MoE: Qwen3's attention with routed experts, except on the layers that keep a dense MLP.
 
 use inference_quant::QuantizedConfig;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{
     decoder::{DecoderSpec, MLP, MoeRouting, MoeSpec, QkNorm, RopeKind},
@@ -12,7 +12,7 @@ use crate::{
 
 serde_default_fn!(bool, tie_word_embeddings, false);
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, inference_json::FromJson)]
 pub struct Config {
     pub vocab_size: usize,
     pub hidden_size: usize,

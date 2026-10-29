@@ -6,7 +6,6 @@ use std::path::Path;
 
 use inference_audio::nemo::NemoMelConfig;
 use inference_tensor::{DType, Device, Error, Result};
-use serde::Deserialize;
 
 use super::Parakeet;
 use super::config::{FeatureConfig, ParakeetConfig, ProcessorConfig};
@@ -30,13 +29,13 @@ fn msg(e: impl std::fmt::Display) -> Error {
     Error::Msg(e.to_string())
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 struct Prednet {
     pred_hidden: usize,
     pred_rnn_layers: usize,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 struct DecoderConfig {
     #[serde(rename = "_target_")]
     target: String,
@@ -48,13 +47,13 @@ struct DecoderConfig {
     prednet: Option<Prednet>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, inference_json::FromJson)]
 struct GreedyConfig {
     #[serde(default)]
     max_symbols: Option<usize>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, inference_json::FromJson)]
 struct DecodingConfig {
     #[serde(default)]
     durations: Option<Vec<usize>>,
@@ -65,7 +64,7 @@ struct DecodingConfig {
     greedy: Option<GreedyConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 struct TokenizerConfig {
     #[serde(rename = "type")]
     kind: String,
@@ -74,7 +73,7 @@ struct TokenizerConfig {
 }
 
 /// The parts of a NeMo ASR `model_config.yaml` a Parakeet-family model needs.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 struct AsrConfig {
     target: String,
     preprocessor: NemoPreprocessorConfig,
@@ -118,13 +117,13 @@ impl AsrConfig {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct ModuleTarget {
     #[serde(rename = "_target_")]
     target: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct Probe {
     target: Option<String>,
     encoder: Option<ModuleTarget>,

@@ -22,7 +22,6 @@ use inference_tensor::{
     Var,
     cuda_backend::cudarc::driver::{CudaStream, sys},
 };
-use serde::Deserialize;
 
 use crate::kv_cache::PagedAuxiliaryPrefixState;
 use crate::layers::{RmsNorm, YarnRopeConfig, yarn_inv_freq_and_attention_factor};
@@ -213,7 +212,7 @@ fn config_names_dflash(value: &serde_json::Value) -> bool {
         })
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, inference_json::FromJson, Default)]
 pub struct DFlashSpecificConfig {
     pub target_layer_ids: Option<Vec<usize>>,
     pub block_size: Option<usize>,
@@ -226,7 +225,7 @@ pub struct DFlashSpecificConfig {
     pub conv_group_size: Option<usize>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct DFlashConfig {
     pub architectures: Vec<String>,
     pub hidden_size: usize,

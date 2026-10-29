@@ -6,7 +6,6 @@ use std::sync::Arc;
 use inference_quant::{QuantMethod, ShardedVarBuilder};
 use inference_tensor::nn::{Embedding, LayerNorm, Module};
 use inference_tensor::{D, DType, Device, Result, Tensor};
-use serde::Deserialize;
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
@@ -30,7 +29,7 @@ serde_default_fn!(f64, rotary_emb_fraction, 1.0);
 serde_default_fn!(String, activation_function, SWIGLU.to_string());
 
 // Nomic configs carry GPT-2 names (`n_embd`), and newer ones the BERT names beside them
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Config {
     pub vocab_size: usize,
     hidden_size: Option<usize>,

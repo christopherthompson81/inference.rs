@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use inference_audio::nemo::{NemoMel, NemoMelConfig};
 use inference_tensor::nn::{LayerNorm, Linear, Module, VarBuilder, layer_norm, linear, ops};
 use inference_tensor::{D, DType, Device, Error, Result, Tensor};
-use serde::Deserialize;
 
 use super::cache::{CacheConfig, Silence, SpeakerCache};
 use super::{DEFAULT_THRESHOLD, Diarization, speaker_segments};
@@ -19,12 +18,12 @@ fn msg(e: impl std::fmt::Display) -> Error {
     Error::Msg(e.to_string())
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 struct RopeParameters {
     rope_theta: f64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 struct AudioConfig {
     hidden_size: usize,
     intermediate_size: usize,
@@ -36,14 +35,14 @@ struct AudioConfig {
     rope_parameters: RopeParameters,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 struct HeadConfig {
     audio_hidden_size: usize,
     hidden_size: usize,
     num_speakers: usize,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 struct StreamingConfig {
     speaker_cache_length: usize,
     speaker_cache_silence_frames_per_speaker: usize,
@@ -55,7 +54,7 @@ struct StreamingConfig {
 }
 
 /// A Nemotron-3 Diarization `config.json`: the encoder, the head, and the offline chunking around the speaker cache.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct Nemotron3Config {
     audio_config: AudioConfig,
     head_config: HeadConfig,
@@ -66,7 +65,7 @@ pub struct Nemotron3Config {
     speaker_cache_update_period: usize,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 struct FeatureConfig {
     feature_size: usize,
     sampling_rate: u32,
@@ -77,7 +76,7 @@ struct FeatureConfig {
     preemphasis: Option<f32>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 struct ProcessorConfig {
     feature_extractor: FeatureConfig,
 }

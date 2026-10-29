@@ -11,12 +11,12 @@ use crate::serde_default_fn;
 serde_default_fn!(usize, default_decoder_sparse_step, 1);
 serde_default_fn!(bool, default_norm_topk_prob, true);
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct MRopeScaling {
     pub mrope_section: Vec<usize>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct TextConfig {
     pub head_dim: usize,
     pub vocab_size: usize,

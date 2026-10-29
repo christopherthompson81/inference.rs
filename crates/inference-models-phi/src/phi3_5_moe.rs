@@ -12,7 +12,7 @@ use crate::{
 serde_default_fn!(bool, word_emb_default, false);
 
 // https://huggingface.co/microsoft/Phi-3-mini-4k-instruct/blob/main/config.json
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, Default)]
+#[derive(Debug, Clone, inference_json::FromJson, serde::Serialize, Default)]
 pub struct Config {
     pub vocab_size: usize,
     pub hidden_act: Activation,

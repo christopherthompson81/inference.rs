@@ -7,7 +7,7 @@ use crate::{
     serde_default_fn,
 };
 
-#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, inference_json::FromJson)]
 pub enum VisionActivation {
     QuickGelu,
     #[serde(alias = "gelu")]
@@ -33,7 +33,7 @@ impl Module for VisionActivation {
 
 serde_default_fn!(usize, d_attn_heads, 16);
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct MLlamaVisionConfig {
     pub hidden_size: usize,
     pub hidden_act: VisionActivation,
@@ -58,7 +58,7 @@ impl MLlamaVisionConfig {
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub enum MLlamaRopeType {
     #[serde(rename = "default")]
     Default,
@@ -74,7 +74,7 @@ pub enum MLlamaRopeType {
     Llama3,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct MLlamaRopeScaling {
     pub rope_type: MLlamaRopeType,
     pub factor: Option<f32>,
@@ -88,7 +88,7 @@ pub struct MLlamaRopeScaling {
     pub high_freq_factor: Option<f32>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct MLlamaTextConfig {
     pub rope_scaling: Option<MLlamaRopeScaling>,
     pub vocab_size: usize,
@@ -143,7 +143,7 @@ impl MLlamaTextConfig {
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct MLlamaConfig {
     pub vision_config: MLlamaVisionConfig,
     pub text_config: MLlamaTextConfig,

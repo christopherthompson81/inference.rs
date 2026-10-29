@@ -12,7 +12,7 @@ use inference_models_speech::parakeet::{Encoder as AudioEncoder, EncoderConfig};
 use inference_quant::{QuantMethod, QuantMethodConfig, ShardedVarBuilder, UnquantLinear};
 use inference_tensor::nn::{Embedding, LayerNorm, LayerNormConfig, Linear, Module, VarBuilder};
 use inference_tensor::{D, DType, Device, Result, Tensor};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
@@ -76,7 +76,7 @@ const AUDIO_BLOCK_NAMES: [(&str, &str); 20] = [
 ];
 
 /// The trunk and head sizes, from the GGUF's `lfm2.*` keys.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize)]
 pub struct Config {
     pub vocab_size: usize,
     pub hidden_size: usize,
@@ -98,7 +98,7 @@ pub struct Config {
 }
 
 /// LFM2-VL's tower and the projector's MLP width, from the projector GGUF's `clip.vision.*` keys.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize)]
 pub struct VisionConfig {
     pub tower: lfm2_vl::config::VisionConfig,
     pub projector_hidden_size: usize,
