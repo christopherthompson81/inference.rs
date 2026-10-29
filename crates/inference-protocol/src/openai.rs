@@ -939,9 +939,12 @@ pub enum OpenAiShellSkill {
     Local { path: String },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+/// A stored skill the shell tool copies into the session's working directory, under `skills/<name>/`.
+#[derive(Clone, Debug, PartialEq, inference_json::FromJson, Serialize, ToSchema)]
 pub struct OpenAiShellSkillReference {
     pub skill_id: String,
+    /// A version number, or "latest" (the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<Value>,
 }
 
@@ -1217,8 +1220,8 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     #[schema(example = false)]
     pub enable_shell: bool,
-    #[serde(default, skip)]
-    #[schema(ignore)]
+    /// Stored skills the shell tool copies into the session's working directory (needs `enable_shell`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shell_skill_references: Vec<OpenAiShellSkillReference>,
     /// Persistent agentic state. If `None`, a new session is created and the ID is returned in the response.
     #[serde(default)]

@@ -102,16 +102,16 @@ pub async fn create_response(
         Err(ApiJsonRejection(error)) => return OpenResponsesResponder::Error(error),
     };
     if !request.stream.unwrap_or(false) {
-        return match engine.responses(request).await {
+        return match crate::responses_api::create(&engine, request).await {
             Ok(response) => OpenResponsesResponder::Json(Box::new(response)),
             Err(error) => OpenResponsesResponder::Error(error),
         };
     }
     let tap = stream_outcome.map(|Extension(handle)| handle.tap());
-    match engine.responses_stream(request).await {
+    match crate::responses_api::create_stream(&engine, request, tap).await {
         Ok(stream) => {
             let sse = ResponsesSse {
-                inner: stream.with_tap(tap),
+                inner: stream,
                 done: false,
             };
             OpenResponsesResponder::Sse(Box::new(Sse::new(sse).keep_alive(
@@ -141,7 +141,7 @@ pub async fn get_response(
     OwnedEngine(engine): OwnedEngine,
     Path(response_id): Path<String>,
 ) -> impl IntoResponse {
-    resource_response(engine.response(&response_id))
+    resource_response(crate::responses_api::get(&engine, &response_id))
 }
 
 /// Delete response by ID endpoint
@@ -156,7 +156,7 @@ pub async fn delete_response(
     OwnedEngine(engine): OwnedEngine,
     Path(response_id): Path<String>,
 ) -> impl IntoResponse {
-    match engine.delete_response(&response_id) {
+    match crate::responses_api::delete(&engine, &response_id) {
         Ok(deleted) => Json(deleted).into_response(),
         Err(error) => openai_error_response(error),
     }
@@ -174,7 +174,7 @@ pub async fn cancel_response(
     OwnedEngine(engine): OwnedEngine,
     Path(response_id): Path<String>,
 ) -> impl IntoResponse {
-    resource_response(engine.cancel_response(&response_id))
+    resource_response(crate::responses_api::cancel(&engine, &response_id))
 }
 
 #[cfg(test)]

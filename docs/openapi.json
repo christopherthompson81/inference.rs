@@ -4525,6 +4525,13 @@
             ],
             "description": "Persistent agentic state. If `None`, a new session is created and the ID is returned in the response."
           },
+          "shell_skill_references": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OpenAiShellSkillReference"
+            },
+            "description": "Stored skills the shell tool copies into the session's working directory (needs `enable_shell`)."
+          },
           "stop": {
             "oneOf": [
               {
@@ -10244,6 +10251,21 @@
             }
           }
         ]
+      },
+      "OpenAiShellSkillReference": {
+        "type": "object",
+        "description": "A stored skill the shell tool copies into the session's working directory, under `skills/<name>/`.",
+        "required": [
+          "skill_id"
+        ],
+        "properties": {
+          "skill_id": {
+            "type": "string"
+          },
+          "version": {
+            "description": "A version number, or \"latest\" (the default)."
+          }
+        }
       },
       "OpenAiShellTool": {
         "type": "object",

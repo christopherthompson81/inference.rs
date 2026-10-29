@@ -8,7 +8,15 @@ const FFI_SOURCES: [&str; 3] = [
 ];
 
 // Methods the ABI covers some other way, or that a binding has no use for.
-const NOT_EXPORTED: [(&str, &str); 11] = [
+const NOT_EXPORTED: [(&str, &str); 13] = [
+    (
+        "chat_events",
+        "for chat protocols a server translates onto chat; a binding's own goes over inference_chat_stream_open",
+    ),
+    (
+        "tag_file",
+        "files into a translated protocol's containers, the server's bookkeeping",
+    ),
     (
         "load_with_callbacks",
         "the ABI loads through load_json, which takes the callbacks",

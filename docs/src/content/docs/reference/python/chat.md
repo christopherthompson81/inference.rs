@@ -181,6 +181,7 @@ Chat completion request following OpenAI's specification
 | `response_format` | `ResponseFormat \| None` | optional |
 | `seed` | `int \| None` | optional |
 | `session_id` | `str \| None` | optional |
+| `shell_skill_references` | `list[OpenAiShellSkillReference] \| None` | optional |
 | `stop` | `StopTokens \| None` | optional |
 | `stop_token_ids` | `list[int] \| None` | optional |
 | `stream` | `bool \| None` | optional |
@@ -735,6 +736,16 @@ One of: `Union[OpenAiShellSkillSkillReference, OpenAiShellSkillLocal]`.
 | --- | --- | --- |
 | `path` | `str` | required |
 | `type` | `Literal['local']` | `'local'` |
+
+
+## `OpenAiShellSkillReference`
+
+A stored skill the shell tool copies into the session's working directory, under `skills/<name>/`.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `skill_id` | `str` | required |
+| `version` | `Any` | optional |
 
 
 ## `OpenAiShellSkillSkillReference`

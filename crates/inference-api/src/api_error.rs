@@ -5,6 +5,8 @@ use serde::Serialize;
 
 pub const INTERNAL_ERROR_MESSAGE: &str = "Internal server error.";
 pub const MODEL_ERROR_MESSAGE: &str = "The model failed to process the request.";
+/// The `code` of [`ApiError::model_error`]: the model failed mid-request.
+pub const MODEL_ERROR_CODE: &str = "model_error";
 pub const SERVICE_UNAVAILABLE_MESSAGE: &str = "The service is temporarily unavailable.";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,7 +90,7 @@ impl ApiError {
         Self::new(
             ApiErrorKind::Internal,
             MODEL_ERROR_MESSAGE,
-            Some("model_error"),
+            Some(MODEL_ERROR_CODE),
             None,
         )
     }

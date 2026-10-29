@@ -327,21 +327,6 @@ class JsonEngine:
         """Answers typed questions (choice, score, noul) about a state with a decision model."""
         return self._call("inference_decide", request_json)
 
-    def create_response(self, request_json: str) -> str:
-        return self._call("inference_responses_create", request_json)
-
-    def response_stream(self, request_json: str) -> Stream:
-        return self._stream("inference_responses_stream_open", request_json)
-
-    def get_response(self, response_id: str) -> str:
-        return self._call("inference_responses_get", response_id)
-
-    def delete_response(self, response_id: str) -> str:
-        return self._call("inference_responses_delete", response_id)
-
-    def cancel_response(self, response_id: str) -> str:
-        return self._call("inference_responses_cancel", response_id)
-
     def list_models(self) -> str:
         return self._get("inference_models_list")
 
@@ -619,7 +604,7 @@ class JsonEngine:
         return self._call("inference_job_file", request_json)
 
     def list_container_files(self, container_id: str) -> str:
-        """The files a Responses container (a code-running session) produced."""
+        """The files a container (a code-running session) produced."""
         return self._call("inference_container_files_list", container_id)
 
     def get_container_file(self, container_id: str, file_id: str) -> str:

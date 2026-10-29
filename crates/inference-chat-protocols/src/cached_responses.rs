@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::sync::{Arc, RwLock};
 
-use crate::openai::Message;
-use crate::responses_types::ResponseResource;
+use inference_protocol::openai::Message;
+use inference_protocol::responses_types::ResponseResource;
 
 /// A stored reply's conversation, which `previous_response_id` continues.
 #[derive(Debug, Clone, Default)]
@@ -132,7 +132,7 @@ impl ResponseCache for InMemoryResponseCache {
     ) -> Result<()> {
         if let Some(session_id) = &conversation.session_id {
             let mut heads = self.session_heads.write().unwrap();
-            heads.insert(inference_core::sandbox_key(owner, session_id), id.clone());
+            heads.insert(inference_api::sandbox_key(owner, session_id), id.clone());
         }
         let mut histories = self.conversation_histories.write().unwrap();
         histories.insert(id, Owned::new(conversation, owner));
@@ -151,7 +151,7 @@ impl ResponseCache for InMemoryResponseCache {
     fn session_head(&self, session_id: &str, owner: Option<&str>) -> Result<Option<String>> {
         let heads = self.session_heads.read().unwrap();
         Ok(heads
-            .get(&inference_core::sandbox_key(owner, session_id))
+            .get(&inference_api::sandbox_key(owner, session_id))
             .cloned())
     }
 }
@@ -168,7 +168,9 @@ pub fn get_response_cache() -> Arc<dyn ResponseCache> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::responses_types::{ItemStatus, OutputContent, OutputItem, ResponseStatus};
+    use inference_protocol::responses_types::{
+        ItemStatus, OutputContent, OutputItem, ResponseStatus,
+    };
 
     const OWNER: Option<&str> = Some("team-a");
     const OTHER: Option<&str> = Some("team-b");
@@ -204,7 +206,7 @@ mod tests {
     fn a_conversation_is_continued_only_by_its_owner() {
         let cache = InMemoryResponseCache::new();
         let messages = vec![Message {
-            content: Some(crate::openai::MessageContent::from_text(
+            content: Some(inference_protocol::openai::MessageContent::from_text(
                 "Hello".to_string(),
             )),
             role: "user".to_string(),

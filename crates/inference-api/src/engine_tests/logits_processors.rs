@@ -71,18 +71,3 @@ async fn a_failing_processor_fails_its_request_and_spares_the_batch() -> anyhow:
     assert_eq!(json!(healthy_steps.load(Ordering::SeqCst)), tokens);
     Ok(())
 }
-
-#[tokio::test(flavor = "multi_thread")]
-async fn responses_requests_resolve_their_processors() -> anyhow::Result<()> {
-    let (_dir, engine) = tiny_engine().await?;
-    let unknown = ["never-registered"];
-    let responses = json!({"model": "default", "input": "hi", "max_output_tokens": 2, "logits_processors": unknown});
-    let refused = engine
-        .responses_json(responses.to_string().as_bytes())
-        .await;
-    assert_eq!(
-        refused.err().map(|error| error.param),
-        Some(Some("logits_processors".into()))
-    );
-    Ok(())
-}

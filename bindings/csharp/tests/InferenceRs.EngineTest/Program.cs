@@ -50,7 +50,7 @@ internal static class Program
             MediaAttachmentsMatchDataUrls(engine);
             AnEditTakesItsImagesAsAttachments(engine);
             OtherProtocolsStream(engine);
-            ResponsesAreStored(engine);
+            ModelsAreListed(engine);
             ErrorsCarryTheEnvelope(engine);
             FilesRoundTrip(engine);
             OwnersStayApart(engine);
@@ -160,22 +160,8 @@ internal static class Program
         }
     }
 
-    private static void ResponsesAreStored(InferenceEngine engine)
+    private static void ModelsAreListed(InferenceEngine engine)
     {
-        var request = new JsonObject
-        {
-            ["model"] = "default", ["input"] = Prompt, ["max_output_tokens"] = MaxTokens, ["temperature"] = 0.0, ["top_k"] = 1,
-        };
-        var created = JsonNode.Parse(engine.CreateResponse(request.ToJsonString()))!;
-        var id = (string)created["id"]!;
-        Check("a stored response is fetched", (string?)JsonNode.Parse(engine.GetResponse(id))!["id"] == id);
-        engine.DeleteResponse(id);
-        Check("a deleted response is NotFound", Throws(() => engine.GetResponse(id))?.Status == InferenceStatus.NotFound);
-        request["stream"] = true;
-        using var stream = engine.ResponseStream(request.ToJsonString());
-        // The token cap ends the run: the random weights never stop on their own.
-        Check("a capped Responses stream ends with response.incomplete", stream.LastOrDefault()?.Name == "response.incomplete");
-
         var models = JsonNode.Parse(engine.ListModels())!["data"]!.AsArray();
         Check("the model list starts with the default alias", (string?)models[0]!["id"] == "default");
         Check("one model card is marked default", models.Count(card => (bool?)card!["default"] == true) == 1);

@@ -2,3 +2,6 @@
 //! operation and the chat responses back. Server-level work, so not part of `inference_api::Engine` or the C ABI.
 
 pub mod anthropic;
+mod background_tasks;
+mod cached_responses;
+pub mod responses;

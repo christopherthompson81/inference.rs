@@ -9,9 +9,9 @@ sidebar:
 
 Upload a skill to the engine and let the shell tool run it.
 
-The upload lands in the engine's skill store; a Responses request references
-it from its shell tool, and the engine copies it into the session's working
-directory under `skills/invoice-auditor/`.
+The upload lands in the engine's skill store; a chat request enables the shell
+tool and references the skill, and the engine copies it into the session's
+working directory under `skills/invoice-auditor/`.
 
 Run with:
     python examples/python/shell_skills.py
@@ -20,9 +20,9 @@ Run with:
 """
 Upload a skill to the engine and let the shell tool run it.
 
-The upload lands in the engine's skill store; a Responses request references
-it from its shell tool, and the engine copies it into the session's working
-directory under `skills/invoice-auditor/`.
+The upload lands in the engine's skill store; a chat request enables the shell
+tool and references the skill, and the engine copies it into the session's
+working directory under `skills/invoice-auditor/`.
 
 Run with:
     python examples/python/shell_skills.py
@@ -76,25 +76,21 @@ def main():
         skill = engine.upload_skill(
             [ir.SkillFile(path, text.encode()) for path, text in SKILL_FILES.items()]
         )
-        response = engine.create_response(
-            t.OpenResponsesCreateRequest(
+        response = engine.chat(
+            t.ChatCompletionRequest(
                 model="default",
-                input="Use the invoice-auditor skill to check the bundled invoice.",
-                tools=[
-                    t.OpenAiShellTool(
-                        environment=t.OpenAiShellEnvironmentContainerAuto(
-                            skills=[
-                                t.OpenAiShellSkillSkillReference(
-                                    skill_id=skill.id, version="latest"
-                                )
-                            ]
-                        )
+                messages=[
+                    t.Message(
+                        role="user",
+                        content="Use the invoice-auditor skill to check the bundled invoice.",
                     )
                 ],
+                enable_shell=True,
+                shell_skill_references=[t.OpenAiShellSkillReference(skill_id=skill.id)],
                 max_tool_rounds=6,
             )
         )
-        print(response.output_text)
+        print(response.choices[0].message.content)
 
 
 if __name__ == "__main__":

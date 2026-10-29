@@ -108,8 +108,8 @@ pub mod streaming;
 pub mod types;
 use inference_api::{
     agentic, api_error, engine_chat, engine_completion, files as files_api,
-    lora_adapters as lora_adapters_api, media_source, models as models_api,
-    responses as responses_api, responses_types, skill_store, system,
+    lora_adapters as lora_adapters_api, media_source, models as models_api, responses_types,
+    skill_store, system,
 };
 pub use inference_api::{openai, util, video};
-use inference_chat_protocols::anthropic as anthropic_api;
+use inference_chat_protocols::{anthropic as anthropic_api, responses as responses_api};

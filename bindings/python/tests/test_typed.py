@@ -187,17 +187,6 @@ class TypedEngine(unittest.TestCase):
         with raw.chat_stream(ir.to_json(chat_request(stream=True))) as stream:
             for event in stream:
                 self.assert_parsed(t.ChatCompletionChunkResponse, json.dumps(event.data))
-        request = t.OpenResponsesCreateRequest(
-            model="default",
-            input=PROMPT,
-            max_output_tokens=MAX_TOKENS,
-            temperature=0.0,
-            top_k=1,
-            stream=True,
-        )
-        with raw.response_stream(ir.to_json(request)) as stream:
-            for event in stream:
-                self.assert_parsed(t.OpenResponsesStreamEvent, json.dumps(event.data))
         self.assert_parsed(t.ModelObjects, raw.list_models())
         self.assert_parsed(t.FileMetadata, raw.upload_file(b"x", "x.txt", "user_data"))
         self.assert_parsed(t.FileListObject, raw.list_files())
@@ -235,25 +224,6 @@ class TypedEngine(unittest.TestCase):
                 self.assertIsInstance(event.data, t.ChatCompletionChunkResponse)
                 streamed += event.data.choices[0].delta.content or ""
         self.assertEqual(streamed, text)
-
-    def test_responses_stream_events_are_their_variants(self):
-        request = t.OpenResponsesCreateRequest(
-            model="default",
-            input=PROMPT,
-            max_output_tokens=MAX_TOKENS,
-            temperature=0.0,
-            top_k=1,
-            stream=True,
-        )
-        with self.engine.response_stream(request) as stream:
-            events = list(stream)
-        self.assertIsInstance(events[0].data, t.OpenResponsesStreamEventResponseCreated)
-        # The random weights never stop on their own, so the token cap ends the run.
-        capped = events[-1].data
-        self.assertIsInstance(capped, t.OpenResponsesStreamEventResponseIncomplete)
-        self.assertIsInstance(capped.response, t.ResponseResource)
-        stored = self.engine.get_response(capped.response.id)
-        self.assertEqual(stored.status, t.ResponseStatus.INCOMPLETE)
 
     def test_management_calls_return_their_classes(self):
         models = self.engine.list_models()

@@ -549,11 +549,6 @@ entry_points! {
     json inference_rerank => |engine, request| engine.rerank_json(request).map_err(api_failure);
     /// Safety: as for `inference_chat`.
     json inference_decide => |engine, request| engine.decide_json(request).map_err(api_failure);
-    /// Safety: as for `inference_chat`.
-    json inference_responses_create => |engine, request| engine.responses_json(request).map_err(api_failure);
-    /// Safety: as for `inference_chat_stream_open`.
-    stream inference_responses_stream_open =>
-        |engine, request| engine.responses_stream_json(request).map_err(api_failure);
 }
 
 // Engine and a UTF-8 id in, an owned handle out.
@@ -569,35 +564,7 @@ unsafe fn id_call<H>(
     }
 }
 
-unsafe fn response_id_call(
-    engine: *const inference_engine,
-    response_id: *const c_char,
-    response_id_len: usize,
-    out_response: *mut *mut inference_string,
-    call: impl FnOnce(&Engine, &str) -> Result<String, ApiError>,
-) -> inference_status {
-    unsafe {
-        id_call(
-            engine,
-            (response_id, response_id_len, "response_id"),
-            (out_response, "out_response"),
-            |engine, id| {
-                call(engine.engine(), id)
-                    .map(string_handle)
-                    .map_err(api_failure)
-            },
-        )
-    }
-}
-
 entry_points! {
-    /// Safety: `engine` is a live handle, `response_id` valid for `response_id_len` bytes, `out_response` valid for a
-    /// write.
-    response_id_call(response_id, response_id_len) inference_responses_get => Engine::response_json;
-    /// Safety: as for `inference_responses_get`.
-    response_id_call(response_id, response_id_len) inference_responses_delete => Engine::delete_response_json;
-    /// Safety: as for `inference_responses_get`.
-    response_id_call(response_id, response_id_len) inference_responses_cancel => Engine::cancel_response_json;
     /// Safety: `engine` is a live handle and `out_response` valid for a write.
     query inference_models_list => |engine| engine.engine().models_json();
 }

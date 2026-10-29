@@ -1,26 +1,41 @@
 //! The Responses streamer over agentic rounds, and the tool calls a stored reply keeps for its follow-up.
 
-use crate::{
-    Engine,
-    responses::{OpenResponsesStreamEvent, ResponsesStreamItem},
-};
 use futures::StreamExt;
+use inference_api::engine_chat::{AgenticToolProgress, ChatStreamEvent};
+use inference_mcp::CalledFunction;
+use inference_protocol::{
+    openai::{Message, MessageContent, ToolCall},
+    response::{
+        ChatCompletionChunkResponse, ChatCompletionResponse, Choice, ChunkChoice, Delta,
+        ResponseMessage, Usage,
+    },
+    responses_types::OutputItem,
+    tools::{ToolCallResponse, ToolCallType},
+};
 use serde_json::json;
 
-use super::tiny_engine;
+use super::{
+    OpenResponsesStreamEvent, OpenResponsesStreamer, RequestContext, ResponseRun,
+    ResponsesStreamItem, parse_openresponses_request, run_to_end,
+};
+use crate::cached_responses::get_response_cache;
+
+fn events(events: Vec<ChatStreamEvent>) -> super::ChatEvents {
+    Box::pin(futures::stream::iter(events))
+}
 
 fn reasoning_chunk(
     reasoning: Option<&str>,
     content: Option<&str>,
     finish_reason: Option<&str>,
-) -> inference_core::Response {
-    inference_core::Response::Chunk(inference_core::ChatCompletionChunkResponse {
+) -> ChatStreamEvent {
+    ChatStreamEvent::Chunk(ChatCompletionChunkResponse {
         id: "chunk".to_string(),
-        choices: vec![inference_core::ChunkChoice {
+        choices: vec![ChunkChoice {
             finish_reason: finish_reason.map(str::to_string),
             stop_sequence: None,
             index: 0,
-            delta: inference_core::Delta {
+            delta: Delta {
                 content: content.map(str::to_string),
                 role: "assistant".to_string(),
                 tool_calls: None,
@@ -38,48 +53,33 @@ fn reasoning_chunk(
     })
 }
 
-fn tool_progress() -> inference_core::Response {
-    let data = inference_core::AgenticToolCallData::Custom {
+fn tool_progress() -> ChatStreamEvent {
+    let data = inference_api::engine_chat::AgenticToolCallData::Custom {
         arguments: "{}".to_string(),
         content: "found".to_string(),
     };
-    inference_core::Response::AgenticToolCallProgress {
+    ChatStreamEvent::AgenticToolCallProgress(AgenticToolProgress {
         round: 0,
         tool_call_id: "call_lookup".to_string(),
         tool_name: "lookup".to_string(),
-        phase: inference_core::AgenticToolCallPhase::Complete(data),
-    }
+        phase: inference_api::engine_chat::AgenticToolCallPhase::Complete(data),
+    })
 }
 
 /// Streams `responses` through a Responses streamer and checks every item keeps one `output_index`, matching its
 /// position in the final resource; returns each reasoning item's text, in output order.
-async fn stream_rounds(
-    engine: &Engine,
-    responses: Vec<inference_core::Response>,
-) -> anyhow::Result<Vec<String>> {
-    use crate::responses::{OpenResponsesStreamer, PreparedResponse, RequestContext};
-    use crate::responses_types::OutputItem;
-
-    let (tx, rx) = tokio::sync::mpsc::channel(16);
-    for response in responses {
-        tx.send(response).await?;
-    }
-    drop(tx);
-    let prepared = PreparedResponse {
-        rx,
+async fn stream_rounds(rounds: Vec<ChatStreamEvent>) -> anyhow::Result<Vec<String>> {
+    let run = ResponseRun {
         id: "resp_rounds".to_string(),
         model: "default".to_string(),
         metadata: None,
         store: false,
-        stream: true,
-        background: false,
         history: Vec::new(),
         context: RequestContext::default(),
-        cancellation: Default::default(),
         session_id: None,
         owner: None,
     };
-    let mut stream = OpenResponsesStreamer::new(prepared, engine.state().clone(), None);
+    let mut stream = OpenResponsesStreamer::new(run, events(rounds), None, None);
     let mut index_of = std::collections::HashMap::new();
     let mut last = None;
     while let Some(item) = stream.next().await {
@@ -129,9 +129,8 @@ async fn stream_rounds(
         .collect())
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn each_agentic_round_streams_its_reasoning_into_its_own_item() -> anyhow::Result<()> {
-    let (_dir, engine) = tiny_engine().await?;
     let first = || reasoning_chunk(Some("first thought"), None, None);
     let second = || reasoning_chunk(Some("second thought"), None, None);
     let finish = || reasoning_chunk(None, Some("Found it."), Some("stop"));
@@ -145,7 +144,7 @@ async fn each_agentic_round_streams_its_reasoning_into_its_own_item() -> anyhow:
         ],
         vec![first(), tool_progress(), second(), finish()],
     ] {
-        let reasoning = stream_rounds(&engine, rounds).await?;
+        let reasoning = stream_rounds(rounds).await?;
         assert_eq!(reasoning, ["first thought", "second thought"]);
     }
     Ok(())
@@ -155,12 +154,12 @@ const CLIENT_TOOL: &str = "lookup";
 const SERVER_TOOL: &str = "search_index";
 const RUN_SESSION: &str = "session_run";
 
-fn tool_call(id: &str, name: &str) -> inference_core::ToolCallResponse {
-    inference_core::ToolCallResponse {
+fn tool_call(id: &str, name: &str) -> ToolCallResponse {
+    ToolCallResponse {
         index: 0,
         id: id.to_string(),
-        tp: inference_core::ToolCallType::Function,
-        function: inference_core::CalledFunction {
+        tp: ToolCallType::Function,
+        function: CalledFunction {
             name: name.to_string(),
             arguments: "{\"word\":\"ok\"}".to_string(),
         },
@@ -168,7 +167,7 @@ fn tool_call(id: &str, name: &str) -> inference_core::ToolCallResponse {
 }
 
 /// A client-defined call, and a server tool's call that a round-limit stop hands back.
-fn returned_calls() -> Vec<inference_core::ToolCallResponse> {
+fn returned_calls() -> Vec<ToolCallResponse> {
     vec![
         tool_call("call_lookup", CLIENT_TOOL),
         tool_call("call_search", SERVER_TOOL),
@@ -179,47 +178,37 @@ fn client_tools() -> serde_json::Value {
     json!([{"type": "function", "name": CLIENT_TOOL, "parameters": {"type": "object"}}])
 }
 
-fn prepared(
-    id: &str,
-    stream: bool,
-    rx: tokio::sync::mpsc::Receiver<inference_core::Response>,
-) -> anyhow::Result<crate::responses::PreparedResponse> {
-    Ok(crate::responses::PreparedResponse {
-        rx,
+fn run(id: &str) -> anyhow::Result<ResponseRun> {
+    Ok(ResponseRun {
         id: id.to_string(),
         model: "default".to_string(),
         metadata: None,
         store: true,
-        stream,
-        background: false,
-        history: vec![crate::openai::Message {
-            content: Some(crate::openai::MessageContent::from_text(
-                "Look up ok.".to_string(),
-            )),
+        history: vec![Message {
+            content: Some(MessageContent::from_text("Look up ok.".to_string())),
             role: "user".to_string(),
             name: None,
             tool_calls: None,
             tool_call_id: None,
             reasoning_content: None,
         }],
-        context: crate::responses::RequestContext {
+        context: RequestContext {
             tools: Some(serde_json::from_value(client_tools())?),
             ..Default::default()
         },
-        cancellation: Default::default(),
         session_id: None,
         owner: None,
     })
 }
 
-fn done_with_calls(calls: Vec<inference_core::ToolCallResponse>) -> inference_core::Response {
-    inference_core::Response::Done(inference_core::ChatCompletionResponse {
+fn done_with_calls(calls: Vec<ToolCallResponse>) -> ChatCompletionResponse {
+    ChatCompletionResponse {
         id: "chatcmpl".to_string(),
-        choices: vec![inference_core::Choice {
+        choices: vec![Choice {
             finish_reason: "tool_calls".to_string(),
             stop_sequence: None,
             index: 0,
-            message: inference_core::ResponseMessage {
+            message: ResponseMessage {
                 content: None,
                 role: "assistant".to_string(),
                 tool_calls: Some(calls),
@@ -231,7 +220,7 @@ fn done_with_calls(calls: Vec<inference_core::ToolCallResponse>) -> inference_co
         model: "default".to_string(),
         system_fingerprint: "local".to_string(),
         object: "chat.completion".to_string(),
-        usage: inference_core::Usage {
+        usage: Usage {
             completion_tokens: 1,
             prompt_tokens: 1,
             total_tokens: 2,
@@ -247,12 +236,12 @@ fn done_with_calls(calls: Vec<inference_core::ToolCallResponse>) -> inference_co
         agentic_tool_calls: None,
         files: None,
         session_id: Some(RUN_SESSION.to_string()),
-    })
+    }
 }
 
 /// The stored reply's tool calls, as `previous_response_id` will replay them in the run's session.
-fn stored_tool_calls(id: &str) -> anyhow::Result<Vec<crate::openai::ToolCall>> {
-    let history = crate::cached_responses::get_response_cache()
+fn stored_tool_calls(id: &str) -> anyhow::Result<Vec<ToolCall>> {
+    let history = get_response_cache()
         .get_conversation(id, None)?
         .expect("the reply was stored");
     assert_eq!(history.session_id.as_deref(), Some(RUN_SESSION));
@@ -267,7 +256,7 @@ fn stored_tool_calls(id: &str) -> anyhow::Result<Vec<crate::openai::ToolCall>> {
         .expect("the reply keeps its tool call"))
 }
 
-fn assert_only_client_call(calls: &[crate::openai::ToolCall]) {
+fn assert_only_client_call(calls: &[ToolCall]) {
     let calls: Vec<_> = calls
         .iter()
         .map(|call| (call.id.as_deref(), call.function.name.as_str()))
@@ -275,98 +264,87 @@ fn assert_only_client_call(calls: &[crate::openai::ToolCall]) {
     assert_eq!(calls, [(Some("call_lookup"), CLIENT_TOOL)]);
 }
 
-async fn stream_returned_calls(engine: &Engine, id: &str) -> anyhow::Result<()> {
-    let (tx, rx) = tokio::sync::mpsc::channel(4);
+async fn stream_returned_calls(id: &str) -> anyhow::Result<()> {
     let mut chunk = reasoning_chunk(None, None, Some("tool_calls"));
-    if let inference_core::Response::Chunk(chunk) = &mut chunk {
+    if let ChatStreamEvent::Chunk(chunk) = &mut chunk {
         chunk.choices[0].delta.tool_calls = Some(returned_calls());
         chunk.session_id = Some(RUN_SESSION.to_string());
     }
-    tx.send(chunk).await?;
-    drop(tx);
-    let mut stream = crate::responses::OpenResponsesStreamer::new(
-        prepared(id, true, rx)?,
-        engine.state().clone(),
-        None,
-    );
+    let mut stream = OpenResponsesStreamer::new(run(id)?, events(vec![chunk]), None, None);
     while stream.next().await.is_some() {}
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
+/// Runs `done` as a collected (not streamed) reply, storing it as the request asked.
+async fn collect(run: ResponseRun, done: ChatCompletionResponse) -> anyhow::Result<()> {
+    let (result, stored) = run_to_end(
+        run,
+        events(vec![ChatStreamEvent::Done(Box::new(done))]),
+        None,
+    )
+    .await;
+    result.map_err(anyhow::Error::msg)?;
+    stored.expect("the request asked to be stored").save();
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_streamed_reply_is_stored_with_the_client_calls_it_returns() -> anyhow::Result<()> {
-    let (_dir, engine) = tiny_engine().await?;
-    stream_returned_calls(&engine, "resp_streamed_call").await?;
+    stream_returned_calls("resp_streamed_call").await?;
     assert_only_client_call(&stored_tool_calls("resp_streamed_call")?);
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn a_collected_reply_is_stored_with_the_client_calls_it_returns() -> anyhow::Result<()> {
-    let (_dir, engine) = tiny_engine().await?;
-    let (tx, rx) = tokio::sync::mpsc::channel(4);
-    tx.send(done_with_calls(returned_calls())).await?;
-    drop(tx);
-    crate::responses::collect_response(prepared("resp_collected_call", false, rx)?, engine.state())
-        .await
-        .map_err(anyhow::Error::msg)?;
+    collect(
+        run("resp_collected_call")?,
+        done_with_calls(returned_calls()),
+    )
+    .await?;
     assert_only_client_call(&stored_tool_calls("resp_collected_call")?);
     Ok(())
 }
 
 /// The agent session a `previous_response_id` follow-up would send on its request.
-async fn follow_up_session(engine: &Engine, previous: &str) -> anyhow::Result<Option<String>> {
+fn follow_up_session(previous: &str) -> anyhow::Result<Option<String>> {
     let request =
         json!({"model": "default", "previous_response_id": previous, "input": "And then?"});
-    let prepared =
-        crate::responses::prepare_response(engine.chat_engine(), serde_json::from_value(request)?)
-            .await
-            .map_err(|error| anyhow::Error::msg(error.into_api_error(engine.state().clone())))?;
-    prepared.cancellation.cancel();
-    Ok(prepared.session_id)
+    let (chat, _, _) = parse_openresponses_request(serde_json::from_value(request)?, None)?;
+    Ok(chat.session_id)
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn only_a_follow_up_on_the_latest_reply_continues_its_session() -> anyhow::Result<()> {
-    let (_dir, engine) = tiny_engine().await?;
-    stream_returned_calls(&engine, "resp_first").await?;
+    stream_returned_calls("resp_first").await?;
     assert_eq!(
-        follow_up_session(&engine, "resp_first").await?.as_deref(),
+        follow_up_session("resp_first")?.as_deref(),
         Some(RUN_SESSION)
     );
-    stream_returned_calls(&engine, "resp_second").await?;
+    stream_returned_calls("resp_second").await?;
     // branching from the first reply must not rewrite the turns the second added to the session
-    assert_eq!(follow_up_session(&engine, "resp_first").await?, None);
+    assert_eq!(follow_up_session("resp_first")?, None);
     assert_eq!(
-        follow_up_session(&engine, "resp_second").await?.as_deref(),
+        follow_up_session("resp_second")?.as_deref(),
         Some(RUN_SESSION)
     );
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn a_reply_without_an_agent_run_keeps_the_session_it_continued() -> anyhow::Result<()> {
-    let (_dir, engine) = tiny_engine().await?;
-    let (tx, rx) = tokio::sync::mpsc::channel(4);
-    let inference_core::Response::Done(mut done) = done_with_calls(returned_calls()) else {
-        unreachable!()
-    };
+    let mut done = done_with_calls(returned_calls());
     done.session_id = None;
-    tx.send(inference_core::Response::Done(done)).await?;
-    drop(tx);
-    let mut prepared = prepared("resp_plain_turn", false, rx)?;
-    prepared.session_id = Some(RUN_SESSION.to_string());
-    crate::responses::collect_response(prepared, engine.state())
-        .await
-        .map_err(anyhow::Error::msg)?;
+    let mut run = run("resp_plain_turn")?;
+    run.session_id = Some(RUN_SESSION.to_string());
+    collect(run, done).await?;
     assert_only_client_call(&stored_tool_calls("resp_plain_turn")?);
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn a_follow_up_answers_the_stored_call_without_repeating_it() -> anyhow::Result<()> {
-    let (_dir, engine) = tiny_engine().await?;
-    stream_returned_calls(&engine, "resp_answered_call").await?;
+    stream_returned_calls("resp_answered_call").await?;
     let request = json!({
         "model": "default",
         "previous_response_id": "resp_answered_call",
@@ -376,13 +354,8 @@ async fn a_follow_up_answers_the_stored_call_without_repeating_it() -> anyhow::R
             {"type": "function_call_output", "call_id": "call_lookup", "output": "found"},
         ],
     });
-    let prepared =
-        crate::responses::prepare_response(engine.chat_engine(), serde_json::from_value(request)?)
-            .await
-            .map_err(|error| anyhow::Error::msg(error.into_api_error(engine.state().clone())))?;
-    prepared.cancellation.cancel();
-    let turns: Vec<_> = prepared
-        .history
+    let (_, history, _) = parse_openresponses_request(serde_json::from_value(request)?, None)?;
+    let turns: Vec<_> = history
         .iter()
         .map(|message| {
             (

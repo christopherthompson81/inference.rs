@@ -3,10 +3,8 @@
 use std::time::Duration;
 
 use futures::StreamExt;
-use inference_api::{
-    Engine,
-    responses::{OpenResponsesStreamEvent, ResponsesStreamItem},
-};
+use inference_api::Engine;
+use inference_chat_protocols::responses::{self, OpenResponsesStreamEvent, ResponsesStreamItem};
 use serde_json::{Value, json};
 
 use crate::support;
@@ -91,8 +89,7 @@ async fn a_cancelled_response_stream_ends_as_cancelled_with_its_usage() -> anyho
         "max_output_tokens": LONG_COMPLETION,
         "ignore_eos": true,
     });
-    let mut stream = engine
-        .responses_stream(serde_json::from_value(request)?)
+    let mut stream = responses::create_stream(&engine, serde_json::from_value(request)?, None)
         .await
         .map_err(anyhow::Error::msg)?;
     let mut last = None;
@@ -119,12 +116,11 @@ async fn a_cancelled_response_stream_ends_as_cancelled_with_its_usage() -> anyho
     assert!(usage.output_tokens < LONG_COMPLETION, "{usage:?}");
 
     // Stored for fetching, but its reply was cut short, so it is not a conversation to continue.
-    let stored = engine.response(&response.id).map_err(anyhow::Error::msg)?;
+    let stored = responses::get(&engine, &response.id).map_err(anyhow::Error::msg)?;
     assert_eq!(stored.status.as_str(), "cancelled");
     let follow_up =
         json!({"model": "default", "input": PROMPT, "previous_response_id": response.id});
-    let refused = engine
-        .responses(serde_json::from_value(follow_up)?)
+    let refused = responses::create(&engine, serde_json::from_value(follow_up)?)
         .await
         .expect_err("a cancelled response cannot be continued");
     assert!(refused.message.contains(&response.id), "{refused:?}");
@@ -151,18 +147,16 @@ async fn cancelling_a_background_response_stops_its_generation() -> anyhow::Resu
         "background": true,
         "store": false,
     });
-    let queued = engine
-        .responses(serde_json::from_value(request)?)
+    let queued = responses::create(&engine, serde_json::from_value(request)?)
         .await
         .map_err(anyhow::Error::msg)?;
-    let cancelled = engine
-        .cancel_response(&queued.id)
+    let cancelled = inference_chat_protocols::responses::cancel(&engine, &queued.id)
         .map_err(anyhow::Error::msg)?;
     assert_eq!(cancelled.status.as_str(), "cancelled");
     // The stopped request comes back with what it generated.
     let deadline = tokio::time::Instant::now() + BACKGROUND_DEADLINE;
     let partial = loop {
-        let response = engine.response(&queued.id).map_err(anyhow::Error::msg)?;
+        let response = responses::get(&engine, &queued.id).map_err(anyhow::Error::msg)?;
         if response.usage.is_some() {
             break response;
         }

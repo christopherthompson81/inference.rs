@@ -199,10 +199,10 @@ async fn a_capped_response_is_incomplete_and_can_be_continued() -> anyhow::Resul
     }))?;
     let engine = inference_api::Engine::load(spec).await?;
     let request = json!({"model": "default", "input": PROMPT, "max_output_tokens": MAX_TOKENS});
-    let response = engine
-        .responses(serde_json::from_value(request)?)
-        .await
-        .map_err(anyhow::Error::msg)?;
+    let response =
+        inference_chat_protocols::responses::create(&engine, serde_json::from_value(request)?)
+            .await
+            .map_err(anyhow::Error::msg)?;
     let body = serde_json::to_value(&response)?;
     assert_eq!(body["status"], "incomplete", "{body}");
     assert_eq!(
@@ -214,8 +214,7 @@ async fn a_capped_response_is_incomplete_and_can_be_continued() -> anyhow::Resul
     // Unlike a cancelled reply, one cut off by its cap is a conversation to continue.
     let follow_up = json!({"model": "default", "input": PROMPT, "previous_response_id": response.id,
         "max_output_tokens": MAX_TOKENS});
-    engine
-        .responses(serde_json::from_value(follow_up)?)
+    inference_chat_protocols::responses::create(&engine, serde_json::from_value(follow_up)?)
         .await
         .map_err(anyhow::Error::msg)?;
     Ok(())
@@ -467,20 +466,25 @@ async fn responses_apply_the_servers_ask_permission() -> anyhow::Result<()> {
     let request = json!({"model": "default", "input": PROMPT, "max_output_tokens": MAX_TOKENS});
 
     // Approvals travel as stream events, so an `ask` server refuses a blocking request, as chat does.
-    let refused = engine
-        .responses(serde_json::from_value(request.clone())?)
-        .await
-        .expect_err("an ask server refuses a blocking Responses request");
+    let refused = inference_chat_protocols::responses::create(
+        &engine,
+        serde_json::from_value(request.clone())?,
+    )
+    .await
+    .expect_err("an ask server refuses a blocking Responses request");
     assert_eq!(
         refused.param.as_deref(),
         Some("agent_permission"),
         "{refused:?}"
     );
 
-    let mut stream = engine
-        .responses_stream(serde_json::from_value(request.clone())?)
-        .await
-        .map_err(anyhow::Error::msg)?;
+    let mut stream = inference_chat_protocols::responses::create_stream(
+        &engine,
+        serde_json::from_value(request.clone())?,
+        None,
+    )
+    .await
+    .map_err(anyhow::Error::msg)?;
     let mut names = Vec::new();
     while let Some(item) = stream.next().await {
         names.push(item.name());

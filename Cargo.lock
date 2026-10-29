@@ -2593,7 +2593,9 @@ dependencies = [
  "inference-protocol",
  "serde",
  "serde_json",
+ "tokio",
  "utoipa",
+ "uuid",
 ]
 
 [[package]]
