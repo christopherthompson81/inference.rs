@@ -67,6 +67,36 @@ const DECISION2_ARCHITECTURE: &str = "vllm-decision2";
 const DECISION2_TRUNK: &str = "qwen3";
 const OPTION_HEAD_TENSOR: &str = "decision.key.weight";
 // d1-omni's GGUF is `lfm2` read bidirectionally with laya's head; it runs as an embedder over d1-omni's prompts
+// laya and Julia-1: llama.cpp's ModernBERT with laya's head as its last blocks
+const LAYA_ARCHITECTURE: &str = "modern-bert";
+const LAYA_TYPE: &str = "laya";
+const LAYA_ENCODER: &str = "encoder";
+const LAYA_TEMPLATE_KEY: &str = "tokenizer.chat_template.systemone";
+// laya's template writes a score's options as `level <key>`; Julia-1's writes the descriptions alone
+const LAYA_SCORE_LEVELS: &str = "level {{ o.key }}";
+const LAYA_QUESTION_TYPES: [&str; 3] = ["choice", "score", "noul"];
+// the GGUF's option-count buckets against the safetensors config's
+const LAYA_OPTION_BUCKETS: [(&str, &str); 4] =
+    [("2", "2"), ("3_5", "3-5"), ("6_10", "6-10"), ("11", "11+")];
+// a head block's torch module against its GGUF role, each with a weight and a bias
+const LAYA_HEAD_BLOCK: [(&str, &str); 5] = [
+    ("norm1", "attn_norm"),
+    ("self_attn.out_proj", "attn_output"),
+    ("norm2", "ffn_norm"),
+    ("linear1", "ffn_up"),
+    ("linear2", "ffn_down"),
+];
+// the type embedding and the scorer, torch's Sequential(LayerNorm, Linear, GELU, Linear)
+const LAYA_HEAD_TENSORS: [(&str, &str); 6] = [
+    ("type_emb.weight", "token_types.weight"),
+    ("scorer.0.weight", "cls.norm.weight"),
+    ("scorer.0.bias", "cls.norm.bias"),
+    ("scorer.1.weight", "cls.weight"),
+    ("scorer.1.bias", "cls.bias"),
+    ("scorer.3.bias", "cls.output.bias"),
+];
+const LAYA_SCORER_OUT: &str = "scorer.3.weight";
+const LAYA_SCORER_OUT_TENSOR: &str = "cls.output.weight";
 // granite-switch: a dense Granite whose projections carry per-token switched LoRA factors
 const SWITCH_ARCHITECTURE: &str = "graniteswitch";
 const SWITCH_TRUNK: &str = "granite";
@@ -515,6 +545,109 @@ fn is_d1_omni(archive: &inference_quant::GgufArchive) -> bool {
             .is_some_and(|value| value.to_string().is_ok_and(|kind| kind == D1_OMNI_TYPE))
 }
 
+/// `<architecture>.decision.type` is `name`.
+fn is_decision_type(
+    archive: &inference_quant::GgufArchive,
+    architecture: &str,
+    name: &str,
+) -> bool {
+    matches!(
+        archive.metadata_value(&format!("{architecture}.decision.type")),
+        Some(inference_tensor::quantized::gguf_file::Value::String(value)) if value == name
+    )
+}
+
+/// laya's encoder config (the ModernBERT one, its trunk's layers only), the trunk and head block counts and the width.
+fn laya_config(archive: &inference_quant::GgufArchive) -> Result<(String, usize, usize, usize)> {
+    let key = |name: &str| {
+        let key = format!("{LAYA_ARCHITECTURE}.{name}");
+        archive
+            .metadata_value(&key)
+            .with_context(|| format!("laya GGUF has no `{key}`"))
+    };
+    let blocks = key("block_count")?.to_u32()? as usize;
+    let head = key("decision.block_count")?.to_u32()? as usize;
+    let trunk = blocks
+        .checked_sub(head)
+        .context("laya GGUF has more head blocks than blocks")?;
+    let mut config: serde_json::Value = serde_json::from_str(&synthesize_embedding_config(
+        archive,
+        EmbeddingGgufArchitecture::ModernBert,
+    )?)?;
+    let width = usize::try_from(
+        config["hidden_size"]
+            .as_u64()
+            .context("laya GGUF has no width")?,
+    )?;
+    config["num_hidden_layers"] = trunk.into();
+    config["architectures"] =
+        serde_json::json!([crate::pipeline::loaders::MODERN_BERT_DECISION_CLASS]);
+    Ok((serde_json::to_string(&config)?, trunk, head, width))
+}
+
+/// The config with laya's decision section, as a safetensors checkpoint's `decision.json` gives it: the family from the
+/// template (laya writes `level` codes for scores, Julia-1 the descriptions alone), the specials, budgets and
+/// temperatures from the metadata.
+fn laya_decision(
+    archive: &inference_quant::GgufArchive,
+    tokenizer: &tokenizers::Tokenizer,
+    config: &str,
+) -> Result<String> {
+    use inference_tensor::quantized::gguf_file::Value;
+    let key = |name: &str| archive.metadata_value(&format!("{LAYA_ARCHITECTURE}.{name}"));
+    let token = |key: &str| -> Result<String> {
+        let id = archive
+            .metadata_value(key)
+            .with_context(|| format!("laya GGUF has no `{key}`"))?
+            .to_u32()?;
+        tokenizer
+            .id_to_token(id)
+            .with_context(|| format!("laya GGUF's `{key}` {id} is not in its vocabulary"))
+    };
+    let template = match archive.metadata_value(LAYA_TEMPLATE_KEY) {
+        Some(Value::String(template)) => template.as_str(),
+        _ => bail!("laya GGUF has no `{LAYA_TEMPLATE_KEY}`"),
+    };
+    let family = match template.contains(LAYA_SCORE_LEVELS) {
+        true => "laya",
+        false => "julia",
+    };
+    let float = |name: &str| key(name).map(|value| value.to_f32()).transpose();
+    let mut temperature = Vec::new();
+    for kind in LAYA_QUESTION_TYPES {
+        match float(&format!("decision.temperature.{kind}"))? {
+            Some(value) => temperature.push(value),
+            None => break,
+        }
+    }
+    // an uncalibrated checkpoint (Julia-1) has none, and a partial set would misplace the rest
+    if temperature.len() != LAYA_QUESTION_TYPES.len() {
+        temperature.clear();
+    }
+    let mut by_options = serde_json::Map::new();
+    for kind in LAYA_QUESTION_TYPES {
+        for (bucket, ours) in LAYA_OPTION_BUCKETS {
+            if let Some(value) = float(&format!("decision.temperature.{kind}.{bucket}"))? {
+                by_options.insert(format!("{kind}:{ours}"), value.into());
+            }
+        }
+    }
+    let mut config: serde_json::Value = serde_json::from_str(config)?;
+    config["decision"] = serde_json::json!({
+        "family": family,
+        "head_layers": key("decision.block_count").context("laya GGUF has no head blocks")?.to_u32()?,
+        "cls_token": token("tokenizer.ggml.bos_token_id")?,
+        "sep_token": token("tokenizer.ggml.seperator_token_id")?,
+        "mask_token": token("tokenizer.ggml.mask_token_id")?,
+        // llama.cpp cuts the state only to the context, the head to its budget
+        "max_len": key("context_length").context("laya GGUF has no context length")?.to_u32()?,
+        "head_max_len": key("decision.max_head_tokens").context("laya GGUF has no head budget")?.to_u32()?,
+        "temperature": temperature,
+        "temperature_by_options": by_options,
+    });
+    Ok(serde_json::to_string(&config)?)
+}
+
 /// d1-omni's config from its `lfm2.*` keys: per-block KV heads (0 for a short convolution) and feed-forward widths,
 /// the trunk followed by the head.
 fn d1_omni_config(archive: &inference_quant::GgufArchive) -> Result<String> {
@@ -903,6 +1036,11 @@ impl GGUFLoader {
             }
             None => bail!("GGUF metadata is missing `general.architecture`"),
         };
+        if architecture == LAYA_ARCHITECTURE
+            && is_decision_type(&archive, LAYA_ARCHITECTURE, LAYA_TYPE)
+        {
+            return self.load_laya(archive, paths, options);
+        }
         if let Some(encoder) = EmbeddingGgufArchitecture::from_architecture(architecture) {
             return self.load_native_embedding(archive, encoder, paths, options);
         }
@@ -1081,6 +1219,80 @@ impl GGUFLoader {
             EmbeddingGgufArchitecture::NeoBert => EmbeddingLoaderType::NeoBert,
         };
         self.load_prepared_embedding(loader_type, source, pooling, paths, options)
+    }
+
+    /// laya and Julia-1 as llama.cpp writes them: a ModernBERT whose last `decision.block_count` blocks are the decision
+    /// head, under the safetensors checkpoint's names, with its decision section built from the metadata.
+    fn load_laya(
+        &self,
+        archive: Arc<inference_quant::GgufArchive>,
+        paths: &dyn ModelPaths,
+        options: LoadOptions<'_>,
+    ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        let (config, trunk, head_layers, width) = laya_config(&archive)?;
+        let mut bindings = inference_quant::GgufBindingMap::new();
+        let encoder = build_embedding_bindings(&archive, EmbeddingGgufArchitecture::ModernBert)?;
+        for (native, binding) in encoder.iter() {
+            // the encoder's own layers only; the head blocks bind below under the head's names
+            let head_block = native
+                .strip_prefix("layers.")
+                .and_then(|rest| rest.split('.').next())
+                .and_then(|layer| layer.parse::<usize>().ok())
+                .is_some_and(|layer| layer >= trunk);
+            if !head_block {
+                bindings.insert(format!("{LAYA_ENCODER}.{native}"), binding.clone());
+            }
+        }
+        let mut bind = |native: String, gguf: String| {
+            if archive.tensors().contains_key(&gguf) {
+                bindings.insert(native, inference_quant::GgufTensorBinding::tensor(gguf));
+            }
+        };
+        for i in 0..head_layers {
+            let (ours, theirs) = (format!("head.layers.{i}"), format!("blk.{}", trunk + i));
+            for (module, role) in LAYA_HEAD_BLOCK {
+                for part in ["weight", "bias"] {
+                    bind(
+                        format!("{ours}.{module}.{part}"),
+                        format!("{theirs}.{role}.{part}"),
+                    );
+                }
+            }
+            // torch keeps the head's q, k and v as one `in_proj`, which the converter writes as `attn_qkv`
+            bind(
+                format!("{ours}.self_attn.in_proj_weight"),
+                format!("{theirs}.attn_qkv.weight"),
+            );
+            bind(
+                format!("{ours}.self_attn.in_proj_bias"),
+                format!("{theirs}.attn_qkv.bias"),
+            );
+        }
+        for (ours, theirs) in LAYA_HEAD_TENSORS {
+            bind(ours.to_string(), theirs.to_string());
+        }
+        // the scorer's last projection is a 1-D GGUF tensor
+        bindings.insert(
+            LAYA_SCORER_OUT.to_string(),
+            inference_quant::GgufTensorBinding::tensor(LAYA_SCORER_OUT_TENSOR)
+                .reshape(vec![1, width]),
+        );
+        let source = self.prepare_source(
+            &archive,
+            &bindings,
+            paths,
+            &options,
+            config,
+            RopePairing::HalfSplit,
+        )?;
+        let config = laya_decision(&archive, &source.tokenizer, &source.config)?;
+        self.load_prepared_embedding(
+            EmbeddingLoaderType::ModernBertDecision,
+            PreparedSource { config, ..source },
+            EmbeddingGgufPooling::Rank,
+            paths,
+            options,
+        )
     }
 
     /// d1-omni: its trunk and head under their GGUF names, with the decision profile that renders its prompts.

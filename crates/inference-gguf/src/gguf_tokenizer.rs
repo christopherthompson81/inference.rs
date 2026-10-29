@@ -61,6 +61,8 @@ const GGML_TOKEN_TYPE_BYTE: i32 = 6;
 const GGML_TOKEN_TYPE_USER_DEFINED: i32 = 4;
 // llama.cpp makes Gemma 4's channel and tool markers user-defined for its chat parser; transformers keeps them special
 const GEMMA4_TOKENIZER_MODEL: &str = "gemma4";
+// mmBERT's Gemma-style SentencePiece vocabulary, which llama.cpp's converter writes as `gpt2` BPE
+const MMBERT_PRE_TOKENIZER: &str = "mmbert";
 const SENTENCEPIECE_UNDERLINE: &str = "\u{2581}";
 // SentencePiece numbers `<unk>` 0 when the GGUF names none
 const SPM_DEFAULT_UNK: u32 = 0;
@@ -231,6 +233,9 @@ pub fn convert_gguf_metadata_to_hf_tokenizer(
         "llama" | "gemma" => spm_bpe_tokenizer(&props)?,
         "replit" => unigram_tokenizer(&props)?,
         "gemma4" => gemma4_tokenizer(&props)?,
+        "gpt2" if props.pre.as_deref() == Some(MMBERT_PRE_TOKENIZER) => {
+            mmbert_tokenizer(&props, &token_types)?
+        }
         "gpt2" => bpe_tokenizer(&props)?,
         WORDPIECE_TOKENIZER_MODEL => wordpiece_tokenizer(&props, &token_types, values)?,
         SPM_UNIGRAM_TOKENIZER_MODEL => spm_unigram_tokenizer(&props, values)?,
@@ -969,6 +974,50 @@ fn gemma4_tokenizer(p: &PropsGGUF) -> Result<(Tokenizer, TokenizerKind)> {
     Ok((tokenizer, TokenizerKind::Bpe))
 }
 
+/// mmBERT's tokenizer (Julia-1's) as its `tokenizer.json` builds it: byte-fallback BPE over spaces written as `▁`,
+/// split before each `▁` with one always prepended; the vocabulary's control tokens stay whole.
+fn mmbert_tokenizer(p: &PropsGGUF, token_types: &[i32]) -> Result<(Tokenizer, TokenizerKind)> {
+    use tokenizers::pre_tokenizers::metaspace::{Metaspace, PrependScheme};
+    let unk = p.unk.ok_or_else(|| {
+        anyhow::anyhow!(
+            "`mmbert` BPE tokenizer is missing required metadata `tokenizer.ggml.unknown_token_id`"
+        )
+    })?;
+    let (vocab, merges) = bpe_vocab_and_merges(p)?;
+    let bpe = BpeBuilder::new()
+        .vocab_and_merges(vocab, merges)
+        .unk_token(p.tokens[unk as usize].clone())
+        .fuse_unk(true)
+        .byte_fallback(true)
+        .ignore_merges(false)
+        .build()
+        .map_err(anyhow::Error::msg)?;
+    let mut tokenizer = TokenizerX::new(
+        ModelWrapper::BPE(bpe),
+        Some(Decoder::Sequence(vec![
+            Decoder::Replace(SENTENCEPIECE_UNDERLINE, " "),
+            Decoder::ByteFallback,
+            Decoder::Fuse,
+        ])),
+        Some(Normalizer::Replace(" ", SENTENCEPIECE_UNDERLINE)),
+    )?;
+    tokenizer.with_pre_tokenizer(Some(PreTokenizerWrapper::Metaspace(Metaspace::new(
+        METASPACE,
+        PrependScheme::Always,
+        true,
+    ))));
+    let specials = token_types
+        .iter()
+        .enumerate()
+        .filter(|(_, kind)| **kind == GGML_TOKEN_TYPE_CONTROL)
+        .map(|(id, _)| AddedToken::from(p.tokens[id].clone(), true))
+        .collect::<Vec<_>>();
+    tokenizer
+        .add_special_tokens(specials)
+        .map_err(anyhow::Error::msg)?;
+    Ok((tokenizer, TokenizerKind::Bpe))
+}
+
 // This is a workaround to have a better builder API.
 // Upstream `TokenizerBuilder` is difficult to work with:
 // https://github.com/huggingface/tokenizers/issues/1549
@@ -1075,10 +1124,11 @@ impl TryFrom<Normalizer<'_>> for NormalizerWrapper {
 #[cfg(test)]
 mod tests {
     use super::{
-        AddedTokenKind, BpePreTokenizerKind, GGML_TOKEN_TYPE_BYTE, GGML_TOKEN_TYPE_NORMAL,
-        GGML_TOKEN_TYPE_USER_DEFINED, PropsGGUF, SENTENCEPIECE_UNDERLINE, added_token_kind,
-        bpe_pre_tokenizer_spec, bpe_tokenizer, convert_gguf_metadata_to_hf_tokenizer,
-        gemma4_tokenizer, spm_bpe_tokenizer, validate_external_gguf_tokenizer,
+        AddedTokenKind, BpePreTokenizerKind, GGML_TOKEN_TYPE_BYTE, GGML_TOKEN_TYPE_CONTROL,
+        GGML_TOKEN_TYPE_NORMAL, GGML_TOKEN_TYPE_USER_DEFINED, MMBERT_PRE_TOKENIZER, PropsGGUF,
+        SENTENCEPIECE_UNDERLINE, added_token_kind, bpe_pre_tokenizer_spec, bpe_tokenizer,
+        convert_gguf_metadata_to_hf_tokenizer, gemma4_tokenizer, mmbert_tokenizer,
+        spm_bpe_tokenizer, validate_external_gguf_tokenizer,
     };
     use anyhow::Result;
     use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
@@ -1334,6 +1384,30 @@ mod tests {
             add_bos,
             add_space_prefix: Some(add_space_prefix),
         }
+    }
+
+    // mmBERT (Julia-1): an escaped space always leads the text, every word splits at one, and a control token stays whole
+    #[test]
+    fn mmbert_prepends_and_splits_at_escaped_spaces() -> Result<()> {
+        let props = PropsGGUF {
+            model: "gpt2".to_string(),
+            pre: Some(MMBERT_PRE_TOKENIZER.to_string()),
+            ..gemma4_props(false, false)
+        };
+        let mut token_types = vec![1; props.tokens.len()];
+        token_types[..3].fill(GGML_TOKEN_TYPE_CONTROL);
+        let (tokenizer, _) = mmbert_tokenizer(&props, &token_types)?;
+        for (text, expected_ids) in [
+            ("hello", vec![8, 15]),
+            ("hello world", vec![8, 15, 20]),
+            ("<bos>hello", vec![2, 8, 15]),
+        ] {
+            let encoding = tokenizer
+                .encode_fast(text, false)
+                .map_err(anyhow::Error::msg)?;
+            assert_eq!(encoding.get_ids(), expected_ids, "{text}");
+        }
+        Ok(())
     }
 
     #[test]

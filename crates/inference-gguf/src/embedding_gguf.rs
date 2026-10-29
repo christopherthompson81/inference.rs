@@ -118,8 +118,19 @@ impl Metadata<'_> {
             .get(&format!("{}.{key}", self.prefix))
     }
 
+    // a per-layer array (laya's, the encoder's blocks then the decision head's) reads as its first layer's value
     fn u32(&self, key: &str) -> Result<u32> {
-        Ok(self.value(key)?.to_u32()?)
+        match self.value(key)? {
+            Value::Array(values) => {
+                let first = values
+                    .first()
+                    .with_context(|| format!("GGUF `{key}` is empty"))?;
+                Ok(first
+                    .to_u32()
+                    .or_else(|_| first.to_i32().map(|v| v as u32))?)
+            }
+            value => Ok(value.to_u32()?),
+        }
     }
 
     fn f32(&self, key: &str) -> Result<f32> {
