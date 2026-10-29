@@ -16,7 +16,7 @@ use inference_core::{
     ChatCompletionResponse, FINISH_REASON_CANCELED, FINISH_REASON_LENGTH, InferenceRs, Request,
     RequestCancellation, Response,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::mpsc::{Receiver, Sender};
 use utoipa::{
@@ -53,7 +53,7 @@ use crate::{
 };
 
 /// Input type for OpenResponses API requests
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 #[serde(untagged)]
 pub enum OpenResponsesInput {
     /// Simple string input
@@ -301,7 +301,7 @@ fn convert_input_items_to_messages(items: Vec<InputItem>) -> Vec<Message> {
 }
 
 /// Reasoning configuration for models that support extended thinking
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct ReasoningConfig {
     /// Effort level for reasoning (off, low, medium, high, xhigh). "none" aliases "off".
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -312,7 +312,7 @@ pub struct ReasoningConfig {
 }
 
 /// Reasoning summary configuration
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningSummary {
     /// Generate a concise summary
@@ -324,7 +324,7 @@ pub enum ReasoningSummary {
 }
 
 /// Stream options configuration
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct StreamOptions {
     /// Include usage statistics in stream
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -416,7 +416,7 @@ impl RequestContext {
 ///
 /// This enum specifies additional content to include in the response.
 /// By default, certain content may be omitted for efficiency.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum IncludeOption {
     /// Include file search results (not currently supported by inference.rs)
@@ -434,7 +434,7 @@ pub enum IncludeOption {
 }
 
 /// OpenResponses API create request
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct OpenResponsesCreateRequest {
     // Core OpenResponses Fields
     /// The model to use for this request

@@ -26,7 +26,7 @@ const DEFAULT_MAX_OUTPUT_LENGTH: usize = 4096;
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 /// Shell execution config.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, inference_json::FromJson)]
 #[serde(deny_unknown_fields)]
 pub struct ShellConfig {
     #[serde(default = "default_shell_path")]

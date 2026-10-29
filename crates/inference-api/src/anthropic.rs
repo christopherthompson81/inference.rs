@@ -16,7 +16,7 @@ use inference_core::{
     RequestCancellation, Response, Tool, ToolChoice, ToolType, Usage, WebSearchOptions,
     WebSearchUserLocation,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 use tokio::sync::mpsc::Receiver;
 use utoipa::ToSchema;
@@ -65,7 +65,7 @@ fn default_assistant_role() -> String {
     "assistant".to_string()
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct AnthropicMessagesRequest {
     #[serde(default = "default_model")]
     pub model: String,
@@ -156,27 +156,27 @@ pub struct AnthropicMessagesRequest {
     pub host_tools: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct AnthropicMessage {
     pub role: String,
     pub content: AnthropicMessageContent,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(untagged)]
 pub enum AnthropicMessageContent {
     Text(String),
     Blocks(Vec<AnthropicContentBlock>),
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(untagged)]
 pub enum AnthropicSystem {
     Text(String),
     Blocks(Vec<AnthropicContentBlock>),
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct AnthropicContentBlock {
     #[serde(rename = "type")]
     pub tp: String,
@@ -210,7 +210,7 @@ pub struct AnthropicContentBlock {
     pub citations: Option<Value>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct AnthropicImageSource {
     #[serde(rename = "type")]
     pub tp: String,
@@ -222,7 +222,7 @@ pub struct AnthropicImageSource {
     pub url: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct AnthropicTool {
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub tp: Option<String>,
@@ -243,7 +243,7 @@ pub struct AnthropicTool {
     pub user_location: Option<AnthropicWebSearchUserLocation>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct AnthropicWebSearchUserLocation {
     #[serde(rename = "type")]
     pub tp: String,
@@ -257,7 +257,7 @@ pub struct AnthropicWebSearchUserLocation {
     pub timezone: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct AnthropicToolChoice {
     #[serde(rename = "type")]
     pub tp: String,
@@ -265,13 +265,13 @@ pub struct AnthropicToolChoice {
     pub name: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct AnthropicContainer {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<AnthropicSkillReference>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct AnthropicSkillReference {
     #[serde(rename = "type")]
     pub source: String,
@@ -280,7 +280,7 @@ pub struct AnthropicSkillReference {
     pub version: Option<Value>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct AnthropicThinking {
     #[serde(rename = "type")]
     pub tp: String,
@@ -290,7 +290,7 @@ pub struct AnthropicThinking {
     pub display: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct AnthropicOutputConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
@@ -298,7 +298,7 @@ pub struct AnthropicOutputConfig {
     pub format: Option<AnthropicJsonOutputFormat>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct AnthropicJsonOutputFormat {
     #[serde(rename = "type")]
     pub tp: String,

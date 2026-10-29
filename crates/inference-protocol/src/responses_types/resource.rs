@@ -1,6 +1,6 @@
 //! ResponseResource type for the OpenResponses API.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use utoipa::ToSchema;
 
@@ -15,7 +15,7 @@ use super::text::TextConfig;
 use crate::openai::OpenAiTool;
 
 /// Usage information for a response
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema, Default)]
 pub struct ResponseUsage {
     /// Number of input tokens
     pub input_tokens: usize,
@@ -45,7 +45,7 @@ impl ResponseUsage {
 }
 
 /// Detailed input token breakdown
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema, Default)]
 pub struct InputTokensDetails {
     /// Audio tokens
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -62,7 +62,7 @@ pub struct InputTokensDetails {
 }
 
 /// Detailed output token breakdown
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema, Default)]
 pub struct OutputTokensDetails {
     /// Audio tokens
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -76,7 +76,7 @@ pub struct OutputTokensDetails {
 }
 
 /// Error information for a response
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct ResponseError {
     /// Error code
     pub code: String,
@@ -95,7 +95,7 @@ impl ResponseError {
 }
 
 /// Details about incomplete responses
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct IncompleteDetails {
     /// Reason for incompleteness
     pub reason: IncompleteReason,
@@ -119,7 +119,7 @@ impl IncompleteDetails {
 }
 
 /// The main response resource returned by the OpenResponses API
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ResponseResource {
     /// Unique identifier for this response
     pub id: String,
@@ -424,7 +424,7 @@ impl ResponseResource {
 }
 
 /// Tool definition for the OpenResponses API
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 #[serde(tag = "type")]
 pub enum ResponseTool {
     /// Function tool
@@ -436,7 +436,7 @@ pub enum ResponseTool {
 }
 
 /// Function definition for tools
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct FunctionDefinition {
     /// Name of the function
     pub name: String,
@@ -452,7 +452,7 @@ pub struct FunctionDefinition {
 }
 
 /// Tool choice configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 #[serde(untagged)]
 pub enum ResponseToolChoice {
     /// Simple choice
@@ -462,7 +462,7 @@ pub enum ResponseToolChoice {
 }
 
 /// Simple tool choice options
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, inference_json::FromJson, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SimpleToolChoice {
     /// Let the model decide
@@ -474,7 +474,7 @@ pub enum SimpleToolChoice {
 }
 
 /// Specific tool choice
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct SpecificToolChoice {
     /// Tool type
     #[serde(rename = "type")]
@@ -484,7 +484,7 @@ pub struct SpecificToolChoice {
 }
 
 /// Specific function choice
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct SpecificFunctionChoice {
     /// Name of the function
     pub name: String,

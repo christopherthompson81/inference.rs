@@ -24,7 +24,7 @@ pub use logger::{IntervalLogger, SpeculativeStats};
 use paged_step::PagedStepCtx;
 use rand::SeedableRng;
 use rand_isaac::Isaac64Rng;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::{
     collections::HashMap,
     fmt,
@@ -97,7 +97,7 @@ pub enum EngineInstruction {
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, inference_json::FromJson)]
 #[serde(rename_all = "snake_case")]
 /// Embedding model used for ranking web search results internally.
 pub enum SearchEmbeddingModel {

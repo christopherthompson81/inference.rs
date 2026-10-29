@@ -58,7 +58,7 @@ scripts/deep_checks.sh
 # Same, then delete target/debug artifacts the selected modes don't use (including on-request example builds).
 scripts/local_ci.sh --lint --tests --cuda --sweep
 
-# Housekeeping measurements (duplication, unused deps; --ir, --incremental, --slow-tests LOG); the routine is in
+# Housekeeping measurements (duplication, unused deps; --ir, --incremental, --crate-time, --slow-tests LOG); the routine is in
 # docs/src/content/docs/developer/housekeeping.md
 scripts/housekeeping.sh
 

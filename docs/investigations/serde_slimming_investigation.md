@@ -152,3 +152,55 @@ way of returning to the caller after a panic has to run those destructors, so it
 
 **Implication:** keeping a host alive after a panic means keeping unwinding; the only slimmer reporting is
 report-then-abort. Not pursued unless the boundary's promise changes.
+
+## Run 5 - 2026-10-29 13:03
+
+**Question:** step 2: request bodies through `FromJson`, dropping `serde_path_to_error`. What does it take and save?
+
+**Change:**
+- `request_body::parse_json` parses once with `inference_json::parse_slice` and decodes with `FromJson`; a parse
+  failure stays `malformed_json`, a decode failure `invalid_request_body` with the path. `serde_path_to_error` leaves
+  inference-api's dependencies.
+- Every `Deserialize` derive in inference-protocol, inference-api and inference-mcp swapped, plus the types they
+  reach in core, nn, sandbox, code-exec and selection (found by compiling: the swap tool reruns until no
+  `FromJson` bound is missing). Five types with hand-written decoders get `inference_json::via_serde!`
+  (`AdapterGenerationId`, `HfConfigOverrides`, `PagedCacheType`, `PagedCacheLayers`, `ReasoningEffort`).
+- The derive grew what the protocol uses: variant-level `#[serde(untagged)]` (tried after the tagged variants, as
+  serde does), `with` / `deserialize_with` on tuple fields, `either::serde_untagged(_optional)` decoded natively,
+  `#[json(serde)]` for a foreign field type (llguidance's grammar), and serde's own `Either` encoding
+  (`{"Left": ...}`, which saved agent sessions use). `NonZero` integers in the runtime.
+- The web UI's 17 JSON handlers take a `JsonBody<T: FromJson>` extractor with axum's statuses (415 / 400 / 422),
+  since axum's `Json` decodes through `serde_path_to_error` too.
+- Response types holding `object: &'static str` (8) drop the derive: their `Deserialize` could only ever read
+  `'static` input.
+- URL query types stay on serde's `Deserialize` (`SkillListQuery`, `ListLoraAdaptersQuery`, `CalibrationTarget`):
+  serde_urlencoded reads numbers from strings, and a `Value` keeps the last of a repeated key where serde's derive
+  rejects it (`chat_route::adapter_routes_use_the_openai_error_envelope` caught `?model=a&model=b` answering 404 for
+  400). The two that are also JSON bodies get `via_serde!`.
+
+**Finding:**
+- CPU suite 3000 passed; lint clean; `docs-regen` leaves `docs/openapi.json` and the Python types unchanged.
+- IR lines:
+
+| crate | master | step 1 | step 2 | change from master |
+|---|---|---|---|---|
+| inference-api | 1,916,996 | 1,800,499 | 1,402,113 | -514,883 (-26.9%) |
+| inference-server-core | 1,170,517 | 1,130,591 | 998,138 | -172,379 (-14.7%) |
+| inference-webui | - | 470,201 | 422,812 | -47,389 (-10.1% from step 1) |
+| inference-core | 1,767,510 | 1,768,834 | 1,717,207 | -50,303 (-2.8%) |
+
+  The decoders that replace them: `FromJson` code is 75k lines in api, 20k in protocol, 14k in mcp, 13k in core.
+- Behaviour change: a JSON body with a repeated key now takes the last value instead of failing with "duplicate
+  field" (as `serde_json::Value` and most JSON parsers do).
+
+- Build time. A `touch` rebuild (workspace check / test build, s) barely moves: nn 8 / 15-16 (Run 93: 8 / 16), core
+  8 / 10 (9 / 10), models-other 8 / 11 (8 / 12), api 6 / 7. A touch costs the dependents' re-check and the links;
+  rustc's incremental cache makes the touched crate itself nearly free, and a comment-only edit is free too (1.6 s).
+  What the IR buys shows in the crate compiled whole, alone (`cargo rustc -p <crate> --lib -- -C incremental=<new
+  dir>`, dependencies built, same tree otherwise; master and this branch switched in place): inference-api 17.7 ->
+  13.0 s (-27%), inference-server-core 11.0 -> 9.9 s (-10%). That is the serial tail of a build after an edit below
+  them, the part the user saw core and api compiling alone. `scripts/housekeeping.sh --crate-time` now measures it.
+- Tests for what the derive gained (variant-level `untagged`, both Either adapters and serde's `Either` encoding,
+  `NonZero`, `#[json(serde)]`) decode as serde does.
+
+**Next:** step 3, the model configs.

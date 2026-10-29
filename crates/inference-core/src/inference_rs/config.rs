@@ -178,7 +178,7 @@ pub struct LoadOverrides {
 
 /// The AnyMoE layer to build on top of the loaded model.
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, inference_json::FromJson)]
 #[serde(deny_unknown_fields)]
 pub struct AnyMoeSpec {
     pub config: AnyMoeConfig,

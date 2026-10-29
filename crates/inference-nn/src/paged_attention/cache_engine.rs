@@ -251,6 +251,8 @@ impl Serialize for PagedCacheType {
     }
 }
 
+inference_json::via_serde!(PagedCacheType);
+
 impl<'de> Deserialize<'de> for PagedCacheType {
     fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,

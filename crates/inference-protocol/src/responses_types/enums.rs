@@ -1,11 +1,13 @@
 //! Enum types for the OpenResponses API.
 
 pub use crate::request::ReasoningEffort;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use utoipa::ToSchema;
 
 /// Status of a response in the OpenResponses API
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, inference_json::FromJson, ToSchema, Default,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ResponseStatus {
     /// Response is queued for processing
@@ -38,7 +40,9 @@ impl ResponseStatus {
 }
 
 /// Status of an individual output item
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, inference_json::FromJson, ToSchema, Default,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ItemStatus {
     /// Item is in progress
@@ -62,7 +66,9 @@ impl ItemStatus {
 }
 
 /// Truncation strategy for input
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, inference_json::FromJson, ToSchema, Default,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum TruncationStrategy {
     /// Automatically truncate input if needed
@@ -73,7 +79,9 @@ pub enum TruncationStrategy {
 }
 
 /// Service tier for request prioritization
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, inference_json::FromJson, ToSchema, Default,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum ServiceTier {
     /// Automatic tier selection
@@ -88,7 +96,9 @@ pub enum ServiceTier {
 }
 
 /// Role of a message in the conversation
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, inference_json::FromJson, ToSchema, Default,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum MessageRole {
     /// User message
@@ -130,7 +140,9 @@ impl MessageRole {
 }
 
 /// Image detail level for vision inputs
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, inference_json::FromJson, ToSchema, Default,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum ImageDetail {
     /// Automatic detail level
@@ -143,7 +155,7 @@ pub enum ImageDetail {
 }
 
 /// Reason for incomplete response
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, inference_json::FromJson, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum IncompleteReason {
     /// Maximum tokens reached

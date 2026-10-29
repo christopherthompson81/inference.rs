@@ -1,7 +1,7 @@
 use inference_mcp::Tool;
 use inference_mcp::ToolType;
 
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, inference_json::FromJson, serde::Serialize)]
 pub enum ToolChoice {
     #[serde(rename = "none")]
     /// Disallow selection of tools.
@@ -27,7 +27,7 @@ pub enum ToolChoice {
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, inference_json::FromJson, serde::Serialize)]
 pub struct NamedFunctionToolChoice {
     #[serde(rename = "type")]
     pub tp: ToolType,
@@ -35,7 +35,7 @@ pub struct NamedFunctionToolChoice {
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, inference_json::FromJson, serde::Serialize)]
 pub struct AllowedToolsToolChoice {
     #[serde(rename = "type")]
     pub tp: AllowedToolsToolChoiceType,
@@ -44,14 +44,14 @@ pub struct AllowedToolsToolChoice {
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, inference_json::FromJson, serde::Serialize, PartialEq, Eq)]
 pub enum AllowedToolsToolChoiceType {
     #[serde(rename = "allowed_tools")]
     AllowedTools,
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, inference_json::FromJson, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AllowedToolsMode {
     Auto,
@@ -59,7 +59,7 @@ pub enum AllowedToolsMode {
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, inference_json::FromJson, serde::Serialize)]
 #[serde(tag = "type")]
 pub enum AllowedToolChoice {
     #[serde(rename = "function")]
@@ -73,14 +73,14 @@ pub enum AllowedToolChoice {
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, inference_json::FromJson, serde::Serialize)]
 pub struct BuiltinToolChoice {
     #[serde(rename = "type")]
     pub tp: BuiltinToolChoiceType,
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, inference_json::FromJson, serde::Serialize, PartialEq, Eq)]
 pub enum BuiltinToolChoiceType {
     #[serde(rename = "web_search_preview", alias = "web_search")]
     WebSearch,

@@ -1,6 +1,6 @@
 //! Content types for the OpenResponses API.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use utoipa::{
     PartialSchema, ToSchema,
     openapi::{ArrayBuilder, ObjectBuilder, OneOfBuilder, RefOr, Schema, Type, schema::SchemaType},
@@ -9,7 +9,7 @@ use utoipa::{
 use super::enums::ImageDetail;
 
 /// Image URL structure for image inputs
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct ImageUrl {
     /// The URL of the image
     pub url: String,
@@ -19,7 +19,7 @@ pub struct ImageUrl {
 }
 
 /// OpenResponses format input content types (with input_text, input_image, etc.)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 #[serde(tag = "type")]
 pub enum OpenResponsesInputContent {
     /// Text input content
@@ -79,7 +79,7 @@ pub enum OpenResponsesInputContent {
 }
 
 /// Audio input structure for OpenAI format
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct AudioInput {
     /// Base64 encoded audio data
     pub data: String,
@@ -88,7 +88,7 @@ pub struct AudioInput {
 }
 
 /// OpenAI Chat format input content types (with text, image_url, etc.)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 #[serde(tag = "type")]
 pub enum OpenAIInputContent {
     /// Text content (OpenAI format)
@@ -115,7 +115,7 @@ pub enum OpenAIInputContent {
 ///
 /// Supports both OpenResponses format (input_text, input_image) and
 /// OpenAI Chat format (text, image_url) for compatibility.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 #[serde(untagged)]
 pub enum InputContent {
     /// OpenResponses format content
@@ -381,7 +381,7 @@ fn input_content_schema() -> Schema {
 }
 
 /// Annotation for output text content
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 #[serde(tag = "type")]
 pub enum Annotation {
     /// File citation annotation
@@ -439,7 +439,7 @@ pub enum Annotation {
 }
 
 /// File citation details
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct FileCitation {
     /// File ID
     pub file_id: String,
@@ -449,7 +449,7 @@ pub struct FileCitation {
 }
 
 /// URL citation details
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct UrlCitation {
     /// The URL
     pub url: String,
@@ -459,14 +459,14 @@ pub struct UrlCitation {
 }
 
 /// File path information
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct FilePathInfo {
     /// File ID
     pub file_id: String,
 }
 
 /// Output content types for the OpenResponses API
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 #[serde(tag = "type")]
 pub enum OutputContent {
     /// Text output content

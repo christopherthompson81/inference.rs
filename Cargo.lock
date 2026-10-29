@@ -2541,6 +2541,7 @@ dependencies = [
  "indicatif 0.18.3",
  "inference-agent",
  "inference-core",
+ "inference-json",
  "inference-layout",
  "inference-models-other",
  "inference-nn",
@@ -2556,7 +2557,6 @@ dependencies = [
  "rand_distr",
  "serde",
  "serde_json",
- "serde_path_to_error",
  "tempfile",
  "tokio",
  "tracing",
@@ -2625,6 +2625,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "image",
+ "inference-json",
  "inference-mcp",
  "inference-sandbox",
  "libc",
@@ -2814,6 +2815,7 @@ dependencies = [
 name = "inference-json"
 version = "0.0.26"
 dependencies = [
+ "either",
  "indexmap",
  "inference-json-derive",
  "serde",
@@ -2881,6 +2883,7 @@ dependencies = [
  "futures",
  "http",
  "image",
+ "inference-json",
  "reqwest 0.13.1",
  "rust-mcp-schema",
  "rustls",
@@ -3143,6 +3146,7 @@ dependencies = [
  "image",
  "indexmap",
  "inference-code-exec",
+ "inference-json",
  "inference-mcp",
  "llguidance",
  "mime_guess",
@@ -3224,6 +3228,7 @@ dependencies = [
 name = "inference-sandbox"
 version = "0.0.26"
 dependencies = [
+ "inference-json",
  "itoa",
  "landlock",
  "libc",
@@ -3278,6 +3283,7 @@ dependencies = [
  "indicatif 0.18.3",
  "inference-api",
  "inference-core",
+ "inference-json",
  "inference-models-diffusion",
  "inference-models-other",
  "inference-models-speech",
@@ -3373,7 +3379,9 @@ dependencies = [
  "indexmap",
  "inference-api",
  "inference-coder",
+ "inference-json",
  "inference-server-core",
+ "mime",
  "mime_guess",
  "serde",
  "serde_json",

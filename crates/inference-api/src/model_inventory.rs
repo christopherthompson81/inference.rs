@@ -14,7 +14,7 @@ pub use inference_selection::inventory::{
     hf_cache_listing, inspect_model, scan_models,
 };
 use inference_selection::quant::{resolve_gguf_projector, resolve_gguf_quant};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
 use tokio::sync::mpsc;
 
@@ -28,14 +28,14 @@ const DOWNLOAD_WORKERS: usize = 4;
 // how often a running download looks for its cancellation
 const CANCEL_POLL: Duration = Duration::from_millis(100);
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, inference_json::FromJson)]
 #[serde(deny_unknown_fields)]
 pub struct ModelInspectRequest {
     /// A model directory, GGUF (any split shard) or `.nemo` file.
     pub path: PathBuf,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, inference_json::FromJson)]
 #[serde(deny_unknown_fields)]
 pub struct HfCacheDeleteRequest {
     /// `org/name`.
@@ -45,7 +45,7 @@ pub struct HfCacheDeleteRequest {
     pub hf_cache_path: Option<PathBuf>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, inference_json::FromJson)]
 #[serde(deny_unknown_fields)]
 pub struct ModelDownloadRequest {
     pub repo_id: String,
@@ -89,7 +89,7 @@ impl JsonRequest for ModelDownloadRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, inference_json::FromJson)]
 #[serde(transparent)]
 pub struct ScanRequestBody(ScanRequest);
 

@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::tools::ToolCallResponse;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, PartialEq)]
 /// Top-n logprobs element
 pub struct TopLogprob {
     pub token: u32,

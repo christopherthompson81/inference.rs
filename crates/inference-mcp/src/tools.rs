@@ -1,5 +1,5 @@
 use image::DynamicImage;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fmt;
@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 const SANDBOX_KEY_BYTES: usize = 16;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentToolSource {
     BuiltIn,
@@ -17,7 +17,7 @@ pub enum AgentToolSource {
     External,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentToolKind {
     CodeExecution,
@@ -28,7 +28,7 @@ pub enum AgentToolKind {
     External,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson)]
 pub struct AgentToolMetadata {
     pub source: AgentToolSource,
     pub kind: AgentToolKind,
@@ -61,7 +61,7 @@ pub type CodeExecutionApprovalNotifier =
     dyn Fn(CodeExecutionApprovalRequest) + Send + Sync + 'static;
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, inference_json::FromJson)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentPermission {
     #[default]
@@ -89,7 +89,7 @@ impl AgentPermission {
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, inference_json::FromJson)]
 #[serde(rename_all = "kebab-case")]
 pub enum CodeExecutionPermission {
     #[default]
@@ -199,20 +199,20 @@ impl fmt::Debug for ToolCallContext {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, inference_json::FromJson)]
 pub struct ShellOptions {
     #[serde(default)]
     pub skills: Vec<ShellSkillMount>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson)]
 pub struct ShellSkillMount {
     pub name: String,
     pub description: String,
     pub source_path: PathBuf,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson)]
 pub struct ToolInputFile {
     pub id: String,
     pub name: String,
@@ -346,7 +346,7 @@ pub type ToolCallbacksWithTools = HashMap<String, ToolCallbackWithTool>;
 
 /// Type of tool
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize)]
 pub enum ToolType {
     #[serde(rename = "function")]
     Function,
@@ -354,7 +354,7 @@ pub enum ToolType {
 
 /// Function definition for a tool
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize)]
 pub struct Function {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -401,7 +401,7 @@ impl Function {
 
 /// Tool definition
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize)]
 pub struct Tool {
     #[serde(rename = "type")]
     pub tp: ToolType,
@@ -409,7 +409,7 @@ pub struct Tool {
 }
 
 /// Called function with name and arguments
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson)]
 pub struct CalledFunction {
     pub name: String,
     pub arguments: String,

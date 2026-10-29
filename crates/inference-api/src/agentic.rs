@@ -10,7 +10,7 @@ use inference_core::{
     AgentToolApproval, AgentToolApprovalAsyncCallback, AgentToolApprovalDecision,
     AgentToolApprovalNotifier, AgentToolApprovalRequest, Response,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::sync::{mpsc::Sender, oneshot};
 use utoipa::ToSchema;
 
@@ -251,7 +251,7 @@ pub enum ApprovalResolveStatus {
 }
 
 /// Decision payload for a pending agentic tool approval.
-#[derive(Deserialize, ToSchema)]
+#[derive(inference_json::FromJson, ToSchema)]
 pub struct ApprovalDecisionRequest {
     pub decision: ApprovalDecision,
     /// Auto-approve all later tool calls in the same session.
@@ -261,7 +261,7 @@ pub struct ApprovalDecisionRequest {
     pub message: Option<String>,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(inference_json::FromJson, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
     Approve,

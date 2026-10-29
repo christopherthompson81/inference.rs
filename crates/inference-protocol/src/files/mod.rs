@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use base64::Engine;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 mod inject;
 mod store;
@@ -37,7 +37,7 @@ pub fn default_file_purpose() -> String {
 }
 
 /// Where a file was produced.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct FileSource {
     pub tool: String,
     /// Zero-based round within the turn.
@@ -51,7 +51,7 @@ pub struct FileSource {
 }
 
 /// File body. Serialized untagged so the wire shape is flat.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 #[serde(untagged)]
 pub enum FileContent {
     /// `text` is `None` when the body was elided over the wire; preview survives.
@@ -85,7 +85,7 @@ impl FileContent {
 }
 
 /// A file produced by an agentic run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct File {
     /// `file_<uuid>` for an agent output, `file-<uuid>` for an upload.
     pub id: String,
@@ -301,7 +301,7 @@ impl File {
 }
 
 /// A file the runtime asks the model to produce. Surfaces as `File` (or `FileContent::Error` if missing).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct RequestedFile {
     pub name: String,
     /// Inferred from `name`'s extension if not set.

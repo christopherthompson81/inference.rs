@@ -6,7 +6,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use either::Either;
 use image::DynamicImage;
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{MessageContent, NormalRequest, RequestMessage, VideoInput};
 
@@ -355,7 +355,7 @@ pub fn splice_session_into_request(request: &mut NormalRequest, entry: &AgenticS
 }
 
 /// Wire format. Images and video frames are base64 PNGs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct SerializedSession {
     #[cfg_attr(feature = "utoipa", schema(value_type = Vec<serde_json::Value>))]
@@ -369,7 +369,7 @@ pub struct SerializedSession {
     pub files: Vec<crate::files::File>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct SerializedVideo {
     pub fps: f64,

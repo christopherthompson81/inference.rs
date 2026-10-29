@@ -11,7 +11,7 @@ use inference_core::default_hf_cache_dir;
 use inference_layout::pp_doclayout_v3::{DEFAULT_THRESHOLD, PPDocLayoutV3Detector};
 use inference_selection::inventory::{InventoryKind, InventoryModel, ModelFormat, ModelScan};
 use inference_tensor::Device;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
 
 use crate::api_error::{ApiError, ApiErrorKind};
@@ -84,7 +84,7 @@ impl From<ModelCategory> for ManagedKind {
 }
 
 /// A load: what to load, the id requests will name it by, and how to run it.
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedLoadRequest {
     /// An inventory entry's `path`, or a Hugging Face repository id (`org/name`), downloaded when not cached; a layout
@@ -125,7 +125,7 @@ pub struct ManagedLoadRequest {
 
 /// A load the manager keeps under its model id: the request its last successful load used, and whether the server
 /// loads it again when it starts.
-#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SavedModel {
     pub request: ManagedLoadRequest,
@@ -160,7 +160,7 @@ pub struct ManagedModels {
 }
 
 /// A download into the server's Hugging Face cache.
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, inference_json::FromJson, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedDownloadRequest {
     pub repo_id: String,
@@ -175,7 +175,7 @@ pub struct ManagedDownloadRequest {
 }
 
 /// What to delete: a repository from the Hugging Face cache, or a GGUF in a model folder.
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, inference_json::FromJson, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedDeleteRequest {
     #[serde(default)]
@@ -193,7 +193,7 @@ pub struct ManagedDeletion {
 }
 
 /// A page to find the layout regions of.
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, inference_json::FromJson, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LayoutDetectRequest {
     /// The layout model's id.

@@ -7,7 +7,7 @@ use either::Either;
 use indexmap::IndexMap;
 use minijinja::{Environment, Error, ErrorKind, Value, context, value::Kwargs};
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::{
     Tool,
@@ -15,7 +15,7 @@ use crate::{
     tools::ToolCallFormat,
 };
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, inference_json::FromJson, Serialize)]
 pub struct AddedTokensDecoder {
     __type: Option<String>,
     pub content: String,
@@ -44,17 +44,17 @@ fn raise_exception(msg: String) -> Result<String, minijinja::Error> {
     )
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, inference_json::FromJson, Serialize)]
 pub struct BeginEndUnkPadTok(
     #[serde(with = "either::serde_untagged")] pub Either<String, AddedTokensDecoder>,
 );
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, inference_json::FromJson, Serialize)]
 pub struct ChatTemplateValue(
     #[serde(with = "either::serde_untagged")] pub Either<String, Vec<HashMap<String, String>>>,
 );
 
-#[derive(Debug, Deserialize, Serialize, Default)]
+#[derive(Debug, inference_json::FromJson, Serialize, Default)]
 /// Template for chat models including bos/eos/unk as well as the chat template.
 pub struct ChatTemplate {
     add_bos_token: Option<bool>,
@@ -540,7 +540,7 @@ pub fn apply_chat_template_to(
     env.set_lstrip_blocks(true);
     env.set_trim_blocks(true);
 
-    #[derive(Serialize, Deserialize)]
+    #[derive(Serialize, inference_json::FromJson)]
     struct UntaggedContent(#[serde(with = "either::serde_untagged")] MessageContent);
 
     // Resolve template string early so we can check for Gemma 4 format

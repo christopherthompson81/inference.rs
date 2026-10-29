@@ -88,6 +88,8 @@ impl Serialize for AdapterGenerationId {
     }
 }
 
+inference_json::via_serde!(AdapterGenerationId);
+
 impl<'de> Deserialize<'de> for AdapterGenerationId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

@@ -8,6 +8,8 @@ use serde_json::Value;
 #[serde(transparent)]
 pub struct HfConfigOverrides(Value);
 
+inference_json::via_serde!(HfConfigOverrides);
+
 impl<'de> Deserialize<'de> for HfConfigOverrides {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where

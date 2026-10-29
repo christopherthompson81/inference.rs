@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::{collections::HashMap, fmt::Display};
 
 /// OpenAI-compatible tool schema for MCP tools
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct McpToolSchema {
     #[serde(rename = "type")]
     pub tool_type: String,
@@ -10,7 +10,7 @@ pub struct McpToolSchema {
 }
 
 /// Function schema for MCP tools
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct McpFunctionSchema {
     pub name: String,
     pub description: Option<String>,
@@ -18,14 +18,14 @@ pub struct McpFunctionSchema {
 }
 
 /// MCP tool call result
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct McpToolResult {
     pub content: Vec<McpContent>,
     pub is_error: Option<bool>,
 }
 
 /// MCP content types
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 #[serde(tag = "type")]
 pub enum McpContent {
     #[serde(rename = "text")]
@@ -37,14 +37,14 @@ pub enum McpContent {
 }
 
 /// Reference to an MCP resource
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct McpResourceReference {
     pub uri: String,
     pub text: Option<String>,
 }
 
 /// MCP server capabilities
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct McpServerCapabilities {
     pub tools: Option<HashMap<String, serde_json::Value>>,
     pub resources: Option<HashMap<String, serde_json::Value>>,
@@ -53,7 +53,7 @@ pub struct McpServerCapabilities {
 }
 
 /// MCP initialization result
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct McpInitResult {
     pub protocol_version: String,
     pub capabilities: McpServerCapabilities,
@@ -61,7 +61,7 @@ pub struct McpInitResult {
 }
 
 /// MCP server information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct McpServerInfo {
     pub name: String,
     pub version: String,

@@ -21,7 +21,7 @@ use crate::types::{LoadedPipeline, SharedInferenceRsState};
 use std::collections::{HashMap, HashSet};
 
 /// Configuration for a single model in a multi-model setup
-#[derive(Clone, serde::Deserialize)]
+#[derive(Clone, inference_json::FromJson)]
 pub struct ModelConfig {
     /// Configuration key for this model (human-friendly label)
     pub model_id: String,

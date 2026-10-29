@@ -13,7 +13,7 @@ use inference_core::placement::{Displace, Placed, place};
 use inference_recon::progress::CANCELLED;
 pub use inference_recon::progress::Progress;
 use inference_tensor::Device;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::sync::broadcast;
 use utoipa::ToSchema;
 
@@ -61,7 +61,9 @@ const MODELS_REPO_MARKER: &str = "WorldStereo/worldstereo-memory-dmd/config.json
 const DOWNLOAD_STAGE: &str = "download";
 
 /// How much a job may displace to run.
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(
+    Clone, Copy, Debug, Default, Serialize, inference_json::FromJson, ToSchema, PartialEq, Eq,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Placement {
     /// Unload what the job needs, idle models first, waiting for busy ones to finish their requests
@@ -84,7 +86,7 @@ impl Placement {
 }
 
 /// Where jobs keep their folders and which weights they run.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson, ToSchema)]
 #[serde(default)]
 pub struct JobsConfig {
     /// One folder per job: its record, inputs, previews and outputs
@@ -249,7 +251,7 @@ pub fn default_jobs_dir() -> PathBuf {
 }
 
 /// Indoor scenes keep far distances; outdoor ones compress them.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, inference_json::FromJson, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SceneKind {
     Indoor,
@@ -257,7 +259,7 @@ pub enum SceneKind {
 }
 
 /// A world from a panorama, the job's one input.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Default, Serialize, inference_json::FromJson, ToSchema)]
 pub struct WorldJob {
     /// The caption every clip is generated with
     #[serde(default)]
@@ -279,7 +281,7 @@ pub struct WorldJob {
 }
 
 /// WorldMirror 2.0 on the job's inputs: images, or one video.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Default, Serialize, inference_json::FromJson, ToSchema)]
 pub struct ReconstructJob {
     /// The longest edge to infer at
     #[serde(default)]
@@ -296,7 +298,7 @@ pub struct ReconstructJob {
 }
 
 /// What a job does.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum JobRequest {
     /// WorldStereo-2 keyframes along camera paths from a panorama, WorldMirror 2.0 on them, then Gaussian splats
@@ -320,7 +322,7 @@ pub enum JobInput {
     Path(PathBuf),
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, inference_json::FromJson, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
     Queued,
@@ -336,7 +338,7 @@ impl JobStatus {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson, ToSchema)]
 pub struct JobStage {
     pub name: String,
     /// Steps in the stage; 0 when it has no count
@@ -349,7 +351,7 @@ pub struct JobStage {
 }
 
 /// An image that shows how the job is going.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson, ToSchema)]
 pub struct JobPreview {
     pub stage: String,
     pub caption: String,
@@ -358,7 +360,7 @@ pub struct JobPreview {
 }
 
 /// A file a job made.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson, ToSchema)]
 pub struct JobOutput {
     pub name: String,
     /// Relative to the job's folder
@@ -366,7 +368,7 @@ pub struct JobOutput {
 }
 
 /// A job's record: what it was asked, how far it got, and what it made.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson, ToSchema)]
 pub struct JobRecord {
     pub id: String,
     pub kind: String,
@@ -405,7 +407,7 @@ pub struct JobRecord {
 }
 
 /// A change to a running job.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum JobEvent {
     Status {
@@ -432,7 +434,7 @@ pub enum JobEvent {
 }
 
 /// A job and the files it takes, by their paths on this machine.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson, ToSchema)]
 pub struct JobSubmission {
     pub request: JobRequest,
     #[serde(default)]
@@ -441,26 +443,26 @@ pub struct JobSubmission {
 }
 
 /// This owner's jobs, newest first.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson, ToSchema)]
 pub struct JobList {
     pub data: Vec<JobRecord>,
 }
 
 /// A file in a job's folder, given relative to it.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson, ToSchema)]
 pub struct JobFileRequest {
     pub id: String,
     pub file: String,
 }
 
 /// Where a job's file is on this machine.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson, ToSchema)]
 pub struct JobFilePath {
     pub path: String,
 }
 
 /// A job removed with its folder.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson, ToSchema)]
 pub struct JobDeleted {
     pub id: String,
     pub deleted: bool,

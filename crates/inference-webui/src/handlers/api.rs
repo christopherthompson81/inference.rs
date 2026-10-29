@@ -1,3 +1,4 @@
+use crate::json_body::JsonBody;
 use axum::{
     Json,
     extract::{Extension, Multipart},
@@ -5,7 +6,6 @@ use axum::{
     response::IntoResponse,
 };
 use chrono::Utc;
-use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::fs;
@@ -383,7 +383,7 @@ pub async fn list_models(Extension(app): Extension<Arc<AppState>>) -> impl IntoR
 
 pub async fn select_model(
     Extension(app): Extension<Arc<AppState>>,
-    Json(req): Json<SelectRequest>,
+    JsonBody(req): JsonBody<SelectRequest>,
 ) -> impl IntoResponse {
     if !crate::chat_models(&app.engine).contains_key(&req.name) {
         return (
@@ -427,7 +427,7 @@ pub async fn list_chats(Extension(app): Extension<Arc<AppState>>) -> impl IntoRe
 
 pub async fn new_chat(
     Extension(app): Extension<Arc<AppState>>,
-    Json(req): Json<NewChatRequest>,
+    JsonBody(req): JsonBody<NewChatRequest>,
 ) -> impl IntoResponse {
     let models = crate::chat_models(&app.engine);
     if !models.contains_key(&req.model) {
@@ -466,7 +466,7 @@ pub async fn new_chat(
 
 pub async fn delete_chat(
     Extension(app): Extension<Arc<AppState>>,
-    Json(req): Json<DeleteChatRequest>,
+    JsonBody(req): JsonBody<DeleteChatRequest>,
 ) -> impl IntoResponse {
     let (Some(path), Some(session_path)) = (app.chat_path(&req.id), app.chat_session_path(&req.id))
     else {
@@ -482,7 +482,7 @@ pub async fn delete_chat(
 
 pub async fn load_chat(
     Extension(app): Extension<Arc<AppState>>,
-    Json(req): Json<LoadChatRequest>,
+    JsonBody(req): JsonBody<LoadChatRequest>,
 ) -> impl IntoResponse {
     let Some(path) = app.chat_path(&req.id) else {
         return (StatusCode::BAD_REQUEST, INVALID_CHAT_ID).into_response();
@@ -499,7 +499,7 @@ pub async fn load_chat(
 
 pub async fn rename_chat(
     Extension(app): Extension<Arc<AppState>>,
-    Json(req): Json<RenameChatRequest>,
+    JsonBody(req): JsonBody<RenameChatRequest>,
 ) -> impl IntoResponse {
     let Some(path) = app.chat_path(&req.id) else {
         return (StatusCode::BAD_REQUEST, INVALID_CHAT_ID).into_response();
@@ -518,7 +518,7 @@ pub async fn rename_chat(
     (StatusCode::INTERNAL_SERVER_ERROR, "rename failed").into_response()
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 pub struct AppendMessageRequest {
     pub id: String,
     #[serde(default)]
@@ -549,7 +549,7 @@ pub struct AppendMessageRequest {
 
 pub async fn append_message(
     Extension(app): Extension<Arc<AppState>>,
-    Json(req): Json<AppendMessageRequest>,
+    JsonBody(req): JsonBody<AppendMessageRequest>,
 ) -> impl IntoResponse {
     if let Err(e) = append_chat_message(
         &app,
@@ -578,7 +578,7 @@ pub async fn append_message(
     (StatusCode::OK, "Appended").into_response()
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 pub struct EditMessageRequest {
     pub id: String,
     pub message_id: String,
@@ -587,7 +587,7 @@ pub struct EditMessageRequest {
 
 pub async fn edit_message(
     Extension(app): Extension<Arc<AppState>>,
-    Json(req): Json<EditMessageRequest>,
+    JsonBody(req): JsonBody<EditMessageRequest>,
 ) -> impl IntoResponse {
     if let Err(e) =
         crate::chat::edit_chat_message(&app, &req.id, &req.message_id, &req.content).await
@@ -598,7 +598,7 @@ pub async fn edit_message(
     (StatusCode::OK, "Edited").into_response()
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 pub struct SetTailRequest {
     pub id: String,
     #[serde(default)]
@@ -607,7 +607,7 @@ pub struct SetTailRequest {
 
 pub async fn set_tail(
     Extension(app): Extension<Arc<AppState>>,
-    Json(req): Json<SetTailRequest>,
+    JsonBody(req): JsonBody<SetTailRequest>,
 ) -> impl IntoResponse {
     if let Err(e) = crate::chat::set_chat_tail(&app, &req.id, req.tail).await {
         error!("set tail error: {}", e);
@@ -616,7 +616,7 @@ pub async fn set_tail(
     (StatusCode::OK, "OK").into_response()
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 pub struct ForkSessionRequest {
     pub src_session_id: String,
     pub num_turns: usize,
@@ -624,7 +624,7 @@ pub struct ForkSessionRequest {
 
 pub async fn fork_session(
     Extension(app): Extension<Arc<AppState>>,
-    Json(req): Json<ForkSessionRequest>,
+    JsonBody(req): JsonBody<ForkSessionRequest>,
 ) -> impl IntoResponse {
     let request = SessionForkRequest {
         num_turns: req.num_turns,
@@ -688,7 +688,7 @@ pub async fn get_capabilities(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 pub struct SaveChatSessionRequest {
     pub chat_id: String,
     pub session_id: String,
@@ -697,7 +697,7 @@ pub struct SaveChatSessionRequest {
 /// Export the agentic session to a sidecar file beside the chat. Stamps the session_id into the chat JSON.
 pub async fn save_chat_session(
     Extension(app): Extension<Arc<AppState>>,
-    Json(req): Json<SaveChatSessionRequest>,
+    JsonBody(req): JsonBody<SaveChatSessionRequest>,
 ) -> impl IntoResponse {
     // Export the session from the in-memory store
     let session = match app.engine.session(&req.session_id) {
@@ -741,7 +741,7 @@ pub async fn save_chat_session(
     (StatusCode::OK, "Saved").into_response()
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 pub struct RestoreChatSessionRequest {
     pub chat_id: String,
 }
@@ -749,7 +749,7 @@ pub struct RestoreChatSessionRequest {
 /// Import the sidecar session into the in-memory store under the chat's saved session_id. Returns the id, or null if none.
 pub async fn restore_chat_session(
     Extension(app): Extension<Arc<AppState>>,
-    Json(req): Json<RestoreChatSessionRequest>,
+    JsonBody(req): JsonBody<RestoreChatSessionRequest>,
 ) -> impl IntoResponse {
     let (Some(chat_path), Some(session_path)) = (
         app.chat_path(&req.chat_id),

@@ -101,6 +101,8 @@ impl Serialize for PagedCacheLayers {
     }
 }
 
+inference_json::via_serde!(PagedCacheLayers);
+
 impl<'de> Deserialize<'de> for PagedCacheLayers {
     fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,

@@ -18,7 +18,7 @@ use inference_mcp::{
 };
 use inference_sandbox::{NetworkMode, Sandbox, SandboxPolicy};
 use protocol::{ExecuteFile, ExecuteOutputSpec};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use session::PythonSession;
 use tokio::sync::Mutex;
 
@@ -59,7 +59,7 @@ const PYTHON_PREFIX_PROBE: &str = concat!(
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 /// Python code execution config.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, inference_json::FromJson)]
 #[serde(deny_unknown_fields)]
 pub struct CodeExecutionConfig {
     /// Defaults to `python3` (`python` on Windows).

@@ -279,6 +279,41 @@ pub mod __private {
         }
     }
 
+    /// A field through a `fn(&Value) -> Result<T, JsonError>`: native `either::serde_untagged`, or `#[json(serde)]`.
+    pub fn field_json<T>(
+        o: &Map<String, Value>,
+        key: &str,
+        aliases: &[&str],
+        default: Option<T>,
+        f: fn(&Value) -> Result<T, JsonError>,
+    ) -> Result<T, JsonError> {
+        match lookup(o, key, aliases) {
+            Some((k, v)) => f(v).map_err(|e| e.at(k)),
+            None => default.ok_or_else(|| JsonError::missing_field(key)),
+        }
+    }
+
+    /// `#[serde(with = "either::serde_untagged")]`: the left type if it decodes, else the right.
+    pub fn either_untagged<L: FromJson, R: FromJson>(
+        v: &Value,
+    ) -> Result<either::Either<L, R>, JsonError> {
+        match L::from_json(v) {
+            Ok(l) => Ok(either::Either::Left(l)),
+            Err(_) => R::from_json(v)
+                .map(either::Either::Right)
+                .map_err(|_| JsonError::untagged("Either")),
+        }
+    }
+
+    pub fn either_untagged_optional<L: FromJson, R: FromJson>(
+        v: &Value,
+    ) -> Result<Option<either::Either<L, R>>, JsonError> {
+        match v {
+            Value::Null => Ok(None),
+            _ => either_untagged(v).map(Some),
+        }
+    }
+
     pub fn deny_unknown(o: &Map<String, Value>, known: &[&str]) -> Result<(), JsonError> {
         match o.keys().find(|k| !known.contains(&k.as_str())) {
             Some(k) => Err(JsonError::unknown_field(k, known)),
@@ -431,6 +466,18 @@ macro_rules! integers {
 }
 integers!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize);
 
+macro_rules! nonzero {
+    ($($t:ty),*) => {$(
+        impl FromJson for std::num::NonZero<$t> {
+            fn from_json(v: &Value) -> Result<Self, JsonError> {
+                std::num::NonZero::new(<$t>::from_json(v)?)
+                    .ok_or_else(|| JsonError::invalid_value(v, concat!("a nonzero ", stringify!($t))))
+            }
+        }
+    )*};
+}
+nonzero!(u8, u16, u32, u64, usize);
+
 impl FromJson for f64 {
     fn from_json(v: &Value) -> Result<Self, JsonError> {
         v.as_f64().ok_or_else(|| JsonError::invalid_type(v, "f64"))
@@ -455,6 +502,21 @@ impl<T: FromJson> FromJson for Option<T> {
 
     fn absent() -> Option<Self> {
         Some(None)
+    }
+}
+
+/// serde's own encoding of `Either`: `{"Left": l}` or `{"Right": r}` (`either::serde_untagged` is the other one).
+impl<L: FromJson, R: FromJson> FromJson for either::Either<L, R> {
+    fn from_json(v: &Value) -> Result<Self, JsonError> {
+        match __private::external(v, "enum Either")? {
+            ("Left", Some(l)) => L::from_json(l)
+                .map(either::Either::Left)
+                .map_err(|e| e.at("Left")),
+            ("Right", Some(r)) => R::from_json(r)
+                .map(either::Either::Right)
+                .map_err(|e| e.at("Right")),
+            (other, _) => Err(JsonError::unknown_variant(other, &["Left", "Right"])),
+        }
     }
 }
 

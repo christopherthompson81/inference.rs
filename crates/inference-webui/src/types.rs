@@ -214,27 +214,27 @@ fn chat_file_path(chats_dir: &str, chat_id: &str, ext: &str) -> Option<PathBuf> 
 }
 
 // Request/Response types
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 pub struct SelectRequest {
     pub name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 pub struct NewChatRequest {
     pub model: String,
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 pub struct DeleteChatRequest {
     pub id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 pub struct LoadChatRequest {
     pub id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 pub struct RenameChatRequest {
     pub id: String,
     pub title: String,

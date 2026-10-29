@@ -34,6 +34,7 @@ mod chat;
 mod code;
 mod handlers;
 mod jobs;
+mod json_body;
 mod types;
 mod utils;
 

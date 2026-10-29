@@ -14,7 +14,7 @@ use crate::{
 use anyhow::{Result, bail};
 use either::Either;
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use utoipa::{
     PartialSchema, ToSchema,
@@ -22,7 +22,7 @@ use utoipa::{
 };
 
 /// Inner content structure for messages that can be either a string or key-value pairs
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct MessageInnerContent(
     #[serde(with = "either::serde_untagged")] pub Either<String, HashMap<String, String>>,
 );
@@ -82,7 +82,7 @@ fn message_inner_content_schema() -> Schema {
 }
 
 /// Message content that can be either simple text or complex structured content
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct MessageContent(
     #[serde(with = "either::serde_untagged")]
     Either<String, Vec<HashMap<String, MessageInnerContent>>>,
@@ -266,7 +266,7 @@ fn message_content_schema() -> Schema {
 ///
 /// When using tool calling, this structure contains the details of a function
 /// that the model has decided to call, including the function name and its parameters.
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, ToSchema)]
+#[derive(Clone, Debug, inference_json::FromJson, serde::Serialize, ToSchema)]
 pub struct FunctionCalled {
     /// The name of the function to call
     pub name: String,
@@ -278,7 +278,7 @@ pub struct FunctionCalled {
 /// Represents a tool call made by the assistant
 ///
 /// This structure wraps a function call with its type information.
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, ToSchema)]
+#[derive(Clone, Debug, inference_json::FromJson, serde::Serialize, ToSchema)]
 pub struct ToolCall {
     /// Unique identifier for this tool call
     #[serde(default)]
@@ -318,7 +318,7 @@ pub struct ToolCall {
 ///     reasoning_content: None,
 /// };
 /// ```
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct Message {
     /// The message content
     pub content: Option<MessageContent>,
@@ -339,7 +339,7 @@ pub struct Message {
 ///
 /// Defines when the model should stop generating text, either with a single
 /// stop token or multiple possible stop sequences.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(untagged)]
 pub enum StopTokens {
     ///  Multiple possible stop sequences
@@ -349,7 +349,7 @@ pub enum StopTokens {
 }
 
 /// An exact immutable LoRA adapter generation.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct AdapterGenerationSelection {
     /// The 64-character hexadecimal generation ID returned by the adapter management API.
     #[schema(
@@ -360,7 +360,7 @@ pub struct AdapterGenerationSelection {
 }
 
 /// A request-scoped LoRA adapter alias or exact immutable generation.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(untagged)]
 pub enum AdapterSelection {
     /// Resolve this alias when the request is admitted.
@@ -445,7 +445,7 @@ const MAX_WEB_SEARCH_FILTER_DOMAINS: usize = 100;
 ///     %import common.NUMBER
 /// "#.to_string());
 /// ```
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 #[serde(tag = "type", content = "value")]
 pub enum Grammar {
     /// Regular expression grammar
@@ -456,7 +456,7 @@ pub enum Grammar {
     JsonSchema(serde_json::Value),
     /// LLGuidance grammar
     #[serde(rename = "llguidance")]
-    Llguidance(LlguidanceGrammar),
+    Llguidance(#[json(serde)] LlguidanceGrammar),
     /// Lark parser grammar
     #[serde(rename = "lark")]
     Lark(String),
@@ -600,14 +600,14 @@ fn llguidance_schema() -> Schema {
 }
 
 /// JSON Schema for structured responses
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct JsonSchemaResponseFormat {
     pub name: String,
     pub schema: serde_json::Value,
 }
 
 /// Response format for model output
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(tag = "type")]
 pub enum ResponseFormat {
     /// Free-form text response
@@ -623,13 +623,13 @@ pub enum ResponseFormat {
     },
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize, ToSchema, PartialEq, Eq)]
 pub enum OpenAiFunctionToolType {
     #[serde(rename = "function")]
     Function,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize, ToSchema, PartialEq, Eq)]
 pub enum OpenAiWebSearchToolType {
     #[serde(rename = "web_search")]
     WebSearch,
@@ -637,25 +637,25 @@ pub enum OpenAiWebSearchToolType {
     WebSearchPreview,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize, ToSchema, PartialEq, Eq)]
 pub enum OpenAiCodeInterpreterToolType {
     #[serde(rename = "code_interpreter")]
     CodeInterpreter,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize, ToSchema, PartialEq, Eq)]
 pub enum OpenAiShellToolType {
     #[serde(rename = "shell")]
     Shell,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize, ToSchema, PartialEq, Eq)]
 pub enum OpenAiNamespaceToolType {
     #[serde(rename = "namespace")]
     Namespace,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(untagged)]
 pub enum OpenAiTool {
     Function(Tool),
@@ -667,7 +667,7 @@ pub enum OpenAiTool {
 }
 
 /// A grouping of client-executed tools; the model sees each inner tool as `<namespace>.<name>`.
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize, ToSchema)]
 pub struct OpenAiNamespaceTool {
     #[serde(rename = "type")]
     pub tp: OpenAiNamespaceToolType,
@@ -684,14 +684,14 @@ impl OpenAiNamespaceTool {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(untagged)]
 pub enum OpenAiNamespaceEntry {
     Function(OpenAiResponsesFunctionTool),
     Unsupported(Value),
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize, ToSchema)]
 pub struct OpenAiResponsesFunctionTool {
     #[serde(rename = "type")]
     pub tp: OpenAiFunctionToolType,
@@ -718,7 +718,7 @@ impl OpenAiResponsesFunctionTool {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize, ToSchema)]
 pub struct OpenAiWebSearchTool {
     #[serde(rename = "type")]
     pub tp: OpenAiWebSearchToolType,
@@ -787,7 +787,7 @@ fn validate_web_search_filter_domains(label: &str, domains: &Option<Vec<String>>
     Ok(())
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(tag = "type")]
 pub enum OpenAiWebSearchUserLocation {
     #[serde(rename = "approximate")]
@@ -823,7 +823,7 @@ impl From<OpenAiWebSearchUserLocation> for WebSearchUserLocation {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize, ToSchema)]
 pub struct OpenAiCodeInterpreterTool {
     #[serde(rename = "type")]
     pub tp: OpenAiCodeInterpreterToolType,
@@ -855,14 +855,14 @@ impl OpenAiCodeInterpreterTool {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(untagged)]
 pub enum OpenAiCodeInterpreterContainer {
     Id(String),
     Auto(OpenAiCodeInterpreterAutoContainer),
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize, ToSchema)]
 pub struct OpenAiCodeInterpreterAutoContainer {
     #[serde(rename = "type")]
     pub tp: OpenAiCodeInterpreterContainerType,
@@ -872,13 +872,13 @@ pub struct OpenAiCodeInterpreterAutoContainer {
     pub file_ids: Option<Vec<String>>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize, ToSchema, PartialEq, Eq)]
 pub enum OpenAiCodeInterpreterContainerType {
     #[serde(rename = "auto")]
     Auto,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize, ToSchema)]
 pub struct OpenAiShellTool {
     #[serde(rename = "type")]
     pub tp: OpenAiShellToolType,
@@ -912,7 +912,7 @@ impl OpenAiShellTool {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(tag = "type")]
 pub enum OpenAiShellEnvironment {
     #[serde(rename = "container_auto")]
@@ -926,7 +926,7 @@ pub enum OpenAiShellEnvironment {
     ContainerReference { container_id: String },
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[derive(Clone, Debug, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(tag = "type")]
 pub enum OpenAiShellSkill {
     #[serde(rename = "skill_reference")]
@@ -1131,7 +1131,7 @@ fn normalize_openai_tools(
 }
 
 /// Chat completion request following OpenAI's specification
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct ChatCompletionRequest {
     /// The conversation so far, or a single raw prompt string.
     #[schema(
@@ -1362,7 +1362,7 @@ pub struct ModelObject {
     pub default: Option<bool>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, inference_json::FromJson, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelCategory {
     Text,
@@ -1381,7 +1381,7 @@ pub enum ModelCategory {
     Embedding,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, inference_json::FromJson, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Modality {
     Text,
@@ -1391,13 +1391,13 @@ pub enum Modality {
     Embedding,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct ModelModalities {
     pub input: Vec<Modality>,
     pub output: Vec<Modality>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, inference_json::FromJson, ToSchema)]
 pub struct GenerationDefaults {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub do_sample: Option<bool>,
@@ -1550,7 +1550,7 @@ pub struct CompletionChunkResponseBody {
 }
 
 /// A completion prompt: text, or token ids the model reads as they are.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(untagged, expecting = "a string or an array of token ids")]
 #[schema(example = "Say this is a test.")]
 pub enum CompletionPrompt {
@@ -1559,7 +1559,7 @@ pub enum CompletionPrompt {
 }
 
 /// Legacy OpenAI compatible text completion request
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct CompletionRequest {
     /// Model ID; "default" targets the only loaded model.
     #[schema(example = "mistral")]
@@ -1667,7 +1667,7 @@ pub struct CompletionRequest {
     pub logits_processors: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 #[serde(untagged)]
 pub enum EmbeddingInput {
     Single(String),
@@ -1740,7 +1740,7 @@ fn embedding_input_schema() -> Schema {
     )
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema, Default)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum EmbeddingEncodingFormat {
     #[default]
@@ -1748,7 +1748,7 @@ pub enum EmbeddingEncodingFormat {
     Base64,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct EmbeddingRequest {
     /// Model ID; "default" targets the only loaded model.
     #[schema(example = "default")]
@@ -1848,7 +1848,7 @@ pub struct EmbeddingResponse {
 }
 
 /// Rerank request: score each document against the query with a cross-encoder (Cohere / Jina shape).
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct RerankRequest {
     /// Model ID; "default" targets the only loaded model.
     #[schema(example = "default")]
@@ -1878,12 +1878,12 @@ pub struct RerankRequest {
     pub truncate_sequence: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct RerankDocument {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct RerankResult {
     /// The document's position in the request.
     pub index: usize,
@@ -1903,7 +1903,7 @@ pub struct RerankResponse {
 }
 
 /// The kind of a decision question, which sets the shape of its criteria and of its answer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum DecisionQuestionType {
     /// One of several named options.
@@ -1915,7 +1915,7 @@ pub enum DecisionQuestionType {
 }
 
 /// One typed question about the request's state.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct DecisionRequestQuestion {
     /// Required, except by h2o-lightning, which then asks a `choice`.
     #[serde(rename = "type", default)]
@@ -1934,7 +1934,7 @@ pub struct DecisionRequestQuestion {
 
 /// Decision request: typed questions about a state, each answered by a decision model in one pass. It takes the shape
 /// of TypeSafe's System One API, which `/v1/systemone` also serves.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct DecisionRequest {
     /// Model ID; "default" targets the only loaded model.
     #[schema(example = "default")]
@@ -1955,7 +1955,7 @@ pub struct DecisionRequest {
 }
 
 /// A question's answer, shaped by its type.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum DecisionAnswer {
     Choice {
@@ -1984,7 +1984,7 @@ pub enum DecisionAnswer {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct DecisionUsage {
     /// The prompt tokens of every question.
     pub input_tokens: u32,
@@ -1992,7 +1992,7 @@ pub struct DecisionUsage {
     pub output_tokens: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct DecisionResponse {
     pub model: String,
     /// Question id to its answer, in the request's order.
@@ -2002,7 +2002,7 @@ pub struct DecisionResponse {
 }
 
 /// Image generation request
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct ImageGenerationRequest {
     /// Model ID; "default" targets the only loaded model.
     #[schema(example = "mistral")]
@@ -2046,7 +2046,7 @@ impl ImageGenerationRequest {
 }
 
 /// One image an edit request conditions on.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct ImageReference {
     /// An `http(s)` or `data:` URL, or `media://N` for the request's Nth attached buffer.
     #[schema(example = "data:image/png;base64,...")]
@@ -2054,7 +2054,7 @@ pub struct ImageReference {
 }
 
 /// Image edit request: one image to edit, or several subject references for a new scene.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct ImageEditRequest {
     /// Model ID; "default" targets the only loaded model.
     #[schema(example = "default")]
@@ -2103,7 +2103,9 @@ impl ImageEditRequest {
 }
 
 /// Audio format options for speech generation responses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, ToSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, inference_json::FromJson, Default, ToSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum AudioResponseFormat {
     /// Widely compatible, lossy compression, good for web streaming
@@ -2143,7 +2145,7 @@ impl AudioResponseFormat {
 }
 
 /// Speech generation request
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct SpeechGenerationRequest {
     /// The TTS model to use for audio generation.
     #[schema(example = "nari-labs/Dia-1.6B")]
@@ -2178,7 +2180,7 @@ pub struct SpeechGenerationRequest {
 }
 
 /// A word of a speech request's `input` and when it is spoken, in seconds from the start of the audio.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, inference_json::FromJson, Serialize, ToSchema)]
 pub struct SpeechWord {
     pub word: String,
     /// The word's canonical IPA, as the phonemizer read it; empty when it couldn't be placed on the word.
@@ -2188,7 +2190,7 @@ pub struct SpeechWord {
 }
 
 /// The answer to a speech request with `timestamps`.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, inference_json::FromJson, Serialize, ToSchema)]
 pub struct SpeechWithTimestamps {
     /// The audio in the request's `response_format`, base64-encoded.
     pub audio: String,
@@ -2217,7 +2219,9 @@ impl SpeechGenerationRequest {
 }
 
 /// What a transcription answers with: OpenAI's formats.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, inference_json::FromJson, Serialize, ToSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum TranscriptionResponseFormat {
     /// `{"text": ...}`
@@ -2242,7 +2246,7 @@ impl TranscriptionResponseFormat {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TimestampGranularity {
     Word,
@@ -2251,7 +2255,7 @@ pub enum TimestampGranularity {
 
 /// Opens a streamed transcription on a cache-aware streaming model: mono audio is pushed as it arrives and each push
 /// returns the text it adds; an inference.rs extension.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct TranscriptionSessionRequest {
     #[schema(example = "nvidia/nemotron-speech-streaming-en-0.6b")]
     #[serde(default = "default_model")]
@@ -2298,13 +2302,13 @@ impl TranscriptionSessionRequest {
 }
 
 /// The text one push to a streamed transcription adds.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct TranscriptionDelta {
     pub delta: String,
 }
 
 /// Speech recognition request; the audio itself travels beside it (a multipart `file` over HTTP).
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct TranscriptionRequest {
     /// The speech recognition model to use.
     #[schema(example = "nvidia/parakeet-tdt-0.6b-v3")]
@@ -2350,13 +2354,13 @@ impl TranscriptionRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, inference_json::FromJson, Serialize, ToSchema)]
 pub struct TranscriptionResponse {
     pub text: String,
 }
 
 /// A timed word of a transcript, in seconds from the start of the audio.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, inference_json::FromJson, Serialize, ToSchema)]
 pub struct TranscriptionWord {
     pub word: String,
     pub start: f64,
@@ -2367,7 +2371,7 @@ pub struct TranscriptionWord {
 }
 
 /// A timed span of a transcript, about a sentence.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, inference_json::FromJson, Serialize, ToSchema)]
 pub struct TranscriptionSegment {
     pub id: usize,
     pub start: f64,
@@ -2378,7 +2382,7 @@ pub struct TranscriptionSegment {
     pub speaker: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, inference_json::FromJson, Serialize, ToSchema)]
 pub struct VerboseTranscriptionResponse {
     /// Always `transcribe`.
     pub task: String,
@@ -2455,7 +2459,7 @@ pub fn transcript_vtt(segments: &[TranscriptionSegment]) -> String {
 
 /// Voice activity request; the audio travels beside it (a multipart `file` over HTTP). An unset field keeps the
 /// reference `get_speech_timestamps` default.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct VoiceActivityRequest {
     /// The voice activity model to use.
     #[serde(default = "default_model")]
@@ -2507,13 +2511,13 @@ impl Default for VoiceActivityRequest {
 }
 
 /// A span of speech, in seconds from the start of the audio.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, inference_json::FromJson, Serialize, ToSchema)]
 pub struct SpeechSegment {
     pub start: f64,
     pub end: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, inference_json::FromJson, Serialize, ToSchema)]
 pub struct VoiceActivityResponse {
     /// Seconds of audio.
     pub duration: f64,
@@ -2526,7 +2530,9 @@ pub struct VoiceActivityResponse {
 }
 
 /// What a diarization answers with.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, inference_json::FromJson, Serialize, ToSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DiarizationResponseFormat {
     /// The segments (and, when asked, the probabilities) as JSON.
@@ -2546,7 +2552,7 @@ impl DiarizationResponseFormat {
 }
 
 /// Speaker diarization request; the audio travels beside it (a multipart `file` over HTTP).
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct DiarizationRequest {
     /// The diarization model to use.
     #[serde(default = "default_model")]
@@ -2581,14 +2587,14 @@ impl Default for DiarizationRequest {
 }
 
 /// One speaker's turn, in seconds from the start of the audio; speakers are the model's output slots.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, inference_json::FromJson, Serialize, ToSchema)]
 pub struct DiarizationSegment {
     pub speaker: usize,
     pub start: f64,
     pub end: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, inference_json::FromJson, Serialize, ToSchema)]
 pub struct DiarizationResponse {
     /// Seconds of audio.
     pub duration: f64,
@@ -2628,7 +2634,7 @@ pub fn diarization_rttm(segments: &[DiarizationSegment]) -> String {
 }
 
 /// Helper type for messages field in ResponsesCreateRequest
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 #[serde(untagged)]
 pub enum ResponsesMessages {
     Messages(Vec<Message>),
@@ -2665,7 +2671,7 @@ impl ToSchema for ResponsesMessages {
 }
 
 /// Response creation request
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
 pub struct ResponsesCreateRequest {
     /// Model ID; "default" targets the only loaded model.
     #[schema(example = "mistral")]
@@ -2805,7 +2811,7 @@ pub struct ResponsesCreateRequest {
 }
 
 /// Response object
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ResponsesObject {
     pub id: String,
     pub object: &'static str,
@@ -2822,7 +2828,7 @@ pub struct ResponsesObject {
 }
 
 /// Response usage information
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct ResponsesUsage {
     pub input_tokens: usize,
     pub output_tokens: usize,
@@ -2832,7 +2838,7 @@ pub struct ResponsesUsage {
 }
 
 /// Input tokens details
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct ResponsesInputTokensDetails {
     pub audio_tokens: Option<usize>,
     pub cached_tokens: Option<usize>,
@@ -2841,7 +2847,7 @@ pub struct ResponsesInputTokensDetails {
 }
 
 /// Output tokens details
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct ResponsesOutputTokensDetails {
     pub audio_tokens: Option<usize>,
     pub text_tokens: Option<usize>,
@@ -2849,7 +2855,7 @@ pub struct ResponsesOutputTokensDetails {
 }
 
 /// Response error
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct ResponsesError {
     #[serde(rename = "type")]
     pub error_type: String,
@@ -2857,13 +2863,13 @@ pub struct ResponsesError {
 }
 
 /// Incomplete details for incomplete responses
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct ResponsesIncompleteDetails {
     pub reason: String,
 }
 
 /// Response output item
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct ResponsesOutput {
     pub id: String,
     #[serde(rename = "type")]
@@ -2874,7 +2880,7 @@ pub struct ResponsesOutput {
 }
 
 /// Response content item
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct ResponsesContent {
     #[serde(rename = "type")]
     pub content_type: String,
@@ -2883,7 +2889,7 @@ pub struct ResponsesContent {
 }
 
 /// Response annotation
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct ResponsesAnnotation {
     #[serde(rename = "type")]
     pub annotation_type: String,
@@ -2893,7 +2899,7 @@ pub struct ResponsesAnnotation {
 }
 
 /// Response streaming chunk
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ResponsesChunk {
     pub id: String,
     pub object: &'static str,
@@ -2906,14 +2912,14 @@ pub struct ResponsesChunk {
 }
 
 /// Response delta for streaming
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct ResponsesDelta {
     pub output: Option<Vec<ResponsesDeltaOutput>>,
     pub status: Option<String>,
 }
 
 /// Response delta output item
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct ResponsesDeltaOutput {
     pub id: String,
     #[serde(rename = "type")]
@@ -2922,7 +2928,7 @@ pub struct ResponsesDeltaOutput {
 }
 
 /// Response delta content item
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson, ToSchema)]
 pub struct ResponsesDeltaContent {
     #[serde(rename = "type")]
     pub content_type: String,
