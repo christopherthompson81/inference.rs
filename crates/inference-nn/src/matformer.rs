@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
@@ -34,7 +33,7 @@ impl MatformerSliceConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 struct CsvRecord {
     name: String,
     #[serde(rename = "# Effective Params (B)")]

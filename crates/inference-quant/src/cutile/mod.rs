@@ -283,7 +283,7 @@ mod tests {
 /// Launch config for the grouped MoE GEMMs, computed once from the token count and reused for both
 /// GEMMs (`bm` is the `moe_align` block size). The knobs past `group_m` default to "let the
 /// compiler decide" and exist for the autotuner to sweep.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, inference_json::FromJson)]
 pub struct MoeTileConfig {
     pub bm: i32,
     pub bn: i32,

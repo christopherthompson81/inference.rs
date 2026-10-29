@@ -36,7 +36,7 @@ This server provides LLM text and multimodal model inference. You can use the fo
 - `chat` for sending a chat completion request with a model message history
 "#;
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, inference_json::FromJson)]
 struct JsonRpcRequest {
     jsonrpc: String,
     id: Option<Value>,

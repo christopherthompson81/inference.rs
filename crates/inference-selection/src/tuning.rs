@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use hf_hub::{Cache, Repo, RepoType, api::sync::ApiRepo};
 use inference_tensor::{DType, Device};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::ModelSelected;
 use crate::model_loader::{get_auto_device_map_params, get_model_dtype};
@@ -16,7 +16,7 @@ use inference_core::{DeviceLayerMapMetadata, DeviceMapMetadata};
 use inference_core::{GLOBAL_HF_CACHE, IsqType, Topology, TryIntoDType, paged_attn_supported};
 use inference_nn::loaders::{AutoDeviceMapQuantization, DeviceMappedModelLoader};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, inference_json::FromJson)]
 #[serde(rename_all = "kebab-case")]
 pub enum TuneProfile {
     Quality,
@@ -35,7 +35,7 @@ pub struct AutoTuneRequest {
 }
 
 /// Quality tier for a quantization level
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, inference_json::FromJson, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum QualityTier {
     /// Full precision, baseline quality
@@ -51,7 +51,7 @@ pub enum QualityTier {
 }
 
 /// Fit status for a quantization candidate
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, inference_json::FromJson, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum FitStatus {
     /// Model fits entirely on GPU(s)
@@ -63,7 +63,7 @@ pub enum FitStatus {
 }
 
 /// A tuning candidate with all calculated metrics
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct TuneCandidate {
     /// Quantization type (None = no quantization)
     pub isq: Option<IsqType>,
@@ -88,7 +88,7 @@ pub struct TuneCandidate {
     pub recommended: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, inference_json::FromJson)]
 pub struct AutoTuneResult {
     pub model_id: String,
     pub profile: TuneProfile,
@@ -268,7 +268,7 @@ fn infer_kind(config: &str, sentence_transformers: bool) -> Result<TuneKind> {
     if sentence_transformers {
         return Ok(TuneKind::Embedding);
     }
-    #[derive(Deserialize)]
+    #[derive(inference_json::FromJson)]
     struct AutoConfig {
         architectures: Vec<String>,
     }

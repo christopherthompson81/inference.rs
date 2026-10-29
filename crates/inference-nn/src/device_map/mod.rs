@@ -14,14 +14,14 @@ use std::{
 use crate::{topology::Topology, utils::debug::DeviceRepr, utils::memory_usage::MemoryUsage};
 use inference_quant::log::once_log_info;
 use inference_tensor::{Device, DeviceLocation, Result};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tracing::info;
 
 use peer::CudaPeerAccess;
 
 type MapperBox = Box<dyn DeviceMapper + Send + Sync>;
 
-#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+#[derive(Debug, Default, inference_json::FromJson, Serialize, Clone)]
 pub struct DeviceLayerMapMetadata {
     pub ordinal: usize,
     pub layers: usize,
@@ -42,7 +42,7 @@ pub enum DeviceMapSetting {
     },
 }
 
-#[derive(Debug, Default, Deserialize, Clone)]
+#[derive(Debug, Default, inference_json::FromJson, Clone)]
 /// Metadata to initialize the device mapper.
 pub struct DeviceMapMetadata {
     device_layers: Option<Vec<DeviceLayerMapMetadata>>,

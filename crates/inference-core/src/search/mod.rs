@@ -1,7 +1,7 @@
 mod embedder;
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 pub use embedder::SearchEmbedder;
 
@@ -17,7 +17,7 @@ pub fn search_tool_called(name: &str) -> bool {
     name == SEARCH_TOOL_NAME || name == EXTRACT_TOOL_NAME
 }
 
-#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+#[derive(Debug, Serialize, inference_json::FromJson, Default, Clone)]
 pub struct SearchResult {
     pub title: String,
     pub description: String,
@@ -25,7 +25,7 @@ pub struct SearchResult {
     pub content: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, inference_json::FromJson)]
 pub struct SearchFunctionParameters {
     pub query: String,
 }

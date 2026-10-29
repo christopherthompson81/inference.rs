@@ -168,7 +168,7 @@ impl FromStr for LoraAdapterSpec {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, inference_json::FromJson, Eq, PartialEq, Serialize)]
 /// Metadata for a loaded adapter alias and its current immutable generation.
 pub struct LoraAdapterInfo {
     /// Stable request-facing name for the adapter.
@@ -186,7 +186,7 @@ pub struct LoraAdapterInfo {
     pub bytes: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, inference_json::FromJson, Eq, PartialEq, Serialize)]
 /// A loaded adapter together with the base model that owns its runtime.
 pub struct LoraAdapterRoute {
     /// Base model ID used to dispatch requests for this adapter.
@@ -195,7 +195,7 @@ pub struct LoraAdapterRoute {
     pub adapter: LoraAdapterInfo,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, inference_json::FromJson, Eq, PartialEq, Serialize)]
 /// Residency and lease state for one immutable adapter generation.
 pub struct LoraResidentGenerationInfo {
     pub generation: AdapterGenerationId,

@@ -2,10 +2,9 @@ use std::collections::HashMap;
 
 use image::imageops::FilterType;
 use inference_tensor::Result;
-use serde::Deserialize;
 use serde_json::{Map, Value};
 
-#[derive(Deserialize, Debug, Clone, Default)]
+#[derive(inference_json::FromJson, Debug, Clone, Default)]
 pub struct PreProcessorConfig {
     // Populated from video_preprocessor_config.json when the repo ships one; never deserialized from this file.
     #[serde(skip)]

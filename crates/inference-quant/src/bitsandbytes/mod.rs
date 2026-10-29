@@ -1,7 +1,6 @@
 use std::sync::{Arc, atomic::AtomicUsize};
 
 use inference_tensor::{Context, DType, Device, Result, Shape, Tensor};
-use serde::Deserialize;
 
 use crate::{
     IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedSerde, ShardedVarBuilder,
@@ -14,7 +13,7 @@ mod op;
 
 const SUPPORTED_BLOCKSIZE: [usize; 7] = [2048, 4096, 1024, 512, 256, 128, 64];
 
-#[derive(Debug, Deserialize, Clone, Copy)]
+#[derive(Debug, inference_json::FromJson, Clone, Copy)]
 pub enum BnbDType {
     #[serde(rename = "float32")]
     F32,
@@ -41,7 +40,7 @@ impl From<BnbDType> for DType {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, inference_json::FromJson)]
 pub struct BnbQuantState {
     pub blocksize: usize,
     pub shape: Vec<usize>,

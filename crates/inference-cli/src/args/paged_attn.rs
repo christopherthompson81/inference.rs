@@ -4,7 +4,6 @@
 
 use clap::{Args, ValueEnum};
 use inference_api::engine::{PagedCacheLayers, PagedCacheType};
-use serde::Deserialize;
 
 /// Cache and attention configuration
 #[derive(Args, Clone, Default)]
@@ -14,7 +13,7 @@ pub struct CacheOptions {
 }
 
 /// PagedAttention configuration
-#[derive(Args, Clone, Deserialize)]
+#[derive(Args, Clone, inference_json::FromJson)]
 pub struct PagedAttentionOptions {
     /// PagedAttention mode
     /// - auto: enabled on CUDA, disabled on Metal/CPU (default)
@@ -69,7 +68,7 @@ impl Default for PagedAttentionOptions {
 }
 
 /// PagedAttention operation mode
-#[derive(Clone, Copy, ValueEnum, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, ValueEnum, Default, PartialEq, Eq, inference_json::FromJson)]
 #[serde(rename_all = "kebab-case")]
 pub enum PagedAttnMode {
     /// Automatic: enabled on CUDA, disabled on Metal/CPU

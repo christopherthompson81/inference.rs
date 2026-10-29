@@ -4,7 +4,6 @@
 //! allowing multiple models without aliases.
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 use crate::args::{
@@ -17,14 +16,14 @@ use inference_api::{
     engine_chat::ReasoningEffort,
 };
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 #[serde(tag = "command", rename_all = "kebab-case")]
 pub enum CliConfig {
     Serve(Box<ServeConfig>),
     Run(Box<RunConfig>),
 }
 
-#[derive(Deserialize, Default)]
+#[derive(inference_json::FromJson, Default)]
 pub struct ServeConfig {
     #[serde(default)]
     pub global: GlobalOptionsToml,
@@ -42,7 +41,7 @@ pub struct ServeConfig {
     pub default_model_id: Option<String>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(inference_json::FromJson, Default)]
 pub struct RunConfig {
     #[serde(default)]
     pub global: GlobalOptionsToml,
@@ -62,7 +61,7 @@ pub struct RunConfig {
     pub adapter: Option<String>,
 }
 
-#[derive(Deserialize, Default, Clone)]
+#[derive(inference_json::FromJson, Default, Clone)]
 pub struct GlobalOptionsToml {
     #[serde(default)]
     pub seed: Option<u64>,
@@ -72,7 +71,7 @@ pub struct GlobalOptionsToml {
     pub token_source: Option<String>,
 }
 
-#[derive(Deserialize, Default, Clone, Copy)]
+#[derive(inference_json::FromJson, Default, Clone, Copy)]
 #[serde(rename_all = "kebab-case")]
 pub enum ModelKind {
     #[default]
@@ -84,7 +83,7 @@ pub enum ModelKind {
     Embedding,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(inference_json::FromJson, Clone)]
 pub struct ModelEntry {
     #[serde(default)]
     pub kind: ModelKind,
@@ -133,7 +132,7 @@ pub struct ModelEntry {
     pub pinned: bool,
 }
 
-#[derive(Deserialize, Default, Clone)]
+#[derive(inference_json::FromJson, Default, Clone)]
 pub struct DeviceOptionsToml {
     #[serde(default)]
     pub cpu: Option<bool>,

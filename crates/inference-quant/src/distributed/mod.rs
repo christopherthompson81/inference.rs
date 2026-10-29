@@ -4,7 +4,7 @@ use inference_tensor::Result;
 pub mod layers;
 pub mod socket;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 const INFERENCE_RS_NO_NCCL: &str = "INFERENCE_RS_NO_NCCL";
 #[cfg(all(feature = "cuda", feature = "nccl"))]
@@ -14,7 +14,7 @@ const INFERENCE_RS_MN_GLOBAL_WORLD_SIZE: &str = "INFERENCE_RS_MN_GLOBAL_WORLD_SI
 #[cfg(all(feature = "cuda", feature = "nccl"))]
 const INFERENCE_RS_MN_LOCAL_WORLD_SIZE: &str = "INFERENCE_RS_MN_LOCAL_WORLD_SIZE";
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, inference_json::FromJson, Serialize)]
 pub struct RingConfig {
     master_ip: Option<String>,
     pub master_port: u16,

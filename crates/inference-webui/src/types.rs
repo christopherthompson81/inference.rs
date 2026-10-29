@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
@@ -18,7 +18,7 @@ pub struct UiModelInfo {
     pub generation_defaults: GenerationParams,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, inference_json::FromJson)]
 pub struct ChatMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -48,7 +48,7 @@ pub struct ChatMessage {
     pub session_id: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, inference_json::FromJson)]
 pub struct ChatFile {
     #[serde(default)]
     pub title: Option<String>,
@@ -65,7 +65,7 @@ pub struct ChatFile {
 }
 
 /// Default generation parameters
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, inference_json::FromJson)]
 pub struct GenerationParams {
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,

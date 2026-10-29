@@ -207,7 +207,7 @@ impl ReferenceImages {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, inference_json::FromJson)]
 pub struct DiffusionGenerationParams {
     pub height: usize,
     pub width: usize,

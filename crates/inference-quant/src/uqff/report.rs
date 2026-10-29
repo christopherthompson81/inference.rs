@@ -10,7 +10,7 @@ use std::{
 use futures::future::{join_all, try_join_all};
 use inference_tensor::{Error, Result};
 use safetensors::tensor::{Dtype, Metadata};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::QuantizedSerdeType;
@@ -33,7 +33,7 @@ pub struct QuantizationReport {
     issues: Arc<Mutex<Vec<QuantizationIssue>>>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson, PartialEq, Eq)]
 pub struct QuantizationIssue {
     pub module: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -75,7 +75,7 @@ impl QuantizationReport {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, inference_json::FromJson, PartialEq, Eq)]
 pub struct UqffGeneratedBy {
     pub tool: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,7 +84,7 @@ pub struct UqffGeneratedBy {
     pub git_revision: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson, PartialEq, Eq)]
 pub struct UqffReport {
     pub schema: u32,
     pub generated_by: UqffGeneratedBy,
@@ -96,7 +96,7 @@ pub struct UqffReport {
     pub outputs: Vec<UqffOutputReport>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson, PartialEq, Eq)]
 pub struct UqffOutputReport {
     pub quant: String,
     pub shards: Vec<String>,
@@ -109,7 +109,7 @@ pub struct UqffOutputReport {
     pub layer_details: Vec<UqffLayerReport>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson, PartialEq, Eq)]
 pub struct UqffLayerReport {
     pub module: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -120,7 +120,7 @@ pub struct UqffLayerReport {
     pub shape: Vec<usize>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson, PartialEq, Eq)]
 pub struct UqffFallbackReport {
     pub module: String,
     pub from: String,
@@ -199,13 +199,13 @@ pub struct UqffReportOptions {
     pub repo_id: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson)]
 pub struct UqffVerifyOptions {
     pub strict: bool,
     pub allow_newer_minor: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson)]
 pub struct UqffVerifyResult {
     pub ok: bool,
     pub report: UqffReport,

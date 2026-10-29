@@ -20,7 +20,6 @@ use inference_api::{
     openai::{TranscriptionResponseFormat, TranscriptionSessionRequest},
     transcription_session::{PCM16_BYTES, PCM16_SCALE, TranscriptionSession},
 };
-use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{handler_core::openai_error_response, types::OwnedEngine};
@@ -49,7 +48,7 @@ const VAD_FRAME_MS: u64 = 20;
 const QUIETEST_SPEECH_DBFS: f64 = -60.0;
 const LOUDEST_THRESHOLD_DBFS: f64 = -20.0;
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 pub struct RealtimeQuery {
     intent: Option<String>,
     model: Option<String>,

@@ -14,7 +14,6 @@ use inference_tensor::DType;
 use inference_quant::ShardedVarBuilder;
 
 use regex::Regex;
-use serde::Deserialize;
 
 use super::{AutoDeviceMapParams, AutoDeviceMapQuantization, DeviceMappedModelLoader};
 

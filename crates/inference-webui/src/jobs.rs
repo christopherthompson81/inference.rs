@@ -11,7 +11,7 @@ use axum::extract::{Extension, Multipart, Path as UrlPath, Query, Request};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
 use tokio::fs;
 use tower_http::services::ServeFile;
@@ -48,7 +48,7 @@ const JOB_FILE_TYPES: &[(&str, &str)] = &[
     ("aiff", "audio/aiff"),
 ];
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, inference_json::FromJson)]
 pub struct JobRecord {
     pub id: String,
     pub kind: String,
@@ -66,7 +66,7 @@ pub struct JobRecord {
 }
 
 // the `job` field of a save: a new job, or with `id` new data and more files for one already kept
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct SaveJob {
     #[serde(default)]
     id: Option<String>,
@@ -79,7 +79,7 @@ struct SaveJob {
     data: serde_json::Value,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 pub struct ListJobsQuery {
     pub kind: String,
 }

@@ -7,7 +7,6 @@ use inference_api::engine::{
     HfConfigOverrides, IsqOrganization, LoraAdapterSpec, LoraRuntimeConfig, MAX_LORA_ALIAS_BYTES,
     ModelDType, NormalLoaderType,
 };
-use serde::Deserialize;
 use std::{
     collections::HashSet,
     num::NonZeroUsize,
@@ -61,7 +60,7 @@ pub(super) fn parse_positive_usize(value: &str) -> Result<usize, String> {
 }
 
 /// Format options for model loading
-#[derive(Args, Clone, Deserialize)]
+#[derive(Args, Clone, inference_json::FromJson)]
 pub struct FormatOptions {
     /// Model format: plain (safetensors), GGUF, or GGML.
     /// Auto-detected from `-f` when not specified.
@@ -249,7 +248,7 @@ impl FormatOptions {
 }
 
 /// Model format type
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Default, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Default, inference_json::FromJson)]
 #[serde(rename_all = "kebab-case")]
 pub enum ModelFormat {
     /// Plain model (safetensors)
@@ -293,7 +292,7 @@ fn split_quantized_filenames(value: &str) -> anyhow::Result<Vec<&str>> {
 }
 
 /// LoRA adapter options
-#[derive(Args, Clone, Deserialize)]
+#[derive(Args, Clone, inference_json::FromJson)]
 #[serde(deny_unknown_fields)]
 pub struct AdapterOptions {
     /// Enable dynamic LoRA without preloading an adapter. Supports compatible text and multimodal
@@ -486,7 +485,7 @@ impl Default for MultimodalAdapterOptions {
 }
 
 fn parse_lora_adapter(value: &str) -> Result<LoraAdapterSpec, String> {
-    #[derive(Deserialize)]
+    #[derive(inference_json::FromJson)]
     #[serde(deny_unknown_fields)]
     struct LoraModuleObject {
         name: String,
@@ -594,7 +593,7 @@ fn default_lora_max_bytes() -> u64 {
 }
 
 /// Quantization options
-#[derive(Args, Clone, Default, Deserialize)]
+#[derive(Args, Clone, Default, inference_json::FromJson)]
 pub struct QuantizationOptions {
     /// Quantization target. Inference commands select a matching GGUF or UQFF artifact when
     /// available. Source checkpoints without a matching UQFF use in-situ quantization. `tune`
@@ -673,7 +672,7 @@ impl Default for DeviceOptions {
 }
 
 /// Multimodal model specific options
-#[derive(Args, Clone, Default, Deserialize)]
+#[derive(Args, Clone, Default, inference_json::FromJson)]
 pub struct MultimodalOptions {
     /// Maximum logical tensor memory retained by the multimodal encoder cache, in MiB
     #[arg(long = "encoder-cache-memory-mb")]

@@ -8,7 +8,7 @@ use std::{
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use inference_tensor::{Context, D, DType, Device, Result, Tensor};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 #[derive(Debug)]
 enum ImatrixLayerStats_ {
@@ -173,7 +173,7 @@ impl ImatrixLayerStats {
 }
 
 /// Collected imatrix data keyed by layer tracking key (`.cimatrix` format).
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, inference_json::FromJson)]
 pub struct CollectedImatrixData(pub HashMap<String, Vec<f32>>);
 
 impl CollectedImatrixData {

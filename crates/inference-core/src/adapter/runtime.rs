@@ -10,7 +10,7 @@ use inference_quant::{
     LoraConfig, LoraExecution, LoraExecutionArena, LoraLayerRegistry, ShardedVarBuilder,
 };
 use inference_tensor::Tensor;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -51,7 +51,7 @@ pub struct LoraRuntimeConfig {
     pub max_bytes: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, inference_json::FromJson, Eq, PartialEq, Serialize)]
 /// Current dynamic LoRA residency and alias state.
 pub struct LoraRuntimeStatus {
     /// Loaded request-facing aliases.

@@ -5,7 +5,6 @@ use std::path::Path;
 
 use inference_tensor::nn::VarBuilder;
 use inference_tensor::{D, DType, Device, Result, Tensor};
-use serde::Deserialize;
 
 use crate::conv::{Conv, Upsample};
 use crate::dinov2::{Dinov2, Dinov2Spec, PosInterp};
@@ -23,13 +22,13 @@ const MASK_THRESHOLD: f32 = 0.5;
 // the memory selector's descriptor is taken at this input size
 const FEATURE_SIZE: usize = 224;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 struct EncoderConfig {
     intermediate_layers: Vec<usize>,
     dim_out: usize,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 struct StackConfig {
     dim_in: Vec<usize>,
     // null for the neck, which passes every level's features on
@@ -39,13 +38,13 @@ struct StackConfig {
     resamplers: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 struct ScaleConfig {
     dims: Vec<usize>,
 }
 
 /// The checkpoint's `model_config`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct MoGeConfig {
     encoder: EncoderConfig,
     neck: StackConfig,

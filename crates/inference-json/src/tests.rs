@@ -280,6 +280,20 @@ fn numbers_keep_serdes_range_checks() {
 }
 
 #[test]
+fn durations_read_serdes_encoding() {
+    let d = std::time::Duration::new(3, 500);
+    let encoded = serde_json::to_value(d).unwrap();
+    assert_eq!(
+        crate::from_value::<std::time::Duration>(&encoded).unwrap(),
+        d
+    );
+    assert_eq!(
+        crate::from_value::<std::time::Duration>(&json!([3, 500])).unwrap(),
+        d
+    );
+}
+
+#[test]
 fn errors_name_the_path_to_the_failing_value() {
     let e: JsonError = crate::from_str::<json_side::Outer>(
         r#"{"unitWords": ["x", 2], "p": "after", "e": "s", "map": {}, "pair": [1, "x"]}"#,

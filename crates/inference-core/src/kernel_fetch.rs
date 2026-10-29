@@ -16,7 +16,6 @@ use inference_tensor::kernel_library::{
     ARCH_DIR_PREFIX, BUILD_DIR_LOCK, Fetch, build_cache_root, download_dir, download_root,
     process_arch_dir, set_fetcher,
 };
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 /// Overrides where kernel assets and their manifest download from: an https mirror, or a local http server for testing.
@@ -46,7 +45,7 @@ const COPY_BUFFER: usize = 1 << 20;
 // plain http is only for a server on this machine
 const LOOPBACK_URLS: [&str; 3] = ["http://127.0.0.1", "http://localhost", "http://[::1]"];
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct Manifest {
     schema: u64,
     version: String,
@@ -54,12 +53,12 @@ struct Manifest {
     files: Vec<FileEntry>,
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct LibraryEntry {
     build_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct FileEntry {
     library: String,
     arch: String,

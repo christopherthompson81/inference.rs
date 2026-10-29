@@ -387,14 +387,14 @@ mod tests {
     // The goldens print float vertices; the 45-degree bisector points are irrational
     const VERTEX_TOLERANCE: f64 = 1e-4;
 
-    #[derive(serde::Deserialize)]
+    #[derive(inference_json::FromJson)]
     struct Goldens {
         model_size: (f32, f32),
         page_size: (f32, f32),
         cases: Vec<Case>,
     }
 
-    #[derive(serde::Deserialize)]
+    #[derive(inference_json::FromJson)]
     struct Case {
         kind: String,
         mask: Vec<Vec<u8>>,

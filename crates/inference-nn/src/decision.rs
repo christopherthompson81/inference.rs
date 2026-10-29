@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 // both reference implementations cut an option's text to this many tokens
 const MAX_OPTION_TOKENS: usize = 48;
@@ -44,7 +44,7 @@ pub struct JointLayout {
 }
 
 /// How a checkpoint renders its options; the model and its budgets are otherwise the same.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, inference_json::FromJson)]
 #[serde(rename_all = "lowercase")]
 pub enum DecisionFamily {
     /// `key: description`, `level i: description`, `false: ...` / `true: ...`
@@ -53,7 +53,7 @@ pub enum DecisionFamily {
     Julia,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, inference_json::FromJson)]
 #[serde(rename_all = "lowercase")]
 pub enum QuestionKind {
     Choice,
@@ -86,14 +86,14 @@ impl QuestionKind {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson)]
 pub struct DecisionOption {
     pub key: String,
     pub description: Option<String>,
 }
 
 /// A question as the model reads it: noul's options are `[false, true]`, so the second probability is the answer.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, inference_json::FromJson)]
 pub struct DecisionQuestion {
     pub kind: QuestionKind,
     pub instructions: String,
@@ -111,7 +111,7 @@ pub struct DecisionTokens {
 
 /// One question's model input: its tokens, where each option's marker sits, and its type embedding row; with the
 /// media a d1-omni prompt reads before its text.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, inference_json::FromJson)]
 pub struct DecisionPrompt {
     pub ids: Vec<u32>,
     pub markers: Vec<u32>,
@@ -154,7 +154,7 @@ impl PartialEq for DecisionMedia {
 }
 
 /// A decision checkpoint's budgets and calibration, from the `decision` section of its merged config.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, inference_json::FromJson)]
 pub struct DecisionSpec {
     pub family: DecisionFamily,
     /// the tokenizer's texts of the specials the sequence is built from
@@ -172,7 +172,7 @@ pub struct DecisionSpec {
     pub temperature_by_options: HashMap<String, f32>,
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct WithDecision {
     #[serde(default)]
     decision: Option<DecisionSpec>,

@@ -1,21 +1,19 @@
 use std::{fs::File, path::Path};
 
-use serde::Deserialize;
-
 pub struct AnyMoeTrainingResult {
     pub steps: usize,
     /// One for each gating layer
     pub final_loss: Vec<f32>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(inference_json::FromJson, Debug)]
 pub struct AnyMoeTrainingInputRow {
     pub prompt: String,
     pub expert: usize,
     pub image_urls: Option<Vec<String>>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(inference_json::FromJson, Debug)]
 pub struct AnyMoeTrainingInputs {
     rows: Vec<AnyMoeTrainingInputRow>,
 }

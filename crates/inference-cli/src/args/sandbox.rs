@@ -2,9 +2,8 @@
 
 use clap::{Args, ValueEnum};
 use inference_api::engine::{NetworkMode, SandboxProfile};
-use serde::Deserialize;
 
-#[derive(Args, Clone, Deserialize)]
+#[derive(Args, Clone, inference_json::FromJson)]
 pub struct SandboxOptions {
     /// Sandbox mode.
     #[arg(
@@ -71,7 +70,7 @@ impl Default for SandboxOptions {
     }
 }
 
-#[derive(Clone, Copy, ValueEnum, Default, PartialEq, Eq, Deserialize, Debug)]
+#[derive(Clone, Copy, ValueEnum, Default, PartialEq, Eq, inference_json::FromJson, Debug)]
 #[serde(rename_all = "kebab-case")]
 pub enum SandboxMode {
     /// Enabled on Linux/macOS, no-op on Windows.
@@ -93,7 +92,7 @@ impl From<SandboxMode> for inference_api::engine::SandboxMode {
     }
 }
 
-#[derive(Clone, Copy, ValueEnum, Default, PartialEq, Eq, Deserialize, Debug)]
+#[derive(Clone, Copy, ValueEnum, Default, PartialEq, Eq, inference_json::FromJson, Debug)]
 #[serde(rename_all = "kebab-case")]
 pub enum SandboxNetworkMode {
     None,
@@ -102,7 +101,7 @@ pub enum SandboxNetworkMode {
     Full,
 }
 
-#[derive(Clone, Copy, ValueEnum, PartialEq, Eq, Deserialize, Debug)]
+#[derive(Clone, Copy, ValueEnum, PartialEq, Eq, inference_json::FromJson, Debug)]
 #[serde(rename_all = "kebab-case")]
 pub enum SandboxProfileArg {
     Restricted,

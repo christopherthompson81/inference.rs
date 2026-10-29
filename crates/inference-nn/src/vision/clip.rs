@@ -41,7 +41,7 @@ serde_default_fn!(usize, d_image_size, 224);
 serde_default_fn!(usize, d_patch_size, 32);
 serde_default_fn!(Activation, d_act, Activation::QuickGelu);
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, inference_json::FromJson)]
 pub struct ClipConfig {
     #[serde(default = "d_hidden_size")]
     pub hidden_size: usize,

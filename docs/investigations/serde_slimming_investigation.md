@@ -233,3 +233,42 @@ the derived `Deserialize` goes through a `Value`, whose deserializer compiles on
   models-other 10.42 -> 6.67, qwen 10.50 -> 7.98, gemma 6.97 -> 5.19, nn 12.42 -> 12.38.
 
 **Next:** step 4, the remaining derives (core, nn, quant, selection, layout and the rest).
+
+## Run 7 - 2026-10-29 14:37
+
+**Question:** step 4: everything else (core, nn, quant, selection, layout, CLI, web UI, agent, coder, recon,
+code-exec, sandbox, server-core, tensor, SDK, gguf, audio, vision). What is left on serde after it?
+
+**Change:** 171 derives swapped. `std::time::Duration` joins the runtime in serde's encoding (`{"secs", "nanos"}` or
+a pair); core's `AdapterSelection` gets `via_serde!`. Kept on serde: the build-time crates (kernel-build, macros),
+matformer's `CsvRecord` (read by the `csv` crate, which is not self-describing: through a `Value` it hands over a
+row as a sequence, `a_config_with_every_published_column_loads` caught it), and the web UI and server-core URL
+query types. The CLI's TOML config and the NeMo YAML configs go through the derived `Deserialize`, so a `Value`, and
+their tests pass.
+
+**Finding:**
+- CPU suite 3002 passed; lint clean; `docs-regen` unchanged.
+- IR lines (before: step 3 for core, nn and quant; step 2 for server-core and the web UI; step 1 for selection):
+
+| crate | before | after | change |
+|---|---|---|---|
+| inference-core | 1,705,253 | 1,588,060 | -117,193 (-6.9%) |
+| inference-server-core | 998,138 | 977,384 | -20,754 (-2.1%) |
+| inference-webui | 422,812 | 413,047 | -9,765 (-2.3%) |
+| inference-nn | 854,669 | 849,579 | -5,090 |
+| inference-selection | 305,508 | 300,385 | -5,123 |
+| inference-quant | 868,194 | 871,828 | +3,634 |
+
+  The CLI binary is 1,215,513, inference-agent 372,445, inference-layout 171,835 (no earlier figure on this tree).
+- Whole-crate compile (`scripts/housekeeping.sh --crate-time`): inference-core 19 -> 16 s; api 13, server-core 10,
+  web UI 4, as after step 2.
+- Left on serde's derive: 16 uses (6 URL query types, `CsvRecord`, 2 build-time crates, tests).
+
+**Next (step 5, the remaining formats):** the exceptions are missing parsers, not reasons to keep serde.
+- URL queries and CSV rows are flat maps of strings, so they need one thing a `Value` from JSON never does: a
+  number or bool read from its text. A text-scalar scope in the runtime (set while `from_query` / `from_text_rows`
+  decode) lets the number and bool impls accept a string there, with no change to the derive's output.
+  `from_query` rejects a repeated key, as serde's derive did.
+- An axum `QueryParams<T: FromJson>` extractor in place of `Query<T>` (server-core, web UI), and matformer reads
+  its CSV with `csv::StringRecord`s into string maps.
+- TOML and YAML need nothing new: their parsers fill a `Value` through the bridge already.

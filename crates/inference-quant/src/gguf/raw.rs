@@ -931,7 +931,7 @@ mod tests {
     // Rows and values from ik_llama.cpp's reference dequantizers (tests/fixtures/gguf_ik/make_goldens.py).
     const IK_GOLDENS: &str = include_str!("../../tests/fixtures/gguf_ik/goldens.json");
 
-    #[derive(serde::Deserialize)]
+    #[derive(inference_json::FromJson)]
     struct Golden {
         ty: String,
         // ik goldens are rows of this many elements

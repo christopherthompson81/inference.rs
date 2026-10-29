@@ -5,17 +5,16 @@ use inference_quant::{ImmediateIsqOverride, IsqType, parse_isq_value};
 use inference_tensor::Device;
 use itertools::Itertools;
 use regex::Regex;
-use serde::Deserialize;
 
 const DEVICE_PATTERN: &str = r"^(cpu|cuda\[(\d+)\]|metal\[(\d+)\])$";
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 pub struct DeserLayerTopology {
     isq: Option<String>,
     device: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 pub struct DeserTopology(IndexMap<String, DeserLayerTopology>);
 
 #[derive(Clone, Debug)]

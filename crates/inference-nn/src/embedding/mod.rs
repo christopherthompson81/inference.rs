@@ -1,7 +1,6 @@
 //! What an embedding model takes beside its token ids: a pair's segment ids and each row's task adapter.
 
 use inference_tensor::{D, DType, Result, Tensor};
-use serde::Deserialize;
 
 const JINA_V5_MODEL_TYPE: &str = "jina_embeddings_v5";
 // Jina v5's retrieval adapter serves both sides of a search, told apart by their prefix
@@ -25,7 +24,7 @@ impl EmbeddingTasks {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct JinaV5Config {
     #[serde(default)]
     model_type: String,

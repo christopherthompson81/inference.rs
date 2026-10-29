@@ -15,7 +15,6 @@ use hf_hub::{
     Cache, Repo, RepoType,
     api::sync::{ApiError, ApiRepo},
 };
-use serde::Deserialize;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
@@ -192,7 +191,7 @@ impl AutoLoaderBuilder {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(inference_json::FromJson)]
 struct AutoConfig {
     #[serde(default)]
     architectures: Vec<String>,

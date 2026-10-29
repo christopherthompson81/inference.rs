@@ -398,6 +398,23 @@ impl FromJson for Value {
     }
 }
 
+/// serde's encoding: `{"secs": u64, "nanos": u32}` or `[secs, nanos]`.
+impl FromJson for std::time::Duration {
+    fn from_json(v: &Value) -> Result<Self, JsonError> {
+        let (secs, nanos) = match v {
+            Value::Array(_) => <(u64, u32)>::from_json(v)?,
+            _ => {
+                let o = __private::object(v, "struct Duration")?;
+                (
+                    __private::field(o, "secs", &[])?,
+                    __private::field(o, "nanos", &[])?,
+                )
+            }
+        };
+        Ok(std::time::Duration::new(secs, nanos))
+    }
+}
+
 impl FromJson for serde::de::IgnoredAny {
     fn from_json(_: &Value) -> Result<Self, JsonError> {
         Ok(serde::de::IgnoredAny)

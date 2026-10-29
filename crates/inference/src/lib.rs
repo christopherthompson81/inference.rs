@@ -110,7 +110,7 @@
 //! use schemars::JsonSchema;
 //! use serde::Deserialize;
 //!
-//! #[derive(Deserialize, JsonSchema)]
+//! #[derive(inference_json::FromJson, JsonSchema)]
 //! struct City {
 //!     name: String,
 //!     country: String,
