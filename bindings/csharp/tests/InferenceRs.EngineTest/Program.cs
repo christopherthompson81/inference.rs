@@ -158,24 +158,6 @@ internal static class Program
                 !stream.TryNext(TimeSpan.Zero, out var first) || first.Name == "chunk");
             Check("a completion stream streams chunks", stream.All(streamEvent => streamEvent.Name == "chunk"));
         }
-
-        var messages = new JsonObject
-        {
-            ["model"] = "default",
-            ["max_tokens"] = MaxTokens,
-            ["messages"] = new JsonArray(new JsonObject { ["role"] = "user", ["content"] = Prompt }),
-            ["temperature"] = 0.0,
-            ["top_k"] = 1,
-        }.ToJsonString();
-        Check("Anthropic Messages returns a message",
-            (string?)JsonNode.Parse(engine.AnthropicMessages(messages))!["type"] == "message");
-        using (var stream = engine.AnthropicMessagesStream(messages))
-        {
-            var names = new List<string>();
-            while (stream.TryNext(PollTimeout, out var streamEvent)) names.Add(streamEvent.Name);
-            Check("an Anthropic stream runs message_start to message_stop",
-                names.FirstOrDefault() == "message_start" && names.LastOrDefault() == "message_stop");
-        }
     }
 
     private static void ResponsesAreStored(InferenceEngine engine)
@@ -202,9 +184,6 @@ internal static class Program
             !(bool)JsonNode.Parse(engine.ModelServed("""{"model_id": "no-such-model"}"""))!["served"]!);
         Check("a model without MCP servers lists no MCP tools",
             JsonNode.Parse(engine.ListMcpTools())!["data"]!.AsArray().Count == 0);
-        var counted = JsonNode.Parse(engine.AnthropicCountTokens(
-            """{"model": "default", "max_tokens": 8, "messages": [{"role": "user", "content": "Reply with ok"}]}"""))!;
-        Check("a Messages request counts its prompt tokens", (int)counted["input_tokens"]! > 0);
         var unknown = Throws(() => engine.ModelStatus("""{"model_id": "no-such-model"}"""));
         Check("an unknown model's status is NotFound", unknown?.Status == InferenceStatus.NotFound);
         var approval = Throws(() => engine.ResolveApproval("never-issued", """{"decision": "approve"}"""));

@@ -163,7 +163,7 @@ INFERENCE_API inference_status inference_layout_result_polygon(const inference_l
  * runtime thread. An engine handle may be used from several threads at once; a stream handle from one at a time, except that
  * inference_stream_cancel may be called from any thread.
  * Failing engine calls, including INFERENCE_ERR_RUNTIME ones, leave the error JSON in inference_last_error(): the
- * OpenAI envelope, or the Anthropic one for the inference_anthropic_* calls.
+ * OpenAI envelope.
  * Freeing the last handle of an engine (the engine or one of its streams) waits up to 10 s for the engine to stop.
  */
 
@@ -315,8 +315,8 @@ INFERENCE_API inference_status inference_chat_stream_open_with_media(const infer
 /* Waits up to timeout_ms (< 0 waits indefinitely, 0 polls) for the next event of a stream. On an event, out_event
  * receives {"event": <name>, "data": ...}. Chat streams emit "chunk" (data: a chat.completion.chunk),
  * "agentic_tool_call_progress", "agentic_tool_approval_required", "file_produced" and "error"; completion streams emit
- * "chunk" (data: a text_completion chunk) and "error"; Anthropic and Responses streams emit their protocol's events
- * (see inference_anthropic_messages_stream_open and inference_responses_stream_open). An error's data is the error
+ * "chunk" (data: a text_completion chunk) and "error"; Responses streams emit their protocol's events (see
+ * inference_responses_stream_open). An error's data is the error
  * JSON of the stream's protocol, and an error event is always the last event. On a timeout out_event is NULL and
  * out_done 0. Once the stream has ended, out_event is NULL and out_done 1. out_event and out_done are required. */
 INFERENCE_API inference_status inference_stream_next(inference_stream *stream, int64_t timeout_ms,
@@ -347,22 +347,6 @@ INFERENCE_API inference_status inference_rerank(const inference_engine *engine, 
  * each question's answer JSON. */
 INFERENCE_API inference_status inference_decide(const inference_engine *engine, const char *request,
                                                size_t request_len, inference_string **out_response);
-
-/* Runs an Anthropic Messages request (the POST /v1/messages body) to its end; out_response receives the message JSON.
- * Failures leave the Anthropic error JSON ({"type": "error", "error": {"type", "message"}}) in inference_last_error().
- * "stream" in the request is ignored. */
-INFERENCE_API inference_status inference_anthropic_messages(const inference_engine *engine, const char *request,
-                                                           size_t request_len, inference_string **out_response);
-/* Starts a streaming Messages request; poll it with inference_stream_next. Its events are the Anthropic stream events
- * (message_start, content_block_start/delta/stop, message_delta, message_stop, error), agentic_tool_call_progress and
- * file_produced. */
-INFERENCE_API inference_status inference_anthropic_messages_stream_open(const inference_engine *engine,
-                                                                       const char *request, size_t request_len,
-                                                                       inference_stream **out_stream);
-/* Counts the prompt tokens an Anthropic Messages request would use (the POST /v1/messages/count_tokens body);
- * out_response receives {"input_tokens"}, and a failure's error JSON is the Anthropic envelope. */
-INFERENCE_API inference_status inference_anthropic_count_tokens(const inference_engine *engine, const char *request,
-                                                               size_t request_len, inference_string **out_response);
 
 /* Runs a Responses request (the POST /v1/responses body); out_response receives the response resource JSON. A request
  * with "background": true returns at once with status "queued"; follow it with inference_responses_get. "stream" in

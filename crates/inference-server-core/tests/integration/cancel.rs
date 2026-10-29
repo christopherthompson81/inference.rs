@@ -61,10 +61,12 @@ async fn a_cancelled_anthropic_stream_still_stops_with_its_usage() -> anyhow::Re
         "max_tokens": LONG_COMPLETION,
         "messages": [{"role": "user", "content": PROMPT}],
     });
-    let mut stream = engine
-        .anthropic_messages_stream(serde_json::from_value(request)?)
-        .await
-        .map_err(anyhow::Error::msg)?;
+    let mut stream = inference_chat_protocols::anthropic::messages_stream(
+        &engine,
+        serde_json::from_value(request)?,
+    )
+    .await
+    .map_err(anyhow::Error::msg)?;
     let mut events: Vec<(&'static str, Value)> = Vec::new();
     while let Some(event) = stream.next().await {
         stream.cancel();

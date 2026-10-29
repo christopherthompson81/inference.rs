@@ -155,35 +155,6 @@ public sealed unsafe class InferenceEngine : IDisposable
         return Text(status, response, nameof(NativeMethods.inference_decide));
     }
 
-    /// <summary>An Anthropic Messages request; failures carry the Anthropic error envelope.</summary>
-    public string AnthropicMessages(string requestJson)
-    {
-        using var engine = Borrow();
-        using var request = new PinnedBytes(requestJson);
-        var status = NativeMethods.inference_anthropic_messages(
-            engine.Handle, request.Pointer, request.Length, out var response);
-        return Text(status, response, nameof(NativeMethods.inference_anthropic_messages));
-    }
-
-    /// <summary>The prompt tokens an Anthropic Messages request would use: {"input_tokens"}.</summary>
-    public string AnthropicCountTokens(string requestJson)
-    {
-        using var engine = Borrow();
-        using var request = new PinnedBytes(requestJson);
-        var status = NativeMethods.inference_anthropic_count_tokens(
-            engine.Handle, request.Pointer, request.Length, out var response);
-        return Text(status, response, nameof(NativeMethods.inference_anthropic_count_tokens));
-    }
-
-    public EngineStream AnthropicMessagesStream(string requestJson)
-    {
-        using var engine = Borrow();
-        using var request = new PinnedBytes(requestJson);
-        var status = NativeMethods.inference_anthropic_messages_stream_open(
-            engine.Handle, request.Pointer, request.Length, out var stream);
-        return Stream(status, stream, nameof(NativeMethods.inference_anthropic_messages_stream_open));
-    }
-
     public string CreateResponse(string requestJson)
     {
         using var engine = Borrow();

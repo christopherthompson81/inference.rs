@@ -73,25 +73,12 @@ async fn a_failing_processor_fails_its_request_and_spares_the_batch() -> anyhow:
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn responses_and_anthropic_requests_resolve_their_processors() -> anyhow::Result<()> {
+async fn responses_requests_resolve_their_processors() -> anyhow::Result<()> {
     let (_dir, engine) = tiny_engine().await?;
     let unknown = ["never-registered"];
     let responses = json!({"model": "default", "input": "hi", "max_output_tokens": 2, "logits_processors": unknown});
-    let anthropic = json!({
-        "model": "default",
-        "max_tokens": 2,
-        "messages": [{"role": "user", "content": "hi"}],
-        "logits_processors": unknown,
-    });
     let refused = engine
         .responses_json(responses.to_string().as_bytes())
-        .await;
-    assert_eq!(
-        refused.err().map(|error| error.param),
-        Some(Some("logits_processors".into()))
-    );
-    let refused = engine
-        .anthropic_messages_json(anthropic.to_string().as_bytes())
         .await;
     assert_eq!(
         refused.err().map(|error| error.param),

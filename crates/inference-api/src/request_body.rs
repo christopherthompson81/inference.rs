@@ -65,7 +65,6 @@ json_requests!(
     inference_protocol::openai::VoiceActivityRequest,
     inference_protocol::openai::DiarizationRequest,
     inference_core::SerializedSession,
-    crate::anthropic::AnthropicMessagesRequest,
     crate::responses::OpenResponsesCreateRequest,
     crate::agentic::ApprovalDecisionRequest,
     crate::lora_adapters::ListLoraAdaptersQuery,

@@ -327,17 +327,6 @@ class JsonEngine:
         """Answers typed questions (choice, score, noul) about a state with a decision model."""
         return self._call("inference_decide", request_json)
 
-    def anthropic_messages(self, request_json: str) -> str:
-        """An Anthropic Messages request; failures carry the Anthropic error envelope."""
-        return self._call("inference_anthropic_messages", request_json)
-
-    def anthropic_count_tokens(self, request_json: str) -> str:
-        """The prompt tokens an Anthropic Messages request would use: {"input_tokens"}."""
-        return self._call("inference_anthropic_count_tokens", request_json)
-
-    def anthropic_messages_stream(self, request_json: str) -> Stream:
-        return self._stream("inference_anthropic_messages_stream_open", request_json)
-
     def create_response(self, request_json: str) -> str:
         return self._call("inference_responses_create", request_json)
 

@@ -1,4 +1,4 @@
-//! Anthropic-compatible Messages API over HTTP; the operation itself lives in `inference_api::anthropic`.
+//! Anthropic-compatible Messages API over HTTP; the translation onto chat lives in `inference_chat_protocols::anthropic`.
 
 use std::{pin::Pin, task::Poll, time::Duration};
 
@@ -14,6 +14,7 @@ use axum::{
 use futures::Stream;
 use tokio::time::{Instant, Interval, MissedTickBehavior, interval_at};
 
+use crate::anthropic_api::{self, AnthropicStream, AnthropicStreamEvent, anthropic_error_body};
 pub use crate::anthropic_api::{
     AnthropicContainer, AnthropicContentBlock, AnthropicCountTokensResponse, AnthropicError,
     AnthropicErrorBody, AnthropicImageSource, AnthropicJsonOutputFormat, AnthropicMessage,
@@ -22,7 +23,6 @@ pub use crate::anthropic_api::{
     AnthropicThinking, AnthropicTool, AnthropicToolChoice, AnthropicUsage,
     AnthropicWebSearchUserLocation,
 };
-use crate::anthropic_api::{AnthropicStream, AnthropicStreamEvent, anthropic_error_body};
 use crate::handler_core::{ApiJson, ApiJsonRejection};
 use crate::{
     handler_core::{ApiError, ApiErrorKind, ResponseErrorMessage},
@@ -162,7 +162,7 @@ pub async fn anthropic_messages(
     };
     if request.stream.unwrap_or(false) {
         let tap = stream_outcome.map(|Extension(handle)| handle.tap());
-        match engine.anthropic_messages_stream(request).await {
+        match anthropic_api::messages_stream(&engine, request).await {
             Ok(stream) => {
                 let streamer = AnthropicStreamer::new(stream.with_tap(tap));
                 AnthropicMessagesResponder::Sse(Sse::new(streamer).keep_alive(
@@ -172,7 +172,7 @@ pub async fn anthropic_messages(
             Err(error) => AnthropicMessagesResponder::Error(error),
         }
     } else {
-        match engine.anthropic_messages(request).await {
+        match anthropic_api::messages(&engine, request).await {
             Ok(response) => AnthropicMessagesResponder::Json(response),
             Err(error) => AnthropicMessagesResponder::Error(error),
         }
@@ -196,7 +196,7 @@ pub async fn anthropic_count_tokens(
             return AnthropicCountTokensResponder::Error(anthropic_json_rejection(error));
         }
     };
-    match engine.count_tokens(request).await {
+    match anthropic_api::count_tokens(&engine, request).await {
         Ok(count) => AnthropicCountTokensResponder::Json(count),
         Err(error) => AnthropicCountTokensResponder::Error(error),
     }

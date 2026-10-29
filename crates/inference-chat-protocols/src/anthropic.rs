@@ -2,43 +2,38 @@
 
 use std::{
     collections::{HashMap, VecDeque},
-    error::Error,
     pin::Pin,
     task::Poll,
 };
 
 use anyhow::{Context, Result};
 use either::Either;
-use futures::future::BoxFuture;
-use inference_core::{
-    AgentPermission, ApproximateUserLocation, ChatCompletionChunkResponse, ChatCompletionResponse,
-    CodeExecutionPermission, FINISH_REASON_LENGTH, Function, InferenceRs, ReasoningEffort,
-    RequestCancellation, Response, Tool, ToolChoice, ToolType, Usage, WebSearchOptions,
-    WebSearchUserLocation,
+use inference_api::{
+    Engine,
+    api_error::{ApiError, ApiErrorKind, INTERNAL_ERROR_MESSAGE},
+    engine_chat::{
+        ChatStream, ChatStreamEvent, FINISH_REASON_LENGTH, RequestCancellation, ResponseTap,
+        resolve_reasoning_controls,
+    },
+    media_source::MediaAttachments,
+};
+use inference_protocol::{
+    AgentPermission, CodeExecutionPermission, Function, Tool, ToolType,
+    files::{File, RequestedFile},
+    openai::{
+        ChatCompletionRequest, FunctionCalled, Grammar, JsonSchemaResponseFormat, Message,
+        MessageContent, MessageInnerContent, OpenAiCodeInterpreterAutoContainer,
+        OpenAiCodeInterpreterContainer, OpenAiCodeInterpreterContainerType,
+        OpenAiCodeInterpreterTool, OpenAiCodeInterpreterToolType, OpenAiShellSkillReference,
+        OpenAiTool, ResponseFormat, StopTokens, ToolCall,
+    },
+    request::{ApproximateUserLocation, ReasoningEffort, WebSearchOptions, WebSearchUserLocation},
+    response::{ChatCompletionChunkResponse, ChatCompletionResponse, Usage},
+    tools::{ToolCallResponse, ToolChoice},
 };
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use tokio::sync::mpsc::Receiver;
 use utoipa::ToSchema;
-
-use crate::{
-    api_error::{ApiError, ApiErrorKind, INTERNAL_ERROR_MESSAGE, ModelErrorMessage, boxed_anyhow},
-    dispatch::apply_model_override,
-    engine_chat::{
-        ChatEngine, DispatchError, PreparedChat, ResponseTap, serialize_agentic_progress,
-        serialize_approval_required, tokenize_chat,
-    },
-    openai::{
-        ChatCompletionRequest, FunctionCalled, Grammar, Message, MessageContent,
-        OpenAiCodeInterpreterAutoContainer, OpenAiCodeInterpreterContainer,
-        OpenAiCodeInterpreterContainerType, OpenAiCodeInterpreterTool,
-        OpenAiCodeInterpreterToolType, OpenAiShellSkillReference, OpenAiTool, OpenAiToolSurface,
-        ResponseFormat, StopTokens, ToolCall,
-    },
-    types::SharedInferenceRsState,
-};
-
-type BoxError = Box<dyn Error + Send + Sync + 'static>;
 
 const ANTHROPIC_WEB_SEARCH_PREFIX: &str = "web_search_";
 const ANTHROPIC_DYNAMIC_WEB_SEARCH_TYPE: &str = "web_search_20260209";
@@ -141,7 +136,7 @@ pub struct AnthropicMessagesRequest {
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<Vec<serde_json::Value>>)]
-    pub files: Option<Vec<inference_core::RequestedFile>>,
+    pub files: Option<Vec<RequestedFile>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tool_rounds: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -320,7 +315,7 @@ pub struct AnthropicMessageResponse {
     pub usage: AnthropicUsage,
     #[schema(value_type = Option<Vec<serde_json::Value>>)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub files: Option<Vec<inference_core::File>>,
+    pub files: Option<Vec<File>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
 }
@@ -396,31 +391,20 @@ pub struct AnthropicCountTokensResponse {
 }
 
 /// Counts the prompt tokens an Anthropic Messages request renders to, with its tools and chat template.
-pub(crate) fn count_tokens<'a>(
-    state: &'a SharedInferenceRsState,
+pub async fn count_tokens(
+    engine: &Engine,
     request: AnthropicMessagesRequest,
-    owner: Option<&'a str>,
-) -> BoxFuture<'a, Result<AnthropicCountTokensResponse, ApiError>> {
-    Box::pin(count_tokens_inner(state, request, owner))
-}
-
-async fn count_tokens_inner(
-    state: &SharedInferenceRsState,
-    request: AnthropicMessagesRequest,
-    owner: Option<&str>,
 ) -> Result<AnthropicCountTokensResponse, ApiError> {
-    let invalid =
-        |error: &(dyn Error + 'static)| ApiError::from_error(error, ApiErrorKind::InvalidRequest);
-    request
-        .validate(false)
-        .map_err(|error| invalid(error.as_ref()))?;
-    let oairequest = request
-        .into_chat_completion_request()
-        .map_err(|error| invalid(error.as_ref()))?;
-    let tokens = tokenize_chat(state, oairequest, owner).await?;
+    request.validate(false).map_err(invalid)?;
+    let chat = request.into_chat_completion_request().map_err(invalid)?;
+    let tokens = engine.tokenize_chat(chat).await?.tokens;
     Ok(AnthropicCountTokensResponse {
         input_tokens: tokens.len(),
     })
+}
+
+fn invalid(error: anyhow::Error) -> ApiError {
+    ApiError::from_error(error.as_ref(), ApiErrorKind::InvalidRequest)
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -517,7 +501,7 @@ fn resolve_anthropic_response_format(
                 anyhow::bail!("Unsupported Anthropic output format `{}`.", format.tp);
             }
             Ok(ResponseFormat::JsonSchema {
-                json_schema: crate::openai::JsonSchemaResponseFormat {
+                json_schema: JsonSchemaResponseFormat {
                     name: ANTHROPIC_OUTPUT_SCHEMA_NAME.to_string(),
                     schema: format.schema.clone(),
                 },
@@ -593,7 +577,7 @@ impl AnthropicMessagesRequest {
             self.output_config.as_ref(),
             self.reasoning_effort.as_deref(),
         )?;
-        inference_core::resolve_reasoning_controls(enable_thinking, reasoning_effort)?;
+        resolve_reasoning_controls(enable_thinking, reasoning_effort)?;
         let response_format =
             resolve_anthropic_response_format(self.output_config.as_ref(), self.response_format)?;
         let mut converted_tools = convert_tools_and_agentic(
@@ -1009,7 +993,7 @@ fn append_anthropic_blocks(
 
 enum AnthropicUserContentPart {
     Text(String),
-    Image(HashMap<String, crate::openai::MessageInnerContent>),
+    Image(HashMap<String, MessageInnerContent>),
 }
 
 fn flush_user_content(
@@ -1456,7 +1440,7 @@ impl AnthropicStreamState {
         );
     }
 
-    fn enqueue_tool_use(&mut self, tool_call: &inference_core::ToolCallResponse) {
+    fn enqueue_tool_use(&mut self, tool_call: &ToolCallResponse) {
         self.stop_thinking_block();
         self.stop_text_block();
         let index = self.next_content_index;
@@ -1584,225 +1568,85 @@ pub fn anthropic_error_body(error: &ApiError) -> Value {
     })
 }
 
-/// A dispatched Messages request.
-pub struct PreparedMessages {
-    pub chat: PreparedChat,
-    /// Adaptive/disabled thinking the client asked not to see.
-    pub omit_thinking: bool,
-}
-
-/// Validates a Messages request, converts it to chat, and dispatches it with the server's chat policy.
-pub(crate) fn prepare_messages<'a>(
-    engine: &'a ChatEngine,
-    request: AnthropicMessagesRequest,
-) -> BoxFuture<'a, Result<PreparedMessages, DispatchError>> {
-    Box::pin(prepare_messages_inner(engine, request))
-}
-
-async fn prepare_messages_inner(
-    engine: &ChatEngine,
-    request: AnthropicMessagesRequest,
-) -> Result<PreparedMessages, DispatchError> {
-    let validation = |error: anyhow::Error| DispatchError::Validation(boxed_anyhow(error));
-    request.validate(true).map_err(validation)?;
-    let omit_thinking =
-        omit_anthropic_thinking_output(request.thinking.as_ref()).map_err(validation)?;
-    let oairequest = request.into_chat_completion_request().map_err(validation)?;
-    let prepared = engine
-        .prepare(
-            oairequest,
-            OpenAiToolSurface::ChatCompletions,
-            Default::default(),
-        )
-        .await?;
-    Ok(PreparedMessages {
-        chat: prepared,
-        omit_thinking,
-    })
-}
-
-/// Why a non-streaming Messages request failed.
-pub enum MessagesFailure {
-    Validation(BoxError),
-    Internal(BoxError),
-    /// The model failed mid-request; the message is logged, not shown to the client.
-    Model(String),
-}
-
-/// Waits for a non-streaming Messages request's final response.
-pub(crate) fn collect_messages<'a>(
-    rx: &'a mut Receiver<Response>,
-    state: SharedInferenceRsState,
-    model_override: Option<&'a str>,
-    omit_thinking: bool,
-) -> BoxFuture<'a, Result<AnthropicMessageResponse, MessagesFailure>> {
-    Box::pin(collect_messages_inner(
-        rx,
-        state,
-        model_override,
-        omit_thinking,
-    ))
-}
-
-async fn collect_messages_inner(
-    rx: &mut Receiver<Response>,
-    state: SharedInferenceRsState,
-    model_override: Option<&str>,
-    omit_thinking: bool,
-) -> Result<AnthropicMessageResponse, MessagesFailure> {
-    loop {
-        match rx.recv().await {
-            Some(Response::Done(mut response)) => {
-                apply_model_override(&mut response.model, model_override);
-                InferenceRs::maybe_log_response(state, &response);
-                return Ok(anthropic_response_from_chat(response, omit_thinking));
-            }
-            Some(Response::ModelError(msg, response)) => {
-                InferenceRs::maybe_log_error(state.clone(), &ModelErrorMessage(msg.to_string()));
-                InferenceRs::maybe_log_response(state, &response);
-                return Err(MessagesFailure::Model(msg));
-            }
-            Some(Response::ValidationError(e)) => return Err(MessagesFailure::Validation(e)),
-            Some(Response::InternalError(e)) => {
-                InferenceRs::maybe_log_error(state, &*e);
-                return Err(MessagesFailure::Internal(e));
-            }
-            Some(Response::AgenticToolApprovalRequired { .. }) => {
-                return Err(MessagesFailure::Validation(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "agent approval requires a streaming request.",
-                ))));
-            }
-            Some(
-                Response::AgenticToolCallProgress { .. }
-                | Response::BlockDenoisingProgress(_)
-                | Response::File(_),
-            ) => {}
-            Some(_) => unreachable!("not a chat response"),
-            None => {
-                return Err(MessagesFailure::Internal(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "No response received from the model.",
-                ))));
-            }
-        }
+impl inference_api::request_body::JsonRequest for AnthropicMessagesRequest {
+    fn from_json(body: &[u8]) -> Result<Self, ApiError> {
+        inference_api::request_body::parse_json(body)
     }
+}
+
+/// Validates a Messages request and converts it to chat, with whether to omit the thinking the client asked not to see.
+fn to_chat(request: AnthropicMessagesRequest) -> Result<(ChatCompletionRequest, bool), ApiError> {
+    request.validate(true).map_err(invalid)?;
+    let omit_thinking =
+        omit_anthropic_thinking_output(request.thinking.as_ref()).map_err(invalid)?;
+    let chat = request.into_chat_completion_request().map_err(invalid)?;
+    Ok((chat, omit_thinking))
+}
+
+/// Runs a Messages request to its end through the engine's chat operation.
+pub async fn messages(
+    engine: &Engine,
+    mut request: AnthropicMessagesRequest,
+) -> Result<AnthropicMessageResponse, ApiError> {
+    request.stream = Some(false);
+    let (chat, omit_thinking) = to_chat(request)?;
+    let response = engine.chat(chat, MediaAttachments::default()).await?;
+    Ok(anthropic_response_from_chat(response, omit_thinking))
+}
+
+/// Starts a streaming Messages request. Dropping the stream abandons the request.
+pub async fn messages_stream(
+    engine: &Engine,
+    mut request: AnthropicMessagesRequest,
+) -> Result<AnthropicStream, ApiError> {
+    request.stream = Some(true);
+    let (chat, omit_thinking) = to_chat(request)?;
+    let chat = engine
+        .chat_stream(chat, MediaAttachments::default())
+        .await?;
+    Ok(AnthropicStream {
+        chat,
+        stream: AnthropicStreamState::new(omit_thinking),
+    })
 }
 
 /// The Anthropic events of a streaming Messages request. Dropping it abandons the request.
 pub struct AnthropicStream {
-    rx: Receiver<Response>,
-    state: SharedInferenceRsState,
-    model_override: Option<String>,
+    chat: ChatStream,
     stream: AnthropicStreamState,
-    tap: Option<ResponseTap>,
-    cancellation: RequestCancellation,
 }
 
 impl AnthropicStream {
-    pub(crate) fn new(
-        prepared: PreparedMessages,
-        state: SharedInferenceRsState,
-        tap: Option<ResponseTap>,
-    ) -> Self {
-        Self {
-            rx: prepared.chat.rx,
-            state,
-            model_override: prepared.chat.model_override,
-            stream: AnthropicStreamState::new(prepared.omit_thinking),
-            tap,
-            cancellation: prepared.chat.cancellation,
-        }
-    }
-
     /// Reports each engine response to `tap` as the stream reads it, e.g. for an access log.
     pub fn with_tap(mut self, tap: Option<ResponseTap>) -> Self {
-        self.tap = tap;
+        self.chat = self.chat.with_tap(tap);
         self
     }
 
     /// The request's cancellation, for a caller that cancels from elsewhere, e.g. a signal handler.
-    pub fn cancellation(&self) -> RequestCancellation {
-        self.cancellation.clone()
+    pub fn cancellation(&self) -> Option<RequestCancellation> {
+        self.chat.cancellation()
     }
 
     /// Ends the request on its next sampled token; the stream still ends with `message_delta` and `message_stop`.
     pub fn cancel(&self) {
-        self.cancellation.cancel();
+        self.chat.cancel();
     }
 
-    fn handle(&mut self, response: Response) {
-        match response {
-            Response::Chunk(mut chunk) => {
-                InferenceRs::maybe_log_response(self.state.clone(), &chunk);
-                apply_model_override(&mut chunk.model, self.model_override.as_deref());
-                self.stream.handle_chunk(chunk);
+    fn handle(&mut self, event: ChatStreamEvent) {
+        match event {
+            ChatStreamEvent::Chunk(chunk) => self.stream.handle_chunk(chunk),
+            ChatStreamEvent::Error(error) => self.stream.handle_error_event(error),
+            ChatStreamEvent::AgenticToolCallProgress(progress) => self
+                .stream
+                .enqueue_json("agentic_tool_call_progress", progress.to_json()),
+            ChatStreamEvent::AgenticToolApprovalRequired(approval) => self
+                .stream
+                .enqueue_json("agentic_tool_approval_required", approval.to_json()),
+            ChatStreamEvent::FileProduced(file) => {
+                self.stream.enqueue_json("file_produced", json!(file))
             }
-            Response::ModelError(msg, _) => {
-                InferenceRs::maybe_log_error(
-                    self.state.clone(),
-                    &ModelErrorMessage(msg.to_string()),
-                );
-                self.stream.handle_error_event(ApiError::model_error());
-            }
-            Response::ValidationError(e) => {
-                let error = ApiError::from_error(e.as_ref(), ApiErrorKind::InvalidRequest);
-                if matches!(
-                    error.kind,
-                    ApiErrorKind::Internal | ApiErrorKind::Unavailable | ApiErrorKind::Overloaded
-                ) {
-                    InferenceRs::maybe_log_error(self.state.clone(), e.as_ref());
-                }
-                self.stream.handle_error_event(error);
-            }
-            Response::InternalError(e) => {
-                InferenceRs::maybe_log_error(self.state.clone(), &*e);
-                self.stream
-                    .handle_error_event(ApiError::from_error(e.as_ref(), ApiErrorKind::Internal));
-            }
-            Response::AgenticToolCallProgress {
-                round,
-                tool_call_id,
-                tool_name,
-                phase,
-            } => {
-                self.stream.enqueue_json(
-                    "agentic_tool_call_progress",
-                    serialize_agentic_progress(round, &tool_call_id, &tool_name, &phase),
-                );
-            }
-            Response::AgenticToolApprovalRequired {
-                approval_id,
-                session_id,
-                round,
-                tool,
-                arguments,
-            } => {
-                self.stream.enqueue_json(
-                    "agentic_tool_approval_required",
-                    serialize_approval_required(
-                        &approval_id,
-                        &session_id,
-                        round,
-                        &tool,
-                        &arguments,
-                    ),
-                );
-            }
-            Response::File(file) => self.stream.enqueue_json("file_produced", json!(file)),
-            Response::BlockDenoisingProgress(_) => {}
-            Response::Done(_)
-            | Response::CompletionDone(_)
-            | Response::CompletionModelError(_, _)
-            | Response::CompletionChunk(_)
-            | Response::ImageGeneration(_)
-            | Response::Speech { .. }
-            | Response::Transcription(_)
-            | Response::VoiceActivity(_)
-            | Response::Diarization(_)
-            | Response::TranscriptionStream(_)
-            | Response::Raw { .. }
-            | Response::Embeddings { .. } => unreachable!("not a chat stream response"),
+            ChatStreamEvent::BlockDenoisingProgress(_) => {}
         }
     }
 
@@ -1826,13 +1670,8 @@ impl futures::Stream for AnthropicStream {
             if self.stream.done {
                 return Poll::Ready(None);
             }
-            match self.rx.poll_recv(cx) {
-                Poll::Ready(Some(response)) => {
-                    if let Some(tap) = &self.tap {
-                        tap(&response);
-                    }
-                    self.handle(response);
-                }
+            match Pin::new(&mut self.chat).poll_next(cx) {
+                Poll::Ready(Some(event)) => self.handle(event),
                 Poll::Ready(None) => self.stream.handle_error_event(ApiError::new(
                     ApiErrorKind::Internal,
                     INTERNAL_ERROR_MESSAGE,
@@ -1848,9 +1687,10 @@ impl futures::Stream for AnthropicStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use inference_core::{
-        CalledFunction, Choice, ChunkChoice, Delta, PromptTokensDetails, ResponseMessage,
-        ToolCallResponse, ToolCallType,
+    use inference_mcp::CalledFunction;
+    use inference_protocol::{
+        response::{Choice, ChunkChoice, Delta, PromptTokensDetails, ResponseMessage},
+        tools::ToolCallType,
     };
 
     fn basic_request() -> AnthropicMessagesRequest {

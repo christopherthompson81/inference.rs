@@ -12,7 +12,9 @@ use inference_core::{
     ModelCategory, NormalRequest, Request, RequestMessage, SamplingParams, TokenizationRequest,
     encode_agentic_tool_images, is_chat_template_request_error,
 };
-pub use inference_core::{ReasoningEffort, resolve_reasoning_controls};
+pub use inference_core::{
+    FINISH_REASON_CANCELED, FINISH_REASON_LENGTH, ReasoningEffort, resolve_reasoning_controls,
+};
 use itertools::Itertools;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::{Receiver, Sender};
