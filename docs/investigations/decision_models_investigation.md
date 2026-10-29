@@ -609,3 +609,70 @@ Finding:
   computed in f64 left 1.49999999999997. The slot is now computed in f32, as the router's softmax runs.
 
 Implication: granite-switch decides and chats through its adapters. Left: tests, the guide, full CI.
+
+## Run 27 - 2026-10-28 18:56
+
+Question: do laya and Julia-1 load from llama.cpp's GGUFs (`ggml-org/Laya-GGUF`, `ggml-org/Julia-1-GGUF`) and match
+llama.cpp's server?
+
+Command: `llama-server -np 1 -ngl 99 -b 8192 -ub 8192` (the default batch refuses the 742-token request) and
+`inference serve -m <dir> -f <file>` over `decision_requests.py` (`server_ref.py`); for Julia-1 also our safetensors
+checkpoint, and the BF16 GGUF in both (ours `--dtype f32`).
+
+Finding:
+- The GGUFs: `modern-bert` with `decision.type = laya`, `block_count` = the encoder's blocks plus
+  `decision.block_count` head blocks (biased, plain MLP), `cls.*` the scorer and `token_types` the type embedding;
+  per-layer `feed_forward_length` arrays; `decision.max_head_tokens` (192 laya, 256 Julia-1); laya's temperatures as
+  `decision.temperature.<type>[.<2|3_5|6_10|11>]`, Julia-1 none. Both name the family `laya`; only the `systemone`
+  template tells them apart (laya writes a score's options as `level <key>`, Julia-1 the descriptions alone).
+- Ours: the ModernBERT GGUF bindings for the encoder's blocks under `encoder.`, the head blocks and scorer under the
+  safetensors names, and a decision section from the metadata (family from the template, specials from the
+  tokenizer, `max_len` the context as llama.cpp cuts, the head budget, temperatures). The ModernBERT config reader now
+  takes a per-layer array's first value. Julia-1 also needed llama.cpp's `mmbert` pre-tokenizer: added as its
+  `tokenizer.json` builds it (byte-fallback BPE, spaces as `▁`, Metaspace split, control tokens whole).
+- laya Q8_0: usage equal (136, 193, 1494), worst 9.2e-3 (a score question), same choices.
+- Julia-1 Q8_0: usage equal (110, 166, 1478), same choices, but score and noul probabilities apart by up to 0.39; our
+  safetensors run is as far from both (0.34 from our GGUF, 0.25 from llama.cpp). BF16 GGUF in both: worst 5.8e-2 (the
+  same score question), the rest within 2.5e-2. llama.cpp's own answer to that question moves from a score of 2.37
+  (BF16) to 2.86 (Q8_0): Julia-1's uncalibrated score and noul logits are quantization sensitive.
+
+Implication: both load from GGUF; Julia-1's parity holds at BF16. Next: tests, then pplx-decider on real weights.
+
+## Run 28 - 2026-10-28 19:15
+
+Question: does lev, which had no GGUF to check against (Runs 7, 8), match llama.cpp?
+
+Command: `interfaze-ai/lev` (a LoRA on `Qwen/Qwen3.5-4B`) through llama.cpp's converter, which merges the adapter
+into the base (`python3 -E convert_hf_to_gguf.py <lev dir> --outtype q8_0`, 4.5 GB); then `llama-server -np 1 -ngl 99
+-c 16384` and `inference serve -m <dir> -f lev-Q8_0.gguf` over `decision_requests.py`.
+
+Finding:
+- The converter merges at its own scale (`lora_alpha / r` = 2); the release's `lev_release.json` also lists an
+  `adapter_scale` of 0.25, which it does not read. Both engines run the converted GGUF, so the comparison stands
+  either way.
+- Usage equal (488, 608, 2448); same choices on all eight questions; worst 3.3e-2 (a noul question, read on the 0-8
+  rating scale, which spreads a small logit difference over nine labels); choices within 6.9e-3, scores within 7.3e-3.
+
+Implication: lev is verified. Left in #660: pplx-decider on real weights.
+
+## Run 29 - 2026-10-28 19:35
+
+Question: does pplx-decider match llama.cpp on real weights?
+
+Command: `perplexity-ai/pplx-decider-flash-v1.2` (safetensors, `decision_config.json`, `readout.safetensors`) through
+`python3 -E convert_hf_to_gguf.py --outtype q8_0` (the published `pplx-decider-flash-gguf-v1.2` has no decision
+profile, Run 8); `llama-server -np 1 -ngl 99 -b 8192 -ub 8192 -c 16384` and `inference serve -m <dir> -f <file>` over
+`decision_requests.py`; then the same GGUF copied with `qwen35.attention.causal = false` added (gguf-py's
+`copy_with_new_metadata`) under llama.cpp.
+
+Finding:
+- The converted GGUF has `qwen35.decision.type` but no `attention.causal`, as Run 8 read from the converter's code.
+- Against llama.cpp on it: usage equal (311, 373, 1611), same choices, but probabilities apart by up to 0.21 (a
+  choice question), in both directions. Ours runs the family non-causally, as the checkpoint's `attention_mode:
+  noncausal_full_attention` says; llama.cpp runs it causally.
+- With `causal = false` set, llama.cpp against ours: usage equal, same choices, worst 1.3e-2 (a noul question), the
+  choices within 5.2e-4.
+
+Implication: pplx-decider is verified. llama.cpp's `PplxDeciderModel` conversion should write `causal = false`, as
+its `VllmD3Model` subclass does: a report for the user to file upstream. With laya and Julia-1 from GGUF (Run 27) and
+lev (Run 28), #660's listed items are all checked.

@@ -16,7 +16,13 @@ These checkpoints load by their file layout (an `encoder/` folder, a `tokenizer/
 inference serve -m convaiinnovations/laya
 ```
 
-laya's `multilingual/` and `typed-decisions/` variants load from a local copy of their folder.
+laya's `multilingual/` and `typed-decisions/` variants load from a local copy of their folder. Both models also load from llama.cpp's GGUFs (`ggml-org/Laya-GGUF`, `ggml-org/Julia-1-GGUF`), which carry the head as the encoder's last blocks and the temperatures and budgets in their metadata:
+
+```bash
+inference serve --format gguf -m ggml-org/Julia-1-GGUF -f Julia-1-BF16.gguf
+```
+
+Julia-1 is uncalibrated, and its score and noul answers move noticeably under 8-bit quantization (one score question's answer shifts by half a level in llama.cpp too); prefer its BF16 GGUF.
 
 ### Chat models with a decision profile
 
@@ -26,7 +32,9 @@ Some decision models are chat models fine-tuned to answer with the code of an op
 inference serve --format gguf -m <repo or folder> -f <file>.gguf
 ```
 
-`pplx-decider` and `vllm-d3` (Qwen3.5 checkpoints) read their prompt with non-causal full attention: the whole prompt runs in one pass, and the server keeps no prefix cache for such a model.
+`pplx-decider` and `vllm-d3` (Qwen3.5 checkpoints) read their prompt with non-causal full attention: the whole prompt runs in one pass, and the server keeps no prefix cache for such a model. The GGUFs Perplexity publishes carry no decision profile; convert `perplexity-ai/pplx-decider-flash-v1.2` with llama.cpp's `convert_hf_to_gguf.py` instead. That conversion leaves out the non-causal flag, which this server does not need (it reads the family), but llama.cpp's server does: there it answers as a causal model.
+
+`lev` is released as a LoRA adapter (`interfaze-ai/lev`, over `Qwen/Qwen3.5-4B`); llama.cpp's `convert_hf_to_gguf.py` merges it into the base and writes the GGUF.
 
 `kev` (Qwen3.5, e.g. `ggml-org/Kev-4B-GGUF`) scores options with a pointer head instead of labels: each option in its prompt ends with a `<|box_end|>` token, and an option's score is the dot product of the last token's query with that token's key, both projected from the hidden states. The head takes the place of the model's vocabulary output, so a kev model answers decisions only and refuses chat and completion requests.
 
