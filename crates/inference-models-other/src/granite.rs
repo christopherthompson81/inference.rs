@@ -17,6 +17,7 @@ use std::{
 use crate::gdn::RecurrentBatchKind;
 use crate::kv_cache::EitherCache;
 use crate::kv_cache::KvCache;
+use crate::kv_cache::NormalCacheType;
 use crate::model::ForwardMaskCache;
 use crate::model::IsqModel;
 use crate::model::ModelForwardContext;
@@ -36,6 +37,11 @@ use crate::{
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
 
+// stacked expert tensors: Granite 4's `input_linear.weight`, or transformers v5's bare parameters
+const EXPERT_WEIGHT: &str = "weight";
+const V5_GATE_UP: &str = "gate_up_proj";
+const V5_DOWN: &str = "down_proj";
+
 serde_default_fn!(bool, word_emb_default, true);
 serde_default_fn!(f32, default_one, 1.0);
 serde_default_fn!(f32, default_rope_theta, 10_000.0);
@@ -50,12 +56,26 @@ serde_default_fn!(usize, default_num_local_experts, 0);
 serde_default_fn!(usize, default_num_experts_per_tok, 2);
 serde_default_fn!(String, default_position_embedding_type, "rope".to_string());
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum GraniteLayerType {
     #[default]
+    #[serde(alias = "full_attention")]
     Attention,
+    #[serde(rename = "sliding_attention")]
+    SlidingAttention,
     Mamba,
+}
+
+impl GraniteLayerType {
+    pub fn is_attention(&self) -> bool {
+        !matches!(self, Self::Mamba)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GraniteRopeParameters {
+    pub rope_theta: Option<f32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -128,6 +148,12 @@ pub struct Config {
     // Position embedding type: "rope" or "nope" (no position embedding)
     #[serde(default = "default_position_embedding_type")]
     pub position_embedding_type: String,
+    pub sliding_window: Option<usize>,
+    // transformers' per-layer base theta, 0 for a layer without RoPE
+    pub layer_rope_theta: Option<Vec<f32>>,
+    // the same as llama.cpp reads it: 1 for a RoPE layer, 0 for NoPE
+    pub no_rope_layers: Option<Vec<u8>>,
+    pub rope_parameters: Option<GraniteRopeParameters>,
 }
 
 impl Config {
@@ -142,6 +168,29 @@ impl Config {
 
     pub fn head_dim(&self) -> usize {
         self.hidden_size / self.num_attention_heads
+    }
+
+    pub fn rope_theta(&self) -> f32 {
+        self.rope_parameters
+            .as_ref()
+            .and_then(|p| p.rope_theta)
+            .unwrap_or(self.rope_theta)
+    }
+
+    /// The RoPE base theta of layer `layer_idx`, or None for a layer without position embeddings.
+    pub fn layer_rope_theta(&self, layer_idx: usize) -> Option<f32> {
+        if let Some(thetas) = &self.layer_rope_theta {
+            return thetas.get(layer_idx).copied().filter(|theta| *theta != 0.0);
+        }
+        if self.position_embedding_type == "nope"
+            || self
+                .no_rope_layers
+                .as_ref()
+                .is_some_and(|layers| layers.get(layer_idx) == Some(&0))
+        {
+            return None;
+        }
+        Some(self.rope_theta())
     }
 
     pub fn layer_types(&self) -> Vec<GraniteLayerType> {
@@ -265,13 +314,7 @@ impl GraniteTopKGating {
         quantization_config: &Option<QuantizedConfig>,
         vb: ShardedVarBuilder,
     ) -> Result<Self> {
-        let layer = ReplicatedLayer::new(
-            input_size,
-            num_experts,
-            quantization_config,
-            false,
-            vb.pp("layer"),
-        )?;
+        let layer = ReplicatedLayer::new(input_size, num_experts, quantization_config, false, vb)?;
         Ok(Self {
             layer,
             num_experts,
@@ -357,6 +400,7 @@ enum GraniteParallelExpertWeights {
 pub struct GraniteParallelExperts {
     weights: GraniteParallelExpertWeights,
     output_size: usize,
+    name: &'static str,
 }
 
 impl GraniteParallelExperts {
@@ -366,6 +410,21 @@ impl GraniteParallelExperts {
         output_size: usize,
         vb: ShardedVarBuilder,
     ) -> Result<Self> {
+        Self::new_named(num_experts, input_size, output_size, vb, EXPERT_WEIGHT)
+    }
+
+    // transformers v5 stores experts as bare `experts.gate_up_proj` / `experts.down_proj` parameters
+    fn new_named(
+        num_experts: usize,
+        input_size: usize,
+        output_size: usize,
+        stacked_vb: ShardedVarBuilder,
+        name: &'static str,
+    ) -> Result<Self> {
+        let vb = match name {
+            EXPERT_WEIGHT => stacked_vb.clone(),
+            name => stacked_vb.pp(name),
+        };
         if let Some(source) = vb.weight_source() {
             let load_device = inference_quant::weight_source_load_device(&vb);
             if let Some(weight) = source.load_linear(
@@ -377,10 +436,11 @@ impl GraniteParallelExperts {
                 return Ok(Self {
                     weights: GraniteParallelExpertWeights::Quantized(weight),
                     output_size,
+                    name,
                 });
             }
         }
-        let all_weights = vb.get((num_experts, output_size, input_size), "weight")?;
+        let all_weights = stacked_vb.get((num_experts, output_size, input_size), name)?;
         if should_apply_immediate_isq(&vb) {
             let layer = Arc::new(inference_quant::UnquantLinear::new(
                 inference_quant::QuantMethodConfig::Unquantized(inference_tensor::nn::Linear::new(
@@ -391,6 +451,7 @@ impl GraniteParallelExperts {
             return Ok(Self {
                 weights: GraniteParallelExpertWeights::Quantized(apply_immediate_isq(layer, vb)?),
                 output_size,
+                name,
             });
         }
         let weights = (0..num_experts)
@@ -399,6 +460,7 @@ impl GraniteParallelExperts {
         Ok(Self {
             weights: GraniteParallelExpertWeights::Dense(weights),
             output_size,
+            name,
         })
     }
 
@@ -415,9 +477,12 @@ impl GraniteParallelExperts {
             GraniteParallelExpertWeights::Dense(weights) => {
                 let weight = Tensor::stack(weights, 0)
                     .expect("Granite expert weight reconstruction should succeed");
-                uvb.add_tensor("weight", weight);
+                uvb.add_tensor(self.name, weight);
             }
-            GraniteParallelExpertWeights::Quantized(weight) => uvb.add(weight),
+            GraniteParallelExpertWeights::Quantized(weight) => match self.name {
+                EXPERT_WEIGHT => uvb.add(weight),
+                name => uvb.pp(name).add(weight),
+            },
         }
         uvb.to_safetensors()
     }
@@ -468,6 +533,7 @@ struct GraniteMoE {
     output_linear: GraniteParallelExperts,
     router: GraniteTopKGating,
     input_size: usize,
+    v5_names: bool,
 }
 
 impl GraniteMoE {
@@ -477,27 +543,49 @@ impl GraniteMoE {
         let num_experts = cfg.num_local_experts;
         let top_k = cfg.num_experts_per_tok;
 
+        let v5_names =
+            crate::layers::contains_tensor_or_weight_source(&vb.pp("experts"), V5_GATE_UP);
+        let (input_vb, input_name, output_vb, output_name, router_vb) = if v5_names {
+            (
+                vb.pp("experts"),
+                V5_GATE_UP,
+                vb.pp("experts"),
+                V5_DOWN,
+                vb.pp("router"),
+            )
+        } else {
+            (
+                vb.pp("input_linear"),
+                EXPERT_WEIGHT,
+                vb.pp("output_linear"),
+                EXPERT_WEIGHT,
+                vb.pp("router").pp("layer"),
+            )
+        };
         Ok(Self {
-            input_linear: GraniteParallelExperts::new(
+            input_linear: GraniteParallelExperts::new_named(
                 num_experts,
                 input_size,
                 hidden_size * 2, // Gated
-                vb.pp("input_linear"),
+                input_vb,
+                input_name,
             )?,
-            output_linear: GraniteParallelExperts::new(
+            output_linear: GraniteParallelExperts::new_named(
                 num_experts,
                 hidden_size,
                 input_size,
-                vb.pp("output_linear"),
+                output_vb,
+                output_name,
             )?,
             router: GraniteTopKGating::new(
                 input_size,
                 num_experts,
                 top_k,
                 &cfg.quantization_config,
-                vb.pp("router"),
+                router_vb,
             )?,
             input_size,
+            v5_names,
         })
     }
 
@@ -520,9 +608,11 @@ impl GraniteMoE {
                 crate::ops::mul_and_act(&chunks[0], &chunks[1], crate::layers::Activation::Silu)?;
             output_linear.process_routed_stats(&hidden, &topk.indices)?;
             let expert_outputs = output_linear.gather_forward(&hidden, &topk.indices)?;
+            // a quantized gather on CUDA returns f32 whatever the activation dtype
             return expert_outputs
-                .broadcast_mul(&topk.values.to_dtype(dtype)?.unsqueeze(2)?)?
+                .broadcast_mul(&topk.values.to_dtype(expert_outputs.dtype())?.unsqueeze(2)?)?
                 .sum(1)?
+                .to_dtype(dtype)?
                 .reshape((batch_size, seq_len, self.input_size));
         }
         let (batch_index, batch_gates, expert_size) =
@@ -571,11 +661,19 @@ impl GraniteMoE {
 
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
-        uvb.pp("input_linear")
-            .extend(self.input_linear.residual_tensors());
-        uvb.pp("output_linear")
-            .extend(self.output_linear.residual_tensors());
-        uvb.pp("router").pp("layer").add(&self.router.layer);
+        if self.v5_names {
+            uvb.pp("experts")
+                .extend(self.input_linear.residual_tensors());
+            uvb.pp("experts")
+                .extend(self.output_linear.residual_tensors());
+            uvb.pp("router").add(&self.router.layer);
+        } else {
+            uvb.pp("input_linear")
+                .extend(self.input_linear.residual_tensors());
+            uvb.pp("output_linear")
+                .extend(self.output_linear.residual_tensors());
+            uvb.pp("router").pp("layer").add(&self.router.layer);
+        }
         uvb.to_safetensors()
     }
 }
@@ -1599,10 +1697,23 @@ impl CausalSelfAttention {
     fn load(
         vb: ShardedVarBuilder,
         cfg: &Config,
-        rope: Option<Arc<RotaryEmbedding>>, // Optional - None when position_embedding_type == "nope"
+        layer_idx: usize,
+        rope: Option<Arc<RotaryEmbedding>>,
         paged_attn: Option<PagedAttention>,
         comm: &Arc<inference_quant::Comm>,
     ) -> Result<Self> {
+        let num_attention_heads = cfg.num_attention_heads / comm.world_size();
+        let sliding_window = match cfg.layer_types().get(layer_idx) {
+            Some(GraniteLayerType::SlidingAttention) => cfg.sliding_window,
+            _ => None,
+        };
+        // Granite SWA's per-head sinks: softmax(QK)V scaled by sigmoid(lse - sink), the gpt-oss sink
+        let sinks = if vb.contains_tensor("sinks") {
+            let sinks = vb.get(cfg.num_attention_heads, "sinks")?;
+            Some(sinks.narrow(0, comm.rank() * num_attention_heads, num_attention_heads)?)
+        } else {
+            None
+        };
         let size_in = cfg.hidden_size;
         let size_q = cfg.head_dim() * cfg.num_attention_heads;
         let size_kv = cfg.head_dim() * cfg.num_key_value_heads();
@@ -1647,7 +1758,7 @@ impl CausalSelfAttention {
             k_proj,
             v_proj,
             o_proj,
-            num_attention_heads: cfg.num_attention_heads / comm.world_size(),
+            num_attention_heads,
             num_key_value_heads: (cfg.num_key_value_heads() / comm.world_size()).max(1),
             head_dim: cfg.head_dim(),
             rotary_emb: rope, // Now optional
@@ -1661,8 +1772,8 @@ impl CausalSelfAttention {
                 softcap: None,
                 // GraniteMoeHybrid uses attention_multiplier instead of 1/sqrt(d)
                 softmax_scale: cfg.attention_multiplier,
-                sliding_window: None,
-                sinks: None,
+                sliding_window,
+                sinks,
                 chunk: None,
             },
         })
@@ -1722,7 +1833,8 @@ impl Block {
         let attn = CausalSelfAttention::load(
             mapper.set_device(layer_idx, vb.pp("self_attn"), loading_isq),
             cfg,
-            rope, // Pass the optional RoPE
+            layer_idx,
+            rope,
             paged_attn,
             comm,
         )?;
@@ -1840,7 +1952,7 @@ impl GraniteHybridCache {
         let mut caches = Vec::with_capacity(layer_types.len());
         for (layer_type, device) in layer_types.iter().zip(layer_devices) {
             match layer_type {
-                GraniteLayerType::Attention => {
+                GraniteLayerType::Attention | GraniteLayerType::SlidingAttention => {
                     caches.push(GraniteLayerCache::Attention(KvCache::new_normal(
                         2,
                         cfg.max_position_embeddings,
@@ -1891,6 +2003,8 @@ pub struct GraniteMoeHybrid {
     embedding_multiplier: f32,
     logits_scaling: f32,
     max_seq_len: usize,
+    sliding_window: Option<usize>,
+    has_sinks: bool,
 }
 
 impl GraniteMoeHybrid {
@@ -1959,20 +2073,11 @@ impl GraniteMoeHybrid {
 
         let head_dim = cfg.head_dim();
 
-        // Check if position embeddings should be used
-        let use_position_embeddings = cfg.position_embedding_type != "nope";
-
-        if !use_position_embeddings {
-            tracing::info!("GraniteMoeHybrid: position_embedding_type is 'nope', skipping RoPE");
-        }
-
-        // Build RoPE embeddings per device (only if position embeddings are used)
         // Note: granite rope_type scaling is not yet supported, using default rope
-        if use_position_embeddings
-            && let Some(GraniteRopeConfig {
-                rope_type: GraniteRopeType::Granite,
-                ..
-            }) = &cfg.rope_scaling
+        if let Some(GraniteRopeConfig {
+            rope_type: GraniteRopeType::Granite,
+            ..
+        }) = &cfg.rope_scaling
         {
             tracing::warn!(
                 "Granite-style rope scaling is not yet fully supported. Using default rope scaling."
@@ -1980,23 +2085,25 @@ impl GraniteMoeHybrid {
         }
 
         let mut ropes = HashMap::new();
-        if use_position_embeddings {
-            for i in 0..cfg.num_hidden_layers {
-                let device = mapper
-                    .device_for(i, false)
-                    .unwrap_or(&normal_loading_metadata.real_device);
-                if let std::collections::hash_map::Entry::Vacant(e) = ropes.entry(device.location())
-                {
-                    let rope = RotaryEmbedding::new(
-                        cfg.rope_theta,
-                        head_dim,
-                        cfg.max_position_embeddings,
-                        device,
-                        is_gptx,
-                        vb_m.dtype(),
-                    )?;
-                    e.insert(Arc::new(rope));
-                }
+        for i in 0..cfg.num_hidden_layers {
+            let Some(theta) = cfg.layer_rope_theta(i) else {
+                continue;
+            };
+            let device = mapper
+                .device_for(i, false)
+                .unwrap_or(&normal_loading_metadata.real_device);
+            if let std::collections::hash_map::Entry::Vacant(e) =
+                ropes.entry((device.location(), theta.to_bits()))
+            {
+                let rope = RotaryEmbedding::new(
+                    theta,
+                    head_dim,
+                    cfg.max_position_embeddings,
+                    device,
+                    is_gptx,
+                    vb_m.dtype(),
+                )?;
+                e.insert(Arc::new(rope));
             }
         }
 
@@ -2015,10 +2122,7 @@ impl GraniteMoeHybrid {
             .iter()
             .filter(|t| matches!(t, GraniteLayerType::Mamba))
             .count();
-        let num_attn = layer_types
-            .iter()
-            .filter(|t| matches!(t, GraniteLayerType::Attention))
-            .count();
+        let num_attn = layer_types.iter().filter(|t| t.is_attention()).count();
         tracing::info!(
             "GraniteMoeHybrid: {} attention layers, {} mamba layers",
             num_attn,
@@ -2039,18 +2143,13 @@ impl GraniteMoeHybrid {
             let vb_layer = vb_m.pp(format!("layers.{i}"));
 
             let layer = match &layer_types[i] {
-                GraniteLayerType::Attention => {
-                    // Get optional RoPE - None when position_embedding_type == "nope"
-                    let rotary_emb = if use_position_embeddings {
-                        Some(
-                            ropes
-                                .get(&device.location())
-                                .expect("No RoPE for device location!")
-                                .clone(),
-                        )
-                    } else {
-                        None
-                    };
+                GraniteLayerType::Attention | GraniteLayerType::SlidingAttention => {
+                    let rotary_emb = cfg.layer_rope_theta(i).map(|theta| {
+                        ropes
+                            .get(&(device.location(), theta.to_bits()))
+                            .expect("No RoPE for device location!")
+                            .clone()
+                    });
                     let paged_attn = match &attention_mechanism {
                         AttentionImplementation::Eager => None,
                         AttentionImplementation::PagedAttention => {
@@ -2063,7 +2162,7 @@ impl GraniteMoeHybrid {
                         &*mapper,
                         i,
                         normal_loading_metadata.loading_isq,
-                        rotary_emb, // Now optional
+                        rotary_emb,
                         paged_attn,
                         &comm,
                     )?)
@@ -2092,8 +2191,8 @@ impl GraniteMoeHybrid {
         let pipeline_layer_types: Vec<HybridLayerType> = layer_types
             .iter()
             .map(|lt| match lt {
-                GraniteLayerType::Attention => HybridLayerType::Attention,
                 GraniteLayerType::Mamba => HybridLayerType::Recurrent,
+                _ => HybridLayerType::Attention,
             })
             .collect();
 
@@ -2121,8 +2220,19 @@ impl GraniteMoeHybrid {
         let has_mamba = layer_types
             .iter()
             .any(|layer_type| matches!(layer_type, GraniteLayerType::Mamba));
+        let has_sliding = layer_types.contains(&GraniteLayerType::SlidingAttention);
+        if has_mamba && has_sliding {
+            inference_tensor::bail!(
+                "Granite with both Mamba and sliding-window layers is not supported"
+            );
+        }
+        let has_sinks = layers.iter().any(|layer| {
+            matches!(layer, DecoderLayer::Attention(block) if block.attn.sdpa_params.sinks.is_some())
+        });
 
         Ok(Self {
+            sliding_window: has_sliding.then_some(cfg.sliding_window).flatten(),
+            has_sinks,
             wte,
             layers,
             layer_types,
@@ -2133,9 +2243,18 @@ impl GraniteMoeHybrid {
             // an all-attention Granite keeps plain KV caches: a hybrid one would reserve recurrent state it has none of
             kv_cache: match has_mamba {
                 true => EitherCache::Hybrid(pipeline_cache),
-                false => EitherCache::Normal(crate::kv_cache::NormalCache::new(
-                    cfg.num_hidden_layers,
-                    cfg.max_position_embeddings,
+                false => EitherCache::Normal(crate::kv_cache::NormalCache::from_types(
+                    cfg.layer_types()
+                        .iter()
+                        .map(|layer_type| match (layer_type, cfg.sliding_window) {
+                            (GraniteLayerType::SlidingAttention, Some(window)) => {
+                                NormalCacheType::SlidingWindow { window }
+                            }
+                            _ => NormalCacheType::Normal {
+                                max_seq_len: cfg.max_position_embeddings,
+                            },
+                        })
+                        .collect(),
                 )),
             },
             device: normal_loading_metadata.real_device,
@@ -2146,7 +2265,7 @@ impl GraniteMoeHybrid {
                 num_kv_heads: (cfg.num_key_value_heads() / mapper.get_comm_for(0)?.world_size())
                     .max(1),
                 num_attn_heads: num_attention_heads,
-                sliding_window: None,
+                sliding_window: has_sliding.then_some(cfg.sliding_window).flatten(),
                 k_head_dim: cfg.head_dim(),
                 v_head_dim: cfg.head_dim(),
                 kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
@@ -2240,20 +2359,42 @@ impl GraniteMoeHybrid {
             x.dtype(),
             &CausalMaskConfig::default(),
         )?;
-        let mask = if ctx.is_first_prompt_chunk() {
-            mask
+        let sliding_mask = match self.sliding_window {
+            Some(window) => Some(CausalMasker.make_causal_mask(
+                input_ids,
+                mask_cache,
+                x.dtype(),
+                &CausalMaskConfig {
+                    sliding_window: Some(window),
+                    ..Default::default()
+                },
+            )?),
+            None => None,
+        };
+        let (mask, sliding_mask) = if ctx.is_first_prompt_chunk() {
+            (mask, sliding_mask)
         } else {
-            AttentionMask::None
+            (
+                AttentionMask::None,
+                sliding_mask.map(|_| AttentionMask::None),
+            )
         };
         let mask = DeviceMappedMask::new(mask, &*self.mapper)?;
+        let sliding_mask = sliding_mask
+            .map(|mask| DeviceMappedMask::new(mask, &*self.mapper))
+            .transpose()?;
 
         for (layer_idx, layer) in self.layers.iter().enumerate() {
             x = self.mapper.map(x, layer_idx)?;
 
             match layer {
                 DecoderLayer::Attention(block) => {
+                    let layer_mask = match (&self.layer_types[layer_idx], &sliding_mask) {
+                        (GraniteLayerType::SlidingAttention, Some(sliding)) => sliding,
+                        _ => &mask,
+                    };
                     if let Some(normal) = normal_cache.as_mut() {
-                        let mask_for_layer = &mask.get(x.device());
+                        let mask_for_layer = &layer_mask.get(x.device());
                         x = block.forward(
                             &x,
                             mask_for_layer,
@@ -2265,12 +2406,12 @@ impl GraniteMoeHybrid {
                         .as_mut()
                         .and_then(|cache| cache.get_mut(layer_idx))
                     {
-                        let mask_for_layer = &mask.get(x.device());
+                        let mask_for_layer = &layer_mask.get(x.device());
                         x = block.forward(&x, mask_for_layer, kv_cache, ctx, layer_idx)?;
                     } else if let GraniteLayerCache::Attention(kv_cache) =
                         &mut internal_cache.caches[layer_idx]
                     {
-                        let mask_for_layer = &mask.get(x.device());
+                        let mask_for_layer = &layer_mask.get(x.device());
                         x = block.forward(&x, mask_for_layer, kv_cache, ctx, layer_idx)?;
                     }
                 }
@@ -2397,7 +2538,12 @@ impl NormalModel for GraniteMoeHybrid {
         &self.cfg
     }
     fn supports_packed_prefill(&self) -> bool {
-        true
+        !self.has_sinks
+            || crate::attention::sinks_backend_supports(
+                self.dtype,
+                self.device.location(),
+                self.cfg.k_head_dim,
+            )
     }
 }
 
@@ -2515,6 +2661,10 @@ impl AnyMoeBaseModelMixin for GraniteMoeHybrid {
                             num_experts_per_tok: 2,
                             // Position embedding type (not used for MLP)
                             position_embedding_type: "rope".to_string(),
+                            sliding_window: None,
+                            layer_rope_theta: None,
+                            no_rope_layers: None,
+                            rope_parameters: None,
                         };
                         row.push(Box::new(GraniteMlp::new(
                             vb.pp(layer_idx)
@@ -2694,6 +2844,7 @@ mod tests {
                 Tensor::ones((4, 3), DType::F32, &Device::Cpu)?,
             ]),
             output_size: 4,
+            name: EXPERT_WEIGHT,
         };
         let residual = experts.residual_tensors();
 
@@ -2814,6 +2965,7 @@ mod tests {
                         .collect::<Result<Vec<_>>>()?,
                 ),
                 output_size: EXPERT_INTERMEDIATE * 2,
+                name: EXPERT_WEIGHT,
             },
             output_linear: GraniteParallelExperts {
                 weights: GraniteParallelExpertWeights::Dense(
@@ -2822,6 +2974,7 @@ mod tests {
                         .collect::<Result<Vec<_>>>()?,
                 ),
                 output_size: HIDDEN_SIZE,
+                name: EXPERT_WEIGHT,
             },
             router: GraniteTopKGating {
                 layer: router.clone(),
@@ -2829,6 +2982,7 @@ mod tests {
                 top_k: TOP_K,
             },
             input_size: HIDDEN_SIZE,
+            v5_names: false,
         };
         let packed_input = unquant_linear(input_weights, None)?;
         let packed_output = unquant_linear(output_weights, None)?;
@@ -2836,10 +2990,12 @@ mod tests {
             input_linear: GraniteParallelExperts {
                 weights: GraniteParallelExpertWeights::Quantized(packed_input.clone()),
                 output_size: EXPERT_INTERMEDIATE * 2,
+                name: EXPERT_WEIGHT,
             },
             output_linear: GraniteParallelExperts {
                 weights: GraniteParallelExpertWeights::Quantized(packed_output.clone()),
                 output_size: HIDDEN_SIZE,
+                name: EXPERT_WEIGHT,
             },
             router: GraniteTopKGating {
                 layer: router,
@@ -2847,6 +3003,7 @@ mod tests {
                 top_k: TOP_K,
             },
             input_size: HIDDEN_SIZE,
+            v5_names: false,
         };
         let input = Tensor::from_vec(
             patterned(2 * 3 * HIDDEN_SIZE, 23, 0.2, 0.01),
@@ -2868,6 +3025,7 @@ mod tests {
         let experts = GraniteParallelExperts {
             weights: GraniteParallelExpertWeights::Quantized(weight.clone()),
             output_size: 2,
+            name: EXPERT_WEIGHT,
         };
         let input = Tensor::new(&[[1f32, 2., 3.], [4., 5., 6.], [7., 8., 9.]], &device)?;
 

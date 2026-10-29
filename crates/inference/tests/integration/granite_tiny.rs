@@ -1,5 +1,6 @@
-//! Granite 3.x / 4.1 (dense, MoE, MoE with a shared expert) on the Granite 4 model: a dense checkpoint's
-//! Llama-style `mlp` scores as its weights fused into `shared_mlp` do, and the MoE classes load and generate.
+//! Granite 3.x / 4.1 (dense, MoE, MoE with a shared expert) and Granite SWA on the Granite 4 model: a dense
+//! checkpoint's `mlp` scores as its weights fused into `shared_mlp` do, the MoE classes generate, and SWA's
+//! transformers v5 expert names score as Granite 4's.
 
 use std::collections::HashMap;
 
@@ -32,6 +33,8 @@ const WEIGHT_STD: f32 = 0.2;
 const PROMPT: [u32; 5] = [40, 41, 42, 43, 44];
 const MAX_LEN: usize = 4;
 const LOGIT_TOLERANCE: f32 = 1e-4;
+// shorter than PROMPT
+const SLIDING_WINDOW: usize = 2;
 
 fn config(architecture: &str, model_type: &str, moe: bool, shared: bool) -> serde_json::Value {
     let mut config = serde_json::json!({
@@ -233,5 +236,61 @@ async fn granite_moe_checkpoints_with_and_without_a_shared_expert_generate() -> 
         let dir = checkpoint(config(architecture, model_type, true, shared), &weights)?;
         generates(&dir).await?;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn granite_swa_v5_expert_names_score_as_granite_4_names() -> anyhow::Result<()> {
+    let mut v5 = common_weights()?;
+    let mut granite4 = v5.clone();
+    for layer in 0..LAYERS {
+        let prefix = format!("model.layers.{layer}");
+        let sinks = random(&[HEADS])?;
+        v5.insert(format!("{prefix}.self_attn.sinks"), sinks.clone());
+        granite4.insert(format!("{prefix}.self_attn.sinks"), sinks);
+        let gate_up = random(&[EXPERTS, 2 * INTERMEDIATE, HIDDEN])?;
+        let down = random(&[EXPERTS, HIDDEN, INTERMEDIATE])?;
+        let router = random(&[EXPERTS, HIDDEN])?;
+        let moe = format!("{prefix}.block_sparse_moe");
+        v5.insert(format!("{moe}.experts.gate_up_proj"), gate_up.clone());
+        v5.insert(format!("{moe}.experts.down_proj"), down.clone());
+        v5.insert(format!("{moe}.router.weight"), router.clone());
+        granite4.insert(format!("{moe}.input_linear.weight"), gate_up);
+        granite4.insert(format!("{moe}.output_linear.weight"), down);
+        granite4.insert(format!("{moe}.router.layer.weight"), router);
+    }
+    let mut swa = config("GraniteMoeSWAForCausalLM", "granitemoe_swa", true, false);
+    swa["sliding_window"] = SLIDING_WINDOW.into();
+    swa["layer_types"] = serde_json::json!(["full_attention", "sliding_attention"]);
+    let mut renamed = swa.clone();
+    renamed["architectures"] = serde_json::json!(["GraniteMoeForCausalLM"]);
+    renamed["model_type"] = "granitemoe".into();
+    // the same layer kinds, under the names Granite 4 reads
+    renamed["layer_types"] = serde_json::json!(["attention", "sliding_attention"]);
+
+    let full = {
+        let mut full = swa.clone();
+        full["layer_types"] = serde_json::json!(["full_attention", "full_attention"]);
+        checkpoint(full, &v5)?
+    };
+    let (v5, granite4) = (checkpoint(swa, &v5)?, checkpoint(renamed, &granite4)?);
+    let (v5, granite4, full) = (
+        prompt_logits(&v5).await?,
+        prompt_logits(&granite4).await?,
+        prompt_logits(&full).await?,
+    );
+    let worst = |a: &[f32], b: &[f32]| {
+        a.iter()
+            .zip(b)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max)
+    };
+    assert!(
+        worst(&v5, &granite4) < LOGIT_TOLERANCE,
+        "logits differ by {}",
+        worst(&v5, &granite4)
+    );
+    // the prompt outruns the window, so the sliding layer must see less than full attention does
+    assert!(worst(&v5, &full) > LOGIT_TOLERANCE);
     Ok(())
 }

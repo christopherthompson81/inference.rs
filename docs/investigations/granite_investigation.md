@@ -44,3 +44,54 @@ Loading the Granite architectures beyond Granite 4.0-H on the existing Granite m
 **Command:** `granite_ours_gguf.py` on `dense-2b-Q8_0.gguf` again, compared against Run 2's output.
 
 **Finding:** max abs 0.0, same top 5. Full local CI (lint, CPU, CUDA, bindings, size) passes.
+
+## Run 5 - 2026-10-28 20:53
+
+**Question:** with Granite SWA on the Granite model (per-layer sliding window from `layer_types`, `self_attn.sinks` through the gpt-oss sink path, per-layer RoPE theta, transformers v5 expert names `experts.gate_up_proj` / `experts.down_proj` / `router.weight`), do the swash checkpoints match transformers past the 128-token window?
+
+**Command:** `granite_ref.py` / `granite_ours.py` on the first 300 tokens of README.md, `ibm-granite/granite-swash-2b` (dense, 24 layers, 6 full) and `ibm-granite/granite-swash-3b-a600m` (48 experts top 4, shared MLP).
+
+**Finding:**
+
+| checkpoint | max abs | cosine | top 5 |
+|---|---|---|---|
+| swash-2b | 3.9e-3 | 0.9999999 | identical |
+| swash-3b-a600m | 1.3e-2 | 0.9999995 | identical |
+
+Control: swash-2b with every layer forced to `full_attention` gives max abs 16.9, cosine 0.51, a different argmax, so the 300-token prompt does exercise the window.
+
+The sink in transformers is `softmax(QK)V * sigmoid(lse - sink)`, which equals a softmax over the scores plus one sink logit (`exp(x) / (sum + exp(s))`), the form our sinks path computes.
+
+**Next:** `granite_swa` GGUF (llama.cpp writes `attn_sinks`, fused `ffn_gate_up_exps` and `ffn_up_shexp`, a sliding-window pattern array, optional `rope_pattern`).
+
+## Run 6 - 2026-10-28 21:00
+
+**Question:** do llama.cpp's `granite_swa` conversions (swash 2B and 3B-A600M, Q8_0) load and score as llama.cpp does?
+
+**Command:** `convert_hf_to_gguf.py --outtype q8_0` on both, `granite_ours_gguf.py` against the transformers logits of Run 5, then `scripts/gguf_perplexity_parity.sh` over all Granite GGUFs (CUDA build).
+
+**Finding:** the files carry `granite_swa.attention.sliding_window` 128, a boolean `sliding_window_pattern`, `attn_sinks`, fused `ffn_gate_up_exps` and `ffn_up_shexp` (3B), and `tokenizer.ggml.pre = granite-docling` (llama.cpp's GPT-2 case). With the `granite_swa` registry entry, the pattern synthesized into `layer_types` / `sliding_window`, and the fused shared expert bound directly, both load: top 5 identical to transformers (max abs 0.25 and 0.48, Q8_0 spread). Perplexity at first:
+
+| file | llama.cpp | ours |
+|---|---|---|
+| dense-2b | 1.4435 | 1.4425 |
+| swash-2b | 3.4414 | 3.4615 |
+| swash-3b | 3.9014 | error: `shape mismatch in gather, lhs: [512, 48], rhs: [4]` |
+
+and a Granite 3.1 MoE GGUF (converted for the check) failed too: `dtype mismatch in mul, lhs: F32, rhs: BF16`. Two bugs, both CUDA-only and older than this work:
+
+- Granite's quantized expert path multiplied the f32 output of a quantized `gather_forward` by bf16 routing weights. Weighting in the output's dtype and casting after fixes it.
+- `Tensor::topk` on CUDA ranked only the last row of its input (`final_logits_row`, from the upstream CUDA graphs change of 2026-06), so any router that falls back to it got one token's experts. The fused router takes power-of-two expert counts (and a short list), so 48 experts took the fallback. The DeepSeek-style grouped router (`moe/router.rs`) and AnyMoE call it on per-token rows too. It now ranks every row; `cuda_topk_ranks_every_row` checks it against the CPU result.
+
+After both:
+
+| file | llama.cpp | ours | drift |
+|---|---|---|---|
+| dense-2b | 1.4435 | 1.4425 | 0.0007 |
+| moe-1b | 1.5056 | 1.5066 | 0.0007 |
+| swash-2b | 3.4414 | 3.4615 | 0.0058 |
+| swash-3b | 3.9014 | 3.8562 | 0.0116 |
+
+**Tokenizer (upstream, for a llama.cpp report):** llama.cpp tags swash's tokenizer `granite-docling` (the hash of its check text), whose case in `llama-vocab.cpp` is the GPT-2 split. granite-docling-258M's own tokenizer is indeed plain ByteLevel, but swash's (like Granite 4.0 / 4.1 / Switch, same 100352 merges) splits with the Llama 3 regex (`\p{N}{1,3}`, `[^\r\n\p{L}\p{N}]?\p{L}+`, newline runs). llama-server's `/tokenize` on README.md gives 5609 tokens against 4742 from the HF tokenizer; on `x=3.14159` it gives `14`, `159` where HF gives `141`, `59`. Granite 4.1 converts as `dbrx` (the right split): its vocab differs from swash's in some entries, so the hash differs. We follow the GGUF's tag like llama.cpp, so a swash GGUF tokenizes as llama.cpp's does. (`llama-tokenize` segfaults on every model in this build; the server endpoint works.)
+
+**Next:** Granite 4 Vision and Granite Speech.

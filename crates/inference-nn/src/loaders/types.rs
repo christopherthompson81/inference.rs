@@ -178,6 +178,13 @@ macro_rules! normal_loader_table {
                 model_type: "granitemoeshared",
                 loader: GraniteMoeHybridLoader, feature: "models-other",
             },
+            GraniteSwa { cli: "granite_swa", hf: "GraniteSWAForCausalLM", model_type: "granite_swa", loader: GraniteMoeHybridLoader, feature: "models-other" },
+            GraniteMoeSwa {
+                cli: "granitemoe_swa",
+                hf: "GraniteMoeSWAForCausalLM",
+                model_type: "granitemoe_swa",
+                loader: GraniteMoeHybridLoader, feature: "models-other",
+            },
             GptOss { cli: "gpt_oss", hf: "GptOssForCausalLM", model_type: "gpt_oss", loader: GptOssLoader, feature: "models-other" },
             HunYuanDenseV1 {
                 cli: "hunyuanv1dense",

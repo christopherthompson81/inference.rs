@@ -2,8 +2,8 @@ use inference_nn::loaders::NormalLoaderType;
 pub use inference_nn::model::RopePairing;
 use std::{error::Error, fmt, str::FromStr};
 
-pub const NORMAL_LOADER_TYPE_COUNT: usize = 31;
-pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 27;
+pub const NORMAL_LOADER_TYPE_COUNT: usize = 33;
+pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 28;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CanonicalGgufArchitecture {
@@ -29,6 +29,7 @@ pub enum CanonicalGgufArchitecture {
     Granite,
     GraniteMoe,
     GraniteHybrid,
+    GraniteSwa,
     GptOss,
     HunYuanDense,
     HunYuanMoe,
@@ -61,6 +62,7 @@ impl CanonicalGgufArchitecture {
             Self::Granite => "granite",
             Self::GraniteMoe => "granitemoe",
             Self::GraniteHybrid => "granitehybrid",
+            Self::GraniteSwa => "granite_swa",
             Self::GptOss => "gpt-oss",
             Self::HunYuanDense => "hunyuan-dense",
             Self::HunYuanMoe => "hunyuan-moe",
@@ -103,6 +105,7 @@ impl FromStr for CanonicalGgufArchitecture {
             "granite" => Ok(Self::Granite),
             "granitemoe" => Ok(Self::GraniteMoe),
             "granitehybrid" => Ok(Self::GraniteHybrid),
+            "granite_swa" => Ok(Self::GraniteSwa),
             "gpt-oss" => Ok(Self::GptOss),
             "hunyuan-dense" => Ok(Self::HunYuanDense),
             "hunyuan-moe" => Ok(Self::HunYuanMoe),
@@ -463,6 +466,14 @@ const GRANITE_MOE_LOADERS: &[NormalLoaderType] = &[
     NormalLoaderType::GraniteMoeShared,
 ];
 const GRANITE_HYBRID_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::GraniteMoeHybrid];
+const GRANITE_SWA_LOADERS: &[NormalLoaderType] = &[
+    NormalLoaderType::GraniteSwa,
+    NormalLoaderType::GraniteMoeSwa,
+];
+const GRANITE_SWA_METADATA: &[&str] = &[
+    "{arch}.attention.sliding_window",
+    "{arch}.attention.sliding_window_pattern",
+];
 const GPT_OSS_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::GptOss];
 const HUNYUAN_DENSE_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::HunYuanDenseV1];
 const HUNYUAN_MOE_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::HunYuanMoEV1];
@@ -644,6 +655,14 @@ pub const GGUF_SCHEMAS: &[GgufSchema; CANONICAL_GGUF_ARCHITECTURE_COUNT] = &[
         rope_pairing: RopePairing::Adjacent,
         required_metadata: GRANITE_HYBRID_METADATA,
         required_tensors: SSM_TENSORS,
+        unsupported_metadata: NO_REQUIREMENTS,
+    },
+    GgufSchema {
+        architecture: CanonicalGgufArchitecture::GraniteSwa,
+        compatible_loaders: GRANITE_SWA_LOADERS,
+        rope_pairing: RopePairing::Adjacent,
+        required_metadata: GRANITE_SWA_METADATA,
+        required_tensors: NO_REQUIREMENTS,
         unsupported_metadata: NO_REQUIREMENTS,
     },
     GgufSchema {
@@ -851,6 +870,28 @@ pub const NORMAL_MODEL_ADAPTERS: &[NativeModelAdapter; NORMAL_LOADER_TYPE_COUNT]
             GgufLayout::StackedExperts,
             GgufLayout::PerLayerInventory,
             GgufLayout::GraniteSsm,
+            GgufLayout::GraniteSplitGateUp,
+        ],
+    },
+    NativeModelAdapter {
+        loader: NormalLoaderType::GraniteSwa,
+        architectures: &[CanonicalGgufArchitecture::GraniteSwa],
+        layouts: &[
+            GgufLayout::Direct,
+            GgufLayout::ConverterPermutedQk,
+            GgufLayout::StackedExperts,
+            GgufLayout::PerLayerInventory,
+            GgufLayout::GraniteSplitGateUp,
+        ],
+    },
+    NativeModelAdapter {
+        loader: NormalLoaderType::GraniteMoeSwa,
+        architectures: &[CanonicalGgufArchitecture::GraniteSwa],
+        layouts: &[
+            GgufLayout::Direct,
+            GgufLayout::ConverterPermutedQk,
+            GgufLayout::StackedExperts,
+            GgufLayout::PerLayerInventory,
             GgufLayout::GraniteSplitGateUp,
         ],
     },
@@ -1074,6 +1115,19 @@ pub fn resolve_native_adapter(
         });
     }
 
+    if descriptor.architecture == CanonicalGgufArchitecture::GraniteSwa {
+        let loader = if descriptor.has_metadata("{arch}.expert_count") {
+            NormalLoaderType::GraniteMoeSwa
+        } else {
+            NormalLoaderType::GraniteSwa
+        };
+        return Ok(ResolvedNativeModelAdapter {
+            adapter: adapter_for(&loader)
+                .expect("granite_swa resolver references a missing adapter"),
+            reason: ResolutionReason::ExpertInventory,
+        });
+    }
+
     if descriptor.architecture == CanonicalGgufArchitecture::GraniteMoe {
         // llama.cpp writes Granite MoE with a shared expert under `granitemoe`, plus the shexp tensors
         let loader = if descriptor.has_tensor(".ffn_gate_shexp.") {
@@ -1286,6 +1340,7 @@ mod tests {
             CanonicalGgufArchitecture::Granite,
             CanonicalGgufArchitecture::GraniteMoe,
             CanonicalGgufArchitecture::GraniteHybrid,
+            CanonicalGgufArchitecture::GraniteSwa,
         ];
         for architecture in adjacent {
             assert_eq!(schema_for(architecture).rope_pairing, RopePairing::Adjacent);

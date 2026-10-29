@@ -127,7 +127,7 @@ Overrides merge recursively, so the checkpoint's `rope_theta`, `partial_rotary_f
 
 ## Granite
 
-IBM Granite 4.0 checkpoints (e.g. `ibm-granite/granite-4.0-micro`) mix Mamba-2 recurrent layers with attention layers. The dense Granite 3.x and 4.1 models (`GraniteForCausalLM`, e.g. `ibm-granite/granite-4.1-3b`), Granite MoE (`GraniteMoeForCausalLM`, e.g. `ibm-granite/granite-3.1-1b-a400m-instruct`) and Granite MoE with a shared expert (`GraniteMoeSharedForCausalLM`) run on the same model with every layer attention. All of them load through auto-detection like any other text model, from safetensors or from llama.cpp's GGUFs.
+IBM Granite 4.0 checkpoints (e.g. `ibm-granite/granite-4.0-micro`) mix Mamba-2 recurrent layers with attention layers. The dense Granite 3.x and 4.1 models (`GraniteForCausalLM`, e.g. `ibm-granite/granite-4.1-3b`), Granite MoE (`GraniteMoeForCausalLM`, e.g. `ibm-granite/granite-3.1-1b-a400m-instruct`), Granite MoE with a shared expert (`GraniteMoeSharedForCausalLM`) and the interleaved sliding-window Granite SWA models (`GraniteSWAForCausalLM` and `GraniteMoeSWAForCausalLM`, e.g. `ibm-granite/granite-swash-2b`, with per-head attention sinks) run on the same model with every layer attention. All of them load through auto-detection like any other text model, from safetensors or from llama.cpp's GGUFs. llama.cpp tags the swash tokenizer `granite-docling` and splits it as GPT-2 does, unlike the checkpoint's own tokenizer; a swash GGUF tokenizes as it does in llama.cpp.
 
 ## LFM2 and LFM2.5
 

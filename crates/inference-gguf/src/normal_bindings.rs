@@ -703,6 +703,8 @@ fn is_granite(loader: &NormalLoaderType) -> bool {
             | NormalLoaderType::GraniteMoe
             | NormalLoaderType::GraniteMoeShared
             | NormalLoaderType::GraniteMoeHybrid
+            | NormalLoaderType::GraniteSwa
+            | NormalLoaderType::GraniteMoeSwa
     )
 }
 
@@ -714,13 +716,14 @@ fn bind_granite(archive: &GgufArchive, layer: usize, bindings: &mut GgufBindingM
         let dense_up = format!("blk.{layer}.ffn_up.{suffix}");
         let (gate, up) =
             if archive.contains_tensor(&shared_gate) && archive.contains_tensor(&shared_up) {
-                (shared_gate, shared_up)
+                (shared_gate, shared_up.clone())
             } else {
                 (dense_gate, dense_up)
             };
+        let input_linear = format!("model.layers.{layer}.shared_mlp.input_linear.{suffix}");
         if archive.contains_tensor(&gate) && archive.contains_tensor(&up) {
             bindings.insert(
-                format!("model.layers.{layer}.shared_mlp.input_linear.{suffix}"),
+                input_linear,
                 GgufTensorBinding::concat(
                     vec![
                         GgufTensorBinding::tensor(gate),
@@ -729,6 +732,9 @@ fn bind_granite(archive: &GgufArchive, layer: usize, bindings: &mut GgufBindingM
                     0,
                 ),
             );
+        } else if archive.contains_tensor(&shared_up) {
+            // granite_swa keeps the shared expert's gate and up fused in ffn_up_shexp
+            bindings.insert(input_linear, GgufTensorBinding::tensor(shared_up));
         }
         bind_named(
             archive,

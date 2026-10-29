@@ -262,6 +262,8 @@ class NormalLoaderType(str, Enum):
     GRANITE = "granite"
     GRANITEMOE = "granitemoe"
     GRANITEMOESHARED = "granitemoeshared"
+    GRANITE_SWA = "granite_swa"
+    GRANITEMOE_SWA = "granitemoe_swa"
     GPT_OSS = "gpt_oss"
     HUNYUANV1DENSE = "hunyuanv1dense"
     HUNYUANV1MOE = "hunyuanv1moe"

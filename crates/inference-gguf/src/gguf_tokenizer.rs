@@ -599,7 +599,8 @@ fn bpe_pre_tokenizer_spec(pre: Option<&str>) -> Result<BpePreTokenizerSpec> {
             ignore_merges: false,
             normalize_nfc: true,
         },
-        "gpt-2" | "phi-2" | "modern-bert" => BpePreTokenizerSpec {
+        // granite-docling shares llama.cpp's GPT-2 case
+        "gpt-2" | "phi-2" | "modern-bert" | "granite-docling" => BpePreTokenizerSpec {
             kind: BpePreTokenizerKind::Gpt2,
             regexes: &[GPT2_REGEX],
             ignore_merges: false,
@@ -1601,6 +1602,13 @@ mod tests {
             ("qwen35", BpePreTokenizerKind::Qwen2, false, true, 1),
             ("gpt-2", BpePreTokenizerKind::Gpt2, false, false, 1),
             ("phi-2", BpePreTokenizerKind::Gpt2, false, false, 1),
+            (
+                "granite-docling",
+                BpePreTokenizerKind::Gpt2,
+                false,
+                false,
+                1,
+            ),
             ("starcoder", BpePreTokenizerKind::Starcoder, false, false, 2),
             ("smollm", BpePreTokenizerKind::Starcoder, false, false, 2),
             ("refact", BpePreTokenizerKind::Starcoder, false, false, 2),

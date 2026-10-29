@@ -756,6 +756,27 @@ fn test_repeat_interleave_flat() -> inference_tensor::Result<()> {
 
 #[cfg(feature = "cuda")]
 #[test]
+fn cuda_topk_ranks_every_row() -> inference_tensor::Result<()> {
+    crate::skip_without_cuda!();
+    use super::TopKLastDimOp;
+    // a router's logits, one row per token; 48 experts take the generic path, not the fused router
+    let logits = Tensor::rand(0f32, 1f32, (5, 48), &Device::Cpu)?;
+    let expected = logits.topk(4)?;
+    let actual = logits.to_device(&Device::new_cuda(0)?)?.topk(4)?;
+    assert_eq!(actual.indices.dims(), &[5, 4]);
+    assert_eq!(
+        actual.indices.to_device(&Device::Cpu)?.to_vec2::<u32>()?,
+        expected.indices.to_vec2::<u32>()?
+    );
+    assert_eq!(
+        actual.values.to_device(&Device::Cpu)?.to_vec2::<f32>()?,
+        expected.values.to_vec2::<f32>()?
+    );
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
 fn cuda_batched_topk_matches_cpu_with_offsets_and_mixed_temperatures()
 -> inference_tensor::Result<()> {
     let device = Device::new_cuda(0)?;

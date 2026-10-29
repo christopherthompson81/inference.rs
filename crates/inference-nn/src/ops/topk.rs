@@ -12,7 +12,7 @@ pub(super) fn cuda_topk(input: &Tensor, k: usize) -> Result<TopKOutput> {
     use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
     use std::ffi::c_void;
 
-    let input = final_logits_row(input)?;
+    let input = input.contiguous()?;
     let dims = input.dims();
     let ncols = *dims
         .last()
