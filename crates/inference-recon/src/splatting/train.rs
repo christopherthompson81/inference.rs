@@ -190,7 +190,7 @@ fn camera_of(view: &View) -> Camera {
 }
 
 fn decode_rgb(path: &Path) -> Result<(Vec<f32>, usize, usize)> {
-    let img = image::open(path)
+    let img = crate::read_image(path)
         .map_err(inference_tensor::Error::wrap)?
         .to_rgb8();
     let (w, h) = img.dimensions();
@@ -206,7 +206,7 @@ fn decode_rgb(path: &Path) -> Result<(Vec<f32>, usize, usize)> {
 
 // float16 bits stored as 16-bit grayscale
 fn decode_depth(path: &Path, rescale: f32) -> Result<Vec<f32>> {
-    let img = image::open(path)
+    let img = crate::read_image(path)
         .map_err(inference_tensor::Error::wrap)?
         .to_luma16();
     Ok(img

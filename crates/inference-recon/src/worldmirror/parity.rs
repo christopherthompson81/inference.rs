@@ -248,7 +248,7 @@ fn preprocessing_matches_the_reference_input() -> Result<()> {
     let images = files
         .iter()
         .map(|f| {
-            let rgb = image::open(f)
+            let rgb = crate::read_image(f)
                 .map_err(inference_tensor::Error::wrap)?
                 .to_rgb8();
             Ok(super::preprocess::RgbImage {

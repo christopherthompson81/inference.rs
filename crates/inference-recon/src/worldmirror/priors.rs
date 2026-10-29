@@ -354,7 +354,7 @@ fn read_depth(path: &std::path::Path) -> Result<(usize, usize, Vec<f32>)> {
             .collect::<Vec<_>>();
         return Ok((w, h, values));
     }
-    let image = image::open(path)
+    let image = crate::read_image(path)
         .map_err(|e| inference_tensor::Error::msg(format!("{}: {e}", path.display())))?;
     let (w, h) = (image.width() as usize, image.height() as usize);
     let mut values = if ext == "png" {

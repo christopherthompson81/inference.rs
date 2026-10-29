@@ -2891,3 +2891,34 @@ puts the failing field in a 400's message, so cutting it means another way to re
 Ranked next items: (1) Qwen3-VL loader sizing share, (2) FP8 `apply_isq` through the unquantized path, (3) Qwen3.5 /
 Qwen3-VL multimodal wrapper share, (4) Qwen2-VL / Qwen2.5-VL vision, (5) inference-api serde: one `ModelSelected`
 access flavor, then the path-to-error question.
+
+## Run 94 - 2026-10-29 16:01
+
+Question (user): with serde gone from the IR, are there big functions in the large crates worth splitting or moving
+out?
+
+Commands: `cargo llvm-lines -p <crate> --lib --sort lines` for core, api, server-core, nn, quant, selection, agent,
+models-qwen and recon; the largest functions per copy, then IR grouped by module and by the crate a function
+belongs to.
+
+Raw findings:
+- No single function dominates: the largest are 5-10k lines (core `prompt_chunk_inputs` 7.7k, `finish_or_add_toks`
+  closure 7.7k; api `parse_request_inner` 9.9k; qwen `Qwen3VLModel::forward` 6.7k), under 0.7% of their crate. The
+  one outlier is nn's `cuda::ffi::kernel_table` closure at 26k. Splitting them would not shorten a build: each crate
+  compiles in 16 codegen units and the total stays the same.
+- The image decoders were 10% of inference-api: `image`, `exr`, `zune_jpeg`, `image_webp`, `tiff` ~140k lines,
+  101k of them instantiated for `BufReader<File>` by the one `image::open(panorama)` in `reconstruction.rs`
+  (`image::open` is generic over the path, so every decoder compiles in the caller). `load_from_memory` is not, so
+  its decoders compile in the image crate once.
+- inference-recon (1.12M lines, beside core in the graph: it depends on nn, quant, diffusion, vision, not core) had six
+  more `image::open` calls.
+
+Change: `inference_recon::read_image(&Path)` reads the bytes and decodes them with `load_from_memory`; the seven
+calls (api's and recon's) go through it.
+
+Result: inference-api 1,384,072 -> 1,173,510 (-210,562, -15.2%), image-family code left in it 4.6k. inference-recon
+1,122,843 -> 1,120,169: it keeps its file-reader decoders through `image::image_dimensions` (splatting data) and the
+`save`s; routing those through `&Path` helpers too saved 600 lines, so that was reverted. CPU suite 3006 passed.
+
+What is left in api by module: jobs 70k, responses 66k, anthropic 61k, engine_decision_labels 57k, files 11k,
+video 7.5k, media_source 6.8k.

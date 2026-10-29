@@ -167,7 +167,7 @@ pub fn generate_world_on(
     if !device.is_cuda() {
         anyhow::bail!("world generation needs a CUDA device");
     }
-    let img = image::open(panorama)
+    let img = inference_recon::read_image(panorama)
         .map_err(|e| anyhow::anyhow!("{}: {e}", panorama.display()))?
         .to_rgb8();
     let pano = inference_recon::worldstereo::panorama::Rgb8 {
