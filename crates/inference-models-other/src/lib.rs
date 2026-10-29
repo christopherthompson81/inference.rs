@@ -8,6 +8,7 @@ use inference_nn::{
 };
 
 pub mod bert;
+pub mod blip2_qformer;
 pub mod classifier;
 pub mod deepseek2;
 pub mod deepseek3;
@@ -22,6 +23,7 @@ mod glm4_tests;
 pub mod gpt_oss;
 pub mod granite;
 pub mod granite4_vision;
+pub mod granite_speech;
 #[cfg(test)]
 mod hunyuan_dense_tests;
 mod hunyuan_rope;
@@ -58,6 +60,7 @@ inference_nn::json_config!(
     gpt_oss::Config,
     granite::Config,
     granite4_vision::config::Config,
+    granite_speech::config::Config,
     hunyuan_v1_dense::Config,
     hunyuan_v1_moe::Config,
     lfm2::Config,

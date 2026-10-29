@@ -207,6 +207,7 @@ class MultimodalLoaderType(str, Enum):
     LLAVA_NEXT = "llava_next"
     LLAVA = "llava"
     GRANITE4_VISION = "granite4_vision"
+    GRANITE_SPEECH = "granite_speech"
     LFM2VL = "lfm2vl"
     VLLAMA = "vllama"
     QWEN2VL = "qwen2vl"

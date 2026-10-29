@@ -12,6 +12,7 @@ mod gguf_iq;
 mod gguf_logits_tiny;
 mod gguf_lora_tiny;
 mod granite4_vision_tiny;
+mod granite_speech_tiny;
 mod granite_tiny;
 mod hidream_o1_tiny;
 mod jina_v5_tiny;

@@ -1,0 +1,51 @@
+{
+  "architectures": [
+    "GraniteSpeechForConditionalGeneration"
+  ],
+  "model_type": "granite_speech",
+  "audio_token_index": 259,
+  "window_size": 15,
+  "downsample_rate": 5,
+  "has_lora_adapter": false,
+  "encoder_config": {
+    "input_dim": 160,
+    "hidden_dim": 32,
+    "num_layers": 2,
+    "num_heads": 2,
+    "dim_head": 16,
+    "context_size": 8,
+    "max_pos_emb": 16,
+    "conv_kernel_size": 3,
+    "conv_expansion_factor": 2,
+    "feedforward_mult": 2,
+    "output_dim": 10
+  },
+  "projector_config": {
+    "hidden_size": 32,
+    "num_attention_heads": 2,
+    "num_hidden_layers": 1,
+    "intermediate_size": 48,
+    "layer_norm_eps": 1e-12,
+    "encoder_hidden_size": 32
+  },
+  "text_config": {
+    "architectures": [
+      "GraniteForCausalLM"
+    ],
+    "model_type": "granite",
+    "hidden_size": 32,
+    "intermediate_size": 64,
+    "vocab_size": 260,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 2,
+    "num_key_value_heads": 1,
+    "rms_norm_eps": 1e-05,
+    "rope_theta": 10000.0,
+    "max_position_embeddings": 512,
+    "tie_word_embeddings": false,
+    "embedding_multiplier": 4.0,
+    "attention_multiplier": 0.25,
+    "residual_multiplier": 0.5,
+    "logits_scaling": 2.0
+  }
+}

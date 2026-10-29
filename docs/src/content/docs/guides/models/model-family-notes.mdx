@@ -131,6 +131,8 @@ IBM Granite 4.0 checkpoints (e.g. `ibm-granite/granite-4.0-micro`) mix Mamba-2 r
 
 Granite 4 Vision (`Granite4VisionForConditionalGeneration`, e.g. `ibm-granite/granite-vision-4.1-4b`) reads images: a SigLIP tower tiled as LLaVA-Next tiles, whose layers feed Window Q-Former projectors that add their features at the image positions before several text layers. `ibm-granite/granite-4.0-3b-vision` ships part of its text weights as a PEFT adapter (`adapter_model.safetensors`), which is not applied on load: merge it into the checkpoint first.
 
+Granite Speech (`GraniteSpeechForConditionalGeneration` and `GraniteSpeechPlusForConditionalGeneration`, e.g. `ibm-granite/granite-speech-4.1-2b`) reads one or more audio clips, resampled to 16 kHz mono, through a Conformer encoder and a windowed Q-Former; each clip takes 3 tokens per 15 encoder frames (0.3 s). Send the audio with a text request such as "can you transcribe the speech into a written format?". Checkpoints that switch a LoRA adapter on for audio (`has_lora_adapter`) are refused.
+
 ## LFM2 and LFM2.5
 
 LiquidAI LFM2 and LFM2.5 dense and MoE checkpoints are supported. LFM2-VL and LFM2.5-VL are supported for image input.
