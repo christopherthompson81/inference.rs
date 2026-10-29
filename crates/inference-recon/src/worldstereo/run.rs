@@ -299,7 +299,7 @@ fn release(device: &Device) -> Result<()> {
 fn load_clip(dir: &Path, frames: usize) -> Option<Vec<Rgb8>> {
     (0..frames)
         .map(|f| {
-            let img = image::open(dir.join(format!("frame_{f:02}.png")))
+            let img = crate::read_image(&dir.join(format!("frame_{f:02}.png")))
                 .ok()?
                 .to_rgb8();
             Some(Rgb8 {

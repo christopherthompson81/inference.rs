@@ -62,7 +62,7 @@ pub fn input_images(input: &Path) -> Result<Vec<PathBuf>> {
 
 // An image decoded to 8-bit RGB, alpha composited over white as the reference does
 fn decode(path: &Path) -> Result<RgbImage> {
-    let image = image::open(path)
+    let image = crate::read_image(path)
         .map_err(|e| inference_tensor::Error::msg(format!("{}: {e}", path.display())))?;
     let rgba = image.to_rgba8();
     let (width, height) = (rgba.width() as usize, rgba.height() as usize);
