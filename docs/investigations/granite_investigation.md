@@ -154,3 +154,19 @@ After both:
 - After that, Vision: 535 prompt tokens, first token top 5 the same tokens as Run 7 (791 -0.121 against -0.129). The greedy text follows transformers for 8 tokens, then takes "text" (-0.916) over "piece" (-0.943), a 0.03 near-tie under Q8_0; llama.cpp on the same files follows transformers' wording.
 
 **Next:** the 4.0 vision PEFT adapter (fold at load).
+
+## Run 10 - 2026-10-29 00:10
+
+**Question:** with a PEFT adapter shipped beside a checkpoint's safetensors folded in on load (`W + alpha/r * B A`, as transformers applies it), does `ibm-granite/granite-4.0-3b-vision` match transformers?
+
+**Command:** reference: transformers 4.57.3 in a scratch venv (the repo's remote code; transformers 5's native class expects a dense Granite text model, 4.0's is `granitemoehybrid` with `shared_mlp`), base weights from a copy of the folder without the adapter, `PeftModel.from_pretrained(...).merge_and_unload()`, the Run 7 image and prompt, f32 CPU. Ours: `inference serve --cpu --dtype f32` on the folder.
+
+**Finding:** the adapter is plain LoRA (r 256, alpha 256) on the text model's q/k/v/o and `shared_mlp.input_linear` / `output_linear`, 240 weights. The checkpoint also keeps its SigLIP tower at the top level (`vision_tower.*`) rather than under `model.`; the model now reads either.
+
+| | ours | transformers + peft |
+|---|---|---|
+| prompt tokens | 535 | 535 |
+| first token | 791 -0.007 | 791 -0.006 |
+| 24-token greedy text | identical | |
+
+Control, ours without the adapter: first token 791 -0.507 and a different description, so the fold carries the checkpoint's behaviour. A unit test reads a folded weight whole and as a tensor-parallel shard (which first failed: the fold read the base at the shard's shape) and an untargeted weight as stored.

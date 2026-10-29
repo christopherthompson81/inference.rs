@@ -398,6 +398,8 @@ pub enum ShardedSafeTensors {
         b: MmapedSafetensors,
         make_dummy_regexes: Option<Arc<Vec<Regex>>>,
         predicate: Arc<dyn Fn(String) -> bool + Send + Sync + 'static>,
+        /// A PEFT adapter the checkpoint ships beside its weights, added into the weights it targets.
+        fold: Option<Arc<AdapterFold>>,
     },
     SimpleBackend {
         b: Box<dyn SimpleBackend + 'static>,
@@ -437,6 +439,21 @@ impl ShardedSafeTensors {
         make_dummy_regexes: Option<Arc<Vec<Regex>>>,
         predicate: Arc<dyn Fn(String) -> bool + Send + Sync + 'static>,
     ) -> Result<ShardedVarBuilder> {
+        unsafe { Self::sharded_with_fold(paths, dtype, dev, make_dummy_regexes, predicate, None) }
+    }
+
+    /// As [`Self::sharded`], with `fold`'s adapter added into the weights it targets.
+    ///
+    /// # Safety
+    /// As [`Self::sharded`]: the files must not change while mapped.
+    pub unsafe fn sharded_with_fold<P: AsRef<std::path::Path>>(
+        paths: &[P],
+        dtype: DType,
+        dev: &Device,
+        make_dummy_regexes: Option<Arc<Vec<Regex>>>,
+        predicate: Arc<dyn Fn(String) -> bool + Send + Sync + 'static>,
+        fold: Option<Arc<AdapterFold>>,
+    ) -> Result<ShardedVarBuilder> {
         unsafe {
             let tensors = MmapedSafetensors::multi(paths)?;
             // mirror get()'s gating so tensor_shape never reports a tensor get() would refuse
@@ -452,6 +469,7 @@ impl ShardedSafeTensors {
                 b: tensors,
                 make_dummy_regexes,
                 predicate,
+                fold,
             };
             Ok(
                 ShardedVarBuilder::from_varbuilder(VarBuilderArgs::new_with_args(
@@ -460,6 +478,115 @@ impl ShardedSafeTensors {
                 .with_shapes(shapes),
             )
         }
+    }
+}
+
+/// A PEFT LoRA adapter a checkpoint ships beside its weights (`adapter_config.json`, `adapter_model.safetensors`),
+/// which transformers applies on load: each targeted `<module>.weight` reads as `W + scale * B A`.
+pub struct AdapterFold {
+    adapter: MmapedSafetensors,
+    // `<module>.weight` -> (lora_A, lora_B, scale)
+    targets: HashMap<String, (String, String, f64)>,
+}
+
+#[derive(serde::Deserialize)]
+struct PeftConfig {
+    r: usize,
+    lora_alpha: f64,
+    #[serde(default)]
+    use_rslora: bool,
+    #[serde(default)]
+    use_dora: bool,
+    #[serde(default)]
+    fan_in_fan_out: bool,
+    #[serde(default)]
+    modules_to_save: Option<Vec<String>>,
+    #[serde(default)]
+    rank_pattern: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    alpha_pattern: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    bias: Option<String>,
+}
+
+// PEFT's wrapper around the model's own names
+const PEFT_PREFIX: &str = "base_model.model.";
+const LORA_A: &str = ".lora_A.weight";
+const LORA_B: &str = ".lora_B.weight";
+
+impl AdapterFold {
+    /// # Safety
+    /// The adapter file must not change while mapped.
+    pub unsafe fn open(config: &std::path::Path, weights: &std::path::Path) -> Result<Self> {
+        let msg = |e: String| Error::Msg(format!("checkpoint adapter `{}`: {e}", config.display()));
+        let cfg: PeftConfig =
+            serde_json::from_str(&std::fs::read_to_string(config).map_err(|e| msg(e.to_string()))?)
+                .map_err(|e| msg(e.to_string()))?;
+        let unsupported = [
+            (cfg.use_dora, "DoRA"),
+            (cfg.fan_in_fan_out, "fan_in_fan_out"),
+            (
+                cfg.modules_to_save.as_ref().is_some_and(|m| !m.is_empty()),
+                "modules_to_save",
+            ),
+            (
+                !cfg.rank_pattern.is_empty() || !cfg.alpha_pattern.is_empty(),
+                "per-module rank or alpha",
+            ),
+            (
+                cfg.bias.as_deref().is_some_and(|bias| bias != "none"),
+                "adapter biases",
+            ),
+        ];
+        if let Some((_, what)) = unsupported.iter().find(|(set, _)| *set) {
+            return Err(msg(format!(
+                "{what} is not supported when folding an adapter into its checkpoint"
+            )));
+        }
+        let scale = if cfg.use_rslora {
+            cfg.lora_alpha / (cfg.r as f64).sqrt()
+        } else {
+            cfg.lora_alpha / cfg.r as f64
+        };
+        let adapter = unsafe { MmapedSafetensors::new(weights)? };
+        let targets = adapter
+            .tensors()
+            .into_iter()
+            .filter_map(|(name, _)| {
+                let module = name.strip_suffix(LORA_A)?;
+                let target = format!(
+                    "{}.weight",
+                    module.strip_prefix(PEFT_PREFIX).unwrap_or(module)
+                );
+                Some((target, (name.clone(), format!("{module}{LORA_B}"), scale)))
+            })
+            .collect::<HashMap<_, _>>();
+        if targets.is_empty() {
+            return Err(msg("the adapter has no LoRA weights".to_string()));
+        }
+        Ok(Self { adapter, targets })
+    }
+
+    pub fn len(&self) -> usize {
+        self.targets.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.targets.is_empty()
+    }
+
+    pub fn targets(&self) -> impl Iterator<Item = &str> {
+        self.targets.keys().map(String::as_str)
+    }
+
+    /// `scale * B A` in f32 for a targeted weight.
+    pub fn delta(&self, path: &str, dev: &Device) -> Result<Option<Tensor>> {
+        let Some((a, b, scale)) = self.targets.get(path) else {
+            return Ok(None);
+        };
+        let a = self.adapter.load(a, dev, Some(DType::F32))?;
+        let b = self.adapter.load(b, dev, Some(DType::F32))?;
+        Ok(Some((b.matmul(&a)? * *scale)?))
     }
 }
 
@@ -611,6 +738,28 @@ impl Backend for ShardedSafeTensors {
         dtype: DType,
         dev: &Device,
     ) -> Result<Tensor> {
+        if let Self::Sharded {
+            b,
+            make_dummy_regexes,
+            predicate,
+            fold: Some(fold),
+        } = self
+            && !matches_dummy_regex(make_dummy_regexes, path)
+            && predicate(path.to_string())
+            && let Some(delta) = fold.delta(path, dev)?
+        {
+            // fold in f32 at full size, then cast and shard as the plain read would
+            let base = b.load(path, dev, Some(DType::F32))?;
+            let folded = h.apply_to(&(base + delta)?.to_dtype(dtype)?)?;
+            if folded.shape() != &target_shape {
+                return Err(Error::UnexpectedShape {
+                    msg: format!("shape mismatch for {path}"),
+                    expected: target_shape,
+                    got: folded.shape().clone(),
+                });
+            }
+            return Ok(folded);
+        }
         if let Shard::Simple { world_size: 1, .. } = &h {
             // There is no sharding to be applied here so we use the default backend to speed
             // things up.
@@ -619,6 +768,7 @@ impl Backend for ShardedSafeTensors {
                     b,
                     make_dummy_regexes,
                     predicate,
+                    ..
                 } => {
                     if let Some(make_dummy_regexes) = make_dummy_regexes
                         && make_dummy_regexes.iter().any(|x| x.is_match(path))
@@ -667,6 +817,7 @@ impl Backend for ShardedSafeTensors {
                         b,
                         make_dummy_regexes,
                         predicate,
+                        ..
                     } => {
                         use safetensors::slice::IndexOp;
 
@@ -743,6 +894,7 @@ impl Backend for ShardedSafeTensors {
                         b,
                         make_dummy_regexes,
                         predicate,
+                        ..
                     } => {
                         use safetensors::slice::IndexOp;
 
@@ -815,6 +967,7 @@ impl Backend for ShardedSafeTensors {
                 b,
                 make_dummy_regexes,
                 predicate,
+                ..
             } => {
                 if let Some(make_dummy_regexes) = make_dummy_regexes
                     && make_dummy_regexes.iter().any(|x| x.is_match(name))
@@ -841,6 +994,7 @@ impl Backend for ShardedSafeTensors {
                 b,
                 make_dummy_regexes,
                 predicate,
+                ..
             } => {
                 if let Some(path) = marked_uqff_dummy_tensor(name) {
                     return matches_dummy_regex(make_dummy_regexes, path);
