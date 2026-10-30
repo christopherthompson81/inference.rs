@@ -10,6 +10,7 @@ members = [
     "crates/inference-webui",
     "crates/inference-core",
     "crates/inference-nn",
+    "crates/inference-models-decision",
     "crates/inference-models-diffusion",
     "crates/inference-models-gemma",
     "crates/inference-models-llama",
@@ -54,6 +55,7 @@ default-members = [
     "crates/inference-webui",
     "crates/inference-core",
     "crates/inference-nn",
+    "crates/inference-models-decision",
     "crates/inference-models-diffusion",
     "crates/inference-models-gemma",
     "crates/inference-models-llama",
@@ -259,6 +261,7 @@ inference-models-other = { path = "crates/inference-models-other", version = "0.
 inference-models-phi = { path = "crates/inference-models-phi", version = "0.0.26" }
 inference-models-qwen = { path = "crates/inference-models-qwen", version = "0.0.26" }
 inference-models-speech = { path = "crates/inference-models-speech", version = "0.0.26" }
+inference-models-decision = { path = "crates/inference-models-decision", version = "0.0.26" }
 inference-paged-attn = { path = "crates/inference-paged-attn", version = "0.0.26" }
 inference-metal-compile = { path = "crates/inference-metal-compile", version = "0.0.26" }
 inference-fattn = { path = "crates/inference-fattn", version = "0.0.26" }

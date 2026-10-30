@@ -147,3 +147,28 @@ shares, so this item was about where the responsibility sits.
 
 **Implication:** #701's list is done: Anthropic (#702), Responses (#703), device leases (#704), jobs (#705), media
 fetching (this run).
+
+## Run 6 - 2026-10-29 19:57
+
+**Question:** #707, the follow-up #701 left: the decision models' prompt formats (`engine_decision_labels`, ~57k IR
+lines) are model-level knowledge, so can they leave inference-api for a model crate?
+
+**Command:** `scripts/housekeeping.sh --ir --crate-time`; `cargo llvm-lines -p inference-models-decision --lib`.
+
+**Change:** a new crate, `inference-models-decision`, always built, holds what needs no engine call: the `json.dumps`
+writer (`PythonJson`), the head models' question and answer (`head`), and the GGUF-profile families' question parsing,
+prompt layouts, `systemone` rendering, clef and d1-omni piece layouts, answers, confidences and media checks
+(`labels`), with a `FormatError` inference-api maps onto its validation and internal errors. inference-api keeps the
+passes: tokenizing the pieces, the label-capture sampler, pointer and marker passes, the joint-head request, media from
+the request's attachments, dispatch. `engine_decision_labels.rs` 2064 -> 654 lines, `engine_decision.rs` 547 -> 141;
+inference-api drops its minijinja dependencies.
+
+**Finding:**
+- IR lines: inference-api 860,853 -> 800,511 (-60,342, -7.0%); inference-models-decision 79,791, more than the api lost: llvm-lines
+  counts the generic instances each crate emits, so the minijinja and serde_json code the formats instantiate counts in
+  the new crate, and what the api still instantiates for itself stays in its count.
+- Whole-crate compile: inference-api 8 -> 7 s; core 17, server-core 10, web UI 4.
+- The 17 format tests moved with the code and pass; the media collection test stays with the api.
+
+**Implication:** the new crate compiles beside core rather than after it, so it leaves the build's tail. A new decision
+family's format goes there.

@@ -1,0 +1,18 @@
+[package]
+name = "inference-models-decision"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Decision models' prompt formats and answers for inference.rs: how each family reads a question and what its scores mean"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+indexmap.workspace = true
+inference-nn.workspace = true
+inference-protocol = { workspace = true, features = ["openai"] }
+minijinja.workspace = true
+minijinja-contrib.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
