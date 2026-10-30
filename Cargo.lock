@@ -2545,6 +2545,7 @@ dependencies = [
  "inference-core",
  "inference-json",
  "inference-layout",
+ "inference-models-decision",
  "inference-models-other",
  "inference-nn",
  "inference-protocol",
@@ -2553,8 +2554,6 @@ dependencies = [
  "inference-selection",
  "inference-tensor",
  "itertools 0.14.0",
- "minijinja",
- "minijinja-contrib",
  "rand 0.9.4",
  "rand_distr",
  "serde",
@@ -2959,6 +2958,18 @@ version = "0.0.26"
 dependencies = [
  "candle-metal-kernels",
  "objc2-metal",
+]
+
+[[package]]
+name = "inference-models-decision"
+version = "0.0.26"
+dependencies = [
+ "indexmap",
+ "inference-nn",
+ "inference-protocol",
+ "minijinja",
+ "minijinja-contrib",
+ "serde_json",
 ]
 
 [[package]]

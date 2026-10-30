@@ -4,30 +4,20 @@
 use anyhow::Error as AnyhowError;
 use futures::future::join_all;
 use indexmap::IndexMap;
-use inference_core::decision::{DecisionOption, DecisionQuestion, QuestionKind};
 use inference_core::{InferenceRs, ModelCategory, RequestMessage};
-use serde_json::Value;
+use inference_models_decision::{FormatError, as_text, head};
 
 use crate::{
     api_error::{ApiError, ApiErrorKind},
     dispatch::response_model_id,
     engine_decision_labels,
     engine_embeddings::{EmbeddingError, EmbeddingWithUsage, fetch, saturating_to_u32},
-    openai::{
-        DecisionAnswer, DecisionQuestionType, DecisionRequest, DecisionRequestQuestion,
-        DecisionResponse, DecisionUsage,
-    },
+    openai::{DecisionAnswer, DecisionRequest, DecisionResponse, DecisionUsage},
     types::SharedInferenceRsState,
     util::validate_model_name,
 };
 
-// the option counts llama.cpp serves these models with
-const MAX_CHOICE_OPTIONS: usize = 255;
-const SCORE_LEVELS: std::ops::RangeInclusive<usize> = 2..=10;
-const NOUL_KEYS: [&str; 2] = ["false", "true"];
 const NO_DECISIONS: &str = "this model answers no decisions: it is neither a decision model nor a GGUF with a decision profile";
-// laya's floor on probabilities in the entropy
-const ENTROPY_FLOOR: f64 = 1e-12;
 
 pub(crate) fn invalid(message: impl Into<String>, param: String) -> EmbeddingError {
     EmbeddingError::Validation(AnyhowError::new(ApiError::new(
@@ -38,376 +28,12 @@ pub(crate) fn invalid(message: impl Into<String>, param: String) -> EmbeddingErr
     )))
 }
 
-/// `json.dumps`'s layout: an indent (one line without), the separators between items and after keys, ASCII escaping,
-/// and whether floats take Python's `repr`.
-pub(crate) struct PythonJson<'a> {
-    pub indent: Option<usize>,
-    pub item_sep: &'a str,
-    pub key_sep: &'a str,
-    pub ensure_ascii: bool,
-    pub python_floats: bool,
-}
-
-impl PythonJson<'_> {
-    /// `json.dumps(value, ensure_ascii=...)`'s defaults, with serde's float text.
-    pub(crate) const fn default_layout(ensure_ascii: bool) -> PythonJson<'static> {
-        PythonJson {
-            indent: None,
-            item_sep: ", ",
-            key_sep: ": ",
-            ensure_ascii,
-            python_floats: false,
+impl From<FormatError> for EmbeddingError {
+    fn from(error: FormatError) -> Self {
+        match error {
+            FormatError::Invalid { message, param } => invalid(message, param),
+            FormatError::Layout => EmbeddingError::Internal(error.into()),
         }
-    }
-
-    pub(crate) fn dumps(&self, value: &Value) -> String {
-        let mut out = String::new();
-        self.write(value, 0, &mut out);
-        out
-    }
-
-    fn newline(&self, level: usize, out: &mut String) {
-        if let Some(indent) = self.indent {
-            out.push('\n');
-            out.push_str(&" ".repeat(indent * level));
-        }
-    }
-
-    fn write(&self, value: &Value, level: usize, out: &mut String) {
-        match value {
-            Value::String(text) => python_string(text, self.ensure_ascii, out),
-            Value::Number(n) if self.python_floats && n.is_f64() => {
-                python_float(n.as_f64().unwrap_or_default(), out);
-            }
-            Value::Array(items) if !items.is_empty() => {
-                out.push('[');
-                for (i, item) in items.iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(self.item_sep);
-                    }
-                    self.newline(level + 1, out);
-                    self.write(item, level + 1, out);
-                }
-                self.newline(level, out);
-                out.push(']');
-            }
-            Value::Object(map) if !map.is_empty() => {
-                out.push('{');
-                for (i, (key, item)) in map.iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(self.item_sep);
-                    }
-                    self.newline(level + 1, out);
-                    python_string(key, self.ensure_ascii, out);
-                    out.push_str(self.key_sep);
-                    self.write(item, level + 1, out);
-                }
-                self.newline(level, out);
-                out.push('}');
-            }
-            Value::Array(_) => out.push_str("[]"),
-            Value::Object(_) => out.push_str("{}"),
-            other => out.push_str(&other.to_string()),
-        }
-    }
-}
-
-/// JSON as Python's `json.dumps` writes it, `", "` and `": "` between items, which the models read their inputs as.
-pub(crate) fn python_json(value: &Value, ensure_ascii: bool, out: &mut String) {
-    PythonJson::default_layout(ensure_ascii).write(value, 0, out);
-}
-
-/// Python's `repr` of a float: the shortest digits that read back, in exponent form below 1e-4 and from 1e16.
-fn python_float(value: f64, out: &mut String) {
-    let sci = format!("{value:e}");
-    let (mantissa, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
-    let exp = exp.parse::<i32>().unwrap_or_default();
-    let sign = if mantissa.starts_with('-') { "-" } else { "" };
-    let digits = mantissa
-        .chars()
-        .filter(char::is_ascii_digit)
-        .collect::<String>();
-    let n = digits.len() as i32;
-    out.push_str(sign);
-    if !(-4..16).contains(&exp) {
-        out.push_str(&digits[..1]);
-        if n > 1 {
-            out.push('.');
-            out.push_str(&digits[1..]);
-        }
-        out.push_str(&format!(
-            "e{}{:02}",
-            if exp < 0 { '-' } else { '+' },
-            exp.abs()
-        ));
-    } else if exp >= n - 1 {
-        out.push_str(&digits);
-        out.push_str(&"0".repeat((exp - (n - 1)) as usize));
-        out.push_str(".0");
-    } else if exp >= 0 {
-        let point = (exp + 1) as usize;
-        out.push_str(&digits[..point]);
-        out.push('.');
-        out.push_str(&digits[point..]);
-    } else {
-        out.push_str("0.");
-        out.push_str(&"0".repeat((-exp - 1) as usize));
-        out.push_str(&digits);
-    }
-}
-
-fn python_string(text: &str, ensure_ascii: bool, out: &mut String) {
-    out.push('"');
-    for c in text.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{8}' => out.push_str("\\b"),
-            '\u{c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 || (ensure_ascii && (!c.is_ascii() || c == '\u{7f}')) => {
-                let mut units = [0u16; 2];
-                for unit in c.encode_utf16(&mut units) {
-                    out.push_str(&format!("\\u{unit:04x}"));
-                }
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-}
-
-/// Text as the model reads it: a string as it is, any other value as `json.dumps` writes it.
-fn as_text(value: &Value, ensure_ascii: bool) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        other => {
-            let mut out = String::new();
-            python_json(other, ensure_ascii, &mut out);
-            out
-        }
-    }
-}
-
-fn description(value: &Value, param: &str) -> Result<Option<String>, EmbeddingError> {
-    match value {
-        Value::Null => Ok(None),
-        Value::String(text) => Ok(Some(text.clone())),
-        _ => Err(invalid(
-            "a criterion's description must be text or null",
-            param.to_string(),
-        )),
-    }
-}
-
-/// The question's type, which a model without a default needs.
-pub(crate) fn required_kind(
-    id: &str,
-    kind: Option<DecisionQuestionType>,
-) -> Result<DecisionQuestionType, EmbeddingError> {
-    kind.ok_or_else(|| {
-        invalid(
-            "`type` must be one of: choice, score, noul",
-            format!("questions.{id}.type"),
-        )
-    })
-}
-
-/// The question's instructions, which a model without a default question needs.
-pub(crate) fn required_instructions(id: &str, instructions: &Value) -> Result<(), EmbeddingError> {
-    match instructions {
-        Value::Null => Err(invalid(
-            "`instructions` must be provided",
-            format!("questions.{id}.instructions"),
-        )),
-        _ => Ok(()),
-    }
-}
-
-pub(crate) fn kind_of(kind: DecisionQuestionType) -> QuestionKind {
-    match kind {
-        DecisionQuestionType::Choice => QuestionKind::Choice,
-        DecisionQuestionType::Score => QuestionKind::Score,
-        DecisionQuestionType::Noul => QuestionKind::Noul,
-    }
-}
-
-/// The question as the model reads it, with the keys its answer reports.
-fn question(
-    id: &str,
-    question: &DecisionRequestQuestion,
-) -> Result<DecisionQuestion, EmbeddingError> {
-    let param = format!("questions.{id}.criteria");
-    let question_kind = required_kind(id, question.kind)?;
-    required_instructions(id, &question.instructions)?;
-    let options = match (question_kind, &question.criteria) {
-        (DecisionQuestionType::Choice, Some(Value::Object(criteria))) => criteria
-            .iter()
-            .map(|(key, value)| {
-                Ok(DecisionOption {
-                    key: key.clone(),
-                    description: description(value, &param)?,
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        (DecisionQuestionType::Choice, Some(Value::Array(keys))) => keys
-            .iter()
-            .map(|key| match key {
-                Value::String(key) => Ok(DecisionOption {
-                    key: key.clone(),
-                    description: None,
-                }),
-                _ => Err(invalid("choice options must be text", param.clone())),
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        (DecisionQuestionType::Choice, _) => {
-            return Err(invalid(
-                "a choice question's criteria map each option to its description",
-                param,
-            ));
-        }
-        (DecisionQuestionType::Score, Some(Value::Array(levels))) => levels
-            .iter()
-            .enumerate()
-            .map(|(level, value)| {
-                Ok(DecisionOption {
-                    key: level.to_string(),
-                    description: Some(description(value, &param)?.unwrap_or_default()),
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        (DecisionQuestionType::Score, _) => {
-            return Err(invalid(
-                "a score question's criteria list its levels, lowest first",
-                param,
-            ));
-        }
-        (DecisionQuestionType::Noul, None) => Vec::new(),
-        (DecisionQuestionType::Noul, Some(Value::Object(criteria))) => {
-            if let Some(key) = criteria
-                .keys()
-                .find(|key| !NOUL_KEYS.contains(&key.as_str()))
-            {
-                return Err(invalid(
-                    format!("a noul question's criteria describe `true` and `false`, not `{key}`"),
-                    param,
-                ));
-            }
-            NOUL_KEYS
-                .iter()
-                .filter_map(|key| criteria.get(*key).map(|value| (key, value)))
-                .map(|(key, value)| {
-                    Ok(DecisionOption {
-                        key: key.to_string(),
-                        description: description(value, &param)?,
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        }
-        (DecisionQuestionType::Noul, Some(_)) => {
-            return Err(invalid(
-                "a noul question's criteria describe `true` and `false`",
-                param,
-            ));
-        }
-    };
-    let kind = kind_of(question_kind);
-    match kind {
-        QuestionKind::Choice if !(2..=MAX_CHOICE_OPTIONS).contains(&options.len()) => {
-            return Err(invalid(
-                format!("a choice question has 2 to {MAX_CHOICE_OPTIONS} options"),
-                param,
-            ));
-        }
-        QuestionKind::Score if !SCORE_LEVELS.contains(&options.len()) => {
-            return Err(invalid(
-                format!(
-                    "a score question has {} to {} levels",
-                    SCORE_LEVELS.start(),
-                    SCORE_LEVELS.end()
-                ),
-                param,
-            ));
-        }
-        _ => {}
-    }
-    Ok(DecisionQuestion {
-        kind,
-        instructions: as_text(&question.instructions, true),
-        options,
-    })
-}
-
-/// The softmax of a question's logits, and one minus their normalized entropy.
-fn probabilities(logits: &[f32]) -> (Vec<f64>, f64) {
-    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
-    let exp = logits
-        .iter()
-        .map(|&z| (z as f64 - max).exp())
-        .collect::<Vec<_>>();
-    let total = exp.iter().sum::<f64>();
-    let p = exp.iter().map(|e| e / total).collect::<Vec<_>>();
-    let k = p.len();
-    let confidence = if k < 2 {
-        1.0
-    } else {
-        let entropy = -p
-            .iter()
-            .map(|&p| p * p.clamp(ENTROPY_FLOOR, 1.0).ln())
-            .sum::<f64>();
-        1.0 - entropy / (k as f64).ln()
-    };
-    (p, confidence)
-}
-
-fn answer(question: &DecisionQuestion, logits: &[f32]) -> DecisionAnswer {
-    let (p, confidence) = probabilities(logits);
-    match question.kind {
-        QuestionKind::Choice => {
-            let best = first_max(&p);
-            DecisionAnswer::Choice {
-                choice: question.options[best].key.clone(),
-                probabilities: question
-                    .options
-                    .iter()
-                    .map(|option| option.key.clone())
-                    .zip(p)
-                    .collect(),
-                confidence,
-            }
-        }
-        QuestionKind::Score => DecisionAnswer::Score {
-            score: p.iter().enumerate().map(|(i, p)| i as f64 * p).sum(),
-            legend: question
-                .options
-                .iter()
-                .map(|option| {
-                    (
-                        option.key.clone(),
-                        Value::String(option.description.clone().unwrap_or_default()),
-                    )
-                })
-                .collect(),
-            probabilities: (0..p.len()).map(|i| i.to_string()).zip(p).collect(),
-            confidence,
-        },
-        // the model reads noul's options as [false, true]
-        QuestionKind::Noul => DecisionAnswer::Noul { noul: p[1] },
-    }
-}
-
-/// The index of the largest probability, the first among equals as numpy's and C++'s argmax take it.
-pub(crate) fn first_max(p: &[f64]) -> usize {
-    (1..p.len()).fold(0, |best, i| if p[i] > p[best] { i } else { best })
-}
-
-/// The number of options the model scores for a question.
-fn n_options(question: &DecisionQuestion) -> usize {
-    match question.kind {
-        QuestionKind::Noul => NOUL_KEYS.len(),
-        _ => question.options.len(),
     }
 }
 
@@ -457,7 +83,7 @@ pub(crate) async fn decide(
     let questions = request
         .questions
         .iter()
-        .map(|(id, q)| question(id, q).map(|question| (id.clone(), question)))
+        .map(|(id, q)| head::question(id, q).map(|question| (id.clone(), question)))
         .collect::<Result<Vec<_>, _>>()?;
     let state_text = as_text(&request.state, false);
     let futures = questions.iter().map(|(_, question)| {
@@ -481,14 +107,14 @@ pub(crate) async fn decide(
             InferenceRs::maybe_log_error(state.clone(), e.as_ref());
             EmbeddingError::Internal(e)
         })?;
-        let Some(logits) = embedding.get(..n_options(question)) else {
+        let Some(logits) = embedding.get(..head::n_options(question)) else {
             return Err(EmbeddingError::Internal(anyhow::anyhow!(
                 "the model scored {} options of question `{id}`, which has {}",
                 embedding.len(),
-                n_options(question)
+                head::n_options(question)
             )));
         };
-        answers.insert(id.clone(), answer(question, logits));
+        answers.insert(id.clone(), head::answer(question, logits));
         input_tokens = input_tokens.saturating_add(prompt_tokens);
     }
 
@@ -512,36 +138,4 @@ fn respond(
     };
     InferenceRs::maybe_log_response(state.clone(), &response);
     response
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn non_text_values_read_as_python_writes_them() {
-        let value = serde_json::json!({"plan": "pro", "n": 2, "tags": ["a", "é"], "ok": null});
-        assert_eq!(
-            as_text(&value, false),
-            r#"{"plan": "pro", "n": 2, "tags": ["a", "é"], "ok": null}"#
-        );
-        assert_eq!(as_text(&serde_json::json!(["é"]), true), "[\"\\u00e9\"]");
-        assert_eq!(as_text(&serde_json::json!("as is"), true), "as is");
-    }
-
-    #[test]
-    fn noul_reads_its_second_option_and_confidence_falls_with_entropy() {
-        let noul = DecisionQuestion {
-            kind: QuestionKind::Noul,
-            instructions: String::new(),
-            options: Vec::new(),
-        };
-        let DecisionAnswer::Noul { noul } = answer(&noul, &[0.0, 2.0f32.ln()]) else {
-            unreachable!()
-        };
-        assert!((noul - 2.0 / 3.0).abs() < 1e-9);
-        let (_, even) = probabilities(&[1.0, 1.0, 1.0]);
-        let (_, sure) = probabilities(&[30.0, 0.0, 0.0]);
-        assert!(even.abs() < 1e-9 && (sure - 1.0).abs() < 1e-9);
-    }
 }
