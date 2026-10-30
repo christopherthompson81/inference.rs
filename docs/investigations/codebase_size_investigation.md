@@ -3034,3 +3034,29 @@ Finding:
 
 Implication: done, with a bug fix. Next per Run 95: Qwen2-VL / Qwen2.5-VL vision, then the qwen2vl / qwen3_vl inputs
 processors.
+
+## Run 99 - 2026-10-29 21:32
+
+Question: Run 95's fourth item: the Qwen2-VL and Qwen2.5-VL vision towers share ~260 lines (8 spans); which parts are
+the same model, and which differ?
+
+Change: a new `qwen_vl_vision` module holds the tower both build: patch embedding, rotary angles over the merge
+windows, attention, block, patch merger, the per-item block-diagonal mask (Qwen2.5-VL built it twice, for its full and
+window layers) and the residual-tensor walk. What differs is data: `NormKind` (LayerNorm or RMSNorm), `MlpKind` (plain
+`fc1`/`fc2` or gated) and Qwen2.5-VL's window index, which stays in its model. Qwen2-VL now lays its rotary angles out
+as Qwen2.5-VL does (`(seq, head_dim)`, the cos and sin broadcast over heads), the same values.
+
+Commands: `cargo nextest run -p inference -E 'test(/^qwen_vl_tiny::/)'`; `cargo nextest run -p inference-models-qwen`;
+`cargo llvm-lines -p inference-models-qwen --lib`; `scripts/dup_scan.py`.
+
+Finding:
+- First run: every pinned Qwen2-VL and Qwen2.5-VL decode moved, single images included. Not numerics: the tiny
+  checkpoints (`record_checkpoint`) draw each tensor's values from one stream in the order the loader asks for them,
+  and the shared code loaded the block's MLP before its norms and the merger's norm before its MLP. With the old load
+  order restored the 14 Qwen-VL integration decodes match their pins exactly, so the towers compute what they did.
+  The module notes the constraint.
+- models-qwen IR 653,885 -> 647,009 (-6,876); duplication 28,125 -> 27,752 (-373); diff -278 lines.
+
+Implication: done. The load-order coupling is worth remembering for later sharing: a refactor that reorders loads
+moves these pins without changing the model, while `record_checkpoint_seeded_by_name` fixtures do not have that
+problem. Next per Run 95: the qwen2vl / qwen3_vl inputs processors.
