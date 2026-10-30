@@ -21,9 +21,9 @@ pub struct Emission {
 
 // one layer of PyTorch's LSTM (gates i, f, g, o), stepped a token at a time
 struct LstmLayer {
-    w_ih_t: Tensor,
-    w_hh_t: Tensor,
-    bias: Tensor,
+    // `[w_ih; w_hh; b_ih + b_hh]` transposed, so one matmul of `[x, h, 1]` gives the gates
+    weights: Tensor,
+    one: Tensor,
 }
 
 impl LstmLayer {
@@ -32,21 +32,29 @@ impl LstmLayer {
         let get = |name: &str, shape: (usize, usize)| vb.get(shape, &format!("{name}_l{layer}"));
         let bias = (vb.get(gates, &format!("bias_ih_l{layer}"))?
             + vb.get(gates, &format!("bias_hh_l{layer}"))?)?;
-        Ok(Self {
-            w_ih_t: get("weight_ih", (gates, hidden))?.t()?.contiguous()?,
-            w_hh_t: get("weight_hh", (gates, hidden))?.t()?.contiguous()?,
-            bias,
-        })
+        let weights = Tensor::cat(
+            &[
+                get("weight_ih", (gates, hidden))?.t()?,
+                get("weight_hh", (gates, hidden))?.t()?,
+                bias.unsqueeze(0)?,
+            ],
+            0,
+        )?
+        .contiguous()?;
+        let one = Tensor::ones((1, 1), weights.dtype(), weights.device())?;
+        Ok(Self { weights, one })
     }
 
     /// `x`, `h` and `c` are `(1, hidden)`; returns the new `(h, c)`.
     fn step(&self, x: &Tensor, h: &Tensor, c: &Tensor) -> Result<(Tensor, Tensor)> {
         let hidden = h.dim(1)?;
-        let g = (x.matmul(&self.w_ih_t)? + h.matmul(&self.w_hh_t)?)?.broadcast_add(&self.bias)?;
-        let i = ops::sigmoid(&g.narrow(1, 0, hidden)?)?;
-        let f = ops::sigmoid(&g.narrow(1, hidden, hidden)?)?;
+        let ones = self.one.broadcast_as((h.dim(0)?, 1))?;
+        let g = Tensor::cat(&[x, h, &ones], 1)?.matmul(&self.weights)?;
+        let gates = ops::sigmoid(&g)?;
+        let i = gates.narrow(1, 0, hidden)?;
+        let f = gates.narrow(1, hidden, hidden)?;
         let cell = g.narrow(1, 2 * hidden, hidden)?.tanh()?;
-        let o = ops::sigmoid(&g.narrow(1, 3 * hidden, hidden)?)?;
+        let o = gates.narrow(1, 3 * hidden, hidden)?;
         let c = ((f * c)? + (i * cell)?)?;
         let h = (o * c.tanh()?)?;
         Ok((h, c))
@@ -97,8 +105,13 @@ impl Predictor {
 
     // each row of `state` fed its row's token
     fn advance(&self, tokens: &[u32], state: PredictorState) -> Result<PredictorState> {
-        let ids = Tensor::new(tokens, state.output.device())?;
-        let mut x = self.embedding.forward(&ids)?;
+        let mut x = match tokens {
+            // a row view rather than an upload of the id, once per greedy token
+            [token] => self.embedding.embeddings().narrow(0, *token as usize, 1)?,
+            _ => self
+                .embedding
+                .forward(&Tensor::new(tokens, state.output.device())?)?,
+        };
         let (mut h, mut c) = (Vec::new(), Vec::new());
         for (layer, (h0, c0)) in self.layers.iter().zip(state.h.iter().zip(&state.c)) {
             let (h1, c1) = layer.step(&x, h0, c0)?;
