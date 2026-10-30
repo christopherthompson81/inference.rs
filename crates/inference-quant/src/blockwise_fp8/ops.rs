@@ -1963,7 +1963,15 @@ mod tests {
     }
 
     #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
-    #[test]
+    inference_tensor::gpu_cases!(
+        fp8_kernel_cases,
+        [
+            fused_add_rms_norm_quantized_aligned_store_normalized_matches_reference,
+            fused_add_rms_norm_quantized_matches_bf16_reference
+        ]
+    );
+
+    #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
     fn fused_add_rms_norm_quantized_matches_bf16_reference() -> Result<()> {
         use crate::{ActivationQuantizationScheme, ActivationScaleLayout};
 
@@ -2133,7 +2141,6 @@ mod tests {
     }
 
     #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
-    #[test]
     fn fused_add_rms_norm_quantized_aligned_store_normalized_matches_reference() -> Result<()> {
         use crate::{ActivationQuantizationScheme, ActivationScaleLayout};
 
@@ -2355,7 +2362,16 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
+    inference_tensor::gpu_cases!(
+        cuda_cases,
+        [
+            test_fp8_blockwise_dequant_cuda,
+            test_fp8_blockwise_dequant_cuda_bf16,
+            test_fp8_blockwise_quant_dequant_roundtrip
+        ]
+    );
+
+    #[cfg(feature = "cuda")]
     fn test_fp8_blockwise_dequant_cuda() -> Result<()> {
         let truth = {
             let dev = &Device::Cpu;
@@ -2453,7 +2469,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn test_fp8_blockwise_dequant_cuda_bf16() -> Result<()> {
         let truth = {
             let dev = &Device::Cpu;
@@ -2534,7 +2549,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn test_fp8_blockwise_quant_dequant_roundtrip() -> Result<()> {
         let dev = &Device::new_cuda(0)?;
 

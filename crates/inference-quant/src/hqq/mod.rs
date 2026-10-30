@@ -1441,17 +1441,26 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    inference_tensor::gpu_cases!(
+        cuda_cases,
+        [
+            hqq4_embedding_matches_dequantized_gather,
+            hqq4_uqff_embedding_matches_dequantized_gather,
+            hqq8_embedding_matches_dequantized_gather,
+            hqq_apply_isq_supports_capture_and_cross_format_requantization,
+            hqq_embedding_accepts_empty_ids,
+            hqq_embedding_chunks_preserve_shape_and_values
+        ]
+    );
+
     fn hqq4_embedding_matches_dequantized_gather() -> Result<()> {
         assert_embedding_matches_dequantized_gather(&test_layer(HqqBits::Four)?)
     }
 
-    #[test]
     fn hqq8_embedding_matches_dequantized_gather() -> Result<()> {
         assert_embedding_matches_dequantized_gather(&test_layer(HqqBits::Eight)?)
     }
 
-    #[test]
     fn hqq_apply_isq_supports_capture_and_cross_format_requantization() -> Result<()> {
         let device = test_device()?;
         let source = Arc::new(
@@ -1493,7 +1502,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn hqq_embedding_chunks_preserve_shape_and_values() -> Result<()> {
         const TEST_CHUNK_ELEMENTS: usize = 45;
         let device = test_device()?;
@@ -1527,7 +1535,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn hqq_embedding_accepts_empty_ids() -> Result<()> {
         let device = test_device()?;
         let layer = test_layer_on_device(HqqBits::Four, &device)?;
@@ -1546,7 +1553,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn hqq4_uqff_embedding_matches_dequantized_gather() -> Result<()> {
         let device = test_device()?;
         let layer = test_layer_on_device(HqqBits::Four, &device)?;

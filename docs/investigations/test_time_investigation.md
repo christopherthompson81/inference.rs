@@ -516,3 +516,25 @@ Finding:
 
 Implication: not this branch; an existing exit-time race in the jobs tests, the class job_scheduler Run 6 fixed for
 `unload_model` (an engine thread still tearing down while the process exits), apparently still open on a job path.
+
+## Run 21 - 2026-10-30 12:23
+
+Question: after Runs 19-20, which GPU test processes still pay a real context, and what does merging them save?
+
+Commands: Run 16's traced and serial logs, minus the modules converted since; the families left merged into
+`gpu_cases!` with the merge script (each case's `#[test]` dropped, one invocation per `cfg` group); the merged tests on
+CUDA; the CUDA suite alone twice.
+
+Finding:
+- 169 processes still paid a context (solo >= 0.15 s, ~20 s of queue). The server-core route tests and the C ABI's
+  engine tests the plan named are the cheap kind (`chat_route` 18 in 1.0 s solo, `keyed` 10 in 0.7 s,
+  `engine_abi` 2 of 21 over 0.15 s), so the target became the kernel families: `routed_lora_cuda_tests` 11,
+  `fast_mmq` 6, `hqq` 6, core `cuda_graph` 5, `attention` 5, `blockwise_fp8::ops` 5 (two `cfg` groups),
+  `qsa` 4, `conv` 4, `cutlass_moe_tests` 4, `indexed_moe_lora_cuda_tests` 4, `layout::layers` 3,
+  `gguf` 3, `unquantized` 3: 59 cases.
+- Kept separate: tests that measure process-global state (the allocator-baseline tests in core and nn, the graph pool
+  threshold and retention tests) and `cuda::preload` (module loading itself); `graph_capture` had one left, not
+  worth a merge.
+- The merged tests: 27 pass, 236 cases ok. CUDA suite alone: 3177 -> 3128 tests, 44.5 -> 36.5 / 36.2 s.
+
+Implication: since Run 15 (75.9 s), 36 s. The rest of the queue is spread thin (families of 1-3).

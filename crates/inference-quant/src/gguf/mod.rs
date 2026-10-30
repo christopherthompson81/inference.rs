@@ -939,7 +939,16 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
+    inference_tensor::gpu_cases!(
+        cuda_cases,
+        [
+            candle_qmatmul_on_cuda_matches_the_dequantized_matmul,
+            capture_to_cuda_preserves_packed_weight,
+            qmatmul_forward_matches_dequantized_matmul_on_cuda
+        ]
+    );
+
+    #[cfg(feature = "cuda")]
     fn qmatmul_forward_matches_dequantized_matmul_on_cuda() -> Result<()> {
         // a decode batch (mmvq) and a prompt batch (mmq)
         const BATCHES: [usize; 2] = [3, 40];
@@ -1029,7 +1038,6 @@ mod tests {
 
     // candle's own QMatMul on CUDA dequantizes, for any caller that skips qmatmul_forward
     #[cfg(feature = "cuda")]
-    #[test]
     fn candle_qmatmul_on_cuda_matches_the_dequantized_matmul() -> Result<()> {
         // a decode batch and a prompt batch, which candle once sent to different kernels
         const BATCHES: [usize; 2] = [3, 40];
@@ -1186,7 +1194,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn capture_to_cuda_preserves_packed_weight() -> Result<()> {
         assert_cross_device_capture_preserves_packed_weight(Device::new_cuda(0)?)
     }

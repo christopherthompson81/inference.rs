@@ -844,42 +844,51 @@ fn check_rank_boundary_case(
     assert_close(&down, &expected_down, 0.3)
 }
 
-#[test]
+inference_tensor::gpu_cases!(
+    cuda_cases,
+    [
+        direct_bf16_interleaved_gate_up_matches_reference,
+        direct_bf16_matches_reference_with_mixed_adapters,
+        direct_f16_matches_reference_with_mixed_adapters,
+        grouped_bf16_interleaved_gate_up_matches_reference,
+        grouped_bf16_matches_reference_with_mixed_adapters,
+        grouped_f16_matches_reference_with_mixed_adapters,
+        grouped_f32_matches_reference_with_mixed_adapters,
+        grouped_owned_api_accumulates_in_place_while_safe_api_preserves_aliases,
+        grouped_wmma_padded_rank_stride_matches_reference,
+        persistent_arena_reuses_allocations_and_reconfigures_mapping,
+        rank_padding_tails_and_dispatch_boundaries_match_reference
+    ]
+);
+
 fn direct_f16_matches_reference_with_mixed_adapters() -> Result<()> {
     check_case(4, DType::F16, 0.04)
 }
 
-#[test]
 fn direct_bf16_matches_reference_with_mixed_adapters() -> Result<()> {
     check_case(4, DType::BF16, 0.12)
 }
 
-#[test]
 fn grouped_f16_matches_reference_with_mixed_adapters() -> Result<()> {
     check_case(24, DType::F16, 0.08)
 }
 
-#[test]
 fn grouped_bf16_matches_reference_with_mixed_adapters() -> Result<()> {
     check_case(24, DType::BF16, 0.3)
 }
 
-#[test]
 fn grouped_f32_matches_reference_with_mixed_adapters() -> Result<()> {
     check_case(24, DType::F32, 2e-4)
 }
 
-#[test]
 fn direct_bf16_interleaved_gate_up_matches_reference() -> Result<()> {
     check_case_with_order(4, DType::BF16, 0.12, LoraGateUpOrder::Interleaved)
 }
 
-#[test]
 fn grouped_bf16_interleaved_gate_up_matches_reference() -> Result<()> {
     check_case_with_order(24, DType::BF16, 0.3, LoraGateUpOrder::Interleaved)
 }
 
-#[test]
 fn persistent_arena_reuses_allocations_and_reconfigures_mapping() -> Result<()> {
     let device = Device::new_cuda(0)?;
     let registry = LoraLayerRegistry::new();
@@ -1001,7 +1010,6 @@ fn persistent_arena_reuses_allocations_and_reconfigures_mapping() -> Result<()> 
     Ok(())
 }
 
-#[test]
 fn rank_padding_tails_and_dispatch_boundaries_match_reference() -> Result<()> {
     for (num_tokens, rank) in [(8, 64), (9, 64), (24, 17), (24, 128), (24, 129)] {
         check_rank_boundary_case(num_tokens, TOP_K, 3, rank, DType::F16)?;
@@ -1014,7 +1022,6 @@ fn rank_padding_tails_and_dispatch_boundaries_match_reference() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn grouped_wmma_padded_rank_stride_matches_reference() -> Result<()> {
     check_grouped_wmma_padded::<f16>(96, 112)?;
     check_grouped_wmma_padded::<bf16>(96, 112)?;
@@ -1022,7 +1029,6 @@ fn grouped_wmma_padded_rank_stride_matches_reference() -> Result<()> {
     check_grouped_wmma_padded::<bf16>(128, 144)
 }
 
-#[test]
 fn grouped_owned_api_accumulates_in_place_while_safe_api_preserves_aliases() -> Result<()> {
     let device = Device::new_cuda(0)?;
     let num_tokens = 24;

@@ -126,22 +126,28 @@ fn check_route_outputs(
     assert_close(&reduced, &reduced_ref, 0.01)
 }
 
-#[test]
+inference_tensor::gpu_cases!(
+    cuda_cases,
+    [
+        bf16_q4k_route_outputs,
+        f16_q4_0_route_outputs_with_odd_block_counts,
+        f32_q8_0_route_outputs,
+        invalid_expert_routes_are_zeroed
+    ]
+);
+
 fn f16_q4_0_route_outputs_with_odd_block_counts() -> Result<()> {
     check_route_outputs(DType::F16, GgmlDType::Q4_0, 288, 544, 0.08)
 }
 
-#[test]
 fn bf16_q4k_route_outputs() -> Result<()> {
     check_route_outputs(DType::BF16, GgmlDType::Q4K, 256, 512, 0.12)
 }
 
-#[test]
 fn f32_q8_0_route_outputs() -> Result<()> {
     check_route_outputs(DType::F32, GgmlDType::Q8_0, 256, 512, 0.05)
 }
 
-#[test]
 fn invalid_expert_routes_are_zeroed() -> Result<()> {
     const NUM_EXPERTS: usize = 2;
     const HIDDEN: usize = 64;

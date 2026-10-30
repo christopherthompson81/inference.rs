@@ -695,9 +695,18 @@ mod tests {
         )))
     }
 
+    #[cfg(feature = "cuda")]
+    inference_tensor::gpu_cases!(
+        cuda_cases,
+        [
+            forward_cuda_bf16_preserves_batched_shapes,
+            forward_cuda_flattens_large_non_contiguous_batch,
+            imatrix_stats_count_gemv_batches
+        ]
+    );
+
     // a decode-sized batch takes the GEMV on CUDA; its activations still count toward the imatrix
     #[cfg(feature = "cuda")]
-    #[test]
     fn imatrix_stats_count_gemv_batches() -> Result<()> {
         const OUT: usize = 64;
         const IN: usize = 128;
@@ -830,7 +839,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn forward_cuda_flattens_large_non_contiguous_batch() -> Result<()> {
         let device = Device::new_cuda(0)?;
         let input = Tensor::randn(0., 1., (9, 4, 3), &device)?
@@ -855,7 +863,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn forward_cuda_bf16_preserves_batched_shapes() -> Result<()> {
         const TOLERANCE: f32 = 0.05;
 

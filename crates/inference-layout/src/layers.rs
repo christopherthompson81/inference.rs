@@ -498,7 +498,15 @@ mod tests {
         )
     }
 
-    #[test]
+    inference_tensor::gpu_cases!(
+        cuda_cases,
+        [
+            dense_dispatch_matches_conv,
+            depthwise_dispatch_matches_grouped_conv,
+            pointwise_dispatch_matches_conv
+        ]
+    );
+
     fn dense_dispatch_matches_conv() -> Result<()> {
         let cpu = Device::Cpu;
         // (out, in): 8 outputs take the fused AVX2 kernel; 3 fall back to implicit GEMM (in >= 16) or im2col (in < 16)
@@ -524,7 +532,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn pointwise_dispatch_matches_conv() -> Result<()> {
         let cpu = Device::Cpu;
         for o in [8, 3] {
@@ -543,7 +550,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn depthwise_dispatch_matches_grouped_conv() -> Result<()> {
         let cpu = Device::Cpu;
         let c = 6;

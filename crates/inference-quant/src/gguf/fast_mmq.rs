@@ -1622,7 +1622,18 @@ mod tests {
         Ok(())
     }
 
-    #[test]
+    inference_tensor::gpu_cases!(
+        cuda_cases,
+        [
+            dense_glu_down_covers_scale_layouts,
+            dense_q4k_glu_down_matches_materialized_path,
+            dense_q4k_shared_lhs_matches_independent_projections,
+            exact_q8_0_matvec_matches_the_dequantized_weight,
+            mmvq_q4k_rank4_unequal_qkv_matches_independent,
+            short_row_mmvq_matches_mmq
+        ]
+    );
+
     fn dense_q4k_shared_lhs_matches_independent_projections() -> Result<()> {
         let cuda = Device::new_cuda(0)?;
         let weights = [11, 29, 47]
@@ -1651,7 +1662,6 @@ mod tests {
 
     // One token over short rows takes MMVQ's short-row kernel: Qwen3.8-Flash-Next's hyper-connection up projection
     // (320 wide), a row count its blocks of four do not divide, and a k-quant
-    #[test]
     fn short_row_mmvq_matches_mmq() -> Result<()> {
         let cuda = Device::new_cuda(0)?;
         for (dtype, rows, cols) in [
@@ -1673,7 +1683,6 @@ mod tests {
 
     // Q8_0 against unquantized activations equals the dequantized weight times them in F32, at the hyper-connection
     // reads' shapes (10240 x 320 and 320 x 10240), a row count four does not divide, and 1, 3 and 8 rows
-    #[test]
     fn exact_q8_0_matvec_matches_the_dequantized_weight() -> Result<()> {
         let cuda = Device::new_cuda(0)?;
         for (rows, cols) in [(10240, 320), (320, 10240), (2565, 640)] {
@@ -1696,7 +1705,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn mmvq_q4k_rank4_unequal_qkv_matches_independent() -> Result<()> {
         let cuda = Device::new_cuda(0)?;
         let q =
@@ -1715,7 +1723,6 @@ mod tests {
         assert_close(&v_out, &fast_mmvq::plain(&v, &xs)?)
     }
 
-    #[test]
     fn dense_q4k_glu_down_matches_materialized_path() -> Result<()> {
         let cuda = Device::new_cuda(0)?;
         let gate = QTensor::quantize_onto(
@@ -1757,7 +1764,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn dense_glu_down_covers_scale_layouts() -> Result<()> {
         let cuda = Device::new_cuda(0)?;
         let xs = patterned((BATCH, ROWS, HIDDEN), 3, 0.2)?

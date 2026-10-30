@@ -699,7 +699,17 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
+    inference_tensor::gpu_cases!(
+        cuda_cases,
+        [
+            cuda_cells_match_the_reference,
+            cuda_decode_plan_matches_the_reference,
+            cuda_gather_matches_the_reference,
+            cuda_selection_matches_the_reference
+        ]
+    );
+
+    #[cfg(feature = "cuda")]
     fn cuda_decode_plan_matches_the_reference() -> Result<()> {
         let Ok(device) = Device::new_cuda(0) else {
             return Ok(());
@@ -727,7 +737,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn cuda_selection_matches_the_reference() -> Result<()> {
         let Ok(device) = Device::new_cuda(0) else {
             return Ok(());
@@ -790,7 +799,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn cuda_cells_match_the_reference() -> Result<()> {
         let Ok(device) = Device::new_cuda(0) else {
             return Ok(());
@@ -868,7 +876,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn cuda_gather_matches_the_reference() -> Result<()> {
         let Ok(device) = Device::new_cuda(0) else {
             return Ok(());
