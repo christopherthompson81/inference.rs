@@ -3143,3 +3143,26 @@ Finding:
 - models-gemma IR 480,609 -> 470,150 (-10,459); duplication 26,572 -> 26,222 (-350).
 
 Implication: next is phi3v/phi4 image embedding (63 windows).
+
+## Run 103 - 2026-10-30 08:42
+
+Question: the next candidate, Phi-3-V's `ImageEmbedding` and Phi-4-MM's (63 windows): ~200 lines in 6 spans.
+
+Change: both files carried the same `QuantMethodWrapper` / `ModuleWithMetadata`, `BigShapeWithOneHole` (the 6-D
+reshape of the HD crops), `EmbeddingLayers`, and a three-arm `img_projection` builder (linear; GELU MLP with the
+HD transform's widened input; GELU MLP without), differing only in that input width (`4 * image_dim_out` for
+Phi-3-V, `image_dim_out * base_feat_height_reduction^2` for Phi-4-MM). `image_projection` now holds them, the
+builder as one function with that width as an argument; the load order (`img_projection`, or `.0` then `.2`)
+and the residual tensors it records are unchanged.
+
+Commands: `cargo nextest run -p inference-models-phi`, CPU and `--profile cuda --features cuda`; `cargo
+llvm-lines -p inference-models-phi --lib` before and after; `scripts/dup_scan.py`.
+
+Finding:
+- The 32 phi tests pass on CPU and CUDA; Phi-3-V's text prefill pins its read tensor names (the HD MLP projection
+  among them) and its logits. No test loads Phi-4-MM's image embedding: its prefill tests set `image_embd_layer` to
+  null, and its SigLIP tower is fixed at the full 27-layer 1152-wide size, too large for a made-up checkpoint.
+- models-phi IR 253,916 -> 251,144 (-2,772); duplication 26,222 -> 26,008 (-214); diff -286 lines.
+
+Implication: the remaining Phi pair is the two input processors (38 windows). After it, the list's cuTile fused MoE
+FP8 arms (111, likely deliberate per-dtype) and the core / server-core IR.

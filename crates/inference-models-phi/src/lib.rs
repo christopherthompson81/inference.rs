@@ -8,6 +8,7 @@ use inference_nn::{
 };
 
 pub mod conformer;
+mod image_projection;
 pub mod loaders;
 pub mod phi2;
 #[cfg(test)]
