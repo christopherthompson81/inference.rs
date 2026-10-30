@@ -23,7 +23,7 @@ use crate::media_inputs::{
     preprocessor_config::{self, PreProcessorConfig, ToFilter},
     processor::{
         InputProcessorOutput, InputsHost, InputsProcessorValidationError, MediaSequence,
-        ModelInputs, MultimodalInputsProcessor, ProcessInputsCall, TextInputs, TextOnlyInputs,
+        ModelInputs, MultimodalInputsProcessor, ProcessInputsCall, TextInputs,
     },
 };
 use crate::paged_attention::{
@@ -385,34 +385,7 @@ impl MultimodalInputsProcessor for LLaVAInputProcessor {
                         mapper,
                     },
                 )
-                .map(|text| {
-                    let TextOnlyInputs {
-                        input_ids,
-                        seqlen_offsets,
-                        context_lens,
-                        position_ids,
-                        paged_attn_meta,
-                        flash_meta,
-                        recurrent_batch_kind,
-                        seq_indices,
-                    } = text;
-
-                    let inputs: Box<dyn Any> = Box::new(ModelInputs {
-                        input_ids,
-                        seqlen_offsets,
-                        context_lens,
-                        position_ids,
-                        pixel_values: None,
-                        model_specific_args: Box::new(LLaVAVisionSpecificArgs::default()),
-                        paged_attn_meta,
-                        flash_meta,
-                        recurrent_batch_kind,
-                    });
-                    InputProcessorOutput {
-                        inputs,
-                        seq_indices,
-                    }
-                });
+                .map(|text| text.into_output(Box::new(LLaVAVisionSpecificArgs::default())));
         }
 
         let mut pixel_values_accum = Vec::new();
@@ -515,35 +488,20 @@ impl MultimodalInputsProcessor for LLaVAInputProcessor {
             )?);
         }
 
-        let metadata = if is_prompt {
-            host.prompt_inputs(
-                toks.iter().map(Vec::as_slice).collect::<Vec<_>>().into(),
-                input_seqs,
-                TextInputs {
-                    device,
-                    last_n_context_len,
-                    return_raw_logits,
-                    paged_attn_metadata: paged_attn_metadata.as_mut(),
-                    mapper,
-                    sliding_window,
-                },
-            )
-        } else {
-            host.completion_inputs(
-                toks.iter().map(Vec::as_slice).collect::<Vec<_>>().into(),
-                input_seqs,
-                TextInputs {
-                    device,
-                    last_n_context_len,
-                    return_raw_logits,
-                    paged_attn_metadata: paged_attn_metadata.as_mut(),
-                    mapper,
-                    sliding_window,
-                },
-                no_kv_cache,
-                None,
-            )
-        };
+        let metadata = host.step_inputs(
+            toks.iter().map(Vec::as_slice).collect::<Vec<_>>().into(),
+            input_seqs,
+            TextInputs {
+                device,
+                last_n_context_len,
+                return_raw_logits,
+                paged_attn_metadata: paged_attn_metadata.as_mut(),
+                mapper,
+                sliding_window,
+            },
+            is_prompt,
+            no_kv_cache,
+        );
 
         let inference_nn::media_inputs::processor::InnerInputProcessorOutput {
             inputs:

@@ -192,6 +192,26 @@ pub struct TextOnlyInputs {
     pub seq_indices: Vec<usize>,
 }
 
+impl TextOnlyInputs {
+    /// The processor's output for this batch, with no pixels and its model's `model_specific_args`.
+    pub fn into_output(self, model_specific_args: Box<dyn Any>) -> InputProcessorOutput {
+        InputProcessorOutput {
+            inputs: Box::new(ModelInputs {
+                input_ids: self.input_ids,
+                seqlen_offsets: self.seqlen_offsets,
+                context_lens: self.context_lens,
+                position_ids: self.position_ids,
+                pixel_values: None,
+                model_specific_args,
+                paged_attn_meta: self.paged_attn_meta,
+                flash_meta: self.flash_meta,
+                recurrent_batch_kind: self.recurrent_batch_kind,
+            }),
+            seq_indices: self.seq_indices,
+        }
+    }
+}
+
 /// Arguments of a whole-batch `process_inputs` call, for the processors that hand text-only batches back.
 pub struct ProcessInputsCall<'a> {
     pub tokenizer: Option<Arc<Tokenizer>>,
@@ -224,6 +244,21 @@ pub trait InputsHost {
         no_kv_cache: bool,
         decode_window: Option<usize>,
     ) -> Result<InnerInputProcessorOutput>;
+    /// `prompt_inputs` on a prompt step, else `completion_inputs` over each sequence's whole context.
+    fn step_inputs(
+        &self,
+        toks: PromptTokens<'_>,
+        seqs: &[&mut dyn MediaSequence],
+        text: TextInputs<'_>,
+        is_prompt: bool,
+        no_kv_cache: bool,
+    ) -> Result<InnerInputProcessorOutput> {
+        if is_prompt {
+            self.prompt_inputs(toks, seqs, text)
+        } else {
+            self.completion_inputs(toks, seqs, text, no_kv_cache, None)
+        }
+    }
     /// The engine's text-only processing of the whole batch.
     fn text_only_inputs(
         &self,
