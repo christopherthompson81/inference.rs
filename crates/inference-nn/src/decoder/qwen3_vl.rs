@@ -92,6 +92,7 @@ impl TextConfig {
                 .filter(|&layer_idx| !self.is_moe_layer(layer_idx))
                 .collect(),
             cuda_decode_graphs: true,
+            shared_expert: None,
         });
         DecoderSpec {
             vocab_size: self.vocab_size,

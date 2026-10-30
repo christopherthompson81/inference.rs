@@ -249,6 +249,7 @@ class NormalLoaderType(str, Enum):
     PHI2 = "phi2"
     PHI3 = "phi3"
     QWEN2 = "qwen2"
+    QWEN2MOE = "qwen2moe"
     GEMMA2 = "gemma2"
     STARCODER2 = "starcoder2"
     PHI3_5MOE = "phi3.5moe"

@@ -266,7 +266,12 @@ fn bind_block_tensor(
         if role == "ffn_gate_inp" && matches!(loader, NormalLoaderType::HunYuanMoEV1) {
             binding = binding.cast(DType::F32);
         }
-        if role == "ffn_gate_inp_shexp" && matches!(loader, NormalLoaderType::Qwen3Next) {
+        if role == "ffn_gate_inp_shexp"
+            && matches!(
+                loader,
+                NormalLoaderType::Qwen2Moe | NormalLoaderType::Qwen3Next
+            )
+        {
             let shape = archive.tensor_info(source)?.shape();
             if shape.len() == 1 {
                 binding = binding.reshape(vec![1, shape[0]]);
@@ -849,7 +854,7 @@ fn shared_expert_target(
     let module = match loader {
         NormalLoaderType::GLM4Moe | NormalLoaderType::GLM4MoeLite => "shared_experts",
         NormalLoaderType::HunYuanMoEV1 => "shared_mlp",
-        NormalLoaderType::Qwen3Next => "shared_expert",
+        NormalLoaderType::Qwen2Moe | NormalLoaderType::Qwen3Next => "shared_expert",
         _ => "shared_experts",
     };
     format!("{p}.mlp.{module}.{projection}_proj.{suffix}")

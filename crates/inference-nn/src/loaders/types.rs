@@ -137,6 +137,7 @@ macro_rules! normal_loader_table {
             Phi2 { cli: "phi2", hf: "PhiForCausalLM", model_type: "phi", loader: Phi2Loader, feature: "models-phi" },
             Phi3 { cli: "phi3", hf: "Phi3ForCausalLM", model_type: "phi3", loader: Phi3Loader, feature: "models-phi" },
             Qwen2 { cli: "qwen2", hf: "Qwen2ForCausalLM", model_type: "qwen2", loader: Qwen2Loader, feature: "models-qwen" },
+            Qwen2Moe { cli: "qwen2moe", hf: "Qwen2MoeForCausalLM", model_type: "qwen2_moe", loader: Qwen2MoeLoader, feature: "models-qwen" },
             Gemma2 { cli: "gemma2", hf: "Gemma2ForCausalLM", model_type: "gemma2", loader: Gemma2Loader, feature: "models-gemma" },
             Starcoder2 { cli: "starcoder2", hf: "Starcoder2ForCausalLM", model_type: "starcoder2", loader: Starcoder2Loader, feature: "models-other" },
             Phi3_5MoE { cli: "phi3.5moe", hf: "PhiMoEForCausalLM", model_type: "phimoe", loader: Phi3_5MoELoader, feature: "models-phi" },

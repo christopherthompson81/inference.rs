@@ -233,6 +233,7 @@ impl OlmoeConfig {
             name: "mlp",
             dense_layers: Vec::new(),
             cuda_decode_graphs: false,
+            shared_expert: None,
         });
         spec
     }

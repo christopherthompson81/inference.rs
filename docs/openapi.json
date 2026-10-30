@@ -9971,6 +9971,7 @@
           "phi2",
           "phi3",
           "qwen2",
+          "qwen2moe",
           "gemma2",
           "starcoder2",
           "phi3.5moe",

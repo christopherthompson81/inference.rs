@@ -91,6 +91,14 @@ impl SupportedArch for NormalLoaderType {
                     ex!("Qwen/Qwen2-7B-Instruct", "2"),
                 ],
             },
+            Self::Qwen2Moe => ArchMetadata {
+                families: &["Qwen1.5-MoE", "Qwen2-MoE"],
+                modalities: m,
+                examples: &[
+                    ex!("Qwen/Qwen2-57B-A14B-Instruct", "2"),
+                    ex!("Qwen/Qwen1.5-MoE-A2.7B-Chat", "1.5"),
+                ],
+            },
             Self::Gemma2 => ArchMetadata {
                 families: &["Gemma 2"],
                 modalities: m,

@@ -1,4 +1,4 @@
-//! Qwen models: the Qwen2, Qwen3, Qwen3-MoE and Qwen3-Next text models, Qwen2-VL, Qwen2.5-VL, Qwen3-VL (dense and MoE),
+//! Qwen models: the Qwen2, Qwen2-MoE, Qwen3, Qwen3-MoE and Qwen3-Next text models, Qwen2-VL, Qwen2.5-VL, Qwen3-VL (dense and MoE),
 //! Qwen3.5 (dense and MoE) with its DFlash drafter, MiniCPM-o and Muse-Glimmer.
 #![deny(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
@@ -14,6 +14,9 @@ pub mod minicpmo;
 pub mod muse_glimmer;
 pub mod qwen2;
 pub mod qwen2_5_vl;
+pub mod qwen2_moe;
+#[cfg(test)]
+mod qwen2_moe_tests;
 #[cfg(test)]
 mod qwen2_tests;
 pub mod qwen2vl;
@@ -41,6 +44,7 @@ inference_nn::json_config!(
     muse_glimmer::config::Config,
     qwen2::Config,
     qwen2_5_vl::config::Config,
+    qwen2_moe::Config,
     qwen2vl::config::Config,
     qwen3::Config,
     qwen3_5::config::Config,
