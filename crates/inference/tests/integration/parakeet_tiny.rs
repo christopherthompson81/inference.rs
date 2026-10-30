@@ -135,28 +135,54 @@ async fn each_head_transcribes_into_each_format() -> anyhow::Result<()> {
     Ok(())
 }
 
-// On the default device (CUDA under `--features cuda`), past one attention block, every head repeats exactly
-#[tokio::test]
-async fn each_head_repeats_exactly_on_the_default_device() -> anyhow::Result<()> {
+// On the default device (CUDA under `--features cuda`), past one attention block, the head repeats exactly. One test
+// per head, so they run side by side: the transducer heads' greedy loops take seconds each on the GPU.
+// a head added to HEADS needs its own test below
+const _: () = assert!(HEADS.len() == 5);
+
+async fn repeats_exactly_on_the_default_device(head: &str) -> anyhow::Result<()> {
     let wav = chirp_wav_of(LONG_SECONDS);
-    for head in HEADS {
-        let checkpoint = tiny_parakeet_checkpoint(head)?;
-        let model = TranscriptionModelBuilder::new(checkpoint.path().to_string_lossy())
-            .with_dtype(ModelDType::F32)
-            .build()
-            .await?;
-        let first = model
+    let checkpoint = tiny_parakeet_checkpoint(head)?;
+    let model = TranscriptionModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .build()
+        .await?;
+    let first = model
+        .transcription(request(TranscriptionResponseFormat::VerboseJson), &wav)
+        .await?
+        .body;
+    for _ in 0..REPEATS {
+        let again = model
             .transcription(request(TranscriptionResponseFormat::VerboseJson), &wav)
-            .await?
-            .body;
-        for _ in 0..REPEATS {
-            let again = model
-                .transcription(request(TranscriptionResponseFormat::VerboseJson), &wav)
-                .await?;
-            assert_eq!(again.body, first, "{head}");
-        }
+            .await?;
+        assert_eq!(again.body, first, "{head}");
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn tdt_repeats_exactly_on_the_default_device() -> anyhow::Result<()> {
+    repeats_exactly_on_the_default_device(HEADS[0]).await
+}
+
+#[tokio::test]
+async fn rnnt_repeats_exactly_on_the_default_device() -> anyhow::Result<()> {
+    repeats_exactly_on_the_default_device(HEADS[1]).await
+}
+
+#[tokio::test]
+async fn ctc_repeats_exactly_on_the_default_device() -> anyhow::Result<()> {
+    repeats_exactly_on_the_default_device(HEADS[2]).await
+}
+
+#[tokio::test]
+async fn streaming_repeats_exactly_on_the_default_device() -> anyhow::Result<()> {
+    repeats_exactly_on_the_default_device(HEADS[3]).await
+}
+
+#[tokio::test]
+async fn prompted_streaming_repeats_exactly_on_the_default_device() -> anyhow::Result<()> {
+    repeats_exactly_on_the_default_device(HEADS[4]).await
 }
 
 #[tokio::test]

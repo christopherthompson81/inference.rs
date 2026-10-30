@@ -256,3 +256,45 @@ Finding:
 Implication: the CUDA wall is set by Parakeet's repeat test: cutting its repeats or its checkpoint size is the first
 test-time item, then Kokoro's three long CPU tests. A run on a loaded machine is not comparable; recheck a slow
 outlier against the neighbouring runs before attributing it.
+
+## Run 13 - 2026-10-29 22:12
+
+Question: Run 12's first test-time items: Parakeet's long repeat test (22-28 s of the CUDA suite) and Kokoro's CPU
+tests (13-21 s each in the CPU suite). What do they spend, and what can be cut without losing a check?
+
+Commands: `cargo nextest run --profile cuda --features cuda -p inference -E 'test(/parakeet_tiny::each_head_repeats/) |
+test(/kokoro_tiny::/)'` (alone); the same on CPU; per-head timing printed from the Parakeet test (reverted); `perf
+record -g` of `kokoro_is_detected_from_its_config`; the CPU suite (`cargo nextest run --workspace --lib --bins
+--tests`) under `CANDLE_BARRIER_POOL_SPIN_LIMIT` default / 0 / 2000, and with a nextest `priority` override.
+
+Finding:
+- Alone, the Parakeet repeat test takes 11.0 s on CUDA and 3.0 s on CPU; in CI 22-28 s is contention. Per head on
+  CUDA (load, then two 45 s transcriptions): TDT 0.74 s, RNN-T 2.51 s, CTC 0.31 s, streaming 2.53 s, prompted streaming
+  3.22 s; on CPU 0.34 / 0.50 / 0.33 / 0.53 / 1.22 s. The three heads that decode with an RNN-T greedy loop take ~1.2 s
+  a transcription on the GPU against ~0.25 s on the CPU: each step reads the argmax back to the host (`to_scalar`),
+  ~1.5 ms a step over ~800 steps. A product cost too (an hour of audio is ~45k frames); left as a follow-up.
+- The test becomes one test per head (a const assert keeps the five in step with `HEADS`), so they run side by side:
+  alone on CPU the longest is 1.8 s (prompted streaming).
+- Kokoro alone on CPU: is-detected 1.8 s, GGUF 2.9, phonemes 3.8, English text 5.6, repeats 7.2. Profile of the
+  shortest: 24% idle pool workers spinning (`BarrierPool`), ~18% elementwise Mul/Sqr/Div (instance norms and the sine
+  source over 24 kHz samples; weight norm is already folded at load), 8.7% gemm, 7% `regress` regex compilation
+  (vernacula's data load, which Kokoro's loader warms once per process on purpose), ~7% the fixture's random weights.
+  The inputs were larger than their checks need: the 30-word phoneme string split into ~7 chunks of the tiny 64-token
+  context, and the long English text was 20 copies of a 44-phoneme sentence (880) to pass the 508-phoneme chunk limit.
+  Now 10 words (2-3 chunks) and 14 copies (616). Alone: 1.7 / 2.7 / 2.7 / 4.1 / 3.4 s, sum 21.2 -> 14.7 s, longest
+  7.2 -> 4.1 s.
+- The Kokoro g2p unit tests (21) finish in 1.0 s wall alone; each pays the phonemizer's data load in its own process
+  (0.4-1.0 s), which is their 15.8 s summed in CI. Not changed: the load is vernacula's.
+- Spin limit (negative): CPU suite wall 10.1 / 9.2 s at the default, 9.7 / 9.1 s at 0, 9.0 s at 2000; noise.
+- Priority (negative): starting the speech tests first gave 9.2-9.3 s; the Kokoro tests take ~8 s inside the suite
+  wherever they start. Reverted.
+- The CUDA suite is throughput-bound, not tail-bound: its last tests to finish are 1-1.5 s tensor tests, and the long
+  ones (llama4 CPU vs GPU 20.6 s, qwen4exp 5-8 s) finish within the first 160 of 3448. So splitting Parakeet shortens
+  that test, not the suite's wall, which follows summed test time (1,380-1,950 s); the CPU suite runs beside it.
+
+- Full local CI with the change (`/usr/bin/time scripts/local_ci.sh --lint --tests --cuda --bindings --size --sweep`, a
+  warm build): wall 190.9 s. CPU suite 15.8 s (Run 12: 18-23 s), Kokoro tiny 46.4 s summed in 5 tests (Run 12: 61-67 s),
+  longest 15.4 s (20.7 s); CUDA suite 96.2 s, its longest Parakeet test 11.4 s (one test of 22-28 s before).
+
+Implication: done for these tests. The suite-level levers are summed CUDA test time (inference-nn `ops` and
+`cuda::gdn`, `qwen3_5_text_tiny`) and the RNN-T greedy loop's per-step host sync.
