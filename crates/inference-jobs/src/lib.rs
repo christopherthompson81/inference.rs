@@ -696,6 +696,8 @@ struct Task {
 struct Queued {
     job: Arc<Job>,
     task: Task,
+    // the submitter's engine, held only while its job waits or runs, so an idle queue keeps no engine alive
+    engine: Engine,
 }
 
 /// The jobs beside an engine: their records, the queue and the worker that runs it. Cloning shares it; a server holds
@@ -767,7 +769,7 @@ impl JobRunner {
         }
     }
 
-    fn sender(&self, engine: &Engine) -> std::sync::mpsc::Sender<Queued> {
+    fn sender(&self) -> std::sync::mpsc::Sender<Queued> {
         let mut queue = self
             .queue
             .lock()
@@ -775,11 +777,10 @@ impl JobRunner {
         queue
             .get_or_insert_with(|| {
                 let (tx, rx) = std::sync::mpsc::channel::<Queued>();
-                let engine = engine.clone();
                 let drain = Duration::from_secs(self.config().drain_timeout_secs);
                 std::thread::Builder::new()
                     .name("inference-jobs".into())
-                    .spawn(move || run_queue(rx, engine, drain))
+                    .spawn(move || run_queue(rx, drain))
                     .expect("spawning the job worker");
                 tx
             })
@@ -787,8 +788,8 @@ impl JobRunner {
     }
 }
 
-// one job at a time: wait for the device, run, record how it ended; ends when the queue is dropped
-fn run_queue(rx: std::sync::mpsc::Receiver<Queued>, engine: Engine, drain: Duration) {
+// one job at a time: wait for the device, run, record how it ended; holds an engine only while a job does
+fn run_queue(rx: std::sync::mpsc::Receiver<Queued>, drain: Duration) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -801,6 +802,7 @@ fn run_queue(rx: std::sync::mpsc::Receiver<Queued>, engine: Engine, drain: Durat
     };
     for Queued {
         job,
+        engine,
         task: Task {
             target,
             prepare,
@@ -1297,8 +1299,12 @@ impl JobQueue {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(id, job.clone());
         runner
-            .sender(engine)
-            .send(Queued { job, task })
+            .sender()
+            .send(Queued {
+                job,
+                task,
+                engine: engine.clone(),
+            })
             .map_err(|_| ApiError::internal())?;
         Ok(record)
     }
