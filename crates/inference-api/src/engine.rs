@@ -892,7 +892,6 @@ pub struct Engine {
     _skill_dir: Option<Arc<tempfile::TempDir>>,
     // Unregistered with the last clone.
     _progress: Option<Arc<inference_core::load_progress::ProgressSinkGuard>>,
-    jobs: Arc<crate::jobs::JobRunner>,
 }
 
 impl Engine {
@@ -903,7 +902,6 @@ impl Engine {
             models: Arc::new(models),
             _skill_dir: None,
             _progress: None,
-            jobs: Arc::default(),
         }
     }
 
@@ -979,10 +977,6 @@ impl Engine {
 
     pub(crate) fn state(&self) -> &SharedInferenceRsState {
         &self.chat.state
-    }
-
-    pub(crate) fn job_runner(&self) -> &crate::jobs::JobRunner {
-        &self.jobs
     }
 
     /// The same engine acting for `owner`: its sessions, files and stored responses are that owner's alone.
@@ -1878,119 +1872,6 @@ impl Engine {
             drain,
         )
         .await
-    }
-
-    /// Sets where jobs keep their folders and which weights they run; takes effect for jobs submitted afterwards.
-    pub fn configure_jobs(&self, config: crate::jobs::JobsConfig) {
-        self.jobs_configure(config);
-    }
-
-    pub fn configure_jobs_json(&self, request: &[u8]) -> Result<String, ApiError> {
-        let config: crate::jobs::JobsConfig = parse_json(request)?;
-        self.configure_jobs(config.clone());
-        to_json(&config)
-    }
-
-    /// Queues a world generation or reconstruction with its input files; the job's record as queued.
-    pub fn submit_job(
-        &self,
-        request: crate::jobs::JobRequest,
-        inputs: Vec<crate::jobs::JobInput>,
-    ) -> Result<crate::jobs::JobRecord, ApiError> {
-        self.jobs_submit(request, inputs)
-    }
-
-    pub fn submit_job_json(&self, request: &[u8]) -> Result<String, ApiError> {
-        let submission: crate::jobs::JobSubmission = parse_json(request)?;
-        let inputs = submission
-            .inputs
-            .into_iter()
-            .map(crate::jobs::JobInput::Path)
-            .collect();
-        to_json(&self.submit_job(submission.request, inputs)?)
-    }
-
-    /// Queues `work` as a job of `kind`, placed on a device with room for `need` by the jobs' placement (none for work
-    /// off the GPU); the job's record as queued. Its context reports progress through [`crate::jobs::Progress`] and
-    /// checks for cancellation.
-    pub fn submit_task(
-        &self,
-        kind: &str,
-        need: Option<crate::jobs::JobNeed>,
-        work: impl FnOnce(&crate::jobs::JobContext) -> anyhow::Result<crate::jobs::JobResult>
-        + Send
-        + 'static,
-    ) -> Result<crate::jobs::JobRecord, ApiError> {
-        self.jobs_submit_task(kind, need, work)
-    }
-
-    /// A job's record.
-    pub fn job(&self, id: &str) -> Result<crate::jobs::JobRecord, ApiError> {
-        self.jobs_get(id)
-    }
-
-    pub fn job_json(&self, id: &str) -> Result<String, ApiError> {
-        to_json(&self.job(id)?)
-    }
-
-    /// This owner's jobs, newest first.
-    pub fn jobs(&self) -> crate::jobs::JobList {
-        crate::jobs::JobList {
-            data: self.jobs_list(),
-        }
-    }
-
-    pub fn jobs_json(&self) -> Result<String, ApiError> {
-        to_json(&self.jobs())
-    }
-
-    /// Asks a job to stop: a queued one never starts, a running one stops at its next step.
-    pub fn cancel_job(&self, id: &str) -> Result<crate::jobs::JobRecord, ApiError> {
-        self.jobs_cancel(id)
-    }
-
-    pub fn cancel_job_json(&self, id: &str) -> Result<String, ApiError> {
-        to_json(&self.cancel_job(id)?)
-    }
-
-    /// Removes a finished job and its folder.
-    pub fn delete_job(&self, id: &str) -> Result<crate::jobs::JobDeleted, ApiError> {
-        self.jobs_delete(id)?;
-        Ok(crate::jobs::JobDeleted {
-            id: id.to_string(),
-            deleted: true,
-        })
-    }
-
-    pub fn delete_job_json(&self, id: &str) -> Result<String, ApiError> {
-        to_json(&self.delete_job(id)?)
-    }
-
-    /// A job's changes from now on, after its record as it stands.
-    pub fn job_events(
-        &self,
-        id: &str,
-    ) -> Result<
-        (
-            crate::jobs::JobRecord,
-            tokio::sync::broadcast::Receiver<crate::jobs::JobEvent>,
-        ),
-        ApiError,
-    > {
-        self.jobs_events(id)
-    }
-
-    /// The path of a file in a job's folder, given relative to it.
-    pub fn job_file(&self, id: &str, file: &str) -> Result<std::path::PathBuf, ApiError> {
-        self.jobs_file(id, file)
-    }
-
-    pub fn job_file_json(&self, request: &[u8]) -> Result<String, ApiError> {
-        let request: crate::jobs::JobFileRequest = parse_json(request)?;
-        let path = self.job_file(&request.id, &request.file)?;
-        to_json(&crate::jobs::JobFilePath {
-            path: path.to_string_lossy().into_owned(),
-        })
     }
 
     pub fn files_json(&self) -> Result<String, ApiError> {

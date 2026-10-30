@@ -90,3 +90,33 @@ so a binding's own GPU work can coexist with the engine.
 **Finding:** the C ABI test runs the no-device path on CPU and the whole cycle on the 3090 (`--features cuda`):
 snapshot, place a 1-byte need (`run` on device 0), lease, a second lease refused with `device_busy`, the snapshot naming
 the holder, free, released. Binding tests (Python 51, C# engine checks) and the CPU suite (3004) pass.
+
+## Run 4 - 2026-10-29 18:45
+
+**Question:** the job queue out of inference-api, built on the engine's device operations (Run 3).
+
+**Change:**
+- `jobs.rs`, `reconstruction.rs` and `worldgen_package.rs` move to a new crate, `inference-jobs`. The last two never
+  touched the engine (they drive inference-recon's pipelines), so they are world-generation tooling beside the queue;
+  the CLI's world commands and its world-model packaging take them from there.
+- The runner was a field of `Engine`; it is now `JobQueue`, a cheap-to-clone handle a server holds, whose methods take
+  the caller's owner-scoped `&Engine` (`configure`, `submit`, `submit_task`, `get`, `list`, `cancel`, `delete`,
+  `events`, `file`). Its worker places and leases through `Engine::place_need` and `Engine::lease_device` instead of
+  core's state, and holds an `Engine` clone until the queue is dropped: with the queue outside the engine there is no
+  cycle for the old weak handle to break.
+- server-core's router builder takes `with_jobs(queue)` (a default queue otherwise) and its job routes read it as an
+  `Extension`; `inference serve` configures one from its flags.
+- Gone: `Engine`'s job methods, the C ABI's `inference_jobs_configure`, `inference_job_submit`, `_file`, `_get`,
+  `_cancel`, `_delete` and `inference_jobs_list`, the C# and Python wrappers, the SDK's job re-exports (the user:
+  orchestration belongs after the SDK). The SDK's job tests, and the two real-checkpoint world-job deep checks, move to
+  inference-jobs; the nextest filters follow them. The tiny Llama fixture now resolves from any crate, as the
+  PaddleOCR-VL one does.
+
+**Finding:**
+- CPU suite 3004 passed; binding tests pass; the five queue tests pass on the 3090 with CUDA (eviction, a sized job
+  beside the resident model, waiting while a no-displacement job's device is occupied, a pinned model refusing).
+- IR lines: inference-api 976,554 -> 884,739 (-91,815, -9.4%); 1,916,996 before the FromJson work (-54%).
+  inference-jobs 217,190.
+- Whole-crate compile: inference-api 10 -> 8 s; core 16, server-core 10, web UI 5.
+
+**Next:** the last #701 item, media fetched by URL (`media_source`, `video`, ~14k).

@@ -522,50 +522,6 @@ delete_file(file_id: str) -> types.FileDeleted
 file_content(file_id: str) -> Blob
 ```
 
-### `Engine.configure_jobs`
-
-```text
-configure_jobs(config: types.JobsConfig | str) -> types.JobsConfig
-```
-
-### `Engine.submit_job`
-
-```text
-submit_job(submission: types.JobSubmission | str) -> types.JobRecord
-```
-
-### `Engine.list_jobs`
-
-```text
-list_jobs() -> types.JobList
-```
-
-### `Engine.get_job`
-
-```text
-get_job(job_id: str) -> types.JobRecord
-```
-
-### `Engine.cancel_job`
-
-```text
-cancel_job(job_id: str) -> types.JobRecord
-```
-
-### `Engine.delete_job`
-
-```text
-delete_job(job_id: str) -> types.JobDeleted
-```
-
-### `Engine.job_file`
-
-```text
-job_file(job_id: str, file: str) -> str
-```
-
-The path of a preview or output of the job, given relative to its folder.
-
 ### `Engine.list_container_files`
 
 ```text
@@ -1206,54 +1162,6 @@ delete_file(file_id: str) -> str
 ```text
 file_content(file_id: str) -> Blob
 ```
-
-### `JsonEngine.configure_jobs`
-
-```text
-configure_jobs(config_json: str) -> str
-```
-
-Sets where jobs keep their folders and which weights they run (a JobsConfig); returns it.
-
-### `JsonEngine.submit_job`
-
-```text
-submit_job(submission_json: str) -> str
-```
-
-Queues a world generation or reconstruction, {"request": JobRequest, "inputs": [paths]}; the JobRecord.
-
-### `JsonEngine.list_jobs`
-
-```text
-list_jobs() -> str
-```
-
-### `JsonEngine.get_job`
-
-```text
-get_job(job_id: str) -> str
-```
-
-### `JsonEngine.cancel_job`
-
-```text
-cancel_job(job_id: str) -> str
-```
-
-### `JsonEngine.delete_job`
-
-```text
-delete_job(job_id: str) -> str
-```
-
-### `JsonEngine.job_file`
-
-```text
-job_file(request_json: str) -> str
-```
-
-Where a job's file is, {"id", "file"} to {"path"}.
 
 ### `JsonEngine.list_container_files`
 

@@ -5,14 +5,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use inference::{
-    JobEvent, JobNeed, JobOutput, JobRecord, JobResult, JobStatus, JobsConfig, Model, ModelDType,
-    ModelOperationRequest, ModelStatus, Placement, Progress, RequestBuilder, TextMessageRole,
+    Model, ModelDType, ModelOperationRequest, ModelStatus, RequestBuilder, TextMessageRole,
     TextMessages, TextModelBuilder,
 };
+use inference_jobs::{
+    JobEvent, JobNeed, JobOutput, JobQueue, JobRecord, JobResult, JobStatus, JobsConfig, Placement,
+    Progress,
+};
 
-#[path = "../support/llama_tiny.rs"]
+#[path = "../../../inference/tests/support/llama_tiny.rs"]
 mod support;
-#[path = "../support/traces.rs"]
+#[path = "../../../inference/tests/support/traces.rs"]
 mod traces;
 use support::tiny_llama_checkpoint;
 use traces::greedy;
@@ -36,17 +39,17 @@ async fn cpu_model() -> anyhow::Result<(Model, tempfile::TempDir)> {
     Ok((model, checkpoint))
 }
 
-fn use_dir(model: &Model) -> anyhow::Result<tempfile::TempDir> {
+fn use_dir(queue: &JobQueue) -> anyhow::Result<tempfile::TempDir> {
     let jobs = tempfile::tempdir()?;
-    model.configure_jobs(JobsConfig {
+    queue.configure(JobsConfig {
         dir: jobs.path().to_path_buf(),
         ..Default::default()
     });
     Ok(jobs)
 }
 
-async fn finished(model: &Model, id: &str) -> anyhow::Result<JobRecord> {
-    let (record, mut events) = model.job_events(id)?;
+async fn finished(queue: &JobQueue, model: &Model, id: &str) -> anyhow::Result<JobRecord> {
+    let (record, mut events) = queue.events(model, id)?;
     if !record.status.is_finished() {
         tokio::time::timeout(JOB_WAIT, async {
             loop {
@@ -59,11 +62,11 @@ async fn finished(model: &Model, id: &str) -> anyhow::Result<JobRecord> {
         })
         .await?;
     }
-    Ok(model.job(id)?)
+    Ok(queue.get(model, id)?)
 }
 
-async fn started(model: &Model, id: &str) -> anyhow::Result<()> {
-    let (record, mut events) = model.job_events(id)?;
+async fn started(queue: &JobQueue, model: &Model, id: &str) -> anyhow::Result<()> {
+    let (record, mut events) = queue.events(model, id)?;
     if record.stages.is_empty() {
         tokio::time::timeout(JOB_WAIT, async {
             while !matches!(events.recv().await, Ok(JobEvent::Stage { .. })) {}
@@ -76,8 +79,9 @@ async fn started(model: &Model, id: &str) -> anyhow::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_records_its_stages_previews_and_outputs() -> anyhow::Result<()> {
     let (model, _checkpoint) = cpu_model().await?;
-    let jobs = use_dir(&model)?;
-    let queued = model.submit_task("probe", None, |ctx| {
+    let queue = JobQueue::default();
+    let jobs = use_dir(&queue)?;
+    let queued = queue.submit_task(&model, "probe", None, |ctx| {
         ctx.stage("first", 2);
         ctx.advance(1);
         let image = ctx.dir().join("look.png");
@@ -95,7 +99,7 @@ async fn a_job_records_its_stages_previews_and_outputs() -> anyhow::Result<()> {
     })?;
     assert_eq!(queued.status, JobStatus::Queued);
 
-    let done = finished(&model, &queued.id).await?;
+    let done = finished(&queue, &model, &queued.id).await?;
     assert_eq!(done.status, JobStatus::Succeeded, "{:?}", done.error);
     let stages = done
         .stages
@@ -118,12 +122,16 @@ async fn a_job_records_its_stages_previews_and_outputs() -> anyhow::Result<()> {
     let saved: JobRecord =
         serde_json::from_slice(&std::fs::read(jobs.path().join(&done.id).join("job.json"))?)?;
     assert_eq!(saved.status, JobStatus::Succeeded);
-    assert!(model.job_file(&done.id, "made.txt")?.is_file());
-    assert!(model.job_file(&done.id, "../job.json").is_err());
-    assert!(model.for_owner("someone else").job(&done.id).is_err());
-    assert_eq!(model.jobs().data.len(), 1);
+    assert!(queue.file(&model, &done.id, "made.txt")?.is_file());
+    assert!(queue.file(&model, &done.id, "../job.json").is_err());
+    assert!(
+        queue
+            .get(&model.for_owner("someone else"), &done.id)
+            .is_err()
+    );
+    assert_eq!(queue.list(&model).data.len(), 1);
 
-    model.delete_job(&done.id)?;
+    queue.delete(&model, &done.id)?;
     assert!(!jobs.path().join(&done.id).exists());
     Ok(())
 }
@@ -131,16 +139,17 @@ async fn a_job_records_its_stages_previews_and_outputs() -> anyhow::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cancelled_job_stops_and_a_cancelled_queued_job_never_starts() -> anyhow::Result<()> {
     let (model, _checkpoint) = cpu_model().await?;
-    let _jobs = use_dir(&model)?;
-    let running = model.submit_task("waits", None, |ctx| {
+    let queue = JobQueue::default();
+    let _jobs = use_dir(&queue)?;
+    let running = queue.submit_task(&model, "waits", None, |ctx| {
         ctx.stage("waiting", 0);
         while !ctx.cancelled() {
             std::thread::sleep(CANCEL_POLL);
         }
-        anyhow::bail!("{}", inference::api::reconstruction::CANCELLED)
+        anyhow::bail!("{}", inference_jobs::reconstruction::CANCELLED)
     })?;
     let ran = Arc::new(AtomicBool::new(false));
-    let queued = model.submit_task("queued", None, {
+    let queued = queue.submit_task(&model, "queued", None, {
         let ran = ran.clone();
         move |_| {
             ran.store(true, Ordering::Relaxed);
@@ -150,16 +159,16 @@ async fn a_cancelled_job_stops_and_a_cancelled_queued_job_never_starts() -> anyh
             })
         }
     })?;
-    started(&model, &running.id).await?;
-    model.cancel_job(&queued.id)?;
-    model.cancel_job(&running.id)?;
+    started(&queue, &model, &running.id).await?;
+    queue.cancel(&model, &queued.id)?;
+    queue.cancel(&model, &running.id)?;
 
     assert_eq!(
-        finished(&model, &running.id).await?.status,
+        finished(&queue, &model, &running.id).await?.status,
         JobStatus::Cancelled
     );
     assert_eq!(
-        finished(&model, &queued.id).await?.status,
+        finished(&queue, &model, &queued.id).await?.status,
         JobStatus::Cancelled
     );
     assert!(!ran.load(Ordering::Relaxed), "the cancelled queued job ran");
@@ -178,7 +187,8 @@ async fn a_device_job_evicts_the_idle_model_and_holds_the_device() -> anyhow::Re
         .with_dtype(ModelDType::BF16)
         .build()
         .await?;
-    let _jobs = use_dir(&model)?;
+    let queue = JobQueue::default();
+    let _jobs = use_dir(&queue)?;
     let id = model
         .models()?
         .data
@@ -193,7 +203,7 @@ async fn a_device_job_evicts_the_idle_model_and_holds_the_device() -> anyhow::Re
 
     let engine = (*model).clone();
     let model_id = id.clone();
-    let held = model.submit_task("hold", Some(JobNeed::Device), move |ctx| {
+    let held = queue.submit_task(&model, "hold", Some(JobNeed::Device), move |ctx| {
         let op = || ModelOperationRequest {
             model_id: model_id.clone(),
         };
@@ -207,7 +217,7 @@ async fn a_device_job_evicts_the_idle_model_and_holds_the_device() -> anyhow::Re
             }),
         })
     })?;
-    let done = finished(&model, &held.id).await?;
+    let done = finished(&queue, &model, &held.id).await?;
     assert_eq!(done.status, JobStatus::Succeeded, "{:?}", done.error);
     assert_eq!(done.report["unloaded"], true);
     let refused = done.report["reload"].as_str().unwrap_or_default();
@@ -225,10 +235,10 @@ async fn a_device_job_evicts_the_idle_model_and_holds_the_device() -> anyhow::Re
         "pinned": true,
     });
     model.add_model_json(spec.to_string().as_bytes()).await?;
-    let blocked = model.submit_task("blocked", Some(JobNeed::Device), |_| {
+    let blocked = queue.submit_task(&model, "blocked", Some(JobNeed::Device), |_| {
         anyhow::bail!("ran beside a pinned model")
     })?;
-    let blocked = finished(&model, &blocked.id).await?;
+    let blocked = finished(&queue, &model, &blocked.id).await?;
     assert_eq!(blocked.status, JobStatus::Failed);
     let error = blocked.error.unwrap_or_default();
     assert!(error.contains("pinned"), "{error}");
@@ -260,19 +270,25 @@ async fn a_sized_job_runs_beside_the_resident_model() -> anyhow::Result<()> {
     let Some((model, _checkpoint, id)) = cuda_model().await? else {
         return Ok(());
     };
-    let _jobs = use_dir(&model)?;
+    let queue = JobQueue::default();
+    let _jobs = use_dir(&queue)?;
     let engine = (*model).clone();
     let model_id = id.clone();
-    let sized = model.submit_task("sized", Some(JobNeed::Bytes(SIZED_NEED_BYTES)), move |_| {
-        let status = engine
-            .model_status(ModelOperationRequest { model_id })?
-            .status;
-        Ok(JobResult {
-            outputs: Vec::new(),
-            report: serde_json::json!({ "loaded": status == ModelStatus::Loaded }),
-        })
-    })?;
-    let done = finished(&model, &sized.id).await?;
+    let sized = queue.submit_task(
+        &model,
+        "sized",
+        Some(JobNeed::Bytes(SIZED_NEED_BYTES)),
+        move |_| {
+            let status = engine
+                .model_status(ModelOperationRequest { model_id })?
+                .status;
+            Ok(JobResult {
+                outputs: Vec::new(),
+                report: serde_json::json!({ "loaded": status == ModelStatus::Loaded }),
+            })
+        },
+    )?;
+    let done = finished(&queue, &model, &sized.id).await?;
     assert_eq!(done.status, JobStatus::Succeeded, "{:?}", done.error);
     assert_eq!(
         done.report["loaded"], true,
@@ -296,18 +312,19 @@ async fn a_job_that_may_not_displace_waits_for_the_device_to_empty() -> anyhow::
         return Ok(());
     };
     let jobs = tempfile::tempdir()?;
-    model.configure_jobs(JobsConfig {
+    let queue = JobQueue::default();
+    queue.configure(JobsConfig {
         dir: jobs.path().to_path_buf(),
         placement: Placement::NoEviction,
         ..Default::default()
     });
-    let queued = model.submit_task("polite", Some(JobNeed::Device), |_| {
+    let queued = queue.submit_task(&model, "polite", Some(JobNeed::Device), |_| {
         Ok(JobResult {
             outputs: Vec::new(),
             report: serde_json::Value::Null,
         })
     })?;
-    let (_, mut events) = model.job_events(&queued.id)?;
+    let (_, mut events) = queue.events(&model, &queued.id)?;
     let reason = tokio::time::timeout(JOB_WAIT, async {
         loop {
             if let Ok(JobEvent::Waiting { reason }) = events.recv().await {
@@ -317,12 +334,12 @@ async fn a_job_that_may_not_displace_waits_for_the_device_to_empty() -> anyhow::
     })
     .await?;
     assert!(reason.contains(&format!("`{id}`")), "{reason}");
-    let record = model.job(&queued.id)?;
+    let record = queue.get(&model, &queued.id)?;
     assert_eq!(record.status, JobStatus::Queued);
     assert_eq!(record.waiting.as_deref(), Some(reason.as_str()));
 
     model.unload_model(ModelOperationRequest { model_id: id })?;
-    let done = finished(&model, &queued.id).await?;
+    let done = finished(&queue, &model, &queued.id).await?;
     assert_eq!(done.status, JobStatus::Succeeded, "{:?}", done.error);
     assert_eq!(done.waiting, None);
     Ok(())

@@ -995,47 +995,6 @@ pub unsafe extern "C" fn inference_device_lease_free(lease: *mut inference_devic
     }
 }
 
-entry_points! {
-    /// Safety: as for `inference_chat`.
-    json inference_jobs_configure => |engine, request| engine.engine().configure_jobs_json(request).map_err(api_failure);
-    /// Safety: as for `inference_chat`.
-    json inference_job_submit => |engine, request| engine.engine().submit_job_json(request).map_err(api_failure);
-    /// Safety: as for `inference_chat`.
-    json inference_job_file => |engine, request| engine.engine().job_file_json(request).map_err(api_failure);
-    /// Safety: `engine` is a live handle and `out_response` valid for a write.
-    query inference_jobs_list => |engine| engine.engine().jobs_json();
-}
-
-unsafe fn job_id_call(
-    engine: *const inference_engine,
-    job_id: *const c_char,
-    job_id_len: usize,
-    out_response: *mut *mut inference_string,
-    call: impl FnOnce(&Engine, &str) -> Result<String, ApiError>,
-) -> inference_status {
-    unsafe {
-        id_call(
-            engine,
-            (job_id, job_id_len, "job_id"),
-            (out_response, "out_response"),
-            |engine, id| {
-                call(engine.engine(), id)
-                    .map(string_handle)
-                    .map_err(api_failure)
-            },
-        )
-    }
-}
-
-entry_points! {
-    /// Safety: `engine` is a live handle, `job_id` valid for `job_id_len` bytes, `out_response` valid for a write.
-    job_id_call(job_id, job_id_len) inference_job_get => Engine::job_json;
-    /// Safety: as for `inference_job_get`.
-    job_id_call(job_id, job_id_len) inference_job_cancel => Engine::cancel_job_json;
-    /// Safety: as for `inference_job_get`.
-    job_id_call(job_id, job_id_len) inference_job_delete => Engine::delete_job_json;
-}
-
 /// Safety: as for `inference_file_get`, with `out_blob` valid for a write.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn inference_file_content(

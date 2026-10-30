@@ -280,29 +280,6 @@ class Engine:
     def file_content(self, file_id: str) -> Blob:
         return self.json.file_content(file_id)
 
-    def configure_jobs(self, config: types.JobsConfig | str) -> types.JobsConfig:
-        return from_json(types.JobsConfig, self.json.configure_jobs(to_json(config)))
-
-    def submit_job(self, submission: types.JobSubmission | str) -> types.JobRecord:
-        return from_json(types.JobRecord, self.json.submit_job(to_json(submission)))
-
-    def list_jobs(self) -> types.JobList:
-        return from_json(types.JobList, self.json.list_jobs())
-
-    def get_job(self, job_id: str) -> types.JobRecord:
-        return from_json(types.JobRecord, self.json.get_job(job_id))
-
-    def cancel_job(self, job_id: str) -> types.JobRecord:
-        return from_json(types.JobRecord, self.json.cancel_job(job_id))
-
-    def delete_job(self, job_id: str) -> types.JobDeleted:
-        return from_json(types.JobDeleted, self.json.delete_job(job_id))
-
-    def job_file(self, job_id: str, file: str) -> str:
-        """The path of a preview or output of the job, given relative to its folder."""
-        request = types.JobFileRequest(id=job_id, file=file)
-        return from_json(types.JobFilePath, self.json.job_file(to_json(request))).path
-
     def list_container_files(self, container_id: str) -> types.ContainerFileListObject:
         return from_json(types.ContainerFileListObject, self.json.list_container_files(container_id))
 

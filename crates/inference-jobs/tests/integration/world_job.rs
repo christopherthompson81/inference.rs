@@ -3,11 +3,10 @@
 
 use std::time::Duration;
 
-use inference::{
-    JobEvent, JobInput, JobRequest, JobStatus, JobsConfig, ModelDType, TextModelBuilder, WorldJob,
-};
+use inference::{ModelDType, TextModelBuilder};
+use inference_jobs::{JobEvent, JobInput, JobQueue, JobRequest, JobStatus, JobsConfig, WorldJob};
 
-#[path = "../support/llama_tiny.rs"]
+#[path = "../../../inference/tests/support/llama_tiny.rs"]
 mod support;
 use support::tiny_llama_checkpoint;
 
@@ -31,7 +30,8 @@ async fn a_world_job_runs_from_a_panorama_to_splats() -> anyhow::Result<()> {
         .build()
         .await?;
     let jobs = tempfile::tempdir()?;
-    model.configure_jobs(
+    let queue = JobQueue::default();
+    queue.configure(
         JobsConfig {
             dir: jobs.path().to_path_buf(),
             ..Default::default()
@@ -43,8 +43,8 @@ async fn a_world_job_runs_from_a_panorama_to_splats() -> anyhow::Result<()> {
         steps: Some(STEPS),
         ..Default::default()
     });
-    let queued = model.submit_job(request, vec![JobInput::Path(panorama.into())])?;
-    let (_, mut events) = model.job_events(&queued.id)?;
+    let queued = queue.submit(&model, request, vec![JobInput::Path(panorama.into())])?;
+    let (_, mut events) = queue.events(&model, &queued.id)?;
     tokio::time::timeout(JOB_WAIT, async {
         while !matches!(
             events.recv().await,
@@ -53,7 +53,7 @@ async fn a_world_job_runs_from_a_panorama_to_splats() -> anyhow::Result<()> {
     })
     .await?;
 
-    let done = model.job(&queued.id)?;
+    let done = queue.get(&model, &queued.id)?;
     assert_eq!(done.status, JobStatus::Succeeded, "{:?}", done.error);
     let stages = done
         .stages
@@ -86,7 +86,7 @@ async fn a_world_job_runs_from_a_panorama_to_splats() -> anyhow::Result<()> {
     for name in ["splats", "mesh"] {
         let output = done.outputs.iter().find(|o| o.name == name);
         let output = output.ok_or_else(|| anyhow::anyhow!("no {name} output"))?;
-        assert!(std::fs::metadata(model.job_file(&done.id, &output.file)?)?.len() > 0);
+        assert!(std::fs::metadata(queue.file(&model, &done.id, &output.file)?)?.len() > 0);
     }
     Ok(())
 }

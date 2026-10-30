@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use inference_core::VideoFrameSampling;
+use inference_api::VideoFrameSampling;
 use inference_recon::worldmirror::preprocess::RgbImage;
 use inference_recon::worldmirror::run::{VideoSource, reconstruct_frames};
 use inference_tensor::{DType, Device};
@@ -88,7 +88,7 @@ pub async fn reconstruct_on(
             max_frames: video.max_frames,
         };
         let path = input.to_string_lossy();
-        let decoded = crate::video::parse_video_url(&path, Some(sampling)).await?;
+        let decoded = inference_api::video::parse_video_url(&path, Some(sampling)).await?;
         let source = VideoSource {
             path: path.to_string(),
             native_fps: decoded.fps,

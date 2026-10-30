@@ -564,64 +564,6 @@ public sealed unsafe class InferenceEngine : IDisposable
         return Owned.TakeBlob(blob);
     }
 
-    /// <summary>Sets where jobs keep their folders and which weights they run (a JobsConfig); returns it.</summary>
-    public string ConfigureJobs(string configJson)
-    {
-        using var engine = Borrow();
-        using var request = new PinnedBytes(configJson);
-        var status = NativeMethods.inference_jobs_configure(engine.Handle, request.Pointer, request.Length, out var response);
-        return Text(status, response, nameof(NativeMethods.inference_jobs_configure));
-    }
-
-    /// <summary>Queues a world generation or reconstruction, {"request": JobRequest, "inputs": [paths]}; the JobRecord.</summary>
-    public string SubmitJob(string submissionJson)
-    {
-        using var engine = Borrow();
-        using var request = new PinnedBytes(submissionJson);
-        var status = NativeMethods.inference_job_submit(engine.Handle, request.Pointer, request.Length, out var response);
-        return Text(status, response, nameof(NativeMethods.inference_job_submit));
-    }
-
-    public string ListJobs()
-    {
-        using var engine = Borrow();
-        var status = NativeMethods.inference_jobs_list(engine.Handle, out var response);
-        return Text(status, response, nameof(NativeMethods.inference_jobs_list));
-    }
-
-    public string GetJob(string jobId)
-    {
-        using var engine = Borrow();
-        using var id = new PinnedBytes(jobId);
-        var status = NativeMethods.inference_job_get(engine.Handle, id.Pointer, id.Length, out var response);
-        return Text(status, response, nameof(NativeMethods.inference_job_get));
-    }
-
-    public string CancelJob(string jobId)
-    {
-        using var engine = Borrow();
-        using var id = new PinnedBytes(jobId);
-        var status = NativeMethods.inference_job_cancel(engine.Handle, id.Pointer, id.Length, out var response);
-        return Text(status, response, nameof(NativeMethods.inference_job_cancel));
-    }
-
-    public string DeleteJob(string jobId)
-    {
-        using var engine = Borrow();
-        using var id = new PinnedBytes(jobId);
-        var status = NativeMethods.inference_job_delete(engine.Handle, id.Pointer, id.Length, out var response);
-        return Text(status, response, nameof(NativeMethods.inference_job_delete));
-    }
-
-    /// <summary>Where a job's file is, {"id", "file"} to {"path"}.</summary>
-    public string JobFile(string requestJson)
-    {
-        using var engine = Borrow();
-        using var request = new PinnedBytes(requestJson);
-        var status = NativeMethods.inference_job_file(engine.Handle, request.Pointer, request.Length, out var response);
-        return Text(status, response, nameof(NativeMethods.inference_job_file));
-    }
-
     /// <summary>The files a container (a code-running session) produced.</summary>
     public string ListContainerFiles(string containerId)
     {

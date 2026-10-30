@@ -295,7 +295,7 @@ pub(crate) async fn serve_engine(spec: EngineSpec, server: &ServerOptions) -> Re
     });
     let token_source = spec.runtime.token_source.clone();
     let engine = Engine::load(spec).await?;
-    let mut jobs = inference_api::jobs::JobsConfig::default();
+    let mut jobs = inference_jobs::JobsConfig::default();
     if let Some(dir) = &server.jobs_dir {
         jobs.dir = dir.clone();
     }
@@ -313,7 +313,8 @@ pub(crate) async fn serve_engine(spec: EngineSpec, server: &ServerOptions) -> Re
     if !server.job_devices.is_empty() {
         jobs.devices = Some(server.job_devices.clone());
     }
-    engine.configure_jobs(jobs);
+    let job_queue = inference_jobs::JobQueue::default();
+    job_queue.configure(jobs);
     let folders = server
         .model_folders
         .iter()
@@ -336,6 +337,7 @@ pub(crate) async fn serve_engine(spec: EngineSpec, server: &ServerOptions) -> Re
     let mut app = InferenceRsServerRouterBuilder::new()
         .with_engine(&engine)
         .with_model_manager(manager)
+        .with_jobs(job_queue)
         .with_observability_config(server.observability_config())
         .with_file_listing(server.allow_file_listing)
         .with_model_management(server.allow_model_management)

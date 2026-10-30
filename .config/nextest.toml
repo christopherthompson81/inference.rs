@@ -15,7 +15,8 @@ metal-model = { max-threads = 4 }
 [profile.default]
 default-filter = """
 not (
-    (package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|qwen3_5_tool_call|gguf_iq|worldmirror_job|world_job)::/))
+    (package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|qwen3_5_tool_call|gguf_iq)::/))
+    | (package(inference-jobs) & test(/^(worldmirror_job|world_job)::/))
     | (package(inference-ffi) & test(detections))
     | (package(inference-server-core) & test(/^flux::/))
 )
@@ -29,7 +30,8 @@ threads-required = 'num-test-threads'
 [profile.cuda]
 default-filter = """
 not (
-    (package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|qwen3_5_tool_call|gguf_iq|worldmirror_job|world_job)::/))
+    (package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|qwen3_5_tool_call|gguf_iq)::/))
+    | (package(inference-jobs) & test(/^(worldmirror_job|world_job)::/))
     | (package(inference-ffi) & test(detections))
     | (package(inference-server-core) & test(/^flux::/))
 )
@@ -43,7 +45,8 @@ threads-required = 'num-test-threads'
 
 [profile.deep]
 default-filter = """
-(package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|qwen3_5_tool_call|gguf_iq|worldmirror_job|world_job)::/))
+(package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|qwen3_5_tool_call|gguf_iq)::/))
+    | (package(inference-jobs) & test(/^(worldmirror_job|world_job)::/))
 | (package(inference-ffi) & test(detections))
 | (package(inference-server-core) & test(/^flux::/))
 """
@@ -51,7 +54,7 @@ default-filter = """
 # The IQ4_XS 27B takes ~15 GB of VRAM, real-weight FLUX ~18 GB, the 35B MoE MTP test ~20 GB and a world job ~18 GB,
 # so each runs alone, first; nextest takes the first override that sets a value, so this precedes the gpu-model group.
 [[profile.deep.overrides]]
-filter = '(package(inference) & test(/^(gguf_iq|world_job)::/) | test(/^qwen3_5_mtp::moe_gguf/)) | (package(inference-server-core) & test(/^flux::/))'
+filter = '(package(inference) & test(/^gguf_iq::/) | test(/^qwen3_5_mtp::moe_gguf/)) | (package(inference-jobs) & test(/^world_job::/)) | (package(inference-server-core) & test(/^flux::/))'
 threads-required = 'num-test-threads'
 priority = 100
 

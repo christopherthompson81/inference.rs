@@ -115,7 +115,7 @@ pub fn run_hidream_quantize(options: HiDreamQuantizeOptions, global: GlobalOptio
 /// Lays the world-generation checkpoints out for distribution.
 pub fn run_worldgen_quantize(options: WorldgenQuantizeOptions) -> Result<()> {
     initialize_logging();
-    let files = inference_api::worldgen_package::write_worldgen_package(
+    let files = inference_jobs::worldgen_package::write_worldgen_package(
         &options.models,
         &options.output_path,
         &options.matrices,

@@ -144,7 +144,9 @@ The web UI's **Worlds** tab starts one from a panorama (the whole pipeline above
 photos or a video (WorldMirror alone), shows each stage as it runs with the start views, every generated clip and the
 training renders as they appear, and opens the finished splats in a viewer (drag to look, WASD to move, E and Q for
 up and down). The same jobs are at `/v1/jobs` (submit as multipart: `request`, the job as JSON, and its `file`s; then
-follow `/v1/jobs/{id}/events` and fetch `/v1/jobs/{id}/files/...`) and in the C ABI's `inference_job_*` calls.
+follow `/v1/jobs/{id}/events` and fetch `/v1/jobs/{id}/files/...`). In Rust the queue is `inference_jobs::JobQueue`,
+which runs beside an engine; a C, C# or Python program schedules its own GPU work with the engine's device calls
+(`inference_device_place` and `inference_device_lease_open`), which keep models off the device while it runs.
 
 A world job takes a whole GPU (it peaks at about 18 GB, so it needs all of a 24 GB card); a reconstruction needs about
 10 GB and runs beside whatever leaves room. What a job may unload to make room is `--job-placement` (and each job's

@@ -11,11 +11,15 @@ mod recording;
 
 // Llama 3 checkpoints may carry per-frequency rope factors; the tiny one uses plain rope.
 const ROPE_FREQS: &str = "model.rope_freqs.weight";
-const LLAMA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/llama_tiny");
+// Resolves from any crate under crates/, as the PaddleOCR-VL fixture does.
+const LLAMA: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../inference/tests/fixtures/llama_tiny"
+);
 // A plain text tokenizer with a small vocabulary; the Llama config's vocab_size matches it.
 const TOKENIZER: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/paddleocr_vl/tiny/tokenizer.json"
+    "/../inference/tests/fixtures/paddleocr_vl/tiny/tokenizer.json"
 );
 
 /// The committed tiny Llama config and templates, a shared tokenizer, and random weights for every loaded tensor.

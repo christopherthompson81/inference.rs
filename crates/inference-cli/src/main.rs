@@ -215,7 +215,7 @@ async fn main() -> Result<()> {
             prior_depth,
             cpu,
         } => {
-            use inference_api::reconstruction::{
+            use inference_jobs::reconstruction::{
                 OutputSettings, ReconstructOptions, VideoOptions, reconstruct,
             };
             let options = ReconstructOptions {
@@ -251,7 +251,7 @@ async fn main() -> Result<()> {
         } => {
             #[cfg(feature = "cuda")]
             {
-                use inference_api::reconstruction::{NoProgress, TrainOptions, train_splats};
+                use inference_jobs::reconstruction::{NoProgress, TrainOptions, train_splats};
                 let options = TrainOptions { steps, lpips };
                 let report = train_splats(&data, &out, &options, &NoProgress)?;
                 println!(
@@ -285,7 +285,7 @@ async fn main() -> Result<()> {
             attention,
             weights,
         } => {
-            use inference_api::reconstruction::{
+            use inference_jobs::reconstruction::{
                 AttentionKind, GgmlDType, NoProgress, WorldGenModels, WorldGenOptions,
                 generate_world,
             };

@@ -9,10 +9,8 @@ use axum::{
     extract::connect_info::MockConnectInfo,
     http::{Request, StatusCode, header},
 };
-use inference_api::{
-    Engine,
-    jobs::{JobEvent, JobOutput, JobResult, JobsConfig, Progress},
-};
+use inference_api::Engine;
+use inference_jobs::{JobEvent, JobOutput, JobQueue, JobResult, JobsConfig, Progress};
 use inference_server_core::auth::Peer;
 use inference_server_core::inference_server_router_builder::InferenceRsServerRouterBuilder;
 use serde_json::{Value, json};
@@ -26,9 +24,10 @@ const PORT: u16 = 40000;
 const BOUNDARY: &str = "job-boundary";
 const JOB_WAIT: Duration = Duration::from_secs(30);
 
-async fn router(engine: &Engine, peer: [u8; 4]) -> anyhow::Result<Router> {
+async fn router(engine: &Engine, jobs: &JobQueue, peer: [u8; 4]) -> anyhow::Result<Router> {
     Ok(InferenceRsServerRouterBuilder::new()
         .with_engine(engine)
+        .with_jobs(jobs.clone())
         .build()
         .await?
         .layer(MockConnectInfo(Peer::from(SocketAddr::from((peer, PORT))))))
@@ -66,14 +65,15 @@ async fn admins_start_jobs_and_owners_follow_and_fetch_them() -> anyhow::Result<
         json!({"runtime": {"device": "cpu"}}),
     )?)
     .await?;
-    let jobs = tempfile::tempdir()?;
-    engine.configure_jobs(JobsConfig {
-        dir: jobs.path().to_path_buf(),
+    let jobs_dir = tempfile::tempdir()?;
+    let jobs = JobQueue::default();
+    jobs.configure(JobsConfig {
+        dir: jobs_dir.path().to_path_buf(),
         worldmirror_repo: None,
         ..Default::default()
     });
-    let local = router(&engine, LOOPBACK).await?;
-    let lan = router(&engine, LAN).await?;
+    let local = router(&engine, &jobs, LOOPBACK).await?;
+    let lan = router(&engine, &jobs, LAN).await?;
 
     let request = json!({"kind": "reconstruct"});
     let (status, _) = json(&lan, submission(request.clone())).await?;
@@ -82,7 +82,7 @@ async fn admins_start_jobs_and_owners_follow_and_fetch_them() -> anyhow::Result<
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["error"]["code"], "job_not_configured", "{body}");
 
-    let queued = engine.submit_task("probe", None, |ctx| {
+    let queued = jobs.submit_task(&engine, "probe", None, |ctx| {
         ctx.stage("drawing", 0);
         let look = ctx.dir().join("look.png");
         image::RgbImage::new(2, 2).save(&look)?;
@@ -96,7 +96,7 @@ async fn admins_start_jobs_and_owners_follow_and_fetch_them() -> anyhow::Result<
             report: Value::Null,
         })
     })?;
-    let (_, mut changes) = engine.job_events(&queued.id)?;
+    let (_, mut changes) = jobs.events(&engine, &queued.id)?;
     tokio::time::timeout(JOB_WAIT, async {
         while !matches!(changes.recv().await, Ok(JobEvent::Finished { .. }) | Err(_)) {}
     })
