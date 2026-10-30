@@ -92,6 +92,7 @@ impl Config {
                     .filter(|&layer_idx| !self.is_moe_layer(layer_idx))
                     .collect(),
                 cuda_decode_graphs: true,
+                shared_expert: None,
             }),
             ..Default::default()
         }

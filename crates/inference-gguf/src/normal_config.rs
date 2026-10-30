@@ -111,6 +111,10 @@ pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; NORMAL_LOADER_TYPE_COUN
         build: build_glm4_moe,
     },
     NormalConfigBuilder {
+        loader: NormalLoaderType::Qwen2Moe,
+        build: build_qwen2_moe,
+    },
+    NormalConfigBuilder {
         loader: NormalLoaderType::Qwen3Moe,
         build: build_qwen3_moe,
     },
@@ -1540,6 +1544,48 @@ fn build_glm4_moe(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     Ok(JsonValue::Object(config))
 }
 
+// llama.cpp's defaults where the expert sizes are missing; its graph never renormalizes the top-k weights
+fn build_qwen2_moe(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
+    reject_unsupported_rope_scaling(metadata, "Qwen2-MoE")?;
+    let fields = StandardFields::read(metadata, None)?;
+    let num_experts_per_tok = metadata.required_usize("expert_used_count")?;
+    let mut config = fields.rms_json();
+    config.insert("hidden_act".into(), json!("silu"));
+    config.insert("head_dim".into(), json!(fields.head_dim));
+    config.insert("use_sliding_window".into(), json!(false));
+    config.insert(
+        "qkv_bias".into(),
+        json!(metadata.has_tensor_marker(".attn_q.bias")),
+    );
+    config.insert(
+        "moe_intermediate_size".into(),
+        json!(
+            metadata
+                .optional_usize("expert_feed_forward_length")?
+                .unwrap_or(fields.intermediate_size / num_experts_per_tok)
+        ),
+    );
+    config.insert(
+        "shared_expert_intermediate_size".into(),
+        json!(
+            metadata
+                .optional_usize("expert_shared_feed_forward_length")?
+                .unwrap_or(fields.intermediate_size)
+        ),
+    );
+    config.insert(
+        "num_experts".into(),
+        json!(metadata.required_usize("expert_count")?),
+    );
+    config.insert("num_experts_per_tok".into(), json!(num_experts_per_tok));
+    config.insert("norm_topk_prob".into(), json!(false));
+    config.insert(
+        "mlp_only_layers".into(),
+        json!(dense_layer_indices(metadata, fields.num_hidden_layers)),
+    );
+    Ok(JsonValue::Object(config))
+}
+
 fn build_qwen3_moe(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     reject_unsupported_rope_scaling(metadata, "Qwen3 MoE")?;
     let fields = StandardFields::read(metadata, None)?;
@@ -2846,7 +2892,7 @@ mod tests {
             hunyuan_v1_dense, hunyuan_v1_moe, lfm2, olmo, starcoder2,
         };
         pub use inference_models_phi::{phi2, phi3, phi3_5_moe};
-        pub use inference_models_qwen::{qwen2, qwen3, qwen3_moe, qwen3_next};
+        pub use inference_models_qwen::{qwen2, qwen2_moe, qwen3, qwen3_moe, qwen3_next};
     }
     use std::collections::HashSet;
     use strum::IntoEnumIterator;
@@ -2922,6 +2968,7 @@ mod tests {
                 | NormalLoaderType::DeepSeekV3
                 | NormalLoaderType::GLM4MoeLite
                 | NormalLoaderType::GLM4Moe
+                | NormalLoaderType::Qwen2Moe
                 | NormalLoaderType::Qwen3Moe
                 | NormalLoaderType::GptOss
                 | NormalLoaderType::HunYuanMoEV1
@@ -3238,6 +3285,9 @@ mod tests {
             ),
             NormalLoaderType::GLM4Moe => {
                 assert_deserializes(loader, config, models::glm4_moe::Glm4MoeConfig::from_json)
+            }
+            NormalLoaderType::Qwen2Moe => {
+                assert_deserializes(loader, config, models::qwen2_moe::Config::from_json)
             }
             NormalLoaderType::Qwen3Moe => {
                 assert_deserializes(loader, config, models::qwen3_moe::Config::from_json)

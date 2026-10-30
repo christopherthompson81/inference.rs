@@ -22,6 +22,7 @@ Fine-tunes and model sizes within a family use the same entry.
 | Phi-3 and Phi-3.5 | `phi3` |
 | Phi-3.5 MoE | `phimoe` |
 | Qwen2 and Qwen2.5 | `qwen2` |
+| Qwen1.5-MoE and Qwen2-MoE | `qwen2moe` |
 | Qwen3 | `qwen3` |
 | Qwen3 MoE | `qwen3moe` |
 | Qwen3-Next and Qwen3-Coder-Next | `qwen3next` |

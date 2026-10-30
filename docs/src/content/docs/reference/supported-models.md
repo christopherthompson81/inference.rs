@@ -33,6 +33,7 @@ The `Architecture` column is the `config.json` `architectures` value. Per-family
 | `PhiForCausalLM` | Phi-2 | <details><summary><code>microsoft/phi-2</code></summary><code>inference run -m microsoft/phi-2</code></details> |
 | `Phi3ForCausalLM` | Phi-3, Phi-3.5 | <details><summary><code>microsoft/Phi-3-medium-4k-instruct</code></summary><code>inference run -m microsoft/Phi-3-medium-4k-instruct</code></details> |
 | `Qwen2ForCausalLM` | Qwen2, Qwen2.5 | <details><summary><code>Qwen/Qwen2.5-7B-Instruct</code> (2.5), <code>Qwen/Qwen2-7B-Instruct</code> (2)</summary><code>inference run -m Qwen/Qwen2.5-7B-Instruct</code><br><code>inference run -m Qwen/Qwen2-7B-Instruct</code></details> |
+| `Qwen2MoeForCausalLM` | Qwen1.5-MoE, Qwen2-MoE | <details><summary><code>Qwen/Qwen2-57B-A14B-Instruct</code> (2), <code>Qwen/Qwen1.5-MoE-A2.7B-Chat</code> (1.5)</summary><code>inference run -m Qwen/Qwen2-57B-A14B-Instruct</code><br><code>inference run -m Qwen/Qwen1.5-MoE-A2.7B-Chat</code></details> |
 | `Gemma2ForCausalLM` | Gemma 2 | <details><summary><code>google/gemma-2-9b-it</code></summary><code>inference run -m google/gemma-2-9b-it</code></details> |
 | `Starcoder2ForCausalLM` | Starcoder2 | <details><summary><code>bigcode/starcoder2-7b</code></summary><code>inference run -m bigcode/starcoder2-7b</code></details> |
 | `PhiMoEForCausalLM` | Phi-3.5-MoE | <details><summary><code>microsoft/Phi-3.5-MoE-instruct</code></summary><code>inference run -m microsoft/Phi-3.5-MoE-instruct</code></details> |

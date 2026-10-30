@@ -644,6 +644,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `NormalLoaderType.PHI2` | `'phi2'` |
 | `NormalLoaderType.PHI3` | `'phi3'` |
 | `NormalLoaderType.QWEN2` | `'qwen2'` |
+| `NormalLoaderType.QWEN2MOE` | `'qwen2moe'` |
 | `NormalLoaderType.GEMMA2` | `'gemma2'` |
 | `NormalLoaderType.STARCODER2` | `'starcoder2'` |
 | `NormalLoaderType.PHI3_5MOE` | `'phi3.5moe'` |

@@ -87,6 +87,7 @@ impl Config {
                 name: BLOCK_SPARSE_MOE,
                 dense_layers: Vec::new(),
                 cuda_decode_graphs: false,
+                shared_expert: None,
             }),
             lm_head_bias: self.lm_head_bias,
             ..Default::default()
