@@ -16,6 +16,7 @@ use inference_core::{
 use inference_tensor::{DType, Tensor};
 use serde_json::{Map, Value, json};
 
+use crate::media_source::MediaAttachments;
 use crate::{
     api_error::{ApiError, ApiErrorKind, ModelErrorMessage},
     dispatch::send_request_with_model,
@@ -1291,7 +1292,11 @@ impl Media {
 }
 
 /// One data URL as an image, or an audio clip when it says so.
-async fn load_media(url: &Value, media: &mut Media) -> Result<(), EmbeddingError> {
+async fn load_media(
+    url: &Value,
+    media: &mut Media,
+    attachments: &MediaAttachments,
+) -> Result<(), EmbeddingError> {
     let fail = |message: String| invalid(message, "files".into());
     let Some(url) = url.as_str().filter(|url| url.starts_with(DATA_URL)) else {
         return Err(fail(
@@ -1305,12 +1310,12 @@ async fn load_media(url: &Value, media: &mut Media) -> Result<(), EmbeddingError
         )));
     }
     if url.starts_with(DATA_AUDIO) {
-        let audio = crate::util::parse_audio_url(url)
+        let audio = crate::util::parse_audio_url(url, attachments)
             .await
             .map_err(|e| fail(e.to_string()))?;
         media.audios.push(audio);
     } else {
-        let image = crate::util::parse_image_url(url)
+        let image = crate::util::parse_image_url(url, attachments)
             .await
             .map_err(|e| fail(e.to_string()))?;
         media.images.push(image);
@@ -1320,10 +1325,13 @@ async fn load_media(url: &Value, media: &mut Media) -> Result<(), EmbeddingError
 
 /// The request's media: `files` and `images`, then the image and audio parts of a chat-message state, which leave
 /// the state (llama.cpp's `parse_state`).
-async fn collect_media(request: &DecisionRequest) -> Result<(Value, Media), EmbeddingError> {
+async fn collect_media(
+    request: &DecisionRequest,
+    attachments: &MediaAttachments,
+) -> Result<(Value, Media), EmbeddingError> {
     let mut media = Media::default();
     for url in request.files.iter().chain(&request.images) {
-        load_media(&json!(url), &mut media).await?;
+        load_media(&json!(url), &mut media, attachments).await?;
     }
     let wrapped = request.state.get("messages").is_some_and(Value::is_array);
     let messages = match wrapped {
@@ -1344,7 +1352,12 @@ async fn collect_media(request: &DecisionRequest) -> Result<(Value, Media), Embe
             match part.get("type").and_then(Value::as_str) {
                 Some("image_url") if part.get("image_url").is_some() => {
                     let image_url = &part["image_url"];
-                    load_media(image_url.get("url").unwrap_or(image_url), &mut media).await?;
+                    load_media(
+                        image_url.get("url").unwrap_or(image_url),
+                        &mut media,
+                        attachments,
+                    )
+                    .await?;
                 }
                 Some("input_audio") if part.get("input_audio").is_some() => {
                     let audio = &part["input_audio"];
@@ -1358,6 +1371,7 @@ async fn collect_media(request: &DecisionRequest) -> Result<(Value, Media), Embe
                     load_media(
                         &json!(format!("{DATA_AUDIO}{format};base64,{data}")),
                         &mut media,
+                        attachments,
                     )
                     .await?;
                 }
@@ -1411,6 +1425,7 @@ pub(crate) async fn decide(
     profile: &LabelDecision,
     request: &DecisionRequest,
     model: Option<&str>,
+    attachments: &MediaAttachments,
 ) -> Result<(IndexMap<String, DecisionAnswer>, usize), EmbeddingError> {
     let questions = request
         .questions
@@ -1426,7 +1441,7 @@ pub(crate) async fn decide(
             "state".into(),
         ));
     }
-    let (request_state, media) = collect_media(request).await?;
+    let (request_state, media) = collect_media(request, attachments).await?;
     if !media.is_empty() {
         check_media(profile, &media)?;
     }
@@ -1886,7 +1901,12 @@ mod tests {
             {"type": "text", "text": "see"},
             {"type": "image_url", "image_url": {"url": png_url()}},
         ]}]});
-        let Ok((state, media)) = collect_media(&request(state, vec![png_url()])).await else {
+        let Ok((state, media)) = collect_media(
+            &request(state, vec![png_url()]),
+            &MediaAttachments::default(),
+        )
+        .await
+        else {
             panic!("the media load");
         };
         assert_eq!(media.images.len(), 2);
@@ -1895,7 +1915,11 @@ mod tests {
             json!({"messages": [{"role": "user", "content": [{"type": "text", "text": "see"}]}]})
         );
         let remote = request(json!("s"), vec!["https://example.com/a.png".into()]);
-        assert!(collect_media(&remote).await.is_err());
+        assert!(
+            collect_media(&remote, &MediaAttachments::default())
+                .await
+                .is_err()
+        );
     }
 
     #[test]

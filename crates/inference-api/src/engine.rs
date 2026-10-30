@@ -892,6 +892,8 @@ pub struct Engine {
     _skill_dir: Option<Arc<tempfile::TempDir>>,
     // Unregistered with the last clone.
     _progress: Option<Arc<inference_core::load_progress::ProgressSinkGuard>>,
+    /// Resolves media sources the engine does not read itself; without one, only attachments and data: URLs work.
+    media_fetcher: Option<Arc<dyn crate::media_source::MediaFetcher>>,
 }
 
 impl Engine {
@@ -902,6 +904,7 @@ impl Engine {
             models: Arc::new(models),
             _skill_dir: None,
             _progress: None,
+            media_fetcher: None,
         }
     }
 
@@ -984,6 +987,19 @@ impl Engine {
         let mut scoped = self.clone();
         scoped.chat.owner = Some(owner.into());
         scoped
+    }
+
+    /// The same engine with `fetcher` resolving the media sources a request names that are neither attachments nor
+    /// data: URLs (http URLs, paths, a host's own schemes), under the host's policy.
+    pub fn with_media_fetcher(&self, fetcher: Arc<dyn crate::media_source::MediaFetcher>) -> Self {
+        let mut fetching = self.clone();
+        fetching.media_fetcher = Some(fetcher);
+        fetching
+    }
+
+    // a request's attachments, with this engine's fetcher for what they do not hold
+    fn media(&self, media: MediaAttachments) -> MediaAttachments {
+        media.with_fetcher(self.media_fetcher.clone())
     }
 
     /// Who this engine acts for; `None` when unscoped.
@@ -1078,7 +1094,7 @@ impl Engine {
         let state = self.state().clone();
         let prepared = self
             .chat
-            .prepare_with_approver(request, media, approver)
+            .prepare_with_approver(request, self.media(media), approver)
             .await
             .map_err(|error| error.into_api_error(state))?;
         self.collect_prepared_chat(prepared).await
@@ -1141,7 +1157,7 @@ impl Engine {
         let state = self.state().clone();
         let prepared = self
             .chat
-            .prepare(request, tool_surface, media)
+            .prepare(request, tool_surface, self.media(media))
             .await
             .map_err(|error| error.into_api_error(state.clone()))?;
         Ok(
@@ -1184,7 +1200,11 @@ impl Engine {
     ) -> Result<crate::engine_chat::PreparedChat, ApiError> {
         let state = self.state().clone();
         self.chat
-            .prepare(request, OpenAiToolSurface::ChatCompletions, media)
+            .prepare(
+                request,
+                OpenAiToolSurface::ChatCompletions,
+                self.media(media),
+            )
             .await
             .map_err(|error| error.into_api_error(state))
     }
@@ -1675,7 +1695,7 @@ impl Engine {
         request: ImageEditRequest,
         media: MediaAttachments,
     ) -> Result<ImageGenerationResponse, ApiError> {
-        edit_image(self.state(), request, media, self.owner()).await
+        edit_image(self.state(), request, self.media(media), self.owner()).await
     }
 
     pub async fn image_edit_json(
@@ -2024,16 +2044,20 @@ impl Engine {
 
     /// Answers typed questions (choice, score, noul) about a state with a decision model .
     pub async fn decide(&self, request: DecisionRequest) -> Result<DecisionResponse, ApiError> {
-        crate::engine_decision::decide(self.state().clone(), request)
-            .await
-            .map_err(|error| match error {
-                EmbeddingError::Validation(error) => {
-                    ApiError::from_error(error.as_ref(), ApiErrorKind::InvalidRequest)
-                }
-                EmbeddingError::Internal(error) => {
-                    ApiError::from_error(error.as_ref(), ApiErrorKind::Internal)
-                }
-            })
+        crate::engine_decision::decide(
+            self.state().clone(),
+            request,
+            self.media(MediaAttachments::default()),
+        )
+        .await
+        .map_err(|error| match error {
+            EmbeddingError::Validation(error) => {
+                ApiError::from_error(error.as_ref(), ApiErrorKind::InvalidRequest)
+            }
+            EmbeddingError::Internal(error) => {
+                ApiError::from_error(error.as_ref(), ApiErrorKind::Internal)
+            }
+        })
     }
 
     pub async fn decide_json(&self, request: &[u8]) -> Result<String, ApiError> {

@@ -88,7 +88,16 @@ pub async fn reconstruct_on(
             max_frames: video.max_frames,
         };
         let path = input.to_string_lossy();
-        let decoded = inference_api::video::parse_video_url(&path, Some(sampling)).await?;
+        let bytes = tokio::fs::read(input).await?;
+        let attachments = inference_api::media_source::MediaAttachments::new(vec![
+            inference_api::media_source::MediaAttachment {
+                bytes,
+                mime_type: None,
+            },
+        ]);
+        let first = format!("{}0", inference_api::media_source::ATTACHMENT_PREFIX);
+        let decoded =
+            inference_api::video::parse_video_url(&first, Some(sampling), &attachments).await?;
         let source = VideoSource {
             path: path.to_string(),
             native_fps: decoded.fps,

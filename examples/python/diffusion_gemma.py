@@ -1,5 +1,14 @@
+import urllib.request
+
 import inference_rs as ir
 from inference_rs import types as t
+
+# the engine reads media from attachments (media://<index>); fetching it is the caller's part
+IMAGE = ir.MediaAttachment(
+    urllib.request.urlopen(
+        "https://www.nhmagazine.com/content/uploads/2019/05/mtwashingtonFranconia-2-19-18-108-Edit-Edit.jpg"
+    ).read()
+)
 
 # DiffusionGemma is a block-diffusion model: it denoises 256-token blocks in
 # parallel instead of sampling tokens one at a time. The API is unchanged, but
@@ -22,9 +31,7 @@ with ir.Engine(
                     content=[
                         {
                             "type": "image_url",
-                            "image_url": {
-                                "url": "https://www.nhmagazine.com/content/uploads/2019/05/mtwashingtonFranconia-2-19-18-108-Edit-Edit.jpg"
-                            },
+                            "image_url": {"url": "media://0"},
                         },
                         {
                             "type": "text",
@@ -34,7 +41,8 @@ with ir.Engine(
                 )
             ],
             max_tokens=1024,
-        )
+        ),
+        media=[IMAGE],
     )
     print(res.choices[0].message.content)
     print(res.usage)

@@ -24,9 +24,7 @@ use std::io::Cursor;
 use std::path::Path;
 use tokio::fs;
 
-use crate::media_source::{
-    LoadedMedia, Media, MediaAttachments, MediaSourcePolicy, SERVER_VIDEO_FRAME_LIMIT,
-};
+use crate::media_source::{LoadedMedia, Media, MediaAttachments, SERVER_VIDEO_FRAME_LIMIT};
 
 /// Default frames-per-second assumed when metadata is unavailable (e.g. GIF).
 const DEFAULT_FPS: f64 = 24.0;
@@ -44,59 +42,24 @@ FFmpeg is required for video input (non-GIF formats). Install it:
   - Windows: https://ffmpeg.org/download.html
 See https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/video-setup.md for details.";
 
-/// Fetch video bytes from a URL, file path, or data URL, then decode into
-/// a [`VideoInput`] (sampled frames + metadata).
-///
-/// Supports:
-/// - HTTP/HTTPS URLs
-/// - Local file paths (absolute or relative)
-/// - `file://` URLs
-/// - `data:video/...;base64,...` data URLs
+/// The video `source` names (an attachment, a `data:` URL, or anything the attachments' fetcher resolves), decoded
+/// into sampled frames.
 ///
 /// GIF files are decoded with the `image` crate. All other formats require
 /// FFmpeg.
 pub async fn parse_video_url(
-    url_unparsed: &str,
-    sampling: Option<VideoFrameSampling>,
-) -> Result<VideoInput> {
-    parse_video_url_with_policy(
-        url_unparsed,
-        sampling,
-        MediaSourcePolicy::Local,
-        &Default::default(),
-    )
-    .await
-}
-
-pub async fn parse_video_url_for_server(
-    url_unparsed: &str,
+    source: &str,
     sampling: Option<VideoFrameSampling>,
     attachments: &MediaAttachments,
 ) -> Result<VideoInput> {
-    parse_video_url_with_policy(
-        url_unparsed,
-        Some(sampling.unwrap_or_default()),
-        MediaSourcePolicy::ServerRequest,
-        attachments,
-    )
-    .await
-}
-
-async fn parse_video_url_with_policy(
-    url_unparsed: &str,
-    sampling: Option<VideoFrameSampling>,
-    policy: MediaSourcePolicy,
-    attachments: &MediaAttachments,
-) -> Result<VideoInput> {
-    if let Some(Media::Video(video)) = attachments.attached(url_unparsed, "video")? {
+    if let Some(Media::Video(video)) = attachments.attached(source, "video")? {
         return Ok(video.clone());
     }
-    let media = attachments.load(url_unparsed, policy, "video").await?;
-
-    if is_gif_source(url_unparsed, &media) {
+    let media = attachments.load(source, "video").await?;
+    if is_gif_source(source, &media) {
         decode_gif_frames(&media.bytes, sampling)
     } else {
-        decode_video_ffmpeg(&media.bytes, sampling, url_unparsed).await
+        decode_video_ffmpeg(&media.bytes, sampling, source).await
     }
 }
 
@@ -449,15 +412,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn server_video_rejects_local_sources() {
+    async fn a_video_path_needs_a_fetcher() {
+        let none = MediaAttachments::default();
         assert!(
-            parse_video_url_for_server(
-                "resources/rust-logo-32x32.png",
-                None,
-                &MediaAttachments::default()
-            )
-            .await
-            .is_err()
+            parse_video_url("resources/rust-logo-32x32.png", None, &none)
+                .await
+                .is_err()
         );
     }
 }

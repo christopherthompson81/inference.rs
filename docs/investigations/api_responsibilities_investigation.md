@@ -120,3 +120,30 @@ the holder, free, released. Binding tests (Python 51, C# engine checks) and the 
 - Whole-crate compile: inference-api 10 -> 8 s; core 16, server-core 10, web UI 5.
 
 **Next:** the last #701 item, media fetched by URL (`media_source`, `video`, ~14k).
+
+## Run 5 - 2026-10-29 19:12
+
+**Question:** the last #701 item, media fetched by URL. The user chose: the server fetches, the engine takes bytes.
+
+**Change:**
+- Every engine path resolved media through `MediaAttachments::load(source, policy, kind)`, which fetched http(s) (a
+  public-network policy for server requests, any address for local callers), read files and served the web UI's
+  uploads. The engine now reads only `media://N` attachments and `data:` URLs; anything else goes to a `MediaFetcher`
+  the host gives the engine (`Engine::with_media_fetcher`, carried on the handle as the owner is), and without one
+  fails with "fetch it and attach the bytes". One parser per kind (`parse_image_url`, `parse_audio_url`,
+  `parse_video_url`, input files' `file_url`, decision media) takes the request's attachments.
+- The policy and the fetching move to `inference_server_core::media_fetch` (`PolicyFetcher` over `MediaSourcePolicy`,
+  the UI upload directory, size and timeout limits); the router builder installs the server-request fetcher on its
+  engine, and the CLI's local chat reads paths and URLs with the local one. The reconstruction job reads its video and
+  attaches it. The C ABI coverage test lists `with_media_fetcher` with its reason: a binding fetches media itself.
+- The 20 in-process Python examples download their media with `urllib` and attach it (the Rust ones already fetched
+  their bytes); the multimodal and speech guides show attachments, and the URL-forms section says what the engine reads
+  and what the server adds. It had shown `file://` URLs over HTTP, which the server never read.
+
+**Finding:** CPU suite 3006 passed, binding and example checks pass, `docs/openapi.json` unchanged. The fetch tests
+moved with the code: a local client reads paths and file URLs, a server request reads neither and reaches only the
+public network. inference-api 860853 IR lines (884,739 before); the HTTP client itself stays in core, which other code
+shares, so this item was about where the responsibility sits.
+
+**Implication:** #701's list is done: Anthropic (#702), Responses (#703), device leases (#704), jobs (#705), media
+fetching (this run).

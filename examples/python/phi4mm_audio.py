@@ -1,6 +1,7 @@
+import urllib.request
+
 import inference_rs as ir
 from inference_rs import types as t
-
 
 # Choose a multimodal model that supports both modalities
 spec = t.EngineSpec(
@@ -10,9 +11,12 @@ spec = t.EngineSpec(
     ),
 )
 
-# Remote media assets (swap for anything you like)
+# Remote media assets (swap for anything you like); the engine reads media from attachments (media://<index>), so
+# fetching them is the caller's part
 IMAGE_URL = "https://www.allaboutbirds.org/guide/assets/og/528129121-1200px.jpg"
 AUDIO_URL = "https://upload.wikimedia.org/wikipedia/commons/4/42/Bird_singing.ogg"
+AUDIO = ir.MediaAttachment(urllib.request.urlopen(AUDIO_URL).read())
+IMAGE = ir.MediaAttachment(urllib.request.urlopen(IMAGE_URL).read())
 
 
 with ir.Engine(spec) as engine:
@@ -25,11 +29,11 @@ with ir.Engine(spec) as engine:
                     content=[
                         {  # Audio clip
                             "type": "audio_url",
-                            "audio_url": {"url": AUDIO_URL},
+                            "audio_url": {"url": "media://0"},
                         },
                         {  # Image
                             "type": "image_url",
-                            "image_url": {"url": IMAGE_URL},
+                            "image_url": {"url": "media://1"},
                         },
                         {
                             "type": "text",
@@ -41,7 +45,8 @@ with ir.Engine(spec) as engine:
             max_tokens=256,
             temperature=0.2,
             top_p=0.9,
-        )
+        ),
+        media=[AUDIO, IMAGE],
     )
 
     print(response.choices[0].message.content)

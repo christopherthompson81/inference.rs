@@ -154,7 +154,10 @@ impl InferenceRsServerRouterBuilder {
 
     /// Serves a loaded engine; each request acts through it for the request's owner.
     pub fn with_engine(mut self, engine: &Engine) -> Self {
-        self.engine = Some(engine.clone());
+        // the server fetches the media a request names by URL, on the public network, and the web UI's uploads
+        let fetcher =
+            crate::media_fetch::PolicyFetcher(crate::media_fetch::MediaSourcePolicy::ServerRequest);
+        self.engine = Some(engine.with_media_fetcher(std::sync::Arc::new(fetcher)));
         self
     }
 

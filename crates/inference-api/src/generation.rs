@@ -29,7 +29,7 @@ use crate::{
         diarization_rttm, transcript_srt, transcript_vtt,
     },
     types::SharedInferenceRsState,
-    util::{parse_image_url_for_server, validate_model_name},
+    util::{parse_image_url, validate_model_name},
 };
 
 // a transducer beam search costs a joint evaluation per hypothesis per frame; past this it buys nothing
@@ -236,7 +236,7 @@ async fn edit_image_inner(
     }
     let mut images = Vec::with_capacity(request.images.len());
     for (i, image) in request.images.iter().enumerate() {
-        let image = parse_image_url_for_server(&image.image_url, &media)
+        let image = parse_image_url(&image.image_url, &media)
             .await
             .map_err(|e| {
                 ApiError::new(

@@ -415,6 +415,7 @@ fn n_options(question: &DecisionQuestion) -> usize {
 pub(crate) async fn decide(
     state: SharedInferenceRsState,
     request: DecisionRequest,
+    attachments: crate::media_source::MediaAttachments,
 ) -> Result<DecisionResponse, EmbeddingError> {
     let repr = serde_json::to_string(&request).expect("Serialization of decision request failed.");
     InferenceRs::maybe_log_request(state.clone(), repr);
@@ -430,14 +431,19 @@ pub(crate) async fn decide(
     }
     let model_override = (request.model != "default").then(|| request.model.clone());
     if let Ok(Some(profile)) = state.label_decision(model_override.as_deref()) {
-        let (answers, input_tokens) =
-            engine_decision_labels::decide(&state, &profile, &request, model_override.as_deref())
-                .await
-                .inspect_err(|e| {
-                    if let EmbeddingError::Internal(e) = e {
-                        InferenceRs::maybe_log_error(state.clone(), e.as_ref());
-                    }
-                })?;
+        let (answers, input_tokens) = engine_decision_labels::decide(
+            &state,
+            &profile,
+            &request,
+            model_override.as_deref(),
+            &attachments,
+        )
+        .await
+        .inspect_err(|e| {
+            if let EmbeddingError::Internal(e) = e {
+                InferenceRs::maybe_log_error(state.clone(), e.as_ref());
+            }
+        })?;
         return Ok(respond(&state, request, answers, input_tokens));
     }
     if !matches!(

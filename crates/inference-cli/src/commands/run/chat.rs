@@ -15,10 +15,11 @@ use inference_api::{
         BlockDenoisingProgress, ChatStreamEvent, ReasoningEffort, RequestCancellation, Usage,
     },
     files::File,
-    media_source::{MediaAttachment, MediaAttachments, MediaSourcePolicy, load_media_source},
+    media_source::{MAX_MEDIA_BYTES, MediaAttachment, MediaAttachments},
     models::EncoderCacheStats,
     openai::{ChatCompletionRequest, GenerationDefaults, ModelObject},
 };
+use inference_server_core::media_fetch::{MediaSourcePolicy, load_media_source};
 use serde_json::{Value, json};
 use tracing::info;
 
@@ -236,7 +237,7 @@ impl SessionMedia {
         part: &str,
     ) -> anyhow::Result<String> {
         let kind = part.trim_end_matches("_url");
-        let loaded = load_media_source(reference, MediaSourcePolicy::Local, kind)
+        let loaded = load_media_source(reference, MediaSourcePolicy::Local, kind, MAX_MEDIA_BYTES)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to load {kind} `{reference}`: {e}"))?;
         self.attachments.push(MediaAttachment {
