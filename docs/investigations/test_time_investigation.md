@@ -234,3 +234,25 @@ Implication: the CUDA suite's wall is set by its long single tests (Parakeet at 
 than by its sum; Parakeet's repeat test, Kokoro's three long CPU tests and the qwen4exp speculative tests are the
 first to look at. Run 10 kept no per-test times, so the ~25 s is not attributed to specific tests; this run's lists
 are the baseline for the next round.
+
+## Run 12 - 2026-10-29 20:38
+
+Question: where does test time stand against Run 11, across the five full local CI runs of the #702-#708 PRs?
+
+Command: `scripts/housekeeping.sh --slow-tests` on each run's `scripts/local_ci.sh --lint --tests --cuda --bindings
+--size --sweep` log (no `/usr/bin/time` wall for these).
+
+Finding:
+- CUDA suite wall / summed test time per run: Responses 101.9 s / 1452 s, devices 97.9 / 1391, jobs 98.4 / 1380,
+  media 98.5 / 1383, decision formats 137.2 / 1956 (Run 11: 126.8 s). The last run is 40% slower in every test alike
+  (Parakeet repeat 28.0 s against 21.9-23.1, `qwen3_5_text_tiny` 163 s against 100-134), so it was load on the machine,
+  not the change; the steady CUDA wall is ~98-102 s.
+- CPU suite: 21.0 s for 3005 tests (Run 11 22.8 s). Kokoro tiny 61.2 s in 5 tests (repeats-exactly 20.7, reads-English
+  16.3, phonemes 13.1, GGUF 7.2), Kokoro g2p unit tests 15.8 s (21), Parakeet tiny 13.2 s (11).
+- CUDA, steady runs: Parakeet each-head-repeats 21.9-23.1 s alone (a quarter of the wall), llama4 CPU vs GPU 8.3-13.5
+  s, the qwen4exp speculative tests ~10 s each; modules `qwen3_5_text_tiny` 100-134 s (26), inference-nn `ops` and
+  `cuda::gdn` ~140-160 s each.
+
+Implication: the CUDA wall is set by Parakeet's repeat test: cutting its repeats or its checkpoint size is the first
+test-time item, then Kokoro's three long CPU tests. A run on a loaded machine is not comparable; recheck a slow
+outlier against the neighbouring runs before attributing it.
