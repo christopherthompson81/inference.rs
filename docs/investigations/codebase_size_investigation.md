@@ -3086,3 +3086,35 @@ Finding:
 Implication: Run 95's ranked list is done (#709-#713). This round: duplication 29,070 -> 27,410 (-1,660 lines),
 models-qwen IR 664,260 -> 645,260, quant 871,825 -> 866,237, and a fixed image-and-video merge in Qwen3-VL / Qwen3.5.
 A `collect` over a closure per call site is its own instantiation; in a crate others link, a loop is cheaper.
+
+## Run 101 - 2026-10-30 07:52
+
+Question: the next duplication candidate after Run 100: LLaVA 1.5 and LLaVA-Next (95 windows). Their models share
+the projector, the CLIP tower, the constructor, the ISQ residuals and every trait method but `forward`; their input
+processors the prompt expansion, marker restore and packed layout; their loaders all but the model type and the
+image token count (~680 shared lines in 19 spans).
+
+Change: one `llava::model::Model` and one `llava::inputs_processor::LLaVAInputProcessor`, each taking `anyres`
+(LLaVA-Next), and one `llava_loader!` for `LLaVALoader` and `LLaVANextLoader` with one prefixer.
+- Model: Next alone loads `image_newline` (in the same load order) and merges the base view with its unpadded tile
+  grid; 1.5 takes the base view. Both encode through Next's per-image sample cache (1.5 is one sample an image, where
+  it used `cached_encode_images`) and splice through 1.5's batch-aware splice, now with a token count per image
+  (Next's assumed a batch of one row).
+- Inputs: one `LLaVAVisionSpecificArgs` (sizes, token and sample counts, hashes, packed layout); 1.5 pads each image
+  to a square, one sample; Next adds the anyres tiles. Marker restore is 1.5's stricter one for both: it also rejects
+  a query that covers part of an image placeholder or misses an image, which Next skipped; image features are not
+  splittable, so a scheduler never cuts one.
+- Fixed in passing: the projector error said "Unsupporg".
+
+Commands: `cargo nextest run -p inference -p inference-models-llama -p inference-core -E
+'test(/llava|LLaVA|multimodal_loaders/)'` and `-E 'test(/^llava_tiny::/)'`, CPU and `--profile cuda --features cuda`;
+`cargo llvm-lines -p inference-models-llama --lib` before and after; `scripts/dup_scan.py`.
+
+Finding:
+- `llava_tiny` (both models, a text prompt then an image prompt served partly from the prefix cache, pinned on prompt
+  lengths, greedy ids and logprobs) and the 1.5 text-prefill snapshot pass unchanged, CPU and CUDA, with the 48
+  LLaVA / multimodal loader unit tests.
+- models-llama IR 484,984 -> 464,875 (-20,109); duplication 27,691 -> 26,572 (-1,119); normalized lines
+  483,709 -> 482,199.
+
+Implication: next duplication candidates are gemma3n/gemma4 audio (76 windows) and phi3v/phi4 image embedding (63).
