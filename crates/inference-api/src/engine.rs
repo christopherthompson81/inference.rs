@@ -115,6 +115,11 @@ pub const DEFAULT_PREFIX_CACHE_DISK_GIB: u64 = 64;
 pub const DEFAULT_PREFIX_CACHE_DISK_TTL_MINS: u64 = 60;
 /// Tokens between a long prompt's recurrent checkpoints in the host prefix cache, the most a divergence redoes.
 pub const DEFAULT_PREFIX_CACHE_CHECKPOINT_TOKENS: usize = 16_384;
+/// Host memory the prefix cache keeps evicted entries in when no size is given, in GiB, at most
+/// `1 / PREFIX_CACHE_RAM_SHARE` of the machine's memory. A hybrid model's GPU checkpoint slots are few, and an agent's
+/// turns would otherwise evict the snapshot a new question over the same context resumes from.
+pub const DEFAULT_PREFIX_CACHE_RAM_GIB: u64 = 8;
+const PREFIX_CACHE_RAM_SHARE: u64 = 8;
 const BYTES_PER_GIB: u64 = 1 << 30;
 const SECS_PER_MIN: u64 = 60;
 /// Sequences a model serves at once unless told otherwise, shared by `inference serve` and specs. Low, since each one
@@ -200,6 +205,15 @@ pub struct ModelSpec {
     /// Never evicted to make room for another model; models are evictable by default.
     #[serde(default)]
     pub pinned: bool,
+}
+
+// the default RAM tier, shrunk on a machine with little memory
+fn default_prefix_cache_ram_bytes() -> u64 {
+    let cap = DEFAULT_PREFIX_CACHE_RAM_GIB.saturating_mul(BYTES_PER_GIB);
+    match inference_core::MemoryUsage.query(&Device::Cpu) {
+        Ok(memory) => cap.min(memory.total() as u64 / PREFIX_CACHE_RAM_SHARE),
+        Err(_) => cap,
+    }
 }
 
 impl ModelSpec {
@@ -342,7 +356,7 @@ pub struct RuntimeSpec {
     #[serde(default)]
     pub prefix_cache_disk_gib: Option<u64>,
     /// Host memory for prefix cache entries, in GiB: in front of `prefix_cache_dir`, or on its own without one;
-    /// unset or 0 keeps none in memory.
+    /// unset gives 8 (at most an eighth of the machine's memory), 0 keeps none in memory.
     #[serde(default)]
     pub prefix_cache_ram_gib: Option<u64>,
     /// Tokens between a long prompt's recurrent checkpoints in the host prefix cache, so a request that diverges early
@@ -744,10 +758,10 @@ impl EngineSpec {
         if let Some(prefix_cache_n) = runtime.prefix_cache_n {
             builder = builder.with_prefix_cache_n(prefix_cache_n);
         }
-        let memory_bytes = runtime
-            .prefix_cache_ram_gib
-            .unwrap_or_default()
-            .saturating_mul(BYTES_PER_GIB);
+        let memory_bytes = match runtime.prefix_cache_ram_gib {
+            Some(gib) => gib.saturating_mul(BYTES_PER_GIB),
+            None => default_prefix_cache_ram_bytes(),
+        };
         if runtime.prefix_cache_dir.is_some() || memory_bytes > 0 {
             builder = builder.with_prefix_store(Some(inference_core::PrefixStoreSettings {
                 dir: runtime.prefix_cache_dir.map(Into::into),

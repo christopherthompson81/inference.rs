@@ -13846,7 +13846,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Host memory for prefix cache entries, in GiB: in front of `prefix_cache_dir`, or on its own without one;\nunset or 0 keeps none in memory.",
+            "description": "Host memory for prefix cache entries, in GiB: in front of `prefix_cache_dir`, or on its own without one;\nunset gives 8 (at most an eighth of the machine's memory), 0 keeps none in memory.",
             "minimum": 0
           },
           "seed": {

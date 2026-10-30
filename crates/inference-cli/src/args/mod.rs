@@ -900,7 +900,8 @@ pub struct RuntimeOptions {
     #[serde(default)]
     pub prefix_cache_disk_gib: Option<u64>,
 
-    /// Host memory for prefix cache entries, in GiB: in front of `--prefix-cache-dir`, or on its own without one
+    /// Host memory for prefix cache entries, in GiB: in front of `--prefix-cache-dir`, or on its own without one;
+    /// default 8 (at most an eighth of the machine's memory), 0 keeps none in memory
     #[arg(long)]
     #[serde(default)]
     pub prefix_cache_ram_gib: Option<u64>,
