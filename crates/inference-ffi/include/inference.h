@@ -173,6 +173,8 @@ typedef struct inference_stream inference_stream;
 typedef struct inference_string inference_string;
 /* Owned bytes (audio, a file's content) and their MIME type. */
 typedef struct inference_blob inference_blob;
+/* A held CUDA device (see inference_device_lease_open); freeing it releases the device. */
+typedef struct inference_device_lease inference_device_lease;
 typedef struct inference_transcription_session inference_transcription_session;
 
 /* Loads an engine from a JSON spec, the EngineSpec schema in docs/openapi.json: {"model": <model selection>,
@@ -519,6 +521,26 @@ INFERENCE_API inference_status inference_file_delete(const inference_engine *eng
                                                     size_t file_id_len, inference_string **out_response);
 INFERENCE_API inference_status inference_file_content(const inference_engine *engine, const char *file_id,
                                                      size_t file_id_len, inference_blob **out_blob);
+
+/* The engine's CUDA devices, for GPU work of the caller's own. The requests name devices by CUDA ordinal ({"devices":
+ * [0, 1]}; every visible one when "devices" is absent); without one, the calls are INFERENCE_ERR_UNAVAILABLE with
+ * code "device_unavailable". Snapshot returns {"data": [{"device", "free", "total", "held_by", "models": [{"id",
+ * "bytes", "pinned", "quiet", "last_used"}]}]}: free and total bytes, the holder of a lease on it, and its resident
+ * models. Place takes {"devices", "need": "device" | {"bytes": n}, "displace": "busy" | "idle" | "nothing"} and returns
+ * where the work would go now, {"status": "run", "device", "evict": [model ids]}, or why it cannot yet,
+ * {"status": "wait", "reason"}, or ever, {"status": "never", "reason"}; "displace" says which models it may unload
+ * (any, idle ones only, none). Lease open takes {"device", "holder", "unload": [model ids], "drain_timeout_secs"} and
+ * holds the device for holder until inference_device_lease_free: nothing loads there meanwhile, and each model there
+ * (or each of "unload") unloads once it goes quiet. It blocks while they drain, and fails
+ * (INFERENCE_ERR_INVALID_REQUEST, code "device_busy") if the device is already held, a pinned model would have to go,
+ * or a model stays busy past the timeout (120 s by default). */
+INFERENCE_API inference_status inference_devices_snapshot(const inference_engine *engine, const char *request,
+                                                         size_t request_len, inference_string **out_response);
+INFERENCE_API inference_status inference_device_place(const inference_engine *engine, const char *request,
+                                                     size_t request_len, inference_string **out_response);
+INFERENCE_API inference_status inference_device_lease_open(const inference_engine *engine, const char *request,
+                                                          size_t request_len, inference_device_lease **out_lease);
+INFERENCE_API void inference_device_lease_free(inference_device_lease *lease);
 
 /* Jobs: world generation and reconstruction, queued and run one at a time. A job holds its CUDA device to itself while
  * it runs, unloading the idle models there (a pinned one makes it fail) and refusing loads there until it ends.

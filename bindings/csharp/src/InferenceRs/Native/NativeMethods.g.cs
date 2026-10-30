@@ -270,6 +270,21 @@ internal static unsafe partial class NativeMethods
         IntPtr engine, byte* fileId, nuint fileIdLen, out IntPtr outBlob);
 
     [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_devices_snapshot(
+        IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_device_place(
+        IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_device_lease_open(
+        IntPtr engine, byte* request, nuint requestLen, out IntPtr outLease);
+
+    [LibraryImport(Library)]
+    internal static partial void inference_device_lease_free(IntPtr lease);
+
+    [LibraryImport(Library)]
     internal static partial InferenceStatus inference_jobs_configure(
         IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
 

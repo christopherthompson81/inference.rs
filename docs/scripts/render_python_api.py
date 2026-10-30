@@ -43,6 +43,7 @@ GROUPS = [
                 "MediaAttachment",
                 "SkillFile",
                 "Blob",
+                "DeviceLease",
                 "InferenceError",
                 "Status",
                 "HostCallbacks",

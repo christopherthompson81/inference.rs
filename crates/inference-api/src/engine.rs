@@ -1804,6 +1804,82 @@ impl Engine {
         files::delete_file(self.state(), file_id, self.owner())
     }
 
+    /// What each of `devices` (every visible CUDA device when `None`) holds now: its free and total memory, the work
+    /// leasing it, and its resident models.
+    pub fn device_snapshots(
+        &self,
+        devices: Option<&[usize]>,
+    ) -> Result<Vec<crate::devices::DeviceSnapshot>, ApiError> {
+        crate::devices::candidate_devices(devices)?
+            .into_iter()
+            .map(|ordinal| {
+                let device = crate::devices::cuda_device(ordinal)?;
+                self.state()
+                    .device_snapshot(&device, ordinal)
+                    .map_err(|error| ApiError::from_error(&error, ApiErrorKind::Internal))
+            })
+            .collect()
+    }
+
+    /// Where work needing `need` would go now among `devices`, and which models it would unload; or why it must
+    /// wait, or why it never could.
+    pub fn place_need(
+        &self,
+        devices: Option<&[usize]>,
+        need: crate::devices::JobNeed,
+        displace: crate::devices::Displace,
+    ) -> Result<crate::devices::Placed, ApiError> {
+        let snapshots = self.device_snapshots(devices)?;
+        Ok(inference_core::placement::place(&snapshots, need, displace))
+    }
+
+    /// Holds CUDA device `ordinal` for `holder` until the lease drops: nothing loads there meanwhile, and each model
+    /// there (or each of `unload`) unloads once it goes quiet. Fails if the device is already held, a pinned model
+    /// would have to go, or a model stays busy past `drain_timeout`.
+    pub async fn lease_device(
+        &self,
+        ordinal: usize,
+        holder: &str,
+        unload: Option<&[String]>,
+        drain_timeout: std::time::Duration,
+    ) -> Result<crate::devices::DeviceLease, ApiError> {
+        let device = crate::devices::cuda_device(ordinal)?;
+        self.state()
+            .lease_device(&device, holder, unload, drain_timeout)
+            .await
+            .map_err(|error| ApiError::from_error(&error, ApiErrorKind::Internal))
+    }
+
+    pub fn device_snapshots_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        let request: crate::devices::DevicesRequest = parse_json(request)?;
+        let data = self.device_snapshots(request.devices.as_deref())?;
+        to_json(&crate::devices::DeviceSnapshotList {
+            data: data.into_iter().map(Into::into).collect(),
+        })
+    }
+
+    pub fn place_need_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        let request: crate::devices::PlaceRequest = parse_json(request)?;
+        let devices = request.devices.as_deref();
+        let placed = self.place_need(devices, request.need.into(), request.displace.into())?;
+        to_json(&crate::devices::PlacedJson::from(placed))
+    }
+
+    pub async fn lease_device_json(
+        &self,
+        request: &[u8],
+    ) -> Result<crate::devices::DeviceLease, ApiError> {
+        let request: crate::devices::LeaseRequest = parse_json(request)?;
+        let drain = crate::devices::drain_timeout(request.drain_timeout_secs);
+        self.lease_device(
+            request.device,
+            &request.holder,
+            request.unload.as_deref(),
+            drain,
+        )
+        .await
+    }
+
     /// Sets where jobs keep their folders and which weights they run; takes effect for jobs submitted afterwards.
     pub fn configure_jobs(&self, config: crate::jobs::JobsConfig) {
         self.jobs_configure(config);

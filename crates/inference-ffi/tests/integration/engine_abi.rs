@@ -504,6 +504,74 @@ fn request_call(
     by_id(call, engine, &request.to_string())
 }
 
+fn open_lease(
+    engine: *const inference_engine,
+    request: &Value,
+) -> (inference_status, *mut inference_device_lease) {
+    let request = request.to_string();
+    let mut lease = null_mut();
+    let status = unsafe {
+        inference_device_lease_open(
+            engine,
+            request.as_ptr().cast::<c_char>(),
+            request.len(),
+            &mut lease,
+        )
+    };
+    (status, lease)
+}
+
+// A build or a machine without CUDA answers device_unavailable; with a device, a lease holds it until freed.
+#[test]
+fn a_device_lease_holds_its_gpu_until_freed() {
+    let dir = support::tiny_checkpoint().unwrap();
+    let (status, engine) = load(&spec(dir.path()));
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let (status, snapshot) = request_call(inference_devices_snapshot, engine, &json!({}));
+    if status != INFERENCE_OK {
+        assert_eq!(status, INFERENCE_ERR_UNAVAILABLE, "{snapshot}");
+        assert_eq!(
+            snapshot["error"]["code"], "device_unavailable",
+            "{snapshot}"
+        );
+        let (status, lease) = open_lease(engine, &json!({"device": 0, "holder": "probe"}));
+        assert_eq!((status, lease.is_null()), (INFERENCE_ERR_UNAVAILABLE, true));
+        unsafe { inference_engine_free(engine) };
+        return;
+    }
+    assert!(
+        snapshot["data"][0]["total"].as_u64().unwrap() > 0,
+        "{snapshot}"
+    );
+    let (status, placed) = request_call(
+        inference_device_place,
+        engine,
+        &json!({"devices": [0], "need": {"bytes": 1}, "displace": "nothing"}),
+    );
+    assert_eq!(
+        (status, placed["status"].clone()),
+        (INFERENCE_OK, json!("run")),
+        "{placed}"
+    );
+
+    let (status, lease) = open_lease(engine, &json!({"device": 0, "holder": "probe"}));
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let (_, held) = request_call(inference_devices_snapshot, engine, &json!({"devices": [0]}));
+    assert_eq!(held["data"][0]["held_by"], "probe", "{held}");
+    let (status, second) = open_lease(engine, &json!({"device": 0, "holder": "other"}));
+    assert_eq!(
+        (status, second.is_null()),
+        (INFERENCE_ERR_INVALID_REQUEST, true)
+    );
+    let busy: Value = serde_json::from_str(&last_error()).unwrap();
+    assert_eq!(busy["error"]["code"], "device_busy", "{busy}");
+
+    unsafe { inference_device_lease_free(lease) };
+    let (_, released) = request_call(inference_devices_snapshot, engine, &json!({"devices": [0]}));
+    assert_eq!(released["data"][0]["held_by"], Value::Null, "{released}");
+    unsafe { inference_engine_free(engine) };
+}
+
 #[test]
 fn models_unload_reload_and_adapter_management_is_guarded() {
     let dir = support::tiny_checkpoint().unwrap();

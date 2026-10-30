@@ -4,6 +4,7 @@ from . import types
 from ._callbacks import HostCallbacks, HostRegistration, HostTool, HostToolCall, LoadProgress
 from ._codec import from_data, from_json, to_data, to_json
 from ._engine import (
+    DeviceLease,
     JsonEngine,
     MediaAttachment,
     SkillFile,
@@ -32,6 +33,7 @@ from ._typed import Engine
 __all__ = [
     "DEFAULT_THRESHOLD",
     "Blob",
+    "DeviceLease",
     "Engine",
     "HostCallbacks",
     "HostRegistration",

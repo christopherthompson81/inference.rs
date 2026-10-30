@@ -123,6 +123,21 @@ class EngineTest(unittest.TestCase):
             self.assertTrue(all(event.name == "chunk" for event in stream))
 
 
+    def test_device_calls_without_cuda_say_so(self):
+        # the tests build without CUDA, where every device call is the same refusal
+        calls = [
+            lambda: self.engine.device_snapshots(),
+            lambda: self.engine.device_place(json.dumps({"need": "device"})),
+            lambda: self.engine.device_lease(json.dumps({"device": 0, "holder": "probe"})),
+        ]
+        for call in calls:
+            with self.assertRaises(ir.InferenceError) as refused:
+                call()
+            self.assertEqual(
+                (refused.exception.status, refused.exception.code),
+                (ir.Status.UNAVAILABLE, "device_unavailable"),
+            )
+
     def test_errors_carry_the_envelope(self):
         with self.assertRaises(ir.InferenceError) as unknown:
             self.engine.chat(

@@ -66,3 +66,27 @@ and what does the move change?
 
 **Implication:** inference-api is about half the size it was this morning and compiles in 10 s. The job queue is
 next; the rebuild after a core edit is now bounded by other crates, not api.
+
+## Run 3 - 2026-10-29 18:13
+
+**Question:** before the job queue leaves inference-api, what does it need from the engine, and should that be in the
+C ABI? The user: the Rust SDK drops jobs (orchestration belongs after the SDK), and device leasing goes into the C ABI
+so a binding's own GPU work can coexist with the engine.
+
+**Change:** the queue's engine needs become engine operations (`inference-api/src/devices.rs`):
+- `Engine::device_snapshots(devices)`: per CUDA device, free and total bytes, the lease holder and resident models.
+- `Engine::place_need(devices, need, displace)`: where work needing a whole device or some bytes would go now, and
+  which models it would unload; or why it must wait, or never can. The placement policy is the engine's knowledge of
+  its own models.
+- `Engine::lease_device(ordinal, holder, unload, drain_timeout)`: holds the device until the lease drops; nothing loads
+  there meanwhile and its models unload as they go quiet.
+- JSON forms and C ABI entries: `inference_devices_snapshot`, `inference_device_place`, `inference_device_lease_open`
+  (an `inference_device_lease` handle) and `inference_device_lease_free`; C# `DeviceSnapshots`, `DevicePlace`,
+  `LeaseDevice` (a disposable `DeviceLease`); Python `device_snapshots`, `device_place`, `device_lease` (a
+  `DeviceLease` context manager). A busy device answers `device_busy` (INFERENCE_ERR_INVALID_REQUEST), a build or
+  machine without CUDA `device_unavailable` (INFERENCE_ERR_UNAVAILABLE).
+- The queue still uses core directly; it switches to these when it moves (next run).
+
+**Finding:** the C ABI test runs the no-device path on CPU and the whole cycle on the 3090 (`--features cuda`):
+snapshot, place a 1-byte need (`run` on device 0), lease, a second lease refused with `device_busy`, the snapshot naming
+the holder, free, released. Binding tests (Python 51, C# engine checks) and the CPU suite (3004) pass.

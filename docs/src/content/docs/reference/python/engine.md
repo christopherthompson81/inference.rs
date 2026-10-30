@@ -14,6 +14,35 @@ Bytes the engine returned with their MIME type: generated speech, or a file's co
 | `mime_type` | `str` |
 
 
+## `DeviceLease`
+
+A CUDA device held for GPU work of the caller's own; close (or `with`) releases it.
+
+### `DeviceLease.__init__`
+
+```text
+__init__(pointer)
+```
+
+### `DeviceLease.close`
+
+```text
+close()
+```
+
+### `DeviceLease.__enter__`
+
+```text
+__enter__()
+```
+
+### `DeviceLease.__exit__`
+
+```text
+__exit__()
+```
+
+
 ## `Engine`
 
 A loaded model serving typed requests; each takes a class from `inference_rs.types` or its JSON string.
@@ -383,6 +412,39 @@ transcription(
 ```
 
 The transcript of encoded audio, in the request's response_format (the blob's MIME type names it).
+
+### `Engine.device_snapshots`
+
+```text
+device_snapshots(devices: list[int] | None = None) -> dict
+```
+
+What each CUDA device (every visible one by default) holds now, as parsed JSON.
+
+### `Engine.device_place`
+
+```text
+device_place(
+    need,
+    devices: list[int] | None = None,
+    displace: str = 'busy',
+) -> dict
+```
+
+Where work needing `need` ("device", or {"bytes": n}) would go now, as parsed JSON.
+
+### `Engine.device_lease`
+
+```text
+device_lease(
+    device: int,
+    holder: str,
+    unload: list[str] | None = None,
+    drain_timeout_secs: int | None = None,
+) -> DeviceLease
+```
+
+Holds CUDA device `device` for `holder`, unloading its models (or `unload`) as they go quiet.
 
 ### `Engine.transcription_session`
 
@@ -904,6 +966,30 @@ transcription(request_json: str, audio: bytes) -> Blob
 ```
 
 Transcribes encoded audio (WAV, MP3, FLAC, ...); the blob's MIME type names the response format.
+
+### `JsonEngine.device_snapshots`
+
+```text
+device_snapshots(request_json: str = '{}') -> str
+```
+
+What each CUDA device holds now: free and total bytes, its lease holder and its resident models.
+
+### `JsonEngine.device_place`
+
+```text
+device_place(request_json: str) -> str
+```
+
+Where work with a need would go now, and which models it would unload; or why it must wait.
+
+### `JsonEngine.device_lease`
+
+```text
+device_lease(request_json: str) -> DeviceLease
+```
+
+Holds a CUDA device for the caller, unloading its models as they go quiet; blocks while they drain.
 
 ### `JsonEngine.transcription_session`
 
