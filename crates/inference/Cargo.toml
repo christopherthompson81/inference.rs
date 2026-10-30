@@ -13,7 +13,6 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
-inference-json.workspace = true
 inference-api.workspace = true
 inference-macros.workspace = true
 anyhow.workspace = true
@@ -29,6 +28,7 @@ base64.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+inference-json.workspace = true
 inference-tensor.workspace = true
 futures.workspace = true
 metrics-util.workspace = true

@@ -13,7 +13,6 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
-inference-json.workspace = true
 anyhow.workspace = true
 hound.workspace = true
 symphonia.workspace = true

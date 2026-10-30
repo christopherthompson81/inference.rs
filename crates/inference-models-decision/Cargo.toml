@@ -10,7 +10,6 @@ repository.workspace = true
 readme = "../../README.md"
 
 [dependencies]
-indexmap.workspace = true
 inference-nn.workspace = true
 inference-protocol = { workspace = true, features = ["openai"] }
 minijinja.workspace = true

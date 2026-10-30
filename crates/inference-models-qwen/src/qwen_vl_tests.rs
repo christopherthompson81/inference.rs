@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use inference_nn::loaders::MultimodalModelLoader;
+use inference_nn::device_map::AutoDeviceMapParams;
+use inference_nn::loaders::{DeviceMappedModelLoader, IsqModelLoader, MultimodalModelLoader};
 use inference_nn::paged_attention::AttentionImplementation;
 use inference_nn::testing::{
     Snapshot, assert_err_contains, assert_snapshot, by_arch, forward_multimodal, load_synthesized,
@@ -165,6 +166,111 @@ fn qwen3_vl_moe_prefill() -> Result<()> {
         l2: 17.858477,
     };
     assert_snapshot(&logits, VOCAB, &expected)
+}
+
+// Device mapping places weights by these sizes, so each must be what the load actually reads.
+fn sizing_matches_the_loaded_weights(
+    loader: &impl MultimodalModelLoader,
+    config: &Value,
+    shapes: HashMap<String, Vec<usize>>,
+) -> Result<()> {
+    let (_, seen) = load_synthesized(MLX_NAMES, shapes, DType::F32, |vb| {
+        loader.load(
+            &config.to_string(),
+            vb,
+            metadata(),
+            AttentionImplementation::Eager,
+        )
+    })?;
+    let layers = "model.language_model.layers.";
+    let loaded_bytes = |in_layers: bool| -> usize {
+        seen.iter()
+            .filter(|(name, _)| name.starts_with(layers) == in_layers)
+            .map(|(_, elems)| elems * DType::F32.size_in_bytes())
+            .sum()
+    };
+    let config = config.to_string();
+    let sizes = loader.layer_sizes_in_bytes(&config, DType::F32, 1, None)?;
+    assert_eq!(sizes.iter().sum::<usize>(), loaded_bytes(true));
+    assert_eq!(
+        loader.non_mapped_size_in_bytes(&config, DType::F32, 1, None, None)?,
+        loaded_bytes(false)
+    );
+    Ok(())
+}
+
+#[test]
+fn qwen3_vl_sizing_matches_the_loaded_weights() -> Result<()> {
+    sizing_matches_the_loaded_weights(
+        &Qwen3VLLoader,
+        &qwen3_vl_config(qwen3_vl_text()),
+        HashMap::new(),
+    )
+}
+
+#[test]
+fn qwen3_vl_moe_sizing_matches_the_loaded_weights() -> Result<()> {
+    sizing_matches_the_loaded_weights(
+        &Qwen3VLMoELoader,
+        &qwen3_vl_config(moe_text()),
+        moe_shapes(),
+    )
+}
+
+#[test]
+fn qwen3_vl_activations_cover_the_merged_images_and_the_encoder() -> Result<()> {
+    let params = AutoDeviceMapParams::Multimodal {
+        max_seq_len: 64,
+        max_batch_size: 2,
+        max_image_shape: (32, 48),
+        max_num_images: 3,
+    };
+    let config = qwen3_vl_config(moe_text()).to_string();
+    // 3 images of (32 / 2 / 2) x (48 / 2 / 2) merged tokens beside the 64-token prompt, 4 text heads
+    assert_eq!(
+        Qwen3VLMoELoader.mapped_max_act_size_elems(&config, &params)?,
+        2 * 4 * (3 * 8 * 12 + 64usize).pow(2)
+    );
+    // 6 images of 16 x 24 patches, 2 vision heads
+    assert_eq!(
+        Qwen3VLMoELoader.non_mapped_max_act_size_elems(&config, &params)?,
+        6 * 2 * (16 * 24usize).pow(2)
+    );
+    Ok(())
+}
+
+#[test]
+fn qwen3_vl_isq_reaches_the_experts_only_on_moe() -> Result<()> {
+    let config = qwen3_vl_config(moe_text()).to_string();
+    let hits = |regexes: Vec<regex::Regex>, name: &str| regexes.iter().any(|r| r.is_match(name));
+    let layer = "model.language_model.layers.1";
+    for name in ["self_attn.o_proj.weight", "mlp.down_proj.weight"] {
+        assert!(hits(
+            Qwen3VLLoader.isq_layer_regexes(&config)?,
+            &format!("{layer}.{name}")
+        ));
+        assert!(hits(
+            Qwen3VLMoELoader.isq_layer_regexes(&config)?,
+            &format!("{layer}.{name}")
+        ));
+    }
+    for name in [
+        "mlp.gate.weight",
+        "mlp.experts.3.down_proj.weight",
+        "mlp.experts.up_proj.weight",
+    ] {
+        let name = format!("{layer}.{name}");
+        assert!(!hits(Qwen3VLLoader.isq_layer_regexes(&config)?, &name));
+        assert!(hits(Qwen3VLMoELoader.isq_layer_regexes(&config)?, &name));
+    }
+    let moqe = Qwen3VLMoELoader.isq_layer_regexes_moqe(&config)?;
+    assert!(hits(
+        moqe.clone(),
+        &format!("{layer}.mlp.experts.3.down_proj.weight")
+    ));
+    assert!(!hits(moqe, &format!("{layer}.mlp.gate.weight")));
+    assert!(Qwen3VLLoader.isq_layer_regexes_moqe(&config)?.is_empty());
+    Ok(())
 }
 
 fn qwen2_vl_config(vision: Value) -> Value {

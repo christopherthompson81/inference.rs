@@ -28,7 +28,7 @@ use crate::qwen2_5_vl::{Config as Qwen2_5VLConfig, Qwen2_5VLModel};
 use crate::qwen2vl::{Config as Qwen2VLConfig, Qwen2VLModel};
 use crate::qwen3_5::{Config as Qwen3_5Config, Qwen3_5Model};
 use crate::qwen3_vl::{Config as Qwen3VLConfig, Qwen3VLModel};
-use crate::qwen3_vl_moe::{Config as Qwen3VLMoEConfig, Qwen3VLMoEModel};
+use crate::qwen3_vl_moe::Qwen3VLMoEModel;
 
 // HF Qwen3VLVideoProcessor sampling defaults, shared by the Qwen3-VL/3.5 family.
 const QWEN3_VIDEO_SAMPLING: VideoFrameSampling = VideoFrameSampling::Fps {
@@ -49,7 +49,6 @@ mod qwen3_embedding;
 mod qwen3_moe;
 mod qwen3_next;
 mod qwen3vl;
-mod qwen3vl_moe;
 #[cfg(test)]
 mod sizing_tests;
 
@@ -65,7 +64,6 @@ pub use qwen3_embedding::*;
 pub use qwen3_moe::*;
 pub use qwen3_next::*;
 pub use qwen3vl::*;
-pub use qwen3vl_moe::*;
 
 inference_nn::boxed_loaders!(
     NormalModelLoader:

@@ -2922,3 +2922,64 @@ Result: inference-api 1,384,072 -> 1,173,510 (-210,562, -15.2%), image-family co
 
 What is left in api by module: jobs 70k, responses 66k, anthropic 61k, engine_decision_labels 57k, files 11k,
 video 7.5k, media_source 6.8k.
+
+## Run 95 - 2026-10-29 20:38
+
+Question: after #701 and #707 moved server-level work and the decision formats out of inference-api (#702-#708), where
+do IR, build time, duplication and dependencies stand against Run 93, and what is next?
+
+Commands: `scripts/housekeeping.sh` (dups, deps); `scripts/housekeeping.sh --ir --incremental --crate-time`;
+`scripts/dup_scan.py --pair` on the Qwen3-VL loaders and Qwen3.5 vs Qwen3-VL loaders; `cargo machete` after the fixes.
+
+Raw findings:
+- IR lines (CPU test features), Run 93 -> now: inference-api 1,916,996 -> 800,511; inference-core 1,767,510 ->
+  1,586,857; inference-server-core 1,170,517 -> 982,954; inference-quant 867,100 -> 871,825; inference-nn 839,182 ->
+  849,832; models-qwen 757,866 -> 664,260; models-other 630,478 -> 523,904; models-llama 549,284 -> 484,984;
+  models-gemma 549,069 -> 480,609; models-phi 300,695 -> 253,916 (the model crates' drops are the FromJson configs).
+  inference-api is no longer the heaviest crate: core, server-core and quant are above it.
+- Incremental rebuild (s, workspace `cargo check --tests` / test build): touch inference-nn 7 / 14, core 6 / 10,
+  models-other 6 / 10 (Run 93: 8 / 16, 9 / 10, 8 / 12).
+- Whole-crate compile (s): core 16, api 8, server-core 10, web UI 4 (api 17.7 before #694).
+- Duplication: 1,377 files, 484,117 normalized lines, 29,070 duplicated (Run 93: 29,118). Top pairs unchanged:
+  qwen3_5 vs qwen3_vl mod 133 windows, qwen3vl vs qwen3vl_moe loaders 126, qwen2_5_vl vs qwen2vl vision 117, cutile
+  fused_moe vs fused_moe_fp8 111, blockwise vs pertensor FP8 107, qwen2vl vs qwen3_vl inputs processors 104,
+  llava15 vs llava_next 95.
+- Verified: the dense and MoE Qwen3-VL loaders parse the same `Config` (qwen3_vl_moe re-exports qwen3_vl's) and differ
+  only in the model they build, the MoE ISQ regexes and the MoE layer sizes; the vision tower's sizing (patch and
+  deepstack mergers, patch and position embeddings, encoder layers, merged image tokens, encoder attention) is copied
+  in the Qwen3-VL, Qwen3-VL MoE and Qwen3.5 loaders over one `VisionConfig`.
+- machete: `inference-json` unused in inference-audio, inference-gguf and inference-vision (left by the FromJson
+  migration), `hf-hub` and `inference-recon` in inference-api (left by the jobs and media moves), `indexmap` in
+  inference-models-decision, `serde` in inference-cli (its `#[serde]` attributes are FromJson's, whose bridge names
+  serde through inference-json); the SDK's `inference-json` serves only its doctest. All removed (the SDK's moved to
+  dev-dependencies); inference-jobs gained the `metal` feature api had been forwarding to inference-recon. Workspace
+  check and SDK doctests pass; machete clean.
+
+Implication: the API work is done; the remaining weight is in core, server-core and quant, and duplication is in the
+Qwen vision models. Ranked next: (1) Qwen3 vision sizing onto `VisionConfig` and one Qwen3-VL loader body for dense
+and MoE, (2) FP8 `apply_isq` through the unquantized path, (3) Qwen3.5 / Qwen3-VL multimodal wrapper, (4) Qwen2-VL /
+Qwen2.5-VL vision, (5) qwen2vl / qwen3_vl inputs processors; then a look at what weighs most in core and server-core.
+
+## Run 96 - 2026-10-29 20:43
+
+Question: Run 95's first item: can the Qwen3 vision tower's sizing live once, and the dense and MoE Qwen3-VL loaders
+share one body?
+
+Change: `VisionConfig` (inference-nn) gains `merged_image_tokens`, `encoder_attention_elems` and `weight_elems`;
+the Qwen3-VL loaders become one `qwen3vl_loader!` body over shared functions (the model type and `moe` are its
+arguments; `qwen3vl_moe.rs` is gone), MoE layers sized as the attention of a `DecoderLayerShape` plus router and
+experts; Qwen3.5's loader takes the vision activation and weight sizing from the same functions.
+
+Commands: `cargo nextest run -p inference-models-qwen`; `cargo llvm-lines -p inference-models-qwen --lib`;
+`scripts/dup_scan.py`.
+
+Finding:
+- New tests: both Qwen3-VL loaders' layer sizes sum to the bytes the load reads under the layers, and the non-mapped
+  size equals every other byte it reads (embeddings, head, final norm, the whole vision tower); the activation sizes
+  pinned against their formulas; the MoE ISQ patterns reach the router and experts, the dense ones do not. Qwen3.5's
+  sizing-vs-weights tests and the existing Qwen3-VL sizing pin pass unchanged; 172 models-qwen tests pass.
+- models-qwen IR 664,260 -> 663,711 (-549); a first cut with a generic `impl IntoIterator` regex helper measured
+  664,918, so the helper takes a slice.
+- Duplication 29,070 -> 28,694 lines (-376); the diff is -375 lines net with ~110 lines of new tests.
+
+Implication: done. Next per Run 95: FP8 `apply_isq` through the unquantized path.

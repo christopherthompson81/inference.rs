@@ -26,12 +26,10 @@ image.workspace = true
 indexmap.workspace = true
 inference-core = { workspace = true, features = ["utoipa"] }
 inference-layout.workspace = true
-inference-recon.workspace = true
 inference-agent.workspace = true
 inference-selection = { workspace = true, features = ["utoipa"] }
 inference-quant.workspace = true
 inference-models-decision.workspace = true
-hf-hub.workspace = true
 itertools.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }
@@ -62,7 +60,6 @@ cuda = [
     "inference-core/cuda",
     "inference-selection/cuda",
     "inference-layout/cuda",
-    "inference-recon/cuda",
 ]
 cudnn = ["inference-core/cudnn", "inference-selection/cudnn"]
 cutile = ["cuda", "inference-core/cutile", "inference-selection/cutile"]
@@ -70,7 +67,6 @@ metal = [
     "inference-core/metal",
     "inference-selection/metal",
     "inference-layout/metal",
-    "inference-recon/metal",
 ]
 flash-attn-v3 = ["cuda", "inference-core/flash-attn-v3", "inference-selection/flash-attn-v3"]
 accelerate = ["inference-core/accelerate", "inference-selection/accelerate"]

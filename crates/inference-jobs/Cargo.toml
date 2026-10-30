@@ -36,3 +36,4 @@ tempfile.workspace = true
 
 [features]
 cuda = ["inference-api/cuda", "inference-recon/cuda", "inference-tensor/cuda"]
+metal = ["inference-api/metal", "inference-recon/metal", "inference-tensor/metal"]
