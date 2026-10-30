@@ -9,6 +9,9 @@ use inference::{
     TextMessageRole,
 };
 
+#[macro_use]
+#[path = "../support/concurrent_cases.rs"]
+mod concurrent_cases;
 #[path = "../support/decode_graphs.rs"]
 mod decode_graphs;
 #[path = "../support/gemma3_tiny.rs"]
@@ -77,7 +80,6 @@ async fn trace(model: &Model, request: RequestBuilder) -> anyhow::Result<(traces
     traces::greedy(model, request, MAX_LEN).await
 }
 
-#[tokio::test]
 async fn gemma3_prefix_cache_serves_only_the_same_image() -> anyhow::Result<()> {
     let checkpoint = tiny_gemma3()?;
     // The SDK turns the prefix cache on by default, so the reference model has it off.
@@ -112,7 +114,6 @@ async fn gemma3_prefix_cache_serves_only_the_same_image() -> anyhow::Result<()> 
 }
 
 // With the prefix cache on, the batched image request would reuse the first run's image blocks instead of prefilling.
-#[tokio::test]
 async fn gemma3_text_in_the_batch_leaves_the_image_unchanged() -> anyhow::Result<()> {
     let checkpoint = tiny_gemma3()?;
     let model = builder(checkpoint.path())
@@ -205,7 +206,6 @@ async fn gemma3_image_and_text_decode_as_recorded() -> anyhow::Result<()> {
 }
 
 // The second request for the same image takes its encoder output from the cache and decodes the same.
-#[tokio::test]
 async fn gemma3_repeated_image_hits_the_encoder_cache() -> anyhow::Result<()> {
     let checkpoint = tiny_gemma3()?;
     // with the prefix cache on, the repeat would reuse KV blocks and never reach the encoder
@@ -241,7 +241,6 @@ async fn gemma3_repeated_image_hits_the_encoder_cache() -> anyhow::Result<()> {
 }
 
 // An in-situ quantized load writes UQFF and serves it on its device; a later load of the file decodes the same.
-#[tokio::test]
 async fn gemma3_isq_load_and_a_reload_of_its_uqff_decode_alike() -> anyhow::Result<()> {
     let checkpoint = tiny_gemma3()?;
     let uqff_dir = tempfile::tempdir()?;
@@ -320,7 +319,6 @@ async fn gemma3_re_isq_decodes_as_recorded() -> anyhow::Result<()> {
 }
 
 // A model loaded without ISQ tracks no layers to requantize, and the call says so.
-#[tokio::test]
 async fn gemma3_re_isq_without_an_isq_load_fails() -> anyhow::Result<()> {
     let checkpoint = tiny_gemma3()?;
     let model = builder(checkpoint.path()).build().await?;
@@ -437,3 +435,14 @@ async fn gemma3_decode_without_cuda_graphs_matches() -> anyhow::Result<()> {
     decode_graphs::assert_disabled(&text);
     Ok(())
 }
+
+concurrent_cases!(
+    concurrent_cases,
+    [
+        gemma3_prefix_cache_serves_only_the_same_image: 360,
+        gemma3_text_in_the_batch_leaves_the_image_unchanged: 348,
+        gemma3_repeated_image_hits_the_encoder_cache: 348,
+        gemma3_isq_load_and_a_reload_of_its_uqff_decode_alike: 348,
+        gemma3_re_isq_without_an_isq_load_fails: 348,
+    ]
+);

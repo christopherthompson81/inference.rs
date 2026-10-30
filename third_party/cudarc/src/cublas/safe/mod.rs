@@ -89,6 +89,7 @@ impl CudaBlas {
 
 impl Drop for CudaBlas {
     fn drop(&mut self) {
+        let _context = crate::driver::context_wide_scope();
         let handle = std::mem::replace(&mut self.handle, std::ptr::null_mut());
         if !handle.is_null() {
             unsafe { result::destroy_handle(handle) }.unwrap();

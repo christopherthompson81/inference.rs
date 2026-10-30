@@ -9,6 +9,9 @@ use inference::{
 };
 use inference_tensor::{Device, Tensor};
 
+#[macro_use]
+#[path = "../support/concurrent_cases.rs"]
+mod concurrent_cases;
 #[path = "../support/decode_graphs.rs"]
 mod decode_graphs;
 #[path = "../support/llama_tiny.rs"]
@@ -97,7 +100,6 @@ fn write_q_proj_adapter(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
 async fn a_text_checkpoint_loads_and_decodes_deterministically() -> anyhow::Result<()> {
     let checkpoint = tiny_llama_checkpoint()?;
     let model = cpu_text_builder(checkpoint.path()).build().await?;
@@ -105,7 +107,6 @@ async fn a_text_checkpoint_loads_and_decodes_deterministically() -> anyhow::Resu
     Ok(())
 }
 
-#[tokio::test]
 async fn an_isq_load_and_a_reload_of_its_uqff_decode_alike() -> anyhow::Result<()> {
     let checkpoint = tiny_llama_checkpoint()?;
     let uqff_dir = tempfile::tempdir()?;
@@ -137,7 +138,6 @@ async fn an_isq_load_and_a_reload_of_its_uqff_decode_alike() -> anyhow::Result<(
 }
 
 // Requantizing an ISQ load in place works from the loaded weights, so Q8_0 then HQQ4 is pinned, not an HQQ4 load.
-#[tokio::test]
 async fn an_isq_load_requantizes_in_place_as_recorded() -> anyhow::Result<()> {
     let checkpoint = tiny_llama_checkpoint()?;
     let model = cpu_text_builder(checkpoint.path())
@@ -178,7 +178,6 @@ async fn an_isq_load_requantizes_in_place_as_recorded() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
 async fn re_isq_without_an_isq_load_fails() -> anyhow::Result<()> {
     let checkpoint = tiny_llama_checkpoint()?;
     let model = cpu_text_builder(checkpoint.path()).build().await?;
@@ -193,7 +192,6 @@ async fn re_isq_without_an_isq_load_fails() -> anyhow::Result<()> {
 }
 
 // The repeat of a prompt reuses the first run's cached prefix and decodes the same.
-#[tokio::test]
 async fn a_repeated_prompt_hits_the_prefix_cache() -> anyhow::Result<()> {
     let checkpoint = tiny_llama_checkpoint()?;
     let builder = TextModelBuilder::new(checkpoint.path().to_string_lossy())
@@ -223,7 +221,6 @@ async fn a_repeated_prompt_hits_the_prefix_cache() -> anyhow::Result<()> {
 }
 
 // A GPU load that writes UQFF serves the written file on the GPU, as a later load of it does, calibrated or not.
-#[tokio::test]
 async fn a_gpu_isq_load_that_writes_uqff_serves_it() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
@@ -259,7 +256,6 @@ async fn a_gpu_isq_load_that_writes_uqff_serves_it() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
 async fn writing_uqff_while_loading_from_uqff_is_refused() -> anyhow::Result<()> {
     let checkpoint = tiny_llama_checkpoint()?;
     // only resolved, never read: the conflict is refused first
@@ -277,7 +273,6 @@ async fn writing_uqff_while_loading_from_uqff_is_refused() -> anyhow::Result<()>
     Ok(())
 }
 
-#[tokio::test]
 async fn an_isq_load_can_calibrate_on_a_text_file_first() -> anyhow::Result<()> {
     let checkpoint = tiny_llama_checkpoint()?;
     let calibration = checkpoint.path().join("calibration.txt");
@@ -291,7 +286,6 @@ async fn an_isq_load_can_calibrate_on_a_text_file_first() -> anyhow::Result<()> 
     Ok(())
 }
 
-#[tokio::test]
 async fn a_lora_adapter_applies_only_when_a_request_selects_it() -> anyhow::Result<()> {
     let checkpoint = tiny_llama_checkpoint()?;
     let adapter = tempfile::tempdir()?;
@@ -309,7 +303,6 @@ async fn a_lora_adapter_applies_only_when_a_request_selects_it() -> anyhow::Resu
 }
 
 // fattn reads no head dim 16 cache, so a CUDA build decodes this one through the gather.
-#[tokio::test]
 async fn paged_gpu_decode_through_the_gather_matches_the_cpu() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
@@ -435,7 +428,6 @@ async fn score(model: &Model, tokens: &[u32]) -> anyhow::Result<Vec<f32>> {
 
 // A layer on the CPU beside the GPU runs in F32 and hands BF16 back: the split model scores the F32 reference no worse
 // than the model all on the GPU in BF16 does.
-#[tokio::test]
 async fn a_model_split_across_gpu_and_cpu_scores_as_on_the_gpu() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
         return Ok(());
@@ -472,7 +464,6 @@ async fn a_model_split_across_gpu_and_cpu_scores_as_on_the_gpu() -> anyhow::Resu
 
 // A lazy model is registered without loading, loads on its first request, and then decodes as the same checkpoint
 // loaded up front does.
-#[tokio::test]
 async fn a_lazy_model_loads_on_its_first_request() -> anyhow::Result<()> {
     const LAZY_ID: &str = "lazy-copy";
     let dir = tiny_llama_checkpoint()?;
@@ -638,3 +629,21 @@ async fn a_full_device_evicts_the_idle_model() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+concurrent_cases!(
+    concurrent_cases,
+    [
+        a_text_checkpoint_loads_and_decodes_deterministically: 0,
+        an_isq_load_and_a_reload_of_its_uqff_decode_alike: 0,
+        an_isq_load_requantizes_in_place_as_recorded: 0,
+        re_isq_without_an_isq_load_fails: 0,
+        a_repeated_prompt_hits_the_prefix_cache: 346,
+        a_gpu_isq_load_that_writes_uqff_serves_it: 348,
+        writing_uqff_while_loading_from_uqff_is_refused: 0,
+        an_isq_load_can_calibrate_on_a_text_file_first: 0,
+        a_lora_adapter_applies_only_when_a_request_selects_it: 0,
+        paged_gpu_decode_through_the_gather_matches_the_cpu: 348,
+        a_model_split_across_gpu_and_cpu_scores_as_on_the_gpu: 354,
+        a_lazy_model_loads_on_its_first_request: 0,
+    ]
+);

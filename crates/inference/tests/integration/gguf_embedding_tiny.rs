@@ -9,6 +9,9 @@ use inference::{EmbeddingModelBuilder, GgufModelBuilder, Model, ModelDType};
 use inference_tensor::quantized::{GgmlDType, QTensor, gguf_file};
 use inference_tensor::{Device, Tensor};
 
+#[macro_use]
+#[path = "../support/concurrent_cases.rs"]
+mod concurrent_cases;
 #[path = "../support/bert_embedding_tiny.rs"]
 mod bert;
 #[path = "../support/qwen3_embedding_tiny.rs"]
@@ -392,12 +395,10 @@ async fn assert_gguf_embeds_as_its_source(checkpoint: &Path, arch: Arch) -> anyh
     Ok(())
 }
 
-#[tokio::test]
 async fn a_bert_gguf_embeds_as_its_safetensors_source() -> anyhow::Result<()> {
     assert_gguf_embeds_as_its_source(bert::tiny_bert_checkpoint(|_| {})?.path(), Arch::Bert).await
 }
 
-#[tokio::test]
 async fn a_jina_bert_v2_gguf_embeds_as_its_safetensors_source() -> anyhow::Result<()> {
     let checkpoint = bert::tiny_bert_checkpoint(|config| {
         config["architectures"] = serde_json::json!(["JinaBertModel"]);
@@ -407,14 +408,12 @@ async fn a_jina_bert_v2_gguf_embeds_as_its_safetensors_source() -> anyhow::Resul
     assert_gguf_embeds_as_its_source(checkpoint.path(), Arch::JinaBertV2).await
 }
 
-#[tokio::test]
 async fn a_nomic_bert_gguf_embeds_as_its_safetensors_source() -> anyhow::Result<()> {
     let checkpoint = rope::tiny_nomic_bert_checkpoint(|_| {})?;
     assert_gguf_embeds_as_its_source(checkpoint.path(), Arch::NomicBert).await
 }
 
 // llama.cpp's converter drops the experts' shared bias; zeroed in the source, the two match
-#[tokio::test]
 async fn a_nomic_bert_moe_gguf_embeds_as_its_source_without_the_expert_bias() -> anyhow::Result<()>
 {
     let checkpoint = rope::tiny_nomic_bert_checkpoint(rope::nomic_moe_config)?;
@@ -429,20 +428,17 @@ async fn a_nomic_bert_moe_gguf_embeds_as_its_source_without_the_expert_bias() ->
     assert_gguf_embeds_as_its_source(checkpoint.path(), Arch::NomicBertMoe).await
 }
 
-#[tokio::test]
 async fn a_modern_bert_gguf_embeds_as_its_safetensors_source() -> anyhow::Result<()> {
     let checkpoint = rope::tiny_modern_bert_checkpoint(|_| {})?;
     assert_gguf_embeds_as_its_source(checkpoint.path(), Arch::ModernBert).await
 }
 
-#[tokio::test]
 async fn a_neo_bert_gguf_embeds_as_its_safetensors_source() -> anyhow::Result<()> {
     let checkpoint = rope::tiny_neo_bert_checkpoint()?;
     assert_gguf_embeds_as_its_source(checkpoint.path(), Arch::NeoBert).await
 }
 
 // the converter keeps a BERT classifier's label projection but drops the pooler it scores through
-#[tokio::test]
 async fn a_bert_reranker_gguf_without_its_pooler_is_refused() -> anyhow::Result<()> {
     let checkpoint = bert::tiny_bert_checkpoint(|config| {
         config["architectures"] = serde_json::json!(["BertForSequenceClassification"]);
@@ -474,7 +470,6 @@ async fn a_bert_reranker_gguf_without_its_pooler_is_refused() -> anyhow::Result<
     Ok(())
 }
 
-#[tokio::test]
 async fn a_qwen3_gguf_that_names_a_pooling_embeds_as_its_source() -> anyhow::Result<()> {
     let checkpoint = qwen3::tiny_embedding_checkpoint()?;
     assert_gguf_embeds_as_its_source(checkpoint.path(), Arch::Qwen3).await
@@ -495,14 +490,12 @@ fn bidirectional_llama(mode: &str) -> anyhow::Result<tempfile::TempDir> {
     Ok(checkpoint)
 }
 
-#[tokio::test]
 async fn a_eurobert_gguf_embeds_as_its_source() -> anyhow::Result<()> {
     let checkpoint = bidirectional_llama("cls")?;
     assert_gguf_embeds_as_its_source(checkpoint.path(), Arch::EuroBert).await
 }
 
 // its Q/K rows permuted as llama.cpp's Llama converter writes them, and no pooling_type, which means mean
-#[tokio::test]
 async fn a_llama_embed_gguf_embeds_as_its_source() -> anyhow::Result<()> {
     let checkpoint = bidirectional_llama("mean")?;
     assert_gguf_embeds_as_its_source(checkpoint.path(), Arch::LlamaEmbed).await
@@ -675,7 +668,6 @@ async fn embed_task(model: &Model, task: Option<&str>) -> anyhow::Result<Vec<f32
     )?)
 }
 
-#[tokio::test]
 async fn a_jina_bert_v3_gguf_runs_each_task_from_the_adapter_files_beside_it() -> anyhow::Result<()>
 {
     let checkpoint = bert::tiny_jina_v3_checkpoint()?;
@@ -701,7 +693,6 @@ async fn a_jina_bert_v3_gguf_runs_each_task_from_the_adapter_files_beside_it() -
     Ok(())
 }
 
-#[tokio::test]
 async fn a_jina_bert_v3_gguf_without_its_adapters_is_refused() -> anyhow::Result<()> {
     let checkpoint = bert::tiny_jina_v3_checkpoint()?;
     let dir = tempfile::tempdir()?;
@@ -747,7 +738,6 @@ fn add_tensors(
 }
 
 // an older XLM-R reranker conversion: `cls` / `cls.output` with the one-label projection as a bare vector, no labels
-#[tokio::test]
 async fn a_reranker_gguf_with_a_bare_one_label_projection_scores_as_its_source()
 -> anyhow::Result<()> {
     let checkpoint = bert::tiny_bert_checkpoint(|config| {
@@ -798,3 +788,22 @@ async fn a_reranker_gguf_with_a_bare_one_label_projection_scores_as_its_source()
     );
     Ok(())
 }
+
+concurrent_cases!(
+    concurrent_cases,
+    [
+        a_bert_gguf_embeds_as_its_safetensors_source: 0,
+        a_jina_bert_v2_gguf_embeds_as_its_safetensors_source: 0,
+        a_nomic_bert_gguf_embeds_as_its_safetensors_source: 0,
+        a_nomic_bert_moe_gguf_embeds_as_its_source_without_the_expert_bias: 0,
+        a_modern_bert_gguf_embeds_as_its_safetensors_source: 0,
+        a_neo_bert_gguf_embeds_as_its_safetensors_source: 0,
+        a_bert_reranker_gguf_without_its_pooler_is_refused: 0,
+        a_qwen3_gguf_that_names_a_pooling_embeds_as_its_source: 0,
+        a_eurobert_gguf_embeds_as_its_source: 0,
+        a_llama_embed_gguf_embeds_as_its_source: 0,
+        a_jina_bert_v3_gguf_runs_each_task_from_the_adapter_files_beside_it: 0,
+        a_jina_bert_v3_gguf_without_its_adapters_is_refused: 0,
+        a_reranker_gguf_with_a_bare_one_label_projection_scores_as_its_source: 0,
+    ]
+);

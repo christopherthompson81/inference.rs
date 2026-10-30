@@ -114,7 +114,10 @@ impl CudaPeerAccess {
                     continue;
                 }
 
-                let enable = unsafe { sys::cuCtxEnablePeerAccess(dst_ctx.cu_ctx(), 0).result() };
+                let enable = {
+                    let _context = inference_tensor::cuda_backend::context_wide_scope();
+                    unsafe { sys::cuCtxEnablePeerAccess(dst_ctx.cu_ctx(), 0).result() }
+                };
                 match enable {
                     Ok(())
                     | Err(result::DriverError(

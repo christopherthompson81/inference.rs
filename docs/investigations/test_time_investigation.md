@@ -373,3 +373,146 @@ apart from its CUDA-gated cases). An injected panic in one `ops` case reported t
 - Full local CI (`--lint --tests --cuda --bindings --size --sweep`): the first run after the change rebuilt every
   crate above inference-tensor (wall 401 s, CUDA suite 103.8 s beside the builds); warm, wall 107.5 s with the CUDA
   suite at 62.0 s and the CPU suite at 11.6 s (Run 13: 190.9 s, 96.2 s, 15.8 s).
+
+## Run 16 - 2026-10-30 10:25
+
+Question: after Run 15 (merged kernel families, CUDA suite 51.7 s alone), which test processes really open the GPU,
+what do they cost alone, and what does the suite leave idle? The user noted VRAM sits mostly unused.
+
+Commands: the CUDA suite through a cargo target runner (`CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER`) that runs each
+test under `strace -f --seccomp-bpf -e trace=openat` and records whether it opened `/dev/nvidiactl` or
+`/dev/nvidia0` / `nvidia-uvm`; the suite again with `--test-threads 1` for solo times; the suite a third time with
+`nvidia-smi --query-gpu=utilization.gpu,memory.used,power.draw -lms 200` sampling.
+
+Finding:
+- 480 of the 3,294 test processes open the GPU device; none initializes the driver without opening it (so no CPU test
+  pays for a needless probe).
+- Serially the suite takes 185.7 s: the 480 GPU tests 148.5 s, the CPU tests 37.0 s. In parallel it takes 52.7-62.7 s,
+  ~3x on 16 threads.
+- Solo, the GPU tests split cleanly: 245 take >= 0.15 s (sum 138.1 s; a real context, ~0.55 s mean), 235 take under
+  0.1 s (median 0.02-0.06 s; they open the device without the context cost). By module (count, solo sum):
+  `qwen3_5_text_tiny` 26 / 14.5 s, `llama_tiny` 15 / 6.8 s, `qwen_vl_tiny` 14 / 7.6 s, `routed_lora_cuda_tests`
+  11 / 5.0 s, `qwen4exp_text_tiny` 10 / 6.5 s, `cuda_graph::tests` 10 / 1.9 s, `gemma3_tiny` 8 / 4.0 s,
+  `parakeet_tiny` 5 / 9.9 s; the cheap ones `engine_abi` 21 / 2.2 s, `chat_route` 18 / 1.0 s,
+  `bert_embedding_tiny` 17 / 1.3 s.
+- During the parallel suite (53.6 s): GPU utilization mean 25% (>= 90% in 9% of samples), VRAM mean 3.9 GB of 24 GB
+  (idle 1.7 GB; peak 20.1 GB, the card-filling eviction test, which already runs alone), power mean 163 W. With the CPU
+  at ~7.5 of 16 cores (Run 15), every resource is under half used while all 16 slots stay occupied: each GPU test
+  spends most of its ~5x-solo time queued behind the others' context creation. 245 real contexts x ~0.12 s = ~29 s
+  of the wall.
+
+Implication: more processes in parallel cannot help (the queue is in the driver), and `gpu_cases!` serializes its
+cases, which is right for millisecond kernel tests but would lengthen the model modules (seconds each). The lever is
+the user's: run a module's tests concurrently inside one process, sharing its context, with a VRAM budget gating how
+many run at once. Kernel tests that hold `CUDA_TEST_LOCK` (process-global pools and graph scopes) stay serial, and
+tests that read the device's free memory keep running alone.
+
+## Run 17 - 2026-10-30 10:32
+
+Question: Run 16's plan, piloted on `qwen3_5_text_tiny`: can a module's model tests run as concurrent cases of one
+process under a VRAM budget?
+
+Commands: per-test peak VRAM, the module run serially through a target runner logging each test's pid beside
+`nvidia-smi --query-compute-apps=pid,used_memory -lms 50`; a `concurrent_cases!` test (tokio multi-thread runtime,
+each case a spawned task claiming its measured MiB from a 4096 MiB semaphore) over the module's 20 tests that touch no
+process-global state (the graph-replay rounds, the verify-graph and drafter tests that install a metrics recorder, and
+the one that sets an environment variable stay separate processes); then the same with
+`INFERENCE_RS_CUDA_GRAPHS=0`.
+
+Finding:
+- Peak VRAM per test process, alone: 348-620 MiB on the GPU, 0 for the five CPU-only tests. That includes the
+  context, kernel modules and library workspaces, which cases sharing a process pay once.
+- Concurrent, graphs on: 9 of the 20 cases fail, either at load (`DriverError(CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED,
+  "operation not permitted when stream is capturing")`) or with "Internal server error" mid-request. Engines capture
+  in `CU_STREAM_CAPTURE_MODE_RELAXED` on `per_thread_stream()`, a per-thread default stream, which still orders
+  against the legacy default stream: a synchronous copy or free on another thread (another engine loading) touches
+  the capturing stream.
+- Concurrent, graphs off: all 20 pass, the whole test in 1.60 s (the cases alone, serially, as separate processes:
+  14.5 s).
+
+Implication: running cases side by side works and pays well, and it found what the one-test-per-process layout hid:
+two engines in one process (the server's model manager hosts several, loading them on request) break each other
+while one captures a CUDA graph. That is a product question before a test one.
+
+## Run 18 - 2026-10-30 11:01
+
+Question: Run 17's failure with graphs on: which work on one engine's thread breaks another engine's capture in the
+same process, and what fix holds?
+
+Commands: backtraces at every CUDA error carrying a capture code (temporary prints in inference-tensor's error
+conversions); a two-thread probe in `graph_capture`'s tests (thread A holds a relaxed capture open, thread B runs one
+step: device creation, allocation, copy, own-stream sync, cuBLAS matmul, a first-use kernel, flash attention, a
+device drop, a pinned free, a cuBLAS-only device drop, a graph destroy); a log of captures begun without the shared
+scope (temporary, in cudarc's `begin_capture`); the pilot's concurrent test five times after each step.
+
+Finding:
+- First errors: a load's footprint measurement (`device_used_bytes`: context synchronize, pool trim) and its memory
+  pool retention (pool attribute change) fail with `STREAM_CAPTURE_UNSUPPORTED` during another engine's capture,
+  and invalidate it.
+- The probe: allocation, copies, own-stream sync, cuBLAS, a kernel's first use, flash attention and freeing pinned
+  memory on B leave A's capture intact. Dropping a device with loaded kernel modules (`cuModuleUnload`) and dropping
+  a cuBLAS-only device (`cublasDestroy`, whose synchronizing free succeeds) invalidate it silently: cudarc records
+  the unload's error in the context, and the destroy reports success. An invalidated capture left open then fails
+  every later context-wide call in the process, so one silent invalidation cascades.
+- Fix: a process-wide lock in the vendored cudarc (`driver::safe::capture_lock`): captures hold it shared (the three
+  production sites: core's decode graph, Qwen3.5's MTP graph, DFlash's), context-wide calls exclusively (context
+  synchronize in core and `MemoryUsage`, pool trim and high-water reset, pool attribute changes in the graph pool
+  guards and retention, `cuDeviceGraphMemTrim`, peer access setup), and cudarc's `CudaModule`, cuBLAS, cuBLASLt,
+  cuRAND and cuDNN drops take it too. A thread inside its own capture takes no exclusive lock (it would deadlock;
+  CUDA reports the call's error as before), and a nested capture on one thread takes no second shared lock.
+- No capture began without the shared scope. The pilot's 20 concurrent cases, graphs on: 20/20 in each of 5 runs,
+  1.58-1.88 s. A regression test (`context_wide_work_on_another_thread_waits_for_an_open_capture`) passes with the
+  lock and fails without it (`STREAM_CAPTURE_UNSUPPORTED`).
+
+Implication: several engines in one process (the server's model manager) no longer break each other's graph captures;
+model test modules can run their cases concurrently in one process with graphs on.
+
+## Run 19 - 2026-10-30 11:28
+
+Question: with Run 18's fix, how far do concurrent cases go across the model test modules, and what do they save?
+
+Commands: per-test peak VRAM for 14 modules, serially (the target-runner pid log beside `nvidia-smi
+--query-compute-apps`); each module's tests that touch no process-global state, carry no `cfg`/`ignore`
+attribute and ran under CUDA moved into its `concurrent_cases!`; the shared tests on CUDA (3 runs, then 6) and CPU;
+the CUDA suite alone twice and the CPU suite.
+
+Finding:
+- Peaks: the card-filling eviction test 22,218 MiB (kept apart, as are the memory-report test, the graph-replay
+  rounds and the recorder tests), every shared test 610 MiB or less.
+- 14 modules share 133 tests in 14 processes: `qwen3_5_text_tiny` 20, `bert_embedding_tiny` 17, `parakeet_tiny`
+  14, `qwen_vl_tiny` 14, `gguf_embedding_tiny` 13, `llama_tiny` 12, `rope_encoder_embedding_tiny` 10,
+  `qwen4exp_text_tiny` 6, `gemma3_tiny` 5, `paddleocr_vl_tiny` 5, `hidream_o1_tiny` 5, `embedding_tiny` 4,
+  `decision_tiny` 4, `granite_tiny` 3. Left as they were: `qwen3_sliding_window_tiny` (its futures are not
+  `Send`, so they cannot be spawned) and one gemma3 test gated on `cfg(cuda|metal)`.
+- First runs: 1 of 3 aborted in `fattn-common.cuh:1310`, `GGML_ASSERT(max_blocks_per_sm > 0)` (the occupancy
+  query found the kernel's shared memory over its limit). The mma f16 path raises each kernel's limit through a
+  per-instantiation `static size_t` that two threads read and write unsynchronized; a smaller request landing after
+  a larger one lowers the attribute under the larger launch. The quant decode path had the same raise and an occupancy
+  cache whose count and size another thread could pair wrongly. Now one serialized, never-lowering
+  `ggml_cuda_raise_shared_memory_limit` for the four f16 sites and the quant one, and the occupancy cache under a
+  mutex. Then 6 of 6 runs pass, 8.6-9.2 s for all 14 shared tests together (`parakeet_tiny` the longest).
+- CUDA suite alone: 3292 -> 3177 tests, 51.7 -> 45.2 / 43.7 s. CPU suite 2899 tests, 10.2 s (Run 15: 11.6 s).
+
+Implication: ~7 s off the CUDA suite, less than Run 16's ~29 s of context queue would allow: many shared tests were
+the cheap kind that never paid for a context. The two bugs found are product bugs for any process running several
+engines (the server's model manager). Next lever if wanted: the server-core route tests (`chat_route` 18, `keyed`
+10) and the C ABI's `engine_abi` 21, each a model per test.
+
+## Run 20 - 2026-10-30 11:54
+
+Question: the full local CI after Run 19 failed once: `jobs::a_device_job_evicts_the_idle_model_and_holds_the_device`
+passed and its process died with SIGSEGV at exit. Did this branch's drop-time locks (cudarc's module, cuBLAS,
+cuBLASLt, cuRAND and cuDNN drops now waiting out open captures) cause it?
+
+Commands: the test alone 6 times; `--stress-count 20` of it, then of every `jobs::` test, with 16 busy-loop shells
+(the suite's CPU load); the binary under `gdb` in a loop with that load (40 iterations); then an A/B, 5 x 20
+iterations of the five jobs tests under the same load, A the branch, B with only the drop-time locks removed.
+
+Finding:
+- Alone: 6/6 pass (2.2 s). Under load: the one test 20/20; all five, 1 SIGSEGV in 9 iterations. Under gdb: none in
+  40 (gdb's timing hides it, as in job_scheduler Run 6).
+- A/B: A 3 crashes in 100 iterations (500 test processes), B 2 in 100. All five at exit after a pass:
+  `a_sized_job_runs_beside_the_resident_model` 4, `a_job_that_may_not_displace_waits_for_the_device_to_empty` 1.
+
+Implication: not this branch; an existing exit-time race in the jobs tests, the class job_scheduler Run 6 fixed for
+`unload_model` (an engine thread still tearing down while the process exits), apparently still open on a job path.

@@ -8,6 +8,9 @@ use inference::{
     RerankResponse, UqffEmbeddingModelBuilder,
 };
 
+#[macro_use]
+#[path = "../support/concurrent_cases.rs"]
+mod concurrent_cases;
 #[path = "../support/bert_embedding_tiny.rs"]
 mod support;
 #[path = "../support/traces.rs"]
@@ -63,7 +66,6 @@ async fn embed_tokens(model: &Model, tokens: &[u32], truncate: bool) -> anyhow::
     )?)
 }
 
-#[tokio::test]
 async fn an_encoder_class_is_detected_and_embeds_to_unit_length() -> anyhow::Result<()> {
     // no config_sentence_transformers.json: the BertModel class alone routes to the embedding loader
     let checkpoint = tiny_bert_checkpoint(|_| {})?;
@@ -75,7 +77,6 @@ async fn an_encoder_class_is_detected_and_embeds_to_unit_length() -> anyhow::Res
     Ok(())
 }
 
-#[tokio::test]
 async fn the_first_token_attends_to_later_ones() -> anyhow::Result<()> {
     let checkpoint = tiny_bert_checkpoint(|_| {})?;
     let model = cpu_embedding_builder(checkpoint.path()).build().await?;
@@ -89,7 +90,6 @@ async fn the_first_token_attends_to_later_ones() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
 async fn a_saved_tokenizer_padding_does_not_reach_the_prompt() -> anyhow::Result<()> {
     let checkpoint = tiny_bert_checkpoint(|_| {})?;
     let expected = cpu_embedding_builder(checkpoint.path())
@@ -123,7 +123,6 @@ async fn a_saved_tokenizer_padding_does_not_reach_the_prompt() -> anyhow::Result
     Ok(())
 }
 
-#[tokio::test]
 async fn sentence_transformers_max_seq_length_limits_the_prompt() -> anyhow::Result<()> {
     let checkpoint = tiny_bert_checkpoint(|_| {})?;
     std::fs::write(
@@ -141,7 +140,6 @@ async fn sentence_transformers_max_seq_length_limits_the_prompt() -> anyhow::Res
     Ok(())
 }
 
-#[tokio::test]
 async fn roberta_positions_leave_room_for_the_pad_offset() -> anyhow::Result<()> {
     let checkpoint = tiny_bert_checkpoint(|config| {
         config["architectures"] = serde_json::json!(["RobertaModel"]);
@@ -163,7 +161,6 @@ async fn roberta_positions_leave_room_for_the_pad_offset() -> anyhow::Result<()>
     Ok(())
 }
 
-#[tokio::test]
 async fn an_isq_encoder_and_a_reload_of_its_uqff_embed_alike() -> anyhow::Result<()> {
     let checkpoint = tiny_bert_checkpoint(|_| {})?;
     let unquantized = cpu_embedding_builder(checkpoint.path())
@@ -205,7 +202,6 @@ async fn an_isq_encoder_and_a_reload_of_its_uqff_embed_alike() -> anyhow::Result
 }
 
 // A GGUF-type ISQ keeps its biases in F32; a BF16 CUDA matmul has to add them in its own dtype.
-#[tokio::test]
 async fn a_bf16_gpu_encoder_with_biased_isq_layers_embeds() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
@@ -243,7 +239,6 @@ fn raw_scores(response: &RerankResponse) -> Vec<f32> {
     scores
 }
 
-#[tokio::test]
 async fn a_cross_encoder_ranks_documents_most_relevant_first() -> anyhow::Result<()> {
     let checkpoint = tiny_bert_checkpoint(classifier(1))?;
     let model = cpu_embedding_builder(checkpoint.path()).build().await?;
@@ -283,7 +278,6 @@ async fn a_cross_encoder_ranks_documents_most_relevant_first() -> anyhow::Result
     Ok(())
 }
 
-#[tokio::test]
 async fn a_pair_reaches_the_model_with_its_segment_ids() -> anyhow::Result<()> {
     let checkpoint = tiny_bert_checkpoint(classifier(1))?;
     let model = cpu_embedding_builder(checkpoint.path()).build().await?;
@@ -312,7 +306,6 @@ async fn a_pair_reaches_the_model_with_its_segment_ids() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
 async fn a_prefixed_cross_encoder_and_a_reload_of_its_uqff_score_alike() -> anyhow::Result<()> {
     let checkpoint = tiny_bert_checkpoint(classifier(1))?;
     prefix_encoder_weights(checkpoint.path(), "bert")?;
@@ -341,7 +334,6 @@ async fn a_prefixed_cross_encoder_and_a_reload_of_its_uqff_score_alike() -> anyh
     Ok(())
 }
 
-#[tokio::test]
 async fn only_a_single_logit_classifier_reranks() -> anyhow::Result<()> {
     let request = serde_json::json!({"query": QUERY, "documents": DOCUMENTS});
     let embedder = tiny_bert_checkpoint(|_| {})?;
@@ -361,7 +353,6 @@ fn jina_v2(config: &mut serde_json::Value) {
 }
 
 // with no position table, a mean pool of a bidirectional encoder sees a bag of tokens; ALiBi makes order count
-#[tokio::test]
 async fn jina_v2_alibi_makes_token_order_count_and_reloads_from_uqff() -> anyhow::Result<()> {
     let checkpoint = tiny_bert_checkpoint(jina_v2)?;
     let pooling = checkpoint.path().join("1_Pooling/config.json");
@@ -418,7 +409,6 @@ async fn embed_with_task(
     )?)
 }
 
-#[tokio::test]
 async fn a_task_picks_its_adapter_and_prepends_its_instruction() -> anyhow::Result<()> {
     let checkpoint = tiny_jina_v3_checkpoint()?;
     let model = cpu_embedding_builder(checkpoint.path()).build().await?;
@@ -447,7 +437,6 @@ async fn a_task_picks_its_adapter_and_prepends_its_instruction() -> anyhow::Resu
     Ok(())
 }
 
-#[tokio::test]
 async fn requests_with_different_tasks_embed_as_they_do_alone() -> anyhow::Result<()> {
     let checkpoint = tiny_jina_v3_checkpoint()?;
     let model = cpu_embedding_builder(checkpoint.path()).build().await?;
@@ -469,7 +458,6 @@ async fn requests_with_different_tasks_embed_as_they_do_alone() -> anyhow::Resul
     Ok(())
 }
 
-#[tokio::test]
 async fn an_unknown_task_or_a_model_without_adapters_is_rejected() -> anyhow::Result<()> {
     let jina = tiny_jina_v3_checkpoint()?;
     let model = cpu_embedding_builder(jina.path()).build().await?;
@@ -548,7 +536,6 @@ fn bert_and_its_distilbert() -> anyhow::Result<(tempfile::TempDir, tempfile::Tem
     Ok((bert, distil))
 }
 
-#[tokio::test]
 async fn a_distilbert_embeds_as_the_bert_with_its_weights() -> anyhow::Result<()> {
     let (bert, distil) = bert_and_its_distilbert()?;
     let expected = embed_tokens(
@@ -568,7 +555,6 @@ async fn a_distilbert_embeds_as_the_bert_with_its_weights() -> anyhow::Result<()
     Ok(())
 }
 
-#[tokio::test]
 async fn a_distilbert_classifier_scores_its_first_token_through_pre_classifier_and_relu()
 -> anyhow::Result<()> {
     use inference_tensor::{Device, Tensor};
@@ -633,3 +619,26 @@ async fn a_distilbert_classifier_scores_its_first_token_through_pre_classifier_a
     );
     Ok(())
 }
+
+concurrent_cases!(
+    concurrent_cases,
+    [
+        an_encoder_class_is_detected_and_embeds_to_unit_length: 0,
+        the_first_token_attends_to_later_ones: 0,
+        a_saved_tokenizer_padding_does_not_reach_the_prompt: 0,
+        sentence_transformers_max_seq_length_limits_the_prompt: 0,
+        roberta_positions_leave_room_for_the_pad_offset: 0,
+        an_isq_encoder_and_a_reload_of_its_uqff_embed_alike: 0,
+        a_bf16_gpu_encoder_with_biased_isq_layers_embeds: 354,
+        a_cross_encoder_ranks_documents_most_relevant_first: 0,
+        a_pair_reaches_the_model_with_its_segment_ids: 0,
+        a_prefixed_cross_encoder_and_a_reload_of_its_uqff_score_alike: 0,
+        only_a_single_logit_classifier_reranks: 0,
+        jina_v2_alibi_makes_token_order_count_and_reloads_from_uqff: 0,
+        a_task_picks_its_adapter_and_prepends_its_instruction: 0,
+        requests_with_different_tasks_embed_as_they_do_alone: 0,
+        an_unknown_task_or_a_model_without_adapters_is_rejected: 0,
+        a_distilbert_embeds_as_the_bert_with_its_weights: 0,
+        a_distilbert_classifier_scores_its_first_token_through_pre_classifier_and_relu: 0,
+    ]
+);

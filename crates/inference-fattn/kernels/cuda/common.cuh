@@ -237,6 +237,18 @@ static const char * cu_get_error_str(CUresult err) {
 #define CU_CHECK(err) CUDA_CHECK_GEN(err, CUDA_SUCCESS, cu_get_error_str)
 #endif
 
+// Raises `kernel`'s dynamic shared memory limit to `nbytes` unless `raised`, its limit so far, covers it. Engines on
+// separate threads share the process, so raises are serialized and never lower a limit another thread raised further.
+template <typename Kernel>
+void ggml_cuda_raise_shared_memory_limit(Kernel kernel, size_t & raised, size_t nbytes) {
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (raised < nbytes) {
+        CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, nbytes));
+        raised = nbytes;
+    }
+}
+
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
 #    define CUDA_SET_SHARED_MEMORY_LIMIT(kernel, nbytes)                                                       \
         do {                                                                                                   \

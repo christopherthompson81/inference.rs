@@ -9,6 +9,9 @@ use inference::{
 };
 use inference_tensor::{Device, Tensor};
 
+#[macro_use]
+#[path = "../support/concurrent_cases.rs"]
+mod concurrent_cases;
 #[path = "../support/qwen_vl_tiny.rs"]
 mod support;
 use support::{
@@ -140,7 +143,6 @@ async fn traces(model: &Model) -> anyhow::Result<Vec<(Vec<u32>, usize)>> {
     ])
 }
 
-#[tokio::test]
 async fn qwen2_vl_images_and_video() -> anyhow::Result<()> {
     let checkpoint = tiny_qwen2_vl()?;
     let model = build(checkpoint.path()).await?;
@@ -157,7 +159,6 @@ async fn qwen2_vl_images_and_video() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
 async fn qwen3_vl_images_and_video() -> anyhow::Result<()> {
     let checkpoint = tiny_qwen3_vl()?;
     let model = build(checkpoint.path()).await?;
@@ -172,7 +173,6 @@ async fn qwen3_vl_images_and_video() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
 async fn qwen2_5_vl_images_and_video() -> anyhow::Result<()> {
     let checkpoint = tiny_qwen2_5_vl()?;
     let model = build(checkpoint.path()).await?;
@@ -187,7 +187,6 @@ async fn qwen2_5_vl_images_and_video() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
 async fn qwen3_vl_moe_images_and_video() -> anyhow::Result<()> {
     let checkpoint = tiny_qwen3_vl_moe()?;
     let model = build(checkpoint.path()).await?;
@@ -300,22 +299,18 @@ async fn text_in_the_batch_leaves_media_unchanged(dir: &Path) -> anyhow::Result<
     Ok(())
 }
 
-#[tokio::test]
 async fn qwen2_vl_prefix_cache_serves_only_the_same_media() -> anyhow::Result<()> {
     prefix_cache_serves_only_the_same_media(tiny_qwen2_vl()?.path()).await
 }
 
-#[tokio::test]
 async fn qwen3_vl_prefix_cache_serves_only_the_same_media() -> anyhow::Result<()> {
     prefix_cache_serves_only_the_same_media(tiny_qwen3_vl()?.path()).await
 }
 
-#[tokio::test]
 async fn qwen2_vl_text_in_the_batch_leaves_media_unchanged() -> anyhow::Result<()> {
     text_in_the_batch_leaves_media_unchanged(tiny_qwen2_vl()?.path()).await
 }
 
-#[tokio::test]
 async fn qwen3_vl_text_in_the_batch_leaves_media_unchanged() -> anyhow::Result<()> {
     text_in_the_batch_leaves_media_unchanged(tiny_qwen3_vl()?.path()).await
 }
@@ -332,7 +327,6 @@ async fn qwen3_5_moe_traces(model: &Model) -> anyhow::Result<[Vec<(u32, f32)>; 2
 
 // The F32 CPU decode is pinned; a BF16 GPU decode keeps its ids and lands within BF16 rounding of it. A BF16 CPU
 // decode is no reference: at a near-tie step its rounding picks a different id on arm64 than on x86.
-#[tokio::test]
 async fn qwen3_5_moe_text_and_image() -> anyhow::Result<()> {
     let checkpoint = tiny_qwen3_5_moe()?;
     let expected_text = [
@@ -375,7 +369,6 @@ async fn qwen3_5_moe_text_and_image() -> anyhow::Result<()> {
 // Flash-Next reads each row's token window (PLE n-grams, QSA spans) beside the image inputs. The F32 CPU decode is
 // pinned; on the GPU only the image decode is, within BF16 rounding, since the random text decode has a near tie at
 // its second step that BF16 breaks the other way.
-#[tokio::test]
 async fn flash_next_text_and_image() -> anyhow::Result<()> {
     let checkpoint = tiny_flash_next_vl()?;
     let expected_text = [
@@ -513,7 +506,6 @@ async fn builtin_mtp_keeps_greedy_output(checkpoint: tempfile::TempDir) -> anyho
     Ok(())
 }
 
-#[tokio::test]
 async fn qwen3_5_builtin_mtp_keeps_greedy_output() -> anyhow::Result<()> {
     if !ON_GPU {
         return Ok(());
@@ -521,7 +513,6 @@ async fn qwen3_5_builtin_mtp_keeps_greedy_output() -> anyhow::Result<()> {
     builtin_mtp_keeps_greedy_output(tiny_qwen3_5_mtp()?).await
 }
 
-#[tokio::test]
 async fn qwen3_5_moe_builtin_mtp_keeps_greedy_output() -> anyhow::Result<()> {
     if !ON_GPU {
         return Ok(());
@@ -530,7 +521,6 @@ async fn qwen3_5_moe_builtin_mtp_keeps_greedy_output() -> anyhow::Result<()> {
 }
 
 // Qwen3-VL's text layers are all full attention, so a window its config names must not reach the mask.
-#[tokio::test]
 async fn qwen3_vl_ignores_a_configured_sliding_window() -> anyhow::Result<()> {
     let checkpoint = tiny_qwen3_vl()?;
     let request = || {
@@ -589,7 +579,6 @@ fn write_q_proj_adapter(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
 async fn a_lora_adapter_on_a_multimodal_model_applies_only_when_selected() -> anyhow::Result<()> {
     let checkpoint = tiny_qwen2_vl()?;
     let adapter = tempfile::tempdir()?;
@@ -622,3 +611,23 @@ async fn a_lora_adapter_on_a_multimodal_model_applies_only_when_selected() -> an
     );
     Ok(())
 }
+
+concurrent_cases!(
+    concurrent_cases,
+    [
+        qwen2_vl_images_and_video: 348,
+        qwen3_vl_images_and_video: 348,
+        qwen2_5_vl_images_and_video: 348,
+        qwen3_vl_moe_images_and_video: 348,
+        qwen2_vl_prefix_cache_serves_only_the_same_media: 362,
+        qwen3_vl_prefix_cache_serves_only_the_same_media: 362,
+        qwen2_vl_text_in_the_batch_leaves_media_unchanged: 348,
+        qwen3_vl_text_in_the_batch_leaves_media_unchanged: 348,
+        qwen3_5_moe_text_and_image: 388,
+        flash_next_text_and_image: 394,
+        qwen3_5_builtin_mtp_keeps_greedy_output: 534,
+        qwen3_5_moe_builtin_mtp_keeps_greedy_output: 514,
+        qwen3_vl_ignores_a_configured_sliding_window: 348,
+        a_lora_adapter_on_a_multimodal_model_applies_only_when_selected: 362,
+    ]
+);

@@ -4,6 +4,9 @@ use inference::{Model, ModelDType, PromptInput, PromptLogitsRequest, TextModelBu
 use inference_models_qwen::qwen3_5::{Qwen3_5TextModel, TextConfig};
 use inference_nn::paged_attention::AttentionImplementation;
 
+#[macro_use]
+#[path = "../support/concurrent_cases.rs"]
+mod concurrent_cases;
 #[path = "../support/decode_graphs.rs"]
 mod decode_graphs;
 #[path = "../support/recording.rs"]
@@ -220,7 +223,6 @@ async fn complete(
 }
 
 // Step-by-step decode carries PLE's token history and conv state, so it scores its own tokens as one prefill does.
-#[tokio::test]
 async fn flash_next_decode_matches_prefill_scoring() -> anyhow::Result<()> {
     let checkpoint = tiny_flash_next(DENSE_BUDGET)?;
     let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
@@ -464,7 +466,6 @@ async fn score(model: &Model, tokens: &[u32]) -> anyhow::Result<Vec<f32>> {
 // Layers on the CPU beside the GPU run in F32 and hand BF16 back: a split model scores the F32 reference no worse
 // than the model all on the GPU in BF16 does (this random checkpoint amplifies BF16 error at a few positions, so
 // the comparison is of the mean).
-#[tokio::test]
 async fn flash_next_split_across_gpu_and_cpu_scores_as_on_the_gpu() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") || inference_tensor::Device::new_cuda(0).is_err() {
         return Ok(());
@@ -622,7 +623,6 @@ async fn flash_next_builtin_mtp_drafts_and_keeps_greedy_output() -> anyhow::Resu
 
 // With an autotuned depth the built-in MTP head drafts more than one depth over a run (the tuner probes the ones
 // it has not timed), and greedy output holds up to BF16 near ties.
-#[tokio::test]
 async fn flash_next_autotuned_mtp_varies_its_depth_and_keeps_greedy_output() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") || inference_tensor::Device::new_cuda(0).is_err() {
         return Ok(());
@@ -651,7 +651,6 @@ async fn flash_next_autotuned_mtp_varies_its_depth_and_keeps_greedy_output() -> 
 }
 
 // A repeated prompt restores PLE's state with the recurrent snapshot and decodes as the cold run did.
-#[tokio::test]
 async fn flash_next_prefix_hit_restores_the_ple_state() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
@@ -674,7 +673,6 @@ async fn flash_next_prefix_hit_restores_the_ple_state() -> anyhow::Result<()> {
 
 // Past QSA's budget a prefix hit restores the indexer's pooled keys with their pages and decodes as the cold run did,
 // and the selection changes what the dense budget decodes.
-#[tokio::test]
 async fn flash_next_sparse_prefix_hit_restores_the_indexer_keys() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
@@ -704,7 +702,6 @@ async fn flash_next_sparse_prefix_hit_restores_the_indexer_keys() -> anyhow::Res
 }
 
 // A UQFF written from an ISQ load reloads every Flash-Next projection: hyper-connections, PLE, the indexer.
-#[tokio::test]
 async fn flash_next_isq_load_and_a_reload_of_its_uqff_decode_alike() -> anyhow::Result<()> {
     let checkpoint = tiny_flash_next(DENSE_BUDGET)?;
     let uqff = tempfile::tempdir()?;
@@ -735,3 +732,15 @@ async fn flash_next_isq_load_and_a_reload_of_its_uqff_decode_alike() -> anyhow::
     );
     Ok(())
 }
+
+concurrent_cases!(
+    concurrent_cases,
+    [
+        flash_next_decode_matches_prefill_scoring: 0,
+        flash_next_split_across_gpu_and_cpu_scores_as_on_the_gpu: 354,
+        flash_next_autotuned_mtp_varies_its_depth_and_keeps_greedy_output: 610,
+        flash_next_prefix_hit_restores_the_ple_state: 360,
+        flash_next_sparse_prefix_hit_restores_the_indexer_keys: 362,
+        flash_next_isq_load_and_a_reload_of_its_uqff_decode_alike: 0,
+    ]
+);

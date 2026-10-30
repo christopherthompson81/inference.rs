@@ -18,6 +18,7 @@ pub mod cudnn;
 mod device;
 mod error;
 mod utils;
+pub use cudarc::driver::{CaptureScope, capture_scope, context_wide_scope};
 pub use device::{
     CudaDevice, DeviceId, built_archs, device_compute_cap, device_count, kernel_arch,
     kernel_arch_among,

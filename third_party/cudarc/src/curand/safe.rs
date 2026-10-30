@@ -109,6 +109,7 @@ impl CudaRng {
 
 impl Drop for CudaRng {
     fn drop(&mut self) {
+        let _context = crate::driver::context_wide_scope();
         let gen = std::mem::replace(&mut self.gen, std::ptr::null_mut());
         if !gen.is_null() {
             unsafe { result::destroy_generator(gen) }.unwrap();

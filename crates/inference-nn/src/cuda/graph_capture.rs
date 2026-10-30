@@ -485,6 +485,7 @@ pub struct CudaGraphMemoryPoolGuard {
 impl Drop for CudaGraphMemoryPoolGuard {
     fn drop(&mut self) {
         let Some(pool) = self.pool else { return };
+        let _context = inference_tensor::cuda_backend::context_wide_scope();
         if let Err(err) = self.stream.context().bind_to_thread() {
             tracing::warn!("Failed to bind CUDA context while restoring graph memory pool: {err}");
         }
@@ -529,6 +530,7 @@ pub struct CudaMemoryPoolRetention {
 impl Drop for CudaMemoryPoolRetention {
     fn drop(&mut self) {
         let Some(pool) = self.pool else { return };
+        let _context = inference_tensor::cuda_backend::context_wide_scope();
         if let Err(err) = self.stream.context().bind_to_thread() {
             tracing::warn!(
                 "Failed to bind CUDA context while releasing memory pool retention: {err}"
@@ -581,6 +583,7 @@ fn memory_pool_scope(
 pub fn retain_cuda_memory_pool(
     stream: &Arc<CudaStream>,
 ) -> inference_tensor::Result<CudaMemoryPoolRetention> {
+    let _context = inference_tensor::cuda_backend::context_wide_scope();
     let pool = if stream.context().has_async_alloc() {
         let pool = cuda_memory_pool(stream)?;
         let scopes = CUDA_GRAPH_MEMORY_POOL_SCOPES.get_or_init(Default::default);
@@ -701,6 +704,7 @@ pub fn cuda_graph_memory_attribute(
 }
 
 pub fn trim_cuda_graph_memory(stream: &Arc<CudaStream>) -> inference_tensor::Result<()> {
+    let _context = inference_tensor::cuda_backend::context_wide_scope();
     stream
         .context()
         .bind_to_thread()
@@ -734,6 +738,7 @@ pub fn prepare_cuda_graph_memory_pool(
         });
     }
 
+    let _context = inference_tensor::cuda_backend::context_wide_scope();
     let pool = cuda_memory_pool(stream)?;
     let pool_key = pool as usize;
     let scopes = CUDA_GRAPH_MEMORY_POOL_SCOPES.get_or_init(Default::default);
@@ -1341,6 +1346,8 @@ pub fn release_cuda_graph_resources<T>(
 mod tests {
     use super::*;
 
+    const OTHER_THREAD_HEAD_START_MS: u64 = 100;
+
     #[test]
     fn graph_event_labels_have_fixed_cardinality() {
         use std::collections::HashSet;
@@ -1720,6 +1727,56 @@ mod tests {
         );
         drop(retention);
         assert_eq!(memory_pool_release_threshold(pool)?, original);
+        Ok(())
+    }
+
+    // Another engine's teardown and footprint measurement on another thread (a module unload, a cuBLAS handle
+    // destroy, a context synchronize) wait for an open capture instead of silently invalidating it.
+    #[test]
+    fn context_wide_work_on_another_thread_waits_for_an_open_capture() -> anyhow::Result<()> {
+        skip_without_cuda!();
+        let captured = Arc::new(std::sync::Barrier::new(2));
+        let capture_thread = {
+            let captured = captured.clone();
+            std::thread::spawn(move || -> anyhow::Result<(bool, std::time::Instant)> {
+                let device = Device::new_cuda(0)?;
+                let stream = device.as_cuda_device()?.cuda_stream();
+                let _pool = prepare_cuda_graph_memory_pool(&stream)?;
+                let input = Var::from_tensor(&Tensor::from_vec(vec![1f32, 2.0], 2, &device)?)?;
+                drop(input.as_detached_tensor().affine(2.0, 1.0)?);
+                device.synchronize()?;
+                let restore = disable_event_tracking_for_capture(&stream);
+                let scope = inference_tensor::cuda_backend::capture_scope();
+                stream.begin_capture(sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)?;
+                let _first = input.as_detached_tensor().affine(2.0, 1.0)?;
+                captured.wait();
+                // long enough for the other thread's calls to reach the lock
+                std::thread::sleep(std::time::Duration::from_millis(OTHER_THREAD_HEAD_START_MS));
+                let _second = input.as_detached_tensor().affine(3.0, 1.0)?;
+                let graph = CudaGraphHandle::end_capture(&stream);
+                let ended = std::time::Instant::now();
+                drop(scope);
+                restore_event_tracking_after_capture(&stream, restore);
+                Ok((graph?.is_some(), ended))
+            })
+        };
+        // a device with kernel modules loaded, and one that only ran cuBLAS
+        let modules = Device::new_cuda(0)?;
+        drop(Tensor::ones((4, 64), DType::F32, &modules)?.affine(2.0, 1.0)?);
+        let blas = Device::new_cuda(0)?;
+        let m = Tensor::from_vec(vec![1f32; 64 * 64], (64, 64), &blas)?;
+        drop(m.matmul(&m)?);
+        blas.synchronize()?;
+        drop(m);
+        let usage = crate::utils::memory_usage::MemoryUsage;
+        captured.wait();
+        drop(modules);
+        drop(blas);
+        usage.synchronize_cuda_context(&Device::new_cuda(0)?)?;
+        let done = std::time::Instant::now();
+        let (graph, ended) = capture_thread.join().expect("capture thread")?;
+        assert!(graph, "the capture produced no graph");
+        assert!(done >= ended, "context-wide work ran inside the capture");
         Ok(())
     }
 }

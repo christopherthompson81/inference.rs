@@ -9,6 +9,9 @@ use inference::{
     TextMessageRole, TextMessages, TextModelBuilder,
 };
 use inference_tensor::{DType, Device, Tensor};
+#[macro_use]
+#[path = "../support/concurrent_cases.rs"]
+mod concurrent_cases;
 
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/llama_tiny");
 const TOKENIZER: &str = concat!(
@@ -153,7 +156,6 @@ async fn generates(dir: &tempfile::TempDir) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
 async fn a_dense_granite_mlp_scores_as_its_fused_shared_mlp() -> anyhow::Result<()> {
     let common = common_weights()?;
     let (mut split, mut fused) = (common.clone(), common);
@@ -200,7 +202,6 @@ async fn a_dense_granite_mlp_scores_as_its_fused_shared_mlp() -> anyhow::Result<
     Ok(())
 }
 
-#[tokio::test]
 async fn granite_moe_checkpoints_with_and_without_a_shared_expert_generate() -> anyhow::Result<()> {
     for (architecture, model_type, shared) in [
         ("GraniteMoeForCausalLM", "granitemoe", false),
@@ -239,7 +240,6 @@ async fn granite_moe_checkpoints_with_and_without_a_shared_expert_generate() -> 
     Ok(())
 }
 
-#[tokio::test]
 async fn granite_swa_v5_expert_names_score_as_granite_4_names() -> anyhow::Result<()> {
     let mut v5 = common_weights()?;
     let mut granite4 = v5.clone();
@@ -294,3 +294,12 @@ async fn granite_swa_v5_expert_names_score_as_granite_4_names() -> anyhow::Resul
     assert!(worst(&v5, &full) > LOGIT_TOLERANCE);
     Ok(())
 }
+
+concurrent_cases!(
+    concurrent_cases,
+    [
+        a_dense_granite_mlp_scores_as_its_fused_shared_mlp: 0,
+        granite_moe_checkpoints_with_and_without_a_shared_expert_generate: 0,
+        granite_swa_v5_expert_names_score_as_granite_4_names: 0,
+    ]
+);

@@ -4,6 +4,9 @@ use std::path::Path;
 
 use inference::{EmbeddingModelBuilder, IsqType, ModelDType, UqffEmbeddingModelBuilder};
 
+#[macro_use]
+#[path = "../support/concurrent_cases.rs"]
+mod concurrent_cases;
 #[path = "../support/qwen3_embedding_tiny.rs"]
 mod support;
 #[path = "../support/traces.rs"]
@@ -26,7 +29,6 @@ fn cpu_embedding_builder(dir: &Path) -> EmbeddingModelBuilder {
         .with_force_cpu()
 }
 
-#[tokio::test]
 async fn an_embedding_checkpoint_loads_and_embeds_to_unit_length() -> anyhow::Result<()> {
     let checkpoint = tiny_embedding_checkpoint()?;
     let model = cpu_embedding_builder(checkpoint.path()).build().await?;
@@ -38,7 +40,6 @@ async fn an_embedding_checkpoint_loads_and_embeds_to_unit_length() -> anyhow::Re
     Ok(())
 }
 
-#[tokio::test]
 async fn an_isq_embedder_and_a_reload_of_its_uqff_embed_alike() -> anyhow::Result<()> {
     let checkpoint = tiny_embedding_checkpoint()?;
     let uqff_dir = tempfile::tempdir()?;
@@ -68,7 +69,6 @@ async fn an_isq_embedder_and_a_reload_of_its_uqff_embed_alike() -> anyhow::Resul
     Ok(())
 }
 
-#[tokio::test]
 async fn a_sliding_window_reaches_the_embedding_only_when_enabled() -> anyhow::Result<()> {
     let checkpoint = tiny_embedding_checkpoint()?;
     let expected = cpu_embedding_builder(checkpoint.path())
@@ -121,7 +121,6 @@ async fn a_sliding_window_reaches_the_embedding_only_when_enabled() -> anyhow::R
 }
 
 // A GPU load that writes UQFF serves the written file on the GPU, as a later load of it does.
-#[tokio::test]
 async fn a_gpu_isq_load_that_writes_uqff_serves_it() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
@@ -154,3 +153,13 @@ async fn a_gpu_isq_load_that_writes_uqff_serves_it() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+concurrent_cases!(
+    concurrent_cases,
+    [
+        an_embedding_checkpoint_loads_and_embeds_to_unit_length: 0,
+        an_isq_embedder_and_a_reload_of_its_uqff_embed_alike: 0,
+        a_sliding_window_reaches_the_embedding_only_when_enabled: 0,
+        a_gpu_isq_load_that_writes_uqff_serves_it: 348,
+    ]
+);

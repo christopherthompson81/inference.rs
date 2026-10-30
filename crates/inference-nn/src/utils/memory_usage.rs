@@ -209,6 +209,7 @@ impl MemoryUsage {
         let Device::Cuda(device) = device else {
             return Ok(false);
         };
+        let _context = inference_tensor::cuda_backend::context_wide_scope();
         let stream = device.cuda_stream();
         stream.context().bind_to_thread().w()?;
         if !stream.context().has_async_alloc() {
@@ -236,6 +237,7 @@ impl MemoryUsage {
         let Device::Cuda(device) = device else {
             return Ok(false);
         };
+        let _context = inference_tensor::cuda_backend::context_wide_scope();
         let stream = device.cuda_stream();
         stream.context().bind_to_thread().w()?;
         if !stream.context().has_async_alloc() {
@@ -265,6 +267,7 @@ impl MemoryUsage {
         let Device::Cuda(device) = device else {
             return Ok(false);
         };
+        let _context = inference_tensor::cuda_backend::context_wide_scope();
         device
             .cuda_stream()
             .context()

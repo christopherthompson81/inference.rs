@@ -2306,6 +2306,7 @@ unsafe impl Sync for CudaModule {}
 
 impl Drop for CudaModule {
     fn drop(&mut self) {
+        let _context = super::capture_lock::context_wide_scope();
         self.ctx.record_err(self.ctx.bind_to_thread());
         self.ctx
             .record_err(unsafe { result::module::unload(self.cu_module) });
