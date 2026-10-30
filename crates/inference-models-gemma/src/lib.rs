@@ -7,6 +7,7 @@ use inference_nn::{
     media_inputs, model, moe, ops, paged_attention, speculative, utils, vision,
 };
 
+mod audio_attention;
 pub mod diffusion_gemma;
 pub mod embedding_gemma;
 pub mod gemma;
