@@ -316,64 +316,22 @@ macro_rules! qwen3_5_loader {
                 config: &str,
                 params: &AutoDeviceMapParams,
             ) -> Result<usize> {
-                let AutoDeviceMapParams::Multimodal {
-                    max_seq_len,
-                    max_batch_size,
-                    max_image_shape,
-                    max_num_images,
-                } = params
-                else {
-                    anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
-                };
-
                 let cfg = parse_config(config, $moe)?;
-
-                let img_seq_len = {
-                    let cfg = &cfg.vision_config;
-                    let grid_t = 1;
-                    let grid_h = (max_image_shape.0 / cfg.patch_size) / cfg.spatial_merge_size;
-                    let grid_w = (max_image_shape.1 / cfg.patch_size) / cfg.spatial_merge_size;
-                    grid_t * grid_h * grid_w * max_num_images
-                };
-
-                let max_text_attn = {
-                    let cfg = &cfg.text_config;
-                    let max_seq_len = img_seq_len + max_seq_len.min(&ATTENTION_CHUNK_SIZE);
-                    max_batch_size * cfg.num_attention_heads * max_seq_len * max_seq_len
-                };
-
-                Ok(max_text_attn)
+                super::qwen3vl::qwen3_vision_mapped_act_elems(
+                    &cfg.vision_config,
+                    cfg.text_config.num_attention_heads,
+                    params,
+                )
             }
             fn non_mapped_max_act_size_elems(
                 &self,
                 config: &str,
                 params: &AutoDeviceMapParams,
             ) -> Result<usize> {
-                let AutoDeviceMapParams::Multimodal {
-                    max_seq_len: _,
-                    max_batch_size,
-                    max_image_shape,
-                    max_num_images,
-                } = params
-                else {
-                    anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
-                };
-
-                let cfg = parse_config(config, $moe)?;
-
-                let img_seq_len = {
-                    let cfg = &cfg.vision_config;
-                    let grid_t = 1;
-                    let grid_h = max_image_shape.0 / cfg.patch_size;
-                    let grid_w = max_image_shape.1 / cfg.patch_size;
-                    grid_t * grid_h * grid_w
-                };
-                let max_vision_attn = {
-                    let cfg = &cfg.vision_config;
-                    (max_batch_size * max_num_images) * cfg.num_heads * img_seq_len * img_seq_len
-                };
-
-                Ok(max_vision_attn)
+                super::qwen3vl::qwen3_vision_non_mapped_act_elems(
+                    &parse_config(config, $moe)?.vision_config,
+                    params,
+                )
             }
             fn non_mapped_size_in_bytes(
                 &self,
@@ -397,70 +355,13 @@ macro_rules! qwen3_5_loader {
                     embed_tokens + lm_head + cfg.text_config.hidden_size
                 };
 
-                let (patch_merger, deepstack_mergers) = {
-                    let cfg = &cfg.vision_config;
-                    let hidden_size = cfg.hidden_size * cfg.spatial_merge_size.pow(2);
-
-                    let mlp0 = hidden_size * hidden_size + hidden_size;
-                    let mlp2 = hidden_size * cfg.out_hidden_size + cfg.out_hidden_size;
-
-                    let ln_q = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
-                    let merger = mlp0 + mlp2 + ln_q;
-
-                    let ds_ln = hidden_size + bias_if!(true, hidden_size);
-                    let ds_merger = mlp0 + mlp2 + ds_ln;
-                    let deepstack = cfg.deepstack_visual_indexes.len() * ds_merger;
-
-                    (merger, deepstack)
-                };
-
-                let patch_embed = {
-                    let cfg = &cfg.vision_config;
-                    let conv_cfg = Conv3dConfig {
-                        stride: cfg.patch_size,
-                        ..Default::default()
-                    };
-                    let kernel_sizes = [cfg.temporal_patch_size, cfg.patch_size, cfg.patch_size];
-                    let weight = cfg.in_chans * cfg.hidden_size / conv_cfg.groups
-                        * kernel_sizes[0]
-                        * kernel_sizes[1]
-                        * kernel_sizes[2];
-                    let bias = cfg.hidden_size;
-                    weight + bias
-                };
-
-                let pos_embed = {
-                    let cfg = &cfg.vision_config;
-                    cfg.num_position_embeddings * cfg.hidden_size
-                };
-
-                let encoder_layer = {
-                    let cfg = &cfg.vision_config;
-                    let norm1 = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
-                    let norm2 = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
-
-                    let fc1 = cfg.hidden_size * cfg.intermediate_size + cfg.intermediate_size;
-                    let fc2 = cfg.hidden_size * cfg.intermediate_size + cfg.hidden_size;
-
-                    let qkv = cfg.hidden_size * cfg.hidden_size * 3 + cfg.hidden_size * 3;
-                    let out = cfg.hidden_size * cfg.hidden_size + cfg.hidden_size;
-
-                    norm1 + norm2 + fc1 + fc2 + qkv + out
-                };
-
                 let mtp_head = if cfg.mtp {
                     mtp_head_elems(&cfg.text_config, weight_pack_factor)?
                 } else {
                     0
                 };
 
-                let elems = text_elems
-                    + mtp_head
-                    + patch_merger
-                    + deepstack_mergers
-                    + patch_embed
-                    + pos_embed
-                    + encoder_layer * cfg.vision_config.depth;
+                let elems = text_elems + mtp_head + cfg.vision_config.weight_elems();
 
                 Ok(elems * dtype.size_in_bytes())
             }

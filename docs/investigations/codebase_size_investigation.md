@@ -2959,3 +2959,27 @@ Implication: the API work is done; the remaining weight is in core, server-core 
 Qwen vision models. Ranked next: (1) Qwen3 vision sizing onto `VisionConfig` and one Qwen3-VL loader body for dense
 and MoE, (2) FP8 `apply_isq` through the unquantized path, (3) Qwen3.5 / Qwen3-VL multimodal wrapper, (4) Qwen2-VL /
 Qwen2.5-VL vision, (5) qwen2vl / qwen3_vl inputs processors; then a look at what weighs most in core and server-core.
+
+## Run 96 - 2026-10-29 20:43
+
+Question: Run 95's first item: can the Qwen3 vision tower's sizing live once, and the dense and MoE Qwen3-VL loaders
+share one body?
+
+Change: `VisionConfig` (inference-nn) gains `merged_image_tokens`, `encoder_attention_elems` and `weight_elems`;
+the Qwen3-VL loaders become one `qwen3vl_loader!` body over shared functions (the model type and `moe` are its
+arguments; `qwen3vl_moe.rs` is gone), MoE layers sized as the attention of a `DecoderLayerShape` plus router and
+experts; Qwen3.5's loader takes the vision activation and weight sizing from the same functions.
+
+Commands: `cargo nextest run -p inference-models-qwen`; `cargo llvm-lines -p inference-models-qwen --lib`;
+`scripts/dup_scan.py`.
+
+Finding:
+- New tests: both Qwen3-VL loaders' layer sizes sum to the bytes the load reads under the layers, and the non-mapped
+  size equals every other byte it reads (embeddings, head, final norm, the whole vision tower); the activation sizes
+  pinned against their formulas; the MoE ISQ patterns reach the router and experts, the dense ones do not. Qwen3.5's
+  sizing-vs-weights tests and the existing Qwen3-VL sizing pin pass unchanged; 172 models-qwen tests pass.
+- models-qwen IR 664,260 -> 663,711 (-549); a first cut with a generic `impl IntoIterator` regex helper measured
+  664,918, so the helper takes a slice.
+- Duplication 29,070 -> 28,694 lines (-376); the diff is -375 lines net with ~110 lines of new tests.
+
+Implication: done. Next per Run 95: FP8 `apply_isq` through the unquantized path.

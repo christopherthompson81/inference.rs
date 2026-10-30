@@ -64,6 +64,46 @@ pub struct VisionConfig {
     pub deepstack_visual_indexes: Vec<usize>,
 }
 
+impl VisionConfig {
+    /// The text tokens `n_images` images of `(height, width)` take after the spatial merge, one frame each.
+    pub fn merged_image_tokens(&self, (height, width): (usize, usize), n_images: usize) -> usize {
+        let grid = |side: usize| side / self.patch_size / self.spatial_merge_size;
+        grid(height) * grid(width) * n_images
+    }
+
+    /// The encoder's attention scores over a batch of `n_images` images, before the merge.
+    pub fn encoder_attention_elems(
+        &self,
+        (height, width): (usize, usize),
+        n_images: usize,
+    ) -> usize {
+        let patches = (height / self.patch_size) * (width / self.patch_size);
+        n_images * self.num_heads * patches * patches
+    }
+
+    /// Elements of the tower's weights: patch and position embeddings, the encoder, the merger and deepstack mergers.
+    pub fn weight_elems(&self) -> usize {
+        let h = self.hidden_size;
+        let merged = h * self.spatial_merge_size.pow(2);
+        let mlp = merged * merged + merged + merged * self.out_hidden_size + self.out_hidden_size;
+        // the merger's norm is over the encoder width, a deepstack merger's over the merged width
+        let merger = mlp + 2 * h;
+        let deepstack = self.deepstack_visual_indexes.len() * (mlp + 2 * merged);
+        let patch_embed =
+            self.in_chans * h * self.temporal_patch_size * self.patch_size * self.patch_size + h;
+        let pos_embed = self.num_position_embeddings * h;
+        let encoder_layer = 4 * h
+            + 2 * h * self.intermediate_size
+            + self.intermediate_size
+            + h
+            + 3 * h * h
+            + 3 * h
+            + h * h
+            + h;
+        merger + deepstack + patch_embed + pos_embed + encoder_layer * self.depth
+    }
+}
+
 struct PatchEmbed {
     proj: Conv3dNoBias,
     bias: Tensor,
