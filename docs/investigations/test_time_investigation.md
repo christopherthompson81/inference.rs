@@ -497,3 +497,22 @@ Implication: ~7 s off the CUDA suite, less than Run 16's ~29 s of context queue 
 the cheap kind that never paid for a context. The two bugs found are product bugs for any process running several
 engines (the server's model manager). Next lever if wanted: the server-core route tests (`chat_route` 18, `keyed`
 10) and the C ABI's `engine_abi` 21, each a model per test.
+
+## Run 20 - 2026-10-30 11:54
+
+Question: the full local CI after Run 19 failed once: `jobs::a_device_job_evicts_the_idle_model_and_holds_the_device`
+passed and its process died with SIGSEGV at exit. Did this branch's drop-time locks (cudarc's module, cuBLAS,
+cuBLASLt, cuRAND and cuDNN drops now waiting out open captures) cause it?
+
+Commands: the test alone 6 times; `--stress-count 20` of it, then of every `jobs::` test, with 16 busy-loop shells
+(the suite's CPU load); the binary under `gdb` in a loop with that load (40 iterations); then an A/B, 5 x 20
+iterations of the five jobs tests under the same load, A the branch, B with only the drop-time locks removed.
+
+Finding:
+- Alone: 6/6 pass (2.2 s). Under load: the one test 20/20; all five, 1 SIGSEGV in 9 iterations. Under gdb: none in
+  40 (gdb's timing hides it, as in job_scheduler Run 6).
+- A/B: A 3 crashes in 100 iterations (500 test processes), B 2 in 100. All five at exit after a pass:
+  `a_sized_job_runs_beside_the_resident_model` 4, `a_job_that_may_not_displace_waits_for_the_device_to_empty` 1.
+
+Implication: not this branch; an existing exit-time race in the jobs tests, the class job_scheduler Run 6 fixed for
+`unload_model` (an engine thread still tearing down while the process exits), apparently still open on a job path.
