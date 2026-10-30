@@ -210,6 +210,7 @@ pub(crate) fn synchronize_cuda_contexts(primary: &Device, mapper: &dyn DeviceMap
     if !devices.iter().any(|device| device.same_device(primary)) {
         devices.push(primary.clone());
     }
+    let _context = inference_tensor::cuda_backend::context_wide_scope();
     for device in devices {
         if let Device::Cuda(cuda) = device {
             cuda.cuda_stream().context().synchronize()?;

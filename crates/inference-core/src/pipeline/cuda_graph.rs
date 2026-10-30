@@ -1328,6 +1328,7 @@ where
     let _memory_pool_guard = prepare_cuda_graph_memory_pool(&stream)?;
     let restore_event_tracking = disable_event_tracking_for_capture(&stream);
     let _htod_cache_guard = cuda_device.enable_cuda_graph_htod_cache();
+    let _capture = inference_tensor::cuda_backend::capture_scope();
 
     if let Err(err) = stream.begin_capture(sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
     {

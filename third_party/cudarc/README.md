@@ -13,6 +13,12 @@
 >   kept in RAM. `CudaSlice` carries the host pointer and its drop frees that with `cuMemFreeHost`; `CudaSlice::mapped_host_ptr`
 >   hands that pointer out, so the CPU reads the same bytes.
 >
+> - `src/driver/safe/capture_lock.rs`: a process-wide lock between graph captures (held shared) and the calls CUDA
+>   rejects while any stream of the context captures (held exclusively), with `CudaModule`'s drop taking it around
+>   `cuModuleUnload`, and the cuBLAS, cuBLASLt, cuRAND and cuDNN handle drops taking it around their destroy (whose
+>   synchronizing frees succeed while invalidating the capture): either, on one thread, silently invalidated another
+>   thread's open capture.
+>
 > Everything else is upstream. To re-sync, copy a new crates.io release and reapply the changes above.
 
 # cudarc: minimal and safe api over the cuda toolkit
