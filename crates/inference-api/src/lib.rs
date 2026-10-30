@@ -4,6 +4,7 @@ pub mod agentic;
 pub mod api_error;
 pub mod asr_gguf;
 pub mod blocking;
+pub mod devices;
 pub mod dispatch;
 pub mod engine;
 pub mod engine_chat;

@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from . import types
 from ._callbacks import HostCallbacks, HostRegistration, HostTool
 from ._codec import from_data, from_json, to_json
-from ._engine import JsonEngine, MediaAttachment, SkillFile, Stream, TranscriptionSession
+from ._engine import DeviceLease, JsonEngine, MediaAttachment, SkillFile, Stream, TranscriptionSession
 from ._owned import Blob
 
 
@@ -217,6 +217,26 @@ class Engine:
     def transcription(self, audio: bytes, request: types.TranscriptionRequest | str = "{}") -> Blob:
         """The transcript of encoded audio, in the request's response_format (the blob's MIME type names it)."""
         return self.json.transcription(to_json(request), audio)
+
+    def device_snapshots(self, devices: list[int] | None = None) -> dict:
+        """What each CUDA device (every visible one by default) holds now, as parsed JSON."""
+        return json.loads(self.json.device_snapshots(json.dumps({"devices": devices})))
+
+    def device_place(self, need, devices: list[int] | None = None, displace: str = "busy") -> dict:
+        """Where work needing `need` ("device", or {"bytes": n}) would go now, as parsed JSON."""
+        request = {"devices": devices, "need": need, "displace": displace}
+        return json.loads(self.json.device_place(json.dumps(request)))
+
+    def device_lease(
+        self,
+        device: int,
+        holder: str,
+        unload: list[str] | None = None,
+        drain_timeout_secs: int | None = None,
+    ) -> DeviceLease:
+        """Holds CUDA device `device` for `holder`, unloading its models (or `unload`) as they go quiet."""
+        request = {"device": device, "holder": holder, "unload": unload, "drain_timeout_secs": drain_timeout_secs}
+        return self.json.device_lease(json.dumps(request))
 
     def transcription_session(
         self, request: types.TranscriptionSessionRequest | str = "{}"

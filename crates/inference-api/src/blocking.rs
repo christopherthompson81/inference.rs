@@ -90,6 +90,16 @@ impl BlockingEngine {
             .map(|(stream, cancellation)| BlockingStream::new(stream, cancellation))
     }
 
+    /// Leases a device ([`Engine::lease_device_json`]), waiting while its models drain.
+    pub fn lease_device_json(
+        &self,
+        request: &[u8],
+    ) -> Result<crate::devices::DeviceLease, ApiError> {
+        self.call(request, |engine, request| async move {
+            engine.lease_device_json(&request).await
+        })
+    }
+
     pub fn chat_json(&self, request: &[u8], media: MediaAttachments) -> Result<String, ApiError> {
         self.call(request, |engine, request| async move {
             engine.chat_json(&request, media).await

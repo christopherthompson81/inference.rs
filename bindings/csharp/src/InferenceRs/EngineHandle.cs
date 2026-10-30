@@ -115,6 +115,21 @@ internal sealed class TranscriptionSessionHandle : SafeHandle
     }
 }
 
+/// <summary>A held CUDA device; freeing it releases the device.</summary>
+internal sealed class DeviceLeaseHandle : SafeHandle
+{
+    internal DeviceLeaseHandle(IntPtr lease)
+        : base(IntPtr.Zero, ownsHandle: true) => SetHandle(lease);
+
+    public override bool IsInvalid => handle == IntPtr.Zero;
+
+    protected override bool ReleaseHandle()
+    {
+        NativeMethods.inference_device_lease_free(handle);
+        return true;
+    }
+}
+
 /// <summary>A native layout model.</summary>
 internal sealed class LayoutHandle : SafeHandle
 {

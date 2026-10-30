@@ -949,6 +949,52 @@ entry_points! {
     file_id_call(file_id, file_id_len) inference_file_delete => Engine::delete_file_json;
 }
 
+/// Opaque; mirrors `inference_device_lease`. Freeing it releases the device.
+#[allow(non_camel_case_types)]
+pub struct inference_device_lease {
+    _lease: inference_api::devices::DeviceLease,
+}
+
+entry_points! {
+    /// Safety: as for `inference_chat`.
+    json inference_devices_snapshot => |engine, request| engine.engine().device_snapshots_json(request).map_err(api_failure);
+    /// Safety: as for `inference_chat`.
+    json inference_device_place => |engine, request| engine.engine().place_need_json(request).map_err(api_failure);
+}
+
+/// Safety: `engine` is a live handle, `request` valid for `request_len` bytes, `out_lease` valid for a write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_device_lease_open(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_lease: *mut *mut inference_device_lease,
+) -> inference_status {
+    unsafe {
+        engine_call(
+            engine,
+            (request, request_len, "request"),
+            (out_lease, "out_lease"),
+            |engine, request| {
+                let lease = engine.lease_device_json(request).map_err(api_failure)?;
+                Ok(Box::into_raw(Box::new(inference_device_lease {
+                    _lease: lease,
+                })))
+            },
+        )
+    }
+}
+
+/// Safety: `lease` is NULL or a live lease handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_device_lease_free(lease: *mut inference_device_lease) {
+    unsafe {
+        if !lease.is_null() {
+            guard_value((), || drop(Box::from_raw(lease)));
+        }
+    }
+}
+
 entry_points! {
     /// Safety: as for `inference_chat`.
     json inference_jobs_configure => |engine, request| engine.engine().configure_jobs_json(request).map_err(api_failure);

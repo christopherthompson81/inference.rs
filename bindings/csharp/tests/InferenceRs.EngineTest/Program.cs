@@ -162,6 +162,11 @@ internal static class Program
 
     private static void ModelsAreListed(InferenceEngine engine)
     {
+        // the tests build without CUDA, where a device call is refused
+        Check("a lease without a CUDA device is Unavailable",
+            Throws(() => engine.LeaseDevice("""{"device": 0, "holder": "probe"}"""))?.Status == InferenceStatus.Unavailable);
+        Check("a device snapshot without a CUDA device is Unavailable",
+            Throws(() => engine.DeviceSnapshots())?.Status == InferenceStatus.Unavailable);
         var models = JsonNode.Parse(engine.ListModels())!["data"]!.AsArray();
         Check("the model list starts with the default alias", (string?)models[0]!["id"] == "default");
         Check("one model card is marked default", models.Count(card => (bool?)card!["default"] == true) == 1);

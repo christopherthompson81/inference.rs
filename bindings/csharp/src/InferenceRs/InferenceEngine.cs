@@ -447,6 +447,38 @@ public sealed unsafe class InferenceEngine : IDisposable
     /// <summary>Opens a streamed transcription on a cache-aware streaming recogniser (Nemotron streaming ASR).</summary>
     /// <param name="requestJson"><c>{"model"?, "language"?, "sample_rate"?, "response_format"?, "timestamp_granularities"?}</c>;
     /// the pushed audio is at <c>sample_rate</c> (default 16000).</param>
+    /// <summary>What each CUDA device holds now: free and total bytes, its lease holder and its resident models.</summary>
+    public string DeviceSnapshots(string requestJson = "{}")
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_devices_snapshot(
+            engine.Handle, request.Pointer, request.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_devices_snapshot));
+    }
+
+    /// <summary>Where work with a need would go now and which models it would unload, or why it must wait.</summary>
+    public string DevicePlace(string requestJson)
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_device_place(
+            engine.Handle, request.Pointer, request.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_device_place));
+    }
+
+    /// <summary>Holds a CUDA device for the caller, unloading its models as they go quiet; blocks while they
+    /// drain.</summary>
+    public DeviceLease LeaseDevice(string requestJson)
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_device_lease_open(
+            engine.Handle, request.Pointer, request.Length, out var lease);
+        InferenceException.ThrowIfFailed(status, nameof(NativeMethods.inference_device_lease_open));
+        return new DeviceLease(new DeviceLeaseHandle(lease));
+    }
+
     public TranscriptionSession OpenTranscriptionSession(string requestJson = "{}")
     {
         using var engine = Borrow();

@@ -136,6 +136,23 @@ class TranscriptionSession:
         self.close()
 
 
+class DeviceLease:
+    """A CUDA device held for GPU work of the caller's own; close (or `with`) releases it."""
+
+    def __init__(self, pointer):
+        self._lease = Handle(pointer, lib.inference_device_lease_free)
+        self._finalizer = weakref.finalize(self, self._lease.close)
+
+    def close(self):
+        self._finalizer()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
 class _Buffers:
     """Keeps the bytes and strings an array of native structs points at alive for one call."""
 
@@ -399,6 +416,25 @@ class JsonEngine:
                 "inference_transcription",
             )
         return take_blob(blob)
+
+    def device_snapshots(self, request_json: str = "{}") -> str:
+        """What each CUDA device holds now: free and total bytes, its lease holder and its resident models."""
+        return self._call("inference_devices_snapshot", request_json)
+
+    def device_place(self, request_json: str) -> str:
+        """Where work with a need would go now, and which models it would unload; or why it must wait."""
+        return self._call("inference_device_place", request_json)
+
+    def device_lease(self, request_json: str) -> DeviceLease:
+        """Holds a CUDA device for the caller, unloading its models as they go quiet; blocks while they drain."""
+        data = text_arg(request_json)
+        lease = ctypes.c_void_p()
+        with Lease(self._handle) as engine:
+            check(
+                lib.inference_device_lease_open(engine, data, len(data), ctypes.byref(lease)),
+                "inference_device_lease_open",
+            )
+        return DeviceLease(lease.value)
 
     def transcription_session(self, request_json: str = "{}") -> TranscriptionSession:
         """Opens a streamed transcription on a cache-aware streaming recogniser; it keeps the engine open."""
