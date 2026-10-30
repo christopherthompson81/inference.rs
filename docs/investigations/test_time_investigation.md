@@ -364,3 +364,12 @@ candidates are the families of small kernel tests, counted as GPU processes: inf
 (26), paged attention layers (19), `speculative_rejection` (11), `moe::experts` (10); inference-quant `utils::ops`
 (17), `packed_affine` (15), `raw` (9); inference-fattn `parity` (17), `paged` (9), `fp8` (5), `varlen` (5). Merging
 each family into one process that runs every case and reports every failing one would cut ~165 processes, ~20 s.
+
+Follow-up, the merge: `inference_tensor::gpu_cases!(cuda_cases, [...])` turns a module's GPU tests into cases of one
+test, which runs each (a panic fails only its case) and fails naming every failing one; `INFERENCE_TEST_CASE` narrows
+it to matching cases. The 12 families above: 173 cases in 13 processes (`gguf::raw` keeps its device-generic pair
+apart from its CUDA-gated cases). An injected panic in one `ops` case reported that case and ran the rest.
+- CUDA suite alone: 3452 -> 3292 tests, nextest 75.9 -> 51.7 / 51.8 s, user + sys 570 -> 455 s.
+- Full local CI (`--lint --tests --cuda --bindings --size --sweep`): the first run after the change rebuilt every
+  crate above inference-tensor (wall 401 s, CUDA suite 103.8 s beside the builds); warm, wall 107.5 s with the CUDA
+  suite at 62.0 s and the CPU suite at 11.6 s (Run 13: 190.9 s, 96.2 s, 15.8 s).
