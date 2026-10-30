@@ -227,7 +227,47 @@ fn dflash_sample_selector_reference(
 }
 
 #[cfg(feature = "cuda")]
-#[test]
+inference_tensor::gpu_cases!(
+    cuda_cases,
+    [
+        cast_then_scale_rms_norms_on_cuda_match_the_composite,
+        cuda_add_rms_norm_matches_separate_ops,
+        cuda_async_top1_device_and_host_tokens_match,
+        cuda_async_top1_marks_nan_token_invalid,
+        cuda_async_top1_queues_two_submissions_and_reuses_slots,
+        cuda_async_top1_releases_resident_target_before_host_completion,
+        cuda_async_top1_resizes_after_completion,
+        cuda_batched_categorical_marks_invalid_distribution,
+        cuda_batched_categorical_matches_reference_across_chunks,
+        cuda_batched_categorical_selects_at_upper_boundary,
+        cuda_batched_topk_matches_cpu_with_offsets_and_mixed_temperatures,
+        cuda_batched_topk_orders_ties_by_lowest_index,
+        cuda_batched_topk_rejects_nan_distribution,
+        cuda_batched_topk_workspace_reuses_and_grows,
+        cuda_cached_batched_top1_tracks_batch_shape,
+        cuda_cached_top1_honors_view_offset,
+        cuda_cached_top1_marks_nan_distribution,
+        cuda_dflash_sample_selector_marks_invalid_sampling_params,
+        cuda_dflash_sample_selector_matches_sequential_reference,
+        cuda_dflash_selector_matches_reference_with_bf16_codebooks,
+        cuda_dflash_selector_supports_max_k_and_stable_ties,
+        cuda_low_precision_top1_matches_f32_across_ties_and_nonfinite_values,
+        cuda_qk_norm_rope_positions_preserves_projection_layout,
+        cuda_qk_norm_rope_writes_token_major_from_packed_projection,
+        cuda_ranked_topk_cooperative_boundaries_and_fallback_match_cpu,
+        cuda_ranked_topk_matches_cpu_across_dtypes_ties_and_offsets,
+        cuda_ranked_topk_radix_matches_realistic_vocab_and_cross_chunk_ties,
+        cuda_ranked_topk_radix_preserves_special_value_contract,
+        cuda_resident_nucleus_sampling_matches_full_vocab_reference,
+        cuda_resident_topk_sampling_matches_filtered_reference,
+        cuda_resident_topk_sampling_reuses_ring_and_destination,
+        cuda_top1_uses_first_maximum_across_lanes_and_chunks,
+        cuda_topk_ranks_every_row,
+        rms_norm_on_cuda_matches_the_cpu_for_every_rank_and_layout
+    ]
+);
+
+#[cfg(feature = "cuda")]
 fn cuda_add_rms_norm_matches_separate_ops() -> inference_tensor::Result<()> {
     const ROWS: usize = 2;
     const COLS: usize = 16;
@@ -288,7 +328,6 @@ fn cuda_add_rms_norm_matches_separate_ops() -> inference_tensor::Result<()> {
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 #[allow(clippy::cast_precision_loss)]
 fn cuda_qk_norm_rope_writes_token_major_from_packed_projection() -> inference_tensor::Result<()> {
     const BATCH: usize = 2;
@@ -381,7 +420,6 @@ fn cuda_qk_norm_rope_writes_token_major_from_packed_projection() -> inference_te
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_qk_norm_rope_positions_preserves_projection_layout() -> inference_tensor::Result<()> {
     const BATCH: usize = 2;
     const SEQ_LEN: usize = 3;
@@ -755,7 +793,6 @@ fn test_repeat_interleave_flat() -> inference_tensor::Result<()> {
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_topk_ranks_every_row() -> inference_tensor::Result<()> {
     crate::skip_without_cuda!();
     use super::TopKLastDimOp;
@@ -776,7 +813,6 @@ fn cuda_topk_ranks_every_row() -> inference_tensor::Result<()> {
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_batched_topk_matches_cpu_with_offsets_and_mixed_temperatures()
 -> inference_tensor::Result<()> {
     let device = Device::new_cuda(0)?;
@@ -808,7 +844,6 @@ fn cuda_batched_topk_matches_cpu_with_offsets_and_mixed_temperatures()
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_batched_topk_rejects_nan_distribution() -> inference_tensor::Result<()> {
     let device = Device::new_cuda(0)?;
     let logits = Tensor::new(&[[1.0f32, f32::NAN, 3.0, 2.0]], &device)?;
@@ -820,7 +855,6 @@ fn cuda_batched_topk_rejects_nan_distribution() -> inference_tensor::Result<()> 
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_resident_topk_sampling_matches_filtered_reference() -> inference_tensor::Result<()> {
     const BATCH: usize = 4;
     const VOCAB: usize = 2051;
@@ -908,7 +942,6 @@ fn nucleus_reference_weights(
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_resident_nucleus_sampling_matches_full_vocab_reference() -> inference_tensor::Result<()> {
     const VOCAB: usize = 20_000;
     const CDF_TOLERANCE: f64 = 1e-3;
@@ -1003,7 +1036,6 @@ fn cuda_resident_nucleus_sampling_matches_full_vocab_reference() -> inference_te
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_resident_topk_sampling_reuses_ring_and_destination() -> inference_tensor::Result<()> {
     const BATCH: usize = 2;
 
@@ -1090,7 +1122,6 @@ fn cuda_resident_topk_sampling_reuses_ring_and_destination() -> inference_tensor
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_cached_batched_top1_tracks_batch_shape() -> inference_tensor::Result<()> {
     let device = Device::new_cuda(0)?;
     let mut workspace = None;
@@ -1107,7 +1138,6 @@ fn cuda_cached_batched_top1_tracks_batch_shape() -> inference_tensor::Result<()>
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_async_top1_device_and_host_tokens_match() -> inference_tensor::Result<()> {
     let device = Device::new_cuda(0)?;
     let logits = Tensor::new(&[[1.0f32, 7.0, 3.0], [9.0, 2.0, 5.0]], &device)?;
@@ -1132,7 +1162,6 @@ fn cuda_async_top1_device_and_host_tokens_match() -> inference_tensor::Result<()
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_async_top1_queues_two_submissions_and_reuses_slots() -> inference_tensor::Result<()> {
     let device = Device::new_cuda(0)?;
     let first = Tensor::new(&[[1.0f32, 4.0, 3.0], [8.0, 2.0, 5.0]], &device)?;
@@ -1170,7 +1199,6 @@ fn cuda_async_top1_queues_two_submissions_and_reuses_slots() -> inference_tensor
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_async_top1_releases_resident_target_before_host_completion() -> inference_tensor::Result<()>
 {
     let device = Device::new_cuda(0)?;
@@ -1205,7 +1233,6 @@ fn cuda_async_top1_releases_resident_target_before_host_completion() -> inferenc
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_async_top1_resizes_after_completion() -> inference_tensor::Result<()> {
     let device = Device::new_cuda(0)?;
     let mut workspace = None;
@@ -1228,7 +1255,6 @@ fn cuda_async_top1_resizes_after_completion() -> inference_tensor::Result<()> {
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_async_top1_marks_nan_token_invalid() -> inference_tensor::Result<()> {
     let device = Device::new_cuda(0)?;
     let logits = Tensor::new(&[[1.0f32, f32::NAN, 3.0]], &device)?;
@@ -1242,7 +1268,6 @@ fn cuda_async_top1_marks_nan_token_invalid() -> inference_tensor::Result<()> {
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_low_precision_top1_matches_f32_across_ties_and_nonfinite_values()
 -> inference_tensor::Result<()> {
     const BACKING_ROWS: usize = 6;
@@ -1308,7 +1333,6 @@ fn cuda_low_precision_top1_matches_f32_across_ties_and_nonfinite_values()
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_batched_topk_orders_ties_by_lowest_index() -> inference_tensor::Result<()> {
     const VOCAB: usize = 4097;
 
@@ -1330,7 +1354,6 @@ fn cuda_batched_topk_orders_ties_by_lowest_index() -> inference_tensor::Result<(
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_batched_topk_workspace_reuses_and_grows() -> inference_tensor::Result<()> {
     skip_without_cuda!();
     const ROWS: usize = 4;
@@ -1426,7 +1449,6 @@ fn cuda_batched_topk_workspace_reuses_and_grows() -> inference_tensor::Result<()
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_ranked_topk_matches_cpu_across_dtypes_ties_and_offsets() -> inference_tensor::Result<()> {
     const BACKING_ROWS: usize = 4;
     const ROWS: usize = 2;
@@ -1487,7 +1509,6 @@ fn cuda_ranked_topk_matches_cpu_across_dtypes_ties_and_offsets() -> inference_te
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_ranked_topk_radix_matches_realistic_vocab_and_cross_chunk_ties()
 -> inference_tensor::Result<()> {
     const BACKING_ROWS: usize = 3;
@@ -1535,7 +1556,6 @@ fn cuda_ranked_topk_radix_matches_realistic_vocab_and_cross_chunk_ties()
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_ranked_topk_radix_preserves_special_value_contract() -> inference_tensor::Result<()> {
     const VOCAB: usize = 4097;
     const K: usize = 16;
@@ -1576,7 +1596,6 @@ fn cuda_ranked_topk_radix_preserves_special_value_contract() -> inference_tensor
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_ranked_topk_cooperative_boundaries_and_fallback_match_cpu() -> inference_tensor::Result<()>
 {
     const VOCAB: usize = 248_320;
@@ -1605,7 +1624,6 @@ fn cuda_ranked_topk_cooperative_boundaries_and_fallback_match_cpu() -> inference
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_dflash_selector_matches_reference_with_bf16_codebooks() -> inference_tensor::Result<()> {
     skip_without_cuda!();
     const BATCH: usize = 2;
@@ -1666,7 +1684,6 @@ fn cuda_dflash_selector_matches_reference_with_bf16_codebooks() -> inference_ten
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_dflash_selector_supports_max_k_and_stable_ties() -> inference_tensor::Result<()> {
     skip_without_cuda!();
     const POSITIONS: usize = 2;
@@ -1702,7 +1719,6 @@ fn cuda_dflash_selector_supports_max_k_and_stable_ties() -> inference_tensor::Re
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_dflash_sample_selector_matches_sequential_reference() -> inference_tensor::Result<()> {
     skip_without_cuda!();
     const BATCH: usize = 2;
@@ -1791,7 +1807,6 @@ fn cuda_dflash_sample_selector_matches_sequential_reference() -> inference_tenso
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_dflash_sample_selector_marks_invalid_sampling_params() -> inference_tensor::Result<()> {
     skip_without_cuda!();
     const K: usize = 2;
@@ -1826,7 +1841,6 @@ fn cuda_dflash_sample_selector_marks_invalid_sampling_params() -> inference_tens
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_batched_categorical_matches_reference_across_chunks() -> inference_tensor::Result<()> {
     const VOCAB: usize = 2051;
 
@@ -1861,7 +1875,6 @@ fn cuda_batched_categorical_matches_reference_across_chunks() -> inference_tenso
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_batched_categorical_marks_invalid_distribution() -> inference_tensor::Result<()> {
     let device = Device::new_cuda(0)?;
     let logits = Tensor::new(&[[1.0f32, f32::NAN, 3.0]], &device)?;
@@ -1879,7 +1892,6 @@ fn cuda_batched_categorical_marks_invalid_distribution() -> inference_tensor::Re
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_batched_categorical_selects_at_upper_boundary() -> inference_tensor::Result<()> {
     const VOCAB: usize = 2048;
 
@@ -1901,7 +1913,6 @@ fn cuda_batched_categorical_selects_at_upper_boundary() -> inference_tensor::Res
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_cached_top1_honors_view_offset() -> inference_tensor::Result<()> {
     let device = Device::new_cuda(0)?;
     let logits = Tensor::new(
@@ -1917,7 +1928,6 @@ fn cuda_cached_top1_honors_view_offset() -> inference_tensor::Result<()> {
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_top1_uses_first_maximum_across_lanes_and_chunks() -> inference_tensor::Result<()> {
     const VOCAB: usize = 4097;
 
@@ -1946,7 +1956,6 @@ fn cuda_top1_uses_first_maximum_across_lanes_and_chunks() -> inference_tensor::R
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn cuda_cached_top1_marks_nan_distribution() -> inference_tensor::Result<()> {
     let device = Device::new_cuda(0)?;
     let logits = Tensor::new(&[1.0f32, f32::NAN, 3.0], &device)?;
@@ -1958,7 +1967,6 @@ fn cuda_cached_top1_marks_nan_distribution() -> inference_tensor::Result<()> {
 }
 
 #[cfg(feature = "cuda")]
-#[test]
 fn rms_norm_on_cuda_matches_the_cpu_for_every_rank_and_layout() -> inference_tensor::Result<()> {
     const EPS: f32 = 1e-6;
     const BF16_TOLERANCE: f32 = 0.02;
@@ -2021,7 +2029,6 @@ fn rms_norm_on_cuda_matches_the_cpu_for_every_rank_and_layout() -> inference_ten
 // transformers' order (normalise in F32, cast, then scale) fused on CUDA against the composite ops; a flipped first
 // rounding (rsqrtf against sqrt of the reciprocal) carries through the weight, so two ulps
 #[cfg(feature = "cuda")]
-#[test]
 fn cast_then_scale_rms_norms_on_cuda_match_the_composite() -> inference_tensor::Result<()> {
     const EPS: f32 = 1e-6;
     const OPERAND_SCALE: f32 = 1.0;

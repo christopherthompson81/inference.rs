@@ -105,7 +105,17 @@ fn check(c: Fp8Case) -> Result<()> {
     Ok(())
 }
 
-#[test]
+inference_tensor::gpu_cases!(
+    cuda_cases,
+    [
+        decode_and_prefill,
+        every_code_decodes,
+        f32_queries_softcap_and_sinks,
+        head_dim_512_loads_k_and_v_in_column_slices,
+        rejects_scales_without_fp8_out_of_range_scales_and_fp8_mla
+    ]
+);
+
 fn decode_and_prefill() -> Result<()> {
     for hd in [64, 112, 128, 256] {
         check(fp8_case(hd, 2, 1, 512))?;
@@ -115,14 +125,12 @@ fn decode_and_prefill() -> Result<()> {
     check(fp8_case(128, 8, 600, 600))
 }
 
-#[test]
 fn head_dim_512_loads_k_and_v_in_column_slices() -> Result<()> {
     // at 512 the tile loads split each row into column slices, so the fp8 byte offset of a slice is exercised
     check(fp8_case(512, 2, 64, 512))?;
     check(fp8_case(512, 2, 1, 512))
 }
 
-#[test]
 fn f32_queries_softcap_and_sinks() -> Result<()> {
     check(Fp8Case {
         q_dtype: DType::F32,
@@ -135,7 +143,6 @@ fn f32_queries_softcap_and_sinks() -> Result<()> {
     })
 }
 
-#[test]
 fn every_code_decodes() -> Result<()> {
     // with every V row equal, the output is that row whatever the weights; the row holds every non-NaN code
     let Some(dev) = cuda() else { return Ok(()) };
@@ -185,7 +192,6 @@ fn every_code_decodes() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn rejects_scales_without_fp8_out_of_range_scales_and_fp8_mla() -> Result<()> {
     let Some(dev) = cuda() else { return Ok(()) };
     let t = |h: usize, d: usize| Tensor::zeros((1, 8, h, d), DType::BF16, &dev);

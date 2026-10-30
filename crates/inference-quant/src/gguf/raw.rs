@@ -1022,9 +1022,22 @@ mod tests {
         Ok(dot / norms)
     }
 
+    #[cfg(feature = "cuda")]
+    inference_tensor::gpu_cases!(
+        cuda_cases,
+        [
+            cuda_dequantization_matches_the_cpu,
+            cuda_kernels_match_the_dequantized_weight,
+            grouped_mmq_reads_raw_expert_stacks,
+            indexed_mmvq_matches_the_dequantized_experts,
+            row_major_tensor_core_matvecs_match_a_dense_matmul,
+            tiled_iq4_ks_matches_the_row_major_weight,
+            tiled_matvecs_share_one_inputs_quantized_activations
+        ]
+    );
+
     // Batches up to 8 take mmvq, larger ones mmq or IQ1_M's dense matmul; Q8_1 activations make it a cosine bound.
     #[cfg(feature = "cuda")]
-    #[test]
     fn cuda_kernels_match_the_dequantized_weight() -> Result<()> {
         // An odd row count leaves the last mmvq row pair half empty
         const ROWS: usize = 63;
@@ -1064,7 +1077,6 @@ mod tests {
 
     // The tiled layout's rows, padding group and uneven K splits (2560 columns over 16 warps) under every config
     #[cfg(feature = "cuda")]
-    #[test]
     fn tiled_iq4_ks_matches_the_row_major_weight() -> Result<()> {
         const ROWS: usize = 63;
         let Ok(cuda) = Device::new_cuda(0) else {
@@ -1122,7 +1134,6 @@ mod tests {
     // Row-major Q4_K / Q6_K through the tensor-core matvec: an odd superblock count leaves every other Q6_K row 2-byte
     // aligned, and 37 rows leave a partial 16-row group
     #[cfg(feature = "cuda")]
-    #[test]
     fn row_major_tensor_core_matvecs_match_a_dense_matmul() -> Result<()> {
         const ROWS: usize = 37;
         let Ok(cuda) = Device::new_cuda(0) else {
@@ -1167,7 +1178,6 @@ mod tests {
     // Inside a shared-input scope back-to-back tiled matvecs on one input reuse its quantized activations; another input,
     // or the same one after the scope, quantizes again
     #[cfg(feature = "cuda")]
-    #[test]
     fn tiled_matvecs_share_one_inputs_quantized_activations() -> Result<()> {
         const ROWS: usize = 64;
         const COLS: usize = 2560;
@@ -1218,8 +1228,15 @@ mod tests {
         Ok(())
     }
 
+    inference_tensor::gpu_cases!(
+        device_cases,
+        [
+            embedding_rows_match_the_dequantized_weight,
+            expert_gather_matches_the_dequantized_stack
+        ]
+    );
+
     // Tied embeddings in ik's mixes are IQ*_K; one IQ4_NL row is less than the 256 elements its GPU dequantizer fills
-    #[test]
     fn embedding_rows_match_the_dequantized_weight() -> Result<()> {
         const ROWS: usize = 40;
         const COLS: usize = 512;
@@ -1278,7 +1295,6 @@ mod tests {
     const GATHER_TOLERANCE: f32 = 1e-3;
 
     // Repeated experts, an unused one, and both input layouts: one input per token, or one per slot
-    #[test]
     fn expert_gather_matches_the_dequantized_stack() -> Result<()> {
         const EXPERTS: usize = 5;
         const ROWS: usize = 16;
@@ -1339,7 +1355,6 @@ mod tests {
 
     // MoE prefill and raw-expert decode run grouped mmq over the stack; the gather path is the reference
     #[cfg(feature = "cuda")]
-    #[test]
     fn grouped_mmq_reads_raw_expert_stacks() -> Result<()> {
         const EXPERTS: usize = 4;
         const ROWS: usize = 64;
@@ -1403,7 +1418,6 @@ mod tests {
 
     // MoE decode runs the expert-indexed matvec: every type it reads, and a trellis down row with a tail block
     #[cfg(feature = "cuda")]
-    #[test]
     fn indexed_mmvq_matches_the_dequantized_experts() -> Result<()> {
         use super::super::kernel::KernelWeight;
         use inference_tensor::quantized::{GgmlDType, QTensor};
@@ -1527,7 +1541,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn cuda_dequantization_matches_the_cpu() -> Result<()> {
         const ROWS: usize = 16;
         const COLS: usize = 512;

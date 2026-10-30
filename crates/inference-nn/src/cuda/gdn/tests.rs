@@ -60,7 +60,38 @@ fn assert_close(label: &str, lhs: &[f32], rhs: &[f32], tol: f32) {
     );
 }
 
-#[test]
+inference_tensor::gpu_cases!(
+    cuda_cases,
+    [
+        causal_conv1d_full_continuation_matches_one_shot_cuda,
+        causal_conv1d_strided_nonzero_offset_matches_reference_cuda,
+        causal_conv1d_width4_update_matches_full_cuda,
+        chunked_prefill_matches_sequential_recurrence,
+        deferred_decode_matches_eager_across_wrap_and_flush_cuda,
+        fused_decode_dispatches_zero_padding_without_touching_state_cuda,
+        fused_decode_kernel_variants_match_decomposed_cuda,
+        fused_decode_recurrence_matches_decomposed_cuda,
+        low_dtype_recurrence_matches_sequential_rounding_cuda,
+        packed_ragged_cuda_transforms_match_cpu_reference,
+        pending_transition_publish_is_slot_indexed_cuda,
+        pooled_causal_conv_padding_rows_are_zero_and_stateless_cuda,
+        pooled_decomposed_recurrence_padding_rows_are_zero_and_stateless_cuda,
+        pooled_state_kernels_match_gathered_cuda,
+        rmsnorm_gated_hidden128_matches_reference_cuda,
+        rmsnorm_gated_quantized_matches_bf16_rounding_cuda,
+        rmsnorm_gated_strided_nonzero_offset_matches_reference_cuda,
+        speculative_checkpoint_kernels_match_serial_cuda,
+        speculative_state_commit_matches_prefix_replay_cuda,
+        speculative_transition_commit_matches_prefix_replay_cuda,
+        speculative_transition_stage_is_slot_indexed_cuda,
+        value_major_decode_repeats_with_shuffled_slots,
+        value_major_grouped_prefill_matches_warp_at_sequence_boundaries,
+        value_major_grouped_prefill_preserves_pooled_padding,
+        value_major_prefill_kernels_match_scalar_with_shuffled_slots,
+        warp_recurrence_matches_scalar_cuda
+    ]
+);
+
 fn packed_ragged_cuda_transforms_match_cpu_reference() -> Result<()> {
     skip_without_cuda!();
     const BATCH_SIZE: usize = 3;
@@ -307,7 +338,6 @@ fn run_case(case: RecurrenceCase, dev: &Device) -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn warp_recurrence_matches_scalar_cuda() -> Result<()> {
     skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
@@ -420,7 +450,6 @@ fn run_low_dtype_sequential_recurrence_case(
     Ok(())
 }
 
-#[test]
 fn low_dtype_recurrence_matches_sequential_rounding_cuda() -> Result<()> {
     skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
@@ -445,7 +474,6 @@ fn low_dtype_recurrence_matches_sequential_rounding_cuda() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn value_major_prefill_kernels_match_scalar_with_shuffled_slots() -> Result<()> {
     skip_without_cuda!();
     const BATCH_SIZE: usize = 2;
@@ -517,7 +545,6 @@ fn value_major_prefill_kernels_match_scalar_with_shuffled_slots() -> Result<()> 
     Ok(())
 }
 
-#[test]
 fn value_major_grouped_prefill_matches_warp_at_sequence_boundaries() -> Result<()> {
     skip_without_cuda!();
     const BH: usize = 48;
@@ -592,7 +619,6 @@ fn value_major_grouped_prefill_matches_warp_at_sequence_boundaries() -> Result<(
     Ok(())
 }
 
-#[test]
 fn value_major_grouped_prefill_preserves_pooled_padding() -> Result<()> {
     skip_without_cuda!();
     const BATCH_SIZE: usize = 3;
@@ -717,7 +743,6 @@ fn realistic_recurrence_inputs(
     Ok((q, k, v, g, beta))
 }
 
-#[test]
 fn chunked_prefill_matches_sequential_recurrence() -> Result<()> {
     skip_without_cuda!();
     const BH: usize = 48;
@@ -1246,7 +1271,6 @@ fn run_value_major_decode_case(dev: &Device, case: ValueMajorDecodeCase) -> Resu
     Ok(())
 }
 
-#[test]
 fn value_major_decode_repeats_with_shuffled_slots() -> Result<()> {
     skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
@@ -1481,7 +1505,6 @@ fn run_fused_decode_case(
     )
 }
 
-#[test]
 fn fused_decode_recurrence_matches_decomposed_cuda() -> Result<()> {
     skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
@@ -1740,7 +1763,6 @@ fn run_speculative_state_commit_case(
     Ok(())
 }
 
-#[test]
 fn speculative_state_commit_matches_prefix_replay_cuda() -> Result<()> {
     skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
@@ -1751,7 +1773,6 @@ fn speculative_state_commit_matches_prefix_replay_cuda() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn speculative_checkpoint_kernels_match_serial_cuda() -> Result<()> {
     skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
@@ -2789,7 +2810,6 @@ fn run_speculative_transition_commit_case(
     Ok(())
 }
 
-#[test]
 fn speculative_transition_commit_matches_prefix_replay_cuda() -> Result<()> {
     skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
@@ -3095,7 +3115,6 @@ fn run_speculative_transition_stage_case(
     Ok(())
 }
 
-#[test]
 fn speculative_transition_stage_is_slot_indexed_cuda() -> Result<()> {
     skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
@@ -3107,7 +3126,6 @@ fn speculative_transition_stage_is_slot_indexed_cuda() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn pending_transition_publish_is_slot_indexed_cuda() -> Result<()> {
     skip_without_cuda!();
     const CAPACITY: usize = 6;
@@ -3179,7 +3197,6 @@ fn pending_transition_publish_is_slot_indexed_cuda() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn fused_decode_kernel_variants_match_decomposed_cuda() -> Result<()> {
     skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
@@ -3224,7 +3241,6 @@ fn fused_decode_kernel_variants_match_decomposed_cuda() -> Result<()> {
     )
 }
 
-#[test]
 fn causal_conv1d_width4_update_matches_full_cuda() -> Result<()> {
     skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
@@ -3283,7 +3299,6 @@ fn causal_conv1d_width4_update_matches_full_cuda() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn causal_conv1d_full_continuation_matches_one_shot_cuda() -> Result<()> {
     skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
@@ -3392,7 +3407,6 @@ fn causal_conv_reference(
     (output, state)
 }
 
-#[test]
 fn causal_conv1d_strided_nonzero_offset_matches_reference_cuda() -> Result<()> {
     skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
@@ -3472,7 +3486,6 @@ fn causal_conv1d_strided_nonzero_offset_matches_reference_cuda() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn rmsnorm_gated_strided_nonzero_offset_matches_reference_cuda() -> Result<()> {
     skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
@@ -3534,7 +3547,6 @@ fn rmsnorm_gated_strided_nonzero_offset_matches_reference_cuda() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn rmsnorm_gated_hidden128_matches_reference_cuda() -> Result<()> {
     skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
@@ -3678,7 +3690,6 @@ fn assert_gdn_quantized_matches_bf16(
     Ok(())
 }
 
-#[test]
 fn rmsnorm_gated_quantized_matches_bf16_rounding_cuda() -> Result<()> {
     skip_without_cuda!();
     use std::num::NonZeroUsize;
@@ -3760,7 +3771,6 @@ fn rmsnorm_gated_quantized_matches_bf16_rounding_cuda() -> Result<()> {
 
 // Pooled kernels addressed through a permuted slot table must match the gathered kernels on
 // the same rows and leave every other pool row untouched.
-#[test]
 fn pooled_state_kernels_match_gathered_cuda() -> Result<()> {
     skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
@@ -3901,7 +3911,6 @@ fn assert_zero(label: &str, tensor: &Tensor) -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn pooled_causal_conv_padding_rows_are_zero_and_stateless_cuda() -> Result<()> {
     skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
@@ -3992,7 +4001,6 @@ fn pooled_causal_conv_padding_rows_are_zero_and_stateless_cuda() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn pooled_decomposed_recurrence_padding_rows_are_zero_and_stateless_cuda() -> Result<()> {
     skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
@@ -4268,7 +4276,6 @@ fn run_fused_decode_padding_case(
     Ok(())
 }
 
-#[test]
 fn fused_decode_dispatches_zero_padding_without_touching_state_cuda() -> Result<()> {
     skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
@@ -4325,7 +4332,6 @@ fn fused_decode_dispatches_zero_padding_without_touching_state_cuda() -> Result<
     Ok(())
 }
 
-#[test]
 fn deferred_decode_matches_eager_across_wrap_and_flush_cuda() -> Result<()> {
     skip_without_cuda!();
     const BATCH_SIZE: usize = 3;

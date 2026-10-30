@@ -1888,7 +1888,23 @@ mod tests {
         }
     }
 
-    #[test]
+    inference_tensor::gpu_cases!(
+        cuda_cases,
+        [
+            bounded_topk_matches_cpu_reference,
+            categorical_matches_cpu_reference,
+            dense_rows_match_packed_inputs_and_survive_owner_drop,
+            dense_rows_require_shared_ordered_tight_backing,
+            nucleus_rows_match_full_width_top_k_and_fall_back_when_wide,
+            ranked_topk_20_32_matches_cpu_reference_with_ties_and_top_p,
+            reports_per_row_fallback_and_validation_status,
+            workspace_accepts_device_drafts_and_materializes_with_outcomes,
+            workspace_rejects_overlap_and_stale_completion,
+            workspace_reuses_bounded_topk_scratch_and_row_temperatures,
+            workspace_reuses_grows_and_supports_deterministic_proposals
+        ]
+    );
+
     fn dense_rows_require_shared_ordered_tight_backing() -> Result<()> {
         skip_without_cuda!();
         let device = Device::new_cuda(0)?;
@@ -1928,7 +1944,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn dense_rows_match_packed_inputs_and_survive_owner_drop() -> Result<()> {
         skip_without_cuda!();
         let device = Device::new_cuda(0)?;
@@ -2023,7 +2038,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn workspace_reuses_grows_and_supports_deterministic_proposals() -> Result<()> {
         skip_without_cuda!();
         let device = Device::new_cuda(0)?;
@@ -2060,7 +2074,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn workspace_accepts_device_drafts_and_materializes_with_outcomes() -> Result<()> {
         skip_without_cuda!();
         let device = Device::new_cuda(0)?;
@@ -2094,7 +2107,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn workspace_reuses_bounded_topk_scratch_and_row_temperatures() -> Result<()> {
         skip_without_cuda!();
         let device = Device::new_cuda(0)?;
@@ -2126,7 +2138,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn workspace_rejects_overlap_and_stale_completion() -> Result<()> {
         skip_without_cuda!();
         let device = Device::new_cuda(0)?;
@@ -2163,7 +2174,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn categorical_matches_cpu_reference() -> Result<()> {
         skip_without_cuda!();
         let device = Device::new_cuda(0)?;
@@ -2210,7 +2220,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn bounded_topk_matches_cpu_reference() -> Result<()> {
         skip_without_cuda!();
         let device = Device::new_cuda(0)?;
@@ -2277,7 +2286,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn ranked_topk_20_32_matches_cpu_reference_with_ties_and_top_p() -> Result<()> {
         skip_without_cuda!();
         let device = Device::new_cuda(0)?;
@@ -2319,7 +2327,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn nucleus_rows_match_full_width_top_k_and_fall_back_when_wide() -> Result<()> {
         skip_without_cuda!();
         let device = Device::new_cuda(0)?;
@@ -2392,7 +2399,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn reports_per_row_fallback_and_validation_status() -> Result<()> {
         skip_without_cuda!();
         let device = Device::new_cuda(0)?;

@@ -467,7 +467,20 @@ mod tests {
         )
     }
 
-    #[test]
+    inference_tensor::gpu_cases!(
+        cuda_cases,
+        [
+            grouped_prefill_activation_without_glu_kernel_matches_gather,
+            grouped_prefill_matching_gate_up_matches_gather,
+            grouped_prefill_mixed_gate_up_types_matches_gather,
+            grouped_prefill_mixed_types_without_glu_kernel_matches_gather,
+            quantized_fast_decode_lora_matches_gather_pipeline,
+            quantized_grouped_prefill_lora_bf16_matches_gather_pipeline,
+            quantized_grouped_prefill_lora_f16_matches_gather_pipeline,
+            quantized_grouped_prefill_lora_f32_matches_gather_pipeline
+        ]
+    );
+
     fn quantized_fast_decode_lora_matches_gather_pipeline() -> Result<()> {
         const EXPERTS: usize = 3;
         const HIDDEN: usize = 64;
@@ -829,7 +842,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn grouped_prefill_matching_gate_up_matches_gather() -> Result<()> {
         run_quantized_grouped_prefill(
             [GgmlDType::Q4K, GgmlDType::Q4K, GgmlDType::Q6K],
@@ -837,7 +849,6 @@ mod tests {
         )
     }
 
-    #[test]
     fn grouped_prefill_mixed_gate_up_types_matches_gather() -> Result<()> {
         run_quantized_grouped_prefill(
             [GgmlDType::Q4K, GgmlDType::Q8_0, GgmlDType::Q6K],
@@ -845,7 +856,6 @@ mod tests {
         )
     }
 
-    #[test]
     fn grouped_prefill_activation_without_glu_kernel_matches_gather() -> Result<()> {
         for act in [Activation::Sigmoid, Activation::QuickGelu] {
             run_quantized_grouped_prefill([GgmlDType::Q4K, GgmlDType::Q4K, GgmlDType::Q6K], act)?;
@@ -853,7 +863,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn grouped_prefill_mixed_types_without_glu_kernel_matches_gather() -> Result<()> {
         run_quantized_grouped_prefill(
             [GgmlDType::Q5K, GgmlDType::Q4_0, GgmlDType::Q8_0],
@@ -861,17 +870,14 @@ mod tests {
         )
     }
 
-    #[test]
     fn quantized_grouped_prefill_lora_f32_matches_gather_pipeline() -> Result<()> {
         run_quantized_grouped_prefill_lora(DType::F32, 0.08)
     }
 
-    #[test]
     fn quantized_grouped_prefill_lora_f16_matches_gather_pipeline() -> Result<()> {
         run_quantized_grouped_prefill_lora(DType::F16, 0.1)
     }
 
-    #[test]
     fn quantized_grouped_prefill_lora_bf16_matches_gather_pipeline() -> Result<()> {
         run_quantized_grouped_prefill_lora(DType::BF16, 0.12)
     }

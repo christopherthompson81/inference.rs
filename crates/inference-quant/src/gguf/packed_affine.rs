@@ -968,7 +968,27 @@ mod tests {
         assert_close(&actual, &expected, 0.08, 0.01)
     }
 
-    #[test]
+    inference_tensor::gpu_cases!(
+        cuda_cases,
+        [
+            affine_only_unsupported_k_reports_required_backend,
+            aligned_copy_handles_contiguous_offset_view,
+            concurrent_per_thread_streams_use_distinct_workspaces,
+            direct_quant_method_dispatch_reaches_affine_only_formats_at_batch_one,
+            dispatch_switches_to_packed_at_minimum_batch,
+            format_specific_minimum_batches_are_enforced,
+            fused_ffn_prepares_different_down_shape,
+            fused_qkv_and_gate_up_use_packed_layers,
+            gguf_dispatch_preserves_bias_and_reuses_pack,
+            marlin_lock_workspace_matches_dequantized_q4k,
+            marlin_matches_dequantized_all_affine_formats,
+            marlin_matches_dequantized_q4k,
+            packing_consumes_paged_attention_reservation,
+            unaligned_width_uses_padded_packed_dispatch,
+            unsupported_k_tile_uses_canonical_dispatch
+        ]
+    );
+
     fn marlin_matches_dequantized_q4k() -> Result<()> {
         for &(m, n, k) in &[
             (1, 64, 256),
@@ -986,7 +1006,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn marlin_matches_dequantized_all_affine_formats() -> Result<()> {
         for &source_dtype in AFFINE_DTYPES {
             run_case(source_dtype, DType::F16, 17, 128, 256)?;
@@ -997,13 +1016,11 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn marlin_lock_workspace_matches_dequantized_q4k() -> Result<()> {
         run_case(GgmlDType::Q4K, DType::F16, 512, 192, 512)?;
         run_case(GgmlDType::Q4K, DType::BF16, 512, 192, 512)
     }
 
-    #[test]
     fn gguf_dispatch_preserves_bias_and_reuses_pack() -> Result<()> {
         const M: usize = 17;
         const N: usize = 128;
@@ -1051,7 +1068,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn direct_quant_method_dispatch_reaches_affine_only_formats_at_batch_one() -> Result<()> {
         const M: usize = AFFINE_ONLY_MIN_BATCH;
         const N: usize = 128;
@@ -1097,7 +1113,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn unaligned_width_uses_padded_packed_dispatch() -> Result<()> {
         const M: usize = 17;
         const N: usize = 96;
@@ -1123,7 +1138,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn unsupported_k_tile_uses_canonical_dispatch() -> Result<()> {
         const M: usize = 17;
         const N: usize = 64;
@@ -1143,7 +1157,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn affine_only_unsupported_k_reports_required_backend() -> Result<()> {
         const M: usize = AFFINE_ONLY_MIN_BATCH;
         const N: usize = 64;
@@ -1166,7 +1179,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn dispatch_switches_to_packed_at_minimum_batch() -> Result<()> {
         const N: usize = 128;
         const K: usize = 256;
@@ -1189,7 +1201,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn format_specific_minimum_batches_are_enforced() -> Result<()> {
         const N: usize = 128;
         const K: usize = 256;
@@ -1218,7 +1229,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn aligned_copy_handles_contiguous_offset_view() -> Result<()> {
         const M: usize = 17;
         const N: usize = 128;
@@ -1240,7 +1250,6 @@ mod tests {
         assert_close(&actual, &expected, 0.08, 0.01)
     }
 
-    #[test]
     fn concurrent_per_thread_streams_use_distinct_workspaces() -> Result<()> {
         const M: usize = 17;
         const N: usize = 128;
@@ -1297,7 +1306,6 @@ mod tests {
         cuda.cuda_stream().context().synchronize().w()
     }
 
-    #[test]
     fn packing_consumes_paged_attention_reservation() -> Result<()> {
         const M: usize = 17;
         const N: usize = 128;
@@ -1328,7 +1336,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn fused_ffn_prepares_different_down_shape() -> Result<()> {
         const M: usize = Q6K_MIN_BATCH;
         const HIDDEN: usize = 256;
@@ -1374,7 +1381,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn fused_qkv_and_gate_up_use_packed_layers() -> Result<()> {
         const M: usize = 17;
         const Q_OUT: usize = 256;
