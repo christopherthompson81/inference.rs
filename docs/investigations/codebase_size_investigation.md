@@ -2983,3 +2983,23 @@ Finding:
 - Duplication 29,070 -> 28,694 lines (-376); the diff is -375 lines net with ~110 lines of new tests.
 
 Implication: done. Next per Run 95: FP8 `apply_isq` through the unquantized path.
+
+## Run 97 - 2026-10-29 21:00
+
+Question: Run 95's second item: blockwise and per-tensor FP8 each keep a copy of the unquantized layer's ISQ target
+match (~150 lines each); can they requantize through `UnquantLinear::apply_isq` as the other formats do?
+
+Change: both dequantize and hand the weight and bias to `UnquantLinear::apply_isq` (bitsandbytes, FP8, F8Q8, HQQ,
+AFQ, MXFP4, NVFP4 and GGUF already did). The copies had drifted from it: they lacked its AFQ check for a group size
+that does not divide the last dim, which now keeps such a weight unquantized as everywhere else.
+
+Commands: `cargo nextest run -p inference-quant`; `cargo llvm-lines -p inference-quant --lib`; `scripts/dup_scan.py`.
+
+Finding:
+- New tests requantize a per-tensor and a blockwise FP8 layer to no target, AFQ4 on a 32-wide weight (stays
+  unquantized) and Q8_0, checking weight, bias and type; 380 quant tests pass.
+- inference-quant IR 871,825 -> 866,237 (-5,588). Duplicated lines 29,070 -> 28,799 with this change alone, 28,423
+  on top of #709.
+- Diff: about -300 lines of code, +60 of tests.
+
+Implication: done. Next per Run 95: Qwen3.5 / Qwen3-VL multimodal wrapper share.
