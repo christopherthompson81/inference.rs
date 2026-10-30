@@ -316,10 +316,18 @@ Finding:
 - Two bit-exact cuts in the advance: a single token reads its embedding row as a view (`narrow`) instead of uploading
   the id and gathering, and one sigmoid over all four gates replaces three over their slices. Predictor 0.90 -> 0.72 s
   (128 us an advance), RNN-T test 3.0 -> 2.6 s alone. All 27 Parakeet tests pass on CUDA and CPU (pins unchanged).
-- What is left is ~12 small launches per layer (two matmuls, bias, sigmoid, tanh, cell and hidden updates) and the
-  projector. Fusing the two matmuls into one over `[x, h]` would change the summation order, so the pinned decodes
-  could move; not taken.
+- Then the gate matmuls: one matmul of `[x, h, 1]` against `[w_ih; w_hh; b_ih + b_hh]` (transposed, stacked at load)
+  replaces two matmuls, their add and the bias add. Not bit-exact (one sum over the stacked row), so checked on real
+  checkpoints: `scripts/parakeet_parity.sh` on CUDA, F32, against transformers.
+  - parakeet-tdt-0.6b-v3 on the 8 clips of the #414 sweep (3 LibriSpeech, the 97.6 s demo, two AMI and two
+    VoxConverse 300 s; the kept reference): emissions 15/15, 16/16, 17/17, 619/619, 1207/1207, 714/714, 1160/1160,
+    1676/1676, WER 0.000% over 2928 words.
+  - nemotron-speech-streaming-en-0.6b (RNN-T), first 4 clips, fresh reference: 18/18, 16/16, 21/21, 639/639.
+  - nemotron-3.5-asr-streaming-0.6b (RNN-T, prompted), same clips: 28/28, 23/23, 27/27, 774/774.
+  - All 27 Parakeet tests pass on CUDA and CPU; no tiny pin moved.
+  Predictor 0.72 -> 0.64 s on CUDA (113 us an advance); on CPU an advance is ~10 us, launch-free.
 
 Implication: the RNN-T loop is launch-bound on token-dense output, not sync-bound. Real checkpoints emit far fewer
-tokens than frames, so the product cost there is the per-token advance; a fused LSTM step kernel is the remaining
-lever if speech decode ever shows up in a profile.
+tokens than frames, so the product cost there is the per-token advance; what is left is ~9 launches per layer (the
+`[x, h, 1]` concat, the matmul, sigmoid, tanh and the five-op cell update) and the projector. A fused LSTM cell kernel
+is the remaining lever if speech decode ever shows up in a profile.
