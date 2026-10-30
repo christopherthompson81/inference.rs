@@ -17,11 +17,11 @@ const SEED: u64 = 7;
 const WAV_HEADER: usize = 44;
 const SAMPLE_RATE: u32 = 24_000;
 // the tiny config's context is 64 tokens, so this splits into several chunks
-const LONG_WORDS: usize = 30;
+const LONG_WORDS: usize = 10;
 // enough runs that ops raced across threads on one device would show
 const REPEATS: usize = 4;
-// enough copies of TEXT to pass the 510-phoneme context
-const LONG_REPEATS: usize = 20;
+// TEXT reads as 44 phonemes, so 14 copies (616) pass the chunker's 508-phoneme limit
+const LONG_REPEATS: usize = 14;
 
 fn request(phonemes: Option<&str>) -> SpeechGenerationRequest {
     SpeechGenerationRequest {
@@ -95,7 +95,7 @@ async fn kokoro_speaks_phonemes_with_voices_speeds_and_seeds() -> anyhow::Result
     };
     assert!(samples(&model.generate_speech(slow).await?.bytes) >= samples(&base.bytes));
 
-    let long = vec![PHONEMES; LONG_WORDS].join(" ");
+    let long = [PHONEMES; LONG_WORDS].join(" ");
     assert!(
         samples(&model.generate_speech(request(Some(&long))).await?.bytes) > samples(&base.bytes)
     );
@@ -197,7 +197,7 @@ async fn kokoro_repeats_exactly_on_the_default_device() -> anyhow::Result<()> {
     .with_dtype(ModelDType::F32)
     .build()
     .await?;
-    let long = vec![PHONEMES; LONG_WORDS].join(" ");
+    let long = [PHONEMES; LONG_WORDS].join(" ");
     let first = model.generate_speech(request(Some(&long))).await?.bytes;
     for _ in 0..REPEATS {
         assert_eq!(
