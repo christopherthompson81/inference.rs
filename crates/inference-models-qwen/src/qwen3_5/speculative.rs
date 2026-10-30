@@ -1533,7 +1533,8 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
             .collect::<Vec<_>>();
         self.commit_recurrent_prefixes(rows, &checkpoint_rows)?;
         // after the GDN commit, which may rewrite every recurrent pool's state from its checkpoints
-        self.commit_ple_prefixes(&checkpoint_rows)
+        self.commit_ple_prefixes(&checkpoint_rows)?;
+        self.commit_terminal_dflash_context(rows)
     }
 
     fn take_speculative_graph_state(&self) -> Option<Box<dyn SpeculativeGraphState>> {
@@ -1556,6 +1557,48 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
 inference_nn::delegate_speculative_target!(Qwen3_5Model, text: Qwen3_5TextModel);
 
 impl Qwen3_5TextModel {
+    // A finished sequence never drafts again, which is where its kept rows would reach the drafter's context; its
+    // final snapshot needs the drafter at the target's position
+    fn commit_terminal_dflash_context(&self, rows: &[SpeculativeCommitRow]) -> Result<()> {
+        if !rows.iter().any(|row| row.terminal) {
+            return Ok(());
+        }
+        let Some(drafter) = self.dflash.lock().expect("dflash poisoned").clone() else {
+            return Ok(());
+        };
+        if !drafter.supports_paged_auxiliary_prefix_state() {
+            return Ok(());
+        }
+        let Some(capture) = self.last_spec_capture() else {
+            return Ok(());
+        };
+        if capture.taps.len() != drafter.target_layer_ids.len() {
+            return Ok(());
+        }
+        let source_rows = capture.taps[0].dim(1)?;
+        let mut appends = Vec::new();
+        let mut flat_row_indices = Vec::new();
+        for row in rows.iter().filter(|row| row.terminal) {
+            let Some(start_pos) = drafter.ctx_next_pos(row.seq_id) else {
+                continue;
+            };
+            if row.keep_rows > source_rows {
+                continue;
+            }
+            let flat_start = row.batch_idx * source_rows;
+            for flat_row in flat_start..flat_start + row.keep_rows {
+                flat_row_indices
+                    .push(u32::try_from(flat_row).map_err(inference_tensor::Error::wrap)?);
+            }
+            appends.push(CtxAppend {
+                seq_id: row.seq_id,
+                rows: row.keep_rows,
+                start_pos,
+            });
+        }
+        drafter.append_ctx_batch(&capture.taps, flat_row_indices, &appends, None)
+    }
+
     // The GDN layers' recurrent state at each row's kept prefix: staged transitions, pool checkpoints, or a replay.
     fn commit_recurrent_prefixes(
         &self,

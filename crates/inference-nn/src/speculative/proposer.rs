@@ -64,6 +64,7 @@ pub struct SpeculativeProposeBatchCtx<'a> {
 /// Outcome of verifying one sequence's staged drafts, in target-batch order.
 #[derive(Clone, Copy, Debug)]
 pub struct SpeculativeCommitRow {
+    pub seq_id: usize,
     pub batch_idx: usize,
     /// Rows of the verify forward that stay committed: the anchor plus accepted drafts.
     pub keep_rows: usize,

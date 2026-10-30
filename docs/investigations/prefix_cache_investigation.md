@@ -193,3 +193,33 @@ Finding:
 
 Implication: the default server keeps a hybrid model's dropped prefixes in RAM and frees ~575 MiB of VRAM the drafter
 held for them.
+
+## Run 7 - 2026-10-30 16:04
+
+Question: the #723 benchmark servers logged `Failed snapshotting recurrent prefix for sequence N: DFlash sequence N is
+at position P, expected checkpoint boundary B` five times, P 3-8 short of B (1629/1632, 33692/33696, 146264/146272,
+11834/11840). Which snapshot fails, and what does it cost?
+
+Commands: the warnings against the server logs around them; a probe test over the tiny Qwen3.5 checkpoint with the
+windowed DFlash drafter (`tiny_dflash(128)`, 2 drafts): a prompt, a greedy reply of R tokens (`ignore_eos`), then
+prompt + reply + follow-up, printing the follow-up's cached tokens per R.
+
+Finding:
+- Every warning sits 1-3 ms after a `request completed`: the decode snapshot of a sequence's last verify step. The
+  drafter appends a verify step's kept rows (anchor plus accepted drafts) to its context only when it drafts the
+  next block (`dflash_propose`); a finished sequence never drafts again, so its drafter context stays at the step's
+  start while the target sits at the boundary. B - P is the kept rows, at most the 8 of a 7-draft block.
+- Probe, 400-token prompt, R 20-60: the follow-up always reaches the reply's last full block. The reply warm-up
+  (`queue_reply_warmups`) prefills the reply on top of the prompt's snapshot, so the miss costs that prefill (up to
+  the reply's length) rather than a re-prefill of the context.
+- Probe, 20-token prompt (no block, so no warm-up), R 8-50: R 13 (ends at 32 computed) caches 0; R 45 (ends at 64)
+  caches 0 though R 14-44 cached 32: a decode snapshot releases its predecessor before it captures, so the failed
+  final one also loses the earlier one.
+- Change: `SpeculativeCommitRow` carries the sequence id, and Qwen3.5's `speculative_commit` appends a terminal row's
+  kept rows to the windowed drafter's context from the verify capture. Probe after: R 13 caches 32, R 45 caches 64,
+  every other R as before.
+- Test: `a_dflash_reply_ending_on_a_block_boundary_snapshots_there` (20-token prompt, R 45): 64 cached and decodes as
+  a cold run; without the change, "resumed at 0, not the reply's final boundary (64)". Peak 420 MiB alone.
+
+Implication: a reply ending on a block boundary keeps its final snapshot; an agent's next turn no longer depends on
+the warm-up to cover it.
