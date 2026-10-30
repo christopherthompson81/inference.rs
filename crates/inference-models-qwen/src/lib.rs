@@ -34,6 +34,7 @@ pub mod qwen3_vl_moe;
 mod qwen_vl_inputs;
 #[cfg(test)]
 mod qwen_vl_tests;
+mod qwen_vl_vision;
 
 inference_nn::json_config!(
     minicpmo::config::MiniCpmOConfig,
