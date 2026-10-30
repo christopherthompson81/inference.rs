@@ -357,26 +357,35 @@ impl<V: QwenVlVision> QwenVlModel<V> {
             .collect()
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn forward(
         &self,
         input_ids: &Tensor,
-        input_ids_full: &Tensor,
         pixel_values: Option<Tensor>,
-        pixel_values_videos: Option<Tensor>,
-        image_grid_thw: Option<Tensor>,
-        video_grid_thw: Option<Tensor>,
-        rope_img_grid_thw: Option<Tensor>,
-        rope_vid_grid_thw: Option<Tensor>,
-        seqlens: Vec<usize>,
-        continuous_img_pad: Vec<Vec<(usize, usize)>>,
-        continuous_vid_pad: Vec<Vec<(usize, usize)>>,
-        image_hashes: &[u64],
-        video_hashes: &[u64],
-        packed_layout: Option<&PackedMultimodalLayout>,
-        prompt_position_ids: Option<&Tensor>,
+        args: Qwen2VLVisionSpecificArgs,
         ctx: &mut ModelForwardContext<'_>,
     ) -> Result<Tensor> {
+        let Qwen2VLVisionSpecificArgs {
+            input_ids_full,
+            pixel_values_videos,
+            image_grid_thw,
+            video_grid_thw,
+            rope_img_grid_thw,
+            rope_vid_grid_thw,
+            seqlens,
+            continuous_img_pad,
+            continuous_vid_pad,
+            image_hashes,
+            video_hashes,
+            packed_layout,
+            prompt_position_ids,
+        } = args;
+        let (input_ids_full, image_hashes, video_hashes) = (
+            &input_ids_full,
+            image_hashes.as_slice(),
+            video_hashes.as_slice(),
+        );
+        let (packed_layout, prompt_position_ids) =
+            (packed_layout.as_ref(), prompt_position_ids.as_ref());
         let seqlen_offsets = ctx.seqlen_offsets();
         let attention_mask = CausalMasker.make_causal_mask(
             input_ids,
@@ -586,6 +595,31 @@ pub struct Qwen2VLVisionSpecificArgs {
     pub prompt_position_ids: Option<Tensor>,
 }
 
+impl Qwen2VLVisionSpecificArgs {
+    /// The image pixels of a forward's `pixel_values`: a video sent there moves to `pixel_values_videos`, and the rope
+    /// grids default to the media's own.
+    pub(crate) fn split_pixels(&mut self, pixel_values: Option<Tensor>) -> Option<Tensor> {
+        if self.pixel_values_videos.is_none()
+            && self.image_grid_thw.is_none()
+            && self.video_grid_thw.is_some()
+        {
+            self.pixel_values_videos = pixel_values.clone();
+        }
+        self.rope_img_grid_thw = self
+            .rope_img_grid_thw
+            .take()
+            .or(self.image_grid_thw.clone());
+        self.rope_vid_grid_thw = self
+            .rope_vid_grid_thw
+            .take()
+            .or(self.video_grid_thw.clone());
+        self.image_grid_thw
+            .is_some()
+            .then_some(pixel_values)
+            .flatten()
+    }
+}
+
 impl<V: QwenVlVision> crate::speculative::SpeculativeTargetMixin for QwenVlModel<V> {}
 
 impl<V: QwenVlVision> crate::model::BlockDiffusionMixin for QwenVlModel<V> {}
@@ -606,49 +640,11 @@ impl<V: QwenVlVision> MultimodalModel for QwenVlModel<V> {
         model_specific_args: Box<dyn Any>,
         ctx: &mut crate::model::ModelForwardContext<'_>,
     ) -> Result<Tensor> {
-        let Qwen2VLVisionSpecificArgs {
-            input_ids_full,
-            pixel_values_videos,
-            image_grid_thw,
-            video_grid_thw,
-            rope_img_grid_thw,
-            rope_vid_grid_thw,
-            seqlens,
-            continuous_img_pad,
-            continuous_vid_pad,
-            image_hashes,
-            video_hashes,
-            packed_layout,
-            prompt_position_ids,
-        } = *model_specific_args
+        let mut args: Qwen2VLVisionSpecificArgs = *model_specific_args
             .downcast()
             .expect("Cannot downcast into `Qwen2VLVisionSpecificArgs`");
-        let pixel_values_video = pixel_values_videos.or_else(|| {
-            (image_grid_thw.is_none() && video_grid_thw.is_some())
-                .then(|| pixel_values.clone())
-                .flatten()
-        });
-        let pixel_values = image_grid_thw.is_some().then_some(pixel_values).flatten();
-        let rope_img = rope_img_grid_thw.or(image_grid_thw.clone());
-        let rope_vid = rope_vid_grid_thw.or(video_grid_thw.clone());
-        self.forward(
-            input_ids,
-            &input_ids_full,
-            pixel_values,
-            pixel_values_video,
-            image_grid_thw,
-            video_grid_thw,
-            rope_img,
-            rope_vid,
-            seqlens,
-            continuous_img_pad,
-            continuous_vid_pad,
-            &image_hashes,
-            &video_hashes,
-            packed_layout.as_ref(),
-            prompt_position_ids.as_ref(),
-            ctx,
-        )
+        let pixel_values = args.split_pixels(pixel_values);
+        self.forward(input_ids, pixel_values, args, ctx)
     }
     fn cache(&self) -> &EitherCache {
         NormalModel::cache(&self.text)

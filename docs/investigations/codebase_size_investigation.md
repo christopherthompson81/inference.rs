@@ -3003,3 +3003,34 @@ Finding:
 - Diff: about -300 lines of code, +60 of tests.
 
 Implication: done. Next per Run 95: Qwen3.5 / Qwen3-VL multimodal wrapper share.
+
+## Run 98 - 2026-10-29 21:15
+
+Question: Run 95's third item: Qwen3.5's and Qwen3-VL's multimodal wrappers share ~255 lines (133 windows); what can
+they share without merging their different packed-prefill paths?
+
+Change: `qwen3_vl` gains `VisionTokens` (merge size and the four token ids, with `prompt_position_ids` over
+`get_rope_index`), `encode_media` (one medium through the tower or the encoder cache, to the text device and dtype),
+`splice_media` (features over the placeholder spans, with the mask) and `merge_visual_deepstack` (image and video
+deepstack rows in prompt order); Qwen3.5 and Qwen3-VL call them. `Qwen2VLVisionSpecificArgs::split_pixels` replaces the
+argument shuffle Qwen2-VL, Qwen3-VL and Qwen3.5 each did, and their inherent `forward`s take the args struct instead
+of 16 parameters.
+
+Commands: `cargo nextest run -p inference-models-qwen`; `cargo nextest run -p inference -E
+'test(/^(qwen_vl_tiny|qwen3_5_text_tiny|qwen4exp_text_tiny)::/)'`; `cargo llvm-lines -p inference-models-qwen --lib`;
+`scripts/dup_scan.py`.
+
+Finding:
+- A new unit test splices an image and a video into one row and merges their deepstack rows. It failed at first:
+  `nonzero()` returns U32 on every device (the CPU op builds a `Vec<u32>`), and the merge read the indices as `i64`,
+  so any unpacked forward with both images and videos (one request with both, or a mixed batch) errored in Qwen3-VL and
+  Qwen3.5 alike. Reading `u32` fixes it; LLaVA-NeXT already reads `u32`. No test had sent both media to one forward.
+- 173 models-qwen tests and the 50 Qwen-VL / Qwen3.5 / qwen4exp integration tests (pinned image and video decodes)
+  pass.
+- models-qwen IR 663,711 (after Run 96) -> 653,885 (-9,826). Duplication 28,423 -> 28,125 (-298). Diff -204 lines
+  net with the new test.
+- The pair still shares 5 spans (~135 lines): the vision tower load, each medium's encode-and-splice call, and the
+  `MultimodalModel` boilerplate (cache counters, default args); left as is.
+
+Implication: done, with a bug fix. Next per Run 95: Qwen2-VL / Qwen2.5-VL vision, then the qwen2vl / qwen3_vl inputs
+processors.
