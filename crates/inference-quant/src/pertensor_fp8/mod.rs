@@ -1,14 +1,12 @@
 use std::sync::{Arc, Mutex, atomic::AtomicUsize};
 
 use inference_tensor::nn::Linear;
-use inference_tensor::{DType, Device, Result, Tensor, quantized::GgmlDType};
+use inference_tensor::{DType, Device, Result, Tensor};
 
 use crate::Fp8WeightScaleLayout;
 use crate::{
-    AfqBits, AfqGroupSize, AfqLayer, FP8Linear, Fp8ActivationMode, GgufMatMul, HqqAxis, HqqBits,
-    HqqConfig, HqqLayer, IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard,
-    QuantizedSerde, UnquantLinear, generate_isq, generate_isq_imatrix,
-    hqq::{ISQ_HQQ_DEFAULT_OPT_STEPS, ISQ_HQQ_GROUP_SIZE},
+    Fp8ActivationMode, IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedSerde,
+    UnquantLinear,
 };
 
 /// E4M3 linear layer with checkpoint-provided scales.
@@ -521,153 +519,10 @@ impl QuantMethod for PerTensorFP8Linear {
         guard: QuantizeOntoGuard,
     ) -> Result<Arc<dyn QuantMethod>> {
         let weight = self.dequantize_w()?;
-        match dtype {
-            Some(IsqType::HQQ4 | IsqType::HQQ8) => {
-                let _acquired_quantize_guard = guard.acquire(&device);
-                if imatrix_weight.is_some() {
-                    inference_tensor::bail!("HQQ does not support imatrix.");
-                }
-
-                n_quantized.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let bits = match dtype.unwrap() {
-                    IsqType::HQQ8 => HqqBits::Eight,
-                    IsqType::HQQ4 => HqqBits::Four,
-                    _ => unreachable!(),
-                };
-                let cfg = HqqConfig {
-                    bits,
-                    group_size: ISQ_HQQ_GROUP_SIZE.try_into()?,
-                    axis: HqqAxis::Zero,
-                    optimization_steps: ISQ_HQQ_DEFAULT_OPT_STEPS,
-                    round_zeros: false,
-                    channel_wise: true,
-                };
-                let res = HqqLayer::quantize(&weight.to_device(&device)?, &device, cfg)?;
-                if let Some(bias) = &self.bias {
-                    let bias = bias
-                        .to_device(&device)?
-                        .to_dtype(res.dtype_and_device().0)?;
-                    Ok(Arc::new(res.with_bias(bias)))
-                } else {
-                    Ok(Arc::new(res))
-                }
-            }
-            Some(IsqType::AFQ2 | IsqType::AFQ3 | IsqType::AFQ4 | IsqType::AFQ6 | IsqType::AFQ8) => {
-                let _acquired_quantize_guard = guard.acquire(&device);
-                if imatrix_weight.is_some() {
-                    inference_tensor::bail!("AFQ does not support imatrix.");
-                }
-
-                n_quantized.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let bits = match dtype.unwrap() {
-                    IsqType::AFQ8 => AfqBits::Eight,
-                    IsqType::AFQ6 => AfqBits::Six,
-                    IsqType::AFQ4 => AfqBits::Four,
-                    IsqType::AFQ3 => AfqBits::Three,
-                    IsqType::AFQ2 => AfqBits::Two,
-                    _ => unreachable!(),
-                };
-
-                Ok(Arc::new(AfqLayer::new(QuantMethodConfig::Afq {
-                    weight: weight.to_device(&device)?,
-                    bias: self
-                        .bias
-                        .as_ref()
-                        .map(|b| b.to_device(&device))
-                        .transpose()?,
-                    bits,
-                    group_size: AfqGroupSize::default(),
-                })?))
-            }
-            Some(
-                IsqType::Q2K
-                | IsqType::Q3K
-                | IsqType::Q4K
-                | IsqType::Q4_0
-                | IsqType::Q4_1
-                | IsqType::Q5K
-                | IsqType::Q5_0
-                | IsqType::Q5_1
-                | IsqType::Q6K
-                | IsqType::Q8K
-                | IsqType::Q8_0
-                | IsqType::Q8_1,
-            ) => {
-                let dtype: GgmlDType = dtype.unwrap().try_into()?;
-                let res = if let Some(imatrix_weight) = imatrix_weight {
-                    generate_isq_imatrix!(weight, imatrix_weight, device, dtype, n_quantized, guard)
-                } else {
-                    generate_isq!(weight, device, dtype, n_quantized, guard)
-                };
-                Ok(Arc::new(GgufMatMul::new(QuantMethodConfig::Gguf {
-                    q_weight: res,
-                    b: self
-                        .bias
-                        .as_ref()
-                        .map(|b| b.to_dtype(DType::F32)?.to_device(&device))
-                        .transpose()?,
-                })?))
-            }
-            Some(IsqType::F8E4M3) => {
-                let _acquired_quantize_guard = guard.acquire(&device);
-                if imatrix_weight.is_some() {
-                    inference_tensor::bail!("F8E4M3 does not support imatrix.");
-                }
-
-                let w = weight.to_device(&device)?;
-                let b = if let Some(b) = &self.bias {
-                    Some(b.to_device(&device)?)
-                } else {
-                    None
-                };
-                Ok(Arc::new(FP8Linear::new(QuantMethodConfig::FP8 {
-                    lin: Linear::new(w, b),
-                    dtype: DType::F8E4M3,
-                })?))
-            }
-            Some(IsqType::F8Q8) => {
-                let _acquired_quantize_guard = guard.acquire(&device);
-                if imatrix_weight.is_some() {
-                    inference_tensor::bail!("F8Q8 does not support imatrix.");
-                }
-
-                let w = weight.to_device(&device)?;
-                let b = if let Some(b) = &self.bias {
-                    Some(b.to_device(&device)?)
-                } else {
-                    None
-                };
-                Ok(Arc::new(crate::F8Q8Linear::from_weight(&w, b)?))
-            }
-            Some(IsqType::MXFP4) => {
-                let _acquired_quantize_guard = guard.acquire(&device);
-                if imatrix_weight.is_some() {
-                    inference_tensor::bail!("MXFP4 does not support imatrix.");
-                }
-
-                n_quantized.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let w = weight.to_device(&device)?;
-                let b = self
-                    .bias
-                    .as_ref()
-                    .map(|b| b.to_device(&device))
-                    .transpose()?;
-                crate::MXFP4Layer::quantize(&w, b, &device)
-            }
-            None => {
-                let _acquired_quantize_guard = guard.acquire(&device);
-
-                let w = weight.to_device(&device)?;
-                let b = if let Some(b) = &self.bias {
-                    Some(b.to_device(&device)?)
-                } else {
-                    None
-                };
-                Ok(Arc::new(UnquantLinear::new(
-                    QuantMethodConfig::Unquantized(Linear::new(w, b)),
-                )?))
-            }
-        }
+        Arc::new(UnquantLinear::new(QuantMethodConfig::Unquantized(
+            Linear::new(weight, self.bias.clone()),
+        ))?)
+        .apply_isq(dtype, device, n_quantized, imatrix_weight, guard)
     }
 }
 
@@ -775,5 +630,18 @@ mod tests {
         let output = layer.forward(&Tensor::zeros((2, 0, 4), DType::F32, &device)?)?;
         assert_eq!(output.dims(), [2, 0, 3]);
         Ok(())
+    }
+
+    #[test]
+    fn apply_isq_requantizes_the_dequantized_weight() -> Result<()> {
+        let device = Device::Cpu;
+        let layer = fp8_w8a16_linear(
+            Tensor::from_vec(vec![F8E4M3::from_f32(1.5); 4 * 32], (4, 32), &device)?,
+            Tensor::new(2f32, &device)?,
+            Fp8WeightScaleLayout::Tensor,
+            Some(Tensor::ones(4, DType::F32, &device)?),
+            DType::F32,
+        )?;
+        crate::unquantized::assert_requantizes_its_dequantized_weight(layer)
     }
 }

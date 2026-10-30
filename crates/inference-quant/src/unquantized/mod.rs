@@ -647,6 +647,35 @@ impl QuantizedSerde for UnquantLinear {
     }
 }
 
+/// Checks a layer that requantizes through its dequantized weight: kept unquantized, to Q8_0, and AFQ on a last dim the
+/// group does not divide, which stays unquantized.
+#[cfg(test)]
+pub(crate) fn assert_requantizes_its_dequantized_weight(layer: Arc<dyn QuantMethod>) -> Result<()> {
+    let weight = layer.dequantize_w()?.flatten_all()?.to_vec1::<f32>()?;
+    let requantize = |ty| {
+        layer.clone().apply_isq(
+            ty,
+            Device::Cpu,
+            &AtomicUsize::new(0),
+            None,
+            QuantizeOntoGuard::new(),
+        )
+    };
+    for ty in [None, Some(IsqType::AFQ4)] {
+        let kept = requantize(ty)?;
+        assert_eq!(kept.uqff_type(), None);
+        assert_eq!(
+            kept.dequantize_w()?.flatten_all()?.to_vec1::<f32>()?,
+            weight
+        );
+        assert_eq!(kept.has_bias(), layer.has_bias());
+    }
+    let q8 = requantize(Some(IsqType::Q8_0))?;
+    assert_eq!(q8.uqff_type(), Some(IsqType::Q8_0));
+    assert_eq!(q8.has_bias(), layer.has_bias());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
