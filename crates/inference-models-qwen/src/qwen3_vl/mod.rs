@@ -28,9 +28,7 @@ use crate::{
         encoder_cache::{CacheModality, EncoderCacheBatchLookup, EncoderCacheManager},
     },
     utils::unvarbuilder::UnVarBuilder,
-    vision::multimodal_layout::{
-        MultimodalEncoderKey, MultimodalEncoderOutputs, PackedMultimodalLayout,
-    },
+    vision::multimodal_layout::{MultimodalEncoderKey, MultimodalEncoderOutputs},
 };
 
 pub mod config;
@@ -42,11 +40,7 @@ pub use config::Config;
 pub struct Qwen3VLModel {
     text: CausalLm,
     vision: Qwen3VLVisionModel,
-    spatial_merge_size: usize,
-    image_token_id: u32,
-    video_token_id: u32,
-    vision_start_token_id: u32,
-    vision_end_token_id: u32,
+    tokens: VisionTokens,
     encoder_cache: Arc<Mutex<EncoderCacheManager>>,
 }
 
@@ -617,6 +611,211 @@ pub fn insert_current_visual_outputs(
     Ok(())
 }
 
+/// The token ids and merge size a Qwen3 vision prompt is laid out with.
+#[derive(Clone, Copy)]
+pub(crate) struct VisionTokens {
+    pub spatial_merge_size: usize,
+    pub image_token_id: u32,
+    pub video_token_id: u32,
+    pub vision_start_token_id: u32,
+    pub vision_end_token_id: u32,
+}
+
+impl VisionTokens {
+    pub(crate) fn new(cfg: &Config) -> Self {
+        Self {
+            spatial_merge_size: cfg.vision_config.spatial_merge_size,
+            image_token_id: cfg.image_token_id,
+            video_token_id: cfg.video_token_id,
+            vision_start_token_id: cfg.vision_start_token_id,
+            vision_end_token_id: cfg.vision_end_token_id,
+        }
+    }
+
+    /// The M-RoPE positions of `input_ids`' rows, from the media grids over the whole prompt.
+    pub(crate) fn prompt_position_ids(
+        &self,
+        input_ids: &Tensor,
+        input_ids_full: &Tensor,
+        rope_img_grid_thw: Option<&Tensor>,
+        rope_vid_grid_thw: Option<&Tensor>,
+        seqlens: &[usize],
+        seqlen_offsets: &[usize],
+    ) -> Result<Tensor> {
+        let max_seqlen = *seqlens
+            .iter()
+            .max()
+            .ok_or(inference_tensor::Error::Msg("seqlens is empty".to_string()))?;
+        let rows = seqlens
+            .iter()
+            .map(|&len| {
+                Tensor::new(
+                    [vec![1f32; len], vec![0f32; max_seqlen - len]].concat(),
+                    input_ids.device(),
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let (position_ids, mrope_position_deltas) = get_rope_index(
+            input_ids_full,
+            rope_img_grid_thw,
+            rope_vid_grid_thw,
+            &AttentionMask::Custom(Tensor::stack(&rows, 0)?),
+            self.spatial_merge_size,
+            self.image_token_id,
+            self.video_token_id,
+            self.vision_start_token_id,
+            self.vision_end_token_id,
+        )?;
+        crate::vision::mrope::mrope_position_ids_for_input(
+            &position_ids,
+            &mrope_position_deltas,
+            input_ids,
+            seqlen_offsets,
+        )
+    }
+}
+
+/// One medium's features: the merged embeddings and each deepstack layer's, and each item's outputs when they went
+/// through the encoder cache.
+pub(crate) struct EncodedMedia {
+    pub embeds: Tensor,
+    pub deepstack: Vec<Tensor>,
+    pub per_item: Option<Vec<Vec<Tensor>>>,
+}
+
+/// Runs the vision tower over one medium's patches (through the encoder cache when its items carry hashes) and moves
+/// the features to the text stack's device and dtype.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_media(
+    vision: &Qwen3VLVisionModel,
+    encoder_cache: &Arc<Mutex<EncoderCacheManager>>,
+    spatial_merge_size: usize,
+    pixel_values: &Tensor,
+    grid_thw: &Tensor,
+    hashes: &[u64],
+    modality: CacheModality,
+    (device, dtype): (&Device, DType),
+) -> Result<EncodedMedia> {
+    let pixel_values = match pixel_values.rank() {
+        rank if rank > 2 => pixel_values.reshape(((), pixel_values.dim(rank - 1)?))?,
+        _ => pixel_values.clone(),
+    };
+    let per_item = match hashes.is_empty() {
+        true => None,
+        false => Some(
+            VisualEncoder::new(vision, encoder_cache, spatial_merge_size).encode(
+                &pixel_values,
+                grid_thw,
+                hashes,
+                modality,
+            )?,
+        ),
+    };
+    let (embeds, deepstack) = match &per_item {
+        Some(outputs) => concatenate_visual_items(outputs)?,
+        None => vision.forward(&pixel_values, grid_thw)?,
+    };
+    Ok(EncodedMedia {
+        embeds: embeds.to_device(device)?.to_dtype(dtype)?,
+        deepstack: deepstack
+            .into_iter()
+            .map(|t| t.to_device(device)?.to_dtype(dtype))
+            .collect::<Result<Vec<_>>>()?,
+        per_item,
+    })
+}
+
+/// `embeds` written over each row's placeholder `spans` in order; the embeddings and the U8 mask of those positions.
+pub(crate) fn splice_media(
+    mut input_embeds: Tensor,
+    embeds: &Tensor,
+    spans: &[Vec<(usize, usize)>],
+    medium: &str,
+) -> Result<(Tensor, Tensor)> {
+    let (batch_size, seq_len, hidden_dim) = input_embeds.dims3()?;
+    let device = input_embeds.device().clone();
+    let expected: usize = spans
+        .iter()
+        .flat_map(|spans| spans.iter().map(|(s, e)| e - s))
+        .sum();
+    if embeds.dim(0)? != expected {
+        inference_tensor::bail!(
+            "{medium} embedding length {} does not match placeholder tokens {expected}",
+            embeds.dim(0)?
+        );
+    }
+    let mut mask = Tensor::zeros((batch_size, seq_len), DType::F32, &device)?;
+    let mut offset = 0usize;
+    for (batch, spans) in spans.iter().enumerate() {
+        for &(start, end) in spans {
+            let len = end - start;
+            let chunk = embeds.narrow(0, offset, len)?;
+            offset += len;
+            input_embeds = input_embeds.slice_assign(
+                &[batch..batch + 1, start..end, 0..hidden_dim],
+                &chunk.unsqueeze(0)?,
+            )?;
+            let ones = Tensor::ones((1, len), DType::F32, &device)?;
+            mask = mask.slice_assign(&[batch..batch + 1, start..end], &ones)?;
+        }
+    }
+    Ok((input_embeds, mask.to_dtype(DType::U8)?))
+}
+
+/// The visual positions' mask and each deepstack layer's rows in prompt order, from the images' and the videos'.
+pub(crate) fn merge_visual_deepstack(
+    image: Option<(Tensor, Vec<Tensor>)>,
+    video: Option<(Tensor, Vec<Tensor>)>,
+) -> Result<(Option<Tensor>, Option<Vec<Tensor>>)> {
+    let ((image_mask, image_deepstack), (video_mask, video_deepstack)) = match (image, video) {
+        (Some(image), Some(video)) => (image, video),
+        (Some((mask, deepstack)), None) | (None, Some((mask, deepstack))) => {
+            return Ok((Some(mask), Some(deepstack)));
+        }
+        (None, None) => return Ok((None, None)),
+    };
+    let combined = (image_mask.to_dtype(DType::F32)? + video_mask.to_dtype(DType::F32)?)?;
+    let visual_mask = combined.gt(0f32)?.to_dtype(DType::U8)?;
+    let visual_indices = visual_mask
+        .flatten_all()?
+        .nonzero()?
+        .squeeze(1)?
+        .to_vec1::<u32>()?;
+    let image_flat = image_mask.flatten_all()?.to_vec1::<u8>()?;
+    if image_deepstack.len() != video_deepstack.len() {
+        inference_tensor::bail!(
+            "DeepStack image layers ({}) do not match video layers ({})",
+            image_deepstack.len(),
+            video_deepstack.len()
+        );
+    }
+    let mut combined_layers = Vec::with_capacity(image_deepstack.len());
+    for (img_layer, vid_layer) in image_deepstack.iter().zip(video_deepstack.iter()) {
+        let mut rows = Vec::with_capacity(visual_indices.len());
+        let (mut img_offset, mut vid_offset) = (0usize, 0usize);
+        for &idx in &visual_indices {
+            if image_flat[idx as usize] != 0 {
+                rows.push(img_layer.i(img_offset)?);
+                img_offset += 1;
+            } else {
+                rows.push(vid_layer.i(vid_offset)?);
+                vid_offset += 1;
+            }
+        }
+        if img_offset != img_layer.dim(0)? || vid_offset != vid_layer.dim(0)? {
+            inference_tensor::bail!(
+                "DeepStack feature alignment failed for images ({}/{}) or videos ({}/{})",
+                img_offset,
+                img_layer.dim(0)?,
+                vid_offset,
+                vid_layer.dim(0)?
+            );
+        }
+        combined_layers.push(Tensor::stack(&rows, 0)?);
+    }
+    Ok((Some(visual_mask), Some(combined_layers)))
+}
+
 impl Qwen3VLModel {
     pub fn new(
         cfg: &Config,
@@ -652,35 +851,40 @@ impl Qwen3VLModel {
         Ok(Self {
             text,
             vision,
-            spatial_merge_size: cfg.vision_config.spatial_merge_size,
-            image_token_id: cfg.image_token_id,
-            video_token_id: cfg.video_token_id,
-            vision_start_token_id: cfg.vision_start_token_id,
-            vision_end_token_id: cfg.vision_end_token_id,
+            tokens: VisionTokens::new(cfg),
             encoder_cache: Arc::new(Mutex::new(EncoderCacheManager::new(32))),
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn forward(
         &self,
         input_ids: &Tensor,
-        input_ids_full: &Tensor,
         pixel_values: Option<Tensor>,
-        pixel_values_videos: Option<Tensor>,
-        image_grid_thw: Option<Tensor>,
-        video_grid_thw: Option<Tensor>,
-        rope_img_grid_thw: Option<Tensor>,
-        rope_vid_grid_thw: Option<Tensor>,
-        seqlens: Vec<usize>,
-        continuous_img_pad: Vec<Vec<(usize, usize)>>,
-        continuous_vid_pad: Vec<Vec<(usize, usize)>>,
-        image_hashes: &[u64],
-        video_hashes: &[u64],
-        packed_layout: Option<&PackedMultimodalLayout>,
-        prompt_position_ids: Option<&Tensor>,
+        args: Qwen2VLVisionSpecificArgs,
         ctx: &mut ModelForwardContext<'_>,
     ) -> Result<Tensor> {
+        let Qwen2VLVisionSpecificArgs {
+            input_ids_full,
+            pixel_values_videos,
+            image_grid_thw,
+            video_grid_thw,
+            rope_img_grid_thw,
+            rope_vid_grid_thw,
+            seqlens,
+            continuous_img_pad,
+            continuous_vid_pad,
+            image_hashes,
+            video_hashes,
+            packed_layout,
+            prompt_position_ids,
+        } = args;
+        let (input_ids_full, image_hashes, video_hashes) = (
+            &input_ids_full,
+            image_hashes.as_slice(),
+            video_hashes.as_slice(),
+        );
+        let (packed_layout, prompt_position_ids) =
+            (packed_layout.as_ref(), prompt_position_ids.as_ref());
         let seqlen_offsets = ctx.seqlen_offsets();
         // every text layer is full attention, whatever window the config names
         let mut attention_mask = CausalMasker.make_causal_mask(
@@ -697,233 +901,70 @@ impl Qwen3VLModel {
         };
 
         let mut input_embeds = self.text.get_input_embeddings(input_ids)?;
-        let (batch_size, seq_len, hidden_dim) = input_embeds.dims3()?;
+        let (batch_size, seq_len, _) = input_embeds.dims3()?;
         let device = input_embeds.device().clone();
-
-        let mut image_mask_opt: Option<Tensor> = None;
-        let mut video_mask_opt: Option<Tensor> = None;
-        let mut deepstack_image_opt: Option<Vec<Tensor>> = None;
-        let mut deepstack_video_opt: Option<Vec<Tensor>> = None;
+        let encode = |pixel_values: &Tensor, grid_thw: &Tensor, hashes: &[u64], modality| {
+            encode_media(
+                &self.vision,
+                &self.encoder_cache,
+                self.tokens.spatial_merge_size,
+                pixel_values,
+                grid_thw,
+                hashes,
+                modality,
+                (&device, self.text.embed_dtype()),
+            )
+        };
         let mut packed_encoder_outputs = MultimodalEncoderOutputs::new();
 
+        let mut image = None;
         if let Some(pixel_values) = &pixel_values {
-            let Some(image_grid_thw_ref) = image_grid_thw.as_ref() else {
+            let Some(grid_thw) = image_grid_thw.as_ref() else {
                 inference_tensor::bail!("pixel_values require image_grid_thw");
             };
-            let mut pixel_values = pixel_values.clone();
-            let ndim = pixel_values.dims().len();
-            if ndim > 2 {
-                let last_dim = pixel_values.dim(ndim - 1)?;
-                pixel_values = pixel_values.reshape(((), last_dim))?;
-            }
-
-            let per_image = if image_hashes.is_empty() {
-                None
-            } else {
-                Some(
-                    VisualEncoder::new(&self.vision, &self.encoder_cache, self.spatial_merge_size)
-                        .encode(
-                            &pixel_values,
-                            image_grid_thw_ref,
-                            image_hashes,
-                            CacheModality::Image,
-                        )?,
-                )
-            };
-            let (image_embeds, deepstack_image_embeds) = match &per_image {
-                Some(outputs) => concatenate_visual_items(outputs)?,
-                None => self.vision.forward(&pixel_values, image_grid_thw_ref)?,
-            };
-
-            let image_embeds = image_embeds
-                .to_device(&device)?
-                .to_dtype(self.text.embed_dtype())?;
-            let deepstack_image_embeds = deepstack_image_embeds
-                .into_iter()
-                .map(|t| t.to_device(&device)?.to_dtype(self.text.embed_dtype()))
-                .collect::<Result<Vec<_>>>()?;
+            let media = encode(pixel_values, grid_thw, image_hashes, CacheModality::Image)?;
             if packed_layout.is_some() {
                 insert_current_visual_outputs(
                     &mut packed_encoder_outputs,
                     MultimodalKind::Image,
                     image_hashes,
-                    per_image.unwrap_or_default(),
+                    media.per_item.unwrap_or_default(),
                 )?;
-            }
-
-            if packed_layout.is_none() {
-                let mut offset = 0usize;
-                let mut image_mask =
-                    Tensor::zeros((batch_size, seq_len), DType::F32, input_ids.device())?;
-                let total_expected: usize = continuous_img_pad
-                    .iter()
-                    .flat_map(|spans| spans.iter().map(|(s, e)| e - s))
-                    .sum();
-                if image_embeds.dim(0)? != total_expected {
-                    inference_tensor::bail!(
-                        "Image embedding length {} does not match placeholder tokens {}",
-                        image_embeds.dim(0)?,
-                        total_expected
-                    );
-                }
-                for (batch, spans) in continuous_img_pad.iter().enumerate() {
-                    for &(start, end) in spans {
-                        let len = end - start;
-                        let chunk = image_embeds.narrow(0, offset, len)?;
-                        offset += len;
-                        input_embeds = input_embeds.slice_assign(
-                            &[batch..batch + 1, start..end, 0..hidden_dim],
-                            &chunk.unsqueeze(0)?,
-                        )?;
-                        let ones = Tensor::ones((1, len), DType::F32, input_ids.device())?;
-                        image_mask =
-                            image_mask.slice_assign(&[batch..batch + 1, start..end], &ones)?;
-                    }
-                }
-                image_mask_opt = Some(image_mask.to_dtype(DType::U8)?);
-                deepstack_image_opt = Some(deepstack_image_embeds);
+            } else {
+                let (embeds, mask) =
+                    splice_media(input_embeds, &media.embeds, &continuous_img_pad, "Image")?;
+                input_embeds = embeds;
+                image = Some((mask, media.deepstack));
             }
         }
 
+        let mut video = None;
         if let Some(pixel_values_videos) = &pixel_values_videos {
-            let Some(video_grid_thw_ref) = video_grid_thw.as_ref() else {
+            let Some(grid_thw) = video_grid_thw.as_ref() else {
                 inference_tensor::bail!("pixel_values_videos require video_grid_thw");
             };
-            let mut pixel_values = pixel_values_videos.clone();
-            let ndim = pixel_values.dims().len();
-            if ndim > 2 {
-                let last_dim = pixel_values.dim(ndim - 1)?;
-                pixel_values = pixel_values.reshape(((), last_dim))?;
-            }
-            let per_video = if video_hashes.is_empty() {
-                None
-            } else {
-                Some(
-                    VisualEncoder::new(&self.vision, &self.encoder_cache, self.spatial_merge_size)
-                        .encode(
-                            &pixel_values,
-                            video_grid_thw_ref,
-                            video_hashes,
-                            CacheModality::Video,
-                        )?,
-                )
-            };
-            let (video_embeds, deepstack_video_embeds) = match &per_video {
-                Some(outputs) => concatenate_visual_items(outputs)?,
-                None => self.vision.forward(&pixel_values, video_grid_thw_ref)?,
-            };
-            let video_embeds = video_embeds
-                .to_device(&device)?
-                .to_dtype(self.text.embed_dtype())?;
-            let deepstack_video_embeds = deepstack_video_embeds
-                .into_iter()
-                .map(|t| t.to_device(&device)?.to_dtype(self.text.embed_dtype()))
-                .collect::<Result<Vec<_>>>()?;
+            let media = encode(
+                pixel_values_videos,
+                grid_thw,
+                video_hashes,
+                CacheModality::Video,
+            )?;
             if packed_layout.is_some() {
                 insert_current_visual_outputs(
                     &mut packed_encoder_outputs,
                     MultimodalKind::Video,
                     video_hashes,
-                    per_video.unwrap_or_default(),
+                    media.per_item.unwrap_or_default(),
                 )?;
-            }
-
-            if packed_layout.is_none() {
-                let mut offset = 0usize;
-                let mut video_mask =
-                    Tensor::zeros((batch_size, seq_len), DType::F32, input_ids.device())?;
-                let total_expected: usize = continuous_vid_pad
-                    .iter()
-                    .flat_map(|spans| spans.iter().map(|(s, e)| e - s))
-                    .sum();
-                if video_embeds.dim(0)? != total_expected {
-                    inference_tensor::bail!(
-                        "Video embedding length {} does not match placeholder tokens {}",
-                        video_embeds.dim(0)?,
-                        total_expected
-                    );
-                }
-                for (batch, spans) in continuous_vid_pad.iter().enumerate() {
-                    for &(start, end) in spans {
-                        let len = end - start;
-                        let chunk = video_embeds.narrow(0, offset, len)?;
-                        offset += len;
-                        input_embeds = input_embeds.slice_assign(
-                            &[batch..batch + 1, start..end, 0..hidden_dim],
-                            &chunk.unsqueeze(0)?,
-                        )?;
-                        let ones = Tensor::ones((1, len), DType::F32, input_ids.device())?;
-                        video_mask =
-                            video_mask.slice_assign(&[batch..batch + 1, start..end], &ones)?;
-                    }
-                }
-                video_mask_opt = Some(video_mask.to_dtype(DType::U8)?);
-                deepstack_video_opt = Some(deepstack_video_embeds);
+            } else {
+                let (embeds, mask) =
+                    splice_media(input_embeds, &media.embeds, &continuous_vid_pad, "Video")?;
+                input_embeds = embeds;
+                video = Some((mask, media.deepstack));
             }
         }
-
-        let (legacy_visual_pos_masks, legacy_deepstack_visual_embeds) = match (
-            image_mask_opt,
-            deepstack_image_opt,
-            video_mask_opt,
-            deepstack_video_opt,
-        ) {
-            (Some(image_mask), Some(image_deepstack), Some(video_mask), Some(video_deepstack)) => {
-                let combined =
-                    (image_mask.to_dtype(DType::F32)? + video_mask.to_dtype(DType::F32)?)?;
-                let visual_mask = combined.gt(0f32)?.to_dtype(DType::U8)?;
-                let visual_indices = visual_mask.flatten_all()?.nonzero()?.squeeze(1)?;
-                let visual_indices_vec = visual_indices.to_vec1::<i64>()?;
-
-                let image_flat = image_mask
-                    .flatten_all()?
-                    .to_dtype(DType::U8)?
-                    .to_vec1::<u8>()?;
-                let num_visual = visual_indices_vec.len();
-                if image_deepstack.len() != video_deepstack.len() {
-                    inference_tensor::bail!(
-                        "DeepStack image layers ({}) do not match video layers ({})",
-                        image_deepstack.len(),
-                        video_deepstack.len()
-                    );
-                }
-                let mut combined_layers = Vec::with_capacity(image_deepstack.len());
-                for (img_layer, vid_layer) in image_deepstack.iter().zip(video_deepstack.iter()) {
-                    let mut rows = Vec::with_capacity(num_visual);
-                    let mut img_offset = 0usize;
-                    let mut vid_offset = 0usize;
-                    for &idx in &visual_indices_vec {
-                        let idx = idx as usize;
-                        if image_flat[idx] != 0 {
-                            rows.push(img_layer.i(img_offset)?);
-                            img_offset += 1;
-                        } else {
-                            rows.push(vid_layer.i(vid_offset)?);
-                            vid_offset += 1;
-                        }
-                    }
-                    if img_offset != img_layer.dim(0)? || vid_offset != vid_layer.dim(0)? {
-                        inference_tensor::bail!(
-                            "DeepStack feature alignment failed for images ({}/{}) or videos ({}/{})",
-                            img_offset,
-                            img_layer.dim(0)?,
-                            vid_offset,
-                            vid_layer.dim(0)?
-                        );
-                    }
-                    let row_refs: Vec<&Tensor> = rows.iter().collect();
-                    combined_layers.push(Tensor::stack(&row_refs, 0)?);
-                }
-                (Some(visual_mask), Some(combined_layers))
-            }
-            (Some(image_mask), Some(image_deepstack), _, _) => {
-                (Some(image_mask), Some(image_deepstack))
-            }
-            (_, _, Some(video_mask), Some(video_deepstack)) => {
-                (Some(video_mask), Some(video_deepstack))
-            }
-            _ => (None, None),
-        };
+        let (legacy_visual_pos_masks, legacy_deepstack_visual_embeds) =
+            merge_visual_deepstack(image, video)?;
 
         let (visual_pos_masks, deepstack_visual_embeds) = if let Some(layout) = packed_layout {
             input_embeds = layout.splice_embeddings(&input_embeds, &packed_encoder_outputs)?;
@@ -978,30 +1019,12 @@ impl Qwen3VLModel {
         } else if let Some(position_ids) = prompt_position_ids {
             position_ids.clone()
         } else {
-            let mut ropeidx_attn_mask_bs = Vec::new();
-            let max_seqlens = *seqlens.iter().max().unwrap();
-            for len in &seqlens {
-                ropeidx_attn_mask_bs.push(Tensor::new(
-                    [vec![1f32; *len], vec![0f32; max_seqlens - len]].concat(),
-                    input_ids.device(),
-                )?);
-            }
-            let ropeidx_attn_mask = Tensor::stack(&ropeidx_attn_mask_bs, 0)?;
-            let (position_ids, mrope_position_deltas) = get_rope_index(
+            self.tokens.prompt_position_ids(
+                input_ids,
                 input_ids_full,
                 rope_img_grid_thw.as_ref(),
                 rope_vid_grid_thw.as_ref(),
-                &AttentionMask::Custom(ropeidx_attn_mask),
-                self.spatial_merge_size,
-                self.image_token_id,
-                self.video_token_id,
-                self.vision_start_token_id,
-                self.vision_end_token_id,
-            )?;
-            crate::vision::mrope::mrope_position_ids_for_input(
-                &position_ids,
-                &mrope_position_deltas,
-                input_ids,
+                &seqlens,
                 seqlen_offsets,
             )?
         };
@@ -1055,49 +1078,11 @@ impl MultimodalModel for Qwen3VLModel {
         model_specific_args: Box<dyn Any>,
         ctx: &mut crate::model::ModelForwardContext<'_>,
     ) -> Result<Tensor> {
-        let Qwen2VLVisionSpecificArgs {
-            input_ids_full,
-            pixel_values_videos,
-            image_grid_thw,
-            video_grid_thw,
-            rope_img_grid_thw,
-            rope_vid_grid_thw,
-            seqlens,
-            continuous_img_pad,
-            continuous_vid_pad,
-            image_hashes,
-            video_hashes,
-            packed_layout,
-            prompt_position_ids,
-        } = *model_specific_args
+        let mut args: Qwen2VLVisionSpecificArgs = *model_specific_args
             .downcast()
             .expect("Cannot downcast into `Qwen2VLVisionSpecificArgs`");
-        let pixel_values_video = pixel_values_videos.or_else(|| {
-            (image_grid_thw.is_none() && video_grid_thw.is_some())
-                .then(|| pixel_values.clone())
-                .flatten()
-        });
-        let pixel_values = (image_grid_thw.is_some()).then_some(pixel_values).flatten();
-        let rope_img = rope_img_grid_thw.or(image_grid_thw.clone());
-        let rope_vid = rope_vid_grid_thw.or(video_grid_thw.clone());
-        self.forward(
-            input_ids,
-            &input_ids_full,
-            pixel_values,
-            pixel_values_video,
-            image_grid_thw,
-            video_grid_thw,
-            rope_img,
-            rope_vid,
-            seqlens,
-            continuous_img_pad,
-            continuous_vid_pad,
-            &image_hashes,
-            &video_hashes,
-            packed_layout.as_ref(),
-            prompt_position_ids.as_ref(),
-            ctx,
-        )
+        let pixel_values = args.split_pixels(pixel_values);
+        self.forward(input_ids, pixel_values, args, ctx)
     }
     fn cache(&self) -> &EitherCache {
         NormalModel::cache(&self.text)
@@ -1166,6 +1151,34 @@ mod tests {
 
     const ENCODER_CACHE_CAPACITY: usize = 32;
     const EVICTION_BATCH_SIZE: usize = ENCODER_CACHE_CAPACITY + 1;
+
+    // an image at positions 1-2 and a video at 4 and 6 of one 7-token row; each feature row holds its source's id
+    #[test]
+    fn image_and_video_deepstack_rows_interleave_in_prompt_order() -> Result<()> {
+        let device = Device::Cpu;
+        let input_embeds = Tensor::zeros((1, 7, 1), DType::F32, &device)?;
+        let image_embeds = Tensor::new(&[[1f32], [2.0]], &device)?;
+        let video_embeds = Tensor::new(&[[3f32], [4.0]], &device)?;
+        let (embeds, image_mask) =
+            splice_media(input_embeds, &image_embeds, &[vec![(1, 3)]], "Image")?;
+        let (embeds, video_mask) =
+            splice_media(embeds, &video_embeds, &[vec![(4, 5), (6, 7)]], "Video")?;
+        assert_eq!(
+            embeds.flatten_all()?.to_vec1::<f32>()?,
+            [0.0, 1.0, 2.0, 0.0, 3.0, 0.0, 4.0]
+        );
+        let (mask, deepstack) = merge_visual_deepstack(
+            Some((image_mask, vec![(&image_embeds * 10.0)?])),
+            Some((video_mask, vec![(&video_embeds * 10.0)?])),
+        )?;
+        assert_eq!(mask.unwrap().to_vec2::<u8>()?, [[0, 1, 1, 0, 1, 0, 1]]);
+        assert_eq!(
+            deepstack.unwrap()[0].flatten_all()?.to_vec1::<f32>()?,
+            [10.0, 20.0, 30.0, 40.0]
+        );
+        assert!(splice_media(embeds, &image_embeds, &[vec![(0, 3)]], "Image").is_err());
+        Ok(())
+    }
 
     #[test]
     fn visual_encoder_cache_hash_includes_geometry() {
