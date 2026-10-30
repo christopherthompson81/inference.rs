@@ -129,15 +129,15 @@ mod generated {
                 // Not a route's body: the engine spec the C ABI and bindings load from, typed from this document.
                 inference_api::EngineSpec,
                 // A job's changes, the data of its event stream; and the job itself, the `request` field of a submission.
-                inference_api::jobs::JobEvent,
-                inference_api::jobs::JobRequest,
-                inference_api::jobs::JobList,
+                inference_jobs::JobEvent,
+                inference_jobs::JobRequest,
+                inference_jobs::JobList,
                 // Job operations the C ABI offers beside the routes.
-                inference_api::jobs::JobsConfig,
-                inference_api::jobs::JobSubmission,
-                inference_api::jobs::JobFileRequest,
-                inference_api::jobs::JobFilePath,
-                inference_api::jobs::JobDeleted,
+                inference_jobs::JobsConfig,
+                inference_jobs::JobSubmission,
+                inference_jobs::JobFileRequest,
+                inference_jobs::JobFilePath,
+                inference_jobs::JobDeleted,
                 // Engine operations the C ABI offers without an HTTP route.
                 inference_api::operations::SessionList,
                 inference_api::operations::SessionDeleted,

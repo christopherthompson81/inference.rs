@@ -2616,6 +2616,7 @@ dependencies = [
  "indicatif 0.18.3",
  "inference-api",
  "inference-coder",
+ "inference-jobs",
  "inference-json",
  "inference-mcp",
  "inference-models-other",
@@ -2834,6 +2835,33 @@ dependencies = [
  "tempfile",
  "tokenizers",
  "tracing",
+]
+
+[[package]]
+name = "inference-jobs"
+version = "0.0.26"
+dependencies = [
+ "anyhow",
+ "hf-hub",
+ "image",
+ "indicatif 0.18.3",
+ "inference",
+ "inference-api",
+ "inference-json",
+ "inference-models-llama",
+ "inference-nn",
+ "inference-quant",
+ "inference-recon",
+ "inference-tensor",
+ "rand 0.9.4",
+ "rand_distr",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "utoipa",
+ "uuid",
 ]
 
 [[package]]
@@ -3320,6 +3348,7 @@ dependencies = [
  "inference-api",
  "inference-chat-protocols",
  "inference-core",
+ "inference-jobs",
  "inference-json",
  "inference-models-diffusion",
  "inference-models-other",

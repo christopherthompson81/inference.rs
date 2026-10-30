@@ -286,15 +286,15 @@ pub enum Command {
         out: PathBuf,
 
         /// Longest edge to infer at: the first image's, capped at this and floored to a multiple of 14
-        #[arg(long, default_value_t = inference_api::reconstruction::DEFAULT_TARGET_SIZE)]
+        #[arg(long, default_value_t = inference_jobs::reconstruction::DEFAULT_TARGET_SIZE)]
         target_size: usize,
 
         /// Frames a second sampled from a video input
-        #[arg(long, default_value_t = inference_api::reconstruction::DEFAULT_VIDEO_FPS)]
+        #[arg(long, default_value_t = inference_jobs::reconstruction::DEFAULT_VIDEO_FPS)]
         fps: f64,
 
         /// The most frames sampled from a video input
-        #[arg(long, default_value_t = inference_api::reconstruction::DEFAULT_VIDEO_MAX_FRAMES)]
+        #[arg(long, default_value_t = inference_jobs::reconstruction::DEFAULT_VIDEO_MAX_FRAMES)]
         max_frames: usize,
 
         /// Keep pixels at depth and normal discontinuities

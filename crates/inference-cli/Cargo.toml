@@ -19,6 +19,7 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
+inference-jobs.workspace = true
 inference-json.workspace = true
 mimalloc = { workspace = true }
 inference-api = { workspace = true }

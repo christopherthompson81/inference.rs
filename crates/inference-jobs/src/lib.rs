@@ -4,12 +4,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use inference_core::InferenceRs;
-pub use inference_core::placement::JobNeed;
-use inference_core::placement::{Displace, Placed, place};
+pub use inference_api::devices::JobNeed;
+use inference_api::devices::{DeviceLease, Displace, Placed};
 use inference_recon::progress::CANCELLED;
 pub use inference_recon::progress::Progress;
 use inference_tensor::Device;
@@ -17,13 +16,17 @@ use serde::Serialize;
 use tokio::sync::broadcast;
 use utoipa::ToSchema;
 
-use crate::api_error::{ApiError, ApiErrorKind};
-use crate::engine::Engine;
+use inference_api::Engine;
+use inference_api::api_error::{ApiError, ApiErrorKind};
+use inference_api::request_body::{JsonRequest, parse_json};
+
 use crate::reconstruction::{
     ReconstructOptions, VideoOptions, WorldGenModels, WorldGenOptions, generate_world_on,
     reconstruct_on,
 };
-use crate::request_body::{JsonRequest, parse_json};
+
+pub mod reconstruction;
+pub mod worldgen_package;
 
 /// Every job id starts with this.
 pub const JOB_ID_PREFIX: &str = "job_";
@@ -196,7 +199,7 @@ impl JobsConfig {
 }
 
 fn hub_api() -> anyhow::Result<hf_hub::api::sync::Api> {
-    inference_core::build_api_with_cache(&inference_core::TokenSource::CacheToken, false, None)
+    inference_api::build_api_with_cache(&inference_api::TokenSource::CacheToken, false, None)
 }
 
 // The models repo's files in the hub cache, downloading what is missing; returns its snapshot folder
@@ -211,7 +214,7 @@ fn fetch_models_repo(repo: &str, progress: &dyn Progress) -> anyhow::Result<Path
             .collect::<Vec<_>>(),
         Err(error) => {
             // the hub is out of reach: a snapshot fetched before serves
-            let cached = inference_core::hf_hub_cache_dir().and_then(|dir| {
+            let cached = inference_api::system::hf_hub_cache_dir().and_then(|dir| {
                 hf_hub::Cache::new(dir)
                     .model(repo.to_string())
                     .get(MODELS_REPO_MARKER)
@@ -693,10 +696,16 @@ struct Task {
 struct Queued {
     job: Arc<Job>,
     task: Task,
+    // the submitter's engine, held only while its job waits or runs, so an idle queue keeps no engine alive
+    engine: Engine,
 }
 
-/// The jobs of one engine: their records, the queue and the worker that runs it.
-pub struct JobRunner {
+/// The jobs beside an engine: their records, the queue and the worker that runs it. Cloning shares it; a server holds
+/// one and passes each call the engine scoped to the caller, whose jobs are theirs alone.
+#[derive(Clone, Default)]
+pub struct JobQueue(Arc<JobRunner>);
+
+struct JobRunner {
     config: RwLock<JobsConfig>,
     jobs: RwLock<HashMap<String, Arc<Job>>>,
     // the records kept in the folder, read once on first use
@@ -760,7 +769,7 @@ impl JobRunner {
         }
     }
 
-    fn sender(&self, state: &Arc<InferenceRs>) -> std::sync::mpsc::Sender<Queued> {
+    fn sender(&self) -> std::sync::mpsc::Sender<Queued> {
         let mut queue = self
             .queue
             .lock()
@@ -768,11 +777,10 @@ impl JobRunner {
         queue
             .get_or_insert_with(|| {
                 let (tx, rx) = std::sync::mpsc::channel::<Queued>();
-                let state = Arc::downgrade(state);
                 let drain = Duration::from_secs(self.config().drain_timeout_secs);
                 std::thread::Builder::new()
                     .name("inference-jobs".into())
-                    .spawn(move || run_queue(rx, state, drain))
+                    .spawn(move || run_queue(rx, drain))
                     .expect("spawning the job worker");
                 tx
             })
@@ -780,8 +788,8 @@ impl JobRunner {
     }
 }
 
-// one job at a time: wait for the device, run, record how it ended; holds the engine only while a job runs
-fn run_queue(rx: std::sync::mpsc::Receiver<Queued>, state: Weak<InferenceRs>, drain: Duration) {
+// one job at a time: wait for the device, run, record how it ended; holds an engine only while a job does
+fn run_queue(rx: std::sync::mpsc::Receiver<Queued>, drain: Duration) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -794,6 +802,7 @@ fn run_queue(rx: std::sync::mpsc::Receiver<Queued>, state: Weak<InferenceRs>, dr
     };
     for Queued {
         job,
+        engine,
         task: Task {
             target,
             prepare,
@@ -819,21 +828,15 @@ fn run_queue(rx: std::sync::mpsc::Receiver<Queued>, state: Weak<InferenceRs>, dr
                 continue;
             }
         }
-        let (device, lease) = match (&target, state.upgrade()) {
-            (Some(target), Some(state)) => {
-                match runtime.block_on(take_device(&state, &job, target, drain)) {
-                    Ok((device, lease)) => (Some(device), Some(lease)),
-                    Err(error) => {
-                        job.finish(Err(error));
-                        continue;
-                    }
+        let (device, lease) = match &target {
+            Some(target) => match runtime.block_on(take_device(&engine, &job, target, drain)) {
+                Ok((device, lease)) => (Some(device), Some(lease)),
+                Err(error) => {
+                    job.finish(Err(error));
+                    continue;
                 }
-            }
-            (Some(_), None) => {
-                job.finish(Err(anyhow::anyhow!("the engine has shut down")));
-                continue;
-            }
-            (None, _) => (None, None),
+            },
+            None => (None, None),
         };
         job.update(
             true,
@@ -859,40 +862,33 @@ fn run_queue(rx: std::sync::mpsc::Receiver<Queued>, state: Weak<InferenceRs>, dr
     }
 }
 
-// waits until a placement takes a device for the job, then leases it; fails when none ever could
+// waits until the engine's placement takes a device for the job, then leases it; fails when none ever could
 async fn take_device(
-    state: &InferenceRs,
+    engine: &Engine,
     job: &Job,
     target: &Target,
     drain: Duration,
-) -> anyhow::Result<(Device, inference_core::DeviceLease)> {
+) -> anyhow::Result<(Device, DeviceLease)> {
     let holder = {
         let record = job.record();
         format!("job {} ({})", record.id, record.kind)
     };
-    let devices = target
-        .devices
-        .iter()
-        .map(|&ordinal| Ok((ordinal, Device::new_cuda(ordinal)?)))
-        .collect::<anyhow::Result<Vec<_>>>()?;
     loop {
         if job.cancel.load(Ordering::Relaxed) {
             anyhow::bail!(CANCELLED);
         }
-        let snapshots = devices
-            .iter()
-            .map(|(ordinal, device)| state.device_snapshot(device, *ordinal))
-            .collect::<Result<Vec<_>, _>>()?;
-        match place(&snapshots, target.need, target.displace) {
+        let placed = engine
+            .place_need(Some(&target.devices), target.need, target.displace)
+            .map_err(anyhow::Error::msg)?;
+        match placed {
             Placed::Run { ordinal, evict } => {
-                let (_, device) = devices
-                    .iter()
-                    .find(|(o, _)| *o == ordinal)
-                    .expect("the plan names a candidate");
                 let unload = (target.need != JobNeed::Device).then_some(evict.as_slice());
-                let lease = state.lease_device(device, &holder, unload, drain).await?;
+                let lease = engine
+                    .lease_device(ordinal, &holder, unload, drain)
+                    .await
+                    .map_err(anyhow::Error::msg)?;
                 job.update(true, None, |record| record.device = Some(ordinal));
-                return Ok((device.clone(), lease));
+                return Ok((Device::new_cuda(ordinal)?, lease));
             }
             Placed::Wait(reason) => {
                 let changed = job.record().waiting.as_deref() != Some(reason.as_str());
@@ -911,23 +907,7 @@ async fn take_device(
 
 // the CUDA devices jobs may use: the configured ones, or every visible one
 fn candidate_devices(config: &JobsConfig) -> Result<Vec<usize>, ApiError> {
-    #[cfg(feature = "cuda")]
-    let visible = inference_tensor::cuda_backend::device_count().unwrap_or(0);
-    #[cfg(not(feature = "cuda"))]
-    let visible = 0;
-    let devices = match &config.devices {
-        Some(devices) => devices.clone(),
-        None => (0..visible).collect(),
-    };
-    if devices.is_empty() || devices.iter().any(|&d| d >= visible) {
-        return Err(ApiError::new(
-            ApiErrorKind::Unavailable,
-            format!("jobs need a CUDA device; {visible} visible, {devices:?} configured"),
-            Some("device_unavailable"),
-            None,
-        ));
-    }
-    Ok(devices)
+    inference_api::devices::candidate_devices(config.devices.as_deref())
 }
 
 fn now() -> f64 {
@@ -1166,21 +1146,24 @@ fn reconstruct_work(config: &JobsConfig, job: ReconstructJob) -> Result<(Prepare
     Ok((prepare, work))
 }
 
-impl Engine {
-    pub(crate) fn jobs_configure(&self, config: JobsConfig) {
+impl JobQueue {
+    /// Sets where jobs keep their folders and which weights they run; takes effect for jobs submitted afterwards.
+    pub fn configure(&self, config: JobsConfig) {
         *self
-            .job_runner()
+            .0
             .config
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = config;
     }
 
-    pub(crate) fn jobs_submit(
+    /// Queues a world generation or reconstruction with its input files for `engine`'s owner; its record as queued.
+    pub fn submit(
         &self,
+        engine: &Engine,
         request: JobRequest,
         inputs: Vec<JobInput>,
     ) -> Result<JobRecord, ApiError> {
-        let config = self.job_runner().config();
+        let config = self.0.config();
         let (need, placement, (prepare, work)) = match request.clone() {
             JobRequest::World(job) => {
                 if inputs.len() != 1 {
@@ -1211,16 +1194,20 @@ impl Engine {
             prepare: Some(prepare),
             work,
         };
-        self.enqueue(&config, kind, request, inputs, task)
+        self.enqueue(engine, &config, kind, request, inputs, task)
     }
 
-    pub(crate) fn jobs_submit_task(
+    /// Queues `work` as a job of `kind`, placed on a device with room for `need` by the engine's placement (none for
+    /// work off the GPU); its record as queued. Its context reports progress through [`Progress`] and checks for
+    /// cancellation.
+    pub fn submit_task(
         &self,
+        engine: &Engine,
         kind: &str,
         need: Option<JobNeed>,
         work: impl FnOnce(&JobContext) -> anyhow::Result<JobResult> + Send + 'static,
     ) -> Result<JobRecord, ApiError> {
-        let config = self.job_runner().config();
+        let config = self.0.config();
         let target = match need {
             Some(need) => Some(Target {
                 need,
@@ -1234,18 +1221,26 @@ impl Engine {
             prepare: None,
             work: Box::new(work),
         };
-        self.enqueue(&config, kind, serde_json::Value::Null, Vec::new(), task)
+        self.enqueue(
+            engine,
+            &config,
+            kind,
+            serde_json::Value::Null,
+            Vec::new(),
+            task,
+        )
     }
 
     fn enqueue(
         &self,
+        engine: &Engine,
         config: &JobsConfig,
         kind: &str,
         request: serde_json::Value,
         inputs: Vec<JobInput>,
         task: Task,
     ) -> Result<JobRecord, ApiError> {
-        let runner = self.job_runner();
+        let runner = &self.0;
         let id = format!("{JOB_ID_PREFIX}{}", uuid::Uuid::new_v4().simple());
         let dir = config.dir.join(&id);
         let input_dir = dir.join(INPUT_DIR);
@@ -1279,7 +1274,7 @@ impl Engine {
         let record = JobRecord {
             id: id.clone(),
             kind: kind.to_string(),
-            owner: self.owner().map(ToString::to_string),
+            owner: engine.owner().map(ToString::to_string),
             status: JobStatus::Queued,
             created_at: now(),
             started_at: None,
@@ -1304,49 +1299,57 @@ impl Engine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(id, job.clone());
         runner
-            .sender(self.state())
-            .send(Queued { job, task })
+            .sender()
+            .send(Queued {
+                job,
+                task,
+                engine: engine.clone(),
+            })
             .map_err(|_| ApiError::internal())?;
         Ok(record)
     }
 
-    fn owned_job(&self, id: &str) -> Result<Arc<Job>, ApiError> {
+    fn owned_job(&self, engine: &Engine, id: &str) -> Result<Arc<Job>, ApiError> {
         let job = self
-            .job_runner()
+            .0
             .jobs()
             .get(id)
             .cloned()
             .ok_or_else(|| not_found(id))?;
-        if job.record().owner.as_deref() != self.owner() {
+        if job.record().owner.as_deref() != engine.owner() {
             return Err(not_found(id));
         }
         Ok(job)
     }
 
-    pub(crate) fn jobs_get(&self, id: &str) -> Result<JobRecord, ApiError> {
-        Ok(self.owned_job(id)?.snapshot())
+    /// A job's record.
+    pub fn get(&self, engine: &Engine, id: &str) -> Result<JobRecord, ApiError> {
+        Ok(self.owned_job(engine, id)?.snapshot())
     }
 
-    pub(crate) fn jobs_list(&self) -> Vec<JobRecord> {
+    /// `engine`'s owner's jobs, newest first.
+    pub fn list(&self, engine: &Engine) -> JobList {
         let mut records = self
-            .job_runner()
+            .0
             .jobs()
             .values()
             .map(|job| job.snapshot())
-            .filter(|record| record.owner.as_deref() == self.owner())
+            .filter(|record| record.owner.as_deref() == engine.owner())
             .collect::<Vec<_>>();
         records.sort_by(|a, b| b.created_at.total_cmp(&a.created_at));
-        records
+        JobList { data: records }
     }
 
-    pub(crate) fn jobs_cancel(&self, id: &str) -> Result<JobRecord, ApiError> {
-        let job = self.owned_job(id)?;
+    /// Asks a job to stop: a queued one never starts, a running one stops at its next step.
+    pub fn cancel(&self, engine: &Engine, id: &str) -> Result<JobRecord, ApiError> {
+        let job = self.owned_job(engine, id)?;
         job.cancel.store(true, Ordering::Relaxed);
         Ok(job.snapshot())
     }
 
-    pub(crate) fn jobs_delete(&self, id: &str) -> Result<(), ApiError> {
-        let job = self.owned_job(id)?;
+    /// Removes a finished job and its folder.
+    pub fn delete(&self, engine: &Engine, id: &str) -> Result<JobDeleted, ApiError> {
+        let job = self.owned_job(engine, id)?;
         if !job.record().status.is_finished() {
             return Err(ApiError::new(
                 ApiErrorKind::Conflict,
@@ -1355,25 +1358,32 @@ impl Engine {
                 Some("id"),
             ));
         }
-        self.job_runner()
+        self.0
             .jobs
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(id);
-        std::fs::remove_dir_all(&job.dir).map_err(io_error)
+        std::fs::remove_dir_all(&job.dir).map_err(io_error)?;
+        Ok(JobDeleted {
+            id: id.to_string(),
+            deleted: true,
+        })
     }
 
-    pub(crate) fn jobs_events(
+    /// A job's changes from now on, after its record as it stands.
+    pub fn events(
         &self,
+        engine: &Engine,
         id: &str,
     ) -> Result<(JobRecord, broadcast::Receiver<JobEvent>), ApiError> {
-        let job = self.owned_job(id)?;
+        let job = self.owned_job(engine, id)?;
         let events = job.events.subscribe();
         Ok((job.snapshot(), events))
     }
 
-    pub(crate) fn jobs_file(&self, id: &str, file: &str) -> Result<PathBuf, ApiError> {
-        let job = self.owned_job(id)?;
+    /// The path of a file in a job's folder, given relative to it.
+    pub fn file(&self, engine: &Engine, id: &str, file: &str) -> Result<PathBuf, ApiError> {
+        let job = self.owned_job(engine, id)?;
         let relative = Path::new(file);
         let plain = relative
             .components()

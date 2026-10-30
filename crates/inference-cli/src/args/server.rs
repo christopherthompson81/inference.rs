@@ -201,7 +201,7 @@ pub enum JobPlacementArg {
     NoEviction,
 }
 
-impl From<JobPlacementArg> for inference_api::jobs::Placement {
+impl From<JobPlacementArg> for inference_jobs::Placement {
     fn from(placement: JobPlacementArg) -> Self {
         match placement {
             JobPlacementArg::Fastest => Self::Fastest,

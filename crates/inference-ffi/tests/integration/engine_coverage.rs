@@ -8,7 +8,7 @@ const FFI_SOURCES: [&str; 3] = [
 ];
 
 // Methods the ABI covers some other way, or that a binding has no use for.
-const NOT_EXPORTED: [(&str, &str); 13] = [
+const NOT_EXPORTED: [(&str, &str); 11] = [
     (
         "chat_events",
         "for chat protocols a server translates onto chat; a binding's own goes over inference_chat_stream_open",
@@ -43,14 +43,6 @@ const NOT_EXPORTED: [(&str, &str); 13] = [
     (
         "calibration",
         "exported as calibration_start, calibration_status and calibration_apply",
-    ),
-    (
-        "submit_task",
-        "it runs a Rust closure; a binding runs its own work in its own language",
-    ),
-    (
-        "job_events",
-        "a binding follows a job by polling inference_job_get",
     ),
 ];
 

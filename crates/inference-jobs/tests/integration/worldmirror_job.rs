@@ -3,12 +3,12 @@
 
 use std::time::Duration;
 
-use inference::{
-    JobEvent, JobInput, JobRequest, JobStatus, JobsConfig, ModelDType, ReconstructJob,
-    TextModelBuilder,
+use inference::{ModelDType, TextModelBuilder};
+use inference_jobs::{
+    JobEvent, JobInput, JobQueue, JobRequest, JobStatus, JobsConfig, ReconstructJob,
 };
 
-#[path = "../support/llama_tiny.rs"]
+#[path = "../../../inference/tests/support/llama_tiny.rs"]
 mod support;
 use support::tiny_llama_checkpoint;
 
@@ -34,26 +34,31 @@ async fn a_reconstruct_job_writes_splats_points_and_a_depth_preview() -> anyhow:
         .build()
         .await?;
     let jobs = tempfile::tempdir()?;
-    model.configure_jobs(JobsConfig {
+    let queue = JobQueue::default();
+    queue.configure(JobsConfig {
         dir: jobs.path().to_path_buf(),
         worldmirror: Some(checkpoint.into()),
         ..Default::default()
     });
     let inputs = photos.iter().cloned().map(JobInput::Path).collect();
-    let queued = model.submit_job(JobRequest::Reconstruct(ReconstructJob::default()), inputs)?;
-    let (_, mut events) = model.job_events(&queued.id)?;
+    let queued = queue.submit(
+        &model,
+        JobRequest::Reconstruct(ReconstructJob::default()),
+        inputs,
+    )?;
+    let (_, mut events) = queue.events(&model, &queued.id)?;
     tokio::time::timeout(JOB_WAIT, async {
         while !matches!(events.recv().await, Ok(JobEvent::Finished { .. }) | Err(_)) {}
     })
     .await?;
 
-    let done = model.job(&queued.id)?;
+    let done = queue.get(&model, &queued.id)?;
     assert_eq!(done.status, JobStatus::Succeeded, "{:?}", done.error);
     assert_eq!(done.report["frames"], photos.len());
     for name in ["splats", "points", "cameras"] {
         let output = done.outputs.iter().find(|o| o.name == name);
         let output = output.ok_or_else(|| anyhow::anyhow!("no {name} output"))?;
-        assert!(std::fs::metadata(model.job_file(&done.id, &output.file)?)?.len() > 0);
+        assert!(std::fs::metadata(queue.file(&model, &done.id, &output.file)?)?.len() > 0);
     }
     assert_eq!(done.previews.len(), 1);
     Ok(())

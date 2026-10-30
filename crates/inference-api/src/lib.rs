@@ -22,7 +22,6 @@ pub mod hidream_gguf;
 pub(crate) mod inference_for_server_builder;
 #[doc(hidden)]
 pub mod input_files;
-pub mod jobs;
 pub mod logits_processors;
 pub mod lora_adapters;
 #[doc(hidden)]
@@ -34,13 +33,14 @@ pub mod model_manager;
 pub mod models;
 pub use inference_protocol::openai;
 pub mod operations;
-pub mod reconstruction;
 pub mod registry;
 pub mod request_body;
 pub use inference_protocol::responses_types;
 #[doc(hidden)]
 pub mod sampling;
 pub mod sdk;
+// for the crates above the engine that fetch checkpoints from the Hub or sample video frames as it does
+pub use inference_core::{TokenSource, VideoFrameSampling, build_api_with_cache};
 pub mod skill_store;
 pub mod system;
 pub mod transcription_session;
@@ -48,7 +48,6 @@ pub mod types;
 pub mod uqff;
 pub mod util;
 pub mod video;
-pub mod worldgen_package;
 
 pub use engine::{Engine, EngineLoadError, EngineSpec};
 /// What a GGUF writer (`asr_gguf`, `hidream_gguf`) reports.

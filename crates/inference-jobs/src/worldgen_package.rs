@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 use inference_recon::worldstereo::gguf_writer::{write_umt5_gguf, write_worldstereo_gguf};
 use inference_tensor::quantized::GgmlDType;
 
-use crate::GgufWriteSummary;
-use crate::jobs::{LPIPS_FILE, MOGE_DIR, WAN_DIR, WORLDSTEREO_DIR};
+use crate::{LPIPS_FILE, MOGE_DIR, WAN_DIR, WORLDSTEREO_DIR};
+use inference_api::GgufWriteSummary;
 
 const TEXT_ENCODER_DIR: &str = "text_encoder";
 // MoGe-2's original pickle, which the converted safetensors replace

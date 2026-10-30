@@ -119,6 +119,7 @@ pub struct InferenceRsServerRouterBuilder {
     file_listing: bool,
     model_management: bool,
     model_manager: Option<std::sync::Arc<inference_api::model_manager::ModelManager>>,
+    jobs: inference_jobs::JobQueue,
     auth: Option<std::sync::Arc<crate::auth::Auth>>,
 }
 
@@ -137,6 +138,7 @@ impl Default for InferenceRsServerRouterBuilder {
             file_listing: false,
             model_management: false,
             model_manager: None,
+            jobs: inference_jobs::JobQueue::default(),
             auth: None,
         }
     }
@@ -216,6 +218,12 @@ impl InferenceRsServerRouterBuilder {
         self
     }
 
+    /// Serves `jobs` on the jobs routes; without it the server keeps a queue of its own with the default config.
+    pub fn with_jobs(mut self, jobs: inference_jobs::JobQueue) -> Self {
+        self.jobs = jobs;
+        self
+    }
+
     /// Requires a key on all but health probes and sign in, scoping each request to its owner; later routes aren't.
     pub fn with_api_keys(self, keys: crate::auth::ApiKeys) -> Self {
         self.with_auth(crate::auth::Auth::new(keys))
@@ -268,6 +276,7 @@ impl InferenceRsServerRouterBuilder {
         }
 
         router = router
+            .layer(Extension(self.jobs))
             .layer(Extension(crate::files::FileListing(self.file_listing)))
             .layer(middleware::from_fn_with_state(observability, observe_http));
         if let Some(auth) = &self.auth {

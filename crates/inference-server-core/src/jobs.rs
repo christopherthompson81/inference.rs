@@ -3,6 +3,7 @@
 
 use std::convert::Infallible;
 
+use axum::Extension;
 use axum::{
     extract::{Multipart, Path, multipart::MultipartRejection},
     http::{StatusCode, header},
@@ -12,7 +13,7 @@ use axum::{
     },
 };
 use futures::stream::{self, Stream, StreamExt};
-use inference_api::jobs::{JobEvent, JobInput, JobRequest};
+use inference_jobs::{JobEvent, JobInput, JobQueue, JobRequest};
 use tokio::sync::broadcast::error::RecvError;
 use tower::ServiceExt;
 
@@ -45,11 +46,12 @@ fn multipart_error(error: axum::extract::multipart::MultipartError) -> ApiError 
     path = "/v1/jobs",
     request_body(content_type = "multipart/form-data", description = "`request`: the job as JSON; `file`: its inputs, repeated"),
     responses(
-        (status = 200, description = "The queued job", body = inference_api::jobs::JobRecord),
+        (status = 200, description = "The queued job", body = inference_jobs::JobRecord),
         (status = 400, description = "Invalid job, or what it needs is not configured"),
     )
 ))]
 pub async fn submit_job(
+    Extension(jobs): Extension<JobQueue>,
     OwnedEngine(engine): OwnedEngine,
     payload: Result<Multipart, MultipartRejection>,
 ) -> Response {
@@ -95,7 +97,7 @@ pub async fn submit_job(
     }
     .await;
     match parsed {
-        Ok((request, inputs)) => json_response(engine.submit_job(request, inputs)),
+        Ok((request, inputs)) => json_response(jobs.submit(&engine, request, inputs)),
         Err(error) => openai_error_response(error),
     }
 }
@@ -104,10 +106,13 @@ pub async fn submit_job(
     get,
     tag = "inference.rs",
     path = "/v1/jobs",
-    responses((status = 200, description = "This owner's jobs, newest first", body = inference_api::jobs::JobList))
+    responses((status = 200, description = "This owner's jobs, newest first", body = inference_jobs::JobList))
 ))]
-pub async fn list_jobs(OwnedEngine(engine): OwnedEngine) -> Response {
-    json_response(Ok::<_, ApiError>(engine.jobs()))
+pub async fn list_jobs(
+    Extension(jobs): Extension<JobQueue>,
+    OwnedEngine(engine): OwnedEngine,
+) -> Response {
+    json_response(Ok::<_, ApiError>(jobs.list(&engine)))
 }
 
 #[cfg_attr(test, utoipa::path(
@@ -116,12 +121,16 @@ pub async fn list_jobs(OwnedEngine(engine): OwnedEngine) -> Response {
     path = "/v1/jobs/{id}",
     params(("id" = String, Path, description = "Job ID")),
     responses(
-        (status = 200, description = "The job", body = inference_api::jobs::JobRecord),
+        (status = 200, description = "The job", body = inference_jobs::JobRecord),
         (status = 404, description = "No such job"),
     )
 ))]
-pub async fn get_job(OwnedEngine(engine): OwnedEngine, Path(id): Path<String>) -> Response {
-    json_response(engine.job(&id))
+pub async fn get_job(
+    Extension(jobs): Extension<JobQueue>,
+    OwnedEngine(engine): OwnedEngine,
+    Path(id): Path<String>,
+) -> Response {
+    json_response(jobs.get(&engine, &id))
 }
 
 #[cfg_attr(test, utoipa::path(
@@ -135,8 +144,12 @@ pub async fn get_job(OwnedEngine(engine): OwnedEngine, Path(id): Path<String>) -
         (status = 409, description = "The job has not finished"),
     )
 ))]
-pub async fn delete_job(OwnedEngine(engine): OwnedEngine, Path(id): Path<String>) -> Response {
-    match engine.delete_job(&id) {
+pub async fn delete_job(
+    Extension(jobs): Extension<JobQueue>,
+    OwnedEngine(engine): OwnedEngine,
+    Path(id): Path<String>,
+) -> Response {
+    match jobs.delete(&engine, &id) {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => openai_error_response(error),
     }
@@ -148,12 +161,16 @@ pub async fn delete_job(OwnedEngine(engine): OwnedEngine, Path(id): Path<String>
     path = "/v1/jobs/{id}/cancel",
     params(("id" = String, Path, description = "Job ID")),
     responses(
-        (status = 200, description = "The job, asked to stop", body = inference_api::jobs::JobRecord),
+        (status = 200, description = "The job, asked to stop", body = inference_jobs::JobRecord),
         (status = 404, description = "No such job"),
     )
 ))]
-pub async fn cancel_job(OwnedEngine(engine): OwnedEngine, Path(id): Path<String>) -> Response {
-    json_response(engine.cancel_job(&id))
+pub async fn cancel_job(
+    Extension(jobs): Extension<JobQueue>,
+    OwnedEngine(engine): OwnedEngine,
+    Path(id): Path<String>,
+) -> Response {
+    json_response(jobs.cancel(&engine, &id))
 }
 
 #[cfg_attr(test, utoipa::path(
@@ -166,8 +183,12 @@ pub async fn cancel_job(OwnedEngine(engine): OwnedEngine, Path(id): Path<String>
         (status = 404, description = "No such job"),
     )
 ))]
-pub async fn job_events(OwnedEngine(engine): OwnedEngine, Path(id): Path<String>) -> Response {
-    let (record, events) = match engine.job_events(&id) {
+pub async fn job_events(
+    Extension(jobs): Extension<JobQueue>,
+    OwnedEngine(engine): OwnedEngine,
+    Path(id): Path<String>,
+) -> Response {
+    let (record, events) = match jobs.events(&engine, &id) {
         Ok(subscribed) => subscribed,
         Err(error) => return openai_error_response(error),
     };
@@ -215,11 +236,12 @@ pub async fn job_events(OwnedEngine(engine): OwnedEngine, Path(id): Path<String>
     )
 ))]
 pub async fn job_file(
+    Extension(jobs): Extension<JobQueue>,
     OwnedEngine(engine): OwnedEngine,
     Path((id, file)): Path<(String, String)>,
     request: axum::extract::Request,
 ) -> Response {
-    let path = match engine.job_file(&id, &file) {
+    let path = match jobs.file(&engine, &id, &file) {
         Ok(path) => path,
         Err(error) => return openai_error_response(error),
     };

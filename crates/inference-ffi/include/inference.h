@@ -542,26 +542,6 @@ INFERENCE_API inference_status inference_device_lease_open(const inference_engin
                                                           size_t request_len, inference_device_lease **out_lease);
 INFERENCE_API void inference_device_lease_free(inference_device_lease *lease);
 
-/* Jobs: world generation and reconstruction, queued and run one at a time. A job holds its CUDA device to itself while
- * it runs, unloading the idle models there (a pinned one makes it fail) and refusing loads there until it ends.
- * Configure takes and returns the JobsConfig JSON ({"dir", "worldstereo", "wan", "moge", "worldmirror", "lpips",
- * "device_ordinal", "drain_timeout_secs"}); submit takes {"request": JobRequest, "inputs": [paths]} and returns the
- * queued JobRecord. Poll inference_job_get to follow one: its stages, previews and outputs name files in the job's
- * folder, which inference_job_file resolves ({"id", "file"} to {"path"}). Cancel stops a job at its next step;
- * delete removes a finished one with its folder. A job of another owner is INFERENCE_ERR_NOT_FOUND. */
-INFERENCE_API inference_status inference_jobs_configure(const inference_engine *engine, const char *request,
-                                                       size_t request_len, inference_string **out_response);
-INFERENCE_API inference_status inference_job_submit(const inference_engine *engine, const char *request,
-                                                   size_t request_len, inference_string **out_response);
-INFERENCE_API inference_status inference_jobs_list(const inference_engine *engine, inference_string **out_response);
-INFERENCE_API inference_status inference_job_get(const inference_engine *engine, const char *job_id, size_t job_id_len,
-                                                inference_string **out_response);
-INFERENCE_API inference_status inference_job_cancel(const inference_engine *engine, const char *job_id,
-                                                   size_t job_id_len, inference_string **out_response);
-INFERENCE_API inference_status inference_job_delete(const inference_engine *engine, const char *job_id,
-                                                   size_t job_id_len, inference_string **out_response);
-INFERENCE_API inference_status inference_job_file(const inference_engine *engine, const char *request,
-                                                 size_t request_len, inference_string **out_response);
 /* The files a container (a code-running session, its "container_id") produced, as the
  * /v1/containers/{id}/files JSON; a file of another container is INFERENCE_ERR_NOT_FOUND. */
 INFERENCE_API inference_status inference_container_files_list(const inference_engine *engine,
