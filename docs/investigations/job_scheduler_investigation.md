@@ -375,3 +375,21 @@ models and small cards refuse); CUDA: a 1 GiB task runs beside the resident mode
 Qwen3.5-0.8B loaded (5.3 GB): a `no_eviction` reconstruction ran on GPU 0 in 3 s with the model still loaded; a
 `no_eviction` world job sat queued showing "Waiting: GPU 0: model ... is loaded there" and cancelled cleanly. The
 multi-GPU choice is covered only by the unit tests: this machine has one card.
+
+## Run 13 - 2026-10-30 12:04
+
+**Question:** the jobs tests die at exit with SIGSEGV under load (test_time Run 20: 5 crashes in 200 stress iterations of
+the five `jobs::` tests beside 16 busy cores, all after a pass, in `a_sized_job_runs_beside_the_resident_model` and
+`a_job_that_may_not_displace_waits_for_the_device_to_empty`). Run 6's exit race again?
+
+**Cause:** the job worker destructured each `Queued` in its `for` loop, so the job's `Engine` clone (and a task
+closure that captured another) lived until the end of the iteration, after `job.finish(outcome)`. `finish` is what
+a caller waits for: the test returned and dropped its `Model`, leaving the worker's clone as the engine's last
+reference, and the engine was torn down (engine threads joined, cuBLAS destroyed) on the worker thread while the
+process exited, Run 6's crash on another path.
+
+**Change:** `run_job` runs one job and returns it with its outcome; its engine, prepare and work closures, device and
+lease are dropped by the time it returns, and the loop only then calls `finish`.
+
+**Result:** the same stress, 5 x 20 iterations of the five tests beside 16 busy cores: 0 crashes in 100 (before: 5 in
+200). At the old 2.5% per iteration a clean 100 has ~8% odds by chance; with the mechanism identified, taken as fixed.

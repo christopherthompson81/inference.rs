@@ -800,7 +800,16 @@ fn run_queue(rx: std::sync::mpsc::Receiver<Queued>, drain: Duration) {
             return;
         }
     };
-    for Queued {
+    for queued in rx {
+        let (job, outcome) = run_job(queued, &runtime, drain);
+        job.finish(outcome);
+    }
+}
+
+// one job, its engine and closures dropped by the time it returns: once its outcome is out, a caller may end the
+// process, and the engine's last reference must not be torn down on this thread as it exits
+fn run_job(
+    Queued {
         job,
         engine,
         task: Task {
@@ -808,58 +817,53 @@ fn run_queue(rx: std::sync::mpsc::Receiver<Queued>, drain: Duration) {
             prepare,
             work,
         },
-    } in rx
-    {
-        if job.cancel.load(Ordering::Relaxed) {
-            job.finish(Err(anyhow::anyhow!(CANCELLED)));
-            continue;
-        }
-        if let Some(prepare) = prepare {
-            let context = JobContext {
-                job: job.clone(),
-                device: None,
-                runtime: runtime.handle().clone(),
-            };
-            let prepared =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prepare(&context)))
-                    .unwrap_or_else(|_| Err(anyhow::anyhow!("the job panicked")));
-            if let Err(error) = prepared {
-                job.finish(Err(error));
-                continue;
-            }
-        }
-        let (device, lease) = match &target {
-            Some(target) => match runtime.block_on(take_device(&engine, &job, target, drain)) {
-                Ok((device, lease)) => (Some(device), Some(lease)),
-                Err(error) => {
-                    job.finish(Err(error));
-                    continue;
-                }
-            },
-            None => (None, None),
-        };
-        job.update(
-            true,
-            Some(JobEvent::Status {
-                status: JobStatus::Running,
-            }),
-            |record| {
-                record.status = JobStatus::Running;
-                record.started_at = Some(now());
-                record.waiting = None;
-            },
-        );
+    }: Queued,
+    runtime: &tokio::runtime::Runtime,
+    drain: Duration,
+) -> (Arc<Job>, anyhow::Result<JobResult>) {
+    if job.cancel.load(Ordering::Relaxed) {
+        return (job, Err(anyhow::anyhow!(CANCELLED)));
+    }
+    if let Some(prepare) = prepare {
         let context = JobContext {
             job: job.clone(),
-            device,
+            device: None,
             runtime: runtime.handle().clone(),
         };
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&context)))
+        let prepared = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prepare(&context)))
             .unwrap_or_else(|_| Err(anyhow::anyhow!("the job panicked")));
-        drop(context);
-        drop(lease);
-        job.finish(outcome);
+        if let Err(error) = prepared {
+            return (job, Err(error));
+        }
     }
+    let (device, lease) = match &target {
+        Some(target) => match runtime.block_on(take_device(&engine, &job, target, drain)) {
+            Ok((device, lease)) => (Some(device), Some(lease)),
+            Err(error) => return (job, Err(error)),
+        },
+        None => (None, None),
+    };
+    job.update(
+        true,
+        Some(JobEvent::Status {
+            status: JobStatus::Running,
+        }),
+        |record| {
+            record.status = JobStatus::Running;
+            record.started_at = Some(now());
+            record.waiting = None;
+        },
+    );
+    let context = JobContext {
+        job: job.clone(),
+        device,
+        runtime: runtime.handle().clone(),
+    };
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&context)))
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("the job panicked")));
+    drop(context);
+    drop(lease);
+    (job, outcome)
 }
 
 // waits until the engine's placement takes a device for the job, then leases it; fails when none ever could
