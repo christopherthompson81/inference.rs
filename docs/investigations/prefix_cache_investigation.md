@@ -164,3 +164,32 @@ checkpoints, so the cacher never reached its own cap (0 capacity evictions) and 
 Run 4's reply warm-up roughly doubles captures per agent turn, which is why a few demo runs were enough to hit it. The
 checkpoint pool is now its own LRU bound; aligning the two capacities would also work, but the eviction keeps
 working whichever is set lower.
+
+## Run 6 - 2026-10-30 14:28
+
+Question (#723): on Qwen3.8 27B with the DFlash 2 drafter (q3 KV, 262K window), a question over the same `read_file`
+context a coding request just used re-prefilled the whole prompt. Why, when the final-message snapshot exists?
+
+Commands: `repro723.py` (scratchpad): a context of repository sources as `read_file` results, a coding request (one
+32-token turn, or the multi-turn 1,024-token agent run), then a review question over the same context, both with the
+same tools; cached tokens from `usage` and the moved `/metrics` prefix counters. Servers from the LAN copy (master
+0e3d62ef5) without a host store and with `--prefix-cache-ram-gib 16`, then this branch's build with no store flags.
+
+Finding:
+- No store, one coding turn: review 13,216 of 13,246 tokens cached. The final-message snapshot
+  (`CheckpointHints::final_message_start`) works with the drafter. (A first try sent the review without the tools,
+  so its prompt differed from the start: 0 cached, `no_replay_boundary`.)
+- No store, the 8-turn agent run: review 0 of 15,977; 30 `checkpoint_pool` evictions, the review's miss
+  `checkpoint_unavailable` with cause `checkpoint_pool`. Without a store the drafter keeps up to `prefix_cache_n`
+  prefixes on the GPU (8 here, bounded by recurrent snapshot slots); each turn adds snapshots, a hit promotes only the
+  longest match, and `evict_oldest_auxiliary_prefix` drops the least recently used: the shared context's snapshot.
+- `--prefix-cache-ram-gib 16`, a 10-turn agent run: review 9,792 of 9,840, `prefix_store_restored_blocks_total` +306.
+- Change: an unset `prefix_cache_ram_gib` now gives an 8 GiB memory tier (at most an eighth of the machine's
+  memory); 0 keeps none. The store only opens for hybrid models with paged attention. With a store the drafter keeps
+  `HOST_BACKED_GPU_PREFIXES` on the GPU: this branch's server, no store flags, logs `retained_prefixes=2` and an
+  8 GiB memory store, loads at 20,374 MiB (no store: 20,949), and the agent repro restores 350 blocks from memory.
+- Test: `a_prefix_the_drafter_dropped_restores_without_a_configured_store` (tiny model, `PREFIX_CACHE_SEQS + 2`
+  agent prompts, no store options): 384 of 420 cached with the default, 0 (and a failure) with it forced off.
+
+Implication: the default server keeps a hybrid model's dropped prefixes in RAM and frees ~575 MiB of VRAM the drafter
+held for them.

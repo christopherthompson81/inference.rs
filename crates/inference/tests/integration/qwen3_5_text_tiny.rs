@@ -873,29 +873,49 @@ async fn a_new_final_message_resumes_at_the_previous_one() -> anyhow::Result<()>
 
 // distinct prompts sent before the first is extended: more than a disk-backed drafter keeps on the GPU
 const EVICTING_PROMPTS: usize = 4;
+// prompts past the GPU's prefixes that a model without a configured store must drop
+const EXTRA_EVICTING_PROMPTS: usize = 2;
 
 // a host store's size in GiB for the tiny model: far more than its prefixes take
 const TINY_RAM_STORE_GIB: u64 = 1;
 
-// With a host store the drafter keeps few prefixes on the GPU; one it dropped restores from the store (a directory,
-// or memory alone), drafter checkpoint included, and its next turn decodes as a cold run does
-async fn check_dropped_prefix_restores(in_memory: bool) -> anyhow::Result<()> {
+// Where a dropped prefix is kept: a directory, memory the request sizes, or the memory tier a model gets by default
+#[derive(PartialEq)]
+enum HostStore {
+    Disk,
+    Memory,
+    Default,
+}
+
+// With a host store the drafter keeps few prefixes on the GPU; one it dropped restores from the store, drafter
+// checkpoint included, and its next turn decodes as a cold run does
+async fn check_dropped_prefix_restores(host: HostStore) -> anyhow::Result<()> {
     let drafter = tiny_dflash(AGENT_DFLASH_WINDOW)?;
     let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
     let store = tempfile::tempdir()?;
+    let in_memory = host != HostStore::Disk;
     let model = if in_memory {
-        TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        let builder = TextModelBuilder::new(checkpoint.path().to_string_lossy())
             .with_dtype(ModelDType::BF16)
             .with_prefix_cache_n(Some(PREFIX_CACHE_SEQS))
             .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
-            .with_mtp_model(drafter.path().to_string_lossy(), Some(DFLASH_N_PREDICT))
-            .with_prefix_cache_ram(TINY_RAM_STORE_GIB)
-            .build()
-            .await?
+            .with_mtp_model(drafter.path().to_string_lossy(), Some(DFLASH_N_PREDICT));
+        match host {
+            HostStore::Memory => builder.with_prefix_cache_ram(TINY_RAM_STORE_GIB),
+            _ => builder,
+        }
+        .build()
+        .await?
     } else {
         stored_model(checkpoint.path(), Some(drafter.path()), Some(store.path())).await?
     };
-    let prompts = (0..EVICTING_PROMPTS)
+    // without a configured store the GPU keeps `PREFIX_CACHE_SEQS` drafter prefixes, so more prompts drop the first
+    let evicting = if host == HostStore::Default {
+        PREFIX_CACHE_SEQS + EXTRA_EVICTING_PROMPTS
+    } else {
+        EVICTING_PROMPTS
+    };
+    let prompts = (0..evicting)
         .map(|i| agent_tokens(AGENT_PROMPT_LEN, 1 + i))
         .collect::<Vec<_>>();
     for prompt in &prompts {
@@ -931,14 +951,22 @@ async fn a_prefix_the_drafter_dropped_restores_from_the_disk_store() -> anyhow::
     if !cfg!(feature = "cuda") {
         return Ok(());
     }
-    check_dropped_prefix_restores(false).await
+    check_dropped_prefix_restores(HostStore::Disk).await
 }
 
 async fn a_prefix_the_drafter_dropped_restores_from_the_memory_store() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
     }
-    check_dropped_prefix_restores(true).await
+    check_dropped_prefix_restores(HostStore::Memory).await
+}
+
+// a model given no prefix store keeps its dropped prefixes in its default memory tier
+async fn a_prefix_the_drafter_dropped_restores_without_a_configured_store() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    check_dropped_prefix_restores(HostStore::Default).await
 }
 
 // the prompt's snapshot sits at its last full block before the end, the reply's one block further
@@ -1210,6 +1238,7 @@ concurrent_cases!(
         a_new_final_message_resumes_at_the_previous_one: 354,
         a_prefix_the_drafter_dropped_restores_from_the_disk_store: 454,
         a_prefix_the_drafter_dropped_restores_from_the_memory_store: 454,
+        a_prefix_the_drafter_dropped_restores_without_a_configured_store: 454,
         a_finished_reply_is_prefilled_for_the_next_turn: 388,
         a_finished_reply_is_prefilled_with_a_dflash_drafter: 454,
         a_prompt_diverging_early_resumes_at_a_progressive_checkpoint: 422,
