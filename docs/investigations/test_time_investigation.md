@@ -298,3 +298,28 @@ Finding:
 
 Implication: done for these tests. The suite-level levers are summed CUDA test time (inference-nn `ops` and
 `cuda::gdn`, `qwen3_5_text_tiny`) and the RNN-T greedy loop's per-step host sync.
+
+## Run 14 - 2026-10-30 06:17
+
+Question: Run 13 put the RNN-T greedy loop's GPU cost on the per-step argmax readback (`to_scalar`, ~1.5 ms a step
+over ~800 steps). Is that right, and what does a step cost?
+
+Command: timers around the joint, the readback and the predictor advance in `Transducer::greedy_from` (reverted),
+`cargo nextest run --profile cuda --features cuda -p inference -E 'test(/parakeet_tiny::(rnnt|tdt)_repeats/)'
+--no-capture`.
+
+Finding:
+- Run 13's diagnosis was wrong. A 45 s transcription with the tiny random RNN-T head takes 5,630 steps, not ~800: its
+  random weights emit a token at almost every step, up to `max_symbols_per_step` a frame, so each step also advances
+  the predictor. Per transcription: total 1.14 s, joint 0.19 s (33 us a step), readback 0.04 s (7 us), predictor
+  0.90 s (160 us an advance). TDT: 282 steps, 0.06 s. The sync is cheap; the predictor's launches are the cost.
+- Two bit-exact cuts in the advance: a single token reads its embedding row as a view (`narrow`) instead of uploading
+  the id and gathering, and one sigmoid over all four gates replaces three over their slices. Predictor 0.90 -> 0.72 s
+  (128 us an advance), RNN-T test 3.0 -> 2.6 s alone. All 27 Parakeet tests pass on CUDA and CPU (pins unchanged).
+- What is left is ~12 small launches per layer (two matmuls, bias, sigmoid, tanh, cell and hidden updates) and the
+  projector. Fusing the two matmuls into one over `[x, h]` would change the summation order, so the pinned decodes
+  could move; not taken.
+
+Implication: the RNN-T loop is launch-bound on token-dense output, not sync-bound. Real checkpoints emit far fewer
+tokens than frames, so the product cost there is the per-token advance; a fused LSTM step kernel is the remaining
+lever if speech decode ever shows up in a profile.

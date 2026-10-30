@@ -43,10 +43,11 @@ impl LstmLayer {
     fn step(&self, x: &Tensor, h: &Tensor, c: &Tensor) -> Result<(Tensor, Tensor)> {
         let hidden = h.dim(1)?;
         let g = (x.matmul(&self.w_ih_t)? + h.matmul(&self.w_hh_t)?)?.broadcast_add(&self.bias)?;
-        let i = ops::sigmoid(&g.narrow(1, 0, hidden)?)?;
-        let f = ops::sigmoid(&g.narrow(1, hidden, hidden)?)?;
+        let gates = ops::sigmoid(&g)?;
+        let i = gates.narrow(1, 0, hidden)?;
+        let f = gates.narrow(1, hidden, hidden)?;
         let cell = g.narrow(1, 2 * hidden, hidden)?.tanh()?;
-        let o = ops::sigmoid(&g.narrow(1, 3 * hidden, hidden)?)?;
+        let o = gates.narrow(1, 3 * hidden, hidden)?;
         let c = ((f * c)? + (i * cell)?)?;
         let h = (o * c.tanh()?)?;
         Ok((h, c))
@@ -97,8 +98,13 @@ impl Predictor {
 
     // each row of `state` fed its row's token
     fn advance(&self, tokens: &[u32], state: PredictorState) -> Result<PredictorState> {
-        let ids = Tensor::new(tokens, state.output.device())?;
-        let mut x = self.embedding.forward(&ids)?;
+        let mut x = match tokens {
+            // a row view rather than an upload of the id, once per greedy token
+            [token] => self.embedding.embeddings().narrow(0, *token as usize, 1)?,
+            _ => self
+                .embedding
+                .forward(&Tensor::new(tokens, state.output.device())?)?,
+        };
         let (mut h, mut c) = (Vec::new(), Vec::new());
         for (layer, (h0, c0)) in self.layers.iter().zip(state.h.iter().zip(&state.c)) {
             let (h1, c1) = layer.step(&x, h0, c0)?;
