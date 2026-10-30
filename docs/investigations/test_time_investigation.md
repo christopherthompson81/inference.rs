@@ -466,3 +466,34 @@ Finding:
 
 Implication: several engines in one process (the server's model manager) no longer break each other's graph captures;
 model test modules can run their cases concurrently in one process with graphs on.
+
+## Run 19 - 2026-10-30 11:28
+
+Question: with Run 18's fix, how far do concurrent cases go across the model test modules, and what do they save?
+
+Commands: per-test peak VRAM for 14 modules, serially (the target-runner pid log beside `nvidia-smi
+--query-compute-apps`); each module's tests that touch no process-global state, carry no `cfg`/`ignore`
+attribute and ran under CUDA moved into its `concurrent_cases!`; the shared tests on CUDA (3 runs, then 6) and CPU;
+the CUDA suite alone twice and the CPU suite.
+
+Finding:
+- Peaks: the card-filling eviction test 22,218 MiB (kept apart, as are the memory-report test, the graph-replay
+  rounds and the recorder tests), every shared test 610 MiB or less.
+- 14 modules share 133 tests in 14 processes: `qwen3_5_text_tiny` 20, `bert_embedding_tiny` 17, `parakeet_tiny`
+  14, `qwen_vl_tiny` 14, `gguf_embedding_tiny` 13, `llama_tiny` 12, `rope_encoder_embedding_tiny` 10,
+  `qwen4exp_text_tiny` 6, `gemma3_tiny` 5, `paddleocr_vl_tiny` 5, `hidream_o1_tiny` 5, `embedding_tiny` 4,
+  `decision_tiny` 4, `granite_tiny` 3. Left as they were: `qwen3_sliding_window_tiny` (its futures are not
+  `Send`, so they cannot be spawned) and one gemma3 test gated on `cfg(cuda|metal)`.
+- First runs: 1 of 3 aborted in `fattn-common.cuh:1310`, `GGML_ASSERT(max_blocks_per_sm > 0)` (the occupancy
+  query found the kernel's shared memory over its limit). The mma f16 path raises each kernel's limit through a
+  per-instantiation `static size_t` that two threads read and write unsynchronized; a smaller request landing after
+  a larger one lowers the attribute under the larger launch. The quant decode path had the same raise and an occupancy
+  cache whose count and size another thread could pair wrongly. Now one serialized, never-lowering
+  `ggml_cuda_raise_shared_memory_limit` for the four f16 sites and the quant one, and the occupancy cache under a
+  mutex. Then 6 of 6 runs pass, 8.6-9.2 s for all 14 shared tests together (`parakeet_tiny` the longest).
+- CUDA suite alone: 3292 -> 3177 tests, 51.7 -> 45.2 / 43.7 s. CPU suite 2899 tests, 10.2 s (Run 15: 11.6 s).
+
+Implication: ~7 s off the CUDA suite, less than Run 16's ~29 s of context queue would allow: many shared tests were
+the cheap kind that never paid for a context. The two bugs found are product bugs for any process running several
+engines (the server's model manager). Next lever if wanted: the server-core route tests (`chat_route` 18, `keyed`
+10) and the C ABI's `engine_abi` 21, each a model per test.

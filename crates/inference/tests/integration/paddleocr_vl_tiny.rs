@@ -7,6 +7,9 @@ use inference::{
 };
 use inference_api::models::{ModelOperationRequest, ModelStatus};
 
+#[macro_use]
+#[path = "../support/concurrent_cases.rs"]
+mod concurrent_cases;
 #[path = "../support/paddleocr_vl_tiny.rs"]
 mod support;
 use support::{FIXTURES, tiny_checkpoint};
@@ -73,7 +76,6 @@ fn greedy_ids(resp: &inference::ChatCompletionResponse) -> Vec<u32> {
 
 // Greedy ids of one image and of two, pinned so the text stack's numerics can't drift unnoticed. Every backend gives
 // the same ids: the image splits CUDA's paged prefill into chunks, and a later chunk must attend causally.
-#[tokio::test]
 async fn image_decodes_are_pinned() -> anyhow::Result<()> {
     let checkpoint = tiny_checkpoint()?;
     let model = build(checkpoint.path()).await?;
@@ -92,7 +94,6 @@ async fn image_decodes_are_pinned() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
 async fn mixed_text_and_image_batch_makes_progress() -> anyhow::Result<()> {
     let dir = tiny_checkpoint()?;
     let model = build(dir.path()).await?;
@@ -154,7 +155,6 @@ fn same_decode(a: &[(u32, f32)], b: &[(u32, f32)]) -> bool {
 }
 
 // Same-size pages give byte-identical prompts, so only the registered image span keeps their KV blocks apart.
-#[tokio::test]
 async fn prefix_cache_does_not_serve_one_image_for_another() -> anyhow::Result<()> {
     let dir = tiny_checkpoint()?;
     let fresh = build(dir.path()).await?;
@@ -199,7 +199,6 @@ async fn prefix_cache_does_not_serve_one_image_for_another() -> anyhow::Result<(
 }
 
 // The second request reuses the shared first image's blocks and must still decode exactly as a fresh request.
-#[tokio::test]
 async fn partial_prefix_hit_matches_a_fresh_two_image_decode() -> anyhow::Result<()> {
     let dir = tiny_checkpoint()?;
     let both = ["page_00.png", "page_01.png"];
@@ -228,7 +227,6 @@ async fn partial_prefix_hit_matches_a_fresh_two_image_decode() -> anyhow::Result
 }
 
 // Reload rebuilds from the config the SDK stored at first load, so it must decode exactly as the first load did.
-#[tokio::test]
 async fn reload_decodes_like_the_first_load() -> anyhow::Result<()> {
     let dir = tiny_checkpoint()?;
     let model = build(dir.path()).await?;
@@ -268,3 +266,14 @@ async fn reload_decodes_like_the_first_load() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+concurrent_cases!(
+    concurrent_cases,
+    [
+        image_decodes_are_pinned: 348,
+        mixed_text_and_image_batch_makes_progress: 348,
+        prefix_cache_does_not_serve_one_image_for_another: 360,
+        partial_prefix_hit_matches_a_fresh_two_image_decode: 348,
+        reload_decodes_like_the_first_load: 348,
+    ]
+);

@@ -7,6 +7,9 @@ use std::path::Path;
 use inference::{DecisionAnswer, DecisionRequest, EmbeddingModelBuilder, Model, ModelDType};
 use inference_tensor::{Device, Tensor};
 
+#[macro_use]
+#[path = "../support/concurrent_cases.rs"]
+mod concurrent_cases;
 #[path = "../support/rope_encoders_tiny.rs"]
 mod rope;
 
@@ -143,7 +146,6 @@ fn choice_probabilities(answer: &DecisionAnswer) -> Vec<f64> {
     }
 }
 
-#[tokio::test]
 async fn a_decision_checkpoint_answers_each_question_type() -> anyhow::Result<()> {
     let (dir, _encoder) = tiny_decision_checkpoint(serde_json::json!({}))?;
     let model = model(dir.path()).await?;
@@ -202,7 +204,6 @@ async fn a_decision_checkpoint_answers_each_question_type() -> anyhow::Result<()
 
 // the same weights with a `choice:3-5` temperature: each probability is the uncalibrated one raised to 1 / T,
 // renormalized
-#[tokio::test]
 async fn a_choice_takes_its_option_count_temperature() -> anyhow::Result<()> {
     let (dir, _encoder) = tiny_decision_checkpoint(serde_json::json!({}))?;
     let plain = choice_probabilities(
@@ -257,7 +258,6 @@ fn same_answer(a: &serde_json::Value, b: &serde_json::Value) -> bool {
 }
 
 // questions batched together answer as they do alone
-#[tokio::test]
 async fn each_question_answers_as_it_does_alone() -> anyhow::Result<()> {
     let (dir, _encoder) = tiny_decision_checkpoint(serde_json::json!({}))?;
     let model = model(dir.path()).await?;
@@ -280,7 +280,6 @@ async fn each_question_answers_as_it_does_alone() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
 async fn malformed_questions_and_non_decision_models_are_refused() -> anyhow::Result<()> {
     let (dir, encoder) = tiny_decision_checkpoint(serde_json::json!({}))?;
     let model = model(dir.path()).await?;
@@ -311,3 +310,13 @@ async fn malformed_questions_and_non_decision_models_are_refused() -> anyhow::Re
     );
     Ok(())
 }
+
+concurrent_cases!(
+    concurrent_cases,
+    [
+        a_decision_checkpoint_answers_each_question_type: 0,
+        a_choice_takes_its_option_count_temperature: 0,
+        each_question_answers_as_it_does_alone: 0,
+        malformed_questions_and_non_decision_models_are_refused: 0,
+    ]
+);

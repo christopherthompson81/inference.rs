@@ -3186,3 +3186,31 @@ Finding: duplication 26,008 -> 25,679 (-329); 18 files, +261 / -584.
 
 Implication: the remaining list is cuTile's fused MoE FP8 arms (111 windows, per-dtype by design until shown
 otherwise) and core / server-core IR.
+
+## Run 105 - 2026-10-30 10:12
+
+Question (user): would segregating core's churning parts from its stable parts shorten builds?
+
+Commands: `git log --since=2026-09-30 --no-merges --name-only -- crates/inference-core/src` (commits per module);
+`cargo llvm-lines -p inference-core --lib` grouped by the first `inference_core::` path in each function; a
+one-line edit inside `NormalLoader::load_from_paths`, then `cargo test --no-run --workspace --lib --bins --tests
+--timings` (the nextest build), reverted after.
+
+Finding:
+- Churn: 169 commits touched core in 30 days, concentrated in `pipeline/mod` 44, loaders 35, `loading` 31, `gguf`
+  31, `engine/add_request` 30, `normal` / `multimodal` 29, `embedding` 27, `sequence` 24, `request` 22.
+- IR by module (1,586,726): 40.4% is other crates' generics instantiated in core (std, tokio, serde) with no core
+  path; the heavy modules that barely churn, `distributed` 2.7%, `speculative` 2.5%, `prefix_store` 2.3%,
+  `adapter` 2.1%, `isq` + `isq_flow` 3.7%, `prefix_cacher` 1.4%, `amoe` 1.3%, add up to ~16%.
+- The edit's test build: 11.4 s wall. inference-core 3.0 s (its test build 3.7 s), done at 3.3 s; then a serial chain
+  inference-api (done 5.2 s) -> inference-server-core (7.9 s) -> inference-webui (8.6 s) -> server-core's tests and the
+  CLI binary (11.3 s); the SDK, ffi, jobs, coder and chat-protocols build beside it. Core is ~a quarter of the cycle.
+- The web UI waits on server-core for its auth middleware (`Auth`, `Guard`, `Owner`, `require`,
+  `require_admin`, `Admin`), metrics (`ObservabilityConfig` / `State`, `observe_http`), the route registry types,
+  `DEFAULT_MAX_BODY_LIMIT` and `configure_ui_upload_dir`.
+- Linking already uses rust-lld (the x86_64-linux-gnu default since Rust 1.90); no linker lever.
+
+Implication: splitting core's stable modules out would trim part of its 3 s at most, since incremental codegen already
+reuses unchanged units; the rest of a core edit is the downstream chain, which rebuilds whenever core's rlib changes.
+The chain's one removable link is web UI -> server-core (~1 s if those items moved below both). A core edit's
+build is 11 s, while the CUDA suite alone is 52 s, so the cycle's larger lever stays test time.

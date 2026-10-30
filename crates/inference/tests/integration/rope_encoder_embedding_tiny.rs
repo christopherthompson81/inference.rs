@@ -8,6 +8,9 @@ use inference::{
     UqffEmbeddingModelBuilder,
 };
 
+#[macro_use]
+#[path = "../support/concurrent_cases.rs"]
+mod concurrent_cases;
 #[path = "../support/rope_encoders_tiny.rs"]
 mod support;
 #[path = "../support/traces.rs"]
@@ -83,13 +86,11 @@ async fn assert_uqff_reload_matches(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
 async fn rope_encoders_are_detected_by_class_and_embed_to_unit_length() -> anyhow::Result<()> {
     assert_unit_embedding(tiny_nomic_bert_checkpoint(|_| {})?.path()).await?;
     assert_unit_embedding(tiny_modern_bert_checkpoint(|_| {})?.path()).await
 }
 
-#[tokio::test]
 async fn modern_bert_sliding_layers_see_only_their_window() -> anyhow::Result<()> {
     let narrow = tiny_modern_bert_checkpoint(|_| {})?;
     let narrow = cpu_embedding_builder(narrow.path()).build().await?;
@@ -118,12 +119,10 @@ async fn modern_bert_sliding_layers_see_only_their_window() -> anyhow::Result<()
     Ok(())
 }
 
-#[tokio::test]
 async fn an_isq_nomic_bert_and_a_reload_of_its_uqff_embed_alike() -> anyhow::Result<()> {
     assert_uqff_reload_matches(tiny_nomic_bert_checkpoint(|_| {})?.path()).await
 }
 
-#[tokio::test]
 async fn a_prefixed_isq_modern_bert_and_a_reload_of_its_uqff_embed_alike() -> anyhow::Result<()> {
     let checkpoint = tiny_modern_bert_checkpoint(|config| {
         config["architectures"] = serde_json::json!(["ModernBertForMaskedLM"]);
@@ -132,7 +131,6 @@ async fn a_prefixed_isq_modern_bert_and_a_reload_of_its_uqff_embed_alike() -> an
     assert_uqff_reload_matches(checkpoint.path()).await
 }
 
-#[tokio::test]
 async fn a_bidirectional_llama_lets_its_first_token_see_later_ones() -> anyhow::Result<()> {
     let checkpoint = tiny_llama_embedding_checkpoint(|_| {})?;
     assert_unit_embedding(checkpoint.path()).await?;
@@ -148,7 +146,6 @@ async fn a_bidirectional_llama_lets_its_first_token_see_later_ones() -> anyhow::
     Ok(())
 }
 
-#[tokio::test]
 async fn a_prefixed_isq_euro_bert_and_a_reload_of_its_uqff_embed_alike() -> anyhow::Result<()> {
     let checkpoint = tiny_llama_embedding_checkpoint(|config| {
         config["architectures"] = serde_json::json!(["EuroBertForMaskedLM"]);
@@ -157,7 +154,6 @@ async fn a_prefixed_isq_euro_bert_and_a_reload_of_its_uqff_embed_alike() -> anyh
     assert_uqff_reload_matches(checkpoint.path()).await
 }
 
-#[tokio::test]
 async fn a_neo_bert_without_modules_mean_pools_and_reloads_from_uqff() -> anyhow::Result<()> {
     let checkpoint = tiny_neo_bert_checkpoint()?;
     let model = cpu_embedding_builder(checkpoint.path()).build().await?;
@@ -168,7 +164,6 @@ async fn a_neo_bert_without_modules_mean_pools_and_reloads_from_uqff() -> anyhow
     assert_uqff_reload_matches(checkpoint.path()).await
 }
 
-#[tokio::test]
 async fn a_nomic_moe_routes_tokens_and_reloads_from_uqff() -> anyhow::Result<()> {
     let top_two = tiny_nomic_bert_checkpoint(nomic_moe_config)?;
     assert_unit_embedding(top_two.path()).await?;
@@ -259,7 +254,6 @@ fn random(shape: &[usize]) -> anyhow::Result<inference_tensor::Tensor> {
     )?)
 }
 
-#[tokio::test]
 async fn a_modern_bert_classifier_scores_its_mean_state_through_its_head() -> anyhow::Result<()> {
     use inference_tensor::{D, Device, Tensor};
     let checkpoint = tiny_modern_bert_checkpoint(|_| {})?;
@@ -308,7 +302,6 @@ async fn a_modern_bert_classifier_scores_its_mean_state_through_its_head() -> an
     Ok(())
 }
 
-#[tokio::test]
 async fn a_neo_bert_classifier_scores_its_first_token_through_dense_and_tanh() -> anyhow::Result<()>
 {
     use inference_tensor::{Device, Tensor};
@@ -351,3 +344,19 @@ async fn a_neo_bert_classifier_scores_its_first_token_through_dense_and_tanh() -
     );
     Ok(())
 }
+
+concurrent_cases!(
+    concurrent_cases,
+    [
+        rope_encoders_are_detected_by_class_and_embed_to_unit_length: 0,
+        modern_bert_sliding_layers_see_only_their_window: 0,
+        an_isq_nomic_bert_and_a_reload_of_its_uqff_embed_alike: 0,
+        a_prefixed_isq_modern_bert_and_a_reload_of_its_uqff_embed_alike: 0,
+        a_bidirectional_llama_lets_its_first_token_see_later_ones: 0,
+        a_prefixed_isq_euro_bert_and_a_reload_of_its_uqff_embed_alike: 0,
+        a_neo_bert_without_modules_mean_pools_and_reloads_from_uqff: 0,
+        a_nomic_moe_routes_tokens_and_reloads_from_uqff: 0,
+        a_modern_bert_classifier_scores_its_mean_state_through_its_head: 0,
+        a_neo_bert_classifier_scores_its_first_token_through_dense_and_tanh: 0,
+    ]
+);

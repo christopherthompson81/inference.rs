@@ -7,6 +7,9 @@ use inference::{
     TranscriptionSessionRequest, VerboseTranscriptionResponse,
 };
 
+#[macro_use]
+#[path = "../support/concurrent_cases.rs"]
+mod concurrent_cases;
 #[path = "../support/parakeet_tiny.rs"]
 mod support;
 use support::{
@@ -53,7 +56,6 @@ fn request(format: TranscriptionResponseFormat) -> TranscriptionRequest {
     request
 }
 
-#[tokio::test]
 async fn each_head_transcribes_into_each_format() -> anyhow::Result<()> {
     let wav = chirp_wav();
     for head in HEADS {
@@ -160,32 +162,26 @@ async fn repeats_exactly_on_the_default_device(head: &str) -> anyhow::Result<()>
     Ok(())
 }
 
-#[tokio::test]
 async fn tdt_repeats_exactly_on_the_default_device() -> anyhow::Result<()> {
     repeats_exactly_on_the_default_device(HEADS[0]).await
 }
 
-#[tokio::test]
 async fn rnnt_repeats_exactly_on_the_default_device() -> anyhow::Result<()> {
     repeats_exactly_on_the_default_device(HEADS[1]).await
 }
 
-#[tokio::test]
 async fn ctc_repeats_exactly_on_the_default_device() -> anyhow::Result<()> {
     repeats_exactly_on_the_default_device(HEADS[2]).await
 }
 
-#[tokio::test]
 async fn streaming_repeats_exactly_on_the_default_device() -> anyhow::Result<()> {
     repeats_exactly_on_the_default_device(HEADS[3]).await
 }
 
-#[tokio::test]
 async fn prompted_streaming_repeats_exactly_on_the_default_device() -> anyhow::Result<()> {
     repeats_exactly_on_the_default_device(HEADS[4]).await
 }
 
-#[tokio::test]
 async fn undecodable_audio_is_an_invalid_request() -> anyhow::Result<()> {
     let checkpoint = tiny_parakeet_checkpoint(HEADS[0])?;
     let model = TranscriptionModelBuilder::new(checkpoint.path().to_string_lossy())
@@ -205,7 +201,6 @@ async fn undecodable_audio_is_an_invalid_request() -> anyhow::Result<()> {
 }
 
 // requests that land in one engine step answer each on its own: a clip the model refuses fails only itself
-#[tokio::test]
 async fn too_short_audio_fails_only_its_own_request() -> anyhow::Result<()> {
     let checkpoint = tiny_parakeet_checkpoint(HEADS[0])?;
     let model = TranscriptionModelBuilder::new(checkpoint.path().to_string_lossy())
@@ -229,7 +224,6 @@ async fn too_short_audio_fails_only_its_own_request() -> anyhow::Result<()> {
 
 // Nemotron-3.5 takes the request's language as its prompt: it is reported back, it conditions the encoder, and a
 // language outside the checkpoint's dictionary is refused for its own request alone
-#[tokio::test]
 async fn a_prompted_model_takes_the_requested_language() -> anyhow::Result<()> {
     let checkpoint = tiny_parakeet_checkpoint(PROMPTED)?;
     let model = TranscriptionModelBuilder::new(checkpoint.path().to_string_lossy())
@@ -264,7 +258,6 @@ async fn a_prompted_model_takes_the_requested_language() -> anyhow::Result<()> {
 }
 
 // a `.nemo` of the same weights transcribes as the transformers layout does, for every head it carries
-#[tokio::test]
 async fn a_nemo_checkpoint_transcribes_as_its_transformers_layout() -> anyhow::Result<()> {
     let wav = chirp_wav();
     for head in HEADS.iter().filter(|h| **h != PROMPTED) {
@@ -287,7 +280,6 @@ async fn a_nemo_checkpoint_transcribes_as_its_transformers_layout() -> anyhow::R
 }
 
 // NVIDIA's `asr` GGUF of the same weights (here in F32) transcribes as the transformers layout does
-#[tokio::test]
 async fn an_asr_gguf_transcribes_as_its_transformers_layout() -> anyhow::Result<()> {
     let wav = chirp_wav();
     for head in ["parakeet_tdt", "parakeet_rnnt", "nemotron_asr_streaming"] {
@@ -310,7 +302,6 @@ async fn an_asr_gguf_transcribes_as_its_transformers_layout() -> anyhow::Result<
 }
 
 // a `.nemo` written as an `asr` GGUF with full-precision matrices loads and transcribes as the `.nemo` does
-#[tokio::test]
 async fn a_written_asr_gguf_transcribes_as_its_nemo() -> anyhow::Result<()> {
     use inference_api::{asr_gguf, engine::TokenSource};
     use inference_models_speech::parakeet::{QuantPolicy, write_asr_gguf};
@@ -360,7 +351,6 @@ async fn a_written_asr_gguf_transcribes_as_its_nemo() -> anyhow::Result<()> {
 }
 
 // a beam decodes each transducer head, repeating exactly; a CTC head and a beam out of range are refused
-#[tokio::test]
 async fn beam_search_decodes_transducers_and_refuses_the_rest() -> anyhow::Result<()> {
     let wav = chirp_wav();
     let beamed = |beam: usize| {
@@ -515,7 +505,6 @@ fn pcm16(pcm: &[f32]) -> Vec<u8> {
 
 // through the engine: a session at the model's rate transcribes as the upload does, one at another rate resamples,
 // and sessions are refused or released as the model and the client decide
-#[tokio::test]
 async fn a_transcription_session_streams_through_the_engine() -> anyhow::Result<()> {
     let checkpoint = tiny_parakeet_checkpoint("nemotron_asr_streaming")?;
     let model = TranscriptionModelBuilder::new(checkpoint.path().to_string_lossy())
@@ -627,3 +616,23 @@ async fn a_transcription_session_streams_through_the_engine() -> anyhow::Result<
     assert!(err.message.contains("streaming"), "{err}");
     Ok(())
 }
+
+concurrent_cases!(
+    concurrent_cases,
+    [
+        each_head_transcribes_into_each_format: 0,
+        tdt_repeats_exactly_on_the_default_device: 348,
+        rnnt_repeats_exactly_on_the_default_device: 348,
+        ctc_repeats_exactly_on_the_default_device: 348,
+        streaming_repeats_exactly_on_the_default_device: 348,
+        prompted_streaming_repeats_exactly_on_the_default_device: 348,
+        undecodable_audio_is_an_invalid_request: 0,
+        too_short_audio_fails_only_its_own_request: 0,
+        a_prompted_model_takes_the_requested_language: 0,
+        a_nemo_checkpoint_transcribes_as_its_transformers_layout: 0,
+        an_asr_gguf_transcribes_as_its_transformers_layout: 0,
+        a_written_asr_gguf_transcribes_as_its_nemo: 0,
+        beam_search_decodes_transducers_and_refuses_the_rest: 0,
+        a_transcription_session_streams_through_the_engine: 0,
+    ]
+);

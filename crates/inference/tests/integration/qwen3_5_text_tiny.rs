@@ -7,6 +7,9 @@ use inference::{
 use inference_models_qwen::qwen3_5::{Qwen3_5TextModel, TextConfig};
 use inference_nn::paged_attention::AttentionImplementation;
 
+#[macro_use]
+#[path = "../support/concurrent_cases.rs"]
+mod concurrent_cases;
 #[path = "../support/decode_graphs.rs"]
 mod decode_graphs;
 #[path = "../support/recording.rs"]
@@ -101,7 +104,6 @@ fn tiny_qwen3_5_text_with(
     )
 }
 
-#[tokio::test]
 async fn a_uqff_keeps_the_checkpoint_context_when_written_under_max_model_len() -> anyhow::Result<()>
 {
     let checkpoint = tiny_qwen3_5_text(HEAD_DIM, false)?;
@@ -180,12 +182,10 @@ async fn assert_bidirectional_prompt(cuda: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
 async fn a_bidirectional_prompt_reaches_back_from_later_tokens() -> anyhow::Result<()> {
     assert_bidirectional_prompt(false).await
 }
 
-#[tokio::test]
 async fn a_paged_gpu_bidirectional_prompt_reaches_back_from_later_tokens() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
@@ -196,7 +196,6 @@ async fn a_paged_gpu_bidirectional_prompt_reaches_back_from_later_tokens() -> an
 // wider than the vocabulary, so every prompt token indexes a row
 const DECISION_HEAD_SIZE: usize = 300;
 
-#[tokio::test]
 async fn a_decision_head_replaces_the_vocabulary_logits() -> anyhow::Result<()> {
     let checkpoint = tiny_qwen3_5_text_with(
         HEAD_DIM,
@@ -222,7 +221,6 @@ async fn a_decision_head_replaces_the_vocabulary_logits() -> anyhow::Result<()> 
 }
 
 // a joint decision head (clef) loads after the trunk, whose output is then the normed hidden state
-#[tokio::test]
 async fn a_joint_head_returns_the_hidden_states() -> anyhow::Result<()> {
     let checkpoint = tiny_qwen3_5_text_with(
         HEAD_DIM,
@@ -445,7 +443,6 @@ async fn hybrid_dflash_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
 }
 
 // An autotuned DFlash drafter drafts shorter blocks than its largest, and greedy output holds.
-#[tokio::test]
 async fn hybrid_autotuned_dflash_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
@@ -510,7 +507,6 @@ async fn hybrid_dspark_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
 }
 
 // A full-attention DSpark drafter, the published shape, drafts on the eager path and greedy output holds.
-#[tokio::test]
 async fn hybrid_dspark_with_full_attention_keeps_greedy_output() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
@@ -536,7 +532,6 @@ async fn hybrid_dspark_with_full_attention_keeps_greedy_output() -> anyhow::Resu
 }
 
 // Beside a quantized target cache, a full-attention drafter's layers stay BF16, and greedy output matches the target's
-#[tokio::test]
 async fn a_full_attention_drafter_runs_beside_a_quantized_cache() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
@@ -614,7 +609,6 @@ const PREFIX_PROMPT: &str = "a hybrid model keeps a recurrent state beside its a
 
 // The repeat of a prompt restores the paged recurrent snapshot with the cached blocks and decodes the same.
 // A non-paged hybrid prefix only matches where its finished sequence ended, which a repeated prompt never reaches.
-#[tokio::test]
 async fn a_repeated_prompt_restores_the_recurrent_prefix() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
@@ -706,7 +700,6 @@ async fn agent_turn(
 
 // An agent's next turn (prompt, reply, follow-up) caches the reply's blocks past the previous prompt's snapshot; with a
 // DFlash drafter that snapshot still restores, drafter checkpoint included, and decodes as a cold run does.
-#[tokio::test]
 async fn a_dflash_agent_turn_resumes_at_the_previous_prompt_snapshot() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
@@ -807,7 +800,6 @@ async fn check_restart_restores(drafter: Option<&std::path::Path>) -> anyhow::Re
     Ok(())
 }
 
-#[tokio::test]
 async fn a_stored_prefix_restores_after_a_restart() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
@@ -815,7 +807,6 @@ async fn a_stored_prefix_restores_after_a_restart() -> anyhow::Result<()> {
     check_restart_restores(None).await
 }
 
-#[tokio::test]
 async fn a_stored_prefix_restores_with_its_dflash_checkpoint_after_a_restart() -> anyhow::Result<()>
 {
     if !cfg!(feature = "cuda") {
@@ -826,7 +817,6 @@ async fn a_stored_prefix_restores_with_its_dflash_checkpoint_after_a_restart() -
 }
 
 // A full-attention drafter's context sits in the target's blocks, so the disk store keeps it and a restart restores it
-#[tokio::test]
 async fn a_stored_prefix_restores_with_a_full_attention_drafter_after_a_restart()
 -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
@@ -863,7 +853,6 @@ async fn chat_cached_tokens(model: &Model, history: &str, last: &str) -> anyhow:
 
 // A request that replaces only the final message resumes where that message starts, not at its first token: the
 // previous prompt's recurrent state is also kept there, short of the last full block the final message runs into
-#[tokio::test]
 async fn a_new_final_message_resumes_at_the_previous_one() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
@@ -938,7 +927,6 @@ async fn check_dropped_prefix_restores(in_memory: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
 async fn a_prefix_the_drafter_dropped_restores_from_the_disk_store() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
@@ -946,7 +934,6 @@ async fn a_prefix_the_drafter_dropped_restores_from_the_disk_store() -> anyhow::
     check_dropped_prefix_restores(false).await
 }
 
-#[tokio::test]
 async fn a_prefix_the_drafter_dropped_restores_from_the_memory_store() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
@@ -1004,7 +991,6 @@ async fn check_reply_prefill(drafter: Option<&std::path::Path>) -> anyhow::Resul
     Ok(())
 }
 
-#[tokio::test]
 async fn a_finished_reply_is_prefilled_for_the_next_turn() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
@@ -1012,7 +998,6 @@ async fn a_finished_reply_is_prefilled_for_the_next_turn() -> anyhow::Result<()>
     check_reply_prefill(None).await
 }
 
-#[tokio::test]
 async fn a_finished_reply_is_prefilled_with_a_dflash_drafter() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
@@ -1044,7 +1029,6 @@ async fn progressive_model(
 
 // A prompt that diverges from a cached one well before its end resumes at the last progressive checkpoint before the
 // divergence, and decodes as a cold run does; with none it starts over
-#[tokio::test]
 async fn a_prompt_diverging_early_resumes_at_a_progressive_checkpoint() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
@@ -1173,7 +1157,6 @@ const UQFF_LOGPROB_TOLERANCE: f32 = 1e-5;
 
 // The UQFF an ISQ load writes holds the layers it runs: GDN's in_proj_b/in_proj_a included, which a merge of their
 // unquantized weights once kept running at full precision beside the quantized copies the file got.
-#[tokio::test]
 async fn an_isq_load_and_a_reload_of_its_uqff_decode_alike() -> anyhow::Result<()> {
     let checkpoint = tiny_qwen3_5_text(HEAD_DIM, false)?;
     let uqff = tempfile::tempdir()?;
@@ -1207,3 +1190,29 @@ async fn an_isq_load_and_a_reload_of_its_uqff_decode_alike() -> anyhow::Result<(
     );
     Ok(())
 }
+
+concurrent_cases!(
+    concurrent_cases,
+    [
+        a_uqff_keeps_the_checkpoint_context_when_written_under_max_model_len: 0,
+        a_bidirectional_prompt_reaches_back_from_later_tokens: 0,
+        a_paged_gpu_bidirectional_prompt_reaches_back_from_later_tokens: 348,
+        a_decision_head_replaces_the_vocabulary_logits: 0,
+        a_joint_head_returns_the_hidden_states: 0,
+        hybrid_autotuned_dflash_drafts_and_keeps_greedy_output: 620,
+        hybrid_dspark_with_full_attention_keeps_greedy_output: 486,
+        a_full_attention_drafter_runs_beside_a_quantized_cache: 486,
+        a_repeated_prompt_restores_the_recurrent_prefix: 354,
+        a_dflash_agent_turn_resumes_at_the_previous_prompt_snapshot: 454,
+        a_stored_prefix_restores_after_a_restart: 388,
+        a_stored_prefix_restores_with_its_dflash_checkpoint_after_a_restart: 422,
+        a_stored_prefix_restores_with_a_full_attention_drafter_after_a_restart: 422,
+        a_new_final_message_resumes_at_the_previous_one: 354,
+        a_prefix_the_drafter_dropped_restores_from_the_disk_store: 454,
+        a_prefix_the_drafter_dropped_restores_from_the_memory_store: 454,
+        a_finished_reply_is_prefilled_for_the_next_turn: 388,
+        a_finished_reply_is_prefilled_with_a_dflash_drafter: 454,
+        a_prompt_diverging_early_resumes_at_a_progressive_checkpoint: 422,
+        an_isq_load_and_a_reload_of_its_uqff_decode_alike: 0,
+    ]
+);

@@ -6,6 +6,9 @@ use inference::{
     ImageGenerationResponseFormat, Model, ModelBuilder, ModelDType,
 };
 
+#[macro_use]
+#[path = "../support/concurrent_cases.rs"]
+mod concurrent_cases;
 #[path = "../support/hidream_o1_tiny.rs"]
 mod support;
 use support::{
@@ -79,7 +82,6 @@ fn error_text<T, E: std::fmt::Display>(result: Result<T, E>) -> String {
     }
 }
 
-#[tokio::test]
 async fn hidream_o1_is_detected_and_seeds_repeat_at_the_snapped_size() -> anyhow::Result<()> {
     let (_dir, path) = tiny_hidream_o1("tiny-hidream-o1")?;
     let mut builder = ModelBuilder::new(path.to_string_lossy()).with_dtype(ModelDType::F32);
@@ -124,7 +126,6 @@ async fn build(model_id: &std::path::Path) -> anyhow::Result<Model> {
 
 // a ComfyUI-GGUF file loads by itself, detected from its metadata; at F32 it samples the checkpoint's image exactly,
 // and the writer's own Q8_0 file stays close
-#[tokio::test]
 async fn a_hidream_o1_gguf_samples_as_its_checkpoint() -> anyhow::Result<()> {
     use inference_models_diffusion::hidream::gguf_writer::{Policy, write_gguf};
     use inference_tensor::quantized::GgmlDType;
@@ -170,7 +171,6 @@ async fn a_hidream_o1_gguf_samples_as_its_checkpoint() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
 async fn hidream_o1_dev_samples_its_fixed_schedule_only() -> anyhow::Result<()> {
     let (_dir, path) = tiny_hidream_o1("tiny-hidream-o1-dev")?;
     let mut builder =
@@ -194,7 +194,6 @@ async fn hidream_o1_dev_samples_its_fixed_schedule_only() -> anyhow::Result<()> 
 }
 
 // one image is edited at its own aspect; the reference conditions the result, and a seed still repeats it
-#[tokio::test]
 async fn an_edit_keeps_the_reference_size_and_follows_the_reference() -> anyhow::Result<()> {
     let (_dir, path) = tiny_hidream_o1("tiny-hidream-o1")?;
     let model = build(&path).await?;
@@ -243,7 +242,6 @@ async fn an_edit_keeps_the_reference_size_and_follows_the_reference() -> anyhow:
 }
 
 // weights written for text-to-image alone still generate, and refuse reference images by saying what they lack
-#[tokio::test]
 async fn a_gguf_without_the_vision_tower_refuses_references() -> anyhow::Result<()> {
     let (_dir, path) = tiny_hidream_o1("tiny-hidream-o1")?;
     let out = tempfile::tempdir()?;
@@ -262,3 +260,14 @@ async fn a_gguf_without_the_vision_tower_refuses_references() -> anyhow::Result<
     assert!(text.contains("vision tower"), "{text}");
     Ok(())
 }
+
+concurrent_cases!(
+    concurrent_cases,
+    [
+        hidream_o1_is_detected_and_seeds_repeat_at_the_snapped_size: 348,
+        a_hidream_o1_gguf_samples_as_its_checkpoint: 348,
+        hidream_o1_dev_samples_its_fixed_schedule_only: 348,
+        an_edit_keeps_the_reference_size_and_follows_the_reference: 348,
+        a_gguf_without_the_vision_tower_refuses_references: 348,
+    ]
+);
