@@ -6,11 +6,8 @@ use std::{
 };
 
 use anyhow::Result;
-use image::{DynamicImage, GenericImageView, imageops::FilterType};
+use image::{DynamicImage, GenericImageView};
 use inference_tensor::{Context, Device, IndexOp, Tensor};
-use inference_vision::{
-    ApplyTensorTransforms, ApplyTransforms, Normalize, TensorTransforms, ToTensor, Transforms,
-};
 use tokenizers::Tokenizer;
 
 use crate::attention::AttentionMask;
@@ -18,7 +15,7 @@ use crate::device_map::DeviceMapper;
 use crate::media_inputs::{
     image_processor::{ImagePreProcessor, PreprocessedImages},
     media::build_mm_features_from_ranges,
-    preprocessor_config::{PreProcessorConfig, ToFilter},
+    preprocessor_config::PreProcessorConfig,
     processor::{
         InputProcessorOutput, InputsHost, InputsProcessorValidationError, MediaSequence,
         MultimodalInputsProcessor,
@@ -29,7 +26,10 @@ use crate::paged_attention::{
     PagedAttentionMeta,
     block_hash::{MultiModalFeature, MultimodalKind},
 };
-use crate::qwen_vl_inputs::{QwenMropeConfig, QwenVlInputs, QwenVlSpec, QwenVlStep};
+use crate::qwen_vl_inputs::{
+    PatchLayout, QwenMropeConfig, QwenVlSpec, frames_to_patches, preprocessed_media,
+    qwen_vl_inputs_processor, smart_resize,
+};
 use crate::vision::multimodal_layout::MropePositionSource;
 
 use super::Qwen2VLVisionSpecificArgs;
@@ -555,202 +555,42 @@ impl QwenVlSpec for Qwen2VLImageProcessor {
     }
 }
 
-impl MultimodalInputsProcessor for Qwen2VLImageProcessor {
-    fn prepare_for_paged_prompt_planning(
-        &self,
-        tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut dyn MediaSequence],
-        device: &Device,
-        other_config: Option<Arc<dyn Any>>,
-        paged_attn_metadata: Option<&mut PagedAttentionMeta>,
-    ) -> Result<()> {
-        QwenVlInputs {
-            spec: self,
-            tokenizer,
-            device,
-            other_config,
-        }
-        .prepare(input_seqs, paged_attn_metadata)
-    }
-
-    fn process_inputs(
-        &self,
-        host: &dyn InputsHost,
-        tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut dyn MediaSequence],
-        is_prompt: bool,
-        device: &Device,
-        no_kv_cache: bool,
-        last_n_context_len: Option<(usize, usize)>,
-        return_raw_logits: bool,
-        sliding_window: Option<usize>,
-        other_config: Option<Arc<dyn Any>>,
-        paged_attn_metadata: Option<PagedAttentionMeta>,
-        mapper: Option<&dyn DeviceMapper>,
-    ) -> Result<InputProcessorOutput> {
-        let step = QwenVlStep {
-            host,
-            is_prompt,
-            no_kv_cache,
-            last_n_context_len,
-            return_raw_logits,
-            sliding_window,
-            paged_attn_metadata,
-            mapper,
-        };
-        QwenVlInputs {
-            spec: self,
-            tokenizer,
-            device,
-            other_config,
-        }
-        .process(input_seqs, step)
-    }
-}
+qwen_vl_inputs_processor!(Qwen2VLImageProcessor);
 
 impl Qwen2VLImageProcessor {
-    fn smart_resize(
-        &self,
-        height: usize,
-        width: usize,
-        factor: usize,
-        min_pixels: usize,
-        max_pixels: usize,
-    ) -> inference_tensor::Result<(usize, usize)> {
-        if height < factor || width < factor {
-            inference_tensor::bail!(
-                "height:{} or width:{} must be larger than factor:{}",
-                height,
-                width,
-                factor
-            );
-        } else if (height.max(width) as f64 / height.min(width) as f64) > 200.0 {
-            inference_tensor::bail!(
-                "absolute aspect ratio must be smaller than 200, got {:.2}",
-                height.max(width) as f64 / height.min(width) as f64
-            );
-        }
-
-        let mut h_bar = (height as f64 / factor as f64).round() as usize * factor;
-        let mut w_bar = (width as f64 / factor as f64).round() as usize * factor;
-
-        if h_bar * w_bar > max_pixels {
-            let beta = ((height * width) as f64 / max_pixels as f64).sqrt();
-            h_bar = ((height as f64 / beta / factor as f64).floor() as usize) * factor;
-            w_bar = ((width as f64 / beta / factor as f64).floor() as usize) * factor;
-        } else if h_bar * w_bar < min_pixels {
-            let beta = (min_pixels as f64 / (height * width) as f64).sqrt();
-            h_bar = ((height as f64 * beta / factor as f64).ceil() as usize) * factor;
-            w_bar = ((width as f64 * beta / factor as f64).ceil() as usize) * factor;
-        }
-
-        Ok((h_bar, w_bar))
-    }
-
     // patches and t,h,w
     fn preprocess_inner(
         &self,
         images: Vec<DynamicImage>,
         config: &PreProcessorConfig,
         device: &Device,
-        (mut height, mut width): (u32, u32),
+        size: (u32, u32),
     ) -> inference_tensor::Result<(Tensor, (u32, u32, u32))> {
-        let mut processed_images = Vec::new();
-
-        for mut image in images {
-            image = inference_vision::resize_exact(
-                &image,
-                width,
+        let patch_size = config.patch_size.context("Require `patch_size`.")?;
+        let merge_size = config.merge_size.context("Require `merge_size`")?;
+        let (min_pixels, max_pixels) = (
+            config.min_pixels.context("Require `min_pixels`")?,
+            config.max_pixels.context("Require `max_pixels`")?,
+        );
+        let layout = PatchLayout {
+            patch_size,
+            merge_size,
+            temporal_patch_size: config
+                .temporal_patch_size
+                .context("Require `temporal_patch_size")?,
+            mean: Self::DEFAULT_MEAN,
+            std: Self::DEFAULT_STD,
+        };
+        let resize = |height, width| {
+            smart_resize(
                 height,
-                config
-                    .resampling
-                    .map(|resample| Some(resample).to_filter())
-                    .unwrap_or(Ok(FilterType::CatmullRom))?,
-            );
-            image = DynamicImage::ImageRgb8(image.to_rgb8());
-            if config.do_resize.is_none() || config.do_resize.is_some_and(|x| x) {
-                let (resized_height, resized_width) = self.smart_resize(
-                    height as usize,
-                    width as usize,
-                    config.patch_size.context("Require `patch_size`.")?
-                        * config.merge_size.context("Require `merge_size`")?,
-                    config.min_pixels.context("Require `min_pixels`")?,
-                    config.max_pixels.context("Require `max_pixels`")?,
-                )?;
-                height = resized_height as u32;
-                width = resized_width as u32;
-                image = inference_vision::resize_exact(
-                    &image,
-                    resized_width as u32,
-                    resized_height as u32,
-                    config
-                        .resampling
-                        .map(|resample| Some(resample).to_filter())
-                        .unwrap_or(Ok(FilterType::CatmullRom))?,
-                );
-            }
-
-            let to_tensor_rescale = Transforms {
-                input: &ToTensor,
-                inner_transforms: &[],
-            };
-            let image = image.apply(to_tensor_rescale, device)?;
-
-            let transforms = TensorTransforms {
-                inner_transforms: &[&Normalize {
-                    mean: config.image_mean.unwrap_or(Self::DEFAULT_MEAN).to_vec(),
-                    std: config.image_std.unwrap_or(Self::DEFAULT_STD).to_vec(),
-                }],
-            };
-            let image = <Tensor as ApplyTensorTransforms>::apply(&image, transforms, device)?;
-
-            processed_images.push(image);
-        }
-
-        let temporal_patch_size = config
-            .temporal_patch_size
-            .context("Require `temporal_patch_size")?;
-        let remainder = processed_images.len() % temporal_patch_size;
-        if remainder != 0 {
-            let pad = temporal_patch_size - remainder;
-            let last = processed_images.last().unwrap().clone();
-            for _ in 0..pad {
-                processed_images.push(last.clone());
-            }
-        }
-
-        let mut patches = Tensor::stack(&processed_images, 0)?;
-        let patch_size = config.patch_size.context("Require `patch_size")?;
-        let merge_size = config.merge_size.context("Require `merge_size")?;
-        // Image
-        if patches.dim(0)? == 1 {
-            patches = patches.repeat((temporal_patch_size, 1, 1, 1))?;
-        }
-        let channel = patches.dim(1)?;
-        let grid_t = patches.dim(0)? / temporal_patch_size;
-        let grid_h = height as usize / patch_size;
-        let grid_w = width as usize / patch_size;
-        patches = patches.reshape(&[
-            grid_t,
-            temporal_patch_size,
-            channel,
-            grid_h / merge_size,
-            merge_size,
-            patch_size,
-            grid_w / merge_size,
-            merge_size,
-            patch_size,
-        ])?;
-        patches = patches.permute([0, 3, 6, 4, 7, 2, 1, 5, 8])?;
-        let flattened_patches = patches.reshape((
-            grid_t * grid_h * grid_w,
-            channel * temporal_patch_size * patch_size * patch_size,
-        ))?;
-
-        Ok((
-            flattened_patches,
-            (grid_t as u32, grid_h as u32, grid_w as u32),
-        ))
+                width,
+                patch_size * merge_size,
+                min_pixels,
+                max_pixels,
+            )
+        };
+        frames_to_patches(images, config, &layout, device, size, &resize)
     }
 }
 
@@ -766,69 +606,25 @@ impl ImagePreProcessor for Qwen2VLImageProcessor {
         device: &Device,
         (_, _): (usize, usize),
     ) -> inference_tensor::Result<PreprocessedImages> {
-        let mut pixel_values = Vec::new();
-        let mut vision_grid_thw = Vec::new();
-
         if !images.is_empty() {
             if let Some(max_edge) = self.max_edge {
                 images = inference_vision::pad_to_max_edge(&images, max_edge);
             }
-
+            let mut patches = Vec::with_capacity(images.len());
             for image in images {
                 let (w, h) = image.dimensions();
-                let (patches, (t, gh, gw)) =
-                    self.preprocess_inner(vec![image], config, device, (h, w))?;
-                pixel_values.push(patches);
-                vision_grid_thw.push(Tensor::new(&[t, gh, gw], &Device::Cpu)?);
+                patches.push(self.preprocess_inner(vec![image], config, device, (h, w))?);
             }
-            let pixel_values = Tensor::cat(&pixel_values, 0)?;
-            let vision_grid_thw = Tensor::stack(&vision_grid_thw, 0)?;
-            return Ok(PreprocessedImages {
-                pixel_values,
-                pixel_attention_mask: None,
-                image_sizes: None,
-                num_img_tokens: None,
-                aspect_ratio_ids: None,
-                aspect_ratio_mask: None,
-                num_tiles: None,
-                image_grid_thw: Some(vision_grid_thw),
-                video_grid_thw: None,
-                rows: None,
-                cols: None,
-                pixel_values_list: None,
-                tgt_sizes: None,
-                image_sizes_all: None,
-                num_crops: None,
-            });
+            return preprocessed_media(patches, false);
         }
 
         if !videos.is_empty() {
+            let mut patches = Vec::with_capacity(videos.len());
             for images in videos {
                 let (w, h) = images[0].dimensions();
-                let (patches, (t, gh, gw)) =
-                    self.preprocess_inner(images, config, device, (h, w))?;
-                pixel_values.push(patches);
-                vision_grid_thw.push(Tensor::new(&[t, gh, gw], &Device::Cpu)?);
+                patches.push(self.preprocess_inner(images, config, device, (h, w))?);
             }
-            let pixel_values = Tensor::cat(&pixel_values, 0)?;
-            let vision_grid_thw = Tensor::stack(&vision_grid_thw, 0)?;
-            return Ok(PreprocessedImages {
-                pixel_values,
-                pixel_attention_mask: None,
-                image_sizes: None,
-                num_img_tokens: None,
-                aspect_ratio_ids: None,
-                aspect_ratio_mask: None,
-                num_tiles: None,
-                image_grid_thw: None,
-                video_grid_thw: Some(vision_grid_thw),
-                rows: None,
-                cols: None,
-                pixel_values_list: None,
-                tgt_sizes: None,
-                image_sizes_all: None,
-                num_crops: None,
-            });
+            return preprocessed_media(patches, true);
         }
         unreachable!()
     }

@@ -1,10 +1,14 @@
 //! Input processing shared by Qwen2-VL/Qwen2.5-VL and Qwen3-VL/Qwen3.5; per-generation behavior is [`QwenVlSpec`].
+#![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use std::{any::Any, ops::Range, sync::Arc};
 
 use anyhow::Result;
-use image::DynamicImage;
+use image::{DynamicImage, imageops::FilterType};
 use inference_tensor::{DType, Device, IndexOp, Tensor};
+use inference_vision::{
+    ApplyTensorTransforms, ApplyTransforms, Normalize, TensorTransforms, ToTensor, Transforms,
+};
 use tokenizers::Tokenizer;
 
 use crate::device_map::DeviceMapper;
@@ -12,7 +16,7 @@ use crate::gdn::RecurrentBatchKind;
 use crate::media_inputs::{
     image_processor::PreprocessedImages,
     media::find_placeholder_delimited_ranges,
-    preprocessor_config::PreProcessorConfig,
+    preprocessor_config::{PreProcessorConfig, ToFilter},
     processor::{
         InnerInputProcessorOutput, InputMetadata, InputProcessorOutput, InputsHost,
         InputsProcessorValidationError, MediaSequence, ModelInputs, TextInputs,
@@ -1061,6 +1065,242 @@ impl QwenVlInputs<'_> {
         }
         Ok(PackedMultimodalLayout::new(&requests)?)
     }
+}
+
+/// The `MultimodalInputsProcessor` of a [`QwenVlSpec`]: planning and input processing through [`QwenVlInputs`].
+macro_rules! qwen_vl_inputs_processor {
+    ($processor:ty) => {
+        impl MultimodalInputsProcessor for $processor {
+            fn prepare_for_paged_prompt_planning(
+                &self,
+                tokenizer: Option<Arc<Tokenizer>>,
+                input_seqs: &mut [&mut dyn MediaSequence],
+                device: &Device,
+                other_config: Option<Arc<dyn Any>>,
+                paged_attn_metadata: Option<&mut PagedAttentionMeta>,
+            ) -> Result<()> {
+                $crate::qwen_vl_inputs::QwenVlInputs {
+                    spec: self,
+                    tokenizer,
+                    device,
+                    other_config,
+                }
+                .prepare(input_seqs, paged_attn_metadata)
+            }
+
+            fn process_inputs(
+                &self,
+                host: &dyn InputsHost,
+                tokenizer: Option<Arc<Tokenizer>>,
+                input_seqs: &mut [&mut dyn MediaSequence],
+                is_prompt: bool,
+                device: &Device,
+                no_kv_cache: bool,
+                last_n_context_len: Option<(usize, usize)>,
+                return_raw_logits: bool,
+                sliding_window: Option<usize>,
+                other_config: Option<Arc<dyn Any>>,
+                paged_attn_metadata: Option<PagedAttentionMeta>,
+                mapper: Option<&dyn DeviceMapper>,
+            ) -> Result<InputProcessorOutput> {
+                let step = $crate::qwen_vl_inputs::QwenVlStep {
+                    host,
+                    is_prompt,
+                    no_kv_cache,
+                    last_n_context_len,
+                    return_raw_logits,
+                    sliding_window,
+                    paged_attn_metadata,
+                    mapper,
+                };
+                $crate::qwen_vl_inputs::QwenVlInputs {
+                    spec: self,
+                    tokenizer,
+                    device,
+                    other_config,
+                }
+                .process(input_seqs, step)
+            }
+        }
+    };
+}
+pub(crate) use qwen_vl_inputs_processor;
+
+/// HF's Qwen-VL `smart_resize`: the closest multiple of `factor` on each side within the pixel budget.
+pub(crate) fn smart_resize(
+    height: usize,
+    width: usize,
+    factor: usize,
+    min_pixels: usize,
+    max_pixels: usize,
+) -> inference_tensor::Result<(usize, usize)> {
+    if height < factor || width < factor {
+        inference_tensor::bail!(
+            "height:{} or width:{} must be larger than factor:{}",
+            height,
+            width,
+            factor
+        );
+    } else if (height.max(width) as f64 / height.min(width) as f64) > 200.0 {
+        inference_tensor::bail!(
+            "absolute aspect ratio must be smaller than 200, got {:.2}",
+            height.max(width) as f64 / height.min(width) as f64
+        );
+    }
+
+    let mut h_bar = (height as f64 / factor as f64).round() as usize * factor;
+    let mut w_bar = (width as f64 / factor as f64).round() as usize * factor;
+
+    if h_bar * w_bar > max_pixels {
+        let beta = ((height * width) as f64 / max_pixels as f64).sqrt();
+        h_bar = ((height as f64 / beta / factor as f64).floor() as usize) * factor;
+        w_bar = ((width as f64 / beta / factor as f64).floor() as usize) * factor;
+    } else if h_bar * w_bar < min_pixels {
+        let beta = (min_pixels as f64 / (height * width) as f64).sqrt();
+        h_bar = ((height as f64 * beta / factor as f64).ceil() as usize) * factor;
+        w_bar = ((width as f64 * beta / factor as f64).ceil() as usize) * factor;
+    }
+
+    Ok((h_bar, w_bar))
+}
+
+/// The patch geometry and normalization a Qwen-VL processor cuts frames with.
+pub(crate) struct PatchLayout {
+    pub patch_size: usize,
+    pub merge_size: usize,
+    pub temporal_patch_size: usize,
+    pub mean: [f64; 3],
+    pub std: [f64; 3],
+}
+
+/// One image's or video's frames as flattened patches with their `(t, h, w)` grid. `resize` gives the size each frame
+/// is resized to from the current one when the config resizes.
+pub(crate) fn frames_to_patches(
+    images: Vec<DynamicImage>,
+    config: &PreProcessorConfig,
+    layout: &PatchLayout,
+    device: &Device,
+    (mut height, mut width): (u32, u32),
+    resize: &dyn Fn(usize, usize) -> inference_tensor::Result<(usize, usize)>,
+) -> inference_tensor::Result<(Tensor, (u32, u32, u32))> {
+    let PatchLayout {
+        patch_size,
+        merge_size,
+        temporal_patch_size,
+        ..
+    } = *layout;
+    if temporal_patch_size == 0 || patch_size == 0 || merge_size == 0 {
+        inference_tensor::bail!("patch, merge and temporal patch sizes must be nonzero");
+    }
+    let filter = || {
+        config
+            .resampling
+            .map(|resample| Some(resample).to_filter())
+            .unwrap_or(Ok(FilterType::CatmullRom))
+    };
+    let mut processed_images = Vec::new();
+    for mut image in images {
+        image = inference_vision::resize_exact(&image, width, height, filter()?);
+        image = DynamicImage::ImageRgb8(image.to_rgb8());
+        if config.do_resize.is_none() || config.do_resize.is_some_and(|x| x) {
+            let (resized_height, resized_width) = resize(height as usize, width as usize)?;
+            height = resized_height as u32;
+            width = resized_width as u32;
+            image = inference_vision::resize_exact(
+                &image,
+                resized_width as u32,
+                resized_height as u32,
+                filter()?,
+            );
+        }
+        let to_tensor_rescale = Transforms {
+            input: &ToTensor,
+            inner_transforms: &[],
+        };
+        let image = image.apply(to_tensor_rescale, device)?;
+        let transforms = TensorTransforms {
+            inner_transforms: &[&Normalize {
+                mean: config.image_mean.unwrap_or(layout.mean).to_vec(),
+                std: config.image_std.unwrap_or(layout.std).to_vec(),
+            }],
+        };
+        processed_images.push(<Tensor as ApplyTensorTransforms>::apply(
+            &image, transforms, device,
+        )?);
+    }
+
+    let remainder = processed_images.len() % temporal_patch_size;
+    if remainder != 0 {
+        let last = processed_images.last().unwrap().clone();
+        for _ in 0..temporal_patch_size - remainder {
+            processed_images.push(last.clone());
+        }
+    }
+
+    let mut patches = Tensor::stack(&processed_images, 0)?;
+    // an image fills every temporal slot
+    if patches.dim(0)? == 1 {
+        patches = patches.repeat((temporal_patch_size, 1, 1, 1))?;
+    }
+    let channel = patches.dim(1)?;
+    let grid_t = patches.dim(0)? / temporal_patch_size;
+    let grid_h = height as usize / patch_size;
+    let grid_w = width as usize / patch_size;
+    patches = patches.reshape(&[
+        grid_t,
+        temporal_patch_size,
+        channel,
+        grid_h / merge_size,
+        merge_size,
+        patch_size,
+        grid_w / merge_size,
+        merge_size,
+        patch_size,
+    ])?;
+    patches = patches.permute([0, 3, 6, 4, 7, 2, 1, 5, 8])?;
+    let flattened_patches = patches.reshape((
+        grid_t * grid_h * grid_w,
+        channel * temporal_patch_size * patch_size * patch_size,
+    ))?;
+    Ok((
+        flattened_patches,
+        (grid_t as u32, grid_h as u32, grid_w as u32),
+    ))
+}
+
+/// Every item's patches and `(t, h, w)` grid, as images or as videos.
+pub(crate) fn preprocessed_media(
+    patches: Vec<(Tensor, (u32, u32, u32))>,
+    videos: bool,
+) -> inference_tensor::Result<PreprocessedImages> {
+    let mut pixel_values = Vec::with_capacity(patches.len());
+    let mut grids = Vec::with_capacity(patches.len());
+    for (item, (t, h, w)) in patches {
+        pixel_values.push(item);
+        grids.push(Tensor::new(&[t, h, w], &Device::Cpu)?);
+    }
+    let grid_thw = Some(Tensor::stack(&grids, 0)?);
+    let (image_grid_thw, video_grid_thw) = match videos {
+        true => (None, grid_thw),
+        false => (grid_thw, None),
+    };
+    Ok(PreprocessedImages {
+        pixel_values: Tensor::cat(&pixel_values, 0)?,
+        pixel_attention_mask: None,
+        image_sizes: None,
+        num_img_tokens: None,
+        aspect_ratio_ids: None,
+        aspect_ratio_mask: None,
+        num_tiles: None,
+        image_grid_thw,
+        video_grid_thw,
+        rows: None,
+        cols: None,
+        pixel_values_list: None,
+        tgt_sizes: None,
+        image_sizes_all: None,
+        num_crops: None,
+    })
 }
 
 #[cfg(test)]

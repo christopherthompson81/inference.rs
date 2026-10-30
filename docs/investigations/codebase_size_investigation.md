@@ -3060,3 +3060,29 @@ Finding:
 Implication: done. The load-order coupling is worth remembering for later sharing: a refactor that reorders loads
 moves these pins without changing the model, while `record_checkpoint_seeded_by_name` fixtures do not have that
 problem. Next per Run 95: the qwen2vl / qwen3_vl inputs processors.
+
+## Run 100 - 2026-10-29 21:48
+
+Question: Run 95's fifth item: the Qwen2-VL and Qwen3-VL input processors share ~280 lines (10 spans) beside the
+`QwenVlSpec` machinery they already share.
+
+Change: `qwen_vl_inputs` gains `qwen_vl_inputs_processor!` (the `MultimodalInputsProcessor` impl both wrote out,
+forwarding to `QwenVlInputs`), `smart_resize` (identical in both; Muse-Glimmer's is another algorithm and stays),
+`frames_to_patches` (resize, normalize, temporal pad and patch layout, given a `PatchLayout` and the size each frame
+resizes to) and `preprocessed_media` (the `PreprocessedImages` of images or videos). Qwen3-VL keeps its video
+`smart_resize_video`; Qwen2-VL gains the zero-size checks Qwen3-VL had instead of dividing by zero.
+
+Commands: `cargo nextest run -p inference-models-qwen`; `cargo nextest run -p inference -E
+'test(/^(qwen_vl_tiny|qwen3_5_text_tiny|qwen4exp_text_tiny)::/)'`; `cargo llvm-lines -p inference-models-qwen --lib`;
+`scripts/dup_scan.py`.
+
+Finding:
+- The 50 Qwen-VL / Qwen3.5 / qwen4exp integration decodes (pinned on image and video patches) and 173 unit tests pass.
+- A first cut built the per-item patches with `map(..).collect::<Result<Vec<_>>>()` in each `preprocess`: models-qwen
+  IR rose 647,009 -> 649,173, four closures each instantiating ~600 lines of in-place-collect machinery. Plain loops,
+  as the code had before: 645,260 (-1,749).
+- Duplication 27,752 -> 27,410 (-342); diff -183 lines.
+
+Implication: Run 95's ranked list is done (#709-#713). This round: duplication 29,070 -> 27,410 (-1,660 lines),
+models-qwen IR 664,260 -> 645,260, quant 871,825 -> 866,237, and a fixed image-and-video merge in Qwen3-VL / Qwen3.5.
+A `collect` over a closure per call site is its own instantiation; in a crate others link, a loop is cheaper.
