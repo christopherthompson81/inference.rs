@@ -155,48 +155,6 @@ public sealed unsafe class InferenceEngine : IDisposable
         return Text(status, response, nameof(NativeMethods.inference_decide));
     }
 
-    public string CreateResponse(string requestJson)
-    {
-        using var engine = Borrow();
-        using var request = new PinnedBytes(requestJson);
-        var status = NativeMethods.inference_responses_create(
-            engine.Handle, request.Pointer, request.Length, out var response);
-        return Text(status, response, nameof(NativeMethods.inference_responses_create));
-    }
-
-    public EngineStream ResponseStream(string requestJson)
-    {
-        using var engine = Borrow();
-        using var request = new PinnedBytes(requestJson);
-        var status = NativeMethods.inference_responses_stream_open(
-            engine.Handle, request.Pointer, request.Length, out var stream);
-        return Stream(status, stream, nameof(NativeMethods.inference_responses_stream_open));
-    }
-
-    public string GetResponse(string responseId)
-    {
-        using var engine = Borrow();
-        using var id = new PinnedBytes(responseId);
-        var status = NativeMethods.inference_responses_get(engine.Handle, id.Pointer, id.Length, out var response);
-        return Text(status, response, nameof(NativeMethods.inference_responses_get));
-    }
-
-    public string DeleteResponse(string responseId)
-    {
-        using var engine = Borrow();
-        using var id = new PinnedBytes(responseId);
-        var status = NativeMethods.inference_responses_delete(engine.Handle, id.Pointer, id.Length, out var response);
-        return Text(status, response, nameof(NativeMethods.inference_responses_delete));
-    }
-
-    public string CancelResponse(string responseId)
-    {
-        using var engine = Borrow();
-        using var id = new PinnedBytes(responseId);
-        var status = NativeMethods.inference_responses_cancel(engine.Handle, id.Pointer, id.Length, out var response);
-        return Text(status, response, nameof(NativeMethods.inference_responses_cancel));
-    }
-
     public string ListModels()
     {
         using var engine = Borrow();
@@ -632,7 +590,7 @@ public sealed unsafe class InferenceEngine : IDisposable
         return Text(status, response, nameof(NativeMethods.inference_job_file));
     }
 
-    /// <summary>The files a Responses container (a code-running session) produced.</summary>
+    /// <summary>The files a container (a code-running session) produced.</summary>
     public string ListContainerFiles(string containerId)
     {
         using var engine = Borrow();

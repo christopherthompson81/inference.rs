@@ -857,6 +857,7 @@ class ChatCompletionRequest:
     response_format: ResponseFormat | None = None
     seed: int | None = None
     session_id: str | None = None
+    shell_skill_references: list[OpenAiShellSkillReference] | None = None
     stop: StopTokens | None = None
     stop_token_ids: list[int] | None = None
     stream: bool | None = None
@@ -2148,6 +2149,14 @@ class OpenAiShellSkillSkillReference:
 class OpenAiShellSkillLocal:
     path: str
     type: Literal["local"] = "local"
+
+
+@dataclass(kw_only=True)
+class OpenAiShellSkillReference:
+    """A stored skill the shell tool copies into the session's working directory, under `skills/<name>/`."""
+
+    skill_id: str
+    version: Any = None
 
 
 @dataclass(kw_only=True)

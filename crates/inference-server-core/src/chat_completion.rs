@@ -141,6 +141,9 @@ impl futures::Stream for ChatCompletionStreamer {
                         )
                     }
                     ChatStreamEvent::Error(error) => Ok(openai_error_event(error)),
+                    ChatStreamEvent::Done(_) => {
+                        unreachable!("an SSE chat stream asks to stream, so it ends with chunks")
+                    }
                 };
                 Poll::Ready(Some(match name {
                     Some(name) => sse.map(|event| event.event(name)),
@@ -227,7 +230,7 @@ fn sse_event_name(event: &ChatStreamEvent) -> Option<&'static str> {
         ChatStreamEvent::AgenticToolApprovalRequired(_) => Some("agentic_tool_approval_required"),
         ChatStreamEvent::FileProduced(_) => Some("file_produced"),
         ChatStreamEvent::BlockDenoisingProgress(_) => None,
-        ChatStreamEvent::Chunk(_) | ChatStreamEvent::Error(_) => None,
+        ChatStreamEvent::Chunk(_) | ChatStreamEvent::Error(_) | ChatStreamEvent::Done(_) => None,
     }
 }
 

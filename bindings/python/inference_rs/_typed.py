@@ -20,10 +20,6 @@ CHAT_EVENTS = _named({"chunk": types.ChatCompletionChunkResponse})
 COMPLETION_EVENTS = _named({"chunk": types.CompletionChunkResponse})
 
 
-def RESPONSE_EVENTS(name, data):
-    return from_data(types.OpenResponsesStreamEvent, data)
-
-
 def _parsed(stream: Stream, parse) -> Stream:
     stream.parse = parse
     return stream
@@ -89,22 +85,6 @@ class Engine:
 
     def decide(self, request: types.DecisionRequest | str) -> types.DecisionResponse:
         return from_json(types.DecisionResponse, self.json.decide(to_json(request)))
-
-    def create_response(self, request: types.OpenResponsesCreateRequest | str) -> types.ResponseResource:
-        return from_json(types.ResponseResource, self.json.create_response(to_json(request)))
-
-    def response_stream(self, request: types.OpenResponsesCreateRequest | str) -> Stream:
-        """OpenResponses events, each read as its variant of OpenResponsesStreamEvent."""
-        return _parsed(self.json.response_stream(to_json(request)), RESPONSE_EVENTS)
-
-    def get_response(self, response_id: str) -> types.ResponseResource:
-        return from_json(types.ResponseResource, self.json.get_response(response_id))
-
-    def delete_response(self, response_id: str) -> types.ResponseDeleted:
-        return from_json(types.ResponseDeleted, self.json.delete_response(response_id))
-
-    def cancel_response(self, response_id: str) -> types.ResponseResource:
-        return from_json(types.ResponseResource, self.json.cancel_response(response_id))
 
     def re_isq(self, ggml_type: str, model: str | None = None) -> types.ReIsqResponse:
         """Requantizes a model that loaded with ISQ; answers once it is requantized."""

@@ -122,22 +122,6 @@ class EngineTest(unittest.TestCase):
         with self.engine.completion_stream(completion) as stream:
             self.assertTrue(all(event.name == "chunk" for event in stream))
 
-        request = {
-            "model": "default",
-            "input": PROMPT,
-            "max_output_tokens": MAX_TOKENS,
-            "temperature": 0.0,
-            "top_k": 1,
-        }
-        response_id = json.loads(self.engine.create_response(json.dumps(request)))["id"]
-        self.assertEqual(json.loads(self.engine.get_response(response_id))["id"], response_id)
-        self.engine.delete_response(response_id)
-        with self.assertRaises(ir.InferenceError) as missing:
-            self.engine.get_response(response_id)
-        self.assertEqual(missing.exception.status, ir.Status.NOT_FOUND)
-        with self.engine.response_stream(json.dumps({**request, "stream": True})) as stream:
-            # the token cap ends the run
-            self.assertEqual(list(stream)[-1].name, "response.incomplete")
 
     def test_errors_carry_the_envelope(self):
         with self.assertRaises(ir.InferenceError) as unknown:

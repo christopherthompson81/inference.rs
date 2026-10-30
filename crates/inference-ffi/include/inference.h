@@ -186,8 +186,8 @@ typedef struct inference_transcription_session inference_transcription_session;
 INFERENCE_API inference_status inference_engine_load(const char *spec, size_t spec_len,
                                                     inference_engine **out_engine);
 INFERENCE_API void inference_engine_free(inference_engine *engine);
-/* A second handle to the same loaded engine that acts for owner (non-empty UTF-8): the sessions, files, stored
- * responses, skills and approvals it creates are owner's, and it reaches no one else's. A handle from
+/* A second handle to the same loaded engine that acts for owner (non-empty UTF-8): the sessions, files,
+ * skills and approvals it creates are owner's, and it reaches no one else's. A handle from
  * inference_engine_load is unscoped and likewise reaches only unscoped data. Free each handle with
  * inference_engine_free; the engine stays loaded until every handle is freed. Serving several users, make one each. */
 INFERENCE_API inference_status inference_engine_for_owner(const inference_engine *engine, const char *owner,
@@ -252,7 +252,7 @@ INFERENCE_API inference_status inference_engine_load_with_callbacks(const char *
                                                                    inference_engine **out_engine);
 
 /* Registers a host tool after load, under its definition's function name. Unlike the tools passed at load, which every
- * chat request offers, a registered tool is offered only by a request (chat, Responses or Anthropic messages) that
+ * chat request offers, a registered tool is offered only by a chat request that
  * names it in its "host_tools" array. Every handle of the engine shares it. A name already registered is
  * INFERENCE_ERR_INVALID_REQUEST with code "host_tool_conflict"; a request naming an unregistered one is
  * INFERENCE_ERR_INVALID_REQUEST with param "host_tools", and one naming a tool that clashes with another of its tools
@@ -273,8 +273,8 @@ INFERENCE_API inference_status inference_engine_unregister_tool(const inference_
  * callbacks above. */
 typedef int32_t (*inference_logits_processor_callback)(void *user_data, float *logits, size_t vocab_size,
                                                        const uint32_t *context, size_t context_len);
-/* Makes callback selectable by name (non-empty UTF-8) in a request's "logits_processors" array (chat, completions,
- * Responses and Anthropic messages), applied in the order listed. Every handle of the engine shares it. A name already
+/* Makes callback selectable by name (non-empty UTF-8) in a request's "logits_processors" array (chat and
+ * completions), applied in the order listed. Every handle of the engine shares it. A name already
  * registered is INFERENCE_ERR_INVALID_REQUEST with code "logits_processor_conflict"; a request naming an unregistered
  * one is INFERENCE_ERR_INVALID_REQUEST with param "logits_processors". */
 INFERENCE_API inference_status inference_engine_register_logits_processor(
@@ -315,9 +315,7 @@ INFERENCE_API inference_status inference_chat_stream_open_with_media(const infer
 /* Waits up to timeout_ms (< 0 waits indefinitely, 0 polls) for the next event of a stream. On an event, out_event
  * receives {"event": <name>, "data": ...}. Chat streams emit "chunk" (data: a chat.completion.chunk),
  * "agentic_tool_call_progress", "agentic_tool_approval_required", "file_produced" and "error"; completion streams emit
- * "chunk" (data: a text_completion chunk) and "error"; Responses streams emit their protocol's events (see
- * inference_responses_stream_open). An error's data is the error
- * JSON of the stream's protocol, and an error event is always the last event. On a timeout out_event is NULL and
+ * "chunk" (data: a text_completion chunk) and "error". An error's data is the OpenAI error JSON, and an error event is always the last event. On a timeout out_event is NULL and
  * out_done 0. Once the stream has ended, out_event is NULL and out_done 1. out_event and out_done are required. */
 INFERENCE_API inference_status inference_stream_next(inference_stream *stream, int64_t timeout_ms,
                                                     inference_string **out_event, int32_t *out_done);
@@ -347,31 +345,6 @@ INFERENCE_API inference_status inference_rerank(const inference_engine *engine, 
  * each question's answer JSON. */
 INFERENCE_API inference_status inference_decide(const inference_engine *engine, const char *request,
                                                size_t request_len, inference_string **out_response);
-
-/* Runs a Responses request (the POST /v1/responses body); out_response receives the response resource JSON. A request
- * with "background": true returns at once with status "queued"; follow it with inference_responses_get. "stream" in
- * the request is ignored. Responses, streamed or not, are stored (unless "store" is false) for inference_responses_get
- * and "previous_response_id"; the store is shared by every engine in the process and lives until the process exits
- * or the response is deleted. */
-INFERENCE_API inference_status inference_responses_create(const inference_engine *engine, const char *request,
-                                                         size_t request_len, inference_string **out_response);
-/* Starts a streaming Responses request; poll it with inference_stream_next. Its events are the OpenResponses stream
- * events named by their "type" (response.created, response.in_progress, response.output_item.added/done,
- * response.content_part.added/done, response.output_text.delta, response.reasoning_text.delta/done,
- * response.function_call_arguments.delta/done, and one terminal event: response.completed, response.incomplete (the
- * token cap stopped it), response.cancelled (inference_stream_cancel stopped it) or response.failed; or error), plus
- * agentic_tool_call_progress and file_produced. "background" cannot be streamed. */
-INFERENCE_API inference_status inference_responses_stream_open(const inference_engine *engine, const char *request,
-                                                              size_t request_len, inference_stream **out_stream);
-/* A background response in its current state, or a stored one; an unknown id is INFERENCE_ERR_NOT_FOUND. */
-INFERENCE_API inference_status inference_responses_get(const inference_engine *engine, const char *response_id,
-                                                      size_t response_id_len, inference_string **out_response);
-/* Forgets a response; out_response receives {"id", "object": "response.deleted", "deleted": true}. */
-INFERENCE_API inference_status inference_responses_delete(const inference_engine *engine, const char *response_id,
-                                                         size_t response_id_len, inference_string **out_response);
-/* Cancels a queued or running background response and returns it; a finished one comes back unchanged. */
-INFERENCE_API inference_status inference_responses_cancel(const inference_engine *engine, const char *response_id,
-                                                         size_t response_id_len, inference_string **out_response);
 
 /* The served models (the GET /v1/models body): the "default" alias, each model with its status, and each loaded LoRA
  * adapter as a model of its own. The model the alias goes to has "default": true. */
@@ -567,7 +540,7 @@ INFERENCE_API inference_status inference_job_delete(const inference_engine *engi
                                                    size_t job_id_len, inference_string **out_response);
 INFERENCE_API inference_status inference_job_file(const inference_engine *engine, const char *request,
                                                  size_t request_len, inference_string **out_response);
-/* The files a Responses container (a code-running session, its "container_id") produced, as the
+/* The files a container (a code-running session, its "container_id") produced, as the
  * /v1/containers/{id}/files JSON; a file of another container is INFERENCE_ERR_NOT_FOUND. */
 INFERENCE_API inference_status inference_container_files_list(const inference_engine *engine,
                                                              const char *container_id, size_t container_id_len,

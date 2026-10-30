@@ -32,7 +32,7 @@ Supported today:
 - Messages `container.skills[]` entries with `type = "custom"`, `skill_id`, and `"version": "latest"`, an omitted version, or a concrete version.
 - Responses output items for `shell_call` and `shell_call_output`, so clients can inspect what ran.
 - inference.rs agentic extensions for Skills requests: `max_tool_rounds` to bound agentic tool loops, and `files` to require specific output files and surface them as downloadable File objects.
-- Python SDK uploads to the engine's own skill store (`engine.upload_skill`), referenced from a Responses request's `shell` tool.
+- Python SDK uploads to the engine's own skill store (`engine.upload_skill`), referenced from a chat request's `shell_skill_references` with `enable_shell`.
 - Rust SDK local mounts for in-process users that do not go through `/v1/skills`.
 
 Not implemented today:
@@ -49,7 +49,7 @@ inference.rs implements the OpenAI-compatible server/runtime layer. It does not 
 
 Use the OpenAI Python package. The current OpenAI package may not expose a typed `skills` resource, so the example uses the package's low-level `client.post(...)` helper.
 
-The Python SDK uploads a skill to the engine's skill store and references it with `skill_reference`, as a server client does. The Rust SDK example mounts a local skill directory in-process, which bypasses `/v1/skills`; server clients should use uploaded Skills and `skill_reference`.
+The Python SDK uploads a skill to the engine's skill store and references it from a chat request (`enable_shell` with `shell_skill_references`); the server's Responses and Messages APIs translate their skill references to the same fields. The Rust SDK example mounts a local skill directory in-process, which bypasses `/v1/skills`; server clients should use uploaded Skills and `skill_reference`.
 
 <Tabs>
 <TabItem label="OpenAI server">
@@ -173,21 +173,16 @@ with ir.Engine(spec) as engine:
             if path.is_file()
         ]
     )
-    resp = engine.create_response(
-        t.OpenResponsesCreateRequest(
+    resp = engine.chat(
+        t.ChatCompletionRequest(
             model="default",
-            input="Use my-skill to complete the task.",
-            tools=[
-                t.OpenAiShellTool(
-                    environment=t.OpenAiShellEnvironmentContainerAuto(
-                        skills=[t.OpenAiShellSkillSkillReference(skill_id=skill.id, version="latest")]
-                    )
-                )
-            ],
+            messages=[t.Message(role="user", content="Use my-skill to complete the task.")],
+            enable_shell=True,
+            shell_skill_references=[t.OpenAiShellSkillReference(skill_id=skill.id)],
             max_tool_rounds=6,
         )
     )
-    print(resp.output_text)
+    print(resp.choices[0].message.content)
 ```
 
 [Full example](/examples/python/shell-skills/)

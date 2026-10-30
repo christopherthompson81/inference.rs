@@ -142,26 +142,6 @@ internal static unsafe partial class NativeMethods
         IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
 
     [LibraryImport(Library)]
-    internal static partial InferenceStatus inference_responses_create(
-        IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
-
-    [LibraryImport(Library)]
-    internal static partial InferenceStatus inference_responses_stream_open(
-        IntPtr engine, byte* request, nuint requestLen, out IntPtr outStream);
-
-    [LibraryImport(Library)]
-    internal static partial InferenceStatus inference_responses_get(
-        IntPtr engine, byte* responseId, nuint responseIdLen, out IntPtr outResponse);
-
-    [LibraryImport(Library)]
-    internal static partial InferenceStatus inference_responses_delete(
-        IntPtr engine, byte* responseId, nuint responseIdLen, out IntPtr outResponse);
-
-    [LibraryImport(Library)]
-    internal static partial InferenceStatus inference_responses_cancel(
-        IntPtr engine, byte* responseId, nuint responseIdLen, out IntPtr outResponse);
-
-    [LibraryImport(Library)]
     internal static partial InferenceStatus inference_models_list(IntPtr engine, out IntPtr outResponse);
 
     [LibraryImport(Library)]

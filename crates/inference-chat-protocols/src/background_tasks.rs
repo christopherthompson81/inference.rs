@@ -8,9 +8,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use inference_core::RequestCancellation;
+use inference_api::engine_chat::RequestCancellation;
 
-use crate::responses_types::{
+use inference_protocol::responses_types::{
     ItemStatus, OutputItem, ResponseError, ResponseResource, ResponseStatus,
 };
 

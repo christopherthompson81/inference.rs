@@ -10,36 +10,23 @@ use std::{
 
 use anyhow::Result;
 use either::Either;
-use futures::future::BoxFuture;
-use inference_core::{
-    AgentPermission, AgentToolApprovalHandler, AgenticToolCallData, AgenticToolCallPhase,
-    ChatCompletionResponse, FINISH_REASON_CANCELED, FINISH_REASON_LENGTH, InferenceRs, Request,
-    RequestCancellation, Response,
-};
-use serde::Serialize;
-use serde_json::Value;
-use tokio::sync::mpsc::{Receiver, Sender};
-use utoipa::{
-    PartialSchema, ToSchema,
-    openapi::{ArrayBuilder, ObjectBuilder, OneOfBuilder, RefOr, Schema, Type, schema::SchemaType},
-};
-use uuid::Uuid;
-
-use crate::{
-    api_error::{ApiError, ApiErrorKind, ModelErrorMessage, boxed_anyhow},
-    background_tasks::get_background_task_manager,
-    cached_responses::{StoredConversation, get_response_cache},
-    dispatch::{create_response_channel, response_model_id, send_request_with_model},
+use futures::{Stream, StreamExt};
+use inference_api::{
+    Engine,
+    api_error::{ApiError, ApiErrorKind, MODEL_ERROR_CODE},
     engine_chat::{
-        ASK_REQUIRES_STREAMING, ChatCompletionParseContext, ChatEngine, DispatchError, ResponseTap,
-        parse_request as parse_chat_request, serialize_agentic_progress,
-        serialize_approval_required,
+        AgenticToolCallData, AgenticToolCallPhase, ChatStreamEvent, FINISH_REASON_CANCELED,
+        FINISH_REASON_LENGTH, RequestCancellation, ResponseTap, resolve_reasoning_controls,
     },
-    lora_routing::{DEFAULT_MODEL_ID, resolve_lora_adapter_model},
+    media_source::MediaAttachments,
+};
+use inference_protocol::{
+    files::File,
     openai::{
         AdapterSelection, ChatCompletionRequest, Message, MessageContent, OpenAiNamespaceEntry,
         OpenAiTool, OpenAiToolSurface, ToolCall,
     },
+    response::ChatCompletionResponse,
     responses_types::{
         content::{Annotation, OutputContent},
         enums::{ItemStatus, ResponseStatus},
@@ -49,10 +36,23 @@ use crate::{
             IncompleteDetails, InputTokensDetails, ResponseError, ResponseResource, ResponseUsage,
         },
     },
-    types::SharedInferenceRsState,
+};
+use serde::Serialize;
+use serde_json::Value;
+use utoipa::{
+    PartialSchema, ToSchema,
+    openapi::{ArrayBuilder, ObjectBuilder, OneOfBuilder, RefOr, Schema, Type, schema::SchemaType},
+};
+use uuid::Uuid;
+
+use crate::{
+    background_tasks::get_background_task_manager,
+    cached_responses::{StoredConversation, get_response_cache},
 };
 
-/// Input type for OpenResponses API requests
+/// The events a Responses run reads: an engine chat run's, or a test's.
+type ChatEvents = Pin<Box<dyn Stream<Item = ChatStreamEvent> + Send>>;
+
 #[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 #[serde(untagged)]
 pub enum OpenResponsesInput {
@@ -117,8 +117,8 @@ const SYSTEM_ROLE: &str = "system";
 ///
 /// This function handles multimodal content including text, images, audio, and files.
 fn convert_input_items_to_messages(items: Vec<InputItem>) -> Vec<Message> {
-    use crate::responses_types::content::NormalizedInputContent;
-    use crate::responses_types::items::TaggedInputItem;
+    use inference_protocol::responses_types::content::NormalizedInputContent;
+    use inference_protocol::responses_types::items::TaggedInputItem;
 
     let mut messages = Vec::new();
 
@@ -157,13 +157,13 @@ fn convert_input_items_to_messages(items: Vec<InputItem>) -> Vec<Message> {
 
                                     let image_part = if let Some(detail_level) = detail {
                                         let detail_str = match detail_level {
-                                            crate::responses_types::enums::ImageDetail::Auto => {
+                                            inference_protocol::responses_types::enums::ImageDetail::Auto => {
                                                 "auto"
                                             }
-                                            crate::responses_types::enums::ImageDetail::Low => {
+                                            inference_protocol::responses_types::enums::ImageDetail::Low => {
                                                 "low"
                                             }
-                                            crate::responses_types::enums::ImageDetail::High => {
+                                            inference_protocol::responses_types::enums::ImageDetail::High => {
                                                 "high"
                                             }
                                         };
@@ -192,18 +192,18 @@ fn convert_input_items_to_messages(items: Vec<InputItem>) -> Vec<Message> {
                                     let mut audio_part = std::collections::HashMap::new();
                                     audio_part.insert(
                                         "type".to_string(),
-                                        crate::openai::MessageInnerContent(Either::Left(
-                                            "input_audio".to_string(),
-                                        )),
+                                        inference_protocol::openai::MessageInnerContent(
+                                            Either::Left("input_audio".to_string()),
+                                        ),
                                     );
                                     let mut audio_obj = std::collections::HashMap::new();
                                     audio_obj.insert("data".to_string(), data);
                                     audio_obj.insert("format".to_string(), format);
                                     audio_part.insert(
                                         "input_audio".to_string(),
-                                        crate::openai::MessageInnerContent(Either::Right(
-                                            audio_obj,
-                                        )),
+                                        inference_protocol::openai::MessageInnerContent(
+                                            Either::Right(audio_obj),
+                                        ),
                                     );
                                     content_parts.push(audio_part);
                                     // Also add as text reference for models that don't support audio
@@ -275,8 +275,8 @@ fn convert_input_items_to_messages(items: Vec<InputItem>) -> Vec<Message> {
                     name: None,
                     tool_calls: Some(vec![ToolCall {
                         id: Some(call_id),
-                        tp: inference_core::ToolType::Function,
-                        function: crate::openai::FunctionCalled { name, arguments },
+                        tp: inference_protocol::ToolType::Function,
+                        function: inference_protocol::openai::FunctionCalled { name, arguments },
                     }]),
                     tool_call_id: None,
                     reasoning_content: None,
@@ -305,7 +305,7 @@ fn convert_input_items_to_messages(items: Vec<InputItem>) -> Vec<Message> {
 pub struct ReasoningConfig {
     /// Effort level for reasoning (off, low, medium, high, xhigh). "none" aliases "off".
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub effort: Option<crate::responses_types::enums::ReasoningEffort>,
+    pub effort: Option<inference_protocol::responses_types::enums::ReasoningEffort>,
     /// Accepted for compatibility; currently does not change the response.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<ReasoningSummary>,
@@ -340,7 +340,7 @@ pub struct RequestContext {
     /// Tool definitions from the request
     pub tools: Option<Vec<OpenAiTool>>,
     /// Tool choice configuration from the request
-    pub tool_choice: Option<inference_core::ToolChoice>,
+    pub tool_choice: Option<inference_protocol::tools::ToolChoice>,
     /// Whether parallel tool calls are enabled
     pub parallel_tool_calls: Option<bool>,
     /// Text configuration from the request
@@ -524,7 +524,7 @@ pub struct OpenResponsesCreateRequest {
 
     /// Controls how the model uses tools
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_choice: Option<inference_core::ToolChoice>,
+    pub tool_choice: Option<inference_protocol::tools::ToolChoice>,
 
     /// Whether to allow parallel tool calls.
     ///
@@ -547,7 +547,7 @@ pub struct OpenResponsesCreateRequest {
     /// Required output files to surface from tool calls (inference.rs extension)
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<Vec<serde_json::Value>>)]
-    pub files: Option<Vec<inference_core::RequestedFile>>,
+    pub files: Option<Vec<inference_protocol::files::RequestedFile>>,
 
     // Reasoning
     /// Configuration for reasoning/thinking behavior
@@ -561,16 +561,16 @@ pub struct OpenResponsesCreateRequest {
 
     /// Truncation strategy when input exceeds context window
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub truncation: Option<crate::responses_types::enums::TruncationStrategy>,
+    pub truncation: Option<inference_protocol::responses_types::enums::TruncationStrategy>,
 
     // inference.rs Extensions (non-standard)
     /// Stop sequences to end generation
     #[serde(rename = "stop", skip_serializing_if = "Option::is_none")]
-    pub stop_seqs: Option<crate::openai::StopTokens>,
+    pub stop_seqs: Option<inference_protocol::openai::StopTokens>,
 
     /// Response format (legacy, prefer `text` field)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub response_format: Option<crate::openai::ResponseFormat>,
+    pub response_format: Option<inference_protocol::openai::ResponseFormat>,
 
     /// Logit bias for token manipulation
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -602,7 +602,7 @@ pub struct OpenResponsesCreateRequest {
 
     /// Grammar for constrained generation (inference.rs extension)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub grammar: Option<crate::openai::Grammar>,
+    pub grammar: Option<inference_protocol::openai::Grammar>,
 
     /// Min-p sampling (inference.rs extension)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -794,19 +794,9 @@ fn stream_error_from_api_error(sequence_number: u64, error: ApiError) -> OpenRes
     }
 }
 
-fn classify_api_error(
-    state: &SharedInferenceRsState,
-    error: &(dyn std::error::Error + 'static),
-    fallback: ApiErrorKind,
-) -> ApiError {
-    let api_error = ApiError::from_error(error, fallback);
-    if matches!(
-        api_error.kind,
-        ApiErrorKind::Internal | ApiErrorKind::Unavailable | ApiErrorKind::Overloaded
-    ) {
-        InferenceRs::maybe_log_error(state.clone(), error);
-    }
-    api_error
+// The response store's failures are the engine's, never the caller's.
+fn store_error(error: anyhow::Error) -> ApiError {
+    ApiError::from_error(error.as_ref(), ApiErrorKind::Internal)
 }
 
 #[derive(Clone)]
@@ -837,7 +827,7 @@ impl MessageOutputItemState {
         &self,
         text: String,
         response_id: &str,
-        files: &[inference_core::File],
+        files: &[File],
         status: ItemStatus,
     ) -> OutputItem {
         OutputItem::message(
@@ -947,7 +937,7 @@ pub enum ResponsesStreamItem {
     Event(OpenResponsesStreamEvent),
     AgenticToolCallProgress(Value),
     AgenticToolApprovalRequired(Value),
-    FileProduced(inference_core::File),
+    FileProduced(File),
 }
 
 impl ResponsesStreamItem {
@@ -977,9 +967,10 @@ impl ResponsesStreamItem {
 
 /// The events of a streaming Responses request. Dropping it abandons the request.
 pub struct OpenResponsesStreamer {
-    rx: Receiver<Response>,
+    events: ChatEvents,
     finished: bool,
-    state: SharedInferenceRsState,
+    /// Tags the files the run produces into its container; `None` for a test's events.
+    engine: Option<Engine>,
     streaming_state: StreamingState,
     metadata: Option<Value>,
     pending_events: Vec<OpenResponsesStreamEvent>,
@@ -1015,34 +1006,32 @@ pub struct OpenResponsesStreamer {
     /// The agent session the run reported, stored so a follow-up continues it by id.
     session_id: Option<String>,
     owner: Option<String>,
-    files: Vec<inference_core::File>,
-    tap: Option<ResponseTap>,
-    cancellation: RequestCancellation,
+    files: Vec<File>,
+    cancellation: Option<RequestCancellation>,
 }
 
 impl OpenResponsesStreamer {
-    pub(crate) fn new(
-        prepared: PreparedResponse,
-        state: SharedInferenceRsState,
-        tap: Option<ResponseTap>,
+    fn new(
+        run: ResponseRun,
+        events: ChatEvents,
+        cancellation: Option<RequestCancellation>,
+        engine: Option<Engine>,
     ) -> Self {
-        let PreparedResponse {
-            rx,
+        let ResponseRun {
             id,
             model,
             metadata,
             store,
             history,
             context,
-            cancellation,
             session_id,
             owner,
             ..
-        } = prepared;
+        } = run;
         Self {
-            rx,
+            events,
             finished: false,
-            state,
+            engine,
             streaming_state: StreamingState::new(id, model, unix_now()),
             metadata,
             pending_events: Vec::new(),
@@ -1071,25 +1060,20 @@ impl OpenResponsesStreamer {
             session_id,
             owner,
             files: Vec::new(),
-            tap,
             cancellation,
         }
     }
 
-    /// Reports each engine response to `tap` as the stream reads it, e.g. for an access log.
-    pub fn with_tap(mut self, tap: Option<ResponseTap>) -> Self {
-        self.tap = tap;
-        self
-    }
-
     /// The request's cancellation, for a caller that cancels from elsewhere, e.g. a signal handler.
-    pub fn cancellation(&self) -> RequestCancellation {
+    pub fn cancellation(&self) -> Option<RequestCancellation> {
         self.cancellation.clone()
     }
 
     /// Ends the request on its next sampled token; the stream ends with `response.cancelled`, with usage.
     pub fn cancel(&self) {
-        self.cancellation.cancel();
+        if let Some(cancellation) = &self.cancellation {
+            cancellation.cancel();
+        }
     }
 
     // Stores the final resource and the conversation before the terminal event goes out, so both are there for a
@@ -1295,22 +1279,15 @@ impl futures::Stream for OpenResponsesStreamer {
             return Poll::Ready(Some(ResponsesStreamItem::Event(event)));
         }
 
-        match self.rx.poll_recv(cx) {
-            Poll::Ready(Some(resp)) => {
-                if let Some(tap) = &self.tap {
-                    tap(&resp);
-                }
-                match resp {
-                    Response::ModelError(msg, _) => {
-                        InferenceRs::maybe_log_error(
-                            self.state.clone(),
-                            &ModelErrorMessage(msg.to_string()),
-                        );
-
+        match self.events.as_mut().poll_next(cx) {
+            Poll::Ready(Some(event)) => {
+                match event {
+                    ChatStreamEvent::Error(error)
+                        if error.code.as_deref() == Some(MODEL_ERROR_CODE) =>
+                    {
                         let seq = self.streaming_state.next_sequence_number();
                         let mut response = self.build_current_response(ResponseStatus::Failed);
-                        response.error =
-                            Some(response_error_from_api_error(ApiError::model_error()));
+                        response.error = Some(response_error_from_api_error(error));
 
                         self.finish(Some(&response));
                         let event = OpenResponsesStreamEvent::ResponseFailed {
@@ -1319,26 +1296,13 @@ impl futures::Stream for OpenResponsesStreamer {
                         };
                         Poll::Ready(Some(ResponsesStreamItem::Event(event)))
                     }
-                    Response::ValidationError(e) => {
+                    ChatStreamEvent::Error(error) => {
                         let seq = self.streaming_state.next_sequence_number();
-                        let error = classify_api_error(
-                            &self.state,
-                            e.as_ref(),
-                            ApiErrorKind::InvalidRequest,
-                        );
                         let event = stream_error_from_api_error(seq, error);
                         self.finish(None);
                         Poll::Ready(Some(ResponsesStreamItem::Event(event)))
                     }
-                    Response::InternalError(e) => {
-                        let seq = self.streaming_state.next_sequence_number();
-                        let error =
-                            classify_api_error(&self.state, e.as_ref(), ApiErrorKind::Internal);
-                        let event = stream_error_from_api_error(seq, error);
-                        self.finish(None);
-                        Poll::Ready(Some(ResponsesStreamItem::Event(event)))
-                    }
-                    Response::Chunk(chat_chunk) => {
+                    ChatStreamEvent::Chunk(chat_chunk) => {
                         let mut events_to_emit = Vec::new();
                         if chat_chunk.session_id.is_some() {
                             self.session_id.clone_from(&chat_chunk.session_id);
@@ -1585,8 +1549,6 @@ impl futures::Stream for OpenResponsesStreamer {
                             events_to_emit.push(terminal_event(seq, response));
                         }
 
-                        InferenceRs::maybe_log_response(self.state.clone(), &chat_chunk);
-
                         // Return first event, queue the rest
                         if !events_to_emit.is_empty() {
                             let first_event = events_to_emit.remove(0);
@@ -1598,7 +1560,7 @@ impl futures::Stream for OpenResponsesStreamer {
                             Poll::Pending
                         }
                     }
-                    Response::Done(chat_resp) => {
+                    ChatStreamEvent::Done(chat_resp) => {
                         // Handle non-streaming completion through chunk path
                         // This shouldn't normally happen in streaming mode
                         let seq = self.streaming_state.next_sequence_number();
@@ -1628,19 +1590,15 @@ impl futures::Stream for OpenResponsesStreamer {
                         let event = terminal_event(seq, response);
                         Poll::Ready(Some(ResponsesStreamItem::Event(event)))
                     }
-                    Response::AgenticToolCallProgress {
-                        round,
-                        tool_call_id,
-                        tool_name,
-                        phase,
-                    } => {
+                    ChatStreamEvent::AgenticToolCallProgress(progress) => {
+                        let (tool_call_id, phase) = (&progress.tool_call_id, &progress.phase);
                         let mut pending_shell_calls = std::mem::take(&mut self.pending_shell_calls);
                         let mut shell_output_items = std::mem::take(&mut self.shell_output_items);
                         let shell_items = record_shell_progress_items(
                             &mut pending_shell_calls,
                             &mut shell_output_items,
-                            &tool_call_id,
-                            &phase,
+                            tool_call_id,
+                            phase,
                         );
                         self.pending_shell_calls = pending_shell_calls;
                         self.shell_output_items = shell_output_items;
@@ -1668,50 +1626,30 @@ impl futures::Stream for OpenResponsesStreamer {
                             Poll::Ready(Some(ResponsesStreamItem::Event(first)))
                         } else {
                             Poll::Ready(Some(ResponsesStreamItem::AgenticToolCallProgress(
-                                serialize_agentic_progress(
-                                    round,
-                                    &tool_call_id,
-                                    &tool_name,
-                                    &phase,
-                                ),
+                                progress.to_json(),
                             )))
                         }
                     }
-                    Response::AgenticToolApprovalRequired {
-                        approval_id,
-                        session_id,
-                        round,
-                        tool,
-                        arguments,
-                    } => Poll::Ready(Some(ResponsesStreamItem::AgenticToolApprovalRequired(
-                        serialize_approval_required(
-                            &approval_id,
-                            &session_id,
-                            round,
-                            &tool,
-                            &arguments,
-                        ),
-                    ))),
-                    Response::File(file) => {
+                    ChatStreamEvent::AgenticToolApprovalRequired(approval) => Poll::Ready(Some(
+                        ResponsesStreamItem::AgenticToolApprovalRequired(approval.to_json()),
+                    )),
+                    ChatStreamEvent::FileProduced(file) => {
                         tag_with_container(
-                            &self.state,
+                            self.engine.as_ref(),
                             &file,
                             &self.streaming_state.response_id,
-                            self.owner.as_deref(),
                         );
                         self.files.push(file.clone());
                         Poll::Ready(Some(ResponsesStreamItem::FileProduced(file)))
                     }
-                    _ => {
+                    ChatStreamEvent::BlockDenoisingProgress(_) => {
                         cx.waker().wake_by_ref();
                         Poll::Pending
                     }
                 }
             }
             Poll::Ready(None) => {
-                let channel_error = anyhow::anyhow!("Response channel closed before completion.");
-                let api_error =
-                    classify_api_error(&self.state, channel_error.as_ref(), ApiErrorKind::Internal);
+                let api_error = ApiError::internal();
                 let seq = self.streaming_state.next_sequence_number();
                 let event = stream_error_from_api_error(seq, api_error);
                 self.finish(None);
@@ -1747,13 +1685,10 @@ impl OpenResponsesStreamEvent {
 }
 
 // The response cites its files under its container id; listing that container returns them and nothing else.
-fn tag_with_container(
-    state: &SharedInferenceRsState,
-    file: &inference_core::File,
-    response_id: &str,
-    owner: Option<&str>,
-) {
-    let _ = state.try_tag_file(&file.id, &response_container_id(response_id), owner);
+fn tag_with_container(engine: Option<&Engine>, file: &File, response_id: &str) {
+    if let Some(engine) = engine {
+        engine.tag_file(&file.id, &response_container_id(response_id));
+    }
 }
 
 fn response_container_id(response_id: &str) -> String {
@@ -1770,10 +1705,7 @@ fn response_container_id(response_id: &str) -> String {
     format!("cntr_{sanitized}")
 }
 
-fn container_file_annotations(
-    response_id: &str,
-    files: &[inference_core::File],
-) -> Vec<Annotation> {
+fn container_file_annotations(response_id: &str, files: &[File]) -> Vec<Annotation> {
     let container_id = response_container_id(response_id);
     files
         .iter()
@@ -1792,7 +1724,7 @@ fn container_file_annotations(
 fn output_text_with_file_annotations(
     text: String,
     response_id: &str,
-    files: &[inference_core::File],
+    files: &[File],
 ) -> OutputContent {
     let annotations = container_file_annotations(response_id, files);
     if annotations.is_empty() {
@@ -1810,7 +1742,7 @@ fn chat_response_to_response_resource(
     metadata: Option<Value>,
     request_ctx: &RequestContext,
     shell_output_items: &[OutputItem],
-    files: &[inference_core::File],
+    files: &[File],
 ) -> ResponseResource {
     let created_at = chat_resp.created;
     let mut resource = ResponseResource::new(request_id.clone(), model, created_at);
@@ -1923,12 +1855,10 @@ fn chat_response_to_response_resource(
 }
 
 /// Parse OpenResponses request into internal format
-async fn parse_openresponses_request(
+fn parse_openresponses_request(
     oairequest: OpenResponsesCreateRequest,
-    chat: &ChatEngine,
-    tx: Sender<Response>,
-) -> Result<(Request, Vec<Message>, RequestContext)> {
-    let state = chat.state.clone();
+    owner: Option<&str>,
+) -> Result<(ChatCompletionRequest, Vec<Message>, RequestContext)> {
     // max_tool_calls has no engine support
     if oairequest.max_tool_calls.is_some() {
         anyhow::bail!(
@@ -1962,13 +1892,13 @@ async fn parse_openresponses_request(
     // If previous_response_id is provided, get the full conversation history from cache
     let previous_messages = if let Some(prev_id) = &oairequest.previous_response_id {
         let cache = get_response_cache();
-        match cache.get_conversation(prev_id, chat.owner.as_deref()) {
+        match cache.get_conversation(prev_id, owner) {
             Ok(Some(mut conversation)) => {
                 // a follow-up on an older reply branches; continuing the session would rewrite its newer turns
                 let head = conversation
                     .session_id
                     .as_deref()
-                    .map(|session| cache.session_head(session, chat.owner.as_deref()))
+                    .map(|session| cache.session_head(session, owner))
                     .transpose()
                     .ok()
                     .flatten()
@@ -1987,10 +1917,7 @@ async fn parse_openresponses_request(
                 )
                 .into());
             }
-            Err(error) => {
-                InferenceRs::maybe_log_error(state.clone(), error.as_ref());
-                return Err(ApiError::internal().into());
-            }
+            Err(error) => return Err(store_error(error).into()),
         }
     } else {
         None
@@ -2038,37 +1965,40 @@ async fn parse_openresponses_request(
         .reasoning
         .as_ref()
         .and_then(|reasoning| reasoning.effort);
-    inference_core::resolve_reasoning_controls(None, reasoning_effort)?;
+    resolve_reasoning_controls(None, reasoning_effort)?;
     let reasoning_effort = reasoning_effort.map(|effort| effort.as_str().to_string());
     let enable_thinking = None;
 
     // Convert truncation enum to truncate_sequence bool
-    let truncate_sequence = oairequest
-        .truncation
-        .map(|t| matches!(t, crate::responses_types::enums::TruncationStrategy::Auto));
+    let truncate_sequence = oairequest.truncation.map(|t| {
+        matches!(
+            t,
+            inference_protocol::responses_types::enums::TruncationStrategy::Auto
+        )
+    });
 
     // Convert OpenResponses `text` field to `response_format`, falling back to legacy field
     let response_format = if let Some(text_config) = oairequest.text {
         text_config.format.map(|fmt| match fmt {
-            TextFormat::Text => crate::openai::ResponseFormat::Text,
+            TextFormat::Text => inference_protocol::openai::ResponseFormat::Text,
             TextFormat::JsonSchema {
                 name,
                 schema,
                 strict: _,
-            } => crate::openai::ResponseFormat::JsonSchema {
-                json_schema: crate::openai::JsonSchemaResponseFormat {
+            } => inference_protocol::openai::ResponseFormat::JsonSchema {
+                json_schema: inference_protocol::openai::JsonSchemaResponseFormat {
                     name,
                     schema: schema.unwrap_or(serde_json::Value::Object(Default::default())),
                 },
             },
-            TextFormat::JsonObject => crate::openai::ResponseFormat::JsonObject,
+            TextFormat::JsonObject => inference_protocol::openai::ResponseFormat::JsonObject,
         })
     } else {
         oairequest.response_format
     };
 
     // Convert to ChatCompletionRequest
-    let mut chat_request = ChatCompletionRequest {
+    let chat_request = ChatCompletionRequest {
         messages: Either::Left(final_messages.clone()),
         model: oairequest.model,
         adapter: oairequest.adapter,
@@ -2115,43 +2045,7 @@ async fn parse_openresponses_request(
         files: oairequest.files,
     };
 
-    chat.apply_agent_policy(&mut chat_request);
-    let asks = chat_request.agent_permission == Some(AgentPermission::Ask);
-    if asks && chat_request.stream != Some(true) {
-        return Err(ApiError::new(
-            ApiErrorKind::InvalidRequest,
-            ASK_REQUIRES_STREAMING,
-            Some("unsupported_parameter"),
-            Some("agent_permission"),
-        )
-        .into());
-    }
-    let agent_approval_handler = asks.then(|| {
-        AgentToolApprovalHandler::from_async(
-            chat.agentic.approval_broker.callback(chat.owner.clone()),
-        )
-    });
-    let agent_approval_notifier = asks.then(|| {
-        chat.agentic
-            .approval_broker
-            .notifier(tx.clone(), chat.owner.clone())
-    });
-    let (request, _) = parse_chat_request(
-        chat_request,
-        ChatCompletionParseContext {
-            state,
-            tx,
-            tool_dispatch_url: chat.agentic.tool_dispatch_url.clone(),
-            agent_approval_handler,
-            agent_approval_notifier,
-            tool_surface: OpenAiToolSurface::Responses,
-            skill_store: chat.skill_store.clone(),
-            media: Default::default(),
-            owner: chat.owner.clone(),
-        },
-    )
-    .await?;
-    Ok((request, final_messages, request_context))
+    Ok((chat_request, final_messages, request_context))
 }
 
 fn response_not_found_error(response_id: &str) -> ApiError {
@@ -2163,91 +2057,100 @@ fn response_not_found_error(response_id: &str) -> ApiError {
     )
 }
 
-/// A dispatched Responses request and what to echo back in its response resource.
-pub struct PreparedResponse {
-    pub rx: Receiver<Response>,
+impl inference_api::request_body::JsonRequest for OpenResponsesCreateRequest {
+    fn from_json(body: &[u8]) -> Result<Self, ApiError> {
+        inference_api::request_body::parse_json(body)
+    }
+}
+
+/// What a Responses run echoes in its resource and stores with its reply.
+pub struct ResponseRun {
     pub id: String,
-    /// The model name the request asked for.
+    /// The model name the response reports.
     pub model: String,
     pub metadata: Option<Value>,
     pub store: bool,
-    pub stream: bool,
-    pub background: bool,
     /// The conversation through this request, stored with the reply for `previous_response_id`.
     pub history: Vec<Message>,
     pub context: RequestContext,
-    pub cancellation: RequestCancellation,
     /// The agent session the request continues, kept for the reply when its run reports none.
     pub session_id: Option<String>,
     /// Who the request acts for; the stored reply is theirs alone.
     pub owner: Option<String>,
 }
 
-/// Validates a Responses request, resolves the conversation it continues and sends it to its model.
-pub(crate) fn prepare_response<'a>(
-    chat: &'a ChatEngine,
+/// Validates a Responses request, resolves the conversation it continues and starts its chat run.
+async fn start(
+    engine: &Engine,
     request: OpenResponsesCreateRequest,
-) -> BoxFuture<'a, Result<PreparedResponse, DispatchError>> {
-    Box::pin(prepare_response_inner(chat, request))
-}
-
-async fn prepare_response_inner(
-    chat: &ChatEngine,
-    mut request: OpenResponsesCreateRequest,
-) -> Result<PreparedResponse, DispatchError> {
-    let state = &chat.state;
-    let stream = request.stream == Some(true);
-    let background = request.background == Some(true);
-    if background && stream {
-        return Err(DispatchError::Validation(Box::new(
-            unsupported_background_stream_error(),
-        )));
-    }
-    let (tx, rx) = create_response_channel(None);
+    tap: Option<ResponseTap>,
+) -> Result<(ResponseRun, ChatEvents, Option<RequestCancellation>), ApiError> {
     let requested_model = request.model.clone();
-    resolve_lora_adapter_model(state, &mut request.model, &mut request.adapter)
-        .map_err(|error| DispatchError::Validation(Box::new(error)))?;
-    let model = response_model_id(state, requested_model.clone(), &request.model)
-        .unwrap_or(requested_model);
-    let model_id = (request.model != DEFAULT_MODEL_ID).then(|| request.model.clone());
     let metadata = request.metadata.clone();
     let store = request.store.unwrap_or(true);
-    let logits_processors = chat
-        .logits_processors
-        .resolve(request.logits_processors.as_deref())
-        .map_err(|error| DispatchError::Validation(Box::new(error)))?;
-    let host_tools = chat
-        .host_tools
-        .resolve(request.host_tools.as_deref())
-        .map_err(|error| DispatchError::Validation(Box::new(error)))?;
-    let (mut core_request, history, context) = parse_openresponses_request(request, chat, tx)
-        .await
-        .map_err(|error| DispatchError::Validation(boxed_anyhow(error)))?;
-    let cancellation = RequestCancellation::default();
-    let mut session_id = None;
-    if let Request::Normal(normal) = &mut core_request {
-        normal.cancellation = Some(cancellation.clone());
-        normal.logits_processors = logits_processors;
-        normal.host_tools = host_tools.unwrap_or_default();
-        session_id.clone_from(&normal.session_id);
-    }
-    send_request_with_model(state, core_request, model_id.as_deref())
-        .await
-        .map_err(|error| DispatchError::Internal(error.into()))?;
-    Ok(PreparedResponse {
-        rx,
+    let owner = engine.owner().map(str::to_string);
+    let (chat_request, history, context) =
+        parse_openresponses_request(request, owner.as_deref())
+            .map_err(|error| ApiError::from_error(error.as_ref(), ApiErrorKind::InvalidRequest))?;
+    let session_id = chat_request.session_id.clone();
+    let surface = OpenAiToolSurface::Responses;
+    let chat = engine
+        .chat_events(chat_request, MediaAttachments::default(), surface)
+        .await?
+        .with_tap(tap);
+    let model = chat
+        .model_override()
+        .map_or(requested_model, str::to_string);
+    let cancellation = chat.cancellation();
+    let run = ResponseRun {
         id: format!("resp_{}", Uuid::new_v4()),
         model,
         metadata,
         store,
-        stream,
-        background,
         history,
         context,
-        cancellation,
         session_id,
-        owner: chat.owner.clone(),
-    })
+        owner,
+    };
+    Ok((run, Box::pin(chat), cancellation))
+}
+
+/// Runs a Responses request to its end, or queues it when it asks for `background` and returns it queued.
+pub async fn create(
+    engine: &Engine,
+    mut request: OpenResponsesCreateRequest,
+) -> Result<ResponseResource, ApiError> {
+    request.stream = Some(false);
+    let background = request.background == Some(true);
+    let (run, events, cancellation) = start(engine, request, None).await?;
+    if background {
+        return Ok(spawn_background(run, events, cancellation, engine.clone()));
+    }
+    let (result, stored) = run_to_end(run, events, Some(engine)).await;
+    if let Some(stored) = stored {
+        stored.save();
+    }
+    result
+}
+
+/// Starts a streaming Responses request, reporting each engine response to `tap` (e.g. for an access log). Dropping
+/// the stream abandons the request.
+pub async fn create_stream(
+    engine: &Engine,
+    mut request: OpenResponsesCreateRequest,
+    tap: Option<ResponseTap>,
+) -> Result<OpenResponsesStreamer, ApiError> {
+    if request.background == Some(true) {
+        return Err(unsupported_background_stream_error());
+    }
+    request.stream = Some(true);
+    let (run, events, cancellation) = start(engine, request, tap).await?;
+    Ok(OpenResponsesStreamer::new(
+        run,
+        events,
+        cancellation,
+        Some(engine.clone()),
+    ))
 }
 
 /// What a finished request leaves in the response cache when it asked to be stored.
@@ -2270,31 +2173,12 @@ impl StoredResponse {
     }
 }
 
-/// Waits for a non-streaming request's reply, storing it and its conversation when the request asked to.
-pub(crate) fn collect_response<'a>(
-    prepared: PreparedResponse,
-    state: &'a SharedInferenceRsState,
-) -> BoxFuture<'a, Result<ResponseResource, ApiError>> {
-    Box::pin(collect_response_inner(prepared, state))
-}
-
-async fn collect_response_inner(
-    prepared: PreparedResponse,
-    state: &SharedInferenceRsState,
-) -> Result<ResponseResource, ApiError> {
-    let (result, stored) = run_to_end(prepared, state).await;
-    if let Some(stored) = stored {
-        stored.save();
-    }
-    result
-}
-
 async fn run_to_end(
-    prepared: PreparedResponse,
-    state: &SharedInferenceRsState,
+    run: ResponseRun,
+    mut events: ChatEvents,
+    engine: Option<&Engine>,
 ) -> (Result<ResponseResource, ApiError>, Option<StoredResponse>) {
-    let PreparedResponse {
-        mut rx,
+    let ResponseRun {
         id,
         model,
         metadata,
@@ -2303,49 +2187,40 @@ async fn run_to_end(
         context,
         session_id,
         owner,
-        ..
-    } = prepared;
+    } = run;
     // Files stay reachable through the file store; the response cites them.
     let mut shell_output_items = Vec::new();
     let mut pending_shell_calls = HashMap::new();
     let mut files = Vec::new();
-    let response = loop {
-        match rx.recv().await {
-            Some(Response::AgenticToolCallProgress {
-                tool_call_id,
-                phase,
-                ..
-            }) => {
+    let last = loop {
+        match events.next().await {
+            Some(ChatStreamEvent::AgenticToolCallProgress(progress)) => {
                 record_shell_progress_items(
                     &mut pending_shell_calls,
                     &mut shell_output_items,
-                    &tool_call_id,
-                    &phase,
+                    &progress.tool_call_id,
+                    &progress.phase,
                 );
             }
-            Some(Response::BlockDenoisingProgress(_)) => {}
-            Some(Response::File(file)) => {
-                tag_with_container(state, &file, &id, owner.as_deref());
+            Some(ChatStreamEvent::FileProduced(file)) => {
+                tag_with_container(engine, &file, &id);
                 files.push(file);
             }
+            Some(ChatStreamEvent::BlockDenoisingProgress(_) | ChatStreamEvent::Chunk(_)) => {}
             other => break other,
         }
     };
-    let resource = |chat_resp: &ChatCompletionResponse, metadata| {
-        chat_response_to_response_resource(
-            chat_resp,
-            id.clone(),
-            model.clone(),
-            metadata,
-            &context,
-            &shell_output_items,
-            &files,
-        )
-    };
-
-    match response {
-        Some(Response::Done(chat_resp)) => {
-            let response = resource(&chat_resp, metadata);
+    match last {
+        Some(ChatStreamEvent::Done(chat_resp)) => {
+            let response = chat_response_to_response_resource(
+                &chat_resp,
+                id.clone(),
+                model,
+                metadata,
+                &context,
+                &shell_output_items,
+                &files,
+            );
             let stored = store.then(|| {
                 for choice in &chat_resp.choices {
                     let tool_calls = client_tool_calls(&context, &choice.message);
@@ -2378,70 +2253,44 @@ async fn run_to_end(
             });
             (Ok(response), stored)
         }
-        Some(Response::ModelError(msg, partial)) => {
-            InferenceRs::maybe_log_error(state.clone(), &ModelErrorMessage(msg.to_string()));
-            let stored = store.then(|| {
-                let mut response = resource(&partial, metadata);
-                response.error = Some(response_error_from_api_error(ApiError::model_error()));
-                response.status = ResponseStatus::Failed;
-                StoredResponse {
-                    id: id.clone(),
-                    owner: owner.clone(),
-                    response,
-                    history: None,
-                }
+        Some(ChatStreamEvent::Error(error)) if error.code.as_deref() == Some(MODEL_ERROR_CODE) => {
+            let stored = store.then(|| StoredResponse {
+                id: id.clone(),
+                owner,
+                response: ResponseResource::new(id.clone(), model, unix_now())
+                    .with_status(ResponseStatus::Failed)
+                    .with_metadata(metadata.unwrap_or(Value::Null))
+                    .with_error(response_error_from_api_error(error.clone())),
+                history: None,
             });
-            (Err(ApiError::model_error()), stored)
+            (Err(error), stored)
         }
-        Some(Response::ValidationError(e)) => (
-            Err(classify_api_error(
-                state,
-                e.as_ref(),
-                ApiErrorKind::InvalidRequest,
-            )),
-            None,
-        ),
-        Some(Response::InternalError(e)) => (
-            Err(classify_api_error(
-                state,
-                e.as_ref(),
-                ApiErrorKind::Internal,
-            )),
-            None,
-        ),
-        _ => {
-            let error = anyhow::anyhow!("No response received from the model.");
-            (
-                Err(classify_api_error(
-                    state,
-                    error.as_ref(),
-                    ApiErrorKind::Internal,
-                )),
-                None,
-            )
-        }
+        Some(ChatStreamEvent::Error(error)) => (Err(error), None),
+        _ => (Err(ApiError::internal()), None),
     }
 }
 
-/// Answers `prepared` off the caller's task and returns its queued resource; [`get_response`] follows it.
-pub(crate) fn spawn_background(
-    prepared: PreparedResponse,
-    state: SharedInferenceRsState,
+/// Answers `run` off the caller's task and returns its queued resource; [`get`] follows it.
+fn spawn_background(
+    run: ResponseRun,
+    events: ChatEvents,
+    cancellation: Option<RequestCancellation>,
+    engine: Engine,
 ) -> ResponseResource {
     let task_manager = get_background_task_manager();
-    let id = prepared.id.clone();
+    let id = run.id.clone();
     task_manager.create_task(
         id.clone(),
-        prepared.model.clone(),
-        prepared.cancellation.clone(),
-        prepared.owner.clone(),
+        run.model.clone(),
+        cancellation.unwrap_or_default(),
+        run.owner.clone(),
     );
-    let queued = ResponseResource::new(id.clone(), prepared.model.clone(), unix_now())
+    let queued = ResponseResource::new(id.clone(), run.model.clone(), unix_now())
         .with_status(ResponseStatus::Queued)
-        .with_metadata(prepared.metadata.clone().unwrap_or(Value::Null));
+        .with_metadata(run.metadata.clone().unwrap_or(Value::Null));
     tokio::spawn(async move {
         task_manager.mark_in_progress(&id);
-        let (result, stored) = run_to_end(prepared, &state).await;
+        let (result, stored) = run_to_end(run, events, Some(&engine)).await;
         // A task cancelled or deleted meanwhile is not stored, so nothing continues from it.
         let current = match result {
             Ok(response) => task_manager.mark_completed(&id, response),
@@ -2454,23 +2303,17 @@ pub(crate) fn spawn_background(
     queued
 }
 
-/// A background response in whatever state it has reached, or a stored one.
-pub(crate) fn get_response(
-    state: &SharedInferenceRsState,
-    response_id: &str,
-    owner: Option<&str>,
-) -> Result<ResponseResource, ApiError> {
+/// A background response in whatever state it has reached, or a stored one. The store is the process's, shared by
+/// its engines; each response is its owner's alone.
+pub fn get(engine: &Engine, response_id: &str) -> Result<ResponseResource, ApiError> {
+    let owner = engine.owner();
     if let Some(response) = get_background_task_manager().get_response(response_id, owner) {
         return Ok(response);
     }
     match get_response_cache().get_response(response_id, owner) {
         Ok(Some(response)) => Ok(response),
         Ok(None) => Err(response_not_found_error(response_id)),
-        Err(error) => Err(classify_api_error(
-            state,
-            error.as_ref(),
-            ApiErrorKind::Internal,
-        )),
+        Err(error) => Err(store_error(error)),
     }
 }
 
@@ -2483,11 +2326,8 @@ pub struct ResponseDeleted {
 }
 
 /// Forgets a response: its background task, the stored resource and its conversation.
-pub(crate) fn delete_response(
-    state: &SharedInferenceRsState,
-    response_id: &str,
-    owner: Option<&str>,
-) -> Result<ResponseDeleted, ApiError> {
+pub fn delete(engine: &Engine, response_id: &str) -> Result<ResponseDeleted, ApiError> {
+    let owner = engine.owner();
     let task_deleted = get_background_task_manager().delete_task(response_id, owner);
     match get_response_cache().delete_response(response_id, owner) {
         Ok(cache_deleted) if task_deleted || cache_deleted => Ok(ResponseDeleted {
@@ -2496,22 +2336,14 @@ pub(crate) fn delete_response(
             deleted: true,
         }),
         Ok(_) => Err(response_not_found_error(response_id)),
-        Err(error) => Err(classify_api_error(
-            state,
-            error.as_ref(),
-            ApiErrorKind::Internal,
-        )),
+        Err(error) => Err(store_error(error)),
     }
 }
 
 /// Cancels a queued or running background response and returns it; finished responses come back unchanged.
-pub(crate) fn cancel_response(
-    state: &SharedInferenceRsState,
-    response_id: &str,
-    owner: Option<&str>,
-) -> Result<ResponseResource, ApiError> {
-    get_background_task_manager().cancel(response_id, owner);
-    get_response(state, response_id, owner)
+pub fn cancel(engine: &Engine, response_id: &str) -> Result<ResponseResource, ApiError> {
+    get_background_task_manager().cancel(response_id, engine.owner());
+    get(engine, response_id)
 }
 
 /// The input minus `function_call` items the stored history holds, which a client resends with their outputs.
@@ -2540,7 +2372,7 @@ fn without_stored_calls(stored: &[Message], input: Vec<Message>) -> Vec<Message>
 /// The calls in a reply that the client answers; a server tool's call stopped by the round limit has no answer coming.
 fn client_tool_calls(
     context: &RequestContext,
-    message: &inference_core::ResponseMessage,
+    message: &inference_protocol::response::ResponseMessage,
 ) -> Vec<ToolCall> {
     message
         .tool_calls
@@ -2552,11 +2384,11 @@ fn client_tool_calls(
 }
 
 /// A tool call the run returned, as history keeps it: the name the model emitted, so a follow-up matches it.
-fn history_tool_call(call: &inference_core::ToolCallResponse) -> ToolCall {
+fn history_tool_call(call: &inference_protocol::tools::ToolCallResponse) -> ToolCall {
     ToolCall {
         id: Some(call.id.clone()),
-        tp: inference_core::ToolType::Function,
-        function: crate::openai::FunctionCalled {
+        tp: inference_protocol::ToolType::Function,
+        function: inference_protocol::openai::FunctionCalled {
             name: call.function.name.clone(),
             arguments: call.function.arguments.clone(),
         },
@@ -2792,7 +2624,7 @@ mod tests {
         assert_eq!(text, "hello");
     }
 
-    fn chat_response(choices: Vec<inference_core::Choice>) -> ChatCompletionResponse {
+    fn chat_response(choices: Vec<inference_protocol::response::Choice>) -> ChatCompletionResponse {
         ChatCompletionResponse {
             id: "chatcmpl_test".to_string(),
             choices,
@@ -2800,7 +2632,7 @@ mod tests {
             model: "base-model".to_string(),
             system_fingerprint: "local".to_string(),
             object: "chat.completion".to_string(),
-            usage: inference_core::Usage {
+            usage: inference_protocol::response::Usage {
                 completion_tokens: 0,
                 prompt_tokens: 0,
                 total_tokens: 0,
@@ -2819,12 +2651,12 @@ mod tests {
         }
     }
 
-    fn choice(finish_reason: &str, content: Option<&str>) -> inference_core::Choice {
-        inference_core::Choice {
+    fn choice(finish_reason: &str, content: Option<&str>) -> inference_protocol::response::Choice {
+        inference_protocol::response::Choice {
             finish_reason: finish_reason.to_string(),
             stop_sequence: None,
             index: 0,
-            message: inference_core::ResponseMessage {
+            message: inference_protocol::response::ResponseMessage {
                 content: content.map(str::to_string),
                 role: "assistant".to_string(),
                 tool_calls: None,
@@ -2881,7 +2713,7 @@ mod tests {
             model: "base-model".to_string(),
             system_fingerprint: "local".to_string(),
             object: "chat.completion".to_string(),
-            usage: inference_core::Usage {
+            usage: inference_protocol::response::Usage {
                 completion_tokens: 0,
                 prompt_tokens: 0,
                 total_tokens: 0,
@@ -2913,3 +2745,7 @@ mod tests {
         assert_eq!(response.adapter_generation.as_deref(), Some("generation"));
     }
 }
+
+#[cfg(test)]
+#[path = "responses_tests.rs"]
+mod stream_tests;

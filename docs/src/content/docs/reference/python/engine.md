@@ -115,42 +115,6 @@ rerank(request: types.RerankRequest | str) -> types.RerankResponse
 decide(request: types.DecisionRequest | str) -> types.DecisionResponse
 ```
 
-### `Engine.create_response`
-
-```text
-create_response(
-    request: types.OpenResponsesCreateRequest | str,
-) -> types.ResponseResource
-```
-
-### `Engine.response_stream`
-
-```text
-response_stream(
-    request: types.OpenResponsesCreateRequest | str,
-) -> Stream
-```
-
-OpenResponses events, each read as its variant of OpenResponsesStreamEvent.
-
-### `Engine.get_response`
-
-```text
-get_response(response_id: str) -> types.ResponseResource
-```
-
-### `Engine.delete_response`
-
-```text
-delete_response(response_id: str) -> types.ResponseDeleted
-```
-
-### `Engine.cancel_response`
-
-```text
-cancel_response(response_id: str) -> types.ResponseResource
-```
-
 ### `Engine.re_isq`
 
 ```text
@@ -826,36 +790,6 @@ decide(request_json: str) -> str
 
 Answers typed questions (choice, score, noul) about a state with a decision model.
 
-### `JsonEngine.create_response`
-
-```text
-create_response(request_json: str) -> str
-```
-
-### `JsonEngine.response_stream`
-
-```text
-response_stream(request_json: str) -> Stream
-```
-
-### `JsonEngine.get_response`
-
-```text
-get_response(response_id: str) -> str
-```
-
-### `JsonEngine.delete_response`
-
-```text
-delete_response(response_id: str) -> str
-```
-
-### `JsonEngine.cancel_response`
-
-```text
-cancel_response(response_id: str) -> str
-```
-
 ### `JsonEngine.list_models`
 
 ```text
@@ -1241,7 +1175,7 @@ Where a job's file is, {"id", "file"} to {"path"}.
 list_container_files(container_id: str) -> str
 ```
 
-The files a Responses container (a code-running session) produced.
+The files a container (a code-running session) produced.
 
 ### `JsonEngine.get_container_file`
 

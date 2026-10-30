@@ -1647,6 +1647,7 @@ impl AnthropicStream {
                 self.stream.enqueue_json("file_produced", json!(file))
             }
             ChatStreamEvent::BlockDenoisingProgress(_) => {}
+            ChatStreamEvent::Done(_) => unreachable!("a streaming run ends with chunks, not Done"),
         }
     }
 

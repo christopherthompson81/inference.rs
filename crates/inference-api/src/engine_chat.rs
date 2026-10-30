@@ -8,9 +8,10 @@ use futures::future::BoxFuture;
 use indexmap::IndexMap;
 use inference_core::{
     AgentPermission, AgentToolApprovalHandler, AgentToolApprovalNotifier,
-    ChatCompletionChunkResponse, ChatResponseCollector, Constraint, InferenceRs, MessageContent,
-    ModelCategory, NormalRequest, Request, RequestMessage, SamplingParams, TokenizationRequest,
-    encode_agentic_tool_images, is_chat_template_request_error,
+    ChatCompletionChunkResponse, ChatCompletionResponse, ChatResponseCollector, Constraint,
+    InferenceRs, MessageContent, ModelCategory, NormalRequest, Request, RequestMessage,
+    SamplingParams, TokenizationRequest, encode_agentic_tool_images,
+    is_chat_template_request_error,
 };
 pub use inference_core::{
     FINISH_REASON_CANCELED, FINISH_REASON_LENGTH, ReasoningEffort, resolve_reasoning_controls,
@@ -1091,6 +1092,8 @@ pub enum ChatStreamEvent {
     BlockDenoisingProgress(inference_core::BlockDenoisingProgress),
     /// Terminal: nothing follows an error.
     Error(ApiError),
+    /// Terminal for a run that did not ask to stream ([`crate::Engine::chat_events`]): its whole response.
+    Done(Box<ChatCompletionResponse>),
 }
 
 // The types the agentic events carry, so API consumers can match on them without naming inference_core.
@@ -1184,6 +1187,11 @@ impl ChatStream {
         self
     }
 
+    /// The model id the run's responses name, when it differs from the one the engine reports (an alias, the default).
+    pub fn model_override(&self) -> Option<&str> {
+        self.model_override.as_deref()
+    }
+
     /// The request's cancellation, for a caller that cancels from elsewhere, e.g. a signal handler.
     pub fn cancellation(&self) -> Option<RequestCancellation> {
         self.cancellation.clone()
@@ -1262,8 +1270,13 @@ impl ChatStream {
                 ChatStreamEvent::BlockDenoisingProgress(progress)
             }
             Response::File(file) => ChatStreamEvent::FileProduced(file),
-            Response::Done(_)
-            | Response::CompletionDone(_)
+            Response::Done(mut response) => {
+                self.finished = true;
+                InferenceRs::maybe_log_response(self.state.clone(), &response);
+                apply_model_override(&mut response.model, self.model_override.as_deref());
+                ChatStreamEvent::Done(Box::new(response))
+            }
+            Response::CompletionDone(_)
             | Response::CompletionModelError(_, _)
             | Response::CompletionChunk(_)
             | Response::ImageGeneration(_)

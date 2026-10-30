@@ -131,21 +131,6 @@ impl BlockingEngine {
         })
     }
 
-    pub fn responses_json(&self, request: &[u8]) -> Result<String, ApiError> {
-        self.call(request, |engine, request| async move {
-            engine.responses_json(&request).await
-        })
-    }
-
-    pub fn responses_stream_json(&self, request: &[u8]) -> Result<BlockingStream, ApiError> {
-        self.stream(request, |engine, request| async move {
-            engine.responses_stream_json(&request).await.map(|stream| {
-                let cancellation = stream.cancellation();
-                (stream.map(|item| item.to_json()), cancellation)
-            })
-        })
-    }
-
     pub fn embeddings_json(&self, request: &[u8]) -> Result<String, ApiError> {
         self.call(request, |engine, request| async move {
             engine.embeddings_json(&request).await

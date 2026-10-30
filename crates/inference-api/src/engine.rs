@@ -60,12 +60,6 @@ use crate::{
     },
     registry::HostTools,
     request_body::JsonRequest,
-    responses::{
-        OpenResponsesCreateRequest, OpenResponsesStreamer, PreparedResponse, ResponseDeleted,
-        cancel_response, collect_response, delete_response, get_response, prepare_response,
-        spawn_background,
-    },
-    responses_types::ResponseResource,
     skill_store::{
         AnthropicSkillVersionListObject, AnthropicSkillVersionObject, SkillFiles, SkillListObject,
         SkillStore, skill_api_error,
@@ -1035,11 +1029,6 @@ impl Engine {
         chat.state.shutdown().await
     }
 
-    #[cfg(test)]
-    pub(crate) fn chat_engine(&self) -> &ChatEngine {
-        &self.chat
-    }
-
     pub fn adapter_config(&self) -> &LoraAdapterApiConfig {
         &self.adapters
     }
@@ -1147,6 +1136,34 @@ impl Engine {
         .with_cancellation(prepared.cancellation))
     }
 
+    /// Starts a chat run offering `tool_surface`'s tools, keeping the request's own `stream`: a streaming run yields
+    /// chunks, one that is not ends with [`ChatStreamEvent::Done`]. Protocols translated onto chat build on it.
+    pub async fn chat_events(
+        &self,
+        request: ChatCompletionRequest,
+        media: MediaAttachments,
+        tool_surface: OpenAiToolSurface,
+    ) -> Result<ChatStream, ApiError> {
+        let state = self.state().clone();
+        let prepared = self
+            .chat
+            .prepare(request, tool_surface, media)
+            .await
+            .map_err(|error| error.into_api_error(state.clone()))?;
+        Ok(
+            ChatStream::new(prepared.rx, state, prepared.model_override, None)
+                .with_cancellation(prepared.cancellation),
+        )
+    }
+
+    /// Tags this owner's stored file with `tag` (a container id) so the container's file listing includes it; false
+    /// when no engine stores the file.
+    pub fn tag_file(&self, file_id: &str, tag: &str) -> bool {
+        self.state()
+            .try_tag_file(file_id, tag, self.owner())
+            .unwrap_or(false)
+    }
+
     /// [`Engine::chat`] over JSON: an OpenAI chat completion request in, the response out.
     pub async fn chat_json(
         &self,
@@ -1237,80 +1254,6 @@ impl Engine {
         request: &[u8],
     ) -> Result<CompletionStream, ApiError> {
         self.completion_stream(parse_json(request)?).await
-    }
-
-    /// Runs a Responses request to its end, or queues it when it asks for `background` and returns it queued.
-    pub async fn responses(
-        &self,
-        mut request: OpenResponsesCreateRequest,
-    ) -> Result<ResponseResource, ApiError> {
-        request.stream = Some(false);
-        let prepared = self.prepare_response(request).await?;
-        if prepared.background {
-            return Ok(spawn_background(prepared, self.state().clone()));
-        }
-        collect_response(prepared, self.state()).await
-    }
-
-    /// Starts a streaming Responses request. Dropping the stream abandons the request.
-    pub async fn responses_stream(
-        &self,
-        mut request: OpenResponsesCreateRequest,
-    ) -> Result<OpenResponsesStreamer, ApiError> {
-        request.stream = Some(true);
-        let prepared = self.prepare_response(request).await?;
-        Ok(OpenResponsesStreamer::new(
-            prepared,
-            self.state().clone(),
-            None,
-        ))
-    }
-
-    async fn prepare_response(
-        &self,
-        request: OpenResponsesCreateRequest,
-    ) -> Result<PreparedResponse, ApiError> {
-        let state = self.state().clone();
-        prepare_response(&self.chat, request)
-            .await
-            .map_err(|error| error.into_api_error(state))
-    }
-
-    /// A background response in its current state, or a stored one. The store is shared by the process's engines.
-    pub fn response(&self, response_id: &str) -> Result<ResponseResource, ApiError> {
-        get_response(self.state(), response_id, self.owner())
-    }
-
-    pub fn delete_response(&self, response_id: &str) -> Result<ResponseDeleted, ApiError> {
-        delete_response(self.state(), response_id, self.owner())
-    }
-
-    /// Cancels a background response that has not finished, and returns it.
-    pub fn cancel_response(&self, response_id: &str) -> Result<ResponseResource, ApiError> {
-        cancel_response(self.state(), response_id, self.owner())
-    }
-
-    pub async fn responses_json(&self, request: &[u8]) -> Result<String, ApiError> {
-        to_json(&self.responses(parse_json(request)?).await?)
-    }
-
-    pub async fn responses_stream_json(
-        &self,
-        request: &[u8],
-    ) -> Result<OpenResponsesStreamer, ApiError> {
-        self.responses_stream(parse_json(request)?).await
-    }
-
-    pub fn response_json(&self, response_id: &str) -> Result<String, ApiError> {
-        to_json(&self.response(response_id)?)
-    }
-
-    pub fn delete_response_json(&self, response_id: &str) -> Result<String, ApiError> {
-        to_json(&self.delete_response(response_id)?)
-    }
-
-    pub fn cancel_response_json(&self, response_id: &str) -> Result<String, ApiError> {
-        to_json(&self.cancel_response(response_id)?)
     }
 
     pub fn models(&self) -> Result<ModelObjects, ApiError> {
@@ -1986,7 +1929,7 @@ impl Engine {
         to_json(&self.delete_file(file_id)?)
     }
 
-    /// The files a Responses container (a code-running session) produced.
+    /// The files a container (a code-running session) produced.
     pub fn container_files(&self, container_id: &str) -> Result<ContainerFileListObject, ApiError> {
         files::list_container_files(self.state(), container_id, self.owner())
     }
@@ -2173,6 +2116,7 @@ impl ChatStreamEvent {
             Self::FileProduced(_) => "file_produced",
             Self::BlockDenoisingProgress(_) => "block_denoising_progress",
             Self::Error(_) => "error",
+            Self::Done(_) => "done",
         }
     }
 
@@ -2192,6 +2136,7 @@ impl ChatStreamEvent {
                 "final_block": progress.final_block,
             })),
             Self::Error(error) => Ok(error.to_openai_body()),
+            Self::Done(response) => serde_json::to_value(response),
         }
         .unwrap_or_else(|_| ApiError::internal().to_openai_body());
         serde_json::json!({ "event": self.name(), "data": data }).to_string()

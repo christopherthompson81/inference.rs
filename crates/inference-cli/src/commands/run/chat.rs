@@ -444,6 +444,9 @@ async fn read_turn(
                 denoising.clear();
                 anyhow::bail!("{error}");
             }
+            ChatStreamEvent::Done(_) => {
+                unreachable!("chat_stream runs stream, so they end with chunks")
+            }
         }
     }
     denoising.clear();

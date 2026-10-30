@@ -446,38 +446,6 @@ fn completion_and_stream_agree_and_embeddings_need_an_embedding_model() {
     unsafe { inference_engine_free(engine) };
 }
 
-// How long a background response may take on the tiny checkpoint before the test calls it hung.
-const BACKGROUND_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
-const BACKGROUND_POLL: std::time::Duration = std::time::Duration::from_millis(50);
-
-fn responses_request(extra: Value) -> String {
-    let mut request = json!({
-        "model": "default",
-        "input": PROMPT,
-        "max_output_tokens": MAX_TOKENS,
-        "temperature": 0.0,
-        "top_k": 1,
-    });
-    request
-        .as_object_mut()
-        .unwrap()
-        .extend(extra.as_object().unwrap().clone());
-    request.to_string()
-}
-
-fn create_response(engine: *const inference_engine, request: &str) -> (inference_status, Value) {
-    let mut response = null_mut();
-    let status = unsafe {
-        inference_responses_create(
-            engine,
-            request.as_ptr().cast::<c_char>(),
-            request.len(),
-            &mut response,
-        )
-    };
-    (status, stored_body(status, response))
-}
-
 fn stored_body(status: inference_status, response: *mut inference_string) -> Value {
     if status == INFERENCE_OK {
         serde_json::from_str(&take_string(response)).unwrap()
@@ -526,150 +494,6 @@ fn drain(stream: *mut inference_stream) -> Vec<Value> {
     }
     unsafe { inference_stream_free(stream) };
     events
-}
-
-#[test]
-fn responses_stream_store_continue_and_run_in_the_background() {
-    let dir = support::tiny_checkpoint().unwrap();
-    let (status, engine) = load(&spec(dir.path()));
-    assert_eq!(status, INFERENCE_OK, "{}", last_error());
-
-    let (status, response) = create_response(engine, &responses_request(json!({})));
-    assert_eq!(status, INFERENCE_OK, "{response}");
-    assert_eq!(response["object"], "response", "{response}");
-    // The random weights never stop on their own, so the token cap ends each run.
-    assert_eq!(response["status"], "incomplete", "{response}");
-    assert_eq!(
-        response["incomplete_details"]["reason"], "max_output_tokens",
-        "{response}"
-    );
-    let id = response["id"].as_str().unwrap().to_string();
-    let text = response["output_text"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
-
-    let request = responses_request(json!({"stream": true}));
-    let mut stream = null_mut();
-    let status = unsafe {
-        inference_responses_stream_open(
-            engine,
-            request.as_ptr().cast::<c_char>(),
-            request.len(),
-            &mut stream,
-        )
-    };
-    assert_eq!(status, INFERENCE_OK, "{}", last_error());
-    let events = drain(stream);
-    let names: Vec<&str> = events
-        .iter()
-        .map(|e| e["event"].as_str().unwrap())
-        .collect();
-    assert_eq!(names.first(), Some(&"response.created"), "{names:?}");
-    assert_eq!(names.last(), Some(&"response.incomplete"), "{names:?}");
-    let streamed: String = events
-        .iter()
-        .filter(|e| e["event"] == "response.output_text.delta")
-        .map(|e| e["data"]["delta"].as_str().unwrap())
-        .collect();
-    assert_eq!(streamed, text);
-    // a streamed response is stored as soon as it completes, so it can be continued at once
-    let streamed_id = events.last().unwrap()["data"]["response"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let (status, stored) = by_id(inference_responses_get, engine, &streamed_id);
-    assert_eq!(status, INFERENCE_OK, "{stored}");
-    assert_eq!(stored["status"], "incomplete", "{stored}");
-    let follow_up = responses_request(json!({"previous_response_id": streamed_id}));
-    let (status, continued) = create_response(engine, &follow_up);
-    assert_eq!(status, INFERENCE_OK, "{continued}");
-    let input_tokens = |response: &Value| response["usage"]["input_tokens"].as_u64().unwrap();
-    assert!(
-        input_tokens(&continued) > input_tokens(&response),
-        "the follow-up carries the stored conversation: {continued}"
-    );
-
-    let (status, stored) = by_id(inference_responses_get, engine, &id);
-    assert_eq!(status, INFERENCE_OK, "{stored}");
-    assert_eq!(
-        (stored["id"].as_str(), stored["status"].as_str()),
-        (Some(id.as_str()), Some("incomplete"))
-    );
-    let (status, cancelled) = by_id(inference_responses_cancel, engine, &id);
-    assert_eq!(status, INFERENCE_OK, "{cancelled}");
-    assert_eq!(
-        cancelled["status"], "incomplete",
-        "a finished response stays finished"
-    );
-    let (status, deleted) = by_id(inference_responses_delete, engine, &id);
-    assert_eq!(status, INFERENCE_OK, "{deleted}");
-    assert_eq!(
-        deleted,
-        json!({"id": id, "object": "response.deleted", "deleted": true})
-    );
-    for call in [inference_responses_get, inference_responses_delete] {
-        let (status, error) = by_id(call, engine, &id);
-        assert_eq!(status, INFERENCE_ERR_NOT_FOUND, "{error}");
-        assert_eq!(error["error"]["code"], "response_not_found", "{error}");
-    }
-    let (status, error) = create_response(
-        engine,
-        &responses_request(json!({"previous_response_id": id})),
-    );
-    assert_eq!(status, INFERENCE_ERR_NOT_FOUND, "{error}");
-    assert_eq!(error["error"]["param"], "previous_response_id", "{error}");
-
-    let (status, queued) = create_response(engine, &responses_request(json!({"background": true})));
-    assert_eq!(status, INFERENCE_OK, "{queued}");
-    assert_eq!(queued["status"], "queued", "{queued}");
-    let background_id = queued["id"].as_str().unwrap();
-    let deadline = std::time::Instant::now() + BACKGROUND_DEADLINE;
-    let finished = loop {
-        let (status, response) = by_id(inference_responses_get, engine, background_id);
-        assert_eq!(status, INFERENCE_OK, "{response}");
-        if !matches!(response["status"].as_str(), Some("queued" | "in_progress")) {
-            break response;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "background response never finished"
-        );
-        std::thread::sleep(BACKGROUND_POLL);
-    };
-    assert_eq!(finished["status"], "incomplete", "{finished}");
-    assert_eq!(
-        finished["incomplete_details"]["reason"], "max_output_tokens",
-        "{finished}"
-    );
-    assert_eq!(finished["output_text"].as_str().unwrap_or_default(), text);
-
-    let request = responses_request(json!({"stream": true, "background": true}));
-    let mut stream = null_mut();
-    let status = unsafe {
-        inference_responses_stream_open(
-            engine,
-            request.as_ptr().cast::<c_char>(),
-            request.len(),
-            &mut stream,
-        )
-    };
-    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST);
-    assert!(stream.is_null());
-    let error: Value = serde_json::from_str(&last_error()).unwrap();
-    assert_eq!(
-        error["error"]["code"], "unsupported_parameter_combination",
-        "{error}"
-    );
-
-    let bad_id = [0xff_u8];
-    let mut response = null_mut();
-    let status = unsafe {
-        inference_responses_get(engine, bad_id.as_ptr().cast::<c_char>(), 1, &mut response)
-    };
-    assert_eq!(status, INFERENCE_ERR_INVALID_ARGUMENT);
-
-    unsafe { inference_engine_free(engine) };
 }
 
 fn request_call(
@@ -1509,12 +1333,6 @@ fn one_engine_serves_several_models_by_id() {
             (status, completion["model"].clone()),
             (INFERENCE_OK, json!(served)),
             "{completion}"
-        );
-        let (status, created) = create_response(engine, &responses_request(json!({"model": id})));
-        assert_eq!(
-            (status, created["model"].clone()),
-            (INFERENCE_OK, json!(served)),
-            "{created}"
         );
     }
     unsafe { inference_engine_free(engine) };
