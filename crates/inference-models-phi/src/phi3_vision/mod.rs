@@ -2,11 +2,10 @@
 
 pub mod inputs_processor;
 
+use crate::image_projection::{BigShapeWithOneHole, EmbeddingLayers, image_projection};
 use either::Either;
 use inference_quant::{BitWiseOp, NonZeroOp, QuantMethod, QuantizedConfig, ShardedVarBuilder};
-use inference_tensor::{
-    D, DType, Device, IndexOp, Module, Result, Shape, Tensor, shape::ShapeWithOneHole,
-};
+use inference_tensor::{D, DType, Device, IndexOp, Module, Result, Tensor};
 use std::{
     any::Any,
     fmt::Debug,
@@ -110,73 +109,7 @@ impl Config {
     }
 }
 
-trait ModuleWithMetadata: Module + Debug + Send + Sync {
-    fn device(&self) -> Device;
-    fn dtype(&self) -> DType;
-}
-
-#[derive(Debug)]
-struct QuantMethodWrapper(Arc<dyn QuantMethod>);
-
-impl Module for QuantMethodWrapper {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        self.0.forward(xs)
-    }
-}
-
-impl ModuleWithMetadata for QuantMethodWrapper {
-    fn device(&self) -> Device {
-        self.0.unquant_weight_bias().unwrap().0.device().clone()
-    }
-    fn dtype(&self) -> DType {
-        self.0.unquant_weight_bias().unwrap().0.dtype()
-    }
-}
-
-impl ModuleWithMetadata for inference_tensor::nn::Activation {
-    fn device(&self) -> Device {
-        unreachable!()
-    }
-    fn dtype(&self) -> DType {
-        unreachable!()
-    }
-}
-
-#[derive(Debug)]
-struct BigShapeWithOneHole((usize, usize, usize, usize, usize, ()));
-
-fn hole_size(el_count: usize, prod_d: usize, s: &dyn std::fmt::Debug) -> Result<usize> {
-    if prod_d == 0 {
-        inference_tensor::bail!("cannot reshape tensor of {el_count} elements to {s:?}")
-    }
-    if !el_count.is_multiple_of(prod_d) {
-        inference_tensor::bail!("cannot reshape tensor with {el_count} elements to {s:?}")
-    }
-    Ok(el_count / prod_d)
-}
-
-impl ShapeWithOneHole for BigShapeWithOneHole {
-    fn into_shape(self, el_count: usize) -> Result<Shape> {
-        let (d1, d2, d3, d4, d5, ()) = self.0;
-        let d = hole_size(el_count, d1 * d2 * d3 * d4 * d5, &self)?;
-        Ok((d1, d2, d3, d4, d5, d).into())
-    }
-}
-
 const MAX_INPUT_ID: f64 = 1e9;
-
-#[derive(Debug)]
-struct EmbeddingLayers(Vec<Box<dyn ModuleWithMetadata>>);
-
-impl Module for EmbeddingLayers {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let mut xs = xs.clone();
-        for layer in &self.0 {
-            xs = layer.forward(&xs)?;
-        }
-        Ok(xs)
-    }
-}
 
 #[derive(Debug)]
 pub struct ImageEmbedding {
@@ -252,91 +185,15 @@ impl ImageEmbedding {
             .unwrap_or("linear".to_string());
 
         let mut tensors = Vec::new();
-        let layers: Vec<Box<dyn ModuleWithMetadata>> =
-            match (projection_cls.as_str(), use_hd_transform) {
-                ("linear", _) => {
-                    let a = inference_quant::linear_b(
-                        image_dim_out,
-                        hidden_size,
-                        true,
-                        &None,
-                        vb.pp("img_projection"),
-                    )?;
-                    let (a_w, a_b) = a.unquant_weight_bias().unwrap();
-                    tensors.push(("img_projection.weight".to_string(), a_w));
-                    if let Some(b) = a_b {
-                        tensors.push(("img_projection.bias".to_string(), b));
-                    }
-                    vec![Box::new(QuantMethodWrapper(a))]
-                }
-                ("mlp", true) => {
-                    let dim_proj = hidden_size;
-                    let a = inference_quant::linear_b(
-                        image_dim_out * 4,
-                        dim_proj,
-                        true,
-                        &None,
-                        vb.pp("img_projection.0"),
-                    )?;
-                    let (a_w, a_b) = a.unquant_weight_bias().unwrap();
-                    tensors.push(("img_projection.0.weight".to_string(), a_w));
-                    if let Some(b) = a_b {
-                        tensors.push(("img_projection.0.bias".to_string(), b));
-                    }
-                    let b = inference_quant::linear_b(
-                        dim_proj,
-                        dim_proj,
-                        true,
-                        &None,
-                        vb.pp("img_projection.2"),
-                    )?;
-                    let (b_w, b_b) = b.unquant_weight_bias().unwrap();
-                    tensors.push(("img_projection.2.weight".to_string(), b_w));
-                    if let Some(b) = b_b {
-                        tensors.push(("img_projection.2.bias".to_string(), b));
-                    }
-                    vec![
-                        Box::new(QuantMethodWrapper(a)),
-                        Box::new(inference_tensor::nn::Activation::Gelu),
-                        Box::new(QuantMethodWrapper(b)),
-                    ]
-                }
-                ("mlp", false) => {
-                    let dim_proj = hidden_size;
-                    let a = inference_quant::linear_b(
-                        image_dim_out,
-                        dim_proj,
-                        true,
-                        &None,
-                        vb.pp("img_projection.0"),
-                    )?;
-                    let (a_w, a_b) = a.unquant_weight_bias().unwrap();
-                    tensors.push(("img_projection.0.weight".to_string(), a_w));
-                    if let Some(b) = a_b {
-                        tensors.push(("img_projection.0.bias".to_string(), b));
-                    }
-                    let b = inference_quant::linear_b(
-                        dim_proj,
-                        dim_proj,
-                        true,
-                        &None,
-                        vb.pp("img_projection.2"),
-                    )?;
-                    let (b_w, b_b) = b.unquant_weight_bias().unwrap();
-                    tensors.push(("img_projection.2.weight".to_string(), b_w));
-                    if let Some(b) = b_b {
-                        tensors.push(("img_projection.2.bias".to_string(), b));
-                    }
-                    vec![
-                        Box::new(QuantMethodWrapper(a)),
-                        Box::new(inference_tensor::nn::Activation::Gelu),
-                        Box::new(QuantMethodWrapper(b)),
-                    ]
-                }
-                _ => {
-                    inference_tensor::bail!("projection_cls=`{projection_cls}` not implemented.");
-                }
-            };
+        let layers = image_projection(
+            &projection_cls,
+            use_hd_transform,
+            image_dim_out,
+            image_dim_out * 4,
+            hidden_size,
+            &vb,
+            &mut tensors,
+        )?;
 
         let layer_idx = config.img_processor.layer_idx.unwrap_or(-2);
         let type_feature = config
@@ -355,7 +212,7 @@ impl ImageEmbedding {
             layer_idx,
             type_feature,
             image_processor,
-            layers: EmbeddingLayers(layers),
+            layers,
             hd_transform_order,
             use_hd_transform,
             vocab_size: config.vocab_size,
