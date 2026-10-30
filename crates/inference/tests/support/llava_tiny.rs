@@ -1,7 +1,7 @@
 //! Builds tiny random-weight LLaVA 1.5 (Llama text) and LLaVA-NeXT (Mistral text) checkpoints at test time.
 #![allow(dead_code)]
 
-use inference_models_llama::llava::{config::Config, llava_next, llava15};
+use inference_models_llama::llava::{config::Config, model::Model};
 use inference_nn::paged_attention::AttentionImplementation;
 
 #[path = "recording.rs"]
@@ -36,12 +36,28 @@ fn record(
 
 pub fn tiny_llava15() -> anyhow::Result<tempfile::TempDir> {
     record(LLAVA15, |cfg, vb, metadata| {
-        llava15::Model::new(cfg, vb, true, metadata, AttentionImplementation::Eager).map(|_| ())
+        Model::new(
+            cfg,
+            vb,
+            true,
+            false,
+            metadata,
+            AttentionImplementation::Eager,
+        )
+        .map(|_| ())
     })
 }
 
 pub fn tiny_llava_next() -> anyhow::Result<tempfile::TempDir> {
     record(LLAVA_NEXT, |cfg, vb, metadata| {
-        llava_next::Model::new(cfg, vb, true, metadata, AttentionImplementation::Eager).map(|_| ())
+        Model::new(
+            cfg,
+            vb,
+            true,
+            true,
+            metadata,
+            AttentionImplementation::Eager,
+        )
+        .map(|_| ())
     })
 }
