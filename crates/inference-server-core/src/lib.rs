@@ -92,8 +92,9 @@ pub mod image_generation;
 pub mod jobs;
 pub mod lora_adapters;
 pub mod mcp_server;
+pub mod media_fetch;
 pub mod model_manager;
-pub use media_source::configure_ui_upload_dir;
+pub use media_fetch::configure_ui_upload_dir;
 pub mod audio_analysis;
 pub mod inference_server_router_builder;
 pub mod metrics;
@@ -108,8 +109,7 @@ pub mod streaming;
 pub mod types;
 use inference_api::{
     agentic, api_error, engine_chat, engine_completion, files as files_api,
-    lora_adapters as lora_adapters_api, media_source, models as models_api, responses_types,
-    skill_store, system,
+    lora_adapters as lora_adapters_api, models as models_api, responses_types, skill_store, system,
 };
 pub use inference_api::{openai, util, video};
 use inference_chat_protocols::{anthropic as anthropic_api, responses as responses_api};

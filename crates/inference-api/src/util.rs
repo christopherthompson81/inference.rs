@@ -5,84 +5,29 @@ use inference_core::{AudioInput, InferenceRs, InferenceRsError};
 use std::error::Error;
 use std::sync::Arc;
 
-use crate::media_source::{Media, MediaAttachments, MediaSourcePolicy};
+use crate::media_source::{Media, MediaAttachments};
 
-/// Parses and loads an image from a URL, file path, or data URL.
-///
-/// This function accepts various input formats and attempts to parse them in order:
-/// 1. First tries to parse as a complete URL (http/https/file/data schemes)
-/// 2. If that fails, checks if it's a local file path and converts to file URL
-/// 3. Finally falls back to treating it as a malformed URL and returns an error
-///
-/// ### Arguments
-///
-/// * `url_unparsed` - A string that can be:
-///   - An HTTP/HTTPS URL (e.g., "<https://example.com/image.png>")
-///   - A file path (e.g., "/path/to/image.jpg" or "image.png")
-///   - A data URL with base64 encoded image (e.g., "data:image/png;base64,...")
-///   - A file URL (e.g., "file:///path/to/image.jpg")
-///
-/// ### Examples
-///
-/// ```ignore
-/// use inference_api::util::parse_image_url;
-///
-/// // Load from HTTP URL
-/// let image = parse_image_url("https://example.com/photo.jpg").await?;
-///
-/// // Load from local file path
-/// let image = parse_image_url("./assets/logo.png").await?;
-///
-/// // Load from data URL
-/// let image = parse_image_url("data:image/png;base64,iVBORw0KGgoAAAANS...").await?;
-///
-/// // Load from file URL
-/// let image = parse_image_url("file:///home/user/picture.jpg").await?;
-/// ```
-pub async fn parse_image_url(url_unparsed: &str) -> Result<DynamicImage, anyhow::Error> {
-    parse_image_url_with_policy(url_unparsed, MediaSourcePolicy::Local, &Default::default()).await
-}
-
-pub async fn parse_image_url_for_server(
-    url_unparsed: &str,
+/// The image `source` names: an attachment, a `data:` URL, or anything the attachments' fetcher resolves.
+pub async fn parse_image_url(
+    source: &str,
     attachments: &MediaAttachments,
 ) -> Result<DynamicImage, anyhow::Error> {
-    parse_image_url_with_policy(url_unparsed, MediaSourcePolicy::ServerRequest, attachments).await
-}
-
-async fn parse_image_url_with_policy(
-    url_unparsed: &str,
-    policy: MediaSourcePolicy,
-    attachments: &MediaAttachments,
-) -> Result<DynamicImage, anyhow::Error> {
-    if let Some(Media::Image(image)) = attachments.attached(url_unparsed, "image")? {
+    if let Some(Media::Image(image)) = attachments.attached(source, "image")? {
         return Ok(image.clone());
     }
-    let media = attachments.load(url_unparsed, policy, "image").await?;
+    let media = attachments.load(source, "image").await?;
     Ok(image::load_from_memory(&media.bytes)?)
 }
 
-/// Parses and loads an audio file from a URL, file path, or data URL.
-pub async fn parse_audio_url(url_unparsed: &str) -> Result<AudioInput, anyhow::Error> {
-    parse_audio_url_with_policy(url_unparsed, MediaSourcePolicy::Local, &Default::default()).await
-}
-
-pub async fn parse_audio_url_for_server(
-    url_unparsed: &str,
+/// The audio `source` names, as [`parse_image_url`] finds an image.
+pub async fn parse_audio_url(
+    source: &str,
     attachments: &MediaAttachments,
 ) -> Result<AudioInput, anyhow::Error> {
-    parse_audio_url_with_policy(url_unparsed, MediaSourcePolicy::ServerRequest, attachments).await
-}
-
-async fn parse_audio_url_with_policy(
-    url_unparsed: &str,
-    policy: MediaSourcePolicy,
-    attachments: &MediaAttachments,
-) -> Result<AudioInput, anyhow::Error> {
-    if let Some(Media::Audio(audio)) = attachments.attached(url_unparsed, "audio")? {
+    if let Some(Media::Audio(audio)) = attachments.attached(source, "audio")? {
         return Ok(audio.clone());
     }
-    let media = attachments.load(url_unparsed, policy, "audio").await?;
+    let media = attachments.load(source, "audio").await?;
     AudioInput::from_bytes(&media.bytes)
 }
 
@@ -167,28 +112,8 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_parse_image_url() {
-        // from URL
-        let url = "https://www.rust-lang.org/logos/rust-logo-32x32.png";
-        let image = parse_image_url(url).await.unwrap();
-        assert_eq!(image.dimensions(), (32, 32));
-
-        let url = "http://www.rust-lang.org/logos/rust-logo-32x32.png";
-        let image = parse_image_url(url).await.unwrap();
-        assert_eq!(image.dimensions(), (32, 32));
-
-        // from file path
-        let url = "resources/rust-logo-32x32.png";
-        let image = parse_image_url(url).await.unwrap();
-        assert_eq!(image.dimensions(), (32, 32));
-
-        // URL must be an absolute path
-        let absolute_path = std::path::absolute(url).unwrap();
-        let url = format!("file://{}", absolute_path.as_os_str().to_str().unwrap());
-        let image = parse_image_url(&url).await.unwrap();
-        assert_eq!(image.dimensions(), (32, 32));
-
-        // from base64 encoded image (rust-logo-32x32.png)
+    async fn media_without_a_fetcher_come_from_attachments_and_data_urls() {
+        // rust-logo-32x32.png
         let url = "
         iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAHhElEQVR4AZXVA5Aky9bA8f/JzKrq
         npleX9u2bdu2bdu2bdv29z1e2zZm7k5PT3dXZeZ56I6J3o03sbG/iDLOSQuT6fptF11OREYDj4uR
@@ -228,35 +153,22 @@ mod tests {
         ";
 
         let url = format!("data:image/png;base64,{url}");
-        let image = parse_image_url(&url).await.unwrap();
+        let none = MediaAttachments::default();
+        let image = parse_image_url(&url, &none).await.unwrap();
         assert_eq!(image.dimensions(), (32, 32));
 
-        // audio from base64
         let audio_b64 = "UklGRiYAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQIAAAAAAA==";
         let url = format!("data:audio/wav;base64,{audio_b64}");
-        let audio = parse_audio_url(&url).await.unwrap();
+        let audio = parse_audio_url(&url, &none).await.unwrap();
         assert_eq!(audio.sample_rate, 8000);
         assert_eq!(audio.samples.len(), 1);
-    }
 
-    #[tokio::test]
-    async fn server_media_rejects_local_sources() {
-        assert!(
-            parse_image_url_for_server(
-                "resources/rust-logo-32x32.png",
-                &MediaAttachments::default()
-            )
-            .await
-            .is_err()
-        );
-
-        let absolute_path = std::path::absolute("resources/rust-logo-32x32.png").unwrap();
-        let url = format!("file://{}", absolute_path.as_os_str().to_str().unwrap());
-        assert!(
-            parse_image_url_for_server(&url, &MediaAttachments::default())
-                .await
-                .is_err()
-        );
+        for source in [
+            "resources/rust-logo-32x32.png",
+            "https://www.rust-lang.org/logos/rust-logo-32x32.png",
+        ] {
+            assert!(parse_image_url(source, &none).await.is_err(), "{source}");
+        }
     }
 
     #[test]
@@ -373,11 +285,9 @@ mod tests {
     async fn a_decoded_image_attachment_skips_the_decode() {
         let image = image::DynamicImage::new_rgb8(3, 2);
         let attachments = MediaAttachments::from_media(vec![Media::Image(image.clone())]);
-        let loaded = parse_image_url_for_server("media://0", &attachments)
-            .await
-            .unwrap();
+        let loaded = parse_image_url("media://0", &attachments).await.unwrap();
         assert_eq!(loaded, image);
-        let as_audio = parse_audio_url_for_server("media://0", &attachments).await;
+        let as_audio = parse_audio_url("media://0", &attachments).await;
         assert!(as_audio.is_err_and(|error| error.to_string().contains("decoded image")));
     }
 }

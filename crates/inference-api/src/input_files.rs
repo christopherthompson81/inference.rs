@@ -3,7 +3,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use inference_core::{FILE_PURPOSE_USER_DATA, File, FileSource};
 
 use crate::media_source::{
-    MAX_MEDIA_BYTES, data_url_mime, decode_data_url_limited, fetch_remote_limited,
+    MAX_MEDIA_BYTES, MediaAttachments, data_url_mime, decode_data_url_limited,
 };
 use crate::types::SharedInferenceRsState;
 
@@ -23,6 +23,7 @@ pub(crate) async fn resolve_input_file(
     spec: InputFileSpec,
     source: &str,
     owner: Option<&str>,
+    attachments: &MediaAttachments,
 ) -> anyhow::Result<File> {
     if let Some(file_id) = spec.file_id {
         return state
@@ -38,7 +39,7 @@ pub(crate) async fn resolve_input_file(
     }
 
     if let Some(file_url) = spec.file_url {
-        let (bytes, mime_type, filename) = fetch_file_url(&file_url).await?;
+        let (bytes, mime_type, filename) = fetch_file_url(&file_url, attachments).await?;
         let filename = spec
             .filename
             .or(filename)
@@ -93,9 +94,14 @@ fn decode_file_data(file_data: &str) -> anyhow::Result<(Vec<u8>, Option<String>)
     }
 }
 
-async fn fetch_file_url(url: &str) -> anyhow::Result<(Vec<u8>, Option<String>, Option<String>)> {
-    let parsed = url::Url::parse(url).context("input_file.file_url must be a valid URL")?;
-    let media = fetch_remote_limited(parsed, MAX_INPUT_FILE_BYTES, "input_file.file_url").await?;
+async fn fetch_file_url(
+    url: &str,
+    attachments: &MediaAttachments,
+) -> anyhow::Result<(Vec<u8>, Option<String>, Option<String>)> {
+    url::Url::parse(url).context("input_file.file_url must be a valid URL")?;
+    let media = attachments
+        .load_limited(url, "input_file.file_url", MAX_INPUT_FILE_BYTES)
+        .await?;
     let filename = media
         .final_url
         .as_ref()
@@ -131,8 +137,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_private_literal_file_urls() {
-        assert!(fetch_file_url("http://127.0.0.1/file.txt").await.is_err());
+    async fn a_file_url_needs_a_fetcher() {
+        let none = MediaAttachments::default();
+        assert!(
+            fetch_file_url("https://example.com/file.txt", &none)
+                .await
+                .is_err()
+        );
     }
 
     #[test]

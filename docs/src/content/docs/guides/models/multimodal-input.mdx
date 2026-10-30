@@ -31,7 +31,7 @@ curl http://localhost:1234/v1/chat/completions \
     "messages": [{
       "role": "user",
       "content": [
-        {"type": "image_url", "image_url": {"url": "file:///path/to/photo.jpg"}},
+        {"type": "image_url", "image_url": {"url": "https://example.com/photo.jpg"}},
         {"type": "text", "text": "Describe this image."}
       ]
     }]
@@ -52,7 +52,7 @@ spec = t.EngineSpec(
     runtime=t.RuntimeSpec(isq="4"),
 )
 
-with ir.Engine(spec) as engine:
+with ir.Engine(spec) as engine, open("photo.jpg", "rb") as photo:
     response = engine.chat(
         t.ChatCompletionRequest(
             model="default",
@@ -60,13 +60,14 @@ with ir.Engine(spec) as engine:
                 t.Message(
                     role="user",
                     content=[
-                        {"type": "image_url", "image_url": {"url": "file:///path/to/photo.jpg"}},
+                        {"type": "image_url", "image_url": {"url": "media://0"}},
                         {"type": "text", "text": "What do you see in this image?"},
                     ],
                 )
             ],
             max_tokens=256,
-        )
+        ),
+        media=[ir.MediaAttachment(photo.read(), "image/jpeg")],
     )
     print(response.choices[0].message.content)
 ```
@@ -95,11 +96,20 @@ let response = model.send_chat_request(messages).await?;
 
 ## Content parts and URL forms
 
-Three part types carry media: `image_url`, `audio_url`, and `video_url`, each wrapping a `{"url": ...}` object. URLs accept three forms:
+Three part types carry media: `image_url`, `audio_url`, and `video_url`, each wrapping a `{"url": ...}` object. The
+engine reads two forms itself:
 
-- `file:///absolute/path`: local files the server process can read.
-- `http(s)://...`: fetched over the network at request time.
+- `media://N`: the Nth attachment passed beside the request (Python `media=[ir.MediaAttachment(...)]`, C#
+  `MediaAttachment`, the C ABI's `inference_media` array; the Rust SDK attaches the images and audio a message carries).
 - `data:<mime>;base64,...`: inline base64.
+
+Fetching anything else is the caller's part: a program embedding the engine reads its files or downloads its URLs and
+passes the bytes. The HTTP server does that for its clients, so a request to `inference serve` may also name:
+
+- `http(s)://...`: fetched by the server at request time, on the public network only.
+- The web UI's uploads.
+
+The server does not read local file paths a request names.
 
 A message can contain any number of parts in any combination the model supports; the model sees them in order:
 
@@ -107,8 +117,8 @@ A message can contain any number of parts in any combination the model supports;
 {
   "role": "user",
   "content": [
-    {"type": "image_url", "image_url": {"url": "file:///before.jpg"}},
-    {"type": "image_url", "image_url": {"url": "file:///after.jpg"}},
+    {"type": "image_url", "image_url": {"url": "media://0"}},
+    {"type": "image_url", "image_url": {"url": "media://1"}},
     {"type": "text", "text": "What changed between these images?"}
   ]
 }
@@ -122,7 +132,7 @@ Send video with `--video` on the CLI or a `video_url` part over HTTP/SDKs:
 {
   "role": "user",
   "content": [
-    {"type": "video_url", "video_url": {"url": "file:///absolute/path/clip.mp4"}},
+    {"type": "video_url", "video_url": {"url": "https://example.com/clip.mp4"}},
     {"type": "text", "text": "What happens in this video?"}
   ]
 }
@@ -142,7 +152,7 @@ Audio support is model-specific: Gemma 4, Gemma 3n, Phi 4 Multimodal, MiniCPM-O,
 {
   "role": "user",
   "content": [
-    {"type": "audio_url", "audio_url": {"url": "file:///clip.wav"}},
+    {"type": "audio_url", "audio_url": {"url": "media://0"}},
     {"type": "text", "text": "Transcribe this."}
   ]
 }
@@ -186,8 +196,8 @@ messages = [
     t.Message(
         role="user",
         content=[
-            {"type": "image_url", "image_url": {"url": "file:///chart.png"}},
-            {"type": "audio_url", "audio_url": {"url": "file:///commentary.wav"}},
+            {"type": "image_url", "image_url": {"url": "media://0"}},
+            {"type": "audio_url", "audio_url": {"url": "media://1"}},
             {"type": "text", "text": "Does the commentary match what the chart shows?"},
         ],
     )

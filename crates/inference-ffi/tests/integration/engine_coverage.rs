@@ -8,7 +8,11 @@ const FFI_SOURCES: [&str; 3] = [
 ];
 
 // Methods the ABI covers some other way, or that a binding has no use for.
-const NOT_EXPORTED: [(&str, &str); 11] = [
+const NOT_EXPORTED: [(&str, &str); 12] = [
+    (
+        "with_media_fetcher",
+        "a binding fetches media itself and passes the bytes as attachments",
+    ),
     (
         "chat_events",
         "for chat protocols a server translates onto chat; a binding's own goes over inference_chat_stream_open",

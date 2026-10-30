@@ -12,8 +12,17 @@ Runnable Python SDK example `qwen3_5`.
 <!-- needs-header -->
 
 ```python
+import urllib.request
+
 import inference_rs as ir
 from inference_rs import types as t
+
+# the engine reads media from attachments (media://<index>); fetching it is the caller's part
+IMAGE = ir.MediaAttachment(
+    urllib.request.urlopen(
+        "https://www.garden-treasures.com/cdn/shop/products/IMG_6245.jpg"
+    ).read()
+)
 
 # Dense variant
 MODEL_ID = "Qwen/Qwen3.5-27B"
@@ -45,7 +54,7 @@ with ir.Engine(spec) as engine:
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": "https://www.garden-treasures.com/cdn/shop/products/IMG_6245.jpg",
+                                "url": "media://0",
                             },
                         },
                         {
@@ -59,7 +68,8 @@ with ir.Engine(spec) as engine:
             presence_penalty=1.0,
             top_p=0.1,
             temperature=0.1,
-        )
+        ),
+        media=[IMAGE],
     )
     print(res.choices[0].message.content)
     print(res.usage)

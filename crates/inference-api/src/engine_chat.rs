@@ -39,8 +39,8 @@ use crate::{
     sampling::{convert_stop_tokens, get_dry_sampling_params},
     skill_store::SkillStore,
     types::SharedInferenceRsState,
-    util::{parse_audio_url_for_server, parse_image_url_for_server, validate_model_name},
-    video::parse_video_url_for_server,
+    util::{parse_audio_url, parse_image_url, validate_model_name},
+    video::parse_video_url,
 };
 
 const ONLY_CHAT_IS_TOKENIZED: &str = "only chat messages can be tokenized as a chat";
@@ -551,6 +551,7 @@ async fn parse_request_inner(
                                 spec,
                                 "input_file",
                                 owner.as_deref(),
+                                &media,
                             )
                             .await?;
                             state.insert_file(None, file.clone(), None, owner.as_deref())?;
@@ -648,7 +649,7 @@ async fn parse_request_inner(
                 // Parse images
                 let mut images = Vec::new();
                 for url_unparsed in image_urls {
-                    let image = parse_image_url_for_server(&url_unparsed, &media)
+                    let image = parse_image_url(&url_unparsed, &media)
                         .await
                         .context(format!("Failed to parse image resource: {url_unparsed}"))?;
                     images.push(image);
@@ -657,7 +658,7 @@ async fn parse_request_inner(
                 // Parse audios
                 let mut audios = Vec::new();
                 for url_unparsed in audio_urls {
-                    let audio = parse_audio_url_for_server(&url_unparsed, &media)
+                    let audio = parse_audio_url(&url_unparsed, &media)
                         .await
                         .context(format!("Failed to parse audio resource: {url_unparsed}"))?;
                     audios.push(audio);
@@ -670,9 +671,13 @@ async fn parse_request_inner(
                 };
                 let mut videos = Vec::new();
                 for url_unparsed in video_urls {
-                    let video = parse_video_url_for_server(&url_unparsed, video_sampling, &media)
-                        .await
-                        .context(format!("Failed to parse video resource: {url_unparsed}"))?;
+                    let video = parse_video_url(
+                        &url_unparsed,
+                        Some(video_sampling.unwrap_or_default()),
+                        &media,
+                    )
+                    .await
+                    .context(format!("Failed to parse video resource: {url_unparsed}"))?;
                     videos.push(video);
                 }
 

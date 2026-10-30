@@ -12,8 +12,17 @@ Runnable Python SDK example `gemma3n`.
 <!-- needs-header -->
 
 ```python
+import urllib.request
+
 import inference_rs as ir
 from inference_rs import types as t
+
+# the engine reads media from attachments (media://<index>); fetching it is the caller's part
+IMAGE = ir.MediaAttachment(
+    urllib.request.urlopen(
+        "https://upload.wikimedia.org/wikipedia/commons/f/fd/Pink_flower.jpg"
+    ).read()
+)
 
 with ir.Engine(
     t.EngineSpec(
@@ -32,9 +41,7 @@ with ir.Engine(
                     content=[
                         {
                             "type": "image_url",
-                            "image_url": {
-                                "url": "https://upload.wikimedia.org/wikipedia/commons/f/fd/Pink_flower.jpg"
-                            },
+                            "image_url": {"url": "media://0"},
                         },
                         {
                             "type": "text",
@@ -47,7 +54,8 @@ with ir.Engine(
             presence_penalty=1.0,
             top_p=0.1,
             temperature=0.1,
-        )
+        ),
+        media=[IMAGE],
     )
     print(res.choices[0].message.content)
     print(res.usage)

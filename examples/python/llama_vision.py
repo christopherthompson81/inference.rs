@@ -1,5 +1,14 @@
+import urllib.request
+
 import inference_rs as ir
 from inference_rs import types as t
+
+# the engine reads media from attachments (media://<index>); fetching it is the caller's part
+IMAGE = ir.MediaAttachment(
+    urllib.request.urlopen(
+        "https://www.nhmagazine.com/content/uploads/2019/05/mtwashingtonFranconia-2-19-18-108-Edit-Edit.jpg"
+    ).read()
+)
 
 # MODEL_ID = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 MODEL_ID = "lamm-mit/Cephalo-Llama-3.2-11B-Vision-Instruct-128k"
@@ -21,9 +30,7 @@ with ir.Engine(spec) as engine:
                     content=[
                         {
                             "type": "image_url",
-                            "image_url": {
-                                "url": "https://www.nhmagazine.com/content/uploads/2019/05/mtwashingtonFranconia-2-19-18-108-Edit-Edit.jpg"
-                            },
+                            "image_url": {"url": "media://0"},
                         },
                         {
                             "type": "text",
@@ -36,7 +43,8 @@ with ir.Engine(spec) as engine:
             presence_penalty=1.0,
             top_p=0.1,
             temperature=0.1,
-        )
+        ),
+        media=[IMAGE],
     )
     print(res.choices[0].message.content)
     print(res.usage)
