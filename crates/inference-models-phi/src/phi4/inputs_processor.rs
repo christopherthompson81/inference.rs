@@ -26,7 +26,7 @@ use crate::media_inputs::{
     preprocessor_config::PreProcessorConfig,
     processor::{
         InputProcessorOutput, InputsHost, InputsProcessorValidationError, MediaSequence,
-        ModelInputs, MultimodalInputsProcessor, ProcessInputsCall, TextInputs, TextOnlyInputs,
+        ModelInputs, MultimodalInputsProcessor, ProcessInputsCall, TextInputs,
     },
 };
 use crate::paged_attention::{
@@ -351,44 +351,19 @@ impl MultimodalInputsProcessor for Phi4MMInputsProcessor {
                     },
                 )
                 .map(|text| {
-                    let TextOnlyInputs {
-                        input_ids,
-                        seqlen_offsets,
-                        context_lens,
-                        position_ids,
-                        paged_attn_meta,
-                        flash_meta,
-                        recurrent_batch_kind,
-                        seq_indices,
-                    } = text;
-
-                    let inputs: Box<dyn Any> = Box::new(ModelInputs {
-                        input_ids,
-                        seqlen_offsets,
-                        context_lens,
-                        position_ids,
-                        pixel_values: None,
-                        model_specific_args: Box::new(Phi4MMVisionSpecificArgs {
-                            input_image_embeds: None,
-                            image_attention_mask: None,
-                            image_sizes: None,
-                            input_audio_embeds: None,
-                            audio_embed_sizes: None,
-                            audio_feature_lens: None,
-                            audio_vision_modes: None,
-                            audio_attention_mask: None,
-                            image_hashes: vec![],
-                            audio_hashes: vec![],
-                            packed_layout: None,
-                        }),
-                        paged_attn_meta,
-                        flash_meta,
-                        recurrent_batch_kind,
-                    });
-                    InputProcessorOutput {
-                        inputs,
-                        seq_indices,
-                    }
+                    text.into_output(Box::new(Phi4MMVisionSpecificArgs {
+                        input_image_embeds: None,
+                        image_attention_mask: None,
+                        image_sizes: None,
+                        input_audio_embeds: None,
+                        audio_embed_sizes: None,
+                        audio_feature_lens: None,
+                        audio_vision_modes: None,
+                        audio_attention_mask: None,
+                        image_hashes: vec![],
+                        audio_hashes: vec![],
+                        packed_layout: None,
+                    }))
                 });
         }
 
@@ -403,35 +378,20 @@ impl MultimodalInputsProcessor for Phi4MMInputsProcessor {
             .map(|seq| seq.get_toks().to_vec())
             .collect::<Vec<_>>();
 
-        let result = if is_prompt {
-            host.prompt_inputs(
-                toks.iter().map(Vec::as_slice).collect::<Vec<_>>().into(),
-                input_seqs,
-                TextInputs {
-                    device,
-                    last_n_context_len,
-                    return_raw_logits,
-                    paged_attn_metadata: paged_attn_metadata.as_mut(),
-                    mapper,
-                    sliding_window,
-                },
-            )
-        } else {
-            host.completion_inputs(
-                toks.iter().map(Vec::as_slice).collect::<Vec<_>>().into(),
-                input_seqs,
-                TextInputs {
-                    device,
-                    last_n_context_len,
-                    return_raw_logits,
-                    paged_attn_metadata: paged_attn_metadata.as_mut(),
-                    mapper,
-                    sliding_window,
-                },
-                no_kv_cache,
-                None,
-            )
-        };
+        let result = host.step_inputs(
+            toks.iter().map(Vec::as_slice).collect::<Vec<_>>().into(),
+            input_seqs,
+            TextInputs {
+                device,
+                last_n_context_len,
+                return_raw_logits,
+                paged_attn_metadata: paged_attn_metadata.as_mut(),
+                mapper,
+                sliding_window,
+            },
+            is_prompt,
+            no_kv_cache,
+        );
 
         result.and_then(|metadata| {
             let inference_nn::media_inputs::processor::InnerInputProcessorOutput {

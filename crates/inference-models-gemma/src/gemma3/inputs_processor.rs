@@ -549,8 +549,8 @@ impl MultimodalInputsProcessor for Gemma3ImageProcessor {
                     flash_meta,
                 },
             seq_indices,
-        } = if is_prompt {
-            host.prompt_inputs(
+        } = host
+            .step_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
@@ -565,29 +565,10 @@ impl MultimodalInputsProcessor for Gemma3ImageProcessor {
                     mapper,
                     sliding_window,
                 },
-            )
-            .unwrap()
-        } else {
-            host.completion_inputs(
-                input_seqs
-                    .iter()
-                    .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>()
-                    .into(),
-                input_seqs,
-                TextInputs {
-                    device,
-                    last_n_context_len,
-                    return_raw_logits,
-                    paged_attn_metadata: paged_attn_metadata.as_mut(),
-                    mapper,
-                    sliding_window,
-                },
+                is_prompt,
                 no_kv_cache,
-                None,
             )
-            .unwrap()
-        };
+            .unwrap();
 
         let pixel_values = if is_prompt { pixel_values } else { None };
 

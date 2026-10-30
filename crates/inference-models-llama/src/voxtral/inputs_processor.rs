@@ -235,43 +235,24 @@ impl MultimodalInputsProcessor for VoxtralInputsProcessor {
                     flash_meta,
                 },
             seq_indices,
-        } = if is_prompt {
-            host.prompt_inputs(
-                input_seqs
-                    .iter()
-                    .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>()
-                    .into(),
-                input_seqs,
-                TextInputs {
-                    device,
-                    last_n_context_len,
-                    return_raw_logits,
-                    paged_attn_metadata: paged_attn_metadata.as_mut(),
-                    mapper,
-                    sliding_window,
-                },
-            )?
-        } else {
-            host.completion_inputs(
-                input_seqs
-                    .iter()
-                    .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>()
-                    .into(),
-                input_seqs,
-                TextInputs {
-                    device,
-                    last_n_context_len,
-                    return_raw_logits,
-                    paged_attn_metadata: paged_attn_metadata.as_mut(),
-                    mapper,
-                    sliding_window,
-                },
-                no_kv_cache,
-                None,
-            )?
-        };
+        } = host.step_inputs(
+            input_seqs
+                .iter()
+                .map(|seq| seq.get_toks())
+                .collect::<Vec<_>>()
+                .into(),
+            input_seqs,
+            TextInputs {
+                device,
+                last_n_context_len,
+                return_raw_logits,
+                paged_attn_metadata: paged_attn_metadata.as_mut(),
+                mapper,
+                sliding_window,
+            },
+            is_prompt,
+            no_kv_cache,
+        )?;
 
         let mut request_mels = Vec::new();
         let mut mel_lengths = Vec::new();

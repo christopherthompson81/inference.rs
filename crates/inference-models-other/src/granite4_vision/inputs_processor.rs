@@ -343,11 +343,7 @@ impl MultimodalInputsProcessor for Granite4VisionInputsProcessor {
                     flash_meta,
                 },
             seq_indices,
-        } = if is_prompt {
-            host.prompt_inputs(toks, input_seqs, text)?
-        } else {
-            host.completion_inputs(toks, input_seqs, text, no_kv_cache, None)?
-        };
+        } = host.step_inputs(toks, input_seqs, text, is_prompt, no_kv_cache)?;
 
         Ok(InputProcessorOutput {
             inputs: Box::new(ModelInputs {

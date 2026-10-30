@@ -3166,3 +3166,23 @@ Finding:
 
 Implication: the remaining Phi pair is the two input processors (38 windows). After it, the list's cuTile fused MoE
 FP8 arms (111, likely deliberate per-dtype) and the core / server-core IR.
+
+## Run 104 - 2026-10-30 09:04
+
+Question: Run 103's last Phi pair, the Phi-3-V and Phi-4-MM input processors (38 windows in 5 spans). Read closely,
+their shared spans are not Phi-specific: the `process_inputs` signature, the text-only fallback wrapped into
+`ModelInputs`, and the `prompt_inputs` / `completion_inputs` branch with its `TextInputs` written out twice. That
+branch is in 19 input processors, the fallback wrap in 3.
+
+Change: `InputsHost::step_inputs` (a provided method: `prompt_inputs` on a prompt step, else `completion_inputs`
+with no decode window) and `TextOnlyInputs::into_output(model_specific_args)`. A bracket-matching rewrite replaced
+the branch only where both arms passed the same tokens, sequences and `TextInputs`, with the same trailing `?` or
+`.unwrap()`: 17 of the 19 sites. Left as written: Gemma 4 (its decode window) and the Qwen-VL inputs (a different
+shape). The three fallbacks (Phi-3-V, Phi-4-MM, LLaVA) call `into_output`.
+
+Commands: `cargo clippy --workspace --tests` with and without `cuda`; `scripts/dup_scan.py`; the full local CI.
+
+Finding: duplication 26,008 -> 25,679 (-329); 18 files, +261 / -584.
+
+Implication: the remaining list is cuTile's fused MoE FP8 arms (111 windows, per-dtype by design until shown
+otherwise) and core / server-core IR.
