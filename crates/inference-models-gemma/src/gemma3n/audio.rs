@@ -1548,3 +1548,58 @@ impl AudioModel {
         uvb.to_safetensors()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use inference_nn::testing::{fill, load_synthesized};
+
+    use super::*;
+
+    const FRAMES: usize = 11;
+    const PADDED_FRAMES: usize = 3;
+    const TOL: f32 = 1e-5;
+
+    fn close(actual: f32, expected: f32) -> bool {
+        (actual - expected).abs() <= TOL * expected.abs().max(1.0)
+    }
+
+    // blocked local attention with its relative position bias over a padded clip, on made-up weights
+    #[test]
+    fn attention_over_a_padded_clip_is_pinned() -> anyhow::Result<()> {
+        let cfg: Gemma3nAudioConfig = inference_json::from_str(
+            r#"{"hidden_size": 16, "conf_num_attention_heads": 2, "conf_attention_chunk_size": 4,
+                "conf_attention_context_left": 5, "conf_attention_context_right": 1}"#,
+        )?;
+        let (attn, _) = load_synthesized(&[], HashMap::new(), DType::F32, |vb| {
+            Ok(Gemma3nAudioAttention::new(&cfg, vb)?)
+        })?;
+        let x = fill("input", &[1, FRAMES, cfg.hidden_size])?;
+        let mask = Tensor::from_vec(
+            (0..FRAMES)
+                .map(|t| u8::from(t >= FRAMES - PADDED_FRAMES))
+                .collect::<Vec<_>>(),
+            (1, FRAMES),
+            x.device(),
+        )?;
+        let out = attn.forward(&x, &mask)?;
+        let flat = out.flatten_all()?.to_vec1::<f32>()?;
+        let probes = [flat[0], flat[37], flat[100], flat[flat.len() - 1]];
+        let sum = flat.iter().sum::<f32>();
+        let l2 = flat.iter().map(|v| v * v).sum::<f32>().sqrt();
+        let expected = (
+            [0.040065933, 0.011715145, -0.06335059, -0.048223395],
+            -0.6183169,
+            0.7466255,
+        );
+        assert!(
+            probes.iter().zip(expected.0).all(|(a, e)| close(*a, e))
+                && close(sum, expected.1)
+                && close(l2, expected.2),
+            "attention moved: {:?} {probes:?} {sum:?} {l2:?}",
+            out.dims()
+        );
+        Ok(())
+    }
+}
