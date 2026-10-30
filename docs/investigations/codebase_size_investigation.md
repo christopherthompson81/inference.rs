@@ -3118,3 +3118,28 @@ Finding:
   483,709 -> 482,199.
 
 Implication: next duplication candidates are gemma3n/gemma4 audio (76 windows) and phi3v/phi4 image embedding (63).
+
+## Run 102 - 2026-10-30 08:27
+
+Question: the next candidate, the Gemma 3n and Gemma 4 audio encoders (76 windows): ~240 lines in 9 spans, all in
+the conformer's chunked local attention and its relative position bias.
+
+Change: no test covered either audio encoder, so the first commit pins each attention module: made-up weights, an
+11-frame clip with 3 padded frames, four output probes plus sum and L2 (Gemma 4 with `use_clipped_linears` off, or
+the random clip bounds flatten its projections to one value). Then `audio_attention` holds
+`RelativePositionEmbedding` (sinusoidal timing signal, projection, content and position logits, relative shift)
+and `LocalAttention` (the causal reach mask, blocks and their context windows, soft cap, padding mask, softmax and
+the value product). Each model keeps its projections, query and key scaling, `per_dim_scale` and timescales (Gemma
+3n's in f32 on the device, Gemma 4's in f64), and their load order. Dropped as unreachable: re-padding or truncating
+context windows, the mask reshape fallbacks and padding key blocks, since the context windows are always
+`ceil(T / chunk)` blocks of `context_size` frames. Gemma 3n's ISQ residuals still write its derived buffers.
+
+Commands: `cargo nextest run -p inference-models-gemma`, CPU and `--profile cuda --features cuda`; `cargo
+llvm-lines -p inference-models-gemma --lib` before and after; `scripts/dup_scan.py`.
+
+Finding:
+- Both pins pass unchanged through the shared code (Gemma 3n's position logits now take Gemma 4's 3D batched matmul);
+  60 gemma tests pass on CPU and CUDA.
+- models-gemma IR 480,609 -> 470,150 (-10,459); duplication 26,572 -> 26,222 (-350).
+
+Implication: next is phi3v/phi4 image embedding (63 windows).
