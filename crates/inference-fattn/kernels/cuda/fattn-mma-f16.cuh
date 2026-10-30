@@ -2433,19 +2433,13 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
                 use_sparse = true;
 
                 static size_t shared_memory_limit_raised[GGML_CUDA_MAX_DEVICES] = {0};
-                if (shared_memory_limit_raised[id] < nbytes_shared_total) {
-                    CUDA_CHECK(cudaFuncSetAttribute(reinterpret_cast<fattn_kernel_ptr_t>(fattn_kernel), cudaFuncAttributeMaxDynamicSharedMemorySize, nbytes_shared_total));
-                    shared_memory_limit_raised[id] = nbytes_shared_total;
-                }
+                ggml_cuda_raise_shared_memory_limit(reinterpret_cast<fattn_kernel_ptr_t>(fattn_kernel), shared_memory_limit_raised[id], nbytes_shared_total);
             } else {
                 constexpr bool use_sparse_kernel = false;
                 fattn_kernel = flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, use_sparse_kernel>;
 
                 static size_t shared_memory_limit_raised[GGML_CUDA_MAX_DEVICES] = {0};
-                if (shared_memory_limit_raised[id] < nbytes_shared_total) {
-                    CUDA_CHECK(cudaFuncSetAttribute(reinterpret_cast<fattn_kernel_ptr_t>(fattn_kernel), cudaFuncAttributeMaxDynamicSharedMemorySize, nbytes_shared_total));
-                    shared_memory_limit_raised[id] = nbytes_shared_total;
-                }
+                ggml_cuda_raise_shared_memory_limit(reinterpret_cast<fattn_kernel_ptr_t>(fattn_kernel), shared_memory_limit_raised[id], nbytes_shared_total);
             }
         } else
 #endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
@@ -2455,10 +2449,7 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
 
 #if !defined(GGML_USE_MUSA)
             static size_t shared_memory_limit_raised[GGML_CUDA_MAX_DEVICES] = {0};
-            if (shared_memory_limit_raised[id] < nbytes_shared_total) {
-                CUDA_CHECK(cudaFuncSetAttribute(reinterpret_cast<fattn_kernel_ptr_t>(fattn_kernel), cudaFuncAttributeMaxDynamicSharedMemorySize, nbytes_shared_total));
-                shared_memory_limit_raised[id] = nbytes_shared_total;
-            }
+            ggml_cuda_raise_shared_memory_limit(reinterpret_cast<fattn_kernel_ptr_t>(fattn_kernel), shared_memory_limit_raised[id], nbytes_shared_total);
 #endif // !defined(GGML_USE_MUSA)
         }
     } else {
@@ -2468,10 +2459,7 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
 
 #if !defined(GGML_USE_MUSA)
         static size_t shared_memory_limit_raised[GGML_CUDA_MAX_DEVICES] = {0};
-        if (shared_memory_limit_raised[id] < nbytes_shared_total) {
-            CUDA_CHECK(cudaFuncSetAttribute(reinterpret_cast<fattn_kernel_ptr_t>(fattn_kernel), cudaFuncAttributeMaxDynamicSharedMemorySize, nbytes_shared_total));
-            shared_memory_limit_raised[id] = nbytes_shared_total;
-        }
+        ggml_cuda_raise_shared_memory_limit(reinterpret_cast<fattn_kernel_ptr_t>(fattn_kernel), shared_memory_limit_raised[id], nbytes_shared_total);
 #endif // !defined(GGML_USE_MUSA)
     }
 

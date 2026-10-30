@@ -832,19 +832,23 @@ static bool ggml_cuda_flash_attn_ext_quant(ggml_backend_cuda_context & ctx, ggml
         }();
         const int smem = fq_smem<DD>::fixed + 2*fq_raw_slot(DD, lay.k_bits, lay.v_bits);
         // the raw slots follow the bits, so the limit follows the largest launch seen
-        static int raised[GGML_CUDA_MAX_DEVICES] = {0};
-        if (raised[ctx.device] < smem) {
-            CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
-            raised[ctx.device] = smem;
-        }
+        static size_t raised[GGML_CUDA_MAX_DEVICES] = {0};
+        ggml_cuda_raise_shared_memory_limit(kernel, raised[ctx.device], smem);
         // one whole wave: device-side lengths hide the work per block, and a partial second wave idles most of the GPU
         static int occ_smem[GGML_CUDA_MAX_DEVICES] = {0};
         static int per_sm[GGML_CUDA_MAX_DEVICES] = {0};
-        if (occ_smem[ctx.device] != smem) {
-            CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm[ctx.device], kernel, WARP_SIZE*warps, smem));
-            occ_smem[ctx.device] = smem;
+        // the cached count must be the one for this smem, which another thread may be replacing
+        static std::mutex occupancy_mutex;
+        int blocks_per_sm;
+        {
+            std::lock_guard<std::mutex> lock(occupancy_mutex);
+            if (occ_smem[ctx.device] != smem) {
+                CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm[ctx.device], kernel, WARP_SIZE*warps, smem));
+                occ_smem[ctx.device] = smem;
+            }
+            blocks_per_sm = per_sm[ctx.device];
         }
-        const int splits = std::max(1, std::max(1, per_sm[ctx.device])*nsm / std::max(1, kv_heads*n_seq));
+        const int splits = std::max(1, std::max(1, blocks_per_sm)*nsm / std::max(1, kv_heads*n_seq));
         ggml_cuda_pool_alloc<float> part(ctx.pool(), size_t(n_seq)*kv_heads*ncols*splits*ksplit*(D + 2));
         const dim3 grid(splits, kv_heads, n_seq);
         const dim3 block(WARP_SIZE, warps);
