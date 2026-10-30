@@ -2064,7 +2064,17 @@ mod tests {
         );
     }
 
-    #[test]
+    inference_tensor::gpu_cases!(
+        cuda_cases,
+        [
+            graph_copy_supports_dense_row_source,
+            graph_replay_retains_captured_output_storage,
+            graph_state_indices_replay_updates_persistent_cuda_buffers,
+            replayed_graph_output_releases_without_driver_error,
+            resident_replay_skips_the_host_input_update
+        ]
+    );
+
     fn graph_state_indices_replay_updates_persistent_cuda_buffers() -> anyhow::Result<()> {
         skip_without_cuda!();
         let device = Device::new_cuda(0)?;
@@ -2089,7 +2099,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn graph_replay_retains_captured_output_storage() -> anyhow::Result<()> {
         skip_without_cuda!();
         let device = Device::new_cuda(0)?;
@@ -2126,7 +2135,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn replayed_graph_output_releases_without_driver_error() -> anyhow::Result<()> {
         skip_without_cuda!();
         let device = Device::new_cuda(0)?;
@@ -2151,7 +2159,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn graph_copy_supports_dense_row_source() -> anyhow::Result<()> {
         skip_without_cuda!();
         let device = Device::new_cuda(0)?;
@@ -2439,7 +2446,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn resident_replay_skips_the_host_input_update() -> anyhow::Result<()> {
         skip_without_cuda!();
         let device = Device::new_cuda(0)?;

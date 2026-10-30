@@ -121,7 +121,16 @@ fn run_case(
     Ok(())
 }
 
-#[test]
+inference_tensor::gpu_cases!(
+    cuda_cases,
+    [
+        cutlass_moe_imbalanced_routing,
+        cutlass_moe_large_avg_tokens,
+        cutlass_moe_silu_imbalanced_routing,
+        cutlass_moe_tiny_batch_many_empty_experts
+    ]
+);
+
 fn cutlass_moe_imbalanced_routing() -> Result<()> {
     // 70% of primary slots routed to expert 0; experts 5 and 6 receive nothing.
     let (num_tokens, topk, num_experts) = (300usize, 2usize, 8usize);
@@ -150,7 +159,6 @@ fn cutlass_moe_imbalanced_routing() -> Result<()> {
     )
 }
 
-#[test]
 fn cutlass_moe_silu_imbalanced_routing() -> Result<()> {
     // Same imbalanced routing, SiLU activation (Mixtral/Qwen-style MoEs).
     let (num_tokens, topk, num_experts) = (300usize, 2usize, 8usize);
@@ -179,7 +187,6 @@ fn cutlass_moe_silu_imbalanced_routing() -> Result<()> {
     )
 }
 
-#[test]
 fn cutlass_moe_tiny_batch_many_empty_experts() -> Result<()> {
     // Decode-like shape: 4 tokens, 64 experts, almost all expert groups have M = 0.
     let (num_tokens, topk, num_experts) = (4usize, 4usize, 64usize);
@@ -204,7 +211,6 @@ fn cutlass_moe_tiny_batch_many_empty_experts() -> Result<()> {
     )
 }
 
-#[test]
 fn cutlass_moe_large_avg_tokens() -> Result<()> {
     // avg tokens per expert = 100 -> exercises the large (128-row) tile config.
     let (num_tokens, topk, num_experts) = (400usize, 2usize, 8usize);

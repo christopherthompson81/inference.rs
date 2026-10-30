@@ -424,7 +424,16 @@ mod tests {
             .to_scalar::<f32>()
     }
 
-    #[test]
+    crate::gpu_cases!(
+        cuda_cases,
+        [
+            conv_transpose1d_matches_a_direct_loop,
+            dense_conv_on_cuda_matches_the_cpu,
+            grouped_conv1d_on_cuda_matches_the_per_group_split,
+            grouped_conv2d_on_cuda_matches_the_per_group_split
+        ]
+    );
+
     fn grouped_conv1d_on_cuda_matches_the_per_group_split() -> Result<()> {
         let Ok(cuda) = Device::new_cuda(0) else {
             return Ok(());
@@ -554,7 +563,6 @@ mod tests {
     }
 
     // Padded transposed convs take col2im and a crop, over batches and several input channels; dilated ones don't
-    #[test]
     fn conv_transpose1d_matches_a_direct_loop() -> Result<()> {
         // (kernel, padding, output padding, stride, dilation)
         let cases = [
@@ -736,7 +744,6 @@ mod tests {
     }
 
     // im2col + GEMM, or cuDNN under its feature; strided input, padding, stride and dilation
-    #[test]
     fn dense_conv_on_cuda_matches_the_cpu() -> Result<()> {
         let Ok(cuda) = Device::new_cuda(0) else {
             return Ok(());
@@ -774,7 +781,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
     fn grouped_conv2d_on_cuda_matches_the_per_group_split() -> Result<()> {
         let Ok(cuda) = Device::new_cuda(0) else {
             return Ok(());

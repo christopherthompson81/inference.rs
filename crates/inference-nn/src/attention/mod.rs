@@ -946,9 +946,20 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "cuda")]
+    inference_tensor::gpu_cases!(
+        cuda_cases,
+        [
+            bidirectional_attention_at_padded_head_dims_runs_on_cuda_and_matches_the_cpu,
+            causal_flash_masks_f32_on_cuda,
+            custom_masks_at_unaligned_key_lengths_match_the_cpu,
+            custom_masks_on_cuda_run_fattn_and_match_the_cpu,
+            sinks_prefill_on_cuda_matches_the_cpu
+        ]
+    );
+
     // gpt-oss's prompt shape: GQA at head dim 64, a sink per head, every other layer windowed
     #[cfg(feature = "cuda")]
-    #[test]
     fn sinks_prefill_on_cuda_matches_the_cpu() -> CandleResult<()> {
         crate::skip_without_cuda!();
         let dev = Device::new_cuda(0)?;
@@ -1014,7 +1025,6 @@ mod tests {
 
     // SigLIP-style vision attention: bidirectional, no mask, at the head dims fattn runs padded to an mma one
     #[cfg(feature = "cuda")]
-    #[test]
     fn bidirectional_attention_at_padded_head_dims_runs_on_cuda_and_matches_the_cpu()
     -> CandleResult<()> {
         crate::skip_without_cuda!();
@@ -1080,7 +1090,6 @@ mod tests {
 
     // An encoder's mask at a key length off fattn's 16-byte row alignment: its mask rows get a padded stride
     #[cfg(feature = "cuda")]
-    #[test]
     fn custom_masks_at_unaligned_key_lengths_match_the_cpu() -> CandleResult<()> {
         crate::skip_without_cuda!();
         let dev = Device::new_cuda(0)?;
@@ -1164,7 +1173,6 @@ mod tests {
 
     // A custom mask on CUDA runs fattn when one mask serves every head; the CPU's fused path is the reference
     #[cfg(feature = "cuda")]
-    #[test]
     fn custom_masks_on_cuda_run_fattn_and_match_the_cpu() -> CandleResult<()> {
         crate::skip_without_cuda!();
         let dev = Device::new_cuda(0)?;
@@ -1335,7 +1343,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn causal_flash_masks_f32_on_cuda() -> CandleResult<()> {
         crate::skip_without_cuda!();
         let dev = Device::new_cuda(0)?;
