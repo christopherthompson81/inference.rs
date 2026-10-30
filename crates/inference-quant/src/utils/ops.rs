@@ -2769,7 +2769,30 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
+    inference_tensor::gpu_cases!(
+        cuda_cases,
+        [
+            bitwise_and_or_keep_i32_on_cuda,
+            nonzero_and_cuda,
+            test_bitpack_4bit_cuda,
+            test_bitpack_8bit_cuda,
+            test_bitwise_and_cuda,
+            test_bitwise_or_cuda,
+            test_fused_glu_cuda_all_activations,
+            test_fused_glu_cuda_silu_f16,
+            test_fused_glu_cuda_silu_f32,
+            test_fused_glu_fp8_quantization_preserves_bf16_rounding_and_row_strides,
+            test_fused_glu_matches_candle_fallback_bf16_cuda,
+            test_fused_sigmoid_glu_cuda_row_strides_and_offsets,
+            test_fused_split_glu_cuda_scalar_and_vector_paths,
+            test_fused_split_glu_fp8_quantization_cuda,
+            test_nonzero_cuda,
+            test_nonzero_i32_cuda,
+            test_softcap_cuda_f32
+        ]
+    );
+
+    #[cfg(feature = "cuda")]
     fn test_fused_split_glu_cuda_scalar_and_vector_paths() {
         use super::{GluActivationType, fused_glu, fused_split_glu};
         use inference_tensor::{DType, Device, Tensor};
@@ -2831,7 +2854,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn test_fused_split_glu_fp8_quantization_cuda() {
         use super::{GluActivationType, fused_split_glu, fused_split_glu_quantized_bf16};
         use float8::F8E4M3;
@@ -2926,7 +2948,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn test_fused_glu_fp8_quantization_preserves_bf16_rounding_and_row_strides() {
         use super::{GluActivationType, fused_glu, fused_glu_quantized_bf16};
         use float8::F8E4M3;
@@ -3027,7 +3048,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn test_fused_sigmoid_glu_cuda_row_strides_and_offsets() {
         use super::{GluActivationType, fused_glu};
         use inference_tensor::{DType, Device, Tensor};
@@ -3111,7 +3131,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn test_softcap_cuda_f32() {
         use super::softcap;
         use inference_tensor::Tensor;
@@ -3188,7 +3207,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn test_nonzero_cuda() {
         use crate::utils::ops::NonZeroOp;
         use inference_tensor::Tensor;
@@ -3204,7 +3222,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn test_nonzero_i32_cuda() {
         use crate::utils::ops::NonZeroOp;
         use inference_tensor::Tensor;
@@ -3228,7 +3245,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn test_bitwise_and_cuda() {
         use crate::utils::ops::BitWiseOp;
         use inference_tensor::Tensor;
@@ -3243,7 +3259,6 @@ mod tests {
 
     // every integer dtype the CUDA path takes keeps its dtype through and/or
     #[cfg(feature = "cuda")]
-    #[test]
     fn bitwise_and_or_keep_i32_on_cuda() -> inference_tensor::Result<()> {
         use crate::utils::ops::BitWiseOp;
         use inference_tensor::Tensor;
@@ -3270,7 +3285,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn test_bitwise_or_cuda() {
         use crate::utils::ops::BitWiseOp;
         use inference_tensor::Tensor;
@@ -3382,7 +3396,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn nonzero_and_cuda() {
         use crate::utils::ops::{BitWiseOp, NonZeroOp};
         use inference_tensor::{Device, Tensor};
@@ -3434,7 +3447,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn test_bitpack_8bit_cuda() {
         use crate::HqqBits;
         use inference_tensor::{Device, Tensor};
@@ -3480,7 +3492,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn test_bitpack_4bit_cuda() {
         use crate::HqqBits;
         use inference_tensor::{Device, Tensor};
@@ -3714,7 +3725,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn test_fused_glu_cuda_silu_f32() {
         use super::{GluActivationType, fused_glu};
         use inference_tensor::Tensor;
@@ -3753,7 +3763,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn test_fused_glu_cuda_silu_f16() {
         use super::{GluActivationType, fused_glu};
         use inference_tensor::{DType, Tensor};
@@ -3806,7 +3815,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn test_fused_glu_cuda_all_activations() {
         use super::{GluActivationType, fused_glu};
         use inference_tensor::Tensor;
@@ -3851,7 +3859,6 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
-    #[test]
     fn test_fused_glu_matches_candle_fallback_bf16_cuda() {
         use super::{GluActivationType, fused_glu};
         use inference_tensor::{DType, Tensor};

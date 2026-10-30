@@ -315,7 +315,17 @@ fn check_paged(c: VarlenCase, extras: Extras) -> Result<()> {
     Ok(())
 }
 
-#[test]
+inference_tensor::gpu_cases!(
+    cuda_cases,
+    [
+        fp8_softcap_sinks_one_sequence_and_a_generous_max_len,
+        implicit_windows_and_bidirectional_packed_sequences,
+        packed_prefill_and_chunks,
+        packed_queries_over_a_paged_cache,
+        rejects_bad_sequences_and_masks
+    ]
+);
+
 fn packed_prefill_and_chunks() -> Result<()> {
     for (d, h_kv) in [(64, 4), (128, 2), (256, 2)] {
         let c = VarlenCase {
@@ -336,7 +346,6 @@ fn packed_prefill_and_chunks() -> Result<()> {
     check_dense(long_beside_short, Extras::default())
 }
 
-#[test]
 fn fp8_softcap_sinks_one_sequence_and_a_generous_max_len() -> Result<()> {
     let c = VarlenCase {
         head_dim: 128,
@@ -375,7 +384,6 @@ fn fp8_softcap_sinks_one_sequence_and_a_generous_max_len() -> Result<()> {
     check_dense(one, Extras::default())
 }
 
-#[test]
 fn packed_queries_over_a_paged_cache() -> Result<()> {
     for d in [64, 128] {
         check_paged(
@@ -391,7 +399,6 @@ fn packed_queries_over_a_paged_cache() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn rejects_bad_sequences_and_masks() -> Result<()> {
     let Some(dev) = cuda() else { return Ok(()) };
     let q = Tensor::zeros((10, 8, 64), DType::BF16, &dev)?;
@@ -431,7 +438,6 @@ fn rejects_bad_sequences_and_masks() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn implicit_windows_and_bidirectional_packed_sequences() -> Result<()> {
     let c = VarlenCase {
         head_dim: 128,

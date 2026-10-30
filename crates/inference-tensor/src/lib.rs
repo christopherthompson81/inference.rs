@@ -42,6 +42,8 @@ pub mod dummy_cuda_backend;
 pub mod dummy_dtype;
 mod dummy_metal_backend;
 pub mod error;
+#[doc(hidden)]
+pub mod gpu_cases;
 mod indexer;
 pub mod kernel_library;
 pub mod layout;

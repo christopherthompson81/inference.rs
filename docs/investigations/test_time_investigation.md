@@ -331,3 +331,36 @@ Implication: the RNN-T loop is launch-bound on token-dense output, not sync-boun
 tokens than frames, so the product cost there is the per-token advance; what is left is ~9 launches per layer (the
 `[x, h, 1]` concat, the matmul, sigmoid, tanh and the five-op cell update) and the projector. A fused LSTM cell kernel
 is the remaining lever if speech decode ever shows up in a profile.
+
+## Run 15 - 2026-10-30 07:06
+
+Question: Run 13 left the CUDA suite's summed test time (inference-nn `ops` 95.6 s over 40 tests, `cuda::gdn` 87.9 s
+over 26, `qwen3_5_text_tiny` 94.8 s over 26) as the suite-level lever. What does a GPU test spend?
+
+Commands: `scripts/housekeeping.sh --slow-tests` on the last full CI log; the `ops` and `gdn` CUDA tests alone; `nsys
+profile -t cuda,osrt` and `/usr/bin/time` of one test binary run (`ops::tests::cuda_add_rms_norm_matches_separate_ops`);
+1, 4, 8 and 16 concurrent copies of it; a 10-line C program (`cuInit`, primary context, one `cuMemAlloc`) the same
+way; that program under an MPS daemon; the CUDA suite alone under `/usr/bin/time`.
+
+Finding:
+- In CI the `ops` CUDA tests take 2.7-3.4 s each, all started together (positions 2120-2135). Alone, one takes 0.35 s;
+  run as a group of 69 (`ops` + `gdn`), most take ~3 s. The tests' own CUDA API time is ~25 ms (module loads 4.4 ms,
+  allocations 9.4 ms); the binary starts in under 10 ms (`--list` 0.00 s). The rest is CUDA context creation.
+- Context creation is serialized in the driver. Ours: 1 / 4 / 8 / 16 concurrent copies in 0.36 / 0.65 / 1.19 / 2.42 s
+  (~0.15 s a process). The bare C program: 0.14 s alone (cuInit 0.036 s, context and first allocation 0.09-0.14 s),
+  16 in 1.97 s (~0.12 s a process). So ~0.12 s a GPU process is the driver's (RTX 3090, persistence mode on), and our
+  startup adds ~0.03 s of serialized time.
+- The CUDA suite alone: nextest 75.9 s, `/usr/bin/time` user 285 s, sys 285 s, so ~7.5 of 16 cores busy and half of
+  it kernel time (driver ioctls). 645 of its 3452 tests take >= 0.15 s (the rest are CPU tests or skips under 0.15 s);
+  645 x 0.12 s = 77 s. The suite's wall is the serialized context creation of its GPU processes; summed test time is
+  that queue, counted once in each waiting test.
+- MPS (negative): `nvidia-cuda-mps-control -d` with user pipe and log directories fails to start ("Failed to
+  initialize MPS control daemon"); it would also be a machine setup change. Dropped.
+
+Implication: the CUDA suite's wall falls only with fewer GPU processes, ~0.12 s each. Speeding a test's body does not
+move it, and splitting a GPU test (Run 13's Parakeet split) adds a process. GPU processes (>= 0.15 s) by package:
+inference-nn 153, inference-quant 95, server-core 38, inference-fattn 36, inference-ffi 21, then model crates. The
+candidates are the families of small kernel tests, counted as GPU processes: inference-nn `ops` (34), `cuda::gdn`
+(26), paged attention layers (19), `speculative_rejection` (11), `moe::experts` (10); inference-quant `utils::ops`
+(17), `packed_affine` (15), `raw` (9); inference-fattn `parity` (17), `paged` (9), `fp8` (5), `varlen` (5). Merging
+each family into one process that runs every case and reports every failing one would cut ~165 processes, ~20 s.

@@ -193,7 +193,29 @@ fn check(case: Case) -> Result<()> {
     Ok(())
 }
 
-#[test]
+inference_tensor::gpu_cases!(
+    cuda_cases,
+    [
+        decode_mma,
+        decode_vec,
+        encoder_without_a_mask,
+        head_dim_512_with_gqa,
+        implicit_chunks,
+        implicit_sliding_window,
+        long_prefill_converts_bf16_kv_first,
+        mla_shaped_head_dims,
+        prefill,
+        prefill_after_a_cached_prefix,
+        prefill_tile,
+        rejects_a_mask_with_causal_or_a_window,
+        rejects_mismatched_operands,
+        sinks,
+        softcap,
+        stream_k_fixups,
+        strided_misaligned_and_f32_queries
+    ]
+);
+
 fn decode_mma() -> Result<()> {
     for hd in [64, 128, 256] {
         check(case(hd, 2, 1, 512))?;
@@ -202,7 +224,6 @@ fn decode_mma() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn decode_vec() -> Result<()> {
     // batch 1 and GQA 1: no GQA optimisation, so Ampere picks the vector kernel
     for hd in [64, 128, 256] {
@@ -222,7 +243,6 @@ fn decode_vec() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn prefill() -> Result<()> {
     for hd in [64, 80, 96, 112, 128, 256] {
         check(case(hd, 2, 200, 200))?;
@@ -230,7 +250,6 @@ fn prefill() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn prefill_tile() -> Result<()> {
     // head dims 40 and 72 (SigLIP) run the tile kernel even with tensor cores
     for hd in [40, 72] {
@@ -250,12 +269,10 @@ fn prefill_tile() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn prefill_after_a_cached_prefix() -> Result<()> {
     check(case(128, 8, 37, 512))
 }
 
-#[test]
 fn encoder_without_a_mask() -> Result<()> {
     // without GQA only the last KV tile is bounds-checked: one full tile, then many with a partial last
     for seq in [100, 1000] {
@@ -267,13 +284,11 @@ fn encoder_without_a_mask() -> Result<()> {
     check(case(128, N_HEAD, 300, 300))
 }
 
-#[test]
 fn head_dim_512_with_gqa() -> Result<()> {
     check(case(512, 2, 64, 512))?;
     check(case(512, 2, 1, 512))
 }
 
-#[test]
 fn mla_shaped_head_dims() -> Result<()> {
     // 192/128 and 576/512 need the GQA optimisation (mask, KV padded to 256, GQA >= 8); 576 takes v as a view of k
     check(Case {
@@ -290,7 +305,6 @@ fn mla_shaped_head_dims() -> Result<()> {
     })
 }
 
-#[test]
 fn softcap() -> Result<()> {
     check(Case {
         softcap: 30.,
@@ -302,7 +316,6 @@ fn softcap() -> Result<()> {
     })
 }
 
-#[test]
 fn sinks() -> Result<()> {
     check(Case {
         sinks: true,
@@ -314,7 +327,6 @@ fn sinks() -> Result<()> {
     })
 }
 
-#[test]
 fn stream_k_fixups() -> Result<()> {
     // batch 1 with few output tiles: stream-k splits tiles across blocks and a fixup kernel writes the result
     for (hd, seq) in [(256, 512), (128, 256), (64, 1024)] {
@@ -326,14 +338,12 @@ fn stream_k_fixups() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn long_prefill_converts_bf16_kv_first() -> Result<()> {
     // past 512 Q rows the mma kernel takes f16 copies of bf16 K/V rather than converting in its tile loads
     check(case(128, 2, 600, 600))?;
     check(case(256, 8, 640, 1024))
 }
 
-#[test]
 fn strided_misaligned_and_f32_queries() -> Result<()> {
     check(Case {
         q_layout: QLayout::Transposed,
@@ -358,7 +368,6 @@ fn strided_misaligned_and_f32_queries() -> Result<()> {
     })
 }
 
-#[test]
 fn rejects_mismatched_operands() -> Result<()> {
     let Some(dev) = cuda() else { return Ok(()) };
     let t = |h: usize, d: usize| Tensor::zeros((1, 8, h, d), DType::F16, &dev);
@@ -395,7 +404,6 @@ fn rejects_mismatched_operands() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn implicit_sliding_window() -> Result<()> {
     // the kernel's implicit mask with window_left against the reference over the same window as a tensor
     let Some(dev) = cuda() else { return Ok(()) };
@@ -449,7 +457,6 @@ fn implicit_sliding_window() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn implicit_chunks() -> Result<()> {
     // the kernel's chunked mask (each query sees only its own chunk of positions) against the same mask as a tensor
     let Some(dev) = cuda() else { return Ok(()) };
@@ -504,7 +511,6 @@ fn implicit_chunks() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn rejects_a_mask_with_causal_or_a_window() -> Result<()> {
     let Some(dev) = cuda() else { return Ok(()) };
     let t = |s: usize, h: usize| Tensor::zeros((1, s, h, 64), DType::BF16, &dev);

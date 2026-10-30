@@ -250,7 +250,29 @@ fn check_with(c: Case, capture: bool, kv_bits: Option<(u32, u32)>) -> Result<()>
     Ok(())
 }
 
-#[test]
+inference_tensor::gpu_cases!(
+    cuda_cases,
+    [
+        a_head_dim_fattn_lacks_gathers_over_the_hnd_cache,
+        chunked_decode_matches_a_reference,
+        chunked_prefix_prefill_matches_a_reference,
+        decode_matches_a_reference,
+        decode_over_a_quantized_cache_matches_attention_over_its_values,
+        decode_with_any_gqa_group,
+        decode_with_sinks_matches_a_reference,
+        f32_caches_fall_back_to_the_gather,
+        gather_decode_refuses_graph_capture,
+        multi_token_decode_matches_a_reference,
+        prefix_prefill_over_a_cached_prefix,
+        prefix_prefill_over_a_quantized_cache_matches_attention_over_its_values,
+        prefix_prefill_with_a_window_and_without_causality,
+        prefix_prefill_with_sinks_matches_a_reference,
+        sliding_window_decode_matches_a_reference,
+        softcap_without_a_fattn_kernel_falls_back_to_the_gather,
+        verify_rows_over_a_quantized_cache_match_attention_over_its_values
+    ]
+);
+
 fn decode_matches_a_reference() -> Result<()> {
     // every head dim fattn decodes over the HND layout
     for head_dim in [64, 80, 96, 112, 128, 256, 512] {
@@ -274,7 +296,6 @@ fn decode_matches_a_reference() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn sliding_window_decode_matches_a_reference() -> Result<()> {
     for block_size in [16, 32] {
         for (layer_window, softcap) in [(Some(100), None), (None, None), (Some(100), Some(30.))] {
@@ -297,7 +318,6 @@ fn sliding_window_decode_matches_a_reference() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn softcap_without_a_fattn_kernel_falls_back_to_the_gather() -> Result<()> {
     check(Case {
         head_dim: 64,
@@ -315,7 +335,6 @@ fn softcap_without_a_fattn_kernel_falls_back_to_the_gather() -> Result<()> {
     })
 }
 
-#[test]
 fn a_head_dim_fattn_lacks_gathers_over_the_hnd_cache() -> Result<()> {
     for cache_dtype in [DType::BF16, DType::F16, DType::F8E4M3] {
         check(Case {
@@ -336,7 +355,6 @@ fn a_head_dim_fattn_lacks_gathers_over_the_hnd_cache() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn decode_with_any_gqa_group() -> Result<()> {
     // groups that are not a multiple of the kernel's head tile, and MQA's one KV head
     for heads in [(6, 2), (18, 2), (71, 1)] {
@@ -358,7 +376,6 @@ fn decode_with_any_gqa_group() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn gather_decode_refuses_graph_capture() -> Result<()> {
     check_with(
         Case {
@@ -380,7 +397,6 @@ fn gather_decode_refuses_graph_capture() -> Result<()> {
     )
 }
 
-#[test]
 fn decode_over_a_quantized_cache_matches_attention_over_its_values() -> Result<()> {
     // fattn's loads dequantize; softcap at 64 has no fattn kernel, so that case gathers (dequantizing too)
     for (head_dim, bits, dtype, window, softcap, gather) in [
@@ -413,7 +429,6 @@ fn decode_over_a_quantized_cache_matches_attention_over_its_values() -> Result<(
     Ok(())
 }
 
-#[test]
 fn multi_token_decode_matches_a_reference() -> Result<()> {
     check(Case {
         head_dim: 256,
@@ -432,7 +447,6 @@ fn multi_token_decode_matches_a_reference() -> Result<()> {
 }
 
 // A speculative verify's rows over a quantized cache, one causal block per sequence, with and without a window
-#[test]
 fn verify_rows_over_a_quantized_cache_match_attention_over_its_values() -> Result<()> {
     // 6 Q heads a K/V head: 8 rows are 48 columns, which take the transposed kernel
     for (head_dim, bits, window, heads) in [
@@ -464,7 +478,6 @@ fn verify_rows_over_a_quantized_cache_match_attention_over_its_values() -> Resul
     Ok(())
 }
 
-#[test]
 fn f32_caches_fall_back_to_the_gather() -> Result<()> {
     check(Case {
         head_dim: 128,
@@ -742,7 +755,6 @@ fn check_prefill(c: PrefillCase) -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn prefix_prefill_over_a_cached_prefix() -> Result<()> {
     for cache_dtype in [DType::BF16, DType::F16, DType::F8E4M3] {
         // dense: equal query lengths per sequence
@@ -773,7 +785,6 @@ fn prefix_prefill_over_a_cached_prefix() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn prefix_prefill_with_a_window_and_without_causality() -> Result<()> {
     check_prefill(PrefillCase {
         head_dim: 64,
@@ -811,7 +822,6 @@ fn prefix_prefill_with_a_window_and_without_causality() -> Result<()> {
     })
 }
 
-#[test]
 fn decode_with_sinks_matches_a_reference() -> Result<()> {
     // gpt-oss: head dim 64, sinks on every layer, a window on every other one
     for cache_dtype in [DType::BF16, DType::F16, DType::F8E4M3] {
@@ -841,7 +851,6 @@ fn decode_with_sinks_matches_a_reference() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn prefix_prefill_with_sinks_matches_a_reference() -> Result<()> {
     for (query_lens, window) in [(&[8, 8][..], None), (&[20, 9][..], Some(24))] {
         check_prefill(PrefillCase {
@@ -859,7 +868,6 @@ fn prefix_prefill_with_sinks_matches_a_reference() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn chunked_decode_matches_a_reference() -> Result<()> {
     // Llama 4: the window keeps each chunk's rows, so the tables start block-aligned and the chunks count from the
     // full lengths; a chunk of 100 over 32-row blocks puts chunk edges mid-table
@@ -884,7 +892,6 @@ fn chunked_decode_matches_a_reference() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn chunked_prefix_prefill_matches_a_reference() -> Result<()> {
     for (query_lens, chunk) in [(&[8, 8][..], 16), (&[20, 9][..], 24)] {
         check_prefill(PrefillCase {
@@ -902,7 +909,6 @@ fn chunked_prefix_prefill_matches_a_reference() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn prefix_prefill_over_a_quantized_cache_matches_attention_over_its_values() -> Result<()> {
     for (head_dim, bits, dtype, kv_lens, query_lens, window) in [
         (

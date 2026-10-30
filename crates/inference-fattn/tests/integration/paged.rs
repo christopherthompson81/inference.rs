@@ -149,7 +149,21 @@ fn check(c: PagedCase) -> Result<()> {
     Ok(())
 }
 
-#[test]
+inference_tensor::gpu_cases!(
+    cuda_cases,
+    [
+        chunked_prefill_over_a_cached_prefix,
+        chunks_count_from_full_lens,
+        decode,
+        graph_padded_tables_split_by_live_length,
+        long_prefill_converts_in_the_loads,
+        one_sequence_with_spare_table_entries,
+        rejects_a_short_mask_and_odd_blocks,
+        small_blocks_and_no_gqa,
+        supported_paged_answers_for_kernel_limits
+    ]
+);
+
 fn decode() -> Result<()> {
     for d in [64, 128, 256] {
         check(PagedCase {
@@ -164,7 +178,6 @@ fn decode() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn chunked_prefill_over_a_cached_prefix() -> Result<()> {
     check(PagedCase {
         head_dim: 128,
@@ -176,7 +189,6 @@ fn chunked_prefill_over_a_cached_prefix() -> Result<()> {
     })
 }
 
-#[test]
 fn small_blocks_and_no_gqa() -> Result<()> {
     check(PagedCase {
         head_dim: 128,
@@ -196,7 +208,6 @@ fn small_blocks_and_no_gqa() -> Result<()> {
     })
 }
 
-#[test]
 fn one_sequence_with_spare_table_entries() -> Result<()> {
     // batch 1 with blocks to spare: whole KV tiles past the sequence, which the mask scan must skip or the mask hide
     check(PagedCase {
@@ -209,7 +220,6 @@ fn one_sequence_with_spare_table_entries() -> Result<()> {
     })
 }
 
-#[test]
 fn graph_padded_tables_split_by_live_length() -> Result<()> {
     // a CUDA graph's table spans a power-of-two bucket: stream-k splits the live rows only, so most blocks get none
     // 80 and 112 leave the fixups a half warp
@@ -233,7 +243,6 @@ fn graph_padded_tables_split_by_live_length() -> Result<()> {
     })
 }
 
-#[test]
 fn long_prefill_converts_in_the_loads() -> Result<()> {
     // past 512 Q rows dense bf16 K/V is converted first, which a paged cache cannot take
     check(PagedCase {
@@ -246,7 +255,6 @@ fn long_prefill_converts_in_the_loads() -> Result<()> {
     })
 }
 
-#[test]
 fn rejects_a_short_mask_and_odd_blocks() -> Result<()> {
     let Some(dev) = cuda() else { return Ok(()) };
     let cache = Tensor::zeros((4, 2, 32, 64), DType::BF16, &dev)?;
@@ -283,7 +291,6 @@ fn rejects_a_short_mask_and_odd_blocks() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn supported_paged_answers_for_kernel_limits() -> Result<()> {
     let Some(dev) = cuda() else { return Ok(()) };
     let block_table = Tensor::zeros((2, 3), DType::U32, &dev)?;
@@ -351,7 +358,6 @@ fn supported_paged_answers_for_kernel_limits() -> Result<()> {
     Ok(())
 }
 
-#[test]
 fn chunks_count_from_full_lens() -> Result<()> {
     // tables that hold only each sequence's last rows (a window's), so chunk edges fall at full_lens-based positions
     let Some(dev) = cuda() else { return Ok(()) };
