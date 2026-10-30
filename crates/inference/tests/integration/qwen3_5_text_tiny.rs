@@ -724,6 +724,41 @@ async fn a_dflash_agent_turn_resumes_at_the_previous_prompt_snapshot() -> anyhow
     Ok(())
 }
 
+// under a block, so no reply warm-up runs and only the reply's own decode snapshots carry the next turn
+const SHORT_PROMPT_LEN: usize = 20;
+// this checkpoint's last verify step of the reply ends at 64 computed tokens, after an earlier one landed on 32
+const BOUNDARY_REPLY_LEN: usize = 45;
+const BOUNDARY_REPLY_SNAPSHOT_TOKENS: usize = 64;
+
+// A reply whose final verify step lands on a block boundary snapshots there with its drafter checkpoint, though the
+// sequence never drafts again, and the next turn resumes at it and decodes as a cold run does.
+async fn a_dflash_reply_ending_on_a_block_boundary_snapshots_there() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let drafter = tiny_dflash(AGENT_DFLASH_WINDOW)?;
+    let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
+    let model = agent_model(checkpoint.path(), drafter.path()).await?;
+    let first = agent_tokens(SHORT_PROMPT_LEN, 0);
+    let (reply, _) = agent_turn(&model, &first, BOUNDARY_REPLY_LEN).await?;
+    let mut next = first;
+    next.extend(reply.iter().map(|&(token, _)| token));
+    next.extend(agent_tokens(AGENT_FOLLOW_UP_LEN, 1));
+    let (warm, cached) = agent_turn(&model, &next, PREFIX_MAX_LEN).await?;
+    drop(model);
+    let cold_model = agent_model(checkpoint.path(), drafter.path()).await?;
+    let (cold, _) = agent_turn(&cold_model, &next, PREFIX_MAX_LEN).await?;
+    anyhow::ensure!(
+        cached == BOUNDARY_REPLY_SNAPSHOT_TOKENS,
+        "the next turn resumed at {cached}, not the reply's final boundary ({BOUNDARY_REPLY_SNAPSHOT_TOKENS})"
+    );
+    anyhow::ensure!(
+        traces::close(&warm, &cold, DECODED_KV_LOGPROB_TOLERANCE),
+        "resuming at the reply's final boundary changed decoding: {warm:?} vs {cold:?}"
+    );
+    Ok(())
+}
+
 // the writer thread stores a prefix well within this
 const STORE_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 const STORE_POLLS: usize = 200;
@@ -1232,6 +1267,7 @@ concurrent_cases!(
         a_full_attention_drafter_runs_beside_a_quantized_cache: 486,
         a_repeated_prompt_restores_the_recurrent_prefix: 354,
         a_dflash_agent_turn_resumes_at_the_previous_prompt_snapshot: 454,
+        a_dflash_reply_ending_on_a_block_boundary_snapshots_there: 420,
         a_stored_prefix_restores_after_a_restart: 388,
         a_stored_prefix_restores_with_its_dflash_checkpoint_after_a_restart: 422,
         a_stored_prefix_restores_with_a_full_attention_drafter_after_a_restart: 422,

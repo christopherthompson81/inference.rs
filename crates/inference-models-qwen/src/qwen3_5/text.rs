@@ -3532,18 +3532,21 @@ mod tests {
 
         let rows = [
             SpeculativeCommitRow {
+                seq_id: 2,
                 batch_idx: 2,
                 keep_rows: 3,
                 accepted_all: true,
                 terminal: true,
             },
             SpeculativeCommitRow {
+                seq_id: 0,
                 batch_idx: 0,
                 keep_rows: 1,
                 accepted_all: false,
                 terminal: false,
             },
             SpeculativeCommitRow {
+                seq_id: 1,
                 batch_idx: 1,
                 keep_rows: 2,
                 accepted_all: false,
@@ -3562,6 +3565,7 @@ mod tests {
         use crate::speculative::SpeculativeCommitRow;
 
         let row = |batch_idx, keep_rows| SpeculativeCommitRow {
+            seq_id: batch_idx,
             batch_idx,
             keep_rows,
             accepted_all: false,

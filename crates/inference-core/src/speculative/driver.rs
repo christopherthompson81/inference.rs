@@ -612,6 +612,7 @@ where
         .enumerate()
         .filter_map(|(batch_idx, outcome)| {
             outcome.as_ref().map(|outcome| SpeculativeCommitRow {
+                seq_id: *seqs[batch_idx].id(),
                 batch_idx,
                 keep_rows: outcome.accepted_drafts + 1,
                 accepted_all: outcome.accepted_drafts == outcome.proposed_drafts,
