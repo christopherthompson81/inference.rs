@@ -491,7 +491,8 @@ fn new_cuda_async_token_slot(
         }),
         Shape::from_dims(&[capacity_rows, 1]),
     ));
-    let event_flags = Some(sys::CUevent_flags::CU_EVENT_BLOCKING_SYNC);
+    // spinning: a sleeping wait wakes ~0.3 ms late, on the critical path of every speculative step
+    let event_flags = Some(sys::CUevent_flags::CU_EVENT_DISABLE_TIMING);
     Ok(CudaAsyncTokenSlot {
         owned_token_ids,
         token_ids_host: unsafe { context.alloc_pinned::<u32>(capacity_rows) }
