@@ -125,34 +125,42 @@ inference reconstruct --model HY-WorldMirror-2.0 --input walk.mp4 --fps 1 --max-
 **Chat:** Qwen3.8-27B answers a question, then describes an attached picture.
 
 <!-- chat.mp4 -->
+https://github.com/user-attachments/assets/c547167d-19e3-48ff-8160-aa0c8fe52d8d
 
 **Audio in chat:** Qwen3-ASR hears a recording attached to the message.
 
 <!-- chat_audio.mp4 -->
+https://github.com/user-attachments/assets/08e86e7e-5715-4478-a297-a8ee1c78cde2
 
 **Speech to text:** Whisper and Nemotron-3 Diarization transcribe a two-speaker clip, and playback follows the words.
 
 <!-- transcription.mp4 -->
+https://github.com/user-attachments/assets/f1752118-8061-44e8-9d33-0511283f5d9e
 
 **Text to speech:** Kokoro reads markdown, highlighting each word as it plays.
 
 <!-- speech.mp4 -->
+https://github.com/user-attachments/assets/8ae4b318-f7ad-4fa4-b2ad-4f9ce83ba693
 
 **Images:** HiDream-O1 draws a scene from a prompt (the generation sped up 4x).
 
 <!-- images.mp4 -->
+https://github.com/user-attachments/assets/fe9413c7-2896-4a7c-b5e9-bbb84086d930
 
 **Documents:** PP-DocLayoutV3 finds a page's regions and PaddleOCR-VL reads them, tables included.
 
 <!-- documents.mp4 -->
+https://github.com/user-attachments/assets/ecfffb43-e2dd-4b67-8e23-e5d8c13930fe
 
 **Code:** the coding agent fixes a small package until its tests pass (sped up 2x).
 
 <!-- code.mp4 -->
+https://github.com/user-attachments/assets/aafef4aa-109a-4938-8c3e-7c5a49e37db2
 
 **Worlds:** a panorama becomes a 3D world of Gaussian splats (about 45 minutes, sped up 200x), then explored in the viewer.
 
 <!-- worlds.mp4 -->
+https://github.com/user-attachments/assets/28b2b0f4-75c5-4d2f-975d-b3817efc6984
 
 </details>
 
