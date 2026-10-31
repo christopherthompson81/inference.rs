@@ -673,6 +673,8 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `NormalLoaderType.OLMO` | `'olmo'` |
 | `NormalLoaderType.OLMO2` | `'olmo2'` |
 | `NormalLoaderType.OLMO3` | `'olmo3'` |
+| `NormalLoaderType.ERNIE4_5` | `'ernie4.5'` |
+| `NormalLoaderType.ERNIE4_5MOE` | `'ernie4.5moe'` |
 | `NormalLoaderType.OLMOE` | `'olmoe'` |
 | `NormalLoaderType.LFM2` | `'lfm2'` |
 | `NormalLoaderType.LFM2_MOE` | `'lfm2_moe'` |

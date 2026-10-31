@@ -83,6 +83,16 @@ impl SupportedArch for NormalLoaderType {
                 modalities: m,
                 examples: &[ex!("microsoft/Phi-3-medium-4k-instruct")],
             },
+            Self::Ernie4_5 => ArchMetadata {
+                families: &["ERNIE 4.5"],
+                modalities: m,
+                examples: &[ex!("baidu/ERNIE-4.5-0.3B-PT")],
+            },
+            Self::Ernie4_5Moe => ArchMetadata {
+                families: &["ERNIE 4.5 MoE"],
+                modalities: m,
+                examples: &[ex!("baidu/ERNIE-4.5-21B-A3B-PT")],
+            },
             Self::Qwen => ArchMetadata {
                 families: &["Qwen"],
                 modalities: m,

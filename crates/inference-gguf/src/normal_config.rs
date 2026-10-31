@@ -163,6 +163,14 @@ pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; NORMAL_LOADER_TYPE_COUN
         build: build_olmo2,
     },
     NormalConfigBuilder {
+        loader: NormalLoaderType::Ernie4_5,
+        build: build_ernie4_5,
+    },
+    NormalConfigBuilder {
+        loader: NormalLoaderType::Ernie4_5Moe,
+        build: build_ernie4_5_moe,
+    },
+    NormalConfigBuilder {
         loader: NormalLoaderType::Olmoe,
         build: build_olmoe,
     },
@@ -1441,6 +1449,62 @@ fn build_olmo2(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
         }
     };
     config.insert("rope_scaling".into(), rope_scaling);
+    Ok(JsonValue::Object(config))
+}
+
+const ERNIE45_ROPE_THETA: f64 = 500_000.0;
+
+fn ernie4_5_core(metadata: &MetadataView<'_>) -> SynthesisResult<JsonMap<String, JsonValue>> {
+    reject_unsupported_rope_scaling(metadata, "ERNIE 4.5")?;
+    let fields = StandardFields::read(metadata, Some(ERNIE45_ROPE_THETA))?;
+    require_full_rotary(metadata, fields.head_dim)?;
+    let mut config = fields.rms_json();
+    config.remove("sliding_window");
+    config.insert("head_dim".into(), json!(fields.head_dim));
+    config.insert("use_bias".into(), json!(false));
+    Ok(config)
+}
+
+fn build_ernie4_5(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
+    Ok(JsonValue::Object(ernie4_5_core(metadata)?))
+}
+
+// llama.cpp writes the leading dense layers and the MoE interval; every layer after them is MoE
+fn build_ernie4_5_moe(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
+    let mut config = ernie4_5_core(metadata)?;
+    config.insert(
+        "moe_num_experts".into(),
+        json!(metadata.required_usize("expert_count")?),
+    );
+    config.insert(
+        "moe_k".into(),
+        json!(metadata.required_usize("expert_used_count")?),
+    );
+    config.insert(
+        "moe_intermediate_size".into(),
+        json!(metadata.required_usize("expert_feed_forward_length")?),
+    );
+    config.insert(
+        "moe_num_shared_experts".into(),
+        json!(metadata.optional_usize("expert_shared_count")?.unwrap_or(0)),
+    );
+    config.insert(
+        "moe_layer_start_index".into(),
+        json!(
+            metadata
+                .optional_usize("leading_dense_block_count")?
+                .unwrap_or(0)
+        ),
+    );
+    config.insert("moe_layer_end_index".into(), json!(-1));
+    config.insert(
+        "moe_layer_interval".into(),
+        json!(
+            metadata
+                .optional_usize("interleave_moe_layer_step")?
+                .unwrap_or(1)
+        ),
+    );
     Ok(JsonValue::Object(config))
 }
 
@@ -2915,7 +2979,7 @@ mod tests {
         pub use inference_models_gemma::{gemma, gemma2};
         pub use inference_models_llama::{llama, mistral, mixtral, smollm3};
         pub use inference_models_other::{
-            deepseek2, deepseek3, glm4, glm4_moe, glm4_moe_lite, gpt_oss, granite,
+            deepseek2, deepseek3, ernie4_5, glm4, glm4_moe, glm4_moe_lite, gpt_oss, granite,
             hunyuan_v1_dense, hunyuan_v1_moe, lfm2, olmo, starcoder2,
         };
         pub use inference_models_phi::{phi2, phi3, phi3_5_moe};
@@ -3008,6 +3072,7 @@ mod tests {
                 | NormalLoaderType::GraniteMoeHybrid
                 | NormalLoaderType::GraniteMoeSwa
                 | NormalLoaderType::Olmoe
+                | NormalLoaderType::Ernie4_5Moe
         )
     }
 
@@ -3360,6 +3425,12 @@ mod tests {
             }
             NormalLoaderType::Olmo2 | NormalLoaderType::Olmo3 => {
                 assert_deserializes(loader, config, models::olmo::Olmo2Config::from_json)
+            }
+            NormalLoaderType::Ernie4_5 => {
+                assert_deserializes(loader, config, models::ernie4_5::Config::from_json)
+            }
+            NormalLoaderType::Ernie4_5Moe => {
+                assert_deserializes(loader, config, models::ernie4_5::MoeConfig::from_json)
             }
             NormalLoaderType::Olmoe => {
                 assert_deserializes(loader, config, models::olmo::OlmoeConfig::from_json)

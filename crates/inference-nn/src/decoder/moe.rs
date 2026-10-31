@@ -17,8 +17,8 @@ use super::LayerLoad;
 /// Mixtral's and Phi-3.5-MoE's name for a layer's experts and router.
 pub const BLOCK_SPARSE_MOE: &str = "block_sparse_moe";
 const ROUTER: &str = "gate";
-const SHARED_EXPERT: &str = "shared_expert";
 const SHARED_EXPERT_GATE: &str = "shared_expert_gate";
+const SELECTION_BIAS: (&str, &str) = ("moe_statics", "e_score_correction_bias");
 // sparsemixer routes each token to two experts by construction
 const SPARSE_MIXER_EXPERTS: usize = 2;
 
@@ -29,12 +29,15 @@ pub enum MoeRouting {
     TopK { k: usize, renormalize: bool },
     /// Phi-3.5-MoE's sparsemixer: the top two experts, each weighed by a softmax masked at the jitter threshold.
     SparseMixer { jitter_eps: f64 },
+    /// ERNIE 4.5: the router and a per-expert selection bias (`moe_statics.e_score_correction_bias`) in f32; the top
+    /// `k` of softmax plus bias, weighed by their softmax renormalized over a sum clamped at `norm_min`.
+    BiasedTopK { k: usize, norm_min: f32 },
 }
 
 impl MoeRouting {
     fn experts_per_token(self) -> usize {
         match self {
-            Self::TopK { k, .. } => k,
+            Self::TopK { k, .. } | Self::BiasedTopK { k, .. } => k,
             Self::SparseMixer { .. } => SPARSE_MIXER_EXPERTS,
         }
     }
@@ -55,8 +58,17 @@ pub struct MoeSpec {
     pub dense_layers: Vec<usize>,
     /// Whether a captured CUDA decode graph has been trusted with these experts.
     pub cuda_decode_graphs: bool,
-    /// The intermediate size of an MLP every token also runs, scaled by `sigmoid(shared_expert_gate(x))` (Qwen2-MoE).
-    pub shared_expert: Option<usize>,
+    pub shared_expert: Option<SharedExpertSpec>,
+}
+
+/// An MLP every token runs beside the routed experts.
+#[derive(Clone, Copy, Debug)]
+pub struct SharedExpertSpec {
+    pub intermediate_size: usize,
+    /// `shared_expert` (Qwen2-MoE) or `shared_experts` (ERNIE 4.5, its experts fused into one MLP).
+    pub name: &'static str,
+    /// Scaled by `sigmoid(shared_expert_gate(x))`, as Qwen2-MoE's is.
+    pub gated: bool,
 }
 
 enum Router {
@@ -64,6 +76,11 @@ enum Router {
     Plain {
         gate: Linear,
         lora: Option<Arc<LoraSiteHandle>>,
+    },
+    /// An f32 router and its selection bias, as the checkpoint stores them (`[1, experts]`).
+    F32 {
+        gate: Linear,
+        bias: Tensor,
     },
 }
 
@@ -79,20 +96,25 @@ pub struct SparseMoe {
 
 struct SharedExpert {
     mlp: layers::Mlp,
-    gate: Linear,
-    gate_lora: Option<Arc<LoraSiteHandle>>,
+    name: &'static str,
+    gate: Option<(Linear, Option<Arc<LoraSiteHandle>>)>,
 }
 
 impl SharedExpert {
     fn forward(&self, xs: &Tensor, xs_flat: &Tensor) -> Result<Tensor> {
-        let (b_size, seq_len, _) = xs.dims3()?;
-        let gate = self.gate.forward(xs_flat)?;
-        let gate = match &self.gate_lora {
-            Some(site) => inference_quant::apply_dynamic_lora_delta(site, xs_flat, gate)?,
-            None => gate,
+        let out = self.mlp.forward(xs)?;
+        let Some((gate, lora)) = &self.gate else {
+            return Ok(out);
         };
-        let gate = inference_tensor::nn::ops::sigmoid(&gate)?.reshape((b_size, seq_len, 1))?;
-        self.mlp.forward(xs)?.broadcast_mul(&gate)
+        let (b_size, seq_len, _) = xs.dims3()?;
+        let gate_logits = gate.forward(xs_flat)?;
+        let gate_logits = match lora {
+            Some(site) => inference_quant::apply_dynamic_lora_delta(site, xs_flat, gate_logits)?,
+            None => gate_logits,
+        };
+        let gate =
+            inference_tensor::nn::ops::sigmoid(&gate_logits)?.reshape((b_size, seq_len, 1))?;
+        out.broadcast_mul(&gate)
     }
 }
 
@@ -105,7 +127,23 @@ impl SparseMoe {
         load: &LayerLoad<'_>,
         vb: ShardedVarBuilder,
     ) -> Result<Self> {
-        let router = if spec.quantized_router {
+        let router = if let MoeRouting::BiasedTopK { .. } = spec.routing {
+            let router_vb = vb
+                .pp(ROUTER)
+                .set_device(load.device.clone())
+                .set_dtype(DType::F32);
+            let gate = layers::linear_no_bias(hidden_size, spec.num_experts, router_vb)?;
+            let bias = vb
+                .pp(SELECTION_BIAS.0)
+                .set_device(load.device.clone())
+                .get_with_hints_dtype(
+                    (1, spec.num_experts),
+                    SELECTION_BIAS.1,
+                    Default::default(),
+                    DType::F32,
+                )?;
+            Router::F32 { gate, bias }
+        } else if spec.quantized_router {
             Router::Quantized(inference_quant::linear_no_bias(
                 hidden_size,
                 spec.num_experts,
@@ -139,22 +177,31 @@ impl SparseMoe {
         )?;
         let shared_expert = spec
             .shared_expert
-            .map(|intermediate_size| -> Result<Box<SharedExpert>> {
-                let gate_vb = vb.pp(SHARED_EXPERT_GATE).set_device(load.device.clone());
+            .map(|shared| -> Result<Box<SharedExpert>> {
+                let gate = shared
+                    .gated
+                    .then(|| -> Result<_> {
+                        let gate_vb = vb.pp(SHARED_EXPERT_GATE).set_device(load.device.clone());
+                        Ok((
+                            layers::linear_no_bias(hidden_size, 1, gate_vb.clone())?,
+                            inference_quant::register_dynamic_lora_site(
+                                &gate_vb,
+                                inference_quant::LoraLinearSpec::replicated(hidden_size, 1),
+                            )?,
+                        ))
+                    })
+                    .transpose()?;
                 Ok(Box::new(SharedExpert {
                     mlp: layers::Mlp::new(
-                        vb.pp(SHARED_EXPERT),
+                        vb.pp(shared.name),
                         hidden_size,
-                        intermediate_size,
+                        shared.intermediate_size,
                         quantization_config,
                         act,
                         load.comm,
                     )?,
-                    gate: layers::linear_no_bias(hidden_size, 1, gate_vb.clone())?,
-                    gate_lora: inference_quant::register_dynamic_lora_site(
-                        &gate_vb,
-                        inference_quant::LoraLinearSpec::replicated(hidden_size, 1),
-                    )?,
+                    name: shared.name,
+                    gate,
                 }))
             })
             .transpose()?;
@@ -182,6 +229,7 @@ impl SparseMoe {
                     None => logits,
                 }
             }
+            Router::F32 { gate, .. } => gate.forward(&xs_flat.to_dtype(DType::F32)?)?,
         };
         let (weights, experts) = match self.routing {
             MoeRouting::TopK { k, renormalize } => {
@@ -204,6 +252,26 @@ impl SparseMoe {
             MoeRouting::SparseMixer { jitter_eps } => {
                 let (weights, experts) = sparsemixer(&logits, jitter_eps)?;
                 (weights.to_dtype(DType::F32)?, experts)
+            }
+            MoeRouting::BiasedTopK { k, norm_min } => {
+                let Router::F32 { bias, .. } = &self.router else {
+                    inference_tensor::bail!("biased top-k routing without its f32 router");
+                };
+                let topk = crate::ops::moe_router_topk(
+                    &logits,
+                    MoeRouterTopKConfig {
+                        top_k: k,
+                        score_function: MoeRouterScoreFunction::Softmax,
+                        selected_weight: MoeRouterSelectedWeight::Score,
+                        renormalize: true,
+                        norm_min,
+                        output_scale: 1.0,
+                        logit_clip: None,
+                    },
+                    Some(bias),
+                    None,
+                )?;
+                (topk.values, topk.indices)
             }
         };
         let Some(shared_expert) = &self.shared_expert else {
@@ -235,11 +303,21 @@ impl SparseMoe {
 
     /// A plain router, which ISQ leaves alone.
     pub(super) fn add_residual(&self, uvb: &UnVarBuilder) {
-        if let Router::Plain { gate, .. } = &self.router {
-            uvb.pp(ROUTER).add(gate);
+        match &self.router {
+            Router::Plain { gate, .. } => uvb.pp(ROUTER).add(gate),
+            Router::F32 { gate, bias } => {
+                uvb.pp(ROUTER).add(gate);
+                uvb.pp(SELECTION_BIAS.0)
+                    .add_tensor(SELECTION_BIAS.1, bias.clone());
+            }
+            Router::Quantized(_) => {}
         }
-        if let Some(shared_expert) = &self.shared_expert {
-            uvb.pp(SHARED_EXPERT_GATE).add(&shared_expert.gate);
+        if let Some((gate, _)) = self
+            .shared_expert
+            .as_ref()
+            .and_then(|shared| shared.gate.as_ref())
+        {
+            uvb.pp(SHARED_EXPERT_GATE).add(gate);
         }
     }
 
@@ -249,7 +327,7 @@ impl SparseMoe {
             uvb.pp(ROUTER).add(gate);
         }
         if let Some(shared_expert) = &self.shared_expert {
-            let uvb = uvb.pp(SHARED_EXPERT);
+            let uvb = uvb.pp(shared_expert.name);
             uvb.pp("gate_proj").add(&shared_expert.mlp.gate);
             uvb.pp("up_proj").add(&shared_expert.mlp.up);
             uvb.pp("down_proj").add(&shared_expert.mlp.down);

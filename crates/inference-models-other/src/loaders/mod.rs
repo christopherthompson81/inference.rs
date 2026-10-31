@@ -25,6 +25,7 @@ mod bert;
 mod deepseek2;
 mod deepseek3;
 mod deepseek_family;
+mod ernie4_5;
 mod glm4;
 mod glm4_moe;
 mod glm4_moe_lite;
@@ -51,6 +52,7 @@ mod sizing_tests;
 pub use bert::*;
 pub use deepseek2::*;
 pub use deepseek3::*;
+pub use ernie4_5::*;
 pub use glm4::*;
 pub use glm4_moe::*;
 pub use glm4_moe_lite::*;
@@ -75,6 +77,8 @@ inference_nn::boxed_loaders!(
     NormalModelLoader:
     DeepSeekV2Loader,
     DeepSeekV3Loader,
+    Ernie4_5Loader,
+    Ernie4_5MoeLoader,
     GLM4Loader,
     GLM4MoeLiteLoader,
     GLM4MoeLoader,

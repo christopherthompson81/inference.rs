@@ -33,7 +33,7 @@ use crate::{
 mod moe;
 pub mod qwen3_vl;
 
-pub use moe::{BLOCK_SPARSE_MOE, MoeRouting, MoeSpec, SparseMoe};
+pub use moe::{BLOCK_SPARSE_MOE, MoeRouting, MoeSpec, SharedExpertSpec, SparseMoe};
 
 /// A layer's feed-forward, dense or routed, as most checkpoints name it.
 pub const MLP: &str = "mlp";

@@ -4,12 +4,14 @@ use inference_quant::QuantizedConfig;
 use inference_tensor::Result;
 
 use crate::{
-    decoder::{DecoderSpec, MLP, MoeRouting, MoeSpec, RopeKind},
+    decoder::{DecoderSpec, MLP, MoeRouting, MoeSpec, RopeKind, SharedExpertSpec},
     layers::Activation,
     moe::ExpertProjNames,
     qwen2::Qwen2AttentionType,
     serde_default_fn,
 };
+
+const SHARED_EXPERT: &str = "shared_expert";
 
 serde_default_fn!(bool, qkv_bias_default, true);
 serde_default_fn!(usize, decoder_sparse_step_default, 1);
@@ -128,7 +130,11 @@ impl Config {
                     .filter(|&layer_idx| !self.is_moe_layer(layer_idx))
                     .collect(),
                 cuda_decode_graphs: true,
-                shared_expert: Some(self.shared_expert_intermediate_size),
+                shared_expert: Some(SharedExpertSpec {
+                    intermediate_size: self.shared_expert_intermediate_size,
+                    name: SHARED_EXPERT,
+                    gated: true,
+                }),
             }),
             ..Default::default()
         })

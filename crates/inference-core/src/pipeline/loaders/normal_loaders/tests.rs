@@ -382,6 +382,16 @@ fn native_gguf_adapter_isq_namespace_matrix() -> Result<()> {
             ],
         },
         NativeIsqNamespaceCase {
+            name: "ERNIE 4.5 MoE",
+            loader: Box::new(Ernie4_5MoeLoader),
+            config: "",
+            paths: &[
+                "model.layers.0.self_attn.q_proj.weight",
+                "model.layers.1.mlp.experts.0.gate_proj.weight",
+                "model.layers.1.mlp.shared_experts.gate_proj.weight",
+            ],
+        },
+        NativeIsqNamespaceCase {
             name: "Qwen 1",
             loader: Box::new(QwenLoader),
             config: "",
@@ -596,6 +606,13 @@ fn normal_moe_loaders_match_canonical_expert_stacks() -> Result<()> {
             projections: FUSED_EXPERT_PROJECTIONS,
         },
         ExpertIsqCase {
+            name: "Ernie4_5MoeLoader",
+            loader: Box::new(Ernie4_5MoeLoader),
+            config: "",
+            prefix: "model.layers.0.mlp.experts",
+            projections: FUSED_EXPERT_PROJECTIONS,
+        },
+        ExpertIsqCase {
             name: "Qwen2MoeLoader",
             loader: Box::new(Qwen2MoeLoader),
             config: "",
@@ -799,6 +816,10 @@ fn native_gguf_moqe_predicates_exclude_the_shared_trunk() -> Result<()> {
             &GLM4MoeLiteLoader as &dyn IsqModelLoader,
         ),
         ("GLM4MoeLoader", &GLM4MoeLoader as &dyn IsqModelLoader),
+        (
+            "Ernie4_5MoeLoader",
+            &Ernie4_5MoeLoader as &dyn IsqModelLoader,
+        ),
         ("Qwen2MoeLoader", &Qwen2MoeLoader as &dyn IsqModelLoader),
         ("Qwen3MoELoader", &Qwen3MoELoader as &dyn IsqModelLoader),
         ("Qwen3NextLoader", &Qwen3NextLoader as &dyn IsqModelLoader),
@@ -872,7 +893,7 @@ fn native_gguf_moqe_predicates_exclude_the_shared_trunk() -> Result<()> {
 
 #[test]
 fn concrete_normal_loaders_scope_promoted_isq_tensors() {
-    let loaders: [(&str, &dyn IsqModelLoader); 27] = [
+    let loaders: [(&str, &dyn IsqModelLoader); 29] = [
         ("MistralLoader", &MistralLoader),
         ("GemmaLoader", &GemmaLoader),
         ("LlamaLoader", &LlamaLoader),
@@ -881,6 +902,8 @@ fn concrete_normal_loaders_scope_promoted_isq_tensors() {
         ("Phi3Loader", &Phi3Loader),
         ("Qwen2Loader", &Qwen2Loader),
         ("Qwen2MoeLoader", &Qwen2MoeLoader),
+        ("Ernie4_5Loader", &Ernie4_5Loader),
+        ("Ernie4_5MoeLoader", &Ernie4_5MoeLoader),
         ("Gemma2Loader", &Gemma2Loader),
         ("Starcoder2Loader", &Starcoder2Loader),
         ("Phi3_5MoELoader", &Phi3_5MoELoader),
