@@ -864,6 +864,9 @@ impl<T> CudaSlice<T> {
 impl<T> Drop for CudaSlice<T> {
     fn drop(&mut self) {
         let ctx = &self.stream.ctx;
+        // a slice dropped on a thread with no current context (an embedder's thread closing an engine) would fail its
+        // free with CUDA_ERROR_INVALID_CONTEXT, which `record_err` keeps quiet, and leak the allocation
+        ctx.record_err(ctx.bind_to_thread());
         if ctx.is_managing_stream_synchronization() {
             if let Some(read) = self.read.as_ref() {
                 ctx.record_err(self.stream.wait(read));
