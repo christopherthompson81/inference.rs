@@ -132,3 +132,15 @@ forced-aligner head.
   on the tiny model it gives the prompt an `audio_url` data URL does.
 
 **Next:** the forced-aligner head (Qwen3-ForcedAligner-0.6B) for word timestamps.
+
+## Run 6 - 2026-10-31 10:57
+
+**Question:** does the real `-hf` checkpoint (Run 5 checked only its config and tensor names) load and transcribe?
+
+**Command:** `inference serve -m Qwen/Qwen3-ASR-1.7B-hf` (its BF16 weights, 3.9 GB, the only form it ships), then
+`/v1/audio/transcriptions` (`verbose_json`) and the chat client on the Run 2 clips.
+
+**Finding:** both clips transcribe word for word as Runs 2 and 3, on the endpoint (`language` `english`, one segment
+over the clip) and in chat under the repo's own template (prompts 60 and 277 tokens, as with ChatML).
+
+**Next:** the forced-aligner head.
