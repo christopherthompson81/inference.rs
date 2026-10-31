@@ -4,7 +4,6 @@ use std::{any::Any, ops::Range, sync::Arc};
 
 use image::{DynamicImage, GenericImageView};
 use inference_tensor::{Device, Result, Tensor};
-use inference_vision::{ApplyTransforms, Normalize, Rescale, ToTensorNoNorm, Transforms};
 use tokenizers::Tokenizer;
 
 use crate::device_map::DeviceMapper;
@@ -561,9 +560,6 @@ impl ImagePreProcessor for Idefics2ImageProcessor {
     ) -> Result<PreprocessedImages> {
         assert!(videos.is_empty());
 
-        let mut patch_masks = Vec::new();
-        let mut pixel_values = Vec::new();
-
         // Image splitting
         if config.do_image_splitting.is_some_and(|x| x) {
             let mut new_images = Vec::new();
@@ -615,62 +611,21 @@ impl ImagePreProcessor for Idefics2ImageProcessor {
             images = inference_vision::pad_to_max_edge(&images, max_edge);
         }
 
-        let mut max_h = 0;
-        let mut max_w = 0;
-        for image in &images {
-            let (w, h) = image.dimensions();
-            if w > max_w {
-                max_w = w;
-            }
-            if h > max_h {
-                max_h = h;
-            }
-        }
-
-        for image in images.iter_mut() {
-            // Convert to rgb
-            if config.do_convert_rgb.is_some_and(|x| x) {
+        if config.do_convert_rgb.is_some_and(|x| x) {
+            for image in images.iter_mut() {
                 *image = DynamicImage::ImageRgb8(image.to_rgb8());
             }
-
-            let transforms = Transforms {
-                input: &ToTensorNoNorm,
-                inner_transforms: &[
-                    &config
-                        .do_rescale
-                        .is_some_and(|x| x)
-                        .then_some(())
-                        .map(|_| Rescale {
-                            factor: config.rescale_factor,
-                        }),
-                    &config
-                        .do_normalize
-                        .is_some_and(|x| x)
-                        .then_some(())
-                        .map(|_| Normalize {
-                            mean: config.image_mean.unwrap_or(Self::DEFAULT_MEAN).to_vec(),
-                            std: config.image_std.unwrap_or(Self::DEFAULT_STD).to_vec(),
-                        }),
-                ],
-            };
-
-            let mut image = image.apply(transforms, device)?;
-            // Pad images, calculating attention mask.
-            if config.do_pad.is_some_and(|x| x) {
-                let (_c, h, w) = image.dims3()?;
-                let padded = inference_vision::pad(&image, max_h as usize, max_w as usize)?;
-                let mask = inference_vision::make_pixel_mask(&padded, h, w)?;
-                patch_masks.push(mask.unsqueeze(0)?);
-                image = padded;
-            }
-
-            // Get pixel values
-            pixel_values.push(image.unsqueeze(0)?)
         }
+        let (pixel_values, pixel_attention_mask) = crate::idefics_common::normalize_and_pad(
+            &images,
+            config,
+            (Self::DEFAULT_MEAN, Self::DEFAULT_STD),
+            device,
+        )?;
 
         Ok(PreprocessedImages {
-            pixel_values: Tensor::cat(&pixel_values, 0)?,
-            pixel_attention_mask: Some(Tensor::cat(&patch_masks, 0)?),
+            pixel_values,
+            pixel_attention_mask: Some(pixel_attention_mask),
             image_sizes: None,
             num_img_tokens: None,
             aspect_ratio_ids: None,

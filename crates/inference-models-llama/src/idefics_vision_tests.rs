@@ -96,6 +96,8 @@ fn tower(cfg: &SiglipVisionConfig) -> Result<SiglipVisionTransformer> {
         Ok(SiglipVisionTransformer::new(cfg, vb)?)
     })?;
     assert_eq!(names_digest(names.keys()), NAMES_DIGEST);
+    // the device map sizes the tower by weight_elems
+    assert_eq!(names.values().sum::<usize>(), cfg.weight_elems());
     Ok(tower)
 }
 

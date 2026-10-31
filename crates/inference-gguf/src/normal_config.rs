@@ -2985,8 +2985,8 @@ mod tests {
         pub use inference_models_gemma::{gemma, gemma2};
         pub use inference_models_llama::{llama, mistral, mixtral, smollm3};
         pub use inference_models_other::{
-            deepseek2, deepseek3, ernie4_5, glm4, glm4_moe, glm4_moe_lite, gpt_oss, granite,
-            hunyuan_v1_dense, hunyuan_v1_moe, lfm2, olmo, starcoder2,
+            deepseek, ernie4_5, glm4, glm4_moe, glm4_moe_lite, gpt_oss, granite, hunyuan_v1_dense,
+            hunyuan_v1_moe, lfm2, olmo, starcoder2,
         };
         pub use inference_models_phi::{phi2, phi3, phi3_5_moe};
         pub use inference_models_qwen::{qwen1, qwen2, qwen2_moe, qwen3, qwen3_moe, qwen3_next};
@@ -3360,16 +3360,9 @@ mod tests {
             NormalLoaderType::Phi3_5MoE => {
                 assert_deserializes(loader, config, models::phi3_5_moe::Config::from_json)
             }
-            NormalLoaderType::DeepSeekV2 => assert_deserializes(
-                loader,
-                config,
-                models::deepseek2::DeepSeekV2Config::from_json,
-            ),
-            NormalLoaderType::DeepSeekV3 => assert_deserializes(
-                loader,
-                config,
-                models::deepseek3::DeepSeekV3Config::from_json,
-            ),
+            NormalLoaderType::DeepSeekV2 | NormalLoaderType::DeepSeekV3 => {
+                assert_deserializes(loader, config, models::deepseek::DeepSeekConfig::from_json)
+            }
             NormalLoaderType::Qwen3 => {
                 assert_deserializes(loader, config, models::qwen3::Config::from_json)
             }

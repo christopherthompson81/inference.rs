@@ -10,8 +10,7 @@ use inference_nn::{
 pub mod bert;
 pub mod blip2_qformer;
 pub mod classifier;
-pub mod deepseek2;
-pub mod deepseek3;
+pub mod deepseek;
 pub mod deepseek_family;
 #[cfg(test)]
 mod deepseek_family_tests;
@@ -56,8 +55,7 @@ inference_nn::json_config!(
     modern_bert::Config,
     neo_bert::Config,
     nomic_bert::Config,
-    deepseek2::DeepSeekV2Config,
-    deepseek3::DeepSeekV3Config,
+    deepseek::DeepSeekConfig,
     ernie4_5::Config,
     ernie4_5::MoeConfig,
     glm4::Config,

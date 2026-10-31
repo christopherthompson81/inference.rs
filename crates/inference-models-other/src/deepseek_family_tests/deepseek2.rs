@@ -2,7 +2,7 @@ use anyhow::Result;
 use inference_tensor::Tensor;
 use serde_json::{Value, json};
 
-use super::DeepSeekV2Config;
+use super::{DeepSeekConfig, DeepSeekVersion};
 use crate::deepseek_family::MoeGate;
 use crate::deepseek_family_tests::{
     Checkpoint, EXPERTS, FamilyCheckpoint, HEADS, HIDDEN, INTERMEDIATE, KV_LORA, LAYERS, MAX_POS,
@@ -47,11 +47,15 @@ fn base_config() -> Value {
 }
 
 fn gate(patch: Value) -> Result<MoeGate> {
-    let cfg: DeepSeekV2Config = serde_json::from_value(patched(
+    let cfg: DeepSeekConfig = serde_json::from_value(patched(
         base_config(),
         patched(json!({"hidden_size": EXPERTS}), patch),
     ))?;
-    Ok(MoeGate::new(&cfg.family(), router_vb(false)?, EXPERTS)?)
+    Ok(MoeGate::new(
+        &cfg.family(DeepSeekVersion::V2),
+        router_vb(false)?,
+        EXPERTS,
+    )?)
 }
 
 #[test]
@@ -178,7 +182,7 @@ fn load_rejects_half_split_kv_b() -> Result<()> {
 fn a_zero_moe_layer_freq_is_a_config_error() {
     let config = patched(base_config(), json!({"moe_layer_freq": 0}));
     assert_err_contains(
-        serde_json::from_value::<DeepSeekV2Config>(config),
+        serde_json::from_value::<DeepSeekConfig>(config),
         "moe_layer_freq must be at least 1",
     );
 }

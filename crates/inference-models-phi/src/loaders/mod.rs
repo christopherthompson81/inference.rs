@@ -16,7 +16,6 @@ use inference_nn::paged_attention::{
 use inference_nn::vision::clip::get_clip_vit_num_elems;
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::DType;
-use inference_tensor::nn::Conv2dConfig;
 use regex::Regex;
 
 use crate::phi3_vision::{Config as Phi3Config, Model as Phi3, PHI3V_CLIP_CONFIG};

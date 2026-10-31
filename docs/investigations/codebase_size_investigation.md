@@ -3214,3 +3214,29 @@ Implication: splitting core's stable modules out would trim part of its 3 s at m
 reuses unchanged units; the rest of a core edit is the downstream chain, which rebuilds whenever core's rlib changes.
 The chain's one removable link is web UI -> server-core (~1 s if those items moved below both). A core edit's
 build is 11 s, while the CUDA suite alone is 52 s, so the cycle's larger lever stays test time.
+
+## Run 106 - 2026-10-31 07:46
+
+Question: the DeepSeek V2/V3 and Idefics2/3 pairs led the duplicated-code scan; how much of each pair can be shared
+without changing what either model computes?
+
+Change:
+- DeepSeek: one `DeepSeekConfig` (`deepseek.rs`) with a `DeepSeekVersion` argument for the two differences, the
+  `norm_topk_prob` default (V3 true) and whether the renormalized top-k skips the scale (V2). The configs differed
+  only there and in V3's extra variants (`noaux_tc`, sigmoid scoring), which V2 configs now also parse; the GGUF V2
+  synthesis still rejects sigmoid gating. The two loaders are one macro over a shared `spec`.
+- Idefics: `idefics_common.rs` holds the padding sub-image drop, the patch mask sums, per-image cached encoding of
+  sub-images and the normalize-and-pad loop. Idefics3 now rejects an image with no sub-images and checks the
+  encoder's row count like Idefics2; it still falls back to uncached encoding when hashes and counts disagree, which
+  its prefix trimming produces. The two loaders share their activation sizing.
+- SigLIP tower sizing: five identical copies (Idefics2/3, Gemma 3, Phi-4-MM, MiniCPM-o loaders) became
+  `SiglipVisionConfig::weight_elems`. A test pinning it to the tower's loaded tensors found the copies missed the
+  patch conv bias and the post-layernorm bias (2 x hidden per tower), now counted.
+
+Commands: `scripts/dup_scan.py` on master and on the branch; clippy on the touched crates; the touched crates'
+tests; the full local CI.
+
+Finding: duplication 25,828 -> 25,276 (-552); 28 files, +635 / -1,045. Neither pair is in the scan's top list now.
+
+Implication: next in the list are the input processors' trait boilerplate (Idefics3 vs Mistral 3, Gemma 3n vs
+Idefics2, 14-20 lines each) and Phi-3-V vs Phi-4-MM loaders.
