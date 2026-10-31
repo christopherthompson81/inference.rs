@@ -196,3 +196,36 @@ async fn a_template_writing_audio_placeholders_gets_the_parts() -> anyhow::Resul
     assert!(response.usage.prompt_tokens > AUDIO_TOKENS + MARKERS);
     Ok(())
 }
+
+fn chat_json(part: serde_json::Value) -> Vec<u8> {
+    serde_json::json!({
+        "model": "default",
+        "max_tokens": MAX_LEN,
+        "messages": [{"role": "user", "content": [part, {"type": "text", "text": PROMPT}]}],
+    })
+    .to_string()
+    .into_bytes()
+}
+
+// OpenAI's `input_audio` part reads as the same clip an `audio_url` data URL gives
+#[tokio::test]
+async fn an_input_audio_part_is_the_clip_an_audio_url_gives() -> anyhow::Result<()> {
+    use base64::Engine as _;
+    let checkpoint = tiny_checkpoint()?;
+    let model = build(checkpoint.path()).await?;
+    let data = base64::engine::general_purpose::STANDARD.encode(wav(&clip()));
+    let mut usages = Vec::new();
+    for part in [
+        serde_json::json!({"type": "input_audio", "input_audio": {"data": data, "format": "wav"}}),
+        serde_json::json!({"type": "audio_url", "audio_url": {"url": format!("data:audio/wav;base64,{data}")}}),
+    ] {
+        let body = model
+            .chat_json(&chat_json(part), Default::default())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let body: serde_json::Value = serde_json::from_str(&body)?;
+        usages.push(body["usage"]["prompt_tokens"].clone());
+    }
+    assert_eq!(usages[0], usages[1]);
+    Ok(())
+}

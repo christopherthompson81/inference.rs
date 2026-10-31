@@ -43,6 +43,8 @@ use crate::{
     video::parse_video_url,
 };
 
+// OpenAI requires an `input_audio` part's `format`; one without it is read as WAV
+const DEFAULT_INPUT_AUDIO_FORMAT: &str = "wav";
 const ONLY_CHAT_IS_TOKENIZED: &str = "only chat messages can be tokenized as a chat";
 pub(crate) const ASK_REQUIRES_STREAMING: &str = "agent_permission \"ask\" requires stream=true, so approval requests can be delivered and answered.";
 
@@ -460,6 +462,27 @@ async fn parse_request_inner(
                                             .clone(),
                                     });
                                 }
+                                // OpenAI's form: base64 data and its format, read as a data URL
+                                Some(MessageInnerContent(Either::Left(x)))
+                                    if x == "input_audio" =>
+                                {
+                                    let audio = image_message
+                                        .get("input_audio")
+                                        .as_ref()
+                                        .context("Audio sub-content must have `input_audio` key.")?
+                                        .as_ref()
+                                        .right()
+                                        .context("Audio sub-content `input_audio` key must be an object.")?;
+                                    let data = audio
+                                        .get("data")
+                                        .context("Audio sub-content `input_audio` object must have a `data` key.")?;
+                                    let format = audio
+                                        .get("format")
+                                        .map_or(DEFAULT_INPUT_AUDIO_FORMAT, String::as_str);
+                                    items.push(ContentPart::Audio {
+                                        audio_url: format!("data:audio/{format};base64,{data}"),
+                                    });
+                                }
                                 Some(MessageInnerContent(Either::Left(x))) if x == "video_url" => {
                                     items.push(ContentPart::Video {
                                         video_url: image_message
@@ -503,7 +526,7 @@ async fn parse_request_inner(
                                     items.push(ContentPart::File { spec });
                                 }
                                 _ => anyhow::bail!(
-                                    "Expected array content sub-content to be one of `text`, `image_url`, `audio_url`, `video_url`, or `file`."
+                                    "Expected array content sub-content to be one of `text`, `image_url`, `audio_url`, `input_audio`, `video_url`, or `file`."
                                 ),
                             }
                         }

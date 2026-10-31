@@ -128,4 +128,7 @@ forced-aligner head.
   of audio clips (1)". A template that contains the placeholder now gets the content parts (prompt 70 tokens on the
   tiny model); ChatML keeps the flattened text.
 
-**Next:** the forced-aligner head (Qwen3-ForcedAligner-0.6B) for word timestamps; OpenAI's `input_audio` part.
+- OpenAI's `input_audio` part (`{data, format}`) now reads as the `data:audio/<format>;base64` URL it stands for;
+  on the tiny model it gives the prompt an `audio_url` data URL does.
+
+**Next:** the forced-aligner head (Qwen3-ForcedAligner-0.6B) for word timestamps.
