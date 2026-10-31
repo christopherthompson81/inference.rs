@@ -37,3 +37,4 @@ mod qwen_vl_tiny;
 mod rope_encoder_embedding_tiny;
 mod silero_tiny;
 mod sortformer_tiny;
+mod whisper_tiny;

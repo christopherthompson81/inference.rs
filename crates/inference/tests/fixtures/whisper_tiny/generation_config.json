@@ -1,0 +1,33 @@
+{
+  "decoder_start_token_id": 261,
+  "eos_token_id": 260,
+  "bos_token_id": 260,
+  "no_timestamps_token_id": 268,
+  "begin_suppress_tokens": [
+    260
+  ],
+  "suppress_tokens": [
+    1,
+    2
+  ],
+  "alignment_heads": [
+    [
+      1,
+      0
+    ],
+    [
+      1,
+      1
+    ]
+  ],
+  "lang_to_id": {
+    "<|en|>": 262,
+    "<|de|>": 263
+  },
+  "task_to_id": {
+    "transcribe": 265,
+    "translate": 264
+  },
+  "max_initial_timestamp_index": 50,
+  "is_multilingual": true
+}

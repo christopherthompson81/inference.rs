@@ -843,6 +843,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | Member | Wire/config name |
 | --- | --- |
 | `TranscriptionLoaderType.PARAKEET` | `'parakeet'` |
+| `TranscriptionLoaderType.WHISPER` | `'whisper'` |
 
 
 ## `UqffWriteSpec`

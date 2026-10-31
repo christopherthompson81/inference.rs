@@ -30,6 +30,7 @@ use inference_models_speech::parakeet::{
     self, MODEL_TYPES, Parakeet, ParakeetFiles, ParakeetStream, QuantPolicy, is_asr, is_asr_gguf,
 };
 use inference_models_speech::silero::{SegmentOptions, SileroVad, is_silero_gguf, read_gguf};
+use inference_models_speech::whisper::{self, Whisper, WhisperFiles};
 use inference_quant::IsqType;
 use inference_tensor::{Device, Tensor};
 use rand_isaac::Isaac64Rng;
@@ -47,6 +48,8 @@ const CONFIG: &str = "config.json";
 const PROCESSOR_CONFIG: &str = "processor_config.json";
 const TOKENIZER: &str = "tokenizer.json";
 const WEIGHTS: &str = "model.safetensors";
+const WEIGHTS_INDEX: &str = "model.safetensors.index.json";
+const GENERATION_CONFIG: &str = "generation_config.json";
 const GGUF_EXTENSION: &str = "gguf";
 const NEMOTRON3_DIARIZATION_TYPE: &str = "nemotron3_diarization";
 // the engine's sequence bookkeeping wants a length; one-shot audio requests never reach it
@@ -60,6 +63,8 @@ const MAX_STREAM_SESSIONS: usize = 64;
 pub enum TranscriptionLoaderType {
     #[serde(rename = "parakeet")]
     Parakeet,
+    #[serde(rename = "whisper")]
+    Whisper,
 }
 
 impl FromStr for TranscriptionLoaderType {
@@ -67,8 +72,9 @@ impl FromStr for TranscriptionLoaderType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "parakeet" => Ok(Self::Parakeet),
+            "whisper" => Ok(Self::Whisper),
             a => Err(format!(
-                "Unknown architecture `{a}`. Possible architectures: `parakeet`."
+                "Unknown architecture `{a}`. Possible architectures: `parakeet`, `whisper`."
             )),
         }
     }
@@ -77,6 +83,9 @@ impl FromStr for TranscriptionLoaderType {
 impl TranscriptionLoaderType {
     /// Detects the architecture from a `config.json`'s `model_type`.
     pub fn auto_detect_from_config(config: &str) -> Option<Self> {
+        if whisper::is_whisper_config(config) {
+            return Some(Self::Whisper);
+        }
         let value: serde_json::Value = serde_json::from_str(config).ok()?;
         let model_type = value.get("model_type")?.as_str()?;
         MODEL_TYPES
@@ -90,6 +99,7 @@ impl TranscriptionLoaderType {
 #[derive(Clone, Debug)]
 enum AsrCheckpoint {
     Transformers(ParakeetFiles),
+    Whisper(WhisperFiles),
     Nemo(PathBuf),
     Gguf(PathBuf),
 }
@@ -105,18 +115,21 @@ impl ModelPaths for TranscriptionModelPaths {
     fn get_config_filename(&self) -> &PathBuf {
         match &self.checkpoint {
             AsrCheckpoint::Transformers(files) => &files.config,
+            AsrCheckpoint::Whisper(files) => &files.config,
             AsrCheckpoint::Nemo(file) | AsrCheckpoint::Gguf(file) => file,
         }
     }
     fn get_tokenizer_filename(&self) -> &PathBuf {
         match &self.checkpoint {
             AsrCheckpoint::Transformers(files) => &files.tokenizer,
+            AsrCheckpoint::Whisper(files) => &files.tokenizer,
             AsrCheckpoint::Nemo(file) | AsrCheckpoint::Gguf(file) => file,
         }
     }
     fn get_weight_filenames(&self) -> &[PathBuf] {
         match &self.checkpoint {
             AsrCheckpoint::Transformers(files) => &files.weights,
+            AsrCheckpoint::Whisper(files) => &files.weights,
             AsrCheckpoint::Nemo(file) | AsrCheckpoint::Gguf(file) => std::slice::from_ref(file),
         }
     }
@@ -257,6 +270,7 @@ enum AudioModel {
         asr: Box<Parakeet>,
         vad: Option<SileroVad>,
     },
+    Whisper(Box<Whisper>),
     Silero(SileroVad),
     Diarizer(Diarizer),
 }
@@ -265,6 +279,7 @@ impl AudioModel {
     fn device(&self) -> &Device {
         match self {
             Self::Parakeet { asr, .. } => asr.device(),
+            Self::Whisper(asr) => asr.device(),
             Self::Silero(vad) => vad.device(),
             Self::Diarizer(diarizer) => diarizer.device(),
         }
@@ -609,6 +624,44 @@ impl Loader for TranscriptionLoader {
         );
         let id = std::path::Path::new(&self.model_id);
         let get = |file: &str| crate::pipeline::hf::get_file(&api, id, file, &revision);
+        let whisper = matches!(self.arch, Some(TranscriptionLoaderType::Whisper))
+            || (self.arch.is_none()
+                && !id.is_file()
+                && get(CONFIG)
+                    .ok()
+                    .and_then(|config| std::fs::read_to_string(config).ok())
+                    .is_some_and(|config| whisper::is_whisper_config(&config)));
+        if whisper {
+            let weights = match get(WEIGHTS) {
+                Ok(weights) => vec![weights],
+                Err(_) => {
+                    let index: serde_json::Value =
+                        serde_json::from_str(&std::fs::read_to_string(get(WEIGHTS_INDEX)?)?)?;
+                    let mut shards = index["weight_map"]
+                        .as_object()
+                        .ok_or_else(|| anyhow::anyhow!("`{WEIGHTS_INDEX}` has no `weight_map`"))?
+                        .values()
+                        .filter_map(|shard| shard.as_str().map(str::to_string))
+                        .collect::<Vec<_>>();
+                    shards.sort();
+                    shards.dedup();
+                    shards
+                        .iter()
+                        .map(|shard| get(shard))
+                        .collect::<Result<Vec<_>>>()?
+                }
+            };
+            let paths = TranscriptionModelPaths {
+                checkpoint: AsrCheckpoint::Whisper(WhisperFiles {
+                    config: get(CONFIG)?,
+                    generation_config: get(GENERATION_CONFIG)?,
+                    tokenizer: get(TOKENIZER)?,
+                    weights,
+                }),
+                vad: None,
+            };
+            return self.load_model_from_path(&paths, options);
+        }
         // a repo's transformers Parakeet files win over a `.nemo` beside them; neither loading reports both causes
         let transformers = (!id.is_file())
             .then(|| -> Result<ParakeetFiles> {
@@ -709,7 +762,16 @@ impl Loader for TranscriptionLoader {
             )?),
             (None, None) => None,
         };
+        if let AsrCheckpoint::Whisper(files) = &paths.checkpoint {
+            let model = AudioModel::Whisper(Box::new(Whisper::load(files, device, dtype)?));
+            return Ok(Arc::new(Mutex::new(TranscriptionPipeline::new(
+                self.model_id.clone(),
+                model,
+                dtype,
+            ))));
+        }
         let asr = match &paths.checkpoint {
+            AsrCheckpoint::Whisper(_) => unreachable!("a Whisper checkpoint loaded above"),
             AsrCheckpoint::Transformers(files) => Parakeet::load(files, device, dtype)?,
             AsrCheckpoint::Nemo(nemo) => Parakeet::load_nemo(nemo, device, dtype)?,
             AsrCheckpoint::Gguf(gguf) => Parakeet::load_gguf(gguf, device, dtype)?,
@@ -738,7 +800,7 @@ impl TranscriptionPipeline {
     fn new(model_id: String, model: AudioModel, activation_dtype: inference_tensor::DType) -> Self {
         // a VAD answers with times, not text
         let output = match model {
-            AudioModel::Parakeet { .. } => vec![SupportedModality::Text],
+            AudioModel::Parakeet { .. } | AudioModel::Whisper(_) => vec![SupportedModality::Text],
             AudioModel::Silero(_) | AudioModel::Diarizer(_) => Vec::new(),
         };
         Self {
@@ -939,6 +1001,22 @@ impl Pipeline for TranscriptionPipeline {
                     })
                     .collect(),
             },
+            AudioModel::Whisper(asr) => ForwardInputsResult::Transcription {
+                transcripts: audios
+                    .iter()
+                    .zip(&transcription)
+                    .map(|(input, request)| match input {
+                        AudioRequest::Stream(_) => {
+                            Err("Whisper transcribes whole recordings; it does not stream"
+                                .to_string())
+                        }
+                        AudioRequest::Audio(audio) => asr
+                            .transcribe(&audio.to_mono(), audio.sample_rate, request)
+                            .map(TranscriptionOutcome::Whole)
+                            .map_err(|e| e.to_string()),
+                    })
+                    .collect(),
+            },
             AudioModel::Silero(vad) => ForwardInputsResult::VoiceActivity {
                 results: audios
                     .iter()
@@ -981,7 +1059,7 @@ impl Pipeline for TranscriptionPipeline {
 
     fn category(&self) -> ModelCategory {
         match self.model {
-            AudioModel::Parakeet { .. } => ModelCategory::Transcription,
+            AudioModel::Parakeet { .. } | AudioModel::Whisper(_) => ModelCategory::Transcription,
             AudioModel::Silero(_) => ModelCategory::VoiceActivity,
             AudioModel::Diarizer(_) => ModelCategory::Diarization,
         }

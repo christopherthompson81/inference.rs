@@ -205,12 +205,12 @@ JSON body whose `images` are `{"image_url": ...}` entries (`http(s)` or `data:` 
 - `file`, `model`: supported; the file may be any format the audio decoder reads (WAV, MP3, FLAC, OGG, ...).
 - `response_format`: `json`, `text`, `srt`, `vtt` and `verbose_json` are supported.
 - `timestamp_granularities[]`: `word` and `segment`; `verbose_json` always carries segments and adds words when asked.
-- `language`: conditions Nemotron-3.5 and Qwen3-ASR, which refuse one outside their lists; Parakeet accepts and ignores it.
+- `language`: conditions Whisper, Nemotron-3.5 and Qwen3-ASR, which refuse one outside their lists; Parakeet accepts and ignores it. Whisper takes the ISO-639-1 code or the language's name.
 - `prompt`, `temperature`: accepted and ignored.
 - `beam_size` (an inference.rs extension, 1 to 16): beam search for RNN-T and TDT models; unset decodes greedily.
 - `verbose_json`'s `language` is the one Nemotron-3.5 was given or identified, otherwise the request's, echoed. Its segments carry `id`, `start`, `end` and `text` only.
 
-Served by transcription models such as Parakeet, and by audio-in decoders that transcribe (Qwen3-ASR), which give whole-clip segments and no words. See [speech models guide](/guides/models/use-speech-models/).
+Served by transcription models such as Parakeet and Whisper, and by audio-in decoders that transcribe (Qwen3-ASR), which give whole-clip segments and no words. See [speech models guide](/guides/models/use-speech-models/).
 
 ### `/v1/audio/translations`
 

@@ -402,6 +402,7 @@ class ToolType(str, Enum):
 
 class TranscriptionLoaderType(str, Enum):
     PARAKEET = "parakeet"
+    WHISPER = "whisper"
 
 
 class TranscriptionResponseFormat(str, Enum):

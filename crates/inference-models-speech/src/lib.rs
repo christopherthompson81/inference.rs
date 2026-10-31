@@ -1,5 +1,5 @@
-//! Speech models: Dia, with its DAC decoder and BS.1770 loudness normalization, and Kokoro to speak; Parakeet to
-//! transcribe.
+//! Speech models: Dia, with its DAC decoder and BS.1770 loudness normalization, and Kokoro to speak; Parakeet and
+//! Whisper to transcribe.
 
 use std::sync::Arc;
 
@@ -15,6 +15,7 @@ pub mod silero;
 mod transcript;
 pub mod utils;
 mod weight_norm;
+pub mod whisper;
 
 pub use dia::{DiaConfig, DiaPipeline};
 pub use transcript::{TimedText, Transcription, TranscriptionOptions};
