@@ -15,6 +15,11 @@ mod parakeet_support;
 #[allow(clippy::duplicate_mod)]
 mod silero_support;
 
+// The tiny random-weight Whisper the translations route loads.
+#[path = "../../../inference/tests/support/whisper_tiny.rs"]
+#[allow(clippy::duplicate_mod)]
+mod whisper_support;
+
 // The tiny random-weight Nemotron-3 Diarization the diarization route loads.
 #[path = "../../../inference/tests/support/nemotron3_diarization_tiny.rs"]
 #[allow(clippy::duplicate_mod)]

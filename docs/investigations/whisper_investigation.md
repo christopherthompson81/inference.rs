@@ -86,3 +86,20 @@ base.en with no language and with `language=de`.
 
 **Next:** full local CI. Follow-ups: the translate task and `/v1/audio/translations`, beam search, temperature
 fallback, `prompt` as previous text, the audio.cpp `crisperwhisper` GGUF (#747), the encoder for #564.
+
+## Run 5 - 2026-10-31 12:32
+
+**Question:** does the translate task (`/v1/audio/translations`) match OpenAI's?
+
+**Command:** `inference serve -m openai/whisper-large-v3 --dtype f16`, the translations route on the Spanish and German
+clips; OpenAI `transcribe(task="translate", temperature=0, condition_on_previous_text=False, fp16=True)`.
+
+**Finding:**
+- Translations equal OpenAI's word for word: "Voice recognition turns spoken words into text. This synthetic
+  fragment is used to check the language detection." and the German one; the source language is reported
+  (`spanish`, `german`).
+- The translate task rides on `TranscriptionRequest.task`, so the engine, the C ABI and the SDK need nothing new; the
+  route sets it. Parakeet, Qwen3-ASR and English-only Whisper refuse it. Word splitting stays on spaces for a
+  translation, since the output is English whatever the source.
+
+**Next:** full local CI.

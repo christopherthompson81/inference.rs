@@ -28,6 +28,7 @@ use crate::{TimedText, Transcription, TranscriptionOptions};
 pub const MODEL_TYPE: &str = "whisper";
 pub const SAMPLE_RATE: u32 = 16_000;
 const ENGLISH: &str = "en";
+const TRANSLATE: &str = "translate";
 const N_FFT: usize = 400;
 const HOP_LENGTH: usize = 160;
 const WINDOW_SECONDS: usize = 30;
@@ -184,13 +185,13 @@ impl Whisper {
     }
 
     // the start of every window's prompt: the start token, then the language and the task for a multilingual model
-    fn start_sequence(&self, language: Option<&str>) -> Vec<u32> {
+    fn start_sequence(&self, language: Option<&str>, task: Option<u32>) -> Vec<u32> {
         let mut tokens = vec![self.special.start];
         if let Some(code) = language.filter(|_| self.multilingual())
             && let Some(&id) = self.generation.lang_to_id.get(&format!("<|{code}|>"))
         {
             tokens.push(id);
-            tokens.extend(self.special.transcribe);
+            tokens.extend(task);
         }
         tokens
     }
@@ -341,6 +342,13 @@ impl Whisper {
         if !self.multilingual() {
             language.get_or_insert_with(|| ENGLISH.to_string());
         }
+        let task = if options.translate {
+            Some(self.generation.task_to_id.get(TRANSLATE).copied().ok_or_else(|| {
+                msg("this Whisper checkpoint transcribes English only; it does not translate")
+            })?)
+        } else {
+            self.special.transcribe
+        };
         let mut words = Vec::new();
         let mut text = String::new();
         let mut seek = 0usize;
@@ -359,14 +367,16 @@ impl Whisper {
             if language.is_none() && self.multilingual() {
                 language = Some(self.detect_language(&encoded)?);
             }
-            let start = self.start_sequence(language.as_deref());
+            let start = self.start_sequence(language.as_deref(), task);
             let generated = self.decode_window(&encoded, &start)?;
             let window_seconds = window_frames as f64 * HOP_LENGTH as f64 / f64::from(SAMPLE_RATE);
             let (segments, consumed) = split_segments(&self.special, &generated, window_seconds);
             let offset = seek as f64 * HOP_LENGTH as f64 / f64::from(SAMPLE_RATE);
-            let unspaced = language
-                .as_deref()
-                .is_some_and(|l| UNSPACED_LANGUAGES.contains(&l));
+            // a translation is English, whatever the speech's language
+            let unspaced = !options.translate
+                && language
+                    .as_deref()
+                    .is_some_and(|l| UNSPACED_LANGUAGES.contains(&l));
             for segment in &segments {
                 text.push_str(&self.token_text(&segment.tokens)?);
             }

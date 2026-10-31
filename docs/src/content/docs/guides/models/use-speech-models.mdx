@@ -372,8 +372,8 @@ OpenAI's `transcribe` does with `temperature=0`, word timestamps on and no previ
   only. A language the checkpoint has no token for is refused.
 - Word times come from the cross-attention of the checkpoint's alignment heads, matched to the audio with dynamic
   time warping, then held to the segment timestamps, as OpenAI's `word_timestamps` does.
-- Not yet: the translate task (`/v1/audio/translations`), beam search, temperature fallback, a `prompt` as previous
-  text, and loading GGUFs.
+- `/v1/audio/translations` writes an English translation instead (large-v3; turbo was not trained to translate).
+- Not yet: beam search, temperature fallback, a `prompt` as previous text, and loading GGUFs.
 
 `scripts/whisper_parity.py` checks a build against OpenAI's `whisper` package on given clips. On synthetic speech the
 transcripts match exactly, and word times fall within 0.02 s for large-v3-turbo (FP16), large-v3 and small; base.en

@@ -2249,6 +2249,17 @@ impl TranscriptionResponseFormat {
     }
 }
 
+/// What a recognizer writes: the speech in its own language, or an English translation of it (Whisper only).
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, inference_json::FromJson, Serialize, ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptionTask {
+    #[default]
+    Transcribe,
+    Translate,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, inference_json::FromJson, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TimestampGranularity {
@@ -2339,6 +2350,10 @@ pub struct TranscriptionRequest {
     #[serde(default)]
     #[schema(example = "diarization")]
     pub diarization_model: Option<String>,
+    /// `translate` writes an English translation (Whisper); `/v1/audio/translations` sets it. An inference.rs
+    /// extension.
+    #[serde(default)]
+    pub task: TranscriptionTask,
 }
 
 impl TranscriptionRequest {
@@ -2353,6 +2368,7 @@ impl TranscriptionRequest {
             timestamp_granularities: Vec::new(),
             beam_size: None,
             diarization_model: None,
+            task: TranscriptionTask::Transcribe,
         }
     }
 }

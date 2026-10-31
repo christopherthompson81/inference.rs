@@ -25,7 +25,7 @@ use crate::{
         DiarizationResponseFormat, DiarizationSegment, ImageEditRequest, ImageGenerationRequest,
         SpeechGenerationRequest, SpeechSegment, SpeechWithTimestamps, SpeechWord,
         TimestampGranularity, TranscriptionOutput, TranscriptionRequest, TranscriptionResponse,
-        TranscriptionResponseFormat, TranscriptionSegment, TranscriptionWord,
+        TranscriptionResponseFormat, TranscriptionSegment, TranscriptionTask, TranscriptionWord,
         VerboseTranscriptionResponse, VoiceActivityRequest, VoiceActivityResponse,
         diarization_rttm, transcript_srt, transcript_vtt,
     },
@@ -488,6 +488,14 @@ async fn transcribe_inner(
         .audio_transcriber(model)
         .map_err(|error| ApiError::from_error(&error, ApiErrorKind::InvalidRequest))?;
     if let Some(transcriber) = transcriber {
+        if request.task == TranscriptionTask::Translate {
+            return Err(ApiError::new(
+                ApiErrorKind::InvalidRequest,
+                "this model transcribes; it does not translate",
+                Some("translation_unsupported"),
+                Some("model"),
+            ));
+        }
         if request.diarization_model.is_some() {
             return Err(ApiError::new(
                 ApiErrorKind::InvalidRequest,
@@ -504,6 +512,7 @@ async fn transcribe_inner(
         options: TranscriptionOptions {
             language: request.language.clone(),
             beam_size: request.beam_size,
+            translate: request.task == TranscriptionTask::Translate,
         },
     };
     let Some(diarizer) = request.diarization_model.clone() else {
@@ -953,6 +962,7 @@ mod tests {
             timestamp_granularities: Vec::new(),
             beam_size: None,
             diarization_model: None,
+            task: TranscriptionTask::Transcribe,
         };
         let transcript = Transcription {
             text: "The quick brown fox.".to_string(),

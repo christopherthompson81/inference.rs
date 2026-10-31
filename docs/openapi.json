@@ -430,6 +430,10 @@
                       "response_format": {
                         "$ref": "#/components/schemas/TranscriptionResponseFormat"
                       },
+                      "task": {
+                        "$ref": "#/components/schemas/TranscriptionTask",
+                        "description": "`translate` writes an English translation (Whisper); `/v1/audio/translations` sets it. An inference.rs\nextension."
+                      },
                       "temperature": {
                         "type": [
                           "number",
@@ -456,6 +460,112 @@
         "responses": {
           "200": {
             "description": "The transcript, in the requested format",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscriptionResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/audio/translations": {
+      "post": {
+        "tags": [
+          "inference.rs"
+        ],
+        "summary": "Translation endpoint handler: the speech as English text, from a model that translates (Whisper).",
+        "operationId": "translation",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "description": "The multipart form `/v1/audio/translations` takes: a transcription's, whose `task` it sets to `translate`.",
+                "required": [
+                  "file",
+                  "request"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "The audio to translate into English, in any format `/v1/audio/transcriptions` takes."
+                  },
+                  "request": {
+                    "type": "object",
+                    "description": "Speech recognition request; the audio itself travels beside it (a multipart `file` over HTTP).",
+                    "properties": {
+                      "beam_size": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ],
+                        "description": "Beam search over this many hypotheses (1 to 16) for an RNN-T or TDT model; unset decodes greedily.",
+                        "minimum": 0
+                      },
+                      "diarization_model": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "A diarization model to run over the same audio: segments then break where the speaker changes, and segments\nand words carry the speaker.",
+                        "example": "diarization"
+                      },
+                      "language": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "The audio's language (`de-DE`, `de`), for Nemotron-3.5; unset lets it identify the language. Parakeet ignores it."
+                      },
+                      "model": {
+                        "type": "string",
+                        "description": "The speech recognition model to use.",
+                        "example": "nvidia/parakeet-tdt-0.6b-v3"
+                      },
+                      "prompt": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "Text to steer the transcript; Parakeet ignores it."
+                      },
+                      "response_format": {
+                        "$ref": "#/components/schemas/TranscriptionResponseFormat"
+                      },
+                      "task": {
+                        "$ref": "#/components/schemas/TranscriptionTask",
+                        "description": "`translate` writes an English translation (Whisper); `/v1/audio/translations` sets it. An inference.rs\nextension."
+                      },
+                      "temperature": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "format": "float",
+                        "description": "Parakeet decodes greedily and ignores it."
+                      },
+                      "timestamp_granularities": {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/components/schemas/TimestampGranularity"
+                        },
+                        "description": "Timestamps `verbose_json` carries; segments are always given, words only when asked for."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The English translation, in the requested format",
             "content": {
               "application/json": {
                 "schema": {
@@ -14924,6 +15034,10 @@
           "response_format": {
             "$ref": "#/components/schemas/TranscriptionResponseFormat"
           },
+          "task": {
+            "$ref": "#/components/schemas/TranscriptionTask",
+            "description": "`translate` writes an English translation (Whisper); `/v1/audio/translations` sets it. An inference.rs\nextension."
+          },
           "temperature": {
             "type": [
               "number",
@@ -15031,6 +15145,14 @@
             }
           }
         }
+      },
+      "TranscriptionTask": {
+        "type": "string",
+        "description": "What a recognizer writes: the speech in its own language, or an English translation of it (Whisper only).",
+        "enum": [
+          "transcribe",
+          "translate"
+        ]
       },
       "TranscriptionWord": {
         "type": "object",

@@ -134,6 +134,7 @@ fn transcription(language: Option<&str>) -> TranscriptionRequest {
         timestamp_granularities: Vec::new(),
         beam_size: None,
         diarization_model: None,
+        task: Default::default(),
     }
 }
 
@@ -157,6 +158,10 @@ async fn a_transcription_request_decodes_the_clip() -> anyhow::Result<()> {
             .await
             .is_err()
     );
+    // it transcribes only; the translate task is Whisper's
+    let mut translate = transcription(None);
+    translate.task = inference::TranscriptionTask::Translate;
+    assert!(model.transcription(translate, &audio).await.is_err());
     Ok(())
 }
 

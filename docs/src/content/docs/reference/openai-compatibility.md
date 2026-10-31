@@ -214,7 +214,14 @@ Served by transcription models such as Parakeet and Whisper, and by audio-in dec
 
 ### `/v1/audio/translations`
 
-Not exposed. Voxtral and similar audio-understanding models also go through `/v1/chat/completions` with audio content parts.
+- The transcription form, answered with an English translation by a model that translates (Whisper multilingual
+  checkpoints; large-v3 rather than turbo, which was not trained for it). Parakeet, Qwen3-ASR and English-only
+  Whisper refuse it.
+- `language` is the speech's language, as a hint; without it Whisper identifies it, and `verbose_json` reports the
+  source language.
+- The same request on `/v1/audio/transcriptions` with `task: translate` (an inference.rs extension) does the same.
+
+Voxtral and similar audio-understanding models go through `/v1/chat/completions` with audio content parts.
 
 ## Realtime (transcription sessions)
 

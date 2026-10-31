@@ -279,7 +279,7 @@ pub use inference_api::{
         SpeechGenerationRequest, SpeechSegment, StopTokens, TimestampGranularity,
         TranscriptionDelta, TranscriptionOutput, TranscriptionRequest, TranscriptionResponse,
         TranscriptionResponseFormat, TranscriptionSegment, TranscriptionSessionRequest,
-        TranscriptionWord, VerboseTranscriptionResponse, VoiceActivityRequest,
+        TranscriptionTask, TranscriptionWord, VerboseTranscriptionResponse, VoiceActivityRequest,
         VoiceActivityResponse,
     },
     response::{
