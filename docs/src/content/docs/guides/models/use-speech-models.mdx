@@ -1,14 +1,16 @@
 ---
 title: Speech models
-description: Parakeet, Qwen3-ASR and Voxtral Realtime for speech transcription, Silero for voice activity, Nemotron-3 and Sortformer for speaker diarization, Dia and Kokoro for text-to-speech.
+description: Parakeet, Whisper, Qwen3-ASR and Voxtral Realtime for speech transcription, Silero for voice activity, Nemotron-3 and Sortformer for speaker diarization, Dia and Kokoro for text-to-speech.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-inference.rs supports eight speech-related model families:
+inference.rs supports nine speech-related model families:
 
 - **Parakeet**: NVIDIA's FastConformer speech recognisers (CTC, RNN-T and TDT heads), and the cache-aware
   Nemotron streaming ASR, served via `/v1/audio/transcriptions` with word and segment timestamps.
+- **Whisper**: OpenAI's encoder-decoder speech recogniser (large-v3-turbo, large-v3, tiny to large, `.en`), served via
+  `/v1/audio/transcriptions` with word and segment timestamps, up to 100 languages identified or forced.
 - **Nemotron-3 Diarization**: who speaks when (up to 8 speakers), served via `/v1/audio/diarization`.
 - **Streaming Sortformer v2**: who speaks when (up to 4 speakers), from its `.nemo`, also via `/v1/audio/diarization`.
 - **Silero VAD**: voice activity detection, served via `/v1/audio/vad`; it also cuts long recordings for Parakeet.
@@ -19,8 +21,8 @@ inference.rs supports eight speech-related model families:
 - **Dia**: dedicated text-to-speech model served via `/v1/audio/speech`.
 - **Kokoro**: an 82M-parameter text-to-speech model with preset voices, also served via `/v1/audio/speech`.
 
-Qwen3-ASR and Voxtral Realtime are classified as multimodal models because audio is an input modality. Parakeet is a
-dedicated transcription model, and Dia and Kokoro are dedicated speech models.
+Qwen3-ASR and Voxtral Realtime are classified as multimodal models because audio is an input modality. Parakeet and
+Whisper are dedicated transcription models, and Dia and Kokoro are dedicated speech models.
 
 ## Parakeet: speech recognition
 
@@ -351,6 +353,31 @@ for segment in &activity.segments {
 
 </TabItem>
 </Tabs>
+
+## Whisper: speech recognition
+
+```bash
+inference serve -m openai/whisper-large-v3-turbo
+```
+
+Whisper loads from the transformers layout (`config.json` with `model_type` `whisper`, `generation_config.json`,
+`tokenizer.json`, `model.safetensors`); the special token ids, languages and alignment heads come from
+`generation_config.json`, so the v1 to v3 sizes and the English-only `.en` checkpoints load alike. It is decoded as
+OpenAI's `transcribe` does with `temperature=0`, word timestamps on and no previous-text conditioning:
+
+- The recording goes in 30 s windows; each window is decoded greedily with timestamp tokens, and the next window
+  starts after the last word of the last complete segment.
+- `language` (an ISO-639-1 code such as `de`, or the name, `german`) sets the language token; without one the model
+  identifies it from the first window, and `verbose_json` reports it. An English-only checkpoint takes English
+  only. A language the checkpoint has no token for is refused.
+- Word times come from the cross-attention of the checkpoint's alignment heads, matched to the audio with dynamic
+  time warping, then held to the segment timestamps, as OpenAI's `word_timestamps` does.
+- Not yet: the translate task (`/v1/audio/translations`), beam search, temperature fallback, a `prompt` as previous
+  text, and loading GGUFs.
+
+`scripts/whisper_parity.py` checks a build against OpenAI's `whisper` package on given clips. On synthetic speech the
+transcripts match exactly, and word times fall within 0.02 s for large-v3-turbo (FP16), large-v3 and small; base.en
+drifts by up to 0.18 s on a few words of a long clip.
 
 ## Qwen3-ASR: audio in, transcript out
 

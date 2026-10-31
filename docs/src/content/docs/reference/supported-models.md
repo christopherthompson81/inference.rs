@@ -122,6 +122,7 @@ The `Architecture` column is the `config.json` `architectures` value. Per-family
 | Architecture | Model families | Example |
 |---|---|---|
 | `Parakeet` | Parakeet (CTC, RNN-T, TDT), Nemotron streaming ASR (English, and 3.5 multilingual), FastConformer hybrid RNN-T/CTC (`.nemo`) | <details><summary><code>nvidia/parakeet-tdt-0.6b-v3</code>, <code>nvidia/nemotron-speech-streaming-en-0.6b</code>, <code>nvidia/nemotron-3.5-asr-streaming-0.6b</code>, <code>nvidia/stt_en_fastconformer_hybrid_large_pc</code></summary><code>inference run -m nvidia/parakeet-tdt-0.6b-v3</code><br><code>inference run -m nvidia/nemotron-speech-streaming-en-0.6b</code><br><code>inference run -m nvidia/nemotron-3.5-asr-streaming-0.6b</code><br><code>inference run -m nvidia/stt_en_fastconformer_hybrid_large_pc</code></details> |
+| `Whisper` | Whisper (large-v3-turbo, large-v3, tiny to large, `.en`) | <details><summary><code>openai/whisper-large-v3-turbo</code>, <code>openai/whisper-small</code></summary><code>inference run -m openai/whisper-large-v3-turbo</code><br><code>inference run -m openai/whisper-small</code></details> |
 
 ## Diarization
 

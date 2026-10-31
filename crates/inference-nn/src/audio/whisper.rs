@@ -1,14 +1,15 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-//! Whisper's encoder layer: pre-norm LayerNorm, bidirectional multi-head attention, a two-layer FFN, under
-//! transformers' `WhisperEncoderLayer` names. Whisper's encoders and the Qwen audio towers built on them share it.
+//! Whisper's encoder: two conv1d downsampling the log-mel, fixed sinusoidal positions, pre-norm layers (LayerNorm,
+//! bidirectional attention, a two-layer FFN) and a final LayerNorm, under transformers' `WhisperEncoder` names. The
+//! Whisper recognizer, the audio LLMs built on its encoder and the Qwen audio towers share its pieces.
 
 use inference_quant::ShardedVarBuilder;
-use inference_tensor::nn::{LayerNorm, Linear, Module};
+use inference_tensor::nn::{Conv1d, Conv1dConfig, LayerNorm, Linear, Module};
 use inference_tensor::{Result, Tensor};
 
 use crate::attention::{AttentionMask, FlashParams, SdpaParams};
-use crate::layers::{Activation, Sdpa, layer_norm, linear_b};
+use crate::layers::{Activation, Sdpa, conv1d, layer_norm, linear_b};
 use crate::utils::unvarbuilder::UnVarBuilder;
 
 #[derive(Clone, Copy, Debug)]
@@ -129,6 +130,74 @@ impl WhisperEncoderLayer {
         uvb.pp("final_layer_norm").add(&self.final_layer_norm);
         uvb.pp("fc1").add(&self.fc1);
         uvb.pp("fc2").add(&self.fc2);
+    }
+}
+
+const CONV_KERNEL: usize = 3;
+// the second conv halves the frames: 3000 mel frames of a 30 s window to 1500 positions
+const DOWNSAMPLE: usize = 2;
+
+#[derive(Clone, Copy, Debug)]
+pub struct WhisperEncoderConfig {
+    pub layer: WhisperLayerConfig,
+    pub num_layers: usize,
+    pub num_mel_bins: usize,
+    pub max_source_positions: usize,
+}
+
+pub struct WhisperEncoder {
+    conv1: Conv1d,
+    conv2: Conv1d,
+    positions: Tensor,
+    layers: Vec<WhisperEncoderLayer>,
+    layer_norm: LayerNorm,
+    activation: Activation,
+}
+
+impl WhisperEncoder {
+    pub fn new(cfg: &WhisperEncoderConfig, vb: ShardedVarBuilder) -> Result<Self> {
+        let d = cfg.layer.d_model;
+        let conv = |stride| Conv1dConfig {
+            padding: 1,
+            stride,
+            ..Default::default()
+        };
+        Ok(Self {
+            conv1: conv1d(cfg.num_mel_bins, d, CONV_KERNEL, conv(1), vb.pp("conv1"))?,
+            conv2: conv1d(d, d, CONV_KERNEL, conv(DOWNSAMPLE), vb.pp("conv2"))?,
+            // the checkpoint stores the sinusoid table; fine-tunes are read as they ship
+            positions: vb.get((cfg.max_source_positions, d), "embed_positions.weight")?,
+            layers: (0..cfg.num_layers)
+                .map(|i| WhisperEncoderLayer::new(&cfg.layer, vb.pp("layers").pp(i)))
+                .collect::<Result<Vec<_>>>()?,
+            layer_norm: layer_norm(d, cfg.layer.layer_norm_eps, vb.pp("layer_norm"))?,
+            activation: cfg.layer.activation,
+        })
+    }
+
+    /// `(batch, n_mels, frames)` log-mel to `(batch, frames / 2, d_model)`.
+    pub fn forward(&self, mel: &Tensor) -> Result<Tensor> {
+        let xs = self.activation.forward(&self.conv1.forward(mel)?)?;
+        let xs = self.activation.forward(&self.conv2.forward(&xs)?)?;
+        let xs = xs.transpose(1, 2)?;
+        let positions = self.positions.narrow(0, 0, xs.dim(1)?)?;
+        let mut xs = xs.broadcast_add(&positions)?;
+        for layer in &self.layers {
+            xs = layer.forward(&xs)?;
+        }
+        self.layer_norm.forward(&xs)
+    }
+
+    pub fn residual_tensors(&self) -> Vec<(String, Tensor)> {
+        let uvb = UnVarBuilder::new();
+        uvb.pp("conv1").add(&self.conv1);
+        uvb.pp("conv2").add(&self.conv2);
+        uvb.add_tensor("embed_positions.weight", self.positions.clone());
+        for (i, layer) in self.layers.iter().enumerate() {
+            layer.residual_tensors(&uvb.pp("layers").pp(i));
+        }
+        uvb.pp("layer_norm").add(&self.layer_norm);
+        uvb.to_safetensors()
     }
 }
 

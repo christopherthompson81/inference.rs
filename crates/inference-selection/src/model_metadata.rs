@@ -546,6 +546,14 @@ impl SupportedArch for TranscriptionLoaderType {
                     ex!("nvidia/stt_en_fastconformer_hybrid_large_pc"),
                 ],
             },
+            Self::Whisper => ArchMetadata {
+                families: &["Whisper (large-v3-turbo, large-v3, tiny to large, `.en`)"],
+                modalities: &[Audio, Text],
+                examples: &[
+                    ex!("openai/whisper-large-v3-turbo"),
+                    ex!("openai/whisper-small"),
+                ],
+            },
         }
     }
 }

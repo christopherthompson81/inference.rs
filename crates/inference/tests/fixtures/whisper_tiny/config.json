@@ -1,0 +1,18 @@
+{
+  "architectures": [
+    "WhisperForConditionalGeneration"
+  ],
+  "model_type": "whisper",
+  "d_model": 32,
+  "encoder_layers": 2,
+  "decoder_layers": 2,
+  "encoder_attention_heads": 2,
+  "decoder_attention_heads": 2,
+  "encoder_ffn_dim": 64,
+  "decoder_ffn_dim": 64,
+  "num_mel_bins": 80,
+  "vocab_size": 1770,
+  "max_source_positions": 1500,
+  "max_target_positions": 448,
+  "activation_function": "gelu"
+}

@@ -88,6 +88,8 @@ shll = "shll"
 "mone" = "mone"
 "usin" = "usin"
 "usign" = "usign"
+# Whisper's language codes (Faroese)
+"fo" = "fo"
 
 [default.extend-identifiers]
 "AtomLayoutNdKV" = "AtomLayoutNdKV"

@@ -14878,7 +14878,8 @@
       "TranscriptionLoaderType": {
         "type": "string",
         "enum": [
-          "parakeet"
+          "parakeet",
+          "whisper"
         ]
       },
       "TranscriptionRequest": {
