@@ -2833,6 +2833,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-http"
+version = "0.0.26"
+dependencies = [
+ "anyhow",
+ "axum",
+ "http-body",
+ "http-body-util",
+ "inference-api",
+ "inference-chat-protocols",
+ "inference-json",
+ "libc",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "mime",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "url",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
 name = "inference-jobs"
 version = "0.0.26"
 dependencies = [
@@ -3354,6 +3379,7 @@ dependencies = [
  "inference-api",
  "inference-chat-protocols",
  "inference-core",
+ "inference-http",
  "inference-jobs",
  "inference-json",
  "inference-models-diffusion",
@@ -3452,8 +3478,8 @@ dependencies = [
  "indexmap",
  "inference-api",
  "inference-coder",
+ "inference-http",
  "inference-json",
- "inference-server-core",
  "mime",
  "mime_guess",
  "serde",

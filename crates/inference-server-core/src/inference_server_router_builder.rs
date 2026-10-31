@@ -61,15 +61,12 @@ use crate::{
     speech_generation::speech_generation,
 };
 use inference_api::Engine;
+pub use inference_http::DEFAULT_MAX_BODY_LIMIT;
+use inference_http::MB_TO_B;
 
-// NOTE(EricLBuehler): Accept up to 50mb input
-const N_INPUT_SIZE: usize = 50;
-const MB_TO_B: usize = 1024 * 1024; // 1024 kb in a mb
 const ROUTE_NOT_FOUND_MESSAGE: &str = "The requested API route was not found.";
 const METHOD_NOT_ALLOWED_MESSAGE: &str = "The requested HTTP method is not allowed for this route.";
 
-/// This is the axum default request body limit for the router. Accept up to 50mb input.
-pub const DEFAULT_MAX_BODY_LIMIT: usize = N_INPUT_SIZE * MB_TO_B;
 /// The audio uploads' own limit, past the router's: 512 MiB is about 4.6 hours of 16 kHz mono 16-bit WAV.
 pub const AUDIO_MAX_BODY_LIMIT: usize = 512 * MB_TO_B;
 /// A job's uploads (a panorama, photos, a video).

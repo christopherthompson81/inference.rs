@@ -8,7 +8,7 @@ use axum::{
 };
 use inference_api::request_body::{INVALID_REQUEST_BODY, JsonRequest, MALFORMED_JSON};
 
-pub(crate) use crate::api_error::{ApiError, ApiErrorKind, SERVICE_UNAVAILABLE_MESSAGE};
+pub use inference_api::api_error::{ApiError, ApiErrorKind, SERVICE_UNAVAILABLE_MESSAGE};
 
 const INVALID_CONTENT_TYPE: &str = "invalid_content_type";
 const REQUEST_BODY_TOO_LARGE: &str = "request_body_too_large";
@@ -21,7 +21,7 @@ const RETRY_AFTER_SECS: &str = "1";
 #[derive(Clone, Debug)]
 pub struct ResponseErrorMessage(pub String);
 
-pub(crate) fn openai_error_response(error: ApiError) -> axum::response::Response {
+pub fn openai_error_response(error: ApiError) -> axum::response::Response {
     let mut response = Json(error.to_openai_body()).into_response();
     *response.status_mut() = error.status();
     if error.kind == ApiErrorKind::RateLimited {
@@ -36,9 +36,7 @@ pub(crate) fn openai_error_response(error: ApiError) -> axum::response::Response
     response
 }
 
-pub(crate) fn json_response<T: serde::Serialize>(
-    result: Result<T, ApiError>,
-) -> axum::response::Response {
+pub fn json_response<T: serde::Serialize>(result: Result<T, ApiError>) -> axum::response::Response {
     match result {
         Ok(body) => Json(body).into_response(),
         Err(error) => openai_error_response(error),
@@ -108,7 +106,7 @@ fn body_rejection(status: StatusCode, message: String) -> ApiError {
 }
 
 /// HTTP views of an [`ApiError`]: the status it maps to, and errors that start as an HTTP status.
-pub(crate) trait ApiErrorHttp {
+pub trait ApiErrorHttp {
     fn from_status(status: StatusCode, message: impl Into<String>) -> Self;
     fn status(&self) -> StatusCode;
 }
@@ -178,8 +176,8 @@ impl ApiErrorHttp for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api_error::INTERNAL_ERROR_MESSAGE;
     use axum::body::to_bytes;
+    use inference_api::api_error::INTERNAL_ERROR_MESSAGE;
 
     const CONTENT_TYPE_PROBES: &[&str] = &[
         "application/json",

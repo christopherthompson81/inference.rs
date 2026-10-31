@@ -6,13 +6,15 @@ use std::{
     time::Instant,
 };
 
-use inference_api::{engine_chat::Response, response::Usage};
+use inference_api::{
+    engine_chat::{Response, ResponseTap},
+    response::Usage,
+    util::sanitize_error_message,
+};
 
 use crate::{
-    engine_chat::ResponseTap,
     handler_core::ApiError,
     metrics::{ITL_METRIC, TTFT_METRIC},
-    util::sanitize_error_message,
 };
 
 /// What a streaming request produced, filled in by the streamer and read once the SSE body ends.
@@ -100,7 +102,7 @@ impl StreamOutcomeHandle {
 }
 
 /// OpenAI-style streaming error event; clients parse `data:` lines as JSON, so a raw text line is invisible to them.
-pub(crate) fn openai_error_event(error: ApiError) -> axum::response::sse::Event {
+pub fn openai_error_event(error: ApiError) -> axum::response::sse::Event {
     axum::response::sse::Event::default().data(error.to_openai_body().to_string())
 }
 

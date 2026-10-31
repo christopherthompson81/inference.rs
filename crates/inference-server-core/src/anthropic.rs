@@ -205,12 +205,12 @@ pub async fn anthropic_count_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api_error::INTERNAL_ERROR_MESSAGE;
     use axum::{
         body::{Body, to_bytes},
         extract::FromRequest,
         http::Request as HttpRequest,
     };
+    use inference_api::api_error::INTERNAL_ERROR_MESSAGE;
     use inference_core::InferenceRsError;
     use serde_json::Value;
 
@@ -340,7 +340,7 @@ mod tests {
         let body = error_body(response).await;
         assert_eq!(
             body["error"]["message"],
-            crate::api_error::MODEL_ERROR_MESSAGE
+            inference_api::api_error::MODEL_ERROR_MESSAGE
         );
     }
 

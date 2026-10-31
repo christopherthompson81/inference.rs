@@ -1,12 +1,9 @@
 //! Running a built router: its listener, the MCP listener beside it, and the startup log.
 
 use anyhow::{Context, Result};
-use axum::{
-    Router,
-    extract::connect_info::Connected,
-    serve::{IncomingStream, Listener},
-};
+use axum::Router;
 use inference_api::Engine;
+use inference_http::listener::NodelayListener;
 use tracing::{debug, info};
 
 use crate::{
@@ -72,35 +69,6 @@ async fn spawn_mcp_server(
     Ok(())
 }
 
-// Streamed tokens are small writes; Nagle would hold each one back waiting for an ACK.
-struct NodelayListener(tokio::net::TcpListener);
-
-impl Listener for NodelayListener {
-    type Io = tokio::net::TcpStream;
-    type Addr = std::net::SocketAddr;
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        let (stream, addr) = Listener::accept(&mut self.0).await;
-        if let Err(error) = stream.set_nodelay(true) {
-            tracing::warn!("failed to set TCP_NODELAY on incoming connection: {error}");
-        }
-        (stream, addr)
-    }
-
-    fn local_addr(&self) -> std::io::Result<Self::Addr> {
-        Listener::local_addr(&self.0)
-    }
-}
-
-impl Connected<IncomingStream<'_, NodelayListener>> for Peer {
-    fn connect_info(stream: IncomingStream<'_, NodelayListener>) -> Self {
-        Self {
-            remote: *stream.remote_addr(),
-            local: stream.io().local_addr().ok(),
-        }
-    }
-}
-
 fn log_api_surfaces(host: &str, port: u16) {
     let client_host = match host {
         "0.0.0.0" => "localhost",
@@ -127,25 +95,5 @@ fn log_api_surfaces(host: &str, port: u16) {
 fn log_routes(routes: &[RouteInfo], kind: RouteKind) {
     for route in routes.iter().filter(|route| route.kind == kind) {
         debug!("  Route: {}, Methods: {}", route.path, route.methods);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use axum::serve::Listener;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn accepted_connections_enable_tcp_nodelay() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let mut listener = NodelayListener(listener);
-        let connect = tokio::net::TcpStream::connect(address);
-
-        let ((stream, _), client) = tokio::join!(listener.accept(), connect);
-
-        client.unwrap();
-        assert!(stream.nodelay().unwrap());
     }
 }

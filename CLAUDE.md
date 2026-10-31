@@ -102,8 +102,9 @@ You should also look for a model.safetensors.index.json file for the model at ha
 - `crates/inference-api/` - The engine surface with no HTTP: OpenAI request/response types, request parsing and dispatch, chat as an engine operation, the server/engine builder. The HTTP server builds on it and the C ABI exposes it; add engine features here, not in the server
 - `crates/inference-jobs/` - Long GPU work queued beside the engine: world generation and reconstruction jobs, their records and events (`JobQueue`, shared by server-core and the CLI). It places and leases devices through the engine's device operations; server-level work (#701), so not in `Engine`, the C ABI or the SDK
 - `crates/inference-chat-protocols/` - Chat protocols a server offers over the engine's chat operation (Anthropic Messages, OpenAI Responses): translations onto `Engine::chat`/`chat_stream`/`chat_events` and back. Server-level work (#701), so not in `Engine` or the C ABI; server-core uses it
-- `crates/inference-server-core/` - HTTP framing over `inference_api::Engine`: routes, auth and keys, SSE, metrics, the MCP server. Each request acts through the `Engine` scoped to its owner; engine logic belongs in inference-api. Like the web UI and the C ABI it depends on inference-api, not core (core is a dev-dependency for its tests)
-- `crates/inference-webui/` - The chat web UI `serve` mounts at `/ui`: its HTTP handlers over the engine, the Svelte source (`webui/`) and the built bundle it embeds (`static/`, rebuilt with `npm run build` in `webui/`)
+- `crates/inference-http/` - HTTP building blocks the server and the web UI share, below both so they build side by side: error envelopes and JSON extraction (`handler_core`), API keys and sessions (`auth`), the observability middleware (`metrics`), SSE stream outcomes, the route names (`route_registry`), the TCP listener, the UI uploads directory and the body limit. Server-core re-exports its modules under the same names
+- `crates/inference-server-core/` - HTTP framing over `inference_api::Engine`: routes, SSE, the MCP server, over `inference-http`'s auth and metrics. Each request acts through the `Engine` scoped to its owner; engine logic belongs in inference-api. Like the web UI and the C ABI it depends on inference-api, not core (core is a dev-dependency for its tests)
+- `crates/inference-webui/` - The chat web UI `serve` mounts at `/ui`: its HTTP handlers over the engine (on `inference-http`, not server-core), the Svelte source (`webui/`) and the built bundle it embeds (`static/`, rebuilt with `npm run build` in `webui/`)
 - `crates/inference/` - Rust SDK: builders that produce an `EngineSpec`, request builders that produce a `ChatCompletionRequest`, and `Model`, which wraps `inference_api::Engine` (and derefs to it). It depends on inference-api, never on core; a type the SDK needs from core is re-exported through `inference_api::sdk`
 - `crates/inference-vision/` - Image processing utilities
 - `crates/inference-quant/` - Quantization implementations (ISQ, GGUF, GPTQ, etc.)
@@ -161,7 +162,7 @@ When adding new quantization methods:
 
 - `crates/inference-core/src/engine/mod.rs` - Main engine orchestration
 - `crates/inference-core/src/pipeline/mod.rs` - Pipeline trait and common logic
-- `crates/inference-server-core/src/route_registry.rs` - HTTP API endpoints (routes wired in `inference_server_router_builder.rs`)
+- `crates/inference-http/src/route_registry.rs` - HTTP API endpoints (routes wired in `inference_server_router_builder.rs`)
 - `bindings/python/inference_rs/_typed.py` - Python SDK entry point (`Engine`)
 - `examples/rust/` - Rust SDK examples (`inference-examples`, not a default member: build with `-p inference-examples --example <name>`)
 

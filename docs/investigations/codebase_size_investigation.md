@@ -3240,3 +3240,29 @@ Finding: duplication 25,828 -> 25,276 (-552); 28 files, +635 / -1,045. Neither p
 
 Implication: next in the list are the input processors' trait boilerplate (Idefics3 vs Mistral 3, Gemma 3n vs
 Idefics2, 14-20 lines each) and Phi-3-V vs Phi-4-MM loaders.
+
+## Run 107 - 2026-10-31 08:29
+
+Question: Run 105 found the web UI waiting on server-core for its auth middleware, metrics, route names, body limit
+and upload dir; does moving those below both take the link out of a core edit's build?
+
+Change: a new crate, `inference-http`, below server-core and the web UI. It holds `handler_core`, `auth`, `metrics`,
+`streaming` and `route_registry` (moved whole, since auth and metrics need the others), the TCP listener (the orphan
+rule keeps `Peer`'s `Connected` impl beside `Peer`), the UI uploads directory and `DEFAULT_MAX_BODY_LIMIT`. Server-core
+re-exports the modules under their old names. The handlers' `utoipa::path` items were `cfg(test)`, which does not
+reach across crates; they are behind an `openapi-paths` feature that server-core enables only as a dev-dependency.
+The first cut also depended on inference-chat-protocols for the 401's Anthropic envelope, which held the crate
+0.8 s behind chat-protocols; auth builds that one envelope itself, pinned to `anthropic_error_body` by a test that
+uses chat-protocols as a dev-dependency.
+
+Commands: as Run 105, a one-line edit inside `NormalLoader::load_from_paths`, then `cargo test --no-run --workspace
+--lib --bins --tests --timings` (warm, twice), reverted after.
+
+Finding:
+- Test build 11.4 s -> 10.5 s (10.46, 10.48).
+- inference-http starts at 4.5 s with inference-api's metadata; the web UI runs 5.3-7.1 s beside server-core
+  5.6-7.7 s, where it used to start after server-core; the CLI binary (7.7-10.4 s) is now the tail, after
+  server-core.
+
+Implication: the server chain is api -> http -> server-core -> CLI. What's left of a core edit's cycle is
+server-core's own build and the CLI link, and the CUDA suite's 52 s is still the bigger cost.
