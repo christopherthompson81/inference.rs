@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use super::*;
 
 /// `NormalLoader` for a dense ERNIE 4.5 model.
@@ -6,6 +8,7 @@ pub struct Ernie4_5Loader;
 /// `NormalLoader` for an ERNIE 4.5 MoE model.
 pub struct Ernie4_5MoeLoader;
 
+const MAX_POSITION_EMBEDDINGS: &str = "max_position_embeddings";
 const MOE_EXPERT_REGEXES: [&str; 4] = [
     r"layers\.(\d+)\.mlp\.experts\.(\d+)\.gate_proj\.(weight|bias)$",
     r"layers\.(\d+)\.mlp\.experts\.(\d+)\.up_proj\.(weight|bias)$",
@@ -75,6 +78,13 @@ impl NormalModelLoader for Ernie4_5Loader {
             normal_loading_metadata,
             attention_mechanism,
         )?))
+    }
+    fn runtime_config<'a>(
+        &self,
+        config: &'a str,
+        max_model_len: Option<usize>,
+    ) -> Result<Cow<'a, str>> {
+        cap_context_length(config, MAX_POSITION_EMBEDDINGS, max_model_len)
     }
     fn is_gptx(&self, _config: &str) -> Result<bool> {
         Ok(false)
@@ -152,6 +162,13 @@ impl NormalModelLoader for Ernie4_5MoeLoader {
             normal_loading_metadata,
             attention_mechanism,
         )?))
+    }
+    fn runtime_config<'a>(
+        &self,
+        config: &'a str,
+        max_model_len: Option<usize>,
+    ) -> Result<Cow<'a, str>> {
+        cap_context_length(config, MAX_POSITION_EMBEDDINGS, max_model_len)
     }
     fn is_gptx(&self, _config: &str) -> Result<bool> {
         Ok(false)

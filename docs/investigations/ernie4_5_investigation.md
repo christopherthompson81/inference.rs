@@ -57,3 +57,18 @@ example's `--kld-base` over llama.cpp's own tokens; then one sampled chat with t
 
 **Next:** none for the text models. The MTP layer (`mtp_block.*`, which llama.cpp's converter drops) as a draft model
 is the issue's optional follow-up.
+
+## Run 3 - 2026-10-30 19:22
+
+**Question:** can a load cut ERNIE's 131,072-token context (`max_model_len`), which every loader but Qwen3.5's and
+Gemma 4's refused?
+
+**Command:** the 0.3B Q8_0 through the C ABI with `runtime.max_model_len` 4096 and 1,048,576, one sampled completion.
+
+**Finding:** before, "max_model_len=4096 is not supported by this model loader". A blanket default would be wrong for
+some loaders (Phi-3's LongRoPE scales attention by `max_position_embeddings`), so `cap_context_length` is opt-in: it
+cuts the config's context key, refusing zero or a length past the trained one, and both ERNIE loaders use it (plain
+RoPE, whose tables only shrink). 4096 loads and completes ("red, green, and blue."); 1,048,576 fails with
+"max_model_len=1048576 is outside the model's context of 131072 tokens".
+
+**Next:** the MTP layer as a draft model.
