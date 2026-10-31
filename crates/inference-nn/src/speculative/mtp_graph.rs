@@ -25,10 +25,16 @@ pub use super::mtp::{MtpDraft, MtpForwardInputs};
 const MTP_GRAPH_MAX_ROWS: usize = 8;
 const MTP_GRAPH_CAPACITY: usize = 8;
 
+/// A graph forward's tokens: host values it uploads, or a device tensor of `shape`'s rows it copies in place.
+pub enum MtpGraphTokens<'a> {
+    Host(&'a [u32]),
+    Device(&'a Tensor),
+}
+
 /// What a graph forward stages: the rows' host values, the target hidden states and their decode rows.
 pub struct MtpGraphRun<'a> {
     pub shape: (usize, usize),
-    pub tokens: &'a [u32],
+    pub tokens: MtpGraphTokens<'a>,
     /// The head's own positions, planes of `shape`; empty for a head that ropes from the metadata's positions.
     pub head_positions: &'a [u32],
     /// Each row's position plus one.
@@ -73,7 +79,11 @@ impl GraphInputs {
     fn new(run: &MtpGraphRun<'_>) -> Result<Self> {
         let device = run.target_hidden.device();
         let (rows, cols) = run.shape;
-        let tokens = Var::from_tensor(&Tensor::from_vec(run.tokens.to_vec(), run.shape, device)?)?;
+        let tokens = match run.tokens {
+            MtpGraphTokens::Host(tokens) => Tensor::from_vec(tokens.to_vec(), run.shape, device)?,
+            MtpGraphTokens::Device(tokens) => tokens.reshape(run.shape)?.copy()?,
+        };
+        let tokens = Var::from_tensor(&tokens)?;
         let positions = (!run.head_positions.is_empty())
             .then(|| {
                 Var::from_tensor(&Tensor::from_vec(
@@ -235,7 +245,9 @@ impl MtpGraphEntry {
             ..
         } = self;
         staging.update(|staging| {
-            staging.copy_from_u32_slice("mtp_tokens", location, run.tokens, tokens)?;
+            if let MtpGraphTokens::Host(host) = run.tokens {
+                staging.copy_from_u32_slice("mtp_tokens", location, host, tokens)?;
+            }
             if let Some(positions) = positions {
                 staging.copy_from_u32_slice(
                     "mtp_positions",
@@ -246,6 +258,12 @@ impl MtpGraphEntry {
             }
             buffers.copy_from(&metadata, run.positions, 1, staging)
         })?;
+        if let MtpGraphTokens::Device(device_tokens) = run.tokens {
+            crate::cuda::graph::copy_tensor(
+                &device_tokens.reshape(run.shape)?,
+                &tokens.as_detached_tensor(),
+            )?;
+        }
         crate::cuda::graph::copy_tensor(run.target_hidden, &self.hidden.as_detached_tensor())?;
         let draft = self.launch()?;
         event.success();
@@ -334,7 +352,7 @@ impl MtpGraphs {
     ) -> Result<Option<MtpDraft>> {
         if !cuda_decode_graphs_enabled()
             || !run.target_hidden.device().is_cuda()
-            || run.tokens.len() > MTP_GRAPH_MAX_ROWS
+            || run.shape.0 * run.shape.1 > MTP_GRAPH_MAX_ROWS
         {
             return Ok(None);
         }
@@ -501,7 +519,7 @@ mod tests {
             let hidden = (hidden + start as f64)?;
             let run = MtpGraphRun {
                 shape,
-                tokens: &tokens,
+                tokens: MtpGraphTokens::Host(&tokens),
                 head_positions: &mrope,
                 positions: &positions,
                 starts: &starts,

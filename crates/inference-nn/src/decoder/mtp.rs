@@ -51,7 +51,13 @@ pub struct MtpSpec {
 struct DraftRow {
     seq_id: usize,
     position: usize,
-    token: u32,
+}
+
+/// The token each row reads: host values, or a `[rows]` U32 tensor a device sampler left on the GPU.
+enum RowTokens<'a> {
+    Host(Vec<u32>),
+    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+    Device(&'a Tensor),
 }
 
 /// The target's last forward, post final norm: every row, and the rows its logits came from.
@@ -286,13 +292,13 @@ impl MtpHead {
         &self,
         embed: &dyn Fn(&Tensor) -> Result<Tensor>,
         rows: &[DraftRow],
+        tokens: RowTokens<'_>,
         hidden: &Tensor,
         kv_cache: &[(Tensor, Tensor)],
         paged_meta: &PagedAttentionMeta,
     ) -> Result<MtpDraft> {
         let n = rows.len();
         let seq_ids = rows.iter().map(|row| row.seq_id).collect::<Vec<_>>();
-        let tokens = rows.iter().map(|row| row.token).collect::<Vec<_>>();
         let starts = rows.iter().map(|row| row.position).collect::<Vec<_>>();
         let context_lens = starts.iter().map(|p| p + 1).collect::<Vec<_>>();
         let hidden = hidden
@@ -308,7 +314,14 @@ impl MtpHead {
             let (k, v) = &kv_cache[self.kv_layer_idx];
             let run = crate::speculative::mtp_graph::MtpGraphRun {
                 shape: (n, 1),
-                tokens: &tokens,
+                tokens: match &tokens {
+                    RowTokens::Host(tokens) => {
+                        crate::speculative::mtp_graph::MtpGraphTokens::Host(tokens)
+                    }
+                    RowTokens::Device(tokens) => {
+                        crate::speculative::mtp_graph::MtpGraphTokens::Device(tokens)
+                    }
+                },
                 head_positions: &[],
                 positions: &context_lens,
                 starts: &starts,
@@ -326,7 +339,10 @@ impl MtpHead {
             }
         }
         let metadata = make_paged_rows_metadata(&seq_ids, &context_lens, paged_meta, &self.device)?;
-        let tokens = Tensor::from_vec(tokens, (n, 1), &self.device)?;
+        let tokens = match tokens {
+            RowTokens::Host(tokens) => Tensor::from_vec(tokens, (n, 1), &self.device)?,
+            RowTokens::Device(tokens) => tokens.reshape((n, 1))?,
+        };
         let draft = forward(MtpForwardInputs {
             tokens: &tokens,
             positions: None,
@@ -414,6 +430,7 @@ impl MtpHead {
             None => return Ok(()),
         };
         let mut rows = Vec::new();
+        let mut tokens = Vec::new();
         let mut hidden_rows = Vec::new();
         let mut tails = self.pending_tails.lock().expect("mtp tails poisoned");
         for (i, &seq_id) in ctx.seq_ids.iter().enumerate() {
@@ -431,21 +448,15 @@ impl MtpHead {
             if let Some((position, hidden)) = tails.remove(&seq_id)
                 && position + 1 == start
             {
-                rows.push(DraftRow {
-                    seq_id,
-                    position,
-                    token: toks[start],
-                });
+                rows.push(DraftRow { seq_id, position });
+                tokens.push(toks[start]);
                 hidden_rows.push(hidden);
             }
             let last = end - 1;
             tails.insert(seq_id, (last, seq_hidden.narrow(0, last - start, 1)?));
             for position in start..last {
-                rows.push(DraftRow {
-                    seq_id,
-                    position,
-                    token: toks[position + 1],
-                });
+                rows.push(DraftRow { seq_id, position });
+                tokens.push(toks[position + 1]);
             }
             if last > start {
                 hidden_rows.push(seq_hidden.narrow(0, 0, last - start)?);
@@ -456,7 +467,14 @@ impl MtpHead {
             return Ok(());
         }
         let hidden = Tensor::cat(&hidden_rows, 0)?;
-        self.forward_rows(embed, &rows, &hidden, kv_cache, paged_meta)?;
+        self.forward_rows(
+            embed,
+            &rows,
+            RowTokens::Host(tokens),
+            &hidden,
+            kv_cache,
+            paged_meta,
+        )?;
         Ok(())
     }
 
@@ -503,6 +521,7 @@ impl MtpHead {
         }
 
         let mut rows = Vec::new();
+        let mut row_tokens = Vec::new();
         let mut hidden_rows = Vec::with_capacity(batch);
         let mut last_rows = Vec::with_capacity(batch);
         let mut tails = self.pending_tails.lock().expect("mtp tails poisoned");
@@ -520,20 +539,14 @@ impl MtpHead {
             if let Some((position, hidden)) = tails.remove(&seq.id())
                 && position + 1 < toks.len()
             {
-                rows.push(DraftRow {
-                    seq_id,
-                    position,
-                    token: toks[position + 1],
-                });
+                rows.push(DraftRow { seq_id, position });
+                row_tokens.push(toks[position + 1]);
                 hidden_rows.push(hidden);
             }
             for r in 0..count {
                 let position = base_len - count + r;
-                rows.push(DraftRow {
-                    seq_id,
-                    position,
-                    token: toks[position + 1],
-                });
+                rows.push(DraftRow { seq_id, position });
+                row_tokens.push(toks[position + 1]);
             }
             hidden_rows.push(selected.get(batch_idx)?.narrow(0, 0, count)?);
             last_rows.push(rows.len() - 1);
@@ -541,7 +554,14 @@ impl MtpHead {
         tails.retain(|seq_id, _| ctx.seq_ids.contains(seq_id));
         drop(tails);
         let hidden = Tensor::cat(&hidden_rows, 0)?;
-        let out = self.forward_rows(embed, &rows, &hidden, kv_cache, paged_meta)?;
+        let out = self.forward_rows(
+            embed,
+            &rows,
+            RowTokens::Host(row_tokens),
+            &hidden,
+            kv_cache,
+            paged_meta,
+        )?;
         #[allow(clippy::cast_possible_truncation)]
         let last = Tensor::from_vec(
             last_rows.iter().map(|&row| row as u32).collect::<Vec<_>>(),
@@ -557,6 +577,112 @@ impl MtpHead {
             .map(|&row| rows[row].position)
             .collect::<Vec<_>>();
 
+        // drafts left on the device reach the verifier without a read-back of their own
+        #[cfg(feature = "cuda")]
+        {
+            let device = draft.chain_hidden.device().clone();
+            let sampler = crate::speculative::proposer::CudaDraftSampler::new(
+                ctx.sequences,
+                n_predict,
+                &device,
+                &ctx.rng,
+            )?;
+            let greedy =
+                device.is_cuda() && ctx.sequences.iter().all(|seq| seq.sampler().is_argmax());
+            if sampler.is_some() || greedy {
+                let mut steps = Vec::with_capacity(n_predict);
+                let mut samples = Vec::with_capacity(n_predict);
+                let mut logits = Vec::with_capacity(n_predict);
+                for step in 0..n_predict {
+                    let step_logits = lm_head.forward(&draft.logits_hidden)?;
+                    let vocab = step_logits.dim(D::Minus1)?;
+                    let drafts = match &sampler {
+                        Some(sampler) => {
+                            let sample = sampler.sample_on_device(step, &step_logits)?;
+                            let drafts = sample.tokens.clone();
+                            samples.push(sample);
+                            drafts
+                        }
+                        None => {
+                            let drafts = greedy_device_drafts(&step_logits)?;
+                            logits.push(step_logits);
+                            drafts
+                        }
+                    };
+                    steps.push(drafts.clone());
+                    if step + 1 == n_predict {
+                        break;
+                    }
+                    let chained = ctx
+                        .seq_ids
+                        .iter()
+                        .zip(cursor.iter_mut())
+                        .map(|(&seq_id, position)| {
+                            *position += 1;
+                            DraftRow {
+                                seq_id,
+                                position: *position,
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    // a row with no finite logits drafts an invalid id, which the embedding must not read
+                    #[allow(clippy::cast_possible_truncation)]
+                    let drafts = drafts.clamp(0u32, (vocab - 1) as u32)?;
+                    draft = self.forward_rows(
+                        embed,
+                        &chained,
+                        RowTokens::Device(&drafts),
+                        &draft.chain_hidden,
+                        kv_cache,
+                        paged_meta,
+                    )?;
+                }
+                // [batch, n_predict]
+                let tokens = Tensor::stack(&steps, 1)?;
+                let stack = |parts: Vec<&Tensor>| Tensor::stack(&parts, 1);
+                let sparse = (!samples.is_empty())
+                    .then(|| {
+                        Ok::<_, inference_tensor::Error>((
+                            stack(samples.iter().map(|sample| &sample.ids).collect())?,
+                            stack(samples.iter().map(|sample| &sample.probs).collect())?,
+                        ))
+                    })
+                    .transpose()?;
+                let logits = (!logits.is_empty())
+                    .then(|| stack(logits.iter().collect()))
+                    .transpose()?;
+                let proposals = (0..batch)
+                    .map(|row| {
+                        let tokens =
+                            crate::speculative::SpeculativeTokens::from_device(tokens.get(row)?)?;
+                        let distribution = match (&sparse, &logits) {
+                            (Some((ids, probs)), _) => {
+                                crate::speculative::SpeculativeProposalDistribution::SparseProbs(
+                                    crate::speculative::SparseSpeculativeProbs::new(
+                                        ids.get(row)?,
+                                        probs.get(row)?,
+                                    )?,
+                                )
+                            }
+                            (None, Some(logits)) => {
+                                crate::speculative::SpeculativeProposalDistribution::Logits(
+                                    logits.get(row)?,
+                                )
+                            }
+                            (None, None) => {
+                                unreachable!("a device draft step keeps its distribution")
+                            }
+                        };
+                        Ok(SpeculativeProposal {
+                            tokens,
+                            distribution: Some(distribution),
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                return Ok(Some(SpeculativeProposalBatch::new(proposals)));
+            }
+        }
+
         let mut contexts = ctx
             .sequences
             .iter()
@@ -564,39 +690,10 @@ impl MtpHead {
             .collect::<Vec<_>>();
         let mut tokens = vec![Vec::with_capacity(n_predict); batch];
         let mut logits = Vec::with_capacity(n_predict);
-        // drafts sampled on the device hand the verifier sparse distributions, not full-vocabulary logits
-        #[cfg(feature = "cuda")]
-        let cuda_sampler = crate::speculative::proposer::CudaDraftSampler::new(
-            ctx.sequences,
-            n_predict,
-            draft.chain_hidden.device(),
-            &ctx.rng,
-        )?;
-        #[cfg(feature = "cuda")]
-        let mut cuda_samples = Vec::with_capacity(n_predict);
         for step in 0..n_predict {
             let step_logits = lm_head.forward(&draft.logits_hidden)?;
-            #[cfg(feature = "cuda")]
-            let drafts = match &cuda_sampler {
-                Some(sampler) => {
-                    let (drafts, sample) = sampler.sample(step, &step_logits)?;
-                    cuda_samples.push(sample);
-                    drafts
-                }
-                None => {
-                    let drafts =
-                        sample_draft_rows(&step_logits, ctx.sequences, &mut contexts, &ctx.rng)?;
-                    logits.push(step_logits);
-                    drafts
-                }
-            };
-            #[cfg(not(feature = "cuda"))]
-            let drafts = {
-                let drafts =
-                    sample_draft_rows(&step_logits, ctx.sequences, &mut contexts, &ctx.rng)?;
-                logits.push(step_logits);
-                drafts
-            };
+            let drafts = sample_draft_rows(&step_logits, ctx.sequences, &mut contexts, &ctx.rng)?;
+            logits.push(step_logits);
             for (i, draft) in drafts.iter().enumerate() {
                 tokens[i].push(*draft);
             }
@@ -607,34 +704,22 @@ impl MtpHead {
                 .seq_ids
                 .iter()
                 .zip(cursor.iter_mut())
-                .zip(&drafts)
-                .map(|((&seq_id, position), &token)| {
+                .map(|(&seq_id, position)| {
                     *position += 1;
                     DraftRow {
                         seq_id,
                         position: *position,
-                        token,
                     }
                 })
                 .collect::<Vec<_>>();
-            draft =
-                self.forward_rows(embed, &chained, &draft.chain_hidden, kv_cache, paged_meta)?;
-        }
-        #[cfg(feature = "cuda")]
-        if !cuda_samples.is_empty() {
-            // [batch, n_predict, k] -> per sequence [n_predict, k]
-            let stack = |part: fn(&crate::ops::CudaDraftSample) -> &Tensor| {
-                Tensor::stack(&cuda_samples.iter().map(part).collect::<Vec<_>>(), 1)
-            };
-            let (ids, probs) = (stack(|sample| &sample.ids)?, stack(|sample| &sample.probs)?);
-            let proposals = tokens
-                .into_iter()
-                .enumerate()
-                .map(|(row, tokens)| {
-                    SpeculativeProposal::with_sparse_probs(tokens, ids.get(row)?, probs.get(row)?)
-                })
-                .collect::<Result<Vec<_>>>()?;
-            return Ok(Some(SpeculativeProposalBatch::new(proposals)));
+            draft = self.forward_rows(
+                embed,
+                &chained,
+                RowTokens::Host(drafts),
+                &draft.chain_hidden,
+                kv_cache,
+                paged_meta,
+            )?;
         }
         // [n_predict, batch, vocab] -> per sequence [n_predict, vocab]
         let logits = Tensor::stack(&logits, 1)?;
@@ -665,4 +750,19 @@ impl MtpHead {
         }
         super::LayerAttention::add_residual(&self.block.self_attn, &uvb_b.pp(self.self_attn_name));
     }
+}
+
+/// Each row's argmax as a `[rows]` U32 tensor, left on the device.
+#[cfg(feature = "cuda")]
+fn greedy_device_drafts(logits: &Tensor) -> Result<Tensor> {
+    let logits = logits
+        .to_dtype(inference_tensor::DType::F32)?
+        .contiguous()?;
+    let top1 = crate::ops::cuda_top1_logits_f32_packed_batched(&logits)?;
+    // packed rows are (value, id), the id exact in F32 below 2^24
+    top1.packed
+        .narrow(1, 1, 1)?
+        .squeeze(1)?
+        .to_dtype(inference_tensor::DType::U32)?
+        .contiguous()
 }
