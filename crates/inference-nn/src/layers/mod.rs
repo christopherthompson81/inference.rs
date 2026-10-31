@@ -2869,10 +2869,55 @@ impl Mlp {
         bias: bool,
         comm: &Arc<inference_quant::Comm>,
     ) -> Result<Self> {
+        Self::build(
+            vb,
+            hidden_size,
+            intermediate_size,
+            quantization_config,
+            hidden_act,
+            bias,
+            crate::moe::ExpertProjNames::DEFAULT,
+            comm,
+        )
+    }
+
+    /// As [`Mlp::new`], with the gate, up and down projections under the checkpoint's own names.
+    pub fn new_named(
+        vb: ShardedVarBuilder,
+        hidden_size: usize,
+        intermediate_size: usize,
+        quantization_config: &Option<QuantizedConfig>,
+        hidden_act: Activation,
+        names: crate::moe::ExpertProjNames,
+        comm: &Arc<inference_quant::Comm>,
+    ) -> Result<Self> {
+        Self::build(
+            vb,
+            hidden_size,
+            intermediate_size,
+            quantization_config,
+            hidden_act,
+            false,
+            names,
+            comm,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        vb: ShardedVarBuilder,
+        hidden_size: usize,
+        intermediate_size: usize,
+        quantization_config: &Option<QuantizedConfig>,
+        hidden_act: Activation,
+        bias: bool,
+        names: crate::moe::ExpertProjNames,
+        comm: &Arc<inference_quant::Comm>,
+    ) -> Result<Self> {
         let packed = ColumnParallelLayer::new_packed(
             hidden_size,
             &[intermediate_size, intermediate_size],
-            &["gate_proj", "up_proj"],
+            &[names.gate, names.up],
             quantization_config,
             bias,
             comm,
@@ -2892,7 +2937,7 @@ impl Mlp {
                     quantization_config,
                     bias,
                     comm,
-                    vb.pp("gate_proj"),
+                    vb.pp(names.gate),
                 )?,
                 ColumnParallelLayer::new(
                     hidden_size,
@@ -2900,7 +2945,7 @@ impl Mlp {
                     quantization_config,
                     bias,
                     comm,
-                    vb.pp("up_proj"),
+                    vb.pp(names.up),
                 )?,
                 None,
             ),
@@ -2915,7 +2960,7 @@ impl Mlp {
                 quantization_config,
                 bias,
                 comm,
-                vb.pp("down_proj"),
+                vb.pp(names.down),
             )?,
             merged_gate_up,
             act: hidden_act,

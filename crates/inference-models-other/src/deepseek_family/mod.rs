@@ -419,6 +419,7 @@ pub fn new_family_model<T: FamilyAttention>(
         quantization_config: &cfg.quantization_config,
         norm: NormKind::Rms,
         norm_names: NormNames::PRE,
+        module_names: crate::decoder::ModuleNames::HF,
         embed_scale: None,
         final_logit_softcap: None,
         mlp: MlpKind::Gated,

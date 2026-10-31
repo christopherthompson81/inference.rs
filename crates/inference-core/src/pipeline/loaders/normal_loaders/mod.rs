@@ -76,7 +76,7 @@ pub use inference_models_phi::loaders::{Phi2Loader, Phi3_5MoELoader, Phi3Loader}
 #[cfg(feature = "models-qwen")]
 pub use inference_models_qwen::loaders::{
     Qwen2Loader, Qwen2MoeLoader, Qwen3_5MoeTextLoader, Qwen3_5TextLoader, Qwen3Loader,
-    Qwen3MoELoader, Qwen3NextLoader,
+    Qwen3MoELoader, Qwen3NextLoader, QwenLoader,
 };
 
 #[cfg(all(

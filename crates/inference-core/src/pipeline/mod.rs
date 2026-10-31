@@ -2484,6 +2484,48 @@ mod tests {
         test_with_inputs(&templates, &expected_outputs, inputs);
     }
 
+    // Qwen's make_context: the system turn it defaults to without one, then each turn and the assistant prompt
+    #[cfg(feature = "models-qwen")]
+    #[test]
+    fn qwen1_template_renders_as_make_context_builds_its_prompt() {
+        let chat = |turns: &[[&str; 2]]| {
+            turns
+                .iter()
+                .map(|[role, content]| {
+                    let mut message: IndexMap<String, MessageContent> = IndexMap::new();
+                    message.insert("role".to_string(), Either::Left(role.to_string()));
+                    message.insert("content".to_string(), Either::Left(content.to_string()));
+                    message
+                })
+                .collect::<Vec<_>>()
+        };
+        let render = |turns| {
+            inference_protocol::chat_template::apply_chat_template_to(
+                chat(turns),
+                true,
+                None,
+                None,
+                &inference_protocol::chat_template::ChatTemplateValue(Either::Left(
+                    inference_models_qwen::qwen1::CHAT_TEMPLATE.to_string(),
+                )),
+                None,
+                None,
+                None,
+                Vec::new(),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            render(&[["user", "Hello"], ["assistant", "Hi"], ["user", "Again"]]),
+            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n\
+             <|im_start|>assistant\nHi<|im_end|>\n<|im_start|>user\nAgain<|im_end|>\n<|im_start|>assistant\n"
+        );
+        assert_eq!(
+            render(&[["system", "Be terse."], ["user", "Hello"]]),
+            "<|im_start|>system\nBe terse.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        );
+    }
+
     #[test]
     /// Generating these cases:
     /// ```py

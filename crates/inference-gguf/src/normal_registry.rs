@@ -2,8 +2,8 @@ use inference_nn::loaders::NormalLoaderType;
 pub use inference_nn::model::RopePairing;
 use std::{error::Error, fmt, str::FromStr};
 
-pub const NORMAL_LOADER_TYPE_COUNT: usize = 38;
-pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 32;
+pub const NORMAL_LOADER_TYPE_COUNT: usize = 39;
+pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 33;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CanonicalGgufArchitecture {
@@ -14,6 +14,7 @@ pub enum CanonicalGgufArchitecture {
     Phi2,
     Phi3,
     PhiMoe,
+    Qwen,
     Qwen2,
     Qwen2Moe,
     Qwen3,
@@ -51,6 +52,7 @@ impl CanonicalGgufArchitecture {
             Self::Phi2 => "phi2",
             Self::Phi3 => "phi3",
             Self::PhiMoe => "phimoe",
+            Self::Qwen => "qwen",
             Self::Qwen2 => "qwen2",
             Self::Qwen2Moe => "qwen2moe",
             Self::Qwen3 => "qwen3",
@@ -98,6 +100,7 @@ impl FromStr for CanonicalGgufArchitecture {
             "phi2" => Ok(Self::Phi2),
             "phi3" => Ok(Self::Phi3),
             "phimoe" => Ok(Self::PhiMoe),
+            "qwen" => Ok(Self::Qwen),
             "qwen2" => Ok(Self::Qwen2),
             "qwen2moe" => Ok(Self::Qwen2Moe),
             "qwen3" => Ok(Self::Qwen3),
@@ -456,6 +459,7 @@ const GEMMA2_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Gemma2];
 const PHI2_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Phi2];
 const PHI3_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Phi3];
 const PHIMOE_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Phi3_5MoE];
+const QWEN_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Qwen];
 const QWEN2_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Qwen2];
 const QWEN2_MOE_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Qwen2Moe];
 const QWEN3_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Qwen3];
@@ -552,6 +556,14 @@ pub const GGUF_SCHEMAS: &[GgufSchema; CANONICAL_GGUF_ARCHITECTURE_COUNT] = &[
         rope_pairing: RopePairing::HalfSplit,
         required_metadata: MOE_METADATA,
         required_tensors: MOE_TENSORS,
+        unsupported_metadata: NO_REQUIREMENTS,
+    },
+    GgufSchema {
+        architecture: CanonicalGgufArchitecture::Qwen,
+        compatible_loaders: QWEN_LOADERS,
+        rope_pairing: RopePairing::HalfSplit,
+        required_metadata: NO_REQUIREMENTS,
+        required_tensors: NO_REQUIREMENTS,
         unsupported_metadata: NO_REQUIREMENTS,
     },
     GgufSchema {
@@ -794,6 +806,11 @@ pub const NORMAL_MODEL_ADAPTERS: &[NativeModelAdapter; NORMAL_LOADER_TYPE_COUNT]
         loader: NormalLoaderType::Phi3,
         architectures: &[CanonicalGgufArchitecture::Phi3],
         layouts: &[GgufLayout::Direct, GgufLayout::FusedGateUp],
+    },
+    NativeModelAdapter {
+        loader: NormalLoaderType::Qwen,
+        architectures: &[CanonicalGgufArchitecture::Qwen],
+        layouts: &[GgufLayout::Direct],
     },
     NativeModelAdapter {
         loader: NormalLoaderType::Qwen2,

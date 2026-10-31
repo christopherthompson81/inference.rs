@@ -9970,6 +9970,7 @@
           "llama",
           "phi2",
           "phi3",
+          "qwen",
           "qwen2",
           "qwen2moe",
           "gemma2",

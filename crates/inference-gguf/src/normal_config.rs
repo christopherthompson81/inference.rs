@@ -111,6 +111,10 @@ pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; NORMAL_LOADER_TYPE_COUN
         build: build_glm4_moe,
     },
     NormalConfigBuilder {
+        loader: NormalLoaderType::Qwen,
+        build: build_qwen1,
+    },
+    NormalConfigBuilder {
         loader: NormalLoaderType::Qwen2Moe,
         build: build_qwen2_moe,
     },
@@ -939,8 +943,11 @@ impl StandardFields {
             intermediate_size,
             num_hidden_layers: transformer_block_count(metadata)?,
             num_attention_heads,
-            num_key_value_heads: metadata
-                .required_uniform_nonzero_usize("attention.head_count_kv")?,
+            // llama.cpp reads a missing head_count_kv as one KV head per query head (older Qwen 1 GGUFs omit it)
+            num_key_value_heads: match metadata.optional_usize_values("attention.head_count_kv")? {
+                Some(_) => metadata.required_uniform_nonzero_usize("attention.head_count_kv")?,
+                None => num_attention_heads,
+            },
             max_position_embeddings: metadata.required_usize("context_length")?,
             norm_epsilon: metadata.norm_epsilon()?,
             rope_theta: metadata.rope_theta(rope_default)?,
@@ -1542,6 +1549,26 @@ fn build_glm4_moe(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
         ),
     );
     Ok(JsonValue::Object(config))
+}
+
+// llama.cpp's converter writes Qwen 1's full `intermediate_size` (the MLP is half of it) and no trained length
+fn build_qwen1(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
+    reject_unsupported_rope_scaling(metadata, "Qwen")?;
+    let fields = StandardFields::read(metadata, None)?;
+    require_full_rotary(metadata, fields.head_dim)?;
+    Ok(json!({
+        "vocab_size": fields.vocab_size,
+        "hidden_size": fields.hidden_size,
+        "intermediate_size": fields.intermediate_size,
+        "num_hidden_layers": fields.num_hidden_layers,
+        "num_attention_heads": fields.num_attention_heads,
+        "kv_channels": fields.head_dim,
+        "layer_norm_epsilon": fields.norm_epsilon,
+        "rotary_emb_base": fields.rope_theta,
+        "seq_length": fields.max_position_embeddings,
+        "tie_word_embeddings": fields.tie_word_embeddings,
+        "quantization_config": null,
+    }))
 }
 
 // llama.cpp's defaults where the expert sizes are missing; its graph never renormalizes the top-k weights
@@ -2892,7 +2919,7 @@ mod tests {
             hunyuan_v1_dense, hunyuan_v1_moe, lfm2, olmo, starcoder2,
         };
         pub use inference_models_phi::{phi2, phi3, phi3_5_moe};
-        pub use inference_models_qwen::{qwen2, qwen2_moe, qwen3, qwen3_moe, qwen3_next};
+        pub use inference_models_qwen::{qwen1, qwen2, qwen2_moe, qwen3, qwen3_moe, qwen3_next};
     }
     use std::collections::HashSet;
     use strum::IntoEnumIterator;
@@ -3285,6 +3312,9 @@ mod tests {
             ),
             NormalLoaderType::GLM4Moe => {
                 assert_deserializes(loader, config, models::glm4_moe::Glm4MoeConfig::from_json)
+            }
+            NormalLoaderType::Qwen => {
+                assert_deserializes(loader, config, models::qwen1::Config::from_json)
             }
             NormalLoaderType::Qwen2Moe => {
                 assert_deserializes(loader, config, models::qwen2_moe::Config::from_json)

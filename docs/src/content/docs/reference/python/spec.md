@@ -643,6 +643,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `NormalLoaderType.LLAMA` | `'llama'` |
 | `NormalLoaderType.PHI2` | `'phi2'` |
 | `NormalLoaderType.PHI3` | `'phi3'` |
+| `NormalLoaderType.QWEN` | `'qwen'` |
 | `NormalLoaderType.QWEN2` | `'qwen2'` |
 | `NormalLoaderType.QWEN2MOE` | `'qwen2moe'` |
 | `NormalLoaderType.GEMMA2` | `'gemma2'` |

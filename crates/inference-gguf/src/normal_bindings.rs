@@ -37,7 +37,41 @@ pub fn build_normal_bindings(
         )?;
     }
     bind_composite_tensors(archive, loader, architecture, block_count, &mut bindings)?;
+    if matches!(loader, NormalLoaderType::Qwen) {
+        return Ok(bindings
+            .iter()
+            .map(|(name, binding)| (qwen1_name(name), binding.clone()))
+            .collect());
+    }
     Ok(bindings)
+}
+
+// Qwen 1 keeps its checkpoint's names (`transformer.h.N.attn.c_attn`), where the bindings above write Llama's
+const QWEN1_RENAMES: &[(&str, &str)] = &[
+    (".input_layernorm.", ".ln_1."),
+    (".post_attention_layernorm.", ".ln_2."),
+    (".self_attn.qkv_proj.", ".attn.c_attn."),
+    (".self_attn.o_proj.", ".attn.c_proj."),
+    (".mlp.gate_proj.", ".mlp.w2."),
+    (".mlp.up_proj.", ".mlp.w1."),
+    (".mlp.down_proj.", ".mlp.c_proj."),
+];
+
+fn qwen1_name(name: &str) -> String {
+    if let Some(rest) = name.strip_prefix("model.embed_tokens.") {
+        return format!("transformer.wte.{rest}");
+    }
+    if let Some(rest) = name.strip_prefix("model.norm.") {
+        return format!("transformer.ln_f.{rest}");
+    }
+    let Some(rest) = name.strip_prefix("model.layers.") else {
+        return name.to_string();
+    };
+    let mut renamed = format!("transformer.h.{rest}");
+    for (from, to) in QWEN1_RENAMES {
+        renamed = renamed.replace(from, to);
+    }
+    renamed
 }
 
 const DECISION_HEAD_PREFIX: &str = "decision.";
@@ -183,7 +217,7 @@ fn bind_block_tensor(
         "attn_v" if !matches!(loader, NormalLoaderType::Phi3) => {
             Some(format!("{p}.self_attn.v_proj.{suffix}"))
         }
-        "attn_qkv" if matches!(loader, NormalLoaderType::Phi3) => {
+        "attn_qkv" if matches!(loader, NormalLoaderType::Phi3 | NormalLoaderType::Qwen) => {
             Some(format!("{p}.self_attn.qkv_proj.{suffix}"))
         }
         "attn_output" => Some(format!(
