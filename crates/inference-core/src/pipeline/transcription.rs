@@ -987,6 +987,9 @@ impl Pipeline for TranscriptionPipeline {
                         AudioRequest::Stream(stream) => {
                             stream_step(asr, sessions, stream).map(TranscriptionOutcome::Stream)
                         }
+                        AudioRequest::Audio(_) if request.translate => {
+                            Err("Parakeet transcribes; it does not translate".to_string())
+                        }
                         AudioRequest::Audio(audio) => {
                             let pcm = audio.to_mono();
                             match vad {

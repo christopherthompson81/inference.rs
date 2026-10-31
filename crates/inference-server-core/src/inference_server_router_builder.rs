@@ -18,7 +18,7 @@ use crate::openapi_doc::get_openapi_doc;
 use crate::{
     anthropic::{anthropic_count_tokens, anthropic_error_response, anthropic_messages},
     approvals::resolve_agent_approval,
-    audio_analysis::{diarization, transcription, voice_activity},
+    audio_analysis::{diarization, transcription, translation, voice_activity},
     chat_completion::chatcompletions,
     completions::completions,
     embeddings::{decisions, embeddings, rerank},
@@ -54,8 +54,8 @@ use crate::{
         RE_ISQ_ROUTE, REALTIME_ROUTE, RELOAD_MODEL_ROUTE, REMOVE_MODEL_ROUTE, RERANK_ROUTE,
         RESPONSE_ROUTE, RESPONSES_ROUTE, ROOT_ROUTE, SESSION_ROUTE, SKILL_VERSIONS_ROUTE,
         SKILLS_ROUTE, SPEECH_GENERATION_ROUTE, SYSTEM_DOCTOR_ROUTE, SYSTEM_INFO_ROUTE,
-        SYSTEMONE_ROUTE, TRANSCRIPTION_ROUTE, TUNE_MODEL_ROUTE, UNLOAD_LORA_ADAPTER_ROUTE,
-        UNLOAD_MODEL_ROUTE, VOICE_ACTIVITY_ROUTE,
+        SYSTEMONE_ROUTE, TRANSCRIPTION_ROUTE, TRANSLATION_ROUTE, TUNE_MODEL_ROUTE,
+        UNLOAD_LORA_ADAPTER_ROUTE, UNLOAD_MODEL_ROUTE, VOICE_ACTIVITY_ROUTE,
     },
     skills::{list_skill_versions, list_skills, upload_skill, upload_skill_version},
     speech_generation::speech_generation,
@@ -399,6 +399,10 @@ fn init_router(
         .route(
             TRANSCRIPTION_ROUTE.path,
             post(transcription).layer(DefaultBodyLimit::max(audio_limit)),
+        )
+        .route(
+            TRANSLATION_ROUTE.path,
+            post(translation).layer(DefaultBodyLimit::max(audio_limit)),
         )
         .route(REALTIME_ROUTE.path, get(crate::realtime::realtime))
         .route(

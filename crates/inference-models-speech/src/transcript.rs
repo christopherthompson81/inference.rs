@@ -26,4 +26,7 @@ pub struct TranscriptionOptions {
     pub language: Option<String>,
     /// Beam search over this many hypotheses for a transducer (RNN-T, TDT); unset or 1 decodes greedily.
     pub beam_size: Option<usize>,
+    /// Write an English translation instead of a transcript, for a model that can.
+    #[serde(default)]
+    pub translate: bool,
 }

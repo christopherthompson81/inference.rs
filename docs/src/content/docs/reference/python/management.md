@@ -908,6 +908,7 @@ Speech recognition request; the audio itself travels beside it (a multipart `fil
 | `model` | `str \| None` | optional |
 | `prompt` | `str \| None` | optional |
 | `response_format` | `TranscriptionResponseFormat \| None` | optional |
+| `task` | `TranscriptionTask \| None` | optional |
 | `temperature` | `float \| None` | optional |
 | `timestamp_granularities` | `list[TimestampGranularity] \| None` | optional |
 
@@ -1003,6 +1004,18 @@ Opens a streamed transcription on a cache-aware streaming model: mono audio is p
 | `response_format` | `TranscriptionResponseFormat \| None` | optional |
 | `sample_rate` | `int \| None` | optional |
 | `timestamp_granularities` | `list[TimestampGranularity] \| None` | optional |
+
+
+## `TranscriptionTask`
+
+What a recognizer writes: the speech in its own language, or an English translation of it (Whisper only).
+
+Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
+
+| Member | Wire/config name |
+| --- | --- |
+| `TranscriptionTask.TRANSCRIBE` | `'transcribe'` |
+| `TranscriptionTask.TRANSLATE` | `'translate'` |
 
 
 ## `TranscriptionWord`

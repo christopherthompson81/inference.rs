@@ -415,6 +415,13 @@ class TranscriptionResponseFormat(str, Enum):
     VTT = "vtt"
 
 
+class TranscriptionTask(str, Enum):
+    """What a recognizer writes: the speech in its own language, or an English translation of it (Whisper only)."""
+
+    TRANSCRIBE = "transcribe"
+    TRANSLATE = "translate"
+
+
 class TruncationStrategy(str, Enum):
     """Truncation strategy for input"""
 
@@ -3320,6 +3327,7 @@ class TranscriptionRequest:
     model: str | None = None
     prompt: str | None = None
     response_format: TranscriptionResponseFormat | None = None
+    task: TranscriptionTask | None = None
     temperature: float | None = None
     timestamp_granularities: list[TimestampGranularity] | None = None
 

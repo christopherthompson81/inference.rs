@@ -8,10 +8,13 @@ use inference_server_core::inference_server_router_builder::InferenceRsServerRou
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use crate::{chat_route::body_text, diarization_support, parakeet_support, silero_support};
+use crate::{
+    chat_route::body_text, diarization_support, parakeet_support, silero_support, whisper_support,
+};
 
 const BOUNDARY: &str = "inference-transcription-boundary";
 const ROUTE: &str = "/v1/audio/transcriptions";
+const TRANSLATION_ROUTE: &str = "/v1/audio/translations";
 const VAD_ROUTE: &str = "/v1/audio/vad";
 const DIARIZATION_ROUTE: &str = "/v1/audio/diarization";
 const RATE: u32 = 16_000;
@@ -41,6 +44,10 @@ fn tone_wav() -> Vec<u8> {
 
 // a multipart form: text fields in order, then the audio as `file` when given
 fn form(fields: &[(&str, &str)], audio: Option<&[u8]>) -> Request<Body> {
+    form_to(ROUTE, fields, audio)
+}
+
+fn form_to(route: &str, fields: &[(&str, &str)], audio: Option<&[u8]>) -> Request<Body> {
     let mut body = Vec::new();
     for (name, value) in fields {
         body.extend_from_slice(
@@ -61,13 +68,44 @@ fn form(fields: &[(&str, &str)], audio: Option<&[u8]>) -> Request<Body> {
         body.extend_from_slice(b"\r\n");
     }
     body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
-    Request::post(ROUTE)
+    Request::post(route)
         .header(
             header::CONTENT_TYPE,
             format!("multipart/form-data; boundary={BOUNDARY}"),
         )
         .body(Body::from(body))
         .unwrap()
+}
+
+// the translations route translates with Whisper and is refused by a recogniser that only transcribes
+#[tokio::test(flavor = "multi_thread")]
+async fn the_translation_form_translates_where_the_model_can() -> anyhow::Result<()> {
+    let wav = tone_wav();
+    let whisper = whisper_support::tiny_whisper_checkpoint()?;
+    let response = router(whisper.path())
+        .await?
+        .oneshot(form_to(
+            TRANSLATION_ROUTE,
+            &[("model", "default")],
+            Some(&wav),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = serde_json::from_str(&body_text(response).await?)?;
+    assert!(body["text"].is_string(), "{body}");
+
+    let parakeet = parakeet_support::tiny_parakeet_checkpoint(parakeet_support::HEADS[0])?;
+    let response = router(parakeet.path())
+        .await?
+        .oneshot(form_to(
+            TRANSLATION_ROUTE,
+            &[("model", "default")],
+            Some(&wav),
+        ))
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(body_text(response).await?.contains("does not translate"));
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]

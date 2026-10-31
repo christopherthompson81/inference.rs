@@ -10,7 +10,7 @@ use inference_api::api_error::ApiError;
 use crate::{
     form::{Field, invalid, multipart_payload, read_form},
     handler_core::openai_error_response,
-    openai::{DiarizationRequest, TranscriptionRequest, VoiceActivityRequest},
+    openai::{DiarizationRequest, TranscriptionRequest, TranscriptionTask, VoiceActivityRequest},
     types::OwnedEngine,
 };
 
@@ -80,6 +80,18 @@ async fn read_audio_form<T: serde::de::DeserializeOwned>(
     }
 }
 
+/// The multipart form `/v1/audio/translations` takes: a transcription's, whose `task` it sets to `translate`.
+#[cfg(test)]
+#[derive(utoipa::ToSchema)]
+#[allow(dead_code)]
+pub struct TranslationForm {
+    /// The audio to translate into English, in any format `/v1/audio/transcriptions` takes.
+    #[schema(value_type = String, format = Binary)]
+    file: Vec<u8>,
+    #[schema(inline)]
+    request: TranscriptionRequest,
+}
+
 /// Transcription endpoint handler.
 #[cfg_attr(test, utoipa::path(
     post,
@@ -105,7 +117,42 @@ pub async fn transcription(
             Ok(form) => form,
             Err(error) => return openai_error_response(error),
         };
-    match engine.transcription(request, &audio).await {
+    audio_response(engine.transcription(request, &audio).await)
+}
+
+/// Translation endpoint handler: the speech as English text, from a model that translates (Whisper).
+#[cfg_attr(test, utoipa::path(
+    post,
+    tag = "inference.rs",
+    path = "/v1/audio/translations",
+    request_body(content = inline(TranslationForm), content_type = "multipart/form-data"),
+    responses((
+        status = 200,
+        description = "The English translation, in the requested format",
+        body = crate::openai::TranscriptionResponse
+    ))
+))]
+pub async fn translation(
+    OwnedEngine(engine): OwnedEngine,
+    payload: Result<Multipart, MultipartRejection>,
+) -> Response {
+    let multipart = match multipart_payload(payload, INVALID_CODE) {
+        Ok(multipart) => multipart,
+        Err(error) => return openai_error_response(error),
+    };
+    let (mut request, audio) =
+        match read_audio_form::<TranscriptionRequest>(multipart, TRANSCRIPTION_FIELDS).await {
+            Ok(form) => form,
+            Err(error) => return openai_error_response(error),
+        };
+    request.task = TranscriptionTask::Translate;
+    audio_response(engine.transcription(request, &audio).await)
+}
+
+fn audio_response(
+    output: Result<inference_api::openai::TranscriptionOutput, ApiError>,
+) -> Response {
+    match output {
         Ok(output) => (
             StatusCode::OK,
             [(

@@ -64,6 +64,7 @@ pub(crate) async fn open(
         options: TranscriptionOptions {
             language: request.language.clone(),
             beam_size: None,
+            translate: false,
         },
         sample_rate: request.sample_rate,
     };
