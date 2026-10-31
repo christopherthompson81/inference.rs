@@ -44,13 +44,14 @@ fn decoder_shape(cfg: &crate::ernie4_5::Config, intermediate_size: usize) -> Dec
     }
 }
 
+// the MTP head sits with the final norm and lm_head: a dense block, its projection and two norms
 fn non_mapped_size(
     cfg: &crate::ernie4_5::Config,
     dtype: DType,
     weight_pack_factor: usize,
     quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
 ) -> Result<usize> {
-    standard_non_mapped_size_in_bytes(
+    let ends = standard_non_mapped_size_in_bytes(
         LanguageModelEnds {
             hidden_size: cfg.hidden_size,
             vocab_size: cfg.vocab_size,
@@ -59,7 +60,12 @@ fn non_mapped_size(
         quantization,
         dtype,
         weight_pack_factor,
-    )
+    )?;
+    let h = cfg.hidden_size;
+    let mtp = decoder_shape(cfg, cfg.intermediate_size).elems(weight_pack_factor)
+        + 2 * h * h / weight_pack_factor
+        + 2 * h;
+    Ok(ends + cfg.mtp_layers() * mtp * dtype.size_in_bytes())
 }
 
 impl NormalModelLoader for Ernie4_5Loader {
@@ -138,7 +144,7 @@ impl DeviceMappedModelLoader for Ernie4_5Loader {
         let cfg = crate::ernie4_5::Config::from_json(config)?;
         Ok(Box::new(
             decoder_shape(&cfg, cfg.intermediate_size).model_config(
-                cfg.num_hidden_layers,
+                cfg.num_hidden_layers + cfg.mtp_layers(),
                 cfg.max_position_embeddings,
                 None,
             ),
@@ -238,7 +244,7 @@ impl DeviceMappedModelLoader for Ernie4_5MoeLoader {
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg = crate::ernie4_5::MoeConfig::from_json(config)?;
         Ok(Box::new(decoder_shape(&cfg.base, 0).model_config(
-            cfg.base.num_hidden_layers,
+            cfg.base.num_hidden_layers + cfg.base.mtp_layers(),
             cfg.base.max_position_embeddings,
             None,
         )))

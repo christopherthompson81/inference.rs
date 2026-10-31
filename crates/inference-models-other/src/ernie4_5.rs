@@ -6,7 +6,9 @@ use inference_quant::QuantizedConfig;
 use inference_tensor::Result;
 
 use crate::{
-    decoder::{DecoderSpec, MLP, MoeRouting, MoeSpec, NormKind, RopeKind, SharedExpertSpec},
+    decoder::{
+        DecoderSpec, MLP, MoeRouting, MoeSpec, MtpSpec, NormKind, RopeKind, SharedExpertSpec,
+    },
     layers::Activation,
     moe::ExpertProjNames,
     serde_default_fn,
@@ -20,6 +22,16 @@ serde_default_fn!(i64, moe_layer_end_default, -1);
 serde_default_fn!(usize, moe_layer_interval_default, 1);
 
 const SHARED_EXPERTS: &str = "shared_experts";
+// vLLM's `ErnieMultiTokenPredictorLayer`: the block's output feeds `lm_head` with no norm of its own
+const MTP: MtpSpec = MtpSpec {
+    embedding_norm: "mtp_emb_norm.0",
+    hidden_norm: "mtp_hidden_norm.0",
+    projection: "mtp_linear_proj.0",
+    block: "mtp_block.0",
+    final_norm: None,
+    dense_block: true,
+    mask_first_position: true,
+};
 
 #[derive(Debug, Clone, Default, serde::Serialize, inference_json::FromJson)]
 pub struct Config {
@@ -39,9 +51,23 @@ pub struct Config {
     #[serde(default = "tie_word_embeddings_default")]
     pub tie_word_embeddings: bool,
     pub quantization_config: Option<QuantizedConfig>,
+    #[serde(default)]
+    pub num_nextn_predict_layers: usize,
+    /// The loader's flag that `--mtp` asked for the checkpoint's MTP head.
+    #[serde(default, rename = "_inference_mtp")]
+    pub mtp: bool,
 }
 
 impl Config {
+    /// The MTP layers this load keeps: the checkpoint's one, when `--mtp` asked for it.
+    pub fn mtp_layers(&self) -> usize {
+        if self.mtp {
+            self.num_nextn_predict_layers
+        } else {
+            0
+        }
+    }
+
     pub fn head_dim(&self) -> usize {
         self.head_dim
             .unwrap_or(self.hidden_size / self.num_attention_heads)
@@ -52,6 +78,12 @@ impl Config {
         if self.use_bias {
             inference_tensor::bail!(
                 "ERNIE 4.5 with biased projections (`use_bias: true`) is not supported"
+            );
+        }
+        if self.mtp_layers() > 1 {
+            inference_tensor::bail!(
+                "ERNIE 4.5 MTP supports one layer, the config has {}",
+                self.num_nextn_predict_layers
             );
         }
         Ok(DecoderSpec {
@@ -73,6 +105,7 @@ impl Config {
             quantization_config: self.quantization_config.clone(),
             // `Ernie4_5RMSNorm` normalises in F32 and applies the weight after casting back
             norm: NormKind::F32Rms,
+            mtp: (self.mtp_layers() == 1).then_some(MTP),
             ..Default::default()
         })
     }

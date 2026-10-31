@@ -66,6 +66,7 @@ let model = inference::ModelBuilder::new("google/gemma-4-E4B-it")
 |---|---|---|---|
 | MTP | Gemma 4 | Gemma 4 assistant checkpoints (`--mtp-model`) | Supported with paged attention |
 | MTP | Qwen3.5 (dense and MoE), Qwen3.8, Qwen3.8-Flash-Next | Built into the checkpoint (`--mtp`), or a GGUF head file | Supported with paged attention |
+| MTP | ERNIE 4.5 MoE | Built into the checkpoint (`--mtp`) | Supported with paged attention |
 | DFlash / DFlash 2 / DSpark | Qwen3.5, Qwen3.8, Qwen3.8-Flash-Next | DFlash and DSpark draft checkpoints (`--mtp-model`) | Supported with paged attention |
 
 Legacy target/draft speculative decoding has been removed. New speculative decoding features use the MTP proposer/target path.
@@ -102,6 +103,27 @@ inference serve --format gguf -m <dir> \
 
 Qwen3.8-Flash-Next's head drafts from the target's hyper-connection streams before the final mixer, through one QSA
 and MoE block with its own mixer. Its DFlash 2 drafter taps the mean of the four streams.
+
+## Built-in MTP head (ERNIE 4.5)
+
+ERNIE-4.5-21B-A3B ships one MTP layer (`mtp_emb_norm`, `mtp_hidden_norm`, `mtp_linear_proj`, `mtp_block`) that drafts
+from the target's last hidden state and the token it sampled. Pass `--mtp` to load it; like Qwen's head it keeps one
+extra paged KV layer, and `--mtp-n-predict` defaults to 2:
+
+```bash
+inference serve -m baidu/ERNIE-4.5-21B-A3B-PT --mtp --mtp-n-predict 1
+```
+
+llama.cpp's converter leaves the layer out of its GGUFs. `scripts/gguf_add_hf_tensors.py` copies a GGUF and appends
+the checkpoint's `model.mtp_*` tensors, fetching only their bytes (0.23 GiB of the 43 GiB checkpoint):
+
+```bash
+python3 scripts/gguf_add_hf_tensors.py ERNIE-4.5-21B-A3B-PT-Q4_K_M.gguf ERNIE-4.5-21B-A3B-PT-Q4_K_M-mtp.gguf \
+  --repo baidu/ERNIE-4.5-21B-A3B-PT --revision <commit> --prefix model.mtp_
+```
+
+On an RTX 3090 with that Q4_K_M, one draft per step accepts about 90% of drafts and runs a code completion at
+about 206 tok/s sampled against 199 without MTP.
 
 ## DFlash and DFlash 2 (Qwen3.5 / Qwen3.8)
 
