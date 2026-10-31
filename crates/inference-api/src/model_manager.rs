@@ -107,8 +107,8 @@ pub struct ManagedLoadRequest {
     /// Sequences the model serves at once; unset uses the server's `--max-seqs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_seqs: Option<usize>,
-    /// Speculative decoding with the checkpoint's own MTP head (`n_predict`, `draft_sampling`); an assistant `model`
-    /// is refused.
+    /// Speculative decoding: the checkpoint's own MTP head, or a DFlash drafter named by `model` (`n_predict`,
+    /// `auto_depth`, `draft_sampling`, `draft_isq`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtp: Option<MtpSpec>,
     /// For a text GGUF, one of its entry's `projectors`; unset takes its only one, and none when there are several.

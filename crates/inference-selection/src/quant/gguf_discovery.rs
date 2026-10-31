@@ -107,8 +107,8 @@ pub fn resolve_gguf_quant(files: &[String], requested: &str) -> Result<ResolvedG
             .collect::<Vec<_>>();
         if !iq_matches.is_empty() {
             bail!(
-                "`quant = {requested}` only matched unsupported IQ GGUF artifacts: {}. Choose a \
-                 supported Q/K quant",
+                "`quant = {requested}` only matched IQ GGUF artifacts, which a bit width does not pick: {}. \
+                 Name the IQ quant (such as `IQ4_XS`) or choose a Q/K quant",
                 format_group_choices(&iq_matches)
             );
         }
@@ -957,11 +957,7 @@ mod tests {
     fn numeric_width_does_not_fall_back_to_iq() {
         let listing = files(&["model-IQ4_NL.gguf", "model-IQ4_XS.gguf"]);
         let error = resolve_gguf_quant(&listing, "4").unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("only matched unsupported IQ GGUF artifacts")
-        );
+        assert!(error.to_string().contains("only matched IQ GGUF artifacts"));
     }
 
     #[test]

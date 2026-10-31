@@ -7791,7 +7791,7 @@
               },
               {
                 "$ref": "#/components/schemas/MtpSpec",
-                "description": "Speculative decoding with the checkpoint's own MTP head (`n_predict`, `draft_sampling`); an assistant `model`\nis refused."
+                "description": "Speculative decoding: the checkpoint's own MTP head, or a DFlash drafter named by `model` (`n_predict`,\n`auto_depth`, `draft_sampling`, `draft_isq`)."
               }
             ]
           },
