@@ -140,7 +140,7 @@ pub use inference_models_phi::loaders::{Phi3VLoader, Phi4MMLoader};
 #[cfg(feature = "models-qwen")]
 pub use inference_models_qwen::loaders::{
     MiniCpmOLoader, MuseGlimmerLoader, Qwen2_5VLLoader, Qwen2VLLoader, Qwen3_5Loader,
-    Qwen3_5MoeLoader, Qwen3VLLoader, Qwen3VLMoELoader,
+    Qwen3_5MoeLoader, Qwen3AsrLoader, Qwen3VLLoader, Qwen3VLMoELoader,
 };
 
 #[cfg(all(

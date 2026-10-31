@@ -46,6 +46,7 @@ mod qwen2vl;
 mod qwen3;
 mod qwen3_5;
 mod qwen3_5_text;
+mod qwen3_asr;
 mod qwen3_embedding;
 mod qwen3_moe;
 mod qwen3_next;
@@ -63,6 +64,7 @@ pub use qwen2vl::*;
 pub use qwen3::*;
 pub use qwen3_5::*;
 pub use qwen3_5_text::*;
+pub use qwen3_asr::*;
 pub use qwen3_embedding::*;
 pub use qwen3_moe::*;
 pub use qwen3_next::*;
@@ -89,5 +91,6 @@ inference_nn::boxed_loaders!(
     Qwen3VLMoELoader,
     Qwen3_5Loader,
     Qwen3_5MoeLoader,
+    Qwen3AsrLoader,
 );
 inference_nn::boxed_loaders!(EmbeddingModelLoader: Qwen3EmbeddingLoader);

@@ -217,6 +217,17 @@ inference run -m llava-hf/llava-v1.6-vicuna-7b-hf \
 
 Per-request video frame-sampling overrides are not exposed. In multi-turn conversations reusing prefix cache entries, pixel inputs are narrowed per turn by grid count, not image count.
 
+## Qwen3-ASR
+
+Qwen3-ASR (`Qwen3ASRForConditionalGeneration`, e.g. `Qwen/Qwen3-ASR-1.7B`) transcribes audio clips, resampled to 16 kHz mono, through the AuT encoder in front of a Qwen3 decoder; each second of audio takes 13 tokens, and the encoder attends within 8 s windows. Send a clip with no text, or with a system turn; the model answers `language <name><asr_text><transcript>`. The original repos are read as published (`thinker.*` weights); the transformers `-hf` conversions are not supported yet.
+
+It also loads from llama.cpp's GGUFs (a `qwen3vl` text GGUF with its `qwen3a` projector), with the original repo for `config.json` (`--tok-model-id`). The original repo has no `tokenizer.json` or chat template; the GGUF provides both:
+
+```bash
+inference serve --format gguf -m <dir> -f Qwen3-ASR-1.7B-Q8_0.gguf --mmproj <dir>/mmproj-Qwen3-ASR-1.7B-Q8_0.gguf \
+  --tok-model-id Qwen/Qwen3-ASR-1.7B
+```
+
 ## Llama 4
 
 Llama 4 Scout supports up to 10M tokens of context. Using the full window requires paged attention with a large memory budget, generally with multi-GPU tensor parallelism.

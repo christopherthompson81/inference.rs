@@ -203,6 +203,17 @@ struct NativeMultimodalLoadArgs<'a> {
     options: LoadOptions<'a>,
 }
 
+// a `.jinja` file is a template; a `tokenizer_config.json` holds one only under `chat_template`
+fn template_file_has_chat_template(file: &std::path::Path) -> bool {
+    if file.extension().is_some_and(|ext| ext == "jinja") {
+        return true;
+    }
+    fs::read_to_string(file)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .is_some_and(|config| config.get("chat_template").is_some_and(|t| !t.is_null()))
+}
+
 fn prepare_native_multimodal_config(
     loader_type: &MultimodalLoaderType,
     config: &str,
@@ -911,12 +922,17 @@ impl GGUFLoader {
             Some(decision) if decision.family.joint() => joint_head_config(&config, archive)?,
             _ => config,
         };
-        let chat_template =
-            if paths.get_template_filename().is_none() && self.chat_template.is_none() {
-                get_gguf_chat_template_from_metadata(archive.metadata())?
-            } else {
-                None
-            };
+        // the GGUF's template stands in for one the original repo's files leave out
+        let files_give_template = paths
+            .get_template_filename()
+            .as_ref()
+            .is_some_and(|file| template_file_has_chat_template(file))
+            || paths.get_chat_template_explicit().is_some();
+        let chat_template = if !files_give_template && self.chat_template.is_none() {
+            get_gguf_chat_template_from_metadata(archive.metadata())?
+        } else {
+            None
+        };
         Ok(PreparedSource {
             config,
             weights: source.sharded_var_builder(Device::Cpu),
@@ -1795,11 +1811,27 @@ mod tests {
     use super::{
         GGUFSpecificConfig, GgufTokenizerConversion, TokenizerFallback, preferred_hf_config,
         prepare_native_multimodal_config, requires_multimodal_projector,
-        resolve_tokenizer_candidate,
+        resolve_tokenizer_candidate, template_file_has_chat_template,
     };
     use crate::{MultimodalLoaderType, gdn::GDN_V_HEAD_LAYOUT_CONFIG_KEY};
     use std::path::{Path, PathBuf};
     use tokenizers::{Tokenizer, models::bpe::BPE};
+
+    // an original repo's tokenizer_config.json without a template leaves the GGUF's to stand in
+    #[test]
+    fn only_a_template_bearing_file_overrides_the_gguf_template() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let without = dir.path().join("tokenizer_config.json");
+        std::fs::write(&without, r#"{"eos_token": "<|im_end|>"}"#)?;
+        let with = dir.path().join("with.json");
+        std::fs::write(&with, r#"{"chat_template": "{{ messages }}"}"#)?;
+        let jinja = dir.path().join("chat_template.jinja");
+        std::fs::write(&jinja, "{{ messages }}")?;
+        assert!(!template_file_has_chat_template(&without));
+        assert!(template_file_has_chat_template(&with));
+        assert!(template_file_has_chat_template(&jinja));
+        Ok(())
+    }
 
     fn tokenizer_conversion(marker: &str) -> GgufTokenizerConversion {
         GgufTokenizerConversion {

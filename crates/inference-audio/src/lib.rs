@@ -7,6 +7,7 @@
 pub mod fft;
 pub mod mel;
 pub mod nemo;
+pub mod whisper;
 
 use anyhow::Result;
 use symphonia::core::{

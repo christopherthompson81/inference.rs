@@ -59,6 +59,8 @@ pub(crate) mod phi4;
 #[cfg(feature = "models-qwen")]
 pub(crate) mod qwen2vl;
 #[cfg(feature = "models-qwen")]
+pub(crate) mod qwen3_asr;
+#[cfg(feature = "models-qwen")]
 pub(crate) mod qwen3_vl;
 #[cfg(feature = "models-llama")]
 pub(crate) mod voxtral;
