@@ -67,9 +67,9 @@ pub use inference_models_llama::loaders::{
 };
 #[cfg(feature = "models-other")]
 pub use inference_models_other::loaders::{
-    DeepSeekV2Loader, DeepSeekV3Loader, GLM4Loader, GLM4MoeLiteLoader, GLM4MoeLoader, GptOssLoader,
-    GraniteMoeHybridLoader, HunYuanDenseV1Loader, HunYuanMoEV1Loader, Lfm2Loader, Olmo2Loader,
-    OlmoLoader, OlmoeLoader, Starcoder2Loader,
+    DeepSeekV2Loader, DeepSeekV3Loader, Ernie4_5Loader, Ernie4_5MoeLoader, GLM4Loader,
+    GLM4MoeLiteLoader, GLM4MoeLoader, GptOssLoader, GraniteMoeHybridLoader, HunYuanDenseV1Loader,
+    HunYuanMoEV1Loader, Lfm2Loader, Olmo2Loader, OlmoLoader, OlmoeLoader, Starcoder2Loader,
 };
 #[cfg(feature = "models-phi")]
 pub use inference_models_phi::loaders::{Phi2Loader, Phi3_5MoELoader, Phi3Loader};

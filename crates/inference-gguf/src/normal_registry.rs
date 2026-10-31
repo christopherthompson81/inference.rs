@@ -2,8 +2,8 @@ use inference_nn::loaders::NormalLoaderType;
 pub use inference_nn::model::RopePairing;
 use std::{error::Error, fmt, str::FromStr};
 
-pub const NORMAL_LOADER_TYPE_COUNT: usize = 39;
-pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 33;
+pub const NORMAL_LOADER_TYPE_COUNT: usize = 41;
+pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 35;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CanonicalGgufArchitecture {
@@ -34,6 +34,8 @@ pub enum CanonicalGgufArchitecture {
     GraniteSwa,
     Olmo,
     Olmo2,
+    Ernie45,
+    Ernie45Moe,
     Olmoe,
     GptOss,
     HunYuanDense,
@@ -72,6 +74,8 @@ impl CanonicalGgufArchitecture {
             Self::GraniteSwa => "granite_swa",
             Self::Olmo => "olmo",
             Self::Olmo2 => "olmo2",
+            Self::Ernie45 => "ernie4_5",
+            Self::Ernie45Moe => "ernie4_5-moe",
             Self::Olmoe => "olmoe",
             Self::GptOss => "gpt-oss",
             Self::HunYuanDense => "hunyuan-dense",
@@ -120,6 +124,8 @@ impl FromStr for CanonicalGgufArchitecture {
             "granite_swa" => Ok(Self::GraniteSwa),
             "olmo" => Ok(Self::Olmo),
             "olmo2" => Ok(Self::Olmo2),
+            "ernie4_5" => Ok(Self::Ernie45),
+            "ernie4_5-moe" => Ok(Self::Ernie45Moe),
             "olmoe" => Ok(Self::Olmoe),
             "gpt-oss" => Ok(Self::GptOss),
             "hunyuan-dense" => Ok(Self::HunYuanDense),
@@ -487,6 +493,8 @@ const OLMO_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Olmo];
 // Olmo 3 converts as olmo2 with a sliding-window pattern
 const OLMO2_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Olmo2, NormalLoaderType::Olmo3];
 const OLMOE_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Olmoe];
+const ERNIE45_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Ernie4_5];
+const ERNIE45_MOE_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Ernie4_5Moe];
 const GRANITE_SWA_LOADERS: &[NormalLoaderType] = &[
     NormalLoaderType::GraniteSwa,
     NormalLoaderType::GraniteMoeSwa,
@@ -717,6 +725,23 @@ pub const GGUF_SCHEMAS: &[GgufSchema; CANONICAL_GGUF_ARCHITECTURE_COUNT] = &[
         rope_pairing: RopePairing::HalfSplit,
         required_metadata: NO_REQUIREMENTS,
         required_tensors: NO_REQUIREMENTS,
+        unsupported_metadata: NO_REQUIREMENTS,
+    },
+    // llama.cpp ropes ERNIE over adjacent pairs and keeps the checkpoint's q/k order
+    GgufSchema {
+        architecture: CanonicalGgufArchitecture::Ernie45,
+        compatible_loaders: ERNIE45_LOADERS,
+        rope_pairing: RopePairing::Adjacent,
+        required_metadata: NO_REQUIREMENTS,
+        required_tensors: NO_REQUIREMENTS,
+        unsupported_metadata: NO_REQUIREMENTS,
+    },
+    GgufSchema {
+        architecture: CanonicalGgufArchitecture::Ernie45Moe,
+        compatible_loaders: ERNIE45_MOE_LOADERS,
+        rope_pairing: RopePairing::Adjacent,
+        required_metadata: MOE_METADATA,
+        required_tensors: MOE_TENSORS,
         unsupported_metadata: NO_REQUIREMENTS,
     },
     GgufSchema {
@@ -989,6 +1014,20 @@ pub const NORMAL_MODEL_ADAPTERS: &[NativeModelAdapter; NORMAL_LOADER_TYPE_COUNT]
         loader: NormalLoaderType::Olmo3,
         architectures: &[CanonicalGgufArchitecture::Olmo2],
         layouts: &[GgufLayout::Direct, GgufLayout::PerLayerInventory],
+    },
+    NativeModelAdapter {
+        loader: NormalLoaderType::Ernie4_5,
+        architectures: &[CanonicalGgufArchitecture::Ernie45],
+        layouts: &[GgufLayout::Direct],
+    },
+    NativeModelAdapter {
+        loader: NormalLoaderType::Ernie4_5Moe,
+        architectures: &[CanonicalGgufArchitecture::Ernie45Moe],
+        layouts: &[
+            GgufLayout::Direct,
+            GgufLayout::StackedExperts,
+            GgufLayout::PerLayerInventory,
+        ],
     },
     NativeModelAdapter {
         loader: NormalLoaderType::Olmoe,
@@ -1458,6 +1497,8 @@ mod tests {
             CanonicalGgufArchitecture::GraniteHybrid,
             CanonicalGgufArchitecture::GraniteSwa,
             CanonicalGgufArchitecture::Olmo,
+            CanonicalGgufArchitecture::Ernie45,
+            CanonicalGgufArchitecture::Ernie45Moe,
         ];
         for architecture in adjacent {
             assert_eq!(schema_for(architecture).rope_pairing, RopePairing::Adjacent);

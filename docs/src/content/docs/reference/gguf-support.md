@@ -41,6 +41,8 @@ Fine-tunes and model sizes within a family use the same entry.
 | OLMo 1 | `olmo` |
 | OLMo 2 and Olmo 3 | `olmo2` |
 | OLMoE | `olmoe` |
+| ERNIE 4.5 dense | `ernie4_5` |
+| ERNIE 4.5 MoE | `ernie4_5-moe` |
 | GPT-OSS | `gpt-oss` |
 | Hunyuan dense | `hunyuan-dense` |
 | Hunyuan MoE | `hunyuan-moe` |

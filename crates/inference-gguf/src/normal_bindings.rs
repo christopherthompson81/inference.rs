@@ -260,6 +260,7 @@ fn bind_block_tensor(
             NormalLoaderType::Lfm2 | NormalLoaderType::Lfm2Moe => {
                 format!("{p}.feed_forward.expert_bias")
             }
+            NormalLoaderType::Ernie4_5Moe => format!("{p}.mlp.moe_statics.e_score_correction_bias"),
             _ => format!("{p}.mlp.gate.e_score_correction_bias"),
         }),
         "attn_q_a" => Some(format!("{p}.self_attn.q_a_proj.{suffix}")),
@@ -299,6 +300,13 @@ fn bind_block_tensor(
         }
         if role == "ffn_gate_inp" && matches!(loader, NormalLoaderType::HunYuanMoEV1) {
             binding = binding.cast(DType::F32);
+        }
+        // ERNIE's checkpoints hold the selection bias as `[1, experts]`, llama.cpp as `[experts]`
+        if role == "exp_probs_b" && matches!(loader, NormalLoaderType::Ernie4_5Moe) {
+            let shape = archive.tensor_info(source)?.shape();
+            if shape.len() == 1 {
+                binding = binding.reshape(vec![1, shape[0]]);
+            }
         }
         if role == "ffn_gate_inp_shexp"
             && matches!(

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # One-off parity check of GGUF weights against a llama.cpp-family reference (mainline or ik_llama.cpp): scores every
-# *.gguf in a directory with the reference's llama-perplexity and with inference.rs, and fails past a relative drift.
+# *.gguf in a directory with the reference's llama-perplexity and with inference.rs, and fails when ours is higher by
+# more than a relative tolerance; lower than the reference is a better score, not a failure.
 # Not part of local_ci.sh: it needs the reference's build and real checkpoints, and verifies an adoption once.
 # scripts/build_gguf_references.sh builds the references and scripts/make_gguf_test_dirs.sh the scored directories.
 #
 # Usage: scripts/gguf_perplexity_parity.sh <llama-perplexity> <gguf-dir> [text] [tolerance]
 #   text       scored by both sides; default README.md (llama-perplexity needs two 512-token windows)
-#   tolerance  relative perplexity drift allowed; default 0.02 (IQ1_S and IQ1_M need 0.05, their backends spread)
+#   tolerance  how much higher ours may score, relative; default 0.02 (IQ1_S and IQ1_M need 0.05, their backends spread)
 set -euo pipefail
 shopt -s nullglob
 
@@ -42,7 +43,7 @@ scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 
 failed=0
-printf '%-40s %12s %12s %8s\n' file reference ours drift
+printf '%-40s %12s %12s %8s\n' file reference ours change
 for gguf in "${ggufs[@]}"; do
     name=$(basename "$gguf")
     # mainline logs `Final estimate: PPL = x` to stderr, ik `... PPL over 1 chunks for n_ctx=512 = x` to stdout
@@ -59,7 +60,7 @@ for gguf in "${ggufs[@]}"; do
         continue
     fi
     read -r drift over < <(awk -v a="$actual" -v e="$expected" -v t="$tolerance" \
-        'BEGIN { d = a / e - 1; if (d < 0) d = -d; over = d > t; printf "%.4f %d\n", d, over }')
+        'BEGIN { d = a / e - 1; over = d > t; printf "%+.4f %d\n", d, over }')
     printf '%-40s %12s %12s %8s\n' "$name" "$expected" "$actual" "$drift"
     if [[ $over == 1 ]]; then
         failed=1

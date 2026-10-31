@@ -167,6 +167,30 @@ pub trait DeviceMappedModelLoader {
     }
 }
 
+/// A config whose context length, at `key`, is cut to `max_model_len`, for a loader whose RoPE and sizing read only
+/// that length (not one, like LongRoPE, that scales attention by it); longer than the trained context is an error.
+pub fn cap_context_length<'a>(
+    config: &'a str,
+    key: &str,
+    max_model_len: Option<usize>,
+) -> Result<Cow<'a, str>> {
+    let Some(max_model_len) = max_model_len else {
+        return Ok(Cow::Borrowed(config));
+    };
+    let mut value: serde_json::Value = serde_json::from_str(config)?;
+    let trained = value
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("the config has no `{key}` to cut to max_model_len"))?;
+    if max_model_len == 0 || max_model_len as u64 > trained {
+        anyhow::bail!(
+            "max_model_len={max_model_len} is outside the model's context of {trained} tokens"
+        );
+    }
+    value[key] = serde_json::Value::from(max_model_len);
+    Ok(Cow::Owned(serde_json::to_string(&value)?))
+}
+
 pub trait NormalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModelLoader {
     fn load(
         &self,
@@ -356,5 +380,26 @@ pub trait EmbeddingModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModel
             self.model_config(config)?.num_layers(),
             loading_isq,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cap_context_length;
+
+    const KEY: &str = "max_position_embeddings";
+    const CONFIG: &str = r#"{"max_position_embeddings":131072,"hidden_size":64}"#;
+
+    #[test]
+    fn a_context_cap_cuts_only_within_the_trained_length() -> anyhow::Result<()> {
+        assert_eq!(cap_context_length(CONFIG, KEY, None)?, CONFIG);
+        let capped: serde_json::Value =
+            serde_json::from_str(&cap_context_length(CONFIG, KEY, Some(4096))?)?;
+        assert_eq!(capped[KEY], 4096);
+        assert_eq!(capped["hidden_size"], 64);
+        assert!(cap_context_length(CONFIG, KEY, Some(262_144)).is_err());
+        assert!(cap_context_length(CONFIG, KEY, Some(0)).is_err());
+        assert!(cap_context_length(CONFIG, "seq_length", Some(4096)).is_err());
+        Ok(())
     }
 }

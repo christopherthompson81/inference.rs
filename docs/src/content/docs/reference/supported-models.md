@@ -62,6 +62,8 @@ The `Architecture` column is the `config.json` `architectures` value. Per-family
 | `OlmoForCausalLM` | OLMo 1 | <details><summary><code>allenai/OLMo-1B-0724-hf</code></summary><code>inference run -m allenai/OLMo-1B-0724-hf</code></details> |
 | `Olmo2ForCausalLM` | OLMo 2 | <details><summary><code>allenai/OLMo-2-0425-1B-Instruct</code></summary><code>inference run -m allenai/OLMo-2-0425-1B-Instruct</code></details> |
 | `Olmo3ForCausalLM` | Olmo 3 | <details><summary><code>allenai/Olmo-3-7B-Instruct</code></summary><code>inference run -m allenai/Olmo-3-7B-Instruct</code></details> |
+| `Ernie4_5ForCausalLM` | ERNIE 4.5 | <details><summary><code>baidu/ERNIE-4.5-0.3B-PT</code></summary><code>inference run -m baidu/ERNIE-4.5-0.3B-PT</code></details> |
+| `Ernie4_5_MoeForCausalLM` | ERNIE 4.5 MoE | <details><summary><code>baidu/ERNIE-4.5-21B-A3B-PT</code></summary><code>inference run -m baidu/ERNIE-4.5-21B-A3B-PT</code></details> |
 | `OlmoeForCausalLM` | OLMoE | <details><summary><code>allenai/OLMoE-1B-7B-0125-Instruct</code></summary><code>inference run -m allenai/OLMoE-1B-7B-0125-Instruct</code></details> |
 | `Lfm2ForCausalLM` | LFM2, LFM2.5 | <details><summary><code>LiquidAI/LFM2.5-1.2B-Instruct</code> (LFM2.5), <code>LiquidAI/LFM2-1.2B</code> (LFM2)</summary><code>inference run -m LiquidAI/LFM2.5-1.2B-Instruct</code><br><code>inference run -m LiquidAI/LFM2-1.2B</code></details> |
 | `Lfm2MoeForCausalLM` | LFM2 MoE, LFM2.5 MoE | <details><summary><code>LiquidAI/LFM2.5-8B-A1B</code> (LFM2.5), <code>LiquidAI/LFM2-8B-A1B</code> (LFM2)</summary><code>inference run -m LiquidAI/LFM2.5-8B-A1B</code><br><code>inference run -m LiquidAI/LFM2-8B-A1B</code></details> |
