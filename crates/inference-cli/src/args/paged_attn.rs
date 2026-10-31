@@ -24,7 +24,7 @@ pub struct PagedAttentionOptions {
     pub mode: PagedAttnMode,
 
     /// Allocate KV cache for this context length.
-    /// If not specified, defaults to using 90% of available VRAM.
+    /// If not specified, the cache holds one sequence at the model's full context, fitted to the free memory.
     #[arg(long = "pa-context-len")]
     pub context_len: Option<usize>,
 

@@ -116,6 +116,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 - `crates/inference-gguf/` - GGUF to Hugging Face translation below core: config synthesis from GGUF metadata, tensor-name bindings per architecture, and the GGUF tokenizer. The pipelines that run GGUF models stay in core
 - `crates/inference-mcp/` - Model Context Protocol client
 - `crates/inference-protocol/` - The wire protocol with no candle dependency (so it compiles alongside the kernel builds): request options, response bodies, tool types with their call parsers and grammars, reasoning parsers, chat templates (rendering messages into prompt text; EOS detection and `generation_config.json` stay in core), image response encoding, files. Core re-exports it; the engine-internal `Request`/`Response` channel types stay in core
+- `crates/inference-recon/` - 3D reconstruction and world generation (WorldMirror, WorldStereo-2, Gaussian splats) that `inference-jobs` runs
 - `crates/inference-layout/` - Document layout detection (PP-DocLayoutV3) with custom CPU/CUDA kernels
 - `crates/inference-ffi/` - C ABI (`libinference_ffi`, header `include/inference.h`) for bindings in other languages. `tests/integration/engine_coverage.rs` fails when a public `Engine` method has no ABI entry and no listed reason
 - `crates/inference-code-exec/` - The Python code-execution tool the agent layer runs

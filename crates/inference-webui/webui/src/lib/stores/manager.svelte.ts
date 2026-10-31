@@ -32,7 +32,7 @@ export const SLOTS = {
     title: "Speech recognition model",
     kinds: ["transcription"],
     vad: true,
-    hint: "Parakeet, Nemotron ASR or Qwen3-ASR: a .nemo, directory, GGUF or repo",
+    hint: "Whisper, Parakeet, Nemotron ASR or Qwen3-ASR: a .nemo, directory, GGUF or repo",
   },
   diarization: {
     id: "diarization",
