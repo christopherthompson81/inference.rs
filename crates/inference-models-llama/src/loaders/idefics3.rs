@@ -113,60 +113,14 @@ impl DeviceMappedModelLoader for Idefics3Loader {
         config: &str,
         params: &AutoDeviceMapParams,
     ) -> Result<usize> {
-        let AutoDeviceMapParams::Multimodal {
-            max_seq_len,
-            max_batch_size,
-            max_image_shape: _,
-            max_num_images,
-        } = params
-        else {
-            anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
-        };
-
-        let cfg = Idefics3Config::from_json(config)?;
-
-        let num_patches = (cfg.vision_config.image_size / cfg.vision_config.patch_size).pow(2);
-        let img_seq_len = (num_patches + 1) * max_num_images;
-
-        let max_text_attn = {
-            // This model injects the vision information directly into the input embeddings
-            let max_seq_len = img_seq_len + max_seq_len.min(&ATTENTION_CHUNK_SIZE);
-            max_batch_size * cfg.text_config.num_attention_heads * max_seq_len * max_seq_len
-        };
-
-        Ok(max_text_attn)
+        act_shape(config)?.mapped_max_act_size_elems(params)
     }
     fn non_mapped_max_act_size_elems(
         &self,
         config: &str,
         params: &AutoDeviceMapParams,
     ) -> Result<usize> {
-        let AutoDeviceMapParams::Multimodal {
-            max_seq_len: _,
-            max_batch_size,
-            max_image_shape: _,
-            max_num_images,
-        } = params
-        else {
-            anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
-        };
-
-        let cfg = Idefics3Config::from_json(config)?;
-
-        let num_patches = (cfg.vision_config.image_size / cfg.vision_config.patch_size).pow(2);
-        let img_seq_len = num_patches + 1;
-
-        let max_vision_attn = {
-            // do_image_splitting = true
-            let images_factor = 5;
-
-            (max_batch_size * images_factor * max_num_images)
-                * cfg.vision_config.num_attention_heads
-                * img_seq_len
-                * img_seq_len
-        };
-
-        Ok(max_vision_attn)
+        act_shape(config)?.non_mapped_max_act_size_elems(params)
     }
     fn non_mapped_size_in_bytes(
         &self,
@@ -208,39 +162,7 @@ impl DeviceMappedModelLoader for Idefics3Loader {
         let vision_transformer = {
             let cfg = &cfg.vision_config;
 
-            let post_layernorm = cfg.hidden_size;
-
-            let conv_config = Conv2dConfig {
-                stride: cfg.patch_size,
-                ..Default::default()
-            };
-            let patch_embedding = cfg.num_channels * cfg.hidden_size / conv_config.groups
-                * cfg.patch_size
-                * cfg.patch_size;
-
-            let num_patches_per_side = cfg.image_size / cfg.patch_size;
-            let num_patches = num_patches_per_side.pow(2);
-            let position_embedding = num_patches * cfg.hidden_size;
-
-            let layer_elems = {
-                let layer_norm_1 = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
-                let layer_norm_2 = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
-
-                let fc1 = cfg.hidden_size * cfg.intermediate_size + cfg.intermediate_size;
-                let fc2 = cfg.intermediate_size * cfg.hidden_size + cfg.hidden_size;
-
-                let q_proj = cfg.hidden_size * cfg.hidden_size + cfg.hidden_size;
-                let k_proj = cfg.hidden_size * cfg.hidden_size + cfg.hidden_size;
-                let v_proj = cfg.hidden_size * cfg.hidden_size + cfg.hidden_size;
-                let o_proj = cfg.hidden_size * cfg.hidden_size + cfg.hidden_size;
-
-                layer_norm_1 + layer_norm_2 + fc1 + fc2 + q_proj + k_proj + v_proj + o_proj
-            };
-
-            post_layernorm
-                + patch_embedding
-                + position_embedding
-                + layer_elems * cfg.num_hidden_layers
+            cfg.siglip().weight_elems()
         };
 
         let elems = text_elems + connector_elems + vision_transformer;
@@ -293,4 +215,14 @@ fn decoder_shape(cfg: &crate::llama::Config) -> DecoderLayerShape {
             intermediate_size: cfg.intermediate_size,
         },
     }
+}
+
+fn act_shape(config: &str) -> Result<super::idefics2::IdeficsActShape> {
+    let cfg = Idefics3Config::from_json(config)?;
+    Ok(super::idefics2::IdeficsActShape {
+        image_size: cfg.vision_config.image_size,
+        patch_size: cfg.vision_config.patch_size,
+        vision_heads: cfg.vision_config.num_attention_heads,
+        text_heads: cfg.text_config.num_attention_heads,
+    })
 }

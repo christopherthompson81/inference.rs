@@ -19,7 +19,6 @@ use inference_nn::paged_attention::{
 use inference_nn::utils::varbuilder_utils::DeviceForLoadTensor;
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::DType;
-use inference_tensor::nn::Conv2dConfig;
 use regex::Regex;
 
 use crate::minicpmo::{MiniCpmOConfig, MiniCpmOModel};

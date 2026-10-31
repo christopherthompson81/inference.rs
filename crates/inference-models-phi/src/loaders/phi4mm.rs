@@ -235,39 +235,7 @@ impl DeviceMappedModelLoader for Phi4MMLoader {
                 let vision_transformer = {
                     let cfg = &PHI4_MM_VISION_CFG;
 
-                    let post_layernorm = cfg.hidden_size;
-
-                    let conv_config = Conv2dConfig {
-                        stride: cfg.patch_size,
-                        ..Default::default()
-                    };
-                    let patch_embedding = cfg.num_channels * cfg.hidden_size / conv_config.groups
-                        * cfg.patch_size
-                        * cfg.patch_size;
-
-                    let num_patches_per_side = cfg.image_size / cfg.patch_size;
-                    let num_patches = num_patches_per_side.pow(2);
-                    let position_embedding = num_patches * cfg.hidden_size;
-
-                    let layer_elems = {
-                        let layer_norm_1 = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
-                        let layer_norm_2 = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
-
-                        let fc1 = cfg.hidden_size * cfg.intermediate_size + cfg.intermediate_size;
-                        let fc2 = cfg.intermediate_size * cfg.hidden_size + cfg.hidden_size;
-
-                        let q_proj = cfg.hidden_size * cfg.hidden_size + cfg.hidden_size;
-                        let k_proj = cfg.hidden_size * cfg.hidden_size + cfg.hidden_size;
-                        let v_proj = cfg.hidden_size * cfg.hidden_size + cfg.hidden_size;
-                        let o_proj = cfg.hidden_size * cfg.hidden_size + cfg.hidden_size;
-
-                        layer_norm_1 + layer_norm_2 + fc1 + fc2 + q_proj + k_proj + v_proj + o_proj
-                    };
-
-                    post_layernorm
-                        + patch_embedding
-                        + position_embedding
-                        + layer_elems * cfg.num_hidden_layers
+                    cfg.weight_elems()
                 };
 
                 proj + glb_gn + sub_gn + vision_transformer

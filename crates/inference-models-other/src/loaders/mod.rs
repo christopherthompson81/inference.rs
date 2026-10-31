@@ -22,8 +22,7 @@ use crate::lfm2_vl::{Lfm2VlModel, config::Config as Lfm2VlConfig};
 use crate::paddleocr_vl::{PaddleOcrVlModel, config::Config as PaddleOcrVlConfig};
 
 mod bert;
-mod deepseek2;
-mod deepseek3;
+mod deepseek;
 mod deepseek_family;
 mod ernie4_5;
 mod glm4;
@@ -50,8 +49,7 @@ mod starcoder2;
 mod sizing_tests;
 
 pub use bert::*;
-pub use deepseek2::*;
-pub use deepseek3::*;
+pub use deepseek::*;
 pub use ernie4_5::*;
 pub use glm4::*;
 pub use glm4_moe::*;

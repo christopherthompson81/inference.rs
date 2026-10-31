@@ -11,6 +11,7 @@ use inference_nn::{
 mod dense_decoder_tests;
 pub mod idefics2;
 pub mod idefics3;
+mod idefics_common;
 #[cfg(test)]
 mod idefics_vision_tests;
 pub mod llama;

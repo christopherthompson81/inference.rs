@@ -61,6 +61,23 @@ impl Default for SiglipVisionConfig {
     }
 }
 
+impl SiglipVisionConfig {
+    // weights of the tower: patch and position embeddings, the encoder layers and the post layernorm
+    pub fn weight_elems(&self) -> usize {
+        let hidden = self.hidden_size;
+        let patch_embedding =
+            self.num_channels * hidden * self.patch_size * self.patch_size + hidden;
+        let position_embedding = (self.image_size / self.patch_size).pow(2) * hidden;
+        let layer_norms = 2 * 2 * hidden;
+        let mlp = 2 * hidden * self.intermediate_size + self.intermediate_size + hidden;
+        let attention = 4 * (hidden * hidden + hidden);
+        2 * hidden
+            + patch_embedding
+            + position_embedding
+            + (layer_norms + mlp + attention) * self.num_hidden_layers
+    }
+}
+
 pub struct VisionEmbeddings {
     patch_size: usize,
     patch_embedding: Conv2d,

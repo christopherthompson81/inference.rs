@@ -20,14 +20,10 @@ use crate::{
     mistral::Model as Mistral,
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata, NormalModel},
     paged_attention::{
-        AttentionImplementation, ModelConfigMetadata,
-        block_hash::MultimodalKind,
-        encoder_cache::{CacheModality, EncoderCacheManager},
+        AttentionImplementation, ModelConfigMetadata, encoder_cache::EncoderCacheManager,
     },
     utils::unvarbuilder::UnVarBuilder,
-    vision::multimodal_layout::{
-        MultimodalEncoderKey, MultimodalEncoderOutputs, PackedMultimodalLayout,
-    },
+    vision::multimodal_layout::PackedMultimodalLayout,
 };
 
 use crate::mistral;
@@ -743,63 +739,13 @@ impl Idefics2 {
                 (pixel_values, pixel_attention_mask)
             };
 
-            // Remove padding images which are full of 0s
-            let nb_values_per_image = pixel_values.dims()[1..].iter().product::<usize>();
-            let real_images_inds = pixel_values
-                .eq(0.0f64)?
-                .sum(vec![
-                    pixel_values.dims().len() - 1,
-                    pixel_values.dims().len() - 2,
-                    pixel_values.dims().len() - 3,
-                ])?
-                .ne(nb_values_per_image as f64)?;
-            let mut batches = Vec::new();
-            for (batch, use_it) in pixel_values
-                .chunk(pixel_values.dim(0)?, 0)?
-                .iter()
-                .zip(real_images_inds.chunk(real_images_inds.dim(0)?, 0)?)
-            {
-                let use_it = use_it.squeeze(0)?.to_scalar::<u8>()? != 0;
-                if use_it {
-                    batches.push(batch.clone());
-                }
-            }
-            let pixel_values = Tensor::cat(&batches, 0)?;
-
-            // Vision attention mask
-            let pixel_attention_mask = if let Some(pixel_attention_mask) = pixel_attention_mask {
-                let mut batches = Vec::new();
-                for (batch, use_it) in pixel_attention_mask
-                    .chunk(pixel_attention_mask.dim(0)?, 0)?
-                    .iter()
-                    .zip(real_images_inds.chunk(real_images_inds.dim(0)?, 0)?)
-                {
-                    let use_it = use_it.squeeze(0)?.to_scalar::<u8>()? != 0;
-                    if use_it {
-                        batches.push(batch.clone());
-                    }
-                }
-                Tensor::cat(&batches, 0)?
-            } else {
-                Tensor::ones(
-                    (
-                        pixel_values.dims()[0],
-                        pixel_values.dims()[2],
-                        pixel_values.dims()[3],
-                    ),
-                    DType::U8,
-                    pixel_values.device(),
-                )?
-            };
-
+            let (pixel_values, pixel_attention_mask) =
+                crate::idefics_common::drop_padding_images(&pixel_values, pixel_attention_mask)?;
             let patch_size = self.config.vision_config.patch_size;
-            let patches_subgrid = pixel_attention_mask.unfold(1, patch_size, patch_size)?;
-            let patches_subgrid = patches_subgrid.unfold(2, patch_size, patch_size)?;
-
-            let patch_attention_mask = patches_subgrid
-                .sum((D::Minus1, D::Minus2))?
-                .eq((patch_size * patch_size) as f64)?
-                .to_dtype(DType::U8)?;
+            let patch_attention_mask =
+                crate::idefics_common::patch_valid_pixels(&pixel_attention_mask, patch_size)?
+                    .eq((patch_size * patch_size) as f64)?
+                    .to_dtype(DType::U8)?;
 
             let pixel_values = pixel_values.to_dtype(self.dtype)?;
 
@@ -811,109 +757,28 @@ impl Idefics2 {
                         args.subimage_counts.len()
                     );
                 }
-                let mut offsets = Vec::with_capacity(args.subimage_counts.len() + 1);
-                offsets.push(0usize);
-                for &count in &args.subimage_counts {
-                    if count == 0 {
-                        inference_tensor::bail!("Idefics2 image has no encoder inputs");
-                    }
-                    offsets.push(
-                        offsets
-                            .last()
-                            .copied()
-                            .unwrap()
-                            .checked_add(count)
-                            .ok_or_else(|| {
-                                inference_tensor::Error::msg("Idefics2 subimage count overflow")
-                            })?,
-                    );
-                }
-                if offsets.last().copied().unwrap_or_default() != pixel_values.dim(0)? {
-                    inference_tensor::bail!(
-                        "Idefics2 has {} encoder inputs but subimage counts total {}",
-                        pixel_values.dim(0)?,
-                        offsets.last().copied().unwrap_or_default()
-                    );
-                }
-                let expected_rows = self.config.perceiver_config.resampler_n_latents;
-                let mut per_image: Vec<Option<Vec<Tensor>>> = vec![None; args.image_hashes.len()];
-                let mut miss_indices = Vec::new();
-                {
-                    let mut guard = self
-                        .encoder_cache
-                        .lock()
-                        .expect("encoder cache lock poisoned");
-                    for (i, &hash) in args.image_hashes.iter().enumerate() {
-                        match guard.get(CacheModality::Image, hash) {
-                            Some(cached) => {
-                                let valid = cached.len() == args.subimage_counts[i]
-                                    && cached.iter().all(|output| {
-                                        output.rank() == 2
-                                            && output.dim(0).ok() == Some(expected_rows)
-                                    });
-                                if valid {
-                                    per_image[i] = Some(cached);
-                                } else {
-                                    miss_indices.push(i);
-                                }
-                            }
-                            _ => {
-                                miss_indices.push(i);
-                            }
-                        }
-                    }
-                }
-                for &i in &miss_indices {
-                    let count = args.subimage_counts[i];
-                    let pv = pixel_values.narrow(0, offsets[i], count)?;
-                    let mask = patch_attention_mask.narrow(0, offsets[i], count)?;
-                    let hidden = self.vision_model.forward(
-                        &pv,
-                        &AttentionMask::Custom(mask.clone()),
-                        None,
-                    )?;
-                    let hidden = self
-                        .connector
-                        .forward(&hidden, &mask.reshape((count, ()))?)?;
-                    if hidden.dim(0)? != count || hidden.dim(1)? != expected_rows {
-                        inference_tensor::bail!(
-                            "Idefics2 encoder returned {:?} for {count} image inputs",
-                            hidden.dims()
-                        );
-                    }
-                    let outputs = (0..count)
-                        .map(|index| hidden.get(index))
-                        .collect::<Result<Vec<_>>>()?;
-                    self.encoder_cache
-                        .lock()
-                        .expect("encoder cache lock poisoned")
-                        .insert(CacheModality::Image, args.image_hashes[i], outputs.clone());
-                    per_image[i] = Some(outputs);
-                }
-                let per_image = per_image
-                    .into_iter()
-                    .map(|outputs| outputs.expect("all Idefics2 images should be resolved"))
-                    .collect::<Vec<_>>();
-                let flat = per_image
-                    .iter()
-                    .flat_map(|outputs| outputs.iter().cloned())
-                    .collect::<Vec<_>>();
-                let encoder_outputs = args
-                    .image_hashes
-                    .iter()
-                    .copied()
-                    .zip(per_image)
-                    .map(|(hash, outputs)| {
-                        (
-                            MultimodalEncoderKey {
-                                kind: MultimodalKind::Image,
-                                hash,
-                            },
-                            outputs,
-                        )
-                    })
-                    .collect::<MultimodalEncoderOutputs>();
-                (Tensor::stack(&flat, 0)?, Some(encoder_outputs))
+                let batch = crate::idefics_common::SubimageBatch {
+                    label: "Idefics2",
+                    image_hashes: &args.image_hashes,
+                    subimage_counts: &args.subimage_counts,
+                    pixel_values: &pixel_values,
+                    patch_attention_mask: &patch_attention_mask,
+                    rows: Some(self.config.perceiver_config.resampler_n_latents),
+                };
+                let (hidden, outputs) = crate::idefics_common::encode_subimages_cached(
+                    &batch,
+                    &self.encoder_cache,
+                    |pv, mask| {
+                        let hidden = self.vision_model.forward(
+                            pv,
+                            &AttentionMask::Custom(mask.clone()),
+                            None,
+                        )?;
+                        self.connector
+                            .forward(&hidden, &mask.reshape((pv.dim(0)?, ()))?)
+                    },
+                )?;
+                (hidden, Some(outputs))
             } else {
                 if args.packed_prefill {
                     inference_tensor::bail!("packed Idefics2 media input has no image hashes");

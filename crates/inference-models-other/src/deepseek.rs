@@ -1,8 +1,6 @@
 use inference_quant::QuantizedConfig;
 
-use crate::deepseek_family::{
-    FamilyConfig, FamilyModel, MlaAttention, MlaConfig, MoeSpec, SharedExpert, mla_softmax_scale,
-};
+use crate::deepseek_family::{FamilyConfig, MlaConfig, MoeSpec, SharedExpert, mla_softmax_scale};
 use crate::{
     layers::{Activation, DeepSeekV2RopeScaling},
     moe::{GroupedRouterConfig, RouterMethod, RouterRenorm, RouterScoring},
@@ -13,13 +11,14 @@ serde_default_fn!(f64, routed_scaling_factor, 1.0);
 serde_default_fn!(TopkMethod, topk_method, TopkMethod::Greedy);
 serde_default_fn!(usize, moe_layer_freq, 1);
 serde_default_fn!(usize, first_k_dense_replace, 0);
-serde_default_fn!(bool, norm_topk_prob, false);
 serde_default_fn!(ScoringFunc, scoring_func, ScoringFunc::Softmax);
 serde_default_fn!(Activation, hidden_act, Activation::Silu);
 serde_default_fn!(bool, tie_word_embeddings, false);
 
 #[derive(inference_json::FromJson, Clone, Debug)]
 enum TopkMethod {
+    #[serde(rename = "noaux_tc")]
+    NoAuxTc,
     #[serde(rename = "greedy")]
     Greedy,
     #[serde(rename = "group_limited_greedy")]
@@ -30,10 +29,19 @@ enum TopkMethod {
 enum ScoringFunc {
     #[serde(rename = "softmax")]
     Softmax,
+    #[serde(rename = "sigmoid")]
+    Sigmoid,
+}
+
+// V2 and V3 share a config; they differ in the norm_topk_prob default and whether the renormalized top-k is scaled
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeepSeekVersion {
+    V2,
+    V3,
 }
 
 #[derive(inference_json::FromJson, Clone, Debug)]
-pub struct DeepSeekV2Config {
+pub struct DeepSeekConfig {
     pub vocab_size: usize,
     pub hidden_size: usize,
     pub intermediate_size: usize,
@@ -54,9 +62,7 @@ pub struct DeepSeekV2Config {
     pub moe_layer_freq: usize,
     #[serde(default = "first_k_dense_replace")]
     pub first_k_dense_replace: usize,
-    // k dense layers
-    #[serde(default = "norm_topk_prob")]
-    pub norm_topk_prob: bool,
+    norm_topk_prob: Option<bool>,
     #[serde(default = "scoring_func")]
     scoring_func: ScoringFunc,
     #[serde(default = "hidden_act")]
@@ -73,26 +79,33 @@ pub struct DeepSeekV2Config {
     pub kv_lora_rank: usize,
     pub v_head_dim: usize,
     pub qk_nope_head_dim: usize,
+    #[serde(alias = "quantization")]
     pub quantization_config: Option<QuantizedConfig>,
     pub n_group: usize,
     pub topk_group: usize,
 }
 
-impl DeepSeekV2Config {
-    pub(crate) fn router_config(&self) -> GroupedRouterConfig {
+impl DeepSeekConfig {
+    pub(crate) fn router_config(&self, version: DeepSeekVersion) -> GroupedRouterConfig {
+        let norm_topk_prob = self
+            .norm_topk_prob
+            .unwrap_or(version == DeepSeekVersion::V3);
         GroupedRouterConfig {
             scoring: match self.scoring_func {
                 ScoringFunc::Softmax => RouterScoring::Softmax,
+                ScoringFunc::Sigmoid => RouterScoring::Sigmoid,
             },
             method: match self.topk_method {
                 TopkMethod::Greedy => RouterMethod::Greedy,
                 TopkMethod::GroupLimitedGreedy => RouterMethod::GroupLimitedGreedy,
+                TopkMethod::NoAuxTc => RouterMethod::NoAuxTc,
             },
             n_group: self.n_group,
             topk_group: self.topk_group,
             routed_scaling_factor: self.routed_scaling_factor,
-            renorm: RouterRenorm::TopkProbSkipsScale {
-                norm_topk_prob: self.norm_topk_prob,
+            renorm: match version {
+                DeepSeekVersion::V2 => RouterRenorm::TopkProbSkipsScale { norm_topk_prob },
+                DeepSeekVersion::V3 => RouterRenorm::TopkProb { norm_topk_prob },
             },
         }
     }
@@ -101,7 +114,11 @@ impl DeepSeekV2Config {
         self.qk_rope_head_dim + self.qk_nope_head_dim
     }
 
-    pub fn family(&self) -> FamilyConfig<MlaConfig> {
+    pub fn uses_correction_bias(&self) -> bool {
+        matches!(self.topk_method, TopkMethod::NoAuxTc)
+    }
+
+    pub fn family(&self, version: DeepSeekVersion) -> FamilyConfig<MlaConfig> {
         FamilyConfig {
             vocab_size: self.vocab_size,
             hidden_size: self.hidden_size,
@@ -122,7 +139,7 @@ impl DeepSeekV2Config {
                 shared_expert: self
                     .n_shared_experts
                     .map(|n| SharedExpert::Sharded(self.moe_intermediate_size * n)),
-                router: self.router_config(),
+                router: self.router_config(version),
             }),
             attn: MlaConfig {
                 q_lora_rank: self.q_lora_rank,
@@ -140,8 +157,44 @@ impl DeepSeekV2Config {
     }
 }
 
-pub type DeepSeekV2 = FamilyModel<MlaAttention>;
+#[cfg(test)]
+mod tests {
+    use inference_tensor::{DType, Device, Result, Tensor};
+
+    use crate::deepseek_family::add_moe_gate_residual_tensors;
+    use crate::utils::unvarbuilder::UnVarBuilder;
+
+    fn residual_names(correction_bias: Option<Tensor>) -> Result<Vec<String>> {
+        let weight = Tensor::zeros((2, 4), DType::F32, &Device::Cpu)?;
+        let uvb = UnVarBuilder::new().pp("model.layers.0.mlp.gate");
+        add_moe_gate_residual_tensors(&uvb, &weight, correction_bias.as_ref());
+        let mut names = uvb
+            .to_safetensors()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        names.sort();
+        Ok(names)
+    }
+
+    #[test]
+    fn moe_gate_residual_includes_optional_correction_bias() -> Result<()> {
+        assert_eq!(
+            residual_names(Some(Tensor::zeros(2, DType::F32, &Device::Cpu)?))?,
+            [
+                "model.layers.0.mlp.gate.e_score_correction_bias",
+                "model.layers.0.mlp.gate.weight",
+            ]
+        );
+        assert_eq!(residual_names(None)?, ["model.layers.0.mlp.gate.weight"]);
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 #[path = "deepseek_family_tests/deepseek2.rs"]
-mod family_tests;
+mod v2_tests;
+
+#[cfg(test)]
+#[path = "deepseek_family_tests/deepseek3.rs"]
+mod v3_tests;

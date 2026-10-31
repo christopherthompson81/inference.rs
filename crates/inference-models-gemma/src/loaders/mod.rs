@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use inference_nn::attention::ATTENTION_CHUNK_SIZE;
-use inference_nn::bias_if;
 use inference_nn::device_map::AutoDeviceMapParams;
 use inference_nn::loaders::*;
 use inference_nn::matformer::MatformerSliceConfig;
@@ -16,7 +15,6 @@ use inference_nn::paged_attention::{
 };
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::DType;
-use inference_tensor::nn::Conv2dConfig;
 use regex::Regex;
 
 use crate::diffusion_gemma::{DiffusionGemmaConfig, DiffusionGemmaModel};

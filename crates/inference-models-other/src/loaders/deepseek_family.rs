@@ -403,9 +403,9 @@ mod tests {
     #[test]
     fn mla_paged_layout_needs_a_cuda_device() -> Result<()> {
         use crate::deepseek_family::{FamilyAttention, MlaAttention};
-        let cfg = crate::deepseek3::DeepSeekV3Config::from_json(&deepseek(Some(16)).to_string())?;
+        let cfg = crate::deepseek::DeepSeekConfig::from_json(&deepseek(Some(16)).to_string())?;
         let meta = MlaAttention::model_metadata(
-            &cfg.family(),
+            &cfg.family(crate::deepseek::DeepSeekVersion::V3),
             &AttentionImplementation::PagedAttention,
             &inference_tensor::Device::Cpu,
             1,
