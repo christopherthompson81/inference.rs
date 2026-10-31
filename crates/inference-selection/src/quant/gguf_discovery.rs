@@ -213,21 +213,7 @@ pub fn resolve_gguf_projector(
         return Ok(None);
     }
 
-    let unsupported_iq = groups
-        .values()
-        .filter(|group| is_iq_projector(group))
-        .collect::<Vec<_>>();
-    let supported = groups
-        .values()
-        .filter(|group| !is_iq_projector(group))
-        .collect::<Vec<_>>();
-    if supported.is_empty() {
-        bail!(
-            "Automatic GGUF projector selection only found unsupported IQ artifacts: {}. Choose \
-             a BF16, F16, F32, or supported Q/K projector",
-            format_group_choices(&unsupported_iq)
-        );
-    }
+    let supported = groups.values().collect::<Vec<_>>();
 
     let role_groups = supported
         .iter()
@@ -250,23 +236,6 @@ pub fn resolve_gguf_projector(
                 .filter_map(|(candidate_role, group)| (*candidate_role == role).then_some(*group))
                 .collect::<Vec<_>>();
             if candidates.is_empty() {
-                let unsupported = unsupported_iq
-                    .iter()
-                    .copied()
-                    .filter(|group| projector_role(group) == Some(role))
-                    .collect::<Vec<_>>();
-                if !unsupported.is_empty() {
-                    let role = match role {
-                        ProjectorRole::Vision => "vision",
-                        ProjectorRole::Audio => "audio",
-                    };
-                    bail!(
-                        "Automatic GGUF projector selection only found unsupported IQ artifacts \
-                         for the {role} projector: {}. Choose a BF16, F16, F32, or supported Q/K \
-                         projector",
-                        format_group_choices(&unsupported)
-                    );
-                }
                 continue;
             }
             selected.push((role, select_projector_group(&candidates, dtype)?));
@@ -287,19 +256,6 @@ pub fn resolve_gguf_projector(
             label: labels.join(" + "),
             files,
         }));
-    }
-
-    let unsupported_role_groups = unsupported_iq
-        .iter()
-        .copied()
-        .filter(|group| projector_role(group).is_some())
-        .collect::<Vec<_>>();
-    if !unsupported_role_groups.is_empty() {
-        bail!(
-            "Automatic GGUF projector selection cannot mix a generic projector with unsupported \
-             role-specific IQ artifacts: {}. Name the projector explicitly (`--mmproj`, or `mmproj_filename` in a spec)",
-            format_group_choices(&unsupported_role_groups)
-        );
     }
 
     resolve_group(select_projector_group(&supported, dtype)?).map(Some)
@@ -656,7 +612,8 @@ fn projector_rank(label: Option<&str>, dtype: ModelDType) -> usize {
     }
 
     let bits = quant_bits(&normalized).unwrap_or(0);
-    100 + (8usize.saturating_sub(bits) * 10)
+    // an IQ projector loads like any other, but a Q/K one of the same width wins over it
+    100 + (8usize.saturating_sub(bits) * 10) + usize::from(is_iq_quant(&normalized))
 }
 
 fn quant_bits(normalized: &str) -> Option<usize> {
@@ -674,14 +631,6 @@ fn is_iq_quant(normalized: &str) -> bool {
         .strip_prefix("UD")
         .unwrap_or(normalized)
         .starts_with("IQ")
-}
-
-fn is_iq_projector(group: &GgufGroup) -> bool {
-    group
-        .label
-        .as_deref()
-        .map(normalize_label)
-        .is_some_and(|label| is_iq_quant(&label))
 }
 
 fn quant_fallback_rank(normalized: &str) -> usize {
@@ -1121,12 +1070,20 @@ mod tests {
     }
 
     #[test]
-    fn iq_only_projector_is_rejected() {
+    fn an_iq_projector_is_selected() {
         let listing = files(&["mmproj-IQ4_XS.gguf"]);
-        let error = resolve_gguf_projector(&listing, ModelDType::Auto).unwrap_err();
-
-        assert!(error.to_string().contains("unsupported IQ artifacts"));
-        assert!(error.to_string().contains("mmproj-IQ4_XS.gguf"));
+        let label = |listing: &[String]| {
+            resolve_gguf_projector(listing, ModelDType::Auto)
+                .unwrap()
+                .unwrap()
+                .label
+        };
+        assert_eq!(label(&listing), "IQ4_XS");
+        // at one width a Q/K projector wins, so the pair isn't ambiguous
+        assert_eq!(
+            label(&files(&["mmproj-IQ4_XS.gguf", "mmproj-Q4_K_M.gguf"])),
+            "Q4_K_M"
+        );
     }
 
     #[test]
@@ -1182,27 +1139,13 @@ mod tests {
     }
 
     #[test]
-    fn role_with_only_iq_projectors_is_rejected() {
+    fn a_role_with_only_iq_projectors_selects_one() {
         let listing = files(&["vision-mmproj-Q4_K_M.gguf", "audio-mmproj-IQ4_XS.gguf"]);
-        let error = resolve_gguf_projector(&listing, ModelDType::Auto).unwrap_err();
+        let selected = resolve_gguf_projector(&listing, ModelDType::Auto)
+            .unwrap()
+            .unwrap();
 
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported IQ artifacts for the audio projector")
-        );
-        assert!(error.to_string().contains("audio-mmproj-IQ4_XS.gguf"));
-    }
-
-    #[test]
-    fn generic_projector_does_not_hide_role_specific_iq_projectors() {
-        let listing = files(&["mmproj-BF16.gguf", "audio-mmproj-IQ4_XS.gguf"]);
-        let error = resolve_gguf_projector(&listing, ModelDType::Auto).unwrap_err();
-
-        assert!(error.to_string().contains(
-            "cannot mix a generic projector with unsupported role-specific IQ artifacts"
-        ));
-        assert!(error.to_string().contains("audio-mmproj-IQ4_XS.gguf"));
+        assert_eq!(selected.label, "vision Q4_K_M + audio IQ4_XS");
     }
 
     #[test]
