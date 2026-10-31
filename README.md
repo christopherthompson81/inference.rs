@@ -121,8 +121,39 @@ inference reconstruct --model HY-WorldMirror-2.0 --input walk.mp4 --fps 1 --max-
 
 <details>
   <summary><b>Web UI demo</b></summary>
-  <br>
-  <img src="docs/assets/ui.gif" alt="The built-in web UI" />
+
+**Chat:** Qwen3.8-27B answers a question, then describes an attached picture.
+
+<!-- chat.mp4 -->
+
+**Audio in chat:** Qwen3-ASR hears a recording attached to the message.
+
+<!-- chat_audio.mp4 -->
+
+**Speech to text:** Whisper and Nemotron-3 Diarization transcribe a two-speaker clip, and playback follows the words.
+
+<!-- transcription.mp4 -->
+
+**Text to speech:** Kokoro reads markdown, highlighting each word as it plays.
+
+<!-- speech.mp4 -->
+
+**Images:** HiDream-O1 draws a scene from a prompt (the generation sped up 4x).
+
+<!-- images.mp4 -->
+
+**Documents:** PP-DocLayoutV3 finds a page's regions and PaddleOCR-VL reads them, tables included.
+
+<!-- documents.mp4 -->
+
+**Code:** the coding agent fixes a small package until its tests pass (sped up 2x).
+
+<!-- code.mp4 -->
+
+**Worlds:** a panorama becomes a 3D world of Gaussian splats (about 45 minutes, sped up 200x), then explored in the viewer.
+
+<!-- worlds.mp4 -->
+
 </details>
 
 ## Serving
