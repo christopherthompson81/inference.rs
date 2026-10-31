@@ -30,6 +30,8 @@ pub struct ChatMessage {
     pub images: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub videos: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audios: Option<Vec<String>>,
     /// Rich display blocks (reasoning, tool calls with results/images) for UI rendering.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocks: Option<serde_json::Value>,
@@ -242,7 +244,19 @@ pub struct RenameChatRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::{GenerationDefaults, GenerationParams, chat_file_path};
+    use super::{ChatMessage, GenerationDefaults, GenerationParams, chat_file_path};
+
+    #[test]
+    fn a_messages_recordings_survive_the_chat_file() {
+        let stored = r#"{"role":"user","content":"What is said?","audios":["uploads/rec.wav"]}"#;
+        let message: ChatMessage = serde_json::from_str(stored).unwrap();
+        assert_eq!(
+            message.audios.as_deref(),
+            Some(&["uploads/rec.wav".to_string()][..])
+        );
+        let written = serde_json::to_value(&message).unwrap();
+        assert_eq!(written["audios"], serde_json::json!(["uploads/rec.wav"]));
+    }
 
     #[test]
     fn chat_paths_stay_inside_chats_dir() {

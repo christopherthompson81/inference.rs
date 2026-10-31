@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::fs;
 
-use crate::handlers::api::MessageStats;
+use crate::handlers::api::{MessageMedia, MessageStats};
 use crate::types::{AppState, ChatFile, ChatMessage};
 
 /// Append a chat message to the specified chat file.
@@ -15,8 +15,7 @@ pub async fn append_chat_message(
     parent_id: Option<String>,
     role: &str,
     content: &str,
-    images: Option<Vec<String>>,
-    videos: Option<Vec<String>>,
+    media: MessageMedia,
     blocks: Option<serde_json::Value>,
     finish_reason: Option<String>,
     stats: MessageStats,
@@ -36,8 +35,9 @@ pub async fn append_chat_message(
         parent_id,
         role: role.into(),
         content: content.into(),
-        images,
-        videos,
+        images: media.images,
+        videos: media.videos,
+        audios: media.audios,
         blocks,
         finish_reason,
         elapsed_ms: stats.elapsed_ms,

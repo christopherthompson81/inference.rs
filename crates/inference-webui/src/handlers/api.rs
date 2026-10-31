@@ -532,6 +532,8 @@ pub struct AppendMessageRequest {
     #[serde(default)]
     pub videos: Option<Vec<String>>,
     #[serde(default)]
+    pub audios: Option<Vec<String>>,
+    #[serde(default)]
     pub blocks: Option<serde_json::Value>,
     #[serde(default)]
     pub finish_reason: Option<String>,
@@ -558,8 +560,11 @@ pub async fn append_message(
         req.parent_id,
         &req.role,
         &req.content,
-        req.images,
-        req.videos,
+        MessageMedia {
+            images: req.images,
+            videos: req.videos,
+            audios: req.audios,
+        },
         req.blocks,
         req.finish_reason,
         crate::handlers::api::MessageStats {
@@ -636,6 +641,14 @@ pub async fn fork_session(
             (StatusCode::INTERNAL_SERVER_ERROR, e.message).into_response()
         }
     }
+}
+
+/// A message's attachments, as the web UI's `uploads/...` or data URLs.
+#[derive(Default)]
+pub struct MessageMedia {
+    pub images: Option<Vec<String>>,
+    pub videos: Option<Vec<String>>,
+    pub audios: Option<Vec<String>>,
 }
 
 #[derive(Default)]

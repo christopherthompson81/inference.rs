@@ -123,6 +123,14 @@
       </div>
     {/if}
 
+    {#if message.audios?.length}
+      <div class="mb-2 flex flex-col gap-2">
+        {#each message.audios as audio}
+          <audio src={audio} controls class="h-9 w-72 max-w-full"></audio>
+        {/each}
+      </div>
+    {/if}
+
     <!-- Videos (rendered as looping GIF-like clips; .gif files use <img> since <video> can't play them) -->
     {#if message.videos?.length}
       <div class="mb-2 flex flex-wrap gap-2">
