@@ -119,8 +119,7 @@ inference reconstruct --model HY-WorldMirror-2.0 --input walk.mp4 --fps 1 --max-
 [3D reconstruction](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-3d-reconstruction.mdx) and
 [3D worlds from a panorama](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/generate-3d-worlds.mdx) list the weights each needs.
 
-<details>
-  <summary><b>Web UI demo</b></summary>
+## Web UI demo
 
 **Chat:** Qwen3.8-27B answers a question, then describes an attached picture.
 
@@ -161,8 +160,6 @@ https://github.com/user-attachments/assets/aafef4aa-109a-4938-8c3e-7c5a49e37db2
 
 <!-- worlds.mp4 -->
 https://github.com/user-attachments/assets/28b2b0f4-75c5-4d2f-975d-b3817efc6984
-
-</details>
 
 ## Serving
 
