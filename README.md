@@ -38,11 +38,12 @@ bindings over that ABI, so every surface does the same things.
 |---|---|
 | **Text** | Llama, Qwen 2-3.8, Qwen3-Next and Qwen3.8-Flash-Next, Gemma 1-4, Mistral, Phi, DeepSeek V2/V3/R1, GLM-4, GPT-OSS, Granite 4, HunYuan, LFM2 and more, dense and MoE; block-diffusion text with DiffusionGemma |
 | **Vision and video** | Qwen-VL 2-3.6 and Qwen3.8-Flash-Next, Gemma 3/3n/4, Llama 3.2 Vision and Llama 4, Mistral Small 3, Muse Glimmer, LLaVA, Idefics, SmolVLM, Phi-4-multimodal, MiniCPM-o, PaddleOCR-VL |
-| **Speech recognition** | NVIDIA Parakeet (CTC, RNN-T, TDT) and Nemotron streaming ASR, from transformers, `.nemo` or GGUF, with word timestamps and beam search; Voxtral Realtime |
+| **Speech recognition** | OpenAI Whisper (tiny to large-v3-turbo) with word timestamps and translation to English; Qwen3-ASR; NVIDIA Parakeet (CTC, RNN-T, TDT) and Nemotron streaming ASR, from transformers, `.nemo` or GGUF, with word timestamps and beam search; Voxtral Realtime |
 | **Speaker and voice activity** | Nemotron-3 Diarization and Streaming Sortformer (who speaks when), Silero VAD |
 | **Speech synthesis** | Kokoro (9 languages) and Dia |
 | **Image generation** | FLUX.1 and HiDream-O1-Image (text to image, editing and subject references), from safetensors or GGUF |
-| **Embeddings and documents** | EmbeddingGemma, Qwen3 Embedding; PP-DocLayoutV3 document layout detection |
+| **Embeddings and documents** | EmbeddingGemma, Qwen3 Embedding, BERT-family, ModernBERT and Nomic encoders; cross-encoder rerankers; PP-DocLayoutV3 document layout detection |
+| **Decisions** | Laya, Julia-1 and d1-omni: typed questions about a text (choose, score, true or false), answered in one forward pass with probabilities over the options |
 | **3D** | WorldMirror 2.0 reconstruction (cameras, depth, normals, points and 3D Gaussian splats from photos or a video); HY-World 2.0 world generation from one panorama with WorldStereo-2 |
 
 The **[supported models reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/supported-models.md)** lists every architecture
@@ -123,42 +124,34 @@ inference reconstruct --model HY-WorldMirror-2.0 --input walk.mp4 --fps 1 --max-
 
 **Chat:** Qwen3.8-27B answers a question, then describes an attached picture.
 
-<!-- chat.mp4 -->
 https://github.com/user-attachments/assets/c547167d-19e3-48ff-8160-aa0c8fe52d8d
 
 **Audio in chat:** Qwen3-ASR hears a recording attached to the message.
 
-<!-- chat_audio.mp4 -->
 https://github.com/user-attachments/assets/08e86e7e-5715-4478-a297-a8ee1c78cde2
 
 **Speech to text:** Whisper and Nemotron-3 Diarization transcribe a two-speaker clip, and playback follows the words.
 
-<!-- transcription.mp4 -->
 https://github.com/user-attachments/assets/f1752118-8061-44e8-9d33-0511283f5d9e
 
 **Text to speech:** Kokoro reads markdown, highlighting each word as it plays.
 
-<!-- speech.mp4 -->
 https://github.com/user-attachments/assets/8ae4b318-f7ad-4fa4-b2ad-4f9ce83ba693
 
 **Images:** HiDream-O1 draws a scene from a prompt (the generation sped up 4x).
 
-<!-- images.mp4 -->
 https://github.com/user-attachments/assets/fe9413c7-2896-4a7c-b5e9-bbb84086d930
 
 **Documents:** PP-DocLayoutV3 finds a page's regions and PaddleOCR-VL reads them, tables included.
 
-<!-- documents.mp4 -->
 https://github.com/user-attachments/assets/ecfffb43-e2dd-4b67-8e23-e5d8c13930fe
 
 **Code:** the coding agent fixes a small package until its tests pass (sped up 2x).
 
-<!-- code.mp4 -->
 https://github.com/user-attachments/assets/aafef4aa-109a-4938-8c3e-7c5a49e37db2
 
 **Worlds:** a panorama becomes a 3D world of Gaussian splats (about 45 minutes, sped up 200x), then explored in the viewer.
 
-<!-- worlds.mp4 -->
 https://github.com/user-attachments/assets/28b2b0f4-75c5-4d2f-975d-b3817efc6984
 
 ## Serving
@@ -169,11 +162,12 @@ models at runtime.
 | Area | Endpoints |
 |---|---|
 | Chat and text | `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, Anthropic `/v1/messages` and `count_tokens` |
-| Audio | `/v1/audio/transcriptions`, `/v1/audio/speech`, `/v1/audio/diarization`, `/v1/audio/vad`, Realtime WebSocket transcription at `/v1/realtime` |
-| Images, documents and embeddings | `/v1/images/generations`, `/v1/images/edits`, `/v1/layout/detect`, `/v1/embeddings` |
+| Audio | `/v1/audio/transcriptions`, `/v1/audio/translations`, `/v1/audio/speech`, `/v1/audio/diarization`, `/v1/audio/vad`, Realtime WebSocket transcription at `/v1/realtime` |
+| Images, documents and embeddings | `/v1/images/generations`, `/v1/images/edits`, `/v1/layout/detect`, `/v1/embeddings`, `/v1/rerank` |
+| Decisions | `/v1/decisions` (also answered at `/v1/systemone`) |
 | Agents and files | `/v1/files`, `/v1/containers`, `/v1/skills`, `/v1/sessions`, agent approvals |
 | Long-running jobs | `/v1/jobs` (3D reconstruction and world generation, queued beside the models, with progress events and cancel) |
-| Operations | `/v1/models` (add, unload, reload, alias, tune), `/v1/manager` (inventory, download, load), `/metrics` (Prometheus), `/v1/system/doctor` |
+| Operations | `/v1/models` (add, unload, reload, alias, tune), `/v1/manager` (inventory, download, load), LoRA adapters (`/v1/lora_adapters`, load and unload), `/metrics` (Prometheus), `/v1/system/doctor` |
 
 - **API keys:** keyed mode gives each client its own sessions and files. Without keys, admin actions are open to
   browsers on the server's own machine.
@@ -235,7 +229,7 @@ CUDA build. [Architecture](https://github.com/christopherthompson81/inference.rs
 
 - [Quickstart](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/quickstart.mdx): install, first run, first server
 - [CLI reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/cli/index.md): `run`, `serve`, `agent`, `launch`, `reconstruct`, `worldgen`, `bench`, `tune`, `quantize`, `kernels`, `doctor` and the rest
-- [Speech models](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-speech-models.mdx), [image generation](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-image-generation.mdx), [multimodal input](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/multimodal-input.mdx), [embeddings](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-embeddings.mdx)
+- [Speech models](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-speech-models.mdx), [image generation](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-image-generation.mdx), [multimodal input](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/multimodal-input.mdx), [embeddings and reranking](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-embeddings.mdx), [decision models](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-decision-models.mdx)
 - [Quantization types](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/quantization-types.md) and [hardware support](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/hardware-support.md)
 - [Troubleshooting](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/troubleshooting.md) and [environment variables](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/environment-variables.md)
 
