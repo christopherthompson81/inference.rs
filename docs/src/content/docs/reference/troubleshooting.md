@@ -33,7 +33,7 @@ Add `--quant 4`. If still too large, try `--quant 2` or split across GPUs with `
 
 Verify accelerator features are compiled in with `inference doctor`. If `cuda` is missing, the binary was built without GPU support.
 
-For CUDA decode throughput, also check whether [paged attention](/guides/perf/paged-attention/) is active. Paged decode on the FlashInfer-layout cache (run by fattn) and CUDA graphs are enabled by default for compatible CUDA paged decode paths.
+For CUDA decode throughput, also check whether [paged attention](/guides/perf/paged-attention/) is active. Paged decode on the HND-layout cache (run by fattn) and CUDA graphs are enabled by default for compatible CUDA paged decode paths.
 
 ### CUDA graphs do not appear to help
 
@@ -60,7 +60,7 @@ The default allows any origin. Custom CORS configuration is only available progr
 
 ### `413 Payload Too Large`
 
-The default body limit is 50 MB and is not configurable via the CLI. Configure programmatically through `InferenceRsServerRouterBuilder`.
+The default body limit is 50 MB; the audio routes allow 512 MB and the job routes 2048 MB. The limits are not configurable via the CLI. Configure programmatically through `InferenceRsServerRouterBuilder`.
 
 ### UI does not load at `/ui`
 

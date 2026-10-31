@@ -47,7 +47,8 @@ directory containing the local `-f` file is used as the model directory.
 and prefers `Q4_K_M` when it is available. Use `-f` when you need an exact variant, or when a
 repository contains several models rather than variants of one model. Use a supported bit width or
 quant name for GGUF. `--quant auto` is for standard model repositories and does not select GGUF
-artifacts. IQ GGUF artifacts are not supported yet; choose a Q/K variant from the repository.
+artifacts. A bit width such as `--quant 4` ranks only Q/K files and skips IQ ones; name the IQ quant
+(`--quant IQ4_XS`) or pass the file with `-f` to load one.
 
 Split GGUF files use semicolon-separated names:
 
@@ -284,4 +285,4 @@ ranked projectors, or incomplete GGUF metadata.
 | Projector selection is ambiguous | Pass the exact projector filename with `--mmproj`. |
 | Original configuration or processor assets are missing | Pass the original model ID or a local asset directory with `--tok-model-id`. |
 | Tokenizer conversion reports an unsupported profile | Supply the original `tokenizer.json` with `-t`, or use `--tok-model-id`. |
-| An IQ GGUF does not load | IQ GGUF formats are not supported yet; choose a supported Q/K quant listed in [GGUF compatibility](/reference/gguf-support/#storage-formats). |
+| `--quant` with a bit width reports only IQ matches | Bit widths skip IQ files; name the IQ quant (`--quant IQ4_XS`) or pass the file with `-f`. Supported types are in [GGUF compatibility](/reference/gguf-support/#storage-formats). |

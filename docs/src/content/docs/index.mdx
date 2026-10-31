@@ -1,6 +1,6 @@
 ---
 title: inference.rs
-description: Fast, flexible LLM inference engine written in Rust. Run 40+ model families including text, vision, video, audio, speech, image generation, and embeddings, with OpenAI-compatible APIs, Anthropic-compatible Messages APIs, and built-in agentic features.
+description: Fast, flexible LLM inference engine written in Rust. Run 40+ model families including text, vision, video, audio, speech recognition, text to speech, image generation, embeddings, reranking, decision models, and 3D reconstruction and worlds, with OpenAI-compatible APIs, Anthropic-compatible Messages APIs, and built-in agentic features.
 template: splash
 hero:
   title: Fast, flexible LLM inference.
@@ -39,6 +39,26 @@ import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
     title="Run GGUF models"
     href="/guides/models/run-gguf/"
     description="Load a local GGUF file or select an artifact from a Hugging Face repository."
+  />
+  <LinkCard
+    title="Use speech models"
+    href="/guides/models/use-speech-models/"
+    description="Transcribe, translate, and diarize audio, detect voice activity, and synthesize speech."
+  />
+  <LinkCard
+    title="Use embeddings and rerankers"
+    href="/guides/models/use-embeddings/"
+    description="Embed text through /v1/embeddings and rank documents with a cross-encoder through /v1/rerank."
+  />
+  <LinkCard
+    title="Use decision models"
+    href="/guides/models/use-decision-models/"
+    description="Answer typed questions about text, with calibrated probabilities, through /v1/decisions."
+  />
+  <LinkCard
+    title="Build 3D scenes"
+    href="/guides/models/use-3d-reconstruction/"
+    description="Reconstruct photos or a video into Gaussian splats, or generate a 3D world from a panorama."
   />
   <LinkCard
     title="Quantize a model"
@@ -110,8 +130,8 @@ import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
     [Distributed inference](/guides/perf/distributed-inference/)
   </Card>
   <Card title="Web UI" icon="laptop">
-    Browser chat with reasoning blocks, tool, code, and shell call
-    visualization, and inline search results.
+    A tab per job: chat, a coding agent, speech to text, text to speech,
+    images, documents, 3D worlds, and a model manager.
     [Web UI](/guides/serve/with-web-ui/)
   </Card>
 </CardGrid>

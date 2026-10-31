@@ -16,6 +16,7 @@ Lookup-oriented pages. For task-oriented documentation, start at the [Quickstart
 - [Hardware support](/reference/hardware-support/): supported GPUs, compute capabilities, and accelerators; which prebuilt binaries are published.
 - [Supported models](/reference/supported-models/): architectures, modalities, quantization compatibility, per-family notes.
 - [Quantization types](/reference/quantization-types/): bit widths, hardware constraints, quality.
+- [GGUF support](/reference/gguf-support/): GGUF architectures, storage types, and what loads from GGUF.
 - [UQFF format](/reference/uqff-format/): on-disk layout of the UQFF quantization format.
 - [Cargo features](/reference/cargo-features/): build-from-source feature flags.
 - [Environment variables](/reference/environment-variables/): every env var the binary or build scripts read.

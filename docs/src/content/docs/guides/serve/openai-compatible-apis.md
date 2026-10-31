@@ -46,7 +46,7 @@ print(response.choices[0].message.content)
 
 For a loaded LoRA alias, either set `model="code"` like vLLM or keep the base model explicit and pass `extra_body={"adapter": "code"}`. The latter also accepts an exact generation object.
 
-The `api_key` is required by the client but not validated by the server; see [authentication](/reference/http-api/#authentication). Set `stream=True` for token-by-token output ([full example](/examples/server/streaming/)).
+The `api_key` is required by the client; an open server ignores it (any non-empty string works) and a keyed server requires a valid one. See [authentication](/reference/http-api/#authentication). Set `stream=True` for token-by-token output ([full example](/examples/server/streaming/)).
 
 ## Endpoints
 
@@ -64,6 +64,11 @@ The `api_key` is required by the client but not validated by the server; see [au
 | `POST /v1/images/generations` | Image generation. |
 | `POST /v1/images/edits` | Image editing and subject references (HiDream-O1-Image). |
 | `POST /v1/audio/speech` | Text to speech. |
+| `POST /v1/audio/transcriptions` | [Speech recognition](/guides/models/use-speech-models/). |
+| `POST /v1/audio/translations` | Speech recognition into English ([Whisper](/guides/models/use-speech-models/#whisper-speech-recognition)). |
+| `GET /v1/realtime` | Realtime transcription sessions over WebSocket ([streamed transcription](/guides/models/use-speech-models/#streamed-transcription)). |
+| `POST /v1/rerank` | Document reranking with a cross-encoder ([reranking](/guides/models/use-embeddings/#reranking-with-a-cross-encoder)). |
+| `POST /v1/decisions` | Answers and scores from [decision models](/guides/models/use-decision-models/). |
 | `POST /v1/files` | Upload OpenAI-compatible user files. |
 | `GET /v1/files` | List uploaded and generated files. |
 | `POST /v1/load_lora_adapter` | Load a local LoRA adapter, or atomically replace one with `load_inplace`. Available only when runtime updating is enabled. |
@@ -75,7 +80,7 @@ Every path with full request and response schemas is in the [generated HTTP API 
 :::caution[Compatibility gaps]
 Most OpenAI-compatible fields work, but a few common ones have limitations:
 
-- `user`, `stream_options`, `metadata`, `parallel_tool_calls` - accepted but ignored. `seed` controls deterministic request-scoped sampling.
+- `user`, `stream_options`, `metadata` - accepted but ignored. `parallel_tool_calls: false` runs server-side tool calls one at a time. `seed` controls deterministic request-scoped sampling.
 - `code_interpreter` supports only `{"container":{"type":"auto"}}`; OpenAI code-interpreter container ids and `container.file_ids` are not supported.
 - Responses `web_search` does not support image search or `external_web_access: false`.
 - Responses `shell` supports `environment.type = "container_auto"` and uploaded `skill_reference` entries; local environments, container references, and inline container-created skills are not implemented. Anthropic Messages uses the same store through `container.skills` with `type = "custom"`.
@@ -106,7 +111,7 @@ For tool timelines, generated files, search, code execution, shell, Skills, and 
 `-p/--port` (default 1234) and `--host` (default `0.0.0.0`) control the bind address. `--no-ui` disables the [web UI](/guides/serve/with-web-ui/) at `/ui`. All flags are in the [CLI reference](/reference/cli/serve/); the equivalent config file for multi-model, repeatable deployments is the [TOML config reference](/reference/cli-toml-config/), which also covers CORS, body limits, authentication, and logging.
 
 :::caution
-The default `--host 0.0.0.0` accepts connections from any host on the network. Use `--host 127.0.0.1` to restrict to the local machine, and put authentication in a reverse proxy before exposing the server.
+The default `--host 0.0.0.0` accepts connections from any host on the network. Use `--host 127.0.0.1` to restrict to the local machine, and give the server [API keys](/reference/http-api/#authentication) (with TLS in front) before exposing it.
 :::
 
 ## Examples

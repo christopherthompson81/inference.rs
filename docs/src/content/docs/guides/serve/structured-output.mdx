@@ -170,6 +170,6 @@ Full examples: [regex](/examples/server/regex/), [lark](/examples/server/lark/),
 
 ## Notes
 
-- `response_format` accepts `{"type": "text"}` (no constraint) and `{"type": "json_schema", ...}`. OpenAI's `json_object` mode is not accepted; supply a schema instead. See [OpenAI compatibility](/reference/openai-compatibility/) for field-level deviations.
+- `response_format` accepts `{"type": "text"}` (no constraint), `{"type": "json_object"}` (any JSON object) and `{"type": "json_schema", ...}`. See [OpenAI compatibility](/reference/openai-compatibility/) for field-level deviations.
 - Constrained decoding restricts which tokens can be sampled; it does not change what the model wants to say. Prompting for the data you expect still matters, and a low temperature helps on extraction tasks.
 - Schema output shape may differ from OpenAI's behavior on ambiguous schemas (llguidance enforces the schema literally).

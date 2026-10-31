@@ -146,7 +146,7 @@ Qwen3-VL, Gemma 4, and the native Muse Glimmer safetensors checkpoint accept vid
 
 ## Audio
 
-Audio support is model-specific: Gemma 4, Gemma 3n, Phi 4 Multimodal, MiniCPM-O, and Voxtral accept `audio_url` parts (Voxtral is the dedicated audio-understanding model; see [speech models](/guides/models/use-speech-models/)).
+Audio support is model-specific: Gemma 4, Gemma 3n, Phi 4 Multimodal, MiniCPM-O, Voxtral, Qwen3-ASR, and Granite Speech accept audio parts (Voxtral, Qwen3-ASR, and Granite Speech are dedicated audio models; see [speech models](/guides/models/use-speech-models/) and [model family notes](/guides/models/model-family-notes/)). The decision model d1-omni reads an audio clip through `/v1/decisions` instead; see [decision models](/guides/models/use-decision-models/#images-and-audio).
 
 ```json
 {
@@ -156,6 +156,12 @@ Audio support is model-specific: Gemma 4, Gemma 3n, Phi 4 Multimodal, MiniCPM-O,
     {"type": "text", "text": "Transcribe this."}
   ]
 }
+```
+
+OpenAI's `input_audio` part carries the clip inline as base64 (a missing `format` reads as WAV); `audio_url` also takes `http(s)` and `data:` URLs:
+
+```json
+{"type": "input_audio", "input_audio": {"data": "<base64>", "format": "wav"}}
 ```
 
 WAV, MP3, FLAC, and OGG decode natively. Convert other formats with FFmpeg first. [Full example](/examples/python/phi4mm-audio/).

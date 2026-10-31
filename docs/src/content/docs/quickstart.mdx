@@ -222,7 +222,7 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
-The `api_key` field is required by the client but not validated by the server.
+The `api_key` field is required by the client; an open server ignores it and a keyed server requires a valid one ([authentication](/reference/http-api/#authentication)).
 
 </TabItem>
 <TabItem label="Rust">

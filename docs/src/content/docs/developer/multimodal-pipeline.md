@@ -11,7 +11,7 @@ Content parts are ordered in the request body. The engine preserves that order w
 
 ## Image path
 
-1. **Decode.** The URL form (`file://`, `http(s)://`, `data:image/...;base64,`) is resolved to a pixel buffer. HTTP URLs trigger a fetch.
+1. **Decode.** The source is resolved to bytes, then to a pixel buffer. The engine itself reads only `data:image/...;base64,` URLs and attachments passed beside the request (`media://<index>`); any other source goes to the client's media fetcher. The server's fetcher reads public `http(s)://` addresses and the web UI's `inference-upload:` references and rejects `file://`; a local client's (the CLI's) also reads file paths, `file://` URLs and any address.
 2. **Preprocess.** Model-specific: resize to the vision encoder's expected resolution, normalize per-channel, tensorize.
 3. **Encode.** The vision encoder produces a sequence of patch embeddings.
 4. **Project.** A learned projection maps patch embeddings to the transformer's hidden dimension.

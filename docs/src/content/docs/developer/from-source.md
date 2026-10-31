@@ -55,11 +55,13 @@ The full flag list, per-hardware recommendations, and per-flag effects live in t
 
 Use `cargo build --release -p inference-cli` for incremental development.
 
-Some tests are gated behind feature flags. Core test suite:
+Tests run under [cargo-nextest](https://nexte.st/), which `--features cuda` requires (plain `cargo test` shares one CUDA context across a binary's tests). The workspace suite on CPU:
 
 ```bash
-cargo test -p inference-core -p inference-quant -p inference-vision
+scripts/local_ci.sh --tests
 ```
+
+`--cuda` runs it with CUDA and `--metal` on macOS.
 
 In the quantization crate, some tests run only with a specific backend feature enabled.
 

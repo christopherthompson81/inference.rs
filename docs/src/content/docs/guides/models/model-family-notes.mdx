@@ -107,6 +107,10 @@ inference run -m openai/gpt-oss-20b
 
 ISQ applies only to the attention layers (and `lm_head`); the expert weights are already quantized.
 
+## Qwen 1
+
+Qwen 1 (`QWenLMHeadModel`, e.g. `Qwen/Qwen-1_8B-Chat`) reads its `qwen.tiktoken` tokenizer when the repository has no `tokenizer.json`, and without a chat template in the repository it uses the ChatML layout of the reference `make_context`, with its default system turn. A safetensors load caps the context at the config's `seq_length`: past it the reference switches on dynamic NTK and logn scaling, which are not implemented. The `qwen` GGUF architecture loads too.
+
 ## Qwen3 Next
 
 Qwen3 Next mixes Gated Delta Network (linear attention) layers with full softmax attention, so its cost profile at long contexts differs from a pure softmax model. Qwen3-Coder-Next checkpoints use the same loader.

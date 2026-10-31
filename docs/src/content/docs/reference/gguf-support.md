@@ -29,6 +29,7 @@ Fine-tunes and model sizes within a family use the same entry.
 | Qwen3-Next and Qwen3-Coder-Next | `qwen3next` |
 | Qwen3.5 and Qwen3.6 dense | `qwen35` |
 | Qwen3.5 and Qwen3.6 MoE | `qwen35moe` |
+| Qwen3.8-Flash-Next | `qwen4exp` |
 | StarCoder2 | `starcoder2` |
 | DeepSeek-V2, DeepSeek-V3, DeepSeek-R1 (non-distill), GLM-4 MoE Lite | `deepseek2` |
 | GLM-4 dense | `glm4` |
@@ -115,8 +116,10 @@ inference.rs accepts GGUF files using the following storage types. A file can mi
 | ik_llama.cpp IQK quants | `IQ2_K`, `IQ3_K`, `IQ4_K`, `IQ5_K`, `IQ6_K`, `IQ2_KS`, `IQ3_KS`, `IQ4_KS`, `IQ5_KS`, `IQ4_KSS`, `IQ2_KL` |
 | GPT-OSS | The GPT-OSS MXFP4 representation |
 
-The IQ, trellis and IQK types run on CUDA and Metal; on the CPU they are dequantized for each matmul. They are
-supported for dense linear weights, not for MoE expert stacks. Tensor parallelism cannot split the rows of
+The IQ, trellis and IQK types run on CUDA and Metal; on the CPU they are dequantized for each matmul. On CUDA, MoE
+expert stacks of these types run through the expert-indexed matvec kernels. Experts kept in host memory by
+[expert offload](/guides/perf/moe-expert-offload/) run on the CPU kernels for IQ3_S, IQ4_XS, IQ4_KSS and IQ4_NL (and
+Q2_K-Q6_K, Q8_0). Tensor parallelism cannot split the rows of
 the trellis and `_KS` / `_KSS` / `_KL` types, since each of their rows keeps one scale. llama-quantize's IQ mixes (`IQ2_M`,
 `IQ3_XS`, `IQ3_M`) and ik_llama.cpp's default mixes use only the types above. ik_llama.cpp's bitnet types
 and its CPU-repacked `_R4` / `_R8` layouts are not supported. Other storage types not listed above
@@ -144,5 +147,11 @@ are mapped onto that order when the adapter loads. Dynamic LoRA is rejected for 
 adjacent-RoPE architectures, including Idefics3, Mistral 3/Pixtral, Llama 4, and Muse Glimmer.
 Base-model loading is unaffected.
 
-GGUF support covers text generation and the multimodal families listed above. GGUF is not a
-loading format for embedding, speech, diffusion, or image-generation pipelines.
+Beyond the text and multimodal families above, GGUF also loads:
+
+- Encoder embedders and rerankers as llama.cpp's converter writes them (`bert`, `nomic-bert`, `jina-bert-v3`, `eurobert` and others); see [embeddings](/guides/models/use-embeddings/#gguf-embedders).
+- Speech: Parakeet ASR GGUFs (NVIDIA's own, or written by `inference quantize asr`), Qwen3-ASR from a `qwen3vl` text GGUF with its `qwen3a` projector, Silero VAD, and audio.cpp's Kokoro GGUF; see [speech models](/guides/models/use-speech-models/). Whisper does not load from GGUF.
+- Image generation: FLUX transformers (with a T5 encoder GGUF) and HiDream-O1 in ComfyUI-GGUF's layout; see [image generation](/guides/models/use-image-generation/).
+- World generation: WorldStereo-2 and the umT5 text encoder; see [3D worlds](/guides/models/generate-3d-worlds/).
+- Decision models, from llama.cpp's GGUFs of them; see [decision models](/guides/models/use-decision-models/).
+- PP-DocLayoutV3 layout detection.
