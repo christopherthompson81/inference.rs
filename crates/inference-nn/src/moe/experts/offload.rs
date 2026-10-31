@@ -236,11 +236,11 @@ impl Shared {
             state.pending[slot] = true;
             in_use[slot] = true;
             fills()
-                .send(Fill {
+                .send(FillJob::Fill(Fill {
                     shared: self.clone(),
                     slot,
                     expert,
-                })
+                }))
                 .ok();
         }
         Ok(())
@@ -278,6 +278,13 @@ struct Fill {
     expert: usize,
 }
 
+enum FillJob {
+    Fill(Fill),
+    // a landed fill's layer, dropped on the fill thread: the last reference frees the layer's stream, a CUDA call a
+    // host function may not make (the driver deadlocks), and a fill can land after its engine is gone
+    Release(Arc<Shared>),
+}
+
 unsafe extern "C" fn fill_landed(data: *mut std::ffi::c_void) {
     // SAFETY: `data` is the box `Shared::fill` leaked for this call
     let Fill {
@@ -285,11 +292,19 @@ unsafe extern "C" fn fill_landed(data: *mut std::ffi::c_void) {
         slot,
         expert,
     } = *unsafe { Box::from_raw(data.cast::<Fill>()) };
-    let mut state = shared.state.lock().expect("expert cache poisoned");
-    state.pending[slot] = false;
-    if state.expert_in[slot] == Some(expert) {
-        state.slot_of[expert] = Some(slot);
-        shared.table()[expert] = u32::try_from(slot).expect("slot ids fit u32");
+    {
+        let mut state = shared.state.lock().expect("expert cache poisoned");
+        state.pending[slot] = false;
+        if state.expert_in[slot] == Some(expert) {
+            state.slot_of[expert] = Some(slot);
+            shared.table()[expert] = u32::try_from(slot).expect("slot ids fit u32");
+        }
+    }
+    if let Err(std::sync::mpsc::SendError(FillJob::Release(shared))) =
+        fills().send(FillJob::Release(shared))
+    {
+        // the fill thread is gone, so the process is exiting: leak the layer rather than free it here
+        std::mem::forget(shared);
     }
 }
 
@@ -305,19 +320,22 @@ impl Shared {
 }
 
 // One thread issues every layer's cache fills: host functions may not call CUDA themselves
-fn fills() -> &'static Sender<Fill> {
-    static FILLS: OnceLock<Sender<Fill>> = OnceLock::new();
+fn fills() -> &'static Sender<FillJob> {
+    static FILLS: OnceLock<Sender<FillJob>> = OnceLock::new();
     FILLS.get_or_init(|| {
-        let (send, receive): (Sender<Fill>, Receiver<Fill>) = std::sync::mpsc::channel();
+        let (send, receive): (Sender<FillJob>, Receiver<FillJob>) = std::sync::mpsc::channel();
         std::thread::Builder::new()
             .name("moe-expert-fills".into())
             .spawn(move || {
-                for Fill {
-                    shared,
-                    slot,
-                    expert,
-                } in receive
-                {
+                for job in receive {
+                    let FillJob::Fill(Fill {
+                        shared,
+                        slot,
+                        expert,
+                    }) = job
+                    else {
+                        continue;
+                    };
                     if let Err(err) = shared.clone().fill(slot, expert) {
                         tracing::error!("MoE expert cache fill failed: {err}");
                         shared.release(slot, expert);

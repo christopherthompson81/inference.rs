@@ -513,7 +513,12 @@ impl CudaContext {
     /// Records a result for later inspection when a Result can be returned.
     pub fn record_err<T>(&self, result: Result<T, DriverError>) {
         if let Err(err) = result {
-            self.error_state.store(err.0 as u32, Ordering::Relaxed)
+            // a drop has no caller to return to, so a new error is logged where it happens; repeats of it are not
+            if self.error_state.swap(err.0 as u32, Ordering::Relaxed) != err.0 as u32 {
+                tracing::error!(
+                    "CUDA error with no caller to return it to, kept for this context's next call: {err:?}"
+                );
+            }
         }
     }
 }
@@ -864,6 +869,9 @@ impl<T> CudaSlice<T> {
 impl<T> Drop for CudaSlice<T> {
     fn drop(&mut self) {
         let ctx = &self.stream.ctx;
+        // a slice dropped on a thread with no current context (an embedder's thread closing an engine) would fail its
+        // free with CUDA_ERROR_INVALID_CONTEXT, which `record_err` keeps quiet, and leak the allocation
+        ctx.record_err(ctx.bind_to_thread());
         if ctx.is_managing_stream_synchronization() {
             if let Some(read) = self.read.as_ref() {
                 ctx.record_err(self.stream.wait(read));

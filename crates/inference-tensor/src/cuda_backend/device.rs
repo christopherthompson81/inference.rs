@@ -995,3 +995,36 @@ impl BackendDevice for CudaDevice {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{DType, Device, Result, Tensor};
+
+    // enough to come from the memory pool rather than a cached small block
+    const ELEMENTS: usize = 1 << 20;
+
+    crate::gpu_cases!(
+        cuda_cases,
+        [a_tensor_dropped_on_a_thread_without_a_context_frees_cleanly]
+    );
+
+    // An engine closed from its embedder's thread drops its tensors where no context is current: their frees bind it
+    // rather than fail with CUDA_ERROR_INVALID_CONTEXT, which the context keeps and later calls report.
+    fn a_tensor_dropped_on_a_thread_without_a_context_frees_cleanly() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let Device::Cuda(cuda) = &device else {
+            unreachable!("a CUDA device");
+        };
+        let tensor = Tensor::zeros(ELEMENTS, DType::F32, &device)?;
+        device.synchronize()?;
+        std::thread::spawn(move || drop(tensor))
+            .join()
+            .expect("the dropping thread panicked");
+        cuda.cuda_stream()
+            .context()
+            .check_err()
+            .map_err(crate::Error::wrap)
+    }
+}

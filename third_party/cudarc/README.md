@@ -19,6 +19,13 @@
 >   synchronizing frees succeed while invalidating the capture): either, on one thread, silently invalidated another
 >   thread's open capture.
 >
+> - `src/driver/safe/core.rs`: `CudaSlice`'s drop binds its context to the thread first, as `CudaStream`'s does: a slice
+>   dropped on a thread with no current context (a C ABI caller closing an engine) failed its `cuMemFreeAsync` with
+>   `CUDA_ERROR_INVALID_CONTEXT`, which `record_err` kept quiet, and the allocation leaked.
+>
+> - `src/driver/safe/core.rs` and `Cargo.toml`: `CudaContext::record_err`, where drops put the errors they cannot return,
+>   logs each new one (`tracing`, a new dependency) instead of only keeping it for the context's next call.
+>
 > Everything else is upstream. To re-sync, copy a new crates.io release and reapply the changes above.
 
 # cudarc: minimal and safe api over the cuda toolkit
