@@ -629,11 +629,17 @@ fn gguf_models_in(
             } else if facts.architecture.as_deref() == Some(LAYOUT_ARCHITECTURE) {
                 model.kind = Some(InventoryKind::Layout);
             } else {
-                let text = facts
-                    .architecture
-                    .as_deref()
-                    .is_some_and(inference_gguf::loads_architecture);
-                // a loadable text architecture is never one of the GGUFs detection routes elsewhere
+                // a HiDream GGUF names its Qwen3-VL backbone's text architecture: detection routes it to diffusion
+                let hidream = inference_core::DiffusionLoaderType::auto_detect_hidream_gguf(
+                    &shards[0].to_string_lossy(),
+                )
+                .is_some();
+                let text = !hidream
+                    && facts
+                        .architecture
+                        .as_deref()
+                        .is_some_and(inference_gguf::loads_architecture);
+                // other loadable text architectures are never one of the GGUFs detection routes elsewhere
                 if text {
                     model.kind = Some(InventoryKind::Text);
                 } else if let Ok(detected) = detect_local_model(&shards[0]) {
@@ -852,6 +858,43 @@ mod tests {
             .iter()
             .find(|model| model.path.ends_with(name))
             .unwrap_or_else(|| panic!("`{name}` is missing from {:?}", scan.models))
+    }
+
+    #[test]
+    fn a_hidream_gguf_is_an_image_model_despite_its_text_backbone() {
+        use inference_tensor::{
+            Device, Tensor,
+            quantized::{GgmlDType, QTensor},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("HiDream-O1-Dev-Q8_0.gguf");
+        let patch_embed = QTensor::quantize(
+            &Tensor::zeros((2, 2), inference_tensor::DType::F32, &Device::Cpu).unwrap(),
+            GgmlDType::F32,
+        )
+        .unwrap();
+        let metadata = [
+            ("general.architecture", text("qwen3vl")),
+            ("general.type", text("diffusion")),
+        ];
+        let metadata = metadata
+            .iter()
+            .map(|(key, value)| (*key, value))
+            .collect::<Vec<_>>();
+        let mut file = fs::File::create(&path).unwrap();
+        gguf_file::write(
+            &mut file,
+            &metadata,
+            &[("model.x_embedder.proj1.weight", &patch_embed)],
+        )
+        .unwrap();
+        let scan = scan_models(&ScanRequest {
+            folders: vec![dir.path().to_path_buf()],
+            ..Default::default()
+        });
+        let model = by_name(&scan, "HiDream-O1-Dev-Q8_0.gguf");
+        assert_eq!(model.kind, Some(InventoryKind::ImageGeneration));
+        assert_eq!(model.loader.as_deref(), Some("hidream-o1-dev"));
     }
 
     #[test]
