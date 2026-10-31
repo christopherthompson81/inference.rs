@@ -513,7 +513,12 @@ impl CudaContext {
     /// Records a result for later inspection when a Result can be returned.
     pub fn record_err<T>(&self, result: Result<T, DriverError>) {
         if let Err(err) = result {
-            self.error_state.store(err.0 as u32, Ordering::Relaxed)
+            // a drop has no caller to return to, so a new error is logged where it happens; repeats of it are not
+            if self.error_state.swap(err.0 as u32, Ordering::Relaxed) != err.0 as u32 {
+                tracing::error!(
+                    "CUDA error with no caller to return it to, kept for this context's next call: {err:?}"
+                );
+            }
         }
     }
 }
