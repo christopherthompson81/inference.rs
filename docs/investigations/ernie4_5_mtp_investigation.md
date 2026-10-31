@@ -92,3 +92,37 @@ against spinning.
 **Next:** the remaining host time per step (about 0.7 ms at 254 tok/s greedy):
 - the drafter's lm_head and sampling run eagerly outside its graph;
 - the host reads the drafts back before every verify, although the verify inputs could take them on the device.
+
+## Run 4 - 2026-10-30 21:59
+
+**Question:** does leaving the drafts on the device, so the verifier reads them back with its own outputs, remove the
+second round trip?
+
+**Command:**
+- The change: the head's propose keeps each step's drafts as a `[batch]` U32 tensor and returns them as
+  `SpeculativeTokens::Device`.
+  - Sampled rows take them from `CudaDraftSampler::sample_on_device`.
+  - Greedy rows take them from the packed top-1 kernel's id column.
+  - A chained step feeds them to the graph's token buffer by a device copy (`MtpGraphTokens::Device`), clamped below
+    the vocabulary so an invalid id never reaches the embedding.
+- The bench at one and two drafts, then the node-traced profile at one draft.
+
+**Finding (tok/s, three runs each):**
+
+| Setup | Sampled | Greedy | Run 3, sampled | Run 3, greedy |
+|---|---|---|---|---|
+| 1 draft | 208-209 | 255-259 | 204-207 | 252-254 |
+| 2 drafts | 202-205 | 258-260 | 197-198 | 255-257 |
+
+- In the profile, the drafter's lm_head and sampling run straight into the verify graph, which starts about 35 us after
+  them.
+- The only host gap left is about 130 us after the verify graph, where the host reads the verify outputs and the
+  drafts together and decides what to accept.
+- A step is now about 6.8 ms of verify, 0.37 ms of drafter graph and 0.3 ms of drafter lm_head (`mmvq_gguf_q6_k` over
+  the 103K vocabulary). At about 1.9 tokens a step, 257 tok/s is about 7.4 ms a step, so the GPU is the limit.
+- Moving the drafter's lm_head and sampling into its graph would now only save launches that already overlap GPU work.
+- Acceptance is unchanged at one draft (363 of 402 sampled). At two drafts it is 461 of 604 sampled positions.
+
+**Next:** nothing on the host side. The rest is GPU time:
+- the verify graph's two rows touch more experts than plain decode's one (6.4 ms against 4.6);
+- the drafter repeats the full-vocabulary lm_head.

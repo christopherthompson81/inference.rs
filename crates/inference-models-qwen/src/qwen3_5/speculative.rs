@@ -222,7 +222,7 @@ impl Qwen3_5TextModel {
                 .concat();
             let run = crate::speculative::mtp_graph::MtpGraphRun {
                 shape,
-                tokens: &tokens,
+                tokens: crate::speculative::mtp_graph::MtpGraphTokens::Host(&tokens),
                 head_positions: &mrope,
                 positions: &context_lens,
                 starts: &starts,

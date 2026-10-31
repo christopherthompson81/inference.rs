@@ -564,17 +564,26 @@ impl CudaDraftSampler {
         step: usize,
         logits: &Tensor,
     ) -> Result<(Vec<u32>, crate::ops::CudaDraftSample)> {
-        let batch = self.top_ks.len();
-        let sample = crate::ops::cuda_ranked_topk_draft_sample(
-            logits,
-            &self.params.narrow(0, step * batch, batch)?,
-            &self.top_ks,
-        )?;
+        let sample = self.sample_on_device(step, logits)?;
         let tokens = sample.tokens.to_vec1::<u32>()?;
         if tokens.contains(&crate::ops::CUDA_TOP1_INVALID_TOKEN) {
             inference_tensor::bail!("MTP draft sampling found no finite, unfiltered draft token");
         }
         Ok((tokens, sample))
+    }
+
+    /// One draft step whose `[batch]` tokens stay on the device; an invalid id marks a row with nothing to draft.
+    pub fn sample_on_device(
+        &self,
+        step: usize,
+        logits: &Tensor,
+    ) -> Result<crate::ops::CudaDraftSample> {
+        let batch = self.top_ks.len();
+        crate::ops::cuda_ranked_topk_draft_sample(
+            logits,
+            &self.params.narrow(0, step * batch, batch)?,
+            &self.top_ks,
+        )
     }
 }
 
