@@ -7829,6 +7829,13 @@
             "type": "string",
             "description": "An inventory entry's `path`, or a Hugging Face repository id (`org/name`), downloaded when not cached; a layout\nmodel loads from the inventory."
           },
+          "tok_model_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For a GGUF, the Hugging Face repository its config and tokenizer come from, when its metadata names no base model."
+          },
           "vad": {
             "type": [
               "string",

@@ -47,6 +47,8 @@ impl GdnVHeadLayout {
 #[serde(rename_all = "snake_case")]
 pub enum GdnOutputGate {
     #[default]
+    // transformers' Qwen3.5 configs spell it `swish`
+    #[serde(alias = "swish")]
     Silu,
     Sigmoid,
 }
@@ -160,6 +162,12 @@ mod tests {
         assert_eq!(config.mamba_ssm_dtype.dtype(), DType::F16);
         let config: StateDTypeConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(config.mamba_ssm_dtype.dtype(), DType::F32);
+    }
+
+    #[test]
+    fn output_gate_reads_transformers_swish_as_silu() {
+        let gate: GdnOutputGate = serde_json::from_str(r#""swish""#).unwrap();
+        assert_eq!(gate, GdnOutputGate::Silu);
     }
 
     #[test]

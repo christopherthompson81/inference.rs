@@ -1648,6 +1648,7 @@ class ManagedLoadRequest:
     paged_cache_type: PagedCacheType | None = None
     paged_context_len: int | None = None
     source: str
+    tok_model_id: str | None = None
     vad: str | None = None
 
 
