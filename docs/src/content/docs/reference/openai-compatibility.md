@@ -31,6 +31,7 @@ Loaded dynamic LoRA aliases receive stable qualified model-card IDs from `GET /v
 - `tool_choice`: `"auto"`, `"none"`, `"required"`, Chat Completions specific function objects (`{"type":"function","function":{"name":"..."}}`), Responses-style specific function objects (`{"type":"function","name":"..."}`), and `{"type":"allowed_tools","mode":"auto"|"required","tools":[{"type":"function","name":"..."}]}` work for function tools. `"required"` rejects requests with no available tools.
 - `tools[*].function.strict`: accepted on function tools. When `true`, inference.rs constrains generated tool arguments to the tool's `parameters` JSON Schema. See [tool calling](/guides/agents/tool-calling-basics/).
 - `tools[*].type="code_interpreter"`: accepted as the OpenAI-compatible opt-in for the built-in Python executor. The server must be started with code execution enabled. The only supported container form is `{"type":"auto"}`. Container ids, `container.file_ids`, `container.memory_limit`, and OpenAI container lifecycle endpoints are not supported.
+- `messages[].content[]` audio parts: OpenAI's `{"type":"input_audio","input_audio":{"data":"<base64>","format":"wav"}}` (a missing `format` reads as WAV), and the inference.rs extension `{"type":"audio_url","audio_url":{"url":"..."}}`, which also takes `http(s)` URLs.
 - `messages[].content[]` file parts: `{"type":"file","file":{"file_id":"file-..."}}` and `{"type":"file","file":{"filename":"data.csv","file_data":"data:text/csv;base64,..."}}` are supported. Chat Completions file URLs are not supported; upload the file first or use Responses.
 - `response_format` with `json_schema`: supported; output shape may differ from OpenAI's on ambiguous schemas. `json_object` is not accepted. See [structured output](/guides/serve/structured-output/).
 - `seed`: initializes a deterministic request-scoped sampling stream. Requests with multiple choices derive a distinct stream for each choice.
@@ -204,12 +205,12 @@ JSON body whose `images` are `{"image_url": ...}` entries (`http(s)` or `data:` 
 - `file`, `model`: supported; the file may be any format the audio decoder reads (WAV, MP3, FLAC, OGG, ...).
 - `response_format`: `json`, `text`, `srt`, `vtt` and `verbose_json` are supported.
 - `timestamp_granularities[]`: `word` and `segment`; `verbose_json` always carries segments and adds words when asked.
-- `language`: conditions Nemotron-3.5, which refuses one outside its list; Parakeet accepts and ignores it.
+- `language`: conditions Nemotron-3.5 and Qwen3-ASR, which refuse one outside their lists; Parakeet accepts and ignores it.
 - `prompt`, `temperature`: accepted and ignored.
 - `beam_size` (an inference.rs extension, 1 to 16): beam search for RNN-T and TDT models; unset decodes greedily.
 - `verbose_json`'s `language` is the one Nemotron-3.5 was given or identified, otherwise the request's, echoed. Its segments carry `id`, `start`, `end` and `text` only.
 
-Served by transcription models such as Parakeet. See [speech models guide](/guides/models/use-speech-models/).
+Served by transcription models such as Parakeet, and by audio-in decoders that transcribe (Qwen3-ASR), which give whole-clip segments and no words. See [speech models guide](/guides/models/use-speech-models/).
 
 ### `/v1/audio/translations`
 

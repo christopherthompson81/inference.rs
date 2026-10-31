@@ -444,6 +444,7 @@ impl NormalLoader {
                 .prepared_source
                 .as_ref()
                 .and_then(|source| source.label_decision.clone()),
+            audio_transcriber: None,
             prompt_activation_bytes_per_token: self
                 .inner
                 .prompt_activation_bytes_per_token(&config)?,

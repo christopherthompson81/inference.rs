@@ -219,7 +219,7 @@ Per-request video frame-sampling overrides are not exposed. In multi-turn conver
 
 ## Qwen3-ASR
 
-Qwen3-ASR (`Qwen3ASRForConditionalGeneration`, e.g. `Qwen/Qwen3-ASR-1.7B`) transcribes audio clips, resampled to 16 kHz mono, through the AuT encoder in front of a Qwen3 decoder; each second of audio takes 13 tokens, and the encoder attends within 8 s windows. Send a clip with no text, or with a system turn; the model answers `language <name><asr_text><transcript>`. The original repos are read as published (`thinker.*` weights); the transformers `-hf` conversions are not supported yet.
+Qwen3-ASR (`Qwen3ASRForConditionalGeneration`, e.g. `Qwen/Qwen3-ASR-1.7B`) transcribes audio clips, resampled to 16 kHz mono, through the AuT encoder in front of a Qwen3 decoder; each second of audio takes 13 tokens, and the encoder attends within 8 s windows. It serves `/v1/audio/transcriptions` (see the [speech models guide](/guides/models/use-speech-models/)) and chat requests, where the model answers `language <name><asr_text><transcript>`. Both the original repos (`thinker.*` weights) and the transformers `-hf` conversions load.
 
 It also loads from llama.cpp's GGUFs (a `qwen3vl` text GGUF with its `qwen3a` projector), with the original repo for `config.json` (`--tok-model-id`). The original repo has no `tokenizer.json` or chat template; the GGUF provides both:
 

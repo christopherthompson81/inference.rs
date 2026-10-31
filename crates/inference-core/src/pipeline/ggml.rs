@@ -248,6 +248,7 @@ impl Loader for GGMLLoader {
                 },
                 loaded_for_uqff_write: false,
                 label_decision: None,
+                audio_transcriber: None,
                 prompt_activation_bytes_per_token: None,
             }),
             generation_defaults,

@@ -6,7 +6,7 @@ use crate::qwen3_asr::{
     inputs_processor::{AUDIO_END, AUDIO_START, AUDIO_TOKEN, SAMPLE_RATE},
 };
 
-const TEXT_LAYER_INDEX_PATTERN: &str = r"thinker\.model\.layers\.(\d+)\.";
+const TEXT_LAYER_INDEX_PATTERN: &str = r"(?:thinker\.model|model\.language_model)\.layers\.(\d+)\.";
 // a 30 s clip budgets the encoder's activations
 const MAX_CLIP_SECONDS: usize = 30;
 const MEL_HOP: usize = 160;
@@ -72,6 +72,9 @@ impl MultimodalModelLoader for Qwen3AsrLoader {
     fn prefixer(&self, _config: &str) -> Arc<dyn MultimodalPromptPrefixer> {
         Arc::new(Qwen3AsrPrefixer)
     }
+    fn audio_transcriber(&self, _config: &str) -> Option<AudioTranscriber> {
+        Some(crate::qwen3_asr::transcription::TRANSCRIBER)
+    }
     fn get_device_for_tensor(
         &self,
         config: &str,
@@ -90,16 +93,16 @@ impl MultimodalModelLoader for Qwen3AsrLoader {
 impl IsqModelLoader for Qwen3AsrLoader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[
-            r"^thinker\.model\.embed_tokens\.weight$",
-            r"^thinker\.lm_head\.(weight|bias)$",
+            r"^(thinker\.model|model\.language_model)\.embed_tokens\.weight$",
+            r"^(thinker\.)?lm_head\.(weight|bias)$",
         ])
     }
 
     fn isq_layer_regexes(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[
-            r"thinker\.lm_head\.(weight|bias)$",
-            r"thinker\.model\.layers\.(\d+)\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.(weight|bias)$",
-            r"thinker\.model\.layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.(weight|bias)$",
+            r"^(thinker\.)?lm_head\.(weight|bias)$",
+            r"(thinker\.model|model\.language_model)\.layers\.(\d+)\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.(weight|bias)$",
+            r"(thinker\.model|model\.language_model)\.layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.(weight|bias)$",
         ])
     }
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
@@ -155,10 +158,14 @@ impl DeviceMappedModelLoader for Qwen3AsrLoader {
     ) -> Result<usize> {
         let cfg = Qwen3AsrConfig::from_json(config)?;
         let tc = &cfg.thinker_config.text_config;
+        let (embed, head) = (
+            format!("{}.embed_tokens.weight", cfg.layout.text_model()),
+            format!("{}.weight", cfg.layout.lm_head()),
+        );
         let (embed_pack, head_pack) = super::language_model_pack_factors(
             quantization,
-            "thinker.model.embed_tokens.weight",
-            "thinker.lm_head.weight",
+            &embed,
+            &head,
             tc.tie_word_embeddings,
             dtype,
             weight_pack_factor,
@@ -237,6 +244,7 @@ mod tests {
             Ok(AudioEncoder::new(
                 &cfg.thinker_config.audio_config,
                 vb,
+                cfg.layout,
                 &Device::Cpu,
             )?)
         })?;

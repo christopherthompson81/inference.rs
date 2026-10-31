@@ -87,6 +87,12 @@ impl MultimodalModelLoader for AutoMultimodalLoader {
             .prefixer(config)
     }
 
+    fn audio_transcriber(&self, config: &str) -> Option<inference_nn::loaders::AudioTranscriber> {
+        Self::get_loader(config)
+            .expect("AutoMultimodalLoader")
+            .audio_transcriber(config)
+    }
+
     fn video_frame_sampling(&self, config: &str) -> crate::VideoFrameSampling {
         Self::get_loader(config)
             .expect("AutoMultimodalLoader")

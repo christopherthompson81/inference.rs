@@ -44,7 +44,6 @@ mod qwen_vl_tests;
 mod qwen_vl_vision;
 
 inference_nn::json_config!(
-    qwen3_asr::config::Config,
     minicpmo::config::MiniCpmOConfig,
     muse_glimmer::config::Config,
     qwen1::Config,

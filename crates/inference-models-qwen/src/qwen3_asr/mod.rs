@@ -4,6 +4,7 @@
 pub mod audio;
 pub mod config;
 pub mod inputs_processor;
+pub mod transcription;
 
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::{D, DType, Device, Result, Tensor};
@@ -17,9 +18,6 @@ use crate::{
 };
 use audio::AudioEncoder;
 pub use config::Config;
-
-// the released checkpoints keep the model under this prefix
-pub const THINKER: &str = "thinker";
 
 /// One clip's `(n_mels, frames)` log-mel, padded to whole chunks, with its count of real frames.
 pub struct AudioClip {
@@ -36,6 +34,7 @@ pub struct Qwen3AsrModel {
     text: crate::qwen3::Model,
     audio: AudioEncoder,
     audio_token: u32,
+    layout: config::Layout,
 }
 
 impl Qwen3AsrModel {
@@ -46,18 +45,18 @@ impl Qwen3AsrModel {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
+        let layout = cfg.layout;
         let cfg = &cfg.thinker_config;
-        let vb = vb.pp(THINKER);
         let device = normal_loading_metadata.real_device.clone();
         let audio_vb = vb
-            .pp("audio_tower")
+            .clone()
             .without_lora_registry()
             .set_device(device.clone());
-        let audio = AudioEncoder::new(&cfg.audio_config, audio_vb, &device)?;
+        let audio = AudioEncoder::new(&cfg.audio_config, audio_vb, layout, &device)?;
         let text = crate::qwen3::Model::new_inner(
             &cfg.text_config.qwen3().decoder_spec(),
-            vb.pp("model"),
-            vb.pp("lm_head"),
+            vb.pp(layout.text_model()),
+            vb.pp(layout.lm_head()),
             is_gptx,
             normal_loading_metadata,
             attention_mechanism,
@@ -66,6 +65,7 @@ impl Qwen3AsrModel {
             text,
             audio,
             audio_token: cfg.audio_token_id,
+            layout,
         })
     }
 
@@ -112,12 +112,13 @@ impl Qwen3AsrModel {
 impl IsqModel for Qwen3AsrModel {
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
-        let thinker = uvb.pp(THINKER);
-        thinker.extend(self.text.residual_tensors_m(thinker.pp("model")));
-        thinker
-            .pp("audio_tower")
-            .extend(self.audio.residual_tensors());
-        uvb.to_safetensors()
+        uvb.extend(
+            self.text
+                .residual_tensors_m(uvb.pp(self.layout.text_model())),
+        );
+        let mut tensors = uvb.to_safetensors();
+        tensors.extend(self.audio.residual_tensors(self.layout));
+        tensors
     }
 }
 

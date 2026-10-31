@@ -185,6 +185,22 @@ impl InferenceRs {
             .ok_or(InferenceRsError::EnginePoisoned)
     }
 
+    /// How a model serves transcription requests by decoding, when it is an audio-in decoder that transcribes.
+    pub fn audio_transcriber(
+        &self,
+        model_id: Option<&str>,
+    ) -> Result<Option<inference_nn::loaders::AudioTranscriber>, InferenceRsError> {
+        let resolved_model_id = self.resolve_alias_or_default(model_id)?;
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| InferenceRsError::EnginePoisoned)?;
+        engines
+            .get(&resolved_model_id)
+            .map(|engine_instance| engine_instance.config.audio_transcriber)
+            .ok_or(InferenceRsError::EnginePoisoned)
+    }
+
     /// Add a new model engine to the InferenceRs instance
     pub fn add_model<'a>(
         &'a self,

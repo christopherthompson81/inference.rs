@@ -3,12 +3,12 @@
 
 use inference::{
     AudioInput, Model, ModelDType, MultimodalMessages, MultimodalModelBuilder, RequestBuilder,
-    TextMessageRole,
+    TextMessageRole, TranscriptionRequest, TranscriptionResponseFormat,
 };
 
 #[path = "../support/qwen3_asr_tiny.rs"]
 mod support;
-use support::tiny_checkpoint;
+use support::{tiny_checkpoint, tiny_transformers_checkpoint};
 
 const PROMPT: &str = "Transcribe it.";
 const MAX_LEN: usize = 6;
@@ -19,6 +19,8 @@ const AUDIO_TOKENS: usize = 39;
 // the clip's start and end markers
 const MARKERS: usize = 2;
 const TONE_HZ: f32 = 440.0;
+const WAV_HEADER_BYTES: usize = 44;
+const DURATION_TOLERANCE: f64 = 1e-6;
 // cached KV comes from a different prefill than a full recompute, so logprobs match only to rounding
 const LOGPROB_TOLERANCE: f32 = 1e-3;
 
@@ -92,5 +94,138 @@ async fn a_clip_expands_to_its_tokens_and_a_cached_repeat_decodes_the_same() -> 
         assert_eq!(a, b);
         assert!((la - lb).abs() < LOGPROB_TOLERANCE, "{la} vs {lb}");
     }
+    Ok(())
+}
+
+// 16-bit mono PCM in a RIFF/WAVE container
+fn wav(clip: &AudioInput) -> Vec<u8> {
+    let data = clip.samples.len() * 2;
+    let mut bytes = Vec::with_capacity(WAV_HEADER_BYTES + data);
+    let u32_le = |value: usize| {
+        u32::try_from(value)
+            .expect("a test clip fits a WAV")
+            .to_le_bytes()
+    };
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&u32_le(WAV_HEADER_BYTES - 8 + data));
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&clip.sample_rate.to_le_bytes());
+    bytes.extend_from_slice(&(clip.sample_rate * 2).to_le_bytes());
+    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&u32_le(data));
+    for sample in &clip.samples {
+        bytes.extend_from_slice(&((sample * f32::from(i16::MAX)) as i16).to_le_bytes());
+    }
+    bytes
+}
+
+fn transcription(language: Option<&str>) -> TranscriptionRequest {
+    TranscriptionRequest {
+        model: "default".to_string(),
+        language: language.map(str::to_string),
+        prompt: None,
+        response_format: TranscriptionResponseFormat::VerboseJson,
+        temperature: None,
+        timestamp_granularities: Vec::new(),
+        beam_size: None,
+        diarization_model: None,
+    }
+}
+
+// a transcription request decodes from the model's transcription prompt; a language it was not trained on is refused
+#[tokio::test]
+async fn a_transcription_request_decodes_the_clip() -> anyhow::Result<()> {
+    let checkpoint = tiny_checkpoint()?;
+    let model = build(checkpoint.path()).await?;
+    let audio = wav(&clip());
+    let output = model
+        .transcription(transcription(Some("en")), &audio)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let body: serde_json::Value = serde_json::from_str(&output.body)?;
+    let duration = body["duration"].as_f64().unwrap_or_default();
+    assert!((duration - SAMPLES as f64 / f64::from(SAMPLE_RATE)).abs() < DURATION_TOLERANCE);
+    assert_eq!(body["language"], "en");
+    assert!(
+        model
+            .transcription(transcription(Some("xx")), &audio)
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+// transformers' `-hf` layout loads from its flat config and `model.` names, and transcribes as the original does
+#[tokio::test]
+async fn the_transformers_layout_transcribes_as_the_original() -> anyhow::Result<()> {
+    let original = tiny_checkpoint()?;
+    let transformers = tiny_transformers_checkpoint()?;
+    let audio = wav(&clip());
+    let mut bodies = Vec::new();
+    for checkpoint in [&original, &transformers] {
+        let model = build(checkpoint.path()).await?;
+        let output = model
+            .transcription(transcription(None), &audio)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        bodies.push(output.body);
+    }
+    assert_eq!(bodies[0], bodies[1]);
+    Ok(())
+}
+
+// as the `-hf` repos' template does: each audio part writes its placeholder, the user's text is dropped
+const PARTS_TEMPLATE: &str = "{%- for m in messages -%}{%- if m.role == 'user' -%}<|im_start|>user\n{%- for c in m.content -%}{%- if c.type == 'audio' -%}<|audio_start|><|audio_pad|><|audio_end|>{%- endif -%}{%- endfor -%}<|im_end|>\n{%- endif -%}{%- endfor -%}{%- if add_generation_prompt -%}<|im_start|>assistant\n{%- endif -%}";
+
+// a template that writes the audio placeholder itself gets the content parts, not the flattened text
+#[tokio::test]
+async fn a_template_writing_audio_placeholders_gets_the_parts() -> anyhow::Result<()> {
+    let checkpoint = tiny_transformers_checkpoint()?;
+    std::fs::write(
+        checkpoint.path().join("chat_template.jinja"),
+        PARTS_TEMPLATE,
+    )?;
+    let model = build(checkpoint.path()).await?;
+    let response = model.send_chat_request(request()).await?;
+    // flattened text would hold no placeholder for the template to keep, and the request would fail on the count
+    assert!(response.usage.prompt_tokens > AUDIO_TOKENS + MARKERS);
+    Ok(())
+}
+
+fn chat_json(part: serde_json::Value) -> Vec<u8> {
+    serde_json::json!({
+        "model": "default",
+        "max_tokens": MAX_LEN,
+        "messages": [{"role": "user", "content": [part, {"type": "text", "text": PROMPT}]}],
+    })
+    .to_string()
+    .into_bytes()
+}
+
+// OpenAI's `input_audio` part reads as the same clip an `audio_url` data URL gives
+#[tokio::test]
+async fn an_input_audio_part_is_the_clip_an_audio_url_gives() -> anyhow::Result<()> {
+    use base64::Engine as _;
+    let checkpoint = tiny_checkpoint()?;
+    let model = build(checkpoint.path()).await?;
+    let data = base64::engine::general_purpose::STANDARD.encode(wav(&clip()));
+    let mut usages = Vec::new();
+    for part in [
+        serde_json::json!({"type": "input_audio", "input_audio": {"data": data, "format": "wav"}}),
+        serde_json::json!({"type": "audio_url", "audio_url": {"url": format!("data:audio/wav;base64,{data}")}}),
+    ] {
+        let body = model
+            .chat_json(&chat_json(part), Default::default())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let body: serde_json::Value = serde_json::from_str(&body)?;
+        usages.push(body["usage"]["prompt_tokens"].clone());
+    }
+    assert_eq!(usages[0], usages[1]);
     Ok(())
 }
