@@ -83,6 +83,11 @@ impl SupportedArch for NormalLoaderType {
                 modalities: m,
                 examples: &[ex!("microsoft/Phi-3-medium-4k-instruct")],
             },
+            Self::Qwen => ArchMetadata {
+                families: &["Qwen"],
+                modalities: m,
+                examples: &[ex!("Qwen/Qwen-7B-Chat")],
+            },
             Self::Qwen2 => ArchMetadata {
                 families: &["Qwen2", "Qwen2.5"],
                 modalities: m,

@@ -206,6 +206,10 @@ pub trait NormalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModelLoa
     fn supports_paged_attention(&self, _config: &str) -> Result<bool> {
         Ok(true)
     }
+    /// The chat template of a family whose checkpoints ship none, used when the checkpoint and request give none.
+    fn default_chat_template(&self, _config: &str) -> Option<String> {
+        None
+    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>>;
     fn get_device_for_tensor(
         &self,

@@ -23,6 +23,7 @@ use crate::{
         masker::PastKvLenCache,
     },
     model::{IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel},
+    moe::ExpertProjNames,
     paged_attention::{
         AttentionImplementation, KvCacheLayout, ModelConfigMetadata, PagedAttention,
     },
@@ -39,7 +40,6 @@ pub const MLP: &str = "mlp";
 const DEFAULT_ROPE_THETA: f32 = 10_000.0;
 const MERGED_GATE_UP_CHUNKS: usize = 2;
 const O_PROJ: &str = "o_proj";
-const QKV_PROJ: &str = "qkv_proj";
 // Phi-3 GGUFs carry their LongRoPE factors as tensors
 const PHI_ROPE_FACTORS: (&str, &str) = ("rope_factors_short.weight", "rope_factors_long.weight");
 // Llama 3 checkpoints may carry per-frequency rope factors under this name
@@ -139,6 +139,36 @@ impl Default for NormNames {
     }
 }
 
+/// The modules' names in the checkpoint, where they are not Hugging Face's Llama layout (Qwen 1's `transformer.h`).
+#[derive(Clone, Copy, Debug)]
+pub struct ModuleNames {
+    pub model: &'static str,
+    pub embed_tokens: &'static str,
+    pub layers: &'static str,
+    pub self_attn: &'static str,
+    /// The fused q/k/v projection, when [`DecoderSpec::fused_qkv`] is set.
+    pub qkv_proj: &'static str,
+    /// The dense gated MLP's projections.
+    pub mlp: ExpertProjNames,
+}
+
+impl ModuleNames {
+    pub const HF: Self = Self {
+        model: "model",
+        embed_tokens: "embed_tokens",
+        layers: "layers",
+        self_attn: "self_attn",
+        qkv_proj: "qkv_proj",
+        mlp: ExpertProjNames::DEFAULT,
+    };
+}
+
+impl Default for ModuleNames {
+    fn default() -> Self {
+        Self::HF
+    }
+}
+
 /// Per-head q/k norm under the given names, before RoPE (fused into it for RMS norms) or after it.
 #[derive(Clone, Copy, Debug)]
 pub enum QkNorm {
@@ -226,6 +256,7 @@ pub struct DecoderSpec {
     /// The q/k norms' kind, when not the layer norms'.
     pub qk_norm_kind: Option<NormKind>,
     pub norm_names: NormNames,
+    pub module_names: ModuleNames,
     pub o_bias: bool,
     /// The attention output projection's name, when not `o_proj`.
     pub o_proj_name: Option<&'static str>,
@@ -413,6 +444,7 @@ impl DecoderSpec {
             quantization_config: &self.quantization_config,
             norm: self.norm,
             norm_names: self.norm_names,
+            module_names: self.module_names,
             embed_scale: self.embed_scale,
             final_logit_softcap: self.final_logit_softcap,
             mlp: self.mlp,
@@ -491,6 +523,7 @@ pub struct AttentionBlock {
     qkv: QkvProj,
     o_proj: Arc<dyn QuantMethod>,
     o_proj_name: &'static str,
+    qkv_proj_name: &'static str,
     qk_norm: Option<(QkNorm, Norm, Norm)>,
     clip_qkv: Option<f64>,
     num_heads: usize,
@@ -676,6 +709,7 @@ pub struct StackShape<'a> {
     pub quantization_config: &'a Option<QuantizedConfig>,
     pub norm: NormKind,
     pub norm_names: NormNames,
+    pub module_names: ModuleNames,
     pub embed_scale: Option<f64>,
     pub final_logit_softcap: Option<f32>,
     pub mlp: MlpKind,
@@ -720,8 +754,13 @@ impl LayerBuilder for StandardLayers<'_> {
             load.mapper
                 .set_device(load.layer_idx, vb.pp(name), load.loading_isq)
         };
-        let attention =
-            AttentionBlock::new(spec, load, place("self_attn"), rotary_emb, paged_attn)?;
+        let attention = AttentionBlock::new(
+            spec,
+            load,
+            place(spec.module_names.self_attn),
+            rotary_emb,
+            paged_attn,
+        )?;
         let qc = &spec.quantization_config;
         if let Some(moe) = spec
             .moe
@@ -752,12 +791,13 @@ impl LayerBuilder for StandardLayers<'_> {
                 spec.hidden_act,
                 |in_dim, out_dim, vb| spec.replicated_linear(in_dim, out_dim, false, vb),
             )?),
-            MlpKind::Gated => Box::new(Mlp::new(
+            MlpKind::Gated => Box::new(Mlp::new_named(
                 place(MLP),
                 spec.hidden_size,
                 spec.intermediate_size,
                 &spec.quantization_config,
                 spec.hidden_act,
+                spec.module_names.mlp,
                 load.comm,
             )?),
             MlpKind::MergedGateUp => Box::new(Mlp::new_merged(
@@ -808,7 +848,7 @@ impl AttentionBlock {
                 hidden,
                 q_size + 2 * kv_size,
                 spec.qkv_bias,
-                place(QKV_PROJ),
+                place(spec.module_names.qkv_proj),
             )?;
             let o_proj = spec.replicated_linear(q_size, hidden, spec.o_bias, place(o_proj_name))?;
             let n_kv_groups = spec.num_heads / spec.num_kv_heads;
@@ -868,6 +908,7 @@ impl AttentionBlock {
             qkv,
             o_proj,
             o_proj_name,
+            qkv_proj_name: spec.module_names.qkv_proj,
             qk_norm,
             clip_qkv: spec.clip_qkv,
             num_heads,
@@ -1111,7 +1152,7 @@ impl LayerAttention for AttentionBlock {
                 uvb.pp("k_proj").add(k);
                 uvb.pp("v_proj").add(v);
             }
-            QkvProj::Fused(qkv) => uvb.pp(QKV_PROJ).add(qkv),
+            QkvProj::Fused(qkv) => uvb.pp(self.qkv_proj_name).add(qkv),
         }
         uvb.pp(self.o_proj_name).add(&self.o_proj);
     }
@@ -1288,6 +1329,7 @@ pub struct DecoderStack<A = AttentionBlock, F = Ffn> {
     pub layers: Vec<DecoderLayer<A, F>>,
     norm: Norm,
     norm_names: NormNames,
+    module_names: ModuleNames,
     embed_scale: Option<f64>,
     dtype: DType,
     sliding_window: Option<usize>,
@@ -1391,7 +1433,8 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
         let loading_isq = normal_loading_metadata.loading_isq;
         let real_device = &normal_loading_metadata.real_device;
         let dtype = vb_m.dtype();
-        let embed_vb = mapper.set_nm_device(vb_m.pp("embed_tokens"), loading_isq);
+        let names = shape.module_names;
+        let embed_vb = mapper.set_nm_device(vb_m.pp(names.embed_tokens), loading_isq);
         let embed_tokens = match tied_lm_head {
             Some(head) => embedding_with_legacy_tied_uqff(
                 shape.vocab_size,
@@ -1411,7 +1454,7 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
         };
 
         let builder = make(&*mapper, real_device)?;
-        let vb_l = vb_m.pp("layers");
+        let vb_l = vb_m.pp(names.layers);
         let layers = NiceProgressBar::<_, 'b'>(
             0..shape.layer_windows.len(),
             "Loading repeating layers",
@@ -1469,6 +1512,7 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
             layers,
             norm,
             norm_names: shape.norm_names,
+            module_names: shape.module_names,
             embed_scale: shape.embed_scale,
             dtype,
             sliding_window: shape.sliding_window(),
@@ -1566,10 +1610,11 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
 
     /// The tensors ISQ leaves alone, under the stack's own prefix; `with_projections` for MoE-experts-only ISQ.
     pub fn residual_uvb(&self, uvb_m: &UnVarBuilder, with_projections: bool) {
-        uvb_m.pp("embed_tokens").add(&self.embed_tokens);
+        let modules = self.module_names;
+        uvb_m.pp(modules.embed_tokens).add(&self.embed_tokens);
         self.norm.add_residual(&uvb_m.pp(self.norm_names.last));
         for (layer_idx, layer) in self.layers.iter().enumerate() {
-            let uvb_l = uvb_m.pp("layers").pp(layer_idx);
+            let uvb_l = uvb_m.pp(modules.layers).pp(layer_idx);
             let names = self.norm_names;
             if let (Some(input), Some(name)) = (&layer.norms.input, names.input) {
                 input.add_residual(&uvb_l.pp(name));
@@ -1583,11 +1628,13 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
                 post_attn.add_residual(&uvb_l.pp(attn_name));
                 post_ffn.add_residual(&uvb_l.pp(ffn_name));
             }
-            layer.self_attn.add_residual(&uvb_l.pp("self_attn"));
+            layer.self_attn.add_residual(&uvb_l.pp(modules.self_attn));
             let uvb_ffn = uvb_l.pp(layer.mlp.name());
             layer.mlp.add_residual(&uvb_ffn);
             if with_projections {
-                layer.self_attn.add_projections(&uvb_l.pp("self_attn"));
+                layer
+                    .self_attn
+                    .add_projections(&uvb_l.pp(modules.self_attn));
                 layer.mlp.add_projections(&uvb_ffn);
             }
         }
@@ -1616,7 +1663,7 @@ impl CausalLm {
     ) -> Result<Self> {
         let mut model = Self::new_inner(
             spec,
-            vb.pp("model"),
+            vb.pp(spec.module_names.model),
             vb.pp("lm_head"),
             is_gptx,
             normal_loading_metadata,
@@ -1836,7 +1883,8 @@ impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {
 
     fn residual_uvb(&self, with_projections: bool) -> UnVarBuilder {
         let uvb = UnVarBuilder::new();
-        self.stack.residual_uvb(&uvb.pp("model"), with_projections);
+        self.stack
+            .residual_uvb(&uvb.pp(self.stack.module_names.model), with_projections);
         uvb
     }
 }

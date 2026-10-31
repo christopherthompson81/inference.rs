@@ -52,6 +52,9 @@ impl NormalModelLoader for AutoNormalLoader {
     fn is_gptx(&self, config: &str) -> Result<bool> {
         Self::get_loader(config)?.is_gptx(config)
     }
+    fn default_chat_template(&self, config: &str) -> Option<String> {
+        Self::get_loader(config).ok()?.default_chat_template(config)
+    }
 }
 
 impl IsqModelLoader for AutoNormalLoader {

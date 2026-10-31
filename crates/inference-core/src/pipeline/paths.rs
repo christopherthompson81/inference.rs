@@ -489,6 +489,18 @@ pub(crate) fn get_chat_template(
     }
 }
 
+// Mistral and Qwen 1 checkpoints ship tiktoken ranks in place of a HF tokenizer
+fn native_or_hf_tokenizer(repo: &RepoFiles<'_>) -> Result<PathBuf> {
+    if !repo.has("tokenizer.json")
+        && let Some(native) = super::tokenizer::NATIVE_TOKENIZERS
+            .into_iter()
+            .find(|name| repo.has(name))
+    {
+        return repo.get(native);
+    }
+    repo.get("tokenizer.json")
+}
+
 /// One repository (a hub repo or a local directory) at one revision: what it lists, and a fetch for any file.
 pub(crate) struct RepoFiles<'a> {
     api: ApiRepo,
@@ -605,11 +617,7 @@ pub(crate) fn get_paths(
             trace!("Using tokenizer.json at `{path}`");
             PathBuf::from(path)
         }
-        // Mistral checkpoints ship `tekken.json` in place of a HF tokenizer
-        None if !repo.has("tokenizer.json") && repo.has("tekken.json") => {
-            repo.get("tekken.json")?
-        }
-        None => repo.get("tokenizer.json")?,
+        None => native_or_hf_tokenizer(&repo)?,
     };
     // Mistral's native `params.json` takes precedence over `config.json`
     let config_filename = if repo.has("params.json") {
@@ -717,10 +725,7 @@ pub(crate) fn get_embedding_paths(
     let tokenizer_filename = match request.tokenizer_json {
         Some(path) => PathBuf::from(path),
         None if decision.is_some() => repo.get(super::loaders::DECISION_TOKENIZER)?,
-        None if !repo.has("tokenizer.json") && repo.has("tekken.json") => {
-            repo.get("tekken.json")?
-        }
-        None => repo.get("tokenizer.json")?,
+        None => native_or_hf_tokenizer(&repo)?,
     };
     let config_filename = match decision {
         Some(name) => repo.get(name)?,

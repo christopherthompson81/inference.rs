@@ -39,6 +39,7 @@ const QWEN3_VIDEO_SAMPLING: VideoFrameSampling = VideoFrameSampling::Fps {
 
 mod minicpm_o;
 mod muse_glimmer;
+mod qwen1;
 mod qwen2;
 mod qwen2_5vl;
 mod qwen2_moe;
@@ -55,6 +56,7 @@ mod sizing_tests;
 
 pub use minicpm_o::*;
 pub use muse_glimmer::*;
+pub use qwen1::*;
 pub use qwen2::*;
 pub use qwen2_5vl::*;
 pub use qwen2_moe::*;
@@ -69,6 +71,7 @@ pub use qwen3vl::*;
 
 inference_nn::boxed_loaders!(
     NormalModelLoader:
+    QwenLoader,
     Qwen2Loader,
     Qwen2MoeLoader,
     Qwen3Loader,

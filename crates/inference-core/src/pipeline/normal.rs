@@ -329,12 +329,20 @@ impl NormalLoader {
             &config,
         );
 
-        let chat_template = super::loading::load_chat_template(
+        let mut chat_template = super::loading::load_chat_template(
             paths,
             self.jinja_explicit.as_ref(),
             self.chat_template.as_ref(),
             self.prepared_source.as_ref(),
         );
+        if chat_template.chat_template.is_none()
+            && let Some(template) = self.inner.default_chat_template(&config)
+        {
+            chat_template.chat_template =
+                Some(inference_protocol::chat_template::ChatTemplateValue(
+                    either::Either::Left(template),
+                ));
+        }
 
         // cloned out so the tracker lock is not held through calibration and the UQFF write
         let tracked = tracker.get().clone();

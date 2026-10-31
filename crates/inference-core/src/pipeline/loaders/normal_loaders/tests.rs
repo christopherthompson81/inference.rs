@@ -382,6 +382,18 @@ fn native_gguf_adapter_isq_namespace_matrix() -> Result<()> {
             ],
         },
         NativeIsqNamespaceCase {
+            name: "Qwen 1",
+            loader: Box::new(QwenLoader),
+            config: "",
+            paths: &[
+                "transformer.h.0.attn.c_attn.weight",
+                "transformer.h.0.attn.c_proj.weight",
+                "transformer.h.0.mlp.w1.weight",
+                "transformer.h.0.mlp.w2.weight",
+                "transformer.h.0.mlp.c_proj.weight",
+            ],
+        },
+        NativeIsqNamespaceCase {
             name: "Qwen2 MoE",
             loader: Box::new(Qwen2MoeLoader),
             config: "",
@@ -506,10 +518,10 @@ fn native_gguf_adapter_isq_namespace_matrix() -> Result<()> {
 
     for case in cases {
         let promoted = case.loader.promoted_isq_predicates(case.config)?;
-        let embedding = if case.name == "Qwen3.5" {
-            "model.language_model.embed_tokens.weight"
-        } else {
-            "model.embed_tokens.weight"
+        let embedding = match case.name {
+            "Qwen3.5" => "model.language_model.embed_tokens.weight",
+            "Qwen 1" => "transformer.wte.weight",
+            _ => "model.embed_tokens.weight",
         };
         for path in [embedding, "lm_head.weight"] {
             assert!(
