@@ -66,6 +66,11 @@ impl LayerDeviceMapper {
         }
     }
 
+    // a layer past the mapped stack (an MTP head's) sits with the head it feeds
+    fn layer_device(&self, layer: usize) -> &Device {
+        self.mappings.get(layer).unwrap_or(&self.nm_device)
+    }
+
     fn dtype_on(&self, device: &Device) -> Option<(DType, DType)> {
         let model = self.cpu_f32_from?;
         Some((model, if device.is_cpu() { DType::F32 } else { model }))
@@ -74,7 +79,7 @@ impl LayerDeviceMapper {
 
 impl DeviceMapper for LayerDeviceMapper {
     fn map(&self, input: Tensor, layer: usize) -> Result<Tensor> {
-        let device = &self.mappings[layer];
+        let device = self.layer_device(layer);
         let x = self.cuda_peer_access.to_device(&input, device)?;
         match self.dtype_on(device) {
             Some((model, to)) => cast_activation(x, model, to),
@@ -87,7 +92,7 @@ impl DeviceMapper for LayerDeviceMapper {
         varbuilder: ShardedVarBuilder,
         loading_isq: bool,
     ) -> ShardedVarBuilder {
-        let device = &self.mappings[layer];
+        let device = self.layer_device(layer);
         // an ISQ layer loads where it is quantized and moves later, but in its layer's dtype
         let varbuilder = match self.dtype_on(device) {
             Some((_, to)) => varbuilder.set_dtype(to),

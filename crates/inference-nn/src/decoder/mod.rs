@@ -31,15 +31,19 @@ use crate::{
 };
 
 mod moe;
+mod mtp;
 pub mod qwen3_vl;
 
 pub use moe::{BLOCK_SPARSE_MOE, MoeRouting, MoeSpec, SharedExpertSpec, SparseMoe};
+pub use mtp::{MtpHead, MtpSpec};
 
 /// A layer's feed-forward, dense or routed, as most checkpoints name it.
 pub const MLP: &str = "mlp";
 const DEFAULT_ROPE_THETA: f32 = 10_000.0;
 const MERGED_GATE_UP_CHUNKS: usize = 2;
 const O_PROJ: &str = "o_proj";
+// draft tokens per step when `--mtp-n-predict` names none; one MTP layer chained this deep stays well accepted
+const DEFAULT_MTP_N_PREDICT: usize = 2;
 // Phi-3 GGUFs carry their LongRoPE factors as tensors
 const PHI_ROPE_FACTORS: (&str, &str) = ("rope_factors_short.weight", "rope_factors_long.weight");
 // Llama 3 checkpoints may carry per-frequency rope factors under this name
@@ -280,6 +284,8 @@ pub struct DecoderSpec {
     pub unquantized_lm_head: bool,
     /// A decision head after the stack (vllm-decision2); the model then outputs the normed hidden states.
     pub option_head: Option<crate::option_head::OptionHeadConfig>,
+    /// A multi-token prediction head to draft with, when the checkpoint has one and `--mtp` asked for it.
+    pub mtp: Option<MtpSpec>,
     /// Eager attention runs in f32 whatever the model's dtype.
     pub eager_attention_f32: bool,
 }
@@ -1651,6 +1657,7 @@ pub struct CausalLm<A = AttentionBlock, F = Ffn> {
     cache: EitherCache,
     max_seq_len: usize,
     cfg: ModelConfigMetadata,
+    mtp: Option<Box<MtpHead>>,
 }
 
 impl CausalLm {
@@ -1690,6 +1697,7 @@ impl CausalLm {
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
         let loading_isq = normal_loading_metadata.loading_isq;
+        let vb_mtp = vb_m.clone();
         let stack = DecoderStack::new(
             spec,
             vb_m,
@@ -1703,9 +1711,25 @@ impl CausalLm {
         } else {
             stack.mapper.get_comm_for(0)?.world_size()
         };
+        let mtp = spec
+            .mtp
+            .as_ref()
+            .map(|mtp| {
+                MtpHead::load(
+                    spec,
+                    mtp,
+                    &vb_mtp,
+                    &stack,
+                    is_gptx,
+                    loading_isq,
+                    &attention_mechanism,
+                )
+            })
+            .transpose()?;
         let cfg = ModelConfigMetadata {
             max_seq_len: spec.max_position_embeddings,
-            num_layers: spec.num_layers(),
+            // the head's attention is the paged layer after the stack's
+            num_layers: spec.num_layers() + usize::from(mtp.is_some()),
             hidden_size: spec.hidden_size,
             num_kv_heads: (spec.num_kv_heads / world_size).max(1),
             num_attn_heads: spec.num_heads / world_size,
@@ -1714,14 +1738,16 @@ impl CausalLm {
             v_head_dim: spec.head_dim,
             kv_cache_layout: KvCacheLayout::Standard,
         };
-        Self::with_stack(
+        let mut model = Self::with_stack(
             stack,
             spec.shape(),
             vb_lm_head,
             loading_isq,
             spec.max_position_embeddings,
             cfg,
-        )
+        )?;
+        model.mtp = mtp.map(Box::new);
+        Ok(model)
     }
 }
 
@@ -1798,6 +1824,7 @@ impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {
             cache: EitherCache::Normal(NormalCache::from_types(cache_types)),
             max_seq_len: max_position_embeddings,
             cfg,
+            mtp: None,
         })
     }
 
@@ -1864,7 +1891,11 @@ impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {
         let xs = self
             .stack
             .forward_hooked(xs, masks, Some(cache), ctx, after_layer)?;
-        let xs = ctx.logits(&xs)?;
+        let full = xs;
+        let xs = ctx.logits(&full)?;
+        if let Some(mtp) = &self.mtp {
+            mtp.record(&full, &xs);
+        }
         if self.option_head.is_some() {
             return Ok(xs);
         }
@@ -1883,8 +1914,11 @@ impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {
 
     fn residual_uvb(&self, with_projections: bool) -> UnVarBuilder {
         let uvb = UnVarBuilder::new();
-        self.stack
-            .residual_uvb(&uvb.pp(self.stack.module_names.model), with_projections);
+        let uvb_m = uvb.pp(self.stack.module_names.model);
+        self.stack.residual_uvb(&uvb_m, with_projections);
+        if let Some(mtp) = &self.mtp {
+            mtp.add_residual(&uvb_m);
+        }
         uvb
     }
 }
@@ -1902,7 +1936,102 @@ impl<A: LayerAttention, F: LayerFfn> IsqModel for CausalLm<A, F> {
     }
 }
 
-impl<A: LayerAttention, F: LayerFfn> crate::speculative::SpeculativeTargetMixin for CausalLm<A, F> {}
+impl<A: LayerAttention, F: LayerFfn> crate::speculative::SpeculativeTargetMixin for CausalLm<A, F> {
+    fn attach_speculative(
+        &mut self,
+        config: crate::speculative::SpeculativeConfig,
+    ) -> Result<Option<crate::speculative::SpeculativeAttachInfo>> {
+        let crate::speculative::SpeculativeConfig::Mtp(config) = config else {
+            if let Some(mtp) = &mut self.mtp {
+                mtp.set_n_predict(0);
+            }
+            return Ok(None);
+        };
+        if !config.is_builtin() {
+            inference_tensor::bail!(
+                "this model drafts only with its own MTP head, not an external drafter"
+            );
+        }
+        let Some(mtp) = &mut self.mtp else {
+            inference_tensor::bail!(
+                "`--mtp` asked for this model's MTP head, which its checkpoint does not carry"
+            );
+        };
+        let n_predict = config.n_predict.unwrap_or(DEFAULT_MTP_N_PREDICT);
+        if n_predict == 0 {
+            inference_tensor::bail!("MTP needs at least one draft token");
+        }
+        mtp.set_n_predict(n_predict);
+        Ok(Some(crate::speculative::SpeculativeAttachInfo::mtp(
+            "built-in".to_string(),
+            n_predict,
+        )))
+    }
+
+    fn has_speculative_proposer(&self) -> bool {
+        self.mtp.as_ref().is_some_and(|mtp| mtp.n_predict() > 0)
+    }
+
+    fn speculative_plan(
+        &self,
+        _batch_size: usize,
+    ) -> Option<crate::speculative::SpeculativeBatchPlan> {
+        self.mtp
+            .as_ref()
+            .filter(|mtp| mtp.n_predict() > 0)
+            .map(|mtp| crate::speculative::SpeculativeBatchPlan::new(mtp.n_predict()))
+    }
+
+    fn take_speculative_graph_state(
+        &self,
+    ) -> Option<Box<dyn crate::speculative::SpeculativeGraphState>> {
+        self.mtp
+            .as_ref()
+            .filter(|mtp| mtp.n_predict() > 0)
+            .and_then(|mtp| mtp.take_graph_state())
+    }
+
+    fn install_speculative_graph_state(
+        &self,
+        state: &dyn crate::speculative::SpeculativeGraphState,
+    ) -> Result<()> {
+        match &self.mtp {
+            Some(mtp) if mtp.n_predict() > 0 => mtp.install(state),
+            _ => Ok(()),
+        }
+    }
+
+    fn speculative_target_hiddens(&self, rows: &[(usize, usize)]) -> Result<Option<Tensor>> {
+        match &self.mtp {
+            Some(mtp) if mtp.n_predict() > 0 => mtp.target_hiddens(rows),
+            _ => Ok(None),
+        }
+    }
+
+    fn speculative_prefill(
+        &mut self,
+        ctx: crate::speculative::SpeculativePrefillCtx<'_>,
+    ) -> Result<()> {
+        match &self.mtp {
+            Some(mtp) if mtp.n_predict() > 0 => {
+                mtp.prefill(&|tokens| self.stack.embed(tokens), ctx)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn speculative_propose(
+        &mut self,
+        ctx: crate::speculative::SpeculativeProposeBatchCtx<'_>,
+    ) -> Result<Option<crate::speculative::SpeculativeProposalBatch>> {
+        match &self.mtp {
+            Some(mtp) if mtp.n_predict() > 0 => {
+                mtp.propose(&|tokens| self.stack.embed(tokens), &*self.lm_head, ctx)
+            }
+            _ => Ok(None),
+        }
+    }
+}
 
 impl<A: LayerAttention, F: LayerFfn> NormalModel for CausalLm<A, F> {
     fn forward(&self, input_ids: &Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
