@@ -73,6 +73,7 @@ pub(crate) struct DecoderCoreArgs<'a> {
     pub dynamic_lora: Option<Arc<DynamicLoraRuntime>>,
     pub switch_adapters: Option<Arc<crate::adapter::SwitchAdapters>>,
     pub label_decision: Option<Arc<crate::decision::LabelDecision>>,
+    pub audio_transcriber: Option<inference_nn::loaders::AudioTranscriber>,
     pub prompt_activation_bytes_per_token: Option<usize>,
 }
 
@@ -163,6 +164,7 @@ impl DecoderCore {
                 modalities: args.modalities,
                 loaded_for_uqff_write: args.loaded_for_uqff_write,
                 label_decision: args.label_decision,
+                audio_transcriber: args.audio_transcriber,
                 prompt_activation_bytes_per_token: args.prompt_activation_bytes_per_token,
                 prompt_chunk_tokens: args.prompt_chunk_tokens,
             }),

@@ -186,6 +186,9 @@ pub fn normalize_qwen_multimodal_config(
     loader_type: &MultimodalLoaderType,
     config: &str,
 ) -> Result<String> {
+    if *loader_type == MultimodalLoaderType::Qwen3Asr {
+        return nest_qwen3_asr_config(config);
+    }
     if !matches!(
         loader_type,
         MultimodalLoaderType::Qwen3_5
@@ -465,6 +468,27 @@ fn bind_mtp_layers(
         );
     }
     Ok(())
+}
+
+// the GGUF binds the original repos' `thinker.` names, so an `-hf` repo's flat config takes their nested form
+fn nest_qwen3_asr_config(config: &str) -> Result<String> {
+    const NESTED: [&str; 3] = ["audio_config", "text_config", "audio_token_id"];
+    let mut config: serde_json::Value =
+        serde_json::from_str(config).context("Qwen3-ASR config is not valid JSON")?;
+    let object = config
+        .as_object_mut()
+        .context("Qwen3-ASR config requires a JSON object")?;
+    if !object.contains_key("thinker_config") {
+        let thinker = NESTED
+            .iter()
+            .filter_map(|key| Some(((*key).to_string(), object.remove(*key)?)))
+            .collect::<serde_json::Map<_, _>>();
+        object.insert(
+            "thinker_config".to_string(),
+            serde_json::Value::Object(thinker),
+        );
+    }
+    serde_json::to_string(&config).context("Failed to serialize Qwen3-ASR config")
 }
 
 fn qwen_family(archive: &GgufArchive) -> Result<QwenMultimodalFamily> {
@@ -1445,6 +1469,20 @@ mod tests {
         assert!(qwen_family_from_names("qwen2vl", None).is_err());
         assert!(qwen_family_from_names("qwen3vl", None).is_err());
         assert!(qwen_family_from_names("qwen3vl", Some(QWEN2VL_PROJECTOR)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_flat_qwen3_asr_config_takes_the_nested_form() -> Result<()> {
+        let flat = r#"{"model_type": "qwen3_asr", "audio_config": {"d_model": 4}, "text_config": {"vocab_size": 8}, "audio_token_id": 7}"#;
+        let nested: serde_json::Value = serde_json::from_str(&normalize_qwen_multimodal_config(
+            &MultimodalLoaderType::Qwen3Asr,
+            flat,
+        )?)?;
+        assert_eq!(nested["thinker_config"]["audio_token_id"], 7);
+        assert_eq!(nested["thinker_config"]["audio_config"]["d_model"], 4);
+        assert!(nested.get("audio_config").is_none());
+        assert_eq!(nested["model_type"], "qwen3_asr");
         Ok(())
     }
 

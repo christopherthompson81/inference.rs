@@ -11,6 +11,7 @@ use inference_core::{
     speech_utils::{self, Sample},
 };
 
+use inference_core::AudioTranscriber;
 use inference_protocol::images::{encode_png, image_generation_response};
 
 use crate::{
@@ -28,12 +29,16 @@ use crate::{
         VerboseTranscriptionResponse, VoiceActivityRequest, VoiceActivityResponse,
         diarization_rttm, transcript_srt, transcript_vtt,
     },
+    operations::TokenizeRequest,
     types::SharedInferenceRsState,
     util::{parse_image_url, validate_model_name},
 };
 
 // a transducer beam search costs a joint evaluation per hypothesis per frame; past this it buys nothing
 const MAX_BEAM_SIZE: usize = 16;
+// an audio-in decoder's transcript budget: its answer prefix, then tokens per second of audio
+const TRANSCRIPT_BASE_TOKENS: usize = 64;
+const TRANSCRIPT_TOKENS_PER_SECOND: f64 = 16.0;
 // the training schedules count 1000 timesteps, the diffusion crates' `NUM_TRAIN_TIMESTEPS`
 const MAX_DIFFUSION_STEPS: usize = 1000;
 // OpenAI's own limit on images per request
@@ -66,20 +71,11 @@ fn generation_request(
     state: &SharedInferenceRsState,
     model: &str,
     messages: RequestMessage,
-    n_choices: usize,
+    sampling: SamplingParams,
     tx: tokio::sync::mpsc::Sender<Response>,
 ) -> Request {
-    let mut request = NormalRequest::new_simple(
-        messages,
-        SamplingParams {
-            n_choices,
-            ..SamplingParams::deterministic()
-        },
-        tx,
-        state.next_request_id(),
-        None,
-        None,
-    );
+    let mut request =
+        NormalRequest::new_simple(messages, sampling, tx, state.next_request_id(), None, None);
     request.model_id = (model != DEFAULT_MODEL_ID).then(|| model.to_string());
     Request::Normal(Box::new(request))
 }
@@ -103,7 +99,11 @@ async fn run_choices(
     n_choices: usize,
 ) -> Result<Response, ApiError> {
     InferenceRs::maybe_log_request(state.clone(), repr);
-    dispatch(state, model, messages, n_choices).await
+    let sampling = SamplingParams {
+        n_choices,
+        ..SamplingParams::deterministic()
+    };
+    dispatch(state, model, messages, sampling).await
 }
 
 // As `run`, for a request too frequent to log, as a streamed session's pushes are
@@ -112,21 +112,21 @@ pub(crate) async fn run_unlogged(
     model: &str,
     messages: RequestMessage,
 ) -> Result<Response, ApiError> {
-    dispatch(state, model, messages, 1).await
+    dispatch(state, model, messages, SamplingParams::deterministic()).await
 }
 
 async fn dispatch(
     state: &SharedInferenceRsState,
     model: &str,
     messages: RequestMessage,
-    n_choices: usize,
+    sampling: SamplingParams,
 ) -> Result<Response, ApiError> {
     validate_model_name(model, state.clone())
         .map_err(|error| ApiError::from_error(&error, ApiErrorKind::InvalidRequest))?;
     let (tx, mut rx) = create_response_channel(None);
     send_request(
         state,
-        generation_request(state, model, messages, n_choices, tx),
+        generation_request(state, model, messages, sampling, tx),
     )
     .await
     .map_err(|error| {
@@ -483,6 +483,22 @@ async fn transcribe_inner(
     }
     let audio = decode_audio(audio)?;
     let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
+    let model = (request.model != DEFAULT_MODEL_ID).then_some(request.model.as_str());
+    let transcriber = state
+        .audio_transcriber(model)
+        .map_err(|error| ApiError::from_error(&error, ApiErrorKind::InvalidRequest))?;
+    if let Some(transcriber) = transcriber {
+        if request.diarization_model.is_some() {
+            return Err(ApiError::new(
+                ApiErrorKind::InvalidRequest,
+                "`diarization_model` needs word timestamps, which this model does not give",
+                Some("diarization_unsupported"),
+                Some("diarization_model"),
+            ));
+        }
+        let transcript = decode_transcript(state, &request, repr, audio, transcriber).await?;
+        return render_transcript(&request, transcript, None);
+    }
     let speech = |audio| RequestMessage::Transcription {
         audio,
         options: TranscriptionOptions {
@@ -522,6 +538,68 @@ async fn transcribe_inner(
     }
 }
 
+// An audio-in decoder's transcript: its transcription prompt around the clip, decoded greedily, the answer parsed.
+async fn decode_transcript(
+    state: &SharedInferenceRsState,
+    request: &TranscriptionRequest,
+    repr: String,
+    audio: AudioInput,
+    transcriber: AudioTranscriber,
+) -> Result<Transcription, ApiError> {
+    let prompt = (transcriber.prompt)(request.language.as_deref()).map_err(|error| {
+        ApiError::new(
+            ApiErrorKind::InvalidRequest,
+            error.to_string(),
+            Some("unsupported_language"),
+            Some("language"),
+        )
+    })?;
+    let tokens = crate::operations::tokenize(
+        state,
+        TokenizeRequest {
+            text: prompt,
+            add_special_tokens: false,
+            model: (request.model != DEFAULT_MODEL_ID).then(|| request.model.clone()),
+        },
+    )
+    .await?
+    .tokens;
+    let duration = audio.samples.len() as f64
+        / (f64::from(audio.sample_rate) * f64::from(audio.channels.max(1)));
+    let sampling = SamplingParams {
+        max_len: Some(transcript_token_budget(duration)),
+        ..SamplingParams::deterministic()
+    };
+    let message = RequestMessage::MultimodalTokens {
+        tokens,
+        images: Vec::new(),
+        audios: vec![audio],
+    };
+    InferenceRs::maybe_log_request(state.clone(), repr);
+    let Response::CompletionDone(done) = dispatch(state, &request.model, message, sampling).await?
+    else {
+        return Err(unexpected(state));
+    };
+    let answer = done
+        .choices
+        .first()
+        .map(|choice| choice.text.as_str())
+        .unwrap_or_default();
+    let parsed = (transcriber.parse)(answer);
+    Ok(Transcription {
+        text: parsed.text,
+        tokens: Vec::new(),
+        words: Vec::new(),
+        duration,
+        language: parsed.language,
+    })
+}
+
+// generous for speech: a fast speaker's words run under four tokens a second
+fn transcript_token_budget(seconds: f64) -> usize {
+    TRANSCRIPT_BASE_TOKENS + (seconds.max(0.0) * TRANSCRIPT_TOKENS_PER_SECOND).ceil() as usize
+}
+
 // each word's speaker: the turn it overlaps most, else the turn nearest its middle; 0 without any turns
 fn word_speakers(words: &[TimedText], turns: &[SpeakerSegment]) -> Vec<usize> {
     words
@@ -548,7 +626,18 @@ pub(crate) fn render_transcript(
     speakers: Option<&[usize]>,
 ) -> Result<TranscriptionOutput, ApiError> {
     let format = request.response_format;
-    let segments = transcript_segments(&transcript.words, speakers);
+    // a model without word timings gives its whole transcript as one segment
+    let segments = if transcript.words.is_empty() && !transcript.text.is_empty() {
+        vec![TranscriptionSegment {
+            id: 0,
+            start: 0.0,
+            end: transcript.duration,
+            text: transcript.text.clone(),
+            speaker: None,
+        }]
+    } else {
+        transcript_segments(&transcript.words, speakers)
+    };
     let body = match format {
         TranscriptionResponseFormat::Json => serde_json::to_string(&TranscriptionResponse {
             text: transcript.text,
@@ -850,6 +939,35 @@ mod tests {
             start,
             end,
         }
+    }
+
+    // an audio-in decoder's transcript has no word timings: its subtitles are the whole clip as one cue
+    #[test]
+    fn a_transcript_without_words_is_one_segment() -> anyhow::Result<()> {
+        let request = TranscriptionRequest {
+            model: DEFAULT_MODEL_ID.to_string(),
+            language: None,
+            prompt: None,
+            response_format: TranscriptionResponseFormat::Srt,
+            temperature: None,
+            timestamp_granularities: Vec::new(),
+            beam_size: None,
+            diarization_model: None,
+        };
+        let transcript = Transcription {
+            text: "The quick brown fox.".to_string(),
+            tokens: Vec::new(),
+            words: Vec::new(),
+            duration: 2.5,
+            language: Some("english".to_string()),
+        };
+        let srt =
+            render_transcript(&request, transcript, None).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        assert_eq!(
+            srt.body.trim(),
+            "1\n00:00:00,000 --> 00:00:02,500\nThe quick brown fox."
+        );
+        Ok(())
     }
 
     // a sentence end closes a segment, and so does a pause of SEGMENT_PAUSE_SECONDS mid-sentence

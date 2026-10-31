@@ -1,23 +1,25 @@
 ---
 title: Speech models
-description: Parakeet and Voxtral Realtime for speech transcription, Silero for voice activity, Nemotron-3 and Sortformer for speaker diarization, Dia and Kokoro for text-to-speech.
+description: Parakeet, Qwen3-ASR and Voxtral Realtime for speech transcription, Silero for voice activity, Nemotron-3 and Sortformer for speaker diarization, Dia and Kokoro for text-to-speech.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-inference.rs supports seven speech-related model families:
+inference.rs supports eight speech-related model families:
 
 - **Parakeet**: NVIDIA's FastConformer speech recognisers (CTC, RNN-T and TDT heads), and the cache-aware
   Nemotron streaming ASR, served via `/v1/audio/transcriptions` with word and segment timestamps.
 - **Nemotron-3 Diarization**: who speaks when (up to 8 speakers), served via `/v1/audio/diarization`.
 - **Streaming Sortformer v2**: who speaks when (up to 4 speakers), from its `.nemo`, also via `/v1/audio/diarization`.
 - **Silero VAD**: voice activity detection, served via `/v1/audio/vad`; it also cuts long recordings for Parakeet.
+- **Qwen3-ASR**: an audio-in decoder that transcribes 30 languages, through `/v1/audio/transcriptions`
+  (whole-clip segments, no word timestamps) or `/v1/chat/completions`.
 - **Voxtral Realtime**: multimodal model accepting audio input for speech transcription through
   `/v1/chat/completions`.
 - **Dia**: dedicated text-to-speech model served via `/v1/audio/speech`.
 - **Kokoro**: an 82M-parameter text-to-speech model with preset voices, also served via `/v1/audio/speech`.
 
-Voxtral Realtime is classified as a multimodal model because audio is an input modality. Parakeet is a
+Qwen3-ASR and Voxtral Realtime are classified as multimodal models because audio is an input modality. Parakeet is a
 dedicated transcription model, and Dia and Kokoro are dedicated speech models.
 
 ## Parakeet: speech recognition
@@ -349,6 +351,30 @@ for segment in &activity.segments {
 
 </TabItem>
 </Tabs>
+
+## Qwen3-ASR: audio in, transcript out
+
+```bash
+inference serve -m Qwen/Qwen3-ASR-1.7B-hf
+```
+
+Qwen3-ASR loads from the transformers `-hf` repos, from the original ones (`Qwen/Qwen3-ASR-1.7B`, weights under
+`thinker.`), and from llama.cpp's GGUFs (see the [model family notes](/guides/models/model-family-notes/#qwen3-asr)).
+`/v1/audio/transcriptions` decodes the model's transcription prompt greedily and returns its transcript:
+
+```bash
+curl http://localhost:1234/v1/audio/transcriptions -F file=@clip.wav -F model=default -F language=en
+```
+
+- `language` (ISO-639-1, or the model's language name) forces the transcript's language, as the reference
+  processor does by starting the answer with `language <name><asr_text>`; one of its 30 languages only. Without
+  it the model identifies the language, which `verbose_json` reports.
+- The model gives no word timings: `verbose_json`, `srt` and `vtt` carry the whole clip as one segment,
+  `timestamp_granularities[]=word` adds no words, and `diarization_model` is refused.
+- The encoder attends within 8 s windows; a clip takes 13 tokens a second, so long recordings fill the context.
+
+Through `/v1/chat/completions`, send the clip as an `audio_url` part; the answer keeps the model's
+`language <name><asr_text>` prefix.
 
 ## Voxtral Realtime: audio in, text out
 

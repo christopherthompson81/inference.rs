@@ -18,6 +18,8 @@ pub enum MessagesAction {
     KeepWithAudioAfterText,
     // For everything else
     FlattenOnlyText,
+    // A template that writes this placeholder itself renders media from the content parts; others see text only.
+    KeepIfTemplateWrites(&'static str),
 }
 
 /// Processor for messages.
@@ -155,8 +157,32 @@ pub(crate) fn apply_chat_template(
     action: MessagesAction,
     tools: Vec<Tool>,
 ) -> Result<String> {
+    let chat_template = pipeline
+        .get_chat_template()
+        .with_context(|| "`apply_chat_template` expects the pipeline to have a chat template.")?;
+    let template = chat_template
+        .chat_template
+        .as_ref()
+        .with_context(|| "The selected model does not define a chat template.")?;
+    let action = match action {
+        MessagesAction::KeepIfTemplateWrites(placeholder) => {
+            let writes = match &template.0 {
+                Either::Left(text) => text.contains(placeholder),
+                Either::Right(named) => named
+                    .iter()
+                    .flat_map(|t| t.values())
+                    .any(|t| t.contains(placeholder)),
+            };
+            if writes {
+                MessagesAction::Keep
+            } else {
+                MessagesAction::FlattenOnlyText
+            }
+        }
+        action => action,
+    };
     let messages = match action {
-        MessagesAction::Keep => messages,
+        MessagesAction::Keep | MessagesAction::KeepIfTemplateWrites(_) => messages,
         MessagesAction::KeepWithAudioAfterText => messages
             .into_iter()
             .map(|message| {
@@ -194,14 +220,6 @@ pub(crate) fn apply_chat_template(
                 .collect()
         }
     };
-
-    let chat_template = pipeline
-        .get_chat_template()
-        .with_context(|| "`apply_chat_template` expects the pipeline to have a chat template.")?;
-    let template = chat_template
-        .chat_template
-        .as_ref()
-        .with_context(|| "The selected model does not define a chat template.")?;
 
     let bos_tok = chat_template.bos_token.as_ref().map(extract_token_string);
     let eos_tok = chat_template.eos_token.as_ref().map(extract_token_string);

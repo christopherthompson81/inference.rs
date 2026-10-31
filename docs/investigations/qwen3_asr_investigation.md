@@ -98,3 +98,34 @@ WAVs.
 **Next:** full local CI. Left for a follow-up: the transformers `-hf` layout (flat config, `model.audio_tower`,
 `model.multi_modal_projector`, `model.language_model`), `/v1/audio/transcriptions` for an audio-in decoder, the
 forced-aligner head.
+
+## Run 5 - 2026-10-31 10:23
+
+**Question:** can `/v1/audio/transcriptions` serve an audio-in decoder, and does the transformers `-hf` layout load?
+
+**Change and command:**
+- A loader may name an `AudioTranscriber` (the whole prompt around one clip, with the answer prefix a language
+  forces, and the answer's parse). inference-api turns a transcription request for such a model into a
+  `MultimodalTokens` generation, greedy, budgeted 64 + 16 tokens per second of audio.
+- The GGUF pair through `serve`; curl with `response_format` `json`, `verbose_json`, `srt`, and `language` `en`,
+  `zh`, `xx`.
+- The `-hf` repo's `config.json`, `chat_template.jinja` and safetensors header (by byte range), not its weights.
+
+**Finding:**
+- Both clips transcribe as in Run 2. `verbose_json` reports `english`, identified by the model, with duration
+  20.12 s. `language=zh` on the English clip: the answer no longer starts with the model's own
+  `language English<asr_text>` (the prefix took), and the text stays English. `xx` is refused naming the language.
+- The model gives no word timings, so segments were empty and `srt`/`vtt` blank. A transcript without words is now
+  one segment over the clip: `1 / 00:00:00,000 --> 00:00:03,439 / The quick brown fox jumps over the lazy dog.`
+- The tiny SDK model first answered "Received a request incompatible for this model's category":
+  `AutoMultimodalLoader` forwards each trait method by hand and returned the default `None`.
+- `-hf` layout: a flat config (`rope_theta` under `rope_parameters`, no audio start/end ids), one
+  `model.safetensors` with `model.audio_tower.*`, `model.multi_modal_projector.linear_{1,2}`,
+  `model.language_model.*`, no `lm_head` (tied). The real config parses (Transformers layout, theta 1e6, tied). The
+  tiny checkpoint renamed into this layout transcribes byte for byte as the original.
+- The `-hf` template writes `<|audio_start|><|audio_pad|><|audio_end|>` per audio content part and drops the user's
+  text, so a flattened message held no placeholder: "The number of `<|audio_pad|>` tokens (0) must match the number
+  of audio clips (1)". A template that contains the placeholder now gets the content parts (prompt 70 tokens on the
+  tiny model); ChatML keeps the flattened text.
+
+**Next:** the forced-aligner head (Qwen3-ForcedAligner-0.6B) for word timestamps; OpenAI's `input_audio` part.

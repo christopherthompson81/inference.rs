@@ -343,6 +343,7 @@ impl InferenceRs {
         let device = pipeline_guard.device();
         let modalities = metadata.modalities.clone();
         let label_decision = metadata.label_decision.clone();
+        let audio_transcriber = metadata.audio_transcriber;
         let max_seq_len = match &category {
             ModelCategory::Diffusion | ModelCategory::Speech => None,
             _ => Some(metadata.max_seq_len),
@@ -375,6 +376,7 @@ impl InferenceRs {
             max_seq_len,
             generation_defaults,
             label_decision,
+            audio_transcriber,
         };
 
         // Shared between engine and EngineInstance so the SDK/HTTP API

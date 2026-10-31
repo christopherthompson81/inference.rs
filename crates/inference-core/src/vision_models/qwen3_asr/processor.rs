@@ -7,10 +7,10 @@ use crate::vision_models::media_host::media_processor;
 
 processor_factory!(Qwen3AsrLoader => |model_config, _, _, _| {
     let cfg = Config::from_json(model_config).expect("Failed to parse Qwen3-ASR config");
-    // its chat template renders a message's text only
+    // the `-hf` repos' template writes each audio part's placeholders and drops the text; ChatML takes text only
     media_processor(
         Qwen3AsrInputsProcessor::new(cfg),
         &[AUDIO_TOKEN],
-        MessagesAction::FlattenOnlyText,
+        MessagesAction::KeepIfTemplateWrites(AUDIO_TOKEN),
     )
 });

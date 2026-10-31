@@ -256,6 +256,7 @@ impl Loader for DiffusionLoader {
                 },
                 loaded_for_uqff_write: false,
                 label_decision: None,
+                audio_transcriber: None,
                 prompt_activation_bytes_per_token: None,
             }),
             dummy_cache: EitherCache::Full(Cache::new(0)),

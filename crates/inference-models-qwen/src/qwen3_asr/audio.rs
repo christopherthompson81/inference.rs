@@ -9,7 +9,7 @@ use crate::audio::whisper::{WhisperEncoderLayer, WhisperLayerConfig, sinusoid_po
 use crate::layers::{Activation, conv2d, layer_norm, linear_b, linear_no_bias};
 use crate::utils::unvarbuilder::UnVarBuilder;
 
-use super::config::AudioConfig;
+use super::config::{AudioConfig, Layout};
 
 const CONV_LAYERS: usize = 3;
 const CONV_KERNEL: usize = 3;
@@ -49,7 +49,15 @@ pub struct AudioEncoder {
 }
 
 impl AudioEncoder {
-    pub fn new(cfg: &AudioConfig, vb: ShardedVarBuilder, device: &Device) -> Result<Self> {
+    /// `vb` at the checkpoint's root: the tower and the projector sit where `layout` puts them.
+    pub fn new(
+        cfg: &AudioConfig,
+        root: ShardedVarBuilder,
+        layout: Layout,
+        device: &Device,
+    ) -> Result<Self> {
+        let vb = root.pp(layout.audio_tower());
+        let [proj1, proj2] = layout.projector();
         let conv_cfg = Conv2dConfig {
             padding: 1,
             stride: CONV_STRIDE,
@@ -94,8 +102,8 @@ impl AudioEncoder {
             positions,
             layers,
             ln_post: layer_norm(cfg.d_model, LAYER_NORM_EPS, vb.pp("ln_post"))?,
-            proj1: linear_b(cfg.d_model, cfg.d_model, true, vb.pp("proj1"))?,
-            proj2: linear_b(cfg.d_model, cfg.output_dim, true, vb.pp("proj2"))?,
+            proj1: linear_b(cfg.d_model, cfg.d_model, true, root.pp(proj1))?,
+            proj2: linear_b(cfg.d_model, cfg.output_dim, true, root.pp(proj2))?,
             activation: cfg.activation_function,
             chunk,
             chunks_per_window: cfg.n_window_infer / chunk,
@@ -163,8 +171,10 @@ impl AudioEncoder {
         self.proj2.forward(&xs)
     }
 
-    pub fn residual_tensors(&self) -> Vec<(String, Tensor)> {
-        let uvb = UnVarBuilder::new();
+    /// Under the checkpoint's root names.
+    pub fn residual_tensors(&self, layout: Layout) -> Vec<(String, Tensor)> {
+        let root = UnVarBuilder::new();
+        let uvb = root.pp(layout.audio_tower());
         for (i, conv) in self.convs.iter().enumerate() {
             uvb.pp(format!("conv2d{}", i + 1)).add(conv);
         }
@@ -173,15 +183,21 @@ impl AudioEncoder {
             layer.residual_tensors(&uvb.pp("layers").pp(i));
         }
         uvb.pp("ln_post").add(&self.ln_post);
-        uvb.pp("proj1").add(&self.proj1);
-        uvb.pp("proj2").add(&self.proj2);
-        uvb.to_safetensors()
+        let [proj1, proj2] = layout.projector();
+        root.pp(proj1).add(&self.proj1);
+        root.pp(proj2).add(&self.proj2);
+        root.to_safetensors()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::audio_token_count;
+    use std::collections::{BTreeSet, HashMap};
+
+    use inference_nn::testing::load_synthesized;
+    use inference_tensor::DType;
+
+    use super::*;
 
     const N_WINDOW: usize = 50;
 
@@ -202,5 +218,87 @@ mod tests {
                 "{frames} frames"
             );
         }
+    }
+
+    // the names Qwen/Qwen3-ASR-1.7B-hf's safetensors header lists for the tower and projector, layers numbered N
+    const TRANSFORMERS_NAMES: [&str; 29] = [
+        "model.audio_tower.conv2d1.bias",
+        "model.audio_tower.conv2d1.weight",
+        "model.audio_tower.conv2d2.bias",
+        "model.audio_tower.conv2d2.weight",
+        "model.audio_tower.conv2d3.bias",
+        "model.audio_tower.conv2d3.weight",
+        "model.audio_tower.conv_out.weight",
+        "model.audio_tower.layers.N.fc1.bias",
+        "model.audio_tower.layers.N.fc1.weight",
+        "model.audio_tower.layers.N.fc2.bias",
+        "model.audio_tower.layers.N.fc2.weight",
+        "model.audio_tower.layers.N.final_layer_norm.bias",
+        "model.audio_tower.layers.N.final_layer_norm.weight",
+        "model.audio_tower.layers.N.self_attn.k_proj.bias",
+        "model.audio_tower.layers.N.self_attn.k_proj.weight",
+        "model.audio_tower.layers.N.self_attn.out_proj.bias",
+        "model.audio_tower.layers.N.self_attn.out_proj.weight",
+        "model.audio_tower.layers.N.self_attn.q_proj.bias",
+        "model.audio_tower.layers.N.self_attn.q_proj.weight",
+        "model.audio_tower.layers.N.self_attn.v_proj.bias",
+        "model.audio_tower.layers.N.self_attn.v_proj.weight",
+        "model.audio_tower.layers.N.self_attn_layer_norm.bias",
+        "model.audio_tower.layers.N.self_attn_layer_norm.weight",
+        "model.audio_tower.ln_post.bias",
+        "model.audio_tower.ln_post.weight",
+        "model.multi_modal_projector.linear_1.bias",
+        "model.multi_modal_projector.linear_1.weight",
+        "model.multi_modal_projector.linear_2.bias",
+        "model.multi_modal_projector.linear_2.weight",
+    ];
+
+    fn tiny() -> AudioConfig {
+        AudioConfig {
+            d_model: 8,
+            encoder_layers: 2,
+            encoder_attention_heads: 2,
+            encoder_ffn_dim: 16,
+            num_mel_bins: 16,
+            downsample_hidden_size: 4,
+            output_dim: 12,
+            n_window: N_WINDOW,
+            n_window_infer: 4 * N_WINDOW,
+            activation_function: Activation::Gelu,
+        }
+    }
+
+    #[test]
+    fn the_transformers_layout_reads_the_hf_names() -> anyhow::Result<()> {
+        let (_, names) = load_synthesized(&[], HashMap::new(), DType::F32, |vb| {
+            Ok(AudioEncoder::new(
+                &tiny(),
+                vb,
+                Layout::Transformers,
+                &Device::Cpu,
+            )?)
+        })?;
+        let numbered = |name: &str| {
+            name.split('.')
+                .map(|part| {
+                    if part.parse::<usize>().is_ok() {
+                        "N"
+                    } else {
+                        part
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(".")
+        };
+        let read = names
+            .keys()
+            .map(|name| numbered(name))
+            .collect::<BTreeSet<_>>();
+        let expected = TRANSFORMERS_NAMES
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(read, expected);
+        Ok(())
     }
 }

@@ -592,6 +592,7 @@ impl MultimodalLoader {
                     decision.image_placeholder = processor.image_placeholder();
                     Arc::new(decision)
                 }),
+            audio_transcriber: self.inner.audio_transcriber(&config),
             prompt_activation_bytes_per_token: self
                 .inner
                 .prompt_activation_bytes_per_token(&config)?,

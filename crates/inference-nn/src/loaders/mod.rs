@@ -249,6 +249,27 @@ pub trait NormalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModelLoa
     }
 }
 
+/// One clip's transcript as an audio-in decoder writes it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TranscriptText {
+    pub language: Option<String>,
+    pub text: String,
+}
+
+/// How an audio-in decoder serves a transcription request: the whole prompt around one clip's placeholder, with the
+/// answer prefix that forces an ISO-639-1 `language` when one is given, and the parse of its answer.
+#[derive(Clone, Copy)]
+pub struct AudioTranscriber {
+    pub prompt: fn(language: Option<&str>) -> anyhow::Result<String>,
+    pub parse: fn(&str) -> TranscriptText,
+}
+
+impl std::fmt::Debug for AudioTranscriber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AudioTranscriber")
+    }
+}
+
 pub trait MultimodalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModelLoader {
     fn load(
         &self,
@@ -305,6 +326,10 @@ pub trait MultimodalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedMode
     }
     fn modalities(&self, config: &str) -> Result<Modalities>;
     fn prefixer(&self, config: &str) -> Arc<dyn MultimodalPromptPrefixer>;
+    /// For an audio-in decoder that transcribes, how a transcription request becomes its prompt and back.
+    fn audio_transcriber(&self, _config: &str) -> Option<AudioTranscriber> {
+        None
+    }
     /// How to sample frames when decoding video inputs for this model.
     fn video_frame_sampling(&self, _config: &str) -> VideoFrameSampling {
         VideoFrameSampling::default()
