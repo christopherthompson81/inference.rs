@@ -672,7 +672,7 @@ pub async fn get_settings(Extension(app): Extension<Arc<AppState>>) -> impl Into
 
 pub async fn get_capabilities(
     Extension(app): Extension<Arc<AppState>>,
-    admin: Option<Extension<inference_server_core::auth::Admin>>,
+    admin: Option<Extension<inference_http::auth::Admin>>,
 ) -> impl IntoResponse {
     Json(json!({
         // whether this client may load, unload, download and delete models

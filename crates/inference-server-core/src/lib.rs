@@ -79,14 +79,14 @@
 pub mod anthropic;
 pub mod approvals;
 mod audio_codecs;
-pub mod auth;
+pub use inference_http::auth;
 pub mod chat_completion;
 mod completion_core;
 pub mod completions;
 pub mod embeddings;
 pub mod files;
 mod form;
-pub mod handler_core;
+pub use inference_http::handler_core;
 mod handlers;
 pub mod image_generation;
 pub mod jobs;
@@ -94,21 +94,21 @@ pub mod lora_adapters;
 pub mod mcp_server;
 pub mod media_fetch;
 pub mod model_manager;
-pub use media_fetch::configure_ui_upload_dir;
+pub use inference_http::configure_ui_upload_dir;
 pub mod audio_analysis;
 pub mod inference_server_router_builder;
-pub mod metrics;
+pub use inference_http::metrics;
 pub mod openapi_doc;
 pub mod realtime;
 pub mod responses;
-pub mod route_registry;
+pub use inference_http::route_registry;
 pub mod serve;
 pub mod skills;
 pub mod speech_generation;
-pub mod streaming;
+pub use inference_http::streaming;
 pub mod types;
 use inference_api::{
-    agentic, api_error, engine_chat, engine_completion, files as files_api,
+    agentic, engine_chat, engine_completion, files as files_api,
     lora_adapters as lora_adapters_api, models as models_api, responses_types, skill_store, system,
 };
 pub use inference_api::{openai, util, video};

@@ -28,6 +28,7 @@ http-body-util.workspace = true
 futures.workspace = true
 hound.workspace = true
 inference-api.workspace = true
+inference-http.workspace = true
 inference-chat-protocols.workspace = true
 inference-jobs.workspace = true
 serde.workspace = true
@@ -50,6 +51,7 @@ uuid = { workspace = true, features = ["v4"] }
 libc.workspace = true
 
 [dev-dependencies]
+inference-http = { workspace = true, features = ["openapi-paths"] }
 inference-core.workspace = true
 tokio-tungstenite.workspace = true
 inference-tensor.workspace = true

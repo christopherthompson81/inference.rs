@@ -249,7 +249,6 @@ pub const MODEL_MANAGER_ROUTES: &[RouteInfo] = &[
 pub const RUNTIME_LORA_API_ROUTES: &[RouteInfo] =
     &[LOAD_LORA_ADAPTER_ROUTE, UNLOAD_LORA_ADAPTER_ROUTE];
 
-#[cfg(feature = "swagger-ui")]
 pub const INFERENCE_RS_SWAGGER_ROUTES: &[RouteInfo] = &[
     RouteInfo::new("/api-doc/openapi.json", "GET", RouteKind::Docs),
     RouteInfo::new("/docs", "GET", RouteKind::Docs),

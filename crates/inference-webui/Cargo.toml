@@ -15,7 +15,7 @@ rust-version.workspace = true
 [dependencies]
 inference-json = { workspace = true, features = ["axum"] }
 inference-api = { workspace = true }
-inference-server-core = { workspace = true }
+inference-http = { workspace = true }
 inference-coder = { workspace = true }
 
 anyhow = { workspace = true }

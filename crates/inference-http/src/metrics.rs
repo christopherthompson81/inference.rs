@@ -75,8 +75,8 @@ const QUEUE_DURATION_BUCKETS: [f64; 22] = [
     0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
     20.0, 40.0, 80.0, 160.0, 640.0, 2_560.0,
 ];
-pub(crate) const TTFT_METRIC: &str = "inference_time_to_first_token_seconds";
-pub(crate) const ITL_METRIC: &str = "inference_inter_token_latency_seconds";
+pub const TTFT_METRIC: &str = "inference_time_to_first_token_seconds";
+pub const ITL_METRIC: &str = "inference_inter_token_latency_seconds";
 const REQUEST_OUTCOME_METRIC: &str = "inference_request_outcomes_total";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, inference_json::FromJson)]
@@ -169,7 +169,7 @@ pub fn install_prometheus_recorder() {
 }
 
 /// Axum handler for `GET /metrics`. Renders the Prometheus exposition format.
-#[cfg_attr(test, utoipa::path(
+#[cfg_attr(feature = "openapi-paths", utoipa::path(
     get,
     tag = "inference.rs",
     path = "/metrics",

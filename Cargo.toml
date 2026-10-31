@@ -3,6 +3,7 @@
 exclude = ["crates/inference-flash-attn-v3", "third_party/cudarc"]
 members = [
     "crates/inference-server-core",
+    "crates/inference-http",
     "crates/inference-chat-protocols",
     "crates/inference-jobs",
     "crates/inference-api",
@@ -48,6 +49,7 @@ members = [
 # Everything but the examples, so a bare `cargo build`/`cargo test` at the root never links them.
 default-members = [
     "crates/inference-server-core",
+    "crates/inference-http",
     "crates/inference-chat-protocols",
     "crates/inference-jobs",
     "crates/inference-api",
@@ -271,6 +273,7 @@ inference-layout = { path = "crates/inference-layout", version = "0.0.26" }
 inference-recon = { path = "crates/inference-recon", version = "0.0.26" }
 inference-api = { path = "crates/inference-api", version = "0.0.26", default-features = false }
 inference-server-core = { path = "crates/inference-server-core", version = "0.0.26", default-features = false }
+inference-http = { path = "crates/inference-http", version = "0.0.26" }
 inference-chat-protocols = { path = "crates/inference-chat-protocols", version = "0.0.26" }
 inference-jobs = { path = "crates/inference-jobs", version = "0.0.26" }
 inference-webui = { path = "crates/inference-webui", version = "0.0.26" }

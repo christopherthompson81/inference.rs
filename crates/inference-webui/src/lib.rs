@@ -15,9 +15,9 @@ use inference_api::engine::SearchEmbeddingModel;
 use inference_api::lora_routing::DEFAULT_MODEL_ID;
 use inference_api::openai::{Modality, ModelCategory};
 use inference_api::{Engine, engine::AgenticSpec};
-use inference_server_core::{
+use inference_http::{
+    DEFAULT_MAX_BODY_LIMIT,
     auth::{Auth, Guard, Owner, require, require_admin},
-    inference_server_router_builder::DEFAULT_MAX_BODY_LIMIT,
     metrics::{ObservabilityConfig, ObservabilityState, observe_http},
     route_registry::{RouteInfo, RouteKind},
 };
@@ -190,7 +190,7 @@ fn modality_label(modality: &Modality) -> String {
     .to_string()
 }
 
-pub use inference_server_core::route_registry::UI_ROUTE;
+pub use inference_http::route_registry::UI_ROUTE;
 
 /// The tools the UI offers and reports; `from_agentic` reads them from the spec the engine was loaded with.
 #[derive(Debug, Clone, Default)]
@@ -301,7 +301,7 @@ async fn build_ui_router(engine: &Engine, options: UiOptions) -> Result<Router> 
     fs::create_dir_all(&jobs_dir).await?;
     let uploads_dir = base_cache.join("uploads");
     fs::create_dir_all(&uploads_dir).await?;
-    inference_server_core::configure_ui_upload_dir(&uploads_dir).await?;
+    inference_http::configure_ui_upload_dir(&uploads_dir).await?;
 
     let default_model = engine
         .default_model_id()

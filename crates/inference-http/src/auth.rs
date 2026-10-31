@@ -29,7 +29,7 @@ use crate::{
 pub const API_KEY_ENV: &str = "INFERENCE_RS_API_KEY";
 /// The owner a key from [`API_KEY_ENV`] acts for.
 pub const ENV_KEY_OWNER: &str = "default";
-pub(crate) const API_KEY_HEADER: &str = "x-api-key";
+pub const API_KEY_HEADER: &str = "x-api-key";
 const BEARER_SCHEME: &str = "bearer";
 const WEBSOCKET_KEY_PREFIX: &str = "openai-insecure-api-key.";
 const WEBSOCKET: &str = "websocket";
@@ -56,6 +56,7 @@ const FORWARDING_HEADERS: &[&str] = &[
 const HOSTNAME_TTL: Duration = Duration::from_secs(30);
 #[cfg(unix)]
 const HOSTNAME_MAX: usize = 256;
+const ANTHROPIC_AUTHENTICATION_ERROR: &str = "authentication_error";
 /// The error code of a request [`require_admin`] refuses.
 pub const ADMIN_REQUIRED_CODE: &str = "admin_required";
 /// Which requests pass without a key: `(method, path as the guarded router sees it)`.
@@ -438,6 +439,14 @@ async fn this_machine_host(headers: &HeaderMap, peer: &Peer) -> bool {
     name.eq_ignore_ascii_case(machine) && machine_hostname_addresses(machine).await.contains(&local)
 }
 
+// Anthropic's envelope for a missing key; chat-protocols' anthropic_error_body builds the same, which a test pins
+fn anthropic_unauthorized_body(error: &ApiError) -> serde_json::Value {
+    serde_json::json!({
+        "type": "error",
+        "error": { "type": ANTHROPIC_AUTHENTICATION_ERROR, "message": error.message },
+    })
+}
+
 // Anthropic clients read their own error envelope; everyone else reads OpenAI's.
 fn unauthorized(path: &str) -> Response {
     let error = ApiError::new(
@@ -447,7 +456,7 @@ fn unauthorized(path: &str) -> Response {
         None,
     );
     if path.starts_with(ANTHROPIC_MESSAGES_ROUTE.path) {
-        let body = inference_chat_protocols::anthropic::anthropic_error_body(&error);
+        let body = anthropic_unauthorized_body(&error);
         return (StatusCode::UNAUTHORIZED, Json(body)).into_response();
     }
     openai_error_response(error)
@@ -529,7 +538,8 @@ pub async fn require_admin(request: Request, next: Next) -> Response {
 }
 
 /// `{"key"}` to sign a browser in.
-#[derive(inference_json::FromJson, utoipa::ToSchema)]
+#[derive(inference_json::FromJson)]
+#[cfg_attr(feature = "openapi-paths", derive(utoipa::ToSchema))]
 pub struct SignInRequest {
     pub key: String,
 }
@@ -540,7 +550,7 @@ impl inference_api::request_body::JsonRequest for SignInRequest {
     }
 }
 
-#[cfg_attr(test, utoipa::path(
+#[cfg_attr(feature = "openapi-paths", utoipa::path(
     post,
     tag = "inference.rs",
     path = "/auth/session",
@@ -582,7 +592,7 @@ pub async fn sign_in(
     session_cookie_response(&cookie)
 }
 
-#[cfg_attr(test, utoipa::path(
+#[cfg_attr(feature = "openapi-paths", utoipa::path(
     delete,
     tag = "inference.rs",
     path = "/auth/session",
@@ -609,6 +619,15 @@ fn session_cookie_response(cookie: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_anthropic_unauthorized_body_is_the_protocols_envelope() {
+        let error = ApiError::new(ApiErrorKind::Unauthorized, "no key", None, None);
+        assert_eq!(
+            anthropic_unauthorized_body(&error),
+            inference_chat_protocols::anthropic::anthropic_error_body(&error)
+        );
+    }
 
     #[tokio::test]
     async fn a_browser_on_this_machine_may_name_it_by_its_hostname() {

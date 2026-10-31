@@ -3,7 +3,6 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::OnceLock,
     time::Duration,
 };
 
@@ -21,8 +20,6 @@ pub const MEDIA_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MEDIA_FETCH_REDIRECTS: usize = 3;
 
 const UI_UPLOAD_SCHEME: &str = "inference-upload";
-
-static UI_UPLOAD_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Who a source is fetched for: a server request (the public network, the web UI's uploads) or a local client (any
 /// address, local files).
@@ -43,26 +40,6 @@ impl MediaFetcher for PolicyFetcher {
         max_bytes: usize,
     ) -> BoxFuture<'a, Result<LoadedMedia>> {
         Box::pin(load_media_source(source, self.0, kind, max_bytes))
-    }
-}
-
-pub async fn configure_ui_upload_dir(path: impl AsRef<Path>) -> Result<()> {
-    let path = tokio::fs::canonicalize(path.as_ref())
-        .await
-        .context("Failed to resolve UI uploads directory")?;
-    if !tokio::fs::metadata(&path).await?.is_dir() {
-        anyhow::bail!("UI uploads path is not a directory.");
-    }
-    if let Some(configured) = UI_UPLOAD_DIR.get() {
-        if configured != &path {
-            anyhow::bail!("UI uploads directory is already configured.");
-        }
-        return Ok(());
-    }
-    match UI_UPLOAD_DIR.set(path) {
-        Ok(()) => Ok(()),
-        Err(path) if UI_UPLOAD_DIR.get() == Some(&path) => Ok(()),
-        Err(_) => anyhow::bail!("UI uploads directory was configured concurrently"),
     }
 }
 
@@ -134,8 +111,7 @@ async fn load_media_url(
 }
 
 async fn load_ui_upload(url: Url, kind: &str, max_bytes: usize) -> Result<LoadedMedia> {
-    let root = UI_UPLOAD_DIR
-        .get()
+    let root = inference_http::ui_upload_dir()
         .ok_or_else(|| anyhow::anyhow!("Unsupported {kind} URL scheme: {UI_UPLOAD_SCHEME}"))?;
     load_ui_upload_from_root(url, kind, root, max_bytes).await
 }

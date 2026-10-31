@@ -13,7 +13,7 @@ cd "$(dirname "$0")/.."
 
 IR_CRATES=(inference-core inference-nn inference-quant inference-api inference-server-core inference-models-llama
     inference-models-qwen inference-models-gemma inference-models-phi inference-models-other)
-TIMED_CRATES=(inference-core inference-api inference-server-core inference-webui)
+TIMED_CRATES=(inference-core inference-api inference-http inference-server-core inference-webui)
 TOUCH_FILES=(crates/inference-nn/src/lib.rs crates/inference-core/src/lib.rs crates/inference-models-other/src/lib.rs)
 
 dups=0 deps=0 ir=0 incremental=0 crate_time=0 slow_log=
