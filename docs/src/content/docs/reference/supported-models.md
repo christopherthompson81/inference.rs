@@ -91,6 +91,7 @@ The `Architecture` column is the `config.json` `architectures` value. Per-family
 | `Gemma3nForConditionalGeneration` | Gemma 3n | <details><summary><code>google/gemma-3n-E4B-it</code></summary><code>inference run -m google/gemma-3n-E4B-it</code></details> |
 | `Qwen3VLForConditionalGeneration` | Qwen3-VL | <details><summary><code>Qwen/Qwen3-VL-4B-Instruct</code></summary><code>inference run -m Qwen/Qwen3-VL-4B-Instruct</code></details> |
 | `Qwen3VLMoeForConditionalGeneration` | Qwen3-VL MoE | <details><summary><code>Qwen/Qwen3-VL-235B-A22B-Instruct</code></summary><code>inference run -m Qwen/Qwen3-VL-235B-A22B-Instruct</code></details> |
+| `Qwen3ASRForConditionalGeneration` | Qwen3-ASR | <details><summary><code>Qwen/Qwen3-ASR-1.7B</code></summary><code>inference run -m Qwen/Qwen3-ASR-1.7B</code></details> |
 | `Qwen3_5ForConditionalGeneration` | Qwen 3.5, Qwen 3.6 | <details><summary><code>Qwen/Qwen3.5-27B</code> (3.5), <code>Qwen/Qwen3.6-27B</code> (3.6)</summary><code>inference run -m Qwen/Qwen3.5-27B</code><br><code>inference run -m Qwen/Qwen3.6-27B</code></details> |
 | `Qwen3_5MoeForConditionalGeneration` | Qwen 3.5 MoE, Qwen 3.6 MoE | <details><summary><code>Qwen/Qwen3.5-35B-A3B</code> (3.5), <code>Qwen/Qwen3.6-35B-A3B</code> (3.6)</summary><code>inference run -m Qwen/Qwen3.5-35B-A3B</code><br><code>inference run -m Qwen/Qwen3.6-35B-A3B</code></details> |
 | `Qwen4ExpForConditionalGeneration` | Qwen3.8-Flash-Next | <details><summary><code>Qwen/Qwen3.8-Flash-Next</code></summary><code>inference run -m Qwen/Qwen3.8-Flash-Next</code></details> |

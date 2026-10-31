@@ -606,6 +606,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `MultimodalLoaderType.GEMMA3N` | `'gemma3n'` |
 | `MultimodalLoaderType.QWEN3VL` | `'qwen3vl'` |
 | `MultimodalLoaderType.QWEN3VLMOE` | `'qwen3vlmoe'` |
+| `MultimodalLoaderType.QWEN3_ASR` | `'qwen3_asr'` |
 | `MultimodalLoaderType.QWEN3_5` | `'qwen3_5'` |
 | `MultimodalLoaderType.QWEN3_5MOE` | `'qwen3_5moe'` |
 | `MultimodalLoaderType.QWEN4EXP` | `'qwen4exp'` |

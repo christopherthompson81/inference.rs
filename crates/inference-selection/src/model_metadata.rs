@@ -371,6 +371,11 @@ impl SupportedArch for MultimodalLoaderType {
                 modalities: &[Text, Vision, Audio, Video],
                 examples: &[ex!("google/gemma-3n-E4B-it")],
             },
+            Self::Qwen3Asr => ArchMetadata {
+                families: &["Qwen3-ASR"],
+                modalities: &[Text, Audio],
+                examples: &[ex!("Qwen/Qwen3-ASR-1.7B")],
+            },
             Self::Qwen3VL => ArchMetadata {
                 families: &["Qwen3-VL"],
                 modalities: &[Text, Vision, Video],

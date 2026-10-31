@@ -77,6 +77,7 @@ files when the repository and GGUF metadata identify them unambiguously. The dir
 | PaddleOCR-VL (1.5, 1.6) | `paddleocr` |
 | Qwen2-VL and Qwen2.5-VL | `qwen2vl` |
 | Qwen3-VL | `qwen3vl` |
+| Qwen3-ASR | `qwen3vl` (projector `qwen3a`) |
 | Qwen3-VL MoE | `qwen3vlmoe` |
 | Qwen3.5 and Qwen3.6 multimodal dense | `qwen35` |
 | Qwen3.5 and Qwen3.6 multimodal MoE | `qwen35moe` |

@@ -1,0 +1,37 @@
+{
+  "architectures": [
+    "Qwen3ASRForConditionalGeneration"
+  ],
+  "model_type": "qwen3_asr",
+  "thinker_config": {
+    "audio_token_id": 264,
+    "audio_start_token_id": 262,
+    "audio_end_token_id": 263,
+    "audio_config": {
+      "d_model": 32,
+      "encoder_layers": 2,
+      "encoder_attention_heads": 2,
+      "encoder_ffn_dim": 64,
+      "num_mel_bins": 128,
+      "downsample_hidden_size": 8,
+      "output_dim": 48,
+      "n_window": 50,
+      "n_window_infer": 200,
+      "activation_function": "gelu"
+    },
+    "text_config": {
+      "vocab_size": 266,
+      "hidden_size": 48,
+      "intermediate_size": 96,
+      "num_hidden_layers": 2,
+      "num_attention_heads": 2,
+      "num_key_value_heads": 1,
+      "head_dim": 32,
+      "hidden_act": "silu",
+      "max_position_embeddings": 1024,
+      "rms_norm_eps": 1e-06,
+      "rope_theta": 1000000.0,
+      "tie_word_embeddings": true
+    }
+  }
+}

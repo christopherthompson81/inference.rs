@@ -9,11 +9,17 @@ use inference_nn::{gdn::GDN_V_HEAD_LAYOUT_CONFIG_KEY, loaders::MultimodalLoaderT
 const GENERAL_ARCHITECTURE: &str = "general.architecture";
 const PROJECTOR_TYPE: &str = "clip.projector_type";
 const VISION_PROJECTOR_TYPE: &str = "clip.vision.projector_type";
+const AUDIO_PROJECTOR_TYPE: &str = "clip.audio.projector_type";
 const DEEPSTACK_LAYERS: &str = "clip.vision.is_deepstack_layers";
 
 const QWEN2VL_PROJECTOR: &str = "qwen2vl_merger";
 const QWEN25VL_PROJECTOR: &str = "qwen2.5vl_merger";
 const QWEN3VL_PROJECTOR: &str = "qwen3vl_merger";
+const QWEN3A_PROJECTOR: &str = "qwen3a";
+// the released Qwen3-ASR checkpoints keep the model under `thinker.`
+const QWEN3_ASR_TEXT: &str = "thinker.model";
+const QWEN3_ASR_LM_HEAD: &str = "thinker.lm_head";
+const QWEN3_ASR_AUDIO: &str = "thinker.audio_tower";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum QwenMultimodalFamily {
@@ -25,6 +31,8 @@ enum QwenMultimodalFamily {
     Qwen35Moe,
     // Qwen3.8-Flash-Next: Qwen3.5 MoE with hyper-connections and PLE, text only for now
     Qwen4Exp,
+    // a Qwen3 dense text model under the `qwen3vl` architecture, with the AuT audio tower
+    Qwen3Asr,
 }
 
 impl QwenMultimodalFamily {
@@ -37,6 +45,7 @@ impl QwenMultimodalFamily {
             Self::Qwen35 => MultimodalLoaderType::Qwen3_5,
             Self::Qwen35Moe => MultimodalLoaderType::Qwen3_5Moe,
             Self::Qwen4Exp => MultimodalLoaderType::Qwen4Exp,
+            Self::Qwen3Asr => MultimodalLoaderType::Qwen3Asr,
         }
     }
 
@@ -47,8 +56,13 @@ impl QwenMultimodalFamily {
         )
     }
 
-    fn uses_language_model_prefix(self) -> bool {
-        !matches!(self, Self::Qwen2Vl | Self::Qwen25Vl)
+    // the text stack's and the head's native names
+    fn text_names(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Qwen2Vl | Self::Qwen25Vl => ("model", "lm_head"),
+            Self::Qwen3Asr => (QWEN3_ASR_TEXT, QWEN3_ASR_LM_HEAD),
+            _ => ("model.language_model", "lm_head"),
+        }
     }
 
     fn has_gemma_norm_offsets(self) -> bool {
@@ -462,9 +476,14 @@ fn qwen_family(archive: &GgufArchive) -> Result<QwenMultimodalFamily> {
 
 /// Whether `architecture` is a Qwen multimodal GGUF's text side, under any projector it pairs with.
 pub fn is_qwen_multimodal_architecture(architecture: &str) -> bool {
-    [QWEN2VL_PROJECTOR, QWEN25VL_PROJECTOR, QWEN3VL_PROJECTOR]
-        .into_iter()
-        .any(|projector| qwen_family_from_names(architecture, Some(projector)).is_ok())
+    [
+        QWEN2VL_PROJECTOR,
+        QWEN25VL_PROJECTOR,
+        QWEN3VL_PROJECTOR,
+        QWEN3A_PROJECTOR,
+    ]
+    .into_iter()
+    .any(|projector| qwen_family_from_names(architecture, Some(projector)).is_ok())
 }
 
 fn qwen_family_from_names(
@@ -480,6 +499,7 @@ fn qwen_family_from_names(
                 "`qwen2vl` requires projector metadata to distinguish Qwen 2 VL from Qwen 2.5 VL"
             ),
         },
+        "qwen3vl" if projector == Some(QWEN3A_PROJECTOR) => QwenMultimodalFamily::Qwen3Asr,
         "qwen3vl" => {
             require_projector(projector, QWEN3VL_PROJECTOR)?;
             QwenMultimodalFamily::Qwen3Vl
@@ -517,15 +537,20 @@ fn require_projector(projector: Option<&str>, expected: &str) -> Result<()> {
 }
 
 fn projector_type(archive: &GgufArchive) -> Result<Option<&str>> {
-    let standalone = metadata_string(archive, PROJECTOR_TYPE)?;
-    let mixed = metadata_string(archive, VISION_PROJECTOR_TYPE)?;
-    match (standalone, mixed) {
-        (Some(left), Some(right)) if left != right => bail!(
-            "GGUF projector metadata conflicts: `{PROJECTOR_TYPE}` is `{left}`, `{VISION_PROJECTOR_TYPE}` is `{right}`"
-        ),
-        (Some(value), _) | (_, Some(value)) => Ok(Some(value)),
-        (None, None) => Ok(None),
+    let mut found: Option<(&str, &str)> = None;
+    for key in [PROJECTOR_TYPE, VISION_PROJECTOR_TYPE, AUDIO_PROJECTOR_TYPE] {
+        let Some(value) = metadata_string(archive, key)? else {
+            continue;
+        };
+        match found {
+            Some((first_key, first)) if first != value => bail!(
+                "GGUF projector metadata conflicts: `{first_key}` is `{first}`, `{key}` is `{value}`"
+            ),
+            Some(_) => {}
+            None => found = Some((key, value)),
+        }
     }
+    Ok(found.map(|(_, value)| value))
 }
 
 fn metadata_string<'a>(archive: &'a GgufArchive, key: &str) -> Result<Option<&'a str>> {
@@ -622,7 +647,9 @@ fn build_qwen_multimodal_bindings_from_inventory(
 ) -> Result<GgufBindingMap> {
     let mut bindings = GgufBindingMap::new();
     bind_text(inventory, family, gdn, &mut bindings)?;
-    if family.uses_qwen3_vision() {
+    if family == QwenMultimodalFamily::Qwen3Asr {
+        bind_qwen3_audio(inventory, &mut bindings)?;
+    } else if family.uses_qwen3_vision() {
         bind_qwen3_vision(inventory, deepstack_layers, &mut bindings)?;
     } else {
         bind_qwen2_vision(inventory, family, &mut bindings)?;
@@ -636,11 +663,7 @@ fn bind_text(
     gdn: Option<GdnMetadata>,
     bindings: &mut GgufBindingMap,
 ) -> Result<()> {
-    let model = if family.uses_language_model_prefix() {
-        "model.language_model"
-    } else {
-        "model"
-    };
+    let (model, lm_head) = family.text_names();
     bind(
         inventory,
         bindings,
@@ -654,7 +677,12 @@ fn bind_text(
         format!("{model}.norm.weight"),
         "output_norm.weight",
     );
-    bind(inventory, bindings, "lm_head.weight", "output.weight");
+    bind(
+        inventory,
+        bindings,
+        format!("{lm_head}.weight"),
+        "output.weight",
+    );
     let head = inference_nn::decision::DECISION_HEAD;
     bind(
         inventory,
@@ -1166,6 +1194,75 @@ fn bind_text_norm(
     }
 }
 
+// llama.cpp's `qwen3a` tensors onto the original checkpoints' `thinker.audio_tower` names; the sinusoidal
+// positions it stores are computed instead
+fn bind_qwen3_audio(inventory: &TensorInventory, bindings: &mut GgufBindingMap) -> Result<()> {
+    const CONVS: usize = 3;
+    let audio = QWEN3_ASR_AUDIO;
+    for conv in 1..=CONVS {
+        let source = format!("a.conv2d.{conv}");
+        bind(
+            inventory,
+            bindings,
+            format!("{audio}.conv2d{conv}.weight"),
+            format!("{source}.weight"),
+        );
+        // llama.cpp keeps the bias as (channels, 1, 1)
+        let bias = format!("{source}.bias");
+        let channels = *inventory
+            .shape(&bias)?
+            .first()
+            .context("Qwen3-ASR conv bias has no dimensions")?;
+        bindings.insert(
+            format!("{audio}.conv2d{conv}.bias"),
+            GgufTensorBinding::tensor(bias).reshape(vec![channels]),
+        );
+    }
+    for (target, source) in [
+        ("conv_out", "a.conv_out"),
+        ("ln_post", "a.post_ln"),
+        ("proj1", "mm.a.mlp.1"),
+        ("proj2", "mm.a.mlp.2"),
+    ] {
+        for suffix in ["weight", "bias"] {
+            bind(
+                inventory,
+                bindings,
+                format!("{audio}.{target}.{suffix}"),
+                format!("{source}.{suffix}"),
+            );
+        }
+    }
+    let layers = inventory.layer_indices("a.blk.");
+    if layers.is_empty() {
+        bail!("Qwen3-ASR mmproj has no `a.blk.*` encoder layers");
+    }
+    for layer in layers {
+        let native = format!("{audio}.layers.{layer}");
+        let source = format!("a.blk.{layer}");
+        for (target, role) in [
+            ("self_attn_layer_norm", "ln1"),
+            ("self_attn.q_proj", "attn_q"),
+            ("self_attn.k_proj", "attn_k"),
+            ("self_attn.v_proj", "attn_v"),
+            ("self_attn.out_proj", "attn_out"),
+            ("final_layer_norm", "ln2"),
+            ("fc1", "ffn_up"),
+            ("fc2", "ffn_down"),
+        ] {
+            for suffix in ["weight", "bias"] {
+                bind(
+                    inventory,
+                    bindings,
+                    format!("{native}.{target}.{suffix}"),
+                    format!("{source}.{role}.{suffix}"),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 fn bind(
     inventory: &TensorInventory,
     bindings: &mut GgufBindingMap,
@@ -1333,6 +1430,11 @@ mod tests {
                 Some(QWEN3VL_PROJECTOR),
                 MultimodalLoaderType::Qwen4Exp,
             ),
+            (
+                "qwen3vl",
+                Some(QWEN3A_PROJECTOR),
+                MultimodalLoaderType::Qwen3Asr,
+            ),
         ];
         for (architecture, projector, expected) in cases {
             assert_eq!(
@@ -1343,6 +1445,81 @@ mod tests {
         assert!(qwen_family_from_names("qwen2vl", None).is_err());
         assert!(qwen_family_from_names("qwen3vl", None).is_err());
         assert!(qwen_family_from_names("qwen3vl", Some(QWEN2VL_PROJECTOR)).is_err());
+        Ok(())
+    }
+
+    // every tensor of llama.cpp's Qwen3-ASR pair binds, under the original checkpoints' names
+    #[test]
+    fn qwen3_asr_inventory_is_exhaustive() -> Result<()> {
+        let mut tensors = vec![
+            ("token_embd.weight", vec![8, 4]),
+            ("output_norm.weight", vec![4]),
+            ("output.weight", vec![8, 4]),
+            ("a.position_embd.weight", vec![1500, 4]),
+            ("a.conv_out.weight", vec![4, 12]),
+            ("a.post_ln.weight", vec![4]),
+            ("a.post_ln.bias", vec![4]),
+            ("mm.a.mlp.1.weight", vec![4, 4]),
+            ("mm.a.mlp.1.bias", vec![4]),
+            ("mm.a.mlp.2.weight", vec![4, 4]),
+            ("mm.a.mlp.2.bias", vec![4]),
+        ];
+        for conv in 1..=3 {
+            tensors.push((format!("a.conv2d.{conv}.weight").leak(), vec![3, 3, 3, 3]));
+            tensors.push((format!("a.conv2d.{conv}.bias").leak(), vec![3, 1, 1]));
+        }
+        for role in [
+            "attn_norm",
+            "attn_q",
+            "attn_k",
+            "attn_v",
+            "attn_output",
+            "attn_q_norm",
+            "attn_k_norm",
+            "ffn_norm",
+            "ffn_gate",
+            "ffn_up",
+            "ffn_down",
+        ] {
+            tensors.push((format!("blk.0.{role}.weight").leak(), vec![4, 4]));
+        }
+        for role in [
+            "ln1", "attn_q", "attn_k", "attn_v", "attn_out", "ln2", "ffn_up", "ffn_down",
+        ] {
+            for suffix in ["weight", "bias"] {
+                tensors.push((format!("a.blk.0.{role}.{suffix}").leak(), vec![4]));
+            }
+        }
+        let tensors = tensors
+            .iter()
+            .map(|(name, shape)| (*name, shape.as_slice()))
+            .collect::<Vec<_>>();
+        let inventory = inventory(&tensors);
+        let bindings = build_qwen_multimodal_bindings_from_inventory(
+            &inventory,
+            QwenMultimodalFamily::Qwen3Asr,
+            None,
+            None,
+        )?;
+        // one binding per tensor but the stored sinusoid table, which is computed instead
+        assert_eq!(names(&bindings).len(), inventory.shapes.len() - 1);
+        let names = names(&bindings);
+        for name in [
+            "thinker.model.embed_tokens.weight",
+            "thinker.lm_head.weight",
+            "thinker.model.layers.0.self_attn.q_norm.weight",
+            "thinker.audio_tower.conv2d1.weight",
+            "thinker.audio_tower.layers.0.self_attn_layer_norm.bias",
+            "thinker.audio_tower.layers.0.fc2.weight",
+            "thinker.audio_tower.ln_post.weight",
+            "thinker.audio_tower.proj2.bias",
+        ] {
+            assert!(names.contains(name), "{name} is not bound");
+        }
+        assert_eq!(
+            bindings.get("thinker.audio_tower.conv2d3.bias"),
+            Some(&GgufTensorBinding::tensor("a.conv2d.3.bias").reshape(vec![3]))
+        );
         Ok(())
     }
 
