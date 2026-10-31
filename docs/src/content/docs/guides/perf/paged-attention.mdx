@@ -82,7 +82,7 @@ When none are set, the pool holds one sequence at the model's full context (its 
 Two more flags tune the cache itself:
 
 - `--pa-block-size <n>`: block size (default 32).
-- `--pa-cache-type`: KV cache storage: `auto` (the model's dtype), `f8e4m3`, `q2`..`q8` (K and V at that many bits), or `qK/qV` such as `q8/q4` (see [KV cache quantization](#kv-cache-quantization)). This is separate from model-weight quantization (`--quant`/`--isq`); the two are chosen independently. A model loaded through the model manager (the web UI) can set its own with `paged_cache_type`.
+- `--pa-cache-type`: KV cache storage: `auto` (the model's dtype, or `q3` when that buys GPU room for [offloaded MoE experts](/guides/perf/moe-expert-offload/)), `none` (the model's dtype, always), `f8e4m3`, `q2`..`q8` (K and V at that many bits), or `qK/qV` such as `q8/q4` (see [KV cache quantization](#kv-cache-quantization)). This is separate from model-weight quantization (`--quant`/`--isq`); the two are chosen independently. A model loaded through the model manager (the web UI) can set its own with `paged_cache_type`.
 
 Scheduler memory and latency are controlled independently:
 

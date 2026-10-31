@@ -7,13 +7,13 @@ description: How inference is organized. Request flow, threading, and how pieces
 
 From the outside in:
 
-**Clients.** The HTTP server (`inference-server-core`: routes, SSE, the MCP server), the web UI (both over `inference-http`'s API keys, error envelopes and metrics), the `inference` CLI (whose `agent` command runs `inference-coder`, a coding agent with a client-side tool loop over the engine or a server) and the C ABI (`inference-ffi`, with the C# and Python bindings over it). Each is a client of the engine API and knows nothing about model internals.
+**Clients.** The HTTP server (`inference-server-core`: routes, SSE, the MCP server, the Anthropic Messages and OpenAI Responses protocols that `inference-chat-protocols` translates onto the engine's chat operation, and the world generation and reconstruction jobs `inference-jobs` queues beside the engine), the web UI (both over `inference-http`'s API keys, error envelopes and metrics), the `inference` CLI (whose `agent` command runs `inference-coder`, a coding agent with a client-side tool loop over the engine or a server) and the C ABI (`inference-ffi`, with the C# and Python bindings over it). Each is a client of the engine API and knows nothing about model internals.
 
-**Engine API.** `inference-api`'s `Engine`: loading from an `EngineSpec`, the OpenAI, Anthropic and Responses operations, files, sessions, models, LoRA adapters and approvals. Every client calls the same methods, so a capability added here reaches the server, the CLI and every binding; a test in `inference-ffi` fails when an `Engine` method has no ABI entry and no listed reason for going without one.
+**Engine API.** `inference-api`'s `Engine`: loading from an `EngineSpec`, the OpenAI operations (chat, completions, embeddings, images, speech, transcription), reranking, decisions, files, sessions, models, LoRA adapters, device placement and approvals. Every client calls the same methods, so a capability added here reaches the server, the CLI and every binding; a test in `inference-ffi` fails when an `Engine` method has no ABI entry and no listed reason for going without one.
 
 **Engine.** `inference-core`: the request queue, scheduler and session store, one engine loop per loaded model, with `AgentRunner` as the seam to `inference-agent`'s tool loop. It drives pipelines without knowing about specific architectures.
 
-**Pipelines and models.** Model implementations (the `inference-models-*` family crates), tokenization, quantization and attention kernels, one pipeline per model type behind a shared trait.
+**Pipelines and models.** Model implementations (the `inference-models-*` family crates, and `inference-recon` for 3D reconstruction and world generation), tokenization, quantization and attention kernels, one pipeline per model type behind a shared trait.
 
 Requests enter through a client and flow down. New model architectures touch the model and pipeline layers; new operations go in the engine API, and a client only adds its framing.
 

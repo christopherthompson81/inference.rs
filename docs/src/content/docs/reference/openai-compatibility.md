@@ -33,12 +33,14 @@ Loaded dynamic LoRA aliases receive stable qualified model-card IDs from `GET /v
 - `tools[*].type="code_interpreter"`: accepted as the OpenAI-compatible opt-in for the built-in Python executor. The server must be started with code execution enabled. The only supported container form is `{"type":"auto"}`. Container ids, `container.file_ids`, `container.memory_limit`, and OpenAI container lifecycle endpoints are not supported.
 - `messages[].content[]` audio parts: OpenAI's `{"type":"input_audio","input_audio":{"data":"<base64>","format":"wav"}}` (a missing `format` reads as WAV), and the inference.rs extension `{"type":"audio_url","audio_url":{"url":"..."}}`, which also takes `http(s)` URLs.
 - `messages[].content[]` file parts: `{"type":"file","file":{"file_id":"file-..."}}` and `{"type":"file","file":{"filename":"data.csv","file_data":"data:text/csv;base64,..."}}` are supported. Chat Completions file URLs are not supported; upload the file first or use Responses.
-- `response_format` with `json_schema`: supported; output shape may differ from OpenAI's on ambiguous schemas. `json_object` is not accepted. See [structured output](/guides/serve/structured-output/).
+- `response_format` with `json_schema`: supported; output shape may differ from OpenAI's on ambiguous schemas. `json_object` constrains output to a JSON object. See [structured output](/guides/serve/structured-output/).
 - `seed`: initializes a deterministic request-scoped sampling stream. Requests with multiple choices derive a distinct stream for each choice.
 
 ### Silently ignored
 
-`user`, `stream_options`, `metadata`, `service_tier`, `parallel_tool_calls`, `store`. The request body accepts these fields (unknown fields are not rejected) but no behavior is wired to them. Use inference.rs `session_id` for persistence.
+`user`, `stream_options`, `metadata`, `service_tier`, `store`. The request body accepts these fields (unknown fields are not rejected) but no behavior is wired to them. Use inference.rs `session_id` for persistence.
+
+`parallel_tool_calls: false` runs server-side tool calls one at a time; `true` or omitted runs them concurrently.
 
 ### Additional request controls
 
@@ -113,7 +115,6 @@ Uploaded skill versions remain available from the server's skills directory (`--
 
 ### Rejected non-default values
 
-- `parallel_tool_calls` must be `true` (default) or omitted; `false` returns an error.
 - `max_tool_calls` returns an error for any value. To cap tool rounds, use the server-level `--max-tool-rounds` flag (applies to both Chat Completions and Responses).
 - The server's `--agent-permission` applies to Responses as to chat: `deny` blocks agent tools, and under `ask` a request must stream, with approvals arriving as `agentic_tool_approval_required` events; a blocking or background request is rejected on `agent_permission`.
 - `tools[*].type="web_search"` rejects image search (`search_content_types: ["image"]` or `image_settings`) and `external_web_access: false`. Domain filters are supported for up to 100 allowed or blocked domains and include subdomains.
@@ -155,6 +156,7 @@ Poll with `curl http://localhost:1234/v1/responses/<id>`, cancel with `curl -X P
 Extensions:
 
 - `truncate_sequence`: truncate long prompts at the model's context limit instead of erroring.
+- `task`: picks one of the model's task adapters (as Jina's API takes it) and prepends its instruction to text inputs. See [embeddings](/guides/models/use-embeddings/#request-fields).
 
 ## Image Generation
 
@@ -273,7 +275,7 @@ inference.rs does not expose `/v1/tokenize` or `/v1/detokenize` HTTP endpoints. 
 
 ## Authentication
 
-OpenAI requires an `Authorization: Bearer ...` header. inference.rs does not validate it. Clients that require an API key for initialization can send any non-empty string. For real authentication, place an authenticating reverse proxy in front.
+OpenAI requires an `Authorization: Bearer ...` header. An open server ignores it, so clients that require an API key for initialization can send any non-empty string. A server started with API keys requires one. See [authentication](/reference/http-api/#authentication).
 
 ## Response headers
 

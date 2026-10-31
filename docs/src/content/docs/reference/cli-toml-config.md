@@ -50,8 +50,15 @@ quant = "4"
 | `max_num_batched_tokens` | `--max-num-batched-tokens` | 4096 | Most tokens one paged-attention scheduler step processes. |
 | `max_prefill_chunk_tokens` | `--max-prefill-chunk-tokens` | 512 | CUDA prompt-token quantum used while decode is resident, and for recurrent prefill batching. |
 | `max_decode_steps_before_prefill` | `--max-decode-steps-before-prefill` | 8 | Most decode steps before a waiting prefill batch is admitted. |
+| `no_embeddings_on_host` | `--no-embeddings-on-host` | false | Keep the token embedding in VRAM; by default an untied one lives in pinned host memory the GPU reads over the bus. |
+| `moe_expert_cache` | `--moe-expert-cache` | not set | Keep GGUF MoE experts in host memory and cache this many per layer on the GPU (CUDA); the CPU runs the rest. Unset, the loader chooses. See [MoE expert offload](/guides/perf/moe-expert-offload/). |
 | `no_kv_cache` | `--no-kv-cache` | false | Disable KV cache entirely. |
 | `prefix_cache_n` | `--prefix-cache-n` | 16 | Prefix caches retained (0 to disable). |
+| `prefix_cache_dir` | `--prefix-cache-dir` | not set | Directory that also keeps prefix cache entries on disk, so long sessions survive eviction and restarts. Hybrid models on CUDA with paged attention. |
+| `prefix_cache_disk_gib` | `--prefix-cache-disk-gib` | 64 | Most the prefix cache directory may hold, in GiB; the least recently used entries go first. |
+| `prefix_cache_ram_gib` | `--prefix-cache-ram-gib` | 8 (at most an eighth of RAM) | Host memory for prefix cache entries, in GiB, in front of `prefix_cache_dir` or on its own; 0 keeps none in memory. |
+| `prefix_cache_checkpoint_tokens` | `--prefix-cache-checkpoint-tokens` | 16384 | Tokens between a long prompt's recurrent checkpoints in the host prefix cache, the most a request that diverges early redoes; 0 keeps only the final ones. |
+| `prefix_cache_disk_ttl_mins` | `--prefix-cache-disk-ttl-mins` | 60 | Minutes a host prefix cache entry (in memory or on disk) outlives its last use, unless its request names a TTL. |
 | `chat_template` | `-c`, `--chat-template` | not set | Custom chat template file (`.json` or `.jinja`), applied to every model. Per-model `chat_template` in `[[models]]` overrides it. |
 | `jinja_explicit` | `-j`, `--jinja-explicit` | not set | Explicit Jinja template override. Per-model `jinja_explicit` also exists. |
 | `matformer_config_path` | `--matformer-config-path` | not set | MatFormer (nested-submodel) slice config (CSV/JSON). |
@@ -61,6 +68,7 @@ quant = "4"
 | `mtp_n_predict` | `--mtp-n-predict` | not set | MTP draft tokens proposed per target step; with `mtp_auto_depth`, the most a step drafts. |
 | `mtp_auto_depth` | `--mtp-auto-depth` | false | Each step drafts the depth that has paid best so far, from acceptance and measured step time. |
 | `mtp_draft_sampling` | `--mtp-draft-sampling` | `auto` | MTP draft policy: `auto`, `greedy`, or `probabilistic`. |
+| `mtp_draft_isq` | `--mtp-draft-isq` | not set | Weight type of the MTP assistant model, such as `q4k` or `q8_0`; unset, the model's ISQ (a GGUF's drafter stays BF16). |
 | `mcp_config` | `--mcp-config` | not set | [MCP (Model Context Protocol)](/guides/agents/connect-mcp-server/) client configuration JSON for outbound servers. Also reads `MCP_CONFIG_PATH` if unset. |
 | `agent` | `--agent` (alias `--agentic`) | false | Shortcut for `enable_search = true` + `enable_code_execution = true` + `enable_shell = true`. |
 | `enable_search` | `--enable-search` | false | Enable the built-in web search tool. |
@@ -97,6 +105,10 @@ quant = "4"
 | `access_log_health` | `--access-log-health` | false | Include health, metrics, docs, and UI requests in HTTP access logs. |
 | `disable_request_id_header` | `--disable-request-id-header` | false | Stop echoing `x-request-id` on responses. |
 | `disable_metrics` | `--disable-metrics` | false | Disable Prometheus HTTP metrics and recorder installation. |
+| `jobs_dir` | `--jobs-dir` | the cache's `engine-jobs` | Where jobs (world generation, reconstruction) keep their folders. |
+| `world_models` | `--world-models` | not set | The world-generation checkpoints for jobs: a folder holding them under their repository names, or a Hugging Face repo laid out the same way, fetched by the first job. See [3D worlds](/guides/models/generate-3d-worlds/). |
+| `job_placement` | `--job-placement` | `fastest` | How much a job may unload to run: whatever it needs (`fastest`), only idle models (`when-quiet`), or nothing (`no-eviction`). |
+| `job_devices` | `--job-device` (repeat) | every visible device | CUDA device ordinals jobs may run on. |
 
 :::caution
 The default `host = "0.0.0.0"` binds on all interfaces, exposing the server to your network. Without `api_keys_file` (or `INFERENCE_RS_API_KEY`) the server is open to anyone who can reach it. Set `host = "127.0.0.1"` for local-only access, or give it keys, and put TLS in front before exposing it.
@@ -113,7 +125,8 @@ The MCP *client* configuration (`mcp_config`) lives under `[runtime]`, not `[ser
 | `memory_mb` | `--pa-memory-mb` | not set | KV cache budget in MB. Conflicts with `context_len`. |
 | `memory_fraction` | `--pa-memory-fraction` | not set | KV cache budget as fraction of VRAM (0.0 to 1.0). Conflicts with `context_len` and `memory_mb`. |
 | `block_size` | `--pa-block-size` | not set | Tokens per block. |
-| `cache_type` | `--pa-cache-type` | `auto` | KV cache quantization type. |
+| `cache_type` | `--pa-cache-type` | `auto` | KV cache storage: `auto`, `none`, `f8e4m3`, `q2`..`q8`, or `qK/qV`; see [paged attention](/guides/perf/paged-attention/). |
+| `cache_layers` | `--pa-cache-layers` | not set | Per-layer KV cache storage on top of `cache_type`: `layers=type` items such as `0=q8,20-27=q6`, or `uniform` (the type everywhere, without the model's profile or the general rule). |
 
 ## `[sandbox]` section
 
@@ -147,6 +160,8 @@ Each entry defines one loaded model.
 | `jinja_explicit` | path | no | Jinja override for this model. |
 | `matformer_config_path` | path | no | MatFormer slice config (CSV/JSON). |
 | `matformer_slice_name` | string | no | MatFormer slice to load. |
+| `lazy` | bool | no | Register the model without loading it: it loads on its first request, under its `model_id`. |
+| `pinned` | bool | no | Never evict this model to make room for another. |
 
 Each `[[models]]` entry can carry nested sections whose field shapes mirror the corresponding CLI flags:
 

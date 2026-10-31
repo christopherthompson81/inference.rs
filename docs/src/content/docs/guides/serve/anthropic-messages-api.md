@@ -54,8 +54,8 @@ Response shape:
 
 `id` is the server's per-request sequence number and `model` echoes the loaded model's name, not the `"default"` alias sent in the request.
 
-The server accepts Anthropic headers for client compatibility, but does not validate
-`x-api-key`. Put authentication in a reverse proxy when exposing the server to users.
+An open server accepts and ignores `x-api-key`, so any non-empty string works; a server
+started with API keys requires one. See [authentication](/reference/http-api/#authentication).
 
 ## Streaming
 
@@ -160,9 +160,8 @@ semantics:
 | Server tools | Web search and code execution use inference.rs agentic implementations. Their extra streaming events are inference.rs extensions, not Anthropic server-tool result blocks. |
 | Beta request controls | Unknown forward-compatible fields are ignored. Anthropic context management and context editing are not implemented. |
 
-`max_tokens` must be greater than zero. Authentication headers are accepted for
-client compatibility but are not validated by the local server; use a reverse
-proxy when authentication is required.
+`max_tokens` must be greater than zero. An open server ignores authentication headers;
+a keyed server requires one ([authentication](/reference/http-api/#authentication)).
 
 ## Tool use
 

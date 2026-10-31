@@ -14,13 +14,18 @@ set in `~/.cargo/config.toml` under `[env]` (build scripts track those variables
 | Variable | Points at | Read by |
 |---|---|---|
 | `INFERENCE_TEST_PADDLEOCR_VL_MODEL` | PaddleOCR-VL Hugging Face directory | `paddleocr_vl` |
+| `INFERENCE_TEST_PADDLEOCR_VL_GGUF` | a directory holding PaddleOCR-VL-1.6's official GGUF and its mmproj | `paddleocr_vl` |
 | `INFERENCE_TEST_QWEN3_5_MODEL` | Qwen3.5-0.8B Hugging Face directory | `qwen3_5_mtp` |
-| `INFERENCE_TEST_QWEN3_5_GGUF` | a Q8_0 GGUF of the same model | `qwen3_5_mtp` |
+| `INFERENCE_TEST_QWEN3_5_GGUF` | a Q8_0 GGUF of the same model | `qwen3_5_mtp`, `qwen3_5_tool_call` (CUDA only) |
 | `INFERENCE_TEST_QWEN3_5_MOE_GGUF` | a Qwen3.5-MoE GGUF that keeps its MTP (`nextn`) block, such as unsloth's Qwen3.6-35B-A3B-MTP | `qwen3_5_mtp` |
 | `INFERENCE_TEST_IQ4_XS_GGUF` | a Qwen3.8-27B IQ4_XS GGUF file | `gguf_iq::iq4_xs_greedy_continuation_matches_llama_cpp` |
 | `INFERENCE_TEST_LAYOUT_MODEL` | PP-DocLayoutV3 safetensors directory | `inference-ffi` `detections` tests |
 | `INFERENCE_TEST_LAYOUT_IMAGE` | a document page image | `inference-ffi` `detections` tests |
 | `INFERENCE_TEST_FLUX_DIR` | a single-file FLUX layout | `flux` (CUDA only) |
+| `INFERENCE_TEST_WORLDGEN_MODELS` | a folder holding the world-generation checkpoints under their repository names | `inference-jobs` `world_job` |
+| `INFERENCE_TEST_WORLDGEN_PANORAMA` | a 2:1 panorama image | `inference-jobs` `world_job` |
+| `INFERENCE_TEST_WORLDMIRROR_MODEL` | WorldMirror 2.0 checkpoint folder | `inference-jobs` `worldmirror_job` |
+| `INFERENCE_TEST_WORLDMIRROR_IMAGES` | a folder of photos of one scene | `inference-jobs` `worldmirror_job` |
 
 `iq4_xs_greedy_continuation_matches_llama_cpp` compares against a continuation recorded with mainline `llama-simple
 -n 32` on the same file, so it needs no reference build.

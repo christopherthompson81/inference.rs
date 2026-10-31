@@ -62,11 +62,14 @@ async fn main() -> anyhow::Result<()> {
 - `with_base_path(&str)`
 - `with_allowed_origins(Vec<String>)`
 - `with_max_body_limit(usize)`
-- `with_api_keys(ApiKeys)`, to require [API keys](/reference/http-api/#authentication)
+- `with_api_keys(ApiKeys)`, to require [API keys](/reference/http-api/#authentication), or `with_auth(Option<Arc<Auth>>)` to share one key set (and its signed-in browsers) with routers built beside this one
+- `with_model_management(bool)`, to serve the routes that add and remove served models (off by default)
+- `with_model_manager(Arc<ModelManager>)`, to serve the model inventory, loads, downloads and deletions
+- `with_jobs(JobQueue)`, to serve an `inference_jobs::JobQueue` on the jobs routes (otherwise the server keeps its own)
 - `with_file_listing(bool)` and `with_observability_config(ObservabilityConfig)`
 
 The agent policy (tool-round limit, tool dispatch URL, permissions), the skill store and runtime LoRA management come from the engine's spec (`agentic`, `skills` and `adapters`), so every route and the engine's own methods share them.
 
 ## Calling the model directly from a handler
 
-For custom request shapes, share the `Engine` (it is cheap to clone) with your handlers and call it: `engine.chat(request, media)` and `engine.chat_stream(...)` apply the same agent policy (permissions, tool-round limits, approvals) that `/v1/chat/completions` applies, and `engine.responses(...)`, `engine.completion(...)`, `engine.embeddings(...)` and the file and session methods mirror their routes. `engine.for_owner(name)` scopes a clone to one owner, as a [keyed server](/reference/http-api/#authentication) does per API key. To change what a stream sends, `chat_completion::create_streamer(stream, on_chunk, on_done)` frames an `engine.chat_stream(...)` as SSE with a hook on each chunk and one at the end; `completions::create_streamer` does the same for completions.
+For custom request shapes, share the `Engine` (it is cheap to clone) with your handlers and call it: `engine.chat(request, media)` and `engine.chat_stream(...)` apply the same agent policy (permissions, tool-round limits, approvals) that `/v1/chat/completions` applies, and `engine.completion(...)`, `engine.embeddings(...)` and the file and session methods mirror their routes (the Anthropic Messages and Responses routes translate onto `engine.chat` in `inference-chat-protocols`). `engine.for_owner(name)` scopes a clone to one owner, as a [keyed server](/reference/http-api/#authentication) does per API key. To change what a stream sends, `chat_completion::create_streamer(stream, on_chunk, on_done)` frames an `engine.chat_stream(...)` as SSE with a hook on each chunk and one at the end; `completions::create_streamer` does the same for completions.

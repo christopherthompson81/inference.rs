@@ -10,4 +10,5 @@ How inference.rs works inside:
 - [Multimodal pipeline](/developer/multimodal-pipeline/) - how image, video, and audio inputs reach the model.
 - [Session memory](/developer/session-memory/) - how agentic conversation state is stored and matched.
 - [Build from source](/developer/from-source/) - local build setup and feature flags.
+- [Deep checks](/developer/deep-checks/) - real-checkpoint tests, their paths, and the llama.cpp parity references.
 - [Housekeeping](/developer/housekeeping/) - the recurring round that keeps build time, test time and duplication down.

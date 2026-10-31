@@ -87,6 +87,20 @@ async fn generate_embedding(&self, text: impl Into<String>) -> Result<Vec<f32>>
 ```
 Single-input convenience wrapper.
 
+## Reranking and decisions
+
+```rust
+async fn rerank_documents<I, S>(&self, query: impl Into<String>, documents: I) -> Result<Vec<RerankResult>>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+```
+Each document scored against `query` by a cross-encoder, most relevant first. Through the engine, `rerank(RerankRequest)` takes the full `/v1/rerank` request, and `decide(DecisionRequest)` answers typed questions (choice, score, noul) with a [decision model](/guides/models/use-decision-models/), as `/v1/decisions` does.
+
+## Speech recognition
+
+Through the engine: `transcription(TranscriptionRequest, &[u8])` transcribes encoded audio, as `/v1/audio/transcriptions` does; `transcription_session` opens a streaming session, and `diarization` and `voice_activity` take the same audio. Guide: [speech models](/guides/models/use-speech-models/).
+
 ## Image and speech generation
 
 ```rust
@@ -98,7 +112,7 @@ Diffusion image generation and editing, and text to speech, taking the same requ
 
 ## Quantization
 
-Through the engine: `re_isq(ReIsqRequest)` requantizes a model loaded with [ISQ (in-situ quantization)](/reference/quantization-types/) to another type, and `calibration(CalibrationAction::{Start, Status, Apply}, model)` runs online calibration (the model must be loaded with ISQ). Guide: [online calibration](/guides/quantization/online-calibration/); example: [online-calibration](/examples/rust/quantization/online-calibration/).
+Through the engine: `re_isq(ReIsqRequest)` requantizes a model loaded with [ISQ (in-situ quantization)](/reference/quantization-types/) to another type, and `calibration(CalibrationAction::{Start, Status, Apply}, model)` runs online calibration (the model must be loaded with ISQ). `Model::re_isq_model(IsqType)` requantizes the default model. Guide: [online calibration](/guides/quantization/online-calibration/); example: [online-calibration](/examples/rust/quantization/online-calibration/).
 
 ## Tokenization
 
@@ -106,4 +120,4 @@ Through the engine: `tokenize(TokenizeRequest)` tokenizes text, `tokenize_chat(C
 
 ## Management
 
-Through the engine: `models()`, `add_model(ModelSpec)`, `remove_model`, `unload_model`, `reload_model`, `model_status`, `set_default_model`, `add_model_alias`; sessions (`sessions`, `session`, `put_session`, `fork_session`, `delete_session`); LoRA adapters; files (`files`, `file_content`); `mcp_tools()`. A `MultiModelBuilder` loads several models into one engine. Example: [multi-model](/examples/rust/advanced/multi-model/); guide: [sessions](/guides/agents/persist-sessions/).
+Through the engine: `models()`, `add_model(ModelSpec)`, `remove_model`, `unload_model`, `reload_model`, `model_status`, `set_default_model`, `add_model_alias`; sessions (`sessions`, `session`, `put_session`, `fork_session`, `delete_session`); LoRA adapters; files (`files`, `file_content`); skills (`Model::upload_skill(dir)` uploads a skill directory and returns the id requests mount it by); `mcp_tools()`; devices (`device_snapshots` reports each CUDA device's memory, leases and resident models, `place_need` where work would go, and `lease_device` holds a device, unloading its models once they go quiet). A `MultiModelBuilder` loads several models into one engine. Example: [multi-model](/examples/rust/advanced/multi-model/); guide: [sessions](/guides/agents/persist-sessions/).

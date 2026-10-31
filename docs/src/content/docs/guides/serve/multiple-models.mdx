@@ -110,7 +110,7 @@ The id is the model's `model_id`, or its alias when added with `add_model_with_a
 curl http://localhost:1234/v1/models
 ```
 
-Each entry includes `id`, `object`, `created`, `owned_by`, plus optional `status` (`loaded`/`unloaded`/`reloading`), `tools_available`, `mcp_tools_count`/`mcp_servers_connected` for [MCP (Model Context Protocol)](/guides/agents/connect-mcp-server/) servers, `max_model_len`, the longest sequence a loaded model accepts, and `default: true` on the model a request without `model` goes to.
+The fields of each entry are listed under [model routing](/reference/http-api/#model-routing) in the HTTP API reference.
 
 ## Unloading and reloading on demand
 
