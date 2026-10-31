@@ -20,7 +20,7 @@ import { modelStore } from "./models.svelte";
 const GREEDY_SAMPLING = { temperature: 0, top_p: 1, top_k: 1, repetition_penalty: 1 };
 
 const UI_UPLOAD_URL =
-  /^uploads\/(?:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(?:jpg|jpeg|png|gif|webp|bmp|svg|mp4|avi|mov|mkv|webm|m4v)$/;
+  /^uploads\/(?:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(?:jpg|jpeg|png|gif|webp|bmp|svg|mp4|avi|mov|mkv|webm|m4v|wav|mp3|ogg|flac|m4a|aac|opus)$/;
 
 function inferenceMediaUrl(url: string): string {
   if (!UI_UPLOAD_URL.test(url)) return url;
@@ -128,8 +128,8 @@ class ChatStore {
 
   // ===== send/generate =====
 
-  async sendMessage(content: string, imageUrls?: string[], videoUrls?: string[]) {
-    if (!content.trim() && !imageUrls?.length && !videoUrls?.length) return;
+  async sendMessage(content: string, imageUrls?: string[], videoUrls?: string[], audioUrls?: string[]) {
+    if (!content.trim() && !imageUrls?.length && !videoUrls?.length && !audioUrls?.length) return;
     if (this.isStreaming) return;
 
     const model = modelStore.selectedModel;
@@ -152,6 +152,7 @@ class ChatStore {
       content,
       images: imageUrls,
       videos: videoUrls,
+      audios: audioUrls,
     };
     this.insertNode(userMsg);
 
@@ -161,8 +162,7 @@ class ChatStore {
           this.currentChatId,
           "user",
           content,
-          imageUrls,
-          videoUrls,
+          { images: imageUrls, videos: videoUrls, audios: audioUrls },
           undefined,
           undefined,
           undefined,
@@ -185,7 +185,7 @@ class ChatStore {
 
     for (const msg of this.messages) {
       if (msg.role === "system") continue;
-      const hasMedia = msg.images?.length || msg.videos?.length;
+      const hasMedia = msg.images?.length || msg.videos?.length || msg.audios?.length;
       if (hasMedia) {
         const contentParts: ChatCompletionMessage["content"] = [
           { type: "text", text: msg.content },
@@ -205,6 +205,12 @@ class ChatStore {
               video_url: { url: inferenceMediaUrl(url) },
             });
           }
+        }
+        for (const url of msg.audios ?? []) {
+          (contentParts as Array<{ type: string; audio_url?: { url: string } }>).push({
+            type: "audio_url",
+            audio_url: { url: inferenceMediaUrl(url) },
+          });
         }
         apiMessages.push({ role: msg.role, content: contentParts });
       } else {
@@ -461,7 +467,6 @@ class ChatStore {
             "assistant",
             fullContent,
             undefined,
-            undefined,
             assistantMsg.blocks,
             assistantMsg.finishReason ?? undefined,
             { elapsed_ms: elapsedMs, ttft_ms: ttftMs, tokens, model, session_id: sessionId },
@@ -639,6 +644,7 @@ class ChatStore {
         content: m.content,
         images: m.images,
         videos: m.videos,
+        audios: m.audios,
         blocks: m.blocks,
         finishReason: m.finish_reason,
         elapsedMs: m.elapsed_ms,

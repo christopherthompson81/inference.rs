@@ -5,10 +5,11 @@ export interface ChatCompletionMessage {
 }
 
 export interface MessageContent {
-  type: "text" | "image_url" | "video_url";
+  type: "text" | "image_url" | "video_url" | "audio_url";
   text?: string;
   image_url?: { url: string };
   video_url?: { url: string };
+  audio_url?: { url: string };
 }
 
 export interface ChatCompletionChunk {
@@ -195,6 +196,7 @@ export interface ChatMessageRecord {
   content: string;
   images?: string[];
   videos?: string[];
+  audios?: string[];
   blocks?: StreamBlock[];
   finish_reason?: string;
   elapsed_ms?: number;
@@ -241,6 +243,8 @@ export interface DisplayMessage {
   blocks?: StreamBlock[];
   images?: string[];
   videos?: string[];
+  /** The web UI's `uploads/...` URLs of attached recordings. */
+  audios?: string[];
   finishReason?: string | null;
   /** Wall-clock duration of the streaming response in milliseconds (TTFT + decode). */
   elapsedMs?: number;

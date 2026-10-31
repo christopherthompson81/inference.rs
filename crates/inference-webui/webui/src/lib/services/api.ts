@@ -84,12 +84,17 @@ export interface MessageStats {
   session_id?: string;
 }
 
+export interface MessageMedia {
+  images?: string[];
+  videos?: string[];
+  audios?: string[];
+}
+
 export async function appendMessage(
   id: string,
   role: string,
   content: string,
-  images?: string[],
-  videos?: string[],
+  media?: MessageMedia,
   blocks?: unknown[],
   finishReason?: string,
   stats?: MessageStats,
@@ -102,8 +107,9 @@ export async function appendMessage(
     parent_id: parentId ?? undefined,
     role,
     content,
-    images,
-    videos,
+    images: media?.images,
+    videos: media?.videos,
+    audios: media?.audios,
     blocks,
     finish_reason: finishReason,
     elapsed_ms: stats?.elapsed_ms,

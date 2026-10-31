@@ -7,6 +7,8 @@
   let inputValue = $state("");
   let pendingImages = $state<{ file: File; url: string; uploadedUrl?: string }[]>([]);
   let pendingVideos = $state<{ file: File; url: string; uploadedUrl?: string }[]>([]);
+  // recordings go up when attached and are sent by their `uploads/...` URL, so chat history keeps no copy
+  let pendingAudios = $state<{ name: string; url: string }[]>([]);
   let isDragging = $state(false);
 
   function fileToDataUrl(file: File): Promise<string> {
@@ -27,7 +29,7 @@
   async function handleSend() {
     if (chatStore.isStreaming) return;
     const content = inputValue.trim();
-    if (!content && !pendingImages.length && !pendingVideos.length) return;
+    if (!content && !pendingImages.length && !pendingVideos.length && !pendingAudios.length) return;
 
     // Encode as data URLs; the /v1/chat/completions endpoint only accepts
     // http/https/data sources, not the server's relative `uploads/...` paths.
@@ -61,9 +63,12 @@
       }
     }
 
+    const audioUrls = pendingAudios.map((audio) => audio.url);
+
     inputValue = "";
     pendingImages = [];
     pendingVideos = [];
+    pendingAudios = [];
     if (textareaEl) {
       textareaEl.style.height = "auto";
     }
@@ -72,6 +77,7 @@
       content,
       imageUrls.length ? imageUrls : undefined,
       videoUrls.length ? videoUrls : undefined,
+      audioUrls.length ? audioUrls : undefined,
     );
   }
 
@@ -104,7 +110,8 @@
       pendingImages = [...pendingImages, { file, url }];
     } else if (file.type.startsWith("audio/")) {
       try {
-        await api.uploadAudio(file);
+        const { url } = await api.uploadAudio(file);
+        pendingAudios = [...pendingAudios, { name: file.name, url }];
       } catch (e) {
         console.error("Audio upload failed:", e);
       }
@@ -120,6 +127,10 @@
   function removeImage(index: number) {
     URL.revokeObjectURL(pendingImages[index].url);
     pendingImages = pendingImages.filter((_, i) => i !== index);
+  }
+
+  function removeAudio(index: number) {
+    pendingAudios = pendingAudios.filter((_, i) => i !== index);
   }
 
   function removeVideo(index: number) {
@@ -156,7 +167,7 @@
 >
   <div class="mx-auto max-w-3xl">
     <!-- Media previews -->
-    {#if pendingImages.length > 0 || pendingVideos.length > 0}
+    {#if pendingImages.length > 0 || pendingVideos.length > 0 || pendingAudios.length > 0}
       <div class="mb-2 flex flex-wrap gap-2">
         {#each pendingImages as img, i}
           <div class="relative h-16 w-16 overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700">
@@ -185,6 +196,23 @@
               class="absolute right-0 top-0 rounded-bl bg-black/60 p-0.5 text-white hover:bg-black/80"
               onclick={() => removeVideo(i)}
               aria-label="Remove video"
+            >
+              <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        {/each}
+        {#each pendingAudios as audio, i}
+          <div class="relative flex h-16 max-w-56 items-center gap-2 rounded-lg border border-gray-200 px-3 pr-6 text-xs text-gray-600 dark:border-gray-700 dark:text-gray-300">
+            <svg class="h-5 w-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
+            </svg>
+            <span class="truncate">{audio.name}</span>
+            <button
+              class="absolute right-0 top-0 rounded-bl bg-black/60 p-0.5 text-white hover:bg-black/80"
+              onclick={() => removeAudio(i)}
+              aria-label="Remove audio"
             >
               <svg class="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
@@ -248,7 +276,7 @@
       {:else}
         <button
           onclick={handleSend}
-          disabled={!modelStore.selectedModel || (!inputValue.trim() && !pendingImages.length)}
+          disabled={!modelStore.selectedModel || (!inputValue.trim() && !pendingImages.length && !pendingAudios.length)}
           class="shrink-0 rounded-xl bg-blue-600 p-2.5 text-white transition-colors hover:bg-blue-700 disabled:opacity-40 disabled:hover:bg-blue-600"
           title="Send message"
         >
