@@ -75,6 +75,9 @@ fn qwen1_name(name: &str) -> String {
 }
 
 const DECISION_HEAD_PREFIX: &str = "decision.";
+/// ERNIE 4.5's MTP layer under its Hugging Face names: llama.cpp's converter drops it, so a GGUF carries it only when
+/// added afterwards (`scripts/gguf_add_hf_tensors.py`).
+pub const ERNIE_MTP_PREFIX: &str = "model.mtp_";
 // granite-switch fuses q, k and v into one tensor; Granite's attention takes them apart
 const FUSED_QKV_ROLE: &str = "attn_qkv";
 
@@ -110,9 +113,13 @@ fn bind_root_tensors(
     );
     bind(archive, bindings, "lm_head.weight", "output.weight");
     bind(archive, bindings, "lm_head.bias", "output.bias");
-    // vllm-decision2's option head keeps llama.cpp's names
+    // vllm-decision2's option head keeps llama.cpp's names, an added ERNIE MTP layer Hugging Face's
     for name in archive.tensors().keys() {
-        if name.starts_with(DECISION_HEAD_PREFIX) {
+        let ernie_mtp = matches!(
+            loader,
+            NormalLoaderType::Ernie4_5 | NormalLoaderType::Ernie4_5Moe
+        ) && name.starts_with(ERNIE_MTP_PREFIX);
+        if name.starts_with(DECISION_HEAD_PREFIX) || ernie_mtp {
             bindings.insert(name.clone(), GgufTensorBinding::tensor(name.clone()));
         }
     }

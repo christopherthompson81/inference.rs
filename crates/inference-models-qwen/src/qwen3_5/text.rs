@@ -1473,7 +1473,7 @@ pub struct Qwen3_5TextModel {
     pub(super) pending_prompt_tails:
         Mutex<std::collections::HashMap<usize, super::speculative::PendingPromptTail>>,
     #[cfg(all(feature = "cuda", target_family = "unix"))]
-    pub(super) mtp_graphs: super::mtp_graph::MtpGraphs,
+    pub(super) mtp_graphs: crate::speculative::mtp_graph::MtpGraphs,
 }
 
 impl Qwen3_5TextModel {

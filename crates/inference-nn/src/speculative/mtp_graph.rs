@@ -1,5 +1,5 @@
-//! The MTP head's drafter forward replayed from a CUDA graph per row shape: eager, its ~100 launches cost more host
-//! time than its kernels take (qwen4exp investigation Run 57).
+//! An MTP head's drafter forward replayed from a CUDA graph per row shape: eager, its ~100 launches cost more host
+//! time than its kernels take (qwen4exp investigation Run 57). Qwen3.5's head and the shared decoder's use it.
 
 use std::sync::{Arc, Mutex};
 
@@ -19,24 +19,25 @@ use crate::cuda::graph_metadata::{CudaDecodeGraphMetadataBuffers, CudaDecodeGrap
 use crate::paged_attention::PagedAttentionInputMetadata;
 use crate::paged_attention::input_metadata::{DecodePagedRows, DecodePagedRowsGraphKey};
 
-use super::mtp::MtpDraft;
-use super::speculative::MtpForwardInputs;
+pub use super::mtp::{MtpDraft, MtpForwardInputs};
 
 // a refresh covers the anchor, the accepted drafts and a pending prompt tail
 const MTP_GRAPH_MAX_ROWS: usize = 8;
 const MTP_GRAPH_CAPACITY: usize = 8;
 
 /// What a graph forward stages: the rows' host values, the target hidden states and their decode rows.
-pub(super) struct MtpGraphRun<'a> {
-    pub(super) shape: (usize, usize),
-    pub(super) tokens: &'a [u32],
-    pub(super) mrope: &'a [u32],
-    pub(super) positions: &'a [usize],
-    pub(super) starts: &'a [usize],
-    pub(super) target_hidden: &'a Tensor,
-    pub(super) decode_rows: Arc<DecodePagedRows>,
+pub struct MtpGraphRun<'a> {
+    pub shape: (usize, usize),
+    pub tokens: &'a [u32],
+    /// The head's own positions, planes of `shape`; empty for a head that ropes from the metadata's positions.
+    pub head_positions: &'a [u32],
+    /// Each row's position plus one.
+    pub positions: &'a [usize],
+    pub starts: &'a [usize],
+    pub target_hidden: &'a Tensor,
+    pub decode_rows: Arc<DecodePagedRows>,
     // the paged layers the forward writes, so a reallocated cache gets a new graph
-    pub(super) kv: Vec<TensorId>,
+    pub kv: Vec<TensorId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,7 +51,7 @@ struct MtpGraphEntry {
     key: MtpGraphKey,
     staging: CudaGraphHostStaging,
     tokens: Var,
-    positions: Var,
+    positions: Option<Var>,
     hidden: Var,
     metadata: CudaDecodeGraphMetadataBuffers,
     output: MtpDraft,
@@ -62,7 +63,7 @@ struct MtpGraphEntry {
 /// A graph's inputs at fixed addresses, holding one run's values: what a capture records and its warm-up reads.
 struct GraphInputs {
     tokens: Var,
-    positions: Var,
+    positions: Option<Var>,
     hidden: Var,
     metadata: CudaDecodeGraphMetadataBuffers,
     graph_metadata: PagedAttentionInputMetadata,
@@ -73,11 +74,15 @@ impl GraphInputs {
         let device = run.target_hidden.device();
         let (rows, cols) = run.shape;
         let tokens = Var::from_tensor(&Tensor::from_vec(run.tokens.to_vec(), run.shape, device)?)?;
-        let positions = Var::from_tensor(&Tensor::from_vec(
-            run.mrope.to_vec(),
-            (run.mrope.len() / (rows * cols), rows, cols),
-            device,
-        )?)?;
+        let positions = (!run.head_positions.is_empty())
+            .then(|| {
+                Var::from_tensor(&Tensor::from_vec(
+                    run.head_positions.to_vec(),
+                    (run.head_positions.len() / (rows * cols), rows, cols),
+                    device,
+                )?)
+            })
+            .transpose()?;
         let hidden = Var::from_tensor(&run.target_hidden.copy()?)?;
         let materialized = run
             .decode_rows
@@ -94,8 +99,10 @@ impl GraphInputs {
                 model_metadata: None,
                 activation_dtype: run.target_hidden.dtype(),
             })?;
-        // the head ropes its own MRoPE positions, as the eager forward's metadata leaves these out
-        graph_metadata.rope_positions = None;
+        // a head that ropes its own positions reads none from the metadata, as its eager forward's carries none
+        if positions.is_some() {
+            graph_metadata.rope_positions = None;
+        }
         Ok(Self {
             tokens,
             positions,
@@ -110,9 +117,10 @@ impl GraphInputs {
         run: &MtpGraphRun<'_>,
         forward: &dyn Fn(MtpForwardInputs<'_>) -> Result<MtpDraft>,
     ) -> Result<MtpDraft> {
+        let positions = self.positions.as_ref().map(Var::as_detached_tensor);
         forward(MtpForwardInputs {
             tokens: &self.tokens.as_detached_tensor(),
-            positions: &self.positions.as_detached_tensor(),
+            positions: positions.as_ref(),
             target_hidden: &self.hidden.as_detached_tensor(),
             metadata: &self.graph_metadata,
             starts: run.starts,
@@ -163,9 +171,10 @@ impl MtpGraphEntry {
             return Err(inference_tensor::Error::msg(err.to_string())
                 .context("MTP graph begin capture failed"));
         }
+        let captured_positions = positions.as_ref().map(Var::as_detached_tensor);
         let output = forward(MtpForwardInputs {
             tokens: &tokens.as_detached_tensor(),
-            positions: &positions.as_detached_tensor(),
+            positions: captured_positions.as_ref(),
             target_hidden: &hidden.as_detached_tensor(),
             metadata: &graph_metadata,
             starts: run.starts,
@@ -227,7 +236,14 @@ impl MtpGraphEntry {
         } = self;
         staging.update(|staging| {
             staging.copy_from_u32_slice("mtp_tokens", location, run.tokens, tokens)?;
-            staging.copy_from_u32_slice("mtp_positions", location, run.mrope, positions)?;
+            if let Some(positions) = positions {
+                staging.copy_from_u32_slice(
+                    "mtp_positions",
+                    location,
+                    run.head_positions,
+                    positions,
+                )?;
+            }
             buffers.copy_from(&metadata, run.positions, 1, staging)
         })?;
         crate::cuda::graph::copy_tensor(run.target_hidden, &self.hidden.as_detached_tensor())?;
@@ -304,14 +320,14 @@ struct MtpGraphState {
     failed: Vec<MtpGraphKey>,
 }
 
-/// The MTP head's captured drafter forwards, most recently used last.
+/// An MTP head's captured drafter forwards, most recently used last.
 #[derive(Default)]
-pub(super) struct MtpGraphs(Mutex<MtpGraphState>);
+pub struct MtpGraphs(Mutex<MtpGraphState>);
 
 impl MtpGraphs {
     /// The drafter forward over `run` from its shape's graph, capturing it on the shape's second use; `None` runs
     /// it eagerly.
-    pub(super) fn forward(
+    pub fn forward(
         &self,
         run: &MtpGraphRun<'_>,
         forward: &dyn Fn(MtpForwardInputs<'_>) -> Result<MtpDraft>,
@@ -384,7 +400,7 @@ impl MtpGraphs {
     }
 
     /// Drops up to `max_entries` least recently used graphs, returning how many went.
-    pub(super) fn evict_lru(&self, max_entries: usize) -> usize {
+    pub fn evict_lru(&self, max_entries: usize) -> usize {
         let mut state = self.0.lock().expect("MTP graphs poisoned");
         let count = max_entries.min(state.entries.len());
         let evicted = state.entries.drain(..count).collect::<Vec<_>>();
@@ -446,7 +462,11 @@ mod tests {
     fn forward(inputs: MtpForwardInputs<'_>) -> Result<MtpDraft> {
         let (rows, cols) = inputs.tokens.dims2()?;
         let tokens = inputs.tokens.to_dtype(DType::F32)?;
-        let positions = inputs.positions.to_dtype(DType::F32)?.sum(0)?;
+        let positions = inputs
+            .positions
+            .expect("the test head stages its positions")
+            .to_dtype(DType::F32)?
+            .sum(0)?;
         let lens = inputs
             .metadata
             .context_lens
@@ -463,8 +483,9 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
     fn replays_take_each_runs_inputs() -> Result<()> {
-        inference_nn::skip_without_cuda!();
+        crate::skip_without_cuda!();
         let device = Device::new_cuda(0)?;
         let graphs = MtpGraphs::default();
         let shape = (2, 1);
@@ -481,7 +502,7 @@ mod tests {
             let run = MtpGraphRun {
                 shape,
                 tokens: &tokens,
-                mrope: &mrope,
+                head_positions: &mrope,
                 positions: &positions,
                 starts: &starts,
                 target_hidden: &hidden,

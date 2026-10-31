@@ -120,15 +120,7 @@ struct DraftRow {
     mrope: [u32; MROPE_DIMS],
 }
 
-/// One drafter forward's device inputs: `[b, rows]` tokens, `[3, b, rows]` MRoPE positions and `[b, rows, hidden]`
-/// target hidden states in the head's dtype, with the rows' paged metadata and target positions.
-pub(super) struct MtpForwardInputs<'a> {
-    pub(super) tokens: &'a Tensor,
-    pub(super) positions: &'a Tensor,
-    pub(super) target_hidden: &'a Tensor,
-    pub(super) metadata: &'a crate::paged_attention::PagedAttentionInputMetadata,
-    pub(super) starts: &'a [usize],
-}
+use crate::speculative::mtp::MtpForwardInputs;
 
 /// The target's paged cache for a drafter that keeps its layers there.
 fn dflash_paged_cache<'a>(
@@ -228,10 +220,10 @@ impl Qwen3_5TextModel {
                 })
                 .collect::<Result<Vec<_>>>()?
                 .concat();
-            let run = super::mtp_graph::MtpGraphRun {
+            let run = crate::speculative::mtp_graph::MtpGraphRun {
                 shape,
                 tokens: &tokens,
-                mrope: &mrope,
+                head_positions: &mrope,
                 positions: &context_lens,
                 starts: &starts,
                 target_hidden: &target_hidden.contiguous()?,
@@ -252,7 +244,7 @@ impl Qwen3_5TextModel {
         let positions = Tensor::from_vec(mrope, (MROPE_DIMS, shape.0, shape.1), device)?;
         forward(MtpForwardInputs {
             tokens: &tokens,
-            positions: &positions,
+            positions: Some(&positions),
             target_hidden: &target_hidden,
             metadata: &metadata,
             starts: &starts,
@@ -272,6 +264,9 @@ impl Qwen3_5TextModel {
             metadata,
             starts,
         } = inputs;
+        let positions = positions.ok_or_else(|| {
+            inference_tensor::Error::msg("a Qwen3.5 MTP forward ropes its own positions")
+        })?;
         let device = head.device();
         let (batch, len) = tokens.dims2()?;
         let n = batch * len;

@@ -1462,6 +1462,12 @@ fn ernie4_5_core(metadata: &MetadataView<'_>) -> SynthesisResult<JsonMap<String,
     config.remove("sliding_window");
     config.insert("head_dim".into(), json!(fields.head_dim));
     config.insert("use_bias".into(), json!(false));
+    config.insert(
+        "num_nextn_predict_layers".into(),
+        json!(usize::from(
+            metadata.has_tensor_marker(super::normal_bindings::ERNIE_MTP_PREFIX)
+        )),
+    );
     Ok(config)
 }
 

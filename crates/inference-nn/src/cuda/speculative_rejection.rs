@@ -675,7 +675,8 @@ impl CudaSparseRejectionWorkspace {
             .ok_or_else(|| {
                 inference_tensor::Error::msg("sparse rejection row temperature workspace overflow")
             })?;
-        let event_flags = Some(sys::CUevent_flags::CU_EVENT_BLOCKING_SYNC);
+        // spinning: a sleeping wait wakes ~0.3 ms late, on the critical path of every speculative step
+        let event_flags = Some(sys::CUevent_flags::CU_EVENT_DISABLE_TIMING);
         Ok(Self {
             location: cuda_device.location(),
             stream: stream.clone(),

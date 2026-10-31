@@ -1,5 +1,8 @@
 pub mod config;
 pub mod logging;
+pub mod mtp;
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+pub mod mtp_graph;
 pub mod paged_rows;
 pub mod policy;
 pub mod proposer;
