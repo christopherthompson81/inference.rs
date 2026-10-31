@@ -114,6 +114,9 @@ pub struct ManagedLoadRequest {
     /// For a text GGUF, one of its entry's `projectors`; unset takes its only one, and none when there are several.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mmproj: Option<String>,
+    /// For a GGUF, the Hugging Face repository its config and tokenizer come from, when its metadata names no base model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tok_model_id: Option<String>,
     /// For a speech recognition model, a Silero VAD GGUF (an inventory `path`): recordings over 5 minutes are then cut
     /// at their silences, and run past the 24 minutes one pass takes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -479,6 +482,13 @@ impl ModelManager {
                 }
             },
         };
+        let gguf = matches!(&source, Source::Local(entry) if entry.format == ModelFormat::Gguf
+            && matches!(entry.kind, Some(InventoryKind::Text | InventoryKind::Multimodal)));
+        if request.tok_model_id.is_some() && !gguf {
+            return Err(ApiError::invalid_request(
+                "`tok_model_id` names a text GGUF's original repository; this source is not one",
+            ));
+        }
         self.remove_id(&id).await?;
         let _progress = add_progress_sink(progress);
         let source_name = request.source.clone();
@@ -529,6 +539,7 @@ impl ModelManager {
                 &source,
                 projector.as_deref(),
                 vad.as_deref(),
+                request.tok_model_id.as_deref(),
             ))
             .map_err(|error| ApiError::invalid_request(error.to_string()))?,
             model_id: Some(id.clone()),
@@ -780,6 +791,7 @@ impl ModelManager {
         source: &Source,
         projector: Option<&str>,
         vad: Option<&str>,
+        tok_model_id: Option<&str>,
     ) -> serde_json::Value {
         let hf_cache = self
             .config
@@ -809,6 +821,9 @@ impl ModelManager {
                 if let Some(name) = projector.and_then(|projector| Path::new(projector).file_name())
                 {
                     gguf["mmproj_filename"] = json!(name.to_string_lossy());
+                }
+                if let Some(tok_model_id) = tok_model_id {
+                    gguf["tok_model_id"] = json!(tok_model_id);
                 }
                 json!({ "GGUF": gguf })
             }

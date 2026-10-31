@@ -247,6 +247,13 @@ async fn loads_reach_only_the_folders_and_only_for_admins() -> anyhow::Result<()
         "error",
         "an assistant model is a path of its own: {refused:?}"
     );
+    let tokenizer = json!({"source": source, "model_id": "x", "tok_model_id": "org/original"});
+    let refused = events(&app, post("/v1/manager/load", tokenizer)).await?;
+    assert_eq!(
+        refused.last().unwrap().0,
+        "error",
+        "a checkpoint carries its own config: {refused:?}"
+    );
     let outside = elsewhere.path().join("model.safetensors");
     let (status, body) =
         json_body(&app, post("/v1/manager/delete", json!({"path": outside}))).await?;

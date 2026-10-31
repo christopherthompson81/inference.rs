@@ -431,6 +431,7 @@ A load: what to load, the id requests will name it by, and how to run it.
 | `paged_cache_type` | `PagedCacheType \| None` | optional |
 | `paged_context_len` | `int \| None` | optional |
 | `source` | `str` | required |
+| `tok_model_id` | `str \| None` | optional |
 | `vad` | `str \| None` | optional |
 
 
