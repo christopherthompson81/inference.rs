@@ -56,11 +56,7 @@ enum MtpInput {
     },
 }
 
-/// One MTP forward's outputs: what `lm_head` reads, and what the next chained draft takes as its hidden state.
-pub struct MtpDraft {
-    pub logits_hidden: Tensor,
-    pub chain_hidden: Tensor,
-}
+pub use crate::speculative::mtp::MtpDraft;
 
 pub struct Qwen3_5MtpHead {
     pre_fc_norm_embedding: GemmaRmsNorm,
