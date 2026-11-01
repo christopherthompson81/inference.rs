@@ -64,7 +64,7 @@ pub use embedding::{EmbeddingLoader, EmbeddingLoaderBuilder, EmbeddingSpecificCo
 pub use execution::{StepLookahead, StepSubmission};
 use futures::future::BoxFuture;
 pub use ggml::{GGMLLoader, GGMLLoaderBuilder, GGMLSpecificConfig};
-pub use gguf::{GGUFLoader, GGUFLoaderBuilder, GGUFSpecificConfig};
+pub use gguf::{GGUFLoader, GGUFLoaderBuilder, GGUFSpecificConfig, gguf_tensor_names};
 pub use hf_config::HfConfigOverrides;
 use image::DynamicImage;
 pub use inference_nn::loaders::{Modalities, MultimodalPromptPrefixer, SupportedModality};

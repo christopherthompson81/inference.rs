@@ -23,9 +23,9 @@ use args::{
 use commands::{
     AgentModel, BenchRunConfig, LaunchRequest, list_agent_sessions, run_agent, run_asr_quantize,
     run_bench, run_cache_delete, run_cache_list, run_doctor, run_from_config, run_gguf_quantize,
-    run_hidream_quantize, run_interactive, run_kernels_fetch, run_kernels_prune, run_launch,
-    run_login, run_quantize, run_server, run_tune, run_uninstall, run_update, run_uqff,
-    run_worldgen_quantize,
+    run_hidream_quantize, run_imatrix_convert, run_interactive, run_kernels_fetch,
+    run_kernels_prune, run_launch, run_login, run_quantize, run_server, run_tune, run_uninstall,
+    run_update, run_uqff, run_worldgen_quantize,
 };
 use inference_api::{LogVerbosity, initialize_inference_logging};
 
@@ -162,6 +162,7 @@ async fn main() -> Result<()> {
             QuantizeCommand::HiDreamO1(options) => run_hidream_quantize(options, cli.global)?,
             QuantizeCommand::Worldgen(options) => run_worldgen_quantize(options)?,
             QuantizeCommand::Gguf(options) => run_gguf_quantize(options)?,
+            QuantizeCommand::Imatrix(options) => run_imatrix_convert(options)?,
         },
 
         Command::Uqff { command } => {

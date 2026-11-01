@@ -25,6 +25,28 @@ pub enum QuantizeCommand {
 
     /// A float GGUF to a quantized GGUF: per-tensor types by name pattern, weighed by an imatrix
     Gguf(GgufQuantizeOptions),
+
+    /// A `.cimatrix` collected online as llama.cpp's imatrix (`.dat`) under a GGUF's tensor names
+    Imatrix(ImatrixConvertOptions),
+}
+
+#[derive(Args, Clone)]
+pub struct ImatrixConvertOptions {
+    /// The `.cimatrix` a calibration apply saved
+    #[arg(long)]
+    pub cimatrix: PathBuf,
+
+    /// The GGUF whose tensor names the imatrix takes
+    #[arg(long)]
+    pub gguf: PathBuf,
+
+    /// Output `.dat` path
+    #[arg(short = 'o', long = "output")]
+    pub output_path: PathBuf,
+
+    /// The calibration data's name, recorded in the file
+    #[arg(long, default_value = "online calibration")]
+    pub dataset: String,
 }
 
 #[derive(Args, Clone)]
@@ -544,7 +566,8 @@ pub fn resolve_quantize_command(
             other @ (QuantizeCommand::Asr(_)
             | QuantizeCommand::HiDreamO1(_)
             | QuantizeCommand::Worldgen(_)
-            | QuantizeCommand::Gguf(_)),
+            | QuantizeCommand::Gguf(_)
+            | QuantizeCommand::Imatrix(_)),
         ) => {
             return Ok(other);
         }
@@ -608,7 +631,8 @@ mod tests {
             QuantizeCommand::Asr(_)
             | QuantizeCommand::HiDreamO1(_)
             | QuantizeCommand::Worldgen(_)
-            | QuantizeCommand::Gguf(_) => {
+            | QuantizeCommand::Gguf(_)
+            | QuantizeCommand::Imatrix(_) => {
                 unreachable!("these tests quantize UQFF")
             }
         }

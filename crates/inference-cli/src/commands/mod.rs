@@ -30,7 +30,8 @@ pub use launch::{LaunchRequest, run_launch};
 pub use login::run_login;
 pub use manage::{run_uninstall, run_update};
 pub use quantize::{
-    run_asr_quantize, run_gguf_quantize, run_hidream_quantize, run_quantize, run_worldgen_quantize,
+    run_asr_quantize, run_gguf_quantize, run_hidream_quantize, run_imatrix_convert, run_quantize,
+    run_worldgen_quantize,
 };
 pub use run::run_interactive;
 pub use serve::run_server;

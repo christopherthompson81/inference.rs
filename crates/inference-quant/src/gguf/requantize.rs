@@ -349,6 +349,35 @@ pub fn load_imatrix(path: &Path) -> Result<HashMap<String, Vec<f32>>> {
     Ok(out)
 }
 
+/// `entries` as llama.cpp's legacy `.dat` imatrix (one call per entry, so the values are read back as they are).
+pub fn save_legacy_imatrix(
+    entries: &HashMap<String, Vec<f32>>,
+    dataset: &str,
+    path: &Path,
+) -> Result<()> {
+    let mut w = BufWriter::new(File::create(path)?);
+    let as_i32 = |n: usize| i32::try_from(n).map_err(inference_tensor::Error::msg);
+    let mut names = entries.keys().collect::<Vec<_>>();
+    names.sort();
+    w.write_all(&as_i32(names.len())?.to_le_bytes())?;
+    for name in names {
+        let values = &entries[name];
+        w.write_all(&as_i32(name.len())?.to_le_bytes())?;
+        w.write_all(name.as_bytes())?;
+        w.write_all(&1i32.to_le_bytes())?;
+        w.write_all(&as_i32(values.len())?.to_le_bytes())?;
+        for v in values {
+            w.write_all(&v.to_le_bytes())?;
+        }
+    }
+    // the chunk count, then the dataset's name
+    w.write_all(&1i32.to_le_bytes())?;
+    w.write_all(&as_i32(dataset.len())?.to_le_bytes())?;
+    w.write_all(dataset.as_bytes())?;
+    w.flush()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,6 +466,10 @@ mod tests {
         let first_only =
             iq_quantize::quantize_rows(GgufType::Iq4Ks, cols, &values, Some(&w[..cols]))?;
         assert_ne!(&bytes[2 * row..4 * row], &first_only[2 * row..]);
+
+        let dat = dir.path().join("imatrix.dat");
+        save_legacy_imatrix(&imatrix, "synthetic", &dat)?;
+        assert_eq!(load_imatrix(&dat)?, imatrix);
         Ok(())
     }
 }

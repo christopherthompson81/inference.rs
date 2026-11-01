@@ -1840,6 +1840,40 @@ fn describes_own_config(
     })
 }
 
+/// A text GGUF's tensors by the native names its layers load them under, for the tensors bound as they are.
+pub fn gguf_tensor_names(
+    archive: &inference_quant::GgufArchive,
+) -> Result<HashMap<String, String>> {
+    let Some(inference_tensor::quantized::gguf_file::Value::String(architecture)) =
+        archive.metadata_value("general.architecture")
+    else {
+        bail!("GGUF metadata is missing `general.architecture`");
+    };
+    let metadata_keys = archive
+        .metadata()
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let tensor_names = archive
+        .tensors()
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let descriptor = GgufDescriptor::new(architecture, &metadata_keys, &tensor_names)?;
+    let resolved = resolve_native_adapter(&descriptor, None)?;
+    let bindings =
+        build_normal_bindings(archive, &resolved.adapter.loader, descriptor.architecture)?;
+    Ok(bindings
+        .iter()
+        .filter_map(|(native, binding)| match binding {
+            inference_quant::GgufTensorBinding::Tensor(name) => {
+                Some((native.to_string(), name.clone()))
+            }
+            _ => None,
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

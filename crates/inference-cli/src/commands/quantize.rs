@@ -19,8 +19,8 @@ use inference_api::{
 use super::serve::{self, extract_device_settings};
 use crate::args::{
     AdapterOptions, AsrQuantizeOptions, CacheOptions, DeviceOptions, FormatOptions,
-    GgufQuantizeOptions, GlobalOptions, HiDreamQuantizeOptions, MatformerSelection,
-    ModelSourceOptions, ModelType, MultimodalAdapterOptions, MultimodalOptions,
+    GgufQuantizeOptions, GlobalOptions, HiDreamQuantizeOptions, ImatrixConvertOptions,
+    MatformerSelection, ModelSourceOptions, ModelType, MultimodalAdapterOptions, MultimodalOptions,
     QuantizationOptions, QuantizeDeviceOptions, QuantizeModelSourceOptions, QuantizeModelType,
     QuantizeMultimodalOptions, QuantizeQuantizationOptions, WorldgenQuantizeOptions,
 };
@@ -163,6 +163,32 @@ pub fn run_gguf_quantize(options: GgufQuantizeOptions) -> Result<()> {
         summary.bytes_in as f64 / MIB / 1024.0,
         summary.quantized,
         summary.tensors,
+    );
+    Ok(())
+}
+
+/// Converts a `.cimatrix` to llama.cpp's imatrix under a GGUF's tensor names.
+pub fn run_imatrix_convert(options: ImatrixConvertOptions) -> Result<()> {
+    initialize_logging();
+    let mapping = gguf_requantize::cimatrix_for_gguf(&options.cimatrix, &options.gguf)?;
+    if !mapping.unmatched.is_empty() {
+        info!(
+            "{} entries bind to no tensor of the GGUF: {}",
+            mapping.unmatched.len(),
+            mapping.unmatched.join(", ")
+        );
+    }
+    if mapping.unseen_experts > 0 {
+        warn!(
+            "{} expert slices saw no tokens; they take llama.cpp's stand-in importance",
+            mapping.unseen_experts
+        );
+    }
+    gguf_requantize::save_legacy_imatrix(&mapping.entries, &options.dataset, &options.output_path)?;
+    info!(
+        "Wrote {} entries to {}",
+        mapping.entries.len(),
+        options.output_path.display()
     );
     Ok(())
 }
@@ -662,7 +688,8 @@ mod tests {
             QuantizeCommand::Asr(_)
             | QuantizeCommand::HiDreamO1(_)
             | QuantizeCommand::Worldgen(_)
-            | QuantizeCommand::Gguf(_) => {
+            | QuantizeCommand::Gguf(_)
+            | QuantizeCommand::Imatrix(_) => {
                 unreachable!("these tests quantize UQFF")
             }
         }
