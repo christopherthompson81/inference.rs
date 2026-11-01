@@ -137,7 +137,10 @@ impl MERaLiON2Model {
 impl IsqModel for MERaLiON2Model {
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
-        uvb.extend(self.text.residual_tensors_m(uvb.pp("text_decoder")));
+        uvb.extend(
+            self.text
+                .residual_tensors_m(uvb.pp("text_decoder").pp("model")),
+        );
         uvb.pp("ln_speech").add(&self.ln_speech);
         let adapter = uvb.pp("speech_audio_adapter");
         adapter.pp("mlp_adapter").pp("0").add(&self.mlp_adapter);

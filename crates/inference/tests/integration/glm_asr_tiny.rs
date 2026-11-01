@@ -10,6 +10,8 @@ use crate::audio_clips::wav;
 
 #[path = "../support/glm_asr_tiny.rs"]
 mod support;
+#[path = "../support/traces.rs"]
+mod traces;
 use support::tiny_checkpoint;
 
 const PROMPT: &str = "Hi";
@@ -24,13 +26,17 @@ const LONG_TOKENS: usize = 500;
 // `<|begin_of_audio|>`, `<|end_of_audio|>`, `<|user|>` and the newline the template writes around each clip
 const FRAME_TOKENS: usize = 4;
 const TONE_HZ: f32 = 440.0;
+// a reload computes as the load that wrote it, so only rounding parts them
+const UQFF_TOLERANCE: f32 = 1e-3;
 
-async fn build(dir: &std::path::Path) -> anyhow::Result<Model> {
-    Ok(MultimodalModelBuilder::new(dir.to_string_lossy())
+fn builder(dir: &std::path::Path) -> MultimodalModelBuilder {
+    MultimodalModelBuilder::new(dir.to_string_lossy())
         .with_dtype(ModelDType::F32)
         .with_force_cpu()
-        .build()
-        .await?)
+}
+
+async fn build(dir: &std::path::Path) -> anyhow::Result<Model> {
+    Ok(builder(dir).build().await?)
 }
 
 fn clip(samples: usize) -> AudioInput {
@@ -98,6 +104,26 @@ async fn a_clip_takes_its_windows_tokens_and_transcribes() -> anyhow::Result<()>
             .transcription(translate, &wav(&clip(SHORT_SAMPLES)))
             .await
             .is_err()
+    );
+    Ok(())
+}
+
+// the UQFF an ISQ load writes reloads, its residual tensors under the names the model reads, and decodes alike
+#[tokio::test]
+async fn an_isq_load_writes_a_uqff_that_reloads_and_decodes_alike() -> anyhow::Result<()> {
+    let checkpoint = tiny_checkpoint()?;
+    let request = || {
+        RequestBuilder::from(MultimodalMessages::new().add_audio_message(
+            TextMessageRole::User,
+            PROMPT,
+            vec![clip(SHORT_SAMPLES)],
+        ))
+    };
+    let (written, read) =
+        traces::isq_and_uqff_reload_traces(checkpoint.path(), builder, request, MAX_LEN).await?;
+    anyhow::ensure!(
+        traces::close(&written, &read, UQFF_TOLERANCE),
+        "the UQFF reload moved: {read:?} vs {written:?}"
     );
     Ok(())
 }

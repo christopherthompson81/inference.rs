@@ -10,6 +10,8 @@ use crate::audio_clips::wav;
 
 #[path = "../support/meralion2_tiny.rs"]
 mod support;
+#[path = "../support/traces.rs"]
+mod traces;
 use support::tiny_checkpoint;
 
 const PROMPT: &str = "Hi";
@@ -23,14 +25,18 @@ const CHUNK_TOKENS: usize = 100;
 // tiny vocabulary spells them a byte at a time, a space as the 3-byte `▁`
 const INSTRUCTION_TOKENS: usize = 95;
 const TONE_HZ: f32 = 440.0;
+// a reload computes as the load that wrote it, so only rounding parts them
+const UQFF_TOLERANCE: f32 = 1e-3;
 const DURATION_TOLERANCE: f64 = 1e-6;
 
-async fn build(dir: &std::path::Path) -> anyhow::Result<Model> {
-    Ok(MultimodalModelBuilder::new(dir.to_string_lossy())
+fn builder(dir: &std::path::Path) -> MultimodalModelBuilder {
+    MultimodalModelBuilder::new(dir.to_string_lossy())
         .with_dtype(ModelDType::F32)
         .with_force_cpu()
-        .build()
-        .await?)
+}
+
+async fn build(dir: &std::path::Path) -> anyhow::Result<Model> {
+    Ok(builder(dir).build().await?)
 }
 
 fn clip(samples: usize) -> AudioInput {
@@ -97,5 +103,25 @@ async fn a_transcription_request_decodes_the_clip() -> anyhow::Result<()> {
     let body: serde_json::Value = serde_json::from_str(&output.body)?;
     let duration = body["duration"].as_f64().unwrap_or_default();
     assert!((duration - SHORT_SAMPLES as f64 / f64::from(SAMPLE_RATE)).abs() < DURATION_TOLERANCE);
+    Ok(())
+}
+
+// the UQFF an ISQ load writes reloads, its residual tensors under the names the model reads, and decodes alike
+#[tokio::test]
+async fn an_isq_load_writes_a_uqff_that_reloads_and_decodes_alike() -> anyhow::Result<()> {
+    let checkpoint = tiny_checkpoint()?;
+    let request = || {
+        RequestBuilder::from(MultimodalMessages::new().add_audio_message(
+            TextMessageRole::User,
+            PROMPT,
+            vec![clip(SHORT_SAMPLES)],
+        ))
+    };
+    let (written, read) =
+        traces::isq_and_uqff_reload_traces(checkpoint.path(), builder, request, MAX_LEN).await?;
+    anyhow::ensure!(
+        traces::close(&written, &read, UQFF_TOLERANCE),
+        "the UQFF reload moved: {read:?} vs {written:?}"
+    );
     Ok(())
 }
