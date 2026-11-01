@@ -95,17 +95,60 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_str(&text).map_err(|e| msg(format!("{}: {e}", path.display())))
 }
 
+/// A NeMo `TransformerEncoder` in transformers' layout: `subsampling_factor` stacked log-mel frames projected, pre-norm
+/// layers with half-split RoPE over the first `rotary_dim` of each head (q and k normalized per head first, with
+/// `qk_norm`), a final norm.
+#[derive(Debug, Clone)]
+pub struct NemoTransformerConfig {
+    pub hidden_size: usize,
+    pub intermediate_size: usize,
+    pub num_hidden_layers: usize,
+    pub num_attention_heads: usize,
+    pub num_mel_bins: usize,
+    pub subsampling_factor: usize,
+    pub max_positions: usize,
+    pub rope_theta: f64,
+    pub rotary_dim: usize,
+    pub qk_norm: bool,
+}
+
+impl NemoTransformerConfig {
+    fn head_dim(&self) -> usize {
+        self.hidden_size / self.num_attention_heads
+    }
+}
+
+impl From<&AudioConfig> for NemoTransformerConfig {
+    fn from(a: &AudioConfig) -> Self {
+        Self {
+            hidden_size: a.hidden_size,
+            intermediate_size: a.intermediate_size,
+            num_hidden_layers: a.num_hidden_layers,
+            num_attention_heads: a.num_attention_heads,
+            num_mel_bins: a.num_mel_bins,
+            subsampling_factor: a.subsampling_factor,
+            max_positions: a.max_position_embeddings,
+            rope_theta: a.rope_parameters.rope_theta,
+            rotary_dim: a.hidden_size / a.num_attention_heads,
+            qk_norm: false,
+        }
+    }
+}
+
 struct Layer {
     norm1: LayerNorm,
     q: Linear,
     k: Linear,
     v: Linear,
     o: Linear,
+    q_norm: Option<LayerNorm>,
+    k_norm: Option<LayerNorm>,
     norm2: LayerNorm,
     fc1: Linear,
     fc2: Linear,
     heads: usize,
     head_dim: usize,
+    rotary_dim: usize,
 }
 
 fn rotate_half(xs: &Tensor) -> Result<Tensor> {
@@ -120,11 +163,16 @@ fn rotate_half(xs: &Tensor) -> Result<Tensor> {
 }
 
 impl Layer {
-    fn new(cfg: &AudioConfig, vb: VarBuilder) -> Result<Self> {
+    fn new(cfg: &NemoTransformerConfig, vb: VarBuilder) -> Result<Self> {
         let h = cfg.hidden_size;
         let attn = vb.pp("self_attn");
         let no_bias = |name: &str| -> Result<Linear> {
             Ok(Linear::new(attn.pp(name).get((h, h), "weight")?, None))
+        };
+        let head_norm = |name: &str| {
+            cfg.qk_norm
+                .then(|| layer_norm(cfg.head_dim(), LAYER_NORM_EPS, attn.pp(name)))
+                .transpose()
         };
         Ok(Self {
             norm1: layer_norm(h, LAYER_NORM_EPS, vb.pp("layer_norm1"))?,
@@ -132,11 +180,14 @@ impl Layer {
             k: no_bias("k_proj")?,
             v: no_bias("v_proj")?,
             o: linear(h, h, attn.pp("o_proj"))?,
+            q_norm: head_norm("q_norm")?,
+            k_norm: head_norm("k_norm")?,
             norm2: layer_norm(h, LAYER_NORM_EPS, vb.pp("layer_norm2"))?,
             fc1: linear(h, cfg.intermediate_size, vb.pp("mlp").pp("fc1"))?,
             fc2: linear(cfg.intermediate_size, h, vb.pp("mlp").pp("fc2"))?,
             heads: cfg.num_attention_heads,
-            head_dim: h / cfg.num_attention_heads,
+            head_dim: cfg.head_dim(),
+            rotary_dim: cfg.rotary_dim,
         })
     }
 
@@ -147,15 +198,36 @@ impl Layer {
             .contiguous()
     }
 
-    /// `cos` and `sin` are `(T, head_dim)`.
+    // RoPE over the first `rotary_dim` of each head, the rest passed through
+    fn rope(&self, x: Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+        let rotated = |x: &Tensor| -> Result<Tensor> {
+            x.broadcast_mul(cos)? + rotate_half(x)?.broadcast_mul(sin)?
+        };
+        if self.rotary_dim == self.head_dim {
+            return rotated(&x);
+        }
+        let pass = self.head_dim - self.rotary_dim;
+        Tensor::cat(
+            &[
+                &rotated(&x.narrow(D::Minus1, 0, self.rotary_dim)?)?,
+                &x.narrow(D::Minus1, self.rotary_dim, pass)?,
+            ],
+            D::Minus1,
+        )
+    }
+
+    /// `cos` and `sin` are `(T, rotary_dim)`.
     fn forward(&self, xs: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
         let (b, t, _) = xs.dims3()?;
         let normed = self.norm1.forward(xs)?;
-        let rope = |x: Tensor| -> Result<Tensor> {
-            x.broadcast_mul(cos)? + rotate_half(&x)?.broadcast_mul(sin)?
+        let head_normed = |x: Tensor, norm: &Option<LayerNorm>| match norm {
+            Some(norm) => norm.forward(&x),
+            None => Ok(x),
         };
-        let q = rope(self.heads(&self.q.forward(&normed)?)?)?;
-        let k = rope(self.heads(&self.k.forward(&normed)?)?)?;
+        let q = head_normed(self.heads(&self.q.forward(&normed)?)?, &self.q_norm)?;
+        let k = head_normed(self.heads(&self.k.forward(&normed)?)?, &self.k_norm)?;
+        let q = self.rope(q, cos, sin)?;
+        let k = self.rope(k, cos, sin)?;
         let v = self.heads(&self.v.forward(&normed)?)?;
         let scale = (self.head_dim as f64).powf(-0.5);
         let scores = (q.matmul(&k.t()?.contiguous()?)? * scale)?;
@@ -171,21 +243,91 @@ impl Layer {
     }
 }
 
-pub struct Nemotron3Diarizer {
-    mel: NemoMel,
+/// The encoder [`NemoTransformerConfig`] describes, its weights under transformers' names (`embedder.projection`,
+/// `input_layer_norm`, `layers.N`, `layer_norm`).
+pub struct NemoTransformer {
     embedder: Linear,
     input_norm: LayerNorm,
     layers: Vec<Layer>,
     final_norm: LayerNorm,
+    // (max positions, rotary_dim) RoPE tables, built once so a step slices rather than uploads
+    cos: Tensor,
+    sin: Tensor,
+    config: NemoTransformerConfig,
+    device: Device,
+}
+
+impl NemoTransformer {
+    pub fn new(config: NemoTransformerConfig, vb: VarBuilder) -> Result<Self> {
+        let c = &config;
+        let layers = (0..c.num_hidden_layers)
+            .map(|i| Layer::new(c, vb.pp("layers").pp(i)))
+            .collect::<Result<Vec<_>>>()?;
+        let stacked = c.subsampling_factor * c.num_mel_bins;
+        let embedder = Linear::new(
+            vb.pp("embedder")
+                .pp("projection")
+                .get((c.hidden_size, stacked), "weight")?,
+            None,
+        );
+        let (cos, sin) = rope_tables(
+            c.max_positions,
+            c.rotary_dim,
+            c.rope_theta,
+            vb.dtype(),
+            vb.device(),
+        )?;
+        Ok(Self {
+            embedder,
+            input_norm: layer_norm(c.hidden_size, LAYER_NORM_EPS, vb.pp("input_layer_norm"))?,
+            layers,
+            final_norm: layer_norm(c.hidden_size, LAYER_NORM_EPS, vb.pp("layer_norm"))?,
+            cos,
+            sin,
+            device: vb.device().clone(),
+            config,
+        })
+    }
+
+    pub fn config(&self) -> &NemoTransformerConfig {
+        &self.config
+    }
+
+    /// `(1, count, hidden)` for groups `first..first + count` of `(frames, mels)` row-major `features`: each
+    /// `subsampling_factor` frames stacked, past the end zero.
+    pub fn embed(&self, features: &[f32], first: usize, count: usize) -> Result<Tensor> {
+        let c = &self.config;
+        let row = c.subsampling_factor * c.num_mel_bins;
+        let begin = (first * row).min(features.len());
+        let mut stacked = features[begin..((first + count) * row).min(features.len())].to_vec();
+        stacked.resize(count * row, 0.);
+        let xs =
+            Tensor::from_vec(stacked, (1, count, row), &self.device)?.to_dtype(self.cos.dtype())?;
+        self.embedder.forward(&xs)
+    }
+
+    /// The layers and the final norm over `(1, T, hidden)` embeddings, positions from 0.
+    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let t = xs.dim(1)?;
+        let cos = self.cos.narrow(0, 0, t)?;
+        let sin = self.sin.narrow(0, 0, t)?;
+        let mut hs = self.input_norm.forward(xs)?;
+        for layer in &self.layers {
+            hs = layer.forward(&hs, &cos, &sin)?;
+        }
+        self.final_norm.forward(&hs)
+    }
+}
+
+pub struct Nemotron3Diarizer {
+    mel: NemoMel,
+    encoder: NemoTransformer,
     proj: Linear,
     upsample: Tensor,
     upsample_bias: Tensor,
     dense: Linear,
     out_proj: Linear,
     silence: Tensor,
-    // (max positions, head_dim) RoPE tables, built once so a step slices rather than uploads
-    cos: Tensor,
-    sin: Tensor,
     config: Nemotron3Config,
     frame_seconds: f64,
     device: Device,
@@ -206,15 +348,7 @@ impl Nemotron3Diarizer {
     }
 
     fn new(config: Nemotron3Config, fe: &FeatureConfig, vb: VarBuilder) -> Result<Self> {
-        let a = &config.audio_config;
-        let h = &config.head_config;
-        if fe.feature_size != a.num_mel_bins {
-            return Err(msg(format!(
-                "the features have {} mel bins but the encoder takes {}",
-                fe.feature_size, a.num_mel_bins
-            )));
-        }
-        let mel = NemoMel::new(NemoMelConfig {
+        let mel = NemoMelConfig {
             sample_rate: fe.sampling_rate,
             n_fft: fe.n_fft,
             win_length: fe.win_length,
@@ -222,36 +356,37 @@ impl Nemotron3Diarizer {
             n_mels: fe.feature_size,
             preemphasis: fe.preemphasis,
             normalize: false,
-        });
+            bf16_constants: false,
+        };
+        Self::with_features(config, mel, vb)
+    }
+
+    /// The diarizer a `config.json`'s text describes over features `mel` computes (another model's front end, as
+    /// Nemotron 3.5 Transcribe's speaker branch reads its own), its weights from `vb`.
+    pub fn from_config_json(config: &str, mel: NemoMelConfig, vb: VarBuilder) -> Result<Self> {
+        let config: Nemotron3Config = serde_json::from_str(config).map_err(msg)?;
+        Self::with_features(config, mel, vb)
+    }
+
+    fn with_features(config: Nemotron3Config, fe: NemoMelConfig, vb: VarBuilder) -> Result<Self> {
+        let a = &config.audio_config;
+        let h = &config.head_config;
+        if fe.n_mels != a.num_mel_bins {
+            return Err(msg(format!(
+                "the features have {} mel bins but the encoder takes {}",
+                fe.n_mels, a.num_mel_bins
+            )));
+        }
+        let frame_seconds = fe.hop_length as f64 / f64::from(fe.sample_rate);
+        let mel = NemoMel::new(fe);
         let tower = vb.pp("model").pp("audio_tower");
-        let layers = (0..a.num_hidden_layers)
-            .map(|i| Layer::new(a, tower.pp("layers").pp(i)))
-            .collect::<Result<Vec<_>>>()?;
-        let stacked = a.subsampling_factor * a.num_mel_bins;
-        let embedder = Linear::new(
-            tower
-                .pp("embedder")
-                .pp("projection")
-                .get((a.hidden_size, stacked), "weight")?,
-            None,
-        );
+        let encoder = NemoTransformer::new(a.into(), tower)?;
         let up = vb.pp("model").pp("upsampler").pp("conv");
         let channels = h.hidden_size * a.subsampling_factor;
-        let head_dim = a.hidden_size / a.num_attention_heads;
-        let (cos, sin) = rope_tables(
-            a.max_position_embeddings,
-            head_dim,
-            a.rope_parameters.rope_theta,
-            vb.dtype(),
-            vb.device(),
-        )?;
         let classifier = vb.pp("classifier");
         Ok(Self {
             mel,
-            embedder,
-            input_norm: layer_norm(a.hidden_size, LAYER_NORM_EPS, tower.pp("input_layer_norm"))?,
-            layers,
-            final_norm: layer_norm(a.hidden_size, LAYER_NORM_EPS, tower.pp("layer_norm"))?,
+            encoder,
             proj: linear(
                 h.audio_hidden_size,
                 h.hidden_size,
@@ -262,9 +397,7 @@ impl Nemotron3Diarizer {
             dense: linear(h.hidden_size, h.hidden_size, classifier.pp("dense"))?,
             out_proj: linear(h.hidden_size, h.num_speakers, classifier.pp("out_proj"))?,
             silence: vb.get(a.hidden_size, "silence_embeds")?,
-            cos,
-            sin,
-            frame_seconds: fe.hop_length as f64 / f64::from(fe.sampling_rate),
+            frame_seconds,
             device: vb.device().clone(),
             config,
         })
@@ -272,6 +405,10 @@ impl Nemotron3Diarizer {
 
     pub fn sample_rate(&self) -> u32 {
         self.mel.config().sample_rate
+    }
+
+    pub fn subsampling_factor(&self) -> usize {
+        self.config.audio_config.subsampling_factor
     }
 
     pub fn num_speakers(&self) -> usize {
@@ -307,28 +444,10 @@ impl Nemotron3Diarizer {
         self.mel.features(pcm).map_err(msg)
     }
 
-    // (1, count, hidden) for groups `first..first + count`: each `subsampling` frames stacked, past the end zero
-    fn embed(&self, features: &[f32], first: usize, count: usize) -> Result<Tensor> {
-        let a = &self.config.audio_config;
-        let row = a.subsampling_factor * a.num_mel_bins;
-        let begin = (first * row).min(features.len());
-        let mut stacked = features[begin..((first + count) * row).min(features.len())].to_vec();
-        stacked.resize(count * row, 0.);
-        let xs =
-            Tensor::from_vec(stacked, (1, count, row), &self.device)?.to_dtype(self.cos.dtype())?;
-        self.embedder.forward(&xs)
-    }
-
-    // one step: the transformer over `(1, T, hidden)`, then the head, to `(T * subsampling, speakers)` logits
+    // one step: the encoder over `(1, T, hidden)`, then the head, to `(T * subsampling, speakers)` logits
     fn step(&self, xs: &Tensor) -> Result<Tensor> {
         let t = xs.dim(1)?;
-        let cos = self.cos.narrow(0, 0, t)?;
-        let sin = self.sin.narrow(0, 0, t)?;
-        let mut hs = self.input_norm.forward(xs)?;
-        for layer in &self.layers {
-            hs = layer.forward(&hs, &cos, &sin)?;
-        }
-        let hs = self.proj.forward(&self.final_norm.forward(&hs)?)?;
+        let hs = self.proj.forward(&self.encoder.forward(xs)?)?;
         let up = hs
             .transpose(1, 2)?
             .conv1d(&self.upsample, UPSAMPLE_KERNEL / 2, 1, 1, 1)?
@@ -343,6 +462,13 @@ impl Nemotron3Diarizer {
     /// `(frames, speakers)` speech logits of mono `pcm` at the model's rate, chunk by chunk behind the cache.
     pub fn logits(&self, pcm: &[f32]) -> Result<Tensor> {
         let (features, frames) = self.features(pcm)?;
+        self.logits_of_features(&features, frames)?
+            .narrow(0, 0, frames)
+    }
+
+    /// As [`Self::logits`], from `frames` rows of [`Self::features`] (or features computed alike), for every frame
+    /// of the whole encoder steps they fill (the last one's zero-padded frames too).
+    pub fn logits_of_features(&self, features: &[f32], frames: usize) -> Result<Tensor> {
         let factor = self.config.audio_config.subsampling_factor;
         let total = frames.div_ceil(factor);
         let (chunk, context) = (self.config.chunk_length, self.config.chunk_right_context);
@@ -352,7 +478,7 @@ impl Nemotron3Diarizer {
         for start in (0..total).step_by(chunk) {
             let frames_here = chunk.min(total - start);
             let seen = (frames_here + context).min(total - start);
-            let chunk_embeds = self.embed(&features, start, seen)?;
+            let chunk_embeds = self.encoder.embed(features, start, seen)?;
             let cached = cache.embeds()?;
             let cached_len = cached.as_ref().map_or(Ok(0), |c| c.dim(0))?;
             let input = match cached {
@@ -369,7 +495,7 @@ impl Nemotron3Diarizer {
             cache.update(&input.squeeze(0)?, &probs, 0, frames_here)?;
             out.push(logits.narrow(0, cached_len * factor, frames_here * factor)?);
         }
-        Tensor::cat(&out, 0)?.narrow(0, 0, frames)
+        Tensor::cat(&out, 0)
     }
 
     /// Who speaks when in mono `pcm` at `sample_rate`, resampled to the model's rate first.

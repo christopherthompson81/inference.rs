@@ -449,6 +449,11 @@ impl SupportedArch for MultimodalLoaderType {
                     ex!("MERaLiON/MERaLiON-2-3B-GGUF", "GGUF"),
                 ],
             },
+            Self::NemotronTranscribe => ArchMetadata {
+                families: &["Nemotron 3.5 Transcribe"],
+                modalities: &[Text, Audio],
+                examples: &[ex!("nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B")],
+            },
             Self::Ultravox => ArchMetadata {
                 families: &["Ultravox"],
                 modalities: &[Text, Audio],

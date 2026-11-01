@@ -196,6 +196,7 @@ impl Parakeet {
             preemphasis: fe.preemphasis,
             // streaming checkpoints see each chunk's raw log-mel, so offline ones normalize alone
             normalize: !enc.is_streaming(),
+            bf16_constants: false,
         });
         let frame_seconds =
             (fe.hop_length * enc.subsampling_factor) as f64 / f64::from(fe.sampling_rate);

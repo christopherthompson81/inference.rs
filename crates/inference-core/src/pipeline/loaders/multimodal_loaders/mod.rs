@@ -133,7 +133,8 @@ pub use inference_models_llama::loaders::{
 };
 #[cfg(feature = "models-other")]
 pub use inference_models_other::loaders::{
-    Granite4VisionLoader, GraniteSpeechLoader, Lfm2VlLoader, PaddleOcrVlLoader,
+    Granite4VisionLoader, GraniteSpeechLoader, Lfm2VlLoader, NemotronTranscribeLoader,
+    PaddleOcrVlLoader,
 };
 #[cfg(feature = "models-phi")]
 pub use inference_models_phi::loaders::{Phi3VLoader, Phi4MMLoader};

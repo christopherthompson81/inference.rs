@@ -78,16 +78,11 @@ impl UngatedExpertsWeights {
             experts_vb.clone()
         };
         let checkpoint = ExpertCheckpoint::new(cfg, read_vb, comm)?;
-        let load = |proj: ExpertProj, vb: ShardedVarBuilder, key: String| {
-            let stacked = Arc::new(UnquantLinear::new(QuantMethodConfig::Unquantized(
-                Linear::new(checkpoint.stacked_proj(proj)?, None),
-            ))?);
-            apply_immediate_isq_with_key(stacked, vb, Some(key), Some(Shard::default()))
-        };
-        Ok(Self {
-            up: load(ExpertProj::Up, vb_up, keys.up)?,
-            down: load(ExpertProj::Down, vb_down, keys.down)?,
-        })
+        let stacks = [
+            checkpoint.stacked_proj(ExpertProj::Up)?,
+            checkpoint.stacked_proj(ExpertProj::Down)?,
+        ];
+        Self::from_stacks(stacks, [(vb_up, keys.up), (vb_down, keys.down)])
     }
 
     // NeMo Automodel's stacks, `[experts, in, out]`: transposed to `[experts, out, in]`
@@ -104,22 +99,78 @@ impl UngatedExpertsWeights {
             experts_vb.clone()
         };
         let (e, h, i) = (cfg.num_experts, cfg.hidden_size, cfg.moe_intermediate_size);
-        let load = |name: &str, shape: (usize, usize, usize), key: String| {
-            let stacked = read_vb.get(shape, name)?.transpose(1, 2)?.contiguous()?;
+        let stack = |name: &str, shape: (usize, usize, usize)| -> Result<Tensor> {
+            read_vb.get(shape, name)?.transpose(1, 2)?.contiguous()
+        };
+        Self::from_stacks(
+            [stack(NEMO_UP, (e, h, i))?, stack(NEMO_DOWN, (e, i, h))?],
+            [
+                (experts_vb.pp(NEMO_UP), keys.up),
+                (experts_vb.pp(NEMO_DOWN), keys.down),
+            ],
+        )
+    }
+
+    // `[experts, out, in]` stacks as layers, quantized when ISQ asks
+    fn from_stacks(stacks: [Tensor; 2], names: [(ShardedVarBuilder, String); 2]) -> Result<Self> {
+        let [(up_vb, up_key), (down_vb, down_key)] = names;
+        let layer = |stacked: &Tensor, vb: ShardedVarBuilder, key: String| {
             let layer = Arc::new(UnquantLinear::new(QuantMethodConfig::Unquantized(
-                Linear::new(stacked, None),
+                Linear::new(stacked.clone(), None),
             ))?);
-            apply_immediate_isq_with_key(
-                layer,
-                experts_vb.pp(name),
-                Some(key),
-                Some(Shard::default()),
-            )
+            apply_immediate_isq_with_key(layer, vb, Some(key), Some(Shard::default()))
         };
         Ok(Self {
-            up: load(NEMO_UP, (e, h, i), keys.up)?,
-            down: load(NEMO_DOWN, (e, i, h), keys.down)?,
+            up: layer(&stacks[0], up_vb, up_key)?,
+            down: layer(&stacks[1], down_vb, down_key)?,
         })
+    }
+
+    // each expert's rows through its own matmuls, weighed and added back into their tokens' rows; unquantized stacks
+    // (pending ones too, while calibration collects their routed statistics) run this way, as gathering them copies a
+    // weight matrix per routed token
+    fn forward_grouped(
+        layers: [&Arc<dyn QuantMethod>; 2],
+        [up, down]: [Tensor; 2],
+        forward: &MoEForward,
+        config: MoEForwardConfig,
+    ) -> Result<Tensor> {
+        layers[0].process_routed_stats(forward.xs_flat, forward.topk_ids)?;
+        let tracking = layers[1].stats_snapshot().is_some();
+        let ids = forward.topk_ids.to_dtype(DType::U32)?.to_vec2::<u32>()?;
+        let weights = forward
+            .topk_weights
+            .to_dtype(DType::F32)?
+            .to_vec2::<f32>()?;
+        let mut routes: Vec<(Vec<u32>, Vec<f32>)> = vec![(Vec::new(), Vec::new()); up.dim(0)?];
+        for (token, (experts, gates)) in ids.iter().zip(&weights).enumerate() {
+            for (&expert, &gate) in experts.iter().zip(gates) {
+                let route = &mut routes[expert as usize];
+                route.0.push(token as u32);
+                route.1.push(gate);
+            }
+        }
+        let device = forward.xs_flat.device();
+        let mut out = Tensor::zeros(forward.shape.flat(), DType::F32, device)?;
+        for (expert, (tokens, gates)) in routes.into_iter().enumerate() {
+            if tokens.is_empty() {
+                continue;
+            }
+            let rows = tokens.len();
+            let tokens = Tensor::from_vec(tokens, rows, device)?;
+            let xs = forward.xs_flat.index_select(&tokens, 0)?;
+            let hidden = xs.matmul(&up.get(expert)?.t()?)?.apply(&config.act)?;
+            if tracking {
+                let ids = Tensor::full(expert as u32, (rows, 1), device)?;
+                layers[1].process_routed_stats(&hidden.unsqueeze(1)?, &ids)?;
+            }
+            let ys = hidden
+                .matmul(&down.get(expert)?.t()?)?
+                .to_dtype(DType::F32)?
+                .broadcast_mul(&Tensor::from_vec(gates, (rows, 1), device)?)?;
+            out = out.index_add(&tokens, &ys, 0)?;
+        }
+        out.to_dtype(forward.original_dtype)
     }
 
     pub(super) fn forward_impl(
@@ -133,6 +184,12 @@ impl UngatedExpertsWeights {
                 .resolved_layer()
                 .unwrap_or_else(|| self.down.clone()),
         );
+        if let (Some((up_w, None)), Some((down_w, None))) =
+            (up.unquant_weight_bias(), down.unquant_weight_bias())
+            && up_w.rank() == 3
+        {
+            return Self::forward_grouped([&up, &down], [up_w, down_w], forward, config);
+        }
         let ids = forward.topk_ids;
         up.process_routed_stats(forward.xs_flat, ids)?;
         let shape = forward.shape;

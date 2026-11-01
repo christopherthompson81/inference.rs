@@ -1,12 +1,13 @@
 //! A tiny random-weight Nemotron-H (Mamba-2, NoPE attention, sigmoid-routed squared-ReLU experts with a shared
 //! expert, a dense squared-ReLU MLP, and a Mamba layer with no feed-forward after it): decoding step by step through
-//! its Mamba state and KV cache scores the tokens as one prefill over them does.
+//! its Mamba state and KV cache scores the tokens as one prefill over them does, and calibrating an ISQ load
+//! collects statistics for every expert projection.
 
 use std::collections::HashMap;
 
 use inference::{
-    ChatRequest, ModelDType, PromptInput, PromptLogitsRequest, RequestBuilder, TextMessageRole,
-    TextMessages, TextModelBuilder,
+    ChatRequest, IsqType, ModelDType, PromptInput, PromptLogitsRequest, RequestBuilder,
+    TextMessageRole, TextMessages, TextModelBuilder,
 };
 use inference_tensor::{DType, Device, Tensor};
 
@@ -43,6 +44,7 @@ const MLP_WIDTH: usize = 48;
 const WEIGHT_STD: f32 = 0.2;
 const MAX_LEN: usize = 6;
 const LOGPROB_TOLERANCE: f32 = 1e-4;
+const CIMATRIX: &str = "collected.cimatrix";
 
 fn config() -> serde_json::Value {
     serde_json::json!({
@@ -209,6 +211,48 @@ async fn a_step_by_step_decode_scores_as_one_prefill() -> anyhow::Result<()> {
             (decoded - prefilled).abs() < LOGPROB_TOLERANCE,
             "step {step}: decoded {decoded}, one prefill {prefilled}"
         );
+    }
+    Ok(())
+}
+
+// the experts' up and down stacks are tracked as one module each per MoE layer, under the canonical expert keys
+#[tokio::test]
+async fn calibrating_an_isq_load_collects_every_expert_projection() -> anyhow::Result<()> {
+    let dir = checkpoint()?;
+    let model = TextModelBuilder::new(dir.path().to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .with_force_cpu()
+        .with_isq(IsqType::Q8_0)
+        .build()
+        .await?;
+    model.calibration_start_json(b"{}").await?;
+    let chat = RequestBuilder::from(
+        TextMessages::new().add_message(TextMessageRole::User, "say something long"),
+    );
+    traces::greedy(&model, chat, MAX_LEN).await?;
+    let saved = dir.path().join(CIMATRIX);
+    model
+        .calibration_apply_json(
+            serde_json::json!({ "save_cimatrix": saved })
+                .to_string()
+                .as_bytes(),
+        )
+        .await?;
+    let collected = inference_quant::CollectedImatrixData::load_imatrix(&saved)?.0;
+    for (i, kind) in LAYERS.iter().enumerate() {
+        if *kind != "moe" {
+            continue;
+        }
+        for projection in ["up_proj", "down_proj"] {
+            let key = format!("backbone.layers.{i}.mixer.experts.{projection}");
+            let stats = collected
+                .get(&key)
+                .ok_or_else(|| anyhow::anyhow!("no statistics for `{key}`"))?;
+            anyhow::ensure!(
+                stats.iter().any(|v| *v > 0.0),
+                "`{key}` collected only zeros"
+            );
+        }
     }
     Ok(())
 }

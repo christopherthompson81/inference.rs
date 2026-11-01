@@ -6,6 +6,8 @@ use crate::mel::slaney_filterbank;
 // NeMo's guard inside the log, and the one added to each feature's standard deviation
 const LOG_GUARD: f64 = 5.960_464_477_539_063e-8;
 const NORMALIZE_EPSILON: f64 = 1e-5;
+const BF16_ROUNDING_BIAS: u32 = 0x7fff;
+const BF16_MASK: u32 = 0xffff_0000;
 
 /// NeMo's `AudioToMelSpectrogramPreprocessor` settings, as Parakeet's `processor_config.json` gives them.
 #[derive(Debug, Clone, PartialEq)]
@@ -18,6 +20,8 @@ pub struct NemoMelConfig {
     pub preemphasis: Option<f32>,
     /// Per-feature normalisation over the utterance's frames.
     pub normalize: bool,
+    /// The filter bank and window rounded to bfloat16, as Nemotron 3.5 Transcribe stores them.
+    pub bf16_constants: bool,
 }
 
 /// Log-mel features as NeMo computes them: preemphasis, a centred zero-padded STFT under a symmetric Hann window,
@@ -31,16 +35,28 @@ pub struct NemoMel {
 
 impl NemoMel {
     pub fn new(config: NemoMelConfig) -> Self {
+        let round = |x: f32| {
+            if config.bf16_constants {
+                bf16_round(x)
+            } else {
+                x
+            }
+        };
         let filters = slaney_filterbank(config.sample_rate, config.n_fft, config.n_mels)
             .into_iter()
-            .map(|row| row.into_iter().map(f64::from).collect())
+            .map(|row| row.into_iter().map(|f| f64::from(round(f))).collect())
             .collect();
         // torch.hann_window(periodic=False) centred inside the FFT frame, as torch.stft pads a short window
         let offset = (config.n_fft - config.win_length) / 2;
         let last = (config.win_length - 1) as f64;
         let mut window = vec![0f64; config.n_fft];
         for n in 0..config.win_length {
-            window[offset + n] = 0.5 - 0.5 * (2.0 * std::f64::consts::PI * n as f64 / last).cos();
+            let hann = 0.5 - 0.5 * (2.0 * std::f64::consts::PI * n as f64 / last).cos();
+            window[offset + n] = if config.bf16_constants {
+                f64::from(bf16_round(hann as f32))
+            } else {
+                hann
+            };
         }
         let fft = plan_forward_f64(config.n_fft);
         Self {
@@ -123,6 +139,13 @@ impl NemoMel {
         }
         Ok((features.into_iter().map(|v| v as f32).collect(), frames))
     }
+}
+
+// round to nearest even, as torch's float32 -> bfloat16 cast
+fn bf16_round(x: f32) -> f32 {
+    let bits = x.to_bits();
+    let rounded = bits.wrapping_add(BF16_ROUNDING_BIAS + ((bits >> 16) & 1)) & BF16_MASK;
+    f32::from_bits(rounded)
 }
 
 struct FrameScratch {
@@ -241,6 +264,7 @@ mod tests {
             n_mels: 128,
             preemphasis: Some(0.97),
             normalize: true,
+            bf16_constants: false,
         })
     }
 

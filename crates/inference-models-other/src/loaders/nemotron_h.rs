@@ -7,7 +7,7 @@ use crate::nemotron_h::{Config, LayerKind};
 const EMBEDDINGS_WEIGHT: &str = "embeddings.weight";
 // NeMo's speech models keep the decoder's ends under Llama's names
 const NEMO_EMBEDDINGS_WEIGHT: &str = "embed_tokens.weight";
-const NEMO_ENDS: (&str, &str) = ("embed_tokens", "norm");
+pub const NEMO_DECODER_ENDS: (&str, &str) = ("embed_tokens", "norm");
 // (decoder, lm_head): Hub checkpoints keep NVIDIA's `backbone.*`, which transformers renames to `model.*`; NeMo's
 // speech models nest the language model under `llm`
 const ROOTS: [(&str, &str); 3] = [
@@ -48,7 +48,7 @@ impl NormalModelLoader for NemotronHLoader {
             &vb.pp(root),
             NEMO_EMBEDDINGS_WEIGHT,
         ) {
-            (layout.embeddings, layout.final_norm) = NEMO_ENDS;
+            (layout.embeddings, layout.final_norm) = NEMO_DECODER_ENDS;
         }
         Ok(Box::new(crate::granite::GraniteMoeHybrid::new_with_layout(
             &cfg.granite()?,
@@ -101,7 +101,7 @@ impl IsqModelLoader for NemotronHLoader {
             r"layers\.(\d+)\.mixer\.(up_proj|down_proj)\.(weight|bias)$",
             r"layers\.(\d+)\.mixer\.shared_experts\.(up_proj|down_proj)\.(weight|bias)$",
             r"layers\.(\d+)\.mixer\.experts\.(\d+)\.(up_proj|down_proj)\.(weight|bias)$",
-            r"layers\.(\d+)\.mixer\.experts\.(gate_and_up_projs|down_projs)$",
+            r"layers\.(\d+)\.mixer\.experts\.(gate_and_up_projs|down_projs)\.weight$",
         ])
     }
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {

@@ -1560,6 +1560,22 @@ impl MambaLayer {
     }
 }
 
+// a block on the CPU beside a GPU computes in f32 over a cache allocated in the model's dtype
+fn in_activation_dtype(
+    cache: &mut MambaLayerCache,
+    dtype: DType,
+    run: impl FnOnce(&mut MambaLayerCache) -> Result<Tensor>,
+) -> Result<Tensor> {
+    let state_dtype = cache.conv_state.dtype();
+    if state_dtype == dtype {
+        return run(cache);
+    }
+    cache.conv_state = cache.conv_state.to_dtype(dtype)?;
+    let out = run(cache)?;
+    cache.conv_state = cache.conv_state.to_dtype(state_dtype)?;
+    Ok(out)
+}
+
 /// Mamba decoder block (replaces attention block for Mamba layers)
 struct MambaBlock {
     rms_1: RmsNorm,
@@ -1575,9 +1591,10 @@ impl MambaBlock {
         cache: &mut MambaLayerCache,
         batch_kind: RecurrentBatchKind,
     ) -> Result<Tensor> {
-        let mamba_out = self
-            .mamba
-            .forward(&self.rms_1.forward(x)?, cache, batch_kind)?;
+        let normed = self.rms_1.forward(x)?;
+        let mamba_out = in_activation_dtype(cache, normed.dtype(), |cache| {
+            self.mamba.forward(&normed, cache, batch_kind)
+        })?;
         let x = (scale_tensor(mamba_out, self.residual_multiplier)? + x)?;
         BlockFfn::residual(self.ffn.as_ref(), x, self.residual_multiplier)
     }
@@ -1588,9 +1605,11 @@ impl MambaBlock {
         cache: &mut MambaLayerCache,
         query_lens: &[usize],
     ) -> Result<Tensor> {
-        let mamba_out =
+        let normed = self.rms_1.forward(x)?;
+        let mamba_out = in_activation_dtype(cache, normed.dtype(), |cache| {
             self.mamba
-                .forward_packed_prefill(&self.rms_1.forward(x)?, cache, query_lens)?;
+                .forward_packed_prefill(&normed, cache, query_lens)
+        })?;
         let x = (scale_tensor(mamba_out, self.residual_multiplier)? + x)?;
         BlockFfn::residual(self.ffn.as_ref(), x, self.residual_multiplier)
     }

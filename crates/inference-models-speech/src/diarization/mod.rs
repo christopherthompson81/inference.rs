@@ -5,7 +5,9 @@ mod cache;
 mod nemotron3;
 mod sortformer;
 
-pub use nemotron3::{Nemotron3Config, Nemotron3Diarizer, Nemotron3Files};
+pub use nemotron3::{
+    NemoTransformer, NemoTransformerConfig, Nemotron3Config, Nemotron3Diarizer, Nemotron3Files,
+};
 pub use sortformer::{SortformerConfig, SortformerDiarizer, is_sortformer};
 
 /// A loaded diarization model.
