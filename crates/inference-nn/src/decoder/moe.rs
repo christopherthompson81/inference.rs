@@ -167,6 +167,7 @@ impl SparseMoe {
                 hidden_size,
                 moe_intermediate_size: spec.intermediate_size,
                 expert_proj_names: spec.expert_names,
+                gated: true,
             },
             vb.clone(),
             load.device.clone(),

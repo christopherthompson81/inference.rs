@@ -144,6 +144,10 @@ inference serve --format gguf -m <dir> -f granite-vision-Q8_0.gguf --mmproj <dir
   --tok-model-id ibm-granite/granite-vision-4.1-4b
 ```
 
+## Nemotron-H
+
+Nemotron-H text models (`NemotronHForCausalLM`, e.g. `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`) interleave Mamba-2, attention (with no position encoding) and feed-forward layers in the pattern their config gives (`layers_block_type` or `hybrid_override_pattern`); the feed-forward layers are squared-ReLU MLPs or experts routed by sigmoid scores with a correction bias, beside one shared expert. They load from safetensors (NVIDIA's `backbone.*` names or transformers' `model.*`) and from llama.cpp's `nemotron_h` and `nemotron_h_moe` GGUFs, and run on the Granite hybrid model: each mixer layer and the feed-forward layer after it form one block. Latent MoE (`moe_latent_size`, Nemotron 3 Super), group-limited routing and the MTP head are not supported yet; experts run on one device and are not offloaded.
+
 ## OLMo
 
 AllenAI's OLMo 1 (`OlmoForCausalLM`, e.g. `allenai/OLMo-1B-0724-hf`), OLMo 2 (`Olmo2ForCausalLM`), Olmo 3 (`Olmo3ForCausalLM`, whose sliding-window layers take plain RoPE beside YaRN full ones) and OLMoE (`OlmoeForCausalLM`) load through auto-detection, from safetensors or from llama.cpp's GGUFs (`olmo`, `olmo2`, `olmoe`). The original pre-HF OLMo 1 checkpoints (`OLMoForCausalLM`, `model.transformer.blocks.*`) are not supported; use their `-hf` conversions.

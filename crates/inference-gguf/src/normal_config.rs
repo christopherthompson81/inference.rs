@@ -210,6 +210,10 @@ pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; NORMAL_LOADER_TYPE_COUN
         loader: NormalLoaderType::Lfm2Moe,
         build: build_lfm2_moe,
     },
+    NormalConfigBuilder {
+        loader: NormalLoaderType::NemotronH,
+        build: build_nemotron_h,
+    },
 ];
 
 pub fn synthesize_normal_config(
@@ -1510,6 +1514,113 @@ fn build_ernie4_5_moe(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue>
                 .optional_usize("interleave_moe_layer_step")?
                 .unwrap_or(1)
         ),
+    );
+    Ok(JsonValue::Object(config))
+}
+
+// llama.cpp keeps one mixer or one feed-forward per block, which its tensors name
+fn nemotron_h_layer_type(metadata: &MetadataView<'_>, layer: usize) -> &'static str {
+    if metadata.layer_has_tensor(layer, ".ssm_conv1d.") {
+        "mamba"
+    } else if metadata.layer_has_tensor(layer, ".attn_q.") {
+        "attention"
+    } else if metadata.layer_has_tensor(layer, ".ffn_gate_inp.") {
+        "moe"
+    } else {
+        "mlp"
+    }
+}
+
+fn build_nemotron_h(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
+    let hidden = metadata.required_usize("embedding_length")?;
+    let blocks = metadata.required_usize("block_count")?.saturating_sub(
+        metadata
+            .optional_usize("nextn_predict_layers")?
+            .unwrap_or(0),
+    );
+    let layer_types = (0..blocks)
+        .map(|layer| nemotron_h_layer_type(metadata, layer))
+        .collect::<Vec<_>>();
+    let heads = metadata.required_usize("attention.head_count")?;
+    // per-layer arrays, zero where a block holds no attention or no dense feed-forward
+    let widest = |suffix| -> SynthesisResult<Option<usize>> {
+        Ok(metadata
+            .optional_usize_values(suffix)?
+            .and_then(|values| values.into_iter().max()))
+    };
+    let kv_heads = widest("attention.head_count_kv")?.unwrap_or(heads);
+    // a dense MLP block's own entry, else the widest
+    let ffn_widths = metadata
+        .optional_usize_values("feed_forward_length")?
+        .unwrap_or_default();
+    let mlp_width = match layer_types.iter().position(|kind| *kind == "mlp") {
+        Some(layer) if ffn_widths.len() > 1 => ffn_widths.get(layer).copied().unwrap_or(0),
+        _ => ffn_widths.iter().copied().max().unwrap_or(0),
+    };
+    let inner = metadata.required_usize("ssm.inner_size")?;
+    let mamba_heads = metadata.required_usize("ssm.time_step_rank")?;
+    let mut config = JsonMap::new();
+    config.insert("vocab_size".into(), json!(metadata.vocab_size()?));
+    config.insert("hidden_size".into(), json!(hidden));
+    config.insert("layers_block_type".into(), json!(layer_types));
+    config.insert("num_attention_heads".into(), json!(heads));
+    config.insert("num_key_value_heads".into(), json!(kv_heads));
+    config.insert("head_dim".into(), json!(metadata.head_dim(hidden, heads)?));
+    config.insert(
+        "max_position_embeddings".into(),
+        json!(metadata.required_usize("context_length")?),
+    );
+    config.insert("intermediate_size".into(), json!(mlp_width));
+    config.insert("mlp_hidden_act".into(), json!("relu2"));
+    config.insert(
+        "ssm_state_size".into(),
+        json!(metadata.required_usize("ssm.state_size")?),
+    );
+    config.insert("mamba_num_heads".into(), json!(mamba_heads));
+    config.insert("mamba_head_dim".into(), json!(inner / mamba_heads));
+    config.insert(
+        "n_groups".into(),
+        json!(metadata.required_usize("ssm.group_count")?),
+    );
+    config.insert(
+        "conv_kernel".into(),
+        json!(metadata.required_usize("ssm.conv_kernel")?),
+    );
+    if let Some(experts) = metadata.optional_usize("expert_count")? {
+        config.insert("n_routed_experts".into(), json!(experts));
+        config.insert(
+            "num_experts_per_tok".into(),
+            json!(metadata.required_usize("expert_used_count")?),
+        );
+        config.insert(
+            "moe_intermediate_size".into(),
+            json!(metadata.required_usize("expert_feed_forward_length")?),
+        );
+        config.insert(
+            "moe_shared_expert_intermediate_size".into(),
+            json!(metadata.required_usize("expert_shared_feed_forward_length")?),
+        );
+        config.insert(
+            "routed_scaling_factor".into(),
+            json!(
+                metadata
+                    .optional_f64("expert_weights_scale")?
+                    .unwrap_or(1.0)
+            ),
+        );
+        config.insert(
+            "norm_topk_prob".into(),
+            json!(
+                metadata
+                    .optional_bool("expert_weights_norm")?
+                    .unwrap_or(true)
+            ),
+        );
+    }
+    config.insert("layer_norm_epsilon".into(), json!(metadata.norm_epsilon()?));
+    config.insert(
+        "tie_word_embeddings".into(),
+        json!(metadata.tie_word_embeddings()),
     );
     Ok(JsonValue::Object(config))
 }
@@ -2986,7 +3097,7 @@ mod tests {
         pub use inference_models_llama::{llama, mistral, mixtral, smollm3};
         pub use inference_models_other::{
             deepseek, ernie4_5, glm4, glm4_moe, glm4_moe_lite, gpt_oss, granite, hunyuan_v1_dense,
-            hunyuan_v1_moe, lfm2, olmo, starcoder2,
+            hunyuan_v1_moe, lfm2, nemotron_h, olmo, starcoder2,
         };
         pub use inference_models_phi::{phi2, phi3, phi3_5_moe};
         pub use inference_models_qwen::{qwen1, qwen2, qwen2_moe, qwen3, qwen3_moe, qwen3_next};
@@ -3079,6 +3190,7 @@ mod tests {
                 | NormalLoaderType::GraniteMoeSwa
                 | NormalLoaderType::Olmoe
                 | NormalLoaderType::Ernie4_5Moe
+                | NormalLoaderType::NemotronH
         )
     }
 
@@ -3193,6 +3305,7 @@ mod tests {
                 | NormalLoaderType::Qwen3_5Moe
                 | NormalLoaderType::Qwen4Exp
                 | NormalLoaderType::GraniteMoeHybrid
+                | NormalLoaderType::NemotronH
         ) {
             insert_u32(&mut metadata, architecture, "ssm.conv_kernel", 4);
             insert_u32(&mut metadata, architecture, "ssm.inner_size", 1_024);
@@ -3201,7 +3314,10 @@ mod tests {
             insert_u32(&mut metadata, architecture, "ssm.group_count", 4);
         }
 
-        if matches!(loader, NormalLoaderType::GraniteMoeHybrid) {
+        if matches!(
+            loader,
+            NormalLoaderType::GraniteMoeHybrid | NormalLoaderType::NemotronH
+        ) {
             tensors.extend(
                 ["blk.1.ssm_a.weight", "blk.1.ssm_conv1d.weight"]
                     .into_iter()
@@ -3396,6 +3512,9 @@ mod tests {
             | NormalLoaderType::GraniteSwa
             | NormalLoaderType::GraniteMoeSwa => {
                 assert_deserializes(loader, config, models::granite::Config::from_json)
+            }
+            NormalLoaderType::NemotronH => {
+                assert_deserializes(loader, config, models::nemotron_h::Config::from_json)
             }
             NormalLoaderType::GptOss => {
                 assert_deserializes(loader, config, models::gpt_oss::Config::from_json)

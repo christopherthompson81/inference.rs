@@ -2,8 +2,8 @@ use inference_nn::loaders::NormalLoaderType;
 pub use inference_nn::model::RopePairing;
 use std::{error::Error, fmt, str::FromStr};
 
-pub const NORMAL_LOADER_TYPE_COUNT: usize = 41;
-pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 35;
+pub const NORMAL_LOADER_TYPE_COUNT: usize = 42;
+pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 37;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CanonicalGgufArchitecture {
@@ -42,6 +42,8 @@ pub enum CanonicalGgufArchitecture {
     HunYuanMoe,
     Lfm2,
     Lfm2Moe,
+    NemotronH,
+    NemotronHMoe,
 }
 
 impl CanonicalGgufArchitecture {
@@ -82,6 +84,8 @@ impl CanonicalGgufArchitecture {
             Self::HunYuanMoe => "hunyuan-moe",
             Self::Lfm2 => "lfm2",
             Self::Lfm2Moe => "lfm2moe",
+            Self::NemotronH => "nemotron_h",
+            Self::NemotronHMoe => "nemotron_h_moe",
         }
     }
 }
@@ -132,6 +136,8 @@ impl FromStr for CanonicalGgufArchitecture {
             "hunyuan-moe" => Ok(Self::HunYuanMoe),
             "lfm2" => Ok(Self::Lfm2),
             "lfm2moe" => Ok(Self::Lfm2Moe),
+            "nemotron_h" => Ok(Self::NemotronH),
+            "nemotron_h_moe" => Ok(Self::NemotronHMoe),
             _ => Err(NormalGgufRegistryError::UnknownArchitecture(
                 value.to_string(),
             )),
@@ -489,6 +495,7 @@ const GRANITE_MOE_LOADERS: &[NormalLoaderType] = &[
     NormalLoaderType::GraniteMoeShared,
 ];
 const GRANITE_HYBRID_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::GraniteMoeHybrid];
+const NEMOTRON_H_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::NemotronH];
 const OLMO_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Olmo];
 // Olmo 3 converts as olmo2 with a sliding-window pattern
 const OLMO2_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Olmo2, NormalLoaderType::Olmo3];
@@ -790,6 +797,23 @@ pub const GGUF_SCHEMAS: &[GgufSchema; CANONICAL_GGUF_ARCHITECTURE_COUNT] = &[
         rope_pairing: RopePairing::HalfSplit,
         required_metadata: LFM2_MOE_METADATA,
         required_tensors: SHORTCONV_TENSORS,
+        unsupported_metadata: NO_REQUIREMENTS,
+    },
+    // NoPE attention: the pairing is never used
+    GgufSchema {
+        architecture: CanonicalGgufArchitecture::NemotronH,
+        compatible_loaders: NEMOTRON_H_LOADERS,
+        rope_pairing: RopePairing::HalfSplit,
+        required_metadata: NO_REQUIREMENTS,
+        required_tensors: SSM_TENSORS,
+        unsupported_metadata: NO_REQUIREMENTS,
+    },
+    GgufSchema {
+        architecture: CanonicalGgufArchitecture::NemotronHMoe,
+        compatible_loaders: NEMOTRON_H_LOADERS,
+        rope_pairing: RopePairing::HalfSplit,
+        required_metadata: MOE_METADATA,
+        required_tensors: SSM_TENSORS,
         unsupported_metadata: NO_REQUIREMENTS,
     },
 ];
@@ -1118,6 +1142,19 @@ pub const NORMAL_MODEL_ADAPTERS: &[NativeModelAdapter; NORMAL_LOADER_TYPE_COUNT]
             GgufLayout::StackedExperts,
             GgufLayout::PerLayerInventory,
             GgufLayout::SqueezedShortConv,
+        ],
+    },
+    NativeModelAdapter {
+        loader: NormalLoaderType::NemotronH,
+        architectures: &[
+            CanonicalGgufArchitecture::NemotronH,
+            CanonicalGgufArchitecture::NemotronHMoe,
+        ],
+        layouts: &[
+            GgufLayout::Direct,
+            GgufLayout::StackedExperts,
+            GgufLayout::PerLayerInventory,
+            GgufLayout::GraniteSsm,
         ],
     },
 ];

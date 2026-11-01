@@ -39,6 +39,7 @@ mod lfm2_decision;
 mod lfm2vl;
 mod modern_bert;
 mod modern_bert_decision;
+mod nemotron_h;
 mod neo_bert;
 mod nomic_bert;
 mod olmo;
@@ -65,6 +66,7 @@ pub use lfm2_decision::*;
 pub use lfm2vl::*;
 pub use modern_bert::*;
 pub use modern_bert_decision::*;
+pub use nemotron_h::*;
 pub use neo_bert::*;
 pub use nomic_bert::*;
 pub use olmo::*;
@@ -85,6 +87,7 @@ inference_nn::boxed_loaders!(
     HunYuanDenseV1Loader,
     HunYuanMoEV1Loader,
     Lfm2Loader,
+    NemotronHLoader,
     Olmo2Loader,
     OlmoLoader,
     OlmoeLoader,
