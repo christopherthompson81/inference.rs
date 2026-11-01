@@ -14,7 +14,13 @@ use inference_core::{
 };
 use inference_core::{DeviceLayerMapMetadata, DeviceMapMetadata};
 use inference_core::{GLOBAL_HF_CACHE, IsqType, Topology, TryIntoDType, paged_attn_supported};
-use inference_nn::loaders::{AutoDeviceMapQuantization, DeviceMappedModelLoader};
+use inference_nn::loaders::{
+    AutoDeviceMapQuantization, DeviceMappedModelLoader, MultimodalModelLoader, companion_model_id,
+};
+
+const CONFIG_FILE: &str = "config.json";
+const SENTENCE_TRANSFORMERS_CONFIG: &str = "config_sentence_transformers.json";
+const TOKENIZER_FILE: &str = "tokenizer.json";
 
 #[derive(Debug, Clone, Copy, Serialize, inference_json::FromJson)]
 #[serde(rename_all = "kebab-case")]
@@ -213,41 +219,48 @@ fn load_config_artifacts(
     hf_revision: Option<String>,
     hf_cache_path: Option<PathBuf>,
 ) -> Result<(String, bool)> {
-    if Path::new(model_id).exists() {
-        let config_path = Path::new(model_id).join("config.json");
-        let config = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("Failed to read config.json at {}", config_path.display()))?;
-        let sentence_transformers = Path::new(model_id)
-            .join("config_sentence_transformers.json")
-            .exists();
-        return Ok((config, sentence_transformers));
-    }
-
     let cache = hf_cache_path
         .map(Cache::new)
         .unwrap_or_else(Cache::from_env);
-    GLOBAL_HF_CACHE.get_or_init(|| cache.clone());
-
-    let api = build_api_with_cache(token_source, false, Some(cache))?;
-    let revision = hf_revision.unwrap_or_else(|| "main".to_string());
-    let api = api.repo(Repo::with_revision(
-        model_id.to_string(),
-        RepoType::Model,
-        revision,
-    ));
-
-    let config_path = api_get_file(&api, model_id, "config.json")?;
-    let config = std::fs::read_to_string(&config_path).with_context(|| {
-        format!(
-            "Failed to read config.json from cache at {}",
-            config_path.display()
-        )
-    })?;
-
+    let read = |model_id: &str, revision: Option<String>, file: &str| {
+        read_model_file(model_id, revision, file, token_source, &cache)
+    };
+    let config = read(model_id, hf_revision.clone(), CONFIG_FILE)?;
     let sentence_transformers =
-        api_get_file(&api, model_id, "config_sentence_transformers.json").is_ok();
-
+        read(model_id, hf_revision.clone(), SENTENCE_TRANSFORMERS_CONFIG).is_ok();
+    // sized as it loads: with the config of the text model it names merged in
+    let config = match companion_model_id(&config)? {
+        Some(text_model) => AutoMultimodalLoader.with_companion_config(
+            &config,
+            &read(&text_model, None, CONFIG_FILE)?,
+            &read(model_id, hf_revision, TOKENIZER_FILE)?,
+        )?,
+        None => config,
+    };
     Ok((config, sentence_transformers))
+}
+
+// `file` from the directory `model_id` names, or from the Hub through `cache`
+fn read_model_file(
+    model_id: &str,
+    revision: Option<String>,
+    file: &str,
+    token_source: &TokenSource,
+    cache: &Cache,
+) -> Result<String> {
+    let path = if Path::new(model_id).exists() {
+        Path::new(model_id).join(file)
+    } else {
+        GLOBAL_HF_CACHE.get_or_init(|| cache.clone());
+        let api = build_api_with_cache(token_source, false, Some(cache.clone()))?;
+        let api = api.repo(Repo::with_revision(
+            model_id.to_string(),
+            RepoType::Model,
+            revision.unwrap_or_else(|| "main".to_string()),
+        ));
+        api_get_file(&api, model_id, file)?
+    };
+    std::fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))
 }
 
 fn api_get_file(api: &ApiRepo, model_id: &str, file: &str) -> Result<PathBuf> {

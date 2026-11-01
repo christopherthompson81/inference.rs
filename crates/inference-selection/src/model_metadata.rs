@@ -447,7 +447,10 @@ impl SupportedArch for MultimodalLoaderType {
             Self::Ultravox => ArchMetadata {
                 families: &["Ultravox"],
                 modalities: &[Text, Audio],
-                examples: &[ex!("ggml-org/ultravox-v0_5-llama-3_2-1b-GGUF", "GGUF")],
+                examples: &[
+                    ex!("fixie-ai/ultravox-v0_5-llama-3_2-1b"),
+                    ex!("ggml-org/ultravox-v0_5-llama-3_2-1b-GGUF", "GGUF"),
+                ],
             },
             Self::VoxtralChat => ArchMetadata {
                 families: &["Voxtral Mini", "Voxtral Small"],

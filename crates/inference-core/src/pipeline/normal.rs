@@ -541,6 +541,7 @@ mod tests {
             video_preprocessor_config: None,
             processor_config: None,
             chat_template_json_filename: None,
+            companion_config: None,
         }
     }
 

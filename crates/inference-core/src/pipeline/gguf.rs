@@ -1727,6 +1727,7 @@ impl GGUFLoader {
             video_preprocessor_config,
             processor_config,
             chat_template_json_filename: paths.get_chat_template_explicit().clone(),
+            companion_config: None,
         }))
     }
 }

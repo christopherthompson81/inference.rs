@@ -42,6 +42,10 @@ use crate::model::{
 use crate::paged_attention::{AttentionImplementation, ModelConfigLike};
 use crate::utils::varbuilder_utils::DeviceForLoadTensor;
 
+// a config that names its text model's repository instead of describing it (Ultravox)
+const COMPANION_MODEL_KEY: &str = "text_model_id";
+const COMPANION_CONFIG_KEY: &str = "text_config";
+
 #[derive(Clone, PartialEq, Eq)]
 pub enum SupportedModality {
     Text,
@@ -352,6 +356,16 @@ pub trait MultimodalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedMode
     fn default_bos_eos(&self, _config: &str) -> Option<(String, String)> {
         None
     }
+    /// `config` with the config of the text model its `text_model_id` names (`companion`) merged in; `tokenizer` is
+    /// the checkpoint's `tokenizer.json`.
+    fn with_companion_config(
+        &self,
+        _config: &str,
+        _companion: &str,
+        _tokenizer: &str,
+    ) -> Result<String> {
+        anyhow::bail!("this model loads no text model from another repository")
+    }
     fn get_device_for_tensor(
         &self,
         config: &str,
@@ -364,6 +378,19 @@ pub trait MultimodalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedMode
             loading_isq,
         )
     }
+}
+
+/// The repository a config names for its text model when it does not describe that model itself (Ultravox's
+/// `text_model_id`), whose config [`MultimodalModelLoader::with_companion_config`] merges in.
+pub fn companion_model_id(config: &str) -> Result<Option<String>> {
+    let config: serde_json::Value = serde_json::from_str(config)?;
+    if config.get(COMPANION_CONFIG_KEY).is_some() {
+        return Ok(None);
+    }
+    Ok(config
+        .get(COMPANION_MODEL_KEY)
+        .and_then(|model_id| model_id.as_str())
+        .map(str::to_string))
 }
 
 pub trait EmbeddingModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModelLoader {

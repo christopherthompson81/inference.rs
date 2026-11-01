@@ -34,13 +34,7 @@ fn build_ultravox_bindings_from_inventory(
     inventory: &TensorInventory<'_>,
 ) -> Result<GgufBindingMap> {
     let mut bindings = GgufBindingMap::new();
-    bind_llama_text(
-        inventory,
-        &mut bindings,
-        "language_model.model",
-        "language_model.lm_head",
-        FAMILY,
-    )?;
+    bind_llama_text(inventory, &mut bindings, "model", "lm_head", FAMILY)?;
     bind_whisper_tower(inventory, &mut bindings, FAMILY, &WHISPER_LAYOUT)?;
     for (native, source) in [("linear_1", "mm.a.mlp.1"), ("linear_2", "mm.a.mlp.2")] {
         bind_required_linear(
@@ -165,7 +159,7 @@ mod tests {
             "multi_modal_projector.linear_1.weight",
             "multi_modal_projector.ln_mid.weight",
             "multi_modal_projector.linear_2.weight",
-            "language_model.lm_head.weight",
+            "lm_head.weight",
         ] {
             assert!(bindings.get(native).is_some(), "`{native}` is not bound");
         }

@@ -255,6 +255,14 @@ impl MultimodalLoader {
             self.config.hf_config_overrides.as_ref(),
             self.mtp,
         )?;
+        let config = match paths.get_companion_config() {
+            Some(companion) => self.inner.with_companion_config(
+                &config,
+                &fs::read_to_string(companion)?,
+                &fs::read_to_string(paths.get_tokenizer_filename())?,
+            )?,
+            None => config,
+        };
         super::loaders::validate_lora_qk_rope_layout(&config, self.lora_adapters.is_some())?;
         let modalities = self.inner.modalities(&config)?;
         let runtime_config = self

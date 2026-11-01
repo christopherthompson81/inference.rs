@@ -8,6 +8,8 @@ use inference::{
 
 #[path = "../support/qwen2_audio_tiny.rs"]
 mod support;
+#[path = "../support/traces.rs"]
+mod traces;
 use support::tiny_checkpoint;
 
 const PROMPT: &str = "Hi";
@@ -23,13 +25,17 @@ const LONG_TOKENS: usize = 750;
 // the 3-byte `▁`), the markers are one token each
 const LINE_TOKENS: usize = 16;
 const TONE_HZ: f32 = 440.0;
+// a reload computes as the load that wrote it, so only rounding parts them
+const UQFF_TOLERANCE: f32 = 1e-3;
 
-async fn build(dir: &std::path::Path) -> anyhow::Result<Model> {
-    Ok(MultimodalModelBuilder::new(dir.to_string_lossy())
+fn builder(dir: &std::path::Path) -> MultimodalModelBuilder {
+    MultimodalModelBuilder::new(dir.to_string_lossy())
         .with_dtype(ModelDType::F32)
         .with_force_cpu()
-        .build()
-        .await?)
+}
+
+async fn build(dir: &std::path::Path) -> anyhow::Result<Model> {
+    Ok(builder(dir).build().await?)
 }
 
 fn clip(samples: usize) -> AudioInput {
@@ -70,5 +76,25 @@ async fn a_clip_fills_its_real_frames_and_a_long_one_is_cut_to_the_window() -> a
     assert_eq!(short - text, SHORT_TOKENS + LINE_TOKENS);
     let long = prompt_tokens(&model, vec![clip(LONG_SAMPLES)]).await?;
     assert_eq!(long - text, LONG_TOKENS + LINE_TOKENS);
+    Ok(())
+}
+
+// the UQFF an ISQ load writes reloads, its residual tensors under the names the model reads, and decodes alike
+#[tokio::test]
+async fn an_isq_load_writes_a_uqff_that_reloads_and_decodes_alike() -> anyhow::Result<()> {
+    let checkpoint = tiny_checkpoint()?;
+    let request = || {
+        RequestBuilder::from(MultimodalMessages::new().add_audio_message(
+            TextMessageRole::User,
+            PROMPT,
+            vec![clip(SHORT_SAMPLES)],
+        ))
+    };
+    let (written, read) =
+        traces::isq_and_uqff_reload_traces(checkpoint.path(), builder, request, MAX_LEN).await?;
+    anyhow::ensure!(
+        traces::close(&written, &read, UQFF_TOLERANCE),
+        "the UQFF reload moved: {read:?} vs {written:?}"
+    );
     Ok(())
 }

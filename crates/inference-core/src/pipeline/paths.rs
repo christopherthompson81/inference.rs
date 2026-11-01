@@ -648,12 +648,22 @@ pub(crate) fn get_paths(
     };
     let config_filename = repo.config_file()?;
     repo.get_listed("hf_quant_config.json")?;
-    let filenames = repo.weights(
+    let mut filenames = repo.weights(
         request.token_source,
         request.quantized_model_id,
         request.quantized_filenames,
         request.loading_uqff,
     )?;
+    let companion_config =
+        match inference_nn::loaders::companion_model_id(&fs::read_to_string(&config_filename)?)? {
+            Some(model_id) => {
+                let companion =
+                    RepoFiles::open(&model_id, request.token_source, None, request.silent)?;
+                filenames.extend(companion.weights(request.token_source, None, None, false)?);
+                Some(companion.config_file()?)
+            }
+            None => None,
+        };
     let adapter_paths = get_adapter_paths(lora_adapters, request.token_source)?;
     let processor_configs = ProcessorConfigs::fetch(&repo)?;
     let template_filename = match request.chat_template {
@@ -676,6 +686,7 @@ pub(crate) fn get_paths(
             video_preprocessor_config: None,
             processor_config: None,
             chat_template_json_filename,
+            companion_config,
         }),
     )
 }
@@ -904,6 +915,7 @@ pub(crate) fn get_paths_gguf(
             video_preprocessor_config: None,
             processor_config: None,
             chat_template_json_filename,
+            companion_config: None,
         }),
     )
 }
@@ -1001,6 +1013,7 @@ mod tests {
             video_preprocessor_config: None,
             processor_config: Some(processor_path),
             chat_template_json_filename: None,
+            companion_config: None,
         };
         let jinja_path = jinja_path.to_string_lossy().into_owned();
 

@@ -171,7 +171,10 @@ impl Qwen2AudioModel {
 impl IsqModel for Qwen2AudioModel {
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
-        uvb.extend(self.text.residual_tensors_m(uvb.pp("language_model")));
+        uvb.extend(
+            self.text
+                .residual_tensors_m(uvb.pp("language_model").pp("model")),
+        );
         self.projector
             .residual_tensors(&uvb.pp("multi_modal_projector"));
         let mut tensors = uvb.to_safetensors();

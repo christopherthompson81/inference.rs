@@ -128,7 +128,10 @@ impl GlmAsrModel {
 impl IsqModel for GlmAsrModel {
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
-        uvb.extend(self.text.residual_tensors_m(uvb.pp("language_model")));
+        uvb.extend(
+            self.text
+                .residual_tensors_m(uvb.pp("language_model").pp("model")),
+        );
         let projector = uvb.pp("multi_modal_projector");
         projector.pp("linear_1").add(&self.linear_1);
         projector.pp("linear_2").add(&self.linear_2);

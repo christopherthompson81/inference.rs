@@ -71,7 +71,7 @@ impl UltravoxModel {
         let linear_2 = linear_no_bias(gated, text_hidden, projector.pp("linear_2"))?;
         let text = Llama::new(
             &cfg.text_config().decoder_spec(),
-            vb.pp("language_model"),
+            vb,
             is_gptx,
             normal_loading_metadata,
             attention_mechanism,
@@ -129,7 +129,7 @@ impl UltravoxModel {
 impl IsqModel for UltravoxModel {
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
-        uvb.extend(self.text.residual_tensors_m(uvb.pp("language_model")));
+        uvb.extend(self.text.residual_tensors_m(uvb.pp("model")));
         let projector = uvb.pp("multi_modal_projector");
         projector.pp("ln_pre").add(&self.ln_pre);
         projector.pp("linear_1").add(&self.linear_1);

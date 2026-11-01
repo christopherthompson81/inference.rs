@@ -3,9 +3,11 @@
 
 use std::path::{Path, PathBuf};
 
-use inference::{Model, RequestBuilder};
+use inference::{IsqType, Model, MultimodalModelBuilder, RequestBuilder};
 
 const UQFF_EXTENSION: &str = "uqff";
+const UQFF_FILE: &str = "model.uqff";
+const WEIGHTS_EXTENSION: &str = "safetensors";
 
 /// The greedy (token, logprob) per step.
 pub type Trace = Vec<(u32, f32)>;
@@ -57,4 +59,36 @@ pub fn uqff_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     files.retain(|path| path.extension().is_some_and(|ext| ext == UQFF_EXTENSION));
     files.sort();
     Ok(files)
+}
+
+/// A Q8_0 in-situ load of `checkpoint` that writes UQFF, then a load of the written files alone (as a UQFF repo
+/// publishes them, the checkpoint's weights left behind): the greedy trace of `request` from each.
+pub async fn isq_and_uqff_reload_traces(
+    checkpoint: &Path,
+    builder: impl Fn(&Path) -> MultimodalModelBuilder,
+    request: impl Fn() -> RequestBuilder,
+    max_len: usize,
+) -> anyhow::Result<(Trace, Trace)> {
+    let uqff_dir = tempfile::tempdir()?;
+    let quantized = builder(checkpoint)
+        .with_isq(IsqType::Q8_0)
+        .write_uqff(uqff_dir.path().join(UQFF_FILE))
+        .build()
+        .await?;
+    let (written, _) = greedy(&quantized, request(), max_len).await?;
+    drop(quantized);
+    let files = uqff_files(uqff_dir.path())?;
+    anyhow::ensure!(!files.is_empty(), "no UQFF written");
+    for entry in std::fs::read_dir(checkpoint)? {
+        let path = entry?.path();
+        if path.extension().is_none_or(|ext| ext != WEIGHTS_EXTENSION) {
+            std::fs::copy(&path, uqff_dir.path().join(path.file_name().unwrap()))?;
+        }
+    }
+    let reloaded = builder(uqff_dir.path())
+        .from_uqff(vec![files[0].clone()])
+        .build()
+        .await?;
+    let (read, _) = greedy(&reloaded, request(), max_len).await?;
+    Ok((written, read))
 }

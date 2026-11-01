@@ -254,9 +254,10 @@ MERaLiON-2 (`MERaLiON2ForConditionalGeneration`, e.g. `MERaLiON/MERaLiON-2-3B`) 
 
 ## Ultravox
 
-Ultravox (e.g. `fixie-ai/ultravox-v0_5-llama-3_2-1b`) answers questions about audio clips in chat. Its safetensors repos hold only the audio tower and projector (the text model is another repository), so it loads from llama.cpp's GGUFs, a `llama` text GGUF with its `ultravox` projector, with nothing else:
+Ultravox (e.g. `fixie-ai/ultravox-v0_5-llama-3_2-1b`) answers questions about audio clips in chat. Its safetensors repos hold only the audio tower and projector; the config's `text_model_id` names the text model's repository (`meta-llama/Llama-3.2-1B-Instruct`, gated), which loads beside it, so the token needs access to that repository too. It also loads from llama.cpp's GGUFs, a `llama` text GGUF with its `ultravox` projector, with nothing else:
 
 ```bash
+inference serve -m fixie-ai/ultravox-v0_5-llama-3_2-1b
 inference serve --format gguf -m <dir> -f Llama-3.2-1B-Instruct-Q8_0.gguf
 ```
 
