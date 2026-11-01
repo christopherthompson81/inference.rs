@@ -9,7 +9,7 @@ use crate::gguf::{
     base_model::infer_hf_base_model_id,
     convert_gguf_metadata_to_hf_tokenizer, get_gguf_chat_template_from_metadata,
     multimodal_bindings::build_gemma4_bindings,
-    multimodal_vision_registry::resolve_native_multimodal_gguf,
+    multimodal_vision_registry::{self, resolve_native_multimodal_gguf},
     muse_glimmer_bindings::normalize_muse_glimmer_config,
     normal_bindings::build_normal_bindings,
     normal_config::{
@@ -34,7 +34,7 @@ use crate::gguf::{
 use crate::pipeline::LoadOptions;
 use crate::pipeline::chat_template::GenerationConfig;
 use crate::pipeline::hf::{build_api, get_file, list_repo_files};
-use crate::pipeline::loaders::stamp_qk_rope_layout;
+use crate::pipeline::loaders::{MultimodalLoaderTypeExt, stamp_qk_rope_layout};
 use crate::pipeline::loading::PreparedSource;
 use crate::pipeline::multimodal::{MultimodalLoaderBuilder, MultimodalSpecificConfig};
 use crate::pipeline::normal::{NormalLoaderBuilder, NormalSpecificConfig};
@@ -1456,16 +1456,19 @@ impl GGUFLoader {
         archive.merge_components(mmproj)?;
         let archive = Arc::new(archive);
 
-        let (loader_type, bindings, rope_pairing) = match architecture.as_str() {
+        let (loader_type, bindings, rope_pairing, synthesized_config) = match architecture.as_str()
+        {
             "gemma4" => (
                 MultimodalLoaderType::Gemma4,
                 build_gemma4_bindings(&archive)?,
                 RopePairing::HalfSplit,
+                None,
             ),
             "qwen2vl" | "qwen3vl" | "qwen3vlmoe" | "qwen35" | "qwen35moe" | "qwen4exp" => (
                 qwen_multimodal_loader_type(&archive)?,
                 build_qwen_multimodal_bindings(&archive)?,
                 RopePairing::HalfSplit,
+                None,
             ),
             architecture => {
                 let Some(resolved) = resolve_native_multimodal_gguf(&archive)? else {
@@ -1477,25 +1480,31 @@ impl GGUFLoader {
                     resolved.loader_type,
                     resolved.bindings,
                     resolved.rope_pairing,
+                    resolved.config,
                 )
             }
         };
-        if paths.get_config_filename().as_os_str().is_empty() {
+        let config = if !paths.get_config_filename().as_os_str().is_empty() {
+            fs::read_to_string(paths.get_config_filename())?
+        } else if let Some(config) = synthesized_config {
+            config
+        } else {
             bail!(
                 "multimodal GGUF architecture `{architecture}` requires its original `config.json`; pass `--tok-model-id <original-model-id>`"
             );
-        }
-        let config = prepare_native_multimodal_config(
-            &loader_type,
-            &fs::read_to_string(paths.get_config_filename())?,
-        )?;
+        };
+        let config = prepare_native_multimodal_config(&loader_type, &config)?;
         let config = stamp_qk_rope_layout(&config, rope_pairing)?;
         #[cfg(feature = "models-gemma")]
         if architecture == "gemma3" {
             ensure_gemma3_vision_config(&config)?;
         }
-        let source =
+        let template_overrides_gguf = loader_type.loader()?.template_overrides_gguf(&config);
+        let mut source =
             self.prepare_source(&archive, &bindings, paths, &options, config, rope_pairing)?;
+        if template_overrides_gguf {
+            source.chat_template = None;
+        }
         #[cfg(feature = "models-gemma")]
         let source = {
             let mut source = source;
@@ -1616,6 +1625,9 @@ impl GGUFLoader {
             }
         };
         let Some(inferred_model_id) = inferred_model_id else {
+            if config_missing && describes_own_config(&model_archive, &projector_archives) {
+                return Ok(None);
+            }
             if config_missing {
                 bail!(
                     "multimodal GGUF requires its original `config.json`, but the GGUF files do \
@@ -1804,6 +1816,26 @@ impl Loader for GGUFLoader {
     fn get_kind(&self) -> ModelKind {
         self.kind.clone()
     }
+}
+
+// a text GGUF beside a projector whose metadata spells out the whole config needs no base repository
+fn describes_own_config(
+    model: &inference_quant::GgufArchive,
+    projectors: &[inference_quant::GgufArchive],
+) -> bool {
+    let text = |archive: &inference_quant::GgufArchive, key: &str| match archive.metadata_value(key)
+    {
+        Some(inference_tensor::quantized::gguf_file::Value::String(value)) => Some(value.clone()),
+        _ => None,
+    };
+    let Some(architecture) = text(model, "general.architecture") else {
+        return false;
+    };
+    projectors.iter().any(|projector| {
+        text(projector, "clip.projector_type").is_some_and(|projector| {
+            multimodal_vision_registry::describes_own_config(&architecture, &projector)
+        })
+    })
 }
 
 #[cfg(test)]

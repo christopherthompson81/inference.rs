@@ -8,7 +8,7 @@ pub mod inputs_processor;
 
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::nn::{Linear, Module};
-use inference_tensor::{D, DType, Device, Result, Tensor};
+use inference_tensor::{Device, Result, Tensor};
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
@@ -16,6 +16,7 @@ use crate::{
     granite::GraniteMoeHybrid,
     kv_cache::EitherCache,
     layers::linear_b,
+    media_inputs::audio_prompt::place_audio_features,
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata, NormalModel},
     paged_attention::{AttentionImplementation, ModelConfigMetadata},
     utils::unvarbuilder::UnVarBuilder,
@@ -150,29 +151,13 @@ impl GraniteSpeechModel {
                 })
                 .collect::<Result<Vec<_>>>()?;
             let projected = Tensor::cat(&projected, 0)?;
-            let positions = input_ids
-                .flatten_all()?
-                .to_dtype(DType::U32)?
-                .to_vec1::<u32>()?
-                .into_iter()
-                .enumerate()
-                .filter(|&(_, id)| id == self.audio_token)
-                .map(|(i, _)| u32::try_from(i).expect("a token position fits u32"))
-                .collect::<Vec<_>>();
-            if positions.len() != projected.dim(0)? {
-                inference_tensor::bail!(
-                    "Granite Speech audio features and audio tokens do not match, tokens: {}, features: {}",
-                    positions.len(),
-                    projected.dim(0)?
-                );
-            }
-            let shape = embeds.shape().clone();
-            let hidden = embeds.dim(D::Minus1)?;
-            let flat = embeds.reshape(((), hidden))?;
-            let positions = Tensor::new(positions.as_slice(), flat.device())?;
-            let replace =
-                (projected.to_dtype(flat.dtype())? - flat.index_select(&positions, 0)?)?;
-            embeds = flat.index_add(&positions, &replace, 0)?.reshape(shape)?;
+            embeds = place_audio_features(
+                &embeds,
+                input_ids,
+                self.audio_token,
+                &projected,
+                "Granite Speech",
+            )?;
         }
         // transformers scales whatever embeddings it is given, the audio features with them
         let embeds = self.language_model.scale_embeddings(embeds)?;

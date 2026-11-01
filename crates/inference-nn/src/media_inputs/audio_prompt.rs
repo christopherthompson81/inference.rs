@@ -1,6 +1,7 @@
 //! Expanding an audio-in model's per-clip placeholder into the run of tokens its encoder output fills.
 
 use inference_audio::AudioInput;
+use inference_tensor::{D, DType, Result, Tensor};
 use tokenizers::Tokenizer;
 
 use super::media::build_mm_features_from_ranges;
@@ -130,6 +131,37 @@ pub fn active_clip_range(
     } else {
         Ok(seq.count_prefix_cached_mm_items_by_kind(MultimodalKind::Audio)..clips)
     }
+}
+
+/// `embeds` with the rows at each `token` in `input_ids` replaced, in order, by the rows of `features`.
+pub fn place_audio_features(
+    embeds: &Tensor,
+    input_ids: &Tensor,
+    token: u32,
+    features: &Tensor,
+    model: &str,
+) -> Result<Tensor> {
+    let positions = input_ids
+        .flatten_all()?
+        .to_dtype(DType::U32)?
+        .to_vec1::<u32>()?
+        .into_iter()
+        .enumerate()
+        .filter(|&(_, id)| id == token)
+        .map(|(i, _)| u32::try_from(i).expect("a token position fits u32"))
+        .collect::<Vec<_>>();
+    if positions.len() != features.dim(0)? {
+        inference_tensor::bail!(
+            "{model} audio features and audio tokens do not match, tokens: {}, features: {}",
+            positions.len(),
+            features.dim(0)?
+        );
+    }
+    let shape = embeds.shape().clone();
+    let flat = embeds.reshape(((), embeds.dim(D::Minus1)?))?;
+    let positions = Tensor::new(positions.as_slice(), flat.device())?;
+    let replace = (features.to_dtype(flat.dtype())? - flat.index_select(&positions, 0)?)?;
+    flat.index_add(&positions, &replace, 0)?.reshape(shape)
 }
 
 #[cfg(test)]

@@ -232,6 +232,18 @@ inference serve --format gguf -m <dir> -f Qwen3-ASR-1.7B-Q8_0.gguf --mmproj <dir
   --tok-model-id Qwen/Qwen3-ASR-1.7B
 ```
 
+## Voxtral
+
+Voxtral Mini and Small (`VoxtralForConditionalGeneration`, e.g. `mistralai/Voxtral-Mini-3B-2507`) answer questions about audio clips in chat: the Whisper encoder reads each clip, resampled to 16 kHz mono and padded to whole 30 s chunks, and every chunk takes 375 `[AUDIO]` tokens at the start of the user turn. The repos ship both transformers weights (`config.json`, `model-*.safetensors`) and Mistral's native ones (`params.json`, `consolidated.safetensors`); the transformers pair loads. The repos have no chat template, so the loader applies mistral_common's layout (`[SYSTEM_PROMPT]...[/SYSTEM_PROMPT][INST]...[/INST]`, no spaces).
+
+It also loads from llama.cpp's GGUFs (a `llama` text GGUF with its `voxtral` projector) with nothing else: the config comes from the GGUFs' metadata, and the loader's template replaces the one the published GGUFs embed (another Mistral model's, with an agent system prompt):
+
+```bash
+inference serve --format gguf -m <dir> -f Voxtral-Mini-3B-2507-Q4_K_M.gguf
+```
+
+Voxtral Realtime (`VoxtralRealtimeForConditionalGeneration`) is a different, streaming transcription model; see the [speech models guide](/guides/models/use-speech-models/).
+
 ## Llama 4
 
 Llama 4 Scout supports up to 10M tokens of context. Using the full window requires paged attention with a large memory budget, generally with multi-GPU tensor parallelism.

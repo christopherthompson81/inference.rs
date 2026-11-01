@@ -214,6 +214,7 @@ impl Loader for GGMLLoader {
             self.jinja_explicit.as_ref(),
             self.chat_template.as_ref(),
             None,
+            None,
         );
 
         let max_seq_len = model.max_seq_len();

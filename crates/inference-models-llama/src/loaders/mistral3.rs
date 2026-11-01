@@ -282,7 +282,7 @@ impl DeviceMappedModelLoader for Mistral3Loader {
     }
 }
 
-fn decoder_shape(cfg: &crate::mistral::Config) -> DecoderLayerShape {
+pub(super) fn decoder_shape(cfg: &crate::mistral::Config) -> DecoderLayerShape {
     DecoderLayerShape {
         hidden_size: cfg.hidden_size,
         num_attention_heads: cfg.num_attention_heads,

@@ -20,7 +20,7 @@ use crate::{
 };
 use anyhow::Result;
 use either::Either;
-use inference_protocol::chat_template::{BeginEndUnkPadTok, ChatTemplateValue};
+use inference_protocol::chat_template::BeginEndUnkPadTok;
 use inference_quant::IsqType;
 use inference_tensor::Device;
 use std::fs;
@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokenizers::AddedToken;
 use tokio::sync::Mutex;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 
 /// A loader for a multimodal (non-quantized) model.
 pub struct MultimodalLoader {
@@ -468,15 +468,8 @@ impl MultimodalLoader {
             self.jinja_explicit.as_ref(),
             self.chat_template.as_ref(),
             self.prepared_source.as_ref(),
+            self.inner.default_chat_template(&config),
         );
-
-        // If no chat template was found, use the loader's built-in default (if any).
-        if chat_template.chat_template.is_none()
-            && let Some(default_tmpl) = self.inner.default_chat_template(&config)
-        {
-            info!("Using loader's built-in default chat template.");
-            chat_template.chat_template = Some(ChatTemplateValue(Either::Left(default_tmpl)));
-        }
 
         // If no bos/eos tokens are set, use the loader's defaults (e.g. for Voxtral
         // which has no tokenizer_config.json).

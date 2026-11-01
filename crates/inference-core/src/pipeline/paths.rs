@@ -23,6 +23,10 @@ const SAFETENSOR_MATCH: &str = r"model-\d+-of-\d+\.safetensors\b";
 const QUANT_SAFETENSOR_MATCH: &str = r"model\.safetensors\b";
 const CONSOLIDATED_SAFETENSOR_MATCH: &str = r"consolidated\.safetensors\b";
 const SAFETENSOR_INDEX: &str = "model.safetensors.index.json";
+const NATIVE_CONFIG: &str = "params.json";
+const HF_CONFIG: &str = "config.json";
+// architectures whose loader reads Mistral's native `params.json` even beside a `config.json`
+const NATIVE_CONFIG_ARCHITECTURES: &[&str] = &["VoxtralRealtimeForConditionalGeneration"];
 const PICKLE_MATCH: &str = r"pytorch_model(-\d{5}-of-\d{5})?\.((pth)|(pt)|(bin))\b";
 // where a task embedder (Jina v5) ships one PEFT adapter per task
 const BUNDLED_ADAPTERS_DIR: &str = "adapters";
@@ -480,9 +484,6 @@ pub(crate) fn get_chat_template(
                     .expect("Serialization of modified chat template failed.");
                 serde_json::from_str(&ser).unwrap()
             } else {
-                warn!(
-                    "No chat template source found. No chat template will be used. Only prompts will be accepted, not messages."
-                );
                 template
             }
         }
@@ -530,6 +531,32 @@ impl<'a> RepoFiles<'a> {
             revision,
             listed,
         })
+    }
+
+    /// `config.json`, or Mistral's native `params.json` when there is no `config.json` or it names an architecture
+    /// whose loader reads the native one (a repo can ship both, each for its own weights).
+    pub fn config_file(&self) -> Result<PathBuf> {
+        if !self.has(NATIVE_CONFIG) {
+            return self.get(HF_CONFIG);
+        }
+        if !self.has(HF_CONFIG) {
+            return self.get(NATIVE_CONFIG);
+        }
+        let hf = self.get(HF_CONFIG)?;
+        let names_native = serde_json::from_str::<serde_json::Value>(&fs::read_to_string(&hf)?)?
+            .get("architectures")
+            .and_then(|names| names.as_array())
+            .is_some_and(|names| {
+                names.iter().any(|name| {
+                    name.as_str()
+                        .is_some_and(|name| NATIVE_CONFIG_ARCHITECTURES.contains(&name))
+                })
+            });
+        if names_native {
+            self.get(NATIVE_CONFIG)
+        } else {
+            Ok(hf)
+        }
     }
 
     pub fn has(&self, file: &str) -> bool {
@@ -619,12 +646,7 @@ pub(crate) fn get_paths(
         }
         None => native_or_hf_tokenizer(&repo)?,
     };
-    // Mistral's native `params.json` takes precedence over `config.json`
-    let config_filename = if repo.has("params.json") {
-        repo.get("params.json")?
-    } else {
-        repo.get("config.json")?
-    };
+    let config_filename = repo.config_file()?;
     repo.get_listed("hf_quant_config.json")?;
     let filenames = repo.weights(
         request.token_source,
@@ -729,8 +751,7 @@ pub(crate) fn get_embedding_paths(
     };
     let config_filename = match decision {
         Some(name) => repo.get(name)?,
-        None if repo.has("params.json") => repo.get("params.json")?,
-        None => repo.get("config.json")?,
+        None => repo.config_file()?,
     };
     repo.get_listed("hf_quant_config.json")?;
     let filenames = repo.weights(

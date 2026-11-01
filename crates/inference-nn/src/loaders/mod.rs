@@ -341,6 +341,11 @@ pub trait MultimodalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedMode
     fn default_chat_template(&self, _config: &str) -> Option<String> {
         None
     }
+    /// Whether [`Self::default_chat_template`] also replaces a template a GGUF embeds: true for a family whose
+    /// published GGUFs carry another model's template.
+    fn template_overrides_gguf(&self, _config: &str) -> bool {
+        false
+    }
     /// Return default (bos_token, eos_token) strings for models that don't ship a
     /// `tokenizer_config.json`. Used to populate the chat template context and
     /// EOS token detection. Returns `None` by default.

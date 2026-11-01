@@ -7,11 +7,12 @@ pub mod inputs_processor;
 pub mod transcription;
 
 use inference_quant::ShardedVarBuilder;
-use inference_tensor::{D, DType, Device, Result, Tensor};
+use inference_tensor::{Device, Result, Tensor};
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     kv_cache::EitherCache,
+    media_inputs::audio_prompt::place_audio_features,
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata, NormalModel},
     paged_attention::{AttentionImplementation, ModelConfigMetadata},
     utils::unvarbuilder::UnVarBuilder,
@@ -83,27 +84,8 @@ impl Qwen3AsrModel {
                 .map(|clip| self.audio.forward(&clip.mel, clip.valid_frames))
                 .collect::<Result<Vec<_>>>()?;
             let encoded = Tensor::cat(&encoded, 0)?;
-            let positions = input_ids
-                .flatten_all()?
-                .to_dtype(DType::U32)?
-                .to_vec1::<u32>()?
-                .into_iter()
-                .enumerate()
-                .filter(|&(_, id)| id == self.audio_token)
-                .map(|(i, _)| u32::try_from(i).expect("a token position fits u32"))
-                .collect::<Vec<_>>();
-            if positions.len() != encoded.dim(0)? {
-                inference_tensor::bail!(
-                    "Qwen3-ASR audio features and audio tokens do not match, tokens: {}, features: {}",
-                    positions.len(),
-                    encoded.dim(0)?
-                );
-            }
-            let shape = embeds.shape().clone();
-            let flat = embeds.reshape(((), embeds.dim(D::Minus1)?))?;
-            let positions = Tensor::new(positions.as_slice(), flat.device())?;
-            let replace = (encoded.to_dtype(flat.dtype())? - flat.index_select(&positions, 0)?)?;
-            embeds = flat.index_add(&positions, &replace, 0)?.reshape(shape)?;
+            embeds =
+                place_audio_features(&embeds, input_ids, self.audio_token, &encoded, "Qwen3-ASR")?;
         }
         self.text.forward_embeds(input_ids, embeds, ctx)
     }
