@@ -12,6 +12,10 @@ use super::checkpoint::{ExpertCheckpoint, ExpertSourceLayout};
 use super::config::{ExpertProj, MoEExpertsConfig};
 use super::forward::{MoEForward, MoEForwardConfig};
 
+// NeMo Automodel's stacked experts: an ungated layer's "gate and up" holds only up
+const NEMO_UP: &str = "gate_and_up_projs";
+const NEMO_DOWN: &str = "down_projs";
+
 pub(super) struct UngatedExpertsWeights {
     up: Arc<dyn QuantMethod>,
     down: Arc<dyn QuantMethod>,
@@ -51,6 +55,9 @@ impl UngatedExpertsWeights {
                 down: load(&keys.down, experts_vb.pp("down_proj"))?,
             });
         }
+        if experts_vb.contains_tensor(NEMO_UP) {
+            return Self::load_nemo(cfg, experts_vb, keys);
+        }
         let shape_of = |rel: &str| experts_vb.tensor_shape(rel).map(|s| s.to_vec());
         let Some(ExpertSourceLayout::PerExpert { names, .. }) =
             ExpertSourceLayout::detect(&shape_of, ExpertProj::Up)
@@ -80,6 +87,38 @@ impl UngatedExpertsWeights {
         Ok(Self {
             up: load(ExpertProj::Up, vb_up, keys.up)?,
             down: load(ExpertProj::Down, vb_down, keys.down)?,
+        })
+    }
+
+    // NeMo Automodel's stacks, `[experts, in, out]`: transposed to `[experts, out, in]`
+    fn load_nemo(
+        cfg: &MoEExpertsConfig,
+        experts_vb: ShardedVarBuilder,
+        keys: QuantizedExpertKeys,
+    ) -> Result<Self> {
+        let isq = should_apply_immediate_isq(&experts_vb.pp(NEMO_UP))
+            || should_apply_immediate_isq(&experts_vb.pp(NEMO_DOWN));
+        let read_vb = if isq && !experts_vb.device().is_cpu() {
+            experts_vb.clone().set_device(Device::Cpu)
+        } else {
+            experts_vb.clone()
+        };
+        let (e, h, i) = (cfg.num_experts, cfg.hidden_size, cfg.moe_intermediate_size);
+        let load = |name: &str, shape: (usize, usize, usize), key: String| {
+            let stacked = read_vb.get(shape, name)?.transpose(1, 2)?.contiguous()?;
+            let layer = Arc::new(UnquantLinear::new(QuantMethodConfig::Unquantized(
+                Linear::new(stacked, None),
+            ))?);
+            apply_immediate_isq_with_key(
+                layer,
+                experts_vb.pp(name),
+                Some(key),
+                Some(Shard::default()),
+            )
+        };
+        Ok(Self {
+            up: load(NEMO_UP, (e, h, i), keys.up)?,
+            down: load(NEMO_DOWN, (e, i, h), keys.down)?,
         })
     }
 

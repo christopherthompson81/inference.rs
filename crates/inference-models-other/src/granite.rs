@@ -48,6 +48,7 @@ const V5_DOWN: &str = "down_proj";
 const NEMOTRON_ROUTER: &str = "gate";
 const NEMOTRON_SELECTION_BIAS: &str = "e_score_correction_bias";
 const NEMOTRON_SHARED_EXPERTS: &str = "shared_experts";
+const NEMO_FP32_PARAMS: &str = "_fp32_params";
 // transformers divides the selected scores by their sum plus this
 const NEMOTRON_NORM_MIN: f32 = 1e-20;
 const NEMOTRON_MLP: [AnyMoeLoraTarget; 2] = [
@@ -997,9 +998,15 @@ impl MambaLayer {
             None
         };
 
-        let mut dt_bias = vb.get(num_heads, "dt_bias")?;
-        let mut a_log = vb.get(num_heads, "A_log")?;
-        let mut d = vb.get(num_heads, "D")?;
+        // NeMo keeps these in float32 under a module of their own
+        let params = if vb.contains_tensor(&format!("{NEMO_FP32_PARAMS}.A_log")) {
+            vb.pp(NEMO_FP32_PARAMS)
+        } else {
+            vb.clone()
+        };
+        let mut dt_bias = params.get(num_heads, "dt_bias")?;
+        let mut a_log = params.get(num_heads, "A_log")?;
+        let mut d = params.get(num_heads, "D")?;
         let norm = RmsNormGated::new(
             intermediate_size,
             cfg.mamba_norm_group_size.unwrap_or(intermediate_size),

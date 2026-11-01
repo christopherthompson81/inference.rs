@@ -101,3 +101,31 @@ drops `<|audio|>`, id 131072: the converter asserts every token id is below the 
 - Granite's tiny suites (dense, MoE, SWA, Speech, Vision) pass on the restructured blocks.
 
 **Next:** the Transcribe model itself: the ASR encoder, the speaker branch, the projector, its prompt.
+
+## Run 4 - 2026-11-01 17:45
+
+**Question:** does the real Transcribe decoder, loaded as Nemotron-H from the checkpoint's NeMo names, answer text
+prompts as transformers does?
+
+**Commands:** transformers main, `AutoModelForMultimodalLM` BF16 on the CPU, `apply_chat_template(...,
+enable_thinking=False)`, greedy 24 tokens with scores, on "Name three rivers in Europe." and "Translate to French: The
+weather is nice today."; ours on a scratch directory holding the `text_config` as a `NemotronHForCausalLM` config beside
+links to the checkpoint and its tokenizer and template, `inference serve --cpu --dtype bf16`, chat with
+`enable_thinking: false` and logprobs.
+
+**Finding:**
+- First load: `cannot find tensor model.embeddings.weight`. The checkpoint is NeMo Automodel's layout:
+  `llm.model.embed_tokens`, `llm.model.norm`, `llm.lm_head`; Mamba's `A_log`, `D`, `dt_bias` under
+  `mixer._fp32_params` (F32); the experts stacked and transposed, `experts.gate_and_up_projs` `[128, 2688, 1856]`
+  (ungated, so only up) and `experts.down_projs` `[128, 1856, 2688]`; `_extra_state` placeholders; MTP under
+  `llm.mtp.layers.{0,1}`. transformers' conversion mapping renames these and transposes the stacks. Now read as they
+  are: the loader finds the decoder under `llm.model` with its head at `llm.lm_head` and takes the Llama names for the
+  ends, the Mamba layer reads `_fp32_params` when present, the ungated experts read the transposed stacks.
+- Prompt tokens equal (22, 26). French: the same 7 tokens to `<|im_end|>`. Rivers: the same first 12 tokens, then
+  "Rhône" for "Danube" as the first river. Per-step logprobs differ by up to 0.16 (step 0 of the French: -0.096 against
+  -0.247). Our top logprobs sit on a coarse grid (-1.028, -2.028, -2.028; -1.17, -1.17): the BF16 `lm_head` output rounds
+  the logits before the softmax, so near ties (step 3 of the rivers) are rounding. transformers also runs `lm_head` in
+  BF16 and casts the F32 Mamba parameters to BF16; only `e_score_correction_bias` stays F32 there. F32 on both sides
+  does not fit in 125 GB; the tiny F32 match (Run 2) is the arithmetic check.
+
+**Next:** commit the NeMo layout; then the audio side.

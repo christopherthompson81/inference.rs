@@ -5,24 +5,32 @@ use inference_nn::utils::varbuilder_utils::DeviceForLoadTensor;
 use crate::nemotron_h::{Config, LayerKind};
 
 const EMBEDDINGS_WEIGHT: &str = "embeddings.weight";
-// Hub checkpoints keep NVIDIA's `backbone.*`, which transformers renames to `model.*`
-const NVIDIA_ROOT: &str = "backbone";
-const HF_ROOT: &str = "model";
-const LM_HEAD: &str = "lm_head";
+// NeMo's speech models keep the decoder's ends under Llama's names
+const NEMO_EMBEDDINGS_WEIGHT: &str = "embed_tokens.weight";
+const NEMO_ENDS: (&str, &str) = ("embed_tokens", "norm");
+// (decoder, lm_head): Hub checkpoints keep NVIDIA's `backbone.*`, which transformers renames to `model.*`; NeMo's
+// speech models nest the language model under `llm`
+const ROOTS: [(&str, &str); 3] = [
+    ("backbone", "lm_head"),
+    ("model", "lm_head"),
+    ("llm.model", "llm.lm_head"),
+];
 
 /// `NormalLoader` for Nemotron-H (`NemotronHForCausalLM`): its layers as Granite's hybrid blocks.
 pub struct NemotronHLoader;
 
-/// The prefix the checkpoint's decoder sits under.
-pub fn nemotron_h_root(vb: &ShardedVarBuilder) -> &'static str {
-    if inference_nn::layers::contains_tensor_or_weight_source(
-        &vb.pp(NVIDIA_ROOT),
-        EMBEDDINGS_WEIGHT,
-    ) {
-        NVIDIA_ROOT
-    } else {
-        HF_ROOT
-    }
+/// The prefixes the checkpoint's decoder and its `lm_head` sit under.
+pub fn nemotron_h_prefixes(vb: &ShardedVarBuilder) -> (&'static str, &'static str) {
+    ROOTS
+        .into_iter()
+        .find(|(root, _)| {
+            [EMBEDDINGS_WEIGHT, NEMO_EMBEDDINGS_WEIGHT]
+                .iter()
+                .any(|weight| {
+                    inference_nn::layers::contains_tensor_or_weight_source(&vb.pp(root), weight)
+                })
+        })
+        .unwrap_or(ROOTS[1])
 }
 
 impl NormalModelLoader for NemotronHLoader {
@@ -34,12 +42,19 @@ impl NormalModelLoader for NemotronHLoader {
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
         let cfg = Config::from_json(config)?;
-        let root = nemotron_h_root(&vb);
+        let (root, lm_head) = nemotron_h_prefixes(&vb);
+        let mut layout = cfg.layout()?;
+        if inference_nn::layers::contains_tensor_or_weight_source(
+            &vb.pp(root),
+            NEMO_EMBEDDINGS_WEIGHT,
+        ) {
+            (layout.embeddings, layout.final_norm) = NEMO_ENDS;
+        }
         Ok(Box::new(crate::granite::GraniteMoeHybrid::new_with_layout(
             &cfg.granite()?,
-            cfg.layout()?,
+            layout,
             vb.pp(root),
-            vb.pp(LM_HEAD),
+            vb.pp(lm_head),
             true,
             normal_loading_metadata,
             attention_mechanism,
@@ -86,6 +101,7 @@ impl IsqModelLoader for NemotronHLoader {
             r"layers\.(\d+)\.mixer\.(up_proj|down_proj)\.(weight|bias)$",
             r"layers\.(\d+)\.mixer\.shared_experts\.(up_proj|down_proj)\.(weight|bias)$",
             r"layers\.(\d+)\.mixer\.experts\.(\d+)\.(up_proj|down_proj)\.(weight|bias)$",
+            r"layers\.(\d+)\.mixer\.experts\.(gate_and_up_projs|down_projs)$",
         ])
     }
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
