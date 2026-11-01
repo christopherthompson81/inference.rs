@@ -366,3 +366,50 @@ probe confirmed the quantized tests reach the kernel, and decode matches prefill
 
 **Second try:** without `--cpu`, the auto map puts layers 0-8 on the 3090 (16.2 GB) and 9-28 on the CPU. 676 tokens
 in 28.9 s, RSS steady at 23.4 GiB, ~7 cores busy (the CPU layers' Mamba and attention parts are not all parallel).
+
+## Run 14 - 2026-11-01 ~16:00
+
+**Question:** does the imatrix collected online (Run 13) convert to llama.cpp's format under the GGUF's names, and
+does `quantize gguf` with it write what llama.cpp's own quantizer writes from the same imatrix?
+
+**Commands:**
+- Calibration: 48 clips (676-914 tokens each, 20-43 s) and 64 text prompts (76-190 tokens, 4-9 s); 163 layers
+  tracked, 14,957,264 routed rows. The first apply was refused (`save_cimatrix` must be a bare file name; the server
+  writes it in its working directory) without disturbing collection; the second saved it.
+- `inference quantize imatrix --cimatrix nemotron_transcribe.cimatrix --gguf ...-text-BF16.gguf -o
+  nemotron_transcribe.imatrix.dat`: 163 entries, none unmatched, no unseen experts (`ffn_up_exps` 128 x 2688,
+  `ffn_down_exps` 128 x 1856; `down` holds exact zeros where squared ReLU left units dead).
+- `inference quantize gguf ... --imatrix nemotron_transcribe.imatrix.dat` (same rules as Run 12): 12:50, RSS 534 MB,
+  only `token_embd` without an entry (a lookup, no imatrix).
+- `llama-quantize --imatrix nemotron_transcribe.imatrix.dat --tensor-type '_exps=iq4_nl' --token-embedding-type q8_0
+  --output-tensor-type q8_0 BF16.gguf check.gguf Q8_0` (rebuilt first: the binary predated the 2026-10-04 imatrix
+  loader and rejected the legacy file with "missing imatrix metadata"), then a tensor-by-tensor byte comparison.
+
+**Findings:** 46 / 46 IQ4_NL expert stacks byte-identical, 111 / 118 Q8_0 identical, 237 F32 identical. The 7 Q8_0
+tensors differ only in blocks whose f16 scale is 0 (84 of 311,808 blocks in `blk.1.ffn_up_shexp`): ours stores
+saturated +-127 indices under the zero scale, llama.cpp zeros; both dequantize to zeros.
+
+**Next:** text KLD against the BF16 GGUF (llama-perplexity, wikitext-2, 512 x 40), imatrix vs no imatrix.
+
+## Run 15 - 2026-11-01 ~16:25
+
+**Question:** what does the imatrix buy, measured as text KLD against the BF16 GGUF?
+
+**Commands:** `llama-perplexity -m ...-text-BF16.gguf -f wiki.test.raw -c 512 --chunks 40 -ngl 99 -ot '_exps=CPU'
+--kl-divergence-base bf16-wiki-c512-ch40.kld` (BF16 experts in RAM, 20.6 s per pass), then `--kl-divergence -ngl 99`
+on each IQ4_NL file.
+
+**Findings (wikitext-2, 512 x 40):**
+
+| file | mean KLD | 99 % KLD | max KLD | same top-1 | PPL(Q) |
+|---|---|---|---|---|---|
+| BF16 | - | - | - | - | 12.7692 +- 0.471 |
+| IQ4_NL + Q8_0, imatrix | 0.032971 +- 0.001060 | 0.328 | 6.75 | 92.363 +- 0.263 % | 12.6045 |
+| IQ4_NL + Q8_0, no imatrix | 0.034762 +- 0.000916 | 0.362 | 3.54 | 91.873 +- 0.271 % | 12.7093 |
+
+The imatrix lowers mean KLD ~5 % and the 99th percentile ~9 %, and raises top-1 agreement 0.5 points. Text is not
+what this model is for, so the audio-prompt KLD (once the audio weights sit beside the GGUF) is the number that
+decides recipes. The no-imatrix file was deleted after this run (disk).
+
+**Next:** the remaining experts budget: the file is 17.59 GiB against a ~21 GiB target, so Q5_0 `ffn_down_exps`
+(or Q8_0 attention / Mamba already) is room to spend; then the audio side beside the GGUF.
