@@ -1,5 +1,6 @@
-//! Qwen2-Audio from llama.cpp's GGUFs: a `qwen2` text GGUF beside a `qwen2a` projector holding the Whisper encoder
-//! and the one linear projector.
+//! Qwen2-Audio and Audio Flamingo 3 from llama.cpp's GGUFs: a `qwen2` text GGUF beside a projector holding the
+//! Whisper encoder, Qwen2-Audio's one linear (`qwen2a`) or Audio Flamingo 3's two-layer MLP (`musicflamingo`, the
+//! type llama.cpp's converter writes for `AudioFlamingo3ForConditionalGeneration`, Music Flamingo included).
 
 use std::collections::HashMap;
 
@@ -18,17 +19,34 @@ use super::whisper_audio_bindings::{
 };
 
 pub const PROJECTOR: &str = "qwen2a";
+pub const AF3_PROJECTOR: &str = "musicflamingo";
 pub const TEXT_ARCHITECTURE: &str = "qwen2";
 const FAMILY: &str = "Qwen2-Audio";
+const AF3_FAMILY: &str = "Audio Flamingo 3";
 const AUDIO_TOKEN: &str = "<|AUDIO|>";
+const SOUND_TOKEN: &str = "<sound>";
+// (native linear, GGUF tensor) per projector
+const QWEN2_AUDIO_PROJECTOR: &[(&str, &str)] = &[("linear", "mm.a.fc")];
+const AF3_MLP: &[(&str, &str)] = &[("linear_1", "mm.a.mlp.1"), ("linear_2", "mm.a.mlp.2")];
 
 pub fn build_qwen2_audio_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
     validate_projector(archive, PROJECTOR)?;
-    build_qwen2_audio_bindings_from_inventory(&TensorInventory::from_archive(archive))
+    build_bindings_from_inventory(
+        &TensorInventory::from_archive(archive),
+        FAMILY,
+        QWEN2_AUDIO_PROJECTOR,
+    )
 }
 
-fn build_qwen2_audio_bindings_from_inventory(
+pub fn build_audio_flamingo3_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
+    validate_projector(archive, AF3_PROJECTOR)?;
+    build_bindings_from_inventory(&TensorInventory::from_archive(archive), AF3_FAMILY, AF3_MLP)
+}
+
+fn build_bindings_from_inventory(
     inventory: &TensorInventory<'_>,
+    family: &str,
+    projector: &[(&str, &str)],
 ) -> Result<GgufBindingMap> {
     let mut bindings = GgufBindingMap::new();
     bind_llama_text(
@@ -36,26 +54,36 @@ fn build_qwen2_audio_bindings_from_inventory(
         &mut bindings,
         "language_model.model",
         "language_model.lm_head",
-        FAMILY,
+        family,
     )?;
-    bind_whisper_tower(inventory, &mut bindings, FAMILY, &WHISPER_LAYOUT)?;
-    bind_required_linear(
-        inventory,
-        &mut bindings,
-        "multi_modal_projector.linear",
-        "mm.a.fc",
-    )?;
+    bind_whisper_tower(inventory, &mut bindings, family, &WHISPER_LAYOUT)?;
+    for (native, source) in projector {
+        bind_required_linear(
+            inventory,
+            &mut bindings,
+            &format!("multi_modal_projector.{native}"),
+            source,
+        )?;
+    }
     Ok(bindings)
 }
 
 /// The `Qwen2AudioForConditionalGeneration` config the merged text and projector GGUFs describe.
 pub fn synthesize_qwen2_audio_config(archive: &GgufArchive) -> Result<String> {
-    let shapes = archive
+    qwen2_audio_config(archive.metadata(), &tensor_shapes(archive))
+}
+
+/// The `AudioFlamingo3ForConditionalGeneration` config the merged text and projector GGUFs describe.
+pub fn synthesize_audio_flamingo3_config(archive: &GgufArchive) -> Result<String> {
+    audio_flamingo3_config(archive.metadata(), &tensor_shapes(archive))
+}
+
+fn tensor_shapes(archive: &GgufArchive) -> HashMap<String, Vec<usize>> {
+    archive
         .tensors()
         .iter()
         .map(|(name, info)| (name.clone(), info.shape().to_vec()))
-        .collect();
-    qwen2_audio_config(archive.metadata(), &shapes)
+        .collect()
 }
 
 fn qwen2_audio_config(
@@ -70,6 +98,26 @@ fn qwen2_audio_config(
         "model_type": "qwen2_audio",
         "audio_token_index": token_id(metadata, AUDIO_TOKEN, FAMILY)?,
         "audio_config": whisper_tower_config(metadata, shapes, FAMILY)?,
+        "text_config": text,
+    });
+    Ok(config.to_string())
+}
+
+fn audio_flamingo3_config(
+    metadata: &HashMap<String, Value>,
+    shapes: &HashMap<String, Vec<usize>>,
+) -> Result<String> {
+    let tensor_names = shapes.keys().cloned().collect::<Vec<_>>();
+    let text = synthesize_normal_config_value(&NormalLoaderType::Qwen2, metadata, &tensor_names)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let config = json!({
+        "architectures": ["AudioFlamingo3ForConditionalGeneration"],
+        "model_type": "audioflamingo3",
+        "audio_token_id": token_id(metadata, SOUND_TOKEN, AF3_FAMILY)?,
+        // llama.cpp's graph runs the MLP with erf GELU
+        "projector_hidden_act": "gelu",
+        "projector_bias": shapes.contains_key("mm.a.mlp.1.bias"),
+        "audio_config": whisper_tower_config(metadata, shapes, AF3_FAMILY)?,
         "text_config": text,
     });
     Ok(config.to_string())
@@ -128,12 +176,45 @@ mod tests {
         tensors
     }
 
+    fn af3_inventory_tensors() -> Vec<(String, Vec<usize>)> {
+        inventory_tensors()
+            .into_iter()
+            .filter(|(name, _)| !name.starts_with("mm.a.fc"))
+            .chain([
+                ("mm.a.mlp.1.weight".to_string(), vec![4, 8]),
+                ("mm.a.mlp.1.bias".to_string(), vec![8]),
+                ("mm.a.mlp.2.weight".to_string(), vec![8, 8]),
+                ("mm.a.mlp.2.bias".to_string(), vec![8]),
+            ])
+            .collect()
+    }
+
+    #[test]
+    fn every_audio_flamingo3_tensor_is_bound_to_its_transformers_name() {
+        let tensors = af3_inventory_tensors();
+        let inventory =
+            TensorInventory::new(tensors.iter().map(|(n, s)| (n.as_str(), s.as_slice())));
+        let bindings = build_bindings_from_inventory(&inventory, AF3_FAMILY, AF3_MLP).unwrap();
+        assert_eq!(
+            binding_sources(&bindings),
+            tensors.iter().map(|(name, _)| name.clone()).collect()
+        );
+        for native in [
+            "multi_modal_projector.linear_1.weight",
+            "multi_modal_projector.linear_2.bias",
+            "audio_tower.embed_positions.weight",
+        ] {
+            assert!(bindings.get(native).is_some(), "`{native}` is not bound");
+        }
+    }
+
     #[test]
     fn every_qwen2_audio_tensor_is_bound_to_its_transformers_name() {
         let tensors = inventory_tensors();
         let inventory =
             TensorInventory::new(tensors.iter().map(|(n, s)| (n.as_str(), s.as_slice())));
-        let bindings = build_qwen2_audio_bindings_from_inventory(&inventory).unwrap();
+        let bindings =
+            build_bindings_from_inventory(&inventory, FAMILY, QWEN2_AUDIO_PROJECTOR).unwrap();
         assert_eq!(
             binding_sources(&bindings),
             tensors.iter().map(|(name, _)| name.clone()).collect()
@@ -148,8 +229,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_qwen2_audio_config_comes_from_the_text_and_projector_metadata() {
+    fn text_and_projector_metadata(audio_token: &str) -> HashMap<String, Value> {
         let mut metadata = HashMap::new();
         let mut put = |key: &str, value: Value| {
             metadata.insert(key.to_string(), value);
@@ -175,8 +255,29 @@ mod tests {
         let mut tokens = (0..300)
             .map(|i| Value::String(format!("<t{i}>")))
             .collect::<Vec<_>>();
-        tokens[264] = Value::String(AUDIO_TOKEN.to_string());
+        tokens[264] = Value::String(audio_token.to_string());
         put(TOKENS_KEY, Value::Array(tokens));
+        metadata
+    }
+
+    #[test]
+    fn an_audio_flamingo3_config_comes_from_the_text_and_projector_metadata() {
+        let metadata = text_and_projector_metadata(SOUND_TOKEN);
+        let shapes = af3_inventory_tensors()
+            .into_iter()
+            .chain([(POSITIONS.to_string(), vec![16, 1500])])
+            .collect::<HashMap<_, _>>();
+        let json = audio_flamingo3_config(&metadata, &shapes).unwrap();
+        inference_models_qwen::qwen2_audio::AudioFlamingo3Config::from_json(&json).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(config["audio_token_id"], 264);
+        assert_eq!(config["projector_bias"], true);
+        assert_eq!(config["text_config"]["hidden_size"], 48);
+    }
+
+    #[test]
+    fn a_qwen2_audio_config_comes_from_the_text_and_projector_metadata() {
+        let metadata = text_and_projector_metadata(AUDIO_TOKEN);
         let shapes = inventory_tensors()
             .into_iter()
             .chain([(POSITIONS.to_string(), vec![16, 1500])])

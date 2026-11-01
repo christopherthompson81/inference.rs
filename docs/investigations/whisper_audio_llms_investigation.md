@@ -395,3 +395,34 @@ projector `meralion` from the repo's patched llama.cpp) agree with our F32 safet
 
 **Next:** docs, checks, ask before pushing. Not filed: llama.cpp's GLMA graph runs GLM-ASR's encoder with the unused
 learned table instead of its rotary positions (Run 12), for the user to report.
+
+## Run 16 - 2026-11-01 15:15
+
+**Question:** do llama.cpp's `musicflamingo` GGUFs (mradermacher's `music-flamingo-hf.Q8_0.gguf` +
+`music-flamingo-hf.mmproj-f16.gguf`, from `nvidia/music-flamingo-hf`) load on our Audio Flamingo 3 path, and agree
+with llama.cpp on the same files?
+
+**Commands:** gguf-py over the pair; llama.cpp's `conversion/ultravox.py` and `whisper-enc.cpp`; transformers 5.19
+`models/musicflamingo`; HF configs of `nvidia/music-flamingo-hf` and `nvidia/music-flamingo-2601-hf`; `inference
+serve --format gguf -m /mnt/data/models/music-flamingo -f music-flamingo-hf.Q8_0.gguf` on the 3090 against
+`llama-server` (970b51ce7, `-np 1`), greedy, on a synthetic 12 s piano-and-kick clip, the short speech clip, both
+zero-padded to 30 s, and the long clip.
+
+**Finding:**
+- `musicflamingo` is the projector type llama.cpp's converter writes for every `AudioFlamingo3ForConditionalGeneration`
+  checkpoint; `nvidia/music-flamingo-hf` is one (`model_type audioflamingo3`). The projector holds the Whisper tower
+  (learned positions, `a.post_ln`) and `mm.a.mlp.1/2` with biases; the text GGUF is `qwen2` with the AF3 template
+  embedded (writes `<sound>`). So these bind to the AF3 loader as Qwen2-Audio's do, with the two-layer MLP.
+- `nvidia/music-flamingo-2601-hf` is a different architecture (`MusicFlamingoForConditionalGeneration`: rotary time
+  embeddings over the encoder output, `<|sound_bos|>`/`<|sound_eos|>` around each clip); no GGUF of it is published.
+- Text-only answer identical to llama-server's.
+- Audio token counts: ours 300 for 12 s and 750 for a 30 s window (transformers' count, as the safetensors path).
+  llama.cpp pads every clip to whole 30 s windows and appends one more window of zeros when a clip is exactly 30 s
+  (1532 prompt tokens for the padded clip against ours 781), and writes a literal `<sound>` before the embeddings
+  (one token more than ours on the same window).
+- Same audio seen by both (ours on the 30 s padded clip, llama.cpp on the unpadded one, which it pads to 30 s): the
+  speech answer identical; the music description identical through "centered in C major. The soundscape is built
+  from", then parts (Q8_0 on two engines). The long clip's transcript identical word for word. The 12 s clip read at
+  its real length gives a different but sound description.
+
+**Next:** docs, checks, ask before pushing.
