@@ -111,3 +111,21 @@ prompt).
 
 **Next:** docs (supported models, GGUF support), then local CI. Transcription mode (`lang:xx[TRANSCRIBE]` through the
 transcriptions endpoint) is a separate step.
+
+## Run 5 - 2026-10-31 19:34
+
+**Question:** does Voxtral's transcription mode, served through `/v1/audio/transcriptions`, match transformers'
+`apply_transcription_request`?
+
+**Commands:** mistral_common `encode_transcription` with and without a language;
+`scripts/voxtral_parity.py mistralai/Voxtral-Mini-3B-2507 <garden dialogue> <short> <multi 44 s>` (transcripts with
+`language=en`, max 192 tokens; the chat cases again).
+
+**Finding:**
+- Prompt: `<s>[INST][BEGIN_AUDIO][AUDIO]x375[/INST]lang:en[TRANSCRIBE]`, or `...[/INST][TRANSCRIBE]` without a language;
+  the answer is the bare transcript.
+- Exact match: transcripts of 406, 44 and 591 chars (the 44 s clip across two chunks), and all chat cases again.
+- The endpoint already refuses `task=translate` for every audio-in decoder.
+
+**Next:** Qwen2-Audio (transformers `qwen2_audio`), then GLM-ASR, Audio Flamingo 3; Ultravox and MERaLiON-2 are
+remote code only.

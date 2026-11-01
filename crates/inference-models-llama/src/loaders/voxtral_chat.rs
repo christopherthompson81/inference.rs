@@ -61,6 +61,9 @@ impl MultimodalModelLoader for VoxtralChatLoader {
     fn prefixer(&self, _config: &str) -> Arc<dyn MultimodalPromptPrefixer> {
         Arc::new(VoxtralChatPrefixer)
     }
+    fn audio_transcriber(&self, _config: &str) -> Option<AudioTranscriber> {
+        Some(crate::voxtral_chat::transcription::TRANSCRIBER)
+    }
     fn default_chat_template(&self, _config: &str) -> Option<String> {
         Some(CHAT_TEMPLATE.to_string())
     }

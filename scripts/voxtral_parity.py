@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Parity of our Voxtral (Mini, Small) against transformers on the same checkpoint: greedy answers to a question about
-each clip, and to a text-only prompt, must match exactly.
+each clip and to a text-only prompt, and each clip's transcript (transcription mode, `--language`), must match exactly.
 
 Not part of local_ci.sh: it needs an `inference` build, transformers with mistral_common (Voxtral's processor reads the
 tekken tokenizer through it) and the checkpoint in the Hugging Face cache. Both run in F32 by default, on the CPU
 unless `--cuda` is given.
 
 Usage: python3 scripts/voxtral_parity.py <hf model id> <wav>... [--inference <binary>] [--port 18498]
-           [--question "..."] [--max-tokens 48] [--cuda]
+           [--question "..."] [--max-tokens 48] [--language en] [--cuda]
   e.g. scripts/voxtral_parity.py mistralai/Voxtral-Mini-3B-2507 clip.wav dialogue.wav
 """
 
@@ -40,11 +40,48 @@ def ours(port: int, content) -> str:
         return json.load(response)["choices"][0]["message"]["content"].strip()
 
 
+def our_transcript(port: int, wav: str) -> str:
+    out = subprocess.run(
+        [
+            "curl",
+            "-s",
+            f"localhost:{port}/v1/audio/transcriptions",
+            "-F",
+            f"file=@{wav}",
+            "-F",
+            "model=default",
+            "-F",
+            f"language={ARGS.language}",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return json.loads(out)["text"]
+
+
+def reference_transcript(model, processor, wav: str) -> str:
+    inputs = processor.apply_transcription_request(
+        language=ARGS.language, audio=wav, model_id=ARGS.model
+    )
+    inputs = inputs.to(model.device, dtype=model.dtype)
+    output = model.generate(
+        **inputs, max_new_tokens=ARGS.max_tokens * 4, do_sample=False
+    )
+    return processor.batch_decode(
+        output[:, inputs.input_ids.shape[1] :], skip_special_tokens=True
+    )[0].strip()
+
+
 def reference(model, processor, content) -> str:
-    inputs = processor.apply_chat_template([{"role": "user", "content": content}], return_tensors="pt")
+    inputs = processor.apply_chat_template(
+        [{"role": "user", "content": content}], return_tensors="pt"
+    )
     inputs = inputs.to(model.device)
     output = model.generate(**inputs, max_new_tokens=ARGS.max_tokens, do_sample=False)
-    return processor.batch_decode(output[:, inputs.input_ids.shape[1]:], skip_special_tokens=True)[0].strip()
+    return processor.batch_decode(
+        output[:, inputs.input_ids.shape[1] :], skip_special_tokens=True
+    )[0].strip()
 
 
 def wait_ready(port: int, server: subprocess.Popen) -> None:
@@ -66,26 +103,65 @@ def main() -> None:
 
     device = ["--cpu"] if not ARGS.cuda else []
     server = subprocess.Popen(
-        [ARGS.inference, "serve", *device, "-p", str(ARGS.port), "--no-ui", "-m", ARGS.model, "--dtype", "f32"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        [
+            ARGS.inference,
+            "serve",
+            *device,
+            "-p",
+            str(ARGS.port),
+            "--no-ui",
+            "-m",
+            ARGS.model,
+            "--dtype",
+            "f32",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     failed = False
     try:
         wait_ready(ARGS.port, server)
         processor = AutoProcessor.from_pretrained(ARGS.model)
-        model = VoxtralForConditionalGeneration.from_pretrained(ARGS.model, dtype=torch.float32)
+        model = VoxtralForConditionalGeneration.from_pretrained(
+            ARGS.model, dtype=torch.float32
+        )
         model = model.to("cuda" if ARGS.cuda else "cpu")
         cases = [("text", [{"type": "text", "text": TEXT_PROMPT}], TEXT_PROMPT)]
         for wav in ARGS.wavs:
             data = base64.b64encode(open(wav, "rb").read()).decode()
-            cases.append((
-                wav,
-                [{"type": "audio", "path": wav}, {"type": "text", "text": ARGS.question}],
-                [{"type": "input_audio", "input_audio": {"data": data, "format": "wav"}},
-                 {"type": "text", "text": ARGS.question}],
-            ))
-        for name, ref_content, our_content in cases:
-            ref, got = reference(model, processor, ref_content), ours(ARGS.port, our_content)
+            cases.append(
+                (
+                    wav,
+                    [
+                        {"type": "audio", "path": wav},
+                        {"type": "text", "text": ARGS.question},
+                    ],
+                    [
+                        {
+                            "type": "input_audio",
+                            "input_audio": {"data": data, "format": "wav"},
+                        },
+                        {"type": "text", "text": ARGS.question},
+                    ],
+                )
+            )
+        results = [
+            (
+                name,
+                reference(model, processor, ref_content),
+                ours(ARGS.port, our_content),
+            )
+            for name, ref_content, our_content in cases
+        ]
+        results += [
+            (
+                f"{wav} (transcript)",
+                reference_transcript(model, processor, wav),
+                our_transcript(ARGS.port, wav),
+            )
+            for wav in ARGS.wavs
+        ]
+        for name, ref, got in results:
             if ref == got:
                 print(f"{name}: match ({len(got)} chars)")
             else:
@@ -105,6 +181,9 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=18498)
     parser.add_argument("--question", default=DEFAULT_QUESTION)
     parser.add_argument("--max-tokens", type=int, default=48)
-    parser.add_argument("--cuda", action="store_true", help="run both on the GPU (default: the CPU)")
+    parser.add_argument("--language", default="en", help="the transcription language")
+    parser.add_argument(
+        "--cuda", action="store_true", help="run both on the GPU (default: the CPU)"
+    )
     ARGS = parser.parse_args()
     main()
