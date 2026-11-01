@@ -363,6 +363,7 @@ fn generation_defaults(defaults: ModelGenerationDefaults) -> GenerationDefaults 
         max_new_tokens: defaults.max_new_tokens,
         max_length: defaults.max_length,
         suppress_tokens: defaults.suppress_tokens,
+        no_repeat_ngram_size: defaults.no_repeat_ngram_size,
     }
 }
 

@@ -1,6 +1,6 @@
 ---
 title: Speech models
-description: Parakeet, Whisper, Qwen3-ASR, GLM-ASR, Audio Flamingo 3, Ultravox, Voxtral and Voxtral Realtime for speech transcription and audio chat, Silero for voice activity, Nemotron-3 and Sortformer for speaker diarization, Dia and Kokoro for text-to-speech.
+description: Parakeet, Whisper, Qwen3-ASR, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime for speech transcription and audio chat, Silero for voice activity, Nemotron-3 and Sortformer for speaker diarization, Dia and Kokoro for text-to-speech.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
@@ -20,6 +20,9 @@ inference.rs supports twelve speech-related model families:
   (whole-clip segments, no word timestamps) or answers through `/v1/chat/completions`.
 - **Audio Flamingo 3**: an audio-in decoder that transcribes up to 600 s through `/v1/audio/transcriptions` and
   reasons about speech, sound and music through `/v1/chat/completions` (NVIDIA OneWay Noncommercial licence).
+- **MERaLiON-2**: an audio-in decoder on Gemma 2 that transcribes up to 300 s through `/v1/audio/transcriptions`
+  and answers questions about speech through `/v1/chat/completions`; see the
+  [model family notes](/guides/models/model-family-notes/#meralion-2).
 - **Ultravox**: an audio-in decoder on Llama 3.2 that answers questions about audio through `/v1/chat/completions`,
   from llama.cpp's GGUFs; see the [model family notes](/guides/models/model-family-notes/#ultravox).
 - **Voxtral** (Mini, Small): an audio-in decoder that transcribes 8 languages through `/v1/audio/transcriptions`
@@ -30,7 +33,7 @@ inference.rs supports twelve speech-related model families:
 - **Dia**: dedicated text-to-speech model served via `/v1/audio/speech`.
 - **Kokoro**: an 82M-parameter text-to-speech model with preset voices, also served via `/v1/audio/speech`.
 
-Qwen3-ASR, GLM-ASR, Audio Flamingo 3, Ultravox, Voxtral and Voxtral Realtime are classified as multimodal models because audio is an input modality. Parakeet and
+Qwen3-ASR, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime are classified as multimodal models because audio is an input modality. Parakeet and
 Whisper are dedicated transcription models, and Dia and Kokoro are dedicated speech models.
 
 ## Parakeet: speech recognition

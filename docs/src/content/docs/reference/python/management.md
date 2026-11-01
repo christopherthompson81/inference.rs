@@ -225,6 +225,7 @@ OpenAI file metadata + inference.rs extensions (`format`, `mime_type`, `source`,
 | `max_length` | `int \| None` | optional |
 | `max_new_tokens` | `int \| None` | optional |
 | `min_p` | `float \| None` | optional |
+| `no_repeat_ngram_size` | `int \| None` | optional |
 | `repetition_penalty` | `float \| None` | optional |
 | `suppress_tokens` | `list[int] \| None` | optional |
 | `temperature` | `float \| None` | optional |

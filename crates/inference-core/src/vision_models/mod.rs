@@ -44,6 +44,8 @@ pub(crate) mod lfm2_vl;
 pub(crate) mod llama4;
 #[cfg(feature = "models-llama")]
 pub(crate) mod llava;
+#[cfg(feature = "models-gemma")]
+pub(crate) mod meralion2;
 #[cfg(feature = "models-qwen")]
 pub(crate) mod minicpmo;
 #[cfg(feature = "models-llama")]

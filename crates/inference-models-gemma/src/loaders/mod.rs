@@ -32,6 +32,7 @@ mod gemma2;
 mod gemma3;
 mod gemma3n;
 mod gemma4;
+mod meralion2;
 #[cfg(test)]
 mod sizing_tests;
 
@@ -42,6 +43,7 @@ pub use gemma2::*;
 pub use gemma3::*;
 pub use gemma3n::*;
 pub use gemma4::*;
+pub use meralion2::*;
 
 fn supports_gemma4_incremental_cache(config: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(config)
@@ -63,5 +65,6 @@ inference_nn::boxed_loaders!(
     Gemma3Loader,
     Gemma3nLoader,
     Gemma4Loader,
+    MERaLiON2Loader,
 );
 inference_nn::boxed_loaders!(EmbeddingModelLoader: EmbeddingGemmaLoader);

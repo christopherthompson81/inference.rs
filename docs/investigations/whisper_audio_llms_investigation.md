@@ -267,3 +267,39 @@ no separator, over the synthetic short clip, the Kokoro garden dialogue (28.7 s)
   describe the second chunk's content, so the continuation chunk's padding and key limit work.
 
 **Next:** commit, checks, ask before pushing. The `date_string` difference is a separate fix to raise.
+
+## Run 11 - 2026-11-01 10:40
+
+**Question:** does our MERaLiON-2 (MERaLiON/MERaLiON-2-3B, safetensors) match its repo's remote code?
+
+**Commands:** the repo's `modeling_meralion2.py`, `processing_meralion2.py` and configs read; the GGUF repo's
+`llama_cpp_meralion.patch` read; `inference serve --cpu --dtype f32 -m MERaLiON/MERaLiON-2-3B`; a scratch script running
+`AutoModelForSpeechSeq2Seq`/`AutoProcessor` with `trust_remote_code`, greedy, 64 tokens, F32 on the CPU; the text
+prompt, "What is said in this recording?" and the card's transcription instruction over four synthetic clips (short,
+the 28.7 s dialogue, the 74 s clip, a Spanish one).
+
+**Finding:**
+- Model: Whisper large-v3's encoder (unmasked over each padded 30 s chunk), `ln_speech` LayerNorm, 15 positions stacked
+  (19200), `mlp_adapter` 19200 -> 6400 + SiLU, `silu(gate_proj) * pool_proj` at 6400, `out_proj` -> 2304, into a Gemma 2
+  2B decoder (no `lm_head`: tied, though our `gemma2::Config` defaults untied). Gemma scales `inputs_embeds` by
+  sqrt(hidden) after the audio is scattered in, so the adapted audio is scaled by 48 too.
+- Processor: `len // 480000 + 1` chunks (a clip of whole chunks ends in an empty one), at most 10; every chunk takes 100
+  `<SpeechHere>` tokens; each chunk is zero-mean unit-variance normalized over its real samples, then zero-padded and
+  given its own log-mel. The model was trained on `Instruction: <text> \nFollow the text instruction based on the
+  following audio: <SpeechHere>`; the prefixer writes it.
+- `generation_config.json` sets `no_repeat_ngram_size: 6`, which we did not support; added as a logits processor over
+  prompt plus output (transformers' rule), filled from generation config like the other defaults.
+- The remote code imports `HybridCache`, gone in transformers 5; the reference runs in a scratch venv with transformers
+  4.50.1 (the version the config names).
+- First text-only run differed from the first list item (ours `* **The Danube**`, theirs `1. **Rhine River**`): the
+  remote code loads with SDPA, and transformers' Gemma 2 applies the attention-logit softcap only under eager
+  attention. With `attn_implementation="eager"` the reference matches ours exactly; the softcap is the model's design,
+  so the reference runs eager.
+- Exact match on every case: text (271 chars), chat about four clips (46, 122, 160, 129), transcripts (56, 143, and the
+  dialogue and 74 s clip, where the reference's 64-token cap stops early and its text is an exact prefix of ours).
+  Prompt token counts agree (131, 231, 331).
+- Transcripts carry speaker labels (`<Speaker1>: ... <Speaker2>: ...`); kept as the model writes them.
+- The official GGUF needs its patched llama.cpp (`clip.projector_type meralion`, `mm.a.mlp.0..3`, `mm.a.norm_pre`)
+  and a Gemma 2 text binding the multimodal GGUF path lacks: left for a follow-up.
+
+**Next:** commit, checks, ask before pushing; then GGUF for MERaLiON-2, Qwen2-Audio (`qwen2a`), GLM-ASR (`glma`).

@@ -124,7 +124,7 @@ mod auto;
 pub use auto::*;
 #[cfg(feature = "models-gemma")]
 pub use inference_models_gemma::loaders::{
-    DiffusionGemmaLoader, Gemma3Loader, Gemma3nLoader, Gemma4Loader,
+    DiffusionGemmaLoader, Gemma3Loader, Gemma3nLoader, Gemma4Loader, MERaLiON2Loader,
 };
 #[cfg(feature = "models-llama")]
 pub use inference_models_llama::loaders::{

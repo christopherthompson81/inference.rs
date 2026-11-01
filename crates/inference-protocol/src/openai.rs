@@ -1420,6 +1420,8 @@ pub struct GenerationDefaults {
     pub max_length: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suppress_tokens: Option<Vec<u32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_repeat_ngram_size: Option<usize>,
 }
 
 /// Collection of available models

@@ -6337,6 +6337,13 @@
             ],
             "format": "double"
           },
+          "no_repeat_ngram_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
           "repetition_penalty": {
             "type": [
               "number",
@@ -10051,6 +10058,7 @@
           "qwen4exp",
           "voxtral",
           "voxtral-chat",
+          "meralion2",
           "ultravox",
           "glm_asr",
           "gemma4",

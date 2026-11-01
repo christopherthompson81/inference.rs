@@ -32,6 +32,7 @@ pub struct ModelGenerationDefaults {
     pub max_new_tokens: Option<usize>,
     pub max_length: Option<usize>,
     pub suppress_tokens: Option<Vec<u32>>,
+    pub no_repeat_ngram_size: Option<usize>,
 }
 
 impl ModelGenerationDefaults {
@@ -45,6 +46,7 @@ impl ModelGenerationDefaults {
             && self.max_new_tokens.is_none()
             && self.max_length.is_none()
             && self.suppress_tokens.is_none()
+            && self.no_repeat_ngram_size.is_none()
     }
 }
 
@@ -73,6 +75,9 @@ pub struct SamplingParams {
     pub logits_bias: Option<HashMap<u32, f32>>,
     pub n_choices: usize,
     pub dry_params: Option<DrySamplingParams>,
+    /// No n-gram of this length occurs twice in the prompt and output together (transformers' `no_repeat_ngram_size`).
+    #[serde(default)]
+    pub no_repeat_ngram_size: Option<usize>,
 }
 
 impl SamplingParams {
@@ -98,6 +103,7 @@ impl SamplingParams {
             logits_bias: None,
             n_choices: 1,
             dry_params: None,
+            no_repeat_ngram_size: None,
         }
     }
 
@@ -121,6 +127,7 @@ impl SamplingParams {
             logits_bias: None,
             n_choices: 1,
             dry_params: None,
+            no_repeat_ngram_size: None,
         }
     }
 
@@ -133,6 +140,7 @@ impl SamplingParams {
         self.top_p = self.top_p.or(filled.top_p);
         self.min_p = self.min_p.or(filled.min_p);
         self.repetition_penalty = self.repetition_penalty.or(filled.repetition_penalty);
+        self.no_repeat_ngram_size = self.no_repeat_ngram_size.or(filled.no_repeat_ngram_size);
         if let Some(defaults_bias) = filled.logits_bias {
             let logits_bias = self.logits_bias.get_or_insert_with(HashMap::new);
             for (token, bias) in defaults_bias {
@@ -166,6 +174,9 @@ impl SamplingParams {
         }
         if let Some(repetition_penalty) = defaults.repetition_penalty {
             self.repetition_penalty = Some(repetition_penalty);
+        }
+        if let Some(size) = defaults.no_repeat_ngram_size {
+            self.no_repeat_ngram_size = (size > 0).then_some(size);
         }
         if let Some(max_new_tokens) = defaults.max_new_tokens {
             self.max_len = Some(max_new_tokens);
@@ -289,6 +300,41 @@ pub trait CustomLogitsProcessor: Send + Sync {
 impl<T: Fn(&Tensor, &[u32]) -> Result<Tensor> + Send + Sync> CustomLogitsProcessor for T {
     fn apply(&self, logits: &Tensor, context: &[u32]) -> Result<Tensor> {
         self(logits, context)
+    }
+}
+
+/// Bans each token that would complete an n-gram of `0`'s length already in the context.
+pub struct NoRepeatNgram(pub usize);
+
+impl NoRepeatNgram {
+    /// The tokens the next position may not take.
+    pub fn banned(&self, context: &[u32]) -> Vec<u32> {
+        let n = self.0;
+        if n == 0 || context.len() + 1 < n {
+            return Vec::new();
+        }
+        let prefix = &context[context.len() + 1 - n..];
+        context
+            .windows(n)
+            .filter(|ngram| &ngram[..n - 1] == prefix)
+            .map(|ngram| ngram[n - 1])
+            .collect()
+    }
+}
+
+impl CustomLogitsProcessor for NoRepeatNgram {
+    fn apply(&self, logits: &Tensor, context: &[u32]) -> Result<Tensor> {
+        let banned = self.banned(context);
+        if banned.is_empty() {
+            return Ok(logits.clone());
+        }
+        let mut values = logits.to_vec1::<f32>()?;
+        for token in banned {
+            if let Some(value) = values.get_mut(token as usize) {
+                *value = f32::NEG_INFINITY;
+            }
+        }
+        Tensor::from_vec(values, logits.shape(), logits.device())
     }
 }
 
@@ -2376,7 +2422,11 @@ impl Sampler {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelGenerationDefaults, SamplingParams, argmax_f32, partial_sort_top_k};
+    use super::{
+        CustomLogitsProcessor, ModelGenerationDefaults, NoRepeatNgram, SamplingParams, argmax_f32,
+        partial_sort_top_k,
+    };
+    use inference_tensor::{Device, Tensor};
     use std::collections::HashMap;
 
     // The device penalties match the host's on every verify row, as the counts grow and when the history is rewritten.
@@ -2688,6 +2738,23 @@ mod tests {
         assert_eq!(res.token, 1);
     }
 
+    // transformers' NoRepeatNGramLogitsProcessor: the last n-1 tokens recur, so what followed them is barred
+    #[test]
+    fn a_repeated_ngram_prefix_bans_the_tokens_that_followed_it() {
+        let banned = |n, context: &[u32]| NoRepeatNgram(n).banned(context);
+        assert_eq!(banned(3, &[1, 2, 3, 4, 1, 2]), [3]);
+        assert_eq!(banned(3, &[1, 2, 3, 1, 2, 5, 1, 2]), [3, 5]);
+        assert_eq!(banned(2, &[7, 7]), [7]);
+        assert!(banned(3, &[1, 2]).is_empty());
+        assert!(banned(4, &[1, 2, 3]).is_empty());
+        let logits = Tensor::new(&[0.0f32, 1.0, 2.0, 3.0], &Device::Cpu).unwrap();
+        let processed = NoRepeatNgram(2).apply(&logits, &[3, 1, 3]).unwrap();
+        assert_eq!(
+            processed.to_vec1::<f32>().unwrap(),
+            [0.0, f32::NEG_INFINITY, 2.0, 3.0]
+        );
+    }
+
     #[test]
     fn test_apply_model_defaults() {
         let mut params = SamplingParams::neutral();
@@ -2701,9 +2768,11 @@ mod tests {
             max_new_tokens: Some(256),
             max_length: None,
             suppress_tokens: Some(vec![258882, 258883]),
+            no_repeat_ngram_size: Some(6),
         });
 
         assert_eq!(params.temperature, Some(1.0));
+        assert_eq!(params.no_repeat_ngram_size, Some(6));
         assert_eq!(params.top_k, Some(32));
         assert_eq!(params.top_p, Some(0.9));
         assert_eq!(params.min_p, Some(0.05));
