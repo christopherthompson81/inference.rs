@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Parity of our Voxtral (Mini, Small) against transformers on the same checkpoint: greedy answers to a question about
-each clip and to a text-only prompt, and each clip's transcript (transcription mode, `--language`), must match exactly.
+"""Parity of our audio-in decoders (Voxtral, Qwen2-Audio, ...) against transformers on the same checkpoint: greedy
+answers to a question about each clip and to a text-only prompt, and, for a model with a transcription mode (Voxtral),
+each clip's transcript (`--language`), must match exactly.
 
-Not part of local_ci.sh: it needs an `inference` build, transformers with mistral_common (Voxtral's processor reads the
-tekken tokenizer through it) and the checkpoint in the Hugging Face cache. Both run in F32 by default, on the CPU
-unless `--cuda` is given.
+Not part of local_ci.sh: it needs an `inference` build, transformers (with mistral_common for Voxtral, whose processor
+reads the tekken tokenizer through it) and the checkpoint in the Hugging Face cache. Both run in F32, on the CPU unless
+`--cuda` is given.
 
-Usage: python3 scripts/voxtral_parity.py <hf model id> <wav>... [--inference <binary>] [--port 18498]
+Usage: python3 scripts/audio_llm_parity.py <hf model id> <wav>... [--inference <binary>] [--port 18498]
            [--question "..."] [--max-tokens 48] [--language en] [--cuda]
-  e.g. scripts/voxtral_parity.py mistralai/Voxtral-Mini-3B-2507 clip.wav dialogue.wav
+  e.g. scripts/audio_llm_parity.py mistralai/Voxtral-Mini-3B-2507 clip.wav dialogue.wav
+       scripts/audio_llm_parity.py Qwen/Qwen2-Audio-7B-Instruct clip.wav
 """
 
 import argparse
@@ -74,9 +76,17 @@ def reference_transcript(model, processor, wav: str) -> str:
 
 
 def reference(model, processor, content) -> str:
-    inputs = processor.apply_chat_template(
-        [{"role": "user", "content": content}], return_tensors="pt"
-    )
+    conversation = [{"role": "user", "content": content}]
+    if model.config.model_type == "voxtral":
+        inputs = processor.apply_chat_template(conversation, return_tensors="pt")
+    else:
+        inputs = processor.apply_chat_template(
+            conversation,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+        )
     inputs = inputs.to(model.device)
     output = model.generate(**inputs, max_new_tokens=ARGS.max_tokens, do_sample=False)
     return processor.batch_decode(
@@ -99,7 +109,8 @@ def wait_ready(port: int, server: subprocess.Popen) -> None:
 
 def main() -> None:
     import torch
-    from transformers import AutoProcessor, VoxtralForConditionalGeneration
+    import transformers
+    from transformers import AutoConfig, AutoProcessor
 
     device = ["--cpu"] if not ARGS.cuda else []
     server = subprocess.Popen(
@@ -122,13 +133,15 @@ def main() -> None:
     try:
         wait_ready(ARGS.port, server)
         processor = AutoProcessor.from_pretrained(ARGS.model)
-        model = VoxtralForConditionalGeneration.from_pretrained(
+        architecture = AutoConfig.from_pretrained(ARGS.model).architectures[0]
+        model = getattr(transformers, architecture).from_pretrained(
             ARGS.model, dtype=torch.float32
         )
         model = model.to("cuda" if ARGS.cuda else "cpu")
         cases = [("text", [{"type": "text", "text": TEXT_PROMPT}], TEXT_PROMPT)]
         for wav in ARGS.wavs:
-            data = base64.b64encode(open(wav, "rb").read()).decode()
+            with open(wav, "rb") as file:
+                data = base64.b64encode(file.read()).decode()
             cases.append(
                 (
                     wav,
@@ -153,14 +166,15 @@ def main() -> None:
             )
             for name, ref_content, our_content in cases
         ]
-        results += [
-            (
-                f"{wav} (transcript)",
-                reference_transcript(model, processor, wav),
-                our_transcript(ARGS.port, wav),
-            )
-            for wav in ARGS.wavs
-        ]
+        if hasattr(processor, "apply_transcription_request"):
+            results += [
+                (
+                    f"{wav} (transcript)",
+                    reference_transcript(model, processor, wav),
+                    our_transcript(ARGS.port, wav),
+                )
+                for wav in ARGS.wavs
+            ]
         for name, ref, got in results:
             if ref == got:
                 print(f"{name}: match ({len(got)} chars)")
@@ -181,7 +195,9 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=18498)
     parser.add_argument("--question", default=DEFAULT_QUESTION)
     parser.add_argument("--max-tokens", type=int, default=48)
-    parser.add_argument("--language", default="en", help="the transcription language")
+    parser.add_argument(
+        "--language", default="en", help="the transcription language (Voxtral)"
+    )
     parser.add_argument(
         "--cuda", action="store_true", help="run both on the GPU (default: the CPU)"
     )

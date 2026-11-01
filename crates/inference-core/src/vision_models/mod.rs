@@ -57,6 +57,8 @@ pub(crate) mod phi3;
 #[cfg(feature = "models-phi")]
 pub(crate) mod phi4;
 #[cfg(feature = "models-qwen")]
+pub(crate) mod qwen2_audio;
+#[cfg(feature = "models-qwen")]
 pub(crate) mod qwen2vl;
 #[cfg(feature = "models-qwen")]
 pub(crate) mod qwen3_asr;

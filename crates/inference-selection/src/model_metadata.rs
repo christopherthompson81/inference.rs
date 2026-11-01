@@ -412,6 +412,11 @@ impl SupportedArch for MultimodalLoaderType {
                 modalities: &[Text, Audio],
                 examples: &[ex!("mistralai/Voxtral-Mini-4B-Realtime-2602")],
             },
+            Self::Qwen2Audio => ArchMetadata {
+                families: &["Qwen2-Audio"],
+                modalities: &[Text, Audio],
+                examples: &[ex!("Qwen/Qwen2-Audio-7B-Instruct")],
+            },
             Self::VoxtralChat => ArchMetadata {
                 families: &["Voxtral Mini", "Voxtral Small"],
                 modalities: &[Text, Audio],

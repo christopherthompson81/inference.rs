@@ -10044,6 +10044,7 @@
           "qwen3vl",
           "qwen3vlmoe",
           "qwen3_asr",
+          "qwen2_audio",
           "qwen3_5",
           "qwen3_5moe",
           "qwen4exp",

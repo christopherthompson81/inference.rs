@@ -129,3 +129,36 @@ transcriptions endpoint) is a separate step.
 
 **Next:** Qwen2-Audio (transformers `qwen2_audio`), then GLM-ASR, Audio Flamingo 3; Ultravox and MERaLiON-2 are
 remote code only.
+
+## Run 6 - 2026-10-31 20:50
+
+**Question:** does our Qwen2-Audio (Qwen/Qwen2-Audio-7B-Instruct, BF16 shards, 16 GB) match transformers?
+
+**Commands:** transformers 5.19 `models/qwen2_audio` read for the encoder (the Whisper encoder; avg-pool by 2 *before*
+the final layer norm; a padding mask over the clip's real frames) and processor (one 30 s window per clip, truncated;
+`Audio N: <|audio_bos|><|AUDIO|><|audio_eos|>\n` per clip from the processor's own template; the repo's tokenizer
+template is text-only ChatML); `scripts/audio_llm_parity.py` (generalized from voxtral_parity.py: the transformers
+class comes from `architectures`, transcripts only for a model with `apply_transcription_request`), F32 on the CPU.
+
+**Finding:**
+- The released `text_config` omits hidden size, layers, heads and activation; transformers' `Qwen2Config` defaults
+  fill them (4096, 32, 32 heads and 32 KV heads, SiLU, untied). Our config applies the same defaults.
+- Truncating the encoder input to the clip's real positions equals transformers' padding mask: every pooled token it
+  keeps averages two real positions.
+- First run: text, the 28.7 s dialogue and the 44 s clip (cut to 30 s) match; the short clip did not: same first
+  sentence, then transformers stopped and ours went on. With `repetition_penalty` 1.0 in both, an exact match; with
+  the checkpoint's 1.1, ours 0.45 " This" vs 0.29 `<|im_end|>`, transformers `<|im_end|>` 19.71 vs " This" 19.09
+  (processed logits).
+- Cause: our prompt was 134 tokens to transformers' 125. `tokenizer.json` lists 3 added tokens and
+  `tokenizer_config.json`'s `added_tokens_decoder` 3288, the audio markers among them; transformers merges the
+  latter, we read only `tokenizer.json`, so `<|audio_bos|>`/`<|audio_eos|>` became text pieces (`<|AUDIO|>` worked
+  only because the processor registers its placeholder). The penalty saw different tokens; at 1.0 the extra
+  pieces happened not to change the answer.
+- Fix (engine-wide): `get_tokenizer` merges `added_tokens_decoder` entries missing from `tokenizer.json` at their
+  declared ids. Prompt now 125 tokens.
+
+- Full parity again, the checkpoint's 1.1 penalty in both: exact match on text (205 chars), the short clip (83), the
+  dialogue (258), the 44 s clip (246) and a Spanish clip (169).
+
+**Next:** GLM-ASR (its own encoder: rotary positions, pre-norm layers, no learned
+positions), Audio Flamingo 3; Ultravox and MERaLiON-2 are remote code only.

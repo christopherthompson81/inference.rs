@@ -177,15 +177,30 @@ impl WhisperEncoder {
 
     /// `(batch, n_mels, frames)` log-mel to `(batch, frames / 2, d_model)`.
     pub fn forward(&self, mel: &Tensor) -> Result<Tensor> {
+        let xs = self.encode(&self.embed(mel)?)?;
+        self.norm(&xs)
+    }
+
+    /// The convolutions and positions: `(batch, n_mels, frames)` to `(batch, frames / 2, d_model)`.
+    pub fn embed(&self, mel: &Tensor) -> Result<Tensor> {
         let xs = self.activation.forward(&self.conv1.forward(mel)?)?;
         let xs = self.activation.forward(&self.conv2.forward(&xs)?)?;
         let xs = xs.transpose(1, 2)?;
         let positions = self.positions.narrow(0, 0, xs.dim(1)?)?;
-        let mut xs = xs.broadcast_add(&positions)?;
+        xs.broadcast_add(&positions)
+    }
+
+    /// The layers over embedded positions, before the final norm.
+    pub fn encode(&self, xs: &Tensor) -> Result<Tensor> {
+        let mut xs = xs.clone();
         for layer in &self.layers {
             xs = layer.forward(&xs)?;
         }
-        self.layer_norm.forward(&xs)
+        Ok(xs)
+    }
+
+    pub fn norm(&self, xs: &Tensor) -> Result<Tensor> {
+        self.layer_norm.forward(xs)
     }
 
     pub fn residual_tensors(&self) -> Vec<(String, Tensor)> {

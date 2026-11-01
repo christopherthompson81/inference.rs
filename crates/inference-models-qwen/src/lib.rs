@@ -17,6 +17,7 @@ pub mod qwen1;
 mod qwen1_tests;
 pub mod qwen2;
 pub mod qwen2_5_vl;
+pub mod qwen2_audio;
 pub mod qwen2_moe;
 #[cfg(test)]
 mod qwen2_moe_tests;
@@ -49,6 +50,7 @@ inference_nn::json_config!(
     qwen1::Config,
     qwen2::Config,
     qwen2_5_vl::config::Config,
+    qwen2_audio::Qwen2AudioConfig,
     qwen2_moe::Config,
     qwen2vl::config::Config,
     qwen3::Config,

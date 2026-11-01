@@ -28,6 +28,7 @@ mod olmo_tiny;
 mod paddleocr_vl;
 mod paddleocr_vl_tiny;
 mod parakeet_tiny;
+mod qwen2_audio_tiny;
 mod qwen3_5_mtp;
 mod qwen3_5_text_tiny;
 mod qwen3_5_tool_call;
