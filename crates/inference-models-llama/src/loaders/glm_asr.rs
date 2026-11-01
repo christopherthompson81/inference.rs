@@ -9,6 +9,8 @@ const TEXT_LAYER_INDEX_PATTERN: &str = r"language_model\.model\.layers\.(\d+)\."
 const CONV_KERNEL: usize = 3;
 // one 30 s window, the most a chunk fills
 const MAX_CHUNK_SAMPLES: usize = 480_000;
+// transformers' template, which writes each audio part; llama.cpp's GGUFs embed the original, text-only one
+const CHAT_TEMPLATE: &str = include_str!("../glm_asr/chat_template.jinja");
 
 /// `MultimodalLoader` for GLM-ASR (`GlmAsrForConditionalGeneration`).
 pub struct GlmAsrLoader;
@@ -55,6 +57,12 @@ impl MultimodalModelLoader for GlmAsrLoader {
     }
     fn audio_transcriber(&self, _config: &str) -> Option<AudioTranscriber> {
         Some(crate::glm_asr::transcription::TRANSCRIBER)
+    }
+    fn default_chat_template(&self, _config: &str) -> Option<String> {
+        Some(CHAT_TEMPLATE.to_string())
+    }
+    fn template_overrides_gguf(&self, _config: &str) -> bool {
+        true
     }
     fn get_device_for_tensor(
         &self,

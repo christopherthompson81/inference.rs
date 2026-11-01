@@ -10,12 +10,16 @@ use crate::{
 
 const LAYER_NORM_EPS: f64 = 1e-5;
 
-/// The Whisper tower, under transformers' `WhisperConfig` names.
+/// The Whisper tower, under transformers' `WhisperConfig` names (or the ones a GGUF's synthesized config writes).
 #[derive(Debug, Clone, inference_json::FromJson)]
 pub struct SpeechConfig {
+    #[serde(alias = "hidden_size")]
     pub d_model: usize,
+    #[serde(alias = "num_hidden_layers")]
     pub encoder_layers: usize,
+    #[serde(alias = "num_attention_heads")]
     pub encoder_attention_heads: usize,
+    #[serde(alias = "intermediate_size")]
     pub encoder_ffn_dim: usize,
     pub num_mel_bins: usize,
     pub max_source_positions: usize,

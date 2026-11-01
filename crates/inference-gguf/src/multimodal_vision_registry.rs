@@ -4,8 +4,13 @@ use inference_quant::{GgufArchive, GgufBindingMap};
 use inference_nn::loaders::MultimodalLoaderType;
 
 #[cfg(any(test, feature = "models-gemma"))]
-use super::{gemma3_bindings::build_gemma3_bindings, gemma3n_bindings::build_gemma3n_bindings};
 use super::{
+    gemma3_bindings::build_gemma3_bindings,
+    gemma3n_bindings::build_gemma3n_bindings,
+    meralion2_bindings::{build_meralion2_bindings, synthesize_meralion2_config},
+};
+use super::{
+    glm_asr_bindings::{self, build_glm_asr_bindings, synthesize_glm_asr_config},
     granite_multimodal_bindings::{
         self, build_granite_speech_bindings, build_granite4_vision_bindings,
     },
@@ -17,6 +22,7 @@ use super::{
     muse_glimmer_bindings::build_muse_glimmer_bindings,
     normal_registry::RopePairing,
     paddleocr_vl_bindings::{self, build_paddleocr_vl_bindings},
+    qwen2_audio_bindings::{self, build_qwen2_audio_bindings, synthesize_qwen2_audio_config},
     ultravox_bindings::{self, build_ultravox_bindings, synthesize_ultravox_config},
     voxtral_bindings::{self, build_voxtral_bindings, synthesize_voxtral_config},
 };
@@ -25,14 +31,17 @@ use super::{
 pub enum NativeMultimodalGgufFamily {
     Gemma3,
     Gemma3n,
+    GlmAsr,
     Granite4Vision,
     GraniteSpeech,
     Idefics3,
     Mistral3,
     Llama4,
     Lfm2Vl,
+    MERaLiON2,
     MuseGlimmer,
     PaddleOcrVl,
+    Qwen2Audio,
     Ultravox,
     VoxtralChat,
 }
@@ -67,7 +76,11 @@ pub fn describes_own_config(architecture: &str, projector: &str) -> bool {
     matches!(
         family_from_names(architecture, Some(projector)),
         Ok(Some(
-            NativeMultimodalGgufFamily::Ultravox | NativeMultimodalGgufFamily::VoxtralChat
+            NativeMultimodalGgufFamily::GlmAsr
+                | NativeMultimodalGgufFamily::MERaLiON2
+                | NativeMultimodalGgufFamily::Qwen2Audio
+                | NativeMultimodalGgufFamily::Ultravox
+                | NativeMultimodalGgufFamily::VoxtralChat
         ))
     )
 }
@@ -77,14 +90,17 @@ impl NativeMultimodalGgufFamily {
         match self {
             Self::Gemma3 => MultimodalLoaderType::Gemma3,
             Self::Gemma3n => MultimodalLoaderType::Gemma3n,
+            Self::GlmAsr => MultimodalLoaderType::GlmAsr,
             Self::Granite4Vision => MultimodalLoaderType::Granite4Vision,
             Self::GraniteSpeech => MultimodalLoaderType::GraniteSpeech,
             Self::Idefics3 => MultimodalLoaderType::Idefics3,
             Self::Mistral3 => MultimodalLoaderType::Mistral3,
             Self::Llama4 => MultimodalLoaderType::Llama4,
             Self::Lfm2Vl => MultimodalLoaderType::Lfm2Vl,
+            Self::MERaLiON2 => MultimodalLoaderType::MERaLiON2,
             Self::MuseGlimmer => MultimodalLoaderType::MuseGlimmer,
             Self::PaddleOcrVl => MultimodalLoaderType::PaddleOcrVl,
+            Self::Qwen2Audio => MultimodalLoaderType::Qwen2Audio,
             Self::Ultravox => MultimodalLoaderType::Ultravox,
             Self::VoxtralChat => MultimodalLoaderType::VoxtralChat,
         }
@@ -92,6 +108,10 @@ impl NativeMultimodalGgufFamily {
 
     fn synthesize_config(self, archive: &GgufArchive) -> Result<Option<String>> {
         match self {
+            Self::GlmAsr => synthesize_glm_asr_config(archive).map(Some),
+            #[cfg(any(test, feature = "models-gemma"))]
+            Self::MERaLiON2 => synthesize_meralion2_config(archive).map(Some),
+            Self::Qwen2Audio => synthesize_qwen2_audio_config(archive).map(Some),
             Self::Ultravox => synthesize_ultravox_config(archive).map(Some),
             Self::VoxtralChat => synthesize_voxtral_config(archive).map(Some),
             _ => Ok(None),
@@ -101,10 +121,15 @@ impl NativeMultimodalGgufFamily {
     fn rope_pairing(self) -> RopePairing {
         match self {
             // llama.cpp's Ernie 4.5 converter keeps q/k in Hugging Face's half-split order
-            Self::Gemma3 | Self::Gemma3n | Self::Lfm2Vl | Self::PaddleOcrVl => {
-                RopePairing::HalfSplit
-            }
-            Self::Granite4Vision
+            // llama.cpp's qwen2 converter keeps q/k half-split too
+            Self::Gemma3
+            | Self::Gemma3n
+            | Self::Lfm2Vl
+            | Self::MERaLiON2
+            | Self::PaddleOcrVl
+            | Self::Qwen2Audio => RopePairing::HalfSplit,
+            Self::GlmAsr
+            | Self::Granite4Vision
             | Self::GraniteSpeech
             | Self::Idefics3
             | Self::Mistral3
@@ -121,10 +146,13 @@ impl NativeMultimodalGgufFamily {
             Self::Gemma3 => build_gemma3_bindings(archive),
             #[cfg(any(test, feature = "models-gemma"))]
             Self::Gemma3n => build_gemma3n_bindings(archive),
+            #[cfg(any(test, feature = "models-gemma"))]
+            Self::MERaLiON2 => build_meralion2_bindings(archive),
             #[cfg(not(any(test, feature = "models-gemma")))]
-            Self::Gemma3 | Self::Gemma3n => {
+            Self::Gemma3 | Self::Gemma3n | Self::MERaLiON2 => {
                 bail!("GGUF Gemma 3 models are not built in; enable the `models-gemma` feature")
             }
+            Self::GlmAsr => build_glm_asr_bindings(archive),
             Self::Granite4Vision => build_granite4_vision_bindings(archive),
             Self::GraniteSpeech => build_granite_speech_bindings(archive),
             Self::Idefics3 => build_idefics3_bindings(archive),
@@ -133,6 +161,7 @@ impl NativeMultimodalGgufFamily {
             Self::Lfm2Vl => build_lfm2_vl_bindings(archive),
             Self::MuseGlimmer => build_muse_glimmer_bindings(archive),
             Self::PaddleOcrVl => build_paddleocr_vl_bindings(archive),
+            Self::Qwen2Audio => build_qwen2_audio_bindings(archive),
             Self::Ultravox => build_ultravox_bindings(archive),
             Self::VoxtralChat => build_voxtral_bindings(archive),
         }
@@ -140,9 +169,14 @@ impl NativeMultimodalGgufFamily {
 }
 
 // (vision projector type, the text architecture it pairs with, family)
-const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 12] = [
+const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 15] = [
     ("gemma3", "gemma3", NativeMultimodalGgufFamily::Gemma3),
     ("gemma3nv", "gemma3n", NativeMultimodalGgufFamily::Gemma3n),
+    (
+        glm_asr_bindings::PROJECTOR,
+        glm_asr_bindings::TEXT_ARCHITECTURE,
+        NativeMultimodalGgufFamily::GlmAsr,
+    ),
     (
         granite_multimodal_bindings::VISION_PROJECTOR,
         granite_multimodal_bindings::TEXT_ARCHITECTURE,
@@ -157,6 +191,7 @@ const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 12] = [
     ("pixtral", "mistral3", NativeMultimodalGgufFamily::Mistral3),
     ("llama4", "llama4", NativeMultimodalGgufFamily::Llama4),
     ("lfm2", "lfm2", NativeMultimodalGgufFamily::Lfm2Vl),
+    ("meralion", "gemma2", NativeMultimodalGgufFamily::MERaLiON2),
     (
         "muse-glimmer",
         "muse-glimmer",
@@ -166,6 +201,11 @@ const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 12] = [
         paddleocr_vl_bindings::PROJECTOR,
         paddleocr_vl_bindings::ARCHITECTURE,
         NativeMultimodalGgufFamily::PaddleOcrVl,
+    ),
+    (
+        qwen2_audio_bindings::PROJECTOR,
+        qwen2_audio_bindings::TEXT_ARCHITECTURE,
+        NativeMultimodalGgufFamily::Qwen2Audio,
     ),
     (
         ultravox_bindings::PROJECTOR,
@@ -262,6 +302,24 @@ mod tests {
                 "paddleocr",
                 "paddleocr",
                 NativeMultimodalGgufFamily::PaddleOcrVl,
+                RopePairing::HalfSplit,
+            ),
+            (
+                "llama",
+                "glma",
+                NativeMultimodalGgufFamily::GlmAsr,
+                RopePairing::Adjacent,
+            ),
+            (
+                "gemma2",
+                "meralion",
+                NativeMultimodalGgufFamily::MERaLiON2,
+                RopePairing::HalfSplit,
+            ),
+            (
+                "qwen2",
+                "qwen2a",
+                NativeMultimodalGgufFamily::Qwen2Audio,
                 RopePairing::HalfSplit,
             ),
             (

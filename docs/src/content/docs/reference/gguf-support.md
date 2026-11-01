@@ -82,6 +82,9 @@ files when the repository and GGUF metadata identify them unambiguously. The dir
 | Qwen3-VL MoE | `qwen3vlmoe` |
 | Qwen3.5 and Qwen3.6 multimodal dense | `qwen35` |
 | Qwen3.5 and Qwen3.6 multimodal MoE | `qwen35moe` |
+| GLM-ASR | `llama` (projector `glma`) |
+| MERaLiON-2 | `gemma2` (projector `meralion`) |
+| Qwen2-Audio | `qwen2` (projector `qwen2a`) |
 | Ultravox | `llama` (projector `ultravox`) |
 | Voxtral Mini and Small | `llama` (projector `voxtral`) |
 
@@ -93,9 +96,12 @@ Multimodal Qwen3.5 and Qwen3.6 accept image and video input, but not audio. Gemm
 image/video and audio when the matching components are present in the model configuration and
 projector files.
 
-Voxtral and Ultravox GGUFs load with no base repository: the config comes from the text and projector GGUFs' metadata.
-For Voxtral the loader's chat template replaces the one llama.cpp's Voxtral GGUFs embed (another Mistral model's);
-Ultravox keeps the text GGUF's Llama 3 template.
+The audio GGUFs (Voxtral, Ultravox, Qwen2-Audio, GLM-ASR, MERaLiON-2) load with no base repository: the config comes
+from the text and projector GGUFs' metadata. For Voxtral and GLM-ASR the loader's chat template replaces the one the
+published GGUFs embed (another Mistral model's; GLM-ASR's original, which writes no audio markers). llama.cpp converts
+GLM-ASR's original checkpoint, so its GGUFs load onto transformers' layout, as the safetensors loader reads it.
+MERaLiON-2's official GGUFs come from the repo's patched llama.cpp (`meralion` projector). A GGUF's end-of-turn and
+end-of-message tokens end a generation as its EOS does.
 
 Muse Glimmer GGUFs require a companion `muse-glimmer` projector. Current published GGUF
 repositories also require `--tok-model-id meta-models/Muse-Glimmer-30B` because they do not carry

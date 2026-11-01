@@ -368,6 +368,47 @@ pub(super) fn inverse_llama_permute(
         .reshape(shape.to_vec()))
 }
 
+/// Rows (the first dim) of `heads` heads whose first `dims` are interleaved rotary pairs, back to half-split order;
+/// the rest of each head stays as it is.
+pub(super) fn inverse_partial_rotary_permute(
+    source: String,
+    shape: &[usize],
+    heads: usize,
+    dims: usize,
+) -> Result<GgufTensorBinding> {
+    let Some(&rows) = shape.first() else {
+        bail!("GGUF tensor `{source}` has no rows to permute");
+    };
+    if heads == 0 || !rows.is_multiple_of(heads) || !dims.is_multiple_of(2) || dims > rows / heads {
+        bail!(
+            "GGUF tensor `{source}` with shape {shape:?} cannot un-interleave {dims} rotary dims across {heads} heads"
+        );
+    }
+    let head_dim = rows / heads;
+    let rest = &shape[1..];
+    let mut per_head = vec![heads, head_dim];
+    per_head.extend_from_slice(rest);
+    let mut pairs = vec![heads, dims / 2, 2];
+    pairs.extend_from_slice(rest);
+    let mut permutation = vec![0, 2, 1];
+    permutation.extend(3..pairs.len());
+    let mut rotary = vec![heads, dims];
+    rotary.extend_from_slice(rest);
+    let head = GgufTensorBinding::tensor(source).reshape(per_head);
+    let rotated = head
+        .clone()
+        .slice(1, 0, dims)
+        .reshape(pairs)
+        .permute(permutation)
+        .reshape(rotary);
+    let parts = if dims == head_dim {
+        vec![rotated]
+    } else {
+        vec![rotated, head.slice(1, dims, head_dim - dims)]
+    };
+    Ok(GgufTensorBinding::concat(parts, 1).reshape(shape.to_vec()))
+}
+
 /// One-layer SigLIP vision tower tensors for binding tests.
 #[cfg(test)]
 pub(super) fn siglip_test_tensors() -> Vec<(String, Vec<usize>)> {

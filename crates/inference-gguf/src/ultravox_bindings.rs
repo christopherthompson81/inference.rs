@@ -14,7 +14,9 @@ use super::multimodal_binding_utils::{
     validate_projector,
 };
 use super::normal_config::synthesize_normal_config_value;
-use super::whisper_audio_bindings::{bind_whisper_tower, token_id, whisper_tower_config};
+use super::whisper_audio_bindings::{
+    WHISPER_LAYOUT, bind_whisper_tower, token_id, whisper_tower_config,
+};
 
 pub const PROJECTOR: &str = "ultravox";
 pub const TEXT_ARCHITECTURE: &str = "llama";
@@ -39,7 +41,7 @@ fn build_ultravox_bindings_from_inventory(
         "language_model.lm_head",
         FAMILY,
     )?;
-    bind_whisper_tower(inventory, &mut bindings, FAMILY)?;
+    bind_whisper_tower(inventory, &mut bindings, FAMILY, &WHISPER_LAYOUT)?;
     for (native, source) in [("linear_1", "mm.a.mlp.1"), ("linear_2", "mm.a.mlp.2")] {
         bind_required_linear(
             inventory,

@@ -14,6 +14,12 @@ const GGUF_SAMPLING_TOP_K: &str = "general.sampling.top_k";
 const GGUF_SAMPLING_TOP_P: &str = "general.sampling.top_p";
 const GGUF_SAMPLING_MIN_P: &str = "general.sampling.min_p";
 const GGUF_SAMPLING_PENALTY_REPEAT: &str = "general.sampling.penalty_repeat";
+// what llama.cpp ends a generation on besides EOS: end of turn, end of message
+const GGUF_END_TOKENS: &[&str] = &[
+    "tokenizer.ggml.eos_token_id",
+    "tokenizer.ggml.eot_token_id",
+    "tokenizer.ggml.eom_token_id",
+];
 
 const SUPPORTED_ALTERNATE_EOS: &[&str] = &[
     "<|im_end|>",      // Handle ChatML case
@@ -179,7 +185,7 @@ impl GenerationConfig {
     }
 
     /// The sampling defaults a GGUF's own metadata records (`general.sampling.*`, as llama.cpp's converter writes
-    /// them), for a file shipped without its generation_config.json.
+    /// them) and the tokens it ends a generation on, for a file shipped without its generation_config.json.
     pub fn from_gguf_metadata(
         metadata: &std::collections::HashMap<String, inference_tensor::quantized::gguf_file::Value>,
     ) -> Option<Self> {
@@ -213,7 +219,20 @@ impl GenerationConfig {
                 .and_then(|value| value.to_f32().ok()),
             ..Default::default()
         };
-        conf.generation_defaults().is_some().then_some(conf)
+        let mut ends = Vec::new();
+        for id in GGUF_END_TOKENS
+            .iter()
+            .filter_map(|key| int_key(key).and_then(|id| u32::try_from(id).ok()))
+        {
+            if !ends.contains(&id) {
+                ends.push(id);
+            }
+        }
+        let conf = GenerationConfig {
+            eos_token_id: (!ends.is_empty()).then_some(Either::Right(ends)),
+            ..conf
+        };
+        (conf.generation_defaults().is_some() || conf.eos_token_id.is_some()).then_some(conf)
     }
 
     pub(crate) fn validate_token_ids(&self, vocab_size: usize) -> Result<()> {
@@ -295,6 +314,16 @@ mod tests {
         assert_eq!(defaults.top_k, Some(20));
         assert!((defaults.top_p.unwrap() - 0.95).abs() < 1e-6);
         assert_eq!(defaults.repetition_penalty, None);
+
+        // eos, end of turn and end of message all end a generation, as llama.cpp's end-of-generation set has them
+        let ends = std::collections::HashMap::from([
+            ("tokenizer.ggml.eos_token_id".to_string(), Value::U32(7)),
+            ("tokenizer.ggml.eot_token_id".to_string(), Value::U32(9)),
+            ("tokenizer.ggml.eom_token_id".to_string(), Value::U32(7)),
+        ]);
+        let conf = GenerationConfig::from_gguf_metadata(&ends).unwrap();
+        assert_eq!(conf.eos_token_id, Some(either::Either::Right(vec![7, 9])));
+        assert!(conf.generation_defaults().is_none());
 
         let none = std::collections::HashMap::from([(
             "general.name".to_string(),

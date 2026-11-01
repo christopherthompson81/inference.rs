@@ -13,7 +13,9 @@ use super::multimodal_binding_utils::{
     TensorInventory, bind_llama_text, bind_required_linear, map_usize, validate_projector,
 };
 use super::normal_config::synthesize_normal_config_value;
-use super::whisper_audio_bindings::{bind_whisper_tower, token_id, whisper_tower_config};
+use super::whisper_audio_bindings::{
+    WHISPER_LAYOUT, bind_whisper_tower, token_id, whisper_tower_config,
+};
 
 pub const PROJECTOR: &str = "voxtral";
 pub const TEXT_ARCHITECTURE: &str = "llama";
@@ -36,7 +38,7 @@ fn build_voxtral_bindings_from_inventory(
         "language_model.lm_head",
         FAMILY,
     )?;
-    bind_whisper_tower(inventory, &mut bindings, FAMILY)?;
+    bind_whisper_tower(inventory, &mut bindings, FAMILY, &WHISPER_LAYOUT)?;
     bind_required_linear(
         inventory,
         &mut bindings,
