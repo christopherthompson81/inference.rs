@@ -23,7 +23,12 @@ fn main() -> inference_tensor::Result<()> {
     let ty = GgufType::RAW_BLOCKS
         .into_iter()
         .chain([
+            GgufType::Q4_0,
+            GgufType::Q4_1,
+            GgufType::Q5_0,
+            GgufType::Q5_1,
             GgufType::Q8_0,
+            GgufType::Q2K,
             GgufType::Q3K,
             GgufType::Q4K,
             GgufType::Q5K,

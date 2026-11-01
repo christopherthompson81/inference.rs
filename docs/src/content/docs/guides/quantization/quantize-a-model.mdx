@@ -246,12 +246,44 @@ Two flags, used with `--isq`:
   calibration text through the model, then quantize.
 
 The two conflict. `--imatrix` is reused across runs; `--calibration-file` re-generates on every
-load. Importance weighting applies to the K-quant formats (`q2k`-`q6k`); other formats quantize
-without it. Calibration runs on all pipelines (text, multimodal, embedding); the calibration
-text drives the language model, so vision/audio encoder layers quantize without importance data.
+load. Importance weighting applies to the K-quant formats (`q2k`-`q6k`) and to `q4_0`, `q4_1`,
+`q5_0` and `q5_1`; `q8_0` and the remaining formats quantize without it. The weighted encoders
+write the same bytes as llama.cpp's from the same imatrix. Calibration runs on all pipelines
+(text, multimodal, embedding); the calibration text drives the language model, so vision/audio
+encoder layers quantize without importance data.
 
 To collect an imatrix from a live server's real traffic instead of a static calibration file,
-see [online calibration](/guides/quantization/online-calibration/).
+see [online calibration](/guides/quantization/online-calibration/). Requests with images or
+audio go through the language model like text, so collecting from them weighs the decoder by
+those inputs too.
+
+#### Writing a quantized GGUF
+
+`inference quantize gguf` rewrites a float GGUF (F32, F16 or BF16) as a quantized GGUF that
+llama.cpp and inference.rs both load. Each `--tensor-type <regex>=<type>` rule sets the type of
+the tensors whose names it matches (the first matching rule wins; unmatched tensors are copied as
+they are), and `--imatrix` takes llama.cpp's imatrix, `.dat` or `.gguf`, keyed by the GGUF's
+tensor names. It reads and writes a slice at a time (an expert, or a bounded run of rows), so
+memory stays small whatever the model's size.
+
+```bash
+inference quantize gguf -m model-BF16.gguf -o model-IQ4_NL.gguf --imatrix model.imatrix.dat \
+  --tensor-type '_exps\.weight$=iq4_nl' \
+  --tensor-type '(attn_[qkv]|attn_output|ssm_in|ssm_out|output|token_embd)\.weight$=q8_0'
+```
+
+Types: `f32`, `f16`, `bf16`, `q4_0`, `q4_1`, `q5_0`, `q5_1`, `q8_0`, `q2_k`-`q6_k`, `iq4_nl`,
+`iq4_xs` and `iq4_ks`. A
+row's length must be a whole number of the type's blocks (256 values for the K and `iq4_xs` /
+`iq4_ks` formats, 32 for the others); a rule that breaks this is refused before anything is
+written.
+
+To use statistics collected by [online calibration](/guides/quantization/online-calibration/),
+convert the saved `.cimatrix` to llama.cpp's format under the GGUF's tensor names:
+
+```bash
+inference quantize imatrix --cimatrix collected.cimatrix --gguf model-BF16.gguf -o model.imatrix.dat
+```
 
 Full example: [Rust](/examples/rust/quantization/imatrix/),
 [Python](/examples/python/imatrix/).

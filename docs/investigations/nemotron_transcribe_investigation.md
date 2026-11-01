@@ -413,3 +413,31 @@ decides recipes. The no-imatrix file was deleted after this run (disk).
 
 **Next:** the remaining experts budget: the file is 17.59 GiB against a ~21 GiB target, so Q5_0 `ffn_down_exps`
 (or Q8_0 attention / Mamba already) is room to spend; then the audio side beside the GGUF.
+
+## Run 16 - 2026-11-01 ~17:00
+
+**Question:** why do our candle-derived k-quant encoders write different bytes from ggml (Run 10), and can they match?
+
+**Findings, in order of the fixes:**
+- `nearest_int` rounded half away from zero (`f32::round`); ggml's magic-number trick rounds ties to even.
+- `make_qx_quants` was ggml's old version (three refinement passes, `amax == 0` test); current ggml sweeps 19 scale
+  offsets in tenths around `nmax` and treats `amax < 1e-15` as zero. Q3_K and Q6_K (plain and imatrix) exact after
+  porting it.
+- The plain Q2_K / Q4_K / Q5_K paths used the old `make_qkx1_quants`; ggml uses `make_qkx2_quants` with per-type
+  weights (`|x|` for Q2_K, the group RMS plus `|x|` for Q4_K / Q5_K) and searches (`-0.5, 0.1, 15, mad` /
+  `-1.0, 0.1, 20` / `-0.5, 0.1, 15`). Q4_K / Q5_K plain exact.
+- `make_qp_quants` (the imatrix paths' 6-bit scale fit) rounded its final assignment with `round()`, tested
+  `max == 0`, and summed `w * (l * l)` where ggml has `(w * l) * l`; `make_qkx3_quants` had the same product order.
+  Q4_K / Q5_K imatrix exact.
+- Q2_K still differed in 4 (plain) and 20 (imatrix) blocks, only in indices, all in groups whose quantized scale is
+  0: ggml skips those in the final pass and keeps the indices the fitter wrote; ours started from zeros. The fitters
+  now hand back their indices and the encoders start from them. Q2_K exact.
+- Added the imatrix paths ggml has for Q4_0 / Q5_0 (`make_qx_quants` with `nmax` 8 / 16) and Q4_1 / Q5_1
+  (`make_qkx3_quants`), weights `qw * sqrt(sigma2 + x^2)` with the row's mean square.
+
+**Result:** `scripts/iq_quantize_parity.py ~/Programming/llama.cpp/build_cuda/bin` over q4_0 q4_1 q5_0 q5_1 q8_0 q2_k
+q3_k q4_k q5_k q6_k iq4_nl iq4_xs: 0 differing bytes in all 24 cases (plain and imatrix). ggml-base is built without
+`-march=native`, so no FMA contraction to mirror (unlike ik's IQ4_KS, Run 9).
+
+**Next:** past parity, an opt-in better encoder judged by KLD: refitting scales after they are rounded, and
+GPTQ-style rounding against the full input covariance rather than the imatrix's diagonal.

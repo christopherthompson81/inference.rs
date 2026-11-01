@@ -9,7 +9,7 @@ Usage: scripts/iq_quantize_parity.py <build lib dir> [type ...]   (default: iq4_
 import ctypes, os, subprocess, sys, tempfile
 import numpy as np
 
-TYPES = {"q8_0": 8, "q3_k": 11, "q4_k": 12, "q5_k": 13, "q6_k": 14, "iq4_nl": 20, "iq4_xs": 23, "iq4_ks": 144}
+TYPES = {"q4_0": 2, "q4_1": 3, "q5_0": 6, "q5_1": 7, "q8_0": 8, "q2_k": 10, "q3_k": 11, "q4_k": 12, "q5_k": 13, "q6_k": 14, "iq4_nl": 20, "iq4_xs": 23, "iq4_ks": 144}
 DEFAULT_TYPES = ["iq4_nl", "iq4_xs"]
 ROWS, COLS = 64, 4096
 SEED = 0

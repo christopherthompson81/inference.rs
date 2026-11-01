@@ -11,7 +11,7 @@ use half::{bf16, f16};
 use inference_tensor::quantized::gguf_file::{
     self, Header, TensorEntry, write_header, write_tensor_padding,
 };
-use inference_tensor::quantized::{GgmlDType, QTensor, WRITABLE_TYPES};
+use inference_tensor::quantized::{GgmlDType, QTensor};
 use inference_tensor::{Device, Result, Tensor};
 use rayon::prelude::*;
 use regex::Regex;
@@ -26,20 +26,37 @@ const ROWS_PER_TASK: usize = 64;
 const SLICE_BYTES: usize = 64 << 20;
 const GGUF_ALIGNMENT: u64 = 32;
 
-/// A tensor type by its llama.cpp name (`q4_k`, `iq4_ks`), if this module writes it.
-pub fn writable_type(name: &str) -> Result<GgufType> {
+// the formats `QTensor` encodes, each matching llama.cpp's encoder byte for byte
+const CANDLE_WRITABLE: [GgmlDType; 13] = [
+    GgmlDType::F32,
+    GgmlDType::F16,
+    GgmlDType::BF16,
+    GgmlDType::Q4_0,
+    GgmlDType::Q4_1,
+    GgmlDType::Q5_0,
+    GgmlDType::Q5_1,
+    GgmlDType::Q8_0,
+    GgmlDType::Q2K,
+    GgmlDType::Q3K,
+    GgmlDType::Q4K,
+    GgmlDType::Q5K,
+    GgmlDType::Q6K,
+];
+
+fn writable_types() -> impl Iterator<Item = GgufType> {
     let raw = GgufType::RAW_BLOCKS
         .into_iter()
         .filter(|ty| iq_quantize::can_quantize(*ty));
-    let candle = WRITABLE_TYPES.into_iter().map(|(_, d)| GgufType::from(d));
-    let mut writable = candle.chain(raw);
-    writable
+    CANDLE_WRITABLE.into_iter().map(GgufType::from).chain(raw)
+}
+
+/// A tensor type by its llama.cpp name (`q4_k`, `iq4_ks`), if this module writes it.
+pub fn writable_type(name: &str) -> Result<GgufType> {
+    writable_types()
         .find(|ty| GgufDType::new(ty.id()).name().eq_ignore_ascii_case(name))
         .ok_or_else(|| {
-            let known = WRITABLE_TYPES
-                .iter()
-                .map(|(n, _)| n.to_string())
-                .chain(["iq4_nl".into(), "iq4_xs".into(), "iq4_ks".into()])
+            let known = writable_types()
+                .map(|ty| GgufDType::new(ty.id()).name().to_ascii_lowercase())
                 .collect::<Vec<_>>();
             inference_tensor::Error::Msg(format!("`{name}` is not one of {known:?}"))
         })
@@ -84,10 +101,15 @@ fn quantize_slice(
     let Some(dtype) = ty.candle() else {
         inference_tensor::bail!("{ty:?} has no quantizer");
     };
-    // ggml's Q8_0 and float types ignore an imatrix; our Q4_0 / Q5_0 encoders have no weighted variant
-    let weighted = matches!(
+    // ggml's Q8_0 and float types ignore an imatrix
+    let weighted = !matches!(
         dtype,
-        GgmlDType::Q2K | GgmlDType::Q3K | GgmlDType::Q4K | GgmlDType::Q5K | GgmlDType::Q6K
+        GgmlDType::Q8_0
+            | GgmlDType::Q8_1
+            | GgmlDType::Q8K
+            | GgmlDType::F32
+            | GgmlDType::F16
+            | GgmlDType::BF16
     );
     let chunks = values
         .par_chunks(ROWS_PER_TASK * cols)

@@ -175,7 +175,7 @@ To browse tensors interactively:
 inference uqff inspect -m inference-community/gemma-4-26B-A4B-it --quant afq3
 ```
 
-K-quant output quality can be improved with an importance matrix: pass `--imatrix <file>`
+K-quant (and `q4_0`/`q4_1`/`q5_0`/`q5_1`) output quality can be improved with an importance matrix: pass `--imatrix <file>`
 (llama.cpp `.imatrix` files work directly) or `--calibration-file <path>` to `quantize`. See
 [imatrix background](/guides/quantization/quantize-a-model/#imatrix).
 

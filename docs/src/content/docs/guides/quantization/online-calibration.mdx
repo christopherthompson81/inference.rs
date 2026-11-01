@@ -89,8 +89,9 @@ Activation collection is inactive until `start` and stops after `apply`.
 - The model must have been loaded with `--isq` from a supported safetensors or GGUF source;
   `start` errors otherwise, including models loaded
   [`--from-uqff`](/guides/quantization/uqff/).
-- Importance weighting applies to the K-quant types (`Q2K`-`Q6K`). Other Q types and AFQ collect
-  and requantize without using importance weights. HQQ, FP8, F8Q8, and MXFP4 do not support
+- Importance weighting applies to the K-quant types (`Q2K`-`Q6K`) and to `Q4_0`, `Q4_1`, `Q5_0`
+  and `Q5_1`. `Q8_0`, the other Q types and AFQ collect and requantize without using importance
+  weights. HQQ, FP8, F8Q8, and MXFP4 do not support
   collection, so `start` returns an error.
 - Safetensors layers are reloaded from the source checkpoint when possible. GGUF layers are
   reloaded from the selected GGUF artifact. Layers that cannot be reloaded fall back to their

@@ -1,5 +1,31 @@
+// ggml's: the float added to 1.5 * 2^23 rounds to the nearest integer, ties to even
+const ROUNDING_MAGIC: f32 = 12_582_912.0;
+// ggml's `GROUP_MAX_EPS`: a group whose largest magnitude is below it quantizes to zeros
+const GROUP_MAX_EPS: f32 = 1e-15;
+// the scale offsets `make_qx_quants` tries, in tenths of a step either side of `nmax`
+const QX_SCALE_TRIES: i32 = 9;
+
+/// The scale search of `make_qkx2_quants` / `make_qkx3_quants`: `nstep` scales past the min-max one, from `rmin` in
+/// steps of `rdelta`, scored by squared error or, with `use_mad`, absolute error.
+#[derive(Clone, Copy)]
+pub(super) struct QkxSearch {
+    pub rmin: f32,
+    pub rdelta: f32,
+    pub nstep: usize,
+    pub use_mad: bool,
+}
+
+/// ggml's search for every imatrix-weighted affine type.
+pub(super) const QKX3_SEARCH: QkxSearch = QkxSearch {
+    rmin: -0.9,
+    rdelta: 0.05,
+    nstep: 36,
+    use_mad: false,
+};
+
 pub(super) fn nearest_int(v: f32) -> i32 {
-    v.round() as i32
+    let v = v + ROUNDING_MAGIC;
+    (v.to_bits() & 0x007f_ffff) as i32 - 0x0040_0000
 }
 
 /// Validates that the input and output are the right size and returns an iterator which maps each
@@ -58,6 +84,9 @@ pub(super) fn get_scale_min_k4(j: usize, q: &[u8]) -> (u8, u8) {
     }
 }
 
+/// ggml's `make_qx_quants`: the scale (and `ls`, offset by `nmax`) minimizing the weighted error of `x` over
+/// `[-nmax, nmax)`, from the plain max scale and nineteen nudges of it; `rmse_type` 0 takes the max scale as it is, a
+/// negative one averages the first fit with it.
 pub(super) unsafe fn make_qx_quants(
     n: usize,
     nmax: i32,
@@ -67,154 +96,73 @@ pub(super) unsafe fn make_qx_quants(
     qw: *const f32,
 ) -> f32 {
     unsafe {
+        let x = std::slice::from_raw_parts(x, n);
+        let ls = std::slice::from_raw_parts_mut(ls, n);
+        let qw = (!qw.is_null()).then(|| std::slice::from_raw_parts(qw, n));
         let mut max = 0f32;
         let mut amax = 0f32;
-        for i in 0..n {
-            let x = *x.add(i);
-            let ax = x.abs();
-            if ax > amax {
-                amax = ax;
-                max = x;
+        for &v in x {
+            if v.abs() > amax {
+                amax = v.abs();
+                max = v;
             }
         }
-        if amax == 0. {
-            // all zero
-            for i in 0..n {
-                *ls.add(i) = 0;
-            }
+        if amax < GROUP_MAX_EPS {
+            ls.fill(0);
             return 0.;
         }
         let mut iscale = -(nmax as f32) / max;
         if rmse_type == 0 {
-            for i in 0..n {
-                let x = *x.add(i);
-                let l = nearest_int(iscale * x);
-                *ls.add(i) = (nmax + l.clamp(-nmax, nmax - 1)) as i8;
+            for (l, &v) in ls.iter_mut().zip(x) {
+                *l = (nmax + nearest_int(iscale * v).clamp(-nmax, nmax - 1)) as i8;
             }
             return 1.0 / iscale;
         }
-        let weight_type = rmse_type % 2;
+        let return_early = rmse_type < 0;
+        let rmse_type = rmse_type.abs();
+        let weight = |i: usize| match qw {
+            Some(qw) => qw[i],
+            None => match rmse_type {
+                1 => x[i] * x[i],
+                2 => 1.0,
+                3 => x[i].abs(),
+                _ => x[i].abs().sqrt(),
+            },
+        };
         let mut sumlx = 0f32;
         let mut suml2 = 0f32;
         for i in 0..n {
-            let x = *x.add(i);
-            let l = nearest_int(iscale * x);
-            let l = l.clamp(-nmax, nmax - 1);
-            *ls.add(i) = (l + nmax) as i8;
-            let w = if !qw.is_null() {
-                *qw.add(i)
-            } else if weight_type == 1 {
-                x * x
+            let l = nearest_int(iscale * x[i]).clamp(-nmax, nmax - 1);
+            ls[i] = (l + nmax) as i8;
+            let w = weight(i);
+            sumlx += w * x[i] * l as f32;
+            suml2 += w * l as f32 * l as f32;
+        }
+        let mut scale = if suml2 != 0.0 { sumlx / suml2 } else { 0.0 };
+        if return_early {
+            return if suml2 > 0.0 {
+                0.5 * (scale + 1.0 / iscale)
             } else {
-                1.0
+                1.0 / iscale
             };
-            let l = l as f32;
-            sumlx += w * x * l;
-            suml2 += w * l * l;
         }
-        let mut scale = sumlx / suml2;
         let mut best = scale * sumlx;
-        for _itry in 0..3 {
-            let iscale = 1.0 / scale;
-            let mut slx = 0f32;
-            let mut sl2 = 0f32;
-            let mut changed = false;
-            for i in 0..n {
-                let x = *x.add(i);
-                let l = nearest_int(iscale * x);
-                let l = l.clamp(-nmax, nmax - 1);
-                if l + nmax != *ls.add(i) as i32 {
-                    changed = true;
-                }
-                let w = if !qw.is_null() {
-                    *qw.add(i)
-                } else if weight_type == 1 {
-                    x * x
-                } else {
-                    1.0
-                };
-                let l = l as f32;
-                slx += w * x * l;
-                sl2 += w * l * l;
-            }
-            if !changed || sl2 == 0.0 || slx * slx <= best * sl2 {
-                break;
-            }
-            for i in 0..n {
-                let x = *x.add(i);
-                let l = nearest_int(iscale * x);
-                *ls.add(i) = (nmax + l.clamp(-nmax, nmax - 1)) as i8;
-            }
-            sumlx = slx;
-            suml2 = sl2;
-            scale = sumlx / suml2;
-            best = scale * sumlx;
-        }
-        for _itry in 0..5 {
-            let mut n_changed = 0;
-            for i in 0..n {
-                let x = *x.add(i);
-                let w = if !qw.is_null() {
-                    *qw.add(i)
-                } else if weight_type == 1 {
-                    x * x
-                } else {
-                    1.0
-                };
-                let l = *ls.add(i) as i32 - nmax;
-                let mut slx = sumlx - w * x * l as f32;
-                if slx > 0. {
-                    let mut sl2 = suml2 - w * l as f32 * l as f32;
-                    let new_l = nearest_int(x * sl2 / slx);
-                    let new_l = new_l.clamp(-nmax, nmax - 1);
-                    if new_l != l {
-                        slx += w * x * new_l as f32;
-                        sl2 += w * new_l as f32 * new_l as f32;
-                        if sl2 > 0. && slx * slx * suml2 > sumlx * sumlx * sl2 {
-                            *ls.add(i) = (nmax + new_l) as i8;
-                            sumlx = slx;
-                            suml2 = sl2;
-                            scale = sumlx / suml2;
-                            best = scale * sumlx;
-                            n_changed += 1;
-                        }
-                    }
-                }
-            }
-            if n_changed == 0 {
-                break;
-            }
-        }
-        if rmse_type < 3 {
-            return scale;
-        }
-        for is in -4..4 {
+        for is in -QX_SCALE_TRIES..=QX_SCALE_TRIES {
             if is == 0 {
                 continue;
             }
-            iscale = -(nmax as f32 + 0.1f32 * is as f32) / max;
-            let mut sumlx = 0.;
-            let mut suml2 = 0.;
-            for i in 0..n {
-                let x = *x.add(i);
-                let l = nearest_int(iscale * x);
-                let l = l.clamp(-nmax, nmax - 1);
-                let w = if !qw.is_null() {
-                    *qw.add(i)
-                } else if weight_type == 1 {
-                    x * x
-                } else {
-                    1.0
-                };
-                let l = l as f32;
-                sumlx += w * x * l;
-                suml2 += w * l * l;
+            iscale = -(nmax as f32 + 0.1 * is as f32) / max;
+            sumlx = 0.0;
+            suml2 = 0.0;
+            for (i, &xi) in x.iter().enumerate() {
+                let l = nearest_int(iscale * xi).clamp(-nmax, nmax - 1);
+                let w = weight(i);
+                sumlx += w * xi * l as f32;
+                suml2 += w * l as f32 * l as f32;
             }
-            if suml2 > 0. && sumlx * sumlx > best * suml2 {
-                for i in 0..n {
-                    let x = *x.add(i);
-                    let l = nearest_int(iscale * x);
-                    *ls.add(i) = (nmax + l.clamp(-nmax, nmax - 1)) as i8;
+            if suml2 > 0.0 && sumlx * sumlx > best * suml2 {
+                for (l, &v) in ls.iter_mut().zip(x) {
+                    *l = (nmax + nearest_int(iscale * v).clamp(-nmax, nmax - 1)) as i8;
                 }
                 scale = sumlx / suml2;
                 best = scale * sumlx;
@@ -224,61 +172,82 @@ pub(super) unsafe fn make_qx_quants(
     }
 }
 
-// https://github.com/ggerganov/llama.cpp/blob/8183159cf3def112f6d1fe94815fce70e1bffa12/k_quants.c#L224
-pub(super) fn make_qkx1_quants(nmax: i32, ntry: usize, x: &[f32]) -> (f32, f32) {
+/// ggml's `make_qkx2_quants`: an affine fit (scale, and the min it subtracts, returned negated as ggml's `the_min`) of
+/// `x` onto `[0, nmax]` under `weights`, from the min-max fit and the scales of `search`.
+pub(super) fn make_qkx2_quants(
+    nmax: i32,
+    x: &[f32],
+    weights: &[f32],
+    search: QkxSearch,
+    l: &mut [u8],
+) -> (f32, f32) {
+    let QkxSearch {
+        rmin,
+        rdelta,
+        nstep,
+        use_mad,
+    } = search;
     let n = x.len();
-    let mut l = vec![0; n];
-    // Get min/max
-    let min = *x
-        .iter()
-        .take(n)
-        .min_by(|a, b| a.total_cmp(b))
-        .unwrap_or(&x[0]);
-    let max = *x.iter().max_by(|a, b| a.total_cmp(b)).unwrap_or(&x[0]);
-
-    // If min == max, all values are the same => nothing to do here
-    if max == min {
-        return (0.0, 0.0);
+    let mut min = x[0];
+    let mut max = x[0];
+    let mut sum_w = weights[0];
+    let mut sum_x = sum_w * x[0];
+    for i in 1..n {
+        min = min.min(x[i]);
+        max = max.max(x[i]);
+        sum_w += weights[i];
+        sum_x += weights[i] * x[i];
     }
-
-    // Ensure min <= 0.0
-    let mut min = min.min(0.);
-
-    // Compute scale and inverse scale
+    if min > 0.0 {
+        min = 0.0;
+    }
+    if max == min {
+        l.fill(0);
+        return (0.0, -min);
+    }
+    let err = |diff: f32| if use_mad { diff.abs() } else { diff * diff };
     let mut iscale = nmax as f32 / (max - min);
     let mut scale = 1.0 / iscale;
-
-    for _ in 0..ntry {
-        let mut sumlx = 0.0;
-        let mut suml2 = 0;
-        let mut did_change = false;
-
-        for (i, value) in x.iter().enumerate().take(n) {
-            let li = nearest_int(iscale * (value - min)).clamp(0, nmax);
-            let clamped_li = li as u8;
-            if clamped_li != l[i] {
-                l[i] = clamped_li;
-                did_change = true;
+    let mut best_error = 0f32;
+    for i in 0..n {
+        let li = nearest_int(iscale * (x[i] - min)).clamp(0, nmax);
+        l[i] = li as u8;
+        best_error += weights[i] * err(scale * li as f32 + min - x[i]);
+    }
+    if nstep == 0 {
+        return (scale, -min);
+    }
+    let mut laux = vec![0i32; n];
+    for is in 0..=nstep {
+        iscale = (rmin + rdelta * is as f32 + nmax as f32) / (max - min);
+        let (mut sum_l, mut sum_l2, mut sum_xl) = (0f32, 0f32, 0f32);
+        for i in 0..n {
+            let li = nearest_int(iscale * (x[i] - min)).clamp(0, nmax);
+            laux[i] = li;
+            let (w, l) = (weights[i], li as f32);
+            sum_l += w * l;
+            sum_l2 += w * l * l;
+            sum_xl += w * l * x[i];
+        }
+        let d = sum_w * sum_l2 - sum_l * sum_l;
+        if d > 0.0 {
+            let mut this_scale = (sum_w * sum_xl - sum_x * sum_l) / d;
+            let mut this_min = (sum_l2 * sum_x - sum_l * sum_xl) / d;
+            if this_min > 0.0 {
+                this_min = 0.0;
+                this_scale = sum_xl / sum_l2;
             }
-            sumlx += (value - min) * li as f32;
-            suml2 += li * li;
-        }
-        scale = sumlx / suml2 as f32;
-
-        let sum: f32 = x
-            .iter()
-            .take(n)
-            .zip(l.iter().take(n))
-            .map(|(xi, &li)| xi - scale * li as f32)
-            .sum();
-
-        min = sum / n as f32;
-        if min > 0.0 {
-            min = 0.0;
-        }
-        iscale = 1.0 / scale;
-        if !did_change {
-            break;
+            let cur_error = (0..n)
+                .map(|i| weights[i] * err(this_scale * laux[i] as f32 + this_min - x[i]))
+                .fold(0f32, |a, v| a + v);
+            if cur_error < best_error {
+                for (l, &a) in l.iter_mut().zip(&laux) {
+                    *l = a as u8;
+                }
+                best_error = cur_error;
+                scale = this_scale;
+                min = this_min;
+            }
         }
     }
     (scale, -min)
@@ -358,13 +327,16 @@ pub(super) fn make_qkx3_quants(
     nmax: i32,
     x: &[f32],
     weights: Option<&[f32]>,
-    rmin: f32,
-    rdelta: f32,
-    nstep: usize,
-    use_mad: bool,
+    search: QkxSearch,
+    l: &mut [u8],
 ) -> (f32, f32) {
+    let QkxSearch {
+        rmin,
+        rdelta,
+        nstep,
+        use_mad,
+    } = search;
     let n = x.len();
-    let mut l: [u8; 32] = [0; 32];
     let mut l_aux: [u8; 32] = [0; 32];
 
     let mut min_val = x[0];
@@ -395,6 +367,7 @@ pub(super) fn make_qkx3_quants(
     }
 
     if max_val <= min_val {
+        l.fill(0);
         return (0.0, -min_val);
     }
 
@@ -430,7 +403,7 @@ pub(super) fn make_qkx3_quants(
                 None => x[i] * x[i],
             };
             sum_l += w * l_val as f32;
-            sum_l2 += w * (l_val as f32).powi(2);
+            sum_l2 += w * l_val as f32 * l_val as f32;
             sum_xl += w * l_val as f32 * x[i];
         }
 
@@ -456,7 +429,7 @@ pub(super) fn make_qkx3_quants(
             }
 
             if mad < best_mad {
-                l.copy_from_slice(&l_aux);
+                l.copy_from_slice(&l_aux[..n]);
                 best_mad = mad;
                 scale = this_scale;
                 min_val = this_min;
@@ -480,7 +453,7 @@ pub(super) fn make_qp_quants(
     assert_eq!(quant_weights.len(), n);
 
     let max = x.iter().copied().fold(0.0, f32::max);
-    if max == 0.0 {
+    if max < GROUP_MAX_EPS {
         l.iter_mut().for_each(|li| *li = 0);
         return 0.0;
     }
@@ -528,23 +501,23 @@ pub(super) fn make_qp_quants(
     let mut sumlx = 0.0;
     let mut suml2 = 0.0;
     for ((xi, li), &w) in x.iter().zip(l.iter_mut()).zip(quant_weights.iter()) {
-        let mut li_new = (iscale * xi).round() as u8;
+        let mut li_new = nearest_int(iscale * xi) as u8;
         li_new = li_new.min(nmax);
         *li = li_new;
         sumlx += w * xi * li_new as f32;
-        suml2 += w * (li_new as f32).powi(2);
+        suml2 += w * li_new as f32 * li_new as f32;
     }
 
     for _ in 0..5 {
         let mut n_changed = 0;
         for ((xi, li), &w) in x.iter().zip(l.iter_mut()).zip(quant_weights.iter()) {
             let mut slx = sumlx - w * xi * *li as f32;
-            let mut sl2 = suml2 - w * (*li as f32).powi(2);
+            let mut sl2 = suml2 - w * *li as f32 * *li as f32;
             if slx > 0.0 && sl2 > 0.0 {
                 let new_li = (nearest_int(xi * sl2 / slx) as u8).min(nmax);
                 if new_li != *li {
                     slx += w * xi * new_li as f32;
-                    sl2 += w * (new_li as f32).powi(2);
+                    sl2 += w * new_li as f32 * new_li as f32;
                     if slx.powi(2) * suml2 > sumlx.powi(2) * sl2 {
                         *li = new_li;
                         sumlx = slx;
@@ -559,5 +532,5 @@ pub(super) fn make_qp_quants(
         }
     }
 
-    sumlx / suml2
+    if suml2 > 0.0 { sumlx / suml2 } else { 0.0 }
 }
