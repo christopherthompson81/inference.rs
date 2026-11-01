@@ -303,3 +303,52 @@ the 28.7 s dialogue, the 74 s clip, a Spanish one).
   and a Gemma 2 text binding the multimodal GGUF path lacks: left for a follow-up.
 
 **Next:** commit, checks, ask before pushing; then GGUF for MERaLiON-2, Qwen2-Audio (`qwen2a`), GLM-ASR (`glma`).
+
+## Run 12 - 2026-11-01 11:20
+
+**Question:** what does a published GLM-ASR GGUF (concedo's `GLM-ASR-Nano-1.6B-2512-Q8_0.gguf` +
+`mmproj-GLM-ASR-Nano-2512-Q8_0.gguf`, `clip.projector_type glma`) hold, and how does it map onto the transformers
+checkpoint our GLM-ASR loads?
+
+**Commands:** gguf-py over both files; llama.cpp's `conversion/ultravox.py` (`GlmASRWhisperEncoderModel`) and
+`tools/mtmd/models/whisper-enc.cpp`; the official repo's history (`trfms-compatible`, 2025-12-24, replaced the original
+`GlmasrModel` code) and the pre-transformers revision `91967eab79`'s `modeling_glmasr.py`/`modeling_audio.py`;
+single tensors of the transformers `model.safetensors` read by HTTP range.
+
+**Finding:**
+- llama.cpp converts the *original* layout (`audio_encoder.whisper.*`), not the transformers one. Text: `llama`
+  (28 layers, 2048, `chatglm-bpe`). Projector: the Whisper tower under `a.*`, `mm.a.norm_pre` (the adapter's layer
+  norm, transformers' `audio_tower.norm`), `mm.a.mlp.1/2`, stack factor 4, and `v.boi`/`v.eoi`.
+- `a.position_embd` (1500 x 1280) is trained-looking (close to, not equal to, Whisper's sinusoid), but the original
+  config sets `use_rope: true` and its encoder then never adds `embed_positions`: the table is unused. llama.cpp's
+  GLMA graph adds it and applies no rotary, so it runs the encoder with the wrong positions.
+- q/k: the GGUF keeps the original rotary layout. Per 64-dim head the first 32 dims (partial factor 0.5) are interleaved
+  pairs; un-interleaving them gives cos 1.0000 against transformers' q and k (cos 0.53 as stored). v matches as stored.
+- `v.boi`/`v.eoi` are the original `audio_bos_eos_token` (norms ~46), which the original model writes over the
+  positions just before and after each audio run. transformers' port has no such tensor: its `<|begin_of_audio|>` and
+  `<|end_of_audio|>` rows equal the GGUF text model's own rows (cos 1.0) and differ from `v.boi`/`v.eoi` (cos 0.02).
+  So transformers' GLM-ASR drops the learned markers. Our safetensors GLM-ASR matches transformers exactly (Run 7).
+
+**Next:** bind the GGUF to transformers' names (llama text; tower under the Llama-style layer names, q/k rows
+un-interleaved, rotary from transformers' config values, `a.position_embd` and `v.boi`/`v.eoi` left unbound), so the
+GGUF runs what our safetensors path runs; then compare it with our BF16 safetensors path on the same clips.
+
+## Run 13 - 2026-11-01 12:10
+
+**Question:** does the GLM-ASR GGUF pair, bound as Run 12 planned, answer and transcribe like our safetensors GLM-ASR?
+
+**Commands:** `inference serve --cpu --format gguf -m /mnt/data/models/glm-asr-nano -f GLM-ASR-Nano-1.6B-2512-Q8_0.gguf`;
+the text prompt, a question and `/v1/audio/transcriptions` over the short clip, the dialogue and the 74 s clip.
+
+**Finding:**
+- The loader's template (transformers', now built in) replaces the GGUF's original text-only one, which writes no
+  audio markers.
+- First run: accurate transcripts (across windows too), but no answer stopped: the short clip's transcript repeated
+  to the token limit. transformers stops on `[59246, 59253, 59255]`; the GGUF records `eos` 59246 and `eot` 59253,
+  and our GGUF path read only `eos`. llama.cpp ends a generation on eos, eot and eom for every model, so the GGUF
+  generation config now carries all three. Every GGUF that records an `eot` (Llama 3's `<|eot_id|>` among them) gains
+  it as a stop.
+- Second run stops: text (3 rivers), the short clip's answer and transcript word for word, the dialogue's and the 74 s
+  clip's transcripts accurate across windows (one slip: "their idea" for "the idea" in the dialogue, Q8_0).
+
+**Next:** Qwen2-Audio's GGUF (`qwen2a`), then MERaLiON-2's.

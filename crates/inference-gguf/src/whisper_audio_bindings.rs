@@ -1,4 +1,4 @@
-//! The Whisper tower llama.cpp's audio projectors (`voxtral`, `ultravox`) store under `a.*`: its bindings to
+//! The Whisper tower llama.cpp's audio projectors (`voxtral`, `ultravox`, `glma`) store under `a.*`: its bindings to
 //! transformers' names and the config its metadata gives.
 
 use std::collections::HashMap;
@@ -9,17 +9,48 @@ use inference_tensor::quantized::gguf_file::Value;
 use serde_json::{Value as Json, json};
 
 use super::multimodal_binding_utils::{
-    TensorInventory, bind_required, bind_required_linear, bind_required_with, map_usize,
+    TensorInventory, bind_required, bind_required_linear, bind_required_with,
+    inverse_partial_rotary_permute, map_usize,
 };
 
 pub(super) const TOKENS_KEY: &str = "tokenizer.ggml.tokens";
 pub(super) const POSITIONS: &str = "a.position_embd.weight";
+
+/// How a family's transformers checkpoint names and positions the tower llama.cpp stores one way.
+pub(super) struct TowerLayout {
+    /// `(transformers, llama.cpp)` names within a layer.
+    pub layer: [(&'static str, &'static str); 8],
+    /// `(transformers, llama.cpp)` for the norm after the layers.
+    pub final_norm: (&'static str, &'static str),
+    /// Learned positions; a rotary tower leaves llama.cpp's table unbound.
+    pub learned_positions: bool,
+    /// `(heads, dims)`: q and k rows llama.cpp keeps in the original interleaved rotary order, for its first `dims`
+    /// dims of each head.
+    pub interleaved_rotary: Option<(usize, usize)>,
+}
+
+pub(super) const WHISPER_LAYOUT: TowerLayout = TowerLayout {
+    layer: [
+        ("self_attn.q_proj", "attn_q"),
+        ("self_attn.k_proj", "attn_k"),
+        ("self_attn.v_proj", "attn_v"),
+        ("self_attn.out_proj", "attn_out"),
+        ("self_attn_layer_norm", "ln1"),
+        ("fc1", "ffn_up"),
+        ("fc2", "ffn_down"),
+        ("final_layer_norm", "ln2"),
+    ],
+    final_norm: ("layer_norm", "a.post_ln"),
+    learned_positions: true,
+    interleaved_rotary: None,
+};
 
 /// The tower's tensors under `audio_tower.*`.
 pub(super) fn bind_whisper_tower(
     inventory: &TensorInventory<'_>,
     bindings: &mut GgufBindingMap,
     family: &str,
+    layout: &TowerLayout,
 ) -> Result<()> {
     for (native, source) in [("conv1", "a.conv1d.1"), ("conv2", "a.conv1d.2")] {
         bind_required(
@@ -39,32 +70,47 @@ pub(super) fn bind_whisper_tower(
             },
         )?;
     }
-    bind_required(
+    if layout.learned_positions {
+        bind_required(
+            inventory,
+            bindings,
+            "audio_tower.embed_positions.weight",
+            POSITIONS,
+        )?;
+    }
+    let (norm, norm_source) = layout.final_norm;
+    bind_required_linear(
         inventory,
         bindings,
-        "audio_tower.embed_positions.weight",
-        POSITIONS,
+        &format!("audio_tower.{norm}"),
+        norm_source,
     )?;
-    bind_required_linear(inventory, bindings, "audio_tower.layer_norm", "a.post_ln")?;
     for layer in inventory.require_layers("a.blk.", family)? {
         let native = format!("audio_tower.layers.{layer}");
         let source = format!("a.blk.{layer}");
-        for (to, from) in [
-            ("self_attn.q_proj", "attn_q"),
-            ("self_attn.k_proj", "attn_k"),
-            ("self_attn.v_proj", "attn_v"),
-            ("self_attn.out_proj", "attn_out"),
-            ("self_attn_layer_norm", "ln1"),
-            ("fc1", "ffn_up"),
-            ("fc2", "ffn_down"),
-            ("final_layer_norm", "ln2"),
-        ] {
-            bind_required_linear(
-                inventory,
-                bindings,
-                &format!("{native}.{to}"),
-                &format!("{source}.{from}"),
-            )?;
+        for (to, from) in layout.layer {
+            let (to, from) = (format!("{native}.{to}"), format!("{source}.{from}"));
+            match layout.interleaved_rotary {
+                Some((heads, dims))
+                    if matches!(to.rsplit('.').next(), Some("q_proj" | "k_proj")) =>
+                {
+                    for suffix in ["weight", "bias"] {
+                        let name = format!("{from}.{suffix}");
+                        if suffix == "weight" || inventory.contains(&name) {
+                            bind_required_with(
+                                inventory,
+                                bindings,
+                                format!("{to}.{suffix}"),
+                                name,
+                                |source, shape| {
+                                    inverse_partial_rotary_permute(source, shape, heads, dims)
+                                },
+                            )?;
+                        }
+                    }
+                }
+                _ => bind_required_linear(inventory, bindings, &to, &from)?,
+            }
         }
     }
     Ok(())

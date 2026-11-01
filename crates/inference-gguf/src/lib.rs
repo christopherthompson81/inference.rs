@@ -8,6 +8,7 @@ pub mod gemma3_config;
 #[cfg(any(test, feature = "models-gemma"))]
 pub mod gemma3n_bindings;
 mod gguf_tokenizer;
+pub mod glm_asr_bindings;
 pub mod granite_multimodal_bindings;
 pub mod idefics3_bindings;
 pub mod lfm2_vl_bindings;
