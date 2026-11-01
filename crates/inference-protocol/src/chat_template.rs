@@ -633,9 +633,6 @@ pub fn apply_chat_template_to(
     env.add_function("strftime_now", strftime_now);
     let tmpl = env.get_template("chat_template")?;
 
-    let date = chrono::Local::now();
-    let date_string = date.format("%d, %B, %Y").to_string();
-
     let reasoning_controls = resolve_reasoning_controls(enable_thinking, reasoning_effort)?;
     let reasoning_effort_value = reasoning_controls
         .reasoning_effort
@@ -675,7 +672,6 @@ pub fn apply_chat_template_to(
             bos_token => bos_tok,
             eos_token => eos_tok,
             unk_token => unk_tok,
-            date_string => date_string,
             enable_thinking => reasoning_controls.enable_thinking,
             reasoning_effort => &reasoning_effort_value,
             reasoning_strength => &reasoning_effort_value,
@@ -690,7 +686,6 @@ pub fn apply_chat_template_to(
             xml_tools => tools.clone(), // SmolLM3
             tools => tools,
             builtin_tools => builtin_tools,
-            date_string => date_string,
             enable_thinking => reasoning_controls.enable_thinking,
             reasoning_effort => &reasoning_effort_value,
             reasoning_strength => &reasoning_effort_value,
@@ -759,6 +754,27 @@ mod tests {
             ["1", "5", "1"]
         );
         assert!(render("{{ messages[0].content.index('<d>') }}").is_err());
+    }
+
+    // as transformers renders it: no `date_string`, so Llama 3.x templates take their `strftime_now` branch
+    #[test]
+    fn templates_see_no_date_string_and_format_their_own() {
+        let rendered = apply_chat_template_to(
+            vec![user_text_message("hi")],
+            false,
+            None,
+            None,
+            &ChatTemplateValue(Either::Left(
+                "{% if date_string is defined %}given{% else %}{{ strftime_now('%Y') }}{% endif %}"
+                    .to_string(),
+            )),
+            None,
+            None,
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(rendered, chrono::Local::now().format("%Y").to_string());
     }
 
     #[test]
