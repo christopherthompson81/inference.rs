@@ -162,3 +162,27 @@ class comes from `architectures`, transcripts only for a model with `apply_trans
 
 **Next:** GLM-ASR (its own encoder: rotary positions, pre-norm layers, no learned
 positions), Audio Flamingo 3; Ultravox and MERaLiON-2 are remote code only.
+
+## Run 7 - 2026-10-31 21:55
+
+**Question:** does our GLM-ASR (zai-org/GLM-ASR-Nano-2512, 4.5 GB) match transformers?
+
+**Commands:** transformers 5.19 `models/glmasr` read; `scripts/audio_llm_parity.py zai-org/GLM-ASR-Nano-2512 <short>
+<garden dialogue> <multi 44 s>` (chat and transcription mode), F32 on the CPU.
+
+**Finding:**
+- The tower is Whisper's layers with rotary positions (half-split, the first 32 of each head's 64 dims) in place of the
+  table, under Llama-style names (`input_layernorm`, `o_proj`, `post_attention_layernorm`, `mlp.fc1`/`fc2`, final
+  `norm`). The shared `WhisperEncoder` now takes `WhisperLayerNames` and `WhisperPositions::Rotary` instead of a second
+  copy of the layer.
+- Each 30 s window is its own feature extraction (own log-mel peak) and the tower reads every window whole, padding
+  included (no mask); four positions stack into one 5120-wide input; the projector widens to 4096 and back to 2048;
+  each window keeps `((positions - 4) / 4) + 1` tokens. Up to 21 windows (655 s).
+- The repo's template writes each audio part itself, so GLM-ASR's prefixer adds nothing (with one, the placeholder
+  appeared twice: the prefixer writes into the text part, which a parts-writing template keeps).
+- Transcription: the processor's `apply_transcription_request` prompt (`Please transcribe this audio into text`); no
+  language option in the reference, so a requested language is ignored.
+- Exact match on the first run: text (185 chars), chat about three clips (44, 212, 235), transcripts (44, 406, 599, the
+  last across two windows).
+
+**Next:** Audio Flamingo 3 (noncommercial licence), then Ultravox and MERaLiON-2 (remote code only).

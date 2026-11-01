@@ -28,6 +28,8 @@ pub(crate) mod gemma3;
 pub(crate) mod gemma3n;
 #[cfg(feature = "models-gemma")]
 pub(crate) mod gemma4;
+#[cfg(feature = "models-llama")]
+pub(crate) mod glm_asr;
 #[cfg(feature = "models-other")]
 pub(crate) mod granite4_vision;
 #[cfg(feature = "models-other")]

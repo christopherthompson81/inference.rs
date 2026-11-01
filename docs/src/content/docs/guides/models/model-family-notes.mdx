@@ -244,6 +244,10 @@ inference serve --format gguf -m <dir> -f Voxtral-Mini-3B-2507-Q4_K_M.gguf
 
 Voxtral Realtime (`VoxtralRealtimeForConditionalGeneration`) is a different, streaming transcription model; see the [speech models guide](/guides/models/use-speech-models/).
 
+## GLM-ASR
+
+GLM-ASR (`GlmAsrForConditionalGeneration`, e.g. `zai-org/GLM-ASR-Nano-2512`) transcribes Chinese and English through `/v1/audio/transcriptions` (with the reference processor's prompt; a `language` is ignored, since the model takes none) and answers questions about audio in chat. Each clip, resampled to 16 kHz mono, is cut into 30 s windows, up to 655 s; every whole window takes 375 tokens.
+
 ## Qwen2-Audio
 
 Qwen2-Audio (`Qwen2AudioForConditionalGeneration`, e.g. `Qwen/Qwen2-Audio-7B-Instruct`) answers questions about audio clips in chat. Each clip, resampled to 16 kHz mono, is read as one 30 s window (a longer clip is cut to its first 30 s, as the reference processor does) and takes one token per 40 ms of real audio, on its own `Audio N:` line before the text. The checkpoint's generation config sets a repetition penalty of 1.1, which applies unless a request sets its own.

@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use inference_nn::audio::whisper::{WhisperEncoderConfig, WhisperLayerConfig};
+use inference_nn::audio::whisper::{
+    WhisperEncoderConfig, WhisperLayerConfig, WhisperLayerNames, WhisperPositions,
+};
 use inference_nn::layers::Activation;
 
 const LAYER_NORM_EPS: f64 = 1e-5;
@@ -33,10 +35,12 @@ impl WhisperConfig {
                 activation: self.activation_function,
                 layer_norm_eps: LAYER_NORM_EPS,
                 k_bias: false,
+                names: WhisperLayerNames::Whisper,
             },
             num_layers: self.encoder_layers,
             num_mel_bins: self.num_mel_bins,
             max_source_positions: self.max_source_positions,
+            positions: WhisperPositions::Learned,
         }
     }
 

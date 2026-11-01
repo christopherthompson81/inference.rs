@@ -5,7 +5,9 @@ use inference_quant::ShardedVarBuilder;
 use inference_tensor::nn::{Conv2d, Conv2dConfig, LayerNorm, Linear, Module};
 use inference_tensor::{Device, Result, Tensor};
 
-use crate::audio::whisper::{WhisperEncoderLayer, WhisperLayerConfig, sinusoid_positions};
+use crate::audio::whisper::{
+    WhisperEncoderLayer, WhisperLayerConfig, WhisperLayerNames, sinusoid_positions,
+};
 use crate::layers::{Activation, conv2d, layer_norm, linear_b, linear_no_bias};
 use crate::utils::unvarbuilder::UnVarBuilder;
 
@@ -92,6 +94,7 @@ impl AudioEncoder {
             activation: cfg.activation_function,
             layer_norm_eps: LAYER_NORM_EPS,
             k_bias: true,
+            names: WhisperLayerNames::Whisper,
         };
         let layers = (0..cfg.encoder_layers)
             .map(|i| WhisperEncoderLayer::new(&layer, vb.pp("layers").pp(i)))

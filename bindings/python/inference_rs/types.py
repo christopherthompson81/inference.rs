@@ -228,6 +228,7 @@ class MultimodalLoaderType(str, Enum):
     QWEN4EXP = "qwen4exp"
     VOXTRAL = "voxtral"
     VOXTRAL_CHAT = "voxtral-chat"
+    GLM_ASR = "glm_asr"
     GEMMA4 = "gemma4"
     MUSE_GLIMMER = "muse_glimmer"
     DIFFUSIONGEMMA = "diffusiongemma"

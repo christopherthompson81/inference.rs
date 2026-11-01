@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Parity of our audio-in decoders (Voxtral, Qwen2-Audio, ...) against transformers on the same checkpoint: greedy
-answers to a question about each clip and to a text-only prompt, and, for a model with a transcription mode (Voxtral),
-each clip's transcript (`--language`), must match exactly.
+answers to a question about each clip and to a text-only prompt, and, for a model with a transcription mode (Voxtral, GLM-ASR),
+each clip's transcript (`--language`, Voxtral's only), must match exactly.
 
 Not part of local_ci.sh: it needs an `inference` build, transformers (with mistral_common for Voxtral, whose processor
 reads the tekken tokenizer through it) and the checkpoint in the Hugging Face cache. Both run in F32, on the CPU unless
@@ -63,9 +63,12 @@ def our_transcript(port: int, wav: str) -> str:
 
 
 def reference_transcript(model, processor, wav: str) -> str:
-    inputs = processor.apply_transcription_request(
-        language=ARGS.language, audio=wav, model_id=ARGS.model
-    )
+    if model.config.model_type == "voxtral":
+        inputs = processor.apply_transcription_request(
+            language=ARGS.language, audio=wav, model_id=ARGS.model
+        )
+    else:
+        inputs = processor.apply_transcription_request(wav)
     inputs = inputs.to(model.device, dtype=model.dtype)
     output = model.generate(
         **inputs, max_new_tokens=ARGS.max_tokens * 4, do_sample=False

@@ -1,0 +1,39 @@
+{
+  "architectures": [
+    "GlmAsrForConditionalGeneration"
+  ],
+  "model_type": "glmasr",
+  "audio_token_id": 264,
+  "projector_hidden_act": "gelu",
+  "audio_config": {
+    "hidden_size": 16,
+    "intermediate_size": 64,
+    "num_attention_heads": 2,
+    "num_hidden_layers": 2,
+    "num_mel_bins": 128,
+    "max_position_embeddings": 1500,
+    "hidden_act": "gelu",
+    "rope_parameters": {
+      "partial_rotary_factor": 0.5,
+      "rope_theta": 10000.0,
+      "rope_type": "default"
+    }
+  },
+  "text_config": {
+    "vocab_size": 265,
+    "hidden_size": 48,
+    "intermediate_size": 96,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 2,
+    "num_key_value_heads": 1,
+    "head_dim": 32,
+    "hidden_act": "silu",
+    "max_position_embeddings": 2048,
+    "rms_norm_eps": 1e-05,
+    "rope_parameters": {
+      "rope_theta": 10000.0,
+      "rope_type": "default"
+    },
+    "tie_word_embeddings": false
+  }
+}

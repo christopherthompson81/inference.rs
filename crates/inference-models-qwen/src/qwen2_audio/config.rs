@@ -1,7 +1,9 @@
 use inference_quant::QuantizedConfig;
 
 use crate::{
-    audio::whisper::{WhisperEncoderConfig, WhisperLayerConfig},
+    audio::whisper::{
+        WhisperEncoderConfig, WhisperLayerConfig, WhisperLayerNames, WhisperPositions,
+    },
     layers::Activation,
     qwen2, serde_default_fn,
 };
@@ -73,10 +75,12 @@ impl Qwen2AudioConfig {
                 activation: ac.activation_function,
                 layer_norm_eps: LAYER_NORM_EPS,
                 k_bias: false,
+                names: WhisperLayerNames::Whisper,
             },
             num_layers: ac.encoder_layers,
             num_mel_bins: ac.num_mel_bins,
             max_source_positions: ac.max_source_positions,
+            positions: WhisperPositions::Learned,
         }
     }
 

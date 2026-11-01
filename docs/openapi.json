@@ -10050,6 +10050,7 @@
           "qwen4exp",
           "voxtral",
           "voxtral-chat",
+          "glm_asr",
           "gemma4",
           "muse_glimmer",
           "diffusiongemma",

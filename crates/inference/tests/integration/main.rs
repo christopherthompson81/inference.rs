@@ -13,6 +13,7 @@ mod gguf_embedding_tiny;
 mod gguf_iq;
 mod gguf_logits_tiny;
 mod gguf_lora_tiny;
+mod glm_asr_tiny;
 mod granite4_vision_tiny;
 mod granite_speech_tiny;
 mod granite_tiny;
