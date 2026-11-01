@@ -1542,6 +1542,7 @@ mod tests {
             video_preprocessor_config: None,
             processor_config: None,
             chat_template_json_filename: None,
+            companion_config: None,
         };
         let reloaded = get_chat_template(&paths, None, None, None, None);
         assert_eq!(

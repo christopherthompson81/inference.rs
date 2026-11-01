@@ -375,6 +375,11 @@ pub trait ModelPaths: AsAny + Debug + Send + Sync {
 
     /// Get embedding model `modules.json` compatible with sentence-transformers
     fn get_modules(&self) -> Option<&[EmbeddingModulePaths]>;
+
+    /// The config of the model whose weights the config's `text_model_id` names, fetched beside its own.
+    fn get_companion_config(&self) -> Option<&PathBuf> {
+        None
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -390,6 +395,7 @@ pub struct LocalModelPaths<P: Debug> {
     pub video_preprocessor_config: Option<P>,
     pub processor_config: Option<P>,
     pub chat_template_json_filename: Option<P>,
+    pub companion_config: Option<P>,
 }
 
 impl<P: Debug> LocalModelPaths<P> {
@@ -416,6 +422,7 @@ impl<P: Debug> LocalModelPaths<P> {
             video_preprocessor_config: None,
             processor_config,
             chat_template_json_filename,
+            companion_config: None,
         }
     }
 }
@@ -453,6 +460,9 @@ impl ModelPaths for LocalModelPaths<PathBuf> {
     }
     fn get_modules(&self) -> Option<&[EmbeddingModulePaths]> {
         None
+    }
+    fn get_companion_config(&self) -> Option<&PathBuf> {
+        self.companion_config.as_ref()
     }
 }
 

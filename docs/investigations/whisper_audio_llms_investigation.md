@@ -426,3 +426,69 @@ zero-padded to 30 s, and the long clip.
   its real length gives a different but sound description.
 
 **Next:** docs, checks, ask before pushing.
+
+## Run 17 - 2026-11-01 15:45
+
+**Question:** does Ultravox load from its safetensors repo (fixie-ai/ultravox-v0_5-llama-3_2-1b: tower and projector
+only, `text_model_id` meta-llama/Llama-3.2-1B-Instruct, no `text_config`) with the text model its config names, and
+match the repo's remote code?
+
+**Commands:** the repo's tensor names by HTTP range (`audio_tower.*`, `multi_modal_projector.*` only) and its
+`tokenizer.json`; `inference serve --dtype f32 -m fixie-ai/ultravox-v0_5-llama-3_2-1b` on the 3090, then with `--cpu`;
+Run 10's reference script without its `date_string` (both sides now render today's date), F32 on the CPU; greedy,
+64 tokens; the text prompt and three clips (short, the 28.7 s dialogue, the 74 s two-chunk clip). `inference tune` on
+the repo.
+
+**Finding:**
+- The file lookup now fetches the repository a config's `text_model_id` names when the config has no `text_config`
+  (its config and weights, beside the repo's own), and the loader merges that config in as `text_config`. The
+  placeholder id comes from the repo's tokenizer (`<|reserved_special_token_0|>`, 128002): the repo's own `<|audio|>`
+  (128256) lies past the text model's embeddings.
+- The text model reads its own names (`model.*`, `lm_head`), so the repo pair loads with no renaming; the GGUF
+  bindings bind the text GGUF to the same names. The GGUF pair still answers as before (64 prompt tokens on the short
+  clip, the same opening).
+- Against the reference: every prompt token count equal (41, 64, 230, 509); the text, short and dialogue answers
+  identical; the 74 s answer parts at token 13, " a friend" for " friends", where ours (GPU and CPU alike) has
+  " friends" at -1.539 and " a" at -1.547, a near tie.
+- `inference tune` first failed with "No suitable quantization level fits": it sized the bare config. It now merges
+  the named text model's config the same way and lists the options (3.84 GB at F16).
+
+**Next:** check UQFF on the audio models (see Run 18), docs, checks.
+
+## Run 18 - 2026-11-01 15:55
+
+**Question:** does an audio model's UQFF reload without the original weights?
+
+**Commands:** `inference quantize -m /mnt/data/models/glm-asr-nano --format gguf -f GLM-ASR-Nano-1.6B-2512-Q8_0.gguf
+--isq q8_0 -o <dir>`; the residual file's tensor names; `inference serve -m <dir> --from-uqff q8_0-0.uqff`.
+
+**Finding:**
+- The residuals were named `language_model.norm.weight`, `language_model.layers.N.input_layernorm.weight`; the reload
+  failed with `cannot find tensor language_model.model.layers.0.input_layernorm.weight`. Qwen2-Audio, Audio Flamingo
+  3, GLM-ASR, Voxtral chat and MERaLiON-2 (`text_decoder`) passed the text model's prefix where the decoder's residual
+  writer takes the stack's (`language_model.model`); fixed in all five.
+- A tiny test per audio model now writes a UQFF from a Q8_0 load and reloads it from the written files alone (a
+  reload beside the checkpoint finds the residuals among the original weights and passes regardless); with GLM-ASR's
+  old prefix it fails.
+
+**Next:** Audio Flamingo 3's `think/` adapter (Run 19).
+
+## Run 19 - 2026-11-01 16:05
+
+**Question:** what is Audio Flamingo 3's `think/` folder, and does supporting it matter for #564?
+
+**Commands:** `think/adapter_config.json`, `think/config.json` and the model card from nvidia/audio-flamingo-3-hf; the
+key list of `think/non_lora_trainables.bin` read from its zip directory and pickle by HTTP range, the pickle parsed
+with stub classes only.
+
+**Finding:**
+- The card's think mode: load `non_lora_trainables.bin` over the model (`strict=False`), then a PEFT LoRA from
+  `think/` (r 64, alpha 16, every text layer's q/k/v/o and gate/up/down), and ask with "Please think and reason about
+  the input music before you respond."
+- `non_lora_trainables.bin` holds one tensor: `language_model.model.embed_tokens.weight` (151672 x 3584, BF16), a
+  retrained input embedding; the tower and projector stay as they are. `think/config.json` is the original
+  `LlavaLlamaModel` training config, not used.
+- So think mode is a second set of input embeddings plus a text-backbone LoRA: our runtime LoRA covers the second
+  part; nothing swaps a full tensor from an adapter folder.
+
+**Next:** report: an optional reasoning mode, not part of the architecture #564 asks for; a follow-up if wanted.

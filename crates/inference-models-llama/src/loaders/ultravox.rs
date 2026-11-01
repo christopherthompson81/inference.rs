@@ -5,15 +5,16 @@ use inference_nn::utils::varbuilder_utils::DeviceForLoadTensor;
 
 use crate::ultravox::{
     UltravoxConfig, UltravoxModel,
+    config::with_text_config,
     inputs_processor::{AUDIO_TOKEN, UltravoxInputsProcessor},
 };
 
-const TEXT_LAYER_INDEX_PATTERN: &str = r"language_model\.model\.layers\.(\d+)\.";
+const TEXT_LAYER_INDEX_PATTERN: &str = r"^model\.layers\.(\d+)\.";
 const CONV_KERNEL: usize = 3;
 // one 30 s chunk, what a clip's attention budget is sized by
 const CHUNK_FRAMES: usize = 3000;
 
-/// `MultimodalLoader` for Ultravox (`UltravoxModel`), from its GGUFs: the published safetensors hold no text model.
+/// `MultimodalLoader` for Ultravox (`UltravoxModel`): its GGUFs, or a safetensors repo with the text model it names.
 pub struct UltravoxLoader;
 
 pub struct UltravoxPrefixer;
@@ -44,6 +45,14 @@ impl MultimodalModelLoader for UltravoxLoader {
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         Ok(Box::new(UltravoxConfig::from_json(config)?))
+    }
+    fn with_companion_config(
+        &self,
+        config: &str,
+        companion: &str,
+        tokenizer: &str,
+    ) -> Result<String> {
+        with_text_config(config, companion, tokenizer)
     }
     fn supports_paged_attention(&self, _config: &str) -> bool {
         true
@@ -78,17 +87,17 @@ impl MultimodalModelLoader for UltravoxLoader {
 impl IsqModelLoader for UltravoxLoader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[
-            r"^language_model\.model\.embed_tokens\.weight$",
-            r"^language_model\.lm_head\.(weight|bias)$",
+            r"^model\.embed_tokens\.weight$",
+            r"^lm_head\.(weight|bias)$",
         ])
     }
 
     // anchored to the decoder: the audio tower's layers share the `layers.N.self_attn` names
     fn isq_layer_regexes(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[
-            r"^language_model\.lm_head\.(weight|bias)$",
-            r"^language_model\.model\.layers\.(\d+)\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.(weight|bias)$",
-            r"^language_model\.model\.layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.(weight|bias)$",
+            r"^lm_head\.(weight|bias)$",
+            r"^model\.layers\.(\d+)\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.(weight|bias)$",
+            r"^model\.layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.(weight|bias)$",
         ])
     }
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
@@ -142,8 +151,8 @@ impl DeviceMappedModelLoader for UltravoxLoader {
         let tc = &cfg.text_config;
         let (embed_pack, head_pack) = super::language_model_pack_factors(
             quantization,
-            "language_model.model.embed_tokens.weight",
-            "language_model.lm_head.weight",
+            "model.embed_tokens.weight",
+            "lm_head.weight",
             tc.tie_word_embeddings,
             dtype,
             weight_pack_factor,

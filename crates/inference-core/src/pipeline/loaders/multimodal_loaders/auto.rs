@@ -106,6 +106,15 @@ impl MultimodalModelLoader for AutoMultimodalLoader {
     fn default_bos_eos(&self, config: &str) -> Option<(String, String)> {
         Self::get_loader(config).ok()?.default_bos_eos(config)
     }
+
+    fn with_companion_config(
+        &self,
+        config: &str,
+        companion: &str,
+        tokenizer: &str,
+    ) -> Result<String> {
+        Self::get_loader(config)?.with_companion_config(config, companion, tokenizer)
+    }
     fn get_device_for_tensor(
         &self,
         config: &str,
