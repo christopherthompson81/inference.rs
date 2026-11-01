@@ -1,6 +1,8 @@
 //! Nemotron-H: Mamba-2, attention, MoE and MLP layers in a per-layer pattern, each layer one mixer or one
 //! feed-forward. A mixer layer and the feed-forward layer after it run as one of Granite's hybrid blocks.
 
+#![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+
 use inference_quant::QuantizedConfig;
 use inference_tensor::Result;
 use serde::Serialize;

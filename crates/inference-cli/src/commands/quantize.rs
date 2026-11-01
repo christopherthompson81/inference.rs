@@ -12,17 +12,17 @@ use inference_api::{
     engine::{
         IsqType, ModelSelected, NormalLoaderType, RuntimeSpec, UqffWriteConfig, expand_isq_value,
     },
-    hidream_gguf, initialize_logging,
+    gguf_requantize, hidream_gguf, initialize_logging,
     uqff::{QuantPolicy, resolve_model_source},
 };
 
 use super::serve::{self, extract_device_settings};
 use crate::args::{
-    AdapterOptions, AsrQuantizeOptions, CacheOptions, DeviceOptions, FormatOptions, GlobalOptions,
-    HiDreamQuantizeOptions, MatformerSelection, ModelSourceOptions, ModelType,
-    MultimodalAdapterOptions, MultimodalOptions, QuantizationOptions, QuantizeDeviceOptions,
-    QuantizeModelSourceOptions, QuantizeModelType, QuantizeMultimodalOptions,
-    QuantizeQuantizationOptions, WorldgenQuantizeOptions,
+    AdapterOptions, AsrQuantizeOptions, CacheOptions, DeviceOptions, FormatOptions,
+    GgufQuantizeOptions, GlobalOptions, HiDreamQuantizeOptions, MatformerSelection,
+    ModelSourceOptions, ModelType, MultimodalAdapterOptions, MultimodalOptions,
+    QuantizationOptions, QuantizeDeviceOptions, QuantizeModelSourceOptions, QuantizeModelType,
+    QuantizeMultimodalOptions, QuantizeQuantizationOptions, WorldgenQuantizeOptions,
 };
 
 const MIB: f64 = (1u64 << 20) as f64;
@@ -109,6 +109,61 @@ pub fn run_hidream_quantize(options: HiDreamQuantizeOptions, global: GlobalOptio
         &options.keep,
     )?;
     report_gguf(&options.output_path, &summary);
+    Ok(())
+}
+
+/// Rewrites a float GGUF with the given per-tensor types.
+pub fn run_gguf_quantize(options: GgufQuantizeOptions) -> Result<()> {
+    initialize_logging();
+    let rules = options
+        .tensor_types
+        .iter()
+        .map(|rule| {
+            let Some((pattern, ty)) = rule.rsplit_once('=') else {
+                anyhow::bail!("`--tensor-type {rule}` is not `<regex>=<type>`");
+            };
+            Ok((
+                regex::Regex::new(pattern)?,
+                gguf_requantize::writable_type(ty)?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let imatrix = options
+        .imatrix
+        .as_deref()
+        .map(gguf_requantize::load_imatrix)
+        .transpose()?;
+    if let Some(imatrix) = &imatrix {
+        info!("Loaded an imatrix of {} tensors", imatrix.len());
+    }
+    let plan = gguf_requantize::RequantizePlan { rules, imatrix };
+    let summary = gguf_requantize::requantize_gguf(
+        &options.model,
+        &options.output_path,
+        &plan,
+        |i, n, name| info!("[{}/{n}] {name}", i + 1),
+    )?;
+    if !summary.without_imatrix.is_empty() {
+        warn!(
+            "{} quantized tensors had no imatrix entry: {}",
+            summary.without_imatrix.len(),
+            summary.without_imatrix.join(", ")
+        );
+    }
+    let types = summary
+        .by_type
+        .iter()
+        .map(|(name, count, bytes)| format!("{count} {name} ({:.1} MiB)", *bytes as f64 / MIB))
+        .collect::<Vec<_>>()
+        .join(", ");
+    info!(
+        "Wrote {} ({:.2} GiB from {:.2} GiB, {} of {} tensors quantized): {types}",
+        options.output_path.display(),
+        summary.bytes_out as f64 / MIB / 1024.0,
+        summary.bytes_in as f64 / MIB / 1024.0,
+        summary.quantized,
+        summary.tensors,
+    );
     Ok(())
 }
 
@@ -606,7 +661,8 @@ mod tests {
             QuantizeCommand::Uqff(model_type) => *model_type,
             QuantizeCommand::Asr(_)
             | QuantizeCommand::HiDreamO1(_)
-            | QuantizeCommand::Worldgen(_) => {
+            | QuantizeCommand::Worldgen(_)
+            | QuantizeCommand::Gguf(_) => {
                 unreachable!("these tests quantize UQFF")
             }
         }

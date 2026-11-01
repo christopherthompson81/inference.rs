@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Our IQ quantizers against ggml's: the same rows (and imatrix) through `ggml_quantize_chunk` in a llama.cpp
+"""Our quantizers against ggml's: the same rows (and imatrix) through `ggml_quantize_chunk` in a llama.cpp
 (libggml-base) or ik_llama.cpp (libggml, for the IQ*_K types) build and through the `quantize_rows` example, compared
 byte for byte.
 
 Usage: scripts/iq_quantize_parity.py <build lib dir> [type ...]   (default: iq4_nl iq4_xs; iq4_ks needs ik_llama.cpp)
+  e.g. q4_k q6_k for the k-quants
 """
 import ctypes, os, subprocess, sys, tempfile
 import numpy as np
 
-TYPES = {"iq4_nl": 20, "iq4_xs": 23, "iq4_ks": 144}
+TYPES = {"q8_0": 8, "q3_k": 11, "q4_k": 12, "q5_k": 13, "q6_k": 14, "iq4_nl": 20, "iq4_xs": 23, "iq4_ks": 144}
 DEFAULT_TYPES = ["iq4_nl", "iq4_xs"]
 ROWS, COLS = 64, 4096
 SEED = 0

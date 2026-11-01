@@ -1,6 +1,7 @@
 //! A tiny random-weight Nemotron-H (Mamba-2, NoPE attention, sigmoid-routed squared-ReLU experts with a shared
 //! expert, a dense squared-ReLU MLP, and a Mamba layer with no feed-forward after it): decoding step by step through
-//! its Mamba state and KV cache scores the tokens as one prefill over them does, and calibrating an ISQ load
+//! its Mamba state and KV cache scores the tokens as one prefill over them does (quantized, with a prompt long enough
+//! to run the experts grouped, too), and calibrating an ISQ load
 //! collects statistics for every expert projection.
 
 use std::collections::HashMap;
@@ -38,12 +39,16 @@ const STATE: usize = 8;
 const CONV: usize = 4;
 const EXPERTS: usize = 4;
 const TOP_K: usize = 2;
+// enough prompt tokens for the CPU's grouped path over quantized experts
+const LONG_PROMPT_REPEATS: usize = 12;
 const EXPERT_WIDTH: usize = 24;
 const SHARED_WIDTH: usize = 40;
 const MLP_WIDTH: usize = 48;
 const WEIGHT_STD: f32 = 0.2;
 const MAX_LEN: usize = 6;
 const LOGPROB_TOLERANCE: f32 = 1e-4;
+// the gather path quantizes activations to Q8 for its dot products; the grouped path multiplies them as they are
+const QUANTIZED_LOGPROB_TOLERANCE: f32 = 5e-2;
 const CIMATRIX: &str = "collected.cimatrix";
 
 fn config() -> serde_json::Value {
@@ -178,17 +183,35 @@ fn checkpoint() -> anyhow::Result<tempfile::TempDir> {
 
 #[tokio::test]
 async fn a_step_by_step_decode_scores_as_one_prefill() -> anyhow::Result<()> {
+    decode_scores_as_prefill(None, "say something long", LOGPROB_TOLERANCE).await
+}
+
+// a long prompt runs a quantized stack on the CPU grouped by expert, decoding gathers it
+#[tokio::test]
+async fn a_long_prompt_on_quantized_experts_scores_as_its_decode() -> anyhow::Result<()> {
+    decode_scores_as_prefill(
+        Some(IsqType::Q8_0),
+        &"say something long ".repeat(LONG_PROMPT_REPEATS),
+        QUANTIZED_LOGPROB_TOLERANCE,
+    )
+    .await
+}
+
+async fn decode_scores_as_prefill(
+    isq: Option<IsqType>,
+    prompt: &str,
+    tolerance: f32,
+) -> anyhow::Result<()> {
     let dir = checkpoint()?;
-    let model = TextModelBuilder::new(dir.path().to_string_lossy())
+    let mut builder = TextModelBuilder::new(dir.path().to_string_lossy())
         .with_dtype(ModelDType::F32)
-        .with_force_cpu()
-        .build()
-        .await?;
-    let chat = || {
-        RequestBuilder::from(
-            TextMessages::new().add_message(TextMessageRole::User, "say something long"),
-        )
-    };
+        .with_force_cpu();
+    if let Some(isq) = isq {
+        builder = builder.with_isq(isq);
+    }
+    let model = builder.build().await?;
+    let chat =
+        || RequestBuilder::from(TextMessages::new().add_message(TextMessageRole::User, prompt));
     let (decoded, _) = traces::greedy(&model, chat(), MAX_LEN).await?;
     let mut tokens = model
         .tokenize_chat(ChatRequest::from(chat()).request)
@@ -208,7 +231,7 @@ async fn a_step_by_step_decode_scores_as_one_prefill() -> anyhow::Result<()> {
         .map(|logprob| logprob.unwrap_or(f32::NAN));
     for (step, ((_, decoded), prefilled)) in decoded.iter().zip(prefilled).enumerate() {
         anyhow::ensure!(
-            (decoded - prefilled).abs() < LOGPROB_TOLERANCE,
+            (decoded - prefilled).abs() < tolerance,
             "step {step}: decoded {decoded}, one prefill {prefilled}"
         );
     }

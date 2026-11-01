@@ -1,4 +1,5 @@
-//! Experts with no gate projection, `down(act(up(x)))` (Nemotron-H's squared ReLU), on the gather path.
+//! Experts with no gate projection, `down(act(up(x)))` (Nemotron-H's squared ReLU): grouped by expert where the
+//! weights are dense (or worth dequantizing for a long prompt), else on the gather path.
 
 use inference_quant::{
     QuantMethod, QuantMethodConfig, QuantizedExpertKeys, Shard, ShardedVarBuilder, UnquantLinear,
@@ -15,6 +16,8 @@ use super::forward::{MoEForward, MoEForwardConfig};
 // NeMo Automodel's stacked experts: an ungated layer's "gate and up" holds only up
 const NEMO_UP: &str = "gate_and_up_projs";
 const NEMO_DOWN: &str = "down_projs";
+// routed rows from which a quantized stack on the CPU is dequantized once and run grouped, not gathered per row
+const CPU_GROUPED_MIN_ROUTES: usize = 256;
 
 pub(super) struct UngatedExpertsWeights {
     up: Arc<dyn QuantMethod>,
@@ -146,7 +149,9 @@ impl UngatedExpertsWeights {
         for (token, (experts, gates)) in ids.iter().zip(&weights).enumerate() {
             for (&expert, &gate) in experts.iter().zip(gates) {
                 let route = &mut routes[expert as usize];
-                route.0.push(token as u32);
+                route
+                    .0
+                    .push(u32::try_from(token).expect("token indices fit u32"));
                 route.1.push(gate);
             }
         }
@@ -161,7 +166,11 @@ impl UngatedExpertsWeights {
             let xs = forward.xs_flat.index_select(&tokens, 0)?;
             let hidden = xs.matmul(&up.get(expert)?.t()?)?.apply(&config.act)?;
             if tracking {
-                let ids = Tensor::full(expert as u32, (rows, 1), device)?;
+                let ids = Tensor::full(
+                    u32::try_from(expert).expect("expert ids fit u32"),
+                    (rows, 1),
+                    device,
+                )?;
                 layers[1].process_routed_stats(&hidden.unsqueeze(1)?, &ids)?;
             }
             let ys = hidden
@@ -189,6 +198,19 @@ impl UngatedExpertsWeights {
             && up_w.rank() == 3
         {
             return Self::forward_grouped([&up, &down], [up_w, down_w], forward, config);
+        }
+        // a long prompt on the CPU: gathering copies a dequantized matrix per routed row
+        if !forward.xs.device().is_cuda()
+            && forward.shape.num_tokens * config.num_experts_per_tok >= CPU_GROUPED_MIN_ROUTES
+        {
+            let dtype = forward.xs_flat.dtype();
+            let stacks = [
+                up.dequantize_w()?.to_dtype(dtype)?,
+                down.dequantize_w()?.to_dtype(dtype)?,
+            ];
+            if stacks[0].rank() == 3 {
+                return Self::forward_grouped([&up, &down], stacks, forward, config);
+            }
         }
         let ids = forward.topk_ids;
         up.process_routed_stats(forward.xs_flat, ids)?;

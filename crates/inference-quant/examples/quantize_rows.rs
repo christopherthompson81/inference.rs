@@ -22,14 +22,26 @@ fn main() -> inference_tensor::Result<()> {
     let id: u32 = id.parse().map_err(inference_tensor::Error::msg)?;
     let ty = GgufType::RAW_BLOCKS
         .into_iter()
+        .chain([
+            GgufType::Q8_0,
+            GgufType::Q3K,
+            GgufType::Q4K,
+            GgufType::Q5K,
+            GgufType::Q6K,
+        ])
         .find(|ty| ty.id() == id)
-        .ok_or_else(|| inference_tensor::Error::msg(format!("no raw GGUF type with id {id}")))?;
+        .ok_or_else(|| {
+            inference_tensor::Error::msg(format!("no writable GGUF type with id {id}"))
+        })?;
     let imatrix = (imatrix != "-").then(|| read_f32(imatrix)).transpose()?;
-    let bytes = inference_quant::iq_quantize::quantize_rows(
+    let values = read_f32(values)?;
+    let cols: usize = cols.parse().map_err(inference_tensor::Error::msg)?;
+    let bytes = inference_quant::requantize::quantize_matrix(
         ty,
-        cols.parse().map_err(inference_tensor::Error::msg)?,
-        &read_f32(values)?,
+        cols,
+        &values,
         imatrix.as_deref(),
+        values.len() / cols,
     )?;
     std::fs::write(out, bytes)?;
     Ok(())

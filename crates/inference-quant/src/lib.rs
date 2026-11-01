@@ -247,10 +247,10 @@ pub use gguf::fast_mmq::{
 pub use gguf::fast_mmvq::{
     moe_decode as indexed_moe_mmvq, supports_moe as supports_indexed_moe_mmvq, with_shared_input,
 };
-pub use gguf::iq_quantize;
 pub use gguf::kernel::GgufType;
 pub use gguf::mapped::MappedBlocks;
 pub use gguf::{GgufMatMul, unquantized_activation_forward};
+pub use gguf::{iq_quantize, requantize};
 /// Runs `f`; without CUDA there are no tile-ordered matvecs to share an input's quantized activations.
 #[cfg(not(feature = "cuda"))]
 pub fn with_shared_input<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {

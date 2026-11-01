@@ -1,3 +1,4 @@
+#![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 use std::{any::Any, sync::Arc};
 
 use inference_audio::nemo::NemoMel;

@@ -46,6 +46,7 @@ pub mod mapped;
 mod packed_affine;
 pub mod raw;
 mod repack;
+pub mod requantize;
 #[cfg(feature = "cuda")]
 mod thread_workspace;
 mod weight_source;

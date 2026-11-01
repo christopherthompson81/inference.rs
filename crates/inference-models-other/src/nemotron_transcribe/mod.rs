@@ -2,6 +2,8 @@
 //! thresholded speaker activities selecting fixed speaker embeddings added to the encoder states, a linear projector,
 //! and a Nemotron-H decoder whose `<|audio|>` positions take the projected audio. Read from NVIDIA's NeMo checkpoint.
 
+#![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+
 pub mod inputs_processor;
 pub mod transcription;
 

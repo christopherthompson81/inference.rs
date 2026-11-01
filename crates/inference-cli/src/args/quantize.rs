@@ -22,6 +22,29 @@ pub enum QuantizeCommand {
 
     /// The world-generation checkpoints laid out for distribution, WorldStereo-2 and umT5 as GGUFs
     Worldgen(WorldgenQuantizeOptions),
+
+    /// A float GGUF to a quantized GGUF: per-tensor types by name pattern, weighed by an imatrix
+    Gguf(GgufQuantizeOptions),
+}
+
+#[derive(Args, Clone)]
+pub struct GgufQuantizeOptions {
+    /// The source `.gguf` (F32, F16 or BF16 tensors)
+    #[arg(short = 'm', long)]
+    pub model: PathBuf,
+
+    /// Output `.gguf` path
+    #[arg(short = 'o', long = "output")]
+    pub output_path: PathBuf,
+
+    /// `<regex>=<type>`, repeatable: the first pattern a tensor's name matches sets its type (`q8_0`, `q6_k`,
+    /// `iq4_ks`, ...); tensors none matches are copied as they are
+    #[arg(long = "tensor-type", required = true)]
+    pub tensor_types: Vec<String>,
+
+    /// llama.cpp's imatrix (`.dat` or `.gguf`), keyed by the source's tensor names
+    #[arg(long)]
+    pub imatrix: Option<PathBuf>,
 }
 
 #[derive(Args, Clone)]
@@ -520,7 +543,8 @@ pub fn resolve_quantize_command(
         Some(
             other @ (QuantizeCommand::Asr(_)
             | QuantizeCommand::HiDreamO1(_)
-            | QuantizeCommand::Worldgen(_)),
+            | QuantizeCommand::Worldgen(_)
+            | QuantizeCommand::Gguf(_)),
         ) => {
             return Ok(other);
         }
@@ -583,7 +607,8 @@ mod tests {
             QuantizeCommand::Uqff(model_type) => Ok(*model_type),
             QuantizeCommand::Asr(_)
             | QuantizeCommand::HiDreamO1(_)
-            | QuantizeCommand::Worldgen(_) => {
+            | QuantizeCommand::Worldgen(_)
+            | QuantizeCommand::Gguf(_) => {
                 unreachable!("these tests quantize UQFF")
             }
         }

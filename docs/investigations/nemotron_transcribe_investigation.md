@@ -5,7 +5,7 @@ speaker encoder (a "parallel expert encoder") in front of the Nemotron 3.5 Light
 attention / MoE decoder, with an MTP head and a CTC word-timestamp head. The decoder is Nemotron-H (#565), which the
 tree does not have yet.
 
-## Run 1 - 2026-11-01 16:40
+## Run 1 - 2026-11-01 ~10:40
 
 **Question:** what does the checkpoint hold, what reference exists, and what has to be built?
 
@@ -47,7 +47,7 @@ llama.cpp's log since 2026-09; issue #565.
 first (the Transcribe decoder, text-only prompts against transformers), then the ASR encoder and the chat/transcribe
 path, then the speaker branch and word timestamps.
 
-## Run 2 - 2026-11-01 17:00
+## Run 2 - 2026-11-01 ~11:00
 
 **Question:** does Nemotron-H, built on Granite's hybrid blocks, compute what transformers' `NemotronHForCausalLM`
 does?
@@ -80,7 +80,7 @@ on the saved directory, `/v1/completions` with logprobs.
 **Next:** the llama.cpp `nemotron_h_moe` GGUF bindings, then the Transcribe text model from the real checkpoint
 against transformers.
 
-## Run 3 - 2026-11-01 17:10
+## Run 3 - 2026-11-01 ~11:10
 
 **Question:** do llama.cpp's Nemotron-H GGUFs load onto the same model?
 
@@ -102,7 +102,7 @@ drops `<|audio|>`, id 131072: the converter asserts every token id is below the 
 
 **Next:** the Transcribe model itself: the ASR encoder, the speaker branch, the projector, its prompt.
 
-## Run 4 - 2026-11-01 17:45
+## Run 4 - 2026-11-01 ~11:45
 
 **Question:** does the real Transcribe decoder, loaded as Nemotron-H from the checkpoint's NeMo names, answer text
 prompts as transformers does?
@@ -130,7 +130,7 @@ links to the checkpoint and its tokenizer and template, `inference serve --cpu -
 
 **Next:** commit the NeMo layout; then the audio side.
 
-## Run 5 - 2026-11-01 19:30
+## Run 5 - 2026-11-01 ~13:00
 
 **Question:** does our Nemotron 3.5 Transcribe (the full model from the NeMo checkpoint) transcribe as transformers does?
 
@@ -157,7 +157,7 @@ projected audio features saved. Ours: `inference serve --cpu --dtype bf16 -m <ch
 
 **Next:** GPU with ISQ (the 3090), then AtomicChat's GGUF pair (the `pee` encoder GGUF), the word-timestamp head.
 
-## Run 6 - 2026-11-01 19:30
+## Run 6 - 2026-11-01 ~13:15
 
 **Question:** does the model run on the 3090 quantized in place, and how does it fit?
 
@@ -183,7 +183,7 @@ NeMo checkpoint; the LAN server stopped for the runs; Run 5's clips and comparis
 **Next:** a sizing plan (as for the Qwen3.8 27B recipe): a quantized artifact written once, sized to leave headroom,
 measured by KLD against BF16 references, then speed.
 
-## Plan - 2026-11-01 20:00 (sizing a GGUF for the 3090)
+## Plan - 2026-11-01 ~13:20 (sizing a GGUF for the 3090)
 
 **Budget:** the card's usable 24,145 MiB (23.58 GiB), under the 23.5 GiB ceiling used for the Qwen3.8 27B recipe. Fixed
 costs: CUDA context and kernels about 0.6 GiB; KV only on the 6 attention layers (2 KV heads x 128, BF16), 6 KiB per
@@ -216,7 +216,7 @@ no room to admit a 74 s prompt (Run 6).
 **Disk:** 131 GB free on /mnt/data. Step 1 as transformers-layout safetensors then GGUF needs 63 + 59 GB at once;
 converting the safetensors to the GGUF directly, or deleting the intermediate first, keeps it under.
 
-## Run 7 - 2026-11-01 20:45
+## Run 7 - 2026-11-01 ~13:30
 
 **Question:** what quantization tooling does inference.rs have for this model, and can the decoder become a llama.cpp
 BF16 GGUF without a 63 GB intermediate?
@@ -245,7 +245,7 @@ b25c3fd2: absent).
 **Next:** IQ encoders (IQ4_NL, IQ4_XS, then IQ4_KS) with round trips against our dequantizers; a KLD tool (BF16
 reference logprobs over text and audio, then mean KLD, top-1 agreement, perplexity of a quantized load).
 
-## Run 8 - 2026-11-01 21:10
+## Run 8 - 2026-11-01 ~13:35
 
 **Question:** do our IQ4_NL / IQ4_XS quantizers (ported from ggml's `quantize_row_iq4_nl_impl`) write what ggml
 writes?
@@ -260,7 +260,7 @@ dequantizers, the imatrix lowering the weighted error, zero rows staying zero.
 **Next:** IQ4_KS (ik_llama.cpp's encoder); then the tool around them: quantizing a GGUF with an imatrix and per-tensor
 rules into a GGUF, imatrix collection keyed by GGUF tensor names, and the KLD tool.
 
-## Run 9 - 2026-11-01 22:00
+## Run 9 - 2026-11-01 ~14:00
 
 **Question:** does our IQ4_KS quantizer (ported from ik_llama.cpp's `quantize_row_iq4_k_impl_bs32`, the AVX2 path its
 `-march=native` build takes) write what ik writes?
@@ -277,3 +277,50 @@ imatrix as Run 8, through ik's libggml), then the mainline run again.
   reference (still 0 differing after switching our `nearest_int` to ggml's round-half-even magic-number trick).
 
 **Next:** `inference quantize gguf`: a BF16 GGUF plus imatrix and per-tensor regex rules to a quantized GGUF.
+
+## Run 10 - 2026-11-01 ~14:15
+
+**Question:** the requantizer reaches the k-quants through `QTensor` (candle's encoders); do they write what current
+ggml writes?
+
+**Commands:** `scripts/iq_quantize_parity.py ~/Programming/llama.cpp/build_cuda/bin q8_0 q3_k q4_k q5_k q6_k iq4_nl
+iq4_xs` (the example now goes through `requantize::quantize_matrix`), then both outputs dequantized with gguf-py and
+compared to the source as relative (imatrix-weighted) RMSE.
+
+**Findings:**
+- Exact: Q8_0, Q3_K plain, IQ4_NL, IQ4_XS (and IQ4_KS vs ik, Run 9).
+- Different bytes: Q4_K / Q5_K / Q6_K plain (25-38 %), Q3_K / Q6_K imatrix (~20 %), Q4_K / Q5_K imatrix (~1 %).
+- Relative error, ggml vs ours: q3_k imatrix 0.18596 vs 0.18807; q4_k plain 0.10605 vs 0.10884, imatrix 0.09666 vs
+  0.09661; q5_k plain 0.05326 vs 0.05408, imatrix 0.04995 vs 0.04994; q6_k plain 0.03052 vs 0.03065, imatrix 0.02957
+  vs 0.02970. Ours is never meaningfully better and up to 2.6 % worse (plain Q4_K).
+
+**Implication:** not a blocker for this model (experts IQ4_KS, the rest Q8_0 / Q6_K), but a follow-up: port ggml's
+current k-quant encoders so our GGUFs match llama.cpp's. The requantizer streams a slice at a time (one expert, or
+up to 64 MiB of source rows), so memory stays at a slice whatever the model's size.
+
+## Run 11 - 2026-11-01 ~14:20
+
+**Question:** does the first recipe (`ffn_up_exps` IQ4_KS, `ffn_down_exps` IQ4_NL, the other matrices Q8_0) go
+through `inference quantize gguf` on the BF16 text GGUF?
+
+**Command:** `inference quantize gguf -m Nemotron-3.5-Transcribe-text-BF16.gguf -o ...-IQ4_KS-noimat.gguf --tensor-type
+'ffn_up_exps\.weight$=iq4_ks' --tensor-type 'ffn_down_exps\.weight$=iq4_nl' --tensor-type
+'(attn_[qkv]|attn_output|_shexp|ssm_in|ssm_out|output|token_embd)\.weight$=q8_0'`
+
+**Finding:** refused while planning, before any data: `blk.1.ffn_up_exps.weight: rows of 2688 cannot be Iq4Ks`. The
+hidden size 2688 is 84 x 32 and the expert width 1856 is 58 x 32, neither a multiple of 256, so no 256-block type
+(the k-quants, IQ4_XS, IQ4_KS, every IQ*_K) fits this model's expert matrices, or any matrix whose rows are 2688 or
+1856 wide. Only the 32-block types do: IQ4_NL (4.5 bpw), Q4_0, Q5_0, Q8_0. The Plan's 4.25 bpw sizing assumed IQ4_KS;
+at IQ4_NL the experts are 15.4 GiB and the text model ~17.6 GiB, still inside the 23.5 GiB ceiling with the audio tower
+(1.4 GiB BF16) and the KV cache. The IQ4_KS encoder stays as a tool for models it fits.
+
+Rerun with `'_exps\.weight$=iq4_nl'` and the same Q8_0 rule: running (writing ~1 GB per ~3 min from a debug build).
+
+**Also:** online calibration of a CPU ISQ load was impractical: quantized ungated experts gathered a dequantized matrix
+per routed row. From 256 routed rows the CPU now dequantizes each stack once and runs it grouped by expert. Prefill
+then differs from decode by up to ~0.02 in logprob on the tiny model, because the gather path quantizes activations to
+Q8 for its dot products while the grouped path multiplies them as they are (the unquantized and short-prompt Q8_0
+cases still agree to 1e-4).
+
+**Next:** collect the imatrix online on a CPU Q8_0 load of the NeMo checkpoint (text corpus + synthetic audio
+prompts), save the `.cimatrix`, convert it to llama.cpp's imatrix under the GGUF names, then requantize with it.
