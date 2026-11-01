@@ -324,3 +324,45 @@ cases still agree to 1e-4).
 
 **Next:** collect the imatrix online on a CPU Q8_0 load of the NeMo checkpoint (text corpus + synthetic audio
 prompts), save the `.cimatrix`, convert it to llama.cpp's imatrix under the GGUF names, then requantize with it.
+
+## Run 12 - 2026-11-01 ~14:30
+
+**Question:** does the IQ4_NL / Q8_0 rewrite (no imatrix) finish within bounded memory, and does the result load and
+generate?
+
+**Command:** `/usr/bin/time -v inference quantize gguf -m ...-text-BF16.gguf -o ...-text-IQ4_NL-noimat.gguf
+--tensor-type '_exps\.weight$=iq4_nl' --tensor-type
+'(attn_[qkv]|attn_output|_shexp|ssm_in|ssm_out|output|token_embd)\.weight$=q8_0'` (debug build), then `inference
+serve --format gguf` on the 3090 and a text chat request (thinking off).
+
+**Findings:**
+- `17.59 GiB from 58.84 GiB, 164 of 401 tensors quantized: 46 IQ4_NL (15757.9 MiB), 118 Q8_0 (2223.4 MiB), 237 F32
+  (33.8 MiB)`; 14:32 wall, maximum RSS 434 MB (the 1.3 GB expert stacks went through an expert at a time).
+- Loads through the `nemotron_h_moe` bindings with the GGUF's tokenizer and template; "Write two sentences about how
+  rivers form deltas." gives a correct two-sentence answer, 37.7 tok/s decode, 124 tok/s prompt (debug build).
+
+**Next:** the imatrix. 48 synthetic Kokoro clips (8 voices, wikitext paragraphs, 22-70 s, 30.6 min) plus 64
+unvoiced wikitext paragraphs, through online calibration on a CPU Q8_0 load of the NeMo checkpoint: each clip with its
+text as the assistant turn (teacher-forced, `max_tokens` 1, so the transcript tokens are prefilled rather than decoded
+on the CPU).
+
+## Run 13 - 2026-11-01 ~15:10
+
+**Question:** does online calibration on a CPU Q8_0 load (`serve --cpu --isq q8_0`) get through the calibration set?
+
+**Finding (first try):** no. The first audio request (676 tokens) ran on one CPU thread for about a minute, then the
+OOM killer took the server: `anon-rss:119345700kB` (idle it held ~33 GB). Run 11's CPU grouped path dequantized each
+whole expert stack per forward (Q8_0 -> f16 -> f32 -> the activation dtype, ~2.5 GB a copy, through candle's
+single-threaded CPU casts) before its matmuls.
+
+**Fix:** the CPU expert kernel the gated MoE uses for GPU-cache misses (`cpu_experts.rs`) now takes a squared-ReLU form
+(`CpuExpertGate::SquaredRelu`, no gate projection) and can return each route's hidden row (`forward_recording`), which
+is the down projection's routed statistics. Ungated quantized stacks in host memory run through it for prefill and
+decode alike, multithreaded from their blocks with no dequantized copies; while calibration collects, the recorded
+rows feed the down projection's statistics. Kernel tests check the ungated form against a dense reference (3 %
+tolerance: squaring `up` doubles its share of the Q8_K activation error) and the recorded rows (2 %). The tiny
+Nemotron-H's experts were 24 wide, so ISQ left the down stack dense and the layer silently gathered; at 32 wide a
+probe confirmed the quantized tests reach the kernel, and decode matches prefill to 1e-4 there.
+
+**Second try:** without `--cpu`, the auto map puts layers 0-8 on the 3090 (16.2 GB) and 9-28 on the CPU. 676 tokens
+in 28.9 s, RSS steady at 23.4 GiB, ~7 cores busy (the CPU layers' Mamba and attention parts are not all parallel).

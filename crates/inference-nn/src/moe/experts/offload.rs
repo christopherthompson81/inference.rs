@@ -147,10 +147,12 @@ impl Shared {
             }
         }
         CpuExperts {
-            gate: projection(&self.host[0]),
+            gate: inference_quant::cpu_experts::CpuExpertGate::Glu {
+                gate: projection(&self.host[0]),
+                act: self.act,
+            },
             up: projection(&self.host[1]),
             down: projection(&self.host[2]),
-            act: self.act,
         }
     }
 
@@ -1001,10 +1003,12 @@ mod tests {
             cols: dims[p][2],
         };
         let cpu = inference_quant::cpu_experts::CpuExperts {
-            gate: projection(0),
+            gate: inference_quant::cpu_experts::CpuExpertGate::Glu {
+                gate: projection(0),
+                act: GluActivationType::Silu,
+            },
             up: projection(1),
             down: projection(2),
-            act: GluActivationType::Silu,
         };
         // what another layer left in the shared staging past the experts a prompt stages: 0xFF reads as NaN scales
         let layouts = LAYOUTS.lock().expect("expert layouts poisoned").clone();

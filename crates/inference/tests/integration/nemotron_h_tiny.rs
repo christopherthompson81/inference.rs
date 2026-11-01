@@ -39,16 +39,15 @@ const STATE: usize = 8;
 const CONV: usize = 4;
 const EXPERTS: usize = 4;
 const TOP_K: usize = 2;
-// enough prompt tokens for the CPU's grouped path over quantized experts
+// enough prompt tokens for the CPU expert kernel to decode an expert's rows into a tile
 const LONG_PROMPT_REPEATS: usize = 12;
-const EXPERT_WIDTH: usize = 24;
+// whole Q8_0 blocks, so a quantized load runs its experts from their blocks on the CPU
+const EXPERT_WIDTH: usize = 32;
 const SHARED_WIDTH: usize = 40;
 const MLP_WIDTH: usize = 48;
 const WEIGHT_STD: f32 = 0.2;
 const MAX_LEN: usize = 6;
 const LOGPROB_TOLERANCE: f32 = 1e-4;
-// the gather path quantizes activations to Q8 for its dot products; the grouped path multiplies them as they are
-const QUANTIZED_LOGPROB_TOLERANCE: f32 = 5e-2;
 const CIMATRIX: &str = "collected.cimatrix";
 
 fn config() -> serde_json::Value {
@@ -183,25 +182,20 @@ fn checkpoint() -> anyhow::Result<tempfile::TempDir> {
 
 #[tokio::test]
 async fn a_step_by_step_decode_scores_as_one_prefill() -> anyhow::Result<()> {
-    decode_scores_as_prefill(None, "say something long", LOGPROB_TOLERANCE).await
+    decode_scores_as_prefill(None, "say something long").await
 }
 
-// a long prompt runs a quantized stack on the CPU grouped by expert, decoding gathers it
+// quantized experts on the CPU run from their blocks, a long prompt's tiled and a decode step's per row
 #[tokio::test]
 async fn a_long_prompt_on_quantized_experts_scores_as_its_decode() -> anyhow::Result<()> {
     decode_scores_as_prefill(
         Some(IsqType::Q8_0),
         &"say something long ".repeat(LONG_PROMPT_REPEATS),
-        QUANTIZED_LOGPROB_TOLERANCE,
     )
     .await
 }
 
-async fn decode_scores_as_prefill(
-    isq: Option<IsqType>,
-    prompt: &str,
-    tolerance: f32,
-) -> anyhow::Result<()> {
+async fn decode_scores_as_prefill(isq: Option<IsqType>, prompt: &str) -> anyhow::Result<()> {
     let dir = checkpoint()?;
     let mut builder = TextModelBuilder::new(dir.path().to_string_lossy())
         .with_dtype(ModelDType::F32)
@@ -231,7 +225,7 @@ async fn decode_scores_as_prefill(
         .map(|logprob| logprob.unwrap_or(f32::NAN));
     for (step, ((_, decoded), prefilled)) in decoded.iter().zip(prefilled).enumerate() {
         anyhow::ensure!(
-            (decoded - prefilled).abs() < tolerance,
+            (decoded - prefilled).abs() < LOGPROB_TOLERANCE,
             "step {step}: decoded {decoded}, one prefill {prefilled}"
         );
     }

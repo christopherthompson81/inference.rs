@@ -1,4 +1,5 @@
-//! A GLU expert FFN run on the CPU straight from GGUF blocks in host memory, for the routes a GPU expert cache misses.
+//! An expert FFN (a GLU, or one activation over `up` alone) run on the CPU straight from GGUF blocks in host memory:
+//! the routes a GPU expert cache misses, or a whole layer's experts on the CPU.
 
 use inference_tensor::quantized::GgmlType;
 use inference_tensor::quantized::k_quants::{BlockQ8K, QK_K};
@@ -101,13 +102,22 @@ impl CpuExpertProjection<'_> {
     }
 }
 
+/// How an expert's hidden rows come from `up`: gated, `act(gate) * up`, or `relu(up)^2` (Nemotron-H's experts).
+#[derive(Clone, Copy)]
+pub enum CpuExpertGate<'a> {
+    Glu {
+        gate: CpuExpertProjection<'a>,
+        act: GluActivationType,
+    },
+    SquaredRelu,
+}
+
 /// gate, up and down of one MoE layer's experts.
 #[derive(Clone, Copy)]
 pub struct CpuExperts<'a> {
-    pub gate: CpuExpertProjection<'a>,
+    pub gate: CpuExpertGate<'a>,
     pub up: CpuExpertProjection<'a>,
     pub down: CpuExpertProjection<'a>,
-    pub act: GluActivationType,
 }
 
 /// One routed pick: token row `token` sends to `expert` with routing weight `weight`.
@@ -258,13 +268,45 @@ fn rows_per_item(rows: usize, cols: usize) -> usize {
 impl CpuExperts<'_> {
     /// Adds each route's weighted expert output into `out` (`tokens x hidden`, as `xs`).
     pub fn forward(&self, xs: &[f32], routes: &[CpuExpertRoute], out: &mut [f32]) -> Result<()> {
-        self.gate.check("gate")?;
+        self.forward_inner(xs, routes, out, None)
+    }
+
+    /// [`Self::forward`], also copying each route's hidden row (the down projection's input, `routes x inter`) into
+    /// `hidden_rows`, as calibration records it.
+    pub fn forward_recording(
+        &self,
+        xs: &[f32],
+        routes: &[CpuExpertRoute],
+        out: &mut [f32],
+        hidden_rows: &mut Vec<f32>,
+    ) -> Result<()> {
+        self.forward_inner(xs, routes, out, Some(hidden_rows))
+    }
+
+    fn glu(&self) -> Option<&CpuExpertProjection<'_>> {
+        match &self.gate {
+            CpuExpertGate::Glu { gate, .. } => Some(gate),
+            CpuExpertGate::SquaredRelu => None,
+        }
+    }
+
+    fn forward_inner(
+        &self,
+        xs: &[f32],
+        routes: &[CpuExpertRoute],
+        out: &mut [f32],
+        hidden_rows: Option<&mut Vec<f32>>,
+    ) -> Result<()> {
+        if let Some(gate) = self.glu() {
+            gate.check("gate")?;
+            if (gate.rows, gate.cols) != (self.up.rows, self.up.cols) {
+                bail!("CPU experts: gate and up shapes disagree");
+            }
+        }
         self.up.check("up")?;
         self.down.check("down")?;
-        let (hidden, inter) = (self.gate.cols, self.gate.rows);
-        if self.up.cols != hidden
-            || self.up.rows != inter
-            || self.down.cols != inter
+        let (hidden, inter) = (self.up.cols, self.up.rows);
+        if self.down.cols != inter
             || self.down.rows != hidden
             || !xs.len().is_multiple_of(hidden)
             || out.len() != xs.len()
@@ -286,11 +328,12 @@ impl CpuExperts<'_> {
         let tiled = |p: &CpuExpertProjection| {
             cpu_dot::tile_supports(p.ty) && groups.iter().any(|g| g.len() >= TILE_MIN_TOKENS)
         };
-        let tiled_gate_up = tiled(&self.gate) && tiled(&self.up);
+        let tiled_gate_up = self.glu().is_none_or(tiled) && tiled(&self.up);
         let tiled_down = tiled(&self.down);
 
-        let gate_up_32 = self.gate.is_32() || self.up.is_32();
-        let (q8, q16) = if self.gate.is_32() && self.up.is_32() {
+        let gate_32 = self.glu().is_none_or(CpuExpertProjection::is_32);
+        let gate_up_32 = self.glu().is_some_and(CpuExpertProjection::is_32) || self.up.is_32();
+        let (q8, q16) = if gate_32 && self.up.is_32() {
             (Vec::new(), Vec::new())
         } else {
             quantize_rows(xs, tiled_gate_up)
@@ -316,19 +359,25 @@ impl CpuExperts<'_> {
             let group = groups[g];
             let expert = routes[group[0]].expert;
             let store = |r: usize, row: usize, gate: f32, up: f32| {
-                // SAFETY: route r's row `row` belongs to this item alone
-                unsafe {
-                    gated_out.set(r * inter + row, apply_cpu_activation(gate, self.act) * up)
+                let value = match self.gate {
+                    CpuExpertGate::Glu { act, .. } => apply_cpu_activation(gate, act) * up,
+                    CpuExpertGate::SquaredRelu => up.max(0.0) * up.max(0.0),
                 };
+                // SAFETY: route r's row `row` belongs to this item alone
+                unsafe { gated_out.set(r * inter + row, value) };
             };
             if let Some(tokens) = &gate_up_rows[g] {
                 TILE.with_borrow_mut(|tile| {
                     let n = tokens.len();
-                    tile.project(0, &self.gate, expert, row0, tokens);
+                    if let Some(gate) = self.glu() {
+                        tile.project(0, gate, expert, row0, tokens);
+                    }
                     tile.project(1, &self.up, expert, row0, tokens);
+                    let gated = self.glu().is_some();
                     for k in 0..item_rows {
                         for (t, &r) in group.iter().enumerate() {
-                            store(r, row0 + k, tile.out[0][k * n + t], tile.out[1][k * n + t]);
+                            let gate = if gated { tile.out[0][k * n + t] } else { 0.0 };
+                            store(r, row0 + k, gate, tile.out[1][k * n + t]);
                         }
                     }
                 });
@@ -348,39 +397,39 @@ impl CpuExperts<'_> {
                     }
                 };
                 for row in row0..row0 + item_rows {
-                    let (gate_row, up_row) = (self.gate.row(expert, row), self.up.row(expert, row));
+                    let up_row = self.up.row(expert, row);
+                    let gate_row = self.glu().map(|gate| (gate, gate.row(expert, row)));
                     for &r in group {
-                        store(
-                            r,
-                            row,
-                            dot(&self.gate, gate_row, r),
-                            dot(&self.up, up_row, r),
-                        );
+                        let gate = gate_row.map_or(0.0, |(gate, w)| dot(gate, w, r));
+                        store(r, row, gate, dot(&self.up, up_row, r));
                     }
                 }
                 return;
             }
             for row in row0..row0 + item_rows {
-                let (gate_row, up_row) = (self.gate.row(expert, row), self.up.row(expert, row));
+                let up_row = self.up.row(expert, row);
+                let gate_row = self.glu().map(|gate| (gate.ty, gate.row(expert, row)));
                 let (quads, rest) = group.as_chunks::<DOT_TOKENS>();
                 for quad in quads {
                     let xs = quad.map(x);
-                    let gate = cpu_dot::vec_dot_x4(self.gate.ty, gate_row, xs);
+                    let gate = gate_row
+                        .map_or([0.0; DOT_TOKENS], |(ty, w)| cpu_dot::vec_dot_x4(ty, w, xs));
                     let up = cpu_dot::vec_dot_x4(self.up.ty, up_row, xs);
                     for (k, &r) in quad.iter().enumerate() {
                         store(r, row, gate[k], up[k]);
                     }
                 }
                 for &r in rest {
-                    let (gate, up) = (
-                        cpu_dot::vec_dot(self.gate.ty, gate_row, x(r)),
-                        cpu_dot::vec_dot(self.up.ty, up_row, x(r)),
-                    );
-                    store(r, row, gate, up);
+                    let gate = gate_row.map_or(0.0, |(ty, w)| cpu_dot::vec_dot(ty, w, x(r)));
+                    store(r, row, gate, cpu_dot::vec_dot(self.up.ty, up_row, x(r)));
                 }
             }
         });
 
+        if let Some(hidden_rows) = hidden_rows {
+            hidden_rows.clear();
+            hidden_rows.extend_from_slice(&gated_rows);
+        }
         let (gated, gated16) = if self.down.is_32() {
             (Vec::new(), Vec::new())
         } else {
@@ -555,36 +604,39 @@ mod tests {
 
     fn check_against_dense(tokens: usize, routes: &[CpuExpertRoute]) -> Result<()> {
         for (types, inter) in TYPE_SETS {
-            check_types_against_dense(types, inter, tokens, routes)?;
+            for gated in [true, false] {
+                check_types_against_dense_dims(types, HIDDEN, inter, tokens, routes, gated)?;
+            }
         }
         Ok(())
     }
 
-    fn check_types_against_dense(
-        types: [GgufType; 2],
-        inter: usize,
-        tokens: usize,
-        routes: &[CpuExpertRoute],
-    ) -> Result<()> {
-        check_types_against_dense_dims(types, HIDDEN, inter, tokens, routes)
-    }
-
+    // `gated` false runs squared-ReLU experts, whose recorded hidden rows are checked too
     fn check_types_against_dense_dims(
         [gate_up_ty, down_ty]: [GgufType; 2],
         hidden: usize,
         inter: usize,
         tokens: usize,
         routes: &[CpuExpertRoute],
+        gated: bool,
     ) -> Result<()> {
         let gate = projection_bytes(gate_up_ty, inter, hidden, 1);
         let up = projection_bytes(gate_up_ty, inter, hidden, 2);
         let down = projection_bytes(down_ty, hidden, inter, 3);
+        let gate_proj = CpuExpertProjection {
+            ty: gate_up_ty,
+            bytes: &gate,
+            rows: inter,
+            cols: hidden,
+        };
         let experts = CpuExperts {
-            gate: CpuExpertProjection {
-                ty: gate_up_ty,
-                bytes: &gate,
-                rows: inter,
-                cols: hidden,
+            gate: if gated {
+                CpuExpertGate::Glu {
+                    gate: gate_proj,
+                    act: GluActivationType::Silu,
+                }
+            } else {
+                CpuExpertGate::SquaredRelu
             },
             up: CpuExpertProjection {
                 ty: gate_up_ty,
@@ -598,24 +650,39 @@ mod tests {
                 rows: hidden,
                 cols: inter,
             },
-            act: GluActivationType::Silu,
         };
         let xs = (0..tokens * hidden)
             .map(|i| ((i * 29 % 97) as f32 - 48.0) / 24.0)
             .collect::<Vec<_>>();
         let mut out = vec![0f32; xs.len()];
-        experts.forward(&xs, routes, &mut out)?;
+        let mut hidden_rows = Vec::new();
+        experts.forward_recording(&xs, routes, &mut out, &mut hidden_rows)?;
 
         let mut expected = vec![0f32; xs.len()];
-        for route in routes {
+        for (r, route) in routes.iter().enumerate() {
             let x = &xs[route.token * hidden..][..hidden];
-            let g = matvec(&dense(&experts.gate, route.expert), x);
             let u = matvec(&dense(&experts.up, route.expert), x);
-            let h = g
+            let h = match experts.glu() {
+                Some(gate) => matvec(&dense(gate, route.expert), x)
+                    .iter()
+                    .zip(&u)
+                    .map(|(g, u)| apply_cpu_activation(*g, GluActivationType::Silu) * u)
+                    .collect::<Vec<_>>(),
+                None => u.iter().map(|u| u.max(0.0) * u.max(0.0)).collect(),
+            };
+            let recorded = &hidden_rows[r * inter..][..inter];
+            let norm = h.iter().map(|v| v * v).sum::<f32>().sqrt();
+            let err = recorded
                 .iter()
-                .zip(&u)
-                .map(|(g, u)| apply_cpu_activation(*g, GluActivationType::Silu) * u)
-                .collect::<Vec<_>>();
+                .zip(&h)
+                .map(|(a, b)| (a - b) * (a - b))
+                .sum::<f32>()
+                .sqrt();
+            assert!(
+                err < 0.02 * norm.max(f32::MIN_POSITIVE),
+                "route {r}: hidden row error {}",
+                err / norm
+            );
             let y = matvec(&dense(&experts.down, route.expert), &h);
             for (e, v) in expected[route.token * hidden..][..hidden].iter_mut().zip(y) {
                 *e += route.weight * v;
@@ -633,9 +700,10 @@ mod tests {
                 .map(|(a, b)| (a - b) * (a - b))
                 .sum::<f32>()
                 .sqrt();
-            // both activations are quantized to Q8_K on this path
+            // both activations are quantized to Q8_K on this path; squaring `up` doubles its share of that error
+            let tolerance = if gated { 0.02 } else { 0.03 };
             assert!(
-                err < 0.02 * norm,
+                err < tolerance * norm,
                 "{gate_up_ty:?} / {down_ty:?} token {t}: relative error {}",
                 err / norm
             );
@@ -667,7 +735,9 @@ mod tests {
             [GgufType::Iq4Nl, GgufType::Iq4Nl],
         ] {
             for (hidden, inter) in [(64, 32), (64, 64), (96, 64), (32 * 7, 32 * 3)] {
-                check_types_against_dense_dims(types, hidden, inter, 2, &routes)?;
+                for gated in [true, false] {
+                    check_types_against_dense_dims(types, hidden, inter, 2, &routes, gated)?;
+                }
             }
         }
         Ok(())
@@ -704,11 +774,14 @@ mod tests {
             bytes(GgufType::Iq4Xs, hidden, inter, 3),
         );
         let experts = CpuExperts {
-            gate: CpuExpertProjection {
-                ty: GgufType::Iq3S,
-                bytes: &gate,
-                rows: inter,
-                cols: hidden,
+            gate: CpuExpertGate::Glu {
+                gate: CpuExpertProjection {
+                    ty: GgufType::Iq3S,
+                    bytes: &gate,
+                    rows: inter,
+                    cols: hidden,
+                },
+                act: GluActivationType::Silu,
             },
             up: CpuExpertProjection {
                 ty: GgufType::Iq3S,
@@ -722,7 +795,6 @@ mod tests {
                 rows: hidden,
                 cols: inter,
             },
-            act: GluActivationType::Silu,
         };
         let start = std::time::Instant::now();
         let (iters, routes) = run(&experts, hidden);
@@ -860,10 +932,12 @@ mod tests {
             cols,
         };
         let experts = CpuExperts {
-            gate: projection(gate_up, &gate, inter, hidden),
+            gate: CpuExpertGate::Glu {
+                gate: projection(gate_up, &gate, inter, hidden),
+                act: GluActivationType::Silu,
+            },
             up: projection(gate_up, &up, inter, hidden),
             down: projection(down, &down_bytes, hidden, inter),
-            act: GluActivationType::Silu,
         };
         let per_expert = (gate.len() + up.len() + down_bytes.len()) / n_experts;
         let xs = vec![0.01f32; hidden];
@@ -945,10 +1019,12 @@ mod tests {
             }
         }
         let experts = CpuExperts {
-            gate: projection(GgufType::Iq3S, &gate, inter, hidden),
+            gate: CpuExpertGate::Glu {
+                gate: projection(GgufType::Iq3S, &gate, inter, hidden),
+                act: GluActivationType::Silu,
+            },
             up: projection(GgufType::Iq3S, &up, inter, hidden),
             down: projection(GgufType::Q8_0, &down, hidden, inter),
-            act: GluActivationType::Silu,
         };
         let raw_gate = super::super::raw::GgufRawMatMul::new(
             super::super::raw::RawGgufTensor::new(

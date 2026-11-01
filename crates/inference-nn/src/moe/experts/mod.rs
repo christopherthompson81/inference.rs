@@ -89,12 +89,14 @@ impl MappedCpuExperts {
             }
         });
         let experts = inference_quant::cpu_experts::CpuExperts {
-            gate,
+            gate: inference_quant::cpu_experts::CpuExpertGate::Glu {
+                gate,
+                act: self.act,
+            },
             up,
             down,
-            act: self.act,
         };
-        backends::run_cpu_experts(&experts, forward, config)
+        backends::run_cpu_experts(&experts, forward, config, None)
     }
 }
 

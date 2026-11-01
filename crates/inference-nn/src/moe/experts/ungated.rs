@@ -1,5 +1,5 @@
 //! Experts with no gate projection, `down(act(up(x)))` (Nemotron-H's squared ReLU): grouped by expert where the
-//! weights are dense (or worth dequantizing for a long prompt), else on the gather path.
+//! weights are dense, from their GGUF blocks on the CPU, else on the gather path.
 
 use inference_quant::{
     QuantMethod, QuantMethodConfig, QuantizedExpertKeys, Shard, ShardedVarBuilder, UnquantLinear,
@@ -16,8 +16,6 @@ use super::forward::{MoEForward, MoEForwardConfig};
 // NeMo Automodel's stacked experts: an ungated layer's "gate and up" holds only up
 const NEMO_UP: &str = "gate_and_up_projs";
 const NEMO_DOWN: &str = "down_projs";
-// routed rows from which a quantized stack on the CPU is dequantized once and run grouped, not gathered per row
-const CPU_GROUPED_MIN_ROUTES: usize = 256;
 
 pub(super) struct UngatedExpertsWeights {
     up: Arc<dyn QuantMethod>,
@@ -182,6 +180,51 @@ impl UngatedExpertsWeights {
         out.to_dtype(forward.original_dtype)
     }
 
+    // quantized stacks in host memory run from their blocks, on every core; gathering dequantizes a matrix per route
+    fn forward_cpu_blocks(
+        [up, down]: [&Arc<dyn QuantMethod>; 2],
+        forward: &MoEForward,
+        config: MoEForwardConfig,
+    ) -> Result<Option<Tensor>> {
+        use inference_quant::cpu_experts::{CpuExpertGate, CpuExperts, supports};
+        if !forward.xs.device().is_cpu() || !matches!(config.act, crate::layers::Activation::Relu2)
+        {
+            return Ok(None);
+        }
+        let (Some(up_blocks), Some(down_blocks)) = (up.cpu_gguf_blocks(), down.cpu_gguf_blocks())
+        else {
+            return Ok(None);
+        };
+        let (Some(up_proj), Some(down_proj)) = (
+            up_blocks.expert_projection(),
+            down_blocks.expert_projection(),
+        ) else {
+            return Ok(None);
+        };
+        if ![up_proj, down_proj].iter().all(|p| supports(p.ty, p.cols)) {
+            return Ok(None);
+        }
+        let experts = CpuExperts {
+            gate: CpuExpertGate::SquaredRelu,
+            up: up_proj,
+            down: down_proj,
+        };
+        if down.stats_snapshot().is_none() {
+            return super::backends::run_cpu_experts(&experts, forward, config, None).map(Some);
+        }
+        up.process_routed_stats(forward.xs_flat, forward.topk_ids)?;
+        let mut hidden = Vec::new();
+        let ys = super::backends::run_cpu_experts(&experts, forward, config, Some(&mut hidden))?;
+        let rows = forward.shape.num_tokens;
+        let hidden = Tensor::from_vec(
+            hidden,
+            (rows, config.num_experts_per_tok, up_proj.rows),
+            &Device::Cpu,
+        )?;
+        down.process_routed_stats(&hidden, forward.topk_ids)?;
+        Ok(Some(ys))
+    }
+
     pub(super) fn forward_impl(
         &self,
         forward: &MoEForward,
@@ -199,18 +242,8 @@ impl UngatedExpertsWeights {
         {
             return Self::forward_grouped([&up, &down], [up_w, down_w], forward, config);
         }
-        // a long prompt on the CPU: gathering copies a dequantized matrix per routed row
-        if !forward.xs.device().is_cuda()
-            && forward.shape.num_tokens * config.num_experts_per_tok >= CPU_GROUPED_MIN_ROUTES
-        {
-            let dtype = forward.xs_flat.dtype();
-            let stacks = [
-                up.dequantize_w()?.to_dtype(dtype)?,
-                down.dequantize_w()?.to_dtype(dtype)?,
-            ];
-            if stacks[0].rank() == 3 {
-                return Self::forward_grouped([&up, &down], stacks, forward, config);
-            }
+        if let Some(ys) = Self::forward_cpu_blocks([&up, &down], forward, config)? {
+            return Ok(ys);
         }
         let ids = forward.topk_ids;
         up.process_routed_stats(forward.xs_flat, ids)?;
