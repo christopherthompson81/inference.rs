@@ -293,11 +293,13 @@ pub(crate) fn hub_model_paths<P>(
 }
 
 /// The model's chat template, with special tokens the files leave unset taken from a prepared source.
+/// The chat template the files, the request or the prepared source give, else the loader's `default`.
 pub(crate) fn load_chat_template(
     paths: &dyn super::ModelPaths,
     jinja_explicit: Option<&String>,
     chat_template: Option<&String>,
     prepared: Option<&PreparedSource>,
+    default: Option<String>,
 ) -> super::ChatTemplate {
     use inference_protocol::chat_template::BeginEndUnkPadTok;
     let chat_template_explicit = paths
@@ -311,6 +313,18 @@ pub(crate) fn load_chat_template(
         chat_template,
         prepared.and_then(|source| source.chat_template.clone()),
     );
+    if template.chat_template.is_none() {
+        if let Some(default) = default {
+            info!("Using the loader's built-in chat template.");
+            template.chat_template = Some(inference_protocol::chat_template::ChatTemplateValue(
+                either::Either::Left(default),
+            ));
+        } else {
+            warn!(
+                "No chat template source found. No chat template will be used. Only prompts will be accepted, not messages."
+            );
+        }
+    }
     if let Some(source) = prepared {
         let token = |token: &Option<String>| {
             token

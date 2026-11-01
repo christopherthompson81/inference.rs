@@ -64,6 +64,8 @@ pub(crate) mod qwen3_asr;
 pub(crate) mod qwen3_vl;
 #[cfg(feature = "models-llama")]
 pub(crate) mod voxtral;
+#[cfg(feature = "models-llama")]
+pub(crate) mod voxtral_chat;
 
 pub(crate) mod media_host;
 pub(crate) use inference_nn::media_inputs::{preprocessor_config, processor_config};

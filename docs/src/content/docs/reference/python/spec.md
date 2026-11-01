@@ -611,6 +611,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `MultimodalLoaderType.QWEN3_5MOE` | `'qwen3_5moe'` |
 | `MultimodalLoaderType.QWEN4EXP` | `'qwen4exp'` |
 | `MultimodalLoaderType.VOXTRAL` | `'voxtral'` |
+| `MultimodalLoaderType.VOXTRAL_CHAT` | `'voxtral-chat'` |
 | `MultimodalLoaderType.GEMMA4` | `'gemma4'` |
 | `MultimodalLoaderType.MUSE_GLIMMER` | `'muse_glimmer'` |
 | `MultimodalLoaderType.DIFFUSIONGEMMA` | `'diffusiongemma'` |

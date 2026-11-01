@@ -1,0 +1,113 @@
+# Whisper-encoder audio LLMs (#564)
+
+Voxtral, Ultravox, Qwen2-Audio, Audio Flamingo 3, GLM-ASR and MERaLiON-2 share one recipe: the bidirectional Whisper
+encoder (now `inference_nn::audio::whisper::WhisperEncoder`, #748), a projector, and a text decoder we already have.
+
+## Run 1 - 2026-10-31 12:59
+
+**Question:** what does Voxtral (offline, mistralai/Voxtral-Mini-3B-2507) need beyond the shared encoder, and what do
+its GGUFs and prompt look like?
+
+**Command:** the repo's `config.json` / `preprocessor_config.json` / weight index; transformers 5.19
+`models/voxtral`; gguf-py over ggml-org's `Voxtral-Mini-3B-2507-Q4_K_M.gguf` and `mmproj-...-Q8_0.gguf`; llama.cpp
+970b51ce7 `tools/mtmd/models/whisper-enc.cpp`; mistral_common 1.x `encode_chat_completion` /
+`encode_transcription` with a 2 s clip.
+
+**Finding:**
+- Encoder: the Whisper encoder exactly (`audio_tower.{conv1,conv2,embed_positions,layers.N,layer_norm}`, 32 layers,
+  1280 wide, 128 mels). Projector: four encoder frames stacked (1280 x 4 = 5120), `multi_modal_projector.linear_1`
+  (5120 -> 3072, no bias), GELU, `linear_2` (3072 -> 3072, no bias). Text: Llama layout (30 layers, 3072, 32/8 heads,
+  head_dim 128, theta 1e8, vocab 131072) under `language_model.`.
+- Features: each clip padded to a multiple of 30 s, one Whisper log-mel over the padded clip (one peak), cut into
+  3000-frame chunks; each chunk is 1500 positions, 375 audio tokens.
+- Prompt (mistral_common): chat `[BOS][INST][BEGIN_AUDIO]` + `[AUDIO]` x 375 per chunk + text + `[/INST]` (ids 1, 3,
+  25, 24, ..., 4; no spaces); transcription `... [/INST]lang:en[TRANSCRIBE]` (id 34). `audio_token_id` 24.
+- The HF repo has no `tokenizer.json` or template (transformers uses mistral_common); the GGUF has a gpt2/tekken
+  tokenizer with these specials, but its chat template is Unsloth's Devstral one, so the loader must bring its own.
+- mmproj: `clip.projector_type voxtral`, `clip.audio.projector.stack_factor 4`, `a.conv1d.N`, `a.position_embd`,
+  `a.blk.N.{ln1,attn_q/k/v/out,ln2,ffn_up/down}`, `a.post_ln`, `mm.a.mlp.N` (Q8_0).
+
+**Next:** the Voxtral model and its GGUF path, checked against llama.cpp on the Q4_K_M GGUF.
+
+## Run 2 - 2026-10-31 17:32
+
+**Question:** what does loading ggml-org's Voxtral GGUF do today, and where does the chat template come from?
+
+**Commands:** `inference run --cpu --format gguf -m /mnt/data/models/voxtral-mini-3b -f Voxtral-Mini-3B-2507-Q4_K_M.gguf`
+(projector beside it); gguf-py over the text GGUF's metadata; reading the GGUF/multimodal template code.
+
+**Finding:**
+- The load stops before any template: `multimodal GGUF requires its original config.json, but the GGUF files do not
+  identify one unambiguous Hugging Face base model`. Neither GGUF carries `general.base_model.*`; the text GGUF is
+  `general.architecture llama` with no name, so only the projector (`clip.projector_type voxtral`) says Voxtral.
+- With `--tok-model-id mistralai/Voxtral-Mini-3B-2507` it would still fail: `VoxtralForConditionalGeneration` is in no
+  loader table. The existing `voxtral` loader is Voxtral Realtime (`VoxtralRealtimeForConditionalGeneration`,
+  Mistral-native consolidated weights), a different model.
+- The embedded template (9838 chars) is Unsloth's Devstral one; it opens every chat with Devstral's OpenHands agent
+  system prompt. Precedence today: a template file or an explicit template, else the GGUF's metadata template, and a
+  loader's `default_chat_template` only when none of those exists, so a loader can never correct a wrong GGUF template.
+- The native multimodal GGUF path (`resolve_native_multimodal_gguf`, keyed by projector type and text architecture)
+  needs a `config.json`; `synthesize_normal_config` builds one for text GGUFs, nothing does for audio projectors.
+
+**Implies:** the template fix lands with the offline Voxtral port: (1) the model (shared `WhisperEncoder`, stack-4
+projector, the shared decoder as `Mistral`), (2) its audio inputs processor, (3) loader + table row (`voxtral-chat`, module
+`voxtral_chat`; renaming Realtime would touch 19 files for no new capability), (4) a loader template that wins over a GGUF's embedded one,
+(5) GGUF: `("voxtral", "llama")` in the native multimodal registry, projector bindings, and a config synthesized from
+the GGUF metadata so no base repo is needed, (6) tests, then parity against llama.cpp's mtmd on the same Q4_K_M.
+
+## Run 3 - 2026-10-31 18:05
+
+**Question:** with the model, loader, template override and GGUF config synthesis in place, does ggml-org's Q4_K_M
+pair load with no base repo, and does it match llama.cpp?
+
+**Commands:** `inference run --cpu --format gguf -m /mnt/data/models/voxtral-mini-3b -f Voxtral-Mini-3B-2507-Q4_K_M.gguf`
+(text, then `--audio` with the synthetic two-voice garden dialogue, 28.7 s); `inference serve --cpu` + greedy
+`/v1/chat/completions` with an `input_audio` part; llama.cpp 970b51ce7 `llama-mtmd-cli -ngl 0 --temp 0` on the same
+files (the GPU holds the LAN server, so both on the CPU).
+
+**Finding:**
+- Loads with no base repo or `--tok-model-id`: the config is synthesized from the GGUF metadata. Text prompt is 16
+  tokens (`<s>[INST]...[/INST]`), so the Devstral template is gone. Audio prompt 390 tokens (375 for the one chunk).
+- Text-only greedy ("Name three rivers in Europe..."): ours and llama.cpp agree for ~30 tokens ("Sure! Here are three
+  rivers in Europe and a fact about each: 1. **Danube River (Europe's second-longest river)**"), then drift, as two
+  Q4_K CPU kernels do.
+- Audio greedy: ours "The conversation is about planning a garden project. The speakers are discussing the garden
+  plans they received...", llama.cpp "This conversation is about a garden project. The speakers are discussing the
+  garden plans, deciding on the location for the vegetable beds...". Same with llama.cpp forced to
+  `--chat-template mistral-v7-tekken` (its default is the GGUF's Devstral template). Our first-token top-2: 1784 at
+  0.572, 4380 at 0.381, a close call.
+- Same prompt framing in both (`mtmd.cpp`: marker first, `[BEGIN_AUDIO]` + embeddings); both projectors use erf GELU.
+- llama.cpp's Whisper preprocessing (`mtmd-audio.cpp`) is openai-whisper's: 30 s of zeros appended and the log-mel
+  normalized over that span; transformers (what mistral's processor uses) pads only to the next 30 s boundary. On a
+  28.7 s clip the peak and the padded frames differ, enough to flip a 0.57/0.38 call. llama.cpp is not the reference
+  for Voxtral's features. Dead end for parity.
+- `llama-completion` in build_cuda segfaults at start (with and without the GPU); `llama-mtmd-cli` reading the prompt
+  from stdin works as a text-only runner.
+
+**Next:** transformers on the BF16 checkpoint as the reference (also the only way to check our safetensors path):
+greedy answers and first-token probabilities, ours BF16 vs transformers BF16.
+
+## Run 4 - 2026-10-31 18:00
+
+**Question:** does our Voxtral match transformers (the reference mistral's processor runs through) on the original
+weights?
+
+**Commands:** `hf download mistralai/Voxtral-Mini-3B-2507 --include "*.safetensors"`; `scripts/voxtral_parity.py
+mistralai/Voxtral-Mini-3B-2507 <wavs>` (transformers 5.19 + mistral_common 1.13 in a scratch venv; both F32 on the CPU,
+greedy, 48 tokens; the question "What is said in this recording? Answer in two sentences." per clip, plus a text-only
+prompt).
+
+**Finding:**
+- First start failed: `missing field audio_config`. The repo ships `config.json` (HF names, `model-*.safetensors`) and
+  Mistral's native `params.json` (`consolidated.safetensors`); the safetensors paths took `params.json` whenever
+  present, a rule for Voxtral Realtime, whose loader reads the native config. Now `params.json` wins only without a
+  `config.json` or when it names an architecture whose loader reads the native config
+  (`VoxtralRealtimeForConditionalGeneration`). Voxtral Realtime's and Small's repos ship both too.
+- Exact match on every case: text-only (192 chars), the synthetic garden dialogue 28.7 s (258), a short synthetic clip
+  (151), a 44.5 s two-chunk clip (246), a 74.5 s three-chunk concatenation (250), a 9.3 s Spanish clip (132).
+- So the features (one log-mel over the clip padded to whole 30 s chunks), the encoder, the stacking and the projector
+  agree with transformers; the GGUF-vs-llama.cpp first-token split in Run 3 is llama.cpp's openai-whisper-style
+  padding, not ours.
+
+**Next:** docs (supported models, GGUF support), then local CI. Transcription mode (`lang:xx[TRANSCRIBE]` through the
+transcriptions endpoint) is a separate step.

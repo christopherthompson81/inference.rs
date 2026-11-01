@@ -46,6 +46,7 @@ mod smollm3;
 mod vllama;
 mod vllama4;
 mod voxtral;
+mod voxtral_chat;
 
 pub use idefics2::*;
 pub use idefics3::*;
@@ -59,6 +60,7 @@ pub use smollm3::*;
 pub use vllama::*;
 pub use vllama4::*;
 pub use voxtral::*;
+pub use voxtral_chat::*;
 
 inference_nn::boxed_loaders!(
     NormalModelLoader:
@@ -78,4 +80,5 @@ inference_nn::boxed_loaders!(
     VLlama4Loader,
     VLlamaLoader,
     VoxtralLoader,
+    VoxtralChatLoader,
 );

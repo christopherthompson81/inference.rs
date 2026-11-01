@@ -106,8 +106,12 @@ fn required_metadata_string<'a>(archive: &'a GgufArchive, key: &str) -> Result<&
 }
 
 pub(super) fn metadata_usize(archive: &GgufArchive, key: &str) -> Result<usize> {
-    let value = archive
-        .metadata_value(key)
+    map_usize(archive.metadata(), key)
+}
+
+pub(super) fn map_usize(metadata: &HashMap<String, Value>, key: &str) -> Result<usize> {
+    let value = metadata
+        .get(key)
         .with_context(|| format!("GGUF metadata `{key}` is required"))?;
     let value = match value {
         Value::U8(value) => *value as u64,

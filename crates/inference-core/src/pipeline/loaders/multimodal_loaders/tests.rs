@@ -445,13 +445,16 @@ fn auto_multimodal_delegates_promoted_isq_predicates() -> Result<()> {
 }
 
 #[test]
-fn voxtral_detection_is_realtime_only() {
+fn voxtral_realtime_and_voxtral_chat_are_told_apart() {
     assert_eq!(
         MultimodalLoaderType::from_causal_lm_name("VoxtralRealtimeForConditionalGeneration")
             .unwrap(),
         MultimodalLoaderType::Voxtral
     );
-    assert!(MultimodalLoaderType::from_causal_lm_name("VoxtralForConditionalGeneration").is_err());
+    assert_eq!(
+        MultimodalLoaderType::from_causal_lm_name("VoxtralForConditionalGeneration").unwrap(),
+        MultimodalLoaderType::VoxtralChat
+    );
 }
 
 #[test]

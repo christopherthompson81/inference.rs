@@ -17,6 +17,7 @@ use super::{
     muse_glimmer_bindings::build_muse_glimmer_bindings,
     normal_registry::RopePairing,
     paddleocr_vl_bindings::{self, build_paddleocr_vl_bindings},
+    voxtral_bindings::{self, build_voxtral_bindings, synthesize_voxtral_config},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,12 +32,15 @@ pub enum NativeMultimodalGgufFamily {
     Lfm2Vl,
     MuseGlimmer,
     PaddleOcrVl,
+    VoxtralChat,
 }
 
 pub struct NativeMultimodalGguf {
     pub loader_type: MultimodalLoaderType,
     pub bindings: GgufBindingMap,
     pub rope_pairing: RopePairing,
+    /// The config the GGUFs' metadata describes, for families that need no base repository.
+    pub config: Option<String>,
 }
 
 pub fn resolve_native_multimodal_gguf(
@@ -51,7 +55,17 @@ pub fn resolve_native_multimodal_gguf(
         loader_type: family.loader_type(),
         bindings: family.build_bindings(archive)?,
         rope_pairing: family.rope_pairing(),
+        config: family.synthesize_config(archive)?,
     }))
+}
+
+/// Whether a text GGUF of `architecture` beside a `projector` describes its own config, so loading needs no base
+/// repository.
+pub fn describes_own_config(architecture: &str, projector: &str) -> bool {
+    matches!(
+        family_from_names(architecture, Some(projector)),
+        Ok(Some(NativeMultimodalGgufFamily::VoxtralChat))
+    )
 }
 
 impl NativeMultimodalGgufFamily {
@@ -67,6 +81,14 @@ impl NativeMultimodalGgufFamily {
             Self::Lfm2Vl => MultimodalLoaderType::Lfm2Vl,
             Self::MuseGlimmer => MultimodalLoaderType::MuseGlimmer,
             Self::PaddleOcrVl => MultimodalLoaderType::PaddleOcrVl,
+            Self::VoxtralChat => MultimodalLoaderType::VoxtralChat,
+        }
+    }
+
+    fn synthesize_config(self, archive: &GgufArchive) -> Result<Option<String>> {
+        match self {
+            Self::VoxtralChat => synthesize_voxtral_config(archive).map(Some),
+            _ => Ok(None),
         }
     }
 
@@ -81,7 +103,8 @@ impl NativeMultimodalGgufFamily {
             | Self::Idefics3
             | Self::Mistral3
             | Self::Llama4
-            | Self::MuseGlimmer => RopePairing::Adjacent,
+            | Self::MuseGlimmer
+            | Self::VoxtralChat => RopePairing::Adjacent,
         }
     }
 
@@ -103,12 +126,13 @@ impl NativeMultimodalGgufFamily {
             Self::Lfm2Vl => build_lfm2_vl_bindings(archive),
             Self::MuseGlimmer => build_muse_glimmer_bindings(archive),
             Self::PaddleOcrVl => build_paddleocr_vl_bindings(archive),
+            Self::VoxtralChat => build_voxtral_bindings(archive),
         }
     }
 }
 
 // (vision projector type, the text architecture it pairs with, family)
-const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 10] = [
+const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 11] = [
     ("gemma3", "gemma3", NativeMultimodalGgufFamily::Gemma3),
     ("gemma3nv", "gemma3n", NativeMultimodalGgufFamily::Gemma3n),
     (
@@ -134,6 +158,11 @@ const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 10] = [
         paddleocr_vl_bindings::PROJECTOR,
         paddleocr_vl_bindings::ARCHITECTURE,
         NativeMultimodalGgufFamily::PaddleOcrVl,
+    ),
+    (
+        voxtral_bindings::PROJECTOR,
+        voxtral_bindings::TEXT_ARCHITECTURE,
+        NativeMultimodalGgufFamily::VoxtralChat,
     ),
 ];
 
