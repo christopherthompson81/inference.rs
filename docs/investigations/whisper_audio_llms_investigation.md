@@ -111,3 +111,101 @@ prompt).
 
 **Next:** docs (supported models, GGUF support), then local CI. Transcription mode (`lang:xx[TRANSCRIBE]` through the
 transcriptions endpoint) is a separate step.
+
+## Run 5 - 2026-10-31 19:34
+
+**Question:** does Voxtral's transcription mode, served through `/v1/audio/transcriptions`, match transformers'
+`apply_transcription_request`?
+
+**Commands:** mistral_common `encode_transcription` with and without a language;
+`scripts/voxtral_parity.py mistralai/Voxtral-Mini-3B-2507 <garden dialogue> <short> <multi 44 s>` (transcripts with
+`language=en`, max 192 tokens; the chat cases again).
+
+**Finding:**
+- Prompt: `<s>[INST][BEGIN_AUDIO][AUDIO]x375[/INST]lang:en[TRANSCRIBE]`, or `...[/INST][TRANSCRIBE]` without a language;
+  the answer is the bare transcript.
+- Exact match: transcripts of 406, 44 and 591 chars (the 44 s clip across two chunks), and all chat cases again.
+- The endpoint already refuses `task=translate` for every audio-in decoder.
+
+**Next:** Qwen2-Audio (transformers `qwen2_audio`), then GLM-ASR, Audio Flamingo 3; Ultravox and MERaLiON-2 are
+remote code only.
+
+## Run 6 - 2026-10-31 20:50
+
+**Question:** does our Qwen2-Audio (Qwen/Qwen2-Audio-7B-Instruct, BF16 shards, 16 GB) match transformers?
+
+**Commands:** transformers 5.19 `models/qwen2_audio` read for the encoder (the Whisper encoder; avg-pool by 2 *before*
+the final layer norm; a padding mask over the clip's real frames) and processor (one 30 s window per clip, truncated;
+`Audio N: <|audio_bos|><|AUDIO|><|audio_eos|>\n` per clip from the processor's own template; the repo's tokenizer
+template is text-only ChatML); `scripts/audio_llm_parity.py` (generalized from voxtral_parity.py: the transformers
+class comes from `architectures`, transcripts only for a model with `apply_transcription_request`), F32 on the CPU.
+
+**Finding:**
+- The released `text_config` omits hidden size, layers, heads and activation; transformers' `Qwen2Config` defaults
+  fill them (4096, 32, 32 heads and 32 KV heads, SiLU, untied). Our config applies the same defaults.
+- Truncating the encoder input to the clip's real positions equals transformers' padding mask: every pooled token it
+  keeps averages two real positions.
+- First run: text, the 28.7 s dialogue and the 44 s clip (cut to 30 s) match; the short clip did not: same first
+  sentence, then transformers stopped and ours went on. With `repetition_penalty` 1.0 in both, an exact match; with
+  the checkpoint's 1.1, ours 0.45 " This" vs 0.29 `<|im_end|>`, transformers `<|im_end|>` 19.71 vs " This" 19.09
+  (processed logits).
+- Cause: our prompt was 134 tokens to transformers' 125. `tokenizer.json` lists 3 added tokens and
+  `tokenizer_config.json`'s `added_tokens_decoder` 3288, the audio markers among them; transformers merges the
+  latter, we read only `tokenizer.json`, so `<|audio_bos|>`/`<|audio_eos|>` became text pieces (`<|AUDIO|>` worked
+  only because the processor registers its placeholder). The penalty saw different tokens; at 1.0 the extra
+  pieces happened not to change the answer.
+- Fix (engine-wide): `get_tokenizer` merges `added_tokens_decoder` entries missing from `tokenizer.json` at their
+  declared ids. Prompt now 125 tokens.
+
+- Full parity again, the checkpoint's 1.1 penalty in both: exact match on text (205 chars), the short clip (83), the
+  dialogue (258), the 44 s clip (246) and a Spanish clip (169).
+
+**Next:** GLM-ASR (its own encoder: rotary positions, pre-norm layers, no learned
+positions), Audio Flamingo 3; Ultravox and MERaLiON-2 are remote code only.
+
+## Run 7 - 2026-10-31 21:55
+
+**Question:** does our GLM-ASR (zai-org/GLM-ASR-Nano-2512, 4.5 GB) match transformers?
+
+**Commands:** transformers 5.19 `models/glmasr` read; `scripts/audio_llm_parity.py zai-org/GLM-ASR-Nano-2512 <short>
+<garden dialogue> <multi 44 s>` (chat and transcription mode), F32 on the CPU.
+
+**Finding:**
+- The tower is Whisper's layers with rotary positions (half-split, the first 32 of each head's 64 dims) in place of the
+  table, under Llama-style names (`input_layernorm`, `o_proj`, `post_attention_layernorm`, `mlp.fc1`/`fc2`, final
+  `norm`). The shared `WhisperEncoder` now takes `WhisperLayerNames` and `WhisperPositions::Rotary` instead of a second
+  copy of the layer.
+- Each 30 s window is its own feature extraction (own log-mel peak) and the tower reads every window whole, padding
+  included (no mask); four positions stack into one 5120-wide input; the projector widens to 4096 and back to 2048;
+  each window keeps `((positions - 4) / 4) + 1` tokens. Up to 21 windows (655 s).
+- The repo's template writes each audio part itself, so GLM-ASR's prefixer adds nothing (with one, the placeholder
+  appeared twice: the prefixer writes into the text part, which a parts-writing template keeps).
+- Transcription: the processor's `apply_transcription_request` prompt (`Please transcribe this audio into text`); no
+  language option in the reference, so a requested language is ignored.
+- Exact match on the first run: text (185 chars), chat about three clips (44, 212, 235), transcripts (44, 406, 599, the
+  last across two windows).
+
+**Next:** Audio Flamingo 3 (noncommercial licence), then Ultravox and MERaLiON-2 (remote code only).
+
+## Run 8 - 2026-10-31 23:30
+
+**Question:** does our Audio Flamingo 3 (nvidia/audio-flamingo-3-hf; the sharded files only, 16 GB, the repo also
+ships a duplicate single file) match transformers?
+
+**Commands:** transformers 5.19 `models/audioflamingo3` read; `scripts/audio_llm_parity.py nvidia/audio-flamingo-3-hf
+<short> <garden dialogue> <multi 44 s>` (chat and transcription mode), F32 on the CPU (7B in F32 does not fit the
+3090 even without the LAN server).
+
+**Finding:**
+- AF3 is Qwen2-Audio's tower (masked to each window's real positions, pooled by two before the final norm) over 30 s
+  windows as GLM-ASR cuts them (each its own log-mel, up to 600 s), a two-layer MLP projector with biases, and a
+  Qwen2.5 decoder whose config uses transformers 5's names (`rope_parameters`, `hidden_size` in the audio config).
+  One `PooledAudioSpec` now drives both models (projector kind, window limit); the loaders come from one macro.
+- The repo's template writes `<sound>` for each audio part (one per message); the processor's transcription prompt
+  is `Transcribe the input speech.` with no language.
+- First run stopped on the transcript step (no transcriber yet); the script now prints each case as it finishes.
+- Exact match: text (191 chars), chat about three clips (65, 39, 82), transcripts (80, 439, 621; the last across two
+  windows).
+
+**Next:** Ultravox and MERaLiON-2 have no transformers implementation; a reference means running their repos' remote
+code, which needs the user's go-ahead.

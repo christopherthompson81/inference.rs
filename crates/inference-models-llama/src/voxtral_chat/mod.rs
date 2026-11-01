@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod inputs_processor;
+pub mod transcription;
 
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::nn::{Linear, Module};

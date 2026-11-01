@@ -25,6 +25,54 @@ struct AddedToken {
     content: String,
 }
 
+// transformers adds the tokens `tokenizer_config.json` declares beside `tokenizer.json`; older repos list them only there
+fn merge_config_added_tokens(raw: Vec<u8>, config: &Path) -> Result<Vec<u8>> {
+    let Ok(config) = std::fs::read(config) else {
+        return Ok(raw);
+    };
+    let config: Value = serde_json::from_slice(&config)?;
+    let Some(declared) = config[ADDED_TOKENS_DECODER].as_object() else {
+        return Ok(raw);
+    };
+    let mut tokenizer: Value = serde_json::from_slice(&raw)?;
+    let present = tokenizer["added_tokens"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|token| token["content"].as_str().map(str::to_string))
+        .collect::<std::collections::HashSet<_>>();
+    let vocab = tokenizer["model"]["vocab"].as_object();
+    let mut missing = declared
+        .iter()
+        .filter_map(|(id, token)| Some((id.parse::<u64>().ok()?, token)))
+        .filter(|(id, token)| {
+            token["content"].as_str().is_some_and(|content| {
+                !present.contains(content)
+                    && vocab
+                        .and_then(|vocab| vocab.get(content))
+                        .is_none_or(|known| known.as_u64() == Some(*id))
+            })
+        })
+        .map(|(id, token)| {
+            let mut token = token.clone();
+            token["id"] = id.into();
+            (id, token)
+        })
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(raw);
+    }
+    missing.sort_by_key(|(id, _)| *id);
+    if !tokenizer["added_tokens"].is_array() {
+        tokenizer["added_tokens"] = Value::Array(Vec::new());
+    }
+    let added = tokenizer["added_tokens"]
+        .as_array_mut()
+        .expect("added_tokens was made an array above");
+    added.extend(missing.into_iter().map(|(_, token)| token));
+    Ok(serde_json::to_vec(&tokenizer)?)
+}
+
 fn repair_tokenizer_json(raw: Vec<u8>) -> Result<Vec<u8>> {
     let mut tokenizer: Value = serde_json::from_slice(&raw)?;
     let Some(vocab) = tokenizer["model"]["vocab"].as_object() else {
@@ -82,6 +130,8 @@ pub(crate) const QWEN_TIKTOKEN_TOKENIZER: &str = "qwen.tiktoken";
 pub(crate) const NATIVE_TOKENIZERS: [&str; 2] = [TEKKEN_TOKENIZER, QWEN_TIKTOKEN_TOKENIZER];
 
 // tokenization_qwen.py: the specials follow the 151,643 ranks
+const TOKENIZER_CONFIG: &str = "tokenizer_config.json";
+const ADDED_TOKENS_DECODER: &str = "added_tokens_decoder";
 const QWEN_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 const QWEN_SPECIALS: [&str; 3] = ["<|endoftext|>", "<|im_start|>", "<|im_end|>"];
 const QWEN_EXTRA_SPECIALS: usize = 205;
@@ -247,6 +297,7 @@ pub(crate) fn get_tokenizer<P: AsRef<Path> + Clone>(
 
     let mut tokenizer = {
         let raw = std::fs::read(p.clone()).map_err(anyhow::Error::msg)?;
+        let raw = merge_config_added_tokens(raw, &p.as_ref().with_file_name(TOKENIZER_CONFIG))?;
         let raw_fixed = repair_tokenizer_json(raw)?;
         tokenizer_from_bytes(&raw_fixed)?
     };
@@ -269,13 +320,43 @@ pub(crate) fn get_tokenizer<P: AsRef<Path> + Clone>(
 
 #[cfg(test)]
 mod tests {
-    use super::{load_qwen_tiktoken, repair_tokenizer_json, tokenizer_from_bytes};
+    use super::{
+        load_qwen_tiktoken, merge_config_added_tokens, repair_tokenizer_json, tokenizer_from_bytes,
+    };
     use base64::Engine;
     use serde_json::{Value, json};
 
     // every byte, then `<a`: the pattern keeps `<a` one piece, which GPT-2's regex would split into `<` and `a`
     const MERGED: &[u8] = b"<a";
     const MERGED_RANK: u32 = 256;
+
+    // as transformers does, tokens only `tokenizer_config.json` declares join the tokenizer at their declared ids
+    #[test]
+    fn tokens_only_the_config_declares_join_at_their_ids() -> anyhow::Result<()> {
+        let tokenizer = json!({
+            "version": "1.0",
+            "added_tokens": [],
+            "model": {"type": "WordLevel", "vocab": {"a": 0, "b": 1, "[UNK]": 2}, "unk_token": "[UNK]"},
+            "pre_tokenizer": {"type": "Whitespace"},
+        });
+        let flags = |content: &str| {
+            json!({"content": content, "lstrip": false, "normalized": false, "rstrip": false,
+                   "single_word": false, "special": true})
+        };
+        let dir = tempfile::tempdir()?;
+        let config = dir.path().join(super::TOKENIZER_CONFIG);
+        std::fs::write(
+            &config,
+            json!({"added_tokens_decoder": {"3": flags("<|x|>"), "4": flags("<|y|>")}}).to_string(),
+        )?;
+        let raw = merge_config_added_tokens(serde_json::to_vec(&tokenizer)?, &config)?;
+        let tokenizer = tokenizer_from_bytes(&repair_tokenizer_json(raw)?)?;
+        let encoding = tokenizer
+            .encode("a <|x|> b<|y|>", false)
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(encoding.get_ids(), [0, 3, 1, 4]);
+        Ok(())
+    }
 
     #[test]
     fn a_qwen_tiktoken_file_merges_by_rank_and_ids_its_specials_after_the_ranks()

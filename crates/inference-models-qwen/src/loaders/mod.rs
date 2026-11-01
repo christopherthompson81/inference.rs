@@ -41,6 +41,7 @@ mod muse_glimmer;
 mod qwen1;
 mod qwen2;
 mod qwen2_5vl;
+mod qwen2_audio;
 mod qwen2_moe;
 mod qwen2vl;
 mod qwen3;
@@ -59,6 +60,7 @@ pub use muse_glimmer::*;
 pub use qwen1::*;
 pub use qwen2::*;
 pub use qwen2_5vl::*;
+pub use qwen2_audio::*;
 pub use qwen2_moe::*;
 pub use qwen2vl::*;
 pub use qwen3::*;
@@ -92,5 +94,7 @@ inference_nn::boxed_loaders!(
     Qwen3_5Loader,
     Qwen3_5MoeLoader,
     Qwen3AsrLoader,
+    Qwen2AudioLoader,
+    AudioFlamingo3Loader,
 );
 inference_nn::boxed_loaders!(EmbeddingModelLoader: Qwen3EmbeddingLoader);

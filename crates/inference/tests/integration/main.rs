@@ -2,6 +2,8 @@
 // Each fixture includes the recording helpers itself, so server-core and ffi can include one fixture alone.
 #![allow(clippy::duplicate_mod)]
 
+mod audio_clips;
+mod audio_flamingo3_tiny;
 mod bert_embedding_tiny;
 mod decision_label_tiny;
 mod decision_tiny;
@@ -12,6 +14,7 @@ mod gguf_embedding_tiny;
 mod gguf_iq;
 mod gguf_logits_tiny;
 mod gguf_lora_tiny;
+mod glm_asr_tiny;
 mod granite4_vision_tiny;
 mod granite_speech_tiny;
 mod granite_tiny;
@@ -27,6 +30,7 @@ mod olmo_tiny;
 mod paddleocr_vl;
 mod paddleocr_vl_tiny;
 mod parakeet_tiny;
+mod qwen2_audio_tiny;
 mod qwen3_5_mtp;
 mod qwen3_5_text_tiny;
 mod qwen3_5_tool_call;

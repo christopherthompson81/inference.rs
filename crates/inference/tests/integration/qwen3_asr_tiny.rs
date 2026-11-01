@@ -6,6 +6,8 @@ use inference::{
     TextMessageRole, TranscriptionRequest, TranscriptionResponseFormat,
 };
 
+use crate::audio_clips::wav;
+
 #[path = "../support/qwen3_asr_tiny.rs"]
 mod support;
 use support::{tiny_checkpoint, tiny_transformers_checkpoint};
@@ -19,7 +21,6 @@ const AUDIO_TOKENS: usize = 39;
 // the clip's start and end markers
 const MARKERS: usize = 2;
 const TONE_HZ: f32 = 440.0;
-const WAV_HEADER_BYTES: usize = 44;
 const DURATION_TOLERANCE: f64 = 1e-6;
 // cached KV comes from a different prefill than a full recompute, so logprobs match only to rounding
 const LOGPROB_TOLERANCE: f32 = 1e-3;
@@ -95,33 +96,6 @@ async fn a_clip_expands_to_its_tokens_and_a_cached_repeat_decodes_the_same() -> 
         assert!((la - lb).abs() < LOGPROB_TOLERANCE, "{la} vs {lb}");
     }
     Ok(())
-}
-
-// 16-bit mono PCM in a RIFF/WAVE container
-fn wav(clip: &AudioInput) -> Vec<u8> {
-    let data = clip.samples.len() * 2;
-    let mut bytes = Vec::with_capacity(WAV_HEADER_BYTES + data);
-    let u32_le = |value: usize| {
-        u32::try_from(value)
-            .expect("a test clip fits a WAV")
-            .to_le_bytes()
-    };
-    bytes.extend_from_slice(b"RIFF");
-    bytes.extend_from_slice(&u32_le(WAV_HEADER_BYTES - 8 + data));
-    bytes.extend_from_slice(b"WAVEfmt ");
-    bytes.extend_from_slice(&16u32.to_le_bytes());
-    bytes.extend_from_slice(&1u16.to_le_bytes());
-    bytes.extend_from_slice(&1u16.to_le_bytes());
-    bytes.extend_from_slice(&clip.sample_rate.to_le_bytes());
-    bytes.extend_from_slice(&(clip.sample_rate * 2).to_le_bytes());
-    bytes.extend_from_slice(&2u16.to_le_bytes());
-    bytes.extend_from_slice(&16u16.to_le_bytes());
-    bytes.extend_from_slice(b"data");
-    bytes.extend_from_slice(&u32_le(data));
-    for sample in &clip.samples {
-        bytes.extend_from_slice(&((sample * f32::from(i16::MAX)) as i16).to_le_bytes());
-    }
-    bytes
 }
 
 fn transcription(language: Option<&str>) -> TranscriptionRequest {

@@ -244,11 +244,14 @@ macro_rules! multimodal_loader_table {
             Qwen3VL { cli: "qwen3vl", hf: "Qwen3VLForConditionalGeneration", loader: Qwen3VLLoader, feature: "models-qwen" },
             Qwen3VLMoE { cli: "qwen3vlmoe", hf: "Qwen3VLMoeForConditionalGeneration", loader: Qwen3VLMoELoader, feature: "models-qwen" },
             Qwen3Asr { cli: "qwen3_asr", hf: "Qwen3ASRForConditionalGeneration", loader: Qwen3AsrLoader, feature: "models-qwen" },
+            Qwen2Audio { cli: "qwen2_audio", hf: "Qwen2AudioForConditionalGeneration", loader: Qwen2AudioLoader, feature: "models-qwen" },
+            AudioFlamingo3 { cli: "audioflamingo3", hf: "AudioFlamingo3ForConditionalGeneration", loader: AudioFlamingo3Loader, feature: "models-qwen" },
             Qwen3_5 { cli: "qwen3_5", hf: "Qwen3_5ForConditionalGeneration", loader: Qwen3_5Loader, feature: "models-qwen" },
             Qwen3_5Moe { cli: "qwen3_5moe", hf: "Qwen3_5MoeForConditionalGeneration", loader: Qwen3_5MoeLoader, feature: "models-qwen" },
             Qwen4Exp { cli: "qwen4exp", hf: "Qwen4ExpForConditionalGeneration", loader: Qwen3_5MoeLoader, feature: "models-qwen" },
             Voxtral { cli: "voxtral", hf: "VoxtralRealtimeForConditionalGeneration", loader: VoxtralLoader, feature: "models-llama" },
             VoxtralChat { cli: "voxtral-chat", hf: "VoxtralForConditionalGeneration", loader: VoxtralChatLoader, feature: "models-llama" },
+            GlmAsr { cli: "glm_asr", hf: "GlmAsrForConditionalGeneration", loader: GlmAsrLoader, feature: "models-llama" },
             Gemma4 {
                 cli: "gemma4",
                 hf: "Gemma4ForConditionalGeneration"

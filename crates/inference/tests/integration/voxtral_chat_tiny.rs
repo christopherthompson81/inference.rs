@@ -2,9 +2,11 @@
 //! opens the user turn as `[BEGIN_AUDIO]` and one 30 s chunk's run of `[AUDIO]` tokens.
 
 use inference::{
-    AudioInput, ModelDType, MultimodalMessages, MultimodalModelBuilder, RequestBuilder,
-    TextMessageRole,
+    AudioInput, Model, ModelDType, MultimodalMessages, MultimodalModelBuilder, RequestBuilder,
+    TextMessageRole, TranscriptionRequest, TranscriptionResponseFormat,
 };
+
+use crate::audio_clips::wav;
 
 #[path = "../support/voxtral_chat_tiny.rs"]
 mod support;
@@ -24,6 +26,15 @@ const TEXT_PROMPT_TOKENS: usize = 5;
 // `[SYSTEM_PROMPT]` and `[/SYSTEM_PROMPT]` around the system prompt, one byte token per ASCII character
 const SYSTEM_TOKENS: usize = 2 + SYSTEM.len();
 const TONE_HZ: f32 = 440.0;
+const DURATION_TOLERANCE: f64 = 1e-6;
+
+async fn build(dir: &std::path::Path) -> anyhow::Result<Model> {
+    Ok(MultimodalModelBuilder::new(dir.to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .with_force_cpu()
+        .build()
+        .await?)
+}
 
 fn clip() -> AudioInput {
     AudioInput {
@@ -40,11 +51,7 @@ fn clip() -> AudioInput {
 #[tokio::test]
 async fn the_loader_template_frames_text_system_and_audio_turns() -> anyhow::Result<()> {
     let checkpoint = tiny_checkpoint()?;
-    let model = MultimodalModelBuilder::new(checkpoint.path().to_string_lossy())
-        .with_dtype(ModelDType::F32)
-        .with_force_cpu()
-        .build()
-        .await?;
+    let model = build(checkpoint.path()).await?;
     let text = model
         .send_chat_request(
             RequestBuilder::new()
@@ -80,5 +87,44 @@ async fn the_loader_template_frames_text_system_and_audio_turns() -> anyhow::Res
         AUDIO_TOKENS + MARKERS
     );
     assert!(audio.usage.completion_tokens > 0);
+    Ok(())
+}
+
+fn transcription(language: Option<&str>) -> TranscriptionRequest {
+    TranscriptionRequest {
+        model: "default".to_string(),
+        language: language.map(str::to_string),
+        prompt: None,
+        response_format: TranscriptionResponseFormat::VerboseJson,
+        temperature: None,
+        timestamp_granularities: Vec::new(),
+        beam_size: None,
+        diarization_model: None,
+        task: Default::default(),
+    }
+}
+
+// transcription mode decodes from `[TRANSCRIBE]`; a language off the model card and the translate task are refused
+#[tokio::test]
+async fn a_transcription_request_decodes_the_clip() -> anyhow::Result<()> {
+    let checkpoint = tiny_checkpoint()?;
+    let model = build(checkpoint.path()).await?;
+    let audio = wav(&clip());
+    let output = model
+        .transcription(transcription(Some("en")), &audio)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let body: serde_json::Value = serde_json::from_str(&output.body)?;
+    let duration = body["duration"].as_f64().unwrap_or_default();
+    assert!((duration - SAMPLES as f64 / f64::from(SAMPLE_RATE)).abs() < DURATION_TOLERANCE);
+    assert!(
+        model
+            .transcription(transcription(Some("ja")), &audio)
+            .await
+            .is_err()
+    );
+    let mut translate = transcription(None);
+    translate.task = inference::TranscriptionTask::Translate;
+    assert!(model.transcription(translate, &audio).await.is_err());
     Ok(())
 }

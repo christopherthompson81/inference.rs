@@ -2,15 +2,62 @@
 
 //! Whisper's encoder: two conv1d downsampling the log-mel, fixed sinusoidal positions, pre-norm layers (LayerNorm,
 //! bidirectional attention, a two-layer FFN) and a final LayerNorm, under transformers' `WhisperEncoder` names. The
-//! Whisper recognizer, the audio LLMs built on its encoder and the Qwen audio towers share its pieces.
+//! Whisper recognizer, the audio LLMs built on its encoder and the Qwen audio towers share its pieces; GLM-ASR's
+//! tower is the same layers with rotary positions in place of the table, under Llama-style names.
 
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::nn::{Conv1d, Conv1dConfig, LayerNorm, Linear, Module};
-use inference_tensor::{Result, Tensor};
+use inference_tensor::{D, DType, Device, Result, Tensor};
 
 use crate::attention::{AttentionMask, FlashParams, SdpaParams};
 use crate::layers::{Activation, Sdpa, conv1d, layer_norm, linear_b};
 use crate::utils::unvarbuilder::UnVarBuilder;
+
+/// The checkpoint names a layer's weights go by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WhisperLayerNames {
+    /// `self_attn_layer_norm`, `self_attn.out_proj`, `final_layer_norm`, `fc1`, `fc2`
+    Whisper,
+    /// `input_layernorm`, `self_attn.o_proj`, `post_attention_layernorm`, `mlp.fc1`, `mlp.fc2`
+    Llama,
+}
+
+impl WhisperLayerNames {
+    fn attn_norm(self) -> &'static str {
+        match self {
+            Self::Whisper => "self_attn_layer_norm",
+            Self::Llama => "input_layernorm",
+        }
+    }
+
+    fn ffn_norm(self) -> &'static str {
+        match self {
+            Self::Whisper => "final_layer_norm",
+            Self::Llama => "post_attention_layernorm",
+        }
+    }
+
+    fn out_proj(self) -> &'static str {
+        match self {
+            Self::Whisper => "out_proj",
+            Self::Llama => "o_proj",
+        }
+    }
+
+    fn ffn(self, vb: &ShardedVarBuilder) -> ShardedVarBuilder {
+        match self {
+            Self::Whisper => vb.clone(),
+            Self::Llama => vb.pp("mlp"),
+        }
+    }
+
+    fn final_norm(self) -> &'static str {
+        match self {
+            Self::Whisper => "layer_norm",
+            Self::Llama => "norm",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct WhisperLayerConfig {
@@ -21,6 +68,78 @@ pub struct WhisperLayerConfig {
     pub layer_norm_eps: f64,
     // Whisper's k_proj has no bias; the Qwen audio towers' does
     pub k_bias: bool,
+    pub names: WhisperLayerNames,
+}
+
+/// How positions enter the encoder.
+#[derive(Clone, Copy, Debug)]
+pub enum WhisperPositions {
+    /// The checkpoint's `embed_positions` table, added after the convolutions.
+    Learned,
+    /// Rotary positions on the first `dims` of each head's queries and keys, rotated by halves (GLM-ASR).
+    Rotary { theta: f32, dims: usize },
+}
+
+/// A rotary tower's cos and sin over `dims`, by position.
+pub struct WhisperRotary {
+    cos: Tensor,
+    sin: Tensor,
+    dims: usize,
+}
+
+impl WhisperRotary {
+    fn new(
+        theta: f32,
+        dims: usize,
+        positions: usize,
+        dtype: DType,
+        device: &Device,
+    ) -> Result<Self> {
+        let inv: Vec<f32> = (0..dims)
+            .step_by(2)
+            .map(|i| 1.0 / theta.powf(i as f32 / dims as f32))
+            .collect();
+        let mut angles = Vec::with_capacity(positions * dims);
+        for position in 0..positions {
+            let row = inv.iter().map(|&inv| position as f32 * inv);
+            angles.extend(row.clone().chain(row));
+        }
+        let angles = Tensor::from_vec(angles, (positions, dims), device)?;
+        Ok(Self {
+            cos: angles.cos()?.to_dtype(dtype)?,
+            sin: angles.sin()?.to_dtype(dtype)?,
+            dims,
+        })
+    }
+
+    // `(batch, heads, frames, head_dim)`: the first `dims` rotated by halves, the rest passed through
+    fn apply(&self, xs: &Tensor) -> Result<Tensor> {
+        let (_, _, frames, head_dim) = xs.dims4()?;
+        let (cos, sin) = (
+            self.cos.narrow(0, 0, frames)?,
+            self.sin.narrow(0, 0, frames)?,
+        );
+        let half = self.dims / 2;
+        let rot = xs.narrow(D::Minus1, 0, self.dims)?;
+        let turned = Tensor::cat(
+            &[
+                &rot.narrow(D::Minus1, half, half)?.neg()?,
+                &rot.narrow(D::Minus1, 0, half)?,
+            ],
+            D::Minus1,
+        )?;
+        let rot = (rot.broadcast_mul(&cos)? + turned.broadcast_mul(&sin)?)?;
+        if self.dims == head_dim {
+            return Ok(rot);
+        }
+        Tensor::cat(
+            &[
+                &rot,
+                &xs.narrow(D::Minus1, self.dims, head_dim - self.dims)?,
+            ],
+            D::Minus1,
+        )
+    }
 }
 
 struct Attention {
@@ -30,6 +149,7 @@ struct Attention {
     out_proj: Linear,
     num_heads: usize,
     head_dim: usize,
+    names: WhisperLayerNames,
 }
 
 impl Attention {
@@ -39,13 +159,14 @@ impl Attention {
             q_proj: linear_b(d, d, true, vb.pp("q_proj"))?,
             k_proj: linear_b(d, d, cfg.k_bias, vb.pp("k_proj"))?,
             v_proj: linear_b(d, d, true, vb.pp("v_proj"))?,
-            out_proj: linear_b(d, d, true, vb.pp("out_proj"))?,
+            out_proj: linear_b(d, d, true, vb.pp(cfg.names.out_proj()))?,
             num_heads: cfg.num_heads,
             head_dim: d / cfg.num_heads,
+            names: cfg.names,
         })
     }
 
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor, rotary: Option<&WhisperRotary>) -> Result<Tensor> {
         let (b, t, d) = xs.dims3()?;
         let heads = |proj: &Linear| -> Result<Tensor> {
             proj.forward(xs)?
@@ -53,11 +174,15 @@ impl Attention {
                 .transpose(1, 2)?
                 .contiguous()
         };
-        let (q, k, v) = (
+        let (mut q, mut k, v) = (
             heads(&self.q_proj)?,
             heads(&self.k_proj)?,
             heads(&self.v_proj)?,
         );
+        if let Some(rotary) = rotary {
+            q = rotary.apply(&q)?.contiguous()?;
+            k = rotary.apply(&k)?.contiguous()?;
+        }
         let params = SdpaParams {
             n_kv_groups: 1,
             sliding_window: None,
@@ -83,7 +208,7 @@ impl Attention {
         uvb.pp("q_proj").add(&self.q_proj);
         uvb.pp("k_proj").add(&self.k_proj);
         uvb.pp("v_proj").add(&self.v_proj);
-        uvb.pp("out_proj").add(&self.out_proj);
+        uvb.pp(self.names.out_proj()).add(&self.out_proj);
     }
 }
 
@@ -94,26 +219,34 @@ pub struct WhisperEncoderLayer {
     fc1: Linear,
     fc2: Linear,
     activation: Activation,
+    names: WhisperLayerNames,
 }
 
 impl WhisperEncoderLayer {
     pub fn new(cfg: &WhisperLayerConfig, vb: ShardedVarBuilder) -> Result<Self> {
         let d = cfg.d_model;
+        let names = cfg.names;
+        let ffn = names.ffn(&vb);
         Ok(Self {
             self_attn: Attention::new(cfg, vb.pp("self_attn"))?,
-            self_attn_layer_norm: layer_norm(d, cfg.layer_norm_eps, vb.pp("self_attn_layer_norm"))?,
-            final_layer_norm: layer_norm(d, cfg.layer_norm_eps, vb.pp("final_layer_norm"))?,
-            fc1: linear_b(d, cfg.ffn_dim, true, vb.pp("fc1"))?,
-            fc2: linear_b(cfg.ffn_dim, d, true, vb.pp("fc2"))?,
+            self_attn_layer_norm: layer_norm(d, cfg.layer_norm_eps, vb.pp(names.attn_norm()))?,
+            final_layer_norm: layer_norm(d, cfg.layer_norm_eps, vb.pp(names.ffn_norm()))?,
+            fc1: linear_b(d, cfg.ffn_dim, true, ffn.pp("fc1"))?,
+            fc2: linear_b(cfg.ffn_dim, d, true, ffn.pp("fc2"))?,
             activation: cfg.activation,
+            names,
         })
     }
 
     /// `(batch, frames, d_model)` in and out; every frame of a batch row attends to every other.
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        self.forward_rotary(xs, None)
+    }
+
+    fn forward_rotary(&self, xs: &Tensor, rotary: Option<&WhisperRotary>) -> Result<Tensor> {
         let attended = self
             .self_attn
-            .forward(&self.self_attn_layer_norm.forward(xs)?)?;
+            .forward(&self.self_attn_layer_norm.forward(xs)?, rotary)?;
         let xs = (xs + attended)?;
         let ffn = self.fc2.forward(
             &self
@@ -125,11 +258,19 @@ impl WhisperEncoderLayer {
 
     pub fn residual_tensors(&self, uvb: &UnVarBuilder) {
         self.self_attn.residual_tensors(&uvb.pp("self_attn"));
-        uvb.pp("self_attn_layer_norm")
+        uvb.pp(self.names.attn_norm())
             .add(&self.self_attn_layer_norm);
-        uvb.pp("final_layer_norm").add(&self.final_layer_norm);
-        uvb.pp("fc1").add(&self.fc1);
-        uvb.pp("fc2").add(&self.fc2);
+        uvb.pp(self.names.ffn_norm()).add(&self.final_layer_norm);
+        let mlp;
+        let ffn = match self.names {
+            WhisperLayerNames::Whisper => uvb,
+            WhisperLayerNames::Llama => {
+                mlp = uvb.pp("mlp");
+                &mlp
+            }
+        };
+        ffn.pp("fc1").add(&self.fc1);
+        ffn.pp("fc2").add(&self.fc2);
     }
 }
 
@@ -143,15 +284,18 @@ pub struct WhisperEncoderConfig {
     pub num_layers: usize,
     pub num_mel_bins: usize,
     pub max_source_positions: usize,
+    pub positions: WhisperPositions,
 }
 
 pub struct WhisperEncoder {
     conv1: Conv1d,
     conv2: Conv1d,
-    positions: Tensor,
+    positions: Option<Tensor>,
+    rotary: Option<WhisperRotary>,
     layers: Vec<WhisperEncoderLayer>,
     layer_norm: LayerNorm,
     activation: Activation,
+    names: WhisperLayerNames,
 }
 
 impl WhisperEncoder {
@@ -162,41 +306,79 @@ impl WhisperEncoder {
             stride,
             ..Default::default()
         };
+        let (positions, rotary) = match cfg.positions {
+            // the checkpoint stores the sinusoid table; fine-tunes are read as they ship
+            WhisperPositions::Learned => (
+                Some(vb.get((cfg.max_source_positions, d), "embed_positions.weight")?),
+                None,
+            ),
+            WhisperPositions::Rotary { theta, dims } => (
+                None,
+                Some(WhisperRotary::new(
+                    theta,
+                    dims,
+                    cfg.max_source_positions,
+                    vb.dtype(),
+                    vb.device(),
+                )?),
+            ),
+        };
+        let names = cfg.layer.names;
         Ok(Self {
             conv1: conv1d(cfg.num_mel_bins, d, CONV_KERNEL, conv(1), vb.pp("conv1"))?,
             conv2: conv1d(d, d, CONV_KERNEL, conv(DOWNSAMPLE), vb.pp("conv2"))?,
-            // the checkpoint stores the sinusoid table; fine-tunes are read as they ship
-            positions: vb.get((cfg.max_source_positions, d), "embed_positions.weight")?,
+            positions,
+            rotary,
             layers: (0..cfg.num_layers)
                 .map(|i| WhisperEncoderLayer::new(&cfg.layer, vb.pp("layers").pp(i)))
                 .collect::<Result<Vec<_>>>()?,
-            layer_norm: layer_norm(d, cfg.layer.layer_norm_eps, vb.pp("layer_norm"))?,
+            layer_norm: layer_norm(d, cfg.layer.layer_norm_eps, vb.pp(names.final_norm()))?,
             activation: cfg.layer.activation,
+            names,
         })
     }
 
     /// `(batch, n_mels, frames)` log-mel to `(batch, frames / 2, d_model)`.
     pub fn forward(&self, mel: &Tensor) -> Result<Tensor> {
+        let xs = self.encode(&self.embed(mel)?)?;
+        self.norm(&xs)
+    }
+
+    /// The convolutions and positions: `(batch, n_mels, frames)` to `(batch, frames / 2, d_model)`.
+    pub fn embed(&self, mel: &Tensor) -> Result<Tensor> {
         let xs = self.activation.forward(&self.conv1.forward(mel)?)?;
         let xs = self.activation.forward(&self.conv2.forward(&xs)?)?;
         let xs = xs.transpose(1, 2)?;
-        let positions = self.positions.narrow(0, 0, xs.dim(1)?)?;
-        let mut xs = xs.broadcast_add(&positions)?;
-        for layer in &self.layers {
-            xs = layer.forward(&xs)?;
+        match &self.positions {
+            Some(positions) => xs.broadcast_add(&positions.narrow(0, 0, xs.dim(1)?)?),
+            None => Ok(xs),
         }
-        self.layer_norm.forward(&xs)
+    }
+
+    /// The layers over embedded positions, before the final norm.
+    pub fn encode(&self, xs: &Tensor) -> Result<Tensor> {
+        let mut xs = xs.clone();
+        for layer in &self.layers {
+            xs = layer.forward_rotary(&xs, self.rotary.as_ref())?;
+        }
+        Ok(xs)
+    }
+
+    pub fn norm(&self, xs: &Tensor) -> Result<Tensor> {
+        self.layer_norm.forward(xs)
     }
 
     pub fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
         uvb.pp("conv1").add(&self.conv1);
         uvb.pp("conv2").add(&self.conv2);
-        uvb.add_tensor("embed_positions.weight", self.positions.clone());
+        if let Some(positions) = &self.positions {
+            uvb.add_tensor("embed_positions.weight", positions.clone());
+        }
         for (i, layer) in self.layers.iter().enumerate() {
             layer.residual_tensors(&uvb.pp("layers").pp(i));
         }
-        uvb.pp("layer_norm").add(&self.layer_norm);
+        uvb.pp(self.names.final_norm()).add(&self.layer_norm);
         uvb.to_safetensors()
     }
 }

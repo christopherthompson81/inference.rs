@@ -32,6 +32,7 @@ use crate::mllama::{MLlamaConfig, MLlamaModel};
 use crate::voxtral::VoxtralModel;
 use crate::voxtral::config::VoxtralConfig;
 
+mod glm_asr;
 mod idefics2;
 mod idefics3;
 mod llama;
@@ -48,6 +49,7 @@ mod vllama4;
 mod voxtral;
 mod voxtral_chat;
 
+pub use glm_asr::*;
 pub use idefics2::*;
 pub use idefics3::*;
 pub use llama::*;
@@ -81,4 +83,5 @@ inference_nn::boxed_loaders!(
     VLlamaLoader,
     VoxtralLoader,
     VoxtralChatLoader,
+    GlmAsrLoader,
 );

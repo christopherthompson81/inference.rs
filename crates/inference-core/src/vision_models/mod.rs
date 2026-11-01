@@ -28,6 +28,8 @@ pub(crate) mod gemma3;
 pub(crate) mod gemma3n;
 #[cfg(feature = "models-gemma")]
 pub(crate) mod gemma4;
+#[cfg(feature = "models-llama")]
+pub(crate) mod glm_asr;
 #[cfg(feature = "models-other")]
 pub(crate) mod granite4_vision;
 #[cfg(feature = "models-other")]
@@ -56,6 +58,8 @@ pub(crate) mod paddleocr_vl;
 pub(crate) mod phi3;
 #[cfg(feature = "models-phi")]
 pub(crate) mod phi4;
+#[cfg(feature = "models-qwen")]
+pub(crate) mod qwen2_audio;
 #[cfg(feature = "models-qwen")]
 pub(crate) mod qwen2vl;
 #[cfg(feature = "models-qwen")]

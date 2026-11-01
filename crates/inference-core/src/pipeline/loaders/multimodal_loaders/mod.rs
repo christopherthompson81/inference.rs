@@ -128,8 +128,8 @@ pub use inference_models_gemma::loaders::{
 };
 #[cfg(feature = "models-llama")]
 pub use inference_models_llama::loaders::{
-    Idefics2Loader, Idefics3Loader, LLaVALoader, LLaVANextLoader, Mistral3Loader, VLlama4Loader,
-    VLlamaLoader, VoxtralChatLoader, VoxtralLoader,
+    GlmAsrLoader, Idefics2Loader, Idefics3Loader, LLaVALoader, LLaVANextLoader, Mistral3Loader,
+    VLlama4Loader, VLlamaLoader, VoxtralChatLoader, VoxtralLoader,
 };
 #[cfg(feature = "models-other")]
 pub use inference_models_other::loaders::{
@@ -139,8 +139,9 @@ pub use inference_models_other::loaders::{
 pub use inference_models_phi::loaders::{Phi3VLoader, Phi4MMLoader};
 #[cfg(feature = "models-qwen")]
 pub use inference_models_qwen::loaders::{
-    MiniCpmOLoader, MuseGlimmerLoader, Qwen2_5VLLoader, Qwen2VLLoader, Qwen3_5Loader,
-    Qwen3_5MoeLoader, Qwen3AsrLoader, Qwen3VLLoader, Qwen3VLMoELoader,
+    AudioFlamingo3Loader, MiniCpmOLoader, MuseGlimmerLoader, Qwen2_5VLLoader, Qwen2AudioLoader,
+    Qwen2VLLoader, Qwen3_5Loader, Qwen3_5MoeLoader, Qwen3AsrLoader, Qwen3VLLoader,
+    Qwen3VLMoELoader,
 };
 
 #[cfg(all(
