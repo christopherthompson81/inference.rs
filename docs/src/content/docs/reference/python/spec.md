@@ -592,6 +592,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `MultimodalLoaderType.LLAVA_NEXT` | `'llava_next'` |
 | `MultimodalLoaderType.LLAVA` | `'llava'` |
 | `MultimodalLoaderType.GRANITE4_VISION` | `'granite4_vision'` |
+| `MultimodalLoaderType.NEMOTRON_TRANSCRIBE` | `'nemotron_transcribe'` |
 | `MultimodalLoaderType.GRANITE_SPEECH` | `'granite_speech'` |
 | `MultimodalLoaderType.LFM2VL` | `'lfm2vl'` |
 | `MultimodalLoaderType.VLLAMA` | `'vllama'` |

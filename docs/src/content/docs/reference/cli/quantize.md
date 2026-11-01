@@ -221,3 +221,33 @@ inference quantize worldgen [OPTIONS] --models <MODELS> --output <OUTPUT_PATH>
 | `-o, --output <OUTPUT_PATH>` | required | The folder to lay the package out in, as a models root |
 | `--type <MATRICES>` | `q8_0` | The type WorldStereo-2's main-block matrices and umT5's matrices take |
 
+## inference quantize gguf
+
+A float GGUF to a quantized GGUF: per-tensor types by name pattern, weighed by an imatrix
+
+```
+inference quantize gguf [OPTIONS] --model <MODEL> --output <OUTPUT_PATH> --tensor-type <TENSOR_TYPES>
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `-m, --model <MODEL>` | required | The source `.gguf` (F32, F16 or BF16 tensors) |
+| `-o, --output <OUTPUT_PATH>` | required | Output `.gguf` path |
+| `--tensor-type <TENSOR_TYPES>` | required | `<regex>=<type>`, repeatable: the first pattern a tensor's name matches sets its type (`q8_0`, `q6_k`, `iq4_ks`, ...); tensors none matches are copied as they are |
+| `--imatrix <IMATRIX>` |  | llama.cpp's imatrix (`.dat` or `.gguf`), keyed by the source's tensor names |
+
+## inference quantize imatrix
+
+A `.cimatrix` collected online as llama.cpp's imatrix (`.dat`) under a GGUF's tensor names
+
+```
+inference quantize imatrix [OPTIONS] --cimatrix <CIMATRIX> --gguf <GGUF> --output <OUTPUT_PATH>
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--cimatrix <CIMATRIX>` | required | The `.cimatrix` a calibration apply saved |
+| `--gguf <GGUF>` | required | The GGUF whose tensor names the imatrix takes |
+| `-o, --output <OUTPUT_PATH>` | required | Output `.dat` path |
+| `--dataset <DATASET>` | `online calibration` | The calibration data's name, recorded in the file |
+

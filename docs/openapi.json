@@ -10036,6 +10036,7 @@
           "llava_next",
           "llava",
           "granite4_vision",
+          "nemotron_transcribe",
           "granite_speech",
           "lfm2vl",
           "vllama",
