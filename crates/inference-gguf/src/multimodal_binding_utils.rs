@@ -379,7 +379,7 @@ pub(super) fn inverse_partial_rotary_permute(
     let Some(&rows) = shape.first() else {
         bail!("GGUF tensor `{source}` has no rows to permute");
     };
-    if heads == 0 || !rows.is_multiple_of(heads) || dims % 2 != 0 || dims > rows / heads {
+    if heads == 0 || !rows.is_multiple_of(heads) || !dims.is_multiple_of(2) || dims > rows / heads {
         bail!(
             "GGUF tensor `{source}` with shape {shape:?} cannot un-interleave {dims} rotary dims across {heads} heads"
         );
