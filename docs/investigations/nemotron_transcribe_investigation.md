@@ -259,3 +259,21 @@ dequantizers, the imatrix lowering the weighted error, zero rows staying zero.
 
 **Next:** IQ4_KS (ik_llama.cpp's encoder); then the tool around them: quantizing a GGUF with an imatrix and per-tensor
 rules into a GGUF, imatrix collection keyed by GGUF tensor names, and the KLD tool.
+
+## Run 9 - 2026-11-01 22:00
+
+**Question:** does our IQ4_KS quantizer (ported from ik_llama.cpp's `quantize_row_iq4_k_impl_bs32`, the AVX2 path its
+`-march=native` build takes) write what ik writes?
+
+**Commands:** `scripts/iq_quantize_parity.py ~/Programming/ik_llama.cpp/build_cuda/ggml/src iq4_ks` (same rows and
+imatrix as Run 8, through ik's libggml), then the mainline run again.
+
+**Findings:**
+- First try: 14 (plain) and 19 (imatrix) of 139,520 bytes differed, all of them row-scale headers off by 1 ulp; every
+  block scale and index matched. g++ builds with the default `-ffp-contract=fast`, so its scalar sums are FMAs: `sigma2
+  += x*x`, `sqrtf(sigma2 + x*x)` in the weights, and `w1*q1*x1 + w2*q2*x2` in the final refit, where the first product
+  is fused over the second. After mirroring those three: 0 differing bytes, plain and imatrix.
+- Against ik's library, IQ4_NL / IQ4_XS differ in ~25 % of bytes: ik rewrote those quantizers, so mainline stays their
+  reference (still 0 differing after switching our `nearest_int` to ggml's round-half-even magic-number trick).
+
+**Next:** `inference quantize gguf`: a BF16 GGUF plus imatrix and per-tensor regex rules to a quantized GGUF.

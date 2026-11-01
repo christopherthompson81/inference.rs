@@ -5,8 +5,10 @@ use inference_quant::GgufType;
 
 fn read_f32(path: &str) -> inference_tensor::Result<Vec<f32>> {
     Ok(std::fs::read(path)?
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
         .collect())
 }
 
