@@ -20,11 +20,17 @@ pub fn tiny_checkpoint() -> anyhow::Result<tempfile::TempDir> {
     let files = files.iter().map(|path| path.as_path()).collect::<Vec<_>>();
     recording::record_checkpoint_seeded_by_name(
         &files,
-        cfg.text_config.num_hidden_layers,
+        cfg.spec().text.num_hidden_layers,
         &[],
         |vb, metadata| {
-            Qwen2AudioModel::new(&cfg, vb, true, metadata, AttentionImplementation::Eager)
-                .map(|_| ())
+            Qwen2AudioModel::new(
+                &cfg.spec(),
+                vb,
+                true,
+                metadata,
+                AttentionImplementation::Eager,
+            )
+            .map(|_| ())
         },
     )
 }

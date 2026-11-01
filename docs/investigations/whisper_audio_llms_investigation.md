@@ -186,3 +186,26 @@ positions), Audio Flamingo 3; Ultravox and MERaLiON-2 are remote code only.
   last across two windows).
 
 **Next:** Audio Flamingo 3 (noncommercial licence), then Ultravox and MERaLiON-2 (remote code only).
+
+## Run 8 - 2026-10-31 23:30
+
+**Question:** does our Audio Flamingo 3 (nvidia/audio-flamingo-3-hf; the sharded files only, 16 GB, the repo also
+ships a duplicate single file) match transformers?
+
+**Commands:** transformers 5.19 `models/audioflamingo3` read; `scripts/audio_llm_parity.py nvidia/audio-flamingo-3-hf
+<short> <garden dialogue> <multi 44 s>` (chat and transcription mode), F32 on the CPU (7B in F32 does not fit the
+3090 even without the LAN server).
+
+**Finding:**
+- AF3 is Qwen2-Audio's tower (masked to each window's real positions, pooled by two before the final norm) over 30 s
+  windows as GLM-ASR cuts them (each its own log-mel, up to 600 s), a two-layer MLP projector with biases, and a
+  Qwen2.5 decoder whose config uses transformers 5's names (`rope_parameters`, `hidden_size` in the audio config).
+  One `PooledAudioSpec` now drives both models (projector kind, window limit); the loaders come from one macro.
+- The repo's template writes `<sound>` for each audio part (one per message); the processor's transcription prompt
+  is `Transcribe the input speech.` with no language.
+- First run stopped on the transcript step (no transcriber yet); the script now prints each case as it finishes.
+- Exact match: text (191 chars), chat about three clips (65, 39, 82), transcripts (80, 439, 621; the last across two
+  windows).
+
+**Next:** Ultravox and MERaLiON-2 have no transformers implementation; a reference means running their repos' remote
+code, which needs the user's go-ahead.

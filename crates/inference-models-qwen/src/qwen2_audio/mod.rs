@@ -1,8 +1,9 @@
-//! Qwen2-Audio: the Whisper encoder, pooled by two positions before its final norm, one linear projector, and a Qwen2
-//! decoder whose `<|AUDIO|>` placeholders take the projected audio.
+//! Qwen2-Audio and Audio Flamingo 3: the Whisper encoder over 30 s windows, pooled by two before its final norm, a
+//! projector to the text width, and a Qwen2 decoder whose audio placeholders take the projected audio.
 
 pub mod config;
 pub mod inputs_processor;
+pub mod transcription;
 
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::nn::{Linear, Module};
@@ -13,25 +14,26 @@ use crate::{
     amoe::AnyMoeBaseModelMixin,
     audio::whisper::WhisperEncoder,
     kv_cache::EitherCache,
-    layers::linear_b,
+    layers::{Activation, linear_b},
     media_inputs::audio_prompt::place_audio_features,
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata, NormalModel},
     paged_attention::{AttentionImplementation, ModelConfigMetadata},
     utils::unvarbuilder::UnVarBuilder,
 };
-pub use config::Qwen2AudioConfig;
+pub use config::{AudioFlamingo3Config, PooledAudioSpec, Projector, Qwen2AudioConfig};
 
 const MODEL: &str = "Qwen2-Audio";
 // the encoder averages each pair of positions after its layers
 const POOL: usize = 2;
 
-/// One clip's `(1, n_mels, frames)` log-mel over the 30 s window, with the encoder positions its real frames give.
+/// One clip's `(windows, n_mels, frames)` log-mel, each window 30 s, with the encoder positions each window's real
+/// frames give.
 pub struct AudioClip {
     pub mel: Tensor,
-    pub positions: usize,
+    pub positions: Vec<usize>,
 }
 
-/// The tokens a clip of `positions` encoder positions fills.
+/// The tokens a window of `positions` encoder positions fills.
 pub fn audio_token_count(positions: usize) -> usize {
     positions.saturating_sub(POOL) / POOL + 1
 }
@@ -41,16 +43,60 @@ pub struct Qwen2AudioSpecificArgs {
     pub audio: Vec<AudioClip>,
 }
 
+enum ProjectorLayers {
+    Linear(Linear),
+    Mlp(Linear, Activation, Linear),
+}
+
+impl ProjectorLayers {
+    fn new(spec: &PooledAudioSpec, vb: ShardedVarBuilder) -> Result<Self> {
+        let (d, hidden) = (spec.audio.d_model, spec.text.hidden_size);
+        Ok(match spec.projector {
+            Projector::Linear => Self::Linear(linear_b(d, hidden, true, vb.pp("linear"))?),
+            Projector::Mlp { activation, bias } => Self::Mlp(
+                linear_b(d, hidden, bias, vb.pp("linear_1"))?,
+                activation,
+                linear_b(hidden, hidden, bias, vb.pp("linear_2"))?,
+            ),
+        })
+    }
+
+    fn dtype(&self) -> inference_tensor::DType {
+        match self {
+            Self::Linear(linear) | Self::Mlp(linear, ..) => linear.weight().dtype(),
+        }
+    }
+
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Linear(linear) => linear.forward(xs),
+            Self::Mlp(first, activation, second) => {
+                second.forward(&activation.forward(&first.forward(xs)?)?)
+            }
+        }
+    }
+
+    fn residual_tensors(&self, uvb: &UnVarBuilder) {
+        match self {
+            Self::Linear(linear) => uvb.pp("linear").add(linear),
+            Self::Mlp(first, _, second) => {
+                uvb.pp("linear_1").add(first);
+                uvb.pp("linear_2").add(second);
+            }
+        }
+    }
+}
+
 pub struct Qwen2AudioModel {
     text: Qwen2,
     audio: WhisperEncoder,
-    projector: Linear,
+    projector: ProjectorLayers,
     audio_token: u32,
 }
 
 impl Qwen2AudioModel {
     pub fn new(
-        cfg: &Qwen2AudioConfig,
+        spec: &PooledAudioSpec,
         vb: ShardedVarBuilder,
         is_gptx: bool,
         normal_loading_metadata: NormalLoadingMetadata,
@@ -60,15 +106,10 @@ impl Qwen2AudioModel {
             .clone()
             .without_lora_registry()
             .set_device(normal_loading_metadata.real_device.clone());
-        let audio = WhisperEncoder::new(&cfg.encoder(), audio_vb.pp("audio_tower"))?;
-        let projector = linear_b(
-            cfg.audio_config.d_model,
-            cfg.text_config.hidden_size,
-            true,
-            audio_vb.pp("multi_modal_projector").pp("linear"),
-        )?;
+        let audio = WhisperEncoder::new(&spec.encoder(), audio_vb.pp("audio_tower"))?;
+        let projector = ProjectorLayers::new(spec, audio_vb.pp("multi_modal_projector"))?;
         let text = Qwen2::new(
-            &cfg.text().decoder_spec()?,
+            &spec.text.decoder_spec()?,
             vb.pp("language_model"),
             is_gptx,
             normal_loading_metadata,
@@ -78,22 +119,33 @@ impl Qwen2AudioModel {
             text,
             audio,
             projector,
-            audio_token: cfg.audio_token_index,
+            audio_token: spec.audio_token,
         })
     }
 
-    // the layers attend over the clip's real positions only, as transformers' padding mask has them
+    // each window's layers attend over its real positions only, as transformers' padding mask has them
     fn embed_audio(&self, clip: &AudioClip) -> Result<Tensor> {
-        let mel = clip.mel.to_dtype(self.projector.weight().dtype())?;
-        let xs = self.audio.embed(&mel)?.narrow(1, 0, clip.positions)?;
-        let xs = self.audio.encode(&xs)?;
-        let tokens = audio_token_count(clip.positions);
-        let (_, _, hidden) = xs.dims3()?;
-        let pooled = xs
-            .narrow(1, 0, tokens * POOL)?
-            .reshape((tokens, POOL, hidden))?
-            .mean(1)?;
-        self.projector.forward(&self.audio.norm(&pooled)?)
+        let mel = clip.mel.to_dtype(self.projector.dtype())?;
+        let pooled = clip
+            .positions
+            .iter()
+            .enumerate()
+            .map(|(window, &positions)| {
+                let xs = self
+                    .audio
+                    .embed(&mel.narrow(0, window, 1)?)?
+                    .narrow(1, 0, positions)?;
+                let xs = self.audio.encode(&xs)?;
+                let tokens = audio_token_count(positions);
+                let (_, _, hidden) = xs.dims3()?;
+                let pooled = xs
+                    .narrow(1, 0, tokens * POOL)?
+                    .reshape((tokens, POOL, hidden))?
+                    .mean(1)?;
+                self.audio.norm(&pooled)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.projector.forward(&Tensor::cat(&pooled, 0)?)
     }
 
     fn forward_inner(
@@ -120,9 +172,8 @@ impl IsqModel for Qwen2AudioModel {
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
         uvb.extend(self.text.residual_tensors_m(uvb.pp("language_model")));
-        uvb.pp("multi_modal_projector")
-            .pp("linear")
-            .add(&self.projector);
+        self.projector
+            .residual_tensors(&uvb.pp("multi_modal_projector"));
         let mut tensors = uvb.to_safetensors();
         tensors.extend(
             self.audio

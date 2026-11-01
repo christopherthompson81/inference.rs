@@ -95,5 +95,6 @@ inference_nn::boxed_loaders!(
     Qwen3_5MoeLoader,
     Qwen3AsrLoader,
     Qwen2AudioLoader,
+    AudioFlamingo3Loader,
 );
 inference_nn::boxed_loaders!(EmbeddingModelLoader: Qwen3EmbeddingLoader);

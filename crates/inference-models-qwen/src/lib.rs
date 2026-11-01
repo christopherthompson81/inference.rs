@@ -51,6 +51,7 @@ inference_nn::json_config!(
     qwen2::Config,
     qwen2_5_vl::config::Config,
     qwen2_audio::Qwen2AudioConfig,
+    qwen2_audio::AudioFlamingo3Config,
     qwen2_moe::Config,
     qwen2vl::config::Config,
     qwen3::Config,

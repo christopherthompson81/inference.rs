@@ -608,6 +608,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `MultimodalLoaderType.QWEN3VLMOE` | `'qwen3vlmoe'` |
 | `MultimodalLoaderType.QWEN3_ASR` | `'qwen3_asr'` |
 | `MultimodalLoaderType.QWEN2_AUDIO` | `'qwen2_audio'` |
+| `MultimodalLoaderType.AUDIOFLAMINGO3` | `'audioflamingo3'` |
 | `MultimodalLoaderType.QWEN3_5` | `'qwen3_5'` |
 | `MultimodalLoaderType.QWEN3_5MOE` | `'qwen3_5moe'` |
 | `MultimodalLoaderType.QWEN4EXP` | `'qwen4exp'` |

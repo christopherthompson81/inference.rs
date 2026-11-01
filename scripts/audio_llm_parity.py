@@ -161,29 +161,27 @@ def main() -> None:
                     ],
                 )
             )
-        results = [
-            (
+
+        def check(name, ref, got):
+            if ref == got:
+                print(f"{name}: match ({len(got)} chars)", flush=True)
+                return False
+            print(f"{name}: MISMATCH\n  ref : {ref}\n  ours: {got}", flush=True)
+            return True
+
+        for name, ref_content, our_content in cases:
+            failed |= check(
                 name,
                 reference(model, processor, ref_content),
                 ours(ARGS.port, our_content),
             )
-            for name, ref_content, our_content in cases
-        ]
         if hasattr(processor, "apply_transcription_request"):
-            results += [
-                (
+            for wav in ARGS.wavs:
+                failed |= check(
                     f"{wav} (transcript)",
                     reference_transcript(model, processor, wav),
                     our_transcript(ARGS.port, wav),
                 )
-                for wav in ARGS.wavs
-            ]
-        for name, ref, got in results:
-            if ref == got:
-                print(f"{name}: match ({len(got)} chars)")
-            else:
-                failed = True
-                print(f"{name}: MISMATCH\n  ref : {ref}\n  ours: {got}")
     finally:
         server.terminate()
         server.wait()

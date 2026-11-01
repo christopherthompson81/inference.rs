@@ -14,31 +14,52 @@ use crate::media_inputs::{
 };
 use crate::paged_attention::PagedAttentionMeta;
 
-use super::{AudioClip, MODEL, Qwen2AudioConfig, Qwen2AudioSpecificArgs, audio_token_count};
+use super::{AudioClip, MODEL, PooledAudioSpec, Qwen2AudioSpecificArgs, audio_token_count};
 
 pub const AUDIO_BOS: &str = "<|audio_bos|>";
 pub const AUDIO_TOKEN: &str = "<|AUDIO|>";
 pub const AUDIO_EOS: &str = "<|audio_eos|>";
+/// Audio Flamingo 3's placeholder, which its template writes for each audio part.
+pub const SOUND_TOKEN: &str = "<sound>";
 pub const SAMPLE_RATE: u32 = 16_000;
 const N_FFT: usize = 400;
 const HOP_LENGTH: usize = 160;
-// the feature extractor truncates and pads every clip to one 30 s window
+// each 30 s window is its own feature extraction
 const WINDOW_SAMPLES: usize = 30 * SAMPLE_RATE as usize;
 const WINDOW_FRAMES: usize = WINDOW_SAMPLES / HOP_LENGTH;
 
-/// The encoder positions a clip's real frames reach: its mel frames (its hops, rounded up) through the stride-2 conv.
-pub fn clip_positions(samples: usize) -> usize {
+/// A clip's 30 s windows, as sample ranges, up to `max_windows`; the rest is cut, as the processors do.
+fn windows(samples: usize, max_windows: usize) -> Vec<std::ops::Range<usize>> {
+    let count = samples.div_ceil(WINDOW_SAMPLES).clamp(1, max_windows);
+    let end = samples.min(count * WINDOW_SAMPLES);
+    (0..count)
+        .map(|i| i * WINDOW_SAMPLES..((i + 1) * WINDOW_SAMPLES).min(end))
+        .collect()
+}
+
+/// The encoder positions a window's real frames reach: its mel frames (its hops, rounded up) through the stride-2
+/// conv.
+pub fn window_positions(samples: usize) -> usize {
     let frames = samples.min(WINDOW_SAMPLES).div_ceil(HOP_LENGTH).max(1);
     (frames - 1) / 2 + 1
 }
 
+/// The tokens a clip of `samples` fills over its windows.
+pub fn clip_tokens(samples: usize, max_windows: usize) -> usize {
+    windows(samples, max_windows)
+        .into_iter()
+        .map(|range| audio_token_count(window_positions(range.len())))
+        .sum()
+}
+
 pub struct Qwen2AudioInputsProcessor {
-    config: Qwen2AudioConfig,
+    spec: PooledAudioSpec,
+    placeholder: &'static str,
 }
 
 impl Qwen2AudioInputsProcessor {
-    pub fn new(config: Qwen2AudioConfig) -> Self {
-        Self { config }
+    pub fn new(spec: PooledAudioSpec, placeholder: &'static str) -> Self {
+        Self { spec, placeholder }
     }
 
     fn log_mel(&self) -> WhisperLogMel {
@@ -46,7 +67,7 @@ impl Qwen2AudioInputsProcessor {
             sample_rate: SAMPLE_RATE,
             n_fft: N_FFT,
             hop_length: HOP_LENGTH,
-            n_mels: self.config.audio_config.num_mel_bins,
+            n_mels: self.spec.audio.num_mel_bins,
         }
     }
 
@@ -59,31 +80,36 @@ impl Qwen2AudioInputsProcessor {
     ) -> anyhow::Result<()> {
         let counts = clips
             .iter()
-            .map(|clip| audio_token_count(clip_positions(clip.len())))
+            .map(|clip| clip_tokens(clip.len(), self.spec.max_windows))
             .collect::<Vec<_>>();
         let placeholder = AudioPlaceholder {
             model: MODEL,
-            text: AUDIO_TOKEN,
-            token: self.config.audio_token_index,
+            text: self.placeholder,
+            token: self.spec.audio_token,
         };
         expand_audio_placeholders(tokenizer, seq, placeholder, &counts, paged_attn_metadata)
     }
 
-    // one log-mel over the clip padded to the window, its peak over the whole window
+    // each window padded to 30 s and its log-mel peaked on its own, as the feature extractor sees them one by one
     fn clip_features(&self, clip: &[f32], device: &Device) -> anyhow::Result<AudioClip> {
-        let mut padded = clip[..clip.len().min(WINDOW_SAMPLES)].to_vec();
-        padded.resize(WINDOW_SAMPLES, 0.0);
-        let frames = self.log_mel().frames(&padded, LogMelMax::Clip);
+        let ranges = windows(clip.len(), self.spec.max_windows);
         let n_mels = self.log_mel().n_mels;
-        let mut mel = vec![0.0f32; n_mels * WINDOW_FRAMES];
-        for (t, frame) in frames.iter().enumerate().take(WINDOW_FRAMES) {
-            for (m, &value) in frame.iter().enumerate() {
-                mel[m * WINDOW_FRAMES + t] = value;
+        let mut mel = vec![0.0f32; ranges.len() * n_mels * WINDOW_FRAMES];
+        let mut positions = Vec::with_capacity(ranges.len());
+        for (window, range) in ranges.into_iter().enumerate() {
+            positions.push(window_positions(range.len()));
+            let mut padded = clip[range].to_vec();
+            padded.resize(WINDOW_SAMPLES, 0.0);
+            let frames = self.log_mel().frames(&padded, LogMelMax::Clip);
+            for (t, frame) in frames.iter().enumerate().take(WINDOW_FRAMES) {
+                for (m, &value) in frame.iter().enumerate() {
+                    mel[(window * n_mels + m) * WINDOW_FRAMES + t] = value;
+                }
             }
         }
         Ok(AudioClip {
-            mel: Tensor::from_vec(mel, (1, n_mels, WINDOW_FRAMES), device)?,
-            positions: clip_positions(clip.len()),
+            mel: Tensor::from_vec(mel, (positions.len(), n_mels, WINDOW_FRAMES), device)?,
+            positions,
         })
     }
 }
