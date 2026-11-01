@@ -413,9 +413,12 @@ impl SupportedArch for MultimodalLoaderType {
                 examples: &[ex!("mistralai/Voxtral-Mini-4B-Realtime-2602")],
             },
             Self::AudioFlamingo3 => ArchMetadata {
-                families: &["Audio Flamingo 3"],
+                families: &["Audio Flamingo 3", "Music Flamingo"],
                 modalities: &[Text, Audio],
-                examples: &[ex!("nvidia/audio-flamingo-3-hf")],
+                examples: &[
+                    ex!("nvidia/audio-flamingo-3-hf"),
+                    ex!("mradermacher/music-flamingo-hf-GGUF", "GGUF"),
+                ],
             },
             Self::Qwen2Audio => ArchMetadata {
                 families: &["Qwen2-Audio"],

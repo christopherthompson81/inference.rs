@@ -264,7 +264,7 @@ Each clip, resampled to 16 kHz mono, is read in 30 s chunks with no length limit
 
 ## Audio Flamingo 3
 
-Audio Flamingo 3 (`AudioFlamingo3ForConditionalGeneration`, e.g. `nvidia/audio-flamingo-3-hf`) answers questions about speech, sounds and music in chat and transcribes through `/v1/audio/transcriptions` (with the reference processor's prompt; a `language` is ignored). Each clip, resampled to 16 kHz mono, is cut into 30 s windows, up to 600 s; every whole window takes 750 tokens. Its repo holds the weights twice (sharded and as one file); the sharded files are what load. The weights are under the NVIDIA OneWay Noncommercial licence.
+Audio Flamingo 3 (`AudioFlamingo3ForConditionalGeneration`, e.g. `nvidia/audio-flamingo-3-hf`) answers questions about speech, sounds and music in chat and transcribes through `/v1/audio/transcriptions` (with the reference processor's prompt; a `language` is ignored). Each clip, resampled to 16 kHz mono, is cut into 30 s windows, up to 600 s; every whole window takes 750 tokens. Its repo holds the weights twice (sharded and as one file); the sharded files are what load. It also loads from llama.cpp's GGUFs (a `qwen2` text GGUF with its `musicflamingo` projector, the type llama.cpp writes for this architecture) with nothing else, which is how Music Flamingo (`nvidia/music-flamingo-hf`, the same architecture) is published, e.g. `mradermacher/music-flamingo-hf-GGUF`. The weights are under the NVIDIA OneWay Noncommercial licence.
 
 ## Qwen2-Audio
 

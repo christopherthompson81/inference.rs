@@ -22,13 +22,17 @@ use super::{
     muse_glimmer_bindings::build_muse_glimmer_bindings,
     normal_registry::RopePairing,
     paddleocr_vl_bindings::{self, build_paddleocr_vl_bindings},
-    qwen2_audio_bindings::{self, build_qwen2_audio_bindings, synthesize_qwen2_audio_config},
+    qwen2_audio_bindings::{
+        self, build_audio_flamingo3_bindings, build_qwen2_audio_bindings,
+        synthesize_audio_flamingo3_config, synthesize_qwen2_audio_config,
+    },
     ultravox_bindings::{self, build_ultravox_bindings, synthesize_ultravox_config},
     voxtral_bindings::{self, build_voxtral_bindings, synthesize_voxtral_config},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeMultimodalGgufFamily {
+    AudioFlamingo3,
     Gemma3,
     Gemma3n,
     GlmAsr,
@@ -76,7 +80,8 @@ pub fn describes_own_config(architecture: &str, projector: &str) -> bool {
     matches!(
         family_from_names(architecture, Some(projector)),
         Ok(Some(
-            NativeMultimodalGgufFamily::GlmAsr
+            NativeMultimodalGgufFamily::AudioFlamingo3
+                | NativeMultimodalGgufFamily::GlmAsr
                 | NativeMultimodalGgufFamily::MERaLiON2
                 | NativeMultimodalGgufFamily::Qwen2Audio
                 | NativeMultimodalGgufFamily::Ultravox
@@ -88,6 +93,7 @@ pub fn describes_own_config(architecture: &str, projector: &str) -> bool {
 impl NativeMultimodalGgufFamily {
     fn loader_type(self) -> MultimodalLoaderType {
         match self {
+            Self::AudioFlamingo3 => MultimodalLoaderType::AudioFlamingo3,
             Self::Gemma3 => MultimodalLoaderType::Gemma3,
             Self::Gemma3n => MultimodalLoaderType::Gemma3n,
             Self::GlmAsr => MultimodalLoaderType::GlmAsr,
@@ -108,6 +114,7 @@ impl NativeMultimodalGgufFamily {
 
     fn synthesize_config(self, archive: &GgufArchive) -> Result<Option<String>> {
         match self {
+            Self::AudioFlamingo3 => synthesize_audio_flamingo3_config(archive).map(Some),
             Self::GlmAsr => synthesize_glm_asr_config(archive).map(Some),
             #[cfg(any(test, feature = "models-gemma"))]
             Self::MERaLiON2 => synthesize_meralion2_config(archive).map(Some),
@@ -122,7 +129,8 @@ impl NativeMultimodalGgufFamily {
         match self {
             // llama.cpp's Ernie 4.5 converter keeps q/k in Hugging Face's half-split order
             // llama.cpp's qwen2 converter keeps q/k half-split too
-            Self::Gemma3
+            Self::AudioFlamingo3
+            | Self::Gemma3
             | Self::Gemma3n
             | Self::Lfm2Vl
             | Self::MERaLiON2
@@ -152,6 +160,7 @@ impl NativeMultimodalGgufFamily {
             Self::Gemma3 | Self::Gemma3n | Self::MERaLiON2 => {
                 bail!("GGUF Gemma 3 models are not built in; enable the `models-gemma` feature")
             }
+            Self::AudioFlamingo3 => build_audio_flamingo3_bindings(archive),
             Self::GlmAsr => build_glm_asr_bindings(archive),
             Self::Granite4Vision => build_granite4_vision_bindings(archive),
             Self::GraniteSpeech => build_granite_speech_bindings(archive),
@@ -169,7 +178,7 @@ impl NativeMultimodalGgufFamily {
 }
 
 // (vision projector type, the text architecture it pairs with, family)
-const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 15] = [
+const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 16] = [
     ("gemma3", "gemma3", NativeMultimodalGgufFamily::Gemma3),
     ("gemma3nv", "gemma3n", NativeMultimodalGgufFamily::Gemma3n),
     (
@@ -189,6 +198,11 @@ const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 15] = [
     ),
     ("idefics3", "llama", NativeMultimodalGgufFamily::Idefics3),
     ("pixtral", "mistral3", NativeMultimodalGgufFamily::Mistral3),
+    (
+        qwen2_audio_bindings::AF3_PROJECTOR,
+        qwen2_audio_bindings::TEXT_ARCHITECTURE,
+        NativeMultimodalGgufFamily::AudioFlamingo3,
+    ),
     ("llama4", "llama4", NativeMultimodalGgufFamily::Llama4),
     ("lfm2", "lfm2", NativeMultimodalGgufFamily::Lfm2Vl),
     ("meralion", "gemma2", NativeMultimodalGgufFamily::MERaLiON2),
@@ -320,6 +334,12 @@ mod tests {
                 "qwen2",
                 "qwen2a",
                 NativeMultimodalGgufFamily::Qwen2Audio,
+                RopePairing::HalfSplit,
+            ),
+            (
+                "qwen2",
+                "musicflamingo",
+                NativeMultimodalGgufFamily::AudioFlamingo3,
                 RopePairing::HalfSplit,
             ),
             (

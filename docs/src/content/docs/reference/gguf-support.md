@@ -82,6 +82,7 @@ files when the repository and GGUF metadata identify them unambiguously. The dir
 | Qwen3-VL MoE | `qwen3vlmoe` |
 | Qwen3.5 and Qwen3.6 multimodal dense | `qwen35` |
 | Qwen3.5 and Qwen3.6 multimodal MoE | `qwen35moe` |
+| Audio Flamingo 3 and Music Flamingo | `qwen2` (projector `musicflamingo`) |
 | GLM-ASR | `llama` (projector `glma`) |
 | MERaLiON-2 | `gemma2` (projector `meralion`) |
 | Qwen2-Audio | `qwen2` (projector `qwen2a`) |
@@ -96,7 +97,7 @@ Multimodal Qwen3.5 and Qwen3.6 accept image and video input, but not audio. Gemm
 image/video and audio when the matching components are present in the model configuration and
 projector files.
 
-The audio GGUFs (Voxtral, Ultravox, Qwen2-Audio, GLM-ASR, MERaLiON-2) load with no base repository: the config comes
+The audio GGUFs (Voxtral, Ultravox, Qwen2-Audio, Audio Flamingo 3, GLM-ASR, MERaLiON-2) load with no base repository: the config comes
 from the text and projector GGUFs' metadata. For Voxtral and GLM-ASR the loader's chat template replaces the one the
 published GGUFs embed (another Mistral model's; GLM-ASR's original, which writes no audio markers). llama.cpp converts
 GLM-ASR's original checkpoint, so its GGUFs load onto transformers' layout, as the safetensors loader reads it.
