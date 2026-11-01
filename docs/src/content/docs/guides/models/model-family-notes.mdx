@@ -248,6 +248,16 @@ Voxtral Realtime (`VoxtralRealtimeForConditionalGeneration`) is a different, str
 
 GLM-ASR (`GlmAsrForConditionalGeneration`, e.g. `zai-org/GLM-ASR-Nano-2512`) transcribes Chinese and English through `/v1/audio/transcriptions` (with the reference processor's prompt; a `language` is ignored, since the model takes none) and answers questions about audio in chat. Each clip, resampled to 16 kHz mono, is cut into 30 s windows, up to 655 s; every whole window takes 375 tokens.
 
+## Ultravox
+
+Ultravox (e.g. `fixie-ai/ultravox-v0_5-llama-3_2-1b`) answers questions about audio clips in chat. Its safetensors repos hold only the audio tower and projector (the text model is another repository), so it loads from llama.cpp's GGUFs, a `llama` text GGUF with its `ultravox` projector, with nothing else:
+
+```bash
+inference serve --format gguf -m <dir> -f Llama-3.2-1B-Instruct-Q8_0.gguf
+```
+
+Each clip, resampled to 16 kHz mono, is read in 30 s chunks with no length limit and takes one token per 160 ms of real audio, at the start of the user turn. There is no transcription mode.
+
 ## Audio Flamingo 3
 
 Audio Flamingo 3 (`AudioFlamingo3ForConditionalGeneration`, e.g. `nvidia/audio-flamingo-3-hf`) answers questions about speech, sounds and music in chat and transcribes through `/v1/audio/transcriptions` (with the reference processor's prompt; a `language` is ignored). Each clip, resampled to 16 kHz mono, is cut into 30 s windows, up to 600 s; every whole window takes 750 tokens. Its repo holds the weights twice (sharded and as one file); the sharded files are what load. The weights are under the NVIDIA OneWay Noncommercial licence.

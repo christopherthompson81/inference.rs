@@ -129,7 +129,7 @@ pub use inference_models_gemma::loaders::{
 #[cfg(feature = "models-llama")]
 pub use inference_models_llama::loaders::{
     GlmAsrLoader, Idefics2Loader, Idefics3Loader, LLaVALoader, LLaVANextLoader, Mistral3Loader,
-    VLlama4Loader, VLlamaLoader, VoxtralChatLoader, VoxtralLoader,
+    UltravoxLoader, VLlama4Loader, VLlamaLoader, VoxtralChatLoader, VoxtralLoader,
 };
 #[cfg(feature = "models-other")]
 pub use inference_models_other::loaders::{

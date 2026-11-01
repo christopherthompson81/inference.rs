@@ -166,7 +166,12 @@ impl Attention {
         })
     }
 
-    fn forward(&self, xs: &Tensor, rotary: Option<&WhisperRotary>) -> Result<Tensor> {
+    fn forward(
+        &self,
+        xs: &Tensor,
+        rotary: Option<&WhisperRotary>,
+        keys: Option<usize>,
+    ) -> Result<Tensor> {
         let (b, t, d) = xs.dims3()?;
         let heads = |proj: &Linear| -> Result<Tensor> {
             proj.forward(xs)?
@@ -183,6 +188,14 @@ impl Attention {
             q = rotary.apply(&q)?.contiguous()?;
             k = rotary.apply(&k)?.contiguous()?;
         }
+        // every position queries, only the first `keys` are attended to: a padding mask over the keys
+        let (k, v) = match keys {
+            Some(keys) if keys < t => (
+                k.narrow(2, 0, keys)?.contiguous()?,
+                v.narrow(2, 0, keys)?.contiguous()?,
+            ),
+            _ => (k, v),
+        };
         let params = SdpaParams {
             n_kv_groups: 1,
             sliding_window: None,
@@ -240,13 +253,18 @@ impl WhisperEncoderLayer {
 
     /// `(batch, frames, d_model)` in and out; every frame of a batch row attends to every other.
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        self.forward_rotary(xs, None)
+        self.forward_rotary(xs, None, None)
     }
 
-    fn forward_rotary(&self, xs: &Tensor, rotary: Option<&WhisperRotary>) -> Result<Tensor> {
-        let attended = self
-            .self_attn
-            .forward(&self.self_attn_layer_norm.forward(xs)?, rotary)?;
+    fn forward_rotary(
+        &self,
+        xs: &Tensor,
+        rotary: Option<&WhisperRotary>,
+        keys: Option<usize>,
+    ) -> Result<Tensor> {
+        let attended =
+            self.self_attn
+                .forward(&self.self_attn_layer_norm.forward(xs)?, rotary, keys)?;
         let xs = (xs + attended)?;
         let ffn = self.fc2.forward(
             &self
@@ -357,9 +375,15 @@ impl WhisperEncoder {
 
     /// The layers over embedded positions, before the final norm.
     pub fn encode(&self, xs: &Tensor) -> Result<Tensor> {
+        self.encode_keys(xs, None)
+    }
+
+    /// [`Self::encode`] with every position attending to the first `keys` only, as a padding mask over a window's
+    /// padded tail has it: the padded positions still come out.
+    pub fn encode_keys(&self, xs: &Tensor, keys: Option<usize>) -> Result<Tensor> {
         let mut xs = xs.clone();
         for layer in &self.layers {
-            xs = layer.forward_rotary(&xs, self.rotary.as_ref())?;
+            xs = layer.forward_rotary(&xs, self.rotary.as_ref(), keys)?;
         }
         Ok(xs)
     }
@@ -399,4 +423,52 @@ pub fn sinusoid_positions(length: usize, channels: usize) -> Vec<f32> {
         table.extend(scaled.map(f32::cos));
     }
     table
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use inference_tensor::{DType, Device, Tensor};
+
+    use super::*;
+    use crate::testing::load_synthesized;
+
+    const POSITIONS: usize = 12;
+    const KEYS: usize = 7;
+
+    // a key limit is a padding mask: the positions before it come out as the encoder over those positions alone
+    #[test]
+    fn a_key_limit_leaves_the_real_positions_as_encoding_them_alone() -> anyhow::Result<()> {
+        let cfg = WhisperEncoderConfig {
+            layer: WhisperLayerConfig {
+                d_model: 8,
+                num_heads: 2,
+                ffn_dim: 16,
+                activation: Activation::Gelu,
+                layer_norm_eps: 1e-5,
+                k_bias: false,
+                names: WhisperLayerNames::Whisper,
+            },
+            num_layers: 2,
+            num_mel_bins: 4,
+            max_source_positions: POSITIONS,
+            positions: WhisperPositions::Learned,
+        };
+        let (encoder, _) = load_synthesized(&[], HashMap::new(), DType::F32, |vb| {
+            Ok(WhisperEncoder::new(&cfg, vb)?)
+        })?;
+        let xs = Tensor::randn(0f32, 1.0, (1, POSITIONS, 8), &Device::Cpu)?;
+        let limited = encoder.encode_keys(&xs, Some(KEYS))?.narrow(1, 0, KEYS)?;
+        let alone = encoder.encode(&xs.narrow(1, 0, KEYS)?)?;
+        let worst = (limited - alone)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+        assert!(worst < 1e-5, "{worst}");
+        // the padded positions still come out, unlike the encoder over the real positions alone
+        assert_eq!(encoder.encode_keys(&xs, Some(KEYS))?.dim(1)?, POSITIONS);
+        Ok(())
+    }
 }

@@ -41,5 +41,6 @@ mod qwen_vl_tiny;
 mod rope_encoder_embedding_tiny;
 mod silero_tiny;
 mod sortformer_tiny;
+mod ultravox_tiny;
 mod voxtral_chat_tiny;
 mod whisper_tiny;
