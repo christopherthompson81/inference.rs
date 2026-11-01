@@ -244,3 +244,18 @@ b25c3fd2: absent).
 
 **Next:** IQ encoders (IQ4_NL, IQ4_XS, then IQ4_KS) with round trips against our dequantizers; a KLD tool (BF16
 reference logprobs over text and audio, then mean KLD, top-1 agreement, perplexity of a quantized load).
+
+## Run 8 - 2026-11-01 21:10
+
+**Question:** do our IQ4_NL / IQ4_XS quantizers (ported from ggml's `quantize_row_iq4_nl_impl`) write what ggml
+writes?
+
+**Commands:** `scripts/iq_quantize_parity.py ~/Programming/llama.cpp/build_cuda/bin`: 64 rows of 4096 seeded normal
+values with 5 % ten-times outliers and a gamma-distributed imatrix, through `ggml_quantize_chunk` (libggml-base by
+ctypes) and our `quantize_rows` example, without and with the imatrix.
+
+**Finding:** 0 differing bytes in all four (IQ4_NL 147,456 bytes, IQ4_XS 139,264). Unit tests: round trips through our
+dequantizers, the imatrix lowering the weighted error, zero rows staying zero.
+
+**Next:** IQ4_KS (ik_llama.cpp's encoder); then the tool around them: quantizing a GGUF with an imatrix and per-tensor
+rules into a GGUF, imatrix collection keyed by GGUF tensor names, and the KLD tool.

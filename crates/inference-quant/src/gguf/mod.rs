@@ -36,6 +36,7 @@ pub(crate) fn ensure_type_kernels_by_name(name: &str) -> std::result::Result<(),
     open()
 }
 mod iq_dequant;
+pub mod iq_quantize;
 mod iq_tables;
 mod iqk_dequant;
 pub mod kernel;

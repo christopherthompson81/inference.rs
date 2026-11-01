@@ -247,6 +247,7 @@ pub use gguf::fast_mmq::{
 pub use gguf::fast_mmvq::{
     moe_decode as indexed_moe_mmvq, supports_moe as supports_indexed_moe_mmvq, with_shared_input,
 };
+pub use gguf::iq_quantize;
 pub use gguf::kernel::GgufType;
 pub use gguf::mapped::MappedBlocks;
 pub use gguf::{GgufMatMul, unquantized_activation_forward};
