@@ -21,8 +21,9 @@ use crate::args::{
     AdapterOptions, AsrQuantizeOptions, CacheOptions, DeviceOptions, FormatOptions,
     GgufQuantizeOptions, GlobalOptions, HiDreamQuantizeOptions, ImatrixConvertOptions,
     MatformerSelection, ModelSourceOptions, ModelType, MultimodalAdapterOptions, MultimodalOptions,
-    QuantizationOptions, QuantizeDeviceOptions, QuantizeModelSourceOptions, QuantizeModelType,
-    QuantizeMultimodalOptions, QuantizeQuantizationOptions, WorldgenQuantizeOptions,
+    NemotronTranscribeAudioOptions, QuantizationOptions, QuantizeDeviceOptions,
+    QuantizeModelSourceOptions, QuantizeModelType, QuantizeMultimodalOptions,
+    QuantizeQuantizationOptions, WorldgenQuantizeOptions,
 };
 
 const MIB: f64 = (1u64 << 20) as f64;
@@ -189,6 +190,22 @@ pub fn run_imatrix_convert(options: ImatrixConvertOptions) -> Result<()> {
         "Wrote {} entries to {}",
         mapping.entries.len(),
         options.output_path.display()
+    );
+    Ok(())
+}
+
+/// Writes Nemotron 3.5 Transcribe's audio GGUF from its checkpoint.
+pub fn run_nemotron_transcribe_audio(options: NemotronTranscribeAudioOptions) -> Result<()> {
+    initialize_logging();
+    let written = gguf_requantize::write_nemotron_transcribe_audio_gguf(
+        &options.model,
+        &options.output_path,
+    )?;
+    info!(
+        "Wrote {} audio tensors to {} ({:.1} MiB)",
+        written,
+        options.output_path.display(),
+        std::fs::metadata(&options.output_path)?.len() as f64 / MIB
     );
     Ok(())
 }
@@ -689,7 +706,8 @@ mod tests {
             | QuantizeCommand::HiDreamO1(_)
             | QuantizeCommand::Worldgen(_)
             | QuantizeCommand::Gguf(_)
-            | QuantizeCommand::Imatrix(_) => {
+            | QuantizeCommand::Imatrix(_)
+            | QuantizeCommand::NemotronTranscribeAudio(_) => {
                 unreachable!("these tests quantize UQFF")
             }
         }

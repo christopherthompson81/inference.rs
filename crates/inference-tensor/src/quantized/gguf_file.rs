@@ -845,17 +845,23 @@ pub fn write_tensor_padding<W: std::io::Write>(w: &mut W, size_in_bytes: usize) 
     Ok(())
 }
 
-pub fn write<W: std::io::Seek + std::io::Write>(
-    w: &mut W,
-    metadata: &[(&str, &Value)],
-    tensors: &[(&str, &QTensor)],
-) -> Result<()> {
+/// `metadata` as the key/value bytes [`write_header`] takes.
+pub fn metadata_bytes(metadata: &[(&str, &Value)]) -> Result<Vec<u8>> {
     let mut kv_bytes = Vec::new();
     for (name, value) in metadata.iter() {
         write_string(&mut kv_bytes, name)?;
         kv_bytes.write_u32::<LittleEndian>(value.value_type().to_u32())?;
         value.write(&mut kv_bytes)?;
     }
+    Ok(kv_bytes)
+}
+
+pub fn write<W: std::io::Seek + std::io::Write>(
+    w: &mut W,
+    metadata: &[(&str, &Value)],
+    tensors: &[(&str, &QTensor)],
+) -> Result<()> {
+    let kv_bytes = metadata_bytes(metadata)?;
     let entries = tensors
         .iter()
         .map(|(name, tensor)| TensorEntry {

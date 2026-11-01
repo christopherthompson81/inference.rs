@@ -151,6 +151,7 @@ pub use files::{
     FILE_PURPOSE_GENERATED_IMAGE, FILE_PURPOSE_USER_DATA, File, FileContent, FileSource, FileStore,
     RequestedFile,
 };
+pub use gguf::nemotron_transcribe_bindings::write_nemotron_transcribe_audio_gguf;
 pub use gguf::{GGUF_MULTI_FILE_DELIMITER, GGUFArchitecture};
 pub use inference_audio::AudioInput;
 pub use inference_code_exec::{

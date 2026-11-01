@@ -251,3 +251,16 @@ inference quantize imatrix [OPTIONS] --cimatrix <CIMATRIX> --gguf <GGUF> --outpu
 | `-o, --output <OUTPUT_PATH>` | required | Output `.dat` path |
 | `--dataset <DATASET>` | `online calibration` | The calibration data's name, recorded in the file |
 
+## inference quantize nemotron-transcribe-audio
+
+Nemotron 3.5 Transcribe's audio GGUF (its `--mmproj`) from NVIDIA's checkpoint directory
+
+```
+inference quantize nemotron-transcribe-audio [OPTIONS] --model <MODEL> --output <OUTPUT_PATH>
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `-m, --model <MODEL>` | required | The checkpoint directory (`config.json`, `model.safetensors`) |
+| `-o, --output <OUTPUT_PATH>` | required | Output `.gguf` path |
+

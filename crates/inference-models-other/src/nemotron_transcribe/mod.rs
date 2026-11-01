@@ -172,8 +172,8 @@ pub struct NemotronTranscribeSpecificArgs {
     pub audio: Vec<AudioClip>,
 }
 
-fn f32_tensor(vb: &ShardedVarBuilder, name: &str) -> Result<Tensor> {
-    vb.get_unchecked_dtype(name, DType::F32)
+fn tower_tensor(vb: &ShardedVarBuilder, name: &str, dtype: DType) -> Result<Tensor> {
+    vb.get_unchecked_dtype(name, dtype)
 }
 
 /// A NeMo `TransformerEncoder`'s tensors under transformers' names, `ours` before each, its fused qkv split in three.
@@ -181,6 +181,7 @@ fn encoder_weights(
     vb: &ShardedVarBuilder,
     layers: usize,
     ours: &str,
+    dtype: DType,
     weights: &mut HashMap<String, Tensor>,
 ) -> Result<()> {
     let join = |name: &str| match ours {
@@ -191,7 +192,10 @@ fn encoder_weights(
         for suffix in ["weight", "bias"] {
             let name = format!("{theirs}.{suffix}");
             if vb.contains_tensor(&name) {
-                weights.insert(join(&format!("{renamed}.{suffix}")), f32_tensor(vb, &name)?);
+                weights.insert(
+                    join(&format!("{renamed}.{suffix}")),
+                    tower_tensor(vb, &name, dtype)?,
+                );
             }
         }
     }
@@ -203,7 +207,7 @@ fn encoder_weights(
                 if !block.contains_tensor(&name) {
                     continue;
                 }
-                let tensor = f32_tensor(&block, &name)?;
+                let tensor = tower_tensor(&block, &name, dtype)?;
                 let ours = |module: &str| join(&format!("layers.{layer}.{module}.{suffix}"));
                 if renamed == "self_attn.qkv" {
                     // rows `[query | key | value]`
@@ -223,18 +227,28 @@ fn encoder_weights(
     Ok(())
 }
 
-fn diarization_weights(vb: &ShardedVarBuilder, layers: usize) -> Result<HashMap<String, Tensor>> {
+fn diarization_weights(
+    vb: &ShardedVarBuilder,
+    layers: usize,
+    dtype: DType,
+) -> Result<HashMap<String, Tensor>> {
     let mut weights = HashMap::new();
-    encoder_weights(&vb.pp("encoder"), layers, "model.audio_tower", &mut weights)?;
+    encoder_weights(
+        &vb.pp("encoder"),
+        layers,
+        "model.audio_tower",
+        dtype,
+        &mut weights,
+    )?;
     for (theirs, ours) in DIARIZATION_HEAD {
         for suffix in ["weight", "bias"] {
             weights.insert(
                 format!("{ours}.{suffix}"),
-                f32_tensor(vb, &format!("{theirs}.{suffix}"))?,
+                tower_tensor(vb, &format!("{theirs}.{suffix}"), dtype)?,
             );
         }
     }
-    weights.insert(SILENCE.1.to_string(), f32_tensor(vb, SILENCE.0)?);
+    weights.insert(SILENCE.1.to_string(), tower_tensor(vb, SILENCE.0, dtype)?);
     Ok(weights)
 }
 
@@ -253,7 +267,8 @@ fn speaker_table(speakers: usize, hidden: usize, device: &Device) -> Result<Tens
     Tensor::from_vec(table, (speakers, hidden), device)
 }
 
-/// The speech encoder and the speaker branch beside it, in f32 as transformers keeps them, and the projector.
+/// The speech encoder and the speaker branch beside it, and the projector: in f32 on the CPU, as transformers keeps
+/// them, and in the model's dtype on an accelerator, where the f32 copy would take 1.4 GiB more.
 struct AudioTower {
     encoder: NemoTransformer,
     diarizer: Nemotron3Diarizer,
@@ -268,11 +283,22 @@ struct AudioTower {
 impl AudioTower {
     fn new(cfg: &Config, config: &str, vb: &ShardedVarBuilder, device: &Device) -> Result<Self> {
         let encoder_cfg = cfg.encoder();
+        let dtype = if device.is_cpu() {
+            DType::F32
+        } else {
+            vb.dtype()
+        };
         let mut weights = HashMap::new();
-        encoder_weights(&vb.pp(ASR), encoder_cfg.num_hidden_layers, "", &mut weights)?;
+        encoder_weights(
+            &vb.pp(ASR),
+            encoder_cfg.num_hidden_layers,
+            "",
+            dtype,
+            &mut weights,
+        )?;
         let encoder = NemoTransformer::new(
             encoder_cfg.clone(),
-            VarBuilder::from_tensors(weights, DType::F32, device),
+            VarBuilder::from_tensors(weights, dtype, device),
         )?;
         let diarization = diarization_config(config)?;
         let layers = serde_json::from_str::<serde_json::Value>(&diarization)
@@ -284,8 +310,8 @@ impl AudioTower {
             &diarization,
             mel_config(encoder_cfg.num_mel_bins),
             VarBuilder::from_tensors(
-                diarization_weights(&vb.pp(DIARIZATION), layers)?,
-                DType::F32,
+                diarization_weights(&vb.pp(DIARIZATION), layers, dtype)?,
+                dtype,
                 device,
             ),
         )?;
@@ -295,30 +321,30 @@ impl AudioTower {
             let vb = vb.pp(prefix);
             let mut map = HashMap::new();
             for suffix in ["weight", "bias"] {
-                map.insert(suffix.to_string(), f32_tensor(&vb, suffix)?);
+                map.insert(suffix.to_string(), tower_tensor(&vb, suffix, dtype)?);
             }
             layer_norm(
                 size,
                 LAYER_NORM_EPS,
-                VarBuilder::from_tensors(map, DType::F32, device),
+                VarBuilder::from_tensors(map, dtype, device),
             )
         };
         let projector = {
             let p = vb.pp(PROJECTOR);
             let mut map = HashMap::new();
             for suffix in ["weight", "bias"] {
-                map.insert(suffix.to_string(), f32_tensor(&p, suffix)?);
+                map.insert(suffix.to_string(), tower_tensor(&p, suffix, dtype)?);
             }
             linear(
                 hidden,
                 cfg.text_config.hidden_size,
-                VarBuilder::from_tensors(map, DType::F32, device),
+                VarBuilder::from_tensors(map, dtype, device),
             )?
         };
         Ok(Self {
             asr_norm: norm(ASR_NORM, hidden)?,
             speaker_norm: norm(SPEAKER_NORM, speakers)?,
-            speaker_table: speaker_table(speakers, hidden, device)?,
+            speaker_table: speaker_table(speakers, hidden, device)?.to_dtype(dtype)?,
             projector,
             activity_threshold: cfg.audio_config.speaker_activity_threshold,
             subsampling: encoder_cfg.subsampling_factor,
@@ -354,7 +380,7 @@ impl AudioTower {
             .mean(1)?;
         let activity = probabilities
             .gt(f64::from(self.activity_threshold))?
-            .to_dtype(DType::F32)?;
+            .to_dtype(self.speaker_table.dtype())?;
         let speaker_states = self
             .speaker_norm
             .forward(&activity)?

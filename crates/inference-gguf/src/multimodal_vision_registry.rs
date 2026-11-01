@@ -20,6 +20,9 @@ use super::{
     mistral3_bindings::build_mistral3_bindings,
     multimodal_binding_utils::{metadata_string, projector_type},
     muse_glimmer_bindings::build_muse_glimmer_bindings,
+    nemotron_transcribe_bindings::{
+        self, build_nemotron_transcribe_bindings, nemotron_transcribe_config,
+    },
     normal_registry::RopePairing,
     paddleocr_vl_bindings::{self, build_paddleocr_vl_bindings},
     qwen2_audio_bindings::{
@@ -44,6 +47,7 @@ pub enum NativeMultimodalGgufFamily {
     Lfm2Vl,
     MERaLiON2,
     MuseGlimmer,
+    NemotronTranscribe,
     PaddleOcrVl,
     Qwen2Audio,
     Ultravox,
@@ -83,6 +87,7 @@ pub fn describes_own_config(architecture: &str, projector: &str) -> bool {
             NativeMultimodalGgufFamily::AudioFlamingo3
                 | NativeMultimodalGgufFamily::GlmAsr
                 | NativeMultimodalGgufFamily::MERaLiON2
+                | NativeMultimodalGgufFamily::NemotronTranscribe
                 | NativeMultimodalGgufFamily::Qwen2Audio
                 | NativeMultimodalGgufFamily::Ultravox
                 | NativeMultimodalGgufFamily::VoxtralChat
@@ -105,6 +110,7 @@ impl NativeMultimodalGgufFamily {
             Self::Lfm2Vl => MultimodalLoaderType::Lfm2Vl,
             Self::MERaLiON2 => MultimodalLoaderType::MERaLiON2,
             Self::MuseGlimmer => MultimodalLoaderType::MuseGlimmer,
+            Self::NemotronTranscribe => MultimodalLoaderType::NemotronTranscribe,
             Self::PaddleOcrVl => MultimodalLoaderType::PaddleOcrVl,
             Self::Qwen2Audio => MultimodalLoaderType::Qwen2Audio,
             Self::Ultravox => MultimodalLoaderType::Ultravox,
@@ -118,6 +124,7 @@ impl NativeMultimodalGgufFamily {
             Self::GlmAsr => synthesize_glm_asr_config(archive).map(Some),
             #[cfg(any(test, feature = "models-gemma"))]
             Self::MERaLiON2 => synthesize_meralion2_config(archive).map(Some),
+            Self::NemotronTranscribe => nemotron_transcribe_config(archive).map(Some),
             Self::Qwen2Audio => synthesize_qwen2_audio_config(archive).map(Some),
             Self::Ultravox => synthesize_ultravox_config(archive).map(Some),
             Self::VoxtralChat => synthesize_voxtral_config(archive).map(Some),
@@ -143,6 +150,8 @@ impl NativeMultimodalGgufFamily {
             | Self::Mistral3
             | Self::Llama4
             | Self::MuseGlimmer
+            // NoPE attention: no rotary pairing applies
+            | Self::NemotronTranscribe
             | Self::Ultravox
             | Self::VoxtralChat => RopePairing::Adjacent,
         }
@@ -169,6 +178,7 @@ impl NativeMultimodalGgufFamily {
             Self::Llama4 => build_llama4_bindings(archive),
             Self::Lfm2Vl => build_lfm2_vl_bindings(archive),
             Self::MuseGlimmer => build_muse_glimmer_bindings(archive),
+            Self::NemotronTranscribe => build_nemotron_transcribe_bindings(archive),
             Self::PaddleOcrVl => build_paddleocr_vl_bindings(archive),
             Self::Qwen2Audio => build_qwen2_audio_bindings(archive),
             Self::Ultravox => build_ultravox_bindings(archive),
@@ -178,7 +188,7 @@ impl NativeMultimodalGgufFamily {
 }
 
 // (vision projector type, the text architecture it pairs with, family)
-const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 16] = [
+const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 17] = [
     ("gemma3", "gemma3", NativeMultimodalGgufFamily::Gemma3),
     ("gemma3nv", "gemma3n", NativeMultimodalGgufFamily::Gemma3n),
     (
@@ -210,6 +220,11 @@ const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 16] = [
         "muse-glimmer",
         "muse-glimmer",
         NativeMultimodalGgufFamily::MuseGlimmer,
+    ),
+    (
+        nemotron_transcribe_bindings::PROJECTOR,
+        nemotron_transcribe_bindings::TEXT_ARCHITECTURE,
+        NativeMultimodalGgufFamily::NemotronTranscribe,
     ),
     (
         paddleocr_vl_bindings::PROJECTOR,
@@ -346,6 +361,12 @@ mod tests {
                 "llama",
                 "ultravox",
                 NativeMultimodalGgufFamily::Ultravox,
+                RopePairing::Adjacent,
+            ),
+            (
+                "nemotron_h_moe",
+                "nemotron_transcribe",
+                NativeMultimodalGgufFamily::NemotronTranscribe,
                 RopePairing::Adjacent,
             ),
         ] {

@@ -1505,6 +1505,19 @@ impl GGUFLoader {
         if template_overrides_gguf {
             source.chat_template = None;
         }
+        if loader_type == MultimodalLoaderType::NemotronTranscribe {
+            use crate::gguf::nemotron_transcribe_bindings as transcribe;
+            transcribe::ensure_nemotron_transcribe_audio_token(
+                &mut source.tokenizer,
+                &source.config,
+            )?;
+            // only in place of the text GGUF's own; a template from files or the command line stays
+            if source.chat_template.is_some()
+                && let Some(template) = transcribe::nemotron_transcribe_chat_template(&archive)?
+            {
+                source.chat_template = Some(template);
+            }
+        }
         #[cfg(feature = "models-gemma")]
         let source = {
             let mut source = source;

@@ -28,6 +28,21 @@ pub enum QuantizeCommand {
 
     /// A `.cimatrix` collected online as llama.cpp's imatrix (`.dat`) under a GGUF's tensor names
     Imatrix(ImatrixConvertOptions),
+
+    /// Nemotron 3.5 Transcribe's audio GGUF (its `--mmproj`) from NVIDIA's checkpoint directory
+    #[command(name = "nemotron-transcribe-audio")]
+    NemotronTranscribeAudio(NemotronTranscribeAudioOptions),
+}
+
+#[derive(Args, Clone)]
+pub struct NemotronTranscribeAudioOptions {
+    /// The checkpoint directory (`config.json`, `model.safetensors`)
+    #[arg(short = 'm', long)]
+    pub model: PathBuf,
+
+    /// Output `.gguf` path
+    #[arg(short = 'o', long = "output")]
+    pub output_path: PathBuf,
 }
 
 #[derive(Args, Clone)]
@@ -567,7 +582,8 @@ pub fn resolve_quantize_command(
             | QuantizeCommand::HiDreamO1(_)
             | QuantizeCommand::Worldgen(_)
             | QuantizeCommand::Gguf(_)
-            | QuantizeCommand::Imatrix(_)),
+            | QuantizeCommand::Imatrix(_)
+            | QuantizeCommand::NemotronTranscribeAudio(_)),
         ) => {
             return Ok(other);
         }
@@ -632,7 +648,8 @@ mod tests {
             | QuantizeCommand::HiDreamO1(_)
             | QuantizeCommand::Worldgen(_)
             | QuantizeCommand::Gguf(_)
-            | QuantizeCommand::Imatrix(_) => {
+            | QuantizeCommand::Imatrix(_)
+            | QuantizeCommand::NemotronTranscribeAudio(_) => {
                 unreachable!("these tests quantize UQFF")
             }
         }

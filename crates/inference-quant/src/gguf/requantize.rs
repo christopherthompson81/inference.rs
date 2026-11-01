@@ -334,6 +334,60 @@ pub fn requantize_gguf(
     Ok(summary)
 }
 
+/// The float tensors of a safetensors file that `keep` selects, copied as they are (F32, F16, BF16) into a GGUF with
+/// `metadata`; returns how many were written.
+pub fn write_safetensors_gguf(
+    src: &Path,
+    dst: &Path,
+    keep: impl Fn(&str) -> bool,
+    metadata: &[(&str, &gguf_file::Value)],
+) -> Result<usize> {
+    use safetensors::Dtype;
+    // SAFETY: the file is only read, and not expected to change while it is mapped
+    let st = unsafe { inference_tensor::safetensors::MmapedSafetensors::new(src)? };
+    let mut tensors = st
+        .tensors()
+        .into_iter()
+        .filter(|(name, _)| keep(name))
+        .collect::<Vec<_>>();
+    tensors.sort_by(|a, b| a.0.cmp(&b.0));
+    let ids = tensors
+        .iter()
+        .map(|(name, view)| match view.dtype() {
+            Dtype::F32 => Ok(GgufType::F32.id()),
+            Dtype::F16 => Ok(GgufType::F16.id()),
+            Dtype::BF16 => Ok(GgufType::BF16.id()),
+            other => inference_tensor::bail!("{name}: {other:?} tensors have no GGUF float type"),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let entries = tensors
+        .iter()
+        .zip(&ids)
+        .map(|((name, view), &ggml_dtype)| TensorEntry {
+            name,
+            dims: view.shape(),
+            ggml_dtype,
+            size_in_bytes: view.data().len(),
+        })
+        .collect::<Vec<_>>();
+    let mut writer = BufWriter::new(File::create(dst)?);
+    write_header(
+        &mut writer,
+        metadata.len(),
+        &gguf_file::metadata_bytes(metadata)?,
+        &entries,
+    )?;
+    for (_, view) in &tensors {
+        writer.write_all(view.data())?;
+        write_tensor_padding(&mut writer, view.data().len())?;
+    }
+    writer
+        .into_inner()
+        .map_err(|e| e.into_error())?
+        .sync_all()?;
+    Ok(tensors.len())
+}
+
 /// llama.cpp's imatrix, legacy `.dat` or GGUF (`<tensor>.in_sum2` over `<tensor>.counts` per expert), as per-tensor
 /// mean squared activations.
 pub fn load_imatrix(path: &Path) -> Result<HashMap<String, Vec<f32>>> {

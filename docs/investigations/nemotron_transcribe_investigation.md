@@ -441,3 +441,33 @@ q3_k q4_k q5_k q6_k iq4_nl iq4_xs: 0 differing bytes in all 24 cases (plain and 
 
 **Next:** past parity, an opt-in better encoder judged by KLD: refitting scales after they are rounded, and
 GPTQ-style rounding against the full input covariance rather than the imatrix's diagonal.
+
+## Run 17 - 2026-11-01 ~17:50
+
+**Question:** does spending the budget on `ffn_down_exps` help, and does the quantized pair (text GGUF + an audio GGUF
+of our own) transcribe on the 3090?
+
+**Commands and findings:**
+- `quantize gguf` with `ffn_down_exps` Q5_0 (now imatrix-weighted, Run 16), `ffn_up_exps` IQ4_NL, the rest Q8_0:
+  19.30 GiB. Text KLD (Run 15's setup): mean 0.024980 +- 0.000739, 99 % 0.227, same top-1 93.216 % (all-IQ4_NL:
+  0.032971, 92.363 %). 24 % lower mean KLD for 1.71 GiB.
+- `inference quantize nemotron-transcribe-audio -m <checkpoint>`: 852 `perception.*` tensors as they are (BF16 and a
+  few F32), 1,399.8 MiB, with the checkpoint's `config.json` and `chat_template.jinja` in its metadata (projector type
+  `nemotron_transcribe`). Served as `--format gguf -f text.gguf --mmproj audio.gguf`.
+- First tries: no `<|audio|>` (the converter's tokenizer leaves out id 131072, the first id past the vocabulary; now
+  added on load and checked against `audio_token_id`), then the text GGUF's template (from `tokenizer_config.json`)
+  rendering content as a string; the checkpoint's template, which places audio parts, now comes from the audio GGUF
+  unless files or the command line give one.
+- `/v1/audio/transcriptions`: the pangram exact, the 20 s clip word for word. Chat requests without the transcription
+  prompt think aloud about the audio (thinking on by default), as the model does.
+- Memory: with the F32 audio tower (as transformers keeps it) the load sat at 23,863 MiB with paged attention off and
+  the 7 calibration clips of 43.5 s or more ran out of memory. On an accelerator the tower now takes the model's
+  dtype (BF16); on the CPU it stays F32, so the parity runs stand. 22,487 MiB, every clip transcribes.
+- F32 vs BF16 tower over the 48 calibration clips: 34 of the 41 both finished identical, 7 word edits in 3,727 words
+  (all spellings of one rare species name); WER on the digit-free clips 0.0417 for both (the source texts write
+  numbers as digits, the model as words, which inflates WER on the rest: 0.150 over all 4,230 words).
+- Paged attention back on at `--max-seq-len 65536`: 1,234 blocks, 39,456 tokens (about 50 minutes of audio), 23,617
+  MiB with the desktop's share; the 74 s and 70 s clips transcribe.
+
+**Next:** audio-conditioned KLD against the BF16 reference (teacher-forced transcripts), so recipes are judged on
+audio; then speed (ungated experts' CUDA path, graphs) and the CTC word-timestamp head.
