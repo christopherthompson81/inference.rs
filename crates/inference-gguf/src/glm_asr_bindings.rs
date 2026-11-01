@@ -29,6 +29,7 @@ const MAX_POSITIONS: usize = 1500;
 
 fn layout(heads: usize, head_dim: usize) -> TowerLayout {
     TowerLayout {
+        root: "audio_tower",
         layer: [
             ("self_attn.q_proj", "attn_q"),
             ("self_attn.k_proj", "attn_k"),

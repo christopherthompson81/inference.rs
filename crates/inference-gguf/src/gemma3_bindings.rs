@@ -33,6 +33,7 @@ fn build_gemma3_bindings_from_inventory(inventory: &TensorInventory<'_>) -> Resu
         &mut bindings,
         "language_model.model",
         "language_model.lm_head",
+        true,
     )?;
     bind_required(
         inventory,
@@ -66,15 +67,17 @@ fn build_gemma3_text_bindings_from_inventory(
     } else {
         ("model", "lm_head")
     };
-    bind_text(inventory, &mut bindings, model, lm_head)?;
+    bind_text(inventory, &mut bindings, model, lm_head, true)?;
     Ok(bindings)
 }
 
-fn bind_text(
+/// A Gemma text stack, its norms stored with llama.cpp's `+1`; Gemma 2 has no q/k norms (`qk_norm` false).
+pub(super) fn bind_text(
     inventory: &TensorInventory<'_>,
     bindings: &mut GgufBindingMap,
     model: &str,
     lm_head: &str,
+    qk_norm: bool,
 ) -> Result<()> {
     bind_required(
         inventory,
@@ -98,7 +101,7 @@ fn bind_text(
     }
 
     for layer in inventory.require_layers("blk.", FAMILY)? {
-        bind_text_layer(inventory, bindings, model, layer)?;
+        bind_text_layer(inventory, bindings, model, layer, qk_norm)?;
     }
     Ok(())
 }
@@ -108,6 +111,7 @@ fn bind_text_layer(
     bindings: &mut GgufBindingMap,
     model: &str,
     layer: usize,
+    qk_norm: bool,
 ) -> Result<()> {
     let native = format!("{model}.layers.{layer}");
     let source = format!("blk.{layer}");
@@ -126,9 +130,12 @@ fn bind_text_layer(
             ("mlp.down_proj", "ffn_down"),
         ],
     )?;
-    for (target, role) in [
+    let qk_norms = [
         ("self_attn.q_norm.weight", "attn_q_norm.weight"),
         ("self_attn.k_norm.weight", "attn_k_norm.weight"),
+    ];
+    let qk_norms: &[(&str, &str)] = if qk_norm { &qk_norms } else { &[] };
+    for (target, role) in qk_norms.iter().copied().chain([
         ("input_layernorm.weight", "attn_norm.weight"),
         (
             "post_attention_layernorm.weight",
@@ -136,7 +143,7 @@ fn bind_text_layer(
         ),
         ("pre_feedforward_layernorm.weight", "ffn_norm.weight"),
         ("post_feedforward_layernorm.weight", "post_ffw_norm.weight"),
-    ] {
+    ]) {
         bind_shifted_norm(
             inventory,
             bindings,

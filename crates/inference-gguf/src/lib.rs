@@ -13,6 +13,8 @@ pub mod granite_multimodal_bindings;
 pub mod idefics3_bindings;
 pub mod lfm2_vl_bindings;
 pub mod llama4_bindings;
+#[cfg(any(test, feature = "models-gemma"))]
+pub mod meralion2_bindings;
 pub mod metadata;
 mod mistral3_bindings;
 mod multimodal_binding_utils;
@@ -23,6 +25,7 @@ pub mod normal_bindings;
 pub mod normal_config;
 pub mod normal_registry;
 pub mod paddleocr_vl_bindings;
+pub mod qwen2_audio_bindings;
 pub mod qwen_multimodal_bindings;
 pub mod ultravox_bindings;
 pub mod voxtral_bindings;

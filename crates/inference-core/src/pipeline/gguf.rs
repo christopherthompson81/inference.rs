@@ -1589,6 +1589,10 @@ impl GGUFLoader {
         let mut model_archive = inference_quant::GgufArchive::open(paths.get_weight_filenames())?;
         alias_decision_architecture(&mut model_archive)?;
         let projector_archives = inference_quant::GgufArchive::open_components(mmproj_paths)?;
+        // its base models (an encoder's and a text model's) are not the repository the pair came from
+        if config_missing && describes_own_config(&model_archive, &projector_archives) {
+            return Ok(None);
+        }
         let projector_labels = projector_archives
             .iter()
             .enumerate()
@@ -1625,9 +1629,6 @@ impl GGUFLoader {
             }
         };
         let Some(inferred_model_id) = inferred_model_id else {
-            if config_missing && describes_own_config(&model_archive, &projector_archives) {
-                return Ok(None);
-            }
             if config_missing {
                 bail!(
                     "multimodal GGUF requires its original `config.json`, but the GGUF files do \

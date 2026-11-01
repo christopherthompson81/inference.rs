@@ -18,6 +18,8 @@ pub(super) const POSITIONS: &str = "a.position_embd.weight";
 
 /// How a family's transformers checkpoint names and positions the tower llama.cpp stores one way.
 pub(super) struct TowerLayout {
+    /// Where the tower sits in the transformers checkpoint.
+    pub root: &'static str,
     /// `(transformers, llama.cpp)` names within a layer.
     pub layer: [(&'static str, &'static str); 8],
     /// `(transformers, llama.cpp)` for the norm after the layers.
@@ -30,6 +32,7 @@ pub(super) struct TowerLayout {
 }
 
 pub(super) const WHISPER_LAYOUT: TowerLayout = TowerLayout {
+    root: "audio_tower",
     layer: [
         ("self_attn.q_proj", "attn_q"),
         ("self_attn.k_proj", "attn_k"),
@@ -45,7 +48,7 @@ pub(super) const WHISPER_LAYOUT: TowerLayout = TowerLayout {
     interleaved_rotary: None,
 };
 
-/// The tower's tensors under `audio_tower.*`.
+/// The tower's tensors under the layout's root.
 pub(super) fn bind_whisper_tower(
     inventory: &TensorInventory<'_>,
     bindings: &mut GgufBindingMap,
@@ -56,14 +59,14 @@ pub(super) fn bind_whisper_tower(
         bind_required(
             inventory,
             bindings,
-            format!("audio_tower.{native}.weight"),
+            format!("{}.{native}.weight", layout.root),
             format!("{source}.weight"),
         )?;
         // llama.cpp stores the conv bias as (1, channels)
         bind_required_with(
             inventory,
             bindings,
-            format!("audio_tower.{native}.bias"),
+            format!("{}.{native}.bias", layout.root),
             format!("{source}.bias"),
             |source, shape| {
                 Ok(GgufTensorBinding::tensor(source).reshape(vec![shape.iter().product()]))
@@ -74,7 +77,7 @@ pub(super) fn bind_whisper_tower(
         bind_required(
             inventory,
             bindings,
-            "audio_tower.embed_positions.weight",
+            format!("{}.embed_positions.weight", layout.root),
             POSITIONS,
         )?;
     }
@@ -82,11 +85,11 @@ pub(super) fn bind_whisper_tower(
     bind_required_linear(
         inventory,
         bindings,
-        &format!("audio_tower.{norm}"),
+        &format!("{}.{norm}", layout.root),
         norm_source,
     )?;
     for layer in inventory.require_layers("a.blk.", family)? {
-        let native = format!("audio_tower.layers.{layer}");
+        let native = format!("{}.layers.{layer}", layout.root);
         let source = format!("a.blk.{layer}");
         for (to, from) in layout.layer {
             let (to, from) = (format!("{native}.{to}"), format!("{source}.{from}"));

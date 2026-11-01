@@ -420,17 +420,26 @@ impl SupportedArch for MultimodalLoaderType {
             Self::Qwen2Audio => ArchMetadata {
                 families: &["Qwen2-Audio"],
                 modalities: &[Text, Audio],
-                examples: &[ex!("Qwen/Qwen2-Audio-7B-Instruct")],
+                examples: &[
+                    ex!("Qwen/Qwen2-Audio-7B-Instruct"),
+                    ex!("mradermacher/Qwen2-Audio-7B-Instruct-GGUF", "GGUF"),
+                ],
             },
             Self::GlmAsr => ArchMetadata {
                 families: &["GLM-ASR"],
                 modalities: &[Text, Audio],
-                examples: &[ex!("zai-org/GLM-ASR-Nano-2512")],
+                examples: &[
+                    ex!("zai-org/GLM-ASR-Nano-2512"),
+                    ex!("concedo/GLM-ASR-Nano-2512-GGUF", "GGUF"),
+                ],
             },
             Self::MERaLiON2 => ArchMetadata {
                 families: &["MERaLiON-2"],
                 modalities: &[Text, Audio],
-                examples: &[ex!("MERaLiON/MERaLiON-2-3B")],
+                examples: &[
+                    ex!("MERaLiON/MERaLiON-2-3B"),
+                    ex!("MERaLiON/MERaLiON-2-3B-GGUF", "GGUF"),
+                ],
             },
             Self::Ultravox => ArchMetadata {
                 families: &["Ultravox"],
