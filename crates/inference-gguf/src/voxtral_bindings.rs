@@ -3,24 +3,22 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use inference_nn::loaders::NormalLoaderType;
-use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
+use inference_quant::{GgufArchive, GgufBindingMap};
 use inference_tensor::quantized::gguf_file::Value;
 use serde_json::json;
 
 use super::multimodal_binding_utils::{
-    TensorInventory, bind_llama_text, bind_required, bind_required_linear, bind_required_with,
-    map_usize, validate_projector,
+    TensorInventory, bind_llama_text, bind_required_linear, map_usize, validate_projector,
 };
 use super::normal_config::synthesize_normal_config_value;
+use super::whisper_audio_bindings::{bind_whisper_tower, token_id, whisper_tower_config};
 
 pub const PROJECTOR: &str = "voxtral";
 pub const TEXT_ARCHITECTURE: &str = "llama";
 const FAMILY: &str = "Voxtral";
 const AUDIO_TOKEN: &str = "[AUDIO]";
-const TOKENS_KEY: &str = "tokenizer.ggml.tokens";
-const POSITIONS: &str = "a.position_embd.weight";
 
 pub fn build_voxtral_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
     validate_projector(archive, PROJECTOR)?;
@@ -38,57 +36,7 @@ fn build_voxtral_bindings_from_inventory(
         "language_model.lm_head",
         FAMILY,
     )?;
-    for (native, source) in [("conv1", "a.conv1d.1"), ("conv2", "a.conv1d.2")] {
-        bind_required(
-            inventory,
-            &mut bindings,
-            format!("audio_tower.{native}.weight"),
-            format!("{source}.weight"),
-        )?;
-        // llama.cpp stores the conv bias as (1, channels)
-        bind_required_with(
-            inventory,
-            &mut bindings,
-            format!("audio_tower.{native}.bias"),
-            format!("{source}.bias"),
-            |source, shape| {
-                Ok(GgufTensorBinding::tensor(source).reshape(vec![shape.iter().product()]))
-            },
-        )?;
-    }
-    bind_required(
-        inventory,
-        &mut bindings,
-        "audio_tower.embed_positions.weight",
-        POSITIONS,
-    )?;
-    bind_required_linear(
-        inventory,
-        &mut bindings,
-        "audio_tower.layer_norm",
-        "a.post_ln",
-    )?;
-    for layer in inventory.require_layers("a.blk.", FAMILY)? {
-        let native = format!("audio_tower.layers.{layer}");
-        let source = format!("a.blk.{layer}");
-        for (to, from) in [
-            ("self_attn.q_proj", "attn_q"),
-            ("self_attn.k_proj", "attn_k"),
-            ("self_attn.v_proj", "attn_v"),
-            ("self_attn.out_proj", "attn_out"),
-            ("self_attn_layer_norm", "ln1"),
-            ("fc1", "ffn_up"),
-            ("fc2", "ffn_down"),
-            ("final_layer_norm", "ln2"),
-        ] {
-            bind_required_linear(
-                inventory,
-                &mut bindings,
-                &format!("{native}.{to}"),
-                &format!("{source}.{from}"),
-            )?;
-        }
-    }
+    bind_whisper_tower(inventory, &mut bindings, FAMILY)?;
     bind_required_linear(
         inventory,
         &mut bindings,
@@ -122,13 +70,8 @@ fn voxtral_config(
     let tensor_names = shapes.keys().cloned().collect::<Vec<_>>();
     let text = synthesize_normal_config_value(&NormalLoaderType::Llama, metadata, &tensor_names)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let audio = whisper_tower_config(metadata, shapes, FAMILY)?;
     let hidden = map_usize(metadata, "clip.audio.embedding_length")?;
-    let positions = shapes
-        .get(POSITIONS)
-        .with_context(|| format!("{FAMILY} projector has no `{POSITIONS}`"))?
-        .iter()
-        .product::<usize>()
-        / hidden;
     let ffn = map_usize(metadata, "clip.audio.feed_forward_length")?;
     let stack = map_usize(metadata, "clip.audio.projector.stack_factor")?;
     if stack * hidden != ffn {
@@ -139,30 +82,12 @@ fn voxtral_config(
     let config = json!({
         "architectures": ["VoxtralForConditionalGeneration"],
         "model_type": "voxtral",
-        "audio_token_id": audio_token_id(metadata)?,
+        "audio_token_id": token_id(metadata, AUDIO_TOKEN, FAMILY)?,
         "projector_hidden_act": "gelu",
-        "audio_config": {
-            "hidden_size": hidden,
-            "intermediate_size": ffn,
-            "num_attention_heads": map_usize(metadata, "clip.audio.attention.head_count")?,
-            "num_hidden_layers": map_usize(metadata, "clip.audio.block_count")?,
-            "num_mel_bins": map_usize(metadata, "clip.audio.num_mel_bins")?,
-            "max_source_positions": positions,
-            "activation_function": "gelu",
-        },
+        "audio_config": audio,
         "text_config": text,
     });
     Ok(config.to_string())
-}
-
-fn audio_token_id(metadata: &HashMap<String, Value>) -> Result<usize> {
-    let Some(Value::Array(tokens)) = metadata.get(TOKENS_KEY) else {
-        bail!("{FAMILY} GGUF has no `{TOKENS_KEY}` list");
-    };
-    tokens
-        .iter()
-        .position(|token| matches!(token, Value::String(text) if text == AUDIO_TOKEN))
-        .with_context(|| format!("{FAMILY} GGUF vocabulary has no `{AUDIO_TOKEN}` token"))
 }
 
 #[cfg(test)]
@@ -179,7 +104,10 @@ mod tests {
             ("a.conv1d.1.bias".to_string(), vec![1, 4]),
             ("a.conv1d.2.weight".to_string(), vec![3, 4, 4]),
             ("a.conv1d.2.bias".to_string(), vec![1, 4]),
-            (POSITIONS.to_string(), vec![4, 6]),
+            (
+                crate::whisper_audio_bindings::POSITIONS.to_string(),
+                vec![4, 6],
+            ),
             ("a.post_ln.weight".to_string(), vec![4]),
             ("a.post_ln.bias".to_string(), vec![4]),
             ("mm.a.mlp.1.weight".to_string(), vec![16, 8]),
@@ -272,10 +200,16 @@ mod tests {
             .map(|i| Value::String(format!("<t{i}>")))
             .collect::<Vec<_>>();
         tokens[263] = Value::String(AUDIO_TOKEN.to_string());
-        put(TOKENS_KEY, Value::Array(tokens));
+        put(
+            crate::whisper_audio_bindings::TOKENS_KEY,
+            Value::Array(tokens),
+        );
         let shapes = inventory_tensors()
             .into_iter()
-            .chain([(POSITIONS.to_string(), vec![16, 1500])])
+            .chain([(
+                crate::whisper_audio_bindings::POSITIONS.to_string(),
+                vec![16, 1500],
+            )])
             .collect::<HashMap<_, _>>();
         let json = voxtral_config(&metadata, &shapes).unwrap();
         inference_models_llama::voxtral_chat::VoxtralChatConfig::from_json(&json).unwrap();

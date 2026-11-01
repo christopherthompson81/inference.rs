@@ -1,0 +1,30 @@
+{
+  "architectures": [
+    "UltravoxModel"
+  ],
+  "model_type": "ultravox",
+  "audio_token_id": 264,
+  "stack_factor": 8,
+  "hidden_size": 64,
+  "audio_config": {
+    "hidden_size": 16,
+    "intermediate_size": 64,
+    "num_attention_heads": 2,
+    "num_hidden_layers": 2,
+    "num_mel_bins": 128,
+    "max_source_positions": 1500
+  },
+  "text_config": {
+    "vocab_size": 266,
+    "hidden_size": 48,
+    "intermediate_size": 96,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 2,
+    "num_key_value_heads": 1,
+    "hidden_act": "silu",
+    "max_position_embeddings": 2048,
+    "rms_norm_eps": 1e-05,
+    "rope_theta": 500000.0,
+    "tie_word_embeddings": false
+  }
+}

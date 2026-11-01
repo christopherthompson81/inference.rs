@@ -209,3 +209,61 @@ ships a duplicate single file) match transformers?
 
 **Next:** Ultravox and MERaLiON-2 have no transformers implementation; a reference means running their repos' remote
 code, which needs the user's go-ahead.
+
+## Run 9 - 2026-11-01 00:20
+
+**Question:** how does Ultravox (fixie-ai/ultravox-v0_5-llama-3_2-1b) load, and what does its remote code do?
+
+**Commands:** the Hub's file lists; the repo's `ultravox_model.py`, `ultravox_processing.py` (read, not run); gguf-py
+over ggml-org's `ultravox-v0_5-llama-3_2-1b-GGUF` (`Llama-3.2-1B-Instruct-Q8_0.gguf` + `mmproj-...-f16.gguf`).
+
+**Finding:**
+- The safetensors repo holds only the tower (Whisper large-v3-turbo's encoder) and the projector; the decoder comes
+  from `text_model_id` (meta-llama/Llama-3.2-1B-Instruct, gated) and the config has no `text_config`. The GGUF pair
+  holds both halves, so the GGUF path needs no second repository; the port loads from GGUF only.
+- Projector (`clip.projector_type ultravox`, `stack_factor 8`): zero-pad the encoder positions to a multiple of 8 and
+  stack them (1280 x 8 = 10240), RMSNorm (`mm.a.norm_pre`, eps 1e-6), `mm.a.mlp.1` 10240 -> 4096 (no bias), SwiGLU
+  with the *second* half gated (`silu(gate) * x`, 4096 -> 2048), RMSNorm (`mm.a.norm_mid`), `mm.a.mlp.2` 2048 -> 2048.
+- Audio: one log-mel over the whole clip (WhisperFeatureExtractor, `padding="longest"`, no 30 s pad), cut into 3000-frame
+  chunks; the first chunk is not padded, continuation chunks are zero-padded to 3000 and masked to their real frames.
+  `audio_lens` comes from the waveform mask sliced every hop (`ceil(len / 160)`); each chunk takes
+  `ceil(audio_lens / 16)` tokens, filled from its stacked frames `[:token_len]`.
+- The placeholder `<|audio|>` is not in the vocabulary; the processor writes the tokenizer's EOS (`<|eot_id|>`) per
+  token, which the turn ends use too. Placement goes by position, so we mark the run with an unused Llama special
+  token; no repetition penalty in the generation config, so the id the run carries changes nothing.
+- The encoder is Whisper's with positions cut to the input length (`embed_positions[:T]`) and a key mask for padded
+  continuation chunks: padded positions are computed (their queries attend to real keys only) and can reach the last
+  kept token. Exact parity needs key-limited attention in the shared encoder.
+
+**Next:** key-limited encoding, the model, GGUF bindings and config synthesis (as Voxtral's), then the remote code as
+reference (transformers 4.48-era code; F32 on the CPU; ours on the Q8_0/F16 GGUFs, so agreement, not exact match).
+
+## Run 10 - 2026-10-31 22:30
+
+**Question:** does our Ultravox on ggml-org's GGUF pair (Q8_0 text, F16 projector) agree with the repo's remote code
+(fixie-ai/ultravox-v0_5-llama-3_2-1b with meta-llama/Llama-3.2-1B-Instruct, F32 on the CPU)?
+
+**Commands:** `inference serve --cpu --format gguf -m /mnt/data/models/ultravox-1b -f Llama-3.2-1B-Instruct-Q8_0.gguf`;
+a scratch script running `AutoModel`/`AutoProcessor` with `trust_remote_code` (transformers 5.19, plus accelerate and
+peft for its imports), greedy, 64 tokens, the text prompt and "What is said in this recording?" after `<|audio|>` with
+no separator, over the synthetic short clip, the Kokoro garden dialogue (28.7 s) and the 74 s two-chunk clip.
+
+**Finding:**
+- First load failed: `shape mismatch for multi_modal_projector.linear_1.weight, expected [10240, 10240], got [4096,
+  10240]`. The archive reports shapes as (out, in), not ggml's (in, out); the projector width now comes from the
+  first dimension.
+- The remote code is transformers 4 era. Under 5.19 it needs two shims in the reference script: the removed
+  `get_extended_attention_mask` (a 2-D mask to the additive 4-D form) and Whisper layers returning a tuple (5.x
+  returns the tensor, and the remote loop takes `[0]`, the batch's first row). It also wants
+  `openai/whisper-large-v3-turbo`'s `preprocessor_config.json` and the repo's `ultravox_config.py`.
+- The text prompt came out 43 tokens for us, 41 for the reference: our renderer defines `date_string`
+  (`"%d, %B, %Y"`, "31, October, 2026"), so the Llama 3 template skips its `strftime_now("%d %b %Y")` branch
+  ("31 Oct 2026") that transformers takes. That affects every Llama 3.x template and predates this port; left alone
+  here. With `date_string` passed to the reference too, both sides render identical prompts.
+- Audio token counts match the reference exactly: 23 (short), 189 (dialogue), 468 (two chunks, 3000 + 4400 frames).
+- Greedy outputs agree word for word through the opening sentence or two, then part where the Q8_0 text model departs
+  from F32: the rivers (Volga vs Seine as the third), the short clip after the pangram explanation, the dialogue at
+  "specifically mention the" vs "specifically to the South", the two-chunk clip after its first sentence. Both
+  describe the second chunk's content, so the continuation chunk's padding and key limit work.
+
+**Next:** commit, checks, ask before pushing. The `date_string` difference is a separate fix to raise.

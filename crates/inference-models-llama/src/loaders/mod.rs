@@ -44,6 +44,7 @@ mod mixtral;
 #[cfg(test)]
 mod sizing_tests;
 mod smollm3;
+mod ultravox;
 mod vllama;
 mod vllama4;
 mod voxtral;
@@ -59,6 +60,7 @@ pub use mistral::*;
 pub use mistral3::*;
 pub use mixtral::*;
 pub use smollm3::*;
+pub use ultravox::*;
 pub use vllama::*;
 pub use vllama4::*;
 pub use voxtral::*;
@@ -84,4 +86,5 @@ inference_nn::boxed_loaders!(
     VoxtralLoader,
     VoxtralChatLoader,
     GlmAsrLoader,
+    UltravoxLoader,
 );

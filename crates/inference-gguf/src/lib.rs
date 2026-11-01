@@ -23,7 +23,9 @@ pub mod normal_config;
 pub mod normal_registry;
 pub mod paddleocr_vl_bindings;
 pub mod qwen_multimodal_bindings;
+pub mod ultravox_bindings;
 pub mod voxtral_bindings;
+mod whisper_audio_bindings;
 
 pub use chat_template::{get_gguf_chat_template, get_gguf_chat_template_from_metadata};
 pub use gguf_tokenizer::{

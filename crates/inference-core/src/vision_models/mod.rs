@@ -67,6 +67,8 @@ pub(crate) mod qwen3_asr;
 #[cfg(feature = "models-qwen")]
 pub(crate) mod qwen3_vl;
 #[cfg(feature = "models-llama")]
+pub(crate) mod ultravox;
+#[cfg(feature = "models-llama")]
 pub(crate) mod voxtral;
 #[cfg(feature = "models-llama")]
 pub(crate) mod voxtral_chat;

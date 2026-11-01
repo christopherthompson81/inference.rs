@@ -82,6 +82,7 @@ files when the repository and GGUF metadata identify them unambiguously. The dir
 | Qwen3-VL MoE | `qwen3vlmoe` |
 | Qwen3.5 and Qwen3.6 multimodal dense | `qwen35` |
 | Qwen3.5 and Qwen3.6 multimodal MoE | `qwen35moe` |
+| Ultravox | `llama` (projector `ultravox`) |
 | Voxtral Mini and Small | `llama` (projector `voxtral`) |
 
 Input modalities depend on the model. A listed family does not imply that every checkpoint accepts
@@ -92,8 +93,9 @@ Multimodal Qwen3.5 and Qwen3.6 accept image and video input, but not audio. Gemm
 image/video and audio when the matching components are present in the model configuration and
 projector files.
 
-Voxtral GGUFs load with no base repository: the config comes from the text and projector GGUFs' metadata, and the
-loader's chat template replaces the one llama.cpp's Voxtral GGUFs embed (another Mistral model's).
+Voxtral and Ultravox GGUFs load with no base repository: the config comes from the text and projector GGUFs' metadata.
+For Voxtral the loader's chat template replaces the one llama.cpp's Voxtral GGUFs embed (another Mistral model's);
+Ultravox keeps the text GGUF's Llama 3 template.
 
 Muse Glimmer GGUFs require a companion `muse-glimmer` projector. Current published GGUF
 repositories also require `--tok-model-id meta-models/Muse-Glimmer-30B` because they do not carry

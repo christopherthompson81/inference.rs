@@ -1,4 +1,4 @@
-//! Llama-family models: the Llama, Mistral, Mixtral and SmolLM3 text models, bidirectional Llama encoders, and LLaVA, Idefics 2/3, Mistral 3, Mllama, Llama 4, Voxtral, Voxtral Realtime and GLM-ASR.
+//! Llama-family models: the Llama, Mistral, Mixtral and SmolLM3 text models, bidirectional Llama encoders, and LLaVA, Idefics 2/3, Mistral 3, Mllama, Llama 4, Voxtral, Voxtral Realtime, GLM-ASR and Ultravox.
 #![deny(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use inference_nn::serde_default_fn;
@@ -30,6 +30,7 @@ mod mixtral_tests;
 pub mod mllama;
 pub mod quantized_llama;
 pub mod smollm3;
+pub mod ultravox;
 pub mod voxtral;
 pub mod voxtral_chat;
 
@@ -45,6 +46,7 @@ inference_nn::json_config!(
     mixtral::Config,
     mllama::config::MLlamaConfig,
     smollm3::Config,
+    ultravox::UltravoxConfig,
     voxtral::config::VoxtralConfig,
     voxtral_chat::VoxtralChatConfig,
 );
