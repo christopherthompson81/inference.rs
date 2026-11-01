@@ -229,6 +229,7 @@ class MultimodalLoaderType(str, Enum):
     QWEN4EXP = "qwen4exp"
     VOXTRAL = "voxtral"
     VOXTRAL_CHAT = "voxtral-chat"
+    MERALION2 = "meralion2"
     ULTRAVOX = "ultravox"
     GLM_ASR = "glm_asr"
     GEMMA4 = "gemma4"
@@ -1267,6 +1268,7 @@ class GenerationDefaults:
     max_length: int | None = None
     max_new_tokens: int | None = None
     min_p: float | None = None
+    no_repeat_ngram_size: int | None = None
     repetition_penalty: float | None = None
     suppress_tokens: list[int] | None = None
     temperature: float | None = None

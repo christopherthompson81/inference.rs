@@ -248,6 +248,10 @@ Voxtral Realtime (`VoxtralRealtimeForConditionalGeneration`) is a different, str
 
 GLM-ASR (`GlmAsrForConditionalGeneration`, e.g. `zai-org/GLM-ASR-Nano-2512`) transcribes Chinese and English through `/v1/audio/transcriptions` (with the reference processor's prompt; a `language` is ignored, since the model takes none) and answers questions about audio in chat. Each clip, resampled to 16 kHz mono, is cut into 30 s windows, up to 655 s; every whole window takes 375 tokens.
 
+## MERaLiON-2
+
+MERaLiON-2 (`MERaLiON2ForConditionalGeneration`, e.g. `MERaLiON/MERaLiON-2-3B`) answers questions about speech in chat and transcribes through `/v1/audio/transcriptions` (with the model card's instruction; a `language` is ignored). A turn with audio is written in the instruction template the model was trained on (`Instruction: <text> \nFollow the text instruction based on the following audio: <SpeechHere>`), so a request sends only its question. Each clip, resampled to 16 kHz mono, is cut into 30 s chunks, up to 300 s; every chunk takes 100 tokens. The checkpoint's generation config sets `no_repeat_ngram_size` 6, which applies to every request. Transcripts keep the model's `<Speaker1>:` labels. The weights are under the MERaLiON Public Licence v3.
+
 ## Ultravox
 
 Ultravox (e.g. `fixie-ai/ultravox-v0_5-llama-3_2-1b`) answers questions about audio clips in chat. Its safetensors repos hold only the audio tower and projector (the text model is another repository), so it loads from llama.cpp's GGUFs, a `llama` text GGUF with its `ultravox` projector, with nothing else:

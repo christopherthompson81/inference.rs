@@ -1,10 +1,10 @@
-//! Gemma family: the Gemma and Gemma 2 text models, Gemma 3, 3n and 4, and DiffusionGemma.
+//! Gemma family: the Gemma and Gemma 2 text models, Gemma 3, 3n and 4, DiffusionGemma, and MERaLiON-2 on Gemma 2.
 #![deny(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use inference_nn::serde_default_fn;
 use inference_nn::{
-    amoe, attention, decoder, device_map, embedding, flashinfer, gdn, kv_cache, layers, matformer,
-    media_inputs, model, moe, ops, paged_attention, speculative, utils, vision,
+    amoe, attention, audio, decoder, device_map, embedding, flashinfer, gdn, kv_cache, layers,
+    matformer, media_inputs, model, moe, ops, paged_attention, speculative, utils, vision,
 };
 
 mod audio_attention;
@@ -18,6 +18,7 @@ pub mod gemma4;
 #[cfg(test)]
 mod gemma_dense_tests;
 pub mod loaders;
+pub mod meralion2;
 
 inference_nn::json_config!(
     gemma::Config,
@@ -27,4 +28,5 @@ inference_nn::json_config!(
     gemma4::config::Gemma4Config,
     diffusion_gemma::config::DiffusionGemmaConfig,
     gemma3::config::Gemma3TextConfig,
+    meralion2::MERaLiON2Config,
 );

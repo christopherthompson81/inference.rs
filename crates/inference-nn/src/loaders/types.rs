@@ -251,6 +251,7 @@ macro_rules! multimodal_loader_table {
             Qwen4Exp { cli: "qwen4exp", hf: "Qwen4ExpForConditionalGeneration", loader: Qwen3_5MoeLoader, feature: "models-qwen" },
             Voxtral { cli: "voxtral", hf: "VoxtralRealtimeForConditionalGeneration", loader: VoxtralLoader, feature: "models-llama" },
             VoxtralChat { cli: "voxtral-chat", hf: "VoxtralForConditionalGeneration", loader: VoxtralChatLoader, feature: "models-llama" },
+            MERaLiON2 { cli: "meralion2", hf: "MERaLiON2ForConditionalGeneration", loader: MERaLiON2Loader, feature: "models-gemma" },
             Ultravox { cli: "ultravox", hf: "UltravoxModel", loader: UltravoxLoader, feature: "models-llama" },
             GlmAsr { cli: "glm_asr", hf: "GlmAsrForConditionalGeneration", loader: GlmAsrLoader, feature: "models-llama" },
             Gemma4 {

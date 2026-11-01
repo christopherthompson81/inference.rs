@@ -151,6 +151,8 @@ pub struct GenerationConfig {
     max_length: Option<usize>,
     #[serde(default)]
     suppress_tokens: Option<Vec<u32>>,
+    #[serde(default)]
+    no_repeat_ngram_size: Option<usize>,
 }
 
 impl GenerationConfig {
@@ -255,6 +257,7 @@ impl GenerationConfig {
             max_new_tokens: self.max_new_tokens,
             max_length: self.max_length,
             suppress_tokens: self.suppress_tokens.clone(),
+            no_repeat_ngram_size: self.no_repeat_ngram_size,
         };
 
         if defaults.is_empty() {

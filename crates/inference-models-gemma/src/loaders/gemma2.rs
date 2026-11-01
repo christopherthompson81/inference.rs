@@ -105,7 +105,7 @@ impl DeviceMappedModelLoader for Gemma2Loader {
     }
 }
 
-fn decoder_shape(cfg: &crate::gemma2::Config) -> DecoderLayerShape {
+pub(super) fn decoder_shape(cfg: &crate::gemma2::Config) -> DecoderLayerShape {
     DecoderLayerShape {
         hidden_size: cfg.hidden_size,
         num_attention_heads: cfg.num_attention_heads,

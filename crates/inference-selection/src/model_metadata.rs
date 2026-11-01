@@ -427,6 +427,11 @@ impl SupportedArch for MultimodalLoaderType {
                 modalities: &[Text, Audio],
                 examples: &[ex!("zai-org/GLM-ASR-Nano-2512")],
             },
+            Self::MERaLiON2 => ArchMetadata {
+                families: &["MERaLiON-2"],
+                modalities: &[Text, Audio],
+                examples: &[ex!("MERaLiON/MERaLiON-2-3B")],
+            },
             Self::Ultravox => ArchMetadata {
                 families: &["Ultravox"],
                 modalities: &[Text, Audio],

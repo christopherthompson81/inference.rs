@@ -20,7 +20,7 @@ use tracing::warn;
 use crate::{
     StopTokens, get_mut_arcmutex,
     request::Request,
-    sampler::Sampler,
+    sampler::{CustomLogitsProcessor, NoRepeatNgram, Sampler},
     sequence::{Sequence, SequenceGroup},
 };
 
@@ -429,7 +429,17 @@ impl Engine {
             topp,
             minp,
             request.sampling_params.logits_bias.unwrap_or_default(),
-            request.logits_processors.unwrap_or_default(),
+            request
+                .logits_processors
+                .unwrap_or_default()
+                .into_iter()
+                .chain(
+                    request
+                        .sampling_params
+                        .no_repeat_ngram_size
+                        .map(|n| Arc::new(NoRepeatNgram(n)) as Arc<dyn CustomLogitsProcessor>),
+                )
+                .collect(),
         );
         let sampler = sampler.map_err(|e| Response::ValidationError(e.into()))?;
 

@@ -614,6 +614,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `MultimodalLoaderType.QWEN4EXP` | `'qwen4exp'` |
 | `MultimodalLoaderType.VOXTRAL` | `'voxtral'` |
 | `MultimodalLoaderType.VOXTRAL_CHAT` | `'voxtral-chat'` |
+| `MultimodalLoaderType.MERALION2` | `'meralion2'` |
 | `MultimodalLoaderType.ULTRAVOX` | `'ultravox'` |
 | `MultimodalLoaderType.GLM_ASR` | `'glm_asr'` |
 | `MultimodalLoaderType.GEMMA4` | `'gemma4'` |
