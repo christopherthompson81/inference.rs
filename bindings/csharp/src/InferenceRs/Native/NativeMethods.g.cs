@@ -19,6 +19,9 @@ internal static unsafe partial class NativeMethods
     internal static partial IntPtr inference_last_error();
 
     [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_init_logging(int verbosity);
+
+    [LibraryImport(Library)]
     internal static partial IntPtr inference_status_string(InferenceStatus status);
 
     [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]

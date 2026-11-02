@@ -7,6 +7,7 @@ use inference_quant::{
 };
 use inference_tensor::nn::Linear;
 use inference_tensor::{D, DType, Device, Result, Tensor};
+use rayon::prelude::*;
 use std::sync::Arc;
 
 use super::checkpoint::{ExpertCheckpoint, ExpertSourceLayout};
@@ -154,27 +155,43 @@ impl UngatedExpertsWeights {
             }
         }
         let device = forward.xs_flat.device();
-        let mut out = Tensor::zeros(forward.shape.flat(), DType::F32, device)?;
-        for (expert, (tokens, gates)) in routes.into_iter().enumerate() {
-            if tokens.is_empty() {
-                continue;
-            }
+        // one expert's rows through its matmuls: the hidden rows (for calibration) and the gated output rows
+        let run = |(expert, (tokens, gates)): (usize, (Vec<u32>, Vec<f32>))| -> Result<_> {
             let rows = tokens.len();
             let tokens = Tensor::from_vec(tokens, rows, device)?;
             let xs = forward.xs_flat.index_select(&tokens, 0)?;
             let hidden = xs.matmul(&up.get(expert)?.t()?)?.apply(&config.act)?;
-            if tracking {
-                let ids = Tensor::full(
-                    u32::try_from(expert).expect("expert ids fit u32"),
-                    (rows, 1),
-                    device,
-                )?;
-                layers[1].process_routed_stats(&hidden.unsqueeze(1)?, &ids)?;
-            }
             let ys = hidden
                 .matmul(&down.get(expert)?.t()?)?
                 .to_dtype(DType::F32)?
                 .broadcast_mul(&Tensor::from_vec(gates, (rows, 1), device)?)?;
+            Ok((expert, tokens, hidden, ys))
+        };
+        let routed = routes
+            .into_iter()
+            .enumerate()
+            .filter(|(_, (tokens, _))| !tokens.is_empty());
+        // on the CPU a prompt gives each expert a few dozen rows, too few for a matmul to spread over the cores, so
+        // the experts run side by side instead
+        let outputs = if device.is_cpu() {
+            routed
+                .collect::<Vec<_>>()
+                .into_par_iter()
+                .map(run)
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            routed.map(run).collect::<Result<Vec<_>>>()?
+        };
+        let mut out = Tensor::zeros(forward.shape.flat(), DType::F32, device)?;
+        for (expert, tokens, hidden, ys) in outputs {
+            if tracking {
+                let ids = Tensor::full(
+                    u32::try_from(expert).expect("expert ids fit u32"),
+                    (hidden.dim(0)?, 1),
+                    device,
+                )?;
+                layers[1].process_routed_stats(&hidden.unsqueeze(1)?, &ids)?;
+            }
             out = out.index_add(&tokens, &ys, 0)?;
         }
         out.to_dtype(forward.original_dtype)

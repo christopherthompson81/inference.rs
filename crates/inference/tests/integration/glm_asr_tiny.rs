@@ -1,9 +1,12 @@
 //! A tiny random-weight GLM-ASR: the repo's template writes each audio part, a clip takes the tokens of its 30 s
-//! windows, and a transcription request decodes from the processor's prompt.
+//! windows, a transcription request decodes from the processor's prompt, and a scored prompt takes its clips as a
+//! chat does.
 
+use base64::Engine as _;
 use inference::{
-    AudioInput, Model, ModelDType, MultimodalMessages, MultimodalModelBuilder, RequestBuilder,
-    TextMessageRole, TranscriptionRequest, TranscriptionResponseFormat,
+    AudioInput, Model, ModelDType, MultimodalMessages, MultimodalModelBuilder, PromptInput,
+    PromptLogitsRequest, RequestBuilder, TextMessageRole, TranscriptionRequest,
+    TranscriptionResponseFormat,
 };
 
 use crate::audio_clips::wav;
@@ -104,6 +107,58 @@ async fn a_clip_takes_its_windows_tokens_and_transcribes() -> anyhow::Result<()>
             .transcription(translate, &wav(&clip(SHORT_SAMPLES)))
             .await
             .is_err()
+    );
+    Ok(())
+}
+
+// the rendered chat's tokens with the clip beside them score over the prompt the chat itself runs
+#[tokio::test]
+async fn a_scored_prompt_expands_its_clips_as_a_chat_does() -> anyhow::Result<()> {
+    let checkpoint = tiny_checkpoint()?;
+    let model = build(checkpoint.path()).await?;
+    let clip = clip(SHORT_SAMPLES);
+    let chat = || {
+        RequestBuilder::from(MultimodalMessages::new().add_audio_message(
+            TextMessageRole::User,
+            PROMPT,
+            vec![clip.clone()],
+        ))
+    };
+    let url = format!(
+        "data:audio/wav;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(wav(&clip))
+    );
+    let request = serde_json::json!({
+        "model": "default",
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": PROMPT},
+            {"type": "audio_url", "audio_url": {"url": url}},
+        ]}],
+    });
+    let rendered: serde_json::Value = serde_json::from_str(
+        &model
+            .tokenize_chat_json(request.to_string().as_bytes())
+            .await?,
+    )?;
+    let rendered = serde_json::from_value::<Vec<u32>>(rendered["tokens"].clone())?;
+    let scored = model
+        .prompt_logits(PromptLogitsRequest {
+            model: None,
+            prompt: PromptInput::Tokens(rendered),
+            output: Default::default(),
+            audio: vec![url],
+        })
+        .await?;
+    let ran = model
+        .send_chat_request(chat().set_sampler_max_len(MAX_LEN))
+        .await?
+        .usage
+        .prompt_tokens;
+    assert_eq!(scored.tokens.len(), ran);
+    assert!(
+        scored.token_logprobs[1..]
+            .iter()
+            .all(|lp| lp.is_some_and(f32::is_finite))
     );
     Ok(())
 }

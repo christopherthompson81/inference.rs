@@ -238,6 +238,7 @@ async fn flash_next_decode_matches_prefill_scoring() -> anyhow::Result<()> {
             model: None,
             prompt: PromptInput::Tokens(tokens),
             output: Default::default(),
+            audio: Vec::new(),
         })
         .await?;
     let prefilled = scored.token_logprobs[PROMPT.len()..]
@@ -453,6 +454,7 @@ async fn score(model: &Model, tokens: &[u32]) -> anyhow::Result<Vec<f32>> {
             model: None,
             prompt: PromptInput::Tokens(tokens.to_vec()),
             output: Default::default(),
+            audio: Vec::new(),
         })
         .await?;
     Ok(scored

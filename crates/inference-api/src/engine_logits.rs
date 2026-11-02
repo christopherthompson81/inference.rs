@@ -46,13 +46,18 @@ pub struct PromptLogitsRequest {
     pub prompt: PromptInput,
     #[serde(default)]
     pub output: LogitsOutput,
+    /// Audio clips (`data:` URLs, or sources the server's fetcher resolves) for the prompt's audio placeholders, in
+    /// order; a multimodal model expands each placeholder as a chat's.
+    #[serde(default)]
+    pub audio: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct PromptLogits {
     pub tokens: Vec<u32>,
     pub vocab_size: usize,
-    /// `log p(tokens[i] | tokens[..i])`; null for the first token, which nothing predicts.
+    /// `log p(tokens[i] | tokens[..i])`; null for the first token, which nothing predicts, and for tokens past the
+    /// vocabulary (an audio placeholder the model replaces).
     pub token_logprobs: Vec<Option<f32>>,
     /// Row-major `[tokens.len(), vocab_size]`, present when the request asked for `logits`.
     #[serde(skip)]
@@ -105,20 +110,31 @@ pub(crate) async fn prompt_logits(
         )));
     }
 
+    let mut audios = Vec::with_capacity(request.audio.len());
+    for source in &request.audio {
+        audios.push(
+            crate::util::parse_audio_url(source, &crate::media_source::MediaAttachments::default())
+                .await
+                .map_err(|error| ApiError::invalid_request(format!("audio `{source}`: {error}")))?,
+        );
+    }
+    let message = if audios.is_empty() {
+        RequestMessage::CompletionTokens(tokens)
+    } else {
+        RequestMessage::MultimodalTokens {
+            tokens,
+            images: Vec::new(),
+            audios,
+        }
+    };
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     // A raw-logits request ends after its prefill pass; one token only satisfies the generation limit's check.
     let sampling = SamplingParams {
         max_len: Some(1),
         ..SamplingParams::deterministic()
     };
-    let mut normal = NormalRequest::new_simple(
-        RequestMessage::CompletionTokens(tokens),
-        sampling,
-        tx,
-        state.next_request_id(),
-        None,
-        None,
-    );
+    let mut normal =
+        NormalRequest::new_simple(message, sampling, tx, state.next_request_id(), None, None);
     normal.return_raw_logits = true;
     send_request_with_model(state, Request::Normal(Box::new(normal)), model)
         .await
@@ -165,11 +181,6 @@ fn scored(
     if rows != tokens.len() {
         inference_tensor::bail!("{rows} rows of logits for {} prompt tokens", tokens.len());
     }
-    if let Some(token) = tokens.iter().find(|&&token| token as usize >= vocab_size) {
-        inference_tensor::bail!(
-            "token {token} is outside the model's {vocab_size}-entry vocabulary"
-        );
-    }
     // Row i - 1 predicts token i, so the last row predicts nothing in the prompt.
     let predicting = logits.narrow(0, 0, rows - 1)?;
     let max = predicting.max_keepdim(1)?;
@@ -179,13 +190,23 @@ fn scored(
         .sum_keepdim(1)?
         .log()?
         .add(&max)?;
-    let targets = Tensor::new(&tokens[1..], predicting.device())?.unsqueeze(1)?;
+    // a placeholder past the vocabulary is gathered as token 0, then scored as null
+    let in_vocab = |token: u32| (token as usize) < vocab_size;
+    let gathered = tokens[1..]
+        .iter()
+        .map(|&token| if in_vocab(token) { token } else { 0 })
+        .collect::<Vec<_>>();
+    let targets = Tensor::new(gathered.as_slice(), predicting.device())?.unsqueeze(1)?;
     let scores = predicting
         .gather(&targets, 1)?
         .sub(&log_sum_exp)?
         .flatten_all()?
-        .to_vec1::<f32>()?;
-    if scores.iter().any(|score| !score.is_finite()) {
+        .to_vec1::<f32>()?
+        .into_iter()
+        .zip(&tokens[1..])
+        .map(|(score, &token)| in_vocab(token).then_some(score))
+        .collect::<Vec<_>>();
+    if scores.iter().flatten().any(|score| !score.is_finite()) {
         inference_tensor::bail!("the model's logits are not finite");
     }
     let logits = match output {
@@ -195,9 +216,7 @@ fn scored(
     Ok(PromptLogits {
         tokens,
         vocab_size,
-        token_logprobs: std::iter::once(None)
-            .chain(scores.into_iter().map(Some))
-            .collect(),
+        token_logprobs: std::iter::once(None).chain(scores).collect(),
         logits,
     })
 }

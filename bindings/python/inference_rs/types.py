@@ -2659,6 +2659,7 @@ class PromptLogits:
 
 @dataclass(kw_only=True)
 class PromptLogitsRequest:
+    audio: list[str] | None = None
     model: str | None = None
     output: LogitsOutput | None = None
     prompt: PromptInput

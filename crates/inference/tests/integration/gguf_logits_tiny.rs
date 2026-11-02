@@ -36,6 +36,7 @@ async fn a_bf16_gguf_model_returns_f32_logits() -> anyhow::Result<()> {
             model: None,
             prompt: PromptInput::Tokens(PROMPT.to_vec()),
             output: LogitsOutput::Logits,
+            audio: Vec::new(),
         })
         .await?;
     let logits = scored.logits.expect("the request asked for logits");

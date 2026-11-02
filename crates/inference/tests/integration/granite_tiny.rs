@@ -138,6 +138,7 @@ async fn prompt_logits(dir: &tempfile::TempDir) -> anyhow::Result<Vec<f32>> {
             model: None,
             prompt: PromptInput::Tokens(PROMPT.to_vec()),
             output: LogitsOutput::Logits,
+            audio: Vec::new(),
         })
         .await?;
     Ok(scored.logits.expect("the request asked for logits"))

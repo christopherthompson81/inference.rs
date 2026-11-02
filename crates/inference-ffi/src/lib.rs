@@ -240,6 +240,20 @@ pub extern "C" fn inference_build_version() -> *const c_char {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn inference_init_logging(verbosity: i32) -> inference_status {
+    guard(|| {
+        let verbosity = match verbosity {
+            0 => inference_api::LogVerbosity::Info,
+            1 => inference_api::LogVerbosity::Debug,
+            2 => inference_api::LogVerbosity::Trace,
+            other => return Err(Failure::invalid(format!("verbosity {other} is not 0, 1 or 2"))),
+        };
+        inference_api::initialize_inference_logging(verbosity);
+        Ok(())
+    })
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn inference_last_error() -> *const c_char {
     // the CString lives in the thread-local until the next call on this thread replaces it
     LAST_ERROR

@@ -133,6 +133,7 @@ async fn first_row_logits(model: &Model, prompt: &[u32]) -> anyhow::Result<Vec<f
             model: None,
             prompt: PromptInput::Tokens(prompt.to_vec()),
             output: LogitsOutput::Logits,
+            audio: Vec::new(),
         })
         .await?;
     let logits = scored.logits.expect("the request asked for logits");
@@ -212,6 +213,7 @@ async fn a_decision_head_replaces_the_vocabulary_logits() -> anyhow::Result<()> 
             model: None,
             prompt: PromptInput::Tokens(PROMPT.to_vec()),
             output: LogitsOutput::Logits,
+            audio: Vec::new(),
         })
         .await?;
     assert_eq!(scored.vocab_size, DECISION_HEAD_SIZE);
@@ -239,6 +241,7 @@ async fn a_joint_head_returns_the_hidden_states() -> anyhow::Result<()> {
             model: None,
             prompt: PromptInput::Tokens(PROMPT.to_vec()),
             output: LogitsOutput::Logits,
+            audio: Vec::new(),
         })
         .await?;
     assert_eq!(scored.vocab_size, HIDDEN);

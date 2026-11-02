@@ -87,6 +87,7 @@ async fn group_softmax(
             model: None,
             prompt: PromptInput::Tokens(ids.clone()),
             output: LogitsOutput::Logits,
+            audio: Vec::new(),
         })
         .await?;
     let logits = scored.logits.expect("the request asked for logits");

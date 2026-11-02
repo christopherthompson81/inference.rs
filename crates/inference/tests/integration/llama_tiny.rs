@@ -416,6 +416,7 @@ async fn score(model: &Model, tokens: &[u32]) -> anyhow::Result<Vec<f32>> {
             model: None,
             prompt: PromptInput::Tokens(tokens.to_vec()),
             output: Default::default(),
+            audio: Vec::new(),
         })
         .await?;
     Ok(scored

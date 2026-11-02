@@ -471,3 +471,28 @@ of our own) transcribe on the 3090?
 
 **Next:** audio-conditioned KLD against the BF16 reference (teacher-forced transcripts), so recipes are judged on
 audio; then speed (ungated experts' CUDA path, graphs) and the CTC word-timestamp head.
+
+## Run 18 - 2026-11-01 ~18:10
+
+**Question:** what does the 19.30 GiB recipe (Run 17) cost on audio, measured against BF16?
+
+**Method:** prompt scoring now takes audio (`PromptLogitsRequest.audio`, `data:` URLs; the prompt goes out as
+`MultimodalTokens`, so its placeholders expand as a chat's; positions predicting a token past the vocabulary score
+null). A script over the Python binding scores each clip's transcript teacher-forced after the transcription prompt
+(the model card's instruction, thinking off) and keeps the transcript positions' log-softmax. Reference: the NeMo
+checkpoint in BF16 on the CPU (audio tower F32). Compared: the GGUF pair on the 3090 as `serve` runs it (BF16 tower).
+Every other calibration clip (24); the forced text is each clip's transcript from Run 17's GPU run.
+
+**Findings:**
+- 2,801 positions: mean KLD 0.004948, same top-1 99.357 %. Per clip 0.0001-0.029; the three highest (0.029, 0.022,
+  0.014) are clips whose maximum position KLD is 3.6, 2.1, 0.6 (single tokens: a name's spelling, a number's form).
+- Mean NLL of the forced text: BF16 0.0128, the pair 0.0100. The forced text is the pair's own greedy transcript,
+  which favours it; the KLD is unaffected by that choice.
+- Five times lower than the text KLD (0.0250): transcription is nearly deterministic.
+- Getting there: the first GPU run failed with no detail from Python; the C ABI had no way to show the engine's log.
+  `inference_init_logging` (and `Engine.init_logging` in Python) now writes it as `serve` does: CUDA out of memory,
+  because paged attention had reserved the VRAM a full-logits request needs (677 x 131,072 floats). Run with paged
+  attention off for this; a logits request beside a full KV reservation fails the same way in a server.
+- Scoring times: 2-4 s per clip on the 3090, 38-78 s on the CPU in BF16.
+
+**Next:** the clean CPU benchmark of the core-utilization changes (`serve --cpu`, idle machine), then speed on the GPU.

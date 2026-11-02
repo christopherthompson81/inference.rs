@@ -242,6 +242,7 @@ async fn a_qwen3_option_head_returns_the_hidden_states() -> anyhow::Result<()> {
             model: None,
             prompt: PromptInput::Tokens(OPTION_HEAD_PROMPT.to_vec()),
             output: LogitsOutput::Logits,
+            audio: Vec::new(),
         })
         .await?;
     assert_eq!(scored.vocab_size, cfg.hidden_size);

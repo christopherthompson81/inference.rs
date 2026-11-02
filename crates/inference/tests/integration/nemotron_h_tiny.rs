@@ -217,6 +217,7 @@ async fn decode_scores_as_prefill(isq: Option<IsqType>, prompt: &str) -> anyhow:
             model: None,
             prompt: PromptInput::Tokens(tokens),
             output: Default::default(),
+            audio: Vec::new(),
         })
         .await?
         .token_logprobs;
