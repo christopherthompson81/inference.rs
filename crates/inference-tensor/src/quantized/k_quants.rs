@@ -1,10 +1,10 @@
 use super::GgmlDType;
 use super::utils::{
     get_scale_min_k4, group_for_dequantization, group_for_quantization, make_q3_quants,
-    make_qkx1_quants, make_qx_quants, nearest_int,
+    make_qkx2_quants, make_qx_quants, nearest_int,
 };
 use crate::Result;
-use crate::quantized::utils::{make_qkx3_quants, make_qp_quants};
+use crate::quantized::utils::{QKX3_SEARCH, QkxSearch, make_qkx3_quants, make_qp_quants};
 use byteorder::{ByteOrder, LittleEndian};
 use half::{bf16, f16, slice::HalfFloatSliceExt};
 
@@ -210,6 +210,71 @@ impl BlockQ8K {
     }
 }
 
+// ggml's plain-path searches for Q2_K, Q4_K and Q5_K
+const Q2K_SEARCH: QkxSearch = QkxSearch {
+    rmin: -0.5,
+    rdelta: 0.1,
+    nstep: 15,
+    use_mad: true,
+};
+const Q4K_SEARCH: QkxSearch = QkxSearch {
+    rmin: -1.0,
+    rdelta: 0.1,
+    nstep: 20,
+    use_mad: false,
+};
+const Q5K_SEARCH: QkxSearch = QkxSearch {
+    rmin: -0.5,
+    rdelta: 0.1,
+    nstep: 15,
+    use_mad: false,
+};
+
+// The 32-value types' imatrix paths: per block, weights of `qw * sqrt(sigma2 + x^2)`, `sigma2` the row's mean square
+fn for_each_weighted_block32<T>(
+    xs: &[f32],
+    ys: &mut [T],
+    imatrix_weights: &[f32],
+    n_per_row: usize,
+    mut encode: impl FnMut(&mut T, &[f32; 32], &[f32; 32]),
+) {
+    for (row, blocks) in xs
+        .chunks_exact(n_per_row)
+        .zip(ys.chunks_exact_mut(n_per_row / 32))
+    {
+        let sigma2 = row.iter().fold(0f32, |s, v| s + v * v) / n_per_row as f32;
+        for ((block, xb), qw) in blocks
+            .iter_mut()
+            .zip(row.as_chunks::<32>().0)
+            .zip(imatrix_weights.as_chunks::<32>().0)
+        {
+            let mut weight = [0f32; 32];
+            for j in 0..32 {
+                weight[j] = qw[j] * (sigma2 + xb[j] * xb[j]).sqrt();
+            }
+            encode(block, xb, &weight);
+        }
+    }
+}
+
+// the 5-bit types' high bits, one per value, as ggml packs them
+fn pack_q5_high_bits(l: &[u8; 32], qs: &mut [u8; 16]) -> [u8; 4] {
+    let mut qh = 0u32;
+    for j in 0..16 {
+        let (x0, x1) = (l[j], l[j + 16]);
+        qs[j] = (x0 & 0x0F) | ((x1 & 0x0F) << 4);
+        qh |= u32::from((x0 & 0x10) >> 4) << j;
+        qh |= u32::from((x1 & 0x10) >> 4) << (j + 16);
+    }
+    qh.to_le_bytes()
+}
+
+// Q4_K / Q5_K's plain weights: a 32-value group's RMS plus each value's magnitude
+fn qkx2_weights(x: &[f32; 32]) -> [f32; 32] {
+    let av_x = (x.iter().map(|v| v * v).fold(0f32, |a, v| a + v) / 32.0).sqrt();
+    x.map(|v| av_x + v.abs())
+}
+
 impl GgmlType for BlockQ4_0 {
     const DTYPE: GgmlDType = GgmlDType::Q4_0;
     const BLCK_SIZE: usize = QK4_0;
@@ -236,6 +301,18 @@ impl GgmlType for BlockQ4_0 {
                 ys[i * qk + j + qk / 2] = (x1 as f32) * d;
             }
         }
+    }
+
+    fn from_float_imatrix(xs: &[f32], ys: &mut [Self], imatrix_weights: &[f32], n_per_row: usize) {
+        for_each_weighted_block32(xs, ys, imatrix_weights, n_per_row, |block, xb, weight| {
+            let mut l = [0i8; 32];
+            let d =
+                unsafe { make_qx_quants(32, 8, xb.as_ptr(), l.as_mut_ptr(), 1, weight.as_ptr()) };
+            block.d = f16::from_f32(d);
+            for j in 0..16 {
+                block.qs[j] = l[j] as u8 | ((l[j + 16] as u8) << 4);
+            }
+        });
     }
 
     fn from_float(xs: &[f32], ys: &mut [Self]) {
@@ -349,6 +426,18 @@ impl GgmlType for BlockQ4_1 {
         sumf
     }
 
+    fn from_float_imatrix(xs: &[f32], ys: &mut [Self], imatrix_weights: &[f32], n_per_row: usize) {
+        for_each_weighted_block32(xs, ys, imatrix_weights, n_per_row, |block, xb, weight| {
+            let mut l = [0u8; 32];
+            let (d, min) = make_qkx3_quants(15, xb, Some(weight), QKX3_SEARCH, &mut l);
+            block.d = f16::from_f32(d);
+            block.m = f16::from_f32(-min);
+            for j in 0..16 {
+                block.qs[j] = l[j] | (l[j + 16] << 4);
+            }
+        });
+    }
+
     fn from_float(xs: &[f32], ys: &mut [Self]) {
         // quantize_row_q4_1
         let qk = Self::BLCK_SIZE;
@@ -451,6 +540,16 @@ impl GgmlType for BlockQ5_0 {
             sumf += sumi as f32 * f16::to_f32(xs.d) * f16::to_f32(ys.d)
         }
         sumf
+    }
+
+    fn from_float_imatrix(xs: &[f32], ys: &mut [Self], imatrix_weights: &[f32], n_per_row: usize) {
+        for_each_weighted_block32(xs, ys, imatrix_weights, n_per_row, |block, xb, weight| {
+            let mut l = [0i8; 32];
+            let d =
+                unsafe { make_qx_quants(32, 16, xb.as_ptr(), l.as_mut_ptr(), 1, weight.as_ptr()) };
+            block.d = f16::from_f32(d);
+            block.qh = pack_q5_high_bits(&l.map(|v| v as u8), &mut block.qs);
+        });
     }
 
     fn from_float(xs: &[f32], ys: &mut [Self]) {
@@ -558,6 +657,16 @@ impl GgmlType for BlockQ5_1 {
                 + f16::to_f32(xs.m) * f16::to_f32(ys.s)
         }
         sumf
+    }
+
+    fn from_float_imatrix(xs: &[f32], ys: &mut [Self], imatrix_weights: &[f32], n_per_row: usize) {
+        for_each_weighted_block32(xs, ys, imatrix_weights, n_per_row, |block, xb, weight| {
+            let mut l = [0u8; 32];
+            let (d, min) = make_qkx3_quants(31, xb, Some(weight), QKX3_SEARCH, &mut l);
+            block.d = f16::from_f32(d);
+            block.m = f16::from_f32(-min);
+            block.qh = pack_q5_high_bits(&l, &mut block.qs);
+        });
     }
 
     fn from_float(xs: &[f32], ys: &mut [Self]) {
@@ -897,12 +1006,20 @@ impl GgmlType for BlockQ2K {
         const Q4SCALE: f32 = 15.0;
 
         for (block, x) in group_for_quantization(xs, ys) {
+            let mut big_l: [u8; QK_K] = [0; QK_K];
             //calculate scales and mins
             let mut mins: [f32; QK_K / 16] = [0.0; QK_K / 16];
             let mut scales: [f32; QK_K / 16] = [0.0; QK_K / 16];
 
             for (j, x_scale_slice) in x.chunks(16).enumerate() {
-                (scales[j], mins[j]) = make_qkx1_quants(3, 5, x_scale_slice);
+                let weights = x_scale_slice.iter().map(|v| v.abs()).collect::<Vec<_>>();
+                (scales[j], mins[j]) = make_qkx2_quants(
+                    3,
+                    x_scale_slice,
+                    &weights,
+                    Q2K_SEARCH,
+                    &mut big_l[16 * j..16 * (j + 1)],
+                );
             }
             // get max scale and max min and ensure they are >= 0.0
             let max_scale = scales.iter().fold(0.0, |max, &val| val.max(max));
@@ -932,8 +1049,6 @@ impl GgmlType for BlockQ2K {
                 block.dmin = f16::from_f32(0.0);
             }
 
-            let mut big_l: [u8; QK_K] = [0; QK_K];
-
             for j in 0..QK_K / 16 {
                 let d = block.d.to_f32() * (block.scales[j] & 0xF) as f32;
                 if d == 0.0 {
@@ -959,6 +1074,7 @@ impl GgmlType for BlockQ2K {
 
     fn from_float_imatrix(xs: &[f32], ys: &mut [Self], imatrix_weights: &[f32], n_per_row: usize) {
         for (sblk_idx, (block, x)) in group_for_quantization(xs, ys).into_iter().enumerate() {
+            let mut big_l: [u8; QK_K] = [0; QK_K];
             let mut mins: [f32; QK_K / 16] = [0.0; QK_K / 16];
             let mut scales: [f32; QK_K / 16] = [0.0; QK_K / 16];
             let mut weights: [f32; 16] = [0.0; 16];
@@ -977,8 +1093,13 @@ impl GgmlType for BlockQ2K {
                 }
                 let sumw = weights.iter().sum::<f32>();
                 sw[j] = sumw;
-                (scales[j], mins[j]) =
-                    make_qkx3_quants(3, x_scale_slice, Some(&weights), -0.9, 0.05, 36, false);
+                (scales[j], mins[j]) = make_qkx3_quants(
+                    3,
+                    x_scale_slice,
+                    Some(&weights),
+                    QKX3_SEARCH,
+                    &mut big_l[16 * j..16 * (j + 1)],
+                );
             }
 
             let d_block = make_qp_quants(QK_K / 16, 15, &scales, &mut ls, &sw);
@@ -990,8 +1111,6 @@ impl GgmlType for BlockQ2K {
             for j in 0..QK_K / 16 {
                 block.scales[j] = ls[j] | (lm[j] << 4);
             }
-
-            let mut big_l: [u8; QK_K] = [0; QK_K];
 
             for j in 0..QK_K / 16 {
                 let d = block.d.to_f32() * (block.scales[j] & 0xF) as f32;
@@ -1557,12 +1676,20 @@ impl GgmlType for BlockQ4K {
 
     fn from_float(xs: &[f32], ys: &mut [Self]) {
         for (block, x) in group_for_quantization(xs, ys) {
+            let mut l: [u8; QK_K] = [0; QK_K];
             let mut mins: [f32; QK_K / 32] = [0.0; QK_K / 32];
             let mut scales: [f32; QK_K / 32] = [0.0; QK_K / 32];
 
             let (x_chunks, _) = x.as_chunks::<32>();
             for (j, x_scale_slice) in x_chunks.iter().enumerate() {
-                (scales[j], mins[j]) = make_qkx1_quants(15, 5, x_scale_slice);
+                let weights = qkx2_weights(x_scale_slice);
+                (scales[j], mins[j]) = make_qkx2_quants(
+                    15,
+                    x_scale_slice,
+                    &weights,
+                    Q4K_SEARCH,
+                    &mut l[32 * j..32 * (j + 1)],
+                );
             }
 
             // get max scale and max min and ensure they are >= 0.0
@@ -1592,8 +1719,6 @@ impl GgmlType for BlockQ4K {
             block.d = f16::from_f32(max_scale / 63.0);
             block.dmin = f16::from_f32(max_min / 63.0);
 
-            let mut l: [u8; QK_K] = [0; QK_K];
-
             for j in 0..QK_K / 32 {
                 let (sc, m) = get_scale_min_k4(j, &block.scales);
                 let d = block.d.to_f32() * sc as f32;
@@ -1618,6 +1743,7 @@ impl GgmlType for BlockQ4K {
 
     fn from_float_imatrix(xs: &[f32], ys: &mut [Self], imatrix_weights: &[f32], n_per_row: usize) {
         for (sblk_idx, (block, x)) in group_for_quantization(xs, ys).into_iter().enumerate() {
+            let mut l: [u8; QK_K] = [0; QK_K];
             let mut mins: [f32; QK_K / 32] = [0.0; QK_K / 32];
             let mut scales: [f32; QK_K / 32] = [0.0; QK_K / 32];
             let mut weights: [f32; 32] = [0.0; 32];
@@ -1637,8 +1763,13 @@ impl GgmlType for BlockQ4K {
                 }
                 let sumw = weights.iter().sum::<f32>();
                 sw[j] = sumw;
-                (scales[j], mins[j]) =
-                    make_qkx3_quants(15, x_scale_slice, Some(&weights), -0.9, 0.05, 36, false);
+                (scales[j], mins[j]) = make_qkx3_quants(
+                    15,
+                    x_scale_slice,
+                    Some(&weights),
+                    QKX3_SEARCH,
+                    &mut l[32 * j..32 * (j + 1)],
+                );
             }
 
             let d_block = make_qp_quants(QK_K / 32, 63, &scales, &mut ls, &sw);
@@ -1658,8 +1789,6 @@ impl GgmlType for BlockQ4K {
 
             block.d = f16::from_f32(d_block);
             block.dmin = f16::from_f32(m_block);
-
-            let mut l: [u8; QK_K] = [0; QK_K];
             for j in 0..QK_K / 32 {
                 let (sc, m) = get_scale_min_k4(j, &block.scales);
                 let d = block.d.to_f32() * sc as f32;
@@ -1823,12 +1952,20 @@ impl GgmlType for BlockQ5K {
     // https://github.com/ggerganov/llama.cpp/blob/8183159cf3def112f6d1fe94815fce70e1bffa12/k_quants.c#L793
     fn from_float(xs: &[f32], ys: &mut [Self]) {
         for (block, x) in group_for_quantization(xs, ys) {
+            let mut l: [u8; QK_K] = [0; QK_K];
             let mut mins: [f32; QK_K / 32] = [0.0; QK_K / 32];
             let mut scales: [f32; QK_K / 32] = [0.0; QK_K / 32];
 
             let (x_chunks, _) = x.as_chunks::<32>();
             for (j, x_scale_slice) in x_chunks.iter().enumerate() {
-                (scales[j], mins[j]) = make_qkx1_quants(31, 5, x_scale_slice);
+                let weights = qkx2_weights(x_scale_slice);
+                (scales[j], mins[j]) = make_qkx2_quants(
+                    31,
+                    x_scale_slice,
+                    &weights,
+                    Q5K_SEARCH,
+                    &mut l[32 * j..32 * (j + 1)],
+                );
             }
 
             // get max scale and max min and ensure they are >= 0.0
@@ -1855,8 +1992,6 @@ impl GgmlType for BlockQ5K {
             }
             block.d = f16::from_f32(max_scale / 63.0);
             block.dmin = f16::from_f32(max_min / 63.0);
-
-            let mut l: [u8; QK_K] = [0; QK_K];
             for j in 0..QK_K / 32 {
                 let (sc, m) = get_scale_min_k4(j, &block.scales);
                 let d = block.d.to_f32() * sc as f32;
@@ -1899,6 +2034,7 @@ impl GgmlType for BlockQ5K {
 
     fn from_float_imatrix(xs: &[f32], ys: &mut [Self], imatrix_weights: &[f32], n_per_row: usize) {
         for (sblk_idx, (block, x)) in group_for_quantization(xs, ys).into_iter().enumerate() {
+            let mut l: [u8; QK_K] = [0; QK_K];
             let mut mins: [f32; QK_K / 32] = [0.0; QK_K / 32];
             let mut scales: [f32; QK_K / 32] = [0.0; QK_K / 32];
             let mut weights: [f32; 32] = [0.0; 32];
@@ -1918,8 +2054,13 @@ impl GgmlType for BlockQ5K {
                 }
                 let sumw = weights.iter().sum::<f32>();
                 sw[j] = sumw;
-                (scales[j], mins[j]) =
-                    make_qkx3_quants(31, x_scale_slice, Some(&weights), -0.9, 0.05, 36, false);
+                (scales[j], mins[j]) = make_qkx3_quants(
+                    31,
+                    x_scale_slice,
+                    Some(&weights),
+                    QKX3_SEARCH,
+                    &mut l[32 * j..32 * (j + 1)],
+                );
             }
 
             let d_block = make_qp_quants(QK_K / 32, 63, &scales, &mut ls, &sw);
@@ -1939,8 +2080,6 @@ impl GgmlType for BlockQ5K {
 
             block.d = f16::from_f32(d_block);
             block.dmin = f16::from_f32(m_block);
-
-            let mut l: [u8; QK_K] = [0; QK_K];
             for j in 0..QK_K / 32 {
                 let (sc, m) = get_scale_min_k4(j, &block.scales);
                 let d = block.d.to_f32() * sc as f32;

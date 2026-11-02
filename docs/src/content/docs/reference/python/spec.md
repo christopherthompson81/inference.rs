@@ -592,6 +592,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `MultimodalLoaderType.LLAVA_NEXT` | `'llava_next'` |
 | `MultimodalLoaderType.LLAVA` | `'llava'` |
 | `MultimodalLoaderType.GRANITE4_VISION` | `'granite4_vision'` |
+| `MultimodalLoaderType.NEMOTRON_TRANSCRIBE` | `'nemotron_transcribe'` |
 | `MultimodalLoaderType.GRANITE_SPEECH` | `'granite_speech'` |
 | `MultimodalLoaderType.LFM2VL` | `'lfm2vl'` |
 | `MultimodalLoaderType.VLLAMA` | `'vllama'` |
@@ -671,6 +672,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `NormalLoaderType.GRANITE_SWA` | `'granite_swa'` |
 | `NormalLoaderType.GRANITEMOE_SWA` | `'granitemoe_swa'` |
 | `NormalLoaderType.GPT_OSS` | `'gpt_oss'` |
+| `NormalLoaderType.NEMOTRON_H` | `'nemotron_h'` |
 | `NormalLoaderType.HUNYUANV1DENSE` | `'hunyuanv1dense'` |
 | `NormalLoaderType.HUNYUANV1MOE` | `'hunyuanv1moe'` |
 | `NormalLoaderType.QWEN3NEXT` | `'qwen3next'` |

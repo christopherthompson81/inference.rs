@@ -55,6 +55,8 @@ pub(crate) mod mllama;
 #[cfg(feature = "models-qwen")]
 pub(crate) mod muse_glimmer;
 #[cfg(feature = "models-other")]
+pub(crate) mod nemotron_transcribe;
+#[cfg(feature = "models-other")]
 pub(crate) mod paddleocr_vl;
 #[cfg(feature = "models-phi")]
 pub(crate) mod phi3;

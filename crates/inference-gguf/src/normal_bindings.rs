@@ -15,6 +15,9 @@ pub fn build_normal_bindings(
     ) {
         return super::qwen_multimodal_bindings::build_qwen35_text_bindings(archive);
     }
+    if matches!(loader, NormalLoaderType::NemotronH) {
+        return super::nemotron_h_bindings::build_nemotron_h_bindings(archive, architecture);
+    }
     let mut bindings = GgufBindingMap::new();
     let block_count = native_block_count(archive, architecture)?;
     bind_root_tensors(archive, loader, architecture, &mut bindings);
@@ -948,7 +951,7 @@ fn norm_binding(
     }
 }
 
-fn granite_ssm_binding(
+pub(super) fn granite_ssm_binding(
     archive: &GgufArchive,
     role: &str,
     source: &str,
@@ -971,7 +974,7 @@ fn granite_ssm_binding(
     Ok(binding)
 }
 
-fn parse_block_tensor(name: &str) -> Option<(usize, &str, &str)> {
+pub(super) fn parse_block_tensor(name: &str) -> Option<(usize, &str, &str)> {
     let rest = name.strip_prefix("blk.")?;
     let (layer, rest) = rest.split_once('.')?;
     let (role, suffix) = match rest.rsplit_once('.') {
@@ -981,14 +984,14 @@ fn parse_block_tensor(name: &str) -> Option<(usize, &str, &str)> {
     Some((layer.parse().ok()?, role, suffix))
 }
 
-fn metadata_usize(archive: &GgufArchive, key: &str) -> Result<usize> {
+pub(super) fn metadata_usize(archive: &GgufArchive, key: &str) -> Result<usize> {
     let value = archive
         .metadata_value(key)
         .with_context(|| format!("GGUF metadata is missing `{key}`"))?;
     metadata_value_usize(value, key)
 }
 
-fn metadata_optional_usize(archive: &GgufArchive, key: &str) -> Result<Option<usize>> {
+pub(super) fn metadata_optional_usize(archive: &GgufArchive, key: &str) -> Result<Option<usize>> {
     archive
         .metadata_value(key)
         .map(|value| metadata_value_usize(value, key))

@@ -306,6 +306,7 @@ impl MoeMlp {
             hidden_size: cfg.hidden_size,
             moe_intermediate_size: cfg.moe_intermediate_size,
             expert_proj_names: crate::moe::ExpertProjNames::MIXTRAL,
+            gated: true,
         };
         let experts = MoEExperts::new(
             &moe_cfg,

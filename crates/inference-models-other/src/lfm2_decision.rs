@@ -325,6 +325,7 @@ impl Audio {
             n_mels: cfg.num_mel_bins,
             preemphasis: Some(AUDIO_PREEMPHASIS),
             normalize: true,
+            bf16_constants: false,
         });
         Ok(Self {
             encoder,

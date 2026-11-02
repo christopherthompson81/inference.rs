@@ -90,7 +90,9 @@ pub(crate) fn select(dtype: super::GgmlDType, m: usize, n: usize, k: usize) -> b
     let Some(lv) = level() else {
         return false;
     };
-    if k == 0 || !n.is_multiple_of(TILE_N) || !k.is_multiple_of(QK_K) {
+    // Q8_0 rows pad to whole superblocks (zero activations under zero weight scales); the K-quants' rows are whole
+    let block = if dtype == D::Q8_0 { QK8_0 } else { QK_K };
+    if k == 0 || !n.is_multiple_of(TILE_N) || !k.is_multiple_of(block) {
         return false;
     }
     match dtype {
@@ -114,6 +116,11 @@ fn q6k_blocks(storage: &dyn QuantizedType) -> &[BlockQ6K] {
     let ptr = storage.as_ptr() as *const BlockQ6K;
     unsafe { std::slice::from_raw_parts(ptr, data / std::mem::size_of::<BlockQ6K>()) }
 }
+/// Superblocks per row: a Q8_0 row short of a whole one is padded with zero-scale tiles and zero activations.
+fn superblocks(k: usize) -> usize {
+    k.div_ceil(QK_K)
+}
+
 fn q8_0_blocks(storage: &dyn QuantizedType) -> &[BlockQ8_0] {
     let data = storage.storage_size_in_bytes();
     let ptr = storage.as_ptr() as *const BlockQ8_0;
@@ -134,7 +141,7 @@ fn get_scale_min_k4(j: usize, scales: &[u8; 12]) -> (u8, u8) {
 
 pub(crate) fn pack_q4k(storage: &dyn QuantizedType, n: usize, k: usize) -> PackedX86 {
     let blocks = q4k_blocks(storage);
-    let kb = k / QK_K;
+    let kb = superblocks(k);
     let n_tiles = n / TILE_N;
     let mut out: Vec<TileQ4K> = Vec::with_capacity(n_tiles * kb);
     for t in 0..n_tiles {
@@ -178,7 +185,7 @@ pub(crate) fn pack_q4k(storage: &dyn QuantizedType, n: usize, k: usize) -> Packe
 
 pub(crate) fn pack_q6k(storage: &dyn QuantizedType, n: usize, k: usize) -> PackedX86 {
     let blocks = q6k_blocks(storage);
-    let kb = k / QK_K;
+    let kb = superblocks(k);
     let n_tiles = n / TILE_N;
     let mut out: Vec<TileQ6K> = Vec::with_capacity(n_tiles * kb);
     for t in 0..n_tiles {
@@ -219,7 +226,9 @@ pub(crate) fn pack_q6k(storage: &dyn QuantizedType, n: usize, k: usize) -> Packe
 
 pub(crate) fn pack_q8_0(storage: &dyn QuantizedType, n: usize, k: usize) -> PackedX86 {
     let blocks = q8_0_blocks(storage);
-    let kb = k / QK8_0;
+    // the row's blocks, then zero-scale ones up to a whole superblock (+128 is a zero weight)
+    let row_blocks = k / QK8_0;
+    let kb = superblocks(k) * Q8_0_PER_SUPERBLOCK;
     let n_tiles = n / TILE_N;
     let mut out: Vec<TileQ8_0> = Vec::with_capacity(n_tiles * kb);
     for t in 0..n_tiles {
@@ -228,8 +237,13 @@ pub(crate) fn pack_q8_0(storage: &dyn QuantizedType, n: usize, k: usize) -> Pack
                 d: [f16::ZERO; TILE_N],
                 qs: [0; QK8_0 * TILE_N],
             };
+            if b >= row_blocks {
+                tile.qs.fill(128);
+                out.push(tile);
+                continue;
+            }
             for r in 0..TILE_N {
-                let blk = &blocks[(t * TILE_N + r) * kb + b];
+                let blk = &blocks[(t * TILE_N + r) * row_blocks + b];
                 tile.d[r] = blk.d;
                 for g in 0..QK8_0 / 4 {
                     for j in 0..4 {
@@ -508,7 +522,7 @@ pub(crate) fn matmul_tiles(
     #[cfg(target_arch = "x86_64")]
     {
         let lv = level().expect("select() gated");
-        let kb = k / QK_K;
+        let kb = superblocks(k);
         let n_tiles = n / TILE_N;
         let mt_step = kernels::MAX_MT;
         let dst_ptr = dst.as_mut_ptr() as usize;
@@ -590,10 +604,20 @@ fn quantize_rows<T: Clone + Send>(
     zero: T,
     quantize: fn(&[f32], &mut [T]),
 ) -> Vec<T> {
-    let kb = k / QK_K;
+    let kb = superblocks(k);
     let mut out = vec![zero; m * kb];
+    // a row short of whole superblocks quantizes from a zero-padded copy
+    let padded = |row: &[f32], dst: &mut [T]| {
+        if row.len() == kb * QK_K {
+            quantize(row, dst);
+        } else {
+            let mut full = row.to_vec();
+            full.resize(kb * QK_K, 0.0);
+            quantize(&full, dst);
+        }
+    };
     if m == 1 {
-        quantize(&lhs[..k], &mut out);
+        padded(&lhs[..k], &mut out);
         return out;
     }
     let out_ptr = out.as_mut_ptr() as usize;
@@ -602,7 +626,7 @@ fn quantize_rows<T: Clone + Send>(
         for r in range {
             let row = &lhs[r * k..(r + 1) * k];
             let dst = unsafe { std::slice::from_raw_parts_mut(out_ptr.add(r * kb), kb) };
-            quantize(row, dst);
+            padded(row, dst);
         }
     });
     out
@@ -620,7 +644,7 @@ pub(crate) fn gemv_fused(
 ) {
     #[cfg(target_arch = "x86_64")]
     {
-        let kb = k / QK_K;
+        let kb = superblocks(k);
         let mt_step = kernels::MAX_MT;
         let m_units = m.div_ceil(mt_step);
         // (n, dst ptr, unit offset)
@@ -717,7 +741,7 @@ pub(crate) fn amx_available() -> bool {
 
 pub(crate) fn pack_q4k_amx(storage: &dyn QuantizedType, n: usize, k: usize) -> Vec<TileQ4KAmx> {
     let blocks = q4k_blocks(storage);
-    let kb = k / QK_K;
+    let kb = superblocks(k);
     let n_tiles = n / TILE_N;
     let mut out: Vec<TileQ4KAmx> = Vec::with_capacity(n_tiles * kb);
     for t in 0..n_tiles {
@@ -937,7 +961,7 @@ pub(crate) fn matmul_amx_q4k(
 ) {
     #[cfg(target_arch = "x86_64")]
     {
-        let kb = k / QK_K;
+        let kb = superblocks(k);
         let n_tiles = n / TILE_N;
         let m_blocks = m.div_ceil(32);
         let dst_ptr = dst.as_mut_ptr() as usize;

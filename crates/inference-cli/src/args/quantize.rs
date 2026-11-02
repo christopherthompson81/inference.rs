@@ -22,6 +22,66 @@ pub enum QuantizeCommand {
 
     /// The world-generation checkpoints laid out for distribution, WorldStereo-2 and umT5 as GGUFs
     Worldgen(WorldgenQuantizeOptions),
+
+    /// A float GGUF to a quantized GGUF: per-tensor types by name pattern, weighed by an imatrix
+    Gguf(GgufQuantizeOptions),
+
+    /// A `.cimatrix` collected online as llama.cpp's imatrix (`.dat`) under a GGUF's tensor names
+    Imatrix(ImatrixConvertOptions),
+
+    /// Nemotron 3.5 Transcribe's audio GGUF (its `--mmproj`) from NVIDIA's checkpoint directory
+    #[command(name = "nemotron-transcribe-audio")]
+    NemotronTranscribeAudio(NemotronTranscribeAudioOptions),
+}
+
+#[derive(Args, Clone)]
+pub struct NemotronTranscribeAudioOptions {
+    /// The checkpoint directory (`config.json`, `model.safetensors`)
+    #[arg(short = 'm', long)]
+    pub model: PathBuf,
+
+    /// Output `.gguf` path
+    #[arg(short = 'o', long = "output")]
+    pub output_path: PathBuf,
+}
+
+#[derive(Args, Clone)]
+pub struct ImatrixConvertOptions {
+    /// The `.cimatrix` a calibration apply saved
+    #[arg(long)]
+    pub cimatrix: PathBuf,
+
+    /// The GGUF whose tensor names the imatrix takes
+    #[arg(long)]
+    pub gguf: PathBuf,
+
+    /// Output `.dat` path
+    #[arg(short = 'o', long = "output")]
+    pub output_path: PathBuf,
+
+    /// The calibration data's name, recorded in the file
+    #[arg(long, default_value = "online calibration")]
+    pub dataset: String,
+}
+
+#[derive(Args, Clone)]
+pub struct GgufQuantizeOptions {
+    /// The source `.gguf` (F32, F16 or BF16 tensors)
+    #[arg(short = 'm', long)]
+    pub model: PathBuf,
+
+    /// Output `.gguf` path
+    #[arg(short = 'o', long = "output")]
+    pub output_path: PathBuf,
+
+    /// `<regex>=<type>`, repeatable: the first pattern a tensor's name matches sets its type (`q8_0`, `q6_k`,
+    /// `iq4_ks`, ...); tensors none matches are copied as they are
+    #[arg(long = "tensor-type", required = true)]
+    pub tensor_types: Vec<String>,
+
+    /// llama.cpp's imatrix (`.dat` or `.gguf`), keyed by the source's tensor names
+    #[arg(long)]
+    pub imatrix: Option<PathBuf>,
 }
 
 #[derive(Args, Clone)]
@@ -520,7 +580,10 @@ pub fn resolve_quantize_command(
         Some(
             other @ (QuantizeCommand::Asr(_)
             | QuantizeCommand::HiDreamO1(_)
-            | QuantizeCommand::Worldgen(_)),
+            | QuantizeCommand::Worldgen(_)
+            | QuantizeCommand::Gguf(_)
+            | QuantizeCommand::Imatrix(_)
+            | QuantizeCommand::NemotronTranscribeAudio(_)),
         ) => {
             return Ok(other);
         }
@@ -583,7 +646,10 @@ mod tests {
             QuantizeCommand::Uqff(model_type) => Ok(*model_type),
             QuantizeCommand::Asr(_)
             | QuantizeCommand::HiDreamO1(_)
-            | QuantizeCommand::Worldgen(_) => {
+            | QuantizeCommand::Worldgen(_)
+            | QuantizeCommand::Gguf(_)
+            | QuantizeCommand::Imatrix(_)
+            | QuantizeCommand::NemotronTranscribeAudio(_) => {
                 unreachable!("these tests quantize UQFF")
             }
         }

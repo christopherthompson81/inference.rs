@@ -24,14 +24,17 @@ use crate::model::ModelForwardContext;
 use crate::model::NormalLoadingMetadata;
 use crate::model::NormalModel;
 use crate::{
-    amoe::{AnyMoeBaseModelMixin, AnyMoeConfig, AnyMoeExpertType, MlpLayer, MoeMlp},
+    amoe::{
+        AnyMoeBaseModelMixin, AnyMoeConfig, AnyMoeExpertType, AnyMoeLoraTarget, MlpLayer, MoeMlp,
+    },
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     kv_cache::{
         HybridCache, HybridCacheConfig, HybridLayerCache, HybridLayerType, RecurrentLayerConfig,
     },
     layers::masker::PastKvLenCache,
-    layers::{CausalMasker, RmsNorm, RotaryEmbedding, embedding_with_legacy_tied_uqff},
+    layers::{CausalMasker, PlainMlp, RmsNorm, RotaryEmbedding, embedding_with_legacy_tied_uqff},
+    moe::{ExpertProjNames, MoEExperts, MoEExpertsConfig},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
@@ -41,6 +44,17 @@ use crate::{
 const EXPERT_WEIGHT: &str = "weight";
 const V5_GATE_UP: &str = "gate_up_proj";
 const V5_DOWN: &str = "down_proj";
+// Nemotron-H's MoE: `mixer.gate` with its `e_score_correction_bias`, `mixer.shared_experts`
+const NEMOTRON_ROUTER: &str = "gate";
+const NEMOTRON_SELECTION_BIAS: &str = "e_score_correction_bias";
+const NEMOTRON_SHARED_EXPERTS: &str = "shared_experts";
+const NEMO_FP32_PARAMS: &str = "_fp32_params";
+// transformers divides the selected scores by their sum plus this
+const NEMOTRON_NORM_MIN: f32 = 1e-20;
+const NEMOTRON_MLP: [AnyMoeLoraTarget; 2] = [
+    AnyMoeLoraTarget::up("up_proj"),
+    AnyMoeLoraTarget::down("down_proj"),
+];
 
 serde_default_fn!(bool, word_emb_default, true);
 serde_default_fn!(f32, default_one, 1.0);
@@ -154,6 +168,14 @@ pub struct Config {
     // the same as llama.cpp reads it: 1 for a RoPE layer, 0 for NoPE
     pub no_rope_layers: Option<Vec<u8>>,
     pub rope_parameters: Option<GraniteRopeParameters>,
+    // Nemotron-H sets these: its head and Mamba widths, a gated norm per group, prefill's dt floor, an f32 state
+    pub head_dim: Option<usize>,
+    pub mamba_inner_size: Option<usize>,
+    pub mamba_norm_group_size: Option<usize>,
+    #[serde(default)]
+    pub mamba_prefill_dt_min: f64,
+    #[serde(default)]
+    pub mamba_f32_state: bool,
 }
 
 impl Config {
@@ -167,7 +189,8 @@ impl Config {
     }
 
     pub fn head_dim(&self) -> usize {
-        self.hidden_size / self.num_attention_heads
+        self.head_dim
+            .unwrap_or(self.hidden_size / self.num_attention_heads)
     }
 
     pub fn rope_theta(&self) -> f32 {
@@ -203,7 +226,8 @@ impl Config {
 
     // Mamba helper methods
     pub fn mamba_intermediate_size(&self) -> usize {
-        self.mamba_expand * self.hidden_size
+        self.mamba_inner_size
+            .unwrap_or(self.mamba_expand * self.hidden_size)
     }
 
     pub fn mamba_n_heads(&self) -> usize {
@@ -213,6 +237,11 @@ impl Config {
     pub fn mamba_d_head(&self) -> usize {
         self.mamba_d_head
             .unwrap_or(self.mamba_intermediate_size() / self.mamba_n_heads())
+    }
+
+    /// The SSM state's dtype when it is not the model's.
+    pub fn mamba_state_dtype(&self) -> Option<DType> {
+        self.mamba_f32_state.then_some(DType::F32)
     }
 
     pub fn mamba_conv_dim(&self) -> usize {
@@ -700,10 +729,15 @@ impl MambaLayerCache {
         head_dim: usize,
         d_state: usize,
         dtype: inference_tensor::DType,
+        state_dtype: inference_tensor::DType,
         device: &Device,
     ) -> Result<Self> {
         let conv_state = Tensor::zeros((batch_size, conv_dim, d_conv), dtype, device)?;
-        let ssm_state = Tensor::zeros((batch_size, n_heads, head_dim, d_state), dtype, device)?;
+        let ssm_state = Tensor::zeros(
+            (batch_size, n_heads, head_dim, d_state),
+            state_dtype,
+            device,
+        )?;
         Ok(Self {
             conv_state,
             ssm_state,
@@ -840,19 +874,22 @@ fn create_mamba_cache(
         cfg.mamba_d_head(),
         cfg.mamba_d_state,
         dtype,
+        cfg.mamba_state_dtype().unwrap_or(dtype),
         device,
     )
 }
 
-/// RMSNorm with optional gating (for Mamba output)
+/// RMSNorm with optional gating (for Mamba output), over the whole width or each group of `group_size`
 struct RmsNormGated {
     weight: Tensor,
     eps: f64,
+    group_size: usize,
 }
 
 impl RmsNormGated {
     fn new(
         hidden_size: usize,
+        group_size: usize,
         eps: f64,
         vb: ShardedVarBuilder,
         isq_target_device: Option<&Device>,
@@ -862,7 +899,11 @@ impl RmsNormGated {
         if let Some(target_dev) = isq_target_device {
             weight = weight.to_device(target_dev)?;
         }
-        Ok(Self { weight, eps })
+        Ok(Self {
+            weight,
+            eps,
+            group_size,
+        })
     }
 
     fn forward(&self, hidden_states: &Tensor, gate: Option<&Tensor>) -> Result<Tensor> {
@@ -876,11 +917,17 @@ impl RmsNormGated {
             hidden_states = hidden_states.broadcast_mul(&gate)?;
         }
 
-        // RMS normalization
+        let shape = hidden_states.dims().to_vec();
+        let width = shape[shape.len() - 1];
+        let mut grouped = shape[..shape.len() - 1].to_vec();
+        grouped.extend([width / self.group_size, self.group_size]);
+        let hidden_states = hidden_states.reshape(grouped)?;
         let variance = hidden_states
             .sqr()?
             .mean_keepdim(inference_tensor::D::Minus1)?;
-        let hidden_states = hidden_states.broadcast_div(&(variance + self.eps)?.sqrt()?)?;
+        let hidden_states = hidden_states
+            .broadcast_div(&(variance + self.eps)?.sqrt()?)?
+            .reshape(shape)?;
 
         // Apply weight and convert back to original dtype
         hidden_states
@@ -906,6 +953,8 @@ struct MambaLayer {
     conv_kernel_size: usize,
     n_groups: usize,
     time_step_min: f64,
+    // transformers clamps prefill's dt at the config's `time_step_min`, not decode's
+    prefill_time_step_min: f64,
     time_step_max: f64,
 }
 
@@ -949,11 +998,18 @@ impl MambaLayer {
             None
         };
 
-        let mut dt_bias = vb.get(num_heads, "dt_bias")?;
-        let mut a_log = vb.get(num_heads, "A_log")?;
-        let mut d = vb.get(num_heads, "D")?;
+        // NeMo keeps these in float32 under a module of their own
+        let params = if vb.contains_tensor(&format!("{NEMO_FP32_PARAMS}.A_log")) {
+            vb.pp(NEMO_FP32_PARAMS)
+        } else {
+            vb.clone()
+        };
+        let mut dt_bias = params.get(num_heads, "dt_bias")?;
+        let mut a_log = params.get(num_heads, "A_log")?;
+        let mut d = params.get(num_heads, "D")?;
         let norm = RmsNormGated::new(
             intermediate_size,
+            cfg.mamba_norm_group_size.unwrap_or(intermediate_size),
             cfg.rms_norm_eps,
             vb.pp("norm"),
             isq_target_device,
@@ -997,6 +1053,7 @@ impl MambaLayer {
             conv_kernel_size,
             n_groups,
             time_step_min: 0.0,
+            prefill_time_step_min: cfg.mamba_prefill_dt_min,
             time_step_max: f64::MAX,
         })
     }
@@ -1311,13 +1368,17 @@ impl MambaLayer {
         )?;
         let weight = self.conv1d_weight.squeeze(1)?.to_dtype(padded_t.dtype())?;
 
-        let mut conv_outputs = Vec::with_capacity(seq_len);
-        for i in 0..seq_len {
-            let window = padded_t.narrow(2, i, self.conv_kernel_size)?;
-            let out = (window * weight.unsqueeze(0)?)?.sum(inference_tensor::D::Minus1)?;
-            conv_outputs.push(out);
-        }
-        let mut hidden_states_b_c = Tensor::stack(&conv_outputs, 1)?; // (batch, seq_len, conv_dim)
+        let mut hidden_states_b_c = if padded_t.device().is_cpu() {
+            crate::ops::causal_conv1d_cpu(&padded_t, &weight)?
+        } else {
+            let mut conv_outputs = Vec::with_capacity(seq_len);
+            for i in 0..seq_len {
+                let window = padded_t.narrow(2, i, self.conv_kernel_size)?;
+                let out = (window * weight.unsqueeze(0)?)?.sum(inference_tensor::D::Minus1)?;
+                conv_outputs.push(out);
+            }
+            Tensor::stack(&conv_outputs, 1)? // (batch, seq_len, conv_dim)
+        };
 
         if let Some(ref bias) = self.conv1d_bias {
             let bias = bias.to_dtype(hidden_states_b_c.dtype())?;
@@ -1358,27 +1419,23 @@ impl MambaLayer {
             .exp()?
             .neg()?;
 
-        // Expand B and C from groups to num_heads
-        let b = b
-            .unsqueeze(3)?
-            .expand((
-                batch_size,
-                seq_len,
-                self.n_groups,
-                self.num_heads / self.n_groups,
-                self.ssm_state_size,
-            ))?
-            .reshape((batch_size, seq_len, self.num_heads, self.ssm_state_size))?;
-        let c = c
-            .unsqueeze(3)?
-            .expand((
-                batch_size,
-                seq_len,
-                self.n_groups,
-                self.num_heads / self.n_groups,
-                self.ssm_state_size,
-            ))?
-            .reshape((batch_size, seq_len, self.num_heads, self.ssm_state_size))?;
+        // B and C expanded from groups to heads, except on the CPU, whose scan reads each head's group
+        let expand = |t: Tensor| -> Result<Tensor> {
+            t.unsqueeze(3)?
+                .expand((
+                    batch_size,
+                    seq_len,
+                    self.n_groups,
+                    self.num_heads / self.n_groups,
+                    self.ssm_state_size,
+                ))?
+                .reshape((batch_size, seq_len, self.num_heads, self.ssm_state_size))
+        };
+        let (b, c) = if hidden_states.device().is_cpu() {
+            (b, c)
+        } else {
+            (expand(b)?, expand(c)?)
+        };
 
         #[cfg(feature = "cuda")]
         let use_cuda = matches!(hidden_states.device(), Device::Cuda(_));
@@ -1406,7 +1463,7 @@ impl MambaLayer {
                 &d_f32,
                 &dt_bias_f32,
                 &mut ssm_state,
-                self.time_step_min as f32,
+                self.prefill_time_step_min as f32,
                 self.time_step_max as f32,
             )?;
 
@@ -1428,14 +1485,32 @@ impl MambaLayer {
                 &d_f32,
                 &dt_bias_f32,
                 &mut ssm_state,
-                self.time_step_min as f32,
+                self.prefill_time_step_min as f32,
                 self.time_step_max as f32,
             )?;
 
             cache.ssm_state = ssm_state.to_dtype(cache.ssm_state.dtype())?;
             y.reshape((batch_size, seq_len, self.intermediate_size))
+        } else if hidden_states.device().is_cpu() {
+            let mut ssm_state = cache.ssm_state.to_dtype(inference_tensor::DType::F32)?;
+            let y = crate::ops::selective_scan_cpu(
+                crate::ops::SelectiveScan {
+                    x: &hidden_states,
+                    dt,
+                    a: &a,
+                    b: &b,
+                    c: &c,
+                    d: &self.d,
+                    dt_bias: &self.dt_bias,
+                    dt_min: self.prefill_time_step_min as f32,
+                    dt_max: self.time_step_max as f32,
+                },
+                &mut ssm_state,
+            )?;
+            cache.ssm_state = ssm_state.to_dtype(cache.ssm_state.dtype())?;
+            y.reshape((batch_size, seq_len, self.intermediate_size))
         } else {
-            // CPU fallback: per-timestep Rust loop
+            // a device with no scan kernel: per-timestep tensor ops
             let dt_dtype = dt.dtype();
             let dt_bias = self
                 .dt_bias
@@ -1447,7 +1522,7 @@ impl MambaLayer {
 
             let dt = dt.broadcast_add(&dt_bias)?;
             let dt = softplus(&dt.to_dtype(inference_tensor::DType::F32)?)?;
-            let dt = dt.clamp(self.time_step_min, self.time_step_max)?;
+            let dt = dt.clamp(self.prefill_time_step_min, self.time_step_max)?;
 
             let d_coeff = self.d.to_dtype(inference_tensor::DType::F32)?;
 
@@ -1503,13 +1578,27 @@ impl MambaLayer {
     }
 }
 
+// a block on the CPU beside a GPU computes in f32 over a cache allocated in the model's dtype
+fn in_activation_dtype(
+    cache: &mut MambaLayerCache,
+    dtype: DType,
+    run: impl FnOnce(&mut MambaLayerCache) -> Result<Tensor>,
+) -> Result<Tensor> {
+    let state_dtype = cache.conv_state.dtype();
+    if state_dtype == dtype {
+        return run(cache);
+    }
+    cache.conv_state = cache.conv_state.to_dtype(dtype)?;
+    let out = run(cache)?;
+    cache.conv_state = cache.conv_state.to_dtype(state_dtype)?;
+    Ok(out)
+}
+
 /// Mamba decoder block (replaces attention block for Mamba layers)
 struct MambaBlock {
     rms_1: RmsNorm,
     mamba: MambaLayer,
-    rms_2: RmsNorm,
-    mlp: Option<Box<dyn MlpLayer>>,
-    block_sparse_moe: Option<GraniteMoE>,
+    ffn: Option<BlockFfn>,
     residual_multiplier: f32,
 }
 
@@ -1520,19 +1609,12 @@ impl MambaBlock {
         cache: &mut MambaLayerCache,
         batch_kind: RecurrentBatchKind,
     ) -> Result<Tensor> {
-        let residual = x;
-        let x = self.rms_1.forward(x)?;
-        let mamba_out = self.mamba.forward(&x, cache, batch_kind)?;
-        let mamba_out = scale_tensor(mamba_out, self.residual_multiplier)?;
-        let x = (mamba_out + residual)?;
-        let residual = &x;
-        let normed = self.rms_2.forward(&x)?;
-
-        let ffn_out =
-            granite_ffn_forward(self.mlp.as_deref(), self.block_sparse_moe.as_ref(), &normed)?;
-
-        let ffn_out = scale_tensor(ffn_out, self.residual_multiplier)?;
-        ffn_out + residual
+        let normed = self.rms_1.forward(x)?;
+        let mamba_out = in_activation_dtype(cache, normed.dtype(), |cache| {
+            self.mamba.forward(&normed, cache, batch_kind)
+        })?;
+        let x = (scale_tensor(mamba_out, self.residual_multiplier)? + x)?;
+        BlockFfn::residual(self.ffn.as_ref(), x, self.residual_multiplier)
     }
 
     fn forward_packed_prefill(
@@ -1541,71 +1623,33 @@ impl MambaBlock {
         cache: &mut MambaLayerCache,
         query_lens: &[usize],
     ) -> Result<Tensor> {
-        let residual = x;
-        let x = self.rms_1.forward(x)?;
-        let mamba_out = self.mamba.forward_packed_prefill(&x, cache, query_lens)?;
-        let mamba_out = scale_tensor(mamba_out, self.residual_multiplier)?;
-        let x = (mamba_out + residual)?;
-        let residual = &x;
-        let normed = self.rms_2.forward(&x)?;
-
-        let ffn_out =
-            granite_ffn_forward(self.mlp.as_deref(), self.block_sparse_moe.as_ref(), &normed)?;
-
-        let ffn_out = scale_tensor(ffn_out, self.residual_multiplier)?;
-        ffn_out + residual
+        let normed = self.rms_1.forward(x)?;
+        let mamba_out = in_activation_dtype(cache, normed.dtype(), |cache| {
+            self.mamba
+                .forward_packed_prefill(&normed, cache, query_lens)
+        })?;
+        let x = (scale_tensor(mamba_out, self.residual_multiplier)? + x)?;
+        BlockFfn::residual(self.ffn.as_ref(), x, self.residual_multiplier)
     }
 
-    fn load(
-        vb: ShardedVarBuilder,
-        cfg: &Config,
-        mapper: &dyn DeviceMapper,
-        layer_idx: usize,
-        loading_isq: bool,
-        comm: &Arc<inference_quant::Comm>,
-    ) -> Result<Self> {
-        let isq_target_device = if loading_isq {
-            mapper.device_for(layer_idx, false)
+    fn load(vb_m: &ShardedVarBuilder, layout: &HybridLayout, load: BlockLoad<'_>) -> Result<Self> {
+        let names = &layout.blocks[load.layer_idx].names;
+        let isq_target_device = if load.loading_isq {
+            load.mapper.device_for(load.layer_idx, false)
         } else {
             None
         };
-
         let mamba = MambaLayer::load(
-            mapper.set_device(layer_idx, vb.pp("mamba"), loading_isq),
-            cfg,
+            load.mapper
+                .set_device(load.layer_idx, vb_m.pp(&names.mixer), load.loading_isq),
+            load.cfg,
             isq_target_device,
         )?;
-        let mlp = load_dense_ffn(
-            mapper.set_device(layer_idx, vb.clone(), loading_isq),
-            cfg,
-            comm,
-        )?;
-        // Load MoE if num_local_experts > 0
-        let block_sparse_moe = if cfg.num_local_experts > 0 {
-            Some(GraniteMoE::new(
-                cfg,
-                mapper.set_device(layer_idx, vb.pp("block_sparse_moe"), loading_isq),
-            )?)
-        } else {
-            None
-        };
-        let rms_1 = RmsNorm::new(
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
-            mapper.set_device(layer_idx, vb.pp("input_layernorm"), false),
-        )?;
-        let rms_2 = RmsNorm::new(
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
-            mapper.set_device(layer_idx, vb.pp("post_attention_layernorm"), false),
-        )?;
         Ok(Self {
-            rms_1,
+            rms_1: load.norm(vb_m.pp(&names.norm))?,
             mamba,
-            rms_2,
-            mlp,
-            block_sparse_moe,
-            residual_multiplier: cfg.residual_multiplier,
+            ffn: BlockFfn::load(vb_m, layout, &load)?,
+            residual_multiplier: load.cfg.residual_multiplier,
         })
     }
 }
@@ -1614,6 +1658,15 @@ impl MambaBlock {
 enum DecoderLayer {
     Attention(Block),
     Mamba(MambaBlock),
+}
+
+impl DecoderLayer {
+    fn ffn(&self) -> Option<&BlockFfn> {
+        match self {
+            Self::Attention(block) => block.ffn.as_ref(),
+            Self::Mamba(block) => block.ffn.as_ref(),
+        }
+    }
 }
 
 // Use HybridLayerCache from kv_cache instead of a local type alias
@@ -1783,14 +1836,11 @@ impl CausalSelfAttention {
 struct Block {
     rms_1: RmsNorm,
     attn: CausalSelfAttention,
-    rms_2: RmsNorm,
-    mlp: Option<Box<dyn MlpLayer>>,
-    block_sparse_moe: Option<GraniteMoE>,
+    ffn: Option<BlockFfn>,
     residual_multiplier: f32,
 }
 
 impl Block {
-    #[allow(clippy::too_many_arguments)]
     fn forward(
         &self,
         x: &Tensor,
@@ -1799,77 +1849,267 @@ impl Block {
         ctx: &mut ModelForwardContext<'_>,
         layer_idx: usize,
     ) -> Result<Tensor> {
-        let residual = x;
-        let x = self.rms_1.forward(x)?;
-        let attn_out = self
-            .attn
-            .forward(&x, attention_mask, kv_cache, ctx, layer_idx)?;
-        // Scale residual connection
-        let attn_out = scale_tensor(attn_out, self.residual_multiplier)?;
-        let x = (attn_out + residual)?;
-        let residual = &x;
-        let normed = self.rms_2.forward(&x)?;
-
-        let ffn_out =
-            granite_ffn_forward(self.mlp.as_deref(), self.block_sparse_moe.as_ref(), &normed)?;
-
-        // Scale residual connection
-        let ffn_out = scale_tensor(ffn_out, self.residual_multiplier)?;
-        let x = (ffn_out + residual)?;
-        Ok(x)
+        let attn_out = self.attn.forward(
+            &self.rms_1.forward(x)?,
+            attention_mask,
+            kv_cache,
+            ctx,
+            layer_idx,
+        )?;
+        let x = (scale_tensor(attn_out, self.residual_multiplier)? + x)?;
+        BlockFfn::residual(self.ffn.as_ref(), x, self.residual_multiplier)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn load(
-        vb: ShardedVarBuilder,
-        cfg: &Config,
-        mapper: &dyn DeviceMapper,
-        layer_idx: usize,
-        loading_isq: bool,
-        rope: Option<Arc<RotaryEmbedding>>, // Optional - None when position_embedding_type == "nope"
+        vb_m: &ShardedVarBuilder,
+        layout: &HybridLayout,
+        load: BlockLoad<'_>,
+        rope: Option<Arc<RotaryEmbedding>>, // None when position_embedding_type == "nope"
         paged_attn: Option<PagedAttention>,
-        comm: &Arc<inference_quant::Comm>,
     ) -> Result<Self> {
+        let names = &layout.blocks[load.layer_idx].names;
         let attn = CausalSelfAttention::load(
-            mapper.set_device(layer_idx, vb.pp("self_attn"), loading_isq),
-            cfg,
-            layer_idx,
+            load.mapper
+                .set_device(load.layer_idx, vb_m.pp(&names.mixer), load.loading_isq),
+            load.cfg,
+            load.layer_idx,
             rope,
             paged_attn,
-            comm,
-        )?;
-        let mlp = load_dense_ffn(
-            mapper.set_device(layer_idx, vb.clone(), loading_isq),
-            cfg,
-            comm,
-        )?;
-        // Load MoE if num_local_experts > 0
-        let block_sparse_moe = if cfg.num_local_experts > 0 {
-            Some(GraniteMoE::new(
-                cfg,
-                mapper.set_device(layer_idx, vb.pp("block_sparse_moe"), loading_isq),
-            )?)
-        } else {
-            None
-        };
-        let rms_1 = RmsNorm::new(
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
-            mapper.set_device(layer_idx, vb.pp("input_layernorm"), false),
-        )?;
-        let rms_2 = RmsNorm::new(
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
-            mapper.set_device(layer_idx, vb.pp("post_attention_layernorm"), false),
+            load.comm,
         )?;
         Ok(Self {
-            rms_1,
+            rms_1: load.norm(vb_m.pp(&names.norm))?,
             attn,
-            rms_2,
-            mlp,
-            block_sparse_moe,
-            residual_multiplier: cfg.residual_multiplier,
+            ffn: BlockFfn::load(vb_m, layout, &load)?,
+            residual_multiplier: load.cfg.residual_multiplier,
         })
+    }
+}
+
+/// What every block's load takes.
+#[derive(Clone, Copy)]
+struct BlockLoad<'a> {
+    cfg: &'a Config,
+    mapper: &'a dyn DeviceMapper,
+    layer_idx: usize,
+    loading_isq: bool,
+    comm: &'a Arc<inference_quant::Comm>,
+}
+
+impl BlockLoad<'_> {
+    fn norm(&self, vb: ShardedVarBuilder) -> Result<RmsNorm> {
+        RmsNorm::new(
+            self.cfg.hidden_size,
+            self.cfg.rms_norm_eps,
+            self.mapper.set_device(self.layer_idx, vb, false),
+        )
+    }
+}
+
+/// A block's feed-forward half, after its own norm: Granite's dense MLP and/or experts, or one Nemotron-H layer.
+struct BlockFfn {
+    norm: RmsNorm,
+    mlp: Option<Box<dyn MlpLayer>>,
+    moe: Option<HybridMoe>,
+}
+
+enum HybridMoe {
+    Granite(GraniteMoE),
+    Nemotron(NemotronMoe),
+}
+
+impl BlockFfn {
+    fn load(
+        vb_m: &ShardedVarBuilder,
+        layout: &HybridLayout,
+        load: &BlockLoad<'_>,
+    ) -> Result<Option<Self>> {
+        let Some(ffn) = &layout.blocks[load.layer_idx].names.ffn else {
+            return Ok(None);
+        };
+        let (cfg, layer_idx, isq) = (load.cfg, load.layer_idx, load.loading_isq);
+        let vb = load.mapper.set_device(layer_idx, vb_m.pp(&ffn.module), isq);
+        let (mlp, moe) = match ffn.kind {
+            FfnKind::Granite => (
+                load_dense_ffn(vb.clone(), cfg, load.comm)?,
+                (cfg.num_local_experts > 0)
+                    .then(|| GraniteMoE::new(cfg, vb.pp("block_sparse_moe")))
+                    .transpose()?
+                    .map(HybridMoe::Granite),
+            ),
+            FfnKind::Mlp => (
+                Some(Box::new(PlainMlp::new(
+                    vb,
+                    &[cfg.hidden_size, cfg.intermediate_size],
+                    &NEMOTRON_MLP,
+                    false,
+                    &cfg.quantization_config,
+                    crate::layers::Activation::Relu2,
+                    load.comm,
+                )?) as Box<dyn MlpLayer>),
+                None,
+            ),
+            FfnKind::Moe => {
+                let spec = layout.moe.as_ref().ok_or_else(|| {
+                    inference_tensor::Error::msg("a Nemotron-H MoE layer without its MoE settings")
+                })?;
+                let device = load
+                    .mapper
+                    .device_for(layer_idx, false)
+                    .cloned()
+                    .unwrap_or_else(|| vb.device().clone());
+                (
+                    None,
+                    Some(HybridMoe::Nemotron(NemotronMoe::load(
+                        cfg, spec, vb, device, load.comm, isq,
+                    )?)),
+                )
+            }
+        };
+        Ok(Some(Self {
+            norm: load.norm(vb_m.pp(&ffn.norm))?,
+            mlp,
+            moe,
+        }))
+    }
+
+    /// `x` plus the feed-forward of its norm, when the block has one.
+    fn residual(ffn: Option<&Self>, x: Tensor, residual_multiplier: f32) -> Result<Tensor> {
+        let Some(ffn) = ffn else {
+            return Ok(x);
+        };
+        let normed = ffn.norm.forward(&x)?;
+        let out = match (ffn.mlp.as_deref(), &ffn.moe) {
+            (Some(mlp), Some(moe)) => (mlp.forward(&normed)? + moe.forward(&normed)?)?,
+            (Some(mlp), None) => mlp.forward(&normed)?,
+            (None, Some(moe)) => moe.forward(&normed)?,
+            (None, None) => {
+                inference_tensor::bail!("Granite layer has neither dense nor expert FFN weights")
+            }
+        };
+        scale_tensor(out, residual_multiplier)? + x
+    }
+}
+
+impl HybridMoe {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Granite(moe) => moe.forward(xs),
+            Self::Nemotron(moe) => moe.forward(xs),
+        }
+    }
+
+    fn residual_tensors(&self) -> Vec<(String, Tensor)> {
+        match self {
+            Self::Granite(moe) => {
+                let uvb = UnVarBuilder::new();
+                uvb.pp("block_sparse_moe").extend(moe.residual_tensors());
+                uvb.to_safetensors()
+            }
+            Self::Nemotron(moe) => moe.residual_tensors(),
+        }
+    }
+}
+
+/// Nemotron-H's experts: a sigmoid router choosing by score plus a correction bias (weighing by the unbiased scores,
+/// renormalized and scaled), squared-ReLU experts with no gate, and one shared expert beside them.
+struct NemotronMoe {
+    gate: inference_tensor::nn::Linear,
+    bias: Tensor,
+    experts: MoEExperts,
+    shared: PlainMlp,
+    top_k: usize,
+    scale: f32,
+}
+
+impl NemotronMoe {
+    fn load(
+        cfg: &Config,
+        spec: &NemotronMoeSpec,
+        vb: ShardedVarBuilder,
+        device: Device,
+        comm: &Arc<inference_quant::Comm>,
+        loading_isq: bool,
+    ) -> Result<Self> {
+        let router_vb = vb
+            .pp(NEMOTRON_ROUTER)
+            .set_device(device.clone())
+            .set_dtype(DType::F32);
+        let gate =
+            crate::layers::linear_no_bias(cfg.hidden_size, spec.num_experts, router_vb.clone())?;
+        let bias = router_vb.get(spec.num_experts, NEMOTRON_SELECTION_BIAS)?;
+        let experts = MoEExperts::new(
+            &MoEExpertsConfig {
+                num_experts: spec.num_experts,
+                num_experts_per_tok: spec.top_k,
+                hidden_size: cfg.hidden_size,
+                moe_intermediate_size: spec.intermediate_size,
+                expert_proj_names: ExpertProjNames::DEFAULT,
+                gated: false,
+            },
+            vb.clone(),
+            device,
+            comm,
+            loading_isq,
+            &cfg.quantization_config,
+            crate::layers::Activation::Relu2,
+        )?;
+        let shared = PlainMlp::new(
+            vb.pp(NEMOTRON_SHARED_EXPERTS),
+            &[cfg.hidden_size, spec.shared_intermediate_size],
+            &NEMOTRON_MLP,
+            false,
+            &cfg.quantization_config,
+            crate::layers::Activation::Relu2,
+            comm,
+        )?;
+        Ok(Self {
+            gate,
+            bias,
+            experts,
+            shared,
+            top_k: spec.top_k,
+            scale: spec.routed_scaling_factor,
+        })
+    }
+
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let (b_size, seq_len, hidden) = xs.dims3()?;
+        let xs_flat = xs.reshape(((), hidden))?;
+        let logits = self.gate.forward(&xs_flat.to_dtype(DType::F32)?)?;
+        let topk = crate::ops::moe_router_topk(
+            &logits,
+            crate::ops::MoeRouterTopKConfig {
+                top_k: self.top_k,
+                score_function: crate::ops::MoeRouterScoreFunction::Sigmoid,
+                selected_weight: crate::ops::MoeRouterSelectedWeight::Score,
+                renormalize: true,
+                norm_min: NEMOTRON_NORM_MIN,
+                output_scale: self.scale,
+                logit_clip: None,
+            },
+            Some(&self.bias),
+            None,
+        )?;
+        // the shared expert runs while offloaded experts' misses are on the CPU
+        let (routed, shared) =
+            self.experts
+                .forward_overlapping(xs, topk.values, &topk.indices, &mut || {
+                    MlpLayer::forward(&self.shared, xs)
+                })?;
+        routed
+            .reshape((b_size, seq_len, hidden))?
+            .to_dtype(xs.dtype())?
+            + shared
+    }
+
+    // the router stays as the checkpoint has it; ISQ takes the experts and the shared expert
+    fn residual_tensors(&self) -> Vec<(String, Tensor)> {
+        let uvb = UnVarBuilder::new();
+        let router = uvb.pp(NEMOTRON_ROUTER);
+        router.add(&self.gate);
+        router.add_tensor(NEMOTRON_SELECTION_BIAS, self.bias.clone());
+        uvb.to_safetensors()
     }
 }
 
@@ -1907,18 +2147,111 @@ fn load_dense_ffn(
     Ok(None)
 }
 
-fn granite_ffn_forward(
-    mlp: Option<&dyn MlpLayer>,
-    moe: Option<&GraniteMoE>,
-    xs: &Tensor,
-) -> Result<Tensor> {
-    match (mlp, moe) {
-        (Some(mlp), Some(moe)) => mlp.forward(xs)? + moe.forward(xs)?,
-        (Some(mlp), None) => mlp.forward(xs),
-        (None, Some(moe)) => moe.forward(xs),
-        (None, None) => {
-            inference_tensor::bail!("Granite layer has neither dense nor expert FFN weights")
+/// The routed experts of a Nemotron-H MoE layer.
+#[derive(Clone, Debug)]
+pub struct NemotronMoeSpec {
+    pub num_experts: usize,
+    pub top_k: usize,
+    pub intermediate_size: usize,
+    pub shared_intermediate_size: usize,
+    pub routed_scaling_factor: f32,
+}
+
+/// Which feed-forward a block's FFN half loads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FfnKind {
+    /// Granite's: a dense MLP (fused `shared_mlp` or Llama-style `mlp`) and/or `block_sparse_moe`.
+    Granite,
+    /// Nemotron-H's squared-ReLU `up_proj`/`down_proj`.
+    Mlp,
+    /// Nemotron-H's experts ([`NemotronMoeSpec`]).
+    Moe,
+}
+
+/// A block's FFN half: its norm's prefix, its module's, and which feed-forward that is.
+#[derive(Clone, Debug)]
+pub struct FfnNames {
+    pub norm: String,
+    pub module: String,
+    pub kind: FfnKind,
+}
+
+/// Where one block's weights sit, relative to the model's prefix.
+#[derive(Clone, Debug)]
+pub struct BlockNames {
+    pub norm: String,
+    pub mixer: String,
+    pub ffn: Option<FfnNames>,
+}
+
+#[derive(Clone, Debug)]
+pub struct HybridBlock {
+    pub mixer: GraniteLayerType,
+    pub names: BlockNames,
+}
+
+/// The model's blocks and the names around them. Granite keeps one block per checkpoint layer; Nemotron-H, whose
+/// layers each hold one mixer or one feed-forward, makes a block of a mixer layer and the feed-forward after it.
+#[derive(Clone, Debug)]
+pub struct HybridLayout {
+    pub blocks: Vec<HybridBlock>,
+    pub embeddings: &'static str,
+    pub final_norm: &'static str,
+    pub moe: Option<NemotronMoeSpec>,
+}
+
+impl HybridLayout {
+    pub fn granite(cfg: &Config) -> Self {
+        let blocks = cfg
+            .layer_types()
+            .into_iter()
+            .enumerate()
+            .map(|(i, mixer)| {
+                let layer = format!("layers.{i}");
+                let mixer_name = match mixer {
+                    GraniteLayerType::Mamba => "mamba",
+                    _ => "self_attn",
+                };
+                HybridBlock {
+                    names: BlockNames {
+                        norm: format!("{layer}.input_layernorm"),
+                        mixer: format!("{layer}.{mixer_name}"),
+                        ffn: Some(FfnNames {
+                            norm: format!("{layer}.post_attention_layernorm"),
+                            module: layer,
+                            kind: FfnKind::Granite,
+                        }),
+                    },
+                    mixer,
+                }
+            })
+            .collect();
+        Self {
+            blocks,
+            embeddings: "embed_tokens",
+            final_norm: "norm",
+            moe: None,
         }
+    }
+
+    /// The checkpoint layer each tensor name's `layers.N` belongs to, mapped to its block.
+    pub fn block_of_layer(&self) -> HashMap<usize, usize> {
+        let layer_of = |name: &str| {
+            name.strip_prefix("layers.")
+                .and_then(|rest| rest.split('.').next())
+                .and_then(|n| n.parse::<usize>().ok())
+        };
+        let mut map = HashMap::new();
+        for (block, b) in self.blocks.iter().enumerate() {
+            let names = [
+                Some(&b.names.mixer),
+                b.names.ffn.as_ref().map(|f| &f.module),
+            ];
+            for layer in names.into_iter().flatten().filter_map(|n| layer_of(n)) {
+                map.insert(layer, block);
+            }
+        }
+        map
     }
 }
 
@@ -1989,6 +2322,7 @@ impl PastKvLenCache for GraniteHybridCache {
 
 pub struct GraniteMoeHybrid {
     wte: Arc<dyn QuantMethod>,
+    layout: HybridLayout,
     layers: Vec<DecoderLayer>,
     layer_types: Vec<GraniteLayerType>,
     ln_f: RmsNorm,
@@ -2036,6 +2370,27 @@ impl GraniteMoeHybrid {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
+        Self::new_with_layout(
+            cfg,
+            HybridLayout::granite(cfg),
+            vb_m,
+            vb_lm_head,
+            is_gptx,
+            normal_loading_metadata,
+            attention_mechanism,
+        )
+    }
+
+    /// As [`Self::new_inner`], with the blocks and names `layout` gives (Nemotron-H's).
+    pub fn new_with_layout(
+        cfg: &Config,
+        layout: HybridLayout,
+        vb_m: ShardedVarBuilder,
+        vb_lm_head: ShardedVarBuilder,
+        is_gptx: bool,
+        normal_loading_metadata: NormalLoadingMetadata,
+        attention_mechanism: AttentionImplementation,
+    ) -> Result<Self> {
         if let Some(quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
@@ -2049,7 +2404,10 @@ impl GraniteMoeHybrid {
         let wte = embedding_with_legacy_tied_uqff(
             cfg.vocab_size,
             cfg.hidden_size,
-            mapper.set_nm_device(vb_m.pp("embed_tokens"), normal_loading_metadata.loading_isq),
+            mapper.set_nm_device(
+                vb_m.pp(layout.embeddings),
+                normal_loading_metadata.loading_isq,
+            ),
             cfg.tie_word_embeddings.then(|| {
                 mapper.set_nm_device(vb_lm_head.clone(), normal_loading_metadata.loading_isq)
             }),
@@ -2069,7 +2427,7 @@ impl GraniteMoeHybrid {
         let ln_f = RmsNorm::new(
             cfg.hidden_size,
             cfg.rms_norm_eps,
-            mapper.set_nm_device(vb_m.pp("norm"), false),
+            mapper.set_nm_device(vb_m.pp(layout.final_norm), false),
         )?;
 
         let head_dim = cfg.head_dim();
@@ -2108,7 +2466,11 @@ impl GraniteMoeHybrid {
             }
         }
 
-        let layer_types = cfg.layer_types();
+        let layer_types = layout
+            .blocks
+            .iter()
+            .map(|block| block.mixer.clone())
+            .collect::<Vec<_>>();
         let layer_devices = (0..layer_types.len())
             .map(|layer_idx| {
                 mapper
@@ -2131,9 +2493,10 @@ impl GraniteMoeHybrid {
         );
 
         // Build layers based on layer_types
-        let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
+        let num_blocks = layer_types.len();
+        let mut layers = Vec::with_capacity(num_blocks);
         for i in NiceProgressBar::<_, 'b'>(
-            0..cfg.num_hidden_layers,
+            0..layer_types.len(),
             "Loading repeating layers",
             &normal_loading_metadata.multi_progress,
         ) {
@@ -2141,7 +2504,13 @@ impl GraniteMoeHybrid {
                 .device_for(i, false)
                 .unwrap_or(&normal_loading_metadata.real_device);
             let comm = mapper.get_comm_for(i)?;
-            let vb_layer = vb_m.pp(format!("layers.{i}"));
+            let load = BlockLoad {
+                cfg,
+                mapper: &*mapper,
+                layer_idx: i,
+                loading_isq: normal_loading_metadata.loading_isq,
+                comm: &comm,
+            };
 
             let layer = match &layer_types[i] {
                 GraniteLayerType::Attention | GraniteLayerType::SlidingAttention => {
@@ -2158,24 +2527,12 @@ impl GraniteMoeHybrid {
                         }
                     };
                     DecoderLayer::Attention(Block::load(
-                        vb_layer,
-                        cfg,
-                        &*mapper,
-                        i,
-                        normal_loading_metadata.loading_isq,
-                        rotary_emb,
-                        paged_attn,
-                        &comm,
+                        &vb_m, &layout, load, rotary_emb, paged_attn,
                     )?)
                 }
-                GraniteLayerType::Mamba => DecoderLayer::Mamba(MambaBlock::load(
-                    vb_layer,
-                    cfg,
-                    &*mapper,
-                    i,
-                    normal_loading_metadata.loading_isq,
-                    &comm,
-                )?),
+                GraniteLayerType::Mamba => {
+                    DecoderLayer::Mamba(MambaBlock::load(&vb_m, &layout, load)?)
+                }
             };
             layers.push(layer);
         }
@@ -2206,7 +2563,7 @@ impl GraniteMoeHybrid {
                 state: crate::kv_cache::RecurrentStateSpec::Opaque {
                     dims: vec![cfg.mamba_n_heads(), cfg.mamba_d_head(), cfg.mamba_d_state],
                 },
-                recurrent_dtype: None,
+                recurrent_dtype: cfg.mamba_state_dtype(),
             },
             auxiliary: Vec::new(),
         };
@@ -2232,6 +2589,7 @@ impl GraniteMoeHybrid {
         });
 
         Ok(Self {
+            layout,
             sliding_window: has_sliding.then_some(cfg.sliding_window).flatten(),
             has_sinks,
             wte,
@@ -2261,7 +2619,7 @@ impl GraniteMoeHybrid {
             device: normal_loading_metadata.real_device,
             cfg: ModelConfigMetadata {
                 max_seq_len: cfg.max_position_embeddings,
-                num_layers: cfg.num_hidden_layers,
+                num_layers: num_blocks,
                 hidden_size: cfg.hidden_size,
                 num_kv_heads: (cfg.num_key_value_heads() / mapper.get_comm_for(0)?.world_size())
                     .max(1),
@@ -2512,26 +2870,25 @@ impl GraniteMoeHybrid {
     }
 
     pub fn residual_tensors_m(&self, uvb_m: UnVarBuilder) -> Vec<(String, Tensor)> {
-        uvb_m.pp("embed_tokens").add(&self.wte);
-        uvb_m.pp("norm").add(&self.ln_f);
+        uvb_m.pp(self.layout.embeddings).add(&self.wte);
+        uvb_m.pp(self.layout.final_norm).add(&self.ln_f);
 
-        for (layer_idx, layer) in self.layers.iter().enumerate() {
-            let uvb_l = uvb_m.pp("layers").pp(layer_idx);
-            match layer {
-                DecoderLayer::Attention(block) => {
-                    uvb_l.pp("input_layernorm").add(&block.rms_1);
-                    uvb_l.pp("post_attention_layernorm").add(&block.rms_2);
-                    if let Some(moe) = &block.block_sparse_moe {
-                        uvb_l.pp("block_sparse_moe").extend(moe.residual_tensors());
-                    }
-                }
+        for (layer, block) in self.layers.iter().zip(&self.layout.blocks) {
+            let names = &block.names;
+            let (rms_1, ffn) = match layer {
+                DecoderLayer::Attention(block) => (&block.rms_1, &block.ffn),
                 DecoderLayer::Mamba(block) => {
-                    uvb_l.pp("input_layernorm").add(&block.rms_1);
-                    uvb_l.pp("post_attention_layernorm").add(&block.rms_2);
-                    uvb_l.pp("mamba").extend(block.mamba.residual_tensors());
-                    if let Some(moe) = &block.block_sparse_moe {
-                        uvb_l.pp("block_sparse_moe").extend(moe.residual_tensors());
-                    }
+                    uvb_m
+                        .pp(&names.mixer)
+                        .extend(block.mamba.residual_tensors());
+                    (&block.rms_1, &block.ffn)
+                }
+            };
+            uvb_m.pp(&names.norm).add(rms_1);
+            if let (Some(ffn), Some(ffn_names)) = (ffn, &names.ffn) {
+                uvb_m.pp(&ffn_names.norm).add(&ffn.norm);
+                if let Some(moe) = &ffn.moe {
+                    uvb_m.pp(&ffn_names.module).extend(moe.residual_tensors());
                 }
             }
         }
@@ -2580,13 +2937,9 @@ impl AnyMoeBaseModelMixin for GraniteMoeHybrid {
         let mut mlps = Vec::new();
         for layer in &self.layers {
             match layer {
-                DecoderLayer::Attention(block) => {
-                    if let Some(mlp) = block.mlp.as_deref() {
-                        mlps.push(mlp);
-                    }
-                }
-                DecoderLayer::Mamba(block) => {
-                    if let Some(mlp) = block.mlp.as_deref() {
+                DecoderLayer::Attention(Block { ffn, .. })
+                | DecoderLayer::Mamba(MambaBlock { ffn, .. }) => {
+                    if let Some(mlp) = ffn.as_ref().and_then(|ffn| ffn.mlp.as_deref()) {
                         mlps.push(mlp);
                     }
                 }
@@ -2598,13 +2951,9 @@ impl AnyMoeBaseModelMixin for GraniteMoeHybrid {
         let mut mlps = Vec::new();
         for layer in &mut self.layers {
             match layer {
-                DecoderLayer::Attention(block) => {
-                    if let Some(mlp) = block.mlp.as_mut() {
-                        mlps.push(mlp);
-                    }
-                }
-                DecoderLayer::Mamba(block) => {
-                    if let Some(mlp) = block.mlp.as_mut() {
+                DecoderLayer::Attention(Block { ffn, .. })
+                | DecoderLayer::Mamba(MambaBlock { ffn, .. }) => {
+                    if let Some(mlp) = ffn.as_mut().and_then(|ffn| ffn.mlp.as_mut()) {
                         mlps.push(mlp);
                     }
                 }
@@ -2631,16 +2980,10 @@ impl AnyMoeBaseModelMixin for GraniteMoeHybrid {
 
         // Helper to get MLP from a layer
         fn get_mlp(layer: &DecoderLayer) -> Result<&dyn MlpLayer> {
-            match layer {
-                DecoderLayer::Attention(block) => block
-                    .mlp
-                    .as_deref()
-                    .ok_or_else(|| inference_tensor::Error::msg("Granite layer has no shared MLP")),
-                DecoderLayer::Mamba(block) => block
-                    .mlp
-                    .as_deref()
-                    .ok_or_else(|| inference_tensor::Error::msg("Granite layer has no shared MLP")),
-            }
+            layer
+                .ffn()
+                .and_then(|ffn| ffn.mlp.as_deref())
+                .ok_or_else(|| inference_tensor::Error::msg("Granite layer has no shared MLP"))
         }
 
         for vb in additional_vbs {
@@ -2693,6 +3036,11 @@ impl AnyMoeBaseModelMixin for GraniteMoeHybrid {
                             layer_rope_theta: None,
                             no_rope_layers: None,
                             rope_parameters: None,
+                            head_dim: None,
+                            mamba_inner_size: None,
+                            mamba_norm_group_size: None,
+                            mamba_prefill_dt_min: 0.0,
+                            mamba_f32_state: false,
                         };
                         row.push(Box::new(GraniteMlp::new(
                             vb.pp(layer_idx)
@@ -2713,8 +3061,10 @@ impl AnyMoeBaseModelMixin for GraniteMoeHybrid {
         }
         for (layer_idx, expert) in layers.into_iter().zip(experts) {
             let mlp_box = match &mut self.layers[layer_idx] {
-                DecoderLayer::Attention(block) => block.mlp.as_mut(),
-                DecoderLayer::Mamba(block) => block.mlp.as_mut(),
+                DecoderLayer::Attention(Block { ffn, .. })
+                | DecoderLayer::Mamba(MambaBlock { ffn, .. }) => {
+                    ffn.as_mut().and_then(|ffn| ffn.mlp.as_mut())
+                }
             }
             .ok_or_else(|| inference_tensor::Error::msg("Granite layer has no shared MLP"))?;
             let mut experts_all = vec![mlp_box.clone()];
@@ -2732,10 +3082,9 @@ impl AnyMoeBaseModelMixin for GraniteMoeHybrid {
         Ok(())
     }
     fn amoe_supported(&self) -> bool {
-        self.layers.iter().all(|layer| match layer {
-            DecoderLayer::Attention(block) => block.mlp.is_some(),
-            DecoderLayer::Mamba(block) => block.mlp.is_some(),
-        })
+        self.layers
+            .iter()
+            .all(|layer| layer.ffn().is_some_and(|ffn| ffn.mlp.is_some()))
     }
 }
 
@@ -2811,6 +3160,7 @@ mod tests {
                     device,
                 )?,
                 eps: 1e-5,
+                group_size: INTERMEDIATE_SIZE,
             },
             out_proj: unquant_linear(out_proj_weight, Some(out_proj_bias))?,
             num_heads: NUM_HEADS,
@@ -2820,6 +3170,7 @@ mod tests {
             conv_kernel_size: CONV_WIDTH,
             n_groups: NUM_GROUPS,
             time_step_min: 0.0,
+            prefill_time_step_min: 0.0,
             time_step_max: f64::MAX,
         })
     }

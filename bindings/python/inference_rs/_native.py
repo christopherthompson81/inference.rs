@@ -88,6 +88,7 @@ SIGNATURES = {
     "inference_abi_version": (c_uint32, ()),
     "inference_build_version": (c_void_p, ()),
     "inference_last_error": (c_void_p, ()),
+    "inference_init_logging": (status, (c_int32,)),
     "inference_status_string": (c_void_p, (c_int32,)),
     "inference_layout_model_load": (status, (c_char_p, POINTER(BackendConfig), out)),
     "inference_layout_model_free": (None, (c_void_p,)),

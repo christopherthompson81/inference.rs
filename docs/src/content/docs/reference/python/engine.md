@@ -238,10 +238,12 @@ prompt_logits(
     prompt: str | list[int],
     output: str = 'logprobs',
     model: str | None = None,
+    audio: Sequence[str] = (),
 ) -> tuple[types.PromptLogits, array.array | None]
 ```
 
-Each prompt token's log-probability, and with ``output="logits"`` the row-major logits.
+Each prompt token's log-probability, and with ``output="logits"`` the row-major logits. ``audio`` holds
+the clips (``data:`` URLs) for the prompt's audio placeholders, in order.
 
 ### `Engine.register_logits_processor`
 
@@ -694,6 +696,15 @@ abi_version() -> int
 ```text
 build_version() -> str
 ```
+
+### `JsonEngine.init_logging`
+
+```text
+init_logging(verbosity: int = 0)
+```
+
+The engine's log on stderr, as ``inference serve`` writes it: 0 info, 1 debug, 2 trace (``RUST_LOG``
+decides instead when set). The first call in a process sets it.
 
 ### `JsonEngine.close`
 

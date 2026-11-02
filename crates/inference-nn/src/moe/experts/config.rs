@@ -12,6 +12,8 @@ pub struct MoEExpertsConfig {
     pub hidden_size: usize,
     pub moe_intermediate_size: usize,
     pub expert_proj_names: ExpertProjNames,
+    /// `act(gate) * up`; otherwise `act(up)`, with no gate projection.
+    pub gated: bool,
 }
 
 /// One of the three expert projections.

@@ -1057,6 +1057,7 @@ impl DecoderLayer {
                 hidden_size: cfg.hidden_size,
                 moe_intermediate_size: expert_inter,
                 expert_proj_names: crate::moe::ExpertProjNames::DEFAULT,
+                gated: true,
             };
             let moe = MoEExperts::new_direct(
                 &moe_cfg,

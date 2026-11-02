@@ -589,6 +589,10 @@ pub struct Header {
     pub large_arrays: HashMap<String, LargeArray>,
     pub tensor_infos: HashMap<String, RawTensorInfo>,
     pub tensor_data_offset: u64,
+    /// Where the metadata entries lie in the file, for copying them into another as they are.
+    pub metadata_span: std::ops::Range<u64>,
+    /// The tensors' names in the order of the file's table.
+    pub tensor_order: Vec<String>,
 }
 
 impl Header {
@@ -642,6 +646,7 @@ impl Header {
             )
         }
 
+        let metadata_start = reader.stream_position()?;
         let mut metadata = HashMap::new();
         let mut large_arrays = HashMap::new();
         for _idx in 0..metadata_kv_count {
@@ -658,7 +663,9 @@ impl Header {
             let value = Value::read(reader, value_type, &magic, 0, file_size)?;
             metadata.insert(key, value);
         }
+        let metadata_span = metadata_start..reader.stream_position()?;
         let mut tensor_infos = HashMap::new();
+        let mut tensor_order = Vec::with_capacity(tensor_count as usize);
         for _idx in 0..tensor_count {
             let tensor_name = read_string(reader, &magic, file_size)?;
             let n_dimensions = reader.read_u32::<LittleEndian>()?;
@@ -684,6 +691,7 @@ impl Header {
             dimensions.reverse();
             let ggml_dtype = reader.read_u32::<LittleEndian>()?;
             let offset = reader.read_u64::<LittleEndian>()?;
+            tensor_order.push(tensor_name.clone());
             tensor_infos.insert(
                 tensor_name,
                 RawTensorInfo {
@@ -710,6 +718,8 @@ impl Header {
             large_arrays,
             tensor_infos,
             tensor_data_offset,
+            metadata_span,
+            tensor_order,
         })
     }
 }
@@ -782,52 +792,88 @@ fn write_string<W: std::io::Write>(w: &mut W, str: &str) -> Result<()> {
     Ok(())
 }
 
+/// A tensor's entry in a GGUF's table written ahead of its data: its dims (outermost first), ggml type id and size.
+pub struct TensorEntry<'a> {
+    pub name: &'a str,
+    pub dims: &'a [usize],
+    pub ggml_dtype: u32,
+    pub size_in_bytes: usize,
+}
+
+fn padding(len: usize) -> usize {
+    31 - (31 + len) % 32
+}
+
+/// A GGUF up to its tensor data: `kv_count` metadata entries already serialized as `kv_bytes`, then the table of
+/// `tensors`, whose data [`write_tensor_data`] appends in the same order.
+pub fn write_header<W: std::io::Seek + std::io::Write>(
+    w: &mut W,
+    kv_count: usize,
+    kv_bytes: &[u8],
+    tensors: &[TensorEntry<'_>],
+) -> Result<()> {
+    w.write_u32::<LittleEndian>(0x46554747)?;
+    w.write_u32::<LittleEndian>(2)?; // version 2.
+    w.write_u64::<LittleEndian>(tensors.len() as u64)?;
+    w.write_u64::<LittleEndian>(kv_count as u64)?;
+    w.write_all(kv_bytes)?;
+    let mut offset = 0usize;
+    for tensor in tensors {
+        write_string(w, tensor.name)?;
+        w.write_u32::<LittleEndian>(tensor.dims.len() as u32)?;
+        for &dim in tensor.dims.iter().rev() {
+            w.write_u64::<LittleEndian>(dim as u64)?;
+        }
+        w.write_u32::<LittleEndian>(tensor.ggml_dtype)?;
+        w.write_u64::<LittleEndian>(offset as u64)?;
+        offset += tensor.size_in_bytes + padding(tensor.size_in_bytes);
+    }
+    let pos = w.stream_position()? as usize;
+    w.write_all(&vec![0u8; padding(pos)])?;
+    Ok(())
+}
+
+/// One tensor's data after [`write_header`], padded to the next tensor's offset.
+pub fn write_tensor_data<W: std::io::Write>(w: &mut W, data: &[u8]) -> Result<()> {
+    w.write_all(data)?;
+    write_tensor_padding(w, data.len())
+}
+
+/// The padding after a tensor of `size_in_bytes` whose data was written in pieces.
+pub fn write_tensor_padding<W: std::io::Write>(w: &mut W, size_in_bytes: usize) -> Result<()> {
+    w.write_all(&vec![0u8; padding(size_in_bytes)])?;
+    Ok(())
+}
+
+/// `metadata` as the key/value bytes [`write_header`] takes.
+pub fn metadata_bytes(metadata: &[(&str, &Value)]) -> Result<Vec<u8>> {
+    let mut kv_bytes = Vec::new();
+    for (name, value) in metadata.iter() {
+        write_string(&mut kv_bytes, name)?;
+        kv_bytes.write_u32::<LittleEndian>(value.value_type().to_u32())?;
+        value.write(&mut kv_bytes)?;
+    }
+    Ok(kv_bytes)
+}
+
 pub fn write<W: std::io::Seek + std::io::Write>(
     w: &mut W,
     metadata: &[(&str, &Value)],
     tensors: &[(&str, &QTensor)],
 ) -> Result<()> {
-    w.write_u32::<LittleEndian>(0x46554747)?;
-    w.write_u32::<LittleEndian>(2)?; // version 2.
-    w.write_u64::<LittleEndian>(tensors.len() as u64)?;
-    w.write_u64::<LittleEndian>(metadata.len() as u64)?;
-    for (name, value) in metadata.iter() {
-        write_string(w, name)?;
-        w.write_u32::<LittleEndian>(value.value_type().to_u32())?;
-        value.write(w)?;
-    }
-    let mut offset = 0usize;
-    let mut offsets = Vec::with_capacity(tensors.len());
-    for (name, tensor) in tensors.iter() {
-        write_string(w, name)?;
-        let dims = tensor.shape().dims();
-        w.write_u32::<LittleEndian>(dims.len() as u32)?;
-        for &dim in dims.iter().rev() {
-            w.write_u64::<LittleEndian>(dim as u64)?;
-        }
-        w.write_u32::<LittleEndian>(tensor.dtype().to_u32())?;
-        w.write_u64::<LittleEndian>(offset as u64)?;
-        offsets.push(offset);
-        let size_in_bytes = tensor.storage_size_in_bytes();
-        let padding = 31 - (31 + size_in_bytes) % 32;
-        offset += size_in_bytes + padding;
-    }
-    let pos = w.stream_position()? as usize;
-    let padding = 31 - (31 + pos) % 32;
-    w.write_all(&vec![0u8; padding])?;
-    let tensor_start_pos = w.stream_position()? as usize;
-    for (offset, (_name, tensor)) in offsets.iter().zip(tensors.iter()) {
-        let pos = w.stream_position()? as usize;
-        if tensor_start_pos + offset != pos {
-            crate::bail!(
-                "internal error, unexpected current position {tensor_start_pos} {offset} {pos}"
-            )
-        }
-        let data = tensor.data()?;
-        let size_in_bytes = data.len();
-        w.write_all(&data)?;
-        let padding = 31 - (31 + size_in_bytes) % 32;
-        w.write_all(&vec![0u8; padding])?;
+    let kv_bytes = metadata_bytes(metadata)?;
+    let entries = tensors
+        .iter()
+        .map(|(name, tensor)| TensorEntry {
+            name,
+            dims: tensor.shape().dims(),
+            ggml_dtype: tensor.dtype().to_u32(),
+            size_in_bytes: tensor.storage_size_in_bytes(),
+        })
+        .collect::<Vec<_>>();
+    write_header(w, metadata.len(), &kv_bytes, &entries)?;
+    for (_name, tensor) in tensors.iter() {
+        write_tensor_data(w, &tensor.data()?)?;
     }
     Ok(())
 }

@@ -177,6 +177,7 @@ async fn main() -> Result<()> {
             model: None,
             prompt: PromptInput::Tokens([vec![bos_token], chunk.to_vec()].concat()),
             output: LogitsOutput::Logprobs,
+            audio: Vec::new(),
         };
         let prompt = [vec![bos_token], chunk.to_vec()].concat();
         let skip = match args.cached_prefix {
@@ -185,6 +186,7 @@ async fn main() -> Result<()> {
                     model: None,
                     prompt: PromptInput::Tokens(prompt[..=prefix].to_vec()),
                     output: LogitsOutput::Logprobs,
+                    audio: Vec::new(),
                 };
                 model.prompt_logits(warm).await?;
                 prefix + 1
@@ -244,6 +246,7 @@ async fn llama_cpp_window(model: &Model, text: String, ctx: usize) -> Result<f64
         model: None,
         prompt: PromptInput::Tokens(tokens[..ctx].to_vec()),
         output: LogitsOutput::Logprobs,
+        audio: Vec::new(),
     };
     let scored = model.prompt_logits(request).await?;
     // index i holds token i's logprob given the tokens before it; the first has none
@@ -382,6 +385,7 @@ async fn kl_divergence(model: &Model, path: &Path, out: Option<&Path>) -> Result
                 model: None,
                 prompt: PromptInput::Tokens(chunk.to_vec()),
                 output: LogitsOutput::Logits,
+                audio: Vec::new(),
             })
             .await?;
         let logits = scored.logits.context("the engine returned no logits")?;

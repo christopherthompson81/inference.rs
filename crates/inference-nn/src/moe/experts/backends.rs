@@ -1369,7 +1369,7 @@ impl FastExpertsWeights {
         forward: &MoEForward,
         config: MoEForwardConfig,
     ) -> Result<Option<Tensor>> {
-        use inference_quant::cpu_experts::{CpuExperts, supports};
+        use inference_quant::cpu_experts::{CpuExpertGate, CpuExperts, supports};
         if !forward.xs.device().is_cpu() {
             return Ok(None);
         }
@@ -1395,13 +1395,13 @@ impl FastExpertsWeights {
         }
         run_cpu_experts(
             &CpuExperts {
-                gate,
+                gate: CpuExpertGate::Glu { gate, act },
                 up,
                 down,
-                act,
             },
             forward,
             config,
+            None,
         )
         .map(Some)
     }
@@ -2260,10 +2260,12 @@ mod cpu_block_tests {
 }
 
 // The block kernels over `forward`'s routes, on the host
+/// The experts' output; with `hidden_rows`, each route's hidden row (`tokens x topk x inter`, F32) too.
 pub(super) fn run_cpu_experts(
     experts: &inference_quant::cpu_experts::CpuExperts,
     forward: &MoEForward,
     config: MoEForwardConfig,
+    hidden_rows: Option<&mut Vec<f32>>,
 ) -> Result<Tensor> {
     let xs = forward
         .xs_flat
@@ -2293,6 +2295,9 @@ pub(super) fn run_cpu_experts(
         )
         .collect::<Vec<_>>();
     let mut out = vec![0f32; xs.len()];
-    experts.forward(&xs, &routes, &mut out)?;
+    match hidden_rows {
+        Some(rows) => experts.forward_recording(&xs, &routes, &mut out, rows)?,
+        None => experts.forward(&xs, &routes, &mut out)?,
+    }
     Tensor::from_vec(out, forward.shape.flat(), &Device::Cpu)?.to_dtype(forward.original_dtype)
 }

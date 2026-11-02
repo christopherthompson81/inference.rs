@@ -1,0 +1,198 @@
+use super::*;
+
+use inference_nn::utils::varbuilder_utils::DeviceForLoadTensor;
+
+use crate::nemotron_h::{Config, LayerKind};
+
+const EMBEDDINGS_WEIGHT: &str = "embeddings.weight";
+// NeMo's speech models keep the decoder's ends under Llama's names
+const NEMO_EMBEDDINGS_WEIGHT: &str = "embed_tokens.weight";
+pub const NEMO_DECODER_ENDS: (&str, &str) = ("embed_tokens", "norm");
+// (decoder, lm_head): Hub checkpoints keep NVIDIA's `backbone.*`, which transformers renames to `model.*`; NeMo's
+// speech models nest the language model under `llm`
+const ROOTS: [(&str, &str); 3] = [
+    ("backbone", "lm_head"),
+    ("model", "lm_head"),
+    ("llm.model", "llm.lm_head"),
+];
+
+/// `NormalLoader` for Nemotron-H (`NemotronHForCausalLM`): its layers as Granite's hybrid blocks.
+pub struct NemotronHLoader;
+
+/// The prefixes the checkpoint's decoder and its `lm_head` sit under.
+pub fn nemotron_h_prefixes(vb: &ShardedVarBuilder) -> (&'static str, &'static str) {
+    ROOTS
+        .into_iter()
+        .find(|(root, _)| {
+            [EMBEDDINGS_WEIGHT, NEMO_EMBEDDINGS_WEIGHT]
+                .iter()
+                .any(|weight| {
+                    inference_nn::layers::contains_tensor_or_weight_source(&vb.pp(root), weight)
+                })
+        })
+        .unwrap_or(ROOTS[1])
+}
+
+impl NormalModelLoader for NemotronHLoader {
+    fn load(
+        &self,
+        config: &str,
+        vb: ShardedVarBuilder,
+        normal_loading_metadata: NormalLoadingMetadata,
+        attention_mechanism: AttentionImplementation,
+    ) -> Result<Box<dyn NormalModel + Send + Sync>> {
+        let cfg = Config::from_json(config)?;
+        let (root, lm_head) = nemotron_h_prefixes(&vb);
+        let mut layout = cfg.layout()?;
+        if inference_nn::layers::contains_tensor_or_weight_source(
+            &vb.pp(root),
+            NEMO_EMBEDDINGS_WEIGHT,
+        ) {
+            (layout.embeddings, layout.final_norm) = NEMO_DECODER_ENDS;
+        }
+        Ok(Box::new(crate::granite::GraniteMoeHybrid::new_with_layout(
+            &cfg.granite()?,
+            layout,
+            vb.pp(root),
+            vb.pp(lm_head),
+            true,
+            normal_loading_metadata,
+            attention_mechanism,
+        )?))
+    }
+    fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
+        Ok(Box::new(Config::from_json(config)?))
+    }
+    fn supports_paged_attention(&self, _config: &str) -> Result<bool> {
+        Ok(true)
+    }
+    // a checkpoint layer goes where the block holding it does
+    fn get_device_for_tensor(
+        &self,
+        config: &str,
+        _mapper: &dyn DeviceMapper,
+        loading_isq: bool,
+    ) -> Result<Arc<dyn Fn(String) -> DeviceForLoadTensor + Send + Sync + 'static>> {
+        if loading_isq {
+            return Ok(Arc::new(|_| DeviceForLoadTensor::Base));
+        }
+        let blocks = Config::from_json(config)?.layout()?.block_of_layer();
+        let re = Regex::new(LAYER_INDEX_PATTERN)?;
+        Ok(Arc::new(move |name: String| {
+            re.captures(&name)
+                .and_then(|captures| captures[1].parse::<usize>().ok())
+                .and_then(|layer| blocks.get(&layer).copied())
+                .map(DeviceForLoadTensor::Idx)
+                .unwrap_or(DeviceForLoadTensor::Base)
+        }))
+    }
+}
+
+impl IsqModelLoader for NemotronHLoader {
+    fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
+        isq_regexes(&[r"\.embeddings\.weight$", r"^lm_head\.(weight|bias)$"])
+    }
+
+    fn isq_layer_regexes(&self, _config: &str) -> Result<Vec<Regex>> {
+        isq_regexes(&[
+            r"lm_head\.(weight|bias)$",
+            r"layers\.(\d+)\.mixer\.(q_proj|k_proj|v_proj|o_proj)\.(weight|bias)$",
+            r"layers\.(\d+)\.mixer\.(in_proj|out_proj)\.(weight|bias)$",
+            r"layers\.(\d+)\.mixer\.(up_proj|down_proj)\.(weight|bias)$",
+            r"layers\.(\d+)\.mixer\.shared_experts\.(up_proj|down_proj)\.(weight|bias)$",
+            r"layers\.(\d+)\.mixer\.experts\.(\d+)\.(up_proj|down_proj)\.(weight|bias)$",
+            r"layers\.(\d+)\.mixer\.experts\.(gate_and_up_projs|down_projs)\.weight$",
+        ])
+    }
+    fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
+        self.isq_layer_regexes(config)
+    }
+    fn isq_layer_regexes_moqe(&self, _config: &str) -> Result<Vec<Regex>> {
+        isq_regexes(&[r"layers\.(\d+)\.mixer\.experts\.(\d+)\.(up_proj|down_proj)\.(weight|bias)$"])
+    }
+    fn immediate_isq_predicates_moqe(&self, config: &str) -> Result<Vec<Regex>> {
+        self.isq_layer_regexes_moqe(config)
+    }
+}
+
+impl DeviceMappedModelLoader for NemotronHLoader {
+    fn non_mapped_size_in_bytes(
+        &self,
+        config: &str,
+        dtype: DType,
+        weight_pack_factor: usize,
+        quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
+        _matformer_config: Option<&MatformerSliceConfig>,
+    ) -> Result<usize> {
+        let cfg = Config::from_json(config)?;
+        standard_non_mapped_size_in_bytes(
+            LanguageModelEnds {
+                hidden_size: cfg.hidden_size,
+                vocab_size: cfg.vocab_size,
+                tie_word_embeddings: cfg.tie_word_embeddings,
+            },
+            quantization,
+            dtype,
+            weight_pack_factor,
+        )
+    }
+    fn layer_sizes_in_bytes(
+        &self,
+        config: &str,
+        dtype: DType,
+        weight_pack_factor: usize,
+        _matformer_config: Option<&MatformerSliceConfig>,
+    ) -> Result<Vec<usize>> {
+        let cfg = Config::from_json(config)?;
+        let h = cfg.hidden_size;
+        let layer_elems = |kind: LayerKind| match kind {
+            LayerKind::Attention => {
+                let q = cfg.num_attention_heads * cfg.head_dim;
+                let kv = cfg.num_key_value_heads.unwrap_or(cfg.num_attention_heads) * cfg.head_dim;
+                (h * q * 2 + h * kv * 2) / weight_pack_factor
+            }
+            LayerKind::Mamba => {
+                let inner = cfg.mamba_num_heads * cfg.mamba_head_dim;
+                let conv_dim = inner + 2 * cfg.n_groups * cfg.ssm_state_size;
+                let in_proj = (inner + conv_dim + cfg.mamba_num_heads) * h;
+                (in_proj + inner * h) / weight_pack_factor
+                    + conv_dim * (cfg.conv_kernel + 1)
+                    + cfg.mamba_num_heads * 3
+                    + inner
+            }
+            LayerKind::Moe => {
+                let experts = cfg.n_routed_experts * cfg.moe_intermediate_size * h * 2;
+                let shared = cfg.moe_shared_expert_intermediate_size * h * 2;
+                (experts + shared) / weight_pack_factor + cfg.n_routed_experts * (h + 1)
+            }
+            LayerKind::Mlp => cfg.intermediate_size * h * 2 / weight_pack_factor,
+        } + h;
+        // a block holds its mixer layer and the feed-forward layer after it
+        let mut sizes: Vec<usize> = Vec::new();
+        for kind in cfg.layer_kinds()? {
+            let bytes = layer_elems(kind) * dtype.size_in_bytes();
+            match kind {
+                LayerKind::Mamba | LayerKind::Attention => sizes.push(bytes),
+                LayerKind::Moe | LayerKind::Mlp => match sizes.last_mut() {
+                    Some(last) => *last += bytes,
+                    None => anyhow::bail!("Nemotron-H starts with a feed-forward layer"),
+                },
+            }
+        }
+        Ok(sizes)
+    }
+    fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
+        let cfg = Config::from_json(config)?;
+        Ok(Box::new(ModelConfigMetadata {
+            max_seq_len: cfg.max_position_embeddings,
+            num_layers: cfg.layout()?.blocks.len(),
+            hidden_size: cfg.hidden_size,
+            num_kv_heads: cfg.num_key_value_heads.unwrap_or(cfg.num_attention_heads),
+            num_attn_heads: cfg.num_attention_heads,
+            sliding_window: None,
+            k_head_dim: cfg.head_dim,
+            v_head_dim: cfg.head_dim,
+            kv_cache_layout: inference_nn::paged_attention::KvCacheLayout::Standard,
+        }))
+    }
+}

@@ -39,6 +39,7 @@ class Engine:
 
     abi_version = staticmethod(JsonEngine.abi_version)
     build_version = staticmethod(JsonEngine.build_version)
+    init_logging = staticmethod(JsonEngine.init_logging)
 
     def close(self):
         self.json.close()
@@ -130,10 +131,15 @@ class Engine:
         return from_json(types.SessionDeleted, self.json.delete_session(session_id))
 
     def prompt_logits(
-        self, prompt: str | list[int], output: str = "logprobs", model: str | None = None
+        self,
+        prompt: str | list[int],
+        output: str = "logprobs",
+        model: str | None = None,
+        audio: Sequence[str] = (),
     ) -> tuple[types.PromptLogits, array.array | None]:
-        """Each prompt token's log-probability, and with ``output="logits"`` the row-major logits."""
-        request = {"prompt": prompt, "output": output, "model": model}
+        """Each prompt token's log-probability, and with ``output="logits"`` the row-major logits. ``audio`` holds
+        the clips (``data:`` URLs) for the prompt's audio placeholders, in order."""
+        request = {"prompt": prompt, "output": output, "model": model, "audio": list(audio)}
         scores, logits = self.json.prompt_logits(json.dumps(request))
         return from_json(types.PromptLogits, scores), logits
 

@@ -11,6 +11,7 @@ mod config;
 mod forward;
 #[cfg(feature = "cuda")]
 mod offload;
+mod ungated;
 #[cfg(feature = "cuda")]
 pub use offload::offload_activity;
 
@@ -66,6 +67,7 @@ enum MoEExpertsBackendImpl {
     MappedCpu(Box<MappedCpuExperts>),
     #[cfg(feature = "cuda")]
     Offloaded(Box<offload::OffloadedExperts>),
+    Ungated(ungated::UngatedExpertsWeights),
 }
 
 /// Resident CPU experts read in place from a GGUF mapping: the block kernels over the file's own bytes, so loading
@@ -87,12 +89,14 @@ impl MappedCpuExperts {
             }
         });
         let experts = inference_quant::cpu_experts::CpuExperts {
-            gate,
+            gate: inference_quant::cpu_experts::CpuExpertGate::Glu {
+                gate,
+                act: self.act,
+            },
             up,
             down,
-            act: self.act,
         };
-        backends::run_cpu_experts(&experts, forward, config)
+        backends::run_cpu_experts(&experts, forward, config, None)
     }
 }
 
@@ -121,6 +125,9 @@ impl MoEExpertsBackendImpl {
                 .forward(forward, config, None)
                 .map(|(ys, _)| ys)
                 .map_err(|err| err.context("moe experts offloaded")),
+            Self::Ungated(w) => w
+                .forward_impl(forward, config)
+                .map_err(|err| err.context("moe experts ungated")),
         }
     }
 }
@@ -152,6 +159,10 @@ impl MoEExperts {
         quantization_config: &Option<QuantizedConfig>,
         act: Activation,
     ) -> Result<Self> {
+        if !cfg.gated {
+            let experts_vb = vb.pp("experts").set_device(layer_device);
+            return Self::new_ungated(cfg, experts_vb, comm, act);
+        }
         #[cfg(feature = "cuda")]
         if let (Some(slots), Some(device)) =
             (vb.moe_expert_cache(), offload::cuda_device(&layer_device))
@@ -268,6 +279,9 @@ impl MoEExperts {
         quantization_config: &Option<QuantizedConfig>,
         act: Activation,
     ) -> Result<Self> {
+        if !cfg.gated {
+            return Self::new_ungated(cfg, experts_vb, comm, act);
+        }
         if let Some(fast) = FastExpertsWeights::from_weight_source(cfg, &experts_vb, comm)? {
             let lora_site = Self::register_lora_site(cfg, &experts_vb, comm, fast.sharded)?;
             return Ok(Self::from_backend(
@@ -327,6 +341,22 @@ impl MoEExperts {
         let lora_site = Self::register_lora_site(cfg, &experts_vb, comm, lora_sharded)?;
 
         Ok(Self::from_backend(backend_impl, lora_site, cfg, comm, act))
+    }
+
+    fn new_ungated(
+        cfg: &MoEExpertsConfig,
+        experts_vb: ShardedVarBuilder,
+        comm: &Arc<inference_quant::Comm>,
+        act: Activation,
+    ) -> Result<Self> {
+        let weights = ungated::UngatedExpertsWeights::load(cfg, experts_vb, comm)?;
+        Ok(Self::from_backend(
+            MoEExpertsBackendImpl::Ungated(weights),
+            None,
+            cfg,
+            comm,
+            act,
+        ))
     }
 
     // GGUF stacks the block kernels run, left in the mapping; not when ISQ, LoRA or sharding needs layers of its own

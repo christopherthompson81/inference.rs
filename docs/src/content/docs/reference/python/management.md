@@ -642,6 +642,7 @@ One of: `Union[str, list[int]]`.
 
 | Field | Type | Default |
 | --- | --- | --- |
+| `audio` | `list[str] \| None` | optional |
 | `model` | `str \| None` | optional |
 | `output` | `LogitsOutput \| None` | optional |
 | `prompt` | `PromptInput` | required |

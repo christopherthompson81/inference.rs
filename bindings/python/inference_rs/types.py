@@ -207,6 +207,7 @@ class MultimodalLoaderType(str, Enum):
     LLAVA_NEXT = "llava_next"
     LLAVA = "llava"
     GRANITE4_VISION = "granite4_vision"
+    NEMOTRON_TRANSCRIBE = "nemotron_transcribe"
     GRANITE_SPEECH = "granite_speech"
     LFM2VL = "lfm2vl"
     VLLAMA = "vllama"
@@ -276,6 +277,7 @@ class NormalLoaderType(str, Enum):
     GRANITE_SWA = "granite_swa"
     GRANITEMOE_SWA = "granitemoe_swa"
     GPT_OSS = "gpt_oss"
+    NEMOTRON_H = "nemotron_h"
     HUNYUANV1DENSE = "hunyuanv1dense"
     HUNYUANV1MOE = "hunyuanv1moe"
     QWEN3NEXT = "qwen3next"
@@ -2657,6 +2659,7 @@ class PromptLogits:
 
 @dataclass(kw_only=True)
 class PromptLogitsRequest:
+    audio: list[str] | None = None
     model: str | None = None
     output: LogitsOutput | None = None
     prompt: PromptInput

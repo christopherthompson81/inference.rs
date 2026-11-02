@@ -36,6 +36,7 @@ pub(crate) fn ensure_type_kernels_by_name(name: &str) -> std::result::Result<(),
     open()
 }
 mod iq_dequant;
+pub mod iq_quantize;
 mod iq_tables;
 mod iqk_dequant;
 pub mod kernel;
@@ -45,6 +46,7 @@ pub mod mapped;
 mod packed_affine;
 pub mod raw;
 mod repack;
+pub mod requantize;
 #[cfg(feature = "cuda")]
 mod thread_workspace;
 mod weight_source;

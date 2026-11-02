@@ -217,6 +217,12 @@ class JsonEngine:
     def build_version() -> str:
         return _native.borrowed(lib.inference_build_version())
 
+    @staticmethod
+    def init_logging(verbosity: int = 0):
+        """The engine's log on stderr, as ``inference serve`` writes it: 0 info, 1 debug, 2 trace (``RUST_LOG``
+        decides instead when set). The first call in a process sets it."""
+        check(lib.inference_init_logging(verbosity), "inference_init_logging")
+
     def close(self):
         self._finalizer()
 

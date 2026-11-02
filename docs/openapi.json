@@ -10036,6 +10036,7 @@
           "llava_next",
           "llava",
           "granite4_vision",
+          "nemotron_transcribe",
           "granite_speech",
           "lfm2vl",
           "vllama",
@@ -10122,6 +10123,7 @@
           "granite_swa",
           "granitemoe_swa",
           "gpt_oss",
+          "nemotron_h",
           "hunyuanv1dense",
           "hunyuanv1moe",
           "qwen3next",
@@ -12290,7 +12292,7 @@
               ],
               "format": "float"
             },
-            "description": "`log p(tokens[i] | tokens[..i])`; null for the first token, which nothing predicts."
+            "description": "`log p(tokens[i] | tokens[..i])`; null for the first token, which nothing predicts, and for tokens past the\nvocabulary (an audio placeholder the model replaces)."
           },
           "tokens": {
             "type": "array",
@@ -12312,6 +12314,13 @@
           "prompt"
         ],
         "properties": {
+          "audio": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Audio clips (`data:` URLs, or sources the server's fetcher resolves) for the prompt's audio placeholders, in\norder; a multimodal model expands each placeholder as a chat's."
+          },
           "model": {
             "type": [
               "string",

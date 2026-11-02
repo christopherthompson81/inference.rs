@@ -12,15 +12,16 @@ use inference_api::{
     engine::{
         IsqType, ModelSelected, NormalLoaderType, RuntimeSpec, UqffWriteConfig, expand_isq_value,
     },
-    hidream_gguf, initialize_logging,
+    gguf_requantize, hidream_gguf, initialize_logging,
     uqff::{QuantPolicy, resolve_model_source},
 };
 
 use super::serve::{self, extract_device_settings};
 use crate::args::{
-    AdapterOptions, AsrQuantizeOptions, CacheOptions, DeviceOptions, FormatOptions, GlobalOptions,
-    HiDreamQuantizeOptions, MatformerSelection, ModelSourceOptions, ModelType,
-    MultimodalAdapterOptions, MultimodalOptions, QuantizationOptions, QuantizeDeviceOptions,
+    AdapterOptions, AsrQuantizeOptions, CacheOptions, DeviceOptions, FormatOptions,
+    GgufQuantizeOptions, GlobalOptions, HiDreamQuantizeOptions, ImatrixConvertOptions,
+    MatformerSelection, ModelSourceOptions, ModelType, MultimodalAdapterOptions, MultimodalOptions,
+    NemotronTranscribeAudioOptions, QuantizationOptions, QuantizeDeviceOptions,
     QuantizeModelSourceOptions, QuantizeModelType, QuantizeMultimodalOptions,
     QuantizeQuantizationOptions, WorldgenQuantizeOptions,
 };
@@ -109,6 +110,103 @@ pub fn run_hidream_quantize(options: HiDreamQuantizeOptions, global: GlobalOptio
         &options.keep,
     )?;
     report_gguf(&options.output_path, &summary);
+    Ok(())
+}
+
+/// Rewrites a float GGUF with the given per-tensor types.
+pub fn run_gguf_quantize(options: GgufQuantizeOptions) -> Result<()> {
+    initialize_logging();
+    let rules = options
+        .tensor_types
+        .iter()
+        .map(|rule| {
+            let Some((pattern, ty)) = rule.rsplit_once('=') else {
+                anyhow::bail!("`--tensor-type {rule}` is not `<regex>=<type>`");
+            };
+            Ok((
+                regex::Regex::new(pattern)?,
+                gguf_requantize::writable_type(ty)?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let imatrix = options
+        .imatrix
+        .as_deref()
+        .map(gguf_requantize::load_imatrix)
+        .transpose()?;
+    if let Some(imatrix) = &imatrix {
+        info!("Loaded an imatrix of {} tensors", imatrix.len());
+    }
+    let plan = gguf_requantize::RequantizePlan { rules, imatrix };
+    let summary = gguf_requantize::requantize_gguf(
+        &options.model,
+        &options.output_path,
+        &plan,
+        |i, n, name| info!("[{}/{n}] {name}", i + 1),
+    )?;
+    if !summary.without_imatrix.is_empty() {
+        warn!(
+            "{} quantized tensors had no imatrix entry: {}",
+            summary.without_imatrix.len(),
+            summary.without_imatrix.join(", ")
+        );
+    }
+    let types = summary
+        .by_type
+        .iter()
+        .map(|(name, count, bytes)| format!("{count} {name} ({:.1} MiB)", *bytes as f64 / MIB))
+        .collect::<Vec<_>>()
+        .join(", ");
+    info!(
+        "Wrote {} ({:.2} GiB from {:.2} GiB, {} of {} tensors quantized): {types}",
+        options.output_path.display(),
+        summary.bytes_out as f64 / MIB / 1024.0,
+        summary.bytes_in as f64 / MIB / 1024.0,
+        summary.quantized,
+        summary.tensors,
+    );
+    Ok(())
+}
+
+/// Converts a `.cimatrix` to llama.cpp's imatrix under a GGUF's tensor names.
+pub fn run_imatrix_convert(options: ImatrixConvertOptions) -> Result<()> {
+    initialize_logging();
+    let mapping = gguf_requantize::cimatrix_for_gguf(&options.cimatrix, &options.gguf)?;
+    if !mapping.unmatched.is_empty() {
+        info!(
+            "{} entries bind to no tensor of the GGUF: {}",
+            mapping.unmatched.len(),
+            mapping.unmatched.join(", ")
+        );
+    }
+    if mapping.unseen_experts > 0 {
+        warn!(
+            "{} expert slices saw no tokens; they take llama.cpp's stand-in importance",
+            mapping.unseen_experts
+        );
+    }
+    gguf_requantize::save_legacy_imatrix(&mapping.entries, &options.dataset, &options.output_path)?;
+    info!(
+        "Wrote {} entries to {}",
+        mapping.entries.len(),
+        options.output_path.display()
+    );
+    Ok(())
+}
+
+/// Writes Nemotron 3.5 Transcribe's audio GGUF from its checkpoint.
+pub fn run_nemotron_transcribe_audio(options: NemotronTranscribeAudioOptions) -> Result<()> {
+    initialize_logging();
+    let written = gguf_requantize::write_nemotron_transcribe_audio_gguf(
+        &options.model,
+        &options.output_path,
+    )?;
+    info!(
+        "Wrote {} audio tensors to {} ({:.1} MiB)",
+        written,
+        options.output_path.display(),
+        std::fs::metadata(&options.output_path)?.len() as f64 / MIB
+    );
     Ok(())
 }
 
@@ -606,7 +704,10 @@ mod tests {
             QuantizeCommand::Uqff(model_type) => *model_type,
             QuantizeCommand::Asr(_)
             | QuantizeCommand::HiDreamO1(_)
-            | QuantizeCommand::Worldgen(_) => {
+            | QuantizeCommand::Worldgen(_)
+            | QuantizeCommand::Gguf(_)
+            | QuantizeCommand::Imatrix(_)
+            | QuantizeCommand::NemotronTranscribeAudio(_) => {
                 unreachable!("these tests quantize UQFF")
             }
         }

@@ -22,7 +22,12 @@ impl<'a> ExpertCheckpoint<'a> {
         comm: &Arc<inference_quant::Comm>,
     ) -> Result<Self> {
         let shape_of = |rel: &str| vb.tensor_shape(rel).map(|s| s.to_vec());
-        let layout = ExpertSourceLayout::detect(&shape_of, ExpertProj::Gate).ok_or_else(|| {
+        let probe = if cfg.gated {
+            ExpertProj::Gate
+        } else {
+            ExpertProj::Up
+        };
+        let layout = ExpertSourceLayout::detect(&shape_of, probe).ok_or_else(|| {
             inference_tensor::Error::Msg(format!(
                 "No known expert checkpoint layout under `{}`.",
                 vb.prefix()
@@ -751,6 +756,7 @@ mod tests {
             hidden_size: HIDDEN,
             moe_intermediate_size: INTER,
             expert_proj_names: super::super::config::ExpertProjNames::DEFAULT,
+            gated: true,
         };
         let comm = Arc::new(
             inference_quant::Comm::from_device(

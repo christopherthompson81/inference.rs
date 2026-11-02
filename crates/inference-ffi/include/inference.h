@@ -81,6 +81,9 @@ INFERENCE_API uint32_t inference_abi_version(void);
 INFERENCE_API const char *inference_build_version(void);
 /* Detail of the most recent failing inference_* call on this thread; "" after a success. Never NULL. */
 INFERENCE_API const char *inference_last_error(void);
+/* The engine's log on stderr, as `inference serve` writes it: 0 info, 1 debug, 2 trace (RUST_LOG, when set, decides
+ * instead). The first call in a process sets it; later ones change nothing. */
+INFERENCE_API inference_status inference_init_logging(int32_t verbosity);
 /* Static name of a status code, e.g. "INFERENCE_ERR_LOAD_FAILED". */
 INFERENCE_API const char *inference_status_string(inference_status status);
 

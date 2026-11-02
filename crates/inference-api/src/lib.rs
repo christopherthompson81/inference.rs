@@ -18,6 +18,7 @@ mod engine_rerank;
 mod engine_tests;
 pub mod files;
 pub mod generation;
+pub mod gguf_requantize;
 pub mod hidream_gguf;
 pub(crate) mod inference_for_server_builder;
 #[doc(hidden)]

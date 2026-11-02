@@ -250,6 +250,7 @@ pub use gguf::fast_mmvq::{
 pub use gguf::kernel::GgufType;
 pub use gguf::mapped::MappedBlocks;
 pub use gguf::{GgufMatMul, unquantized_activation_forward};
+pub use gguf::{iq_quantize, requantize};
 /// Runs `f`; without CUDA there are no tile-ordered matvecs to share an input's quantized activations.
 #[cfg(not(feature = "cuda"))]
 pub fn with_shared_input<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -1338,7 +1339,15 @@ impl IsqType {
     pub fn supports_imatrix(self) -> bool {
         matches!(
             self,
-            Self::Q2K | Self::Q3K | Self::Q4K | Self::Q5K | Self::Q6K
+            Self::Q4_0
+                | Self::Q4_1
+                | Self::Q5_0
+                | Self::Q5_1
+                | Self::Q2K
+                | Self::Q3K
+                | Self::Q4K
+                | Self::Q5K
+                | Self::Q6K
         )
     }
 

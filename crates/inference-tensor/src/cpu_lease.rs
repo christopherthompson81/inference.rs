@@ -1,5 +1,5 @@
-//! Worker slots every process on the machine shares, so concurrent processes' compute pools do not oversubscribe the
-//! cores between them. A slot is a lock file; a process takes slots for the extra workers of its parallel ops, keeps
+//! Worker slots the processes of a test run share, so nextest's concurrent test processes do not oversubscribe the
+//! cores between them; an application runs its ops on every worker it asks for. A slot is a lock file; a process takes slots for the extra workers of its parallel ops, keeps
 //! them while it stays busy and gives them back when it goes idle or has held them a while. The kernel drops a dead
 //! process's locks, so a crash or a killed test leaks none.
 
@@ -11,8 +11,10 @@ const REFRESH: Duration = Duration::from_millis(2);
 const IDLE: Duration = Duration::from_millis(20);
 // a process holding slots this long gives them back once, so newer processes get a turn
 const TURN: Duration = Duration::from_millis(50);
-// `INFERENCE_CPU_SLOTS=0` turns leasing off: every op takes the workers it asks for
+// `INFERENCE_CPU_SLOTS=<n>` leases n slots in any process, `0` turns leasing off under nextest too
 const SLOTS_ENV: &str = "INFERENCE_CPU_SLOTS";
+// nextest sets this in every test process it runs
+const NEXTEST_ENV: &str = "NEXTEST_RUN_ID";
 const SLOT_DIR: &str = "inference-rs-cpu-slots";
 const SHARED_MEMORY: &str = "/dev/shm";
 
@@ -28,8 +30,8 @@ pub fn extra_workers(want: usize) -> usize {
     }
 }
 
-/// The machine-wide slot count: the physical cores less the calling thread every process brings, or the
-/// `INFERENCE_CPU_SLOTS` override.
+/// The slot count under a test run (the physical cores less the calling thread every process brings), the
+/// `INFERENCE_CPU_SLOTS` override anywhere, else none: no lease.
 fn slot_count(default: usize) -> Option<usize> {
     match std::env::var(SLOTS_ENV)
         .ok()
@@ -37,7 +39,8 @@ fn slot_count(default: usize) -> Option<usize> {
     {
         Some(0) => None,
         Some(slots) => Some(slots),
-        None => Some(default.saturating_sub(1).max(1)),
+        None if std::env::var_os(NEXTEST_ENV).is_some() => Some(default.saturating_sub(1).max(1)),
+        None => None,
     }
 }
 

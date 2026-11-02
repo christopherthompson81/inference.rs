@@ -230,6 +230,11 @@ impl SupportedArch for NormalLoaderType {
                     ex!("openai/gpt-oss-120b", "120b"),
                 ],
             },
+            Self::NemotronH => ArchMetadata {
+                families: &["Nemotron-H"],
+                modalities: m,
+                examples: &[ex!("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16")],
+            },
             Self::HunYuanDenseV1 => ArchMetadata {
                 families: &["HunYuan"],
                 modalities: m,
@@ -443,6 +448,11 @@ impl SupportedArch for MultimodalLoaderType {
                     ex!("MERaLiON/MERaLiON-2-3B"),
                     ex!("MERaLiON/MERaLiON-2-3B-GGUF", "GGUF"),
                 ],
+            },
+            Self::NemotronTranscribe => ArchMetadata {
+                families: &["Nemotron 3.5 Transcribe"],
+                modalities: &[Text, Audio],
+                examples: &[ex!("nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B")],
             },
             Self::Ultravox => ArchMetadata {
                 families: &["Ultravox"],

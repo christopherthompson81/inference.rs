@@ -98,7 +98,9 @@ mod adapter;
 mod agent_approval;
 mod chat_collector;
 mod engine;
+mod gguf_imatrix;
 mod gguf_write;
+pub use gguf_imatrix::{ImatrixMapping, cimatrix_for_gguf};
 pub use gguf_write::GgufWriteSummary;
 use inference_nn::media_inputs::video as video_input;
 pub use video_input::{VideoFrameSampling, VideoInput, sample_frame_indices};
@@ -149,6 +151,7 @@ pub use files::{
     FILE_PURPOSE_GENERATED_IMAGE, FILE_PURPOSE_USER_DATA, File, FileContent, FileSource, FileStore,
     RequestedFile,
 };
+pub use gguf::nemotron_transcribe_bindings::write_nemotron_transcribe_audio_gguf;
 pub use gguf::{GGUF_MULTI_FILE_DELIMITER, GGUFArchitecture};
 pub use inference_audio::AudioInput;
 pub use inference_code_exec::{

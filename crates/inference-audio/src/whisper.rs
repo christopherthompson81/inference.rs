@@ -9,7 +9,7 @@ const DYNAMIC_RANGE: f32 = 8.0;
 const LOG_OFFSET: f32 = 4.0;
 const LOG_SCALE: f32 = 4.0;
 
-/// The maximum the log-mel floor sits [`DYNAMIC_RANGE`] below.
+/// The maximum the log-mel floor sits `DYNAMIC_RANGE` below.
 #[derive(Clone, Copy, Debug)]
 pub enum LogMelMax {
     /// A fixed maximum, as a streaming model sets in its config.

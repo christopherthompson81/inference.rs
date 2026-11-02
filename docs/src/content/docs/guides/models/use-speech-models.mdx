@@ -1,6 +1,6 @@
 ---
 title: Speech models
-description: Parakeet, Whisper, Qwen3-ASR, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime for speech transcription and audio chat, Silero for voice activity, Nemotron-3 and Sortformer for speaker diarization, Dia and Kokoro for text-to-speech.
+description: Parakeet, Whisper, Qwen3-ASR, Nemotron 3.5 Transcribe, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime for speech transcription and audio chat, Silero for voice activity, Nemotron-3 and Sortformer for speaker diarization, Dia and Kokoro for text-to-speech.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
@@ -16,6 +16,8 @@ inference.rs supports twelve speech-related model families:
 - **Silero VAD**: voice activity detection, served via `/v1/audio/vad`; it also cuts long recordings for Parakeet.
 - **Qwen3-ASR**: an audio-in decoder that transcribes 30 languages, through `/v1/audio/transcriptions`
   (whole-clip segments, no word timestamps) or `/v1/chat/completions`.
+- **Nemotron 3.5 Transcribe**: an audio-in decoder on Nemotron-H (30B-A4B) with a speaker branch, through
+  `/v1/audio/transcriptions` (whole-clip segments, no word timestamps yet) or `/v1/chat/completions`.
 - **GLM-ASR**: an audio-in decoder (GLM-ASR-Nano) that transcribes up to 655 s through `/v1/audio/transcriptions`
   (whole-clip segments, no word timestamps) or answers through `/v1/chat/completions`.
 - **Audio Flamingo 3**: an audio-in decoder that transcribes up to 600 s through `/v1/audio/transcriptions` and
@@ -33,7 +35,7 @@ inference.rs supports twelve speech-related model families:
 - **Dia**: dedicated text-to-speech model served via `/v1/audio/speech`.
 - **Kokoro**: an 82M-parameter text-to-speech model with preset voices, also served via `/v1/audio/speech`.
 
-Qwen3-ASR, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime are classified as multimodal models because audio is an input modality. Parakeet and
+Qwen3-ASR, Nemotron 3.5 Transcribe, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime are classified as multimodal models because audio is an input modality. Parakeet and
 Whisper are dedicated transcription models, and Dia and Kokoro are dedicated speech models.
 
 ## Parakeet: speech recognition
@@ -414,6 +416,36 @@ curl http://localhost:1234/v1/audio/transcriptions -F file=@clip.wav -F model=de
 
 Through `/v1/chat/completions`, send the clip as an `audio_url` part; the answer keeps the model's
 `language <name><asr_text>` prefix.
+
+## Nemotron 3.5 Transcribe: audio in, transcript out
+
+```bash
+inference serve -m nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B
+```
+
+The checkpoint is NVIDIA's NeMo layout (`llm.*` for the decoder, `perception.*` for the speech encoder, speaker
+branch and projector). `/v1/audio/transcriptions` decodes the model's transcription prompt greedily; through
+`/v1/chat/completions`, send the clip as an `audio_url` part. A clip takes 12.5 tokens a second.
+
+In BF16 the model needs about 63 GB. For a 24 GB GPU, write a quantized text GGUF and an audio GGUF beside it:
+
+```bash
+# the decoder as llama.cpp's `nemotron_h_moe` GGUF in BF16 (llama.cpp's converter over `llm.*`), then quantized
+scripts/nemotron_transcribe_text_gguf.py <llama.cpp dir> <checkpoint dir> Nemotron-3.5-Transcribe-text-BF16.gguf
+inference quantize gguf -m Nemotron-3.5-Transcribe-text-BF16.gguf -o text.gguf --imatrix imatrix.dat \
+  --tensor-type 'ffn_down_exps\.weight$=q5_0' --tensor-type '_exps\.weight$=iq4_nl' \
+  --tensor-type '(attn_[qkv]|attn_output|_shexp|ssm_in|ssm_out|output|token_embd)\.weight$=q8_0'
+# the audio tensors, the checkpoint's config and its chat template
+inference quantize nemotron-transcribe-audio -m <checkpoint dir> -o audio.gguf
+inference serve --format gguf -m <dir> -f text.gguf --mmproj audio.gguf
+```
+
+The hidden size (2688) and the experts' width (1856) are not multiples of 256, so the experts take 32-value block
+types (`iq4_nl`, `q4_0`, `q5_0`, `q8_0`). With this recipe the text GGUF is 19.3 GiB and the audio one 1.4 GiB;
+on a 24 GB card, paged attention then holds about 39K tokens (50 minutes of audio). An imatrix from audio requests
+(see [online calibration](/guides/quantization/online-calibration/) and `inference quantize imatrix`) weighs the
+decoder by what audio puts through it. On a GPU the audio tower runs in the model's dtype; on the CPU it runs in f32,
+as transformers keeps it.
 
 ## Voxtral Realtime: audio in, text out
 

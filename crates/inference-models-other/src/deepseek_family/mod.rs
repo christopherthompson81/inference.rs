@@ -259,6 +259,7 @@ impl Moe {
             hidden_size: cfg.hidden_size,
             moe_intermediate_size: spec.moe_intermediate_size,
             expert_proj_names: crate::moe::ExpertProjNames::DEFAULT,
+            gated: true,
         };
 
         let experts = MoEExperts::new(

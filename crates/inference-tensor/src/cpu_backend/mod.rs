@@ -943,7 +943,77 @@ fn copy2d_<T: Copy>(
     }
 }
 
-fn copy_strided_src_<T: Copy>(src: &[T], dst: &mut [T], dst_offset: usize, src_l: &Layout) {
+// a transposed copy of fewer elements runs on one thread, through the tiles as a larger one
+const PARALLEL_TRANSPOSE_ELEMS: usize = 1 << 16;
+// rows and columns of the tiles a transposed copy goes through, so reads and writes both stay in cache
+const TRANSPOSE_TILE: usize = 32;
+
+/// A batch of matrices whose last two dims are swapped in `src_l` (stride 1 down the rows, not along them), copied
+/// out contiguous tile by tile: the generic path would visit them an element at a time through a strided index.
+fn copy_transposed_<T: Copy + Send + Sync>(src: &[T], dst: &mut [T], src_l: &Layout) -> bool {
+    let (dims, strides) = (src_l.dims(), src_l.stride());
+    let rank = dims.len();
+    if rank < 2 || strides[rank - 2] != 1 || strides[rank - 1] == 1 || dims[rank - 1] == 1 {
+        return false;
+    }
+    let (rows, cols, col_stride) = (dims[rank - 2], dims[rank - 1], strides[rank - 1]);
+    let (lead_dims, lead_strides) = (&dims[..rank - 2], &strides[..rank - 2]);
+    let matrix = rows * cols;
+    if matrix == 0 {
+        return true;
+    }
+    let start = src_l.start_offset();
+    let batch_offset = |mut batch: usize| {
+        let mut offset = start;
+        for (&dim, &stride) in lead_dims.iter().zip(lead_strides).rev() {
+            offset += (batch % dim) * stride;
+            batch /= dim;
+        }
+        offset
+    };
+    // one item: a batch's band of `TRANSPOSE_TILE` rows, its tiles across the columns
+    let band = |(item, out): (usize, &mut [T])| {
+        let row_bands = rows.div_ceil(TRANSPOSE_TILE);
+        let (batch, band) = (item / row_bands, item % row_bands);
+        let base = batch_offset(batch);
+        let row0 = band * TRANSPOSE_TILE;
+        let band_rows = TRANSPOSE_TILE.min(rows - row0);
+        for col0 in (0..cols).step_by(TRANSPOSE_TILE) {
+            let tile_cols = TRANSPOSE_TILE.min(cols - col0);
+            for c in col0..col0 + tile_cols {
+                let column = base + c * col_stride + row0;
+                for r in 0..band_rows {
+                    out[r * cols + c] = src[column + r];
+                }
+            }
+        }
+    };
+    let band_len = TRANSPOSE_TILE * cols;
+    // bands of a batch split its rows; the last band of each batch is shorter when the rows are not whole tiles
+    let mut items = Vec::new();
+    for (batch, out) in dst.chunks_mut(matrix).enumerate() {
+        for (band, out) in out.chunks_mut(band_len).enumerate() {
+            items.push((batch * rows.div_ceil(TRANSPOSE_TILE) + band, out));
+        }
+    }
+    if src_l.shape().elem_count() >= PARALLEL_TRANSPOSE_ELEMS {
+        items.into_par_iter().for_each(band);
+    } else {
+        items.into_iter().for_each(band);
+    }
+    true
+}
+
+fn copy_strided_src_<T: Copy + Send + Sync>(
+    src: &[T],
+    dst: &mut [T],
+    dst_offset: usize,
+    src_l: &Layout,
+) {
+    let n = src_l.shape().elem_count();
+    if copy_transposed_(src, &mut dst[dst_offset..dst_offset + n], src_l) {
+        return;
+    }
     match src_l.strided_blocks() {
         crate::StridedBlocks::SingleBlock { start_offset, len } => dst
             [dst_offset..dst_offset + len]
@@ -3449,6 +3519,41 @@ macro_rules! map_dtype {
 #[cfg(test)]
 mod tests {
     use crate::{DType, Device, IndexOp, Result, Tensor};
+
+    // the tiled copy of a transpose against reading each element by hand: whole and partial tiles, a start offset,
+    // a broadcast batch, one thread and many
+    #[test]
+    fn a_transposed_copy_matches_the_elements_it_reads() -> Result<()> {
+        let dev = Device::Cpu;
+        for (batch, rows, cols) in [(1, 3, 5), (2, 33, 70), (4, 64, 300), (3, 129, 257)] {
+            let total = batch * rows * cols + 7;
+            let values = (0..total).map(|v| v as f32).collect::<Vec<_>>();
+            // `[batch, cols, rows]` from a buffer 7 values in, then rows and columns swapped
+            let base = Tensor::from_vec(values.clone(), total, &dev)?
+                .narrow(0, 7, batch * rows * cols)?
+                .reshape((batch, cols, rows))?;
+            let got = base.transpose(1, 2)?.contiguous()?.to_vec3::<f32>()?;
+            for (b, matrix) in got.iter().enumerate() {
+                for (r, row) in matrix.iter().enumerate() {
+                    for (c, &v) in row.iter().enumerate() {
+                        assert_eq!(
+                            v,
+                            values[7 + (b * cols + c) * rows + r],
+                            "{batch}x{rows}x{cols} at {b},{r},{c}"
+                        );
+                    }
+                }
+            }
+        }
+        let shared = Tensor::arange(0f32, 6., &dev)?.reshape((2, 3))?;
+        let got = shared
+            .t()?
+            .broadcast_left(2)?
+            .contiguous()?
+            .to_vec3::<f32>()?;
+        assert_eq!(got[1], vec![vec![0., 3.], vec![1., 4.], vec![2., 5.]]);
+        Ok(())
+    }
 
     // a few rows read the bf16 weight in place, more widen it; both on a weight narrowed out of a larger buffer
     #[test]
