@@ -43,6 +43,9 @@ use crate::{
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
 
+// the Mamba dt clamp without a configured one (transformers' `time_step_limit` default)
+const NO_DT_LIMIT: [f64; 2] = [0.0, f64::MAX];
+
 // stacked expert tensors: Granite 4's `input_linear.weight`, or transformers v5's bare parameters
 const EXPERT_WEIGHT: &str = "weight";
 const V5_GATE_UP: &str = "gate_up_proj";
@@ -171,12 +174,12 @@ pub struct Config {
     // the same as llama.cpp reads it: 1 for a RoPE layer, 0 for NoPE
     pub no_rope_layers: Option<Vec<u8>>,
     pub rope_parameters: Option<GraniteRopeParameters>,
-    // Nemotron-H sets these: its head and Mamba widths, a gated norm per group, prefill's dt floor, an f32 state
+    // Nemotron-H sets these: its head and Mamba widths, a gated norm per group, its dt clamp, an f32 state
     pub head_dim: Option<usize>,
     pub mamba_inner_size: Option<usize>,
     pub mamba_norm_group_size: Option<usize>,
     #[serde(default)]
-    pub mamba_prefill_dt_min: f64,
+    pub mamba_dt_limit: Option<[f64; 2]>,
     #[serde(default)]
     pub mamba_f32_state: bool,
 }
@@ -975,8 +978,6 @@ struct MambaLayer {
     conv_kernel_size: usize,
     n_groups: usize,
     time_step_min: f64,
-    // transformers clamps prefill's dt at the config's `time_step_min`, not decode's
-    prefill_time_step_min: f64,
     time_step_max: f64,
 }
 
@@ -1059,6 +1060,7 @@ impl MambaLayer {
             d = d.to_device(target_dev)?;
         }
 
+        let [time_step_min, time_step_max] = cfg.mamba_dt_limit.unwrap_or(NO_DT_LIMIT);
         Ok(Self {
             in_proj,
             conv1d_weight,
@@ -1075,9 +1077,8 @@ impl MambaLayer {
             ssm_state_size,
             conv_kernel_size,
             n_groups,
-            time_step_min: 0.0,
-            prefill_time_step_min: cfg.mamba_prefill_dt_min,
-            time_step_max: f64::MAX,
+            time_step_min,
+            time_step_max,
         })
     }
 
@@ -1358,7 +1359,7 @@ impl MambaLayer {
         Ok(y)
     }
 
-    // one decode step through the scan kernel (a one-token chunk), at decode's dt floor: `[x, b, c, dt]` as
+    // one decode step through the scan kernel (a one-token chunk): `[x, b, c, dt]` as
     // `forward_cached` splits them, the result `(batch, intermediate_size)`
     #[cfg(feature = "cuda")]
     fn scan_step_cuda(
@@ -1596,7 +1597,7 @@ impl MambaLayer {
                     c: &c,
                     d: &self.scan.d,
                     dt_bias: &self.scan.dt_bias,
-                    dt_min: self.prefill_time_step_min as f32,
+                    dt_min: self.time_step_min as f32,
                     dt_max: self.time_step_max as f32,
                 },
                 &mut ssm_state,
@@ -1621,7 +1622,7 @@ impl MambaLayer {
                 &d_f32,
                 &dt_bias_f32,
                 &mut ssm_state,
-                self.prefill_time_step_min as f32,
+                self.time_step_min as f32,
                 self.time_step_max as f32,
             )?;
 
@@ -1638,7 +1639,7 @@ impl MambaLayer {
                     c: &c,
                     d: &self.scan.d,
                     dt_bias: &self.scan.dt_bias,
-                    dt_min: self.prefill_time_step_min as f32,
+                    dt_min: self.time_step_min as f32,
                     dt_max: self.time_step_max as f32,
                 },
                 &mut ssm_state,
@@ -1658,7 +1659,7 @@ impl MambaLayer {
 
             let dt = dt.broadcast_add(&dt_bias)?;
             let dt = softplus(&dt.to_dtype(inference_tensor::DType::F32)?)?;
-            let dt = dt.clamp(self.prefill_time_step_min, self.time_step_max)?;
+            let dt = dt.clamp(self.time_step_min, self.time_step_max)?;
 
             let d_coeff = self.d.to_dtype(inference_tensor::DType::F32)?;
 
@@ -3247,7 +3248,7 @@ impl AnyMoeBaseModelMixin for GraniteMoeHybrid {
                             head_dim: None,
                             mamba_inner_size: None,
                             mamba_norm_group_size: None,
-                            mamba_prefill_dt_min: 0.0,
+                            mamba_dt_limit: None,
                             mamba_f32_state: false,
                         };
                         row.push(Box::new(GraniteMlp::new(
@@ -3381,9 +3382,8 @@ mod tests {
             ssm_state_size: STATE_SIZE,
             conv_kernel_size: CONV_WIDTH,
             n_groups: NUM_GROUPS,
-            time_step_min: 0.0,
-            prefill_time_step_min: 0.0,
-            time_step_max: f64::MAX,
+            time_step_min: NO_DT_LIMIT[0],
+            time_step_max: NO_DT_LIMIT[1],
         })
     }
 

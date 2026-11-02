@@ -13,7 +13,7 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use inference::{
-    GgufModelBuilder, LogitsOutput, MemoryGpuConfig, Model, ModelBuilder,
+    GgufModelBuilder, LogitsOutput, MemoryGpuConfig, Model, ModelBuilder, ModelDType,
     PagedAttentionMetaBuilder, PagedCacheType, PromptInput, PromptLogitsRequest,
     api::operations::TokenizeRequest,
 };
@@ -59,6 +59,14 @@ struct Args {
     /// MoE experts kept in host memory with this many per layer cached on the GPU.
     #[arg(long)]
     moe_expert_cache: Option<usize>,
+
+    /// The activations' dtype (`auto`, `bf16`, `f16`, `f32`).
+    #[arg(long, default_value = "auto")]
+    dtype: ModelDType,
+
+    /// Run on the CPU even when a GPU is present.
+    #[arg(long)]
+    cpu: bool,
 
     /// The paged KV cache's storage (`auto`, `f8e4m3`, `q4`, `q8/q4`, ...).
     #[arg(long)]
@@ -113,7 +121,12 @@ async fn main() -> Result<()> {
                         .context("a GGUF path has no file name")
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let mut builder = GgufModelBuilder::new(dir.to_string_lossy(), names).with_logging();
+            let mut builder = GgufModelBuilder::new(dir.to_string_lossy(), names)
+                .with_logging()
+                .with_dtype(args.dtype);
+            if args.cpu {
+                builder = builder.with_force_cpu();
+            }
             if let Some(experts) = args.moe_expert_cache {
                 builder = builder.with_moe_expert_cache(experts);
             }
@@ -130,7 +143,12 @@ async fn main() -> Result<()> {
             builder.build().await?
         }
         None => {
-            let mut model_builder = ModelBuilder::new(&args.model_id).with_logging();
+            let mut model_builder = ModelBuilder::new(&args.model_id)
+                .with_logging()
+                .with_dtype(args.dtype);
+            if args.cpu {
+                model_builder = model_builder.with_force_cpu();
+            }
             if let Some(isq) = &args.isq {
                 let isq = inference::parse_isq_value(isq, None).map_err(anyhow::Error::msg)?;
                 model_builder = model_builder.with_isq(isq);
