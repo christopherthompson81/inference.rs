@@ -83,7 +83,11 @@ fn parse(answer: &str) -> TranscriptText {
     }
 }
 
-pub const TRANSCRIBER: AudioTranscriber = AudioTranscriber { prompt, parse };
+pub const TRANSCRIBER: AudioTranscriber = AudioTranscriber {
+    prompt,
+    parse,
+    speakers: None,
+};
 
 #[cfg(test)]
 mod tests {

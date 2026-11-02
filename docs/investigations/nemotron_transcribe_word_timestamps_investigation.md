@@ -76,3 +76,19 @@ path stays exact; they keep the Q8_0 GGUF on this machine.
 
 The Q8_0 head's flip lands on a different boundary than the first try's in-memory quantization of the same weights:
 each is one near-tie boundary in 281 words. The dense head's ~183K tokens with the Q8_0 GGUF (Run 1) become ~194K.
+
+## Run 3 - 2026-11-02 16:11 (local clock)
+
+**Question:** speaker attribution through `/v1/audio/transcriptions`.
+
+**Change:** an `AudioTranscriber` may carry a `SpeakerPrompt` (the speaker-tag prompt and the parse that drops the
+tags); Nemotron 3.5 Transcribe's is the model card's. A request whose `diarization_model` names the transcription
+model itself decodes that prompt, aligns the answer as written (its tags attribute the words, Run 1's tagged path),
+and renders words and segments with each word's tag as its speaker; naming another diarization model runs it beside
+the decoder and assigns its turns to the timed words, as for Parakeet (an audio-in decoder refused `diarization_model`
+before, having no word times).
+
+**Result (Q8_0 audio GGUF, `mix2`, `verbose_json` and `srt`):** the text without tags; speaker runs 0 from 0.29 s, 1
+from 10.83 s, 0 from 20.97 s, 1 from 31.45 s, against the clip's voices changing at 10.5, 21.0 and 31.5 s; nine
+segments breaking at those changes, SRT lines `Speaker 0: ...`. Naming a model the server does not hold gives its
+`model_not_found` error. The external-diarizer path was not run (no second model loaded).

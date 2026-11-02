@@ -20,4 +20,8 @@ fn parse(answer: &str) -> TranscriptText {
     }
 }
 
-pub const AUDIO_FLAMINGO3: AudioTranscriber = AudioTranscriber { prompt, parse };
+pub const AUDIO_FLAMINGO3: AudioTranscriber = AudioTranscriber {
+    prompt,
+    parse,
+    speakers: None,
+};

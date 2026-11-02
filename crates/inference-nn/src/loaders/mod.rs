@@ -275,6 +275,16 @@ pub struct AlignedWord {
 pub struct AudioTranscriber {
     pub prompt: fn(language: Option<&str>) -> anyhow::Result<String>,
     pub parse: fn(&str) -> TranscriptText,
+    /// The model's own speaker attribution, for a model that writes it.
+    pub speakers: Option<SpeakerPrompt>,
+}
+
+/// An audio-in decoder's own speaker attribution: the prompt asking for a `<spk:N>` tag before each speaker's turn,
+/// and the parse of its answer to the plain transcript (the model's alignment head times the tagged answer).
+#[derive(Clone, Copy)]
+pub struct SpeakerPrompt {
+    pub prompt: fn(language: Option<&str>) -> anyhow::Result<String>,
+    pub parse: fn(&str) -> TranscriptText,
 }
 
 impl std::fmt::Debug for AudioTranscriber {

@@ -405,7 +405,7 @@
                           "string",
                           "null"
                         ],
-                        "description": "A diarization model to run over the same audio: segments then break where the speaker changes, and segments\nand words carry the speaker.",
+                        "description": "A diarization model to run over the same audio: segments then break where the speaker changes, and segments\nand words carry the speaker. Naming the transcription model itself has a model that tags speakers (Nemotron\n3.5 Transcribe) attribute them.",
                         "example": "diarization"
                       },
                       "language": {
@@ -511,7 +511,7 @@
                           "string",
                           "null"
                         ],
-                        "description": "A diarization model to run over the same audio: segments then break where the speaker changes, and segments\nand words carry the speaker.",
+                        "description": "A diarization model to run over the same audio: segments then break where the speaker changes, and segments\nand words carry the speaker. Naming the transcription model itself has a model that tags speakers (Nemotron\n3.5 Transcribe) attribute them.",
                         "example": "diarization"
                       },
                       "language": {
@@ -15038,7 +15038,7 @@
               "string",
               "null"
             ],
-            "description": "A diarization model to run over the same audio: segments then break where the speaker changes, and segments\nand words carry the speaker.",
+            "description": "A diarization model to run over the same audio: segments then break where the speaker changes, and segments\nand words carry the speaker. Naming the transcription model itself has a model that tags speakers (Nemotron\n3.5 Transcribe) attribute them.",
             "example": "diarization"
           },
           "language": {

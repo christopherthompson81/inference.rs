@@ -2348,7 +2348,8 @@ pub struct TranscriptionRequest {
     #[serde(default)]
     pub beam_size: Option<usize>,
     /// A diarization model to run over the same audio: segments then break where the speaker changes, and segments
-    /// and words carry the speaker.
+    /// and words carry the speaker. Naming the transcription model itself has a model that tags speakers (Nemotron
+    /// 3.5 Transcribe) attribute them.
     #[serde(default)]
     #[schema(example = "diarization")]
     pub diarization_model: Option<String>,
