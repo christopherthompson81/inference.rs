@@ -254,6 +254,7 @@ inference_tensor::gpu_cases!(
         cuda_low_precision_top1_matches_f32_across_ties_and_nonfinite_values,
         cuda_moe_router_with_fewer_experts_than_lanes_picks_only_experts,
         cuda_selective_scan_matches_the_cpu_scan_gathered_and_in_a_pool,
+        cuda_chunked_ssd_scan_matches_the_cpu_scan,
         cuda_qk_norm_rope_positions_preserves_projection_layout,
         cuda_qk_norm_rope_writes_token_major_from_packed_projection,
         cuda_ranked_topk_cooperative_boundaries_and_fallback_match_cpu,
@@ -895,6 +896,68 @@ fn cuda_selective_scan_matches_the_cpu_scan_gathered_and_in_a_pool() -> inferenc
             None => pool.get(row)?,
         };
         close(&format!("pool row {row}"), &gpu_pool.get(row)?, &want)?;
+    }
+    Ok(())
+}
+
+// a prompt long enough for the chunked SSD path (two windows, a part chunk, groups of 3 heads, the dt clamp) against
+// the CPU scan
+#[cfg(feature = "cuda")]
+fn cuda_chunked_ssd_scan_matches_the_cpu_scan() -> inference_tensor::Result<()> {
+    const BATCH: usize = 2;
+    const SEQ: usize = 700;
+    const HEADS: usize = 6;
+    const GROUPS: usize = 2;
+    const HEAD_DIM: usize = 16;
+    const STATE: usize = 32;
+    const DT_RANGE: [f32; 2] = [0.01, 1.5];
+    const TOLERANCE: f32 = 1e-4;
+    let device = Device::new_cuda(0)?;
+    let rand = |shape: &[usize]| Tensor::randn(0f32, 0.5, shape, &Device::Cpu);
+    let host = [
+        rand(&[BATCH, SEQ, HEADS, HEAD_DIM])?,
+        rand(&[BATCH, SEQ, HEADS])?,
+        (rand(&[HEADS])?.abs()? * -1.0)?,
+        rand(&[BATCH, SEQ, GROUPS, STATE])?,
+        rand(&[BATCH, SEQ, GROUPS, STATE])?,
+        rand(&[HEADS])?,
+        rand(&[HEADS])?,
+    ];
+    let state = rand(&[BATCH, HEADS, HEAD_DIM, STATE])?;
+    let gpu = host
+        .iter()
+        .map(|t| t.to_device(&device))
+        .collect::<inference_tensor::Result<Vec<_>>>()?;
+    fn inputs(t: &[Tensor]) -> super::SelectiveScan<'_> {
+        super::SelectiveScan {
+            x: &t[0],
+            dt: &t[1],
+            a: &t[2],
+            b: &t[3],
+            c: &t[4],
+            d: &t[5],
+            dt_bias: &t[6],
+            dt_min: DT_RANGE[0],
+            dt_max: DT_RANGE[1],
+        }
+    }
+    let mut expected_state = state.clone();
+    let expected = super::selective_scan_cpu(inputs(&host), &mut expected_state)?;
+    let mut gpu_state = state.to_device(&device)?;
+    let y = crate::cuda::ssm::selective_scan_cuda(inputs(&gpu), &mut gpu_state, None)?;
+    for (label, actual, expected) in [
+        ("output", &y, &expected),
+        ("state", &gpu_state, &expected_state),
+    ] {
+        let error = (actual.to_device(&Device::Cpu)? - expected)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        let scale = expected.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert!(
+            error < TOLERANCE * scale,
+            "{label}: max error {error} at scale {scale}"
+        );
     }
     Ok(())
 }

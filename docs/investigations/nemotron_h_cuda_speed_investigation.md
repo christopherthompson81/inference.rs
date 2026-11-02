@@ -261,3 +261,46 @@ sides of a near-tie, most likely in the experts' routing. Not a graph bug; Run 1
 checkpoints, so every run checks the same weights. On them the BF16 graph case differs from one prefill by 0.023, and
 its tolerance goes from 0.5 to 0.1; the other cases: CUDA F32 1.4e-6, CPU quantized 2.4e-7, CPU 4.0e-5, CPU against
 CUDA 4.4e-4. 0 failures in 10 runs of the Nemotron-H and Granite tiny group.
+
+## Run 15 - 2026-11-02 06:05 (local clock; earlier runs' times were approximate)
+
+**Question:** where does prefill trail llama.cpp now (2436-token fresh prompt, `fresh_long.py`, nsys)?
+
+**Profile (ours, one pass):** 0.715 s busy: `mul_mat_q` 462 ms, `ssm_scan_kernel` 110 ms (138 calls, 794 us each:
+one warp per (head, head_dim row) walking ~400 tokens in order), then elementwise (`cast_bf16_f32` 18 ms, `bmul_f32`
+11, `usqr_f32` 10, `ucopy_bf16` 10, `bdiv_f32` 9, `urelu_f32` 7). **llama.cpp** (`llama-bench -fa 1 -p 2436 -n 0
+-r 1 -ub 512` under nsys, halved for its warm-up pass): ~550 ms busy: `mul_mat_q` ~434 ms, and its scan is chunked SSD
+(#22675: per 256-token chunk, cuBLAS for C.B, the intra-chunk output, the state's output and the state update, beside
+three small kernels), ~38 ms.
+
+**Change:** a prompt of 128+ tokens (llama.cpp's crossover; a window costs ~200 us fixed against the scan's ~2 us a
+token) with no pool slots runs the scan as chunked SSD in F32: per sequence, windows of two 256-token chunks (scratch
+~40 MB a chunk at 64 heads); one kernel prepares dt (bias, softplus, clamp, summed within the chunk), x dt and x dt
+decayed to the chunk's end, and B and C by group; cuBLAS C.B for all chunks; a kernel masks and decays it; per chunk,
+cuBLAS the chunk's own outputs (per head) and its state increment (per group, the group's heads side by side); one
+kernel carries the state from chunk to chunk; cuBLAS the carried state's outputs (per group); a kernel adds the two
+outputs, the decay to each position and D x. Unlike llama.cpp's, dt is summed within each chunk (no long-prompt
+cancellation in the decays), every matmul is F32, and the chunk's matmuls run batched rather than chunk by chunk. GPU
+case `cuda_chunked_ssd_scan_matches_the_cpu_scan` (700 tokens, batch 2, 3 heads a group, the dt clamp) within 1e-4 of
+the output's scale.
+
+**Result:** the scan's 110 ms is ~51 ms of SSD (SGEMMs 31, mask 7.6, prepare 6.3, finish 4.8, state 1.8; the prepare
+kernel was 122 us a window until each position's decay was computed once and the group's heads shared the B/C copy).
+Busy 0.665 s. `gpu_fresh.py`: 592 / 530 / 1149 / 2321 / 2345 / 4398 tokens at 2129 / 3442 / 2887 / 3517 / 3740 / 3705
+tok/s (Run 12: 3463-3469 at 2.3-4.4K); decode 200.3 / 200.8. Short-prompt greedy completions identical to Run 10's.
+
+**Long prompts:** 64-token greedy completions after 235 / 1301 / 2852-token prompts against the same build with SSD
+off: first-token logprobs differ by 0.036-0.048, one completion matches in full, two diverge (steps 24 and 2). A
+temporary probe ran both scans on every layer's real inputs: the largest difference in y is 1e-6 to 2e-5 of the
+layer's largest output (A down to -11,076, x up to 62), F32 rounding of two summation orders. The gap is BF16
+rounding of that noise, carried through 52 layers of a 4-bit model (Run 4 saw 0.002-0.035 between two expert matmul
+paths).
+
+**KLD** (the perplexity example's `--kld-base` against the BF16 base `bf16-wiki-c512-ch40.kld`, ik_llama.cpp's
+`llama-perplexity` tokens, 40 chunks of 512, 10,200 positions): SSD on PPL 12.7827, KLD mean 0.07516, median 0.02778,
+p99 0.689, same top-1 88.57 %; SSD off PPL 12.6964, KLD mean 0.07435, median 0.02699, p99 0.629, same top-1 89.02 %
+(base PPL 12.1989). SSD costs ~0.0008 KLD (1 %). Both are 3x llama.cpp's KLD for the same GGUF (0.0250, top-1 93.2 %,
+nemotron_transcribe_investigation.md): our CUDA path loses accuracy somewhere else, before this change.
+
+**Next:** find the 3x KLD gap against llama.cpp (CPU against CUDA first, then per stage); the remaining ~115 ms: `mul_mat_q` (+28 ms against llama.cpp), F16 or TF32 tensor cores for the SSD
+matmuls (~31 ms of SGEMM; llama.cpp runs them in F16), the BF16/F32 casts and the gated RMSNorm's elementwise chain.

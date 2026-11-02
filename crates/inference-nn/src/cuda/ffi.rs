@@ -1358,6 +1358,12 @@ inference_tensor::kernel_library! {
             dt_max: f32,
             stream: i64,
         );
+        // chunked SSD prompt scan, over `cuda::ssm::SsdParams`
+        pub fn ssd_chunk_length() -> i32;
+        pub fn ssd_prepare_cuda(params: *const c_void, stream: i64);
+        pub fn ssd_mask_cuda(params: *const c_void, stream: i64);
+        pub fn ssd_state_pass_cuda(params: *const c_void, stream: i64);
+        pub fn ssd_finish_cuda(params: *const c_void, stream: i64);
 
         // GDN (Gated Delta Net) kernels for qwen3_next
         pub fn gdn_packed_to_padded(
