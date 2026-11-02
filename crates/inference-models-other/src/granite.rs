@@ -1257,8 +1257,10 @@ impl MambaLayer {
             groups_time_state_size,
         )?;
 
-        if pool_slots.is_some() && !hidden_states.device().is_cuda() {
-            inference_tensor::bail!("Only CUDA updates a Mamba recurrent pool in place.");
+        if pool_slots.is_some() && hidden_states.device().is_metal() {
+            inference_tensor::bail!(
+                "Only CUDA and the CPU update a Mamba recurrent pool in place."
+            );
         }
         if hidden_states.device().is_cuda() || hidden_states.device().is_cpu() {
             return self.scan_step([&hidden_states, &b, &c, dt], cache, batch_size, pool_slots);
@@ -1407,6 +1409,8 @@ impl MambaLayer {
         };
         let y = if x.device().is_cuda() {
             crate::cuda::ssm::selective_scan_cuda(scan, &mut ssm_state, pool_slots)?
+        } else if let Some(slots) = pool_slots {
+            crate::ops::selective_scan_cpu_slots(scan, &ssm_state, &slots.to_vec1::<u32>()?)?
         } else {
             crate::ops::selective_scan_cpu(scan, &mut ssm_state)?
         };
@@ -1431,8 +1435,15 @@ impl MambaLayer {
                 .conv_cuda(&hidden_states_b_c.unsqueeze(1)?, cache, true, pool_slots)?
                 .squeeze(1);
         }
-        if pool_slots.is_some() {
-            inference_tensor::bail!("Only CUDA updates a Mamba conv pool in place.");
+        if let Some(slots) = pool_slots {
+            return crate::ops::causal_conv1d_step_cpu_slots(
+                hidden_states_b_c,
+                &self.conv1d_weight.squeeze(1)?,
+                self.conv1d_bias.as_ref(),
+                &cache.conv_state,
+                &slots.to_vec1::<u32>()?,
+            )?
+            .to_dtype(hidden_states_b_c.dtype());
         }
         // Update conv state: roll and insert new values
         // conv_state: (batch, conv_dim, d_conv)
@@ -3009,8 +3020,9 @@ impl GraniteMoeHybrid {
                                 "Hybrid cache layer {layer_idx} is not recurrent for Granite"
                             );
                         };
-                        // a CUDA decode step runs on the pool's rows in place, skipping the gather and scatter
-                        if x.device().is_cuda()
+                        // a CUDA or CPU decode step runs on the pool's rows in place, skipping the gather and scatter
+                        if (x.device().is_cuda()
+                            || (x.device().is_cpu() && x.dtype() == DType::F32))
                             && packed_query_lens.is_none()
                             && matches!(metadata.batch_kind(), RecurrentBatchKind::Decode)
                             && pool.conv_dtype() == x.dtype()
