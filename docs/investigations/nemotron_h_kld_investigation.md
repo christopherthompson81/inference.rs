@@ -63,3 +63,33 @@ softplus), so the floor raised many heads' steps by orders of magnitude.
 The BF16-on-CPU run (`--dtype bf16`) was stopped once this explained the gap. The audio KLD figures so far
 (nemotron_h_cuda_speed Run 4, 0.0049 / 0.0055) were against our own BF16 CPU reference, which had the same floor, so
 they need a new reference before they guide the audio recipe.
+
+## Run 3 - 2026-11-02 08:38 (local clock)
+
+**Question:** the audio-conditioned KLD with a reference made after the dt fix. The old reference (BF16 safetensors on
+the CPU, our engine) had the same prompt floor as the pair it scored.
+
+**Command:** scratch `audio_kld.py ref` (each clip's transcript teacher-forced after the verbatim transcription prompt
+with the clip's audio; the transcript positions' log-softmax saved), 24 synthetic clips (every second of 48), 2801
+positions, then `audio_kld.py cmp` with the GGUF pair (IQ4_NL-down-Q5_0 text, BF16 audio).
+
+**Finding 1, a load failure:** after #772 the safetensors checkpoint did not load: NeMo writes the limit as `[0.0,
+{"__float__": "Infinity"}]` (`text_config` and `llm_backbone/config.json`), which `[f64; 2]` rejects. Reading that
+form was not enough: the loader serializes the config and reads it again, and serde_json writes infinity as `null`. The
+field now reads and writes NeMo's form (unit case round-trips it). GGUF loads were unaffected (no limit key).
+
+**Finding 2, the reference moved little:** old against new reference, KLD 0.00572, top-1 99.61 % (worst clips 0.018 -
+0.025). Transcript positions are mostly confident, so the floor that tripled wikitext's KLD costs audio far less.
+
+**Result:**
+
+| pair against the fixed BF16 reference | mean KLD | same top-1 | transcript NLL (ref / pair) |
+|---|---|---|---|
+| GGUF pair, CUDA, before the fix (Run 4 of the CUDA speed log, old reference) | 0.005451 | 99.536 % | - |
+| GGUF pair, CUDA, fixed | 0.002090 | 99.821 % | 0.0128 / 0.0109 |
+| GGUF pair, CPU, fixed | 0.001866 | 99.857 % | 0.0128 / 0.0125 |
+
+Against the fixed reference the shipped pair's audio KLD is 0.0019 - 0.0021 on both devices, under half the 0.0055
+measured against the floored reference, and its transcript NLL is no worse than BF16's. The audio side of the recipe
+stands (BF16 audio GGUF, IQ4_NL-down-Q5_0 text); the reference (`kld_ref_bf16`, scratch) is what a later audio-tower
+quantization (Q8_0) is measured against.
