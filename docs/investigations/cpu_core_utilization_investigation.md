@@ -117,3 +117,16 @@ expert dots `q5_0_32` 26.2 % and `iq4_nl_32` 22.3 %, `q8_0_tile2_avx2` 14.5 %, f
 the scan 5.2 %.
 
 **Next:** the expert dots (48 %): a token-reusing tile for the 32-value types.
+
+## Run 6 - 2026-11-01 ~19:50
+
+**Question:** do the 32-value expert dots (48 %) gain from decoding each weight block once for several routes, as the
+256-value types' `vec_dot_x4` does?
+
+**Change:** `vec_dot_32_x4` (IQ4_NL, Q4_0, Q5_0, Q8_0): each block decoded to its 32 signed weights once and dotted
+with four routes' activations, every route's sums in the single-row kernel's order (the test checks the four results
+equal the single-row one bit for bit). Each type's single and four-row kernels come from one decoder through a macro.
+The expert kernel's 32-value gate/up and down loops take routes four at a time.
+
+**Result (GGUF pair):** 31.1-34.1 tok/s (was 27.8-29.9). Samples: `q5_0_32_x4` 18.0 %, `iq4_nl_32_x4` 17.3 %, Q8_0
+tiles 16.9 %, f32 gemm 16.0 % (the audio tower), the scan 6.1 %, barrier waits 5.7 %; 9 threads 84 % of wall time.

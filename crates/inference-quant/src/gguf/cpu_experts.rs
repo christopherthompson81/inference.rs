@@ -385,21 +385,35 @@ impl CpuExperts<'_> {
             }
             let x = |r: usize| &q8[routes[r].token * blocks..][..blocks];
             if gate_up_32 {
+                let x32 = |r: usize| &q32[routes[r].token * hidden_32..][..hidden_32];
                 let dot = |p: &CpuExpertProjection, w: &[u8], r: usize| {
                     if p.is_32() {
-                        cpu_dot::vec_dot_32(
-                            p.ty,
-                            w,
-                            &q32[routes[r].token * hidden_32..][..hidden_32],
-                        )
+                        cpu_dot::vec_dot_32(p.ty, w, x32(r))
                     } else {
                         cpu_dot::vec_dot(p.ty, w, x(r))
+                    }
+                };
+                // four routes per pass decode each weight block once for all four
+                let dot4 = |p: &CpuExpertProjection, w: &[u8], quad: &[usize; DOT_TOKENS]| {
+                    if p.is_32() {
+                        cpu_dot::vec_dot_32_x4(p.ty, w, quad.map(x32))
+                    } else {
+                        cpu_dot::vec_dot_x4(p.ty, w, quad.map(x))
                     }
                 };
                 for row in row0..row0 + item_rows {
                     let up_row = self.up.row(expert, row);
                     let gate_row = self.glu().map(|gate| (gate, gate.row(expert, row)));
-                    for &r in group {
+                    let (quads, rest) = group.as_chunks::<DOT_TOKENS>();
+                    for quad in quads {
+                        let gate =
+                            gate_row.map_or([0.0; DOT_TOKENS], |(gate, w)| dot4(gate, w, quad));
+                        let up = dot4(&self.up, up_row, quad);
+                        for (k, &r) in quad.iter().enumerate() {
+                            store(r, row, gate[k], up[k]);
+                        }
+                    }
+                    for &r in rest {
                         let gate = gate_row.map_or(0.0, |(gate, w)| dot(gate, w, r));
                         store(r, row, gate, dot(&self.up, up_row, r));
                     }
@@ -470,11 +484,18 @@ impl CpuExperts<'_> {
                 return;
             }
             if self.down.is_32() {
+                let h = |r: usize| &gated32[r * inter_32..][..inter_32];
                 for row in row0..row0 + item_rows {
                     let down_row = self.down.row(expert, row);
-                    for &r in group {
-                        let h = &gated32[r * inter_32..][..inter_32];
-                        store(r, row, cpu_dot::vec_dot_32(self.down.ty, down_row, h));
+                    let (quads, rest) = group.as_chunks::<DOT_TOKENS>();
+                    for quad in quads {
+                        let ys = cpu_dot::vec_dot_32_x4(self.down.ty, down_row, quad.map(h));
+                        for (k, &r) in quad.iter().enumerate() {
+                            store(r, row, ys[k]);
+                        }
+                    }
+                    for &r in rest {
+                        store(r, row, cpu_dot::vec_dot_32(self.down.ty, down_row, h(r)));
                     }
                 }
                 return;
