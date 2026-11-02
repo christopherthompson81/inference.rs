@@ -247,3 +247,19 @@ memory. Plain index loops instead: 47 GMAC/s in the dev profile too.
 
 **A/B, alternating servers (539-token text prompt, warm runs):** HEAD 59.0-60.5 tok/s, eight-row kernel 66.9-68.8
 tok/s (+13 %). llama.cpp's pp512 on the same file: 70-71.
+
+## Run 13 - 2026-11-01 ~23:40
+
+**Question:** Q4_0 and Q5_0 values fit 0..32 once their offset is added back; does dotting them unsigned pay?
+
+**Change:** for those two the eight-row kernel takes the stored values (nibbles, Q5_0's fifth bit ORed in as 0x10)
+straight into maddubs' unsigned side, no sign ops. Four word positions' pair sums add in i16 (at most 4 x 2 x 31 x 127
+= 31496) before one madd, and each block takes `offset * sum(y)` out in i32, with the sum stored in `Q8Block32` at
+quantize time. Integer sums are the same as the signed path's, so the results are too.
+
+**Kernel (`tile_rate_32`, dev profile):** Q4_0 48.6 -> 68.8 GMAC/s, Q5_0 37.2 -> 50.4. IQ4_NL and Q8_0 keep the sign
+path (their values overflow i16 pairs when offset).
+
+**A/B, alternating servers (539-token text prompt, warm runs):** previous commit 79.0-80.7 tok/s, unsigned 84.8-87.8
+(+8 %). Both ran ~20 % faster than in Run 12, so the machine was slower then (the A/B pairs are what compare).
+llama.cpp's pp512 measured right after: 72.0 +- 0.4 tok/s.

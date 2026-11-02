@@ -86,12 +86,15 @@ pub(crate) fn supports_32(ty: GgufType) -> bool {
 #[derive(Clone, Copy)]
 pub(crate) struct Q8Block32 {
     d: f32,
+    // the sum of `qs`, for kernels that dot unsigned weights and take their offset back out
+    sum: i32,
     qs: [i8; QK32],
 }
 
 impl Q8Block32 {
     pub(crate) const ZERO: Self = Self {
         d: 0.0,
+        sum: 0,
         qs: [0; QK32],
     };
 
@@ -106,6 +109,7 @@ impl Q8Block32 {
                 // within [-127, 127] by the scale's choice
                 *q = (v * id).round() as i8;
             }
+            y.sum = y.qs.iter().map(|&q| i32::from(q)).sum();
         }
     }
 }
@@ -489,8 +493,8 @@ mod avx2 {
     use super::{
         BLOCK32_QS, IQ3_S_BYTES, IQ3_S_QH, IQ3_S_QS, IQ3_S_SCALES, IQ3_S_SIGNS, IQ3S_GRID,
         IQ4_KSS_BYTES, IQ4_KSS_ROW_SCALE, IQ4_KSS_SHIFT, IQ4_NL_BYTES, IQ4_XS_BYTES, IQ4_XS_QS,
-        KVALUES_IQ4NL, PREFETCH_AHEAD, Q4_0_BYTES, Q4_0_OFFSET, Q5_0_BYTES, Q5_0_QH, Q5_0_QS,
-        Q8_0_BYTES, Q8Block32, TileRow, f16_at, iq4_xs_sub_scale, row_scale,
+        KVALUES_IQ4NL, PREFETCH_AHEAD, Q4_0_BYTES, Q4_0_OFFSET, Q5_0_BYTES, Q5_0_OFFSET, Q5_0_QH,
+        Q5_0_QS, Q8_0_BYTES, Q8Block32, TileRow, f16_at, iq4_xs_sub_scale, row_scale,
     };
 
     // byte b of each 32-bit sign word spread over lanes 8b..8b+8, then each lane's bit
@@ -712,15 +716,13 @@ mod avx2 {
     #[inline]
     #[target_feature(enable = "avx2,fma")]
     fn pair_q4_0(a: &[u8; Q4_0_BYTES], b: &[u8; Q4_0_BYTES]) -> [__m256i; 2] {
-        let offset = _mm256_set1_epi8(Q4_0_OFFSET as i8);
-        let [lo, hi] = nibble_pair(&a[BLOCK32_QS..], &b[BLOCK32_QS..]);
-        [_mm256_sub_epi8(lo, offset), _mm256_sub_epi8(hi, offset)]
+        nibble_pair(&a[BLOCK32_QS..], &b[BLOCK32_QS..])
     }
 
     #[inline]
     #[target_feature(enable = "avx2,fma")]
     fn pair_q5_0(a: &[u8; Q5_0_BYTES], b: &[u8; Q5_0_BYTES]) -> [__m256i; 2] {
-        split_pair(decode_q5_0(a), decode_q5_0(b))
+        split_pair(decode_q5_0_unsigned(a), decode_q5_0_unsigned(b))
     }
 
     #[inline]
@@ -729,11 +731,12 @@ mod avx2 {
         split_pair(decode_q8_0(a), decode_q8_0(b))
     }
 
-    // eight rows by four activation rows: rows i and i + 4 decode as one pair, and the transposes leave each row's
+    // eight rows by four activation rows, the pairs' values signed or, for a nonzero `OFFSET`, unsigned and that much
+    // above the weights: rows i and i + 4 decode as one pair, and the transposes leave each row's
     // four values of every word position in its own lane, so lane i of each token's accumulator is row i's sum
     #[inline]
     #[target_feature(enable = "avx2,fma,f16c")]
-    fn sum_blocks_32_8x4<const N: usize>(
+    fn sum_blocks_32_8x4<const N: usize, const OFFSET: i32>(
         rows: [&[u8]; 8],
         ys: [&[Q8Block32]; 4],
         pair: impl Fn(&[u8; N], &[u8; N]) -> [__m256i; 2],
@@ -774,12 +777,26 @@ mod avx2 {
                 let mut sum = _mm256_setzero_si256();
                 for h in 0..2 {
                     let y = words(halves[h]);
-                    for k in 0..4 {
-                        let w = w[h][k];
-                        let p16 =
-                            _mm256_maddubs_epi16(_mm256_sign_epi8(w, w), _mm256_sign_epi8(y[k], w));
+                    if OFFSET == 0 {
+                        for k in 0..4 {
+                            let w = w[h][k];
+                            let p16 = _mm256_maddubs_epi16(
+                                _mm256_sign_epi8(w, w),
+                                _mm256_sign_epi8(y[k], w),
+                            );
+                            sum = _mm256_add_epi32(sum, _mm256_madd_epi16(p16, ones));
+                        }
+                    } else {
+                        // weights below 32 against |y| <= 127: four pair sums stay within i16
+                        let mut p16 = _mm256_maddubs_epi16(w[h][0], y[0]);
+                        for k in 1..4 {
+                            p16 = _mm256_add_epi16(p16, _mm256_maddubs_epi16(w[h][k], y[k]));
+                        }
                         sum = _mm256_add_epi32(sum, _mm256_madd_epi16(p16, ones));
                     }
+                }
+                if OFFSET != 0 {
+                    sum = _mm256_sub_epi32(sum, _mm256_set1_epi32(OFFSET * y.sum));
                 }
                 let d = _mm256_mul_ps(dw, _mm256_set1_ps(y.d));
                 acc[t] = _mm256_fmadd_ps(_mm256_cvtepi32_ps(sum), d, acc[t]);
@@ -828,6 +845,17 @@ mod avx2 {
     #[inline]
     #[target_feature(enable = "avx2,fma")]
     fn decode_q5_0(block: &[u8; Q5_0_BYTES]) -> __m256i {
+        // a clear fifth bit makes the value 16 below its nibble: 0xf0 ORed in is that in two's complement
+        _mm256_or_si256(
+            nibbles_32(&block[Q5_0_QS..]),
+            _mm256_andnot_si256(q5_0_fifth_bits(block), _mm256_set1_epi8(0xf0u8 as i8)),
+        )
+    }
+
+    // 0xff in each byte whose value has its fifth bit set
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    fn q5_0_fifth_bits(block: &[u8; Q5_0_BYTES]) -> __m256i {
         // byte i of the broadcast mask picks the byte of `qh` holding bit i, the OR leaves 0xff where the bit is set
         let pick = _mm256_set_epi64x(
             0x0303_0303_0303_0303,
@@ -842,14 +870,19 @@ mod avx2 {
             block[Q5_0_QH + 2],
             block[Q5_0_QH + 3],
         ]);
-        let set = _mm256_cmpeq_epi8(
+        _mm256_cmpeq_epi8(
             _mm256_or_si256(_mm256_shuffle_epi8(_mm256_set1_epi32(qh), pick), others),
             _mm256_set1_epi64x(-1),
-        );
-        // a clear fifth bit makes the value 16 below its nibble: 0xf0 ORed in is that in two's complement
+        )
+    }
+
+    // the block's values plus `Q5_0_OFFSET`, 0..32
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    fn decode_q5_0_unsigned(block: &[u8; Q5_0_BYTES]) -> __m256i {
         _mm256_or_si256(
             nibbles_32(&block[Q5_0_QS..]),
-            _mm256_andnot_si256(set, _mm256_set1_epi8(0xf0u8 as i8)),
+            _mm256_and_si256(q5_0_fifth_bits(block), _mm256_set1_epi8(0x10)),
         )
     }
 
@@ -861,10 +894,10 @@ mod avx2 {
 
     // each 32-value type's one-row and four-row kernels over its decoder
     macro_rules! kernels_32 {
-        ($($single:ident, $quad:ident, $wide:ident, $bytes:ident, $decode:ident, $pair:ident;)*) => {$(
+        ($($single:ident, $quad:ident, $wide:ident, $bytes:ident, $decode:ident, $pair:ident, $offset:expr;)*) => {$(
             #[target_feature(enable = "avx2,fma,f16c")]
             pub(super) fn $wide(rows: [&[u8]; 8], ys: [&[Q8Block32]; 4]) -> [[f32; 8]; 4] {
-                sum_blocks_32_8x4::<$bytes>(rows, ys, |a, b| $pair(a, b))
+                sum_blocks_32_8x4::<$bytes, { $offset }>(rows, ys, |a, b| $pair(a, b))
             }
 
             #[target_feature(enable = "avx2,fma,f16c")]
@@ -880,10 +913,10 @@ mod avx2 {
     }
 
     kernels_32! {
-        iq4_nl_32, iq4_nl_32_x4, iq4_nl_32_8x4, IQ4_NL_BYTES, decode_iq4_nl, pair_iq4_nl;
-        q4_0_32, q4_0_32_x4, q4_0_32_8x4, Q4_0_BYTES, decode_q4_0, pair_q4_0;
-        q5_0_32, q5_0_32_x4, q5_0_32_8x4, Q5_0_BYTES, decode_q5_0, pair_q5_0;
-        q8_0_32, q8_0_32_x4, q8_0_32_8x4, Q8_0_BYTES, decode_q8_0, pair_q8_0;
+        iq4_nl_32, iq4_nl_32_x4, iq4_nl_32_8x4, IQ4_NL_BYTES, decode_iq4_nl, pair_iq4_nl, 0;
+        q4_0_32, q4_0_32_x4, q4_0_32_8x4, Q4_0_BYTES, decode_q4_0, pair_q4_0, Q4_0_OFFSET;
+        q5_0_32, q5_0_32_x4, q5_0_32_8x4, Q5_0_BYTES, decode_q5_0, pair_q5_0, Q5_0_OFFSET;
+        q8_0_32, q8_0_32_x4, q8_0_32_8x4, Q8_0_BYTES, decode_q8_0, pair_q8_0, 0;
     }
 
     // the IQ4_NL codebook in both lanes, and each u16 code's place in its sub-block's scale code
