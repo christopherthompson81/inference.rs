@@ -43,6 +43,17 @@ fn normalize_per_feature(features: &[f32], frames: usize, mels: usize) -> Vec<f3
     out
 }
 
+/// A 16 kHz mono clip's log-mel, as the model reads it.
+pub fn audio_clip(mel: &NemoMel, pcm: &[f32]) -> anyhow::Result<AudioClip> {
+    let (raw, frames) = mel.features(pcm)?;
+    let normalized = normalize_per_feature(&raw, frames, mel.config().n_mels);
+    Ok(AudioClip {
+        raw,
+        normalized,
+        frames,
+    })
+}
+
 pub struct NemotronTranscribeInputsProcessor {
     mel: NemoMel,
     subsampling: usize,
@@ -84,13 +95,7 @@ impl NemotronTranscribeInputsProcessor {
     }
 
     fn clip(&self, pcm: &[f32]) -> anyhow::Result<AudioClip> {
-        let (raw, frames) = self.mel.features(pcm)?;
-        let normalized = normalize_per_feature(&raw, frames, self.mel.config().n_mels);
-        Ok(AudioClip {
-            raw,
-            normalized,
-            frames,
-        })
+        audio_clip(&self.mel, pcm)
     }
 }
 

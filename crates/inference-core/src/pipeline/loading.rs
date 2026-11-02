@@ -1650,6 +1650,7 @@ mod tests {
             processor_config: None,
             chat_template_json_filename: None,
             companion_config: None,
+            alignment_tokenizer: None,
         }
     }
 

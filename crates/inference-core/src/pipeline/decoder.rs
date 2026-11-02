@@ -1140,6 +1140,18 @@ impl Pipeline for DecoderPipeline {
         }
     }
 
+    fn word_timestamps(
+        &self,
+        audio: &inference_audio::AudioInput,
+        transcript: &str,
+        language: Option<&str>,
+    ) -> anyhow::Result<Option<Vec<inference_nn::loaders::AlignedWord>>> {
+        match &self.model {
+            DecoderModel::Text(_) => Ok(None),
+            DecoderModel::Multimodal(model) => model.word_timestamps(audio, transcript, language),
+        }
+    }
+
     fn joint_decision(
         &self,
         hidden: &Tensor,

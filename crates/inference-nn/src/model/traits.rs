@@ -120,6 +120,15 @@ pub trait MultimodalModel:
     ) -> inference_tensor::Result<Vec<f32>> {
         inference_tensor::bail!("this model has no joint decision head")
     }
+    /// `transcript`'s words timed on `audio` by the model's alignment head; `None` without one.
+    fn word_timestamps(
+        &self,
+        _audio: &inference_audio::AudioInput,
+        _transcript: &str,
+        _language: Option<&str>,
+    ) -> anyhow::Result<Option<Vec<crate::loaders::AlignedWord>>> {
+        Ok(None)
+    }
     /// As `NormalModel::token_window`.
     fn token_window(&self) -> Option<usize> {
         None

@@ -259,6 +259,14 @@ impl Engine {
                     .map_err(anyhow::Error::from);
                 let _ = req.response.send(scores).await;
             }
+            Request::WordTimestamps(req) => {
+                let words = get_mut_arcmutex!(self.pipeline).word_timestamps(
+                    &req.audio,
+                    &req.transcript,
+                    req.language.as_deref(),
+                );
+                let _ = req.response.send(words).await;
+            }
             Request::Terminate => (),
             Request::TerminateAllSeqsNextStep => {
                 TERMINATE_ALL_NEXT_STEP.store(true, Ordering::SeqCst)

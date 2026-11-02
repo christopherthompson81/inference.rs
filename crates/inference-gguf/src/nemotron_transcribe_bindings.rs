@@ -20,6 +20,10 @@ pub const CONFIG_KEY: &str = "nemotron_transcribe.config";
 pub const CHAT_TEMPLATE_KEY: &str = "nemotron_transcribe.chat_template";
 /// The checkpoint tensors the audio GGUF holds: the speech encoder, speaker branch, preprocessor and projector.
 pub const AUDIO_PREFIX: &str = "perception.";
+/// The word timestamp head's tensors, which the audio GGUF holds too.
+pub const WORD_TIMESTAMP_PREFIX: &str = "ctc_timestamp.decoder.";
+// the head's scalars, which its config states
+const WORD_TIMESTAMP_SCALARS: [&str; 2] = ["residual_scale", "upsample_factor"];
 const AUDIO_TOKEN: &str = "<|audio|>";
 
 // Nemotron-H's transformers names to the transcription model's (NeMo's ends, under `llm.`)
@@ -57,7 +61,7 @@ pub fn build_nemotron_transcribe_bindings(archive: &GgufArchive) -> Result<GgufB
         bindings.insert(renamed, binding.clone());
     }
     for name in archive.tensors().keys() {
-        if name.starts_with(AUDIO_PREFIX) {
+        if is_audio_tensor(name) {
             bindings.insert(name.clone(), GgufTensorBinding::tensor(name.clone()));
         }
     }
@@ -74,11 +78,28 @@ pub fn nemotron_transcribe_config(archive: &GgufArchive) -> Result<String> {
         .with_context(|| format!("Nemotron Transcribe audio GGUF has no `{CONFIG_KEY}`"))
 }
 
-/// The audio GGUF beside a `nemotron_h_moe` text GGUF, from NVIDIA's checkpoint directory: its `perception.*` tensors
-/// as they are and its `config.json`. Returns the number of tensors written.
+fn is_audio_tensor(name: &str) -> bool {
+    name.starts_with(AUDIO_PREFIX)
+        || name
+            .strip_prefix(WORD_TIMESTAMP_PREFIX)
+            .is_some_and(|rest| !WORD_TIMESTAMP_SCALARS.contains(&rest))
+}
+
+/// The audio GGUF beside a `nemotron_h_moe` text GGUF, from NVIDIA's checkpoint directory: its `perception.*` and word
+/// timestamp head tensors as they are, and its `config.json` with the alignment tokenizer inside. Returns the number of
+/// tensors written.
 pub fn write_nemotron_transcribe_audio_gguf(checkpoint: &Path, out: &Path) -> Result<usize> {
     let config = std::fs::read_to_string(checkpoint.join(CHECKPOINT_CONFIG))
         .with_context(|| format!("reading {}", checkpoint.join(CHECKPOINT_CONFIG).display()))?;
+    let alignment = checkpoint.join(inference_nn::loaders::ALIGNMENT_TOKENIZER_FILE);
+    let config = if alignment.is_file() {
+        inference_nn::loaders::with_alignment_tokenizer(
+            &config,
+            &std::fs::read_to_string(&alignment)?,
+        )?
+    } else {
+        config
+    };
     let template = std::fs::read_to_string(checkpoint.join(CHECKPOINT_TEMPLATE))
         .with_context(|| format!("reading {}", checkpoint.join(CHECKPOINT_TEMPLATE).display()))?;
     let values = [
@@ -98,7 +119,7 @@ pub fn write_nemotron_transcribe_audio_gguf(checkpoint: &Path, out: &Path) -> Re
     let written = inference_quant::requantize::write_safetensors_gguf(
         &checkpoint.join(CHECKPOINT_WEIGHTS),
         out,
-        |name| name.starts_with(AUDIO_PREFIX),
+        is_audio_tensor,
         &metadata,
     )?;
     if written == 0 {

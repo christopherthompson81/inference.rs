@@ -1741,6 +1741,7 @@ impl GGUFLoader {
             processor_config,
             chat_template_json_filename: paths.get_chat_template_explicit().clone(),
             companion_config: None,
+            alignment_tokenizer: None,
         }))
     }
 }

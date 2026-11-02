@@ -1543,6 +1543,7 @@ mod tests {
             processor_config: None,
             chat_template_json_filename: None,
             companion_config: None,
+            alignment_tokenizer: None,
         };
         let reloaded = get_chat_template(&paths, None, None, None, None);
         assert_eq!(

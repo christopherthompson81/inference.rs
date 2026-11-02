@@ -965,6 +965,7 @@ impl Engine {
             Request::Tokenize(_)
             | Request::Detokenize(_)
             | Request::JointDecision(_)
+            | Request::WordTimestamps(_)
             | Request::TerminateAllSeqsNextStep => admission::AdmissionClass::BypassControl,
             Request::Terminate => admission::AdmissionClass::Shutdown,
             Request::ReIsq(_) | Request::Calibration(_) => {
