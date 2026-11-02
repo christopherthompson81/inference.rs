@@ -151,6 +151,22 @@ pub(crate) fn vec_dot_32_8x4(
     ys.map(|y| rows.map(|row| vec_dot_32(ty, row, y)))
 }
 
+/// [`vec_dot_32_8x4`] for one activation row, as a decode step's single route per expert is.
+pub(crate) fn vec_dot_32_8x1(ty: GgufType, rows: [&[u8]; 8], y: &[Q8Block32]) -> [f32; 8] {
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2_fma() {
+        match ty {
+            // SAFETY: AVX2 and FMA were detected above
+            GgufType::Iq4Nl => return unsafe { avx2::iq4_nl_32_8x1(rows, y) },
+            GgufType::Q4_0 => return unsafe { avx2::q4_0_32_8x1(rows, y) },
+            GgufType::Q5_0 => return unsafe { avx2::q5_0_32_8x1(rows, y) },
+            GgufType::Q8_0 => return unsafe { avx2::q8_0_32_8x1(rows, y) },
+            _ => {}
+        }
+    }
+    rows.map(|row| vec_dot_32(ty, row, y))
+}
+
 /// `row` holds `ys.len()` blocks of a 32-wide `ty`.
 pub(crate) fn vec_dot_32(ty: GgufType, row: &[u8], ys: &[Q8Block32]) -> f32 {
     #[cfg(target_arch = "x86_64")]
@@ -731,20 +747,20 @@ mod avx2 {
         split_pair(decode_q8_0(a), decode_q8_0(b))
     }
 
-    // eight rows by four activation rows, the pairs' values signed or, for a nonzero `OFFSET`, unsigned and that much
+    // eight rows by `T` activation rows, the pairs' values signed or, for a nonzero `OFFSET`, unsigned and that much
     // above the weights: rows i and i + 4 decode as one pair, and the transposes leave each row's
     // four values of every word position in its own lane, so lane i of each token's accumulator is row i's sum
     #[inline]
     #[target_feature(enable = "avx2,fma,f16c")]
-    fn sum_blocks_32_8x4<const N: usize, const OFFSET: i32>(
+    fn sum_blocks_32_8xt<const N: usize, const OFFSET: i32, const T: usize>(
         rows: [&[u8]; 8],
-        ys: [&[Q8Block32]; 4],
+        ys: [&[Q8Block32]; T],
         pair: impl Fn(&[u8; N], &[u8; N]) -> [__m256i; 2],
-    ) -> [[f32; 8]; 4] {
+    ) -> [[f32; 8]; T] {
         let n = ys[0].len();
         let blocks = rows.map(|row| &row.as_chunks::<N>().0[..n]);
         let ones = _mm256_set1_epi16(1);
-        let mut acc = [_mm256_setzero_ps(); 4];
+        let mut acc = [_mm256_setzero_ps(); T];
         for l in 0..n {
             let (mut lo, mut hi) = ([_mm256_setzero_si256(); 4], [_mm256_setzero_si256(); 4]);
             for i in 0..4 {
@@ -802,8 +818,8 @@ mod avx2 {
                 acc[t] = _mm256_fmadd_ps(_mm256_cvtepi32_ps(sum), d, acc[t]);
             }
         }
-        let mut out = [[0f32; 8]; 4];
-        for t in 0..4 {
+        let mut out = [[0f32; 8]; T];
+        for t in 0..T {
             // SAFETY: a row of `out` holds eight floats
             unsafe { _mm256_storeu_ps(out[t].as_mut_ptr(), acc[t]) };
         }
@@ -894,10 +910,15 @@ mod avx2 {
 
     // each 32-value type's one-row and four-row kernels over its decoder
     macro_rules! kernels_32 {
-        ($($single:ident, $quad:ident, $wide:ident, $bytes:ident, $decode:ident, $pair:ident, $offset:expr;)*) => {$(
+        ($($single:ident, $quad:ident, $wide:ident, $tall:ident, $bytes:ident, $decode:ident, $pair:ident, $offset:expr;)*) => {$(
             #[target_feature(enable = "avx2,fma,f16c")]
             pub(super) fn $wide(rows: [&[u8]; 8], ys: [&[Q8Block32]; 4]) -> [[f32; 8]; 4] {
-                sum_blocks_32_8x4::<$bytes, { $offset }>(rows, ys, |a, b| $pair(a, b))
+                sum_blocks_32_8xt::<$bytes, { $offset }, 4>(rows, ys, |a, b| $pair(a, b))
+            }
+
+            #[target_feature(enable = "avx2,fma,f16c")]
+            pub(super) fn $tall(rows: [&[u8]; 8], y: &[Q8Block32]) -> [f32; 8] {
+                sum_blocks_32_8xt::<$bytes, { $offset }, 1>(rows, [y], |a, b| $pair(a, b))[0]
             }
 
             #[target_feature(enable = "avx2,fma,f16c")]
@@ -913,10 +934,10 @@ mod avx2 {
     }
 
     kernels_32! {
-        iq4_nl_32, iq4_nl_32_x4, iq4_nl_32_8x4, IQ4_NL_BYTES, decode_iq4_nl, pair_iq4_nl, 0;
-        q4_0_32, q4_0_32_x4, q4_0_32_8x4, Q4_0_BYTES, decode_q4_0, pair_q4_0, Q4_0_OFFSET;
-        q5_0_32, q5_0_32_x4, q5_0_32_8x4, Q5_0_BYTES, decode_q5_0, pair_q5_0, Q5_0_OFFSET;
-        q8_0_32, q8_0_32_x4, q8_0_32_8x4, Q8_0_BYTES, decode_q8_0, pair_q8_0, 0;
+        iq4_nl_32, iq4_nl_32_x4, iq4_nl_32_8x4, iq4_nl_32_8x1, IQ4_NL_BYTES, decode_iq4_nl, pair_iq4_nl, 0;
+        q4_0_32, q4_0_32_x4, q4_0_32_8x4, q4_0_32_8x1, Q4_0_BYTES, decode_q4_0, pair_q4_0, Q4_0_OFFSET;
+        q5_0_32, q5_0_32_x4, q5_0_32_8x4, q5_0_32_8x1, Q5_0_BYTES, decode_q5_0, pair_q5_0, Q5_0_OFFSET;
+        q8_0_32, q8_0_32_x4, q8_0_32_8x4, q8_0_32_8x1, Q8_0_BYTES, decode_q8_0, pair_q8_0, 0;
     }
 
     // the IQ4_NL codebook in both lanes, and each u16 code's place in its sub-block's scale code
@@ -1559,6 +1580,13 @@ mod tests {
                     .collect();
                 let rows: [&[u8]; 8] = std::array::from_fn(|i| &wide_rows[i][..n * block_bytes]);
                 let wide = vec_dot_32_8x4(ty, rows, [&ys[..n]; 4]);
+                // one activation row scores as the four-row tile's lanes do, bit for bit
+                let tall = vec_dot_32_8x1(ty, rows, &ys[..n]);
+                assert_eq!(
+                    tall.map(f32::to_bits),
+                    wide[0].map(f32::to_bits),
+                    "{ty:?} {n} blocks"
+                );
                 for (i, row) in rows.iter().enumerate() {
                     let one = vec_dot_32(ty, row, &ys[..n]);
                     for got in wide.map(|t| t[i]) {

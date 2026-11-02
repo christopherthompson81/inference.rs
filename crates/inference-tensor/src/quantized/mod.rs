@@ -1345,6 +1345,7 @@ mod cpu_matmul_tests {
         const N: usize = 32;
         const OUTLIER_EVERY: usize = 64;
         const OUTLIER: f32 = 60.0;
+        const TERM_TOLERANCE: f32 = 1e-6;
         let dev = Device::Cpu;
         let w = Tensor::randn(0f32, 1., (N, k), &dev)?;
         let qmm = QMatMul::from_qtensor(QTensor::quantize(&w, GgmlDType::Q8_0)?)?;
@@ -1369,8 +1370,10 @@ mod cpu_matmul_tests {
                 for (c, w_row) in w_rows.iter().enumerate() {
                     let expected = BlockQ8_0::vec_dot(k, &rows(w_row), &a);
                     let got = actual[r][c];
-                    // the same integer products, summed in another order
-                    let tolerance = 1e-4 * expected.abs().max(1.0);
+                    // the same integer products, summed in another order: the rounding scales with the terms, not
+                    // with a sum the outliers can cancel to near zero
+                    let terms: f32 = row.iter().zip(w_row).map(|(x, w)| (x * w).abs()).sum();
+                    let tolerance = TERM_TOLERANCE * terms.max(1.0);
                     assert!(
                         (got - expected).abs() <= tolerance,
                         "k={k} m={m} [{r}][{c}]: {got} against ggml's {expected}"
