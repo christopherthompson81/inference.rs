@@ -1354,14 +1354,20 @@ impl Sampler {
     }
 
     fn sample_argmax(&self, logits: Tensor, return_logprobs: bool) -> Result<Logprobs> {
-        let next_token = argmax_f32(&logits.to_vec1::<f32>()?)?;
-        let probs = inference_tensor::nn::ops::softmax_last_dim(&logits)?.to_vec1::<f32>()?;
-        let logprob = probs[next_token as usize].ln();
-
-        let top_logprobs = if return_logprobs {
-            Some(self.get_top_logprobs(&probs)?)
+        let values = logits.to_vec1::<f32>()?;
+        let next_token = argmax_f32(&values)?;
+        let (logprob, top_logprobs) = if return_logprobs || !logits.device().is_cpu() {
+            let probs = inference_tensor::nn::ops::softmax_last_dim(&logits)?.to_vec1::<f32>()?;
+            let top = return_logprobs
+                .then(|| self.get_top_logprobs(&probs))
+                .transpose()?;
+            (probs[next_token as usize].ln(), top)
         } else {
-            None
+            // on the CPU one pass replaces the softmax: the argmax is the max, so its log-softmax is minus the log of
+            // the shifted exponentials' sum
+            let max = values[next_token as usize];
+            let sum: f32 = values.iter().map(|&v| (v - max).exp()).sum();
+            (-sum.ln(), None)
         };
 
         let bytes = if let Some(tokenizer) = &self.tokenizer {
@@ -2537,6 +2543,15 @@ mod tests {
             .find(|top| top.token == 1)
             .unwrap();
         assert!((selected.logprob - expected).abs() < 1e-6);
+        // without top logprobs the chosen token's logprob comes from one pass, not the softmax
+        let logits = Tensor::from_vec(vec![-3.0f32, -1.0, -2.0], 3, &Device::Cpu).unwrap();
+        let rng = Arc::new(Mutex::new(Isaac64Rng::seed_from_u64(42)));
+        let res = sampler
+            .sample(logits, &[0, 1, 2], 0, false, rng, false, false)
+            .unwrap();
+        assert_eq!(res.token, 1);
+        assert!(res.top_logprobs.is_none());
+        assert!((res.logprob - expected).abs() < 1e-6);
     }
 
     #[test]

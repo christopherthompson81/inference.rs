@@ -345,3 +345,35 @@ branch 8.3 / 8.4 / 8.3 / 8.2 (+6 %). Experts 25 -> 21 % of samples (~33 GB/s); g
 #776's. Per ~122 ms token now: Q8_0 ~63 ms (~31.5 GB/s), experts ~26 ms, the pool's spin 18 % (~22 ms, the small
 ops between matmuls). With both kernel families near the machine's bandwidth, the gap to llama.cpp (9.73 tok/s,
 ~103 ms) is that serial time.
+
+## Run 18 - 2026-11-02 12:21 (local clock)
+
+**Question:** what are the ~22 ms of small ops a CPU decode token spends between its matmuls while the pool spins?
+
+**Commands:** `perf record --call-graph lbr` over `bench/decode.py`, the dispatching thread's samples dumped with
+`perf script`; scratch `cpudec/attribute.py` charges each sample outside the big kernels to its nearest model-level
+frame.
+
+**Finding (master `ad63161bb`):** 22.1 % of the dispatching thread's samples are outside the kernels: the recurrent
+pool's gather and scatter around every Mamba decode step (`memmove` / `memset` under `forward_embeds`, 4.7 %: each
+layer's 2 MB state copied out of the pool and back, as CUDA no longer does), the scan's own state copy (`scan_step`,
+1.8 %), the experts' glue, the router's F32 GEMV, the projections' activation quantization, the sampler's softmax.
+
+**Changes:**
+- A CPU decode step runs on the pool's rows in place, as a CUDA one does: `selective_scan_cpu_slots` advances each
+  batch row's pool row by slot, `causal_conv1d_step_cpu_slots` shifts each slot's conv window and returns
+  `silu(window . weight + bias)`, a slot past `i32::MAX` a padding row that leaves the pool and scores 0 (f32 pools;
+  the CPU's BF16 activations keep the gather). Unit cases: three pool rows, slots `[2, padding, 0]`, against the plain
+  scan and conv on the gathered rows.
+- The conv step splits its channels across the pool's threads (as one serial pass it was 2.7 % of the thread).
+- The greedy sampler on CPU logits takes the chosen token's logprob from one pass (`-ln sum exp(l - max)`, the argmax
+  being the max) instead of a softmax over the vocabulary, unless top logprobs are asked for.
+
+**Result:** alternating servers, two runs each: master 8.0 / 8.3 / 8.2 / 8.2 tok/s, branch 9.3 / 8.8 / 9.1 / 9.1 (+11 %;
+the pool path alone 8.7-9.2); llama.cpp tg128 9.78 +- 0.08 in the same session, ~8 % ahead. Non-kernel samples on the
+dispatching thread 22.1 -> 13.0 %, the pool's spin 18 -> 12.7 %. Greedy completions (with logprobs) identical to
+master's, tokens and logprobs.
+
+**Left (each under 1 % of the thread):** the router's F32 GEMV (`dot_f32`, 0.8 %), the experts' and projections'
+activation quantization on the dispatching thread (~1.4 %), barrier waits at the end of parallel sections (~1.8 %),
+the gated norm's tensor ops (~0.6 %).
