@@ -291,3 +291,39 @@ llama-bench -m <text gguf> -p 0 -n 128 -t 8 -ngl 0`.
 **Result:** ours 7.7 / 7.7 tok/s, llama.cpp tg128 10.71 +- 0.04. Decode is memory-bound: ~3.5B active parameters at
 ~4.5-5 bits plus the Q8_0 dense parts is ~2-2.5 GB a token against ~40 GB/s of dual-channel DDR4, a ceiling near
 16-20 tok/s. We are 28 % behind llama.cpp here, the opposite of prefill. Not yet profiled.
+
+## Run 16 - 2026-11-02 11:06 (local clock)
+
+**Question:** where does CPU decode lose to llama.cpp (Run 15: 7.7 against 10.71 tok/s)?
+
+**Commands:** `serve --cpu` on the text GGUF, scratch `bench/decode.py` (128 tokens, `ignore_eos`) under `perf record`
+(then `--call-graph lbr`, since the build has no frame pointers); the GGUF's tensor sizes from `gguf-py`.
+
+**Budget:** a token reads ~1.99 GB of dense Q8_0 (`ssm_in` 677 MB, `output` 374, `ssm_out` 269, the shared expert
+488, attention 148) and ~0.86 GB of routed experts (6 of 128: Q5_0 down, IQ4_NL up), ~2.85 GB. llama.cpp's 10.7 tok/s
+is ~30.5 GB/s; ours at 7.1 is ~20 GB/s.
+
+**Profile (master `56ef9b6c8`, 7.1 tok/s):** `vec_dot_q8_0_q8_0` 46.8 %, barrier-pool spin 15.2 %, `q5_0_32_8x4`
+11.3 %, `iq4_nl_32_8x4` 10.8 %, then `binary_map_vec_par<Mul>` 2.8 %, `expf` 2.2 %, `vec_mul` 1.9 %, `vec_add` 1.9 %:
+on the CPU a decode step ran the Mamba update as tensor ops over `(batch, 64, 64, 128)` (dA = exp(dt A) over 524K
+values, dB, dB x, state * dA + dB x, the matmul with C), each a pass over the 2 MB state per layer. CUDA decode steps
+already run the scan kernel as a one-token chunk.
+
+**Change:** a CPU decode step runs `selective_scan_cpu` as a one-token chunk, the same call the CUDA step makes
+(`scan_step`, B and C by group); the tensor-op step stays for devices with neither kernel.
+
+**Result:** alternating master and branch servers, two runs each: master 7.0 / 7.2 / 7.2 / 7.2 tok/s, branch 8.3 /
+7.9 / 8.0 / 8.1 (+13 %). The elementwise ops leave the profile. Greedy 200-token CPU completions against master: one
+identical, two diverge at tokens 49 and 50, logprobs within 0.10 before (F32 summation order). llama.cpp in the same
+session: tg128 9.73 +- 0.09 (Run 15's 10.71 was another day's machine state), so the gap is now ~20 %.
+
+**Negative results:**
+- Advancing the CPU scan's state in place (an `InplaceOp1`, as the CUDA scan writes its state) instead of copying the
+  2 MB out and back: no measurable change (7.9-8.3). The remaining `memmove` (~0.5 %) is the recurrent pool's gather
+  and scatter (`RecurrentStatePool::{gather,scatter}_recurrent_state`), not the scan.
+- An AVX2 four-row Q8_0 dot (each activation block loaded once, four accumulators): 7.6-8.1, no change; the Q8_0
+  GEMV runs at ~29 GB/s and is memory-bound.
+
+**What is left (perf, LBR stacks):** per 125 ms token, the Q8_0 matmuls ~69 ms (~29 GB/s), the routed experts ~37 ms
+(~23 GB/s), and ~19 ms of small ops spread through the layers while the pool spins (16.5 %). The experts' bandwidth
+is the larger lever.
