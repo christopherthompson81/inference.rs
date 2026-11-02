@@ -37,6 +37,41 @@ serde_default_fn!(usize, default_one, 1);
 serde_default_fn!(f64, default_norm_eps, 1e-5);
 serde_default_fn!(usize, default_max_position_embeddings, 4096);
 
+// NeMo-exported configs write non-finite floats as `{"__float__": "Infinity"}`; serde_json would write `null`
+mod float_pair {
+    use serde::{Deserialize, Serialize, de::Error};
+    use serde_json::{Value, json};
+
+    const ENCODED: &str = "__float__";
+
+    pub fn serialize<S: serde::Serializer>(
+        pair: &Option<[f64; 2]>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let encode = |x: f64| match x.is_finite() {
+            true => json!(x),
+            false if x.is_nan() => json!({ ENCODED: "NaN" }),
+            false => json!({ ENCODED: if x > 0.0 { "Infinity" } else { "-Infinity" } }),
+        };
+        pair.map(|[a, b]| [encode(a), encode(b)])
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<[f64; 2]>, D::Error> {
+        let Some(pair) = Option::<[Value; 2]>::deserialize(deserializer)? else {
+            return Ok(None);
+        };
+        let float = |v: &Value| {
+            v.as_f64()
+                .or_else(|| v.get(ENCODED)?.as_str()?.parse().ok())
+                .ok_or_else(|| D::Error::custom(format!("expected a float, got {v}")))
+        };
+        Ok(Some([float(&pair[0])?, float(&pair[1])?]))
+    }
+}
+
 #[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct Config {
     pub vocab_size: usize,
@@ -67,7 +102,7 @@ pub struct Config {
     #[serde(default = "default_expand", alias = "mamba_expand")]
     pub expand: usize,
     // the Mamba dt clamp, prompts and decode alike (`time_step_min` only seeds the dt bias at init)
-    #[serde(default)]
+    #[serde(default, with = "float_pair")]
     pub time_step_limit: Option<[f64; 2]>,
     #[serde(default = "default_true", alias = "mamba_conv_bias")]
     pub use_conv_bias: bool,
@@ -341,5 +376,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(set.granite().unwrap().mamba_dt_limit, Some([0.0, 1e30]));
+        let nemo = Config::from_json(
+            r#"{"vocab_size": 16, "hidden_size": 8, "num_attention_heads": 2, "hybrid_override_pattern": "ME",
+                "time_step_limit": [0.0, {"__float__": "Infinity"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(nemo.time_step_limit, Some([0.0, f64::INFINITY]));
+        let round_trip = Config::from_json(&serde_json::to_string(&nemo).unwrap()).unwrap();
+        assert_eq!(round_trip.time_step_limit, Some([0.0, f64::INFINITY]));
     }
 }
