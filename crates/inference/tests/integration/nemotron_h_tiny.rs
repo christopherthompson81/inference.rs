@@ -11,6 +11,8 @@ use inference::{
     TextMessageRole, TextMessages, TextModelBuilder,
 };
 use inference_tensor::{DType, Device, Tensor};
+use rand::{SeedableRng, rngs::StdRng};
+use rand_distr::{Distribution, Normal};
 
 #[path = "../support/decode_graphs.rs"]
 mod decode_graphs;
@@ -50,13 +52,16 @@ const EXPERT_WIDTH: usize = 32;
 const SHARED_WIDTH: usize = 40;
 const MLP_WIDTH: usize = 48;
 const WEIGHT_STD: f32 = 0.2;
+// fixed, so every run checks the same checkpoint: decode and prefill round differently, and an unlucky draw of weights
+// (a near-tie in the experts' routing) can put one step past a tolerance
+const WEIGHT_SEED: u64 = 0x6e65_6d6f;
 const MAX_LEN: usize = 6;
 const LOGPROB_TOLERANCE: f32 = 1e-4;
 // cuBLAS and the paged attention kernels add up in other orders than the CPU's
 const CUDA_LOGPROB_TOLERANCE: f32 = 1e-3;
-// BF16 with Q8_0 experts: decode and one prefill round differently (p90 ~0.055, worst 0.29 over 30 random checkpoints,
-// as much with graphs off), where a replay reading stale state is off by nats
-const BF16_LOGPROB_TOLERANCE: f32 = 0.5;
+// BF16 with Q8_0 experts: decode and one prefill round differently (0.023 on this checkpoint), where a replay reading
+// stale state is off by nats
+const BF16_LOGPROB_TOLERANCE: f32 = 0.1;
 const CIMATRIX: &str = "collected.cimatrix";
 
 fn config(head_dim: usize) -> serde_json::Value {
@@ -87,84 +92,103 @@ fn config(head_dim: usize) -> serde_json::Value {
     })
 }
 
-fn random(shape: &[usize]) -> anyhow::Result<Tensor> {
-    Ok(Tensor::randn(0f32, WEIGHT_STD, shape, &Device::Cpu)?)
+fn random(rng: &mut StdRng, shape: &[usize]) -> anyhow::Result<Tensor> {
+    let normal = Normal::new(0f32, WEIGHT_STD)?;
+    let count = shape.iter().product::<usize>();
+    let data = (0..count).map(|_| normal.sample(rng)).collect::<Vec<_>>();
+    Ok(Tensor::from_vec(data, shape, &Device::Cpu)?)
 }
 
-fn near_one(shape: &[usize]) -> anyhow::Result<Tensor> {
-    Ok((Tensor::randn(0f32, WEIGHT_STD, shape, &Device::Cpu)? + 1.0)?)
+fn near_one(rng: &mut StdRng, shape: &[usize]) -> anyhow::Result<Tensor> {
+    Ok((random(rng, shape)? + 1.0)?)
 }
 
 // NVIDIA's `backbone.*` names, as the Hub checkpoints keep them
 fn weights(head_dim: usize) -> anyhow::Result<HashMap<String, Tensor>> {
+    let rng = &mut StdRng::seed_from_u64(WEIGHT_SEED);
     let inner = MAMBA_HEADS * MAMBA_HEAD_DIM;
     let conv_dim = inner + 2 * GROUPS * STATE;
     let mut weights = HashMap::from([
         (
             "backbone.embeddings.weight".to_string(),
-            random(&[VOCAB, HIDDEN])?,
+            random(rng, &[VOCAB, HIDDEN])?,
         ),
-        ("backbone.norm_f.weight".to_string(), near_one(&[HIDDEN])?),
-        ("lm_head.weight".to_string(), random(&[VOCAB, HIDDEN])?),
+        (
+            "backbone.norm_f.weight".to_string(),
+            near_one(rng, &[HIDDEN])?,
+        ),
+        ("lm_head.weight".to_string(), random(rng, &[VOCAB, HIDDEN])?),
     ]);
     for (i, kind) in LAYERS.iter().enumerate() {
         let layer = format!("backbone.layers.{i}");
-        weights.insert(format!("{layer}.norm.weight"), near_one(&[HIDDEN])?);
+        weights.insert(format!("{layer}.norm.weight"), near_one(rng, &[HIDDEN])?);
         let mixer = format!("{layer}.mixer");
         let mut tensors: Vec<(String, Tensor)> = match *kind {
             "mamba" => vec![
                 (
                     "in_proj.weight".into(),
-                    random(&[inner + conv_dim + MAMBA_HEADS, HIDDEN])?,
+                    random(rng, &[inner + conv_dim + MAMBA_HEADS, HIDDEN])?,
                 ),
-                ("conv1d.weight".into(), random(&[conv_dim, 1, CONV])?),
-                ("conv1d.bias".into(), random(&[conv_dim])?),
-                ("dt_bias".into(), random(&[MAMBA_HEADS])?),
-                ("A_log".into(), random(&[MAMBA_HEADS])?),
-                ("D".into(), near_one(&[MAMBA_HEADS])?),
-                ("norm.weight".into(), near_one(&[inner])?),
-                ("out_proj.weight".into(), random(&[HIDDEN, inner])?),
+                ("conv1d.weight".into(), random(rng, &[conv_dim, 1, CONV])?),
+                ("conv1d.bias".into(), random(rng, &[conv_dim])?),
+                ("dt_bias".into(), random(rng, &[MAMBA_HEADS])?),
+                ("A_log".into(), random(rng, &[MAMBA_HEADS])?),
+                ("D".into(), near_one(rng, &[MAMBA_HEADS])?),
+                ("norm.weight".into(), near_one(rng, &[inner])?),
+                ("out_proj.weight".into(), random(rng, &[HIDDEN, inner])?),
             ],
             "attention" => vec![
-                ("q_proj.weight".into(), random(&[HEADS * head_dim, HIDDEN])?),
+                (
+                    "q_proj.weight".into(),
+                    random(rng, &[HEADS * head_dim, HIDDEN])?,
+                ),
                 (
                     "k_proj.weight".into(),
-                    random(&[KV_HEADS * head_dim, HIDDEN])?,
+                    random(rng, &[KV_HEADS * head_dim, HIDDEN])?,
                 ),
                 (
                     "v_proj.weight".into(),
-                    random(&[KV_HEADS * head_dim, HIDDEN])?,
+                    random(rng, &[KV_HEADS * head_dim, HIDDEN])?,
                 ),
-                ("o_proj.weight".into(), random(&[HIDDEN, HEADS * head_dim])?),
+                (
+                    "o_proj.weight".into(),
+                    random(rng, &[HIDDEN, HEADS * head_dim])?,
+                ),
             ],
             "moe" => {
                 let mut moe = vec![
-                    ("gate.weight".into(), random(&[EXPERTS, HIDDEN])?),
-                    ("gate.e_score_correction_bias".into(), random(&[EXPERTS])?),
+                    ("gate.weight".into(), random(rng, &[EXPERTS, HIDDEN])?),
+                    (
+                        "gate.e_score_correction_bias".into(),
+                        random(rng, &[EXPERTS])?,
+                    ),
                     (
                         "shared_experts.up_proj.weight".into(),
-                        random(&[SHARED_WIDTH, HIDDEN])?,
+                        random(rng, &[SHARED_WIDTH, HIDDEN])?,
                     ),
                     (
                         "shared_experts.down_proj.weight".into(),
-                        random(&[HIDDEN, SHARED_WIDTH])?,
+                        random(rng, &[HIDDEN, SHARED_WIDTH])?,
                     ),
                 ];
                 for e in 0..EXPERTS {
                     moe.push((
                         format!("experts.{e}.up_proj.weight"),
-                        random(&[EXPERT_WIDTH, HIDDEN])?,
+                        random(rng, &[EXPERT_WIDTH, HIDDEN])?,
                     ));
                     moe.push((
                         format!("experts.{e}.down_proj.weight"),
-                        random(&[HIDDEN, EXPERT_WIDTH])?,
+                        random(rng, &[HIDDEN, EXPERT_WIDTH])?,
                     ));
                 }
                 moe
             }
             _ => vec![
-                ("up_proj.weight".into(), random(&[MLP_WIDTH, HIDDEN])?),
-                ("down_proj.weight".into(), random(&[HIDDEN, MLP_WIDTH])?),
+                ("up_proj.weight".into(), random(rng, &[MLP_WIDTH, HIDDEN])?),
+                (
+                    "down_proj.weight".into(),
+                    random(rng, &[HIDDEN, MLP_WIDTH])?,
+                ),
             ],
         };
         for (name, tensor) in tensors.drain(..) {

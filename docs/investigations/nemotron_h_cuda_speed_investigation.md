@@ -239,3 +239,25 @@ kernels, which argues against routing near-ties. A step that is off by 0.5-1.9 n
 within 0.03 fits a replay reading one stale piece of per-step attention metadata (a position, context length or slot)
 better than stale recurrent indices, which would carry into every later step. Not yet tested; next is a debug mode
 that runs each replayed step eagerly too and compares the logits, to catch the bad step and diff its inputs.
+
+## Run 14 - 2026-11-02 ~13:00
+
+**Question:** what does a failing replay read wrong?
+
+**Probes (temporary):** after each replay, synchronize and read back the graph's inputs (token ids, positions, state
+indices, and every metadata buffer the staging wrote: slot mappings, block tables, context lengths, FlashInfer
+indptr / indices / tile plans, rope positions) against the values staged, and the step's top token and logprob from
+the graph's own logits; the capture and replay threads. A failing run: every input as staged, capture and replays on
+one thread, all kernels and copies on one stream, and the graph's own logits already give the wrong logprob (so not a
+later read of them).
+
+**Decisive check:** the test keeps a failing checkpoint; rerun on it, it fails 10 of 10 with identical values, and with
+`INFERENCE_RS_CUDA_GRAPHS=0` it fails identically, bit for bit (step 5: decode -2.5467, prefill -3.6523). Run 13's "0 in
+100 with graphs off" was an unlucky draw of checkpoints: the test made new random weights every run, and about one draw
+in 30 has a step where decode (indexed matvec, Q8_1-quantized activations) and prefill (grouped mmq) land on opposite
+sides of a near-tie, most likely in the experts' routing. Not a graph bug; Run 13's conclusion is withdrawn.
+
+**Change:** the tiny Nemotron-H's weights come from a seeded `StdRng`, as `support/recording.rs` seeds its
+checkpoints, so every run checks the same weights. On them the BF16 graph case differs from one prefill by 0.023, and
+its tolerance goes from 0.5 to 0.1; the other cases: CUDA F32 1.4e-6, CPU quantized 2.4e-7, CPU 4.0e-5, CPU against
+CUDA 4.4e-4. 0 failures in 10 runs of the Nemotron-H and Granite tiny group.
