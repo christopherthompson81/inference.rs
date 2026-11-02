@@ -220,3 +220,44 @@ step (step 1, 2 or 4 of five, by 0.5-1.9 nats, the steps after it within 0.03), 
 cache hits). A one-step error that does not carry into later steps is not the recurrent state or the KV cache; it
 looks like the step's reported logprob, possibly read after the next replay (the engine runs one step ahead) has
 overwritten the graph's logits. The tokens match, so greedy decoding is unaffected.
+
+## Run 13 - 2026-11-02 ~12:00
+
+**Question:** is Run 12's one-step decode error a graph-replay bug or test noise?
+
+**Code reading (subagent, read-only):** with logprobs requested no lookahead step launches: `Sampler::cuda_sampling_plan`
+returns `None` when `return_logprobs` is set (inference-nn/src/sampler.rs ~937), so `try_submit_cuda_token_batch`
+declines and the step samples eagerly, the logits copied to the host (`to_vec1`, a blocking copy on the graph's
+stream) and the token and logprob both taken from that copy. The graph's logits buffer is reused across replays, but
+the next replay cannot launch before that copy returns. So it is not the logprob read racing the next step.
+
+**Command:** the graph case with `INFERENCE_RS_CUDA_GRAPHS=0`, 100 runs (replay assertion skipped).
+
+**Result:** 0 failures in 100 with graphs off, against about 1 in 30 over the loops with graphs on (master included):
+at that rate 100 clean runs happen ~3 % of the time, so replays are implicated. Eager decode and replays run the same
+kernels, which argues against routing near-ties. A step that is off by 0.5-1.9 nats while the steps after it are
+within 0.03 fits a replay reading one stale piece of per-step attention metadata (a position, context length or slot)
+better than stale recurrent indices, which would carry into every later step. Not yet tested; next is a debug mode
+that runs each replayed step eagerly too and compares the logits, to catch the bad step and diff its inputs.
+
+## Run 14 - 2026-11-02 ~13:00
+
+**Question:** what does a failing replay read wrong?
+
+**Probes (temporary):** after each replay, synchronize and read back the graph's inputs (token ids, positions, state
+indices, and every metadata buffer the staging wrote: slot mappings, block tables, context lengths, FlashInfer
+indptr / indices / tile plans, rope positions) against the values staged, and the step's top token and logprob from
+the graph's own logits; the capture and replay threads. A failing run: every input as staged, capture and replays on
+one thread, all kernels and copies on one stream, and the graph's own logits already give the wrong logprob (so not a
+later read of them).
+
+**Decisive check:** the test keeps a failing checkpoint; rerun on it, it fails 10 of 10 with identical values, and with
+`INFERENCE_RS_CUDA_GRAPHS=0` it fails identically, bit for bit (step 5: decode -2.5467, prefill -3.6523). Run 13's "0 in
+100 with graphs off" was an unlucky draw of checkpoints: the test made new random weights every run, and about one draw
+in 30 has a step where decode (indexed matvec, Q8_1-quantized activations) and prefill (grouped mmq) land on opposite
+sides of a near-tie, most likely in the experts' routing. Not a graph bug; Run 13's conclusion is withdrawn.
+
+**Change:** the tiny Nemotron-H's weights come from a seeded `StdRng`, as `support/recording.rs` seeds its
+checkpoints, so every run checks the same weights. On them the BF16 graph case differs from one prefill by 0.023, and
+its tolerance goes from 0.5 to 0.1; the other cases: CUDA F32 1.4e-6, CPU quantized 2.4e-7, CPU 4.0e-5, CPU against
+CUDA 4.4e-4. 0 failures in 10 runs of the Nemotron-H and Granite tiny group.
