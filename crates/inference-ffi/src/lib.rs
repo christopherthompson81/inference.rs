@@ -246,7 +246,11 @@ pub extern "C" fn inference_init_logging(verbosity: i32) -> inference_status {
             0 => inference_api::LogVerbosity::Info,
             1 => inference_api::LogVerbosity::Debug,
             2 => inference_api::LogVerbosity::Trace,
-            other => return Err(Failure::invalid(format!("verbosity {other} is not 0, 1 or 2"))),
+            other => {
+                return Err(Failure::invalid(format!(
+                    "verbosity {other} is not 0, 1 or 2"
+                )));
+            }
         };
         inference_api::initialize_inference_logging(verbosity);
         Ok(())

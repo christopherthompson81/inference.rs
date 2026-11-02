@@ -1419,27 +1419,23 @@ impl MambaLayer {
             .exp()?
             .neg()?;
 
-        // Expand B and C from groups to num_heads
-        let b = b
-            .unsqueeze(3)?
-            .expand((
-                batch_size,
-                seq_len,
-                self.n_groups,
-                self.num_heads / self.n_groups,
-                self.ssm_state_size,
-            ))?
-            .reshape((batch_size, seq_len, self.num_heads, self.ssm_state_size))?;
-        let c = c
-            .unsqueeze(3)?
-            .expand((
-                batch_size,
-                seq_len,
-                self.n_groups,
-                self.num_heads / self.n_groups,
-                self.ssm_state_size,
-            ))?
-            .reshape((batch_size, seq_len, self.num_heads, self.ssm_state_size))?;
+        // B and C expanded from groups to heads, except on the CPU, whose scan reads each head's group
+        let expand = |t: Tensor| -> Result<Tensor> {
+            t.unsqueeze(3)?
+                .expand((
+                    batch_size,
+                    seq_len,
+                    self.n_groups,
+                    self.num_heads / self.n_groups,
+                    self.ssm_state_size,
+                ))?
+                .reshape((batch_size, seq_len, self.num_heads, self.ssm_state_size))
+        };
+        let (b, c) = if hidden_states.device().is_cpu() {
+            (b, c)
+        } else {
+            (expand(b)?, expand(c)?)
+        };
 
         #[cfg(feature = "cuda")]
         let use_cuda = matches!(hidden_states.device(), Device::Cuda(_));

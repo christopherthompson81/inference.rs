@@ -7,7 +7,8 @@ use rayon::prelude::*;
 
 /// The scan's inputs, as `selective_scan_cuda` takes them (all f32, contiguous after the call's copies):
 /// `x` `(batch, seq, heads, head_dim)`, `dt` `(batch, seq, heads)` before bias and softplus, `a` `(heads,)` (already
-/// negated), `b` and `c` `(batch, seq, heads, state)` (expanded from groups), `d` and `dt_bias` `(heads,)`.
+/// negated), `b` and `c` `(batch, seq, groups, state)` (heads split evenly over the groups), `d` and `dt_bias`
+/// `(heads,)`.
 pub struct SelectiveScan<'a> {
     pub x: &'a Tensor,
     pub dt: &'a Tensor,
@@ -20,20 +21,54 @@ pub struct SelectiveScan<'a> {
     pub dt_max: f32,
 }
 
-// partial sums a dot product keeps apart, so it vectorizes rather than adding one product at a time
+// partial sums the dot with C keeps apart, as the AVX2 lanes do
 const DOT_LANES: usize = 8;
 
-fn lane_dot(a: &[f32], b: &[f32]) -> f32 {
+/// One state row's step: `row = row * decay + dtx * b`, then `row . c`.
+#[inline(always)]
+fn state_row_step(row: &mut [f32], b: &[f32], c: &[f32], decay: f32, dtx: f32) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if avx2_fma() && row.len().is_multiple_of(DOT_LANES) {
+        // SAFETY: AVX2 and FMA were detected, and the row is whole lanes
+        return unsafe { state_row_step_avx2(row, b, c, decay, dtx) };
+    }
     let mut lanes = [0f32; DOT_LANES];
-    let (a_chunks, a_rest) = a.as_chunks::<DOT_LANES>();
-    let (b_chunks, b_rest) = b.as_chunks::<DOT_LANES>();
-    for (x, y) in a_chunks.iter().zip(b_chunks) {
-        for i in 0..DOT_LANES {
-            lanes[i] += x[i] * y[i];
+    for (i, ((sn, &bn), &cn)) in row.iter_mut().zip(b).zip(c).enumerate() {
+        *sn = *sn * decay + dtx * bn;
+        lanes[i % DOT_LANES] += *sn * cn;
+    }
+    lanes.iter().sum()
+}
+
+#[cfg(target_arch = "x86_64")]
+fn avx2_fma() -> bool {
+    static DETECTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DETECTED.get_or_init(|| is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma"))
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn state_row_step_avx2(row: &mut [f32], b: &[f32], c: &[f32], decay: f32, dtx: f32) -> f32 {
+    use std::arch::x86_64::*;
+    let (vdecay, vdtx) = (_mm256_set1_ps(decay), _mm256_set1_ps(dtx));
+    let mut acc = _mm256_setzero_ps();
+    for i in (0..row.len()).step_by(DOT_LANES) {
+        // SAFETY: `row`, `b` and `c` hold whole lanes from `i`
+        unsafe {
+            let s = _mm256_loadu_ps(row.as_ptr().add(i));
+            // the update as a multiply and an add, as the scalar and CUDA scans round it
+            let s = _mm256_add_ps(
+                _mm256_mul_ps(s, vdecay),
+                _mm256_mul_ps(vdtx, _mm256_loadu_ps(b.as_ptr().add(i))),
+            );
+            _mm256_storeu_ps(row.as_mut_ptr().add(i), s);
+            acc = _mm256_fmadd_ps(s, _mm256_loadu_ps(c.as_ptr().add(i)), acc);
         }
     }
-    let tail = a_rest.iter().zip(b_rest).map(|(x, y)| x * y).sum::<f32>();
-    lanes.iter().sum::<f32>() + tail
+    let mut lanes = [0f32; DOT_LANES];
+    // SAFETY: `lanes` holds eight floats
+    unsafe { _mm256_storeu_ps(lanes.as_mut_ptr(), acc) };
+    lanes.iter().sum()
 }
 
 fn f32_vec(t: &Tensor) -> Result<Vec<f32>> {
@@ -44,7 +79,8 @@ fn f32_vec(t: &Tensor) -> Result<Vec<f32>> {
 /// step `dt = clamp(softplus(dt + dt_bias))`, `state = state * exp(dt * a) + dt * b * x`, `y = state . c + d * x`.
 pub fn selective_scan_cpu(scan: SelectiveScan<'_>, state: &mut Tensor) -> Result<Tensor> {
     let (batch, seq, heads, head_dim) = scan.x.dims4()?;
-    let d_state = scan.b.dim(3)?;
+    let (groups, d_state) = (scan.b.dim(2)?, scan.b.dim(3)?);
+    let heads_per_group = heads / groups;
     let (x, dt, a, b, c, d, dt_bias) = (
         f32_vec(scan.x)?,
         f32_vec(scan.dt)?,
@@ -70,15 +106,13 @@ pub fn selective_scan_cpu(scan: SelectiveScan<'_>, state: &mut Tensor) -> Result
                 let raw = dt[step] + dt_bias[h];
                 let dt_t = (1.0 + raw.exp()).ln().clamp(scan.dt_min, scan.dt_max);
                 let decay = (dt_t * a[h]).exp();
-                let bt = &b[step * d_state..(step + 1) * d_state];
-                let ct = &c[step * d_state..(step + 1) * d_state];
+                let group_step = (bi * seq + t) * groups + h / heads_per_group;
+                let bt = &b[group_step * d_state..(group_step + 1) * d_state];
+                let ct = &c[group_step * d_state..(group_step + 1) * d_state];
                 let xt = &x[step * head_dim..(step + 1) * head_dim];
                 for (p, row) in s.chunks_exact_mut(d_state).enumerate() {
-                    let dtx = dt_t * xt[p];
-                    for (sn, &bn) in row.iter_mut().zip(bt) {
-                        *sn = *sn * decay + dtx * bn;
-                    }
-                    out[t * head_dim + p] = lane_dot(row, ct) + d[h] * xt[p];
+                    out[t * head_dim + p] =
+                        state_row_step(row, bt, ct, decay, dt_t * xt[p]) + d[h] * xt[p];
                 }
             }
         });

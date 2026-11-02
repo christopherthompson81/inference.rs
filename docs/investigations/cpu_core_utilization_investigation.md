@@ -184,3 +184,30 @@ IQ4_NL to 8 interleaved rows, `gemv_q4_b32_8x8_q8_0_lut_avx`); the Mamba scan 0.
 
 **Result:** text prompt 54.3-55.1 tok/s (was 48.7-51.1); llama.cpp 70.9. Left: IQ4_NL's interleaved repack
 (~0.5 s per 512 tokens), the scan (~0.3 s), barrier waits (3.5 %), many small items.
+
+## Run 10 - 2026-11-01 ~21:10
+
+**Questions:** what is the audio side's 30 % of an audio request; what is left in the decoder besides the three big
+kernels?
+
+**Audio side (temporary probes, reverted):** per 540-token clip the speech encoder takes 3.43 s and the speaker
+branch 0.81 s. Over its 63 layers (both encoders) at 489 steps: FFN 2.08 s, q/k/v + RoPE 0.98 s, attention 0.53 s,
+output projection 0.26 s, GELU 0.26 s. A probe of the same f32 matmul shapes (350 x 1280 x 5120 and the like) runs at
+393-422 GFLOP/s, about what the encoders' linear layers get: they are gemm-bound in f32. Faster would mean other
+arithmetic (Q8_0 weights, an accuracy question for the audio KLD), not less overhead.
+
+**Decoder, grouped (539-token text prompt):** Q8_0 tiles 26.4 %, Q5_0 experts 25.4 %, IQ4_NL experts 24.5 %, Mamba
+scan + conv 6.9 %, barrier waits 3.7 %, activation quantization 2.5 %, elementwise 2.4 %, expert glue 2.4 %,
+attention 2.3 %.
+
+**Scan:** `perf annotate` showed the 8-lane dot compiled to scalar `vmulss` / `vaddss` with the partial sums spilled
+to the stack. The row step (update, then the dot with C) is now AVX2 intrinsics with a portable fallback, the update
+as a multiply and an add as the CUDA scan rounds it; B and C reach the CPU scan by group (the 64 heads read their 8
+groups) instead of expanded to every head (~35 MB a layer). Scan 4.3 % -> 2.8 %; text prompt 55.1-55.7 tok/s.
+
+**IQ4_NL against llama.cpp:** per 32 multiply-adds (one row, one token, one block) both spend 4 integer ops (sign,
+sign, maddubs, madd); we spend 3 more on the scale (convert, broadcast, fused multiply-add) where llama.cpp's
+interleaved weights and activations (8 rows' and 4 tokens' blocks woven together) land one row per lane and scale 8
+outputs with one fused multiply-add (~0.5 per output). That is the 1.6x on those kernels. Interleaving in registers
+at decode time does not recover it (broadcasting each 8-value activation chunk costs what the scale saves); it takes
+the repacked layouts, at load for the weights and per prompt for the activations, as llama.cpp does.
