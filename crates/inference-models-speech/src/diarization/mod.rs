@@ -6,7 +6,8 @@ mod nemotron3;
 mod sortformer;
 
 pub use nemotron3::{
-    NemoTransformer, NemoTransformerConfig, Nemotron3Config, Nemotron3Diarizer, Nemotron3Files,
+    NemoLayerProjections, NemoProjection, NemoQkv, NemoTransformer, NemoTransformerConfig,
+    Nemotron3Config, Nemotron3Diarizer, Nemotron3Files,
 };
 pub use sortformer::{SortformerConfig, SortformerDiarizer, is_sortformer};
 

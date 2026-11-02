@@ -437,15 +437,21 @@ inference quantize gguf -m Nemotron-3.5-Transcribe-text-BF16.gguf -o text.gguf -
   --tensor-type '(attn_[qkv]|attn_output|_shexp|ssm_in|ssm_out|output|token_embd)\.weight$=q8_0'
 # the audio tensors, the checkpoint's config and its chat template
 inference quantize nemotron-transcribe-audio -m <checkpoint dir> -o audio.gguf
+# optional: the speech encoder's matrices at Q8_0
+inference quantize gguf -m audio.gguf -o audio-q8_0.gguf \
+  --tensor-type 'asr_encoder\.layers\.\d+\.(ffn\.net\.\d+|attn\.w_qkv|attn\.out_proj)\.weight$=q8_0'
 inference serve --format gguf -m <dir> -f text.gguf --mmproj audio.gguf
 ```
 
 The hidden size (2688) and the experts' width (1856) are not multiples of 256, so the experts take 32-value block
 types (`iq4_nl`, `q4_0`, `q5_0`, `q8_0`). With this recipe the text GGUF is 19.3 GiB and the audio one 1.4 GiB;
-on a 24 GB card, paged attention then holds about 39K tokens (50 minutes of audio). An imatrix from audio requests
+on a 24 GB card, paged attention then holds about 107K tokens (over two hours of audio). The Q8_0 audio GGUF is
+0.8 GiB, and its matrices stay 8-bit when loaded, which raises that to about 200K tokens (on the CPU, 1.5 GB less
+memory); in our measurements its transcripts tracked the BF16 one's (on synthetic clips, the same word error rate
+within 0.1 points and the same KL divergence from the BF16 checkpoint). An imatrix from audio requests
 (see [online calibration](/guides/quantization/online-calibration/) and `inference quantize imatrix`) weighs the
 decoder by what audio puts through it. On a GPU the audio tower runs in the model's dtype; on the CPU it runs in f32,
-as transformers keeps it.
+as transformers keeps it (the speech encoder's quantized matrices excepted).
 
 ## Voxtral Realtime: audio in, text out
 

@@ -11,7 +11,8 @@ use std::collections::HashMap;
 
 use inference_audio::nemo::NemoMelConfig;
 use inference_models_speech::diarization::{
-    NemoTransformer, NemoTransformerConfig, Nemotron3Diarizer,
+    NemoLayerProjections, NemoProjection, NemoQkv, NemoTransformer, NemoTransformerConfig,
+    Nemotron3Diarizer,
 };
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::nn::{LayerNorm, Linear, Module, VarBuilder, layer_norm, linear};
@@ -56,6 +57,8 @@ const BLOCK_RENAMES: [(&str, &str); 8] = [
     ("ffn.net.3", "mlp.fc2"),
     ("attn.w_qkv", "self_attn.qkv"),
 ];
+// a block's projections, which the speech encoder takes as linears of their own (quantized when the GGUF is)
+const BLOCK_PROJECTIONS: [&str; 4] = ["attn.w_qkv", "attn.out_proj", "ffn.net.0", "ffn.net.3"];
 const ENCODER_RENAMES: [(&str, &str); 3] = [
     ("pre_encode.proj", "embedder.projection"),
     ("embed_norm", "input_layer_norm"),
@@ -176,15 +179,55 @@ fn tower_tensor(vb: &ShardedVarBuilder, name: &str, dtype: DType) -> Result<Tens
     vb.get_unchecked_dtype(name, dtype)
 }
 
-/// A NeMo `TransformerEncoder`'s tensors under transformers' names, `ours` before each, its fused qkv split in three.
+// a quantized GGUF weight stays as it is stored; a dense one (or one loaded elsewhere) comes back in the tower's dtype
+fn tower_projection(
+    vb: &ShardedVarBuilder,
+    [in_dim, out_dim]: [usize; 2],
+    dtype: DType,
+    device: &Device,
+) -> Result<NemoProjection> {
+    let layer = inference_quant::linear_b(
+        in_dim,
+        out_dim,
+        vb.contains_tensor("bias"),
+        &None,
+        vb.clone(),
+    )?;
+    let dense = |w: Tensor, b: Option<Tensor>| -> Result<NemoProjection> {
+        let to = |t: Tensor| t.to_dtype(dtype)?.to_device(device);
+        Ok(NemoProjection::Dense(Linear::new(
+            to(w)?,
+            b.map(to).transpose()?,
+        )))
+    };
+    match layer.unquant_weight_bias() {
+        Some((w, b)) => dense(w, b),
+        None if !layer.dtype_and_device().1.same_device(device) => {
+            let bias = vb
+                .contains_tensor("bias")
+                .then(|| tower_tensor(vb, "bias", dtype))
+                .transpose()?;
+            dense(layer.dequantize_w()?, bias)
+        }
+        None => Ok(NemoProjection::Quantized(layer)),
+    }
+}
+
+// where an encoder's tensors go: `ours` before each renamed one, its blocks' `skip` modules left out
+struct EncoderNames<'a> {
+    ours: &'a str,
+    skip: &'a [&'a str],
+}
+
+/// A NeMo `TransformerEncoder`'s tensors under transformers' names, its fused qkv split in three.
 fn encoder_weights(
     vb: &ShardedVarBuilder,
     layers: usize,
-    ours: &str,
+    names: EncoderNames<'_>,
     dtype: DType,
     weights: &mut HashMap<String, Tensor>,
 ) -> Result<()> {
-    let join = |name: &str| match ours {
+    let join = |name: &str| match names.ours {
         "" => name.to_string(),
         prefix => format!("{prefix}.{name}"),
     };
@@ -202,6 +245,9 @@ fn encoder_weights(
     for layer in 0..layers {
         let block = vb.pp("layers").pp(layer);
         for (theirs, renamed) in BLOCK_RENAMES {
+            if names.skip.contains(&theirs) {
+                continue;
+            }
             for suffix in ["weight", "bias"] {
                 let name = format!("{theirs}.{suffix}");
                 if !block.contains_tensor(&name) {
@@ -236,7 +282,10 @@ fn diarization_weights(
     encoder_weights(
         &vb.pp("encoder"),
         layers,
-        "model.audio_tower",
+        EncoderNames {
+            ours: "model.audio_tower",
+            skip: &[],
+        },
         dtype,
         &mut weights,
     )?;
@@ -292,13 +341,33 @@ impl AudioTower {
         encoder_weights(
             &vb.pp(ASR),
             encoder_cfg.num_hidden_layers,
-            "",
+            EncoderNames {
+                ours: "",
+                skip: &BLOCK_PROJECTIONS,
+            },
             dtype,
             &mut weights,
         )?;
-        let encoder = NemoTransformer::new(
+        let (h, inter) = (encoder_cfg.hidden_size, encoder_cfg.intermediate_size);
+        let projections = (0..encoder_cfg.num_hidden_layers)
+            .map(|layer| {
+                let block = vb.pp(ASR).pp("layers").pp(layer);
+                let [qkv, o, fc1, fc2] = BLOCK_PROJECTIONS;
+                let projection = |name: &str, in_dim: usize, out_dim: usize| {
+                    tower_projection(&block.pp(name), [in_dim, out_dim], dtype, device)
+                };
+                Ok(NemoLayerProjections {
+                    qkv: NemoQkv::Fused(projection(qkv, h, 3 * h)?),
+                    o: projection(o, h, h)?,
+                    fc1: projection(fc1, h, inter)?,
+                    fc2: projection(fc2, inter, h)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let encoder = NemoTransformer::with_projections(
             encoder_cfg.clone(),
             VarBuilder::from_tensors(weights, dtype, device),
+            projections,
         )?;
         let diarization = diarization_config(config)?;
         let layers = serde_json::from_str::<serde_json::Value>(&diarization)
