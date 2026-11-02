@@ -1218,6 +1218,11 @@ impl MambaLayer {
             .exp()?
             .neg()?;
 
+        #[cfg(feature = "cuda")]
+        if hidden_states.device().is_cuda() {
+            return self.scan_step_cuda([&hidden_states, &b, &c, dt, &a], cache, batch_size);
+        }
+
         // dt with bias and softplus
         let dt_dtype = dt.dtype();
         let dt_bias = self
@@ -1320,6 +1325,47 @@ impl MambaLayer {
         let y = y.reshape((batch_size, self.intermediate_size))?;
 
         Ok(y)
+    }
+
+    // one decode step through the scan kernel (a one-token chunk), at decode's dt floor: `[x, b, c, dt, a]` as
+    // `forward_cached` splits them, the result `(batch, intermediate_size)`
+    #[cfg(feature = "cuda")]
+    fn scan_step_cuda(
+        &self,
+        [x, b, c, dt, a]: [&Tensor; 5],
+        cache: &mut MambaLayerCache,
+        batch_size: usize,
+    ) -> Result<Tensor> {
+        let f32 = inference_tensor::DType::F32;
+        let heads_per_group = self.num_heads / self.n_groups;
+        let per_head = |t: &Tensor| -> Result<Tensor> {
+            t.reshape((batch_size, 1, self.n_groups, 1, self.ssm_state_size))?
+                .to_dtype(f32)?
+                .expand((
+                    batch_size,
+                    1,
+                    self.n_groups,
+                    heads_per_group,
+                    self.ssm_state_size,
+                ))?
+                .reshape((batch_size, 1, self.num_heads, self.ssm_state_size))
+        };
+        let mut ssm_state = cache.ssm_state.to_dtype(f32)?;
+        let y = crate::cuda::ssm::selective_scan_cuda(
+            &x.reshape((batch_size, 1, self.num_heads, self.head_dim))?
+                .to_dtype(f32)?,
+            &dt.reshape((batch_size, 1, self.num_heads))?.to_dtype(f32)?,
+            a,
+            &per_head(b)?,
+            &per_head(c)?,
+            &self.d.to_dtype(f32)?,
+            &self.dt_bias.to_dtype(f32)?,
+            &mut ssm_state,
+            self.time_step_min as f32,
+            self.time_step_max as f32,
+        )?;
+        cache.ssm_state = ssm_state.to_dtype(cache.ssm_state.dtype())?;
+        y.reshape((batch_size, self.intermediate_size))
     }
 
     // one decode step's conv and SiLU, `(batch, conv_dim)`, shifting the step into the conv state

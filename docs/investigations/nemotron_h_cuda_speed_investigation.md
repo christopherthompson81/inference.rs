@@ -113,3 +113,17 @@ share one body. Ungated experts take it for up to 8 tokens. GPU case `ungated_in
 
 **Result (`gpu_fresh.py`):** decode 91.0 / 91.4 tok/s (was 55.6 / 55.8); prefill unchanged (2027-3317). llama.cpp
 tg256 198.
+
+## Run 8 - 2026-11-02 ~07:40
+
+**Question:** the decode profile after Run 7: 1157 ms over 64 tokens under nsys, 625 ms busy, ~1750 kernels a token.
+What are they?
+
+**Profile:** `bmul_f32` 160 a token, `cast_bf16_f32` 208, `uexp_f32`, `badd_f32`...: the Mamba decode step ran as ~20
+F32 tensor ops a layer (dA, dB, the state update, the dot with C, the D skip), the scan kernel only taking prompts.
+
+**Change:** a decode step runs the scan kernel as a one-token chunk (B and C expanded to the heads as for prompts),
+at decode's dt floor (`time_step_min`; prompts clamp at `prefill_time_step_min`).
+
+**Result (`gpu_fresh.py`):** decode 114.5 / 113.5 tok/s (was 91); 4398-token prompt 3294 tok/s. Tiny-model CUDA cases
+pass (decode against one prefill, CPU against CUDA).
