@@ -71,6 +71,7 @@ pub struct CpuExpertProjection<'a> {
 }
 
 impl CpuExpertProjection<'_> {
+    #[inline]
     fn row_bytes(&self) -> usize {
         self.ty.row_scale_bytes() + self.cols / self.ty.block_size() * self.ty.type_size()
     }
@@ -80,6 +81,7 @@ impl CpuExpertProjection<'_> {
         cpu_dot::supports_32(self.ty)
     }
 
+    #[inline]
     fn row(&self, expert: usize, row: usize) -> &[u8] {
         let row_bytes = self.row_bytes();
         &self.bytes[(expert * self.rows + row) * row_bytes..][..row_bytes]

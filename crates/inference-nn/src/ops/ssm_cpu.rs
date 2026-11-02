@@ -144,7 +144,12 @@ pub fn causal_conv1d_cpu(padded: &Tensor, weight: &Tensor) -> Result<Tensor> {
             for (ch, o) in dst.iter_mut().enumerate() {
                 let src = &input[(bi * channels + ch) * width + t..][..kernel];
                 let w = &weight[ch * kernel..(ch + 1) * kernel];
-                *o = src.iter().zip(w).map(|(x, w)| x * w).sum();
+                // an index loop: the zipped sum stayed an out-of-line call per channel in the dev profile
+                let mut sum = 0f32;
+                for j in 0..kernel {
+                    sum += src[j] * w[j];
+                }
+                *o = sum;
             }
         });
     Tensor::from_vec(out, (batch, seq, channels), &Device::Cpu)?.to_dtype(padded.dtype())

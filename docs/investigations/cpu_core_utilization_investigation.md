@@ -263,3 +263,20 @@ path (their values overflow i16 pairs when offset).
 **A/B, alternating servers (539-token text prompt, warm runs):** previous commit 79.0-80.7 tok/s, unsigned 84.8-87.8
 (+8 %). Both ran ~20 % faster than in Run 12, so the machine was slower then (the A/B pairs are what compare).
 llama.cpp's pp512 measured right after: 72.0 +- 0.4 tok/s.
+
+## Run 14 - 2026-11-02 ~00:10
+
+**Question:** what is left after the expert kernels, and where do audio prompts stand?
+
+**Profile (539-token text prompt, `perf record`):** dense Q8_0 tiles 35.3 %, IQ4_NL experts 21.2 %, Q5_0 experts
+18.8 %, barrier waits 5.5 %, scan row step 1.3 %, conv 1.3 %, attention 1.2 %, the rest below 1 % each. A 2.5 %
+symbol named for the GDN conv update (`causal_conv1d_update_cpu`'s zipped sum) was the Mamba conv's tap sum (the two
+closures' code merged under one name): an index loop inlines it, and it is gone from the profile. Text prompt
+78.6 / 86.4 / 86.5 tok/s (noise-level change). `CpuExpertProjection::row` (0.8 %, out of line) is `#[inline]` now.
+
+The dense Q8_0 AVX2 tile already spends one sign, one maddubs and one madd per 32 multiply-adds with the weight
+work shared over the tokens; past that it takes AVX-VNNI, which this CPU lacks.
+
+**Audio prompts (`cpu_bench.sh`, 5 clips, same build):** 56.0-60.7 tok/s (Run 7's 33.5-36.6 was a slower machine
+state too). At ~86 tok/s for the decoder, a 540-token clip spends ~6.3 s there and the rest (~3.4 s) in the speech
+encoder and speaker branch, f32 gemm-bound (Run 10): the audio side is now ~35-40 % of an audio request.
