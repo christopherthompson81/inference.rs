@@ -314,6 +314,40 @@ impl UngatedExpertsWeights {
         .map(Some)
     }
 
+    // a decode step's few routes through the expert-indexed matvec, reading only the routed experts' blocks
+    #[cfg(feature = "cuda")]
+    pub(super) fn forward_cuda_decode(
+        [up, down]: [&Arc<dyn QuantMethod>; 2],
+        forward: &MoEForward,
+        config: MoEForwardConfig,
+    ) -> Result<Option<Tensor>> {
+        if !forward.xs.device().is_cuda()
+            || forward.shape.num_tokens > super::backends::INDEXED_MMVQ_MAX_TOKENS
+            || forward.lora.is_some()
+            || up.stats_snapshot().is_some()
+            || down.stats_snapshot().is_some()
+        {
+            return Ok(None);
+        }
+        let (Some(up_qt), Some(down_qt)) = (up.kernel_weight(), down.kernel_weight()) else {
+            return Ok(None);
+        };
+        if !inference_quant::supports_indexed_moe_mmvq_ungated(up_qt, down_qt) {
+            return Ok(None);
+        }
+        let routed = inference_quant::indexed_moe_mmvq_ungated(
+            up_qt,
+            down_qt,
+            forward.xs_flat,
+            forward.topk_ids,
+            config.num_experts_per_tok,
+            &|rows| rows.apply(&config.act),
+        )?;
+        let out =
+            super::backends::weighted_reduce_f32(forward, &routed, config.num_experts_per_tok)?;
+        out.to_dtype(forward.original_dtype).map(Some)
+    }
+
     pub(super) fn forward_impl(
         &self,
         forward: &MoEForward,
@@ -336,6 +370,10 @@ impl UngatedExpertsWeights {
         }
         #[cfg(feature = "cuda")]
         if let Some(ys) = Self::forward_cuda_grouped([&up, &down], forward, config)? {
+            return Ok(ys);
+        }
+        #[cfg(feature = "cuda")]
+        if let Some(ys) = Self::forward_cuda_decode([&up, &down], forward, config)? {
             return Ok(ys);
         }
         Self::forward_gather([&up, &down], forward, config)

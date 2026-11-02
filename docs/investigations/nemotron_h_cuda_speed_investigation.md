@@ -97,3 +97,19 @@ logprobs on both devices, 1e-3).
 
 **Result (`gpu_fresh.py`):** 592 / 530 / 1149 / 2321 / 2345 / 4398 tokens at 2092 / 3252 / 2623 / 3158 / 3326 / 3302
 tok/s (Run 4: ~1300-1790); decode 55.6 / 55.8 (unchanged). llama.cpp pp512 4342, tg256 198.
+
+## Run 7 - 2026-11-02 ~07:10
+
+**Question:** where does a decode step go (64 tokens, 1.61 s of kernels, 0.98 s busy)?
+
+**Profile:** the IQ4_NL up ran `gather_rows_u8` + `dequantize_superblocks` + a BF16 gemm once per routed expert per
+layer (~158 a token, 31 % of busy time): the gather path, since IQ4_NL (raw storage) has no `indexed_moe_forward`
+kernel. Q5_0 down took `indexed_moe_forward_q5_0_q8_1`. The lm head `mmvq_gguf_q8_0_f32_plain` 0.43 ms a token, then
+~1.7 ms idle before the next step's embedding (`get_rows_q8_0`).
+
+**Change:** `fast_mmvq::moe_decode_ungated`: the expert-indexed matvec gated decode uses, with the up projection
+alone (no fused GLU), the activation as tensor ops on its F32 rows, Q8_1 quantization, then down; `moe_decode` and it
+share one body. Ungated experts take it for up to 8 tokens. GPU case `ungated_indexed_decode_matches_gather`.
+
+**Result (`gpu_fresh.py`):** decode 91.0 / 91.4 tok/s (was 55.6 / 55.8); prefill unchanged (2027-3317). llama.cpp
+tg256 198.

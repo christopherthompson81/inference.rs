@@ -22,7 +22,7 @@ use super::forward::{MoEForward, MoEForwardConfig};
 pub(super) const GROUPED_PREFILL_MIN_TOKENS: usize = 32;
 // Past this many tokens grouped mmq, which reads each routed expert once, beats a matvec per routed pair
 #[cfg(feature = "cuda")]
-const INDEXED_MMVQ_MAX_TOKENS: usize = 8;
+pub(super) const INDEXED_MMVQ_MAX_TOKENS: usize = 8;
 
 /// Canonical stacked expert weights, ENK [E, N, K] = [E, out, in]. The raw backends (Fused,
 /// Cutile) hold exactly this; nothing else stores a layout.
@@ -478,7 +478,8 @@ mod tests {
             quantized_grouped_prefill_lora_bf16_matches_gather_pipeline,
             quantized_grouped_prefill_lora_f16_matches_gather_pipeline,
             quantized_grouped_prefill_lora_f32_matches_gather_pipeline,
-            ungated_grouped_prefill_matches_gather
+            ungated_grouped_prefill_matches_gather,
+            ungated_indexed_decode_matches_gather
         ]
     );
 
@@ -768,6 +769,7 @@ mod tests {
 
     /// A prefill-sized batch of tokens, each routed to two experts with uneven weights.
     struct PrefillCase {
+        tokens: usize,
         xs: Tensor,
         xs_flat: Tensor,
         topk_ids: Tensor,
@@ -776,22 +778,26 @@ mod tests {
 
     impl PrefillCase {
         fn new(device: &Device) -> Result<Self> {
-            let tokens = f32::from(u16::try_from(PREFILL_TOKENS).expect("token count is bounded"));
-            let token_scales = (0..PREFILL_TOKENS)
+            Self::with_tokens(device, PREFILL_TOKENS)
+        }
+
+        fn with_tokens(device: &Device, count: usize) -> Result<Self> {
+            let tokens = f32::from(u16::try_from(count).expect("token count is bounded"));
+            let token_scales = (0..count)
                 .map(|token| {
                     0.5 + f32::from(u16::try_from(token).expect("token index is bounded")) / tokens
                 })
                 .collect::<Vec<_>>();
-            let xs = (tensor((1, PREFILL_TOKENS, PREFILL_HIDDEN), 3.1)? * 4.0)?
+            let xs = (tensor((1, count, PREFILL_HIDDEN), 3.1)? * 4.0)?
                 .broadcast_mul(&Tensor::from_vec(
                     token_scales,
-                    (1, PREFILL_TOKENS, 1),
+                    (1, count, 1),
                     &Device::Cpu,
                 )?)?
                 .to_dtype(DType::BF16)?
                 .to_device(device)?;
-            let xs_flat = xs.reshape((PREFILL_TOKENS, PREFILL_HIDDEN))?;
-            let topk_ids = (0..PREFILL_TOKENS)
+            let xs_flat = xs.reshape((count, PREFILL_HIDDEN))?;
+            let topk_ids = (0..count)
                 .flat_map(|token| {
                     [
                         u32::try_from(token % PREFILL_EXPERTS).expect("expert index is bounded"),
@@ -800,7 +806,7 @@ mod tests {
                     ]
                 })
                 .collect::<Vec<_>>();
-            let topk_weights = (0..PREFILL_TOKENS)
+            let topk_weights = (0..count)
                 .flat_map(|token| {
                     let cycle = u16::try_from(token % 5).expect("cycle is bounded");
                     let first = 0.25 + 0.5 * f32::from(cycle) / 4.0;
@@ -808,14 +814,11 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             Ok(Self {
+                tokens: count,
                 xs,
                 xs_flat,
-                topk_ids: Tensor::from_vec(topk_ids, (PREFILL_TOKENS, PREFILL_TOPK), device)?,
-                topk_weights: Tensor::from_vec(
-                    topk_weights,
-                    (PREFILL_TOKENS, PREFILL_TOPK),
-                    device,
-                )?,
+                topk_ids: Tensor::from_vec(topk_ids, (count, PREFILL_TOPK), device)?,
+                topk_weights: Tensor::from_vec(topk_weights, (count, PREFILL_TOPK), device)?,
             })
         }
 
@@ -828,9 +831,9 @@ mod tests {
                 original_dtype: DType::BF16,
                 shape: MoEForwardShape {
                     batch_size: 1,
-                    seq_len: PREFILL_TOKENS,
+                    seq_len: self.tokens,
                     hidden_dim: PREFILL_HIDDEN,
-                    num_tokens: PREFILL_TOKENS,
+                    num_tokens: self.tokens,
                     phase: MoEForwardPhase::Prefill,
                 },
                 lora: None,
@@ -914,6 +917,38 @@ mod tests {
                 &actual,
                 &expected,
                 &format!("ungated grouped prefill {up:?} {down:?}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    // ungated experts' decode steps through the expert-indexed matvec against their gather path
+    fn ungated_indexed_decode_matches_gather() -> Result<()> {
+        const DECODE_TOKENS: usize = 3;
+        let device = Device::new_cuda(0)?;
+        let (hidden, inter) = (PREFILL_HIDDEN, PREFILL_INTERMEDIATE);
+        for [up, down] in [
+            [GgmlDType::Q4_0, GgmlDType::Q5_0],
+            [GgmlDType::Q4K, GgmlDType::Q8_0],
+        ] {
+            let experts = super::super::ungated::UngatedExpertsWeights {
+                up: prefill_projection(inter, hidden, 0.7, up, &device)?,
+                down: prefill_projection(hidden, inter, 1.3, down, &device)?,
+            };
+            let case = PrefillCase::with_tokens(&device, DECODE_TOKENS)?;
+            let (forward, config) = (case.forward(), PrefillCase::config(Activation::Relu2));
+            let layers = [&experts.up, &experts.down];
+            let actual = super::super::ungated::UngatedExpertsWeights::forward_cuda_decode(
+                layers, &forward, config,
+            )?
+            .expect("these types take the indexed decode path");
+            let expected = super::super::ungated::UngatedExpertsWeights::forward_gather(
+                layers, &forward, config,
+            )?;
+            assert_close(
+                &actual,
+                &expected,
+                &format!("ungated indexed decode {up:?} {down:?}"),
             )?;
         }
         Ok(())
@@ -2087,7 +2122,11 @@ pub(super) fn glu_activation(act: Activation) -> Option<inference_quant::GluActi
 
 // Sums each token's routed rows (F32, `[tokens * topk, hidden]`) by its router weights, in BF16 for a BF16 model
 #[cfg(feature = "cuda")]
-fn weighted_reduce_f32(forward: &MoEForward, routed: &Tensor, topk: usize) -> Result<Tensor> {
+pub(super) fn weighted_reduce_f32(
+    forward: &MoEForward,
+    routed: &Tensor,
+    topk: usize,
+) -> Result<Tensor> {
     use inference_tensor::cuda::cudarc::driver::DevicePtr;
     let dev = forward.xs_flat.device().as_cuda_device()?;
     let tw_f32 = forward
