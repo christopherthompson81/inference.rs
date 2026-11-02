@@ -377,3 +377,24 @@ master's, tokens and logprobs.
 **Left (each under 1 % of the thread):** the router's F32 GEMV (`dot_f32`, 0.8 %), the experts' and projections'
 activation quantization on the dispatching thread (~1.4 %), barrier waits at the end of parallel sections (~1.8 %),
 the gated norm's tensor ops (~0.6 %).
+
+## Run 19 - 2026-11-02 12:38 (local clock)
+
+**Question:** what does llama.cpp's CPU backend (`ggml/src/ggml-cpu`, `970b51ce7`) do differently on this path?
+
+**Reading:** on AVX2 it does not repack Q8_0 (`ggml_repack_get_optimal_repack_type` repacks Q8_0 only for NEON and
+RISC-V), so its dense GEMVs are plain row dots like ours; it repacks IQ4_NL to an 8x8 interleave
+(`iq4_nl_8x8_q8_0`); `ggml_compute_forward_mul_mat` splits converting the activations to the dot type across all
+threads; `ssm_conv` / `ssm_scan` split rows across threads.
+
+**Change:** the activations' Q8 conversion was a scalar loop on the dispatching thread before every Q8_0 matmul
+(`BlockQ8_0::from_float`) and expert call (`Q8Block32::quantize`); both now call one block quantizer,
+`quantize_block32`, AVX2 on x86 with `f32::round`'s half-away ties (truncate, then step where the remainder is at
+least a half), so the same bits. Unit case: random blocks and a block of ties against the scalar loop.
+
+**Result:** against Run 18's branch, alternating: 9.3 / 9.4 / 9.4 / 9.5 -> 9.5 / 9.4 / 9.5 / 9.5 tok/s (~1 %, near the
+noise; this session's machine state runs both above Run 18's numbers). Greedy completions identical.
+
+**IQ4_NL interleave, not done:** at ~106 ms a token the IQ4_NL up reads its 387 MB in ~10.7 ms (~36 GB/s), the Q5_0
+down 473 MB in ~13.2 ms (~36 GB/s), the dense Q8_0 1.99 GB in ~58 ms (~34 GB/s): every weight stream is at the
+machine's practical DDR4 rate, so a layout that reads the same bytes cannot be faster.

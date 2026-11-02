@@ -38,6 +38,23 @@ use half::{bf16, f16};
 
 pub use k_quants::GgmlType;
 
+/// One block of 32 activations as Q8: the scale `max |x| / 127` (returned) and each value times its inverse,
+/// rounded half away from zero, as ggml's reference quantizer does.
+pub fn quantize_block32(x: &[f32; 32], qs: &mut [i8; 32]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if crate::cpu::features::get().avx2 && crate::cpu::features::get().fma {
+        // SAFETY: AVX2 and FMA were detected above
+        return unsafe { avx::quantize_block32_avx2(x, qs) };
+    }
+    let amax = x.iter().fold(0f32, |m, v| m.max(v.abs()));
+    let d = amax / 127.0;
+    let id = if d != 0.0 { 1.0 / d } else { 0.0 };
+    for (q, v) in qs.iter_mut().zip(x) {
+        *q = (v * id).round() as i8;
+    }
+    d
+}
+
 fn as_t_slice<T>(data: &[u8]) -> &[T] {
     let size = std::mem::size_of::<T>();
     assert_eq!(
@@ -1240,6 +1257,44 @@ impl crate::Module for QMatMul {
                 };
                 xs.to_dtype(DType::F16)?.matmul(&w)?.to_dtype(in_dtype)
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod quantize_block32_tests {
+    // the AVX2 quantizer gives the scalar one's bits: random blocks, and a block whose max is 127 so the values are
+    // their own quants, with ties at every half (rounded away from zero) and values just under a half
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn the_avx2_block_quantizer_matches_the_scalar_one() {
+        if !(crate::cpu::features::get().avx2 && crate::cpu::features::get().fma) {
+            return;
+        }
+        let scalar = |x: &[f32; 32]| {
+            let amax = x.iter().fold(0f32, |m, v| m.max(v.abs()));
+            let d = amax / 127.0;
+            let id = if d != 0.0 { 1.0 / d } else { 0.0 };
+            (d, x.map(|v| (v * id).round() as i8))
+        };
+        let mut blocks: Vec<[f32; 32]> = (0..64)
+            .map(|b| {
+                std::array::from_fn(|i| {
+                    (((b * 32 + i) * 2_654_435_761usize % 1000) as f32 - 500.0) / 37.0
+                })
+            })
+            .collect();
+        blocks.push(std::array::from_fn(|i| match i {
+            0 => 127.0,
+            _ => (i as f32 - 16.0) + if i % 2 == 0 { 0.5 } else { 0.499_999_97 },
+        }));
+        blocks.push([0.0; 32]);
+        for x in &blocks {
+            let mut qs = [0i8; 32];
+            // SAFETY: AVX2 and FMA were detected above
+            let d = unsafe { super::avx::quantize_block32_avx2(x, &mut qs) };
+            let (expected_d, expected) = scalar(x);
+            assert_eq!((d.to_bits(), qs), (expected_d.to_bits(), expected), "{x:?}");
         }
     }
 }
