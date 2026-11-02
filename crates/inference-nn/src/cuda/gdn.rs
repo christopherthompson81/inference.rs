@@ -1553,6 +1553,20 @@ pub fn causal_conv1d_cuda(
     is_update: bool,
     slots: GdnStateSlots<'_>,
 ) -> Result<(Tensor, Tensor)> {
+    causal_conv1d_cuda_with_bias(x, weight, None, conv_state, kernel_size, is_update, slots)
+}
+
+/// [`causal_conv1d_cuda`] with a `[conv_dim]` bias added before the SiLU, as Mamba-2's conv has.
+#[cfg(feature = "cuda")]
+pub fn causal_conv1d_cuda_with_bias(
+    x: &Tensor,
+    weight: &Tensor,
+    bias: Option<&Tensor>,
+    conv_state: &Tensor,
+    kernel_size: usize,
+    is_update: bool,
+    slots: GdnStateSlots<'_>,
+) -> Result<(Tensor, Tensor)> {
     use core::ffi::c_void;
     use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
 
@@ -1561,7 +1575,7 @@ pub fn causal_conv1d_cuda(
             + inference_tensor::cuda_backend::cudarc::driver::DeviceRepr,
     >(
         x: &Tensor,
-        weight: &Tensor,
+        (weight, bias): (&Tensor, Option<&Tensor>),
         conv_state: &Tensor,
         kernel_size: usize,
         is_update: bool,
@@ -1586,6 +1600,21 @@ pub fn causal_conv1d_cuda(
             _ => inference_tensor::bail!("weight must be a cuda tensor"),
         };
         let w_offset = w_l.start_offset();
+        let bias = bias.map(Tensor::contiguous).transpose()?;
+        let bias_storage = bias.as_ref().map(Tensor::storage_and_layout);
+        let bias_ptr = match &bias_storage {
+            Some((storage, layout)) => match &**storage {
+                inference_tensor::Storage::Cuda(c) => {
+                    let slice = c.as_cuda_slice::<T>()?;
+                    slice
+                        .slice(layout.start_offset()..)
+                        .device_ptr(slice.stream())
+                        .0 as *const c_void
+                }
+                _ => inference_tensor::bail!("bias must be a cuda tensor"),
+            },
+            None => std::ptr::null(),
+        };
 
         let stream = dev.cuda_stream().cu_stream() as i64;
 
@@ -1609,6 +1638,7 @@ pub fn causal_conv1d_cuda(
                         crate::cuda::ffi::causal_conv1d_update(
                             x_s.slice(x_offset..).device_ptr(x_s.stream()).0 as *const c_void,
                             w_s.slice(w_offset..).device_ptr(w_s.stream()).0 as *const c_void,
+                            bias_ptr,
                             cs_s.slice(cs_offset..).device_ptr(cs_s.stream()).0 as *mut c_void,
                             output_buf.device_ptr(output_buf.stream()).0 as *mut c_void,
                             batch_size as i32,
@@ -1659,6 +1689,7 @@ pub fn causal_conv1d_cuda(
                     crate::cuda::ffi::causal_conv1d_full(
                         x_s.slice(x_offset..).device_ptr(x_s.stream()).0 as *const c_void,
                         w_s.slice(w_offset..).device_ptr(w_s.stream()).0 as *const c_void,
+                        bias_ptr,
                         cs_in_ptr as *const c_void,
                         cs_out_ptr as *mut c_void,
                         output_buf.device_ptr(output_buf.stream()).0 as *mut c_void,
@@ -1704,13 +1735,33 @@ pub fn causal_conv1d_cuda(
     }
     let conv_state = conv_state.contiguous()?;
     match x.dtype() {
-        DType::F16 => {
-            cuda_fwd::<half::f16>(x, &weight, &conv_state, kernel_size, is_update, slots, 0)
-        }
-        DType::BF16 => {
-            cuda_fwd::<half::bf16>(x, &weight, &conv_state, kernel_size, is_update, slots, 1)
-        }
-        DType::F32 => cuda_fwd::<f32>(x, &weight, &conv_state, kernel_size, is_update, slots, 2),
+        DType::F16 => cuda_fwd::<half::f16>(
+            x,
+            (&weight, bias),
+            &conv_state,
+            kernel_size,
+            is_update,
+            slots,
+            0,
+        ),
+        DType::BF16 => cuda_fwd::<half::bf16>(
+            x,
+            (&weight, bias),
+            &conv_state,
+            kernel_size,
+            is_update,
+            slots,
+            1,
+        ),
+        DType::F32 => cuda_fwd::<f32>(
+            x,
+            (&weight, bias),
+            &conv_state,
+            kernel_size,
+            is_update,
+            slots,
+            2,
+        ),
         other => inference_tensor::bail!(
             "causal_conv1d_cuda supports f16, bf16 and f32, got {:?}",
             other

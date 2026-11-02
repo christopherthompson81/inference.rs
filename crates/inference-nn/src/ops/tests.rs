@@ -252,6 +252,7 @@ inference_tensor::gpu_cases!(
         cuda_dflash_selector_matches_reference_with_bf16_codebooks,
         cuda_dflash_selector_supports_max_k_and_stable_ties,
         cuda_low_precision_top1_matches_f32_across_ties_and_nonfinite_values,
+        cuda_moe_router_with_fewer_experts_than_lanes_picks_only_experts,
         cuda_qk_norm_rope_positions_preserves_projection_layout,
         cuda_qk_norm_rope_writes_token_major_from_packed_projection,
         cuda_ranked_topk_cooperative_boundaries_and_fallback_match_cpu,
@@ -789,6 +790,52 @@ fn test_repeat_interleave_flat() -> inference_tensor::Result<()> {
         vec![1., 2., 2., 3., 3., 3., 4., 4., 4., 4.]
     );
 
+    Ok(())
+}
+
+// Nemotron-H's routing (sigmoid scores, a selection bias) over 4 experts: with every expert's biased score below 0, the
+// fused router still picks experts, and the same ones and weights as the composite path
+#[cfg(feature = "cuda")]
+fn cuda_moe_router_with_fewer_experts_than_lanes_picks_only_experts() -> inference_tensor::Result<()>
+{
+    use super::{
+        MoeRouterScoreFunction, MoeRouterSelectedWeight, MoeRouterTopKConfig, moe_router_topk,
+    };
+    let device = Device::new_cuda(0)?;
+    let config = MoeRouterTopKConfig {
+        top_k: 2,
+        score_function: MoeRouterScoreFunction::Sigmoid,
+        selected_weight: MoeRouterSelectedWeight::Score,
+        renormalize: true,
+        norm_min: 1e-20,
+        output_scale: 2.5,
+        logit_clip: None,
+    };
+    let logits = Tensor::new(
+        &[[0.3f32, -1.2, 2.0, 0.1], [-0.5, 0.4, -2.0, 1.5]],
+        &Device::Cpu,
+    )?;
+    let bias = Tensor::new(&[-1.5f32, -2.0, -3.0, -1.2], &Device::Cpu)?;
+    let expected = moe_router_topk(&logits, config, Some(&bias), None)?;
+    let actual = moe_router_topk(
+        &logits.to_device(&device)?,
+        config,
+        Some(&bias.to_device(&device)?),
+        None,
+    )?;
+    assert_eq!(
+        actual.indices.to_device(&Device::Cpu)?.to_vec2::<u32>()?,
+        expected.indices.to_vec2::<u32>()?
+    );
+    let (actual, expected) = (
+        actual.values.to_device(&Device::Cpu)?.to_vec2::<f32>()?,
+        expected.values.to_vec2::<f32>()?,
+    );
+    for (actual_row, expected_row) in actual.iter().zip(&expected) {
+        for (&actual, &expected) in actual_row.iter().zip(expected_row) {
+            assert_close(actual, expected, CUDA_F32_REL_TOLERANCE);
+        }
+    }
     Ok(())
 }
 

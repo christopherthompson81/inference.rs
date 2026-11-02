@@ -59,8 +59,7 @@ __device__ __forceinline__ float4 gdn_load_state_x4(const float *source) {
   return *reinterpret_cast<const float4 *>(source);
 }
 
-__device__ __forceinline__ float4
-gdn_load_state_x4(const __half *source) {
+__device__ __forceinline__ float4 gdn_load_state_x4(const __half *source) {
   const float2 lo = __half22float2(*reinterpret_cast<const __half2 *>(source));
   const float2 hi =
       __half22float2(*reinterpret_cast<const __half2 *>(source + 2));
@@ -71,8 +70,8 @@ __device__ __forceinline__ float4
 gdn_load_state_x4(const __nv_bfloat16 *source) {
   const float2 lo =
       __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(source));
-  const float2 hi = __bfloat1622float2(
-      *reinterpret_cast<const __nv_bfloat162 *>(source + 2));
+  const float2 hi =
+      __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162 *>(source + 2));
   return make_float4(lo.x, lo.y, hi.x, hi.y);
 }
 
@@ -89,8 +88,8 @@ __device__ __forceinline__ void gdn_store_state_x4(__half *destination,
       __floats2half2_rn(value.z, value.w);
 }
 
-__device__ __forceinline__ void
-gdn_store_state_x4(__nv_bfloat16 *destination, float4 value) {
+__device__ __forceinline__ void gdn_store_state_x4(__nv_bfloat16 *destination,
+                                                   float4 value) {
   *reinterpret_cast<__nv_bfloat162 *>(destination) =
       __floats2bfloat162_rn(value.x, value.y);
   *reinterpret_cast<__nv_bfloat162 *>(destination + 2) =
@@ -116,10 +115,11 @@ gdn_ragged_from_float<__nv_bfloat16>(float value) {
   return __float2bfloat16_rn(value);
 }
 
-// (batch, head) -> row of the state buffer: identity on a gathered [B*H, ...] copy, or through the
-// per-batch slot table when a kernel updates the recurrent state pool in place
-__device__ __forceinline__ size_t gdn_state_row(const int32_t *__restrict__ slot_indices,
-                                                int bidx, int h, int num_heads) {
+// (batch, head) -> row of the state buffer: identity on a gathered [B*H, ...]
+// copy, or through the per-batch slot table when a kernel updates the recurrent
+// state pool in place
+__device__ __forceinline__ size_t gdn_state_row(
+    const int32_t *__restrict__ slot_indices, int bidx, int h, int num_heads) {
   const size_t slot = slot_indices ? (size_t)slot_indices[bidx] : (size_t)bidx;
   return slot * num_heads + h;
 }
@@ -138,8 +138,9 @@ template <typename T> struct alignas(8) GdnConvWidth4 {
 };
 
 template <typename T>
-__device__ __forceinline__ T gdn_conv_width4_update(
-    T input, const GdnConvWidth4<T> &weights, GdnConvWidth4<T> *state) {
+__device__ __forceinline__ T
+gdn_conv_width4_update(T input, const GdnConvWidth4<T> &weights,
+                       GdnConvWidth4<T> *state, float bias) {
   GdnConvWidth4<T> values = *state;
 
 #pragma unroll
@@ -149,7 +150,7 @@ __device__ __forceinline__ T gdn_conv_width4_update(
   values.values[GDN_PACKED_CONV_WIDTH - 1] = input;
   *state = values;
 
-  float acc = 0.0f;
+  float acc = bias;
 #pragma unroll
   for (int i = 0; i < GDN_PACKED_CONV_WIDTH; i++) {
     acc += (float)values.values[i] * (float)weights.values[i];
@@ -158,13 +159,20 @@ __device__ __forceinline__ T gdn_conv_width4_update(
   return (T)(acc * sig);
 }
 
+// a conv's bias for channel `ch`, before its SiLU; GDN's conv has none
 template <typename T>
-__device__ __forceinline__ float causal_conv1d_width4_load(
-    const T *__restrict__ x, const T *__restrict__ state, int pos,
-    size_t x_batch_offset, int64_t x_stride_s, int64_t x_stride_c, int ch) {
+__device__ __forceinline__ float conv_bias(const T *__restrict__ bias, int ch) {
+  return bias != nullptr ? (float)bias[ch] : 0.0f;
+}
+
+template <typename T>
+__device__ __forceinline__ float
+causal_conv1d_width4_load(const T *__restrict__ x, const T *__restrict__ state,
+                          int pos, size_t x_batch_offset, int64_t x_stride_s,
+                          int64_t x_stride_c, int ch) {
   if (pos >= 0) {
-    return (float)x[x_batch_offset + (size_t)pos * x_stride_s +
-                    (size_t)ch * x_stride_c];
+    return (float)
+        x[x_batch_offset + (size_t)pos * x_stride_s + (size_t)ch * x_stride_c];
   }
   return (float)state[GDN_PACKED_CONV_WIDTH + pos];
 }
@@ -186,12 +194,13 @@ __device__ __forceinline__ float gdn_grouped_k_sum(float value) {
   return value;
 }
 
-__device__ __forceinline__ void gdn_cp_async_cg_16(void *dst,
-                                                   const void *src) {
+__device__ __forceinline__ void gdn_cp_async_cg_16(void *dst, const void *src) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-  const uint32_t dst_smem = static_cast<uint32_t>(__cvta_generic_to_shared(dst));
+  const uint32_t dst_smem =
+      static_cast<uint32_t>(__cvta_generic_to_shared(dst));
   asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n"
-               : : "r"(dst_smem), "l"(src));
+               :
+               : "r"(dst_smem), "l"(src));
 #else
   *reinterpret_cast<float4 *>(dst) = *reinterpret_cast<const float4 *>(src);
 #endif
@@ -236,16 +245,17 @@ __device__ __forceinline__ float gdn_warp_max(float value, int width = 32) {
   return value;
 }
 
-__device__ __forceinline__ size_t gdn_fp8_scale_offset(
-    int normalized_row, int groups, int scale_stride_m) {
+__device__ __forceinline__ size_t gdn_fp8_scale_offset(int normalized_row,
+                                                       int groups,
+                                                       int scale_stride_m) {
   const int projection_row = normalized_row / groups;
   const int group = normalized_row - projection_row * groups;
   return (size_t)group * scale_stride_m + projection_row;
 }
 
-__device__ __forceinline__ void gdn_fp8_quant_params(
-    float maximum, int scale_layout, float &quant_scale,
-    float &inverse_quant_scale) {
+__device__ __forceinline__ void
+gdn_fp8_quant_params(float maximum, int scale_layout, float &quant_scale,
+                     float &inverse_quant_scale) {
   if (scale_layout == 0) {
     inverse_quant_scale = fmaxf(maximum, 1.0e-10f) / 448.0f;
     quant_scale = 1.0f / inverse_quant_scale;
@@ -255,12 +265,11 @@ __device__ __forceinline__ void gdn_fp8_quant_params(
   inverse_quant_scale = 1.0f / quant_scale;
 }
 
-__device__ __forceinline__ gdn_fp8_e4m3 gdn_fp8_quantize(
-    float value, float quant_scale, float inverse_quant_scale,
-    int scale_layout) {
-  const float scaled = scale_layout == 0
-                           ? value / inverse_quant_scale
-                           : value * quant_scale;
+__device__ __forceinline__ gdn_fp8_e4m3
+gdn_fp8_quantize(float value, float quant_scale, float inverse_quant_scale,
+                 int scale_layout) {
+  const float scaled =
+      scale_layout == 0 ? value / inverse_quant_scale : value * quant_scale;
   return gdn_fp8_e4m3(fminf(fmaxf(scaled, -448.0f), 448.0f));
 }
 
@@ -297,7 +306,8 @@ constexpr int GDN_SPEC_FUSED_VALUE_CHUNKS =
 constexpr int GDN_SPEC_FUSED_VALUES_PER_WARP =
     GDN_SPEC_FUSED_VALUE_CHUNK / GDN_SPEC_FUSED_WARPS;
 
-// Paired reductions favor 16-bit states and underfilled or saturated F32 grids; serial sustains mid-grid bandwidth.
+// Paired reductions favor 16-bit states and underfilled or saturated F32 grids;
+// serial sustains mid-grid bandwidth.
 constexpr int GDN_SPEC_FUSED_PAIR_LOW_GRID_MAX = 144;
 
 constexpr int GDN_SPEC_FUSED_PAIR_HIGH_GRID_MIN = 768;
@@ -312,10 +322,9 @@ gdn_spec_checkpoint_base(uint32_t active_slot, int checkpoint_lanes) {
 }
 
 __device__ __forceinline__ float gdn_spec_softplus(float value) {
-  return value > 20.0f
-             ? value
-             : (value > 0.0f ? value + log1pf(expf(-value))
-                             : log1pf(expf(value)));
+  return value > 20.0f ? value
+                       : (value > 0.0f ? value + log1pf(expf(-value))
+                                       : log1pf(expf(value)));
 }
 
 __device__ __forceinline__ float2 gdn_spec_warp_sum_pair(float x, float y) {
@@ -328,8 +337,9 @@ __device__ __forceinline__ float2 gdn_spec_warp_sum_pair(float x, float y) {
 }
 
 template <typename StateT>
-__device__ __forceinline__ void gdn_spec_copy_state_chunk(
-    StateT *shared_state, const StateT *state, int chunk, int thread) {
+__device__ __forceinline__ void
+gdn_spec_copy_state_chunk(StateT *shared_state, const StateT *state, int chunk,
+                          int thread) {
   constexpr int ELEMENTS_PER_COPY = 16 / sizeof(StateT);
   constexpr int ELEMENTS_PER_CHUNK =
       GDN_SPEC_FUSED_VALUE_CHUNK * GDN_DECODE_VALUE_MAJOR_K;

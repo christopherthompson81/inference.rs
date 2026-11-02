@@ -1277,27 +1277,95 @@ pub fn moe_decode(
             down.gguf_type()
         );
     }
-    let Device::Cuda(dev) = gate.kernel_device() else {
+    if up.kernel_shape().dims3()? != gate.kernel_shape().dims3()? {
+        inference_tensor::bail!(
+            "fast_mmvq: gate {:?} and up {:?} shapes differ",
+            gate.kernel_shape(),
+            up.kernel_shape()
+        );
+    }
+    moe_decode_with(
+        MoeFirst::Glu {
+            gate,
+            up,
+            activation,
+        },
+        down,
+        xs,
+        ids,
+        topk,
+    )
+}
+
+/// Whether `moe_decode_ungated` reads these stacked experts.
+pub fn supports_moe_ungated(up: &dyn KernelWeight, down: &dyn KernelWeight) -> bool {
+    [up, down]
+        .into_iter()
+        .all(|w| moe_launcher(w.gguf_type()).is_some() && w.kernel_shape().rank() == 3)
+}
+
+/// [`moe_decode`] for experts with no gate, `down(act(up(x)))`: `act` runs on the up rows (F32, `[pairs, inter]`).
+pub fn moe_decode_ungated(
+    up: &dyn KernelWeight,
+    down: &dyn KernelWeight,
+    xs: &Tensor,
+    ids: &Tensor,
+    topk: usize,
+    act: &dyn Fn(&Tensor) -> Result<Tensor>,
+) -> Result<Tensor> {
+    if !supports_moe_ungated(up, down) {
+        inference_tensor::bail!(
+            "fast_mmvq: no expert-indexed matvec for {:?}/{:?}",
+            up.gguf_type(),
+            down.gguf_type()
+        );
+    }
+    moe_decode_with(MoeFirst::Plain { up, act }, down, xs, ids, topk)
+}
+
+// how an expert's hidden rows come from its input: a GLU the kernel fuses, or one projection then `act`
+enum MoeFirst<'a> {
+    Glu {
+        gate: &'a dyn KernelWeight,
+        up: &'a dyn KernelWeight,
+        activation: GluActivationType,
+    },
+    Plain {
+        up: &'a dyn KernelWeight,
+        act: &'a dyn Fn(&Tensor) -> Result<Tensor>,
+    },
+}
+
+fn moe_decode_with(
+    first: MoeFirst<'_>,
+    down: &dyn KernelWeight,
+    xs: &Tensor,
+    ids: &Tensor,
+    topk: usize,
+) -> Result<Tensor> {
+    let lead = match first {
+        MoeFirst::Glu { gate, .. } => gate,
+        MoeFirst::Plain { up, .. } => up,
+    };
+    let Device::Cuda(dev) = lead.kernel_device() else {
         inference_tensor::bail!("fast_mmvq: experts must live on CUDA");
     };
-    if !xs.device().same_device(&gate.kernel_device())
-        || !ids.device().same_device(&gate.kernel_device())
+    if !xs.device().same_device(&lead.kernel_device())
+        || !ids.device().same_device(&lead.kernel_device())
     {
         inference_tensor::bail!(
             "fast_mmvq: MoE input, expert ids and experts are on different devices"
         );
     }
-    let (_, intermediate, hidden) = gate.kernel_shape().dims3()?;
+    let (_, intermediate, hidden) = lead.kernel_shape().dims3()?;
     let (tokens, k) = xs.dims2()?;
-    if up.kernel_shape().dims3()? != gate.kernel_shape().dims3()?
-        || down.kernel_shape().dims3()?.1 != hidden
+    if down.kernel_shape().dims3()?.1 != hidden
         || down.kernel_shape().dims3()?.2 != intermediate
         || k != hidden
     {
         inference_tensor::bail!(
-            "fast_mmvq: expert shapes gate {:?} up {:?} down {:?} do not fit input {:?}",
-            gate.kernel_shape(),
-            up.kernel_shape(),
+            "fast_mmvq: expert shapes {:?} and down {:?} do not fit input {:?}",
+            lead.kernel_shape(),
             down.kernel_shape(),
             xs.shape()
         );
@@ -1316,7 +1384,7 @@ pub fn moe_decode(
         })?;
         Ok((rows * row) as i64)
     };
-    let gate_stride = expert_bytes(gate, intermediate, hidden)?;
+    let lead_stride = expert_bytes(lead, intermediate, hidden)?;
     let down_stride = expert_bytes(down, hidden, intermediate)?;
 
     let stream = dev.cuda_stream();
@@ -1348,18 +1416,28 @@ pub fn moe_decode(
     );
     let ids_ptr = ids_ptr as *const std::ffi::c_void;
 
-    let mut activated = unsafe { dev.alloc::<f32>(pairs * intermediate)? };
+    let mut hidden_rows = unsafe { dev.alloc::<f32>(pairs * intermediate)? };
     let mut out = unsafe { dev.alloc::<f32>(pairs * hidden)? };
     {
-        let (gate_ptr, _gate_guard) = gate.kernel_ptr(&stream)?;
-        let (up_ptr, _up_guard) = up.kernel_ptr(&stream)?;
-        let (mid_ptr, _mid_guard) = slice_ptr_mut_on_stream(&mut activated, 0, &stream);
-        let launch = moe_launcher(gate.gguf_type()).expect("supports_moe checked");
+        let (lead_ptr, _lead_guard) = lead.kernel_ptr(&stream)?;
+        let (mid_ptr, _mid_guard) = slice_ptr_mut_on_stream(&mut hidden_rows, 0, &stream);
+        let launch = moe_launcher(lead.gguf_type()).expect("supports_moe checked");
+        let (up_ptr, _up_guard, activation) = match first {
+            MoeFirst::Glu { up, activation, .. } => {
+                let (ptr, guard) = up.kernel_ptr(&stream)?;
+                (
+                    ptr as *const std::ffi::c_void,
+                    Some(guard),
+                    activation as i32,
+                )
+            }
+            MoeFirst::Plain { .. } => (std::ptr::null(), None, MOE_NO_ACTIVATION),
+        };
         unsafe {
             launch(
-                gate_ptr as *const _,
-                up_ptr as *const _,
-                gate_stride,
+                lead_ptr as *const _,
+                up_ptr,
+                lead_stride,
                 x_q8,
                 ids_ptr,
                 mid_ptr as *mut f32,
@@ -1368,9 +1446,28 @@ pub fn moe_decode(
                 (x_padded / Q8_1_BLOCK_SIZE) as i32,
                 topk as i32,
                 pairs as i32,
-                activation as i32,
+                activation,
                 stream_ptr,
             );
+        }
+    }
+    // the hidden rows down reads: the fused GLU's as the kernel wrote them, an ungated expert's after `act`
+    let rows = Tensor::from((
+        Storage::Cuda(CudaStorage::wrap_cuda_slice(hidden_rows, dev.clone())),
+        Shape::from((pairs, intermediate)),
+    ));
+    let activated = match first {
+        MoeFirst::Glu { .. } => rows,
+        MoeFirst::Plain { act, .. } => act(&rows)?.to_dtype(DType::F32)?.contiguous()?,
+    };
+    {
+        let (storage, layout) = activated.storage_and_layout();
+        let Storage::Cuda(cuda) = &*storage else {
+            inference_tensor::bail!("fast_mmvq: activated rows must live on CUDA");
+        };
+        let (mid_ptr, _mid_guard) =
+            slice_ptr_on_stream(cuda.as_cuda_slice::<f32>()?, layout.start_offset(), &stream);
+        unsafe {
             ffi::launch_mmvq_gguf_quantize_q8_1_f32(
                 mid_ptr as *const _,
                 mid_q8,

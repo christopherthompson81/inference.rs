@@ -80,10 +80,13 @@ __global__ void __launch_bounds__(WARP_SIZE, 1) ssm_scan_kernel(
   // state layout: (batch, n_heads, head_dim, d_state)
   const int state_base = batch_idx * n_heads * head_dim * d_state +
                          head_idx * head_dim * d_state + head_off * d_state;
+  // a d_state that is not a whole number of lanes leaves the last lanes' items
+  // past the row
   float reg_state[c_factor];
 #pragma unroll
   for (int j = 0; j < c_factor; j++) {
-    reg_state[j] = state[state_base + lane * c_factor + j];
+    const int state_off = lane * c_factor + j;
+    reg_state[j] = state_off < d_state ? state[state_base + state_off] : 0.0f;
   }
 
   // Process each timestep
@@ -111,6 +114,8 @@ __global__ void __launch_bounds__(WARP_SIZE, 1) ssm_scan_kernel(
 #pragma unroll
     for (int j = 0; j < c_factor; j++) {
       const int state_off = lane * c_factor + j;
+      if (state_off >= d_state)
+        continue;
       const float b_val = B[bc_base + state_off];
       const float c_val = C[bc_base + state_off];
 
@@ -132,7 +137,9 @@ __global__ void __launch_bounds__(WARP_SIZE, 1) ssm_scan_kernel(
 // Write final state back
 #pragma unroll
   for (int j = 0; j < c_factor; j++) {
-    state[state_base + lane * c_factor + j] = reg_state[j];
+    const int state_off = lane * c_factor + j;
+    if (state_off < d_state)
+      state[state_base + state_off] = reg_state[j];
   }
 }
 

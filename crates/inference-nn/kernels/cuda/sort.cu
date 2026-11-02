@@ -1481,7 +1481,9 @@ __launch_bounds__(MOE_ROUTER_ROWS_PER_BLOCK * 32, 1) __global__
         selection[i] += selection_bias[expert];
       }
     }
-    if (selection[i] != selection[i]) {
+    // past the experts (fewer than a warp's lanes) a sigmoid score is 0, which a negative bias on every expert loses to
+    if (selection[i] != selection[i] ||
+        (n_experts % 32 != 0 && expert >= n_experts)) {
       selection[i] = -INFINITY;
     }
   }

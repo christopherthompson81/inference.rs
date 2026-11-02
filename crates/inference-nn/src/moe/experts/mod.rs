@@ -607,6 +607,14 @@ impl MoEExperts {
         Ok((ys, overlap()?))
     }
 
+    /// Whether a decode step's experts run without reading their routes on the host, as a CUDA graph capture needs.
+    pub fn decode_is_device_only(&self) -> bool {
+        match &self.backend {
+            MoEExpertsBackendImpl::Ungated(w) => w.decode_is_device_only(),
+            _ => true,
+        }
+    }
+
     /// Whether the experts live in host memory, a cache of them on the GPU.
     pub fn is_offloaded(&self) -> bool {
         #[cfg(feature = "cuda")]

@@ -19,8 +19,8 @@ const NEMO_UP: &str = "gate_and_up_projs";
 const NEMO_DOWN: &str = "down_projs";
 
 pub(super) struct UngatedExpertsWeights {
-    up: Arc<dyn QuantMethod>,
-    down: Arc<dyn QuantMethod>,
+    pub(super) up: Arc<dyn QuantMethod>,
+    pub(super) down: Arc<dyn QuantMethod>,
 }
 
 impl UngatedExpertsWeights {
@@ -242,6 +242,126 @@ impl UngatedExpertsWeights {
         Ok(Some(ys))
     }
 
+    // a prompt's routes sorted by expert through grouped mmq, each routed expert's blocks read once per chunk
+    // instead of once per routed token; calibration keeps the gather path, which hands back the routed rows
+    #[cfg(feature = "cuda")]
+    pub(super) fn forward_cuda_grouped(
+        [up, down]: [&Arc<dyn QuantMethod>; 2],
+        forward: &MoEForward,
+        config: MoEForwardConfig,
+    ) -> Result<Option<Tensor>> {
+        if !forward.xs.device().is_cuda()
+            || !forward.shape.phase.is_prefill()
+            || forward.shape.num_tokens < super::backends::GROUPED_PREFILL_MIN_TOKENS
+            || forward.lora.is_some()
+            || up.stats_snapshot().is_some()
+            || down.stats_snapshot().is_some()
+        {
+            return Ok(None);
+        }
+        let (Some(up_qt), Some(down_qt)) = (up.kernel_weight(), down.kernel_weight()) else {
+            return Ok(None);
+        };
+        if !inference_quant::supports_mmq_weight(up_qt)
+            || !inference_quant::supports_mmq_weight(down_qt)
+        {
+            return Ok(None);
+        }
+        let Some(super::backends::GroupedDispatch {
+            dev,
+            expert_bounds,
+            sorted_token_ids,
+            sorted_source_ids,
+        }) = super::backends::grouped_dispatch(forward, config, false)?
+        else {
+            return Ok(None);
+        };
+        let (tokens, topk) = (forward.shape.num_tokens, config.num_experts_per_tok);
+        let total = tokens * topk;
+        let hidden = inference_quant::grouped_moe_mmq(
+            up_qt,
+            forward.xs_flat,
+            &sorted_source_ids,
+            &sorted_token_ids,
+            &expert_bounds,
+            total,
+            tokens,
+            config.num_experts,
+            dev,
+        )?
+        .apply(&config.act)?;
+        let inter = hidden.dim(D::Minus1)?;
+        let down_rows = inference_quant::grouped_moe_mmq(
+            down_qt,
+            &hidden.reshape((total, inter))?,
+            &sorted_token_ids,
+            &sorted_token_ids,
+            &expert_bounds,
+            total,
+            tokens,
+            config.num_experts,
+            dev,
+        )?
+        .to_dtype(hidden.dtype())?;
+        inference_quant::moe_weighted_reduce_flat_same_dtype(
+            &down_rows.reshape((total, forward.shape.hidden_dim))?,
+            forward.topk_weights,
+            tokens,
+            topk,
+            dev,
+        )?
+        .to_dtype(forward.original_dtype)
+        .map(Some)
+    }
+
+    // the indexed matvec runs both projections; dense stacks route on the host, as grouped matmuls by expert
+    pub(super) fn decode_is_device_only(&self) -> bool {
+        #[cfg(feature = "cuda")]
+        {
+            let resolved =
+                |w: &Arc<dyn QuantMethod>| w.resolved_layer().unwrap_or_else(|| w.clone());
+            let (up, down) = (resolved(&self.up), resolved(&self.down));
+            if let (Some(up), Some(down)) = (up.kernel_weight(), down.kernel_weight()) {
+                return inference_quant::supports_indexed_moe_mmvq_ungated(up, down);
+            }
+        }
+        false
+    }
+
+    // a decode step's few routes through the expert-indexed matvec, reading only the routed experts' blocks
+    #[cfg(feature = "cuda")]
+    pub(super) fn forward_cuda_decode(
+        [up, down]: [&Arc<dyn QuantMethod>; 2],
+        forward: &MoEForward,
+        config: MoEForwardConfig,
+    ) -> Result<Option<Tensor>> {
+        if !forward.xs.device().is_cuda()
+            || forward.shape.num_tokens > super::backends::INDEXED_MMVQ_MAX_TOKENS
+            || forward.lora.is_some()
+            || up.stats_snapshot().is_some()
+            || down.stats_snapshot().is_some()
+        {
+            return Ok(None);
+        }
+        let (Some(up_qt), Some(down_qt)) = (up.kernel_weight(), down.kernel_weight()) else {
+            return Ok(None);
+        };
+        if !inference_quant::supports_indexed_moe_mmvq_ungated(up_qt, down_qt) {
+            return Ok(None);
+        }
+        let routed = inference_quant::indexed_moe_mmvq_ungated(
+            up_qt,
+            down_qt,
+            forward.xs_flat,
+            forward.topk_ids,
+            config.num_experts_per_tok,
+            &|rows| rows.apply(&config.act),
+        )?;
+        let out =
+            super::backends::weighted_reduce_f32(forward, &routed, config.num_experts_per_tok)?;
+        out.to_dtype(forward.original_dtype).map(Some)
+    }
+
     pub(super) fn forward_impl(
         &self,
         forward: &MoEForward,
@@ -262,6 +382,23 @@ impl UngatedExpertsWeights {
         if let Some(ys) = Self::forward_cpu_blocks([&up, &down], forward, config)? {
             return Ok(ys);
         }
+        #[cfg(feature = "cuda")]
+        if let Some(ys) = Self::forward_cuda_grouped([&up, &down], forward, config)? {
+            return Ok(ys);
+        }
+        #[cfg(feature = "cuda")]
+        if let Some(ys) = Self::forward_cuda_decode([&up, &down], forward, config)? {
+            return Ok(ys);
+        }
+        Self::forward_gather([&up, &down], forward, config)
+    }
+
+    // each route's rows gathered through the indexed kernels, the path for decode and for calibration
+    pub(super) fn forward_gather(
+        [up, down]: [&Arc<dyn QuantMethod>; 2],
+        forward: &MoEForward,
+        config: MoEForwardConfig,
+    ) -> Result<Tensor> {
         let ids = forward.topk_ids;
         up.process_routed_stats(forward.xs_flat, ids)?;
         let shape = forward.shape;

@@ -376,6 +376,12 @@ impl MultimodalModel for Granite4VisionModel {
         self.language_model.config()
     }
 
+    fn model_config(
+        &self,
+    ) -> std::sync::Arc<dyn inference_nn::paged_attention::ModelConfigLike + Send + Sync> {
+        self.language_model.paged_kv_config()
+    }
+
     fn default_model_specific_args(&self, _input_ids: &Tensor) -> Box<dyn std::any::Any> {
         Box::new(Granite4VisionSpecificArgs {
             image_sizes: Vec::new(),

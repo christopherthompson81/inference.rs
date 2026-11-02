@@ -15,6 +15,7 @@ template <typename T>
 __global__ void causal_conv1d_update_kernel(
     const T *__restrict__ x,      // [B, 1, conv_dim]
     const T *__restrict__ weight, // [conv_dim, kernel_size]
+    const T *__restrict__ bias,   // [conv_dim] or null
     T *__restrict__ conv_state,   // [B, conv_dim, kernel_size]
     T *__restrict__ output,       // [B, 1, conv_dim]
     int batch_size, int conv_dim, int kernel_size, int64_t x_stride_b,
@@ -45,7 +46,7 @@ __global__ void causal_conv1d_update_kernel(
   cs[kernel_size - 1] = x[(size_t)b * x_stride_b + (size_t)ch * x_stride_c];
 
   // Dot product with weight
-  float acc = 0.0f;
+  float acc = conv_bias(bias, ch);
   for (int i = 0; i < kernel_size; i++) {
     acc += (float)cs[i] * (float)w[i];
   }
@@ -60,8 +61,9 @@ __global__ void causal_conv1d_update_kernel(
 template <typename T>
 __global__ void causal_conv1d_update_width4_kernel(
     const T *__restrict__ x, const T *__restrict__ weight,
-    T *__restrict__ conv_state, T *__restrict__ output, int batch_size,
-    int conv_dim, int64_t x_stride_b, int64_t x_stride_s, int64_t x_stride_c,
+    const T *__restrict__ bias, T *__restrict__ conv_state,
+    T *__restrict__ output, int batch_size, int conv_dim, int64_t x_stride_b,
+    int64_t x_stride_s, int64_t x_stride_c,
     const int32_t *__restrict__ slot_indices) {
   const int ch = blockIdx.x * blockDim.x + threadIdx.x;
   const int b = blockIdx.y;
@@ -80,37 +82,36 @@ __global__ void causal_conv1d_update_width4_kernel(
   const size_t x_idx = (size_t)b * x_stride_b + (size_t)ch * x_stride_c;
   auto *state = reinterpret_cast<GdnConvWidth4<T> *>(conv_state);
   const auto *weights = reinterpret_cast<const GdnConvWidth4<T> *>(weight);
-  output[input_idx] =
-      gdn_conv_width4_update(x[x_idx], weights[ch], &state[state_idx]);
+  output[input_idx] = gdn_conv_width4_update(
+      x[x_idx], weights[ch], &state[state_idx], conv_bias(bias, ch));
 }
 
 template <typename T>
-static void launch_causal_conv1d_update(const void *x, const void *weight,
-                                        void *conv_state, void *output,
-                                        int batch_size, int conv_dim,
-                                        int kernel_size, int64_t x_stride_b,
-                                        int64_t x_stride_s, int64_t x_stride_c,
-                                        const int32_t *slot_indices,
-                                        cudaStream_t custream) {
+static void launch_causal_conv1d_update(
+    const void *x, const void *weight, const void *bias, void *conv_state,
+    void *output, int batch_size, int conv_dim, int kernel_size,
+    int64_t x_stride_b, int64_t x_stride_s, int64_t x_stride_c,
+    const int32_t *slot_indices, cudaStream_t custream) {
   dim3 block(GDN_CHANNEL_BLOCK_SIZE);
   dim3 grid((conv_dim + GDN_CHANNEL_BLOCK_SIZE - 1) / GDN_CHANNEL_BLOCK_SIZE,
             batch_size);
   if (kernel_size == GDN_PACKED_CONV_WIDTH) {
     causal_conv1d_update_width4_kernel<T><<<grid, block, 0, custream>>>(
-        (const T *)x, (const T *)weight, (T *)conv_state, (T *)output,
-        batch_size, conv_dim, x_stride_b, x_stride_s, x_stride_c, slot_indices);
+        (const T *)x, (const T *)weight, (const T *)bias, (T *)conv_state,
+        (T *)output, batch_size, conv_dim, x_stride_b, x_stride_s, x_stride_c,
+        slot_indices);
   } else {
     causal_conv1d_update_kernel<T><<<grid, block, 0, custream>>>(
-        (const T *)x, (const T *)weight, (T *)conv_state, (T *)output,
-        batch_size, conv_dim, kernel_size, x_stride_b, x_stride_s, x_stride_c,
-        slot_indices);
+        (const T *)x, (const T *)weight, (const T *)bias, (T *)conv_state,
+        (T *)output, batch_size, conv_dim, kernel_size, x_stride_b, x_stride_s,
+        x_stride_c, slot_indices);
   }
 }
 
 // dtype: 0 f16, 1 bf16, 2 f32
 extern "C" void causal_conv1d_update(const void *x, const void *weight,
-                                     void *conv_state, void *output,
-                                     int batch_size, int conv_dim,
+                                     const void *bias, void *conv_state,
+                                     void *output, int batch_size, int conv_dim,
                                      int kernel_size, int64_t x_stride_b,
                                      int64_t x_stride_s, int64_t x_stride_c,
                                      const int32_t *slot_indices, int dtype,
@@ -118,15 +119,15 @@ extern "C" void causal_conv1d_update(const void *x, const void *weight,
   const cudaStream_t custream = (cudaStream_t)stream;
   if (dtype == 0) {
     launch_causal_conv1d_update<__half>(
-        x, weight, conv_state, output, batch_size, conv_dim, kernel_size,
+        x, weight, bias, conv_state, output, batch_size, conv_dim, kernel_size,
         x_stride_b, x_stride_s, x_stride_c, slot_indices, custream);
   } else if (dtype == 1) {
     launch_causal_conv1d_update<__nv_bfloat16>(
-        x, weight, conv_state, output, batch_size, conv_dim, kernel_size,
+        x, weight, bias, conv_state, output, batch_size, conv_dim, kernel_size,
         x_stride_b, x_stride_s, x_stride_c, slot_indices, custream);
   } else {
     launch_causal_conv1d_update<float>(
-        x, weight, conv_state, output, batch_size, conv_dim, kernel_size,
+        x, weight, bias, conv_state, output, batch_size, conv_dim, kernel_size,
         x_stride_b, x_stride_s, x_stride_c, slot_indices, custream);
   }
 }
@@ -145,6 +146,7 @@ template <typename T>
 __global__ void causal_conv1d_full_kernel(
     const T *__restrict__ x,      // [B, S, conv_dim]
     const T *__restrict__ weight, // [conv_dim, kernel_size]
+    const T *__restrict__ bias,   // [conv_dim] or null
     const T *__restrict__ conv_state,
     T *__restrict__ output, // [B, S, conv_dim]
     int batch_size, int conv_dim, int seq_len, int kernel_size,
@@ -172,7 +174,7 @@ __global__ void causal_conv1d_full_kernel(
       conv_state +
       (gdn_state_row(slot_indices, b, 0, 1) * conv_dim + ch) * kernel_size;
 
-  float acc = 0.0f;
+  float acc = conv_bias(bias, ch);
   for (int i = 0; i < kernel_size; i++) {
     int src_pos = pos - (kernel_size - 1) + i;
     float x_val =
@@ -193,9 +195,10 @@ __global__ void causal_conv1d_full_kernel(
 template <typename T, int TOKEN_TILE>
 __global__ void causal_conv1d_full_width4_tiled_kernel(
     const T *__restrict__ x, const T *__restrict__ weight,
-    const T *__restrict__ conv_state, T *__restrict__ output, int batch_size,
-    int conv_dim, int seq_len, int64_t x_stride_b, int64_t x_stride_s,
-    int64_t x_stride_c, const int32_t *__restrict__ slot_indices) {
+    const T *__restrict__ bias, const T *__restrict__ conv_state,
+    T *__restrict__ output, int batch_size, int conv_dim, int seq_len,
+    int64_t x_stride_b, int64_t x_stride_s, int64_t x_stride_c,
+    const int32_t *__restrict__ slot_indices) {
   const int ch = blockIdx.x * blockDim.x + threadIdx.x;
   const int start = blockIdx.y * TOKEN_TILE;
   const int b = blockIdx.z;
@@ -228,12 +231,14 @@ __global__ void causal_conv1d_full_width4_tiled_kernel(
   const float w1 = (float)w[1];
   const float w2 = (float)w[2];
   const float w3 = (float)w[3];
+  const float channel_bias = conv_bias(bias, ch);
 
   for (int pos = start; pos < end; ++pos) {
     const float x3 = (float)
         x[x_batch_offset + (size_t)pos * x_stride_s + (size_t)ch * x_stride_c];
     const float acc =
-        __fmaf_rn(x0, w0, __fmaf_rn(x1, w1, __fmaf_rn(x2, w2, x3 * w3)));
+        __fmaf_rn(x0, w0, __fmaf_rn(x1, w1, __fmaf_rn(x2, w2, x3 * w3))) +
+        channel_bias;
     const float result = acc / (1.0f + expf(-acc));
     *out = (T)result;
     out += conv_dim;
@@ -244,16 +249,16 @@ __global__ void causal_conv1d_full_width4_tiled_kernel(
 }
 
 template <typename T>
-__global__ void
-save_conv_state_kernel(const T *__restrict__ x, // [B, S, conv_dim]
-                       // May alias conv_state_out (pooled in-place update):
-                       // every read is ahead of the write position
-                       const T *conv_state_in,
-                       T *conv_state_out, // [B, conv_dim, kernel_size]
-                       int batch_size, int conv_dim, int seq_len,
-                       int kernel_size, int64_t x_stride_b, int64_t x_stride_s,
-                       int64_t x_stride_c,
-                       const int32_t *__restrict__ slot_indices) {
+__global__ void save_conv_state_kernel(
+    const T
+        *__restrict__ x, // [B, S, conv_dim]
+                         // May alias conv_state_out (pooled in-place update):
+                         // every read is ahead of the write position
+    const T *conv_state_in,
+    T *conv_state_out, // [B, conv_dim, kernel_size]
+    int batch_size, int conv_dim, int seq_len, int kernel_size,
+    int64_t x_stride_b, int64_t x_stride_s, int64_t x_stride_c,
+    const int32_t *__restrict__ slot_indices) {
 
   const int ch = blockIdx.x * blockDim.x + threadIdx.x;
   const int b = blockIdx.y;
@@ -282,11 +287,13 @@ save_conv_state_kernel(const T *__restrict__ x, // [B, S, conv_dim]
 }
 
 template <typename T>
-static void launch_causal_conv1d_full(
-    const void *x, const void *weight, const void *conv_state_in,
-    void *conv_state_out, void *output, int batch_size, int conv_dim,
-    int seq_len, int kernel_size, int64_t x_stride_b, int64_t x_stride_s,
-    int64_t x_stride_c, const int32_t *slot_indices, cudaStream_t custream) {
+static void
+launch_causal_conv1d_full(const void *x, const void *weight, const void *bias,
+                          const void *conv_state_in, void *conv_state_out,
+                          void *output, int batch_size, int conv_dim,
+                          int seq_len, int kernel_size, int64_t x_stride_b,
+                          int64_t x_stride_s, int64_t x_stride_c,
+                          const int32_t *slot_indices, cudaStream_t custream) {
   const dim3 state_block(256);
   dim3 block = state_block;
   const size_t plane = (size_t)conv_dim * seq_len;
@@ -303,14 +310,14 @@ static void launch_causal_conv1d_full(
                 batch_size);
     causal_conv1d_full_width4_tiled_kernel<T, GDN_PREFILL_CONV_TOKEN_TILE>
         <<<grid, block, 0, custream>>>(
-            (const T *)x, (const T *)weight, (const T *)conv_state_in,
-            (T *)output, batch_size, conv_dim, seq_len, x_stride_b, x_stride_s,
-            x_stride_c, slot_indices);
+            (const T *)x, (const T *)weight, (const T *)bias,
+            (const T *)conv_state_in, (T *)output, batch_size, conv_dim,
+            seq_len, x_stride_b, x_stride_s, x_stride_c, slot_indices);
   } else {
     causal_conv1d_full_kernel<T><<<grid, block, 0, custream>>>(
-        (const T *)x, (const T *)weight, (const T *)conv_state_in, (T *)output,
-        batch_size, conv_dim, seq_len, kernel_size, x_stride_b, x_stride_s,
-        x_stride_c, slot_indices);
+        (const T *)x, (const T *)weight, (const T *)bias,
+        (const T *)conv_state_in, (T *)output, batch_size, conv_dim, seq_len,
+        kernel_size, x_stride_b, x_stride_s, x_stride_c, slot_indices);
   }
   dim3 grid2((conv_dim + state_block.x - 1) / state_block.x, batch_size);
   save_conv_state_kernel<T><<<grid2, state_block, 0, custream>>>(
@@ -320,27 +327,29 @@ static void launch_causal_conv1d_full(
 }
 
 // dtype: 0 f16, 1 bf16, 2 f32
-extern "C" void
-causal_conv1d_full(const void *x, const void *weight, const void *conv_state_in,
-                   void *conv_state_out, void *output, int batch_size,
-                   int conv_dim, int seq_len, int kernel_size,
-                   int64_t x_stride_b, int64_t x_stride_s, int64_t x_stride_c,
-                   const int32_t *slot_indices, int dtype, int64_t stream) {
+extern "C" void causal_conv1d_full(const void *x, const void *weight,
+                                   const void *bias, const void *conv_state_in,
+                                   void *conv_state_out, void *output,
+                                   int batch_size, int conv_dim, int seq_len,
+                                   int kernel_size, int64_t x_stride_b,
+                                   int64_t x_stride_s, int64_t x_stride_c,
+                                   const int32_t *slot_indices, int dtype,
+                                   int64_t stream) {
   const cudaStream_t custream = (cudaStream_t)stream;
   if (dtype == 0) {
-    launch_causal_conv1d_full<__half>(x, weight, conv_state_in, conv_state_out,
-                                      output, batch_size, conv_dim, seq_len,
-                                      kernel_size, x_stride_b, x_stride_s,
-                                      x_stride_c, slot_indices, custream);
+    launch_causal_conv1d_full<__half>(
+        x, weight, bias, conv_state_in, conv_state_out, output, batch_size,
+        conv_dim, seq_len, kernel_size, x_stride_b, x_stride_s, x_stride_c,
+        slot_indices, custream);
   } else if (dtype == 1) {
     launch_causal_conv1d_full<__nv_bfloat16>(
-        x, weight, conv_state_in, conv_state_out, output, batch_size, conv_dim,
-        seq_len, kernel_size, x_stride_b, x_stride_s, x_stride_c, slot_indices,
-        custream);
+        x, weight, bias, conv_state_in, conv_state_out, output, batch_size,
+        conv_dim, seq_len, kernel_size, x_stride_b, x_stride_s, x_stride_c,
+        slot_indices, custream);
   } else {
-    launch_causal_conv1d_full<float>(x, weight, conv_state_in, conv_state_out,
-                                     output, batch_size, conv_dim, seq_len,
-                                     kernel_size, x_stride_b, x_stride_s,
-                                     x_stride_c, slot_indices, custream);
+    launch_causal_conv1d_full<float>(
+        x, weight, bias, conv_state_in, conv_state_out, output, batch_size,
+        conv_dim, seq_len, kernel_size, x_stride_b, x_stride_s, x_stride_c,
+        slot_indices, custream);
   }
 }
