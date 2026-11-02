@@ -26,7 +26,6 @@ serde_default_fn!(usize, default_mamba_head_dim, 64);
 serde_default_fn!(usize, default_n_groups, 8);
 serde_default_fn!(usize, default_conv_kernel, 4);
 serde_default_fn!(usize, default_expand, 2);
-serde_default_fn!(f64, default_time_step_min, 0.001);
 serde_default_fn!(bool, default_true, true);
 serde_default_fn!(usize, default_chunk_size, 128);
 serde_default_fn!(String, default_state_dtype, F32_STATE.to_string());
@@ -67,8 +66,9 @@ pub struct Config {
     pub conv_kernel: usize,
     #[serde(default = "default_expand", alias = "mamba_expand")]
     pub expand: usize,
-    #[serde(default = "default_time_step_min", alias = "mamba_dt_min")]
-    pub time_step_min: f64,
+    // the Mamba dt clamp, prompts and decode alike (`time_step_min` only seeds the dt bias at init)
+    #[serde(default)]
+    pub time_step_limit: Option<[f64; 2]>,
     #[serde(default = "default_true", alias = "mamba_conv_bias")]
     pub use_conv_bias: bool,
     #[serde(default)]
@@ -252,7 +252,7 @@ impl Config {
             head_dim: Some(self.head_dim),
             mamba_inner_size: Some(self.mamba_num_heads * self.mamba_head_dim),
             mamba_norm_group_size: Some(self.mamba_num_heads * self.mamba_head_dim / self.n_groups),
-            mamba_prefill_dt_min: self.time_step_min,
+            mamba_dt_limit: self.time_step_limit,
             mamba_f32_state: self.mamba_ssm_cache_dtype == F32_STATE,
         })
     }
@@ -327,5 +327,19 @@ mod tests {
             listed.layer_kinds().unwrap(),
             pattern.layer_kinds().unwrap()
         );
+    }
+
+    // dt is clamped by `time_step_limit` alone, as NVIDIA's modeling code and llama.cpp do: transformers' port clamps
+    // prompts at `time_step_min`, which tripled the text KLD against llama.cpp's BF16 logits
+    #[test]
+    fn the_dt_clamp_is_the_time_step_limit_not_the_init_minimum() {
+        let unset = config(PATTERN).granite().unwrap();
+        assert_eq!(unset.mamba_dt_limit, None);
+        let set = Config::from_json(
+            r#"{"vocab_size": 16, "hidden_size": 8, "num_attention_heads": 2, "hybrid_override_pattern": "ME",
+                "time_step_min": 0.001, "time_step_limit": [0.0, 1e30]}"#,
+        )
+        .unwrap();
+        assert_eq!(set.granite().unwrap().mamba_dt_limit, Some([0.0, 1e30]));
     }
 }
