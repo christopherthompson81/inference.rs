@@ -194,3 +194,29 @@ sized by the user, is unchanged.
 
 **Result:** 512 MB reserved, the cache at 2157 MB (368,096 tokens, was 455,456), 880 MB available after the run;
 4 captures, 510 replays, no pressure events or evictions over `gpu_fresh.py`. Decode 167.3 tok/s, prompts unchanged.
+
+## Run 12 - 2026-11-02 ~11:00
+
+**Question:** what does a decode step's Mamba layer launch now (167 tok/s)?
+
+**Profile (one layer between two scans, from Run 9's trace):** 57 kernels a Mamba + MoE block. Before the scan:
+`a_log` cast, exp and neg, `D` and `dt_bias` casts every step; B and C cast and copied out to every head; the state
+gathered from the recurrent pool (`is_u32_f32`, 11.8 us) and scattered back after (`indexed_row_copy`), the conv
+state too. After it, the grouped gated RMSNorm as ~11 elementwise ops.
+
+**Change:** the scan kernel reads B and C by group and takes optional slot indices, updating those rows of a
+recurrent pool in place (a negative slot is a padding row: no state write, output 0); its wrapper takes the CPU scan's
+`SelectiveScan`. Granite keeps the scan's F32 constants from load. A CUDA decode step with an F32 state pool and conv
+pool in the activation dtype runs the conv update and the scan on the pool's rows, without the gather and scatter.
+GPU case `cuda_selective_scan_matches_the_cpu_scan_gathered_and_in_a_pool` (40-wide state, a padding row, untouched
+rows checked).
+
+**Result:** decode 200.8 / 200.8 tok/s (was 167; llama.cpp tg256 198); prompts 3463-3469 at 2.3-4.4K tokens. Greedy
+completions of the three prompts identical to Run 10's eager reference (ids and logprobs to 3 decimals).
+
+**Found on the way, not fixed:** `a_long_prompt_scores_as_its_graph_decode` fails about once in 20-60 runs, master
+too (1 in 60). Scoring the sequence twice gives the same prefill both times, so the decode is off, and only at one
+step (step 1, 2 or 4 of five, by 0.5-1.9 nats, the steps after it within 0.03), every step a graph replay (4 replays,
+cache hits). A one-step error that does not carry into later steps is not the recurrent state or the KV cache; it
+looks like the step's reported logprob, possibly read after the next replay (the engine runs one step ahead) has
+overwritten the graph's logits. The tokens match, so greedy decoding is unaffected.

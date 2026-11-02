@@ -253,6 +253,7 @@ inference_tensor::gpu_cases!(
         cuda_dflash_selector_supports_max_k_and_stable_ties,
         cuda_low_precision_top1_matches_f32_across_ties_and_nonfinite_values,
         cuda_moe_router_with_fewer_experts_than_lanes_picks_only_experts,
+        cuda_selective_scan_matches_the_cpu_scan_gathered_and_in_a_pool,
         cuda_qk_norm_rope_positions_preserves_projection_layout,
         cuda_qk_norm_rope_writes_token_major_from_packed_projection,
         cuda_ranked_topk_cooperative_boundaries_and_fallback_match_cpu,
@@ -790,6 +791,111 @@ fn test_repeat_interleave_flat() -> inference_tensor::Result<()> {
         vec![1., 2., 2., 3., 3., 3., 4., 4., 4., 4.]
     );
 
+    Ok(())
+}
+
+// the CUDA scan (B and C by group, a state not a whole number of warp lanes) against the CPU scan, on a gathered state
+// and on rows of a recurrent pool it updates in place, where a padding slot scores 0 and leaves the pool alone
+#[cfg(feature = "cuda")]
+fn cuda_selective_scan_matches_the_cpu_scan_gathered_and_in_a_pool() -> inference_tensor::Result<()>
+{
+    const BATCH: usize = 2;
+    const SEQ: usize = 5;
+    const HEADS: usize = 4;
+    const GROUPS: usize = 2;
+    const HEAD_DIM: usize = 8;
+    const STATE: usize = 40;
+    const POOL_ROWS: usize = 5;
+    const SLOTS: [u32; BATCH] = [3, 1];
+    const TOLERANCE: f32 = 1e-4;
+    let device = Device::new_cuda(0)?;
+    let rand = |shape: &[usize]| Tensor::randn(0f32, 0.5, shape, &Device::Cpu);
+    let (x, dt, b, c) = (
+        rand(&[BATCH, SEQ, HEADS, HEAD_DIM])?,
+        rand(&[BATCH, SEQ, HEADS])?,
+        rand(&[BATCH, SEQ, GROUPS, STATE])?,
+        rand(&[BATCH, SEQ, GROUPS, STATE])?,
+    );
+    let (a, d, dt_bias) = (
+        (rand(&[HEADS])?.abs()? * -1.0)?,
+        rand(&[HEADS])?,
+        rand(&[HEADS])?,
+    );
+    let pool = rand(&[POOL_ROWS, HEADS, HEAD_DIM, STATE])?;
+    let scan = |on: &Device| -> inference_tensor::Result<[Tensor; 7]> {
+        let moved = [&x, &dt, &a, &b, &c, &d, &dt_bias]
+            .iter()
+            .map(|t| t.to_device(on))
+            .collect::<inference_tensor::Result<Vec<_>>>()?;
+        Ok(moved.try_into().expect("seven scan inputs"))
+    };
+    fn inputs(t: &[Tensor; 7]) -> super::SelectiveScan<'_> {
+        super::SelectiveScan {
+            x: &t[0],
+            dt: &t[1],
+            a: &t[2],
+            b: &t[3],
+            c: &t[4],
+            d: &t[5],
+            dt_bias: &t[6],
+            dt_min: 0.0,
+            dt_max: f32::MAX,
+        }
+    }
+    let host = scan(&Device::Cpu)?;
+    let gathered = Tensor::stack(&SLOTS.map(|s| pool.get(s as usize).unwrap()), 0)?;
+    let mut expected_state = gathered.clone();
+    let expected = super::selective_scan_cpu(inputs(&host), &mut expected_state)?;
+
+    let on_gpu = scan(&device)?;
+    let mut gpu_state = gathered.to_device(&device)?;
+    let y = crate::cuda::ssm::selective_scan_cuda(inputs(&on_gpu), &mut gpu_state, None)?;
+    let close = |label: &str, actual: &Tensor, expected: &Tensor| -> inference_tensor::Result<()> {
+        let error = (actual.to_device(&Device::Cpu)? - expected)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        assert!(error < TOLERANCE, "{label}: max error {error}");
+        Ok(())
+    };
+    close("gathered output", &y, &expected)?;
+    close("gathered state", &gpu_state, &expected_state)?;
+
+    // the same rows in place in a pool, with a third, padding row
+    let padded = |t: &Tensor| -> inference_tensor::Result<Tensor> {
+        Tensor::cat(&[t.clone(), t.narrow(0, 0, 1)?], 0)?.to_device(&device)
+    };
+    let pooled = [&x, &dt, &b, &c]
+        .iter()
+        .map(|t| padded(t))
+        .collect::<inference_tensor::Result<Vec<_>>>()?;
+    let mut gpu_pool = pool.to_device(&device)?;
+    let slots = Tensor::new(&[SLOTS[0], SLOTS[1], u32::MAX], &device)?;
+    let y = crate::cuda::ssm::selective_scan_cuda(
+        super::SelectiveScan {
+            x: &pooled[0],
+            dt: &pooled[1],
+            b: &pooled[2],
+            c: &pooled[3],
+            ..inputs(&on_gpu)
+        },
+        &mut gpu_pool,
+        Some(&slots),
+    )?;
+    close("pooled output", &y.narrow(0, 0, BATCH)?, &expected)?;
+    let padding_row = y.narrow(0, BATCH, 1)?.flatten_all()?.to_vec1::<f32>()?;
+    assert!(
+        padding_row.iter().all(|&v| v == 0.0),
+        "a padding row scores 0"
+    );
+    let gpu_pool = gpu_pool.to_device(&Device::Cpu)?;
+    for row in 0..POOL_ROWS {
+        let want = match SLOTS.iter().position(|&s| s as usize == row) {
+            Some(i) => expected_state.get(i)?,
+            None => pool.get(row)?,
+        };
+        close(&format!("pool row {row}"), &gpu_pool.get(row)?, &want)?;
+    }
     Ok(())
 }
 
