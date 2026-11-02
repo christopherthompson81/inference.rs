@@ -220,3 +220,22 @@ step (step 1, 2 or 4 of five, by 0.5-1.9 nats, the steps after it within 0.03), 
 cache hits). A one-step error that does not carry into later steps is not the recurrent state or the KV cache; it
 looks like the step's reported logprob, possibly read after the next replay (the engine runs one step ahead) has
 overwritten the graph's logits. The tokens match, so greedy decoding is unaffected.
+
+## Run 13 - 2026-11-02 ~12:00
+
+**Question:** is Run 12's one-step decode error a graph-replay bug or test noise?
+
+**Code reading (subagent, read-only):** with logprobs requested no lookahead step launches: `Sampler::cuda_sampling_plan`
+returns `None` when `return_logprobs` is set (inference-nn/src/sampler.rs ~937), so `try_submit_cuda_token_batch`
+declines and the step samples eagerly, the logits copied to the host (`to_vec1`, a blocking copy on the graph's
+stream) and the token and logprob both taken from that copy. The graph's logits buffer is reused across replays, but
+the next replay cannot launch before that copy returns. So it is not the logprob read racing the next step.
+
+**Command:** the graph case with `INFERENCE_RS_CUDA_GRAPHS=0`, 100 runs (replay assertion skipped).
+
+**Result:** 0 failures in 100 with graphs off, against about 1 in 30 over the loops with graphs on (master included):
+at that rate 100 clean runs happen ~3 % of the time, so replays are implicated. Eager decode and replays run the same
+kernels, which argues against routing near-ties. A step that is off by 0.5-1.9 nats while the steps after it are
+within 0.03 fits a replay reading one stale piece of per-step attention metadata (a position, context length or slot)
+better than stale recurrent indices, which would carry into every later step. Not yet tested; next is a debug mode
+that runs each replayed step eagerly too and compares the logits, to catch the bad step and diff its inputs.
