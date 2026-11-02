@@ -144,7 +144,7 @@ pub enum NemoProjection {
 }
 
 impl NemoProjection {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         match self {
             Self::Dense(linear) => linear.forward(xs),
             Self::Quantized(layer) => layer.forward(xs),

@@ -335,11 +335,13 @@ pub fn requantize_gguf(
 }
 
 /// The float tensors of a safetensors file that `keep` selects, copied as they are (F32, F16, BF16) into a GGUF with
-/// `metadata`; returns how many were written.
+/// `metadata`, each recorded with the shape `dims` gives it (its own, or the same elements reshaped); returns how many
+/// were written.
 pub fn write_safetensors_gguf(
     src: &Path,
     dst: &Path,
     keep: impl Fn(&str) -> bool,
+    dims: impl Fn(&str, &[usize]) -> Vec<usize>,
     metadata: &[(&str, &gguf_file::Value)],
 ) -> Result<usize> {
     use safetensors::Dtype;
@@ -360,12 +362,27 @@ pub fn write_safetensors_gguf(
             other => inference_tensor::bail!("{name}: {other:?} tensors have no GGUF float type"),
         })
         .collect::<Result<Vec<_>>>()?;
+    let shapes = tensors
+        .iter()
+        .map(|(name, view)| {
+            let shape = dims(name, view.shape());
+            if shape.iter().product::<usize>() != view.shape().iter().product::<usize>() {
+                inference_tensor::bail!(
+                    "{name}: {:?} does not hold its {:?} elements",
+                    shape,
+                    view.shape()
+                );
+            }
+            Ok(shape)
+        })
+        .collect::<Result<Vec<_>>>()?;
     let entries = tensors
         .iter()
         .zip(&ids)
-        .map(|((name, view), &ggml_dtype)| TensorEntry {
+        .zip(&shapes)
+        .map(|(((name, view), &ggml_dtype), dims)| TensorEntry {
             name,
-            dims: view.shape(),
+            dims,
             ggml_dtype,
             size_in_bytes: view.data().len(),
         })

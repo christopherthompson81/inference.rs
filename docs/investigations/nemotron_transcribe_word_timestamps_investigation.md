@@ -47,3 +47,32 @@ The CPU's word times for `clip00` equal the GPU's (112 of 112). The alignment ad
 
 **Next:** speaker attribution through the API (the speaker-tagged prompt, words carrying their tags); the head's
 classifier at BF16 in the audio GGUF (F32 now, 122 MB).
+
+## Run 2 - 2026-11-02 15:42 (local clock)
+
+**Question:** can the head run quantized, and at what cost to the word times?
+
+**Change:** the head's matrices (the transformer's qkv, output and FFN, the classifier) load through the tower's
+`tower_projection`, so a GGUF that stores them quantized keeps them so (a `GgufMatMul`) and any other file loads them
+dense; the upsampler stays dense (its kernel dimension, 2, is the innermost, which Q8_0 cannot block). The audio GGUF's
+converter records the classifier, a kernel-1 convolution, as a `[23863, 1280]` matrix so a recipe can quantize it; the
+Q8_0 recipe adds `ctc_timestamp\.decoder\.(transformer\.layers\.\d+\.(ffn\.net\.\d+|attn\.w_qkv|attn\.out_proj)|decoder_layers\.0)\.weight$=q8_0`
+(the Q8_0 audio GGUF 1.00 -> 0.88 GiB). The head's full-vocabulary logits are computed 256 frames at a time (a window's
+were ~115 MB F32 and its BF16 copy). The parity script now transcribes and compares in two steps, the server stopped in
+between: the first version left it up while transformers loaded the checkpoint (~85 GB).
+
+**Finding (first try, every load quantizing the head in memory):** BF16 audio GGUF with the head at Q8_0, against
+transformers: mix2 88 of 90 exact, the boundary of `work` / `changed` 80 ms early (11.994 -> 11.914 s); clip00 and
+clip05 exact. A dense classifier with the rest at Q8_0 moved the same boundary, so the transformer alone flips it:
+a near-tie between two frames rather than a drift. The user chose to run the head as the file stores it, so the BF16
+path stays exact; they keep the Q8_0 GGUF on this machine.
+
+**Result:**
+
+| audio GGUF | head | 3090 paged pool | mix2 (90) | clip00 (112) | clip05 (79) |
+|---|---|---|---|---|---|
+| BF16 | dense | 96,384 tokens | 90 exact | 112 exact | 79 exact |
+| Q8_0 | Q8_0 as stored | 194,688 tokens | 90 exact | 112 exact | 77 exact, `two` / `compilation` 80 ms early |
+
+The Q8_0 head's flip lands on a different boundary than the first try's in-memory quantization of the same weights:
+each is one near-tie boundary in 281 words. The dense head's ~183K tokens with the Q8_0 GGUF (Run 1) become ~194K.
