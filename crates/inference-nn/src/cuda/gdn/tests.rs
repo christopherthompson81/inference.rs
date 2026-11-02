@@ -64,6 +64,7 @@ inference_tensor::gpu_cases!(
     cuda_cases,
     [
         causal_conv1d_full_continuation_matches_one_shot_cuda,
+        causal_conv1d_bias_matches_the_cpu_conv,
         causal_conv1d_strided_nonzero_offset_matches_reference_cuda,
         causal_conv1d_width4_update_matches_full_cuda,
         chunked_prefill_matches_sequential_recurrence,
@@ -3296,6 +3297,74 @@ fn causal_conv1d_width4_update_matches_full_cuda() -> Result<()> {
         &flat(&full_state.to_dtype(DType::F32)?)?,
         0.0,
     );
+    Ok(())
+}
+
+// Mamba-2's conv bias, added before the SiLU, in the prompt kernels (width 4 tiled, and any width) and the decode
+// step, against the CPU conv over the state's last positions and the input
+fn causal_conv1d_bias_matches_the_cpu_conv() -> Result<()> {
+    skip_without_cuda!();
+    let dev = Device::new_cuda(0)?;
+    let (batch_size, conv_dim, seq_len) = (2, 21, 9);
+    for kernel_size in [3, 4] {
+        let x = tensor3(
+            patterned(batch_size * seq_len * conv_dim, 60, 0.08, 0.01),
+            (batch_size, seq_len, conv_dim),
+            &Device::Cpu,
+        )?;
+        let weight = tensor2(
+            patterned(conv_dim * kernel_size, 61, 0.05, -0.01),
+            (conv_dim, kernel_size),
+            &Device::Cpu,
+        )?;
+        let bias = Tensor::from_vec(patterned(conv_dim, 62, 0.4, 0.1), conv_dim, &Device::Cpu)?;
+        let state = tensor3(
+            patterned(batch_size * conv_dim * kernel_size, 63, 0.03, 0.0),
+            (batch_size, conv_dim, kernel_size),
+            &Device::Cpu,
+        )?;
+        let padded = Tensor::cat(
+            &[
+                state.narrow(2, 1, kernel_size - 1)?,
+                x.transpose(1, 2)?.contiguous()?,
+            ],
+            2,
+        )?;
+        let expected = inference_tensor::nn::ops::silu(
+            &crate::ops::causal_conv1d_cpu(&padded, &weight)?.broadcast_add(&bias)?,
+        )?;
+        let on_gpu = |t: &Tensor| t.to_device(&dev);
+        let (full, _) = causal_conv1d_cuda_with_bias(
+            &on_gpu(&x)?,
+            &on_gpu(&weight)?,
+            Some(&on_gpu(&bias)?),
+            &on_gpu(&state)?,
+            kernel_size,
+            false,
+            GdnStateSlots::Gathered,
+        )?;
+        assert_close(
+            &format!("width-{kernel_size} biased conv"),
+            &flat(&full.to_device(&Device::Cpu)?)?,
+            &flat(&expected)?,
+            1e-5,
+        );
+        let (step, _) = causal_conv1d_cuda_with_bias(
+            &on_gpu(&x.narrow(1, 0, 1)?)?,
+            &on_gpu(&weight)?,
+            Some(&on_gpu(&bias)?),
+            &on_gpu(&state)?.copy()?,
+            kernel_size,
+            true,
+            GdnStateSlots::Gathered,
+        )?;
+        assert_close(
+            &format!("width-{kernel_size} biased conv step"),
+            &flat(&step.to_device(&Device::Cpu)?)?,
+            &flat(&expected.narrow(1, 0, 1)?.contiguous()?)?,
+            1e-5,
+        );
+    }
     Ok(())
 }
 

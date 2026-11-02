@@ -213,6 +213,58 @@ async fn a_long_prompt_on_cuda_scores_as_its_decode() -> anyhow::Result<()> {
     .await
 }
 
+// the same checkpoint scores a long prompt on CUDA as on the CPU: the GPU's Mamba conv and scan kernels, attention and
+// grouped experts against the CPU's
+#[tokio::test]
+async fn a_long_prompt_scores_on_cuda_as_on_the_cpu() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let dir = checkpoint()?;
+    let build = |cpu: bool| {
+        let builder =
+            TextModelBuilder::new(dir.path().to_string_lossy()).with_dtype(ModelDType::F32);
+        if cpu {
+            builder.with_force_cpu()
+        } else {
+            builder
+        }
+        .build()
+    };
+    let (cpu, gpu) = (build(true).await?, build(false).await?);
+    let chat = RequestBuilder::from(TextMessages::new().add_message(
+        TextMessageRole::User,
+        "say something long ".repeat(LONG_PROMPT_REPEATS),
+    ));
+    let tokens = cpu
+        .tokenize_chat(ChatRequest::from(chat).request)
+        .await?
+        .tokens;
+    let (expected, actual) = (
+        scores(&cpu, tokens.clone()).await?,
+        scores(&gpu, tokens).await?,
+    );
+    for (position, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
+        if let (Some(expected), Some(actual)) = (expected, actual) {
+            anyhow::ensure!(
+                (expected - actual).abs() < CUDA_LOGPROB_TOLERANCE,
+                "position {position}: CPU {expected}, CUDA {actual}"
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn scores(model: &inference::Model, tokens: Vec<u32>) -> anyhow::Result<Vec<Option<f32>>> {
+    let request = PromptLogitsRequest {
+        model: None,
+        prompt: PromptInput::Tokens(tokens),
+        output: Default::default(),
+        audio: Vec::new(),
+    };
+    Ok(model.prompt_logits(request).await?.token_logprobs)
+}
+
 async fn decode_scores_as_prefill(
     isq: Option<IsqType>,
     prompt: &str,

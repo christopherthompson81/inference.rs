@@ -80,7 +80,8 @@ __global__ void __launch_bounds__(WARP_SIZE, 1) ssm_scan_kernel(
   // state layout: (batch, n_heads, head_dim, d_state)
   const int state_base = batch_idx * n_heads * head_dim * d_state +
                          head_idx * head_dim * d_state + head_off * d_state;
-  // a d_state that is not a whole number of lanes leaves the last lanes' items past the row
+  // a d_state that is not a whole number of lanes leaves the last lanes' items
+  // past the row
   float reg_state[c_factor];
 #pragma unroll
   for (int j = 0; j < c_factor; j++) {

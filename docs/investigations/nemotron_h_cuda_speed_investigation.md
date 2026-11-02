@@ -81,3 +81,19 @@ the experts' GPU case.
 **Real model (`audio_kld.py cmp`, 24 clips, 2801 positions, GPU pair against the BF16 CPU reference):** mean KLD
 0.005451, same top-1 99.536 % (before Runs 2 and 4: 0.004948, 99.357 %). IQ4_NL up now quantizes its activations to
 Q8_1 inside mmq, as llama.cpp does, where it dequantized the weights to BF16 for cuBLAS before.
+
+## Run 6 - 2026-11-02 ~06:30
+
+**Question:** what is left after grouped mmq (2436-token prompt, 1.61 s of kernels, 1.12 s busy)?
+
+**Profile:** `mul_mat_q` 39 % (experts and dense), then 56,028 each of `bmul_bf16`, `fast_sum_small_bf16` and
+`copy2d_bf16` (~406 per Mamba layer per chunk, one per token): on CUDA the Mamba conv ran per timestep (narrow the
+window, multiply by the weight, sum), only the CPU having a conv kernel. The scan 10 %.
+
+**Change:** GDN's fused conv kernels (prompt, width-4 tiled, decode step) take an optional bias before their SiLU, and
+Granite's Mamba conv runs them on CUDA for prompts and decode steps. GPU case `causal_conv1d_bias_matches_the_cpu_conv`
+(widths 3 and 4, prompt and step); tiny model `a_long_prompt_scores_on_cuda_as_on_the_cpu` (the same checkpoint's
+logprobs on both devices, 1e-3).
+
+**Result (`gpu_fresh.py`):** 592 / 530 / 1149 / 2321 / 2345 / 4398 tokens at 2092 / 3252 / 2623 / 3158 / 3326 / 3302
+tok/s (Run 4: ~1300-1790); decode 55.6 / 55.8 (unchanged). llama.cpp pp512 4342, tg256 198.

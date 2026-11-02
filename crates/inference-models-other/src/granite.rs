@@ -1194,22 +1194,7 @@ impl MambaLayer {
     ) -> Result<Tensor> {
         let groups_time_state_size = self.n_groups * self.ssm_state_size;
 
-        // Update conv state: roll and insert new values
-        // conv_state: (batch, conv_dim, d_conv)
-        let conv_state = cache.conv_state.narrow(2, 1, self.conv_kernel_size - 1)?;
-        let new_col = hidden_states_b_c.unsqueeze(2)?;
-        cache.conv_state = Tensor::cat(&[conv_state, new_col], 2)?;
-
-        // Apply convolution: sum(conv_state * weight)
-        // weight: (conv_dim, 1, kernel_size) -> squeeze to (conv_dim, kernel_size)
-        let weight = self.conv1d_weight.squeeze(1)?;
-        let mut hidden_states_b_c =
-            (cache.conv_state.clone() * weight.unsqueeze(0)?)?.sum(inference_tensor::D::Minus1)?;
-
-        if let Some(ref bias) = self.conv1d_bias {
-            hidden_states_b_c = hidden_states_b_c.broadcast_add(bias)?;
-        }
-        let hidden_states_b_c = inference_tensor::nn::ops::silu(&hidden_states_b_c)?;
+        let hidden_states_b_c = self.conv_step(hidden_states_b_c, cache)?;
 
         // Split into hidden_states, B, C
         let hidden_states =
@@ -1337,16 +1322,47 @@ impl MambaLayer {
         Ok(y)
     }
 
-    fn forward_full(
-        &self,
-        hidden_states_b_c: &Tensor, // (batch, seq_len, conv_dim)
-        dt: &Tensor,                // (batch, seq_len, num_heads)
-        cache: &mut MambaLayerCache,
-        batch_size: usize,
-        seq_len: usize,
-    ) -> Result<Tensor> {
-        let groups_time_state_size = self.n_groups * self.ssm_state_size;
+    // one decode step's conv and SiLU, `(batch, conv_dim)`, shifting the step into the conv state
+    fn conv_step(&self, hidden_states_b_c: &Tensor, cache: &mut MambaLayerCache) -> Result<Tensor> {
+        #[cfg(feature = "cuda")]
+        if hidden_states_b_c.device().is_cuda() {
+            // the update kernel shifts the state in place, and a prefix snapshot may share the cache's storage
+            cache.conv_state = cache.conv_state.copy()?;
+            return self
+                .conv_cuda(&hidden_states_b_c.unsqueeze(1)?, cache, true)?
+                .squeeze(1);
+        }
+        // Update conv state: roll and insert new values
+        // conv_state: (batch, conv_dim, d_conv)
+        let conv_state = cache.conv_state.narrow(2, 1, self.conv_kernel_size - 1)?;
+        let new_col = hidden_states_b_c.unsqueeze(2)?;
+        cache.conv_state = Tensor::cat(&[conv_state, new_col], 2)?;
 
+        // Apply convolution: sum(conv_state * weight)
+        // weight: (conv_dim, 1, kernel_size) -> squeeze to (conv_dim, kernel_size)
+        let weight = self.conv1d_weight.squeeze(1)?;
+        let mut hidden_states_b_c =
+            (cache.conv_state.clone() * weight.unsqueeze(0)?)?.sum(inference_tensor::D::Minus1)?;
+
+        if let Some(ref bias) = self.conv1d_bias {
+            hidden_states_b_c = hidden_states_b_c.broadcast_add(bias)?;
+        }
+        let hidden_states_b_c = inference_tensor::nn::ops::silu(&hidden_states_b_c)?;
+        Ok(hidden_states_b_c)
+    }
+
+    // the causal conv over a prompt chunk and its SiLU, `(batch, seq_len, conv_dim)`, rolling the chunk into the
+    // conv state
+    fn conv_prefill(
+        &self,
+        hidden_states_b_c: &Tensor,
+        cache: &mut MambaLayerCache,
+    ) -> Result<Tensor> {
+        #[cfg(feature = "cuda")]
+        if hidden_states_b_c.device().is_cuda() {
+            return self.conv_cuda(hidden_states_b_c, cache, false);
+        }
+        let seq_len = hidden_states_b_c.dim(1)?;
         let hidden_states_b_c_t = hidden_states_b_c.transpose(1, 2)?;
         let state_width = cache.conv_state.dim(2)?;
         if state_width != self.conv_kernel_size {
@@ -1389,6 +1405,49 @@ impl MambaLayer {
                 hidden_states_b_c.broadcast_add(&bias.unsqueeze(0)?.unsqueeze(0)?)?;
         }
         let hidden_states_b_c = inference_tensor::nn::ops::silu(&hidden_states_b_c)?;
+        Ok(hidden_states_b_c)
+    }
+
+    // the fused kernel's conv, bias and SiLU over `(batch, seq_len, conv_dim)` (one step when `is_update`)
+    #[cfg(feature = "cuda")]
+    fn conv_cuda(
+        &self,
+        hidden_states_b_c: &Tensor,
+        cache: &mut MambaLayerCache,
+        is_update: bool,
+    ) -> Result<Tensor> {
+        let dtype = hidden_states_b_c.dtype();
+        let weight = self.conv1d_weight.squeeze(1)?.to_dtype(dtype)?;
+        let bias = self
+            .conv1d_bias
+            .as_ref()
+            .map(|bias| bias.to_dtype(dtype))
+            .transpose()?;
+        let state = cache.conv_state.to_dtype(dtype)?;
+        let (activated, state) = crate::cuda::gdn::causal_conv1d_cuda_with_bias(
+            hidden_states_b_c,
+            &weight,
+            bias.as_ref(),
+            &state,
+            self.conv_kernel_size,
+            is_update,
+            crate::cuda::gdn::GdnStateSlots::Gathered,
+        )?;
+        cache.conv_state = state.to_dtype(cache.conv_state.dtype())?;
+        Ok(activated)
+    }
+
+    fn forward_full(
+        &self,
+        hidden_states_b_c: &Tensor, // (batch, seq_len, conv_dim)
+        dt: &Tensor,                // (batch, seq_len, num_heads)
+        cache: &mut MambaLayerCache,
+        batch_size: usize,
+        seq_len: usize,
+    ) -> Result<Tensor> {
+        let groups_time_state_size = self.n_groups * self.ssm_state_size;
+
+        let hidden_states_b_c = self.conv_prefill(hidden_states_b_c, cache)?;
 
         // Split into hidden_states, B, C
         let hidden_states =
