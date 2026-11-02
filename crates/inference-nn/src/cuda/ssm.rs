@@ -132,6 +132,91 @@ pub fn selective_scan_cuda(
     inference_tensor::bail!("selective_scan_cuda requires the cuda feature")
 }
 
+/// Mamba-2's gated RMSNorm on CUDA: `x * silu(gate)` normalized over each group of `group_size`, times `weight`.
+/// `x` is f32 `(..., width)`, `gate` the same shape in f16, bf16 or f32 (its rows may sit `gate_stride` apart, as a
+/// slice of the input projection does), `weight` f32 `(width,)`. Returns `gate`'s dtype.
+#[cfg(feature = "cuda")]
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+pub fn mamba_gated_rmsnorm_cuda(
+    x: &inference_tensor::Tensor,
+    gate: &inference_tensor::Tensor,
+    weight: &inference_tensor::Tensor,
+    eps: f64,
+    group_size: usize,
+) -> inference_tensor::Result<inference_tensor::Tensor> {
+    use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
+    use inference_tensor::{CudaStorage, DType, Storage, Tensor};
+
+    let x = x.contiguous()?;
+    let weight = weight.contiguous()?;
+    let width = x.dim(inference_tensor::D::Minus1)?;
+    let rows = x.elem_count() / width;
+    if gate.dims() != x.dims() || !width.is_multiple_of(group_size) || weight.elem_count() != width
+    {
+        inference_tensor::bail!(
+            "mamba_gated_rmsnorm_cuda: x {:?}, gate {:?}, weight {:?}, groups of {group_size}",
+            x.dims(),
+            gate.dims(),
+            weight.dims()
+        );
+    }
+    // rows of a uniform stride, the last dim contiguous, read in place
+    let stride = gate.stride();
+    let rank = stride.len();
+    let uniform = stride[rank - 1] == 1
+        && (0..rank.saturating_sub(2)).all(|k| stride[k] == gate.dims()[k + 1] * stride[k + 1]);
+    let gate = if uniform {
+        gate.clone()
+    } else {
+        gate.contiguous()?
+    };
+    let gate_stride = if rank > 1 {
+        gate.stride()[rank - 2]
+    } else {
+        width
+    };
+    let dev = x.device().as_cuda_device()?;
+
+    macro_rules! get_ptr {
+        ($tensor:expr, $ty:ty) => {{
+            let (s, l) = $tensor.storage_and_layout();
+            let s = match &*s {
+                Storage::Cuda(c) => c.as_cuda_slice::<$ty>()?,
+                _ => inference_tensor::bail!("mamba_gated_rmsnorm_cuda: tensor must be on CUDA"),
+            };
+            s.slice(l.start_offset()..).device_ptr(s.stream()).0
+        }};
+    }
+    macro_rules! launch {
+        ($ty:ty, $code:expr) => {{
+            let out = unsafe { dev.alloc::<$ty>(rows * width) }?;
+            unsafe {
+                crate::cuda::ffi::mamba_gated_rmsnorm_cuda(
+                    get_ptr!(x, f32) as *const f32,
+                    get_ptr!(gate, $ty) as *const core::ffi::c_void,
+                    get_ptr!(weight, f32) as *const f32,
+                    out.device_ptr(out.stream()).0 as *mut core::ffi::c_void,
+                    rows as i32,
+                    width as i32,
+                    group_size as i32,
+                    gate_stride as i64,
+                    eps as f32,
+                    $code,
+                    dev.cuda_stream().cu_stream() as i64,
+                )
+            };
+            CudaStorage::wrap_cuda_slice(out, dev.clone())
+        }};
+    }
+    let out = match gate.dtype() {
+        DType::F16 => launch!(half::f16, 0),
+        DType::BF16 => launch!(half::bf16, 1),
+        DType::F32 => launch!(f32, 2),
+        dtype => inference_tensor::bail!("mamba_gated_rmsnorm_cuda: no {dtype:?} gate"),
+    };
+    Ok(Tensor::from((Storage::Cuda(out), x.shape().clone())))
+}
+
 #[cfg(feature = "cuda")]
 #[repr(C)]
 struct SsdParams {
@@ -210,7 +295,7 @@ fn ssd_gemm(
             ldc as i32,
             sc as i64,
             g.batch as i32,
-            sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+            sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32,
             sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
         )
     }

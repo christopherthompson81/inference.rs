@@ -304,3 +304,49 @@ nemotron_transcribe_investigation.md): our CUDA path loses accuracy somewhere el
 
 **Next:** find the 3x KLD gap against llama.cpp (CPU against CUDA first, then per stage); the remaining ~115 ms: `mul_mat_q` (+28 ms against llama.cpp), F16 or TF32 tensor cores for the SSD
 matmuls (~31 ms of SGEMM; llama.cpp runs them in F16), the BF16/F32 casts and the gated RMSNorm's elementwise chain.
+
+## Run 16 - 2026-11-02 08:50 (local clock)
+
+**Question:** after the dt fix (#772), where does a 2438-token fresh prompt trail llama.cpp, measured on the same
+prompt? (Run 15's llama.cpp figures came from `llama-bench`'s random tokens, which route experts differently.)
+
+**Commands:** scratch `nsys/prefill_profile.sh <tag>` (serve under nsys, two warm-up prompts, one profiled
+`fresh_long.py` prompt, three timed); llama.cpp `970b51ce7` `llama-server -fa on -ub 512 --cache-ram 0` under nsys
+with the same request; `mmq_breakdown.py` groups `mul_mat_q` by template instance and grid.
+
+**Baseline (master `d08d42934`):** span 0.724 s, busy 0.689 s, 10,217 kernels, ~3,850 tok/s. llama-server: span
+0.672 s, busy 0.614 s, 7,820 kernels. By kernel, against llama-server:
+
+| | ours | llama.cpp |
+|---|---|---|
+| `mul_mat_q` | 485.5 ms | 461.9 ms |
+| Q5_0 expert down, full ubatch / last | 1931 / 1881 us | 1767 / 1596 us |
+| IQ4_NL expert up, full / last | 1608 / 1541 us | 1641 / 1496 us |
+| Q8_0 dense | 104 / 300 us | 101 / 288 us |
+| SSD scan (SGEMM + 4 kernels; llama.cpp `Kernel2` + 4) | ~57 ms | ~40 ms |
+| elementwise | gated RMSNorm as ~11 F32 ops, relu^2 as `urelu` + `usqr` | `rms_norm_f32` 6.9, `unary_op_kernel` 7.9 |
+
+The kernels match llama.cpp's (same templates, grids, 254 registers); only the Q5_0 down is slower (~22 ms over the
+pass). llama.cpp's mmq now picks tiles from per-architecture tables (`mmq-config-ampere.cuh`), but its Ampere Q5_0 row
+is the 128 / 8 warps we launch, so that is not the difference.
+
+**Change 1, TF32 for the SSD matmuls** (`CUBLAS_COMPUTE_32F_FAST_TF32`, operands still F32): SGEMMs ~35 -> ~19 ms,
+busy 0.689 -> 0.681 s. KLD 0.02507 (F32: 0.02672, both noise around llama.cpp's 0.02498). The SSD GPU case's
+output error rises to 4.6e-4 of the output's scale (F32: under 1e-4); its tolerance is now 2e-3.
+
+**Change 2, a fused gated RMSNorm:** Mamba's `x * silu(z)` normalized over each group (8 of 512 here) times the weight
+ran as ~11 F32 tensor ops (two casts, silu, a multiply, square, mean, add, sqrt, divide, a cast back, the weight
+multiply), each a pass over 2438 x 4096 values. `mamba_gated_rmsnorm_kernel` (ssm.cu) does it in one pass, one block
+a (row, group), reading the scan's F32 output and the bf16 gate in place from the input projection's slice, writing
+the gate's dtype. Unlike GDN's gated norm it gates before normalizing. GPU case
+`cuda_mamba_gated_rmsnorm_matches_the_composite` (gate a slice of a wider bf16 tensor, groups of 96).
+
+**Result:** span 0.665 s (llama-server 0.672), busy 0.636 s, 8,699 kernels; the norm 3.2 ms for 138 calls.
+`fresh_long.py` ~4,330 tok/s (was ~3,850). `gpu_fresh.py`: 592 / 530 / 1149 / 2321 / 2345 / 4398 tokens at 2349 /
+3759 / 3024 / 3774 / 3928 / 3909 tok/s; decode 216.0 / 222.6 tok/s (Run 15: 200.3 / 200.8; the norm runs in decode
+too). KLD 0.02490, median 0.00966, p99 0.238, same top-1 93.34 % (llama.cpp 0.02498 / 0.00936 / 93.22 %). Greedy
+200-token completions with the fused norm against the same build without it: one identical, two diverge at tokens 66
+and 94, logprobs within 0.16 before that (rounding: rsqrt and the summation order).
+
+**Next:** the Q5_0 expert down (~22 ms against llama.cpp, same kernel); relu^2 as one pass (~7 ms); `cast_bf16_f32`
+(12 ms, 691 calls) and `ucopy_bf16` (10 ms).

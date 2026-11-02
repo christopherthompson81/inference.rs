@@ -1364,6 +1364,20 @@ inference_tensor::kernel_library! {
         pub fn ssd_mask_cuda(params: *const c_void, stream: i64);
         pub fn ssd_state_pass_cuda(params: *const c_void, stream: i64);
         pub fn ssd_finish_cuda(params: *const c_void, stream: i64);
+        // gate and out by `dtype`: 0 f16, 1 bf16, 2 f32
+        pub fn mamba_gated_rmsnorm_cuda(
+            x: *const f32,
+            gate: *const c_void,
+            weight: *const f32,
+            out: *mut c_void,
+            rows: i32,
+            width: i32,
+            group_size: i32,
+            gate_stride: i64,
+            eps: f32,
+            dtype: i32,
+            stream: i64,
+        );
 
         // GDN (Gated Delta Net) kernels for qwen3_next
         pub fn gdn_packed_to_padded(

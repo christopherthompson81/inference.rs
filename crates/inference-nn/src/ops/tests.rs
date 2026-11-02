@@ -255,6 +255,7 @@ inference_tensor::gpu_cases!(
         cuda_moe_router_with_fewer_experts_than_lanes_picks_only_experts,
         cuda_selective_scan_matches_the_cpu_scan_gathered_and_in_a_pool,
         cuda_chunked_ssd_scan_matches_the_cpu_scan,
+        cuda_mamba_gated_rmsnorm_matches_the_composite,
         cuda_qk_norm_rope_positions_preserves_projection_layout,
         cuda_qk_norm_rope_writes_token_major_from_packed_projection,
         cuda_ranked_topk_cooperative_boundaries_and_fallback_match_cpu,
@@ -911,7 +912,8 @@ fn cuda_chunked_ssd_scan_matches_the_cpu_scan() -> inference_tensor::Result<()> 
     const HEAD_DIM: usize = 16;
     const STATE: usize = 32;
     const DT_RANGE: [f32; 2] = [0.01, 1.5];
-    const TOLERANCE: f32 = 1e-4;
+    // the matmuls run on TF32 tensor cores (10-bit mantissa)
+    const TOLERANCE: f32 = 2e-3;
     let device = Device::new_cuda(0)?;
     let rand = |shape: &[usize]| Tensor::randn(0f32, 0.5, shape, &Device::Cpu);
     let host = [
@@ -959,6 +961,55 @@ fn cuda_chunked_ssd_scan_matches_the_cpu_scan() -> inference_tensor::Result<()> 
             "{label}: max error {error} at scale {scale}"
         );
     }
+    Ok(())
+}
+
+// the gate a slice of a wider bf16 projection, as Mamba's in_proj output is
+#[cfg(feature = "cuda")]
+fn cuda_mamba_gated_rmsnorm_matches_the_composite() -> inference_tensor::Result<()> {
+    const ROWS: [usize; 2] = [3, 37];
+    const WIDTH: usize = 384;
+    const GROUP: usize = 96;
+    const PROJECTED: usize = 1000;
+    const EPS: f64 = 1e-5;
+    // bf16 output rounding
+    const TOLERANCE: f32 = 1e-2;
+    let device = Device::new_cuda(0)?;
+    let x = Tensor::randn(0f32, 2.0, (ROWS[0], ROWS[1], WIDTH), &Device::Cpu)?;
+    let projected = Tensor::randn(0f32, 3.0, (ROWS[0], ROWS[1], PROJECTED), &Device::Cpu)?
+        .to_dtype(DType::BF16)?;
+    let gate = projected.narrow(2, 0, WIDTH)?;
+    let weight = Tensor::randn(1f32, 0.3, WIDTH, &Device::Cpu)?;
+
+    let gated = (&x * inference_tensor::nn::ops::silu(&gate.to_dtype(DType::F32)?)?)?.reshape((
+        ROWS[0],
+        ROWS[1],
+        WIDTH / GROUP,
+        GROUP,
+    ))?;
+    let rms = (gated.sqr()?.mean_keepdim(inference_tensor::D::Minus1)? + EPS)?.sqrt()?;
+    let expected = gated
+        .broadcast_div(&rms)?
+        .reshape((ROWS[0], ROWS[1], WIDTH))?
+        .broadcast_mul(&weight)?;
+
+    let actual = crate::cuda::ssm::mamba_gated_rmsnorm_cuda(
+        &x.to_device(&device)?,
+        &projected.to_device(&device)?.narrow(2, 0, WIDTH)?,
+        &weight.to_device(&device)?,
+        EPS,
+        GROUP,
+    )?;
+    assert_eq!(actual.dtype(), DType::BF16);
+    let error = (actual.to_dtype(DType::F32)?.to_device(&Device::Cpu)? - &expected)?
+        .abs()?
+        .max_all()?
+        .to_scalar::<f32>()?;
+    let scale = expected.abs()?.max_all()?.to_scalar::<f32>()?;
+    assert!(
+        error < TOLERANCE * scale,
+        "max error {error} at scale {scale}"
+    );
     Ok(())
 }
 
