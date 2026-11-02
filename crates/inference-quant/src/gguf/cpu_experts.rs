@@ -9,6 +9,8 @@ use super::cpu_dot;
 
 // Tokens one expert row is dotted against per pass, decoding its blocks once for all of them
 const DOT_TOKENS: usize = 4;
+// Rows a 32-value register tile covers beside its `DOT_TOKENS` tokens, and the fewest rows an item takes
+const TILE_ROWS: usize = 4;
 // Weights one work item decodes into its i16 tile; its row count is a power of two from 2 to QK_K, so it divides
 // every projection's rows
 const TILE_ELEMS: usize = 8 * 1024;
@@ -262,7 +264,7 @@ fn tile_rows<'a>(
 // the rows one item of a projection with `cols` columns covers: a power of two dividing `rows`, so the items cover
 // every row of a small expert too
 fn rows_per_item(rows: usize, cols: usize) -> usize {
-    (1 << (TILE_ELEMS / cols).clamp(2, QK_K).ilog2()).min(1 << rows.trailing_zeros())
+    (1 << (TILE_ELEMS / cols).clamp(TILE_ROWS, QK_K).ilog2()).min(1 << rows.trailing_zeros())
 }
 
 impl CpuExperts<'_> {
@@ -401,18 +403,46 @@ impl CpuExperts<'_> {
                         cpu_dot::vec_dot_x4(p.ty, w, quad.map(x))
                     }
                 };
+                // four rows by four routes per pass: each block decoded once per route quad, each route's
+                // activations loaded once per row quad
+                let tile = |p: &CpuExpertProjection, row: usize, quad: &[usize; DOT_TOKENS]| {
+                    let rows: [&[u8]; TILE_ROWS] = std::array::from_fn(|i| p.row(expert, row + i));
+                    if p.is_32() {
+                        cpu_dot::vec_dot_32_4x4(p.ty, rows, quad.map(x32))
+                    } else {
+                        rows.map(|w| cpu_dot::vec_dot_x4(p.ty, w, quad.map(x)))
+                    }
+                };
+                let (quads, rest) = group.as_chunks::<DOT_TOKENS>();
+                if item_rows.is_multiple_of(TILE_ROWS) {
+                    for row in (row0..row0 + item_rows).step_by(TILE_ROWS) {
+                        for quad in quads {
+                            let up = tile(&self.up, row, quad);
+                            let gate = self.glu().map(|gate| tile(gate, row, quad));
+                            for i in 0..TILE_ROWS {
+                                for (k, &r) in quad.iter().enumerate() {
+                                    store(r, row + i, gate.map_or(0.0, |g| g[i][k]), up[i][k]);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    for row in row0..row0 + item_rows {
+                        let up_row = self.up.row(expert, row);
+                        let gate_row = self.glu().map(|gate| (gate, gate.row(expert, row)));
+                        for quad in quads {
+                            let gate =
+                                gate_row.map_or([0.0; DOT_TOKENS], |(gate, w)| dot4(gate, w, quad));
+                            let up = dot4(&self.up, up_row, quad);
+                            for (k, &r) in quad.iter().enumerate() {
+                                store(r, row, gate[k], up[k]);
+                            }
+                        }
+                    }
+                }
                 for row in row0..row0 + item_rows {
                     let up_row = self.up.row(expert, row);
                     let gate_row = self.glu().map(|gate| (gate, gate.row(expert, row)));
-                    let (quads, rest) = group.as_chunks::<DOT_TOKENS>();
-                    for quad in quads {
-                        let gate =
-                            gate_row.map_or([0.0; DOT_TOKENS], |(gate, w)| dot4(gate, w, quad));
-                        let up = dot4(&self.up, up_row, quad);
-                        for (k, &r) in quad.iter().enumerate() {
-                            store(r, row, gate[k], up[k]);
-                        }
-                    }
                     for &r in rest {
                         let gate = gate_row.map_or(0.0, |(gate, w)| dot(gate, w, r));
                         store(r, row, gate, dot(&self.up, up_row, r));
@@ -485,15 +515,33 @@ impl CpuExperts<'_> {
             }
             if self.down.is_32() {
                 let h = |r: usize| &gated32[r * inter_32..][..inter_32];
-                for row in row0..row0 + item_rows {
-                    let down_row = self.down.row(expert, row);
-                    let (quads, rest) = group.as_chunks::<DOT_TOKENS>();
-                    for quad in quads {
-                        let ys = cpu_dot::vec_dot_32_x4(self.down.ty, down_row, quad.map(h));
-                        for (k, &r) in quad.iter().enumerate() {
-                            store(r, row, ys[k]);
+                let (quads, rest) = group.as_chunks::<DOT_TOKENS>();
+                if item_rows.is_multiple_of(TILE_ROWS) {
+                    for row in (row0..row0 + item_rows).step_by(TILE_ROWS) {
+                        let rows: [&[u8]; TILE_ROWS] =
+                            std::array::from_fn(|i| self.down.row(expert, row + i));
+                        for quad in quads {
+                            let ys = cpu_dot::vec_dot_32_4x4(self.down.ty, rows, quad.map(h));
+                            for (i, ys) in ys.iter().enumerate() {
+                                for (k, &r) in quad.iter().enumerate() {
+                                    store(r, row + i, ys[k]);
+                                }
+                            }
                         }
                     }
+                } else {
+                    for row in row0..row0 + item_rows {
+                        let down_row = self.down.row(expert, row);
+                        for quad in quads {
+                            let ys = cpu_dot::vec_dot_32_x4(self.down.ty, down_row, quad.map(h));
+                            for (k, &r) in quad.iter().enumerate() {
+                                store(r, row, ys[k]);
+                            }
+                        }
+                    }
+                }
+                for row in row0..row0 + item_rows {
+                    let down_row = self.down.row(expert, row);
                     for &r in rest {
                         store(r, row, cpu_dot::vec_dot_32(self.down.ty, down_row, h(r)));
                     }
@@ -618,11 +666,13 @@ mod tests {
 
     // the expert types each test runs, with the experts' width: Unsloth's 35B-A3B mix, IQ4_KSS throughout (its rows
     // carry a scale), and Unsloth's Flash-Next mixes (IQ4_NL or Q8_0 down over 640)
-    const TYPE_SETS: [([GgufType; 2], usize); 4] = [
+    const TYPE_SETS: [([GgufType; 2], usize); 5] = [
         ([GgufType::Iq3S, GgufType::Iq4Xs], INTER),
         ([GgufType::Iq4Kss, GgufType::Iq4Kss], INTER),
         ([GgufType::Iq3S, GgufType::Iq4Nl], INTER_32),
         ([GgufType::Iq4Xs, GgufType::Q8_0], INTER_32),
+        // Nemotron 3.5 Transcribe's: 32-value blocks on both sides
+        ([GgufType::Iq4Nl, GgufType::Q5_0], INTER_32),
     ];
 
     fn check_against_dense(tokens: usize, routes: &[CpuExpertRoute]) -> Result<()> {

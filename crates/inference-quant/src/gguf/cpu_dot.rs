@@ -126,6 +126,27 @@ pub(crate) fn vec_dot_32_x4(ty: GgufType, row: &[u8], ys: [&[Q8Block32]; 4]) -> 
     ys.map(|y| vec_dot_32(ty, row, y))
 }
 
+/// Four rows of a 32-wide `ty` against four activation rows, `[row][token]`: each block decoded once for the four
+/// tokens and each activation block loaded once for the four rows. Within rounding of [`vec_dot_32`].
+pub(crate) fn vec_dot_32_4x4(
+    ty: GgufType,
+    rows: [&[u8]; 4],
+    ys: [&[Q8Block32]; 4],
+) -> [[f32; 4]; 4] {
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2_fma() {
+        match ty {
+            // SAFETY: AVX2 and FMA were detected above
+            GgufType::Iq4Nl => return unsafe { avx2::iq4_nl_32_4x4(rows, ys) },
+            GgufType::Q4_0 => return unsafe { avx2::q4_0_32_4x4(rows, ys) },
+            GgufType::Q5_0 => return unsafe { avx2::q5_0_32_4x4(rows, ys) },
+            GgufType::Q8_0 => return unsafe { avx2::q8_0_32_4x4(rows, ys) },
+            _ => {}
+        }
+    }
+    rows.map(|row| ys.map(|y| vec_dot_32(ty, row, y)))
+}
+
 /// `row` holds `ys.len()` blocks of a 32-wide `ty`.
 pub(crate) fn vec_dot_32(ty: GgufType, row: &[u8], ys: &[Q8Block32]) -> f32 {
     #[cfg(target_arch = "x86_64")]
@@ -625,6 +646,35 @@ mod avx2 {
         std::array::from_fn(|t| hsum(_mm256_add_ps(a0[t], a1[t])))
     }
 
+    // four rows' blocks against four activation rows, one accumulator per pair: each block decoded once for the four
+    // tokens, each activation block loaded once for the four rows
+    #[inline]
+    #[target_feature(enable = "avx2,fma,f16c")]
+    fn sum_blocks_32_4x4<const N: usize>(
+        rows: [&[u8]; 4],
+        ys: [&[Q8Block32]; 4],
+        decode: impl Fn(&[u8; N]) -> __m256i,
+    ) -> [[f32; 4]; 4] {
+        let n = ys[0].len();
+        let blocks = rows.map(|row| &row.as_chunks::<N>().0[..n]);
+        let mut acc = [[_mm256_setzero_ps(); 4]; 4];
+        for l in 0..n {
+            let w: [__m256i; 4] = std::array::from_fn(|i| {
+                prefetch_ahead(&blocks[i][l], 1);
+                decode(&blocks[i][l])
+            });
+            let dw: [f32; 4] = std::array::from_fn(|i| f16c_at(&blocks[i][l], 0));
+            for (t, y) in ys.iter().enumerate() {
+                let (qs, dy) = (load_q8(&y[l].qs), y[l].d);
+                for i in 0..4 {
+                    let dot = _mm256_cvtepi32_ps(signed_dot(w[i], qs));
+                    acc[i][t] = _mm256_fmadd_ps(_mm256_set1_ps(dw[i] * dy), dot, acc[i][t]);
+                }
+            }
+        }
+        acc.map(|row| row.map(|v| hsum(v)))
+    }
+
     // a block's 16 nibble bytes as 32 values: the low nibbles first, then the high ones
     #[inline]
     #[target_feature(enable = "avx2,fma")]
@@ -693,7 +743,12 @@ mod avx2 {
 
     // each 32-value type's one-row and four-row kernels over its decoder
     macro_rules! kernels_32 {
-        ($($single:ident, $quad:ident, $bytes:ident, $decode:ident;)*) => {$(
+        ($($single:ident, $quad:ident, $tile:ident, $bytes:ident, $decode:ident;)*) => {$(
+            #[target_feature(enable = "avx2,fma,f16c")]
+            pub(super) fn $tile(rows: [&[u8]; 4], ys: [&[Q8Block32]; 4]) -> [[f32; 4]; 4] {
+                sum_blocks_32_4x4::<$bytes>(rows, ys, |block| $decode(block))
+            }
+
             #[target_feature(enable = "avx2,fma,f16c")]
             pub(super) fn $single(row: &[u8], ys: &[Q8Block32]) -> f32 {
                 sum_blocks_32::<$bytes>(row, ys, |block| $decode(block))
@@ -707,10 +762,10 @@ mod avx2 {
     }
 
     kernels_32! {
-        iq4_nl_32, iq4_nl_32_x4, IQ4_NL_BYTES, decode_iq4_nl;
-        q4_0_32, q4_0_32_x4, Q4_0_BYTES, decode_q4_0;
-        q5_0_32, q5_0_32_x4, Q5_0_BYTES, decode_q5_0;
-        q8_0_32, q8_0_32_x4, Q8_0_BYTES, decode_q8_0;
+        iq4_nl_32, iq4_nl_32_x4, iq4_nl_32_4x4, IQ4_NL_BYTES, decode_iq4_nl;
+        q4_0_32, q4_0_32_x4, q4_0_32_4x4, Q4_0_BYTES, decode_q4_0;
+        q5_0_32, q5_0_32_x4, q5_0_32_4x4, Q5_0_BYTES, decode_q5_0;
+        q8_0_32, q8_0_32_x4, q8_0_32_4x4, Q8_0_BYTES, decode_q8_0;
     }
 
     // the IQ4_NL codebook in both lanes, and each u16 code's place in its sub-block's scale code
@@ -1347,6 +1402,21 @@ mod tests {
                     quad.iter().all(|q| q.to_bits() == dispatched.to_bits()),
                     "{ty:?} {n} blocks: {quad:?}"
                 );
+                // a four-row tile, each row its own seed, within rounding of the one-row kernel
+                let tile_rows: Vec<Vec<u8>> = (0..4)
+                    .map(|i| self::row(block_bytes, seed + 10 * i))
+                    .collect();
+                let rows: [&[u8]; 4] = std::array::from_fn(|i| &tile_rows[i][..n * block_bytes]);
+                let tile = vec_dot_32_4x4(ty, rows, [&ys[..n]; 4]);
+                for (i, row) in rows.iter().enumerate() {
+                    let one = vec_dot_32(ty, row, &ys[..n]);
+                    for got in tile[i] {
+                        assert!(
+                            (got - one).abs() <= 1e-4 * one.abs().max(1.0),
+                            "{ty:?} {n} blocks, tile row {i}: {got} vs {one}"
+                        );
+                    }
+                }
             }
         }
     }
