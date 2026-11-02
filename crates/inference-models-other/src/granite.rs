@@ -1257,17 +1257,11 @@ impl MambaLayer {
             groups_time_state_size,
         )?;
 
-        #[cfg(feature = "cuda")]
-        if hidden_states.device().is_cuda() {
-            return self.scan_step_cuda(
-                [&hidden_states, &b, &c, dt],
-                cache,
-                batch_size,
-                pool_slots,
-            );
-        }
-        if pool_slots.is_some() {
+        if pool_slots.is_some() && !hidden_states.device().is_cuda() {
             inference_tensor::bail!("Only CUDA updates a Mamba recurrent pool in place.");
+        }
+        if hidden_states.device().is_cuda() || hidden_states.device().is_cpu() {
+            return self.scan_step([&hidden_states, &b, &c, dt], cache, batch_size, pool_slots);
         }
 
         // SSM computation for single token
@@ -1379,8 +1373,7 @@ impl MambaLayer {
 
     // one decode step through the scan kernel (a one-token chunk): `[x, b, c, dt]` as
     // `forward_cached` splits them, the result `(batch, intermediate_size)`
-    #[cfg(feature = "cuda")]
-    fn scan_step_cuda(
+    fn scan_step(
         &self,
         [x, b, c, dt]: [&Tensor; 4],
         cache: &mut MambaLayerCache,
@@ -1394,23 +1387,29 @@ impl MambaLayer {
         };
         // an F32 state is the cache's own storage, which the kernel updates in place
         let mut ssm_state = cache.ssm_state.to_dtype(f32)?;
-        let y = crate::cuda::ssm::selective_scan_cuda(
-            crate::ops::SelectiveScan {
-                x: &x
-                    .reshape((batch_size, 1, self.num_heads, self.head_dim))?
-                    .to_dtype(f32)?,
-                dt: &dt.reshape((batch_size, 1, self.num_heads))?.to_dtype(f32)?,
-                a: &self.scan.a,
-                b: &by_group(b)?,
-                c: &by_group(c)?,
-                d: &self.scan.d,
-                dt_bias: &self.scan.dt_bias,
-                dt_min: self.time_step_min as f32,
-                dt_max: self.time_step_max as f32,
-            },
-            &mut ssm_state,
-            pool_slots,
-        )?;
+        let (x, dt, b, c) = (
+            x.reshape((batch_size, 1, self.num_heads, self.head_dim))?
+                .to_dtype(f32)?,
+            dt.reshape((batch_size, 1, self.num_heads))?.to_dtype(f32)?,
+            by_group(b)?,
+            by_group(c)?,
+        );
+        let scan = crate::ops::SelectiveScan {
+            x: &x,
+            dt: &dt,
+            a: &self.scan.a,
+            b: &b,
+            c: &c,
+            d: &self.scan.d,
+            dt_bias: &self.scan.dt_bias,
+            dt_min: self.time_step_min as f32,
+            dt_max: self.time_step_max as f32,
+        };
+        let y = if x.device().is_cuda() {
+            crate::cuda::ssm::selective_scan_cuda(scan, &mut ssm_state, pool_slots)?
+        } else {
+            crate::ops::selective_scan_cpu(scan, &mut ssm_state)?
+        };
         cache.ssm_state = ssm_state.to_dtype(cache.ssm_state.dtype())?;
         y.reshape((batch_size, self.intermediate_size))
     }
