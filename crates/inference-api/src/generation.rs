@@ -11,7 +11,7 @@ use inference_core::{
     speech_utils::{self, Sample},
 };
 
-use inference_core::AudioTranscriber;
+use inference_core::{AlignedWord, TranscriptText};
 use inference_protocol::images::{encode_png, image_generation_response};
 
 use crate::{
@@ -499,16 +499,50 @@ async fn transcribe_inner(
                 Some("model"),
             ));
         }
-        if request.diarization_model.is_some() {
-            return Err(ApiError::new(
-                ApiErrorKind::InvalidRequest,
-                "`diarization_model` needs word timestamps, which this model does not give",
-                Some("diarization_unsupported"),
-                Some("diarization_model"),
-            ));
+        let plain = TranscriptPlan {
+            prompt: transcriber.prompt,
+            parse: transcriber.parse,
+            timings: wants_timings(&request),
+        };
+        let Some(diarizer) = request.diarization_model.clone() else {
+            let (transcript, _) = decode_transcript(state, &request, repr, audio, plain).await?;
+            return render_transcript(&request, transcript, None);
+        };
+        // named as its own diarizer, a model that writes speaker tags attributes its words itself
+        if diarizer == request.model {
+            let Some(own) = transcriber.speakers else {
+                return Err(ApiError::new(
+                    ApiErrorKind::InvalidRequest,
+                    "this model does not attribute speakers itself; name a diarization model",
+                    Some("diarization_unsupported"),
+                    Some("diarization_model"),
+                ));
+            };
+            let plan = TranscriptPlan {
+                prompt: own.prompt,
+                parse: own.parse,
+                timings: true,
+            };
+            let (transcript, tags) = decode_transcript(state, &request, repr, audio, plan).await?;
+            require_words(&transcript)?;
+            let speakers: Vec<usize> = tags.iter().map(|tag| tag.unwrap_or(0) as usize).collect();
+            return render_transcript(&request, transcript, Some(&speakers));
         }
-        let transcript = decode_transcript(state, &request, repr, audio, transcriber).await?;
-        return render_transcript(&request, transcript, None);
+        let timed = TranscriptPlan {
+            timings: true,
+            ..plain
+        };
+        let (transcript, diarization) = futures::join!(
+            decode_transcript(state, &request, repr, audio.clone(), timed),
+            speaker_turns(state, &diarizer, audio),
+        );
+        let (transcript, _) = transcript?;
+        require_words(&transcript)?;
+        let Response::Diarization(diarization) = diarization? else {
+            return Err(unexpected(state));
+        };
+        let speakers = word_speakers(&transcript.words, &diarization.segments);
+        return render_transcript(&request, transcript, Some(&speakers));
     }
     let speech = |audio| RequestMessage::Transcription {
         audio,
@@ -525,21 +559,9 @@ async fn transcribe_inner(
         };
     };
     // one upload, both models over it at once
-    let diarization_request = DiarizationRequest {
-        model: diarizer.clone(),
-        threshold: None,
-        response_format: Default::default(),
-        return_probabilities: false,
-    };
-    let diarization_repr =
-        serde_json::to_string(&diarization_request).map_err(|_| ApiError::internal())?;
-    let turns = RequestMessage::Diarization {
-        audio: audio.clone(),
-        options: DiarizationOptions { threshold: None },
-    };
     let (transcript, diarization) = futures::join!(
-        run(state, &request.model, repr, speech(audio)),
-        run(state, &diarizer, diarization_repr, turns),
+        run(state, &request.model, repr, speech(audio.clone())),
+        speaker_turns(state, &diarizer, audio),
     );
     match (transcript?, diarization?) {
         (Response::Transcription(transcript), Response::Diarization(diarization)) => {
@@ -550,15 +572,57 @@ async fn transcribe_inner(
     }
 }
 
-// An audio-in decoder's transcript: its transcription prompt around the clip, decoded greedily, the answer parsed.
+// a diarization model's speaker turns over the clip
+async fn speaker_turns(
+    state: &SharedInferenceRsState,
+    diarizer: &str,
+    audio: AudioInput,
+) -> Result<Response, ApiError> {
+    let diarization_request = DiarizationRequest {
+        model: diarizer.to_string(),
+        threshold: None,
+        response_format: Default::default(),
+        return_probabilities: false,
+    };
+    let repr = serde_json::to_string(&diarization_request).map_err(|_| ApiError::internal())?;
+    let turns = RequestMessage::Diarization {
+        audio,
+        options: DiarizationOptions { threshold: None },
+    };
+    run(state, diarizer, repr, turns).await
+}
+
+// speakers attach to timed words
+fn require_words(transcript: &Transcription) -> Result<(), ApiError> {
+    if transcript.words.is_empty() && !transcript.text.is_empty() {
+        return Err(ApiError::new(
+            ApiErrorKind::InvalidRequest,
+            "`diarization_model` needs word timestamps, which this model does not give",
+            Some("diarization_unsupported"),
+            Some("diarization_model"),
+        ));
+    }
+    Ok(())
+}
+
+// how an audio-in decoder is asked for its transcript: the prompt and the parse of its answer, and whether its
+// alignment head times the words
+struct TranscriptPlan {
+    prompt: fn(Option<&str>) -> anyhow::Result<String>,
+    parse: fn(&str) -> TranscriptText,
+    timings: bool,
+}
+
+// An audio-in decoder's transcript: its transcription prompt around the clip, decoded greedily, the answer parsed;
+// with each timed word's speaker tag, when the answer carries them.
 async fn decode_transcript(
     state: &SharedInferenceRsState,
     request: &TranscriptionRequest,
     repr: String,
     audio: AudioInput,
-    transcriber: AudioTranscriber,
-) -> Result<Transcription, ApiError> {
-    let prompt = (transcriber.prompt)(request.language.as_deref()).map_err(|error| {
+    plan: TranscriptPlan,
+) -> Result<(Transcription, Vec<Option<u32>>), ApiError> {
+    let prompt = (plan.prompt)(request.language.as_deref()).map_err(|error| {
         ApiError::new(
             ApiErrorKind::InvalidRequest,
             error.to_string(),
@@ -582,7 +646,7 @@ async fn decode_transcript(
         max_len: Some(transcript_token_budget(duration)),
         ..SamplingParams::deterministic()
     };
-    let aligned = wants_timings(request).then(|| audio.clone());
+    let aligned = plan.timings.then(|| audio.clone());
     let message = RequestMessage::MultimodalTokens {
         tokens,
         images: Vec::new(),
@@ -598,18 +662,29 @@ async fn decode_transcript(
         .first()
         .map(|choice| choice.text.as_str())
         .unwrap_or_default();
-    let parsed = (transcriber.parse)(answer);
-    let words = match aligned {
-        Some(audio) => align_transcript(state, request, audio, &parsed.text).await,
+    let parsed = (plan.parse)(answer);
+    // the answer as written: its speaker tags attribute the words
+    let aligned = match aligned {
+        Some(audio) => align_transcript(state, request, audio, answer.trim()).await,
         None => Vec::new(),
     };
-    Ok(Transcription {
+    let tags = aligned.iter().map(|word| word.speaker).collect();
+    let words = aligned
+        .into_iter()
+        .map(|word| TimedText {
+            text: word.text,
+            start: word.start,
+            end: word.end,
+        })
+        .collect();
+    let transcript = Transcription {
         text: parsed.text,
         tokens: Vec::new(),
         words,
         duration,
         language: parsed.language,
-    })
+    };
+    Ok((transcript, tags))
 }
 
 // whether a response shows when its words were spoken: subtitles, or a verbose response with words or segments
@@ -628,7 +703,7 @@ async fn align_transcript(
     request: &TranscriptionRequest,
     audio: AudioInput,
     transcript: &str,
-) -> Vec<TimedText> {
+) -> Vec<AlignedWord> {
     let (response, mut words) = tokio::sync::mpsc::channel(1);
     let alignment = Request::WordTimestamps(WordTimestampsRequest {
         audio,
@@ -642,15 +717,7 @@ async fn align_transcript(
         return Vec::new();
     }
     match words.recv().await {
-        Some(Ok(words)) => words
-            .unwrap_or_default()
-            .into_iter()
-            .map(|word| TimedText {
-                text: word.text,
-                start: word.start,
-                end: word.end,
-            })
-            .collect(),
+        Some(Ok(words)) => words.unwrap_or_default(),
         Some(Err(error)) => {
             tracing::warn!("word timestamps: {error:#}");
             Vec::new()

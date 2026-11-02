@@ -275,6 +275,15 @@ pub fn tokenize_transcript(
     Ok(streams)
 }
 
+/// `text` without its `<spk:N>` tags, its words single-spaced.
+pub fn strip_speaker_tags(text: &str) -> String {
+    speaker_tag()
+        .replace_all(text, " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Whether a transcript attributes its words with `<spk:N>` tags; one without aligns on every frame, as one speaker.
 pub fn has_speaker_tags(text: &str) -> bool {
     speaker_tag().is_match(text)

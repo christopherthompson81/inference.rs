@@ -434,6 +434,12 @@ runs as the audio GGUF stores it: dense from a BF16 one, at Q8_0 from the Q8_0 r
 then break at sentence ends and pauses; without the head (an audio GGUF written before it), the transcript is one
 segment. It adds a second pass of the speech encoder, about 2 s per 40 s clip on the CPU.
 
+Set `diarization_model` to the transcription model's own name and the model attributes speakers itself: it is asked for
+the model card's speaker-tagged transcript (`<spk:0>` ... before each speaker's turn), the word timestamp head aligns
+each tag's words on the frames where the speaker branch matched to it is active, and segments and words carry the
+speaker (the text drops the tags). Naming another loaded diarization model (Nemotron-3, Sortformer) assigns its speaker
+turns to the timed words instead, as for Parakeet.
+
 In BF16 the model needs about 63 GB. For a 24 GB GPU, write a quantized text GGUF and an audio GGUF beside it:
 
 ```bash
