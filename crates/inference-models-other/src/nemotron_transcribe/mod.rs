@@ -497,6 +497,12 @@ impl MultimodalModel for NemotronTranscribeModel {
         NormalModel::config(&self.text)
     }
 
+    fn model_config(
+        &self,
+    ) -> std::sync::Arc<dyn inference_nn::paged_attention::ModelConfigLike + Send + Sync> {
+        self.text.paged_kv_config()
+    }
+
     fn default_model_specific_args(&self, _input_ids: &Tensor) -> Box<dyn std::any::Any> {
         Box::new(NemotronTranscribeSpecificArgs { audio: Vec::new() })
     }

@@ -35,7 +35,10 @@ use crate::{
     layers::masker::PastKvLenCache,
     layers::{CausalMasker, PlainMlp, RmsNorm, RotaryEmbedding, embedding_with_legacy_tied_uqff},
     moe::{ExpertProjNames, MoEExperts, MoEExpertsConfig},
-    paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
+    paged_attention::{
+        AttentionImplementation, HybridPagedKvCacheConfig, ModelConfigLike, ModelConfigMetadata,
+        PagedAttention,
+    },
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -2339,6 +2342,8 @@ pub struct GraniteMoeHybrid {
     max_seq_len: usize,
     sliding_window: Option<usize>,
     has_sinks: bool,
+    // one sequence's conv and SSM state over the Mamba layers
+    recurrent_state_bytes: usize,
 }
 
 /// Runs before decoder layer `layer_idx` on its input hidden states, as Granite 4 Vision injects image features.
@@ -2587,11 +2592,25 @@ impl GraniteMoeHybrid {
         let has_sinks = layers.iter().any(|layer| {
             matches!(layer, DecoderLayer::Attention(block) if block.attn.sdpa_params.sinks.is_some())
         });
+        let mamba_layers = layer_types
+            .iter()
+            .filter(|layer_type| matches!(layer_type, GraniteLayerType::Mamba))
+            .count();
+        let recurrent_state_bytes = mamba_layers
+            * (cfg.mamba_conv_dim() * cfg.mamba_d_conv * vb_m.dtype().size_in_bytes()
+                + cfg.mamba_n_heads()
+                    * cfg.mamba_d_head()
+                    * cfg.mamba_d_state
+                    * cfg
+                        .mamba_state_dtype()
+                        .unwrap_or(vb_m.dtype())
+                        .size_in_bytes());
 
         Ok(Self {
             layout,
             sliding_window: has_sliding.then_some(cfg.sliding_window).flatten(),
             has_sinks,
+            recurrent_state_bytes,
             wte,
             layers,
             layer_types,
@@ -2637,6 +2656,25 @@ impl GraniteMoeHybrid {
                 1.0 / cfg.logits_scaling
             },
             max_seq_len: cfg.max_position_embeddings,
+        })
+    }
+
+    /// The paged cache's view: a hybrid model pages only its attention layers, whose prefix prefill reads the paged
+    /// cache directly unless sinks need the gathered path.
+    pub fn paged_kv_config(&self) -> Arc<dyn ModelConfigLike + Send + Sync> {
+        if !self.layer_types.contains(&GraniteLayerType::Mamba) {
+            return Arc::new(self.cfg.clone());
+        }
+        let paged_layers = self
+            .layer_types
+            .iter()
+            .map(|layer_type| !matches!(layer_type, GraniteLayerType::Mamba))
+            .collect();
+        let config = HybridPagedKvCacheConfig::new(self.cfg.clone(), paged_layers)
+            .with_recurrent_state_bytes(self.recurrent_state_bytes);
+        Arc::new(match self.has_sinks {
+            true => config,
+            false => config.with_uniform_prefix_prefill_attention_features(Default::default()),
         })
     }
 
@@ -2921,6 +2959,9 @@ impl NormalModel for GraniteMoeHybrid {
     }
     fn config(&self) -> &ModelConfigMetadata {
         &self.cfg
+    }
+    fn model_config(&self) -> Arc<dyn ModelConfigLike + Send + Sync> {
+        self.paged_kv_config()
     }
     fn supports_packed_prefill(&self) -> bool {
         !self.has_sinks
