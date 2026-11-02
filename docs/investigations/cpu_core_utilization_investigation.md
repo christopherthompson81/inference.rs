@@ -280,3 +280,14 @@ work shared over the tokens; past that it takes AVX-VNNI, which this CPU lacks.
 **Audio prompts (`cpu_bench.sh`, 5 clips, same build):** 56.0-60.7 tok/s (Run 7's 33.5-36.6 was a slower machine
 state too). At ~86 tok/s for the decoder, a 540-token clip spends ~6.3 s there and the rest (~3.4 s) in the speech
 encoder and speaker branch, f32 gemm-bound (Run 10): the audio side is now ~35-40 % of an audio request.
+
+## Run 15 - 2026-11-02 ~03:40
+
+**Question:** where does CPU decode stand (all runs so far measured prefill)?
+
+**Commands:** `serve --cpu` on the text GGUF, 128 tokens with `ignore_eos` twice; `CUDA_VISIBLE_DEVICES=
+llama-bench -m <text gguf> -p 0 -n 128 -t 8 -ngl 0`.
+
+**Result:** ours 7.7 / 7.7 tok/s, llama.cpp tg128 10.71 +- 0.04. Decode is memory-bound: ~3.5B active parameters at
+~4.5-5 bits plus the Q8_0 dense parts is ~2-2.5 GB a token against ~40 GB/s of dual-channel DDR4, a ceiling near
+16-20 tok/s. We are 28 % behind llama.cpp here, the opposite of prefill. Not yet profiled.
