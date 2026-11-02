@@ -211,3 +211,39 @@ interleaved weights and activations (8 rows' and 4 tokens' blocks woven together
 outputs with one fused multiply-add (~0.5 per output). That is the 1.6x on those kernels. Interleaving in registers
 at decode time does not recover it (broadcasting each 8-value activation chunk costs what the scale saves); it takes
 the repacked layouts, at load for the weights and per prompt for the activations, as llama.cpp does.
+
+## Run 11 - 2026-11-01 ~22:00
+
+**Question:** can a row-per-lane kernel reach llama.cpp's interleaved rate without repacking the weights at load?
+
+**Kernel:** `vec_dot_32_8x4` takes eight rows in their GGUF layout. Rows i and i + 4 load as one 256-bit pair (low
+and high lane), split into values 0..16 and 16..32, and two in-lane 4x4 transposes of 32-bit words leave each row's
+values of a word position in its own lane. Each token's 16-byte activation halves are broadcast and their words
+shuffled across the lanes, so one convert and one fused multiply-add scale the block for all eight rows. The
+transposes cost ~16 shuffles per eight-row block, shared by the four tokens. Run 10's "interleaving in registers
+does not recover it" was wrong: it assumed the activation side was interleaved per row, not the weights.
+
+**Command:** `cargo test --release -p inference-quant --lib tile_rate_32 -- --ignored --nocapture` (8 rows x 2688
+columns x 32 tokens, one thread).
+
+| type | 4x4 tiles GMAC/s | 8x4 lanes GMAC/s | ratio |
+|------|------------------|------------------|-------|
+| IQ4_NL | 34.1 | 49.3 | 1.45 |
+| Q4_0 | 35.2 | 51.3 | 1.46 |
+| Q5_0 | 30.8 | 40.3 | 1.31 |
+| Q8_0 | 37.4 | 50.7 | 1.36 |
+
+Agrees with the one-row kernel within 1e-4 relative (`block32_dots_match_the_generic_kernels`). Next: run the
+expert items in eight-row groups through it and measure the text prompt.
+
+## Run 12 - 2026-11-01 ~23:00
+
+**Question:** what does the eight-row kernel buy end to end (expert items now at least eight rows)?
+
+**First try, a regression:** the text prompt fell from ~60 to 36 tok/s. The server build is the dev profile (debug
+assertions and overflow checks off), and there the kernel ran at 10 GMAC/s against 49 under `--release`: `perf`
+showed `<[__m256i; 2]>::map` and the array zips' iterators as their own functions, so every vector went through
+memory. Plain index loops instead: 47 GMAC/s in the dev profile too.
+
+**A/B, alternating servers (539-token text prompt, warm runs):** HEAD 59.0-60.5 tok/s, eight-row kernel 66.9-68.8
+tok/s (+13 %). llama.cpp's pp512 on the same file: 70-71.

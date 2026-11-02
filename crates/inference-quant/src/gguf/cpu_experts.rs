@@ -9,8 +9,8 @@ use super::cpu_dot;
 
 // Tokens one expert row is dotted against per pass, decoding its blocks once for all of them
 const DOT_TOKENS: usize = 4;
-// Rows a 32-value register tile covers beside its `DOT_TOKENS` tokens, and the fewest rows an item takes
-const TILE_ROWS: usize = 4;
+// Rows a 32-value register tile covers (a lane each) beside its `DOT_TOKENS` tokens, and the fewest rows an item takes
+const TILE_ROWS: usize = 8;
 // Weights one work item decodes into its i16 tile; its row count is a power of two from 2 to QK_K, so it divides
 // every projection's rows
 const TILE_ELEMS: usize = 8 * 1024;
@@ -417,14 +417,15 @@ impl CpuExperts<'_> {
                         cpu_dot::vec_dot_x4(p.ty, w, quad.map(x))
                     }
                 };
-                // four rows by four routes per pass: each block decoded once per route quad, each route's
-                // activations loaded once per row quad
+                // eight rows by four routes per pass, `[route][row]`: each block decoded once per route quad, each
+                // route's activations loaded once per eight rows
                 let tile = |p: &CpuExpertProjection, row: usize, quad: &[usize; DOT_TOKENS]| {
                     let rows: [&[u8]; TILE_ROWS] = std::array::from_fn(|i| p.row(expert, row + i));
                     if p.is_32() {
-                        cpu_dot::vec_dot_32_4x4(p.ty, rows, quad.map(x32))
+                        cpu_dot::vec_dot_32_8x4(p.ty, rows, quad.map(x32))
                     } else {
-                        rows.map(|w| cpu_dot::vec_dot_x4(p.ty, w, quad.map(x)))
+                        let by_row = rows.map(|w| cpu_dot::vec_dot_x4(p.ty, w, quad.map(x)));
+                        std::array::from_fn(|k| by_row.map(|row| row[k]))
                     }
                 };
                 let (quads, rest) = group.as_chunks::<DOT_TOKENS>();
@@ -433,9 +434,9 @@ impl CpuExperts<'_> {
                         for (quad, len) in padded_quads(quads, rest) {
                             let up = tile(&self.up, row, &quad);
                             let gate = self.glu().map(|gate| tile(gate, row, &quad));
-                            for i in 0..TILE_ROWS {
-                                for (k, &r) in quad[..len].iter().enumerate() {
-                                    store(r, row + i, gate.map_or(0.0, |g| g[i][k]), up[i][k]);
+                            for (k, &r) in quad[..len].iter().enumerate() {
+                                for i in 0..TILE_ROWS {
+                                    store(r, row + i, gate.map_or(0.0, |g| g[k][i]), up[k][i]);
                                 }
                             }
                         }
@@ -536,10 +537,10 @@ impl CpuExperts<'_> {
                         let rows: [&[u8]; TILE_ROWS] =
                             std::array::from_fn(|i| self.down.row(expert, row + i));
                         for (quad, len) in padded_quads(quads, rest) {
-                            let ys = cpu_dot::vec_dot_32_4x4(self.down.ty, rows, quad.map(h));
-                            for (i, ys) in ys.iter().enumerate() {
-                                for (k, &r) in quad[..len].iter().enumerate() {
-                                    store(r, row + i, ys[k]);
+                            let ys = cpu_dot::vec_dot_32_8x4(self.down.ty, rows, quad.map(h));
+                            for (ys, &r) in ys.iter().zip(&quad[..len]) {
+                                for (i, &y) in ys.iter().enumerate() {
+                                    store(r, row + i, y);
                                 }
                             }
                         }
