@@ -5,10 +5,11 @@
 use inference_tensor::{DType, Device, Result, Tensor};
 use rayon::prelude::*;
 
-/// The scan's inputs, as `selective_scan_cuda` takes them (all f32, contiguous after the call's copies):
+/// The scan's inputs, as the CPU and CUDA scans take them (all f32, contiguous after the call's copies):
 /// `x` `(batch, seq, heads, head_dim)`, `dt` `(batch, seq, heads)` before bias and softplus, `a` `(heads,)` (already
 /// negated), `b` and `c` `(batch, seq, groups, state)` (heads split evenly over the groups), `d` and `dt_bias`
 /// `(heads,)`.
+#[derive(Clone, Copy)]
 pub struct SelectiveScan<'a> {
     pub x: &'a Tensor,
     pub dt: &'a Tensor,

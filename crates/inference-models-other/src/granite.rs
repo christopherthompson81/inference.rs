@@ -939,6 +939,24 @@ impl RmsNormGated {
     }
 }
 
+/// The scan's per-head constants in F32, as every step reads them: `A` as -exp(A_log), `D` and the dt bias.
+struct ScanConstants {
+    a: Tensor,
+    d: Tensor,
+    dt_bias: Tensor,
+}
+
+impl ScanConstants {
+    fn new(a_log: &Tensor, d: &Tensor, dt_bias: &Tensor) -> Result<Self> {
+        let f32 = inference_tensor::DType::F32;
+        Ok(Self {
+            a: a_log.to_dtype(f32)?.exp()?.neg()?,
+            d: d.to_dtype(f32)?,
+            dt_bias: dt_bias.to_dtype(f32)?,
+        })
+    }
+}
+
 /// Mamba2-style mixer layer
 struct MambaLayer {
     in_proj: Arc<dyn QuantMethod>,
@@ -947,6 +965,7 @@ struct MambaLayer {
     dt_bias: Tensor,
     a_log: Tensor,
     d: Tensor,
+    scan: ScanConstants,
     norm: RmsNormGated,
     out_proj: Arc<dyn QuantMethod>,
     num_heads: usize,
@@ -1044,6 +1063,7 @@ impl MambaLayer {
             in_proj,
             conv1d_weight,
             conv1d_bias,
+            scan: ScanConstants::new(&a_log, &d, &dt_bias)?,
             dt_bias,
             a_log,
             d,
@@ -1095,11 +1115,13 @@ impl MambaLayer {
         uvb.to_safetensors()
     }
 
+    // `pool_slots`: `cache` holds the recurrent pool itself, a decode step updating these rows of it in place
     fn forward(
         &self,
         x: &Tensor,
         cache: &mut MambaLayerCache,
         batch_kind: RecurrentBatchKind,
+        pool_slots: Option<&Tensor>,
     ) -> Result<Tensor> {
         let (batch_size, seq_len, _) = x.dims3()?;
         let dtype = x.dtype();
@@ -1114,8 +1136,13 @@ impl MambaLayer {
                 &dt.squeeze(1)?,
                 cache,
                 batch_size,
+                pool_slots,
             )?
             .unsqueeze(1)?
+        } else if pool_slots.is_some() {
+            inference_tensor::bail!(
+                "Only a Mamba decode step updates the recurrent pool in place."
+            );
         } else {
             self.forward_full(&hidden_states_b_c, &dt, cache, batch_size, seq_len)?
         };
@@ -1191,10 +1218,11 @@ impl MambaLayer {
         dt: &Tensor,                // (batch, num_heads)
         cache: &mut MambaLayerCache,
         batch_size: usize,
+        pool_slots: Option<&Tensor>,
     ) -> Result<Tensor> {
         let groups_time_state_size = self.n_groups * self.ssm_state_size;
 
-        let hidden_states_b_c = self.conv_step(hidden_states_b_c, cache)?;
+        let hidden_states_b_c = self.conv_step(hidden_states_b_c, cache, pool_slots)?;
 
         // Split into hidden_states, B, C
         let hidden_states =
@@ -1210,18 +1238,21 @@ impl MambaLayer {
             groups_time_state_size,
         )?;
 
-        // SSM computation for single token
-        // A = -exp(A_log)
-        let a = self
-            .a_log
-            .to_dtype(inference_tensor::DType::F32)?
-            .exp()?
-            .neg()?;
-
         #[cfg(feature = "cuda")]
         if hidden_states.device().is_cuda() {
-            return self.scan_step_cuda([&hidden_states, &b, &c, dt, &a], cache, batch_size);
+            return self.scan_step_cuda(
+                [&hidden_states, &b, &c, dt],
+                cache,
+                batch_size,
+                pool_slots,
+            );
         }
+        if pool_slots.is_some() {
+            inference_tensor::bail!("Only CUDA updates a Mamba recurrent pool in place.");
+        }
+
+        // SSM computation for single token
+        let a = self.scan.a.clone();
 
         // dt with bias and softplus
         let dt_dtype = dt.dtype();
@@ -1327,56 +1358,63 @@ impl MambaLayer {
         Ok(y)
     }
 
-    // one decode step through the scan kernel (a one-token chunk), at decode's dt floor: `[x, b, c, dt, a]` as
+    // one decode step through the scan kernel (a one-token chunk), at decode's dt floor: `[x, b, c, dt]` as
     // `forward_cached` splits them, the result `(batch, intermediate_size)`
     #[cfg(feature = "cuda")]
     fn scan_step_cuda(
         &self,
-        [x, b, c, dt, a]: [&Tensor; 5],
+        [x, b, c, dt]: [&Tensor; 4],
         cache: &mut MambaLayerCache,
         batch_size: usize,
+        pool_slots: Option<&Tensor>,
     ) -> Result<Tensor> {
         let f32 = inference_tensor::DType::F32;
-        let heads_per_group = self.num_heads / self.n_groups;
-        let per_head = |t: &Tensor| -> Result<Tensor> {
-            t.reshape((batch_size, 1, self.n_groups, 1, self.ssm_state_size))?
-                .to_dtype(f32)?
-                .expand((
-                    batch_size,
-                    1,
-                    self.n_groups,
-                    heads_per_group,
-                    self.ssm_state_size,
-                ))?
-                .reshape((batch_size, 1, self.num_heads, self.ssm_state_size))
+        let by_group = |t: &Tensor| -> Result<Tensor> {
+            t.reshape((batch_size, 1, self.n_groups, self.ssm_state_size))?
+                .to_dtype(f32)
         };
+        // an F32 state is the cache's own storage, which the kernel updates in place
         let mut ssm_state = cache.ssm_state.to_dtype(f32)?;
         let y = crate::cuda::ssm::selective_scan_cuda(
-            &x.reshape((batch_size, 1, self.num_heads, self.head_dim))?
-                .to_dtype(f32)?,
-            &dt.reshape((batch_size, 1, self.num_heads))?.to_dtype(f32)?,
-            a,
-            &per_head(b)?,
-            &per_head(c)?,
-            &self.d.to_dtype(f32)?,
-            &self.dt_bias.to_dtype(f32)?,
+            crate::ops::SelectiveScan {
+                x: &x
+                    .reshape((batch_size, 1, self.num_heads, self.head_dim))?
+                    .to_dtype(f32)?,
+                dt: &dt.reshape((batch_size, 1, self.num_heads))?.to_dtype(f32)?,
+                a: &self.scan.a,
+                b: &by_group(b)?,
+                c: &by_group(c)?,
+                d: &self.scan.d,
+                dt_bias: &self.scan.dt_bias,
+                dt_min: self.time_step_min as f32,
+                dt_max: self.time_step_max as f32,
+            },
             &mut ssm_state,
-            self.time_step_min as f32,
-            self.time_step_max as f32,
+            pool_slots,
         )?;
         cache.ssm_state = ssm_state.to_dtype(cache.ssm_state.dtype())?;
         y.reshape((batch_size, self.intermediate_size))
     }
 
     // one decode step's conv and SiLU, `(batch, conv_dim)`, shifting the step into the conv state
-    fn conv_step(&self, hidden_states_b_c: &Tensor, cache: &mut MambaLayerCache) -> Result<Tensor> {
+    fn conv_step(
+        &self,
+        hidden_states_b_c: &Tensor,
+        cache: &mut MambaLayerCache,
+        pool_slots: Option<&Tensor>,
+    ) -> Result<Tensor> {
         #[cfg(feature = "cuda")]
         if hidden_states_b_c.device().is_cuda() {
-            // the update kernel shifts the state in place, and a prefix snapshot may share the cache's storage
-            cache.conv_state = cache.conv_state.copy()?;
+            // the update kernel shifts the state in place, and a gathered state may share a prefix snapshot's storage
+            if pool_slots.is_none() {
+                cache.conv_state = cache.conv_state.copy()?;
+            }
             return self
-                .conv_cuda(&hidden_states_b_c.unsqueeze(1)?, cache, true)?
+                .conv_cuda(&hidden_states_b_c.unsqueeze(1)?, cache, true, pool_slots)?
                 .squeeze(1);
+        }
+        if pool_slots.is_some() {
+            inference_tensor::bail!("Only CUDA updates a Mamba conv pool in place.");
         }
         // Update conv state: roll and insert new values
         // conv_state: (batch, conv_dim, d_conv)
@@ -1406,7 +1444,7 @@ impl MambaLayer {
     ) -> Result<Tensor> {
         #[cfg(feature = "cuda")]
         if hidden_states_b_c.device().is_cuda() {
-            return self.conv_cuda(hidden_states_b_c, cache, false);
+            return self.conv_cuda(hidden_states_b_c, cache, false, None);
         }
         let seq_len = hidden_states_b_c.dim(1)?;
         let hidden_states_b_c_t = hidden_states_b_c.transpose(1, 2)?;
@@ -1461,6 +1499,7 @@ impl MambaLayer {
         hidden_states_b_c: &Tensor,
         cache: &mut MambaLayerCache,
         is_update: bool,
+        pool_slots: Option<&Tensor>,
     ) -> Result<Tensor> {
         let dtype = hidden_states_b_c.dtype();
         let weight = self.conv1d_weight.squeeze(1)?.to_dtype(dtype)?;
@@ -1477,7 +1516,7 @@ impl MambaLayer {
             &state,
             self.conv_kernel_size,
             is_update,
-            crate::cuda::gdn::GdnStateSlots::Gathered,
+            crate::cuda::gdn::GdnStateSlots::from_option(pool_slots),
         )?;
         cache.conv_state = state.to_dtype(cache.conv_state.dtype())?;
         Ok(activated)
@@ -1520,15 +1559,10 @@ impl MambaLayer {
             .reshape((batch_size, seq_len, self.n_groups, self.ssm_state_size))?
             .to_dtype(inference_tensor::DType::F32)?;
 
-        // SSM computation
-        let a = self
-            .a_log
-            .to_dtype(inference_tensor::DType::F32)?
-            .exp()?
-            .neg()?;
+        let a = self.scan.a.clone();
 
-        // B and C expanded from groups to heads, except on the CPU, whose scan reads each head's group
-        let expand = |t: Tensor| -> Result<Tensor> {
+        // B and C expanded from groups to heads for Metal's scan; the CPU and CUDA ones read each head's group
+        let expand = |t: &Tensor| -> Result<Tensor> {
             t.unsqueeze(3)?
                 .expand((
                     batch_size,
@@ -1539,12 +1573,6 @@ impl MambaLayer {
                 ))?
                 .reshape((batch_size, seq_len, self.num_heads, self.ssm_state_size))
         };
-        let (b, c) = if hidden_states.device().is_cpu() {
-            (b, c)
-        } else {
-            (expand(b)?, expand(c)?)
-        };
-
         #[cfg(feature = "cuda")]
         let use_cuda = matches!(hidden_states.device(), Device::Cuda(_));
         #[cfg(not(feature = "cuda"))]
@@ -1556,23 +1584,23 @@ impl MambaLayer {
         let use_metal = false;
 
         if use_cuda {
-            // CUDA kernel handles dt_bias + softplus + clamp internally
+            // the kernel adds dt_bias, then softplus and the clamp
             let dt_f32 = dt.to_dtype(inference_tensor::DType::F32)?;
-            let dt_bias_f32 = self.dt_bias.to_dtype(inference_tensor::DType::F32)?;
-            let d_f32 = self.d.to_dtype(inference_tensor::DType::F32)?;
             let mut ssm_state = cache.ssm_state.to_dtype(inference_tensor::DType::F32)?;
-
             let y = crate::cuda::ssm::selective_scan_cuda(
-                &hidden_states,
-                &dt_f32,
-                &a,
-                &b,
-                &c,
-                &d_f32,
-                &dt_bias_f32,
+                crate::ops::SelectiveScan {
+                    x: &hidden_states,
+                    dt: &dt_f32,
+                    a: &a,
+                    b: &b,
+                    c: &c,
+                    d: &self.scan.d,
+                    dt_bias: &self.scan.dt_bias,
+                    dt_min: self.prefill_time_step_min as f32,
+                    dt_max: self.time_step_max as f32,
+                },
                 &mut ssm_state,
-                self.prefill_time_step_min as f32,
-                self.time_step_max as f32,
+                None,
             )?;
 
             cache.ssm_state = ssm_state.to_dtype(cache.ssm_state.dtype())?;
@@ -1588,8 +1616,8 @@ impl MambaLayer {
                 &hidden_states,
                 &dt_f32,
                 &a,
-                &b,
-                &c,
+                &expand(&b)?,
+                &expand(&c)?,
                 &d_f32,
                 &dt_bias_f32,
                 &mut ssm_state,
@@ -1608,8 +1636,8 @@ impl MambaLayer {
                     a: &a,
                     b: &b,
                     c: &c,
-                    d: &self.d,
-                    dt_bias: &self.dt_bias,
+                    d: &self.scan.d,
+                    dt_bias: &self.scan.dt_bias,
                     dt_min: self.prefill_time_step_min as f32,
                     dt_max: self.time_step_max as f32,
                 },
@@ -1716,10 +1744,11 @@ impl MambaBlock {
         x: &Tensor,
         cache: &mut MambaLayerCache,
         batch_kind: RecurrentBatchKind,
+        pool_slots: Option<&Tensor>,
     ) -> Result<Tensor> {
         let normed = self.rms_1.forward(x)?;
         let mamba_out = in_activation_dtype(cache, normed.dtype(), |cache| {
-            self.mamba.forward(&normed, cache, batch_kind)
+            self.mamba.forward(&normed, cache, batch_kind, pool_slots)
         })?;
         let x = (scale_tensor(mamba_out, self.residual_multiplier)? + x)?;
         BlockFfn::residual(self.ffn.as_ref(), x, self.residual_multiplier)
@@ -2962,6 +2991,25 @@ impl GraniteMoeHybrid {
                                 "Hybrid cache layer {layer_idx} is not recurrent for Granite"
                             );
                         };
+                        // a CUDA decode step runs on the pool's rows in place, skipping the gather and scatter
+                        if x.device().is_cuda()
+                            && packed_query_lens.is_none()
+                            && matches!(metadata.batch_kind(), RecurrentBatchKind::Decode)
+                            && pool.conv_dtype() == x.dtype()
+                            && pool.recurrent_dtype() == DType::F32
+                        {
+                            let mut pool_cache = MambaLayerCache {
+                                conv_state: pool.conv_state.clone(),
+                                ssm_state: pool.recurrent_state.clone(),
+                            };
+                            x = block.forward(
+                                &x,
+                                &mut pool_cache,
+                                RecurrentBatchKind::Decode,
+                                Some(&indices),
+                            )?;
+                            continue;
+                        }
                         let conv_state = pool.gather_conv_state(&indices)?;
                         let ssm_state = pool.gather_recurrent_state(&indices)?;
 
@@ -2973,7 +3021,7 @@ impl GraniteMoeHybrid {
                         x = if let Some(query_lens) = packed_query_lens.as_deref() {
                             block.forward_packed_prefill(&x, &mut temp_cache, query_lens)?
                         } else {
-                            block.forward(&x, &mut temp_cache, metadata.batch_kind())?
+                            block.forward(&x, &mut temp_cache, metadata.batch_kind(), None)?
                         };
 
                         pool.scatter_conv_state_with_host_indices(
@@ -2993,7 +3041,7 @@ impl GraniteMoeHybrid {
                             if recurrent_batch_kind == RecurrentBatchKind::Prefill {
                                 mamba_cache.reset()?;
                             }
-                            x = block.forward(&x, mamba_cache, recurrent_batch_kind)?;
+                            x = block.forward(&x, mamba_cache, recurrent_batch_kind, None)?;
                         }
                     }
                 }
@@ -3298,6 +3346,9 @@ mod tests {
         )?;
         let out_proj_bias =
             Tensor::from_vec(patterned(HIDDEN_SIZE, 4, 0.02, 0.0), (HIDDEN_SIZE,), device)?;
+        let dt_bias = Tensor::from_vec(patterned(NUM_HEADS, 7, 0.1, 0.2), (NUM_HEADS,), device)?;
+        let a_log = Tensor::from_vec(patterned(NUM_HEADS, 8, 0.1, -0.5), (NUM_HEADS,), device)?;
+        let d = Tensor::from_vec(patterned(NUM_HEADS, 9, 0.1, 0.3), (NUM_HEADS,), device)?;
         Ok(MambaLayer {
             in_proj: unquant_linear(in_proj_weight, Some(in_proj_bias))?,
             conv1d_weight: Tensor::from_vec(
@@ -3310,9 +3361,10 @@ mod tests {
                 (CONV_DIM,),
                 device,
             )?),
-            dt_bias: Tensor::from_vec(patterned(NUM_HEADS, 7, 0.1, 0.2), (NUM_HEADS,), device)?,
-            a_log: Tensor::from_vec(patterned(NUM_HEADS, 8, 0.1, -0.5), (NUM_HEADS,), device)?,
-            d: Tensor::from_vec(patterned(NUM_HEADS, 9, 0.1, 0.3), (NUM_HEADS,), device)?,
+            scan: ScanConstants::new(&a_log, &d, &dt_bias)?,
+            dt_bias,
+            a_log,
+            d,
             norm: RmsNormGated {
                 weight: Tensor::from_vec(
                     patterned(INTERMEDIATE_SIZE, 10, 0.1, 1.0),
@@ -3452,6 +3504,7 @@ mod tests {
                 &x.narrow(1, offset, segment_len)?,
                 &mut segment_cache,
                 RecurrentBatchKind::Prefill,
+                None,
             )?);
             reference_conv_states.push(segment_cache.conv_state);
             reference_ssm_states.push(segment_cache.ssm_state);
@@ -3600,16 +3653,18 @@ mod tests {
         let mut one_shot_cache = initial.clone();
         let mut chunked_cache = initial;
 
-        let one_shot = layer.forward(&x, &mut one_shot_cache, RecurrentBatchKind::Prefill)?;
+        let one_shot = layer.forward(&x, &mut one_shot_cache, RecurrentBatchKind::Prefill, None)?;
         let first = layer.forward(
             &x.narrow(1, 0, split)?,
             &mut chunked_cache,
             RecurrentBatchKind::Prefill,
+            None,
         )?;
         let second = layer.forward(
             &x.narrow(1, split, seq_len - split)?,
             &mut chunked_cache,
             RecurrentBatchKind::Prefill,
+            None,
         )?;
 
         assert_close(&one_shot, &Tensor::cat(&[first, second], 1)?)?;

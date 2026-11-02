@@ -20,41 +20,25 @@ static __device__ __forceinline__ float warp_reduce_sum(float x) {
   return x;
 }
 
-// Mamba-2 SSM scan kernel (group-aware)
-//
-// Each warp processes one (head, head_offset) pair across all timesteps.
-// Lanes within the warp process d_state / WARP_SIZE items each.
-//
-// Inputs:
-//   x:     (batch, seq_len, n_heads, head_dim) - input after conv1d
-//   dt:    (batch, seq_len, n_heads)            - timestep (pre-softplus,
-//   pre-bias) A:     (n_heads,)                           - state matrix
-//   (A_log, negated exp) B:     (batch, seq_len, n_heads, d_state)   - input
-//   projection (expanded from groups) C:     (batch, seq_len, n_heads, d_state)
-//   - output projection (expanded from groups) D:     (n_heads,) - skip
-//   connection weight dt_bias: (n_heads,)                         - bias for dt
-//   state: (batch, n_heads, head_dim, d_state)  - SSM state (read/write)
-//
-// Output:
-//   y:     (batch, seq_len, n_heads, head_dim)  - output
-//
-// Template parameter c_factor = d_state / WARP_SIZE = items per lane
-
+// Mamba-2 SSM scan: each warp runs one (head, head_offset) row across the
+// timesteps, each lane `c_factor` state items. Shapes: x (batch, seq_len,
+// n_heads, head_dim); dt (batch, seq_len, n_heads), before dt_bias and
+// softplus; A, D and dt_bias (n_heads,), A already -exp(A_log); B and C (batch,
+// seq_len, n_groups, d_state), the heads split evenly over the groups; y
+// (batch, seq_len, n_heads, head_dim). state is (rows, n_heads, head_dim,
+// d_state): row b without slot_indices, else row slot_indices[b], a negative
+// slot a padding row that leaves the state and outputs 0.
 template <int c_factor>
-__global__ void __launch_bounds__(WARP_SIZE, 1) ssm_scan_kernel(
-    const float *__restrict__ x,       // (batch, seq_len, n_heads * head_dim)
-    const float *__restrict__ dt,      // (batch, seq_len, n_heads)
-    const float *__restrict__ A,       // (n_heads,)
-    const float *__restrict__ B,       // (batch, seq_len, n_heads * d_state)
-    const float *__restrict__ C,       // (batch, seq_len, n_heads * d_state)
-    const float *__restrict__ D,       // (n_heads,)
-    const float *__restrict__ dt_bias, // (n_heads,)
-    float *__restrict__ state,         // (batch, n_heads, head_dim, d_state)
-    float *__restrict__ y,             // (batch, seq_len, n_heads * head_dim)
-    int n_heads, int head_dim, int d_state, int seq_len, float dt_min,
-    float dt_max) {
-  // Grid: (num_warps_per_batch, batch_size)
-  // Each warp handles one (head, head_offset) pair
+__global__ void __launch_bounds__(WARP_SIZE, 1)
+    ssm_scan_kernel(const float *__restrict__ x, const float *__restrict__ dt,
+                    const float *__restrict__ A, const float *__restrict__ B,
+                    const float *__restrict__ C, const float *__restrict__ D,
+                    const float *__restrict__ dt_bias,
+                    float *__restrict__ state, float *__restrict__ y,
+                    const int32_t *__restrict__ slot_indices, int n_heads,
+                    int n_groups, int head_dim, int d_state, int seq_len,
+                    float dt_min, float dt_max) {
+  // Grid: (n_heads * head_dim, batch_size)
   const int batch_idx = blockIdx.y;
   const int warp_idx = blockIdx.x;
   const int lane = threadIdx.x;
@@ -66,20 +50,25 @@ __global__ void __launch_bounds__(WARP_SIZE, 1) ssm_scan_kernel(
     return;
 
   const int d_inner = n_heads * head_dim;
+  const size_t y_row =
+      (size_t)batch_idx * seq_len * d_inner + head_idx * head_dim + head_off;
+  const int slot = slot_indices ? slot_indices[batch_idx] : batch_idx;
+  if (slot < 0) {
+    if (lane == 0) {
+      for (int t = 0; t < seq_len; t++) {
+        y[y_row + (size_t)t * d_inner] = 0.0f;
+      }
+    }
+    return;
+  }
 
-  // Load A value for this head
   const float a_val = A[head_idx];
-
-  // Load D value for this head
   const float d_val = D[head_idx];
-
-  // Load dt_bias for this head
   const float dt_bias_val = dt_bias[head_idx];
+  const int group = head_idx / (n_heads / n_groups);
 
-  // Initialize state from input state tensor
-  // state layout: (batch, n_heads, head_dim, d_state)
-  const int state_base = batch_idx * n_heads * head_dim * d_state +
-                         head_idx * head_dim * d_state + head_off * d_state;
+  const size_t state_base =
+      (((size_t)slot * n_heads + head_idx) * head_dim + head_off) * d_state;
   // a d_state that is not a whole number of lanes leaves the last lanes' items
   // past the row
   float reg_state[c_factor];
@@ -89,28 +78,22 @@ __global__ void __launch_bounds__(WARP_SIZE, 1) ssm_scan_kernel(
     reg_state[j] = state_off < d_state ? state[state_base + state_off] : 0.0f;
   }
 
-  // Process each timestep
   for (int t = 0; t < seq_len; t++) {
-    // Load dt and apply bias + softplus + clamp
-    float dt_val = dt[batch_idx * seq_len * n_heads + t * n_heads + head_idx];
+    float dt_val = dt[((size_t)batch_idx * seq_len + t) * n_heads + head_idx];
     dt_val += dt_bias_val;
     // softplus: log(1 + exp(x))
     dt_val = (dt_val > 20.0f) ? dt_val : logf(1.0f + expf(dt_val));
-    // clamp
     dt_val = fminf(fmaxf(dt_val, dt_min), dt_max);
 
-    // dA = exp(dt * A)
     const float dA = expf(dt_val * a_val);
 
-    // x value for this (head, head_offset) at timestep t
-    const float x_val = x[batch_idx * seq_len * d_inner + t * d_inner +
+    const float x_val = x[((size_t)batch_idx * seq_len + t) * d_inner +
                           head_idx * head_dim + head_off];
     const float x_dt = x_val * dt_val;
 
-    // Compute state update and output dot product
     float state_sum = 0.0f;
-    const int bc_base = batch_idx * seq_len * n_heads * d_state +
-                        t * n_heads * d_state + head_idx * d_state;
+    const size_t bc_base =
+        (((size_t)batch_idx * seq_len + t) * n_groups + group) * d_state;
 #pragma unroll
     for (int j = 0; j < c_factor; j++) {
       const int state_off = lane * c_factor + j;
@@ -124,17 +107,13 @@ __global__ void __launch_bounds__(WARP_SIZE, 1) ssm_scan_kernel(
       state_sum += reg_state[j] * c_val;
     }
 
-    // Warp-reduce the output across lanes
     state_sum = warp_reduce_sum(state_sum);
 
-    // Lane 0 writes the output (+ D skip connection)
     if (lane == 0) {
-      y[batch_idx * seq_len * d_inner + t * d_inner + head_idx * head_dim +
-        head_off] = state_sum + d_val * x_val;
+      y[y_row + (size_t)t * d_inner] = state_sum + d_val * x_val;
     }
   }
 
-// Write final state back
 #pragma unroll
   for (int j = 0; j < c_factor; j++) {
     const int state_off = lane * c_factor + j;
@@ -143,44 +122,45 @@ __global__ void __launch_bounds__(WARP_SIZE, 1) ssm_scan_kernel(
   }
 }
 
-// Extern C wrapper
+template <int c_factor>
+static void launch_ssm_scan(dim3 grid, cudaStream_t stream, const float *x,
+                            const float *dt, const float *A, const float *B,
+                            const float *C, const float *D,
+                            const float *dt_bias, float *state, float *y,
+                            const int32_t *slot_indices, int n_heads,
+                            int n_groups, int head_dim, int d_state,
+                            int seq_len, float dt_min, float dt_max) {
+  ssm_scan_kernel<c_factor><<<grid, WARP_SIZE, 0, stream>>>(
+      x, dt, A, B, C, D, dt_bias, state, y, slot_indices, n_heads, n_groups,
+      head_dim, d_state, seq_len, dt_min, dt_max);
+}
+
 extern "C" void
 selective_scan_cuda(const float *x, const float *dt, const float *A,
                     const float *B, const float *C, const float *D,
                     const float *dt_bias, float *state, float *y,
-                    int batch_size, int n_heads, int head_dim, int d_state,
-                    int seq_len, float dt_min, float dt_max, int64_t stream) {
+                    const int32_t *slot_indices, int batch_size, int n_heads,
+                    int n_groups, int head_dim, int d_state, int seq_len,
+                    float dt_min, float dt_max, int64_t stream) {
   const cudaStream_t custream = (cudaStream_t)stream;
-  const int n_warps = n_heads * head_dim;
-
-  dim3 grid(n_warps, batch_size);
-  dim3 block(WARP_SIZE);
-
-  // Dispatch based on c_factor = d_state / WARP_SIZE
-  // Common values: d_state=16 (c_factor=1 with padding), 64, 128, 256
+  dim3 grid(n_heads * head_dim, batch_size);
+  // items per lane: d_state up to 256
   const int c_factor = (d_state + WARP_SIZE - 1) / WARP_SIZE;
-
   if (c_factor == 1) {
-    ssm_scan_kernel<1><<<grid, block, 0, custream>>>(
-        x, dt, A, B, C, D, dt_bias, state, y, n_heads, head_dim, d_state,
-        seq_len, dt_min, dt_max);
+    launch_ssm_scan<1>(grid, custream, x, dt, A, B, C, D, dt_bias, state, y,
+                       slot_indices, n_heads, n_groups, head_dim, d_state,
+                       seq_len, dt_min, dt_max);
   } else if (c_factor == 2) {
-    ssm_scan_kernel<2><<<grid, block, 0, custream>>>(
-        x, dt, A, B, C, D, dt_bias, state, y, n_heads, head_dim, d_state,
-        seq_len, dt_min, dt_max);
-  } else if (c_factor == 4) {
-    ssm_scan_kernel<4><<<grid, block, 0, custream>>>(
-        x, dt, A, B, C, D, dt_bias, state, y, n_heads, head_dim, d_state,
-        seq_len, dt_min, dt_max);
-  } else if (c_factor == 8) {
-    ssm_scan_kernel<8><<<grid, block, 0, custream>>>(
-        x, dt, A, B, C, D, dt_bias, state, y, n_heads, head_dim, d_state,
-        seq_len, dt_min, dt_max);
+    launch_ssm_scan<2>(grid, custream, x, dt, A, B, C, D, dt_bias, state, y,
+                       slot_indices, n_heads, n_groups, head_dim, d_state,
+                       seq_len, dt_min, dt_max);
+  } else if (c_factor <= 4) {
+    launch_ssm_scan<4>(grid, custream, x, dt, A, B, C, D, dt_bias, state, y,
+                       slot_indices, n_heads, n_groups, head_dim, d_state,
+                       seq_len, dt_min, dt_max);
   } else {
-    // Fallback: use c_factor=8 as max
-    // This covers d_state up to 256
-    ssm_scan_kernel<8><<<grid, block, 0, custream>>>(
-        x, dt, A, B, C, D, dt_bias, state, y, n_heads, head_dim, d_state,
-        seq_len, dt_min, dt_max);
+    launch_ssm_scan<8>(grid, custream, x, dt, A, B, C, D, dt_bias, state, y,
+                       slot_indices, n_heads, n_groups, head_dim, d_state,
+                       seq_len, dt_min, dt_max);
   }
 }
