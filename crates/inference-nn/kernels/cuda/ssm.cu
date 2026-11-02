@@ -9,8 +9,11 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
 
 #define WARP_SIZE 32
+#define GATED_NORM_THREADS 256
 
 static __device__ __forceinline__ float warp_reduce_sum(float x) {
 #pragma unroll
@@ -319,4 +322,64 @@ extern "C" void ssd_finish_cuda(const SsdParams *p, int64_t stream) {
   const size_t items =
       (size_t)p->n_chunks * SSD_CHUNK * p->n_heads * p->head_dim;
   ssd_finish_kernel<<<(items + 255) / 256, 256, 0, (cudaStream_t)stream>>>(*p);
+}
+
+// Mamba-2's gated RMSNorm: x * silu(gate) normalized over each group, times the
+// weight; one block a (row, group)
+template <typename T>
+__global__ void mamba_gated_rmsnorm_kernel(const float *__restrict__ x,
+                                           const T *__restrict__ gate,
+                                           const float *__restrict__ weight,
+                                           T *__restrict__ out, int width,
+                                           int group_size, int64_t gate_stride,
+                                           float eps) {
+  const size_t row = blockIdx.x;
+  const int base = blockIdx.y * group_size;
+  const float *xr = x + row * width + base;
+  const T *gr = gate + row * gate_stride + base;
+  float sum = 0.0f;
+  for (int i = threadIdx.x; i < group_size; i += blockDim.x) {
+    const float g = (float)gr[i];
+    const float v = xr[i] * g / (1.0f + expf(-g));
+    sum = fmaf(v, v, sum);
+  }
+  __shared__ float partial[GATED_NORM_THREADS / WARP_SIZE];
+  sum = warp_reduce_sum(sum);
+  if (threadIdx.x % WARP_SIZE == 0)
+    partial[threadIdx.x / WARP_SIZE] = sum;
+  __syncthreads();
+  sum = threadIdx.x < blockDim.x / WARP_SIZE ? partial[threadIdx.x] : 0.0f;
+  sum = warp_reduce_sum(sum);
+  if (threadIdx.x == 0)
+    partial[0] = sum;
+  __syncthreads();
+  const float inv_rms = rsqrtf(partial[0] / group_size + eps);
+  T *orow = out + row * width + base;
+  for (int i = threadIdx.x; i < group_size; i += blockDim.x) {
+    const float g = (float)gr[i];
+    const float v = xr[i] * g / (1.0f + expf(-g));
+    orow[i] = (T)(v * inv_rms * weight[base + i]);
+  }
+}
+
+// dtype: 0 f16, 1 bf16, 2 f32 (gate and out)
+extern "C" void mamba_gated_rmsnorm_cuda(const float *x, const void *gate,
+                                         const float *weight, void *out,
+                                         int rows, int width, int group_size,
+                                         int64_t gate_stride, float eps,
+                                         int dtype, int64_t stream) {
+  dim3 grid(rows, width / group_size);
+  const cudaStream_t s = (cudaStream_t)stream;
+  if (dtype == 0)
+    mamba_gated_rmsnorm_kernel<<<grid, GATED_NORM_THREADS, 0, s>>>(
+        x, (const __half *)gate, weight, (__half *)out, width, group_size,
+        gate_stride, eps);
+  else if (dtype == 1)
+    mamba_gated_rmsnorm_kernel<<<grid, GATED_NORM_THREADS, 0, s>>>(
+        x, (const __nv_bfloat16 *)gate, weight, (__nv_bfloat16 *)out, width,
+        group_size, gate_stride, eps);
+  else
+    mamba_gated_rmsnorm_kernel<<<grid, GATED_NORM_THREADS, 0, s>>>(
+        x, (const float *)gate, weight, (float *)out, width, group_size,
+        gate_stride, eps);
 }

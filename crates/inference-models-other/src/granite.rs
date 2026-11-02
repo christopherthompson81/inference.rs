@@ -888,6 +888,9 @@ fn create_mamba_cache(
 /// RMSNorm with optional gating (for Mamba output), over the whole width or each group of `group_size`
 struct RmsNormGated {
     weight: Tensor,
+    // what the fused CUDA norm reads
+    #[cfg(feature = "cuda")]
+    weight_f32: Tensor,
     eps: f64,
     group_size: usize,
 }
@@ -906,6 +909,8 @@ impl RmsNormGated {
             weight = weight.to_device(target_dev)?;
         }
         Ok(Self {
+            #[cfg(feature = "cuda")]
+            weight_f32: weight.to_dtype(inference_tensor::DType::F32)?,
             weight,
             eps,
             group_size,
@@ -914,6 +919,19 @@ impl RmsNormGated {
 
     fn forward(&self, hidden_states: &Tensor, gate: Option<&Tensor>) -> Result<Tensor> {
         let dtype = hidden_states.dtype();
+        #[cfg(feature = "cuda")]
+        if let Some(gate) = gate
+            && hidden_states.device().is_cuda()
+            && dtype == inference_tensor::DType::F32
+        {
+            return crate::cuda::ssm::mamba_gated_rmsnorm_cuda(
+                hidden_states,
+                gate,
+                &self.weight_f32,
+                self.eps,
+                self.group_size,
+            );
+        }
         let mut hidden_states = hidden_states.to_dtype(inference_tensor::DType::F32)?;
 
         // Apply gating if provided
@@ -3350,6 +3368,11 @@ mod tests {
         let dt_bias = Tensor::from_vec(patterned(NUM_HEADS, 7, 0.1, 0.2), (NUM_HEADS,), device)?;
         let a_log = Tensor::from_vec(patterned(NUM_HEADS, 8, 0.1, -0.5), (NUM_HEADS,), device)?;
         let d = Tensor::from_vec(patterned(NUM_HEADS, 9, 0.1, 0.3), (NUM_HEADS,), device)?;
+        let norm_weight = Tensor::from_vec(
+            patterned(INTERMEDIATE_SIZE, 10, 0.1, 1.0),
+            (INTERMEDIATE_SIZE,),
+            device,
+        )?;
         Ok(MambaLayer {
             in_proj: unquant_linear(in_proj_weight, Some(in_proj_bias))?,
             conv1d_weight: Tensor::from_vec(
@@ -3367,11 +3390,9 @@ mod tests {
             a_log,
             d,
             norm: RmsNormGated {
-                weight: Tensor::from_vec(
-                    patterned(INTERMEDIATE_SIZE, 10, 0.1, 1.0),
-                    (INTERMEDIATE_SIZE,),
-                    device,
-                )?,
+                weight: norm_weight.clone(),
+                #[cfg(feature = "cuda")]
+                weight_f32: norm_weight.to_dtype(DType::F32)?,
                 eps: 1e-5,
                 group_size: INTERMEDIATE_SIZE,
             },
