@@ -261,6 +261,20 @@ fn tile_rows<'a>(
         .collect()
 }
 
+// a group's route quads, then its last partial quad padded with its final route: (routes, how many are real)
+fn padded_quads<'a>(
+    quads: &'a [[usize; DOT_TOKENS]],
+    rest: &'a [usize],
+) -> impl Iterator<Item = ([usize; DOT_TOKENS], usize)> + 'a {
+    let tail = rest.last().map(|&last| {
+        (
+            std::array::from_fn(|i| rest.get(i).copied().unwrap_or(last)),
+            rest.len(),
+        )
+    });
+    quads.iter().map(|q| (*q, DOT_TOKENS)).chain(tail)
+}
+
 // the rows one item of a projection with `cols` columns covers: a power of two dividing `rows`, so the items cover
 // every row of a small expert too
 fn rows_per_item(rows: usize, cols: usize) -> usize {
@@ -416,16 +430,17 @@ impl CpuExperts<'_> {
                 let (quads, rest) = group.as_chunks::<DOT_TOKENS>();
                 if item_rows.is_multiple_of(TILE_ROWS) {
                     for row in (row0..row0 + item_rows).step_by(TILE_ROWS) {
-                        for quad in quads {
-                            let up = tile(&self.up, row, quad);
-                            let gate = self.glu().map(|gate| tile(gate, row, quad));
+                        for (quad, len) in padded_quads(quads, rest) {
+                            let up = tile(&self.up, row, &quad);
+                            let gate = self.glu().map(|gate| tile(gate, row, &quad));
                             for i in 0..TILE_ROWS {
-                                for (k, &r) in quad.iter().enumerate() {
+                                for (k, &r) in quad[..len].iter().enumerate() {
                                     store(r, row + i, gate.map_or(0.0, |g| g[i][k]), up[i][k]);
                                 }
                             }
                         }
                     }
+                    return;
                 } else {
                     for row in row0..row0 + item_rows {
                         let up_row = self.up.row(expert, row);
@@ -520,15 +535,16 @@ impl CpuExperts<'_> {
                     for row in (row0..row0 + item_rows).step_by(TILE_ROWS) {
                         let rows: [&[u8]; TILE_ROWS] =
                             std::array::from_fn(|i| self.down.row(expert, row + i));
-                        for quad in quads {
+                        for (quad, len) in padded_quads(quads, rest) {
                             let ys = cpu_dot::vec_dot_32_4x4(self.down.ty, rows, quad.map(h));
                             for (i, ys) in ys.iter().enumerate() {
-                                for (k, &r) in quad.iter().enumerate() {
+                                for (k, &r) in quad[..len].iter().enumerate() {
                                     store(r, row + i, ys[k]);
                                 }
                             }
                         }
                     }
+                    return;
                 } else {
                     for row in row0..row0 + item_rows {
                         let down_row = self.down.row(expert, row);

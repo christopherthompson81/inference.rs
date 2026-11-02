@@ -165,3 +165,22 @@ times. Both on the idle machine.
 
 **Next:** profile llama.cpp and ours op by op on the text prompt to place the remaining 1.4x; the audio side's f32
 encoders (two of them: speech and the speaker branch) on audio prompts.
+
+## Run 9 - 2026-11-01 ~20:40
+
+**Question:** where do the remaining ~2.7 s per 512 tokens go, against llama.cpp on the same file?
+
+**Commands:** `perf record` of `llama-bench -p 512 -t 8 -ngl 0` and of our `serve --cpu` on the 539-token text prompt.
+
+**Per 512 tokens (ours ~10.0 s, llama.cpp 7.3 s):** dense Q8_0 2.5 s vs 2.4 s (tinyBLAS 4xN); Q5_0 down experts
+2.35 s vs 2.5 s (llama.cpp's plain `ggml_vec_dot_q5_0_q8_0`); IQ4_NL up experts 2.2 s vs 1.46 s (llama.cpp repacks
+IQ4_NL to 8 interleaved rows, `gemv_q4_b32_8x8_q8_0_lut_avx`); the Mamba scan 0.9 s vs 0.1 s.
+
+**Changes:**
+- The scan's inner loop fused the state update and the dot with C into one serial sum, which kept it scalar; the
+  update now runs on its own and the dot keeps 8 partial sums. Scan samples 8.8 % -> ~4.3 % (with the dot).
+- A group's last partial route quad pads with its final route into the 4 x 4 tile (only the real routes stored),
+  where it took the single-route dots (7 % of samples).
+
+**Result:** text prompt 54.3-55.1 tok/s (was 48.7-51.1); llama.cpp 70.9. Left: IQ4_NL's interleaved repack
+(~0.5 s per 512 tokens), the scan (~0.3 s), barrier waits (3.5 %), many small items.

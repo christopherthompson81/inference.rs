@@ -20,6 +20,22 @@ pub struct SelectiveScan<'a> {
     pub dt_max: f32,
 }
 
+// partial sums a dot product keeps apart, so it vectorizes rather than adding one product at a time
+const DOT_LANES: usize = 8;
+
+fn lane_dot(a: &[f32], b: &[f32]) -> f32 {
+    let mut lanes = [0f32; DOT_LANES];
+    let (a_chunks, a_rest) = a.as_chunks::<DOT_LANES>();
+    let (b_chunks, b_rest) = b.as_chunks::<DOT_LANES>();
+    for (x, y) in a_chunks.iter().zip(b_chunks) {
+        for i in 0..DOT_LANES {
+            lanes[i] += x[i] * y[i];
+        }
+    }
+    let tail = a_rest.iter().zip(b_rest).map(|(x, y)| x * y).sum::<f32>();
+    lanes.iter().sum::<f32>() + tail
+}
+
 fn f32_vec(t: &Tensor) -> Result<Vec<f32>> {
     t.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()
 }
@@ -59,12 +75,10 @@ pub fn selective_scan_cpu(scan: SelectiveScan<'_>, state: &mut Tensor) -> Result
                 let xt = &x[step * head_dim..(step + 1) * head_dim];
                 for (p, row) in s.chunks_exact_mut(d_state).enumerate() {
                     let dtx = dt_t * xt[p];
-                    let mut acc = 0f32;
-                    for ((sn, &bn), &cn) in row.iter_mut().zip(bt).zip(ct) {
+                    for (sn, &bn) in row.iter_mut().zip(bt) {
                         *sn = *sn * decay + dtx * bn;
-                        acc += *sn * cn;
                     }
-                    out[t * head_dim + p] = acc + d[h] * xt[p];
+                    out[t * head_dim + p] = lane_dot(row, ct) + d[h] * xt[p];
                 }
             }
         });
