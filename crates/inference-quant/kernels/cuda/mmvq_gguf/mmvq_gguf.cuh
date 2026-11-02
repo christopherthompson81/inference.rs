@@ -343,7 +343,7 @@ static __device__ __forceinline__ float vec_dot_q3_K_q8_1_impl_mmvq(
     const int sc = (sc_low | sc_high) - 32;
     const int vil = (vl >> (2 * i)) & 0x03030303;
     const int vih = ((vh >> i) << 2) & 0x04040404;
-    const int vi = __vsubss4(vil, vih);
+    const int vi = __vsub4(vil, vih);
     sumf += d8[i] * (ggml_cuda_dp4a(vi, u[i], 0) * sc);
   }
   return d3 * sumf;
@@ -407,7 +407,7 @@ vec_dot_q6_K_q8_1_impl_mmvq(const int &vl, const int &vh,
     const int sc = scales[4 * i];
     const int vil = (vl >> (4 * i)) & 0x0F0F0F0F;
     const int vih = ((vh >> (4 * i)) << 4) & 0x30303030;
-    const int vi = __vsubss4((vil | vih), 0x20202020);
+    const int vi = __vsub4((vil | vih), 0x20202020);
     sumf += d8[i] * (ggml_cuda_dp4a(vi, u[i], 0) * sc);
   }
   return d * sumf;

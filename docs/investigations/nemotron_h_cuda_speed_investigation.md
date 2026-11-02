@@ -350,3 +350,26 @@ and 94, logprobs within 0.16 before that (rounding: rsqrt and the summation orde
 
 **Next:** the Q5_0 expert down (~22 ms against llama.cpp, same kernel); relu^2 as one pass (~7 ms); `cast_bf16_f32`
 (12 ms, 691 calls) and `ucopy_bf16` (10 ms).
+
+## Run 17 - 2026-11-02 10:19 (local clock)
+
+**Question:** why is the Q5_0 expert down slower than llama.cpp's with the same template, grid and registers (Run 16:
+1931 against 1767 us)?
+
+**Commands:** `ncu --set detailed` on two full-ubatch launches of `mul_mat_q<Q5_0, 128, false>` in our server and in
+llama-server (`970b51ce7`), same request; scratch `ncu/ophist.py` compares executed SASS by opcode.
+
+**Finding:** at ncu's base clocks 1.84 / 1.86 ms against 1.68 / 1.72 ms, the same DRAM traffic (~615 MB read), but
+475M instructions against 449M: +16.7M `LOP3`, +10.5M `PRMT`. Our Q5_0 tile loader subtracts the 16 offset with
+`__vsubss4` (saturating), which Ampere has no instruction for; llama.cpp's #29478 (2026-09-29) replaced every
+`__vsubss4` in its CUDA code with `__vsub4`, since no operand can saturate (4-6 bit values minus their offset: Q4_0,
+Q5_0, Q3_K, Q6_K and the K-quant scales in mmq and mmvq, the Q4_0 / Q5_0 KV dequantizers in fattn).
+
+**Change:** the same in our copies: `mmq_gguf.cuh`, `mmq_vecdotq.cuh`, `mmvq_gguf.cuh`, `indexed_moe.cu`, and fattn's
+`vecdotq.cuh` and `fattn-common.cuh` (20 sites).
+
+**Result:** the Q5_0 down at base clocks 1.73 / 1.75 ms, 449M / 456M instructions (llama.cpp 449M / 453M); what is
+left is branch syncs (`BSSY`/`BSYNC` +1.3M each) and the write-back. Greedy completions bit-identical to Run 16's
+build. End to end the gain is within the card's power-cap noise: nsys `mul_mat_q` 482.4 ms (Run 16: 482.6; Q5_0 down
+1863 against 1922 us, IQ4_NL up, unchanged code, 1651 against 1586), SM clock 1,695-1,980 MHz with the power-cap
+reason set, `fresh_long.py` 4,324-4,371 tok/s.
