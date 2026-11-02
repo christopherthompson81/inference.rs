@@ -68,7 +68,6 @@ const Q4_0_OFFSET: i32 = 8;
 const Q5_0_OFFSET: i32 = 16;
 // both blocks open with their f16 scale
 const BLOCK32_QS: usize = 2;
-const Q8_MAX: f32 = 127.0;
 // Bytes ahead of the block being dotted that a single-token dot prefetches: expert rows stream from DRAM, and the
 // hardware prefetcher alone leaves the dots waiting on them
 #[cfg(target_arch = "x86_64")]
@@ -101,14 +100,7 @@ impl Q8Block32 {
     /// `xs` in blocks of 32, into `ys`.
     pub(crate) fn quantize(xs: &[f32], ys: &mut [Self]) {
         for (x, y) in xs.as_chunks::<QK32>().0.iter().zip(ys) {
-            let amax = x.iter().fold(0f32, |m, v| m.max(v.abs()));
-            let d = amax / Q8_MAX;
-            let id = if d == 0.0 { 0.0 } else { 1.0 / d };
-            y.d = d;
-            for (q, v) in y.qs.iter_mut().zip(x) {
-                // within [-127, 127] by the scale's choice
-                *q = (v * id).round() as i8;
-            }
+            y.d = inference_tensor::quantized::quantize_block32(x, &mut y.qs);
             y.sum = y.qs.iter().map(|&q| i32::from(q)).sum();
         }
     }

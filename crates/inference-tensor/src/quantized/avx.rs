@@ -88,6 +88,42 @@ pub(crate) fn vec_dot_q8_0_q8_0(n: usize, xs: &[BlockQ8_0], ys: &[BlockQ8_0]) ->
     }
 }
 
+/// [`super::quantize_block32`] on AVX2: the same scale, multiply and half-away rounding, so the same bits.
+#[target_feature(enable = "avx2,fma")]
+pub(crate) fn quantize_block32_avx2(x: &[f32; 32], qs: &mut [i8; 32]) -> f32 {
+    let sign = _mm256_set1_ps(-0.0);
+    // SAFETY: `x` holds 32 floats
+    let v: [__m256; 4] = std::array::from_fn(|i| unsafe { _mm256_loadu_ps(x.as_ptr().add(8 * i)) });
+    let abs = |v: __m256| _mm256_andnot_ps(sign, v);
+    let m = _mm256_max_ps(
+        _mm256_max_ps(abs(v[0]), abs(v[1])),
+        _mm256_max_ps(abs(v[2]), abs(v[3])),
+    );
+    let m = _mm_max_ps(_mm256_extractf128_ps(m, 1), _mm256_castps256_ps128(m));
+    let m = _mm_max_ps(m, _mm_movehl_ps(m, m));
+    let amax = _mm_cvtss_f32(_mm_max_ss(m, _mm_movehdup_ps(m)));
+    let d = amax / 127.0;
+    let id = _mm256_set1_ps(if d != 0.0 { 1.0 / d } else { 0.0 });
+    let (half, one) = (_mm256_set1_ps(0.5), _mm256_set1_ps(1.0));
+    let q = v.map(|v| {
+        let s = _mm256_mul_ps(v, id);
+        let t = _mm256_round_ps::<{ _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC }>(s);
+        // f32::round's ties: away from zero
+        let away = _mm256_cmp_ps::<_CMP_GE_OQ>(abs(_mm256_sub_ps(s, t)), half);
+        let step = _mm256_and_ps(away, _mm256_or_ps(_mm256_and_ps(s, sign), one));
+        _mm256_cvtps_epi32(_mm256_add_ps(t, step))
+    });
+    let bytes = _mm256_packs_epi16(
+        _mm256_packs_epi32(q[0], q[1]),
+        _mm256_packs_epi32(q[2], q[3]),
+    );
+    // the packs interleave the 128-bit lanes: put the eight 4-byte groups back in order
+    let bytes = _mm256_permutevar8x32_epi32(bytes, _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7));
+    // SAFETY: `qs` holds 32 bytes
+    unsafe { _mm256_storeu_si256(qs.as_mut_ptr().cast(), bytes) };
+    d
+}
+
 /// # Safety
 /// `i` must be less than 8.
 #[target_feature(enable = "avx2,fma")]

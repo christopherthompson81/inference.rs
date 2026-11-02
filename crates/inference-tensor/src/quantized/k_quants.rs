@@ -785,18 +785,8 @@ impl GgmlType for BlockQ8_0 {
                 ys.len(),
                 Self::BLCK_SIZE
             );
-            for (i, ys) in ys.iter_mut().enumerate() {
-                let mut amax = 0f32;
-                let xs = &xs[i * Self::BLCK_SIZE..(i + 1) * Self::BLCK_SIZE];
-                for &x in xs.iter() {
-                    amax = amax.max(x.abs())
-                }
-                let d = amax / ((1 << 7) - 1) as f32;
-                let id = if d != 0f32 { 1. / d } else { 0. };
-                ys.d = f16::from_f32(d);
-                for (y, &x) in ys.qs.iter_mut().zip(xs.iter()) {
-                    *y = f32::round(x * id) as i8
-                }
+            for (x, y) in xs.as_chunks::<QK8_0>().0.iter().zip(ys) {
+                y.d = f16::from_f32(super::quantize_block32(x, &mut y.qs));
             }
         }
     }
