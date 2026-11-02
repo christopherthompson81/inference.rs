@@ -226,12 +226,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_token_outside_the_vocabulary_is_an_error() -> inference_tensor::Result<()> {
+    fn a_token_outside_the_vocabulary_scores_null() -> inference_tensor::Result<()> {
         let logits = Tensor::new(
-            &[[0.0_f32, 2.0], [5.0, 0.0]],
+            &[[0.0_f32, 2.0], [5.0, 0.0], [1.0, 0.0]],
             &inference_tensor::Device::Cpu,
         )?;
-        assert!(scored(vec![logits], vec![0, 7], LogitsOutput::Logprobs).is_err());
+        let scored = scored(vec![logits], vec![0, 7, 1], LogitsOutput::Logprobs)?;
+        assert_eq!(scored.token_logprobs[1], None);
+        let expected = -(1.0_f32 + 5.0_f32.exp()).ln();
+        assert!((scored.token_logprobs[2].unwrap() - expected).abs() < 1e-6);
         Ok(())
     }
 
