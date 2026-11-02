@@ -46,6 +46,16 @@ use tracing::info;
 pub const DEFAULT_PAGED_ATTENTION_BLOCK_SIZE: usize = 32;
 const GPU_RESERVE_FRACTION: f64 = 0.02;
 const GPU_MIN_RESERVE_BYTES: usize = 512 * 1024 * 1024;
+// the free memory a CUDA engine keeps between prompts: a share of the device, within these bounds
+const CUDA_FREE_FLOOR_DIVISOR: usize = 128;
+const CUDA_FREE_FLOOR_MIN_BYTES: usize = 512 * 1024 * 1024;
+const CUDA_FREE_FLOOR_MAX_BYTES: usize = 2 * 1024 * 1024 * 1024;
+
+/// Free memory a CUDA engine keeps on a device of `total_bytes`: below it, prompts reclaim captured decode graphs.
+pub fn cuda_free_floor_bytes(total_bytes: usize) -> usize {
+    (total_bytes / CUDA_FREE_FLOOR_DIVISOR)
+        .clamp(CUDA_FREE_FLOOR_MIN_BYTES, CUDA_FREE_FLOOR_MAX_BYTES)
+}
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 pub fn device_memory_cap(available_bytes: usize, device: &Device) -> usize {

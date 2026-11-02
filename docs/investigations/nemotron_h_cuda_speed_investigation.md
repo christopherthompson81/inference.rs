@@ -175,3 +175,22 @@ attention) replays graphs and scores within 0.5 of one prefill; over 30 random c
 worst 0.29 with graphs and p90 0.056, worst 0.18 without, so it bounds stale-state replays, not rounding.
 
 **Result (`gpu_fresh.py`):** prompts 2107-3307 tok/s, decode 163.7 tok/s (llama.cpp pp512 4342, tg256 198).
+
+## Run 11 - 2026-11-02 ~10:00
+
+**Question:** why are the precaptured decode graphs evicted (Run 10), and only for this model?
+
+**Finding (`/metrics` after load, before any prompt):** `inference_cuda_memory_pressure_total{level="reserve"}` 5,
+`inference_cuda_graph_evictions_total{reason="memory_pressure"}` 4, 350 MB available against a required 512 MB. The
+default paged cache holds one sequence at the model's context, or what is free when that is less; for Nemotron-H's
+context it is less, so the cache took everything but the cap's 512 MB reserve, and what loaded after it (graphs,
+workspaces) left free memory under the engine's floor (total / 128 within 512 MB-2 GB, the same 512 MB on a 24 GB
+card). Every idle check and prompt then reclaimed the graphs. Qwen2.5-Coder-3B's full context fits in 1152 MB, so its
+graphs stay.
+
+**Change:** a default-sized cache on CUDA reserves the engine's free floor as a post-load component
+(`cuda_free_floor_bytes`, now shared by the planner and the engine's thresholds). A cache that fits beside it, or one
+sized by the user, is unchanged.
+
+**Result:** 512 MB reserved, the cache at 2157 MB (368,096 tokens, was 455,456), 880 MB available after the run;
+4 captures, 510 replays, no pressure events or evictions over `gpu_fresh.py`. Decode 167.3 tok/s, prompts unchanged.

@@ -8,9 +8,6 @@ use crate::{
 };
 
 const BYTES_PER_MIB: usize = 1024 * 1024;
-const BASE_FREE_DIVISOR: usize = 128;
-const BASE_FREE_MIN_BYTES: usize = 512 * BYTES_PER_MIB;
-const BASE_FREE_MAX_BYTES: usize = 2 * 1024 * BYTES_PER_MIB;
 const WARM_CACHE_DIVISOR: usize = 128;
 const WARM_CACHE_MIN_BYTES: usize = 256 * BYTES_PER_MIB;
 const WARM_CACHE_MAX_BYTES: usize = 1024 * BYTES_PER_MIB;
@@ -363,8 +360,7 @@ struct PressureThresholds {
 
 impl PressureThresholds {
     fn from_snapshot(snapshot: CudaAllocatorSnapshot) -> Self {
-        let base_free =
-            (snapshot.total / BASE_FREE_DIVISOR).clamp(BASE_FREE_MIN_BYTES, BASE_FREE_MAX_BYTES);
+        let base_free = crate::paged_attention::cuda_free_floor_bytes(snapshot.total);
         Self {
             base_free,
             hard_free: base_free / 2,
@@ -700,16 +696,10 @@ mod tests {
     fn threshold_clamps_cover_small_and_large_devices() {
         let mut small = snapshot(1, 1, 1);
         small.total = 4 * GIB;
-        assert_eq!(
-            PressureThresholds::from_snapshot(small).base_free,
-            BASE_FREE_MIN_BYTES
-        );
+        assert_eq!(PressureThresholds::from_snapshot(small).base_free, GIB / 2);
         let mut large = snapshot(1, 1, 1);
         large.total = 512 * GIB;
-        assert_eq!(
-            PressureThresholds::from_snapshot(large).base_free,
-            BASE_FREE_MAX_BYTES
-        );
+        assert_eq!(PressureThresholds::from_snapshot(large).base_free, 2 * GIB);
         assert_eq!(
             PressureThresholds::from_snapshot(large).warm_cache,
             WARM_CACHE_MAX_BYTES

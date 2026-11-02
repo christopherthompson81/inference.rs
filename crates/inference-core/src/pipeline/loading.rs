@@ -819,18 +819,30 @@ fn shrink_expert_slots(
 
 // The default paged cache (no size, share or context chosen) holds one sequence at the model's context (its window, or
 // max_model_len) instead of most of the free memory, so several models can share a device; it still takes only what
-// is free when that is less.
+// is free when that is less, short of the engine's free floor, below which every prompt reclaims the decode graphs.
 fn need_sized_default_cache(
     paged_attn_config: &mut Option<PagedAttentionConfig>,
     sizing: &super::isq_flow::AutoDeviceMapSizingInputs<'_>,
     dtype: DType,
+    primary: &Device,
 ) -> Result<()> {
-    let Some(cfg) = paged_attn_config.as_mut() else {
+    let Some(cfg) = paged_attn_config.take() else {
         return Ok(());
     };
     if !cfg.default_memory || !matches!(cfg.mem_gpu, crate::MemoryGpuConfig::Utilization(_)) {
+        *paged_attn_config = Some(cfg);
         return Ok(());
     }
+    let cfg = if primary.is_cuda() {
+        let total = crate::MemoryUsage.query(primary)?.total();
+        cfg.with_base_device_memory_reservation(crate::paged_attention::cuda_free_floor_bytes(
+            total,
+        ))
+        .map_err(inference_tensor::Error::msg)?
+    } else {
+        cfg
+    };
+    let cfg = paged_attn_config.insert(cfg);
     let model = sizing.loader.model_config(sizing.config)?;
     let plan = crate::paged_attention::cache_plan(cfg.cache_type, &cfg.cache_layers, &*model);
     let (num, den) = crate::paged_attention::kv_bytes_per_token(&plan, dtype, &*model);
@@ -875,7 +887,7 @@ pub(crate) fn resolve_map_setting(
         });
     }
     let dtype = dtype.try_into_dtype(&available_devices.iter().collect::<Vec<_>>())?;
-    need_sized_default_cache(paged_attn_config, &sizing, dtype)?;
+    need_sized_default_cache(paged_attn_config, &sizing, dtype, &available_devices[0])?;
     let DeviceMapSetting::Auto(params) = &setting else {
         return Ok(ResolvedMapSetting {
             setting,
