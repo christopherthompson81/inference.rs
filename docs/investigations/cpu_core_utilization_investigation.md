@@ -145,3 +145,23 @@ are compute-bound per core. The default stays at the physical core count.
 tok/s, nine threads busy 84 % of the wall time; load 28 -> 4-15 s; the 818-token prompt no longer runs out of
 memory. BF16 checkpoint: load ~8.5 min -> 63 s, 11-14 tok/s. Left: the expert dots (~40 %), the Q8_0 tiles (17 %),
 the audio tower's f32 gemm (16 %).
+
+## Run 8 - 2026-11-01 ~20:20
+
+**Question:** how far are we from llama.cpp, on the same text GGUF?
+
+**Commands:** `CUDA_VISIBLE_DEVICES= llama-bench -m ...-text-IQ4_NL-down-Q5_0.gguf -p 512 -n 0 -t 8 -ngl 0 -r 2`;
+ours: `serve --cpu` with the text GGUF alone, a 539-token wikitext prompt as a chat message, `max_tokens` 1, three
+times. Both on the idle machine.
+
+**Findings:**
+- llama.cpp pp512: 70.95 +- 1.10 tok/s. Ours, decoder only: 48.7, 51.1, 51.1 tok/s. About 1.4x behind (from ~9x
+  at the baseline tag's 1.2-1.7 with audio).
+- After the 4 x 4 register tiles for the 32-value expert rows (each block decoded once for four routes, each route's
+  activations loaded once for four rows, as llama.cpp's tinyBLAS), audio prompts run 33.5-36.6 tok/s (was
+  31.1-34.1); the audio tower and speaker branch are ~30 % of an audio request.
+- Samples now (audio prompts): Q8_0 tiles 18.2 %, f32 gemm 17.3 % (audio side), expert tiles 28.6 % + single-route
+  remainders 5.2 %, the scan 6.5 %, barrier waits 6.1 %.
+
+**Next:** profile llama.cpp and ours op by op on the text prompt to place the remaining 1.4x; the audio side's f32
+encoders (two of them: speech and the speaker branch) on audio prompts.
