@@ -327,3 +327,21 @@ session: tg128 9.73 +- 0.09 (Run 15's 10.71 was another day's machine state), so
 **What is left (perf, LBR stacks):** per 125 ms token, the Q8_0 matmuls ~69 ms (~29 GB/s), the routed experts ~37 ms
 (~23 GB/s), and ~19 ms of small ops spread through the layers while the pool spins (16.5 %). The experts' bandwidth
 is the larger lever.
+
+## Run 17 - 2026-11-02 11:34 (local clock)
+
+**Question:** why do the routed experts read at ~23 GB/s in decode when the dense Q8_0 GEMV reads at ~29?
+
+**Finding:** a decode step routes one token to each of its 6 experts, and `padded_quads` pads a group's tail to four
+routes by repeating the last, so the 8-row tiles (`*_32_8x4`) dotted every weight block against four copies of the one
+activation row: four times the integer work for the same bytes.
+
+**Change:** the tile kernel is generic over its token count (`sum_blocks_32_8xt`), with `*_32_8x1` beside the four-
+route form; a group of one route takes it, for the up and down projections. Unit case: the 8x1 rows equal the 8x4
+tile's lanes bit for bit.
+
+**Result:** alternating master (`effdb8251`) and branch servers, two runs each: master 7.6 / 7.7 / 7.9 / 8.0 tok/s,
+branch 8.3 / 8.4 / 8.3 / 8.2 (+6 %). Experts 25 -> 21 % of samples (~33 GB/s); greedy CPU completions bit-identical to
+#776's. Per ~122 ms token now: Q8_0 ~63 ms (~31.5 GB/s), experts ~26 ms, the pool's spin 18 % (~22 ms, the small
+ops between matmuls). With both kernel families near the machine's bandwidth, the gap to llama.cpp (9.73 tok/s,
+~103 ms) is that serial time.
