@@ -93,3 +93,34 @@ Against the fixed reference the shipped pair's audio KLD is 0.0019 - 0.0021 on b
 measured against the floored reference, and its transcript NLL is no worse than BF16's. The audio side of the recipe
 stands (BF16 audio GGUF, IQ4_NL-down-Q5_0 text); the reference (`kld_ref_bf16`, scratch) is what a later audio-tower
 quantization (Q8_0) is measured against.
+
+## Run 4 - 2026-11-02 13:43 (local clock)
+
+**Question:** does a Q8_0 speech encoder cost the audio side anything, and does it save memory?
+
+**Commands:** `inference quantize gguf` on the BF16 audio GGUF with the ASR encoder's projections at Q8_0
+(`asr_encoder\.layers\.\d+\.(ffn\.net\.\d+|attn\.w_qkv|attn\.out_proj)\.weight$=q8_0`; 0.82 GiB from 1.37);
+scratch `audio_kld.py cmp` against Run 3's reference; scratch `wer.py` over all 48 clips through a CUDA server.
+
+**Finding 1, before any code change:** the tower dequantized every weight at load, so a Q8_0 file gave Q8_0 rounding
+for no memory: the 3090's paged pool held 101,856 tokens against BF16's 107,296. KLD 0.00188 (BF16 0.00219), WER
+equal.
+
+**Change:** `NemoTransformer`'s layer projections are dense or quantized (`NemoProjection`), the query, key and value
+fused or split (`NemoQkv`), given by the caller through `with_projections`; the standalone diarizer keeps its split,
+dense ones. The transcribe tower loads each ASR layer's `w_qkv`, `out_proj` and two FFN matrices through
+`inference_quant::linear_b`: a quantized GGUF tensor stays a `GgufMatMul`, a dense one comes back in the tower's
+dtype, its qkv no longer cut in three. Unit cases: a fused qkv scores as the split one; Q8_0 projections within
+rounding of their dequantized weights.
+
+**Result:**
+
+| audio GGUF | GPU KLD | GPU same top-1 | WER (48 clips) | 3090 paged pool | CPU KLD | CPU max RSS | CPU, 24 clips |
+|---|---|---|---|---|---|---|---|
+| BF16 | 0.00225 | 99.79 % | 15.08 % | 107,296 tokens | 0.001866 | 50.4 GB | 347 s |
+| Q8_0 (encoder) | 0.00200 | 99.82 % | 15.13 % | 200,160 tokens | 0.001990 | 48.8 GB | 336 s |
+
+BF16 on the GPU moved 0.00219 -> 0.00225 with the fused qkv's rounding (45 of 48 transcripts identical to before);
+on the CPU it is unchanged. Q8_0 against BF16: 42 of 48 transcripts identical. One BF16 server read 88,544 tokens of
+pool, which alternating master and branch servers (107,296 each, twice) showed to be the desktop's share of the
+card moving, not the change.
