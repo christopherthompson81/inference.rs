@@ -28,7 +28,7 @@ use std::borrow::Cow;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::DType;
 
@@ -260,6 +260,15 @@ pub struct TranscriptText {
     pub text: String,
 }
 
+/// A transcript's word, timed on its clip by a model's alignment head; `speaker` the `<spk:N>` tag the transcript gave it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AlignedWord {
+    pub text: String,
+    pub start: f64,
+    pub end: f64,
+    pub speaker: Option<u32>,
+}
+
 /// How an audio-in decoder serves a transcription request: the whole prompt around one clip's placeholder, with the
 /// answer prefix that forces an ISO-639-1 `language` when one is given, and the parse of its answer.
 #[derive(Clone, Copy)]
@@ -378,6 +387,22 @@ pub trait MultimodalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedMode
             loading_isq,
         )
     }
+}
+
+/// A checkpoint's CTC alignment tokenizer (Nemotron 3.5 Transcribe's word timestamp head), which the loaders carry
+/// inside the model's config under [`ALIGNMENT_TOKENIZER_KEY`].
+pub const ALIGNMENT_TOKENIZER_FILE: &str = "alignment_tokenizer/tokenizer.json";
+pub const ALIGNMENT_TOKENIZER_KEY: &str = "alignment_tokenizer";
+
+/// `config` with the alignment `tokenizer`'s JSON under [`ALIGNMENT_TOKENIZER_KEY`].
+pub fn with_alignment_tokenizer(config: &str, tokenizer: &str) -> Result<String> {
+    let mut config: serde_json::Value = serde_json::from_str(config)?;
+    let tokenizer: serde_json::Value = serde_json::from_str(tokenizer)?;
+    config
+        .as_object_mut()
+        .context("the model config is not a JSON object")?
+        .insert(ALIGNMENT_TOKENIZER_KEY.to_string(), tokenizer);
+    Ok(config.to_string())
 }
 
 /// The repository a config names for its text model when it does not describe that model itself (Ultravox's

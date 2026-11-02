@@ -17,7 +17,7 @@ inference.rs supports twelve speech-related model families:
 - **Qwen3-ASR**: an audio-in decoder that transcribes 30 languages, through `/v1/audio/transcriptions`
   (whole-clip segments, no word timestamps) or `/v1/chat/completions`.
 - **Nemotron 3.5 Transcribe**: an audio-in decoder on Nemotron-H (30B-A4B) with a speaker branch, through
-  `/v1/audio/transcriptions` (whole-clip segments, no word timestamps yet) or `/v1/chat/completions`.
+  `/v1/audio/transcriptions` (word and segment timestamps from its CTC alignment head) or `/v1/chat/completions`.
 - **GLM-ASR**: an audio-in decoder (GLM-ASR-Nano) that transcribes up to 655 s through `/v1/audio/transcriptions`
   (whole-clip segments, no word timestamps) or answers through `/v1/chat/completions`.
 - **Audio Flamingo 3**: an audio-in decoder that transcribes up to 600 s through `/v1/audio/transcriptions` and
@@ -427,6 +427,12 @@ The checkpoint is NVIDIA's NeMo layout (`llm.*` for the decoder, `perception.*` 
 branch and projector). `/v1/audio/transcriptions` decodes the model's transcription prompt greedily; through
 `/v1/chat/completions`, send the clip as an `audio_url` part. A clip takes 12.5 tokens a second.
 
+With `response_format=verbose_json` and `timestamp_granularities[]=word` (or `srt` and `vtt`), the checkpoint's word
+timestamp head (`ctc_timestamp.*` and `alignment_tokenizer/`) times the transcript: a CTC forced alignment over 40 ms
+frames, ported from transformers' `align_word_timestamps`, whose word times ours matched exactly in our tests. Segments
+then break at sentence ends and pauses; without the head (an audio GGUF written before it), the transcript is one
+segment. It adds a second pass of the speech encoder, about 2 s per 40 s clip on the CPU.
+
 In BF16 the model needs about 63 GB. For a 24 GB GPU, write a quantized text GGUF and an audio GGUF beside it:
 
 ```bash
@@ -435,7 +441,7 @@ scripts/nemotron_transcribe_text_gguf.py <llama.cpp dir> <checkpoint dir> Nemotr
 inference quantize gguf -m Nemotron-3.5-Transcribe-text-BF16.gguf -o text.gguf --imatrix imatrix.dat \
   --tensor-type 'ffn_down_exps\.weight$=q5_0' --tensor-type '_exps\.weight$=iq4_nl' \
   --tensor-type '(attn_[qkv]|attn_output|_shexp|ssm_in|ssm_out|output|token_embd)\.weight$=q8_0'
-# the audio tensors, the checkpoint's config and its chat template
+# the audio tensors and the word timestamp head, the checkpoint's config with its alignment tokenizer, its chat template
 inference quantize nemotron-transcribe-audio -m <checkpoint dir> -o audio.gguf
 # optional: the speech encoder's matrices at Q8_0
 inference quantize gguf -m audio.gguf -o audio-q8_0.gguf \
@@ -444,9 +450,9 @@ inference serve --format gguf -m <dir> -f text.gguf --mmproj audio.gguf
 ```
 
 The hidden size (2688) and the experts' width (1856) are not multiples of 256, so the experts take 32-value block
-types (`iq4_nl`, `q4_0`, `q5_0`, `q8_0`). With this recipe the text GGUF is 19.3 GiB and the audio one 1.4 GiB;
-on a 24 GB card, paged attention then holds about 107K tokens (over two hours of audio). The Q8_0 audio GGUF is
-0.8 GiB, and its matrices stay 8-bit when loaded, which raises that to about 200K tokens (on the CPU, 1.5 GB less
+types (`iq4_nl`, `q4_0`, `q5_0`, `q8_0`). With this recipe the text GGUF is 19.3 GiB and the audio one 1.55 GiB;
+on a 24 GB card, paged attention then holds about 92K tokens (two hours of audio). The Q8_0 audio GGUF is
+1.0 GiB, and its matrices stay 8-bit when loaded, which raises that to about 183K tokens (on the CPU, 1.5 GB less
 memory); in our measurements its transcripts tracked the BF16 one's (on synthetic clips, the same word error rate
 within 0.1 points and the same KL divergence from the BF16 checkpoint). An imatrix from audio requests
 (see [online calibration](/guides/quantization/online-calibration/) and `inference quantize imatrix`) weighs the

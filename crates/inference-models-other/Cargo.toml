@@ -28,6 +28,8 @@ serde.workspace = true
 serde_json.workspace = true
 tokenizers.workspace = true
 tracing.workspace = true
+unicode-normalization.workspace = true
+unicode_categories.workspace = true
 
 [dev-dependencies]
 rand.workspace = true

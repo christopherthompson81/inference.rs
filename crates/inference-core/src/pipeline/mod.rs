@@ -1324,6 +1324,15 @@ pub trait Pipeline:
     fn whole_prompt(&self) -> bool {
         false
     }
+    /// `transcript`'s words timed on `audio` by the model's alignment head; `None` without one.
+    fn word_timestamps(
+        &self,
+        _audio: &inference_audio::AudioInput,
+        _transcript: &str,
+        _language: Option<&str>,
+    ) -> anyhow::Result<Option<Vec<inference_nn::loaders::AlignedWord>>> {
+        Ok(None)
+    }
     /// A joint decision head's option scores over a prompt's normed hidden states (clef).
     fn joint_decision(
         &self,

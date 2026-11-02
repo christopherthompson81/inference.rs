@@ -263,6 +263,13 @@ impl MultimodalLoader {
             )?,
             None => config,
         };
+        let config = match paths.get_alignment_tokenizer() {
+            Some(tokenizer) => inference_nn::loaders::with_alignment_tokenizer(
+                &config,
+                &fs::read_to_string(tokenizer)?,
+            )?,
+            None => config,
+        };
         super::loaders::validate_lora_qk_rope_layout(&config, self.lora_adapters.is_some())?;
         let modalities = self.inner.modalities(&config)?;
         let runtime_config = self

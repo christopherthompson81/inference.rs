@@ -380,6 +380,11 @@ pub trait ModelPaths: AsAny + Debug + Send + Sync {
     fn get_companion_config(&self) -> Option<&PathBuf> {
         None
     }
+
+    /// The checkpoint's CTC alignment tokenizer, which the loader carries inside the model's config.
+    fn get_alignment_tokenizer(&self) -> Option<&PathBuf> {
+        None
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -396,6 +401,8 @@ pub struct LocalModelPaths<P: Debug> {
     pub processor_config: Option<P>,
     pub chat_template_json_filename: Option<P>,
     pub companion_config: Option<P>,
+    /// [`inference_nn::loaders::ALIGNMENT_TOKENIZER_FILE`], when the checkpoint has one.
+    pub alignment_tokenizer: Option<P>,
 }
 
 impl<P: Debug> LocalModelPaths<P> {
@@ -423,6 +430,7 @@ impl<P: Debug> LocalModelPaths<P> {
             processor_config,
             chat_template_json_filename,
             companion_config: None,
+            alignment_tokenizer: None,
         }
     }
 }
@@ -463,6 +471,9 @@ impl ModelPaths for LocalModelPaths<PathBuf> {
     }
     fn get_companion_config(&self) -> Option<&PathBuf> {
         self.companion_config.as_ref()
+    }
+    fn get_alignment_tokenizer(&self) -> Option<&PathBuf> {
+        self.alignment_tokenizer.as_ref()
     }
 }
 

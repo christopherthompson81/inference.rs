@@ -3091,6 +3091,8 @@ dependencies = [
  "tempfile",
  "tokenizers",
  "tracing",
+ "unicode-normalization",
+ "unicode_categories",
 ]
 
 [[package]]

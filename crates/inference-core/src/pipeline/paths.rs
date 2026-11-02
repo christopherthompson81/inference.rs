@@ -687,6 +687,7 @@ pub(crate) fn get_paths(
             processor_config: None,
             chat_template_json_filename,
             companion_config,
+            alignment_tokenizer: None,
         }),
     )
 }
@@ -697,6 +698,7 @@ struct ProcessorConfigs {
     preprocessor_config: Option<PathBuf>,
     video_preprocessor_config: Option<PathBuf>,
     processor_config: Option<PathBuf>,
+    alignment_tokenizer: Option<PathBuf>,
 }
 
 impl ProcessorConfigs {
@@ -706,6 +708,8 @@ impl ProcessorConfigs {
             preprocessor_config: repo.get_listed("preprocessor_config.json")?,
             video_preprocessor_config: repo.get_listed("video_preprocessor_config.json")?,
             processor_config: repo.get_listed("processor_config.json")?,
+            alignment_tokenizer: repo
+                .get_listed(inference_nn::loaders::ALIGNMENT_TOKENIZER_FILE)?,
         })
     }
 
@@ -718,6 +722,7 @@ impl ProcessorConfigs {
             preprocessor_config: self.preprocessor_config,
             video_preprocessor_config: self.video_preprocessor_config,
             processor_config: self.processor_config,
+            alignment_tokenizer: self.alignment_tokenizer,
             ..paths
         }
     }
@@ -916,6 +921,7 @@ pub(crate) fn get_paths_gguf(
             processor_config: None,
             chat_template_json_filename,
             companion_config: None,
+            alignment_tokenizer: None,
         }),
     )
 }
@@ -1014,6 +1020,7 @@ mod tests {
             processor_config: Some(processor_path),
             chat_template_json_filename: None,
             companion_config: None,
+            alignment_tokenizer: None,
         };
         let jinja_path = jinja_path.to_string_lossy().into_owned();
 

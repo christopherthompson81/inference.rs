@@ -225,7 +225,7 @@ pub use request::{
     RequestMessage, SearchContextSize, TokenizationRequest, TranscriptionStreamOp,
     TranscriptionStreamRequest, TranscriptionStreamUpdate, WebSearchContentType, WebSearchFilters,
     WebSearchImageSettings, WebSearchOptions, WebSearchReturnTokenBudget, WebSearchUserLocation,
-    resolve_reasoning_controls,
+    WordTimestampsRequest, resolve_reasoning_controls,
 };
 pub use response::*;
 pub use sampler::{

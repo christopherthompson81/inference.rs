@@ -7,7 +7,7 @@ use inference_core::{
     ImageGenerationResponse, ImageGenerationResponseFormat, InferenceRs, MAX_REFERENCE_IMAGES,
     NormalRequest, ReferenceImages, Request, RequestMessage, Response, SamplingParams,
     SegmentOptions, SpeakerSegment, SpeechOptions, TimedText, Transcription, TranscriptionOptions,
-    VoiceActivity,
+    VoiceActivity, WordTimestampsRequest,
     speech_utils::{self, Sample},
 };
 
@@ -16,7 +16,10 @@ use inference_protocol::images::{encode_png, image_generation_response};
 
 use crate::{
     api_error::{ApiError, ApiErrorKind, ModelErrorMessage},
-    dispatch::{base_process_non_streaming_response, create_response_channel, send_request},
+    dispatch::{
+        base_process_non_streaming_response, create_response_channel, send_request,
+        send_request_with_model,
+    },
     files::store_generated_image,
     lora_routing::DEFAULT_MODEL_ID,
     media_source::MediaAttachments,
@@ -579,6 +582,7 @@ async fn decode_transcript(
         max_len: Some(transcript_token_budget(duration)),
         ..SamplingParams::deterministic()
     };
+    let aligned = wants_timings(request).then(|| audio.clone());
     let message = RequestMessage::MultimodalTokens {
         tokens,
         images: Vec::new(),
@@ -595,13 +599,64 @@ async fn decode_transcript(
         .map(|choice| choice.text.as_str())
         .unwrap_or_default();
     let parsed = (transcriber.parse)(answer);
+    let words = match aligned {
+        Some(audio) => align_transcript(state, request, audio, &parsed.text).await,
+        None => Vec::new(),
+    };
     Ok(Transcription {
         text: parsed.text,
         tokens: Vec::new(),
-        words: Vec::new(),
+        words,
         duration,
         language: parsed.language,
     })
+}
+
+// whether a response shows when its words were spoken: subtitles, or a verbose response with words or segments
+fn wants_timings(request: &TranscriptionRequest) -> bool {
+    match request.response_format {
+        TranscriptionResponseFormat::Srt | TranscriptionResponseFormat::Vtt => true,
+        TranscriptionResponseFormat::VerboseJson => !request.timestamp_granularities.is_empty(),
+        TranscriptionResponseFormat::Json | TranscriptionResponseFormat::Text => false,
+    }
+}
+
+// an audio-in decoder's transcript timed by its alignment head; none from a model without one, or that fails to align
+// it (the transcript stands as one segment)
+async fn align_transcript(
+    state: &SharedInferenceRsState,
+    request: &TranscriptionRequest,
+    audio: AudioInput,
+    transcript: &str,
+) -> Vec<TimedText> {
+    let (response, mut words) = tokio::sync::mpsc::channel(1);
+    let alignment = Request::WordTimestamps(WordTimestampsRequest {
+        audio,
+        transcript: transcript.to_string(),
+        language: request.language.clone(),
+        response,
+    });
+    let model = (request.model != DEFAULT_MODEL_ID).then_some(request.model.as_str());
+    if let Err(error) = send_request_with_model(state, alignment, model).await {
+        tracing::warn!("word timestamps: {error}");
+        return Vec::new();
+    }
+    match words.recv().await {
+        Some(Ok(words)) => words
+            .unwrap_or_default()
+            .into_iter()
+            .map(|word| TimedText {
+                text: word.text,
+                start: word.start,
+                end: word.end,
+            })
+            .collect(),
+        Some(Err(error)) => {
+            tracing::warn!("word timestamps: {error:#}");
+            Vec::new()
+        }
+        None => Vec::new(),
+    }
 }
 
 // generous for speech: a fast speaker's words run under four tokens a second

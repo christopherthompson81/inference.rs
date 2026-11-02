@@ -6,6 +6,7 @@
 
 pub mod inputs_processor;
 pub mod transcription;
+pub mod word_timestamps;
 
 use std::collections::HashMap;
 
@@ -37,6 +38,8 @@ const DIARIZATION: &str = "perception.encoder.diarization_model";
 const ASR_NORM: &str = "perception.encoder.asr_norm";
 const SPEAKER_NORM: &str = "perception.encoder.diar_norm";
 const PROJECTOR: &str = "perception.proj";
+// NVIDIA's word timestamp head, beside `perception`
+const WORD_TIMESTAMPS: &str = "ctc_timestamp.decoder";
 const LAYER_NORM_EPS: f64 = 1e-5;
 // the encoder runs on chunks of this many frames, each seeing this many more on either side
 const CHUNK_FRAMES: usize = 500;
@@ -111,11 +114,47 @@ pub struct AudioConfig {
     pub speaker_activity_threshold: f32,
 }
 
+/// The word timestamp head: a transformer over the speech encoder's states, upsampled, and a CTC classifier.
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
+pub struct WordTimestampConfig {
+    pub hidden_size: usize,
+    pub intermediate_size: usize,
+    pub num_hidden_layers: usize,
+    pub num_attention_heads: usize,
+    pub max_position_embeddings: usize,
+    pub rope_parameters: RopeParameters,
+    pub residual_scale: f64,
+    pub upsampling_factor: usize,
+    pub vocab_size: usize,
+    pub blank_token_id: u32,
+}
+
+impl WordTimestampConfig {
+    fn encoder(&self) -> NemoTransformerConfig {
+        let head_dim = self.hidden_size / self.num_attention_heads;
+        NemoTransformerConfig {
+            hidden_size: self.hidden_size,
+            intermediate_size: self.intermediate_size,
+            num_hidden_layers: self.num_hidden_layers,
+            num_attention_heads: self.num_attention_heads,
+            // it reads encoder states, not log-mel frames
+            num_mel_bins: 0,
+            subsampling_factor: 1,
+            max_positions: self.max_position_embeddings,
+            rope_theta: self.rope_parameters.rope_theta,
+            rotary_dim: (head_dim as f64 * self.rope_parameters.partial_rotary_factor) as usize,
+            qk_norm: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct Config {
     pub text_config: crate::nemotron_h::Config,
     pub audio_config: AudioConfig,
     pub audio_token_id: u32,
+    #[serde(default)]
+    pub word_timestamp_config: Option<WordTimestampConfig>,
 }
 
 impl Config {
@@ -316,6 +355,90 @@ fn speaker_table(speakers: usize, hidden: usize, device: &Device) -> Result<Tens
     Tensor::from_vec(table, (speakers, hidden), device)
 }
 
+/// The word timestamp head: the speech encoder's states before `asr_norm`, upsampled by a transposed convolution, a
+/// small transformer with a scaled residual, and a classifier over the alignment tokenizer's pieces and the blank.
+struct WordTimestampHead {
+    // the transposed convolution's taps: head frame `j` of each encoder step is tap `j` of the step
+    taps: Vec<Linear>,
+    encoder: NemoTransformer,
+    residual_scale: f64,
+    classifier: Linear,
+}
+
+impl WordTimestampHead {
+    fn new(
+        cfg: &WordTimestampConfig,
+        vb: &ShardedVarBuilder,
+        dtype: DType,
+        device: &Device,
+    ) -> Result<Self> {
+        let vb = vb.pp(WORD_TIMESTAMPS);
+        let on = |t: Tensor| t.to_device(device);
+        // `(in, out, kernel)`, kernel and stride the upsampling factor
+        let weight = tower_tensor(&vb.pp("upsample"), "weight", dtype)?;
+        let bias = on(tower_tensor(&vb.pp("upsample"), "bias", dtype)?)?;
+        let taps = (0..cfg.upsampling_factor)
+            .map(|j| {
+                let tap = weight.narrow(2, j, 1)?.squeeze(2)?.t()?.contiguous()?;
+                Ok(Linear::new(on(tap)?, Some(bias.clone())))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut weights = HashMap::new();
+        encoder_weights(
+            &vb.pp("transformer"),
+            cfg.num_hidden_layers,
+            EncoderNames {
+                ours: "",
+                skip: &[],
+            },
+            dtype,
+            &mut weights,
+        )?;
+        let encoder = NemoTransformer::new(
+            cfg.encoder(),
+            VarBuilder::from_tensors(weights, dtype, device),
+        )?;
+        // a kernel-1 convolution
+        let classifier = vb.pp("decoder_layers").pp(0);
+        let classifier = Linear::new(
+            on(tower_tensor(&classifier, "weight", dtype)?.squeeze(2)?)?,
+            Some(on(tower_tensor(&classifier, "bias", dtype)?)?),
+        );
+        Ok(Self {
+            taps,
+            encoder,
+            residual_scale: cfg.residual_scale,
+            classifier,
+        })
+    }
+
+    // one encoder window's `(steps, hidden)` states to its `(steps * upsampling, classes)` log-probabilities
+    fn log_probs(&self, states: &Tensor, classes: &Tensor) -> Result<Tensor> {
+        let xs = states.unsqueeze(0)?;
+        let (_, steps, hidden) = xs.dims3()?;
+        let taps = self
+            .taps
+            .iter()
+            .map(|tap| tap.forward(&xs))
+            .collect::<Result<Vec<_>>>()?;
+        let upsampled = Tensor::stack(&taps, 2)?.reshape((1, steps * taps.len(), hidden))?;
+        let hidden = (&upsampled + (self.encoder.forward(&upsampled)? * self.residual_scale)?)?;
+        let logits = self
+            .classifier
+            .forward(&hidden)?
+            .squeeze(0)?
+            .to_dtype(DType::F32)?;
+        let max = logits.max_keepdim(inference_tensor::D::Minus1)?;
+        let normalizer = (logits
+            .broadcast_sub(&max)?
+            .exp()?
+            .sum_keepdim(inference_tensor::D::Minus1)?
+            .log()?
+            + max)?;
+        logits.index_select(classes, 1)?.broadcast_sub(&normalizer)
+    }
+}
+
 /// The speech encoder and the speaker branch beside it, and the projector: in f32 on the CPU, as transformers keeps
 /// them, and in the model's dtype on an accelerator, where the f32 copy would take 1.4 GiB more.
 struct AudioTower {
@@ -327,6 +450,17 @@ struct AudioTower {
     projector: Linear,
     activity_threshold: f32,
     subsampling: usize,
+    // absent from a checkpoint or GGUF without it
+    word_timestamps: Option<(WordTimestampHead, usize)>,
+}
+
+// the windows the encoders run on: `(first, start, end, last)`, steps `start..end` of each, seen with `first..last`
+fn encoder_windows(steps: usize) -> impl Iterator<Item = (usize, usize, usize, usize)> {
+    (0..steps).step_by(CHUNK_FRAMES).map(move |start| {
+        let end = (start + CHUNK_FRAMES).min(steps);
+        let first = start.saturating_sub(CHUNK_CONTEXT);
+        (first, start, end, (end + CHUNK_CONTEXT).min(steps))
+    })
 }
 
 impl AudioTower {
@@ -410,7 +544,17 @@ impl AudioTower {
                 VarBuilder::from_tensors(map, dtype, device),
             )?
         };
+        let word_timestamps = match &cfg.word_timestamp_config {
+            Some(head) if vb.contains_tensor(&format!("{WORD_TIMESTAMPS}.upsample.weight")) => {
+                Some((
+                    WordTimestampHead::new(head, vb, dtype, device)?,
+                    head.upsampling_factor,
+                ))
+            }
+            _ => None,
+        };
         Ok(Self {
+            word_timestamps,
             asr_norm: norm(ASR_NORM, hidden)?,
             speaker_norm: norm(SPEAKER_NORM, speakers)?,
             speaker_table: speaker_table(speakers, hidden, device)?.to_dtype(dtype)?,
@@ -425,10 +569,7 @@ impl AudioTower {
     // the encoder over chunks of `CHUNK_FRAMES` steps, each run with `CHUNK_CONTEXT` more on either side
     fn encode(&self, clip: &AudioClip, steps: usize) -> Result<Tensor> {
         let mut out = Vec::new();
-        for start in (0..steps).step_by(CHUNK_FRAMES) {
-            let end = (start + CHUNK_FRAMES).min(steps);
-            let first = start.saturating_sub(CHUNK_CONTEXT);
-            let last = (end + CHUNK_CONTEXT).min(steps);
+        for (first, start, end, last) in encoder_windows(steps) {
             let xs = self.encoder.embed(&clip.normalized, first, last - first)?;
             let hs = self.encoder.forward(&xs)?;
             out.push(hs.narrow(1, start - first, end - start)?);
@@ -457,6 +598,51 @@ impl AudioTower {
         let hidden = (self.asr_norm.forward(&hidden)? + speaker_states)?;
         self.projector.forward(&hidden)
     }
+
+    /// The word timestamp head's log-probabilities over `classes` (`frames x classes.len()`, the head's frames) and the
+    /// diarization model's logits, for [`word_timestamps::align`]; `None` without the head.
+    fn word_timestamp_inputs(
+        &self,
+        clip: &AudioClip,
+        classes: &[u32],
+    ) -> Result<
+        Option<(
+            word_timestamps::LogProbs,
+            word_timestamps::SpeakerLogits,
+            usize,
+        )>,
+    > {
+        let Some((head, upsampling)) = &self.word_timestamps else {
+            return Ok(None);
+        };
+        let steps = clip.frames.div_ceil(self.subsampling);
+        let states = self.encode(clip, steps)?;
+        let ids = Tensor::new(classes, states.device())?;
+        let mut rows = Vec::new();
+        for (first, start, end, last) in encoder_windows(steps) {
+            let window = head.log_probs(&states.narrow(0, first, last - first)?, &ids)?;
+            rows.push(window.narrow(
+                0,
+                (start - first) * upsampling,
+                (end - start) * upsampling,
+            )?);
+        }
+        let log_probs = word_timestamps::LogProbs {
+            frames: steps * upsampling,
+            columns: classes.to_vec(),
+            values: Tensor::cat(&rows, 0)?.flatten_all()?.to_vec1::<f32>()?,
+        };
+        let logits = self.diarizer.logits_of_features(&clip.raw, clip.frames)?;
+        let speakers = logits.dim(1)?;
+        let speaker_logits = word_timestamps::SpeakerLogits {
+            speakers,
+            values: logits
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?,
+        };
+        Ok(Some((log_probs, speaker_logits, *upsampling)))
+    }
 }
 
 pub struct NemotronTranscribeModel {
@@ -464,6 +650,9 @@ pub struct NemotronTranscribeModel {
     audio: AudioTower,
     audio_token: u32,
     vocab_size: usize,
+    mel: inference_audio::nemo::NemoMel,
+    // the word timestamp head's vocabulary and its blank, when the loader gave the tokenizer
+    alignment: Option<(tokenizers::Tokenizer, u32)>,
 }
 
 impl NemotronTranscribeModel {
@@ -488,12 +677,67 @@ impl NemotronTranscribeModel {
             normal_loading_metadata,
             attention_mechanism,
         )?;
+        let tokenizer = serde_json::from_str::<serde_json::Value>(config)
+            .map_err(inference_tensor::Error::msg)?
+            .get(inference_nn::loaders::ALIGNMENT_TOKENIZER_KEY)
+            .map(|json| {
+                inference_nn::utils::tokenizer::tokenizer_from_bytes(json.to_string().as_bytes())
+            })
+            .transpose()
+            .map_err(inference_tensor::Error::msg)?;
+        let alignment = tokenizer.zip(
+            cfg.word_timestamp_config
+                .as_ref()
+                .map(|head| head.blank_token_id),
+        );
         Ok(Self {
             text,
             audio,
             audio_token: cfg.audio_token_id,
             vocab_size: cfg.text_config.vocab_size,
+            mel: inference_audio::nemo::NemoMel::new(mel_config(
+                cfg.audio_config.asr_config.num_mel_bins,
+            )),
+            alignment,
         })
+    }
+
+    /// `transcript`'s words timed on `audio` and attributed to its `<spk:N>` tags (a transcript without tags aligns as
+    /// tag 0); `None` when the checkpoint has no word timestamp head or its loader gave no alignment tokenizer.
+    pub fn word_timestamps(
+        &self,
+        audio: &inference_audio::AudioInput,
+        transcript: &str,
+        language: Option<&str>,
+    ) -> anyhow::Result<Option<word_timestamps::WordTimestamps>> {
+        let Some((tokenizer, blank)) = &self.alignment else {
+            return Ok(None);
+        };
+        let mono = audio.to_mono();
+        let pcm = if audio.sample_rate == inputs_processor::SAMPLE_RATE {
+            mono
+        } else {
+            inference_audio::mel::resample(&mono, audio.sample_rate, inputs_processor::SAMPLE_RATE)?
+        };
+        let clip = inputs_processor::audio_clip(&self.mel, &pcm)?;
+        let streams =
+            word_timestamps::tokenize_transcript(tokenizer, transcript, language, *blank)?;
+        let classes = word_timestamps::classes(&streams, *blank);
+        let Some((log_probs, speakers, upsampling)) =
+            self.audio.word_timestamp_inputs(&clip, &classes)?
+        else {
+            return Ok(None);
+        };
+        let timing = word_timestamps::Timing {
+            spectrogram_frames: clip.frames,
+            subsampling: self.audio.subsampling,
+            upsampling,
+            hop_seconds: inputs_processor::HOP_LENGTH as f64
+                / f64::from(inputs_processor::SAMPLE_RATE),
+        };
+        // the speaker branch places a tagged transcript's speakers; an untagged one is one speaker everywhere
+        let speakers = word_timestamps::has_speaker_tags(transcript).then_some(&speakers);
+        word_timestamps::align(&streams, &log_probs, speakers, timing).map(Some)
     }
 
     fn forward_inner(
@@ -537,6 +781,37 @@ impl crate::model::BlockDiffusionMixin for NemotronTranscribeModel {}
 impl AnyMoeBaseModelMixin for NemotronTranscribeModel {}
 
 impl MultimodalModel for NemotronTranscribeModel {
+    fn word_timestamps(
+        &self,
+        audio: &inference_audio::AudioInput,
+        transcript: &str,
+        language: Option<&str>,
+    ) -> anyhow::Result<Option<Vec<inference_nn::loaders::AlignedWord>>> {
+        let Some(timestamps) =
+            NemotronTranscribeModel::word_timestamps(self, audio, transcript, language)?
+        else {
+            return Ok(None);
+        };
+        if !timestamps.failed.is_empty() {
+            tracing::warn!(
+                "{MODEL}: the words of speaker tags {:?} did not fit on their speakers' frames",
+                timestamps.failed
+            );
+        }
+        Ok(Some(
+            timestamps
+                .words
+                .into_iter()
+                .map(|word| inference_nn::loaders::AlignedWord {
+                    text: word.text,
+                    start: word.start,
+                    end: word.end,
+                    speaker: word.tag,
+                })
+                .collect(),
+        ))
+    }
+
     fn forward(
         &self,
         input_ids: &Tensor,

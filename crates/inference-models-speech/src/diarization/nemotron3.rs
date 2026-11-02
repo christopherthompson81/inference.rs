@@ -298,7 +298,8 @@ impl Layer {
 /// The encoder [`NemoTransformerConfig`] describes, its weights under transformers' names (`embedder.projection`,
 /// `input_layer_norm`, `layers.N`, `layer_norm`).
 pub struct NemoTransformer {
-    embedder: Linear,
+    // absent for an encoder over another encoder's states, which `forward` takes directly
+    embedder: Option<Linear>,
     input_norm: LayerNorm,
     layers: Vec<Layer>,
     final_norm: LayerNorm,
@@ -344,12 +345,16 @@ impl NemoTransformer {
             })
             .collect::<Result<Vec<_>>>()?;
         let stacked = c.subsampling_factor * c.num_mel_bins;
-        let embedder = Linear::new(
-            vb.pp("embedder")
-                .pp("projection")
-                .get((c.hidden_size, stacked), "weight")?,
-            None,
-        );
+        let projection = vb.pp("embedder").pp("projection");
+        let embedder = projection
+            .contains_tensor("weight")
+            .then(|| -> Result<Linear> {
+                Ok(Linear::new(
+                    projection.get((c.hidden_size, stacked), "weight")?,
+                    None,
+                ))
+            })
+            .transpose()?;
         let (cos, sin) = rope_tables(
             c.max_positions,
             c.rotary_dim,
@@ -383,7 +388,10 @@ impl NemoTransformer {
         stacked.resize(count * row, 0.);
         let xs =
             Tensor::from_vec(stacked, (1, count, row), &self.device)?.to_dtype(self.cos.dtype())?;
-        self.embedder.forward(&xs)
+        self.embedder
+            .as_ref()
+            .ok_or_else(|| msg("this encoder has no frame embedder"))?
+            .forward(&xs)
     }
 
     /// The layers and the final norm over `(1, T, hidden)` embeddings, positions from 0.

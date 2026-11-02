@@ -427,6 +427,16 @@ pub struct DetokenizationRequest {
     pub response: Sender<anyhow::Result<String>>,
 }
 
+/// A transcript's words timed on its audio by the model's alignment head (Nemotron 3.5 Transcribe's CTC head); `None`
+/// from a model without one.
+#[derive(Clone)]
+pub struct WordTimestampsRequest {
+    pub audio: inference_audio::AudioInput,
+    pub transcript: String,
+    pub language: Option<String>,
+    pub response: Sender<anyhow::Result<Option<Vec<inference_nn::loaders::AlignedWord>>>>,
+}
+
 /// A prompt's normed hidden states (from a raw-logits pass of a joint decision model) and the spans its joint head
 /// reads; answered with one score per option.
 #[derive(Clone)]
@@ -476,6 +486,8 @@ pub enum Request {
     Detokenize(DetokenizationRequest),
     #[serde(skip)]
     JointDecision(JointDecisionRequest),
+    #[serde(skip)]
+    WordTimestamps(WordTimestampsRequest),
     // Sending a terminate request causes the `run` function to return to the thread created in `InferenceRs::new`,
     // and then Engine will be dropped.
     Terminate,
@@ -512,6 +524,9 @@ impl Debug for Request {
             }
             Request::JointDecision(req) => {
                 write!(f, "Joint Decision Request {:?}", req.hidden.shape())
+            }
+            Request::WordTimestamps(req) => {
+                write!(f, "Word Timestamps Request {:?}", req.transcript)
             }
             Request::Terminate => write!(f, "Termination Request"),
             Request::TerminateAllSeqsNextStep => write!(f, "Terminate All Seqs Next Step"),
