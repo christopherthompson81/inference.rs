@@ -294,7 +294,13 @@ off: first-token logprobs differ by 0.036-0.048, one completion matches in full,
 temporary probe ran both scans on every layer's real inputs: the largest difference in y is 1e-6 to 2e-5 of the
 layer's largest output (A down to -11,076, x up to 62), F32 rounding of two summation orders. The gap is BF16
 rounding of that noise, carried through 52 layers of a 4-bit model (Run 4 saw 0.002-0.035 between two expert matmul
-paths); there is no in-repo KLD tool to put a number on it.
+paths).
 
-**Next:** the remaining ~115 ms: `mul_mat_q` (+28 ms against llama.cpp), F16 or TF32 tensor cores for the SSD
+**KLD** (the perplexity example's `--kld-base` against the BF16 base `bf16-wiki-c512-ch40.kld`, ik_llama.cpp's
+`llama-perplexity` tokens, 40 chunks of 512, 10,200 positions): SSD on PPL 12.7827, KLD mean 0.07516, median 0.02778,
+p99 0.689, same top-1 88.57 %; SSD off PPL 12.6964, KLD mean 0.07435, median 0.02699, p99 0.629, same top-1 89.02 %
+(base PPL 12.1989). SSD costs ~0.0008 KLD (1 %). Both are 3x llama.cpp's KLD for the same GGUF (0.0250, top-1 93.2 %,
+nemotron_transcribe_investigation.md): our CUDA path loses accuracy somewhere else, before this change.
+
+**Next:** find the 3x KLD gap against llama.cpp (CPU against CUDA first, then per stage); the remaining ~115 ms: `mul_mat_q` (+28 ms against llama.cpp), F16 or TF32 tensor cores for the SSD
 matmuls (~31 ms of SGEMM; llama.cpp runs them in F16), the BF16/F32 casts and the gated RMSNorm's elementwise chain.
