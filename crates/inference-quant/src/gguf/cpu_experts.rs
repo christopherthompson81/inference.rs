@@ -571,15 +571,17 @@ mod tests {
     fn dense(projection: &CpuExpertProjection, expert: usize) -> Vec<f32> {
         let expert_bytes = projection.rows * projection.row_bytes();
         let bytes = &projection.bytes[expert * expert_bytes..][..expert_bytes];
-        if projection.ty == GgufType::Q8_0 {
-            // Candle holds Q8_0, so the raw dequantizer does not; its block is an f16 scale and 32 i8 values
-            return bytes
-                .chunks_exact(projection.ty.type_size())
-                .flat_map(|block| {
-                    let d = half::f16::from_le_bytes([block[0], block[1]]).to_f32();
-                    block[2..].iter().map(move |&q| d * f32::from(q as i8))
-                })
-                .collect();
+        if let Some(dtype) = projection.ty.candle() {
+            // Candle holds these, so the raw dequantizer does not
+            return inference_tensor::quantized::ggml_file::qtensor_from_ggml(
+                dtype,
+                bytes,
+                vec![projection.rows, projection.cols],
+                &inference_tensor::Device::Cpu,
+            )
+            .and_then(|q| q.dequantize(&inference_tensor::Device::Cpu))
+            .and_then(|t| t.flatten_all()?.to_vec1::<f32>())
+            .unwrap();
         }
         super::super::raw::dequantize_rows(projection.ty, projection.cols, bytes).unwrap()
     }
@@ -733,6 +735,8 @@ mod tests {
         for types in [
             [GgufType::Q8_0, GgufType::Q8_0],
             [GgufType::Iq4Nl, GgufType::Iq4Nl],
+            [GgufType::Iq4Nl, GgufType::Q5_0],
+            [GgufType::Q4_0, GgufType::Q5_0],
         ] {
             for (hidden, inter) in [(64, 32), (64, 64), (96, 64), (32 * 7, 32 * 3)] {
                 for gated in [true, false] {

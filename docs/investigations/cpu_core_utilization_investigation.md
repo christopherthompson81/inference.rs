@@ -47,3 +47,31 @@ statistics and the `index_add` back into the tokens stay sequential, in expert o
 the machine; it applied to every process, the application too. It now leases only under nextest (`NEXTEST_RUN_ID`
 set) or with an explicit `INFERENCE_CPU_SLOTS`; an application's ops take every worker they ask for. The run below
 still has the lease (its library predates the change).
+
+## Run 3 - 2026-11-01 ~18:45 (baseline tag `cpu-baseline-2026-11-01`, 660e3a207)
+
+**Question:** with nothing else running, how do `serve --cpu` loads of Nemotron 3.5 Transcribe use the cores?
+
+**Command:** `scratchpad/bench/cpu_bench.sh`: `inference serve --cpu`, wait for the listener (load time), five
+calibration clips as chat requests with the transcription instruction and `max_tokens` 1 (prompt processing only),
+CPU% sampled every 2 s and `perf record --latency` over the prompt phase; machine idle (load average < 1.5).
+
+**Findings:**
+- BF16 checkpoint: load 63.2 s (was ~8.5 minutes before Run 1's copy). 396-818 tokens at 11.4-14.0 tok/s, 540 %
+  CPU; wall time at 8 threads 64.8 %, at 15 9.3 %, at 1 15.3 %.
+- GGUF pair (IQ4_NL up, Q5_0 down, Q8_0 rest): load 28.1 s; 1.2-1.7 tok/s, 147 % CPU, 78 % of wall time on 2
+  threads; the 818-token prompt was OOM-killed at 119 GB. 43 % of samples in `memmove` and byte gathering: the
+  experts took the gather path, copying a matrix per routed row. The CPU expert kernel takes a layer only when both
+  projections are its types, and its 32-value set was IQ4_NL and Q8_0; the Q5_0 down stack sent every MoE layer to
+  the gather.
+
+**Fix:** Q4_0 and Q5_0 in the CPU expert kernel's 32-value dots (AVX2 and generic; Q5_0's fifth bits expanded to
+bytes and `0xf0` ORed into the nibbles whose bit is clear, so the signed dot applies). Tests: AVX2 against generic,
+and the kernel against Candle's dequantized weights for IQ4_NL / Q5_0 and Q4_0 / Q5_0, gated and ungated.
+
+**After:** GGUF pair load 15.0 s, 396-818 tokens at 14.4-15.1 tok/s, 583 % CPU; wall time at 9 threads 91.2 %.
+Samples: `vec_dot_q8_0_q8_0` 35 % (the dense Q8_0 layers' prefill, a row dot per output), `q5_0_32` 13 %,
+`iq4_nl_32` 11 %, barrier waits 7 %, f32 gemm 8 %.
+
+**Next:** per-core efficiency: the dense Q8_0 matmuls in prefill (a tiled kernel or dequantize-then-gemm past some
+rows), then the 8-thread pool on a 16-thread machine (hyperthreads were measured slower for the conv kernels).
