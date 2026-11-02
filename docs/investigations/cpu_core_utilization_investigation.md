@@ -75,3 +75,23 @@ Samples: `vec_dot_q8_0_q8_0` 35 % (the dense Q8_0 layers' prefill, a row dot per
 
 **Next:** per-core efficiency: the dense Q8_0 matmuls in prefill (a tiled kernel or dequantize-then-gemm past some
 rows), then the 8-thread pool on a 16-thread machine (hyperthreads were measured slower for the conv kernels).
+
+## Run 4 - 2026-11-01 ~19:05
+
+**Question:** why do the dense Q8_0 layers' prefill matmuls take a dot product per output row (35 % of samples)?
+
+**Finding:** the tiled x86 path (`repack_x86::select`) required `k % 256 == 0` for every type, Q8_0 included, though
+Q8_0's tiles are per 32-value block. This model's inputs are 2688 wide (attention q/k/v, `ssm_in`, shared up) and
+3712 (shared down); only the 4096-wide ones tiled.
+
+**Change:** Q8_0 takes the tiles at any whole number of 32-value blocks: its rows pad to whole superblocks with
+zero-scale tiles (+128, a zero weight) and zero activations, which add nothing; the superblock count rounds up in
+every path (matmul, fused and indexed gemv), exact for the K-quants, which still need whole superblocks. The test
+against ggml's `vec_dot_q8_0_q8_0` (1e-4) runs at k = 1024, 1056 (33 blocks) and 2688.
+
+**Result (GGUF pair, same benchmark):** 20.2-21.7 tok/s (was 14.4-15.1), 640 % CPU; wall time at 9 threads 47 %,
+at 8 39 %. Samples: the expert dots `q5_0_32` 19.8 % and `iq4_nl_32` 16.7 % (a row dot per route, each expert's
+weights decoded again for every token routed to it), `q8_0_tile2_avx2` 10.7 %, f32 gemm 10.4 % (the audio tower
+in f32), barrier waits 10.2 %, elementwise mul 9.0 %, `expf` 7.2 %.
+
+**Next:** tiles for the 32-value expert types (decode an expert's rows once for its tokens, as IQ4_XS / IQ3_S do).
