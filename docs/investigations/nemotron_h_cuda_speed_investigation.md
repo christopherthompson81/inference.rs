@@ -143,3 +143,35 @@ llama.cpp runs its decode as a CUDA graph. Granite does not opt into decode grap
 and its Mamba cache replaces its conv and SSM state tensors every step where a captured graph needs fixed addresses,
 so graphs need the recurrent state updated in place in a pool, as Qwen3.5's GDN layers do. Short of that: fewer
 casts (the Mamba step's F32 round trips) and fusing the elementwise ops.
+
+## Run 10 - 2026-11-02 ~09:00
+
+**Question:** do Granite's hybrid decode steps capture as CUDA graphs as they are?
+
+**Finding:** yes. On CUDA the recurrent pool's gather is `index_select` and its scatter the `copy_rows` kernel, both
+by the device slot indices the graph machinery swaps, so opting in (`supports_cuda_decode_graphs`) was the whole
+change for the real model: 4 graphs (buckets 1-4) captured in 194 ms, decode 163.5 / 163.7 tok/s (was 114).
+200-token greedy completions of three prompts are identical with graphs on and off (ids and logprobs to 3 decimals);
+three concurrent requests diverge from single ones at near-ties as much with graphs off (batched BF16 rounding).
+Four "CUDA error with no caller" logs after capture are evicted, never-replayed graph outputs whose free fails as
+`drop_cuda_graph_entry_output` expects: the first prompt's memory check evicts the precaptured graphs (the KV cache
+leaves the planner's 64 MB activation estimate free, Run 1), and they are captured again lazily.
+
+**Opt-in limits:** a tiny checkpoint's capture failed on a host copy: unquantized ungated experts group their routes
+on the host, as do Granite's own experts (`GraniteMoE`). Granite opts in only when every MoE layer's experts decode on
+the device (`MoEExperts::decode_is_device_only`: quantized ungated stacks the indexed matvec reads, or any gated
+backend).
+
+**Two flakes on the way:**
+- The fused MoE router, with fewer experts than a warp's 32 lanes, scored the padding lanes as sigmoid(-inf) = 0;
+  a selection bias leaving every expert below 0 made a padding lane the pick (expert 4 of 4), about one tiny run in
+  six. Fixed in the kernel, with a GPU case.
+- Decode-against-prefill on the CPU (Q8_0) differed by up to 1.4e-3 about once in 30 full-group runs, never alone:
+  the scoring request could reuse the prefix cache's state from the decode steps. The checks now run without a
+  prefix cache: 0 failures in 40 runs of the group.
+
+**Tests:** `a_long_prompt_scores_as_its_graph_decode` (BF16, Q8_0 experts, head dim 64 so FlashInfer takes the
+attention) replays graphs and scores within 0.5 of one prefill; over 30 random checkpoints the gap is p90 0.054,
+worst 0.29 with graphs and p90 0.056, worst 0.18 without, so it bounds stale-state replays, not rounding.
+
+**Result (`gpu_fresh.py`):** prompts 2107-3307 tok/s, decode 163.7 tok/s (llama.cpp pp512 4342, tg256 198).

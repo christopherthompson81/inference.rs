@@ -503,6 +503,11 @@ impl MultimodalModel for NemotronTranscribeModel {
         self.text.paged_kv_config()
     }
 
+    #[cfg(feature = "cuda")]
+    fn supports_cuda_decode_graphs(&self) -> bool {
+        NormalModel::supports_cuda_decode_graphs(&self.text)
+    }
+
     fn default_model_specific_args(&self, _input_ids: &Tensor) -> Box<dyn std::any::Any> {
         Box::new(NemotronTranscribeSpecificArgs { audio: Vec::new() })
     }

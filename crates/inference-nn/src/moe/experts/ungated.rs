@@ -314,6 +314,20 @@ impl UngatedExpertsWeights {
         .map(Some)
     }
 
+    // the indexed matvec runs both projections; dense stacks route on the host, as grouped matmuls by expert
+    pub(super) fn decode_is_device_only(&self) -> bool {
+        #[cfg(feature = "cuda")]
+        {
+            let resolved =
+                |w: &Arc<dyn QuantMethod>| w.resolved_layer().unwrap_or_else(|| w.clone());
+            let (up, down) = (resolved(&self.up), resolved(&self.down));
+            if let (Some(up), Some(down)) = (up.kernel_weight(), down.kernel_weight()) {
+                return inference_quant::supports_indexed_moe_mmvq_ungated(up, down);
+            }
+        }
+        false
+    }
+
     // a decode step's few routes through the expert-indexed matvec, reading only the routed experts' blocks
     #[cfg(feature = "cuda")]
     pub(super) fn forward_cuda_decode(

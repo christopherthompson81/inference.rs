@@ -3068,6 +3068,20 @@ impl NormalModel for GraniteMoeHybrid {
     fn model_config(&self) -> Arc<dyn ModelConfigLike + Send + Sync> {
         self.paged_kv_config()
     }
+    // a hybrid model's decode reads and writes its recurrent pool through device slot indices, so a step captures
+    // unless its experts route on the host (Granite's own, or dense ungated stacks)
+    #[cfg(feature = "cuda")]
+    fn supports_cuda_decode_graphs(&self) -> bool {
+        self.layer_types.contains(&GraniteLayerType::Mamba)
+            && self
+                .layers
+                .iter()
+                .all(|layer| match layer.ffn().and_then(|ffn| ffn.moe.as_ref()) {
+                    None => true,
+                    Some(HybridMoe::Granite(_)) => false,
+                    Some(HybridMoe::Nemotron(moe)) => moe.experts.decode_is_device_only(),
+                })
+    }
     fn supports_packed_prefill(&self) -> bool {
         !self.has_sinks
             || crate::attention::sinks_backend_supports(

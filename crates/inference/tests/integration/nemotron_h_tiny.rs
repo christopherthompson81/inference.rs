@@ -12,6 +12,8 @@ use inference::{
 };
 use inference_tensor::{DType, Device, Tensor};
 
+#[path = "../support/decode_graphs.rs"]
+mod decode_graphs;
 #[path = "../support/traces.rs"]
 mod traces;
 
@@ -32,6 +34,8 @@ const HIDDEN: usize = 32;
 const HEADS: usize = 2;
 const KV_HEADS: usize = 1;
 const HEAD_DIM: usize = 16;
+// a width FlashInfer decodes, so a BF16 model's paged decode steps capture as CUDA graphs
+const GRAPH_HEAD_DIM: usize = 64;
 const MAMBA_HEADS: usize = 4;
 const MAMBA_HEAD_DIM: usize = 8;
 const GROUPS: usize = 2;
@@ -50,9 +54,12 @@ const MAX_LEN: usize = 6;
 const LOGPROB_TOLERANCE: f32 = 1e-4;
 // cuBLAS and the paged attention kernels add up in other orders than the CPU's
 const CUDA_LOGPROB_TOLERANCE: f32 = 1e-3;
+// BF16 with Q8_0 experts: decode and one prefill round differently (p90 ~0.055, worst 0.29 over 30 random checkpoints,
+// as much with graphs off), where a replay reading stale state is off by nats
+const BF16_LOGPROB_TOLERANCE: f32 = 0.5;
 const CIMATRIX: &str = "collected.cimatrix";
 
-fn config() -> serde_json::Value {
+fn config(head_dim: usize) -> serde_json::Value {
     serde_json::json!({
         "architectures": ["NemotronHForCausalLM"],
         "model_type": "nemotron_h",
@@ -61,7 +68,7 @@ fn config() -> serde_json::Value {
         "layers_block_type": LAYERS,
         "num_attention_heads": HEADS,
         "num_key_value_heads": KV_HEADS,
-        "head_dim": HEAD_DIM,
+        "head_dim": head_dim,
         "intermediate_size": MLP_WIDTH,
         "mlp_hidden_act": "relu2",
         "ssm_state_size": STATE,
@@ -89,7 +96,7 @@ fn near_one(shape: &[usize]) -> anyhow::Result<Tensor> {
 }
 
 // NVIDIA's `backbone.*` names, as the Hub checkpoints keep them
-fn weights() -> anyhow::Result<HashMap<String, Tensor>> {
+fn weights(head_dim: usize) -> anyhow::Result<HashMap<String, Tensor>> {
     let inner = MAMBA_HEADS * MAMBA_HEAD_DIM;
     let conv_dim = inner + 2 * GROUPS * STATE;
     let mut weights = HashMap::from([
@@ -119,16 +126,16 @@ fn weights() -> anyhow::Result<HashMap<String, Tensor>> {
                 ("out_proj.weight".into(), random(&[HIDDEN, inner])?),
             ],
             "attention" => vec![
-                ("q_proj.weight".into(), random(&[HEADS * HEAD_DIM, HIDDEN])?),
+                ("q_proj.weight".into(), random(&[HEADS * head_dim, HIDDEN])?),
                 (
                     "k_proj.weight".into(),
-                    random(&[KV_HEADS * HEAD_DIM, HIDDEN])?,
+                    random(&[KV_HEADS * head_dim, HIDDEN])?,
                 ),
                 (
                     "v_proj.weight".into(),
-                    random(&[KV_HEADS * HEAD_DIM, HIDDEN])?,
+                    random(&[KV_HEADS * head_dim, HIDDEN])?,
                 ),
-                ("o_proj.weight".into(), random(&[HIDDEN, HEADS * HEAD_DIM])?),
+                ("o_proj.weight".into(), random(&[HIDDEN, HEADS * head_dim])?),
             ],
             "moe" => {
                 let mut moe = vec![
@@ -168,13 +175,17 @@ fn weights() -> anyhow::Result<HashMap<String, Tensor>> {
 }
 
 fn checkpoint() -> anyhow::Result<tempfile::TempDir> {
+    checkpoint_with(HEAD_DIM)
+}
+
+fn checkpoint_with(head_dim: usize) -> anyhow::Result<tempfile::TempDir> {
     let dir = tempfile::tempdir()?;
     for file in FIXTURE_FILES {
         std::fs::copy(format!("{FIXTURE}/{file}"), dir.path().join(file))?;
     }
     std::fs::copy(TOKENIZER, dir.path().join("tokenizer.json"))?;
-    std::fs::write(dir.path().join("config.json"), config().to_string())?;
-    let weights = weights()?
+    std::fs::write(dir.path().join("config.json"), config(head_dim).to_string())?;
+    let weights = weights(head_dim)?
         .into_iter()
         .map(|(name, tensor)| Ok((name, tensor.to_dtype(DType::F32)?)))
         .collect::<anyhow::Result<HashMap<_, _>>>()?;
@@ -184,7 +195,7 @@ fn checkpoint() -> anyhow::Result<tempfile::TempDir> {
 
 #[tokio::test]
 async fn a_step_by_step_decode_scores_as_one_prefill() -> anyhow::Result<()> {
-    decode_scores_as_prefill(None, "say something long", true).await
+    decode_scores_as_prefill(None, "say something long", Target::Cpu).await
 }
 
 // quantized experts on the CPU run from their blocks, a long prompt's tiled and a decode step's per row
@@ -193,13 +204,13 @@ async fn a_long_prompt_on_quantized_experts_scores_as_its_decode() -> anyhow::Re
     decode_scores_as_prefill(
         Some(IsqType::Q8_0),
         &"say something long ".repeat(LONG_PROMPT_REPEATS),
-        true,
+        Target::Cpu,
     )
     .await
 }
 
-// on CUDA through the paged hybrid cache and the scan kernel at a state narrower than a warp (grouped mmq against the
-// gather path is a GPU case of the experts' backends: quantized, prefill and decode differ by the activations' rounding)
+// on CUDA through the hybrid cache and the scan kernel at a state narrower than a warp (grouped mmq against the gather
+// path is a GPU case of the experts' backends: quantized, prefill and decode differ by the activations' rounding)
 #[tokio::test]
 async fn a_long_prompt_on_cuda_scores_as_its_decode() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
@@ -208,9 +219,59 @@ async fn a_long_prompt_on_cuda_scores_as_its_decode() -> anyhow::Result<()> {
     decode_scores_as_prefill(
         None,
         &"say something long ".repeat(LONG_PROMPT_REPEATS),
-        false,
+        Target::Cuda,
     )
     .await
+}
+
+// in BF16 with quantized experts (dense ones route on the host) the paged decode steps replay captured CUDA graphs,
+// reading and writing the recurrent pool in place
+#[tokio::test]
+async fn a_long_prompt_scores_as_its_graph_decode() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let snapshotter = decode_graphs::recorder();
+    decode_scores_as_prefill(
+        Some(IsqType::Q8_0),
+        &"say something long ".repeat(LONG_PROMPT_REPEATS),
+        Target::CudaGraphs,
+    )
+    .await?;
+    decode_graphs::assert_replayed(&decode_graphs::Counters::take(&snapshotter));
+    Ok(())
+}
+
+/// Where a decode-against-prefill check runs, which sets the checkpoint's attention width, the dtype and the tolerance.
+#[derive(Clone, Copy)]
+enum Target {
+    Cpu,
+    Cuda,
+    CudaGraphs,
+}
+
+impl Target {
+    fn head_dim(self) -> usize {
+        match self {
+            Self::CudaGraphs => GRAPH_HEAD_DIM,
+            Self::Cpu | Self::Cuda => HEAD_DIM,
+        }
+    }
+
+    fn dtype(self) -> ModelDType {
+        match self {
+            Self::CudaGraphs => ModelDType::BF16,
+            Self::Cpu | Self::Cuda => ModelDType::F32,
+        }
+    }
+
+    fn tolerance(self) -> f32 {
+        match self {
+            Self::Cpu => LOGPROB_TOLERANCE,
+            Self::Cuda => CUDA_LOGPROB_TOLERANCE,
+            Self::CudaGraphs => BF16_LOGPROB_TOLERANCE,
+        }
+    }
 }
 
 // the same checkpoint scores a long prompt on CUDA as on the CPU: the GPU's Mamba conv and scan kernels, attention and
@@ -268,13 +329,20 @@ async fn scores(model: &inference::Model, tokens: Vec<u32>) -> anyhow::Result<Ve
 async fn decode_scores_as_prefill(
     isq: Option<IsqType>,
     prompt: &str,
-    cpu: bool,
+    target: Target,
 ) -> anyhow::Result<()> {
-    let dir = checkpoint()?;
-    let mut builder =
-        TextModelBuilder::new(dir.path().to_string_lossy()).with_dtype(ModelDType::F32);
-    if cpu {
-        builder = builder.with_force_cpu();
+    let dir = checkpoint_with(target.head_dim())?;
+    // no prefix cache, so the scoring request is one prefill rather than a suffix over the decode steps' state
+    let mut builder = TextModelBuilder::new(dir.path().to_string_lossy())
+        .with_dtype(target.dtype())
+        .with_prefix_cache_n(None);
+    match target {
+        Target::Cpu => builder = builder.with_force_cpu(),
+        Target::CudaGraphs => {
+            builder =
+                builder.with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        }
+        Target::Cuda => {}
     }
     if let Some(isq) = isq {
         builder = builder.with_isq(isq);
@@ -302,12 +370,7 @@ async fn decode_scores_as_prefill(
         .map(|logprob| logprob.unwrap_or(f32::NAN));
     for (step, ((_, decoded), prefilled)) in decoded.iter().zip(prefilled).enumerate() {
         anyhow::ensure!(
-            (decoded - prefilled).abs()
-                < if cpu {
-                    LOGPROB_TOLERANCE
-                } else {
-                    CUDA_LOGPROB_TOLERANCE
-                },
+            (decoded - prefilled).abs() < target.tolerance(),
             "step {step}: decoded {decoded}, one prefill {prefilled}"
         );
     }
