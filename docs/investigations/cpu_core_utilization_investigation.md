@@ -130,3 +130,18 @@ The expert kernel's 32-value gate/up and down loops take routes four at a time.
 
 **Result (GGUF pair):** 31.1-34.1 tok/s (was 27.8-29.9). Samples: `q5_0_32_x4` 18.0 %, `iq4_nl_32_x4` 17.3 %, Q8_0
 tiles 16.9 %, f32 gemm 16.0 % (the audio tower), the scan 6.1 %, barrier waits 5.7 %; 9 threads 84 % of wall time.
+
+## Run 7 - 2026-11-01 ~20:00
+
+**Question:** with the cores busy, does a 16-thread pool (the hyperthreads) beat the default of one per physical
+core?
+
+**Command:** the same benchmark with `RAYON_NUM_THREADS=16` (sizes rayon, the barrier pool and gemm).
+
+**Finding:** 33.0-34.3 tok/s at 1,161 % CPU against 31.1-34.1 at 607 %: no gain for twice the CPU; the SIMD kernels
+are compute-bound per core. The default stays at the physical core count.
+
+**Where it stands (GGUF pair, CPU, from the `cpu-baseline-2026-11-01` tag):** prompt processing 1.2-1.7 -> 31-34
+tok/s, nine threads busy 84 % of the wall time; load 28 -> 4-15 s; the 818-token prompt no longer runs out of
+memory. BF16 checkpoint: load ~8.5 min -> 63 s, 11-14 tok/s. Left: the expert dots (~40 %), the Q8_0 tiles (17 %),
+the audio tower's f32 gemm (16 %).
