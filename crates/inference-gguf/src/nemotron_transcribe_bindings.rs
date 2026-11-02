@@ -24,6 +24,8 @@ pub const AUDIO_PREFIX: &str = "perception.";
 pub const WORD_TIMESTAMP_PREFIX: &str = "ctc_timestamp.decoder.";
 // the head's scalars, which its config states
 const WORD_TIMESTAMP_SCALARS: [&str; 2] = ["residual_scale", "upsample_factor"];
+// the head's classifier, a kernel-1 convolution, which the GGUF holds as a matrix so a recipe can quantize it
+const WORD_TIMESTAMP_CLASSIFIER: &str = "ctc_timestamp.decoder.decoder_layers.0.weight";
 const AUDIO_TOKEN: &str = "<|audio|>";
 
 // Nemotron-H's transformers names to the transcription model's (NeMo's ends, under `llm.`)
@@ -120,6 +122,10 @@ pub fn write_nemotron_transcribe_audio_gguf(checkpoint: &Path, out: &Path) -> Re
         &checkpoint.join(CHECKPOINT_WEIGHTS),
         out,
         is_audio_tensor,
+        |name, dims| match dims {
+            [rows, cols, 1] if name == WORD_TIMESTAMP_CLASSIFIER => vec![*rows, *cols],
+            _ => dims.to_vec(),
+        },
         &metadata,
     )?;
     if written == 0 {

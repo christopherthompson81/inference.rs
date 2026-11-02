@@ -40,6 +40,8 @@ const SPEAKER_NORM: &str = "perception.encoder.diar_norm";
 const PROJECTOR: &str = "perception.proj";
 // NVIDIA's word timestamp head, beside `perception`
 const WORD_TIMESTAMPS: &str = "ctc_timestamp.decoder";
+// frames of the head whose full-vocabulary logits are held at once
+const LOGIT_ROWS: usize = 256;
 const LAYER_NORM_EPS: f64 = 1e-5;
 // the encoder runs on chunks of this many frames, each seeing this many more on either side
 const CHUNK_FRAMES: usize = 500;
@@ -218,13 +220,31 @@ fn tower_tensor(vb: &ShardedVarBuilder, name: &str, dtype: DType) -> Result<Tens
     vb.get_unchecked_dtype(name, dtype)
 }
 
-// a quantized GGUF weight stays as it is stored; a dense one (or one loaded elsewhere) comes back in the tower's dtype
+// a quantized GGUF weight stays as it is stored; a dense one (or one loaded elsewhere) comes back in the tower's dtype,
+// a kernel-1 convolution's trailing dimension dropped
 fn tower_projection(
     vb: &ShardedVarBuilder,
     [in_dim, out_dim]: [usize; 2],
     dtype: DType,
     device: &Device,
 ) -> Result<NemoProjection> {
+    let bias = || {
+        vb.contains_tensor("bias")
+            .then(|| tower_tensor(vb, "bias", dtype))
+            .transpose()
+    };
+    let dense = |w: Tensor, b: Option<Tensor>| -> Result<NemoProjection> {
+        let w = if w.rank() == 3 { w.squeeze(2)? } else { w };
+        let to = |t: Tensor| t.to_dtype(dtype)?.to_device(device);
+        Ok(NemoProjection::Dense(Linear::new(
+            to(w)?,
+            b.map(to).transpose()?,
+        )))
+    };
+    // a checkpoint's tensors are all dense
+    if vb.weight_source().is_none() {
+        return dense(tower_tensor(vb, "weight", dtype)?, bias()?);
+    }
     let layer = inference_quant::linear_b(
         in_dim,
         out_dim,
@@ -232,21 +252,10 @@ fn tower_projection(
         &None,
         vb.clone(),
     )?;
-    let dense = |w: Tensor, b: Option<Tensor>| -> Result<NemoProjection> {
-        let to = |t: Tensor| t.to_dtype(dtype)?.to_device(device);
-        Ok(NemoProjection::Dense(Linear::new(
-            to(w)?,
-            b.map(to).transpose()?,
-        )))
-    };
     match layer.unquant_weight_bias() {
         Some((w, b)) => dense(w, b),
         None if !layer.dtype_and_device().1.same_device(device) => {
-            let bias = vb
-                .contains_tensor("bias")
-                .then(|| tower_tensor(vb, "bias", dtype))
-                .transpose()?;
-            dense(layer.dequantize_w()?, bias)
+            dense(layer.dequantize_w()?, bias()?)
         }
         None => Ok(NemoProjection::Quantized(layer)),
     }
@@ -356,13 +365,14 @@ fn speaker_table(speakers: usize, hidden: usize, device: &Device) -> Result<Tens
 }
 
 /// The word timestamp head: the speech encoder's states before `asr_norm`, upsampled by a transposed convolution, a
-/// small transformer with a scaled residual, and a classifier over the alignment tokenizer's pieces and the blank.
+/// small transformer with a scaled residual, and a classifier over the alignment tokenizer's pieces and the blank. Its
+/// matrices run as its file stores them: quantized from a GGUF that holds them quantized.
 struct WordTimestampHead {
     // the transposed convolution's taps: head frame `j` of each encoder step is tap `j` of the step
-    taps: Vec<Linear>,
+    taps: Vec<NemoProjection>,
     encoder: NemoTransformer,
     residual_scale: f64,
-    classifier: Linear,
+    classifier: NemoProjection,
 }
 
 impl WordTimestampHead {
@@ -373,42 +383,56 @@ impl WordTimestampHead {
         device: &Device,
     ) -> Result<Self> {
         let vb = vb.pp(WORD_TIMESTAMPS);
-        let on = |t: Tensor| t.to_device(device);
+        let (hidden, inter) = (cfg.hidden_size, cfg.intermediate_size);
+        let matrix =
+            |vb: &ShardedVarBuilder, dims: [usize; 2]| tower_projection(vb, dims, dtype, device);
         // `(in, out, kernel)`, kernel and stride the upsampling factor
-        let weight = tower_tensor(&vb.pp("upsample"), "weight", dtype)?;
-        let bias = on(tower_tensor(&vb.pp("upsample"), "bias", dtype)?)?;
+        let upsample = vb.pp("upsample");
+        let weight = tower_tensor(&upsample, "weight", dtype)?;
+        let bias = tower_tensor(&upsample, "bias", dtype)?.to_device(device)?;
         let taps = (0..cfg.upsampling_factor)
             .map(|j| {
                 let tap = weight.narrow(2, j, 1)?.squeeze(2)?.t()?.contiguous()?;
-                Ok(Linear::new(on(tap)?, Some(bias.clone())))
+                Ok(NemoProjection::Dense(Linear::new(
+                    tap.to_device(device)?,
+                    Some(bias.clone()),
+                )))
             })
             .collect::<Result<Vec<_>>>()?;
+        let transformer = vb.pp("transformer");
         let mut weights = HashMap::new();
         encoder_weights(
-            &vb.pp("transformer"),
+            &transformer,
             cfg.num_hidden_layers,
             EncoderNames {
                 ours: "",
-                skip: &[],
+                skip: &BLOCK_PROJECTIONS,
             },
             dtype,
             &mut weights,
         )?;
-        let encoder = NemoTransformer::new(
+        let projections = (0..cfg.num_hidden_layers)
+            .map(|layer| {
+                let block = transformer.pp("layers").pp(layer);
+                let [qkv, o, fc1, fc2] = BLOCK_PROJECTIONS;
+                Ok(NemoLayerProjections {
+                    qkv: NemoQkv::Fused(matrix(&block.pp(qkv), [hidden, 3 * hidden])?),
+                    o: matrix(&block.pp(o), [hidden, hidden])?,
+                    fc1: matrix(&block.pp(fc1), [hidden, inter])?,
+                    fc2: matrix(&block.pp(fc2), [inter, hidden])?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let encoder = NemoTransformer::with_projections(
             cfg.encoder(),
             VarBuilder::from_tensors(weights, dtype, device),
+            projections,
         )?;
-        // a kernel-1 convolution
-        let classifier = vb.pp("decoder_layers").pp(0);
-        let classifier = Linear::new(
-            on(tower_tensor(&classifier, "weight", dtype)?.squeeze(2)?)?,
-            Some(on(tower_tensor(&classifier, "bias", dtype)?)?),
-        );
         Ok(Self {
             taps,
             encoder,
             residual_scale: cfg.residual_scale,
-            classifier,
+            classifier: matrix(&vb.pp("decoder_layers").pp(0), [hidden, cfg.vocab_size])?,
         })
     }
 
@@ -421,21 +445,32 @@ impl WordTimestampHead {
             .iter()
             .map(|tap| tap.forward(&xs))
             .collect::<Result<Vec<_>>>()?;
-        let upsampled = Tensor::stack(&taps, 2)?.reshape((1, steps * taps.len(), hidden))?;
+        let frames = steps * taps.len();
+        let upsampled = Tensor::stack(&taps, 2)?.reshape((1, frames, hidden))?;
         let hidden = (&upsampled + (self.encoder.forward(&upsampled)? * self.residual_scale)?)?;
-        let logits = self
-            .classifier
-            .forward(&hidden)?
-            .squeeze(0)?
-            .to_dtype(DType::F32)?;
-        let max = logits.max_keepdim(inference_tensor::D::Minus1)?;
-        let normalizer = (logits
-            .broadcast_sub(&max)?
-            .exp()?
-            .sum_keepdim(inference_tensor::D::Minus1)?
-            .log()?
-            + max)?;
-        logits.index_select(classes, 1)?.broadcast_sub(&normalizer)
+        // the full vocabulary's logits only a block of frames at a time
+        let mut rows = Vec::new();
+        for first in (0..frames).step_by(LOGIT_ROWS) {
+            let block = hidden.narrow(1, first, LOGIT_ROWS.min(frames - first))?;
+            let logits = self
+                .classifier
+                .forward(&block)?
+                .squeeze(0)?
+                .to_dtype(DType::F32)?;
+            let max = logits.max_keepdim(inference_tensor::D::Minus1)?;
+            let normalizer = (logits
+                .broadcast_sub(&max)?
+                .exp()?
+                .sum_keepdim(inference_tensor::D::Minus1)?
+                .log()?
+                + max)?;
+            rows.push(
+                logits
+                    .index_select(classes, 1)?
+                    .broadcast_sub(&normalizer)?,
+            );
+        }
+        Tensor::cat(&rows, 0)
     }
 }
 
