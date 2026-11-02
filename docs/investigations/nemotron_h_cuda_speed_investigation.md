@@ -127,3 +127,19 @@ at decode's dt floor (`time_step_min`; prompts clamp at `prefill_time_step_min`)
 
 **Result (`gpu_fresh.py`):** decode 114.5 / 113.5 tok/s (was 91); 4398-token prompt 3294 tok/s. Tiny-model CUDA cases
 pass (decode against one prefill, CPU against CUDA).
+
+## Run 9 - 2026-11-02 ~07:55
+
+**Question:** what is left of a decode step at 114 tok/s (8.8 ms a token; llama.cpp ~5 ms)?
+
+**Profile (64 tokens under nsys, so slower):** per token 12.1 ms wall, 6.6 ms of kernels, 1348 kernels. Of the kernel
+time: dense Q8_0 matvecs (`mmvq_gguf_q8_0_bf16_plain`, ~96 a token at 21 us: Mamba in/out, shared experts,
+attention) 2.0 ms, the experts' indexed matvecs (Q5_0 down, IQ4_NL up) 1.1 ms, the F32 lm head 0.43 ms, ~230 BF16-F32
+casts 0.5 ms, then small elementwise ops and Q8_1 quantizations. Between steps ~1.6 ms idle from the lm head to the
+next embedding (the logits' copy to the host, 0.6 ms a call including the wait, then sampling and scheduling).
+
+**Implications:** the GPU idles ~45 % of a step under nsys (less without it): launch overhead over ~1350 kernels.
+llama.cpp runs its decode as a CUDA graph. Granite does not opt into decode graphs (`supports_cuda_decode_graphs`),
+and its Mamba cache replaces its conv and SSM state tensors every step where a captured graph needs fixed addresses,
+so graphs need the recurrent state updated in place in a pool, as Qwen3.5's GDN layers do. Short of that: fewer
+casts (the Mamba step's F32 round trips) and fusing the elementwise ops.
