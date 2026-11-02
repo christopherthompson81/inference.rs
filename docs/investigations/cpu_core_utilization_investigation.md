@@ -95,3 +95,25 @@ weights decoded again for every token routed to it), `q8_0_tile2_avx2` 10.7 %, f
 in f32), barrier waits 10.2 %, elementwise mul 9.0 %, `expf` 7.2 %.
 
 **Next:** tiles for the 32-value expert types (decode an expert's rows once for its tokens, as IQ4_XS / IQ3_S do).
+
+## Run 5 - 2026-11-01 ~19:30
+
+**Question:** what are the ~20 % of samples in generic elementwise ops (`binary_map` Mul, `expf`, `vec_add`) and the
+10 % barrier waits? DWARF unwinding gave no callers; `perf record --call-graph lbr` did.
+
+**Finding:** the engine thread's time sat under `granite::MambaLayer::forward_full` (5.1 % of all samples, as much as
+the whole MoE): on the CPU the selective scan ran one timestep at a time as tensor ops, expanding each head's decay
+(one scalar) over the 64 x 64 x 128 state and passing the 2 MB state through ~6 ops per step, each split over the
+barrier pool, for every token of every Mamba layer; the causal convolution was a per-step loop of small ops too.
+
+**Change:** `inference_nn::ops::{selective_scan_cpu, causal_conv1d_cpu}`: the scan as `selective_scan_cuda` defines
+it (softplus of dt + bias clamped, `state = state * exp(dt a) + dt b x`, `y = state . c + d x`), parallel over
+(batch, head) with each head's 32 KB state in cache across the sequence; the convolution over plain slices, parallel
+over output steps. Granite's CPU path takes them; other devices keep theirs. The tiny Nemotron-H test (step-by-step
+decode, a separate code path, against one prefill at 1e-4) and the Granite suites pass.
+
+**Result (GGUF pair):** 27.8-29.9 tok/s (was 20.2-21.7), wall time at 9 threads 86.5 %, barrier waits 3.9 %. Samples:
+expert dots `q5_0_32` 26.2 % and `iq4_nl_32` 22.3 %, `q8_0_tile2_avx2` 14.5 %, f32 gemm 13.5 % (the audio tower),
+the scan 5.2 %.
+
+**Next:** the expert dots (48 %): a token-reusing tile for the 32-value types.

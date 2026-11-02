@@ -74,6 +74,8 @@ mod logit_processing;
 pub use logit_processing::*;
 mod norm;
 pub use norm::*;
+mod ssm_cpu;
+pub use ssm_cpu::*;
 #[cfg(feature = "cuda")]
 mod rope;
 #[cfg(feature = "cuda")]

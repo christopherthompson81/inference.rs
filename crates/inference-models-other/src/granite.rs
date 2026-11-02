@@ -1368,13 +1368,17 @@ impl MambaLayer {
         )?;
         let weight = self.conv1d_weight.squeeze(1)?.to_dtype(padded_t.dtype())?;
 
-        let mut conv_outputs = Vec::with_capacity(seq_len);
-        for i in 0..seq_len {
-            let window = padded_t.narrow(2, i, self.conv_kernel_size)?;
-            let out = (window * weight.unsqueeze(0)?)?.sum(inference_tensor::D::Minus1)?;
-            conv_outputs.push(out);
-        }
-        let mut hidden_states_b_c = Tensor::stack(&conv_outputs, 1)?; // (batch, seq_len, conv_dim)
+        let mut hidden_states_b_c = if padded_t.device().is_cpu() {
+            crate::ops::causal_conv1d_cpu(&padded_t, &weight)?
+        } else {
+            let mut conv_outputs = Vec::with_capacity(seq_len);
+            for i in 0..seq_len {
+                let window = padded_t.narrow(2, i, self.conv_kernel_size)?;
+                let out = (window * weight.unsqueeze(0)?)?.sum(inference_tensor::D::Minus1)?;
+                conv_outputs.push(out);
+            }
+            Tensor::stack(&conv_outputs, 1)? // (batch, seq_len, conv_dim)
+        };
 
         if let Some(ref bias) = self.conv1d_bias {
             let bias = bias.to_dtype(hidden_states_b_c.dtype())?;
@@ -1491,8 +1495,26 @@ impl MambaLayer {
 
             cache.ssm_state = ssm_state.to_dtype(cache.ssm_state.dtype())?;
             y.reshape((batch_size, seq_len, self.intermediate_size))
+        } else if hidden_states.device().is_cpu() {
+            let mut ssm_state = cache.ssm_state.to_dtype(inference_tensor::DType::F32)?;
+            let y = crate::ops::selective_scan_cpu(
+                crate::ops::SelectiveScan {
+                    x: &hidden_states,
+                    dt,
+                    a: &a,
+                    b: &b,
+                    c: &c,
+                    d: &self.d,
+                    dt_bias: &self.dt_bias,
+                    dt_min: self.prefill_time_step_min as f32,
+                    dt_max: self.time_step_max as f32,
+                },
+                &mut ssm_state,
+            )?;
+            cache.ssm_state = ssm_state.to_dtype(cache.ssm_state.dtype())?;
+            y.reshape((batch_size, seq_len, self.intermediate_size))
         } else {
-            // CPU fallback: per-timestep Rust loop
+            // a device with no scan kernel: per-timestep tensor ops
             let dt_dtype = dt.dtype();
             let dt_bias = self
                 .dt_bias
