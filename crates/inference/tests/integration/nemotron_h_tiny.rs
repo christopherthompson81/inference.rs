@@ -1,8 +1,8 @@
 //! A tiny random-weight Nemotron-H (Mamba-2, NoPE attention, sigmoid-routed squared-ReLU experts with a shared
 //! expert, a dense squared-ReLU MLP, and a Mamba layer with no feed-forward after it): decoding step by step through
 //! its Mamba state and KV cache scores the tokens as one prefill over them does (quantized, with a prompt long enough
-//! to run the experts grouped, too), and calibrating an ISQ load
-//! collects statistics for every expert projection.
+//! to run the experts grouped, too, and on CUDA), and calibrating an ISQ load collects statistics for every
+//! expert projection.
 
 use std::collections::HashMap;
 
@@ -48,6 +48,8 @@ const MLP_WIDTH: usize = 48;
 const WEIGHT_STD: f32 = 0.2;
 const MAX_LEN: usize = 6;
 const LOGPROB_TOLERANCE: f32 = 1e-4;
+// cuBLAS and the paged attention kernels add up in other orders than the CPU's
+const CUDA_LOGPROB_TOLERANCE: f32 = 1e-3;
 const CIMATRIX: &str = "collected.cimatrix";
 
 fn config() -> serde_json::Value {
@@ -182,7 +184,7 @@ fn checkpoint() -> anyhow::Result<tempfile::TempDir> {
 
 #[tokio::test]
 async fn a_step_by_step_decode_scores_as_one_prefill() -> anyhow::Result<()> {
-    decode_scores_as_prefill(None, "say something long").await
+    decode_scores_as_prefill(None, "say something long", true).await
 }
 
 // quantized experts on the CPU run from their blocks, a long prompt's tiled and a decode step's per row
@@ -191,15 +193,37 @@ async fn a_long_prompt_on_quantized_experts_scores_as_its_decode() -> anyhow::Re
     decode_scores_as_prefill(
         Some(IsqType::Q8_0),
         &"say something long ".repeat(LONG_PROMPT_REPEATS),
+        true,
     )
     .await
 }
 
-async fn decode_scores_as_prefill(isq: Option<IsqType>, prompt: &str) -> anyhow::Result<()> {
+// on CUDA through the paged hybrid cache and the scan kernel at a state narrower than a warp (grouped mmq against the
+// gather path is a GPU case of the experts' backends: quantized, prefill and decode differ by the activations' rounding)
+#[tokio::test]
+async fn a_long_prompt_on_cuda_scores_as_its_decode() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    decode_scores_as_prefill(
+        None,
+        &"say something long ".repeat(LONG_PROMPT_REPEATS),
+        false,
+    )
+    .await
+}
+
+async fn decode_scores_as_prefill(
+    isq: Option<IsqType>,
+    prompt: &str,
+    cpu: bool,
+) -> anyhow::Result<()> {
     let dir = checkpoint()?;
-    let mut builder = TextModelBuilder::new(dir.path().to_string_lossy())
-        .with_dtype(ModelDType::F32)
-        .with_force_cpu();
+    let mut builder =
+        TextModelBuilder::new(dir.path().to_string_lossy()).with_dtype(ModelDType::F32);
+    if cpu {
+        builder = builder.with_force_cpu();
+    }
     if let Some(isq) = isq {
         builder = builder.with_isq(isq);
     }
@@ -226,7 +250,12 @@ async fn decode_scores_as_prefill(isq: Option<IsqType>, prompt: &str) -> anyhow:
         .map(|logprob| logprob.unwrap_or(f32::NAN));
     for (step, ((_, decoded), prefilled)) in decoded.iter().zip(prefilled).enumerate() {
         anyhow::ensure!(
-            (decoded - prefilled).abs() < LOGPROB_TOLERANCE,
+            (decoded - prefilled).abs()
+                < if cpu {
+                    LOGPROB_TOLERANCE
+                } else {
+                    CUDA_LOGPROB_TOLERANCE
+                },
             "step {step}: decoded {decoded}, one prefill {prefilled}"
         );
     }
