@@ -1,9 +1,11 @@
+use std::cell::{Cell, RefCell};
 use std::ffi::CStr;
 use std::sync::{Arc, Mutex};
 
 use ash::vk;
 
 use crate::kernels::Kernels;
+use crate::stream::{DISPATCHES_PER_SUBMIT, Retained, Stream};
 use crate::{Error, Result};
 
 const REQUIRED_EXTENSIONS: [&CStr; 2] = [
@@ -22,21 +24,17 @@ pub struct Context {
     pub(crate) import_alignment: u64,
     name: String,
     queue: vk::Queue,
-    submit: Mutex<Submit>,
+    stream: Mutex<Stream>,
     pub(crate) kernels: Kernels,
 }
 
-// one command buffer recorded and waited on at a time
-struct Submit {
-    pool: vk::CommandPool,
-    buffer: vk::CommandBuffer,
-    fence: vk::Fence,
-}
-
-/// Records one submission's commands; see [`Context::submit`].
+/// Appends commands to the stream's open command buffer; see [`Context::record`]. Each dispatch is ordered after the
+/// ones before it.
 pub struct Recorder<'a> {
     pub(crate) context: &'a Context,
     pub(crate) buffer: vk::CommandBuffer,
+    retained: RefCell<Vec<Retained>>,
+    pub(crate) dispatches: Cell<usize>,
 }
 
 impl Context {
@@ -95,7 +93,7 @@ impl Context {
         let push_descriptor = ash::khr::push_descriptor::Device::new(&instance, &device);
         // SAFETY: the family was checked to exist and queue 0 was asked for
         let queue = unsafe { device.get_device_queue(family, 0) };
-        let submit = Submit::new(&device, family)?;
+        let stream = Stream::new(&device, family)?;
         let kernels = Kernels::new(&device)?;
         Ok(Arc::new(Self {
             _entry: entry,
@@ -107,7 +105,7 @@ impl Context {
             import_alignment,
             name,
             queue,
-            submit: Mutex::new(submit),
+            stream: Mutex::new(stream),
             kernels,
         }))
     }
@@ -116,36 +114,39 @@ impl Context {
         &self.name
     }
 
-    /// Records `record`'s commands into one command buffer, submits it and waits for the GPU to finish it.
-    pub fn submit<T>(&self, record: impl FnOnce(&Recorder<'_>) -> Result<T>) -> Result<T> {
-        let submit = self.submit.lock().expect("vulkan submit poisoned");
-        // SAFETY: the buffer is idle (the last submit was waited on) and owned by this lock's holder
-        unsafe {
-            self.device
-                .reset_command_buffer(submit.buffer, vk::CommandBufferResetFlags::empty())?;
-            self.device.begin_command_buffer(
-                submit.buffer,
-                &vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-            )?;
-        }
-        let out = record(&Recorder {
+    /// Appends `record`'s commands to the stream without waiting for them; a batch that has grown long is submitted.
+    /// What the commands read or write must be [`Recorder::retain`]ed, or outlive the next [`Self::synchronize`].
+    pub fn record<T>(&self, record: impl FnOnce(&Recorder<'_>) -> Result<T>) -> Result<T> {
+        let mut stream = self.stream.lock().expect("vulkan stream poisoned");
+        let batch = stream.open(&self.device)?;
+        let recorder = Recorder {
             context: self,
-            buffer: submit.buffer,
-        });
-        // SAFETY: as above; the buffer was begun above, and the fence is unsignaled between submits
-        unsafe {
-            self.device.end_command_buffer(submit.buffer)?;
-            let out = out?;
-            let buffers = [submit.buffer];
-            let info = vk::SubmitInfo::default().command_buffers(&buffers);
-            self.device
-                .queue_submit(self.queue, &[info], submit.fence)?;
-            self.device
-                .wait_for_fences(&[submit.fence], true, u64::MAX)?;
-            self.device.reset_fences(&[submit.fence])?;
-            Ok(out)
+            buffer: batch.buffer,
+            retained: RefCell::new(Vec::new()),
+            dispatches: Cell::new(0),
+        };
+        let out = record(&recorder);
+        batch.retained.append(&mut recorder.retained.into_inner());
+        batch.dispatches += recorder.dispatches.get();
+        if batch.dispatches >= DISPATCHES_PER_SUBMIT {
+            stream.flush(&self.device, self.queue)?;
         }
+        out
+    }
+
+    /// Submits what is recorded and waits for the GPU to finish everything submitted.
+    pub fn synchronize(&self) -> Result<()> {
+        self.stream
+            .lock()
+            .expect("vulkan stream poisoned")
+            .synchronize(&self.device, self.queue)
+    }
+
+    /// [`Self::record`], then [`Self::synchronize`].
+    pub fn submit<T>(&self, record: impl FnOnce(&Recorder<'_>) -> Result<T>) -> Result<T> {
+        let out = self.record(record)?;
+        self.synchronize()?;
+        Ok(out)
     }
 
     pub(crate) fn memory_type(&self, bits: u32, want: vk::MemoryPropertyFlags) -> Option<u32> {
@@ -157,58 +158,21 @@ impl Context {
 }
 
 impl Recorder<'_> {
-    /// Orders the commands recorded so far before the ones recorded after, for compute reading compute's writes.
-    pub fn barrier(&self) {
-        let barrier = vk::MemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-            .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
-        // SAFETY: the buffer is recording
-        unsafe {
-            self.context.device.cmd_pipeline_barrier(
-                self.buffer,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::DependencyFlags::empty(),
-                &[barrier],
-                &[],
-                &[],
-            );
-        }
-    }
-}
-
-impl Submit {
-    fn new(device: &ash::Device, family: u32) -> Result<Self> {
-        let pool_info = vk::CommandPoolCreateInfo::default()
-            .queue_family_index(family)
-            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
-        // SAFETY: the create infos outlive their calls, and the pool outlives its buffer (both freed in Drop)
-        unsafe {
-            let pool = device.create_command_pool(&pool_info, None)?;
-            let alloc = vk::CommandBufferAllocateInfo::default()
-                .command_pool(pool)
-                .level(vk::CommandBufferLevel::PRIMARY)
-                .command_buffer_count(1);
-            let buffer = device.allocate_command_buffers(&alloc)?[0];
-            let fence = device.create_fence(&vk::FenceCreateInfo::default(), None)?;
-            Ok(Self {
-                pool,
-                buffer,
-                fence,
-            })
-        }
+    /// Keeps `resource` alive until the commands recorded here have finished.
+    pub fn retain(&self, resource: Retained) {
+        self.retained.borrow_mut().push(resource);
     }
 }
 
 impl Drop for Context {
     fn drop(&mut self) {
-        let submit = self.submit.get_mut().expect("vulkan submit poisoned");
-        // SAFETY: no submit is in flight (each is waited on), and every object here was created from this device
+        let stream = self.stream.get_mut().expect("vulkan stream poisoned");
+        let _ = stream.synchronize(&self.device, self.queue);
+        // SAFETY: everything submitted finished above, and every object here was created from this device
         unsafe {
             let _ = self.device.device_wait_idle();
             self.kernels.destroy(&self.device);
-            self.device.destroy_fence(submit.fence, None);
-            self.device.destroy_command_pool(submit.pool, None);
+            stream.destroy(&self.device);
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
         }

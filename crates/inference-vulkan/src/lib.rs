@@ -7,6 +7,7 @@ mod context;
 mod kernels;
 mod memory;
 mod pipeline;
+mod stream;
 mod shaders {
     include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
 }
@@ -14,6 +15,7 @@ mod shaders {
 pub use context::{Context, Recorder};
 pub use kernels::MatVec;
 pub use memory::{HostBuffer, ImportedMemory};
+pub use stream::Retained;
 
 pub use ash::vk;
 

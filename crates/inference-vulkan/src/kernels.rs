@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::memory::{HostBuffer, ImportedMemory};
 use crate::pipeline::Pipeline;
 use crate::{Error, Recorder, Result, shaders};
@@ -38,12 +40,12 @@ impl Kernels {
 
 /// `y[y_offset..][..rows] = W x[x_offset..][..cols]` for a `rows x cols` Q8_0 weight held in `weights`.
 pub struct MatVec<'a> {
-    pub weights: &'a ImportedMemory,
+    pub weights: &'a Arc<ImportedMemory>,
     pub rows: usize,
     pub cols: usize,
-    pub x: &'a HostBuffer,
+    pub x: &'a Arc<HostBuffer>,
     pub x_offset: usize,
-    pub y: &'a HostBuffer,
+    pub y: &'a Arc<HostBuffer>,
     pub y_offset: usize,
 }
 
@@ -87,17 +89,18 @@ impl Recorder<'_> {
             &bytes,
             [groups_x as u32, groups.div_ceil(groups_x) as u32, 1],
         );
+        self.retain(op.weights.clone());
+        self.retain(op.x.clone());
+        self.retain(op.y.clone());
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::alloc::{Layout, alloc_zeroed, dealloc};
-    use std::sync::Arc;
-
     use super::*;
     use crate::Context;
+    use std::alloc::{Layout, alloc_zeroed, dealloc};
 
     const PAGE: usize = 4096;
     const TOLERANCE: f64 = 1e-4;
@@ -194,10 +197,14 @@ mod tests {
             .collect();
         let want = reference(weight_bytes, ROWS, COLS, &x);
         // SAFETY: `pages` outlives the import and is not written while it lives
-        let weights = unsafe { ImportedMemory::new(&context, &pages.bytes()[WEIGHT_AT..])? };
+        let weights =
+            Arc::new(unsafe { ImportedMemory::new(&context, &pages.bytes()[WEIGHT_AT..])? });
         let mut xs = HostBuffer::new(&context, (COLS + 8) * 4)?;
         xs.as_f32_mut()[8..8 + COLS].copy_from_slice(&x);
-        let ys = HostBuffer::new(&context, (ROWS + 4) * 4)?;
+        let (xs, ys) = (
+            Arc::new(xs),
+            Arc::new(HostBuffer::new(&context, (ROWS + 4) * 4)?),
+        );
         context.submit(|r| {
             r.mat_vec_q8_0(&MatVec {
                 weights: &weights,
@@ -218,6 +225,53 @@ mod tests {
         Ok(())
     }
 
+    // more dispatches than one batch takes, with the caller's handles to the inputs dropped before the GPU finishes
+    #[test]
+    fn recorded_work_keeps_its_buffers_alive_across_batches() -> Result<()> {
+        let Some(context) = context() else {
+            return Ok(());
+        };
+        const ROWS: usize = 64;
+        const COLS: usize = 256;
+        const DISPATCHES: usize = 3 * crate::stream::DISPATCHES_PER_SUBMIT / 2;
+        let len = ROWS * COLS / Q8_0_VALUES * Q8_0_BYTES;
+        let mut pages = Pages::new(len);
+        q8_0_weights(pages.bytes(), ROWS, COLS);
+        let x: Vec<f32> = (0..COLS).map(|i| (i % 7) as f32 - 3.0).collect();
+        let want = reference(pages.bytes(), ROWS, COLS, &x);
+        let ys = Arc::new(HostBuffer::new(&context, DISPATCHES * ROWS * 4)?);
+        {
+            // SAFETY: `pages` outlives every submit, which `synchronize` below waits for
+            let weights =
+                Arc::new(unsafe { ImportedMemory::new(&context, &pages.bytes()[..len])? });
+            let mut xs = HostBuffer::new(&context, COLS * 4)?;
+            xs.as_f32_mut().copy_from_slice(&x);
+            let xs = Arc::new(xs);
+            for d in 0..DISPATCHES {
+                context.record(|r| {
+                    r.mat_vec_q8_0(&MatVec {
+                        weights: &weights,
+                        rows: ROWS,
+                        cols: COLS,
+                        x: &xs,
+                        x_offset: 0,
+                        y: &ys,
+                        y_offset: d * ROWS,
+                    })
+                })?;
+            }
+        }
+        context.synchronize()?;
+        for (i, &got) in ys.as_f32().iter().enumerate() {
+            let want = want[i % ROWS];
+            assert!(
+                (f64::from(got) - want).abs() <= TOLERANCE * want.abs().max(1.0),
+                "{i}: {got} vs {want}"
+            );
+        }
+        Ok(())
+    }
+
     // an lm_head-sized weight (131072 x 2688, 374 MB) read twenty times a submit
     #[test]
     #[ignore = "benchmark"]
@@ -233,10 +287,10 @@ mod tests {
         let mut pages = Pages::new(len);
         q8_0_weights(pages.bytes(), ROWS, COLS);
         // SAFETY: as in the test above
-        let weights = unsafe { ImportedMemory::new(&context, &pages.bytes()[..len])? };
+        let weights = Arc::new(unsafe { ImportedMemory::new(&context, &pages.bytes()[..len])? });
         let mut xs = HostBuffer::new(&context, COLS * 4)?;
         xs.as_f32_mut().iter_mut().for_each(|x| *x = 0.5);
-        let ys = HostBuffer::new(&context, ROWS * 4)?;
+        let (xs, ys) = (Arc::new(xs), Arc::new(HostBuffer::new(&context, ROWS * 4)?));
         let op = MatVec {
             weights: &weights,
             rows: ROWS,
@@ -250,7 +304,6 @@ mod tests {
             context.submit(|r| {
                 for _ in 0..REPEATS {
                     r.mat_vec_q8_0(&op)?;
-                    r.barrier();
                 }
                 Ok(())
             })

@@ -74,7 +74,8 @@ impl Pipeline {
         }
     }
 
-    /// Records one dispatch over `groups` workgroups with `buffers` bound in order and `push` as its constants.
+    /// Records one dispatch over `groups` workgroups with `buffers` bound in order and `push` as its constants, ordered
+    /// before whatever is recorded after it.
     pub(crate) fn dispatch(
         &self,
         recorder: &Recorder<'_>,
@@ -135,7 +136,21 @@ impl Pipeline {
             context
                 .device
                 .cmd_dispatch(recorder.buffer, groups[0], groups[1], groups[2]);
+            // the next dispatch reads what this one wrote
+            let barrier = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
+            context.device.cmd_pipeline_barrier(
+                recorder.buffer,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[barrier],
+                &[],
+                &[],
+            );
         }
+        recorder.dispatches.set(recorder.dispatches.get() + 1);
     }
 
     /// # Safety
