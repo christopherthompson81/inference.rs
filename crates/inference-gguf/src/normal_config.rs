@@ -214,6 +214,10 @@ pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; NORMAL_LOADER_TYPE_COUN
         loader: NormalLoaderType::NemotronH,
         build: build_nemotron_h,
     },
+    NormalConfigBuilder {
+        loader: NormalLoaderType::NemotronHPuzzle,
+        build: build_nemotron_h,
+    },
 ];
 
 pub fn synthesize_normal_config(
@@ -1587,19 +1591,53 @@ fn build_nemotron_h(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
         json!(metadata.required_usize("ssm.conv_kernel")?),
     );
     if let Some(experts) = metadata.optional_usize("expert_count")? {
+        // a Puzzle checkpoint's (Bolt's) per layer; its routers' rows give each layer's expert count
+        let per_layer = |suffix| -> SynthesisResult<Vec<usize>> {
+            metadata.per_layer_usize(suffix, blocks)?.ok_or_else(|| {
+                NormalConfigSynthesisError::new(format!(
+                    "GGUF metadata is missing `{}`",
+                    metadata.key(suffix)
+                ))
+            })
+        };
+        let used = per_layer("expert_used_count")?;
+        let widths = per_layer("expert_feed_forward_length")?;
+        let widest = |values: &[usize]| values.iter().copied().max().unwrap_or(0);
         config.insert("n_routed_experts".into(), json!(experts));
-        config.insert(
-            "num_experts_per_tok".into(),
-            json!(metadata.required_usize("expert_used_count")?),
-        );
-        config.insert(
-            "moe_intermediate_size".into(),
-            json!(metadata.required_usize("expert_feed_forward_length")?),
-        );
+        config.insert("num_experts_per_tok".into(), json!(widest(&used)));
+        config.insert("moe_intermediate_size".into(), json!(widest(&widths)));
+        let uniform = |values: &[usize]| {
+            let moe = layer_types
+                .iter()
+                .zip(values)
+                .filter(|(kind, _)| **kind == "moe");
+            moe.map(|(_, v)| *v)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                <= 1
+        };
+        if !uniform(&used) || !uniform(&widths) {
+            let block_configs = layer_types
+                .iter()
+                .enumerate()
+                .map(|(layer, kind)| match *kind {
+                    "moe" => json!({
+                        "block_type": kind,
+                        "num_experts_per_tok": used[layer],
+                        "moe_intermediate_size": widths[layer],
+                    }),
+                    _ => json!({ "block_type": kind }),
+                })
+                .collect::<Vec<_>>();
+            config.insert("block_configs".into(), json!(block_configs));
+        }
         config.insert(
             "moe_shared_expert_intermediate_size".into(),
             json!(metadata.required_usize("expert_shared_feed_forward_length")?),
         );
+        if let Some(latent) = metadata.optional_usize("moe_latent_size")? {
+            config.insert("moe_latent_size".into(), json!(latent));
+        }
         config.insert(
             "routed_scaling_factor".into(),
             json!(
@@ -3191,6 +3229,7 @@ mod tests {
                 | NormalLoaderType::Olmoe
                 | NormalLoaderType::Ernie4_5Moe
                 | NormalLoaderType::NemotronH
+                | NormalLoaderType::NemotronHPuzzle
         )
     }
 
@@ -3306,6 +3345,7 @@ mod tests {
                 | NormalLoaderType::Qwen4Exp
                 | NormalLoaderType::GraniteMoeHybrid
                 | NormalLoaderType::NemotronH
+                | NormalLoaderType::NemotronHPuzzle
         ) {
             insert_u32(&mut metadata, architecture, "ssm.conv_kernel", 4);
             insert_u32(&mut metadata, architecture, "ssm.inner_size", 1_024);
@@ -3316,7 +3356,9 @@ mod tests {
 
         if matches!(
             loader,
-            NormalLoaderType::GraniteMoeHybrid | NormalLoaderType::NemotronH
+            NormalLoaderType::GraniteMoeHybrid
+                | NormalLoaderType::NemotronH
+                | NormalLoaderType::NemotronHPuzzle
         ) {
             tensors.extend(
                 ["blk.1.ssm_a.weight", "blk.1.ssm_conv1d.weight"]
@@ -3513,7 +3555,7 @@ mod tests {
             | NormalLoaderType::GraniteMoeSwa => {
                 assert_deserializes(loader, config, models::granite::Config::from_json)
             }
-            NormalLoaderType::NemotronH => {
+            NormalLoaderType::NemotronH | NormalLoaderType::NemotronHPuzzle => {
                 assert_deserializes(loader, config, models::nemotron_h::Config::from_json)
             }
             NormalLoaderType::GptOss => {

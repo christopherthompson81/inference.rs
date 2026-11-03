@@ -278,6 +278,7 @@ class NormalLoaderType(str, Enum):
     GRANITEMOE_SWA = "granitemoe_swa"
     GPT_OSS = "gpt_oss"
     NEMOTRON_H = "nemotron_h"
+    NEMOTRON_H_PUZZLE = "nemotron_h_puzzle"
     HUNYUANV1DENSE = "hunyuanv1dense"
     HUNYUANV1MOE = "hunyuanv1moe"
     QWEN3NEXT = "qwen3next"

@@ -100,6 +100,7 @@ impl IsqModelLoader for NemotronHLoader {
             r"layers\.(\d+)\.mixer\.(in_proj|out_proj)\.(weight|bias)$",
             r"layers\.(\d+)\.mixer\.(up_proj|down_proj)\.(weight|bias)$",
             r"layers\.(\d+)\.mixer\.shared_experts\.(up_proj|down_proj)\.(weight|bias)$",
+            r"layers\.(\d+)\.mixer\.(fc1_latent_proj|fc2_latent_proj)\.(weight|bias)$",
             r"layers\.(\d+)\.mixer\.experts\.(\d+)\.(up_proj|down_proj)\.(weight|bias)$",
             r"layers\.(\d+)\.mixer\.experts\.(gate_and_up_projs|down_projs)\.weight$",
         ])
@@ -145,7 +146,7 @@ impl DeviceMappedModelLoader for NemotronHLoader {
     ) -> Result<Vec<usize>> {
         let cfg = Config::from_json(config)?;
         let h = cfg.hidden_size;
-        let layer_elems = |kind: LayerKind| match kind {
+        let layer_elems = |layer: usize, kind: LayerKind| match kind {
             LayerKind::Attention => {
                 let q = cfg.num_attention_heads * cfg.head_dim;
                 let kv = cfg.num_key_value_heads.unwrap_or(cfg.num_attention_heads) * cfg.head_dim;
@@ -161,16 +162,19 @@ impl DeviceMappedModelLoader for NemotronHLoader {
                     + inner
             }
             LayerKind::Moe => {
-                let experts = cfg.n_routed_experts * cfg.moe_intermediate_size * h * 2;
-                let shared = cfg.moe_shared_expert_intermediate_size * h * 2;
-                (experts + shared) / weight_pack_factor + cfg.n_routed_experts * (h + 1)
+                let spec = cfg.moe_spec(layer);
+                let expert_in = spec.latent_size.unwrap_or(h);
+                let experts = spec.num_experts * spec.intermediate_size * expert_in * 2;
+                let latent = spec.latent_size.map_or(0, |latent| latent * h * 2);
+                let shared = spec.shared_intermediate_size * h * 2;
+                (experts + latent + shared) / weight_pack_factor + spec.num_experts * (h + 1)
             }
             LayerKind::Mlp => cfg.intermediate_size * h * 2 / weight_pack_factor,
         } + h;
         // a block holds its mixer layer and the feed-forward layer after it
         let mut sizes: Vec<usize> = Vec::new();
-        for kind in cfg.layer_kinds()? {
-            let bytes = layer_elems(kind) * dtype.size_in_bytes();
+        for (layer, kind) in cfg.layer_kinds()?.into_iter().enumerate() {
+            let bytes = layer_elems(layer, kind) * dtype.size_in_bytes();
             match kind {
                 LayerKind::Mamba | LayerKind::Attention => sizes.push(bytes),
                 LayerKind::Moe | LayerKind::Mlp => match sizes.last_mut() {

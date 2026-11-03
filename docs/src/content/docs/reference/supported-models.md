@@ -54,6 +54,7 @@ The `Architecture` column is the `config.json` `architectures` value. Per-family
 | `GraniteMoeSWAForCausalLM` | Granite MoE SWA (swash) | <details><summary><code>ibm-granite/granite-swash-3b-a600m</code></summary><code>inference run -m ibm-granite/granite-swash-3b-a600m</code></details> |
 | `GptOssForCausalLM` | GPT-OSS | <details><summary><code>openai/gpt-oss-20b</code> (20b), <code>openai/gpt-oss-120b</code> (120b)</summary><code>inference run -m openai/gpt-oss-20b</code><br><code>inference run -m openai/gpt-oss-120b</code></details> |
 | `NemotronHForCausalLM` | Nemotron-H | <details><summary><code>nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16</code></summary><code>inference run -m nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16</code></details> |
+| `NemotronHPuzzleForCausalLM` | Nemotron-H | <details><summary><code>nvidia/NVIDIA-Nemotron-Labs-3-Puzzle-75B-A9B-BF16</code></summary><code>inference run -m nvidia/NVIDIA-Nemotron-Labs-3-Puzzle-75B-A9B-BF16</code></details> |
 | `HunYuanDenseV1ForCausalLM` | HunYuan | <details><summary><code>tencent/Hunyuan-7B-Instruct</code></summary><code>inference run -m tencent/Hunyuan-7B-Instruct</code></details> |
 | `HunYuanMoEV1ForCausalLM` | HunYuan MoE | <details><summary><code>tencent/Hunyuan-A13B-Instruct</code></summary><code>inference run -m tencent/Hunyuan-A13B-Instruct</code></details> |
 | `Qwen3NextForCausalLM` | Qwen3-Next, Qwen3-Coder-Next | <details><summary><code>Qwen/Qwen3-Next-80B-A3B-Instruct</code></summary><code>inference run -m Qwen/Qwen3-Next-80B-A3B-Instruct</code></details> |

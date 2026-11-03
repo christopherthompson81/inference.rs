@@ -54,6 +54,9 @@ const V5_DOWN: &str = "down_proj";
 const NEMOTRON_ROUTER: &str = "gate";
 const NEMOTRON_SELECTION_BIAS: &str = "e_score_correction_bias";
 const NEMOTRON_SHARED_EXPERTS: &str = "shared_experts";
+// latent MoE (Super, Bolt): the routed experts run between these two, the router and shared expert at full width
+const NEMOTRON_LATENT_DOWN: &str = "fc1_latent_proj";
+const NEMOTRON_LATENT_UP: &str = "fc2_latent_proj";
 const NEMO_FP32_PARAMS: &str = "_fp32_params";
 // transformers divides the selected scores by their sum plus this
 const NEMOTRON_NORM_MIN: f32 = 1e-20;
@@ -2116,7 +2119,7 @@ impl BlockFfn {
                 None,
             ),
             FfnKind::Moe => {
-                let spec = layout.moe.as_ref().ok_or_else(|| {
+                let spec = ffn.moe.as_ref().ok_or_else(|| {
                     inference_tensor::Error::msg("a Nemotron-H MoE layer without its MoE settings")
                 })?;
                 let device = load
@@ -2183,6 +2186,7 @@ struct NemotronMoe {
     gate: inference_tensor::nn::Linear,
     bias: Tensor,
     experts: MoEExperts,
+    latent: Option<NemotronLatent>,
     shared: PlainMlp,
     top_k: usize,
     scale: f32,
@@ -2201,14 +2205,20 @@ impl NemotronMoe {
             .pp(NEMOTRON_ROUTER)
             .set_device(device.clone())
             .set_dtype(DType::F32);
-        let gate =
-            crate::layers::linear_no_bias(cfg.hidden_size, spec.num_experts, router_vb.clone())?;
-        let bias = router_vb.get(spec.num_experts, NEMOTRON_SELECTION_BIAS)?;
+        // a GGUF of a Puzzle checkpoint gives each layer's expert count only by its router's rows
+        let router = router_vb.get_unchecked("weight")?;
+        let num_experts = router.dim(0)?;
+        let gate = inference_tensor::nn::Linear::new(router, None);
+        let bias = router_vb.get(num_experts, NEMOTRON_SELECTION_BIAS)?;
+        let latent = spec
+            .latent_size
+            .map(|size| NemotronLatent::load(cfg, size, &vb))
+            .transpose()?;
         let experts = MoEExperts::new(
             &MoEExpertsConfig {
-                num_experts: spec.num_experts,
+                num_experts,
                 num_experts_per_tok: spec.top_k,
-                hidden_size: cfg.hidden_size,
+                hidden_size: spec.latent_size.unwrap_or(cfg.hidden_size),
                 moe_intermediate_size: spec.intermediate_size,
                 expert_proj_names: ExpertProjNames::DEFAULT,
                 gated: false,
@@ -2233,6 +2243,7 @@ impl NemotronMoe {
             gate,
             bias,
             experts,
+            latent,
             shared,
             top_k: spec.top_k,
             scale: spec.routed_scaling_factor,
@@ -2257,16 +2268,25 @@ impl NemotronMoe {
             Some(&self.bias),
             None,
         )?;
+        let routed_in = match &self.latent {
+            Some(latent) => latent.down.forward(xs)?,
+            None => xs.clone(),
+        };
         // the shared expert runs while offloaded experts' misses are on the CPU
-        let (routed, shared) =
-            self.experts
-                .forward_overlapping(xs, topk.values, &topk.indices, &mut || {
-                    MlpLayer::forward(&self.shared, xs)
-                })?;
-        routed
-            .reshape((b_size, seq_len, hidden))?
-            .to_dtype(xs.dtype())?
-            + shared
+        let (routed, shared) = self.experts.forward_overlapping(
+            &routed_in,
+            topk.values,
+            &topk.indices,
+            &mut || MlpLayer::forward(&self.shared, xs),
+        )?;
+        let routed = routed
+            .reshape((b_size, seq_len, routed_in.dims3()?.2))?
+            .to_dtype(xs.dtype())?;
+        let routed = match &self.latent {
+            Some(latent) => latent.up.forward(&routed)?,
+            None => routed,
+        };
+        routed + shared
     }
 
     // the router stays as the checkpoint has it; ISQ takes the experts and the shared expert
@@ -2275,7 +2295,28 @@ impl NemotronMoe {
         let router = uvb.pp(NEMOTRON_ROUTER);
         router.add(&self.gate);
         router.add_tensor(NEMOTRON_SELECTION_BIAS, self.bias.clone());
+        if let Some(latent) = &self.latent {
+            uvb.pp(NEMOTRON_LATENT_DOWN).add(&latent.down);
+            uvb.pp(NEMOTRON_LATENT_UP).add(&latent.up);
+        }
         uvb.to_safetensors()
+    }
+}
+
+struct NemotronLatent {
+    down: Arc<dyn QuantMethod>,
+    up: Arc<dyn QuantMethod>,
+}
+
+impl NemotronLatent {
+    fn load(cfg: &Config, size: usize, vb: &ShardedVarBuilder) -> Result<Self> {
+        let projection = |(input, output), name| {
+            ReplicatedLayer::new(input, output, &cfg.quantization_config, false, vb.pp(name))
+        };
+        Ok(Self {
+            down: projection((cfg.hidden_size, size), NEMOTRON_LATENT_DOWN)?,
+            up: projection((size, cfg.hidden_size), NEMOTRON_LATENT_UP)?,
+        })
     }
 }
 
@@ -2321,6 +2362,8 @@ pub struct NemotronMoeSpec {
     pub intermediate_size: usize,
     pub shared_intermediate_size: usize,
     pub routed_scaling_factor: f32,
+    /// The width the routed experts run at, when it is not the model's.
+    pub latent_size: Option<usize>,
 }
 
 /// Which feed-forward a block's FFN half loads.
@@ -2340,6 +2383,8 @@ pub struct FfnNames {
     pub norm: String,
     pub module: String,
     pub kind: FfnKind,
+    /// A Nemotron-H MoE layer's experts.
+    pub moe: Option<NemotronMoeSpec>,
 }
 
 /// Where one block's weights sit, relative to the model's prefix.
@@ -2363,7 +2408,6 @@ pub struct HybridLayout {
     pub blocks: Vec<HybridBlock>,
     pub embeddings: &'static str,
     pub final_norm: &'static str,
-    pub moe: Option<NemotronMoeSpec>,
 }
 
 impl HybridLayout {
@@ -2386,6 +2430,7 @@ impl HybridLayout {
                             norm: format!("{layer}.post_attention_layernorm"),
                             module: layer,
                             kind: FfnKind::Granite,
+                            moe: None,
                         }),
                     },
                     mixer,
@@ -2396,7 +2441,6 @@ impl HybridLayout {
             blocks,
             embeddings: "embed_tokens",
             final_norm: "norm",
-            moe: None,
         }
     }
 

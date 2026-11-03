@@ -673,6 +673,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `NormalLoaderType.GRANITEMOE_SWA` | `'granitemoe_swa'` |
 | `NormalLoaderType.GPT_OSS` | `'gpt_oss'` |
 | `NormalLoaderType.NEMOTRON_H` | `'nemotron_h'` |
+| `NormalLoaderType.NEMOTRON_H_PUZZLE` | `'nemotron_h_puzzle'` |
 | `NormalLoaderType.HUNYUANV1DENSE` | `'hunyuanv1dense'` |
 | `NormalLoaderType.HUNYUANV1MOE` | `'hunyuanv1moe'` |
 | `NormalLoaderType.QWEN3NEXT` | `'qwen3next'` |

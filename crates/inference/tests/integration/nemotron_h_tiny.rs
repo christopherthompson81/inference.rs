@@ -1,8 +1,8 @@
 //! A tiny random-weight Nemotron-H (Mamba-2, NoPE attention, sigmoid-routed squared-ReLU experts with a shared
 //! expert, a dense squared-ReLU MLP, and a Mamba layer with no feed-forward after it): decoding step by step through
 //! its Mamba state and KV cache scores the tokens as one prefill over them does (quantized, with a prompt long enough
-//! to run the experts grouped, too, and on CUDA), and calibrating an ISQ load collects statistics for every
-//! expert projection.
+//! to run the experts grouped, too, and on CUDA, and with latent experts), and calibrating an ISQ load collects
+//! statistics for every expert projection.
 
 use std::collections::HashMap;
 
@@ -50,6 +50,8 @@ const LONG_PROMPT_REPEATS: usize = 12;
 // whole Q8_0 blocks, so a quantized load runs its experts from their blocks on the CPU
 const EXPERT_WIDTH: usize = 32;
 const SHARED_WIDTH: usize = 40;
+// narrower than the model, as Super's and Bolt's latent experts are
+const LATENT_WIDTH: usize = 16;
 const MLP_WIDTH: usize = 48;
 const WEIGHT_STD: f32 = 0.2;
 // fixed, so every run checks the same checkpoint: decode and prefill round differently, and an unlucky draw of weights
@@ -64,8 +66,23 @@ const CUDA_LOGPROB_TOLERANCE: f32 = 1e-3;
 const BF16_LOGPROB_TOLERANCE: f32 = 0.1;
 const CIMATRIX: &str = "collected.cimatrix";
 
-fn config(head_dim: usize) -> serde_json::Value {
-    serde_json::json!({
+/// The checkpoint's attention width and, for latent MoE, the routed experts' width.
+#[derive(Clone, Copy)]
+struct Shape {
+    head_dim: usize,
+    latent: Option<usize>,
+}
+
+impl Shape {
+    const BASE: Self = Self {
+        head_dim: HEAD_DIM,
+        latent: None,
+    };
+}
+
+fn config(shape: Shape) -> serde_json::Value {
+    let head_dim = shape.head_dim;
+    let mut config = serde_json::json!({
         "architectures": ["NemotronHForCausalLM"],
         "model_type": "nemotron_h",
         "vocab_size": VOCAB,
@@ -89,7 +106,11 @@ fn config(head_dim: usize) -> serde_json::Value {
         "layer_norm_epsilon": 1e-5,
         "max_position_embeddings": 4096,
         "tie_word_embeddings": false,
-    })
+    });
+    if let Some(latent) = shape.latent {
+        config["moe_latent_size"] = latent.into();
+    }
+    config
 }
 
 fn random(rng: &mut StdRng, shape: &[usize]) -> anyhow::Result<Tensor> {
@@ -104,7 +125,9 @@ fn near_one(rng: &mut StdRng, shape: &[usize]) -> anyhow::Result<Tensor> {
 }
 
 // NVIDIA's `backbone.*` names, as the Hub checkpoints keep them
-fn weights(head_dim: usize) -> anyhow::Result<HashMap<String, Tensor>> {
+fn weights(shape: Shape) -> anyhow::Result<HashMap<String, Tensor>> {
+    let head_dim = shape.head_dim;
+    let expert_in = shape.latent.unwrap_or(HIDDEN);
     let rng = &mut StdRng::seed_from_u64(WEIGHT_SEED);
     let inner = MAMBA_HEADS * MAMBA_HEAD_DIM;
     let conv_dim = inner + 2 * GROUPS * STATE;
@@ -174,11 +197,22 @@ fn weights(head_dim: usize) -> anyhow::Result<HashMap<String, Tensor>> {
                 for e in 0..EXPERTS {
                     moe.push((
                         format!("experts.{e}.up_proj.weight"),
-                        random(rng, &[EXPERT_WIDTH, HIDDEN])?,
+                        random(rng, &[EXPERT_WIDTH, expert_in])?,
                     ));
                     moe.push((
                         format!("experts.{e}.down_proj.weight"),
-                        random(rng, &[HIDDEN, EXPERT_WIDTH])?,
+                        random(rng, &[expert_in, EXPERT_WIDTH])?,
+                    ));
+                }
+                // drawn last, so the other checkpoints keep their weights
+                if let Some(latent) = shape.latent {
+                    moe.push((
+                        "fc1_latent_proj.weight".into(),
+                        random(rng, &[latent, HIDDEN])?,
+                    ));
+                    moe.push((
+                        "fc2_latent_proj.weight".into(),
+                        random(rng, &[HIDDEN, latent])?,
                     ));
                 }
                 moe
@@ -199,17 +233,17 @@ fn weights(head_dim: usize) -> anyhow::Result<HashMap<String, Tensor>> {
 }
 
 fn checkpoint() -> anyhow::Result<tempfile::TempDir> {
-    checkpoint_with(HEAD_DIM)
+    checkpoint_with(Shape::BASE)
 }
 
-fn checkpoint_with(head_dim: usize) -> anyhow::Result<tempfile::TempDir> {
+fn checkpoint_with(shape: Shape) -> anyhow::Result<tempfile::TempDir> {
     let dir = tempfile::tempdir()?;
     for file in FIXTURE_FILES {
         std::fs::copy(format!("{FIXTURE}/{file}"), dir.path().join(file))?;
     }
     std::fs::copy(TOKENIZER, dir.path().join("tokenizer.json"))?;
-    std::fs::write(dir.path().join("config.json"), config(head_dim).to_string())?;
-    let weights = weights(head_dim)?
+    std::fs::write(dir.path().join("config.json"), config(shape).to_string())?;
+    let weights = weights(shape)?
         .into_iter()
         .map(|(name, tensor)| Ok((name, tensor.to_dtype(DType::F32)?)))
         .collect::<anyhow::Result<HashMap<_, _>>>()?;
@@ -220,6 +254,12 @@ fn checkpoint_with(head_dim: usize) -> anyhow::Result<tempfile::TempDir> {
 #[tokio::test]
 async fn a_step_by_step_decode_scores_as_one_prefill() -> anyhow::Result<()> {
     decode_scores_as_prefill(None, "say something long", Target::Cpu).await
+}
+
+// latent experts: down-projected before them, up after, with the router and the shared expert at the model's width
+#[tokio::test]
+async fn a_latent_moe_decode_scores_as_one_prefill() -> anyhow::Result<()> {
+    decode_scores_as_prefill(None, "say something long", Target::CpuLatent).await
 }
 
 // quantized experts on the CPU run from their blocks, a long prompt's tiled and a decode step's per row
@@ -270,28 +310,36 @@ async fn a_long_prompt_scores_as_its_graph_decode() -> anyhow::Result<()> {
 #[derive(Clone, Copy)]
 enum Target {
     Cpu,
+    CpuLatent,
     Cuda,
     CudaGraphs,
 }
 
 impl Target {
-    fn head_dim(self) -> usize {
+    fn shape(self) -> Shape {
         match self {
-            Self::CudaGraphs => GRAPH_HEAD_DIM,
-            Self::Cpu | Self::Cuda => HEAD_DIM,
+            Self::CudaGraphs => Shape {
+                head_dim: GRAPH_HEAD_DIM,
+                latent: None,
+            },
+            Self::CpuLatent => Shape {
+                head_dim: HEAD_DIM,
+                latent: Some(LATENT_WIDTH),
+            },
+            Self::Cpu | Self::Cuda => Shape::BASE,
         }
     }
 
     fn dtype(self) -> ModelDType {
         match self {
             Self::CudaGraphs => ModelDType::BF16,
-            Self::Cpu | Self::Cuda => ModelDType::F32,
+            Self::Cpu | Self::CpuLatent | Self::Cuda => ModelDType::F32,
         }
     }
 
     fn tolerance(self) -> f32 {
         match self {
-            Self::Cpu => LOGPROB_TOLERANCE,
+            Self::Cpu | Self::CpuLatent => LOGPROB_TOLERANCE,
             Self::Cuda => CUDA_LOGPROB_TOLERANCE,
             Self::CudaGraphs => BF16_LOGPROB_TOLERANCE,
         }
@@ -355,13 +403,13 @@ async fn decode_scores_as_prefill(
     prompt: &str,
     target: Target,
 ) -> anyhow::Result<()> {
-    let dir = checkpoint_with(target.head_dim())?;
+    let dir = checkpoint_with(target.shape())?;
     // no prefix cache, so the scoring request is one prefill rather than a suffix over the decode steps' state
     let mut builder = TextModelBuilder::new(dir.path().to_string_lossy())
         .with_dtype(target.dtype())
         .with_prefix_cache_n(None);
     match target {
-        Target::Cpu => builder = builder.with_force_cpu(),
+        Target::Cpu | Target::CpuLatent => builder = builder.with_force_cpu(),
         Target::CudaGraphs => {
             builder =
                 builder.with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)

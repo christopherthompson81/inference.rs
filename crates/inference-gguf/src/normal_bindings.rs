@@ -15,7 +15,10 @@ pub fn build_normal_bindings(
     ) {
         return super::qwen_multimodal_bindings::build_qwen35_text_bindings(archive);
     }
-    if matches!(loader, NormalLoaderType::NemotronH) {
+    if matches!(
+        loader,
+        NormalLoaderType::NemotronH | NormalLoaderType::NemotronHPuzzle
+    ) {
         return super::nemotron_h_bindings::build_nemotron_h_bindings(archive, architecture);
     }
     let mut bindings = GgufBindingMap::new();
