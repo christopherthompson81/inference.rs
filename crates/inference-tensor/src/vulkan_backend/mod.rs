@@ -1298,6 +1298,88 @@ mod tests {
         Ok(())
     }
 
+    // the scan step against its formula over 128-state rows, one batch row advancing pool row 1 and one padding row
+    #[test]
+    fn a_vulkan_scan_step_advances_its_pool_rows() -> Result<()> {
+        let Some(vk) = device() else { return Ok(()) };
+        let (heads, head_dim, groups, state) =
+            (4usize, 8usize, 2usize, crate::vulkan::SCAN_STEP_STATE);
+        let r = |shape: &[usize]| Tensor::randn(0f32, 0.5, shape, &Device::Cpu);
+        let (x, dt, b, c) = (
+            r(&[2, 1, heads, head_dim])?,
+            r(&[2, 1, heads])?,
+            r(&[2, 1, groups, state])?,
+            r(&[2, 1, groups, state])?,
+        );
+        let (a, d, dt_bias) = ((r(&[heads])?.abs()? * -1.)?, r(&[heads])?, r(&[heads])?);
+        let pool = r(&[3, heads, head_dim, state])?;
+        let vpool = pool.to_device(&vk)?;
+        let slots = Tensor::new(&[1u32, u32::MAX], &Device::Cpu)?.to_device(&vk)?;
+        let on = |t: &Tensor| t.to_device(&vk);
+        let got = crate::vulkan::ssm_scan_step(&crate::vulkan::ScanStep {
+            x: &on(&x)?,
+            dt: &on(&dt)?,
+            a: &on(&a)?,
+            b: &on(&b)?,
+            c: &on(&c)?,
+            d: &on(&d)?,
+            dt_bias: &on(&dt_bias)?,
+            dt_range: [0.0, f32::INFINITY],
+            pool: &vpool,
+            slots: &slots,
+        })?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+        let (xv, dtv, bv, cv) = (
+            x.flatten_all()?.to_vec1::<f32>()?,
+            dt.flatten_all()?.to_vec1::<f32>()?,
+            b.flatten_all()?.to_vec1::<f32>()?,
+            c.flatten_all()?.to_vec1::<f32>()?,
+        );
+        let (av, dv, biasv) = (
+            a.to_vec1::<f32>()?,
+            d.to_vec1::<f32>()?,
+            dt_bias.to_vec1::<f32>()?,
+        );
+        let mut states = pool.flatten_all()?.to_vec1::<f32>()?;
+        let row_len = heads * head_dim * state;
+        let mut want = vec![0f32; heads * head_dim];
+        {
+            for h in 0..heads {
+                let dt_t = (1.0 + (dtv[h] + biasv[h]).exp()).ln();
+                let decay = (dt_t * av[h]).exp();
+                let g = h / (heads / groups);
+                for p in 0..head_dim {
+                    let xp = xv[h * head_dim + p];
+                    let mut acc = 0f32;
+                    for n in 0..state {
+                        let at = row_len + (h * head_dim + p) * state + n;
+                        states[at] = states[at] * decay + dt_t * xp * bv[g * state + n];
+                        acc += states[at] * cv[g * state + n];
+                    }
+                    want[h * head_dim + p] = acc + dv[h] * xp;
+                }
+            }
+        }
+        for (i, (g, w)) in got[..heads * head_dim].iter().zip(&want).enumerate() {
+            assert!(
+                (g - w).abs() <= DOT_TOLERANCE * w.abs().max(1.0),
+                "{i}: {g} vs {w}"
+            );
+        }
+        assert!(
+            got[heads * head_dim..].iter().all(|&v| v == 0.0),
+            "the padding row scores 0"
+        );
+        let pool_after = vpool.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(
+            &pool_after[..row_len],
+            &pool.flatten_all()?.to_vec1::<f32>()?[..row_len],
+            "row 0 is untouched"
+        );
+        Ok(())
+    }
+
     #[test]
     fn a_vulkan_tensor_takes_in_place_writes() -> Result<()> {
         let Some(vk) = device() else { return Ok(()) };

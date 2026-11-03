@@ -1455,7 +1455,10 @@ impl MambaLayer {
         };
         let y = if x.device().is_cuda() {
             crate::cuda::ssm::selective_scan_cuda(scan, &mut ssm_state, pool_slots)?
-        } else if let Some(slots) = pool_slots.filter(|_| x.device().is_vulkan()) {
+        } else if let Some(slots) = pool_slots.filter(|_| {
+            x.device().is_vulkan()
+                && self.ssm_state_size == inference_tensor::vulkan::SCAN_STEP_STATE
+        }) {
             inference_tensor::vulkan::ssm_scan_step(&inference_tensor::vulkan::ScanStep {
                 x: &x.contiguous()?,
                 dt: &dt.contiguous()?,

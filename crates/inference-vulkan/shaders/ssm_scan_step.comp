@@ -1,9 +1,11 @@
 #version 450
 // One decode step of Mamba-2's selective scan on a state pool, in place: batch row b advances the pool's row slots[b]
 // (pool f32 (rows, heads, head_dim, state)): dt = clamp(softplus(dt + dt_bias)), state = state * exp(dt * a) + dt * x * B,
-// y = state . C + d * x. A thread a (b, head, p) state row; a slot past i32::MAX is a padding row scoring 0.
+// y = state . C + d * x. A cluster of LANES lanes a (b, head, p) state row, each lane VEC consecutive states of it, so a
+// row's reads coalesce; the cluster sums its lanes' dots. `state` is LANES * VEC; a slot past i32::MAX scores 0.
+#extension GL_KHR_shader_subgroup_clustered : require
 
-layout(local_size_x = 64) in;
+layout(local_size_x = 256) in;
 
 layout(std430, binding = 0) readonly buffer X { float x[]; };
 layout(std430, binding = 1) readonly buffer Dt { float dt[]; };
@@ -33,17 +35,27 @@ layout(push_constant) uniform PushConstants {
 } pc;
 
 const uint PAD_SLOT = 0x7fffffffu;
+const uint LANES = 32;
+const uint VEC = 4;
 
 void main() {
-    uint total = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
-    for (uint e = gl_GlobalInvocationID.x; e < pc.batch * pc.heads * pc.head_dim; e += total) {
+    uint rows_per_group = gl_WorkGroupSize.x / LANES;
+    uint lane = gl_LocalInvocationID.x % LANES;
+    uint e = (gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x) * rows_per_group + gl_LocalInvocationID.x / LANES;
+    // a whole cluster leaves together, so the clustered sum below sees every lane of a live row
+    if (e >= pc.batch * pc.heads * pc.head_dim) {
+        return;
+    }
+    {
         uint p = e % pc.head_dim;
         uint h = (e / pc.head_dim) % pc.heads;
         uint b = e / (pc.head_dim * pc.heads);
         uint slot = slots[pc.slots_off + b];
         if (slot > PAD_SLOT) {
-            y[e] = 0.0;
-            continue;
+            if (lane == 0) {
+                y[e] = 0.0;
+            }
+            return;
         }
         float raw = dt[pc.dt_off + b * pc.heads + h] + dt_bias[h];
         // softplus, as the CPU's ln(1 + e^x)
@@ -54,11 +66,15 @@ void main() {
         uint g = (b * pc.groups + h / (pc.heads / pc.groups)) * pc.state;
         uint row = pc.pool_off + ((slot * pc.heads + h) * pc.head_dim + p) * pc.state;
         float acc = 0.0;
-        for (uint n = 0; n < pc.state; n++) {
+        for (uint j = 0; j < VEC; j++) {
+            uint n = lane * VEC + j;
             float s = pool[row + n] * decay + dtx * bm[pc.b_off + g + n];
             pool[row + n] = s;
             acc += s * cm[pc.c_off + g + n];
         }
-        y[e] = acc + d[h] * xv;
+        acc = subgroupClusteredAdd(acc, LANES);
+        if (lane == 0) {
+            y[e] = acc + d[h] * xv;
+        }
     }
 }

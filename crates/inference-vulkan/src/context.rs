@@ -37,6 +37,8 @@ pub struct Recorder<'a> {
     pub(crate) buffer: vk::CommandBuffer,
     retained: RefCell<Vec<Retained>>,
     pub(crate) dispatches: Cell<usize>,
+    queries: Option<vk::QueryPool>,
+    profiled: RefCell<Vec<&'static str>>,
 }
 
 impl Context {
@@ -95,7 +97,12 @@ impl Context {
         let push_descriptor = ash::khr::push_descriptor::Device::new(&instance, &device);
         // SAFETY: the family was checked to exist and queue 0 was asked for
         let queue = unsafe { device.get_device_queue(family, 0) };
-        let stream = Stream::new(&device, family)?;
+        let mut stream = Stream::new(&device, family)?;
+        if std::env::var_os(crate::stream::PROFILE_ENV).is_some() {
+            stream.profile = Some(Box::new(crate::stream::Profile::new(f64::from(
+                properties.limits.timestamp_period,
+            ))));
+        }
         let kernels = Kernels::new(&device)?;
         Ok(Arc::new(Self {
             _entry: entry,
@@ -127,8 +134,11 @@ impl Context {
             buffer: batch.buffer,
             retained: RefCell::new(Vec::new()),
             dispatches: Cell::new(0),
+            queries: batch.queries,
+            profiled: RefCell::new(std::mem::take(&mut batch.profiled)),
         };
         let out = record(&recorder);
+        batch.profiled = recorder.profiled.into_inner();
         batch.retained.append(&mut recorder.retained.into_inner());
         batch.dispatches += recorder.dispatches.get();
         if batch.dispatches >= DISPATCHES_PER_SUBMIT {
@@ -161,6 +171,27 @@ impl Context {
 }
 
 impl Recorder<'_> {
+    // a timestamp after `kernel`'s dispatch, while profiling and the batch's pool has room
+    pub(crate) fn profile(&self, kernel: &'static str) {
+        let Some(pool) = self.queries else {
+            return;
+        };
+        let mut profiled = self.profiled.borrow_mut();
+        if profiled.len() + 1 >= crate::stream::PROFILE_QUERIES as usize {
+            return;
+        }
+        profiled.push(kernel);
+        // SAFETY: the buffer is recording and the query index is in the pool
+        unsafe {
+            self.context.device.cmd_write_timestamp(
+                self.buffer,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                pool,
+                profiled.len() as u32,
+            );
+        }
+    }
+
     /// Keeps `resource` alive until the commands recorded here have finished.
     pub fn retain(&self, resource: Retained) {
         self.retained.borrow_mut().push(resource);

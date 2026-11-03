@@ -10,6 +10,7 @@ pub(crate) struct Pipeline {
     pipeline: vk::Pipeline,
     bindings: usize,
     push_bytes: u32,
+    name: &'static str,
 }
 
 impl Pipeline {
@@ -18,6 +19,7 @@ impl Pipeline {
         spirv: &[u8],
         bindings: usize,
         push_bytes: u32,
+        name: &'static str,
     ) -> Result<Self> {
         let code = ash::util::read_spv(&mut std::io::Cursor::new(spirv))
             .map_err(|err| Error::Invalid(format!("embedded SPIR-V: {err}")))?;
@@ -70,6 +72,7 @@ impl Pipeline {
                 pipeline,
                 bindings,
                 push_bytes,
+                name,
             })
         }
     }
@@ -151,6 +154,7 @@ impl Pipeline {
             );
         }
         recorder.dispatches.set(recorder.dispatches.get() + 1);
+        recorder.profile(self.name);
     }
 
     /// # Safety

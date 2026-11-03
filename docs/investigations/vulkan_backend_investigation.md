@@ -137,3 +137,15 @@ k-way weighted sum (a batched matmul) on Vulkan, and `moe_router_topk` routes on
 
 **Result (as Run 2):** decode 8.9 -> 16.8 tok/s (59.5 ms a token); prefill 71 tok/s. Recipe A's expert stacks are
 copied once into driver memory (~14 GB of GTT) on first use.
+
+### Run 9 - 2026-11-04 ~02:10
+
+**Change:** `INFERENCE_VULKAN_PROFILE` times every dispatch with GPU timestamps and prints each kernel's share every
+5 s. It showed the weight reads at bandwidth (Q8_0 matvecs ~79 GB/s, the Q5_0 experts ~78 GB/s) and three kernels
+far off it: the scan step (a thread a 512-byte state row, uncoalesced: 275 us), the router (its top-k on one thread:
+171 us) and the f32 matmuls (a thread an output over a strided row: ~6.9 ms a token). The scan now gives a state row
+32 lanes of 4 states summed by a clustered subgroup add (57 us), the router's scores and each pick's argmax run over
+the workgroup (12.5 us), and a matmul with a k of 64 or more gives each output a workgroup splitting its dot product.
+
+**Result (as Run 2):** decode 16.8 -> 22.8 tok/s (43.8 ms a token; llama.cpp's Vulkan backend: 22.2), prefill 79 tok/s.
+Per token now: Q8_0 matvecs ~20 ms, Q5_0 experts ~14 ms, the shared expert ~5 ms, everything else ~5 ms.

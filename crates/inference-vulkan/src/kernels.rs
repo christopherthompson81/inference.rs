@@ -24,7 +24,7 @@ macro_rules! kernels {
         impl Kernels {
             pub(crate) fn new(device: &ash::Device) -> Result<Self> {
                 Ok(Self {
-                    $($name: Pipeline::new(device, shaders::$spirv, $bindings, $push)?,)*
+                    $($name: Pipeline::new(device, shaders::$spirv, $bindings, $push, stringify!($name))?,)*
                 })
             }
 
@@ -48,6 +48,7 @@ kernels! {
     rows_f32: ROWS_F32, ops::BINDINGS, ops::ROWS_PUSH_BYTES;
     index_b32: INDEX_B32, ops::BINDINGS, ops::INDEX_PUSH_BYTES;
     matmul_f32: MATMUL_F32, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
+    matmul_f32_dot: MATMUL_F32_DOT, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
     ssm_conv_step: SSM_CONV_STEP, ops::CONV_STEP_BINDINGS, ops::CONV_STEP_PUSH_BYTES;
     ssm_scan_step: SSM_SCAN_STEP, ops::SCAN_STEP_BINDINGS, ops::SCAN_STEP_PUSH_BYTES;
     moe_mat_vec_q5_0: MOE_MAT_VEC_Q5_0, ops::MOE_MATVEC_BINDINGS, ops::MOE_MATVEC_PUSH_BYTES;

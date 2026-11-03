@@ -17,6 +17,7 @@ pub type Retained = Arc<dyn Any + Send + Sync>;
 /// buffer keeps every resource its commands use alive until its fence signals.
 pub(crate) struct Stream {
     pool: vk::CommandPool,
+    pub(crate) profile: Option<Box<Profile>>,
     open: Option<Batch>,
     in_flight: VecDeque<Batch>,
     spare: Vec<(vk::CommandBuffer, vk::Fence)>,
@@ -27,6 +28,59 @@ pub(crate) struct Batch {
     fence: vk::Fence,
     pub(crate) dispatches: usize,
     pub(crate) retained: Vec<Retained>,
+    // the kernels whose dispatches wrote timestamps 1.. of the profiler's pool, while profiling
+    pub(crate) profiled: Vec<&'static str>,
+    pub(crate) queries: Option<vk::QueryPool>,
+}
+
+/// Set to profile the GPU time of each kernel, printed every `PROFILE_PRINT_SECS`.
+pub const PROFILE_ENV: &str = "INFERENCE_VULKAN_PROFILE";
+// timestamps one batch's query pool holds: its opening one and a dispatch's each
+pub(crate) const PROFILE_QUERIES: u32 = 8192;
+const PROFILE_PRINT_SECS: u64 = 5;
+
+/// Each kernel's dispatch count and GPU time since the last print.
+#[derive(Default)]
+pub(crate) struct Profile {
+    kernels: std::collections::HashMap<&'static str, (u64, f64)>,
+    since: Option<std::time::Instant>,
+    pub(crate) ns_per_tick: f64,
+}
+
+impl Profile {
+    pub(crate) fn new(ns_per_tick: f64) -> Self {
+        Self {
+            ns_per_tick,
+            ..Default::default()
+        }
+    }
+
+    fn add(&mut self, names: &[&'static str], ticks: &[u64]) {
+        for (i, name) in names.iter().enumerate() {
+            let entry = self.kernels.entry(name).or_default();
+            entry.0 += 1;
+            entry.1 += ticks[i + 1].saturating_sub(ticks[i]) as f64 * self.ns_per_tick;
+        }
+        let since = *self.since.get_or_insert_with(std::time::Instant::now);
+        if since.elapsed().as_secs() >= PROFILE_PRINT_SECS {
+            let mut rows: Vec<_> = self.kernels.drain().collect();
+            rows.sort_by(|a, b| b.1.1.total_cmp(&a.1.1));
+            let total: f64 = rows.iter().map(|r| r.1.1).sum();
+            eprintln!(
+                "vulkan profile over {:.1} s: {:.1} ms on the GPU",
+                since.elapsed().as_secs_f64(),
+                total / 1e6
+            );
+            for (name, (count, ns)) in rows {
+                eprintln!(
+                    "  {name:<20} {count:>8} dispatches {:>9.1} ms {:>7.1} us each",
+                    ns / 1e6,
+                    ns / 1e3 / count as f64
+                );
+            }
+            self.since = Some(std::time::Instant::now());
+        }
+    }
 }
 
 impl Stream {
@@ -38,6 +92,7 @@ impl Stream {
         let pool = unsafe { device.create_command_pool(&info, None)? };
         Ok(Self {
             pool,
+            profile: None,
             open: None,
             in_flight: VecDeque::new(),
             spare: Vec::new(),
@@ -67,11 +122,14 @@ impl Stream {
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
             // SAFETY: a spare buffer finished (its fence was waited on and reset) and was reset below in `reap`
             unsafe { device.begin_command_buffer(buffer, &begin)? };
+            let queries = profile_pool(device, buffer)?;
             self.open = Some(Batch {
                 buffer,
                 fence,
                 dispatches: 0,
                 retained: Vec::new(),
+                profiled: Vec::new(),
+                queries,
             });
         }
         Ok(self.open.as_mut().expect("opened above"))
@@ -104,6 +162,7 @@ impl Stream {
 
     // releases the batches that finished (all of them, waiting, when `wait`), keeping their buffers as spares
     fn reap(&mut self, device: &ash::Device, wait: bool) -> Result<()> {
+        let mut profile = self.profile.as_mut();
         while let Some(batch) = self.in_flight.front() {
             // SAFETY: the fence belongs to this device and was submitted with its batch
             let done = unsafe {
@@ -118,6 +177,20 @@ impl Stream {
                 break;
             }
             let batch = self.in_flight.pop_front().expect("checked above");
+            if let (Some(pool), Some(profile)) = (batch.queries, profile.as_deref_mut()) {
+                let mut ticks = vec![0u64; batch.profiled.len() + 1];
+                // SAFETY: the batch finished, so every timestamp it wrote is available
+                unsafe {
+                    device.get_query_pool_results(
+                        pool,
+                        0,
+                        &mut ticks,
+                        vk::QueryResultFlags::TYPE_64,
+                    )?;
+                    device.destroy_query_pool(pool, None);
+                }
+                profile.add(&batch.profiled, &ticks);
+            }
             // SAFETY: the batch finished, so its buffer and fence are idle
             unsafe {
                 device.reset_fences(&[batch.fence])?;
@@ -138,5 +211,22 @@ impl Stream {
             }
             device.destroy_command_pool(self.pool, None);
         }
+    }
+}
+
+// a fresh query pool for a batch, its first timestamp written, while profiling
+fn profile_pool(device: &ash::Device, buffer: vk::CommandBuffer) -> Result<Option<vk::QueryPool>> {
+    if std::env::var_os(PROFILE_ENV).is_none() {
+        return Ok(None);
+    }
+    let info = vk::QueryPoolCreateInfo::default()
+        .query_type(vk::QueryType::TIMESTAMP)
+        .query_count(PROFILE_QUERIES);
+    // SAFETY: the buffer is recording, and the pool is reset before its first write
+    unsafe {
+        let pool = device.create_query_pool(&info, None)?;
+        device.cmd_reset_query_pool(buffer, pool, 0, PROFILE_QUERIES);
+        device.cmd_write_timestamp(buffer, vk::PipelineStageFlags::TOP_OF_PIPE, pool, 0);
+        Ok(Some(pool))
     }
 }

@@ -12,6 +12,8 @@ pub(crate) const MATMUL_PUSH_BYTES: u32 = 12 * 4;
 const MAX_GROUPS_X: usize = 65_535;
 const INDEX_THREADS: usize = 256;
 const MATMUL_THREADS: usize = 64;
+// the inner length from which an output element gets a workgroup of its own, its threads splitting the dot product
+const DOT_MIN_K: usize = 64;
 const MAX_GROUPS: usize = 4096;
 
 /// A per-row op, numbered as `rows_f32.comp`'s constants.
@@ -167,13 +169,22 @@ impl Recorder<'_> {
             b.row_stride,
             b.col_stride,
         ])?;
-        let groups = count.div_ceil(MATMUL_THREADS).min(MAX_GROUPS) as u32;
-        self.context.kernels.matmul_f32.dispatch(
-            self,
-            &[a.buffer.buffer, b.buffer.buffer, op.out.buffer],
-            &bytes,
-            [groups, 1, 1],
-        );
+        let buffers = [a.buffer.buffer, b.buffer.buffer, op.out.buffer];
+        if op.k >= DOT_MIN_K {
+            let groups_x = count.min(MAX_GROUPS_X);
+            self.context.kernels.matmul_f32_dot.dispatch(
+                self,
+                &buffers,
+                &bytes,
+                [groups_x as u32, count.div_ceil(groups_x) as u32, 1],
+            );
+        } else {
+            let groups = count.div_ceil(MATMUL_THREADS).min(MAX_GROUPS) as u32;
+            self.context
+                .kernels
+                .matmul_f32
+                .dispatch(self, &buffers, &bytes, [groups, 1, 1]);
+        }
         for buffer in [a.buffer, b.buffer, op.out] {
             self.retain(buffer.clone());
         }
@@ -188,7 +199,10 @@ pub(crate) const CONV_STEP_BINDINGS: usize = 6;
 pub(crate) const CONV_STEP_PUSH_BYTES: u32 = 9 * 4;
 pub(crate) const SCAN_STEP_BINDINGS: usize = 10;
 pub(crate) const SCAN_STEP_PUSH_BYTES: u32 = 13 * 4;
-const STEP_THREADS: usize = 64;
+// the scan step's lanes a state row and states a lane, and the rows a 256-thread workgroup takes
+const SCAN_LANES: usize = 32;
+const SCAN_VEC: usize = 4;
+const SCAN_ROWS_PER_GROUP: usize = 256 / SCAN_LANES;
 
 /// One decode step of Mamba's causal conv on a conv-state pool (`(rows, channels, kernel)` f32, in place), each batch
 /// row's state the pool row `slots` names; `out` is `(batch, channels)`.
@@ -256,10 +270,13 @@ impl Recorder<'_> {
     }
 
     pub fn ssm_scan_step(&self, op: &ScanStep<'_>) -> Result<()> {
-        if op.groups == 0 || !op.heads.is_multiple_of(op.groups) {
+        if op.groups == 0
+            || !op.heads.is_multiple_of(op.groups)
+            || op.state != SCAN_LANES * SCAN_VEC
+        {
             return Err(Error::Invalid(format!(
-                "{} heads over {} groups",
-                op.heads, op.groups
+                "{} heads over {} groups of {} states",
+                op.heads, op.groups, op.state
             )));
         }
         let mut bytes = words(&[op.batch, op.heads, op.head_dim, op.groups, op.state])?;
@@ -272,14 +289,13 @@ impl Recorder<'_> {
         let buffers = [
             op.x.0, op.dt.0, op.a, op.b.0, op.c.0, op.d, op.dt_bias, op.pool.0, op.slots.0, op.out,
         ];
-        let groups = (op.batch * op.heads * op.head_dim)
-            .div_ceil(STEP_THREADS)
-            .min(MAX_GROUPS) as u32;
+        let groups = (op.batch * op.heads * op.head_dim).div_ceil(SCAN_ROWS_PER_GROUP);
+        let groups_x = groups.clamp(1, MAX_GROUPS_X);
         self.context.kernels.ssm_scan_step.dispatch(
             self,
             &buffers.map(|b| b.buffer),
             &bytes,
-            [groups.max(1), 1, 1],
+            [groups_x as u32, groups.div_ceil(groups_x).max(1) as u32, 1],
         );
         for buffer in buffers {
             self.retain(buffer.clone());

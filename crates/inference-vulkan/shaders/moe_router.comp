@@ -1,9 +1,10 @@
 #version 450
 // Top-k MoE routing a token a workgroup, as inference_nn's CPU router: scores (raw, softmax or sigmoid of the clipped
 // logits), the selection bias added for choosing only, the top k by a stable descending order (ties to the lower
-// expert), their weights (the scores, or a softmax or sigmoid of their logits), renormalized and scaled.
+// expert), their weights (the scores, or a softmax or sigmoid of their logits), renormalized and scaled. The scores
+// and each pick's argmax run over the workgroup.
 
-layout(local_size_x = 64) in;
+layout(local_size_x = 128) in;
 
 layout(std430, binding = 0) readonly buffer L { float logits[]; };
 layout(std430, binding = 1) readonly buffer Bias { float bias[]; };
@@ -26,36 +27,63 @@ layout(push_constant) uniform PushConstants {
     uint logits_off;
 } pc;
 
+const uint THREADS = 128;
 const uint MAX_EXPERTS = 1024;
 const uint MAX_TOP_K = 32;
+const uint NONE = 0xffffffffu;
 // score and weight functions, as `RouterFn` numbers them
-const uint RAW = 0;
 const uint SOFTMAX = 1;
 const uint SIGMOID = 2;
 
 shared float logit[MAX_EXPERTS];
 shared float score[MAX_EXPERTS];
-shared float picked[MAX_TOP_K];
+shared bool taken[MAX_EXPERTS];
+shared float red_v[THREADS];
+shared uint red_i[THREADS];
 shared uint chosen[MAX_TOP_K];
 
-void main() {
-    uint t = gl_WorkGroupID.x;
-    uint lane = gl_LocalInvocationID.x;
-    uint base = pc.logits_off + t * pc.experts;
-    for (uint e = lane; e < pc.experts; e += gl_WorkGroupSize.x) {
-        float l = logits[base + e];
-        logit[e] = pc.has_clip != 0 ? clamp(l, pc.clip_min, pc.clip_max) : l;
-    }
+// the workgroup's largest `v` and its index, the lower index among equals; NONE indices lose
+void best(float v, uint i, out float bv, out uint bi) {
+    uint t = gl_LocalInvocationID.x;
+    red_v[t] = v;
+    red_i[t] = i;
     barrier();
-    if (lane != 0) {
-        return;
+    for (uint s = THREADS / 2; s > 0; s >>= 1) {
+        if (t < s) {
+            float ov = red_v[t + s];
+            uint oi = red_i[t + s];
+            bool better = oi != NONE
+                && (red_i[t] == NONE || ov > red_v[t] || (ov == red_v[t] && oi < red_i[t]));
+            if (better) {
+                red_v[t] = ov;
+                red_i[t] = oi;
+            }
+        }
+        barrier();
     }
+    bv = red_v[0];
+    bi = red_i[0];
+    barrier();
+}
+
+void main() {
+    uint tok = gl_WorkGroupID.x;
+    uint t = gl_LocalInvocationID.x;
+    uint base = pc.logits_off + tok * pc.experts;
     float m = -1.0 / 0.0;
-    for (uint e = 0; e < pc.experts; e++) {
-        m = max(m, logit[e]);
+    for (uint e = t; e < pc.experts; e += THREADS) {
+        float l = logits[base + e];
+        l = pc.has_clip != 0 ? clamp(l, pc.clip_min, pc.clip_max) : l;
+        logit[e] = l;
+        taken[e] = false;
+        m = max(m, l);
     }
+    float bv;
+    uint bi;
+    best(m, t < pc.experts ? t : NONE, bv, bi);
+    m = bv;
     float total = 0.0;
-    for (uint e = 0; e < pc.experts; e++) {
+    for (uint e = t; e < pc.experts; e += THREADS) {
         float s = logit[e];
         if (pc.score_fn == SOFTMAX) {
             s = exp(s - m);
@@ -66,26 +94,42 @@ void main() {
         score[e] = s;
     }
     if (pc.score_fn == SOFTMAX) {
-        for (uint e = 0; e < pc.experts; e++) {
+        red_v[t] = total;
+        barrier();
+        for (uint s = THREADS / 2; s > 0; s >>= 1) {
+            if (t < s) {
+                red_v[t] += red_v[t + s];
+            }
+            barrier();
+        }
+        total = red_v[0];
+        barrier();
+        for (uint e = t; e < pc.experts; e += THREADS) {
             score[e] /= total;
         }
     }
+    barrier();
     for (uint j = 0; j < pc.top_k; j++) {
-        uint best = 0xffffffffu;
-        float best_v = 0.0;
-        for (uint e = 0; e < pc.experts; e++) {
-            bool taken = false;
-            for (uint q = 0; q < j; q++) {
-                taken = taken || chosen[q] == e;
-            }
-            float v = score[e] + (pc.has_bias != 0 ? bias[e] : 0.0);
-            if (!taken && (best == 0xffffffffu || v > best_v)) {
-                best = e;
-                best_v = v;
+        float v = 0.0;
+        uint idx = NONE;
+        for (uint e = t; e < pc.experts; e += THREADS) {
+            float c = score[e] + (pc.has_bias != 0 ? bias[e] : 0.0);
+            if (!taken[e] && (idx == NONE || c > v)) {
+                v = c;
+                idx = e;
             }
         }
-        chosen[j] = best;
+        best(v, idx, bv, bi);
+        if (t == 0) {
+            chosen[j] = bi;
+            taken[bi] = true;
+        }
+        barrier();
     }
+    if (t != 0) {
+        return;
+    }
+    float picked[MAX_TOP_K];
     float wm = -1.0 / 0.0;
     for (uint j = 0; j < pc.top_k; j++) {
         wm = max(wm, logit[chosen[j]]);
@@ -101,13 +145,11 @@ void main() {
         }
         picked[j] = w;
     }
-    if (pc.weight_fn == SOFTMAX) {
-        for (uint j = 0; j < pc.top_k; j++) {
-            picked[j] /= wsum;
-        }
-    }
     float denominator = 0.0;
     for (uint j = 0; j < pc.top_k; j++) {
+        if (pc.weight_fn == SOFTMAX) {
+            picked[j] /= wsum;
+        }
         denominator += picked[j];
     }
     if (pc.norm_min > 0.0) {
@@ -115,7 +157,7 @@ void main() {
     }
     for (uint j = 0; j < pc.top_k; j++) {
         float w = pc.renormalize != 0 ? picked[j] / denominator : picked[j];
-        values[t * pc.top_k + j] = w * pc.output_scale;
-        indices[t * pc.top_k + j] = chosen[j];
+        values[tok * pc.top_k + j] = w * pc.output_scale;
+        indices[tok * pc.top_k + j] = chosen[j];
     }
 }
