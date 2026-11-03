@@ -250,3 +250,16 @@ AVX-512 read loop on huge pages over 1-16 threads; both together. Memory is dual
   Holding the 21.7 GB model for the GPU needs `amdgpu.gttsize` / `ttm.pages_limit` raised on the kernel command line.
 
 **Finding:** decode on the iGPU has 1.4x the CPU's bandwidth ceiling (recipe A: ~30 tok/s plain against ~21.3).
+
+## Run 14 - 2026-11-03 ~15:00
+
+**Change (system):** `amdgpu.gttsize=49152 ttm.pages_limit=12582912` on the kernel command line; GTT is 48 GiB.
+
+**Bandwidth at model size:** a storage-buffer binding stops near 4 GiB (reads past it return zeros under
+robustness, which first showed as TB/s), so the test binds 2 GiB chunks; a submit of ~2 s of reads loses the device
+to the job timeout. GTT-allocated 20 GiB: 79 GB/s; imported host memory (zero-copy) 20-30 GiB: ~73 GB/s, with or
+without huge pages.
+
+**llama.cpp Vulkan (2cbca389f, RADV, `-ngl 99`) on recipe A:** pp512 411.07 +- 1.58, tg128 22.23 +- 0.05 tok/s
+(61 GB/s of weights). Against its CPU build: 5.2x prefill, 1.23x decode; against ours on the CPU, ahead of MTP 2
+(20.4) without speculating.
