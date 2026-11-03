@@ -10009,6 +10009,14 @@
           "draft_sampling": {
             "$ref": "#/components/schemas/MtpDraftSampling"
           },
+          "greedy_tolerance": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Greedy verification also accepts a draft within this many nats of the target's top logit, so greedy output is\nno longer bit-exact argmax; unset or 0 accepts only the argmax."
+          },
           "model": {
             "type": [
               "string",

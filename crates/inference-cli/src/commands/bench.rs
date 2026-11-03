@@ -16,7 +16,7 @@ use tracing::info;
 use crate::args::{BenchRuntimeOptions, GlobalOptions, ModelType};
 
 use super::normalize_requested_adapter;
-use super::serve::{model_spec, mtp_spec, normalize_quant_flags};
+use super::serve::{MtpFlags, model_spec, mtp_spec, normalize_quant_flags};
 
 /// The engine a benchmark measures: the model as `serve` would load it, run one sequence at a time.
 fn bench_spec(
@@ -35,14 +35,15 @@ fn bench_spec(
             prefix_cache_n: Some(0),
             disable_eos_stop: true,
             no_kv_cache: runtime.no_kv_cache,
-            mtp: mtp_spec(
-                runtime.mtp,
-                runtime.mtp_model.clone(),
-                runtime.mtp_n_predict,
-                runtime.mtp_auto_depth,
-                runtime.mtp_draft_sampling,
-                runtime.mtp_draft_isq.clone(),
-            ),
+            mtp: mtp_spec(MtpFlags {
+                builtin: runtime.mtp,
+                model: runtime.mtp_model.clone(),
+                n_predict: runtime.mtp_n_predict,
+                auto_depth: runtime.mtp_auto_depth,
+                draft_sampling: runtime.mtp_draft_sampling,
+                draft_isq: runtime.mtp_draft_isq.clone(),
+                greedy_tolerance: runtime.mtp_greedy_tolerance,
+            }),
             moe_expert_cache: runtime.moe_expert_cache,
             log: None,
             ..model_runtime

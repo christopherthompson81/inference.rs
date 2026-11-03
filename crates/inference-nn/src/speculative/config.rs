@@ -28,6 +28,9 @@ pub struct MtpConfig {
     /// Each step drafts the depth that has paid best, up to `n_predict` (unset, the proposer's largest
     /// automatic depth), instead of always `n_predict`.
     pub auto_depth: bool,
+    /// Greedy verification also accepts a draft whose logit is within this many nats of the target's top one (a
+    /// near-tie), so it stops being bit-exact argmax; 0 accepts only the argmax.
+    pub greedy_tolerance: f32,
 }
 
 #[doc(hidden)]
@@ -67,6 +70,7 @@ impl MtpConfig {
             draft_lm_head_isq: None,
             drafter_isq: None,
             auto_depth: false,
+            greedy_tolerance: 0.0,
         }
     }
 
@@ -78,6 +82,7 @@ impl MtpConfig {
             draft_lm_head_isq: None,
             drafter_isq: None,
             auto_depth: false,
+            greedy_tolerance: 0.0,
         }
     }
 
@@ -98,6 +103,11 @@ impl MtpConfig {
 
     pub fn with_auto_depth(mut self, auto_depth: bool) -> Self {
         self.auto_depth = auto_depth;
+        self
+    }
+
+    pub fn with_greedy_tolerance(mut self, nats: f32) -> Self {
+        self.greedy_tolerance = nats;
         self
     }
 

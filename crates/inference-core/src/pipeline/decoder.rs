@@ -538,6 +538,10 @@ impl crate::speculative::driver::SpeculativePipelineExt for DecoderPipeline {
     ) -> &StdMutex<crate::speculative::autotuner::SpeculativeAutotuner> {
         &self.core.speculative_autotuner
     }
+
+    fn speculative_greedy_tolerance(&self) -> f32 {
+        self.core.speculative_greedy_tolerance
+    }
 }
 
 impl DecoderPipeline {
@@ -1505,6 +1509,10 @@ impl Pipeline for DecoderPipeline {
             self.model.disable_recurrent_decode_deferred_storage()?;
         }
         let config = crate::speculative::resolve_speculative_model(config)?;
+        self.core.speculative_greedy_tolerance = match &config {
+            crate::speculative::SpeculativeConfig::Mtp(mtp) => mtp.greedy_tolerance,
+            crate::speculative::SpeculativeConfig::Off => 0.0,
+        };
         if let Some(info) = self
             .model
             .attach_speculative_with_runtime(config, runtime)?

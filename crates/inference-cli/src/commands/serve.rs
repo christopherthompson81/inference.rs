@@ -178,14 +178,15 @@ pub(crate) fn runtime_options_spec(
         no_kv_cache: runtime.no_kv_cache,
         chat_template: path_string(runtime.chat_template.as_deref()),
         jinja_explicit: path_string(runtime.jinja_explicit.as_deref()),
-        mtp: mtp_spec(
-            runtime.mtp,
-            runtime.mtp_model.clone(),
-            runtime.mtp_n_predict,
-            runtime.mtp_auto_depth,
-            runtime.mtp_draft_sampling,
-            runtime.mtp_draft_isq.clone(),
-        ),
+        mtp: mtp_spec(MtpFlags {
+            builtin: runtime.mtp,
+            model: runtime.mtp_model.clone(),
+            n_predict: runtime.mtp_n_predict,
+            auto_depth: runtime.mtp_auto_depth,
+            draft_sampling: runtime.mtp_draft_sampling,
+            draft_isq: runtime.mtp_draft_isq.clone(),
+            greedy_tolerance: runtime.mtp_greedy_tolerance,
+        }),
         max_num_batched_tokens: runtime
             .max_num_batched_tokens
             .map(std::num::NonZeroUsize::get),
@@ -244,20 +245,25 @@ fn path_string(path: Option<&Path>) -> Option<String> {
     path.map(|path| path.to_string_lossy().into_owned())
 }
 
-pub(crate) fn mtp_spec(
-    builtin: bool,
-    model: Option<String>,
-    n_predict: Option<usize>,
-    auto_depth: bool,
-    draft_sampling: crate::args::MtpDraftSamplingArg,
-    draft_isq: Option<String>,
-) -> Option<MtpSpec> {
-    (builtin || model.is_some()).then(|| MtpSpec {
-        model: if builtin { None } else { model },
-        n_predict,
-        auto_depth,
-        draft_sampling: draft_sampling.into(),
-        draft_isq,
+/// The `--mtp*` flags `serve` and `bench` share.
+pub(crate) struct MtpFlags {
+    pub builtin: bool,
+    pub model: Option<String>,
+    pub n_predict: Option<usize>,
+    pub auto_depth: bool,
+    pub draft_sampling: crate::args::MtpDraftSamplingArg,
+    pub draft_isq: Option<String>,
+    pub greedy_tolerance: Option<f32>,
+}
+
+pub(crate) fn mtp_spec(flags: MtpFlags) -> Option<MtpSpec> {
+    (flags.builtin || flags.model.is_some()).then(|| MtpSpec {
+        model: if flags.builtin { None } else { flags.model },
+        n_predict: flags.n_predict,
+        auto_depth: flags.auto_depth,
+        draft_sampling: flags.draft_sampling.into(),
+        draft_isq: flags.draft_isq,
+        greedy_tolerance: flags.greedy_tolerance,
     })
 }
 

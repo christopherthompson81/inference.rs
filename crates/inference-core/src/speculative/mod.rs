@@ -30,6 +30,7 @@ mod tests {
             draft_lm_head_isq: None,
             drafter_isq: None,
             auto_depth: false,
+            greedy_tolerance: 0.0,
         };
 
         assert_eq!(config.n_predict, Some(3));

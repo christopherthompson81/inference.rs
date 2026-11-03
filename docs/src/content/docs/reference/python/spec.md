@@ -575,6 +575,7 @@ MTP speculative decoding, drafting with an assistant model or the head built int
 | `auto_depth` | `bool \| None` | optional |
 | `draft_isq` | `str \| None` | optional |
 | `draft_sampling` | `MtpDraftSampling \| None` | optional |
+| `greedy_tolerance` | `float \| None` | optional |
 | `model` | `str \| None` | optional |
 | `n_predict` | `int \| None` | optional |
 

@@ -2103,6 +2103,7 @@ class MtpSpec:
     auto_depth: bool | None = None
     draft_isq: str | None = None
     draft_sampling: MtpDraftSampling | None = None
+    greedy_tolerance: float | None = None
     model: str | None = None
     n_predict: int | None = None
 

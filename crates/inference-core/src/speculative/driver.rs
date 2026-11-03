@@ -113,6 +113,11 @@ pub trait SpeculativePipelineExt: Pipeline {
         self.speculative_target().speculative_plan(batch_size)
     }
 
+    /// How far below the target's top logit greedy verification still accepts a draft, in nats.
+    fn speculative_greedy_tolerance(&self) -> f32 {
+        0.0
+    }
+
     fn speculative_observe(&self, observation: SpeculativeBatchObservation) {
         self.speculative_target().speculative_observe(observation);
     }
@@ -593,6 +598,7 @@ where
                 base_len: prepared.base_len,
                 anchor_to_emit: None,
                 device_verification: device_verifications[idx].take(),
+                greedy_tolerance: target.speculative_greedy_tolerance(),
             },
             prefix_cacher,
             disable_eos_stop,

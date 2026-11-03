@@ -958,6 +958,12 @@ pub struct RuntimeOptions {
     #[serde(default)]
     pub mtp_auto_depth: bool,
 
+    /// Greedy verification also accepts an MTP draft whose logit is within this many nats of the target's top one
+    /// (a near-tie), so output is no longer bit-exact greedy; off (0) by default.
+    #[arg(long, value_name = "NATS")]
+    #[serde(default)]
+    pub mtp_greedy_tolerance: Option<f32>,
+
     /// MTP draft sampling policy. Auto uses probabilistic DFlash2 drafting when supported.
     #[arg(long, value_enum, default_value_t)]
     #[serde(default)]
@@ -1154,6 +1160,11 @@ pub struct BenchRuntimeOptions {
     #[arg(long)]
     pub mtp_auto_depth: bool,
 
+    /// Greedy verification also accepts an MTP draft whose logit is within this many nats of the target's top one
+    /// (a near-tie), so output is no longer bit-exact greedy; off (0) by default.
+    #[arg(long, value_name = "NATS")]
+    pub mtp_greedy_tolerance: Option<f32>,
+
     /// MTP draft sampling policy. Auto uses probabilistic DFlash2 drafting when supported.
     #[arg(long, value_enum, default_value_t)]
     pub mtp_draft_sampling: MtpDraftSamplingArg,
@@ -1311,6 +1322,7 @@ impl Default for RuntimeOptions {
             mtp_model: None,
             mtp_n_predict: None,
             mtp_auto_depth: false,
+            mtp_greedy_tolerance: None,
             mtp_draft_sampling: MtpDraftSamplingArg::default(),
             mtp_draft_isq: None,
             mcp_config: None,
@@ -1872,14 +1884,15 @@ mod tests {
             panic!("expected serve command");
         };
         assert_eq!(
-            crate::commands::serve::mtp_spec(
-                runtime.mtp,
-                runtime.mtp_model.clone(),
-                runtime.mtp_n_predict,
-                runtime.mtp_auto_depth,
-                runtime.mtp_draft_sampling,
-                runtime.mtp_draft_isq.clone(),
-            )
+            crate::commands::serve::mtp_spec(crate::commands::serve::MtpFlags {
+                builtin: runtime.mtp,
+                model: runtime.mtp_model.clone(),
+                n_predict: runtime.mtp_n_predict,
+                auto_depth: runtime.mtp_auto_depth,
+                draft_sampling: runtime.mtp_draft_sampling,
+                draft_isq: runtime.mtp_draft_isq.clone(),
+                greedy_tolerance: runtime.mtp_greedy_tolerance,
+            })
             .expect("missing MTP spec")
             .draft_sampling,
             inference_api::engine::MtpDraftSampling::Auto
@@ -1900,14 +1913,15 @@ mod tests {
             panic!("expected serve command");
         };
         assert_eq!(
-            crate::commands::serve::mtp_spec(
-                runtime.mtp,
-                runtime.mtp_model.clone(),
-                runtime.mtp_n_predict,
-                runtime.mtp_auto_depth,
-                runtime.mtp_draft_sampling,
-                runtime.mtp_draft_isq.clone(),
-            )
+            crate::commands::serve::mtp_spec(crate::commands::serve::MtpFlags {
+                builtin: runtime.mtp,
+                model: runtime.mtp_model.clone(),
+                n_predict: runtime.mtp_n_predict,
+                auto_depth: runtime.mtp_auto_depth,
+                draft_sampling: runtime.mtp_draft_sampling,
+                draft_isq: runtime.mtp_draft_isq.clone(),
+                greedy_tolerance: runtime.mtp_greedy_tolerance,
+            })
             .expect("missing MTP spec")
             .draft_sampling,
             inference_api::engine::MtpDraftSampling::Probabilistic
@@ -1928,14 +1942,15 @@ mod tests {
             panic!("expected serve command");
         };
         assert_eq!(
-            crate::commands::serve::mtp_spec(
-                runtime.mtp,
-                runtime.mtp_model.clone(),
-                runtime.mtp_n_predict,
-                runtime.mtp_auto_depth,
-                runtime.mtp_draft_sampling,
-                runtime.mtp_draft_isq.clone(),
-            )
+            crate::commands::serve::mtp_spec(crate::commands::serve::MtpFlags {
+                builtin: runtime.mtp,
+                model: runtime.mtp_model.clone(),
+                n_predict: runtime.mtp_n_predict,
+                auto_depth: runtime.mtp_auto_depth,
+                draft_sampling: runtime.mtp_draft_sampling,
+                draft_isq: runtime.mtp_draft_isq.clone(),
+                greedy_tolerance: runtime.mtp_greedy_tolerance,
+            })
             .expect("missing MTP spec")
             .draft_sampling,
             inference_api::engine::MtpDraftSampling::Greedy
