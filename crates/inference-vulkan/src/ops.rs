@@ -287,3 +287,149 @@ impl Recorder<'_> {
         Ok(())
     }
 }
+
+pub(crate) const MOE_MATVEC_BINDINGS: usize = 4;
+pub(crate) const MOE_MATVEC_PUSH_BYTES: u32 = 9 * 4;
+pub(crate) const ROUTER_BINDINGS: usize = 4;
+pub(crate) const ROUTER_PUSH_BYTES: u32 = 13 * 4;
+// the matvec shaders' rows a workgroup, and the router shader's limits
+const MATVEC_ROWS: usize = 2;
+const MAX_ROUTER_EXPERTS: usize = 1024;
+const MAX_ROUTER_TOP_K: usize = 32;
+
+/// `y[slot] = W[ids[slot]] x[slot / x_div]` over a stack of Q5_0 experts (each `rows x cols`) in `weights`; `y` is
+/// `(slots, rows)`.
+pub struct MoeMatVec<'a> {
+    pub weights: &'a Arc<dyn crate::Bound>,
+    pub experts: usize,
+    pub rows: usize,
+    pub cols: usize,
+    pub slots: usize,
+    /// slots a row of `x` serves: the routes of one token, or 1 for a row a route
+    pub x_div: usize,
+    pub x: At<'a>,
+    pub ids: At<'a>,
+    pub y: &'a Arc<HostBuffer>,
+}
+
+/// How a router turns logits into scores or weights.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(u32)]
+pub enum RouterFn {
+    Raw = 0,
+    Softmax = 1,
+    Sigmoid = 2,
+}
+
+/// Top-k routing of `tokens` rows of `experts` logits into `values` (f32) and `indices` (u32), each `(tokens, top_k)`.
+pub struct Router<'a> {
+    pub tokens: usize,
+    pub experts: usize,
+    pub top_k: usize,
+    pub score_fn: RouterFn,
+    pub weight_fn: RouterFn,
+    pub renormalize: bool,
+    pub norm_min: f32,
+    pub output_scale: f32,
+    pub clip: Option<(f32, f32)>,
+    pub logits: At<'a>,
+    pub bias: Option<&'a Arc<HostBuffer>>,
+    pub values: &'a Arc<HostBuffer>,
+    pub indices: &'a Arc<HostBuffer>,
+}
+
+impl Recorder<'_> {
+    pub fn moe_mat_vec_q5_0(&self, op: &MoeMatVec<'_>) -> Result<()> {
+        const BLOCK_VALUES: usize = 32;
+        const BLOCK_BYTES: usize = 22;
+        let blocks = op.cols / BLOCK_VALUES;
+        let expert_bytes = op.rows * blocks * BLOCK_BYTES;
+        if !op.cols.is_multiple_of(BLOCK_VALUES)
+            || op.x_div == 0
+            || op.weights.bytes() < op.experts * expert_bytes
+            || !op.weights.offset().is_multiple_of(2)
+            || op.slots > MAX_GROUPS_X
+        {
+            return Err(Error::Invalid(format!(
+                "a {} x {}x{} Q5_0 expert matvec over {} slots",
+                op.experts, op.rows, op.cols, op.slots
+            )));
+        }
+        if op.slots == 0 {
+            return Ok(());
+        }
+        let groups = op.rows.div_ceil(MATVEC_ROWS);
+        let groups_x = groups.min(MAX_GROUPS_X);
+        let bytes = words(&[
+            op.rows,
+            op.cols,
+            op.weights.offset() as usize / 2,
+            op.x.1,
+            0,
+            groups_x,
+            op.x_div,
+            op.ids.1,
+            expert_bytes / 2,
+        ])?;
+        let buffers = [
+            op.weights.vk_buffer(),
+            op.x.0.buffer,
+            op.y.buffer,
+            op.ids.0.buffer,
+        ];
+        self.context.kernels.moe_mat_vec_q5_0.dispatch(
+            self,
+            &buffers,
+            &bytes,
+            [
+                groups_x as u32,
+                groups.div_ceil(groups_x) as u32,
+                op.slots as u32,
+            ],
+        );
+        self.retain(op.weights.clone() as crate::Retained);
+        for buffer in [op.x.0, op.ids.0, op.y] {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+
+    pub fn moe_router(&self, op: &Router<'_>) -> Result<()> {
+        if op.experts > MAX_ROUTER_EXPERTS || op.top_k > MAX_ROUTER_TOP_K || op.top_k > op.experts {
+            return Err(Error::Invalid(format!(
+                "top {} of {} experts",
+                op.top_k, op.experts
+            )));
+        }
+        if op.tokens == 0 {
+            return Ok(());
+        }
+        let (clip_min, clip_max) = op.clip.unwrap_or((0.0, 0.0));
+        let mut bytes = words(&[
+            op.tokens,
+            op.experts,
+            op.top_k,
+            op.score_fn as usize,
+            op.weight_fn as usize,
+            usize::from(op.renormalize),
+            usize::from(op.bias.is_some()),
+            usize::from(op.clip.is_some()),
+        ])?;
+        for v in [clip_min, clip_max, op.norm_min, op.output_scale] {
+            bytes.extend_from_slice(&v.to_bits().to_le_bytes());
+        }
+        bytes.extend(words(&[op.logits.1])?);
+        let bias = op.bias.unwrap_or(op.logits.0);
+        let buffers = [op.logits.0, bias, op.values, op.indices];
+        self.context.kernels.moe_router.dispatch(
+            self,
+            &buffers.map(|b| b.buffer),
+            &bytes,
+            [op.tokens as u32, 1, 1],
+        );
+        for buffer in buffers {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+}

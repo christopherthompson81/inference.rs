@@ -522,6 +522,94 @@ pub(crate) fn ssm_conv_step(
     Ok(tensor_of(out, (batch, channels)))
 }
 
+pub(crate) fn moe_router(route: &crate::vulkan::Route<'_>) -> Result<(Tensor, Tensor)> {
+    use crate::vulkan::RouterFn as F;
+    let (tokens, experts) = route.logits.dims2()?;
+    let logits = bound(route.logits, DType::F32)?;
+    let bias = route
+        .selection_bias
+        .map(|b| bound(b, DType::F32))
+        .transpose()?;
+    if bias.as_ref().is_some_and(|b| b.1 != 0) {
+        crate::bail!("the router reads its selection bias from its buffer's start");
+    }
+    let device = route.logits.device().as_vulkan_device()?.clone();
+    let count = tokens * route.top_k;
+    let storage = |dtype| -> Result<VulkanStorage> {
+        Ok(VulkanStorage {
+            buffer: Arc::new(device.buffer(count * 4)?),
+            device: device.clone(),
+            count,
+            dtype,
+        })
+    };
+    let (values, indices) = (storage(DType::F32)?, storage(DType::U32)?);
+    let to_fn = |f: F| match f {
+        F::Raw => inference_vulkan::RouterFn::Raw,
+        F::Softmax => inference_vulkan::RouterFn::Softmax,
+        F::Sigmoid => inference_vulkan::RouterFn::Sigmoid,
+    };
+    device
+        .context
+        .record(|r| {
+            r.moe_router(&inference_vulkan::Router {
+                tokens,
+                experts,
+                top_k: route.top_k,
+                score_fn: to_fn(route.score_fn),
+                weight_fn: to_fn(route.weight_fn),
+                renormalize: route.renormalize,
+                norm_min: route.norm_min,
+                output_scale: route.output_scale,
+                clip: route.clip,
+                logits: (&logits.0, logits.1),
+                bias: bias.as_ref().map(|b| &b.0),
+                values: &values.buffer,
+                indices: &indices.buffer,
+            })
+        })
+        .map_err(vk_err)?;
+    let shape = (tokens, route.top_k);
+    Ok((tensor_of(values, shape), tensor_of(indices, shape)))
+}
+
+/// `y[slot] = W[ids[slot]] x[slot / x_div]` over a Q5_0 expert stack `(experts, rows, cols)` copied to `weights`.
+pub(crate) fn expert_mat_vec(
+    weights: &Arc<HostBuffer>,
+    (experts, rows, cols): (usize, usize, usize),
+    x: &Tensor,
+    ids: &Tensor,
+    x_div: usize,
+) -> Result<Tensor> {
+    let (xb, ib) = (bound(x, DType::F32)?, bound(ids, DType::U32)?);
+    let slots = ids.elem_count();
+    let device = x.device().as_vulkan_device()?.clone();
+    let out = VulkanStorage {
+        buffer: Arc::new(device.buffer(slots * rows * 4)?),
+        device: device.clone(),
+        count: slots * rows,
+        dtype: DType::F32,
+    };
+    let weights: Arc<dyn Bound> = weights.clone();
+    device
+        .context
+        .record(|r| {
+            r.moe_mat_vec_q5_0(&inference_vulkan::MoeMatVec {
+                weights: &weights,
+                experts,
+                rows,
+                cols,
+                slots,
+                x_div,
+                x: (&xb.0, xb.1),
+                ids: (&ib.0, ib.1),
+                y: &out.buffer,
+            })
+        })
+        .map_err(vk_err)?;
+    Ok(tensor_of(out, (slots, rows)))
+}
+
 // the stride between batches of a matmul operand whose batch dims (all but its last two) collapse into one
 fn batch_stride(l: &Layout, batch: usize) -> Option<usize> {
     let (dims, strides) = (l.shape().dims(), l.stride());

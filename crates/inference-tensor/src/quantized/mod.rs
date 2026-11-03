@@ -134,6 +134,20 @@ impl QVulkanStorage {
         }
     }
 
+    // the blocks in driver-allocated memory, copied on first use
+    #[cfg(feature = "vulkan")]
+    fn gpu_copy(&self) -> Result<std::sync::Arc<inference_vulkan::HostBuffer>> {
+        if let Some(gpu) = self.gpu.get() {
+            return Ok(gpu.clone());
+        }
+        // SAFETY: the pointer and size are the blocks' own
+        let bytes = unsafe {
+            std::slice::from_raw_parts(self.blocks.as_ptr(), self.blocks.storage_size_in_bytes())
+        };
+        let gpu = self.device.host_copy(bytes)?;
+        Ok(self.gpu.get_or_init(|| gpu).clone())
+    }
+
     // `xs` times this `shape` weight transposed, where a Vulkan kernel takes the type, dtype and row count
     #[cfg(feature = "vulkan")]
     fn mat_vec(
@@ -1243,6 +1257,28 @@ fn narrow_bf16(src: &[f32]) -> Vec<half::bf16> {
 }
 
 const WIDEN_CHUNK: usize = 32 * 1024;
+
+impl QTensor {
+    /// `y[slot] = W[ids[slot]] x[slot / x_div]` for this `(experts, rows, cols)` stack on Vulkan, with `x` f32 rows of
+    /// `cols` and `ids` u32: `(slots, rows)`, or `None` where the Vulkan kernel does not take its type.
+    pub fn vulkan_expert_mat_vec(
+        &self,
+        x: &Tensor,
+        ids: &Tensor,
+        x_div: usize,
+    ) -> Result<Option<Tensor>> {
+        #[cfg(feature = "vulkan")]
+        if let QStorage::Vulkan(weight) = &self.storage
+            && weight.blocks.dtype() == GgmlDType::Q5_0
+        {
+            let dims = self.shape.dims3()?;
+            let weights = weight.gpu_copy()?;
+            return crate::vulkan_backend::expert_mat_vec(&weights, dims, x, ids, x_div).map(Some);
+        }
+        let _ = (x, ids, x_div);
+        Ok(None)
+    }
+}
 
 impl crate::CustomOp1 for QTensor {
     fn name(&self) -> &'static str {

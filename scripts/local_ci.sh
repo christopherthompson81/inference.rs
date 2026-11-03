@@ -119,7 +119,7 @@ if [[ $metal -eq 1 ]]; then
     cargo nextest run --no-fail-fast --profile metal --features metal "${TEST_TARGETS[@]}" || failed=1
 fi
 if [[ $vulkan -eq 1 ]]; then
-    VULKAN_PACKAGES=(-p inference-vulkan -p inference-tensor -p inference)
+    VULKAN_PACKAGES=(-p inference-vulkan -p inference-tensor -p inference-nn -p inference)
     cargo clippy "${VULKAN_PACKAGES[@]}" --features vulkan --tests -- -D warnings || failed=1
     cargo nextest run --no-fail-fast "${VULKAN_PACKAGES[@]}" --features vulkan \
         -E 'package(inference-vulkan) | test(vulkan)' || failed=1

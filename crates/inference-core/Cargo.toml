@@ -113,7 +113,7 @@ metal = [
     "inference-models-speech/metal",
 ]
 flash-attn-v3 = ["cuda", "inference-nn/flash-attn-v3"]
-vulkan = ["inference-tensor/vulkan"]
+vulkan = ["inference-tensor/vulkan", "inference-nn/vulkan"]
 accelerate = ["inference-tensor/accelerate", "inference-quant/accelerate", "inference-nn/accelerate"]
 mkl = ["inference-tensor/mkl"]
 nccl = ["cuda", "inference-quant/nccl"]

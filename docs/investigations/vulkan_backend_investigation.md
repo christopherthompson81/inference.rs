@@ -124,3 +124,16 @@ prefill, plain (1e-3) and with Q8_0 weights (0.05: the prompt's last row reaches
 f32-activation matvec, where a whole-prompt score runs the CPU's int8-activation kernel).
 
 **Result (as Run 2):** decode 6.8 -> 8.9 tok/s (112 ms a token), prefill 81 tok/s.
+
+### Run 8 - 2026-11-04 ~01:20
+
+**Change:** `moe_router` (a token a workgroup: scores, the selection bias, a stable top-k, the weights renormalized
+and scaled, as the CPU router) and `moe_mat_vec_q5_0` (a Q5_0 expert stack's rows for each route, the route's
+expert id read on the GPU); the ungated experts run a decode step's routes (up to 64) as up, relu^2, down and the
+k-way weighted sum (a batched matmul) on Vulkan, and `moe_router_topk` routes on it.
+
+**Tests:** `the_vulkan_router_routes_as_the_cpu_does` (every score and weight function, bias and clip);
+`a_vulkan_decode_scores_as_one_prefill` with Q5_0 weights too.
+
+**Result (as Run 2):** decode 8.9 -> 16.8 tok/s (59.5 ms a token); prefill 71 tok/s. Recipe A's expert stacks are
+copied once into driver memory (~14 GB of GTT) on first use.

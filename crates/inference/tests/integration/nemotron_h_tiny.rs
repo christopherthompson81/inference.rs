@@ -510,6 +510,7 @@ async fn a_vulkan_decode_scores_as_one_prefill() -> anyhow::Result<()> {
     for (isq, target) in [
         (None, Target::Vulkan),
         (Some(IsqType::Q8_0), Target::VulkanQuantized),
+        (Some(IsqType::Q5_0), Target::VulkanQuantized),
     ] {
         decode_scores_as_prefill(isq, "say something long", target)
             .await

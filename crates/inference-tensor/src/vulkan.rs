@@ -47,3 +47,36 @@ pub fn ssm_conv_step(
         Err(crate::Error::NotCompiledWithVulkanSupport)
     }
 }
+
+/// How MoE routing turns logits into scores, or the chosen experts into weights (where `Raw` weighs each by its score).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RouterFn {
+    Raw,
+    Softmax,
+    Sigmoid,
+}
+
+/// Top-k routing of `(tokens, experts)` f32 logits, as inference_nn's CPU router computes it.
+pub struct Route<'a> {
+    pub logits: &'a Tensor,
+    /// added to the scores for choosing the experts, not for weighing them
+    pub selection_bias: Option<&'a Tensor>,
+    pub top_k: usize,
+    pub score_fn: RouterFn,
+    pub weight_fn: RouterFn,
+    pub renormalize: bool,
+    pub norm_min: f32,
+    pub output_scale: f32,
+    pub clip: Option<(f32, f32)>,
+}
+
+/// The routes' weights (f32) and expert ids (u32), each `(tokens, top_k)`.
+pub fn moe_router(route: &Route<'_>) -> Result<(Tensor, Tensor)> {
+    #[cfg(feature = "vulkan")]
+    return crate::vulkan_backend::moe_router(route);
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = route;
+        Err(crate::Error::NotCompiledWithVulkanSupport)
+    }
+}

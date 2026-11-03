@@ -62,6 +62,9 @@ pub fn moe_router_topk(
     if logits.device().is_cpu() {
         return cpu_moe_router_topk(logits, config, selection_bias, expert_scale);
     }
+    if logits.device().is_vulkan() && expert_scale.is_none() && logits.rank() == 2 {
+        return vulkan_moe_router_topk(logits, config, selection_bias);
+    }
     tensor_moe_router_topk(logits, config, selection_bias, expert_scale)
 }
 
@@ -127,6 +130,45 @@ fn tensor_moe_router_topk(
         values = (values * scales)?;
     }
 
+    Ok(TopKOutput { values, indices })
+}
+
+fn vulkan_moe_router_topk(
+    logits: &Tensor,
+    config: MoeRouterTopKConfig,
+    selection_bias: Option<&Tensor>,
+) -> Result<TopKOutput> {
+    use inference_tensor::vulkan::RouterFn;
+    let score_fn = match config.score_function {
+        MoeRouterScoreFunction::Raw => RouterFn::Raw,
+        MoeRouterScoreFunction::Softmax => RouterFn::Softmax,
+        MoeRouterScoreFunction::Sigmoid => RouterFn::Sigmoid,
+    };
+    // a route's weight: its score as chosen (`Raw`), or a softmax or sigmoid of the chosen logits
+    let weight_fn = match config.selected_weight {
+        MoeRouterSelectedWeight::Score => RouterFn::Raw,
+        MoeRouterSelectedWeight::Softmax => RouterFn::Softmax,
+        MoeRouterSelectedWeight::Sigmoid => RouterFn::Sigmoid,
+    };
+    let bias = selection_bias
+        .map(|b| {
+            b.to_device(logits.device())?
+                .to_dtype(DType::F32)?
+                .contiguous()
+        })
+        .transpose()?;
+    let (values, indices) =
+        inference_tensor::vulkan::moe_router(&inference_tensor::vulkan::Route {
+            logits: &logits.to_dtype(DType::F32)?.contiguous()?,
+            selection_bias: bias.as_ref(),
+            top_k: config.top_k,
+            score_fn,
+            weight_fn,
+            renormalize: config.renormalize,
+            norm_min: config.norm_min,
+            output_scale: config.output_scale,
+            clip: config.logit_clip,
+        })?;
     Ok(TopKOutput { values, indices })
 }
 
@@ -434,6 +476,78 @@ mod tests {
     const EXPERTS: usize = 16;
     const TOKENS: usize = 5;
     const TOLERANCE: f32 = 1e-6;
+
+    // Vulkan's router kernel against the CPU's, every score and weight function, with and without the bias and clip
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn the_vulkan_router_routes_as_the_cpu_does() -> Result<()> {
+        let Ok(vk) = Device::new_vulkan(0) else {
+            return Ok(());
+        };
+        let logits: Vec<f32> = (0..TOKENS * EXPERTS)
+            .map(|i| ((i * 37 % 101) as f32 - 50.0) / 17.0)
+            .collect();
+        let logits = Tensor::from_vec(logits, (TOKENS, EXPERTS), &Device::Cpu)?;
+        let bias = Tensor::from_vec(
+            (0..EXPERTS)
+                .map(|e| e as f32 * 0.01 - 0.05)
+                .collect::<Vec<_>>(),
+            EXPERTS,
+            &Device::Cpu,
+        )?;
+        for score_function in [
+            MoeRouterScoreFunction::Raw,
+            MoeRouterScoreFunction::Softmax,
+            MoeRouterScoreFunction::Sigmoid,
+        ] {
+            for selected_weight in [
+                MoeRouterSelectedWeight::Score,
+                MoeRouterSelectedWeight::Softmax,
+                MoeRouterSelectedWeight::Sigmoid,
+            ] {
+                for (renormalize, clip, with_bias) in
+                    [(true, None, true), (false, Some((-1.5, 1.5)), false)]
+                {
+                    let config = MoeRouterTopKConfig {
+                        top_k: 4,
+                        score_function,
+                        selected_weight,
+                        renormalize,
+                        norm_min: 1e-20,
+                        output_scale: 2.5,
+                        logit_clip: clip,
+                    };
+                    let want =
+                        cpu_moe_router_topk(&logits, config, with_bias.then_some(&bias), None)?;
+                    let vbias = bias.to_device(&vk)?;
+                    let got = moe_router_topk(
+                        &logits.to_device(&vk)?,
+                        config,
+                        with_bias.then_some(&vbias),
+                        None,
+                    )?;
+                    assert_eq!(
+                        got.indices.to_vec2::<u32>()?,
+                        want.indices.to_vec2::<u32>()?,
+                        "{config:?}"
+                    );
+                    for (g, w) in got
+                        .values
+                        .flatten_all()?
+                        .to_vec1::<f32>()?
+                        .iter()
+                        .zip(want.values.flatten_all()?.to_vec1::<f32>()?)
+                    {
+                        assert!(
+                            (g - w).abs() <= 1e-5 * w.abs().max(1.0),
+                            "{config:?}: {g} vs {w}"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 
     // every score and weight function, with and without the bias, clip, renormalization and scales
     #[test]
