@@ -234,3 +234,33 @@ Estimate against what the card holds (desktop share taken off), `--pa-context-le
 A constant per model, not per slot; the kernel libraries are ~30 MB in all, so not code. Open: where the rest goes
 (the pool keeping load-time temporaries, library workspaces). Before the fold fix text-only Bolt planned resident only
 because 40 layers were missing from the sum.
+
+## Run 8 - 2026-11-03 12:32
+
+**Question:** where do the 180 - 380 MB the offload plan misses go?
+
+Free memory and the CUDA pool's used bytes logged through a Bolt load (`-f` picks up the adjacent mmproj, so these
+"text" runs held the tower too), against the planner's estimate at 126 slots:
+
+| stage | pool used | estimate |
+|---|---|---|
+| vision tower, before the decoder | 1,642 MB | ~1,720 MB (part of non-mapped) |
+| embeddings / output head | +1,088 MB (BF16 head) | |
+| 48 blocks | +9,514 MB | 9,511 MB |
+| hybrid cache | +163 MB | |
+| between the model and the KV sizing | **+1,142 MB** | **0** |
+
+Trimming the pool frees nothing; it holds live tensors. The +1,142 MB is the recurrent state pool: 7 lanes x 40 Mamba
+layers x 4.08 MB of f32 state (128 heads x 64 x 128). `NemotronHLoader::model_config` returned a plain
+`ModelConfigMetadata`: no recurrent state bytes (the trait default, 0) and paged KV on all 48 blocks. The built
+model's `paged_kv_config` had both right. The non-mapped estimate (~880 MB high: the output head at BF16) hid most of it.
+
+Qwen3.6-35B's "177 MB short" was my comparison, not the planner: nvidia-smi took in its KV cache and the CUDA context.
+Its loader reports its recurrent state; against the pool its estimate is ~190 MB high.
+
+**Fix:** one `recurrent_state_bytes` / `hybrid_paged_kv_config` in granite.rs that the built model and the loader's
+plan both use (the conv window counted in f32 at plan time).
+
+**Result**, `serve -f NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf` with no flags: 252 slots, 32,736-token context,
+21.2 GiB, image answered as before, decode 70 - 72 tok/s warm, prompt ~1.5 K tok/s. local_ci `--lint --tests --cuda`
+passes. Open: a failed load segfaults on exit after a run of CUDA_ERROR_DEINITIALIZED.
