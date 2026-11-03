@@ -406,6 +406,8 @@ impl Shared {
 struct Doorbell {
     layers: Mutex<Vec<Arc<Shared>>>,
     generation: AtomicUsize,
+    // the generation whose layers the thread holds: it has let go of every layer unregistered before it
+    held: AtomicUsize,
     // nanoseconds past `epoch` of the latest step start
     activity: AtomicU64,
     epoch: Instant,
@@ -417,6 +419,7 @@ fn doorbell() -> &'static Doorbell {
     DOORBELL.get_or_init(|| Doorbell {
         layers: Mutex::new(Vec::new()),
         generation: AtomicUsize::new(0),
+        held: AtomicUsize::new(0),
         activity: AtomicU64::new(0),
         epoch: Instant::now(),
         thread: OnceLock::new(),
@@ -445,12 +448,21 @@ impl Doorbell {
         offload_activity();
     }
 
+    // Returns once the thread holds the layer no more, so its last reference drops with the caller's, while CUDA is
+    // up: dropped on the thread instead, it can outlive a failed load's exit and free (or read) after the driver is gone
     fn unregister(&self, layer: &Arc<Shared>) {
         self.layers
             .lock()
             .expect("doorbell layers poisoned")
             .retain(|l| !Arc::ptr_eq(l, layer));
-        self.generation.fetch_add(1, Ordering::Release);
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let Some(thread) = self.thread.get() else {
+            return;
+        };
+        while self.held.load(Ordering::Acquire) < generation {
+            thread.unpark();
+            std::thread::yield_now();
+        }
     }
 
     fn run(&self) {
@@ -469,6 +481,7 @@ impl Doorbell {
                     .map(|l: &Arc<Shared>| Shared::word(&l.done, 0).load(Ordering::Acquire))
                     .collect();
                 seen = generation;
+                self.held.store(generation, Ordering::Release);
             }
             let mut rang = false;
             for (layer, answered) in layers.iter().zip(answered.iter_mut()) {
@@ -1297,6 +1310,38 @@ mod tests {
         assert!(
             relative_error(&actual, &expected)? < 1e-5,
             "the staged prompt path runs the same kernels"
+        );
+        Ok(())
+    }
+
+    // a dropped layer leaves nothing on the doorbell thread: its last reference goes with the drop, while CUDA is up,
+    // not up to a poll later on the thread, which can outlive a failed load's exit
+    #[test]
+    fn a_dropped_layer_is_released_by_the_drop() -> Result<()> {
+        crate::skip_without_cuda!();
+        let device = Device::new_cuda(0)?;
+        let cuda = device.as_cuda_device()?;
+        let ty = inference_quant::GgufType::Q4K;
+        let dims = [[EXPERTS, INTER, HIDDEN], [EXPERTS, HIDDEN, INTER]];
+        let bytes = [q4k_bytes(INTER, HIDDEN, 1)?, q4k_bytes(HIDDEN, INTER, 2)?];
+        let host = |p: usize| HostExpertStack::new(ty, dims[p], &bytes[p], cuda);
+        let offloaded = OffloadedExperts::new(
+            vec![host(0)?, host(1)?],
+            SLOTS,
+            TOPK,
+            cuda,
+            OffloadGate::SquaredRelu,
+        )?;
+        let shared = Arc::downgrade(&offloaded.shared);
+        // the thread picks the layer up first, as it does with any layer that served
+        let bell = doorbell();
+        while bell.held.load(Ordering::Acquire) < bell.generation.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        drop(offloaded);
+        assert!(
+            shared.upgrade().is_none(),
+            "the doorbell thread still holds the layer"
         );
         Ok(())
     }
