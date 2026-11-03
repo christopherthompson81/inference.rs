@@ -4,7 +4,9 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
-use inference_vulkan::{Context, HostBuffer, MAX_DIMS, Map, MapOp, Operand};
+use inference_vulkan::{
+    BlockType, Bound, Context, HostBuffer, MAX_DIMS, Map, MapOp, MatVec, Operand,
+};
 
 use crate::backend::{BackendDevice, BackendStorage};
 use crate::conv::{ParamsConv1D, ParamsConv2D, ParamsConvTranspose1D, ParamsConvTranspose2D};
@@ -40,6 +42,13 @@ impl VulkanDevice {
 
     fn buffer(&self, bytes: usize) -> Result<HostBuffer> {
         HostBuffer::new(&self.context, bytes.max(MIN_BUFFER_BYTES)).map_err(vk_err)
+    }
+
+    /// A buffer of `bytes`, which the device reads without an import's per-submit cost.
+    pub(crate) fn host_copy(&self, bytes: &[u8]) -> Result<Arc<HostBuffer>> {
+        let mut buffer = self.buffer(bytes.len())?;
+        buffer.as_bytes_mut()[..bytes.len()].copy_from_slice(bytes);
+        Ok(Arc::new(buffer))
     }
 
     fn storage_from_bytes(
@@ -285,6 +294,40 @@ impl VulkanStorage {
     fn native(&self, l: &Layout) -> bool {
         self.dtype == DType::F32 && l.shape().rank() <= MAX_DIMS
     }
+}
+
+/// `xs`'s rows of `k` (laid out by `l`, contiguous) times the `n x k` weight of `ty` blocks in `weights`, transposed,
+/// one matvec a row.
+pub(crate) fn quantized_mat_vec(
+    xs: &VulkanStorage,
+    l: &Layout,
+    weights: &Arc<HostBuffer>,
+    ty: BlockType,
+    n: usize,
+    k: usize,
+) -> Result<VulkanStorage> {
+    let rows = l.shape().elem_count() / k;
+    let out = xs.empty(rows * n, DType::F32)?;
+    let weights: Arc<dyn Bound> = weights.clone();
+    xs.device
+        .context
+        .record(|r| {
+            for row in 0..rows {
+                r.mat_vec(&MatVec {
+                    ty,
+                    weights: &weights,
+                    rows: n,
+                    cols: k,
+                    x: &xs.buffer,
+                    x_offset: l.start_offset() + row * k,
+                    y: &out.buffer,
+                    y_offset: row * n,
+                })?;
+            }
+            Ok(())
+        })
+        .map_err(vk_err)?;
+    Ok(out)
 }
 
 /// Runs a CPU kernel on the storages' copies, and gives back the Vulkan storage of its result.
@@ -713,8 +756,14 @@ mod tests {
 
     // the GPU's exp, tanh and the like round differently from the CPU's
     const TOLERANCE: f32 = 1e-5;
+    // a 2688-term dot product summed in another order
+    const DOT_TOLERANCE: f32 = 1e-3;
 
     fn assert_same(got: &Tensor, want: &Tensor) -> Result<()> {
+        assert_close(got, want, TOLERANCE)
+    }
+
+    fn assert_close(got: &Tensor, want: &Tensor, tolerance: f32) -> Result<()> {
         assert_eq!(got.dims(), want.dims());
         assert!(got.device().is_vulkan());
         let (got, want) = (
@@ -723,7 +772,7 @@ mod tests {
         );
         for (i, (g, w)) in got.iter().zip(&want).enumerate() {
             assert!(
-                (g - w).abs() <= TOLERANCE * w.abs().max(1.0),
+                (g - w).abs() <= tolerance * w.abs().max(1.0),
                 "{i}: {g} vs {w}"
             );
         }
@@ -786,6 +835,27 @@ mod tests {
                 .to_vec2::<f32>()?,
             a.to_vec2::<f32>()?
         );
+        Ok(())
+    }
+
+    // Q8_0 and Q5_0 weights on the Vulkan device take a decode step's and a verify step's rows on the GPU, against the
+    // dequantized weight in f32 (the CPU's kernel quantizes the activations too, so it is further off)
+    #[test]
+    fn vulkan_quantized_matmuls_match_the_dequantized_weight() -> Result<()> {
+        use crate::Module;
+        use crate::quantized::{GgmlDType, QMatMul, QTensor};
+        let Some(vk) = device() else { return Ok(()) };
+        let w = Tensor::randn(0f32, 1., (96, 2688), &Device::Cpu)?;
+        for dtype in [GgmlDType::Q8_0, GgmlDType::Q5_0] {
+            let weight = QTensor::quantize(&w.to_device(&vk)?, dtype)?;
+            let dense = weight.dequantize(&Device::Cpu)?;
+            let matmul = QMatMul::from_qtensor(weight)?;
+            for rows in [1usize, 3] {
+                let x = Tensor::randn(0f32, 1., (1, rows, 2688), &Device::Cpu)?;
+                let want = x.broadcast_matmul(&dense.t()?)?;
+                assert_close(&matmul.forward(&x.to_device(&vk)?)?, &want, DOT_TOLERANCE)?;
+            }
+        }
         Ok(())
     }
 

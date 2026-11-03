@@ -256,8 +256,10 @@ impl Storage {
                 let (storage, shape) = c.metal_fwd(storage, l)?;
                 Ok((Self::Metal(storage), shape))
             }
-            // custom ops have no Vulkan kernels yet: the CPU's runs on a copy
             Self::Vulkan(storage) => {
+                if let Some((out, shape)) = c.vulkan_fwd(storage, l)? {
+                    return Ok((Self::Vulkan(out), shape));
+                }
                 let (out, shape) = c.cpu_fwd(&storage.to_cpu_storage()?, l)?;
                 Ok((
                     Self::Vulkan(storage.device().storage_from_cpu_storage_owned(out)?),

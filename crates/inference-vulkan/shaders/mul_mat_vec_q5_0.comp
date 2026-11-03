@@ -1,0 +1,87 @@
+#version 450
+// y = W x for a Q5_0 W (`rows x cols`, rows of 22-byte blocks: an f16 scale, the 32 values' fifth bits, then their
+// low nibbles, value j in byte j % 16's low or high half), f32 x and y; a value is its 5 bits less 16.
+// Each workgroup takes `ROWS` rows; its threads stride over a row's blocks, then reduce through shared memory.
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer W { uint16_t w[]; };
+layout(std430, binding = 1) readonly buffer X { float x[]; };
+layout(std430, binding = 2) writeonly buffer Y { float y[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint rows;
+    uint cols;
+    // element offsets into the bound buffers: `w` in u16s, `x` and `y` in floats
+    uint w_base;
+    uint x_base;
+    uint y_base;
+    // workgroups per grid row, the grid's second dimension carrying what one dimension's limit cannot
+    uint groups_x;
+} pc;
+
+const uint THREADS = 64;
+const uint QK = 32;
+const uint BLOCK_U16 = 11;
+const float OFFSET = 16.0;
+const uint ROWS = 2;
+
+shared float partial[ROWS][THREADS];
+
+void main() {
+    uint row0 = (gl_WorkGroupID.y * pc.groups_x + gl_WorkGroupID.x) * ROWS;
+    uint tid = gl_LocalInvocationID.x;
+    uint blocks = pc.cols / QK;
+    float acc[ROWS];
+    for (uint r = 0; r < ROWS; r++) {
+        acc[r] = 0.0;
+    }
+    for (uint b = tid; b < blocks; b += THREADS) {
+        float xs[QK];
+        uint xb = pc.x_base + b * QK;
+        for (uint i = 0; i < QK; i++) {
+            xs[i] = x[xb + i];
+        }
+        for (uint r = 0; r < ROWS; r++) {
+            uint row = row0 + r;
+            if (row >= pc.rows) {
+                break;
+            }
+            uint base = pc.w_base + (row * blocks + b) * BLOCK_U16;
+            float d = unpackHalf2x16(uint(w[base])).x;
+            uint qh = uint(w[base + 1]) | (uint(w[base + 2]) << 16);
+            float s = 0.0;
+            for (uint k = 0; k < QK / 4; k++) {
+                // bytes 2k and 2k + 1 of the nibbles: values 2k, 2k + 1 below, 2k + 16, 2k + 17 above
+                uint v = uint(w[base + 3 + k]);
+                uint j = 2 * k;
+                float v0 = float((v & 0xfu) | (((qh >> j) & 1u) << 4)) - OFFSET;
+                float v1 = float(((v >> 8) & 0xfu) | (((qh >> (j + 1)) & 1u) << 4)) - OFFSET;
+                float v16 = float(((v >> 4) & 0xfu) | (((qh >> (j + 16)) & 1u) << 4)) - OFFSET;
+                float v17 = float(((v >> 12) & 0xfu) | (((qh >> (j + 17)) & 1u) << 4)) - OFFSET;
+                s += v0 * xs[j] + v1 * xs[j + 1] + v16 * xs[j + 16] + v17 * xs[j + 17];
+            }
+            acc[r] += d * s;
+        }
+    }
+    for (uint r = 0; r < ROWS; r++) {
+        partial[r][tid] = acc[r];
+    }
+    barrier();
+    for (uint stride = THREADS / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            for (uint r = 0; r < ROWS; r++) {
+                partial[r][tid] += partial[r][tid + stride];
+            }
+        }
+        barrier();
+    }
+    if (tid == 0) {
+        for (uint r = 0; r < ROWS; r++) {
+            if (row0 + r < pc.rows) {
+                y[pc.y_base + row0 + r] = partial[r][0];
+            }
+        }
+    }
+}

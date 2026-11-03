@@ -87,10 +87,10 @@ impl Device {
                 let storage = dtype.cpu_zeros(elem_count);
                 Ok(QStorage::Cpu(storage))
             }
-            Device::Vulkan(device) => Ok(QStorage::Vulkan(QVulkanStorage {
-                blocks: dtype.cpu_zeros(elem_count),
-                device: device.clone(),
-            })),
+            Device::Vulkan(device) => Ok(QStorage::Vulkan(QVulkanStorage::new(
+                dtype.cpu_zeros(elem_count),
+                device,
+            ))),
             Device::Metal(metal) => {
                 let storage = metal::QMetalStorage::zeros(metal, elem_count, dtype)?;
                 Ok(QStorage::Metal(storage))
@@ -110,19 +110,72 @@ pub enum QStorage {
     Vulkan(QVulkanStorage),
 }
 
-/// A Vulkan device's quantized weight: its blocks in host memory, which the CPU's kernels read on the activations'
-/// host-visible storage until Vulkan has quantized kernels of its own.
+/// A Vulkan device's quantized weight: its blocks in host memory for the CPU's kernels, and a copy in memory the driver
+/// allocated for Vulkan's, made on first use (importing the blocks instead would cost every later submit the import's
+/// page validation, ~0.8 us a MB of everything imported).
 pub struct QVulkanStorage {
     blocks: Box<dyn QuantizedType>,
     device: crate::VulkanDevice,
+    #[cfg(feature = "vulkan")]
+    gpu: std::sync::OnceLock<std::sync::Arc<inference_vulkan::HostBuffer>>,
 }
+
+/// The most activation rows a Vulkan matvec takes, one dispatch a row; a prompt's run the CPU's tiled kernels.
+#[cfg(feature = "vulkan")]
+const VULKAN_MATVEC_MAX_ROWS: usize = 8;
 
 impl QVulkanStorage {
     pub(crate) fn new(blocks: Box<dyn QuantizedType>, device: &crate::VulkanDevice) -> Self {
         Self {
             blocks,
             device: device.clone(),
+            #[cfg(feature = "vulkan")]
+            gpu: std::sync::OnceLock::new(),
         }
+    }
+
+    // `xs` times this `shape` weight transposed, where a Vulkan kernel takes the type, dtype and row count
+    #[cfg(feature = "vulkan")]
+    fn mat_vec(
+        &self,
+        shape: &Shape,
+        xs: &crate::VulkanStorage,
+        l: &crate::Layout,
+    ) -> Result<Option<(crate::VulkanStorage, Shape)>> {
+        use crate::backend::BackendStorage;
+        let ty = match self.blocks.dtype() {
+            GgmlDType::Q8_0 => inference_vulkan::BlockType::Q8_0,
+            GgmlDType::Q5_0 => inference_vulkan::BlockType::Q5_0,
+            _ => return Ok(None),
+        };
+        let (n, k) = shape.dims2()?;
+        let dims = l.shape().dims();
+        let rows = l.shape().elem_count() / k.max(1);
+        if xs.dtype() != DType::F32
+            || !l.is_contiguous()
+            || dims.last() != Some(&k)
+            || rows > VULKAN_MATVEC_MAX_ROWS
+        {
+            return Ok(None);
+        }
+        let weights = match self.gpu.get() {
+            Some(gpu) => gpu.clone(),
+            None => {
+                // SAFETY: the pointer and size are the blocks' own
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        self.blocks.as_ptr(),
+                        self.blocks.storage_size_in_bytes(),
+                    )
+                };
+                let gpu = self.device.host_copy(bytes)?;
+                self.gpu.get_or_init(|| gpu).clone()
+            }
+        };
+        let out = crate::vulkan_backend::quantized_mat_vec(xs, l, &weights, ty, n, k)?;
+        let mut out_dims = dims.to_vec();
+        *out_dims.last_mut().expect("dims hold k") = n;
+        Ok(Some((out, Shape::from(out_dims))))
     }
 }
 
@@ -131,10 +184,10 @@ impl QStorage {
         let data: &[u8] = &data;
         match device {
             Device::Cpu => Ok(Self::Cpu(dtype.from_data(Cow::Borrowed(data)))),
-            Device::Vulkan(device) => Ok(Self::Vulkan(QVulkanStorage {
-                blocks: dtype.from_data(Cow::Borrowed(data)),
-                device: device.clone(),
-            })),
+            Device::Vulkan(device) => Ok(Self::Vulkan(QVulkanStorage::new(
+                dtype.from_data(Cow::Borrowed(data)),
+                device,
+            ))),
             Device::Metal(d) => match dtype {
                 GgmlDType::F32 => metal::load_quantized(d, as_t_slice::<f32>(data)),
                 GgmlDType::F16 => metal::load_quantized(d, as_t_slice::<f16>(data)),
@@ -1279,6 +1332,19 @@ impl crate::CustomOp1 for QTensor {
             }
             _ => crate::bail!("Expected f32/f16/bf16"),
         }
+    }
+
+    fn vulkan_fwd(
+        &self,
+        storage: &crate::VulkanStorage,
+        layout: &crate::Layout,
+    ) -> Result<Option<(crate::VulkanStorage, Shape)>> {
+        #[cfg(feature = "vulkan")]
+        if let QStorage::Vulkan(weight) = &self.storage {
+            return weight.mat_vec(&self.shape, storage, layout);
+        }
+        let _ = (storage, layout);
+        Ok(None)
     }
 
     fn metal_fwd(

@@ -64,6 +64,42 @@ fn capacity(len: u64) -> u64 {
     }
 }
 
+/// Memory a kernel binds and reads from `offset`: a host buffer, or an import.
+pub trait Bound: std::any::Any + Send + Sync {
+    fn vk_buffer(&self) -> vk::Buffer;
+    fn offset(&self) -> u64;
+    /// The bytes from `offset` it holds.
+    fn bytes(&self) -> usize;
+}
+
+impl Bound for HostBuffer {
+    fn vk_buffer(&self) -> vk::Buffer {
+        self.buffer
+    }
+
+    fn offset(&self) -> u64 {
+        0
+    }
+
+    fn bytes(&self) -> usize {
+        self.len
+    }
+}
+
+impl Bound for ImportedMemory {
+    fn vk_buffer(&self) -> vk::Buffer {
+        self.buffer
+    }
+
+    fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    fn bytes(&self) -> usize {
+        self.len
+    }
+}
+
 /// Memory the device allocated in host RAM, mapped for the CPU's reads and writes as well (cached when the device
 /// offers it: an iGPU reads cached host pages as fast as uncached ones).
 pub struct HostBuffer {
@@ -215,7 +251,8 @@ impl BufferPool {
 }
 
 /// A host allocation the device reads in place: its range rounded out to the import alignment, bound as one buffer,
-/// with `offset` the allocation's first byte within it.
+/// with `offset` the allocation's first byte within it. Every submit while it lives validates its pages (~0.8 us a MB on
+/// RADV), so it suits one large buffer streamed in long submits, not a model's weights.
 pub struct ImportedMemory {
     context: Arc<Context>,
     pub(crate) buffer: vk::Buffer,
