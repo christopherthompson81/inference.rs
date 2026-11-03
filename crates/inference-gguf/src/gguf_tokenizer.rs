@@ -852,9 +852,29 @@ fn bpe_tokenizer(p: &PropsGGUF) -> Result<(Tokenizer, TokenizerKind)> {
     tokenizer.with_decoder(Some(decoders::byte_level::ByteLevel::new(
         false, false, false,
     )));
-    tokenizer.with_post_processor(Some(processors::byte_level::ByteLevel::new(
-        false, false, false,
-    )));
+    let byte_level = processors::PostProcessorWrapper::ByteLevel(
+        processors::byte_level::ByteLevel::new(false, false, false),
+    );
+    // `<|begin_of_text|> $A` as a Llama 3 tokenizer.json has it, when the GGUF asks for its BOS
+    let post_processor = match bos.filter(|_| p.add_bos) {
+        Some(bos) => {
+            let bos_token = p.tokens[bos as usize].to_string();
+            let template = processors::template::TemplateProcessing::builder()
+                .try_single(format!("{bos_token}:0 $A:0"))
+                .map_err(anyhow::Error::msg)?
+                .try_pair(format!("{bos_token}:0 $A:0 $B:1"))
+                .map_err(anyhow::Error::msg)?
+                .special_tokens(vec![(bos_token, bos)])
+                .build()
+                .map_err(anyhow::Error::msg)?;
+            processors::PostProcessorWrapper::Sequence(processors::sequence::Sequence::new(vec![
+                byte_level,
+                processors::PostProcessorWrapper::Template(template),
+            ]))
+        }
+        None => byte_level,
+    };
+    tokenizer.with_post_processor(Some(post_processor));
 
     for v in [bos, Some(eos), unk].iter().flatten() {
         let tk = p.tokens[*v as usize].clone();
@@ -1672,6 +1692,26 @@ mod tests {
             .encode_fast("ab", false)
             .map_err(anyhow::Error::msg)?;
         assert_eq!(encoding.get_ids(), &[1, 2]);
+        Ok(())
+    }
+
+    // llama.cpp prepends a BPE GGUF's BOS when `add_bos_token` says so (Llama 3, Nemotron-H); special tokens only
+    #[test]
+    fn a_bpe_gguf_adds_its_bos_when_it_asks() -> Result<()> {
+        let mut props = test_bpe_props(Some("llama3"));
+        props.tokens.push("<s>".to_string());
+        props.bos = Some(4);
+        let ids = |props: &PropsGGUF, add_special| -> Result<Vec<u32>> {
+            let (tokenizer, _) = bpe_tokenizer(props)?;
+            let encoding = tokenizer
+                .encode_fast("ab", add_special)
+                .map_err(anyhow::Error::msg)?;
+            Ok(encoding.get_ids().to_vec())
+        };
+        assert_eq!(ids(&props, true)?, [3]);
+        props.add_bos = true;
+        assert_eq!(ids(&props, true)?, [4, 3]);
+        assert_eq!(ids(&props, false)?, [3]);
         Ok(())
     }
 
