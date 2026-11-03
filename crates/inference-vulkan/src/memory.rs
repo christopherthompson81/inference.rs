@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use ash::vk;
@@ -6,6 +7,62 @@ use crate::{Context, Error, Result};
 
 /// A storage binding past this reads zeros, so no buffer here is larger.
 pub(crate) const MAX_BINDING_BYTES: u64 = 4 << 30;
+// Buffers up to this size are pooled in power-of-two classes from the smallest; larger ones are allocated to size and
+// freed when dropped
+const MIN_POOLED_BYTES: u64 = 256;
+const MAX_POOLED_BYTES: u64 = 256 << 20;
+// The most idle memory the pool holds before a dropped buffer is freed instead
+const MAX_POOL_BYTES: u64 = 2 << 30;
+
+/// Host buffers nothing references any longer, by capacity, for new ones to reuse: a Vulkan allocation costs tens of
+/// microseconds, and a model step allocates hundreds of short-lived tensors.
+#[derive(Default)]
+pub(crate) struct BufferPool {
+    free: HashMap<u64, Vec<Allocation>>,
+    bytes: u64,
+}
+
+// a buffer, its memory and the memory's mapping
+struct Allocation {
+    buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
+    ptr: *mut u8,
+}
+
+// SAFETY: the handles and mapping are only used by whoever takes the allocation out of the pool's lock
+unsafe impl Send for Allocation {}
+
+impl BufferPool {
+    /// # Safety
+    /// No submit may still use the buffers.
+    pub(crate) unsafe fn destroy(&mut self, device: &ash::Device) {
+        for allocation in self.free.drain().flat_map(|(_, allocations)| allocations) {
+            // SAFETY: the caller's contract
+            unsafe { allocation.free(device) };
+        }
+        self.bytes = 0;
+    }
+}
+
+impl Allocation {
+    unsafe fn free(self, device: &ash::Device) {
+        // SAFETY: the caller's contract that the GPU no longer uses it
+        unsafe {
+            device.unmap_memory(self.memory);
+            device.destroy_buffer(self.buffer, None);
+            device.free_memory(self.memory, None);
+        }
+    }
+}
+
+// the capacity a buffer of `len` bytes is allocated with
+fn capacity(len: u64) -> u64 {
+    if len > MAX_POOLED_BYTES {
+        len
+    } else {
+        len.next_power_of_two().max(MIN_POOLED_BYTES)
+    }
+}
 
 /// Memory the device allocated in host RAM, mapped for the CPU's reads and writes as well (cached when the device
 /// offers it: an iGPU reads cached host pages as fast as uncached ones).
@@ -15,6 +72,7 @@ pub struct HostBuffer {
     memory: vk::DeviceMemory,
     ptr: *mut u8,
     len: usize,
+    capacity: u64,
 }
 
 // SAFETY: the mapping is plain memory, and the Vulkan handles are only used through the context's synchronized calls
@@ -26,9 +84,30 @@ impl HostBuffer {
         if len == 0 || len as u64 > MAX_BINDING_BYTES {
             return Err(Error::Invalid(format!("a host buffer of {len} bytes")));
         }
+        let capacity = capacity(len as u64);
+        let pooled = context
+            .pool
+            .lock()
+            .expect("vulkan pool poisoned")
+            .take(capacity);
+        if let Some(Allocation {
+            buffer,
+            memory,
+            ptr,
+        }) = pooled
+        {
+            return Ok(Self {
+                context: context.clone(),
+                buffer,
+                memory,
+                ptr,
+                len,
+                capacity,
+            });
+        }
         let device = &context.device;
         let info = vk::BufferCreateInfo::default()
-            .size(len as u64)
+            .size(capacity)
             .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
         // SAFETY: the create info outlives the call
@@ -58,6 +137,7 @@ impl HostBuffer {
                 memory,
                 ptr: ptr.cast(),
                 len,
+                capacity,
             })
         }
     }
@@ -96,13 +176,41 @@ impl HostBuffer {
 }
 
 impl Drop for HostBuffer {
+    // a recorded command retains what it uses, so nothing submitted reads a buffer once it drops
     fn drop(&mut self) {
-        // SAFETY: every submit is waited on, so the GPU no longer uses the buffer
-        unsafe {
-            self.context.device.unmap_memory(self.memory);
-            self.context.device.destroy_buffer(self.buffer, None);
-            self.context.device.free_memory(self.memory, None);
+        let allocation = Allocation {
+            buffer: self.buffer,
+            memory: self.memory,
+            ptr: self.ptr,
+        };
+        let refused = self
+            .context
+            .pool
+            .lock()
+            .expect("vulkan pool poisoned")
+            .give(self.capacity, allocation);
+        if let Some(allocation) = refused {
+            // SAFETY: see above
+            unsafe { allocation.free(&self.context.device) };
         }
+    }
+}
+
+impl BufferPool {
+    fn take(&mut self, capacity: u64) -> Option<Allocation> {
+        let allocation = self.free.get_mut(&capacity)?.pop()?;
+        self.bytes -= capacity;
+        Some(allocation)
+    }
+
+    // keeps `allocation` for reuse, or hands it back to be freed when it is not a pooled size or the pool is full
+    fn give(&mut self, capacity: u64, allocation: Allocation) -> Option<Allocation> {
+        if capacity > MAX_POOLED_BYTES || self.bytes + capacity > MAX_POOL_BYTES {
+            return Some(allocation);
+        }
+        self.bytes += capacity;
+        self.free.entry(capacity).or_default().push(allocation);
+        None
     }
 }
 

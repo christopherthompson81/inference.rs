@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use ash::vk;
 
 use crate::kernels::Kernels;
+use crate::memory::BufferPool;
 use crate::stream::{DISPATCHES_PER_SUBMIT, Retained, Stream};
 use crate::{Error, Result};
 
@@ -25,6 +26,7 @@ pub struct Context {
     name: String,
     queue: vk::Queue,
     stream: Mutex<Stream>,
+    pub(crate) pool: Mutex<BufferPool>,
     pub(crate) kernels: Kernels,
 }
 
@@ -106,6 +108,7 @@ impl Context {
             name,
             queue,
             stream: Mutex::new(stream),
+            pool: Mutex::default(),
             kernels,
         }))
     }
@@ -173,6 +176,10 @@ impl Drop for Context {
             let _ = self.device.device_wait_idle();
             self.kernels.destroy(&self.device);
             stream.destroy(&self.device);
+            self.pool
+                .get_mut()
+                .expect("vulkan pool poisoned")
+                .destroy(&self.device);
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
         }

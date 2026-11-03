@@ -66,3 +66,10 @@ was the only difference, which the quantized checkpoint amplified to 0.015).
 
 **Result (Lightning recipe A, 64-token prompt, 32 decoded):** prefill 23.3 tok/s, decode 3.0 tok/s (332 ms a token):
 ~0.5 ms an op of fallback (a synchronize, two copies, a fresh Vulkan allocation), the baseline the kernels replace.
+
+### Run 3 - 2026-11-03 ~21:10
+
+**Change:** host buffers pool by capacity (powers of two from 256 B to 256 MiB, up to 2 GiB idle): a dropped buffer
+returns to its class, which the stream's retention makes safe, and a new one reuses it rather than allocating.
+
+**Result (as Run 2):** prefill 23.3 -> 61.2 tok/s, decode 3.0 -> 8.1 tok/s (124 ms a token).
