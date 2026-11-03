@@ -63,6 +63,9 @@ const LOGPROB_TOLERANCE: f32 = 1e-4;
 const CUDA_LOGPROB_TOLERANCE: f32 = 1e-3;
 // Vulkan's ops sum in other orders than the CPU's (its attention, and its kernels as they land), as CUDA's do
 const VULKAN_LOGPROB_TOLERANCE: f32 = 1e-3;
+// an ISQ checkpoint's prompt reaches lm_head as one row, which Vulkan's matvec takes with f32 activations, where a
+// whole-prompt score runs the CPU's kernel on int8 activations (0.013 apart on this checkpoint)
+const VULKAN_QUANTIZED_LOGPROB_TOLERANCE: f32 = 0.05;
 // BF16 with Q8_0 experts: decode and one prefill round differently (0.023 on this checkpoint), where a replay reading
 // stale state is off by nats
 const BF16_LOGPROB_TOLERANCE: f32 = 0.1;
@@ -411,6 +414,8 @@ enum Target {
     CpuPaged,
     Cuda,
     CudaGraphs,
+    Vulkan,
+    VulkanQuantized,
 }
 
 impl Target {
@@ -424,14 +429,21 @@ impl Target {
                 head_dim: HEAD_DIM,
                 latent: Some(LATENT_WIDTH),
             },
-            Self::Cpu | Self::CpuPaged | Self::Cuda => Shape::BASE,
+            Self::Cpu | Self::CpuPaged | Self::Cuda | Self::Vulkan | Self::VulkanQuantized => {
+                Shape::BASE
+            }
         }
     }
 
     fn dtype(self) -> ModelDType {
         match self {
             Self::CudaGraphs => ModelDType::BF16,
-            Self::Cpu | Self::CpuLatent | Self::CpuPaged | Self::Cuda => ModelDType::F32,
+            Self::Cpu
+            | Self::CpuLatent
+            | Self::CpuPaged
+            | Self::Cuda
+            | Self::Vulkan
+            | Self::VulkanQuantized => ModelDType::F32,
         }
     }
 
@@ -439,6 +451,8 @@ impl Target {
         match self {
             Self::Cpu | Self::CpuLatent | Self::CpuPaged => LOGPROB_TOLERANCE,
             Self::Cuda => CUDA_LOGPROB_TOLERANCE,
+            Self::Vulkan => VULKAN_LOGPROB_TOLERANCE,
+            Self::VulkanQuantized => VULKAN_QUANTIZED_LOGPROB_TOLERANCE,
             Self::CudaGraphs => BF16_LOGPROB_TOLERANCE,
         }
     }
@@ -482,6 +496,24 @@ async fn a_long_prompt_scores_on_cuda_as_on_the_cpu() -> anyhow::Result<()> {
                 "position {position}: CPU {expected}, CUDA {actual}"
             );
         }
+    }
+    Ok(())
+}
+
+// Vulkan's decode steps (its Mamba conv and scan kernels on the state pools, its matvecs on Q8_0 weights) score as the
+// model's own prefill does
+#[tokio::test]
+async fn a_vulkan_decode_scores_as_one_prefill() -> anyhow::Result<()> {
+    if !cfg!(feature = "vulkan") || Device::new_vulkan(0).is_err() {
+        return Ok(());
+    }
+    for (isq, target) in [
+        (None, Target::Vulkan),
+        (Some(IsqType::Q8_0), Target::VulkanQuantized),
+    ] {
+        decode_scores_as_prefill(isq, "say something long", target)
+            .await
+            .map_err(|err| err.context(format!("{isq:?}")))?;
     }
     Ok(())
 }
@@ -564,6 +596,7 @@ async fn decode_scores_as_prefill(
                 builder.with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
         }
         Target::Cuda => {}
+        Target::Vulkan | Target::VulkanQuantized => builder = builder.with_device("vulkan:0"),
     }
     if let Some(isq) = isq {
         builder = builder.with_isq(isq);

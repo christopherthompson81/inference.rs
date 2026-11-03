@@ -14,69 +14,42 @@ const MAX_GROUPS_X: usize = 65_535;
 const MATVEC_PUSH_BYTES: u32 = 6 * 4;
 const MATVEC_BINDINGS: usize = 3;
 
-/// Every kernel's pipeline on one device.
-pub(crate) struct Kernels {
-    mat_vec_q8_0: Pipeline,
-    mat_vec_q5_0: Pipeline,
-    pub(crate) map_f32: Pipeline,
-    pub(crate) copy_b32: Pipeline,
-    pub(crate) rows_f32: Pipeline,
-    pub(crate) index_b32: Pipeline,
-    pub(crate) matmul_f32: Pipeline,
+/// Every kernel's pipeline on one device: its field, its embedded SPIR-V, its storage buffers and push-constant bytes.
+macro_rules! kernels {
+    ($($name:ident: $spirv:ident, $bindings:expr, $push:expr;)*) => {
+        pub(crate) struct Kernels {
+            $(pub(crate) $name: Pipeline,)*
+        }
+
+        impl Kernels {
+            pub(crate) fn new(device: &ash::Device) -> Result<Self> {
+                Ok(Self {
+                    $($name: Pipeline::new(device, shaders::$spirv, $bindings, $push)?,)*
+                })
+            }
+
+            /// # Safety
+            /// No submit may still use the pipelines.
+            pub(crate) unsafe fn destroy(&self, device: &ash::Device) {
+                // SAFETY: the caller's contract
+                unsafe {
+                    $(self.$name.destroy(device);)*
+                }
+            }
+        }
+    };
 }
 
-impl Kernels {
-    pub(crate) fn new(device: &ash::Device) -> Result<Self> {
-        Ok(Self {
-            mat_vec_q8_0: Pipeline::new(
-                device,
-                shaders::MUL_MAT_VEC_Q8_0,
-                MATVEC_BINDINGS,
-                MATVEC_PUSH_BYTES,
-            )?,
-            mat_vec_q5_0: Pipeline::new(
-                device,
-                shaders::MUL_MAT_VEC_Q5_0,
-                MATVEC_BINDINGS,
-                MATVEC_PUSH_BYTES,
-            )?,
-            map_f32: Pipeline::new(device, shaders::MAP_F32, MAP_BINDINGS, MAP_PUSH_BYTES)?,
-            copy_b32: Pipeline::new(device, shaders::COPY_B32, MAP_BINDINGS, MAP_PUSH_BYTES)?,
-            rows_f32: Pipeline::new(
-                device,
-                shaders::ROWS_F32,
-                ops::BINDINGS,
-                ops::ROWS_PUSH_BYTES,
-            )?,
-            index_b32: Pipeline::new(
-                device,
-                shaders::INDEX_B32,
-                ops::BINDINGS,
-                ops::INDEX_PUSH_BYTES,
-            )?,
-            matmul_f32: Pipeline::new(
-                device,
-                shaders::MATMUL_F32,
-                ops::BINDINGS,
-                ops::MATMUL_PUSH_BYTES,
-            )?,
-        })
-    }
-
-    /// # Safety
-    /// No submit may still use the pipelines.
-    pub(crate) unsafe fn destroy(&self, device: &ash::Device) {
-        // SAFETY: the caller's contract
-        unsafe {
-            self.mat_vec_q8_0.destroy(device);
-            self.mat_vec_q5_0.destroy(device);
-            self.map_f32.destroy(device);
-            self.copy_b32.destroy(device);
-            self.rows_f32.destroy(device);
-            self.index_b32.destroy(device);
-            self.matmul_f32.destroy(device);
-        }
-    }
+kernels! {
+    mat_vec_q8_0: MUL_MAT_VEC_Q8_0, MATVEC_BINDINGS, MATVEC_PUSH_BYTES;
+    mat_vec_q5_0: MUL_MAT_VEC_Q5_0, MATVEC_BINDINGS, MATVEC_PUSH_BYTES;
+    map_f32: MAP_F32, MAP_BINDINGS, MAP_PUSH_BYTES;
+    copy_b32: COPY_B32, MAP_BINDINGS, MAP_PUSH_BYTES;
+    rows_f32: ROWS_F32, ops::BINDINGS, ops::ROWS_PUSH_BYTES;
+    index_b32: INDEX_B32, ops::BINDINGS, ops::INDEX_PUSH_BYTES;
+    matmul_f32: MATMUL_F32, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
+    ssm_conv_step: SSM_CONV_STEP, ops::CONV_STEP_BINDINGS, ops::CONV_STEP_PUSH_BYTES;
+    ssm_scan_step: SSM_SCAN_STEP, ops::SCAN_STEP_BINDINGS, ops::SCAN_STEP_PUSH_BYTES;
 }
 
 /// A GGUF weight's block format the matvec kernels read.

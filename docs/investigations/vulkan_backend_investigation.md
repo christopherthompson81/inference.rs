@@ -114,3 +114,13 @@ gather over 32-bit words), `matmul_f32` (batched, every operand strided) and a s
 
 **Result (as Run 2):** prefill 45.6 -> 82.5 tok/s, decode 7.1 -> 6.8 tok/s: what still syncs a decode step are the
 model's CPU branches (the experts, the router's sort, Mamba's conv and scan), which read their inputs back each layer.
+
+### Run 7 - 2026-11-04 ~00:40
+
+**Change:** `ssm_conv_step` and `ssm_scan_step` kernels update Mamba's conv and state pools in place at the batch's
+slot rows, which stay on the GPU (the CPU kernels read them back to the host); granite takes them for a decode step on
+Vulkan. `nemotron_h_tiny::a_vulkan_decode_scores_as_one_prefill` checks a Vulkan decode against the model's own
+prefill, plain (1e-3) and with Q8_0 weights (0.05: the prompt's last row reaches `lm_head` alone, through Vulkan's
+f32-activation matvec, where a whole-prompt score runs the CPU's int8-activation kernel).
+
+**Result (as Run 2):** decode 6.8 -> 8.9 tok/s (112 ms a token), prefill 81 tok/s.

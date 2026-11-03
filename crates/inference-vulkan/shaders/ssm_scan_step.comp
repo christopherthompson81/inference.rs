@@ -1,0 +1,64 @@
+#version 450
+// One decode step of Mamba-2's selective scan on a state pool, in place: batch row b advances the pool's row slots[b]
+// (pool f32 (rows, heads, head_dim, state)): dt = clamp(softplus(dt + dt_bias)), state = state * exp(dt * a) + dt * x * B,
+// y = state . C + d * x. A thread a (b, head, p) state row; a slot past i32::MAX is a padding row scoring 0.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer Dt { float dt[]; };
+layout(std430, binding = 2) readonly buffer A { float a[]; };
+layout(std430, binding = 3) readonly buffer B { float bm[]; };
+layout(std430, binding = 4) readonly buffer C { float cm[]; };
+layout(std430, binding = 5) readonly buffer D { float d[]; };
+layout(std430, binding = 6) readonly buffer DtBias { float dt_bias[]; };
+layout(std430, binding = 7) buffer Pool { float pool[]; };
+layout(std430, binding = 8) readonly buffer Slots { uint slots[]; };
+layout(std430, binding = 9) writeonly buffer Y { float y[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint heads;
+    uint head_dim;
+    uint groups;
+    uint state;
+    float dt_min;
+    float dt_max;
+    uint pool_off;
+    uint slots_off;
+    uint x_off;
+    uint dt_off;
+    uint b_off;
+    uint c_off;
+} pc;
+
+const uint PAD_SLOT = 0x7fffffffu;
+
+void main() {
+    uint total = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint e = gl_GlobalInvocationID.x; e < pc.batch * pc.heads * pc.head_dim; e += total) {
+        uint p = e % pc.head_dim;
+        uint h = (e / pc.head_dim) % pc.heads;
+        uint b = e / (pc.head_dim * pc.heads);
+        uint slot = slots[pc.slots_off + b];
+        if (slot > PAD_SLOT) {
+            y[e] = 0.0;
+            continue;
+        }
+        float raw = dt[pc.dt_off + b * pc.heads + h] + dt_bias[h];
+        // softplus, as the CPU's ln(1 + e^x)
+        float dt_t = clamp(log(1.0 + exp(raw)), pc.dt_min, pc.dt_max);
+        float decay = exp(dt_t * a[h]);
+        float xv = x[pc.x_off + e];
+        float dtx = dt_t * xv;
+        uint g = (b * pc.groups + h / (pc.heads / pc.groups)) * pc.state;
+        uint row = pc.pool_off + ((slot * pc.heads + h) * pc.head_dim + p) * pc.state;
+        float acc = 0.0;
+        for (uint n = 0; n < pc.state; n++) {
+            float s = pool[row + n] * decay + dtx * bm[pc.b_off + g + n];
+            pool[row + n] = s;
+            acc += s * cm[pc.c_off + g + n];
+        }
+        y[e] = acc + d[h] * xv;
+    }
+}

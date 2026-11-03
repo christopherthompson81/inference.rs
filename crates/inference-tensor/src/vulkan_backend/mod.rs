@@ -12,7 +12,7 @@ use inference_vulkan::{
 use crate::backend::{BackendDevice, BackendStorage};
 use crate::conv::{ParamsConv1D, ParamsConv2D, ParamsConvTranspose1D, ParamsConvTranspose2D};
 use crate::op::{BinaryOpT, CmpOp, ReduceOp, UnaryOpT};
-use crate::{CpuStorage, DType, DeviceLocation, Layout, Result, Shape, WithDType};
+use crate::{CpuStorage, DType, DeviceLocation, Layout, Result, Shape, Tensor, WithDType};
 
 // a zero-element tensor still gets a buffer
 const MIN_BUFFER_BYTES: usize = 16;
@@ -399,6 +399,127 @@ pub(crate) fn sigmoid(
         storage.map_f32(MapOp::Sigmoid, l, None, [0.0; 2])?,
         l.shape().clone(),
     )))
+}
+
+// a contiguous f32 or u32 Vulkan tensor's buffer and first element
+fn bound(t: &Tensor, dtype: DType) -> Result<(Arc<HostBuffer>, usize)> {
+    if t.dtype() != dtype || !t.is_contiguous() {
+        crate::bail!(
+            "a Vulkan kernel takes contiguous {dtype:?}, got {:?} {:?}",
+            t.dtype(),
+            t.layout()
+        );
+    }
+    match &*t.storage() {
+        crate::Storage::Vulkan(s) => Ok((s.buffer.clone(), t.layout().start_offset())),
+        _ => crate::bail!("a Vulkan kernel's operand is on {:?}", t.device()),
+    }
+}
+
+fn tensor_of(storage: VulkanStorage, shape: impl Into<Shape>) -> Tensor {
+    crate::tensor::from_storage(
+        crate::Storage::Vulkan(storage),
+        shape,
+        crate::op::BackpropOp::none(),
+        false,
+    )
+}
+
+pub(crate) fn ssm_scan_step(step: &crate::vulkan::ScanStep<'_>) -> Result<Tensor> {
+    let (batch, _, heads, head_dim) = step.x.dims4()?;
+    let (_, _, groups, state) = step.b.dims4()?;
+    let f32 = DType::F32;
+    let (x, dt, b, c) = (
+        bound(step.x, f32)?,
+        bound(step.dt, f32)?,
+        bound(step.b, f32)?,
+        bound(step.c, f32)?,
+    );
+    let (a, d, dt_bias) = (
+        bound(step.a, f32)?,
+        bound(step.d, f32)?,
+        bound(step.dt_bias, f32)?,
+    );
+    let (pool, slots) = (bound(step.pool, f32)?, bound(step.slots, DType::U32)?);
+    if [a.1, d.1, dt_bias.1] != [0; 3] {
+        crate::bail!("the scan step reads a, d and dt_bias from their buffers' start");
+    }
+    let device = step.x.device().as_vulkan_device()?.clone();
+    let count = batch * heads * head_dim;
+    let out = VulkanStorage {
+        buffer: Arc::new(device.buffer(count * 4)?),
+        device: device.clone(),
+        count,
+        dtype: f32,
+    };
+    device
+        .context
+        .record(|r| {
+            r.ssm_scan_step(&inference_vulkan::ScanStep {
+                batch,
+                heads,
+                head_dim,
+                groups,
+                state,
+                dt_range: step.dt_range,
+                x: (&x.0, x.1),
+                dt: (&dt.0, dt.1),
+                a: &a.0,
+                b: (&b.0, b.1),
+                c: (&c.0, c.1),
+                d: &d.0,
+                dt_bias: &dt_bias.0,
+                pool: (&pool.0, pool.1),
+                slots: (&slots.0, slots.1),
+                out: &out.buffer,
+            })
+        })
+        .map_err(vk_err)?;
+    Ok(tensor_of(out, (batch, 1, heads, head_dim)))
+}
+
+pub(crate) fn ssm_conv_step(
+    x: &Tensor,
+    weight: &Tensor,
+    bias: Option<&Tensor>,
+    pool: &Tensor,
+    slots: &Tensor,
+) -> Result<Tensor> {
+    let (batch, channels) = x.dims2()?;
+    let kernel = weight.dim(1)?;
+    let f32 = DType::F32;
+    let (xb, wb, pb, sb) = (
+        bound(x, f32)?,
+        bound(weight, f32)?,
+        bound(pool, f32)?,
+        bound(slots, DType::U32)?,
+    );
+    let bias = bias.map(|b| bound(b, f32)).transpose()?;
+    let device = x.device().as_vulkan_device()?.clone();
+    let count = batch * channels;
+    let out = VulkanStorage {
+        buffer: Arc::new(device.buffer(count * 4)?),
+        device: device.clone(),
+        count,
+        dtype: f32,
+    };
+    device
+        .context
+        .record(|r| {
+            r.ssm_conv_step(&inference_vulkan::ConvStep {
+                batch,
+                channels,
+                kernel,
+                x: (&xb.0, xb.1),
+                weight: (&wb.0, wb.1),
+                bias: bias.as_ref().map(|b| (&b.0, b.1)),
+                pool: (&pb.0, pb.1),
+                slots: (&sb.0, sb.1),
+                out: &out.buffer,
+            })
+        })
+        .map_err(vk_err)?;
+    Ok(tensor_of(out, (batch, channels)))
 }
 
 // the stride between batches of a matmul operand whose batch dims (all but its last two) collapse into one

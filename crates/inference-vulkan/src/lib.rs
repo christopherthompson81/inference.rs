@@ -18,7 +18,7 @@ pub use context::{Context, Recorder};
 pub use kernels::{BlockType, MatVec};
 pub use map::{MAX_DIMS, Map, MapOp, Operand};
 pub use memory::{Bound, HostBuffer, ImportedMemory};
-pub use ops::{MatMul, MatOperand, RowOp, Rows, Select};
+pub use ops::{At, ConvStep, MatMul, MatOperand, RowOp, Rows, ScanStep, Select};
 pub use stream::Retained;
 
 pub use ash::vk;

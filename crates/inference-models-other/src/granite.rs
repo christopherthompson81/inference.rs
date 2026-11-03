@@ -1455,6 +1455,21 @@ impl MambaLayer {
         };
         let y = if x.device().is_cuda() {
             crate::cuda::ssm::selective_scan_cuda(scan, &mut ssm_state, pool_slots)?
+        } else if let Some(slots) = pool_slots.filter(|_| x.device().is_vulkan()) {
+            inference_tensor::vulkan::ssm_scan_step(&inference_tensor::vulkan::ScanStep {
+                x: &x.contiguous()?,
+                dt: &dt.contiguous()?,
+                a: scan.a,
+                b: &b.contiguous()?,
+                c: &c.contiguous()?,
+                d: scan.d,
+                dt_bias: scan.dt_bias,
+                dt_range: [scan.dt_min, scan.dt_max],
+                pool: &ssm_state,
+                slots: &slots
+                    .to_device(x.device())?
+                    .to_dtype(inference_tensor::DType::U32)?,
+            })?
         } else if let Some(slots) = pool_slots {
             crate::ops::selective_scan_cpu_slots(scan, &ssm_state, &slots.to_vec1::<u32>()?)?
         } else {
@@ -1480,6 +1495,23 @@ impl MambaLayer {
             return self
                 .conv_cuda(&hidden_states_b_c.unsqueeze(1)?, cache, true, pool_slots)?
                 .squeeze(1);
+        }
+        if let Some(slots) = pool_slots.filter(|_| hidden_states_b_c.device().is_vulkan()) {
+            let f32 = inference_tensor::DType::F32;
+            return inference_tensor::vulkan::ssm_conv_step(
+                &hidden_states_b_c.to_dtype(f32)?.contiguous()?,
+                &self.conv1d_weight.squeeze(1)?.to_dtype(f32)?.contiguous()?,
+                self.conv1d_bias
+                    .as_ref()
+                    .map(|b| b.to_dtype(f32))
+                    .transpose()?
+                    .as_ref(),
+                &cache.conv_state,
+                &slots
+                    .to_device(hidden_states_b_c.device())?
+                    .to_dtype(inference_tensor::DType::U32)?,
+            )?
+            .to_dtype(hidden_states_b_c.dtype());
         }
         if let Some(slots) = pool_slots {
             return crate::ops::causal_conv1d_step_cpu_slots(

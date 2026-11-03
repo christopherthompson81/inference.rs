@@ -180,3 +180,110 @@ impl Recorder<'_> {
         Ok(())
     }
 }
+
+/// A buffer and the element an operand starts at.
+pub type At<'a> = (&'a Arc<HostBuffer>, usize);
+
+pub(crate) const CONV_STEP_BINDINGS: usize = 6;
+pub(crate) const CONV_STEP_PUSH_BYTES: u32 = 9 * 4;
+pub(crate) const SCAN_STEP_BINDINGS: usize = 10;
+pub(crate) const SCAN_STEP_PUSH_BYTES: u32 = 13 * 4;
+const STEP_THREADS: usize = 64;
+
+/// One decode step of Mamba's causal conv on a conv-state pool (`(rows, channels, kernel)` f32, in place), each batch
+/// row's state the pool row `slots` names; `out` is `(batch, channels)`.
+pub struct ConvStep<'a> {
+    pub batch: usize,
+    pub channels: usize,
+    pub kernel: usize,
+    pub x: At<'a>,
+    pub weight: At<'a>,
+    pub bias: Option<At<'a>>,
+    pub pool: At<'a>,
+    pub slots: At<'a>,
+    pub out: &'a Arc<HostBuffer>,
+}
+
+/// One decode step of Mamba-2's selective scan on a state pool (`(rows, heads, head_dim, state)` f32, in place); `a`,
+/// `d` and `dt_bias` are `(heads,)` from their buffers' first element; `out` is `(batch, heads, head_dim)`.
+pub struct ScanStep<'a> {
+    pub batch: usize,
+    pub heads: usize,
+    pub head_dim: usize,
+    pub groups: usize,
+    pub state: usize,
+    pub dt_range: [f32; 2],
+    pub x: At<'a>,
+    pub dt: At<'a>,
+    pub a: &'a Arc<HostBuffer>,
+    pub b: At<'a>,
+    pub c: At<'a>,
+    pub d: &'a Arc<HostBuffer>,
+    pub dt_bias: &'a Arc<HostBuffer>,
+    pub pool: At<'a>,
+    pub slots: At<'a>,
+    pub out: &'a Arc<HostBuffer>,
+}
+
+impl Recorder<'_> {
+    pub fn ssm_conv_step(&self, op: &ConvStep<'_>) -> Result<()> {
+        let (bias, bias_off) = op.bias.unwrap_or(op.x);
+        let bytes = words(&[
+            op.batch,
+            op.channels,
+            op.kernel,
+            usize::from(op.bias.is_some()),
+            op.x.1,
+            op.weight.1,
+            bias_off,
+            op.pool.1,
+            op.slots.1,
+        ])?;
+        let buffers = [op.x.0, op.weight.0, bias, op.pool.0, op.slots.0, op.out];
+        let groups = (op.batch * op.channels)
+            .div_ceil(INDEX_THREADS)
+            .min(MAX_GROUPS) as u32;
+        self.context.kernels.ssm_conv_step.dispatch(
+            self,
+            &buffers.map(|b| b.buffer),
+            &bytes,
+            [groups.max(1), 1, 1],
+        );
+        for buffer in buffers {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+
+    pub fn ssm_scan_step(&self, op: &ScanStep<'_>) -> Result<()> {
+        if op.groups == 0 || !op.heads.is_multiple_of(op.groups) {
+            return Err(Error::Invalid(format!(
+                "{} heads over {} groups",
+                op.heads, op.groups
+            )));
+        }
+        let mut bytes = words(&[op.batch, op.heads, op.head_dim, op.groups, op.state])?;
+        for v in op.dt_range {
+            bytes.extend_from_slice(&v.to_bits().to_le_bytes());
+        }
+        bytes.extend(words(&[
+            op.pool.1, op.slots.1, op.x.1, op.dt.1, op.b.1, op.c.1,
+        ])?);
+        let buffers = [
+            op.x.0, op.dt.0, op.a, op.b.0, op.c.0, op.d, op.dt_bias, op.pool.0, op.slots.0, op.out,
+        ];
+        let groups = (op.batch * op.heads * op.head_dim)
+            .div_ceil(STEP_THREADS)
+            .min(MAX_GROUPS) as u32;
+        self.context.kernels.ssm_scan_step.dispatch(
+            self,
+            &buffers.map(|b| b.buffer),
+            &bytes,
+            [groups.max(1), 1, 1],
+        );
+        for buffer in buffers {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+}

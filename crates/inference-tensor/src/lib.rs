@@ -69,6 +69,7 @@ mod tensor;
 mod tensor_cat;
 pub mod utils;
 mod variable;
+pub mod vulkan;
 #[cfg(feature = "vulkan")]
 pub mod vulkan_backend;
 
