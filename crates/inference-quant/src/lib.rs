@@ -124,10 +124,10 @@ pub trait QuantizedWeightSource: Send + Sync {
         Ok(None)
     }
 
-    /// Bytes of each text layer's routed MoE experts (indexed by layer, 0 for a dense one) and the experts a layer
-    /// holds; `None` when the source cannot tell, holds no experts, or holds a type the CPU expert path cannot run
-    /// (such experts load resident).
-    fn layer_expert_bytes(&self) -> Result<Option<(Vec<usize>, usize)>> {
+    /// Bytes of each text layer's routed MoE experts and how many experts it holds (indexed by layer, 0 for a dense
+    /// one); `None` when the source cannot tell, holds no experts, or holds a type the CPU expert path cannot run (such
+    /// experts load resident).
+    fn layer_expert_bytes(&self) -> Result<Option<(Vec<usize>, Vec<usize>)>> {
         Ok(None)
     }
 
@@ -151,7 +151,7 @@ impl<T: QuantizedWeightSource + ?Sized> QuantizedWeightSource for Arc<T> {
         (**self).load_linear(key, device, shard)
     }
 
-    fn layer_expert_bytes(&self) -> Result<Option<(Vec<usize>, usize)>> {
+    fn layer_expert_bytes(&self) -> Result<Option<(Vec<usize>, Vec<usize>)>> {
         (**self).layer_expert_bytes()
     }
 

@@ -196,3 +196,41 @@ predicts a resident fit that is not there (the same OOM).
 
 **Next:** offload for ungated experts (two projections, the ungated GPU kernels over cached slots), and the resident fit
 estimate.
+
+## Run 7 - 2026-11-03 12:05
+
+**Question:** with ungated experts offloadable, does Bolt with its tower serve from the 3090, and does the planner pick it?
+
+`OffloadedExperts` now takes `[up, down]` with squared ReLU beside `[gate, up, down]` with a GLU: the cache runs
+the ungated indexed matvec on its slots, staged prefill the ungated grouped mmq with parked routes, misses
+`CpuExpertGate::SquaredRelu`. Test: IQ2_XXS ungated experts offloaded against resident, 12 decode steps and a 40-token
+prompt (`offloaded_ungated_experts_match_resident_ones`).
+
+**Explicit flags** (`--pa-context-len 8192 --moe-expert-cache N`, mmproj loaded, thinking off):
+
+| slots per layer (of 240 - 496) | GPU | decode (warm) | prompt |
+|---|---|---|---|
+| 128 (KV left to fill the rest: 7.8 GB) | 23.1 GiB | 42 - 43 tok/s | 825 - 868 tok/s |
+| 300 (KV 17 MB) | 22.5 GiB | 75 - 77 tok/s | 1,737 - 1,833 tok/s |
+
+llama.cpp on the same files with `--n-cpu-moe 6`: decode 76 tok/s. Image answers as Run 5's (a 640 x 640 image: 433
+prompt tokens, the same answer).
+
+**Planner:** two sizing bugs, both from GGUF blocks (88 for Bolt) not being the loader's layers (48 hybrid blocks):
+`with_source_layers` kept the first 48 blocks' bytes and dropped the other 40, and `layer_expert_bytes` lined expert
+bytes up by GGUF block and gave one expert count (the first layer's 240) for all. Now a loader can say which mapped
+layer each checkpoint layer folds into (`checkpoint_layer_groups`; Nemotron-H's from its layout), and the expert
+counts are per layer. With them the auto plan picks 287 slots, but the post-load check then finds 23 - 30 MB short of
+the 1.5 GB it holds back.
+
+Estimate against what the card holds (desktop share taken off), `--pa-context-len 32768`:
+
+| model | slots | planner | measured | short |
+|---|---|---|---|---|
+| Bolt text | 126 | 13,760 MB | ~14,094 MB | ~334 MB |
+| Bolt text | 252 | 19,439 MB | ~19,822 MB | ~383 MB |
+| Qwen3.6-35B-A3B IQ4_XS | 64 | 6,389 MB | ~6,566 MB | ~177 MB |
+
+A constant per model, not per slot; the kernel libraries are ~30 MB in all, so not code. Open: where the rest goes
+(the pool keeping load-time temporaries, library workspaces). Before the fold fix text-only Bolt planned resident only
+because 40 layers were missing from the sum.

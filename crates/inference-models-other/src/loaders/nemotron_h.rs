@@ -130,6 +130,16 @@ impl IsqModelLoader for NemotronHLoader {
 }
 
 impl DeviceMappedModelLoader for NemotronHLoader {
+    fn checkpoint_layer_groups(&self, config: &str) -> Result<Option<Vec<usize>>> {
+        let blocks = Config::from_json(config)?.layout()?.block_of_layer();
+        let layers = blocks.keys().max().map_or(0, |last| last + 1);
+        Ok(Some(
+            (0..layers)
+                .map(|l| blocks.get(&l).copied().unwrap_or(0))
+                .collect(),
+        ))
+    }
+
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,

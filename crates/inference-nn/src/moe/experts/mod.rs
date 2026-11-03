@@ -160,6 +160,20 @@ impl MoEExperts {
         act: Activation,
     ) -> Result<Self> {
         if !cfg.gated {
+            #[cfg(feature = "cuda")]
+            if let (Some(slots), Some(device)) =
+                (vb.moe_expert_cache(), offload::cuda_device(&layer_device))
+                && let Some(offloaded) =
+                    Self::load_offloaded_ungated(cfg, &vb, comm, slots, device, act)?
+            {
+                return Ok(Self::from_backend(
+                    MoEExpertsBackendImpl::Offloaded(offloaded),
+                    None,
+                    cfg,
+                    comm,
+                    act,
+                ));
+            }
             let experts_vb = vb.pp("experts").set_device(layer_device);
             return Self::new_ungated(cfg, experts_vb, comm, act);
         }
@@ -386,6 +400,44 @@ impl MoEExperts {
         })
     }
 
+    // ungated (squared ReLU) GGUF experts left in their mapping, with a device cache of `slots` per projection
+    #[cfg(feature = "cuda")]
+    fn load_offloaded_ungated(
+        cfg: &MoEExpertsConfig,
+        vb: &ShardedVarBuilder,
+        comm: &Arc<inference_quant::Comm>,
+        slots: usize,
+        device: &inference_tensor::CudaDevice,
+        act: Activation,
+    ) -> Result<Option<Box<offload::OffloadedExperts>>> {
+        if act != Activation::Relu2 || comm.world_size() > 1 {
+            return Ok(None);
+        }
+        let host_vb = vb.pp("experts").set_device(Device::Cpu);
+        let Some(source) = host_vb.weight_source() else {
+            return Ok(None);
+        };
+        let keys = inference_quant::QuantizedExpertKeys::new(&host_vb.prefix());
+        let [Some(up), Some(down)] = [&keys.up, &keys.down].map(|key| {
+            source.mapped_blocks(key).filter(|blocks| {
+                blocks.dims.len() == 3
+                    && inference_quant::cpu_experts::supports(blocks.ty, blocks.dims[2])
+            })
+        }) else {
+            return Ok(None);
+        };
+        let [up, down] =
+            [up, down].map(|blocks| inference_quant::HostExpertStack::from_mapped(blocks, device));
+        offload::OffloadedExperts::new(
+            vec![up?, down?],
+            slots,
+            cfg.num_experts_per_tok,
+            device,
+            offload::OffloadGate::SquaredRelu,
+        )
+        .map(|experts| Some(Box::new(experts)))
+    }
+
     // GGUF experts read on the host, kept there in pinned memory with a device cache of `slots` per projection
     #[cfg(feature = "cuda")]
     fn load_offloaded(
@@ -417,11 +469,11 @@ impl MoEExperts {
                     .map(|blocks| inference_quant::HostExpertStack::from_mapped(blocks, device));
                 let [gate, up, down] = stacks;
                 return offload::OffloadedExperts::new(
-                    [gate?, up?, down?],
+                    vec![gate?, up?, down?],
                     slots,
                     cfg.num_experts_per_tok,
                     device,
-                    glu,
+                    offload::OffloadGate::Glu(glu),
                 )
                 .map(|experts| Some(Box::new(experts)));
             }
@@ -455,11 +507,11 @@ impl MoEExperts {
             .try_into()
             .map_err(|_| inference_tensor::Error::msg("three expert projections"))?;
         offload::OffloadedExperts::new(
-            [gate, up, down],
+            vec![gate, up, down],
             slots,
             cfg.num_experts_per_tok,
             device,
-            glu,
+            offload::OffloadGate::Glu(glu),
         )
         .map(|experts| Some(Box::new(experts)))
     }

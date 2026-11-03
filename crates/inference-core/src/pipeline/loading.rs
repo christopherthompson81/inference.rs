@@ -643,7 +643,10 @@ impl ExpertCachePlan<'_> {
         let Some(source) = self.sizing.weight_source else {
             return Ok(None);
         };
-        Ok(source.layer_expert_bytes()?.map(|(_, experts)| experts))
+        // the largest layer's: no layer caches more than it holds
+        Ok(source
+            .layer_expert_bytes()?
+            .and_then(|(_, experts)| experts.into_iter().max()))
     }
 
     // The activations of a MIN_PLANNED_PROMPT_CHUNK-token prompt chunk, for a loader that reports them

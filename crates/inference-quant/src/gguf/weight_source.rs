@@ -1011,9 +1011,9 @@ impl QuantizedWeightSource for GgufWeightSource {
         ))
     }
 
-    fn layer_expert_bytes(&self) -> Result<Option<(Vec<usize>, usize)>> {
+    fn layer_expert_bytes(&self) -> Result<Option<(Vec<usize>, Vec<usize>)>> {
         let mut layers = Vec::<usize>::new();
-        let mut experts = None;
+        let mut experts = Vec::<usize>::new();
         let mut counted = std::collections::HashSet::<&str>::new();
         for (native_name, binding) in &self.bindings {
             let (Some(layer), Some(source)) = (binding.text_layer_index(), binding.direct_tensor())
@@ -1040,17 +1040,14 @@ impl QuantizedWeightSource for GgufWeightSource {
             }
             if layers.len() <= layer {
                 layers.resize(layer + 1, 0);
+                experts.resize(layer + 1, 0);
             }
             layers[layer] += info.exact_byte_len()?;
-            experts = experts.or_else(|| {
-                self.shapes
-                    .get(native_name)
-                    .and_then(|dims| dims.first().copied())
-            });
+            if let Some(&count) = self.shapes.get(native_name).and_then(|dims| dims.first()) {
+                experts[layer] = count;
+            }
         }
-        Ok(experts
-            .filter(|_| !layers.is_empty())
-            .map(|experts| (layers, experts)))
+        Ok((!layers.is_empty()).then_some((layers, experts)))
     }
 
     fn pack_factor_for(&self, key: &str, dtype: DType) -> Result<Option<usize>> {
@@ -2048,7 +2045,7 @@ mod tests {
         let source = GgufWeightSource::new(archive, &bindings, DType::BF16)?;
         let (layers, experts) = source.layer_expert_bytes()?.unwrap();
         assert_eq!(layers, [stack.storage_size_in_bytes()]);
-        assert_eq!(experts, 4);
+        assert_eq!(experts, [4]);
         Ok(())
     }
 
