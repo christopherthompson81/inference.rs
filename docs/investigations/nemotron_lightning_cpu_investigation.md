@@ -196,3 +196,19 @@ whose threads wake beside the pool's spinning workers for every layer.
 
 **A/B (same thermal state, recipe A):** plain 15.95 -> 16.84 tok/s; MTP 2 with the Q5_0 draft head 19.02 -> 19.39.
 The machine ran ~4 % slower than at Run 9 by then; MTP's per-prompt spread (15.8 to 22.1) is the prompts' acceptance.
+
+## Run 11 - 2026-11-03 ~15:00
+
+**Question:** where do plain decode's remaining ~5 ms against llama.cpp go?
+
+**Method:** a temporary timer on every barrier-pool call, keyed by the call's closure type, over 130 decode tokens on
+recipe A. Per token: dense tile matmuls 33.0 ms (1.79 GB, ~54 GB/s), routed experts 21.4 ms (0.95 GB, ~44 GB/s),
+router / scan / conv / attention 2.6 ms, 4.8 ms between calls (runs of small tensor ops of 10-37 us each).
+
+**Experts:** the 8x1 kernel dots eight rows in lockstep, eight streams 1.8 KB apart per thread. A 256 MB DRAM
+microbench at eight threads: Q5_0 8x1 44 GB/s, one row at a time 56.5 GB/s (Q8_0 51 against 58); one thread runs
+both at the same rate, so it is DRAM stream interleaving, not compute. With four tokens the 8x4 kernel's shared
+decoding still wins (Q5_0 40 GB/s against 31 for 1x4). An AVX-512 VNNI rewrite of the 8-row kernels (no transposes,
+`vpdpbusd`) ran no faster in cache or from DRAM, so it was dropped.
+**Change:** a lone route (a decode step's, and most experts' in a verify step) dots its rows one at a time, as does
+`cpu_dense` for its sub-quad tokens; the 8x1 kernels are gone. Expert calls: 459 -> 420 us, 21.4 -> 19.6 ms a token.
