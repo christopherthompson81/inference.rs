@@ -1284,6 +1284,7 @@ gguf_iq_types!(
     (iq5_ks, "IQ5_KS"),
     (iq3_ks, "IQ3_KS"),
     (iq2_kl, "IQ2_KL"),
+    (nvfp4, "NVFP4"),
 );
 
 // IQ1_M has no prompt kernel
@@ -1354,6 +1355,11 @@ pub(crate) const TYPE_LIBRARIES: &[(&str, super::kernel::GgufType, fn() -> Resul
     ("iq3_s", super::kernel::GgufType::Iq3S, iq3_s::ensure_loaded),
     ("iq1_s", super::kernel::GgufType::Iq1S, iq1_s::ensure_loaded),
     ("iq1_m", super::kernel::GgufType::Iq1M, iq1_m::ensure_loaded),
+    (
+        "nvfp4",
+        super::kernel::GgufType::Nvfp4,
+        nvfp4::ensure_loaded,
+    ),
     (
         "iq1_kt",
         super::kernel::GgufType::Iq1Kt,

@@ -19,13 +19,18 @@ rng = np.random.default_rng(SEED)
 
 # IQ1_M has no leading scale: its f16 is the top nibble of each of the four u16 scale words at this offset
 IQ1_M_SCALES = 48
+# NVFP4 leads with four UE4M3 sub-block scales; unsigned, so encoders write none past 0x7E
+NVFP4_SCALES = 4
+UE4M3_MAX = 0x7E
 
 
 def block(name: str, type_size: int) -> bytes:
     raw = bytearray(rng.integers(0, 256, type_size, dtype=np.uint8).tobytes())
     # a finite, sign-varying f16 scale; the remaining bytes are any scale bits and indices
     scale = np.float16(rng.uniform(-0.05, 0.05)).view(np.uint16)
-    if name == "IQ1_M":
+    if name == "NVFP4":
+        raw[0:NVFP4_SCALES] = rng.integers(0, UE4M3_MAX + 1, NVFP4_SCALES, dtype=np.uint8).tobytes()
+    elif name == "IQ1_M":
         for k in range(4):
             at = IQ1_M_SCALES + 2 * k
             word = int.from_bytes(raw[at:at + 2], "little") & 0x0FFF | ((int(scale) >> (4 * k)) & 0xF) << 12
@@ -46,6 +51,7 @@ for name, block_size, type_size in [
     ("IQ3_S", 256, 110),
     ("IQ1_S", 256, 50),
     ("IQ1_M", 256, 56),
+    ("NVFP4", 64, 36),
 ]:
     qtype = GGMLQuantizationType[name]
     data = b"".join(block(name, type_size) for _ in range(BLOCKS))

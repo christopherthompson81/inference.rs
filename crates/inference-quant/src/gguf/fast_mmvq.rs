@@ -52,6 +52,7 @@ pub fn supports(dtype: impl Into<GgufType>) -> bool {
             | GgufType::Q5K
             | GgufType::Q6K
             | GgufType::Iq4Nl
+            | GgufType::Nvfp4
             | GgufType::Iq4Xs
             | GgufType::Iq2Xxs
             | GgufType::Iq2Xs
@@ -204,6 +205,7 @@ fn plain_launcher_bf16(dtype: GgufType) -> Option<PlainLauncher> {
         GgufType::Q5K => ffi::launch_mmvq_gguf_q5_k_bf16_plain,
         GgufType::Q6K => ffi::launch_mmvq_gguf_q6_k_bf16_plain,
         GgufType::Iq4Nl => ffi::launch_mmvq_gguf_iq4_nl_bf16_plain,
+        GgufType::Nvfp4 => ffi::launch_mmvq_gguf_nvfp4_bf16_plain,
         GgufType::Iq4Xs => ffi::launch_mmvq_gguf_iq4_xs_bf16_plain,
         GgufType::Iq2Xxs => ffi::launch_mmvq_gguf_iq2_xxs_bf16_plain,
         GgufType::Iq2Xs => ffi::launch_mmvq_gguf_iq2_xs_bf16_plain,
@@ -245,6 +247,7 @@ fn plain_launcher_f16(dtype: GgufType) -> Option<PlainLauncher> {
         GgufType::Q5K => ffi::launch_mmvq_gguf_q5_k_f16_plain,
         GgufType::Q6K => ffi::launch_mmvq_gguf_q6_k_f16_plain,
         GgufType::Iq4Nl => ffi::launch_mmvq_gguf_iq4_nl_f16_plain,
+        GgufType::Nvfp4 => ffi::launch_mmvq_gguf_nvfp4_f16_plain,
         GgufType::Iq4Xs => ffi::launch_mmvq_gguf_iq4_xs_f16_plain,
         GgufType::Iq2Xxs => ffi::launch_mmvq_gguf_iq2_xxs_f16_plain,
         GgufType::Iq2Xs => ffi::launch_mmvq_gguf_iq2_xs_f16_plain,
@@ -286,6 +289,7 @@ fn plain_launcher_f32(dtype: GgufType) -> Option<PlainLauncher> {
         GgufType::Q5K => ffi::launch_mmvq_gguf_q5_k_f32_plain,
         GgufType::Q6K => ffi::launch_mmvq_gguf_q6_k_f32_plain,
         GgufType::Iq4Nl => ffi::launch_mmvq_gguf_iq4_nl_f32_plain,
+        GgufType::Nvfp4 => ffi::launch_mmvq_gguf_nvfp4_f32_plain,
         GgufType::Iq4Xs => ffi::launch_mmvq_gguf_iq4_xs_f32_plain,
         GgufType::Iq2Xxs => ffi::launch_mmvq_gguf_iq2_xxs_f32_plain,
         GgufType::Iq2Xs => ffi::launch_mmvq_gguf_iq2_xs_f32_plain,
@@ -1154,6 +1158,7 @@ fn moe_launcher(dtype: GgufType) -> Option<MoeLauncher> {
         GgufType::Q5K => ffi::launch_mmvq_gguf_q5_k_moe,
         GgufType::Q6K => ffi::launch_mmvq_gguf_q6_k_moe,
         GgufType::Iq4Nl => ffi::launch_mmvq_gguf_iq4_nl_moe,
+        GgufType::Nvfp4 => ffi::launch_mmvq_gguf_nvfp4_moe,
         GgufType::Iq4Xs => ffi::launch_mmvq_gguf_iq4_xs_moe,
         GgufType::Iq2Xxs => ffi::launch_mmvq_gguf_iq2_xxs_moe,
         GgufType::Iq2Xs => ffi::launch_mmvq_gguf_iq2_xs_moe,
@@ -1537,6 +1542,9 @@ fn dequantize_launcher(ty: GgufType, dtype: DType) -> Option<DequantizeLauncher>
         (GgufType::Iq4Nl, DType::BF16) => ffi::launch_dequantize_iq4_nl_bf16,
         (GgufType::Iq4Nl, DType::F16) => ffi::launch_dequantize_iq4_nl_f16,
         (GgufType::Iq4Nl, DType::F32) => ffi::launch_dequantize_iq4_nl_f32,
+        (GgufType::Nvfp4, DType::BF16) => ffi::launch_dequantize_nvfp4_bf16,
+        (GgufType::Nvfp4, DType::F16) => ffi::launch_dequantize_nvfp4_f16,
+        (GgufType::Nvfp4, DType::F32) => ffi::launch_dequantize_nvfp4_f32,
         (GgufType::Iq4Xs, DType::BF16) => ffi::launch_dequantize_iq4_xs_bf16,
         (GgufType::Iq4Xs, DType::F16) => ffi::launch_dequantize_iq4_xs_f16,
         (GgufType::Iq4Xs, DType::F32) => ffi::launch_dequantize_iq4_xs_f32,

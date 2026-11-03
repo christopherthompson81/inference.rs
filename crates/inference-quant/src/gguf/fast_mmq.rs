@@ -64,6 +64,7 @@ pub fn supports(dtype: impl Into<GgufType>) -> bool {
             | GgufType::Q5K
             | GgufType::Q6K
             | GgufType::Iq4Nl
+            | GgufType::Nvfp4
             | GgufType::Iq4Xs
             | GgufType::Iq2Xxs
             | GgufType::Iq2Xs
@@ -122,6 +123,7 @@ fn qk_for(dtype: GgufType) -> usize {
         | GgufType::Q5_1
         | GgufType::Q8_0
         | GgufType::Iq4Nl => 32,
+        GgufType::Nvfp4 => 64,
         GgufType::Q2K
         | GgufType::Q3K
         | GgufType::Q4K
@@ -173,6 +175,7 @@ fn ds_layout_for(dtype: GgufType) -> DsLayout {
         GgufType::Q4K | GgufType::Q5K => DsLayout::DS4,
         GgufType::Q6K
         | GgufType::Iq4Nl
+        | GgufType::Nvfp4
         | GgufType::Iq4Xs
         | GgufType::Iq2Xxs
         | GgufType::Iq2Xs
@@ -318,6 +321,7 @@ fn mmq_launcher(dtype: GgufType) -> Option<MmqLauncher> {
         GgufType::Q5K => ffi::launch_mmq_gguf_q5_k,
         GgufType::Q6K => ffi::launch_mmq_gguf_q6_k,
         GgufType::Iq4Nl => ffi::launch_mmq_gguf_iq4_nl,
+        GgufType::Nvfp4 => ffi::launch_mmq_gguf_nvfp4,
         GgufType::Iq4Xs => ffi::launch_mmq_gguf_iq4_xs,
         GgufType::Iq2Xxs => ffi::launch_mmq_gguf_iq2_xxs,
         GgufType::Iq2Xs => ffi::launch_mmq_gguf_iq2_xs,
@@ -359,6 +363,7 @@ fn mmq_moe_launcher(dtype: GgufType) -> Option<MmqMoeLauncher> {
         GgufType::Q5K => ffi::launch_mmq_gguf_q5_k_moe,
         GgufType::Q6K => ffi::launch_mmq_gguf_q6_k_moe,
         GgufType::Iq4Nl => ffi::launch_mmq_gguf_iq4_nl_moe,
+        GgufType::Nvfp4 => ffi::launch_mmq_gguf_nvfp4_moe,
         GgufType::Iq4Xs => ffi::launch_mmq_gguf_iq4_xs_moe,
         GgufType::Iq2Xxs => ffi::launch_mmq_gguf_iq2_xxs_moe,
         GgufType::Iq2Xs => ffi::launch_mmq_gguf_iq2_xs_moe,

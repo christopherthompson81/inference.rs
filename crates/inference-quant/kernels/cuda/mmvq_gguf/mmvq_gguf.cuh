@@ -1095,6 +1095,30 @@ typedef struct {
 static const __device__ int8_t kvalues_iq4nl[16] = {
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
 
+// NVFP4: 64 E2M1 values with a UE4M3 scale per 16, from ggml-cuda's vecdotq.cuh and convert.cu
+#define QK_NVFP4 64
+#define QK_NVFP4_SUB 16
+#define QR_NVFP4 2
+#define QI_NVFP4 (QK_NVFP4 / (4 * QR_NVFP4))
+typedef struct {
+  uint8_t d[QK_NVFP4 / QK_NVFP4_SUB];
+  uint8_t qs[QK_NVFP4 / 2];
+} block_nvfp4;
+
+// ggml-common.h's kvalues_fp4: E2M1 doubled, which ggml_cuda_ue4m3_to_fp32 halves back
+static const __device__ int8_t kvalues_fp4[16] = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12};
+
+// ggml-cuda's software decode, which matches the CPU's for every byte (the FP8 intrinsic reads bit 7 as a sign)
+static __device__ __forceinline__ float ggml_cuda_ue4m3_to_fp32(uint8_t x) {
+  if (x == 0 || x == 0x7F) {
+    return 0.0f;
+  }
+  const int exp = (x >> 3) & 0xF;
+  const int man = x & 0x7;
+  const float raw = exp == 0 ? ldexpf((float)man, -9) : ldexpf(1.0f + (float)man / 8.0f, exp - 7);
+  return raw / 2;
+}
+
 static __device__ __forceinline__ int get_int_b2(const void *x, const int &i32) {
   const uint16_t *x16 = (const uint16_t *)x;
   int x32 = x16[2 * i32 + 0] << 0;
@@ -1142,6 +1166,33 @@ vec_dot_iq4_nl_q8_1(const void *__restrict__ vbq,
   }
   const float d = __half2float(bq4->d) * __low2float(bq8_1->ds);
   return d * sumi;
+}
+
+#define VDR_NVFP4_Q8_1_MMVQ 4
+
+// two 16-value sub-blocks a call, each against its half of a q8_1 block
+static __device__ __forceinline__ float
+vec_dot_nvfp4_q8_1(const void *__restrict__ vbq,
+                   const block_q8_1 *__restrict__ bq8_1, const int &kbx,
+                   const int &iqs) {
+  const block_nvfp4 *bq4 = (const block_nvfp4 *)vbq + kbx;
+  float sum = 0.0f;
+#pragma unroll
+  for (int i = 0; i < VDR_NVFP4_Q8_1_MMVQ / 2; i++) {
+    const int iqs0 = iqs + 2 * i;
+    const int iqs1 = iqs0 + 1;
+    const int is = iqs0 >> 1;
+    const int2 v0 = get_int_from_table_16(get_int_b4(bq4->qs, iqs0), kvalues_fp4);
+    const int2 v1 = get_int_from_table_16(get_int_b4(bq4->qs, iqs1), kvalues_fp4);
+    const block_q8_1 *bq8 = bq8_1 + (is >> 1);
+    const int i8 = (is & 1) << 2;
+    int sumi = ggml_cuda_dp4a(v0.x, get_int_b4(bq8->qs, i8 + 0), 0);
+    sumi = ggml_cuda_dp4a(v0.y, get_int_b4(bq8->qs, i8 + 2), sumi);
+    sumi = ggml_cuda_dp4a(v1.x, get_int_b4(bq8->qs, i8 + 1), sumi);
+    sumi = ggml_cuda_dp4a(v1.y, get_int_b4(bq8->qs, i8 + 3), sumi);
+    sum += ggml_cuda_ue4m3_to_fp32(bq4->d[is]) * __low2float(bq8->ds) * float(sumi);
+  }
+  return sum;
 }
 
 #define VDR_IQ4_XS_Q8_1_MMVQ 4
@@ -2070,6 +2121,26 @@ static __device__ __forceinline__ void dequantize_iq4_xs(const void * vx, const 
         y[j+16] = ggml_cuda_cast<dst_t>(d * kvalues_iq4nl[q4[j] >>  4]);
     }
 }
+
+// one 64-value block per CUDA block of 32 threads, two values each: rows need only be whole blocks
+template <typename dst_t>
+static __global__ void dequantize_block_nvfp4(const void *__restrict__ vx, dst_t *__restrict__ yy) {
+  const block_nvfp4 &xb = ((const block_nvfp4 *)vx)[blockIdx.x];
+  const int sub = threadIdx.x / (QK_NVFP4_SUB / 2);
+  const int j = threadIdx.x % (QK_NVFP4_SUB / 2);
+  const float d = ggml_cuda_ue4m3_to_fp32(xb.d[sub]);
+  const uint8_t q = xb.qs[sub * (QK_NVFP4_SUB / 2) + j];
+  dst_t *y = yy + (int64_t)blockIdx.x * QK_NVFP4 + sub * QK_NVFP4_SUB + j;
+  y[0] = ggml_cuda_cast<dst_t>(d * kvalues_fp4[q & 0x0F]);
+  y[QK_NVFP4_SUB / 2] = ggml_cuda_cast<dst_t>(d * kvalues_fp4[q >> 4]);
+}
+
+#define DEQUANTIZE_NVFP4_LAUNCHER(dst_tag, dst_c_type)                                                  \
+  extern "C" void launch_dequantize_nvfp4_##dst_tag(const void *vx, void *dst, int64_t nrows, int64_t ncols, \
+                                                   void *stream) {                                     \
+    dequantize_block_nvfp4<dst_c_type><<<(unsigned int)(nrows * ncols / QK_NVFP4), WARP_SIZE, 0,        \
+                                         static_cast<cudaStream_t>(stream)>>>(vx, (dst_c_type *)dst);  \
+  }
 
 template <typename dst_t, void (*dequantize)(const void *, const int64_t, dst_t *, const int)>
 static __global__ void dequantize_superblocks(const void *__restrict__ vx, dst_t *__restrict__ yy) {

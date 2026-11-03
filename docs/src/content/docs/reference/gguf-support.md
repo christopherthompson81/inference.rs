@@ -128,12 +128,14 @@ inference.rs accepts GGUF files using the following storage types. A file can mi
 | IQ quants | `IQ1_S`, `IQ1_M`, `IQ2_XXS`, `IQ2_XS`, `IQ2_S`, `IQ3_XXS`, `IQ3_S`, `IQ4_NL`, `IQ4_XS` |
 | ik_llama.cpp trellis quants | `IQ1_KT`, `IQ2_KT`, `IQ3_KT`, `IQ4_KT` |
 | ik_llama.cpp IQK quants | `IQ2_K`, `IQ3_K`, `IQ4_K`, `IQ5_K`, `IQ6_K`, `IQ2_KS`, `IQ3_KS`, `IQ4_KS`, `IQ5_KS`, `IQ4_KSS`, `IQ2_KL` |
+| FP4 | `NVFP4` (64-value blocks of E2M1 with a UE4M3 scale per 16, and the tensor-wide F32 `.scale` llama.cpp pairs with it) |
 | GPT-OSS | The GPT-OSS MXFP4 representation |
 
 The IQ, trellis and IQK types run on CUDA and Metal; on the CPU they are dequantized for each matmul. On CUDA, MoE
 expert stacks of these types run through the expert-indexed matvec kernels. Experts kept in host memory by
 [expert offload](/guides/perf/moe-expert-offload/) run on the CPU kernels for IQ3_S, IQ4_XS, IQ4_KSS and IQ4_NL (and
-Q2_K-Q6_K, Q8_0). Tensor parallelism cannot split the rows of
+Q2_K-Q6_K, Q8_0). `NVFP4` runs on CUDA (any GPU with dp4a, through the same matvec and tiled kernels as the
+legacy block quants) and is dequantized on the CPU; Metal has no kernel for it. Tensor parallelism cannot split the rows of
 the trellis and `_KS` / `_KSS` / `_KL` types, since each of their rows keeps one scale. llama-quantize's IQ mixes (`IQ2_M`,
 `IQ3_XS`, `IQ3_M`) and ik_llama.cpp's default mixes use only the types above. ik_llama.cpp's bitnet types
 and its CPU-repacked `_R4` / `_R8` layouts are not supported. Other storage types not listed above

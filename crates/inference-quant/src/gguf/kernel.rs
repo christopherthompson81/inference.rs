@@ -51,6 +51,9 @@ pub enum GgufType {
     Iq5Ks,
     Iq3Ks,
     Iq2Kl,
+    /// NVIDIA's FP4: 64-value blocks of E2M1 with a UE4M3 scale per 16 (Bolt's GGUF); a tensor-wide F32 scale, when
+    /// the file has one, is a tensor of its own.
+    Nvfp4,
     /// IQ4_KS regrouped into 16-row tiles for the multi-row matvec (`fast_mmvq::iq4_ks_to_tiled`): the same bytes
     /// in another order, held only on the GPU and never written to a file.
     Iq4KsTiled,
@@ -80,7 +83,7 @@ impl From<GgmlDType> for GgufType {
 
 impl GgufType {
     /// The types only our own kernels read; Candle cannot hold them in a `QTensor`.
-    pub const RAW_BLOCKS: [Self; 24] = [
+    pub const RAW_BLOCKS: [Self; 25] = [
         Self::Iq4Nl,
         Self::Iq4Xs,
         Self::Iq2Xxs,
@@ -105,6 +108,7 @@ impl GgufType {
         Self::Iq5Ks,
         Self::Iq3Ks,
         Self::Iq2Kl,
+        Self::Nvfp4,
     ];
 
     /// The ggml type id, as stored in a GGUF tensor header.
@@ -133,6 +137,7 @@ impl GgufType {
             Self::Iq2S => 22,
             Self::Iq4Xs => 23,
             Self::Iq1M => 29,
+            Self::Nvfp4 => 40,
             Self::BF16 => 30,
             Self::Iq2Kt => 153,
             Self::Iq3Kt => 154,
