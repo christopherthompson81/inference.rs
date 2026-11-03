@@ -172,3 +172,27 @@ llama.cpp resizes the position grid straight to 30 x 40 where the reference crop
 **Speed with 5 blocks on the CPU:** prompt 27 - 32 tok/s, decode 0.9 - 1.6 tok/s; llama.cpp with 6 layers' experts on
 the CPU: prompt 465 tok/s, decode 76 tok/s. The gap is whole blocks (Mamba included) on our CPU, against llama.cpp's
 experts-only offload. A CPU IQ2_XXS expert kernel would let `--moe-expert-cache` do the same here.
+
+## Run 6 - 2026-11-03 11:11
+
+**Question:** with a CPU IQ2_XXS dot, does `--moe-expert-cache` let Bolt and its tower fit the 3090?
+
+The kernel (`cpu_dot`, scalar plus AVX2 one-row, four-row and tile decode) matches dequantized rows. One thread, this
+AVX2 box (`single_thread_rate`, `tile_rate`):
+
+| type | one row | four rows | tile dot |
+|---|---|---|---|
+| IQ2_XXS | 1.51 GB/s (5.9 G values/s) | 4.51 GB/s | 61.9 GMAC/s |
+| IQ3_S | 3.57 GB/s (8.3 G values/s) | 11.14 GB/s | 57.4 GMAC/s |
+
+The table lookups (four grid and four sign words per 32 values) bound it, as in ggml.
+
+**Serving still fails:** with `--moe-expert-cache 128` the planner logs "MoE experts leave the GPU" and quantizes
+the KV cache to q3, then the load runs out of memory. `MoEExperts::new` takes the ungated path (Nemotron-H's
+experts are up and down with ReLU^2) before it looks at the expert cache, and `OffloadedExperts` runs only gated
+stacks: three projections, `indexed_mmvq_with` on the cached slots for decode and `grouped_parked_with` for staged
+prefill. The CPU misses already take ungated experts (`CpuExpertGate::SquaredRelu`). With no flag the planner
+predicts a resident fit that is not there (the same OOM).
+
+**Next:** offload for ungated experts (two projections, the ungated GPU kernels over cached slots), and the resident fit
+estimate.

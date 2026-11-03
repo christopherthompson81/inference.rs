@@ -5,7 +5,7 @@ use inference_tensor::quantized::k_quants::{
     BlockQ2K, BlockQ3K, BlockQ4K, BlockQ5K, BlockQ6K, BlockQ8K, QK_K,
 };
 
-use super::iq_tables::{IQ3S_GRID, KMASK_IQ2XS};
+use super::iq_tables::{IQ2XXS_GRID, IQ3S_GRID, KMASK_IQ2XS, KSIGNS_IQ2XS};
 use super::kernel::GgufType;
 use super::raw::KVALUES_IQ4NL;
 
@@ -18,16 +18,40 @@ const IQ3_S_QS: usize = 2;
 const IQ3_S_QH: usize = 66;
 const IQ3_S_SIGNS: usize = 74;
 const IQ3_S_SCALES: usize = 106;
+// an f16 scale, then per 32 values: four grid bytes and a word of four 7-bit sign codes and a 4-bit scale
+const IQ2_XXS_BYTES: usize = 66;
+const IQ2_XXS_QS: usize = 2;
+// the sub-block scale is (2 * ls + 1) / 8 of the block's
+const IQ2_XXS_SCALE: f32 = 0.125;
+// each 7-bit sign code's eight signs as bytes of +1 / -1 (ggml's `keven_signs_q2xs`): the eighth makes the parity even
+const IQ2_XXS_SIGNS: [u64; 128] = iq2_xxs_signs();
 const IQ4_KSS_BYTES: usize = 128;
 const IQ4_KSS_ROW_SCALE: usize = 4;
 // ik's shifted IQ4_K table is the IQ4_NL one plus this, picked by a sub-block scale code's low bit
 const IQ4_KSS_SHIFT: i8 = 4;
 
+const fn iq2_xxs_signs() -> [u64; 128] {
+    let mut table = [0u64; 128];
+    let mut code = 0;
+    while code < 128 {
+        let bits = KSIGNS_IQ2XS[code];
+        let mut j = 0;
+        while j < 8 {
+            let byte: u64 = if bits & (1 << j) != 0 { 0xff } else { 0x01 };
+            table[code] |= byte << (8 * j);
+            j += 1;
+        }
+        code += 1;
+    }
+    table
+}
+
 /// Whether `vec_dot` serves this type.
 pub(crate) fn supports(ty: GgufType) -> bool {
     matches!(
         ty,
-        GgufType::Iq3S
+        GgufType::Iq2Xxs
+            | GgufType::Iq3S
             | GgufType::Iq4Xs
             | GgufType::Iq4Kss
             | GgufType::Q2K
@@ -42,6 +66,7 @@ pub(crate) fn supports(ty: GgufType) -> bool {
 pub(crate) fn vec_dot(ty: GgufType, row: &[u8], ys: &[BlockQ8K]) -> f32 {
     let n = ys.len() * QK_K;
     match ty {
+        GgufType::Iq2Xxs => iq2_xxs(row, ys),
         GgufType::Iq3S => iq3_s(row, ys),
         GgufType::Iq4Xs => iq4_xs(row, ys),
         GgufType::Iq4Kss => iq4_kss(row, ys),
@@ -284,6 +309,15 @@ fn iq4_xs(row: &[u8], ys: &[BlockQ8K]) -> f32 {
     iq4_xs_generic(row, ys)
 }
 
+fn iq2_xxs(row: &[u8], ys: &[BlockQ8K]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2_fma() {
+        // SAFETY: AVX2 and FMA were detected above
+        return unsafe { avx2::iq2_xxs_one(row, ys) };
+    }
+    iq2_xxs_generic(row, ys)
+}
+
 fn iq3_s(row: &[u8], ys: &[BlockQ8K]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     if has_avx2_fma() {
@@ -308,6 +342,7 @@ pub(crate) fn vec_dot_x4(ty: GgufType, row: &[u8], ys: [&[BlockQ8K]; 4]) -> [f32
     if has_avx2_fma() {
         match ty {
             // SAFETY: AVX2 and FMA were detected above
+            GgufType::Iq2Xxs => return unsafe { avx2::iq2_xxs_x4(row, ys) },
             GgufType::Iq3S => return unsafe { avx2::iq3_s_x4(row, ys) },
             GgufType::Iq4Xs => return unsafe { avx2::iq4_xs_x4(row, ys) },
             GgufType::Iq4Kss => return unsafe { avx2::iq4_kss_x4(row, ys) },
@@ -321,7 +356,10 @@ pub(crate) fn vec_dot_x4(ty: GgufType, row: &[u8], ys: [&[BlockQ8K]; 4]) -> [f32
 pub(crate) fn tile_supports(ty: GgufType) -> bool {
     #[cfg(target_arch = "x86_64")]
     if has_avx2_fma() {
-        return matches!(ty, GgufType::Iq3S | GgufType::Iq4Xs | GgufType::Iq4Kss);
+        return matches!(
+            ty,
+            GgufType::Iq2Xxs | GgufType::Iq3S | GgufType::Iq4Xs | GgufType::Iq4Kss
+        );
     }
     let _ = ty;
     false
@@ -341,6 +379,7 @@ pub(crate) fn decode_tile(ty: GgufType, rows: &[u8], cols: usize, w: &mut [i16],
     // SAFETY: tile_supports checked AVX2 and FMA
     unsafe {
         match ty {
+            GgufType::Iq2Xxs => avx2::decode_iq2_xxs(rows, w, d),
             GgufType::Iq3S => avx2::decode_iq3_s(rows, w, d),
             GgufType::Iq4Kss => avx2::decode_iq4_kss(rows, row_bytes, cols, w, d),
             _ => avx2::decode_iq4_xs(rows, w, d),
@@ -456,6 +495,39 @@ fn iq4_kss_generic(row: &[u8], ys: &[BlockQ8K]) -> f32 {
     row_scale(row) * sumf
 }
 
+// sub-block `ib32`'s four grid bytes and the word of its sign codes (7 bits each) and scale (the top 4)
+fn iq2_xxs_words(block: &[u8], ib32: usize) -> ([u8; 4], u32) {
+    let at = IQ2_XXS_QS + 8 * ib32;
+    let grid = block[at..at + 4].try_into().expect("4 grid bytes");
+    let word = u32::from_le_bytes(block[at + 4..at + 8].try_into().expect("a sign word"));
+    (grid, word)
+}
+
+fn iq2_xxs_generic(row: &[u8], ys: &[BlockQ8K]) -> f32 {
+    let mut sumf = 0f32;
+    for (block, y) in row.as_chunks::<IQ2_XXS_BYTES>().0.iter().zip(ys) {
+        let d = f16_at(block, 0) * y.d();
+        let q8 = y.qs();
+        let mut bsum = 0i32;
+        for ib32 in 0..QK_K / 32 {
+            let (grid, word) = iq2_xxs_words(block, ib32);
+            let mut sumi = 0i32;
+            for l in 0..4 {
+                let values = IQ2XXS_GRID[usize::from(grid[l])].to_le_bytes();
+                let signs = IQ2_XXS_SIGNS[((word >> (7 * l)) & 127) as usize].to_le_bytes();
+                for j in 0..8 {
+                    sumi += i32::from(values[j])
+                        * i32::from(signs[j] as i8)
+                        * i32::from(q8[32 * ib32 + 8 * l + j]);
+                }
+            }
+            bsum += sumi * (2 * (word >> 28) as i32 + 1);
+        }
+        sumf += d * bsum as f32;
+    }
+    IQ2_XXS_SCALE * sumf
+}
+
 fn iq3_s_grid_index(block: &[u8], ib32: usize, k: usize) -> usize {
     let qh = usize::from(block[IQ3_S_QH + ib32]);
     usize::from(block[IQ3_S_QS + 8 * ib32 + k]) | ((qh << (8 - k)) & 256)
@@ -499,10 +571,11 @@ mod avx2 {
     use inference_tensor::quantized::k_quants::{BlockQ8K, QK_K};
 
     use super::{
-        BLOCK32_QS, IQ3_S_BYTES, IQ3_S_QH, IQ3_S_QS, IQ3_S_SCALES, IQ3_S_SIGNS, IQ3S_GRID,
-        IQ4_KSS_BYTES, IQ4_KSS_ROW_SCALE, IQ4_KSS_SHIFT, IQ4_NL_BYTES, IQ4_XS_BYTES, IQ4_XS_QS,
-        KVALUES_IQ4NL, PREFETCH_AHEAD, Q4_0_BYTES, Q4_0_OFFSET, Q5_0_BYTES, Q5_0_OFFSET, Q5_0_QH,
-        Q5_0_QS, Q8_0_BYTES, Q8Block32, TileRow, f16_at, iq4_xs_sub_scale, row_scale,
+        BLOCK32_QS, IQ2_XXS_BYTES, IQ2_XXS_SCALE, IQ2_XXS_SIGNS, IQ2XXS_GRID, IQ3_S_BYTES,
+        IQ3_S_QH, IQ3_S_QS, IQ3_S_SCALES, IQ3_S_SIGNS, IQ3S_GRID, IQ4_KSS_BYTES, IQ4_KSS_ROW_SCALE,
+        IQ4_KSS_SHIFT, IQ4_NL_BYTES, IQ4_XS_BYTES, IQ4_XS_QS, KVALUES_IQ4NL, PREFETCH_AHEAD,
+        Q4_0_BYTES, Q4_0_OFFSET, Q5_0_BYTES, Q5_0_OFFSET, Q5_0_QH, Q5_0_QS, Q8_0_BYTES, Q8Block32,
+        TileRow, f16_at, iq2_xxs_words, iq4_xs_sub_scale, row_scale,
     };
 
     // byte b of each 32-bit sign word spread over lanes 8b..8b+8, then each lane's bit
@@ -1052,6 +1125,57 @@ mod avx2 {
         row_scale(row) * hsum(acc)
     }
 
+    // sub-block `ib32` of an IQ2_XXS block: its 32 unsigned grid values, their signs as +1 / -1 bytes, and its scale
+    #[target_feature(enable = "avx2,fma")]
+    fn iq2_xxs_sub(block: &[u8], ib32: usize) -> (__m256i, __m256i, __m256i) {
+        let (grid, word) = iq2_xxs_words(block, ib32);
+        let at = |l: usize| IQ2XXS_GRID[usize::from(grid[l])] as i64;
+        let sign = |l: usize| IQ2_XXS_SIGNS[((word >> (7 * l)) & 127) as usize] as i64;
+        (
+            _mm256_set_epi64x(at(3), at(2), at(1), at(0)),
+            _mm256_set_epi64x(sign(3), sign(2), sign(1), sign(0)),
+            _mm256_set1_epi16(2 * (word >> 28) as i16 + 1),
+        )
+    }
+
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) fn iq2_xxs_one(row: &[u8], ys: &[BlockQ8K]) -> f32 {
+        let mut acc = _mm256_setzero_ps();
+        for (block, y) in row.as_chunks::<IQ2_XXS_BYTES>().0.iter().zip(ys) {
+            prefetch_ahead(block, 1);
+            let q8 = y.qs();
+            let mut sumi = _mm256_setzero_si256();
+            for ib32 in 0..QK_K / 32 {
+                let (q2, signs, scale) = iq2_xxs_sub(block, ib32);
+                let q8 = _mm256_sign_epi8(load_q8(&q8[32 * ib32..]), signs);
+                sumi =
+                    _mm256_add_epi32(sumi, _mm256_madd_epi16(_mm256_maddubs_epi16(q2, q8), scale));
+            }
+            let d = _mm256_set1_ps(f16_at(block, 0) * y.d());
+            acc = _mm256_fmadd_ps(d, _mm256_cvtepi32_ps(sumi), acc);
+        }
+        IQ2_XXS_SCALE * hsum(acc)
+    }
+
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) fn decode_iq2_xxs(rows: &[u8], w: &mut [i16], d: &mut [f32]) {
+        let blocks = rows.as_chunks::<IQ2_XXS_BYTES>().0;
+        for ((block, w), d) in blocks.iter().zip(w.as_chunks_mut::<QK_K>().0).zip(d) {
+            *d = IQ2_XXS_SCALE * f16_at(block, 0);
+            for ib32 in 0..QK_K / 32 {
+                let (q2, signs, scale) = iq2_xxs_sub(block, ib32);
+                // grid values reach 43, so they stay positive as i8 and take their signs there
+                let q2 = _mm256_sign_epi8(q2, signs);
+                store_scaled(&mut w[32 * ib32..], _mm256_castsi256_si128(q2), scale);
+                store_scaled(
+                    &mut w[32 * ib32 + 16..],
+                    _mm256_extracti128_si256(q2, 1),
+                    scale,
+                );
+            }
+        }
+    }
+
     #[target_feature(enable = "avx2,fma")]
     pub(super) fn iq3_s_one(row: &[u8], ys: &[BlockQ8K]) -> f32 {
         let sign_bytes = load(&SIGN_BYTES);
@@ -1371,6 +1495,32 @@ mod avx2 {
     }
 
     #[target_feature(enable = "avx2,fma")]
+    pub(super) fn iq2_xxs_x4(row: &[u8], ys: [&[BlockQ8K]; 4]) -> [f32; 4] {
+        let mut acc = [_mm256_setzero_ps(); 4];
+        for (i, block) in row.as_chunks::<IQ2_XXS_BYTES>().0.iter().enumerate() {
+            prefetch_ahead(block, 1);
+            let yb = [&ys[0][i], &ys[1][i], &ys[2][i], &ys[3][i]];
+            let mut sumi = [_mm256_setzero_si256(); 4];
+            for ib32 in 0..QK_K / 32 {
+                let (q2, signs, scale) = iq2_xxs_sub(block, ib32);
+                four_rows!(a, sumi, yb, 32 * ib32, |q8| _mm256_madd_epi16(
+                    _mm256_maddubs_epi16(q2, _mm256_sign_epi8(q8, signs)),
+                    scale
+                ));
+            }
+            let d = f16_at(block, 0);
+            for t in 0..4 {
+                acc[t] = _mm256_fmadd_ps(
+                    _mm256_set1_ps(d * yb[t].d()),
+                    _mm256_cvtepi32_ps(sumi[t]),
+                    acc[t],
+                );
+            }
+        }
+        acc.map(|a| IQ2_XXS_SCALE * hsum(a))
+    }
+
+    #[target_feature(enable = "avx2,fma")]
     pub(super) fn iq3_s_x4(row: &[u8], ys: [&[BlockQ8K]; 4]) -> [f32; 4] {
         let sign_bytes = load(&SIGN_BYTES);
         let sign_bits = load(&SIGN_BITS);
@@ -1507,6 +1657,7 @@ mod tests {
             (GgufType::Iq4Xs, IQ4_XS_BYTES),
             (GgufType::Iq3S, IQ3_S_BYTES),
             (GgufType::Iq4Kss, IQ4_KSS_BYTES),
+            (GgufType::Iq2Xxs, IQ2_XXS_BYTES),
         ] {
             for seed in 0..4 {
                 let row = match ty {
@@ -1517,6 +1668,7 @@ mod tests {
                 let generic = match ty {
                     GgufType::Iq4Xs => iq4_xs_generic(&row, &ys),
                     GgufType::Iq4Kss => iq4_kss_generic(&row, &ys),
+                    GgufType::Iq2Xxs => iq2_xxs_generic(&row, &ys),
                     _ => iq3_s_generic(&row, &ys),
                 };
                 let tolerance = 1e-3 * expected.abs().max(1.0);
@@ -1606,6 +1758,7 @@ mod tests {
             (GgufType::Iq4Xs, IQ4_XS_BYTES),
             (GgufType::Iq3S, IQ3_S_BYTES),
             (GgufType::Iq4Kss, IQ4_KSS_BYTES),
+            (GgufType::Iq2Xxs, IQ2_XXS_BYTES),
         ] {
             if !tile_supports(ty) {
                 continue;
@@ -1637,6 +1790,7 @@ mod bench {
     #[ignore = "benchmark"]
     fn single_thread_rate() {
         for (ty, size) in [
+            (GgufType::Iq2Xxs, IQ2_XXS_BYTES),
             (GgufType::Iq3S, IQ3_S_BYTES),
             (GgufType::Iq4Xs, IQ4_XS_BYTES),
             (GgufType::Iq4Kss, IQ4_KSS_BYTES),
@@ -1764,6 +1918,7 @@ mod bench {
         const TOKENS: usize = 16;
         const ITERS: usize = 20_000;
         for (ty, size, cols) in [
+            (GgufType::Iq2Xxs, IQ2_XXS_BYTES, 1024),
             (GgufType::Iq3S, IQ3_S_BYTES, 2048),
             (GgufType::Iq4Xs, IQ4_XS_BYTES, 512),
             (GgufType::Iq4Kss, IQ4_KSS_BYTES, 2048),
