@@ -5,7 +5,7 @@
 
 use std::{collections::HashMap, sync::Arc, sync::Mutex};
 
-use inference_quant::{QuantMethod, ShardedVarBuilder};
+use inference_quant::{IsqType, QuantMethod, QuantizeOntoGuard, ShardedVarBuilder};
 use inference_tensor::{D, Device, Result, Tensor};
 
 use crate::{
@@ -192,6 +192,8 @@ pub struct MtpHead<B: MtpBlock = StandardMtpBlock> {
     dtype: inference_tensor::DType,
     placeholder_kv: Mutex<KvCache>,
     n_predict: usize,
+    // the target's `lm_head` at the drafts' own weight type; verification keeps the target's
+    draft_lm_head: Option<Arc<dyn QuantMethod>>,
     capture: Mutex<Option<Capture>>,
     // the last prompt row's hidden state, whose next token is only known once it is sampled
     pending_tails: Mutex<HashMap<usize, (usize, Tensor)>>,
@@ -306,6 +308,7 @@ impl<B: MtpBlock> MtpHead<B> {
             dtype: parts.dtype,
             placeholder_kv: Mutex::new(KvCache::new_normal(PLACEHOLDER_KV_DIM, 1, 1)),
             n_predict: 0,
+            draft_lm_head: None,
             capture: Mutex::new(None),
             pending_tails: Mutex::new(HashMap::new()),
             #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -315,6 +318,27 @@ impl<B: MtpBlock> MtpHead<B> {
 
     pub fn n_predict(&self) -> usize {
         self.n_predict
+    }
+
+    /// Drafts through a copy of `lm_head` quantized to `isq`; `None` drafts through the target's own head.
+    pub fn set_draft_lm_head(
+        &mut self,
+        lm_head: &Arc<dyn QuantMethod>,
+        isq: Option<IsqType>,
+    ) -> Result<()> {
+        let device = lm_head.dtype_and_device().1;
+        self.draft_lm_head = isq
+            .map(|isq| {
+                lm_head.clone().apply_isq(
+                    Some(isq),
+                    device.clone(),
+                    &std::sync::atomic::AtomicUsize::new(0),
+                    None,
+                    QuantizeOntoGuard::new(),
+                )
+            })
+            .transpose()?;
+        Ok(())
     }
 
     pub fn set_n_predict(&mut self, n_predict: usize) {
@@ -575,6 +599,7 @@ impl<B: MtpBlock> MtpHead<B> {
         lm_head: &dyn QuantMethod,
         ctx: SpeculativeProposeBatchCtx<'_>,
     ) -> Result<Option<SpeculativeProposalBatch>> {
+        let lm_head = self.draft_lm_head.as_deref().unwrap_or(lm_head);
         let n_predict = ctx.proposal_len;
         let batch = ctx.sequences.len();
         if batch == 0 || n_predict == 0 {

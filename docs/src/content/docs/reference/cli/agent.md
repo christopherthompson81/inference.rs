@@ -77,7 +77,7 @@ inference agent [OPTIONS] [COMMAND]
 | `--mtp-auto-depth` | `false` | Draft the depth that has paid best so far each step, from acceptance and measured step time |
 | `--mtp-greedy-tolerance <NATS>` |  | Greedy verification also accepts an MTP draft whose logit is within this many nats of the target's top one (a near-tie), so output is no longer bit-exact greedy; off (0) by default |
 | `--mtp-draft-sampling <MTP_DRAFT_SAMPLING>` | `auto` | MTP draft sampling policy. Auto uses probabilistic DFlash2 drafting when supported. Possible values: `auto`, `greedy`, `probabilistic`. |
-| `--mtp-draft-isq <MTP_DRAFT_ISQ>` |  | Weight type of the MTP assistant model, e.g. q4k or q8_0; unset, the model's ISQ (a GGUF's drafter stays BF16) |
+| `--mtp-draft-isq <MTP_DRAFT_ISQ>` |  | Weight type of the MTP assistant model, or of a built-in MTP head's draft-only lm_head copy, e.g. q5_0 or q8_0; unset, the model's ISQ (a GGUF's drafter stays BF16) and the built-in head drafts through the target's lm_head |
 | `--mcp-config <MCP_CONFIG>` |  | Path to an MCP client configuration JSON. Also reads `MCP_CONFIG_PATH` if unset |
 | `--sandbox <MODE>` | `auto` | Sandbox mode. Possible values: `auto`, `on`, `off`. |
 | `--sandbox-profile <PROFILE>` |  | Sandbox policy profile. Possible values: `restricted`, `developer`. |

@@ -23,7 +23,8 @@ pub struct MtpConfig {
     /// ISQ type for a draft-only copy of `lm_head`, so drafting skips the promoted (wider)
     /// sensitive-tensor type; the target still verifies with the promoted head.
     pub draft_lm_head_isq: Option<inference_quant::IsqType>,
-    /// An assistant drafter's own weight type (DFlash); unset, the draft head's (`draft_lm_head_isq`).
+    /// An assistant drafter's own weight type (DFlash; unset, `draft_lm_head_isq`), or a built-in head's draft-only
+    /// `lm_head` copy's (unset, it drafts through the target's).
     pub drafter_isq: Option<inference_quant::IsqType>,
     /// Each step drafts the depth that has paid best, up to `n_predict` (unset, the proposer's largest
     /// automatic depth), instead of always `n_predict`.

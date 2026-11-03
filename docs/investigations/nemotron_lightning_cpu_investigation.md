@@ -173,3 +173,26 @@ kernels, for up to 32 activation rows; longer batches keep the dequantized matmu
 plain decode for 1.6x the KLD; r2 adds only 2 % more for another 1.5x, and its MTP is no faster than plain. MTP's
 gain shrinks as the non-expert bytes shrink (r0 +14 %, r1 +7 %), since the verify step's extra cost is in the
 routed experts and fixed per-step overhead, not in the matrices every token reads once.
+
+## Run 10 - 2026-11-03 ~13:00
+
+**Goal:** the fastest decode with KLD under 0.01. MTP verification is exact, so the MTP head and the draft path cost
+no KLD.
+
+**Recipes:** A = routed and shared experts Q5_0, the rest Q8_0: 21.7 GiB, KLD 0.0090, top-1 96.2 %, PPL 6.544.
+B = routed up Q5_0, down IQ4_NL: KLD 0.0103, and slower than A (15.5 against 16.2 tok/s plain) despite fewer
+bytes. llama.cpp decodes A at 18.35 tok/s (tg128, 8 threads).
+
+**Where an MTP 2 step goes (A, 131 ms):** propose 22 ms (two drafts, each reading the 375 MB Q8_0 `lm_head`),
+commit / Mamba replay 4 ms, the verify forward the rest.
+**Change:** `--mtp-draft-isq` (`MtpConfig.drafter_isq`) also gives a built-in MTP head a draft-only `lm_head` copy
+at that type; verification keeps the target's. Q5_0: propose 16.6 ms, MTP 2 18.3 -> 20.0 tok/s, acceptance
+unchanged. Q4_0 is no faster (no repacked kernel) and accepts less; depth 3 does not beat depth 2.
+
+**Plain decode overhead:** a pool-call timer showed 84 % of a token inside barrier-pool calls (the kernels, near
+bandwidth) and 16 % (10 ms) between them on the main thread. The Mamba scan and conv step dispatched on rayon,
+whose threads wake beside the pool's spinning workers for every layer.
+**Change:** both run on the barrier pool, and the scan writes its output in place. Between-call time fell to 9 %.
+
+**A/B (same thermal state, recipe A):** plain 15.95 -> 16.84 tok/s; MTP 2 with the Q5_0 draft head 19.02 -> 19.39.
+The machine ran ~4 % slower than at Run 9 by then; MTP's per-prompt spread (15.8 to 22.1) is the prompts' acceptance.

@@ -1961,6 +1961,7 @@ impl<A: LayerAttention, F: LayerFfn> crate::speculative::SpeculativeTargetMixin 
         if n_predict == 0 {
             inference_tensor::bail!("MTP needs at least one draft token");
         }
+        mtp.set_draft_lm_head(&self.lm_head, config.drafter_isq)?;
         mtp.set_n_predict(n_predict);
         Ok(Some(crate::speculative::SpeculativeAttachInfo::mtp(
             "built-in".to_string(),

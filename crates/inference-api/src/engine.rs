@@ -478,7 +478,8 @@ pub struct MtpSpec {
     pub auto_depth: bool,
     #[serde(default)]
     pub draft_sampling: MtpDraftSampling,
-    /// The assistant model's weight type, e.g. `q4k` or `q8_0`; unset, the model's ISQ (none for a GGUF, so BF16).
+    /// The assistant model's weight type, or a built-in head's draft-only `lm_head` copy's, e.g. `q5_0`; unset, the
+    /// model's ISQ (none for a GGUF, so BF16) and a built-in head drafts through the target's `lm_head`.
     #[serde(default)]
     pub draft_isq: Option<String>,
     /// Greedy verification also accepts a draft within this many nats of the target's top logit, so greedy output is
