@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Canonical local checks with fixed package/feature sets: scripts/local_ci.sh [--lint] [--tests] [--cuda] [--metal]
-# [--slim] [--docs|--docs-all] [--bindings] [--size|--size-update]. Real-checkpoint tests are not run here:
+# [--vulkan] [--slim] [--docs|--docs-all] [--bindings] [--size|--size-update]. Real-checkpoint tests are not run here:
 # scripts/deep_checks.sh runs them on request.
 # --metal is the macOS counterpart of --cuda: the metal-only code paths are invisible to a CPU or CUDA lint.
+# --vulkan lints and tests inference-vulkan with its `vulkan` feature (needs glslc; the GPU tests skip without a device).
 # --slim lints inference-core with no model families and with each family alone, so feature gates stay intact; it is
 # skipped when nothing inference-core builds on differs from origin/master.
 # With --cuda, the GPU-bound CUDA suite runs in the background while the CPU lint and tests run; the binding tests run
@@ -22,6 +23,7 @@ lint=0
 tests=0
 cuda=0
 metal=0
+vulkan=0
 slim=0
 docs=0
 docs_all=0
@@ -35,6 +37,7 @@ for arg in "$@"; do
         --tests) tests=1 ;;
         --cuda) cuda=1 ;;
         --metal) metal=1 ;;
+        --vulkan) vulkan=1 ;;
         --slim) slim=1 ;;
         --docs) docs=1 ;;
         --docs-all) docs=1 docs_all=1 ;;
@@ -45,7 +48,7 @@ for arg in "$@"; do
         *) echo "unknown option $arg" >&2; exit 2 ;;
     esac
 done
-[[ $((lint + tests + cuda + metal + slim + docs + bindings + size)) -eq 0 ]] && lint=1 && tests=1
+[[ $((lint + tests + cuda + metal + vulkan + slim + docs + bindings + size)) -eq 0 ]] && lint=1 && tests=1
 
 # --examples compile-checks the examples (tests only link the smoke set below); --bins checks bins without dev-deps, like CI.
 CLIPPY=(clippy --workspace --bins --tests --examples)
@@ -113,6 +116,10 @@ if [[ $metal -eq 1 ]]; then
     # Metal and the CPU suite share one chip, so this runs in series rather than beside them like the CUDA suite
     cargo "${CLIPPY[@]}" --features metal -- -D warnings || failed=1
     cargo nextest run --no-fail-fast --profile metal --features metal "${TEST_TARGETS[@]}" || failed=1
+fi
+if [[ $vulkan -eq 1 ]]; then
+    cargo clippy -p inference-vulkan --features vulkan --tests -- -D warnings || failed=1
+    cargo nextest run --no-fail-fast -p inference-vulkan --features vulkan || failed=1
 fi
 if [[ $lint -eq 1 ]]; then
     cargo "${CLIPPY[@]}" -- -D warnings || failed=1

@@ -1,0 +1,79 @@
+#version 450
+// y = W x for a Q8_0 W (`rows x cols`, rows of 34-byte blocks: an f16 scale, 32 int8 values), f32 x and y.
+// Each workgroup takes `ROWS` rows; its threads stride over a row's blocks, then reduce through shared memory.
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer W { uint16_t w[]; };
+layout(std430, binding = 1) readonly buffer X { float x[]; };
+layout(std430, binding = 2) writeonly buffer Y { float y[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint rows;
+    uint cols;
+    // element offsets into the bound buffers: `w` in u16s, `x` and `y` in floats
+    uint w_base;
+    uint x_base;
+    uint y_base;
+    // workgroups per grid row, the grid's second dimension carrying what one dimension's limit cannot
+    uint groups_x;
+} pc;
+
+const uint THREADS = 64;
+const uint QK = 32;
+const uint BLOCK_U16 = 17;
+const uint ROWS = 2;
+
+shared float partial[ROWS][THREADS];
+
+void main() {
+    uint row0 = (gl_WorkGroupID.y * pc.groups_x + gl_WorkGroupID.x) * ROWS;
+    uint tid = gl_LocalInvocationID.x;
+    uint blocks = pc.cols / QK;
+    float acc[ROWS];
+    for (uint r = 0; r < ROWS; r++) {
+        acc[r] = 0.0;
+    }
+    for (uint b = tid; b < blocks; b += THREADS) {
+        float xs[QK];
+        uint xb = pc.x_base + b * QK;
+        for (uint i = 0; i < QK; i++) {
+            xs[i] = x[xb + i];
+        }
+        for (uint r = 0; r < ROWS; r++) {
+            uint row = row0 + r;
+            if (row >= pc.rows) {
+                break;
+            }
+            uint base = pc.w_base + (row * blocks + b) * BLOCK_U16;
+            float d = unpackHalf2x16(uint(w[base])).x;
+            float s = 0.0;
+            for (uint j = 0; j < QK / 2; j++) {
+                uint v = uint(w[base + 1 + j]);
+                // the two int8 values a u16 holds, sign-extended
+                s += float(int(v << 24) >> 24) * xs[2 * j] + float(int(v << 16) >> 24) * xs[2 * j + 1];
+            }
+            acc[r] += d * s;
+        }
+    }
+    for (uint r = 0; r < ROWS; r++) {
+        partial[r][tid] = acc[r];
+    }
+    barrier();
+    for (uint stride = THREADS / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            for (uint r = 0; r < ROWS; r++) {
+                partial[r][tid] += partial[r][tid + stride];
+            }
+        }
+        barrier();
+    }
+    if (tid == 0) {
+        for (uint r = 0; r < ROWS; r++) {
+            if (row0 + r < pc.rows) {
+                y[pc.y_base + row0 + r] = partial[r][0];
+            }
+        }
+    }
+}
