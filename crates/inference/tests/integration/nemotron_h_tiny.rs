@@ -273,6 +273,20 @@ async fn a_long_prompt_on_quantized_experts_scores_as_its_decode() -> anyhow::Re
     .await
 }
 
+// a CPU-only build runs paged attention on the CPU: decode steps through the block tables, the prompt through a gather
+#[tokio::test]
+async fn a_long_prompt_scores_as_its_cpu_paged_decode() -> anyhow::Result<()> {
+    if cfg!(any(feature = "cuda", feature = "metal")) {
+        return Ok(());
+    }
+    decode_scores_as_prefill(
+        None,
+        &"say something long ".repeat(LONG_PROMPT_REPEATS),
+        Target::CpuPaged,
+    )
+    .await
+}
+
 // on CUDA through the hybrid cache and the scan kernel at a state narrower than a warp (grouped mmq against the gather
 // path is a GPU case of the experts' backends: quantized, prefill and decode differ by the activations' rounding)
 #[tokio::test]
@@ -311,6 +325,7 @@ async fn a_long_prompt_scores_as_its_graph_decode() -> anyhow::Result<()> {
 enum Target {
     Cpu,
     CpuLatent,
+    CpuPaged,
     Cuda,
     CudaGraphs,
 }
@@ -326,20 +341,20 @@ impl Target {
                 head_dim: HEAD_DIM,
                 latent: Some(LATENT_WIDTH),
             },
-            Self::Cpu | Self::Cuda => Shape::BASE,
+            Self::Cpu | Self::CpuPaged | Self::Cuda => Shape::BASE,
         }
     }
 
     fn dtype(self) -> ModelDType {
         match self {
             Self::CudaGraphs => ModelDType::BF16,
-            Self::Cpu | Self::CpuLatent | Self::Cuda => ModelDType::F32,
+            Self::Cpu | Self::CpuLatent | Self::CpuPaged | Self::Cuda => ModelDType::F32,
         }
     }
 
     fn tolerance(self) -> f32 {
         match self {
-            Self::Cpu | Self::CpuLatent => LOGPROB_TOLERANCE,
+            Self::Cpu | Self::CpuLatent | Self::CpuPaged => LOGPROB_TOLERANCE,
             Self::Cuda => CUDA_LOGPROB_TOLERANCE,
             Self::CudaGraphs => BF16_LOGPROB_TOLERANCE,
         }
@@ -410,6 +425,11 @@ async fn decode_scores_as_prefill(
         .with_prefix_cache_n(None);
     match target {
         Target::Cpu | Target::CpuLatent => builder = builder.with_force_cpu(),
+        Target::CpuPaged => {
+            builder = builder
+                .with_force_cpu()
+                .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        }
         Target::CudaGraphs => {
             builder =
                 builder.with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)

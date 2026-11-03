@@ -3230,6 +3230,7 @@ dependencies = [
  "inference-metal-compile",
  "inference-tensor",
  "objc2-metal",
+ "rayon",
  "thiserror 2.0.18",
 ]
 

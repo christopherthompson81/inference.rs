@@ -371,7 +371,8 @@ pub fn get_device_layers(
             over
         );
     }
-    if has_paged_attn && includes_cpu {
+    if has_paged_attn && includes_cpu && !inference_nn::utils::paged_attn_supported_on(&Device::Cpu)
+    {
         let original_layers = layer_sizes_backup
             .take()
             .expect("layer sizes backup missing for paged attention fallback");

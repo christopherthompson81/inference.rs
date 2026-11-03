@@ -1243,11 +1243,11 @@ fn configure_paged_attn(device: &Device, paged_attn: Option<bool>) -> bool {
     if inference_core::distributed::use_nccl() {
         paged_attn.unwrap_or(defaults::PAGED_ATTN_CUDA)
     } else if device.is_cpu() {
-        if paged_attn == Some(true) {
-            warn!("Paged attention is not supported on CPU.");
+        let supported = inference_core::paged_attn_supported_on(device);
+        if paged_attn == Some(true) && !supported {
+            warn!("Paged attention runs on the CPU only in CPU-only builds.");
         }
-
-        defaults::PAGED_ATTN_CPU
+        supported && paged_attn.unwrap_or(defaults::PAGED_ATTN_CPU)
     } else if device.is_cuda() {
         paged_attn.unwrap_or(defaults::PAGED_ATTN_CUDA)
     } else if device.is_metal() {
