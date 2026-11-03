@@ -83,3 +83,50 @@ pub fn moe_router(route: &Route<'_>) -> Result<(Tensor, Tensor)> {
         Err(crate::Error::NotCompiledWithVulkanSupport)
     }
 }
+
+/// Writes `key` and `value` rows `(tokens, kv_heads, head_size)` into f32 vLLM-layout caches at the i64
+/// `slot_mapping` (a negative slot skipped), in place.
+pub fn paged_cache_write(
+    key: &Tensor,
+    value: &Tensor,
+    key_cache: &Tensor,
+    value_cache: &Tensor,
+    slot_mapping: &Tensor,
+) -> Result<()> {
+    #[cfg(feature = "vulkan")]
+    return crate::vulkan_backend::paged_cache_write(
+        key,
+        value,
+        key_cache,
+        value_cache,
+        slot_mapping,
+    );
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = (key, value, key_cache, value_cache, slot_mapping);
+        Err(crate::Error::NotCompiledWithVulkanSupport)
+    }
+}
+
+/// One query a sequence (`q` `(seqs, heads, head_size)`) against f32 vLLM-layout caches through u32 `block_tables`
+/// `(seqs, max_blocks)` over u32 `context_lens`, softmax-scaled by `scale`; or `None` past the kernel's longest
+/// context.
+pub struct PagedDecode<'a> {
+    pub q: &'a Tensor,
+    pub key_cache: &'a Tensor,
+    pub value_cache: &'a Tensor,
+    pub block_tables: &'a Tensor,
+    pub context_lens: &'a Tensor,
+    pub max_context: usize,
+    pub scale: f32,
+}
+
+pub fn paged_decode(op: &PagedDecode<'_>) -> Result<Option<Tensor>> {
+    #[cfg(feature = "vulkan")]
+    return crate::vulkan_backend::paged_decode(op);
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = op;
+        Err(crate::Error::NotCompiledWithVulkanSupport)
+    }
+}

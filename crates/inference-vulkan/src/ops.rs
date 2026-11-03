@@ -449,3 +449,136 @@ impl Recorder<'_> {
         Ok(())
     }
 }
+
+pub(crate) const PAGED_WRITE_BINDINGS: usize = 5;
+pub(crate) const PAGED_WRITE_PUSH_BYTES: u32 = 8 * 4;
+pub(crate) const PAGED_DECODE_BINDINGS: usize = 6;
+pub(crate) const PAGED_DECODE_PUSH_BYTES: u32 = 10 * 4;
+// the decode shader's limits: shared scores and query
+const MAX_PAGED_CONTEXT: usize = 8192;
+const MAX_PAGED_HEAD: usize = 256;
+
+/// The geometry of a pair of f32 vLLM-layout caches: keys `[blocks, kv_heads, head_size / x, block_size, x]`, values
+/// `[blocks, kv_heads, head_size, block_size]`.
+#[derive(Clone, Copy, Debug)]
+pub struct CacheShape {
+    pub kv_heads: usize,
+    pub head_size: usize,
+    pub block_size: usize,
+    pub x: usize,
+}
+
+/// Writes `tokens` key and value rows `(tokens, kv_heads, head_size)` into the caches at the i64 `slots`.
+pub struct PagedWrite<'a> {
+    pub shape: CacheShape,
+    pub tokens: usize,
+    pub key: At<'a>,
+    pub value: At<'a>,
+    pub key_cache: &'a Arc<HostBuffer>,
+    pub value_cache: &'a Arc<HostBuffer>,
+    pub slots: At<'a>,
+}
+
+/// One query `(seqs, heads, head_size)` a sequence over its `context_lens` cached positions through `block_tables`
+/// (`(seqs, max_blocks)` u32); `out` is laid out as the queries.
+pub struct PagedDecode<'a> {
+    pub shape: CacheShape,
+    pub seqs: usize,
+    pub heads: usize,
+    pub max_blocks: usize,
+    pub max_context: usize,
+    pub scale: f32,
+    pub q: At<'a>,
+    pub key_cache: &'a Arc<HostBuffer>,
+    pub value_cache: &'a Arc<HostBuffer>,
+    pub block_tables: At<'a>,
+    pub context_lens: At<'a>,
+    pub out: &'a Arc<HostBuffer>,
+}
+
+impl Recorder<'_> {
+    pub fn paged_cache_write(&self, op: &PagedWrite<'_>) -> Result<()> {
+        let s = op.shape;
+        if op.tokens == 0 {
+            return Ok(());
+        }
+        let bytes = words(&[
+            op.tokens,
+            s.kv_heads,
+            s.head_size,
+            s.block_size,
+            s.x,
+            op.key.1,
+            op.value.1,
+            op.slots.1 * 2,
+        ])?;
+        let buffers = [
+            op.key.0,
+            op.value.0,
+            op.key_cache,
+            op.value_cache,
+            op.slots.0,
+        ];
+        let groups = (op.tokens * s.kv_heads * s.head_size)
+            .div_ceil(INDEX_THREADS)
+            .min(MAX_GROUPS) as u32;
+        self.context.kernels.paged_cache_write.dispatch(
+            self,
+            &buffers.map(|b| b.buffer),
+            &bytes,
+            [groups, 1, 1],
+        );
+        for buffer in buffers {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+
+    pub fn paged_decode(&self, op: &PagedDecode<'_>) -> Result<()> {
+        let s = op.shape;
+        if op.max_context > MAX_PAGED_CONTEXT
+            || s.head_size > MAX_PAGED_HEAD
+            || !op.heads.is_multiple_of(s.kv_heads)
+        {
+            return Err(Error::Invalid(format!(
+                "paged decode of {} heads over {} kv heads, head size {}, context {}",
+                op.heads, s.kv_heads, s.head_size, op.max_context
+            )));
+        }
+        if op.seqs == 0 {
+            return Ok(());
+        }
+        let mut bytes = words(&[
+            op.heads,
+            s.kv_heads,
+            s.head_size,
+            s.block_size,
+            s.x,
+            op.max_blocks,
+        ])?;
+        bytes.extend_from_slice(&op.scale.to_bits().to_le_bytes());
+        bytes.extend(words(&[op.q.1, op.block_tables.1, op.context_lens.1])?);
+        let buffers = [
+            op.q.0,
+            op.key_cache,
+            op.value_cache,
+            op.block_tables.0,
+            op.context_lens.0,
+            op.out,
+        ];
+        let groups = (op.seqs * op.heads) as u32;
+        self.context.kernels.paged_decode.dispatch(
+            self,
+            &buffers.map(|b| b.buffer),
+            &bytes,
+            [groups, 1, 1],
+        );
+        for buffer in buffers {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+}
+
+/// The longest context [`Recorder::paged_decode`] takes.
+pub const PAGED_DECODE_MAX_CONTEXT: usize = MAX_PAGED_CONTEXT;

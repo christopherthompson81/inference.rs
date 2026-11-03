@@ -1252,6 +1252,8 @@ fn configure_paged_attn(device: &Device, paged_attn: Option<bool>) -> bool {
         paged_attn.unwrap_or(defaults::PAGED_ATTN_CUDA)
     } else if device.is_metal() {
         paged_attn.unwrap_or(defaults::PAGED_ATTN_METAL)
+    } else if device.is_vulkan() {
+        inference_core::paged_attn_supported_on(device) && paged_attn.unwrap_or(false)
     } else {
         false
     }

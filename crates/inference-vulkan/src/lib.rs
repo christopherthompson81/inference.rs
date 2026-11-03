@@ -19,7 +19,8 @@ pub use kernels::{BlockType, MatVec};
 pub use map::{MAX_DIMS, Map, MapOp, Operand};
 pub use memory::{Bound, HostBuffer, ImportedMemory};
 pub use ops::{
-    At, ConvStep, MatMul, MatOperand, MoeMatVec, Router, RouterFn, RowOp, Rows, ScanStep, Select,
+    At, CacheShape, ConvStep, MatMul, MatOperand, MoeMatVec, PAGED_DECODE_MAX_CONTEXT, PagedDecode,
+    PagedWrite, Router, RouterFn, RowOp, Rows, ScanStep, Select,
 };
 pub use stream::Retained;
 

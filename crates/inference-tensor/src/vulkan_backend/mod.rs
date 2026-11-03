@@ -610,6 +610,108 @@ pub(crate) fn expert_mat_vec(
     Ok(tensor_of(out, (slots, rows)))
 }
 
+// the geometry of f32 vLLM-layout caches, keys `[blocks, kv_heads, head_size / x, block_size, x]`
+fn cache_shape(key_cache: &Tensor, value_cache: &Tensor) -> Result<inference_vulkan::CacheShape> {
+    let (_, kv_heads, _, block_size, x) = key_cache.dims5()?;
+    let (_, _, head_size, _) = value_cache.dims4()?;
+    Ok(inference_vulkan::CacheShape {
+        kv_heads,
+        head_size,
+        block_size,
+        x,
+    })
+}
+
+pub(crate) fn paged_cache_write(
+    key: &Tensor,
+    value: &Tensor,
+    key_cache: &Tensor,
+    value_cache: &Tensor,
+    slot_mapping: &Tensor,
+) -> Result<()> {
+    let shape = cache_shape(key_cache, value_cache)?;
+    let tokens = key.dim(0)?;
+    let f32 = DType::F32;
+    let (k, v) = (
+        bound(&key.contiguous()?, f32)?,
+        bound(&value.contiguous()?, f32)?,
+    );
+    let (kc, vc) = (bound(key_cache, f32)?, bound(value_cache, f32)?);
+    let slots = slot_mapping
+        .to_device(key.device())?
+        .to_dtype(DType::I64)?
+        .contiguous()?;
+    let sb = match &*slots.storage() {
+        crate::Storage::Vulkan(s) => (s.buffer.clone(), slots.layout().start_offset()),
+        _ => crate::bail!("paged_cache_write: the slots are not on the Vulkan device"),
+    };
+    let device = key.device().as_vulkan_device()?.clone();
+    device
+        .context
+        .record(|r| {
+            r.paged_cache_write(&inference_vulkan::PagedWrite {
+                shape,
+                tokens,
+                key: (&k.0, k.1),
+                value: (&v.0, v.1),
+                key_cache: &kc.0,
+                value_cache: &vc.0,
+                slots: (&sb.0, sb.1),
+            })
+        })
+        .map_err(vk_err)
+}
+
+pub(crate) fn paged_decode(op: &crate::vulkan::PagedDecode<'_>) -> Result<Option<Tensor>> {
+    if op.max_context > inference_vulkan::PAGED_DECODE_MAX_CONTEXT {
+        return Ok(None);
+    }
+    let shape = cache_shape(op.key_cache, op.value_cache)?;
+    let (seqs, heads, head_size) = op.q.dims3()?;
+    let (_, max_blocks) = op.block_tables.dims2()?;
+    let f32 = DType::F32;
+    let device = op.q.device().as_vulkan_device()?.clone();
+    let on_device = |t: &Tensor| -> Result<Tensor> {
+        t.to_device(op.q.device())?
+            .to_dtype(DType::U32)?
+            .contiguous()
+    };
+    let (tables, lens) = (on_device(op.block_tables)?, on_device(op.context_lens)?);
+    let (q, kc, vc) = (
+        bound(&op.q.contiguous()?, f32)?,
+        bound(op.key_cache, f32)?,
+        bound(op.value_cache, f32)?,
+    );
+    let (tb, lb) = (bound(&tables, DType::U32)?, bound(&lens, DType::U32)?);
+    let count = seqs * heads * head_size;
+    let out = VulkanStorage {
+        buffer: Arc::new(device.buffer(count * 4)?),
+        device: device.clone(),
+        count,
+        dtype: f32,
+    };
+    device
+        .context
+        .record(|r| {
+            r.paged_decode(&inference_vulkan::PagedDecode {
+                shape,
+                seqs,
+                heads,
+                max_blocks,
+                max_context: op.max_context,
+                scale: op.scale,
+                q: (&q.0, q.1),
+                key_cache: &kc.0,
+                value_cache: &vc.0,
+                block_tables: (&tb.0, tb.1),
+                context_lens: (&lb.0, lb.1),
+                out: &out.buffer,
+            })
+        })
+        .map_err(vk_err)?;
+    Ok(Some(tensor_of(out, (seqs, heads, head_size))))
+}
+
 // the stride between batches of a matmul operand whose batch dims (all but its last two) collapse into one
 fn batch_stride(l: &Layout, batch: usize) -> Option<usize> {
     let (dims, strides) = (l.shape().dims(), l.stride());

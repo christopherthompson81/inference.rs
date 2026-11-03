@@ -1,0 +1,94 @@
+#version 450
+// One query a sequence against f32 vLLM-layout caches through its block table: a workgroup a (sequence, head)
+// scores every cached position into shared memory, softmaxes them, then its threads each sum a value dimension.
+
+layout(local_size_x = 128) in;
+
+layout(std430, binding = 0) readonly buffer Q { float q[]; };
+layout(std430, binding = 1) readonly buffer KC { float key_cache[]; };
+layout(std430, binding = 2) readonly buffer VC { float value_cache[]; };
+layout(std430, binding = 3) readonly buffer BT { uint block_tables[]; };
+layout(std430, binding = 4) readonly buffer CL { uint context_lens[]; };
+layout(std430, binding = 5) writeonly buffer O { float o[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint heads;
+    uint kv_heads;
+    uint head_size;
+    uint block_size;
+    uint x;
+    uint max_blocks;
+    float scale;
+    uint q_off;
+    uint tables_off;
+    uint lens_off;
+} pc;
+
+const uint THREADS = 128;
+// the longest context a workgroup's shared scores hold
+const uint MAX_CONTEXT = 8192;
+const uint MAX_HEAD = 256;
+
+shared float scores[MAX_CONTEXT];
+shared float qs[MAX_HEAD];
+shared float red[THREADS];
+
+void main() {
+    uint seq = gl_WorkGroupID.x / pc.heads;
+    uint h = gl_WorkGroupID.x % pc.heads;
+    uint kvh = h / (pc.heads / pc.kv_heads);
+    uint t = gl_LocalInvocationID.x;
+    uint len = context_lens[pc.lens_off + seq];
+    uint qb = pc.q_off + (seq * pc.heads + h) * pc.head_size;
+    for (uint d = t; d < pc.head_size; d += THREADS) {
+        qs[d] = q[qb + d];
+    }
+    barrier();
+    float m = -1.0 / 0.0;
+    for (uint j = t; j < len; j += THREADS) {
+        uint block = block_tables[pc.tables_off + seq * pc.max_blocks + j / pc.block_size];
+        uint off = j % pc.block_size;
+        uint kb = (block * pc.kv_heads + kvh) * (pc.head_size / pc.x);
+        float s = 0.0;
+        for (uint d = 0; d < pc.head_size; d++) {
+            s += qs[d] * key_cache[((kb + d / pc.x) * pc.block_size + off) * pc.x + d % pc.x];
+        }
+        s *= pc.scale;
+        scores[j] = s;
+        m = max(m, s);
+    }
+    red[t] = m;
+    barrier();
+    for (uint w = THREADS / 2; w > 0; w >>= 1) {
+        if (t < w) {
+            red[t] = max(red[t], red[t + w]);
+        }
+        barrier();
+    }
+    m = red[0];
+    barrier();
+    float sum = 0.0;
+    for (uint j = t; j < len; j += THREADS) {
+        float p = exp(scores[j] - m);
+        scores[j] = p;
+        sum += p;
+    }
+    red[t] = sum;
+    barrier();
+    for (uint w = THREADS / 2; w > 0; w >>= 1) {
+        if (t < w) {
+            red[t] += red[t + w];
+        }
+        barrier();
+    }
+    // as the CPU kernel: the denominator plus SOFTMAX_EPS
+    float inv = 1.0 / (red[0] + 1e-6);
+    for (uint d = t; d < pc.head_size; d += THREADS) {
+        float acc = 0.0;
+        for (uint j = 0; j < len; j++) {
+            uint block = block_tables[pc.tables_off + seq * pc.max_blocks + j / pc.block_size];
+            acc += scores[j] * value_cache[((block * pc.kv_heads + kvh) * pc.head_size + d) * pc.block_size + j % pc.block_size];
+        }
+        o[(seq * pc.heads + h) * pc.head_size + d] = acc * inv;
+    }
+}

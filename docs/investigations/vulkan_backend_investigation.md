@@ -149,3 +149,18 @@ the workgroup (12.5 us), and a matmul with a k of 64 or more gives each output a
 
 **Result (as Run 2):** decode 16.8 -> 22.8 tok/s (43.8 ms a token; llama.cpp's Vulkan backend: 22.2), prefill 79 tok/s.
 Per token now: Q8_0 matvecs ~20 ms, Q5_0 experts ~14 ms, the shared expert ~5 ms, everything else ~5 ms.
+
+### Run 10 - 2026-11-04 ~02:50
+
+**Change:** `paged_cache_write` (reshape_and_cache over f32 vLLM-layout caches, the i64 slots read on the GPU) and
+`paged_decode` (a workgroup a (sequence, head): scores into shared memory, softmax, then a value dimension a thread);
+the CPU-only build's paged-attention ops take them on Vulkan, the prompt's gather runs the CPU's on host copies, and
+`--paged-attn on` enables paged attention on Vulkan, so the MTP head attaches.
+
+**Tests:** `vulkan_paged_attention_matches_the_cpu` (cache bytes equal, decode within 1e-4);
+`an_mtp_head_drafts_on_vulkan_without_changing_greedy_output`.
+
+**Result (`--pa-context-len 8192`):** paged decode 22.8 tok/s, as non-paged; MTP 2 15.5 and MTP 3 15.4 tok/s. The
+GPU is busy 67 % of an MTP step: Mamba's multi-token path (verify and replay) still runs on the CPU, and each verify row
+is its own matvec dispatch, reading the weights once a row. Without `--pa-context-len` the cache is fitted to free memory
+and one layer's buffer passes the 4 GiB binding limit.

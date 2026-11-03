@@ -337,13 +337,30 @@ async fn an_mtp_head_drafts_on_the_cpu_without_changing_greedy_output() -> anyho
     if cfg!(any(feature = "cuda", feature = "metal")) {
         return Ok(());
     }
+    mtp_keeps_greedy_output(TextModelBuilder::with_force_cpu, LOGPROB_TOLERANCE).await
+}
+
+// as on the CPU, with Vulkan's paged cache writes and decode attention, its scan steps and its experts
+#[tokio::test]
+async fn an_mtp_head_drafts_on_vulkan_without_changing_greedy_output() -> anyhow::Result<()> {
+    if !cfg!(feature = "vulkan") || Device::new_vulkan(0).is_err() {
+        return Ok(());
+    }
+    mtp_keeps_greedy_output(|b| b.with_device("vulkan:0"), VULKAN_LOGPROB_TOLERANCE).await
+}
+
+async fn mtp_keeps_greedy_output(
+    place: fn(TextModelBuilder) -> TextModelBuilder,
+    tolerance: f32,
+) -> anyhow::Result<()> {
     let dir = checkpoint()?;
     let builder = || -> anyhow::Result<TextModelBuilder> {
-        Ok(TextModelBuilder::new(dir.path().to_string_lossy())
-            .with_dtype(ModelDType::F32)
-            .with_force_cpu()
-            .with_prefix_cache_n(None)
-            .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?))
+        Ok(place(
+            TextModelBuilder::new(dir.path().to_string_lossy())
+                .with_dtype(ModelDType::F32)
+                .with_prefix_cache_n(None),
+        )
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?))
     };
     let request = || {
         RequestBuilder::from(
@@ -367,7 +384,7 @@ async fn an_mtp_head_drafts_on_the_cpu_without_changing_greedy_output() -> anyho
         "every draft was accepted ({accepted}), so no replay ran"
     );
     anyhow::ensure!(
-        traces::close(&expected, &actual, LOGPROB_TOLERANCE),
+        traces::close(&expected, &actual, tolerance),
         "drafting changed greedy decoding ({accepted} of {proposed} drafts accepted): {expected:?} vs {actual:?}"
     );
     Ok(())
