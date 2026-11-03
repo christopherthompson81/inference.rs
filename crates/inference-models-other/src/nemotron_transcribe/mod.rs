@@ -25,7 +25,7 @@ use crate::serde_default_fn;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     kv_cache::EitherCache,
-    media_inputs::audio_prompt::place_audio_features,
+    media_inputs::media::place_token_features,
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata, NormalModel},
     paged_attention::{AttentionImplementation, ModelConfigMetadata},
 };
@@ -796,7 +796,7 @@ impl NemotronTranscribeModel {
                 .map(|clip| self.audio.forward(clip))
                 .collect::<Result<Vec<_>>>()?;
             let projected = Tensor::cat(&projected, 0)?.to_device(embeds.device())?;
-            embeds = place_audio_features(&embeds, input_ids, self.audio_token, &projected, MODEL)?;
+            embeds = place_token_features(&embeds, input_ids, self.audio_token, &projected, MODEL)?;
         }
         self.text
             .forward_embeds(input_ids, embeds, ctx, &|_, x| Ok(x))

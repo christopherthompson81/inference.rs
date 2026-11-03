@@ -208,6 +208,7 @@ class MultimodalLoaderType(str, Enum):
     LLAVA = "llava"
     GRANITE4_VISION = "granite4_vision"
     NEMOTRON_TRANSCRIBE = "nemotron_transcribe"
+    NEMOTRON_OMNI = "nemotron_omni"
     GRANITE_SPEECH = "granite_speech"
     LFM2VL = "lfm2vl"
     VLLAMA = "vllama"

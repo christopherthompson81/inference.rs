@@ -6,7 +6,7 @@ use std::{
 };
 
 use inference_audio::AudioInput;
-use inference_tensor::Tensor;
+use inference_tensor::{D, DType, Result, Tensor};
 
 use super::video::VideoInput;
 use crate::paged_attention::block_hash::{
@@ -593,6 +593,37 @@ pub fn build_mm_features_from_ranges_with_policy(
     let mut layout = MultimodalPromptLayout::default();
     layout.extend_ranges(ranges, hashes, kind, attention_policy);
     layout.into_features()
+}
+
+/// `embeds` with the rows at each `token` in `input_ids` replaced, in order, by the rows of `features`.
+pub fn place_token_features(
+    embeds: &Tensor,
+    input_ids: &Tensor,
+    token: u32,
+    features: &Tensor,
+    model: &str,
+) -> Result<Tensor> {
+    let positions = input_ids
+        .flatten_all()?
+        .to_dtype(DType::U32)?
+        .to_vec1::<u32>()?
+        .into_iter()
+        .enumerate()
+        .filter(|&(_, id)| id == token)
+        .map(|(i, _)| u32::try_from(i).expect("a token position fits u32"))
+        .collect::<Vec<_>>();
+    if positions.len() != features.dim(0)? {
+        inference_tensor::bail!(
+            "{model} media features and placeholder tokens do not match, tokens: {}, features: {}",
+            positions.len(),
+            features.dim(0)?
+        );
+    }
+    let shape = embeds.shape().clone();
+    let flat = embeds.reshape(((), embeds.dim(D::Minus1)?))?;
+    let positions = Tensor::new(positions.as_slice(), flat.device())?;
+    let replace = (features.to_dtype(flat.dtype())? - flat.index_select(&positions, 0)?)?;
+    flat.index_add(&positions, &replace, 0)?.reshape(shape)
 }
 
 #[cfg(test)]

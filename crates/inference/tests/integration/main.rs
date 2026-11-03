@@ -28,6 +28,7 @@ mod local_attention_tiny;
 mod meralion2_tiny;
 mod nemotron3_diarization_tiny;
 mod nemotron_h_tiny;
+mod nemotron_omni_tiny;
 mod olmo_tiny;
 mod paddleocr_vl;
 mod paddleocr_vl_tiny;

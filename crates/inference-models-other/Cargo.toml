@@ -37,6 +37,8 @@ rand_distr.workspace = true
 indicatif.workspace = true
 safetensors.workspace = true
 tempfile.workspace = true
+clap.workspace = true
+inference-gguf.workspace = true
 
 [features]
 cuda = ["inference-tensor/cuda", "inference-quant/cuda", "inference-nn/cuda", "inference-models-speech/cuda"]

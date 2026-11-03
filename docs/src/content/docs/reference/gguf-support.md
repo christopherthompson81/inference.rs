@@ -76,6 +76,7 @@ files when the repository and GGUF metadata identify them unambiguously. The dir
 | Llama 4 | `llama4` |
 | LFM2-VL and LFM2.5-VL | `lfm2` |
 | Muse Glimmer | `muse-glimmer` |
+| Nemotron 3.5 Bolt (Nemotron-H Omni) | `nemotron_h_moe` (projector `nemotron_omni`) |
 | PaddleOCR-VL (1.5, 1.6) | `paddleocr` |
 | Qwen2-VL and Qwen2.5-VL | `qwen2vl` |
 | Qwen3-VL | `qwen3vl` |
@@ -104,6 +105,12 @@ published GGUFs embed (another Mistral model's; GLM-ASR's original, which writes
 GLM-ASR's original checkpoint, so its GGUFs load onto transformers' layout, as the safetensors loader reads it.
 MERaLiON-2's official GGUFs come from the repo's patched llama.cpp (`meralion` projector). A GGUF's end-of-turn and
 end-of-message tokens end a generation as its EOS does.
+
+NVIDIA's Nemotron 3.5 Bolt GGUF and its `mmproj` load with no base repository: the config comes from the two files'
+metadata, and the projector holds the checkpoint's C-RADIO tower and projector unchanged. Image input is supported;
+video, which the projector's video patch embedder serves, is not yet. On a 24 GB GPU the text GGUF and the tower
+together do not fit: map a few blocks to the CPU (`-n "0:43"`), as Bolt's IQ2_XXS experts cannot stay in host memory
+on their own.
 
 Muse Glimmer GGUFs require a companion `muse-glimmer` projector. Current published GGUF
 repositories also require `--tok-model-id meta-models/Muse-Glimmer-30B` because they do not carry

@@ -12,7 +12,7 @@ use inference_tensor::{Device, Result, Tensor};
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     kv_cache::EitherCache,
-    media_inputs::audio_prompt::place_audio_features,
+    media_inputs::media::place_token_features,
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata, NormalModel},
     paged_attention::{AttentionImplementation, ModelConfigMetadata},
     utils::unvarbuilder::UnVarBuilder,
@@ -85,7 +85,7 @@ impl Qwen3AsrModel {
                 .collect::<Result<Vec<_>>>()?;
             let encoded = Tensor::cat(&encoded, 0)?;
             embeds =
-                place_audio_features(&embeds, input_ids, self.audio_token, &encoded, "Qwen3-ASR")?;
+                place_token_features(&embeds, input_ids, self.audio_token, &encoded, "Qwen3-ASR")?;
         }
         self.text.forward_embeds(input_ids, embeds, ctx)
     }
