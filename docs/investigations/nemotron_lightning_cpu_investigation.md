@@ -232,3 +232,21 @@ same file, quiet: 18.13 +- 0.09.
 | llama.cpp, recipe A | 0.0090 | 18.13 |
 | ours, recipe A, plain | 0.0090 | 17.76 |
 | ours, recipe A, MTP 2 + Q5_0 draft head | 0.0090 | 20.4 |
+
+## Run 13 - 2026-11-03 ~14:00
+
+**Question:** can the Radeon 780M add memory bandwidth past the CPU's?
+
+**Commands:** a Vulkan compute shader streaming a buffer (`uvec4` loads, four in flight a thread, 2048 workgroups)
+from the carve-out, GTT (uncached and cached), and host memory imported with `VK_EXT_external_memory_host`; an
+AVX-512 read loop on huge pages over 1-16 threads; both together. Memory is dual-channel DDR5-5600 (89.6 GB/s peak).
+
+**Result:**
+- CPU: 58-59 GB/s at every thread count from 1 to 16, with or without software prefetch: the CCX's fabric limit, not
+  DRAM's (Run 1's 55 GB/s was a weaker loop).
+- iGPU: 82 GB/s from every path alike, the carve-out, GTT, and imported (cached) host pages: 92 % of peak.
+- Both at once: 77-82 GB/s between them; the GPU alone already fills the bus, so a CPU / GPU split adds nothing.
+- The kernel's default GTT is 4 GiB: a 3 GiB import runs at 81.9 GB/s, a 6 GiB import or GTT allocation fails.
+  Holding the 21.7 GB model for the GPU needs `amdgpu.gttsize` / `ttm.pages_limit` raised on the kernel command line.
+
+**Finding:** decode on the iGPU has 1.4x the CPU's bandwidth ceiling (recipe A: ~30 tok/s plain against ~21.3).
