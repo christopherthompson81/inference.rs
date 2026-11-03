@@ -2526,6 +2526,35 @@ pub struct HybridBlock {
     pub names: BlockNames,
 }
 
+/// A sequence's recurrent state over `mamba_layers` layers: the conv window in `dtype`, the SSM state in the config's
+/// state dtype (else `dtype`).
+pub fn recurrent_state_bytes(cfg: &Config, mamba_layers: usize, dtype: DType) -> usize {
+    mamba_layers
+        * (cfg.mamba_conv_dim() * cfg.mamba_d_conv * dtype.size_in_bytes()
+            + cfg.mamba_n_heads()
+                * cfg.mamba_d_head()
+                * cfg.mamba_d_state
+                * cfg.mamba_state_dtype().unwrap_or(dtype).size_in_bytes())
+}
+
+/// The paged cache's view of a hybrid layout: only attention layers page (an MTP head's is the one after the stack's),
+/// and each sequence holds `recurrent_state_bytes`.
+pub fn hybrid_paged_kv_config(
+    base: ModelConfigMetadata,
+    layout: &HybridLayout,
+    mtp: bool,
+    recurrent_state_bytes: usize,
+) -> HybridPagedKvCacheConfig {
+    let paged_layers = layout
+        .blocks
+        .iter()
+        .map(|block| !matches!(block.mixer, GraniteLayerType::Mamba))
+        .chain(mtp.then_some(true))
+        .collect();
+    HybridPagedKvCacheConfig::new(base, paged_layers)
+        .with_recurrent_state_bytes(recurrent_state_bytes)
+}
+
 /// The model's blocks and the names around them. Granite keeps one block per checkpoint layer; Nemotron-H, whose
 /// layers each hold one mixer or one feed-forward, makes a block of a mixer layer and the feed-forward after it.
 #[derive(Clone, Debug)]
@@ -2931,15 +2960,7 @@ impl GraniteMoeHybrid {
             .iter()
             .filter(|layer_type| matches!(layer_type, GraniteLayerType::Mamba))
             .count();
-        let recurrent_state_bytes = mamba_layers
-            * (cfg.mamba_conv_dim() * cfg.mamba_d_conv * vb_m.dtype().size_in_bytes()
-                + cfg.mamba_n_heads()
-                    * cfg.mamba_d_head()
-                    * cfg.mamba_d_state
-                    * cfg
-                        .mamba_state_dtype()
-                        .unwrap_or(vb_m.dtype())
-                        .size_in_bytes());
+        let recurrent_state_bytes = recurrent_state_bytes(cfg, mamba_layers, vb_m.dtype());
 
         Ok(Self {
             layout,
@@ -3077,15 +3098,12 @@ impl GraniteMoeHybrid {
         if !self.layer_types.contains(&GraniteLayerType::Mamba) {
             return Arc::new(self.cfg.clone());
         }
-        // the MTP head's attention is the paged layer after the stack's
-        let paged_layers = self
-            .layer_types
-            .iter()
-            .map(|layer_type| !matches!(layer_type, GraniteLayerType::Mamba))
-            .chain(self.mtp.is_some().then_some(true))
-            .collect();
-        let config = HybridPagedKvCacheConfig::new(self.cfg.clone(), paged_layers)
-            .with_recurrent_state_bytes(self.recurrent_state_bytes);
+        let config = hybrid_paged_kv_config(
+            self.cfg.clone(),
+            &self.layout,
+            self.mtp.is_some(),
+            self.recurrent_state_bytes,
+        );
         Arc::new(match self.has_sinks {
             true => config,
             false => config.with_uniform_prefix_prefill_attention_features(Default::default()),

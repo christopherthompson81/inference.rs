@@ -169,6 +169,11 @@ pub trait DeviceMappedModelLoader {
     fn checkpoint_layer_index(&self, _config: &str, tensor_name: &str) -> Option<usize> {
         standard_layer_index(tensor_name)
     }
+    /// The mapped layer each checkpoint layer belongs to, by checkpoint layer, where several make one (Nemotron-H's
+    /// mixer and the feed-forward after it); `None` when they map one to one.
+    fn checkpoint_layer_groups(&self, _config: &str) -> Result<Option<Vec<usize>>> {
+        Ok(None)
+    }
 }
 
 /// A config whose context length, at `key`, is cut to `max_model_len`, for a loader whose RoPE and sizing read only

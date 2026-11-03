@@ -193,9 +193,16 @@ impl AutoDeviceMapSizes {
         let Some((expert_bytes, experts)) = source.layer_expert_bytes()? else {
             return Ok(self);
         };
+        let (expert_bytes, experts) = match inputs.loader.checkpoint_layer_groups(inputs.config)? {
+            Some(groups) => (
+                fold_layer_groups(&expert_bytes, &groups),
+                fold_layer_groups(&experts, &groups),
+            ),
+            None => (expert_bytes, experts),
+        };
         Ok(self.with_experts_cached(
             &expert_bytes,
-            experts,
+            &experts,
             slots,
             mtp_head_resident_bytes(source),
         ))
@@ -205,31 +212,43 @@ impl AutoDeviceMapSizes {
     fn with_experts_cached(
         mut self,
         expert_bytes: &[usize],
-        experts: usize,
+        experts: &[usize],
         slots: usize,
         head: Option<usize>,
     ) -> Self {
-        let cached = (slots + 1).min(experts + 1);
-        let staged = OFFLOAD_STAGING_EXPERTS.min(experts);
+        // a layer caches `slots` of its own experts and the zeroed miss slot; staging holds a group of them
+        let per_expert = |bytes: usize, experts: usize| bytes.checked_div(experts).unwrap_or(0);
+        let kept = |bytes: usize, experts: usize| {
+            per_expert(bytes, experts) * (slots + 1).min(experts + 1)
+        };
+        let staged = |bytes: usize, experts: usize| {
+            per_expert(bytes, experts) * OFFLOAD_STAGING_EXPERTS.min(experts)
+        };
         let mapped = self.layer_sizes_in_bytes.len();
         let mut staging = 0;
-        for (size, &bytes) in self.layer_sizes_in_bytes.iter_mut().zip(expert_bytes) {
-            let kept = bytes / experts * cached;
-            *size = size.saturating_sub(bytes) + kept;
-            staging = staging.max(bytes / experts * staged);
+        for ((size, &bytes), &experts) in self
+            .layer_sizes_in_bytes
+            .iter_mut()
+            .zip(expert_bytes)
+            .zip(experts)
+        {
+            *size = size.saturating_sub(bytes) + kept(bytes, experts);
+            staging = staging.max(staged(bytes, experts));
         }
         // an MTP head's experts stay on the GPU requantized, or in host memory cached like a mapped layer's
-        for (size, &bytes) in self
+        let from = mapped.min(expert_bytes.len());
+        for ((size, &bytes), &experts) in self
             .non_mapped_layer_sizes_in_bytes
             .iter_mut()
-            .zip(&expert_bytes[mapped.min(expert_bytes.len())..])
+            .zip(&expert_bytes[from..])
+            .zip(&experts[from..])
         {
             let kept = size.saturating_sub(bytes)
                 + match head {
                     Some(resident) => resident,
                     None => {
-                        staging = staging.max(bytes / experts * staged);
-                        bytes / experts * cached
+                        staging = staging.max(staged(bytes, experts));
+                        kept(bytes, experts)
                     }
                 };
             self.non_mapped_size_in_bytes =
@@ -301,6 +320,19 @@ fn packed_sizes(
 }
 
 /// Per-layer and non-mapped weight sizes for automatic device mapping, following the weights that will be loaded.
+// a checkpoint layer's bytes added into the mapped layer it belongs to; one past the groups keeps its own place after them
+fn fold_layer_groups(resident: &[usize], groups: &[usize]) -> Vec<usize> {
+    let mapped = groups.iter().max().map_or(0, |last| last + 1);
+    let mut folded = vec![0; mapped];
+    for (layer, &bytes) in resident.iter().enumerate() {
+        match groups.get(layer) {
+            Some(&group) => folded[group] += bytes,
+            None => folded.push(bytes),
+        }
+    }
+    folded
+}
+
 pub(crate) fn auto_device_map_sizes(
     inputs: AutoDeviceMapSizingInputs<'_>,
     dtype: DType,
@@ -337,9 +369,14 @@ pub(crate) fn auto_device_map_sizes(
             if matches!(sizing, AutoDeviceMapSizing::PreparedWeightSource)
                 && inputs.topology.is_none()
                 && let Some(resident) = source.layer_resident_bytes(dtype)?
-                && resident.len() >= sizes.layer_sizes_in_bytes.len()
             {
-                sizes = sizes.with_source_layers(resident);
+                let resident = match inputs.loader.checkpoint_layer_groups(inputs.config)? {
+                    Some(groups) => fold_layer_groups(&resident, &groups),
+                    None => resident,
+                };
+                if resident.len() >= sizes.layer_sizes_in_bytes.len() {
+                    sizes = sizes.with_source_layers(resident);
+                }
             }
             sizes
                 .without_host_embedding(
@@ -690,6 +727,15 @@ fn capture_mode(has_write_uqff: bool, wants_imatrix: bool) -> inference_quant::I
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Nemotron-H: a mixer and its feed-forward are one mapped block, a Mamba layer with none is one alone, and a
+    // layer past the groups (an MTP head) stays after them
+    #[test]
+    fn checkpoint_layers_fold_into_their_mapped_layers() {
+        let resident = [10, 1, 20, 2, 30, 7];
+        let groups = [0, 0, 1, 1, 2];
+        assert_eq!(fold_layer_groups(&resident, &groups), vec![11, 22, 30, 7]);
+    }
 
     struct Loader;
 
@@ -1168,7 +1214,7 @@ mod tests {
             total_model_size_in_bytes: 750,
         }
         .with_source_layers(vec![100, 100, 300])
-        .with_experts_cached(&[80, 80, 240], 4, 2, None);
+        .with_experts_cached(&[80, 80, 240], &[4, 4, 4], 2, None);
         assert_eq!(sizes.layer_sizes_in_bytes, [80, 80]);
         assert_eq!(sizes.non_mapped_layer_sizes_in_bytes, [240]);
         assert_eq!(sizes.non_mapped_size_in_bytes, 50 + 240 + 240);
@@ -1186,10 +1232,25 @@ mod tests {
             total_model_size_in_bytes: 750,
         }
         .with_source_layers(vec![100, 100, 300])
-        .with_experts_cached(&[80, 80, 240], 4, 2, Some(90));
+        .with_experts_cached(&[80, 80, 240], &[4, 4, 4], 2, Some(90));
         assert_eq!(sizes.layer_sizes_in_bytes, [80, 80]);
         assert_eq!(sizes.non_mapped_layer_sizes_in_bytes, [150]);
         assert_eq!(sizes.non_mapped_size_in_bytes, 50 + 150 + 80);
         assert_eq!(sizes.total_model_size_in_bytes, 160 + 280);
+    }
+
+    // Puzzle's layers hold their own expert counts: 2 cached of 4 keeps 3 of 4 experts' bytes, 2 of 8 keeps 3 of 8, and
+    // a dense layer keeps everything
+    #[test]
+    fn each_layer_caches_slots_of_its_own_experts() {
+        let sizes = AutoDeviceMapSizes {
+            layer_sizes_in_bytes: vec![100, 100, 100],
+            non_mapped_size_in_bytes: 0,
+            non_mapped_layer_sizes_in_bytes: Vec::new(),
+            total_model_size_in_bytes: 300,
+        }
+        .with_experts_cached(&[80, 80, 0], &[4, 8, 0], 2, None);
+        assert_eq!(sizes.layer_sizes_in_bytes, [20 + 60, 20 + 30, 100]);
+        assert_eq!(sizes.non_mapped_size_in_bytes, 80);
     }
 }

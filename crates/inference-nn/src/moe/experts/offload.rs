@@ -25,6 +25,7 @@ use inference_tensor::{CudaDevice, DType, Device, Result, Tensor};
 use super::OFFLOAD_STAGING_EXPERTS;
 use super::backends::{grouped_parked_with, indexed_mmvq_with};
 use super::forward::{MoEForward, MoEForwardConfig};
+use super::ungated::{grouped_ungated_with, indexed_mmvq_ungated_with};
 
 // Largest batch the cache and CPU split serves (the indexed matvec's limit); a larger one stages the experts it routes
 // to on the GPU, since copying an expert costs about what the CPU takes for one token through it
@@ -39,13 +40,32 @@ const MISS_SLOT: u32 = 0;
 const DOORBELL_IDLE: Duration = Duration::from_millis(50);
 const DOORBELL_PARKED_POLL: Duration = Duration::from_millis(1);
 
-/// Which projection of a layer, in `[gate, up, down]` order.
+/// Which projection of a layer, in `[gate, up, down]` order; an ungated layer has the last two.
 const PROJECTIONS: usize = 3;
+
+type Layout = (inference_quant::GgufType, usize, usize);
+
+/// How a layer's experts activate: a gate projection under a GLU, or none (`down(relu(up(x))^2)`, Nemotron-H's).
+#[derive(Clone, Copy)]
+pub(super) enum OffloadGate {
+    Glu(GluActivationType),
+    SquaredRelu,
+}
+
+impl OffloadGate {
+    fn projections(self) -> usize {
+        match self {
+            Self::Glu(_) => PROJECTIONS,
+            Self::SquaredRelu => PROJECTIONS - 1,
+        }
+    }
+}
 
 /// Prefill staging every offloaded layer shares on a device: room for a group of the largest layer's experts, and the
 /// pinned chunks uploads from pageable experts go through.
 struct Staging {
-    stacks: [DeviceExpertStack; PROJECTIONS],
+    // a projection no offloaded layer has (the gate, when all are ungated) gets none
+    stacks: [Option<DeviceExpertStack>; PROJECTIONS],
     ring: Mutex<BounceRing>,
 }
 
@@ -53,7 +73,7 @@ static STAGING: Mutex<Vec<(usize, Arc<Staging>)>> = Mutex::new(Vec::new());
 
 fn staging(
     device: &CudaDevice,
-    layouts: &[[(inference_quant::GgufType, usize, usize); PROJECTIONS]],
+    layouts: &[[Option<Layout>; PROJECTIONS]],
     experts: usize,
 ) -> Result<Arc<Staging>> {
     let mut all = STAGING.lock().expect("expert staging poisoned");
@@ -62,8 +82,10 @@ fn staging(
         return Ok(staging.clone());
     }
     let stack = |p: usize| {
-        let layouts = layouts.iter().map(|l| l[p]).collect::<Vec<_>>();
-        DeviceExpertStack::zeros(&layouts, experts, device)
+        let layouts = layouts.iter().filter_map(|l| l[p]).collect::<Vec<_>>();
+        (!layouts.is_empty())
+            .then(|| DeviceExpertStack::zeros(&layouts, experts, device))
+            .transpose()
     };
     let staging = Arc::new(Staging {
         stacks: [stack(0)?, stack(1)?, stack(2)?],
@@ -74,8 +96,7 @@ fn staging(
 }
 
 // Every offloaded layer's projection layouts, so the shared staging fits the largest
-static LAYOUTS: Mutex<Vec<[(inference_quant::GgufType, usize, usize); PROJECTIONS]>> =
-    Mutex::new(Vec::new());
+static LAYOUTS: Mutex<Vec<[Option<Layout>; PROJECTIONS]>> = Mutex::new(Vec::new());
 
 struct CacheState {
     // expert -> slot whose copy has landed
@@ -117,8 +138,9 @@ struct Exchange {
 
 /// What a layer's host functions and fill worker share.
 struct Shared {
-    host: [HostExpertStack; PROJECTIONS],
-    cache: [DeviceExpertStack; PROJECTIONS],
+    // the layer's projections, `[gate, up, down]` or `[up, down]`
+    host: Vec<HostExpertStack>,
+    cache: Vec<DeviceExpertStack>,
     state: Mutex<CacheState>,
     exchange: Exchange,
     // expert -> slot in mapped host memory, which the GPU reads and only `state`'s holder writes
@@ -131,7 +153,7 @@ struct Shared {
     timed_out: CudaSlice<u32>,
     // on the device: the sequence the next ring takes, which the wait compares the answer with
     counter: CudaSlice<u32>,
-    act: GluActivationType,
+    gate: OffloadGate,
     topk: usize,
 }
 
@@ -146,18 +168,30 @@ impl Shared {
                 cols,
             }
         }
+        let [.., up, down] = &self.host[..] else {
+            unreachable!("a layer has up and down projections")
+        };
         CpuExperts {
-            gate: inference_quant::cpu_experts::CpuExpertGate::Glu {
-                gate: projection(&self.host[0]),
-                act: self.act,
+            gate: match self.gate {
+                OffloadGate::Glu(act) => inference_quant::cpu_experts::CpuExpertGate::Glu {
+                    gate: projection(&self.host[0]),
+                    act,
+                },
+                OffloadGate::SquaredRelu => {
+                    inference_quant::cpu_experts::CpuExpertGate::SquaredRelu
+                }
             },
-            up: projection(&self.host[1]),
-            down: projection(&self.host[2]),
+            up: projection(up),
+            down: projection(down),
         }
     }
 
     fn hidden(&self) -> usize {
         self.host[0].dims()[2]
+    }
+
+    fn weights<'a, W: KernelWeight>(&self, stacks: &'a [W]) -> Vec<&'a dyn KernelWeight> {
+        stacks.iter().map(|w| w as &dyn KernelWeight).collect()
     }
 
     #[allow(clippy::mut_from_ref)]
@@ -484,27 +518,41 @@ pub(super) struct OffloadedExperts {
 }
 
 impl OffloadedExperts {
-    /// `host` holds `[gate, up, down]`; `slots` experts of each stay cached on `device`, `topk` routed per token.
+    /// `host` holds `[gate, up, down]`, or `[up, down]` for an ungated `gate`; `slots` experts of each stay cached on
+    /// `device`, `topk` routed per token.
     pub(super) fn new(
-        host: [HostExpertStack; PROJECTIONS],
+        host: Vec<HostExpertStack>,
         slots: usize,
         topk: usize,
         device: &CudaDevice,
-        act: GluActivationType,
+        gate: OffloadGate,
     ) -> Result<Self> {
+        if host.len() != gate.projections() {
+            inference_tensor::bail!(
+                "an offloaded layer takes {} projections",
+                gate.projections()
+            );
+        }
         let experts = host[0].dims()[0];
         let hidden = host[0].dims()[2];
         let layout = |h: &HostExpertStack| {
             let [_, rows, cols] = h.dims();
             (h.ty(), rows, cols)
         };
-        let layouts = [layout(&host[0]), layout(&host[1]), layout(&host[2])];
+        // an ungated layer's up and down take the gated layers' up and down staging
+        let mut layouts = [None; PROJECTIONS];
+        for (p, h) in host.iter().enumerate() {
+            layouts[PROJECTIONS - host.len() + p] = Some(layout(h));
+        }
         LAYOUTS
             .lock()
             .expect("expert layouts poisoned")
             .push(layouts);
         let slots = slots.min(experts) + 1;
-        let cache = |p: usize| DeviceExpertStack::zeros(&[layouts[p]], slots, device);
+        let cache = host
+            .iter()
+            .map(|h| DeviceExpertStack::zeros(&[layout(h)], slots, device))
+            .collect::<Result<Vec<_>>>()?;
         let stream = device.cuda_stream();
         let picks = SPLIT_MAX_TOKENS * topk;
         let exchange = Exchange {
@@ -518,7 +566,7 @@ impl OffloadedExperts {
             .to_mapped_host()?
             .ok_or_else(|| inference_tensor::Error::msg("the slot table needs a CUDA device"))?;
         let shared = Arc::new(Shared {
-            cache: [cache(0)?, cache(1)?, cache(2)?],
+            cache,
             host,
             state: Mutex::new(CacheState::new(experts, slots)),
             exchange,
@@ -533,7 +581,7 @@ impl OffloadedExperts {
             counter: stream
                 .alloc_zeros(1)
                 .map_err(inference_tensor::Error::wrap)?,
-            act,
+            gate,
             topk,
         });
         doorbell().register(shared.clone());
@@ -654,13 +702,21 @@ impl OffloadedExperts {
             shape: forward.shape,
             lora: None,
         };
-        let cache = &self.shared.cache;
-        let cache = [&cache[0] as &dyn KernelWeight, &cache[1], &cache[2]];
+        let cache = self.shared.weights(&self.shared.cache);
         let hit_config = MoEForwardConfig {
             num_experts: cache[0].kernel_shape().dims()[0],
             ..config
         };
-        let gpu = indexed_mmvq_with(cache, &hits, hit_config)?.ok_or_else(|| {
+        let gpu = match (self.shared.gate, &cache[..]) {
+            (OffloadGate::Glu(_), &[gate, up, down]) => {
+                indexed_mmvq_with([gate, up, down], &hits, hit_config)?
+            }
+            (OffloadGate::SquaredRelu, &[up, down]) => {
+                indexed_mmvq_ungated_with([up, down], &hits, hit_config)?
+            }
+            _ => unreachable!("a layer's projections match its gate"),
+        }
+        .ok_or_else(|| {
             inference_tensor::Error::msg("cached experts cannot run the indexed matvec")
         })?;
         let side = overlap.map(|f| f()).transpose()?;
@@ -720,15 +776,17 @@ impl OffloadedExperts {
 
         let mut out = None;
         if !cached.is_empty() {
-            let cache = &self.shared.cache;
-            let slots = cache[0].kernel_shape().dims()[0];
+            let slots = self.shared.cache[0].kernel_shape().dims()[0];
             let pass = self.staged_pass(forward, config, &ids, &weights, slots, |e| slot_of[e])?;
-            let weights = [&cache[0] as &dyn KernelWeight, &cache[1], &cache[2]];
-            out = Some(self.run_pass(weights, forward, &pass, config, slots)?);
+            let weights = self.shared.weights(&self.shared.cache);
+            out = Some(self.run_pass(&weights, forward, &pass, config, slots)?);
         }
         for group in uncached.chunks(self.staging_experts) {
             let mut views = Vec::with_capacity(PROJECTIONS);
-            for (host, stack) in self.shared.host.iter().zip(&staging.stacks) {
+            let stacks = staging.stacks[PROJECTIONS - self.shared.host.len()..]
+                .iter()
+                .map(|stack| stack.as_ref().expect("a staging stack per projection"));
+            for (host, stack) in self.shared.host.iter().zip(stacks) {
                 let [_, rows, cols] = host.dims();
                 let view = stack.view(host.ty(), group.len(), rows, cols)?;
                 let size = host.expert_bytes();
@@ -757,8 +815,11 @@ impl OffloadedExperts {
             let pass = self.staged_pass(forward, config, &ids, &weights, group.len(), |e| {
                 group.binary_search(&e).ok()
             })?;
-            let weights = [&views[0] as &dyn KernelWeight, &views[1], &views[2]];
-            let partial = self.run_pass(weights, forward, &pass, config, group.len())?;
+            let weights = views
+                .iter()
+                .map(|v| v as &dyn KernelWeight)
+                .collect::<Vec<_>>();
+            let partial = self.run_pass(&weights, forward, &pass, config, group.len())?;
             out = Some(match out {
                 Some(sum) => (sum + partial)?,
                 None => partial,
@@ -797,7 +858,7 @@ impl OffloadedExperts {
 
     fn run_pass(
         &self,
-        weights: [&dyn KernelWeight; PROJECTIONS],
+        weights: &[&dyn KernelWeight],
         forward: &MoEForward,
         (ids, routing): &(Tensor, Tensor),
         config: MoEForwardConfig,
@@ -816,7 +877,16 @@ impl OffloadedExperts {
             num_experts: experts,
             ..config
         };
-        grouped_parked_with(weights, &pass, pass_config)?.ok_or_else(|| {
+        match (self.shared.gate, weights) {
+            (OffloadGate::Glu(_), &[gate, up, down]) => {
+                grouped_parked_with([gate, up, down], &pass, pass_config)?
+            }
+            (OffloadGate::SquaredRelu, &[up, down]) => {
+                grouped_ungated_with([up, down], &pass, pass_config, true)?
+            }
+            _ => unreachable!("a layer's projections match its gate"),
+        }
+        .ok_or_else(|| {
             inference_tensor::Error::msg("staged experts cannot run the grouped kernels")
         })
     }
@@ -985,11 +1055,11 @@ mod tests {
         });
         let host = |p: usize| HostExpertStack::new(types[p], dims[p], &bytes[p], cuda);
         let offloaded = OffloadedExperts::new(
-            [host(0)?, host(1)?, host(2)?],
+            vec![host(0)?, host(1)?, host(2)?],
             SLOTS,
             TOPK,
             cuda,
-            GluActivationType::Silu,
+            OffloadGate::Glu(GluActivationType::Silu),
         )?;
         let config = MoEForwardConfig {
             num_experts: EXPERTS,
@@ -1014,6 +1084,9 @@ mod tests {
         let layouts = LAYOUTS.lock().expect("expert layouts poisoned").clone();
         for (p, stack) in staging(cuda, &layouts, EXPERTS)?.stacks.iter().enumerate() {
             let [_, rows, cols] = dims[p];
+            let stack = stack
+                .as_ref()
+                .expect("this gated layer stages every projection");
             let view = stack.view(types[p], EXPERTS, rows, cols)?;
             let poison =
                 vec![0xFF_u8; EXPERTS * rows * types[p].row_bytes(cols).expect("whole blocks")];
@@ -1096,11 +1169,11 @@ mod tests {
             HostExpertStack::new(inference_quant::GgufType::Q4K, dims[p], &bytes[p], cuda)
         };
         let mut offloaded = OffloadedExperts::new(
-            [host(0)?, host(1)?, host(2)?],
+            vec![host(0)?, host(1)?, host(2)?],
             SLOTS,
             TOPK,
             cuda,
-            GluActivationType::Silu,
+            OffloadGate::Glu(GluActivationType::Silu),
         )?;
         // a prompt's uncached experts (at least EXPERTS - SLOTS) stage in more than one group
         offloaded.staging_experts = 3;
@@ -1164,6 +1237,70 @@ mod tests {
         Ok(())
     }
 
+    // Nemotron-H's experts: IQ2_XXS up and down with no gate, squared ReLU between; the cache with its CPU misses and the
+    // staged prompt path against every expert resident on the device
+    #[test]
+    fn offloaded_ungated_experts_match_resident_ones() -> Result<()> {
+        crate::skip_without_cuda!();
+        use super::super::ungated::{grouped_ungated_with, indexed_mmvq_ungated_with};
+        let device = Device::new_cuda(0)?;
+        let cuda = device.as_cuda_device()?;
+        let ty = inference_quant::GgufType::Iq2Xxs;
+        let dims = [[EXPERTS, INTER, HIDDEN], [EXPERTS, HIDDEN, INTER]];
+        let bytes = [
+            random_blocks(ty, INTER, HIDDEN, 11),
+            random_blocks(ty, HIDDEN, INTER, 12),
+        ];
+        let host = |p: usize| HostExpertStack::new(ty, dims[p], &bytes[p], cuda);
+        let mut offloaded = OffloadedExperts::new(
+            vec![host(0)?, host(1)?],
+            SLOTS,
+            TOPK,
+            cuda,
+            OffloadGate::SquaredRelu,
+        )?;
+        offloaded.staging_experts = 3;
+        let resident = (0..2)
+            .map(|p| {
+                let [_, rows, cols] = dims[p];
+                let stack = DeviceExpertStack::zeros(&[(ty, rows, cols)], EXPERTS, cuda)?;
+                // SAFETY: `bytes` outlives the test, and the synchronize below lands the copy before any read
+                unsafe { stack.fill_async(0, &bytes[p], &cuda.cuda_stream())? };
+                Ok(stack)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        cuda.cuda_stream()
+            .synchronize()
+            .map_err(inference_tensor::Error::wrap)?;
+        let resident = [&resident[0] as &dyn KernelWeight, &resident[1]];
+        let config = MoEForwardConfig {
+            num_experts: EXPERTS,
+            num_experts_per_tok: TOPK,
+            act: Activation::Relu2,
+        };
+        for step in 0..12 {
+            let run = run(&device, 2, step)?;
+            let (actual, _) = offloaded.forward(&run.forward(), config, None)?;
+            let expected = indexed_mmvq_ungated_with(resident, &run.forward(), config)?
+                .expect("IQ2_XXS runs the indexed matvec");
+            let err = relative_error(&actual, &expected)?;
+            // the CPU quantizes activations to Q8_K, the GPU kernels to Q8_1
+            assert!(err < 0.03, "step {step}: relative error {err}");
+            cuda.cuda_stream()
+                .synchronize()
+                .map_err(inference_tensor::Error::wrap)?;
+        }
+        let run = run(&device, PROMPT, 0)?;
+        let (actual, _) = offloaded.forward(&run.forward(), config, None)?;
+        let expected = grouped_ungated_with(resident, &run.forward(), config, false)?
+            .expect("IQ2_XXS runs the grouped mmq");
+        assert!(
+            relative_error(&actual, &expected)? < 1e-5,
+            "the staged prompt path runs the same kernels"
+        );
+        Ok(())
+    }
+
     // The fixed cost of a decode step's host round trip: an offloaded layer whose experts are all cached (so the
     // CPU computes nothing) against the same cached-expert kernel resident, eager and replayed from a graph
     #[test]
@@ -1199,11 +1336,11 @@ mod tests {
             HostExpertStack::new(inference_quant::GgufType::Q4K, dims[p], &bytes[p], cuda)
         };
         let offloaded = OffloadedExperts::new(
-            [host(0)?, host(1)?, host(2)?],
+            vec![host(0)?, host(1)?, host(2)?],
             BENCH_EXPERTS,
             BENCH_TOPK,
             cuda,
-            GluActivationType::Silu,
+            OffloadGate::Glu(GluActivationType::Silu),
         )?;
         let resident = (0..PROJECTIONS)
             .map(|p| {

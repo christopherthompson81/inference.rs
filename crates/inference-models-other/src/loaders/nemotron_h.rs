@@ -130,6 +130,16 @@ impl IsqModelLoader for NemotronHLoader {
 }
 
 impl DeviceMappedModelLoader for NemotronHLoader {
+    fn checkpoint_layer_groups(&self, config: &str) -> Result<Option<Vec<usize>>> {
+        let blocks = Config::from_json(config)?.layout()?.block_of_layer();
+        let layers = blocks.keys().max().map_or(0, |last| last + 1);
+        Ok(Some(
+            (0..layers)
+                .map(|l| blocks.get(&l).copied().unwrap_or(0))
+                .collect(),
+        ))
+    }
+
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -198,11 +208,15 @@ impl DeviceMappedModelLoader for NemotronHLoader {
         }
         Ok(sizes)
     }
+    // as the built model reports it: only attention layers page, and the Mamba layers' state sizes the recurrent pool
+    // (the conv window counted in f32, which the model's dtype is not known to undercut)
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg = Config::from_json(config)?;
-        Ok(Box::new(ModelConfigMetadata {
+        let layout = cfg.layout()?;
+        let mtp = cfg.mtp_layout()?.is_some();
+        let base = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,
-            num_layers: cfg.layout()?.blocks.len(),
+            num_layers: layout.blocks.len() + usize::from(mtp),
             hidden_size: cfg.hidden_size,
             num_kv_heads: cfg.num_key_value_heads.unwrap_or(cfg.num_attention_heads),
             num_attn_heads: cfg.num_attention_heads,
@@ -210,6 +224,61 @@ impl DeviceMappedModelLoader for NemotronHLoader {
             k_head_dim: cfg.head_dim,
             v_head_dim: cfg.head_dim,
             kv_cache_layout: inference_nn::paged_attention::KvCacheLayout::Standard,
-        }))
+        };
+        let mamba_layers = layout
+            .blocks
+            .iter()
+            .filter(|block| matches!(block.mixer, crate::granite::GraniteLayerType::Mamba))
+            .count();
+        let state =
+            crate::granite::recurrent_state_bytes(&cfg.granite()?, mamba_layers, DType::F32);
+        Ok(Box::new(crate::granite::hybrid_paged_kv_config(
+            base, &layout, mtp, state,
+        )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Mamba, attention+MoE, Mamba+MLP: three blocks of which only the attention one pages, and two Mamba layers whose
+    // f32 state the recurrent pool holds per sequence
+    #[test]
+    fn the_planned_config_pages_attention_and_holds_mamba_state() -> Result<()> {
+        let config = serde_json::json!({
+            "vocab_size": 64,
+            "hidden_size": 32,
+            "layers_block_type": ["mamba", "attention", "moe", "mamba", "mlp"],
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "head_dim": 16,
+            "intermediate_size": 48,
+            "mlp_hidden_act": "relu2",
+            "ssm_state_size": 8,
+            "mamba_num_heads": 4,
+            "mamba_head_dim": 8,
+            "n_groups": 2,
+            "conv_kernel": 4,
+            "n_routed_experts": 4,
+            "num_experts_per_tok": 2,
+            "moe_intermediate_size": 32,
+            "moe_shared_expert_intermediate_size": 40,
+            "layer_norm_epsilon": 1e-5,
+            "max_position_embeddings": 4096,
+            "mamba_ssm_cache_dtype": "float32",
+        })
+        .to_string();
+        let model = NemotronHLoader.model_config(&config)?;
+        let paged = (0..model.num_layers())
+            .map(|layer| model.layer_kv_cache_elements_per_token(layer).is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(paged, [false, true, false]);
+        // per Mamba layer: (4 * 8 + 2 * 2 * 8) conv channels by 4 taps, and 4 heads of 8 x 8 state, all f32
+        assert_eq!(
+            model.recurrent_state_bytes_per_sequence(),
+            2 * ((32 + 32) * 4 + 4 * 8 * 8) * 4
+        );
+        Ok(())
     }
 }

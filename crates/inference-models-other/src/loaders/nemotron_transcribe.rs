@@ -97,6 +97,10 @@ impl IsqModelLoader for NemotronTranscribeLoader {
 }
 
 impl DeviceMappedModelLoader for NemotronTranscribeLoader {
+    fn checkpoint_layer_groups(&self, config: &str) -> Result<Option<Vec<usize>>> {
+        NemotronHLoader.checkpoint_layer_groups(&text_config(config)?)
+    }
+
     fn mapped_max_act_size_elems(
         &self,
         config: &str,

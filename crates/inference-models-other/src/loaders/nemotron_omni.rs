@@ -85,6 +85,10 @@ impl IsqModelLoader for NemotronOmniLoader {
 }
 
 impl DeviceMappedModelLoader for NemotronOmniLoader {
+    fn checkpoint_layer_groups(&self, config: &str) -> Result<Option<Vec<usize>>> {
+        NemotronHLoader.checkpoint_layer_groups(&text_config(config)?)
+    }
+
     fn mapped_max_act_size_elems(
         &self,
         config: &str,
@@ -136,11 +140,12 @@ impl DeviceMappedModelLoader for NemotronOmniLoader {
         let merged = h * cfg.merge() * cfg.merge();
         let side = v.max_img_size / cfg.patch_size;
         let tower = v.num_hidden_layers * (4 * h * h + 2 * h * ffn)
-            + 3 * cfg.patch_size * cfg.patch_size * h
-            + side * side * h;
+            + 3 * cfg.patch_size * cfg.patch_size * h;
         let projector = merged * cfg.projector_hidden_size
             + cfg.projector_hidden_size * cfg.llm_config.hidden_size;
-        Ok(text + (tower + projector) * dtype.size_in_bytes())
+        // the position grid stays in f32, which it is resized in
+        let positions = side * side * h * DType::F32.size_in_bytes();
+        Ok(text + (tower + projector) * dtype.size_in_bytes() + positions)
     }
     fn layer_sizes_in_bytes(
         &self,

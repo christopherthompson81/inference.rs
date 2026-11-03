@@ -172,3 +172,95 @@ llama.cpp resizes the position grid straight to 30 x 40 where the reference crop
 **Speed with 5 blocks on the CPU:** prompt 27 - 32 tok/s, decode 0.9 - 1.6 tok/s; llama.cpp with 6 layers' experts on
 the CPU: prompt 465 tok/s, decode 76 tok/s. The gap is whole blocks (Mamba included) on our CPU, against llama.cpp's
 experts-only offload. A CPU IQ2_XXS expert kernel would let `--moe-expert-cache` do the same here.
+
+## Run 6 - 2026-11-03 11:11
+
+**Question:** with a CPU IQ2_XXS dot, does `--moe-expert-cache` let Bolt and its tower fit the 3090?
+
+The kernel (`cpu_dot`, scalar plus AVX2 one-row, four-row and tile decode) matches dequantized rows. One thread, this
+AVX2 box (`single_thread_rate`, `tile_rate`):
+
+| type | one row | four rows | tile dot |
+|---|---|---|---|
+| IQ2_XXS | 1.51 GB/s (5.9 G values/s) | 4.51 GB/s | 61.9 GMAC/s |
+| IQ3_S | 3.57 GB/s (8.3 G values/s) | 11.14 GB/s | 57.4 GMAC/s |
+
+The table lookups (four grid and four sign words per 32 values) bound it, as in ggml.
+
+**Serving still fails:** with `--moe-expert-cache 128` the planner logs "MoE experts leave the GPU" and quantizes
+the KV cache to q3, then the load runs out of memory. `MoEExperts::new` takes the ungated path (Nemotron-H's
+experts are up and down with ReLU^2) before it looks at the expert cache, and `OffloadedExperts` runs only gated
+stacks: three projections, `indexed_mmvq_with` on the cached slots for decode and `grouped_parked_with` for staged
+prefill. The CPU misses already take ungated experts (`CpuExpertGate::SquaredRelu`). With no flag the planner
+predicts a resident fit that is not there (the same OOM).
+
+**Next:** offload for ungated experts (two projections, the ungated GPU kernels over cached slots), and the resident fit
+estimate.
+
+## Run 7 - 2026-11-03 12:05
+
+**Question:** with ungated experts offloadable, does Bolt with its tower serve from the 3090, and does the planner pick it?
+
+`OffloadedExperts` now takes `[up, down]` with squared ReLU beside `[gate, up, down]` with a GLU: the cache runs
+the ungated indexed matvec on its slots, staged prefill the ungated grouped mmq with parked routes, misses
+`CpuExpertGate::SquaredRelu`. Test: IQ2_XXS ungated experts offloaded against resident, 12 decode steps and a 40-token
+prompt (`offloaded_ungated_experts_match_resident_ones`).
+
+**Explicit flags** (`--pa-context-len 8192 --moe-expert-cache N`, mmproj loaded, thinking off):
+
+| slots per layer (of 240 - 496) | GPU | decode (warm) | prompt |
+|---|---|---|---|
+| 128 (KV left to fill the rest: 7.8 GB) | 23.1 GiB | 42 - 43 tok/s | 825 - 868 tok/s |
+| 300 (KV 17 MB) | 22.5 GiB | 75 - 77 tok/s | 1,737 - 1,833 tok/s |
+
+llama.cpp on the same files with `--n-cpu-moe 6`: decode 76 tok/s. Image answers as Run 5's (a 640 x 640 image: 433
+prompt tokens, the same answer).
+
+**Planner:** two sizing bugs, both from GGUF blocks (88 for Bolt) not being the loader's layers (48 hybrid blocks):
+`with_source_layers` kept the first 48 blocks' bytes and dropped the other 40, and `layer_expert_bytes` lined expert
+bytes up by GGUF block and gave one expert count (the first layer's 240) for all. Now a loader can say which mapped
+layer each checkpoint layer folds into (`checkpoint_layer_groups`; Nemotron-H's from its layout), and the expert
+counts are per layer. With them the auto plan picks 287 slots, but the post-load check then finds 23 - 30 MB short of
+the 1.5 GB it holds back.
+
+Estimate against what the card holds (desktop share taken off), `--pa-context-len 32768`:
+
+| model | slots | planner | measured | short |
+|---|---|---|---|---|
+| Bolt text | 126 | 13,760 MB | ~14,094 MB | ~334 MB |
+| Bolt text | 252 | 19,439 MB | ~19,822 MB | ~383 MB |
+| Qwen3.6-35B-A3B IQ4_XS | 64 | 6,389 MB | ~6,566 MB | ~177 MB |
+
+A constant per model, not per slot; the kernel libraries are ~30 MB in all, so not code. Open: where the rest goes
+(the pool keeping load-time temporaries, library workspaces). Before the fold fix text-only Bolt planned resident only
+because 40 layers were missing from the sum.
+
+## Run 8 - 2026-11-03 12:32
+
+**Question:** where do the 180 - 380 MB the offload plan misses go?
+
+Free memory and the CUDA pool's used bytes logged through a Bolt load (`-f` picks up the adjacent mmproj, so these
+"text" runs held the tower too), against the planner's estimate at 126 slots:
+
+| stage | pool used | estimate |
+|---|---|---|
+| vision tower, before the decoder | 1,642 MB | ~1,720 MB (part of non-mapped) |
+| embeddings / output head | +1,088 MB (BF16 head) | |
+| 48 blocks | +9,514 MB | 9,511 MB |
+| hybrid cache | +163 MB | |
+| between the model and the KV sizing | **+1,142 MB** | **0** |
+
+Trimming the pool frees nothing; it holds live tensors. The +1,142 MB is the recurrent state pool: 7 lanes x 40 Mamba
+layers x 4.08 MB of f32 state (128 heads x 64 x 128). `NemotronHLoader::model_config` returned a plain
+`ModelConfigMetadata`: no recurrent state bytes (the trait default, 0) and paged KV on all 48 blocks. The built
+model's `paged_kv_config` had both right. The non-mapped estimate (~880 MB high: the output head at BF16) hid most of it.
+
+Qwen3.6-35B's "177 MB short" was my comparison, not the planner: nvidia-smi took in its KV cache and the CUDA context.
+Its loader reports its recurrent state; against the pool its estimate is ~190 MB high.
+
+**Fix:** one `recurrent_state_bytes` / `hybrid_paged_kv_config` in granite.rs that the built model and the loader's
+plan both use (the conv window counted in f32 at plan time).
+
+**Result**, `serve -f NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf` with no flags: 252 slots, 32,736-token context,
+21.2 GiB, image answered as before, decode 70 - 72 tok/s warm, prompt ~1.5 K tok/s. local_ci `--lint --tests --cuda`
+passes. Open: a failed load segfaults on exit after a run of CUDA_ERROR_DEINITIALIZED.

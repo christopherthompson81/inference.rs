@@ -262,56 +262,7 @@ impl UngatedExpertsWeights {
         let (Some(up_qt), Some(down_qt)) = (up.kernel_weight(), down.kernel_weight()) else {
             return Ok(None);
         };
-        if !inference_quant::supports_mmq_weight(up_qt)
-            || !inference_quant::supports_mmq_weight(down_qt)
-        {
-            return Ok(None);
-        }
-        let Some(super::backends::GroupedDispatch {
-            dev,
-            expert_bounds,
-            sorted_token_ids,
-            sorted_source_ids,
-        }) = super::backends::grouped_dispatch(forward, config, false)?
-        else {
-            return Ok(None);
-        };
-        let (tokens, topk) = (forward.shape.num_tokens, config.num_experts_per_tok);
-        let total = tokens * topk;
-        let hidden = inference_quant::grouped_moe_mmq(
-            up_qt,
-            forward.xs_flat,
-            &sorted_source_ids,
-            &sorted_token_ids,
-            &expert_bounds,
-            total,
-            tokens,
-            config.num_experts,
-            dev,
-        )?
-        .apply(&config.act)?;
-        let inter = hidden.dim(D::Minus1)?;
-        let down_rows = inference_quant::grouped_moe_mmq(
-            down_qt,
-            &hidden.reshape((total, inter))?,
-            &sorted_token_ids,
-            &sorted_token_ids,
-            &expert_bounds,
-            total,
-            tokens,
-            config.num_experts,
-            dev,
-        )?
-        .to_dtype(hidden.dtype())?;
-        inference_quant::moe_weighted_reduce_flat_same_dtype(
-            &down_rows.reshape((total, forward.shape.hidden_dim))?,
-            forward.topk_weights,
-            tokens,
-            topk,
-            dev,
-        )?
-        .to_dtype(forward.original_dtype)
-        .map(Some)
+        grouped_ungated_with([up_qt, down_qt], forward, config, false)
     }
 
     // the indexed matvec runs both projections; dense stacks route on the host, as grouped matmuls by expert
@@ -336,8 +287,6 @@ impl UngatedExpertsWeights {
         config: MoEForwardConfig,
     ) -> Result<Option<Tensor>> {
         if !forward.xs.device().is_cuda()
-            || forward.shape.num_tokens > super::backends::INDEXED_MMVQ_MAX_TOKENS
-            || forward.lora.is_some()
             || up.stats_snapshot().is_some()
             || down.stats_snapshot().is_some()
         {
@@ -346,20 +295,7 @@ impl UngatedExpertsWeights {
         let (Some(up_qt), Some(down_qt)) = (up.kernel_weight(), down.kernel_weight()) else {
             return Ok(None);
         };
-        if !inference_quant::supports_indexed_moe_mmvq_ungated(up_qt, down_qt) {
-            return Ok(None);
-        }
-        let routed = inference_quant::indexed_moe_mmvq_ungated(
-            up_qt,
-            down_qt,
-            forward.xs_flat,
-            forward.topk_ids,
-            config.num_experts_per_tok,
-            &|rows| rows.apply(&config.act),
-        )?;
-        let out =
-            super::backends::weighted_reduce_f32(forward, &routed, config.num_experts_per_tok)?;
-        out.to_dtype(forward.original_dtype).map(Some)
+        indexed_mmvq_ungated_with([up_qt, down_qt], forward, config)
     }
 
     pub(super) fn forward_impl(
@@ -435,4 +371,88 @@ impl UngatedExpertsWeights {
             .sum(D::Minus2)?
             .to_dtype(forward.original_dtype)
     }
+}
+
+/// The grouped mmq over `[up, down]` kernel weights; `parked` sorts routes to expert `config.num_experts` past the rest
+/// and never runs them (their routing weight must be 0, which the weighted reduce skips).
+#[cfg(feature = "cuda")]
+pub(super) fn grouped_ungated_with(
+    [up, down]: [&dyn inference_quant::KernelWeight; 2],
+    forward: &MoEForward,
+    config: MoEForwardConfig,
+    parked: bool,
+) -> Result<Option<Tensor>> {
+    if !inference_quant::supports_mmq_weight(up) || !inference_quant::supports_mmq_weight(down) {
+        return Ok(None);
+    }
+    let Some(super::backends::GroupedDispatch {
+        dev,
+        expert_bounds,
+        sorted_token_ids,
+        sorted_source_ids,
+    }) = super::backends::grouped_dispatch(forward, config, parked)?
+    else {
+        return Ok(None);
+    };
+    let (tokens, topk) = (forward.shape.num_tokens, config.num_experts_per_tok);
+    let total = tokens * topk;
+    let hidden = inference_quant::grouped_moe_mmq(
+        up,
+        forward.xs_flat,
+        &sorted_source_ids,
+        &sorted_token_ids,
+        &expert_bounds,
+        total,
+        tokens,
+        config.num_experts,
+        dev,
+    )?
+    .apply(&config.act)?;
+    let inter = hidden.dim(D::Minus1)?;
+    let down_rows = inference_quant::grouped_moe_mmq(
+        down,
+        &hidden.reshape((total, inter))?,
+        &sorted_token_ids,
+        &sorted_token_ids,
+        &expert_bounds,
+        total,
+        tokens,
+        config.num_experts,
+        dev,
+    )?
+    .to_dtype(hidden.dtype())?;
+    inference_quant::moe_weighted_reduce_flat_same_dtype(
+        &down_rows.reshape((total, forward.shape.hidden_dim))?,
+        forward.topk_weights,
+        tokens,
+        topk,
+        dev,
+    )?
+    .to_dtype(forward.original_dtype)
+    .map(Some)
+}
+
+/// The expert-indexed matvec over `[up, down]` kernel weights, for decode-sized batches.
+#[cfg(feature = "cuda")]
+pub(super) fn indexed_mmvq_ungated_with(
+    [up, down]: [&dyn inference_quant::KernelWeight; 2],
+    forward: &MoEForward,
+    config: MoEForwardConfig,
+) -> Result<Option<Tensor>> {
+    if forward.lora.is_some()
+        || forward.shape.num_tokens > super::backends::INDEXED_MMVQ_MAX_TOKENS
+        || !inference_quant::supports_indexed_moe_mmvq_ungated(up, down)
+    {
+        return Ok(None);
+    }
+    let routed = inference_quant::indexed_moe_mmvq_ungated(
+        up,
+        down,
+        forward.xs_flat,
+        forward.topk_ids,
+        config.num_experts_per_tok,
+        &|rows| rows.apply(&config.act),
+    )?;
+    let out = super::backends::weighted_reduce_f32(forward, &routed, config.num_experts_per_tok)?;
+    out.to_dtype(forward.original_dtype).map(Some)
 }
