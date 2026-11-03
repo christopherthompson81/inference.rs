@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::map::{MAP_BINDINGS, MAP_PUSH_BYTES};
 use crate::memory::{HostBuffer, ImportedMemory};
 use crate::pipeline::Pipeline;
 use crate::{Error, Recorder, Result, shaders};
@@ -16,6 +17,8 @@ const MATVEC_BINDINGS: usize = 3;
 /// Every kernel's pipeline on one device.
 pub(crate) struct Kernels {
     mat_vec_q8_0: Pipeline,
+    pub(crate) map_f32: Pipeline,
+    pub(crate) copy_b32: Pipeline,
 }
 
 impl Kernels {
@@ -27,6 +30,8 @@ impl Kernels {
                 MATVEC_BINDINGS,
                 MATVEC_PUSH_BYTES,
             )?,
+            map_f32: Pipeline::new(device, shaders::MAP_F32, MAP_BINDINGS, MAP_PUSH_BYTES)?,
+            copy_b32: Pipeline::new(device, shaders::COPY_B32, MAP_BINDINGS, MAP_PUSH_BYTES)?,
         })
     }
 
@@ -34,7 +39,11 @@ impl Kernels {
     /// No submit may still use the pipelines.
     pub(crate) unsafe fn destroy(&self, device: &ash::Device) {
         // SAFETY: the caller's contract
-        unsafe { self.mat_vec_q8_0.destroy(device) };
+        unsafe {
+            self.mat_vec_q8_0.destroy(device);
+            self.map_f32.destroy(device);
+            self.copy_b32.destroy(device);
+        }
     }
 }
 

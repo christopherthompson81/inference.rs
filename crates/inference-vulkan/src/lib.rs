@@ -5,6 +5,7 @@
 
 mod context;
 mod kernels;
+mod map;
 mod memory;
 mod pipeline;
 mod stream;
@@ -14,6 +15,7 @@ mod shaders {
 
 pub use context::{Context, Recorder};
 pub use kernels::MatVec;
+pub use map::{MAX_DIMS, Map, MapOp, Operand};
 pub use memory::{HostBuffer, ImportedMemory};
 pub use stream::Retained;
 

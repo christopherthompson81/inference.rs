@@ -73,3 +73,16 @@ was the only difference, which the quantized checkpoint amplified to 0.015).
 returns to its class, which the stream's retention makes safe, and a new one reuses it rather than allocating.
 
 **Result (as Run 2):** prefill 23.3 -> 61.2 tok/s, decode 3.0 -> 8.1 tok/s (124 ms a token).
+
+### Run 4 - 2026-11-03 ~21:40
+
+**Change:** `map_f32` (unary, binary with broadcasting, affine, powf, elu, fill over strided f32 operands of up to 6
+dims, by op code) and `copy_b32` (copies and fills of any 4-byte element bit for bit); `VulkanStorage` runs its unary,
+binary, affine, powf, elu, strided and 2-D copies, same-dtype `to_dtype`, `try_clone` and `const_set` on them.
+
+**Count first:** a decode step had ~285 fallback calls a token: binary ops, strided copies (`copy2d`), unary ops,
+gathers, affine, f32 matmuls (router, attention), reductions, then the custom ops and in-place pool updates.
+
+**Result (as Run 2):** prefill 61.2 -> 80.9 tok/s; decode 8.1 -> 6.6 tok/s. A native op leaves work in flight that
+the next fallback op waits for (~60 us a submit-and-wait), so decode pays for every boundary until a layer's ops are
+all on the GPU.
