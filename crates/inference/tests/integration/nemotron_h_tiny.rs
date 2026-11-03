@@ -1,8 +1,8 @@
 //! A tiny random-weight Nemotron-H (Mamba-2, NoPE attention, sigmoid-routed squared-ReLU experts with a shared
 //! expert, a dense squared-ReLU MLP, and a Mamba layer with no feed-forward after it): decoding step by step through
 //! its Mamba state and KV cache scores the tokens as one prefill over them does (quantized, with a prompt long enough
-//! to run the experts grouped, too, and on CUDA, and with latent experts), and calibrating an ISQ load collects
-//! statistics for every expert projection.
+//! to run the experts grouped, too, and on CUDA, and with latent experts), calibrating an ISQ load collects
+//! statistics for every expert projection, and its MTP head drafts on the CPU without changing greedy output.
 
 use std::collections::HashMap;
 
@@ -65,6 +65,9 @@ const CUDA_LOGPROB_TOLERANCE: f32 = 1e-3;
 // stale state is off by nats
 const BF16_LOGPROB_TOLERANCE: f32 = 0.1;
 const CIMATRIX: &str = "collected.cimatrix";
+const MTP_N_PREDICT: usize = 2;
+// enough steps that drafts are rejected at several positions, each replaying the Mamba state
+const MTP_MAX_LEN: usize = 24;
 
 /// The checkpoint's attention width and, for latent MoE, the routed experts' width.
 #[derive(Clone, Copy)]
@@ -106,6 +109,8 @@ fn config(shape: Shape) -> serde_json::Value {
         "layer_norm_epsilon": 1e-5,
         "max_position_embeddings": 4096,
         "tie_word_embeddings": false,
+        "num_nextn_predict_layers": 1,
+        "mtp_layers_block_type": ["attention", "moe"],
     });
     if let Some(latent) = shape.latent {
         config["moe_latent_size"] = latent.into();
@@ -160,63 +165,8 @@ fn weights(shape: Shape) -> anyhow::Result<HashMap<String, Tensor>> {
                 ("norm.weight".into(), near_one(rng, &[inner])?),
                 ("out_proj.weight".into(), random(rng, &[HIDDEN, inner])?),
             ],
-            "attention" => vec![
-                (
-                    "q_proj.weight".into(),
-                    random(rng, &[HEADS * head_dim, HIDDEN])?,
-                ),
-                (
-                    "k_proj.weight".into(),
-                    random(rng, &[KV_HEADS * head_dim, HIDDEN])?,
-                ),
-                (
-                    "v_proj.weight".into(),
-                    random(rng, &[KV_HEADS * head_dim, HIDDEN])?,
-                ),
-                (
-                    "o_proj.weight".into(),
-                    random(rng, &[HIDDEN, HEADS * head_dim])?,
-                ),
-            ],
-            "moe" => {
-                let mut moe = vec![
-                    ("gate.weight".into(), random(rng, &[EXPERTS, HIDDEN])?),
-                    (
-                        "gate.e_score_correction_bias".into(),
-                        random(rng, &[EXPERTS])?,
-                    ),
-                    (
-                        "shared_experts.up_proj.weight".into(),
-                        random(rng, &[SHARED_WIDTH, HIDDEN])?,
-                    ),
-                    (
-                        "shared_experts.down_proj.weight".into(),
-                        random(rng, &[HIDDEN, SHARED_WIDTH])?,
-                    ),
-                ];
-                for e in 0..EXPERTS {
-                    moe.push((
-                        format!("experts.{e}.up_proj.weight"),
-                        random(rng, &[EXPERT_WIDTH, expert_in])?,
-                    ));
-                    moe.push((
-                        format!("experts.{e}.down_proj.weight"),
-                        random(rng, &[expert_in, EXPERT_WIDTH])?,
-                    ));
-                }
-                // drawn last, so the other checkpoints keep their weights
-                if let Some(latent) = shape.latent {
-                    moe.push((
-                        "fc1_latent_proj.weight".into(),
-                        random(rng, &[latent, HIDDEN])?,
-                    ));
-                    moe.push((
-                        "fc2_latent_proj.weight".into(),
-                        random(rng, &[HIDDEN, latent])?,
-                    ));
-                }
-                moe
-            }
+            "attention" => attention_tensors(rng, head_dim)?,
+            "moe" => moe_tensors(rng, expert_in, shape.latent)?,
             _ => vec![
                 ("up_proj.weight".into(), random(rng, &[MLP_WIDTH, HIDDEN])?),
                 (
@@ -229,7 +179,95 @@ fn weights(shape: Shape) -> anyhow::Result<HashMap<String, Tensor>> {
             weights.insert(format!("{mixer}.{name}"), tensor);
         }
     }
+    // drawn after the stack's, so its weights stay those the other cases were tuned on
+    let mtp = [
+        ("mtp.layers.0.enorm.weight", near_one(rng, &[HIDDEN])?),
+        ("mtp.layers.0.hnorm.weight", near_one(rng, &[HIDDEN])?),
+        (
+            "mtp.layers.0.eh_proj.weight",
+            random(rng, &[HIDDEN, 2 * HIDDEN])?,
+        ),
+        ("mtp.layers.0.norm.weight", near_one(rng, &[HIDDEN])?),
+        ("mtp.layers.1.norm.weight", near_one(rng, &[HIDDEN])?),
+        (
+            "mtp.layers.1.final_layernorm.weight",
+            near_one(rng, &[HIDDEN])?,
+        ),
+    ];
+    weights.extend(mtp.into_iter().map(|(name, t)| (name.to_string(), t)));
+    for (name, tensor) in attention_tensors(rng, head_dim)? {
+        weights.insert(format!("mtp.layers.0.mixer.{name}"), tensor);
+    }
+    for (name, tensor) in moe_tensors(rng, expert_in, shape.latent)? {
+        weights.insert(format!("mtp.layers.1.mixer.{name}"), tensor);
+    }
     Ok(weights)
+}
+
+fn attention_tensors(rng: &mut StdRng, head_dim: usize) -> anyhow::Result<Vec<(String, Tensor)>> {
+    Ok(vec![
+        (
+            "q_proj.weight".into(),
+            random(rng, &[HEADS * head_dim, HIDDEN])?,
+        ),
+        (
+            "k_proj.weight".into(),
+            random(rng, &[KV_HEADS * head_dim, HIDDEN])?,
+        ),
+        (
+            "v_proj.weight".into(),
+            random(rng, &[KV_HEADS * head_dim, HIDDEN])?,
+        ),
+        (
+            "o_proj.weight".into(),
+            random(rng, &[HIDDEN, HEADS * head_dim])?,
+        ),
+    ])
+}
+
+// experts reading `expert_in`-wide inputs, projected to and from `latent` when the MoE is latent
+fn moe_tensors(
+    rng: &mut StdRng,
+    expert_in: usize,
+    latent: Option<usize>,
+) -> anyhow::Result<Vec<(String, Tensor)>> {
+    let mut moe = vec![
+        ("gate.weight".into(), random(rng, &[EXPERTS, HIDDEN])?),
+        (
+            "gate.e_score_correction_bias".into(),
+            random(rng, &[EXPERTS])?,
+        ),
+        (
+            "shared_experts.up_proj.weight".into(),
+            random(rng, &[SHARED_WIDTH, HIDDEN])?,
+        ),
+        (
+            "shared_experts.down_proj.weight".into(),
+            random(rng, &[HIDDEN, SHARED_WIDTH])?,
+        ),
+    ];
+    for e in 0..EXPERTS {
+        moe.push((
+            format!("experts.{e}.up_proj.weight"),
+            random(rng, &[EXPERT_WIDTH, expert_in])?,
+        ));
+        moe.push((
+            format!("experts.{e}.down_proj.weight"),
+            random(rng, &[expert_in, EXPERT_WIDTH])?,
+        ));
+    }
+    // drawn last, so the other checkpoints keep their weights
+    if let Some(latent) = latent {
+        moe.push((
+            "fc1_latent_proj.weight".into(),
+            random(rng, &[latent, HIDDEN])?,
+        ));
+        moe.push((
+            "fc2_latent_proj.weight".into(),
+            random(rng, &[HIDDEN, latent])?,
+        ));
+    }
+    Ok(moe)
 }
 
 fn checkpoint() -> anyhow::Result<tempfile::TempDir> {
@@ -285,6 +323,49 @@ async fn a_long_prompt_scores_as_its_cpu_paged_decode() -> anyhow::Result<()> {
         Target::CpuPaged,
     )
     .await
+}
+
+// greedy decoding with the MTP head drafting through the CPU's paged attention matches decoding without it: a verify
+// step that keeps fewer rows than it ran replays each Mamba layer's state from its stash over the kept rows
+#[tokio::test]
+async fn an_mtp_head_drafts_on_the_cpu_without_changing_greedy_output() -> anyhow::Result<()> {
+    if cfg!(any(feature = "cuda", feature = "metal")) {
+        return Ok(());
+    }
+    let dir = checkpoint()?;
+    let builder = || -> anyhow::Result<TextModelBuilder> {
+        Ok(TextModelBuilder::new(dir.path().to_string_lossy())
+            .with_dtype(ModelDType::F32)
+            .with_force_cpu()
+            .with_prefix_cache_n(None)
+            .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?))
+    };
+    let request = || {
+        RequestBuilder::from(
+            TextMessages::new().add_message(TextMessageRole::User, "say something long"),
+        )
+    };
+    let drafting = builder()?
+        .with_builtin_mtp(Some(MTP_N_PREDICT))
+        .build()
+        .await?;
+    let (actual, _) = traces::greedy(&drafting, request(), MTP_MAX_LEN).await?;
+    let stats = drafting.speculative_stats()?;
+    let proposed: usize = stats.data.iter().map(|m| m.draft_tokens_proposed).sum();
+    let accepted: usize = stats.data.iter().map(|m| m.draft_tokens_accepted).sum();
+    drop(drafting);
+    let plain = builder()?.build().await?;
+    let (expected, _) = traces::greedy(&plain, request(), MTP_MAX_LEN).await?;
+    anyhow::ensure!(proposed > 0, "the MTP head never drafted");
+    anyhow::ensure!(
+        accepted < proposed,
+        "every draft was accepted ({accepted}), so no replay ran"
+    );
+    anyhow::ensure!(
+        traces::close(&expected, &actual, LOGPROB_TOLERANCE),
+        "drafting changed greedy decoding ({accepted} of {proposed} drafts accepted): {expected:?} vs {actual:?}"
+    );
+    Ok(())
 }
 
 // on CUDA through the hybrid cache and the scan kernel at a state narrower than a warp (grouped mmq against the gather

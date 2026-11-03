@@ -7,8 +7,10 @@ use inference_quant::QuantizedConfig;
 use inference_tensor::Result;
 use serde::Serialize;
 
+use crate::decoder::MtpSpec;
 use crate::granite::{
-    BlockNames, FfnKind, FfnNames, GraniteLayerType, HybridBlock, HybridLayout, NemotronMoeSpec,
+    BlockNames, FfnKind, FfnNames, GraniteLayerType, HybridBlock, HybridLayout, HybridMtpLayout,
+    NemotronMoeSpec,
 };
 use crate::serde_default_fn;
 
@@ -145,6 +147,12 @@ pub struct Config {
     #[serde(default)]
     pub tie_word_embeddings: bool,
     pub quantization_config: Option<QuantizedConfig>,
+    #[serde(default)]
+    pub num_nextn_predict_layers: usize,
+    pub mtp_layers_block_type: Option<Vec<String>>,
+    /// The loader's flag that `--mtp` asked for the checkpoint's MTP head.
+    #[serde(default, rename = "_inference_mtp")]
+    pub mtp: bool,
 }
 
 /// What one checkpoint layer holds.
@@ -271,6 +279,58 @@ impl Config {
             routed_scaling_factor: self.routed_scaling_factor,
             latent_size: self.moe_latent_size,
         }
+    }
+
+    /// The checkpoint's MTP head when `--mtp` asked for it: an attention layer and the MoE after it, under `mtp.`, its
+    /// input fusion on the first and its final LayerNorm on the second.
+    pub fn mtp_layout(&self) -> Result<Option<HybridMtpLayout>> {
+        if !self.mtp || self.num_nextn_predict_layers == 0 {
+            return Ok(None);
+        }
+        if self.num_nextn_predict_layers != 1 {
+            inference_tensor::bail!(
+                "Nemotron-H with {} MTP layers is not supported",
+                self.num_nextn_predict_layers
+            );
+        }
+        let kinds = match &self.mtp_layers_block_type {
+            Some(types) => types
+                .iter()
+                .map(|t| LayerKind::parse(t))
+                .collect::<Result<Vec<_>>>()?,
+            None => vec![LayerKind::Attention, LayerKind::Moe],
+        };
+        if kinds != [LayerKind::Attention, LayerKind::Moe] {
+            inference_tensor::bail!(
+                "Nemotron-H MTP layers {kinds:?} are not supported, only an attention layer and an MoE"
+            );
+        }
+        Ok(Some(HybridMtpLayout {
+            block: HybridBlock {
+                mixer: GraniteLayerType::Attention,
+                names: BlockNames {
+                    norm: "layers.0.norm".into(),
+                    mixer: "layers.0.mixer".into(),
+                    ffn: Some(FfnNames {
+                        norm: "layers.1.norm".into(),
+                        module: "layers.1.mixer".into(),
+                        kind: FfnKind::Moe,
+                        // no `block_configs` entry covers the MTP layer, so the model's own experts
+                        moe: Some(self.moe_spec(usize::MAX)),
+                    }),
+                },
+            },
+            names: MtpSpec {
+                embedding_norm: "layers.0.enorm",
+                hidden_norm: "layers.0.hnorm",
+                projection: "layers.0.eh_proj",
+                block: "layers.0",
+                final_norm: Some("layers.1.final_layernorm"),
+                dense_block: false,
+                mask_first_position: false,
+            },
+            layer_norm_final: true,
+        }))
     }
 
     /// The Granite config the blocks load with: NoPE attention scaled by `1/sqrt(head_dim)`, the Mamba widths from

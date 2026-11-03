@@ -14,6 +14,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::decoder::{MtpBlock, MtpHead, MtpHeadParts, MtpSpec, Norm};
 use crate::gdn::RecurrentBatchKind;
 use crate::kv_cache::EitherCache;
 use crate::kv_cache::KvCache;
@@ -78,6 +79,9 @@ serde_default_fn!(bool, default_mamba_proj_bias, false);
 serde_default_fn!(usize, default_num_local_experts, 0);
 serde_default_fn!(usize, default_num_experts_per_tok, 2);
 serde_default_fn!(String, default_position_embedding_type, "rope".to_string());
+
+// where a checkpoint keeps its MTP head, beside the decoder's own prefix
+pub const MTP_PREFIX: &str = "mtp";
 
 #[derive(Debug, Clone, inference_json::FromJson, Serialize, Default, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -1120,6 +1124,43 @@ impl MambaLayer {
         Ok((gate, hidden_states_b_c, dt))
     }
 
+    // a multi-token verify step's pass that also hands back its conv input and dt, for a replay over the kept rows
+    fn forward_replayable(
+        &self,
+        x: &Tensor,
+        cache: &mut MambaLayerCache,
+    ) -> Result<(Tensor, ReplayInputs)> {
+        let (batch_size, seq_len, _) = x.dims3()?;
+        let (gate, hidden_states_b_c, dt) = self.projected_parts(x)?;
+        let y = self.forward_full(&hidden_states_b_c, &dt, cache, batch_size, seq_len)?;
+        let y = self.norm.forward(&y, Some(&gate))?;
+        let out = self.out_proj.forward(&y.to_dtype(x.dtype())?)?;
+        Ok((
+            out,
+            ReplayInputs {
+                hidden_states_b_c,
+                dt,
+            },
+        ))
+    }
+
+    /// Advances `cache` over the first `rows` positions of a stashed verify step.
+    fn replay(
+        &self,
+        inputs: &ReplayInputs,
+        cache: &mut MambaLayerCache,
+        rows: usize,
+    ) -> Result<Tensor> {
+        let batch_size = inputs.dt.dim(0)?;
+        self.forward_full(
+            &inputs.hidden_states_b_c.narrow(1, 0, rows)?,
+            &inputs.dt.narrow(1, 0, rows)?,
+            cache,
+            batch_size,
+            rows,
+        )
+    }
+
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
         uvb.pp("in_proj").add(&self.in_proj);
@@ -1762,6 +1803,23 @@ fn in_activation_dtype(
     Ok(out)
 }
 
+/// A Mamba layer's conv input `(batch, seq, conv_dim)` and dt `(batch, seq, heads)` from one verify step.
+struct ReplayInputs {
+    hidden_states_b_c: Tensor,
+    dt: Tensor,
+}
+
+/// One Mamba layer's verify step from the state before it, so a commit can re-advance the pool over only the rows
+/// verification kept.
+struct MambaReplay {
+    layer_idx: usize,
+    // the pool slots of the step's batch rows
+    indices: Tensor,
+    conv_state: Tensor,
+    ssm_state: Tensor,
+    inputs: ReplayInputs,
+}
+
 /// Mamba decoder block (replaces attention block for Mamba layers)
 struct MambaBlock {
     rms_1: RmsNorm,
@@ -1784,6 +1842,35 @@ impl MambaBlock {
         })?;
         let x = (scale_tensor(mamba_out, self.residual_multiplier)? + x)?;
         BlockFfn::residual(self.ffn.as_ref(), x, self.residual_multiplier)
+    }
+
+    fn forward_replayable(
+        &self,
+        x: &Tensor,
+        cache: &mut MambaLayerCache,
+    ) -> Result<(Tensor, ReplayInputs)> {
+        let normed = self.rms_1.forward(x)?;
+        let mut inputs = None;
+        let mamba_out = in_activation_dtype(cache, normed.dtype(), |cache| {
+            let (out, replay) = self.mamba.forward_replayable(&normed, cache)?;
+            inputs = Some(replay);
+            Ok(out)
+        })?;
+        let x = (scale_tensor(mamba_out, self.residual_multiplier)? + x)?;
+        let out = BlockFfn::residual(self.ffn.as_ref(), x, self.residual_multiplier)?;
+        Ok((out, inputs.expect("the Mamba pass ran")))
+    }
+
+    fn replay(
+        &self,
+        inputs: &ReplayInputs,
+        cache: &mut MambaLayerCache,
+        rows: usize,
+    ) -> Result<()> {
+        in_activation_dtype(cache, inputs.dt.dtype(), |cache| {
+            self.mamba.replay(inputs, cache, rows)
+        })?;
+        Ok(())
     }
 
     fn forward_packed_prefill(
@@ -1836,6 +1923,44 @@ impl DecoderLayer {
             Self::Mamba(block) => block.ffn.as_ref(),
         }
     }
+}
+
+/// Nemotron-H's MTP block: an attention mixer and the MoE after it, as the stack's attention blocks are.
+struct GraniteMtpBlock {
+    block: Block,
+    names: BlockNames,
+}
+
+impl MtpBlock for GraniteMtpBlock {
+    fn forward(
+        &self,
+        xs: &Tensor,
+        kv_cache: &mut KvCache,
+        ctx: &mut ModelForwardContext<'_>,
+        kv_layer_idx: usize,
+    ) -> Result<Tensor> {
+        self.block
+            .forward(xs, &AttentionMask::None, kv_cache, ctx, kv_layer_idx)
+    }
+
+    fn add_residual(&self, uvb_m: &UnVarBuilder) {
+        uvb_m.pp(&self.names.norm).add(&self.block.rms_1);
+        if let (Some(ffn), Some(names)) = (&self.block.ffn, &self.names.ffn) {
+            uvb_m.pp(&names.norm).add(&ffn.norm);
+            if let Some(moe) = &ffn.moe {
+                uvb_m.pp(&names.module).extend(moe.residual_tensors());
+            }
+        }
+    }
+}
+
+/// Where a checkpoint's MTP head sits under its own prefix: its norms and projection, and one block.
+#[derive(Clone, Debug)]
+pub struct HybridMtpLayout {
+    pub block: HybridBlock,
+    pub names: MtpSpec,
+    /// The head's final norm is a weight-only LayerNorm (Nemotron-H's `final_layernorm`), not an RMS norm.
+    pub layer_norm_final: bool,
 }
 
 // Use HybridLayerCache from kv_cache instead of a local type alias
@@ -2551,6 +2676,9 @@ pub struct GraniteMoeHybrid {
     has_sinks: bool,
     // one sequence's conv and SSM state over the Mamba layers
     recurrent_state_bytes: usize,
+    mtp: Option<MtpHead<GraniteMtpBlock>>,
+    // the last verify step's Mamba layers, which a commit replays over the rows it keeps
+    mamba_replay: Mutex<Vec<MambaReplay>>,
 }
 
 /// Runs before decoder layer `layer_idx` on its input hidden states, as Granite 4 Vision injects image features.
@@ -2818,6 +2946,8 @@ impl GraniteMoeHybrid {
             sliding_window: has_sliding.then_some(cfg.sliding_window).flatten(),
             has_sinks,
             recurrent_state_bytes,
+            mtp: None,
+            mamba_replay: Mutex::new(Vec::new()),
             wte,
             layers,
             layer_types,
@@ -2868,14 +2998,91 @@ impl GraniteMoeHybrid {
 
     /// The paged cache's view: a hybrid model pages only its attention layers, whose prefix prefill reads the paged
     /// cache directly unless sinks need the gathered path.
+    /// The checkpoint's MTP head as the paged layer after the stack's, its block loaded as the stack's attention blocks.
+    pub fn with_mtp(
+        mut self,
+        cfg: &Config,
+        mtp: HybridMtpLayout,
+        vb: ShardedVarBuilder,
+        loading_isq: bool,
+        attention_mechanism: &AttentionImplementation,
+    ) -> Result<Self> {
+        let kv_layer_idx = self.layers.len();
+        let mut layout = self.layout.clone();
+        layout.blocks.push(mtp.block.clone());
+        let comm = self.mapper.get_comm_for(kv_layer_idx)?;
+        let load = BlockLoad {
+            cfg,
+            mapper: &*self.mapper,
+            layer_idx: kv_layer_idx,
+            loading_isq,
+            comm: &comm,
+        };
+        let device = self.device.clone();
+        let paged_attn = match attention_mechanism {
+            AttentionImplementation::Eager => None,
+            AttentionImplementation::PagedAttention => {
+                Some(PagedAttention::new(cfg.head_dim(), &device, None)?)
+            }
+        };
+        let block = Block::load(&vb, &layout, load, None, paged_attn)?;
+        let norm = |name: &str| -> Result<Norm> {
+            Ok(Norm::Rms(RmsNorm::new(
+                cfg.hidden_size,
+                cfg.rms_norm_eps,
+                self.mapper.set_nm_device(vb.pp(name), false),
+            )?))
+        };
+        let final_norm = match mtp.names.final_norm {
+            Some(name) if mtp.layer_norm_final => Some(Norm::Layer(crate::layers::layer_norm(
+                cfg.hidden_size,
+                inference_tensor::nn::LayerNormConfig {
+                    eps: cfg.rms_norm_eps,
+                    remove_mean: true,
+                    affine: false,
+                },
+                self.mapper.set_nm_device(vb.pp(name), false),
+            )?)),
+            Some(name) => Some(norm(name)?),
+            None => None,
+        };
+        let head = MtpHead::from_parts(MtpHeadParts {
+            embedding_norm: norm(mtp.names.embedding_norm)?,
+            hidden_norm: norm(mtp.names.hidden_norm)?,
+            projection: ReplicatedLayer::new(
+                2 * cfg.hidden_size,
+                cfg.hidden_size,
+                &cfg.quantization_config,
+                false,
+                self.mapper
+                    .set_nm_device(vb.pp(mtp.names.projection), loading_isq),
+            )?,
+            block: GraniteMtpBlock {
+                block,
+                names: mtp.block.names,
+            },
+            final_norm,
+            names: mtp.names,
+            chain_normed: true,
+            kv_layer_idx,
+            device,
+            dtype: self.dtype,
+        });
+        self.mtp = Some(head);
+        self.cfg.num_layers += 1;
+        Ok(self)
+    }
+
     pub fn paged_kv_config(&self) -> Arc<dyn ModelConfigLike + Send + Sync> {
         if !self.layer_types.contains(&GraniteLayerType::Mamba) {
             return Arc::new(self.cfg.clone());
         }
+        // the MTP head's attention is the paged layer after the stack's
         let paged_layers = self
             .layer_types
             .iter()
             .map(|layer_type| !matches!(layer_type, GraniteLayerType::Mamba))
+            .chain(self.mtp.is_some().then_some(true))
             .collect();
         let config = HybridPagedKvCacheConfig::new(self.cfg.clone(), paged_layers)
             .with_recurrent_state_bytes(self.recurrent_state_bytes);
@@ -3013,6 +3220,13 @@ impl GraniteMoeHybrid {
         let sliding_mask = sliding_mask
             .map(|mask| DeviceMappedMask::new(mask, &*self.mapper))
             .transpose()?;
+        let stash_replays = self.mtp.as_ref().is_some_and(|mtp| mtp.n_predict() > 0)
+            && packed_query_lens.is_none()
+            && recurrent_metadata.as_ref().is_some_and(|metadata| {
+                metadata.batch_kind() == RecurrentBatchKind::SpeculativeDecode
+            })
+            && x.dim(1)? > 1;
+        let mut replays = Vec::new();
 
         for (layer_idx, layer) in self.layers.iter().enumerate() {
             x = self.mapper.map(x, layer_idx)?;
@@ -3088,12 +3302,22 @@ impl GraniteMoeHybrid {
                         let ssm_state = pool.gather_recurrent_state(&indices)?;
 
                         let mut temp_cache = MambaLayerCache {
-                            conv_state,
-                            ssm_state,
+                            conv_state: conv_state.clone(),
+                            ssm_state: ssm_state.clone(),
                         };
 
                         x = if let Some(query_lens) = packed_query_lens.as_deref() {
                             block.forward_packed_prefill(&x, &mut temp_cache, query_lens)?
+                        } else if stash_replays {
+                            let (out, inputs) = block.forward_replayable(&x, &mut temp_cache)?;
+                            replays.push(MambaReplay {
+                                layer_idx,
+                                indices: indices.clone(),
+                                conv_state,
+                                ssm_state,
+                                inputs,
+                            });
+                            out
                         } else {
                             block.forward(&x, &mut temp_cache, metadata.batch_kind(), None)?
                         };
@@ -3122,9 +3346,14 @@ impl GraniteMoeHybrid {
             }
         }
 
+        *self.mamba_replay.lock().expect("mamba replay poisoned") = replays;
+
         let x = self.mapper.cast_nm_device(&x, false)?;
-        let x = self.ln_f.forward(&x)?;
-        let x = ctx.logits(&x)?;
+        let full = self.ln_f.forward(&x)?;
+        let x = ctx.logits(&full)?;
+        if let Some(mtp) = &self.mtp {
+            mtp.record(&full, &x);
+        }
 
         let mut logits = ctx.lm_head(&*self.lm_head, &x)?;
 
@@ -3165,11 +3394,149 @@ impl GraniteMoeHybrid {
 impl IsqModel for GraniteMoeHybrid {
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
+        if let Some(mtp) = &self.mtp {
+            mtp.add_residual(&uvb.pp(MTP_PREFIX));
+        }
         self.residual_tensors_m(uvb.pp("model"))
     }
 }
 
-impl crate::speculative::SpeculativeTargetMixin for GraniteMoeHybrid {}
+impl GraniteMoeHybrid {
+    // the pool rows of a verify step that kept fewer rows than it ran, re-advanced from the stashed state
+    fn replay_mamba_layers(&self, rows: &[crate::speculative::SpeculativeCommitRow]) -> Result<()> {
+        let replays =
+            std::mem::take(&mut *self.mamba_replay.lock().expect("mamba replay poisoned"));
+        let mut groups: std::collections::BTreeMap<usize, Vec<u32>> = Default::default();
+        for row in rows.iter().filter(|row| !row.accepted_all) {
+            #[allow(clippy::cast_possible_truncation)]
+            groups
+                .entry(row.keep_rows)
+                .or_default()
+                .push(row.batch_idx as u32);
+        }
+        if replays.is_empty() || groups.is_empty() {
+            return Ok(());
+        }
+        let mut cache = self.kv_cache.hybrid();
+        for replay in &replays {
+            let DecoderLayer::Mamba(block) = &self.layers[replay.layer_idx] else {
+                inference_tensor::bail!("Mamba replay of non-Mamba layer {}", replay.layer_idx);
+            };
+            for (&keep, batch_rows) in &groups {
+                // the stashed conv input and dt are views into the input projection
+                let pick = |t: &Tensor| -> Result<Tensor> {
+                    t.contiguous()?
+                        .index_select(&Tensor::new(batch_rows.as_slice(), t.device())?, 0)
+                };
+                let mut state = MambaLayerCache {
+                    conv_state: pick(&replay.conv_state)?,
+                    ssm_state: pick(&replay.ssm_state)?,
+                };
+                let inputs = ReplayInputs {
+                    hidden_states_b_c: pick(&replay.inputs.hidden_states_b_c)?,
+                    dt: pick(&replay.inputs.dt)?,
+                };
+                block.replay(&inputs, &mut state, keep)?;
+                let slots = pick(&replay.indices)?;
+                let Some(HybridLayerCache::Recurrent(pool)) = cache.get_mut(replay.layer_idx)
+                else {
+                    inference_tensor::bail!(
+                        "Hybrid cache layer {} is not recurrent",
+                        replay.layer_idx
+                    );
+                };
+                pool.scatter_conv_state_with_host_indices(&slots, None, &state.conv_state)?;
+                pool.scatter_recurrent_state_with_host_indices(&slots, None, &state.ssm_state)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl crate::speculative::SpeculativeTargetMixin for GraniteMoeHybrid {
+    fn attach_speculative(
+        &mut self,
+        config: crate::speculative::SpeculativeConfig,
+    ) -> Result<Option<crate::speculative::SpeculativeAttachInfo>> {
+        let crate::speculative::SpeculativeConfig::Mtp(config) = config else {
+            if let Some(mtp) = &mut self.mtp {
+                mtp.set_n_predict(0);
+            }
+            return Ok(None);
+        };
+        if !config.is_builtin() {
+            inference_tensor::bail!(
+                "this model drafts only with its own MTP head, not an external drafter"
+            );
+        }
+        let Some(mtp) = &mut self.mtp else {
+            inference_tensor::bail!(
+                "`--mtp` asked for this model's MTP head, which its checkpoint does not carry"
+            );
+        };
+        let n_predict = config
+            .n_predict
+            .unwrap_or(crate::decoder::DEFAULT_MTP_N_PREDICT);
+        if n_predict == 0 {
+            inference_tensor::bail!("MTP needs at least one draft token");
+        }
+        mtp.set_n_predict(n_predict);
+        Ok(Some(crate::speculative::SpeculativeAttachInfo::mtp(
+            "built-in".to_string(),
+            n_predict,
+        )))
+    }
+
+    fn has_speculative_proposer(&self) -> bool {
+        self.mtp.as_ref().is_some_and(|mtp| mtp.n_predict() > 0)
+    }
+
+    fn speculative_plan(
+        &self,
+        _batch_size: usize,
+    ) -> Option<crate::speculative::SpeculativeBatchPlan> {
+        self.mtp
+            .as_ref()
+            .filter(|mtp| mtp.n_predict() > 0)
+            .map(|mtp| crate::speculative::SpeculativeBatchPlan::new(mtp.n_predict()))
+    }
+
+    fn speculative_target_hiddens(&self, rows: &[(usize, usize)]) -> Result<Option<Tensor>> {
+        match &self.mtp {
+            Some(mtp) if mtp.n_predict() > 0 => mtp.target_hiddens(rows),
+            _ => Ok(None),
+        }
+    }
+
+    fn speculative_prefill(
+        &mut self,
+        ctx: crate::speculative::SpeculativePrefillCtx<'_>,
+    ) -> Result<()> {
+        match &self.mtp {
+            Some(mtp) if mtp.n_predict() > 0 => mtp.prefill(&|tokens| self.embed(tokens), ctx),
+            _ => Ok(()),
+        }
+    }
+
+    fn speculative_propose(
+        &mut self,
+        ctx: crate::speculative::SpeculativeProposeBatchCtx<'_>,
+    ) -> Result<Option<crate::speculative::SpeculativeProposalBatch>> {
+        match &self.mtp {
+            Some(mtp) if mtp.n_predict() > 0 => {
+                mtp.propose(&|tokens| self.embed(tokens), &*self.lm_head, ctx)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn speculative_commit(
+        &mut self,
+        rows: &[crate::speculative::SpeculativeCommitRow],
+    ) -> Result<()> {
+        self.replay_mamba_layers(rows)
+    }
+}
 
 impl NormalModel for GraniteMoeHybrid {
     fn forward(&self, input_ids: &Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
