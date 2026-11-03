@@ -212,3 +212,23 @@ decoding still wins (Q5_0 40 GB/s against 31 for 1x4). An AVX-512 VNNI rewrite o
 `vpdpbusd`) ran no faster in cache or from DRAM, so it was dropped.
 **Change:** a lone route (a decode step's, and most experts' in a verify step) dots its rows one at a time, as does
 `cpu_dense` for its sub-quad tokens; the 8x1 kernels are gone. Expert calls: 459 -> 420 us, 21.4 -> 19.6 ms a token.
+
+## Run 12 - 2026-11-03 ~13:30
+
+**Change:** the CPU MoE router (sigmoid or softmax scores, the selection bias, top-k, renormalized weights) runs in
+one host pass instead of a dozen small tensor ops and a rayon-dispatched sort per MoE layer; ties still go to the
+lower expert, and greedy text is byte-identical. Alone it is 2.9 -> 1.6 us a call in a hot loop.
+
+**Measurement note:** browser tabs had been taking a share of the cores through earlier runs (load average ~8 with
+no benchmark), which depressed and spread plain decode; the runs below are on a quiet machine, two rounds of the old
+and new binaries alternated.
+
+**Result (recipe A, Run 6's prompts):** plain 17.70 / 17.76 (old) against 17.76 / 17.76 (new); MTP 2 with the Q5_0
+draft head 20.00 / 20.08 against 20.32 / 20.51 (+1.8 %, a verify step routes three rows). llama.cpp tg128 on the
+same file, quiet: 18.13 +- 0.09.
+
+| | KLD vs BF16 | decode tok/s |
+|---|---|---|
+| llama.cpp, recipe A | 0.0090 | 18.13 |
+| ours, recipe A, plain | 0.0090 | 17.76 |
+| ours, recipe A, MTP 2 + Q5_0 draft head | 0.0090 | 20.4 |
