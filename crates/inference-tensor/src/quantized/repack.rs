@@ -252,9 +252,11 @@ pub(crate) fn try_matmul_f32(
             super::repack_x86::matmul_amx_q4k(tiles, q8k, m, k, n, dst);
             return Ok(true);
         }
-        let tiles = packed
-            .x86
-            .get_or_init(|| super::repack_x86::pack(dtype, storage, n, k));
+        let tiles = storage.x86_tiles().unwrap_or_else(|| {
+            packed
+                .x86
+                .get_or_init(|| super::repack_x86::pack(dtype, storage, n, k))
+        });
         super::repack_x86::matmul_tiles(tiles, &lhs_q, m, k, n, dst);
         Ok(true)
     }

@@ -398,3 +398,43 @@ noise; this session's machine state runs both above Run 18's numbers). Greedy co
 **IQ4_NL interleave, not done:** at ~106 ms a token the IQ4_NL up reads its 387 MB in ~10.7 ms (~36 GB/s), the Q5_0
 down 473 MB in ~13.2 ms (~36 GB/s), the dense Q8_0 1.99 GB in ~58 ms (~34 GB/s): every weight stream is at the
 machine's practical DDR4 rate, so a layout that reads the same bytes cannot be faster.
+
+## Run 20 - 2026-11-02 18:42 (local clock)
+
+**Question:** why does a dense Nemotron Nano 2 (9B v2, a public Q4_K_M GGUF) prompt run 4x slower on the CPU than
+llama.cpp's?
+
+**Commands:** `inference serve --cpu --max-seq-len 4096` on the GGUF, scratch `bench/text_prompt.py` (535 tokens, three
+times) and `bench/decode.py` (128 tokens); `perf record -g` over one prompt; `llama-bench -dev none -ngl 0 -t 8 -p 512
+-n 32 -r 2` for llama.cpp. Dev profile, same build as the runs above. Peak RSS from `/proc/<pid>/status` after the
+prompts.
+
+**Finding:** 90.9 % of the prompt was `BlockQ5_0::vec_dot_unopt`, the scalar dot: Q5_0 had no x86 SIMD path at all,
+and this file stores `ssm_in`, `ffn_up`, half the `ffn_down`, `attn_q`/`k` and `token_embd` as Q5_0 (its 4480 and
+15680 widths are not whole 256-value superblocks). Memory at load is the file mapping (6.1 GiB, reclaimable) plus the
+blocks copied out of it (7.8 GiB anonymous).
+
+**Changes, in the order tried:**
+1. An AVX2 `vec_dot_q5_0_q8_0` (ggml's, the fifth bit from `qh`), and Q4_0/Q5_0 weights widened into the Q8_0 tiles
+   past one row. Fast, but the widened tiles sit beside the blocks: +6.3 GB.
+2. A compact `TileQ5_0`: the blocks' 22 bytes a row (low nibbles laid out as `TileQ4K`'s, the fifth bits a u64 per
+   four k-values), values stored +16 and widened in the kernel, for AVX-512 VNNI (masked add), AVX-VNNI and AVX2 (0..31
+   leaves `maddubs` far from saturating, so no sign move and decode can take the tiles too). Q4_0 widening dropped.
+3. `TiledQ5_0`: a CPU 2-D Q5_0 storage whose shape tiles is swapped for its tiles at `QTensor` construction, so the
+   blocks' memory goes; `data()`, `dequantize`, `embedding` and f16 matmuls rebuild blocks. `QuantizedType` gained
+   `data()` and `x86_tiles()`. Packing runs per 16-row tile group in parallel.
+
+**Result:**
+
+| | prompt (535 tokens) | decode | peak RSS | warm load |
+|---|---|---|---|---|
+| master | 6.2 tok/s | 3.9 tok/s | 16.0 GB | 2.9-3.1 s |
+| 1. widened tiles beside the blocks | 30.8 tok/s | 4.4 tok/s | 22.3 GB | |
+| 2. compact tiles beside the blocks | 24.4 tok/s | 4.3 tok/s | 20.3 GB | |
+| 3. compact tiles in place of the blocks | 24.3 tok/s | 4.3 tok/s | 16.5 GB | 3.9-4.1 s (7.7 s packed serially) |
+| llama.cpp | 24.4 tok/s (pp512) | 4.6 tok/s | | |
+
+The +0.5 GB left is mostly the tiles' padding of each row to whole superblocks (140 blocks to 144). The compact tile
+gives up a fifth of the widened tile's prompt speed for the memory. Tests: `block32_matmuls_take_a_scale_per_32_activations`
+(Q4_0/Q5_0/Q8_0 tiles and SIMD dots against each type's scalar dot), `a_tiled_q5_0_matrix_gives_back_its_blocks`. Only
+the AVX2 kernel ran here (an i7-10700K has neither AVX-VNNI nor AVX-512); the other two compile only.

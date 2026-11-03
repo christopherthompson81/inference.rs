@@ -234,12 +234,7 @@ impl QStorage {
 
     fn data(&self) -> Result<Cow<'_, [u8]>> {
         match self {
-            QStorage::Cpu(storage) => {
-                let data_ptr = storage.as_ptr();
-                let size_in_bytes = storage.storage_size_in_bytes();
-                let data = unsafe { std::slice::from_raw_parts(data_ptr, size_in_bytes) };
-                Ok(Cow::from(data))
-            }
+            QStorage::Cpu(storage) => Ok(storage.data()),
             QStorage::Cuda(storage) => Ok(Cow::from(storage.data()?)),
             QStorage::Metal(storage) => Ok(Cow::from(storage.data()?)),
         }
@@ -463,6 +458,18 @@ pub trait QuantizedType: Send + Sync {
     #[allow(clippy::wrong_self_convention)]
     fn from_float_imatrix(&mut self, xs: &[f32], imatrix_weights: &[f32], n_per_row: usize);
     fn size(&self) -> usize;
+    // the blocks as bytes; a storage held in another layout rebuilds them
+    fn data(&self) -> Cow<'_, [u8]> {
+        let bytes =
+            unsafe { std::slice::from_raw_parts(self.as_ptr(), self.storage_size_in_bytes()) };
+        Cow::Borrowed(bytes)
+    }
+    // tiles a storage keeps in place of its blocks, which the tiled matmuls take as they are
+    #[cfg(target_arch = "x86_64")]
+    #[allow(private_interfaces)]
+    fn x86_tiles(&self) -> Option<&repack_x86::PackedX86> {
+        None
+    }
 }
 
 impl<T: k_quants::GgmlType + Send + Sync> QuantizedType for Vec<T> {
@@ -566,14 +573,20 @@ fn check_shape(shape: &Shape, block_size: usize) -> Result<()> {
 }
 
 impl QTensor {
-    pub fn new<S: Into<Shape>>(storage: QStorage, shape: S) -> Result<Self> {
-        let shape = shape.into();
-        check_shape(&shape, storage.block_size())?;
-        Ok(Self {
+    fn from_storage(storage: QStorage, shape: Shape) -> Self {
+        #[cfg(target_arch = "x86_64")]
+        let storage = repack_x86::tile_cpu_storage(storage, &shape);
+        Self {
             storage,
             shape,
             repacked_qs: repack::PackedCache::new(),
-        })
+        }
+    }
+
+    pub fn new<S: Into<Shape>>(storage: QStorage, shape: S) -> Result<Self> {
+        let shape = shape.into();
+        check_shape(&shape, storage.block_size())?;
+        Ok(Self::from_storage(storage, shape))
     }
 
     pub fn quantize(src: &Tensor, dtype: GgmlDType) -> Result<Self> {
@@ -590,11 +603,7 @@ impl QTensor {
         }
         let mut storage = src.device().qzeros(elem_count, dtype)?;
         storage.quantize(&src.storage())?;
-        Ok(Self {
-            storage,
-            shape: shape.clone(),
-            repacked_qs: repack::PackedCache::new(),
-        })
+        Ok(Self::from_storage(storage, shape.clone()))
     }
 
     pub fn quantize_imatrix(
@@ -626,11 +635,7 @@ impl QTensor {
         }
         let mut storage = src.device().qzeros(elem_count, dtype)?;
         storage.quantize_imatrix(&src.storage(), imatrix_weights, n_per_row)?;
-        Ok(Self {
-            storage,
-            shape: shape.clone(),
-            repacked_qs: repack::PackedCache::new(),
-        })
+        Ok(Self::from_storage(storage, shape.clone()))
     }
 
     /// Quantize `src` (currently on the CPU) to a QTensor on `dev`
@@ -655,11 +660,7 @@ impl QTensor {
         // storage is on the `dev`, src is on `cpu`
         let mut storage = dev.qzeros(elem_count, dtype)?;
         storage.quantize_onto(&src.storage())?;
-        Ok(Self {
-            storage,
-            shape: shape.clone(),
-            repacked_qs: repack::PackedCache::new(),
-        })
+        Ok(Self::from_storage(storage, shape.clone()))
     }
 
     pub fn dtype(&self) -> GgmlDType {
@@ -957,8 +958,11 @@ impl QTensor {
                 .enumerate()
                 .map(|(i, t)| {
                     let n = shapes[i];
-                    t.repacked_qs
-                        .x86_get_or_init(|| repack_x86::pack(dtype, t.storage_ref(), n, k))
+                    let storage = t.storage_ref();
+                    storage.x86_tiles().unwrap_or_else(|| {
+                        t.repacked_qs
+                            .x86_get_or_init(|| repack_x86::pack(dtype, storage, n, k))
+                    })
                 })
                 .collect();
             let parts: Vec<(&repack_x86::PackedX86, usize)> = packs
@@ -1383,18 +1387,23 @@ mod cpu_matmul_tests {
     use super::{GgmlDType, QMatMul, QTensor};
     use crate::{Device, Module, Tensor};
 
-    // Q8_0 weights pair with Q8_0 activations, a scale per 32 values, as ggml's vec_dot_q8_0_q8_0 does; an outlier
-    // every 64 values puts one scale per 256 far off, so the tiled kernels must give each 32 values their own; rows of
-    // 33 and 84 blocks pad the tiles' last superblock
+    // Q4_0, Q5_0 and Q8_0 weights pair with Q8_0 activations, a scale per 32 values, as ggml's vec_dot_*_q8_0 do;
+    // an outlier every 64 values puts one scale per 256 far off, so the tiled kernels must give each 32 values their
+    // own; rows of 33 and 84 blocks pad the tiles' last superblock
     #[test]
-    fn q8_0_matmuls_take_a_scale_per_32_activations() -> crate::Result<()> {
+    fn block32_matmuls_take_a_scale_per_32_activations() -> crate::Result<()> {
+        use super::k_quants::{BlockQ4_0, BlockQ5_0, BlockQ8_0};
         for k in [1024, 1056, 2688] {
-            q8_0_matmul_matches_ggml(k)?;
+            block32_matmul_matches_ggml::<BlockQ4_0>(k)?;
+            block32_matmul_matches_ggml::<BlockQ5_0>(k)?;
+            block32_matmul_matches_ggml::<BlockQ8_0>(k)?;
         }
         Ok(())
     }
 
-    fn q8_0_matmul_matches_ggml(k: usize) -> crate::Result<()> {
+    fn block32_matmul_matches_ggml<T: super::GgmlType<VecDotType = super::k_quants::BlockQ8_0>>(
+        k: usize,
+    ) -> crate::Result<()> {
         use super::GgmlType;
         use super::k_quants::{BlockQ8_0, QK8_0};
         const N: usize = 32;
@@ -1403,11 +1412,23 @@ mod cpu_matmul_tests {
         const TERM_TOLERANCE: f32 = 1e-6;
         let dev = Device::Cpu;
         let w = Tensor::randn(0f32, 1., (N, k), &dev)?;
-        let qmm = QMatMul::from_qtensor(QTensor::quantize(&w, GgmlDType::Q8_0)?)?;
+        let qmm = QMatMul::from_qtensor(QTensor::quantize(&w, T::DTYPE)?)?;
         let rows = |x: &[f32]| {
             let mut blocks = vec![BlockQ8_0::zeros(); x.len() / QK8_0];
             BlockQ8_0::from_float(x, &mut blocks);
             blocks
+        };
+        let weight_rows = |x: &[f32]| {
+            let mut blocks = vec![T::zeros(); x.len() / QK8_0];
+            T::from_float(x, &mut blocks);
+            blocks
+        };
+        let terms = |x: &[f32], w: &[f32]| -> f32 {
+            x.iter()
+                .zip(w)
+                .map(|(x, w)| (x * w).abs())
+                .sum::<f32>()
+                .max(1.0)
         };
         let w_rows = w.to_vec2::<f32>()?;
         for m in [1, 4, 9] {
@@ -1423,17 +1444,54 @@ mod cpu_matmul_tests {
             for (r, row) in x.iter().enumerate() {
                 let a = rows(row);
                 for (c, w_row) in w_rows.iter().enumerate() {
-                    let expected = BlockQ8_0::vec_dot(k, &rows(w_row), &a);
+                    let w_blocks = weight_rows(w_row);
+                    let expected = T::vec_dot_unopt(k, &w_blocks, &a);
+                    let simd = T::vec_dot(k, &w_blocks, &a);
                     let got = actual[r][c];
+                    assert!(
+                        (simd - expected).abs() <= TERM_TOLERANCE * terms(row, w_row),
+                        "{:?} k={k}: vec_dot {simd} against the scalar {expected}",
+                        T::DTYPE
+                    );
                     // the same integer products, summed in another order: the rounding scales with the terms, not
                     // with a sum the outliers can cancel to near zero
-                    let terms: f32 = row.iter().zip(w_row).map(|(x, w)| (x * w).abs()).sum();
-                    let tolerance = TERM_TOLERANCE * terms.max(1.0);
+                    let tolerance = TERM_TOLERANCE * terms(row, w_row);
                     assert!(
                         (got - expected).abs() <= tolerance,
-                        "k={k} m={m} [{r}][{c}]: {got} against ggml's {expected}"
+                        "{:?} k={k} m={m} [{r}][{c}]: {got} against ggml's {expected}",
+                        T::DTYPE
                     );
                 }
+            }
+        }
+        Ok(())
+    }
+
+    // a CPU Q5_0 matrix is held as its tiles alone, so whatever reads it as blocks must get them back bit for bit;
+    // 33 blocks a row pad the last superblock's tiles
+    #[test]
+    fn a_tiled_q5_0_matrix_gives_back_its_blocks() -> crate::Result<()> {
+        use super::{GgmlType, QStorage, k_quants::BlockQ5_0};
+        const N: usize = 48;
+        let dev = Device::Cpu;
+        for k in [512, 1056] {
+            let w = Tensor::randn(0f32, 1., (N, k), &dev)?;
+            let bytes = QTensor::quantize(&w, GgmlDType::Q5_0)?.data()?.into_owned();
+            let mut blocks = vec![BlockQ5_0::zeros(); N * k / 32];
+            BlockQ5_0::from_float(&w.flatten_all()?.to_vec1::<f32>()?, &mut blocks);
+            let expected =
+                unsafe { std::slice::from_raw_parts(blocks.as_ptr() as *const u8, bytes.len()) };
+            assert_eq!(bytes, expected, "k={k}: quantized bytes");
+            let q = QTensor::new(
+                QStorage::from_data(bytes.clone().into(), &dev, GgmlDType::Q5_0)?,
+                (N, k),
+            )?;
+            assert_eq!(&q.data()?[..], expected, "k={k}: bytes back from the tiles");
+            let dense = q.dequantize(&dev)?.to_vec2::<f32>()?;
+            let ids = [0u32, 17, N as u32 - 1];
+            let rows = q.embedding(&Tensor::new(&ids, &dev)?)?.to_vec2::<f32>()?;
+            for (&id, row) in ids.iter().zip(&rows) {
+                assert_eq!(row, &dense[id as usize], "k={k}: embedding row {id}");
             }
         }
         Ok(())
@@ -1445,7 +1503,13 @@ mod cpu_matmul_tests {
         const K: usize = 512;
         const N: usize = 48;
         let dev = Device::Cpu;
-        for dtype in [GgmlDType::Q4K, GgmlDType::Q6K, GgmlDType::Q8_0] {
+        for dtype in [
+            GgmlDType::Q4_0,
+            GgmlDType::Q5_0,
+            GgmlDType::Q4K,
+            GgmlDType::Q6K,
+            GgmlDType::Q8_0,
+        ] {
             let w = Tensor::randn(0f32, 1., (N, K), &dev)?;
             let qw = QTensor::quantize(&w, dtype)?;
             let dense = qw.dequantize(&dev)?;

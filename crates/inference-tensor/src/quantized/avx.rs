@@ -1,5 +1,6 @@
 use super::k_quants::{
-    BlockQ2K, BlockQ3K, BlockQ4_0, BlockQ4K, BlockQ5K, BlockQ6K, BlockQ8_0, BlockQ8K, QK_K, QK8_0,
+    BlockQ2K, BlockQ3K, BlockQ4_0, BlockQ4K, BlockQ5_0, BlockQ5K, BlockQ6K, BlockQ8_0, BlockQ8K,
+    QK_K, QK8_0,
 };
 use byteorder::{ByteOrder, LittleEndian};
 use half::f16;
@@ -61,6 +62,42 @@ pub(crate) fn vec_dot_q4_0_q8_0(n: usize, xs: &[BlockQ4_0], ys: &[BlockQ8_0]) ->
             let bx = bytes_from_nibbles_32(x.qs.as_ptr());
             let off = _mm256_set1_epi8(8);
             let bx = _mm256_sub_epi8(bx, off);
+            let by = _mm256_loadu_si256(y.qs.as_ptr() as *const __m256i);
+            let q = mul_sum_i8_pairs_float(bx, by);
+            acc = _mm256_fmadd_ps(d, q, acc);
+        }
+        hsum_float_8(acc)
+    }
+}
+
+// 0xff in byte i where bit i of `x` is set
+#[target_feature(enable = "avx2,fma")]
+fn bytes_from_bits_32(x: [u8; 4]) -> __m256i {
+    let shuffle = _mm256_set_epi64x(
+        0x0303_0303_0303_0303,
+        0x0202_0202_0202_0202,
+        0x0101_0101_0101_0101,
+        0,
+    );
+    let bytes = _mm256_shuffle_epi8(_mm256_set1_epi32(i32::from_le_bytes(x)), shuffle);
+    let others = _mm256_set1_epi64x(0x7fbf_dfef_f7fb_fdfe);
+    _mm256_cmpeq_epi8(_mm256_or_si256(bytes, others), _mm256_set1_epi64x(-1))
+}
+
+#[target_feature(enable = "avx2,fma")]
+pub(crate) fn vec_dot_q5_0_q8_0(n: usize, xs: &[BlockQ5_0], ys: &[BlockQ8_0]) -> f32 {
+    debug_assert!(
+        n.is_multiple_of(QK8_0),
+        "vec_dot_q5_0_q8_0: {n} is not divisible by {QK8_0}"
+    );
+    unsafe {
+        let mut acc = _mm256_setzero_ps();
+        for (x, y) in xs.iter().zip(ys.iter()) {
+            let d = _mm256_set1_ps(f16::to_f32(x.d) * f16::to_f32(y.d));
+            // a clear fifth bit makes the nibble's value v - 16 negative: its high bits all set
+            let high =
+                _mm256_andnot_si256(bytes_from_bits_32(x.qh), _mm256_set1_epi8(0xF0u8 as i8));
+            let bx = _mm256_or_si256(bytes_from_nibbles_32(x.qs.as_ptr()), high);
             let by = _mm256_loadu_si256(y.qs.as_ptr() as *const __m256i);
             let q = mul_sum_i8_pairs_float(bx, by);
             acc = _mm256_fmadd_ps(d, q, acc);

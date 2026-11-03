@@ -512,10 +512,10 @@ impl GgmlType for BlockQ5_0 {
             n.is_multiple_of(qk),
             "vec_dot_q5_0_q8_0: {n} is not divisible by {qk}"
         );
-        debug_assert!(
-            (n / qk).is_multiple_of(2),
-            "vec_dot_q5_0_q8_0: {n}, nb is not divisible by 2"
-        );
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if has_avx2_fma() {
+            return unsafe { super::avx::vec_dot_q5_0_q8_0(n, xs, ys) };
+        }
         Self::vec_dot_unopt(n, xs, ys)
     }
 
