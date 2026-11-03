@@ -40,6 +40,7 @@ mod lfm2vl;
 mod modern_bert;
 mod modern_bert_decision;
 mod nemotron_h;
+mod nemotron_omni;
 mod nemotron_transcribe;
 mod neo_bert;
 mod nomic_bert;
@@ -68,6 +69,7 @@ pub use lfm2vl::*;
 pub use modern_bert::*;
 pub use modern_bert_decision::*;
 pub use nemotron_h::*;
+pub use nemotron_omni::*;
 pub use nemotron_transcribe::*;
 pub use neo_bert::*;
 pub use nomic_bert::*;
@@ -99,6 +101,7 @@ inference_nn::boxed_loaders!(
     MultimodalModelLoader: Granite4VisionLoader,
     GraniteSpeechLoader,
     Lfm2VlLoader,
+    NemotronOmniLoader,
     NemotronTranscribeLoader,
     PaddleOcrVlLoader
 );

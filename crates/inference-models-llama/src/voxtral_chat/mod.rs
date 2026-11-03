@@ -15,7 +15,7 @@ use crate::{
     audio::whisper::WhisperEncoder,
     kv_cache::EitherCache,
     layers::{Activation, linear_no_bias},
-    media_inputs::audio_prompt::place_audio_features,
+    media_inputs::media::place_token_features,
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata, NormalModel},
     paged_attention::{AttentionImplementation, ModelConfigMetadata},
     utils::unvarbuilder::UnVarBuilder,
@@ -98,7 +98,7 @@ impl VoxtralChatModel {
                 .map(|mel| self.embed_audio(mel))
                 .collect::<Result<Vec<_>>>()?;
             let projected = Tensor::cat(&projected, 0)?;
-            embeds = place_audio_features(&embeds, input_ids, self.audio_token, &projected, MODEL)?;
+            embeds = place_token_features(&embeds, input_ids, self.audio_token, &projected, MODEL)?;
         }
         self.text.forward_embeds(input_ids, embeds, ctx)
     }

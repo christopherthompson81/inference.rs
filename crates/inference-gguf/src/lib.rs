@@ -22,6 +22,7 @@ pub mod multimodal_bindings;
 pub mod multimodal_vision_registry;
 pub mod muse_glimmer_bindings;
 mod nemotron_h_bindings;
+pub mod nemotron_omni_bindings;
 pub mod nemotron_transcribe_bindings;
 pub mod normal_bindings;
 pub mod normal_config;

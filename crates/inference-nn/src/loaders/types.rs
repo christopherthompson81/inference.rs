@@ -233,6 +233,7 @@ macro_rules! multimodal_loader_table {
             LLaVA { cli: "llava", hf: "LlavaForConditionalGeneration", loader: LLaVALoader, feature: "models-llama" },
             Granite4Vision { cli: "granite4_vision", hf: "Granite4VisionForConditionalGeneration", loader: Granite4VisionLoader, feature: "models-other" },
             NemotronTranscribe { cli: "nemotron_transcribe", hf: "Nemotron3_5TranscribeForConditionalGeneration", loader: NemotronTranscribeLoader, feature: "models-other" },
+            NemotronOmni { cli: "nemotron_omni", hf: "NemotronH_Omni_Reasoning_V3", loader: NemotronOmniLoader, feature: "models-other" },
             GraniteSpeech {
                 cli: "granite_speech",
                 hf: "GraniteSpeechForConditionalGeneration" | "GraniteSpeechPlusForConditionalGeneration",

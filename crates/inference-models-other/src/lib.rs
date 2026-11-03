@@ -39,6 +39,7 @@ pub mod loaders;
 pub mod modern_bert;
 pub mod modern_bert_decision;
 pub mod nemotron_h;
+pub mod nemotron_omni;
 pub mod nemotron_transcribe;
 pub mod neo_bert;
 pub mod nomic_bert;
@@ -56,6 +57,7 @@ inference_nn::json_config!(
     jina_v3::Config,
     modern_bert::Config,
     nemotron_h::Config,
+    nemotron_omni::Config,
     nemotron_transcribe::Config,
     neo_bert::Config,
     nomic_bert::Config,

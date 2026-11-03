@@ -10,8 +10,6 @@ use crate::worldmirror::layers::{Block, BlockSpec, F32LayerNorm};
 const DINO_EPS: f64 = 1e-6;
 // tokens before the patches: cls and the registers
 const CLS_TOKENS: usize = 1;
-// the cubic kernel's coefficient for antialiased bicubic resampling (PyTorch's AA path, not the -0.75 of plain bicubic)
-const AA_CUBIC_A: f64 = -0.5;
 const CUBIC_A: f64 = -0.75;
 // the hub models' training size: a 37 x 37 position-embedding grid at patch 14
 const POS_GRID_IMAGE: usize = 518;
@@ -155,9 +153,10 @@ impl Dinov2 {
             .to_device(&Device::Cpu)?
             .to_vec2::<f32>()?;
         let (rows, cols) = match self.pos_interp {
-            PosInterp::AntialiasedBicubic => {
-                (aa_bicubic_weights(grid, hp), aa_bicubic_weights(grid, wp))
-            }
+            PosInterp::AntialiasedBicubic => (
+                inference_vision::aa_bicubic_weights(grid, hp),
+                inference_vision::aa_bicubic_weights(grid, wp),
+            ),
             PosInterp::Bicubic { offset } => (
                 bicubic_weights(grid, hp, (hp as f64 + offset) / grid as f64),
                 bicubic_weights(grid, wp, (wp as f64 + offset) / grid as f64),
@@ -180,41 +179,6 @@ impl Dinov2 {
         let resampled = Tensor::from_vec(out, (1, hp * wp, dim), self.pos_embed.device())?;
         Tensor::cat(&[&self.pos_embed.narrow(1, 0, 1)?, &resampled], 1)
     }
-}
-
-// The cubic convolution kernel PyTorch's antialiased bicubic uses
-fn aa_cubic(x: f64) -> f64 {
-    let (a, x) = (AA_CUBIC_A, x.abs());
-    if x < 1.0 {
-        ((a + 2.0) * x - (a + 3.0)) * x * x + 1.0
-    } else if x < 2.0 {
-        ((a * x - 5.0 * a) * x + 8.0 * a) * x - 4.0 * a
-    } else {
-        0.0
-    }
-}
-
-// Each output index's (input index, weight) taps for resampling `input` samples to `output` with antialiased bicubic,
-// as `F.interpolate(mode="bicubic", antialias=True, align_corners=False)` computes them
-fn aa_bicubic_weights(input: usize, output: usize) -> Vec<Vec<(usize, f64)>> {
-    let scale = input as f64 / output as f64;
-    let (support, inv) = if scale >= 1.0 {
-        (2.0 * scale, 1.0 / scale)
-    } else {
-        (2.0, 1.0)
-    };
-    (0..output)
-        .map(|i| {
-            let center = scale * (i as f64 + 0.5);
-            let lo = ((center - support + 0.5) as isize).max(0) as usize;
-            let hi = ((center + support + 0.5) as usize).min(input);
-            let taps = (lo..hi)
-                .map(|j| (j, aa_cubic((j as f64 - center + 0.5) * inv)))
-                .collect::<Vec<_>>();
-            let total: f64 = taps.iter().map(|t| t.1).sum();
-            taps.into_iter().map(|(j, w)| (j, w / total)).collect()
-        })
-        .collect()
 }
 
 // Plain bicubic taps for `output` samples of `input` at `scale_factor`, as PyTorch's upsample_bicubic2d with a scale
