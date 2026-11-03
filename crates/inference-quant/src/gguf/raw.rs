@@ -746,6 +746,29 @@ impl GgufRawMatMul {
         }
     }
 
+    // A few host rows dot the blocks in place, where dequantizing the whole weight would cost far more than the dots
+    fn cpu_forward(&self, a: &Tensor) -> Result<Option<Tensor>> {
+        let bytes = match &self.w.storage {
+            RawStorage::Cpu(bytes) if a.device().is_cpu() => bytes,
+            _ => return Ok(None),
+        };
+        let Ok((rows, cols)) = self.w.shape.dims2() else {
+            return Ok(None);
+        };
+        if !super::cpu_dense::supports(self.w.ty, cols)
+            || a.elem_count() / cols > super::cpu_dense::DENSE_DOT_MAX_TOKENS
+        {
+            return Ok(None);
+        }
+        let xs = a.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let out = super::cpu_dense::matmul(self.w.ty, bytes, rows, cols, &xs);
+        let mut dims = a.dims().to_vec();
+        *dims.last_mut().expect("a matmul input has a last dim") = rows;
+        Ok(Some(
+            Tensor::from_vec(out, dims, &Device::Cpu)?.to_dtype(a.dtype())?,
+        ))
+    }
+
     fn add_bias(&self, x: Tensor) -> Result<Tensor> {
         let x = self.scaled(x)?;
         match &self.b {
@@ -916,6 +939,9 @@ impl QuantMethod for GgufRawMatMul {
         }
         #[cfg(feature = "metal")]
         if let Some(out) = self.metal_forward(a)? {
+            return self.add_bias(out);
+        }
+        if let Some(out) = self.cpu_forward(a)? {
             return self.add_bias(out);
         }
         let w = self.w.dequantize(a.device())?.to_dtype(a.dtype())?;

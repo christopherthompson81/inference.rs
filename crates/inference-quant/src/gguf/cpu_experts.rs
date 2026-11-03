@@ -165,7 +165,7 @@ fn quantize_rows(xs: &[f32], wide: bool) -> (Vec<BlockQ8K>, Vec<i16>) {
 }
 
 // Q8 blocks of 32 of `xs`, for the projections of a 32-wide type
-fn quantize_rows_32(xs: &[f32]) -> Vec<Q8Block32> {
+pub(super) fn quantize_rows_32(xs: &[f32]) -> Vec<Q8Block32> {
     let n = xs.len() / QK32;
     let mut ys = vec![Q8Block32::ZERO; n];
     let out = Disjoint(ys.as_mut_ptr());
@@ -181,7 +181,7 @@ fn quantize_rows_32(xs: &[f32]) -> Vec<Q8Block32> {
 
 // The quantized matmuls' barrier pool spins between calls, so a second pool here would fight it for the cores.
 // Items cost what their span's length makes them, so each worker drains one shared cursor a few items at a time.
-fn for_each_parallel(n_items: usize, f: impl Fn(usize) + Sync) {
+pub(super) fn for_each_parallel(n_items: usize, f: impl Fn(usize) + Sync) {
     if n_items == 1 {
         return f(0);
     }
@@ -198,14 +198,14 @@ fn for_each_parallel(n_items: usize, f: impl Fn(usize) + Sync) {
 }
 
 /// A shared output each parallel item writes its own disjoint elements of.
-struct Disjoint<T>(*mut T);
+pub(super) struct Disjoint<T>(pub(super) *mut T);
 
 // SAFETY: every writer stores to indices no other item touches, and the buffer outlives the parallel call
 unsafe impl<T> Sync for Disjoint<T> {}
 
 impl<T> Disjoint<T> {
     // SAFETY: `i` is in bounds and written by this item alone
-    unsafe fn set(&self, i: usize, value: T) {
+    pub(super) unsafe fn set(&self, i: usize, value: T) {
         unsafe { *self.0.add(i) = value };
     }
 

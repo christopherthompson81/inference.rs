@@ -1,5 +1,6 @@
 pub mod archive;
 pub mod cpu;
+mod cpu_dense;
 mod cpu_dot;
 pub mod cpu_experts;
 #[cfg(feature = "cuda")]

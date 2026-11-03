@@ -118,3 +118,58 @@ or processors), unconstrained, without returned logprobs. Unit case `a_draft_wit
 **Result (Run 6's prompts, decode tok/s mean):** MTP 2 exact 18.33, 0.10 nats 18.06, 0.25 nats 18.04; MTP 3 exact
 18.53, 0.25 nats 18.67. One prompt of four (0.10) or three (0.25) took a tie and changed text, so the tolerance runs,
 but the speed is within run-to-run noise: ties are too rare to matter, and a verify step's 1.85x cost is the limit.
+
+## Run 8 - 2026-11-03 ~09:40
+
+**Question:** which of the 32-block types does each tensor group tolerate?
+
+**Commands:** `llama-quantize --imatrix` (wiki.train, 160 x 512 tokens, from a Q8_0 build) from the BF16 GGUF, base
+Q8_0 with one group lowered per variant; `llama-perplexity --kl-divergence` against Run 3's BF16 logits.
+
+**Result (KLD vs BF16; the cost is over all-Q8_0's 0.0040; decode MB is a token's weight reads saved):**
+
+| group | Q5_0 KLD (+cost) | IQ4_NL KLD (+cost) | other | decode MB saved (Q5_0 / IQ4_NL) |
+|---|---|---|---|---|
+| routed `ffn_up_exps` | 0.0063 (+0.0023) | 0.0110 (+0.0070) | Q4_0 0.0117, MXFP4 0.0201 | 258 / 344 |
+| routed `ffn_down_exps` | 0.0061 (+0.0021) | 0.0088 (+0.0048) | Q4_0 0.0101, MXFP4 0.0168 | 258 / 344 |
+| shared expert | 0.0055 (+0.0015) | 0.0075 (+0.0035) | | 172 / 230 |
+| `ssm_in` | 0.0080 (+0.0040) | 0.0130 (+0.0090) | | 239 / 318 |
+| `ssm_out` | 0.0105 (+0.0065) | 0.0111 (+0.0071) | | 95 / 127 |
+| attention q/k/v/o | 0.0066 (+0.0026) | 0.0096 (+0.0056) | | 52 / 70 |
+| `output` | 0.0063 (+0.0023) | 0.0121 (+0.0081) | | 131 / 175 |
+| `token_embd` | 0.0052 (+0.0012) | 0.0063 (+0.0023) | | 0 / 0 |
+
+**Findings:**
+- IQ4_NL is the best 4-bit type everywhere; Q4_0 is a little worse at the same size and MXFP4 is twice the cost.
+- The experts' down projection tolerates 4 bits better than the up projection.
+- `ssm_out` is the most sensitive matrix per byte: Q5_0 already costs +0.0065 for 95 MB. Keep it at Q8_0.
+- For decode speed, a lowered matrix pays in proportion to how often it is read. The shared expert at IQ4_NL
+  (66 MB per 0.001 KLD), `output` at Q5_0 (57) and `ssm_in` at Q5_0 (60) pay best. Attention (20 at Q5_0) and
+  `ssm_out` (15) do not.
+- `token_embd` has no decode cost (one row per token), so IQ4_NL there only saves RAM.
+
+## Run 9 - 2026-11-03 ~10:30
+
+**Question:** what do recipes built from Run 8 score, and what do they decode at?
+
+**Recipes (imatrix, from BF16):** r0 = experts IQ4_NL, the rest Q8_0 (the Run 1 mix); r1 = r0 plus the shared expert
+and `token_embd` IQ4_NL and `ssm_in` and `output` Q5_0; r2 = r1 plus `ssm_in` IQ4_NL and `ssm_out` and attention Q5_0.
+
+**First speed pass:** r1 decoded at 5.7 tok/s and r2 at 2.8. A flat profile put 45 % in `dequantize_iq4_nl` and
+`dot_f32`: a dense IQ4_NL matrix (a type Candle has no `QTensor` for) dequantized all of itself on every CPU call.
+**Change:** `gguf::cpu_dense` dots a 32-value block type's dense rows in place with the expert path's 8x4 / 8x1
+kernels, for up to 32 activation rows; longer batches keep the dequantized matmul.
+
+**Result (Run 6's prompts and serve setup, decode tok/s mean):**
+
+| recipe | size | KLD | top-1 | PPL | plain | MTP 2 |
+|---|---|---|---|---|---|---|
+| Run 1 file (no imatrix) | 18.3 GiB | 0.0155 | 95.0 % | 6.582 | 15.4 | 18.3 |
+| r0 | 18.3 GiB | 0.0150 | 95.2 % | 6.584 | 16.3 | 18.6 |
+| r1 | 17.6 GiB | 0.0238 | 93.5 % | 6.607 | 18.3 | 19.6 |
+| r2 | 17.4 GiB | 0.0351 | 92.0 % | 6.672 | 18.7 | 18.6 |
+
+**Findings:** Run 8's single-group costs add up to within 15 % of a recipe's KLD (r1 predicted 0.028). r1 buys 12 %
+plain decode for 1.6x the KLD; r2 adds only 2 % more for another 1.5x, and its MTP is no faster than plain. MTP's
+gain shrinks as the non-expert bytes shrink (r0 +14 %, r1 +7 %), since the verify step's extra cost is in the
+routed experts and fixed per-step overhead, not in the matrices every token reads once.
