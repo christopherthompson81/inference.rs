@@ -235,6 +235,11 @@ impl SupportedArch for NormalLoaderType {
                 modalities: m,
                 examples: &[ex!("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16")],
             },
+            Self::NemotronHPuzzle => ArchMetadata {
+                families: &["Nemotron-H"],
+                modalities: m,
+                examples: &[ex!("nvidia/NVIDIA-Nemotron-Labs-3-Puzzle-75B-A9B-BF16")],
+            },
             Self::HunYuanDenseV1 => ArchMetadata {
                 families: &["HunYuan"],
                 modalities: m,

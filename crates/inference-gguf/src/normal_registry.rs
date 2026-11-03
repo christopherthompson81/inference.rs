@@ -2,7 +2,7 @@ use inference_nn::loaders::NormalLoaderType;
 pub use inference_nn::model::RopePairing;
 use std::{error::Error, fmt, str::FromStr};
 
-pub const NORMAL_LOADER_TYPE_COUNT: usize = 42;
+pub const NORMAL_LOADER_TYPE_COUNT: usize = 43;
 pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 37;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -495,7 +495,10 @@ const GRANITE_MOE_LOADERS: &[NormalLoaderType] = &[
     NormalLoaderType::GraniteMoeShared,
 ];
 const GRANITE_HYBRID_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::GraniteMoeHybrid];
-const NEMOTRON_H_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::NemotronH];
+const NEMOTRON_H_LOADERS: &[NormalLoaderType] = &[
+    NormalLoaderType::NemotronH,
+    NormalLoaderType::NemotronHPuzzle,
+];
 const OLMO_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Olmo];
 // Olmo 3 converts as olmo2 with a sliding-window pattern
 const OLMO2_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Olmo2, NormalLoaderType::Olmo3];
@@ -1157,6 +1160,19 @@ pub const NORMAL_MODEL_ADAPTERS: &[NativeModelAdapter; NORMAL_LOADER_TYPE_COUNT]
             GgufLayout::GraniteSsm,
         ],
     },
+    NativeModelAdapter {
+        loader: NormalLoaderType::NemotronHPuzzle,
+        architectures: &[
+            CanonicalGgufArchitecture::NemotronH,
+            CanonicalGgufArchitecture::NemotronHMoe,
+        ],
+        layouts: &[
+            GgufLayout::Direct,
+            GgufLayout::StackedExperts,
+            GgufLayout::PerLayerInventory,
+            GgufLayout::GraniteSsm,
+        ],
+    },
 ];
 
 impl GgufSchema {
@@ -1292,6 +1308,18 @@ pub fn resolve_native_adapter(
         return Ok(ResolvedNativeModelAdapter {
             adapter: adapter_for(&loader).expect("deepseek2 resolver references a missing adapter"),
             reason,
+        });
+    }
+
+    // a Puzzle checkpoint's GGUF carries its per-layer experts in arrays, which `nemotron_h` reads as they are
+    if matches!(
+        descriptor.architecture,
+        CanonicalGgufArchitecture::NemotronH | CanonicalGgufArchitecture::NemotronHMoe
+    ) {
+        return Ok(ResolvedNativeModelAdapter {
+            adapter: adapter_for(&NormalLoaderType::NemotronH)
+                .expect("nemotron_h resolver references a missing adapter"),
+            reason: ResolutionReason::ModelIdentity,
         });
     }
 

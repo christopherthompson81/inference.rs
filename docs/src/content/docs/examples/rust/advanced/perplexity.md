@@ -293,6 +293,29 @@ async fn llama_cpp_window(model: &Model, text: String, ctx: usize) -> Result<f64
     Ok((-logprobs.iter().sum::<f64>() / logprobs.len() as f64).exp())
 }
 
+// the BOS our tokenizer adds, if it adds one
+async fn added_bos(model: &Model) -> Result<Option<u32>> {
+    let with = model
+        .tokenize(tokenize(" ".to_string(), true))
+        .await?
+        .tokens;
+    let without = model
+        .tokenize(tokenize(" ".to_string(), false))
+        .await?
+        .tokens;
+    Ok((with.len() > without.len()).then(|| with[0]))
+}
+
+// llama-perplexity evaluates a chunk with its first token swapped for BOS when the vocab adds one; the base keeps the
+// chunk's own tokens
+fn chunk_prompt(chunk: &[u32], bos: Option<u32>) -> Vec<u32> {
+    let mut prompt = chunk.to_vec();
+    if let Some(bos) = bos {
+        prompt[0] = bos;
+    }
+    prompt
+}
+
 fn read_i32(reader: &mut impl Read) -> Result<i32> {
     let mut bytes = [0u8; 4];
     reader.read_exact(&mut bytes)?;
@@ -407,6 +430,7 @@ async fn kl_divergence(model: &Model, path: &Path, out: Option<&Path>) -> Result
         .transpose()?;
     // llama-perplexity scores positions first..n_ctx - 1 of each chunk, each predicting the next token
     let first = n_ctx / 2;
+    let bos = added_bos(model).await?;
     let record = 2 * n_vocab.div_ceil(2) + 4;
     let mut bytes = vec![0u8; record * 2];
     let (mut klds, mut nll, mut nll_base, mut same_top) = (Vec::new(), 0.0, 0.0, 0usize);
@@ -415,7 +439,7 @@ async fn kl_divergence(model: &Model, path: &Path, out: Option<&Path>) -> Result
         let scored = model
             .prompt_logits(PromptLogitsRequest {
                 model: None,
-                prompt: PromptInput::Tokens(chunk.to_vec()),
+                prompt: PromptInput::Tokens(chunk_prompt(chunk, bos)),
                 output: LogitsOutput::Logits,
                 audio: Vec::new(),
             })

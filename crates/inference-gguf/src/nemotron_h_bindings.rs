@@ -60,6 +60,8 @@ pub fn build_nemotron_h_bindings(
             "ffn_down_exps" => format!("{p}.mixer.experts.down_proj.{suffix}"),
             "ffn_up_shexp" => format!("{p}.mixer.shared_experts.up_proj.{suffix}"),
             "ffn_down_shexp" => format!("{p}.mixer.shared_experts.down_proj.{suffix}"),
+            "ffn_latent_down" => format!("{p}.mixer.fc1_latent_proj.{suffix}"),
+            "ffn_latent_up" => format!("{p}.mixer.fc2_latent_proj.{suffix}"),
             "ffn_up" => format!("{p}.mixer.up_proj.{suffix}"),
             "ffn_down" => format!("{p}.mixer.down_proj.{suffix}"),
             _ => continue,

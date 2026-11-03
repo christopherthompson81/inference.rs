@@ -72,6 +72,16 @@ mod float_pair {
     }
 }
 
+/// One layer of a Puzzle checkpoint (`nemotron_h_puzzle`: Nemotron Labs 3 Puzzle, Bolt): its kind and, for MoE, the
+/// experts it was pruned to.
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
+pub struct BlockConfig {
+    pub block_type: String,
+    pub moe_intermediate_size: Option<usize>,
+    pub n_routed_experts: Option<usize>,
+    pub num_experts_per_tok: Option<usize>,
+}
+
 #[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct Config {
     pub vocab_size: usize,
@@ -112,7 +122,7 @@ pub struct Config {
     pub chunk_size: usize,
     #[serde(default = "default_state_dtype")]
     pub mamba_ssm_cache_dtype: String,
-    #[serde(default = "default_n_routed_experts")]
+    #[serde(default = "default_n_routed_experts", alias = "num_experts")]
     pub n_routed_experts: usize,
     #[serde(default = "default_experts_per_tok")]
     pub num_experts_per_tok: usize,
@@ -121,6 +131,7 @@ pub struct Config {
     #[serde(default = "default_moe_intermediate_size")]
     pub moe_shared_expert_intermediate_size: usize,
     pub moe_latent_size: Option<usize>,
+    pub block_configs: Option<Vec<BlockConfig>>,
     #[serde(default = "default_routed_scaling_factor")]
     pub routed_scaling_factor: f32,
     #[serde(default = "default_one")]
@@ -159,6 +170,12 @@ impl LayerKind {
 
 impl Config {
     pub fn layer_kinds(&self) -> Result<Vec<LayerKind>> {
+        if let Some(blocks) = &self.block_configs {
+            return blocks
+                .iter()
+                .map(|b| LayerKind::parse(&b.block_type))
+                .collect();
+        }
         match (&self.layers_block_type, &self.hybrid_override_pattern) {
             (Some(types), _) => types.iter().map(|t| LayerKind::parse(t)).collect(),
             (None, Some(pattern)) => pattern
@@ -176,11 +193,6 @@ impl Config {
             inference_tensor::bail!(
                 "Nemotron-H with `mlp_hidden_act` {} is not supported",
                 self.mlp_hidden_act
-            );
-        }
-        if self.moe_latent_size.is_some() {
-            inference_tensor::bail!(
-                "Nemotron-H latent MoE (`moe_latent_size`) is not supported yet"
             );
         }
         if self.n_group != 1 || self.topk_group != 1 {
@@ -229,20 +241,36 @@ impl Config {
                     LayerKind::Moe => FfnKind::Moe,
                     _ => FfnKind::Mlp,
                 },
+                moe: (kind == LayerKind::Moe).then(|| self.moe_spec(i)),
             });
         }
         Ok(HybridLayout {
             blocks,
             embeddings: EMBEDDINGS,
             final_norm: FINAL_NORM,
-            moe: Some(NemotronMoeSpec {
-                num_experts: self.n_routed_experts,
-                top_k: self.num_experts_per_tok,
-                intermediate_size: self.moe_intermediate_size,
-                shared_intermediate_size: self.moe_shared_expert_intermediate_size,
-                routed_scaling_factor: self.routed_scaling_factor,
-            }),
         })
+    }
+
+    /// Layer `layer`'s experts: the model's, as a Puzzle checkpoint's `block_configs` prunes them.
+    pub fn moe_spec(&self, layer: usize) -> NemotronMoeSpec {
+        let block = self
+            .block_configs
+            .as_ref()
+            .and_then(|blocks| blocks.get(layer));
+        NemotronMoeSpec {
+            num_experts: block
+                .and_then(|b| b.n_routed_experts)
+                .unwrap_or(self.n_routed_experts),
+            top_k: block
+                .and_then(|b| b.num_experts_per_tok)
+                .unwrap_or(self.num_experts_per_tok),
+            intermediate_size: block
+                .and_then(|b| b.moe_intermediate_size)
+                .unwrap_or(self.moe_intermediate_size),
+            shared_intermediate_size: self.moe_shared_expert_intermediate_size,
+            routed_scaling_factor: self.routed_scaling_factor,
+            latent_size: self.moe_latent_size,
+        }
     }
 
     /// The Granite config the blocks load with: NoPE attention scaled by `1/sqrt(head_dim)`, the Mamba widths from

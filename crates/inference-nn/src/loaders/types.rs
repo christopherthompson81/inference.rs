@@ -188,6 +188,12 @@ macro_rules! normal_loader_table {
             },
             GptOss { cli: "gpt_oss", hf: "GptOssForCausalLM", model_type: "gpt_oss", loader: GptOssLoader, feature: "models-other" },
             NemotronH { cli: "nemotron_h", hf: "NemotronHForCausalLM", model_type: "nemotron_h", loader: NemotronHLoader, feature: "models-other" },
+            NemotronHPuzzle {
+                cli: "nemotron_h_puzzle",
+                hf: "NemotronHPuzzleForCausalLM",
+                model_type: "nemotron_h_puzzle",
+                loader: NemotronHLoader, feature: "models-other",
+            },
             HunYuanDenseV1 {
                 cli: "hunyuanv1dense",
                 hf: "HunYuanDenseV1ForCausalLM",
