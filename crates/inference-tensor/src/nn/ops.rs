@@ -54,6 +54,20 @@ impl crate::CustomOp1 for Sigmoid {
         "sigmoid"
     }
 
+    fn vulkan_fwd(
+        &self,
+        storage: &crate::VulkanStorage,
+        layout: &Layout,
+    ) -> Result<Option<(crate::VulkanStorage, Shape)>> {
+        #[cfg(feature = "vulkan")]
+        return crate::vulkan_backend::sigmoid(storage, layout);
+        #[cfg(not(feature = "vulkan"))]
+        {
+            let _ = (storage, layout);
+            Ok(None)
+        }
+    }
+
     fn cpu_fwd(&self, storage: &CpuStorage, layout: &Layout) -> Result<(CpuStorage, Shape)> {
         use crate::backend::BackendStorage;
 
@@ -286,6 +300,26 @@ impl crate::CustomOp1 for SoftmaxLastDim {
         "softmax-last-dim"
     }
 
+    fn vulkan_fwd(
+        &self,
+        storage: &crate::VulkanStorage,
+        layout: &Layout,
+    ) -> Result<Option<(crate::VulkanStorage, Shape)>> {
+        #[cfg(feature = "vulkan")]
+        return crate::vulkan_backend::rows(
+            storage,
+            layout,
+            None,
+            inference_vulkan::RowOp::Softmax,
+            0.0,
+        );
+        #[cfg(not(feature = "vulkan"))]
+        {
+            let _ = (storage, layout);
+            Ok(None)
+        }
+    }
+
     fn cpu_fwd(&self, storage: &CpuStorage, layout: &Layout) -> Result<(CpuStorage, Shape)> {
         fn softmax<T: crate::WithDType + num_traits::Float>(
             src: &[T],
@@ -443,6 +477,28 @@ struct RmsNorm {
 impl crate::CustomOp2 for RmsNorm {
     fn name(&self) -> &'static str {
         "rms-norm"
+    }
+
+    fn vulkan_fwd(
+        &self,
+        s1: &crate::VulkanStorage,
+        l1: &Layout,
+        s2: &crate::VulkanStorage,
+        l2: &Layout,
+    ) -> Result<Option<(crate::VulkanStorage, Shape)>> {
+        #[cfg(feature = "vulkan")]
+        return crate::vulkan_backend::rows(
+            s1,
+            l1,
+            Some((s2, l2)),
+            inference_vulkan::RowOp::RmsNorm,
+            self.eps,
+        );
+        #[cfg(not(feature = "vulkan"))]
+        {
+            let _ = (s1, l1, s2, l2);
+            Ok(None)
+        }
     }
 
     fn cpu_fwd(

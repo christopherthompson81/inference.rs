@@ -94,6 +94,17 @@ pub trait CustomOp2 {
         ))
     }
 
+    /// As [`CustomOp1::vulkan_fwd`].
+    fn vulkan_fwd(
+        &self,
+        _s1: &VulkanStorage,
+        _l1: &Layout,
+        _s2: &VulkanStorage,
+        _l2: &Layout,
+    ) -> Result<Option<(VulkanStorage, Shape)>> {
+        Ok(None)
+    }
+
     fn bwd(
         &self,
         _arg1: &Tensor,

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::map::{MAP_BINDINGS, MAP_PUSH_BYTES};
 use crate::memory::{Bound, HostBuffer};
+use crate::ops;
 use crate::pipeline::Pipeline;
 use crate::{Error, Recorder, Result, shaders};
 
@@ -19,6 +20,9 @@ pub(crate) struct Kernels {
     mat_vec_q5_0: Pipeline,
     pub(crate) map_f32: Pipeline,
     pub(crate) copy_b32: Pipeline,
+    pub(crate) rows_f32: Pipeline,
+    pub(crate) index_b32: Pipeline,
+    pub(crate) matmul_f32: Pipeline,
 }
 
 impl Kernels {
@@ -38,6 +42,24 @@ impl Kernels {
             )?,
             map_f32: Pipeline::new(device, shaders::MAP_F32, MAP_BINDINGS, MAP_PUSH_BYTES)?,
             copy_b32: Pipeline::new(device, shaders::COPY_B32, MAP_BINDINGS, MAP_PUSH_BYTES)?,
+            rows_f32: Pipeline::new(
+                device,
+                shaders::ROWS_F32,
+                ops::BINDINGS,
+                ops::ROWS_PUSH_BYTES,
+            )?,
+            index_b32: Pipeline::new(
+                device,
+                shaders::INDEX_B32,
+                ops::BINDINGS,
+                ops::INDEX_PUSH_BYTES,
+            )?,
+            matmul_f32: Pipeline::new(
+                device,
+                shaders::MATMUL_F32,
+                ops::BINDINGS,
+                ops::MATMUL_PUSH_BYTES,
+            )?,
         })
     }
 
@@ -50,6 +72,9 @@ impl Kernels {
             self.mat_vec_q5_0.destroy(device);
             self.map_f32.destroy(device);
             self.copy_b32.destroy(device);
+            self.rows_f32.destroy(device);
+            self.index_b32.destroy(device);
+            self.matmul_f32.destroy(device);
         }
     }
 }

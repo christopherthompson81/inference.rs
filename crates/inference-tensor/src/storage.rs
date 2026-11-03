@@ -291,6 +291,9 @@ impl Storage {
                 Ok((Self::Metal(s), shape))
             }
             (Self::Vulkan(s1), Self::Vulkan(s2)) => {
+                if let Some((s, shape)) = c.vulkan_fwd(s1, l1, s2, l2)? {
+                    return Ok((Self::Vulkan(s), shape));
+                }
                 let (s, shape) = c.cpu_fwd(&s1.to_cpu_storage()?, l1, &s2.to_cpu_storage()?, l2)?;
                 Ok((
                     Self::Vulkan(s1.device().storage_from_cpu_storage_owned(s)?),

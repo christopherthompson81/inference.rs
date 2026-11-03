@@ -5,7 +5,8 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
 use inference_vulkan::{
-    BlockType, Bound, Context, HostBuffer, MAX_DIMS, Map, MapOp, MatVec, Operand,
+    BlockType, Bound, Context, HostBuffer, MAX_DIMS, Map, MapOp, MatMul, MatOperand, MatVec,
+    Operand, RowOp, Rows, Select,
 };
 
 use crate::backend::{BackendDevice, BackendStorage};
@@ -291,9 +292,128 @@ impl VulkanStorage {
             .map_err(vk_err)
     }
 
+    // index_select (`gather` false) or gather of contiguous 32-bit `self` by contiguous u32 `ids` along `dim`
+    fn select(
+        &self,
+        l: &Layout,
+        ids: &Self,
+        ids_l: &Layout,
+        dim: usize,
+        gather: bool,
+    ) -> Option<Result<Self>> {
+        if !word_sized(self.dtype)
+            || ids.dtype != DType::U32
+            || !l.is_contiguous()
+            || !ids_l.is_contiguous()
+        {
+            return None;
+        }
+        let dims = l.shape().dims();
+        let left: usize = dims[..dim].iter().product();
+        let right: usize = dims[dim + 1..].iter().product();
+        let n = if gather {
+            ids_l.shape().dims()[dim]
+        } else {
+            ids_l.shape().elem_count()
+        };
+        let out = match self.empty(left * n * right, self.dtype) {
+            Ok(out) => out,
+            Err(err) => return Some(Err(err)),
+        };
+        let recorded = self.device.context.record(|r| {
+            r.select_b32(&Select {
+                left,
+                src_dim: dims[dim],
+                right,
+                n,
+                gather,
+                src: (&self.buffer, l.start_offset()),
+                ids: (&ids.buffer, ids_l.start_offset()),
+                out: &out.buffer,
+            })
+        });
+        Some(recorded.map_err(vk_err).map(|()| out))
+    }
+
     fn native(&self, l: &Layout) -> bool {
         self.dtype == DType::F32 && l.shape().rank() <= MAX_DIMS
     }
+}
+
+/// `op` over `storage`'s contiguous last-dim rows (with `alpha` for RMS norm), or `None` where the kernel does not take it.
+pub(crate) fn rows(
+    storage: &VulkanStorage,
+    l: &Layout,
+    alpha: Option<(&VulkanStorage, &Layout)>,
+    op: RowOp,
+    eps: f32,
+) -> Result<Option<(VulkanStorage, Shape)>> {
+    let alpha_ok = alpha.is_none_or(|(a, al)| a.dtype == DType::F32 && al.is_contiguous());
+    if storage.dtype != DType::F32 || !l.is_contiguous() || l.shape().rank() == 0 || !alpha_ok {
+        return Ok(None);
+    }
+    let dims = l.shape().dims();
+    let cols = dims[dims.len() - 1];
+    let rows = l.shape().elem_count() / cols.max(1);
+    let (out_count, out_dtype, out_dims) = if op.reduces() {
+        let mut out_dims = dims.to_vec();
+        *out_dims.last_mut().expect("rank checked") = 1;
+        let dtype = if matches!(op, RowOp::ArgMax | RowOp::ArgMin) {
+            DType::U32
+        } else {
+            DType::F32
+        };
+        (rows, dtype, out_dims)
+    } else {
+        (rows * cols, DType::F32, dims.to_vec())
+    };
+    let out = storage.empty(out_count, out_dtype)?;
+    storage
+        .device
+        .context
+        .record(|r| {
+            r.rows_f32(&Rows {
+                op,
+                rows,
+                cols,
+                eps,
+                x: &storage.buffer,
+                x_offset: l.start_offset(),
+                alpha: alpha.map(|(a, al)| (&a.buffer, al.start_offset())),
+                out: &out.buffer,
+                out_offset: 0,
+            })
+        })
+        .map_err(vk_err)?;
+    Ok(Some((out, Shape::from(out_dims))))
+}
+
+pub(crate) fn sigmoid(
+    storage: &VulkanStorage,
+    l: &Layout,
+) -> Result<Option<(VulkanStorage, Shape)>> {
+    if !storage.native(l) {
+        return Ok(None);
+    }
+    Ok(Some((
+        storage.map_f32(MapOp::Sigmoid, l, None, [0.0; 2])?,
+        l.shape().clone(),
+    )))
+}
+
+// the stride between batches of a matmul operand whose batch dims (all but its last two) collapse into one
+fn batch_stride(l: &Layout, batch: usize) -> Option<usize> {
+    let (dims, strides) = (l.shape().dims(), l.stride());
+    let rank = dims.len();
+    if rank <= 2 || batch == 1 {
+        return Some(0);
+    }
+    for d in 0..rank - 3 {
+        if dims[d + 1] != 1 && strides[d] != strides[d + 1] * dims[d + 1] {
+            return None;
+        }
+    }
+    Some(strides[rank - 3])
 }
 
 /// `xs`'s rows of `k` (laid out by `l`, contiguous) times the `n x k` weight of `ty` blocks in `weights`, transposed,
@@ -386,6 +506,17 @@ impl BackendStorage for VulkanStorage {
     }
 
     fn reduce_op(&self, op: ReduceOp, l: &Layout, dims: &[usize]) -> Result<Self> {
+        let row_op = match op {
+            ReduceOp::Sum => RowOp::Sum,
+            ReduceOp::Max => RowOp::Max,
+            ReduceOp::Min => RowOp::Min,
+            ReduceOp::ArgMax => RowOp::ArgMax,
+        };
+        if dims == [l.shape().rank().saturating_sub(1)]
+            && let Some((out, _)) = rows(self, l, None, row_op, 0.0)?
+        {
+            return Ok(out);
+        }
         on_cpu!(self, |cpu| cpu.reduce_op(op, l, dims))
     }
 
@@ -511,6 +642,15 @@ impl BackendStorage for VulkanStorage {
     }
 
     fn gather(&self, l: &Layout, ids: &Self, ids_l: &Layout, dim: usize) -> Result<Self> {
+        let (src, idx) = (l.shape().dims(), ids_l.shape().dims());
+        let same_but_dim =
+            src.len() == idx.len() && (0..src.len()).all(|d| d == dim || src[d] == idx[d]);
+        if let Some(out) = self
+            .select(l, ids, ids_l, dim, true)
+            .filter(|_| same_but_dim)
+        {
+            return out;
+        }
         on_cpu!(self, |cpu, ids| cpu.gather(l, &ids, ids_l, dim))
     }
 
@@ -543,6 +683,9 @@ impl BackendStorage for VulkanStorage {
     }
 
     fn index_select(&self, ids: &Self, l: &Layout, ids_l: &Layout, dim: usize) -> Result<Self> {
+        if let Some(out) = self.select(l, ids, ids_l, dim, false) {
+            return out;
+        }
         on_cpu!(self, |cpu, ids| cpu.index_select(&ids, l, ids_l, dim))
     }
 
@@ -566,6 +709,41 @@ impl BackendStorage for VulkanStorage {
         l: &Layout,
         rhs_l: &Layout,
     ) -> Result<Self> {
+        let (batch, m, n, k) = bmnk;
+        let strides = (batch_stride(l, batch), batch_stride(rhs_l, batch));
+        if let (DType::F32, DType::F32, (Some(a_bs), Some(b_bs))) = (self.dtype, rhs.dtype, strides)
+        {
+            let (a_st, b_st) = (l.stride(), rhs_l.stride());
+            let (ar, br) = (a_st.len(), b_st.len());
+            let out = self.empty(batch * m * n, DType::F32)?;
+            self.device
+                .context
+                .record(|r| {
+                    r.matmul_f32(&MatMul {
+                        batch,
+                        m,
+                        n,
+                        k,
+                        a: MatOperand {
+                            buffer: &self.buffer,
+                            offset: l.start_offset(),
+                            batch_stride: a_bs,
+                            row_stride: a_st[ar - 2],
+                            col_stride: a_st[ar - 1],
+                        },
+                        b: MatOperand {
+                            buffer: &rhs.buffer,
+                            offset: rhs_l.start_offset(),
+                            batch_stride: b_bs,
+                            row_stride: b_st[br - 2],
+                            col_stride: b_st[br - 1],
+                        },
+                        out: &out.buffer,
+                    })
+                })
+                .map_err(vk_err)?;
+            return Ok(out);
+        }
         on_cpu!(self, |cpu, rhs| cpu.matmul(&rhs, bmnk, l, rhs_l))
     }
 
@@ -856,6 +1034,58 @@ mod tests {
                 assert_close(&matmul.forward(&x.to_device(&vk)?)?, &want, DOT_TOLERANCE)?;
             }
         }
+        Ok(())
+    }
+
+    // row ops, row selection and matmuls on the GPU: RMS norm, softmax, sigmoid, last-dim reductions, embedding and
+    // gather lookups, and batched matmuls with a transposed operand
+    #[test]
+    fn vulkan_row_ops_selection_and_matmuls_match_the_cpu() -> Result<()> {
+        let Some(vk) = device() else { return Ok(()) };
+        let x = Tensor::randn(0f32, 1., (3, 5, 300), &Device::Cpu)?;
+        let alpha = Tensor::randn(1f32, 0.1, 300, &Device::Cpu)?;
+        let (vx, valpha) = (x.to_device(&vk)?, alpha.to_device(&vk)?);
+        let ops = crate::nn::ops::rms_norm;
+        assert_same(&ops(&vx, &valpha, 1e-6)?, &ops(&x, &alpha, 1e-6)?)?;
+        assert_same(
+            &crate::nn::ops::softmax_last_dim(&vx)?,
+            &crate::nn::ops::softmax_last_dim(&x)?,
+        )?;
+        assert_same(
+            &crate::nn::ops::sigmoid(&vx)?,
+            &crate::nn::ops::sigmoid(&x)?,
+        )?;
+        assert_close(&vx.sum_keepdim(2)?, &x.sum_keepdim(2)?, DOT_TOLERANCE)?;
+        assert_same(&vx.max_keepdim(2)?, &x.max_keepdim(2)?)?;
+        assert_eq!(
+            vx.argmax_keepdim(2)?.to_vec3::<u32>()?,
+            x.argmax_keepdim(2)?.to_vec3::<u32>()?
+        );
+        let table = Tensor::randn(0f32, 1., (50, 16), &Device::Cpu)?;
+        let ids = Tensor::new(&[7u32, 0, 49, 7], &Device::Cpu)?;
+        let (vtable, vids) = (table.to_device(&vk)?, ids.to_device(&vk)?);
+        assert_same(
+            &vtable.index_select(&vids, 0)?,
+            &table.index_select(&ids, 0)?,
+        )?;
+        let picks = Tensor::new(&[[3u32, 1], [0, 15]], &Device::Cpu)?;
+        let (rows, vrows) = (table.narrow(0, 0, 2)?, vtable.narrow(0, 0, 2)?);
+        assert_same(
+            &vrows.contiguous()?.gather(&picks.to_device(&vk)?, 1)?,
+            &rows.contiguous()?.gather(&picks, 1)?,
+        )?;
+        let a = Tensor::randn(0f32, 1., (4, 3, 64), &Device::Cpu)?;
+        let b = Tensor::randn(0f32, 1., (4, 7, 64), &Device::Cpu)?;
+        let (va, vb) = (a.to_device(&vk)?, b.to_device(&vk)?);
+        assert_close(&va.matmul(&vb.t()?)?, &a.matmul(&b.t()?)?, DOT_TOLERANCE)?;
+        let w = Tensor::randn(0f32, 1., (128, 64), &Device::Cpu)?;
+        let row = a.narrow(1, 0, 1)?;
+        assert_close(
+            &row.to_device(&vk)?
+                .broadcast_matmul(&w.to_device(&vk)?.t()?)?,
+            &row.broadcast_matmul(&w.t()?)?,
+            DOT_TOLERANCE,
+        )?;
         Ok(())
     }
 

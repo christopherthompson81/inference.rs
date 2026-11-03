@@ -1,0 +1,33 @@
+#version 450
+// Row selection over 32-bit words, with `src` contiguous as (left, src_dim, right):
+// index_select: out[l, i, r] = src[l, ids[i], r] for i < n;
+// gather:       out[l, i, r] = src[l, ids[(l * n + i) * right + r], r], ids laid out as out.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer S { uint src[]; };
+layout(std430, binding = 1) readonly buffer I { uint ids[]; };
+layout(std430, binding = 2) buffer O { uint o[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint left;
+    uint src_dim;
+    uint right;
+    uint n;
+    uint gather;
+    uint src_off;
+    uint ids_off;
+    uint o_off;
+} pc;
+
+void main() {
+    uint total = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    uint count = pc.left * pc.n * pc.right;
+    for (uint e = gl_GlobalInvocationID.x; e < count; e += total) {
+        uint r = e % pc.right;
+        uint i = (e / pc.right) % pc.n;
+        uint l = e / (pc.right * pc.n);
+        uint id = ids[pc.ids_off + (pc.gather != 0 ? e : i)];
+        o[pc.o_off + e] = src[pc.src_off + (l * pc.src_dim + id) * pc.right + r];
+    }
+}

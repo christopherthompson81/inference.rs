@@ -105,3 +105,12 @@ us (69 GB/s), Q8_0 2688x4096 222 / 156 us (75 GB/s).
 **Result (as Run 2):** decode 6.6 -> 7.1 tok/s (a weight copy each: +1.9 GB for recipe A's dense layers). Prefill
 fell to 45.6 tok/s with the Vulkan quantized storage alone (the CPU path's tiles are a likely cause, to look at with
 GPU prefill).
+
+### Run 6 - 2026-11-04 ~00:00
+
+**Change:** `rows_f32` (a workgroup a row: RMS norm, softmax, sum / max / min / argmax), `index_b32` (index_select and
+gather over 32-bit words), `matmul_f32` (batched, every operand strided) and a sigmoid map op;
+`CustomOp2::vulkan_fwd`, and the RMS norm, softmax and sigmoid ops' Vulkan kernels.
+
+**Result (as Run 2):** prefill 45.6 -> 82.5 tok/s, decode 7.1 -> 6.8 tok/s: what still syncs a decode step are the
+model's CPU branches (the experts, the router's sort, Mamba's conv and scan), which read their inputs back each layer.

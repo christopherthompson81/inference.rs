@@ -54,6 +54,7 @@ const uint CEIL = 24;
 const uint ROUND = 25;
 const uint SIGN = 26;
 const uint ELU = 27;
+const uint SIGMOID = 28;
 
 const float GELU_C = 0.7978845608028654;
 const float GELU_K = 0.044715;
@@ -89,6 +90,7 @@ float apply(float x, float y) {
         case ROUND: return sign(x) * floor(abs(x) + 0.5);
         case SIGN: return sign(x);
         case ELU: return x >= 0.0 ? x : pc.p0 * (exp(x) - 1.0);
+        case SIGMOID: return 1.0 / (1.0 + exp(-x));
     }
     return x;
 }

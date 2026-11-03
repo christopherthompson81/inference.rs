@@ -50,6 +50,7 @@ pub enum MapOp {
     Sign = 26,
     /// `x` where positive, else `p0 * (e^x - 1)`
     Elu = 27,
+    Sigmoid = 28,
 }
 
 impl MapOp {

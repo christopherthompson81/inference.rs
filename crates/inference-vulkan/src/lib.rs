@@ -7,6 +7,7 @@ mod context;
 mod kernels;
 mod map;
 mod memory;
+mod ops;
 mod pipeline;
 mod stream;
 mod shaders {
@@ -17,6 +18,7 @@ pub use context::{Context, Recorder};
 pub use kernels::{BlockType, MatVec};
 pub use map::{MAX_DIMS, Map, MapOp, Operand};
 pub use memory::{Bound, HostBuffer, ImportedMemory};
+pub use ops::{MatMul, MatOperand, RowOp, Rows, Select};
 pub use stream::Retained;
 
 pub use ash::vk;
