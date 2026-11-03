@@ -11,7 +11,9 @@ const BLOCK_VALUES: usize = 32;
 // rows one matvec workgroup takes (the shader's `ROWS`), and the most workgroups one grid dimension holds
 const MATVEC_ROWS: usize = 2;
 const MAX_GROUPS_X: usize = 65_535;
-const MATVEC_PUSH_BYTES: u32 = 6 * 4;
+const MATVEC_PUSH_BYTES: u32 = 7 * 4;
+// the most activation rows one matvec takes (the shaders' MAX_M)
+pub const MATVEC_MAX_ROWS: usize = 8;
 const MATVEC_BINDINGS: usize = 3;
 
 /// Every kernel's pipeline on one device: its field, its embedded SPIR-V, its storage buffers and push-constant bytes.
@@ -43,6 +45,8 @@ macro_rules! kernels {
 kernels! {
     mat_vec_q8_0: MUL_MAT_VEC_Q8_0, MATVEC_BINDINGS, MATVEC_PUSH_BYTES;
     mat_vec_q5_0: MUL_MAT_VEC_Q5_0, MATVEC_BINDINGS, MATVEC_PUSH_BYTES;
+    mat_vecs_q8_0: MUL_MAT_VECS_Q8_0, MATVEC_BINDINGS, MATVEC_PUSH_BYTES;
+    mat_vecs_q5_0: MUL_MAT_VECS_Q5_0, MATVEC_BINDINGS, MATVEC_PUSH_BYTES;
     map_f32: MAP_F32, MAP_BINDINGS, MAP_PUSH_BYTES;
     copy_b32: COPY_B32, MAP_BINDINGS, MAP_PUSH_BYTES;
     rows_f32: ROWS_F32, ops::BINDINGS, ops::ROWS_PUSH_BYTES;
@@ -75,7 +79,8 @@ impl BlockType {
     }
 }
 
-/// `y[y_offset..][..rows] = W x[x_offset..][..cols]` for a `rows x cols` weight of `ty` blocks held in `weights`.
+/// `y[y_offset + m * rows..][..rows] = W x[x_offset + m * cols..][..cols]` for each of `x_rows` (up to
+/// [`MATVEC_MAX_ROWS`]) activation rows, for a `rows x cols` weight of `ty` blocks held in `weights`.
 pub struct MatVec<'a> {
     pub ty: BlockType,
     pub weights: &'a Arc<dyn Bound>,
@@ -85,6 +90,7 @@ pub struct MatVec<'a> {
     pub x_offset: usize,
     pub y: &'a Arc<HostBuffer>,
     pub y_offset: usize,
+    pub x_rows: usize,
 }
 
 impl Recorder<'_> {
@@ -93,8 +99,9 @@ impl Recorder<'_> {
         let fits = op.cols.is_multiple_of(BLOCK_VALUES)
             && op.weights.offset().is_multiple_of(2)
             && op.weights.bytes() >= op.rows * blocks * op.ty.block_bytes()
-            && op.x.len() / 4 >= op.x_offset + op.cols
-            && op.y.len() / 4 >= op.y_offset + op.rows;
+            && op.x.len() / 4 >= op.x_offset + op.x_rows * op.cols
+            && op.y.len() / 4 >= op.y_offset + op.x_rows * op.rows
+            && (1..=MATVEC_MAX_ROWS).contains(&op.x_rows);
         if !fits {
             return Err(Error::Invalid(format!(
                 "a {}x{} {:?} matvec over {} weight bytes at offset {}",
@@ -114,6 +121,7 @@ impl Recorder<'_> {
             op.x_offset,
             op.y_offset,
             groups_x,
+            op.x_rows,
         ]
         .map(|v| {
             u32::try_from(v).map_err(|_| Error::Invalid(format!("matvec constant {v} past u32")))
@@ -122,9 +130,13 @@ impl Recorder<'_> {
         for value in push {
             bytes.extend_from_slice(&value?.to_le_bytes());
         }
-        let pipeline = match op.ty {
-            BlockType::Q8_0 => &self.context.kernels.mat_vec_q8_0,
-            BlockType::Q5_0 => &self.context.kernels.mat_vec_q5_0,
+        // one row keeps the single-row kernels, which stage the activations in registers (~78 GB/s against ~61)
+        let kernels = &self.context.kernels;
+        let pipeline = match (op.ty, op.x_rows) {
+            (BlockType::Q8_0, 1) => &kernels.mat_vec_q8_0,
+            (BlockType::Q5_0, 1) => &kernels.mat_vec_q5_0,
+            (BlockType::Q8_0, _) => &kernels.mat_vecs_q8_0,
+            (BlockType::Q5_0, _) => &kernels.mat_vecs_q5_0,
         };
         pipeline.dispatch(
             self,
@@ -280,6 +292,7 @@ mod tests {
                 x_offset: 8,
                 y: &ys,
                 y_offset: 4,
+                x_rows: 1,
             })
         })?;
         for (row, (&got, &want)) in ys.as_f32()[4..4 + ROWS].iter().zip(&want).enumerate() {
@@ -325,6 +338,7 @@ mod tests {
                         x_offset: 0,
                         y: &ys,
                         y_offset: d * ROWS,
+                        x_rows: 1,
                     })
                 })?;
             }
@@ -370,6 +384,7 @@ mod tests {
             x_offset: 0,
             y: &ys,
             y_offset: 0,
+            x_rows: 1,
         };
         let run = || {
             context.submit(|r| {

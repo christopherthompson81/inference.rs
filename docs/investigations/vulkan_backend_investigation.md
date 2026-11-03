@@ -164,3 +164,20 @@ the CPU-only build's paged-attention ops take them on Vulkan, the prompt's gathe
 GPU is busy 67 % of an MTP step: Mamba's multi-token path (verify and replay) still runs on the CPU, and each verify row
 is its own matvec dispatch, reading the weights once a row. Without `--pa-context-len` the cache is fitted to free memory
 and one layer's buffer passes the 4 GiB binding limit.
+
+### Run 11 - 2026-11-04 ~04:00
+
+**Change:** multi-row Q8_0/Q5_0 matvecs (`mul_mat_vecs_*`, up to 8 rows, each weight block decoded once for all rows;
+one row keeps the single-row kernels, 76 vs 61 GB/s). The scan and conv step kernels take a sequence (`seq` steps a
+dispatch, the state held across them), so granite's multi-token path (prompt chunks, MTP verify and replay) runs them
+on a copy of the gathered state. Three host round trips went: the pool's slot clamp (a u32 `minimum` the backend runs
+on the CPU; the row select clamps its ids instead), the replay's scatter indices (stashed from the step's host
+indices), and the sampler's full-vocabulary filter and `WeightedIndex` for top-1 (it takes the argmax). A batch is
+submitted after 8 dispatches when nothing is in flight, so the GPU starts soon after a synchronize.
+
+**Tests:** the scan test runs 3 steps and checks the advanced state; the tiny Nemotron-H takes 128 states, so its
+Vulkan tests run the scan kernels; `top_1_sampling_at_a_temperature_takes_the_argmax`.
+
+**Result (`--pa-context-len 8192`):** MTP 2 15.5 -> 25.7 tok/s, MTP 3 15.4 -> 25.2, plain decode 22.8 -> 23.7, prefill
+79 -> 103 tok/s (llama.cpp's Vulkan backend: 22.2 decode). The GPU is busy ~62 % of an MTP step before the sampler
+change; prefill's matmuls and experts past 8 rows still run on the CPU.

@@ -120,9 +120,9 @@ pub struct QVulkanStorage {
     gpu: std::sync::OnceLock<std::sync::Arc<inference_vulkan::HostBuffer>>,
 }
 
-/// The most activation rows a Vulkan matvec takes, one dispatch a row; a prompt's run the CPU's tiled kernels.
+/// The most activation rows a Vulkan matvec takes; a prompt's run the CPU's tiled kernels.
 #[cfg(feature = "vulkan")]
-const VULKAN_MATVEC_MAX_ROWS: usize = 8;
+const VULKAN_MATVEC_MAX_ROWS: usize = inference_vulkan::MATVEC_MAX_ROWS;
 
 impl QVulkanStorage {
     pub(crate) fn new(blocks: Box<dyn QuantizedType>, device: &crate::VulkanDevice) -> Self {

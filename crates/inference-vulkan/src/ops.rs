@@ -196,18 +196,19 @@ impl Recorder<'_> {
 pub type At<'a> = (&'a Arc<HostBuffer>, usize);
 
 pub(crate) const CONV_STEP_BINDINGS: usize = 6;
-pub(crate) const CONV_STEP_PUSH_BYTES: u32 = 9 * 4;
+pub(crate) const CONV_STEP_PUSH_BYTES: u32 = 10 * 4;
 pub(crate) const SCAN_STEP_BINDINGS: usize = 10;
-pub(crate) const SCAN_STEP_PUSH_BYTES: u32 = 13 * 4;
+pub(crate) const SCAN_STEP_PUSH_BYTES: u32 = 14 * 4;
 // the scan step's lanes a state row and states a lane, and the rows a 256-thread workgroup takes
 const SCAN_LANES: usize = 32;
 const SCAN_VEC: usize = 4;
 const SCAN_ROWS_PER_GROUP: usize = 256 / SCAN_LANES;
 
-/// One decode step of Mamba's causal conv on a conv-state pool (`(rows, channels, kernel)` f32, in place), each batch
-/// row's state the pool row `slots` names; `out` is `(batch, channels)`.
+/// `seq` steps of Mamba's causal conv on a conv-state pool (`(rows, channels, kernel)` f32, in place), each batch
+/// row's state the pool row `slots` names; `x` and `out` are `(batch, seq, channels)`.
 pub struct ConvStep<'a> {
     pub batch: usize,
+    pub seq: usize,
     pub channels: usize,
     pub kernel: usize,
     pub x: At<'a>,
@@ -218,10 +219,11 @@ pub struct ConvStep<'a> {
     pub out: &'a Arc<HostBuffer>,
 }
 
-/// One decode step of Mamba-2's selective scan on a state pool (`(rows, heads, head_dim, state)` f32, in place); `a`,
-/// `d` and `dt_bias` are `(heads,)` from their buffers' first element; `out` is `(batch, heads, head_dim)`.
+/// `seq` steps of Mamba-2's selective scan on a state pool (`(rows, heads, head_dim, state)` f32, in place); `a`, `d`
+/// and `dt_bias` are `(heads,)` from their buffers' first element; `out` is `(batch, seq, heads, head_dim)`.
 pub struct ScanStep<'a> {
     pub batch: usize,
+    pub seq: usize,
     pub heads: usize,
     pub head_dim: usize,
     pub groups: usize,
@@ -252,6 +254,7 @@ impl Recorder<'_> {
             bias_off,
             op.pool.1,
             op.slots.1,
+            op.seq,
         ])?;
         let buffers = [op.x.0, op.weight.0, bias, op.pool.0, op.slots.0, op.out];
         let groups = (op.batch * op.channels)
@@ -284,7 +287,7 @@ impl Recorder<'_> {
             bytes.extend_from_slice(&v.to_bits().to_le_bytes());
         }
         bytes.extend(words(&[
-            op.pool.1, op.slots.1, op.x.1, op.dt.1, op.b.1, op.c.1,
+            op.pool.1, op.slots.1, op.x.1, op.dt.1, op.b.1, op.c.1, op.seq,
         ])?);
         let buffers = [
             op.x.0, op.dt.0, op.a, op.b.0, op.c.0, op.d, op.dt_bias, op.pool.0, op.slots.0, op.out,

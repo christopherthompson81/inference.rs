@@ -9,6 +9,8 @@ use crate::Result;
 /// Dispatches one command buffer takes before it is submitted (without waiting) and a new one opens, so the GPU starts
 /// on a long run of work while the CPU still records the rest.
 pub(crate) const DISPATCHES_PER_SUBMIT: usize = 64;
+/// Dispatches a batch submits after while the GPU has nothing else to run, so it starts soon after a synchronize.
+pub(crate) const DISPATCHES_WHEN_IDLE: usize = 8;
 
 /// A resource a recorded command uses, kept alive until the command finishes.
 pub type Retained = Arc<dyn Any + Send + Sync>;
@@ -152,6 +154,15 @@ impl Stream {
         }
         self.in_flight.push_back(batch);
         self.reap(device, false)
+    }
+
+    /// Whether every submitted batch has finished.
+    pub(crate) fn idle(&self, device: &ash::Device) -> Result<bool> {
+        let Some(last) = self.in_flight.back() else {
+            return Ok(true);
+        };
+        // SAFETY: the fence belongs to this device and was submitted with its batch
+        Ok(unsafe { device.get_fence_status(last.fence)? })
     }
 
     /// Submits the open batch and waits for everything submitted.

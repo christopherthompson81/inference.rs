@@ -426,7 +426,7 @@ fn tensor_of(storage: VulkanStorage, shape: impl Into<Shape>) -> Tensor {
 }
 
 pub(crate) fn ssm_scan_step(step: &crate::vulkan::ScanStep<'_>) -> Result<Tensor> {
-    let (batch, _, heads, head_dim) = step.x.dims4()?;
+    let (batch, seq, heads, head_dim) = step.x.dims4()?;
     let (_, _, groups, state) = step.b.dims4()?;
     let f32 = DType::F32;
     let (x, dt, b, c) = (
@@ -445,7 +445,7 @@ pub(crate) fn ssm_scan_step(step: &crate::vulkan::ScanStep<'_>) -> Result<Tensor
         crate::bail!("the scan step reads a, d and dt_bias from their buffers' start");
     }
     let device = step.x.device().as_vulkan_device()?.clone();
-    let count = batch * heads * head_dim;
+    let count = batch * seq * heads * head_dim;
     let out = VulkanStorage {
         buffer: Arc::new(device.buffer(count * 4)?),
         device: device.clone(),
@@ -457,6 +457,7 @@ pub(crate) fn ssm_scan_step(step: &crate::vulkan::ScanStep<'_>) -> Result<Tensor
         .record(|r| {
             r.ssm_scan_step(&inference_vulkan::ScanStep {
                 batch,
+                seq,
                 heads,
                 head_dim,
                 groups,
@@ -475,7 +476,7 @@ pub(crate) fn ssm_scan_step(step: &crate::vulkan::ScanStep<'_>) -> Result<Tensor
             })
         })
         .map_err(vk_err)?;
-    Ok(tensor_of(out, (batch, 1, heads, head_dim)))
+    Ok(tensor_of(out, (batch, seq, heads, head_dim)))
 }
 
 pub(crate) fn ssm_conv_step(
@@ -485,7 +486,7 @@ pub(crate) fn ssm_conv_step(
     pool: &Tensor,
     slots: &Tensor,
 ) -> Result<Tensor> {
-    let (batch, channels) = x.dims2()?;
+    let (batch, seq, channels) = x.dims3()?;
     let kernel = weight.dim(1)?;
     let f32 = DType::F32;
     let (xb, wb, pb, sb) = (
@@ -496,7 +497,7 @@ pub(crate) fn ssm_conv_step(
     );
     let bias = bias.map(|b| bound(b, f32)).transpose()?;
     let device = x.device().as_vulkan_device()?.clone();
-    let count = batch * channels;
+    let count = batch * seq * channels;
     let out = VulkanStorage {
         buffer: Arc::new(device.buffer(count * 4)?),
         device: device.clone(),
@@ -508,6 +509,7 @@ pub(crate) fn ssm_conv_step(
         .record(|r| {
             r.ssm_conv_step(&inference_vulkan::ConvStep {
                 batch,
+                seq,
                 channels,
                 kernel,
                 x: (&xb.0, xb.1),
@@ -519,7 +521,7 @@ pub(crate) fn ssm_conv_step(
             })
         })
         .map_err(vk_err)?;
-    Ok(tensor_of(out, (batch, channels)))
+    Ok(tensor_of(out, (batch, seq, channels)))
 }
 
 pub(crate) fn moe_router(route: &crate::vulkan::Route<'_>) -> Result<(Tensor, Tensor)> {
@@ -728,7 +730,7 @@ fn batch_stride(l: &Layout, batch: usize) -> Option<usize> {
 }
 
 /// `xs`'s rows of `k` (laid out by `l`, contiguous) times the `n x k` weight of `ty` blocks in `weights`, transposed,
-/// one matvec a row.
+/// in one matvec reading the weight once.
 pub(crate) fn quantized_mat_vec(
     xs: &VulkanStorage,
     l: &Layout,
@@ -743,19 +745,17 @@ pub(crate) fn quantized_mat_vec(
     xs.device
         .context
         .record(|r| {
-            for row in 0..rows {
-                r.mat_vec(&MatVec {
-                    ty,
-                    weights: &weights,
-                    rows: n,
-                    cols: k,
-                    x: &xs.buffer,
-                    x_offset: l.start_offset() + row * k,
-                    y: &out.buffer,
-                    y_offset: row * n,
-                })?;
-            }
-            Ok(())
+            r.mat_vec(&MatVec {
+                ty,
+                weights: &weights,
+                rows: n,
+                cols: k,
+                x: &xs.buffer,
+                x_offset: l.start_offset(),
+                y: &out.buffer,
+                y_offset: 0,
+                x_rows: rows,
+            })
         })
         .map_err(vk_err)?;
     Ok(out)
@@ -1400,18 +1400,23 @@ mod tests {
         Ok(())
     }
 
-    // the scan step against its formula over 128-state rows, one batch row advancing pool row 1 and one padding row
+    // the scan against its formula over 128-state rows and 3 steps, one batch row advancing pool row 1 and one padding row
     #[test]
     fn a_vulkan_scan_step_advances_its_pool_rows() -> Result<()> {
         let Some(vk) = device() else { return Ok(()) };
-        let (heads, head_dim, groups, state) =
-            (4usize, 8usize, 2usize, crate::vulkan::SCAN_STEP_STATE);
+        let (seq, heads, head_dim, groups, state) = (
+            3usize,
+            4usize,
+            8usize,
+            2usize,
+            crate::vulkan::SCAN_STEP_STATE,
+        );
         let r = |shape: &[usize]| Tensor::randn(0f32, 0.5, shape, &Device::Cpu);
         let (x, dt, b, c) = (
-            r(&[2, 1, heads, head_dim])?,
-            r(&[2, 1, heads])?,
-            r(&[2, 1, groups, state])?,
-            r(&[2, 1, groups, state])?,
+            r(&[2, seq, heads, head_dim])?,
+            r(&[2, seq, heads])?,
+            r(&[2, seq, groups, state])?,
+            r(&[2, seq, groups, state])?,
         );
         let (a, d, dt_bias) = ((r(&[heads])?.abs()? * -1.)?, r(&[heads])?, r(&[heads])?);
         let pool = r(&[3, heads, head_dim, state])?;
@@ -1445,32 +1450,33 @@ mod tests {
         );
         let mut states = pool.flatten_all()?.to_vec1::<f32>()?;
         let row_len = heads * head_dim * state;
-        let mut want = vec![0f32; heads * head_dim];
-        {
+        let step_len = heads * head_dim;
+        let mut want = vec![0f32; seq * step_len];
+        for t in 0..seq {
             for h in 0..heads {
-                let dt_t = (1.0 + (dtv[h] + biasv[h]).exp()).ln();
+                let dt_t = (1.0 + (dtv[t * heads + h] + biasv[h]).exp()).ln();
                 let decay = (dt_t * av[h]).exp();
-                let g = h / (heads / groups);
+                let g = t * groups * state + h / (heads / groups) * state;
                 for p in 0..head_dim {
-                    let xp = xv[h * head_dim + p];
+                    let xp = xv[t * step_len + h * head_dim + p];
                     let mut acc = 0f32;
                     for n in 0..state {
                         let at = row_len + (h * head_dim + p) * state + n;
-                        states[at] = states[at] * decay + dt_t * xp * bv[g * state + n];
-                        acc += states[at] * cv[g * state + n];
+                        states[at] = states[at] * decay + dt_t * xp * bv[g + n];
+                        acc += states[at] * cv[g + n];
                     }
-                    want[h * head_dim + p] = acc + dv[h] * xp;
+                    want[t * step_len + h * head_dim + p] = acc + dv[h] * xp;
                 }
             }
         }
-        for (i, (g, w)) in got[..heads * head_dim].iter().zip(&want).enumerate() {
+        for (i, (g, w)) in got[..seq * step_len].iter().zip(&want).enumerate() {
             assert!(
                 (g - w).abs() <= DOT_TOLERANCE * w.abs().max(1.0),
                 "{i}: {g} vs {w}"
             );
         }
         assert!(
-            got[heads * head_dim..].iter().all(|&v| v == 0.0),
+            got[seq * step_len..].iter().all(|&v| v == 0.0),
             "the padding row scores 0"
         );
         let pool_after = vpool.flatten_all()?.to_vec1::<f32>()?;
@@ -1479,6 +1485,16 @@ mod tests {
             &pool.flatten_all()?.to_vec1::<f32>()?[..row_len],
             "row 0 is untouched"
         );
+        for (i, (g, w)) in pool_after[row_len..2 * row_len]
+            .iter()
+            .zip(&states[row_len..2 * row_len])
+            .enumerate()
+        {
+            assert!(
+                (g - w).abs() <= DOT_TOLERANCE * w.abs().max(1.0),
+                "state {i}: {g} vs {w}"
+            );
+        }
         Ok(())
     }
 

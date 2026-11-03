@@ -1502,7 +1502,10 @@ impl MambaLayer {
         if let Some(slots) = pool_slots.filter(|_| hidden_states_b_c.device().is_vulkan()) {
             let f32 = inference_tensor::DType::F32;
             return inference_tensor::vulkan::ssm_conv_step(
-                &hidden_states_b_c.to_dtype(f32)?.contiguous()?,
+                &hidden_states_b_c
+                    .unsqueeze(1)?
+                    .to_dtype(f32)?
+                    .contiguous()?,
                 &self.conv1d_weight.squeeze(1)?.to_dtype(f32)?.contiguous()?,
                 self.conv1d_bias
                     .as_ref()
@@ -1514,6 +1517,7 @@ impl MambaLayer {
                     .to_device(hidden_states_b_c.device())?
                     .to_dtype(inference_tensor::DType::U32)?,
             )?
+            .squeeze(1)?
             .to_dtype(hidden_states_b_c.dtype());
         }
         if let Some(slots) = pool_slots {
@@ -1557,6 +1561,25 @@ impl MambaLayer {
             return self.conv_cuda(hidden_states_b_c, cache, false, None);
         }
         let seq_len = hidden_states_b_c.dim(1)?;
+        if hidden_states_b_c.device().is_vulkan() {
+            let f32 = inference_tensor::DType::F32;
+            let device = hidden_states_b_c.device();
+            // the kernel shifts the state in place, and a gathered state may share a snapshot's storage
+            cache.conv_state = cache.conv_state.to_dtype(f32)?.force_contiguous()?;
+            let slots = Tensor::arange(0u32, hidden_states_b_c.dim(0)? as u32, device)?;
+            return inference_tensor::vulkan::ssm_conv_step(
+                &hidden_states_b_c.to_dtype(f32)?.contiguous()?,
+                &self.conv1d_weight.squeeze(1)?.to_dtype(f32)?.contiguous()?,
+                self.conv1d_bias
+                    .as_ref()
+                    .map(|b| b.to_dtype(f32))
+                    .transpose()?
+                    .as_ref(),
+                &cache.conv_state,
+                &slots,
+            )?
+            .to_dtype(hidden_states_b_c.dtype());
+        }
         let hidden_states_b_c_t = hidden_states_b_c.transpose(1, 2)?;
         let state_width = cache.conv_state.dim(2)?;
         if state_width != self.conv_kernel_size {
@@ -1581,7 +1604,7 @@ impl MambaLayer {
         )?;
         let weight = self.conv1d_weight.squeeze(1)?.to_dtype(padded_t.dtype())?;
 
-        let mut hidden_states_b_c = if padded_t.device().is_cpu() || padded_t.device().is_vulkan() {
+        let mut hidden_states_b_c = if padded_t.device().is_cpu() {
             crate::ops::causal_conv1d_cpu(&padded_t, &weight)?
         } else {
             let mut conv_outputs = Vec::with_capacity(seq_len);
@@ -1737,6 +1760,29 @@ impl MambaLayer {
 
             cache.ssm_state = ssm_state.to_dtype(cache.ssm_state.dtype())?;
             y.reshape((batch_size, seq_len, self.intermediate_size))
+        } else if hidden_states.device().is_vulkan()
+            && self.ssm_state_size == inference_tensor::vulkan::SCAN_STEP_STATE
+        {
+            // the kernel advances the state in place, and a gathered state may share a snapshot's storage
+            let ssm_state = cache
+                .ssm_state
+                .to_dtype(inference_tensor::DType::F32)?
+                .force_contiguous()?;
+            let slots = Tensor::arange(0u32, batch_size as u32, hidden_states.device())?;
+            let y = inference_tensor::vulkan::ssm_scan_step(&inference_tensor::vulkan::ScanStep {
+                x: &hidden_states.contiguous()?,
+                dt: &dt.to_dtype(inference_tensor::DType::F32)?.contiguous()?,
+                a: &a,
+                b: &b.contiguous()?,
+                c: &c.contiguous()?,
+                d: &self.scan.d,
+                dt_bias: &self.scan.dt_bias,
+                dt_range: [self.time_step_min as f32, self.time_step_max as f32],
+                pool: &ssm_state,
+                slots: &slots,
+            })?;
+            cache.ssm_state = ssm_state.to_dtype(cache.ssm_state.dtype())?;
+            y.reshape((batch_size, seq_len, self.intermediate_size))
         } else if hidden_states.device().is_cpu() || hidden_states.device().is_vulkan() {
             let mut ssm_state = cache.ssm_state.to_dtype(inference_tensor::DType::F32)?;
             let y = crate::ops::selective_scan_cpu(
@@ -1850,8 +1896,9 @@ struct ReplayInputs {
 /// verification kept.
 struct MambaReplay {
     layer_idx: usize,
-    // the pool slots of the step's batch rows
+    // the pool slots of the step's batch rows, and on the host where the step had them
     indices: Tensor,
+    host_indices: Option<Vec<u32>>,
     conv_state: Tensor,
     ssm_state: Tensor,
     inputs: ReplayInputs,
@@ -3369,6 +3416,7 @@ impl GraniteMoeHybrid {
                             replays.push(MambaReplay {
                                 layer_idx,
                                 indices: indices.clone(),
+                                host_indices: metadata.state_indices_host().map(<[u32]>::to_vec),
                                 conv_state,
                                 ssm_state,
                                 inputs,
@@ -3494,6 +3542,10 @@ impl GraniteMoeHybrid {
                 };
                 block.replay(&inputs, &mut state, keep)?;
                 let slots = pick(&replay.indices)?;
+                let host_slots: Option<Vec<u32>> = replay
+                    .host_indices
+                    .as_ref()
+                    .map(|host| batch_rows.iter().map(|&row| host[row as usize]).collect());
                 let Some(HybridLayerCache::Recurrent(pool)) = cache.get_mut(replay.layer_idx)
                 else {
                     inference_tensor::bail!(
@@ -3501,8 +3553,13 @@ impl GraniteMoeHybrid {
                         replay.layer_idx
                     );
                 };
-                pool.scatter_conv_state_with_host_indices(&slots, None, &state.conv_state)?;
-                pool.scatter_recurrent_state_with_host_indices(&slots, None, &state.ssm_state)?;
+                let host_slots = host_slots.as_deref();
+                pool.scatter_conv_state_with_host_indices(&slots, host_slots, &state.conv_state)?;
+                pool.scatter_recurrent_state_with_host_indices(
+                    &slots,
+                    host_slots,
+                    &state.ssm_state,
+                )?;
             }
         }
         Ok(())

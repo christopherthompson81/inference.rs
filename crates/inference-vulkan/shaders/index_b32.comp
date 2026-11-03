@@ -2,6 +2,7 @@
 // Row selection over 32-bit words, with `src` contiguous as (left, src_dim, right):
 // index_select: out[l, i, r] = src[l, ids[i], r] for i < n;
 // gather:       out[l, i, r] = src[l, ids[(l * n + i) * right + r], r], ids laid out as out.
+// An id past src_dim reads row src_dim - 1.
 
 layout(local_size_x = 256) in;
 
@@ -27,7 +28,7 @@ void main() {
         uint r = e % pc.right;
         uint i = (e / pc.right) % pc.n;
         uint l = e / (pc.right * pc.n);
-        uint id = ids[pc.ids_off + (pc.gather != 0 ? e : i)];
+        uint id = min(ids[pc.ids_off + (pc.gather != 0 ? e : i)], pc.src_dim - 1);
         o[pc.o_off + e] = src[pc.src_off + (l * pc.src_dim + id) * pc.right + r];
     }
 }

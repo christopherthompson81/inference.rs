@@ -6,8 +6,8 @@ use crate::{Result, Tensor};
 /// The states a Mamba head's row holds that [`ssm_scan_step`] takes (its lanes a row times states a lane).
 pub const SCAN_STEP_STATE: usize = 128;
 
-/// One decode step of Mamba-2's selective scan: `x` `(batch, 1, heads, head_dim)`, `dt` `(batch, 1, heads)`, `b` and
-/// `c` `(batch, 1, groups, state)`, `a`, `d` and `dt_bias` `(heads,)`, all f32; the pool `(rows, heads, head_dim,
+/// `seq` steps of Mamba-2's selective scan: `x` `(batch, seq, heads, head_dim)`, `dt` `(batch, seq, heads)`, `b` and
+/// `c` `(batch, seq, groups, state)`, `a`, `d` and `dt_bias` `(heads,)`, all f32; the pool `(rows, heads, head_dim,
 /// state)` advances in place at the u32 `slots` rows.
 pub struct ScanStep<'a> {
     pub x: &'a Tensor,
@@ -22,7 +22,7 @@ pub struct ScanStep<'a> {
     pub slots: &'a Tensor,
 }
 
-/// The scan step's `y`, `(batch, 1, heads, head_dim)`.
+/// The scan's `y`, `(batch, seq, heads, head_dim)`.
 pub fn ssm_scan_step(step: &ScanStep<'_>) -> Result<Tensor> {
     #[cfg(feature = "vulkan")]
     return crate::vulkan_backend::ssm_scan_step(step);
@@ -33,7 +33,7 @@ pub fn ssm_scan_step(step: &ScanStep<'_>) -> Result<Tensor> {
     }
 }
 
-/// One decode step of Mamba's causal conv and SiLU: `x` `(batch, channels)`, `weight` `(channels, kernel)`, `bias`
+/// `seq` steps of Mamba's causal conv and SiLU: `x` `(batch, seq, channels)`, `weight` `(channels, kernel)`, `bias`
 /// `(channels,)`, f32; the pool `(rows, channels, kernel)` shifts in place at the u32 `slots` rows.
 pub fn ssm_conv_step(
     x: &Tensor,

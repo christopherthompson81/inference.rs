@@ -6,7 +6,7 @@ use ash::vk;
 
 use crate::kernels::Kernels;
 use crate::memory::BufferPool;
-use crate::stream::{DISPATCHES_PER_SUBMIT, Retained, Stream};
+use crate::stream::{DISPATCHES_PER_SUBMIT, DISPATCHES_WHEN_IDLE, Retained, Stream};
 use crate::{Error, Result};
 
 const REQUIRED_EXTENSIONS: [&CStr; 2] = [
@@ -141,7 +141,10 @@ impl Context {
         batch.profiled = recorder.profiled.into_inner();
         batch.retained.append(&mut recorder.retained.into_inner());
         batch.dispatches += recorder.dispatches.get();
-        if batch.dispatches >= DISPATCHES_PER_SUBMIT {
+        let dispatches = batch.dispatches;
+        if dispatches >= DISPATCHES_PER_SUBMIT
+            || (dispatches >= DISPATCHES_WHEN_IDLE && stream.idle(&self.device)?)
+        {
             stream.flush(&self.device, self.queue)?;
         }
         out

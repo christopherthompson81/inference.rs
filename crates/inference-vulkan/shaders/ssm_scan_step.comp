@@ -1,5 +1,5 @@
 #version 450
-// One decode step of Mamba-2's selective scan on a state pool, in place: batch row b advances the pool's row slots[b]
+// `seq` steps of Mamba-2's selective scan on a state pool, in place: batch row b advances the pool's row slots[b]
 // (pool f32 (rows, heads, head_dim, state)): dt = clamp(softplus(dt + dt_bias)), state = state * exp(dt * a) + dt * x * B,
 // y = state . C + d * x. A cluster of LANES lanes a (b, head, p) state row, each lane VEC consecutive states of it, so a
 // row's reads coalesce; the cluster sums its lanes' dots. `state` is LANES * VEC; a slot past i32::MAX scores 0.
@@ -32,6 +32,7 @@ layout(push_constant) uniform PushConstants {
     uint dt_off;
     uint b_off;
     uint c_off;
+    uint seq;
 } pc;
 
 const uint PAD_SLOT = 0x7fffffffu;
@@ -53,28 +54,40 @@ void main() {
         uint slot = slots[pc.slots_off + b];
         if (slot > PAD_SLOT) {
             if (lane == 0) {
-                y[e] = 0.0;
+                for (uint t = 0; t < pc.seq; t++) {
+                    y[((b * pc.seq + t) * pc.heads + h) * pc.head_dim + p] = 0.0;
+                }
             }
             return;
         }
-        float raw = dt[pc.dt_off + b * pc.heads + h] + dt_bias[h];
-        // softplus, as the CPU's ln(1 + e^x)
-        float dt_t = clamp(log(1.0 + exp(raw)), pc.dt_min, pc.dt_max);
-        float decay = exp(dt_t * a[h]);
-        float xv = x[pc.x_off + e];
-        float dtx = dt_t * xv;
-        uint g = (b * pc.groups + h / (pc.heads / pc.groups)) * pc.state;
+        uint g_head = h / (pc.heads / pc.groups);
         uint row = pc.pool_off + ((slot * pc.heads + h) * pc.head_dim + p) * pc.state;
-        float acc = 0.0;
+        float st[VEC];
         for (uint j = 0; j < VEC; j++) {
-            uint n = lane * VEC + j;
-            float s = pool[row + n] * decay + dtx * bm[pc.b_off + g + n];
-            pool[row + n] = s;
-            acc += s * cm[pc.c_off + g + n];
+            st[j] = pool[row + lane * VEC + j];
         }
-        acc = subgroupClusteredAdd(acc, LANES);
-        if (lane == 0) {
-            y[e] = acc + d[h] * xv;
+        for (uint t = 0; t < pc.seq; t++) {
+            uint step = (b * pc.seq + t) * pc.heads + h;
+            float raw = dt[pc.dt_off + step] + dt_bias[h];
+            // softplus, as the CPU's ln(1 + e^x)
+            float dt_t = clamp(log(1.0 + exp(raw)), pc.dt_min, pc.dt_max);
+            float decay = exp(dt_t * a[h]);
+            float xv = x[pc.x_off + step * pc.head_dim + p];
+            float dtx = dt_t * xv;
+            uint g = ((b * pc.seq + t) * pc.groups + g_head) * pc.state;
+            float acc = 0.0;
+            for (uint j = 0; j < VEC; j++) {
+                uint n = lane * VEC + j;
+                st[j] = st[j] * decay + dtx * bm[pc.b_off + g + n];
+                acc += st[j] * cm[pc.c_off + g + n];
+            }
+            acc = subgroupClusteredAdd(acc, LANES);
+            if (lane == 0) {
+                y[step * pc.head_dim + p] = acc + d[h] * xv;
+            }
+        }
+        for (uint j = 0; j < VEC; j++) {
+            pool[row + lane * VEC + j] = st[j];
         }
     }
 }

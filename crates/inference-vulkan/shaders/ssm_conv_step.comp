@@ -1,7 +1,7 @@
 #version 450
-// One decode step of Mamba's causal conv on a conv-state pool, in place: batch row b shifts x[b] into the pool's row
-// slots[b] (pool f32 (rows, channels, kernel)) and writes silu(window . weight + bias); a slot past i32::MAX marks a
-// padding row, which writes 0 and leaves the pool.
+// `seq` steps of Mamba's causal conv on a conv-state pool, in place: batch row b shifts x[b, t] into the pool's row
+// slots[b] (pool f32 (rows, channels, kernel)) and writes silu(window . weight + bias) for each t; a slot past
+// i32::MAX marks a padding row, which writes 0 and leaves the pool.
 
 layout(local_size_x = 256) in;
 
@@ -22,6 +22,7 @@ layout(push_constant) uniform PushConstants {
     uint bias_off;
     uint pool_off;
     uint slots_off;
+    uint seq;
 } pc;
 
 const uint PAD_SLOT = 0x7fffffffu;
@@ -33,22 +34,26 @@ void main() {
         uint ch = e % pc.channels;
         uint slot = slots[pc.slots_off + b];
         if (slot > PAD_SLOT) {
-            o[e] = 0.0;
+            for (uint t = 0; t < pc.seq; t++) {
+                o[(b * pc.seq + t) * pc.channels + ch] = 0.0;
+            }
             continue;
         }
         uint w0 = pc.pool_off + (slot * pc.channels + ch) * pc.kernel;
-        float sum = 0.0;
-        for (uint j = 0; j + 1 < pc.kernel; j++) {
-            float v = pool[w0 + j + 1];
-            pool[w0 + j] = v;
-            sum += v * weight[pc.weight_off + ch * pc.kernel + j];
+        uint wt = pc.weight_off + ch * pc.kernel;
+        float b0 = pc.has_bias != 0 ? bias[pc.bias_off + ch] : 0.0;
+        for (uint t = 0; t < pc.seq; t++) {
+            uint at = (b * pc.seq + t) * pc.channels + ch;
+            float sum = b0;
+            for (uint j = 0; j + 1 < pc.kernel; j++) {
+                float v = pool[w0 + j + 1];
+                pool[w0 + j] = v;
+                sum += v * weight[wt + j];
+            }
+            float xv = x[pc.x_off + at];
+            pool[w0 + pc.kernel - 1] = xv;
+            sum += xv * weight[wt + pc.kernel - 1];
+            o[at] = sum / (1.0 + exp(-sum));
         }
-        float xv = x[pc.x_off + e];
-        pool[w0 + pc.kernel - 1] = xv;
-        sum += xv * weight[pc.weight_off + ch * pc.kernel + pc.kernel - 1];
-        if (pc.has_bias != 0) {
-            sum += bias[pc.bias_off + ch];
-        }
-        o[e] = sum / (1.0 + exp(-sum));
     }
 }

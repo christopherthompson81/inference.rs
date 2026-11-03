@@ -2042,16 +2042,25 @@ impl Sampler {
                 inference_tensor::nn::ops::softmax_last_dim(&logits)?.to_vec1::<f32>()?
             }
         };
-        let mut sampling = match self.temperature {
-            None => {
+        // top-1 keeps only the most likely token (the lowest index among ties), as greedy does
+        let greedy_token = match greedy_token {
+            None if self.top_k == 1 => Some(argmax_f32(&reporting)?),
+            token => token,
+        };
+        // a one-hot row passes the filters and normalization unchanged
+        let sampling = match greedy_token {
+            Some(token) => {
                 let mut sampling = vec![0.0; reporting.len()];
-                sampling[greedy_token.expect("greedy token exists") as usize] = 1.0;
+                sampling[token as usize] = 1.0;
                 sampling
             }
-            Some(_) => reporting.clone(),
+            None => {
+                let mut sampling = reporting.clone();
+                self.filter_top_kp_min_p(&mut sampling);
+                Self::normalize_probs(&mut sampling)?;
+                sampling
+            }
         };
-        self.filter_top_kp_min_p(&mut sampling);
-        Self::normalize_probs(&mut sampling)?;
         Ok(SpeculativeProbs {
             sampling,
             reporting,
@@ -2114,6 +2123,14 @@ impl Sampler {
     ) -> Result<Logprobs> {
         if top_k <= 0 && !(top_p > 0.0 && top_p < 1.0) && !(min_p > 0.0 && min_p < 1.0) {
             return self.sample_multinomial(reporting_probs, reporting_probs, return_logprobs, rng);
+        }
+        // top-1 keeps only the most likely token (the lowest index among ties), which top-p and min-p never drop
+        if top_k == 1 {
+            return self.logprobs_from_probs(
+                argmax_f32(reporting_probs)?,
+                reporting_probs,
+                return_logprobs,
+            );
         }
         let mut sampling_probs = reporting_probs.to_vec();
         // Determine how many elements we need for partial sort
@@ -2689,6 +2706,48 @@ mod tests {
         assert!((probs[0] - 0.0).abs() < 1e-6);
         assert!((probs[1] - 1.0 / 3.0).abs() < 1e-6);
         assert!((probs[2] - 2.0 / 3.0).abs() < 1e-6);
+    }
+
+    // a tie goes to the lower index, and the logprob is the tempered distribution's
+    #[test]
+    fn top_1_sampling_at_a_temperature_takes_the_argmax() {
+        use super::Sampler;
+        use inference_tensor::{Device, Tensor};
+        use rand::SeedableRng;
+        use rand_isaac::Isaac64Rng;
+        use std::sync::{Arc, Mutex};
+
+        let sampler = Sampler::new(
+            Some(0.7),
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            1,
+            0.9,
+            0.05,
+            HashMap::new(),
+            vec![],
+        )
+        .unwrap();
+        let values = vec![1.0f32, 3.0, 3.0, 0.5];
+        let logits = || Tensor::from_vec(values.clone(), 4, &Device::Cpu).unwrap();
+        let rng = Arc::new(Mutex::new(Isaac64Rng::seed_from_u64(7)));
+        let tempered: Vec<f32> = values.iter().map(|v| (v / 0.7).exp()).collect();
+        let want = (tempered[1] / tempered.iter().sum::<f32>()).ln();
+        for _ in 0..8 {
+            let result = sampler
+                .sample(logits(), &[0], 0, false, rng.clone(), false, false)
+                .unwrap();
+            assert_eq!(result.token, 1);
+            assert!((result.logprob - want).abs() < 1e-5);
+        }
+        let probs = sampler
+            .speculative_candidate_probs(logits(), &[0], 0)
+            .unwrap();
+        assert_eq!(probs, [0.0, 1.0, 0.0, 0.0]);
     }
 
     #[test]
