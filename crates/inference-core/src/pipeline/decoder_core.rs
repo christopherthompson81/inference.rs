@@ -29,6 +29,8 @@ pub(crate) struct DecoderCore {
     #[cfg(feature = "cuda")]
     pub cuda_sparse_rejection: StdMutex<Option<crate::speculative::CudaSparseRejectionWorkspace>>,
     pub speculative_autotuner: StdMutex<crate::speculative::autotuner::SpeculativeAutotuner>,
+    /// The attached MTP config's greedy tolerance, in nats.
+    pub speculative_greedy_tolerance: f32,
     pub generation_defaults: Option<crate::ModelGenerationDefaults>,
     pub tracked_modules: Vec<inference_quant::TrackedModule>,
     pub source_weight_files: Vec<PathBuf>,
@@ -177,6 +179,7 @@ impl DecoderCore {
             #[cfg(feature = "cuda")]
             cuda_sparse_rejection: StdMutex::new(None),
             speculative_autotuner: StdMutex::default(),
+            speculative_greedy_tolerance: 0.0,
             generation_defaults,
             tracked_modules: args.tracked_modules,
             source_weight_files: args.source_weight_files,

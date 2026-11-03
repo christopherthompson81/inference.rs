@@ -5,7 +5,7 @@
 
 use std::{collections::HashMap, sync::Arc, sync::Mutex};
 
-use inference_quant::{QuantMethod, ShardedVarBuilder};
+use inference_quant::{IsqType, QuantMethod, QuantizeOntoGuard, ShardedVarBuilder};
 use inference_tensor::{D, Device, Result, Tensor};
 
 use crate::{
@@ -109,21 +109,91 @@ impl SpeculativeGraphState for MtpGraphState {
     }
 }
 
-pub struct MtpHead {
+/// The decoder block an [`MtpHead`] runs between its input projection and its final norm.
+pub trait MtpBlock: Send + Sync {
+    /// One block over `[rows, 1, hidden]`, its attention writing paged layer `kv_layer_idx`.
+    fn forward(
+        &self,
+        xs: &Tensor,
+        kv_cache: &mut KvCache,
+        ctx: &mut ModelForwardContext<'_>,
+        kv_layer_idx: usize,
+    ) -> Result<Tensor>;
+    /// The block's tensors ISQ leaves alone, under the head's prefix.
+    fn add_residual(&self, uvb_m: &UnVarBuilder);
+}
+
+/// A stack's own decoder layer as the head's block, named as the stack's layers are inside.
+pub struct StandardMtpBlock {
+    layer: DecoderLayer<AttentionBlock, Ffn>,
+    block: &'static str,
+    norm_names: super::NormNames,
+    self_attn_name: &'static str,
+}
+
+impl MtpBlock for StandardMtpBlock {
+    fn forward(
+        &self,
+        xs: &Tensor,
+        kv_cache: &mut KvCache,
+        ctx: &mut ModelForwardContext<'_>,
+        kv_layer_idx: usize,
+    ) -> Result<Tensor> {
+        self.layer.forward(
+            xs,
+            &AttentionMask::None,
+            Some(kv_cache),
+            ctx,
+            kv_layer_idx,
+            None,
+        )
+    }
+
+    fn add_residual(&self, uvb_m: &UnVarBuilder) {
+        let uvb_b = uvb_m.pp(self.block);
+        if let (Some(norm), Some(name)) = (&self.layer.norms.input, self.norm_names.input) {
+            norm.add_residual(&uvb_b.pp(name));
+        }
+        if let (Some(norm), Some(name)) = (&self.layer.norms.pre_ffn, self.norm_names.pre_ffn) {
+            norm.add_residual(&uvb_b.pp(name));
+        }
+        super::LayerAttention::add_residual(&self.layer.self_attn, &uvb_b.pp(self.self_attn_name));
+    }
+}
+
+/// A head over a model's own block type, for stacks that are not a [`super::DecoderStack`].
+pub struct MtpHeadParts<B> {
+    pub embedding_norm: Norm,
+    pub hidden_norm: Norm,
+    pub projection: Arc<dyn QuantMethod>,
+    pub block: B,
+    pub final_norm: Option<Norm>,
+    /// The norms' names under the head's prefix; `projection`, `block` and `dense_block` are the model's business.
+    pub names: MtpSpec,
+    /// The next chained draft reads the final norm's output, as Nemotron-H's head does, not the block's.
+    pub chain_normed: bool,
+    /// The paged layer the block's attention writes, after the stack's.
+    pub kv_layer_idx: usize,
+    pub device: Device,
+    pub dtype: inference_tensor::DType,
+}
+
+pub struct MtpHead<B: MtpBlock = StandardMtpBlock> {
     embedding_norm: Norm,
     hidden_norm: Norm,
     projection: Arc<dyn QuantMethod>,
-    block: DecoderLayer<AttentionBlock, Ffn>,
+    block: B,
     final_norm: Option<Norm>,
     names: MtpSpec,
-    layer_norm_names: super::NormNames,
-    self_attn_name: &'static str,
+    chain_normed: bool,
     mask_first_position: bool,
     kv_layer_idx: usize,
     device: Device,
     dtype: inference_tensor::DType,
     placeholder_kv: Mutex<KvCache>,
     n_predict: usize,
+    // the target's `lm_head` at the drafts' own weight type; verification keeps the target's
+    draft_lm_head: Option<Arc<dyn QuantMethod>>,
     capture: Mutex<Option<Capture>>,
     // the last prompt row's hidden state, whose next token is only known once it is sampled
     pending_tails: Mutex<HashMap<usize, (usize, Tensor)>>,
@@ -131,7 +201,7 @@ pub struct MtpHead {
     graphs: crate::speculative::mtp_graph::MtpGraphs,
 }
 
-impl MtpHead {
+impl MtpHead<StandardMtpBlock> {
     /// The head on the device the stack's head and final norm use, as the paged layer after the stack's.
     pub(super) fn load<F>(
         spec: &DecoderSpec,
@@ -182,7 +252,7 @@ impl MtpHead {
                 mapper.set_nm_device(vb, false),
             )
         };
-        let block = DecoderLayer {
+        let layer = DecoderLayer {
             self_attn,
             mlp,
             norms: LayerNorms {
@@ -197,7 +267,7 @@ impl MtpHead {
                 post: None,
             },
         };
-        Ok(Self {
+        Ok(Self::from_parts(MtpHeadParts {
             embedding_norm: norm(vb_m.pp(mtp.embedding_norm))?,
             hidden_norm: norm(vb_m.pp(mtp.hidden_norm))?,
             projection: spec.replicated_linear(
@@ -206,29 +276,72 @@ impl MtpHead {
                 false,
                 mapper.set_nm_device(vb_m.pp(mtp.projection), loading_isq),
             )?,
-            block,
+            block: StandardMtpBlock {
+                layer,
+                block: mtp.block,
+                norm_names: names,
+                self_attn_name: spec.module_names.self_attn,
+            },
             final_norm: mtp.final_norm.map(|name| norm(vb_m.pp(name))).transpose()?,
             names: *mtp,
-            layer_norm_names: names,
-            self_attn_name: spec.module_names.self_attn,
-            mask_first_position: mtp.mask_first_position,
+            chain_normed: false,
             kv_layer_idx,
             device,
             dtype,
+        }))
+    }
+}
+
+impl<B: MtpBlock> MtpHead<B> {
+    pub fn from_parts(parts: MtpHeadParts<B>) -> Self {
+        Self {
+            embedding_norm: parts.embedding_norm,
+            hidden_norm: parts.hidden_norm,
+            projection: parts.projection,
+            block: parts.block,
+            final_norm: parts.final_norm,
+            mask_first_position: parts.names.mask_first_position,
+            names: parts.names,
+            chain_normed: parts.chain_normed,
+            kv_layer_idx: parts.kv_layer_idx,
+            device: parts.device,
+            dtype: parts.dtype,
             placeholder_kv: Mutex::new(KvCache::new_normal(PLACEHOLDER_KV_DIM, 1, 1)),
             n_predict: 0,
+            draft_lm_head: None,
             capture: Mutex::new(None),
             pending_tails: Mutex::new(HashMap::new()),
             #[cfg(all(feature = "cuda", target_family = "unix"))]
             graphs: Default::default(),
-        })
+        }
     }
 
     pub fn n_predict(&self) -> usize {
         self.n_predict
     }
 
-    pub(super) fn set_n_predict(&mut self, n_predict: usize) {
+    /// Drafts through a copy of `lm_head` quantized to `isq`; `None` drafts through the target's own head.
+    pub fn set_draft_lm_head(
+        &mut self,
+        lm_head: &Arc<dyn QuantMethod>,
+        isq: Option<IsqType>,
+    ) -> Result<()> {
+        let device = lm_head.dtype_and_device().1;
+        self.draft_lm_head = isq
+            .map(|isq| {
+                lm_head.clone().apply_isq(
+                    Some(isq),
+                    device.clone(),
+                    &std::sync::atomic::AtomicUsize::new(0),
+                    None,
+                    QuantizeOntoGuard::new(),
+                )
+            })
+            .transpose()?;
+        Ok(())
+    }
+
+    pub fn set_n_predict(&mut self, n_predict: usize) {
         self.n_predict = n_predict;
         *self.capture.lock().expect("mtp capture poisoned") = None;
         self.pending_tails
@@ -238,7 +351,7 @@ impl MtpHead {
     }
 
     /// Keeps the target's post-norm hidden states while drafting is on.
-    pub(super) fn record(&self, full: &Tensor, selected: &Tensor) {
+    pub fn record(&self, full: &Tensor, selected: &Tensor) {
         if self.n_predict > 0 {
             *self.capture.lock().expect("mtp capture poisoned") = Some(Capture {
                 full: full.clone(),
@@ -248,7 +361,7 @@ impl MtpHead {
     }
 
     /// The capture a decode graph's forward just made, which its replays hand back through [`MtpHead::install`].
-    pub(super) fn take_graph_state(&self) -> Option<Box<dyn SpeculativeGraphState>> {
+    pub fn take_graph_state(&self) -> Option<Box<dyn SpeculativeGraphState>> {
         let capture = self.capture.lock().expect("mtp capture poisoned");
         capture.as_ref().map(|capture| {
             Box::new(MtpGraphState {
@@ -258,7 +371,7 @@ impl MtpHead {
         })
     }
 
-    pub(super) fn install(&self, state: &dyn SpeculativeGraphState) -> Result<()> {
+    pub fn install(&self, state: &dyn SpeculativeGraphState) -> Result<()> {
         let state = state
             .as_any()
             .downcast_ref::<MtpGraphState>()
@@ -273,7 +386,7 @@ impl MtpHead {
     }
 
     /// The last forward's selected hidden rows, `(batch_idx, row)` each, as `[rows, hidden]`.
-    pub(super) fn target_hiddens(&self, rows: &[(usize, usize)]) -> Result<Option<Tensor>> {
+    pub fn target_hiddens(&self, rows: &[(usize, usize)]) -> Result<Option<Tensor>> {
         let capture = self.capture.lock().expect("mtp capture poisoned");
         let Some(capture) = capture.as_ref() else {
             return Ok(None);
@@ -396,17 +509,17 @@ impl MtpHead {
             &flash,
         );
         let mut placeholder = self.placeholder_kv.lock().expect("mtp cache poisoned");
-        let chain_hidden = self.block.forward(
-            &xs,
-            &AttentionMask::None,
-            Some(&mut placeholder),
-            &mut ctx,
-            self.kv_layer_idx,
-            None,
-        )?;
+        let block_out = self
+            .block
+            .forward(&xs, &mut placeholder, &mut ctx, self.kv_layer_idx)?;
         let logits_hidden = match &self.final_norm {
-            Some(norm) => norm.forward(&chain_hidden)?,
-            None => chain_hidden.clone(),
+            Some(norm) => norm.forward(&block_out)?,
+            None => block_out.clone(),
+        };
+        let chain_hidden = if self.chain_normed {
+            logits_hidden.clone()
+        } else {
+            block_out
         };
         Ok(MtpDraft {
             logits_hidden,
@@ -416,7 +529,7 @@ impl MtpHead {
 
     /// Catches the head up over a prompt chunk: row p takes token p+1 and the target's hidden at p, except the last
     /// prompt row, kept until its next token is sampled.
-    pub(super) fn prefill(
+    pub fn prefill(
         &self,
         embed: &dyn Fn(&Tensor) -> Result<Tensor>,
         ctx: SpeculativePrefillCtx<'_>,
@@ -480,12 +593,13 @@ impl MtpHead {
 
     /// Drafts `ctx.proposal_len` tokens per sequence: a refresh over the rows the last verify kept (and any prompt
     /// tail), then a chain of single-row steps, each fed the previous draft.
-    pub(super) fn propose(
+    pub fn propose(
         &self,
         embed: &dyn Fn(&Tensor) -> Result<Tensor>,
         lm_head: &dyn QuantMethod,
         ctx: SpeculativeProposeBatchCtx<'_>,
     ) -> Result<Option<SpeculativeProposalBatch>> {
+        let lm_head = self.draft_lm_head.as_deref().unwrap_or(lm_head);
         let n_predict = ctx.proposal_len;
         let batch = ctx.sequences.len();
         if batch == 0 || n_predict == 0 {
@@ -732,8 +846,7 @@ impl MtpHead {
     }
 
     /// The tensors ISQ leaves alone, under the stack's prefix.
-    pub(super) fn add_residual(&self, uvb_m: &UnVarBuilder) {
-        let norm_names = self.layer_norm_names;
+    pub fn add_residual(&self, uvb_m: &UnVarBuilder) {
         self.embedding_norm
             .add_residual(&uvb_m.pp(self.names.embedding_norm));
         self.hidden_norm
@@ -741,14 +854,7 @@ impl MtpHead {
         if let (Some(norm), Some(name)) = (&self.final_norm, self.names.final_norm) {
             norm.add_residual(&uvb_m.pp(name));
         }
-        let uvb_b = uvb_m.pp(self.names.block);
-        if let (Some(norm), Some(name)) = (&self.block.norms.input, norm_names.input) {
-            norm.add_residual(&uvb_b.pp(name));
-        }
-        if let (Some(norm), Some(name)) = (&self.block.norms.pre_ffn, norm_names.pre_ffn) {
-            norm.add_residual(&uvb_b.pp(name));
-        }
-        super::LayerAttention::add_residual(&self.block.self_attn, &uvb_b.pp(self.self_attn_name));
+        self.block.add_residual(uvb_m);
     }
 }
 

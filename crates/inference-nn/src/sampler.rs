@@ -901,6 +901,17 @@ impl Sampler {
         self.temperature.is_none()
     }
 
+    /// Greedy over the raw logits: no temperature, penalty, DRY, bias or custom processor reshapes them first.
+    pub fn is_plain_argmax(&self) -> bool {
+        self.temperature.is_none()
+            && self.frequency_penalty.is_none_or(|p| p == 0.0)
+            && self.presence_penalty.is_none_or(|p| p == 0.0)
+            && self.repetition_penalty.is_none_or(|p| p == 1.0)
+            && self.dry_params.is_none()
+            && self.logits_bias.is_empty()
+            && self.logits_processors.is_empty()
+    }
+
     pub fn temperature(&self) -> Option<f64> {
         self.temperature
     }

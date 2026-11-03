@@ -18,7 +18,6 @@ pub mod input_metadata;
 pub mod kv_cache_manager;
 mod layers;
 pub mod mm_prefix;
-#[cfg(any(all(feature = "cuda", target_family = "unix"), feature = "metal"))]
 pub mod plan;
 mod scales;
 #[cfg(any(test, all(feature = "cuda", target_family = "unix")))]

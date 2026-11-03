@@ -23,11 +23,15 @@ pub struct MtpConfig {
     /// ISQ type for a draft-only copy of `lm_head`, so drafting skips the promoted (wider)
     /// sensitive-tensor type; the target still verifies with the promoted head.
     pub draft_lm_head_isq: Option<inference_quant::IsqType>,
-    /// An assistant drafter's own weight type (DFlash); unset, the draft head's (`draft_lm_head_isq`).
+    /// An assistant drafter's own weight type (DFlash; unset, `draft_lm_head_isq`), or a built-in head's draft-only
+    /// `lm_head` copy's (unset, it drafts through the target's).
     pub drafter_isq: Option<inference_quant::IsqType>,
     /// Each step drafts the depth that has paid best, up to `n_predict` (unset, the proposer's largest
     /// automatic depth), instead of always `n_predict`.
     pub auto_depth: bool,
+    /// Greedy verification also accepts a draft whose logit is within this many nats of the target's top one (a
+    /// near-tie), so it stops being bit-exact argmax; 0 accepts only the argmax.
+    pub greedy_tolerance: f32,
 }
 
 #[doc(hidden)]
@@ -67,6 +71,7 @@ impl MtpConfig {
             draft_lm_head_isq: None,
             drafter_isq: None,
             auto_depth: false,
+            greedy_tolerance: 0.0,
         }
     }
 
@@ -78,6 +83,7 @@ impl MtpConfig {
             draft_lm_head_isq: None,
             drafter_isq: None,
             auto_depth: false,
+            greedy_tolerance: 0.0,
         }
     }
 
@@ -98,6 +104,11 @@ impl MtpConfig {
 
     pub fn with_auto_depth(mut self, auto_depth: bool) -> Self {
         self.auto_depth = auto_depth;
+        self
+    }
+
+    pub fn with_greedy_tolerance(mut self, nats: f32) -> Self {
+        self.greedy_tolerance = nats;
         self
     }
 

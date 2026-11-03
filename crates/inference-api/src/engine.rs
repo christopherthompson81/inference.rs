@@ -478,9 +478,14 @@ pub struct MtpSpec {
     pub auto_depth: bool,
     #[serde(default)]
     pub draft_sampling: MtpDraftSampling,
-    /// The assistant model's weight type, e.g. `q4k` or `q8_0`; unset, the model's ISQ (none for a GGUF, so BF16).
+    /// The assistant model's weight type, or a built-in head's draft-only `lm_head` copy's, e.g. `q5_0`; unset, the
+    /// model's ISQ (none for a GGUF, so BF16) and a built-in head drafts through the target's `lm_head`.
     #[serde(default)]
     pub draft_isq: Option<String>,
+    /// Greedy verification also accepts a draft within this many nats of the target's top logit, so greedy output is
+    /// no longer bit-exact argmax; unset or 0 accepts only the argmax.
+    #[serde(default)]
+    pub greedy_tolerance: Option<f32>,
 }
 
 #[derive(
@@ -523,13 +528,20 @@ impl MtpSpec {
                 })
             })
             .transpose()?;
+        let greedy_tolerance = self.greedy_tolerance.unwrap_or(0.0);
+        if !greedy_tolerance.is_finite() || greedy_tolerance < 0.0 {
+            return Err(EngineLoadError::InvalidSpec(format!(
+                "mtp.greedy_tolerance must be a non-negative number of nats, got {greedy_tolerance}"
+            )));
+        }
         Ok(match self.model {
             Some(model) => MtpConfig::new(model, self.n_predict),
             None => MtpConfig::builtin(self.n_predict),
         }
         .with_draft_sampling_method(self.draft_sampling.into())
         .with_drafter_isq(draft_isq)
-        .with_auto_depth(self.auto_depth))
+        .with_auto_depth(self.auto_depth)
+        .with_greedy_tolerance(greedy_tolerance))
     }
 }
 

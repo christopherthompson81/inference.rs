@@ -32,16 +32,22 @@ macro_rules! serde_default_fn {
     };
 }
 
-/// `true` if built with CUDA (requires Unix) /Metal
-#[cfg(any(all(feature = "cuda", target_family = "unix"), feature = "metal"))]
+/// `true`: every build has a PagedAttention backend (CUDA, Metal or the CPU kernels); see [`paged_attn_supported_on`].
 pub const fn paged_attn_supported() -> bool {
     true
 }
 
-/// `true` if built with CUDA (requires Unix) /Metal
-#[cfg(not(any(all(feature = "cuda", target_family = "unix"), feature = "metal")))]
-pub const fn paged_attn_supported() -> bool {
-    false
+/// Whether this build's PagedAttention kernels serve `device`: the CPU kernels are the backend of CPU-only builds.
+pub fn paged_attn_supported_on(device: &inference_tensor::Device) -> bool {
+    const GPU_BUILD: bool = cfg!(any(
+        all(feature = "cuda", target_family = "unix"),
+        feature = "metal"
+    ));
+    match device {
+        inference_tensor::Device::Cpu => !GPU_BUILD,
+        inference_tensor::Device::Cuda(_) => cfg!(all(feature = "cuda", target_family = "unix")),
+        inference_tensor::Device::Metal(_) => cfg!(feature = "metal"),
+    }
 }
 
 /// `true` if a CUDA FlashAttention backend runs here: fattn on Turing or newer, FA3 with its feature.

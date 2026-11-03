@@ -827,6 +827,7 @@ pub(crate) struct VerificationInput {
     pub(crate) base_len: usize,
     pub(crate) anchor_to_emit: Option<Logprobs>,
     pub(crate) device_verification: Option<DeviceVerification>,
+    pub(crate) greedy_tolerance: f32,
 }
 
 pub(crate) async fn finish_verified_step(
@@ -845,6 +846,7 @@ pub(crate) async fn finish_verified_step(
         base_len,
         anchor_to_emit,
         device_verification,
+        greedy_tolerance,
     } = input;
     let general_metadata = pipeline.get_metadata();
     let eos_tok = seq.effective_eos_tokens(&general_metadata.eos_tok, disable_eos_stop);
@@ -912,6 +914,13 @@ pub(crate) async fn finish_verified_step(
         );
     }
 
+    // a near-tie accepts the draft only where the raw logits are what greedy picks from and no logprobs are reported
+    let tie_tolerance = (greedy_tolerance > 0.0
+        && device_verification.is_none()
+        && unconstrained
+        && !return_logprobs
+        && seq.sampler().is_plain_argmax())
+    .then_some(greedy_tolerance);
     let mut accepted = 0usize;
     for (idx, draft) in proposal.iter().copied().enumerate() {
         let (sampled, accepted_by_device) = match &device_verification {
@@ -952,7 +961,16 @@ pub(crate) async fn finish_verified_step(
             }
         };
         let sampled_token = sampled.token;
-        if accepted_by_device.unwrap_or(sampled_token == draft) {
+        let sampled = match tie_tolerance {
+            Some(nats)
+                if sampled_token != draft
+                    && within_tie(&verify_logits, idx, sampled_token, draft, nats)? =>
+            {
+                device_token_logprobs(draft)
+            }
+            _ => sampled,
+        };
+        if accepted_by_device.unwrap_or(sampled.token == draft) {
             accepted += 1;
             finish_or_add_toks_to_seq(pipeline, prefix_cacher, seq, sampled, eos_tok, false)
                 .await?;
@@ -1561,6 +1579,15 @@ async fn finish_at_tool_grammar(
     })
 }
 
+// whether `draft`'s logit in verify row `row` is within `nats` of the argmax `top`'s
+fn within_tie(logits: &Tensor, row: usize, top: u32, draft: u32, nats: f32) -> Result<bool> {
+    let row = logit_row(logits, row)?
+        .flatten_all()?
+        .to_dtype(inference_tensor::DType::F32)?;
+    let pick = |token: u32| -> Result<f32> { row.get(token as usize)?.to_scalar::<f32>() };
+    Ok(pick(top)? - pick(draft)? <= nats)
+}
+
 fn logit_row(logits: &Tensor, row: usize) -> Result<Tensor> {
     match logits.dims() {
         [_, rows, _] => {
@@ -1670,7 +1697,9 @@ mod tests {
         DeviceVerification, ProposalProbabilityRow, SparseRejectionFallbackUniforms, accepts_draft,
         normalize_probs, normalize_sparse_row, packed_target_shape_matches,
         partition_device_tokens, stochastic_verification_allowed, validate_device_verification,
+        within_tie,
     };
+    use inference_tensor::{Device, Tensor};
 
     #[test]
     fn packed_sparse_target_requires_the_complete_homogeneous_shape() {
@@ -1733,6 +1762,16 @@ mod tests {
         assert!(!stochastic_verification_allowed(false, false, true));
         assert!(!stochastic_verification_allowed(false, true, false));
         assert!(!stochastic_verification_allowed(true, false, false));
+    }
+
+    #[test]
+    fn a_draft_within_the_tolerance_of_the_top_logit_ties() -> inference_tensor::Result<()> {
+        // two verify rows; row 1's top token is 2 at 3.0, token 0 trails it by 0.05 and token 1 by 2.0
+        let logits = Tensor::new(&[[0.0f32, 1.0, 0.5], [2.95, 1.0, 3.0]], &Device::Cpu)?;
+        assert!(within_tie(&logits, 1, 2, 0, 0.1)?);
+        assert!(!within_tie(&logits, 1, 2, 0, 0.01)?);
+        assert!(!within_tie(&logits, 1, 2, 1, 0.1)?);
+        Ok(())
     }
 
     #[test]

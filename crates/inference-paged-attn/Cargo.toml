@@ -21,6 +21,7 @@ dispatch2 = { workspace = true, optional = true }
 candle-metal-kernels = { workspace = true, optional = true }
 inference-metal-compile = { workspace = true, optional = true, features = ["metal"] }
 thiserror.workspace = true
+rayon.workspace = true
 
 [build-dependencies]
 inference-kernel-build = { workspace = true, optional = true }

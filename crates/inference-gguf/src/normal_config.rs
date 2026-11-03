@@ -1537,11 +1537,12 @@ fn nemotron_h_layer_type(metadata: &MetadataView<'_>, layer: usize) -> &'static 
 
 fn build_nemotron_h(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     let hidden = metadata.required_usize("embedding_length")?;
-    let blocks = metadata.required_usize("block_count")?.saturating_sub(
-        metadata
-            .optional_usize("nextn_predict_layers")?
-            .unwrap_or(0),
-    );
+    let nextn_layers = metadata
+        .optional_usize("nextn_predict_layers")?
+        .unwrap_or(0);
+    let blocks = metadata
+        .required_usize("block_count")?
+        .saturating_sub(nextn_layers);
     let layer_types = (0..blocks)
         .map(|layer| nemotron_h_layer_type(metadata, layer))
         .collect::<Vec<_>>();
@@ -1567,6 +1568,7 @@ fn build_nemotron_h(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     config.insert("vocab_size".into(), json!(metadata.vocab_size()?));
     config.insert("hidden_size".into(), json!(hidden));
     config.insert("layers_block_type".into(), json!(layer_types));
+    config.insert("num_nextn_predict_layers".into(), json!(nextn_layers));
     config.insert("num_attention_heads".into(), json!(heads));
     config.insert("num_key_value_heads".into(), json!(kv_heads));
     config.insert("head_dim".into(), json!(metadata.head_dim(hidden, heads)?));

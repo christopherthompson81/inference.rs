@@ -2584,7 +2584,7 @@ impl PagedAttention {
     }
 
     /// Read-only paged attention against a donor layer's cache. Identical to
-    /// [`forward`] but never calls `reshape_and_cache`, the donor layer has
+    /// [`Self::forward`] but never calls `reshape_and_cache`, the donor layer has
     /// already written its K,V.  On prompt the donor's cached K,V are
     /// gathered; on decode the paged-attention kernel reads them directly.
     #[allow(clippy::too_many_arguments)]

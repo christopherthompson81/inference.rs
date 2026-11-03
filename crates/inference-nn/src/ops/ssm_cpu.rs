@@ -74,6 +74,21 @@ unsafe fn state_row_step_avx2(row: &mut [f32], b: &[f32], c: &[f32], decay: f32,
     lanes.iter().sum()
 }
 
+// A buffer the barrier pool's items each write their own disjoint elements of
+#[derive(Clone, Copy)]
+struct SharedMut(*mut f32);
+
+// SAFETY: every item touches only its own elements, and the buffer outlives the pool call
+unsafe impl Send for SharedMut {}
+unsafe impl Sync for SharedMut {}
+
+impl SharedMut {
+    // SAFETY: `start..start + len` is in bounds and touched by this item alone
+    unsafe fn slice<'a>(self, start: usize, len: usize) -> &'a mut [f32] {
+        unsafe { std::slice::from_raw_parts_mut(self.0.add(start), len) }
+    }
+}
+
 fn f32_vec(t: &Tensor) -> Result<Vec<f32>> {
     t.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()
 }
@@ -144,17 +159,23 @@ impl ScanInputs {
     }
 
     // `states` holds each (batch, head) item's state block, `None` for a padding row's
-    fn scan(&self, mut states: Vec<Option<&mut [f32]>>) -> Vec<f32> {
+    // on the barrier pool, whose workers spin between the matmuls: rayon's would wake beside them for every layer
+    fn scan(&self, states: Vec<Option<&mut [f32]>>) -> Vec<f32> {
         let [batch, seq, heads, head_dim, groups, d_state] = self.shape;
         let heads_per_group = heads / groups;
+        let head_state = self.head_state();
+        let mut y = vec![0f32; batch * seq * heads * head_dim];
+        let out = SharedMut(y.as_mut_ptr());
         // one item per (batch, head): its state block and its outputs, strided through `y`
-        let mut outputs: Vec<Vec<f32>> = vec![vec![0f32; seq * head_dim]; batch * heads];
-        states
-            .par_iter_mut()
-            .zip(outputs.par_iter_mut())
-            .enumerate()
-            .for_each(|(item, (s, out))| {
-                let Some(s) = s else { return };
+        let states: Vec<Option<SharedMut>> = states
+            .into_iter()
+            .map(|s| s.map(|s| SharedMut(s.as_mut_ptr())))
+            .collect();
+        inference_tensor::utils::barrier_pool().execute_chunked(states.len(), |items| {
+            for item in items {
+                let Some(state) = states[item] else { continue };
+                // SAFETY: the item's state block is its own
+                let s = unsafe { state.slice(0, head_state) };
                 let (bi, h) = (item / heads, item % heads);
                 for t in 0..seq {
                     let step = (bi * seq + t) * heads + h;
@@ -167,20 +188,15 @@ impl ScanInputs {
                     let bt = &self.b[group_step * d_state..(group_step + 1) * d_state];
                     let ct = &self.c[group_step * d_state..(group_step + 1) * d_state];
                     let xt = &self.x[step * head_dim..(step + 1) * head_dim];
+                    // SAFETY: step `t` of head `h` in batch row `bi` is this item's alone
+                    let yt = unsafe { out.slice(step * head_dim, head_dim) };
                     for (p, row) in s.chunks_exact_mut(d_state).enumerate() {
-                        out[t * head_dim + p] =
+                        yt[p] =
                             state_row_step(row, bt, ct, decay, dt_t * xt[p]) + self.d[h] * xt[p];
                     }
                 }
-            });
-        let mut y = vec![0f32; batch * seq * heads * head_dim];
-        for (item, out) in outputs.iter().enumerate() {
-            let (bi, h) = (item / heads, item % heads);
-            for t in 0..seq {
-                let at = ((bi * seq + t) * heads + h) * head_dim;
-                y[at..at + head_dim].copy_from_slice(&out[t * head_dim..(t + 1) * head_dim]);
             }
-        }
+        });
         y
     }
 }
@@ -301,12 +317,20 @@ impl inference_tensor::InplaceOp1 for SlotConvStep<'_> {
                 &self.weight,
                 &self.bias,
             );
-            // channels split across the pool's threads: a serial pass here stalls every worker
-            row.par_chunks_mut(kernel * CONV_CHANNELS_PER_TASK)
-                .zip(dst.par_chunks_mut(CONV_CHANNELS_PER_TASK))
-                .enumerate()
-                .for_each(|(task, (windows, dst))| {
+            // channels split across the barrier pool's threads: a serial pass here stalls every worker
+            let (windows_at, dst_at) = (SharedMut(row.as_mut_ptr()), SharedMut(dst.as_mut_ptr()));
+            let tasks = channels.div_ceil(CONV_CHANNELS_PER_TASK);
+            inference_tensor::utils::barrier_pool().execute_chunked(tasks, |tasks| {
+                for task in tasks {
                     let ch0 = task * CONV_CHANNELS_PER_TASK;
+                    let n = CONV_CHANNELS_PER_TASK.min(channels - ch0);
+                    // SAFETY: a task's channels, and their windows, are its own
+                    let (windows, dst) = unsafe {
+                        (
+                            windows_at.slice(ch0 * kernel, n * kernel),
+                            dst_at.slice(ch0, n),
+                        )
+                    };
                     for (i, (window, o)) in windows.chunks_mut(kernel).zip(dst).enumerate() {
                         let ch = ch0 + i;
                         window.copy_within(1.., 0);
@@ -321,7 +345,8 @@ impl inference_tensor::InplaceOp1 for SlotConvStep<'_> {
                         }
                         *o = sum / (1.0 + (-sum).exp());
                     }
-                });
+                }
+            });
         }
         *self.out.borrow_mut() = out;
         Ok(())

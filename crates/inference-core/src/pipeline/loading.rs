@@ -68,10 +68,15 @@ pub(crate) fn materialize_device_mapper(
     mapper.set_model_dtype(dtype);
     pipeline_mapper.set_model_dtype(dtype);
 
-    // get_device_layers already keeps PagedAttention off the CPU; a manual map can still mix devices
-    if paged_attn_config.is_some() && mapper.get_unique_devices().iter().any(Device::is_cpu) {
+    // get_device_layers already keeps PagedAttention off a device it does not serve; a manual map can still mix them
+    if paged_attn_config.is_some()
+        && !mapper
+            .get_unique_devices()
+            .iter()
+            .all(inference_nn::utils::paged_attn_supported_on)
+    {
         warn!(
-            "Device mapping contains a mix of GPU and CPU. There is no CPU support for PagedAttention, disabling PagedAttention."
+            "Device mapping places layers where this build has no PagedAttention backend (a GPU build on the CPU), disabling PagedAttention."
         );
         *paged_attn_config = None;
     }

@@ -35,7 +35,7 @@ mod mtp;
 pub mod qwen3_vl;
 
 pub use moe::{BLOCK_SPARSE_MOE, MoeRouting, MoeSpec, SharedExpertSpec, SparseMoe};
-pub use mtp::{MtpHead, MtpSpec};
+pub use mtp::{MtpBlock, MtpHead, MtpHeadParts, MtpSpec, StandardMtpBlock};
 
 /// A layer's feed-forward, dense or routed, as most checkpoints name it.
 pub const MLP: &str = "mlp";
@@ -43,7 +43,7 @@ const DEFAULT_ROPE_THETA: f32 = 10_000.0;
 const MERGED_GATE_UP_CHUNKS: usize = 2;
 const O_PROJ: &str = "o_proj";
 // draft tokens per step when `--mtp-n-predict` names none; one MTP layer chained this deep stays well accepted
-const DEFAULT_MTP_N_PREDICT: usize = 2;
+pub const DEFAULT_MTP_N_PREDICT: usize = 2;
 // Phi-3 GGUFs carry their LongRoPE factors as tensors
 const PHI_ROPE_FACTORS: (&str, &str) = ("rope_factors_short.weight", "rope_factors_long.weight");
 // Llama 3 checkpoints may carry per-frequency rope factors under this name
@@ -1961,6 +1961,7 @@ impl<A: LayerAttention, F: LayerFfn> crate::speculative::SpeculativeTargetMixin 
         if n_predict == 0 {
             inference_tensor::bail!("MTP needs at least one draft token");
         }
+        mtp.set_draft_lm_head(&self.lm_head, config.drafter_isq)?;
         mtp.set_n_predict(n_predict);
         Ok(Some(crate::speculative::SpeculativeAttachInfo::mtp(
             "built-in".to_string(),

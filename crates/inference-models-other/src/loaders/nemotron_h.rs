@@ -50,15 +50,27 @@ impl NormalModelLoader for NemotronHLoader {
         ) {
             (layout.embeddings, layout.final_norm) = NEMO_DECODER_ENDS;
         }
-        Ok(Box::new(crate::granite::GraniteMoeHybrid::new_with_layout(
-            &cfg.granite()?,
+        let granite = cfg.granite()?;
+        let loading_isq = normal_loading_metadata.loading_isq;
+        let mut model = crate::granite::GraniteMoeHybrid::new_with_layout(
+            &granite,
             layout,
             vb.pp(root),
             vb.pp(lm_head),
             true,
             normal_loading_metadata,
             attention_mechanism,
-        )?))
+        )?;
+        if let Some(mtp) = cfg.mtp_layout()? {
+            model = model.with_mtp(
+                &granite,
+                mtp,
+                vb.pp(crate::granite::MTP_PREFIX),
+                loading_isq,
+                &attention_mechanism,
+            )?;
+        }
+        Ok(Box::new(model))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         Ok(Box::new(Config::from_json(config)?))
@@ -103,6 +115,7 @@ impl IsqModelLoader for NemotronHLoader {
             r"layers\.(\d+)\.mixer\.(fc1_latent_proj|fc2_latent_proj)\.(weight|bias)$",
             r"layers\.(\d+)\.mixer\.experts\.(\d+)\.(up_proj|down_proj)\.(weight|bias)$",
             r"layers\.(\d+)\.mixer\.experts\.(gate_and_up_projs|down_projs)\.weight$",
+            r"mtp\.layers\.0\.eh_proj\.weight$",
         ])
     }
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
