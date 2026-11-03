@@ -174,8 +174,9 @@ For the [Python SDK](/developer/from-source/#python-sdk), build the library with
 `cargo build --release -p inference-ffi --features cuda,cutile`.
 
 Dense and MoE projections are supported. Experts within each projection must share a quantization
-scheme, and input-dimension shards must align to 16 weights. NVFP4 creation through ISQ, NVFP4 UQFF
-serialization, and NVFP4 GGUF loading are not supported.
+scheme, and input-dimension shards must align to 16 weights. NVFP4 creation through ISQ and NVFP4 UQFF
+serialization are not supported. A GGUF file's NVFP4 tensors load through the GGUF kernels instead, on any CUDA
+GPU and on the CPU (see [GGUF support](/reference/gguf-support/)).
 
 The CUDA backend uses a dedicated matrix-vector kernel for small decode batches. Larger dense
 batches use tiled matrix multiplication; W4A4 activations are quantized once and reused across

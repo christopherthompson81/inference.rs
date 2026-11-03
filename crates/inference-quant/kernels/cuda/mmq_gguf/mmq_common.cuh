@@ -582,7 +582,7 @@ static __device__ __forceinline__ float ggml_cuda_ue4m3_to_fp32(uint8_t x) {
 }
 
 // ggml-common.h's codebooks for the IQ and MXFP4 types
-static const __device__ int8_t  kvalues_mxfp4[16] = {0, 2, 4, 6, 8, 10, 12, 14, 1, 3, 5, 7, 9, 11, 13, 15};
+static const __device__ int8_t  kvalues_mxfp4[16] = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12};
 static const __device__ int8_t  kvalues_iq4nl[16] = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
 #include "../gguf_iq_tables.cuh"
 #define IQ1S_DELTA 0.125f

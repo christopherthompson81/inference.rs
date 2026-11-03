@@ -40,6 +40,11 @@ pub fn build_nemotron_h_bindings(
         if layer >= block_count {
             continue;
         }
+        // `<weight>.scale`, NVFP4's tensor-wide scale, which the shared parser leaves on the role
+        let (role, suffix) = match role.strip_suffix(".scale") {
+            Some(base) if suffix.is_empty() => (base, "scale"),
+            _ => (role, suffix),
+        };
         let p = format!("model.layers.{layer}");
         let target = match role {
             "attn_norm" | "norm" => format!("{p}.norm.{suffix}"),

@@ -25,6 +25,11 @@ const IQ4_XS_QS: std::ops::Range<usize> = 8..136;
 #[cfg(feature = "cuda")]
 const MATRIX_ROW_PADDING: usize = 512;
 // Blocks per rayon task in the CPU dequantizers; one block is 32 to 256 values, too little work to schedule alone
+// ggml-common.h's kvalues_fp4: E2M1 doubled, which the UE4M3 scale halves back
+const KVALUES_FP4: [i8; 16] = [0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12];
+const NVFP4_SCALES: usize = 4;
+const NVFP4_SUB_BLOCK: usize = 16;
+const UE4M3_NAN: u8 = 0x7F;
 const DEQUANT_MIN_BLOCKS_PER_TASK: usize = 64;
 
 #[derive(Debug, Clone)]
@@ -563,6 +568,7 @@ fn metal_tag(ty: GgufType) -> Result<&'static str> {
         GgufType::Iq5Ks => "iq5_ks",
         GgufType::Iq3Ks => "iq3_ks",
         GgufType::Iq2Kl => "iq2_kl",
+        GgufType::Nvfp4 => inference_tensor::bail!("NVFP4 GGUF tensors have no Metal kernel"),
         other => inference_tensor::bail!("{other:?} is held by Candle, not as raw GGUF blocks"),
     })
 }
@@ -633,6 +639,7 @@ pub fn dequantize_rows(ty: GgufType, cols: usize, bytes: &[u8]) -> Result<Vec<f3
         GgufType::Iq3S => super::iq_dequant::iq3_s,
         GgufType::Iq1S => super::iq_dequant::iq1_s,
         GgufType::Iq1M => super::iq_dequant::iq1_m,
+        GgufType::Nvfp4 => dequantize_nvfp4,
         other => inference_tensor::bail!("{other:?} is held by Candle, not as raw GGUF blocks"),
     };
     let mut out = vec![0f32; bytes.len() / size * block];
@@ -642,6 +649,39 @@ pub fn dequantize_rows(ty: GgufType, cols: usize, bytes: &[u8]) -> Result<Vec<f3
         .with_min_len(DEQUANT_MIN_BLOCKS_PER_TASK)
         .for_each(|(block_bytes, values)| dequantize_block(block_bytes, values));
     Ok(out)
+}
+
+// block_nvfp4: a UE4M3 scale per 16 values, then 32 bytes; a sub-block's byte j holds its values j and j + 8
+fn dequantize_nvfp4(block: &[u8], values: &mut [f32]) {
+    let (scales, qs) = block.split_at(NVFP4_SCALES);
+    let sub_blocks = qs
+        .as_chunks::<{ NVFP4_SUB_BLOCK / 2 }>()
+        .0
+        .iter()
+        .zip(values.as_chunks_mut::<NVFP4_SUB_BLOCK>().0);
+    for (&scale, (qs, values)) in scales.iter().zip(sub_blocks) {
+        let d = ue4m3_to_f32(scale);
+        let (low, high) = values.split_at_mut(NVFP4_SUB_BLOCK / 2);
+        for ((q, lo), hi) in qs.iter().zip(low).zip(high) {
+            *lo = d * f32::from(KVALUES_FP4[usize::from(q & 0x0F)]);
+            *hi = d * f32::from(KVALUES_FP4[usize::from(q >> 4)]);
+        }
+    }
+}
+
+// ggml_ue4m3_to_fp32: E4M3 without its sign, halved for the doubled E2M1 table; 0x7F (NaN) reads as zero
+fn ue4m3_to_f32(x: u8) -> f32 {
+    if x == 0 || x == UE4M3_NAN {
+        return 0.0;
+    }
+    let exp = i32::from((x >> 3) & 0x0F);
+    let man = f32::from(x & 0x07);
+    let raw = if exp == 0 {
+        man * 2f32.powi(-9)
+    } else {
+        (1.0 + man / 8.0) * 2f32.powi(exp - 7)
+    };
+    raw * 0.5
 }
 
 fn f16_at(bytes: &[u8], at: usize) -> f32 {
@@ -685,14 +725,29 @@ fn dequantize_iq4_xs(block: &[u8], values: &mut [f32]) {
 pub struct GgufRawMatMul {
     w: RawGgufTensor,
     b: Option<Tensor>,
+    scale: Option<f32>,
 }
 
 impl GgufRawMatMul {
     pub fn new(w: RawGgufTensor, b: Option<Tensor>) -> Self {
-        Self { w, b }
+        Self { w, b, scale: None }
+    }
+
+    /// The weight's tensor-wide scale (llama.cpp's `<name>.scale`, NVFP4's second level), applied to each output.
+    pub fn with_output_scale(mut self, scale: Option<f32>) -> Self {
+        self.scale = scale;
+        self
+    }
+
+    fn scaled(&self, x: Tensor) -> Result<Tensor> {
+        match self.scale {
+            Some(scale) => x.affine(f64::from(scale), 0.),
+            None => Ok(x),
+        }
     }
 
     fn add_bias(&self, x: Tensor) -> Result<Tensor> {
+        let x = self.scaled(x)?;
         match &self.b {
             Some(b) => x.broadcast_add(b),
             None => Ok(x),
@@ -762,7 +817,7 @@ impl QuantMethod for GgufRawMatMul {
     }
 
     fn dequantize_w(&self) -> Result<Tensor> {
-        self.w.dequantize(&self.w.device())
+        self.scaled(self.w.dequantize(&self.w.device())?)
     }
 
     fn embedding_forward_raw(&self, ids: &Tensor) -> Result<Tensor> {
@@ -843,7 +898,7 @@ impl QuantMethod for GgufRawMatMul {
             inverse[slot as usize] = at as u32;
         }
         let inverse = Tensor::from_vec(inverse, slots, a.device())?;
-        let out = Tensor::cat(&outputs, 0)?.index_select(&inverse, 0)?;
+        let out = self.scaled(Tensor::cat(&outputs, 0)?.index_select(&inverse, 0)?)?;
         let out = match &self.b {
             Some(b) => {
                 let b = b.index_select(&indices.flatten_all()?.to_device(b.device())?, 0)?;
@@ -926,6 +981,9 @@ impl QuantizedSerde for GgufRawMatMul {
 mod tests {
     use super::*;
 
+    // UE4M3 exponent 2 (2^-5), mantissa 0
+    const NVFP4_TEST_SCALE: u8 = 0x10;
+
     // Blocks and expected values from gguf-py's IQ dequantizers (tests/fixtures/gguf_iq/make_goldens.py).
     const GOLDENS: &str = include_str!("../../tests/fixtures/gguf_iq/goldens.json");
     // Rows and values from ik_llama.cpp's reference dequantizers (tests/fixtures/gguf_ik/make_goldens.py).
@@ -989,6 +1047,11 @@ mod tests {
                         let word = u16::from_le_bytes([block[at], block[at + 1]]) & 0x0FFF
                             | ((scale >> (4 * k)) & 0xF) << 12;
                         block[at..at + 2].copy_from_slice(&word.to_le_bytes());
+                    }
+                } else if ty == GgufType::Nvfp4 {
+                    // UE4M3 scales of 2^-5 times 1 to 1.875, halved: the order of the others' f16 scales
+                    for (k, scale) in block[..NVFP4_SCALES].iter_mut().enumerate() {
+                        *scale = NVFP4_TEST_SCALE + ((i + k) % 8) as u8;
                     }
                 } else {
                     block[..2].copy_from_slice(&scale.to_le_bytes());
@@ -1587,6 +1650,7 @@ mod tests {
         let metal = Device::new_metal(0)?;
         for (ty, cols) in GgufType::RAW_BLOCKS
             .into_iter()
+            .filter(|&ty| ty != GgufType::Nvfp4)
             .map(|ty| (ty, COLS))
             .chain([(GgufType::Iq4Nl, NL_COLS)])
             .chain([GgufType::Iq3Kt, GgufType::Iq4Kt].map(|ty| (ty, 480)))
@@ -1634,6 +1698,7 @@ mod tests {
         let metal = Device::new_metal(0)?;
         let cases = GgufType::RAW_BLOCKS
             .into_iter()
+            .filter(|&ty| ty != GgufType::Nvfp4)
             .map(|ty| (ty, COLS))
             .chain([GgufType::Iq3Kt, GgufType::Iq4Kt].map(|ty| (ty, 480)));
         for (ty, cols) in cases {
