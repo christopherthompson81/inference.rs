@@ -3,7 +3,8 @@
 # [--vulkan] [--slim] [--docs|--docs-all] [--bindings] [--size|--size-update]. Real-checkpoint tests are not run here:
 # scripts/deep_checks.sh runs them on request.
 # --metal is the macOS counterpart of --cuda: the metal-only code paths are invisible to a CPU or CUDA lint.
-# --vulkan lints and tests inference-vulkan with its `vulkan` feature (needs glslc; the GPU tests skip without a device).
+# --vulkan lints inference-vulkan, inference-tensor and the SDK with the `vulkan` feature and runs the Vulkan tests (needs
+# glslc; the GPU tests skip without a device).
 # --slim lints inference-core with no model families and with each family alone, so feature gates stay intact; it is
 # skipped when nothing inference-core builds on differs from origin/master.
 # With --cuda, the GPU-bound CUDA suite runs in the background while the CPU lint and tests run; the binding tests run
@@ -118,8 +119,10 @@ if [[ $metal -eq 1 ]]; then
     cargo nextest run --no-fail-fast --profile metal --features metal "${TEST_TARGETS[@]}" || failed=1
 fi
 if [[ $vulkan -eq 1 ]]; then
-    cargo clippy -p inference-vulkan --features vulkan --tests -- -D warnings || failed=1
-    cargo nextest run --no-fail-fast -p inference-vulkan --features vulkan || failed=1
+    VULKAN_PACKAGES=(-p inference-vulkan -p inference-tensor -p inference)
+    cargo clippy "${VULKAN_PACKAGES[@]}" --features vulkan --tests -- -D warnings || failed=1
+    cargo nextest run --no-fail-fast "${VULKAN_PACKAGES[@]}" --features vulkan \
+        -E 'package(inference-vulkan) | test(vulkan)' || failed=1
 fi
 if [[ $lint -eq 1 ]]; then
     cargo "${CLIPPY[@]}" -- -D warnings || failed=1

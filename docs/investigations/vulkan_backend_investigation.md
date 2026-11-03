@@ -46,3 +46,23 @@ outputs, against an f64 dequantized reference); `scripts/local_ci.sh --vulkan`.
 
 **Result:** an `lm_head`-sized weight (131072 x 2688 Q8_0, 374 MB) imported from host memory, twenty matvecs a
 submit: 76.1 GB/s, 4.9 ms each (the raw-read test's imported ceiling was 73-79 GB/s).
+
+### Run 2 - 2026-11-03 ~20:50
+
+**Change:** `inference-vulkan` records into a stream: dispatches append to an open command buffer, submitted without
+waiting every 64 dispatches, each followed by a barrier, with the resources a batch uses kept alive until its fence
+signals. `Device::Vulkan` / `Storage::Vulkan` / `QStorage::Vulkan` in `inference-tensor` (a stub without the
+feature): storage in host-visible buffers; every op, custom op and in-place op runs the CPU backend's kernel on a
+copy and uploads the result; quantized weights keep CPU blocks. Model code that branches by device sends Vulkan
+down the CPU's branch (Mamba's scan / conv / pool step, the MoE experts from their blocks, the mapped-CPU expert
+backend), and CPU kernels' outputs follow their input's device. `--vulkan` / `vulkan:0` select it; F32 activations.
+
+**Measured:** a submit-and-wait costs ~57 us on the 780M and a batched dispatch ~10-15 us, so the design submits only
+when the CPU reads.
+
+**Tests:** the backend's ops against the CPU's (`vulkan_backend::tests`); `nemotron_h_tiny::
+a_long_prompt_scores_on_vulkan_as_on_the_cpu` (plain and Q8_0 experts, with the CPU's KV cache in f32: its f16 default
+was the only difference, which the quantized checkpoint amplified to 0.015).
+
+**Result (Lightning recipe A, 64-token prompt, 32 decoded):** prefill 23.3 tok/s, decode 3.0 tok/s (332 ms a token):
+~0.5 ms an op of fallback (a synchronize, two copies, a fresh Vulkan allocation), the baseline the kernels replace.

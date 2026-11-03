@@ -47,6 +47,7 @@ pub fn paged_attn_supported_on(device: &inference_tensor::Device) -> bool {
         inference_tensor::Device::Cpu => !GPU_BUILD,
         inference_tensor::Device::Cuda(_) => cfg!(all(feature = "cuda", target_family = "unix")),
         inference_tensor::Device::Metal(_) => cfg!(feature = "metal"),
+        inference_tensor::Device::Vulkan(_) => false,
     }
 }
 

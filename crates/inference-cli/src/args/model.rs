@@ -635,6 +635,10 @@ pub struct DeviceOptions {
     #[arg(long)]
     pub cpu: bool,
 
+    /// Run on the Vulkan iGPU (a build with the `vulkan` feature); ops without a Vulkan kernel run on the CPU
+    #[arg(long, conflicts_with = "cpu")]
+    pub vulkan: bool,
+
     /// Device layer mapping (format: ORD:NUM;... e.g., "0:10;1:20")
     /// Omit for automatic device mapping
     #[arg(short = 'n', long, value_delimiter = ';')]
@@ -662,6 +666,7 @@ impl Default for DeviceOptions {
     fn default() -> Self {
         Self {
             cpu: false,
+            vulkan: false,
             device_layers: None,
             topology: None,
             hf_cache: None,

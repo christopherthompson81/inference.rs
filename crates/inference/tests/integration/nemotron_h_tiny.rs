@@ -61,6 +61,8 @@ const MAX_LEN: usize = 6;
 const LOGPROB_TOLERANCE: f32 = 1e-4;
 // cuBLAS and the paged attention kernels add up in other orders than the CPU's
 const CUDA_LOGPROB_TOLERANCE: f32 = 1e-3;
+// Vulkan's ops sum in other orders than the CPU's (its attention, and its kernels as they land), as CUDA's do
+const VULKAN_LOGPROB_TOLERANCE: f32 = 1e-3;
 // BF16 with Q8_0 experts: decode and one prefill round differently (0.023 on this checkpoint), where a replay reading
 // stale state is off by nats
 const BF16_LOGPROB_TOLERANCE: f32 = 0.1;
@@ -479,6 +481,52 @@ async fn a_long_prompt_scores_on_cuda_as_on_the_cpu() -> anyhow::Result<()> {
                 (expected - actual).abs() < CUDA_LOGPROB_TOLERANCE,
                 "position {position}: CPU {expected}, CUDA {actual}"
             );
+        }
+    }
+    Ok(())
+}
+
+// the same checkpoint scores a long prompt on Vulkan as on the CPU, plain and with Q8_0 experts run from their blocks
+#[tokio::test]
+async fn a_long_prompt_scores_on_vulkan_as_on_the_cpu() -> anyhow::Result<()> {
+    if !cfg!(feature = "vulkan") || Device::new_vulkan(0).is_err() {
+        return Ok(());
+    }
+    // the CPU stores KV in f16 by default and Vulkan in f32, a difference a quantized checkpoint amplifies
+    // SAFETY: nextest runs each test in its own process, and nothing has read the environment yet
+    unsafe { std::env::set_var(inference_nn::kv_cache::CPU_KV_F32_ENV, "1") };
+    let dir = checkpoint()?;
+    for isq in [None, Some(IsqType::Q8_0)] {
+        let build = |device: &str| {
+            let builder = TextModelBuilder::new(dir.path().to_string_lossy())
+                .with_dtype(ModelDType::F32)
+                .with_device(device);
+            match isq {
+                Some(isq) => builder.with_isq(isq),
+                None => builder,
+            }
+            .build()
+        };
+        let (cpu, vulkan) = (build("cpu").await?, build("vulkan:0").await?);
+        let chat = RequestBuilder::from(TextMessages::new().add_message(
+            TextMessageRole::User,
+            "say something long ".repeat(LONG_PROMPT_REPEATS),
+        ));
+        let tokens = cpu
+            .tokenize_chat(ChatRequest::from(chat).request)
+            .await?
+            .tokens;
+        let (expected, actual) = (
+            scores(&cpu, tokens.clone()).await?,
+            scores(&vulkan, tokens).await?,
+        );
+        for (position, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
+            if let (Some(expected), Some(actual)) = (expected, actual) {
+                anyhow::ensure!(
+                    (expected - actual).abs() < VULKAN_LOGPROB_TOLERANCE,
+                    "{isq:?} position {position}: CPU {expected}, Vulkan {actual}"
+                );
+            }
         }
     }
     Ok(())

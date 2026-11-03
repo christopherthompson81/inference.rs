@@ -204,7 +204,10 @@ impl UngatedExpertsWeights {
         config: MoEForwardConfig,
     ) -> Result<Option<Tensor>> {
         use inference_quant::cpu_experts::{CpuExpertGate, CpuExperts, supports};
-        if !forward.xs.device().is_cpu() || !matches!(config.act, crate::layers::Activation::Relu2)
+        // Vulkan runs the CPU's expert kernels on its host-visible activations until it has its own
+        let device = forward.xs.device();
+        if !(device.is_cpu() || device.is_vulkan())
+            || !matches!(config.act, crate::layers::Activation::Relu2)
         {
             return Ok(None);
         }

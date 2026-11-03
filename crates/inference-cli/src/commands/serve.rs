@@ -33,6 +33,8 @@ use crate::args::{
 use inference_webui::{UI_ROUTE, UiOptions};
 
 const MEBIBYTE_BYTES: usize = 1024 * 1024;
+// the device `--vulkan` asks for; the Vulkan backend drives one
+const VULKAN_DEVICE: &str = "vulkan:0";
 
 /// Run the HTTP server with the specified model
 #[allow(clippy::too_many_arguments)]
@@ -94,7 +96,7 @@ fn model_runtime_spec(model_type: &ModelType, global: &GlobalOptions) -> Result<
         extract_paged_attn_settings(model_type);
     let (cpu, device_layers) = extract_device_settings(model_type);
     let runtime = RuntimeSpec {
-        device: cpu.then(|| "cpu".to_string()),
+        device: device_spec(model_type, cpu),
         seed: global.seed,
         max_model_len,
         isq: extract_isq_setting(model_type),
@@ -844,16 +846,27 @@ pub(crate) fn extract_paged_attn_settings(
 }
 
 pub(crate) fn extract_device_settings(model_type: &ModelType) -> (bool, Option<Vec<String>>) {
-    let device = match model_type {
+    let device = device_options(model_type);
+    (device.cpu, device.device_layers.clone())
+}
+
+// the runtime's explicit device: `--cpu`, `--vulkan`, or none for the automatic choice
+fn device_spec(model_type: &ModelType, cpu: bool) -> Option<String> {
+    if device_options(model_type).vulkan {
+        return Some(VULKAN_DEVICE.to_string());
+    }
+    cpu.then(|| "cpu".to_string())
+}
+
+fn device_options(model_type: &ModelType) -> &crate::args::DeviceOptions {
+    match model_type {
         ModelType::Auto { device, .. } => device,
         ModelType::Text { device, .. } => device,
         ModelType::Multimodal { device, .. } => device,
         ModelType::Diffusion { device, .. } => device,
         ModelType::Speech { device, .. } => device,
         ModelType::Embedding { device, .. } => device,
-    };
-
-    (device.cpu, device.device_layers.clone())
+    }
 }
 
 pub(crate) fn extract_isq_setting(model_type: &ModelType) -> Option<String> {

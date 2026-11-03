@@ -4,6 +4,9 @@ use inference_tensor::{Result, Tensor};
 
 use crate::get_mut_arcmutex;
 
+/// Set to `1` to keep a CPU KV cache in f32 rather than the default f16.
+pub const CPU_KV_F32_ENV: &str = "INFERENCE_RS_CPU_KV_F32";
+
 // Recurrent state slots reserved past serving capacity for CUDA graph padding rows.
 pub const RECURRENT_GRAPH_PAD_SLOTS: usize = 1;
 /// Prefixes whose recurrent snapshot and drafter state stay on the GPU when a host prefix store holds the rest: a hit
@@ -86,7 +89,7 @@ pub fn cpu_kv_f16() -> bool {
             && std::arch::is_aarch64_feature_detected!("fhm");
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         let fast = false;
-        let on = fast && std::env::var("INFERENCE_RS_CPU_KV_F32").map_or(true, |v| v == "0");
+        let on = fast && std::env::var(CPU_KV_F32_ENV).map_or(true, |v| v == "0");
         if on {
             tracing::info!("Using f16 KV cache on CPU (set INFERENCE_RS_CPU_KV_F32=1 for f32).");
         }

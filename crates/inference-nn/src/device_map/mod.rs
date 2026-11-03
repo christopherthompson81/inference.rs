@@ -266,6 +266,8 @@ fn mapped_device_for_ordinal(
             }),
         DeviceLocation::Metal { gpu_id } if gpu_id == ordinal => Ok(device.clone()),
         DeviceLocation::Metal { .. } => Device::new_metal(ordinal),
+        DeviceLocation::Vulkan { gpu_id } if gpu_id == ordinal => Ok(device.clone()),
+        DeviceLocation::Vulkan { .. } => Device::new_vulkan(ordinal),
     }
 }
 
@@ -274,6 +276,7 @@ fn device_ordinal(device: &Device) -> usize {
         DeviceLocation::Cpu => 0,
         DeviceLocation::Cuda { gpu_id } => gpu_id,
         DeviceLocation::Metal { gpu_id } => gpu_id,
+        DeviceLocation::Vulkan { gpu_id } => gpu_id,
     }
 }
 
@@ -333,6 +336,8 @@ pub fn get_all_similar_devices(base: &Device) -> Result<Vec<Device>> {
     let mut devices = Vec::new();
     match base {
         Device::Cpu => return Ok(vec![Device::Cpu]),
+        // the backend drives one device
+        Device::Vulkan(_) => return Ok(vec![base.clone()]),
         #[cfg(feature = "cuda")]
         Device::Cuda(_) => {
             let DeviceLocation::Cuda { gpu_id: base_ord } = base.location() else {

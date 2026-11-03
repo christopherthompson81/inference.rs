@@ -168,6 +168,9 @@ pub enum Error {
     #[error("inference-tensor has not been built with metal support")]
     NotCompiledWithMetalSupport,
 
+    #[error("inference-tensor has not been built with vulkan support")]
+    NotCompiledWithVulkanSupport,
+
     #[error("cannot find tensor {path}")]
     CannotFindTensor { path: String },
 

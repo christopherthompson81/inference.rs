@@ -669,6 +669,7 @@ fn as_model_type(model_type: &QuantizeModelType) -> ModelType {
 fn device_options(device: &QuantizeDeviceOptions) -> DeviceOptions {
     DeviceOptions {
         cpu: device.cpu,
+        vulkan: false,
         device_layers: device.device_layers.clone(),
         topology: device.topology.clone(),
         hf_cache: device.hf_cache.clone(),

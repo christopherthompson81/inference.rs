@@ -139,6 +139,18 @@ impl MemoryUsage {
             Device::Metal(_) => {
                 inference_tensor::bail!("Cannot query memory for Metal device")
             }
+            // a unified-memory iGPU: its budget is the share of system RAM an integrated CUDA device gets
+            Device::Vulkan(_) => {
+                let mut sys = System::new();
+                sys.refresh_memory();
+                let fraction = igpu_memory_fraction();
+                let budget = (usize::try_from(sys.total_memory())? as f64 * fraction) as usize;
+                let free = (usize::try_from(sys.available_memory())? as f64 * fraction) as usize;
+                Ok(DeviceMemory::Unified {
+                    budget,
+                    allocated: budget.saturating_sub(free),
+                })
+            }
         }
     }
 
@@ -382,7 +394,6 @@ fn cuda_result(
     }
 }
 
-#[cfg(feature = "cuda")]
 fn igpu_memory_fraction() -> f64 {
     std::env::var("INFERENCE_RS_IGPU_MEMORY_FRACTION")
         .ok()

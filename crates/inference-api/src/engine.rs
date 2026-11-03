@@ -338,7 +338,7 @@ impl AdapterSpec {
 #[derive(Debug, Default, inference_json::FromJson, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSpec {
-    /// `auto` (the best available), `cpu`, `cuda:N` or `metal:N`.
+    /// `auto` (the best available), `cpu`, `cuda:N`, `metal:N` or `vulkan:N`.
     #[serde(default)]
     pub device: Option<String>,
     #[serde(default)]
@@ -888,7 +888,7 @@ impl EngineSpec {
 pub(crate) fn explicit_device(device: &str, seed: Option<u64>) -> Result<Device, EngineLoadError> {
     let invalid = || {
         EngineLoadError::InvalidSpec(format!(
-            "device `{device}` is not one of auto, cpu, cuda:N, metal:N"
+            "device `{device}` is not one of auto, cpu, cuda:N, metal:N, vulkan:N"
         ))
     };
     let (kind, ordinal) = device.split_once(':').ok_or_else(invalid)?;
@@ -896,6 +896,7 @@ pub(crate) fn explicit_device(device: &str, seed: Option<u64>) -> Result<Device,
     let device = match kind {
         "cuda" => Device::new_cuda(ordinal),
         "metal" => Device::new_metal(ordinal),
+        "vulkan" => Device::new_vulkan(ordinal),
         _ => return Err(invalid()),
     }
     .map_err(|error| EngineLoadError::Unavailable(format!("device {device}: {error}")))?;

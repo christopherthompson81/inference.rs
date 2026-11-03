@@ -70,6 +70,18 @@ impl HostBuffer {
         self.len == 0
     }
 
+    /// The buffer's bytes; the GPU must not be writing them.
+    pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: the mapping is `len` bytes and lives as long as `self`
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+
+    /// As [`Self::as_bytes`], for writing; the GPU must not be reading them.
+    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+        // SAFETY: as above, and `&mut self` keeps the slice unique on the host side
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+
     /// The buffer's bytes as `f32`s; the GPU must not be writing them.
     pub fn as_f32(&self) -> &[f32] {
         // SAFETY: the mapping is `len` bytes, page aligned, and lives as long as `self`

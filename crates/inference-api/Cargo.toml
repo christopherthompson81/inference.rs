@@ -68,6 +68,7 @@ metal = [
     "inference-selection/metal",
     "inference-layout/metal",
 ]
+vulkan = ["inference-core/vulkan"]
 flash-attn-v3 = ["cuda", "inference-core/flash-attn-v3", "inference-selection/flash-attn-v3"]
 accelerate = ["inference-core/accelerate", "inference-selection/accelerate"]
 mkl = ["inference-core/mkl", "inference-selection/mkl"]

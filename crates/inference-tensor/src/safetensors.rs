@@ -219,16 +219,13 @@ impl Tensor {
             DType::F6E2M3 | DType::F6E3M2 | DType::F4 | DType::F8E8M0 => {
                 // For dummy types, create storage with raw bytes
                 let storage = match device {
-                    Device::Cpu => {
-                        let cpu_storage = match dtype {
-                            DType::F6E2M3 => crate::cpu_backend::CpuStorage::F6E2M3(data.to_vec()),
-                            DType::F6E3M2 => crate::cpu_backend::CpuStorage::F6E3M2(data.to_vec()),
-                            DType::F4 => crate::cpu_backend::CpuStorage::F4(data.to_vec()),
-                            DType::F8E8M0 => crate::cpu_backend::CpuStorage::F8E8M0(data.to_vec()),
-                            _ => unreachable!(),
-                        };
-                        Storage::Cpu(cpu_storage)
-                    }
+                    Device::Cpu => Storage::Cpu(raw_byte_storage(dtype, data)),
+                    Device::Vulkan(device) => Storage::Vulkan(
+                        crate::backend::BackendDevice::storage_from_cpu_storage_owned(
+                            device,
+                            raw_byte_storage(dtype, data),
+                        )?,
+                    ),
                     #[cfg(feature = "cuda")]
                     Device::Cuda(device) => {
                         let mut slice = unsafe { device.alloc::<u8>(data.len())? };
@@ -323,16 +320,13 @@ fn convert_dummy(view: &st::TensorView<'_>, device: &Device) -> Result<Tensor> {
 
     // Create storage with the appropriate dummy type variant
     let storage = match device {
-        Device::Cpu => {
-            let cpu_storage = match dtype {
-                DType::F6E2M3 => crate::cpu_backend::CpuStorage::F6E2M3(data.to_vec()),
-                DType::F6E3M2 => crate::cpu_backend::CpuStorage::F6E3M2(data.to_vec()),
-                DType::F4 => crate::cpu_backend::CpuStorage::F4(data.to_vec()),
-                DType::F8E8M0 => crate::cpu_backend::CpuStorage::F8E8M0(data.to_vec()),
-                _ => unreachable!(),
-            };
-            Storage::Cpu(cpu_storage)
-        }
+        Device::Cpu => Storage::Cpu(raw_byte_storage(dtype, data)),
+        Device::Vulkan(device) => Storage::Vulkan(
+            crate::backend::BackendDevice::storage_from_cpu_storage_owned(
+                device,
+                raw_byte_storage(dtype, data),
+            )?,
+        ),
         #[cfg(feature = "cuda")]
         Device::Cuda(device) => {
             let mut slice = unsafe { device.alloc::<u8>(data.len())? };
@@ -518,6 +512,17 @@ impl MmapedSafetensors {
             }
         };
         Ok(self.safetensors[index].get().0.tensor(name)?)
+    }
+}
+
+// a dtype held as raw bytes (the sub-byte and scale formats) as CPU storage
+fn raw_byte_storage(dtype: DType, data: &[u8]) -> crate::cpu_backend::CpuStorage {
+    match dtype {
+        DType::F6E2M3 => crate::cpu_backend::CpuStorage::F6E2M3(data.to_vec()),
+        DType::F6E3M2 => crate::cpu_backend::CpuStorage::F6E3M2(data.to_vec()),
+        DType::F4 => crate::cpu_backend::CpuStorage::F4(data.to_vec()),
+        DType::F8E8M0 => crate::cpu_backend::CpuStorage::F8E8M0(data.to_vec()),
+        _ => unreachable!("only the raw-byte dtypes reach here"),
     }
 }
 

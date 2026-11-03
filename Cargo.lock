@@ -3442,6 +3442,7 @@ dependencies = [
  "half",
  "inference-json",
  "inference-tensor-kernels",
+ "inference-vulkan",
  "intel-mkl-src",
  "libc",
  "libm",

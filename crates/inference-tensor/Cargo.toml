@@ -15,6 +15,7 @@ accelerate-src = { version = "0.3.2", optional = true }
 byteorder = "1.4.3"
 inference-tensor-kernels = { path = "../inference-tensor-kernels", optional = true }
 candle-metal-kernels = { workspace = true, optional = true }
+inference-vulkan = { workspace = true, optional = true }
 objc2-metal = { version = "0.3.1", optional = true }
 objc2-foundation = { version = "0.3.1", optional = true }
 cudarc = { version = "0.19.8", features = [
@@ -65,3 +66,4 @@ metal = [
     "dep:candle-metal-kernels",
 ]
 metal-debug-labels = ["metal", "candle-metal-kernels/debug-labels"]
+vulkan = ["dep:inference-vulkan", "inference-vulkan/vulkan"]

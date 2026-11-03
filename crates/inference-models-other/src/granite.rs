@@ -1306,7 +1306,9 @@ impl MambaLayer {
                 "Only CUDA and the CPU update a Mamba recurrent pool in place."
             );
         }
-        if hidden_states.device().is_cuda() || hidden_states.device().is_cpu() {
+        // Vulkan runs the CPU's step on its storage until it has its own kernels
+        let device = hidden_states.device();
+        if device.is_cuda() || device.is_cpu() || device.is_vulkan() {
             return self.scan_step([&hidden_states, &b, &c, dt], cache, batch_size, pool_slots);
         }
 
@@ -1544,7 +1546,7 @@ impl MambaLayer {
         )?;
         let weight = self.conv1d_weight.squeeze(1)?.to_dtype(padded_t.dtype())?;
 
-        let mut hidden_states_b_c = if padded_t.device().is_cpu() {
+        let mut hidden_states_b_c = if padded_t.device().is_cpu() || padded_t.device().is_vulkan() {
             crate::ops::causal_conv1d_cpu(&padded_t, &weight)?
         } else {
             let mut conv_outputs = Vec::with_capacity(seq_len);
@@ -1700,7 +1702,7 @@ impl MambaLayer {
 
             cache.ssm_state = ssm_state.to_dtype(cache.ssm_state.dtype())?;
             y.reshape((batch_size, seq_len, self.intermediate_size))
-        } else if hidden_states.device().is_cpu() {
+        } else if hidden_states.device().is_cpu() || hidden_states.device().is_vulkan() {
             let mut ssm_state = cache.ssm_state.to_dtype(inference_tensor::DType::F32)?;
             let y = crate::ops::selective_scan_cpu(
                 crate::ops::SelectiveScan {
@@ -3298,7 +3300,8 @@ impl GraniteMoeHybrid {
                         };
                         // a CUDA or CPU decode step runs on the pool's rows in place, skipping the gather and scatter
                         if (x.device().is_cuda()
-                            || (x.device().is_cpu() && x.dtype() == DType::F32))
+                            || ((x.device().is_cpu() || x.device().is_vulkan())
+                                && x.dtype() == DType::F32))
                             && packed_query_lens.is_none()
                             && matches!(metadata.batch_kind(), RecurrentBatchKind::Decode)
                             && pool.conv_dtype() == x.dtype()

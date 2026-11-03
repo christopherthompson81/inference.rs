@@ -164,7 +164,9 @@ impl QuantMethod for UnquantLinear {
             let b = b.broadcast_as(Shape::from_dims(&tgt_shape))?;
 
             match a.device().location() {
-                DeviceLocation::Cuda { .. } | DeviceLocation::Metal { .. } => {
+                DeviceLocation::Cuda { .. }
+                | DeviceLocation::Metal { .. }
+                | DeviceLocation::Vulkan { .. } => {
                     let matmul_result = a.matmul(&w.t()?)?;
                     matmul_result.broadcast_add(&b)
                 }
@@ -189,7 +191,9 @@ impl QuantMethod for UnquantLinear {
             }
         } else {
             match a.device().location() {
-                DeviceLocation::Cuda { .. } | DeviceLocation::Metal { .. } => a.matmul(&w.t()?),
+                DeviceLocation::Cuda { .. }
+                | DeviceLocation::Metal { .. }
+                | DeviceLocation::Vulkan { .. } => a.matmul(&w.t()?),
                 DeviceLocation::Cpu => {
                     #[cfg(feature = "accelerate")]
                     {
