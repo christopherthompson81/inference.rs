@@ -124,3 +124,48 @@ BF16 on the GPU moved 0.00219 -> 0.00225 with the fused qkv's rounding (45 of 48
 on the CPU it is unchanged. Q8_0 against BF16: 42 of 48 transcripts identical. One BF16 server read 88,544 tokens of
 pool, which alternating master and branch servers (107,296 each, twice) showed to be the desktop's share of the
 card moving, not the change.
+
+## Run 5 - 2026-11-02 19:42 (local clock)
+
+**Question:** dense Nemotron Nano 2 (9B v2, a public Q4_K_M GGUF) on the same file as llama.cpp: our logits sit KLD
+0.005 from llama.cpp's with the top token differing at 3.5 % of positions. Is that ordinary backend rounding?
+
+**Base:** `llama-perplexity --kl-divergence-base` on that GGUF (CUDA), wikitext-2 test, `-c 512 --chunks 40`, PPL
+7.7979.
+
+**Runs before the fix:**
+
+| run | PPL | mean KLD | median | p99 | same top-1 |
+|---|---|---|---|---|---|
+| ours CUDA, BF16 activations | 7.7907 | 0.00512 | 0.00246 | 0.0431 | 96.48 % |
+| ours CUDA, F32 activations | 7.7885 | 0.00493 | 0.00228 | 0.0403 | 96.67 % |
+| ours CPU (7 of 40 chunks) | | 0.00460 | | | |
+| llama.cpp CPU against its CUDA base | 7.8018 | 0.00102 | 0.00066 | 0.0063 | 98.33 % |
+
+Five times llama.cpp's own CPU-against-CUDA difference, the same on our CPU and CUDA, and not activation precision.
+
+**Dead end, per-layer dumps:** `llama-eval-callback` (the build_cuda binary predated its `libllama-common` and crashed
+in argument parsing until rebuilt) against temporary prints of our block outputs, 63 tokens on the CPU. Ours drifted
+from llama.cpp CPU by 0.4 - 8 % on the printed edge values, but llama.cpp CPU against llama.cpp CUDA drifted 1 - 13 %
+on the same values while scoring KLD 0.001: a few large outlier channels wander between backends without moving the
+logits, so edge values cannot place the gap. The hyperparameters our GGUF config reads (eps, head_dim from
+`key_length`, KV heads from the per-layer array, groups, conv bias, dt limit) all match.
+
+**Finding:** the harness and the tokenizer, not the model. llama-perplexity evaluates every chunk with its first
+token swapped for BOS when the vocab adds one (`tokens[seq_start] = llama_vocab_bos(vocab)`, restored after), and the
+base file keeps the chunk's own tokens; our KLD loop sent them unchanged. Its BOS lookup then found none: our GGUF BPE
+tokenizer (`bpe_tokenizer`, `gpt2` vocabularies) never applied `tokenizer.ggml.add_bos_token`, which this GGUF sets.
+With BOS forced in the loop: KLD 0.00103, median 0.00066, p99 0.0065, same top-1 98.37 %, PPL 7.8034.
+
+**Change:** the BPE tokenizer adds the GGUF's BOS after its byte-level step when `add_bos_token` is set (as a Llama 3
+`tokenizer.json` does; templates that write the BOS themselves already skip the added one); the perplexity example's
+KLD loop swaps each chunk's first token for the tokenizer's BOS as llama-perplexity does. Unit case
+`a_bpe_gguf_adds_its_bos_when_it_asks`.
+
+**Result:** with the fix alone, Nano 2 KLD 0.00103 / same top-1 98.37 %, llama.cpp's own backend-to-backend level. The
+Nemotron 3.5 Transcribe text GGUF against its BF16 base is unchanged (0.02490, 93.34 %), so its published figure
+stands.
+
+**Smoke test, same build:** `inference serve` on CUDA with the GGUF: `/no_think` answers "17 * 23" with 391, `/think`
+reasons through a time sum correctly (cut at max_tokens 400), decode 119 - 125 tok/s on an RTX 3090, against
+`llama-bench` `tg128` 113 tok/s (`pp512` 3991 tok/s).
