@@ -723,3 +723,68 @@ and 8-23 s at 2048. Measurements here need the card to themselves.
   the dense layers.
 - When VRAM is short, take the routed experts' host share through a streaming path (as the CUDA offload does)
   rather than reading host memory in the matmul.
+
+### Run 30 - 2026-11-04 ~10:00 (desktop: RTX 3090)
+
+**Question:** recipe A (21.7 GiB) cannot fit the 3090 beside the desktop and a long context. Which recipe does, at
+what KLD? (The Qwen recipes for this card keep 14-18 GiB of weights at a KLD of 0.017-0.022.)
+
+**Candidates (routed and shared experts changed, the rest Q8_0 as recipe A; bartowski's imatrix; KLD against BF16,
+40 chunks of 512, llama.cpp CUDA):**
+
+| file | size | KLD mean | median | p99 | PPL vs BF16 |
+|---|---|---|---|---|---|
+| recipe A (experts Q5_0) | 21.7 GiB | 0.0093 | 0.0036 | 0.088 | -0.06 % |
+| experts IQ4_NL | 18.2 GiB | 0.0172 | 0.0067 | 0.158 | +0.92 % |
+| experts Q4_0 | 18.2 GiB | 0.0192 | 0.0073 | 0.180 | +0.91 % |
+
+The k-quants do not apply: the experts' rows are 2688 and 1856 wide, neither a multiple of 256. IQ4_NL has no Vulkan
+kernel yet, so Q4_0.
+
+**Finding:** the Q4_0 file first ran 3 s a 512-token prompt and decoded at 21 tok/s. The expert kernels were Q5_0
+only, so Q4_0 experts ran on the CPU.
+
+**Change:** the expert kernels (`moe_mat_vecs_*`, `moe_mm_*`, `moe_mmc_*`) take all eight block types over the
+shared type interface, and `MoeMatVec` carries its `BlockType`.
+
+**Result (Q4_0 experts, no paged cache, median iteration):** 512 tokens 0.23 s, 2048 tokens 0.70 s (recipe A: 0.24 /
+1.57 s, spilling), decode 111 tok/s (recipe A 24.7).
+
+### Run 31 - 2026-11-04 ~11:00 (desktop: RTX 3090)
+
+**Question:** a context of 256K tokens resident on the 3090 with the Q4_0 recipe, nothing spilled.
+
+**Findings, in order:**
+- A paged prompt chunk after the first gathered the whole K/V cache to the host every chunk and layer, about 3.7 GB
+  over PCIe a 512-token chunk at a 131K cache, then scored the chunk against the full context. A 16K-token prompt
+  stalled for 15+ minutes.
+- `paged_prefill` (new) reads the paged cache in place:
+  - A workgroup takes (context split, kv head, 8 rows) of one sequence, each (row, query head) in a pair of threads.
+    32-position key and value tiles are staged in shared memory for every row.
+  - Flash-style running sums over the split; each row is causal over its own length; `paged_decode_reduce` combines
+    the splits.
+  - Two bugs on the way. Writing single components of shared vec4s raced, so the value tile is floats now. And -inf
+    masked scores leaked weight through exp on NVIDIA (all-ones values came out 0.72), so masked scores are a finite
+    -1e30. The same bug makes master's `flash_attn.comp` score 0.023 off the CPU on this card; the laptop is landing
+    its fix separately.
+- Vulkan prompts were never chunked: the pipeline step chunked on CUDA only. A 49K-token prompt asked for a 9.8 GB
+  mask. Vulkan now chunks as CUDA does.
+- Weights were still being placed against a free-memory figure read once at startup:
+  - The figure missed the paged cache allocated before the weights, so activations spilled at 15K tokens.
+  - A server started while another was releasing its VRAM saw 1147 MiB free and placed almost everything in host
+    memory.
+  - Placement and room-making now ask the driver for free memory at each decision (`VK_EXT_memory_budget`: other
+    processes and our own allocations both counted).
+- An unquantized paged cache on Vulkan is now f16, half f32's memory. Its key rows hold 8 dimensions a position
+  (16 bytes, as vLLM's layout has it), which the decode and prefill loaders map.
+
+**Result (Q4_0 experts, `serve --paged-attn on`, completions over wiki text):**
+
+| setup | 3.5K tokens | 15K | 50K | 112K |
+|---|---|---|---|---|
+| 131K f32 cache, before | 1.2 s | 49 s | 9.8 GB request, failed | |
+| 131K f32 cache, chunked and in place | 1.2 s | 7.7 s | 39.5 s | |
+| 262K f16 cache | 2.1 s | | 48.2 s | 146 s |
+
+At 262K the server loads at 21.5 GB and peaks at 23.5 GB; one buffer spilled during the 112K prompt. A quantized
+cache (the engine's q8/q4 format) would free 0.9-1.3 GB more: next.
