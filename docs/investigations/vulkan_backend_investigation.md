@@ -380,3 +380,21 @@ order.
 `a_chunked_vulkan_scan_matches_its_steps` checks a 150-token scan (head 80, a partial last chunk, a padded row)
 against the same scan in serial pieces, outputs and pool (2e-4). The chunk-state pass is still well off bandwidth
 (57 MB in 0.37 ms). Whether it is worth more depends on its share of a real prefill, still to be measured.
+
+### Run 20 - 2026-11-03 ~22:00 (laptop: Radeon 780M)
+
+**Question:** a Vulkan weight was held twice: its blocks in host memory for the CPU's kernels, and a driver-allocated
+copy for the GPU's, the copy in a pool size class rounded up to a power of two.
+
+**Change:** a Q8_0 or Q5_0 weight on Vulkan keeps its blocks only in a driver buffer allocated to size and never
+pooled (`Buffer::exact`), copied there when the storage is made; its CPU-side `QuantizedType` is `MappedBlocks`,
+the same `QuantizedType` methods as a `Vec` of blocks (one macro now writes both) over the mapped pages, so the CPU's
+fallback kernels, embedding lookups and quantizing read or write the very memory the GPU reads. Other types keep host
+blocks and their lazy GPU copy, now also exact. A device whose buffers are not mapped (a discrete GPU) keeps host
+blocks for every type.
+
+**Test:** `a_vulkan_weight_holds_its_blocks_once` (the blocks and the GPU buffer share a pointer; bytes and
+dequantization as the CPU's).
+
+**Result (recipe A served, after one request):** system memory in use 47 -> 27 GB, the process's RSS 29 -> 20 GiB
+(mostly the shared mapped pages), GTT 21 -> 22 GiB. Prefill 395 tok/s and decode 24.4 tok/s as before.

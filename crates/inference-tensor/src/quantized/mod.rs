@@ -110,9 +110,10 @@ pub enum QStorage {
     Vulkan(QVulkanStorage),
 }
 
-/// A Vulkan device's quantized weight: its blocks in host memory for the CPU's kernels, and a copy in memory the driver
-/// allocated for Vulkan's, made on first use (importing the blocks instead would cost every later submit the import's
-/// page validation, ~0.8 us a MB of everything imported).
+/// A Vulkan device's quantized weight. A type Vulkan's kernels take keeps its blocks only in memory the driver allocated
+/// (mapped, so the CPU's kernels read the same pages); any other keeps them in host memory, copied there on first GPU
+/// use. Importing the host blocks instead would cost every later submit the import's page validation, ~0.8 us a MB of
+/// everything imported.
 pub struct QVulkanStorage {
     blocks: Box<dyn QuantizedType>,
     device: crate::VulkanDevice,
@@ -122,12 +123,39 @@ pub struct QVulkanStorage {
 
 impl QVulkanStorage {
     pub(crate) fn new(blocks: Box<dyn QuantizedType>, device: &crate::VulkanDevice) -> Self {
+        #[cfg(feature = "vulkan")]
+        if let Some(storage) = Self::mapped(blocks.as_ref(), device) {
+            return storage;
+        }
         Self {
             blocks,
             device: device.clone(),
             #[cfg(feature = "vulkan")]
             gpu: std::sync::OnceLock::new(),
         }
+    }
+
+    // a GPU-run type's blocks moved into one driver buffer that both sides read, or `None` (the type stays on the host,
+    // the device has its own memory, or the driver refused the allocation and the lazy copy will report it)
+    #[cfg(feature = "vulkan")]
+    fn mapped(blocks: &dyn QuantizedType, device: &crate::VulkanDevice) -> Option<Self> {
+        let bytes = blocks.data();
+        let gpu_run = matches!(blocks.dtype(), GgmlDType::Q8_0 | GgmlDType::Q5_0);
+        if !gpu_run || bytes.is_empty() || !device.context().is_unified() {
+            return None;
+        }
+        let buffer = device.weight_copy(&bytes).ok()?;
+        let blocks: Box<dyn QuantizedType> = match blocks.dtype() {
+            GgmlDType::Q8_0 => Box::new(MappedBlocks::<BlockQ8_0>::new(buffer.clone())?),
+            _ => Box::new(MappedBlocks::<BlockQ5_0>::new(buffer.clone())?),
+        };
+        let gpu = std::sync::OnceLock::new();
+        gpu.set(buffer).ok()?;
+        Some(Self {
+            blocks,
+            device: device.clone(),
+            gpu,
+        })
     }
 
     // the blocks in driver-allocated memory, copied on first use
@@ -140,7 +168,7 @@ impl QVulkanStorage {
         let bytes = unsafe {
             std::slice::from_raw_parts(self.blocks.as_ptr(), self.blocks.storage_size_in_bytes())
         };
-        let gpu = self.device.host_copy(bytes)?;
+        let gpu = self.device.weight_copy(bytes)?;
         Ok(self.gpu.get_or_init(|| gpu).clone())
     }
 
@@ -163,20 +191,7 @@ impl QVulkanStorage {
         if xs.dtype() != DType::F32 || !l.is_contiguous() || dims.last() != Some(&k) {
             return Ok(None);
         }
-        let weights = match self.gpu.get() {
-            Some(gpu) => gpu.clone(),
-            None => {
-                // SAFETY: the pointer and size are the blocks' own
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        self.blocks.as_ptr(),
-                        self.blocks.storage_size_in_bytes(),
-                    )
-                };
-                let gpu = self.device.host_copy(bytes)?;
-                self.gpu.get_or_init(|| gpu).clone()
-            }
-        };
+        let weights = self.gpu_copy()?;
         let out = crate::vulkan_backend::quantized_mat_vec(xs, l, &weights, ty, n, k)?;
         let mut out_dims = dims.to_vec();
         *out_dims.last_mut().expect("dims hold k") = n;
@@ -591,12 +606,15 @@ pub trait QuantizedType: Send + Sync {
     }
 }
 
-impl<T: k_quants::GgmlType + Send + Sync> QuantizedType for Vec<T> {
+// the QuantizedType methods over a type whose blocks are a slice: `self.$blocks()` and `self.$blocks_mut()` give it
+macro_rules! blocks_quantized_type {
+    ($ty:ty, $blocks:ident, $blocks_mut:ident) => {
+impl<T: k_quants::GgmlType + Send + Sync> QuantizedType for $ty {
     fn matmul_t(&self, mkn: (usize, usize, usize), lhs: &[f32], dst: &mut [f32]) -> Result<()> {
-        k_quants::matmul(mkn, lhs, self.as_slice(), dst)
+        k_quants::matmul(mkn, lhs, self.$blocks(), dst)
     }
     fn matmul_t_f16(&self, mkn: (usize, usize, usize), lhs: &[f16], dst: &mut [f16]) -> Result<()> {
-        k_quants::matmul_f16(mkn, lhs, self.as_slice(), dst)
+        k_quants::matmul_f16(mkn, lhs, self.$blocks(), dst)
     }
 
     fn embedding(&self, ids: &[u32], rows: usize, hidden: usize) -> Result<CpuStorage> {
@@ -607,10 +625,10 @@ impl<T: k_quants::GgmlType + Send + Sync> QuantizedType for Vec<T> {
             )
         }
         let row_blocks = hidden / T::BLCK_SIZE;
-        if self.len() != rows * row_blocks {
+        if self.$blocks().len() != rows * row_blocks {
             crate::bail!(
                 "quantized tensor has {} blocks, expected {}",
-                self.len(),
+                self.$blocks().len(),
                 rows * row_blocks
             )
         }
@@ -620,7 +638,7 @@ impl<T: k_quants::GgmlType + Send + Sync> QuantizedType for Vec<T> {
             if row >= rows {
                 crate::bail!("embedding id {row} is out of range for {rows} rows")
             }
-            let src = &self[row * row_blocks..(row + 1) * row_blocks];
+            let src = &self.$blocks()[row * row_blocks..(row + 1) * row_blocks];
             let dst = &mut out[out_row * hidden..(out_row + 1) * hidden];
             T::to_float(src, dst);
         }
@@ -628,14 +646,14 @@ impl<T: k_quants::GgmlType + Send + Sync> QuantizedType for Vec<T> {
     }
 
     fn size(&self) -> usize {
-        self.len() * core::mem::size_of::<T>()
+        self.$blocks().len() * core::mem::size_of::<T>()
     }
 
     // blocks quantize independently, so runs of them go to separate threads
     fn from_float(&mut self, xs: &[f32]) {
         use rayon::prelude::*;
         xs.par_chunks(QUANTIZE_BLOCKS_PER_TASK * T::BLCK_SIZE)
-            .zip(self.par_chunks_mut(QUANTIZE_BLOCKS_PER_TASK))
+            .zip(self.$blocks_mut().par_chunks_mut(QUANTIZE_BLOCKS_PER_TASK))
             .for_each(|(xs, ys)| T::from_float(xs, ys));
     }
 
@@ -644,7 +662,7 @@ impl<T: k_quants::GgmlType + Send + Sync> QuantizedType for Vec<T> {
         use rayon::prelude::*;
         let rows = (QUANTIZE_BLOCKS_PER_TASK * T::BLCK_SIZE / n_per_row).max(1);
         xs.par_chunks(rows * n_per_row)
-            .zip(self.par_chunks_mut(rows * n_per_row / T::BLCK_SIZE))
+            .zip(self.$blocks_mut().par_chunks_mut(rows * n_per_row / T::BLCK_SIZE))
             .for_each(|(xs, ys)| T::from_float_imatrix(xs, ys, imatrix_weights, n_per_row));
     }
 
@@ -658,18 +676,66 @@ impl<T: k_quants::GgmlType + Send + Sync> QuantizedType for Vec<T> {
 
     fn dequantize(&self, elem_count: usize) -> Result<CpuStorage> {
         let mut ys = vec![0.0f32; elem_count];
-        T::to_float(self.as_slice(), &mut ys);
+        T::to_float(self.$blocks(), &mut ys);
         Ok(CpuStorage::F32(ys))
     }
 
     fn storage_size_in_bytes(&self) -> usize {
-        self.len() * std::mem::size_of::<T>()
+        self.$blocks().len() * std::mem::size_of::<T>()
     }
 
     fn as_ptr(&self) -> *const u8 {
-        self.as_ptr() as *const u8
+        self.$blocks().as_ptr() as *const u8
     }
 }
+    };
+}
+
+blocks_quantized_type!(Vec<T>, as_slice, as_mut_slice);
+
+/// A Vulkan weight's blocks held only in the driver's mapped buffer the GPU reads, so a unified-memory device keeps one
+/// copy: the CPU's kernels and conversions read (and quantizing writes) the same pages.
+#[cfg(feature = "vulkan")]
+pub(crate) struct MappedBlocks<T> {
+    // keeps the mapping alive
+    _buffer: std::sync::Arc<inference_vulkan::Buffer>,
+    ptr: std::ptr::NonNull<T>,
+    len: usize,
+}
+
+// SAFETY: the blocks are plain old data in a mapping the buffer owns, which is Send and Sync
+#[cfg(feature = "vulkan")]
+unsafe impl<T: Send> Send for MappedBlocks<T> {}
+#[cfg(feature = "vulkan")]
+unsafe impl<T: Sync> Sync for MappedBlocks<T> {}
+
+#[cfg(feature = "vulkan")]
+impl<T: k_quants::GgmlType> MappedBlocks<T> {
+    // `None` for a buffer the CPU does not map
+    fn new(buffer: std::sync::Arc<inference_vulkan::Buffer>) -> Option<Self> {
+        let ptr = buffer.mapped_ptr()?.cast();
+        let len = buffer.len() / std::mem::size_of::<T>();
+        Some(Self {
+            _buffer: buffer,
+            ptr,
+            len,
+        })
+    }
+
+    fn blocks(&self) -> &[T] {
+        // SAFETY: the mapping holds `len` blocks of `T` (plain old data, byte aligned), lives with the buffer, and the GPU
+        // only reads it
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+
+    fn blocks_mut(&mut self) -> &mut [T] {
+        // SAFETY: as above; `&mut self` is the weight's quantizing write, before any kernel reads the buffer
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
+    }
+}
+
+#[cfg(feature = "vulkan")]
+blocks_quantized_type!(MappedBlocks<T>, blocks, blocks_mut);
 
 impl std::fmt::Debug for QTensor {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -1783,5 +1849,42 @@ fn dense_f32(src: &Tensor) -> Result<Tensor> {
     } else {
         // the conversion writes a storage of exactly the tensor's elements
         src.to_dtype(crate::DType::F32)?.flatten_all()
+    }
+}
+
+#[cfg(all(test, feature = "vulkan"))]
+mod vulkan_storage_tests {
+    use super::{GgmlDType, QStorage, QTensor};
+    use crate::{Device, Result, Tensor};
+
+    // a GPU-run type's blocks are one buffer the CPU and the GPU both read, quantized as on the CPU
+    #[test]
+    fn a_vulkan_weight_holds_its_blocks_once() -> Result<()> {
+        let Ok(vk) = Device::new_vulkan(0) else {
+            return Ok(());
+        };
+        let w = Tensor::randn(0f32, 1., (24, 256), &Device::Cpu)?;
+        for dtype in [GgmlDType::Q8_0, GgmlDType::Q5_0] {
+            let on_vulkan = QTensor::quantize(&w.to_device(&vk)?, dtype)?;
+            let on_cpu = QTensor::quantize(&w, dtype)?;
+            let QStorage::Vulkan(storage) = &on_vulkan.storage else {
+                panic!("a Vulkan weight's storage is Vulkan's");
+            };
+            let gpu = storage.gpu_copy()?;
+            // a discrete device's buffer is its own memory, beside the host blocks
+            if let Some(mapped) = gpu.mapped_ptr() {
+                assert_eq!(
+                    storage.blocks.as_ptr(),
+                    mapped.as_ptr().cast_const(),
+                    "{dtype:?}"
+                );
+            }
+            assert_eq!(storage.blocks.data(), on_cpu.storage.data()?, "{dtype:?}");
+            assert_eq!(
+                on_vulkan.dequantize(&Device::Cpu)?.to_vec2::<f32>()?,
+                on_cpu.dequantize(&Device::Cpu)?.to_vec2::<f32>()?
+            );
+        }
+        Ok(())
     }
 }

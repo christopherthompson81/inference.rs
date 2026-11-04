@@ -115,6 +115,7 @@ pub struct Buffer {
     ptr: *mut u8,
     len: usize,
     capacity: u64,
+    pooled: bool,
 }
 
 // SAFETY: the mapping is plain memory, and the Vulkan handles are only used through the context's synchronized calls
@@ -155,8 +156,28 @@ impl Buffer {
                 ptr,
                 len,
                 capacity,
+                pooled: true,
             });
         }
+        Self::allocate(context, len, capacity, device_local, true)
+    }
+
+    /// A buffer of `len` bytes placed as `new` places it, allocated to size and freed when dropped, for what lives as
+    /// long as the model (weights), which a size class would round up by as much again.
+    pub fn exact(context: &Arc<Context>, len: usize) -> Result<Self> {
+        if len == 0 || len as u64 > MAX_BINDING_BYTES {
+            return Err(Error::Invalid(format!("a buffer of {len} bytes")));
+        }
+        Self::allocate(context, len, len as u64, !context.unified, false)
+    }
+
+    fn allocate(
+        context: &Arc<Context>,
+        len: usize,
+        capacity: u64,
+        device_local: bool,
+        pooled: bool,
+    ) -> Result<Self> {
         let device = &context.device;
         let usage = vk::BufferUsageFlags::STORAGE_BUFFER
             | vk::BufferUsageFlags::TRANSFER_SRC
@@ -211,6 +232,7 @@ impl Buffer {
                 ptr,
                 len,
                 capacity,
+                pooled,
             })
         }
     }
@@ -238,6 +260,11 @@ impl Buffer {
     /// Whether the CPU maps the buffer, so its bytes are written and read in place.
     pub fn is_mapped(&self) -> bool {
         !self.ptr.is_null()
+    }
+
+    /// The mapping's first byte, when mapped; what the CPU writes there the GPU must not be using.
+    pub fn mapped_ptr(&self) -> Option<std::ptr::NonNull<u8>> {
+        std::ptr::NonNull::new(self.ptr)
     }
 
     /// Writes `bytes` at `offset`: in place when mapped, which the GPU must not be using, else as a copy recorded on
@@ -346,12 +373,15 @@ impl Drop for Buffer {
             memory: self.memory,
             ptr: self.ptr,
         };
-        let refused = self
-            .context
-            .pool
-            .lock()
-            .expect("vulkan pool poisoned")
-            .give(self.ptr.is_null(), self.capacity, allocation);
+        let refused = if self.pooled {
+            self.context
+                .pool
+                .lock()
+                .expect("vulkan pool poisoned")
+                .give(self.ptr.is_null(), self.capacity, allocation)
+        } else {
+            Some(allocation)
+        };
         if let Some(allocation) = refused {
             // SAFETY: see above
             unsafe { allocation.free(&self.context.device) };
