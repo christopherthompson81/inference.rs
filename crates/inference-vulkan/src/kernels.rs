@@ -91,6 +91,7 @@ kernels! {
     paged_decode: PAGED_DECODE, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
     paged_decode_reduce: PAGED_DECODE_REDUCE, ops::PAGED_REDUCE_BINDINGS, ops::PAGED_REDUCE_PUSH_BYTES;
     flash_attn: FLASH_ATTN, ops::FLASH_BINDINGS, ops::FLASH_PUSH_BYTES;
+    ranked_topk: RANKED_TOPK, ops::RANKED_BINDINGS, ops::RANKED_PUSH_BYTES;
 }
 
 /// The matrix-core prompt matmuls (`mul_mmc_*`), on a device with VK_KHR_cooperative_matrix's f16 16 x 16 x 16
