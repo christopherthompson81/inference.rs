@@ -597,3 +597,37 @@ The coopmat expert kernel loses where its 64-token tiles are mostly empty, hence
   step. It measured 0.113 at one Q5_0 step.
 
 **Next:** NV coopmat2 (`VK_NV_cooperative_matrix2`), where llama.cpp reaches 3845 tok/s.
+
+### Run 26 - 2026-11-04 ~09:00 (laptop: Radeon 780M)
+
+**Question:** where recipe A's time goes on the 780M at master 5fda98d97 (`INFERENCE_VULKAN_PROFILE`).
+
+**Decode (24.3 tok/s, the GPU busy 93 %):** 38 ms of GPU time a token. Q8_0 matvecs read ~1.49 GB a token (`ssm_in`
+677 MB, `output` 374 MB, `ssm_out` 269 MB, attention 174 MB) in 18 ms, and the Q5_0 experts and shared expert ~1.32 GB
+in 15.7 ms: both ~83 GB/s, the bandwidth ceiling. The rest is the scan 1.3 ms, ~350 elementwise dispatches 0.9 ms and
+small kernels; ~3 ms a token the GPU waits.
+
+**Prefill (512 tokens, 367 tok/s):** experts 41 %, dense matmuls 26 %, chunked SSD 12 % (182 ms), elementwise 8 %.
+The serial scan was 6 % in Run 16, and prefill had slipped from 397 to ~367 tok/s since chunked SSD (Run 19).
+
+**Finding (`prompt_scan_time`, a Lightning layer, now timing both paths):**
+
+| tokens | serial | chunked |
+|---|---|---|
+| 512 | 4.4 ms | 7.3 ms |
+| 1024 | 7.1 ms | 13.6 ms |
+| 2048 | 19.2 ms | 28.7 ms |
+| 3072 | 38.1 ms | 43.3 ms |
+| 4096 | 60.9 ms | 57.4 ms |
+
+On the iGPU chunked SSD grows linearly at ~14 ms a 1k tokens, while the serial scan grows faster than that and
+crosses it near 3.5k tokens.
+
+**Change:** a unified device scans serially below 3584 tokens (`UNIFIED_CHUNKED_SCAN_MIN_SEQ`); a discrete one
+keeps chunked SSD from 128. `a_chunked_vulkan_scan_matches_its_steps` forces the chunked path, so it still runs here.
+
+**Result (`bench`, recipe A):** 512 tokens 366.6 -> 403.6 tok/s (417 in one run), 2048 tokens 345.3 -> 380.3,
+4096 tokens 311.6 -> 307.7 (chunked both, within noise). Decode unchanged.
+
+**Next:** at 4096 tokens prompt attention's unfused scores (`matmul_f32_tiled`, `map_f32`, `rows_f32` over seq x seq)
+take ~4 s of a 13.3 s prompt; a fused attention kernel is the long-prompt lever.

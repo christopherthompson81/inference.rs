@@ -16,6 +16,9 @@ use crate::{CpuStorage, DType, DeviceLocation, Layout, Result, Shape, Tensor, Wi
 
 // a zero-element tensor still gets a buffer
 const MIN_BUFFER_BYTES: usize = 16;
+// below this an iGPU's serial scan beats chunked SSD (Radeon 780M, a Lightning layer: 38 against 43 ms at 3072, 61
+// against 57 at 4096; `prompt_scan_time`)
+const UNIFIED_CHUNKED_SCAN_MIN_SEQ: usize = 3584;
 
 static CONTEXT: OnceLock<std::result::Result<Arc<Context>, String>> = OnceLock::new();
 
@@ -425,6 +428,12 @@ fn tensor_of(storage: VulkanStorage, shape: impl Into<Shape>) -> Tensor {
 }
 
 pub(crate) fn ssm_scan_step(step: &crate::vulkan::ScanStep<'_>) -> Result<Tensor> {
+    let unified = step.x.device().as_vulkan_device()?.context.is_unified();
+    let chunked = !unified || step.x.dim(1)? >= UNIFIED_CHUNKED_SCAN_MIN_SEQ;
+    scan_step(step, chunked)
+}
+
+fn scan_step(step: &crate::vulkan::ScanStep<'_>, chunked: bool) -> Result<Tensor> {
     let (batch, seq, heads, head_dim) = step.x.dims4()?;
     let (_, _, groups, state) = step.b.dims4()?;
     let f32 = DType::F32;
@@ -452,6 +461,7 @@ pub(crate) fn ssm_scan_step(step: &crate::vulkan::ScanStep<'_>) -> Result<Tensor
         dtype: f32,
     };
     let scratch = inference_vulkan::ScanStep::chunked_scratch_bytes(batch, seq, heads, head_dim)
+        .filter(|_| chunked)
         .map(|bytes| device.buffer(bytes).map(Arc::new))
         .transpose()?;
     device
@@ -1642,18 +1652,21 @@ mod tests {
         let start = r(&[3, heads, head_dim, state])?;
         let slots = Tensor::new(&[2u32, u32::MAX], &vk)?;
         let scan = |pool: &Tensor, from: usize, len: usize| {
-            crate::vulkan::ssm_scan_step(&crate::vulkan::ScanStep {
-                x: &x.narrow(1, from, len)?.contiguous()?,
-                dt: &dt.narrow(1, from, len)?.contiguous()?,
-                a: &a,
-                b: &b.narrow(1, from, len)?.contiguous()?,
-                c: &c.narrow(1, from, len)?.contiguous()?,
-                d: &d,
-                dt_bias: &dt_bias,
-                dt_range: [0.0, f32::INFINITY],
-                pool,
-                slots: &slots,
-            })
+            super::scan_step(
+                &crate::vulkan::ScanStep {
+                    x: &x.narrow(1, from, len)?.contiguous()?,
+                    dt: &dt.narrow(1, from, len)?.contiguous()?,
+                    a: &a,
+                    b: &b.narrow(1, from, len)?.contiguous()?,
+                    c: &c.narrow(1, from, len)?.contiguous()?,
+                    d: &d,
+                    dt_bias: &dt_bias,
+                    dt_range: [0.0, f32::INFINITY],
+                    pool,
+                    slots: &slots,
+                },
+                true,
+            )
         };
         let chunked_pool = start.copy()?;
         let chunked = scan(&chunked_pool, 0, seq)?;
@@ -1671,14 +1684,17 @@ mod tests {
         Ok(())
     }
 
-    // a Nemotron 3.5 Lightning Mamba layer's scan over prompts of a few lengths
+    // a Nemotron 3.5 Lightning Mamba layer's scan over prompts of a few lengths, serial and chunked
     #[test]
     #[ignore = "benchmark"]
     fn prompt_scan_time() -> Result<()> {
         let Some(vk) = device() else { return Ok(()) };
         let (heads, head_dim, groups, state) =
             (64usize, 64usize, 8usize, crate::vulkan::SCAN_STEP_STATE);
-        for seq in [128usize, 512, 2048] {
+        for (seq, chunked) in [128usize, 512, 1024, 2048, 3072, 4096]
+            .into_iter()
+            .flat_map(|seq| [(seq, false), (seq, true)])
+        {
             let r = |shape: &[usize]| Tensor::randn(0f32, 0.5, shape, &vk);
             let (x, dt, b, c) = (
                 r(&[1, seq, heads, head_dim])?,
@@ -1690,18 +1706,21 @@ mod tests {
             let pool = Tensor::zeros((1, heads, head_dim, state), DType::F32, &vk)?;
             let slots = Tensor::new(&[0u32], &vk)?;
             let run = || {
-                crate::vulkan::ssm_scan_step(&crate::vulkan::ScanStep {
-                    x: &x,
-                    dt: &dt,
-                    a: &a,
-                    b: &b,
-                    c: &c,
-                    d: &d,
-                    dt_bias: &dt_bias,
-                    dt_range: [0.0, f32::INFINITY],
-                    pool: &pool,
-                    slots: &slots,
-                })
+                super::scan_step(
+                    &crate::vulkan::ScanStep {
+                        x: &x,
+                        dt: &dt,
+                        a: &a,
+                        b: &b,
+                        c: &c,
+                        d: &d,
+                        dt_bias: &dt_bias,
+                        dt_range: [0.0, f32::INFINITY],
+                        pool: &pool,
+                        slots: &slots,
+                    },
+                    chunked,
+                )
             };
             // synchronized runs, so each reuses the buffers the last one freed rather than allocating its own
             run()?;
@@ -1713,7 +1732,7 @@ mod tests {
                 vk.synchronize()?;
             }
             eprintln!(
-                "seq {seq}: {:.3} ms a scan",
+                "seq {seq} chunked {chunked}: {:.3} ms a scan",
                 start.elapsed().as_secs_f64() * 1e3 / f64::from(RUNS)
             );
         }
