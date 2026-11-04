@@ -726,6 +726,10 @@ const MAX_DISPATCH_GROUPS: usize = 65535;
 // MAX_PREFILL_SPLITS of them, their partials within PREFILL_PARTIALS_BYTES (a prompt chunk's rows already fill the GPU,
 // and every layer's partials stay live until its batch completes)
 const PREFILL_ROWS: usize = 8;
+// paged_prefill_cm's query rows (positions x heads) a workgroup, and the heads it tiles
+const PREFILL_CM_ROWS: usize = 64;
+const PREFILL_CM_HEAD_STEP: usize = 16;
+const PREFILL_CM_MAX_HEAD: usize = 128;
 const PREFILL_MIN_SPAN: usize = 1024;
 const MAX_PREFILL_SPLITS: usize = 32;
 const PREFILL_PARTIALS_BYTES: usize = 32 << 20;
@@ -1021,16 +1025,29 @@ impl Recorder<'_> {
             op.block_table.0,
             op.partials,
         ];
-        self.context.kernels.paged_prefill(s).dispatch(
-            self,
-            &buffers.map(|b| b.buffer),
-            &bytes,
-            [
-                splits as u32,
-                s.kv_heads as u32,
-                op.rows.div_ceil(PREFILL_ROWS) as u32,
-            ],
-        );
+        let bound = buffers.map(|b| b.buffer);
+        match self.prefill_cm(s, group) {
+            Some(pipeline) => pipeline.dispatch(
+                self,
+                &bound,
+                &bytes,
+                [
+                    splits as u32,
+                    s.kv_heads as u32,
+                    op.rows.div_ceil(PREFILL_CM_ROWS / group) as u32,
+                ],
+            ),
+            None => self.context.kernels.paged_prefill(s).dispatch(
+                self,
+                &bound,
+                &bytes,
+                [
+                    splits as u32,
+                    s.kv_heads as u32,
+                    op.rows.div_ceil(PREFILL_ROWS) as u32,
+                ],
+            ),
+        }
         self.context.kernels.paged_decode_reduce.dispatch(
             self,
             &[op.partials.buffer, op.out.0.buffer],
@@ -1046,6 +1063,17 @@ impl Recorder<'_> {
             self.retain(buffer.clone());
         }
         Ok(())
+    }
+
+    // the matrix-core prompt attention, for heads it tiles (multiples of 16 to 128) and groups within its rows
+    fn prefill_cm(&self, s: CacheShape, group: usize) -> Option<&crate::pipeline::Pipeline> {
+        if !s.head_size.is_multiple_of(PREFILL_CM_HEAD_STEP)
+            || s.head_size > PREFILL_CM_MAX_HEAD
+            || group > PREFILL_CM_ROWS
+        {
+            return None;
+        }
+        self.context.coop.as_ref()?.paged_prefill(s)
     }
 
     pub fn paged_decode(&self, op: &PagedDecode<'_>) -> Result<()> {

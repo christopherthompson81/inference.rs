@@ -98,10 +98,14 @@ impl Context {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
         let mut host_props = vk::PhysicalDeviceExternalMemoryHostPropertiesEXT::default();
-        let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut host_props);
-        // SAFETY: as above, and the chained struct outlives the call
+        let mut subgroup_props = vk::PhysicalDeviceSubgroupProperties::default();
+        let mut props2 = vk::PhysicalDeviceProperties2::default()
+            .push_next(&mut host_props)
+            .push_next(&mut subgroup_props);
+        // SAFETY: as above, and the chained structs outlive the call
         unsafe { instance.get_physical_device_properties2(physical, &mut props2) };
         let import_alignment = host_props.min_imported_host_pointer_alignment;
+        let subgroup_size = subgroup_props.subgroup_size;
         let unified = properties.device_type != vk::PhysicalDeviceType::DISCRETE_GPU;
         let (has_budget, heap_size) = memory_budget(&instance, physical);
 
@@ -151,7 +155,7 @@ impl Context {
         }
         let kernels = Kernels::new(&device)?;
         let coop = if has_coop {
-            Some(crate::kernels::CoopKernels::new(&device)?)
+            Some(crate::kernels::CoopKernels::new(&device, subgroup_size)?)
         } else {
             None
         };

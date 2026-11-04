@@ -1,0 +1,5 @@
+#version 450
+// paged_prefill_cm_main.glsl over f16 caches.
+#extension GL_GOOGLE_include_directive : require
+#define CACHE_F16
+#include "paged_prefill_cm_main.glsl"
