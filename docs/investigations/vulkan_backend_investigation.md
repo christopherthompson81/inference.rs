@@ -449,3 +449,94 @@ master's expressions.
 
 **Result (3090, warm; master -> this):** Q8_0 x 3 rows 723 -> 725 GB/s, x 8 rows 416 -> 415; Q5_0 x 3 rows 693 -> 696,
 x 8 rows 402 -> 399; prompt matmuls at 512 rows 31.7 / 34.4 -> 31.9 / 34.3 TOPS; experts 1.90 -> 1.85 ms.
+
+### Run 23 - 2026-11-04 ~04:30 (desktop: RTX 3090)
+
+**Question:** Lightning recipe A (21.7 GiB) on a 24 GiB card that also drives the display. What runs, and how fast?
+
+**First finding:** the prompt step failed with `ERROR_OUT_OF_DEVICE_MEMORY` on a 64 MiB buffer while the pool held
+723 MB idle. The weight copies (made on first use) had filled the card.
+
+**Changes, in order:**
+1. A device allocation that fails frees the pool's idle device buffers and retries, then falls back to host memory.
+   Result: it ran, 512-token prefill 1882 tok/s and decode 106 +- 18 tok/s; the noise was hot activations landing in
+   host memory.
+2. Exact (weight) buffers stay in device memory while they leave `EXACT_RESERVE_BYTES` (2 GiB) of the device's free
+   memory at startup (`VK_EXT_memory_budget`: 23218 MiB here), then go to host memory. Result: 2070 tok/s, decode
+   83.9 +- 0.2.
+3. Pool classes past 1 MiB are eighths of a power of two, and buffers up to 1 GiB are pooled. A 2048-token prompt
+   had made 190 fresh 256 MiB allocations, since a 132 MB activation took a 256 MiB class. Result: 512 tokens 2280,
+   2048 tokens 1477 tok/s, still spilling.
+4. Logging the live buffers at 512 tokens showed nothing large, only about 1.5 GB of 32-64 MiB temporaries. The CPU
+   records a whole forward ahead of the GPU, and a dropped temporary returns to the pool only once its batch's fence
+   signals.
+   - Synchronizing on out-of-memory, before draining the pool, ended the spill, but stalled the overlap: 512 tokens
+     1676 tok/s.
+   - Instead, a pool miss on a discrete GPU now waits for the oldest submitted batch and tries the pool again before
+     allocating. That gives 512 tokens 2628 tok/s and decode 108 tok/s, with nothing spilled.
+
+**Dead ends:**
+- Paged attention with 512-token prompt chunks did not help long prompts: 2048 tokens 1489 +- 540, 4096 tokens
+  934 tok/s.
+- A tiled-main expert kernel for discrete GPUs: 2.56 ms against the row-streaming 1.85 ms at 512 tokens, and
+  5.31 against 5.46 ms at 2048. Not kept.
+
+**Profile (2048-token prefill, a steady 5 s window):**
+
+| kernel | dispatches | GPU time | each |
+|---|---|---|---|
+| `moe_mm_q5_0` | 155 | 1529 ms | 9.9 ms |
+| `mul_mm_q8_0` | 234 | 822 ms | 3.5 ms |
+| `ssd_chunk_state` | 77 | 348 ms | 4.5 ms |
+| `matmul_f32_tiled` | 158 | 193 ms | 1.2 ms |
+| `mul_mm_q5_0` | 154 | 171 ms | 1.1 ms |
+
+The int8 dp4a kernels run at about 15-33 TOPS on the 3090, a fraction of its int8 tensor cores.
+`VK_KHR_cooperative_matrix` and `VK_NV_cooperative_matrix2` are both offered: the next lever for prompts on this
+card.
+
+### Run 24 - 2026-11-04 ~05:30 (desktop: RTX 3090)
+
+**Question:** after Run 23, a 2048-token prompt on recipe A swung from about 1 s to 19 s an iteration. What makes long
+prompts erratic, and how close is llama.cpp?
+
+**References (llama.cpp 970b51ce7 on recipe A, this 3090):**
+
+| backend | pp512 | pp2048 | tg64 |
+|---|---|---|---|
+| CUDA | 4157 | 4278 | 200 |
+| Vulkan, NV coopmat2 | 3845 | 3856 | 161 |
+| Vulkan, KHR coopmat | 2840 | 2826 | |
+| Vulkan, no matrix cores | 1506 | 1490 | |
+
+**Findings:**
+- Master runs Nemotron Nano 9B v2 Q4_K_M (6.5 GB) out of device memory at 2048 tokens. The CPU records a whole
+  forward ahead of the GPU, and the batches' temporaries take more than 17 GB.
+- On Run 23's branch the 9B took about 28 GB of fresh device allocations per 2048-token prompt. The idle pool's
+  2 GiB cap evicted buffers of 40, 128 and 320 MiB that the next layer wanted again, and each fresh allocation is
+  zeroed by the driver (system time 1.35 s at 512 tokens, 6.7 s at 2048).
+- With the cap lifted, recipe A hit out-of-memory 14 times an iteration. Each one synchronized and drained the whole
+  pool, and there were about 425 oldest-batch waits too. No buffer spilled, yet iterations still took 6.5, 12.5 and
+  19 s at times: allocating up to the edge of the card's memory stalls the driver.
+- A large CPU fallback was ruled out: the only one at 1 MiB or more was a 10 MiB `where_cond`, four times.
+
+**Changes:**
+- A discrete GPU's stream lets at most 3 submitted batches run unfinished. A submit past that waits for the oldest,
+  so the CPU no longer records a whole forward ahead. The pool-miss wait of Run 23 is gone.
+- The context counts every device-local byte, live or pooled. Before a fresh device allocation, idle device buffers
+  are freed, largest first, until the total leaves `ROOM_MARGIN_BYTES` (512 MiB) of the startup budget, with one
+  synchronize when the pool runs dry. Only then come the out-of-memory retry and the host spill.
+- Idle device memory is not capped (a 4 GiB cap measured worse: recipe A median 1.26 against 1.02 s an
+  iteration). Idle host memory keeps its 2 GiB cap, which is all an iGPU uses.
+
+**Result (median seconds an iteration of a 2048-token prompt plus 4 decoded, 6 after warmup):**
+
+| model | Run 23 | now |
+|---|---|---|
+| recipe A | 1.05 typical, 6.5 / 12.5 / 19.3 outliers | 1.02 (1.01-1.71) |
+| Nano 9B Q4_K_M | 1.45 typical, 4.2 outlier | 1.50 (1.45-4.19, the first measured run) |
+
+`bench`, recipe A: 512 tokens 2554 tok/s with decode 125 tok/s (Run 23: 2628 / 108). At 4096 tokens it still
+spills (737 tok/s): a single 4096-token pass's working set passes the 2 GiB the weights leave. The 9B decodes at
+88 tok/s after a 512-token prompt. The next gap to llama.cpp is the matrix cores (coopmat2 3845 against our 2554 at
+512 tokens).

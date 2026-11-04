@@ -28,6 +28,11 @@ pub struct Context {
     pub(crate) import_alignment: u64,
     // the device's memory is the host's, so buffers live in mapped host RAM
     pub(crate) unified: bool,
+    // device-local bytes free when the context was made, and those the long-lived (exact) buffers hold now
+    pub(crate) device_budget: u64,
+    pub(crate) exact_device_bytes: std::sync::atomic::AtomicU64,
+    // device-local bytes every live and pooled buffer holds
+    pub(crate) device_bytes: std::sync::atomic::AtomicU64,
     name: String,
     queue: vk::Queue,
     stream: Mutex<Stream>,
@@ -84,6 +89,7 @@ impl Context {
         unsafe { instance.get_physical_device_properties2(physical, &mut props2) };
         let import_alignment = host_props.min_imported_host_pointer_alignment;
         let unified = properties.device_type != vk::PhysicalDeviceType::DISCRETE_GPU;
+        let device_budget = device_budget(&instance, physical);
 
         let priorities = [1.0f32];
         let queues = [vk::DeviceQueueCreateInfo::default()
@@ -108,6 +114,9 @@ impl Context {
         // SAFETY: the family was checked to exist and queue 0 was asked for
         let queue = unsafe { device.get_device_queue(family, 0) };
         let mut stream = Stream::new(&device, family)?;
+        if !unified {
+            stream.max_in_flight = Some(crate::stream::DISCRETE_MAX_IN_FLIGHT);
+        }
         if std::env::var_os(crate::stream::PROFILE_ENV).is_some() {
             stream.profile = Some(Box::new(crate::stream::Profile::new(f64::from(
                 properties.limits.timestamp_period,
@@ -123,6 +132,9 @@ impl Context {
             memory_properties,
             import_alignment,
             unified,
+            device_budget,
+            exact_device_bytes: std::sync::atomic::AtomicU64::new(0),
+            device_bytes: std::sync::atomic::AtomicU64::new(0),
             name,
             queue,
             stream: Mutex::new(stream),
@@ -183,6 +195,16 @@ impl Context {
             .lock()
             .expect("vulkan stream poisoned")
             .synchronize(&self.device, self.queue)
+    }
+
+    /// [`Self::synchronize`] unless the stream is in use (a buffer allocated while recording), so it never waits on
+    /// itself; whether it waited.
+    pub(crate) fn try_synchronize(&self) -> Result<bool> {
+        let Ok(mut stream) = self.stream.try_lock() else {
+            return Ok(false);
+        };
+        stream.synchronize(&self.device, self.queue)?;
+        Ok(true)
     }
 
     /// [`Self::record`], then [`Self::synchronize`].
@@ -308,6 +330,39 @@ impl Drop for Context {
             self.instance.destroy_instance(None);
         }
     }
+}
+
+// the device-local heaps' free bytes: their budget less what is in use (VK_EXT_memory_budget), else their size
+fn device_budget(instance: &ash::Instance, physical: vk::PhysicalDevice) -> u64 {
+    // SAFETY: `physical` came from this instance
+    let extensions =
+        unsafe { instance.enumerate_device_extension_properties(physical) }.unwrap_or_default();
+    let has_budget = extensions
+        .iter()
+        .any(|ext| ext.extension_name_as_c_str() == Ok(ash::ext::memory_budget::NAME));
+    let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
+    let mut props = vk::PhysicalDeviceMemoryProperties2::default();
+    if has_budget {
+        props = props.push_next(&mut budget);
+    }
+    // SAFETY: as above, and the chained struct outlives the call
+    unsafe { instance.get_physical_device_memory_properties2(physical, &mut props) };
+    let memory = props.memory_properties;
+    (0..memory.memory_heap_count as usize)
+        .filter(|&i| {
+            memory.memory_heaps[i]
+                .flags
+                .contains(vk::MemoryHeapFlags::DEVICE_LOCAL)
+        })
+        .map(|i| {
+            if has_budget {
+                budget.heap_budget[i].saturating_sub(budget.heap_usage[i])
+            } else {
+                memory.memory_heaps[i].size
+            }
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 // an integrated GPU first: its memory is the host's, which the crate's zero-copy imports rely on for speed
