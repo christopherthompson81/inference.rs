@@ -1130,3 +1130,59 @@ impl Recorder<'_> {
         Ok(())
     }
 }
+
+pub(crate) const RANKED_BINDINGS: usize = 2;
+pub(crate) const RANKED_PUSH_BYTES: u32 = 3 * 4;
+
+/// Each of `rows` f32 logits rows of `vocab` (from `logits`): its [`RankedTopK::K`] largest values sorted
+/// descending (ties to the lower index), their indices as floats, the softmax normalizer at `inv_temperature` and
+/// the scaled max, [`RankedTopK::row_floats`] a row into `out`.
+pub struct RankedTopK<'a> {
+    pub rows: usize,
+    pub vocab: usize,
+    pub inv_temperature: f32,
+    pub logits: At<'a>,
+    pub out: &'a Arc<Buffer>,
+}
+
+impl RankedTopK<'_> {
+    pub const K: usize = 128;
+
+    pub fn row_floats() -> usize {
+        2 * Self::K + 2
+    }
+}
+
+impl Recorder<'_> {
+    pub fn ranked_top_k(&self, op: &RankedTopK<'_>) -> Result<()> {
+        let temperature_ok = op.inv_temperature.is_finite() && op.inv_temperature > 0.0;
+        if op.vocab < RankedTopK::K
+            || !temperature_ok
+            || op.out.len() < op.rows * RankedTopK::row_floats() * 4
+        {
+            return Err(Error::Invalid(format!(
+                "ranked top-{} of {} rows of {} at inverse temperature {}",
+                RankedTopK::K,
+                op.rows,
+                op.vocab,
+                op.inv_temperature
+            )));
+        }
+        if op.rows == 0 {
+            return Ok(());
+        }
+        let mut bytes = words(&[op.vocab, op.logits.1])?;
+        bytes.extend_from_slice(&op.inv_temperature.to_bits().to_le_bytes());
+        let buffers = [op.logits.0, op.out];
+        self.context.kernels.ranked_topk.dispatch(
+            self,
+            &buffers.map(|b| b.buffer),
+            &bytes,
+            [op.rows as u32, 1, 1],
+        );
+        for buffer in buffers {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+}

@@ -788,3 +788,34 @@ shared type interface, and `MoeMatVec` carries its `BlockType`.
 
 At 262K the server loads at 21.5 GB and peaks at 23.5 GB; one buffer spilled during the 112K prompt. A quantized
 cache (the engine's q8/q4 format) would free 0.9-1.3 GB more: next.
+
+### Run 32 - 2026-11-04 ~12:30 (laptop: Radeon 780M)
+
+**Question:** with the model's default sampling (temperature 1.0, top_p 0.95, what the web UI sends), MTP 3 decoded
+at ~12.6 tok/s against ~27 greedy. Where does a speculative step go?
+
+**Finding:** the GPU sat idle ~95 ms of a step. Each step drains the GPU ~14 times, and ~10 of those read a full
+131072-token logits row and run the CPU filter, whose top-p with no top-k sorts the whole vocabulary. Those rows are
+the verify rows, the draft candidate rows in the verifier, and the draft samples. The other drains are the draft
+embedding's ids and the causal mask's `where_cond`, which round-trips through the host.
+
+**Change:** `ranked_topk.comp`, a workgroup a row, takes each row's 128 largest logits by radix select on
+order-preserving keys (ties to the lower index), sorts them, and sums the softmax normalizer. It writes CUDA's packed
+top-k layout. The sampler reads that back (1 KB a row, not 512 KB) and applies the CPU's top-k, top-p and min-p
+rules over the 128, in `sample` (decode and drafts) and `speculative_probs` (the verifier's target and candidate
+rows). Where a nucleus or min-p cut would keep a token past the 128, it takes the full CPU path. Penalties, bias,
+processors, DRY and logprob requests keep the CPU path too.
+
+**Tests:** `ranked_top_k_matches_a_sort` (131072 and 1000 tokens with ties and masked tokens: the same values and
+indices as a sort, the normalizer within 1e-4); `a_ranked_row_filters_as_the_cpu_does` (top-k, top-p, min-p and
+mixes give the CPU's filtered, normalized distribution within 1e-5; a nucleus wider than 128 is refused).
+
+**Result (a served MTP 3 chat turn, 256 tokens, three seeds):**
+
+| sampling | before | after |
+|---|---|---|
+| temperature 1.0, top_p 0.95 | 12.2 / 12.9 / 12.9 tok/s | 25.9 / 23.7 / 23.8 |
+| greedy | 27.4 / 27.2 / 27.2 | 27.9 / 27.9 / 27.9 |
+| top_k 1 | 24.6 / 23.8 / 23.8 | 24.8 / 24.7 / 24.7 |
+
+**Next:** a step still drains the GPU at each draft (its token, then its embedding's ids) and at the causal mask.

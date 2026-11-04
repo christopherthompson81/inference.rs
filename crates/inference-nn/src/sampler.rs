@@ -792,6 +792,72 @@ fn top_p_cutoff(top_p: f32, kept_probs: impl Iterator<Item = f32>) -> f32 {
     top_p * kept_probs.sum::<f32>()
 }
 
+/// A row's filtered distribution over the device's ranked top-K, most likely first: the tokens, their full-vocab
+/// probabilities and what the filters keep of them (unnormalized).
+struct RankedSupport {
+    tokens: Vec<u32>,
+    reporting: Vec<f32>,
+    sampling: Vec<f32>,
+}
+
+/// The CPU's top-k, top-p and min-p rules over a packed ranked row (`2 K + 2` floats: values, indices, normalizer,
+/// scaled max), or `None` where they would keep a token past its K: a nucleus or min-p cut beyond them.
+fn ranked_support(
+    packed: &[f32],
+    inv_temperature: f32,
+    top_k: i64,
+    top_p: f32,
+    min_p: f32,
+) -> Option<RankedSupport> {
+    let width = (packed.len().checked_sub(2)?) / 2;
+    let k = if top_k > 0 { top_k as usize } else { width };
+    let (denom, scaled_max) = (packed[2 * width], packed[2 * width + 1]);
+    if k > width || !(denom > 0.0 && denom.is_finite() && scaled_max.is_finite()) {
+        return None;
+    }
+    let tokens = packed[width..width + k].iter().map(|&i| i as u32).collect();
+    let reporting: Vec<f32> = packed[..k]
+        .iter()
+        .map(|&v| (v * inv_temperature - scaled_max).exp() / denom)
+        .collect();
+    let mut sampling = reporting.clone();
+    let (top_p_on, min_p_on) = (top_p > 0.0 && top_p < 1.0, min_p > 0.0 && min_p < 1.0);
+    let mut nucleus_within = false;
+    if top_p_on {
+        // the CPU's cutoff is a share of what the top-k keeps, the whole vocabulary without one
+        let kept = if top_k > 0 {
+            reporting.iter().sum::<f32>()
+        } else {
+            1.0
+        };
+        let cutoff = top_p * kept;
+        let mut cumsum = 0.0f32;
+        for prob in &mut sampling {
+            if cumsum >= cutoff {
+                *prob = 0.0;
+            } else {
+                cumsum += *prob;
+            }
+        }
+        nucleus_within = cumsum >= cutoff;
+    }
+    let mut min_p_within = false;
+    if min_p_on {
+        let threshold = reporting[0] * min_p;
+        for (prob, &full) in sampling.iter_mut().zip(&reporting) {
+            if threshold >= full {
+                *prob = 0.0;
+            }
+        }
+        min_p_within = reporting[k - 1] <= threshold;
+    }
+    (top_k > 0 || nucleus_within || min_p_within).then_some(RankedSupport {
+        tokens,
+        reporting,
+        sampling,
+    })
+}
+
 #[cfg(all(feature = "cuda", test))]
 fn weighted_index_from_unit_f32(weights: &[f32], unit: f32) -> Result<usize> {
     if weights.is_empty() || !unit.is_finite() || !(0.0..1.0).contains(&unit) {
@@ -1571,6 +1637,45 @@ impl Sampler {
                 .is_none_or(|params| params.multiplier == 0.0)
     }
 
+    // a row the device's ranked top-K serves: a temperature, nothing reshaping the logits, and a top-k within K or a
+    // top-p or min-p that may cut inside it
+    fn can_rank_on_vulkan(&self, logits: &Tensor) -> bool {
+        let filters = if self.top_k > 0 {
+            self.top_k as usize <= inference_tensor::vulkan::RANKED_TOP_K
+        } else {
+            (self.top_p > 0.0 && self.top_p < 1.0) || (self.min_p > 0.0 && self.min_p < 1.0)
+        };
+        logits.device().is_vulkan()
+            && self.temperature.is_some_and(|t| t > 0.0)
+            && filters
+            && !self.needs_penalties()
+            && self.logits_bias.is_empty()
+            && self.logits_processors.is_empty()
+            && self
+                .dry_params
+                .as_ref()
+                .is_none_or(|params| params.multiplier == 0.0)
+            && logits.elem_count() >= inference_tensor::vulkan::RANKED_TOP_K
+    }
+
+    // a vocabulary row's ranked top-K from the device, filtered here; `None` where the filters reach past it
+    fn vulkan_ranked_support(&self, logits: &Tensor) -> Result<Option<RankedSupport>> {
+        let temperature = self.temperature.unwrap_or(1.0);
+        let row = logits.flatten_all()?;
+        let vocab = row.dim(0)?;
+        let packed =
+            inference_tensor::vulkan::ranked_top_k(&row.reshape((1, vocab))?, temperature)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
+        Ok(ranked_support(
+            &packed,
+            (1.0 / temperature) as f32,
+            self.top_k,
+            self.top_p as f32,
+            self.min_p as f32,
+        ))
+    }
+
     fn needs_penalties(&self) -> bool {
         self.frequency_penalty.is_some_and(|p| p != 0.0)
             || self.presence_penalty.is_some_and(|p| p != 0.0)
@@ -2030,6 +2135,21 @@ impl Sampler {
         context: &[u32],
         prompt_len: usize,
     ) -> Result<SpeculativeProbs> {
+        if self.can_rank_on_vulkan(&logits)
+            && let Some(support) = self.vulkan_ranked_support(&logits)?
+        {
+            let vocab = logits.elem_count();
+            let (mut sampling, mut reporting) = (vec![0.0; vocab], vec![0.0; vocab]);
+            for (i, &token) in support.tokens.iter().enumerate() {
+                sampling[token as usize] = support.sampling[i];
+                reporting[token as usize] = support.reporting[i];
+            }
+            Self::normalize_probs(&mut sampling)?;
+            return Ok(SpeculativeProbs {
+                sampling,
+                reporting,
+            });
+        }
         let logits = logits.to_vec1()?;
         let mut logits = self.apply_penalties(logits, context, prompt_len)?;
         for processor in &self.logits_processors {
@@ -2410,6 +2530,25 @@ impl Sampler {
             return Ok(Logprobs {
                 token,
                 logprob: 0.0,
+                top_logprobs: None,
+                bytes: None,
+            });
+        }
+
+        // a filtered sample on Vulkan reads back the row's ranked top-K, not the vocabulary
+        if logits.device().is_vulkan()
+            && !return_logprobs
+            && !sample_speculative
+            && self.can_rank_on_vulkan(&logits)
+            && let Some(support) = self.vulkan_ranked_support(&logits)?
+        {
+            let distr = WeightedIndex::new(&support.sampling).map_err(|e| {
+                Error::Msg(format!("Failed to construct the ranked top-k sampler: {e}"))
+            })?;
+            let selected = distr.sample(&mut *rng.lock().expect("could not lock rng mutex"));
+            return Ok(Logprobs {
+                token: support.tokens[selected],
+                logprob: support.reporting[selected].ln(),
                 top_logprobs: None,
                 bytes: None,
             });
@@ -3294,5 +3433,71 @@ mod tests {
         assert_eq!(sampled.logprob, 0.0);
         assert!(sampler.sample_cuda_top1_row(&[4.5]).is_err());
         assert!(sampler.sample_cuda_top1_row(&[f32::NAN, f32::NAN]).is_err());
+    }
+
+    // the ranked top-K a row filters as the CPU does: top-k, top-p, min-p and their mixes, a nucleus past K refused
+    #[test]
+    fn a_ranked_row_filters_as_the_cpu_does() {
+        use super::{Sampler, ranked_support};
+        const VOCAB: usize = 4096;
+        const K: usize = 128;
+        let temperature = 0.8f64;
+        let inv = (1.0 / temperature) as f32;
+        // a peaked row whose nucleus fits in K, and a flat one whose 0.95 nucleus does not
+        let peaked: Vec<f32> = (0..VOCAB)
+            .map(|i| -0.12 * ((i * 7919) % VOCAB) as f32 + if i % 9 == 0 { 0.5 } else { 0.0 })
+            .collect();
+        let flat: Vec<f32> = (0..VOCAB).map(|i| ((i * 31) % 17) as f32 * 0.01).collect();
+        for (row, filters, fits) in [
+            (&peaked, (0i64, 0.95f64, 0.0f64), true),
+            (&peaked, (40, 0.9, 0.0), true),
+            (&peaked, (0, 0.0, 0.05), true),
+            (&peaked, (64, 0.8, 0.1), true),
+            (&flat, (0, 0.95, 0.0), false),
+            (&flat, (50, 0.95, 0.0), true),
+        ] {
+            let (top_k, top_p, min_p) = filters;
+            let sampler = Sampler::new(
+                Some(temperature),
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                top_k,
+                top_p,
+                min_p,
+                HashMap::new(),
+                vec![],
+            )
+            .unwrap();
+            let mut order: Vec<usize> = (0..VOCAB).collect();
+            order.sort_by(|&a, &b| row[b].total_cmp(&row[a]).then(a.cmp(&b)));
+            let scaled_max = row[order[0]] * inv;
+            let denom: f32 = row.iter().map(|v| (v * inv - scaled_max).exp()).sum();
+            let mut packed: Vec<f32> = order[..K].iter().map(|&i| row[i]).collect();
+            packed.extend(order[..K].iter().map(|&i| i as f32));
+            packed.extend([denom, scaled_max]);
+            let support = ranked_support(&packed, inv, top_k, top_p as f32, min_p as f32);
+            assert_eq!(support.is_some(), fits, "{filters:?}");
+            let Some(support) = support else { continue };
+            let want = sampler
+                .speculative_target_probs(
+                    Tensor::new(row.as_slice(), &Device::Cpu).unwrap(),
+                    &[0],
+                    1,
+                )
+                .unwrap()
+                .sampling;
+            let total: f32 = support.sampling.iter().sum();
+            let mut got = vec![0.0f32; VOCAB];
+            for (token, prob) in support.tokens.iter().zip(&support.sampling) {
+                got[*token as usize] = prob / total;
+            }
+            for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                assert!((g - w).abs() < 1e-5, "{filters:?} token {i}: {g} vs {w}");
+            }
+        }
     }
 }

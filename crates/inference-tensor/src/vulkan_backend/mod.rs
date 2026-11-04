@@ -818,6 +818,37 @@ pub(crate) fn paged_prefill(op: &crate::vulkan::PagedPrefill<'_>) -> Result<Tens
     Ok(tensor_of(out, (rows, heads, head_size)))
 }
 
+pub(crate) fn ranked_top_k(logits: &Tensor, temperature: f64) -> Result<Tensor> {
+    const _: () = assert!(crate::vulkan::RANKED_TOP_K == inference_vulkan::RankedTopK::K);
+    let (rows, vocab) = logits.dims2()?;
+    let logits = logits.contiguous()?;
+    let (x, x_off) = bound(&logits, DType::F32)?;
+    let device = logits.device().as_vulkan_device()?.clone();
+    let count = rows * inference_vulkan::RankedTopK::row_floats();
+    let out = VulkanStorage {
+        buffer: Arc::new(device.buffer(count * 4)?),
+        device: device.clone(),
+        count,
+        dtype: DType::F32,
+    };
+    device
+        .context
+        .record(|r| {
+            r.ranked_top_k(&inference_vulkan::RankedTopK {
+                rows,
+                vocab,
+                inv_temperature: (1.0 / temperature) as f32,
+                logits: (&x, x_off),
+                out: &out.buffer,
+            })
+        })
+        .map_err(vk_err)?;
+    Ok(tensor_of(
+        out,
+        (rows, inference_vulkan::RankedTopK::row_floats()),
+    ))
+}
+
 pub(crate) fn paged_decode(op: &crate::vulkan::PagedDecode<'_>) -> Result<Tensor> {
     let shape = cache_shape(op.key_cache, op.value_cache)?;
     let (seqs, heads, head_size) = op.q.dims3()?;
@@ -1821,6 +1852,54 @@ mod tests {
             })?
             .expect("the kernel takes this shape");
             assert_close(&got, &want, 1e-4)?;
+        }
+        Ok(())
+    }
+
+    // the device's top-K a row against a sort here: ties to the lower index, masked entries never in the sum
+    #[test]
+    fn ranked_top_k_matches_a_sort() -> Result<()> {
+        let Some(vk) = device() else { return Ok(()) };
+        let k = crate::vulkan::RANKED_TOP_K;
+        for (rows, vocab, temperature) in [(3usize, 131_072usize, 0.7f64), (2, 1000, 1.0)] {
+            let mut logits =
+                Tensor::randn(0f32, 3.0, (rows, vocab), &Device::Cpu)?.to_vec2::<f32>()?;
+            for row in logits.iter_mut() {
+                // ties straddling the cut, and masked tokens
+                for i in (0..vocab).step_by(97).take(200) {
+                    row[i] = 5.5;
+                }
+                for i in (3..vocab).step_by(11) {
+                    row[i] = f32::NEG_INFINITY;
+                }
+            }
+            let flat: Vec<f32> = logits.iter().flatten().copied().collect();
+            let packed = crate::vulkan::ranked_top_k(
+                &Tensor::from_vec(flat, (rows, vocab), &vk)?,
+                temperature,
+            )?
+            .to_vec2::<f32>()?;
+            for (row, got) in logits.iter().zip(&packed) {
+                let mut order: Vec<usize> = (0..vocab).collect();
+                order.sort_by(|&a, &b| row[b].total_cmp(&row[a]).then(a.cmp(&b)));
+                let want_idx: Vec<f32> = order[..k].iter().map(|&i| i as f32).collect();
+                let want_val: Vec<f32> = order[..k].iter().map(|&i| row[i]).collect();
+                assert_eq!(&got[k..2 * k], &want_idx[..]);
+                assert_eq!(&got[..k], &want_val[..]);
+                let inv = (1.0 / temperature) as f32;
+                let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max) * inv;
+                let z = row
+                    .iter()
+                    .filter(|v| v.is_finite())
+                    .map(|v| f64::from((v * inv - max).exp()))
+                    .sum::<f64>() as f32;
+                assert!(
+                    (got[2 * k + 1] - max).abs() < 1e-5,
+                    "{} vs {max}",
+                    got[2 * k + 1]
+                );
+                assert!((got[2 * k] - z).abs() <= 1e-4 * z, "{} vs {z}", got[2 * k]);
+            }
         }
         Ok(())
     }

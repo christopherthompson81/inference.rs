@@ -109,6 +109,7 @@ kernels! {
     flash_attn: FLASH_ATTN, ops::FLASH_BINDINGS, ops::FLASH_PUSH_BYTES;
     paged_prefill: PAGED_PREFILL, ops::PAGED_PREFILL_BINDINGS, ops::PAGED_PREFILL_PUSH_BYTES;
     paged_prefill_f16: PAGED_PREFILL_F16, ops::PAGED_PREFILL_BINDINGS, ops::PAGED_PREFILL_PUSH_BYTES;
+    ranked_topk: RANKED_TOPK, ops::RANKED_BINDINGS, ops::RANKED_PUSH_BYTES;
 }
 
 impl Kernels {
