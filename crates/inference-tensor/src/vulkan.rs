@@ -6,6 +6,19 @@ use crate::{Result, Tensor};
 /// Set to keep a Vulkan device's prompt matmuls off its matrix cores, on the int8 kernels decode uses.
 pub const NO_MATRIX_CORES_ENV: &str = "INFERENCE_VULKAN_NO_COOPMAT";
 
+/// Whether `device` is a discrete Vulkan GPU, with memory of its own rather than an iGPU's share of the host's.
+pub fn is_discrete(device: &crate::Device) -> bool {
+    #[cfg(feature = "vulkan")]
+    return device
+        .as_vulkan_device()
+        .is_ok_and(|d| !d.context().is_unified());
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = device;
+        false
+    }
+}
+
 /// The states a Mamba head's row holds that [`ssm_scan_step`] takes (its lanes a row times states a lane).
 pub const SCAN_STEP_STATE: usize = 128;
 
