@@ -1442,6 +1442,7 @@ fn device_location_sort_key(location: &DeviceLocation) -> (u8, usize) {
         DeviceLocation::Cpu => (0, 0),
         DeviceLocation::Cuda { gpu_id } => (1, *gpu_id),
         DeviceLocation::Metal { gpu_id } => (2, *gpu_id),
+        DeviceLocation::Vulkan { gpu_id } => (3, *gpu_id),
     }
 }
 

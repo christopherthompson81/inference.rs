@@ -59,8 +59,9 @@ const WEIGHT_STD: f32 = 0.2;
 const WEIGHT_SEED: u64 = 0x6e65_6d6f;
 const MAX_LEN: usize = 6;
 const LOGPROB_TOLERANCE: f32 = 1e-4;
-// cuBLAS and the paged attention kernels add up in other orders than the CPU's
-const CUDA_LOGPROB_TOLERANCE: f32 = 1e-3;
+// cuBLAS and the paged attention kernels add up in other orders than the CPU's, and a long prompt's chunked scan
+// multiplies in TF32 (0.0026 from the CPU over 128 states)
+const CUDA_LOGPROB_TOLERANCE: f32 = 5e-3;
 // Vulkan's ops sum in other orders than the CPU's (its attention, and its kernels as they land), as CUDA's do
 const VULKAN_LOGPROB_TOLERANCE: f32 = 1e-3;
 // an ISQ checkpoint's decode and one prefill on Vulkan: the same int8 activations, summed in another order
@@ -398,7 +399,7 @@ async fn mtp_keeps_greedy_output(
     Ok(())
 }
 
-// on CUDA through the hybrid cache and the scan kernel at a state narrower than a warp (grouped mmq against the gather
+// on CUDA through the hybrid cache and the scan kernel (grouped mmq against the gather
 // path is a GPU case of the experts' backends: quantized, prefill and decode differ by the activations' rounding)
 #[tokio::test]
 async fn a_long_prompt_on_cuda_scores_as_its_decode() -> anyhow::Result<()> {

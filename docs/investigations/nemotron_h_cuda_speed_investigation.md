@@ -373,3 +373,48 @@ left is branch syncs (`BSSY`/`BSYNC` +1.3M each) and the write-back. Greedy comp
 build. End to end the gain is within the card's power-cap noise: nsys `mul_mat_q` 482.4 ms (Run 16: 482.6; Q5_0 down
 1863 against 1922 us, IQ4_NL up, unchanged code, 1651 against 1586), SM clock 1,695-1,980 MHz with the power-cap
 reason set, `fresh_long.py` 4,324-4,371 tok/s.
+
+## Run 18 - 2026-11-04 15:25 (local clock)
+
+**Question:** Nemotron 3.5 Lightning on the 3090, CUDA: what can the card do, as a target for the Vulkan backend
+(Vulkan Runs 30-35: 512 tokens ~2200 tok/s, 2048 ~2900, decode 111, a 244K prompt 715 s with a q8 cache)?
+
+**Build fix first:** master's CUDA build failed. `device_location_sort_key` (`pipeline/cuda_graph.rs`) had no arm for
+`DeviceLocation::Vulkan`, which #795 added; `local_ci.sh --vulkan` never builds `cuda`. Added the arm. With CUDA
+building again, `nemotron_h_tiny::a_long_prompt_scores_on_cuda_as_on_the_cpu` (0.0026 off) and
+`a_long_prompt_on_cuda_scores_as_its_decode` (0.0011) failed their 1e-3 tolerance. Bisected to #795, which raised the
+tiny checkpoint's Mamba state from 8 to 128 for the Vulkan scan; the chunked SSD's cuBLAS matmuls run
+`CUBLAS_COMPUTE_32F_FAST_TF32`. With `CUBLAS_COMPUTE_32F` all long-prompt tests pass at 1e-3, so the CUDA tolerance
+is 5e-3 now (TF32 stays: it is the production path).
+
+**Commands:** `llama-bench -m Lightning-exps-q4_0.gguf -p 512,2048 -n 128 -ngl 99 -fa 1 -r 3` (`970b51ce7`); ours
+`inference bench --format gguf -f Lightning-exps-q4_0.gguf --prompt-len P --gen-len G` (dev build, debug assertions
+and overflow checks off), with `--paged-attn on --pa-context-len 262144 --max-seq-len 262144 [--pa-cache-type q8]
+--depth D` for the long runs. Note `--depth` sets the decode depth only; TTFT is always a fresh prompt.
+
+**Short (Q4_0 experts, 18.2 GiB):**
+
+| | llama.cpp CUDA | ours CUDA | ours Vulkan (Run 30) |
+|---|---|---|---|
+| 512-token prompt | 4142 +- 280 tok/s | 4285 +- 51 | ~2200 |
+| 2048-token prompt | 4327 +- 86 | 4247 +- 29 | ~2900 |
+| decode | 197.3 | 208.6 | 111 |
+
+**Decode at depth (q8 cache):** 180.7 tok/s at 32K, 142.0 at 128K.
+
+**Long prompts, one fresh prompt each:**
+
+| prompt | q8 cache | bf16 cache (1536 MB at 262K) | Vulkan, q8 (Run 35) |
+|---|---|---|---|
+| 131072 | 84.6 s (1549 tok/s) | | ~150 s at 105K |
+| 245760 | 246.1 s (999 tok/s) | 115.0 s (2137 tok/s) | 715.3 s at 244K |
+
+**Finding:** the q8 runs fit `T = aN + bN^2/2` exactly (a = 1/4250 s, b = 6.26e-9 s). At 245K that's 58 s of
+per-token work and 188 s of attention. Causal attention over the 6 attention layers (32 heads, head 128) is
+49152 N^2 FLOPs, 2.97 PFLOP at 245K: 15.8 TFLOPS through the q8 cache, ~52 TFLOPS through bf16 (115 - 58 s).
+The quantized-cache prefill attention costs 2.1x the whole prompt on CUDA; bf16's is near what the card's f16 tensor
+cores sustain. Vulkan's 715 s leaves ~630 s of attention after ~85 s of per-token work: ~4.7 TFLOPS.
+
+**Next:** two separate levers. On CUDA, the q8 cache's prefill attention (dequantize into the flash tiles rather than
+whatever it does now) is worth ~130 s at 245K. On Vulkan, prompt attention over the paged cache runs at ~1/10 of
+bf16 CUDA's; at 245K the card's demonstrated floor is ~115 s.
