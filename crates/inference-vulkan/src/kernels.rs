@@ -121,6 +121,10 @@ kernels! {
     paged_prefill: PAGED_PREFILL, ops::PAGED_PREFILL_BINDINGS, ops::PAGED_PREFILL_PUSH_BYTES;
     paged_prefill_f16: PAGED_PREFILL_F16, ops::PAGED_PREFILL_BINDINGS, ops::PAGED_PREFILL_PUSH_BYTES;
     ranked_topk: RANKED_TOPK, ops::RANKED_BINDINGS, ops::RANKED_PUSH_BYTES;
+    paged_prefill_quant: PAGED_PREFILL_QUANT, ops::PAGED_PREFILL_BINDINGS, ops::PAGED_PREFILL_PUSH_BYTES;
+    paged_decode_quant: PAGED_DECODE_QUANT, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
+    paged_cache_write_quant: PAGED_CACHE_WRITE_QUANT, ops::PAGED_WRITE_BINDINGS, ops::PAGED_WRITE_QUANT_PUSH_BYTES;
+    hadamard_32: HADAMARD_32, ops::HADAMARD_BINDINGS, ops::HADAMARD_PUSH_BYTES;
 }
 
 impl Kernels {
@@ -134,7 +138,9 @@ impl Kernels {
     }
 
     pub(crate) fn paged_decode(&self, shape: ops::CacheShape) -> &Pipeline {
-        if shape.f16 {
+        if shape.quant.is_some() {
+            &self.paged_decode_quant
+        } else if shape.f16 {
             &self.paged_decode_f16
         } else {
             &self.paged_decode
@@ -142,7 +148,9 @@ impl Kernels {
     }
 
     pub(crate) fn paged_prefill(&self, shape: ops::CacheShape) -> &Pipeline {
-        if shape.f16 {
+        if shape.quant.is_some() {
+            &self.paged_prefill_quant
+        } else if shape.f16 {
             &self.paged_prefill_f16
         } else {
             &self.paged_prefill

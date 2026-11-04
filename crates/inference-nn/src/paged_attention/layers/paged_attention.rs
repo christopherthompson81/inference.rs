@@ -181,7 +181,15 @@ fn block_aligned_window_len_for_query(
     full_len - block_aligned_sliding_window_start(full_len, query_len, window, block_size)
 }
 
+// Vulkan's quantized caches: HND rows of bytes, though its kernels take the standard path
+fn is_vulkan_quant_cache(key_cache: &Tensor) -> bool {
+    key_cache.device().is_vulkan() && key_cache.dtype() == DType::U8
+}
+
 fn cache_block_size(key_cache: &Tensor, value_cache: &Tensor) -> Result<usize> {
+    if is_vulkan_quant_cache(key_cache) {
+        return Ok(key_cache.dims4()?.2);
+    }
     match AttentionBackendKind::from_cache(key_cache, value_cache) {
         AttentionBackendKind::FlashInfer => Ok(key_cache.dims4()?.2),
         AttentionBackendKind::Standard => Ok(key_cache.dims5()?.3),
@@ -194,6 +202,9 @@ fn cache_kv_shape(
     value_cache: &Tensor,
     query_head_size: usize,
 ) -> Result<(usize, usize)> {
+    if is_vulkan_quant_cache(key_cache) {
+        return Ok((key_cache.dims4()?.1, query_head_size));
+    }
     match AttentionBackendKind::from_cache(key_cache, value_cache) {
         AttentionBackendKind::FlashInfer => {
             let (_, num_kv_heads, _, head_size) = key_cache.dims4()?;
@@ -610,13 +621,13 @@ struct VulkanPrefill<'a> {
     scale: f32,
 }
 
-// a causal prompt chunk over a Vulkan f32 or f16 cache, read in place a sequence at a time (rather than gathered to the host
+// a causal prompt chunk over a Vulkan f32, f16 or quantized cache, read in place a sequence at a time (rather than gathered to the host
 // and scored whole): `(batch, heads, seq, head)` as Sdpa returns, or `None` where the kernel does not apply
 fn vulkan_paged_prefill(call: VulkanPrefill<'_>) -> Result<Option<Tensor>> {
     if !call.query.device().is_vulkan()
         || !call.causal
         || !call.plain
-        || !matches!(call.key_cache.dtype(), DType::F32 | DType::F16)
+        || !matches!(call.key_cache.dtype(), DType::F32 | DType::F16 | DType::U8)
     {
         return Ok(None);
     }

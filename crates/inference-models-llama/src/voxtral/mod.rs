@@ -836,17 +836,17 @@ impl VoxtralModel {
         // EitherCache::normal() returns MutexGuard via interior mutability
         let mut cache = self.cache.normal();
         let mask_cache = ctx.mask_cache(&cache.0);
-        let attention_mask = CausalMasker.make_causal_mask(
-            &dummy_toks,
-            &mask_cache as &dyn PastKvLenCache,
-            input_embeds.dtype(),
-            &CausalMaskConfig {
-                sliding_window: self.sliding_window,
-                ..Default::default()
-            },
-        )?;
+        // later chunks attend through the paged cache, so only the first needs a mask
         let attention_mask = if ctx.is_first_prompt_chunk() {
-            attention_mask
+            CausalMasker.make_causal_mask(
+                &dummy_toks,
+                &mask_cache as &dyn PastKvLenCache,
+                input_embeds.dtype(),
+                &CausalMaskConfig {
+                    sliding_window: self.sliding_window,
+                    ..Default::default()
+                },
+            )?
         } else {
             AttentionMask::None
         };

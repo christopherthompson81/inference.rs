@@ -33,8 +33,16 @@ uint key_dims(uint r, uint bs) {
     return r / bs;
 #endif
 }
+#ifdef CACHE_QUANT
+layout(std430, binding = 1) readonly buffer KC { uint key_cache[]; };
+layout(std430, binding = 2) readonly buffer VC { uint value_cache[]; };
+#include "kv_quant.glsl"
+QUANT_READER(key_at, key_cache)
+QUANT_READER(value_at, value_cache)
+#else
 layout(std430, binding = 1) readonly buffer KC { CACHE_VEC4 key_cache[]; };
 layout(std430, binding = 2) readonly buffer VC { CACHE_VEC4 value_cache[]; };
+#endif
 layout(std430, binding = 3) readonly buffer BT { uint block_tables[]; };
 layout(std430, binding = 4) readonly buffer CL { uint context_lens[]; };
 layout(std430, binding = 5) writeonly buffer P { float part[]; };
@@ -51,7 +59,16 @@ layout(push_constant) uniform PushConstants {
     uint tables_off;
     uint lens_off;
     uint chunks;
+    // a quantized cache's K and V bits
+    uint k_bits;
+    uint v_bits;
 } pc;
+#ifdef CACHE_QUANT
+// the first word of an HND row: block `block`'s position `p` of kv head `kvh`
+uint quant_row(uint block, uint kvh, uint p, uint words) {
+    return ((block * pc.kv_heads + kvh) * pc.block_size + p) * words;
+}
+#endif
 
 const uint THREADS = 256;
 const uint CHUNK = 64;
@@ -91,6 +108,10 @@ void main() {
     uint n = start < len ? min(CHUNK, len - start) : 0;
     uint table = pc.tables_off + seq * pc.max_blocks;
     uint kv_slab = kvh * block_vec4s;
+#ifdef CACHE_QUANT
+    uint k_words = quant_row_words(pc.head_size, pc.k_bits);
+    uint v_words = quant_row_words(pc.head_size, pc.v_bits);
+#endif
 
     for (uint i = t; i < group * hs4; i += THREADS) {
         qs[i] = q[pc.q_off + (seq * pc.heads + kvh * group) * hs4 + i];
@@ -101,6 +122,19 @@ void main() {
     barrier();
     for (uint tile0 = 0; tile0 < n; tile0 += TILE) {
         uint first_block = (start + tile0) / bs;
+#ifdef CACHE_QUANT
+        for (uint i = t; i < TILE * hs4; i += THREADS) {
+            uint p = i / hs4;
+            uint d = (i % hs4) * 4;
+            vec4 v = vec4(0.0);
+            if (start + tile0 + p < len) {
+                uint row = quant_row(block_tables[table + first_block + p / bs], kvh, p % bs, k_words);
+                v = vec4(key_at(row, d, pc.k_bits, pc.head_size), key_at(row, d + 1, pc.k_bits, pc.head_size),
+                         key_at(row, d + 2, pc.k_bits, pc.head_size), key_at(row, d + 3, pc.k_bits, pc.head_size));
+            }
+            keys[p * hp4 + d / 4] = v;
+        }
+#else
         // a block's keys are contiguous as (d / 4, position) vec4s
         for (uint i = t; i < TILE * hs4; i += THREADS) {
             uint bt = i / block_vec4s;
@@ -113,6 +147,7 @@ void main() {
             }
             keys[p * hp4 + key_dims(r, bs)] = v;
         }
+#endif
         barrier();
         uint p = t % TILE;
         uint g0 = t / TILE;
@@ -176,6 +211,21 @@ void main() {
     }
     for (uint tile0 = 0; tile0 < n; tile0 += TILE) {
         uint first_block = (start + tile0) / bs;
+#ifdef CACHE_QUANT
+        for (uint i = t; i < TILE * hs4; i += THREADS) {
+            uint dd = i / (TILE / 4);
+            uint p4 = i % (TILE / 4);
+            vec4 v = vec4(0.0);
+            [[unroll]] for (uint c = 0; c < 4; c++) {
+                uint p = p4 * 4 + c;
+                if (start + tile0 + p < len) {
+                    uint row = quant_row(block_tables[table + first_block + p / bs], kvh, p % bs, v_words);
+                    v[c] = value_at(row, dd, pc.v_bits, pc.head_size);
+                }
+            }
+            keys[dd * VALUE_ROW + p4] = v;
+        }
+#else
         // a block's values are contiguous as (d, position / 4) vec4s
         for (uint i = t; i < TILE * hs4; i += THREADS) {
             uint bt = i / block_vec4s;
@@ -194,6 +244,7 @@ void main() {
             }
             keys[dd * VALUE_ROW + p4] = v;
         }
+#endif
         barrier();
         uint lim4 = (min(TILE, n - tile0) + 3) / 4;
         for (uint p4 = 0; p4 < lim4; p4++) {

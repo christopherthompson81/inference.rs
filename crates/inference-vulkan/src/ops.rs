@@ -708,15 +708,27 @@ impl Recorder<'_> {
 
 pub(crate) const PAGED_WRITE_BINDINGS: usize = 5;
 pub(crate) const PAGED_WRITE_PUSH_BYTES: u32 = 8 * 4;
+pub(crate) const PAGED_WRITE_QUANT_PUSH_BYTES: u32 = 9 * 4;
 pub(crate) const PAGED_DECODE_BINDINGS: usize = 6;
-pub(crate) const PAGED_DECODE_PUSH_BYTES: u32 = 10 * 4;
+pub(crate) const PAGED_DECODE_PUSH_BYTES: u32 = 12 * 4;
 pub(crate) const PAGED_PREFILL_BINDINGS: usize = 5;
-pub(crate) const PAGED_PREFILL_PUSH_BYTES: u32 = 11 * 4;
+pub(crate) const PAGED_PREFILL_PUSH_BYTES: u32 = 13 * 4;
+pub(crate) const HADAMARD_BINDINGS: usize = 2;
+pub(crate) const HADAMARD_PUSH_BYTES: u32 = 3 * 4;
+// the quantizing write's and the Hadamard op's threads a workgroup; the values a rotation (and a scale) covers
+const QUANT_THREADS: usize = 64;
+const QUANT_GROUP: usize = 32;
+// a quantized row's head size is a multiple of this, so a row is whole words with whole pairs of f16 scales
+const QUANT_HEAD_MULTIPLE: usize = 64;
+const QUANT_BITS: std::ops::RangeInclusive<u32> = 2..=8;
+const MAX_DISPATCH_GROUPS: usize = 65535;
 // the prefill shader's rows a workgroup and its tile; a split covers at least PREFILL_MIN_SPAN positions, at most
-// MAX_PREFILL_SPLITS of them, their partials within PAGED_PARTIALS_BYTES
+// MAX_PREFILL_SPLITS of them, their partials within PREFILL_PARTIALS_BYTES (a prompt chunk's rows already fill the GPU,
+// and every layer's partials stay live until its batch completes)
 const PREFILL_ROWS: usize = 8;
 const PREFILL_MIN_SPAN: usize = 1024;
 const MAX_PREFILL_SPLITS: usize = 32;
+const PREFILL_PARTIALS_BYTES: usize = 32 << 20;
 pub(crate) const PAGED_REDUCE_BINDINGS: usize = 2;
 pub(crate) const PAGED_REDUCE_PUSH_BYTES: u32 = 3 * 4;
 // the decode shader's geometry: the positions a workgroup takes, a tile of whole blocks, its threads, the query heads
@@ -734,8 +746,9 @@ const PAGED_X: usize = 4;
 // an f16 cache's key rows hold 8 dimensions a position (16 bytes, as vLLM's layout has it)
 const PAGED_X_F16: usize = 8;
 
-/// The geometry of a pair of vLLM-layout caches: keys `[blocks, kv_heads, head_size / x, block_size, x]`, values
-/// `[blocks, kv_heads, head_size, block_size]`, f32 or (`f16`) f16.
+/// The geometry of a pair of caches: vLLM's layout, keys `[blocks, kv_heads, head_size / x, block_size, x]` and
+/// values `[blocks, kv_heads, head_size, block_size]`, f32 or (`f16`) f16; or with `quant` (K and V bits) rows of
+/// bytes `[blocks, kv_heads, block_size, row]` in inference-paged-attn's kv_quant format, `x` unused.
 #[derive(Clone, Copy, Debug)]
 pub struct CacheShape {
     pub kv_heads: usize,
@@ -743,6 +756,35 @@ pub struct CacheShape {
     pub block_size: usize,
     pub x: usize,
     pub f16: bool,
+    pub quant: Option<(u32, u32)>,
+}
+
+impl CacheShape {
+    /// The bits a quantized row of `row_bytes` holds a value of `head_size`, if it is one.
+    pub fn quant_bits(row_bytes: usize, head_size: usize) -> Option<u32> {
+        if head_size == 0 || !head_size.is_multiple_of(QUANT_HEAD_MULTIPLE) {
+            return None;
+        }
+        let data = row_bytes.checked_sub(head_size / 16)?;
+        let bits = u32::try_from(data * 8 / head_size).ok()?;
+        (QUANT_BITS.contains(&bits) && data * 8 == head_size * bits as usize).then_some(bits)
+    }
+
+    // the vec4 row layout the float kernels read, or a quantized cache's head size
+    fn readable(&self) -> bool {
+        match self.quant {
+            Some((k, v)) => {
+                self.head_size.is_multiple_of(QUANT_HEAD_MULTIPLE)
+                    && QUANT_BITS.contains(&k)
+                    && QUANT_BITS.contains(&v)
+            }
+            None => self.x == if self.f16 { PAGED_X_F16 } else { PAGED_X },
+        }
+    }
+
+    fn bits(&self) -> [usize; 2] {
+        self.quant.map_or([0, 0], |(k, v)| [k as usize, v as usize])
+    }
 }
 
 /// Writes `tokens` key and value rows `(tokens, kv_heads, head_size)` into the caches at the i64 `slots`.
@@ -780,7 +822,7 @@ impl PagedPrefill<'_> {
         let splits = context
             .div_ceil(PREFILL_MIN_SPAN)
             .clamp(1, MAX_PREFILL_SPLITS)
-            .min((PAGED_PARTIALS_BYTES / per_split).max(1));
+            .min((PREFILL_PARTIALS_BYTES / per_split).max(1));
         let span = context.div_ceil(splits).next_multiple_of(PAGED_TILE);
         (context.div_ceil(span).max(1), span)
     }
@@ -837,6 +879,9 @@ impl Recorder<'_> {
         if op.tokens == 0 {
             return Ok(());
         }
+        if let Some((k_bits, v_bits)) = s.quant {
+            return self.paged_cache_write_quant(op, k_bits, v_bits);
+        }
         let bytes = words(&[
             op.tokens,
             s.kv_heads,
@@ -869,13 +914,76 @@ impl Recorder<'_> {
         Ok(())
     }
 
+    fn paged_cache_write_quant(&self, op: &PagedWrite<'_>, k_bits: u32, v_bits: u32) -> Result<()> {
+        let s = op.shape;
+        let threads = op.tokens * s.kv_heads * 2;
+        if !s.readable() || threads.div_ceil(QUANT_THREADS) > MAX_DISPATCH_GROUPS {
+            return Err(Error::Invalid(format!(
+                "quantized paged write of {} tokens, {} kv heads, head size {}",
+                op.tokens, s.kv_heads, s.head_size
+            )));
+        }
+        let bytes = words(&[
+            op.tokens,
+            s.kv_heads,
+            s.head_size,
+            s.block_size,
+            k_bits as usize,
+            op.key.1,
+            op.value.1,
+            op.slots.1 * 2,
+            v_bits as usize,
+        ])?;
+        let buffers = [
+            op.key.0,
+            op.value.0,
+            op.key_cache,
+            op.value_cache,
+            op.slots.0,
+        ];
+        self.context.kernels.paged_cache_write_quant.dispatch(
+            self,
+            &buffers.map(|b| b.buffer),
+            &bytes,
+            [threads.div_ceil(QUANT_THREADS) as u32, 1, 1],
+        );
+        for buffer in buffers {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+
+    /// `out` = `x` with each of `values / 32` consecutive groups through the normalized 32-wide Hadamard transform
+    /// (its own inverse: a query into a quantized cache's space, attention's output back out); in place when both
+    /// name the same place.
+    pub fn hadamard_32(&self, x: At<'_>, out: At<'_>, values: usize) -> Result<()> {
+        if !values.is_multiple_of(QUANT_GROUP) {
+            return Err(Error::Invalid(format!("hadamard of {values} values")));
+        }
+        let groups = values / QUANT_GROUP;
+        if groups == 0 {
+            return Ok(());
+        }
+        let wide = groups.div_ceil(QUANT_THREADS);
+        let x_groups = wide.min(MAX_DISPATCH_GROUPS);
+        self.context.kernels.hadamard_32.dispatch(
+            self,
+            &[x.0.buffer, out.0.buffer],
+            &words(&[groups, x.1, out.1])?,
+            [x_groups as u32, wide.div_ceil(x_groups) as u32, 1],
+        );
+        self.retain(x.0.clone());
+        self.retain(out.0.clone());
+        Ok(())
+    }
+
     pub fn paged_prefill(&self, op: &PagedPrefill<'_>) -> Result<()> {
         let s = op.shape;
         let group = op.heads / s.kv_heads.max(1);
         if s.head_size == 0
             || s.head_size > MAX_PAGED_HEAD
             || !s.head_size.is_multiple_of(2 * PAGED_X)
-            || s.x != if s.f16 { PAGED_X_F16 } else { PAGED_X }
+            || !s.readable()
             || s.kv_heads == 0
             || !op.heads.is_multiple_of(s.kv_heads)
             || group > MAX_PAGED_GROUP
@@ -905,6 +1013,7 @@ impl Recorder<'_> {
             splits,
             span,
         ])?);
+        bytes.extend(words(&s.bits())?);
         let buffers = [
             op.q.0,
             op.key_cache,
@@ -946,7 +1055,7 @@ impl Recorder<'_> {
         if s.head_size == 0
             || s.head_size > MAX_PAGED_HEAD
             || !PAGED_THREADS.is_multiple_of(s.head_size)
-            || s.x != if s.f16 { PAGED_X_F16 } else { PAGED_X }
+            || !s.readable()
             || s.kv_heads == 0
             || !op.heads.is_multiple_of(s.kv_heads)
             || group > MAX_PAGED_GROUP
@@ -990,6 +1099,7 @@ impl Recorder<'_> {
                 op.context_lens.1 + first,
                 chunks,
             ])?);
+            bytes.extend(words(&s.bits())?);
             self.context.kernels.paged_decode(s).dispatch(
                 self,
                 &buffers.map(|b| b.buffer),

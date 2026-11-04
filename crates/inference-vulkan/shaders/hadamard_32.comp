@@ -1,0 +1,33 @@
+#version 450
+// `out` = `x` with every 32 consecutive values (from x_off, `groups` of them) through the normalized 32-wide Hadamard
+// transform: a query rotated into a quantized cache's space, or attention's output rotated back out of it.
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+#include "kv_quant.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer X { float x[]; };
+// in place where both bind one buffer: a thread reads its group whole before writing it
+layout(std430, binding = 1) buffer O { float o[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint groups;
+    uint x_off;
+    uint o_off;
+} pc;
+
+void main() {
+    uint g = gl_GlobalInvocationID.y * (gl_NumWorkGroups.x * 64) + gl_GlobalInvocationID.x;
+    if (g >= pc.groups) {
+        return;
+    }
+    float v[32];
+    [[unroll]] for (uint i = 0; i < 32; i++) {
+        v[i] = x[pc.x_off + g * 32 + i];
+    }
+    hadamard32(v);
+    [[unroll]] for (uint i = 0; i < 32; i++) {
+        o[pc.o_off + g * 32 + i] = v[i];
+    }
+}

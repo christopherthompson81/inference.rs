@@ -55,9 +55,12 @@ fn check_vulkan_cache(
     k_scale: Option<&Tensor>,
     v_scale: Option<&Tensor>,
 ) -> Result<()> {
-    if !matches!(cache.dtype(), DType::F32 | DType::F16) || k_scale.is_some() || v_scale.is_some() {
+    if !matches!(cache.dtype(), DType::F32 | DType::F16 | DType::U8)
+        || k_scale.is_some()
+        || v_scale.is_some()
+    {
         inference_tensor::bail!(
-            "{op}: Vulkan caches are f32 or f16 without K/V scales, got {:?}",
+            "{op}: Vulkan caches are f32, f16 or quantized, without K/V scales, got {:?}",
             cache.dtype()
         );
     }

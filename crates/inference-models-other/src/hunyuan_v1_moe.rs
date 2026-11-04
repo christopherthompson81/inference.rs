@@ -1003,17 +1003,17 @@ impl Model {
         let mut xs = input_embeds;
         let cache = &mut self.cache.normal().0;
         let mask_cache = ctx.mask_cache(cache);
-        let attention_mask = CausalMasker.make_causal_mask(
-            input_ids,
-            &mask_cache,
-            xs.dtype(),
-            &CausalMaskConfig {
-                sliding_window: None,
-                ..Default::default()
-            },
-        )?;
+        // later chunks attend through the paged cache, so only the first needs a mask
         let attention_mask = if ctx.is_first_prompt_chunk() {
-            attention_mask
+            CausalMasker.make_causal_mask(
+                input_ids,
+                &mask_cache,
+                xs.dtype(),
+                &CausalMaskConfig {
+                    sliding_window: None,
+                    ..Default::default()
+                },
+            )?
         } else {
             AttentionMask::None
         };

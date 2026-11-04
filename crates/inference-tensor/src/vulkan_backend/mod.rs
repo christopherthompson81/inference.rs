@@ -638,22 +638,69 @@ pub(crate) fn expert_mat_vec(
     Ok(tensor_of(out, (slots, rows)))
 }
 
-// the geometry of f32 vLLM-layout caches, keys `[blocks, kv_heads, head_size / x, block_size, x]`
-fn cache_shape(key_cache: &Tensor, value_cache: &Tensor) -> Result<inference_vulkan::CacheShape> {
+// the geometry of vLLM-layout f32 or f16 caches (keys `[blocks, kv_heads, head_size / x, block_size, x]`), or of
+// quantized HND rows `[blocks, kv_heads, block_size, row bytes]` holding `head_size` values each
+fn cache_shape(
+    key_cache: &Tensor,
+    value_cache: &Tensor,
+    head_size: usize,
+) -> Result<inference_vulkan::CacheShape> {
+    if key_cache.dtype() == DType::U8 && value_cache.dtype() == DType::U8 {
+        let (_, kv_heads, block_size, k_row) = key_cache.dims4()?;
+        let (_, _, _, v_row) = value_cache.dims4()?;
+        let bits = |row| inference_vulkan::CacheShape::quant_bits(row, head_size);
+        let (Some(k), Some(v)) = (bits(k_row), bits(v_row)) else {
+            crate::bail!(
+                "Vulkan's quantized cache rows of {k_row} / {v_row} bytes do not hold head size {head_size}"
+            );
+        };
+        return Ok(inference_vulkan::CacheShape {
+            kv_heads,
+            head_size,
+            block_size,
+            x: 0,
+            f16: false,
+            quant: Some((k, v)),
+        });
+    }
     let (_, kv_heads, _, block_size, x) = key_cache.dims5()?;
-    let (_, _, head_size, _) = value_cache.dims4()?;
+    let (_, _, cache_head, _) = value_cache.dims4()?;
     let f16 = match (key_cache.dtype(), value_cache.dtype()) {
         (DType::F32, DType::F32) => false,
         (DType::F16, DType::F16) => true,
-        (k, v) => crate::bail!("Vulkan's paged caches are f32 or f16, got {k:?} / {v:?}"),
+        (k, v) => {
+            crate::bail!("Vulkan's paged caches are f32, f16 or quantized, got {k:?} / {v:?}")
+        }
     };
+    if cache_head != head_size {
+        crate::bail!("Vulkan's paged caches hold head size {cache_head}, not {head_size}");
+    }
     Ok(inference_vulkan::CacheShape {
         kv_heads,
         head_size,
         block_size,
         x,
         f16,
+        quant: None,
     })
+}
+
+// a quantized cache's query in its rotated space, in a buffer of its own
+fn rotated_query(
+    device: &VulkanDevice,
+    shape: &inference_vulkan::CacheShape,
+    q: (Arc<inference_vulkan::Buffer>, usize),
+    count: usize,
+) -> Result<(Arc<inference_vulkan::Buffer>, usize)> {
+    if shape.quant.is_none() {
+        return Ok(q);
+    }
+    let rotated = Arc::new(device.buffer(count * 4)?);
+    device
+        .context
+        .record(|r| r.hadamard_32((&q.0, q.1), (&rotated, 0), count))
+        .map_err(vk_err)?;
+    Ok((rotated, 0))
 }
 
 pub(crate) fn paged_cache_write(
@@ -663,7 +710,7 @@ pub(crate) fn paged_cache_write(
     value_cache: &Tensor,
     slot_mapping: &Tensor,
 ) -> Result<()> {
-    let shape = cache_shape(key_cache, value_cache)?;
+    let shape = cache_shape(key_cache, value_cache, key.dim(2)?)?;
     let tokens = key.dim(0)?;
     let f32 = DType::F32;
     let (k, v) = (
@@ -769,9 +816,22 @@ pub(crate) fn flash_attn(op: &crate::vulkan::FlashAttn<'_>) -> Result<Option<Ten
     Ok(Some(tensor_of(out, (batch, heads, positions, head_size))))
 }
 
+// attention's output over a quantized cache, rotated back out of the cache's space in place
+fn unrotate(
+    r: &inference_vulkan::Recorder<'_>,
+    shape: &inference_vulkan::CacheShape,
+    out: &Arc<inference_vulkan::Buffer>,
+    count: usize,
+) -> std::result::Result<(), inference_vulkan::Error> {
+    if shape.quant.is_some() {
+        r.hadamard_32((out, 0), (out, 0), count)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn paged_prefill(op: &crate::vulkan::PagedPrefill<'_>) -> Result<Tensor> {
-    let shape = cache_shape(op.key_cache, op.value_cache)?;
     let (rows, heads, head_size) = op.q.dims3()?;
+    let shape = cache_shape(op.key_cache, op.value_cache, head_size)?;
     let f32 = DType::F32;
     let device = op.q.device().as_vulkan_device()?.clone();
     let table = op
@@ -786,6 +846,7 @@ pub(crate) fn paged_prefill(op: &crate::vulkan::PagedPrefill<'_>) -> Result<Tens
         bound(&table, DType::U32)?,
     );
     let count = rows * heads * head_size;
+    let q = rotated_query(&device, &shape, q, count)?;
     let out = VulkanStorage {
         buffer: Arc::new(device.buffer(count * 4)?),
         device: device.clone(),
@@ -812,7 +873,8 @@ pub(crate) fn paged_prefill(op: &crate::vulkan::PagedPrefill<'_>) -> Result<Tens
                 block_table: (&tb.0, tb.1),
                 partials: &partials,
                 out: (&out.buffer, 0),
-            })
+            })?;
+            unrotate(r, &shape, &out.buffer, count)
         })
         .map_err(vk_err)?;
     Ok(tensor_of(out, (rows, heads, head_size)))
@@ -850,8 +912,8 @@ pub(crate) fn ranked_top_k(logits: &Tensor, temperature: f64) -> Result<Tensor> 
 }
 
 pub(crate) fn paged_decode(op: &crate::vulkan::PagedDecode<'_>) -> Result<Tensor> {
-    let shape = cache_shape(op.key_cache, op.value_cache)?;
     let (seqs, heads, head_size) = op.q.dims3()?;
+    let shape = cache_shape(op.key_cache, op.value_cache, head_size)?;
     let (_, max_blocks) = op.block_tables.dims2()?;
     let f32 = DType::F32;
     let device = op.q.device().as_vulkan_device()?.clone();
@@ -868,6 +930,7 @@ pub(crate) fn paged_decode(op: &crate::vulkan::PagedDecode<'_>) -> Result<Tensor
     );
     let (tb, lb) = (bound(&tables, DType::U32)?, bound(&lens, DType::U32)?);
     let count = seqs * heads * head_size;
+    let q = rotated_query(&device, &shape, q, count)?;
     let out = VulkanStorage {
         buffer: Arc::new(device.buffer(count * 4)?),
         device: device.clone(),
@@ -897,7 +960,8 @@ pub(crate) fn paged_decode(op: &crate::vulkan::PagedDecode<'_>) -> Result<Tensor
                 context_lens: (&lb.0, lb.1),
                 partials: &partials,
                 out: &out.buffer,
-            })
+            })?;
+            unrotate(r, &shape, &out.buffer, count)
         })
         .map_err(vk_err)?;
     Ok(tensor_of(out, (seqs, heads, head_size)))

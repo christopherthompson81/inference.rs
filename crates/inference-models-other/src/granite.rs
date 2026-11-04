@@ -3292,14 +3292,20 @@ impl GraniteMoeHybrid {
             (None, Some(hybrid)) => &**hybrid as &dyn PastKvLenCache,
             (None, None) => unreachable!("Granite keeps a normal or a hybrid cache"),
         };
-        let mask = CausalMasker.make_causal_mask(
-            input_ids,
-            mask_cache,
-            x.dtype(),
-            &CausalMaskConfig::default(),
-        )?;
+        // later chunks attend through the paged cache, so only the first needs a mask
+        let first_chunk = ctx.is_first_prompt_chunk();
+        let mask = if first_chunk {
+            CausalMasker.make_causal_mask(
+                input_ids,
+                mask_cache,
+                x.dtype(),
+                &CausalMaskConfig::default(),
+            )?
+        } else {
+            AttentionMask::None
+        };
         let sliding_mask = match self.sliding_window {
-            Some(window) => Some(CausalMasker.make_causal_mask(
+            Some(window) if first_chunk => Some(CausalMasker.make_causal_mask(
                 input_ids,
                 mask_cache,
                 x.dtype(),
@@ -3308,15 +3314,8 @@ impl GraniteMoeHybrid {
                     ..Default::default()
                 },
             )?),
+            Some(_) => Some(AttentionMask::None),
             None => None,
-        };
-        let (mask, sliding_mask) = if ctx.is_first_prompt_chunk() {
-            (mask, sliding_mask)
-        } else {
-            (
-                AttentionMask::None,
-                sliding_mask.map(|_| AttentionMask::None),
-            )
         };
         let mask = DeviceMappedMask::new(mask, &*self.mapper)?;
         let sliding_mask = sliding_mask

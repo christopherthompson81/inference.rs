@@ -1,0 +1,92 @@
+#version 450
+// reshape_and_cache into quantized HND caches ([blocks, kv_heads, block_size, row words]): a thread a (token, kv head,
+// K or V) row rotates, scales and quantizes its head's groups (kv_quant.glsl) and writes the row's words; token t
+// goes to slot slot_mapping[t] (i64, a negative slot skipped).
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+#include "kv_quant.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer K { float key[]; };
+layout(std430, binding = 1) readonly buffer V { float value[]; };
+layout(std430, binding = 2) buffer KC { uint key_cache[]; };
+layout(std430, binding = 3) buffer VC { uint value_cache[]; };
+layout(std430, binding = 4) readonly buffer S { uint slots[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint tokens;
+    uint kv_heads;
+    uint head_size;
+    uint block_size;
+    uint k_bits;
+    uint key_off;
+    uint value_off;
+    uint slots_off;
+    uint v_bits;
+} pc;
+
+// one row's groups quantized into its words: `src` (a buffer's index) the row's first value
+#define QUANTIZE_ROW(SRC, SRC_OFF, DST, BITS, ROW)                                                                   \
+    {                                                                                                                \
+        uint scales_at = (ROW) + pc.head_size * (BITS) / 32;                                                         \
+        uint scale_pair = 0;                                                                                         \
+        for (uint g = 0; g < pc.head_size / QGROUP; g++) {                                                           \
+            float v[32];                                                                                             \
+            [[unroll]] for (uint i = 0; i < 32; i++) {                                                               \
+                v[i] = SRC[(SRC_OFF) + g * QGROUP + i];                                                              \
+            }                                                                                                        \
+            hadamard32(v);                                                                                           \
+            float amax = 0.0;                                                                                        \
+            [[unroll]] for (uint i = 0; i < 32; i++) {                                                               \
+                amax = max(amax, abs(v[i]));                                                                         \
+            }                                                                                                        \
+            float scale = max(amax, QMIN_SCALE);                                                                     \
+            float mid = float(1u << ((BITS) - 1));                                                                   \
+            int qmax = int((1u << (BITS)) - 1);                                                                      \
+            uint words[8] = uint[8](0, 0, 0, 0, 0, 0, 0, 0);                                                         \
+            [[unroll]] for (uint k = 0; k < 32; k++) {                                                               \
+                uint q = uint(clamp(int(floor(fma(v[k] / scale, mid, mid))), 0, qmax));                              \
+                uint o = k * (BITS);                                                                                 \
+                words[o / 32] |= q << (o % 32);                                                                      \
+                if (o % 32 + (BITS) > 32) {                                                                          \
+                    words[o / 32 + 1] |= q >> (32 - o % 32);                                                         \
+                }                                                                                                    \
+            }                                                                                                        \
+            for (uint w = 0; w < (BITS); w++) {                                                                      \
+                DST[(ROW) + g * (BITS) + w] = words[w];                                                              \
+            }                                                                                                        \
+            uint half_bits = packHalf2x16(vec2(scale, 0.0)) & 0xffffu;                                               \
+            if (g % 2 == 0) {                                                                                        \
+                scale_pair = half_bits;                                                                              \
+            } else {                                                                                                 \
+                DST[scales_at + g / 2] = scale_pair | (half_bits << 16);                                             \
+            }                                                                                                        \
+        }                                                                                                            \
+    }
+
+void main() {
+    uint e = gl_GlobalInvocationID.x;
+    if (e >= pc.tokens * pc.kv_heads * 2) {
+        return;
+    }
+    uint is_value = e % 2;
+    uint h = (e / 2) % pc.kv_heads;
+    uint t = e / (2 * pc.kv_heads);
+    // the i64 slot's low and high words
+    uint lo = slots[pc.slots_off + 2 * t];
+    uint hi = slots[pc.slots_off + 2 * t + 1];
+    if ((hi & 0x80000000u) != 0) {
+        return;
+    }
+    uint block = lo / pc.block_size;
+    uint off = lo % pc.block_size;
+    uint src = (t * pc.kv_heads + h) * pc.head_size;
+    uint slot_row = (block * pc.kv_heads + h) * pc.block_size + off;
+    if (is_value == 0) {
+        QUANTIZE_ROW(key, pc.key_off + src, key_cache, pc.k_bits, slot_row * quant_row_words(pc.head_size, pc.k_bits))
+    } else {
+        QUANTIZE_ROW(value, pc.value_off + src, value_cache, pc.v_bits,
+                     slot_row * quant_row_words(pc.head_size, pc.v_bits))
+    }
+}
