@@ -221,6 +221,13 @@ pub(crate) const SCAN_STEP_PUSH_BYTES: u32 = 14 * 4;
 const SCAN_LANES: usize = 32;
 const SCAN_VEC: usize = 4;
 const SCAN_ROWS_PER_GROUP: usize = 256 / SCAN_LANES;
+pub(crate) const SSD_BINDINGS: usize = 11;
+// the chunked scan's positions a chunk, threads a state-pass workgroup and widest head (ssd_head.glsl's)
+const SSD_CHUNK: usize = 32;
+const SSD_THREADS: usize = 256;
+const SSD_MAX_HEAD_DIM: usize = 128;
+/// The shortest sequence a scan with scratch runs chunked; shorter ones step in order.
+pub const SSD_MIN_SEQ: usize = 4 * SSD_CHUNK;
 
 /// `seq` steps of Mamba's causal conv on a conv-state pool (`(rows, channels, kernel)` f32, in place), each batch
 /// row's state the pool row `slots` names; `x` and `out` are `(batch, seq, channels)`.
@@ -257,6 +264,26 @@ pub struct ScanStep<'a> {
     pub pool: At<'a>,
     pub slots: At<'a>,
     pub out: &'a Arc<Buffer>,
+    /// Scratch of [`Self::chunked_scratch_bytes`], with which a sequence of [`SSD_MIN_SEQ`] or more runs as chunked
+    /// SSD (each chunk's scan as dot products, only the state carried between chunks in order).
+    pub scratch: Option<&'a Arc<Buffer>>,
+}
+
+impl ScanStep<'_> {
+    /// The scratch a chunked scan of this shape takes, or `None` where it steps in order.
+    pub fn chunked_scratch_bytes(
+        batch: usize,
+        seq: usize,
+        heads: usize,
+        head_dim: usize,
+    ) -> Option<usize> {
+        if seq < SSD_MIN_SEQ || head_dim > SSD_MAX_HEAD_DIM {
+            return None;
+        }
+        let chunks = seq.div_ceil(SSD_CHUNK);
+        let bytes = batch * chunks * heads * (SSD_CHUNK + head_dim * SCAN_LANES * SCAN_VEC) * 4;
+        (bytes as u64 <= crate::memory::MAX_BINDING_BYTES).then_some(bytes)
+    }
 }
 
 impl MoeMatVec<'_> {
@@ -322,6 +349,40 @@ impl Recorder<'_> {
         let buffers = [
             op.x.0, op.dt.0, op.a, op.b.0, op.c.0, op.d, op.dt_bias, op.pool.0, op.slots.0, op.out,
         ];
+        let chunked = ScanStep::chunked_scratch_bytes(op.batch, op.seq, op.heads, op.head_dim);
+        if let (Some(scratch), Some(bytes_needed)) = (op.scratch, chunked) {
+            if scratch.len() < bytes_needed {
+                return Err(Error::Invalid(format!(
+                    "a chunked scan's {bytes_needed} bytes of scratch in {}",
+                    scratch.len()
+                )));
+            }
+            let mut bound = buffers.map(|b| b.buffer).to_vec();
+            bound.push(scratch.buffer);
+            let tiles = [
+                op.seq.div_ceil(SSD_CHUNK) as u32,
+                op.heads as u32,
+                op.batch as u32,
+            ];
+            let kernels = &self.context.kernels;
+            kernels
+                .ssd_chunk_state
+                .dispatch(self, &bound, &bytes, tiles);
+            let items = (op.batch * op.heads * op.head_dim * op.state).div_ceil(SSD_THREADS);
+            let items_x = items.clamp(1, MAX_GROUPS_X);
+            kernels.ssd_state_pass.dispatch(
+                self,
+                &bound,
+                &bytes,
+                [items_x as u32, items.div_ceil(items_x).max(1) as u32, 1],
+            );
+            kernels.ssd_chunk_out.dispatch(self, &bound, &bytes, tiles);
+            self.retain(scratch.clone());
+            for buffer in buffers {
+                self.retain(buffer.clone());
+            }
+            return Ok(());
+        }
         let groups = (op.batch * op.heads * op.head_dim).div_ceil(SCAN_ROWS_PER_GROUP);
         let groups_x = groups.clamp(1, MAX_GROUPS_X);
         self.context.kernels.ssm_scan_step.dispatch(

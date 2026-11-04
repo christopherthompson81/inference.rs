@@ -515,4 +515,31 @@ mod tests {
         );
         Ok(())
     }
+
+    // the copy engine's device-to-device rate, the ceiling a kernel's reads and writes are measured against
+    #[test]
+    #[ignore = "benchmark"]
+    fn copy_bandwidth() -> Result<()> {
+        let context = Context::new()?;
+        const LEN: usize = 256 << 20;
+        let (a, b) = (
+            Arc::new(Buffer::new(&context, LEN)?),
+            Arc::new(Buffer::new(&context, LEN)?),
+        );
+        for _ in 0..3 {
+            let t0 = std::time::Instant::now();
+            context.record(|r| {
+                for _ in 0..20 {
+                    r.copy(a.buffer, 0, b.buffer, 0, LEN as u64);
+                }
+                Ok(())
+            })?;
+            context.synchronize()?;
+            eprintln!(
+                "copy: {:.0} GB/s",
+                20.0 * 2.0 * LEN as f64 / t0.elapsed().as_secs_f64() / 1e9
+            );
+        }
+        Ok(())
+    }
 }

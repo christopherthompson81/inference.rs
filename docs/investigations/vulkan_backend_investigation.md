@@ -305,3 +305,78 @@ that comparison checks the mean.
 Prefill kernels per 512 tokens: experts 53 %, dense matmuls 28 %, elementwise 9 %, the scan 6 %. Decode unchanged
 (Run 12's prompts: plain 24.7, MTP 3 34.1, with a browser running). A ~30-token chat turn prefills at ~110 tok/s: its
 routes touch nearly every expert, so a step reads most of the 20 GB of expert weights.
+
+### Run 17 - 2026-11-03 ~21:00 (desktop: RTX 3090, NVIDIA 615.71, no iGPU)
+
+**Question:** the backend's buffers are host-visible memory, which a discrete GPU reads over PCIe (this 3090 has a
+256 MiB BAR). Can a discrete GPU be a target as well, with weights and activations in its own memory?
+
+**Change:** `HostBuffer` became `Buffer`. On a unified device (the iGPU, or a CPU device such as llvmpipe) it stays
+mapped host RAM. On a discrete one it is device-local memory, which the host writes and reads through 64 MiB staging
+copies recorded on the stream; fills use `cmd_fill_buffer`. The pool keeps the two placements apart. The backend's
+uploads, readbacks and zero fills now go through `write` / `read` / `fill` rather than the mapping.
+
+**Build note:** Ubuntu 24.04's `glslc` (shaderc 2023.8) has no `GL_EXT_integer_dot_product`. `GLSLC` in
+`~/.cargo/config.toml` points at the LunarG SDK's (1.4.363.1, shaderc 2026.4) instead.
+
+**Tests:** `scripts/local_ci.sh --vulkan` passes on the 3090 (18 tests). `buffers_take_writes_fills_and_reads_wherever_
+they_live` covers both placements, past one staging buffer.
+
+**Measured on the 3090:**
+- Device-to-device bandwidth: the copy engine 740 GB/s (`copy_bandwidth`), a shader copy 828 GB/s
+  (`copy_b32_bandwidth`).
+- A fresh allocation costs more than on the iGPU:
+
+| size | device | host |
+|---|---|---|
+| 4 KiB | 78 us | 57 us |
+| 1 MiB | 92 us | 115 us |
+| 16 MiB | 277 us | 907 us |
+| 128 MiB | 1.5 ms | 15 ms |
+
+A run of unsynchronized ops that cannot reuse pooled buffers (they return to the pool only once their batch's fence
+signals) pays these costs; with a synchronize between runs, the pool serves them.
+
+### Run 18 - 2026-11-03 ~21:20
+
+**Question:** the prompt's Mamba scan (`ssm_scan_step` over `seq` steps) is one serial loop a state row. What does a
+Lightning layer's scan cost on the 3090?
+
+**Bench:** `prompt_scan_time` (`#[ignore]`): one batch row, 64 heads x 64 x 128 states, 8 groups, synchronized runs.
+Serial: 128 tokens 0.297 ms, 512 tokens 1.051 ms, 2048 tokens 4.108 ms (~2 us a token a layer, about 24 ms a 512-token
+prompt over 23 layers).
+
+### Run 19 - 2026-11-03 ~21:40
+
+**Change:** chunked SSD for prompts, in three passes over 32-position chunks (`ssd_head.glsl`):
+1. `ssd_chunk_state`: each chunk's inclusive dt * a sums, and its own state from zero, in register tiles (an n quad
+   by up to 16 p rows a thread).
+2. `ssd_state_pass`: a thread per state item carries the state across chunks, eight chunks' loads at a time. It
+   leaves in place the state each chunk starts from and advances the pool row.
+3. `ssd_chunk_out`: the carried state's output (start-state columns staged 16 at a time), the decayed causal C.B
+   times x, and D x, in 4 x 4 tiles.
+
+`ScanStep` takes optional scratch; the backend gives it scratch for 128 tokens or more, and shorter scans step in
+order.
+
+**Dead ends:**
+- The first version (scalar, two shared loads a multiply-add) took 1.38 ms at 512 tokens, slower than the serial
+  kernel.
+- Register tiles took that to 1.86 ms. Bisecting the chunk-state pass pinned it: the prefix sums alone 0.045 ms, the
+  loads and stores 0.27 ms, the multiply-adds the remaining 0.9 ms. The store loop ran to a runtime row count, which
+  indexes the accumulator array dynamically, so the driver kept the array in local memory. Looping to the constant
+  bound and breaking fixed it.
+- Earlier per-pass timings, from unsynchronized runs and from seds that missed rustfmt's line splits, were
+  allocation-bound and misleading.
+
+**Result (synchronized):**
+
+| tokens | serial | chunked | chunk state | state pass | chunk out |
+|---|---|---|---|---|---|
+| 128 | 0.297 ms | 0.296 ms | 0.158 | 0.079 | 0.117 |
+| 512 | 1.051 ms | 0.762 ms | 0.371 | 0.144 | 0.324 |
+| 2048 | 4.108 ms | 2.644 ms | 1.178 | 0.430 | 1.089 |
+
+`a_chunked_vulkan_scan_matches_its_steps` checks a 150-token scan (head 80, a partial last chunk, a padded row)
+against the same scan in serial pieces, outputs and pool (2e-4). The chunk-state pass is still well off bandwidth
+(57 MB in 0.37 ms). Whether it is worth more depends on its share of a real prefill, still to be measured.

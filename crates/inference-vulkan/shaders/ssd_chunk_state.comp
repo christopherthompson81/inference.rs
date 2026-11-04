@@ -1,0 +1,73 @@
+#version 450
+// A workgroup a (chunk, head, batch row): the chunk's inclusive dt * a sums into cs, and its own state (from zero)
+// into ds: ds[p][n] = sum_t exp(cs_last - cs_t) dt_t x_t[p] B_t[n]. A thread holds 4 states (an n quad) of the rows
+// p = its row group + P_GROUPS * j.
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+#include "ssd_head.glsl"
+
+layout(local_size_x = THREADS) in;
+
+const uint QUADS = STATE / 4;
+const uint P_GROUPS = THREADS / QUADS;
+const uint P_PER_THREAD = MAX_HEAD_DIM / P_GROUPS;
+
+shared float s_w[CHUNK];
+// x scaled by its position's weight
+shared float s_x[CHUNK][MAX_HEAD_DIM];
+shared vec4 s_b[CHUNK][QUADS];
+
+void main() {
+    uint k = gl_WorkGroupID.x, h = gl_WorkGroupID.y, b = gl_WorkGroupID.z;
+    uint tid = gl_LocalInvocationID.x;
+    if (tid == 0) {
+        float sum = 0.0;
+        float dts[CHUNK];
+        for (uint t = 0; t < CHUNK; t++) {
+            dts[t] = step_dt(b, k, h, t);
+            sum += dts[t] * a[h];
+            scratch[cs_at(b, k, h, t)] = sum;
+            s_w[t] = sum;
+        }
+        for (uint t = 0; t < CHUNK; t++) {
+            s_w[t] = exp(sum - s_w[t]) * dts[t];
+        }
+    }
+    for (uint i = tid; i < CHUNK * QUADS; i += THREADS) {
+        uint t = i / QUADS, q = i % QUADS;
+        uint pos = k * CHUNK + t;
+        uint at = pc.b_off + bc_at(b, min(pos, pc.seq - 1), h) + 4 * q;
+        s_b[t][q] = pos < pc.seq ? vec4(bm[at], bm[at + 1], bm[at + 2], bm[at + 3]) : vec4(0.0);
+    }
+    barrier();
+    for (uint i = tid; i < CHUNK * pc.head_dim; i += THREADS) {
+        uint t = i / pc.head_dim, p = i % pc.head_dim;
+        uint pos = k * CHUNK + t;
+        s_x[t][p] = pos < pc.seq ? x[pc.x_off + x_at(b, pos, h) + p] * s_w[t] : 0.0;
+    }
+    barrier();
+    uint q = tid % QUADS, pg = tid / QUADS;
+    uint rows = (pc.head_dim + P_GROUPS - 1 - pg) / P_GROUPS;
+    vec4 acc[P_PER_THREAD];
+    [[unroll]] for (uint j = 0; j < P_PER_THREAD; j++) {
+        acc[j] = vec4(0.0);
+    }
+    for (uint t = 0; t < CHUNK; t++) {
+        vec4 bv = s_b[t][q];
+        [[unroll]] for (uint j = 0; j < P_PER_THREAD; j++) {
+            if (j < rows) {
+                acc[j] += s_x[t][pg + P_GROUPS * j] * bv;
+            }
+        }
+    }
+    [[unroll]] for (uint j = 0; j < P_PER_THREAD; j++) {
+        if (j >= rows) {
+            break;
+        }
+        uint at = ds_at(b, k, h, pg + P_GROUPS * j) + 4 * q;
+        scratch[at] = acc[j].x;
+        scratch[at + 1] = acc[j].y;
+        scratch[at + 2] = acc[j].z;
+        scratch[at + 3] = acc[j].w;
+    }
+}

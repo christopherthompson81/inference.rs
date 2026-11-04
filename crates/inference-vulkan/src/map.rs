@@ -269,4 +269,46 @@ mod tests {
         assert_eq!(&got[words.len()..words.len() + 4], &[3; 4]);
         Ok(())
     }
+
+    // a shader's straight copy over 256 MB, against `memory::tests::copy_bandwidth`
+    #[test]
+    #[ignore = "benchmark"]
+    fn copy_b32_bandwidth() -> Result<()> {
+        let Some(context) = context() else {
+            return Ok(());
+        };
+        const WORDS: usize = 64 << 20;
+        let src = Arc::new(Buffer::new(&context, WORDS * 4)?);
+        let out = Arc::new(Buffer::new(&context, WORDS * 4)?);
+        let strides = [1usize];
+        for _ in 0..3 {
+            let t0 = std::time::Instant::now();
+            context.submit(|r| {
+                for _ in 0..20 {
+                    let operand = |buffer, offset| Operand {
+                        buffer,
+                        offset,
+                        strides: &strides,
+                    };
+                    r.copy_b32(
+                        &Map {
+                            op: MapOp::Copy,
+                            dims: &[WORDS],
+                            a: operand(&src, 0),
+                            b: None,
+                            out: operand(&out, 0),
+                            params: [0.0; 2],
+                        },
+                        0,
+                    )?;
+                }
+                Ok(())
+            })?;
+            eprintln!(
+                "copy_b32: {:.0} GB/s",
+                20.0 * 8.0 * WORDS as f64 / t0.elapsed().as_secs_f64() / 1e9
+            );
+        }
+        Ok(())
+    }
 }

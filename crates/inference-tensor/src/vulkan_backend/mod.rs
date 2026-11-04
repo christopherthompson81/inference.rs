@@ -450,6 +450,9 @@ pub(crate) fn ssm_scan_step(step: &crate::vulkan::ScanStep<'_>) -> Result<Tensor
         count,
         dtype: f32,
     };
+    let scratch = inference_vulkan::ScanStep::chunked_scratch_bytes(batch, seq, heads, head_dim)
+        .map(|bytes| device.buffer(bytes).map(Arc::new))
+        .transpose()?;
     device
         .context
         .record(|r| {
@@ -471,6 +474,7 @@ pub(crate) fn ssm_scan_step(step: &crate::vulkan::ScanStep<'_>) -> Result<Tensor
                 pool: (&pool.0, pool.1),
                 slots: (&slots.0, slots.1),
                 out: &out.buffer,
+                scratch: scratch.as_ref(),
             })
         })
         .map_err(vk_err)?;
@@ -1593,6 +1597,106 @@ mod tests {
             dst.to_device(&Device::Cpu)?.to_vec2::<f32>()?,
             want.to_vec2::<f32>()?
         );
+        Ok(())
+    }
+
+    // a prompt long enough to run chunked (a partial last chunk, a padded row) against the same scan in short steps
+    #[test]
+    fn a_chunked_vulkan_scan_matches_its_steps() -> Result<()> {
+        let Some(vk) = device() else { return Ok(()) };
+        let (seq, heads, head_dim, groups, state) = (
+            150usize,
+            4usize,
+            80usize,
+            2usize,
+            crate::vulkan::SCAN_STEP_STATE,
+        );
+        let r = |shape: &[usize]| Tensor::randn(0f32, 0.5, shape, &vk);
+        let (x, dt, b, c) = (
+            r(&[2, seq, heads, head_dim])?,
+            r(&[2, seq, heads])?,
+            r(&[2, seq, groups, state])?,
+            r(&[2, seq, groups, state])?,
+        );
+        let (a, d, dt_bias) = ((r(&[heads])?.abs()? * -1.)?, r(&[heads])?, r(&[heads])?);
+        let start = r(&[3, heads, head_dim, state])?;
+        let slots = Tensor::new(&[2u32, u32::MAX], &vk)?;
+        let scan = |pool: &Tensor, from: usize, len: usize| {
+            crate::vulkan::ssm_scan_step(&crate::vulkan::ScanStep {
+                x: &x.narrow(1, from, len)?.contiguous()?,
+                dt: &dt.narrow(1, from, len)?.contiguous()?,
+                a: &a,
+                b: &b.narrow(1, from, len)?.contiguous()?,
+                c: &c.narrow(1, from, len)?.contiguous()?,
+                d: &d,
+                dt_bias: &dt_bias,
+                dt_range: [0.0, f32::INFINITY],
+                pool,
+                slots: &slots,
+            })
+        };
+        let chunked_pool = start.copy()?;
+        let chunked = scan(&chunked_pool, 0, seq)?;
+        let stepped_pool = start.copy()?;
+        let pieces = [0usize, 40, 70, seq];
+        let stepped = Tensor::cat(
+            &pieces
+                .windows(2)
+                .map(|w| scan(&stepped_pool, w[0], w[1] - w[0]))
+                .collect::<Result<Vec<_>>>()?,
+            1,
+        )?;
+        assert_close(&chunked, &stepped, 2e-4)?;
+        assert_close(&chunked_pool, &stepped_pool, 2e-4)?;
+        Ok(())
+    }
+
+    // a Nemotron 3.5 Lightning Mamba layer's scan over prompts of a few lengths
+    #[test]
+    #[ignore = "benchmark"]
+    fn prompt_scan_time() -> Result<()> {
+        let Some(vk) = device() else { return Ok(()) };
+        let (heads, head_dim, groups, state) =
+            (64usize, 64usize, 8usize, crate::vulkan::SCAN_STEP_STATE);
+        for seq in [128usize, 512, 2048] {
+            let r = |shape: &[usize]| Tensor::randn(0f32, 0.5, shape, &vk);
+            let (x, dt, b, c) = (
+                r(&[1, seq, heads, head_dim])?,
+                r(&[1, seq, heads])?,
+                r(&[1, seq, groups, state])?,
+                r(&[1, seq, groups, state])?,
+            );
+            let (a, d, dt_bias) = ((r(&[heads])?.abs()? * -1.)?, r(&[heads])?, r(&[heads])?);
+            let pool = Tensor::zeros((1, heads, head_dim, state), DType::F32, &vk)?;
+            let slots = Tensor::new(&[0u32], &vk)?;
+            let run = || {
+                crate::vulkan::ssm_scan_step(&crate::vulkan::ScanStep {
+                    x: &x,
+                    dt: &dt,
+                    a: &a,
+                    b: &b,
+                    c: &c,
+                    d: &d,
+                    dt_bias: &dt_bias,
+                    dt_range: [0.0, f32::INFINITY],
+                    pool: &pool,
+                    slots: &slots,
+                })
+            };
+            // synchronized runs, so each reuses the buffers the last one freed rather than allocating its own
+            run()?;
+            vk.synchronize()?;
+            let start = std::time::Instant::now();
+            const RUNS: u32 = 20;
+            for _ in 0..RUNS {
+                run()?;
+                vk.synchronize()?;
+            }
+            eprintln!(
+                "seq {seq}: {:.3} ms a scan",
+                start.elapsed().as_secs_f64() * 1e3 / f64::from(RUNS)
+            );
+        }
         Ok(())
     }
 }
