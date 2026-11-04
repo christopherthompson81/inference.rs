@@ -1,0 +1,37 @@
+#version 450
+// The many-row matmul over a Q5_1 W: tile y over the tokens in order.
+#extension GL_GOOGLE_include_directive : require
+#include "mat_mul_q_head.glsl"
+
+layout(push_constant) uniform PushConstants {
+    uint rows;
+    uint cols;
+    // element offsets into the bound buffers: `w` in u16s, `y` in floats
+    uint w_base;
+    uint y_base;
+    // activation rows; output row t is `rows` long
+    uint m;
+    // where the blocks' scales start, in vec4s
+    uint s_off;
+} pc;
+
+#include "q5_1_int8.glsl"
+
+uint m0;
+
+bool begin_tile(out uint tokens, out uint w_matrix) {
+    m0 = gl_WorkGroupID.y * BM;
+    tokens = min(BM, pc.m - m0);
+    w_matrix = pc.w_base;
+    return true;
+}
+
+uint x_row(uint j) {
+    return m0 + j;
+}
+
+uint y_row(uint j) {
+    return m0 + j;
+}
+
+#include "mat_mul_q_main.glsl"

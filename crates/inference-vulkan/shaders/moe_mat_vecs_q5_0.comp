@@ -16,7 +16,7 @@ layout(std430, binding = 0) readonly buffer W { uint16_t w[]; };
 layout(std430, binding = 1) readonly buffer Q { uvec4 xq[]; };
 layout(std430, binding = 2) writeonly buffer Y { float y[]; };
 layout(std430, binding = 3) readonly buffer Ids { uint ids[]; };
-layout(std430, binding = 4) readonly buffer S { vec2 xs[]; };
+layout(std430, binding = 4) readonly buffer S { vec4 xs[]; };
 
 layout(push_constant) uniform PushConstants {
     uint rows;
@@ -32,7 +32,7 @@ layout(push_constant) uniform PushConstants {
     // u16s from one expert's matrix to the next
     uint expert_u16;
     uint slots;
-    // where the blocks' (d, d * sum q) start, in vec2s
+    // where the blocks' scales start, in vec4s
     uint s_off;
 } pc;
 
@@ -43,7 +43,9 @@ const uint MAX_M = 8;
 const uint MAX_SUBGROUPS = THREADS / 8;
 shared float partial[ROWS * MAX_M][MAX_SUBGROUPS];
 
+#include "int8_dot.glsl"
 #include "q5_0_int8.glsl"
+#include "block_at.glsl"
 
 void main() {
     uint slot = gl_WorkGroupID.z;
@@ -73,29 +75,22 @@ void main() {
         acc[i] = 0.0;
     }
     for (uint b = tid; b < blocks; b += THREADS) {
-        float d[ROWS];
+        vec4 coef[ROWS];
         uvec4 lo[ROWS];
         uvec4 hi[ROWS];
         [[unroll]] for (uint r = 0; r < ROWS; r++) {
             // a row past the matrix decodes the last one, its sums never written
-            d[r] = unpack_block(w_expert + (min(row0 + r, pc.rows - 1) * blocks + b) * BLOCK_U16, lo[r], hi[r]);
+            coef[r] = unpack(w_expert, min(row0 + r, pc.rows - 1), b, blocks, lo[r], hi[r]);
         }
         [[unroll]] for (uint mi = 0; mi < MAX_M; mi++) {
             if (mi >= m) {
                 break;
             }
             uint xb = (members[mi] / pc.x_div) * blocks + b;
-            ivec4 p = ivec4(xq[2 * xb]);
-            ivec4 o = ivec4(xq[2 * xb + 1]);
-            vec2 sx = xs[pc.s_off + xb];
+            uvec4 x_lo = xq[2 * xb], x_hi = xq[2 * xb + 1];
+            vec4 sx = xs[pc.s_off + xb];
             [[unroll]] for (uint r = 0; r < ROWS; r++) {
-                // signed bytes both sides: Q5_0's 0..31 fit
-                ivec4 a = ivec4(lo[r]);
-                ivec4 c = ivec4(hi[r]);
-                int dot = dotPacked4x8EXT(a.x, p.x) + dotPacked4x8EXT(a.y, p.y) + dotPacked4x8EXT(a.z, p.z)
-                    + dotPacked4x8EXT(a.w, p.w) + dotPacked4x8EXT(c.x, o.x) + dotPacked4x8EXT(c.y, o.y)
-                    + dotPacked4x8EXT(c.z, o.z) + dotPacked4x8EXT(c.w, o.w);
-                acc[r * MAX_M + mi] += d[r] * (sx.x * float(dot) - BIAS * sx.y);
+                acc[r * MAX_M + mi] += block_dot(lo[r], hi[r], coef[r], x_lo, x_hi, sx);
             }
         }
     }

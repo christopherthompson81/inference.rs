@@ -1,17 +1,18 @@
 #version 450
 // Activation rows as int8 blocks for the int8 matvecs: block i of x (32 f32s from x_base) becomes 8 packed words,
-// q = round(x / d) with d = max |x| / 127, and (d, d * sum q) for its scale and the offset a type's bias needs.
+// q = round(x / d) with d = max |x| / 127, and (d, d * sum q over values 0..15, d * sum q over 16..31, 0): its scale,
+// and the half-sums a weight type's offsets take.
 
 layout(local_size_x = 64) in;
 
 layout(std430, binding = 0) readonly buffer X { float x[]; };
 layout(std430, binding = 1) writeonly buffer Q { uvec4 q[]; };
-layout(std430, binding = 2) writeonly buffer S { vec2 s[]; };
+layout(std430, binding = 2) writeonly buffer S { vec4 s[]; };
 
 layout(push_constant) uniform PushConstants {
     uint blocks;
     uint x_base;
-    // where (d, d * sum q) start in their buffer, in vec2s
+    // where the blocks' scales start in their buffer, in vec4s
     uint s_off;
 } pc;
 
@@ -29,18 +30,18 @@ void main() {
     }
     float d = amax / 127.0;
     float inv = d > 0.0 ? 1.0 / d : 0.0;
-    int sum = 0;
+    int sums[2] = int[2](0, 0);
     uint words[QK / 4];
     for (uint w = 0; w < QK / 4; w++) {
         uint packed = 0;
         for (uint k = 0; k < 4; k++) {
             int v = int(round(x[xb + 4 * w + k] * inv));
-            sum += v;
+            sums[w / 4] += v;
             packed |= (uint(v) & 0xffu) << (8 * k);
         }
         words[w] = packed;
     }
     q[2 * i] = uvec4(words[0], words[1], words[2], words[3]);
     q[2 * i + 1] = uvec4(words[4], words[5], words[6], words[7]);
-    s[pc.s_off + i] = vec2(d, d * float(sum));
+    s[pc.s_off + i] = vec4(d, d * float(sums[0]), d * float(sums[1]), 0.0);
 }
