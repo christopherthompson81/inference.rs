@@ -586,8 +586,8 @@ pub(crate) fn expert_mat_vec(
 ) -> Result<Tensor> {
     let (xb, ib) = (bound(x, DType::F32)?, bound(ids, DType::U32)?);
     let slots = ids.elem_count();
-    let tokens = ids.dims2()?.0;
     let device = x.device().as_vulkan_device()?.clone();
+    let scratch = Arc::new(device.buffer(MatVec::scratch_bytes(slots.div_ceil(x_div), cols))?);
     let out = VulkanStorage {
         buffer: Arc::new(device.buffer(slots * rows * 4)?),
         device: device.clone(),
@@ -605,10 +605,10 @@ pub(crate) fn expert_mat_vec(
                 cols,
                 slots,
                 x_div,
-                share_experts: tokens > 1,
                 x: (&xb.0, xb.1),
                 ids: (&ib.0, ib.1),
                 y: &out.buffer,
+                scratch: &scratch,
             })
         })
         .map_err(vk_err)?;
@@ -749,6 +749,7 @@ pub(crate) fn quantized_mat_vec(
     let rows = l.shape().elem_count() / k;
     let out = xs.empty(rows * n, DType::F32)?;
     let weights: Arc<dyn Bound> = weights.clone();
+    let scratch = Arc::new(xs.device.buffer(MatVec::scratch_bytes(rows, k))?);
     xs.device
         .context
         .record(|r| {
@@ -762,6 +763,7 @@ pub(crate) fn quantized_mat_vec(
                 y: &out.buffer,
                 y_offset: 0,
                 x_rows: rows,
+                scratch: &scratch,
             })
         })
         .map_err(vk_err)?;
@@ -1254,9 +1256,30 @@ mod tests {
     const TOLERANCE: f32 = 1e-5;
     // a 2688-term dot product summed in another order
     const DOT_TOLERANCE: f32 = 1e-3;
+    // a 2688-term dot product over activations rounded to int8 blocks, against the outputs' RMS: unit-normal weights
+    // and activations leave ~0.6 % (one deviation), and the worst of a few hundred outputs lands near three
+    const INT8_DOT_TOLERANCE: f32 = 3e-2;
 
     fn assert_same(got: &Tensor, want: &Tensor) -> Result<()> {
         assert_close(got, want, TOLERANCE)
+    }
+
+    // within int8 activations' rounding, measured against the outputs' RMS (an output near zero keeps the same
+    // absolute error)
+    fn assert_int8_close(got: &Tensor, want: &Tensor) -> Result<()> {
+        assert_eq!(got.dims(), want.dims());
+        let (got, want) = (
+            got.flatten_all()?.to_vec1::<f32>()?,
+            want.flatten_all()?.to_vec1::<f32>()?,
+        );
+        let rms = (want.iter().map(|v| v * v).sum::<f32>() / want.len() as f32).sqrt();
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                (g - w).abs() <= INT8_DOT_TOLERANCE * rms,
+                "{i}: {g} vs {w} (rms {rms})"
+            );
+        }
+        Ok(())
     }
 
     fn assert_close(got: &Tensor, want: &Tensor, tolerance: f32) -> Result<()> {
@@ -1335,7 +1358,7 @@ mod tests {
     }
 
     // Q8_0 and Q5_0 weights on the Vulkan device take a decode step's and a verify step's rows on the GPU, against the
-    // dequantized weight in f32 (the CPU's kernel quantizes the activations too, so it is further off)
+    // dequantized weight in f32
     #[test]
     fn vulkan_quantized_matmuls_match_the_dequantized_weight() -> Result<()> {
         use crate::Module;
@@ -1349,7 +1372,7 @@ mod tests {
             for rows in [1usize, 3] {
                 let x = Tensor::randn(0f32, 1., (1, rows, 2688), &Device::Cpu)?;
                 let want = x.broadcast_matmul(&dense.t()?)?;
-                assert_close(&matmul.forward(&x.to_device(&vk)?)?, &want, DOT_TOLERANCE)?;
+                assert_int8_close(&matmul.forward(&x.to_device(&vk)?)?, &want)?;
             }
         }
         Ok(())
@@ -1380,7 +1403,7 @@ mod tests {
                     let row = x.narrow(0, slot / x_div, 1)?;
                     want.push(row.matmul(&dense.get(e as usize)?.t()?)?);
                 }
-                assert_close(&got, &Tensor::cat(&want, 0)?, DOT_TOLERANCE)?;
+                assert_int8_close(&got, &Tensor::cat(&want, 0)?)?;
             }
         }
         Ok(())

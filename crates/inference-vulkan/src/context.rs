@@ -11,9 +11,10 @@ use crate::stream::{
 };
 use crate::{Error, Result};
 
-const REQUIRED_EXTENSIONS: [&CStr; 2] = [
+const REQUIRED_EXTENSIONS: [&CStr; 3] = [
     ash::ext::external_memory_host::NAME,
     ash::khr::push_descriptor::NAME,
+    ash::khr::shader_integer_dot_product::NAME,
 ];
 
 /// One Vulkan device and its compute queue, with the kernels' pipelines built on it.
@@ -88,10 +89,13 @@ impl Context {
         let extensions = REQUIRED_EXTENSIONS.map(CStr::as_ptr);
         let mut features11 =
             vk::PhysicalDeviceVulkan11Features::default().storage_buffer16_bit_access(true);
+        let mut dot_product = vk::PhysicalDeviceShaderIntegerDotProductFeatures::default()
+            .shader_integer_dot_product(true);
         let create = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queues)
             .enabled_extension_names(&extensions)
-            .push_next(&mut features11);
+            .push_next(&mut features11)
+            .push_next(&mut dot_product);
         // SAFETY: the create info and everything it points to outlive the call
         let device = unsafe { instance.create_device(physical, &create, None)? };
         // SAFETY: the device was created from this instance

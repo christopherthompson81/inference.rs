@@ -220,3 +220,40 @@ and plain decode take it; the verifier's target rows still score on the CPU).
 
 **Result (Run 12's prompts):** plain 24.44 -> 25.05 tok/s, MTP 2 25.37 -> 26.52, text unchanged. Plain decode now
 reads ~3.3 GB a token at ~82 GB/s, the iGPU's measured peak: only drafting gets past it.
+
+### Run 14 - 2026-11-04 ~07:00
+
+**Question:** the verifier's lesson from the DFlash 2 runs (a wide verify step should read its weights at the 1-row
+kernel's bandwidth): how far off are the multi-row matvecs, and what closes the gap?
+
+**Finding (`matvec_bandwidth`, a 131072 x 2688 weight, GB/s):** the f32 kernels were compute-bound past one row, each
+block's 32 scalar activation loads per row and the decoded block in registers dominating.
+
+| rows | Q8_0 f32 | Q8_0 int8 | Q5_0 f32 | Q5_0 int8 |
+|---|---|---|---|---|
+| 1 | 77.3 (1-row kernel) | 80.4 | 75.7 (1-row kernel) | 82.2 |
+| 2 | 59.3 | 81.0 | 40.0 | 80.6 |
+| 3 | 52.8 | 80.7 | 33.1 | 77.9 |
+| 4 | 47.1 | 79.1 | 27.1 | 73.6 |
+| 8 | 31.2 | 66.6 | 16.6 | 60.0 |
+
+(vec4 f32 loads and 4 weight rows a workgroup first took 3 rows to 68.5 / 52.2; staging the activations in shared
+memory dropped occupancy and fell to 21 / 13.)
+
+**Change:** activations are quantized to int8 blocks (`quantize_q8_1`: d = max |x| / 127, the CPU's Q8_0 rounding,
+with an f32 scale and the block's d * sum q), and every matvec packs a weight block's values to int8 once and takes
+`dotPacked4x8EXT` against each row's (`VK_KHR_shader_integer_dot_product`, now required; RDNA3's `v_dot4`). Q5_0's
+values go in as 0..31, the 16 offset taken off through the sum. The expert matvec does the same, one kernel for decode
+and verify. The f32 matvec kernels are gone. `matvecs_round_only_their_activations` holds each output to its blocks'
+int8 rounding bound.
+
+**Result (Run 12's prompts):**
+
+| config | code | list | prose | counting | mean |
+|---|---|---|---|---|---|
+| plain | 25.55 | 25.38 | 25.55 | 25.74 | 25.55 |
+| MTP 2 | 33.17 | 33.92 | 28.40 | 38.74 | 33.56 |
+| MTP 3 | 35.17 | 31.73 | 26.12 | 43.50 | 34.13 |
+
+MTP's text is byte-identical to plain's. (With int8 dense matvecs but f32 experts, MTP 2 measured 28.74 and two texts
+split at near-ties of 0.142 and 0.162 nats.)

@@ -325,18 +325,18 @@ impl Recorder<'_> {
     }
 }
 
-pub(crate) const MOE_MATVEC_BINDINGS: usize = 4;
-pub(crate) const MOE_MATVEC_PUSH_BYTES: u32 = 9 * 4;
-pub(crate) const MOE_MATVECS_PUSH_BYTES: u32 = 10 * 4;
+pub(crate) const MOE_MATVEC_BINDINGS: usize = 5;
+pub(crate) const MOE_MATVEC_PUSH_BYTES: u32 = 10 * 4;
 pub(crate) const ROUTER_BINDINGS: usize = 4;
 pub(crate) const ROUTER_PUSH_BYTES: u32 = 13 * 4;
-// the matvec shaders' rows a workgroup, and the router shader's limits
-const MATVEC_ROWS: usize = 2;
+// the expert matvec's rows a workgroup, and the router shader's limits
+const MATVEC_ROWS: usize = 4;
 const MAX_ROUTER_EXPERTS: usize = 1024;
 const MAX_ROUTER_TOP_K: usize = 32;
 
-/// `y[slot] = W[ids[slot]] x[slot / x_div]` over a stack of Q5_0 experts (each `rows x cols`) in `weights`; `y` is
-/// `(slots, rows)`.
+/// `y[slot] = W[ids[slot]] x[slot / x_div]` over a stack of Q5_0 experts (each `rows x cols`) in `weights`, each
+/// expert read once for every slot routed to it and `x`'s rows quantized to int8 blocks into `scratch` (of
+/// [`crate::MatVec::scratch_bytes`] for `slots / x_div` rows); `y` is `(slots, rows)`.
 pub struct MoeMatVec<'a> {
     pub weights: &'a Arc<dyn crate::Bound>,
     pub experts: usize,
@@ -345,11 +345,10 @@ pub struct MoeMatVec<'a> {
     pub slots: usize,
     /// slots a row of `x` serves: the routes of one token, or 1 for a row a route
     pub x_div: usize,
-    /// read each expert's weights once for all the slots routed to it, worth its cost when several tokens route
-    pub share_experts: bool,
     pub x: At<'a>,
     pub ids: At<'a>,
     pub y: &'a Arc<HostBuffer>,
+    pub scratch: &'a Arc<HostBuffer>,
 }
 
 /// How a router turns logits into scores or weights.
@@ -398,33 +397,29 @@ impl Recorder<'_> {
         if op.slots == 0 {
             return Ok(());
         }
+        let s_off = self.quantize_rows(op.x, op.slots.div_ceil(op.x_div), op.cols, op.scratch)?;
         let groups = op.rows.div_ceil(MATVEC_ROWS);
         let groups_x = groups.min(MAX_GROUPS_X);
-        let mut push = vec![
+        let bytes = words(&[
             op.rows,
             op.cols,
             op.weights.offset() as usize / 2,
-            op.x.1,
             0,
             groups_x,
             op.x_div,
             op.ids.1,
             expert_bytes / 2,
-        ];
-        let kernel = if op.share_experts {
-            push.push(op.slots);
-            &self.context.kernels.moe_mat_vecs_q5_0
-        } else {
-            &self.context.kernels.moe_mat_vec_q5_0
-        };
-        let bytes = words(&push)?;
+            op.slots,
+            s_off,
+        ])?;
         let buffers = [
             op.weights.vk_buffer(),
-            op.x.0.buffer,
+            op.scratch.buffer,
             op.y.buffer,
             op.ids.0.buffer,
+            op.scratch.buffer,
         ];
-        kernel.dispatch(
+        self.context.kernels.moe_mat_vecs_q5_0.dispatch(
             self,
             &buffers,
             &bytes,
@@ -435,7 +430,7 @@ impl Recorder<'_> {
             ],
         );
         self.retain(op.weights.clone() as crate::Retained);
-        for buffer in [op.x.0, op.ids.0, op.y] {
+        for buffer in [op.ids.0, op.y] {
             self.retain(buffer.clone());
         }
         Ok(())

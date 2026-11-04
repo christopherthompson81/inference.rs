@@ -1,36 +1,40 @@
-// a subgroup's sums, combined across the workgroup's subgroups by thread 0
-const uint MAX_SUBGROUPS = THREADS / 8;
-shared float partial[ROWS * MAX_M][MAX_SUBGROUPS];
-
 void main() {
     uint row0 = (gl_WorkGroupID.y * pc.groups_x + gl_WorkGroupID.x) * ROWS;
     uint tid = gl_LocalInvocationID.x;
     uint blocks = pc.cols / QK;
     float acc[ROWS * MAX_M];
-    for (uint i = 0; i < ROWS * MAX_M; i++) {
+    [[unroll]] for (uint i = 0; i < ROWS * MAX_M; i++) {
         acc[i] = 0.0;
     }
     for (uint b = tid; b < blocks; b += THREADS) {
-        float v[ROWS][QK];
+        float d[ROWS];
+        uvec4 lo[ROWS];
+        uvec4 hi[ROWS];
         [[unroll]] for (uint r = 0; r < ROWS; r++) {
             // a row past the matrix decodes the last one, its sums never written
-            decode((min(row0 + r, pc.rows - 1) * blocks + b) * BLOCK_U16 + pc.w_base, v[r]);
+            uint base = (min(row0 + r, pc.rows - 1) * blocks + b) * BLOCK_U16 + pc.w_base;
+            d[r] = unpack_block(base, lo[r], hi[r]);
         }
         // constant bounds, so the accumulators stay in registers
         [[unroll]] for (uint mi = 0; mi < MAX_M; mi++) {
             if (mi >= pc.m) {
                 break;
             }
-            uint xb = pc.x_base + mi * pc.cols + b * QK;
-            float s0 = 0.0;
-            float s1 = 0.0;
-            [[unroll]] for (uint j = 0; j < QK; j++) {
-                float xv = x[xb + j];
-                s0 += v[0][j] * xv;
-                s1 += v[1][j] * xv;
+            uint xb = mi * blocks + b;
+            uvec4 ql = xq[2 * xb];
+            uvec4 qh = xq[2 * xb + 1];
+            vec2 sx = xs[pc.s_off + xb];
+            [[unroll]] for (uint r = 0; r < ROWS; r++) {
+                // signed bytes both sides: Q5_0's 0..31 fit
+                ivec4 a = ivec4(lo[r]);
+                ivec4 c = ivec4(hi[r]);
+                ivec4 p = ivec4(ql);
+                ivec4 o = ivec4(qh);
+                int dot = dotPacked4x8EXT(a.x, p.x) + dotPacked4x8EXT(a.y, p.y) + dotPacked4x8EXT(a.z, p.z)
+                    + dotPacked4x8EXT(a.w, p.w) + dotPacked4x8EXT(c.x, o.x) + dotPacked4x8EXT(c.y, o.y)
+                    + dotPacked4x8EXT(c.z, o.z) + dotPacked4x8EXT(c.w, o.w);
+                acc[r * MAX_M + mi] += d[r] * (sx.x * float(dot) - BIAS * sx.y);
             }
-            acc[mi] += s0;
-            acc[MAX_M + mi] += s1;
         }
     }
     [[unroll]] for (uint mi = 0; mi < MAX_M; mi++) {
