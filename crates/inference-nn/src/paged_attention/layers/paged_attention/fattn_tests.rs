@@ -922,6 +922,9 @@ fn prefix_prefill_over_a_quantized_cache_matches_attention_over_its_values() -> 
         (256, (6, 4), DType::F16, &[45, 20, 70], &[5, 17, 1], None),
         (64, (5, 3), DType::BF16, &[90, 33], &[12, 12], Some(40)),
         (512, (4, 2), DType::F16, &[40, 70], &[9, 30], None),
+        // many KV tiles through the wide staged kernels, whose dequantized K and V share a buffer
+        (128, (8, 8), DType::BF16, &[700, 500], &[200, 64], None),
+        (128, (4, 4), DType::F16, &[700, 500], &[200, 64], None),
     ] {
         check_prefill(PrefillCase {
             head_dim,

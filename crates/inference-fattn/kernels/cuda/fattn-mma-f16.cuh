@@ -511,6 +511,15 @@ static __host__ __device__ __forceinline__ bool fattn_use_quant_stage(const fatt
     return nstages > 1 && lay.k_bits && smem_before + fattn_quant_stage_bytes(lay, nbatch_fa) <= FATTN_QUANT_STAGE_SMEM_MAX;
 }
 
+static __device__ __forceinline__ void fattn_cp_async_ca_8(const unsigned int dst, const void * src) {
+#ifdef CP_ASYNC_AVAILABLE
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 8;" : : "r"(dst), "l"(src));
+#else
+    GGML_UNUSED_VARS(dst, src);
+    NO_DEVICE_CODE;
+#endif // CP_ASYNC_AVAILABLE
+}
+
 static __device__ __forceinline__ void fattn_cp_async_ca_4(const unsigned int dst, const void * src) {
 #ifdef CP_ASYNC_AVAILABLE
     asm volatile("cp.async.ca.shared.global [%0], [%1], 4;" : : "r"(dst), "l"(src));
@@ -529,17 +538,24 @@ static __device__ __noinline__ void fattn_stage_quant_rows(
     const int stride    = fattn_quant_stage_stride(head_dim, rows.bits);
     const int tid       = threadIdx.y*ggml_cuda_get_physical_warp_size() + threadIdx.x;
     const unsigned int stage_32 = ggml_cuda_cvta_generic_to_shared(stage);
-    // rows start 4-byte aligned; 16-byte copies need rows that are whole 16-byte units
-    const int unit  = row_bytes % 16 == 0 ? 16 : 4;
-    const int units = row_bytes / unit;
-    for (int item = tid; item < nbatch_fa*units; item += nthreads) {
-        const int i = item / units;
-        const int u = item - i*units;
-        const uint8_t * src = KV + 4*fattn_kv_row(rows, k_VKQ_0 + i, stride_KV) + u*unit;
-        if (unit == 16) {
-            cp_async_cg_16<0>(stage_32 + i*stride + u*16, src);
-        } else {
-            fattn_cp_async_ca_4(stage_32 + i*stride + u*4, src);
+    // rows are as aligned as their length divides: 8 bytes for every head a multiple of 32, 16 at some bits
+    const int unit_log2 = row_bytes % 16 == 0 ? 4 : (row_bytes % 8 == 0 ? 3 : 2);
+    const int units     = row_bytes >> unit_log2;
+    // a power-of-two group of threads copies each row, which looks the row up once
+    const int group_log2 = min(31 - __clz(units), 5);
+    const int lane       = tid & ((1 << group_log2) - 1);
+    for (int i = tid >> group_log2; i < nbatch_fa; i += nthreads >> group_log2) {
+        const uint8_t * src = KV + 4*fattn_kv_row(rows, k_VKQ_0 + i, stride_KV);
+        const unsigned int dst = stage_32 + i*stride;
+        for (int u = lane; u < units; u += 1 << group_log2) {
+            const int off = u << unit_log2;
+            if (unit_log2 == 4) {
+                cp_async_cg_16<0>(dst + off, src + off);
+            } else if (unit_log2 == 3) {
+                fattn_cp_async_ca_8(dst + off, src + off);
+            } else {
+                fattn_cp_async_ca_4(dst + off, src + off);
+            }
         }
     }
 }
@@ -552,6 +568,19 @@ static __device__ __forceinline__ void fattn_dequant_group(const uint32_t * src,
 #pragma unroll
     for (int k = 0; k < bits; ++k) {
         w[k] = src[k];
+    }
+    if constexpr (bits == 8) {
+        // a byte permute makes 0x64XX, the half 1024 + c, of two codes at once; the fma rounds the same exact value
+        const half2 bias = __float2half2_rn(1024.0f + 128.0f);
+        const half2 q2x2 = __hadd2(q2, q2);
+#pragma unroll
+        for (int k = 0; k < 8; ++k) {
+            const uint32_t lo = __byte_perm(w[k], 0x64646464u, 0x4140);
+            const uint32_t hi = __byte_perm(w[k], 0x64646464u, 0x4342);
+            out[2*k]     = __hfma2(__hsub2(*(const half2 *) &lo, bias), q2x2, q2);
+            out[2*k + 1] = __hfma2(__hsub2(*(const half2 *) &hi, bias), q2x2, q2);
+        }
+        return;
     }
     constexpr uint32_t mask = (1u << bits) - 1;
     const half2 bias = __float2half2_rn(1024.0f + float(1 << bits));
@@ -1599,8 +1628,12 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
 
     extern __shared__ half2 tile_Q[];
     half2 * tile_K    = Q_in_reg              ? tile_Q                             : tile_Q + ncols     * stride_tile_Q;
-    half2 * tile_V    =           nstages > 1 ? tile_K + nbatch_fa * stride_tile_K : tile_K;
-    half  * tile_mask = (half *) (nstages > 1 ? tile_V + nbatch_fa * stride_tile_V : tile_V + nbatch_fa * stride_tile_KV_max);
+    // staged quantized tiles dequantize K for Q.K and V for P.V between barriers, so the two share one buffer
+    const bool shared_KV = fattn_use_quant_stage(lay, nstages, nbatch_fa, (Q_in_reg ? 0 : ncols*stride_tile_Q*sizeof(half2)) +
+        nbatch_fa*stride_tile_KV_max*sizeof(half2) + ncols1*(nbatch_fa + 8)*sizeof(half));
+    const bool split_KV = nstages > 1 && !shared_KV;
+    half2 * tile_V    = split_KV ? tile_K + nbatch_fa * stride_tile_K : tile_K;
+    half  * tile_mask = (half *) (split_KV ? tile_V + nbatch_fa * stride_tile_V : tile_V + nbatch_fa * stride_tile_KV_max);
 
     T_B_KQ    Q_B[(Q_in_reg ? DKQ/(2*T_B_KQ::J) : 1)];
 #if defined(TURING_MMA_AVAILABLE)
@@ -2401,9 +2434,11 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
     const size_t nbytes_shared_mask      = ncols1               * (nbatch_fa/2 + 4)                       * sizeof(half2);
     const size_t nbytes_shared_combine   = nwarps*cols_per_warp * (nbatch_combine + 4)                    * sizeof(half2);
 
-    const size_t nbytes_shared_KV = nstages <= 1 ? nbytes_shared_KV_1stage : nbytes_shared_KV_2stage;
-
     const fattn_layout lay = fattn_get_layout(KQV);
+    // as the kernel lays them out: staged quantized tiles share one K/V buffer
+    const bool shared_KV = fattn_use_quant_stage(lay, nstages, nbatch_fa,
+        (Q_in_reg ? 0 : nbytes_shared_Q) + nbytes_shared_KV_1stage + nbytes_shared_mask);
+    const size_t nbytes_shared_KV = nstages <= 1 || shared_KV ? nbytes_shared_KV_1stage : nbytes_shared_KV_2stage;
     const size_t nbytes_shared_before_stage = (Q_in_reg ? 0 : nbytes_shared_Q) + nbytes_shared_KV + nbytes_shared_mask;
     const size_t nbytes_shared_stage = fattn_use_quant_stage(lay, nstages, nbatch_fa, nbytes_shared_before_stage)
         ? fattn_quant_stage_bytes(lay, nbatch_fa) : 0;
