@@ -259,6 +259,18 @@ pub struct ScanStep<'a> {
     pub out: &'a Arc<HostBuffer>,
 }
 
+impl MoeMatVec<'_> {
+    // the tiles moe_sort cuts `slots` routes over `experts` into, at most
+    fn max_tiles(slots: usize, experts: usize) -> usize {
+        slots.div_ceil(MOE_TILE) + experts
+    }
+
+    /// The routing scratch `slots` routes over `experts` take: their order, the tile count and the tiles.
+    pub fn routing_bytes(slots: usize, experts: usize) -> usize {
+        (slots + 1 + 3 * Self::max_tiles(slots, experts)) * 4
+    }
+}
+
 impl Recorder<'_> {
     pub fn ssm_conv_step(&self, op: &ConvStep<'_>) -> Result<()> {
         let (bias, bias_off) = op.bias.unwrap_or(op.x);
@@ -327,6 +339,16 @@ impl Recorder<'_> {
 
 pub(crate) const MOE_MATVEC_BINDINGS: usize = 5;
 pub(crate) const MOE_MATVEC_PUSH_BYTES: u32 = 10 * 4;
+pub(crate) const MOE_SORT_BINDINGS: usize = 2;
+pub(crate) const MOE_SORT_PUSH_BYTES: u32 = 4 * 4;
+pub(crate) const MOE_MM_BINDINGS: usize = 5;
+pub(crate) const MOE_MM_PUSH_BYTES: u32 = 8 * 4;
+// past this many routes a step's experts take the tiled matmul over routes grouped by expert (moe_sort's tiles of
+// MOE_TILE), its weight rows a tile, and the sort's expert limit
+const MOE_TILED_MIN_SLOTS: usize = 64;
+const MOE_TILE: usize = 64;
+const MOE_TILE_N: usize = 256;
+const MAX_SORT_EXPERTS: usize = 1024;
 pub(crate) const ROUTER_BINDINGS: usize = 4;
 pub(crate) const ROUTER_PUSH_BYTES: u32 = 13 * 4;
 // the expert matvec's rows a workgroup, and the router shader's limits
@@ -349,6 +371,8 @@ pub struct MoeMatVec<'a> {
     pub ids: At<'a>,
     pub y: &'a Arc<HostBuffer>,
     pub scratch: &'a Arc<HostBuffer>,
+    /// past MOE_TILED_MIN_SLOTS routes, the routes grouped by expert: [`MoeMatVec::routing_bytes`]
+    pub routing: &'a Arc<HostBuffer>,
 }
 
 /// How a router turns logits into scores or weights.
@@ -387,7 +411,8 @@ impl Recorder<'_> {
             || op.x_div == 0
             || op.weights.bytes() < op.experts * expert_bytes
             || !op.weights.offset().is_multiple_of(2)
-            || op.slots > MAX_GROUPS_X
+            || op.experts > MAX_SORT_EXPERTS
+            || op.routing.len() < MoeMatVec::routing_bytes(op.slots, op.experts)
         {
             return Err(Error::Invalid(format!(
                 "a {} x {}x{} Q5_0 expert matvec over {} slots",
@@ -398,6 +423,12 @@ impl Recorder<'_> {
             return Ok(());
         }
         let s_off = self.quantize_rows(op.x, op.slots.div_ceil(op.x_div), op.cols, op.scratch)?;
+        if op.slots > MOE_TILED_MIN_SLOTS {
+            return self.moe_mm_q5_0(op, s_off, expert_bytes);
+        }
+        if op.slots > MAX_GROUPS_X {
+            return Err(Error::Invalid(format!("{} expert routes", op.slots)));
+        }
         let groups = op.rows.div_ceil(MATVEC_ROWS);
         let groups_x = groups.min(MAX_GROUPS_X);
         let bytes = words(&[
@@ -431,6 +462,53 @@ impl Recorder<'_> {
         );
         self.retain(op.weights.clone() as crate::Retained);
         for buffer in [op.ids.0, op.y] {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+
+    // a prompt's routes: grouped by expert on the GPU, then a tiled matmul over each expert's tiles of them
+    fn moe_mm_q5_0(&self, op: &MoeMatVec<'_>, s_off: usize, expert_bytes: usize) -> Result<()> {
+        let tiles_off = op.slots;
+        self.context.kernels.moe_sort.dispatch(
+            self,
+            &[op.ids.0.buffer, op.routing.buffer],
+            &words(&[op.slots, op.experts, op.ids.1, tiles_off])?,
+            [1, 1, 1],
+        );
+        let bytes = words(&[
+            op.rows,
+            op.cols,
+            op.weights.offset() as usize / 2,
+            0,
+            op.x_div,
+            expert_bytes / 2,
+            s_off,
+            tiles_off,
+        ])?;
+        self.context.kernels.moe_mm_q5_0.dispatch(
+            self,
+            &[
+                op.weights.vk_buffer(),
+                op.scratch.buffer,
+                op.y.buffer,
+                op.scratch.buffer,
+                op.routing.buffer,
+            ],
+            &bytes,
+            [
+                op.rows.div_ceil(MOE_TILE_N) as u32,
+                MoeMatVec::max_tiles(op.slots, op.experts) as u32,
+                1,
+            ],
+        );
+        self.work.set(
+            self.work
+                .get()
+                .saturating_add((op.slots * op.rows * op.cols) as u64),
+        );
+        self.retain(op.weights.clone() as crate::Retained);
+        for buffer in [op.ids.0, op.y, op.routing, op.scratch] {
             self.retain(buffer.clone());
         }
         Ok(())

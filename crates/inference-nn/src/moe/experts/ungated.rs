@@ -13,8 +13,6 @@ use std::sync::Arc;
 use super::checkpoint::{ExpertCheckpoint, ExpertSourceLayout};
 use super::config::{ExpertProj, MoEExpertsConfig};
 
-// The most routes (tokens times experts a token) Vulkan's expert kernels take a call; a prompt's run the CPU's.
-const VULKAN_MAX_ROUTES: usize = 64;
 use super::forward::{MoEForward, MoEForwardConfig};
 
 // NeMo Automodel's stacked experts: an ungated layer's "gate and up" holds only up
@@ -200,7 +198,7 @@ impl UngatedExpertsWeights {
         out.to_dtype(forward.original_dtype)
     }
 
-    // a decode step's routes on Vulkan: each route's expert rows dotted on the GPU, its expert ids never leaving it
+    // a step's routes on Vulkan, decode's or a prompt's: the experts' rows dotted on the GPU, the ids never leaving it
     fn forward_vulkan(
         [up, down]: [&Arc<dyn QuantMethod>; 2],
         forward: &MoEForward,
@@ -211,7 +209,6 @@ impl UngatedExpertsWeights {
             || !matches!(config.act, crate::layers::Activation::Relu2)
             || forward.lora.is_some()
             || down.stats_snapshot().is_some()
-            || tokens * k > VULKAN_MAX_ROUTES
             || up.has_bias()
             || down.has_bias()
         {

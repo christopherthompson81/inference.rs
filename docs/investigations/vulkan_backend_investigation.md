@@ -274,3 +274,34 @@ head reading a whole prompt calls it with a query a prompt row: those run in pie
 
 **Result:** `bench --depth 4096` MTP 3 26.7 tok/s, plain 23.4; Run 12's prompts plain 25.97, MTP 3 34.41 (text as
 plain's from the same build; against Run 14's plain, two texts split at near-ties under the new summation order).
+
+### Run 16 - 2026-11-04 ~22:00
+
+**Question:** prefill: a prompt's matmuls (more than 8 rows) and experts (more than 64 routes) ran the CPU's kernels,
+~100 tok/s against llama.cpp's 411 on Vulkan.
+
+**Change:**
+- `mul_mm_q8_0/q5_0`: a tiled int8 matmul over `quantize_q8_1`'s blocks (64 weight rows x 64 tokens a workgroup, 4
+  blocks a step through shared memory, 4 x 4 outputs a thread, `dotPacked4x8EXT`): 4.4 int8 TOPS from 64 to 512
+  tokens.
+- Experts: `moe_sort` groups a step's routes by expert into a tile list, and `moe_mm_q5_0` takes it. The tiled
+  kernel's weight side tops out near 26 GB/s (load, unpack, shared store, barrier), flat from 24 to 64 tokens, and an
+  expert sees ~24 tokens of a 512-token step: 17-20 ms a call, whatever the tile shape (64 x 32, 128 x 32, 8 blocks a
+  step, coalesced weight reads, a register prefetch that cost occupancy, wave32: all within 15-23 ms). Removing the
+  weight reads took it to 11 ms. So `mat_mul_q_rows.glsl` streams the weights as a matvec does, a thread a weight row
+  unpacking each block once into registers, while the step's token blocks (up to 64) sit in shared memory and every
+  thread reads them at once; it stops at the tile's real tokens. The isolated benchmark (`expert_matmul_throughput`:
+  3072 routes over 128 experts of 1856 x 2688) went 17.1 -> 13.8 ms, 11.4 ms a call in the model. Dense prompt matmuls
+  stay tiled (row streaming wins at 24-32 rows, 65 GB/s, and loses at 64 to 3.2 TOPS).
+- The type includes split loading a block (`read_raw`) from unpacking it (`unpack_raw`).
+
+**Tests:** `matvecs_round_only_their_activations` takes 70 rows (two token tiles); the expert test a 150-route prompt
+(an expert past a tile); `a_long_quantized_prompt_on_vulkan_scores_as_its_decode` (Q8_0 and Q5_0: Vulkan's tiled
+prefill against its own decode, 0.0000 apart). Against the CPU an ISQ checkpoint's long prompt is 0.01 apart on average
+(int8 activations rounded with an f32 scale here, f16 there), its Mamba state carrying a few positions to 0.37, so
+that comparison checks the mean.
+
+**Result:** `bench` TTFT for 512 tokens: 1.69 s (302 tok/s) with the tiled experts, 1.29 s (397 tok/s) streamed.
+Prefill kernels per 512 tokens: experts 53 %, dense matmuls 28 %, elementwise 9 %, the scan 6 %. Decode unchanged
+(Run 12's prompts: plain 24.7, MTP 3 34.1, with a browser running). A ~30-token chat turn prefills at ~110 tok/s: its
+routes touch nearly every expert, so a step reads most of the 20 GB of expert weights.
