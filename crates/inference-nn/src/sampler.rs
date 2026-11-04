@@ -720,6 +720,29 @@ pub struct SpeculativeProbs {
     pub reporting: Vec<f32>,
 }
 
+/// A speculative row's filtered distribution over its ranked top-K: the tokens, most likely first, their normalized
+/// sampling probabilities and their full-vocabulary ones.
+pub struct RankedProbs {
+    pub tokens: Vec<u32>,
+    pub sampling: Vec<f32>,
+    pub reporting: Vec<f32>,
+}
+
+impl RankedProbs {
+    /// As the CPU's speculative probabilities over a `vocab` row, zero off the support.
+    pub fn dense(&self, vocab: usize) -> SpeculativeProbs {
+        let (mut sampling, mut reporting) = (vec![0.0; vocab], vec![0.0; vocab]);
+        for (i, &token) in self.tokens.iter().enumerate() {
+            sampling[token as usize] = self.sampling[i];
+            reporting[token as usize] = self.reporting[i];
+        }
+        SpeculativeProbs {
+            sampling,
+            reporting,
+        }
+    }
+}
+
 /// Comparator for descending order by probability (second element of tuple).
 #[inline]
 fn cmp_desc_by_prob(a: &(u32, f32), b: &(u32, f32)) -> std::cmp::Ordering {
@@ -1674,6 +1697,43 @@ impl Sampler {
             self.top_p as f32,
             self.min_p as f32,
         ))
+    }
+
+    /// Every row of `logits` (`(.., rows, vocab)`) ranked on Vulkan in one dispatch and read back once, where this
+    /// sampler's filters keep each row within its top-K; `None` otherwise, for the row-by-row path.
+    pub fn ranked_speculative_rows(&self, logits: &Tensor) -> Result<Option<Vec<RankedProbs>>> {
+        if !self.can_rank_on_vulkan(logits) {
+            return Ok(None);
+        }
+        let vocab = logits.dim(inference_tensor::D::Minus1)?;
+        let rows = logits.elem_count() / vocab;
+        let temperature = self.temperature.unwrap_or(1.0);
+        let packed =
+            inference_tensor::vulkan::ranked_top_k(&logits.reshape((rows, vocab))?, temperature)?
+                .to_vec2::<f32>()?;
+        let inv_temperature = (1.0 / temperature) as f32;
+        let mut ranked = Vec::with_capacity(rows);
+        for row in &packed {
+            let Some(support) = ranked_support(
+                row,
+                inv_temperature,
+                self.top_k,
+                self.top_p as f32,
+                self.min_p as f32,
+            ) else {
+                return Ok(None);
+            };
+            let total: f32 = support.sampling.iter().sum();
+            if !(total > 0.0 && total.is_finite()) {
+                return Ok(None);
+            }
+            ranked.push(RankedProbs {
+                tokens: support.tokens,
+                sampling: support.sampling.iter().map(|p| p / total).collect(),
+                reporting: support.reporting,
+            });
+        }
+        Ok(Some(ranked))
     }
 
     fn needs_penalties(&self) -> bool {
@@ -3497,6 +3557,47 @@ mod tests {
             }
             for (i, (g, w)) in got.iter().zip(&want).enumerate() {
                 assert!((g - w).abs() < 1e-5, "{filters:?} token {i}: {g} vs {w}");
+            }
+        }
+    }
+
+    // a Vulkan step's rows ranked together give each row the CPU's speculative probabilities
+    #[test]
+    fn ranked_speculative_rows_match_the_cpu() {
+        use super::Sampler;
+        let Ok(vk) = Device::new_vulkan(0) else {
+            return;
+        };
+        const VOCAB: usize = 2048;
+        let rows: Vec<f32> = (0..3 * VOCAB)
+            .map(|i| -0.15 * ((i * 7919) % VOCAB) as f32 + (i / VOCAB) as f32 * 0.3)
+            .collect();
+        let sampler = Sampler::new(
+            Some(1.0),
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            0,
+            0.95,
+            0.0,
+            HashMap::new(),
+            vec![],
+        )
+        .unwrap();
+        let logits = Tensor::from_vec(rows.clone(), (1, 3, VOCAB), &vk).unwrap();
+        let ranked = sampler
+            .ranked_speculative_rows(&logits)
+            .unwrap()
+            .expect("the nuclei fit");
+        for (r, row) in ranked.iter().enumerate() {
+            let cpu = Tensor::new(&rows[r * VOCAB..(r + 1) * VOCAB], &Device::Cpu).unwrap();
+            let want = sampler.speculative_target_probs(cpu, &[0], 1).unwrap();
+            let got = row.dense(VOCAB);
+            for (g, w) in got.sampling.iter().zip(&want.sampling) {
+                assert!((g - w).abs() < 1e-5, "row {r}: {g} vs {w}");
             }
         }
     }

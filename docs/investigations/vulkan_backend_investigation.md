@@ -819,3 +819,28 @@ mixes give the CPU's filtered, normalized distribution within 1e-5; a nucleus wi
 | top_k 1 | 24.6 / 23.8 / 23.8 | 24.8 / 24.7 / 24.7 |
 
 **Next:** a step still drains the GPU at each draft (its token, then its embedding's ids) and at the causal mask.
+
+### Run 33 - 2026-11-04 ~14:30 (laptop: Radeon 780M)
+
+**Question:** after Run 32, a chat-sampled MTP 3 step still drained the GPU ~17 times. What can go?
+
+**Changes:**
+- The quantized embedding gathers its rows on the device (`embed_<type>.comp`, a thread a 32-value block through
+  each type's `unpack`). It used to read the ids back and gather on the CPU. That was 4 drains a step (3 drafts and
+  the verify forward).
+- A Vulkan causal mask is built as the additive f32 matrix on the host and uploaded. `masked_fill`'s `where_cond` has
+  no Vulkan kernel, so it round-tripped through the host: 3 a step.
+- The stochastic verifier ranks every verify row in one dispatch and one readback
+  (`Sampler::ranked_speculative_rows`). A Vulkan draft's logits become the verifier's sparse proposal rows the same
+  way, so `probability_row` no longer touches the device. That took ~5.5 drains a step to 2.
+
+**Tests:** `a_vulkan_embedding_gathers_as_the_cpu_does` (all eight kernel types against the CPU's gather) and
+`ranked_speculative_rows_match_the_cpu`. Greedy text is identical to master's on Run 12's prompts, and MTP 3's
+matches plain's.
+
+**Result (a served MTP 3 chat turn at temperature 1.0, top_p 0.95, three seeds):** 25.0 / 22.9 / 22.9 ->
+27.3 / 24.7 / 25.1 tok/s. The GPU is 89 % busy (Run 32: ~82 %).
+
+**Left:** each draft's sample is read back (3 a step). Chaining drafts on the device needs the pick there, with its
+uniform from the host (as CUDA's draft sampler does). The Mamba state copies take ~420 small dispatches, ~7 ms a
+step. `ranked_topk` runs a workgroup a row, ~0.4 ms each.

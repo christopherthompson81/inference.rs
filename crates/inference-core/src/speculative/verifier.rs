@@ -10,7 +10,7 @@ use crate::pipeline::sampling::{finish_or_add_toks_to_seq, sample_sequence};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 #[cfg(feature = "cuda")]
 use crate::sampler::CudaSpeculativeSamplingPlan;
-use crate::sampler::{Logprobs, Sampler};
+use crate::sampler::{Logprobs, Sampler, SpeculativeProbs};
 use crate::sequence::{Sequence, SequenceRecognizer, SequenceState};
 
 #[cfg(feature = "cuda")]
@@ -1187,6 +1187,25 @@ impl PreparedProposalDistribution {
         }
     }
 
+    // as `new`, but a Vulkan draft's logits become their ranked top-K's sparse rows, ranked in one dispatch
+    fn new_ranked(
+        distribution: SpeculativeProposalDistribution,
+        positions: usize,
+        sampler: &Sampler,
+    ) -> Result<Self> {
+        if let SpeculativeProposalDistribution::Logits(logits) = &distribution
+            && let Some(rows) = sampler.ranked_speculative_rows(logits)?
+            && rows.len() >= positions
+        {
+            let (token_ids, probs) = rows
+                .into_iter()
+                .map(|row| (row.tokens, row.sampling))
+                .unzip();
+            return Ok(Self::Sparse { token_ids, probs });
+        }
+        Self::new(distribution, positions)
+    }
+
     fn probability_row(
         &self,
         row: usize,
@@ -1354,19 +1373,29 @@ async fn finish_verified_step_stochastic(
     rng: Arc<std::sync::Mutex<Isaac64Rng>>,
     fallback_uniforms: Option<&SparseRejectionFallbackUniforms>,
 ) -> Result<VerificationOutcome> {
+    let sampler = seq.sampler();
     let proposal_distribution = match proposal_distribution {
-        Some(distribution) => PreparedProposalDistribution::new(distribution, proposal.len())?,
+        Some(distribution) => {
+            PreparedProposalDistribution::new_ranked(distribution, proposal.len(), &sampler)?
+        }
         None => PreparedProposalDistribution::Deterministic,
+    };
+    // on Vulkan every verify row is ranked in one dispatch and read back once
+    let ranked_targets = sampler.ranked_speculative_rows(&verify_logits)?;
+    let vocab = verify_logits.dim(inference_tensor::D::Minus1)?;
+    let target_probs_at = |seq: &Sequence, row: usize| -> Result<SpeculativeProbs> {
+        match &ranked_targets {
+            Some(rows) => Ok(rows[row].dense(vocab)),
+            None => sampler.speculative_target_probs(
+                flat_logits(logit_row(&verify_logits, row)?)?,
+                seq.get_toks(),
+                seq.prompt_tokens(),
+            ),
+        }
     };
     let mut accepted = 0usize;
     for (idx, draft) in proposal.iter().copied().enumerate() {
-        let target_row = logit_row(&verify_logits, idx)?;
-        let sampler = seq.sampler();
-        let target_probs = sampler.speculative_target_probs(
-            flat_logits(target_row.clone())?,
-            seq.get_toks(),
-            seq.prompt_tokens(),
-        )?;
+        let target_probs = target_probs_at(seq, idx)?;
         let candidate_probs = proposal_distribution.probability_row(
             idx,
             draft,
@@ -1476,13 +1505,7 @@ async fn finish_verified_step_stochastic(
         });
     }
 
-    let row = logit_row(&verify_logits, accepted)?;
-    let sampler = seq.sampler();
-    let target_probs = sampler.speculative_target_probs(
-        flat_logits(row.clone())?,
-        seq.get_toks(),
-        seq.prompt_tokens(),
-    )?;
+    let target_probs = target_probs_at(seq, accepted)?;
     let continuation = match fallback_uniforms {
         Some(uniforms) => sample_from_probs_with_uniform(
             &sampler,

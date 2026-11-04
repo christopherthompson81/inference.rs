@@ -952,6 +952,41 @@ pub(crate) fn quantized_mat_vec(
     Ok(out)
 }
 
+/// The `count` rows of a `vocab x cols` quantized weight at the u32 `ids` (bound at their element offset).
+pub(crate) fn quantized_embedding(
+    ids: (&Arc<Buffer>, usize),
+    count: usize,
+    weights: &Arc<Buffer>,
+    ty: BlockType,
+    vocab: usize,
+    cols: usize,
+    device: &VulkanDevice,
+) -> Result<VulkanStorage> {
+    let len = count * cols;
+    let out = VulkanStorage {
+        buffer: Arc::new(device.buffer(len * 4)?),
+        device: device.clone(),
+        count: len,
+        dtype: DType::F32,
+    };
+    let weights: Arc<dyn Bound> = weights.clone();
+    device
+        .context
+        .record(|r| {
+            r.embed(&inference_vulkan::Embed {
+                ty,
+                weights: &weights,
+                vocab,
+                cols,
+                ids,
+                count,
+                y: &out.buffer,
+            })
+        })
+        .map_err(vk_err)?;
+    Ok(out)
+}
+
 /// Runs a CPU kernel on the storages' copies, and gives back the Vulkan storage of its result.
 macro_rules! on_cpu {
     ($self:ident, |$cpu:ident $(, $other:ident)*| $body:expr) => {{
