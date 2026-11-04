@@ -31,6 +31,8 @@ pub struct Context {
     // device-local bytes free when the context was made, and those the long-lived (exact) buffers hold now
     pub(crate) device_budget: u64,
     pub(crate) exact_device_bytes: std::sync::atomic::AtomicU64,
+    // device-local bytes every live and pooled buffer holds
+    pub(crate) device_bytes: std::sync::atomic::AtomicU64,
     name: String,
     queue: vk::Queue,
     stream: Mutex<Stream>,
@@ -112,6 +114,9 @@ impl Context {
         // SAFETY: the family was checked to exist and queue 0 was asked for
         let queue = unsafe { device.get_device_queue(family, 0) };
         let mut stream = Stream::new(&device, family)?;
+        if !unified {
+            stream.max_in_flight = Some(crate::stream::DISCRETE_MAX_IN_FLIGHT);
+        }
         if std::env::var_os(crate::stream::PROFILE_ENV).is_some() {
             stream.profile = Some(Box::new(crate::stream::Profile::new(f64::from(
                 properties.limits.timestamp_period,
@@ -129,6 +134,7 @@ impl Context {
             unified,
             device_budget,
             exact_device_bytes: std::sync::atomic::AtomicU64::new(0),
+            device_bytes: std::sync::atomic::AtomicU64::new(0),
             name,
             queue,
             stream: Mutex::new(stream),
@@ -199,15 +205,6 @@ impl Context {
         };
         stream.synchronize(&self.device, self.queue)?;
         Ok(true)
-    }
-
-    /// Waits for the oldest submitted batch unless the stream is in use, so the buffers it held return to the pool;
-    /// whether one was waited on.
-    pub(crate) fn try_wait_oldest(&self) -> Result<bool> {
-        let Ok(mut stream) = self.stream.try_lock() else {
-            return Ok(false);
-        };
-        stream.wait_oldest(&self.device)
     }
 
     /// [`Self::record`], then [`Self::synchronize`].

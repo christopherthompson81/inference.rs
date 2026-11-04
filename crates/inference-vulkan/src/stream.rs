@@ -14,6 +14,10 @@ pub(crate) const DISPATCHES_WHEN_IDLE: usize = 8;
 /// The multiply-adds a batch submits after, well inside the driver's job timeout (~2 s on amdgpu) at the slowest
 /// kernels' rate.
 pub(crate) const WORK_PER_SUBMIT: u64 = 4_000_000_000;
+/// Submitted batches a discrete GPU's stream lets run unfinished before a submit waits for the oldest: the CPU records
+/// a whole forward ahead of the GPU otherwise, and the temporaries its batches hold (a long prompt's, many GB) would
+/// fill device memory.
+pub(crate) const DISCRETE_MAX_IN_FLIGHT: usize = 3;
 
 /// A resource a recorded command uses, kept alive until the command finishes.
 pub type Retained = Arc<dyn Any + Send + Sync>;
@@ -23,6 +27,8 @@ pub type Retained = Arc<dyn Any + Send + Sync>;
 pub(crate) struct Stream {
     pool: vk::CommandPool,
     pub(crate) profile: Option<Box<Profile>>,
+    // the most submitted batches left unfinished, if bounded
+    pub(crate) max_in_flight: Option<usize>,
     open: Option<Batch>,
     in_flight: VecDeque<Batch>,
     spare: Vec<(vk::CommandBuffer, vk::Fence)>,
@@ -100,6 +106,7 @@ impl Stream {
         Ok(Self {
             pool,
             profile: None,
+            max_in_flight: None,
             open: None,
             in_flight: VecDeque::new(),
             spare: Vec::new(),
@@ -159,6 +166,11 @@ impl Stream {
             )?;
         }
         self.in_flight.push_back(batch);
+        if let Some(max) = self.max_in_flight {
+            while self.in_flight.len() > max {
+                self.wait_oldest(device)?;
+            }
+        }
         self.reap(device, false)
     }
 

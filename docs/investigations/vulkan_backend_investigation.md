@@ -494,3 +494,49 @@ x 8 rows 402 -> 399; prompt matmuls at 512 rows 31.7 / 34.4 -> 31.9 / 34.3 TOPS;
 The int8 dp4a kernels run at about 15-33 TOPS on the 3090, a fraction of its int8 tensor cores.
 `VK_KHR_cooperative_matrix` and `VK_NV_cooperative_matrix2` are both offered: the next lever for prompts on this
 card.
+
+### Run 24 - 2026-11-04 ~05:30 (desktop: RTX 3090)
+
+**Question:** after Run 23, a 2048-token prompt on recipe A swung from about 1 s to 19 s an iteration. What makes long
+prompts erratic, and how close is llama.cpp?
+
+**References (llama.cpp 970b51ce7 on recipe A, this 3090):**
+
+| backend | pp512 | pp2048 | tg64 |
+|---|---|---|---|
+| CUDA | 4157 | 4278 | 200 |
+| Vulkan, NV coopmat2 | 3845 | 3856 | 161 |
+| Vulkan, KHR coopmat | 2840 | 2826 | |
+| Vulkan, no matrix cores | 1506 | 1490 | |
+
+**Findings:**
+- Master runs Nemotron Nano 9B v2 Q4_K_M (6.5 GB) out of device memory at 2048 tokens. The CPU records a whole
+  forward ahead of the GPU, and the batches' temporaries take more than 17 GB.
+- On Run 23's branch the 9B took about 28 GB of fresh device allocations per 2048-token prompt. The idle pool's
+  2 GiB cap evicted buffers of 40, 128 and 320 MiB that the next layer wanted again, and each fresh allocation is
+  zeroed by the driver (system time 1.35 s at 512 tokens, 6.7 s at 2048).
+- With the cap lifted, recipe A hit out-of-memory 14 times an iteration. Each one synchronized and drained the whole
+  pool, and there were about 425 oldest-batch waits too. No buffer spilled, yet iterations still took 6.5, 12.5 and
+  19 s at times: allocating up to the edge of the card's memory stalls the driver.
+- A large CPU fallback was ruled out: the only one at 1 MiB or more was a 10 MiB `where_cond`, four times.
+
+**Changes:**
+- A discrete GPU's stream lets at most 3 submitted batches run unfinished. A submit past that waits for the oldest,
+  so the CPU no longer records a whole forward ahead. The pool-miss wait of Run 23 is gone.
+- The context counts every device-local byte, live or pooled. Before a fresh device allocation, idle device buffers
+  are freed, largest first, until the total leaves `ROOM_MARGIN_BYTES` (512 MiB) of the startup budget, with one
+  synchronize when the pool runs dry. Only then come the out-of-memory retry and the host spill.
+- Idle device memory is not capped (a 4 GiB cap measured worse: recipe A median 1.26 against 1.02 s an
+  iteration). Idle host memory keeps its 2 GiB cap, which is all an iGPU uses.
+
+**Result (median seconds an iteration of a 2048-token prompt plus 4 decoded, 6 after warmup):**
+
+| model | Run 23 | now |
+|---|---|---|
+| recipe A | 1.05 typical, 6.5 / 12.5 / 19.3 outliers | 1.02 (1.01-1.71) |
+| Nano 9B Q4_K_M | 1.45 typical, 4.2 outlier | 1.50 (1.45-4.19, the first measured run) |
+
+`bench`, recipe A: 512 tokens 2554 tok/s with decode 125 tok/s (Run 23: 2628 / 108). At 4096 tokens it still
+spills (737 tok/s): a single 4096-token pass's working set passes the 2 GiB the weights leave. The 9B decodes at
+88 tok/s after a 512-token prompt. The next gap to llama.cpp is the matrix cores (coopmat2 3845 against our 2554 at
+512 tokens).

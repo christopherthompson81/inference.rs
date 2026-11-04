@@ -14,10 +14,15 @@ pub(crate) const MAX_BINDING_BYTES: u64 = 4 << 30;
 const MIN_POOLED_BYTES: u64 = 256;
 const FINE_CLASS_BYTES: u64 = 1 << 20;
 const MAX_POOLED_BYTES: u64 = 1 << 30;
-// The most idle memory the pool holds before a dropped buffer is freed instead
+// The most idle host memory the pool holds before a dropped buffer is freed instead (on an iGPU, the model's RAM).
+// Idle device memory is not capped: a prompt's working set cycles through it, and an allocation that runs out of
+// device memory frees it first.
 const MAX_POOL_BYTES: u64 = 2 << 30;
 // Whether a device allocation has fallen back to host memory, so the fallback is reported once
 static SPILLED: AtomicBool = AtomicBool::new(false);
+// The device memory every buffer together leaves free, short of the device's budget: allocating to the edge of a
+// discrete GPU's memory stalls its driver for seconds
+const ROOM_MARGIN_BYTES: u64 = 512 << 20;
 /// The device memory a discrete GPU's long-lived buffers leave free, for activations, caches and scratch.
 pub const EXACT_RESERVE_BYTES: u64 = 2 << 30;
 // A host write to or read of device memory goes through staging buffers of up to this, a submit each
@@ -36,6 +41,7 @@ struct Allocation {
     buffer: vk::Buffer,
     memory: vk::DeviceMemory,
     ptr: *mut u8,
+    size: u64,
 }
 
 // SAFETY: the handles and mapping are only used by whoever takes the allocation out of the pool's lock
@@ -54,6 +60,15 @@ impl BufferPool {
 }
 
 impl Allocation {
+    // frees it, and takes device memory off the context's count
+    unsafe fn release(self, context: &Context) {
+        if self.ptr.is_null() {
+            context.device_bytes.fetch_sub(self.size, Ordering::Relaxed);
+        }
+        // SAFETY: the caller's contract
+        unsafe { self.free(&context.device) };
+    }
+
     unsafe fn free(self, device: &ash::Device) {
         // SAFETY: the caller's contract that the GPU no longer uses it
         unsafe {
@@ -154,15 +169,12 @@ impl Buffer {
                 .expect("vulkan pool poisoned")
                 .take(device_local, capacity)
         };
-        let mut pooled = take();
-        // a discrete GPU's memory is scarce: before a fresh allocation, the oldest batch's buffers come back first
-        if pooled.is_none() && device_local && context.try_wait_oldest()? {
-            pooled = take();
-        }
+        let pooled = take();
         if let Some(Allocation {
             buffer,
             memory,
             ptr,
+            ..
         }) = pooled
         {
             return Ok(Self {
@@ -212,6 +224,9 @@ impl Buffer {
     ) -> Result<Self> {
         let out_of_memory =
             |r: &Result<Self>| matches!(r, Err(Error::Vk(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)));
+        if device_local {
+            make_room(context, capacity)?;
+        }
         let first = Self::allocate_once(context, len, capacity, device_local, pooled);
         if !device_local || !out_of_memory(&first) {
             return first;
@@ -224,7 +239,7 @@ impl Buffer {
             .drain(true);
         for allocation in idle {
             // SAFETY: a pooled allocation is one no submit uses any longer
-            unsafe { allocation.free(&context.device) };
+            unsafe { allocation.release(context) };
         }
         let retried = Self::allocate_once(context, len, capacity, true, pooled);
         if !out_of_memory(&retried) {
@@ -292,6 +307,9 @@ impl Buffer {
                     .map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())?
                     .cast()
             };
+            if device_local {
+                context.device_bytes.fetch_add(capacity, Ordering::Relaxed);
+            }
             Ok(Self {
                 context: context.clone(),
                 buffer,
@@ -439,6 +457,7 @@ impl Drop for Buffer {
             buffer: self.buffer,
             memory: self.memory,
             ptr: self.ptr,
+            size: self.capacity,
         };
         if !self.pooled && self.ptr.is_null() {
             self.context
@@ -456,12 +475,53 @@ impl Drop for Buffer {
         };
         if let Some(allocation) = refused {
             // SAFETY: see above
-            unsafe { allocation.free(&self.context.device) };
+            unsafe { allocation.release(&self.context) };
         }
     }
 }
 
+// frees idle device buffers, the largest first, until `capacity` more device memory leaves ROOM_MARGIN_BYTES of the
+// device's budget; once the pool is empty, the finished work's buffers come back to it first (once)
+fn make_room(context: &Context, capacity: u64) -> Result<()> {
+    let limit = context.device_budget.saturating_sub(ROOM_MARGIN_BYTES);
+    let mut synchronized = false;
+    while context.device_bytes.load(Ordering::Relaxed) + capacity > limit {
+        let largest = context
+            .pool
+            .lock()
+            .expect("vulkan pool poisoned")
+            .pop_largest(true);
+        match largest {
+            // SAFETY: a pooled allocation is one no submit uses any longer
+            Some(allocation) => unsafe { allocation.release(context) },
+            None if !synchronized => {
+                synchronized = true;
+                if !context.try_synchronize()? {
+                    break;
+                }
+            }
+            None => break,
+        }
+    }
+    Ok(())
+}
+
 impl BufferPool {
+    // the largest idle allocation of one placement, out of the pool
+    fn pop_largest(&mut self, device_local: bool) -> Option<Allocation> {
+        let key = self
+            .free
+            .iter()
+            .filter(|(key, allocations)| key.0 == device_local && !allocations.is_empty())
+            .map(|(&key, _)| key)
+            .max_by_key(|&(_, capacity)| capacity)?;
+        let allocation = self.free.get_mut(&key)?.pop()?;
+        if !device_local {
+            self.bytes -= key.1;
+        }
+        Some(allocation)
+    }
+
     // every idle allocation of one placement, out of the pool
     fn drain(&mut self, device_local: bool) -> Vec<Allocation> {
         let mut out = Vec::new();
@@ -469,7 +529,9 @@ impl BufferPool {
             if local != device_local {
                 return true;
             }
-            self.bytes -= capacity * allocations.len() as u64;
+            if !local {
+                self.bytes -= capacity * allocations.len() as u64;
+            }
             out.append(allocations);
             false
         });
@@ -478,7 +540,9 @@ impl BufferPool {
 
     fn take(&mut self, device_local: bool, capacity: u64) -> Option<Allocation> {
         let allocation = self.free.get_mut(&(device_local, capacity))?.pop()?;
-        self.bytes -= capacity;
+        if !device_local {
+            self.bytes -= capacity;
+        }
         Some(allocation)
     }
 
@@ -489,10 +553,13 @@ impl BufferPool {
         capacity: u64,
         allocation: Allocation,
     ) -> Option<Allocation> {
-        if capacity > MAX_POOLED_BYTES || self.bytes + capacity > MAX_POOL_BYTES {
+        if capacity > MAX_POOLED_BYTES || (!device_local && self.bytes + capacity > MAX_POOL_BYTES)
+        {
             return Some(allocation);
         }
-        self.bytes += capacity;
+        if !device_local {
+            self.bytes += capacity;
+        }
         self.free
             .entry((device_local, capacity))
             .or_default()
@@ -629,6 +696,41 @@ mod tests {
             Buffer::new(&context, LEN)?.is_mapped(),
             context.is_unified()
         );
+        Ok(())
+    }
+
+    // device memory is counted while a buffer lives and while the pool holds it, and released largest first
+    #[test]
+    fn device_bytes_follow_buffers_through_the_pool() -> Result<()> {
+        let context = match Context::new() {
+            Ok(context) => context,
+            Err(err) => {
+                eprintln!("skipping: {err}");
+                return Ok(());
+            }
+        };
+        let base = context.device_bytes.load(Ordering::Relaxed);
+        let sizes = [3 << 20, 40 << 20, 5 << 20];
+        let buffers: Vec<_> = sizes
+            .iter()
+            .map(|&len| Buffer::new(&context, len))
+            .collect::<Result<_>>()?;
+        let held: u64 = sizes.iter().map(|&len| capacity(len as u64)).sum();
+        let device = !context.is_unified();
+        let expect = |bytes| if device { base + bytes } else { base };
+        assert_eq!(context.device_bytes.load(Ordering::Relaxed), expect(held));
+        drop(buffers);
+        assert_eq!(context.device_bytes.load(Ordering::Relaxed), expect(held));
+        if device {
+            let largest = context.pool.lock().unwrap().pop_largest(true).unwrap();
+            assert_eq!(largest.size, capacity(40 << 20));
+            // SAFETY: a pooled allocation is one no submit uses
+            unsafe { largest.release(&context) };
+            assert_eq!(
+                context.device_bytes.load(Ordering::Relaxed),
+                expect(held - capacity(40 << 20))
+            );
+        }
         Ok(())
     }
 
