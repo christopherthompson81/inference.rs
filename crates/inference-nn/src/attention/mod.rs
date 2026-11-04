@@ -543,6 +543,21 @@ impl Sdpa {
         // If the mask is provided, then softcapping isn't allowed - default back to naive SDPA
         // Softcapping is implemented for vector SDPA.
         let all_head_dims_match = head_dim == k_head_dim && k_head_dim == v_head_dim;
+        if q.device().is_vulkan()
+            && all_head_dims_match
+            && sdpa_params.softcap.is_none_or(|x| x == 1.0)
+            && let Some(out) =
+                inference_tensor::vulkan::flash_attn(&inference_tensor::vulkan::FlashAttn {
+                    q,
+                    k,
+                    v,
+                    mask,
+                    scale: sdpa_params.softmax_scale,
+                    causal,
+                })?
+        {
+            return Ok(out);
+        }
         let tgt_mask_shape = vec![b_sz, n_attn_heads, seq_len, k.dim(2)?];
         let can_use_mask = mask.is_none_or(|mask| {
             mask.layout().broadcast_as(tgt_mask_shape.clone()).is_ok()

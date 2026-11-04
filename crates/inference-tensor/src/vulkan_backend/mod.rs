@@ -688,6 +688,76 @@ pub(crate) fn paged_cache_write(
         .map_err(vk_err)
 }
 
+pub(crate) fn flash_attn(op: &crate::vulkan::FlashAttn<'_>) -> Result<Option<Tensor>> {
+    let f32 = DType::F32;
+    let (batch, heads, positions, head_size) = op.q.dims4()?;
+    let (k_batch, kv_heads, keys, k_head) = op.k.dims4()?;
+    let shapes_match = k_batch == batch && k_head == head_size && op.v.dims() == op.k.dims();
+    let all_f32 = [op.q, op.k, op.v].iter().all(|t| t.dtype() == f32);
+    if !shapes_match
+        || !all_f32
+        || !inference_vulkan::FlashAttn::supports(heads, kv_heads, head_size)
+        || (op.causal && keys < positions)
+    {
+        return Ok(None);
+    }
+    // a mask shared by every batch and head, as one (positions, keys) matrix
+    let mask = match op.mask {
+        Some(m) => {
+            let dims = m.dims();
+            let rank = dims.len();
+            let leading_ones = dims[..rank.saturating_sub(2)].iter().all(|&d| d == 1);
+            if m.dtype() != f32 || rank < 2 || !leading_ones {
+                return Ok(None);
+            }
+            let m = m.reshape((dims[rank - 2], dims[rank - 1]))?;
+            Some(m.broadcast_as((positions, keys))?.contiguous()?)
+        }
+        None => None,
+    };
+    let device = op.q.device().as_vulkan_device()?.clone();
+    let (q, k, v) = (op.q.contiguous()?, op.k.contiguous()?, op.v.contiguous()?);
+    let (qb, kb, vb) = (bound(&q, f32)?, bound(&k, f32)?, bound(&v, f32)?);
+    let mb = mask.as_ref().map(|m| bound(m, f32)).transpose()?;
+    if [qb.1, kb.1, vb.1].iter().any(|o| o % 4 != 0) {
+        return Ok(None);
+    }
+    let count = batch * heads * positions * head_size;
+    let out = VulkanStorage {
+        buffer: Arc::new(device.buffer(count * 4)?),
+        device: device.clone(),
+        count,
+        dtype: f32,
+    };
+    let piece = inference_vulkan::FlashAttn::piece_positions(heads, keys, head_size);
+    // a piece a record, so the stream submits between them
+    for first in (0..positions).step_by(piece) {
+        device
+            .context
+            .record(|r| {
+                r.flash_attn(&inference_vulkan::FlashAttn {
+                    batch,
+                    heads,
+                    kv_heads,
+                    positions,
+                    keys,
+                    head_size,
+                    scale: op.scale,
+                    causal: op.causal,
+                    first,
+                    count: piece.min(positions - first),
+                    q: (&qb.0, qb.1),
+                    k: (&kb.0, kb.1),
+                    v: (&vb.0, vb.1),
+                    mask: mb.as_ref().map(|m| (&m.0, m.1)),
+                    out: &out.buffer,
+                })
+            })
+            .map_err(vk_err)?;
+    }
+    Ok(Some(tensor_of(out, (batch, heads, positions, head_size))))
+}
+
 pub(crate) fn paged_decode(op: &crate::vulkan::PagedDecode<'_>) -> Result<Tensor> {
     let shape = cache_shape(op.key_cache, op.value_cache)?;
     let (seqs, heads, head_size) = op.q.dims3()?;
@@ -1627,6 +1697,61 @@ mod tests {
             dst.to_device(&Device::Cpu)?.to_vec2::<f32>()?,
             want.to_vec2::<f32>()?
         );
+        Ok(())
+    }
+
+    // fused attention against softmax(scale q k^T + mask) v on the CPU: GQA, keys past the positions (a cached prefix), a
+    // partial last tile, with the model's causal mask and without one
+    #[test]
+    fn fused_vulkan_attention_matches_its_definition() -> Result<()> {
+        let Some(vk) = device() else { return Ok(()) };
+        for (batch, heads, kv_heads, positions, keys, head_size, masked) in [
+            (2usize, 32usize, 2usize, 75usize, 75usize, 128usize, true),
+            (1, 8, 8, 40, 107, 80, true),
+            (1, 6, 2, 33, 33, 64, false),
+        ] {
+            let r = |shape: &[usize]| Tensor::randn(0f32, 1.0, shape, &Device::Cpu);
+            let q = r(&[batch, heads, positions, head_size])?;
+            let k = r(&[batch, kv_heads, keys, head_size])?;
+            let v = r(&[batch, kv_heads, keys, head_size])?;
+            let offset = keys - positions;
+            let causal: Vec<f32> = (0..positions * keys)
+                .map(|i| {
+                    if i % keys > i / keys + offset {
+                        f32::NEG_INFINITY
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            let mask = Tensor::from_vec(causal, (positions, keys), &Device::Cpu)?;
+            let scale = 1.0 / (head_size as f32).sqrt();
+            let group = heads / kv_heads;
+            let expand = |t: &Tensor| -> Result<Tensor> {
+                t.unsqueeze(2)?
+                    .broadcast_as((batch, kv_heads, group, keys, head_size))?
+                    .reshape((batch, heads, keys, head_size))
+            };
+            let scores = (q.matmul(&expand(&k)?.t()?)? * f64::from(scale))?;
+            let scores = if masked {
+                scores.broadcast_add(&mask)?
+            } else {
+                scores
+            };
+            let want = crate::nn::ops::softmax_last_dim(&scores)?.matmul(&expand(&v)?)?;
+            let on = |t: &Tensor| t.to_device(&vk);
+            let mask_vk = on(&mask)?;
+            let got = crate::vulkan::flash_attn(&crate::vulkan::FlashAttn {
+                q: &on(&q)?,
+                k: &on(&k)?,
+                v: &on(&v)?,
+                mask: masked.then_some(&mask_vk),
+                scale,
+                causal: masked,
+            })?
+            .expect("the kernel takes this shape");
+            assert_close(&got, &want, 1e-4)?;
+        }
         Ok(())
     }
 

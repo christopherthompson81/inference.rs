@@ -896,3 +896,124 @@ impl Recorder<'_> {
         Ok(())
     }
 }
+
+pub(crate) const FLASH_BINDINGS: usize = 5;
+pub(crate) const FLASH_PUSH_BYTES: u32 = 16 * 4;
+// flash_attn.comp's rows a workgroup, widest head and vec4 width
+const FLASH_ROWS: usize = 128;
+const FLASH_MAX_HEAD: usize = 128;
+const FLASH_VEC: usize = 4;
+
+/// Fused prompt attention over contiguous f32 `q` `(batch, heads, positions, head_size)` and `k`, `v`
+/// `(batch, kv_heads, keys, head_size)` into `out` laid out as `q`, for positions `first..first + count` (a call's
+/// piece: [`FlashAttn::piece_positions`] bounds one submit's work). `mask` is an additive `(positions, keys)` matrix
+/// every batch and head shares; `causal` skips keys past each position's diagonal, which the mask must hide too.
+pub struct FlashAttn<'a> {
+    pub batch: usize,
+    pub heads: usize,
+    pub kv_heads: usize,
+    pub positions: usize,
+    pub keys: usize,
+    pub head_size: usize,
+    pub scale: f32,
+    pub causal: bool,
+    pub first: usize,
+    pub count: usize,
+    pub q: At<'a>,
+    pub k: At<'a>,
+    pub v: At<'a>,
+    pub mask: Option<At<'a>>,
+    pub out: &'a Arc<Buffer>,
+}
+
+impl FlashAttn<'_> {
+    /// Whether the kernel takes this shape.
+    pub fn supports(heads: usize, kv_heads: usize, head_size: usize) -> bool {
+        kv_heads > 0
+            && heads.is_multiple_of(kv_heads)
+            && head_size > 0
+            && head_size <= FLASH_MAX_HEAD
+            && head_size.is_multiple_of(FLASH_VEC)
+    }
+
+    /// Positions a piece of a call takes so its multiply-adds stay within one submit's work.
+    pub fn piece_positions(heads: usize, keys: usize, head_size: usize) -> usize {
+        let per_position = (2 * heads * keys.max(1) * head_size) as u64;
+        let positions = (crate::stream::WORK_PER_SUBMIT / per_position) as usize;
+        positions.max(FLASH_ROWS).next_multiple_of(FLASH_ROWS)
+    }
+
+    // the query heads a workgroup's rows take (a divisor of the group), and its positions
+    fn rows(&self) -> (usize, usize) {
+        let group = self.heads / self.kv_heads;
+        let row_heads = (1..=group.min(FLASH_ROWS))
+            .rev()
+            .find(|h| group.is_multiple_of(*h))
+            .unwrap_or(1);
+        (row_heads, FLASH_ROWS / row_heads)
+    }
+}
+
+impl Recorder<'_> {
+    pub fn flash_attn(&self, op: &FlashAttn<'_>) -> Result<()> {
+        let vec4 = |at: usize| at.is_multiple_of(FLASH_VEC);
+        if !FlashAttn::supports(op.heads, op.kv_heads, op.head_size)
+            || (op.causal && op.keys < op.positions)
+            || op.first + op.count > op.positions
+            || ![op.q.1, op.k.1, op.v.1].into_iter().all(vec4)
+        {
+            return Err(Error::Invalid(format!(
+                "fused attention of {} heads over {} kv heads, head size {}, {} positions over {} keys",
+                op.heads, op.kv_heads, op.head_size, op.positions, op.keys
+            )));
+        }
+        if op.count == 0 || op.batch == 0 {
+            return Ok(());
+        }
+        let (row_heads, row_positions) = op.rows();
+        let chunks = op.heads / op.kv_heads / row_heads;
+        let mut bytes = words(&[
+            op.positions,
+            op.keys,
+            op.heads,
+            op.kv_heads,
+            op.head_size / FLASH_VEC,
+        ])?;
+        bytes.extend_from_slice(&op.scale.to_bits().to_le_bytes());
+        bytes.extend(words(&[
+            op.q.1 / FLASH_VEC,
+            op.k.1 / FLASH_VEC,
+            op.v.1 / FLASH_VEC,
+            op.mask.map_or(0, |m| m.1),
+            0,
+            usize::from(op.mask.is_some()),
+            usize::from(op.causal),
+            row_heads,
+            row_positions,
+            op.first,
+        ])?);
+        // without a mask the queries stand in for its binding, never read
+        let mask = op.mask.map_or(op.q.0, |m| m.0);
+        let buffers = [op.q.0, op.k.0, op.v.0, mask, op.out];
+        self.context.kernels.flash_attn.dispatch(
+            self,
+            &buffers.map(|b| b.buffer),
+            &bytes,
+            [
+                op.count.div_ceil(row_positions) as u32,
+                (op.kv_heads * chunks) as u32,
+                op.batch as u32,
+            ],
+        );
+        let keys = if op.causal { op.keys / 2 + 1 } else { op.keys };
+        self.work.set(
+            self.work
+                .get()
+                .saturating_add((2 * op.batch * op.heads * op.count * keys * op.head_size) as u64),
+        );
+        for buffer in buffers {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+}
