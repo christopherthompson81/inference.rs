@@ -1,0 +1,33 @@
+#version 450
+// The CPU sampler's penalties on rows of f32 logits, in place, as a sparse list of (row << 1 | seen, token, generated
+// count, bias bits) entries, one a distinct context or biased token of a row: frequency and presence off the count,
+// then repetition on a seen token's logit (divided when positive, multiplied otherwise), then the bias.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer E { uvec4 entries[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint vocab;
+    uint count;
+    uint x_off;
+    float frequency;
+    float presence;
+    float repetition;
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) {
+        return;
+    }
+    uvec4 e = entries[i];
+    uint at = pc.x_off + (e.x >> 1) * pc.vocab + e.y;
+    float generated = float(e.z);
+    float logit = x[at] - generated * pc.frequency - (e.z > 0u ? pc.presence : 0.0);
+    if ((e.x & 1u) != 0u && pc.repetition != 1.0) {
+        logit = logit > 0.0 ? logit / pc.repetition : logit * pc.repetition;
+    }
+    x[at] = logit + uintBitsToFloat(e.w);
+}

@@ -1671,8 +1671,6 @@ impl Sampler {
         logits.device().is_vulkan()
             && self.temperature.is_some_and(|t| t > 0.0)
             && filters
-            && !self.needs_penalties()
-            && self.logits_bias.is_empty()
             && self.logits_processors.is_empty()
             && self
                 .dry_params
@@ -1682,14 +1680,19 @@ impl Sampler {
     }
 
     // a vocabulary row's ranked top-K from the device, filtered here; `None` where the filters reach past it
-    fn vulkan_ranked_support(&self, logits: &Tensor) -> Result<Option<RankedSupport>> {
+    fn vulkan_ranked_support(
+        &self,
+        logits: &Tensor,
+        context: &[u32],
+        prompt_len: usize,
+    ) -> Result<Option<RankedSupport>> {
         let temperature = self.temperature.unwrap_or(1.0);
         let row = logits.flatten_all()?;
         let vocab = row.dim(0)?;
-        let packed =
-            inference_tensor::vulkan::ranked_top_k(&row.reshape((1, vocab))?, temperature)?
-                .flatten_all()?
-                .to_vec1::<f32>()?;
+        let row = self.penalized_on_vulkan(&row.reshape((1, vocab))?, context, &[], prompt_len)?;
+        let packed = inference_tensor::vulkan::ranked_top_k(&row, temperature)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
         Ok(ranked_support(
             &packed,
             (1.0 / temperature) as f32,
@@ -1700,17 +1703,25 @@ impl Sampler {
     }
 
     /// Every row of `logits` (`(.., rows, vocab)`) ranked on Vulkan in one dispatch and read back once, where this
-    /// sampler's filters keep each row within its top-K; `None` otherwise, for the row-by-row path.
-    pub fn ranked_speculative_rows(&self, logits: &Tensor) -> Result<Option<Vec<RankedProbs>>> {
+    /// sampler's filters keep each row within its top-K; `None` otherwise, for the row-by-row path. Row `i` is
+    /// penalized over `context` and the `drafts` before it, as the CPU's verifier sees it once those are accepted.
+    pub fn ranked_speculative_rows(
+        &self,
+        logits: &Tensor,
+        context: &[u32],
+        drafts: &[u32],
+        prompt_len: usize,
+    ) -> Result<Option<Vec<RankedProbs>>> {
         if !self.can_rank_on_vulkan(logits) {
             return Ok(None);
         }
         let vocab = logits.dim(inference_tensor::D::Minus1)?;
         let rows = logits.elem_count() / vocab;
         let temperature = self.temperature.unwrap_or(1.0);
+        let logits =
+            self.penalized_on_vulkan(&logits.reshape((rows, vocab))?, context, drafts, prompt_len)?;
         let packed =
-            inference_tensor::vulkan::ranked_top_k(&logits.reshape((rows, vocab))?, temperature)?
-                .to_vec2::<f32>()?;
+            inference_tensor::vulkan::ranked_top_k(&logits, temperature)?.to_vec2::<f32>()?;
         let inv_temperature = (1.0 / temperature) as f32;
         let mut ranked = Vec::with_capacity(rows);
         for row in &packed {
@@ -1734,6 +1745,64 @@ impl Sampler {
             });
         }
         Ok(Some(ranked))
+    }
+
+    // `(rows, vocab)` logits with this sampler's penalties and bias on the device, row `i` over `context` and the
+    // first `i` of `drafts` (the CPU's rule: frequency and presence count generated tokens, repetition every one)
+    fn penalized_on_vulkan(
+        &self,
+        logits: &Tensor,
+        context: &[u32],
+        drafts: &[u32],
+        prompt_len: usize,
+    ) -> Result<Tensor> {
+        if !self.needs_penalties() && self.logits_bias.is_empty() {
+            return Ok(logits.clone());
+        }
+        let penalized = self.frequency_penalty.is_some()
+            || self.presence_penalty.is_some()
+            || self.repetition_penalty.is_some();
+        let (rows, vocab) = logits.dims2()?;
+        // a token's generated count and whether it was seen at all
+        let add = |seen: &mut HashMap<u32, (u32, bool)>, at: usize, token: u32| {
+            if penalized && (token as usize) < vocab {
+                let entry = seen.entry(token).or_default();
+                entry.1 = true;
+                entry.0 += u32::from(at >= prompt_len);
+            }
+        };
+        let mut seen = HashMap::new();
+        for (at, &token) in context.iter().enumerate() {
+            add(&mut seen, at, token);
+        }
+        let mut entries = Vec::new();
+        for row in 0..rows {
+            let mut row_seen = seen.clone();
+            for (k, &token) in drafts.iter().take(row).enumerate() {
+                add(&mut row_seen, context.len() + k, token);
+            }
+            for &token in self.logits_bias.keys() {
+                if (token as usize) < vocab {
+                    row_seen.entry(token).or_default();
+                }
+            }
+            for (token, (count, was_seen)) in row_seen {
+                let bias = self.logits_bias.get(&token).copied().unwrap_or(0.0);
+                entries.push([
+                    (row as u32) << 1 | u32::from(was_seen),
+                    token,
+                    count,
+                    bias.to_bits(),
+                ]);
+            }
+        }
+        inference_tensor::vulkan::penalize(
+            logits,
+            &entries,
+            self.frequency_penalty.unwrap_or(0.0),
+            self.presence_penalty.unwrap_or(0.0),
+            self.repetition_penalty.unwrap_or(1.0),
+        )
     }
 
     fn needs_penalties(&self) -> bool {
@@ -2196,7 +2265,7 @@ impl Sampler {
         prompt_len: usize,
     ) -> Result<SpeculativeProbs> {
         if self.can_rank_on_vulkan(&logits)
-            && let Some(support) = self.vulkan_ranked_support(&logits)?
+            && let Some(support) = self.vulkan_ranked_support(&logits, context, prompt_len)?
         {
             let vocab = logits.elem_count();
             let (mut sampling, mut reporting) = (vec![0.0; vocab], vec![0.0; vocab]);
@@ -2600,7 +2669,7 @@ impl Sampler {
             && !return_logprobs
             && !sample_speculative
             && self.can_rank_on_vulkan(&logits)
-            && let Some(support) = self.vulkan_ranked_support(&logits)?
+            && let Some(support) = self.vulkan_ranked_support(&logits, context, prompt_len)?
         {
             let distr = WeightedIndex::new(&support.sampling).map_err(|e| {
                 Error::Msg(format!("Failed to construct the ranked top-k sampler: {e}"))
@@ -3589,7 +3658,7 @@ mod tests {
         .unwrap();
         let logits = Tensor::from_vec(rows.clone(), (1, 3, VOCAB), &vk).unwrap();
         let ranked = sampler
-            .ranked_speculative_rows(&logits)
+            .ranked_speculative_rows(&logits, &[0], &[], 1)
             .unwrap()
             .expect("the nuclei fit");
         for (r, row) in ranked.iter().enumerate() {
@@ -3598,6 +3667,61 @@ mod tests {
             let got = row.dense(VOCAB);
             for (g, w) in got.sampling.iter().zip(&want.sampling) {
                 assert!((g - w).abs() < 1e-5, "row {r}: {g} vs {w}");
+            }
+        }
+    }
+
+    // penalties and bias on the device, row by row over the context and the drafts before it, as the CPU applies them
+    #[test]
+    fn device_penalties_rank_as_the_cpu_does() {
+        use super::Sampler;
+        let Ok(vk) = Device::new_vulkan(0) else {
+            return;
+        };
+        const VOCAB: usize = 2048;
+        let rows: Vec<f32> = (0..3 * VOCAB)
+            .map(|i| -0.15 * ((i * 7919) % VOCAB) as f32 + 4.0 - (i / VOCAB) as f32 * 0.2)
+            .collect();
+        // the row's likeliest tokens, so the penalties move the nucleus
+        let top = |r: usize| {
+            (0..VOCAB)
+                .max_by(|&a, &b| rows[r * VOCAB + a].total_cmp(&rows[r * VOCAB + b]))
+                .unwrap() as u32
+        };
+        let context = vec![top(0), 5, top(1), 9, top(0), 300, top(2)];
+        let drafts = [top(1), top(2)];
+        let prompt_len = 3;
+        let bias = HashMap::from([(top(2), -1.5f32), (17, 2.0)]);
+        let sampler = Sampler::new(
+            Some(0.8),
+            0,
+            None,
+            Some(0.2),
+            Some(0.3),
+            Some(1.3),
+            None,
+            0,
+            0.95,
+            0.0,
+            bias,
+            vec![],
+        )
+        .unwrap();
+        let logits = Tensor::from_vec(rows.clone(), (1, 3, VOCAB), &vk).unwrap();
+        let ranked = sampler
+            .ranked_speculative_rows(&logits, &context, &drafts, prompt_len)
+            .unwrap()
+            .expect("the nuclei fit");
+        for (r, row) in ranked.iter().enumerate() {
+            let mut row_context = context.clone();
+            row_context.extend_from_slice(&drafts[..r]);
+            let cpu = Tensor::new(&rows[r * VOCAB..(r + 1) * VOCAB], &Device::Cpu).unwrap();
+            let want = sampler
+                .speculative_target_probs(cpu, &row_context, prompt_len)
+                .unwrap();
+            let got = row.dense(VOCAB);
+            for (i, (g, w)) in got.sampling.iter().zip(&want.sampling).enumerate() {
+                assert!((g - w).abs() < 1e-5, "row {r} token {i}: {g} vs {w}");
             }
         }
     }

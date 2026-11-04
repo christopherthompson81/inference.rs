@@ -1192,9 +1192,16 @@ impl PreparedProposalDistribution {
         distribution: SpeculativeProposalDistribution,
         positions: usize,
         sampler: &Sampler,
+        seq: &Sequence,
+        drafts: &[u32],
     ) -> Result<Self> {
         if let SpeculativeProposalDistribution::Logits(logits) = &distribution
-            && let Some(rows) = sampler.ranked_speculative_rows(logits)?
+            && let Some(rows) = sampler.ranked_speculative_rows(
+                logits,
+                seq.get_toks(),
+                drafts,
+                seq.prompt_tokens(),
+            )?
             && rows.len() >= positions
         {
             let (token_ids, probs) = rows
@@ -1375,13 +1382,22 @@ async fn finish_verified_step_stochastic(
 ) -> Result<VerificationOutcome> {
     let sampler = seq.sampler();
     let proposal_distribution = match proposal_distribution {
-        Some(distribution) => {
-            PreparedProposalDistribution::new_ranked(distribution, proposal.len(), &sampler)?
-        }
+        Some(distribution) => PreparedProposalDistribution::new_ranked(
+            distribution,
+            proposal.len(),
+            &sampler,
+            seq,
+            &proposal,
+        )?,
         None => PreparedProposalDistribution::Deterministic,
     };
     // on Vulkan every verify row is ranked in one dispatch and read back once
-    let ranked_targets = sampler.ranked_speculative_rows(&verify_logits)?;
+    let ranked_targets = sampler.ranked_speculative_rows(
+        &verify_logits,
+        seq.get_toks(),
+        &proposal,
+        seq.prompt_tokens(),
+    )?;
     let vocab = verify_logits.dim(inference_tensor::D::Minus1)?;
     let target_probs_at = |seq: &Sequence, row: usize| -> Result<SpeculativeProbs> {
         match &ranked_targets {

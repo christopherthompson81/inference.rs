@@ -160,6 +160,24 @@ pub fn ranked_top_k(logits: &Tensor, temperature: f64) -> Result<Tensor> {
     }
 }
 
+/// A copy of f32 `logits` `(rows, vocab)` with the sampler's penalties applied through `entries`: one a distinct token of
+/// a row, `[row << 1 | seen, token, generated count, bias bits]` (see the Vulkan `Penalize` op).
+pub fn penalize(
+    logits: &Tensor,
+    entries: &[[u32; 4]],
+    frequency: f32,
+    presence: f32,
+    repetition: f32,
+) -> Result<Tensor> {
+    #[cfg(feature = "vulkan")]
+    return crate::vulkan_backend::penalize(logits, entries, frequency, presence, repetition);
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = (logits, entries, frequency, presence, repetition);
+        Err(crate::Error::NotCompiledWithVulkanSupport)
+    }
+}
+
 /// The values a row of [`ranked_top_k`] holds.
 pub const RANKED_TOP_K: usize = 128;
 

@@ -919,3 +919,22 @@ call, retained per layer across up to 3 batches in flight.
 
 **Result:** Lightning Q4_0 with a 262K q8 cache holds 244K tokens of context on the 3090 without spilling, peaking at
 23.6 GB.
+
+### Run 36 - 2026-11-04 ~16:00 (laptop: Radeon 780M)
+
+**Question:** the web UI's chats decoded slower than the benches, the GPU ~80 % busy. The UI's sampling defaults are
+temperature 0.7, top_p 0.9, top_k 40 and a repetition penalty of 1.1. Any penalty or logit bias kept Run 32's device
+top-K off, so each row went back to the full-vocabulary readback and CPU filter.
+
+**Change:** `penalize.comp` applies the CPU sampler's frequency, presence and repetition penalties and logit bias to
+a copy of the logits on the device, through a sparse list of (row, token, generated count, bias) entries, one a
+distinct context or biased token of a row. Frequency and presence count generated tokens, repetition every context
+token, then the bias, as `apply_freq_pres_rep_penalty` and `apply_logits_bias` do. The ranked top-K then reads the
+penalized rows. A verify step's row `i` is penalized over the context plus the drafts before it, as the CPU's
+verifier sees it once those are accepted, and a draft row the same way.
+
+**Test:** `device_penalties_rank_as_the_cpu_does` (repetition, frequency and presence penalties and a bias, over a
+context and drafts: each row's filtered distribution as the CPU's within 1e-5).
+
+**Result (a served MTP 3 chat turn, 256 tokens, three seeds):** the UI's defaults went 22.8 / 20.3 / 22.5 ->
+27.1 / 26.7 / 26.7 tok/s. Temperature 1.0 with top_p 0.95 is unchanged: 28.5 / 26.2 / 27.4 -> 28.6 / 26.3 / 27.2.
