@@ -3375,24 +3375,24 @@ impl NormalModel for Qwen3_5TextModel {
 
     fn forward(&self, input_ids: &Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
         let input_embeds = self.embed_tokens(input_ids)?;
-        let attention_mask = if ctx.is_paged() {
-            CausalMasker.make_causal_mask(
-                input_ids,
-                &ForwardMaskCache::Paged(ctx.seqlen_offsets()),
-                self.dtype,
-                &CausalMaskConfig::default(),
-            )?
-        } else {
-            let hybrid_cache = self.cache.hybrid();
-            CausalMasker.make_causal_mask(
-                input_ids,
-                &*hybrid_cache as &dyn PastKvLenCache,
-                self.dtype,
-                &CausalMaskConfig::default(),
-            )?
-        };
+        // later chunks attend through the paged cache, so only the first needs a mask
         let attention_mask = if ctx.is_first_prompt_chunk() {
-            attention_mask
+            if ctx.is_paged() {
+                CausalMasker.make_causal_mask(
+                    input_ids,
+                    &ForwardMaskCache::Paged(ctx.seqlen_offsets()),
+                    self.dtype,
+                    &CausalMaskConfig::default(),
+                )?
+            } else {
+                let hybrid_cache = self.cache.hybrid();
+                CausalMasker.make_causal_mask(
+                    input_ids,
+                    &*hybrid_cache as &dyn PastKvLenCache,
+                    self.dtype,
+                    &CausalMaskConfig::default(),
+                )?
+            }
         } else {
             AttentionMask::None
         };

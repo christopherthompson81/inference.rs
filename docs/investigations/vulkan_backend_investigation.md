@@ -844,3 +844,78 @@ matches plain's.
 **Left:** each draft's sample is read back (3 a step). Chaining drafts on the device needs the pick there, with its
 uniform from the host (as CUDA's draft sampler does). The Mamba state copies take ~420 small dispatches, ~7 ms a
 step. `ranked_topk` runs a workgroup a row, ~0.4 ms each.
+
+### Run 34 - 2026-11-04 ~11:30 (desktop: RTX 3090)
+
+**Question:** does the engine's quantized KV cache, ported to Vulkan, let Lightning (Q4_0 experts) hold 256K of
+context on the 3090 without spilling?
+
+**Port:**
+- The row format is CUDA's (`kv_quant`): HND rows of bytes. Each 32-value group is rotated by a 32-wide Hadamard,
+  quantized on a midpoint grid against its absmax, and given an f16 scale.
+- `paged_cache_write_quant` uses one thread per (token, kv head, K or V) row.
+- `paged_decode` and `paged_prefill` get `CACHE_QUANT` builds whose tile loaders dequantize into the same shared
+  tiles the float builds fill.
+- `hadamard_32` rotates the query into the cache's space and the output back out. The backend wrappers do both, so
+  callers pass U8 caches as they are.
+- The cache engine allocates HND quant rows on Vulkan and `validate_quant` admits Vulkan layers.
+- Test `vulkan_quantized_cache_scores_as_its_dequantized_rows` checks q8/q8, q4/q4 and q3/q5 against a host
+  fake-quantizer through CPU attention: max diff within 1e-3, prefill and decode. Giving the reference one more K bit
+  fails it (0.0019).
+
+**Run:**
+```
+srv.sh start --vulkan --paged-attn on --pa-context-len 262144 --pa-cache-type q8 --format gguf \
+  -m /mnt/data/models/nemotron-lightning-gguf -f Lightning-exps-q4_0.gguf
+longprompt.py 18765 <words>   # wiki text completions, nvidia-smi sampled each second
+```
+
+| prompt | time | peak VRAM |
+|---|---|---|
+| 3.0K tokens | 2.2 s | 23.3 GB |
+| 45.9K | 45.7 s | 23.6 GB |
+| 104.7K | 134.6 s | 24.1 GB |
+| 244.5K | 669.6 s | 24.1 GB |
+
+- The cache is 816 MB at q8, against about 1.6 GB at f16, and the server loads at 20.8 GB (f16: 21.5 GB).
+- Speed matches f16 (50K: 48.2 s before) and 244K tokens completes.
+- It still spilled: "device memory is full" printed during a prompt of 112K tokens or less. That message prints only
+  after the idle pool is drained and an allocation still fails, so live buffers, not pooled ones, filled the card.
+  The saved cache memory went to whatever grows with the context.
+
+**Next:** find what live memory grows with context. The first suspect is `paged_prefill`'s partials: up to 256 MiB a
+call, retained per layer across up to 3 batches in flight.
+
+### Run 35 - 2026-11-04 ~12:38 (desktop: RTX 3090)
+
+**Question:** what filled the card in Run 34, given that the idle pool was already drained?
+
+**Finding:**
+- The spill message now reports what was asked, held and free: `1600 MiB asked, 20949 MiB held, 1472 MiB free`, at
+  a 105K-token prompt.
+- A backtrace at the spill (a temporary env hook, since removed) pointed at `CausalMasker::make_causal_mask`, called
+  from Granite's `forward_embeds`. The mask covered chunk rows x the whole context, rebuilt for every chunk.
+- Granite then discarded it for every chunk but the first, since later chunks attend through the paged cache.
+  Qwen3-Next, Qwen3.5 text, Voxtral and Hunyuan MoE did the same; Qwen3.5's multimodal entry already skipped it.
+- All five now build the mask for the first chunk only.
+- `paged_prefill`'s partials budget is now its own 32 MiB, down from the shared 256 MiB. A prompt chunk's rows
+  already fill the GPU, and each layer's partials stay live until its batch completes.
+
+**Run** (same server as Run 34, q8 cache at 262K):
+
+| prompt | time | peak VRAM | spilled |
+|---|---|---|---|
+| 46K, after a 3K prompt | 36.7 s (Run 34: 45.7) | 23.6 GB | no |
+| 105K, after the 46K one | 112.5 s (Run 34: 134.6) | 23.6 GB | no |
+| 244K, fresh server | 715.3 s | 23.6 GB | no |
+| 105K, fresh server, 32 MiB partials | 149.6 s | 23.6 GB | no |
+| 105K, fresh server, 256 MiB partials | 151.1 s | 23.6 GB | no |
+
+- Each longer prompt starts with the shorter one's text, so a run after a shorter prompt reuses its cached prefix.
+  The ladder rows compare against Run 34's ladder; fresh-server rows compare only with each other.
+- Run 34's 244K-token figure (669.6 s) came after its 105K prompt, so it isn't comparable with 715.3 s either.
+- An exact repeat took 0.4 s.
+- The partials cap is speed-neutral (149.6 against 151.1 s), so it stays at 32 MiB.
+
+**Result:** Lightning Q4_0 with a 262K q8 cache holds 244K tokens of context on the 3090 without spilling, peaking at
+23.6 GB.

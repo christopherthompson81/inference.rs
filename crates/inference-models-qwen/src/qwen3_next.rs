@@ -1006,24 +1006,24 @@ impl Model {
         }
         let mut hybrid_cache = self.kv_cache.hybrid();
 
-        let mask = if ctx.is_paged() {
-            let cache = ForwardMaskCache::Paged(ctx.seqlen_offsets());
-            CausalMasker.make_causal_mask(
-                input_ids,
-                &cache,
-                x.dtype(),
-                &CausalMaskConfig::default(),
-            )?
-        } else {
-            CausalMasker.make_causal_mask(
-                input_ids,
-                &*hybrid_cache as &dyn PastKvLenCache,
-                x.dtype(),
-                &CausalMaskConfig::default(),
-            )?
-        };
+        // later chunks attend through the paged cache, so only the first needs a mask
         let mask = if ctx.is_first_prompt_chunk() {
-            mask
+            if ctx.is_paged() {
+                let cache = ForwardMaskCache::Paged(ctx.seqlen_offsets());
+                CausalMasker.make_causal_mask(
+                    input_ids,
+                    &cache,
+                    x.dtype(),
+                    &CausalMaskConfig::default(),
+                )?
+            } else {
+                CausalMasker.make_causal_mask(
+                    input_ids,
+                    &*hybrid_cache as &dyn PastKvLenCache,
+                    x.dtype(),
+                    &CausalMaskConfig::default(),
+                )?
+            }
         } else {
             AttentionMask::None
         };

@@ -483,3 +483,139 @@ fn vulkan_paged_prefill_matches_each_row_scored_alone() -> Result<()> {
     }
     Ok(())
 }
+
+// kv_quant's round trip on the host: each 32-group rotated, quantized at `bits` against an f16 scale, and rotated back
+fn fake_quantize(rows: &[f32], bits: u32) -> Vec<f32> {
+    fn hadamard(v: &mut [f32]) {
+        let mut s = 1;
+        while s < v.len() {
+            for i in 0..v.len() {
+                if i & s == 0 {
+                    let (a, b) = (v[i], v[i | s]);
+                    v[i] = a + b;
+                    v[i | s] = a - b;
+                }
+            }
+            s <<= 1;
+        }
+        let norm = 1.0 / (v.len() as f32).sqrt();
+        v.iter_mut().for_each(|x| *x *= norm);
+    }
+    let mid = (1u32 << (bits - 1)) as f32;
+    let qmax = ((1u32 << bits) - 1) as f32;
+    let mut out = rows.to_vec();
+    for group in out.chunks_mut(32) {
+        hadamard(group);
+        let scale = group.iter().fold(0f32, |m, x| m.max(x.abs())).max(1e-10);
+        let stored = half::f16::from_f32(scale).to_f32();
+        for x in group.iter_mut() {
+            let q = (*x / scale).mul_add(mid, mid).floor().clamp(0.0, qmax);
+            *x = (q + 0.5 - mid) / mid * stored;
+        }
+        hadamard(group);
+    }
+    out
+}
+
+#[test]
+fn vulkan_quantized_cache_scores_as_its_dequantized_rows() -> Result<()> {
+    let Ok(vk) = Device::new_vulkan(0) else {
+        return Ok(());
+    };
+    const BLOCK: usize = 16;
+    const KV_HEADS: usize = 2;
+    const HEADS: usize = 16;
+    const HEAD: usize = 128;
+    const CONTEXT: usize = 1500;
+    const ROWS: usize = 40;
+    let max_blocks = CONTEXT.div_ceil(BLOCK);
+    let blocks = max_blocks + 3;
+    let table: Vec<u32> = (0..max_blocks as u32)
+        .map(|b| (b * 7 + 3) % blocks as u32)
+        .collect();
+    let slots: Vec<i64> = (0..CONTEXT)
+        .map(|t| (table[t / BLOCK] as usize * BLOCK + t % BLOCK) as i64)
+        .collect();
+    let k = Tensor::randn(0f32, 1., (CONTEXT, KV_HEADS, HEAD), &Device::Cpu)?;
+    let v = Tensor::randn(0f32, 1., (CONTEXT, KV_HEADS, HEAD), &Device::Cpu)?;
+    let q = Tensor::randn(0f32, 1., (ROWS, HEADS, HEAD), &Device::Cpu)?;
+    let scale = 1.0 / (HEAD as f32).sqrt();
+    let tables = Tensor::from_vec(table.repeat(ROWS), (ROWS, max_blocks), &Device::Cpu)?;
+    let lens: Vec<u32> = (0..ROWS).map(|r| (CONTEXT - ROWS + r + 1) as u32).collect();
+    let lens = Tensor::new(lens.as_slice(), &Device::Cpu)?;
+    // odd widths cross word boundaries, and K and V may differ
+    for (k_bits, v_bits) in [(8u32, 8u32), (4, 4), (3, 5)] {
+        let fake = |t: &Tensor, bits| -> Result<Tensor> {
+            Tensor::from_vec(
+                fake_quantize(&t.flatten_all()?.to_vec1::<f32>()?, bits),
+                t.shape(),
+                &Device::Cpu,
+            )
+        };
+        let (kc, vc) = (
+            Tensor::zeros(
+                (blocks, KV_HEADS, HEAD / 4, BLOCK, 4),
+                DType::F32,
+                &Device::Cpu,
+            )?,
+            Tensor::zeros((blocks, KV_HEADS, HEAD, BLOCK), DType::F32, &Device::Cpu)?,
+        );
+        let cpu_slots = Tensor::new(slots.as_slice(), &Device::Cpu)?;
+        reshape_and_cache(
+            &fake(&k, k_bits)?,
+            &fake(&v, v_bits)?,
+            None,
+            None,
+            &kc,
+            &vc,
+            &cpu_slots,
+        )?;
+        let want = paged_attention(
+            &q, None, None, &kc, &vc, &tables, &lens, None, CONTEXT, scale, NO_SOFTCAP, None,
+        )?;
+
+        let rows = |bits| {
+            Tensor::zeros(
+                (
+                    blocks,
+                    KV_HEADS,
+                    BLOCK,
+                    crate::kv_quant::row_bytes(HEAD, bits),
+                ),
+                DType::U8,
+                &vk,
+            )
+        };
+        let (qk, qv) = (rows(k_bits)?, rows(v_bits)?);
+        let on = |t: &Tensor| t.to_device(&vk);
+        reshape_and_cache(&on(&k)?, &on(&v)?, None, None, &qk, &qv, &on(&cpu_slots)?)?;
+        let prefill =
+            inference_tensor::vulkan::paged_prefill(&inference_tensor::vulkan::PagedPrefill {
+                q: &on(&q)?,
+                key_cache: &qk,
+                value_cache: &qv,
+                block_table: &Tensor::new(table.as_slice(), &vk)?,
+                context: CONTEXT,
+                scale,
+            })?;
+        let decode = paged_attention(
+            &on(&q)?,
+            None,
+            None,
+            &qk,
+            &qv,
+            &on(&tables)?,
+            &on(&lens)?,
+            None,
+            CONTEXT,
+            scale,
+            NO_SOFTCAP,
+            None,
+        )?;
+        for (name, got) in [("prefill", prefill), ("decode", decode)] {
+            let diff = max_diff(&got.to_device(&Device::Cpu)?, &want)?;
+            assert!(diff <= 1e-3, "q{k_bits}/q{v_bits} {name}: max diff {diff}");
+        }
+    }
+    Ok(())
+}

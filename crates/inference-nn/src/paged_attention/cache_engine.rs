@@ -142,8 +142,8 @@ fn validate_fp8(
     Ok(())
 }
 
-// Quantized caches are read by fattn's paged mma kernel or dequantized by a gather: CUDA, the HND layout, and head
-// dims the row format takes.
+// Quantized caches are read by fattn's paged mma kernel or dequantized by a gather (CUDA, the HND layout), or by
+// Vulkan's paged kernels; either way, equal K and V head dims the row format takes.
 fn validate_quant(
     k_bits: u32,
     v_bits: u32,
@@ -166,49 +166,72 @@ fn validate_quant(
             "a quantized KV cache requires f16, bf16, or f32 activations, got {act_dtype:?}"
         ));
     }
-    #[cfg(not(all(feature = "cuda", target_family = "unix")))]
-    {
-        let _ = (model_config, device, layer_devices);
-        Err("a quantized KV cache requires the CUDA paged-attention backend".to_string())
-    }
-    #[cfg(all(feature = "cuda", target_family = "unix"))]
-    {
-        for layer_idx in 0..model_config.num_layers() {
-            if !model_config.layer_has_paged_kv_cache(layer_idx) {
-                continue;
-            }
-            let layer_device = layer_devices
-                .get(layer_idx)
-                .and_then(Option::as_ref)
-                .unwrap_or(device);
-            if !layer_device.is_cuda() {
-                return Err(format!(
-                    "a quantized KV cache is only supported on CUDA, got {layer_device:?} for layer {layer_idx}"
-                ));
-            }
-            if !inference_fattn::mma_available() {
-                return Err(
-                    "a quantized KV cache needs fattn's mma kernel (Turing or newer on every visible GPU)".to_string(),
-                );
-            }
-            let head_dim = model_config.k_head_dim_for_layer(layer_idx);
-            let layout = model_config.kv_cache_layout_for_layer(layer_idx);
-            if !matches!(layout, KvCacheLayout::FlashInferHnd)
-                || head_dim != model_config.v_head_dim_for_layer(layer_idx)
-            {
-                return Err(format!(
-                    "a quantized KV cache needs equal K and V head dims in the HND cache layout; layer {layer_idx} uses {layout:?}"
-                ));
-            }
-            if !head_dim.is_multiple_of(kv_quant::HEAD_DIM_MULTIPLE) {
-                return Err(format!(
-                    "a quantized KV cache needs head dims that are a multiple of {}, layer {layer_idx} has {head_dim}",
-                    kv_quant::HEAD_DIM_MULTIPLE
-                ));
-            }
+    for layer_idx in 0..model_config.num_layers() {
+        if !model_config.layer_has_paged_kv_cache(layer_idx) {
+            continue;
         }
-        Ok(())
+        let layer_device = layer_devices
+            .get(layer_idx)
+            .and_then(Option::as_ref)
+            .unwrap_or(device);
+        let head_dim = model_config.k_head_dim_for_layer(layer_idx);
+        if layer_device.is_vulkan() {
+            if head_dim != model_config.v_head_dim_for_layer(layer_idx) {
+                return Err(format!(
+                    "a quantized KV cache needs equal K and V head dims; layer {layer_idx} differs"
+                ));
+            }
+        } else {
+            validate_cuda_quant_layer(model_config, layer_device, layer_idx)?;
+        }
+        if !head_dim.is_multiple_of(kv_quant::HEAD_DIM_MULTIPLE) {
+            return Err(format!(
+                "a quantized KV cache needs head dims that are a multiple of {}, layer {layer_idx} has {head_dim}",
+                kv_quant::HEAD_DIM_MULTIPLE
+            ));
+        }
     }
+    Ok(())
+}
+
+#[cfg(not(all(feature = "cuda", target_family = "unix")))]
+fn validate_cuda_quant_layer(
+    _model_config: &dyn ModelConfigLike,
+    layer_device: &Device,
+    layer_idx: usize,
+) -> std::result::Result<(), String> {
+    Err(format!(
+        "a quantized KV cache requires the CUDA or Vulkan paged-attention backend, got {layer_device:?} for layer {layer_idx}"
+    ))
+}
+
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+fn validate_cuda_quant_layer(
+    model_config: &dyn ModelConfigLike,
+    layer_device: &Device,
+    layer_idx: usize,
+) -> std::result::Result<(), String> {
+    if !layer_device.is_cuda() {
+        return Err(format!(
+            "a quantized KV cache is only supported on CUDA or Vulkan, got {layer_device:?} for layer {layer_idx}"
+        ));
+    }
+    if !inference_fattn::mma_available() {
+        return Err(
+            "a quantized KV cache needs fattn's mma kernel (Turing or newer on every visible GPU)"
+                .to_string(),
+        );
+    }
+    let layout = model_config.kv_cache_layout_for_layer(layer_idx);
+    if !matches!(layout, KvCacheLayout::FlashInferHnd)
+        || model_config.k_head_dim_for_layer(layer_idx)
+            != model_config.v_head_dim_for_layer(layer_idx)
+    {
+        return Err(format!(
+            "a quantized KV cache needs equal K and V head dims in the HND cache layout; layer {layer_idx} uses {layout:?}"
+        ));
+    }
+    Ok(())
 }
 
 impl FromStr for PagedCacheType {
@@ -386,14 +409,21 @@ impl CacheEngine {
                 0
             };
             let requested_kv_cache_layout = model_config.kv_cache_layout_for_layer(layer_idx);
-            let kv_cache_layout =
-                if matches!(requested_kv_cache_layout, KvCacheLayout::FlashInferHnd)
-                    && !device.is_cuda()
-                {
-                    KvCacheLayout::Standard
-                } else {
-                    requested_kv_cache_layout
-                };
+            // Vulkan's kernels read quantized caches as the HND rows CUDA's do, and float ones in vLLM's layout
+            let vulkan_quant = device.is_vulkan()
+                && matches!(
+                    cache_config.layer_type(layer_idx),
+                    PagedCacheType::Quant { .. }
+                );
+            let kv_cache_layout = if vulkan_quant {
+                KvCacheLayout::FlashInferHnd
+            } else if matches!(requested_kv_cache_layout, KvCacheLayout::FlashInferHnd)
+                && !device.is_cuda()
+            {
+                KvCacheLayout::Standard
+            } else {
+                requested_kv_cache_layout
+            };
             let (key_blocks, value_blocks) = match kv_cache_layout {
                 KvCacheLayout::Standard => {
                     let key_block_shape = Self::calculate_key_block_shape(

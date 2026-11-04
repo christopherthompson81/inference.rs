@@ -246,8 +246,12 @@ impl Buffer {
             return retried;
         }
         if !SPILLED.swap(true, Ordering::Relaxed) {
+            let held = context.device_bytes.load(Ordering::Relaxed) >> 20;
             eprintln!(
-                "vulkan: device memory is full; further buffers live in host memory, read over the bus"
+                "vulkan: device memory is full ({} MiB asked, {held} MiB held, {} MiB free); further buffers live in \
+                 host memory, read over the bus",
+                capacity >> 20,
+                context.device_free() >> 20
             );
         }
         Self::allocate_once(context, len, capacity, false, pooled)
