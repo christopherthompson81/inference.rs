@@ -45,9 +45,10 @@ impl VulkanDevice {
         Buffer::new(&self.context, bytes.max(MIN_BUFFER_BYTES)).map_err(vk_err)
     }
 
-    /// A buffer of `bytes`, which the device reads without an import's per-submit cost.
-    pub(crate) fn host_copy(&self, bytes: &[u8]) -> Result<Arc<Buffer>> {
-        let mut buffer = self.buffer(bytes.len())?;
+    /// A buffer of `bytes` the device reads without an import's per-submit cost, allocated to size and never pooled,
+    /// for a weight that lives as long as the model.
+    pub(crate) fn weight_copy(&self, bytes: &[u8]) -> Result<Arc<Buffer>> {
+        let mut buffer = Buffer::exact(&self.context, bytes.len()).map_err(vk_err)?;
         buffer.write(0, bytes).map_err(vk_err)?;
         Ok(Arc::new(buffer))
     }
