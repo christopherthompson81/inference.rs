@@ -20,8 +20,12 @@ const QUANTIZE_BINDINGS: usize = 3;
 const QUANTIZE_PUSH_BYTES: u32 = 3 * 4;
 const QUANTIZE_THREADS: usize = 64;
 const MAX_GROUPS_X: usize = 65_535;
-// the most activation rows one matvec takes (the shaders' MAX_M)
+// the most activation rows the matvec kernels take (their MAX_M); more take the tiled matmul, its tile's weight rows
+// and tokens
 pub const MATVEC_MAX_ROWS: usize = 8;
+const MATMUL_Q_TILE_N: usize = 64;
+const MATMUL_Q_TILE_M: usize = 64;
+const MATMUL_Q_PUSH_BYTES: u32 = 6 * 4;
 
 /// Every kernel's pipeline on one device: its field, its embedded SPIR-V, its storage buffers and push-constant bytes.
 macro_rules! kernels {
@@ -53,6 +57,8 @@ kernels! {
     mat_vecs_q8_0: MUL_MAT_VECS_Q8_0, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
     mat_vecs_q5_0: MUL_MAT_VECS_Q5_0, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
     quantize_q8_1: QUANTIZE_Q8_1, QUANTIZE_BINDINGS, QUANTIZE_PUSH_BYTES;
+    mul_mm_q8_0: MUL_MM_Q8_0, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
+    mul_mm_q5_0: MUL_MM_Q5_0, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
     map_f32: MAP_F32, MAP_BINDINGS, MAP_PUSH_BYTES;
     copy_b32: COPY_B32, MAP_BINDINGS, MAP_PUSH_BYTES;
     rows_f32: ROWS_F32, ops::BINDINGS, ops::ROWS_PUSH_BYTES;
@@ -63,6 +69,8 @@ kernels! {
     ssm_conv_step: SSM_CONV_STEP, ops::CONV_STEP_BINDINGS, ops::CONV_STEP_PUSH_BYTES;
     ssm_scan_step: SSM_SCAN_STEP, ops::SCAN_STEP_BINDINGS, ops::SCAN_STEP_PUSH_BYTES;
     moe_mat_vecs_q5_0: MOE_MAT_VECS_Q5_0, ops::MOE_MATVEC_BINDINGS, ops::MOE_MATVEC_PUSH_BYTES;
+    moe_sort: MOE_SORT, ops::MOE_SORT_BINDINGS, ops::MOE_SORT_PUSH_BYTES;
+    moe_mm_q5_0: MOE_MM_Q5_0, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
     moe_router: MOE_ROUTER, ops::ROUTER_BINDINGS, ops::ROUTER_PUSH_BYTES;
     paged_cache_write: PAGED_CACHE_WRITE, ops::PAGED_WRITE_BINDINGS, ops::PAGED_WRITE_PUSH_BYTES;
     paged_decode: PAGED_DECODE, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
@@ -87,9 +95,10 @@ impl BlockType {
     }
 }
 
-/// `y[y_offset + m * rows..][..rows] = W x[x_offset + m * cols..][..cols]` for each of `x_rows` (up to
-/// [`MATVEC_MAX_ROWS`]) activation rows, for a `rows x cols` weight of `ty` blocks held in `weights`. The rows are
-/// quantized to int8 blocks (as the CPU's quantized matmuls do) into `scratch`, of [`MatVec::scratch_bytes`].
+/// `y[y_offset + m * rows..][..rows] = W x[x_offset + m * cols..][..cols]` for each of `x_rows` activation rows, for a
+/// `rows x cols` weight of `ty` blocks held in `weights`: up to [`MATVEC_MAX_ROWS`] rows a matvec reading the weight
+/// once, more a tiled matmul. The rows are quantized to int8 blocks (as the CPU's quantized matmuls do) into
+/// `scratch`, of [`MatVec::scratch_bytes`].
 pub struct MatVec<'a> {
     pub ty: BlockType,
     pub weights: &'a Arc<dyn Bound>,
@@ -155,7 +164,7 @@ impl Recorder<'_> {
             && op.weights.bytes() >= op.rows * blocks * op.ty.block_bytes()
             && op.x.len() / 4 >= op.x_offset + op.x_rows * op.cols
             && op.y.len() / 4 >= op.y_offset + op.x_rows * op.rows
-            && (1..=MATVEC_MAX_ROWS).contains(&op.x_rows);
+            && op.x_rows > 0;
         if !fits {
             return Err(Error::Invalid(format!(
                 "a {}x{} {:?} matvec over {} weight bytes at offset {}",
@@ -176,6 +185,44 @@ impl Recorder<'_> {
         }
         let kernels = &self.context.kernels;
         let s_off = self.quantize_rows((op.x, op.x_offset), op.x_rows, op.cols, scratch)?;
+        if op.x_rows > MATVEC_MAX_ROWS {
+            let pipeline = match op.ty {
+                BlockType::Q8_0 => &kernels.mul_mm_q8_0,
+                BlockType::Q5_0 => &kernels.mul_mm_q5_0,
+            };
+            let bytes = push_words(&[
+                op.rows,
+                op.cols,
+                op.weights.offset() as usize / 2,
+                op.y_offset,
+                op.x_rows,
+                s_off,
+            ])?;
+            pipeline.dispatch(
+                self,
+                &[
+                    op.weights.vk_buffer(),
+                    scratch.buffer,
+                    op.y.buffer,
+                    scratch.buffer,
+                ],
+                &bytes,
+                [
+                    op.rows.div_ceil(MATMUL_Q_TILE_N) as u32,
+                    op.x_rows.div_ceil(MATMUL_Q_TILE_M) as u32,
+                    1,
+                ],
+            );
+            self.work.set(
+                self.work
+                    .get()
+                    .saturating_add((op.rows * op.cols * op.x_rows) as u64),
+            );
+            self.retain(scratch.clone());
+            self.retain(op.weights.clone() as crate::Retained);
+            self.retain(op.y.clone());
+            return Ok(());
+        }
         let groups = op.rows.div_ceil(MATVEC_ROWS);
         let groups_x = groups.min(MAX_GROUPS_X);
         let bytes = push_words(&[
@@ -309,8 +356,9 @@ mod tests {
             .collect()
     }
 
-    // matvecs take int8 activations: each output within the rounding bound of its blocks (|w| times half a block's
-    // step, summed) of the f32 product, over rows past one workgroup's and activation rows unaligned in their buffer
+    // matvecs (and past 8 rows the tiled matmul) take int8 activations: each output within the rounding bound of its
+    // blocks (|w| times half a block's step, summed) of the f32 product, over weight rows and tokens past a
+    // workgroup's and activation rows unaligned in their buffer
     #[test]
     fn matvecs_round_only_their_activations() -> Result<()> {
         let Some(context) = context() else {
@@ -322,8 +370,10 @@ mod tests {
         for (ty, x_rows) in [
             (BlockType::Q8_0, 1),
             (BlockType::Q8_0, 3),
+            (BlockType::Q8_0, 70),
             (BlockType::Q5_0, 1),
             (BlockType::Q5_0, 3),
+            (BlockType::Q5_0, 70),
         ] {
             let len = len(ty, ROWS, COLS);
             let mut pages = Pages::new(len);
@@ -460,7 +510,7 @@ mod tests {
             let mut copy = HostBuffer::new(&context, len)?;
             copy.as_bytes_mut().copy_from_slice(&pages.bytes()[..len]);
             let weights: Arc<dyn Bound> = Arc::new(copy);
-            for x_rows in [1usize, 2, 3, 4, 8] {
+            for x_rows in [1usize, 2, 3, 4, 8, 64, 512] {
                 let mut xs = HostBuffer::new(&context, x_rows * COLS * 4)?;
                 xs.as_f32_mut().iter_mut().for_each(|x| *x = 0.5);
                 let (xs, ys) = (
@@ -483,13 +533,12 @@ mod tests {
                     x_rows,
                     scratch: &scratch,
                 };
-                let run = || {
-                    context.submit(|r| {
-                        for _ in 0..REPEATS {
-                            r.mat_vec(&op)?;
-                        }
-                        Ok(())
-                    })
+                // a record a call, as the backend's ops do, so heavy calls split across submits
+                let run = || -> Result<()> {
+                    for _ in 0..REPEATS {
+                        context.record(|r| r.mat_vec(&op))?;
+                    }
+                    context.synchronize()
                 };
                 run()?;
                 let start = std::time::Instant::now();
@@ -497,13 +546,95 @@ mod tests {
                     run()?;
                 }
                 let secs = start.elapsed().as_secs_f64();
+                let calls = (SUBMITS * REPEATS) as f64;
                 println!(
-                    "{ty:?} x {x_rows} rows: {:.1} GB/s, {:.0} us each",
-                    (SUBMITS * REPEATS * len) as f64 / secs / 1e9,
-                    secs / (SUBMITS * REPEATS) as f64 * 1e6
+                    "{ty:?} x {x_rows} rows: {:.1} GB/s, {:.2} TOPS, {:.0} us each",
+                    calls * len as f64 / secs / 1e9,
+                    calls * (2 * x_rows * ROWS * COLS) as f64 / secs / 1e12,
+                    secs / calls * 1e6
                 );
             }
         }
+        Ok(())
+    }
+
+    // a prompt step's experts: 512 tokens routed to 6 of 128 experts (1856 x 2688, Q5_0), each pass timed on its own
+    #[test]
+    #[ignore = "benchmark"]
+    fn expert_matmul_throughput() -> Result<()> {
+        let Some(context) = context() else {
+            return Ok(());
+        };
+        const EXPERTS: usize = 128;
+        const ROWS: usize = 1856;
+        const COLS: usize = 2688;
+        const TOKENS: usize = 512;
+        const K: usize = 6;
+        const REPEATS: usize = 10;
+        let ty = BlockType::Q5_0;
+        let len = EXPERTS * len(ty, ROWS, COLS);
+        let mut pages = Pages::new(len);
+        weights(ty, pages.bytes(), EXPERTS * ROWS, COLS);
+        let mut copy = HostBuffer::new(&context, len)?;
+        copy.as_bytes_mut().copy_from_slice(&pages.bytes()[..len]);
+        let weights: Arc<dyn Bound> = Arc::new(copy);
+        let slots = TOKENS * K;
+        let mut ids = HostBuffer::new(&context, slots * 4)?;
+        let mut state = 0x9e37_79b9u32;
+        for (t, chunk) in ids
+            .as_bytes_mut()
+            .as_chunks_mut::<{ 4 * K }>()
+            .0
+            .iter_mut()
+            .enumerate()
+        {
+            for (j, id) in chunk.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                // distinct experts a token: spread from a random start
+                let e = ((state >> 8) as usize + j * 21 + t) % EXPERTS;
+                id.copy_from_slice(&(e as u32).to_le_bytes());
+            }
+        }
+        let ids = Arc::new(ids);
+        let mut xs = HostBuffer::new(&context, TOKENS * COLS * 4)?;
+        xs.as_f32_mut()
+            .iter_mut()
+            .enumerate()
+            .for_each(|(i, x)| *x = (i % 13) as f32 - 6.0);
+        let xs = Arc::new(xs);
+        let ys = Arc::new(HostBuffer::new(&context, slots * ROWS * 4)?);
+        let scratch = Arc::new(HostBuffer::new(
+            &context,
+            MatVec::scratch_bytes(TOKENS, COLS),
+        )?);
+        let routing = Arc::new(HostBuffer::new(
+            &context,
+            crate::MoeMatVec::routing_bytes(slots, EXPERTS),
+        )?);
+        let op = crate::MoeMatVec {
+            weights: &weights,
+            experts: EXPERTS,
+            rows: ROWS,
+            cols: COLS,
+            slots,
+            x_div: K,
+            x: (&xs, 0),
+            ids: (&ids, 0),
+            y: &ys,
+            scratch: &scratch,
+            routing: &routing,
+        };
+        context.submit(|r| r.moe_mat_vec_q5_0(&op))?;
+        let start = std::time::Instant::now();
+        for _ in 0..REPEATS {
+            context.submit(|r| r.moe_mat_vec_q5_0(&op))?;
+        }
+        let secs = start.elapsed().as_secs_f64() / REPEATS as f64;
+        println!(
+            "experts: {:.2} ms a pass, {:.2} int8 TOPS",
+            secs * 1e3,
+            (2 * slots * ROWS * COLS) as f64 / secs / 1e12
+        );
         Ok(())
     }
 }

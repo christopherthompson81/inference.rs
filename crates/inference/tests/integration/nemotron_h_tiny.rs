@@ -63,9 +63,13 @@ const LOGPROB_TOLERANCE: f32 = 1e-4;
 const CUDA_LOGPROB_TOLERANCE: f32 = 1e-3;
 // Vulkan's ops sum in other orders than the CPU's (its attention, and its kernels as they land), as CUDA's do
 const VULKAN_LOGPROB_TOLERANCE: f32 = 1e-3;
-// an ISQ checkpoint's prompt reaches lm_head as one row, which Vulkan's matvec takes with f32 activations, where a
-// whole-prompt score runs the CPU's kernel on int8 activations (0.013 apart on this checkpoint)
+// an ISQ checkpoint's decode and one prefill on Vulkan: the same int8 activations, summed in another order
 const VULKAN_QUANTIZED_LOGPROB_TOLERANCE: f32 = 0.05;
+// an ISQ checkpoint's quantized matmuls take int8 activations on the CPU and Vulkan, each rounding its own way (an f32
+// scale on Vulkan, f16 on the CPU): 0.01 apart on average on this checkpoint, the Mamba state carrying a few positions'
+// differences to 0.37 late in the long prompt; Vulkan's prefill against its own decode is pinned below
+const VULKAN_CPU_INT8_MEAN_TOLERANCE: f32 = 0.02;
+const VULKAN_CPU_INT8_LOGPROB_TOLERANCE: f32 = 0.5;
 // BF16 with Q8_0 experts: decode and one prefill round differently (0.023 on this checkpoint), where a replay reading
 // stale state is off by nats
 const BF16_LOGPROB_TOLERANCE: f32 = 0.1;
@@ -475,6 +479,24 @@ impl Target {
     }
 }
 
+// past a tile of tokens, Vulkan's tiled prefill (dense and grouped experts) leaves the state its decode continues from
+#[tokio::test]
+async fn a_long_quantized_prompt_on_vulkan_scores_as_its_decode() -> anyhow::Result<()> {
+    if !cfg!(feature = "vulkan") || Device::new_vulkan(0).is_err() {
+        return Ok(());
+    }
+    for isq in [IsqType::Q8_0, IsqType::Q5_0] {
+        decode_scores_as_prefill(
+            Some(isq),
+            &"say something long ".repeat(LONG_PROMPT_REPEATS),
+            Target::VulkanQuantized,
+        )
+        .await
+        .map_err(|err| err.context(format!("{isq:?}")))?;
+    }
+    Ok(())
+}
+
 // the same checkpoint scores a long prompt on CUDA as on the CPU: the GPU's Mamba conv and scan kernels, attention and
 // grouped experts against the CPU's
 #[tokio::test]
@@ -570,10 +592,27 @@ async fn a_long_prompt_scores_on_vulkan_as_on_the_cpu() -> anyhow::Result<()> {
             scores(&cpu, tokens.clone()).await?,
             scores(&vulkan, tokens).await?,
         );
+        let (tolerance, mean_tolerance) = match isq {
+            Some(_) => (
+                VULKAN_CPU_INT8_LOGPROB_TOLERANCE,
+                VULKAN_CPU_INT8_MEAN_TOLERANCE,
+            ),
+            None => (VULKAN_LOGPROB_TOLERANCE, VULKAN_LOGPROB_TOLERANCE),
+        };
+        let diffs: Vec<f32> = expected
+            .iter()
+            .zip(&actual)
+            .filter_map(|(e, a)| Some((e.as_ref()? - a.as_ref()?).abs()))
+            .collect();
+        let mean = diffs.iter().sum::<f32>() / diffs.len().max(1) as f32;
+        anyhow::ensure!(
+            mean < mean_tolerance,
+            "{isq:?}: CPU and Vulkan {mean} apart on average"
+        );
         for (position, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
             if let (Some(expected), Some(actual)) = (expected, actual) {
                 anyhow::ensure!(
-                    (expected - actual).abs() < VULKAN_LOGPROB_TOLERANCE,
+                    (expected - actual).abs() < tolerance,
                     "{isq:?} position {position}: CPU {expected}, Vulkan {actual}"
                 );
             }

@@ -120,10 +120,6 @@ pub struct QVulkanStorage {
     gpu: std::sync::OnceLock<std::sync::Arc<inference_vulkan::HostBuffer>>,
 }
 
-/// The most activation rows a Vulkan matvec takes; a prompt's run the CPU's tiled kernels.
-#[cfg(feature = "vulkan")]
-const VULKAN_MATVEC_MAX_ROWS: usize = inference_vulkan::MATVEC_MAX_ROWS;
-
 impl QVulkanStorage {
     pub(crate) fn new(blocks: Box<dyn QuantizedType>, device: &crate::VulkanDevice) -> Self {
         Self {
@@ -164,12 +160,7 @@ impl QVulkanStorage {
         };
         let (n, k) = shape.dims2()?;
         let dims = l.shape().dims();
-        let rows = l.shape().elem_count() / k.max(1);
-        if xs.dtype() != DType::F32
-            || !l.is_contiguous()
-            || dims.last() != Some(&k)
-            || rows > VULKAN_MATVEC_MAX_ROWS
-        {
+        if xs.dtype() != DType::F32 || !l.is_contiguous() || dims.last() != Some(&k) {
             return Ok(None);
         }
         let weights = match self.gpu.get() {

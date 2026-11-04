@@ -588,6 +588,8 @@ pub(crate) fn expert_mat_vec(
     let slots = ids.elem_count();
     let device = x.device().as_vulkan_device()?.clone();
     let scratch = Arc::new(device.buffer(MatVec::scratch_bytes(slots.div_ceil(x_div), cols))?);
+    let routing =
+        Arc::new(device.buffer(inference_vulkan::MoeMatVec::routing_bytes(slots, experts))?);
     let out = VulkanStorage {
         buffer: Arc::new(device.buffer(slots * rows * 4)?),
         device: device.clone(),
@@ -609,6 +611,7 @@ pub(crate) fn expert_mat_vec(
                 ids: (&ib.0, ib.1),
                 y: &out.buffer,
                 scratch: &scratch,
+                routing: &routing,
             })
         })
         .map_err(vk_err)?;
@@ -1389,7 +1392,12 @@ mod tests {
         let weight = QTensor::quantize(&w.to_device(&vk)?, GgmlDType::Q5_0)?;
         let dense = weight.dequantize(&Device::Cpu)?;
         // the last: 18 slots of one expert, more than a leader takes
-        let routes: [&[u32]; 3] = [&[3, 1], &[2, 0, 0, 2, 1, 2], &[1; 18]];
+        // a prompt's 150 routes, past the grouped kernel's, take the tiled matmul over routes sorted by expert, one
+        // expert past a tile of them
+        let prompt: Vec<u32> = (0..150u32)
+            .map(|i| if i % 3 == 0 { 2 } else { i * 7 % 4 })
+            .collect();
+        let routes: [&[u32]; 4] = [&[3, 1], &[2, 0, 0, 2, 1, 2], &[1; 18], &prompt];
         for ids in routes {
             let tokens = ids.len() / k;
             let id_t = Tensor::from_slice(ids, (tokens, k), &Device::Cpu)?;
