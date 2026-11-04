@@ -880,6 +880,41 @@ pub(crate) fn paged_prefill(op: &crate::vulkan::PagedPrefill<'_>) -> Result<Tens
     Ok(tensor_of(out, (rows, heads, head_size)))
 }
 
+pub(crate) fn penalize(
+    logits: &Tensor,
+    entries: &[[u32; 4]],
+    frequency: f32,
+    presence: f32,
+    repetition: f32,
+) -> Result<Tensor> {
+    let (_, vocab) = logits.dims2()?;
+    // a copy, so the model's logits stay as they were
+    let out = logits.contiguous()?.copy()?;
+    if entries.is_empty() {
+        return Ok(out);
+    }
+    let flat: Vec<u32> = entries.iter().flatten().copied().collect();
+    let entries_t = Tensor::from_vec(flat, entries.len() * 4, logits.device())?;
+    let (x, x_off) = bound(&out, DType::F32)?;
+    let (e, e_off) = bound(&entries_t, DType::U32)?;
+    let device = logits.device().as_vulkan_device()?.clone();
+    device
+        .context
+        .record(|r| {
+            r.penalize(&inference_vulkan::Penalize {
+                vocab,
+                count: entries.len(),
+                logits: (&x, x_off),
+                entries: (&e, e_off),
+                frequency,
+                presence,
+                repetition,
+            })
+        })
+        .map_err(vk_err)?;
+    Ok(out)
+}
+
 pub(crate) fn ranked_top_k(logits: &Tensor, temperature: f64) -> Result<Tensor> {
     const _: () = assert!(crate::vulkan::RANKED_TOP_K == inference_vulkan::RankedTopK::K);
     let (rows, vocab) = logits.dims2()?;

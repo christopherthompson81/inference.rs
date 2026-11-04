@@ -1296,3 +1296,47 @@ impl Recorder<'_> {
         Ok(())
     }
 }
+
+pub(crate) const PENALIZE_BINDINGS: usize = 2;
+pub(crate) const PENALIZE_PUSH_BYTES: u32 = 6 * 4;
+const PENALIZE_THREADS: usize = 64;
+
+/// The sampler's frequency, presence and repetition penalties and logit bias on rows of `vocab` f32 `logits`, in
+/// place, through `count` u32 4-word entries (`row << 1 | seen`, token, generated count, bias bits), one a distinct
+/// token of a row.
+pub struct Penalize<'a> {
+    pub vocab: usize,
+    pub count: usize,
+    pub logits: At<'a>,
+    pub entries: At<'a>,
+    pub frequency: f32,
+    pub presence: f32,
+    pub repetition: f32,
+}
+
+impl Recorder<'_> {
+    pub fn penalize(&self, op: &Penalize<'_>) -> Result<()> {
+        if op.entries.0.len() < (op.entries.1 + 4 * op.count) * 4 || !op.entries.1.is_multiple_of(4)
+        {
+            return Err(Error::Invalid(format!("{} penalty entries", op.count)));
+        }
+        if op.count == 0 {
+            return Ok(());
+        }
+        let mut bytes = words(&[op.vocab, op.count, op.logits.1])?;
+        for value in [op.frequency, op.presence, op.repetition] {
+            bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+        }
+        let buffers = [op.logits.0, op.entries.0];
+        self.context.kernels.penalize.dispatch(
+            self,
+            &buffers.map(|b| b.buffer),
+            &bytes,
+            [op.count.div_ceil(PENALIZE_THREADS) as u32, 1, 1],
+        );
+        for buffer in buffers {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+}
