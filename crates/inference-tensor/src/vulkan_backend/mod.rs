@@ -642,11 +642,17 @@ pub(crate) fn expert_mat_vec(
 fn cache_shape(key_cache: &Tensor, value_cache: &Tensor) -> Result<inference_vulkan::CacheShape> {
     let (_, kv_heads, _, block_size, x) = key_cache.dims5()?;
     let (_, _, head_size, _) = value_cache.dims4()?;
+    let f16 = match (key_cache.dtype(), value_cache.dtype()) {
+        (DType::F32, DType::F32) => false,
+        (DType::F16, DType::F16) => true,
+        (k, v) => crate::bail!("Vulkan's paged caches are f32 or f16, got {k:?} / {v:?}"),
+    };
     Ok(inference_vulkan::CacheShape {
         kv_heads,
         head_size,
         block_size,
         x,
+        f16,
     })
 }
 
@@ -664,7 +670,10 @@ pub(crate) fn paged_cache_write(
         bound(&key.contiguous()?, f32)?,
         bound(&value.contiguous()?, f32)?,
     );
-    let (kc, vc) = (bound(key_cache, f32)?, bound(value_cache, f32)?);
+    let (kc, vc) = (
+        bound(key_cache, key_cache.dtype())?,
+        bound(value_cache, value_cache.dtype())?,
+    );
     let slots = slot_mapping
         .to_device(key.device())?
         .to_dtype(DType::I64)?
@@ -760,6 +769,55 @@ pub(crate) fn flash_attn(op: &crate::vulkan::FlashAttn<'_>) -> Result<Option<Ten
     Ok(Some(tensor_of(out, (batch, heads, positions, head_size))))
 }
 
+pub(crate) fn paged_prefill(op: &crate::vulkan::PagedPrefill<'_>) -> Result<Tensor> {
+    let shape = cache_shape(op.key_cache, op.value_cache)?;
+    let (rows, heads, head_size) = op.q.dims3()?;
+    let f32 = DType::F32;
+    let device = op.q.device().as_vulkan_device()?.clone();
+    let table = op
+        .block_table
+        .to_device(op.q.device())?
+        .to_dtype(DType::U32)?
+        .contiguous()?;
+    let (q, kc, vc, tb) = (
+        bound(&op.q.contiguous()?, f32)?,
+        bound(op.key_cache, op.key_cache.dtype())?,
+        bound(op.value_cache, op.value_cache.dtype())?,
+        bound(&table, DType::U32)?,
+    );
+    let count = rows * heads * head_size;
+    let out = VulkanStorage {
+        buffer: Arc::new(device.buffer(count * 4)?),
+        device: device.clone(),
+        count,
+        dtype: f32,
+    };
+    let partials = Arc::new(
+        device.buffer(inference_vulkan::PagedPrefill::partials_bytes(
+            rows, heads, head_size, op.context,
+        ))?,
+    );
+    device
+        .context
+        .record(|r| {
+            r.paged_prefill(&inference_vulkan::PagedPrefill {
+                shape,
+                rows,
+                heads,
+                context: op.context,
+                scale: op.scale,
+                q: (&q.0, q.1),
+                key_cache: &kc.0,
+                value_cache: &vc.0,
+                block_table: (&tb.0, tb.1),
+                partials: &partials,
+                out: (&out.buffer, 0),
+            })
+        })
+        .map_err(vk_err)?;
+    Ok(tensor_of(out, (rows, heads, head_size)))
+}
+
 pub(crate) fn paged_decode(op: &crate::vulkan::PagedDecode<'_>) -> Result<Tensor> {
     let shape = cache_shape(op.key_cache, op.value_cache)?;
     let (seqs, heads, head_size) = op.q.dims3()?;
@@ -774,8 +832,8 @@ pub(crate) fn paged_decode(op: &crate::vulkan::PagedDecode<'_>) -> Result<Tensor
     let (tables, lens) = (on_device(op.block_tables)?, on_device(op.context_lens)?);
     let (q, kc, vc) = (
         bound(&op.q.contiguous()?, f32)?,
-        bound(op.key_cache, f32)?,
-        bound(op.value_cache, f32)?,
+        bound(op.key_cache, op.key_cache.dtype())?,
+        bound(op.value_cache, op.value_cache.dtype())?,
     );
     let (tb, lb) = (bound(&tables, DType::U32)?, bound(&lens, DType::U32)?);
     let count = seqs * heads * head_size;

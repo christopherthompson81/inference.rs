@@ -405,3 +405,81 @@ fn vulkan_paged_attention_splits_long_contexts() -> Result<()> {
     }
     Ok(())
 }
+
+// a prompt chunk's rows against a long cached prefix on Vulkan (f32 and f16 caches), each row causal over its own
+// length, against the CPU kernel scoring each row as its own query: Nemotron-H's shape, a context over several of the kernel's splits ending
+// partway through a block, rows off its workgroup's 8, a shuffled block table
+#[test]
+fn vulkan_paged_prefill_matches_each_row_scored_alone() -> Result<()> {
+    let Ok(vk) = Device::new_vulkan(0) else {
+        return Ok(());
+    };
+    const BLOCK: usize = 16;
+    const KV_HEADS: usize = 2;
+    const HEADS: usize = 32;
+    const HEAD: usize = 128;
+    const CONTEXT: usize = 2500;
+    const ROWS: usize = 70;
+    let max_blocks = CONTEXT.div_ceil(BLOCK);
+    let blocks = max_blocks + 3;
+    // f32 caches hold 4 dimensions a key row, f16 ones 8 (16 bytes either way)
+    for (dtype, x) in [(DType::F32, 4usize), (DType::F16, 8)] {
+        let kc = Tensor::randn(
+            0f32,
+            1.,
+            (blocks, KV_HEADS, HEAD / x, BLOCK, x),
+            &Device::Cpu,
+        )?
+        .to_dtype(dtype)?;
+        let vc = Tensor::randn(0f32, 1., (blocks, KV_HEADS, HEAD, BLOCK), &Device::Cpu)?
+            .to_dtype(dtype)?;
+        let table: Vec<u32> = (0..max_blocks as u32)
+            .map(|b| (b * 7 + 3) % blocks as u32)
+            .rev()
+            .collect();
+        let mut seen = table.clone();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), max_blocks, "a block a position range");
+        let q = Tensor::randn(0f32, 1., (ROWS, HEADS, HEAD), &Device::Cpu)?;
+        let scale = 1.0 / (HEAD as f32).sqrt();
+        let tables = Tensor::from_vec(table.repeat(ROWS), (ROWS, max_blocks), &Device::Cpu)?;
+        let lens: Vec<u32> = (0..ROWS).map(|r| (CONTEXT - ROWS + r + 1) as u32).collect();
+        let want = paged_attention(
+            &q,
+            None,
+            None,
+            &kc,
+            &vc,
+            &tables,
+            &Tensor::new(lens.as_slice(), &Device::Cpu)?,
+            None,
+            CONTEXT,
+            scale,
+            NO_SOFTCAP,
+            None,
+        )?;
+        let on = |t: &Tensor| t.to_device(&vk);
+        let got =
+            inference_tensor::vulkan::paged_prefill(&inference_tensor::vulkan::PagedPrefill {
+                q: &on(&q)?,
+                key_cache: &on(&kc)?,
+                value_cache: &on(&vc)?,
+                block_table: &Tensor::new(table.as_slice(), &vk)?,
+                context: CONTEXT,
+                scale,
+            })?;
+        for (g, w) in got
+            .flatten_all()?
+            .to_vec1::<f32>()?
+            .iter()
+            .zip(want.flatten_all()?.to_vec1::<f32>()?)
+        {
+            assert!(
+                (g - w).abs() <= 1e-4 * w.abs().max(1.0),
+                "{dtype:?}: {g} vs {w}"
+            );
+        }
+    }
+    Ok(())
+}

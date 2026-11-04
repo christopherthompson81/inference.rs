@@ -312,10 +312,11 @@ impl dyn Pipeline {
         let scheduler_visible_prompt_step = scheduled_prompt_chunks.is_some();
         let scheduler_visible_prompt_is_final =
             scheduler_visible_prompt_step && metadata.is_final_prompt_chunk;
+        // Vulkan's later chunks attend over the paged cache in place (paged_prefill), as CUDA's do
         let chunk_size = if !scheduler_visible_prompt_step
             && is_prompt
             && !ctx.return_raw_logits
-            && self.device().is_cuda()
+            && (self.device().is_cuda() || self.device().is_vulkan())
         {
             metadata.prompt_chunk_size
         } else {

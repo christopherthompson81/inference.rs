@@ -102,12 +102,41 @@ kernels! {
     moe_mm_q6_k: MOE_MM_Q6_K, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
     moe_router: MOE_ROUTER, ops::ROUTER_BINDINGS, ops::ROUTER_PUSH_BYTES;
     paged_cache_write: PAGED_CACHE_WRITE, ops::PAGED_WRITE_BINDINGS, ops::PAGED_WRITE_PUSH_BYTES;
+    paged_cache_write_f16: PAGED_CACHE_WRITE_F16, ops::PAGED_WRITE_BINDINGS, ops::PAGED_WRITE_PUSH_BYTES;
     paged_decode: PAGED_DECODE, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
+    paged_decode_f16: PAGED_DECODE_F16, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
     paged_decode_reduce: PAGED_DECODE_REDUCE, ops::PAGED_REDUCE_BINDINGS, ops::PAGED_REDUCE_PUSH_BYTES;
     flash_attn: FLASH_ATTN, ops::FLASH_BINDINGS, ops::FLASH_PUSH_BYTES;
+    paged_prefill: PAGED_PREFILL, ops::PAGED_PREFILL_BINDINGS, ops::PAGED_PREFILL_PUSH_BYTES;
+    paged_prefill_f16: PAGED_PREFILL_F16, ops::PAGED_PREFILL_BINDINGS, ops::PAGED_PREFILL_PUSH_BYTES;
 }
 
 impl Kernels {
+    /// The paged-cache kernels for a cache of `shape`'s element type.
+    pub(crate) fn paged_cache_write(&self, shape: ops::CacheShape) -> &Pipeline {
+        if shape.f16 {
+            &self.paged_cache_write_f16
+        } else {
+            &self.paged_cache_write
+        }
+    }
+
+    pub(crate) fn paged_decode(&self, shape: ops::CacheShape) -> &Pipeline {
+        if shape.f16 {
+            &self.paged_decode_f16
+        } else {
+            &self.paged_decode
+        }
+    }
+
+    pub(crate) fn paged_prefill(&self, shape: ops::CacheShape) -> &Pipeline {
+        if shape.f16 {
+            &self.paged_prefill_f16
+        } else {
+            &self.paged_prefill
+        }
+    }
+
     /// The expert matvec over `ty`'s blocks.
     pub(crate) fn moe_mat_vecs(&self, ty: BlockType) -> &Pipeline {
         match ty {

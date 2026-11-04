@@ -25,7 +25,7 @@ pub mod windowed_pool;
 pub const _PAD_SLOT_ID: i64 = -1;
 
 pub use attention_backend::AttentionBackendKind;
-pub use cache_engine::{CacheConfig, CacheEngine, PagedCacheType};
+pub use cache_engine::{CacheConfig, CacheEngine, PagedCacheType, cache_activation_dtype};
 pub use cache_layers::{
     CachePlan, KvFingerprint, PagedCacheLayers, plan as cache_plan, profile_name as kv_profile_name,
 };
@@ -451,6 +451,7 @@ pub fn calculate_cache_config(
     model_weight_size_in_bytes: Option<usize>,
     max_num_tokens: Option<usize>,
 ) -> anyhow::Result<CacheConfig> {
+    let dtype = cache_engine::cache_activation_dtype(dtype, device);
     let block_size = block_size.unwrap_or(DEFAULT_PAGED_ATTENTION_BLOCK_SIZE);
     if !SUPPORTED_BLOCK_SIZE.contains(&block_size) {
         anyhow::bail!("Block size must be in {SUPPORTED_BLOCK_SIZE:?}, got {block_size}");

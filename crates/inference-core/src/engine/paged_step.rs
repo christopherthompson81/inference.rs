@@ -375,10 +375,14 @@ impl Engine {
         ) = {
             let pipeline = get_mut_arcmutex!(self.pipeline);
             let metadata = pipeline.get_metadata();
+            let cache_act = inference_nn::paged_attention::cache_activation_dtype(
+                metadata.activation_dtype,
+                &pipeline.device(),
+            );
             let cache_dtype = metadata
                 .cache_config
                 .as_ref()
-                .map(|config| config.cache_type.to_dtype(metadata.activation_dtype))
+                .map(|config| config.cache_type.to_dtype(cache_act))
                 .unwrap_or(metadata.activation_dtype);
             (
                 metadata.model_metadata.clone(),

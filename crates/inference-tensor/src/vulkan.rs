@@ -136,6 +136,28 @@ pub fn flash_attn(op: &FlashAttn<'_>) -> Result<Option<Tensor>> {
 
 /// One query a sequence (`q` `(seqs, heads, head_size)`) against f32 vLLM-layout caches through u32 `block_tables`
 /// `(seqs, max_blocks)` over u32 `context_lens`, softmax-scaled by `scale`.
+/// One sequence's prompt rows `q` `(rows, heads, head_size)` over its `context` cached positions (the rows' own
+/// included, last; row r causal over the first `context - rows + r + 1`) through `block_table` (its row, u32); the
+/// output is laid out as `q`.
+pub struct PagedPrefill<'a> {
+    pub q: &'a Tensor,
+    pub key_cache: &'a Tensor,
+    pub value_cache: &'a Tensor,
+    pub block_table: &'a Tensor,
+    pub context: usize,
+    pub scale: f32,
+}
+
+pub fn paged_prefill(op: &PagedPrefill<'_>) -> Result<Tensor> {
+    #[cfg(feature = "vulkan")]
+    return crate::vulkan_backend::paged_prefill(op);
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = op;
+        Err(crate::Error::NotCompiledWithVulkanSupport)
+    }
+}
+
 pub struct PagedDecode<'a> {
     pub q: &'a Tensor,
     pub key_cache: &'a Tensor,
