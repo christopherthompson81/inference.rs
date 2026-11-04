@@ -6,6 +6,19 @@ use crate::{Result, Tensor};
 /// Set to keep a Vulkan device's prompt matmuls off its matrix cores, on the int8 kernels decode uses.
 pub const NO_MATRIX_CORES_ENV: &str = "INFERENCE_VULKAN_NO_COOPMAT";
 
+/// Whether `device` is a discrete Vulkan GPU, with memory of its own rather than an iGPU's share of the host's.
+pub fn is_discrete(device: &crate::Device) -> bool {
+    #[cfg(feature = "vulkan")]
+    return device
+        .as_vulkan_device()
+        .is_ok_and(|d| !d.context().is_unified());
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = device;
+        false
+    }
+}
+
 /// The states a Mamba head's row holds that [`ssm_scan_step`] takes (its lanes a row times states a lane).
 pub const SCAN_STEP_STATE: usize = 128;
 
@@ -152,6 +165,28 @@ pub const RANKED_TOP_K: usize = 128;
 
 /// One query a sequence (`q` `(seqs, heads, head_size)`) against f32 vLLM-layout caches through u32 `block_tables`
 /// `(seqs, max_blocks)` over u32 `context_lens`, softmax-scaled by `scale`.
+/// One sequence's prompt rows `q` `(rows, heads, head_size)` over its `context` cached positions (the rows' own
+/// included, last; row r causal over the first `context - rows + r + 1`) through `block_table` (its row, u32); the
+/// output is laid out as `q`.
+pub struct PagedPrefill<'a> {
+    pub q: &'a Tensor,
+    pub key_cache: &'a Tensor,
+    pub value_cache: &'a Tensor,
+    pub block_table: &'a Tensor,
+    pub context: usize,
+    pub scale: f32,
+}
+
+pub fn paged_prefill(op: &PagedPrefill<'_>) -> Result<Tensor> {
+    #[cfg(feature = "vulkan")]
+    return crate::vulkan_backend::paged_prefill(op);
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = op;
+        Err(crate::Error::NotCompiledWithVulkanSupport)
+    }
+}
+
 pub struct PagedDecode<'a> {
     pub q: &'a Tensor,
     pub key_cache: &'a Tensor,

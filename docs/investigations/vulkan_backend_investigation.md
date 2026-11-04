@@ -654,7 +654,142 @@ tokens 307.7 -> 369.6. At 4096 tokens the attention costs ~1.1 s a prompt, where
 at ~0.85 TFLOPS (64-row workgroups 361.5 tok/s, 128 rows 369.6). KLD 0.00898 (Run 26: 0.00897), top-1 96.41 %. MTP 3
 text matches plain's on all four prompts. Against master's, two split at near-ties.
 
-### Run 28 - 2026-11-04 ~12:30 (laptop: Radeon 780M)
+### Run 28 - 2026-11-04 ~08:30 (desktop: RTX 3090)
+
+**Question:** NVIDIA's `VK_NV_cooperative_matrix2` (llama.cpp's fastest path here: 3845 tok/s at 512 tokens against
+2840 for KHR). Does it take the prompt matmuls past the KHR kernels?
+
+**Setup:**
+- ash 0.38 (Vulkan 1.3.281) predates the extension, so its name and features struct are declared from the registry
+  (structure type 1000593000, extension 594).
+- The instance asks for Vulkan 1.3. The `*_cm2` shaders build for SPIR-V 1.6. The device enables workgroup scope,
+  flexible dimensions, per-element operations, tensor addressing, block loads and buffer device addresses, which
+  the decode functions' buffer references need.
+
+**Kernel (`mul_mm_cm2_main.glsl`, Q8_0 and Q5_0):**
+- A 128 x 128 workgroup-scope tile (weight rows x tokens), 32 values a step.
+- W loads through a per-element decode on its block structs; the f16 tokens load transposed.
+- Clamped tensor layouts give zeros and drop writes past every edge, so it needs no padding.
+
+**Result (512 rows, warm):**
+
+| kernel | Q8_0 | Q5_0 |
+|---|---|---|
+| KHR coopmat, f32 accumulation (Run 25) | 36.0 | 39.8 |
+| cm2, f32 accumulation | 20.5 | 31.4 |
+| cm2, BK 64 | 26.3 | 18.3 |
+| cm2, f16 accumulation over all of K | ~48 | ~42 |
+| cm2, f16 over 256-value spans folded into f32 | 40.3 | 31.0 |
+
+(TFLOPS. At 64 rows the cm2 kernels were 10-20, half of a 128-token tile empty.)
+
+**Finding:**
+- Recipe A end to end is unchanged by cm2: 0.23 s an iteration at 512 tokens and about 1.0 s at 2048, as with KHR
+  coopmat and nearly as with dp4a (0.24 / 1.03 s).
+- llama.cpp's 3845 tok/s is about 0.13 s a 512-token prompt; our prefill is about 0.20 s of the 0.23. The dense
+  matmuls are not what holds the 3090 back.
+- f16 accumulation over the whole K would need a KLD check before use.
+
+**Next:** a GPU breakdown of a whole 512-token prompt that adds up to its wall time. The per-dispatch profiler has
+over-reported on NVIDIA, so the experts, the Mamba conv and scan, the f32 attention matmuls, the elementwise ops and
+CPU-side gaps have to be measured before more kernel work.
+
+### Run 29 - 2026-11-04 ~09:00 (desktop: RTX 3090)
+
+**Question:** Run 28's next step. Where does a 512-token prompt's GPU time go on recipe A?
+
+**Profile (`INFERENCE_VULKAN_PROFILE`, 512 tokens; a window's GPU time agrees with wall time here):**
+- `moe_mm_q5_0` took 59 % of the GPU time, at 6.4 ms a call against 1.7 ms in Run 23.
+- `mat_vecs_q8_0` at the last token took 44 ms a call.
+- Everything else was small: `moe_sort` 2.3 %, the Mamba conv and scan about 7 %, the f32 attention matmuls about
+  3 %, elementwise ops about 2 %.
+
+**Finding:** some weights live in host memory.
+- Logging the exact buffers that miss the budget: the startup budget was 21396 MiB (other processes held about
+  1.8 GiB more than in Runs 23-24), the weights held 19.7 GB, and five 418 MiB expert stacks went to host memory.
+- A prompt reads every expert stack, so about 1.6 GB of it crosses PCIe on each prompt.
+- Weight copies are placed in first-use order, so whatever comes last (the last layers' experts, `lm_head`) is
+  what misses.
+- On this card the prompt's main cost is VRAM, not a kernel: llama.cpp keeps all 21.7 GiB on it.
+
+**Dead end:** `EXACT_RESERVE_BYTES` at 1 GiB, with 2.7 GiB held by other processes: 512 tokens 1.39 s, 2048 tokens
+8.1 s, 4096 tokens 48.8 s an iteration (median). The activations spilled instead. Kept at 2 GiB.
+
+**Environment:** another process (1.7 GB of VRAM) then started on the GPU. With it, 2 GiB gives 0.78 s at 512 tokens
+and 8-23 s at 2048. Measurements here need the card to themselves.
+
+**Next:**
+- Place weights by how often they are read, so that host memory gets only rarely read experts, never `lm_head` or
+  the dense layers.
+- When VRAM is short, take the routed experts' host share through a streaming path (as the CUDA offload does)
+  rather than reading host memory in the matmul.
+
+### Run 30 - 2026-11-04 ~10:00 (desktop: RTX 3090)
+
+**Question:** recipe A (21.7 GiB) cannot fit the 3090 beside the desktop and a long context. Which recipe does, at
+what KLD? (The Qwen recipes for this card keep 14-18 GiB of weights at a KLD of 0.017-0.022.)
+
+**Candidates (routed and shared experts changed, the rest Q8_0 as recipe A; bartowski's imatrix; KLD against BF16,
+40 chunks of 512, llama.cpp CUDA):**
+
+| file | size | KLD mean | median | p99 | PPL vs BF16 |
+|---|---|---|---|---|---|
+| recipe A (experts Q5_0) | 21.7 GiB | 0.0093 | 0.0036 | 0.088 | -0.06 % |
+| experts IQ4_NL | 18.2 GiB | 0.0172 | 0.0067 | 0.158 | +0.92 % |
+| experts Q4_0 | 18.2 GiB | 0.0192 | 0.0073 | 0.180 | +0.91 % |
+
+The k-quants do not apply: the experts' rows are 2688 and 1856 wide, neither a multiple of 256. IQ4_NL has no Vulkan
+kernel yet, so Q4_0.
+
+**Finding:** the Q4_0 file first ran 3 s a 512-token prompt and decoded at 21 tok/s. The expert kernels were Q5_0
+only, so Q4_0 experts ran on the CPU.
+
+**Change:** the expert kernels (`moe_mat_vecs_*`, `moe_mm_*`, `moe_mmc_*`) take all eight block types over the
+shared type interface, and `MoeMatVec` carries its `BlockType`.
+
+**Result (Q4_0 experts, no paged cache, median iteration):** 512 tokens 0.23 s, 2048 tokens 0.70 s (recipe A: 0.24 /
+1.57 s, spilling), decode 111 tok/s (recipe A 24.7).
+
+### Run 31 - 2026-11-04 ~11:00 (desktop: RTX 3090)
+
+**Question:** a context of 256K tokens resident on the 3090 with the Q4_0 recipe, nothing spilled.
+
+**Findings, in order:**
+- A paged prompt chunk after the first gathered the whole K/V cache to the host every chunk and layer, about 3.7 GB
+  over PCIe a 512-token chunk at a 131K cache, then scored the chunk against the full context. A 16K-token prompt
+  stalled for 15+ minutes.
+- `paged_prefill` (new) reads the paged cache in place:
+  - A workgroup takes (context split, kv head, 8 rows) of one sequence, each (row, query head) in a pair of threads.
+    32-position key and value tiles are staged in shared memory for every row.
+  - Flash-style running sums over the split; each row is causal over its own length; `paged_decode_reduce` combines
+    the splits.
+  - Two bugs on the way. Writing single components of shared vec4s raced, so the value tile is floats now. And -inf
+    masked scores leaked weight through exp on NVIDIA (all-ones values came out 0.72), so masked scores are a finite
+    -1e30. The same bug makes master's `flash_attn.comp` score 0.023 off the CPU on this card; the laptop is landing
+    its fix separately.
+- Vulkan prompts were never chunked: the pipeline step chunked on CUDA only. A 49K-token prompt asked for a 9.8 GB
+  mask. Vulkan now chunks as CUDA does.
+- Weights were still being placed against a free-memory figure read once at startup:
+  - The figure missed the paged cache allocated before the weights, so activations spilled at 15K tokens.
+  - A server started while another was releasing its VRAM saw 1147 MiB free and placed almost everything in host
+    memory.
+  - Placement and room-making now ask the driver for free memory at each decision (`VK_EXT_memory_budget`: other
+    processes and our own allocations both counted).
+- An unquantized paged cache on Vulkan is now f16, half f32's memory. Its key rows hold 8 dimensions a position
+  (16 bytes, as vLLM's layout has it), which the decode and prefill loaders map.
+
+**Result (Q4_0 experts, `serve --paged-attn on`, completions over wiki text):**
+
+| setup | 3.5K tokens | 15K | 50K | 112K |
+|---|---|---|---|---|
+| 131K f32 cache, before | 1.2 s | 49 s | 9.8 GB request, failed | |
+| 131K f32 cache, chunked and in place | 1.2 s | 7.7 s | 39.5 s | |
+| 262K f16 cache | 2.1 s | | 48.2 s | 146 s |
+
+At 262K the server loads at 21.5 GB and peaks at 23.5 GB; one buffer spilled during the 112K prompt. A quantized
+cache (the engine's q8/q4 format) would free 0.9-1.3 GB more: next.
+
+### Run 32 - 2026-11-04 ~12:30 (laptop: Radeon 780M)
 
 **Question:** with the model's default sampling (temperature 1.0, top_p 0.95, what the web UI sends), MTP 3 decoded
 at ~12.6 tok/s against ~27 greedy. Where does a speculative step go?

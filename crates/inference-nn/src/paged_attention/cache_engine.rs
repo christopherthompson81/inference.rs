@@ -43,6 +43,16 @@ pub enum PagedCacheType {
 const QUANT_PREFIX: char = 'q';
 const KV_SEPARATOR: char = '/';
 
+/// The activation dtype an unquantized cache takes its element type from: Vulkan's activations are f32, and its paged
+/// kernels keep that cache in f16, half the memory a context takes.
+pub fn cache_activation_dtype(act_dtype: DType, device: &Device) -> DType {
+    if device.is_vulkan() && act_dtype == DType::F32 {
+        DType::F16
+    } else {
+        act_dtype
+    }
+}
+
 impl PagedCacheType {
     /// The element type of the K and V cache tensors; quantized caches are rows of bytes.
     pub fn to_dtype(&self, act_dtype: DType) -> DType {
@@ -319,6 +329,7 @@ impl CacheEngine {
         device: &Device,
         layer_devices: Vec<Option<Device>>,
     ) -> Result<Self> {
+        let dtype = cache_activation_dtype(dtype, device);
         cache_config
             .cache_type
             .validate(dtype, model_config, device, &layer_devices)

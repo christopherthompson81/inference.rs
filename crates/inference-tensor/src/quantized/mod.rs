@@ -181,16 +181,8 @@ impl QVulkanStorage {
         l: &crate::Layout,
     ) -> Result<Option<(crate::VulkanStorage, Shape)>> {
         use crate::backend::BackendStorage;
-        let ty = match self.blocks.dtype() {
-            GgmlDType::Q8_0 => inference_vulkan::BlockType::Q8_0,
-            GgmlDType::Q5_0 => inference_vulkan::BlockType::Q5_0,
-            GgmlDType::Q4_0 => inference_vulkan::BlockType::Q4_0,
-            GgmlDType::Q4_1 => inference_vulkan::BlockType::Q4_1,
-            GgmlDType::Q5_1 => inference_vulkan::BlockType::Q5_1,
-            GgmlDType::Q4K => inference_vulkan::BlockType::Q4K,
-            GgmlDType::Q5K => inference_vulkan::BlockType::Q5K,
-            GgmlDType::Q6K => inference_vulkan::BlockType::Q6K,
-            _ => return Ok(None),
+        let Some(ty) = vulkan_block_type(self.blocks.dtype()) else {
+            return Ok(None);
         };
         let (n, k) = shape.dims2()?;
         let dims = l.shape().dims();
@@ -203,6 +195,23 @@ impl QVulkanStorage {
         *out_dims.last_mut().expect("dims hold k") = n;
         Ok(Some((out, Shape::from(out_dims))))
     }
+}
+
+// the Vulkan kernels' name for a block type they take
+#[cfg(feature = "vulkan")]
+fn vulkan_block_type(dtype: GgmlDType) -> Option<inference_vulkan::BlockType> {
+    use inference_vulkan::BlockType;
+    Some(match dtype {
+        GgmlDType::Q8_0 => BlockType::Q8_0,
+        GgmlDType::Q5_0 => BlockType::Q5_0,
+        GgmlDType::Q4_0 => BlockType::Q4_0,
+        GgmlDType::Q4_1 => BlockType::Q4_1,
+        GgmlDType::Q5_1 => BlockType::Q5_1,
+        GgmlDType::Q4K => BlockType::Q4K,
+        GgmlDType::Q5K => BlockType::Q5K,
+        GgmlDType::Q6K => BlockType::Q6K,
+        _ => return None,
+    })
 }
 
 impl QStorage {
@@ -1323,7 +1332,7 @@ const WIDEN_CHUNK: usize = 32 * 1024;
 
 impl QTensor {
     /// `y[slot] = W[ids[slot]] x[slot / x_div]` for this `(experts, rows, cols)` stack on Vulkan, with `x` f32 rows of
-    /// `cols` and `ids` u32 `(tokens, k)`, a slot a route: `(slots, rows)`, or `None` where the Vulkan kernel does not
+    /// `cols` and `ids` u32 `(tokens, k)`, a slot a route: `(slots, rows)`, or `None` where the Vulkan kernels do not
     /// take its type.
     pub fn vulkan_expert_mat_vec(
         &self,
@@ -1333,11 +1342,12 @@ impl QTensor {
     ) -> Result<Option<Tensor>> {
         #[cfg(feature = "vulkan")]
         if let QStorage::Vulkan(weight) = &self.storage
-            && weight.blocks.dtype() == GgmlDType::Q5_0
+            && let Some(ty) = vulkan_block_type(weight.blocks.dtype())
         {
             let dims = self.shape.dims3()?;
             let weights = weight.gpu_copy()?;
-            return crate::vulkan_backend::expert_mat_vec(&weights, dims, x, ids, x_div).map(Some);
+            return crate::vulkan_backend::expert_mat_vec(&weights, ty, dims, x, ids, x_div)
+                .map(Some);
         }
         let _ = (x, ids, x_div);
         Ok(None)

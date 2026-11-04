@@ -28,9 +28,11 @@ pub struct Context {
     pub(crate) import_alignment: u64,
     // the device's memory is the host's, so buffers live in mapped host RAM
     pub(crate) unified: bool,
-    // device-local bytes free when the context was made, and those the long-lived (exact) buffers hold now
-    pub(crate) device_budget: u64,
-    pub(crate) exact_device_bytes: std::sync::atomic::AtomicU64,
+    // where the device's free memory is asked for: its physical device, and whether it reports a live budget
+    // (VK_EXT_memory_budget), else its device-local heap's size, less what the context holds
+    physical: vk::PhysicalDevice,
+    has_budget: bool,
+    heap_size: u64,
     // device-local bytes every live and pooled buffer holds
     pub(crate) device_bytes: std::sync::atomic::AtomicU64,
     name: String,
@@ -101,7 +103,7 @@ impl Context {
         unsafe { instance.get_physical_device_properties2(physical, &mut props2) };
         let import_alignment = host_props.min_imported_host_pointer_alignment;
         let unified = properties.device_type != vk::PhysicalDeviceType::DISCRETE_GPU;
-        let device_budget = device_budget(&instance, physical);
+        let (has_budget, heap_size) = memory_budget(&instance, physical);
 
         let priorities = [1.0f32];
         let queues = [vk::DeviceQueueCreateInfo::default()
@@ -162,8 +164,9 @@ impl Context {
             memory_properties,
             import_alignment,
             unified,
-            device_budget,
-            exact_device_bytes: std::sync::atomic::AtomicU64::new(0),
+            physical,
+            has_budget,
+            heap_size,
             device_bytes: std::sync::atomic::AtomicU64::new(0),
             name,
             queue,
@@ -176,6 +179,33 @@ impl Context {
 
     pub fn device_name(&self) -> &str {
         &self.name
+    }
+
+    /// The device-local memory free now: the heap's budget less its usage, which other processes' and this context's
+    /// allocations both count in (VK_EXT_memory_budget), else the heap less what this context holds.
+    pub(crate) fn device_free(&self) -> u64 {
+        if !self.has_budget {
+            return self
+                .heap_size
+                .saturating_sub(self.device_bytes.load(std::sync::atomic::Ordering::Relaxed));
+        }
+        let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
+        let mut props = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
+        // SAFETY: the physical device came from this context's instance, and the chained struct outlives the call
+        unsafe {
+            self.instance
+                .get_physical_device_memory_properties2(self.physical, &mut props)
+        };
+        let memory = props.memory_properties;
+        (0..memory.memory_heap_count as usize)
+            .filter(|&i| {
+                memory.memory_heaps[i]
+                    .flags
+                    .contains(vk::MemoryHeapFlags::DEVICE_LOCAL)
+            })
+            .map(|i| budget.heap_budget[i].saturating_sub(budget.heap_usage[i]))
+            .max()
+            .unwrap_or(0)
     }
 
     /// Whether the device's memory is the host's (an iGPU, or a CPU device), so its buffers are mapped host RAM.
@@ -408,37 +438,23 @@ fn coop_matrix_f16(
     })
 }
 
-// the device-local heaps' free bytes: their budget less what is in use (VK_EXT_memory_budget), else their size
-fn device_budget(instance: &ash::Instance, physical: vk::PhysicalDevice) -> u64 {
+// whether the device reports a live memory budget (VK_EXT_memory_budget), and its largest device-local heap's size
+fn memory_budget(instance: &ash::Instance, physical: vk::PhysicalDevice) -> (bool, u64) {
     // SAFETY: `physical` came from this instance
     let extensions =
         unsafe { instance.enumerate_device_extension_properties(physical) }.unwrap_or_default();
     let has_budget = extensions
         .iter()
         .any(|ext| ext.extension_name_as_c_str() == Ok(ash::ext::memory_budget::NAME));
-    let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
-    let mut props = vk::PhysicalDeviceMemoryProperties2::default();
-    if has_budget {
-        props = props.push_next(&mut budget);
-    }
-    // SAFETY: as above, and the chained struct outlives the call
-    unsafe { instance.get_physical_device_memory_properties2(physical, &mut props) };
-    let memory = props.memory_properties;
-    (0..memory.memory_heap_count as usize)
-        .filter(|&i| {
-            memory.memory_heaps[i]
-                .flags
-                .contains(vk::MemoryHeapFlags::DEVICE_LOCAL)
-        })
-        .map(|i| {
-            if has_budget {
-                budget.heap_budget[i].saturating_sub(budget.heap_usage[i])
-            } else {
-                memory.memory_heaps[i].size
-            }
-        })
+    // SAFETY: as above
+    let memory = unsafe { instance.get_physical_device_memory_properties(physical) };
+    let heap = memory.memory_heaps[..memory.memory_heap_count as usize]
+        .iter()
+        .filter(|heap| heap.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
+        .map(|heap| heap.size)
         .max()
-        .unwrap_or(0)
+        .unwrap_or(0);
+    (has_budget, heap)
 }
 
 // an integrated GPU first: its memory is the host's, which the crate's zero-copy imports rely on for speed

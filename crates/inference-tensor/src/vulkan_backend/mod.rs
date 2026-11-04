@@ -592,6 +592,7 @@ pub(crate) fn moe_router(route: &crate::vulkan::Route<'_>) -> Result<(Tensor, Te
 /// `(tokens, k)`.
 pub(crate) fn expert_mat_vec(
     weights: &Arc<Buffer>,
+    ty: BlockType,
     (experts, rows, cols): (usize, usize, usize),
     x: &Tensor,
     ids: &Tensor,
@@ -618,7 +619,8 @@ pub(crate) fn expert_mat_vec(
     device
         .context
         .record(|r| {
-            r.moe_mat_vec_q5_0(&inference_vulkan::MoeMatVec {
+            r.moe_mat_vec(&inference_vulkan::MoeMatVec {
+                ty,
                 weights: &weights,
                 experts,
                 rows,
@@ -640,11 +642,17 @@ pub(crate) fn expert_mat_vec(
 fn cache_shape(key_cache: &Tensor, value_cache: &Tensor) -> Result<inference_vulkan::CacheShape> {
     let (_, kv_heads, _, block_size, x) = key_cache.dims5()?;
     let (_, _, head_size, _) = value_cache.dims4()?;
+    let f16 = match (key_cache.dtype(), value_cache.dtype()) {
+        (DType::F32, DType::F32) => false,
+        (DType::F16, DType::F16) => true,
+        (k, v) => crate::bail!("Vulkan's paged caches are f32 or f16, got {k:?} / {v:?}"),
+    };
     Ok(inference_vulkan::CacheShape {
         kv_heads,
         head_size,
         block_size,
         x,
+        f16,
     })
 }
 
@@ -662,7 +670,10 @@ pub(crate) fn paged_cache_write(
         bound(&key.contiguous()?, f32)?,
         bound(&value.contiguous()?, f32)?,
     );
-    let (kc, vc) = (bound(key_cache, f32)?, bound(value_cache, f32)?);
+    let (kc, vc) = (
+        bound(key_cache, key_cache.dtype())?,
+        bound(value_cache, value_cache.dtype())?,
+    );
     let slots = slot_mapping
         .to_device(key.device())?
         .to_dtype(DType::I64)?
@@ -758,6 +769,55 @@ pub(crate) fn flash_attn(op: &crate::vulkan::FlashAttn<'_>) -> Result<Option<Ten
     Ok(Some(tensor_of(out, (batch, heads, positions, head_size))))
 }
 
+pub(crate) fn paged_prefill(op: &crate::vulkan::PagedPrefill<'_>) -> Result<Tensor> {
+    let shape = cache_shape(op.key_cache, op.value_cache)?;
+    let (rows, heads, head_size) = op.q.dims3()?;
+    let f32 = DType::F32;
+    let device = op.q.device().as_vulkan_device()?.clone();
+    let table = op
+        .block_table
+        .to_device(op.q.device())?
+        .to_dtype(DType::U32)?
+        .contiguous()?;
+    let (q, kc, vc, tb) = (
+        bound(&op.q.contiguous()?, f32)?,
+        bound(op.key_cache, op.key_cache.dtype())?,
+        bound(op.value_cache, op.value_cache.dtype())?,
+        bound(&table, DType::U32)?,
+    );
+    let count = rows * heads * head_size;
+    let out = VulkanStorage {
+        buffer: Arc::new(device.buffer(count * 4)?),
+        device: device.clone(),
+        count,
+        dtype: f32,
+    };
+    let partials = Arc::new(
+        device.buffer(inference_vulkan::PagedPrefill::partials_bytes(
+            rows, heads, head_size, op.context,
+        ))?,
+    );
+    device
+        .context
+        .record(|r| {
+            r.paged_prefill(&inference_vulkan::PagedPrefill {
+                shape,
+                rows,
+                heads,
+                context: op.context,
+                scale: op.scale,
+                q: (&q.0, q.1),
+                key_cache: &kc.0,
+                value_cache: &vc.0,
+                block_table: (&tb.0, tb.1),
+                partials: &partials,
+                out: (&out.buffer, 0),
+            })
+        })
+        .map_err(vk_err)?;
+    Ok(tensor_of(out, (rows, heads, head_size)))
+}
+
 pub(crate) fn ranked_top_k(logits: &Tensor, temperature: f64) -> Result<Tensor> {
     const _: () = assert!(crate::vulkan::RANKED_TOP_K == inference_vulkan::RankedTopK::K);
     let (rows, vocab) = logits.dims2()?;
@@ -803,8 +863,8 @@ pub(crate) fn paged_decode(op: &crate::vulkan::PagedDecode<'_>) -> Result<Tensor
     let (tables, lens) = (on_device(op.block_tables)?, on_device(op.context_lens)?);
     let (q, kc, vc) = (
         bound(&op.q.contiguous()?, f32)?,
-        bound(op.key_cache, f32)?,
-        bound(op.value_cache, f32)?,
+        bound(op.key_cache, op.key_cache.dtype())?,
+        bound(op.value_cache, op.value_cache.dtype())?,
     );
     let (tb, lb) = (bound(&tables, DType::U32)?, bound(&lens, DType::U32)?);
     let count = seqs * heads * head_size;
@@ -1514,37 +1574,47 @@ mod tests {
         Ok(())
     }
 
-    // a Q5_0 expert stack's routes: one token's (a kernel a route), then several tokens sharing experts (the kernel
-    // reading each expert once), over a token's input (x_div k) and over each route's own row (x_div 1)
+    // an expert stack's routes, for each block type the kernels take: one token's (a kernel a route), then several
+    // tokens sharing experts (the kernel reading each expert once), over a token's input (x_div k) and over each
+    // route's own row (x_div 1)
     #[test]
     fn vulkan_expert_matvecs_match_the_dequantized_experts() -> Result<()> {
         use crate::quantized::{GgmlDType, QTensor};
         let Some(vk) = device() else { return Ok(()) };
         let (experts, rows, cols, k) = (4usize, 71usize, 256usize, 2usize);
         let w = Tensor::randn(0f32, 1., (experts, rows, cols), &Device::Cpu)?;
-        let weight = QTensor::quantize(&w.to_device(&vk)?, GgmlDType::Q5_0)?;
-        let dense = weight.dequantize(&Device::Cpu)?;
         // the last: 18 slots of one expert, more than a leader takes
         // a prompt's 150 routes, past the grouped kernel's, take the tiled matmul over routes sorted by expert, one
-        // expert past a tile of them
+        // expert past a tile of them; 400 average past what sends a prompt's experts to the matrix cores
         let prompt: Vec<u32> = (0..150u32)
             .map(|i| if i % 3 == 0 { 2 } else { i * 7 % 4 })
             .collect();
-        let routes: [&[u32]; 4] = [&[3, 1], &[2, 0, 0, 2, 1, 2], &[1; 18], &prompt];
-        for ids in routes {
-            let tokens = ids.len() / k;
-            let id_t = Tensor::from_slice(ids, (tokens, k), &Device::Cpu)?;
-            for x_div in [k, 1] {
-                let x = Tensor::randn(0f32, 1., (ids.len() / x_div, cols), &Device::Cpu)?;
-                let got = weight
-                    .vulkan_expert_mat_vec(&x.to_device(&vk)?, &id_t.to_device(&vk)?, x_div)?
-                    .expect("Q5_0 runs on Vulkan");
-                let mut want = Vec::new();
-                for (slot, &e) in ids.iter().enumerate() {
-                    let row = x.narrow(0, slot / x_div, 1)?;
-                    want.push(row.matmul(&dense.get(e as usize)?.t()?)?);
+        let long: Vec<u32> = (0..400u32).map(|i| (i * 5 + i / 7) % 4).collect();
+        let routes: [&[u32]; 5] = [&[3, 1], &[2, 0, 0, 2, 1, 2], &[1; 18], &prompt, &long];
+        for dtype in [
+            GgmlDType::Q5_0,
+            GgmlDType::Q8_0,
+            GgmlDType::Q4_0,
+            GgmlDType::Q4_1,
+            GgmlDType::Q6K,
+        ] {
+            let weight = QTensor::quantize(&w.to_device(&vk)?, dtype)?;
+            let dense = weight.dequantize(&Device::Cpu)?;
+            for ids in routes {
+                let tokens = ids.len() / k;
+                let id_t = Tensor::from_slice(ids, (tokens, k), &Device::Cpu)?;
+                for x_div in [k, 1] {
+                    let x = Tensor::randn(0f32, 1., (ids.len() / x_div, cols), &Device::Cpu)?;
+                    let got = weight
+                        .vulkan_expert_mat_vec(&x.to_device(&vk)?, &id_t.to_device(&vk)?, x_div)?
+                        .expect("the type runs on Vulkan");
+                    let mut want = Vec::new();
+                    for (slot, &e) in ids.iter().enumerate() {
+                        let row = x.narrow(0, slot / x_div, 1)?;
+                        want.push(row.matmul(&dense.get(e as usize)?.t()?)?);
+                    }
+                    assert_int8_close(&got, &Tensor::cat(&want, 0)?)?;
                 }
-                assert_int8_close(&got, &Tensor::cat(&want, 0)?)?;
             }
         }
         Ok(())

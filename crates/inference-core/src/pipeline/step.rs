@@ -312,10 +312,12 @@ impl dyn Pipeline {
         let scheduler_visible_prompt_step = scheduled_prompt_chunks.is_some();
         let scheduler_visible_prompt_is_final =
             scheduler_visible_prompt_step && metadata.is_final_prompt_chunk;
+        // a discrete Vulkan GPU's later chunks attend over the paged cache in place (paged_prefill), as CUDA's do; an
+        // iGPU reads every expert's weights from host memory again each chunk, so it runs a prompt whole
         let chunk_size = if !scheduler_visible_prompt_step
             && is_prompt
             && !ctx.return_raw_logits
-            && self.device().is_cuda()
+            && (self.device().is_cuda() || inference_tensor::vulkan::is_discrete(&self.device()))
         {
             metadata.prompt_chunk_size
         } else {

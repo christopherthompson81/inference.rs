@@ -441,6 +441,7 @@ const MAX_ROUTER_TOP_K: usize = 32;
 /// expert read once for every slot routed to it and `x`'s rows quantized to int8 blocks into `scratch` (of
 /// [`crate::MatVec::scratch_bytes`] for `slots / x_div` rows); `y` is `(slots, rows)`.
 pub struct MoeMatVec<'a> {
+    pub ty: crate::BlockType,
     pub weights: &'a Arc<dyn crate::Bound>,
     pub experts: usize,
     pub rows: usize,
@@ -483,12 +484,9 @@ pub struct Router<'a> {
 }
 
 impl Recorder<'_> {
-    pub fn moe_mat_vec_q5_0(&self, op: &MoeMatVec<'_>) -> Result<()> {
-        const BLOCK_VALUES: usize = 32;
-        const BLOCK_BYTES: usize = 22;
-        let blocks = op.cols / BLOCK_VALUES;
-        let expert_bytes = op.rows * blocks * BLOCK_BYTES;
-        if !op.cols.is_multiple_of(BLOCK_VALUES)
+    pub fn moe_mat_vec(&self, op: &MoeMatVec<'_>) -> Result<()> {
+        let expert_bytes = op.rows * op.cols / op.ty.block_values() * op.ty.block_bytes();
+        if !op.cols.is_multiple_of(op.ty.block_values())
             || op.x_div == 0
             || op.weights.bytes() < op.experts * expert_bytes
             || !op.weights.offset().is_multiple_of(2)
@@ -496,8 +494,8 @@ impl Recorder<'_> {
             || op.routing.len() < MoeMatVec::routing_bytes(op.slots, op.experts)
         {
             return Err(Error::Invalid(format!(
-                "a {} x {}x{} Q5_0 expert matvec over {} slots",
-                op.experts, op.rows, op.cols, op.slots
+                "a {} x {}x{} {:?} expert matvec over {} slots",
+                op.experts, op.rows, op.cols, op.ty, op.slots
             )));
         }
         if op.slots == 0 {
@@ -506,11 +504,11 @@ impl Recorder<'_> {
         if op.slots >= op.experts * MMC_MIN_ROUTES_PER_EXPERT
             && let Some(coop) = self.context.coop.as_ref().filter(|_| !self.context.unified)
         {
-            return self.moe_mmc_q5_0(op, coop, expert_bytes);
+            return self.moe_mmc(op, coop, expert_bytes);
         }
         let s_off = self.quantize_rows(op.x, op.slots.div_ceil(op.x_div), op.cols, op.scratch)?;
         if op.slots > MOE_TILED_MIN_SLOTS {
-            return self.moe_mm_q5_0(op, s_off, expert_bytes);
+            return self.moe_mm(op, s_off, expert_bytes);
         }
         if op.slots > MAX_GROUPS_X {
             return Err(Error::Invalid(format!("{} expert routes", op.slots)));
@@ -536,7 +534,7 @@ impl Recorder<'_> {
             op.ids.0.buffer,
             op.scratch.buffer,
         ];
-        self.context.kernels.moe_mat_vecs_q5_0.dispatch(
+        self.context.kernels.moe_mat_vecs(op.ty).dispatch(
             self,
             &buffers,
             &bytes,
@@ -555,7 +553,7 @@ impl Recorder<'_> {
 
     // a prompt's routes: grouped by expert on the GPU, then a tiled matmul over each expert's tiles of them
     // the routes on matrix cores: sorted by expert, their activations gathered in that order as f16, then the tiles
-    fn moe_mmc_q5_0(
+    fn moe_mmc(
         &self,
         op: &MoeMatVec<'_>,
         coop: &crate::kernels::CoopKernels,
@@ -587,7 +585,7 @@ impl Recorder<'_> {
             &words(&[op.slots, op.cols, op.x_div, op.x.1])?,
             [pairs_x as u32, pairs.div_ceil(pairs_x) as u32, 1],
         );
-        coop.moe_mmc_q5_0.dispatch(
+        coop.moe_mmc(op.ty).dispatch(
             self,
             &[
                 op.weights.vk_buffer(),
@@ -622,7 +620,7 @@ impl Recorder<'_> {
         Ok(())
     }
 
-    fn moe_mm_q5_0(&self, op: &MoeMatVec<'_>, s_off: usize, expert_bytes: usize) -> Result<()> {
+    fn moe_mm(&self, op: &MoeMatVec<'_>, s_off: usize, expert_bytes: usize) -> Result<()> {
         let tiles_off = op.slots;
         self.context.kernels.moe_sort.dispatch(
             self,
@@ -640,7 +638,7 @@ impl Recorder<'_> {
             s_off,
             tiles_off,
         ])?;
-        self.context.kernels.moe_mm_q5_0.dispatch(
+        self.context.kernels.moe_mm(op.ty).dispatch(
             self,
             &[
                 op.weights.vk_buffer(),
@@ -712,6 +710,13 @@ pub(crate) const PAGED_WRITE_BINDINGS: usize = 5;
 pub(crate) const PAGED_WRITE_PUSH_BYTES: u32 = 8 * 4;
 pub(crate) const PAGED_DECODE_BINDINGS: usize = 6;
 pub(crate) const PAGED_DECODE_PUSH_BYTES: u32 = 10 * 4;
+pub(crate) const PAGED_PREFILL_BINDINGS: usize = 5;
+pub(crate) const PAGED_PREFILL_PUSH_BYTES: u32 = 11 * 4;
+// the prefill shader's rows a workgroup and its tile; a split covers at least PREFILL_MIN_SPAN positions, at most
+// MAX_PREFILL_SPLITS of them, their partials within PAGED_PARTIALS_BYTES
+const PREFILL_ROWS: usize = 8;
+const PREFILL_MIN_SPAN: usize = 1024;
+const MAX_PREFILL_SPLITS: usize = 32;
 pub(crate) const PAGED_REDUCE_BINDINGS: usize = 2;
 pub(crate) const PAGED_REDUCE_PUSH_BYTES: u32 = 3 * 4;
 // the decode shader's geometry: the positions a workgroup takes, a tile of whole blocks, its threads, the query heads
@@ -726,15 +731,18 @@ const PAGED_THREADS: usize = 256;
 const MAX_PAGED_GROUP: usize = 16;
 const PAGED_VALUE_HEADS: usize = 8;
 const PAGED_X: usize = 4;
+// an f16 cache's key rows hold 8 dimensions a position (16 bytes, as vLLM's layout has it)
+const PAGED_X_F16: usize = 8;
 
-/// The geometry of a pair of f32 vLLM-layout caches: keys `[blocks, kv_heads, head_size / x, block_size, x]`, values
-/// `[blocks, kv_heads, head_size, block_size]`.
+/// The geometry of a pair of vLLM-layout caches: keys `[blocks, kv_heads, head_size / x, block_size, x]`, values
+/// `[blocks, kv_heads, head_size, block_size]`, f32 or (`f16`) f16.
 #[derive(Clone, Copy, Debug)]
 pub struct CacheShape {
     pub kv_heads: usize,
     pub head_size: usize,
     pub block_size: usize,
     pub x: usize,
+    pub f16: bool,
 }
 
 /// Writes `tokens` key and value rows `(tokens, kv_heads, head_size)` into the caches at the i64 `slots`.
@@ -746,6 +754,41 @@ pub struct PagedWrite<'a> {
     pub key_cache: &'a Arc<Buffer>,
     pub value_cache: &'a Arc<Buffer>,
     pub slots: At<'a>,
+}
+
+/// One sequence's `rows` prompt queries `(rows, heads, head_size)` over its `context` cached positions (the rows'
+/// own included, last), row r causal over the first `context - rows + r + 1`, through its block table row (u32);
+/// `out` is laid out as the queries, and `partials` holds [`PagedPrefill::partials_bytes`].
+pub struct PagedPrefill<'a> {
+    pub shape: CacheShape,
+    pub rows: usize,
+    pub heads: usize,
+    pub context: usize,
+    pub scale: f32,
+    pub q: At<'a>,
+    pub key_cache: &'a Arc<Buffer>,
+    pub value_cache: &'a Arc<Buffer>,
+    pub block_table: At<'a>,
+    pub partials: &'a Arc<Buffer>,
+    pub out: At<'a>,
+}
+
+impl PagedPrefill<'_> {
+    // the context's splits and the positions each covers (whole tiles)
+    fn splits(rows: usize, heads: usize, head_size: usize, context: usize) -> (usize, usize) {
+        let per_split = (rows * heads * (head_size + 2) * 4).max(1);
+        let splits = context
+            .div_ceil(PREFILL_MIN_SPAN)
+            .clamp(1, MAX_PREFILL_SPLITS)
+            .min((PAGED_PARTIALS_BYTES / per_split).max(1));
+        let span = context.div_ceil(splits).next_multiple_of(PAGED_TILE);
+        (context.div_ceil(span).max(1), span)
+    }
+
+    pub fn partials_bytes(rows: usize, heads: usize, head_size: usize, context: usize) -> usize {
+        let (splits, _) = Self::splits(rows, heads, head_size, context);
+        rows * heads * splits * (head_size + 2) * 4
+    }
 }
 
 /// One query `(seqs, heads, head_size)` a sequence over its `context_lens` cached positions through `block_tables`
@@ -814,13 +857,83 @@ impl Recorder<'_> {
         let groups = (op.tokens * s.kv_heads * s.head_size)
             .div_ceil(INDEX_THREADS)
             .min(MAX_GROUPS) as u32;
-        self.context.kernels.paged_cache_write.dispatch(
+        self.context.kernels.paged_cache_write(op.shape).dispatch(
             self,
             &buffers.map(|b| b.buffer),
             &bytes,
             [groups, 1, 1],
         );
         for buffer in buffers {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+
+    pub fn paged_prefill(&self, op: &PagedPrefill<'_>) -> Result<()> {
+        let s = op.shape;
+        let group = op.heads / s.kv_heads.max(1);
+        if s.head_size == 0
+            || s.head_size > MAX_PAGED_HEAD
+            || !s.head_size.is_multiple_of(2 * PAGED_X)
+            || s.x != if s.f16 { PAGED_X_F16 } else { PAGED_X }
+            || s.kv_heads == 0
+            || !op.heads.is_multiple_of(s.kv_heads)
+            || group > MAX_PAGED_GROUP
+            || !PAGED_TILE.is_multiple_of(s.block_size)
+            || !s.block_size.is_multiple_of(PAGED_X)
+            || !op.q.1.is_multiple_of(PAGED_X)
+            || op.rows > op.context
+            || op.partials.len()
+                < PagedPrefill::partials_bytes(op.rows, op.heads, s.head_size, op.context)
+        {
+            return Err(Error::Invalid(format!(
+                "paged prefill of {} rows, {} heads over {} kv heads, head size {}, context {}",
+                op.rows, op.heads, s.kv_heads, s.head_size, op.context
+            )));
+        }
+        if op.rows == 0 {
+            return Ok(());
+        }
+        let (splits, span) = PagedPrefill::splits(op.rows, op.heads, s.head_size, op.context);
+        let mut bytes = words(&[op.heads, s.kv_heads, s.head_size, s.block_size])?;
+        bytes.extend_from_slice(&op.scale.to_bits().to_le_bytes());
+        bytes.extend(words(&[
+            op.q.1 / PAGED_X,
+            op.block_table.1,
+            op.context,
+            op.rows,
+            splits,
+            span,
+        ])?);
+        let buffers = [
+            op.q.0,
+            op.key_cache,
+            op.value_cache,
+            op.block_table.0,
+            op.partials,
+        ];
+        self.context.kernels.paged_prefill(s).dispatch(
+            self,
+            &buffers.map(|b| b.buffer),
+            &bytes,
+            [
+                splits as u32,
+                s.kv_heads as u32,
+                op.rows.div_ceil(PREFILL_ROWS) as u32,
+            ],
+        );
+        self.context.kernels.paged_decode_reduce.dispatch(
+            self,
+            &[op.partials.buffer, op.out.0.buffer],
+            &words(&[s.head_size, splits, op.out.1])?,
+            [(op.rows * op.heads) as u32, 1, 1],
+        );
+        self.work.set(
+            self.work
+                .get()
+                .saturating_add((op.rows * op.context * op.heads * s.head_size) as u64),
+        );
+        for buffer in buffers.iter().copied().chain([op.out.0]) {
             self.retain(buffer.clone());
         }
         Ok(())
@@ -833,7 +946,7 @@ impl Recorder<'_> {
         if s.head_size == 0
             || s.head_size > MAX_PAGED_HEAD
             || !PAGED_THREADS.is_multiple_of(s.head_size)
-            || s.x != PAGED_X
+            || s.x != if s.f16 { PAGED_X_F16 } else { PAGED_X }
             || s.kv_heads == 0
             || !op.heads.is_multiple_of(s.kv_heads)
             || group > MAX_PAGED_GROUP
@@ -877,7 +990,7 @@ impl Recorder<'_> {
                 op.context_lens.1 + first,
                 chunks,
             ])?);
-            self.context.kernels.paged_decode.dispatch(
+            self.context.kernels.paged_decode(s).dispatch(
                 self,
                 &buffers.map(|b| b.buffer),
                 &bytes,

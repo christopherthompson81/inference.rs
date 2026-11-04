@@ -33,7 +33,9 @@ const STAGING_BYTES: usize = 64 << 20;
 #[derive(Default)]
 pub(crate) struct BufferPool {
     free: HashMap<(bool, u64), Vec<Allocation>>,
+    // idle host bytes (capped), and idle device bytes (counted, not capped)
     bytes: u64,
+    device_bytes: u64,
 }
 
 // a buffer, its memory and the memory's mapping
@@ -56,6 +58,7 @@ impl BufferPool {
             unsafe { allocation.free(device) };
         }
         self.bytes = 0;
+        self.device_bytes = 0;
     }
 }
 
@@ -192,24 +195,21 @@ impl Buffer {
 
     /// A buffer of `len` bytes placed as `new` places it, allocated to size and freed when dropped, for what lives as
     /// long as the model (weights), which a size class would round up by as much again. On a discrete GPU these stay
-    /// in device memory while they leave [`EXACT_RESERVE_BYTES`] of it for the short-lived buffers, then go to host
-    /// memory.
+    /// in device memory while everything live there leaves [`EXACT_RESERVE_BYTES`] of it for the short-lived buffers,
+    /// then go to host memory.
     pub fn exact(context: &Arc<Context>, len: usize) -> Result<Self> {
         if len == 0 || len as u64 > MAX_BINDING_BYTES {
             return Err(Error::Invalid(format!("a buffer of {len} bytes")));
         }
-        let held = &context.exact_device_bytes;
-        let fits = held.fetch_add(len as u64, Ordering::Relaxed) + len as u64
-            <= context.device_budget.saturating_sub(EXACT_RESERVE_BYTES);
-        let device_local = !context.unified && fits;
-        if !device_local {
-            held.fetch_sub(len as u64, Ordering::Relaxed);
-        }
-        let buffer = Self::allocate(context, len, len as u64, device_local, false);
-        if device_local && !buffer.as_ref().is_ok_and(|b| !b.is_mapped()) {
-            held.fetch_sub(len as u64, Ordering::Relaxed);
-        }
-        buffer
+        // free now, as the driver counts it (the paged cache, the weights placed so far and other processes all
+        // taken), plus idle pooled buffers, which an allocation frees first
+        let idle = context
+            .pool
+            .lock()
+            .expect("vulkan pool poisoned")
+            .device_bytes;
+        let fits = len as u64 + EXACT_RESERVE_BYTES <= context.device_free() + idle;
+        Self::allocate(context, len, len as u64, !context.unified && fits, false)
     }
 
     // a fresh allocation; device memory a discrete GPU has run out of comes from the buffers finished work held (the
@@ -459,11 +459,6 @@ impl Drop for Buffer {
             ptr: self.ptr,
             size: self.capacity,
         };
-        if !self.pooled && self.ptr.is_null() {
-            self.context
-                .exact_device_bytes
-                .fetch_sub(self.capacity, Ordering::Relaxed);
-        }
         let refused = if self.pooled {
             self.context
                 .pool
@@ -480,12 +475,11 @@ impl Drop for Buffer {
     }
 }
 
-// frees idle device buffers, the largest first, until `capacity` more device memory leaves ROOM_MARGIN_BYTES of the
-// device's budget; once the pool is empty, the finished work's buffers come back to it first (once)
+// frees idle device buffers, the largest first, until `capacity` more device memory leaves ROOM_MARGIN_BYTES free;
+// once the pool is empty, the finished work's buffers come back to it first (once)
 fn make_room(context: &Context, capacity: u64) -> Result<()> {
-    let limit = context.device_budget.saturating_sub(ROOM_MARGIN_BYTES);
     let mut synchronized = false;
-    while context.device_bytes.load(Ordering::Relaxed) + capacity > limit {
+    while context.device_free() < capacity + ROOM_MARGIN_BYTES {
         let largest = context
             .pool
             .lock()
@@ -516,7 +510,9 @@ impl BufferPool {
             .map(|(&key, _)| key)
             .max_by_key(|&(_, capacity)| capacity)?;
         let allocation = self.free.get_mut(&key)?.pop()?;
-        if !device_local {
+        if device_local {
+            self.device_bytes -= key.1;
+        } else {
             self.bytes -= key.1;
         }
         Some(allocation)
@@ -529,7 +525,9 @@ impl BufferPool {
             if local != device_local {
                 return true;
             }
-            if !local {
+            if local {
+                self.device_bytes -= capacity * allocations.len() as u64;
+            } else {
                 self.bytes -= capacity * allocations.len() as u64;
             }
             out.append(allocations);
@@ -540,7 +538,9 @@ impl BufferPool {
 
     fn take(&mut self, device_local: bool, capacity: u64) -> Option<Allocation> {
         let allocation = self.free.get_mut(&(device_local, capacity))?.pop()?;
-        if !device_local {
+        if device_local {
+            self.device_bytes -= capacity;
+        } else {
             self.bytes -= capacity;
         }
         Some(allocation)
@@ -557,7 +557,9 @@ impl BufferPool {
         {
             return Some(allocation);
         }
-        if !device_local {
+        if device_local {
+            self.device_bytes += capacity;
+        } else {
             self.bytes += capacity;
         }
         self.free

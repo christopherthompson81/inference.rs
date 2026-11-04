@@ -597,6 +597,48 @@ fn adjust_kv_mask(mask: &Tensor, kv_seq_len: usize) -> Result<Tensor> {
     }
 }
 
+struct VulkanPrefill<'a> {
+    query: &'a Tensor,
+    key_cache: &'a Tensor,
+    value_cache: &'a Tensor,
+    block_tables: &'a Tensor,
+    query_lens: &'a [usize],
+    kv_lens: &'a [usize],
+    causal: bool,
+    // no window, softcap, sinks, ALiBi or multimodal prefix, and every sequence's rows dense
+    plain: bool,
+    scale: f32,
+}
+
+// a causal prompt chunk over a Vulkan f32 or f16 cache, read in place a sequence at a time (rather than gathered to the host
+// and scored whole): `(batch, heads, seq, head)` as Sdpa returns, or `None` where the kernel does not apply
+fn vulkan_paged_prefill(call: VulkanPrefill<'_>) -> Result<Option<Tensor>> {
+    if !call.query.device().is_vulkan()
+        || !call.causal
+        || !call.plain
+        || !matches!(call.key_cache.dtype(), DType::F32 | DType::F16)
+    {
+        return Ok(None);
+    }
+    let query = call.query.to_dtype(DType::F32)?;
+    let mut rows = Vec::with_capacity(call.query_lens.len());
+    for (seq, (&q_len, &kv_len)) in call.query_lens.iter().zip(call.kv_lens).enumerate() {
+        // (heads, seq, head) -> (seq, heads, head)
+        let q = query.get(seq)?.narrow(1, 0, q_len)?.transpose(0, 1)?;
+        let out =
+            inference_tensor::vulkan::paged_prefill(&inference_tensor::vulkan::PagedPrefill {
+                q: &q,
+                key_cache: call.key_cache,
+                value_cache: call.value_cache,
+                block_table: &call.block_tables.get(seq)?,
+                context: kv_len,
+                scale: call.scale,
+            })?;
+        rows.push(out.transpose(0, 1)?);
+    }
+    Ok(Some(Tensor::stack(&rows, 0)?.to_dtype(call.query.dtype())?))
+}
+
 fn prefix_attention_output_layout(
     output: Tensor,
     attention_mask: &AttentionMask,
@@ -1280,6 +1322,24 @@ impl PagedAttention {
             block_size,
             attention_backend,
         };
+        if let Some(output) = vulkan_paged_prefill(VulkanPrefill {
+            query: tensors.query,
+            key_cache: key_cache.as_ref().unwrap(),
+            value_cache: value_cache.as_ref().unwrap(),
+            block_tables,
+            query_lens: &query_lens,
+            kv_lens: &kv_lens,
+            causal: prefix_causal || single_queries,
+            plain: mm_prefix_ranges.is_none()
+                && ctx.sdpa_params.sliding_window.is_none()
+                && ctx.sdpa_params.softcap.is_none()
+                && ctx.sdpa_params.sinks.is_none()
+                && ctx.alibi_slopes.is_none()
+                && query_layout_is_dense,
+            scale: ctx.sdpa_params.softmax_scale,
+        })? {
+            return prefix_attention_output_layout(output, tensors.attention_mask).map(Some);
+        }
         #[cfg_attr(not(all(feature = "cuda", target_family = "unix")), allow(unused_mut))]
         let mut prefill_plan = PrefixPrefillPlan::choose(prefill_plan_input);
         #[cfg(all(feature = "cuda", target_family = "unix"))]
