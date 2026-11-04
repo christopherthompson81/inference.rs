@@ -1370,13 +1370,24 @@ mod tests {
         use crate::Module;
         use crate::quantized::{GgmlDType, QMatMul, QTensor};
         let Some(vk) = device() else { return Ok(()) };
-        let w = Tensor::randn(0f32, 1., (96, 2688), &Device::Cpu)?;
-        for dtype in [GgmlDType::Q8_0, GgmlDType::Q5_0] {
+        // 2816 columns: whole 256-value blocks for the k-quants, and a block count no thread stride divides evenly
+        let w = Tensor::randn(0f32, 1., (97, 2816), &Device::Cpu)?;
+        for dtype in [
+            GgmlDType::Q8_0,
+            GgmlDType::Q5_0,
+            GgmlDType::Q4_0,
+            GgmlDType::Q4_1,
+            GgmlDType::Q5_1,
+            GgmlDType::Q4K,
+            GgmlDType::Q5K,
+            GgmlDType::Q6K,
+        ] {
             let weight = QTensor::quantize(&w.to_device(&vk)?, dtype)?;
             let dense = weight.dequantize(&Device::Cpu)?;
             let matmul = QMatMul::from_qtensor(weight)?;
-            for rows in [1usize, 3] {
-                let x = Tensor::randn(0f32, 1., (1, rows, 2688), &Device::Cpu)?;
+            // past 8 rows, the prompt matmul
+            for rows in [1usize, 3, 8, 70] {
+                let x = Tensor::randn(0f32, 1., (1, rows, 2816), &Device::Cpu)?;
                 let want = x.broadcast_matmul(&dense.t()?)?;
                 assert_int8_close(&matmul.forward(&x.to_device(&vk)?)?, &want)?;
             }

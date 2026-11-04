@@ -56,9 +56,21 @@ macro_rules! kernels {
 kernels! {
     mat_vecs_q8_0: MUL_MAT_VECS_Q8_0, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
     mat_vecs_q5_0: MUL_MAT_VECS_Q5_0, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
+    mat_vecs_q4_0: MUL_MAT_VECS_Q4_0, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
+    mat_vecs_q4_1: MUL_MAT_VECS_Q4_1, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
+    mat_vecs_q5_1: MUL_MAT_VECS_Q5_1, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
+    mat_vecs_q4_k: MUL_MAT_VECS_Q4_K, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
+    mat_vecs_q5_k: MUL_MAT_VECS_Q5_K, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
+    mat_vecs_q6_k: MUL_MAT_VECS_Q6_K, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
     quantize_q8_1: QUANTIZE_Q8_1, QUANTIZE_BINDINGS, QUANTIZE_PUSH_BYTES;
     mul_mm_q8_0: MUL_MM_Q8_0, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
     mul_mm_q5_0: MUL_MM_Q5_0, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
+    mul_mm_q4_0: MUL_MM_Q4_0, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
+    mul_mm_q4_1: MUL_MM_Q4_1, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
+    mul_mm_q5_1: MUL_MM_Q5_1, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
+    mul_mm_q4_k: MUL_MM_Q4_K, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
+    mul_mm_q5_k: MUL_MM_Q5_K, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
+    mul_mm_q6_k: MUL_MM_Q6_K, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
     map_f32: MAP_F32, MAP_BINDINGS, MAP_PUSH_BYTES;
     copy_b32: COPY_B32, MAP_BINDINGS, MAP_PUSH_BYTES;
     rows_f32: ROWS_F32, ops::BINDINGS, ops::ROWS_PUSH_BYTES;
@@ -87,13 +99,40 @@ pub enum BlockType {
     Q8_0,
     /// an f16 scale, 32 fifth bits and 32 low nibbles, values offset by 16
     Q5_0,
+    /// an f16 scale and 32 nibbles, values offset by 8
+    Q4_0,
+    /// f16 scale and min, 32 nibbles
+    Q4_1,
+    /// f16 scale and min, 32 fifth bits and 32 low nibbles
+    Q5_1,
+    /// 256 values in eight 32-value sub-blocks of nibbles, each with a 6-bit scale and min
+    Q4K,
+    /// Q4K with a fifth bit a value
+    Q5K,
+    /// 256 six-bit values, an int8 scale per 16
+    Q6K,
 }
 
 impl BlockType {
+    /// The bytes of one stored block.
     pub fn block_bytes(self) -> usize {
         match self {
             Self::Q8_0 => 34,
             Self::Q5_0 => 22,
+            Self::Q4_0 => 18,
+            Self::Q4_1 => 20,
+            Self::Q5_1 => 24,
+            Self::Q4K => 144,
+            Self::Q5K => 176,
+            Self::Q6K => 210,
+        }
+    }
+
+    /// The values one stored block holds; a row's length is a multiple of it.
+    pub fn block_values(self) -> usize {
+        match self {
+            Self::Q4K | Self::Q5K | Self::Q6K => 256,
+            _ => BLOCK_VALUES,
         }
     }
 }
@@ -161,10 +200,9 @@ impl Recorder<'_> {
     }
 
     pub fn mat_vec(&self, op: &MatVec<'_>) -> Result<()> {
-        let blocks = op.cols / BLOCK_VALUES;
-        let fits = op.cols.is_multiple_of(BLOCK_VALUES)
+        let fits = op.cols.is_multiple_of(op.ty.block_values())
             && op.weights.offset().is_multiple_of(2)
-            && op.weights.bytes() >= op.rows * blocks * op.ty.block_bytes()
+            && op.weights.bytes() >= op.rows * op.cols / op.ty.block_values() * op.ty.block_bytes()
             && op.x.len() / 4 >= op.x_offset + op.x_rows * op.cols
             && op.y.len() / 4 >= op.y_offset + op.x_rows * op.rows
             && op.x_rows > 0;
@@ -192,6 +230,12 @@ impl Recorder<'_> {
             let pipeline = match op.ty {
                 BlockType::Q8_0 => &kernels.mul_mm_q8_0,
                 BlockType::Q5_0 => &kernels.mul_mm_q5_0,
+                BlockType::Q4_0 => &kernels.mul_mm_q4_0,
+                BlockType::Q4_1 => &kernels.mul_mm_q4_1,
+                BlockType::Q5_1 => &kernels.mul_mm_q5_1,
+                BlockType::Q4K => &kernels.mul_mm_q4_k,
+                BlockType::Q5K => &kernels.mul_mm_q5_k,
+                BlockType::Q6K => &kernels.mul_mm_q6_k,
             };
             let bytes = push_words(&[
                 op.rows,
@@ -240,6 +284,12 @@ impl Recorder<'_> {
         let pipeline = match op.ty {
             BlockType::Q8_0 => &kernels.mat_vecs_q8_0,
             BlockType::Q5_0 => &kernels.mat_vecs_q5_0,
+            BlockType::Q4_0 => &kernels.mat_vecs_q4_0,
+            BlockType::Q4_1 => &kernels.mat_vecs_q4_1,
+            BlockType::Q5_1 => &kernels.mat_vecs_q5_1,
+            BlockType::Q4K => &kernels.mat_vecs_q4_k,
+            BlockType::Q5K => &kernels.mat_vecs_q5_k,
+            BlockType::Q6K => &kernels.mat_vecs_q6_k,
         };
         pipeline.dispatch(
             self,
@@ -338,6 +388,9 @@ mod tests {
                 let nibble = if j < 16 { byte & 0xf } else { byte >> 4 };
                 f64::from(i32::from(nibble) | (((qh >> j) & 1) as i32) << 4) - 16.0
             }
+            other => unreachable!(
+                "{other:?} is checked against the CPU's dequantization in inference-tensor"
+            ),
         }
     }
 

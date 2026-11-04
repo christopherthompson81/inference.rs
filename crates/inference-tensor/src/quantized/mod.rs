@@ -184,6 +184,12 @@ impl QVulkanStorage {
         let ty = match self.blocks.dtype() {
             GgmlDType::Q8_0 => inference_vulkan::BlockType::Q8_0,
             GgmlDType::Q5_0 => inference_vulkan::BlockType::Q5_0,
+            GgmlDType::Q4_0 => inference_vulkan::BlockType::Q4_0,
+            GgmlDType::Q4_1 => inference_vulkan::BlockType::Q4_1,
+            GgmlDType::Q5_1 => inference_vulkan::BlockType::Q5_1,
+            GgmlDType::Q4K => inference_vulkan::BlockType::Q4K,
+            GgmlDType::Q5K => inference_vulkan::BlockType::Q5K,
+            GgmlDType::Q6K => inference_vulkan::BlockType::Q6K,
             _ => return Ok(None),
         };
         let (n, k) = shape.dims2()?;

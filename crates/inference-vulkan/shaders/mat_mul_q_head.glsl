@@ -16,6 +16,8 @@ layout(std430, binding = 1) readonly buffer Q { uvec4 xq[]; };
 layout(std430, binding = 2) writeonly buffer Y { float y[]; };
 layout(std430, binding = 3) readonly buffer S { vec2 xs[]; };
 
+#include "int8_dot.glsl"
+
 
 const uint THREADS = 256;
 const uint QK = 32;
@@ -34,11 +36,3 @@ const uint THREADS_N = 16;
 const uint THREADS_M = THREADS / THREADS_N;
 const uint BN = TN * THREADS_N;
 const uint BM = TM * THREADS_M;
-
-// a block's 8 packed words as two uvec4s, and its scale (and for tokens d * sum q); a row padded to spread banks
-shared uvec4 w_lo[BK][BN + 1];
-shared uvec4 w_hi[BK][BN + 1];
-shared float w_d[BK][BN + 1];
-shared uvec4 x_lo[BK][BM + 1];
-shared uvec4 x_hi[BK][BM + 1];
-shared vec2 x_s[BK][BM + 1];

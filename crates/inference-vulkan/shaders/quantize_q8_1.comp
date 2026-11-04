@@ -1,6 +1,6 @@
 #version 450
 // Activation rows as int8 blocks for the int8 matvecs: block i of x (32 f32s from x_base) becomes 8 packed words,
-// q = round(x / d) with d = max |x| / 127, and (d, d * sum q) for its scale and the offset a type's bias needs.
+// q = round(x / d) with d = max |x| / 127, and (d, d * sum q) for its scale and the offset a weight type's needs.
 
 layout(local_size_x = 64) in;
 

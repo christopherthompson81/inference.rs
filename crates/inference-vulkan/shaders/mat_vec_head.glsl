@@ -1,9 +1,11 @@
 // Shared by the multi-row mul_mat_vecs_* shaders (mul_mat_vec_* take one row): y[m] = W x[m] for up to MAX_M
 // activation rows against a quantized W (`rows x cols`), with the rows as quantize_q8_1's int8 blocks (8 packed words
 // and (d, d * sum q) a block, row-major over the rows' blocks). A workgroup takes ROWS weight rows; its threads stride
-// over the blocks, each weight block's values packed to int8 once and dotted four at a time with every row's, then
-// sum by subgroup. The including shader includes a `*_int8.glsl` (the block's scale, packed values and bias) between
-// this and mat_vec_main.glsl.
+// over the 32-value blocks, each weight block's values packed to int8 once and dotted four at a time with every row's,
+// then sum by subgroup. The including shader includes a `*_int8.glsl` between this and mat_vec_main.glsl: its
+// SUPER_VALUES (values a stored block holds, 32 or 256) and SUPER_U16 (its size), and `unpack_sub`, which turns 32
+// values of a stored block into int8 halves q (values 0..15 and 16..31) and coefficients (s_lo, s_hi, o_lo, o_hi)
+// with w = s q + o over each half.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_control_flow_attributes : require
 #extension GL_EXT_integer_dot_product : require
@@ -38,3 +40,4 @@ const uint MAX_M = 8;
 // a subgroup's sums, combined across the workgroup's subgroups by thread 0
 const uint MAX_SUBGROUPS = THREADS / 8;
 shared float partial[ROWS * MAX_M][MAX_SUBGROUPS];
+#include "int8_dot.glsl"

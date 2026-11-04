@@ -1,3 +1,5 @@
+#include "block_at.glsl"
+
 void main() {
     uint row0 = (gl_WorkGroupID.y * pc.groups_x + gl_WorkGroupID.x) * ROWS;
     uint tid = gl_LocalInvocationID.x;
@@ -7,13 +9,12 @@ void main() {
         acc[i] = 0.0;
     }
     for (uint b = tid; b < blocks; b += THREADS) {
-        float d[ROWS];
+        COEF coef[ROWS];
         uvec4 lo[ROWS];
         uvec4 hi[ROWS];
         [[unroll]] for (uint r = 0; r < ROWS; r++) {
             // a row past the matrix decodes the last one, its sums never written
-            uint base = (min(row0 + r, pc.rows - 1) * blocks + b) * BLOCK_U16 + pc.w_base;
-            d[r] = unpack_block(base, lo[r], hi[r]);
+            coef[r] = pack_coef(unpack(pc.w_base, min(row0 + r, pc.rows - 1), b, blocks, lo[r], hi[r]));
         }
         // constant bounds, so the accumulators stay in registers
         [[unroll]] for (uint mi = 0; mi < MAX_M; mi++) {
@@ -21,19 +22,10 @@ void main() {
                 break;
             }
             uint xb = mi * blocks + b;
-            uvec4 ql = xq[2 * xb];
-            uvec4 qh = xq[2 * xb + 1];
-            vec2 sx = xs[pc.s_off + xb];
+            uvec4 x_lo = xq[2 * xb], x_hi = xq[2 * xb + 1];
+            XSCALE sx = pack_xs(xs[pc.s_off + xb]);
             [[unroll]] for (uint r = 0; r < ROWS; r++) {
-                // signed bytes both sides: Q5_0's 0..31 fit
-                ivec4 a = ivec4(lo[r]);
-                ivec4 c = ivec4(hi[r]);
-                ivec4 p = ivec4(ql);
-                ivec4 o = ivec4(qh);
-                int dot = dotPacked4x8EXT(a.x, p.x) + dotPacked4x8EXT(a.y, p.y) + dotPacked4x8EXT(a.z, p.z)
-                    + dotPacked4x8EXT(a.w, p.w) + dotPacked4x8EXT(c.x, o.x) + dotPacked4x8EXT(c.y, o.y)
-                    + dotPacked4x8EXT(c.z, o.z) + dotPacked4x8EXT(c.w, o.w);
-                acc[r * MAX_M + mi] += d[r] * (sx.x * float(dot) - BIAS * sx.y);
+                acc[r * MAX_M + mi] += block_dot(lo[r], hi[r], coef[r], x_lo, x_hi, sx);
             }
         }
     }
