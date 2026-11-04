@@ -4,6 +4,7 @@
 #include "nibbles.glsl"
 
 const uint SUPER_VALUES = 256;
+#define SPLIT_HALVES 0
 const uint SUPER_U16 = 88;
 
 vec4 unpack_sub(uint base, uint sub, out uvec4 lo, out uvec4 hi) {

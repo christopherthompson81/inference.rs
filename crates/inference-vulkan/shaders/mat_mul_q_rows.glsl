@@ -4,6 +4,11 @@
 // memory and every thread reads at once (a broadcast).
 #include "block_at.glsl"
 
+// a token block's 8 packed words as two uvec4s and its scales; a row padded to spread banks
+shared uvec4 x_lo[BK][BM + 1];
+shared uvec4 x_hi[BK][BM + 1];
+shared XSCALE x_s[BK][BM + 1];
+
 void main() {
     uint t = gl_LocalInvocationID.x;
     uint row = gl_WorkGroupID.x * THREADS + t;
@@ -27,12 +32,12 @@ void main() {
             uint b = k0 + xk;
             uvec4 qlo = uvec4(0);
             uvec4 qhi = uvec4(0);
-            vec4 s = vec4(0.0);
+            XSCALE s = XSCALE(0.0);
             if (xr < tokens && b < blocks) {
                 uint xb = x_row(xr) * blocks + b;
                 qlo = xq[2 * xb];
                 qhi = xq[2 * xb + 1];
-                s = xs[pc.s_off + xb];
+                s = pack_xs(xs[pc.s_off + xb]);
             }
             x_lo[xk][xr] = qlo;
             x_hi[xk][xr] = qhi;
@@ -43,7 +48,7 @@ void main() {
             if (k0 + kk < blocks) {
                 uvec4 lo;
                 uvec4 hi;
-                vec4 c = unpack(w_matrix, w_row, k0 + kk, blocks, lo, hi);
+                COEF c = pack_coef(unpack(w_matrix, w_row, k0 + kk, blocks, lo, hi));
                 [[unroll]] for (uint j = 0; j < BM; j++) {
                     // uniform: the tile's real tokens
                     if (j >= tokens) {

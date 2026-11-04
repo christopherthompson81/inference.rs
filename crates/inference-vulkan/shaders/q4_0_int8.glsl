@@ -2,6 +2,8 @@
 // its 4 bits less 8.
 
 const uint SUPER_VALUES = 32;
+#define SPLIT_HALVES 0
+#define OFFSET_RATIO -8.0
 const uint SUPER_U16 = 9;
 
 vec4 unpack_sub(uint base, uint sub, out uvec4 lo, out uvec4 hi) {

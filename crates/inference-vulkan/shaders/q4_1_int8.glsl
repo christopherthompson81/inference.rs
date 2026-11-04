@@ -1,6 +1,7 @@
 // A Q4_1 block (10 u16s): f16 scale and min, then Q4_0's 16 bytes of nibbles; a value is d q + m.
 
 const uint SUPER_VALUES = 32;
+#define SPLIT_HALVES 0
 const uint SUPER_U16 = 10;
 
 vec4 unpack_sub(uint base, uint sub, out uvec4 lo, out uvec4 hi) {

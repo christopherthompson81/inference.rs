@@ -4,6 +4,7 @@
 // d sc (q - 32).
 
 const uint SUPER_VALUES = 256;
+#define SPLIT_HALVES 1
 const uint SUPER_U16 = 105;
 
 int scale_at(uint base, uint i) {

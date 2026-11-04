@@ -36,11 +36,3 @@ const uint THREADS_N = 16;
 const uint THREADS_M = THREADS / THREADS_N;
 const uint BN = TN * THREADS_N;
 const uint BM = TM * THREADS_M;
-
-// a block's 8 packed words as two uvec4s, and its coefficients (a token block's scales); a row padded to spread banks
-shared uvec4 w_lo[BK][BN + 1];
-shared uvec4 w_hi[BK][BN + 1];
-shared vec4 w_c[BK][BN + 1];
-shared uvec4 x_lo[BK][BM + 1];
-shared uvec4 x_hi[BK][BM + 1];
-shared vec4 x_s[BK][BM + 1];

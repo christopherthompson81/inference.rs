@@ -9,12 +9,12 @@ void main() {
         acc[i] = 0.0;
     }
     for (uint b = tid; b < blocks; b += THREADS) {
-        vec4 coef[ROWS];
+        COEF coef[ROWS];
         uvec4 lo[ROWS];
         uvec4 hi[ROWS];
         [[unroll]] for (uint r = 0; r < ROWS; r++) {
             // a row past the matrix decodes the last one, its sums never written
-            coef[r] = unpack(pc.w_base, min(row0 + r, pc.rows - 1), b, blocks, lo[r], hi[r]);
+            coef[r] = pack_coef(unpack(pc.w_base, min(row0 + r, pc.rows - 1), b, blocks, lo[r], hi[r]));
         }
         // constant bounds, so the accumulators stay in registers
         [[unroll]] for (uint mi = 0; mi < MAX_M; mi++) {
@@ -23,7 +23,7 @@ void main() {
             }
             uint xb = mi * blocks + b;
             uvec4 x_lo = xq[2 * xb], x_hi = xq[2 * xb + 1];
-            vec4 sx = xs[pc.s_off + xb];
+            XSCALE sx = pack_xs(xs[pc.s_off + xb]);
             [[unroll]] for (uint r = 0; r < ROWS; r++) {
                 acc[r * MAX_M + mi] += block_dot(lo[r], hi[r], coef[r], x_lo, x_hi, sx);
             }

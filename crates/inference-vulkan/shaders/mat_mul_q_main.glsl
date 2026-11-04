@@ -1,5 +1,13 @@
 #include "block_at.glsl"
 
+// a block's 8 packed words as two uvec4s, and its coefficients (a token block's scales); a row padded to spread banks
+shared uvec4 w_lo[BK][BN + 1];
+shared uvec4 w_hi[BK][BN + 1];
+shared COEF w_c[BK][BN + 1];
+shared uvec4 x_lo[BK][BM + 1];
+shared uvec4 x_hi[BK][BM + 1];
+shared XSCALE x_s[BK][BM + 1];
+
 void main() {
     uint t = gl_LocalInvocationID.x;
     uint n0 = gl_WorkGroupID.x * BN;
@@ -28,9 +36,9 @@ void main() {
             uint b = k0 + lk;
             uvec4 lo = uvec4(0);
             uvec4 hi = uvec4(0);
-            vec4 c = vec4(0.0);
+            COEF c = COEF(0.0);
             if (n0 + lr < pc.rows && b < blocks) {
-                c = unpack(w_matrix, n0 + lr, b, blocks, lo, hi);
+                c = pack_coef(unpack(w_matrix, n0 + lr, b, blocks, lo, hi));
             }
             w_lo[lk][lr] = lo;
             w_hi[lk][lr] = hi;
@@ -42,12 +50,12 @@ void main() {
             uint b = k0 + xk;
             uvec4 qlo = uvec4(0);
             uvec4 qhi = uvec4(0);
-            vec4 s = vec4(0.0);
+            XSCALE s = XSCALE(0.0);
             if (xr < tokens && b < blocks) {
                 uint xb = x_row(xr) * blocks + b;
                 qlo = xq[2 * xb];
                 qhi = xq[2 * xb + 1];
-                s = xs[pc.s_off + xb];
+                s = pack_xs(xs[pc.s_off + xb]);
             }
             x_lo[xk][xr] = qlo;
             x_hi[xk][xr] = qhi;
@@ -57,7 +65,7 @@ void main() {
         [[unroll]] for (uint kk = 0; kk < BK; kk++) {
             uvec4 wl[TN];
             uvec4 wh[TN];
-            vec4 wc[TN];
+            COEF wc[TN];
             [[unroll]] for (uint i = 0; i < TN; i++) {
                 uint r = tx + i * THREADS_N;
                 wl[i] = w_lo[kk][r];
@@ -68,7 +76,7 @@ void main() {
                 uint c = ty + j * THREADS_M;
                 uvec4 ql = x_lo[kk][c];
                 uvec4 qh = x_hi[kk][c];
-                vec4 sx = x_s[kk][c];
+                XSCALE sx = x_s[kk][c];
                 [[unroll]] for (uint i = 0; i < TN; i++) {
                     acc[i][j] += block_dot(wl[i], wh[i], wc[i], ql, qh, sx);
                 }

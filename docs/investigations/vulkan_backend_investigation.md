@@ -398,3 +398,41 @@ dequantization as the CPU's).
 
 **Result (recipe A served, after one request):** system memory in use 47 -> 27 GB, the process's RSS 29 -> 20 GiB
 (mostly the shared mapped pages), GTT 21 -> 22 GiB. Prefill 395 tok/s and decode 24.4 tok/s as before.
+
+### Run 21 - 2026-11-04 ~03:30 (desktop: RTX 3090)
+
+**Question:** which GGUF types beyond Q8_0 / Q5_0 can the int8 kernels take without a main per type?
+
+**Change:** a type now unpacks one 32-value sub-block of its stored block (32 or 256 values) to int8 halves (values
+0..15 and 16..31) and (s_lo, s_hi, o_lo, o_hi), with w = s q + o over each half. `block_at.glsl` finds a sub-block
+inside a superblock for every main (the matvec, the tiled and row-streaming prompt matmuls, the expert matvec).
+`quantize_q8_1` writes (d, d * sum_lo, d * sum_hi, 0) for each activation block, so the offsets need no per-type
+code. New matvec and prompt-matmul kernels: Q4_0, Q4_1, Q5_1, Q4_K, Q5_K, Q6_K (Q6_K is the one type whose halves
+take their own scales).
+
+**Tests:** `vulkan_quantized_matmuls_match_the_dequantized_weight` covers all eight types at 1, 3, 8 and 70 rows
+(97 x 2816), against the CPU's dequantized weight. A deliberately broken Q4_K decoder fails it (132.5 vs 1.51).
+
+**Dead ends:**
+- The first A/B showed the expert prompt matmul 5.6x slower (11.4 against 2.0 ms). It was the GPU at idle clocks:
+  the expert bench is ~20 ms of work, and it ran first. Run warm, a bench's second run is the one to read.
+- Warm, the general form still cost the tiled matmul 16 % (26.3 against 31.7 TOPS at 512 tokens), from vec4
+  coefficients and scales in its shared tiles where master kept a float and a vec2.
+
+**Fix:** a type declares what it needs: `SPLIT_HALVES` (vec4s), a free offset (vec2s), `OFFSET_RATIO` (Q5_0's -16,
+Q4_0's -8: s alone), or `NO_OFFSET` (Q8_0: s, and d alone for the tokens). The dot is one 8-term `dotPacked4x8EXT`
+sum, as before.
+
+**Result (`matvec_bandwidth`, `expert_matmul_throughput`, warm; master 6460fe532 -> branch):**
+
+| kernel | master | branch |
+|---|---|---|
+| Q8_0 x 1 / 3 / 4 / 8 rows | 876 / 723 / 584 / 416 GB/s | 874 / 651 / 573 / 412 GB/s |
+| Q5_0 x 1 / 3 / 4 / 8 rows | 860 / 693 / 625 / 402 GB/s | 861 / 697 / 613 / 397 GB/s |
+| Q8_0 / Q5_0 x 512 rows | 31.7 / 34.4 TOPS | 31.6 / 33.8 TOPS |
+| experts, 512 tokens x 6 of 128 | 1.90 ms | 1.84 ms |
+
+Q8_0 at 3 rows stays 10 % behind, with the same unpack and dot: left for the 780M A/B to judge.
+
+**Model (Nemotron Nano 9B v2 Q4_K_M, `bench --vulkan`, 512-token prompt, 64 decoded):** prefill 26.8 -> 1275 tok/s,
+decode 20.7 -> 59.8 tok/s. Its Q4_K and Q6_K weights had run through the CPU fallback before.

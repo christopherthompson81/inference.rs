@@ -15,9 +15,3 @@ int dot4(uvec4 a, uvec4 b) {
     return dotPacked4x8EXT(x.x, y.x) + dotPacked4x8EXT(x.y, y.y) + dotPacked4x8EXT(x.z, y.z)
         + dotPacked4x8EXT(x.w, y.w);
 }
-
-// a weight block (its int8 halves and (s_lo, s_hi, o_lo, o_hi)) dotted with an activation block (its int8 halves
-// and quantize_q8_1's (d, d * sum_lo, d * sum_hi, 0))
-float block_dot(uvec4 lo, uvec4 hi, vec4 coef, uvec4 x_lo, uvec4 x_hi, vec4 xs) {
-    return xs.x * (coef.x * float(dot4(lo, x_lo)) + coef.y * float(dot4(hi, x_hi))) + dot(coef.zw, xs.yz);
-}
