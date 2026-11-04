@@ -134,6 +134,22 @@ pub fn flash_attn(op: &FlashAttn<'_>) -> Result<Option<Tensor>> {
     }
 }
 
+/// The packed top-[`RANKED_TOP_K`] of each row of f32 `logits` `(rows, vocab)`: `(rows, 2 K + 2)`, the largest values
+/// sorted descending (ties to the lower index), their indices as floats, the softmax normalizer at `1 / temperature`
+/// and the max over the temperature (CUDA's packed top-k layout).
+pub fn ranked_top_k(logits: &Tensor, temperature: f64) -> Result<Tensor> {
+    #[cfg(feature = "vulkan")]
+    return crate::vulkan_backend::ranked_top_k(logits, temperature);
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = (logits, temperature);
+        Err(crate::Error::NotCompiledWithVulkanSupport)
+    }
+}
+
+/// The values a row of [`ranked_top_k`] holds.
+pub const RANKED_TOP_K: usize = 128;
+
 /// One query a sequence (`q` `(seqs, heads, head_size)`) against f32 vLLM-layout caches through u32 `block_tables`
 /// `(seqs, max_blocks)` over u32 `context_lens`, softmax-scaled by `scale`.
 pub struct PagedDecode<'a> {
