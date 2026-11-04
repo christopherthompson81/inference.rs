@@ -653,3 +653,73 @@ and 128, masked and not; 1e-4 against the CPU's definition).
 tokens 307.7 -> 369.6. At 4096 tokens the attention costs ~1.1 s a prompt, where the unfused path cost ~4 s; it runs
 at ~0.85 TFLOPS (64-row workgroups 361.5 tok/s, 128 rows 369.6). KLD 0.00898 (Run 26: 0.00897), top-1 96.41 %. MTP 3
 text matches plain's on all four prompts. Against master's, two split at near-ties.
+
+### Run 28 - 2026-11-04 ~08:30 (desktop: RTX 3090)
+
+**Question:** NVIDIA's `VK_NV_cooperative_matrix2` (llama.cpp's fastest path here: 3845 tok/s at 512 tokens against
+2840 for KHR). Does it take the prompt matmuls past the KHR kernels?
+
+**Setup:**
+- ash 0.38 (Vulkan 1.3.281) predates the extension, so its name and features struct are declared from the registry
+  (structure type 1000593000, extension 594).
+- The instance asks for Vulkan 1.3. The `*_cm2` shaders build for SPIR-V 1.6. The device enables workgroup scope,
+  flexible dimensions, per-element operations, tensor addressing, block loads and buffer device addresses, which
+  the decode functions' buffer references need.
+
+**Kernel (`mul_mm_cm2_main.glsl`, Q8_0 and Q5_0):**
+- A 128 x 128 workgroup-scope tile (weight rows x tokens), 32 values a step.
+- W loads through a per-element decode on its block structs; the f16 tokens load transposed.
+- Clamped tensor layouts give zeros and drop writes past every edge, so it needs no padding.
+
+**Result (512 rows, warm):**
+
+| kernel | Q8_0 | Q5_0 |
+|---|---|---|
+| KHR coopmat, f32 accumulation (Run 25) | 36.0 | 39.8 |
+| cm2, f32 accumulation | 20.5 | 31.4 |
+| cm2, BK 64 | 26.3 | 18.3 |
+| cm2, f16 accumulation over all of K | ~48 | ~42 |
+| cm2, f16 over 256-value spans folded into f32 | 40.3 | 31.0 |
+
+(TFLOPS. At 64 rows the cm2 kernels were 10-20, half of a 128-token tile empty.)
+
+**Finding:**
+- Recipe A end to end is unchanged by cm2: 0.23 s an iteration at 512 tokens and about 1.0 s at 2048, as with KHR
+  coopmat and nearly as with dp4a (0.24 / 1.03 s).
+- llama.cpp's 3845 tok/s is about 0.13 s a 512-token prompt; our prefill is about 0.20 s of the 0.23. The dense
+  matmuls are not what holds the 3090 back.
+- f16 accumulation over the whole K would need a KLD check before use.
+
+**Next:** a GPU breakdown of a whole 512-token prompt that adds up to its wall time. The per-dispatch profiler has
+over-reported on NVIDIA, so the experts, the Mamba conv and scan, the f32 attention matmuls, the elementwise ops and
+CPU-side gaps have to be measured before more kernel work.
+
+### Run 29 - 2026-11-04 ~09:00 (desktop: RTX 3090)
+
+**Question:** Run 28's next step. Where does a 512-token prompt's GPU time go on recipe A?
+
+**Profile (`INFERENCE_VULKAN_PROFILE`, 512 tokens; a window's GPU time agrees with wall time here):**
+- `moe_mm_q5_0` took 59 % of the GPU time, at 6.4 ms a call against 1.7 ms in Run 23.
+- `mat_vecs_q8_0` at the last token took 44 ms a call.
+- Everything else was small: `moe_sort` 2.3 %, the Mamba conv and scan about 7 %, the f32 attention matmuls about
+  3 %, elementwise ops about 2 %.
+
+**Finding:** some weights live in host memory.
+- Logging the exact buffers that miss the budget: the startup budget was 21396 MiB (other processes held about
+  1.8 GiB more than in Runs 23-24), the weights held 19.7 GB, and five 418 MiB expert stacks went to host memory.
+- A prompt reads every expert stack, so about 1.6 GB of it crosses PCIe on each prompt.
+- Weight copies are placed in first-use order, so whatever comes last (the last layers' experts, `lm_head`) is
+  what misses.
+- On this card the prompt's main cost is VRAM, not a kernel: llama.cpp keeps all 21.7 GiB on it.
+
+**Dead end:** `EXACT_RESERVE_BYTES` at 1 GiB, with 2.7 GiB held by other processes: 512 tokens 1.39 s, 2048 tokens
+8.1 s, 4096 tokens 48.8 s an iteration (median). The activations spilled instead. Kept at 2 GiB.
+
+**Environment:** another process (1.7 GB of VRAM) then started on the GPU. With it, 2 GiB gives 0.78 s at 512 tokens
+and 8-23 s at 2048. Measurements here need the card to themselves.
+
+**Next:**
+- Place weights by how often they are read, so that host memory gets only rarely read experts, never `lm_head` or
+  the dense layers.
+- When VRAM is short, take the routed experts' host share through a streaming path (as the CUDA offload does)
+  rather than reading host memory in the matmul.
