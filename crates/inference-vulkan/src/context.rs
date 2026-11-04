@@ -26,6 +26,8 @@ pub struct Context {
     pub(crate) push_descriptor: ash::khr::push_descriptor::Device,
     pub(crate) memory_properties: vk::PhysicalDeviceMemoryProperties,
     pub(crate) import_alignment: u64,
+    // the device's memory is the host's, so buffers live in mapped host RAM
+    pub(crate) unified: bool,
     name: String,
     queue: vk::Queue,
     stream: Mutex<Stream>,
@@ -81,6 +83,7 @@ impl Context {
         // SAFETY: as above, and the chained struct outlives the call
         unsafe { instance.get_physical_device_properties2(physical, &mut props2) };
         let import_alignment = host_props.min_imported_host_pointer_alignment;
+        let unified = properties.device_type != vk::PhysicalDeviceType::DISCRETE_GPU;
 
         let priorities = [1.0f32];
         let queues = [vk::DeviceQueueCreateInfo::default()
@@ -119,6 +122,7 @@ impl Context {
             push_descriptor,
             memory_properties,
             import_alignment,
+            unified,
             name,
             queue,
             stream: Mutex::new(stream),
@@ -129,6 +133,11 @@ impl Context {
 
     pub fn device_name(&self) -> &str {
         &self.name
+    }
+
+    /// Whether the device's memory is the host's (an iGPU, or a CPU device), so its buffers are mapped host RAM.
+    pub fn is_unified(&self) -> bool {
+        self.unified
     }
 
     /// Appends `record`'s commands to the stream without waiting for them; a batch that has grown long is submitted.
@@ -158,6 +167,14 @@ impl Context {
             stream.flush(&self.device, self.queue)?;
         }
         out
+    }
+
+    /// Submits what is recorded without waiting for it.
+    pub fn flush(&self) -> Result<()> {
+        self.stream
+            .lock()
+            .expect("vulkan stream poisoned")
+            .flush(&self.device, self.queue)
     }
 
     /// Submits what is recorded and waits for the GPU to finish everything submitted.
@@ -203,6 +220,69 @@ impl Recorder<'_> {
                 profiled.len() as u32,
             );
         }
+    }
+
+    /// Copies `size` bytes between buffers, ordered after and before the commands recorded around it.
+    pub(crate) fn copy(
+        &self,
+        src: vk::Buffer,
+        src_at: u64,
+        dst: vk::Buffer,
+        dst_at: u64,
+        size: u64,
+    ) {
+        let region = vk::BufferCopy::default()
+            .src_offset(src_at)
+            .dst_offset(dst_at)
+            .size(size);
+        self.transfer(|device, buffer| {
+            // SAFETY: the command buffer is recording, and the caller retains both buffers
+            unsafe { device.cmd_copy_buffer(buffer, src, dst, &[region]) }
+        });
+    }
+
+    /// Fills a buffer's first `size` bytes (a multiple of 4) with `word`, ordered as [`Self::copy`].
+    pub(crate) fn fill(&self, dst: vk::Buffer, size: u64, word: u32) {
+        self.transfer(|device, buffer| {
+            // SAFETY: as above
+            unsafe { device.cmd_fill_buffer(buffer, dst, 0, size, word) }
+        });
+    }
+
+    // a transfer command between barriers that order it with the compute work on either side
+    fn transfer(&self, command: impl FnOnce(&ash::Device, vk::CommandBuffer)) {
+        let device = &self.context.device;
+        let all = vk::AccessFlags::SHADER_READ
+            | vk::AccessFlags::SHADER_WRITE
+            | vk::AccessFlags::TRANSFER_READ
+            | vk::AccessFlags::TRANSFER_WRITE;
+        let stages = vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::TRANSFER;
+        let barrier = vk::MemoryBarrier::default()
+            .src_access_mask(all)
+            .dst_access_mask(all);
+        // SAFETY: the command buffer is recording
+        unsafe {
+            device.cmd_pipeline_barrier(
+                self.buffer,
+                stages,
+                stages,
+                vk::DependencyFlags::empty(),
+                &[barrier],
+                &[],
+                &[],
+            );
+            command(device, self.buffer);
+            device.cmd_pipeline_barrier(
+                self.buffer,
+                stages,
+                stages,
+                vk::DependencyFlags::empty(),
+                &[barrier],
+                &[],
+                &[],
+            );
+        }
+        self.dispatches.set(self.dispatches.get() + 1);
     }
 
     /// Keeps `resource` alive until the commands recorded here have finished.

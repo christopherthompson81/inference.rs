@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::memory::HostBuffer;
+use crate::memory::Buffer;
 use crate::{Error, Recorder, Result};
 
 /// The most dims a map's shape has (the shaders' `MAX_DIMS`).
@@ -62,7 +62,7 @@ impl MapOp {
 /// One operand: its buffer, the element its first index starts at, and its stride along each of the map's dims.
 #[derive(Clone, Copy)]
 pub struct Operand<'a> {
-    pub buffer: &'a Arc<HostBuffer>,
+    pub buffer: &'a Arc<Buffer>,
     pub offset: usize,
     pub strides: &'a [usize],
 }
@@ -161,10 +161,8 @@ mod tests {
             .ok()
     }
 
-    fn buffer(context: &Arc<Context>, values: &[f32]) -> Result<Arc<HostBuffer>> {
-        let mut buffer = HostBuffer::new(context, values.len() * 4)?;
-        buffer.as_f32_mut()[..values.len()].copy_from_slice(values);
-        Ok(Arc::new(buffer))
+    fn buffer(context: &Arc<Context>, values: &[f32]) -> Result<Arc<Buffer>> {
+        Ok(Arc::new(Buffer::with_f32(context, values)?))
     }
 
     // a [2, 3] lhs times a broadcast row, a transposed read, and a unary op into a strided output
@@ -176,7 +174,7 @@ mod tests {
         let lhs: Vec<f32> = (0..6).map(|i| i as f32 - 2.5).collect();
         let row = [2.0f32, -1.0, 0.5];
         let (a, b) = (buffer(&context, &lhs)?, buffer(&context, &row)?);
-        let out = Arc::new(HostBuffer::new(&context, 64 * 4)?);
+        let out = Arc::new(Buffer::new(&context, 64 * 4)?);
         let operand = |buffer, offset, strides| Operand {
             buffer,
             offset,
@@ -201,7 +199,7 @@ mod tests {
                 params: [0.0; 2],
             })
         })?;
-        let got = out.as_f32();
+        let got = out.read_f32()?;
         for r in 0..2 {
             for c in 0..3 {
                 assert!((got[r * 3 + c] - lhs[r * 3 + c] * row[c]).abs() <= TOLERANCE);
@@ -227,18 +225,9 @@ mod tests {
             return Ok(());
         };
         let words: Vec<u32> = (0..300).map(|i| i * 7 + 1).collect();
-        let mut src = HostBuffer::new(&context, words.len() * 4)?;
-        for (dst, w) in src
-            .as_bytes_mut()
-            .as_chunks_mut::<4>()
-            .0
-            .iter_mut()
-            .zip(&words)
-        {
-            dst.copy_from_slice(&w.to_le_bytes());
-        }
-        let src = Arc::new(src);
-        let out = Arc::new(HostBuffer::new(&context, (words.len() + 4) * 4)?);
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let src = Arc::new(Buffer::with_bytes(&context, &bytes)?);
+        let out = Arc::new(Buffer::new(&context, (words.len() + 4) * 4)?);
         let strides = [1usize];
         context.submit(|r| {
             let operand = |buffer, offset| Operand {
@@ -270,7 +259,7 @@ mod tests {
             )
         })?;
         let got: Vec<u32> = out
-            .as_bytes()
+            .read()?
             .as_chunks::<4>()
             .0
             .iter()

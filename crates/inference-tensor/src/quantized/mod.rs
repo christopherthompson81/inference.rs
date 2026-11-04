@@ -117,7 +117,7 @@ pub struct QVulkanStorage {
     blocks: Box<dyn QuantizedType>,
     device: crate::VulkanDevice,
     #[cfg(feature = "vulkan")]
-    gpu: std::sync::OnceLock<std::sync::Arc<inference_vulkan::HostBuffer>>,
+    gpu: std::sync::OnceLock<std::sync::Arc<inference_vulkan::Buffer>>,
 }
 
 impl QVulkanStorage {
@@ -132,7 +132,7 @@ impl QVulkanStorage {
 
     // the blocks in driver-allocated memory, copied on first use
     #[cfg(feature = "vulkan")]
-    fn gpu_copy(&self) -> Result<std::sync::Arc<inference_vulkan::HostBuffer>> {
+    fn gpu_copy(&self) -> Result<std::sync::Arc<inference_vulkan::Buffer>> {
         if let Some(gpu) = self.gpu.get() {
             return Ok(gpu.clone());
         }

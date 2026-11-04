@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::memory::HostBuffer;
+use crate::memory::Buffer;
 use crate::{Error, Recorder, Result};
 
 pub(crate) const BINDINGS: usize = 3;
@@ -49,10 +49,10 @@ pub struct Rows<'a> {
     pub rows: usize,
     pub cols: usize,
     pub eps: f32,
-    pub x: &'a Arc<HostBuffer>,
+    pub x: &'a Arc<Buffer>,
     pub x_offset: usize,
-    pub alpha: Option<(&'a Arc<HostBuffer>, usize)>,
-    pub out: &'a Arc<HostBuffer>,
+    pub alpha: Option<(&'a Arc<Buffer>, usize)>,
+    pub out: &'a Arc<Buffer>,
     pub out_offset: usize,
 }
 
@@ -65,15 +65,15 @@ pub struct Select<'a> {
     pub n: usize,
     /// `ids` laid out as the output (gather) rather than `n` ids shared by every position (index_select)
     pub gather: bool,
-    pub src: (&'a Arc<HostBuffer>, usize),
-    pub ids: (&'a Arc<HostBuffer>, usize),
-    pub out: &'a Arc<HostBuffer>,
+    pub src: (&'a Arc<Buffer>, usize),
+    pub ids: (&'a Arc<Buffer>, usize),
+    pub out: &'a Arc<Buffer>,
 }
 
 /// One operand of [`MatMul`]: its buffer, first element, and strides between batches, rows and columns.
 #[derive(Clone, Copy)]
 pub struct MatOperand<'a> {
-    pub buffer: &'a Arc<HostBuffer>,
+    pub buffer: &'a Arc<Buffer>,
     pub offset: usize,
     pub batch_stride: usize,
     pub row_stride: usize,
@@ -88,7 +88,7 @@ pub struct MatMul<'a> {
     pub k: usize,
     pub a: MatOperand<'a>,
     pub b: MatOperand<'a>,
-    pub out: &'a Arc<HostBuffer>,
+    pub out: &'a Arc<Buffer>,
 }
 
 fn words(values: &[usize]) -> Result<Vec<u8>> {
@@ -211,7 +211,7 @@ impl Recorder<'_> {
 }
 
 /// A buffer and the element an operand starts at.
-pub type At<'a> = (&'a Arc<HostBuffer>, usize);
+pub type At<'a> = (&'a Arc<Buffer>, usize);
 
 pub(crate) const CONV_STEP_BINDINGS: usize = 6;
 pub(crate) const CONV_STEP_PUSH_BYTES: u32 = 10 * 4;
@@ -234,7 +234,7 @@ pub struct ConvStep<'a> {
     pub bias: Option<At<'a>>,
     pub pool: At<'a>,
     pub slots: At<'a>,
-    pub out: &'a Arc<HostBuffer>,
+    pub out: &'a Arc<Buffer>,
 }
 
 /// `seq` steps of Mamba-2's selective scan on a state pool (`(rows, heads, head_dim, state)` f32, in place); `a`, `d`
@@ -249,14 +249,14 @@ pub struct ScanStep<'a> {
     pub dt_range: [f32; 2],
     pub x: At<'a>,
     pub dt: At<'a>,
-    pub a: &'a Arc<HostBuffer>,
+    pub a: &'a Arc<Buffer>,
     pub b: At<'a>,
     pub c: At<'a>,
-    pub d: &'a Arc<HostBuffer>,
-    pub dt_bias: &'a Arc<HostBuffer>,
+    pub d: &'a Arc<Buffer>,
+    pub dt_bias: &'a Arc<Buffer>,
     pub pool: At<'a>,
     pub slots: At<'a>,
-    pub out: &'a Arc<HostBuffer>,
+    pub out: &'a Arc<Buffer>,
 }
 
 impl MoeMatVec<'_> {
@@ -369,10 +369,10 @@ pub struct MoeMatVec<'a> {
     pub x_div: usize,
     pub x: At<'a>,
     pub ids: At<'a>,
-    pub y: &'a Arc<HostBuffer>,
-    pub scratch: &'a Arc<HostBuffer>,
+    pub y: &'a Arc<Buffer>,
+    pub scratch: &'a Arc<Buffer>,
     /// past MOE_TILED_MIN_SLOTS routes, the routes grouped by expert: [`MoeMatVec::routing_bytes`]
-    pub routing: &'a Arc<HostBuffer>,
+    pub routing: &'a Arc<Buffer>,
 }
 
 /// How a router turns logits into scores or weights.
@@ -396,9 +396,9 @@ pub struct Router<'a> {
     pub output_scale: f32,
     pub clip: Option<(f32, f32)>,
     pub logits: At<'a>,
-    pub bias: Option<&'a Arc<HostBuffer>>,
-    pub values: &'a Arc<HostBuffer>,
-    pub indices: &'a Arc<HostBuffer>,
+    pub bias: Option<&'a Arc<Buffer>>,
+    pub values: &'a Arc<Buffer>,
+    pub indices: &'a Arc<Buffer>,
 }
 
 impl Recorder<'_> {
@@ -589,8 +589,8 @@ pub struct PagedWrite<'a> {
     pub tokens: usize,
     pub key: At<'a>,
     pub value: At<'a>,
-    pub key_cache: &'a Arc<HostBuffer>,
-    pub value_cache: &'a Arc<HostBuffer>,
+    pub key_cache: &'a Arc<Buffer>,
+    pub value_cache: &'a Arc<Buffer>,
     pub slots: At<'a>,
 }
 
@@ -605,12 +605,12 @@ pub struct PagedDecode<'a> {
     pub max_context: usize,
     pub scale: f32,
     pub q: At<'a>,
-    pub key_cache: &'a Arc<HostBuffer>,
-    pub value_cache: &'a Arc<HostBuffer>,
+    pub key_cache: &'a Arc<Buffer>,
+    pub value_cache: &'a Arc<Buffer>,
     pub block_tables: At<'a>,
     pub context_lens: At<'a>,
-    pub partials: &'a Arc<HostBuffer>,
-    pub out: &'a Arc<HostBuffer>,
+    pub partials: &'a Arc<Buffer>,
+    pub out: &'a Arc<Buffer>,
 }
 
 impl PagedDecode<'_> {

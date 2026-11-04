@@ -5,8 +5,8 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
 use inference_vulkan::{
-    BlockType, Bound, Context, HostBuffer, MAX_DIMS, Map, MapOp, MatMul, MatOperand, MatVec,
-    Operand, RowOp, Rows, Select,
+    BlockType, Bound, Buffer, Context, MAX_DIMS, Map, MapOp, MatMul, MatOperand, MatVec, Operand,
+    RowOp, Rows, Select,
 };
 
 use crate::backend::{BackendDevice, BackendStorage};
@@ -41,14 +41,14 @@ impl VulkanDevice {
         &self.context
     }
 
-    fn buffer(&self, bytes: usize) -> Result<HostBuffer> {
-        HostBuffer::new(&self.context, bytes.max(MIN_BUFFER_BYTES)).map_err(vk_err)
+    fn buffer(&self, bytes: usize) -> Result<Buffer> {
+        Buffer::new(&self.context, bytes.max(MIN_BUFFER_BYTES)).map_err(vk_err)
     }
 
     /// A buffer of `bytes`, which the device reads without an import's per-submit cost.
-    pub(crate) fn host_copy(&self, bytes: &[u8]) -> Result<Arc<HostBuffer>> {
+    pub(crate) fn host_copy(&self, bytes: &[u8]) -> Result<Arc<Buffer>> {
         let mut buffer = self.buffer(bytes.len())?;
-        buffer.as_bytes_mut()[..bytes.len()].copy_from_slice(bytes);
+        buffer.write(0, bytes).map_err(vk_err)?;
         Ok(Arc::new(buffer))
     }
 
@@ -59,7 +59,7 @@ impl VulkanDevice {
         dtype: DType,
     ) -> Result<VulkanStorage> {
         let mut buffer = self.buffer(bytes.len())?;
-        buffer.as_bytes_mut()[..bytes.len()].copy_from_slice(bytes);
+        buffer.write(0, bytes).map_err(vk_err)?;
         Ok(VulkanStorage {
             buffer: Arc::new(buffer),
             device: self.clone(),
@@ -71,7 +71,7 @@ impl VulkanDevice {
 
 /// A tensor's elements in a host-visible Vulkan buffer.
 pub struct VulkanStorage {
-    buffer: Arc<HostBuffer>,
+    buffer: Arc<Buffer>,
     device: VulkanDevice,
     count: usize,
     dtype: DType,
@@ -88,18 +88,17 @@ fn bytes_of<T: WithDType>(values: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(values.as_ptr().cast(), std::mem::size_of_val(values)) }
 }
 
-fn values_of<T: WithDType>(bytes: &[u8], count: usize) -> Vec<T> {
+// the buffer's first `count` values, once the GPU has finished writing them
+fn values_of<T: WithDType>(buffer: &Buffer, count: usize) -> Result<Vec<T>> {
     let mut out = Vec::<T>::with_capacity(count);
-    // SAFETY: `bytes` holds at least `count` values' bytes, which any bit pattern of a `WithDType` makes valid
+    // SAFETY: the bytes are written in full below, and any bit pattern of a `WithDType` is valid
     unsafe {
-        std::ptr::copy_nonoverlapping(
-            bytes.as_ptr(),
-            out.as_mut_ptr().cast::<u8>(),
-            count * size_of::<T>(),
-        );
+        let bytes =
+            std::slice::from_raw_parts_mut(out.as_mut_ptr().cast::<u8>(), count * size_of::<T>());
+        buffer.read_into(bytes).map_err(vk_err)?;
         out.set_len(count);
     }
-    out
+    Ok(out)
 }
 
 macro_rules! cpu_bytes {
@@ -124,7 +123,7 @@ macro_rules! cpu_bytes {
 }
 
 impl VulkanStorage {
-    pub fn buffer(&self) -> &Arc<HostBuffer> {
+    pub fn buffer(&self) -> &Arc<Buffer> {
         &self.buffer
     }
 
@@ -134,23 +133,22 @@ impl VulkanStorage {
 
     // the CPU backend's copy, after the GPU has finished every write to it
     fn cpu(&self) -> Result<CpuStorage> {
-        self.device.synchronize()?;
-        let bytes = self.buffer.as_bytes();
+        let (buffer, count) = (&self.buffer, self.count);
         Ok(match self.dtype {
-            DType::U8 => CpuStorage::U8(values_of(bytes, self.count)),
-            DType::U32 => CpuStorage::U32(values_of(bytes, self.count)),
-            DType::I16 => CpuStorage::I16(values_of(bytes, self.count)),
-            DType::I32 => CpuStorage::I32(values_of(bytes, self.count)),
-            DType::I64 => CpuStorage::I64(values_of(bytes, self.count)),
-            DType::BF16 => CpuStorage::BF16(values_of(bytes, self.count)),
-            DType::F16 => CpuStorage::F16(values_of(bytes, self.count)),
-            DType::F32 => CpuStorage::F32(values_of(bytes, self.count)),
-            DType::F64 => CpuStorage::F64(values_of(bytes, self.count)),
-            DType::F8E4M3 => CpuStorage::F8E4M3(values_of(bytes, self.count)),
-            DType::F6E2M3 => CpuStorage::F6E2M3(values_of(bytes, self.count)),
-            DType::F6E3M2 => CpuStorage::F6E3M2(values_of(bytes, self.count)),
-            DType::F4 => CpuStorage::F4(values_of(bytes, self.count)),
-            DType::F8E8M0 => CpuStorage::F8E8M0(values_of(bytes, self.count)),
+            DType::U8 => CpuStorage::U8(values_of(buffer, count)?),
+            DType::U32 => CpuStorage::U32(values_of(buffer, count)?),
+            DType::I16 => CpuStorage::I16(values_of(buffer, count)?),
+            DType::I32 => CpuStorage::I32(values_of(buffer, count)?),
+            DType::I64 => CpuStorage::I64(values_of(buffer, count)?),
+            DType::BF16 => CpuStorage::BF16(values_of(buffer, count)?),
+            DType::F16 => CpuStorage::F16(values_of(buffer, count)?),
+            DType::F32 => CpuStorage::F32(values_of(buffer, count)?),
+            DType::F64 => CpuStorage::F64(values_of(buffer, count)?),
+            DType::F8E4M3 => CpuStorage::F8E4M3(values_of(buffer, count)?),
+            DType::F6E2M3 => CpuStorage::F6E2M3(values_of(buffer, count)?),
+            DType::F6E3M2 => CpuStorage::F6E3M2(values_of(buffer, count)?),
+            DType::F4 => CpuStorage::F4(values_of(buffer, count)?),
+            DType::F8E8M0 => CpuStorage::F8E8M0(values_of(buffer, count)?),
         })
     }
 
@@ -402,7 +400,7 @@ pub(crate) fn sigmoid(
 }
 
 // a contiguous f32 or u32 Vulkan tensor's buffer and first element
-fn bound(t: &Tensor, dtype: DType) -> Result<(Arc<HostBuffer>, usize)> {
+fn bound(t: &Tensor, dtype: DType) -> Result<(Arc<Buffer>, usize)> {
     if t.dtype() != dtype || !t.is_contiguous() {
         crate::bail!(
             "a Vulkan kernel takes contiguous {dtype:?}, got {:?} {:?}",
@@ -578,7 +576,7 @@ pub(crate) fn moe_router(route: &crate::vulkan::Route<'_>) -> Result<(Tensor, Te
 /// `y[slot] = W[ids[slot]] x[slot / x_div]` over a Q5_0 expert stack `(experts, rows, cols)` copied to `weights`, `ids`
 /// `(tokens, k)`.
 pub(crate) fn expert_mat_vec(
-    weights: &Arc<HostBuffer>,
+    weights: &Arc<Buffer>,
     (experts, rows, cols): (usize, usize, usize),
     x: &Tensor,
     ids: &Tensor,
@@ -744,7 +742,7 @@ fn batch_stride(l: &Layout, batch: usize) -> Option<usize> {
 pub(crate) fn quantized_mat_vec(
     xs: &VulkanStorage,
     l: &Layout,
-    weights: &Arc<HostBuffer>,
+    weights: &Arc<Buffer>,
     ty: BlockType,
     n: usize,
     k: usize,
@@ -1173,7 +1171,7 @@ impl BackendDevice for VulkanDevice {
     fn zeros_impl(&self, shape: &Shape, dtype: DType) -> Result<Self::Storage> {
         let count = shape.elem_count();
         let mut buffer = self.buffer(count * dtype.size_in_bytes())?;
-        buffer.as_bytes_mut().fill(0);
+        buffer.fill(0).map_err(vk_err)?;
         Ok(VulkanStorage {
             buffer: Arc::new(buffer),
             device: self.clone(),

@@ -1,6 +1,6 @@
-//! Vulkan compute for unified-memory iGPUs: a device, memory it reads in place (host allocations imported without a
-//! copy, or its own host-visible buffers), compute pipelines from SPIR-V compiled at build time, and the kernels on
-//! them. Everything is behind the `vulkan` feature; without it the crate is empty.
+//! Vulkan compute: a device, its buffers (mapped host RAM on a unified-memory iGPU, which also reads host allocations
+//! imported without a copy; the device's own memory on a discrete GPU), compute pipelines from SPIR-V compiled at
+//! build time, and the kernels on them. Everything is behind the `vulkan` feature; without it the crate is empty.
 #![cfg(feature = "vulkan")]
 
 mod context;
@@ -17,7 +17,7 @@ mod shaders {
 pub use context::{Context, Recorder};
 pub use kernels::{BlockType, MATVEC_MAX_ROWS, MatVec};
 pub use map::{MAX_DIMS, Map, MapOp, Operand};
-pub use memory::{Bound, HostBuffer, ImportedMemory};
+pub use memory::{Bound, Buffer, ImportedMemory, f32_bytes};
 pub use ops::{
     At, CacheShape, ConvStep, MatMul, MatOperand, MoeMatVec, PagedDecode, PagedWrite, Router,
     RouterFn, RowOp, Rows, ScanStep, Select,

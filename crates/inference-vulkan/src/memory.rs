@@ -13,12 +13,14 @@ const MIN_POOLED_BYTES: u64 = 256;
 const MAX_POOLED_BYTES: u64 = 256 << 20;
 // The most idle memory the pool holds before a dropped buffer is freed instead
 const MAX_POOL_BYTES: u64 = 2 << 30;
+// A host write to or read of device memory goes through staging buffers of up to this, a submit each
+const STAGING_BYTES: usize = 64 << 20;
 
-/// Host buffers nothing references any longer, by capacity, for new ones to reuse: a Vulkan allocation costs tens of
-/// microseconds, and a model step allocates hundreds of short-lived tensors.
+/// Buffers nothing references any longer, by placement and capacity, for new ones to reuse: a Vulkan allocation costs
+/// tens of microseconds, and a model step allocates hundreds of short-lived tensors.
 #[derive(Default)]
 pub(crate) struct BufferPool {
-    free: HashMap<u64, Vec<Allocation>>,
+    free: HashMap<(bool, u64), Vec<Allocation>>,
     bytes: u64,
 }
 
@@ -48,7 +50,9 @@ impl Allocation {
     unsafe fn free(self, device: &ash::Device) {
         // SAFETY: the caller's contract that the GPU no longer uses it
         unsafe {
-            device.unmap_memory(self.memory);
+            if !self.ptr.is_null() {
+                device.unmap_memory(self.memory);
+            }
             device.destroy_buffer(self.buffer, None);
             device.free_memory(self.memory, None);
         }
@@ -64,7 +68,7 @@ fn capacity(len: u64) -> u64 {
     }
 }
 
-/// Memory a kernel binds and reads from `offset`: a host buffer, or an import.
+/// Memory a kernel binds and reads from `offset`: a buffer, or an import.
 pub trait Bound: std::any::Any + Send + Sync {
     fn vk_buffer(&self) -> vk::Buffer;
     fn offset(&self) -> u64;
@@ -72,7 +76,7 @@ pub trait Bound: std::any::Any + Send + Sync {
     fn bytes(&self) -> usize;
 }
 
-impl Bound for HostBuffer {
+impl Bound for Buffer {
     fn vk_buffer(&self) -> vk::Buffer {
         self.buffer
     }
@@ -100,32 +104,44 @@ impl Bound for ImportedMemory {
     }
 }
 
-/// Memory the device allocated in host RAM, mapped for the CPU's reads and writes as well (cached when the device
-/// offers it: an iGPU reads cached host pages as fast as uncached ones).
-pub struct HostBuffer {
+/// Memory a kernel reads and writes: in host RAM, mapped for the CPU as well (cached when the device offers it: an iGPU
+/// reads cached host pages as fast as uncached ones), on a device that shares the host's memory; in the device's own
+/// memory on a discrete one, which the host reaches through staging copies on the stream.
+pub struct Buffer {
     context: Arc<Context>,
     pub(crate) buffer: vk::Buffer,
     memory: vk::DeviceMemory,
+    // null for device memory
     ptr: *mut u8,
     len: usize,
     capacity: u64,
 }
 
 // SAFETY: the mapping is plain memory, and the Vulkan handles are only used through the context's synchronized calls
-unsafe impl Send for HostBuffer {}
-unsafe impl Sync for HostBuffer {}
+unsafe impl Send for Buffer {}
+unsafe impl Sync for Buffer {}
 
-impl HostBuffer {
+impl Buffer {
+    /// A buffer where the device's kernels read fastest: the device's memory, or mapped host RAM on a unified device.
     pub fn new(context: &Arc<Context>, len: usize) -> Result<Self> {
+        Self::placed(context, len, !context.unified)
+    }
+
+    /// A buffer in host RAM the CPU maps, wherever the device's own memory is.
+    pub fn host(context: &Arc<Context>, len: usize) -> Result<Self> {
+        Self::placed(context, len, false)
+    }
+
+    fn placed(context: &Arc<Context>, len: usize, device_local: bool) -> Result<Self> {
         if len == 0 || len as u64 > MAX_BINDING_BYTES {
-            return Err(Error::Invalid(format!("a host buffer of {len} bytes")));
+            return Err(Error::Invalid(format!("a buffer of {len} bytes")));
         }
         let capacity = capacity(len as u64);
         let pooled = context
             .pool
             .lock()
             .expect("vulkan pool poisoned")
-            .take(capacity);
+            .take(device_local, capacity);
         if let Some(Allocation {
             buffer,
             memory,
@@ -142,40 +158,73 @@ impl HostBuffer {
             });
         }
         let device = &context.device;
+        let usage = vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::TRANSFER_SRC
+            | vk::BufferUsageFlags::TRANSFER_DST;
         let info = vk::BufferCreateInfo::default()
             .size(capacity)
-            .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
+            .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
         // SAFETY: the create info outlives the call
         let buffer = unsafe { device.create_buffer(&info, None)? };
         // SAFETY: the buffer was created on this device
         let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+        let bits = requirements.memory_type_bits;
         let visible =
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-        let memory_type = context
-            .memory_type(
-                requirements.memory_type_bits,
-                visible | vk::MemoryPropertyFlags::HOST_CACHED,
-            )
-            .or_else(|| context.memory_type(requirements.memory_type_bits, visible))
-            .ok_or(Error::NoMemoryType)?;
+        let memory_type = if device_local {
+            context.memory_type(bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+        } else {
+            context
+                .memory_type(bits, visible | vk::MemoryPropertyFlags::HOST_CACHED)
+                .or_else(|| context.memory_type(bits, visible))
+        };
+        let Some(memory_type) = memory_type else {
+            // SAFETY: the buffer is unused
+            unsafe { device.destroy_buffer(buffer, None) };
+            return Err(Error::NoMemoryType);
+        };
         let alloc = vk::MemoryAllocateInfo::default()
             .allocation_size(requirements.size)
             .memory_type_index(memory_type);
-        // SAFETY: the allocation is host visible, bound once, and mapped whole for the buffer's life
+        // SAFETY: the allocation is bound once, and a host-visible one is mapped whole for the buffer's life
         unsafe {
-            let memory = device.allocate_memory(&alloc, None)?;
+            let memory = match device.allocate_memory(&alloc, None) {
+                Ok(memory) => memory,
+                Err(err) => {
+                    device.destroy_buffer(buffer, None);
+                    return Err(err.into());
+                }
+            };
             device.bind_buffer_memory(buffer, memory, 0)?;
-            let ptr = device.map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())?;
+            let ptr = if device_local {
+                std::ptr::null_mut()
+            } else {
+                device
+                    .map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())?
+                    .cast()
+            };
             Ok(Self {
                 context: context.clone(),
                 buffer,
                 memory,
-                ptr: ptr.cast(),
+                ptr,
                 len,
                 capacity,
             })
         }
+    }
+
+    /// A buffer holding `bytes`.
+    pub fn with_bytes(context: &Arc<Context>, bytes: &[u8]) -> Result<Self> {
+        let mut buffer = Self::new(context, bytes.len())?;
+        buffer.write(0, bytes)?;
+        Ok(buffer)
+    }
+
+    /// A buffer holding `values`.
+    pub fn with_f32(context: &Arc<Context>, values: &[f32]) -> Result<Self> {
+        Self::with_bytes(context, f32_bytes(values))
     }
 
     pub fn len(&self) -> usize {
@@ -186,32 +235,110 @@ impl HostBuffer {
         self.len == 0
     }
 
-    /// The buffer's bytes; the GPU must not be writing them.
-    pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: the mapping is `len` bytes and lives as long as `self`
-        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    /// Whether the CPU maps the buffer, so its bytes are written and read in place.
+    pub fn is_mapped(&self) -> bool {
+        !self.ptr.is_null()
     }
 
-    /// As [`Self::as_bytes`], for writing; the GPU must not be reading them.
-    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
-        // SAFETY: as above, and `&mut self` keeps the slice unique on the host side
-        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    /// Writes `bytes` at `offset`: in place when mapped, which the GPU must not be using, else as a copy recorded on
+    /// the stream, ordered after what is recorded before it.
+    pub fn write(&mut self, offset: usize, bytes: &[u8]) -> Result<()> {
+        if offset + bytes.len() > self.len {
+            return Err(Error::Invalid(format!(
+                "{} bytes at {offset} of a {}-byte buffer",
+                bytes.len(),
+                self.len
+            )));
+        }
+        if self.is_mapped() {
+            // SAFETY: the range is in the mapping, which nothing else writes while `&mut self` is held
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.ptr.add(offset), bytes.len())
+            };
+            return Ok(());
+        }
+        for (i, chunk) in bytes.chunks(STAGING_BYTES).enumerate() {
+            let mut staging = Self::host(&self.context, chunk.len())?;
+            staging.write(0, chunk)?;
+            let at = (offset + i * STAGING_BYTES) as u64;
+            let staging = Arc::new(staging);
+            self.context.record(|recorder| {
+                recorder.copy(staging.buffer, 0, self.buffer, at, chunk.len() as u64);
+                recorder.retain(staging.clone());
+                Ok(())
+            })?;
+            self.context.flush()?;
+        }
+        Ok(())
     }
 
-    /// The buffer's bytes as `f32`s; the GPU must not be writing them.
-    pub fn as_f32(&self) -> &[f32] {
-        // SAFETY: the mapping is `len` bytes, page aligned, and lives as long as `self`
-        unsafe { std::slice::from_raw_parts(self.ptr.cast(), self.len / 4) }
+    /// Fills the buffer with copies of `word`, ordered as [`Self::write`] is.
+    pub fn fill(&mut self, word: u32) -> Result<()> {
+        if self.is_mapped() {
+            let words = self.len / 4;
+            // SAFETY: the mapping is page aligned and `len` bytes long, unique while `&mut self` is held
+            unsafe { std::slice::from_raw_parts_mut(self.ptr.cast::<u32>(), words) }.fill(word);
+            let tail = &word.to_le_bytes()[..self.len % 4];
+            // SAFETY: as above
+            unsafe {
+                std::ptr::copy_nonoverlapping(tail.as_ptr(), self.ptr.add(words * 4), tail.len())
+            };
+            return Ok(());
+        }
+        let (buffer, size) = (self.buffer, self.capacity);
+        self.context.record(|recorder| {
+            recorder.fill(buffer, size, word);
+            Ok(())
+        })
     }
 
-    /// As [`Self::as_f32`], for writing; the GPU must not be reading them.
-    pub fn as_f32_mut(&mut self) -> &mut [f32] {
-        // SAFETY: as above, and `&mut self` keeps the slice unique on the host side
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.cast(), self.len / 4) }
+    /// Reads the buffer's first `out.len()` bytes once the GPU has finished everything recorded so far.
+    pub fn read_into(&self, out: &mut [u8]) -> Result<()> {
+        let len = out.len().min(self.len);
+        let out = &mut out[..len];
+        if self.is_mapped() {
+            self.context.synchronize()?;
+            // SAFETY: the range is in the mapping, which the GPU no longer writes
+            unsafe { std::ptr::copy_nonoverlapping(self.ptr, out.as_mut_ptr(), len) };
+            return Ok(());
+        }
+        for (i, chunk) in out.chunks_mut(STAGING_BYTES).enumerate() {
+            let staging = Self::host(&self.context, chunk.len())?;
+            let at = (i * STAGING_BYTES) as u64;
+            self.context.record(|recorder| {
+                recorder.copy(self.buffer, at, staging.buffer, 0, chunk.len() as u64);
+                Ok(())
+            })?;
+            staging.read_into(chunk)?;
+        }
+        Ok(())
+    }
+
+    /// The buffer's bytes once the GPU has finished everything recorded so far.
+    pub fn read(&self) -> Result<Vec<u8>> {
+        let mut out = vec![0u8; self.len];
+        self.read_into(&mut out)?;
+        Ok(out)
+    }
+
+    /// The buffer's bytes as `f32`s, as [`Self::read`].
+    pub fn read_f32(&self) -> Result<Vec<f32>> {
+        let mut out = vec![0f32; self.len / 4];
+        // SAFETY: any bytes are a valid f32
+        let bytes =
+            unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr().cast::<u8>(), out.len() * 4) };
+        self.read_into(bytes)?;
+        Ok(out)
     }
 }
 
-impl Drop for HostBuffer {
+/// `values`' bytes.
+pub fn f32_bytes(values: &[f32]) -> &[u8] {
+    // SAFETY: an f32's bytes are initialized and u8 has no alignment
+    unsafe { std::slice::from_raw_parts(values.as_ptr().cast(), std::mem::size_of_val(values)) }
+}
+
+impl Drop for Buffer {
     // a recorded command retains what it uses, so nothing submitted reads a buffer once it drops
     fn drop(&mut self) {
         let allocation = Allocation {
@@ -224,7 +351,7 @@ impl Drop for HostBuffer {
             .pool
             .lock()
             .expect("vulkan pool poisoned")
-            .give(self.capacity, allocation);
+            .give(self.ptr.is_null(), self.capacity, allocation);
         if let Some(allocation) = refused {
             // SAFETY: see above
             unsafe { allocation.free(&self.context.device) };
@@ -233,19 +360,27 @@ impl Drop for HostBuffer {
 }
 
 impl BufferPool {
-    fn take(&mut self, capacity: u64) -> Option<Allocation> {
-        let allocation = self.free.get_mut(&capacity)?.pop()?;
+    fn take(&mut self, device_local: bool, capacity: u64) -> Option<Allocation> {
+        let allocation = self.free.get_mut(&(device_local, capacity))?.pop()?;
         self.bytes -= capacity;
         Some(allocation)
     }
 
     // keeps `allocation` for reuse, or hands it back to be freed when it is not a pooled size or the pool is full
-    fn give(&mut self, capacity: u64, allocation: Allocation) -> Option<Allocation> {
+    fn give(
+        &mut self,
+        device_local: bool,
+        capacity: u64,
+        allocation: Allocation,
+    ) -> Option<Allocation> {
         if capacity > MAX_POOLED_BYTES || self.bytes + capacity > MAX_POOL_BYTES {
             return Some(allocation);
         }
         self.bytes += capacity;
-        self.free.entry(capacity).or_default().push(allocation);
+        self.free
+            .entry((device_local, capacity))
+            .or_default()
+            .push(allocation);
         None
     }
 }
@@ -261,7 +396,7 @@ pub struct ImportedMemory {
     len: usize,
 }
 
-// SAFETY: as for `HostBuffer`; the imported pages belong to the caller, who keeps them alive
+// SAFETY: as for `Buffer`; the imported pages belong to the caller, who keeps them alive
 unsafe impl Send for ImportedMemory {}
 unsafe impl Sync for ImportedMemory {}
 
@@ -344,5 +479,40 @@ impl Drop for ImportedMemory {
             self.context.device.destroy_buffer(self.buffer, None);
             self.context.device.free_memory(self.memory, None);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // past one staging buffer, so a device-memory write and read take several copies
+    const LEN: usize = STAGING_BYTES + 4096 + 12;
+
+    #[test]
+    fn buffers_take_writes_fills_and_reads_wherever_they_live() -> Result<()> {
+        let context = match Context::new() {
+            Ok(context) => context,
+            Err(err) => {
+                eprintln!("skipping: {err}");
+                return Ok(());
+            }
+        };
+        let bytes: Vec<u8> = (0..LEN).map(|i| (i * 31 % 251) as u8).collect();
+        for buffer in [Buffer::new(&context, LEN)?, Buffer::host(&context, LEN)?] {
+            let mut buffer = buffer;
+            buffer.fill(0x0302_0100)?;
+            let filled = buffer.read()?;
+            assert!(filled.iter().enumerate().all(|(i, &b)| b == (i % 4) as u8));
+            buffer.write(5, &bytes[..LEN - 5])?;
+            let got = buffer.read()?;
+            assert_eq!(&got[..5], &[0, 1, 2, 3, 0]);
+            assert_eq!(&got[5..], &bytes[..LEN - 5]);
+        }
+        assert_eq!(
+            Buffer::new(&context, LEN)?.is_mapped(),
+            context.is_unified()
+        );
+        Ok(())
     }
 }
