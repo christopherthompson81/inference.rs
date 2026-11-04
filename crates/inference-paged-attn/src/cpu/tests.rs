@@ -9,6 +9,9 @@ const HEADS: usize = 4;
 const HEAD_SIZE: usize = 32;
 const BLOCK_SIZE: usize = 4;
 const BLOCKS: usize = 8;
+// a Vulkan prompt row against the CPU, relative: the f32 kernel, and matrix cores (f16 Q, K, V and P; 1.0e-4 seen)
+const VULKAN_PREFILL_TOLERANCE: f32 = 1e-4;
+const VULKAN_MATRIX_CORE_PREFILL_TOLERANCE: f32 = 1e-3;
 
 // softcap, ALiBi slopes, sinks
 type DecodeCase<'a> = (f32, &'a [f32], Option<&'a [f32]>);
@@ -411,6 +414,19 @@ fn vulkan_paged_attention_splits_long_contexts() -> Result<()> {
 // partway through a block, rows off its workgroup's 8, a shuffled block table
 #[test]
 fn vulkan_paged_prefill_matches_each_row_scored_alone() -> Result<()> {
+    // the f32 kernel; its matrix-core twin is the next test
+    // SAFETY: nextest runs each test in its own process, and nothing has read the environment yet
+    unsafe { std::env::set_var(inference_tensor::vulkan::NO_MATRIX_CORES_ENV, "1") };
+    paged_prefill_rows_score_alone(VULKAN_PREFILL_TOLERANCE)
+}
+
+// on matrix cores where the device has them: Q, K, V and P in f16, as CUDA's flash kernels take them
+#[test]
+fn vulkan_matrix_core_paged_prefill_matches_each_row_scored_alone() -> Result<()> {
+    paged_prefill_rows_score_alone(VULKAN_MATRIX_CORE_PREFILL_TOLERANCE)
+}
+
+fn paged_prefill_rows_score_alone(tolerance: f32) -> Result<()> {
     let Ok(vk) = Device::new_vulkan(0) else {
         return Ok(());
     };
@@ -476,7 +492,7 @@ fn vulkan_paged_prefill_matches_each_row_scored_alone() -> Result<()> {
             .zip(want.flatten_all()?.to_vec1::<f32>()?)
         {
             assert!(
-                (g - w).abs() <= 1e-4 * w.abs().max(1.0),
+                (g - w).abs() <= tolerance * w.abs().max(1.0),
                 "{dtype:?}: {g} vs {w}"
             );
         }

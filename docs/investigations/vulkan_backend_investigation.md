@@ -938,3 +938,43 @@ context and drafts: each row's filtered distribution as the CPU's within 1e-5).
 
 **Result (a served MTP 3 chat turn, 256 tokens, three seeds):** the UI's defaults went 22.8 / 20.3 / 22.5 ->
 27.1 / 26.7 / 26.7 tok/s. Temperature 1.0 with top_p 0.95 is unchanged: 28.5 / 26.2 / 27.4 -> 28.6 / 26.3 / 27.2.
+
+### Run 37 - 2026-11-04 ~17:45 (desktop: RTX 3090)
+
+**Question:** Lightning on CUDA (Nemotron-H CUDA Runs 18-19) puts a 245K-token prompt at 116 s (bf16 cache) to 141 s
+(q8), where Vulkan's took 715 s, almost all of it prompt attention over the paged cache at ~4.7 TFLOPS. Can the
+3090's matrix cores take it?
+
+**Change:** `paged_prefill_cm_main.glsl`, prompt attention on `VK_KHR_cooperative_matrix` (f16 16 x 16 x 16 into f32)
+with `paged_prefill`'s bindings, push constants and partials, so `paged_decode_reduce` and the three cache types
+(f32, f16, quantized) are unchanged around it:
+- A workgroup (4 subgroups of 32) takes 64 query rows (positions x the kv head's query heads), Q in f16 A matrices.
+- It stages 32 positions of K and V as f16, through the scalar kernel's index math (f32 and f16 caches). A quantized
+  tile goes a thread a 32-value group: the row, its scale and its words read once.
+- Each subgroup's 16 x 32 scores go through shared memory, a pair of lanes a row for the softmax. P V adds into
+  accumulators that stay in matrix registers; a row's reference max moves only when a tile passes it by 8 nats (P
+  stays below e^8 in f16), the one time its accumulators round-trip shared memory to be rescaled.
+- ~32 KB of shared memory. Built only for 32-lane subgroups (`CoopKernels::paged_prefill`); heads a multiple of 16
+  up to 128, groups up to 64.
+
+**Tests:** `vulkan_paged_prefill_matches_each_row_scored_alone` now pins the f32 kernel (`NO_MATRIX_CORES_ENV`) at
+1e-4; `vulkan_matrix_core_paged_prefill_matches_each_row_scored_alone` runs the matrix cores at 1e-3 relative
+(1.0e-4 seen: f16 Q, K, V and P). `vulkan_quantized_cache_scores_as_its_dequantized_rows` passes at its 1e-3.
+
+**Result (`inference bench --vulkan`, Q4_0 experts, one fresh prompt each):**
+
+| prompt | cache | scalar | matrix cores, per-value quant loads | matrix cores |
+|---|---|---|---|---|
+| 32768 | q8 | 24.3 s | 18.0 s | 12.5 s |
+| 32768 | f16 | 20.7 s | | 13.1 s |
+| 131072 | q8 | | 154.0 s | 77.4 s |
+| 245760 | q8 | 715.3 s (Run 35, 244K) | | 240.8 s |
+
+(The 32K scalar rows ran with `INFERENCE_VULKAN_NO_COOPMAT`, which also takes the matmuls off the matrix cores; Run
+25 measured those at 0.23 against 0.24 s a 512-token prompt.) Decode after the prompt 127-132 tok/s.
+
+**Finding:** at 32K the f16 cache's attention is down to ~2 s of 13 (~29 TFLOPS); the per-value quantized loads had
+cost the q8 cache ~5.5 s more, now gone (q8 reads half f16's bytes and is the faster cache). At 245K, against ~85 s
+of per-token work, attention is ~156 s (~19 TFLOPS); CUDA's q8 is 141 s in all.
+
+**Next:** item (3) of Nemotron-H CUDA Run 18: short prompts and decode at half CUDA's rate.

@@ -202,7 +202,11 @@ pub(crate) struct CoopKernels {
     // by BlockType
     moe_mmc: Vec<Pipeline>,
     pub(crate) moe_gather_f16: Pipeline,
+    // prompt attention over f32, f16 and quantized paged caches, on 32-lane subgroups (the shader's 4 a workgroup)
+    paged_prefill: Option<[Pipeline; 3]>,
 }
+// the subgroup width paged_prefill_cm_main.glsl's workgroup is laid out for
+const PREFILL_CM_SUBGROUP: u32 = 32;
 pub(crate) const MOE_MMC_BINDINGS: usize = 4;
 pub(crate) const MOE_MMC_PUSH_BYTES: u32 = 7 * 4;
 pub(crate) const MOE_GATHER_BINDINGS: usize = 3;
@@ -212,7 +216,7 @@ const CONVERT_PUSH_BYTES: u32 = 2 * 4;
 pub(crate) const CONVERT_THREADS: usize = 256;
 
 impl CoopKernels {
-    pub(crate) fn new(device: &ash::Device) -> Result<Self> {
+    pub(crate) fn new(device: &ash::Device, subgroup_size: u32) -> Result<Self> {
         let sources = [
             (shaders::MUL_MMC_Q8_0, "mul_mmc_q8_0"),
             (shaders::MUL_MMC_Q5_0, "mul_mmc_q5_0"),
@@ -256,11 +260,42 @@ impl CoopKernels {
             MOE_GATHER_PUSH_BYTES,
             "moe_gather_f16",
         )?;
+        let paged_prefill = if subgroup_size == PREFILL_CM_SUBGROUP {
+            let prefill = |spirv, name| {
+                Pipeline::new(
+                    device,
+                    spirv,
+                    ops::PAGED_PREFILL_BINDINGS,
+                    ops::PAGED_PREFILL_PUSH_BYTES,
+                    name,
+                )
+            };
+            Some([
+                prefill(shaders::PAGED_PREFILL_CM, "paged_prefill_cm")?,
+                prefill(shaders::PAGED_PREFILL_CM_F16, "paged_prefill_cm_f16")?,
+                prefill(shaders::PAGED_PREFILL_CM_QUANT, "paged_prefill_cm_quant")?,
+            ])
+        } else {
+            None
+        };
         Ok(Self {
             mul_mmc,
             convert_f16,
             moe_mmc,
             moe_gather_f16,
+            paged_prefill,
+        })
+    }
+
+    /// Prompt attention over `shape`'s cache on matrix cores, where this device runs it.
+    pub(crate) fn paged_prefill(&self, shape: ops::CacheShape) -> Option<&Pipeline> {
+        let [f32, f16, quant] = self.paged_prefill.as_ref()?;
+        Some(if shape.quant.is_some() {
+            quant
+        } else if shape.f16 {
+            f16
+        } else {
+            f32
         })
     }
 
@@ -280,6 +315,7 @@ impl CoopKernels {
             .iter()
             .chain(&self.moe_mmc)
             .chain([&self.convert_f16, &self.moe_gather_f16])
+            .chain(self.paged_prefill.iter().flatten())
         {
             // SAFETY: the caller's contract
             unsafe { pipeline.destroy(device) };

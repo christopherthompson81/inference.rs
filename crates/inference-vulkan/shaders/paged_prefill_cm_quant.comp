@@ -1,0 +1,5 @@
+#version 450
+// paged_prefill_cm_main.glsl over quantized HND caches (kv_quant.glsl), the query already rotated.
+#extension GL_GOOGLE_include_directive : require
+#define CACHE_QUANT
+#include "paged_prefill_cm_main.glsl"

@@ -1,0 +1,4 @@
+#version 450
+// paged_prefill_cm_main.glsl over f32 caches.
+#extension GL_GOOGLE_include_directive : require
+#include "paged_prefill_cm_main.glsl"
