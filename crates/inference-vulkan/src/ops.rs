@@ -14,6 +14,11 @@ const INDEX_THREADS: usize = 256;
 const MATMUL_THREADS: usize = 64;
 // the inner length from which an output element gets a workgroup of its own, its threads splitting the dot product
 const DOT_MIN_K: usize = 64;
+// the tiled kernel's output tile, its smallest worthwhile rows and columns, and the batches its grid's z takes
+const TILE_M: usize = 64;
+const TILE_N: usize = 64;
+const TILED_MIN: usize = 16;
+const MAX_GROUPS_Z: usize = 65_535;
 const MAX_GROUPS: usize = 4096;
 
 /// A per-row op, numbered as `rows_f32.comp`'s constants.
@@ -170,7 +175,20 @@ impl Recorder<'_> {
             b.col_stride,
         ])?;
         let buffers = [a.buffer.buffer, b.buffer.buffer, op.out.buffer];
-        if op.k >= DOT_MIN_K {
+        let work = (count as u64).saturating_mul(op.k as u64);
+        self.work.set(self.work.get().saturating_add(work));
+        if op.m >= TILED_MIN && op.n >= TILED_MIN && op.batch <= MAX_GROUPS_Z {
+            self.context.kernels.matmul_f32_tiled.dispatch(
+                self,
+                &buffers,
+                &bytes,
+                [
+                    op.n.div_ceil(TILE_N) as u32,
+                    op.m.div_ceil(TILE_M) as u32,
+                    op.batch as u32,
+                ],
+            );
+        } else if op.k >= DOT_MIN_K {
             let groups_x = count.min(MAX_GROUPS_X);
             self.context.kernels.matmul_f32_dot.dispatch(
                 self,
@@ -309,6 +327,7 @@ impl Recorder<'_> {
 
 pub(crate) const MOE_MATVEC_BINDINGS: usize = 4;
 pub(crate) const MOE_MATVEC_PUSH_BYTES: u32 = 9 * 4;
+pub(crate) const MOE_MATVECS_PUSH_BYTES: u32 = 10 * 4;
 pub(crate) const ROUTER_BINDINGS: usize = 4;
 pub(crate) const ROUTER_PUSH_BYTES: u32 = 13 * 4;
 // the matvec shaders' rows a workgroup, and the router shader's limits
@@ -326,6 +345,8 @@ pub struct MoeMatVec<'a> {
     pub slots: usize,
     /// slots a row of `x` serves: the routes of one token, or 1 for a row a route
     pub x_div: usize,
+    /// read each expert's weights once for all the slots routed to it, worth its cost when several tokens route
+    pub share_experts: bool,
     pub x: At<'a>,
     pub ids: At<'a>,
     pub y: &'a Arc<HostBuffer>,
@@ -379,7 +400,7 @@ impl Recorder<'_> {
         }
         let groups = op.rows.div_ceil(MATVEC_ROWS);
         let groups_x = groups.min(MAX_GROUPS_X);
-        let bytes = words(&[
+        let mut push = vec![
             op.rows,
             op.cols,
             op.weights.offset() as usize / 2,
@@ -389,14 +410,21 @@ impl Recorder<'_> {
             op.x_div,
             op.ids.1,
             expert_bytes / 2,
-        ])?;
+        ];
+        let kernel = if op.share_experts {
+            push.push(op.slots);
+            &self.context.kernels.moe_mat_vecs_q5_0
+        } else {
+            &self.context.kernels.moe_mat_vec_q5_0
+        };
+        let bytes = words(&push)?;
         let buffers = [
             op.weights.vk_buffer(),
             op.x.0.buffer,
             op.y.buffer,
             op.ids.0.buffer,
         ];
-        self.context.kernels.moe_mat_vec_q5_0.dispatch(
+        kernel.dispatch(
             self,
             &buffers,
             &bytes,
@@ -457,9 +485,16 @@ pub(crate) const PAGED_WRITE_BINDINGS: usize = 5;
 pub(crate) const PAGED_WRITE_PUSH_BYTES: u32 = 8 * 4;
 pub(crate) const PAGED_DECODE_BINDINGS: usize = 6;
 pub(crate) const PAGED_DECODE_PUSH_BYTES: u32 = 10 * 4;
-// the decode shader's limits: shared scores and query
-const MAX_PAGED_CONTEXT: usize = 8192;
-const MAX_PAGED_HEAD: usize = 256;
+pub(crate) const PAGED_REDUCE_BINDINGS: usize = 2;
+pub(crate) const PAGED_REDUCE_PUSH_BYTES: u32 = 2 * 4;
+// the decode shader's geometry: the positions a workgroup takes, a tile of whole blocks, its threads, the query heads
+// a kv head serves and those a value thread sums, and the cache's vec4 rows (x)
+const PAGED_CHUNK: usize = 128;
+const PAGED_TILE: usize = 32;
+const PAGED_THREADS: usize = 256;
+const MAX_PAGED_GROUP: usize = 16;
+const PAGED_VALUE_HEADS: usize = 8;
+const PAGED_X: usize = 4;
 
 /// The geometry of a pair of f32 vLLM-layout caches: keys `[blocks, kv_heads, head_size / x, block_size, x]`, values
 /// `[blocks, kv_heads, head_size, block_size]`.
@@ -483,7 +518,8 @@ pub struct PagedWrite<'a> {
 }
 
 /// One query `(seqs, heads, head_size)` a sequence over its `context_lens` cached positions through `block_tables`
-/// (`(seqs, max_blocks)` u32); `out` is laid out as the queries.
+/// (`(seqs, max_blocks)` u32); `out` is laid out as the queries, and `partials` holds
+/// [`PagedDecode::partials_bytes`] of each context chunk's sums.
 pub struct PagedDecode<'a> {
     pub shape: CacheShape,
     pub seqs: usize,
@@ -496,7 +532,19 @@ pub struct PagedDecode<'a> {
     pub value_cache: &'a Arc<HostBuffer>,
     pub block_tables: At<'a>,
     pub context_lens: At<'a>,
+    pub partials: &'a Arc<HostBuffer>,
     pub out: &'a Arc<HostBuffer>,
+}
+
+impl PagedDecode<'_> {
+    pub fn partials_bytes(
+        seqs: usize,
+        heads: usize,
+        head_size: usize,
+        max_context: usize,
+    ) -> usize {
+        seqs * heads * max_context.div_ceil(PAGED_CHUNK).max(1) * (head_size + 2) * 4
+    }
 }
 
 impl Recorder<'_> {
@@ -539,9 +587,20 @@ impl Recorder<'_> {
 
     pub fn paged_decode(&self, op: &PagedDecode<'_>) -> Result<()> {
         let s = op.shape;
-        if op.max_context > MAX_PAGED_CONTEXT
-            || s.head_size > MAX_PAGED_HEAD
+        let group = op.heads / s.kv_heads.max(1);
+        let chunks = op.max_context.div_ceil(PAGED_CHUNK).max(1);
+        if s.head_size == 0
+            || !PAGED_THREADS.is_multiple_of(s.head_size)
+            || s.x != PAGED_X
+            || s.kv_heads == 0
             || !op.heads.is_multiple_of(s.kv_heads)
+            || group > MAX_PAGED_GROUP
+            || group > PAGED_VALUE_HEADS * (PAGED_THREADS / s.head_size)
+            || !PAGED_TILE.is_multiple_of(s.block_size)
+            || !s.block_size.is_multiple_of(PAGED_X)
+            || !op.q.1.is_multiple_of(PAGED_X)
+            || op.partials.len()
+                < PagedDecode::partials_bytes(op.seqs, op.heads, s.head_size, op.max_context)
         {
             return Err(Error::Invalid(format!(
                 "paged decode of {} heads over {} kv heads, head size {}, context {}",
@@ -556,32 +615,38 @@ impl Recorder<'_> {
             s.kv_heads,
             s.head_size,
             s.block_size,
-            s.x,
             op.max_blocks,
         ])?;
         bytes.extend_from_slice(&op.scale.to_bits().to_le_bytes());
-        bytes.extend(words(&[op.q.1, op.block_tables.1, op.context_lens.1])?);
+        bytes.extend(words(&[
+            op.q.1 / PAGED_X,
+            op.block_tables.1,
+            op.context_lens.1,
+            chunks,
+        ])?);
         let buffers = [
             op.q.0,
             op.key_cache,
             op.value_cache,
             op.block_tables.0,
             op.context_lens.0,
-            op.out,
+            op.partials,
         ];
-        let groups = (op.seqs * op.heads) as u32;
         self.context.kernels.paged_decode.dispatch(
             self,
             &buffers.map(|b| b.buffer),
             &bytes,
-            [groups, 1, 1],
+            [chunks as u32, s.kv_heads as u32, op.seqs as u32],
         );
-        for buffer in buffers {
+        self.context.kernels.paged_decode_reduce.dispatch(
+            self,
+            &[op.partials.buffer, op.out.buffer],
+            &words(&[s.head_size, chunks])?,
+            [(op.seqs * op.heads) as u32, 1, 1],
+        );
+        for buffer in buffers.iter().copied().chain([op.out]) {
             self.retain(buffer.clone());
         }
         Ok(())
     }
 }
-
-/// The longest context [`Recorder::paged_decode`] takes.
-pub const PAGED_DECODE_MAX_CONTEXT: usize = MAX_PAGED_CONTEXT;

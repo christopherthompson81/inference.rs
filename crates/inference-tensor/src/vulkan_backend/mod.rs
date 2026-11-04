@@ -575,7 +575,8 @@ pub(crate) fn moe_router(route: &crate::vulkan::Route<'_>) -> Result<(Tensor, Te
     Ok((tensor_of(values, shape), tensor_of(indices, shape)))
 }
 
-/// `y[slot] = W[ids[slot]] x[slot / x_div]` over a Q5_0 expert stack `(experts, rows, cols)` copied to `weights`.
+/// `y[slot] = W[ids[slot]] x[slot / x_div]` over a Q5_0 expert stack `(experts, rows, cols)` copied to `weights`, `ids`
+/// `(tokens, k)`.
 pub(crate) fn expert_mat_vec(
     weights: &Arc<HostBuffer>,
     (experts, rows, cols): (usize, usize, usize),
@@ -585,6 +586,7 @@ pub(crate) fn expert_mat_vec(
 ) -> Result<Tensor> {
     let (xb, ib) = (bound(x, DType::F32)?, bound(ids, DType::U32)?);
     let slots = ids.elem_count();
+    let tokens = ids.dims2()?.0;
     let device = x.device().as_vulkan_device()?.clone();
     let out = VulkanStorage {
         buffer: Arc::new(device.buffer(slots * rows * 4)?),
@@ -603,6 +605,7 @@ pub(crate) fn expert_mat_vec(
                 cols,
                 slots,
                 x_div,
+                share_experts: tokens > 1,
                 x: (&xb.0, xb.1),
                 ids: (&ib.0, ib.1),
                 y: &out.buffer,
@@ -664,10 +667,7 @@ pub(crate) fn paged_cache_write(
         .map_err(vk_err)
 }
 
-pub(crate) fn paged_decode(op: &crate::vulkan::PagedDecode<'_>) -> Result<Option<Tensor>> {
-    if op.max_context > inference_vulkan::PAGED_DECODE_MAX_CONTEXT {
-        return Ok(None);
-    }
+pub(crate) fn paged_decode(op: &crate::vulkan::PagedDecode<'_>) -> Result<Tensor> {
     let shape = cache_shape(op.key_cache, op.value_cache)?;
     let (seqs, heads, head_size) = op.q.dims3()?;
     let (_, max_blocks) = op.block_tables.dims2()?;
@@ -692,6 +692,12 @@ pub(crate) fn paged_decode(op: &crate::vulkan::PagedDecode<'_>) -> Result<Option
         count,
         dtype: f32,
     };
+    let partials = Arc::new(device.buffer(inference_vulkan::PagedDecode::partials_bytes(
+        seqs,
+        heads,
+        head_size,
+        op.max_context,
+    ))?);
     device
         .context
         .record(|r| {
@@ -707,11 +713,12 @@ pub(crate) fn paged_decode(op: &crate::vulkan::PagedDecode<'_>) -> Result<Option
                 value_cache: &vc.0,
                 block_tables: (&tb.0, tb.1),
                 context_lens: (&lb.0, lb.1),
+                partials: &partials,
                 out: &out.buffer,
             })
         })
         .map_err(vk_err)?;
-    Ok(Some(tensor_of(out, (seqs, heads, head_size))))
+    Ok(tensor_of(out, (seqs, heads, head_size)))
 }
 
 // the stride between batches of a matmul operand whose batch dims (all but its last two) collapse into one
@@ -1345,6 +1352,52 @@ mod tests {
                 assert_close(&matmul.forward(&x.to_device(&vk)?)?, &want, DOT_TOLERANCE)?;
             }
         }
+        Ok(())
+    }
+
+    // a Q5_0 expert stack's routes: one token's (a kernel a route), then several tokens sharing experts (the kernel
+    // reading each expert once), over a token's input (x_div k) and over each route's own row (x_div 1)
+    #[test]
+    fn vulkan_expert_matvecs_match_the_dequantized_experts() -> Result<()> {
+        use crate::quantized::{GgmlDType, QTensor};
+        let Some(vk) = device() else { return Ok(()) };
+        let (experts, rows, cols, k) = (4usize, 71usize, 256usize, 2usize);
+        let w = Tensor::randn(0f32, 1., (experts, rows, cols), &Device::Cpu)?;
+        let weight = QTensor::quantize(&w.to_device(&vk)?, GgmlDType::Q5_0)?;
+        let dense = weight.dequantize(&Device::Cpu)?;
+        // the last: 18 slots of one expert, more than a leader takes
+        let routes: [&[u32]; 3] = [&[3, 1], &[2, 0, 0, 2, 1, 2], &[1; 18]];
+        for ids in routes {
+            let tokens = ids.len() / k;
+            let id_t = Tensor::from_slice(ids, (tokens, k), &Device::Cpu)?;
+            for x_div in [k, 1] {
+                let x = Tensor::randn(0f32, 1., (ids.len() / x_div, cols), &Device::Cpu)?;
+                let got = weight
+                    .vulkan_expert_mat_vec(&x.to_device(&vk)?, &id_t.to_device(&vk)?, x_div)?
+                    .expect("Q5_0 runs on Vulkan");
+                let mut want = Vec::new();
+                for (slot, &e) in ids.iter().enumerate() {
+                    let row = x.narrow(0, slot / x_div, 1)?;
+                    want.push(row.matmul(&dense.get(e as usize)?.t()?)?);
+                }
+                assert_close(&got, &Tensor::cat(&want, 0)?, DOT_TOLERANCE)?;
+            }
+        }
+        Ok(())
+    }
+
+    // the tiled matmul over sizes off its tiles: attention's q k^T (b strided along n) and p v (b unit-stride along n)
+    #[test]
+    fn vulkan_tiled_matmuls_match_the_cpu() -> Result<()> {
+        let Some(vk) = device() else { return Ok(()) };
+        let q = Tensor::randn(0f32, 1., (3, 70, 40), &Device::Cpu)?;
+        let k = Tensor::randn(0f32, 1., (3, 131, 40), &Device::Cpu)?;
+        let v = Tensor::randn(0f32, 1., (3, 131, 24), &Device::Cpu)?;
+        let (vq, vk_, vv) = (q.to_device(&vk)?, k.to_device(&vk)?, v.to_device(&vk)?);
+        let scores = q.matmul(&k.t()?)?;
+        assert_close(&vq.matmul(&vk_.t()?)?, &scores, DOT_TOLERANCE)?;
+        let vscores = scores.to_device(&vk)?;
+        assert_close(&vscores.matmul(&vv)?, &scores.matmul(&v)?, DOT_TOLERANCE)?;
         Ok(())
     }
 

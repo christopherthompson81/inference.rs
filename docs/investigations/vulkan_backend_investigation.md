@@ -184,3 +184,30 @@ change; prefill's matmuls and experts past 8 rows still run on the CPU.
 
 **KLD (recipe A on Vulkan, `perplexity --device vulkan:0 --kld-base` over Run 3's BF16 base, 40 chunks of 512):** mean
 0.00885 (median 0.00355, p99 0.078), top-1 96.22 %, PPL 6.5454 against the base's 6.5329; the CPU scored 0.0090.
+
+### Run 12 - 2026-11-04 ~05:00
+
+**Change:** a verify step's experts: 77 % of its 3 x 6 routes are distinct experts, so `moe_mat_vecs_q5_0` has the
+first slot of each expert's run compute every slot routed to it (up to 8), the others leaving (766 -> 697 us a
+dispatch). Paged decode splits the context into 128-position chunks, a workgroup a (chunk, kv head, sequence) scoring
+all 16 of the kv head's query heads from vec4 key tiles in shared memory and summing values straight from the cache
+(a value vec4 serving 8 heads), and `paged_decode_reduce` combines the chunks: before, each query head re-read its kv
+head's cache, 345 -> 1038 us a call over a 512-token run, now 60 -> 110 us, with no context limit. f32 matmuls of 16 or
+more rows and columns take a 64 x 64 tiled kernel (a long prompt's attention had launched a workgroup an output), and a
+batch submits once its matmuls pass 4e9 multiply-adds: a 4096-token prompt had tripped amdgpu's job timeout.
+
+**Tests:** `vulkan_expert_matvecs_match_the_dequantized_experts` (one token, shared experts, an expert past 8 slots);
+`vulkan_paged_attention_splits_long_contexts` (32 over 2 heads, head 128, 700 and 257 positions, shuffled blocks);
+`vulkan_tiled_matmuls_match_the_cpu`.
+
+**Result (Run 6's four prompts, greedy, 256 tokens, `serve --vulkan --pa-context-len 8192 --paged-attn on`):**
+
+| config | code | list | prose | counting | mean |
+|---|---|---|---|---|---|
+| plain | 24.47 | 24.47 | 24.42 | 24.40 | 24.44 |
+| MTP 2, Q5_0 draft head | 25.33 | 25.04 | 22.21 | 28.91 | 25.37 |
+| MTP 3, Q5_0 draft head | 25.43 | 23.99 | 19.44 | 30.77 | 24.91 |
+
+MTP's text is byte-identical to plain's on all four. A verify step costs ~2.4 plain tokens (its experts ~2.3x, the
+draft head's Q5_0 lm_head 3.3 ms a draft), so MTP gains 4 % on real text against the bench's synthetic prompt (26.5).
+`bench --depth 4096`: plain 22.6 tok/s.

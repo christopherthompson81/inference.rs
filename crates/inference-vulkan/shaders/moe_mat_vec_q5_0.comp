@@ -1,7 +1,7 @@
 #version 450
 // y[slot] = W[ids[slot]] x[slot / x_div] for a stack of Q5_0 experts W (each `rows x cols`, rows of 22-byte blocks:
-// an f16 scale, the 32 values' fifth bits, then their low nibbles), one workgroup layer a slot (grid z); as for one W (`rows x cols`, rows of 22-byte blocks: an f16 scale, the 32 values' fifth bits, then their
-// low nibbles, value j in byte j % 16's low or high half), f32 x and y; a value is its 5 bits less 16.
+// an f16 scale, the 32 values' fifth bits, then their low nibbles, value j in byte j % 16's low or high half), f32 x
+// and y, one workgroup layer a slot (grid z); a value is its 5 bits less 16.
 // Each workgroup takes `ROWS` rows; its threads stride over a row's blocks, then reduce through shared memory.
 #extension GL_EXT_shader_16bit_storage : require
 

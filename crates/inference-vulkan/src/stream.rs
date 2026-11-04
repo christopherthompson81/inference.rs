@@ -11,6 +11,9 @@ use crate::Result;
 pub(crate) const DISPATCHES_PER_SUBMIT: usize = 64;
 /// Dispatches a batch submits after while the GPU has nothing else to run, so it starts soon after a synchronize.
 pub(crate) const DISPATCHES_WHEN_IDLE: usize = 8;
+/// The multiply-adds a batch submits after, well inside the driver's job timeout (~2 s on amdgpu) at the slowest
+/// kernels' rate.
+pub(crate) const WORK_PER_SUBMIT: u64 = 4_000_000_000;
 
 /// A resource a recorded command uses, kept alive until the command finishes.
 pub type Retained = Arc<dyn Any + Send + Sync>;
@@ -29,6 +32,8 @@ pub(crate) struct Batch {
     pub(crate) buffer: vk::CommandBuffer,
     fence: vk::Fence,
     pub(crate) dispatches: usize,
+    // the multiply-adds its heavy dispatches declared
+    pub(crate) work: u64,
     pub(crate) retained: Vec<Retained>,
     // the kernels whose dispatches wrote timestamps 1.. of the profiler's pool, while profiling
     pub(crate) profiled: Vec<&'static str>,
@@ -129,6 +134,7 @@ impl Stream {
                 buffer,
                 fence,
                 dispatches: 0,
+                work: 0,
                 retained: Vec::new(),
                 profiled: Vec::new(),
                 queries,

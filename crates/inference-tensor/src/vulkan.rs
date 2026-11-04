@@ -109,8 +109,7 @@ pub fn paged_cache_write(
 }
 
 /// One query a sequence (`q` `(seqs, heads, head_size)`) against f32 vLLM-layout caches through u32 `block_tables`
-/// `(seqs, max_blocks)` over u32 `context_lens`, softmax-scaled by `scale`; or `None` past the kernel's longest
-/// context.
+/// `(seqs, max_blocks)` over u32 `context_lens`, softmax-scaled by `scale`.
 pub struct PagedDecode<'a> {
     pub q: &'a Tensor,
     pub key_cache: &'a Tensor,
@@ -121,7 +120,7 @@ pub struct PagedDecode<'a> {
     pub scale: f32,
 }
 
-pub fn paged_decode(op: &PagedDecode<'_>) -> Result<Option<Tensor>> {
+pub fn paged_decode(op: &PagedDecode<'_>) -> Result<Tensor> {
     #[cfg(feature = "vulkan")]
     return crate::vulkan_backend::paged_decode(op);
     #[cfg(not(feature = "vulkan"))]

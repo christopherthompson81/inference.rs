@@ -1260,7 +1260,8 @@ const WIDEN_CHUNK: usize = 32 * 1024;
 
 impl QTensor {
     /// `y[slot] = W[ids[slot]] x[slot / x_div]` for this `(experts, rows, cols)` stack on Vulkan, with `x` f32 rows of
-    /// `cols` and `ids` u32: `(slots, rows)`, or `None` where the Vulkan kernel does not take its type.
+    /// `cols` and `ids` u32 `(tokens, k)`, a slot a route: `(slots, rows)`, or `None` where the Vulkan kernel does not
+    /// take its type.
     pub fn vulkan_expert_mat_vec(
         &self,
         x: &Tensor,

@@ -375,22 +375,16 @@ pub fn paged_attention(
                 "paged_attention: Vulkan's kernel takes no ALiBi, sinks or softcap"
             );
         }
-        let decoded =
-            inference_tensor::vulkan::paged_decode(&inference_tensor::vulkan::PagedDecode {
-                q: &q.to_dtype(DType::F32)?,
-                key_cache,
-                value_cache,
-                block_tables,
-                context_lens,
-                max_context: max_context_len,
-                scale: softmax_scale,
-            })?;
-        return match decoded {
-            Some(out) => out.to_dtype(q.dtype()),
-            None => inference_tensor::bail!(
-                "paged_attention: a context of {max_context_len} is past Vulkan's kernel"
-            ),
-        };
+        return inference_tensor::vulkan::paged_decode(&inference_tensor::vulkan::PagedDecode {
+            q: &q.to_dtype(DType::F32)?,
+            key_cache,
+            value_cache,
+            block_tables,
+            context_lens,
+            max_context: max_context_len,
+            scale: softmax_scale,
+        })?
+        .to_dtype(q.dtype());
     }
     check_cpu_cache("paged_attention", key_cache, k_scale, v_scale)?;
     let geom = CacheGeom::of(key_cache, value_cache)?;

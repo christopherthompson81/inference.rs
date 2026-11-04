@@ -1,0 +1,119 @@
+#version 450
+// y[slot] = W[ids[slot]] x[slot / x_div] for a stack of Q5_0 experts W (each `rows x cols`), as moe_mat_vec_q5_0, but
+// each expert's weights read once for every slot routed to it: grid z is a slot, and the slot leading a run of up to
+// MAX_M of its expert's slots computes them all while the rest leave. A workgroup takes ROWS weight rows.
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer W { uint16_t w[]; };
+layout(std430, binding = 1) readonly buffer X { float x[]; };
+layout(std430, binding = 2) writeonly buffer Y { float y[]; };
+layout(std430, binding = 3) readonly buffer Ids { uint ids[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint rows;
+    uint cols;
+    // element offsets into the bound buffers: `w` in u16s, `x` and `y` in floats
+    uint w_base;
+    uint x_base;
+    uint y_base;
+    // workgroups per grid row, the grid's second dimension carrying what one dimension's limit cannot
+    uint groups_x;
+    // slots a token's activation row serves (a projection of the token's input: its routes), or 1 (of each route's own)
+    uint x_div;
+    uint ids_off;
+    // u16s from one expert's matrix to the next
+    uint expert_u16;
+    uint slots;
+} pc;
+
+const uint THREADS = 64;
+const uint QK = 32;
+const uint ROWS = 2;
+const uint MAX_M = 8;
+const uint MAX_SUBGROUPS = THREADS / 8;
+shared float partial[ROWS * MAX_M][MAX_SUBGROUPS];
+
+#include "q5_0_decode.glsl"
+
+void main() {
+    uint slot = gl_WorkGroupID.z;
+    uint expert = ids[pc.ids_off + slot];
+    uint before = 0;
+    for (uint s = 0; s < slot; s++) {
+        before += uint(ids[pc.ids_off + s] == expert);
+    }
+    // the whole workgroup leaves together, before any barrier
+    if (before % MAX_M != 0) {
+        return;
+    }
+    uint members[MAX_M];
+    uint m = 0;
+    for (uint s = slot; s < pc.slots && m < MAX_M; s++) {
+        if (ids[pc.ids_off + s] == expert) {
+            members[m] = s;
+            m++;
+        }
+    }
+    uint row0 = (gl_WorkGroupID.y * pc.groups_x + gl_WorkGroupID.x) * ROWS;
+    uint w_expert = pc.w_base + expert * pc.expert_u16;
+    uint tid = gl_LocalInvocationID.x;
+    uint blocks = pc.cols / QK;
+    float acc[ROWS * MAX_M];
+    for (uint i = 0; i < ROWS * MAX_M; i++) {
+        acc[i] = 0.0;
+    }
+    for (uint b = tid; b < blocks; b += THREADS) {
+        float v[ROWS][QK];
+        [[unroll]] for (uint r = 0; r < ROWS; r++) {
+            // a row past the matrix decodes the last one, its sums never written
+            decode(w_expert + (min(row0 + r, pc.rows - 1) * blocks + b) * BLOCK_U16, v[r]);
+        }
+        [[unroll]] for (uint mi = 0; mi < MAX_M; mi++) {
+            if (mi >= m) {
+                break;
+            }
+            uint xb = pc.x_base + (members[mi] / pc.x_div) * pc.cols + b * QK;
+            float s0 = 0.0;
+            float s1 = 0.0;
+            [[unroll]] for (uint j = 0; j < QK; j++) {
+                float xv = x[xb + j];
+                s0 += v[0][j] * xv;
+                s1 += v[1][j] * xv;
+            }
+            acc[mi] += s0;
+            acc[MAX_M + mi] += s1;
+        }
+    }
+    [[unroll]] for (uint mi = 0; mi < MAX_M; mi++) {
+        if (mi >= m) {
+            break;
+        }
+        [[unroll]] for (uint r = 0; r < ROWS; r++) {
+            float sum = subgroupAdd(acc[r * MAX_M + mi]);
+            if (subgroupElect()) {
+                partial[r * MAX_M + mi][gl_SubgroupID] = sum;
+            }
+        }
+    }
+    barrier();
+    if (tid == 0) {
+        for (uint r = 0; r < ROWS; r++) {
+            if (row0 + r >= pc.rows) {
+                break;
+            }
+            for (uint mi = 0; mi < m; mi++) {
+                float sum = 0.0;
+                for (uint g = 0; g < gl_NumSubgroups; g++) {
+                    sum += partial[r * MAX_M + mi][g];
+                }
+                y[pc.y_base + members[mi] * pc.rows + row0 + r] = sum;
+            }
+        }
+    }
+}

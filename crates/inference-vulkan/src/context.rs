@@ -6,7 +6,9 @@ use ash::vk;
 
 use crate::kernels::Kernels;
 use crate::memory::BufferPool;
-use crate::stream::{DISPATCHES_PER_SUBMIT, DISPATCHES_WHEN_IDLE, Retained, Stream};
+use crate::stream::{
+    DISPATCHES_PER_SUBMIT, DISPATCHES_WHEN_IDLE, Retained, Stream, WORK_PER_SUBMIT,
+};
 use crate::{Error, Result};
 
 const REQUIRED_EXTENSIONS: [&CStr; 2] = [
@@ -37,6 +39,7 @@ pub struct Recorder<'a> {
     pub(crate) buffer: vk::CommandBuffer,
     retained: RefCell<Vec<Retained>>,
     pub(crate) dispatches: Cell<usize>,
+    pub(crate) work: Cell<u64>,
     queries: Option<vk::QueryPool>,
     profiled: RefCell<Vec<&'static str>>,
 }
@@ -134,6 +137,7 @@ impl Context {
             buffer: batch.buffer,
             retained: RefCell::new(Vec::new()),
             dispatches: Cell::new(0),
+            work: Cell::new(0),
             queries: batch.queries,
             profiled: RefCell::new(std::mem::take(&mut batch.profiled)),
         };
@@ -141,8 +145,10 @@ impl Context {
         batch.profiled = recorder.profiled.into_inner();
         batch.retained.append(&mut recorder.retained.into_inner());
         batch.dispatches += recorder.dispatches.get();
+        batch.work += recorder.work.get();
         let dispatches = batch.dispatches;
         if dispatches >= DISPATCHES_PER_SUBMIT
+            || batch.work >= WORK_PER_SUBMIT
             || (dispatches >= DISPATCHES_WHEN_IDLE && stream.idle(&self.device)?)
         {
             stream.flush(&self.device, self.queue)?;

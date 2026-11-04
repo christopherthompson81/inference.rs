@@ -224,7 +224,7 @@ impl UngatedExpertsWeights {
         let ids = forward
             .topk_ids
             .to_dtype(DType::U32)?
-            .flatten_all()?
+            .reshape((tokens, k))?
             .contiguous()?;
         let Some(hidden) = up_q.vulkan_expert_mat_vec(&xs, &ids, k)? else {
             return Ok(None);

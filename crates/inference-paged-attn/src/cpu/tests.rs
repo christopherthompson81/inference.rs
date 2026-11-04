@@ -334,3 +334,74 @@ fn vulkan_paged_attention_matches_the_cpu() -> Result<()> {
     }
     Ok(())
 }
+
+// Nemotron-H's attention shape (32 heads over 2 kv heads, head 128) over contexts spanning several of the Vulkan
+// kernel's chunks, one ending partway through a block, through a shuffled block table
+#[test]
+fn vulkan_paged_attention_splits_long_contexts() -> Result<()> {
+    let Ok(vk) = Device::new_vulkan(0) else {
+        return Ok(());
+    };
+    const BLOCK: usize = 16;
+    const KV_HEADS: usize = 2;
+    const HEADS: usize = 32;
+    const HEAD: usize = 128;
+    const X: usize = 4;
+    const LENS: [u32; 2] = [700, 257];
+    const MAX_BLOCKS: usize = 44;
+    let blocks = 2 * MAX_BLOCKS;
+    let kc = Tensor::randn(
+        0f32,
+        1.,
+        (blocks, KV_HEADS, HEAD / X, BLOCK, X),
+        &Device::Cpu,
+    )?;
+    let vc = Tensor::randn(0f32, 1., (blocks, KV_HEADS, HEAD, BLOCK), &Device::Cpu)?;
+    // sequence s takes blocks s, s + 2, ..., in reverse
+    let tables: Vec<u32> = (0..2u32)
+        .flat_map(|s| (0..MAX_BLOCKS as u32).rev().map(move |b| 2 * b + s))
+        .collect();
+    let tables = Tensor::from_vec(tables, (2, MAX_BLOCKS), &Device::Cpu)?;
+    let lens = Tensor::new(&LENS, &Device::Cpu)?;
+    let q = Tensor::randn(0f32, 1., (2, HEADS, HEAD), &Device::Cpu)?;
+    let scale = 1.0 / (HEAD as f32).sqrt();
+    let max_context = LENS[0] as usize;
+    let want = paged_attention(
+        &q,
+        None,
+        None,
+        &kc,
+        &vc,
+        &tables,
+        &lens,
+        None,
+        max_context,
+        scale,
+        NO_SOFTCAP,
+        None,
+    )?;
+    let on = |t: &Tensor| t.to_device(&vk);
+    let got = paged_attention(
+        &on(&q)?,
+        None,
+        None,
+        &on(&kc)?,
+        &on(&vc)?,
+        &on(&tables)?,
+        &on(&lens)?,
+        None,
+        max_context,
+        scale,
+        NO_SOFTCAP,
+        None,
+    )?;
+    for (g, w) in got
+        .flatten_all()?
+        .to_vec1::<f32>()?
+        .iter()
+        .zip(want.flatten_all()?.to_vec1::<f32>()?)
+    {
+        assert!((g - w).abs() <= 1e-4 * w.abs().max(1.0), "{g} vs {w}");
+    }
+    Ok(())
+}

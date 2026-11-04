@@ -1,94 +1,179 @@
 #version 450
-// One query a sequence against f32 vLLM-layout caches through its block table: a workgroup a (sequence, head)
-// scores every cached position into shared memory, softmaxes them, then its threads each sum a value dimension.
+// One query a sequence against f32 vLLM-layout caches (x = 4) through its block table, split over the context: a
+// workgroup a (CHUNK positions, kv head, sequence) scores the chunk for every query head of its kv head, a TILE of keys
+// at a time staged in shared memory, then sums the values straight from the cache, each value vec4 (4 positions of a
+// dimension) serving GROUP_STEP heads' accumulators. It writes each head's max score, its exponentials' sum and the
+// unnormalized value sum (`head_size + 2` floats a (sequence, head, chunk)); paged_decode_reduce combines the chunks.
+#extension GL_KHR_shader_subgroup_clustered : require
+#extension GL_EXT_control_flow_attributes : require
 
-layout(local_size_x = 128) in;
+layout(local_size_x = 256) in;
 
-layout(std430, binding = 0) readonly buffer Q { float q[]; };
-layout(std430, binding = 1) readonly buffer KC { float key_cache[]; };
-layout(std430, binding = 2) readonly buffer VC { float value_cache[]; };
+layout(std430, binding = 0) readonly buffer Q { vec4 q[]; };
+layout(std430, binding = 1) readonly buffer KC { vec4 key_cache[]; };
+layout(std430, binding = 2) readonly buffer VC { vec4 value_cache[]; };
 layout(std430, binding = 3) readonly buffer BT { uint block_tables[]; };
 layout(std430, binding = 4) readonly buffer CL { uint context_lens[]; };
-layout(std430, binding = 5) writeonly buffer O { float o[]; };
+layout(std430, binding = 5) writeonly buffer P { float part[]; };
 
 layout(push_constant) uniform PushConstants {
     uint heads;
     uint kv_heads;
     uint head_size;
     uint block_size;
-    uint x;
     uint max_blocks;
     float scale;
+    // in vec4s
     uint q_off;
     uint tables_off;
     uint lens_off;
+    uint chunks;
 } pc;
 
-const uint THREADS = 128;
-// the longest context a workgroup's shared scores hold
-const uint MAX_CONTEXT = 8192;
-const uint MAX_HEAD = 256;
+const uint THREADS = 256;
+const uint CHUNK = 128;
+// a multiple of the block size, so a tile holds whole blocks
+const uint TILE = 32;
+const uint MAX_HEAD4 = 64;
+const uint MAX_GROUP = 16;
+// the heads a thread scores a position for
+const uint SCORE_HEADS = MAX_GROUP / (THREADS / TILE);
+// the heads a value thread sums for (its dimension's vec4 read once for them all)
+const uint MAX_OUT = 8;
+const uint LANES = THREADS / MAX_GROUP;
 
-shared float scores[MAX_CONTEXT];
-shared float qs[MAX_HEAD];
-shared float red[THREADS];
+shared vec4 qs[MAX_GROUP * MAX_HEAD4];
+// a tile's keys, a position a padded row of vec4s
+shared vec4 keys[TILE * (MAX_HEAD4 + 1)];
+shared vec4 scores[MAX_GROUP * CHUNK / 4];
+shared float stat_m[MAX_GROUP];
+shared float stat_l[MAX_GROUP];
 
 void main() {
-    uint seq = gl_WorkGroupID.x / pc.heads;
-    uint h = gl_WorkGroupID.x % pc.heads;
-    uint kvh = h / (pc.heads / pc.kv_heads);
+    uint c = gl_WorkGroupID.x;
+    uint kvh = gl_WorkGroupID.y;
+    uint seq = gl_WorkGroupID.z;
     uint t = gl_LocalInvocationID.x;
+    uint group = pc.heads / pc.kv_heads;
+    uint hs4 = pc.head_size / 4;
+    uint hp4 = hs4 + 1;
+    uint bs = pc.block_size;
+    uint block_vec4s = hs4 * bs;
     uint len = context_lens[pc.lens_off + seq];
-    uint qb = pc.q_off + (seq * pc.heads + h) * pc.head_size;
-    for (uint d = t; d < pc.head_size; d += THREADS) {
-        qs[d] = q[qb + d];
+    uint start = c * CHUNK;
+    uint n = start < len ? min(CHUNK, len - start) : 0;
+    uint table = pc.tables_off + seq * pc.max_blocks;
+    uint kv_slab = kvh * block_vec4s;
+
+    for (uint i = t; i < group * hs4; i += THREADS) {
+        qs[i] = q[pc.q_off + (seq * pc.heads + kvh * group) * hs4 + i];
+    }
+    for (uint i = t; i < MAX_GROUP * CHUNK / 4; i += THREADS) {
+        scores[i] = vec4(0.0);
     }
     barrier();
-    float m = -1.0 / 0.0;
-    for (uint j = t; j < len; j += THREADS) {
-        uint block = block_tables[pc.tables_off + seq * pc.max_blocks + j / pc.block_size];
-        uint off = j % pc.block_size;
-        uint kb = (block * pc.kv_heads + kvh) * (pc.head_size / pc.x);
-        float s = 0.0;
-        for (uint d = 0; d < pc.head_size; d++) {
-            s += qs[d] * key_cache[((kb + d / pc.x) * pc.block_size + off) * pc.x + d % pc.x];
+    for (uint tile0 = 0; tile0 < n; tile0 += TILE) {
+        uint first_block = (start + tile0) / bs;
+        // a block's keys are contiguous as (d / 4, position) vec4s
+        for (uint i = t; i < TILE * hs4; i += THREADS) {
+            uint bt = i / block_vec4s;
+            uint r = i % block_vec4s;
+            uint p = bt * bs + r % bs;
+            vec4 v = vec4(0.0);
+            if (start + tile0 + p < len) {
+                uint block = block_tables[table + first_block + bt];
+                v = key_cache[block * pc.kv_heads * block_vec4s + kv_slab + r];
+            }
+            keys[p * hp4 + r / bs] = v;
         }
-        s *= pc.scale;
-        scores[j] = s;
-        m = max(m, s);
-    }
-    red[t] = m;
-    barrier();
-    for (uint w = THREADS / 2; w > 0; w >>= 1) {
-        if (t < w) {
-            red[t] = max(red[t], red[t + w]);
+        barrier();
+        uint p = t % TILE;
+        uint g0 = t / TILE;
+        if (tile0 + p < n) {
+            float s[SCORE_HEADS];
+            [[unroll]] for (uint k = 0; k < SCORE_HEADS; k++) {
+                s[k] = 0.0;
+            }
+            for (uint d4 = 0; d4 < hs4; d4++) {
+                vec4 kv = keys[p * hp4 + d4];
+                [[unroll]] for (uint k = 0; k < SCORE_HEADS; k++) {
+                    uint g = g0 + k * (THREADS / TILE);
+                    if (g < group) {
+                        s[k] += dot(qs[g * hs4 + d4], kv);
+                    }
+                }
+            }
+            [[unroll]] for (uint k = 0; k < SCORE_HEADS; k++) {
+                uint g = g0 + k * (THREADS / TILE);
+                if (g < group) {
+                    uint at = g * CHUNK + tile0 + p;
+                    scores[at / 4][at % 4] = s[k] * pc.scale;
+                }
+            }
         }
         barrier();
     }
-    m = red[0];
-    barrier();
-    float sum = 0.0;
-    for (uint j = t; j < len; j += THREADS) {
-        float p = exp(scores[j] - m);
-        scores[j] = p;
-        sum += p;
-    }
-    red[t] = sum;
-    barrier();
-    for (uint w = THREADS / 2; w > 0; w >>= 1) {
-        if (t < w) {
-            red[t] += red[t + w];
+    {
+        uint g = t / LANES;
+        uint lane = t % LANES;
+        // a head's lanes are one cluster, all in or all out
+        if (g < group) {
+            float m = -1.0 / 0.0;
+            for (uint p = lane; p < n; p += LANES) {
+                uint at = g * CHUNK + p;
+                m = max(m, scores[at / 4][at % 4]);
+            }
+            m = subgroupClusteredMax(m, LANES);
+            float l = 0.0;
+            for (uint p = lane; p < n; p += LANES) {
+                uint at = g * CHUNK + p;
+                float e = exp(scores[at / 4][at % 4] - m);
+                scores[at / 4][at % 4] = e;
+                l += e;
+            }
+            l = subgroupClusteredAdd(l, LANES);
+            if (lane == 0) {
+                stat_m[g] = m;
+                stat_l[g] = l;
+            }
         }
-        barrier();
     }
-    // as the CPU kernel: the denominator plus SOFTMAX_EPS
-    float inv = 1.0 / (red[0] + 1e-6);
-    for (uint d = t; d < pc.head_size; d += THREADS) {
-        float acc = 0.0;
-        for (uint j = 0; j < len; j++) {
-            uint block = block_tables[pc.tables_off + seq * pc.max_blocks + j / pc.block_size];
-            acc += scores[j] * value_cache[((block * pc.kv_heads + kvh) * pc.head_size + d) * pc.block_size + j % pc.block_size];
+    barrier();
+    // thread t sums dimension t % head_size for heads t / head_size, + heads_step, ...
+    uint d = t % pc.head_size;
+    uint g0 = t / pc.head_size;
+    uint heads_step = THREADS / pc.head_size;
+    float acc[MAX_OUT];
+    [[unroll]] for (uint k = 0; k < MAX_OUT; k++) {
+        acc[k] = 0.0;
+    }
+    for (uint p4 = 0; p4 * 4 < n; p4++) {
+        uint pos = start + p4 * 4;
+        uint block = block_tables[table + pos / bs];
+        vec4 v = value_cache[block * pc.kv_heads * block_vec4s + kv_slab + d * (bs / 4) + (pos % bs) / 4];
+        // past the context, the cache's stale values meet zero scores; zeroed so a NaN there cannot leak
+        uint valid = n - p4 * 4;
+        if (valid < 4) {
+            v = vec4(v.x, valid > 1 ? v.y : 0.0, valid > 2 ? v.z : 0.0, 0.0);
         }
-        o[(seq * pc.heads + h) * pc.head_size + d] = acc * inv;
+        [[unroll]] for (uint k = 0; k < MAX_OUT; k++) {
+            uint g = g0 + k * heads_step;
+            if (g < group) {
+                acc[k] += dot(scores[(g * CHUNK) / 4 + p4], v);
+            }
+        }
+    }
+    uint stride = pc.head_size + 2;
+    [[unroll]] for (uint k = 0; k < MAX_OUT; k++) {
+        uint g = g0 + k * heads_step;
+        if (g < group) {
+            uint row = (seq * pc.heads + kvh * group + g) * pc.chunks + c;
+            part[row * stride + 2 + d] = acc[k];
+        }
+    }
+    if (t < group) {
+        uint row = (seq * pc.heads + kvh * group + t) * pc.chunks + c;
+        part[row * stride] = stat_m[t];
+        part[row * stride + 1] = stat_l[t];
     }
 }
