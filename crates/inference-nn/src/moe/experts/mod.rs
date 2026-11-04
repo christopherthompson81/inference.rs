@@ -191,7 +191,8 @@ impl MoEExperts {
             ));
         }
         let experts_vb = vb.pp("experts").set_device(layer_device.clone());
-        if layer_device.is_cpu()
+        // Vulkan's experts run on the CPU's kernels from host memory until it has its own
+        if (layer_device.is_cpu() || layer_device.is_vulkan())
             && let Some(mapped) = Self::load_mapped_cpu(&experts_vb, comm, act)
         {
             return Ok(Self::from_backend(

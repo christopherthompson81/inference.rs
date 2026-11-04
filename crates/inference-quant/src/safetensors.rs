@@ -187,6 +187,11 @@ fn convert_dummy(view: &st::TensorView<'_>, device: &Device) -> Result<Tensor> {
             };
             Storage::Cpu(cpu_storage)
         }
+        Device::Vulkan(_) => {
+            inference_tensor::bail!(
+                "{dtype:?} raw-byte tensors do not load onto a Vulkan device yet"
+            )
+        }
         #[cfg(feature = "cuda")]
         Device::Cuda(device) => {
             let mut slice = unsafe { device.alloc::<u8>(data.len())? };

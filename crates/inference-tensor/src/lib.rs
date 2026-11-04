@@ -41,6 +41,8 @@ mod dtype;
 pub mod dummy_cuda_backend;
 pub mod dummy_dtype;
 mod dummy_metal_backend;
+#[cfg(not(feature = "vulkan"))]
+mod dummy_vulkan_backend;
 pub mod error;
 #[doc(hidden)]
 pub mod gpu_cases;
@@ -67,6 +69,9 @@ mod tensor;
 mod tensor_cat;
 pub mod utils;
 mod variable;
+pub mod vulkan;
+#[cfg(feature = "vulkan")]
+pub mod vulkan_backend;
 
 #[cfg(feature = "cudnn")]
 pub use cuda_backend::cudnn;
@@ -99,6 +104,12 @@ pub use metal_backend::{MetalDevice, MetalError, MetalStorage};
 
 #[cfg(not(feature = "metal"))]
 pub use dummy_metal_backend::{MetalDevice, MetalError, MetalStorage};
+
+#[cfg(feature = "vulkan")]
+pub use vulkan_backend::{VulkanDevice, VulkanStorage};
+
+#[cfg(not(feature = "vulkan"))]
+pub use dummy_vulkan_backend::{VulkanDevice, VulkanStorage};
 
 #[cfg(feature = "mkl")]
 extern crate intel_mkl_src;

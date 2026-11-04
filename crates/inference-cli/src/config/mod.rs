@@ -242,6 +242,7 @@ impl DeviceOptionsToml {
         let defaults = DeviceOptions::default();
         DeviceOptions {
             cpu,
+            vulkan: false,
             device_layers: self.device_layers.clone(),
             topology: self.topology.clone(),
             hf_cache: self.hf_cache.clone(),

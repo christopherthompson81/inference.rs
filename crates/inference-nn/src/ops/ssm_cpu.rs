@@ -100,7 +100,7 @@ pub fn selective_scan_cpu(scan: SelectiveScan<'_>, state: &mut Tensor) -> Result
     let mut states = f32_vec(state)?;
     let y = inputs.scan(states.chunks_mut(inputs.head_state()).map(Some).collect());
     *state =
-        Tensor::from_vec(states, state.shape().clone(), &Device::Cpu)?.to_dtype(state.dtype())?;
+        Tensor::from_vec(states, state.shape().clone(), state.device())?.to_dtype(state.dtype())?;
     inputs.output(y)
 }
 
@@ -123,6 +123,8 @@ pub fn selective_scan_cpu_slots(
 struct ScanInputs {
     // batch, seq, heads, head_dim, groups, d_state
     shape: [usize; 6],
+    // where the output goes: the input's device (Vulkan runs these kernels on its host-visible storage)
+    device: Device,
     x: Vec<f32>,
     dt: Vec<f32>,
     a: Vec<f32>,
@@ -138,6 +140,7 @@ impl ScanInputs {
         let (batch, seq, heads, head_dim) = scan.x.dims4()?;
         Ok(Self {
             shape: [batch, seq, heads, head_dim, scan.b.dim(2)?, scan.b.dim(3)?],
+            device: scan.x.device().clone(),
             x: f32_vec(scan.x)?,
             dt: f32_vec(scan.dt)?,
             a: f32_vec(scan.a)?,
@@ -155,7 +158,7 @@ impl ScanInputs {
 
     fn output(&self, y: Vec<f32>) -> Result<Tensor> {
         let [batch, seq, heads, head_dim, ..] = self.shape;
-        Tensor::from_vec(y, (batch, seq, heads, head_dim), &Device::Cpu)
+        Tensor::from_vec(y, (batch, seq, heads, head_dim), &self.device)
     }
 
     // `states` holds each (batch, head) item's state block, `None` for a padding row's
@@ -265,7 +268,7 @@ pub fn causal_conv1d_step_cpu_slots(
         out: std::cell::RefCell::new(Vec::new()),
     };
     pool.inplace_op1(&op)?;
-    Tensor::from_vec(op.out.take(), (batch, channels), &Device::Cpu)
+    Tensor::from_vec(op.out.take(), (batch, channels), x.device())
 }
 
 struct SlotConvStep<'a> {
@@ -377,7 +380,7 @@ pub fn causal_conv1d_cpu(padded: &Tensor, weight: &Tensor) -> Result<Tensor> {
                 *o = sum;
             }
         });
-    Tensor::from_vec(out, (batch, seq, channels), &Device::Cpu)?.to_dtype(padded.dtype())
+    Tensor::from_vec(out, (batch, seq, channels), padded.device())?.to_dtype(padded.dtype())
 }
 
 #[cfg(test)]

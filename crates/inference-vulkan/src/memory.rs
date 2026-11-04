@@ -1,0 +1,348 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use ash::vk;
+
+use crate::{Context, Error, Result};
+
+/// A storage binding past this reads zeros, so no buffer here is larger.
+pub(crate) const MAX_BINDING_BYTES: u64 = 4 << 30;
+// Buffers up to this size are pooled in power-of-two classes from the smallest; larger ones are allocated to size and
+// freed when dropped
+const MIN_POOLED_BYTES: u64 = 256;
+const MAX_POOLED_BYTES: u64 = 256 << 20;
+// The most idle memory the pool holds before a dropped buffer is freed instead
+const MAX_POOL_BYTES: u64 = 2 << 30;
+
+/// Host buffers nothing references any longer, by capacity, for new ones to reuse: a Vulkan allocation costs tens of
+/// microseconds, and a model step allocates hundreds of short-lived tensors.
+#[derive(Default)]
+pub(crate) struct BufferPool {
+    free: HashMap<u64, Vec<Allocation>>,
+    bytes: u64,
+}
+
+// a buffer, its memory and the memory's mapping
+struct Allocation {
+    buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
+    ptr: *mut u8,
+}
+
+// SAFETY: the handles and mapping are only used by whoever takes the allocation out of the pool's lock
+unsafe impl Send for Allocation {}
+
+impl BufferPool {
+    /// # Safety
+    /// No submit may still use the buffers.
+    pub(crate) unsafe fn destroy(&mut self, device: &ash::Device) {
+        for allocation in self.free.drain().flat_map(|(_, allocations)| allocations) {
+            // SAFETY: the caller's contract
+            unsafe { allocation.free(device) };
+        }
+        self.bytes = 0;
+    }
+}
+
+impl Allocation {
+    unsafe fn free(self, device: &ash::Device) {
+        // SAFETY: the caller's contract that the GPU no longer uses it
+        unsafe {
+            device.unmap_memory(self.memory);
+            device.destroy_buffer(self.buffer, None);
+            device.free_memory(self.memory, None);
+        }
+    }
+}
+
+// the capacity a buffer of `len` bytes is allocated with
+fn capacity(len: u64) -> u64 {
+    if len > MAX_POOLED_BYTES {
+        len
+    } else {
+        len.next_power_of_two().max(MIN_POOLED_BYTES)
+    }
+}
+
+/// Memory a kernel binds and reads from `offset`: a host buffer, or an import.
+pub trait Bound: std::any::Any + Send + Sync {
+    fn vk_buffer(&self) -> vk::Buffer;
+    fn offset(&self) -> u64;
+    /// The bytes from `offset` it holds.
+    fn bytes(&self) -> usize;
+}
+
+impl Bound for HostBuffer {
+    fn vk_buffer(&self) -> vk::Buffer {
+        self.buffer
+    }
+
+    fn offset(&self) -> u64 {
+        0
+    }
+
+    fn bytes(&self) -> usize {
+        self.len
+    }
+}
+
+impl Bound for ImportedMemory {
+    fn vk_buffer(&self) -> vk::Buffer {
+        self.buffer
+    }
+
+    fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    fn bytes(&self) -> usize {
+        self.len
+    }
+}
+
+/// Memory the device allocated in host RAM, mapped for the CPU's reads and writes as well (cached when the device
+/// offers it: an iGPU reads cached host pages as fast as uncached ones).
+pub struct HostBuffer {
+    context: Arc<Context>,
+    pub(crate) buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
+    ptr: *mut u8,
+    len: usize,
+    capacity: u64,
+}
+
+// SAFETY: the mapping is plain memory, and the Vulkan handles are only used through the context's synchronized calls
+unsafe impl Send for HostBuffer {}
+unsafe impl Sync for HostBuffer {}
+
+impl HostBuffer {
+    pub fn new(context: &Arc<Context>, len: usize) -> Result<Self> {
+        if len == 0 || len as u64 > MAX_BINDING_BYTES {
+            return Err(Error::Invalid(format!("a host buffer of {len} bytes")));
+        }
+        let capacity = capacity(len as u64);
+        let pooled = context
+            .pool
+            .lock()
+            .expect("vulkan pool poisoned")
+            .take(capacity);
+        if let Some(Allocation {
+            buffer,
+            memory,
+            ptr,
+        }) = pooled
+        {
+            return Ok(Self {
+                context: context.clone(),
+                buffer,
+                memory,
+                ptr,
+                len,
+                capacity,
+            });
+        }
+        let device = &context.device;
+        let info = vk::BufferCreateInfo::default()
+            .size(capacity)
+            .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        // SAFETY: the create info outlives the call
+        let buffer = unsafe { device.create_buffer(&info, None)? };
+        // SAFETY: the buffer was created on this device
+        let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+        let visible =
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+        let memory_type = context
+            .memory_type(
+                requirements.memory_type_bits,
+                visible | vk::MemoryPropertyFlags::HOST_CACHED,
+            )
+            .or_else(|| context.memory_type(requirements.memory_type_bits, visible))
+            .ok_or(Error::NoMemoryType)?;
+        let alloc = vk::MemoryAllocateInfo::default()
+            .allocation_size(requirements.size)
+            .memory_type_index(memory_type);
+        // SAFETY: the allocation is host visible, bound once, and mapped whole for the buffer's life
+        unsafe {
+            let memory = device.allocate_memory(&alloc, None)?;
+            device.bind_buffer_memory(buffer, memory, 0)?;
+            let ptr = device.map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())?;
+            Ok(Self {
+                context: context.clone(),
+                buffer,
+                memory,
+                ptr: ptr.cast(),
+                len,
+                capacity,
+            })
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The buffer's bytes; the GPU must not be writing them.
+    pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: the mapping is `len` bytes and lives as long as `self`
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+
+    /// As [`Self::as_bytes`], for writing; the GPU must not be reading them.
+    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+        // SAFETY: as above, and `&mut self` keeps the slice unique on the host side
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+
+    /// The buffer's bytes as `f32`s; the GPU must not be writing them.
+    pub fn as_f32(&self) -> &[f32] {
+        // SAFETY: the mapping is `len` bytes, page aligned, and lives as long as `self`
+        unsafe { std::slice::from_raw_parts(self.ptr.cast(), self.len / 4) }
+    }
+
+    /// As [`Self::as_f32`], for writing; the GPU must not be reading them.
+    pub fn as_f32_mut(&mut self) -> &mut [f32] {
+        // SAFETY: as above, and `&mut self` keeps the slice unique on the host side
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.cast(), self.len / 4) }
+    }
+}
+
+impl Drop for HostBuffer {
+    // a recorded command retains what it uses, so nothing submitted reads a buffer once it drops
+    fn drop(&mut self) {
+        let allocation = Allocation {
+            buffer: self.buffer,
+            memory: self.memory,
+            ptr: self.ptr,
+        };
+        let refused = self
+            .context
+            .pool
+            .lock()
+            .expect("vulkan pool poisoned")
+            .give(self.capacity, allocation);
+        if let Some(allocation) = refused {
+            // SAFETY: see above
+            unsafe { allocation.free(&self.context.device) };
+        }
+    }
+}
+
+impl BufferPool {
+    fn take(&mut self, capacity: u64) -> Option<Allocation> {
+        let allocation = self.free.get_mut(&capacity)?.pop()?;
+        self.bytes -= capacity;
+        Some(allocation)
+    }
+
+    // keeps `allocation` for reuse, or hands it back to be freed when it is not a pooled size or the pool is full
+    fn give(&mut self, capacity: u64, allocation: Allocation) -> Option<Allocation> {
+        if capacity > MAX_POOLED_BYTES || self.bytes + capacity > MAX_POOL_BYTES {
+            return Some(allocation);
+        }
+        self.bytes += capacity;
+        self.free.entry(capacity).or_default().push(allocation);
+        None
+    }
+}
+
+/// A host allocation the device reads in place: its range rounded out to the import alignment, bound as one buffer,
+/// with `offset` the allocation's first byte within it. Every submit while it lives validates its pages (~0.8 us a MB on
+/// RADV), so it suits one large buffer streamed in long submits, not a model's weights.
+pub struct ImportedMemory {
+    context: Arc<Context>,
+    pub(crate) buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
+    pub(crate) offset: u64,
+    len: usize,
+}
+
+// SAFETY: as for `HostBuffer`; the imported pages belong to the caller, who keeps them alive
+unsafe impl Send for ImportedMemory {}
+unsafe impl Sync for ImportedMemory {}
+
+impl ImportedMemory {
+    /// # Safety
+    /// `bytes`, rounded out to whole pages of the import alignment, must stay mapped and unchanged for as long as the
+    /// import lives; a page past either end belongs to the import too, so it must be mapped memory as well.
+    pub unsafe fn new(context: &Arc<Context>, bytes: &[u8]) -> Result<Self> {
+        let align = context.import_alignment;
+        let start = bytes.as_ptr() as u64;
+        let base = start & !(align - 1);
+        let size = (start + bytes.len() as u64).next_multiple_of(align) - base;
+        if bytes.is_empty() || size > MAX_BINDING_BYTES {
+            return Err(Error::Invalid(format!(
+                "an import of {} bytes",
+                bytes.len()
+            )));
+        }
+        let handle = vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT;
+        let device = &context.device;
+        let mut external = vk::ExternalMemoryBufferCreateInfo::default().handle_types(handle);
+        let info = vk::BufferCreateInfo::default()
+            .size(size)
+            .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .push_next(&mut external);
+        // SAFETY: the pages are the caller's to keep mapped (this fn's contract); the create infos outlive their calls
+        unsafe {
+            let buffer = device.create_buffer(&info, None)?;
+            let requirements = device.get_buffer_memory_requirements(buffer);
+            let mut host = vk::MemoryHostPointerPropertiesEXT::default();
+            (context
+                .host_memory
+                .fp()
+                .get_memory_host_pointer_properties_ext)(
+                context.host_memory.device(),
+                handle,
+                base as *const _,
+                &mut host,
+            )
+            .result()?;
+            let memory_type = context
+                .memory_type(
+                    requirements.memory_type_bits & host.memory_type_bits,
+                    vk::MemoryPropertyFlags::empty(),
+                )
+                .ok_or(Error::NoMemoryType)?;
+            let mut import = vk::ImportMemoryHostPointerInfoEXT::default()
+                .handle_type(handle)
+                .host_pointer(base as *mut _);
+            let alloc = vk::MemoryAllocateInfo::default()
+                .allocation_size(size)
+                .memory_type_index(memory_type)
+                .push_next(&mut import);
+            let memory = device.allocate_memory(&alloc, None)?;
+            device.bind_buffer_memory(buffer, memory, 0)?;
+            Ok(Self {
+                context: context.clone(),
+                buffer,
+                memory,
+                offset: start - base,
+                len: bytes.len(),
+            })
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl Drop for ImportedMemory {
+    fn drop(&mut self) {
+        // SAFETY: every submit is waited on, so the GPU no longer reads the pages
+        unsafe {
+            self.context.device.destroy_buffer(self.buffer, None);
+            self.context.device.free_memory(self.memory, None);
+        }
+    }
+}

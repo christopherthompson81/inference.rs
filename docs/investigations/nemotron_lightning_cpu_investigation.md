@@ -196,3 +196,70 @@ whose threads wake beside the pool's spinning workers for every layer.
 
 **A/B (same thermal state, recipe A):** plain 15.95 -> 16.84 tok/s; MTP 2 with the Q5_0 draft head 19.02 -> 19.39.
 The machine ran ~4 % slower than at Run 9 by then; MTP's per-prompt spread (15.8 to 22.1) is the prompts' acceptance.
+
+## Run 11 - 2026-11-03 ~15:00
+
+**Question:** where do plain decode's remaining ~5 ms against llama.cpp go?
+
+**Method:** a temporary timer on every barrier-pool call, keyed by the call's closure type, over 130 decode tokens on
+recipe A. Per token: dense tile matmuls 33.0 ms (1.79 GB, ~54 GB/s), routed experts 21.4 ms (0.95 GB, ~44 GB/s),
+router / scan / conv / attention 2.6 ms, 4.8 ms between calls (runs of small tensor ops of 10-37 us each).
+
+**Experts:** the 8x1 kernel dots eight rows in lockstep, eight streams 1.8 KB apart per thread. A 256 MB DRAM
+microbench at eight threads: Q5_0 8x1 44 GB/s, one row at a time 56.5 GB/s (Q8_0 51 against 58); one thread runs
+both at the same rate, so it is DRAM stream interleaving, not compute. With four tokens the 8x4 kernel's shared
+decoding still wins (Q5_0 40 GB/s against 31 for 1x4). An AVX-512 VNNI rewrite of the 8-row kernels (no transposes,
+`vpdpbusd`) ran no faster in cache or from DRAM, so it was dropped.
+**Change:** a lone route (a decode step's, and most experts' in a verify step) dots its rows one at a time, as does
+`cpu_dense` for its sub-quad tokens; the 8x1 kernels are gone. Expert calls: 459 -> 420 us, 21.4 -> 19.6 ms a token.
+
+## Run 12 - 2026-11-03 ~13:30
+
+**Change:** the CPU MoE router (sigmoid or softmax scores, the selection bias, top-k, renormalized weights) runs in
+one host pass instead of a dozen small tensor ops and a rayon-dispatched sort per MoE layer; ties still go to the
+lower expert, and greedy text is byte-identical. Alone it is 2.9 -> 1.6 us a call in a hot loop.
+
+**Measurement note:** browser tabs had been taking a share of the cores through earlier runs (load average ~8 with
+no benchmark), which depressed and spread plain decode; the runs below are on a quiet machine, two rounds of the old
+and new binaries alternated.
+
+**Result (recipe A, Run 6's prompts):** plain 17.70 / 17.76 (old) against 17.76 / 17.76 (new); MTP 2 with the Q5_0
+draft head 20.00 / 20.08 against 20.32 / 20.51 (+1.8 %, a verify step routes three rows). llama.cpp tg128 on the
+same file, quiet: 18.13 +- 0.09.
+
+| | KLD vs BF16 | decode tok/s |
+|---|---|---|
+| llama.cpp, recipe A | 0.0090 | 18.13 |
+| ours, recipe A, plain | 0.0090 | 17.76 |
+| ours, recipe A, MTP 2 + Q5_0 draft head | 0.0090 | 20.4 |
+
+## Run 13 - 2026-11-03 ~14:00
+
+**Question:** can the Radeon 780M add memory bandwidth past the CPU's?
+
+**Commands:** a Vulkan compute shader streaming a buffer (`uvec4` loads, four in flight a thread, 2048 workgroups)
+from the carve-out, GTT (uncached and cached), and host memory imported with `VK_EXT_external_memory_host`; an
+AVX-512 read loop on huge pages over 1-16 threads; both together. Memory is dual-channel DDR5-5600 (89.6 GB/s peak).
+
+**Result:**
+- CPU: 58-59 GB/s at every thread count from 1 to 16, with or without software prefetch: the CCX's fabric limit, not
+  DRAM's (Run 1's 55 GB/s was a weaker loop).
+- iGPU: 82 GB/s from every path alike, the carve-out, GTT, and imported (cached) host pages: 92 % of peak.
+- Both at once: 77-82 GB/s between them; the GPU alone already fills the bus, so a CPU / GPU split adds nothing.
+- The kernel's default GTT is 4 GiB: a 3 GiB import runs at 81.9 GB/s, a 6 GiB import or GTT allocation fails.
+  Holding the 21.7 GB model for the GPU needs `amdgpu.gttsize` / `ttm.pages_limit` raised on the kernel command line.
+
+**Finding:** decode on the iGPU has 1.4x the CPU's bandwidth ceiling (recipe A: ~30 tok/s plain against ~21.3).
+
+## Run 14 - 2026-11-03 ~15:00
+
+**Change (system):** `amdgpu.gttsize=49152 ttm.pages_limit=12582912` on the kernel command line; GTT is 48 GiB.
+
+**Bandwidth at model size:** a storage-buffer binding stops near 4 GiB (reads past it return zeros under
+robustness, which first showed as TB/s), so the test binds 2 GiB chunks; a submit of ~2 s of reads loses the device
+to the job timeout. GTT-allocated 20 GiB: 79 GB/s; imported host memory (zero-copy) 20-30 GiB: ~73 GB/s, with or
+without huge pages.
+
+**llama.cpp Vulkan (2cbca389f, RADV, `-ngl 99`) on recipe A:** pp512 411.07 +- 1.58, tg128 22.23 +- 0.05 tok/s
+(61 GB/s of weights). Against its CPU build: 5.2x prefill, 1.23x decode; against ours on the CPU, ahead of MTP 2
+(20.4) without speculating.

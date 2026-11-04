@@ -2441,5 +2441,6 @@ pub(super) fn run_cpu_experts(
         Some(rows) => experts.forward_recording(&xs, &routes, &mut out, rows)?,
         None => experts.forward(&xs, &routes, &mut out)?,
     }
-    Tensor::from_vec(out, forward.shape.flat(), &Device::Cpu)?.to_dtype(forward.original_dtype)
+    Tensor::from_vec(out, forward.shape.flat(), forward.xs.device())?
+        .to_dtype(forward.original_dtype)
 }

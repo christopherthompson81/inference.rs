@@ -1,6 +1,9 @@
 use crate::op::{BackpropOp, Op};
 use crate::tensor::from_storage;
-use crate::{CpuStorage, CudaStorage, Layout, MetalStorage, Result, Shape, Storage, Tensor, bail};
+use crate::{
+    CpuStorage, CudaStorage, Layout, MetalStorage, Result, Shape, Storage, Tensor, VulkanStorage,
+    bail,
+};
 use std::sync::Arc;
 
 /// Unary ops that can be defined in user-land.
@@ -30,6 +33,16 @@ pub trait CustomOp1 {
         Err(crate::Error::Metal(
             format!("no metal implementation for {}", self.name()).into(),
         ))
+    }
+
+    /// The forward pass on a Vulkan device, or `None` where the op has no Vulkan kernel for this input, which then
+    /// runs `cpu_fwd` on a copy.
+    fn vulkan_fwd(
+        &self,
+        _storage: &VulkanStorage,
+        _layout: &Layout,
+    ) -> Result<Option<(VulkanStorage, Shape)>> {
+        Ok(None)
     }
 
     /// This function takes as argument the argument `arg` used in the forward pass, the result
@@ -79,6 +92,17 @@ pub trait CustomOp2 {
         Err(crate::Error::Metal(
             format!("no metal implementation for {}", self.name()).into(),
         ))
+    }
+
+    /// As [`CustomOp1::vulkan_fwd`].
+    fn vulkan_fwd(
+        &self,
+        _s1: &VulkanStorage,
+        _l1: &Layout,
+        _s2: &VulkanStorage,
+        _l2: &Layout,
+    ) -> Result<Option<(VulkanStorage, Shape)>> {
+        Ok(None)
     }
 
     fn bwd(

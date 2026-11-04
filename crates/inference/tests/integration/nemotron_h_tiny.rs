@@ -41,7 +41,7 @@ const GRAPH_HEAD_DIM: usize = 64;
 const MAMBA_HEADS: usize = 4;
 const MAMBA_HEAD_DIM: usize = 8;
 const GROUPS: usize = 2;
-const STATE: usize = 8;
+const STATE: usize = 128; // the Vulkan scan takes 128 states
 const CONV: usize = 4;
 const EXPERTS: usize = 4;
 const TOP_K: usize = 2;
@@ -61,6 +61,11 @@ const MAX_LEN: usize = 6;
 const LOGPROB_TOLERANCE: f32 = 1e-4;
 // cuBLAS and the paged attention kernels add up in other orders than the CPU's
 const CUDA_LOGPROB_TOLERANCE: f32 = 1e-3;
+// Vulkan's ops sum in other orders than the CPU's (its attention, and its kernels as they land), as CUDA's do
+const VULKAN_LOGPROB_TOLERANCE: f32 = 1e-3;
+// an ISQ checkpoint's prompt reaches lm_head as one row, which Vulkan's matvec takes with f32 activations, where a
+// whole-prompt score runs the CPU's kernel on int8 activations (0.013 apart on this checkpoint)
+const VULKAN_QUANTIZED_LOGPROB_TOLERANCE: f32 = 0.05;
 // BF16 with Q8_0 experts: decode and one prefill round differently (0.023 on this checkpoint), where a replay reading
 // stale state is off by nats
 const BF16_LOGPROB_TOLERANCE: f32 = 0.1;
@@ -332,13 +337,30 @@ async fn an_mtp_head_drafts_on_the_cpu_without_changing_greedy_output() -> anyho
     if cfg!(any(feature = "cuda", feature = "metal")) {
         return Ok(());
     }
+    mtp_keeps_greedy_output(TextModelBuilder::with_force_cpu, LOGPROB_TOLERANCE).await
+}
+
+// as on the CPU, with Vulkan's paged cache writes and decode attention, its scan steps and its experts
+#[tokio::test]
+async fn an_mtp_head_drafts_on_vulkan_without_changing_greedy_output() -> anyhow::Result<()> {
+    if !cfg!(feature = "vulkan") || Device::new_vulkan(0).is_err() {
+        return Ok(());
+    }
+    mtp_keeps_greedy_output(|b| b.with_device("vulkan:0"), VULKAN_LOGPROB_TOLERANCE).await
+}
+
+async fn mtp_keeps_greedy_output(
+    place: fn(TextModelBuilder) -> TextModelBuilder,
+    tolerance: f32,
+) -> anyhow::Result<()> {
     let dir = checkpoint()?;
     let builder = || -> anyhow::Result<TextModelBuilder> {
-        Ok(TextModelBuilder::new(dir.path().to_string_lossy())
-            .with_dtype(ModelDType::F32)
-            .with_force_cpu()
-            .with_prefix_cache_n(None)
-            .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?))
+        Ok(place(
+            TextModelBuilder::new(dir.path().to_string_lossy())
+                .with_dtype(ModelDType::F32)
+                .with_prefix_cache_n(None),
+        )
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?))
     };
     let request = || {
         RequestBuilder::from(
@@ -362,7 +384,7 @@ async fn an_mtp_head_drafts_on_the_cpu_without_changing_greedy_output() -> anyho
         "every draft was accepted ({accepted}), so no replay ran"
     );
     anyhow::ensure!(
-        traces::close(&expected, &actual, LOGPROB_TOLERANCE),
+        traces::close(&expected, &actual, tolerance),
         "drafting changed greedy decoding ({accepted} of {proposed} drafts accepted): {expected:?} vs {actual:?}"
     );
     Ok(())
@@ -409,6 +431,8 @@ enum Target {
     CpuPaged,
     Cuda,
     CudaGraphs,
+    Vulkan,
+    VulkanQuantized,
 }
 
 impl Target {
@@ -422,14 +446,21 @@ impl Target {
                 head_dim: HEAD_DIM,
                 latent: Some(LATENT_WIDTH),
             },
-            Self::Cpu | Self::CpuPaged | Self::Cuda => Shape::BASE,
+            Self::Cpu | Self::CpuPaged | Self::Cuda | Self::Vulkan | Self::VulkanQuantized => {
+                Shape::BASE
+            }
         }
     }
 
     fn dtype(self) -> ModelDType {
         match self {
             Self::CudaGraphs => ModelDType::BF16,
-            Self::Cpu | Self::CpuLatent | Self::CpuPaged | Self::Cuda => ModelDType::F32,
+            Self::Cpu
+            | Self::CpuLatent
+            | Self::CpuPaged
+            | Self::Cuda
+            | Self::Vulkan
+            | Self::VulkanQuantized => ModelDType::F32,
         }
     }
 
@@ -437,6 +468,8 @@ impl Target {
         match self {
             Self::Cpu | Self::CpuLatent | Self::CpuPaged => LOGPROB_TOLERANCE,
             Self::Cuda => CUDA_LOGPROB_TOLERANCE,
+            Self::Vulkan => VULKAN_LOGPROB_TOLERANCE,
+            Self::VulkanQuantized => VULKAN_QUANTIZED_LOGPROB_TOLERANCE,
             Self::CudaGraphs => BF16_LOGPROB_TOLERANCE,
         }
     }
@@ -484,6 +517,71 @@ async fn a_long_prompt_scores_on_cuda_as_on_the_cpu() -> anyhow::Result<()> {
     Ok(())
 }
 
+// Vulkan's decode steps (its Mamba conv and scan kernels on the state pools, its matvecs on Q8_0 weights) score as the
+// model's own prefill does
+#[tokio::test]
+async fn a_vulkan_decode_scores_as_one_prefill() -> anyhow::Result<()> {
+    if !cfg!(feature = "vulkan") || Device::new_vulkan(0).is_err() {
+        return Ok(());
+    }
+    for (isq, target) in [
+        (None, Target::Vulkan),
+        (Some(IsqType::Q8_0), Target::VulkanQuantized),
+        (Some(IsqType::Q5_0), Target::VulkanQuantized),
+    ] {
+        decode_scores_as_prefill(isq, "say something long", target)
+            .await
+            .map_err(|err| err.context(format!("{isq:?}")))?;
+    }
+    Ok(())
+}
+
+// the same checkpoint scores a long prompt on Vulkan as on the CPU, plain and with Q8_0 experts run from their blocks
+#[tokio::test]
+async fn a_long_prompt_scores_on_vulkan_as_on_the_cpu() -> anyhow::Result<()> {
+    if !cfg!(feature = "vulkan") || Device::new_vulkan(0).is_err() {
+        return Ok(());
+    }
+    // the CPU stores KV in f16 by default and Vulkan in f32, a difference a quantized checkpoint amplifies
+    // SAFETY: nextest runs each test in its own process, and nothing has read the environment yet
+    unsafe { std::env::set_var(inference_nn::kv_cache::CPU_KV_F32_ENV, "1") };
+    let dir = checkpoint()?;
+    for isq in [None, Some(IsqType::Q8_0)] {
+        let build = |device: &str| {
+            let builder = TextModelBuilder::new(dir.path().to_string_lossy())
+                .with_dtype(ModelDType::F32)
+                .with_device(device);
+            match isq {
+                Some(isq) => builder.with_isq(isq),
+                None => builder,
+            }
+            .build()
+        };
+        let (cpu, vulkan) = (build("cpu").await?, build("vulkan:0").await?);
+        let chat = RequestBuilder::from(TextMessages::new().add_message(
+            TextMessageRole::User,
+            "say something long ".repeat(LONG_PROMPT_REPEATS),
+        ));
+        let tokens = cpu
+            .tokenize_chat(ChatRequest::from(chat).request)
+            .await?
+            .tokens;
+        let (expected, actual) = (
+            scores(&cpu, tokens.clone()).await?,
+            scores(&vulkan, tokens).await?,
+        );
+        for (position, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
+            if let (Some(expected), Some(actual)) = (expected, actual) {
+                anyhow::ensure!(
+                    (expected - actual).abs() < VULKAN_LOGPROB_TOLERANCE,
+                    "{isq:?} position {position}: CPU {expected}, Vulkan {actual}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn scores(model: &inference::Model, tokens: Vec<u32>) -> anyhow::Result<Vec<Option<f32>>> {
     let request = PromptLogitsRequest {
         model: None,
@@ -516,6 +614,7 @@ async fn decode_scores_as_prefill(
                 builder.with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
         }
         Target::Cuda => {}
+        Target::Vulkan | Target::VulkanQuantized => builder = builder.with_device("vulkan:0"),
     }
     if let Some(isq) = isq {
         builder = builder.with_isq(isq);

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use inference_tensor::{DType, Device, IndexOp, Result, Tensor};
 
-use super::{copy_blocks, gather_kv_cache, paged_attention, reshape_and_cache};
+use super::{NO_SOFTCAP, copy_blocks, gather_kv_cache, paged_attention, reshape_and_cache};
 
 const KV_HEADS: usize = 2;
 const HEADS: usize = 4;
@@ -249,5 +249,159 @@ fn copy_blocks_duplicates_the_source_block() -> Result<()> {
         assert_eq!(max_diff(&value_cache.i(dst)?, &f.value_cache.i(5)?)?, 0.0);
     }
     assert_eq!(max_diff(&key_cache.i(2)?, &f.key_cache.i(2)?)?, 0.0);
+    Ok(())
+}
+
+// Vulkan's cache writes and decode attention against the CPU's: the same rows written to both caches, then one query
+// a sequence through block tables that skip around the cache
+#[test]
+fn vulkan_paged_attention_matches_the_cpu() -> Result<()> {
+    let Ok(vk) = Device::new_vulkan(0) else {
+        return Ok(());
+    };
+    const BLOCKS: usize = 6;
+    const BLOCK: usize = 4;
+    const KV_HEADS: usize = 2;
+    const HEADS: usize = 4;
+    const HEAD: usize = 64;
+    const X: usize = 4;
+    const TOKENS: usize = 13;
+    let rows = |scale: f64| -> Result<Tensor> {
+        Tensor::randn(0f32, 1., (TOKENS, KV_HEADS, HEAD), &Device::Cpu)? * scale
+    };
+    let (key, value) = (rows(1.0)?, rows(0.5)?);
+    // seq 0 fills blocks 4 and 1 (tokens 0..7), seq 1 blocks 2 and 5 (6 tokens), one slot skipped
+    let slots: Vec<i64> = (0..7)
+        .map(|i| [4, 1][i / BLOCK] * BLOCK as i64 + (i % BLOCK) as i64)
+        .chain([-1])
+        .chain((0..5).map(|i| [2, 5][i / BLOCK] * BLOCK as i64 + (i % BLOCK) as i64))
+        .collect();
+    let slots = Tensor::new(slots.as_slice(), &Device::Cpu)?;
+    let caches = |device: &Device| -> Result<(Tensor, Tensor)> {
+        Ok((
+            Tensor::zeros((BLOCKS, KV_HEADS, HEAD / X, BLOCK, X), DType::F32, device)?,
+            Tensor::zeros((BLOCKS, KV_HEADS, HEAD, BLOCK), DType::F32, device)?,
+        ))
+    };
+    let (kc, vc) = caches(&Device::Cpu)?;
+    let (vkc, vvc) = caches(&vk)?;
+    reshape_and_cache(&key, &value, None, None, &kc, &vc, &slots)?;
+    reshape_and_cache(
+        &key.to_device(&vk)?,
+        &value.to_device(&vk)?,
+        None,
+        None,
+        &vkc,
+        &vvc,
+        &slots.to_device(&vk)?,
+    )?;
+    assert_eq!(
+        vkc.flatten_all()?.to_vec1::<f32>()?,
+        kc.flatten_all()?.to_vec1::<f32>()?
+    );
+    assert_eq!(
+        vvc.flatten_all()?.to_vec1::<f32>()?,
+        vc.flatten_all()?.to_vec1::<f32>()?
+    );
+    let q = Tensor::randn(0f32, 1., (2, HEADS, HEAD), &Device::Cpu)?;
+    let tables = Tensor::new(&[[4u32, 1], [2, 5]], &Device::Cpu)?;
+    let lens = Tensor::new(&[7u32, 5], &Device::Cpu)?;
+    let scale = 1.0 / (HEAD as f32).sqrt();
+    let want = paged_attention(
+        &q, None, None, &kc, &vc, &tables, &lens, None, 7, scale, NO_SOFTCAP, None,
+    )?;
+    let got = paged_attention(
+        &q.to_device(&vk)?,
+        None,
+        None,
+        &vkc,
+        &vvc,
+        &tables.to_device(&vk)?,
+        &lens.to_device(&vk)?,
+        None,
+        7,
+        scale,
+        NO_SOFTCAP,
+        None,
+    )?;
+    for (g, w) in got
+        .flatten_all()?
+        .to_vec1::<f32>()?
+        .iter()
+        .zip(want.flatten_all()?.to_vec1::<f32>()?)
+    {
+        assert!((g - w).abs() <= 1e-4 * w.abs().max(1.0), "{g} vs {w}");
+    }
+    Ok(())
+}
+
+// Nemotron-H's attention shape (32 heads over 2 kv heads, head 128) over contexts spanning several of the Vulkan
+// kernel's chunks, one ending partway through a block, through a shuffled block table
+#[test]
+fn vulkan_paged_attention_splits_long_contexts() -> Result<()> {
+    let Ok(vk) = Device::new_vulkan(0) else {
+        return Ok(());
+    };
+    const BLOCK: usize = 16;
+    const KV_HEADS: usize = 2;
+    const HEADS: usize = 32;
+    const HEAD: usize = 128;
+    const X: usize = 4;
+    const LENS: [u32; 2] = [700, 257];
+    const MAX_BLOCKS: usize = 44;
+    let blocks = 2 * MAX_BLOCKS;
+    let kc = Tensor::randn(
+        0f32,
+        1.,
+        (blocks, KV_HEADS, HEAD / X, BLOCK, X),
+        &Device::Cpu,
+    )?;
+    let vc = Tensor::randn(0f32, 1., (blocks, KV_HEADS, HEAD, BLOCK), &Device::Cpu)?;
+    // sequence s takes blocks s, s + 2, ..., in reverse
+    let tables: Vec<u32> = (0..2u32)
+        .flat_map(|s| (0..MAX_BLOCKS as u32).rev().map(move |b| 2 * b + s))
+        .collect();
+    let tables = Tensor::from_vec(tables, (2, MAX_BLOCKS), &Device::Cpu)?;
+    let lens = Tensor::new(&LENS, &Device::Cpu)?;
+    let q = Tensor::randn(0f32, 1., (2, HEADS, HEAD), &Device::Cpu)?;
+    let scale = 1.0 / (HEAD as f32).sqrt();
+    let max_context = LENS[0] as usize;
+    let want = paged_attention(
+        &q,
+        None,
+        None,
+        &kc,
+        &vc,
+        &tables,
+        &lens,
+        None,
+        max_context,
+        scale,
+        NO_SOFTCAP,
+        None,
+    )?;
+    let on = |t: &Tensor| t.to_device(&vk);
+    let got = paged_attention(
+        &on(&q)?,
+        None,
+        None,
+        &on(&kc)?,
+        &on(&vc)?,
+        &on(&tables)?,
+        &on(&lens)?,
+        None,
+        max_context,
+        scale,
+        NO_SOFTCAP,
+        None,
+    )?;
+    for (g, w) in got
+        .flatten_all()?
+        .to_vec1::<f32>()?
+        .iter()
+        .zip(want.flatten_all()?.to_vec1::<f32>()?)
+    {
+        assert!((g - w).abs() <= 1e-4 * w.abs().max(1.0), "{g} vs {w}");
+    }
     Ok(())
 }

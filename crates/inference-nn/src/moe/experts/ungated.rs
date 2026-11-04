@@ -12,6 +12,9 @@ use std::sync::Arc;
 
 use super::checkpoint::{ExpertCheckpoint, ExpertSourceLayout};
 use super::config::{ExpertProj, MoEExpertsConfig};
+
+// The most routes (tokens times experts a token) Vulkan's expert kernels take a call; a prompt's run the CPU's.
+const VULKAN_MAX_ROUTES: usize = 64;
 use super::forward::{MoEForward, MoEForwardConfig};
 
 // NeMo Automodel's stacked experts: an ungated layer's "gate and up" holds only up
@@ -197,6 +200,49 @@ impl UngatedExpertsWeights {
         out.to_dtype(forward.original_dtype)
     }
 
+    // a decode step's routes on Vulkan: each route's expert rows dotted on the GPU, its expert ids never leaving it
+    fn forward_vulkan(
+        [up, down]: [&Arc<dyn QuantMethod>; 2],
+        forward: &MoEForward,
+        config: MoEForwardConfig,
+    ) -> Result<Option<Tensor>> {
+        let (tokens, k) = (forward.shape.num_tokens, config.num_experts_per_tok);
+        if !forward.xs.device().is_vulkan()
+            || !matches!(config.act, crate::layers::Activation::Relu2)
+            || forward.lora.is_some()
+            || down.stats_snapshot().is_some()
+            || tokens * k > VULKAN_MAX_ROUTES
+            || up.has_bias()
+            || down.has_bias()
+        {
+            return Ok(None);
+        }
+        let (Some(up_q), Some(down_q)) = (up.get_qtensor(), down.get_qtensor()) else {
+            return Ok(None);
+        };
+        let xs = forward.xs_flat.to_dtype(DType::F32)?.contiguous()?;
+        let ids = forward
+            .topk_ids
+            .to_dtype(DType::U32)?
+            .reshape((tokens, k))?
+            .contiguous()?;
+        let Some(hidden) = up_q.vulkan_expert_mat_vec(&xs, &ids, k)? else {
+            return Ok(None);
+        };
+        let Some(ys) = down_q.vulkan_expert_mat_vec(&hidden.relu()?.sqr()?, &ids, 1)? else {
+            return Ok(None);
+        };
+        let weights = forward
+            .topk_weights
+            .to_dtype(DType::F32)?
+            .reshape((tokens, 1, k))?;
+        let out = weights.matmul(&ys.reshape((tokens, k, ys.dim(1)?))?)?;
+        Ok(Some(
+            out.reshape(forward.shape.flat())?
+                .to_dtype(forward.original_dtype)?,
+        ))
+    }
+
     // quantized stacks in host memory run from their blocks, on every core; gathering dequantizes a matrix per route
     fn forward_cpu_blocks(
         [up, down]: [&Arc<dyn QuantMethod>; 2],
@@ -204,7 +250,10 @@ impl UngatedExpertsWeights {
         config: MoEForwardConfig,
     ) -> Result<Option<Tensor>> {
         use inference_quant::cpu_experts::{CpuExpertGate, CpuExperts, supports};
-        if !forward.xs.device().is_cpu() || !matches!(config.act, crate::layers::Activation::Relu2)
+        // Vulkan runs the CPU's expert kernels on its host-visible activations until it has its own
+        let device = forward.xs.device();
+        if !(device.is_cpu() || device.is_vulkan())
+            || !matches!(config.act, crate::layers::Activation::Relu2)
         {
             return Ok(None);
         }
@@ -314,6 +363,9 @@ impl UngatedExpertsWeights {
             && up_w.rank() == 3
         {
             return Self::forward_grouped([&up, &down], [up_w, down_w], forward, config);
+        }
+        if let Some(ys) = Self::forward_vulkan([&up, &down], forward, config)? {
+            return Ok(ys);
         }
         if let Some(ys) = Self::forward_cpu_blocks([&up, &down], forward, config)? {
             return Ok(ys);

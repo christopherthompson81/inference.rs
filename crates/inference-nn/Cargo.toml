@@ -71,6 +71,7 @@ cuda = [
     "inference-fattn/cuda",
 ]
 cutile = ["cuda", "inference-quant/cutile"]
+vulkan = ["inference-tensor/vulkan"]
 metal = [
     "inference-tensor/metal",
     "inference-quant/metal",

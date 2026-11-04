@@ -1731,6 +1731,10 @@ impl Tensor {
                 host = storage.to_cpu_storage()?;
                 &host
             }
+            Storage::Vulkan(storage) => {
+                host = storage.to_cpu_storage()?;
+                &host
+            }
         };
         // SAFETY: copy_strided_src writes every element
         let mut out =
@@ -1787,6 +1791,7 @@ impl Tensor {
             Storage::Cpu(storage) => from_cpu_storage(storage),
             Storage::Cuda(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
             Storage::Metal(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
+            Storage::Vulkan(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
         }
     }
 
@@ -2168,6 +2173,10 @@ impl Tensor {
                 }
                 (Storage::Cuda(storage), Device::Cpu) => Storage::Cpu(storage.to_cpu_storage()?),
                 (Storage::Metal(storage), Device::Cpu) => Storage::Cpu(storage.to_cpu_storage()?),
+                (Storage::Cpu(storage), Device::Vulkan(vulkan)) => {
+                    Storage::Vulkan(vulkan.storage_from_cpu_storage(storage)?)
+                }
+                (Storage::Vulkan(storage), Device::Cpu) => Storage::Cpu(storage.to_cpu_storage()?),
                 (Storage::Cuda(storage), Device::Cuda(cuda)) => {
                     // can't clone storage if it's the same device because of the underlying device ptr
                     let dst_storage = storage.transfer_to_device(cuda)?;

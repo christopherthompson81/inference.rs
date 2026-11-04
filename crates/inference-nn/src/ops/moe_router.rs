@@ -59,7 +59,21 @@ pub fn moe_router_topk(
     {
         return Ok(topk);
     }
+    if logits.device().is_cpu() {
+        return cpu_moe_router_topk(logits, config, selection_bias, expert_scale);
+    }
+    if logits.device().is_vulkan() && expert_scale.is_none() && logits.rank() == 2 {
+        return vulkan_moe_router_topk(logits, config, selection_bias);
+    }
+    tensor_moe_router_topk(logits, config, selection_bias, expert_scale)
+}
 
+fn tensor_moe_router_topk(
+    logits: &Tensor,
+    config: MoeRouterTopKConfig,
+    selection_bias: Option<&Tensor>,
+    expert_scale: Option<&Tensor>,
+) -> Result<TopKOutput> {
     let logits = logits.to_dtype(DType::F32)?;
     let logits = match config.logit_clip {
         Some((min, max)) => logits.clamp(min as f64, max as f64)?,
@@ -117,6 +131,143 @@ pub fn moe_router_topk(
     }
 
     Ok(TopKOutput { values, indices })
+}
+
+fn vulkan_moe_router_topk(
+    logits: &Tensor,
+    config: MoeRouterTopKConfig,
+    selection_bias: Option<&Tensor>,
+) -> Result<TopKOutput> {
+    use inference_tensor::vulkan::RouterFn;
+    let score_fn = match config.score_function {
+        MoeRouterScoreFunction::Raw => RouterFn::Raw,
+        MoeRouterScoreFunction::Softmax => RouterFn::Softmax,
+        MoeRouterScoreFunction::Sigmoid => RouterFn::Sigmoid,
+    };
+    // a route's weight: its score as chosen (`Raw`), or a softmax or sigmoid of the chosen logits
+    let weight_fn = match config.selected_weight {
+        MoeRouterSelectedWeight::Score => RouterFn::Raw,
+        MoeRouterSelectedWeight::Softmax => RouterFn::Softmax,
+        MoeRouterSelectedWeight::Sigmoid => RouterFn::Sigmoid,
+    };
+    let bias = selection_bias
+        .map(|b| {
+            b.to_device(logits.device())?
+                .to_dtype(DType::F32)?
+                .contiguous()
+        })
+        .transpose()?;
+    let (values, indices) =
+        inference_tensor::vulkan::moe_router(&inference_tensor::vulkan::Route {
+            logits: &logits.to_dtype(DType::F32)?.contiguous()?,
+            selection_bias: bias.as_ref(),
+            top_k: config.top_k,
+            score_fn,
+            weight_fn,
+            renormalize: config.renormalize,
+            norm_min: config.norm_min,
+            output_scale: config.output_scale,
+            clip: config.logit_clip,
+        })?;
+    Ok(TopKOutput { values, indices })
+}
+
+fn f32_values(t: &Tensor) -> Result<Vec<f32>> {
+    t.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()
+}
+
+fn softmax_in_place(xs: &mut [f32]) {
+    let max = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    xs.iter_mut().for_each(|x| *x = (*x - max).exp());
+    let sum: f32 = xs.iter().sum();
+    xs.iter_mut().for_each(|x| *x /= sum);
+}
+
+fn sigmoid(x: f32) -> f32 {
+    (1.0 + (-x).exp()).recip()
+}
+
+// The tensor path's routes in one host pass: a decode step's dozen small tensor ops and the sort's dispatch cost more
+// than the routing itself. The stable descending sort breaks ties toward the lower expert, as the tensor path's does.
+fn cpu_moe_router_topk(
+    logits: &Tensor,
+    config: MoeRouterTopKConfig,
+    selection_bias: Option<&Tensor>,
+    expert_scale: Option<&Tensor>,
+) -> Result<TopKOutput> {
+    let experts = logits.dim(D::Minus1)?;
+    let k = config.top_k;
+    let mut xs = f32_values(logits)?;
+    let bias = selection_bias.map(f32_values).transpose()?;
+    let expert_scale = expert_scale.map(f32_values).transpose()?;
+    let rows = xs.len() / experts;
+    let mut indices = Vec::with_capacity(rows * k);
+    let mut values = Vec::with_capacity(rows * k);
+    let (mut scores, mut selection, mut order) = (
+        vec![0f32; experts],
+        vec![0f32; experts],
+        Vec::with_capacity(experts),
+    );
+    for row in xs.chunks_exact_mut(experts) {
+        if let Some((min, max)) = config.logit_clip {
+            row.iter_mut().for_each(|x| *x = x.clamp(min, max));
+        }
+        scores.copy_from_slice(row);
+        match config.score_function {
+            MoeRouterScoreFunction::Raw => {}
+            MoeRouterScoreFunction::Softmax => softmax_in_place(&mut scores),
+            MoeRouterScoreFunction::Sigmoid => scores.iter_mut().for_each(|x| *x = sigmoid(*x)),
+        }
+        selection.copy_from_slice(&scores);
+        if let Some(bias) = &bias {
+            selection.iter_mut().zip(bias).for_each(|(s, b)| *s += b);
+        }
+        order.clear();
+        order.extend(0..u32::try_from(experts)?);
+        order.sort_by(|&j, &i| {
+            selection[i as usize]
+                .partial_cmp(&selection[j as usize])
+                .unwrap_or(std::cmp::Ordering::Greater)
+        });
+        let top = &order[..k];
+        let mut picked: Vec<f32> = match config.selected_weight {
+            MoeRouterSelectedWeight::Score => top.iter().map(|&e| scores[e as usize]).collect(),
+            MoeRouterSelectedWeight::Softmax => {
+                let mut picked: Vec<f32> = top.iter().map(|&e| row[e as usize]).collect();
+                softmax_in_place(&mut picked);
+                picked
+            }
+            MoeRouterSelectedWeight::Sigmoid => {
+                top.iter().map(|&e| sigmoid(row[e as usize])).collect()
+            }
+        };
+        if config.renormalize {
+            let sum: f32 = picked.iter().sum();
+            let denominator = if config.norm_min > 0.0 {
+                sum.max(config.norm_min)
+            } else {
+                sum
+            };
+            picked.iter_mut().for_each(|v| *v /= denominator);
+        }
+        if config.output_scale != 1.0 {
+            picked.iter_mut().for_each(|v| *v *= config.output_scale);
+        }
+        if let Some(scale) = &expert_scale {
+            picked
+                .iter_mut()
+                .zip(top)
+                .for_each(|(v, &e)| *v *= scale[e as usize]);
+        }
+        indices.extend_from_slice(top);
+        values.extend(picked);
+    }
+    let mut dims = logits.dims().to_vec();
+    *dims.last_mut().expect("router logits have an expert dim") = k;
+    Ok(TopKOutput {
+        values: Tensor::from_vec(values, dims.as_slice(), logits.device())?,
+        indices: Tensor::from_vec(indices, dims.as_slice(), logits.device())?,
+    })
 }
 
 #[cfg(feature = "cuda")]
@@ -315,4 +466,155 @@ pub fn cuda_moe_router_topk(
             Shape::from_dims(&out_dims),
         )),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inference_tensor::Device;
+
+    const EXPERTS: usize = 16;
+    const TOKENS: usize = 5;
+    const TOLERANCE: f32 = 1e-6;
+
+    // Vulkan's router kernel against the CPU's, every score and weight function, with and without the bias and clip
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn the_vulkan_router_routes_as_the_cpu_does() -> Result<()> {
+        let Ok(vk) = Device::new_vulkan(0) else {
+            return Ok(());
+        };
+        let logits: Vec<f32> = (0..TOKENS * EXPERTS)
+            .map(|i| ((i * 37 % 101) as f32 - 50.0) / 17.0)
+            .collect();
+        let logits = Tensor::from_vec(logits, (TOKENS, EXPERTS), &Device::Cpu)?;
+        let bias = Tensor::from_vec(
+            (0..EXPERTS)
+                .map(|e| e as f32 * 0.01 - 0.05)
+                .collect::<Vec<_>>(),
+            EXPERTS,
+            &Device::Cpu,
+        )?;
+        for score_function in [
+            MoeRouterScoreFunction::Raw,
+            MoeRouterScoreFunction::Softmax,
+            MoeRouterScoreFunction::Sigmoid,
+        ] {
+            for selected_weight in [
+                MoeRouterSelectedWeight::Score,
+                MoeRouterSelectedWeight::Softmax,
+                MoeRouterSelectedWeight::Sigmoid,
+            ] {
+                for (renormalize, clip, with_bias) in
+                    [(true, None, true), (false, Some((-1.5, 1.5)), false)]
+                {
+                    let config = MoeRouterTopKConfig {
+                        top_k: 4,
+                        score_function,
+                        selected_weight,
+                        renormalize,
+                        norm_min: 1e-20,
+                        output_scale: 2.5,
+                        logit_clip: clip,
+                    };
+                    let want =
+                        cpu_moe_router_topk(&logits, config, with_bias.then_some(&bias), None)?;
+                    let vbias = bias.to_device(&vk)?;
+                    let got = moe_router_topk(
+                        &logits.to_device(&vk)?,
+                        config,
+                        with_bias.then_some(&vbias),
+                        None,
+                    )?;
+                    assert_eq!(
+                        got.indices.to_vec2::<u32>()?,
+                        want.indices.to_vec2::<u32>()?,
+                        "{config:?}"
+                    );
+                    for (g, w) in got
+                        .values
+                        .flatten_all()?
+                        .to_vec1::<f32>()?
+                        .iter()
+                        .zip(want.values.flatten_all()?.to_vec1::<f32>()?)
+                    {
+                        assert!(
+                            (g - w).abs() <= 1e-5 * w.abs().max(1.0),
+                            "{config:?}: {g} vs {w}"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // every score and weight function, with and without the bias, clip, renormalization and scales
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn the_cpu_router_routes_as_the_tensor_path_does() -> Result<()> {
+        let mut logits: Vec<f32> = (0..TOKENS * EXPERTS)
+            .map(|i| ((i * 37 % 101) as f32 - 50.0) / 17.0)
+            .collect();
+        // a tie, which both break toward the lower expert
+        logits[3] = logits[7];
+        let logits = Tensor::from_vec(logits, (1, TOKENS, EXPERTS), &Device::Cpu)?;
+        let bias = Tensor::from_vec(
+            (0..EXPERTS)
+                .map(|e| e as f32 * 0.01 - 0.05)
+                .collect::<Vec<_>>(),
+            EXPERTS,
+            &Device::Cpu,
+        )?;
+        let scale = (bias.clone() + 1.0)?;
+        let scores = [
+            MoeRouterScoreFunction::Raw,
+            MoeRouterScoreFunction::Softmax,
+            MoeRouterScoreFunction::Sigmoid,
+        ];
+        let weights = [
+            MoeRouterSelectedWeight::Score,
+            MoeRouterSelectedWeight::Softmax,
+            MoeRouterSelectedWeight::Sigmoid,
+        ];
+        for score_function in scores {
+            for selected_weight in weights {
+                for (renormalize, clip, extra) in
+                    [(true, None, true), (false, Some((-1.5, 1.5)), false)]
+                {
+                    let config = MoeRouterTopKConfig {
+                        top_k: 4,
+                        score_function,
+                        selected_weight,
+                        renormalize,
+                        norm_min: 1e-20,
+                        output_scale: 2.5,
+                        logit_clip: clip,
+                    };
+                    let (bias, scale) = if extra {
+                        (Some(&bias), Some(&scale))
+                    } else {
+                        (None, None)
+                    };
+                    let want = tensor_moe_router_topk(&logits, config, bias, scale)?;
+                    let got = cpu_moe_router_topk(&logits, config, bias, scale)?;
+                    assert_eq!(got.indices.dims(), want.indices.dims());
+                    assert_eq!(
+                        got.indices.flatten_all()?.to_vec1::<u32>()?,
+                        want.indices.flatten_all()?.to_vec1::<u32>()?,
+                        "{config:?}"
+                    );
+                    let got = got.values.flatten_all()?.to_vec1::<f32>()?;
+                    let want = want.values.flatten_all()?.to_vec1::<f32>()?;
+                    for (g, w) in got.iter().zip(&want) {
+                        assert!(
+                            (g - w).abs() <= TOLERANCE * w.abs().max(1.0),
+                            "{config:?}: {g} vs {w}"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }

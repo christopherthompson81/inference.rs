@@ -427,9 +427,10 @@ impl CpuExperts<'_> {
                             len: usize| {
                     let rows: [&[u8]; TILE_ROWS] = std::array::from_fn(|i| p.row(expert, row + i));
                     if p.is_32() && len == 1 {
-                        // a lone route (a decode step's) skips the padded quad's three copies
+                        // a lone route (a decode step's) reads a row at a time: the eight rows' interleaved streams
+                        // cost a fifth of DRAM bandwidth, which the quads' shared decoding makes back and one route does not
                         let mut out = [[0f32; TILE_ROWS]; DOT_TOKENS];
-                        out[0] = cpu_dot::vec_dot_32_8x1(p.ty, rows, x32(quad[0]));
+                        out[0] = rows.map(|w| cpu_dot::vec_dot_32(p.ty, w, x32(quad[0])));
                         out
                     } else if p.is_32() {
                         cpu_dot::vec_dot_32_8x4(p.ty, rows, quad.map(x32))
@@ -549,7 +550,8 @@ impl CpuExperts<'_> {
                         for (quad, len) in padded_quads(quads, rest) {
                             let ys = if len == 1 {
                                 let mut out = [[0f32; TILE_ROWS]; DOT_TOKENS];
-                                out[0] = cpu_dot::vec_dot_32_8x1(self.down.ty, rows, h(quad[0]));
+                                out[0] =
+                                    rows.map(|w| cpu_dot::vec_dot_32(self.down.ty, w, h(quad[0])));
                                 out
                             } else {
                                 cpu_dot::vec_dot_32_8x4(self.down.ty, rows, quad.map(h))

@@ -1,0 +1,93 @@
+#version 450
+// `seq` steps of Mamba-2's selective scan on a state pool, in place: batch row b advances the pool's row slots[b]
+// (pool f32 (rows, heads, head_dim, state)): dt = clamp(softplus(dt + dt_bias)), state = state * exp(dt * a) + dt * x * B,
+// y = state . C + d * x. A cluster of LANES lanes a (b, head, p) state row, each lane VEC consecutive states of it, so a
+// row's reads coalesce; the cluster sums its lanes' dots. `state` is LANES * VEC; a slot past i32::MAX scores 0.
+#extension GL_KHR_shader_subgroup_clustered : require
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer Dt { float dt[]; };
+layout(std430, binding = 2) readonly buffer A { float a[]; };
+layout(std430, binding = 3) readonly buffer B { float bm[]; };
+layout(std430, binding = 4) readonly buffer C { float cm[]; };
+layout(std430, binding = 5) readonly buffer D { float d[]; };
+layout(std430, binding = 6) readonly buffer DtBias { float dt_bias[]; };
+layout(std430, binding = 7) buffer Pool { float pool[]; };
+layout(std430, binding = 8) readonly buffer Slots { uint slots[]; };
+layout(std430, binding = 9) writeonly buffer Y { float y[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint heads;
+    uint head_dim;
+    uint groups;
+    uint state;
+    float dt_min;
+    float dt_max;
+    uint pool_off;
+    uint slots_off;
+    uint x_off;
+    uint dt_off;
+    uint b_off;
+    uint c_off;
+    uint seq;
+} pc;
+
+const uint PAD_SLOT = 0x7fffffffu;
+const uint LANES = 32;
+const uint VEC = 4;
+
+void main() {
+    uint rows_per_group = gl_WorkGroupSize.x / LANES;
+    uint lane = gl_LocalInvocationID.x % LANES;
+    uint e = (gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x) * rows_per_group + gl_LocalInvocationID.x / LANES;
+    // a whole cluster leaves together, so the clustered sum below sees every lane of a live row
+    if (e >= pc.batch * pc.heads * pc.head_dim) {
+        return;
+    }
+    {
+        uint p = e % pc.head_dim;
+        uint h = (e / pc.head_dim) % pc.heads;
+        uint b = e / (pc.head_dim * pc.heads);
+        uint slot = slots[pc.slots_off + b];
+        if (slot > PAD_SLOT) {
+            if (lane == 0) {
+                for (uint t = 0; t < pc.seq; t++) {
+                    y[((b * pc.seq + t) * pc.heads + h) * pc.head_dim + p] = 0.0;
+                }
+            }
+            return;
+        }
+        uint g_head = h / (pc.heads / pc.groups);
+        uint row = pc.pool_off + ((slot * pc.heads + h) * pc.head_dim + p) * pc.state;
+        float st[VEC];
+        for (uint j = 0; j < VEC; j++) {
+            st[j] = pool[row + lane * VEC + j];
+        }
+        for (uint t = 0; t < pc.seq; t++) {
+            uint step = (b * pc.seq + t) * pc.heads + h;
+            float raw = dt[pc.dt_off + step] + dt_bias[h];
+            // softplus, as the CPU's ln(1 + e^x)
+            float dt_t = clamp(log(1.0 + exp(raw)), pc.dt_min, pc.dt_max);
+            float decay = exp(dt_t * a[h]);
+            float xv = x[pc.x_off + step * pc.head_dim + p];
+            float dtx = dt_t * xv;
+            uint g = ((b * pc.seq + t) * pc.groups + g_head) * pc.state;
+            float acc = 0.0;
+            for (uint j = 0; j < VEC; j++) {
+                uint n = lane * VEC + j;
+                st[j] = st[j] * decay + dtx * bm[pc.b_off + g + n];
+                acc += st[j] * cm[pc.c_off + g + n];
+            }
+            acc = subgroupClusteredAdd(acc, LANES);
+            if (lane == 0) {
+                y[step * pc.head_dim + p] = acc + d[h] * xv;
+            }
+        }
+        for (uint j = 0; j < VEC; j++) {
+            pool[row + lane * VEC + j] = st[j];
+        }
+    }
+}

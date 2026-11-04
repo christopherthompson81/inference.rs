@@ -618,7 +618,8 @@ impl QuantMethod for GgufMatMul {
         let inference_tensor::quantized::QMatMul::QTensor(qt) = &self.w else {
             return None;
         };
-        if self.b.is_some() || !qt.device().is_cpu() {
+        // a Vulkan weight's blocks are in host memory too
+        if self.b.is_some() || !(qt.device().is_cpu() || qt.device().is_vulkan()) {
             return None;
         }
         Some(cpu_experts::CpuGgufBlocks {

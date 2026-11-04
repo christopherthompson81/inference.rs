@@ -1,0 +1,55 @@
+#version 450
+// c[b] = a[b] (m x k) times b[b] (k x n), every operand strided, c contiguous, as matmul_f32.comp: here a workgroup an
+// output element, its threads striding over k and summing through shared memory, for a long k.
+
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer A { float a[]; };
+layout(std430, binding = 1) readonly buffer B { float bm[]; };
+layout(std430, binding = 2) buffer C { float c[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint m;
+    uint n;
+    uint k;
+    uint a_off;
+    uint a_bs;
+    uint a_ms;
+    uint a_ks;
+    uint b_off;
+    uint b_bs;
+    uint b_ks;
+    uint b_ns;
+} pc;
+
+const uint THREADS = 64;
+shared float red[THREADS];
+
+void main() {
+    uint e = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    if (e >= pc.batch * pc.m * pc.n) {
+        return;
+    }
+    uint t = gl_LocalInvocationID.x;
+    uint col = e % pc.n;
+    uint row = (e / pc.n) % pc.m;
+    uint bat = e / (pc.n * pc.m);
+    uint ia = pc.a_off + bat * pc.a_bs + row * pc.a_ms;
+    uint ib = pc.b_off + bat * pc.b_bs + col * pc.b_ns;
+    float s = 0.0;
+    for (uint j = t; j < pc.k; j += THREADS) {
+        s += a[ia + j * pc.a_ks] * bm[ib + j * pc.b_ks];
+    }
+    red[t] = s;
+    barrier();
+    for (uint w = THREADS / 2; w > 0; w >>= 1) {
+        if (t < w) {
+            red[t] += red[t + w];
+        }
+        barrier();
+    }
+    if (t == 0) {
+        c[e] = red[0];
+    }
+}

@@ -13819,7 +13819,7 @@
               "string",
               "null"
             ],
-            "description": "`auto` (the best available), `cpu`, `cuda:N` or `metal:N`."
+            "description": "`auto` (the best available), `cpu`, `cuda:N`, `metal:N` or `vulkan:N`."
           },
           "device_layers": {
             "type": [

@@ -46,12 +46,10 @@ pub(crate) fn matmul(ty: GgufType, bytes: &[u8], rows: usize, cols: usize, xs: &
                 }
                 t += DOT_TOKENS;
             }
+            // a row at a time, as the experts' lone routes read them
             for t in t..tokens {
-                for (i, v) in cpu_dot::vec_dot_32_8x1(ty, ws, x(t))
-                    .into_iter()
-                    .enumerate()
-                {
-                    set(t, r + i, v);
+                for (i, w) in ws.iter().enumerate() {
+                    set(t, r + i, cpu_dot::vec_dot_32(ty, w, x(t)));
                 }
             }
             r += TILE_ROWS;

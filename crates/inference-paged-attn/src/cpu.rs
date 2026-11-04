@@ -49,6 +49,21 @@ cache_elem!(f32, F32, |v: f32| v, |v: f32| v);
 cache_elem!(f16, F16, f16::to_f32, f16::from_f32);
 cache_elem!(bf16, BF16, bf16::to_f32, bf16::from_f32);
 
+fn check_vulkan_cache(
+    op: &str,
+    cache: &Tensor,
+    k_scale: Option<&Tensor>,
+    v_scale: Option<&Tensor>,
+) -> Result<()> {
+    if cache.dtype() != DType::F32 || k_scale.is_some() || v_scale.is_some() {
+        inference_tensor::bail!(
+            "{op}: Vulkan caches are f32 without K/V scales, got {:?}",
+            cache.dtype()
+        );
+    }
+    Ok(())
+}
+
 fn check_cpu_cache(
     op: &str,
     cache: &Tensor,
@@ -195,6 +210,16 @@ pub fn reshape_and_cache(
     value_cache: &Tensor,
     slot_mapping: &Tensor,
 ) -> Result<()> {
+    if key_cache.device().is_vulkan() {
+        check_vulkan_cache("reshape_and_cache", key_cache, k_scale, v_scale)?;
+        return inference_tensor::vulkan::paged_cache_write(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+        );
+    }
     check_cpu_cache("reshape_and_cache", key_cache, k_scale, v_scale)?;
     let geom = CacheGeom::of(key_cache, value_cache)?;
     let (tokens, kv_heads, head_size) = key.dims3()?;
@@ -338,11 +363,29 @@ pub fn paged_attention(
     block_tables: &Tensor,
     context_lens: &Tensor,
     alibi_slopes: Option<&Tensor>,
-    _max_context_len: usize,
+    max_context_len: usize,
     softmax_scale: f32,
     softcapping: f32,
     sinks: Option<&Tensor>,
 ) -> Result<Tensor> {
+    if key_cache.device().is_vulkan() {
+        check_vulkan_cache("paged_attention", key_cache, k_scale, v_scale)?;
+        if alibi_slopes.is_some() || sinks.is_some() || softcapping != NO_SOFTCAP {
+            inference_tensor::bail!(
+                "paged_attention: Vulkan's kernel takes no ALiBi, sinks or softcap"
+            );
+        }
+        return inference_tensor::vulkan::paged_decode(&inference_tensor::vulkan::PagedDecode {
+            q: &q.to_dtype(DType::F32)?,
+            key_cache,
+            value_cache,
+            block_tables,
+            context_lens,
+            max_context: max_context_len,
+            scale: softmax_scale,
+        })?
+        .to_dtype(q.dtype());
+    }
     check_cpu_cache("paged_attention", key_cache, k_scale, v_scale)?;
     let geom = CacheGeom::of(key_cache, value_cache)?;
     let (seqs, num_heads, head_size) = q.dims3()?;
@@ -392,6 +435,25 @@ pub fn gather_kv_cache(
     num_tokens: usize,
     out_dtype: DType,
 ) -> Result<(Tensor, Tensor)> {
+    // a prompt's gather runs once a chunk: Vulkan's runs the CPU's on host copies of the caches
+    if key_cache.device().is_vulkan() {
+        check_vulkan_cache("gather_kv_cache", key_cache, k_scale, v_scale)?;
+        let host = |t: &Tensor| t.to_device(&Device::Cpu);
+        let (k, v) = gather_kv_cache(
+            &host(key_cache)?,
+            &host(value_cache)?,
+            None,
+            None,
+            &host(block_table)?,
+            &host(cu_seq_lens)?,
+            num_tokens,
+            out_dtype,
+        )?;
+        return Ok((
+            k.to_device(key_cache.device())?,
+            v.to_device(key_cache.device())?,
+        ));
+    }
     check_cpu_cache("gather_kv_cache", key_cache, k_scale, v_scale)?;
     let geom = CacheGeom::of(key_cache, value_cache)?;
     let (_, stride) = block_table.dims2()?;

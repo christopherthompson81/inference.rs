@@ -563,6 +563,10 @@ struct RecurrentStatePoolConfig<'a> {
 // a decode graph's pad rows (`GDN_PAD_SLOT`) read the last slot of `states`; their outputs are dropped
 #[allow(clippy::cast_precision_loss)]
 fn readable_slots(state_indices: &Tensor, states: &Tensor) -> Result<Tensor> {
+    // Vulkan's row select clamps its ids itself, sparing a u32 min that would run on the CPU
+    if states.device().is_vulkan() {
+        return Ok(state_indices.clone());
+    }
     state_indices.minimum(states.dim(0)?.saturating_sub(1) as f64)
 }
 

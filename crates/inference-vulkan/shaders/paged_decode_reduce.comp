@@ -1,0 +1,47 @@
+#version 450
+// Combines paged_decode's chunks: a workgroup a (sequence, head) rescales each chunk's sums to the overall max score;
+// the output is their value sum over their exponentials' sum plus SOFTMAX_EPS, as the CPU kernel's.
+
+layout(local_size_x = 128) in;
+
+layout(std430, binding = 0) readonly buffer P { float part[]; };
+layout(std430, binding = 1) writeonly buffer O { float o[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint head_size;
+    uint chunks;
+    // where this piece's rows start in `o`
+    uint o_off;
+} pc;
+
+const uint THREADS = 128;
+const float SOFTMAX_EPS = 1e-6;
+const float NEG_INF = -1.0 / 0.0;
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint stride = pc.head_size + 2;
+    uint base = row * pc.chunks * stride;
+    float m = NEG_INF;
+    for (uint c = 0; c < pc.chunks; c++) {
+        m = max(m, part[base + c * stride]);
+    }
+    float l = 0.0;
+    for (uint c = 0; c < pc.chunks; c++) {
+        float mc = part[base + c * stride];
+        if (mc > NEG_INF) {
+            l += exp(mc - m) * part[base + c * stride + 1];
+        }
+    }
+    float inv = 1.0 / (l + SOFTMAX_EPS);
+    for (uint d = gl_LocalInvocationID.x; d < pc.head_size; d += THREADS) {
+        float acc = 0.0;
+        for (uint c = 0; c < pc.chunks; c++) {
+            float mc = part[base + c * stride];
+            if (mc > NEG_INF) {
+                acc += exp(mc - m) * part[base + c * stride + 2 + d];
+            }
+        }
+        o[pc.o_off + row * pc.head_size + d] = acc * inv;
+    }
+}
