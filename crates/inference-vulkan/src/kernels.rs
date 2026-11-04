@@ -92,6 +92,92 @@ kernels! {
     paged_decode_reduce: PAGED_DECODE_REDUCE, ops::PAGED_REDUCE_BINDINGS, ops::PAGED_REDUCE_PUSH_BYTES;
 }
 
+/// The matrix-core prompt matmuls (`mul_mmc_*`), on a device with VK_KHR_cooperative_matrix's f16 16 x 16 x 16
+/// shape: weights, activations (f32) and outputs bound, and their push constants.
+const MMC_BINDINGS: usize = 3;
+const MMC_PUSH_BYTES: u32 = 6 * 4;
+// a matrix-core workgroup's tile: weight rows by tokens
+const MMC_TILE_N: usize = 64;
+pub(crate) const MMC_TILE_M: usize = 64;
+
+pub(crate) struct CoopKernels {
+    // by BlockType
+    mul_mmc: Vec<Pipeline>,
+    convert_f16: Pipeline,
+    pub(crate) moe_mmc_q5_0: Pipeline,
+    pub(crate) moe_gather_f16: Pipeline,
+}
+pub(crate) const MOE_MMC_BINDINGS: usize = 4;
+pub(crate) const MOE_MMC_PUSH_BYTES: u32 = 7 * 4;
+pub(crate) const MOE_GATHER_BINDINGS: usize = 3;
+pub(crate) const MOE_GATHER_PUSH_BYTES: u32 = 4 * 4;
+const CONVERT_BINDINGS: usize = 2;
+const CONVERT_PUSH_BYTES: u32 = 2 * 4;
+pub(crate) const CONVERT_THREADS: usize = 256;
+
+impl CoopKernels {
+    pub(crate) fn new(device: &ash::Device) -> Result<Self> {
+        let sources = [
+            (shaders::MUL_MMC_Q8_0, "mul_mmc_q8_0"),
+            (shaders::MUL_MMC_Q5_0, "mul_mmc_q5_0"),
+            (shaders::MUL_MMC_Q4_0, "mul_mmc_q4_0"),
+            (shaders::MUL_MMC_Q4_1, "mul_mmc_q4_1"),
+            (shaders::MUL_MMC_Q5_1, "mul_mmc_q5_1"),
+            (shaders::MUL_MMC_Q4_K, "mul_mmc_q4_k"),
+            (shaders::MUL_MMC_Q5_K, "mul_mmc_q5_k"),
+            (shaders::MUL_MMC_Q6_K, "mul_mmc_q6_k"),
+        ];
+        let mul_mmc = sources
+            .into_iter()
+            .map(|(spirv, name)| Pipeline::new(device, spirv, MMC_BINDINGS, MMC_PUSH_BYTES, name))
+            .collect::<Result<_>>()?;
+        let convert_f16 = Pipeline::new(
+            device,
+            shaders::CONVERT_F16,
+            CONVERT_BINDINGS,
+            CONVERT_PUSH_BYTES,
+            "convert_f16",
+        )?;
+        let moe_mmc_q5_0 = Pipeline::new(
+            device,
+            shaders::MOE_MMC_Q5_0,
+            MOE_MMC_BINDINGS,
+            MOE_MMC_PUSH_BYTES,
+            "moe_mmc_q5_0",
+        )?;
+        let moe_gather_f16 = Pipeline::new(
+            device,
+            shaders::MOE_GATHER_F16,
+            MOE_GATHER_BINDINGS,
+            MOE_GATHER_PUSH_BYTES,
+            "moe_gather_f16",
+        )?;
+        Ok(Self {
+            mul_mmc,
+            convert_f16,
+            moe_mmc_q5_0,
+            moe_gather_f16,
+        })
+    }
+
+    fn mul_mmc(&self, ty: BlockType) -> &Pipeline {
+        &self.mul_mmc[ty as usize]
+    }
+
+    /// # Safety
+    /// No submit may still use the pipelines.
+    pub(crate) unsafe fn destroy(&self, device: &ash::Device) {
+        for pipeline in
+            self.mul_mmc
+                .iter()
+                .chain([&self.convert_f16, &self.moe_mmc_q5_0, &self.moe_gather_f16])
+        {
+            // SAFETY: the caller's contract
+            unsafe { pipeline.destroy(device) };
+        }
+    }
+}
+
 /// A GGUF weight's block format the matvec kernels read.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BlockType {
@@ -157,7 +243,14 @@ pub struct MatVec<'a> {
 impl MatVec<'_> {
     /// The scratch bytes `x_rows` rows of `cols` take.
     pub fn scratch_bytes(x_rows: usize, cols: usize) -> usize {
-        x_rows * cols / BLOCK_VALUES * (Q8_WORD_BYTES + Q8_SCALE_BYTES)
+        let int8 = x_rows * cols / BLOCK_VALUES * (Q8_WORD_BYTES + Q8_SCALE_BYTES);
+        // a prompt on the matrix cores takes its tokens as f16, padded to whole tiles
+        let f16 = if x_rows > MATVEC_MAX_ROWS {
+            x_rows.next_multiple_of(MMC_TILE_M) * cols * 2
+        } else {
+            0
+        };
+        int8.max(f16).next_multiple_of(4)
     }
 }
 
@@ -225,6 +318,51 @@ impl Recorder<'_> {
             )));
         }
         let kernels = &self.context.kernels;
+        if op.x_rows > MATVEC_MAX_ROWS
+            && let Some(coop) = self.context.coop.as_ref().filter(|_| !self.context.unified)
+        {
+            // the tokens as f16 into the scratch, padded to whole tiles with zeros: a tile's last matrices read past
+            // its live tokens (outputs dropped), and past a row's end into the next row (against zero weights)
+            let count = op.x_rows * op.cols;
+            let padded = (op.x_rows.next_multiple_of(MMC_TILE_M) * op.cols * 2) as u64;
+            self.fill(scratch.buffer, padded.next_multiple_of(4), 0);
+            let pairs = count.div_ceil(2).div_ceil(CONVERT_THREADS);
+            let pairs_x = pairs.min(MAX_GROUPS_X);
+            coop.convert_f16.dispatch(
+                self,
+                &[op.x.buffer, scratch.buffer],
+                &push_words(&[count, op.x_offset])?,
+                [pairs_x as u32, pairs.div_ceil(pairs_x) as u32, 1],
+            );
+            let bytes = push_words(&[
+                op.rows,
+                op.cols,
+                op.weights.offset() as usize / 2,
+                0,
+                op.y_offset,
+                op.x_rows,
+            ])?;
+            coop.mul_mmc(op.ty).dispatch(
+                self,
+                &[op.weights.vk_buffer(), scratch.buffer, op.y.buffer],
+                &bytes,
+                [
+                    op.rows.div_ceil(MMC_TILE_N) as u32,
+                    op.x_rows.div_ceil(MMC_TILE_M) as u32,
+                    1,
+                ],
+            );
+            self.work.set(
+                self.work
+                    .get()
+                    .saturating_add((op.rows * op.cols * op.x_rows) as u64),
+            );
+            self.retain(op.weights.clone() as crate::Retained);
+            self.retain(op.x.clone());
+            self.retain(op.y.clone());
+            self.retain(scratch.clone());
+            return Ok(());
+        }
         let s_off = self.quantize_rows((op.x, op.x_offset), op.x_rows, op.cols, scratch)?;
         if op.x_rows > MATVEC_MAX_ROWS {
             let pipeline = match op.ty {
@@ -644,7 +782,10 @@ mod tests {
         let x: Vec<f32> = (0..TOKENS * COLS).map(|i| (i % 13) as f32 - 6.0).collect();
         let xs = Arc::new(Buffer::with_f32(&context, &x)?);
         let ys = Arc::new(Buffer::new(&context, slots * ROWS * 4)?);
-        let scratch = Arc::new(Buffer::new(&context, MatVec::scratch_bytes(TOKENS, COLS))?);
+        let scratch = Arc::new(Buffer::new(
+            &context,
+            crate::MoeMatVec::scratch_bytes(&context, TOKENS * K, K, COLS),
+        )?);
         let routing = Arc::new(Buffer::new(
             &context,
             crate::MoeMatVec::routing_bytes(slots, EXPERTS),

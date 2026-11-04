@@ -3,6 +3,9 @@
 
 use crate::{Result, Tensor};
 
+/// Set to keep a Vulkan device's prompt matmuls off its matrix cores, on the int8 kernels decode uses.
+pub const NO_MATRIX_CORES_ENV: &str = "INFERENCE_VULKAN_NO_COOPMAT";
+
 /// The states a Mamba head's row holds that [`ssm_scan_step`] takes (its lanes a row times states a lane).
 pub const SCAN_STEP_STATE: usize = 128;
 

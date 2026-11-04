@@ -590,7 +590,12 @@ pub(crate) fn expert_mat_vec(
     let (xb, ib) = (bound(x, DType::F32)?, bound(ids, DType::U32)?);
     let slots = ids.elem_count();
     let device = x.device().as_vulkan_device()?.clone();
-    let scratch = Arc::new(device.buffer(MatVec::scratch_bytes(slots.div_ceil(x_div), cols))?);
+    let scratch = Arc::new(device.buffer(inference_vulkan::MoeMatVec::scratch_bytes(
+        &device.context,
+        slots,
+        x_div,
+        cols,
+    ))?);
     let routing =
         Arc::new(device.buffer(inference_vulkan::MoeMatVec::routing_bytes(slots, experts))?);
     let out = VulkanStorage {
@@ -1156,7 +1161,10 @@ impl BackendDevice for VulkanDevice {
             crate::bail!("the Vulkan backend drives one device, ordinal 0, not {ordinal}");
         }
         let context = CONTEXT
-            .get_or_init(|| Context::new().map_err(|err| err.to_string()))
+            .get_or_init(|| {
+                let matrix_cores = std::env::var_os(crate::vulkan::NO_MATRIX_CORES_ENV).is_none();
+                Context::with_matrix_cores(matrix_cores).map_err(|err| err.to_string())
+            })
             .clone()
             .map_err(crate::Error::msg)?;
         Ok(Self {

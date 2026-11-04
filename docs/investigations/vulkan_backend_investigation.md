@@ -540,3 +540,60 @@ prompts erratic, and how close is llama.cpp?
 spills (737 tok/s): a single 4096-token pass's working set passes the 2 GiB the weights leave. The 9B decodes at
 88 tok/s after a 512-token prompt. The next gap to llama.cpp is the matrix cores (coopmat2 3845 against our 2554 at
 512 tokens).
+
+### Run 25 - 2026-11-04 ~08:00 (desktop: RTX 3090)
+
+**Question:** do the 3090's matrix cores through portable `VK_KHR_cooperative_matrix` beat the int8 dp4a prompt
+matmuls, and what do they do to accuracy? (llama.cpp on recipe A, Run 24: KHR coopmat 2840 against no matrix cores
+1506 tok/s at 512 tokens.)
+
+**Driver's shapes (`get_physical_device_cooperative_matrix_properties`):** 16 x 16 x 16 and 16 x 8 x 16 f16 (f16
+or f32 accumulate), bf16 16 x 16 x 16 into f32, int8 / uint8 16 x 16 x 32 and 16 x 8 x 32 into int32, all
+subgroup scope.
+- Int8 at K = 32 fits a GGUF block, but each block's int32 product needs its own row-by-column rescale. KHR exposes
+  no element's row or column, so that rescale goes through shared memory.
+- So the kernels take f16 instead: weights dequantized through the type's `unpack_sub` into shared memory, f16
+  activations, f32 accumulators across all of K. That is llama.cpp's KHR path.
+
+**Change:**
+- `mul_mmc_*`: a 64 x 64 tile, 4 subgroups each 32 x 32 (2 x 2 accumulators), 4 blocks a step.
+- `convert_f16` puts the tokens into the f16 scratch, padded to whole tiles with zeros: a tile's last matrices read
+  past its tokens and past a row's end, against zero weights, and an Inf there would make NaN.
+- `moe_mmc_q5_0` with `moe_gather_f16` does the experts on the same main through tile hooks (`begin_tile`,
+  `y_row`). The routed activations are gathered as f16 in `moe_sort`'s order.
+- The pipelines are built only where the device has the shape. They are picked only off unified devices, from 9
+  rows for the dense matmuls and from 48 routes an expert for the experts. `INFERENCE_VULKAN_NO_COOPMAT` (the
+  tensor crate's `NO_MATRIX_CORES_ENV`) turns them off.
+- The expert scratch grows for the gathered rows only where coopmat may run.
+
+**Dead end:** the first version staged both operands in shared memory a 16-bit scalar at a time, two blocks a step:
+13 TFLOPS against dp4a's 32-34 TOPS. Loading the f16 activations straight from memory and stepping four blocks gave
+36-40 TFLOPS.
+
+**Result (warm):**
+
+| case | dp4a | KHR coopmat |
+|---|---|---|
+| Q8_0 / Q5_0 dense, 512 rows | 31.8 / 34.4 TOPS | 36.0 / 39.8 TFLOPS |
+| experts, 512 tokens x 6 of 128 (24 routes an expert) | 1.97 ms | 2.37 ms |
+| experts, 2048 tokens (96 routes an expert) | 5.55 ms | 5.16 ms |
+| Lightning recipe A, 512-token prompt (median iteration) | 0.24 s | 0.23 s |
+| Lightning recipe A, 2048-token prompt (median iteration) | 1.03 s | 1.00 s |
+| Nano 9B Q4_K_M, 512 tokens (`bench`) | 1525 tok/s | 1538 tok/s |
+
+The coopmat expert kernel loses where its 64-token tiles are mostly empty, hence the 48-routes threshold.
+
+**KLD (recipe A against the BF16 base, 40 chunks of 512; the base made here with llama-perplexity, PPL 6.5503):**
+
+| path | KLD mean | median | p99 | same top-1 | PPL |
+|---|---|---|---|---|---|
+| KHR coopmat | 0.00846 | 0.00325 | 0.0811 | 96.26 % | 6.5454 |
+| dp4a | 0.00924 | 0.00363 | 0.0846 | 96.03 % | 6.5402 |
+
+**Tests:**
+- The tiny Nemotron-H's int8 parity tests (Vulkan against the CPU, Vulkan's prefill against its decode) now set
+  `NO_MATRIX_CORES_ENV`, so their int8 tolerances stay as tight as before.
+- `a_long_quantized_prompt_on_vulkan_matrix_cores_scores_near_its_decode` covers the f16 prompt path at 0.2 a
+  step. It measured 0.113 at one Q5_0 step.
+
+**Next:** NV coopmat2 (`VK_NV_cooperative_matrix2`), where llama.cpp reaches 3845 tok/s.

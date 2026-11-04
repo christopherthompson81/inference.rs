@@ -65,6 +65,10 @@ const CUDA_LOGPROB_TOLERANCE: f32 = 1e-3;
 const VULKAN_LOGPROB_TOLERANCE: f32 = 1e-3;
 // an ISQ checkpoint's decode and one prefill on Vulkan: the same int8 activations, summed in another order
 const VULKAN_QUANTIZED_LOGPROB_TOLERANCE: f32 = 0.05;
+// the prompt's quantized matmuls on matrix cores take f16 activations where decode takes int8: 0.113 apart at one
+// step (Q5_0) on this checkpoint; on Nemotron Lightning recipe A the f16 path's KLD to BF16 is the lower (0.0085
+// against 0.0092)
+const VULKAN_MATRIX_CORES_LOGPROB_TOLERANCE: f32 = 0.2;
 // an ISQ checkpoint's quantized matmuls take int8 activations on the CPU and Vulkan, each rounding its own way (an f32
 // scale on Vulkan, f16 on the CPU): 0.01 apart on average on this checkpoint, the Mamba state carrying a few positions'
 // differences to 0.37 late in the long prompt; Vulkan's prefill against its own decode is pinned below
@@ -437,6 +441,7 @@ enum Target {
     CudaGraphs,
     Vulkan,
     VulkanQuantized,
+    VulkanMatrixCores,
 }
 
 impl Target {
@@ -450,9 +455,12 @@ impl Target {
                 head_dim: HEAD_DIM,
                 latent: Some(LATENT_WIDTH),
             },
-            Self::Cpu | Self::CpuPaged | Self::Cuda | Self::Vulkan | Self::VulkanQuantized => {
-                Shape::BASE
-            }
+            Self::Cpu
+            | Self::CpuPaged
+            | Self::Cuda
+            | Self::Vulkan
+            | Self::VulkanQuantized
+            | Self::VulkanMatrixCores => Shape::BASE,
         }
     }
 
@@ -464,7 +472,8 @@ impl Target {
             | Self::CpuPaged
             | Self::Cuda
             | Self::Vulkan
-            | Self::VulkanQuantized => ModelDType::F32,
+            | Self::VulkanQuantized
+            | Self::VulkanMatrixCores => ModelDType::F32,
         }
     }
 
@@ -474,6 +483,7 @@ impl Target {
             Self::Cuda => CUDA_LOGPROB_TOLERANCE,
             Self::Vulkan => VULKAN_LOGPROB_TOLERANCE,
             Self::VulkanQuantized => VULKAN_QUANTIZED_LOGPROB_TOLERANCE,
+            Self::VulkanMatrixCores => VULKAN_MATRIX_CORES_LOGPROB_TOLERANCE,
             Self::CudaGraphs => BF16_LOGPROB_TOLERANCE,
         }
     }
@@ -482,6 +492,9 @@ impl Target {
 // past a tile of tokens, Vulkan's tiled prefill (dense and grouped experts) leaves the state its decode continues from
 #[tokio::test]
 async fn a_long_quantized_prompt_on_vulkan_scores_as_its_decode() -> anyhow::Result<()> {
+    // the prompt on the int8 kernels decode uses, so the two differ only in their order of summing
+    // SAFETY: nextest runs each test in its own process, and nothing has read the environment yet
+    unsafe { std::env::set_var(inference_tensor::vulkan::NO_MATRIX_CORES_ENV, "1") };
     if !cfg!(feature = "vulkan") || Device::new_vulkan(0).is_err() {
         return Ok(());
     }
@@ -490,6 +503,26 @@ async fn a_long_quantized_prompt_on_vulkan_scores_as_its_decode() -> anyhow::Res
             Some(isq),
             &"say something long ".repeat(LONG_PROMPT_REPEATS),
             Target::VulkanQuantized,
+        )
+        .await
+        .map_err(|err| err.context(format!("{isq:?}")))?;
+    }
+    Ok(())
+}
+
+// the same with the prompt's quantized matmuls on the matrix cores where the device has them (f16 activations, where
+// decode takes int8)
+#[tokio::test]
+async fn a_long_quantized_prompt_on_vulkan_matrix_cores_scores_near_its_decode()
+-> anyhow::Result<()> {
+    if !cfg!(feature = "vulkan") || Device::new_vulkan(0).is_err() {
+        return Ok(());
+    }
+    for isq in [IsqType::Q8_0, IsqType::Q5_0] {
+        decode_scores_as_prefill(
+            Some(isq),
+            &"say something long ".repeat(LONG_PROMPT_REPEATS),
+            Target::VulkanMatrixCores,
         )
         .await
         .map_err(|err| err.context(format!("{isq:?}")))?;
@@ -561,6 +594,9 @@ async fn a_vulkan_decode_scores_as_one_prefill() -> anyhow::Result<()> {
 // the same checkpoint scores a long prompt on Vulkan as on the CPU, plain and with Q8_0 experts run from their blocks
 #[tokio::test]
 async fn a_long_prompt_scores_on_vulkan_as_on_the_cpu() -> anyhow::Result<()> {
+    // the quantized prompt on the int8 kernels, as the CPU's matmuls take int8 activations too
+    // SAFETY: nextest runs each test in its own process, and nothing has read the environment yet
+    unsafe { std::env::set_var(inference_tensor::vulkan::NO_MATRIX_CORES_ENV, "1") };
     if !cfg!(feature = "vulkan") || Device::new_vulkan(0).is_err() {
         return Ok(());
     }
@@ -653,7 +689,9 @@ async fn decode_scores_as_prefill(
                 builder.with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
         }
         Target::Cuda => {}
-        Target::Vulkan | Target::VulkanQuantized => builder = builder.with_device("vulkan:0"),
+        Target::Vulkan | Target::VulkanQuantized | Target::VulkanMatrixCores => {
+            builder = builder.with_device("vulkan:0")
+        }
     }
     if let Some(isq) = isq {
         builder = builder.with_isq(isq);

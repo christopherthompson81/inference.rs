@@ -1,0 +1,30 @@
+#version 450
+// The routed activations in moe_sort's order, as f16 for moe_mmc: row p of `h` is x's row routing[p] / x_div, two
+// values a thread.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer Routing { uint routing[]; };
+layout(std430, binding = 2) writeonly buffer H { f16vec2 h[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint slots;
+    // a row's values, even
+    uint cols;
+    uint x_div;
+    uint x_base;
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.y * (gl_NumWorkGroups.x * 256) + gl_GlobalInvocationID.x;
+    uint half_cols = pc.cols / 2;
+    if (i >= pc.slots * half_cols) {
+        return;
+    }
+    uint p = i / half_cols, c = i % half_cols;
+    uint src = pc.x_base + (routing[p] / pc.x_div) * pc.cols + 2 * c;
+    h[i] = f16vec2(float16_t(x[src]), float16_t(x[src + 1]));
+}
