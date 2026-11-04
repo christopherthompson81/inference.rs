@@ -82,6 +82,10 @@ struct Args {
     #[arg(long)]
     cpu: bool,
 
+    /// The device to load on, such as `vulkan:0` or `cuda:1`.
+    #[arg(long, conflicts_with = "cpu")]
+    device: Option<String>,
+
     /// The paged KV cache's storage (`auto`, `f8e4m3`, `q4`, `q8/q4`, ...).
     #[arg(long)]
     pa_cache_type: Option<PagedCacheType>,
@@ -141,6 +145,9 @@ async fn main() -> Result<()> {
             if args.cpu {
                 builder = builder.with_force_cpu();
             }
+            if let Some(device) = &args.device {
+                builder = builder.with_device(device);
+            }
             if let Some(experts) = args.moe_expert_cache {
                 builder = builder.with_moe_expert_cache(experts);
             }
@@ -162,6 +169,9 @@ async fn main() -> Result<()> {
                 .with_dtype(args.dtype);
             if args.cpu {
                 model_builder = model_builder.with_force_cpu();
+            }
+            if let Some(device) = &args.device {
+                model_builder = model_builder.with_device(device);
             }
             if let Some(isq) = &args.isq {
                 let isq = inference::parse_isq_value(isq, None).map_err(anyhow::Error::msg)?;
