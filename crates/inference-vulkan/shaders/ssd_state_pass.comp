@@ -1,0 +1,43 @@
+#version 450
+// A thread a (batch row, head, p, n) state item: walks the chunks in order, leaving in ds the state each starts from,
+// and writes the state after the last back to its pool row. Chunks are read BATCH at a time before any is written,
+// so their loads overlap.
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+#include "ssd_head.glsl"
+
+layout(local_size_x = THREADS) in;
+
+const uint BATCH = 8;
+
+void main() {
+    uint e = gl_GlobalInvocationID.y * (gl_NumWorkGroups.x * THREADS) + gl_GlobalInvocationID.x;
+    if (e >= pc.batch * pc.heads * pc.head_dim * STATE) {
+        return;
+    }
+    uint n = e % STATE;
+    uint p = (e / STATE) % pc.head_dim;
+    uint h = (e / (STATE * pc.head_dim)) % pc.heads;
+    uint b = e / (STATE * pc.head_dim * pc.heads);
+    uint slot = slots[pc.slots_off + b];
+    if (slot > PAD_SLOT) {
+        return;
+    }
+    uint row = pc.pool_off + ((slot * pc.heads + h) * pc.head_dim + p) * STATE + n;
+    float s = pool[row];
+    uint total = chunks();
+    for (uint k0 = 0; k0 < total; k0 += BATCH) {
+        float own[BATCH];
+        float decay[BATCH];
+        [[unroll]] for (uint j = 0; j < BATCH; j++) {
+            uint k = min(k0 + j, total - 1);
+            own[j] = scratch[ds_at(b, k, h, p) + n];
+            decay[j] = exp(scratch[cs_at(b, k, h, CHUNK - 1)]);
+        }
+        [[unroll]] for (uint j = 0; j < BATCH && k0 + j < total; j++) {
+            scratch[ds_at(b, k0 + j, h, p) + n] = s;
+            s = s * decay[j] + own[j];
+        }
+    }
+    pool[row] = s;
+}

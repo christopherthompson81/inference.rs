@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::map::{MAP_BINDINGS, MAP_PUSH_BYTES};
-use crate::memory::{Bound, HostBuffer};
+use crate::memory::{Bound, Buffer};
 use crate::ops;
 use crate::pipeline::Pipeline;
 use crate::{Error, Recorder, Result, shaders};
@@ -68,6 +68,9 @@ kernels! {
     matmul_f32_tiled: MATMUL_F32_TILED, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
     ssm_conv_step: SSM_CONV_STEP, ops::CONV_STEP_BINDINGS, ops::CONV_STEP_PUSH_BYTES;
     ssm_scan_step: SSM_SCAN_STEP, ops::SCAN_STEP_BINDINGS, ops::SCAN_STEP_PUSH_BYTES;
+    ssd_chunk_state: SSD_CHUNK_STATE, ops::SSD_BINDINGS, ops::SCAN_STEP_PUSH_BYTES;
+    ssd_state_pass: SSD_STATE_PASS, ops::SSD_BINDINGS, ops::SCAN_STEP_PUSH_BYTES;
+    ssd_chunk_out: SSD_CHUNK_OUT, ops::SSD_BINDINGS, ops::SCAN_STEP_PUSH_BYTES;
     moe_mat_vecs_q5_0: MOE_MAT_VECS_Q5_0, ops::MOE_MATVEC_BINDINGS, ops::MOE_MATVEC_PUSH_BYTES;
     moe_sort: MOE_SORT, ops::MOE_SORT_BINDINGS, ops::MOE_SORT_PUSH_BYTES;
     moe_mm_q5_0: MOE_MM_Q5_0, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
@@ -104,12 +107,12 @@ pub struct MatVec<'a> {
     pub weights: &'a Arc<dyn Bound>,
     pub rows: usize,
     pub cols: usize,
-    pub x: &'a Arc<HostBuffer>,
+    pub x: &'a Arc<Buffer>,
     pub x_offset: usize,
-    pub y: &'a Arc<HostBuffer>,
+    pub y: &'a Arc<Buffer>,
     pub y_offset: usize,
     pub x_rows: usize,
-    pub scratch: &'a Arc<HostBuffer>,
+    pub scratch: &'a Arc<Buffer>,
 }
 
 impl MatVec<'_> {
@@ -136,7 +139,7 @@ impl Recorder<'_> {
         x: crate::At<'_>,
         rows: usize,
         cols: usize,
-        scratch: &Arc<HostBuffer>,
+        scratch: &Arc<Buffer>,
     ) -> Result<usize> {
         let x_blocks = rows * cols / BLOCK_VALUES;
         if scratch.len() < MatVec::scratch_bytes(rows, cols) || x.0.len() / 4 < x.1 + rows * cols {
@@ -260,7 +263,7 @@ impl Recorder<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Context, ImportedMemory};
+    use crate::{Context, ImportedMemory, f32_bytes};
     use std::alloc::{Layout, alloc_zeroed, dealloc};
 
     const PAGE: usize = 4096;
@@ -383,19 +386,15 @@ mod tests {
                 .collect();
             let size = ty.block_bytes();
             let blocks = COLS / BLOCK_VALUES;
-            let mut copy = HostBuffer::new(&context, len)?;
-            copy.as_bytes_mut().copy_from_slice(&pages.bytes()[..len]);
-            let weights: Arc<dyn Bound> = Arc::new(copy);
-            let mut xs = HostBuffer::new(&context, (X_AT + x_rows * COLS) * 4)?;
-            xs.as_f32_mut()[X_AT..].copy_from_slice(&x);
+            let weights: Arc<dyn Bound> =
+                Arc::new(Buffer::with_bytes(&context, &pages.bytes()[..len])?);
+            let mut xs = Buffer::new(&context, (X_AT + x_rows * COLS) * 4)?;
+            xs.write(X_AT * 4, f32_bytes(&x))?;
             let (xs, ys) = (
                 Arc::new(xs),
-                Arc::new(HostBuffer::new(&context, x_rows * ROWS * 4)?),
+                Arc::new(Buffer::new(&context, x_rows * ROWS * 4)?),
             );
-            let scratch = Arc::new(HostBuffer::new(
-                &context,
-                MatVec::scratch_bytes(x_rows, COLS),
-            )?);
+            let scratch = Arc::new(Buffer::new(&context, MatVec::scratch_bytes(x_rows, COLS))?);
             context.submit(|r| {
                 r.mat_vec(&MatVec {
                     ty,
@@ -410,6 +409,7 @@ mod tests {
                     scratch: &scratch,
                 })
             })?;
+            let got = ys.read_f32()?;
             for m in 0..x_rows {
                 let xm = &x[m * COLS..][..COLS];
                 let want = reference(ty, pages.bytes(), ROWS, COLS, xm);
@@ -428,7 +428,7 @@ mod tests {
                             w * step / 2.0
                         })
                         .sum();
-                    let got = f64::from(ys.as_f32()[m * ROWS + row]);
+                    let got = f64::from(got[m * ROWS + row]);
                     assert!(
                         (got - want).abs() <= bound * 1.01 + 1e-5,
                         "{ty:?} x row {m} row {row}: {got} vs {want} (bound {bound})"
@@ -455,15 +455,13 @@ mod tests {
         // -1, 0 and 1, which the int8 activations hold exactly
         let x: Vec<f32> = (0..COLS).map(|i| (i % 3) as f32 - 1.0).collect();
         let want = reference(ty, pages.bytes(), ROWS, COLS, &x);
-        let ys = Arc::new(HostBuffer::new(&context, DISPATCHES * ROWS * 4)?);
-        let scratch = Arc::new(HostBuffer::new(&context, MatVec::scratch_bytes(1, COLS))?);
+        let ys = Arc::new(Buffer::new(&context, DISPATCHES * ROWS * 4)?);
+        let scratch = Arc::new(Buffer::new(&context, MatVec::scratch_bytes(1, COLS))?);
         {
             // SAFETY: `pages` outlives every submit, which `synchronize` below waits for
             let weights: Arc<dyn Bound> =
                 Arc::new(unsafe { ImportedMemory::new(&context, &pages.bytes()[..len])? });
-            let mut xs = HostBuffer::new(&context, COLS * 4)?;
-            xs.as_f32_mut().copy_from_slice(&x);
-            let xs = Arc::new(xs);
+            let xs = Arc::new(Buffer::with_f32(&context, &x)?);
             for d in 0..DISPATCHES {
                 context.record(|r| {
                     r.mat_vec(&MatVec {
@@ -482,7 +480,7 @@ mod tests {
             }
         }
         context.synchronize()?;
-        for (i, &got) in ys.as_f32().iter().enumerate() {
+        for (i, &got) in ys.read_f32()?.iter().enumerate() {
             let want = want[i % ROWS];
             assert!(
                 (f64::from(got) - want).abs() <= TOLERANCE * want.abs().max(1.0),
@@ -507,20 +505,16 @@ mod tests {
             let len = len(ty, ROWS, COLS);
             let mut pages = Pages::new(len);
             weights(ty, pages.bytes(), ROWS, COLS);
-            let mut copy = HostBuffer::new(&context, len)?;
-            copy.as_bytes_mut().copy_from_slice(&pages.bytes()[..len]);
-            let weights: Arc<dyn Bound> = Arc::new(copy);
+            let weights: Arc<dyn Bound> =
+                Arc::new(Buffer::with_bytes(&context, &pages.bytes()[..len])?);
             for x_rows in [1usize, 2, 3, 4, 8, 64, 512] {
-                let mut xs = HostBuffer::new(&context, x_rows * COLS * 4)?;
-                xs.as_f32_mut().iter_mut().for_each(|x| *x = 0.5);
+                let mut xs = Buffer::new(&context, x_rows * COLS * 4)?;
+                xs.fill(0.5f32.to_bits())?;
                 let (xs, ys) = (
                     Arc::new(xs),
-                    Arc::new(HostBuffer::new(&context, x_rows * ROWS * 4)?),
+                    Arc::new(Buffer::new(&context, x_rows * ROWS * 4)?),
                 );
-                let scratch = Arc::new(HostBuffer::new(
-                    &context,
-                    MatVec::scratch_bytes(x_rows, COLS),
-                )?);
+                let scratch = Arc::new(Buffer::new(&context, MatVec::scratch_bytes(x_rows, COLS))?);
                 let op = MatVec {
                     ty,
                     weights: &weights,
@@ -575,14 +569,12 @@ mod tests {
         let len = EXPERTS * len(ty, ROWS, COLS);
         let mut pages = Pages::new(len);
         weights(ty, pages.bytes(), EXPERTS * ROWS, COLS);
-        let mut copy = HostBuffer::new(&context, len)?;
-        copy.as_bytes_mut().copy_from_slice(&pages.bytes()[..len]);
-        let weights: Arc<dyn Bound> = Arc::new(copy);
+        let weights: Arc<dyn Bound> =
+            Arc::new(Buffer::with_bytes(&context, &pages.bytes()[..len])?);
         let slots = TOKENS * K;
-        let mut ids = HostBuffer::new(&context, slots * 4)?;
+        let mut id_bytes = vec![0u8; slots * 4];
         let mut state = 0x9e37_79b9u32;
-        for (t, chunk) in ids
-            .as_bytes_mut()
+        for (t, chunk) in id_bytes
             .as_chunks_mut::<{ 4 * K }>()
             .0
             .iter_mut()
@@ -595,19 +587,12 @@ mod tests {
                 id.copy_from_slice(&(e as u32).to_le_bytes());
             }
         }
-        let ids = Arc::new(ids);
-        let mut xs = HostBuffer::new(&context, TOKENS * COLS * 4)?;
-        xs.as_f32_mut()
-            .iter_mut()
-            .enumerate()
-            .for_each(|(i, x)| *x = (i % 13) as f32 - 6.0);
-        let xs = Arc::new(xs);
-        let ys = Arc::new(HostBuffer::new(&context, slots * ROWS * 4)?);
-        let scratch = Arc::new(HostBuffer::new(
-            &context,
-            MatVec::scratch_bytes(TOKENS, COLS),
-        )?);
-        let routing = Arc::new(HostBuffer::new(
+        let ids = Arc::new(Buffer::with_bytes(&context, &id_bytes)?);
+        let x: Vec<f32> = (0..TOKENS * COLS).map(|i| (i % 13) as f32 - 6.0).collect();
+        let xs = Arc::new(Buffer::with_f32(&context, &x)?);
+        let ys = Arc::new(Buffer::new(&context, slots * ROWS * 4)?);
+        let scratch = Arc::new(Buffer::new(&context, MatVec::scratch_bytes(TOKENS, COLS))?);
+        let routing = Arc::new(Buffer::new(
             &context,
             crate::MoeMatVec::routing_bytes(slots, EXPERTS),
         )?);

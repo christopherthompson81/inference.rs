@@ -1,0 +1,122 @@
+#version 450
+// A workgroup a (chunk, head, batch row): y_t[p] = exp(cs_t) sum_n C_t[n] s0[p][n] (the state the chunk starts from)
+// + sum_{u <= t} M[t][u] x_u[p] + d x_t[p], with M[t][u] = exp(cs_t - cs_u) dt_u (C_t . B_u); a padded slot's rows
+// are zeros. A thread holds a 4 x 4 tile of y: a t quad by the rows p = its row group + P_GROUPS * j.
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+#include "ssd_head.glsl"
+
+layout(local_size_x = THREADS) in;
+
+const uint T_QUADS = CHUNK / 4;
+const uint P_GROUPS = THREADS / T_QUADS;
+const uint P_PER_THREAD = MAX_HEAD_DIM / P_GROUPS;
+// columns of the start state staged at a time; its rows padded a word against bank conflicts
+const uint S0_COLS = 16;
+
+shared float s_cs[CHUNK];
+shared float s_dt[CHUNK];
+// C and B transposed, a t (or u) quad a vec4; then s_bt holds x as [u][p]
+shared vec4 s_ct[STATE][T_QUADS];
+shared vec4 s_bt[STATE][T_QUADS];
+// M transposed, a t quad a vec4
+shared vec4 s_mt[CHUNK][T_QUADS];
+shared float s_s0[MAX_HEAD_DIM][S0_COLS + 1];
+
+float x_tile(uint u, uint p) {
+    uint i = u * MAX_HEAD_DIM + p;
+    return s_bt[i / (4 * T_QUADS)][(i / 4) % T_QUADS][i % 4];
+}
+
+void main() {
+    uint k = gl_WorkGroupID.x, h = gl_WorkGroupID.y, b = gl_WorkGroupID.z;
+    uint tid = gl_LocalInvocationID.x;
+    bool pad = slots[pc.slots_off + b] > PAD_SLOT;
+    if (tid < CHUNK) {
+        s_cs[tid] = scratch[cs_at(b, k, h, tid)];
+        s_dt[tid] = step_dt(b, k, h, tid);
+    }
+    for (uint i = tid; i < CHUNK * STATE; i += THREADS) {
+        uint t = i / STATE, n = i % STATE;
+        uint pos = k * CHUNK + t;
+        bool live = pos < pc.seq;
+        uint at = bc_at(b, min(pos, pc.seq - 1), h) + n;
+        s_ct[n][t / 4][t % 4] = live ? cm[pc.c_off + at] : 0.0;
+        s_bt[n][t / 4][t % 4] = live ? bm[pc.b_off + at] : 0.0;
+    }
+    barrier();
+    // M: a thread a (u, t quad) column of 4
+    for (uint i = tid; i < CHUNK * T_QUADS; i += THREADS) {
+        uint u = i / T_QUADS, tq = i % T_QUADS;
+        vec4 dot4 = vec4(0.0);
+        for (uint n = 0; n < STATE; n++) {
+            dot4 += s_ct[n][tq] * s_bt[n][u / 4][u % 4];
+        }
+        vec4 m;
+        [[unroll]] for (uint r = 0; r < 4; r++) {
+            uint t = 4 * tq + r;
+            m[r] = u <= t ? dot4[r] * exp(s_cs[t] - s_cs[u]) * s_dt[u] : 0.0;
+        }
+        s_mt[u][tq] = m;
+    }
+    barrier();
+    for (uint i = tid; i < CHUNK * MAX_HEAD_DIM / 4; i += THREADS) {
+        uint u = (4 * i) / MAX_HEAD_DIM, p = (4 * i) % MAX_HEAD_DIM;
+        uint pos = k * CHUNK + u;
+        vec4 v = vec4(0.0);
+        if (pos < pc.seq) {
+            [[unroll]] for (uint r = 0; r < 4; r++) {
+                v[r] = p + r < pc.head_dim ? x[pc.x_off + x_at(b, pos, h) + p + r] : 0.0;
+            }
+        }
+        s_bt[i / T_QUADS][i % T_QUADS] = v;
+    }
+    uint tq = tid % T_QUADS, pg = tid / T_QUADS;
+    uint rows = (pc.head_dim + P_GROUPS - 1 - pg) / P_GROUPS;
+    vec4 carried[P_PER_THREAD];
+    vec4 own[P_PER_THREAD];
+    [[unroll]] for (uint j = 0; j < P_PER_THREAD; j++) {
+        carried[j] = vec4(0.0);
+        own[j] = vec4(0.0);
+    }
+    for (uint n0 = 0; n0 < STATE; n0 += S0_COLS) {
+        barrier();
+        for (uint i = tid; i < pc.head_dim * S0_COLS; i += THREADS) {
+            uint p = i / S0_COLS, nn = i % S0_COLS;
+            s_s0[p][nn] = scratch[ds_at(b, k, h, p) + n0 + nn];
+        }
+        barrier();
+        for (uint nn = 0; nn < S0_COLS; nn++) {
+            vec4 cv = s_ct[n0 + nn][tq];
+            [[unroll]] for (uint j = 0; j < P_PER_THREAD; j++) {
+                if (j < rows) {
+                    carried[j] += cv * s_s0[pg + P_GROUPS * j][nn];
+                }
+            }
+        }
+    }
+    for (uint u = 0; u < CHUNK; u++) {
+        vec4 mv = s_mt[u][tq];
+        [[unroll]] for (uint j = 0; j < P_PER_THREAD; j++) {
+            if (j < rows) {
+                own[j] += mv * x_tile(u, pg + P_GROUPS * j);
+            }
+        }
+    }
+    [[unroll]] for (uint r = 0; r < 4; r++) {
+        uint t = 4 * tq + r;
+        uint pos = k * CHUNK + t;
+        if (pos >= pc.seq) {
+            continue;
+        }
+        float decay = exp(s_cs[t]);
+        [[unroll]] for (uint j = 0; j < P_PER_THREAD; j++) {
+            if (j >= rows) {
+                break;
+            }
+            uint p = pg + P_GROUPS * j;
+            float v = decay * carried[j][r] + own[j][r] + d[h] * x_tile(t, p);
+            y[x_at(b, pos, h) + p] = pad ? 0.0 : v;
+        }
+    }
+}
