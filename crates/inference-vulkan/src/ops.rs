@@ -481,10 +481,14 @@ pub(crate) const PAGED_WRITE_PUSH_BYTES: u32 = 8 * 4;
 pub(crate) const PAGED_DECODE_BINDINGS: usize = 6;
 pub(crate) const PAGED_DECODE_PUSH_BYTES: u32 = 10 * 4;
 pub(crate) const PAGED_REDUCE_BINDINGS: usize = 2;
-pub(crate) const PAGED_REDUCE_PUSH_BYTES: u32 = 2 * 4;
+pub(crate) const PAGED_REDUCE_PUSH_BYTES: u32 = 3 * 4;
 // the decode shader's geometry: the positions a workgroup takes, a tile of whole blocks, its threads, the query heads
 // a kv head serves and those a value thread sums, and the cache's vec4 rows (x)
-const PAGED_CHUNK: usize = 128;
+const PAGED_CHUNK: usize = 64;
+// the shared tiles' head size, sized for occupancy
+const MAX_PAGED_HEAD: usize = 128;
+// the partials one piece of a call holds; many queries (an MTP head reading a whole prompt) run in pieces
+const PAGED_PARTIALS_BYTES: usize = 256 << 20;
 const PAGED_TILE: usize = 32;
 const PAGED_THREADS: usize = 256;
 const MAX_PAGED_GROUP: usize = 16;
@@ -538,7 +542,17 @@ impl PagedDecode<'_> {
         head_size: usize,
         max_context: usize,
     ) -> usize {
-        seqs * heads * max_context.div_ceil(PAGED_CHUNK).max(1) * (head_size + 2) * 4
+        seqs.min(Self::piece_seqs(heads, head_size, max_context))
+            * Self::row_bytes(heads, head_size, max_context)
+    }
+
+    // a sequence's partials, and the sequences one piece of the call takes within PAGED_PARTIALS_BYTES
+    fn row_bytes(heads: usize, head_size: usize, max_context: usize) -> usize {
+        heads * max_context.div_ceil(PAGED_CHUNK).max(1) * (head_size + 2) * 4
+    }
+
+    fn piece_seqs(heads: usize, head_size: usize, max_context: usize) -> usize {
+        (PAGED_PARTIALS_BYTES / Self::row_bytes(heads, head_size, max_context)).max(1)
     }
 }
 
@@ -585,6 +599,7 @@ impl Recorder<'_> {
         let group = op.heads / s.kv_heads.max(1);
         let chunks = op.max_context.div_ceil(PAGED_CHUNK).max(1);
         if s.head_size == 0
+            || s.head_size > MAX_PAGED_HEAD
             || !PAGED_THREADS.is_multiple_of(s.head_size)
             || s.x != PAGED_X
             || s.kv_heads == 0
@@ -605,20 +620,7 @@ impl Recorder<'_> {
         if op.seqs == 0 {
             return Ok(());
         }
-        let mut bytes = words(&[
-            op.heads,
-            s.kv_heads,
-            s.head_size,
-            s.block_size,
-            op.max_blocks,
-        ])?;
-        bytes.extend_from_slice(&op.scale.to_bits().to_le_bytes());
-        bytes.extend(words(&[
-            op.q.1 / PAGED_X,
-            op.block_tables.1,
-            op.context_lens.1,
-            chunks,
-        ])?);
+        let piece = PagedDecode::piece_seqs(op.heads, s.head_size, op.max_context);
         let buffers = [
             op.q.0,
             op.key_cache,
@@ -627,18 +629,35 @@ impl Recorder<'_> {
             op.context_lens.0,
             op.partials,
         ];
-        self.context.kernels.paged_decode.dispatch(
-            self,
-            &buffers.map(|b| b.buffer),
-            &bytes,
-            [chunks as u32, s.kv_heads as u32, op.seqs as u32],
-        );
-        self.context.kernels.paged_decode_reduce.dispatch(
-            self,
-            &[op.partials.buffer, op.out.buffer],
-            &words(&[s.head_size, chunks])?,
-            [(op.seqs * op.heads) as u32, 1, 1],
-        );
+        for first in (0..op.seqs).step_by(piece) {
+            let seqs = piece.min(op.seqs - first);
+            let mut bytes = words(&[
+                op.heads,
+                s.kv_heads,
+                s.head_size,
+                s.block_size,
+                op.max_blocks,
+            ])?;
+            bytes.extend_from_slice(&op.scale.to_bits().to_le_bytes());
+            bytes.extend(words(&[
+                (op.q.1 + first * op.heads * s.head_size) / PAGED_X,
+                op.block_tables.1 + first * op.max_blocks,
+                op.context_lens.1 + first,
+                chunks,
+            ])?);
+            self.context.kernels.paged_decode.dispatch(
+                self,
+                &buffers.map(|b| b.buffer),
+                &bytes,
+                [chunks as u32, s.kv_heads as u32, seqs as u32],
+            );
+            self.context.kernels.paged_decode_reduce.dispatch(
+                self,
+                &[op.partials.buffer, op.out.buffer],
+                &words(&[s.head_size, chunks, first * op.heads * s.head_size])?,
+                [(seqs * op.heads) as u32, 1, 1],
+            );
+        }
         for buffer in buffers.iter().copied().chain([op.out]) {
             self.retain(buffer.clone());
         }

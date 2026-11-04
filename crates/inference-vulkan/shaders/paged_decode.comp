@@ -1,8 +1,8 @@
 #version 450
 // One query a sequence against f32 vLLM-layout caches (x = 4) through its block table, split over the context: a
 // workgroup a (CHUNK positions, kv head, sequence) scores the chunk for every query head of its kv head, a TILE of keys
-// at a time staged in shared memory, then sums the values straight from the cache, each value vec4 (4 positions of a
-// dimension) serving GROUP_STEP heads' accumulators. It writes each head's max score, its exponentials' sum and the
+// at a time staged in shared memory, then sums the values a TILE at a time staged too (as vec4s of 4 positions of a
+// dimension, each serving several heads' accumulators). It writes each head's max score, its exponentials' sum and the
 // unnormalized value sum (`head_size + 2` floats a (sequence, head, chunk)); paged_decode_reduce combines the chunks.
 #extension GL_KHR_shader_subgroup_clustered : require
 #extension GL_EXT_control_flow_attributes : require
@@ -31,10 +31,10 @@ layout(push_constant) uniform PushConstants {
 } pc;
 
 const uint THREADS = 256;
-const uint CHUNK = 128;
+const uint CHUNK = 64;
 // a multiple of the block size, so a tile holds whole blocks
 const uint TILE = 32;
-const uint MAX_HEAD4 = 64;
+const uint MAX_HEAD4 = 32;
 const uint MAX_GROUP = 16;
 // the heads a thread scores a position for
 const uint SCORE_HEADS = MAX_GROUP / (THREADS / TILE);
@@ -42,9 +42,13 @@ const uint SCORE_HEADS = MAX_GROUP / (THREADS / TILE);
 const uint MAX_OUT = 8;
 const uint LANES = THREADS / MAX_GROUP;
 
-shared vec4 qs[MAX_GROUP * MAX_HEAD4];
-// a tile's keys, a position a padded row of vec4s
-shared vec4 keys[TILE * (MAX_HEAD4 + 1)];
+// a kv head's query heads times the head size, at most 2048 floats (the op checks it)
+const uint MAX_Q4 = 512;
+shared vec4 qs[MAX_Q4];
+// a tile's keys (a position a padded row of vec4s), then its values (a dimension a padded row of 4-position vec4s)
+const uint VALUE_ROW = TILE / 4 + 1;
+const uint KV_VEC4S = max(TILE * (MAX_HEAD4 + 1), 4 * MAX_HEAD4 * VALUE_ROW);
+shared vec4 keys[KV_VEC4S];
 shared vec4 scores[MAX_GROUP * CHUNK / 4];
 shared float stat_m[MAX_GROUP];
 shared float stat_l[MAX_GROUP];
@@ -147,21 +151,38 @@ void main() {
     [[unroll]] for (uint k = 0; k < MAX_OUT; k++) {
         acc[k] = 0.0;
     }
-    for (uint p4 = 0; p4 * 4 < n; p4++) {
-        uint pos = start + p4 * 4;
-        uint block = block_tables[table + pos / bs];
-        vec4 v = value_cache[block * pc.kv_heads * block_vec4s + kv_slab + d * (bs / 4) + (pos % bs) / 4];
-        // past the context, the cache's stale values meet zero scores; zeroed so a NaN there cannot leak
-        uint valid = n - p4 * 4;
-        if (valid < 4) {
-            v = vec4(v.x, valid > 1 ? v.y : 0.0, valid > 2 ? v.z : 0.0, 0.0);
+    for (uint tile0 = 0; tile0 < n; tile0 += TILE) {
+        uint first_block = (start + tile0) / bs;
+        // a block's values are contiguous as (d, position / 4) vec4s
+        for (uint i = t; i < TILE * hs4; i += THREADS) {
+            uint bt = i / block_vec4s;
+            uint r = i % block_vec4s;
+            uint dd = r / (bs / 4);
+            uint p4 = bt * (bs / 4) + r % (bs / 4);
+            vec4 v = vec4(0.0);
+            if (start + tile0 + p4 * 4 < len) {
+                uint block = block_tables[table + first_block + bt];
+                v = value_cache[block * pc.kv_heads * block_vec4s + kv_slab + r];
+                // past the context, the cache's stale values meet zero scores; zeroed so a NaN there cannot leak
+                uint valid = len - (start + tile0 + p4 * 4);
+                if (valid < 4) {
+                    v = vec4(v.x, valid > 1 ? v.y : 0.0, valid > 2 ? v.z : 0.0, 0.0);
+                }
+            }
+            keys[dd * VALUE_ROW + p4] = v;
         }
-        [[unroll]] for (uint k = 0; k < MAX_OUT; k++) {
-            uint g = g0 + k * heads_step;
-            if (g < group) {
-                acc[k] += dot(scores[(g * CHUNK) / 4 + p4], v);
+        barrier();
+        uint lim4 = (min(TILE, n - tile0) + 3) / 4;
+        for (uint p4 = 0; p4 < lim4; p4++) {
+            vec4 v = keys[d * VALUE_ROW + p4];
+            [[unroll]] for (uint k = 0; k < MAX_OUT; k++) {
+                uint g = g0 + k * heads_step;
+                if (g < group) {
+                    acc[k] += dot(scores[(g * CHUNK + tile0) / 4 + p4], v);
+                }
             }
         }
+        barrier();
     }
     uint stride = pc.head_size + 2;
     [[unroll]] for (uint k = 0; k < MAX_OUT; k++) {

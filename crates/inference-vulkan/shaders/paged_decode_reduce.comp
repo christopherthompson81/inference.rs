@@ -10,6 +10,8 @@ layout(std430, binding = 1) writeonly buffer O { float o[]; };
 layout(push_constant) uniform PushConstants {
     uint head_size;
     uint chunks;
+    // where this piece's rows start in `o`
+    uint o_off;
 } pc;
 
 const uint THREADS = 128;
@@ -40,6 +42,6 @@ void main() {
                 acc += exp(mc - m) * part[base + c * stride + 2 + d];
             }
         }
-        o[row * pc.head_size + d] = acc * inv;
+        o[pc.o_off + row * pc.head_size + d] = acc * inv;
     }
 }

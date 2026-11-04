@@ -257,3 +257,20 @@ int8 rounding bound.
 
 MTP's text is byte-identical to plain's. (With int8 dense matvecs but f32 experts, MTP 2 measured 28.74 and two texts
 split at near-ties of 0.142 and 0.162 nats.)
+
+### Run 15 - 2026-11-04 ~08:30
+
+**Question:** after Run 14, does MTP pay at long context, and how deep should it draft?
+
+**Depth (Run 12's prompts):** MTP 4 32.30 and MTP 5 31.39 tok/s (accept 2.6-2.9), auto-depth up to 5 31.54: MTP 3
+stays best. At `bench --depth 4096` MTP 3 led plain by 26.2 to 23.0, its 4-row verify attention ~4 ms a call.
+
+**Change:** paged decode's chunks are 64 positions (twice the workgroups) and its values are staged a tile at a time
+in shared memory with coalesced vec4 loads (the cache's (dimension, position) rows had been read a dimension a
+thread, 128 bytes apart); the shared tiles take heads up to 128. GPU time at 4100 positions: 1 query 337 -> 279 us,
+4 queries 1120 -> 760 us: still latency-bound (~30 GB/s; each tile waits on a block-table read, then its K/V). An MTP
+head reading a whole prompt calls it with a query a prompt row: those run in pieces whose partials stay within 256 MiB
+(64-position chunks put a 4096-token prompt's at 4.4 GB, past the 4 GiB binding limit).
+
+**Result:** `bench --depth 4096` MTP 3 26.7 tok/s, plain 23.4; Run 12's prompts plain 25.97, MTP 3 34.41 (text as
+plain's from the same build; against Run 14's plain, two texts split at near-ties under the new summation order).
