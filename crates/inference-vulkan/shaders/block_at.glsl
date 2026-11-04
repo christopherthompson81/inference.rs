@@ -7,34 +7,27 @@ vec4 unpack(uint matrix, uint row, uint b, uint blocks, out uvec4 lo, out uvec4 
     return unpack_sub(base, b % SUBS, lo, hi);
 }
 
-// What a block's dot keeps of its coefficients and its activation block's scales, as little as the type allows (which
-// keeps the prompt matmuls' shared tiles small): all four of each where the halves differ (SPLIT_HALVES); (s, o) and
-// (d, d * sum q) where the offset is free; s alone where it is OFFSET_RATIO * s; and d alone with NO_OFFSET.
-#if SPLIT_HALVES
-#define COEF vec4
-#define XSCALE vec4
-COEF pack_coef(vec4 c) {
-    return c;
-}
-XSCALE pack_xs(vec4 s) {
-    return s;
-}
-float block_dot(uvec4 lo, uvec4 hi, COEF c, uvec4 x_lo, uvec4 x_hi, XSCALE xs) {
-    return xs.x * (c.x * float(dot4(lo, x_lo)) + c.y * float(dot4(hi, x_hi))) + dot(c.zw, xs.yz);
-}
-#else
+// What a block's dot keeps of its coefficients and of its activation block's (d, d * sum q), as little as the type
+// allows (which keeps the prompt matmuls' shared tiles small): s alone where the offset is OFFSET_RATIO * s, and d
+// alone with NO_OFFSET; (s, o) where the offset is free; all four where the halves differ (SPLIT_HALVES), whose
+// activation half-sums come from the int8 words.
 #if defined(NO_OFFSET)
 #define XSCALE float
-XSCALE pack_xs(vec4 s) {
+XSCALE pack_xs(vec2 s) {
     return s.x;
 }
 #else
 #define XSCALE vec2
-XSCALE pack_xs(vec4 s) {
-    return vec2(s.x, s.y + s.z);
+XSCALE pack_xs(vec2 s) {
+    return s;
 }
 #endif
-#if defined(NO_OFFSET) || defined(OFFSET_RATIO)
+#if SPLIT_HALVES
+#define COEF vec4
+COEF pack_coef(vec4 c) {
+    return c;
+}
+#elif defined(NO_OFFSET) || defined(OFFSET_RATIO)
 #define COEF float
 COEF pack_coef(vec4 c) {
     return c.x;
@@ -45,7 +38,13 @@ COEF pack_coef(vec4 c) {
     return c.xz;
 }
 #endif
+
 float block_dot(uvec4 lo, uvec4 hi, COEF c, uvec4 x_lo, uvec4 x_hi, XSCALE xs) {
+#if SPLIT_HALVES
+    const uvec4 ones = uvec4(0x01010101u);
+    vec4 q = vec4(dot4(lo, x_lo), dot4(hi, x_hi), dot4(x_lo, ones), dot4(x_hi, ones));
+    return xs.x * dot(c, q);
+#else
     ivec4 a = ivec4(lo), e = ivec4(hi), p = ivec4(x_lo), o = ivec4(x_hi);
     int q = dotPacked4x8EXT(a.x, p.x) + dotPacked4x8EXT(a.y, p.y) + dotPacked4x8EXT(a.z, p.z)
         + dotPacked4x8EXT(a.w, p.w) + dotPacked4x8EXT(e.x, o.x) + dotPacked4x8EXT(e.y, o.y)
@@ -57,5 +56,5 @@ float block_dot(uvec4 lo, uvec4 hi, COEF c, uvec4 x_lo, uvec4 x_hi, XSCALE xs) {
 #else
     return c.x * (xs.x * float(q)) + c.y * xs.y;
 #endif
-}
 #endif
+}

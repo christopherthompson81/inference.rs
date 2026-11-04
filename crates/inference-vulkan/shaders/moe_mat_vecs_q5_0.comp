@@ -16,7 +16,7 @@ layout(std430, binding = 0) readonly buffer W { uint16_t w[]; };
 layout(std430, binding = 1) readonly buffer Q { uvec4 xq[]; };
 layout(std430, binding = 2) writeonly buffer Y { float y[]; };
 layout(std430, binding = 3) readonly buffer Ids { uint ids[]; };
-layout(std430, binding = 4) readonly buffer S { vec4 xs[]; };
+layout(std430, binding = 4) readonly buffer S { vec2 xs[]; };
 
 layout(push_constant) uniform PushConstants {
     uint rows;
@@ -32,7 +32,7 @@ layout(push_constant) uniform PushConstants {
     // u16s from one expert's matrix to the next
     uint expert_u16;
     uint slots;
-    // where the blocks' scales start, in vec4s
+    // where the blocks' (d, d * sum q) start, in vec2s
     uint s_off;
 } pc;
 

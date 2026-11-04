@@ -14,7 +14,7 @@ layout(local_size_x = 256) in;
 layout(std430, binding = 0) readonly buffer W { uint16_t w[]; };
 layout(std430, binding = 1) readonly buffer Q { uvec4 xq[]; };
 layout(std430, binding = 2) writeonly buffer Y { float y[]; };
-layout(std430, binding = 3) readonly buffer S { vec4 xs[]; };
+layout(std430, binding = 3) readonly buffer S { vec2 xs[]; };
 
 #include "int8_dot.glsl"
 

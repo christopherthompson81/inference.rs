@@ -10,12 +10,12 @@ use crate::{Error, Recorder, Result, shaders};
 const BLOCK_VALUES: usize = 32;
 // rows one matvec workgroup takes (the shader's `ROWS`), and the most workgroups one grid dimension holds
 const MATVEC_ROWS: usize = 4;
-// the matvecs' buffers and push constants, and an int8 block's bytes (8 packed words, then its vec4 of scales in the
+// the matvecs' buffers and push constants, and an int8 block's bytes (8 packed words, then its (d, d * sum q) in the
 // same buffer)
 const MATVECS_BINDINGS: usize = 4;
 const MATVECS_PUSH_BYTES: u32 = 7 * 4;
 const Q8_WORD_BYTES: usize = 32;
-const Q8_SCALE_BYTES: usize = 16;
+const Q8_SCALE_BYTES: usize = 8;
 const QUANTIZE_BINDINGS: usize = 3;
 const QUANTIZE_PUSH_BYTES: u32 = 3 * 4;
 const QUANTIZE_THREADS: usize = 64;

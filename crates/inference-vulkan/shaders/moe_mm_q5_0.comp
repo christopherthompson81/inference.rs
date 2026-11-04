@@ -20,7 +20,7 @@ layout(push_constant) uniform PushConstants {
     uint x_div;
     // u16s from one expert's matrix to the next
     uint expert_u16;
-    // where the blocks' scales start, in vec4s
+    // where the blocks' (d, d * sum q) start, in vec2s
     uint s_off;
     // where moe_sort's tile count and tiles start in `routing` (its `order` at 0)
     uint tiles_off;

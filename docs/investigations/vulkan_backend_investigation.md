@@ -436,3 +436,16 @@ Q8_0 at 3 rows stays 10 % behind, with the same unpack and dot: left for the 780
 
 **Model (Nemotron Nano 9B v2 Q4_K_M, `bench --vulkan`, 512-token prompt, 64 decoded):** prefill 26.8 -> 1275 tok/s,
 decode 20.7 -> 59.8 tok/s. Its Q4_K and Q6_K weights had run through the CPU fallback before.
+
+### Run 22 - 2026-11-04 ~04:30
+
+**Question:** the 780M A/B of Run 21 (laptop): KLD 0.00891 against master's 0.00897, but 512-token prefill 388 -> 366
+tok/s (-5.7 %), `mul_mm` at 512 rows -3.7 %, the 8-row Q5_0 matvec -7 %. Greedy text also moved at near-ties: the
+offset as d * sum_lo + d * sum_hi rounds differently from master's d * sum q.
+
+**Change:** the activation scales are master's (d, d * sum q) again, 8 bytes a block. Only Q6_K needs the half-sums,
+and it takes them from the activation's int8 words (a packed dot with 0x01010101). Q8_0 and Q5_0 now compute exactly
+master's expressions.
+
+**Result (3090, warm; master -> this):** Q8_0 x 3 rows 723 -> 725 GB/s, x 8 rows 416 -> 415; Q5_0 x 3 rows 693 -> 696,
+x 8 rows 402 -> 399; prompt matmuls at 512 rows 31.7 / 34.4 -> 31.9 / 34.3 TOPS; experts 1.90 -> 1.85 ms.

@@ -11,7 +11,7 @@ layout(push_constant) uniform PushConstants {
     uint y_base;
     // activation rows; output row t is `rows` long
     uint m;
-    // where the blocks' scales start, in vec4s
+    // where the blocks' (d, d * sum q) start, in vec2s
     uint s_off;
 } pc;
 
