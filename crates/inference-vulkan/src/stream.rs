@@ -171,6 +171,17 @@ impl Stream {
         Ok(unsafe { device.get_fence_status(last.fence)? })
     }
 
+    /// Waits for the oldest submitted batch, if any, and releases what finished; whether there was one.
+    pub(crate) fn wait_oldest(&mut self, device: &ash::Device) -> Result<bool> {
+        let Some(oldest) = self.in_flight.front() else {
+            return Ok(false);
+        };
+        // SAFETY: the fence belongs to this device and was submitted with its batch
+        unsafe { device.wait_for_fences(&[oldest.fence], true, u64::MAX)? };
+        self.reap(device, false)?;
+        Ok(true)
+    }
+
     /// Submits the open batch and waits for everything submitted.
     pub(crate) fn synchronize(&mut self, device: &ash::Device, queue: vk::Queue) -> Result<()> {
         self.flush(device, queue)?;

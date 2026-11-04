@@ -147,11 +147,18 @@ impl Buffer {
             return Err(Error::Invalid(format!("a buffer of {len} bytes")));
         }
         let capacity = capacity(len as u64);
-        let pooled = context
-            .pool
-            .lock()
-            .expect("vulkan pool poisoned")
-            .take(device_local, capacity);
+        let take = || {
+            context
+                .pool
+                .lock()
+                .expect("vulkan pool poisoned")
+                .take(device_local, capacity)
+        };
+        let mut pooled = take();
+        // a discrete GPU's memory is scarce: before a fresh allocation, the oldest batch's buffers come back first
+        if pooled.is_none() && device_local && context.try_wait_oldest()? {
+            pooled = take();
+        }
         if let Some(Allocation {
             buffer,
             memory,
@@ -193,8 +200,9 @@ impl Buffer {
         buffer
     }
 
-    // a fresh allocation; device memory a discrete GPU has run out of comes from the pool's idle buffers, freed, and
-    // past them from host RAM, which the GPU reads over the bus
+    // a fresh allocation; device memory a discrete GPU has run out of comes from the buffers finished work held (the
+    // CPU records a whole forward ahead of the GPU, its dropped temporaries alive until their batch's fence) and the
+    // pool's idle ones, freed, and past them from host RAM, which the GPU reads over the bus
     fn allocate(
         context: &Arc<Context>,
         len: usize,
@@ -208,6 +216,7 @@ impl Buffer {
         if !device_local || !out_of_memory(&first) {
             return first;
         }
+        context.try_synchronize()?;
         let idle = context
             .pool
             .lock()

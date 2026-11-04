@@ -449,3 +449,48 @@ master's expressions.
 
 **Result (3090, warm; master -> this):** Q8_0 x 3 rows 723 -> 725 GB/s, x 8 rows 416 -> 415; Q5_0 x 3 rows 693 -> 696,
 x 8 rows 402 -> 399; prompt matmuls at 512 rows 31.7 / 34.4 -> 31.9 / 34.3 TOPS; experts 1.90 -> 1.85 ms.
+
+### Run 23 - 2026-11-04 ~04:30 (desktop: RTX 3090)
+
+**Question:** Lightning recipe A (21.7 GiB) on a 24 GiB card that also drives the display. What runs, and how fast?
+
+**First finding:** the prompt step failed with `ERROR_OUT_OF_DEVICE_MEMORY` on a 64 MiB buffer while the pool held
+723 MB idle. The weight copies (made on first use) had filled the card.
+
+**Changes, in order:**
+1. A device allocation that fails frees the pool's idle device buffers and retries, then falls back to host memory.
+   Result: it ran, 512-token prefill 1882 tok/s and decode 106 +- 18 tok/s; the noise was hot activations landing in
+   host memory.
+2. Exact (weight) buffers stay in device memory while they leave `EXACT_RESERVE_BYTES` (2 GiB) of the device's free
+   memory at startup (`VK_EXT_memory_budget`: 23218 MiB here), then go to host memory. Result: 2070 tok/s, decode
+   83.9 +- 0.2.
+3. Pool classes past 1 MiB are eighths of a power of two, and buffers up to 1 GiB are pooled. A 2048-token prompt
+   had made 190 fresh 256 MiB allocations, since a 132 MB activation took a 256 MiB class. Result: 512 tokens 2280,
+   2048 tokens 1477 tok/s, still spilling.
+4. Logging the live buffers at 512 tokens showed nothing large, only about 1.5 GB of 32-64 MiB temporaries. The CPU
+   records a whole forward ahead of the GPU, and a dropped temporary returns to the pool only once its batch's fence
+   signals.
+   - Synchronizing on out-of-memory, before draining the pool, ended the spill, but stalled the overlap: 512 tokens
+     1676 tok/s.
+   - Instead, a pool miss on a discrete GPU now waits for the oldest submitted batch and tries the pool again before
+     allocating. That gives 512 tokens 2628 tok/s and decode 108 tok/s, with nothing spilled.
+
+**Dead ends:**
+- Paged attention with 512-token prompt chunks did not help long prompts: 2048 tokens 1489 +- 540, 4096 tokens
+  934 tok/s.
+- A tiled-main expert kernel for discrete GPUs: 2.56 ms against the row-streaming 1.85 ms at 512 tokens, and
+  5.31 against 5.46 ms at 2048. Not kept.
+
+**Profile (2048-token prefill, a steady 5 s window):**
+
+| kernel | dispatches | GPU time | each |
+|---|---|---|---|
+| `moe_mm_q5_0` | 155 | 1529 ms | 9.9 ms |
+| `mul_mm_q8_0` | 234 | 822 ms | 3.5 ms |
+| `ssd_chunk_state` | 77 | 348 ms | 4.5 ms |
+| `matmul_f32_tiled` | 158 | 193 ms | 1.2 ms |
+| `mul_mm_q5_0` | 154 | 171 ms | 1.1 ms |
+
+The int8 dp4a kernels run at about 15-33 TOPS on the 3090, a fraction of its int8 tensor cores.
+`VK_KHR_cooperative_matrix` and `VK_NV_cooperative_matrix2` are both offered: the next lever for prompts on this
+card.

@@ -191,6 +191,25 @@ impl Context {
             .synchronize(&self.device, self.queue)
     }
 
+    /// [`Self::synchronize`] unless the stream is in use (a buffer allocated while recording), so it never waits on
+    /// itself; whether it waited.
+    pub(crate) fn try_synchronize(&self) -> Result<bool> {
+        let Ok(mut stream) = self.stream.try_lock() else {
+            return Ok(false);
+        };
+        stream.synchronize(&self.device, self.queue)?;
+        Ok(true)
+    }
+
+    /// Waits for the oldest submitted batch unless the stream is in use, so the buffers it held return to the pool;
+    /// whether one was waited on.
+    pub(crate) fn try_wait_oldest(&self) -> Result<bool> {
+        let Ok(mut stream) = self.stream.try_lock() else {
+            return Ok(false);
+        };
+        stream.wait_oldest(&self.device)
+    }
+
     /// [`Self::record`], then [`Self::synchronize`].
     pub fn submit<T>(&self, record: impl FnOnce(&Recorder<'_>) -> Result<T>) -> Result<T> {
         let out = self.record(record)?;
