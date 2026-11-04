@@ -14,6 +14,9 @@ const MATVEC_ROWS: usize = 4;
 // same buffer)
 const MATVECS_BINDINGS: usize = 4;
 const MATVECS_PUSH_BYTES: u32 = 7 * 4;
+const EMBED_BINDINGS: usize = 3;
+const EMBED_PUSH_BYTES: u32 = 5 * 4;
+const EMBED_THREADS: usize = 64;
 const Q8_WORD_BYTES: usize = 32;
 const Q8_SCALE_BYTES: usize = 8;
 const QUANTIZE_BINDINGS: usize = 3;
@@ -55,6 +58,14 @@ macro_rules! kernels {
 
 kernels! {
     mat_vecs_q8_0: MUL_MAT_VECS_Q8_0, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
+    embed_q8_0: EMBED_Q8_0, EMBED_BINDINGS, EMBED_PUSH_BYTES;
+    embed_q5_0: EMBED_Q5_0, EMBED_BINDINGS, EMBED_PUSH_BYTES;
+    embed_q4_0: EMBED_Q4_0, EMBED_BINDINGS, EMBED_PUSH_BYTES;
+    embed_q4_1: EMBED_Q4_1, EMBED_BINDINGS, EMBED_PUSH_BYTES;
+    embed_q5_1: EMBED_Q5_1, EMBED_BINDINGS, EMBED_PUSH_BYTES;
+    embed_q4_k: EMBED_Q4_K, EMBED_BINDINGS, EMBED_PUSH_BYTES;
+    embed_q5_k: EMBED_Q5_K, EMBED_BINDINGS, EMBED_PUSH_BYTES;
+    embed_q6_k: EMBED_Q6_K, EMBED_BINDINGS, EMBED_PUSH_BYTES;
     mat_vecs_q5_0: MUL_MAT_VECS_Q5_0, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
     mat_vecs_q4_0: MUL_MAT_VECS_Q4_0, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
     mat_vecs_q4_1: MUL_MAT_VECS_Q4_1, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
@@ -343,6 +354,18 @@ impl MatVec<'_> {
     }
 }
 
+/// The rows of a `vocab x cols` matrix of `ty` blocks in `weights` at the u32 `ids` (`count` of them), dequantized to
+/// `count x cols` floats in `y`.
+pub struct Embed<'a> {
+    pub ty: BlockType,
+    pub weights: &'a Arc<dyn Bound>,
+    pub vocab: usize,
+    pub cols: usize,
+    pub ids: (&'a Arc<Buffer>, usize),
+    pub count: usize,
+    pub y: &'a Arc<Buffer>,
+}
+
 fn push_words(values: &[usize]) -> Result<Vec<u8>> {
     let mut bytes = Vec::with_capacity(values.len() * 4);
     for &v in values {
@@ -379,6 +402,53 @@ impl Recorder<'_> {
         self.retain(x.0.clone());
         self.retain(scratch.clone());
         Ok(s_off)
+    }
+
+    pub fn embed(&self, op: &Embed<'_>) -> Result<()> {
+        let blocks = op.cols / BLOCK_VALUES;
+        let fits = op.vocab > 0
+            && op.cols.is_multiple_of(op.ty.block_values())
+            && op.weights.offset().is_multiple_of(2)
+            && op.weights.bytes()
+                >= op.vocab * op.cols / op.ty.block_values() * op.ty.block_bytes()
+            && op.y.len() / 4 >= op.count * op.cols;
+        if !fits {
+            return Err(Error::Invalid(format!(
+                "an embedding of {} ids from a {} x {} {:?} matrix",
+                op.count, op.vocab, op.cols, op.ty
+            )));
+        }
+        if op.count == 0 {
+            return Ok(());
+        }
+        let kernels = &self.context.kernels;
+        let pipeline = match op.ty {
+            BlockType::Q8_0 => &kernels.embed_q8_0,
+            BlockType::Q5_0 => &kernels.embed_q5_0,
+            BlockType::Q4_0 => &kernels.embed_q4_0,
+            BlockType::Q4_1 => &kernels.embed_q4_1,
+            BlockType::Q5_1 => &kernels.embed_q5_1,
+            BlockType::Q4K => &kernels.embed_q4_k,
+            BlockType::Q5K => &kernels.embed_q5_k,
+            BlockType::Q6K => &kernels.embed_q6_k,
+        };
+        let bytes = push_words(&[
+            op.vocab,
+            blocks,
+            op.weights.offset() as usize / 2,
+            op.ids.1,
+            op.count,
+        ])?;
+        pipeline.dispatch(
+            self,
+            &[op.weights.vk_buffer(), op.ids.0.buffer, op.y.buffer],
+            &bytes,
+            [(op.count * blocks).div_ceil(EMBED_THREADS) as u32, 1, 1],
+        );
+        self.retain(op.weights.clone() as crate::Retained);
+        self.retain(op.ids.0.clone());
+        self.retain(op.y.clone());
+        Ok(())
     }
 
     pub fn mat_vec(&self, op: &MatVec<'_>) -> Result<()> {

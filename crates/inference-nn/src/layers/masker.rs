@@ -162,6 +162,21 @@ impl CausalMasker {
 
         let mask = if let Some(sw) = cfg.sliding_window {
             self.make_swa_mask(tgt_len, past_kv_len, sw, input_ids.device(), dtype)?
+        } else if input_ids.device().is_vulkan() {
+            // Vulkan has no where_cond kernel, so the additive mask is built here and uploaded once
+            let offset = tgt_len + past_kv_len;
+            let values: Vec<f32> = (0..tgt_len)
+                .flat_map(|i| {
+                    (0..offset).map(move |j| {
+                        if j + tgt_len > i + offset {
+                            f32::NEG_INFINITY
+                        } else {
+                            0.0
+                        }
+                    })
+                })
+                .collect();
+            Tensor::from_vec(values, (tgt_len, offset), input_ids.device())?.to_dtype(dtype)?
         } else {
             let causal = self
                 .make_mask(tgt_len, past_kv_len, input_ids.device())?

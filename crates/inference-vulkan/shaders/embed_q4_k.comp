@@ -1,0 +1,6 @@
+#version 450
+// The rows of a Q4_K matrix at a list of ids, dequantized.
+#extension GL_GOOGLE_include_directive : require
+#include "embed_head.glsl"
+#include "q4_k_int8.glsl"
+#include "embed_main.glsl"

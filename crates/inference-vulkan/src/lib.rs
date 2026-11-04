@@ -15,7 +15,7 @@ mod shaders {
 }
 
 pub use context::{Context, Recorder};
-pub use kernels::{BlockType, MATVEC_MAX_ROWS, MatVec};
+pub use kernels::{BlockType, Embed, MATVEC_MAX_ROWS, MatVec};
 pub use map::{MAX_DIMS, Map, MapOp, Operand};
 pub use memory::{Bound, Buffer, ImportedMemory, f32_bytes};
 pub use ops::{

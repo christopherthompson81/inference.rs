@@ -172,6 +172,39 @@ impl QVulkanStorage {
         Ok(self.gpu.get_or_init(|| gpu).clone())
     }
 
+    // the rows of this `rows x hidden` weight at contiguous u32 Vulkan `ids`, gathered on the device
+    #[cfg(feature = "vulkan")]
+    fn embedding(
+        &self,
+        ids: &Tensor,
+        rows: usize,
+        hidden: usize,
+    ) -> Result<Option<crate::VulkanStorage>> {
+        let Some(ty) = vulkan_block_type(self.blocks.dtype()) else {
+            return Ok(None);
+        };
+        let (storage, layout) = ids.storage_and_layout();
+        let crate::Storage::Vulkan(ids_storage) = &*storage else {
+            return Ok(None);
+        };
+        let weights = self.gpu_copy()?;
+        crate::vulkan_backend::quantized_embedding(
+            (ids_storage.buffer(), layout.start_offset()),
+            ids.elem_count(),
+            &weights,
+            ty,
+            rows,
+            hidden,
+            &self.device,
+        )
+        .map(Some)
+    }
+
+    #[cfg(not(feature = "vulkan"))]
+    fn embedding(&self, _: &Tensor, _: usize, _: usize) -> Result<Option<crate::VulkanStorage>> {
+        Ok(None)
+    }
+
     // `xs` times this `shape` weight transposed, where a Vulkan kernel takes the type, dtype and row count
     #[cfg(feature = "vulkan")]
     fn mat_vec(
@@ -935,15 +968,18 @@ impl QTensor {
                 let ids = ids.to_vec1::<u32>()?;
                 Storage::Cpu(storage.embedding(&ids, rows, hidden)?)
             }
-            QStorage::Vulkan(storage) => {
-                let ids = ids.to_vec1::<u32>()?;
-                Storage::Vulkan(
-                    crate::backend::BackendDevice::storage_from_cpu_storage_owned(
-                        &storage.device,
-                        storage.blocks.embedding(&ids, rows, hidden)?,
-                    )?,
-                )
-            }
+            QStorage::Vulkan(storage) => match storage.embedding(&ids, rows, hidden)? {
+                Some(gathered) => Storage::Vulkan(gathered),
+                None => {
+                    let ids = ids.to_vec1::<u32>()?;
+                    Storage::Vulkan(
+                        crate::backend::BackendDevice::storage_from_cpu_storage_owned(
+                            &storage.device,
+                            storage.blocks.embedding(&ids, rows, hidden)?,
+                        )?,
+                    )
+                }
+            },
             QStorage::Metal(storage) => match &*ids.storage() {
                 Storage::Metal(ids_storage) => {
                     Storage::Metal(storage.embedding(rows, hidden, ids_storage, ids.layout())?)
@@ -1872,6 +1908,46 @@ fn dense_f32(src: &Tensor) -> Result<Tensor> {
 mod vulkan_storage_tests {
     use super::{GgmlDType, QStorage, QTensor};
     use crate::{Device, Result, Tensor};
+
+    // the device's gather of a quantized embedding's rows against the CPU's, every type the kernels take
+    #[test]
+    fn a_vulkan_embedding_gathers_as_the_cpu_does() -> Result<()> {
+        let Ok(vk) = Device::new_vulkan(0) else {
+            return Ok(());
+        };
+        let w = Tensor::randn(0f32, 1., (40, 512), &Device::Cpu)?;
+        let ids = [3u32, 0, 39, 3, 17];
+        for dtype in [
+            GgmlDType::Q8_0,
+            GgmlDType::Q5_0,
+            GgmlDType::Q4_0,
+            GgmlDType::Q4_1,
+            GgmlDType::Q5_1,
+            GgmlDType::Q4K,
+            GgmlDType::Q5K,
+            GgmlDType::Q6K,
+        ] {
+            let on_vulkan = QTensor::quantize(&w.to_device(&vk)?, dtype)?;
+            let on_cpu = QTensor::quantize(&w, dtype)?;
+            let got = on_vulkan.embedding(&Tensor::new(&ids, &vk)?)?;
+            assert!(got.device().is_vulkan(), "{dtype:?}");
+            let want = on_cpu
+                .embedding(&Tensor::new(&ids, &Device::Cpu)?)?
+                .to_vec2::<f32>()?;
+            for (g, w) in got
+                .to_vec2::<f32>()?
+                .iter()
+                .flatten()
+                .zip(want.iter().flatten())
+            {
+                assert!(
+                    (g - w).abs() <= 1e-5 * w.abs().max(1.0),
+                    "{dtype:?}: {g} vs {w}"
+                );
+            }
+        }
+        Ok(())
+    }
 
     // a GPU-run type's blocks are one buffer the CPU and the GPU both read, quantized as on the CPU
     #[test]
