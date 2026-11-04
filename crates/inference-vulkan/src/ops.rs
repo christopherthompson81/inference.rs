@@ -441,6 +441,7 @@ const MAX_ROUTER_TOP_K: usize = 32;
 /// expert read once for every slot routed to it and `x`'s rows quantized to int8 blocks into `scratch` (of
 /// [`crate::MatVec::scratch_bytes`] for `slots / x_div` rows); `y` is `(slots, rows)`.
 pub struct MoeMatVec<'a> {
+    pub ty: crate::BlockType,
     pub weights: &'a Arc<dyn crate::Bound>,
     pub experts: usize,
     pub rows: usize,
@@ -483,12 +484,9 @@ pub struct Router<'a> {
 }
 
 impl Recorder<'_> {
-    pub fn moe_mat_vec_q5_0(&self, op: &MoeMatVec<'_>) -> Result<()> {
-        const BLOCK_VALUES: usize = 32;
-        const BLOCK_BYTES: usize = 22;
-        let blocks = op.cols / BLOCK_VALUES;
-        let expert_bytes = op.rows * blocks * BLOCK_BYTES;
-        if !op.cols.is_multiple_of(BLOCK_VALUES)
+    pub fn moe_mat_vec(&self, op: &MoeMatVec<'_>) -> Result<()> {
+        let expert_bytes = op.rows * op.cols / op.ty.block_values() * op.ty.block_bytes();
+        if !op.cols.is_multiple_of(op.ty.block_values())
             || op.x_div == 0
             || op.weights.bytes() < op.experts * expert_bytes
             || !op.weights.offset().is_multiple_of(2)
@@ -496,8 +494,8 @@ impl Recorder<'_> {
             || op.routing.len() < MoeMatVec::routing_bytes(op.slots, op.experts)
         {
             return Err(Error::Invalid(format!(
-                "a {} x {}x{} Q5_0 expert matvec over {} slots",
-                op.experts, op.rows, op.cols, op.slots
+                "a {} x {}x{} {:?} expert matvec over {} slots",
+                op.experts, op.rows, op.cols, op.ty, op.slots
             )));
         }
         if op.slots == 0 {
@@ -506,11 +504,11 @@ impl Recorder<'_> {
         if op.slots >= op.experts * MMC_MIN_ROUTES_PER_EXPERT
             && let Some(coop) = self.context.coop.as_ref().filter(|_| !self.context.unified)
         {
-            return self.moe_mmc_q5_0(op, coop, expert_bytes);
+            return self.moe_mmc(op, coop, expert_bytes);
         }
         let s_off = self.quantize_rows(op.x, op.slots.div_ceil(op.x_div), op.cols, op.scratch)?;
         if op.slots > MOE_TILED_MIN_SLOTS {
-            return self.moe_mm_q5_0(op, s_off, expert_bytes);
+            return self.moe_mm(op, s_off, expert_bytes);
         }
         if op.slots > MAX_GROUPS_X {
             return Err(Error::Invalid(format!("{} expert routes", op.slots)));
@@ -536,7 +534,7 @@ impl Recorder<'_> {
             op.ids.0.buffer,
             op.scratch.buffer,
         ];
-        self.context.kernels.moe_mat_vecs_q5_0.dispatch(
+        self.context.kernels.moe_mat_vecs(op.ty).dispatch(
             self,
             &buffers,
             &bytes,
@@ -555,7 +553,7 @@ impl Recorder<'_> {
 
     // a prompt's routes: grouped by expert on the GPU, then a tiled matmul over each expert's tiles of them
     // the routes on matrix cores: sorted by expert, their activations gathered in that order as f16, then the tiles
-    fn moe_mmc_q5_0(
+    fn moe_mmc(
         &self,
         op: &MoeMatVec<'_>,
         coop: &crate::kernels::CoopKernels,
@@ -587,7 +585,7 @@ impl Recorder<'_> {
             &words(&[op.slots, op.cols, op.x_div, op.x.1])?,
             [pairs_x as u32, pairs.div_ceil(pairs_x) as u32, 1],
         );
-        coop.moe_mmc_q5_0.dispatch(
+        coop.moe_mmc(op.ty).dispatch(
             self,
             &[
                 op.weights.vk_buffer(),
@@ -622,7 +620,7 @@ impl Recorder<'_> {
         Ok(())
     }
 
-    fn moe_mm_q5_0(&self, op: &MoeMatVec<'_>, s_off: usize, expert_bytes: usize) -> Result<()> {
+    fn moe_mm(&self, op: &MoeMatVec<'_>, s_off: usize, expert_bytes: usize) -> Result<()> {
         let tiles_off = op.slots;
         self.context.kernels.moe_sort.dispatch(
             self,
@@ -640,7 +638,7 @@ impl Recorder<'_> {
             s_off,
             tiles_off,
         ])?;
-        self.context.kernels.moe_mm_q5_0.dispatch(
+        self.context.kernels.moe_mm(op.ty).dispatch(
             self,
             &[
                 op.weights.vk_buffer(),

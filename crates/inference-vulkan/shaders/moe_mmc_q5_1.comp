@@ -1,0 +1,47 @@
+#version 450
+// The matrix-core many-route matmul over a stack of Q5_1 experts: y[slot] = W[expert] x[slot / x_div] for the routes
+// moe_sort grouped by expert, their activations gathered in that order as f16 (moe_gather_f16's), grid y a tile of
+// moe_sort's tile list (past the list's count leaving at once).
+#extension GL_GOOGLE_include_directive : require
+#include "mul_mmc_head.glsl"
+
+layout(std430, binding = 3) readonly buffer Routing { uint routing[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint rows;
+    uint cols;
+    // element offsets into the bound buffers: `w` in u16s, `x` in halves, `y` in floats
+    uint w_base;
+    uint x_base;
+    uint y_base;
+    // u16s from one expert's matrix to the next
+    uint expert_u16;
+    // where moe_sort's tile count and tiles start in `routing` (its `order` at 0)
+    uint tiles_off;
+} pc;
+
+#include "q5_1_int8.glsl"
+
+uint first;
+
+bool begin_tile(out uint tokens, out uint w_matrix, out uint x_row0) {
+    uint tile = gl_WorkGroupID.y;
+    tokens = 0;
+    w_matrix = 0;
+    x_row0 = 0;
+    if (tile >= routing[pc.tiles_off]) {
+        return false;
+    }
+    uint at = pc.tiles_off + 1 + 3 * tile;
+    w_matrix = pc.w_base + routing[at] * pc.expert_u16;
+    first = routing[at + 1];
+    tokens = routing[at + 2];
+    x_row0 = first;
+    return true;
+}
+
+uint y_row(uint j) {
+    return routing[first + j];
+}
+
+#include "mul_mmc_main.glsl"

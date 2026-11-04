@@ -83,14 +83,58 @@ kernels! {
     ssd_chunk_state: SSD_CHUNK_STATE, ops::SSD_BINDINGS, ops::SCAN_STEP_PUSH_BYTES;
     ssd_state_pass: SSD_STATE_PASS, ops::SSD_BINDINGS, ops::SCAN_STEP_PUSH_BYTES;
     ssd_chunk_out: SSD_CHUNK_OUT, ops::SSD_BINDINGS, ops::SCAN_STEP_PUSH_BYTES;
+    moe_mat_vecs_q8_0: MOE_MAT_VECS_Q8_0, ops::MOE_MATVEC_BINDINGS, ops::MOE_MATVEC_PUSH_BYTES;
     moe_mat_vecs_q5_0: MOE_MAT_VECS_Q5_0, ops::MOE_MATVEC_BINDINGS, ops::MOE_MATVEC_PUSH_BYTES;
+    moe_mat_vecs_q4_0: MOE_MAT_VECS_Q4_0, ops::MOE_MATVEC_BINDINGS, ops::MOE_MATVEC_PUSH_BYTES;
+    moe_mat_vecs_q4_1: MOE_MAT_VECS_Q4_1, ops::MOE_MATVEC_BINDINGS, ops::MOE_MATVEC_PUSH_BYTES;
+    moe_mat_vecs_q5_1: MOE_MAT_VECS_Q5_1, ops::MOE_MATVEC_BINDINGS, ops::MOE_MATVEC_PUSH_BYTES;
+    moe_mat_vecs_q4_k: MOE_MAT_VECS_Q4_K, ops::MOE_MATVEC_BINDINGS, ops::MOE_MATVEC_PUSH_BYTES;
+    moe_mat_vecs_q5_k: MOE_MAT_VECS_Q5_K, ops::MOE_MATVEC_BINDINGS, ops::MOE_MATVEC_PUSH_BYTES;
+    moe_mat_vecs_q6_k: MOE_MAT_VECS_Q6_K, ops::MOE_MATVEC_BINDINGS, ops::MOE_MATVEC_PUSH_BYTES;
     moe_sort: MOE_SORT, ops::MOE_SORT_BINDINGS, ops::MOE_SORT_PUSH_BYTES;
+    moe_mm_q8_0: MOE_MM_Q8_0, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
     moe_mm_q5_0: MOE_MM_Q5_0, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
+    moe_mm_q4_0: MOE_MM_Q4_0, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
+    moe_mm_q4_1: MOE_MM_Q4_1, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
+    moe_mm_q5_1: MOE_MM_Q5_1, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
+    moe_mm_q4_k: MOE_MM_Q4_K, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
+    moe_mm_q5_k: MOE_MM_Q5_K, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
+    moe_mm_q6_k: MOE_MM_Q6_K, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
     moe_router: MOE_ROUTER, ops::ROUTER_BINDINGS, ops::ROUTER_PUSH_BYTES;
     paged_cache_write: PAGED_CACHE_WRITE, ops::PAGED_WRITE_BINDINGS, ops::PAGED_WRITE_PUSH_BYTES;
     paged_decode: PAGED_DECODE, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
     paged_decode_reduce: PAGED_DECODE_REDUCE, ops::PAGED_REDUCE_BINDINGS, ops::PAGED_REDUCE_PUSH_BYTES;
     flash_attn: FLASH_ATTN, ops::FLASH_BINDINGS, ops::FLASH_PUSH_BYTES;
+}
+
+impl Kernels {
+    /// The expert matvec over `ty`'s blocks.
+    pub(crate) fn moe_mat_vecs(&self, ty: BlockType) -> &Pipeline {
+        match ty {
+            BlockType::Q8_0 => &self.moe_mat_vecs_q8_0,
+            BlockType::Q5_0 => &self.moe_mat_vecs_q5_0,
+            BlockType::Q4_0 => &self.moe_mat_vecs_q4_0,
+            BlockType::Q4_1 => &self.moe_mat_vecs_q4_1,
+            BlockType::Q5_1 => &self.moe_mat_vecs_q5_1,
+            BlockType::Q4K => &self.moe_mat_vecs_q4_k,
+            BlockType::Q5K => &self.moe_mat_vecs_q5_k,
+            BlockType::Q6K => &self.moe_mat_vecs_q6_k,
+        }
+    }
+
+    /// The prompt's expert matmul (routes sorted by expert, rows streamed) over `ty`'s blocks.
+    pub(crate) fn moe_mm(&self, ty: BlockType) -> &Pipeline {
+        match ty {
+            BlockType::Q8_0 => &self.moe_mm_q8_0,
+            BlockType::Q5_0 => &self.moe_mm_q5_0,
+            BlockType::Q4_0 => &self.moe_mm_q4_0,
+            BlockType::Q4_1 => &self.moe_mm_q4_1,
+            BlockType::Q5_1 => &self.moe_mm_q5_1,
+            BlockType::Q4K => &self.moe_mm_q4_k,
+            BlockType::Q5K => &self.moe_mm_q5_k,
+            BlockType::Q6K => &self.moe_mm_q6_k,
+        }
+    }
 }
 
 /// The matrix-core prompt matmuls (`mul_mmc_*`), on a device with VK_KHR_cooperative_matrix's f16 16 x 16 x 16
@@ -105,7 +149,8 @@ pub(crate) struct CoopKernels {
     // by BlockType
     mul_mmc: Vec<Pipeline>,
     convert_f16: Pipeline,
-    pub(crate) moe_mmc_q5_0: Pipeline,
+    // by BlockType
+    moe_mmc: Vec<Pipeline>,
     pub(crate) moe_gather_f16: Pipeline,
 }
 pub(crate) const MOE_MMC_BINDINGS: usize = 4;
@@ -139,13 +184,21 @@ impl CoopKernels {
             CONVERT_PUSH_BYTES,
             "convert_f16",
         )?;
-        let moe_mmc_q5_0 = Pipeline::new(
-            device,
-            shaders::MOE_MMC_Q5_0,
-            MOE_MMC_BINDINGS,
-            MOE_MMC_PUSH_BYTES,
-            "moe_mmc_q5_0",
-        )?;
+        let moe_mmc = [
+            (shaders::MOE_MMC_Q8_0, "moe_mmc_q8_0"),
+            (shaders::MOE_MMC_Q5_0, "moe_mmc_q5_0"),
+            (shaders::MOE_MMC_Q4_0, "moe_mmc_q4_0"),
+            (shaders::MOE_MMC_Q4_1, "moe_mmc_q4_1"),
+            (shaders::MOE_MMC_Q5_1, "moe_mmc_q5_1"),
+            (shaders::MOE_MMC_Q4_K, "moe_mmc_q4_k"),
+            (shaders::MOE_MMC_Q5_K, "moe_mmc_q5_k"),
+            (shaders::MOE_MMC_Q6_K, "moe_mmc_q6_k"),
+        ]
+        .into_iter()
+        .map(|(spirv, name)| {
+            Pipeline::new(device, spirv, MOE_MMC_BINDINGS, MOE_MMC_PUSH_BYTES, name)
+        })
+        .collect::<Result<_>>()?;
         let moe_gather_f16 = Pipeline::new(
             device,
             shaders::MOE_GATHER_F16,
@@ -156,7 +209,7 @@ impl CoopKernels {
         Ok(Self {
             mul_mmc,
             convert_f16,
-            moe_mmc_q5_0,
+            moe_mmc,
             moe_gather_f16,
         })
     }
@@ -165,13 +218,18 @@ impl CoopKernels {
         &self.mul_mmc[ty as usize]
     }
 
+    pub(crate) fn moe_mmc(&self, ty: BlockType) -> &Pipeline {
+        &self.moe_mmc[ty as usize]
+    }
+
     /// # Safety
     /// No submit may still use the pipelines.
     pub(crate) unsafe fn destroy(&self, device: &ash::Device) {
-        for pipeline in
-            self.mul_mmc
-                .iter()
-                .chain([&self.convert_f16, &self.moe_mmc_q5_0, &self.moe_gather_f16])
+        for pipeline in self
+            .mul_mmc
+            .iter()
+            .chain(&self.moe_mmc)
+            .chain([&self.convert_f16, &self.moe_gather_f16])
         {
             // SAFETY: the caller's contract
             unsafe { pipeline.destroy(device) };
@@ -792,6 +850,7 @@ mod tests {
             crate::MoeMatVec::routing_bytes(slots, EXPERTS),
         )?);
         let op = crate::MoeMatVec {
+            ty,
             weights: &weights,
             experts: EXPERTS,
             rows: ROWS,
@@ -804,10 +863,10 @@ mod tests {
             scratch: &scratch,
             routing: &routing,
         };
-        context.submit(|r| r.moe_mat_vec_q5_0(&op))?;
+        context.submit(|r| r.moe_mat_vec(&op))?;
         let start = std::time::Instant::now();
         for _ in 0..REPEATS {
-            context.submit(|r| r.moe_mat_vec_q5_0(&op))?;
+            context.submit(|r| r.moe_mat_vec(&op))?;
         }
         let secs = start.elapsed().as_secs_f64() / REPEATS as f64;
         println!(

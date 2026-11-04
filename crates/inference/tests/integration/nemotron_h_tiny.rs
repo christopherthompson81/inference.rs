@@ -576,6 +576,9 @@ async fn a_long_prompt_scores_on_cuda_as_on_the_cpu() -> anyhow::Result<()> {
 // model's own prefill does
 #[tokio::test]
 async fn a_vulkan_decode_scores_as_one_prefill() -> anyhow::Result<()> {
+    // the prompt on the int8 kernels decode uses (the matrix-core prompt has its own test)
+    // SAFETY: nextest runs each test in its own process, and nothing has read the environment yet
+    unsafe { std::env::set_var(inference_tensor::vulkan::NO_MATRIX_CORES_ENV, "1") };
     if !cfg!(feature = "vulkan") || Device::new_vulkan(0).is_err() {
         return Ok(());
     }
