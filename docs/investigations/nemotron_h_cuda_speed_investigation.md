@@ -380,7 +380,12 @@ reason set, `fresh_long.py` 4,324-4,371 tok/s.
 (Vulkan Runs 30-35: 512 tokens ~2200 tok/s, 2048 ~2900, decode 111, a 244K prompt 715 s with a q8 cache)?
 
 **Build fix first:** master's CUDA build failed. `device_location_sort_key` (`pipeline/cuda_graph.rs`) had no arm for
-`DeviceLocation::Vulkan`, which #795 added; `local_ci.sh --vulkan` never builds `cuda`. Added the arm.
+`DeviceLocation::Vulkan`, which #795 added; `local_ci.sh --vulkan` never builds `cuda`. Added the arm. With CUDA
+building again, `nemotron_h_tiny::a_long_prompt_scores_on_cuda_as_on_the_cpu` (0.0026 off) and
+`a_long_prompt_on_cuda_scores_as_its_decode` (0.0011) failed their 1e-3 tolerance. Bisected to #795, which raised the
+tiny checkpoint's Mamba state from 8 to 128 for the Vulkan scan; the chunked SSD's cuBLAS matmuls run
+`CUBLAS_COMPUTE_32F_FAST_TF32`. With `CUBLAS_COMPUTE_32F` all long-prompt tests pass at 1e-3, so the CUDA tolerance
+is 5e-3 now (TF32 stays: it is the production path).
 
 **Commands:** `llama-bench -m Lightning-exps-q4_0.gguf -p 512,2048 -n 128 -ngl 99 -fa 1 -r 3` (`970b51ce7`); ours
 `inference bench --format gguf -f Lightning-exps-q4_0.gguf --prompt-len P --gen-len G` (dev build, debug assertions
