@@ -43,7 +43,8 @@ const uint ROWS = THREADS / LANES;
 const uint TILE = 32;
 const uint MAX_HEAD4 = 32;
 const uint LANE_VEC4S = MAX_HEAD4 / LANES;
-const float NEG_INF = -1.0 / 0.0;
+// finite, since NVIDIA's exp(-inf - m) leaks weight to masked keys; a caller's -inf clamps to it
+const float MASKED = -1e30;
 
 shared vec4 ks[TILE * MAX_HEAD4];
 shared vec4 vs[TILE * MAX_HEAD4];
@@ -75,7 +76,7 @@ void main() {
         qr[j] = live && i < h4 ? q[q_base + i] * pc.scale : vec4(0.0);
         acc[j] = vec4(0.0);
     }
-    float m = NEG_INF;
+    float m = MASKED;
     float l = 0.0;
     uint kv_base = (batch * pc.kv_heads + kvh) * pc.keys * h4;
     uint limit = pos + offset;
@@ -90,7 +91,7 @@ void main() {
         }
         barrier();
         float s[TILE];
-        float tile_max = NEG_INF;
+        float tile_max = MASKED;
         [[unroll]] for (uint c = 0; c < TILE; c++) {
             float part = 0.0;
             [[unroll]] for (uint j = 0; j < LANE_VEC4S; j++) {
@@ -105,11 +106,11 @@ void main() {
             if (!hidden && pc.has_mask != 0) {
                 score += mask[pc.m_off + pos * pc.keys + key];
             }
-            s[c] = hidden ? NEG_INF : score;
+            s[c] = hidden ? MASKED : max(score, MASKED);
             tile_max = max(tile_max, s[c]);
         }
-        float m_new = max(m, tile_max);
-        if (m_new != NEG_INF) {
+        if (tile_max > MASKED) {
+            float m_new = max(m, tile_max);
             float alpha = exp(m - m_new);
             l *= alpha;
             [[unroll]] for (uint j = 0; j < LANE_VEC4S; j++) {
