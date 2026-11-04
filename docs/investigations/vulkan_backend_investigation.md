@@ -631,3 +631,25 @@ keeps chunked SSD from 128. `a_chunked_vulkan_scan_matches_its_steps` forces the
 
 **Next:** at 4096 tokens prompt attention's unfused scores (`matmul_f32_tiled`, `map_f32`, `rows_f32` over seq x seq)
 take ~4 s of a 13.3 s prompt; a fused attention kernel is the long-prompt lever.
+
+### Run 27 - 2026-11-04 ~10:30 (laptop: Radeon 780M)
+
+**Question:** Run 26's long-prompt lever: prompt attention ran unfused (`run_attention_noflash`: the q k^T matmul,
+scale and mask maps, softmax rows, the v matmul), its (positions x keys) scores written and read a pass each, ~4 s of
+a 4096-token prompt.
+
+**Change:** `flash_attn.comp`, prompt attention fused with an online softmax over 32-key tiles staged in shared
+memory. A workgroup's 128 rows are every query head of a kv head's group times a few positions (Lightning: 16 heads x
+8 positions), so a tile serves the whole group. A row is 4 threads, each holding a quarter of the head in registers
+and summing its scores with a clustered subgroup add. It applies the caller's additive (positions, keys) mask as it
+is, and, when the caller says the mask is causal, skips the tiles past each position's diagonal. Calls run in pieces
+of positions within one submit's work. `run_attention_noflash` takes it on Vulkan for f32 heads up to 128 whose mask is
+shared by every batch and head, and falls back to the unfused path otherwise.
+
+**Tests:** `fused_vulkan_attention_matches_its_definition` (GQA 16, a cached prefix, partial tiles, head sizes 64, 80
+and 128, masked and not; 1e-4 against the CPU's definition).
+
+**Result (`bench`, recipe A, against Run 26):** 512 tokens 403.6 -> 421.8 tok/s, 2048 tokens 380.3 -> 410.8, 4096
+tokens 307.7 -> 369.6. At 4096 tokens the attention costs ~1.1 s a prompt, where the unfused path cost ~4 s; it runs
+at ~0.85 TFLOPS (64-row workgroups 361.5 tok/s, 128 rows 369.6). KLD 0.00898 (Run 26: 0.00897), top-1 96.41 %. MTP 3
+text matches plain's on all four prompts. Against master's, two split at near-ties.

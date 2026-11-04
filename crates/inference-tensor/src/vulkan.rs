@@ -111,6 +111,29 @@ pub fn paged_cache_write(
     }
 }
 
+/// Fused attention: softmax(`scale` q k^T + `mask`) v over f32 `q` `(batch, heads, positions, head_size)` and `k`, `v`
+/// `(batch, kv_heads, keys, head_size)`, `mask` additive and broadcast from `(positions, keys)`; `causal` lets the
+/// kernel skip keys past each position's diagonal, which the mask must hide as well. `None` for a shape or mask the
+/// kernel does not take.
+pub struct FlashAttn<'a> {
+    pub q: &'a Tensor,
+    pub k: &'a Tensor,
+    pub v: &'a Tensor,
+    pub mask: Option<&'a Tensor>,
+    pub scale: f32,
+    pub causal: bool,
+}
+
+pub fn flash_attn(op: &FlashAttn<'_>) -> Result<Option<Tensor>> {
+    #[cfg(feature = "vulkan")]
+    return crate::vulkan_backend::flash_attn(op);
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = op;
+        Err(crate::Error::NotCompiledWithVulkanSupport)
+    }
+}
+
 /// One query a sequence (`q` `(seqs, heads, head_size)`) against f32 vLLM-layout caches through u32 `block_tables`
 /// `(seqs, max_blocks)` over u32 `context_lens`, softmax-scaled by `scale`.
 pub struct PagedDecode<'a> {

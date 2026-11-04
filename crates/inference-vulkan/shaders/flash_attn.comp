@@ -1,0 +1,144 @@
+#version 450
+// Prompt attention, fused: softmax(scale * q k^T + mask) v over contiguous f32 (batch, heads, positions, head_size)
+// queries and (batch, kv_heads, keys, head_size) keys and values, online over TILE keys at a time staged in shared
+// memory. A workgroup's 128 rows are `row_heads` query heads of one kv head times `row_positions` positions, so a tile
+// serves every head of the group; a row is 4 threads, each holding a quarter of the head's vec4s. `mask` is an
+// additive (positions, keys) f32 matrix shared by every batch and head; `causal` skips keys past a position's diagonal
+// (key position <= query position + keys - positions), which the mask must also hide.
+#extension GL_KHR_shader_subgroup_clustered : require
+#extension GL_EXT_control_flow_attributes : require
+
+layout(local_size_x = 512) in;
+
+layout(std430, binding = 0) readonly buffer Q { vec4 q[]; };
+layout(std430, binding = 1) readonly buffer K { vec4 k[]; };
+layout(std430, binding = 2) readonly buffer V { vec4 v[]; };
+layout(std430, binding = 3) readonly buffer M { float mask[]; };
+layout(std430, binding = 4) writeonly buffer O { vec4 o[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint positions;
+    uint keys;
+    uint heads;
+    uint kv_heads;
+    uint head4;
+    float scale;
+    // in vec4s, the mask's in floats
+    uint q_off;
+    uint k_off;
+    uint v_off;
+    uint m_off;
+    uint o_off;
+    uint has_mask;
+    uint causal;
+    uint row_heads;
+    uint row_positions;
+    // the first position of this piece of the call
+    uint first;
+} pc;
+
+const uint THREADS = 512;
+const uint LANES = 4;
+const uint ROWS = THREADS / LANES;
+const uint TILE = 32;
+const uint MAX_HEAD4 = 32;
+const uint LANE_VEC4S = MAX_HEAD4 / LANES;
+const float NEG_INF = -1.0 / 0.0;
+
+shared vec4 ks[TILE * MAX_HEAD4];
+shared vec4 vs[TILE * MAX_HEAD4];
+
+void main() {
+    uint t = gl_LocalInvocationID.x;
+    uint row = t / LANES;
+    uint lane = t % LANES;
+    uint group = pc.heads / pc.kv_heads;
+    uint chunks = group / pc.row_heads;
+    uint kvh = gl_WorkGroupID.y / chunks;
+    uint chunk = gl_WorkGroupID.y % chunks;
+    uint batch = gl_WorkGroupID.z;
+    uint pi = row / pc.row_heads;
+    uint head = kvh * group + chunk * pc.row_heads + row % pc.row_heads;
+    uint block0 = pc.first + gl_WorkGroupID.x * pc.row_positions;
+    uint pos = block0 + pi;
+    bool live = pi < pc.row_positions && pos < pc.positions;
+    uint offset = pc.keys - pc.positions;
+    uint last = min(block0 + pc.row_positions, pc.positions) - 1;
+    uint end = pc.causal != 0 ? min(pc.keys, last + offset + 1) : pc.keys;
+    uint h4 = pc.head4;
+
+    vec4 qr[LANE_VEC4S];
+    vec4 acc[LANE_VEC4S];
+    uint q_base = pc.q_off + ((batch * pc.heads + head) * pc.positions + min(pos, pc.positions - 1)) * h4;
+    [[unroll]] for (uint j = 0; j < LANE_VEC4S; j++) {
+        uint i = j * LANES + lane;
+        qr[j] = live && i < h4 ? q[q_base + i] * pc.scale : vec4(0.0);
+        acc[j] = vec4(0.0);
+    }
+    float m = NEG_INF;
+    float l = 0.0;
+    uint kv_base = (batch * pc.kv_heads + kvh) * pc.keys * h4;
+    uint limit = pos + offset;
+
+    for (uint tile0 = 0; tile0 < end; tile0 += TILE) {
+        uint n = min(TILE, pc.keys - tile0);
+        for (uint i = t; i < TILE * h4; i += THREADS) {
+            uint c = i / h4;
+            uint at = kv_base + (tile0 + min(c, n - 1)) * h4 + i % h4;
+            ks[i] = k[pc.k_off + at];
+            vs[i] = v[pc.v_off + at];
+        }
+        barrier();
+        float s[TILE];
+        float tile_max = NEG_INF;
+        [[unroll]] for (uint c = 0; c < TILE; c++) {
+            float part = 0.0;
+            [[unroll]] for (uint j = 0; j < LANE_VEC4S; j++) {
+                uint i = j * LANES + lane;
+                if (i < h4) {
+                    part += dot(qr[j], ks[c * h4 + i]);
+                }
+            }
+            float score = subgroupClusteredAdd(part, LANES);
+            uint key = tile0 + c;
+            bool hidden = c >= n || !live || (pc.causal != 0 && key > limit);
+            if (!hidden && pc.has_mask != 0) {
+                score += mask[pc.m_off + pos * pc.keys + key];
+            }
+            s[c] = hidden ? NEG_INF : score;
+            tile_max = max(tile_max, s[c]);
+        }
+        float m_new = max(m, tile_max);
+        if (m_new != NEG_INF) {
+            float alpha = exp(m - m_new);
+            l *= alpha;
+            [[unroll]] for (uint j = 0; j < LANE_VEC4S; j++) {
+                acc[j] *= alpha;
+            }
+            [[unroll]] for (uint c = 0; c < TILE; c++) {
+                float p = exp(s[c] - m_new);
+                l += p;
+                [[unroll]] for (uint j = 0; j < LANE_VEC4S; j++) {
+                    uint i = j * LANES + lane;
+                    if (i < h4) {
+                        acc[j] += p * vs[c * h4 + i];
+                    }
+                }
+            }
+            m = m_new;
+        }
+        barrier();
+    }
+
+    if (!live) {
+        return;
+    }
+    float inv = l > 0.0 ? 1.0 / l : 0.0;
+    uint o_base = pc.o_off + ((batch * pc.heads + head) * pc.positions + pos) * h4;
+    [[unroll]] for (uint j = 0; j < LANE_VEC4S; j++) {
+        uint i = j * LANES + lane;
+        if (i < h4) {
+            o[o_base + i] = acc[j] * inv;
+        }
+    }
+}
