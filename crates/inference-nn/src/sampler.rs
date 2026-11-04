@@ -1571,7 +1571,12 @@ impl Sampler {
                 .is_none_or(|params| params.multiplier == 0.0)
     }
 
-    #[cfg(feature = "cuda")]
+    fn needs_penalties(&self) -> bool {
+        self.frequency_penalty.is_some_and(|p| p != 0.0)
+            || self.presence_penalty.is_some_and(|p| p != 0.0)
+            || self.repetition_penalty.is_some_and(|p| p != 1.0)
+    }
+
     fn can_sample_greedy_on_device(
         &self,
         return_logprobs: bool,
@@ -2387,6 +2392,27 @@ impl Sampler {
                 self.apply_device_sparse_penalties_if_needed(logits, context, prompt_len)?;
             let logits = self.apply_device_logits_bias_if_needed(logits)?;
             return self.sample_topk_on_device(logits, temperature, rng);
+        }
+
+        // greedy on Vulkan reads back the argmax alone, as CUDA's top-1 does (no logprob or bytes: none was asked)
+        if logits.device().is_vulkan()
+            && self.can_sample_greedy_on_device(
+                return_logprobs,
+                sample_speculative,
+                multiple_sequences,
+            )
+            && !self.needs_penalties()
+            && self.logits_bias.is_empty()
+        {
+            let token = logits
+                .argmax(inference_tensor::D::Minus1)?
+                .to_scalar::<u32>()?;
+            return Ok(Logprobs {
+                token,
+                logprob: 0.0,
+                top_logprobs: None,
+                bytes: None,
+            });
         }
 
         #[cfg(feature = "metal")]

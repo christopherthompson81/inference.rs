@@ -211,3 +211,12 @@ batch submits once its matmuls pass 4e9 multiply-adds: a 4096-token prompt had t
 MTP's text is byte-identical to plain's on all four. A verify step costs ~2.4 plain tokens (its experts ~2.3x, the
 draft head's Q5_0 lm_head 3.3 ms a draft), so MTP gains 4 % on real text against the bench's synthetic prompt (26.5).
 `bench --depth 4096`: plain 22.6 tok/s.
+
+### Run 13 - 2026-11-04 ~05:40
+
+**Change:** greedy sampling with no logprobs, penalties or bias asked takes the argmax on the Vulkan device and reads
+back the token alone, as CUDA's top-1 does, instead of the vocabulary's logits and their softmax (the MTP draft rows
+and plain decode take it; the verifier's target rows still score on the CPU).
+
+**Result (Run 12's prompts):** plain 24.44 -> 25.05 tok/s, MTP 2 25.37 -> 26.52, text unchanged. Plain decode now
+reads ~3.3 GB a token at ~82 GB/s, the iGPU's measured peak: only drafting gets past it.
