@@ -421,6 +421,79 @@ fn verify_long_context() -> Result<()> {
     Ok(())
 }
 
+// A long prompt's chunk over its cached prefix through a quantized cache, at a GQA-16 hybrid's attention shape
+const PREFIX_SHAPE: Shape = Shape {
+    name: "nemotron-lightning",
+    n_head: 32,
+    n_head_kv: 2,
+    head_dim: 128,
+};
+const PREFIX_CHUNK: usize = 8192;
+const PREFIX_KV: [usize; 3] = [8192, 32768, 131072];
+const PREFIX_BITS: [(u32, u32); 2] = [(8, 8), (4, 4)];
+
+#[test]
+#[ignore]
+fn chunk_over_prefix() -> Result<()> {
+    let dev = Device::new_cuda(0)?;
+    let filter = std::env::var(FILTER_ENV).unwrap_or_default();
+    let shape = PREFIX_SHAPE;
+    let (d, h_kv) = (shape.head_dim, shape.n_head_kv);
+    for seq_kv in PREFIX_KV {
+        let blocks = seq_kv / PAGED_BLOCK_SIZE;
+        let block_table = Tensor::from_vec((0..blocks as u32).collect(), (1, blocks), &dev)?;
+        let seq_lens = Tensor::from_vec(vec![seq_kv as u32], 1, &dev)?;
+        let q = Tensor::randn(0f32, 1., (1, PREFIX_CHUNK, shape.n_head, d), &dev)?
+            .to_dtype(DType::BF16)?;
+        let opts = FattnOptions {
+            scale: 1. / (d as f32).sqrt(),
+            causal: true,
+            ..Default::default()
+        };
+        // the chunk's causal half past the prefix: each row sees the prefix and its own rows up to it
+        let prefix = (seq_kv - PREFIX_CHUNK) as f64;
+        let flops = 4.0
+            * (shape.n_head * d) as f64
+            * PREFIX_CHUNK as f64
+            * (prefix + PREFIX_CHUNK as f64 / 2.0);
+        let bf16 = || {
+            Tensor::randn(0f32, 1., (blocks, h_kv, PAGED_BLOCK_SIZE, d), &dev)?
+                .to_dtype(DType::BF16)
+        };
+        let (k, v) = (bf16()?, bf16()?);
+        let bf16_us = time(&dev, || {
+            flash_attn_paged(&q, &paged(&k, &v, &block_table, &seq_lens), &opts)
+        })?;
+        for (kb, vb) in PREFIX_BITS {
+            let label = format!(
+                "{:<20} q {PREFIX_CHUNK} kv {seq_kv:>6} q{kb}/q{vb}",
+                shape.name
+            );
+            if !label.contains(&filter) {
+                continue;
+            }
+            let (kq, vq) = (
+                quant_cache(blocks, h_kv, d, kb, &dev)?,
+                quant_cache(blocks, h_kv, d, vb, &dev)?,
+            );
+            let quant_opts = FattnOptions {
+                kv_bits: Some(KvBits { k: kb, v: vb }),
+                ..opts.clone()
+            };
+            let us = time(&dev, || {
+                flash_attn_paged(&q, &paged(&kq, &vq, &block_table, &seq_lens), &quant_opts)
+            })?;
+            println!(
+                "{label}: quant {us:9.1} us {:5.1} TFLOP/s  bf16 {bf16_us:9.1} us {:5.1} TFLOP/s  ratio {:.2}",
+                flops / us / 1e6,
+                flops / bf16_us / 1e6,
+                us / bf16_us
+            );
+        }
+    }
+    Ok(())
+}
+
 // Bidirectional attention over every frame's tokens, as a multi-view reconstruction trunk's global layers run it
 const LONG_BIDIRECTIONAL: [(usize, usize, usize); 3] =
     [(16, 64, 4096), (16, 64, 20848), (16, 64, 41696)];

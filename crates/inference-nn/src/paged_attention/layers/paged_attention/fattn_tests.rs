@@ -17,6 +17,8 @@ use crate::paged_attention::{
 const NUM_BLOCKS: usize = 96;
 const N_HEAD: usize = 8;
 const N_HEAD_KV: usize = 2;
+// (q heads, kv heads) of a hybrid model's attention layers, a 16-head group a kv head
+const GQA16_HEADS: (usize, usize) = (32, 2);
 // Multiplier and offset of a full-period LCG over block ids, so each sequence gets scattered, distinct blocks.
 const BLOCK_SHUFFLE: usize = 29;
 const BLOCK_OFFSET: usize = 7;
@@ -593,6 +595,10 @@ fn attention_reference(
 }
 
 fn check_prefill(c: PrefillCase) -> Result<()> {
+    check_prefill_heads(c, (N_HEAD, N_HEAD_KV))
+}
+
+fn check_prefill_heads(c: PrefillCase, (n_head, n_head_kv): (usize, usize)) -> Result<()> {
     crate::skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
     let (d, bs, nseq) = (c.head_dim, PREFILL_BLOCK_SIZE, c.kv_lens.len());
@@ -628,12 +634,12 @@ fn check_prefill(c: PrefillCase) -> Result<()> {
     let fp8 = c.cache_dtype == DType::F8E4M3;
     let q_dtype = if fp8 { DType::BF16 } else { c.cache_dtype };
     let cache = || {
-        Tensor::randn(0f32, 1., (NUM_BLOCKS, N_HEAD_KV, bs, d), &Device::Cpu)?
+        Tensor::randn(0f32, 1., (NUM_BLOCKS, n_head_kv, bs, d), &Device::Cpu)?
             .to_dtype(c.cache_dtype)?
             .to_device(&dev)
     };
     let [k_cache, v_cache, k_ref, v_ref] = match c.kv_bits {
-        Some(bits) => quantized_caches(bits, (NUM_BLOCKS, N_HEAD_KV, bs, d), q_dtype, &dev)?,
+        Some(bits) => quantized_caches(bits, (NUM_BLOCKS, n_head_kv, bs, d), q_dtype, &dev)?,
         None => {
             let (k, v) = (cache()?, cache()?);
             [k.clone(), v.clone(), k, v]
@@ -647,18 +653,18 @@ fn check_prefill(c: PrefillCase) -> Result<()> {
     } else {
         (1, total_q)
     };
-    let packed = Tensor::randn(0f32, 1., (1, N_HEAD, total_q, d), &dev)?.to_dtype(q_dtype)?;
+    let packed = Tensor::randn(0f32, 1., (1, n_head, total_q, d), &dev)?.to_dtype(q_dtype)?;
     let query = if dense {
         packed
-            .reshape((N_HEAD, nseq, s, d))?
+            .reshape((n_head, nseq, s, d))?
             .transpose(0, 1)?
             .contiguous()?
     } else {
         packed.clone()
     };
-    let sinks = c.sinks.then(|| sink_logits(N_HEAD));
+    let sinks = c.sinks.then(|| sink_logits(n_head));
     let sdpa = SdpaParams {
-        n_kv_groups: N_HEAD / N_HEAD_KV,
+        n_kv_groups: n_head / n_head_kv,
         softcap: None,
         softmax_scale: 1. / f32::from(u16::try_from(d).unwrap()).sqrt(),
         sliding_window: c.window,
@@ -693,10 +699,10 @@ fn check_prefill(c: PrefillCase) -> Result<()> {
         slot_mapping: slot_mapping.clone(),
         dims: PagedForwardDims {
             batch_size: b,
-            attention_heads: N_HEAD,
+            attention_heads: n_head,
             seq_len: s,
             head_size: d,
-            key_value_heads: N_HEAD_KV,
+            key_value_heads: n_head_kv,
         },
         use_full: true,
         alibi_slopes: None,
@@ -715,7 +721,7 @@ fn check_prefill(c: PrefillCase) -> Result<()> {
         .expect("fattn takes the call");
     // back to (1, heads, total, d), the reference's row order
     let out = if dense {
-        out.transpose(0, 1)?.reshape((1, N_HEAD, total_q, d))?
+        out.transpose(0, 1)?.reshape((1, n_head, total_q, d))?
     } else {
         out
     };
@@ -730,7 +736,7 @@ fn check_prefill(c: PrefillCase) -> Result<()> {
             softcap: None,
             sinks: sinks.as_deref(),
             chunk: c.chunk,
-            heads: (N_HEAD, N_HEAD_KV),
+            heads: (n_head, n_head_kv),
         },
         &packed,
         (&k_ref, &v_ref),
@@ -922,6 +928,9 @@ fn prefix_prefill_over_a_quantized_cache_matches_attention_over_its_values() -> 
         (256, (6, 4), DType::F16, &[45, 20, 70], &[5, 17, 1], None),
         (64, (5, 3), DType::BF16, &[90, 33], &[12, 12], Some(40)),
         (512, (4, 2), DType::F16, &[40, 70], &[9, 30], None),
+        // many KV tiles through the wide staged kernels, whose dequantized K and V share a buffer
+        (128, (8, 8), DType::BF16, &[700, 500], &[200, 64], None),
+        (128, (4, 4), DType::F16, &[700, 500], &[200, 64], None),
     ] {
         check_prefill(PrefillCase {
             head_dim,
@@ -934,6 +943,23 @@ fn prefix_prefill_over_a_quantized_cache_matches_attention_over_its_values() -> 
             chunk: None,
             kv_bits: Some(bits),
         })?;
+    }
+    // a group of 16 query heads a kv head takes fattn's 128-column tiles over a quantized cache
+    for bits in [(8, 8), (4, 4)] {
+        check_prefill_heads(
+            PrefillCase {
+                head_dim: 128,
+                cache_dtype: DType::BF16,
+                kv_lens: &[700, 500],
+                query_lens: &[200, 64],
+                causal: true,
+                window: None,
+                sinks: false,
+                chunk: None,
+                kv_bits: Some(bits),
+            },
+            GQA16_HEADS,
+        )?;
     }
     Ok(())
 }

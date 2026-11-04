@@ -418,3 +418,46 @@ cores sustain. Vulkan's 715 s leaves ~630 s of attention after ~85 s of per-toke
 **Next:** two separate levers. On CUDA, the q8 cache's prefill attention (dequantize into the flash tiles rather than
 whatever it does now) is worth ~130 s at 245K. On Vulkan, prompt attention over the paged cache runs at ~1/10 of
 bf16 CUDA's; at 245K the card's demonstrated floor is ~115 s.
+
+## Run 19 - 2026-11-04 17:30 (local clock)
+
+**Question:** Run 18's q8-cache prompt attention ran at ~16 TFLOPS against bf16's ~52. Why, and how much comes back?
+
+**Commands:** nsys over a 65536-token prompt (q8 and bf16 caches); a new bench, `bench::chunk_over_prefix` (an
+8192-row chunk over a 8K / 32K / 128K paged prefix, 32/2 heads, head 128, causal); `ncu --set detailed` and
+`--section SourceCounters` on one launch at 32K; e2e `inference bench --prompt-len 245760` as in Run 18.
+
+**Findings, in order:**
+- nsys: everything but `flash_attn_ext_f16` matched; it took 13973 ms with q8 against 4157 with bf16 (3.4x), the same
+  tile (`<128, 128, 8, 8>`, 128 threads, 255 registers).
+- q8's staging (raw rows copied by `cp.async`, then dequantized from smem) put the block at 52.4 KB of smem
+  against bf16's 33.9: one block an SM where bf16 fits two. q4 (80-byte rows, 44 KB) fit two, and ran 1.5x bf16
+  where q8 ran 3.1x. The dequantized K tile (Q.K) and V tile (P.V) live between barriers, never at once, so they now
+  share one buffer: q8 at 36 KB, two blocks an SM. Bench, 128K prefix: 842 -> 563 ms.
+- Byte-permute dequant of 8-bit codes (3 ops two values, bit-identical): 563 -> 544 ms. Not the limiter.
+- ncu at 32K: same occupancy and IPC (1.40 / 1.48), but 26.2G warp instructions against 12.5G. Source counters: 49%
+  in `fattn_stage_quant_rows`, 27 instructions a `cp.async`. A q8 row is 136 bytes, not whole 16-byte units, so it
+  copied 34 4-byte units a row, each recomputing its row (a divide by 34, the block table). Each row now goes to a
+  power-of-two group of threads that looks it up once, and copies 8 bytes a unit (every head a multiple of 32 has
+  8-byte rows): 544 -> 422 ms; q4 420 -> 340.
+- The tile's staging and dequant are a fixed cost a block, shared by its columns. A 128-column tile (16 positions x
+  8 heads, 256 threads, one block an SM; one new instance, head 128 only, quantized caches with >= 8-head groups):
+  q8 422 -> 376 ms (45 TFLOPS); q4 unchanged (342).
+
+**Bench (`chunk_over_prefix`, us; bf16 275-298K at 128K):**
+
+| step | q8 8K | q8 32K | q8 128K | q4 128K |
+|---|---|---|---|---|
+| before | 28201 | 190197 | 842398 | 407481 |
+| shared K/V buffer | 18706 | 125496 | 562810 | 424507 |
+| byte-permute dequant | 17801 | 121972 | 544425 | 420502 |
+| row-wise staging | 14087 | 95333 | 422195 | 339579 |
+| 128 columns | 12669 | 84644 | 375678 | 342124 |
+
+**Result (e2e, one fresh 245760-token prompt, Q4_0 experts):** q8 cache 246.1 -> 141.4 s, q4 157 -> 137.1 s, bf16
+115.0 / 116.3 s. Decode at depth with q8 unchanged (181.4 tok/s at 32K, 140.8 at 128K).
+
+**Tests:** `prefix_prefill_over_a_quantized_cache_matches_attention_over_its_values` gains 700/500-row sequences
+(many tiles through the staged kernels) and GQA-16 cases (32/2 heads) that take the 128-column tile.
+
+**Next:** q8 prompts sit 1.22x bf16 end to end. Item (1) of Run 18: Vulkan's prompt attention over the paged cache.
