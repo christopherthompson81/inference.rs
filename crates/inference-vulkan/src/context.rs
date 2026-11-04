@@ -38,6 +38,8 @@ pub struct Context {
     stream: Mutex<Stream>,
     pub(crate) pool: Mutex<BufferPool>,
     pub(crate) kernels: Kernels,
+    // the matrix-core kernels, on a device that has them
+    pub(crate) coop: Option<crate::kernels::CoopKernels>,
 }
 
 /// Appends commands to the stream's open command buffer; see [`Context::record`]. Each dispatch is ordered after the
@@ -55,6 +57,12 @@ pub struct Recorder<'a> {
 impl Context {
     /// The first integrated GPU (else any GPU) that takes compute work, imports host memory and pushes descriptors.
     pub fn new() -> Result<Arc<Self>> {
+        Self::with_matrix_cores(true)
+    }
+
+    /// [`Self::new`], with prompt matmuls on the device's matrix cores (VK_KHR_cooperative_matrix) only when `allow`
+    /// and the device has them.
+    pub fn with_matrix_cores(allow: bool) -> Result<Arc<Self>> {
         // SAFETY: the loader is opened once here and kept alive in `_entry` for the context's life
         let entry = unsafe { ash::Entry::load() }.map_err(|err| Error::Load(err.to_string()))?;
         let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_2);
@@ -65,7 +73,7 @@ impl Context {
                 None,
             )?
         };
-        match Self::with_instance(entry, instance.clone()) {
+        match Self::with_instance(entry, instance.clone(), allow) {
             Ok(context) => Ok(context),
             Err(err) => {
                 // SAFETY: nothing was created from the instance that is still alive
@@ -75,7 +83,11 @@ impl Context {
         }
     }
 
-    fn with_instance(entry: ash::Entry, instance: ash::Instance) -> Result<Arc<Self>> {
+    fn with_instance(
+        entry: ash::Entry,
+        instance: ash::Instance,
+        matrix_cores: bool,
+    ) -> Result<Arc<Self>> {
         let (physical, family) = pick_device(&instance)?;
         // SAFETY: `physical` came from this instance
         let properties = unsafe { instance.get_physical_device_properties(physical) };
@@ -95,16 +107,29 @@ impl Context {
         let queues = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(family)
             .queue_priorities(&priorities)];
-        let extensions = REQUIRED_EXTENSIONS.map(CStr::as_ptr);
+        let has_coop = matrix_cores && coop_matrix_f16(&entry, &instance, physical);
+        let mut extensions = REQUIRED_EXTENSIONS.map(CStr::as_ptr).to_vec();
+        if has_coop {
+            extensions.push(ash::khr::cooperative_matrix::NAME.as_ptr());
+        }
         let mut features11 =
             vk::PhysicalDeviceVulkan11Features::default().storage_buffer16_bit_access(true);
+        let mut features12 = vk::PhysicalDeviceVulkan12Features::default()
+            .shader_float16(has_coop)
+            .vulkan_memory_model(has_coop);
         let mut dot_product = vk::PhysicalDeviceShaderIntegerDotProductFeatures::default()
             .shader_integer_dot_product(true);
-        let create = vk::DeviceCreateInfo::default()
+        let mut coop_features =
+            vk::PhysicalDeviceCooperativeMatrixFeaturesKHR::default().cooperative_matrix(true);
+        let mut create = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queues)
             .enabled_extension_names(&extensions)
             .push_next(&mut features11)
+            .push_next(&mut features12)
             .push_next(&mut dot_product);
+        if has_coop {
+            create = create.push_next(&mut coop_features);
+        }
         // SAFETY: the create info and everything it points to outlive the call
         let device = unsafe { instance.create_device(physical, &create, None)? };
         // SAFETY: the device was created from this instance
@@ -123,6 +148,11 @@ impl Context {
             ))));
         }
         let kernels = Kernels::new(&device)?;
+        let coop = if has_coop {
+            Some(crate::kernels::CoopKernels::new(&device)?)
+        } else {
+            None
+        };
         Ok(Arc::new(Self {
             _entry: entry,
             instance,
@@ -140,6 +170,7 @@ impl Context {
             stream: Mutex::new(stream),
             pool: Mutex::default(),
             kernels,
+            coop,
         }))
     }
 
@@ -265,9 +296,14 @@ impl Recorder<'_> {
 
     /// Fills a buffer's first `size` bytes (a multiple of 4) with `word`, ordered as [`Self::copy`].
     pub(crate) fn fill(&self, dst: vk::Buffer, size: u64, word: u32) {
+        self.fill_range(dst, 0, size, word);
+    }
+
+    /// [`Self::fill`] from byte `at` (a multiple of 4).
+    pub(crate) fn fill_range(&self, dst: vk::Buffer, at: u64, size: u64, word: u32) {
         self.transfer(|device, buffer| {
             // SAFETY: as above
-            unsafe { device.cmd_fill_buffer(buffer, dst, 0, size, word) }
+            unsafe { device.cmd_fill_buffer(buffer, dst, at, size, word) }
         });
     }
 
@@ -321,6 +357,9 @@ impl Drop for Context {
         unsafe {
             let _ = self.device.device_wait_idle();
             self.kernels.destroy(&self.device);
+            if let Some(coop) = &self.coop {
+                coop.destroy(&self.device);
+            }
             stream.destroy(&self.device);
             self.pool
                 .get_mut()
@@ -330,6 +369,43 @@ impl Drop for Context {
             self.instance.destroy_instance(None);
         }
     }
+}
+
+// whether the device multiplies 16 x 16 x 16 f16 matrices into f32 on its matrix cores (VK_KHR_cooperative_matrix),
+// with the 16-bit arithmetic and memory model the kernels use
+fn coop_matrix_f16(
+    entry: &ash::Entry,
+    instance: &ash::Instance,
+    physical: vk::PhysicalDevice,
+) -> bool {
+    // SAFETY: `physical` came from this instance
+    let extensions =
+        unsafe { instance.enumerate_device_extension_properties(physical) }.unwrap_or_default();
+    if !extensions
+        .iter()
+        .any(|ext| ext.extension_name_as_c_str() == Ok(ash::khr::cooperative_matrix::NAME))
+    {
+        return false;
+    }
+    let mut features12 = vk::PhysicalDeviceVulkan12Features::default();
+    let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut features12);
+    // SAFETY: as above, and the chained struct outlives the call
+    unsafe { instance.get_physical_device_features2(physical, &mut features) };
+    if features12.shader_float16 == vk::FALSE || features12.vulkan_memory_model == vk::FALSE {
+        return false;
+    }
+    let coop = ash::khr::cooperative_matrix::Instance::new(entry, instance);
+    // SAFETY: as above
+    let shapes = unsafe { coop.get_physical_device_cooperative_matrix_properties(physical) }
+        .unwrap_or_default();
+    shapes.iter().any(|p| {
+        (p.m_size, p.n_size, p.k_size) == (16, 16, 16)
+            && p.a_type == vk::ComponentTypeKHR::FLOAT16
+            && p.b_type == vk::ComponentTypeKHR::FLOAT16
+            && p.c_type == vk::ComponentTypeKHR::FLOAT32
+            && p.result_type == vk::ComponentTypeKHR::FLOAT32
+            && p.scope == vk::ScopeKHR::SUBGROUP
+    })
 }
 
 // the device-local heaps' free bytes: their budget less what is in use (VK_EXT_memory_budget), else their size
