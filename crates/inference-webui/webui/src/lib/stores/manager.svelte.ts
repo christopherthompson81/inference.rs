@@ -297,7 +297,12 @@ class ManagerStore {
   }
 
   servedIn(slot: SlotId): ManagedModel | undefined {
-    return this.served.find((model) => model.model_id === SLOTS[slot].id);
+    const spec = SLOTS[slot] as Slot;
+    const own = this.served.find((model) => model.model_id === spec.id);
+    if (own) return own;
+    // a model the server started with (`serve -m`) is served under its own id, not a slot's
+    const slotIds = new Set(Object.values(SLOTS).map((s) => s.id as string));
+    return this.served.find((model) => !slotIds.has(model.model_id) && spec.kinds.includes(model.kind));
   }
 
   form(slot: SlotId): SlotForm {
@@ -348,8 +353,11 @@ class ManagerStore {
   async load(slot: SlotId) {
     this.persistForms();
     const request = this.requestFor(slot);
+    const startup = this.servedIn(slot);
     this.activity[slot] = { busy: true, progress: null, error: null };
     try {
+      // a replaced startup model is unloaded first, so the two never hold memory at once
+      if (startup && startup.model_id !== request.model_id) await manager.unloadModel(startup.model_id);
       await manager.loadModel(request, (progress) => {
         this.activity[slot] = { busy: true, progress, error: null };
       });
@@ -367,7 +375,7 @@ class ManagerStore {
   async unload(slot: SlotId) {
     this.activity[slot] = { busy: true, progress: null, error: null };
     try {
-      await manager.unloadModel(SLOTS[slot].id);
+      await manager.unloadModel(this.servedIn(slot)?.model_id ?? SLOTS[slot].id);
       this.activity[slot] = { busy: false, progress: null, error: null };
     } catch (e) {
       this.activity[slot] = { busy: false, progress: null, error: e instanceof Error ? e.message : String(e) };
