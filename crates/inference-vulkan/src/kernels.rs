@@ -202,11 +202,9 @@ pub(crate) struct CoopKernels {
     // by BlockType
     moe_mmc: Vec<Pipeline>,
     pub(crate) moe_gather_f16: Pipeline,
-    // prompt attention over f32, f16 and quantized paged caches, on 32-lane subgroups (the shader's 4 a workgroup)
-    paged_prefill: Option<[Pipeline; 3]>,
+    // prompt attention over f32, f16 and quantized paged caches
+    paged_prefill: [Pipeline; 3],
 }
-// the subgroup width paged_prefill_cm_main.glsl's workgroup is laid out for
-const PREFILL_CM_SUBGROUP: u32 = 32;
 pub(crate) const MOE_MMC_BINDINGS: usize = 4;
 pub(crate) const MOE_MMC_PUSH_BYTES: u32 = 7 * 4;
 pub(crate) const MOE_GATHER_BINDINGS: usize = 3;
@@ -216,7 +214,7 @@ const CONVERT_PUSH_BYTES: u32 = 2 * 4;
 pub(crate) const CONVERT_THREADS: usize = 256;
 
 impl CoopKernels {
-    pub(crate) fn new(device: &ash::Device, subgroup_size: u32) -> Result<Self> {
+    pub(crate) fn new(device: &ash::Device, subgroup: Option<u32>) -> Result<Self> {
         let sources = [
             (shaders::MUL_MMC_Q8_0, "mul_mmc_q8_0"),
             (shaders::MUL_MMC_Q5_0, "mul_mmc_q5_0"),
@@ -229,7 +227,9 @@ impl CoopKernels {
         ];
         let mul_mmc = sources
             .into_iter()
-            .map(|(spirv, name)| Pipeline::new(device, spirv, MMC_BINDINGS, MMC_PUSH_BYTES, name))
+            .map(|(spirv, name)| {
+                Pipeline::with_subgroup(device, spirv, MMC_BINDINGS, MMC_PUSH_BYTES, name, subgroup)
+            })
             .collect::<Result<_>>()?;
         let convert_f16 = Pipeline::new(
             device,
@@ -250,7 +250,14 @@ impl CoopKernels {
         ]
         .into_iter()
         .map(|(spirv, name)| {
-            Pipeline::new(device, spirv, MOE_MMC_BINDINGS, MOE_MMC_PUSH_BYTES, name)
+            Pipeline::with_subgroup(
+                device,
+                spirv,
+                MOE_MMC_BINDINGS,
+                MOE_MMC_PUSH_BYTES,
+                name,
+                subgroup,
+            )
         })
         .collect::<Result<_>>()?;
         let moe_gather_f16 = Pipeline::new(
@@ -260,24 +267,21 @@ impl CoopKernels {
             MOE_GATHER_PUSH_BYTES,
             "moe_gather_f16",
         )?;
-        let paged_prefill = if subgroup_size == PREFILL_CM_SUBGROUP {
-            let prefill = |spirv, name| {
-                Pipeline::new(
-                    device,
-                    spirv,
-                    ops::PAGED_PREFILL_BINDINGS,
-                    ops::PAGED_PREFILL_PUSH_BYTES,
-                    name,
-                )
-            };
-            Some([
-                prefill(shaders::PAGED_PREFILL_CM, "paged_prefill_cm")?,
-                prefill(shaders::PAGED_PREFILL_CM_F16, "paged_prefill_cm_f16")?,
-                prefill(shaders::PAGED_PREFILL_CM_QUANT, "paged_prefill_cm_quant")?,
-            ])
-        } else {
-            None
+        let prefill = |spirv, name| {
+            Pipeline::with_subgroup(
+                device,
+                spirv,
+                ops::PAGED_PREFILL_BINDINGS,
+                ops::PAGED_PREFILL_PUSH_BYTES,
+                name,
+                subgroup,
+            )
         };
+        let paged_prefill = [
+            prefill(shaders::PAGED_PREFILL_CM, "paged_prefill_cm")?,
+            prefill(shaders::PAGED_PREFILL_CM_F16, "paged_prefill_cm_f16")?,
+            prefill(shaders::PAGED_PREFILL_CM_QUANT, "paged_prefill_cm_quant")?,
+        ];
         Ok(Self {
             mul_mmc,
             convert_f16,
@@ -288,15 +292,15 @@ impl CoopKernels {
     }
 
     /// Prompt attention over `shape`'s cache on matrix cores, where this device runs it.
-    pub(crate) fn paged_prefill(&self, shape: ops::CacheShape) -> Option<&Pipeline> {
-        let [f32, f16, quant] = self.paged_prefill.as_ref()?;
-        Some(if shape.quant.is_some() {
+    pub(crate) fn paged_prefill(&self, shape: ops::CacheShape) -> &Pipeline {
+        let [f32, f16, quant] = &self.paged_prefill;
+        if shape.quant.is_some() {
             quant
         } else if shape.f16 {
             f16
         } else {
             f32
-        })
+        }
     }
 
     fn mul_mmc(&self, ty: BlockType) -> &Pipeline {
@@ -315,7 +319,7 @@ impl CoopKernels {
             .iter()
             .chain(&self.moe_mmc)
             .chain([&self.convert_f16, &self.moe_gather_f16])
-            .chain(self.paged_prefill.iter().flatten())
+            .chain(&self.paged_prefill)
         {
             // SAFETY: the caller's contract
             unsafe { pipeline.destroy(device) };
@@ -523,7 +527,7 @@ impl Recorder<'_> {
         }
         let kernels = &self.context.kernels;
         if op.x_rows > MATVEC_MAX_ROWS
-            && let Some(coop) = self.context.coop.as_ref().filter(|_| !self.context.unified)
+            && let Some(coop) = self.context.coop.as_ref()
         {
             // the tokens as f16 into the scratch, padded to whole tiles with zeros: a tile's last matrices read past
             // its live tokens (outputs dropped), and past a row's end into the next row (against zero weights)

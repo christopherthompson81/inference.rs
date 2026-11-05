@@ -21,6 +21,18 @@ impl Pipeline {
         push_bytes: u32,
         name: &'static str,
     ) -> Result<Self> {
+        Self::with_subgroup(device, spirv, bindings, push_bytes, name, None)
+    }
+
+    /// [`Self::new`], its subgroups `subgroup` invocations wide when given (VK_EXT_subgroup_size_control).
+    pub(crate) fn with_subgroup(
+        device: &ash::Device,
+        spirv: &[u8],
+        bindings: usize,
+        push_bytes: u32,
+        name: &'static str,
+        subgroup: Option<u32>,
+    ) -> Result<Self> {
         let code = ash::util::read_spv(&mut std::io::Cursor::new(spirv))
             .map_err(|err| Error::Invalid(format!("embedded SPIR-V: {err}")))?;
         let layout_bindings: Vec<_> = (0..bindings as u32)
@@ -53,10 +65,15 @@ impl Pipeline {
             )?;
             let module = device
                 .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&code), None)?;
-            let stage = vk::PipelineShaderStageCreateInfo::default()
+            let mut required = vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo::default()
+                .required_subgroup_size(subgroup.unwrap_or_default());
+            let mut stage = vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::COMPUTE)
                 .module(module)
                 .name(c"main");
+            if subgroup.is_some() {
+                stage = stage.push_next(&mut required);
+            }
             let created = device.create_compute_pipelines(
                 vk::PipelineCache::null(),
                 &[vk::ComputePipelineCreateInfo::default()

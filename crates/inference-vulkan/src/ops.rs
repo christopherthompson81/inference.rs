@@ -301,7 +301,7 @@ impl MoeMatVec<'_> {
         cols: usize,
     ) -> usize {
         let int8 = crate::MatVec::scratch_bytes(slots.div_ceil(x_div), cols);
-        if context.coop.is_none() || context.unified {
+        if context.coop.is_none() {
             return int8;
         }
         int8.max((slots + crate::kernels::MMC_TILE_M) * cols * 2)
@@ -502,7 +502,7 @@ impl Recorder<'_> {
             return Ok(());
         }
         if op.slots >= op.experts * MMC_MIN_ROUTES_PER_EXPERT
-            && let Some(coop) = self.context.coop.as_ref().filter(|_| !self.context.unified)
+            && let Some(coop) = self.context.coop.as_ref()
         {
             return self.moe_mmc(op, coop, expert_bytes);
         }
@@ -1073,7 +1073,7 @@ impl Recorder<'_> {
         {
             return None;
         }
-        self.context.coop.as_ref()?.paged_prefill(s)
+        Some(self.context.coop.as_ref()?.paged_prefill(s))
     }
 
     pub fn paged_decode(&self, op: &PagedDecode<'_>) -> Result<()> {

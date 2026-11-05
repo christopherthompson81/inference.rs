@@ -59,12 +59,12 @@ pub struct Recorder<'a> {
 impl Context {
     /// The first integrated GPU (else any GPU) that takes compute work, imports host memory and pushes descriptors.
     pub fn new() -> Result<Arc<Self>> {
-        Self::with_matrix_cores(true)
+        Self::with_matrix_cores(MatrixCores::Discrete)
     }
 
-    /// [`Self::new`], with prompt matmuls on the device's matrix cores (VK_KHR_cooperative_matrix) only when `allow`
+    /// [`Self::new`], with prompt matmuls on the device's matrix cores (VK_KHR_cooperative_matrix) where `mode` allows
     /// and the device has them.
-    pub fn with_matrix_cores(allow: bool) -> Result<Arc<Self>> {
+    pub fn with_matrix_cores(mode: MatrixCores) -> Result<Arc<Self>> {
         // SAFETY: the loader is opened once here and kept alive in `_entry` for the context's life
         let entry = unsafe { ash::Entry::load() }.map_err(|err| Error::Load(err.to_string()))?;
         let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_2);
@@ -75,7 +75,7 @@ impl Context {
                 None,
             )?
         };
-        match Self::with_instance(entry, instance.clone(), allow) {
+        match Self::with_instance(entry, instance.clone(), mode) {
             Ok(context) => Ok(context),
             Err(err) => {
                 // SAFETY: nothing was created from the instance that is still alive
@@ -88,7 +88,7 @@ impl Context {
     fn with_instance(
         entry: ash::Entry,
         instance: ash::Instance,
-        matrix_cores: bool,
+        matrix_cores: MatrixCores,
     ) -> Result<Arc<Self>> {
         let (physical, family) = pick_device(&instance)?;
         // SAFETY: `physical` came from this instance
@@ -98,14 +98,10 @@ impl Context {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
         let mut host_props = vk::PhysicalDeviceExternalMemoryHostPropertiesEXT::default();
-        let mut subgroup_props = vk::PhysicalDeviceSubgroupProperties::default();
-        let mut props2 = vk::PhysicalDeviceProperties2::default()
-            .push_next(&mut host_props)
-            .push_next(&mut subgroup_props);
-        // SAFETY: as above, and the chained structs outlive the call
+        let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut host_props);
+        // SAFETY: as above, and the chained struct outlives the call
         unsafe { instance.get_physical_device_properties2(physical, &mut props2) };
         let import_alignment = host_props.min_imported_host_pointer_alignment;
-        let subgroup_size = subgroup_props.subgroup_size;
         let unified = properties.device_type != vk::PhysicalDeviceType::DISCRETE_GPU;
         let (has_budget, heap_size) = memory_budget(&instance, physical);
 
@@ -113,11 +109,23 @@ impl Context {
         let queues = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(family)
             .queue_priorities(&priorities)];
-        let has_coop = matrix_cores && coop_matrix_f16(&entry, &instance, physical);
+        let pin = coop_subgroup(&instance, physical);
+        let has_coop = match matrix_cores {
+            MatrixCores::Off => false,
+            MatrixCores::Discrete => !unified,
+            MatrixCores::Any => true,
+        } && pin.is_some()
+            && coop_matrix_f16(&entry, &instance, physical);
+        let pin_subgroup = has_coop && pin == Some(SubgroupPin::Required);
         let mut extensions = REQUIRED_EXTENSIONS.map(CStr::as_ptr).to_vec();
         if has_coop {
             extensions.push(ash::khr::cooperative_matrix::NAME.as_ptr());
         }
+        if pin_subgroup {
+            extensions.push(ash::ext::subgroup_size_control::NAME.as_ptr());
+        }
+        let mut size_control =
+            vk::PhysicalDeviceSubgroupSizeControlFeatures::default().subgroup_size_control(true);
         let mut features11 =
             vk::PhysicalDeviceVulkan11Features::default().storage_buffer16_bit_access(true);
         let mut features12 = vk::PhysicalDeviceVulkan12Features::default()
@@ -135,6 +143,9 @@ impl Context {
             .push_next(&mut dot_product);
         if has_coop {
             create = create.push_next(&mut coop_features);
+        }
+        if pin_subgroup {
+            create = create.push_next(&mut size_control);
         }
         // SAFETY: the create info and everything it points to outlive the call
         let device = unsafe { instance.create_device(physical, &create, None)? };
@@ -155,7 +166,10 @@ impl Context {
         }
         let kernels = Kernels::new(&device)?;
         let coop = if has_coop {
-            Some(crate::kernels::CoopKernels::new(&device, subgroup_size)?)
+            Some(crate::kernels::CoopKernels::new(
+                &device,
+                pin_subgroup.then_some(COOP_SUBGROUP),
+            )?)
         } else {
             None
         };
@@ -403,6 +417,56 @@ impl Drop for Context {
             self.instance.destroy_instance(None);
         }
     }
+}
+
+// the matrix-core kernels' tiling assumes subgroups this wide
+const COOP_SUBGROUP: u32 = 32;
+/// Where prompt matmuls and attention may run on matrix cores.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatrixCores {
+    Off,
+    /// A discrete GPU's only: an iGPU's lose to its dp4a kernels (a 780M's prompts run 4-8% slower on them).
+    Discrete,
+    Any,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SubgroupPin {
+    // compute subgroups are already COOP_SUBGROUP wide
+    Default,
+    // they can be made so per pipeline (VK_EXT_subgroup_size_control)
+    Required,
+}
+
+// how the device's compute subgroups come to be COOP_SUBGROUP wide, if they can
+fn coop_subgroup(instance: &ash::Instance, physical: vk::PhysicalDevice) -> Option<SubgroupPin> {
+    let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
+    let mut control = vk::PhysicalDeviceSubgroupSizeControlProperties::default();
+    let mut props = vk::PhysicalDeviceProperties2::default()
+        .push_next(&mut subgroup)
+        .push_next(&mut control);
+    // SAFETY: `physical` came from this instance, and the chained structs outlive the call
+    unsafe { instance.get_physical_device_properties2(physical, &mut props) };
+    if subgroup.subgroup_size == COOP_SUBGROUP {
+        return Some(SubgroupPin::Default);
+    }
+    // SAFETY: as above
+    let extensions =
+        unsafe { instance.enumerate_device_extension_properties(physical) }.unwrap_or_default();
+    let has_ext = extensions
+        .iter()
+        .any(|ext| ext.extension_name_as_c_str() == Ok(ash::ext::subgroup_size_control::NAME));
+    let mut features = vk::PhysicalDeviceSubgroupSizeControlFeatures::default();
+    let mut features2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut features);
+    // SAFETY: as above
+    unsafe { instance.get_physical_device_features2(physical, &mut features2) };
+    (has_ext
+        && features.subgroup_size_control == vk::TRUE
+        && (control.min_subgroup_size..=control.max_subgroup_size).contains(&COOP_SUBGROUP)
+        && control
+            .required_subgroup_size_stages
+            .contains(vk::ShaderStageFlags::COMPUTE))
+    .then_some(SubgroupPin::Required)
 }
 
 // whether the device multiplies 16 x 16 x 16 f16 matrices into f32 on its matrix cores (VK_KHR_cooperative_matrix),

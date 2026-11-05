@@ -511,11 +511,13 @@ async fn a_long_quantized_prompt_on_vulkan_scores_as_its_decode() -> anyhow::Res
     Ok(())
 }
 
-// the same with the prompt's quantized matmuls on the matrix cores where the device has them (f16 activations, where
-// decode takes int8)
+// the same with the prompt's quantized matmuls on the matrix cores where the device has them, an iGPU's too (f16
+// activations, where decode takes int8)
 #[tokio::test]
 async fn a_long_quantized_prompt_on_vulkan_matrix_cores_scores_near_its_decode()
 -> anyhow::Result<()> {
+    // SAFETY: nextest runs each test in its own process, and nothing has read the environment yet
+    unsafe { std::env::set_var(inference_tensor::vulkan::IGPU_MATRIX_CORES_ENV, "1") };
     if !cfg!(feature = "vulkan") || Device::new_vulkan(0).is_err() {
         return Ok(());
     }

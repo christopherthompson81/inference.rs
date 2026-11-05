@@ -5,8 +5,8 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
 use inference_vulkan::{
-    BlockType, Bound, Buffer, Context, MAX_DIMS, Map, MapOp, MatMul, MatOperand, MatVec, Operand,
-    RowOp, Rows, Select,
+    BlockType, Bound, Buffer, Context, MAX_DIMS, Map, MapOp, MatMul, MatOperand, MatVec,
+    MatrixCores, Operand, RowOp, Rows, Select,
 };
 
 use crate::backend::{BackendDevice, BackendStorage};
@@ -1467,8 +1467,15 @@ impl BackendDevice for VulkanDevice {
         }
         let context = CONTEXT
             .get_or_init(|| {
-                let matrix_cores = std::env::var_os(crate::vulkan::NO_MATRIX_CORES_ENV).is_none();
-                Context::with_matrix_cores(matrix_cores).map_err(|err| err.to_string())
+                let set = |name| std::env::var_os(name).is_some();
+                let mode = if set(crate::vulkan::NO_MATRIX_CORES_ENV) {
+                    MatrixCores::Off
+                } else if set(crate::vulkan::IGPU_MATRIX_CORES_ENV) {
+                    MatrixCores::Any
+                } else {
+                    MatrixCores::Discrete
+                };
+                Context::with_matrix_cores(mode).map_err(|err| err.to_string())
             })
             .clone()
             .map_err(crate::Error::msg)?;
