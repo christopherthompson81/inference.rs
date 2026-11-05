@@ -1,0 +1,141 @@
+#version 450
+// flash_attn.comp at one position (decode): a workgroup a query head, its subgroups splitting the keys (subgroup s
+// takes keys s, s + subgroups, ...), a lane the head's vec4s lane, lane + subgroup size, ..., an online softmax a
+// subgroup merged through shared memory at the end. Same bindings and push constants as flash_attn; `positions` is 1
+// and `first` 0.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_control_flow_attributes : require
+
+layout(local_size_x = 512) in;
+
+layout(std430, binding = 0) readonly buffer Q { vec4 q[]; };
+layout(std430, binding = 1) readonly buffer K { vec4 k[]; };
+layout(std430, binding = 2) readonly buffer V { vec4 v[]; };
+layout(std430, binding = 3) readonly buffer M { float mask[]; };
+layout(std430, binding = 4) writeonly buffer O { vec4 o[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint positions;
+    uint keys;
+    uint heads;
+    uint kv_heads;
+    uint head4;
+    float scale;
+    // in vec4s, the mask's in floats
+    uint q_off;
+    uint k_off;
+    uint v_off;
+    uint m_off;
+    uint o_off;
+    uint has_mask;
+    uint causal;
+    uint row_heads;
+    uint row_positions;
+    uint first;
+} pc;
+
+// subgroups a workgroup at most (512 threads of at least 8 lanes), the widest head in vec4s, and a lane's vec4s at
+// most (8 lanes)
+const uint MAX_SUBGROUPS = 64;
+const uint MAX_HEAD4 = 32;
+const uint LANE_VEC4S = 4;
+// finite, as flash_attn's: NVIDIA's exp(-inf - m) leaks weight to masked keys
+const float MASKED = -1e30;
+
+shared float sm[MAX_SUBGROUPS];
+shared float sl[MAX_SUBGROUPS];
+shared vec4 sacc[MAX_SUBGROUPS * MAX_HEAD4];
+
+void main() {
+    uint head = gl_WorkGroupID.x;
+    uint batch = gl_WorkGroupID.z;
+    uint sg = gl_SubgroupID;
+    uint lane = gl_SubgroupInvocationID;
+    uint subgroups = gl_NumSubgroups;
+    uint h4 = pc.head4;
+    uint kvh = head / (pc.heads / pc.kv_heads);
+    uint pos = pc.first;
+    // the last key this position sees (keys past the diagonal hidden)
+    uint end = pc.causal != 0 ? min(pc.keys, pos + pc.keys - pc.positions + 1) : pc.keys;
+
+    uint width = gl_SubgroupSize;
+    uint q_base = pc.q_off + ((batch * pc.heads + head) * pc.positions + pos) * h4;
+    vec4 qr[LANE_VEC4S];
+    vec4 acc[LANE_VEC4S];
+    [[unroll]] for (uint j = 0; j < LANE_VEC4S; j++) {
+        uint i = lane + j * width;
+        qr[j] = i < h4 ? q[q_base + i] * pc.scale : vec4(0.0);
+        acc[j] = vec4(0.0);
+    }
+    uint kv_base = (batch * pc.kv_heads + kvh) * pc.keys * h4;
+    float m = MASKED;
+    float l = 0.0;
+    for (uint key = sg; key < end; key += subgroups) {
+        uint at = kv_base + key * h4;
+        float part = 0.0;
+        [[unroll]] for (uint j = 0; j < LANE_VEC4S; j++) {
+            uint i = lane + j * width;
+            if (i < h4) {
+                part += dot(qr[j], k[pc.k_off + at + i]);
+            }
+        }
+        float score = subgroupAdd(part);
+        if (pc.has_mask != 0) {
+            score += mask[pc.m_off + pos * pc.keys + key];
+        }
+        score = max(score, MASKED);
+        float m_new = max(m, score);
+        float alpha = exp(m - m_new);
+        float p = exp(score - m_new);
+        l = l * alpha + p;
+        [[unroll]] for (uint j = 0; j < LANE_VEC4S; j++) {
+            uint i = lane + j * width;
+            if (i < h4) {
+                acc[j] = acc[j] * alpha + p * v[pc.v_off + at + i];
+            }
+        }
+        m = m_new;
+    }
+    if (lane == 0) {
+        sm[sg] = m;
+        sl[sg] = l;
+    }
+    [[unroll]] for (uint j = 0; j < LANE_VEC4S; j++) {
+        uint i = lane + j * width;
+        if (i < h4) {
+            sacc[sg * MAX_HEAD4 + i] = acc[j];
+        }
+    }
+    barrier();
+    if (sg != 0) {
+        return;
+    }
+    float mt = MASKED;
+    for (uint s = 0; s < subgroups; s++) {
+        mt = max(mt, sm[s]);
+    }
+    float lt = 0.0;
+    vec4 out4[LANE_VEC4S];
+    [[unroll]] for (uint j = 0; j < LANE_VEC4S; j++) {
+        out4[j] = vec4(0.0);
+    }
+    for (uint s = 0; s < subgroups; s++) {
+        float w = exp(sm[s] - mt);
+        lt += sl[s] * w;
+        [[unroll]] for (uint j = 0; j < LANE_VEC4S; j++) {
+            uint i = lane + j * width;
+            if (i < h4) {
+                out4[j] += sacc[s * MAX_HEAD4 + i] * w;
+            }
+        }
+    }
+    float inv = lt > 0.0 ? 1.0 / lt : 0.0;
+    uint o_base = pc.o_off + ((batch * pc.heads + head) * pc.positions + pos) * h4;
+    [[unroll]] for (uint j = 0; j < LANE_VEC4S; j++) {
+        uint i = lane + j * width;
+        if (i < h4) {
+            o[o_base + i] = out4[j] * inv;
+        }
+    }
+}

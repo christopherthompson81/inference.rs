@@ -347,6 +347,10 @@ impl Buffer {
     }
 
     /// Whether the CPU maps the buffer, so its bytes are written and read in place.
+    pub(crate) fn context(&self) -> &Arc<Context> {
+        &self.context
+    }
+
     pub fn is_mapped(&self) -> bool {
         !self.ptr.is_null()
     }
@@ -359,6 +363,7 @@ impl Buffer {
     /// Writes `bytes` at `offset`: in place when mapped, which the GPU must not be using, else as a copy recorded on
     /// the stream, ordered after what is recorded before it.
     pub fn write(&mut self, offset: usize, bytes: &[u8]) -> Result<()> {
+        self.context.forget_quantized(self.buffer);
         if offset + bytes.len() > self.len {
             return Err(Error::Invalid(format!(
                 "{} bytes at {offset} of a {}-byte buffer",
@@ -390,6 +395,7 @@ impl Buffer {
 
     /// Fills the buffer with copies of `word`, ordered as [`Self::write`] is.
     pub fn fill(&mut self, word: u32) -> Result<()> {
+        self.context.forget_quantized(self.buffer);
         if self.is_mapped() {
             let words = self.len / 4;
             // SAFETY: the mapping is page aligned and `len` bytes long, unique while `&mut self` is held

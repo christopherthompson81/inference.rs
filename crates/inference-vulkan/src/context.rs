@@ -44,7 +44,23 @@ pub struct Context {
     pub(crate) coop: Option<crate::kernels::CoopKernels>,
     // labels each dispatch records, under LABELS_ENV
     pub(crate) labels: Option<ash::ext::debug_utils::Device>,
+    // decode activations already quantized, until something writes their buffer or their blocks'
+    quantized: Mutex<Vec<Quantized>>,
 }
+
+/// A decode activation's int8 blocks (quantize_q8_1's, at `s_off` in `blocks`) for `values` contiguous floats of `x`
+/// from `x_off`: the same blocks whatever rows they make, rows being whole blocks; both buffers held, so the pool
+/// cannot hand either out again while it is cached.
+pub(crate) struct Quantized {
+    x: Arc<crate::Buffer>,
+    x_off: usize,
+    values: usize,
+    pub(crate) blocks: Arc<crate::Buffer>,
+    pub(crate) s_off: usize,
+}
+
+// decode activations the cache keeps (a layer's input serves at most a few matvecs)
+const QUANTIZED_KEPT: usize = 4;
 
 /// Appends commands to the stream's open command buffer; see [`Context::record`]. Each dispatch is ordered after the
 /// ones before it.
@@ -224,7 +240,51 @@ impl Context {
             pool: Mutex::default(),
             kernels,
             coop,
+            quantized: Mutex::default(),
         }))
+    }
+
+    /// The cached int8 blocks of `values` floats of `x` from `x_off`, if nothing has written either since.
+    pub(crate) fn find_quantized(
+        &self,
+        x: &Arc<crate::Buffer>,
+        x_off: usize,
+        values: usize,
+    ) -> Option<(Arc<crate::Buffer>, usize)> {
+        let cache = self.quantized.lock().expect("quantized cache poisoned");
+        cache
+            .iter()
+            .find(|q| Arc::ptr_eq(&q.x, x) && q.x_off == x_off && q.values == values)
+            .map(|q| (q.blocks.clone(), q.s_off))
+    }
+
+    pub(crate) fn remember_quantized(
+        &self,
+        x: &Arc<crate::Buffer>,
+        x_off: usize,
+        values: usize,
+        blocks: &Arc<crate::Buffer>,
+        s_off: usize,
+    ) {
+        let mut cache = self.quantized.lock().expect("quantized cache poisoned");
+        if cache.len() >= QUANTIZED_KEPT {
+            cache.remove(0);
+        }
+        cache.push(Quantized {
+            x: x.clone(),
+            x_off,
+            values,
+            blocks: blocks.clone(),
+            s_off,
+        });
+    }
+
+    /// Drops cached quantizations that `buffer` holds the floats or the blocks of: something is about to write it.
+    pub(crate) fn forget_quantized(&self, buffer: vk::Buffer) {
+        let mut cache = self.quantized.lock().expect("quantized cache poisoned");
+        if !cache.is_empty() {
+            cache.retain(|q| q.x.buffer != buffer && q.blocks.buffer != buffer);
+        }
     }
 
     pub fn device_name(&self) -> &str {
@@ -377,6 +437,7 @@ impl Recorder<'_> {
             .src_offset(src_at)
             .dst_offset(dst_at)
             .size(size);
+        self.context.forget_quantized(dst);
         self.transfer(|device, buffer| {
             // SAFETY: the command buffer is recording, and the caller retains both buffers
             unsafe { device.cmd_copy_buffer(buffer, src, dst, &[region]) }
@@ -390,6 +451,7 @@ impl Recorder<'_> {
 
     /// [`Self::fill`] from byte `at` (a multiple of 4).
     pub(crate) fn fill_range(&self, dst: vk::Buffer, at: u64, size: u64, word: u32) {
+        self.context.forget_quantized(dst);
         self.transfer(|device, buffer| {
             // SAFETY: as above
             unsafe { device.cmd_fill_buffer(buffer, dst, at, size, word) }

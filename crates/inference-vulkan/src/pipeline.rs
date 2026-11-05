@@ -11,6 +11,73 @@ pub(crate) struct Pipeline {
     bindings: usize,
     push_bytes: u32,
     name: &'static str,
+    // bit b: binding b's buffer may be written (its block not decorated NonWritable)
+    pub(crate) writes: u64,
+}
+
+// SPIR-V opcodes and decorations the binding scan reads
+const OP_TYPE_POINTER: u32 = 32;
+const OP_VARIABLE: u32 = 59;
+const OP_DECORATE: u32 = 71;
+const OP_MEMBER_DECORATE: u32 = 72;
+const DECORATION_NON_WRITABLE: u32 = 24;
+const DECORATION_BINDING: u32 = 33;
+
+// which bindings a module may write: a binding's variables, each writable unless it or every member of its block is
+// NonWritable
+fn writable_bindings(code: &[u32]) -> u64 {
+    use std::collections::{HashMap, HashSet};
+    let mut binding = HashMap::new();
+    let mut readonly_vars = HashSet::new();
+    // block -> (members, NonWritable members)
+    let mut members: HashMap<u32, (u32, u32)> = HashMap::new();
+    let mut pointee = HashMap::new();
+    let mut var_type = HashMap::new();
+    let mut at = 5;
+    while at < code.len() {
+        let count = (code[at] >> 16) as usize;
+        let op = code[at] & 0xffff;
+        let w = &code[at..(at + count.max(1)).min(code.len())];
+        match op {
+            OP_DECORATE if w.len() >= 3 => match w[2] {
+                DECORATION_BINDING if w.len() >= 4 => {
+                    binding.insert(w[1], w[3]);
+                }
+                DECORATION_NON_WRITABLE => {
+                    readonly_vars.insert(w[1]);
+                }
+                _ => {}
+            },
+            OP_MEMBER_DECORATE if w.len() >= 4 => {
+                let entry = members.entry(w[1]).or_default();
+                entry.0 = entry.0.max(w[2] + 1);
+                if w[3] == DECORATION_NON_WRITABLE {
+                    entry.1 += 1;
+                }
+            }
+            OP_TYPE_POINTER if w.len() >= 4 => {
+                pointee.insert(w[1], w[3]);
+            }
+            OP_VARIABLE if w.len() >= 3 => {
+                var_type.insert(w[2], w[1]);
+            }
+            _ => {}
+        }
+        at += count.max(1);
+    }
+    let mut writes = 0u64;
+    for (var, &b) in &binding {
+        let block = var_type.get(var).and_then(|t| pointee.get(t));
+        // Offset decorates every member of a block, so its count is the block's members
+        let readonly = readonly_vars.contains(var)
+            || block
+                .and_then(|s| members.get(s))
+                .is_some_and(|&(n, ro)| n > 0 && ro >= n);
+        if !readonly && b < 64 {
+            writes |= 1 << b;
+        }
+    }
+    writes
 }
 
 impl Pipeline {
@@ -35,6 +102,7 @@ impl Pipeline {
     ) -> Result<Self> {
         let code = ash::util::read_spv(&mut std::io::Cursor::new(spirv))
             .map_err(|err| Error::Invalid(format!("embedded SPIR-V: {err}")))?;
+        let writes = writable_bindings(&code);
         let layout_bindings: Vec<_> = (0..bindings as u32)
             .map(|binding| {
                 vk::DescriptorSetLayoutBinding::default()
@@ -90,6 +158,7 @@ impl Pipeline {
                 bindings,
                 push_bytes,
                 name,
+                writes,
             })
         }
     }
@@ -155,6 +224,11 @@ impl Pipeline {
             })
             .collect();
         let context = recorder.context;
+        for (b, &buffer) in buffers.iter().enumerate() {
+            if self.writes & (1 << b) != 0 {
+                context.forget_quantized(buffer);
+            }
+        }
         let label = context.labels.as_ref().map(|labels| {
             (
                 labels,

@@ -3,6 +3,7 @@
 // logits), the selection bias added for choosing only, the top k by a stable descending order (ties to the lower
 // expert), their weights (the scores, or a softmax or sigmoid of their logits), renormalized and scaled. The scores
 // and each pick's argmax run over the workgroup.
+#extension GL_KHR_shader_subgroup_arithmetic : require
 
 layout(local_size_x = 128) in;
 
@@ -40,29 +41,31 @@ shared float score[MAX_EXPERTS];
 shared bool taken[MAX_EXPERTS];
 shared float red_v[THREADS];
 shared uint red_i[THREADS];
+// a subgroup's best, at most THREADS subgroups (one-lane subgroups)
+shared float sg_v[THREADS];
+shared uint sg_i[THREADS];
 shared uint chosen[MAX_TOP_K];
 
-// the workgroup's largest `v` and its index, the lower index among equals; NONE indices lose
+// the workgroup's largest `v` and its index, the lower index among equals; NONE indices lose: a subgroup's max and its
+// lowest index at that max, then the subgroups' in shared memory
 void best(float v, uint i, out float bv, out uint bi) {
-    uint t = gl_LocalInvocationID.x;
-    red_v[t] = v;
-    red_i[t] = i;
-    barrier();
-    for (uint s = THREADS / 2; s > 0; s >>= 1) {
-        if (t < s) {
-            float ov = red_v[t + s];
-            uint oi = red_i[t + s];
-            bool better = oi != NONE
-                && (red_i[t] == NONE || ov > red_v[t] || (ov == red_v[t] && oi < red_i[t]));
-            if (better) {
-                red_v[t] = ov;
-                red_i[t] = oi;
-            }
-        }
-        barrier();
+    bool valid = i != NONE;
+    float top = subgroupMax(valid ? v : -1.0 / 0.0);
+    uint top_i = subgroupMin(valid && v == top ? i : NONE);
+    if (subgroupElect()) {
+        sg_v[gl_SubgroupID] = top;
+        sg_i[gl_SubgroupID] = top_i;
     }
-    bv = red_v[0];
-    bi = red_i[0];
+    barrier();
+    bv = 0.0;
+    bi = NONE;
+    for (uint g = 0; g < gl_NumSubgroups; g++) {
+        uint oi = sg_i[g];
+        if (oi != NONE && (bi == NONE || sg_v[g] > bv || (sg_v[g] == bv && oi < bi))) {
+            bv = sg_v[g];
+            bi = oi;
+        }
+    }
     barrier();
 }
 

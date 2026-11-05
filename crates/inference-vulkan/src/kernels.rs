@@ -7,7 +7,7 @@ use crate::pipeline::Pipeline;
 use crate::{Error, Recorder, Result, shaders};
 
 // values a block of the 32-value types holds
-const BLOCK_VALUES: usize = 32;
+pub(crate) const BLOCK_VALUES: usize = 32;
 // rows one matvec workgroup takes (the shader's `ROWS`), and the most workgroups one grid dimension holds
 const MATVEC_ROWS: usize = 4;
 // the matvecs' buffers and push constants, and an int8 block's bytes (8 packed words, then its (d, d * sum q) in the
@@ -17,8 +17,8 @@ const MATVECS_PUSH_BYTES: u32 = 7 * 4;
 const EMBED_BINDINGS: usize = 3;
 const EMBED_PUSH_BYTES: u32 = 5 * 4;
 const EMBED_THREADS: usize = 64;
-const Q8_WORD_BYTES: usize = 32;
-const Q8_SCALE_BYTES: usize = 8;
+pub(crate) const Q8_WORD_BYTES: usize = 32;
+pub(crate) const Q8_SCALE_BYTES: usize = 8;
 const QUANTIZE_BINDINGS: usize = 3;
 const QUANTIZE_PUSH_BYTES: u32 = 3 * 4;
 const QUANTIZE_THREADS: usize = 64;
@@ -85,6 +85,8 @@ kernels! {
     map_f32: MAP_F32, MAP_BINDINGS, MAP_PUSH_BYTES;
     copy_b32: COPY_B32, MAP_BINDINGS, MAP_PUSH_BYTES;
     rows_f32: ROWS_F32, ops::BINDINGS, ops::ROWS_PUSH_BYTES;
+    rms_norm_q8: RMS_NORM_Q8, ops::RMS_Q8_BINDINGS, ops::RMS_Q8_PUSH_BYTES;
+    relu2_q8: RELU2_Q8, crate::map::RELU2_Q8_BINDINGS, crate::map::RELU2_Q8_PUSH_BYTES;
     index_b32: INDEX_B32, ops::BINDINGS, ops::INDEX_PUSH_BYTES;
     matmul_f32: MATMUL_F32, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
     matmul_f32_dot: MATMUL_F32_DOT, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
@@ -119,7 +121,9 @@ kernels! {
     paged_decode_f16: PAGED_DECODE_F16, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
     paged_decode_reduce: PAGED_DECODE_REDUCE, ops::PAGED_REDUCE_BINDINGS, ops::PAGED_REDUCE_PUSH_BYTES;
     flash_attn: FLASH_ATTN, ops::FLASH_BINDINGS, ops::FLASH_PUSH_BYTES;
+    flash_decode: FLASH_DECODE, ops::FLASH_BINDINGS, ops::FLASH_PUSH_BYTES;
     gated_rmsnorm: GATED_RMSNORM, ops::GATED_RMSNORM_BINDINGS, ops::GATED_RMSNORM_PUSH_BYTES;
+    gated_rmsnorm_q8: GATED_RMSNORM_Q8, ops::GATED_Q8_BINDINGS, ops::GATED_Q8_PUSH_BYTES;
     paged_prefill: PAGED_PREFILL, ops::PAGED_PREFILL_BINDINGS, ops::PAGED_PREFILL_PUSH_BYTES;
     paged_prefill_f16: PAGED_PREFILL_F16, ops::PAGED_PREFILL_BINDINGS, ops::PAGED_PREFILL_PUSH_BYTES;
     ranked_topk: RANKED_TOPK, ops::RANKED_BINDINGS, ops::RANKED_PUSH_BYTES;
@@ -572,6 +576,25 @@ impl Recorder<'_> {
         Ok(s_off)
     }
 
+    /// A decode activation's int8 blocks: the cached ones when nothing has written `x` or them since they were made,
+    /// else quantized into `scratch` and cached. The buffer to bind for them, and where their scales start.
+    pub(crate) fn quantized(
+        &self,
+        x: crate::At<'_>,
+        rows: usize,
+        cols: usize,
+        scratch: &Arc<Buffer>,
+    ) -> Result<(Arc<Buffer>, usize)> {
+        if let Some(hit) = self.context.find_quantized(x.0, x.1, rows * cols) {
+            self.retain(hit.0.clone());
+            return Ok(hit);
+        }
+        let s_off = self.quantize_rows(x, rows, cols, scratch)?;
+        self.context
+            .remember_quantized(x.0, x.1, rows * cols, scratch, s_off);
+        Ok((scratch.clone(), s_off))
+    }
+
     pub fn embed(&self, op: &Embed<'_>) -> Result<()> {
         let blocks = op.cols / BLOCK_VALUES;
         let fits = op.vocab > 0
@@ -740,7 +763,13 @@ impl Recorder<'_> {
             self.retain(scratch.clone());
             return Ok(());
         }
-        let s_off = self.quantize_rows((op.x, op.x_offset), op.x_rows, op.cols, scratch)?;
+        let (blocks, s_off) = if op.x_rows <= MATVEC_MAX_ROWS {
+            self.quantized((op.x, op.x_offset), op.x_rows, op.cols, scratch)?
+        } else {
+            let s_off = self.quantize_rows((op.x, op.x_offset), op.x_rows, op.cols, scratch)?;
+            (scratch.clone(), s_off)
+        };
+        let scratch = &blocks;
         if op.x_rows > MATVEC_MAX_ROWS {
             let pipeline = match op.ty {
                 BlockType::Q8_0 => &kernels.mul_mm_q8_0,
@@ -936,6 +965,265 @@ mod tests {
     }
 
     // matvecs (and past 8 rows the tiled matmul) take int8 activations: each output within the rounding bound of its
+    // the SPIR-V scan's writable bindings: quantize writes its blocks and scales, a matvec its output alone
+    #[test]
+    fn pipelines_know_which_bindings_they_write() {
+        let Some(context) = context() else {
+            return;
+        };
+        assert_eq!(context.kernels.quantize_q8_1.writes, 0b110);
+        assert_eq!(context.kernels.mat_vecs_q8_0.writes, 0b100);
+    }
+
+    // a decode row's RMS norm writes its int8 blocks for the next matvec: that matvec matches one over the same values
+    // quantized apart (copied to a buffer of their own)
+    #[test]
+    fn a_norms_blocks_match_quantizing_its_output() -> Result<()> {
+        let Some(context) = context() else {
+            return Ok(());
+        };
+        const ROWS: usize = 96;
+        const COLS: usize = 2688;
+        let ty = BlockType::Q8_0;
+        let len = len(ty, ROWS, COLS);
+        let mut pages = Pages::new(len);
+        weights(ty, pages.bytes(), ROWS, COLS);
+        let weights: Arc<dyn Bound> =
+            Arc::new(Buffer::with_bytes(&context, &pages.bytes()[..len])?);
+        let x: Vec<f32> = (0..COLS)
+            .map(|i| ((i * 37 % 101) as f32 - 50.0) / 9.0)
+            .collect();
+        let alpha: Vec<f32> = (0..COLS).map(|i| 0.5 + (i % 11) as f32 / 10.0).collect();
+        let (xs, alphas) = (
+            Arc::new(Buffer::with_f32(&context, &x)?),
+            Arc::new(Buffer::with_f32(&context, &alpha)?),
+        );
+        let normed = Arc::new(Buffer::new(&context, COLS * 4)?);
+        let (cached_y, apart_y) = (
+            Arc::new(Buffer::new(&context, ROWS * 4)?),
+            Arc::new(Buffer::new(&context, ROWS * 4)?),
+        );
+        let scratch = Arc::new(Buffer::new(&context, MatVec::scratch_bytes(1, COLS))?);
+        let op = |x, y| MatVec {
+            ty,
+            weights: &weights,
+            rows: ROWS,
+            cols: COLS,
+            x,
+            x_offset: 0,
+            y,
+            y_offset: 0,
+            x_rows: 1,
+            scratch: &scratch,
+        };
+        context.submit(|r| {
+            r.rows_f32(&crate::Rows {
+                op: crate::RowOp::RmsNorm,
+                rows: 1,
+                cols: COLS,
+                eps: 1e-5,
+                x: &xs,
+                x_offset: 0,
+                alpha: Some((&alphas, 0)),
+                out: &normed,
+                out_offset: 0,
+            })?;
+            r.mat_vec(&op(&normed, &cached_y))
+        })?;
+        let apart = Arc::new(Buffer::with_f32(&context, &normed.read_f32()?)?);
+        context.submit(|r| r.mat_vec(&op(&apart, &apart_y)))?;
+        assert_eq!(cached_y.read_f32()?, apart_y.read_f32()?);
+        Ok(())
+    }
+
+    // the same for Mamba-2's gated RMS norm (a row of 8 groups of 512, Lightning's)
+    #[test]
+    fn a_gated_norms_blocks_match_quantizing_its_output() -> Result<()> {
+        let Some(context) = context() else {
+            return Ok(());
+        };
+        const ROWS: usize = 96;
+        const GROUPS: usize = 8;
+        const GROUP: usize = 512;
+        const COLS: usize = GROUPS * GROUP;
+        let ty = BlockType::Q8_0;
+        let len = len(ty, ROWS, COLS);
+        let mut pages = Pages::new(len);
+        weights(ty, pages.bytes(), ROWS, COLS);
+        let weights: Arc<dyn Bound> =
+            Arc::new(Buffer::with_bytes(&context, &pages.bytes()[..len])?);
+        let wave = |k: usize| -> Vec<f32> {
+            (0..COLS)
+                .map(|i| ((i * k % 101) as f32 - 50.0) / 13.0)
+                .collect()
+        };
+        let (xs, gate, scale) = (
+            Arc::new(Buffer::with_f32(&context, &wave(37))?),
+            Arc::new(Buffer::with_f32(&context, &wave(53))?),
+            Arc::new(Buffer::with_f32(&context, &wave(7))?),
+        );
+        let normed = Arc::new(Buffer::new(&context, COLS * 4)?);
+        let (cached_y, apart_y) = (
+            Arc::new(Buffer::new(&context, ROWS * 4)?),
+            Arc::new(Buffer::new(&context, ROWS * 4)?),
+        );
+        let scratch = Arc::new(Buffer::new(&context, MatVec::scratch_bytes(1, COLS))?);
+        let op = |x, y| MatVec {
+            ty,
+            weights: &weights,
+            rows: ROWS,
+            cols: COLS,
+            x,
+            x_offset: 0,
+            y,
+            y_offset: 0,
+            x_rows: 1,
+            scratch: &scratch,
+        };
+        context.submit(|r| {
+            r.gated_rmsnorm(&crate::GatedRmsNorm {
+                rows: 1,
+                groups: GROUPS,
+                group_size: GROUP,
+                eps: 1e-5,
+                x: (&xs, 0),
+                gate: (&gate, 0),
+                weight: (&scale, 0),
+                out: &normed,
+            })?;
+            r.mat_vec(&op(&normed, &cached_y))
+        })?;
+        let apart = Arc::new(Buffer::with_f32(&context, &normed.read_f32()?)?);
+        context.submit(|r| r.mat_vec(&op(&apart, &apart_y)))?;
+        assert_eq!(cached_y.read_f32()?, apart_y.read_f32()?);
+        Ok(())
+    }
+
+    // the same for relu^2 into a few rows (a decode step's routed experts' down-projection input)
+    #[test]
+    fn a_relu_squares_blocks_match_quantizing_its_output() -> Result<()> {
+        let Some(context) = context() else {
+            return Ok(());
+        };
+        const ROWS: usize = 96;
+        const X_ROWS: usize = 6;
+        const COLS: usize = 1856;
+        let ty = BlockType::Q8_0;
+        let len = len(ty, ROWS, COLS);
+        let mut pages = Pages::new(len);
+        weights(ty, pages.bytes(), ROWS, COLS);
+        let weights: Arc<dyn Bound> =
+            Arc::new(Buffer::with_bytes(&context, &pages.bytes()[..len])?);
+        let a: Vec<f32> = (0..X_ROWS * COLS)
+            .map(|i| ((i * 37 % 101) as f32 - 50.0) / 17.0)
+            .collect();
+        let xs = Arc::new(Buffer::with_f32(&context, &a)?);
+        let squared = Arc::new(Buffer::new(&context, X_ROWS * COLS * 4)?);
+        let (cached_y, apart_y) = (
+            Arc::new(Buffer::new(&context, X_ROWS * ROWS * 4)?),
+            Arc::new(Buffer::new(&context, X_ROWS * ROWS * 4)?),
+        );
+        let scratch = Arc::new(Buffer::new(&context, MatVec::scratch_bytes(X_ROWS, COLS))?);
+        let op = |x, y| MatVec {
+            ty,
+            weights: &weights,
+            rows: ROWS,
+            cols: COLS,
+            x,
+            x_offset: 0,
+            y,
+            y_offset: 0,
+            x_rows: X_ROWS,
+            scratch: &scratch,
+        };
+        let strides = [COLS, 1];
+        context.submit(|r| {
+            r.map_f32(&crate::map::Map {
+                op: crate::map::MapOp::Relu2,
+                dims: &[X_ROWS, COLS],
+                a: crate::map::Operand {
+                    buffer: &xs,
+                    offset: 0,
+                    strides: &strides,
+                },
+                b: None,
+                out: crate::map::Operand {
+                    buffer: &squared,
+                    offset: 0,
+                    strides: &strides,
+                },
+                params: [0.0; 2],
+            })?;
+            r.mat_vec(&op(&squared, &cached_y))
+        })?;
+        let values = squared.read_f32()?;
+        let want: Vec<f32> = a.iter().map(|v| v.max(0.0) * v.max(0.0)).collect();
+        assert_eq!(values, want);
+        let apart = Arc::new(Buffer::with_f32(&context, &values)?);
+        context.submit(|r| r.mat_vec(&op(&apart, &apart_y)))?;
+        assert_eq!(cached_y.read_f32()?, apart_y.read_f32()?);
+        Ok(())
+    }
+
+    // a decode activation's cached blocks serve a second matvec of it, and a write to it drops them: a fill of the
+    // activations between two matvecs in one submit shows in the second's output
+    #[test]
+    fn quantized_activations_are_dropped_when_written() -> Result<()> {
+        let Some(context) = context() else {
+            return Ok(());
+        };
+        const ROWS: usize = 64;
+        const COLS: usize = 256;
+        const ONE: u32 = 0x3f80_0000;
+        let ty = BlockType::Q8_0;
+        let len = len(ty, ROWS, COLS);
+        let mut pages = Pages::new(len);
+        weights(ty, pages.bytes(), ROWS, COLS);
+        let weights: Arc<dyn Bound> =
+            Arc::new(Buffer::with_bytes(&context, &pages.bytes()[..len])?);
+        let x: Vec<f32> = (0..COLS).map(|i| (i % 7) as f32 - 3.0).collect();
+        let xs = Arc::new(Buffer::with_f32(&context, &x)?);
+        let ys: Vec<_> = (0..3)
+            .map(|_| Buffer::new(&context, ROWS * 4).map(Arc::new))
+            .collect::<Result<_>>()?;
+        let scratches: Vec<_> = (0..3)
+            .map(|_| Buffer::new(&context, MatVec::scratch_bytes(1, COLS)).map(Arc::new))
+            .collect::<Result<_>>()?;
+        let op = |y, scratch| MatVec {
+            ty,
+            weights: &weights,
+            rows: ROWS,
+            cols: COLS,
+            x: &xs,
+            x_offset: 0,
+            y,
+            y_offset: 0,
+            x_rows: 1,
+            scratch,
+        };
+        context.submit(|r| {
+            r.mat_vec(&op(&ys[0], &scratches[0]))?;
+            r.mat_vec(&op(&ys[1], &scratches[1]))?;
+            r.fill(xs.buffer, (COLS * 4) as u64, ONE);
+            r.mat_vec(&op(&ys[2], &scratches[2]))
+        })?;
+        let (first, again, after) = (ys[0].read_f32()?, ys[1].read_f32()?, ys[2].read_f32()?);
+        assert_eq!(first, again);
+        // against an all-ones row: each output the row's weight sum
+        let ones = Arc::new(Buffer::with_f32(&context, &vec![1.0; COLS])?);
+        let want = Arc::new(Buffer::new(&context, ROWS * 4)?);
+        let fresh = Arc::new(Buffer::new(&context, MatVec::scratch_bytes(1, COLS))?);
+        context.submit(|r| {
+            r.mat_vec(&MatVec {
+                x: &ones,
+                ..op(&want, &fresh)
+            })
+        })?;
+        assert_eq!(after, want.read_f32()?);
+        assert_ne!(after, first);
+        Ok(())
+    }
+
     // blocks (|w| times half a block's step, summed) of the f32 product, over weight rows and tokens past a
     // workgroup's and activation rows unaligned in their buffer
     #[test]
