@@ -552,6 +552,10 @@ impl Recorder<'_> {
                 op.y_offset,
                 op.x_rows,
             ])?;
+            self.profile_shape(
+                || format!("m={} n={} k={}", op.rows, op.x_rows, op.cols),
+                op.rows * op.cols * op.x_rows,
+            );
             coop.mul_mmc(op.ty).dispatch(
                 self,
                 &[op.weights.vk_buffer(), scratch.buffer, op.y.buffer],
@@ -593,6 +597,10 @@ impl Recorder<'_> {
                 op.x_rows,
                 s_off,
             ])?;
+            self.profile_shape(
+                || format!("m={} n={} k={}", op.rows, op.x_rows, op.cols),
+                op.rows * op.cols * op.x_rows,
+            );
             pipeline.dispatch(
                 self,
                 &[
@@ -639,6 +647,10 @@ impl Recorder<'_> {
             BlockType::Q5K => &kernels.mat_vecs_q5_k,
             BlockType::Q6K => &kernels.mat_vecs_q6_k,
         };
+        self.profile_shape(
+            || format!("m={} n={} k={}", op.rows, op.x_rows, op.cols),
+            op.rows * op.cols * op.x_rows,
+        );
         pipeline.dispatch(
             self,
             &[

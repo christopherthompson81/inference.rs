@@ -177,6 +177,10 @@ impl Recorder<'_> {
         let buffers = [a.buffer.buffer, b.buffer.buffer, op.out.buffer];
         let work = (count as u64).saturating_mul(op.k as u64);
         self.work.set(self.work.get().saturating_add(work));
+        self.profile_shape(
+            || format!("b={} m={} n={} k={}", op.batch, op.m, op.n, op.k),
+            count * op.k,
+        );
         if op.m >= TILED_MIN && op.n >= TILED_MIN && op.batch <= MAX_GROUPS_Z {
             self.context.kernels.matmul_f32_tiled.dispatch(
                 self,
@@ -571,6 +575,15 @@ impl Recorder<'_> {
             op.ids.0.buffer,
             op.scratch.buffer,
         ];
+        self.profile_shape(
+            || {
+                format!(
+                    "m={} n={} k={} e={}",
+                    op.rows, op.slots, op.cols, op.experts
+                )
+            },
+            op.rows * op.cols * op.slots,
+        );
         self.context.kernels.moe_mat_vecs(op.ty).dispatch(
             self,
             &buffers,
@@ -621,6 +634,15 @@ impl Recorder<'_> {
             &[op.x.0.buffer, op.routing.buffer, op.scratch.buffer],
             &words(&[op.slots, op.cols, op.x_div, op.x.1])?,
             [pairs_x as u32, pairs.div_ceil(pairs_x) as u32, 1],
+        );
+        self.profile_shape(
+            || {
+                format!(
+                    "m={} n={} k={} e={}",
+                    op.rows, op.slots, op.cols, op.experts
+                )
+            },
+            op.rows * op.cols * op.slots,
         );
         coop.moe_mmc(op.ty).dispatch(
             self,
@@ -675,6 +697,15 @@ impl Recorder<'_> {
             s_off,
             tiles_off,
         ])?;
+        self.profile_shape(
+            || {
+                format!(
+                    "m={} n={} k={} e={}",
+                    op.rows, op.slots, op.cols, op.experts
+                )
+            },
+            op.rows * op.cols * op.slots,
+        );
         self.context.kernels.moe_mm(op.ty).dispatch(
             self,
             &[
