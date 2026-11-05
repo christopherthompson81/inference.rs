@@ -12,6 +12,10 @@ const BLOCKS: usize = 8;
 // a Vulkan prompt row against the CPU, relative: the f32 kernel, and matrix cores (f16 Q, K, V and P; 1.0e-4 seen)
 const VULKAN_PREFILL_TOLERANCE: f32 = 1e-4;
 const VULKAN_MATRIX_CORE_PREFILL_TOLERANCE: f32 = 1e-3;
+// a quantized cache's rows against their dequantized values, absolute: decode in f32, and the prompt on matrix cores,
+// which round the dequantized rows to f16 (1.4e-3 seen)
+const QUANT_DECODE_TOLERANCE: f32 = 1e-3;
+const QUANT_PREFILL_TOLERANCE: f32 = 3e-3;
 
 // softcap, ALiBi slopes, sinks
 type DecodeCase<'a> = (f32, &'a [f32], Option<&'a [f32]>);
@@ -630,9 +634,15 @@ fn vulkan_quantized_cache_scores_as_its_dequantized_rows() -> Result<()> {
             NO_SOFTCAP,
             None,
         )?;
-        for (name, got) in [("prefill", prefill), ("decode", decode)] {
+        for (name, got, tolerance) in [
+            ("prefill", prefill, QUANT_PREFILL_TOLERANCE),
+            ("decode", decode, QUANT_DECODE_TOLERANCE),
+        ] {
             let diff = max_diff(&got.to_device(&Device::Cpu)?, &want)?;
-            assert!(diff <= 1e-3, "q{k_bits}/q{v_bits} {name}: max diff {diff}");
+            assert!(
+                diff <= tolerance,
+                "q{k_bits}/q{v_bits} {name}: max diff {diff}"
+            );
         }
     }
     Ok(())
