@@ -15,7 +15,8 @@
 # dependents; --docs-all checks every crate. Neither renders HTML; `cargo doc` does.
 # --size (Linux) builds the CUDA C ABI library as the wheels do and fails when its file or a large section grew past
 # scripts/bundle_size_baseline.json; --size-update rewrites the baseline (commit it with the change that moved it).
-# --sweep then deletes target/debug artifacts the selected modes no longer use (stale variants pile up otherwise).
+# --sweep then deletes target/debug artifacts the selected modes no longer use (stale variants pile up otherwise). Every
+# run that builds also deletes what live units no longer read (old codegen units' debug info, older sessions).
 # Build env (CC/CXX/NVCC) and INFERENCE_TEST_* paths belong in ~/.cargo/config.toml [env]; changing one rebuilds deps.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -54,9 +55,7 @@ done
 # --examples compile-checks the examples (tests only link the smoke set below); --bins checks bins without dev-deps, like CI.
 CLIPPY=(clippy --workspace --bins --tests --examples)
 TEST_TARGETS=(--workspace --lib --bins --tests)
-# The rest of examples/rust is built on request (`-p inference-examples --example <name>`).
-# --workspace keeps the same feature unification as the tests, so no second copy of the crates gets built.
-SMOKE=(build --workspace --example text_generation --example streaming --example multimodal_basic)
+# examples/rust links only on request (`-p inference-examples --example <name>`); clippy type-checks every example.
 SLIM_FAMILIES=("" models-gemma models-llama models-other models-phi models-qwen)
 # --workspace keeps the tests' feature unification, so the cdylib reuses their artifacts instead of rebuilding deps.
 BINDINGS=(build --workspace --lib --example tiny_checkpoint)
@@ -137,7 +136,6 @@ if [[ $tests -eq 1 ]]; then
     fi
     # nextest does not run doctests
     cargo test --workspace --no-fail-fast --doc || failed=1
-    cargo "${SMOKE[@]}" || failed=1
 fi
 # The binding tests and the CUDA suite need no cargo lock, so the slim lint and the docs check run while they do.
 if [[ $bindings -eq 1 ]]; then
@@ -219,6 +217,11 @@ if [[ -n $cuda_pid ]]; then
     cargo nextest run --no-fail-fast --profile cuda --features cuda "${TEST_TARGETS[@]}" -E "$ALONE" || failed=1
 fi
 cuda_pid= bindings_pid=
+# What live units no longer read (renamed codegen units' split debug info, older incremental sessions) needs no
+# replay to find, so this runs whether or not the checks passed (`--sweep` runs it too).
+if [[ $sweep -eq 0 && $((lint + tests + cuda + metal + slim + docs + bindings)) -gt 0 ]]; then
+    scripts/sweep_target.py target/debug --superseded || true
+fi
 [[ $failed -eq 0 ]] || exit 1
 if [[ $size -eq 1 ]]; then
     if [[ $OSTYPE != linux* ]]; then echo "--size measures the Linux CUDA library" >&2; exit 2; fi
@@ -249,7 +252,6 @@ if [[ $sweep -eq 1 && $((lint + tests + cuda + metal + slim + docs + bindings)) 
     lint_replay() { cargo "${CLIPPY[@]}" "$@" --message-format=json -- -D warnings >> "$live"; }
     if [[ $lint -eq 1 ]]; then lint_replay; fi
     if [[ $tests -eq 1 ]]; then replay test --no-run "${TEST_TARGETS[@]}"; fi
-    if [[ $tests -eq 1 ]]; then replay "${SMOKE[@]}"; fi
     if [[ $cuda -eq 1 ]]; then
         lint_replay --features cuda
         replay test --no-run --features cuda "${TEST_TARGETS[@]}"
