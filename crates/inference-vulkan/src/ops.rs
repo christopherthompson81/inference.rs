@@ -117,6 +117,7 @@ impl Recorder<'_> {
         if op.op == RowOp::RmsNorm
             && op.rows <= crate::kernels::MATVEC_MAX_ROWS
             && op.cols.is_multiple_of(crate::kernels::BLOCK_VALUES)
+            && op.cols <= RMS_Q8_MAX_COLS
             && !Arc::ptr_eq(op.x, op.out)
         {
             let blocks = Arc::new(Buffer::new(
@@ -543,6 +544,8 @@ pub(crate) const MOE_MATVEC_BINDINGS: usize = 5;
 pub(crate) const MOE_MATVEC_PUSH_BYTES: u32 = 10 * 4;
 pub(crate) const MOE_SORT_BINDINGS: usize = 2;
 pub(crate) const RMS_Q8_BINDINGS: usize = 5;
+// rms_norm_q8's widest row: its 1024 threads hold 4 values a pass, 4 passes
+const RMS_Q8_MAX_COLS: usize = 16384;
 pub(crate) const GATED_Q8_BINDINGS: usize = 6;
 pub(crate) const GATED_Q8_PUSH_BYTES: u32 = 7 * 4;
 pub(crate) const RMS_Q8_PUSH_BYTES: u32 = 7 * 4;
