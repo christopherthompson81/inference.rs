@@ -217,7 +217,19 @@ pub(crate) struct CoopKernels {
     pub(crate) moe_gather_f16: Pipeline,
     // prompt attention over f32, f16 and quantized paged caches
     paged_prefill: [Pipeline; 3],
+    // Q4_0 experts on NV_cooperative_matrix2, where the device has it: a build a tile width, 16 to 128 routes
+    // by BlockType, where the type has decode functions
+    moe_mm_cm2: Vec<Option<[Pipeline; 4]>>,
+    // by BlockType, the same: the prompt matmul on NV_cooperative_matrix2
+    mul_mm_cm2: Vec<Option<Pipeline>>,
 }
+// BlockType's variants
+const BLOCK_TYPES: usize = 8;
+// the cm2 kernels' tile (weight rows, and tokens of the prompt matmul), and their K step: a row a whole number of them
+const CM2_TILE: usize = 128;
+pub(crate) const CM2_K_STEP: usize = 64;
+pub(crate) const MOE_CM2_BINDINGS: usize = 4;
+pub(crate) const MOE_CM2_PUSH_BYTES: u32 = 8 * 4;
 pub(crate) const MOE_MMC_BINDINGS: usize = 4;
 pub(crate) const MOE_MMC_PUSH_BYTES: u32 = 7 * 4;
 pub(crate) const MOE_GATHER_BINDINGS: usize = 3;
@@ -227,7 +239,7 @@ const CONVERT_PUSH_BYTES: u32 = 2 * 4;
 pub(crate) const CONVERT_THREADS: usize = 256;
 
 impl CoopKernels {
-    pub(crate) fn new(device: &ash::Device, subgroup: Option<u32>) -> Result<Self> {
+    pub(crate) fn new(device: &ash::Device, subgroup: Option<u32>, cm2: bool) -> Result<Self> {
         let sources = [
             (shaders::MUL_MMC_Q8_0, "mul_mmc_q8_0"),
             (shaders::MUL_MMC_Q5_0, "mul_mmc_q5_0"),
@@ -308,6 +320,71 @@ impl CoopKernels {
             prefill(shaders::PAGED_PREFILL_CM_F16, "paged_prefill_cm_f16")?,
             prefill(shaders::PAGED_PREFILL_CM_QUANT, "paged_prefill_cm_quant")?,
         ];
+        let cm2_pipeline =
+            |spirv, name| Pipeline::new(device, spirv, MOE_CM2_BINDINGS, MOE_CM2_PUSH_BYTES, name);
+        let mut moe_mm_cm2: Vec<Option<[Pipeline; 4]>> = (0..BLOCK_TYPES).map(|_| None).collect();
+        let mut mul_mm_cm2: Vec<Option<Pipeline>> = (0..BLOCK_TYPES).map(|_| None).collect();
+        if cm2 {
+            for (ty, spirv, name) in [
+                (BlockType::Q8_0, shaders::MUL_MM_CM2_Q8_0, "mul_mm_cm2_q8_0"),
+                (BlockType::Q5_0, shaders::MUL_MM_CM2_Q5_0, "mul_mm_cm2_q5_0"),
+                (BlockType::Q4_0, shaders::MUL_MM_CM2_Q4_0, "mul_mm_cm2_q4_0"),
+                (BlockType::Q4_1, shaders::MUL_MM_CM2_Q4_1, "mul_mm_cm2_q4_1"),
+                (BlockType::Q5_1, shaders::MUL_MM_CM2_Q5_1, "mul_mm_cm2_q5_1"),
+            ] {
+                mul_mm_cm2[ty as usize] = Some(cm2_pipeline(spirv, name)?);
+            }
+            for (ty, builds) in [
+                (
+                    BlockType::Q8_0,
+                    [
+                        (shaders::MOE_MM_CM2_Q8_0_N16, "moe_mm_cm2_q8_0_n16"),
+                        (shaders::MOE_MM_CM2_Q8_0_N32, "moe_mm_cm2_q8_0_n32"),
+                        (shaders::MOE_MM_CM2_Q8_0_N64, "moe_mm_cm2_q8_0_n64"),
+                        (shaders::MOE_MM_CM2_Q8_0_N128, "moe_mm_cm2_q8_0_n128"),
+                    ],
+                ),
+                (
+                    BlockType::Q5_0,
+                    [
+                        (shaders::MOE_MM_CM2_Q5_0_N16, "moe_mm_cm2_q5_0_n16"),
+                        (shaders::MOE_MM_CM2_Q5_0_N32, "moe_mm_cm2_q5_0_n32"),
+                        (shaders::MOE_MM_CM2_Q5_0_N64, "moe_mm_cm2_q5_0_n64"),
+                        (shaders::MOE_MM_CM2_Q5_0_N128, "moe_mm_cm2_q5_0_n128"),
+                    ],
+                ),
+                (
+                    BlockType::Q4_0,
+                    [
+                        (shaders::MOE_MM_CM2_Q4_0_N16, "moe_mm_cm2_q4_0_n16"),
+                        (shaders::MOE_MM_CM2_Q4_0_N32, "moe_mm_cm2_q4_0_n32"),
+                        (shaders::MOE_MM_CM2_Q4_0_N64, "moe_mm_cm2_q4_0_n64"),
+                        (shaders::MOE_MM_CM2_Q4_0_N128, "moe_mm_cm2_q4_0_n128"),
+                    ],
+                ),
+                (
+                    BlockType::Q4_1,
+                    [
+                        (shaders::MOE_MM_CM2_Q4_1_N16, "moe_mm_cm2_q4_1_n16"),
+                        (shaders::MOE_MM_CM2_Q4_1_N32, "moe_mm_cm2_q4_1_n32"),
+                        (shaders::MOE_MM_CM2_Q4_1_N64, "moe_mm_cm2_q4_1_n64"),
+                        (shaders::MOE_MM_CM2_Q4_1_N128, "moe_mm_cm2_q4_1_n128"),
+                    ],
+                ),
+                (
+                    BlockType::Q5_1,
+                    [
+                        (shaders::MOE_MM_CM2_Q5_1_N16, "moe_mm_cm2_q5_1_n16"),
+                        (shaders::MOE_MM_CM2_Q5_1_N32, "moe_mm_cm2_q5_1_n32"),
+                        (shaders::MOE_MM_CM2_Q5_1_N64, "moe_mm_cm2_q5_1_n64"),
+                        (shaders::MOE_MM_CM2_Q5_1_N128, "moe_mm_cm2_q5_1_n128"),
+                    ],
+                ),
+            ] {
+                let [a, b, c, d] = builds.map(|(spirv, name)| cm2_pipeline(spirv, name));
+                moe_mm_cm2[ty as usize] = Some([a?, b?, c?, d?]);
+            }
+        }
         Ok(Self {
             mul_mmc,
             mul_mmcl,
@@ -315,6 +392,8 @@ impl CoopKernels {
             moe_mmc,
             moe_gather_f16,
             paged_prefill,
+            moe_mm_cm2,
+            mul_mm_cm2,
         })
     }
 
@@ -342,6 +421,12 @@ impl CoopKernels {
         &self.moe_mmc[ty as usize]
     }
 
+    /// The expert matmul on NV_cooperative_matrix2 over `ty`'s blocks, where the device and type have one: a build
+    /// each for the tiles of up to 16, 32, 64 and 128 routes.
+    pub(crate) fn moe_mm_cm2(&self, ty: BlockType) -> Option<&[Pipeline; 4]> {
+        self.moe_mm_cm2[ty as usize].as_ref()
+    }
+
     /// # Safety
     /// No submit may still use the pipelines.
     pub(crate) unsafe fn destroy(&self, device: &ash::Device) {
@@ -352,6 +437,8 @@ impl CoopKernels {
             .chain(&self.moe_mmc)
             .chain([&self.convert_f16, &self.moe_gather_f16])
             .chain(&self.paged_prefill)
+            .chain(self.moe_mm_cm2.iter().flatten().flatten())
+            .chain(self.mul_mm_cm2.iter().flatten())
         {
             // SAFETY: the caller's contract
             unsafe { pipeline.destroy(device) };
@@ -586,6 +673,44 @@ impl Recorder<'_> {
                 || format!("m={} n={} k={}", op.rows, op.x_rows, op.cols),
                 op.rows * op.cols * op.x_rows,
             );
+            if let Some(cm2) = coop.mul_mm_cm2[op.ty as usize].as_ref()
+                && op.cols.is_multiple_of(CM2_K_STEP)
+            {
+                cm2.dispatch(
+                    self,
+                    &[
+                        op.weights.vk_buffer(),
+                        scratch.buffer,
+                        op.y.buffer,
+                        scratch.buffer,
+                    ],
+                    &push_words(&[
+                        op.rows,
+                        op.cols,
+                        op.weights.offset() as usize / 2,
+                        0,
+                        op.y_offset,
+                        0,
+                        op.x_rows,
+                        op.x_rows.next_multiple_of(MMC_PAD_M),
+                    ])?,
+                    [
+                        op.rows.div_ceil(CM2_TILE) as u32,
+                        op.x_rows.div_ceil(CM2_TILE) as u32,
+                        1,
+                    ],
+                );
+                self.work.set(
+                    self.work
+                        .get()
+                        .saturating_add((op.rows * op.cols * op.x_rows) as u64),
+                );
+                self.retain(op.weights.clone() as crate::Retained);
+                self.retain(op.x.clone());
+                self.retain(op.y.clone());
+                self.retain(scratch.clone());
+                return Ok(());
+            }
             let large = op.x_rows >= MMCL_TILE
                 && op.rows >= MMCL_MIN_ROWS
                 && op.cols.is_multiple_of(MMCL_ALIGN);
@@ -1206,74 +1331,118 @@ mod tests {
     #[test]
     #[ignore = "benchmark"]
     fn expert_matmul_throughput() -> Result<()> {
+        // one shape of the list alone (its index), and routes drawn uniformly (llama.cpp's test-backend-ops perf)
+        // where the default is one real prompt layer's
+        const BENCH_SHAPE_ENV: &str = "INFERENCE_VULKAN_BENCH_SHAPE";
+        const BENCH_EVEN_ENV: &str = "INFERENCE_VULKAN_BENCH_EVEN";
         let Some(context) = context() else {
             return Ok(());
         };
         const EXPERTS: usize = 128;
-        const ROWS: usize = 1856;
-        const COLS: usize = 2688;
         const TOKENS: usize = 512;
         const K: usize = 6;
-        const REPEATS: usize = 10;
-        let ty = BlockType::Q5_0;
-        let len = EXPERTS * len(ty, ROWS, COLS);
-        let mut pages = Pages::new(len);
-        weights(ty, pages.bytes(), EXPERTS * ROWS, COLS);
-        let weights: Arc<dyn Bound> =
-            Arc::new(Buffer::with_bytes(&context, &pages.bytes()[..len])?);
-        let slots = TOKENS * K;
-        let mut id_bytes = vec![0u8; slots * 4];
-        let mut state = 0x9e37_79b9u32;
-        for (t, chunk) in id_bytes
-            .as_chunks_mut::<{ 4 * K }>()
-            .0
-            .iter_mut()
-            .enumerate()
+        const REPEATS: usize = 20;
+        const BATCH: usize = 40;
+        // one 512-token prompt layer's routes an expert, busiest first (18 experts unrouted)
+        const PROMPT_ROUTES: [usize; 110] = [
+            264, 213, 198, 181, 171, 98, 96, 95, 91, 85, 75, 59, 56, 51, 47, 47, 47, 47, 46, 41,
+            40, 39, 36, 35, 35, 32, 31, 30, 30, 29, 28, 27, 27, 26, 25, 23, 22, 22, 22, 21, 21, 20,
+            19, 18, 18, 18, 17, 17, 16, 16, 16, 16, 14, 14, 13, 13, 11, 10, 10, 9, 9, 9, 8, 8, 7,
+            7, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2,
+            2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        ];
+        // a hybrid MoE's up (one activation row a token's routes) and down (a row a route) projections
+        for (ty, rows, cols, x_div) in [
+            (BlockType::Q5_0, 1856usize, 2688usize, K),
+            (BlockType::Q4_0, 1856, 2688, K),
+            (BlockType::Q4_0, 2688, 1856, 1),
+        ]
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| std::env::var(BENCH_SHAPE_ENV).map_or(true, |v| v == i.to_string()))
+        .map(|(_, shape)| shape)
         {
-            for (j, id) in chunk.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                // distinct experts a token: spread from a random start
-                let e = ((state >> 8) as usize + j * 21 + t) % EXPERTS;
-                id.copy_from_slice(&(e as u32).to_le_bytes());
+            let len = EXPERTS * len(ty, rows, cols);
+            let mut pages = Pages::new(len);
+            weights(ty, pages.bytes(), EXPERTS * rows, cols);
+            let weights: Arc<dyn Bound> =
+                Arc::new(Buffer::with_bytes(&context, &pages.bytes()[..len])?);
+            let slots = TOKENS * K;
+            let mut id_bytes = vec![0u8; slots * 4];
+            if std::env::var_os(BENCH_EVEN_ENV).is_some() {
+                let mut state = 0x9e37_79b9u32;
+                for t in 0..TOKENS {
+                    let mut picked = Vec::new();
+                    while picked.len() < K {
+                        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        let e = (state >> 8) as usize % EXPERTS;
+                        if !picked.contains(&e) {
+                            picked.push(e);
+                        }
+                    }
+                    for (j, e) in picked.into_iter().enumerate() {
+                        let slot = t * K + j;
+                        id_bytes[slot * 4..slot * 4 + 4].copy_from_slice(&(e as u32).to_le_bytes());
+                    }
+                }
+            } else {
+                // route i to token i % TOKENS: an expert's (at most TOKENS) routes land on distinct tokens
+                let mut i = 0;
+                for (e, &count) in PROMPT_ROUTES.iter().enumerate() {
+                    for _ in 0..count {
+                        let slot = (i % TOKENS) * K + i / TOKENS;
+                        id_bytes[slot * 4..slot * 4 + 4].copy_from_slice(&(e as u32).to_le_bytes());
+                        i += 1;
+                    }
+                }
             }
+            let ids = Arc::new(Buffer::with_bytes(&context, &id_bytes)?);
+            let x: Vec<f32> = (0..slots / x_div * cols)
+                .map(|i| (i % 13) as f32 - 6.0)
+                .collect();
+            let xs = Arc::new(Buffer::with_f32(&context, &x)?);
+            let ys = Arc::new(Buffer::new(&context, slots * rows * 4)?);
+            let scratch = Arc::new(Buffer::new(
+                &context,
+                crate::MoeMatVec::scratch_bytes(&context, slots, x_div, cols),
+            )?);
+            let routing = Arc::new(Buffer::new(
+                &context,
+                crate::MoeMatVec::routing_bytes(slots, EXPERTS),
+            )?);
+            let op = crate::MoeMatVec {
+                ty,
+                weights: &weights,
+                experts: EXPERTS,
+                rows,
+                cols,
+                slots,
+                x_div,
+                x: (&xs, 0),
+                ids: (&ids, 0),
+                y: &ys,
+                scratch: &scratch,
+                routing: &routing,
+            };
+            // a submit of BATCH back to back, as a prompt records its layers, so its wall time is the GPU's
+            let batch = |r: &crate::Recorder<'_>| {
+                for _ in 0..BATCH {
+                    r.moe_mat_vec(&op)?;
+                }
+                Ok(())
+            };
+            context.submit(batch)?;
+            let start = std::time::Instant::now();
+            for _ in 0..REPEATS {
+                context.submit(batch)?;
+            }
+            let secs = start.elapsed().as_secs_f64() / (REPEATS * BATCH) as f64;
+            println!(
+                "experts {ty:?} {rows} x {cols}: {:.2} ms a pass, {:.2} int8 TOPS",
+                secs * 1e3,
+                (2 * slots * rows * cols) as f64 / secs / 1e12
+            );
         }
-        let ids = Arc::new(Buffer::with_bytes(&context, &id_bytes)?);
-        let x: Vec<f32> = (0..TOKENS * COLS).map(|i| (i % 13) as f32 - 6.0).collect();
-        let xs = Arc::new(Buffer::with_f32(&context, &x)?);
-        let ys = Arc::new(Buffer::new(&context, slots * ROWS * 4)?);
-        let scratch = Arc::new(Buffer::new(
-            &context,
-            crate::MoeMatVec::scratch_bytes(&context, TOKENS * K, K, COLS),
-        )?);
-        let routing = Arc::new(Buffer::new(
-            &context,
-            crate::MoeMatVec::routing_bytes(slots, EXPERTS),
-        )?);
-        let op = crate::MoeMatVec {
-            ty,
-            weights: &weights,
-            experts: EXPERTS,
-            rows: ROWS,
-            cols: COLS,
-            slots,
-            x_div: K,
-            x: (&xs, 0),
-            ids: (&ids, 0),
-            y: &ys,
-            scratch: &scratch,
-            routing: &routing,
-        };
-        context.submit(|r| r.moe_mat_vec(&op))?;
-        let start = std::time::Instant::now();
-        for _ in 0..REPEATS {
-            context.submit(|r| r.moe_mat_vec(&op))?;
-        }
-        let secs = start.elapsed().as_secs_f64() / REPEATS as f64;
-        println!(
-            "experts: {:.2} ms a pass, {:.2} int8 TOPS",
-            secs * 1e3,
-            (2 * slots * ROWS * COLS) as f64 / secs / 1e12
-        );
         Ok(())
     }
 }

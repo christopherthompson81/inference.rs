@@ -1,0 +1,10 @@
+#version 450
+// The prompt matmul y = W x over Q5_0 weights on NV_cooperative_matrix2: moe_mm_cm2's tile over one matrix, the tokens'
+// f16 rows (convert_f16's, padded to whole tiles) 128 a tile.
+#extension GL_GOOGLE_include_directive : require
+#define WIDTH 128
+#define DENSE
+#define F32_ACC
+#include "moe_mm_cm2_head.glsl"
+#include "cm2_q5_0.glsl"
+#include "moe_mm_cm2_main.glsl"

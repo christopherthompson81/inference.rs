@@ -1305,3 +1305,278 @@ tokens 634-654 ms (638 before). `matrix_core_prompt_matmuls_match_their_referenc
 large tile fails it).
 
 **Still behind llama.cpp:** 2688 x 4096 at 469 us against its 215, and the routed experts.
+
+### Run 54 - 2026-11-05 ~03:00 (desktop: RTX 3090)
+
+**Question:** the routed experts' prompt kernel after llama.cpp's MMQ: Q4_0 kept packed in shared memory (its halves'
+nibbles a byte, split again in registers) in the register-blocked tile, 8 weight rows x 2 routes a thread, 32-route
+tiles (`moe_sort`'s tile a push constant, a per-type tile in `moe_mm`).
+
+**Results:**
+- `expert_matmul_throughput` (routes spread evenly, now over Lightning's Q4_0 up and down; Run 50's bench change):
+  up 1.67 -> 1.38 ms, down 1.56 -> 1.41 at 8 x 2; 4 x 2 1.47 / 1.52; 16 x 2 1.52 / 1.51; 8 x 4 (64-route tiles)
+  2.72 / 2.74. Runs drift upward by ~10-15 % between repeats on this card (the untouched Q5_0 1.82 -> 2.12).
+- In the model (`INFERENCE_VULKAN_PROFILE`, 512 tokens): up 1603 -> 1486 us, down 1427 -> 1463; the prompt 166.5 ->
+  168.7-169.4 ms. Real routing is skewed: an expert past 32 routes takes another tile and streams its rows again,
+  which the 64-route row-streaming tile does not.
+
+**Not taken.** llama.cpp's experts run 1301 / 1138 us on the same prompt.
+
+### Run 55 - 2026-11-05 00:12 (desktop: RTX 3090)
+
+**Question:** whether the routed experts' parts that each lost alone (Runs 50-54) win together: one prompt path
+past 64 routes where the experts of many routes take the matrix cores and the long tail of few takes an int8
+kernel beside them, on a bench with real routing.
+
+**Changes (WIP, branch `vulkan-moe-mmq`):**
+- `expert_matmul_throughput` routes as one 512-token Lightning prompt layer did (110 of 128 experts routed: 264,
+  213, 198, ... down to 13 experts of one route); `INFERENCE_VULKAN_BENCH_SHAPE` picks one shape.
+- `moe_sort` cuts an expert of at most `small` routes into the small list's tiles of `small_tile`, so the cutoff is
+  free of the tail kernel's tile.
+- The matrix-core path (`moe_mmc`) is the hybrid: int8 rows then f16 rows in one scratch (`moe_gather_f16` takes
+  `h_base`), `moe_mmc` over the main list and a tail kernel over the small list. Knobs: `INFERENCE_VULKAN_MOE_SMALL`
+  (cutoff; >= 1000 is master's all-row-streaming path), `INFERENCE_VULKAN_MOE_TAIL` (`rows` = moe_mm, `mvt`,
+  `packed` = Run 54's moe_mm_q4_0p).
+- `moe_mvt_*`: `moe_mat_vecs` over the small list (lanes across K, coalesced; 4 rows x 8 routes a pass). The eight
+  `moe_mat_vecs_*` copies now share `moe_mat_vecs_head.glsl` / `moe_mat_vecs_main.glsl`.
+- `Pipeline::dispatch_beside_next`: a dispatch without its trailing barrier, the tail kernel beside `moe_mmc`.
+
+**Results** (`INFERENCE_VULKAN_PROFILE`, GPU us a pass summed over the op's kernels, serial unless noted; the expert
+tests pass at every tail and cutoff tried):
+
+| config | Q4_0 up 1856x2688 | Q4_0 down 2688x1856 |
+|---|---|---|
+| master (all moe_mm rows) | 1664, 1672 | 1572 |
+| all moe_mmc (cutoff 0) | 2152 | |
+| rows <= 32 + mmc | 1771 (rows 893, mmc 782) | 1694 |
+| mvt <= 16 + mmc | 1796 (mvt 564, mmc 1136) | 1946 |
+| packed <= 16 + mmc | 1859 | 1906 |
+| packed <= 32 + mmc | 1580, 1782 (packed 781-875, mmc 704-808) | 1847 |
+| packed <= 47 / 64 / 100 + mmc | 1782 / 1766 / 1806 | 1825 (47) |
+| packed, all experts | 1806 | |
+
+- The tail kernels cost what their experts' weights cost, nearly whatever the routes: rows over the <= 32 list
+  (85 experts, 879 routes) 1046 us against 1839 for all 110 experts; mvt grows with routes instead (565 / 1250 /
+  1800 us at <= 16 / 32 / 47), its weights reread a pass of 8 routes.
+- `moe_mmc` over partial tiles of the busy experts runs 28-45 TFLOPS (45 tiles at <= 32: ~16 us a tile), against
+  ~62-66 on near-full ones.
+- Overlap (`dispatch_beside_next`), wall time: packed <= 32 2.18 / 2.35 ms against 1.88 / 1.89 serial; rows <= 32
+  1.90 / 1.90 against 1.94 / 1.94. Two shared-memory tiles resident together lose; the rows tail is neutral.
+- Repeats drift ~12 % even in GPU time (packed <= 32 up 1580 then 1782), so nothing here clears noise against
+  master; the bench's wall time adds ~0.25 ms of submits a pass.
+
+**Implication:** splitting the experts between kernels does not close the gap (llama.cpp 1301 / 1138 us): each half
+stays below what it reaches on full work, and they do not overlap well. The win has to come from one kernel that
+is fast at 64-route tiles and degrades gracefully on few routes. Clocks need pinning (or many alternating repeats)
+before 5 % calls.
+
+### Run 56 - 2026-11-05 08:06 (desktop: RTX 3090)
+
+**Question:** whether one int8 kernel in llama.cpp's MMQ tile closes the expert gap: `mat_mul_q_mmq.glsl`, 128
+threads a 64 x 64 tile (weight rows x routes) in 2 x 2 subgroups of 32 x 32, each thread 4 rows x 8 routes with its
+rows' blocks in registers (Q4_0 still packed) and the routes' blocks streamed past them, 2 blocks a step
+(`moe_mmq_*`, `INFERENCE_VULKAN_MOE_MMQ=1` on master's path; the expert tests pass).
+
+**Result** (GPU us a pass, real routing): Q5_0 up 2208 against moe_mm 1837; Q4_0 up 1891 against 1630; Q4_0 down
+2188 against 1757. Slower everywhere.
+
+**Finding (corrects Run 51):** llama.cpp does not run these experts as int8 MMQ on this card. Its device line is
+`int dot: 1 | matrix cores: NV_coopmat2v`, and with `device->coopmat2` its pipeline setup takes the coopmat2 branch,
+where MUL_MAT_ID is `matmul_id_subgroup_quant_f16` / `matmul_id_subgroup_q4_k_f16` (`*_cm2`): NV_cooperative_matrix2
+f16 tiles that decode the quantized weights inside the matmul. The int8 MMQ-ID pipelines exist only in the branch
+for devices without matrix cores. Its 1301 / 1138 us experts (and likely its dense prompt matmuls) are coopmat2,
+which this driver exposes (`VK_NV_cooperative_matrix2`, `VK_NV_cooperative_matrix_decode_vector`); ours use
+KHR_cooperative_matrix (coopmat1) or dp4a.
+
+**Implication:** the int8 expert kernels are near what they can do here; parity with llama.cpp on NVIDIA means a
+coopmat2 path (NVIDIA-only; the 780M laptop keeps coopmat1/dp4a).
+
+### Run 57 - 2026-11-05 08:48 (desktop: RTX 3090)
+
+**Question:** whether a coopmat2 expert kernel (llama.cpp's MUL_MAT_ID path on this card, Run 56; Run 26 tried coopmat2
+on the dense matmuls, with no end-to-end change) brings the routed experts to llama.cpp's 1301 / 1138 us.
+
+**Setup:**
+- `VK_NV_cooperative_matrix2` and `VK_NV_cooperative_matrix_decode_vector` are declared by hand (ash 0.38 predates
+  them; structure types 1000593000 and 1000689000) and enabled with buffer device addresses. The instance asks for
+  Vulkan 1.3.
+- `*_cm2*` shaders build for SPIR-V 1.6. `build.rs` probes glslc once: a glslc without the extension leaves them
+  empty (the device then keeps coopmat1), and with it a failing one fails the build. An empty module had hidden a
+  real compile error.
+- `INFERENCE_VULKAN_NO_CM2` keeps coopmat2 off for A/B runs.
+- `moe_mm_cm2_q4_0_n{16,32,64,128}` are workgroup-scope 128-row tiles. Each build takes the sorted list's tiles of
+  its width (`moe_sort` now takes the main list's tile size, 128 here). W is decoded in the tensor load (scalar and
+  4-wide decode functions), the gathered f16 rows load transposed, and a per-element callback scatters the sums.
+  The builds are dispatched side by side.
+
+**Bench fix:** `expert_matmul_throughput` now records 40 ops a submit and reads wall time. Per submit, or by the
+profiler's timestamps, the numbers had moved 10-15 % between repeats and disagreed with the model. Batched they
+repeat within ~2 % and agree with it.
+
+**End-to-end share:** `INFERENCE_VULKAN_SKIP_EXPERTS` (a WIP probe) drops the prompt's routed experts. A 512-token
+prompt goes from 167.6 to 92.0 ms, so the experts cost ~75 ms a prompt, ~1.7 ms a projection.
+
+**Results** (batched wall time, ms a pass, Lightning's Q4_0 up 1856 x 2688 / down 2688 x 1856, real routing):
+
+| kernel | up | down |
+|---|---|---|
+| master's int8 row kernel | 1.70-1.71 | 1.61-1.62 |
+| cm2, 256 threads, 64-route tiles, scalar decode, clamped A (first build; profiler) | ~3.3-3.6 | |
+| + unclamped A inside the matrix (profiler) | ~2.9 | |
+| + 4-wide decode, BK 64 (profiler) | ~2.2 | |
+| + 128-route tiles, 32 / 64 wide matrices, a 128-thread build for experts of <= 16 routes, f16 sums | 1.73-1.77 | 1.45-1.54 |
+| the same with the <= 16 experts in the main 256-thread build | 2.65-2.84 | 2.23-2.52 |
+| a 128-thread build a width (16 / 32 / 64 / 128), side by side, f16 sums | 1.80 | 1.55 |
+| the same, serial | 2.37 | 1.71 |
+| the same, 64-route tiles | 1.85 | 1.51 |
+| the same, BK 128 / BK 32 | 2.37 / 2.62 | 1.93 / 2.21 |
+| the same, f32 sums | 1.99-2.01 | 1.64 |
+
+- End to end (512 tokens) with the first fast build: 168.5 / 167.5 ms against 166.5 / 166.8 on master's path.
+- A 128 x 16 workgroup matrix in a 256-thread workgroup gives wrong sums, whole routes of a tile (unchanged by the
+  scalar decode, a 32-value K step or a store through shared memory). At 128 threads it is right. llama.cpp never
+  goes below 32 wide (its 128-wide tile over 4).
+- f16 sums put one element of the new uneven-routing case just past the int8 tolerance. The committed builds sum
+  in f32 (tests pass) and are slower than master.
+- New test case: one expert of 10 routes beside busy ones. Skipping the narrow tiles' dispatch fails it (697 bad).
+
+**Implication:** coopmat2 as built ties the int8 row kernel: down 5-10 % faster, up a few % slower, both well short
+of llama.cpp's 1.30 / 1.14. Running the builds side by side matters far more than any one kernel change (serial
+2.37 against 1.80), which points at small grids leaving the card idle rather than at the inner loop. Next: compare
+our dispatch shape (the grid, the tile order across experts, which tiles share a wave) with llama.cpp's.
+
+### Run 58 - 2026-11-05 09:11 (desktop: RTX 3090)
+
+**Question:** where Run 57's coopmat2 kernel differs from llama.cpp's MUL_MAT_ID on the same card.
+
+**llama.cpp's dispatch** (`ggml_vk_mul_mat_id_q_f16`): on a coopmat2 device at 512 tokens the tile selector takes the
+large MUL_MAT_ID config: 256 threads, 128 rows x 128 routes, BK 64, `enable_smaller_matrices` (64- and 32-wide
+matrices for tiles of few routes), f16 sums (`ggml_vk_get_mul_mat_mat_f16acc`: quantized weights on coopmat2), one
+dispatch over `count_experts`' tiles, grid (rows / 128, tiles). That is Run 57's "<= 16 experts in the main build"
+row, which ran 2.65-2.84 ms here. So the structure is the same, and the difference is inside the kernel.
+
+**Like-for-like timing:** llama.cpp's `test-backend-ops perf -o MUL_MAT_ID` with our two shapes added (a local edit,
+reverted) and, behind a local env, the same skewed routes as `expert_matmul_throughput` (route i to token i % 512).
+Ours gained `INFERENCE_VULKAN_BENCH_EVEN` for test-backend-ops' uniform routing. Interleaved, 3 rounds, card at
+1710-1725 MHz and 62-66 C (only the power-cap reason set). ms a pass, Q4_0:
+
+| | up 1856 x 2688 | down 2688 x 1856 |
+|---|---|---|
+| llama.cpp, uniform routing (cool / warm) | 1.50 / 1.82 | 1.45 / 1.76 |
+| ours, row kernel, uniform | 1.65 | 1.54 |
+| llama.cpp, real routing | 1.26-1.33 | 1.14-1.96 (noisy) |
+| ours, row kernel, real routing | 1.71-1.74 | 1.62-1.66 |
+| ours, cm2 (Run 57, f32 sums), real routing | 2.03-2.13 | 1.66-1.74 |
+
+Skew makes llama.cpp ~15 % faster (fewer experts, full 128-route tiles). It leaves ours flat or slower.
+
+**Change:** B (the gathered f16 route rows) loads as llama.cpp's does: a block size of (1, BK) on its layout and
+decode functions (one value, and four through `GL_NV_cooperative_matrix_decode_vector`) that read `h` directly,
+where it had been a plain transposed tensor load.
+
+**Result** (real routing, batched wall ms a pass):
+
+| | up | down |
+|---|---|---|
+| row kernel (master's path) | 1.76 | 1.66-1.67 |
+| cm2, decoded B, f32 sums | 1.80 | 1.38 |
+| cm2, decoded B, f16 sums | 1.50 | 1.21-1.22 |
+
+- The expert tests pass with f16 sums (Run 57's one element past tolerance came with the transposed load).
+- End to end (`inference bench --vulkan`, Lightning Q4_0 experts, interleaved): 512 tokens 152.3 / 155.8 ms
+  against 172.6 / 171.4 on master's path (warmer card today than Run 53's 166.5); 2048 tokens 583.7 against 661.2 ms.
+- KLD against the BF16 base (perplexity example, `--device vulkan:0`, wiki c512, 40 chunks): cm2 with f16 sums mean
+  0.01857, median 0.00698, p99 0.179, top-1 94.52 %, PPL 6.5919. Master's path: 0.01849, 0.00704, 0.176, 94.53 %,
+  6.6025. f16 sums cost nothing measurable.
+
+**Next:** the up projection's 1.50 against llama.cpp's ~1.3. Then the other expert types on cm2 (Q5_0, Q8_0, K-quants
+through their own decode functions) and the dense prompt matmuls on the same B load (Run 26's cm2 dense kernel used
+the plain transposed load too).
+
+### Run 59 - 2026-11-05 09:21 (desktop: RTX 3090)
+
+**Question:** the up projection's 1.50 against llama.cpp's ~1.3 ms, then the other 32-value types on coopmat2.
+
+**Finding (row count):** the up shape at 1792 / 1856 / 1920 rows ran 1.23 / 1.53 / 1.31 ms. 1856 rows is 14.5
+blocks of 128, and the half-empty last block's clamped weight load cost ~0.25 ms a pass.
+
+**Change 1:** the weight layout's rows round up to whole 128-row blocks, so a last block past the matrix reads the next
+expert's rows without clamping (its sums are never stored). Only a block that would run past the weight buffer
+(`w.length()`, the last expert's last block) still clamps. Q4_0 up 1.50 -> 1.28-1.29 ms (llama.cpp 1.26-1.33), down
+1.20-1.21. The test's 71-row matrices take this path for every expert but the last. End to end (512 tokens)
+151.8-155.7 ms against 170.4 on master's path, within noise of Run 58; 2048 tokens 575.5 ms.
+
+**Change 2:** the type-specific part moved to `cm2_<type>.glsl` (block struct, `BLOCK_U16`, scalar and 4-wide decode
+functions written from the GGML block formats), between `moe_mm_cm2_head.glsl` and `moe_mm_cm2_main.glsl`.
+Q8_0, Q5_0, Q4_0, Q4_1 and Q5_1 each get four width builds. The expert test now covers Q5_1 too. Breaking Q5_0's
+fifth-bit placement fails it (0: -1.40 vs -16.54).
+
+**Result:** Q5_0 1856 x 2688 experts 1.96-1.99 -> 1.42 ms a pass (real routing, batched).
+
+**Left on the int8 path:** the K-quants (256-value super blocks with packed sub-block scales).
+
+**Where the prompt stands:** the experts now cost about what llama.cpp's do (~55 ms of a 512-token prompt), and the
+prompt is ~152 ms against llama.cpp's ~122-126. Skipping the experts (Run 57) left 92 ms of everything else,
+against llama.cpp's ~66. So the dense prompt matmuls and the Mamba scan hold most of the remaining gap (Run 51:
+`ssm_out` 469 us against 215, `ssm_in` 695 against 532).
+
+### Run 60 - 2026-11-05 09:32 (desktop: RTX 3090)
+
+**Question:** the dense prompt matmuls (Run 59's ~26 ms outside the experts) on the same coopmat2 tile.
+
+**Change:** `mul_mm_cm2_<type>.comp` (Q8_0, Q5_0, Q4_0, Q4_1, Q5_1) is the expert body with `DENSE`: one matrix, 128
+tokens a tile from the grid (the token count in the tiles_off word), outputs to the tokens' rows. It takes the matrix
+core path's convert_f16 rows (padded to 128). Both coopmat2 paths now need K a multiple of 64 (the B layout's block,
+`CM2_K_STEP`), and other shapes keep the old kernels. `matrix_core_prompt_matmuls_match_their_reference` covers it
+(Q8_0 333 x 70, 4100 x 200, Q5_0 4096 x 130); shifting its output row by one fails it.
+
+**Result** (`inference bench --vulkan`, Lightning Q4_0 experts):
+
+| | 512 tokens | 2048 tokens | KLD mean / median / p99 | top-1 |
+|---|---|---|---|---|
+| master's path (int8, coopmat1) | 166.8 ms | | 0.01849 / 0.00704 / 0.176 | 94.53 % |
+| cm2 experts (Run 59) | 151.8-155.7 | 575.5 | 0.01857 / 0.00698 / 0.179 | 94.52 % |
+| + cm2 dense, f32 sums | 141.8-147.3 | 519.1 | 0.01857 / 0.00698 / 0.179 | 94.52 % |
+| + cm2 dense, f16 sums | 138.4-140.3 | 476.9 | 0.01911 / 0.00740 / 0.176 | 94.41 % |
+| llama.cpp Vulkan (`llama-perplexity --kl-divergence -ngl 99 -c 512`) | ~122-126 | | 0.018941 +- 0.000421 / 0.007374 / 0.180 | 94.48 % |
+
+f16 sums in the dense matmuls land inside llama.cpp's own KLD error band, the same choice its coopmat2 path makes,
+so they stay.
+
+**Where it stands:** 512 tokens 138-140 ms against llama.cpp's ~122-126 and CUDA's ~118.
+
+### Run 61 - 2026-11-05 09:39 (desktop: RTX 3090)
+
+**Question:** where Vulkan (this branch, coopmat2) stands against CUDA in tokens a second.
+
+**Command:** one dev build with `cuda vulkan`, `inference bench [--vulkan] --format gguf -m nemotron-lightning-gguf -f
+Lightning-exps-q4_0.gguf --prompt-len {512,2048} --gen-len 128 --iterations 3 --warmup 1`, backends alternating,
+2 rounds.
+
+| | CUDA | Vulkan | Vulkan / CUDA |
+|---|---|---|---|
+| prefill 512 (tok/s) | 4253-4354 (117.6-120.4 ms) | 3590-3696 (138.7-142.8 ms) | ~0.85 |
+| prefill 2048 (tok/s) | 4203-4291 (477-487 ms) | 4192-4227 (485-489 ms) | ~0.99 |
+| decode, 128 tokens (tok/s) | 207-214 | 134-144 (+- 7-14 within a run) | ~0.67 |
+
+Prefill at 2048 tokens is level with CUDA. The 512-token gap (~20 ms) is fixed per prompt, not per token. Decode is
+the larger gap now, and below #815's ~148 with a wide spread within each run. Both binaries are dev builds, whose
+debug assertions slow host-side work, so decode may read low on both.
+
+### Run 62 - 2026-11-05 11:35 (desktop: RTX 3090)
+
+**Question:** what of Runs 54-61 stays.
+
+**f16 sums in the dense builds:** `vulkan_quantized_matmuls_match_the_dequantized_weight` failed 3 of 30 runs with
+them. Its 70-row case runs `mul_mm_cm2`, and one output landed 1.77 off at an RMS of 53, against the int8 tolerance
+of 3 %. The int8 path fails 0 of 30. f16 spans folded into f32 every 1 / 2 / 4 steps ran 690 / 701 / 561 ms at 2048
+tokens (f32 sums 519, f16 477), still failing 1 of 30 at 4 steps. The dense builds sum in f32 (0 of 30). The expert
+builds keep f16 sums (their test passes).
+
+**Removed:** the hybrid busy/tail expert split (Run 55) with its matvec, packed (Run 54) and MMQ-tile (Run 56) kernels
+and `moe_sort`'s small list; the tuning knobs and probes of Runs 55-61 (`INFERENCE_VULKAN_MOE_SMALL`, `_MOE_TAIL`,
+`_MOE_MMQ`, `_NO_OVERLAP`, `_SKIP_EXPERTS`, `_BENCH_ROWS`). Without coopmat2 the experts take Run 53's paths.
+`moe_sort` takes its tile size (128 routes for cm2, 64 otherwise). `INFERENCE_VULKAN_NO_CM2` stays.
+
+**Result** (one dev build with `cuda vulkan`): 512 tokens ~142-147 ms, 2048 ~519 ms (Run 61's 138-142 / 485-489 were
+with f16 dense sums).

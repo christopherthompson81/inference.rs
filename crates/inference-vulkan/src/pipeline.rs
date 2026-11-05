@@ -103,6 +103,29 @@ impl Pipeline {
         push: &[u8],
         groups: [u32; 3],
     ) {
+        self.record(recorder, buffers, push, groups, true);
+    }
+
+    /// As [`Self::dispatch`], but free to run alongside the next dispatch, which must neither read what this one
+    /// writes nor write what it reads.
+    pub(crate) fn dispatch_beside_next(
+        &self,
+        recorder: &Recorder<'_>,
+        buffers: &[vk::Buffer],
+        push: &[u8],
+        groups: [u32; 3],
+    ) {
+        self.record(recorder, buffers, push, groups, false);
+    }
+
+    fn record(
+        &self,
+        recorder: &Recorder<'_>,
+        buffers: &[vk::Buffer],
+        push: &[u8],
+        groups: [u32; 3],
+        ordered: bool,
+    ) {
         assert_eq!(
             buffers.len(),
             self.bindings,
@@ -171,19 +194,21 @@ impl Pipeline {
             if let Some((labels, _)) = &label {
                 labels.cmd_end_debug_utils_label(recorder.buffer);
             }
-            // the next dispatch reads what this one wrote
-            let barrier = vk::MemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
-            context.device.cmd_pipeline_barrier(
-                recorder.buffer,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::DependencyFlags::empty(),
-                &[barrier],
-                &[],
-                &[],
-            );
+            if ordered {
+                // the next dispatch reads what this one wrote
+                let barrier = vk::MemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
+                context.device.cmd_pipeline_barrier(
+                    recorder.buffer,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[barrier],
+                    &[],
+                    &[],
+                );
+            }
         }
         recorder.dispatches.set(recorder.dispatches.get() + 1);
         recorder.profile(self.name);

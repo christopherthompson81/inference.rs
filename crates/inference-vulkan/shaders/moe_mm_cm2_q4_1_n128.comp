@@ -1,0 +1,9 @@
+#version 450
+// The prompt's expert matmul over a stack of Q4_1 experts on NV_cooperative_matrix2 (llama.cpp's MUL_MAT_ID tile),
+// over the tiles of moe_sort's list of up to 128 routes: y[slot] = W[expert] x[slot], the weights decoded to f16 as
+// the tensor load reads them, the routes' rows moe_gather_f16's.
+#extension GL_GOOGLE_include_directive : require
+#define WIDTH 128
+#include "moe_mm_cm2_head.glsl"
+#include "cm2_q4_1.glsl"
+#include "moe_mm_cm2_main.glsl"
