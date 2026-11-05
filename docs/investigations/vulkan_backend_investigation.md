@@ -1134,3 +1134,25 @@ an expert, under the matrix-core experts' 48.
 **Implication:** the experts' kernel is ~5x off its ALU bound (~20 ms a prompt by instruction count) for reasons
 timestamps cannot show; counters (Nsight Graphics' GPU Trace, the one Vulkan profiler with SM and memory metrics on
 this driver, which exposes no VK_KHR_performance_query) would.
+
+### Run 45 - 2026-11-04 ~21:30 (desktop: RTX 3090)
+
+**Question:** Run 44's expert kernel through hardware counters (Nsight Graphics 2026.4, GPU Trace).
+
+**Getting a trace:** `ngfx --activity "GPU Trace Profiler"` headless needs `QT_QPA_PLATFORM=offscreen` and no
+`--platform` (Qt reads it as its own `-platform`), and `--no-timeout` (the launch times out before a process makes
+its Vulkan device). Under it the full `inference bench` never loaded the model (0 % GPU, 2.7 GB of VRAM after 8
+minutes, both processes spinning a core). The `expert_matmul_throughput` test binary traces cleanly
+(`--start-after-submits 3 --max-duration-ms 200 --auto-export`); the CLI exports whole-trace aggregates only
+(`GPUTRACE_FRAME.xls`), which the expert passes dominate.
+
+**Counters (512 tokens x 6 routes over 128 Q5_0 experts, 1856 x 2688):** graphics engine active 96 %, SM throughput
+19.6 % (0.78 of 4 instructions a cycle), compute warps active 29 % of peak, registers allocated 41 %, L1 31 %, L2
+7.9 %, DRAM 12 %. Latency-bound at low occupancy, nowhere near any bandwidth or issue limit.
+
+**Dead end:** half the accumulators (32-token tiles, `TM` 4 -> 2, `moe_sort`'s tile a push constant): 1.95 -> 3.40 ms
+a pass. Each tile streams its expert's whole rows, so halving the tile doubles the weight reads a token, which costs
+more than the occupancy buys.
+
+**Next:** the per-dispatch view (warp stall reasons, the kernel's registers) is in the trace file
+(`*.ngfx-gputrace`, opened in `ngfx-ui`), not the CLI export.
