@@ -19,6 +19,11 @@ const MIN_BUFFER_BYTES: usize = 16;
 // below this an iGPU's serial scan beats chunked SSD (Radeon 780M, a Lightning layer: 38 against 43 ms at 3072, 61
 // against 57 at 4096; `prompt_scan_time`)
 const UNIFIED_CHUNKED_SCAN_MIN_SEQ: usize = 3584;
+// paged prefill work (rows x context x heads x head size) a submit takes, ~100 ms on a Radeon 780M; whole 4096-row
+// chunks there passed amdgpu's job timeout by a 16K-token prompt
+const PAGED_PREFILL_WORK_PER_SUBMIT: usize = 16_000_000_000;
+// rows a piece keeps at least, the scalar kernel's workgroup
+const PAGED_PREFILL_MIN_PIECE_ROWS: usize = 8;
 
 static CONTEXT: OnceLock<std::result::Result<Arc<Context>, String>> = OnceLock::new();
 
@@ -890,6 +895,13 @@ fn unrotate(
 }
 
 pub(crate) fn paged_prefill(op: &crate::vulkan::PagedPrefill<'_>) -> Result<Tensor> {
+    paged_prefill_in_pieces(op, PAGED_PREFILL_WORK_PER_SUBMIT)
+}
+
+fn paged_prefill_in_pieces(
+    op: &crate::vulkan::PagedPrefill<'_>,
+    work_per_submit: usize,
+) -> Result<Tensor> {
     let (rows, heads, head_size) = op.q.dims3()?;
     let shape = cache_shape(op.key_cache, op.value_cache, head_size)?;
     let f32 = DType::F32;
@@ -913,29 +925,46 @@ pub(crate) fn paged_prefill(op: &crate::vulkan::PagedPrefill<'_>) -> Result<Tens
         count,
         dtype: f32,
     };
-    let partials = Arc::new(
-        device.buffer(inference_vulkan::PagedPrefill::partials_bytes(
-            rows, heads, head_size, op.context,
-        ))?,
-    );
+    // rows [r0, r1) over the first `context - rows + r1` positions see the keys they would in one call
+    let row_work = (op.context * heads * head_size).max(1);
+    let piece = (work_per_submit / row_work)
+        .max(1)
+        .next_multiple_of(PAGED_PREFILL_MIN_PIECE_ROWS)
+        .min(rows.max(1));
+    let row_len = heads * head_size;
+    for r0 in (0..rows).step_by(piece) {
+        let r1 = (r0 + piece).min(rows);
+        let context = op.context - rows + r1;
+        let partials = Arc::new(
+            device.buffer(inference_vulkan::PagedPrefill::partials_bytes(
+                r1 - r0,
+                heads,
+                head_size,
+                context,
+            ))?,
+        );
+        device
+            .context
+            .record(|r| {
+                r.paged_prefill(&inference_vulkan::PagedPrefill {
+                    shape,
+                    rows: r1 - r0,
+                    heads,
+                    context,
+                    scale: op.scale,
+                    q: (&q.0, q.1 + r0 * row_len),
+                    key_cache: &kc.0,
+                    value_cache: &vc.0,
+                    block_table: (&tb.0, tb.1),
+                    partials: &partials,
+                    out: (&out.buffer, r0 * row_len),
+                })
+            })
+            .map_err(vk_err)?;
+    }
     device
         .context
-        .record(|r| {
-            r.paged_prefill(&inference_vulkan::PagedPrefill {
-                shape,
-                rows,
-                heads,
-                context: op.context,
-                scale: op.scale,
-                q: (&q.0, q.1),
-                key_cache: &kc.0,
-                value_cache: &vc.0,
-                block_table: (&tb.0, tb.1),
-                partials: &partials,
-                out: (&out.buffer, 0),
-            })?;
-            unrotate(r, &shape, &out.buffer, count)
-        })
+        .record(|r| unrotate(r, &shape, &out.buffer, count))
         .map_err(vk_err)?;
     Ok(tensor_of(out, (rows, heads, head_size)))
 }
@@ -2077,6 +2106,41 @@ mod tests {
     }
 
     // relu(x)^2 in one map against the CPU's relu then sqr, over a strided view
+    // a prompt chunk's rows split into pieces, each over its own causal prefix, score as one call does
+    #[test]
+    fn paged_prefill_in_pieces_matches_one_call() -> Result<()> {
+        let Some(vk) = device() else {
+            return Ok(());
+        };
+        const BLOCK: usize = 16;
+        const KV_HEADS: usize = 2;
+        const HEADS: usize = 8;
+        const HEAD: usize = 64;
+        // f16 caches hold 8 dimensions a key row
+        const X: usize = 8;
+        const CONTEXT: usize = 900;
+        const ROWS: usize = 37;
+        // 8 rows a piece, the last one short
+        const PIECE_WORK: usize = 8 * CONTEXT * HEADS * HEAD;
+        let blocks = CONTEXT.div_ceil(BLOCK);
+        let kc = Tensor::randn(0f32, 1., (blocks, KV_HEADS, HEAD / X, BLOCK, X), &vk)?
+            .to_dtype(DType::F16)?;
+        let vc =
+            Tensor::randn(0f32, 1., (blocks, KV_HEADS, HEAD, BLOCK), &vk)?.to_dtype(DType::F16)?;
+        let table: Vec<u32> = (0..blocks as u32).rev().collect();
+        let op = crate::vulkan::PagedPrefill {
+            q: &Tensor::randn(0f32, 1., (ROWS, HEADS, HEAD), &vk)?,
+            key_cache: &kc,
+            value_cache: &vc,
+            block_table: &Tensor::new(table.as_slice(), &vk)?,
+            context: CONTEXT,
+            scale: 1.0 / (HEAD as f32).sqrt(),
+        };
+        let whole = super::paged_prefill_in_pieces(&op, usize::MAX)?;
+        let pieces = super::paged_prefill_in_pieces(&op, PIECE_WORK)?;
+        assert_same(&pieces, &whole)
+    }
+
     #[test]
     fn a_fused_relu_sqr_matches_relu_then_sqr() -> Result<()> {
         let Some(vk) = device() else { return Ok(()) };
