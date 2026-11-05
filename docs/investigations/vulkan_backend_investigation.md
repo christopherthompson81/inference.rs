@@ -1056,3 +1056,23 @@ closed for these. Decode still swings ~+-15 tok/s within a 2-iteration bench, so
 
 **Next:** the fixed cost a dispatch (~3 us beyond its work, ~600 a token) and the remaining matvec gap to the card's
 ~870 GB/s; `ranked_topk` over more of the GPU for a single row.
+
+### Run 41 - 2026-11-04 ~21:30 (desktop: RTX 3090)
+
+**Question:** after Run 40 (~131 tok/s), the sampler's top-128 and the matvecs' occupancy.
+
+**Changes and results (as Run 40's setup):**
+- `ranked_topk` ran a workgroup a row: decode's one row of 131072 logits, read eight times, on one SM (286 us a
+  token). Now `ranked_topk_part` takes 4096-logit chunks over the GPU (each chunk's sorted top-128, max and partial
+  sum; the last chunk takes a row's remainder, so each holds 128 or more), and `ranked_topk` selects again from a
+  row's chunks' candidates in chunk order, so ties still go to the lower index. 29.6 + 28.1 us a token; decode
+  ~131 -> 147-150 tok/s. `ranked_top_k_matches_a_sort` adds a 151936-logit row (a remainder chunk).
+- Dense matvecs at 2 rows a workgroup (more warps a SM for decode's small matrices) and at 1: no better at any
+  decode shape (2688 x 4096: 19.8 us at 4 rows, 21.6 at 2, 20.6 at 1), and lm_head falls from 869 GB/s to 660 / 736.
+  Occupancy is not the matvecs' limit; back to 4 rows.
+
+**Where a token goes now (~6.7 ms wall, CUDA 4.8):** matvecs ~4.5 ms (decode shapes 540-750 GB/s against lm_head's
+870), ~600 dispatches at ~3 us of fixed cost each, the router 0.48 ms, the activation quantizes 0.47 ms.
+
+**Next:** the matvecs' loads (34- and 22-byte blocks read as u16s) against llama.cpp's Vulkan mul_mat_vec, which
+decodes this file at 176 tok/s.
