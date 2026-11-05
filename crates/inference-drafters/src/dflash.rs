@@ -13,8 +13,10 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::{Arc, Mutex};
 
+use inference_quant::nvfp4::gguf_blocks::{ModeloptNvfp4Weight, gguf_nvfp4_linear};
 use inference_quant::{
-    IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, ShardedVarBuilder, UnquantLinear,
+    IsqType, NVFP4_BLOCK_SIZE, QuantMethod, QuantMethodConfig, QuantizeOntoGuard,
+    ShardedVarBuilder, UnquantLinear,
 };
 use inference_tensor::{D, DType, Device, IndexOp, Module, Result, Tensor};
 #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -518,13 +520,17 @@ struct MarkovHead {
 
 impl MarkovHead {
     fn load(vb: ShardedVarBuilder, vocab: usize, rank: usize, device: &Device) -> Result<Self> {
-        Ok(Self {
-            w1: vb.pp("markov_w1").get((vocab, rank), "weight")?,
-            w2: linear_from_weight(
+        let w2 = match modelopt_nvfp4(&vb.pp("markov_w2"), vocab, rank)? {
+            Some(weight) => gguf_nvfp4_linear(&[weight], device)?.0,
+            None => linear_from_weight(
                 vb.pp("markov_w2").get((vocab, rank), "weight")?,
                 None,
                 device,
             )?,
+        };
+        Ok(Self {
+            w1: vb.pp("markov_w1").get((vocab, rank), "weight")?,
+            w2,
         })
     }
 
@@ -996,6 +1002,8 @@ struct DFlashLayer {
     mlp_conv: Option<DynamicConv>,
     is_causal: bool,
     sliding_window: Option<usize>,
+    // per-head f32 attention sinks `[heads]`: a logit that takes softmax mass and adds no value
+    sinks: Option<Tensor>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1464,6 +1472,9 @@ pub struct DFlashDraftModel {
     full_attention: bool,
     paged_first_layer: Option<usize>,
     paged_next_pos: Mutex<HashMap<usize, usize>>,
+    // the drafter's own embedding of its mask token, `[hidden]`, when its checkpoint carries a table (NVIDIA's
+    // Lightning drafters train that one row and freeze the rest at the target's)
+    mask_embedding: Option<Tensor>,
     input_embedding_scale: f64,
     output_multiplier: f64,
     num_heads: usize,
@@ -2280,6 +2291,38 @@ fn linear_from_weight(
     }
 }
 
+/// A ModelOpt NVFP4 projection `[rows, cols]` (`weight` U8, `weight_scale` E4M3 a 16-value group,
+/// `weight_scale_2` F32), or None when the projection is stored unquantized.
+fn modelopt_nvfp4(
+    vb: &ShardedVarBuilder,
+    rows: usize,
+    cols: usize,
+) -> Result<Option<ModeloptNvfp4Weight>> {
+    if !vb.contains_tensor("weight_scale") {
+        return Ok(None);
+    }
+    let weight =
+        vb.get_with_hints_dtype((rows, cols / 2), "weight", Default::default(), DType::U8)?;
+    let scales = vb.get_with_hints_dtype(
+        (rows, cols / NVFP4_BLOCK_SIZE),
+        "weight_scale",
+        Default::default(),
+        DType::F8E4M3,
+    )?;
+    let global_scale = vb
+        .get_unchecked_dtype("weight_scale_2", DType::F32)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    let [global_scale] = global_scale[..] else {
+        inference_tensor::bail!("NVFP4 weight_scale_2 must be one value per projection");
+    };
+    Ok(Some(ModeloptNvfp4Weight {
+        weight,
+        scales,
+        global_scale,
+    }))
+}
+
 /// Reads only the drafter's config when it identifies a DFlash checkpoint.
 pub fn peek_config(config: &MtpConfig) -> Result<Option<DFlashConfig>> {
     let path = config.resolve_path()?;
@@ -2544,21 +2587,49 @@ impl DFlashDraftModel {
             let o_proj = linears.linear(&format!("layers.{i}.o_proj"), || {
                 host_attn.pp("o_proj").get((hidden, q_size), "weight")
             })?;
-            let gate_up_proj = linears.linear(&format!("layers.{i}.gate_up_proj"), || {
-                let gate_weight = host_mlp
-                    .pp("gate_proj")
-                    .get((cfg.intermediate_size, hidden), "weight")?;
-                let up_weight = host_mlp
-                    .pp("up_proj")
-                    .get((cfg.intermediate_size, hidden), "weight")?;
-                Tensor::cat(&[&gate_weight, &up_weight], 0)
-            })?;
-            let down_proj = linears.linear(&format!("layers.{i}.down_proj"), || {
-                host_mlp
-                    .pp("down_proj")
-                    .get((hidden, cfg.intermediate_size), "weight")
-            })?;
+            let nvfp4 = (
+                modelopt_nvfp4(&host_mlp.pp("gate_proj"), cfg.intermediate_size, hidden)?,
+                modelopt_nvfp4(&host_mlp.pp("up_proj"), cfg.intermediate_size, hidden)?,
+                modelopt_nvfp4(&host_mlp.pp("down_proj"), hidden, cfg.intermediate_size)?,
+            );
+            let (gate_up_proj, down_proj) = match nvfp4 {
+                (Some(gate), Some(up), Some(mut down)) => {
+                    let (gate_up, ratios) = gguf_nvfp4_linear(&[gate, up], device)?;
+                    // the fused matrix scales both halves by the gate's tensor scale; the MLP is linear in its up
+                    // half, so the up half's ratio to it moves into the down projection's scale
+                    down.global_scale *= ratios[0];
+                    (gate_up, gguf_nvfp4_linear(&[down], device)?.0)
+                }
+                (None, None, None) => (
+                    linears.linear(&format!("layers.{i}.gate_up_proj"), || {
+                        let gate_weight = host_mlp
+                            .pp("gate_proj")
+                            .get((cfg.intermediate_size, hidden), "weight")?;
+                        let up_weight = host_mlp
+                            .pp("up_proj")
+                            .get((cfg.intermediate_size, hidden), "weight")?;
+                        Tensor::cat(&[&gate_weight, &up_weight], 0)
+                    })?,
+                    linears.linear(&format!("layers.{i}.down_proj"), || {
+                        host_mlp
+                            .pp("down_proj")
+                            .get((hidden, cfg.intermediate_size), "weight")
+                    })?,
+                ),
+                _ => inference_tensor::bail!(
+                    "DFlash layer {i} quantizes only some of its MLP projections with NVFP4"
+                ),
+            };
+            let sinks = vb_attn
+                .contains_tensor("attention_sink_bias")
+                .then(|| {
+                    vb_attn
+                        .get(cfg.num_attention_heads, "attention_sink_bias")?
+                        .to_dtype(DType::F32)
+                })
+                .transpose()?;
             layers.push(DFlashLayer {
+                sinks,
                 qkv_proj,
                 o_proj,
                 q_norm: RmsNorm::new(head_dim, eps, vb_attn.pp("q_norm"))?,
@@ -2596,12 +2667,34 @@ impl DFlashDraftModel {
         } else {
             None
         };
-        let fc = linears.linear("fc", || {
-            vb_host
-                .pp("fc")
-                .get((hidden, target_layer_ids.len() * hidden), "weight")
-        })?;
+        let fc_cols = target_layer_ids.len() * hidden;
+        let fc = match modelopt_nvfp4(&vb_host.pp("fc"), hidden, fc_cols)? {
+            Some(weight) => gguf_nvfp4_linear(&[weight], device)?.0,
+            None => linears.linear("fc", || vb_host.pp("fc").get((hidden, fc_cols), "weight"))?,
+        };
         linears.finish();
+        let mask_embedding = vb_host
+            .pp("embed_tokens")
+            .contains_tensor("weight")
+            .then(|| -> Result<Tensor> {
+                let mask =
+                    usize::try_from(cfg.mask_token_id()?).map_err(inference_tensor::Error::wrap)?;
+                vb_host
+                    .pp("embed_tokens")
+                    .get_with_hints(
+                        (1, hidden),
+                        "weight",
+                        inference_quant::Shard::Offset {
+                            dim: 0,
+                            offset: mask,
+                            len: 1,
+                        },
+                    )?
+                    .reshape(hidden)?
+                    .to_dtype(dtype)?
+                    .to_device(device)
+            })
+            .transpose()?;
         let selector = cfg
             .is_v2()
             .then(|| CandidateSelector::load(vb.pp("candidate_selector"), &cfg))
@@ -2652,6 +2745,7 @@ impl DFlashDraftModel {
             full_attention: false,
             paged_first_layer: None,
             paged_next_pos: Mutex::new(HashMap::new()),
+            mask_embedding,
             input_embedding_scale: cfg.dflash_config.input_embedding_scale.unwrap_or(1.0),
             output_multiplier: cfg.dflash_config.output_multiplier.unwrap_or(1.0),
             num_heads: cfg.num_attention_heads,
@@ -3238,6 +3332,23 @@ impl DFlashDraftModel {
         self.mask_token_id
     }
 
+    /// A noise block `[batch, rows, hidden]` (the anchor, then mask tokens) with the drafter's own mask embedding
+    /// in place of the target's, unscaled.
+    pub fn with_own_mask_rows(&self, noise: Tensor) -> Result<Tensor> {
+        let Some(mask) = &self.mask_embedding else {
+            return Ok(noise);
+        };
+        let (batch, rows, hidden) = noise.dims3()?;
+        if rows < 2 {
+            return Ok(noise);
+        }
+        let masks = mask
+            .to_dtype(noise.dtype())?
+            .reshape((1, 1, hidden))?
+            .broadcast_as((batch, rows - 1, hidden))?;
+        Tensor::cat(&[&noise.narrow(1, 0, 1)?, &masks], 1)
+    }
+
     pub fn input_embedding_scale(&self) -> f64 {
         self.input_embedding_scale
     }
@@ -3760,6 +3871,7 @@ impl DFlashDraftModel {
                     scale,
                     causal: layer.is_causal,
                     window_left: layer.sliding_window.map(|window| window - 1),
+                    sinks: layer.sinks.clone(),
                     ..Default::default()
                 };
                 let kv = inference_fattn::PagedKv {
@@ -3968,7 +4080,18 @@ impl DFlashDraftModel {
                 let v = repeat_kv(&v, groups)?;
                 let att = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
                 let att = att.broadcast_add(mask)?;
-                let att = inference_tensor::nn::ops::softmax_last_dim(&att)?;
+                let att = match &layer.sinks {
+                    Some(sinks) => {
+                        let (batch, heads, queries, keys) = att.dims4()?;
+                        let sink = sinks
+                            .to_dtype(att.dtype())?
+                            .reshape((1, heads, 1, 1))?
+                            .broadcast_as((batch, heads, queries, 1))?;
+                        let att = Tensor::cat(&[&att, &sink.contiguous()?], 3)?;
+                        inference_tensor::nn::ops::softmax_last_dim(&att)?.narrow(3, 0, keys)?
+                    }
+                    None => inference_tensor::nn::ops::softmax_last_dim(&att)?,
+                };
                 let out = att.matmul(&v)?;
                 out.transpose(1, 2)?
                     .reshape((b, block, self.num_heads * self.head_dim))
@@ -4223,6 +4346,7 @@ impl DFlashDraftModel {
                     scale,
                     causal: layer.is_causal,
                     window_left: Some(window - 1),
+                    sinks: layer.sinks.clone(),
                     ..Default::default()
                 };
                 let kv = inference_fattn::PagedKv {
@@ -4253,8 +4377,10 @@ impl DFlashDraftModel {
         token_embedding: &Arc<dyn QuantMethod>,
         lm_head: &Arc<dyn QuantMethod>,
     ) -> Result<DFlashCudaGraphOutput> {
-        let mut noise = token_embedding
-            .embedding_forward(&buffers.token_ids.as_detached_tensor(), self.dtype)?;
+        let mut noise = self.with_own_mask_rows(
+            token_embedding
+                .embedding_forward(&buffers.token_ids.as_detached_tensor(), self.dtype)?,
+        )?;
         if (self.input_embedding_scale - 1.0).abs() > f64::EPSILON {
             noise = (noise * self.input_embedding_scale)?;
         }

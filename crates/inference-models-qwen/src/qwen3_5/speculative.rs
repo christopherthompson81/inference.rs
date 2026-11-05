@@ -18,11 +18,10 @@ use crate::{
     speculative::{
         AUTO_DEPTHS, AUTO_MAX_DEPTH, MtpRuntimeConfig, SpeculativeAttachInfo, SpeculativeBatchPlan,
         SpeculativeCommitRow, SpeculativeConfig, SpeculativeGraphPlan, SpeculativeGraphState,
-        SpeculativeKvCache, SpeculativePrefillCtx, SpeculativePrefixReplay, SpeculativeProposal,
-        SpeculativeProposalBatch, SpeculativeProposeBatchCtx, SpeculativeProposePreparation,
-        SpeculativeProposePrepareCtx, SpeculativeTargetMixin, TargetAttentionInputs,
-        auto_depth_graph_plans, depths_up_to, paged_rows::make_paged_rows_metadata,
-        proposer::sample_draft_rows,
+        SpeculativeKvCache, SpeculativePrefillCtx, SpeculativeProposal, SpeculativeProposalBatch,
+        SpeculativeProposeBatchCtx, SpeculativeProposePreparation, SpeculativeProposePrepareCtx,
+        SpeculativeTargetMixin, TargetAttentionInputs, auto_depth_graph_plans, depths_up_to,
+        paged_rows::make_paged_rows_metadata, proposer::sample_draft_rows,
     },
 };
 use inference_drafters::dflash::DFlashLoadTarget;
@@ -842,98 +841,7 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
         self.dflash.lock().expect("dflash poisoned").is_some()
     }
 
-    fn speculative_prefix_replay(&self) -> SpeculativePrefixReplay {
-        self.dflash
-            .lock()
-            .expect("dflash poisoned")
-            .as_ref()
-            .map_or(SpeculativePrefixReplay::NotRequired, |drafter| {
-                drafter.prefix_replay()
-            })
-    }
-
-    fn supports_paged_auxiliary_prefix_state(&self) -> bool {
-        self.dflash
-            .lock()
-            .expect("dflash poisoned")
-            .as_ref()
-            .is_some_and(|drafter| drafter.supports_paged_auxiliary_prefix_state())
-    }
-
-    fn capture_paged_auxiliary_prefix_state(
-        &mut self,
-        sequence_id: usize,
-        cached_tokens: usize,
-    ) -> Result<Option<Arc<dyn crate::kv_cache::PagedAuxiliaryPrefixState>>> {
-        let Some(drafter) = self
-            .dflash
-            .lock()
-            .expect("dflash poisoned")
-            .as_ref()
-            .cloned()
-        else {
-            return Ok(None);
-        };
-        drafter.capture_paged_auxiliary_prefix_state(sequence_id, cached_tokens)
-    }
-
-    fn restore_paged_auxiliary_prefix_state(
-        &mut self,
-        sequence_id: usize,
-        cached_tokens: usize,
-        state: &dyn crate::kv_cache::PagedAuxiliaryPrefixState,
-    ) -> Result<()> {
-        let drafter = self
-            .dflash
-            .lock()
-            .expect("dflash poisoned")
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| {
-                inference_tensor::Error::msg("DFlash prefix restore without a drafter")
-            })?;
-        drafter.restore_paged_auxiliary_prefix_state(sequence_id, cached_tokens, state)
-    }
-
-    fn export_paged_auxiliary_prefix_state(
-        &mut self,
-        state: &dyn crate::kv_cache::PagedAuxiliaryPrefixState,
-    ) -> Result<Option<crate::kv_cache::PagedAuxiliaryPrefixData>> {
-        let drafter = self
-            .dflash
-            .lock()
-            .expect("dflash poisoned")
-            .as_ref()
-            .cloned();
-        drafter.map_or(Ok(None), |drafter| {
-            drafter.export_paged_auxiliary_prefix_state(state)
-        })
-    }
-
-    fn import_paged_auxiliary_prefix_state(
-        &mut self,
-        data: &crate::kv_cache::PagedAuxiliaryPrefixData,
-    ) -> Result<Option<Arc<dyn crate::kv_cache::PagedAuxiliaryPrefixState>>> {
-        let drafter = self
-            .dflash
-            .lock()
-            .expect("dflash poisoned")
-            .as_ref()
-            .cloned();
-        drafter.map_or(Ok(None), |drafter| {
-            drafter.import_paged_auxiliary_prefix_state(data)
-        })
-    }
-
-    fn paged_auxiliary_prefix_signature(&self) -> Option<String> {
-        let drafter = self
-            .dflash
-            .lock()
-            .expect("dflash poisoned")
-            .as_ref()
-            .cloned();
-        drafter.and_then(|drafter| drafter.paged_auxiliary_prefix_signature())
-    }
+    inference_drafters::external_drafter_prefix_hooks!(|this| this.drafter());
 
     fn speculative_plan(&self, batch_size: usize) -> Option<SpeculativeBatchPlan> {
         let n = self.mtp_n_predict();

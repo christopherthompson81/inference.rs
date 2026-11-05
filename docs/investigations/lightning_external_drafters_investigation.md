@@ -91,3 +91,91 @@ at `qwen3_5/text.rs:3197`).
 **Implication:** the drafter must move out of the Qwen crate to somewhere both target crates reach, and the glue
 splits into a generic drafter driver plus a small per-target surface (taps, rollback, prefix sizing). Where it goes
 is a structure decision for the user.
+
+## Run 4 — 2026-11-05
+
+**Question:** does NVIDIA's NVFP4 DFlash drafter draft for Nemotron-H once the drafter glue is target-agnostic
+(`inference_drafters::host::ExternalDrafter`, Qwen3.5 moved onto it with its 55 DFlash/DSpark tests passing)?
+
+**First attempt:** `DFlash taps target layer 51 but the target has 29 layers`. Our Nemotron-H blocks pair a mixer with
+the MoE after it; the checkpoint counts them apart (`layers_block_type`, 52 entries). The taps land on
+1 = moe, 5 = attention (followed by moe 6), 19 = attention (moe 20), 29 = moe, 41 = mamba (followed by attention, so
+a block without FFN), 51 = moe. A tap is now a point in a block, from the layout's `layers.N` names: after the
+block, or between its mixer and FFN (a per-block `MixerTap` keeps that residual when tapped). The drafter's layer
+check counts checkpoint layers (52), not blocks.
+
+**Command:** `mtp/run.sh df1 256 --paged-attn on --pa-context-len 8192 --mtp-model
+/mnt/data/models/nemotron-lightning-dflash-nvfp4` (4 generic prompts, greedy, thinking off).
+
+Attach line: `DFlash ... (block of 15, depth 7, greedy draft, paged context, taps [1, 5, 19, 29, 41, 51])`, YaRN from
+the drafter (factor 128 over 8192), checkpoint lanes 1 (Granite rolls back by Mamba replay).
+
+| config | per prompt tok/s | mean | accept (len) |
+|---|---|---|---|
+| plain | 249.8 / 250.5 / 248.4 / 249.0 | 249.4 | |
+| MTP 3, q4_0 draft head | 329.5 / 248.3 / 225.8 / 395.7 | 299.8 | 73.0 % (3.19) |
+| DFlash, depth 7 (its default) | 231.3 / 130.4 / 133.9 / 514.1 | 252.4 | 36.1 % (3.53) |
+| DFlash, depth 3 | 192.5 / 137.8 / 153.4 / 355.1 | 209.7 | 47.6 % (2.43) |
+
+NVIDIA's card gives SPEED-Bench acceptance length 3.16 on average at draft length 7 (2.49 writing to 3.75
+multilingual, temperature 1, BF16 target); greedy here 3.47-3.53, so the NVFP4 repack, the taps and the drafter's
+mask row are right. A step costs ~14 ms at depth 7 (3.5 tokens) against MTP 3's ~10.6 ms (3.2 tokens): the built-in
+head accepts nearly as much at depth 3, where an 8-row verify does not have to be paid.
+
+## Run 5 — 2026-11-05
+
+**Question:** speculative text departs from plain decoding (DFlash 7 at chars 248 / 57 / 111, MTP 3 at 38 / 55 /
+944, counting the same). Near-ties, or a verify bug?
+
+**Command:** `LOGPROBS=1 mtp/run.sh ...` (top-2 logprobs per token) for plain, MTP 3, DFlash 3 and 7; then
+`mtp/tf.sh 1 4,14,30,53,100`: the chat prompt plus plain decoding's first k tokens sent as one prompt, so token k is
+scored by a multi-row prefill instead of a one-row decode.
+
+At the departures, plain's top two: 0.015 and 0.013 nats apart on prompts 0 and 2 (ties), but 0.44 (DFlash 7) and
+0.95 (DFlash 3) on prompt 1. Over the shared prefixes the chosen token's logprob moves 0.08-0.35 nats under every
+drafter. Plain decoding's own prefill moves it as far:
+
+| position | one-row decode, top two | multi-row prefill, top two |
+|---|---|---|
+| 4 | -1.283 / -1.361 | -1.030 / -1.265 (order flipped) |
+| 14 | -0.650 / -1.086 | -0.668 / -0.998 |
+| 30 | -0.000 / -9.588 | -0.000 / -11.069 |
+| 53 | -0.533 / -1.482 | -0.880 / -1.502 |
+| 100 | -0.056 / -4.292 | -0.069 / -4.053 |
+
+**Implication:** the departures are this stack's multi-row against one-row numerics (Q4_0 experts, BF16 activations,
+the chunked Mamba scan against its recurrent step), which every verify inherits; not a drafter or verify bug. Whether
+0.3 nats between prefill and decode is right for the plain model is its own question (the tiny parity tests hold at
+0.06 on random weights).
+
+## Run 6 — 2026-11-05
+
+**Question:** NVIDIA's DSpark drafter (`Qwen3DSparkModel`: 6 causal SWA-1024 layers, block 8, a rank-512 Markov head,
+an attention sink per head; card: SPEED-Bench acceptance length 3.75 on average at draft length 7, against DFlash's
+3.16) on the same target.
+
+**First attempt:** `shape mismatch for markov_head.markov_w2.weight, expected: [131072, 512], got: [131072, 256]`: the
+Markov head's `w2` is NVFP4 too (`markov_w1` and attention stay BF16), and each layer has `attention_sink_bias` [32].
+The drafter now loads `w2` through the same repack, and passes per-head F32 sinks to fattn (`FattnOptions::sinks`,
+both the paged and the windowed path) and as an extra softmax logit on its eager path.
+
+**Command:** `mtp/run.sh dsN 256 --paged-attn on --pa-context-len 8192 --mtp-model
+/mnt/data/models/nemotron-lightning-dspark-nvfp4 [--mtp-n-predict N]`. Attach: `DSpark ... (block of 7, depth 7,
+greedy draft, windowed context, ...)`, its CUDA graphs captured.
+
+| config | per prompt tok/s | mean | accept (len) |
+|---|---|---|---|
+| DSpark, depth 3 | 295.3 / 189.6 / 206.3 / 362.1 | 263.3 | 66.1 % (2.98) |
+| DSpark, depth 4 | 298.0 / 178.1 / 177.0 / 414.2 | 266.9 | 52.7 % (3.11) |
+| DSpark, depth 5 | 307.3 / 163.7 / 156.3 / 424.5 | 263.0 | 51.5 % (3.58) |
+| DSpark, depth 7 (default) | 281.0 / 148.6 / 149.4 / 490.4 | 267.4 | 41.9 % (3.93) |
+| (Run 4) MTP 3, q4_0 head | 329.5 / 248.3 / 225.8 / 395.7 | 299.8 | 73.0 % (3.19) |
+
+DSpark's acceptance is above its card's (3.93 at depth 7), and its text departs from plain decoding at the same
+characters as DFlash's (Run 5's multi-row numerics). At depth 3 it verifies the same 4 rows as MTP 3 and accepts 2.98
+against 3.19, yet a step costs 11.3 ms against 10.6: its drafting pass (6 layers over the block and the Markov chain
+over a 131K vocabulary) costs more than the built-in head's.
+
+**Implication:** both NVIDIA drafters run on Nemotron-H from their NVFP4 weights at NVIDIA's acceptance, through the
+target-agnostic `ExternalDrafter`; on the 3090 neither beats the built-in MTP head (~300 tok/s). Next for speed: profile
+DSpark's step (drafter forward, Markov chain, context append) against MTP's.

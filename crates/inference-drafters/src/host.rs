@@ -255,7 +255,9 @@ impl ExternalDrafter {
             ids.extend(std::iter::repeat_n(self.drafter.mask_token_id(), block - 1));
         }
         let ids = Tensor::from_vec(ids, (anchors.len(), block), device)?;
-        let mut emb = target.embed_tokens(&ids)?;
+        let mut emb = self
+            .drafter
+            .with_own_mask_rows(target.embed_tokens(&ids)?)?;
         let scale = self.drafter.input_embedding_scale();
         if (scale - 1.0).abs() > f64::EPSILON {
             emb = (emb * scale)?;
@@ -613,6 +615,85 @@ impl ExternalDrafter {
         }
         drafter.append_ctx_batch(&taps, flat_row_indices, &appends, None)
     }
+}
+
+/// The prefix-cache hooks of `SpeculativeTargetMixin` for a target with an external drafter, which keeps that state:
+/// `$drafter` reads the attached drafter from `self` as an `Option<Arc<ExternalDrafter>>`.
+#[macro_export]
+macro_rules! external_drafter_prefix_hooks {
+    (|$this:ident| $drafter:expr) => {
+        fn speculative_prefix_replay(
+            &self,
+        ) -> ::inference_nn::speculative::SpeculativePrefixReplay {
+            let $this = self;
+            $drafter.map_or(
+                ::inference_nn::speculative::SpeculativePrefixReplay::NotRequired,
+                |drafter| drafter.prefix_replay(),
+            )
+        }
+
+        fn supports_paged_auxiliary_prefix_state(&self) -> bool {
+            let $this = self;
+            $drafter.is_some_and(|drafter| drafter.supports_paged_auxiliary_prefix_state())
+        }
+
+        fn capture_paged_auxiliary_prefix_state(
+            &mut self,
+            sequence_id: usize,
+            cached_tokens: usize,
+        ) -> ::inference_tensor::Result<
+            Option<::std::sync::Arc<dyn ::inference_nn::kv_cache::PagedAuxiliaryPrefixState>>,
+        > {
+            let $this = &*self;
+            match $drafter {
+                Some(drafter) => {
+                    drafter.capture_paged_auxiliary_prefix_state(sequence_id, cached_tokens)
+                }
+                None => Ok(None),
+            }
+        }
+
+        fn restore_paged_auxiliary_prefix_state(
+            &mut self,
+            sequence_id: usize,
+            cached_tokens: usize,
+            state: &dyn ::inference_nn::kv_cache::PagedAuxiliaryPrefixState,
+        ) -> ::inference_tensor::Result<()> {
+            let $this = &*self;
+            let drafter = $drafter.ok_or_else(|| {
+                ::inference_tensor::Error::msg("DFlash prefix restore without a drafter")
+            })?;
+            drafter.restore_paged_auxiliary_prefix_state(sequence_id, cached_tokens, state)
+        }
+
+        fn export_paged_auxiliary_prefix_state(
+            &mut self,
+            state: &dyn ::inference_nn::kv_cache::PagedAuxiliaryPrefixState,
+        ) -> ::inference_tensor::Result<Option<::inference_nn::kv_cache::PagedAuxiliaryPrefixData>>
+        {
+            let $this = &*self;
+            $drafter.map_or(Ok(None), |drafter| {
+                drafter.export_paged_auxiliary_prefix_state(state)
+            })
+        }
+
+        fn import_paged_auxiliary_prefix_state(
+            &mut self,
+            data: &::inference_nn::kv_cache::PagedAuxiliaryPrefixData,
+        ) -> ::inference_tensor::Result<
+            Option<::std::sync::Arc<dyn ::inference_nn::kv_cache::PagedAuxiliaryPrefixState>>,
+        > {
+            let $this = &*self;
+            $drafter.map_or(Ok(None), |drafter| {
+                drafter.import_paged_auxiliary_prefix_state(data)
+            })
+        }
+
+        fn paged_auxiliary_prefix_signature(&self) -> Option<String> {
+            let $this = self;
+            $drafter.and_then(|drafter| drafter.paged_auxiliary_prefix_signature())
+        }
+    };
 }
 
 #[cfg(test)]
