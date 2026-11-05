@@ -983,56 +983,74 @@ mod tests {
             return Ok(());
         };
         const ROWS: usize = 96;
-        const COLS: usize = 2688;
-        let ty = BlockType::Q8_0;
-        let len = len(ty, ROWS, COLS);
-        let mut pages = Pages::new(len);
-        weights(ty, pages.bytes(), ROWS, COLS);
-        let weights: Arc<dyn Bound> =
-            Arc::new(Buffer::with_bytes(&context, &pages.bytes()[..len])?);
-        let x: Vec<f32> = (0..COLS)
-            .map(|i| ((i * 37 % 101) as f32 - 50.0) / 9.0)
-            .collect();
-        let alpha: Vec<f32> = (0..COLS).map(|i| 0.5 + (i % 11) as f32 / 10.0).collect();
-        let (xs, alphas) = (
-            Arc::new(Buffer::with_f32(&context, &x)?),
-            Arc::new(Buffer::with_f32(&context, &alpha)?),
-        );
-        let normed = Arc::new(Buffer::new(&context, COLS * 4)?);
-        let (cached_y, apart_y) = (
-            Arc::new(Buffer::new(&context, ROWS * 4)?),
-            Arc::new(Buffer::new(&context, ROWS * 4)?),
-        );
-        let scratch = Arc::new(Buffer::new(&context, MatVec::scratch_bytes(1, COLS))?);
-        let op = |x, y| MatVec {
-            ty,
-            weights: &weights,
-            rows: ROWS,
-            cols: COLS,
-            x,
-            x_offset: 0,
-            y,
-            y_offset: 0,
-            x_rows: 1,
-            scratch: &scratch,
-        };
-        context.submit(|r| {
-            r.rows_f32(&crate::Rows {
-                op: crate::RowOp::RmsNorm,
-                rows: 1,
-                cols: COLS,
-                eps: 1e-5,
-                x: &xs,
+        // a decode row in one pass, and rows of two passes with a partial second
+        for (x_rows, cols) in [(1usize, 2688usize), (3, 4128)] {
+            let ty = BlockType::Q8_0;
+            let len = len(ty, ROWS, cols);
+            let mut pages = Pages::new(len);
+            weights(ty, pages.bytes(), ROWS, cols);
+            let weights: Arc<dyn Bound> =
+                Arc::new(Buffer::with_bytes(&context, &pages.bytes()[..len])?);
+            let x: Vec<f32> = (0..x_rows * cols)
+                .map(|i| ((i * 37 % 101) as f32 - 50.0) / (9.0 + (i / cols) as f32))
+                .collect();
+            let alpha: Vec<f32> = (0..cols).map(|i| 0.5 + (i % 11) as f32 / 10.0).collect();
+            let (xs, alphas) = (
+                Arc::new(Buffer::with_f32(&context, &x)?),
+                Arc::new(Buffer::with_f32(&context, &alpha)?),
+            );
+            let normed = Arc::new(Buffer::new(&context, x_rows * cols * 4)?);
+            let (cached_y, apart_y) = (
+                Arc::new(Buffer::new(&context, x_rows * ROWS * 4)?),
+                Arc::new(Buffer::new(&context, x_rows * ROWS * 4)?),
+            );
+            let scratch = Arc::new(Buffer::new(&context, MatVec::scratch_bytes(x_rows, cols))?);
+            let op = |x, y| MatVec {
+                ty,
+                weights: &weights,
+                rows: ROWS,
+                cols,
+                x,
                 x_offset: 0,
-                alpha: Some((&alphas, 0)),
-                out: &normed,
-                out_offset: 0,
+                y,
+                y_offset: 0,
+                x_rows,
+                scratch: &scratch,
+            };
+            context.submit(|r| {
+                r.rows_f32(&crate::Rows {
+                    op: crate::RowOp::RmsNorm,
+                    rows: x_rows,
+                    cols,
+                    eps: 1e-5,
+                    x: &xs,
+                    x_offset: 0,
+                    alpha: Some((&alphas, 0)),
+                    out: &normed,
+                    out_offset: 0,
+                })?;
+                r.mat_vec(&op(&normed, &cached_y))
             })?;
-            r.mat_vec(&op(&normed, &cached_y))
-        })?;
-        let apart = Arc::new(Buffer::with_f32(&context, &normed.read_f32()?)?);
-        context.submit(|r| r.mat_vec(&op(&apart, &apart_y)))?;
-        assert_eq!(cached_y.read_f32()?, apart_y.read_f32()?);
+            let values = normed.read_f32()?;
+            for (r, row) in x.chunks(cols).enumerate() {
+                let rms = (row.iter().map(|v| v * v).sum::<f32>() / cols as f32 + 1e-5).sqrt();
+                for (c, (&v, &a)) in row.iter().zip(&alpha).enumerate() {
+                    let want = v / rms * a;
+                    let got = values[r * cols + c];
+                    assert!(
+                        (got - want).abs() <= 1e-4 * want.abs().max(1.0),
+                        "{r},{c}: {got} vs {want}"
+                    );
+                }
+            }
+            let apart = Arc::new(Buffer::with_f32(&context, &values)?);
+            context.submit(|r| r.mat_vec(&op(&apart, &apart_y)))?;
+            assert_eq!(
+                cached_y.read_f32()?,
+                apart_y.read_f32()?,
+                "{x_rows} x {cols}"
+            );
+        }
         Ok(())
     }
 
