@@ -346,7 +346,14 @@ async fn an_mtp_head_drafts_on_the_cpu_without_changing_greedy_output() -> anyho
     if cfg!(any(feature = "cuda", feature = "metal")) {
         return Ok(());
     }
-    mtp_keeps_greedy_output(TextModelBuilder::with_force_cpu, LOGPROB_TOLERANCE).await
+    mtp_keeps_greedy_output(
+        TextModelBuilder::with_force_cpu,
+        Shape::BASE,
+        ModelDType::F32,
+        None,
+        LOGPROB_TOLERANCE,
+    )
+    .await
 }
 
 // as on the CPU, with Vulkan's paged cache writes and decode attention, its scan steps and its experts
@@ -355,21 +362,57 @@ async fn an_mtp_head_drafts_on_vulkan_without_changing_greedy_output() -> anyhow
     if !cfg!(feature = "vulkan") || Device::new_vulkan(0).is_err() {
         return Ok(());
     }
-    mtp_keeps_greedy_output(|b| b.with_device("vulkan:0"), VULKAN_LOGPROB_TOLERANCE).await
+    mtp_keeps_greedy_output(
+        |b| b.with_device("vulkan:0"),
+        Shape::BASE,
+        ModelDType::F32,
+        None,
+        VULKAN_LOGPROB_TOLERANCE,
+    )
+    .await
+}
+
+// on CUDA in BF16 with quantized experts, whose scan advances the state it is handed in place: a verify step's replay
+// starts from a copy of the state before it, and the verify steps replay as graphs carrying the Mamba stash
+#[tokio::test]
+async fn an_mtp_head_drafts_on_cuda_without_changing_greedy_output() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let snapshotter = decode_graphs::recorder();
+    mtp_keeps_greedy_output(
+        |b| b,
+        Target::CudaGraphs.shape(),
+        ModelDType::BF16,
+        Some(IsqType::Q8_0),
+        BF16_LOGPROB_TOLERANCE,
+    )
+    .await?;
+    let counters = decode_graphs::Counters::take(&snapshotter);
+    decode_graphs::assert_replayed(&counters);
+    decode_graphs::assert_only_prompts_skip(&counters);
+    Ok(())
 }
 
 async fn mtp_keeps_greedy_output(
     place: fn(TextModelBuilder) -> TextModelBuilder,
+    shape: Shape,
+    dtype: ModelDType,
+    isq: Option<IsqType>,
     tolerance: f32,
 ) -> anyhow::Result<()> {
-    let dir = checkpoint()?;
+    let dir = checkpoint_with(shape)?;
     let builder = || -> anyhow::Result<TextModelBuilder> {
-        Ok(place(
+        let mut builder = place(
             TextModelBuilder::new(dir.path().to_string_lossy())
-                .with_dtype(ModelDType::F32)
+                .with_dtype(dtype)
                 .with_prefix_cache_n(None),
         )
-        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?))
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?);
+        if let Some(isq) = isq {
+            builder = builder.with_isq(isq);
+        }
+        Ok(builder)
     };
     let request = || {
         RequestBuilder::from(

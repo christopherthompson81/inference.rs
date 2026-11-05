@@ -461,3 +461,227 @@ bf16 CUDA's; at 245K the card's demonstrated floor is ~115 s.
 (many tiles through the staged kernels) and GQA-16 cases (32/2 heads) that take the 128-column tile.
 
 **Next:** q8 prompts sit 1.22x bf16 end to end. Item (1) of Run 18: Vulkan's prompt attention over the paged cache.
+
+## Run 20 - 2026-11-05 12:20 (local clock)
+
+**Question:** does Lightning's built-in MTP head speed up CUDA decode, as it did on the CPU (Lightning CPU Run 6: MTP 2
++19 %)?
+
+**Commands:** dev build with `cuda vulkan` at f77f76fcf. `inference serve --max-seqs 1 --format gguf -f
+Lightning-exps-q4_0.gguf` plain, with `--paged-attn on --pa-context-len 8192`, and with `--mtp --mtp-n-predict
+{1,2,3}` added. Four chat prompts (code, a list, prose, counting), greedy, thinking off, 256 tokens; a warm-up pass,
+then a measured one, reading `usage.avg_compl_tok_per_sec` (a harness in the session scratchpad).
+
+**Result (decode tok/s per prompt, mean):**
+
+| config | prompts | mean | MTP accept (len) |
+|---|---|---|---|
+| plain | 243.6 / 245.4 / 247.1 / 247.6 | 245.9 | |
+| paged | 248.8 / 250.2 / 248.7 / 249.8 | 249.4 | |
+| MTP 1 | 225.7 / 199.8 / 211.0 / 244.7 | 220.3 | 87.1 % (1.87) |
+| MTP 2 | 226.7 / 204.3 / 192.2 / 271.5 | 223.7 | 78.2 % (2.56) |
+| MTP 3 | 244.3 / 198.9 / 165.6 / 306.2 | 228.7 | 67.3 % (3.02) |
+
+MTP loses on CUDA despite the CPU's acceptance. MTP 1's step (1.87 tokens at 220 tok/s) is ~8.5 ms against plain's
+4.0: 2.1x a decode step.
+
+**Finding:** with MTP the startup capture fails: "CUDA decode graph precapture failed, graphs will be captured
+lazily: CUDA graph captured forward failed". With debug logging, cudarc reports `CUDA_ERROR_INVALID_VALUE` with no
+caller ("kept for this context's next call"), and a step then fails ("step - Model failed with error:
+DriverError(CUDA_ERROR_INVALID_VALUE)"). Plain and paged runs capture their decode graph at startup (~100 ms).
+
+**Next:** the failing call under capture. User note: DFlash and DSpark drafter heads for Lightning are on Hugging
+Face (NVFP4).
+
+## Run 21 - 2026-11-05 12:47 (local clock)
+
+**Question:** Run 20's failing capture, and whether MTP's output on CUDA is right.
+
+**Correctness first:** MTP's text departed from plain decoding early in 3 of 4 prompts at every depth (characters
+38-111). A new test, `an_mtp_head_drafts_on_cuda_without_changing_greedy_output` (the graph checkpoint: BF16, Q8_0
+experts, paged), failed the same way. An F32 checkpoint failed too, as did one with graphs off, so neither graphs nor
+TF32 cause it; full-f32 cuBLAS for the SSD and the GEMMs changed nothing. One draft or two, the same token
+departed (the third).
+
+**Localized:** a per-layer checksum of row 0 in each forward, plain run against MTP run, step by step. Step 2 matched
+to 2e-7; at step 3 layer 0's input (the embedding) matched and its output (Mamba) was 10 % off. So the recurrent state
+was right after the first commit and wrong after the second. Printing layer 0's gathered pre-state around the verify
+pass: SSM norm 55.84 before, 41.67 after, read through the stash's own tensor. `selective_scan_cuda` advances the
+state it is handed in place, and the stash shared that storage (`to_dtype` to the same dtype is a view), so every
+commit's replay started from the already-advanced state. The CPU's scan writes a new tensor, and Vulkan's branch
+copies first.
+
+**Fix:** the verify pass stashes copies of the gathered conv and SSM states, taken before the pass (one state copy a
+Mamba layer a verify step, ~48 MB for Lightning, ~50 us). A copy taken when the stash was pushed, after the pass,
+had not helped.
+
+**Result (Run 20's prompts, after the fix):**
+
+| config | mean tok/s | MTP accept (len) | text against plain, per prompt |
+|---|---|---|---|
+| paged | 246.2 | | |
+| MTP 1 | 213.5 | 88.4 % (1.88) | departs at char 248 / 222 / 1023 / same |
+| MTP 2 | 229.4 | 82.4 % (2.65) | departs at 38 / 55 / 944 / same |
+| MTP 3 | 233.9 | 72.1 % (3.16) | departs at 38 / 55 / 944 / same |
+
+MTP 1's departures moved from 60-104 to 222-1023. MTP 2 and 3 still part at 38 and 55; whether those are near-ties a
+3-4 row forward rounds the other way (the CPU's Run 6 case) is not yet checked.
+
+**The graph capture (open):** a backtrace hook in cudarc's `record_err` (removed) showed the "no caller" errors are
+frees of the wrong memory around a capture. Freeing an eager allocation inside a capture is invalid, and so is freeing
+a graph allocation whose graph never ran.
+- The MTP head's `record` replaced the warm-up's capture inside the captured forward. For hybrid models
+  (`nonmutating_transition_capture`) the decoder doesn't reinstall the warm state afterwards, so the head is left as
+  the only owner of the graph's tensors. ERNIE's and Qwen3.5's MTP graph tests take the other path and pass.
+- Granite's `mamba_replay` stash has the same two problems, and a third: after a replay the commit needs exactly the
+  graph's stash buffers. It has to become part of the speculative graph state handed to the entry, as the MTP
+  capture is; Qwen3.5's hybrid MTP rolls back by checkpoints and has no stash.
+- A separate head slot for captures made during a capture fixed the head's half but not the stash's (the tiny test
+  still failed); reverted.
+
+Until then MTP runs eagerly on CUDA, and loses to graph-replayed plain decoding (4.0 ms a step against MTP 1's ~8.5).
+
+**Next:** the Mamba stash as graph state, or checkpoint-based rollback for Nemotron-H's verify graphs. The DFlash and
+DSpark drafters for Lightning: the codebase already runs both kinds of drafter for Qwen3.5 (`tiny_dflash`,
+`tiny_dspark`).
+
+## Run 22 — 2026-11-05
+
+**Question:** with Granite's verify steps skipping graphs anyway ("SpeculativeConflict", no speculative graph-state
+hooks), does turning decode-graph capture off while the MTP head drafts remove the capture errors, and what does MTP
+cost against eager and graphed plain decoding?
+
+**Change:** `supports_cuda_decode_graphs` returns false while the MTP head has drafts (`n_predict() > 0`), so no decode
+graph is captured that would record the head's state.
+
+**Command:** `mtp/run.sh LABEL 256 --paged-attn on --pa-context-len 8192 [--mtp N]` (scratch harness, 4 generic
+prompts, greedy, thinking off); `INFERENCE_RS_CUDA_GRAPHS=0` for the eager row.
+
+| config | mean tok/s |
+|---|---|
+| paged, graphs | 244.8 |
+| paged, eager | 169.6 (170.0 / 168.8 / 171.8 / 167.9) |
+| MTP 2, eager (graphs off by the change) | 229.6 (accept 82.4 %, len 2.65) |
+
+No `CUDA_ERROR_INVALID_VALUE` and no graph warnings in the log; the 15 nemotron_h_tiny tests pass.
+
+**Implication:** MTP 2 already beats eager plain decoding by 35 %, so verify steps replayed as graphs should take it
+past graphed plain decoding. Next: Granite's `take_speculative_graph_state` / `install_speculative_graph_state`
+carrying the MTP capture and the Mamba replay stash.
+
+## Run 23 — 2026-11-05
+
+**Question:** with the Mamba replay stash and the MTP head's capture handed to the graph entry as speculative graph
+state, do verify steps replay as graphs, does the text stay what eager MTP produced, and does MTP now beat graphed
+plain decoding?
+
+**Change:** Granite's `take_speculative_graph_state` / `install_speculative_graph_state` carry a
+`GraniteSpecGraphState` (the head's `MtpGraphState` and each Mamba layer's pre-pass conv/SSM state, conv input and
+dt). The device slot indices stay the graph's buffer, refreshed by each replay; installed replays drop their host
+slots (the CUDA scatter reads device slots only). Run 22's opt-out of decode graphs is reverted: holding the warm
+state across the capture is what keeps the head's eager capture from being freed inside it.
+
+- First try refreshed the host slots from the cache's live table and bailed when it was short. Precapture has no live
+  sequence, so it failed ("Mamba replay has 1 rows, but the live slot table has fewer"). The failed capture's
+  never-run graph memory then freed with the `CUDA_ERROR_INVALID_VALUE` "no caller" errors.
+- After the fix: "Captured 2 CUDA decode graphs" (widths 1 and 3), and no errors or lazy-capture warnings in any log.
+
+**Command:** `mtp/run.sh LABEL 256 --paged-attn on --pa-context-len 8192 [--mtp --mtp-n-predict N]`, one session.
+
+| config | per prompt tok/s | mean | MTP accept (len) |
+|---|---|---|---|
+| paged | 247.8 / 247.6 / 240.1 / 241.5 | 244.3 | |
+| MTP 1 | 253.7 / 223.0 / 224.8 / 264.5 | 241.5 | 88.6 % (1.89) |
+| MTP 2 | 266.1 / 228.4 / 228.2 / 301.5 | 256.1 | 80.5 % (2.61) |
+| MTP 3 | 281.3 / 225.6 / 196.4 / 348.3 | 262.9 | 70.6 % (3.12) |
+| MTP 4 | 276.5 / 189.9 / 178.0 / 361.6 | 251.5 | 65.7 % (3.63) |
+
+MTP 2's text against plain decoding departs at chars 38 / 55 / 944 / same, exactly as Run 21's eager MTP 2, so the
+graphed verify replays what the eager one computes. The tiny CUDA MTP test now runs with graphs and asserts that only
+prompts skipped them (it would see `speculative_conflict` skips without the hooks); 15/15 nemotron_h_tiny pass.
+
+**Implication:** MTP 3 is +7.6 % over plain decoding. A step at MTP 3 costs ~11.9 ms (3.12 tokens at 262.9 tok/s)
+against plain decoding's 4.1 ms a token, so the verify, the drafts and the commit's replay together cost ~2.9 plain
+steps. Next: where that step time goes (nsys), since a 4-row MoE verify reads up to 4 tokens' distinct experts.
+
+## Run 24 — 2026-11-05
+
+**Question:** where does an MTP 3 step's time go now that verify steps replay as graphs?
+
+**Command:** `mtp/prof.sh p3 --paged-attn on --pa-context-len 8192 --mtp --mtp-n-predict 3` (nsys
+`--cuda-graph-trace=node` over one 194-token prose request after a warm-up, sqlite export; kernels grouped by
+correlation id per graph launch), and `p0` without MTP for the 1-row decode graph.
+
+Per step (75 steps; nsys slows the run, 171 against 195 tok/s for this prompt):
+
+| part | GPU time |
+|---|---|
+| verify graph (4 rows, 1026 kernels) | 9.5 ms |
+| drafter graph (48 kernels) x 3 | 0.24 ms each |
+| draft lm_head, Q8_0 `mmvq_gguf_q8_0_bf16_plain_cuda1`, eager x 3 | 0.44 ms each, 1.3 ms |
+| commit's Mamba replay and other eager kernels | ~1.4 ms |
+| GPU idle | ~3.2 ms |
+
+Verify graph against the 1-row decode graph (4.8 ms under nsys), per launch:
+
+| kernel | verify | decode |
+|---|---|---|
+| `mmvq_gguf_q4_0_moe_cuda` x 46 | 3793 us | 1023 us |
+| Q8_0 dense matvecs x 52 | 1472 | 1400 |
+| Q5_0 dense matvecs x 46 | 648 | 459 |
+| casts x 116 | 524 | 241 |
+| Mamba gather / copy / scatter / `gemmSN_TN` | ~1010 | none (in place) |
+| `ssm_scan_kernel` x 23 | 237 | 134 |
+
+The dense matvecs stay flat at 4 rows (the DFlash 2 lesson, `dflash2_drafter_investigation.md` Runs 4-5, already
+holds for Q8_0 here). The experts do not: the MoE grid is (928, 24), one block row per (token, expert) pair, each
+pair reading its expert's rows by itself. Verify attention already runs per sequence (`flash_attn_ext_f16` with
+`ncols1 = 4`, DFlash 2 Run 12's fix), so it is not a verify cost at 8K.
+
+**Overlap (temporary probe, removed):** distinct experts per 4-token MoE call, eager MTP 3 run, 14298 calls: mean
+16.45 of 24 pairs (10-19). Reading each distinct expert once would cut the expert traffic to ~69 %.
+
+**Draft head (`--mtp-draft-isq`):**
+
+| config | mean tok/s | accept (len) |
+|---|---|---|
+| MTP 3, Q8_0 draft head | 262.9 | 70.6 % (3.12) |
+| MTP 3, q4_0 draft head | 275.7 | 67.6 % (3.03) |
+| MTP 3, q4k draft head | 271.8 | 66.5 % (3.00) |
+
+**Implication:** two levers, the cheap one already there (a 4-bit draft head). Next: an expert matvec that reads an
+expert once for the tokens routed to it.
+
+## Run 25 — 2026-11-05
+
+**Question:** can the MoE matvec read a shared expert once for its tokens?
+
+**Try 1, grouped blocks (reverted):** a pair leading its expert's group (up to 8 pairs) dotted each weight block
+against every member's activations, the rest returning. Correct for every type (the indexed MoE test with shared,
+repeated and over-full groups), but 167 registers and 128 bytes of stack for the Q4_0 GLU kernel against 56, so
+~3 blocks per SM instead of ~8 in a latency-bound kernel:
+
+| config | mean tok/s |
+|---|---|
+| plain | 246.3 |
+| MTP 3 | 153.6 |
+| MTP 3, q4_0 head | 157.3 |
+
+**Try 2, pairs fast (kept):** the same one-pair blocks, but with several tokens the grid is (pairs, row blocks), so
+every pair's block over one row block runs together and the pairs sharing an expert read its rows from L2 after the
+first. No register change; one-token decode keeps the old order (its pairs are distinct experts). The launchers take
+a `grouped` flag, which `moe_decode_with` sets for more than one token.
+
+| config | mean tok/s | accept (len) |
+|---|---|---|
+| MTP 3 | 272.8 (was 262.9) | 70.2 % (3.11) |
+| MTP 2, q4_0 head | 280.2 | 82.3 % (2.65) |
+| MTP 3, q4_0 head | 295.0 (was 275.7) | 72.7 % (3.18) |
+| MTP 4, q4_0 head | 288.3 | 65.2 % (3.61) |
+
+Profile (`p3b`, MTP 3, q4_0 head): the verify's expert matvec 3793 -> 3099 us per launch (ideal from Run 24's overlap
+~2600), the verify graph 9.5 -> 8.8 ms.
+
+**Implication:** MTP 3 with a q4_0 draft head is 295 tok/s against plain decoding's 246 (+20 %). Left, by size: the
+GPU idle time between graphs (the eager commit and host work), the verify's Mamba gather / copy / scatter (~1 ms,
+in place as the decode step would save the copy and scatter), the 116 casts, and the last ~0.5 ms of expert reuse.

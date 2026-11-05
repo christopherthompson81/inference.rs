@@ -1519,7 +1519,12 @@ mod tests {
             eprintln!("SKIP: no CUDA device");
             return Ok(());
         };
-        let routes: [&[[u32; 2]]; 2] = [&[[2, 0]], &[[3, 2], [1, 1], [0, 3]]];
+        // tokens sharing an expert, a token routing to one twice, and more pairs on expert 2 than a group holds
+        let routes: [&[[u32; 2]]; 3] = [
+            &[[2, 0]],
+            &[[3, 2], [1, 1], [0, 3]],
+            &[[2, 2], [2, 1], [2, 2], [0, 2], [2, 2], [2, 3]],
+        ];
         let check = |label: String, w: [&dyn KernelWeight; 3], dense: [Tensor; 3]| -> Result<()> {
             assert!(
                 super::super::fast_mmvq::supports_moe(w[0], w[1], w[2]),
