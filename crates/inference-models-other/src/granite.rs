@@ -1900,6 +1900,7 @@ fn in_activation_dtype(
 }
 
 /// A Mamba layer's conv input `(batch, seq, conv_dim)` and dt `(batch, seq, heads)` from one verify step.
+#[derive(Clone)]
 struct ReplayInputs {
     hidden_states_b_c: Tensor,
     dt: Tensor,
@@ -1907,6 +1908,7 @@ struct ReplayInputs {
 
 /// One Mamba layer's verify step from the state before it, so a commit can re-advance the pool over only the rows
 /// verification kept.
+#[derive(Clone)]
 struct MambaReplay {
     layer_idx: usize,
     // the pool slots of the step's batch rows, and on the host where the step had them
@@ -1915,6 +1917,98 @@ struct MambaReplay {
     conv_state: Tensor,
     ssm_state: Tensor,
     inputs: ReplayInputs,
+}
+
+/// What a verify step's forward leaves for drafting and the commit: the MTP head's capture and the Mamba replays.
+#[derive(Clone)]
+struct GraniteSpecGraphState {
+    mtp: Arc<dyn crate::speculative::SpeculativeGraphState>,
+    replays: Vec<MambaReplay>,
+}
+
+impl MambaReplay {
+    // the device indices are the graph's slot buffer, which a replay refreshes, so they are not part of the state
+    fn tensors(&self) -> [&Tensor; 4] {
+        [
+            &self.conv_state,
+            &self.ssm_state,
+            &self.inputs.hidden_states_b_c,
+            &self.inputs.dt,
+        ]
+    }
+
+    fn tensors_mut(&mut self) -> [&mut Tensor; 4] {
+        [
+            &mut self.conv_state,
+            &mut self.ssm_state,
+            &mut self.inputs.hidden_states_b_c,
+            &mut self.inputs.dt,
+        ]
+    }
+}
+
+impl crate::speculative::SpeculativeGraphState for GraniteSpecGraphState {
+    fn tensors(&self) -> Vec<Tensor> {
+        let mut out = self.mtp.tensors();
+        for replay in &self.replays {
+            out.extend(replay.tensors().into_iter().cloned());
+        }
+        out
+    }
+
+    fn with_tensors(
+        &self,
+        tensors: Vec<Tensor>,
+    ) -> Result<Box<dyn crate::speculative::SpeculativeGraphState>> {
+        let mtp_len = self.mtp.tensors().len();
+        let expected = mtp_len + self.replays.len() * 4;
+        if tensors.len() != expected {
+            inference_tensor::bail!(
+                "Granite speculative graph state holds {expected} tensors, got {}",
+                tensors.len()
+            );
+        }
+        let mut tensors = tensors.into_iter();
+        let mtp = Arc::from(
+            self.mtp
+                .with_tensors(tensors.by_ref().take(mtp_len).collect())?,
+        );
+        let mut replays = self.replays.clone();
+        for replay in &mut replays {
+            for (dst, src) in replay.tensors_mut().into_iter().zip(tensors.by_ref()) {
+                *dst = src;
+            }
+        }
+        Ok(Box::new(Self { mtp, replays }))
+    }
+
+    fn for_real_batch(
+        &self,
+        real_batch: usize,
+    ) -> Result<Box<dyn crate::speculative::SpeculativeGraphState>> {
+        let mtp = Arc::from(self.mtp.for_real_batch(real_batch)?);
+        let mut replays = self.replays.clone();
+        for replay in &mut replays {
+            let captured = replay.indices.dim(0)?;
+            if real_batch > captured {
+                inference_tensor::bail!(
+                    "Mamba replay batch {real_batch} exceeds the captured batch {captured}"
+                );
+            }
+            replay.indices = replay.indices.narrow(0, 0, real_batch)?;
+            if let Some(host) = replay.host_indices.as_mut() {
+                host.truncate(real_batch);
+            }
+            for tensor in replay.tensors_mut() {
+                *tensor = tensor.narrow(0, 0, real_batch)?;
+            }
+        }
+        Ok(Box::new(Self { mtp, replays }))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Mamba decoder block (replaces attention block for Mamba layers)
@@ -3664,6 +3758,48 @@ impl crate::speculative::SpeculativeTargetMixin for GraniteMoeHybrid {
         rows: &[crate::speculative::SpeculativeCommitRow],
     ) -> Result<()> {
         self.replay_mamba_layers(rows)
+    }
+
+    fn take_speculative_graph_state(
+        &self,
+    ) -> Option<Box<dyn crate::speculative::SpeculativeGraphState>> {
+        let mtp = self
+            .mtp
+            .as_ref()
+            .filter(|mtp| mtp.n_predict() > 0)?
+            .take_graph_state()?;
+        let replays = self
+            .mamba_replay
+            .lock()
+            .expect("mamba replay poisoned")
+            .clone();
+        Some(Box::new(GraniteSpecGraphState {
+            mtp: Arc::from(mtp),
+            replays,
+        }))
+    }
+
+    fn install_speculative_graph_state(
+        &self,
+        state: &dyn crate::speculative::SpeculativeGraphState,
+    ) -> Result<()> {
+        let Some(mtp) = self.mtp.as_ref().filter(|mtp| mtp.n_predict() > 0) else {
+            return Ok(());
+        };
+        let state = state
+            .as_any()
+            .downcast_ref::<GraniteSpecGraphState>()
+            .ok_or_else(|| {
+                inference_tensor::Error::msg("foreign speculative graph state for Granite")
+            })?;
+        mtp.install(&*state.mtp)?;
+        let mut replays = state.replays.clone();
+        // a capture baked in its own step's host slots; graphs run on CUDA, whose scatter reads the device slots
+        for replay in &mut replays {
+            replay.host_indices = None;
+        }
+        *self.mamba_replay.lock().expect("mamba replay poisoned") = replays;
+        Ok(())
     }
 }
 

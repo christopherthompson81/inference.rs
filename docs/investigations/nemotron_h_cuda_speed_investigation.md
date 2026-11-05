@@ -544,3 +544,62 @@ Until then MTP runs eagerly on CUDA, and loses to graph-replayed plain decoding 
 **Next:** the Mamba stash as graph state, or checkpoint-based rollback for Nemotron-H's verify graphs. The DFlash and
 DSpark drafters for Lightning: the codebase already runs both kinds of drafter for Qwen3.5 (`tiny_dflash`,
 `tiny_dspark`).
+
+## Run 22 — 2026-11-05
+
+**Question:** with Granite's verify steps skipping graphs anyway ("SpeculativeConflict", no speculative graph-state
+hooks), does turning decode-graph capture off while the MTP head drafts remove the capture errors, and what does MTP
+cost against eager and graphed plain decoding?
+
+**Change:** `supports_cuda_decode_graphs` returns false while the MTP head has drafts (`n_predict() > 0`), so no decode
+graph is captured that would record the head's state.
+
+**Command:** `mtp/run.sh LABEL 256 --paged-attn on --pa-context-len 8192 [--mtp N]` (scratch harness, 4 generic
+prompts, greedy, thinking off); `INFERENCE_RS_CUDA_GRAPHS=0` for the eager row.
+
+| config | mean tok/s |
+|---|---|
+| paged, graphs | 244.8 |
+| paged, eager | 169.6 (170.0 / 168.8 / 171.8 / 167.9) |
+| MTP 2, eager (graphs off by the change) | 229.6 (accept 82.4 %, len 2.65) |
+
+No `CUDA_ERROR_INVALID_VALUE` and no graph warnings in the log; the 15 nemotron_h_tiny tests pass.
+
+**Implication:** MTP 2 already beats eager plain decoding by 35 %, so verify steps replayed as graphs should take it
+past graphed plain decoding. Next: Granite's `take_speculative_graph_state` / `install_speculative_graph_state`
+carrying the MTP capture and the Mamba replay stash.
+
+## Run 23 — 2026-11-05
+
+**Question:** with the Mamba replay stash and the MTP head's capture handed to the graph entry as speculative graph
+state, do verify steps replay as graphs, does the text stay what eager MTP produced, and does MTP now beat graphed
+plain decoding?
+
+**Change:** Granite's `take_speculative_graph_state` / `install_speculative_graph_state` carry a
+`GraniteSpecGraphState` (the head's `MtpGraphState` and each Mamba layer's pre-pass conv/SSM state, conv input and
+dt). The device slot indices stay the graph's buffer, refreshed by each replay; installed replays drop their host
+slots (the CUDA scatter reads device slots only). Run 22's opt-out of decode graphs is reverted: holding the warm
+state across the capture is what keeps the head's eager capture from being freed inside it.
+
+- First try refreshed the host slots from the cache's live table and bailed when it was short. Precapture has no live
+  sequence, so it failed ("Mamba replay has 1 rows, but the live slot table has fewer"). The failed capture's
+  never-run graph memory then freed with the `CUDA_ERROR_INVALID_VALUE` "no caller" errors.
+- After the fix: "Captured 2 CUDA decode graphs" (widths 1 and 3), and no errors or lazy-capture warnings in any log.
+
+**Command:** `mtp/run.sh LABEL 256 --paged-attn on --pa-context-len 8192 [--mtp --mtp-n-predict N]`, one session.
+
+| config | per prompt tok/s | mean | MTP accept (len) |
+|---|---|---|---|
+| paged | 247.8 / 247.6 / 240.1 / 241.5 | 244.3 | |
+| MTP 1 | 253.7 / 223.0 / 224.8 / 264.5 | 241.5 | 88.6 % (1.89) |
+| MTP 2 | 266.1 / 228.4 / 228.2 / 301.5 | 256.1 | 80.5 % (2.61) |
+| MTP 3 | 281.3 / 225.6 / 196.4 / 348.3 | 262.9 | 70.6 % (3.12) |
+| MTP 4 | 276.5 / 189.9 / 178.0 / 361.6 | 251.5 | 65.7 % (3.63) |
+
+MTP 2's text against plain decoding departs at chars 38 / 55 / 944 / same, exactly as Run 21's eager MTP 2, so the
+graphed verify replays what the eager one computes. The tiny CUDA MTP test now runs with graphs and asserts that only
+prompts skipped them (it would see `speculative_conflict` skips without the hooks); 15/15 nemotron_h_tiny pass.
+
+**Implication:** MTP 3 is +7.6 % over plain decoding. A step at MTP 3 costs ~11.9 ms (3.12 tokens at 262.9 tok/s)
+against plain decoding's 4.1 ms a token, so the verify, the drafts and the commit's replay together cost ~2.9 plain
+steps. Next: where that step time goes (nsys), since a 4-row MoE verify reads up to 4 tokens' distinct experts.

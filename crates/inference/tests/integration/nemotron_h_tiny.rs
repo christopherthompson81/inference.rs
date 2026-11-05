@@ -82,8 +82,6 @@ const CIMATRIX: &str = "collected.cimatrix";
 const MTP_N_PREDICT: usize = 2;
 // enough steps that drafts are rejected at several positions, each replaying the Mamba state
 const MTP_MAX_LEN: usize = 24;
-// inference_nn's switch for captured decode graphs
-const CUDA_GRAPHS_ENV: &str = "INFERENCE_RS_CUDA_GRAPHS";
 
 /// The checkpoint's attention width and, for latent MoE, the routed experts' width.
 #[derive(Clone, Copy)]
@@ -375,14 +373,13 @@ async fn an_mtp_head_drafts_on_vulkan_without_changing_greedy_output() -> anyhow
 }
 
 // on CUDA in BF16 with quantized experts, whose scan advances the state it is handed in place: a verify step's replay
-// starts from a copy of the state before it. Eager: a verify graph's Mamba stash is not yet part of its graph state
+// starts from a copy of the state before it, and the verify steps replay as graphs carrying the Mamba stash
 #[tokio::test]
 async fn an_mtp_head_drafts_on_cuda_without_changing_greedy_output() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
         return Ok(());
     }
-    // SAFETY: nextest runs each test in its own process, and nothing has read the flag yet
-    unsafe { std::env::set_var(CUDA_GRAPHS_ENV, "0") };
+    let snapshotter = decode_graphs::recorder();
     mtp_keeps_greedy_output(
         |b| b,
         Target::CudaGraphs.shape(),
@@ -390,7 +387,11 @@ async fn an_mtp_head_drafts_on_cuda_without_changing_greedy_output() -> anyhow::
         Some(IsqType::Q8_0),
         BF16_LOGPROB_TOLERANCE,
     )
-    .await
+    .await?;
+    let counters = decode_graphs::Counters::take(&snapshotter);
+    decode_graphs::assert_replayed(&counters);
+    decode_graphs::assert_only_prompts_skip(&counters);
+    Ok(())
 }
 
 async fn mtp_keeps_greedy_output(
