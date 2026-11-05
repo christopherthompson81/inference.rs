@@ -270,3 +270,89 @@ superseded incremental sessions and pre-LTO bitcode.
   - **Head size** comes next. A family needs only its own: Llama/Qwen 128, Gemma 256, DeepSeek MLA 576/512, ...
     - The tile kernels are already split per head size.
     - The MMA kernels hold every head size in each file, so a per-family split would need the instance files regrouped by head size.
+
+## Run 14 - 2026-11-05
+
+- Question, from the user: get `target/debug` down to its bare essentials, with the build itself removing stale parts and
+  build-only artifacts. Step one: what a freshly swept `target/` holds.
+- Context: the root disk filled (0 MB free) during a full CI run. Freed: incremental dirs older than a day and all but
+  the newest 20 per crate (~45 GB), the npm and uv download caches (~29 GB), then `scripts/local_ci.sh --lint --tests
+  --cuda --slim --bindings --sweep` (green; the sweep freed 101.8 GiB). After it `target/` is 45 GB:
+
+| part | size |
+|---|---|
+| `debug/incremental` (623 dirs) | 21-22 GB |
+| `debug/deps/*.dwo` (489,896 files) | 10.23 GiB |
+| `debug/deps` linked test binaries (108) | 8.59 GiB |
+| `debug/deps` rlib (598) / rmeta (1303) / so (47) | 2.13 / 1.03 / 0.61 GiB |
+| `debug/examples` | 975 MB |
+| `debug/build` | 541 MB |
+| `bundle` (`--size`) / `release` | 7.0 / 4.8 GB |
+
+- Linked test binaries per mode, from `cargo nextest list` over `--workspace --lib --bins --tests`: CPU 61 (4.1 GiB),
+  CUDA 61 (4.7 GiB). 15 and 10 of them hold no tests, but together only 0.1 GiB: the empty harnesses cost link time,
+  not disk.
+- `.dwo` liveness: a codegen unit is live when a live rlib holds its `<crate>-<hash>.<cgu>.rcgu.o` member, or a linked
+  binary or shared object names its `.rcgu.dwo` in a skeleton unit (scanned as bytes: decoding `.debug_info` with
+  readelf took ~30 s a binary). 48 s on 16 processes.
+
+| `.dwo` | files | size |
+|---|---|---|
+| all | 489,896 | 10.23 GiB |
+| referenced | 35,046 | 0.90 GiB |
+| referenced by nothing | 454,850 | 9.33 GiB |
+
+- `inference_ffi` alone held 217,121 (2.41 GiB), dated back to 2026-10-29. A unit keeps its hash while an incremental
+  rebuild renames its codegen units, and the old units' `.dwo` stay: Run 7's sweep works per unit (its hash) and
+  cannot see them.
+- Also: 12 leftover `rmeta*` temp dirs from interrupted rustc runs (48 KB); 733 `.dwo` names referenced but absent
+  (to check before deleting anything).
+- Implication: the sweep needs a codegen-unit pass. Next: quarantine the unreferenced `.dwo`, rebuild, and check
+  that backtraces still resolve file:line before deleting them.
+
+## Run 15 - 2026-11-05
+
+- Question: are the 454,850 unreferenced `.dwo` safe to delete, and can the sweep find them on every run?
+- Check: moved them to a quarantine dir on the same filesystem; the canonical test build (`cargo nextest run --no-run
+  --workspace --lib --bins --tests`) stayed a no-op (one unit: Run 7's inference-ffi relink churn, 2.4 s), and
+  `addr2line -i` still resolves a test binary's code to file:line (`host.rs:127`). Deleted: root 120 -> 129 GB free.
+- Mistake on the way: `cargo nextest -p inference-drafters` resolves one package's features and built a variant; only
+  the canonical replays keep the target dir's variant set.
+- `sweep_target.py --superseded` (no replay): `.dwo` no live rlib member or binary names, plus rustc's interrupted
+  `deps/rmeta*` temp dirs. First version: 52 s serial, 47 s of it a regex over each binary's string sections. A fixed
+  `.rcgu.dwo` search back to the previous NUL: 1.7 s for the whole dir, the same 522 entries. Its verdicts matched a
+  whole-file scan of every binary in `deps/` and `examples/` (none of the flagged names appear anywhere).
+- `local_ci.sh` runs it after every invocation that builds, before reporting failure (stale codegen units pile up
+  whether or not the checks pass); `--sweep` includes it.
+
+## Run 16 - 2026-11-05
+
+- Question: what is left in `incremental/` (23.3 GiB in 632 dirs), and which of it is stale?
+- By crate: inference_core 21 dirs 3.61 GiB, the `integration` test binaries 25 dirs 3.00 GiB, nn 13 dirs 1.48 GiB,
+  quant 1.23 GiB, server-core and api ~1.15 GiB each, the model crates 0.5-0.8 GiB each.
+- inference_core's 21 dirs: four codegen variants at 465-516 MB (512 objects and their `.dwo`, ~140 MB query cache:
+  the CPU and CUDA rlib and lib-test builds), one at 279 MB, and 16 check-only variants at 73-91 MB (clippy with and
+  without cuda, the six `--slim` family checks, ...). These are the cache that makes a touch rebuild 17 crates in
+  10.9 s, so they stay.
+- Stale inside them: 86 dirs held a superseded session (5.67 GiB). rustc loads only the newest finalized session and
+  deletes older ones when that unit next compiles; until then only `--sweep` removed them. `--superseded` now does too,
+  keeping each dir's newest finalized session (an interrupted `-working` one is never kept). Freed 5.7 GiB in 172
+  entries; a touch of inference-drafters then rebuilt 17 crates in 10.9 s, so no cache was lost.
+- Also: the `--tests` mode no longer links three SDK examples as a smoke build (`target/debug/examples` was 975 MB);
+  clippy's `--examples` still type-checks every example, and `--bindings` still builds `tiny_checkpoint`, which its tests
+  run.
+
+## Run 17 - 2026-11-05
+
+- Question: after the cleanup, what remains, and should local CI stop building the CPU-only variant?
+- `scripts/local_ci.sh --lint --tests --cuda --slim --bindings --sweep` with the `--superseded` pass and no smoke
+  examples: green, the sweep freed 13.5 GiB; root 135 GB free (0 MB at the start of Run 14).
+- Left in `target/debug` is live: the incremental cache per build variant (Run 16) and 61 + 61 test binaries, the CPU
+  and the CUDA suite each linking their own (4.1 + 4.7 GiB).
+- Dropping the CPU build locally would save ~4 GiB of binaries and the CPU codegen variants' incremental dirs. What it
+  catches: the CUDA suite runs nearly every CPU-device test too (about 4 tests run only without `cuda`); the 109
+  `cfg(not(feature = "cuda"))` items are compiled and linted by GitHub's `Clippy` on every PR. GitHub's CPU `Test`
+  job runs only after a merge, 11.5-17.2 min a run (8 runs on 2026-11-05, warm cache). Its one failure on record had
+  been red on every master push since #634 (2026-10-25): `openapi_matches_committed`, a default rendered from the
+  generating machine's `$HOME` (fixed separately).
+- Decision (user): keep the CPU build and suite local; a 12-17 min post-merge job is too slow to be the only check.
