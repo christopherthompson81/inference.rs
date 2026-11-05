@@ -537,6 +537,17 @@ pub(crate) fn ssm_conv_step(
     Ok(tensor_of(out, (batch, seq, channels)))
 }
 
+// max(x, 0)^2 in one map, where `x`'s storage is an f32 Vulkan buffer the map reads
+pub(crate) fn relu_sqr(x: &Tensor) -> Result<Option<Tensor>> {
+    let out = match &*x.storage() {
+        crate::Storage::Vulkan(s) if s.native(x.layout()) => {
+            s.map_f32(MapOp::Relu2, x.layout(), None, [0.0; 2])?
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(tensor_of(out, x.dims())))
+}
+
 pub(crate) fn gated_rmsnorm(
     x: &Tensor,
     gate: &Tensor,
@@ -2046,6 +2057,19 @@ mod tests {
             .expect("the kernel takes this shape");
             assert_close(&got, &want, 1e-4)?;
         }
+        Ok(())
+    }
+
+    // relu(x)^2 in one map against the CPU's relu then sqr, over a strided view
+    #[test]
+    fn a_fused_relu_sqr_matches_relu_then_sqr() -> Result<()> {
+        let Some(vk) = device() else { return Ok(()) };
+        let x = Tensor::randn(0f32, 1.0, (6, 1856), &Device::Cpu)?;
+        let want = x.t()?.relu()?.sqr()?.flatten_all()?.to_vec1::<f32>()?;
+        let got = crate::nn::ops::relu_sqr(&x.to_device(&vk)?.t()?)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        assert_eq!(got, want);
         Ok(())
     }
 

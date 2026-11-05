@@ -42,6 +42,17 @@ pub fn silu(xs: &Tensor) -> Result<Tensor> {
     xs.silu()
 }
 
+/// `relu(xs)^2`, one pass on Vulkan.
+pub fn relu_sqr(xs: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "vulkan")]
+    if xs.device().is_vulkan()
+        && let Some(out) = crate::vulkan_backend::relu_sqr(xs)?
+    {
+        return Ok(out);
+    }
+    xs.relu()?.sqr()
+}
+
 pub fn swiglu(xs: &Tensor) -> Result<Tensor> {
     let xs = xs.chunk(2, D::Minus1)?;
     &xs[0].silu()? * &xs[1]

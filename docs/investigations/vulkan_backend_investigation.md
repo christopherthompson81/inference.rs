@@ -1094,3 +1094,19 @@ records a barrier only when a node overlaps an unsynchronized one's memory).
 **Where the gap to CUDA is:** ~700 dependent dispatches a token, each drained, ~3 us of fixed cost each on Vulkan
 here against ~1 us for CUDA's stream; ~1.4 ms of the ~1.9 ms gap. The lever is fewer dispatches: the 163 activation
 quantizes, the 167 elementwise maps (residual adds, relu^2, scales) and the 53 row ops folded into their neighbours.
+
+### Run 43 - 2026-11-04 ~20:30 (desktop: RTX 3090)
+
+**Question:** Run 42's plan, fewer dispatches; first relu^2 (a Relu then a Sqr on the shared and routed experts, ~46
+dispatches a token) as one map op.
+
+**Note:** KDE's `baloo_file_extractor` was crash-looping (SIGABRT several times a second), systemd-coredump
+parsing each dump at 100 % of a core; decode read 130-141 tok/s in both arms until it was suspended.
+
+**Change:** `MapOp::Relu2` and `inference_tensor::nn::ops::relu_sqr` (the map on Vulkan, relu then sqr elsewhere),
+used by both activations' `Relu2` and the Vulkan routed experts. `a_fused_relu_sqr_matches_relu_then_sqr`: bit-exact
+over a strided view.
+
+**Result (alternating, 512 tokens, 3 iterations):** fused 142.1 / 143.4 / 142.3 tok/s, unfused 143.3 / 142.5 /
+140.2; no measurable gain. A drain after a kernel this small is cheap, so Run 42's ~3 us a dispatch overstates what
+folding the tiny maps recovers; the residual adds and the other small maps would buy as little.

@@ -51,6 +51,8 @@ pub enum MapOp {
     /// `x` where positive, else `p0 * (e^x - 1)`
     Elu = 27,
     Sigmoid = 28,
+    /// `max(x, 0)^2`
+    Relu2 = 29,
 }
 
 impl MapOp {

@@ -226,7 +226,12 @@ impl UngatedExpertsWeights {
         let Some(hidden) = up_q.vulkan_expert_mat_vec(&xs, &ids, k)? else {
             return Ok(None);
         };
-        let Some(ys) = down_q.vulkan_expert_mat_vec(&hidden.relu()?.sqr()?, &ids, 1)? else {
+        let Some(ys) = down_q.vulkan_expert_mat_vec(
+            &inference_tensor::nn::ops::relu_sqr(&hidden)?,
+            &ids,
+            1,
+        )?
+        else {
             return Ok(None);
         };
         let weights = forward
