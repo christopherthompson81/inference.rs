@@ -1270,3 +1270,16 @@ checkpoints (`accepts_paged_recurrent_prefix`), as the scheduler's does.
 **Remaining against llama.cpp (us a call):** router f32 matmul 317 against 36; Mamba in 777 against 532 and Mamba out
 469 against 215 (our matrix-core matmul loads its activation tiles from global memory each step); routed experts
 1532 / 1355 against 1301 / 1138.
+
+### Run 52 - 2026-11-05 ~01:00 (desktop: RTX 3090)
+
+**Question:** Run 51's two next items: the router's f32 matmul, and the dense matrix-core matmul's activation loads.
+
+**Router:** `matmul_f32_tiled`'s 64 x 64 tiles made 16 workgroups for 512 tokens x 128 experts; `matmul_f32_tiled32`
+(32 x 32 tiles, taken below 256 tiles of 64) makes 64: 317 -> 180 us a call, a 512-token prompt 176 -> 171.5 ms.
+llama.cpp's is 36 us; 64 workgroups still leave the card part idle, so the rest needs a split K.
+
+**Dead end:** the dense matrix-core matmul with each step's activation tile staged in shared memory (`f16vec4` loads
+along the tokens' rows, `coopMatLoad` from there, the step 2 blocks so the three tiles fit in 34 KB): 512-row Q8_0
+36.4 -> 17.5 TOPS, through an aliased `f16vec4` view or the scalar one alike, where the 2-block step alone gives 33.2.
+GPU Trace exported no counters for the slow variant (nan, as for Run 48's), so the cause is unseen; reverted.
