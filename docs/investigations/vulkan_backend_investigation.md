@@ -1215,3 +1215,26 @@ unpacked from there through a `W16` hook in `int8_dot.glsl`.
 so staging adds the copy and saves nothing: the load-store pipe's limit is its instruction count, not coalescing.
 Fewer, wider loads need blocks aligned to their loads (34-, 22- and 18-byte blocks are 2-byte aligned): a Vulkan
 weight layout repacked at load (scales apart from 16-byte quant runs), which every int8 and matrix-core kernel reads.
+
+### Run 49 - 2026-11-04 ~23:30 (desktop: RTX 3090)
+
+**Question:** Run 48's conclusion, a row-split weight layout (each row's blocks' quantized values back to back, then
+their scales: the same bytes, so no memory cost), prototyped before wiring it through every kernel.
+
+**Prototypes (`block_at.glsl` under `ROW_SPLIT`, a type's `unpack_row`, test-only benches repacking the same random
+weights; every pair of outputs bit-identical):**
+
+| kernel, shape | blocks | row-split |
+|---|---|---|
+| Q8_0 matvec 10304 x 2688 / 2688 x 4096 / 4096 x 2688 / 256 x 2688 | 40.7 / 20.9 / 21.1 / 8.8 us | 40.0 / 20.1 / 19.5 / 8.0 |
+| Q8_0 matvec lm_head 131072 x 2688 | 421.5 us | 423.2 |
+| Q8_0 matrix-core, 512 tokens: 10304 x 2688 / 2688 x 4096 / lm_head | 34.4 / 25.6 / 37.1 TOPS | 39.7 / 29.9 / 42.0 |
+| Q4_0 experts, `expert_matmul_throughput` (512 x 6 of 128) | 1.66 ms | 2.93-3.05 |
+
+**Finding:** fewer, wider loads help the tiled kernels (matrix-core 13-17 %, matvecs 2-8 %) and hurt the experts'
+row-streaming kernel 1.8x: a thread streams its own row, and with the scales at the row's end each block's scale is
+another stream's line where the block layout kept it beside the values. The experts are half a prompt, and Q8_0 (the
+only type this model uses densely) would buy ~2 % of a prompt and of a decode step through a new block type in every
+kernel family. Not taken.
+
+**Where a 512-token prompt stands:** 216 ms (2375 tok/s; CUDA ~120 ms, llama.cpp Vulkan ~126 ms).
