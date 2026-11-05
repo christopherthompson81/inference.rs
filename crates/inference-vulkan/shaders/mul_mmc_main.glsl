@@ -10,19 +10,18 @@ const uint BK = BLOCKS * QK;
 const uint STRIDE = BK + 8;
 const uint TILE = 16;
 
-shared float16_t w_tile[BN * STRIDE];
+// four halves an element, so a block's dequantized values take 8 stores, not 32; offsets and strides in fours
+shared f16vec4 w_tile[BN * STRIDE / 4];
 shared float c_tile[BN * BM];
 
-// a block's 32 int8 values (two uvec4s of packed bytes) as w = s q + o, into a tile row from `at`
+// a block's 32 int8 values (two uvec4s of packed bytes) as w = s q + o, into a tile row from `at` (in halves)
 void dequantize(uvec4 lo, uvec4 hi, vec4 c, uint at) {
     [[unroll]] for (uint i = 0; i < 8; i++) {
         uint word = i < 4 ? lo[i] : hi[i - 4];
         float s = i < 4 ? c.x : c.y;
         float o = i < 4 ? c.z : c.w;
-        [[unroll]] for (uint k = 0; k < 4; k++) {
-            int q = int(word << (24 - 8 * k)) >> 24;
-            w_tile[at + 4 * i + k] = float16_t(s * float(q) + o);
-        }
+        vec4 q = vec4(ivec4(int(word << 24) >> 24, int(word << 16) >> 24, int(word << 8) >> 24, int(word) >> 24));
+        w_tile[at / 4 + i] = f16vec4(s * q + o);
     }
 }
 
@@ -57,8 +56,8 @@ void main() {
                 vec4 c = unpack(w_matrix, n0 + w_row, b, blocks, lo, hi);
                 dequantize(lo, hi, c, at);
             } else {
-                [[unroll]] for (uint j = 0; j < QK; j++) {
-                    w_tile[at + j] = float16_t(0.0);
+                [[unroll]] for (uint j = 0; j < QK / 4; j++) {
+                    w_tile[at / 4 + j] = f16vec4(0.0);
                 }
             }
         }
@@ -67,7 +66,7 @@ void main() {
             coopmat<float16_t, gl_ScopeSubgroup, TILE, TILE, gl_MatrixUseA> a[2];
             coopmat<float16_t, gl_ScopeSubgroup, TILE, TILE, gl_MatrixUseB> bm[2];
             [[unroll]] for (uint i = 0; i < 2; i++) {
-                coopMatLoad(a[i], w_tile, (sn + TILE * i) * STRIDE + kk, STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+                coopMatLoad(a[i], w_tile, ((sn + TILE * i) * STRIDE + kk) / 4, STRIDE / 4, gl_CooperativeMatrixLayoutRowMajor);
                 // B is (values x tokens), a token's values a row of x; rows past the tile's tokens are padding or
                 // another tile's, their outputs dropped
                 uint row = x_row0 + sm + TILE * i;

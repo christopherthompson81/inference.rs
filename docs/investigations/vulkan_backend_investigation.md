@@ -1179,3 +1179,22 @@ counters weighted by each dispatch's time.
 **Implication:** the expert matmul is register-bound (81 % allocated, 31 % of warps) and load-store-bound (72 %:
 its weights read as u16s, 11 a Q5_0 block, and every token block read from shared memory a dot); `moe_sort` is one
 workgroup's serial tile list, 9.5 % of the experts' time (~6 ms a 512-token prompt), and the cheapest fix.
+
+### Run 47 - 2026-11-04 ~22:30 (desktop: RTX 3090)
+
+**Question:** Run 46's cheapest items, measured with `scripts/vulkan_gputrace.py`.
+
+**Changes:**
+- `moe_sort`: a thread an expert scanned every slot to list its routes in slot order; each slot now takes its
+  expert's next place by an atomic cursor (the order within an expert is free: each route's output is its own).
+  212.6 -> 22.8 us a call; `expert_matmul_throughput` 1.95 -> 1.82 ms a pass.
+- The matrix-core matmuls' weight tile as `f16vec4`s, a block's dequantized values in 8 stores rather than 32.
+  512 rows: Q8_0 35.2 -> 36.4 TOPS, Q5_0 39.2 -> 40.2.
+
+**Finding:** `mul_mmc_q8_0` (lm_head, 512 rows) runs its load-store pipe at 91-92 % with the SMs at 22-23 %, before
+and after: the tile stores were not its load. The rest is global: a thread reads its weight blocks as u16s (17 a
+Q8_0 block), neighbouring threads' blocks 34 bytes apart, and each subgroup loads its activation tiles from global
+memory every step. `moe_mm` has the same shape of limit (Run 46).
+
+**Next:** whole-word loads of each step's weight rows (compile-time index math; Run 44's staging spent its time on a
+runtime division a u16).
