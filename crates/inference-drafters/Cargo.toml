@@ -1,0 +1,38 @@
+[package]
+name = "inference-drafters"
+readme = "README.md"
+authors = ["Eric Buehler"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[dependencies]
+inference-json.workspace = true
+anyhow.workspace = true
+inference-tensor.workspace = true
+inference-fattn = { workspace = true, optional = true }
+inference-nn.workspace = true
+inference-paged-attn = { workspace = true, optional = true }
+inference-quant.workspace = true
+metrics.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[features]
+cuda = [
+    "inference-tensor/cuda",
+    "dep:inference-fattn",
+    "inference-fattn/cuda",
+    "dep:inference-paged-attn",
+    "inference-paged-attn/cuda",
+    "inference-quant/cuda",
+    "inference-nn/cuda",
+]
+metal = ["inference-tensor/metal", "inference-quant/metal", "inference-nn/metal"]

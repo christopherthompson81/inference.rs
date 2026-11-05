@@ -17,6 +17,7 @@ members = [
     "crates/inference-models-llama",
     "crates/inference-models-other",
     "crates/inference-models-phi",
+    "crates/inference-drafters",
     "crates/inference-models-qwen",
     "crates/inference-models-speech",
     "crates/inference",
@@ -64,6 +65,7 @@ default-members = [
     "crates/inference-models-llama",
     "crates/inference-models-other",
     "crates/inference-models-phi",
+    "crates/inference-drafters",
     "crates/inference-models-qwen",
     "crates/inference-models-speech",
     "crates/inference",
@@ -265,6 +267,7 @@ inference-models-gemma = { path = "crates/inference-models-gemma", version = "0.
 inference-models-llama = { path = "crates/inference-models-llama", version = "0.0.26" }
 inference-models-other = { path = "crates/inference-models-other", version = "0.0.26" }
 inference-models-phi = { path = "crates/inference-models-phi", version = "0.0.26" }
+inference-drafters = { path = "crates/inference-drafters", version = "0.0.26" }
 inference-models-qwen = { path = "crates/inference-models-qwen", version = "0.0.26" }
 inference-models-speech = { path = "crates/inference-models-speech", version = "0.0.26" }
 inference-models-decision = { path = "crates/inference-models-decision", version = "0.0.26" }

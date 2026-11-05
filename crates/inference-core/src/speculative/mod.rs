@@ -2,7 +2,7 @@ pub mod autotuner;
 pub mod cache;
 pub mod config;
 #[cfg(feature = "models-qwen")]
-pub use inference_models_qwen::dflash;
+pub use inference_drafters::dflash;
 pub mod driver;
 pub(crate) mod staging;
 pub mod verifier;

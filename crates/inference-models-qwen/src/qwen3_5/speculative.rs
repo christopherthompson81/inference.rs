@@ -15,10 +15,6 @@ use rand::Rng;
 use crate::cuda::graph_capture::{CudaGraphComponent, CudaGraphEvent, CudaGraphEventGuard};
 use crate::{
     attention::AttentionMask,
-    dflash::{
-        CtxAppend, DFlashDraftModel, DFlashGraphProposalInputs, DFlashLoadTarget,
-        DFlashPreparedContext, DFlashProposalBatch, DFlashSamplingInputs,
-    },
     get_mut_arcmutex,
     layers::CausalMasker,
     layers::masker::CausalMaskConfig,
@@ -31,6 +27,10 @@ use crate::{
         TargetAttentionInputs, auto_depth_graph_plans, depths_up_to,
         paged_rows::make_paged_rows_metadata, proposer::sample_draft_rows,
     },
+};
+use inference_drafters::dflash::{
+    CtxAppend, DFlashDraftModel, DFlashGraphProposalInputs, DFlashLoadTarget,
+    DFlashPreparedContext, DFlashProposalBatch, DFlashSamplingInputs,
 };
 
 use super::{
@@ -126,11 +126,11 @@ use crate::speculative::mtp::MtpForwardInputs;
 fn dflash_paged_cache<'a>(
     drafter: &DFlashDraftModel,
     cache: &SpeculativeKvCache<'a>,
-) -> Option<crate::dflash::DFlashPagedCache<'a>> {
+) -> Option<inference_drafters::dflash::DFlashPagedCache<'a>> {
     let SpeculativeKvCache::Paged { metadata, kv_cache } = *cache;
     drafter
         .uses_paged_kv()
-        .then_some(crate::dflash::DFlashPagedCache { kv_cache, metadata })
+        .then_some(inference_drafters::dflash::DFlashPagedCache { kv_cache, metadata })
 }
 
 fn resolve_dflash_n_predict(
@@ -141,7 +141,8 @@ fn resolve_dflash_n_predict(
     if max_drafts == 0 {
         inference_tensor::bail!("DFlash drafter yields no drafts per block");
     }
-    let configured = requested.unwrap_or(max_drafts.min(crate::dflash::DEFAULT_MAX_DRAFTS));
+    let configured =
+        requested.unwrap_or(max_drafts.min(inference_drafters::dflash::DEFAULT_MAX_DRAFTS));
     if configured == 0 || configured > max_drafts {
         inference_tensor::bail!(
             "requested {configured} draft tokens but this DFlash drafter yields at most {max_drafts} per block"
@@ -452,11 +453,12 @@ impl Qwen3_5TextModel {
             .unwrap_or_else(|| {
                 recurrent_capacity.saturating_sub(crate::kv_cache::RECURRENT_GRAPH_PAD_SLOTS)
             });
-        let (sequence_capacity, retained_prefixes) = crate::dflash::windowed_kv_capacities(
-            serving_capacity,
-            recurrent_capacity,
-            runtime.prefix_cache_capacity(),
-        );
+        let (sequence_capacity, retained_prefixes) =
+            inference_drafters::dflash::windowed_kv_capacities(
+                serving_capacity,
+                recurrent_capacity,
+                runtime.prefix_cache_capacity(),
+            );
         let windowed_kv = drafter.enable_windowed_kv(sequence_capacity, retained_prefixes)?;
         // the target's own paged layers (and the MTP head's) come first; the speculative config put the drafter's after
         let paged_kv = !windowed_kv && drafter.enable_paged_kv(self.cfg.num_layers);
@@ -476,8 +478,9 @@ impl Qwen3_5TextModel {
             )?;
             *self.draft_lm_head.lock().expect("draft lm_head poisoned") = Some(head);
         }
-        let adaptive =
-            config.n_predict.is_none() && windowed_kv && crate::dflash::dflash_adaptive_requested();
+        let adaptive = config.n_predict.is_none()
+            && windowed_kv
+            && inference_drafters::dflash::dflash_adaptive_requested();
         let max_live_sequences =
             sequence_capacity.saturating_sub(crate::kv_cache::RECURRENT_GRAPH_PAD_SLOTS);
         let adaptive = adaptive && drafter.enable_adaptive(n_predict, max_live_sequences);
@@ -832,7 +835,7 @@ impl Qwen3_5TextModel {
             .zip(ctx.chunk_ranges)
             .zip(routing.spans())
         {
-            appends.push(crate::dflash::CtxAppend {
+            appends.push(inference_drafters::dflash::CtxAppend {
                 seq_id: *seq_id,
                 rows: span.rows(),
                 start_pos: start,
@@ -1437,7 +1440,7 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
             return Vec::new();
         }
         if self.dflash.lock().expect("dflash poisoned").is_some() {
-            return depths_up_to(&crate::dflash::AUTO_DEPTHS, n);
+            return depths_up_to(&inference_drafters::dflash::AUTO_DEPTHS, n);
         }
         depths_up_to(&AUTO_DEPTHS, n)
     }

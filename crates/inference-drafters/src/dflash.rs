@@ -23,24 +23,24 @@ use inference_tensor::{
     cuda_backend::cudarc::driver::{CudaStream, sys},
 };
 
-use crate::kv_cache::PagedAuxiliaryPrefixState;
-use crate::layers::{RmsNorm, YarnRopeConfig, yarn_inv_freq_and_attention_factor};
+use inference_nn::kv_cache::PagedAuxiliaryPrefixState;
+use inference_nn::layers::{RmsNorm, YarnRopeConfig, yarn_inv_freq_and_attention_factor};
 #[cfg(all(feature = "cuda", target_family = "unix"))]
-use crate::paged_attention::AuxiliaryPagedLayers;
-use crate::speculative::{MtpConfig, MtpDraftSamplingMethod, SpeculativePrefixReplay};
-use crate::utils::varbuilder_utils::{DeviceForLoadTensor, from_mmaped_safetensors};
+use inference_nn::paged_attention::AuxiliaryPagedLayers;
+use inference_nn::speculative::{MtpConfig, MtpDraftSamplingMethod, SpeculativePrefixReplay};
+use inference_nn::utils::varbuilder_utils::{DeviceForLoadTensor, from_mmaped_safetensors};
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
-use crate::cuda::graph_capture::{
+use inference_nn::cuda::graph_capture::{
     CudaGraphComponent, CudaGraphDispatchMode, CudaGraphDispatchReason, CudaGraphEvent,
     CudaGraphEventGuard, CudaGraphEvictionReason, record_cuda_graph_dispatch,
     record_cuda_graph_evictions, record_cuda_graph_resident_entries,
     take_cuda_graph_capacity_eviction,
 };
 #[cfg(all(feature = "cuda", target_family = "unix"))]
-use crate::cuda::phase_timer::CudaPhaseTimer;
+use inference_nn::cuda::phase_timer::CudaPhaseTimer;
 #[cfg(all(feature = "cuda", target_family = "unix"))]
-use crate::paged_attention::windowed_pool::{
+use inference_nn::paged_attention::windowed_pool::{
     WindowedKvBatch, WindowedKvBatchTensors, WindowedKvCheckpoint, WindowedKvPool,
     WindowedKvPoolConfig, WindowedKvQuery,
 };
@@ -103,7 +103,7 @@ fn dflash_rope_from_positions(
             DType::F32
         };
         if let Some(rope) =
-            crate::ops::try_cuda_rope_sincos_positions(&positions, inv_freq, rope_dtype)?
+            inference_nn::ops::try_cuda_rope_sincos_positions(&positions, inv_freq, rope_dtype)?
         {
             return finalize_dflash_rope(rope, dtype, attention_factor);
         }
@@ -137,22 +137,27 @@ pub fn dflash_adaptive_requested() -> bool {
 fn dflash_graph_plans(
     adaptive: bool,
     max_n: usize,
-) -> Vec<crate::speculative::SpeculativeGraphPlan> {
+) -> Vec<inference_nn::speculative::SpeculativeGraphPlan> {
     if max_n == 0 {
         return Vec::new();
     }
     if !adaptive || max_n <= ADAPT_BATCH_DEPTH {
-        return vec![crate::speculative::SpeculativeGraphPlan::new(max_n, None)];
+        return vec![inference_nn::speculative::SpeculativeGraphPlan::new(
+            max_n, None,
+        )];
     }
     vec![
-        crate::speculative::SpeculativeGraphPlan::new(max_n, Some(ADAPT_FULL_DEPTH_MAX_BATCH)),
-        crate::speculative::SpeculativeGraphPlan::new(ADAPT_BATCH_DEPTH, None),
+        inference_nn::speculative::SpeculativeGraphPlan::new(
+            max_n,
+            Some(ADAPT_FULL_DEPTH_MAX_BATCH),
+        ),
+        inference_nn::speculative::SpeculativeGraphPlan::new(ADAPT_BATCH_DEPTH, None),
     ]
 }
 
 #[cfg(any(all(feature = "cuda", target_family = "unix"), test))]
 fn dflash_graph_precapture_shapes(
-    plans: &[crate::speculative::SpeculativeGraphPlan],
+    plans: &[inference_nn::speculative::SpeculativeGraphPlan],
     batches: impl IntoIterator<Item = usize>,
     sequence_capacity: usize,
     draft_row_offset: usize,
@@ -293,7 +298,7 @@ impl DFlashConfig {
             .map(|layer| self.layer_attention(layer))
             .collect::<Vec<_>>();
         let windowed = windowed_kv_fits_fattn(self.head_dim(), self.block_size(), layers);
-        (!windowed && crate::attention::fattn_supports(self.head_dim(), false)).then(|| {
+        (!windowed && inference_nn::attention::fattn_supports(self.head_dim(), false)).then(|| {
             AuxiliaryPagedLayers {
                 count: self.num_hidden_layers,
                 num_attn_heads: self.num_attention_heads,
@@ -574,9 +579,9 @@ impl DynamicConv {
         let (b, len, h) = hidden.dims3()?;
         #[cfg(feature = "cuda")]
         if hidden.device().is_cuda()
-            && self.kernel_size <= crate::cuda::dynamic_conv::MAX_DYNAMIC_CONV_KERNEL_SIZE
+            && self.kernel_size <= inference_nn::cuda::dynamic_conv::MAX_DYNAMIC_CONV_KERNEL_SIZE
         {
-            return crate::cuda::dynamic_conv::dynamic_conv(
+            return inference_nn::cuda::dynamic_conv::dynamic_conv(
                 hidden,
                 dynamic,
                 base,
@@ -705,7 +710,7 @@ fn validate_candidate_selector_cuda(
     if spec.vocab_size == 0 {
         return Err("the vocabulary is empty".to_string());
     }
-    if spec.vocab_size > crate::ops::CUDA_TOPK_MAX_EXACT_PACKED_VOCAB {
+    if spec.vocab_size > inference_nn::ops::CUDA_TOPK_MAX_EXACT_PACKED_VOCAB {
         return Err(format!(
             "vocabulary size {} cannot be represented exactly by packed F32 indices",
             spec.vocab_size
@@ -722,9 +727,9 @@ fn validate_candidate_selector_cuda(
             ));
         }
     }
-    let max_top_k = crate::ops::cuda_topk_ranked_packed_max_k(spec.vocab_size)
+    let max_top_k = inference_nn::ops::cuda_topk_ranked_packed_max_k(spec.vocab_size)
         .expect("nonempty representable vocabulary checked above")
-        .min(crate::ops::CUDA_DFLASH_SELECTOR_MAX_K);
+        .min(inference_nn::ops::CUDA_DFLASH_SELECTOR_MAX_K);
     if spec.top_k == 0 || spec.top_k > max_top_k {
         return Err(format!(
             "selector top_k={} must be in [1, {max_top_k}] for vocabulary {}",
@@ -796,13 +801,13 @@ impl CandidateSelector {
         &self,
         hidden: &Tensor,
         logits: &Tensor,
-    ) -> Result<(crate::ops::RankedTopKPackedOutput, Tensor)> {
+    ) -> Result<(inference_nn::ops::RankedTopKPackedOutput, Tensor)> {
         let (batch, positions, vocab) = logits.dims3()?;
         let rows = batch * positions;
         self.cuda_capability(logits.device().is_cuda(), logits.dtype(), vocab)
             .map_err(inference_tensor::Error::msg)?;
         let logits = logits.reshape((rows, vocab))?.contiguous()?;
-        let topk = crate::ops::cuda_topk_ranked_packed_batched(&logits, self.top_k)?;
+        let topk = inference_nn::ops::cuda_topk_ranked_packed_batched(&logits, self.top_k)?;
         let projection_dtype = self.hidden_projection.dtype();
         let projected = hidden
             .reshape((rows, ()))?
@@ -820,7 +825,7 @@ impl CandidateSelector {
         anchors: &Tensor,
     ) -> Result<Tensor> {
         let (topk, projected) = self.cuda_candidates(hidden, logits)?;
-        crate::ops::cuda_dflash_greedy_select(
+        inference_nn::ops::cuda_dflash_greedy_select(
             &topk,
             &projected,
             &self.predecessor_codebook.contiguous()?,
@@ -837,9 +842,9 @@ impl CandidateSelector {
         anchors: &Tensor,
         inverse_temperatures: &Tensor,
         uniforms: &Tensor,
-    ) -> Result<crate::ops::DFlashSelectorSampleOutput> {
+    ) -> Result<inference_nn::ops::DFlashSelectorSampleOutput> {
         let (topk, projected) = self.cuda_candidates(hidden, logits)?;
-        crate::ops::cuda_dflash_sample_select(crate::ops::DFlashSelectorSampleInput {
+        inference_nn::ops::cuda_dflash_sample_select(inference_nn::ops::DFlashSelectorSampleInput {
             topk: &topk,
             projected_hidden: &projected,
             predecessor_codebook: &self.predecessor_codebook.contiguous()?,
@@ -953,7 +958,7 @@ fn topk_rows(logits: &Tensor, k: usize) -> Result<TopkRows> {
     if logits.device().is_cuda() {
         let (rows, _) = logits.dims2()?;
         let ones = Tensor::ones((rows,), DType::F32, logits.device())?;
-        let packed = crate::ops::cuda_topk_logits_f32_packed_batched(logits, k, &ones)?;
+        let packed = inference_nn::ops::cuda_topk_logits_f32_packed_batched(logits, k, &ones)?;
         let packed_rows = packed.packed.to_vec2::<f32>()?;
         let mut values = Vec::with_capacity(rows);
         let mut indices = Vec::with_capacity(rows);
@@ -1062,7 +1067,7 @@ fn gather_ctx_taps(taps: &[Tensor], flat_row_indices: Vec<u32>, device: &Device)
         inference_tensor::bail!("DFlash context tap row index is out of range");
     }
     #[cfg(feature = "cuda")]
-    if let Some(packed) = crate::cuda::dflash_context::pack_taps(taps, &flat_row_indices)? {
+    if let Some(packed) = inference_nn::cuda::dflash_context::pack_taps(taps, &flat_row_indices)? {
         return packed.unsqueeze(0);
     }
     let contiguous_range = contiguous_row_range(&flat_row_indices);
@@ -1291,13 +1296,13 @@ struct DFlashCudaGraphBuffers {
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 struct DFlashCudaGraphEntry {
     key: DFlashCudaGraphKey,
-    staging: crate::cuda::graph_capture::CudaGraphHostStaging,
+    staging: inference_nn::cuda::graph_capture::CudaGraphHostStaging,
     buffers: DFlashCudaGraphBuffers,
     token_embedding: Arc<dyn QuantMethod>,
     lm_head: Arc<dyn QuantMethod>,
     mask_token_id: u32,
     host_rows: DFlashGraphHostRows,
-    graph: crate::cuda::graph_capture::CudaGraphHandle,
+    graph: inference_nn::cuda::graph_capture::CudaGraphHandle,
 }
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -1432,7 +1437,7 @@ struct DFlashWindowedForward<'a> {
 #[derive(Clone, Copy)]
 pub struct DFlashPagedCache<'a> {
     pub kv_cache: &'a [(Tensor, Tensor)],
-    pub metadata: &'a crate::paged_attention::PagedAttentionMeta,
+    pub metadata: &'a inference_nn::paged_attention::PagedAttentionMeta,
 }
 
 pub struct DFlashDraftModel {
@@ -1614,7 +1619,7 @@ impl DFlashCudaGraphBuffers {
         &self,
         rows: &DFlashGraphHostRows,
         batch: &WindowedKvBatch,
-        staging: &mut crate::cuda::graph_capture::CudaGraphHostStaging,
+        staging: &mut inference_nn::cuda::graph_capture::CudaGraphHostStaging,
     ) -> Result<()> {
         let location = self.token_ids.device().location();
         staging.update(|staging| {
@@ -1761,7 +1766,7 @@ impl DFlashCudaGraphEntry {
             host_rows,
             graph,
         } = self;
-        let release = crate::cuda::graph_capture::release_cuda_graph_resources(
+        let release = inference_nn::cuda::graph_capture::release_cuda_graph_resources(
             CudaGraphComponent::DFlash,
             graph,
             (staging, buffers, host_rows),
@@ -1786,7 +1791,7 @@ fn release_dflash_cuda_graphs(entries: Vec<DFlashCudaGraphEntry>) {
         }
     }
     for stream in streams {
-        if let Err(err) = crate::cuda::graph_capture::trim_cuda_graph_memory(&stream) {
+        if let Err(err) = inference_nn::cuda::graph_capture::trim_cuda_graph_memory(&stream) {
             tracing::warn!("Failed to trim released DFlash CUDA graph memory: {err:?}");
         }
     }
@@ -1906,15 +1911,15 @@ impl DFlashCudaGraphState {
         };
         let stream = cuda_device.cuda_stream();
         let _memory_pool_guard =
-            crate::cuda::graph_capture::prepare_cuda_graph_memory_pool(&stream)?;
+            inference_nn::cuda::graph_capture::prepare_cuda_graph_memory_pool(&stream)?;
         let restore_event_tracking =
-            crate::cuda::graph_capture::disable_event_tracking_for_capture(&stream);
+            inference_nn::cuda::graph_capture::disable_event_tracking_for_capture(&stream);
         let _htod_cache_guard = cuda_device.enable_cuda_graph_htod_cache();
         let _capture = inference_tensor::cuda_backend::capture_scope();
         if let Err(err) =
             stream.begin_capture(sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
         {
-            crate::cuda::graph_capture::restore_event_tracking_after_capture(
+            inference_nn::cuda::graph_capture::restore_event_tracking_after_capture(
                 &stream,
                 restore_event_tracking,
             );
@@ -1927,7 +1932,7 @@ impl DFlashCudaGraphState {
         match capture_result {
             Ok(output) => {
                 let copy_result = (|| {
-                    crate::cuda::graph::copy_tensor(
+                    inference_nn::cuda::graph::copy_tensor(
                         &output.tokens,
                         &buffers.output_tokens.as_detached_tensor(),
                     )?;
@@ -1938,16 +1943,22 @@ impl DFlashCudaGraphState {
                         &buffers.output_candidate_probs,
                     ) {
                         (Some(ids), Some(probs), Some(dst_ids), Some(dst_probs)) => {
-                            crate::cuda::graph::copy_tensor(&ids, &dst_ids.as_detached_tensor())?;
-                            crate::cuda::graph::copy_tensor(&probs, &dst_probs.as_detached_tensor())
+                            inference_nn::cuda::graph::copy_tensor(
+                                &ids,
+                                &dst_ids.as_detached_tensor(),
+                            )?;
+                            inference_nn::cuda::graph::copy_tensor(
+                                &probs,
+                                &dst_probs.as_detached_tensor(),
+                            )
                         }
                         (None, None, None, None) => Ok(()),
                         _ => inference_tensor::bail!("DFlash graph selector output shape changed"),
                     }
                 })();
                 if let Err(err) = copy_result {
-                    crate::cuda::graph_capture::end_cuda_capture_discard(&stream);
-                    crate::cuda::graph_capture::restore_event_tracking_after_capture(
+                    inference_nn::cuda::graph_capture::end_cuda_capture_discard(&stream);
+                    inference_nn::cuda::graph_capture::restore_event_tracking_after_capture(
                         &stream,
                         restore_event_tracking,
                     );
@@ -1955,8 +1966,8 @@ impl DFlashCudaGraphState {
                 }
             }
             Err(err) => {
-                crate::cuda::graph_capture::end_cuda_capture_discard(&stream);
-                crate::cuda::graph_capture::restore_event_tracking_after_capture(
+                inference_nn::cuda::graph_capture::end_cuda_capture_discard(&stream);
+                inference_nn::cuda::graph_capture::restore_event_tracking_after_capture(
                     &stream,
                     restore_event_tracking,
                 );
@@ -1964,10 +1975,10 @@ impl DFlashCudaGraphState {
             }
         }
 
-        let graph = match crate::cuda::graph_capture::CudaGraphHandle::end_capture(&stream) {
+        let graph = match inference_nn::cuda::graph_capture::CudaGraphHandle::end_capture(&stream) {
             Ok(Some(graph)) => graph,
             Ok(None) => {
-                crate::cuda::graph_capture::restore_event_tracking_after_capture(
+                inference_nn::cuda::graph_capture::restore_event_tracking_after_capture(
                     &stream,
                     restore_event_tracking,
                 );
@@ -1976,19 +1987,19 @@ impl DFlashCudaGraphState {
                 ));
             }
             Err(err) => {
-                crate::cuda::graph_capture::restore_event_tracking_after_capture(
+                inference_nn::cuda::graph_capture::restore_event_tracking_after_capture(
                     &stream,
                     restore_event_tracking,
                 );
                 return Err(err);
             }
         };
-        crate::cuda::graph_capture::restore_event_tracking_after_capture(
+        inference_nn::cuda::graph_capture::restore_event_tracking_after_capture(
             &stream,
             restore_event_tracking,
         );
         graph.upload()?;
-        let staging = crate::cuda::graph_capture::CudaGraphHostStaging::new(stream)?;
+        let staging = inference_nn::cuda::graph_capture::CudaGraphHostStaging::new(stream)?;
         let entry = DFlashCudaGraphEntry {
             key,
             staging,
@@ -2292,7 +2303,7 @@ pub fn windowed_kv_capacities(
     recurrent_capacity: usize,
     prefix_cache_capacity: usize,
 ) -> (usize, usize) {
-    let pad = crate::kv_cache::RECURRENT_GRAPH_PAD_SLOTS;
+    let pad = inference_nn::kv_cache::RECURRENT_GRAPH_PAD_SLOTS;
     let snapshots = recurrent_capacity.saturating_sub(pad);
     (
         serving_capacity.saturating_add(pad),
@@ -2318,7 +2329,7 @@ fn windowed_kv_fits_fattn(
     block_size: usize,
     layers: impl IntoIterator<Item = (bool, Option<usize>)>,
 ) -> bool {
-    crate::attention::fattn_supports(head_dim, false)
+    inference_nn::attention::fattn_supports(head_dim, false)
         && layers
             .into_iter()
             .all(|(is_causal, window)| window.is_some_and(|w| is_causal || w >= block_size))
@@ -2704,7 +2715,7 @@ impl DFlashDraftModel {
                 checkpoint_capacity,
                 layer_windows,
                 self.block_size,
-                crate::paged_attention::DEFAULT_PAGED_ATTENTION_BLOCK_SIZE,
+                inference_nn::paged_attention::DEFAULT_PAGED_ATTENTION_BLOCK_SIZE,
                 self.num_kv_heads,
                 self.head_dim,
             )?;
@@ -2737,7 +2748,7 @@ impl DFlashDraftModel {
         token_embedding: &Arc<dyn QuantMethod>,
         lm_head: &Arc<dyn QuantMethod>,
     ) -> Result<()> {
-        if !crate::cuda::graph_capture::cuda_decode_graphs_enabled() || max_n == 0 {
+        if !inference_nn::cuda::graph_capture::cuda_decode_graphs_enabled() || max_n == 0 {
             return Ok(());
         }
         let Some(pool) = &self.windowed_pool else {
@@ -2771,7 +2782,7 @@ impl DFlashDraftModel {
             .sequence_capacity();
         let shapes = dflash_graph_precapture_shapes(
             &self.graph_plans(max_n),
-            crate::cuda::graph_capture::cuda_graph_precapture_batches(
+            inference_nn::cuda::graph_capture::cuda_graph_precapture_batches(
                 CudaGraphComponent::DFlash,
                 self.query_rows(max_n),
             ),
@@ -2880,7 +2891,7 @@ impl DFlashDraftModel {
         } = *inputs;
         #[cfg(all(feature = "cuda", target_family = "unix"))]
         {
-            if !crate::cuda::graph_capture::cuda_decode_graphs_enabled()
+            if !inference_nn::cuda::graph_capture::cuda_decode_graphs_enabled()
                 || self.windowed_pool.is_none()
                 || seq_ids.is_empty()
                 || seq_ids.len() != anchors.len()
@@ -2893,7 +2904,7 @@ impl DFlashDraftModel {
             if block > self.block_size || !dflash_graph_positions_fit(start_positions, block) {
                 return Ok(None);
             }
-            let Some(batch_bucket) = crate::cuda::graph_capture::cuda_graph_batch_bucket(
+            let Some(batch_bucket) = inference_nn::cuda::graph_capture::cuda_graph_batch_bucket(
                 CudaGraphComponent::DFlash,
                 block,
                 seq_ids.len(),
@@ -3001,7 +3012,10 @@ impl DFlashDraftModel {
         select_dflash_depth(adaptive, max_n, batch, self.live_sequence_count())
     }
 
-    pub fn graph_plans(&self, max_n: usize) -> Vec<crate::speculative::SpeculativeGraphPlan> {
+    pub fn graph_plans(
+        &self,
+        max_n: usize,
+    ) -> Vec<inference_nn::speculative::SpeculativeGraphPlan> {
         let guard = self.adaptive.lock().expect("dflash adaptive poisoned");
         if let Some(adaptive) = guard.as_ref() {
             debug_assert_eq!(adaptive.max_n, max_n);
@@ -3144,7 +3158,7 @@ impl DFlashDraftModel {
     pub fn export_paged_auxiliary_prefix_state(
         &self,
         state: &dyn PagedAuxiliaryPrefixState,
-    ) -> Result<Option<crate::kv_cache::PagedAuxiliaryPrefixData>> {
+    ) -> Result<Option<inference_nn::kv_cache::PagedAuxiliaryPrefixData>> {
         #[cfg(all(feature = "cuda", target_family = "unix"))]
         {
             let (Some(state), Some(pool)) = (
@@ -3168,7 +3182,7 @@ impl DFlashDraftModel {
     /// A prefix checkpoint of this drafter's windowed pool rebuilt from exported pages.
     pub fn import_paged_auxiliary_prefix_state(
         &self,
-        data: &crate::kv_cache::PagedAuxiliaryPrefixData,
+        data: &inference_nn::kv_cache::PagedAuxiliaryPrefixData,
     ) -> Result<Option<Arc<dyn PagedAuxiliaryPrefixState>>> {
         #[cfg(all(feature = "cuda", target_family = "unix"))]
         {
@@ -3439,7 +3453,7 @@ impl DFlashDraftModel {
                     }
                 }
                 let positions = Tensor::from_vec(positions, (total,), &self.device)?;
-                crate::cuda::dflash_context::context_keys(
+                inference_nn::cuda::dflash_context::context_keys(
                     &raw_k,
                     norm_weights,
                     &self.rope_table.0,
@@ -3619,7 +3633,7 @@ impl DFlashDraftModel {
     ) -> Result<()> {
         let mut slots = Vec::with_capacity(rows.iter().sum());
         {
-            let manager = crate::get_mut_arcmutex!(paged.metadata.kv_cache_manager);
+            let manager = inference_nn::get_mut_arcmutex!(paged.metadata.kv_cache_manager);
             for (entry, rows) in entries.iter().zip(rows) {
                 let mapping = manager
                     .get_slot_mapping(entry.seq_id, entry.start_pos, *rows)
@@ -3671,7 +3685,7 @@ impl DFlashDraftModel {
     ) -> Result<Tensor> {
         let (batch, block, _) = noise_embedding.dims3()?;
         let (block_tables, width, slots, kv_lens) = {
-            let mut manager = crate::get_mut_arcmutex!(paged.metadata.kv_cache_manager);
+            let mut manager = inference_nn::get_mut_arcmutex!(paged.metadata.kv_cache_manager);
             let page = manager.block_size();
             let width = start_positions
                 .iter()
@@ -4006,13 +4020,15 @@ impl DFlashDraftModel {
                 let cos = q_cos.reshape((batch * block, ()))?;
                 let sin = q_sin.reshape((batch * block, ()))?;
                 let output_layout = match attention_layout {
-                    DraftAttentionLayout::HeadsFirst => crate::ops::QkRopeOutputLayout::HeadsFirst,
+                    DraftAttentionLayout::HeadsFirst => {
+                        inference_nn::ops::QkRopeOutputLayout::HeadsFirst
+                    }
                     #[cfg(all(feature = "cuda", target_family = "unix"))]
                     DraftAttentionLayout::TokensFirst => {
-                        crate::ops::QkRopeOutputLayout::TokensFirst
+                        inference_nn::ops::QkRopeOutputLayout::TokensFirst
                     }
                 };
-                crate::ops::try_cuda_qk_rms_norm_rope(
+                inference_nn::ops::try_cuda_qk_rms_norm_rope(
                     &q_input,
                     Some(&k_input),
                     layer.q_norm.weight(),
@@ -4077,18 +4093,18 @@ impl DFlashDraftModel {
                 None => None,
             };
             let gate_up = layer.gate_up_proj.forward(&x)?;
-            let mut out = match crate::ops::try_fused_split_glu_quantized_forward(
+            let mut out = match inference_nn::ops::try_fused_split_glu_quantized_forward(
                 &gate_up,
                 self.intermediate_size,
-                crate::layers::Activation::Silu,
+                inference_nn::layers::Activation::Silu,
                 &*layer.down_proj,
             )? {
                 Some(output) => output,
                 _ => {
-                    let inter = crate::ops::split_mul_and_act(
+                    let inter = inference_nn::ops::split_mul_and_act(
                         &gate_up,
                         self.intermediate_size,
-                        crate::layers::Activation::Silu,
+                        inference_nn::layers::Activation::Silu,
                     )?;
                     layer.down_proj.forward(&inter)?
                 }
@@ -4488,12 +4504,12 @@ mod tests {
     #[cfg(all(feature = "cuda", target_family = "unix"))]
     use super::{windowed_kv_checkpoint_capacity, windowed_kv_fits_fattn};
     #[cfg(feature = "cuda")]
-    use crate::cuda::graph_capture::{
+    use inference_nn::cuda::graph_capture::{
         CUDA_GRAPH_MAX_BATCH_BUCKET, CudaGraphComponent, cuda_graph_precapture_batches,
     };
-    use crate::layers::{YarnRopeConfig, yarn_inv_freq_and_attention_factor};
-    use crate::speculative::MtpDraftSamplingMethod;
-    use crate::speculative::{SpeculativeGraphPlan, SpeculativePrefixReplay};
+    use inference_nn::layers::{YarnRopeConfig, yarn_inv_freq_and_attention_factor};
+    use inference_nn::speculative::MtpDraftSamplingMethod;
+    use inference_nn::speculative::{SpeculativeGraphPlan, SpeculativePrefixReplay};
 
     // Live slots follow the served sequences; retained prefixes stop at the GDN snapshots a restore also needs
     #[test]
@@ -4507,7 +4523,7 @@ mod tests {
     #[cfg(all(feature = "cuda", target_family = "unix"))]
     #[test]
     fn windowed_kv_needs_every_layer_windowed_and_non_causal_windows_past_a_block() {
-        let fattn = crate::attention::fattn_supports(128, false);
+        let fattn = inference_nn::attention::fattn_supports(128, false);
         assert_eq!(
             windowed_kv_fits_fattn(128, 16, [(true, Some(8)), (false, Some(16))]),
             fattn
@@ -4596,9 +4612,9 @@ mod tests {
     #[test]
     fn cuda_selector_top_k_respects_the_ranked_workspace_bound() {
         let vocab_size = 1_000_000;
-        let max_top_k = crate::ops::cuda_topk_ranked_packed_max_k(vocab_size)
+        let max_top_k = inference_nn::ops::cuda_topk_ranked_packed_max_k(vocab_size)
             .expect("test vocabulary is representable")
-            .min(crate::ops::CUDA_DFLASH_SELECTOR_MAX_K);
+            .min(inference_nn::ops::CUDA_DFLASH_SELECTOR_MAX_K);
         assert!(
             validate_candidate_selector_cuda(selector_cuda_spec(vocab_size, max_top_k)).is_ok()
         );
@@ -4610,7 +4626,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn cuda_selector_rejects_unrepresentable_vocabularies() {
-        let vocab_size = crate::ops::CUDA_TOPK_MAX_EXACT_PACKED_VOCAB + 1;
+        let vocab_size = inference_nn::ops::CUDA_TOPK_MAX_EXACT_PACKED_VOCAB + 1;
         let error = validate_candidate_selector_cuda(selector_cuda_spec(vocab_size, 1))
             .expect_err("packed F32 indices must represent every vocabulary id exactly");
         assert!(error.contains("cannot be represented exactly"));
@@ -4911,7 +4927,7 @@ mod tests {
         skip_without_cuda!();
         use inference_tensor::{Var, cuda_backend::cudarc::driver::sys};
 
-        use crate::cuda::graph_capture::{
+        use inference_nn::cuda::graph_capture::{
             CudaGraphHandle, CudaGraphHostStaging, disable_event_tracking_for_capture,
             prepare_cuda_graph_memory_pool, restore_event_tracking_after_capture,
         };
@@ -4930,7 +4946,7 @@ mod tests {
         let restore_event_tracking = disable_event_tracking_for_capture(&stream);
         stream.begin_capture(sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)?;
         let captured = input.as_detached_tensor().affine(2.0, 1.0)?;
-        crate::cuda::graph::copy_tensor(&captured, &output.as_detached_tensor())?;
+        inference_nn::cuda::graph::copy_tensor(&captured, &output.as_detached_tensor())?;
         let graph = CudaGraphHandle::end_capture(&stream)?
             .ok_or_else(|| anyhow::anyhow!("DFlash graph capture returned no graph"))?;
         restore_event_tracking_after_capture(&stream, restore_event_tracking);
@@ -4940,8 +4956,8 @@ mod tests {
         graph.launch()?;
         staging.record_graph_complete()?;
         let detached = copy_dflash_graph_output_rows(&output.as_detached_tensor(), 1)?;
-        let (_, release_result) = crate::cuda::graph_capture::release_cuda_graph_resources(
-            crate::cuda::graph_capture::CudaGraphComponent::DFlash,
+        let (_, release_result) = inference_nn::cuda::graph_capture::release_cuda_graph_resources(
+            inference_nn::cuda::graph_capture::CudaGraphComponent::DFlash,
             graph,
             (staging, input, output, captured),
         );
@@ -5223,7 +5239,7 @@ mod tests {
         skip_without_cuda!();
         use inference_tensor::{Var, cuda_backend::cudarc::driver::sys};
 
-        use crate::cuda::graph_capture::{
+        use inference_nn::cuda::graph_capture::{
             CudaGraphHandle, disable_event_tracking_for_capture, prepare_cuda_graph_memory_pool,
             restore_event_tracking_after_capture,
         };

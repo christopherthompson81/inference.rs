@@ -1469,7 +1469,7 @@ pub struct Qwen3_5TextModel {
     pub(super) draft_lm_head: Mutex<Option<Arc<dyn QuantMethod>>>,
     joint_head: Option<super::joint_head::JointHead>,
     // External DFlash block-diffusion drafter, replacing the built-in MTP head when attached
-    pub(super) dflash: Mutex<Option<Arc<crate::dflash::DFlashDraftModel>>>,
+    pub(super) dflash: Mutex<Option<Arc<inference_drafters::dflash::DFlashDraftModel>>>,
     pub(super) pending_prompt_tails:
         Mutex<std::collections::HashMap<usize, super::speculative::PendingPromptTail>>,
     #[cfg(all(feature = "cuda", target_family = "unix"))]
