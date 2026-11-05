@@ -889,6 +889,7 @@ macro_rules! gguf_type_library {
                             y_div: i32,
                             n_pairs: i32,
                             activation: i32,
+                            grouped: i32,
                             stream: *mut c_void,
                         );
                         $($extra)*

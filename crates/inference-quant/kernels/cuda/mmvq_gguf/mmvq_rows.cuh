@@ -159,8 +159,8 @@ static void launch_mmvq_rows(const void *vx, const void *vy, void *dst, int ncol
                                          stream);                                                              \
   }
 
-// Expert-indexed form for MoE decode, as mmvq_moe_impl in mmvq_gguf.cuh: blockIdx.y is a routed pair
-template <typename kt, bool glu>
+// Expert-indexed form for MoE decode, as mmvq_moe_impl in mmvq_gguf.cuh, `pairs_fast` included
+template <typename kt, bool glu, bool pairs_fast>
 static __global__ void __launch_bounds__(MMVQ_ROWS_NWARPS_MOE *WARP_SIZE, 1)
     mmvq_rows_moe_kernel(const void *__restrict__ vx_gate, const void *__restrict__ vx_up, const int64_t expert_stride,
                          const void *__restrict__ vy, const uint32_t *__restrict__ ids, float *__restrict__ dst,
@@ -173,7 +173,7 @@ static __global__ void __launch_bounds__(MMVQ_ROWS_NWARPS_MOE *WARP_SIZE, 1)
   constexpr int rows_per_cuda_block = MMVQ_ROWS_PER_BLOCK_MOE;
   constexpr int nsums = glu ? 2 : 1;
 
-  const int pair = blockIdx.y;
+  const int pair = pairs_fast ? blockIdx.x : blockIdx.y;
   const int64_t expert_offset = (int64_t)ids[pair] * expert_stride;
   const char *vx[nsums];
   vx[0] = (const char *)vx_gate + expert_offset;
@@ -184,7 +184,7 @@ static __global__ void __launch_bounds__(MMVQ_ROWS_NWARPS_MOE *WARP_SIZE, 1)
   dst += (int64_t)pair * nrows_x;
 
   const int tid = WARP_SIZE * threadIdx.y + threadIdx.x;
-  const int row0 = rows_per_cuda_block * blockIdx.x;
+  const int row0 = rows_per_cuda_block * (pairs_fast ? blockIdx.y : blockIdx.x);
   const int blocks_per_row_x = ncols_x / qk;
   constexpr int blocks_per_iter = vdr * nwarps * WARP_SIZE / qi;
   const int64_t row_size = kt::row_size(ncols_x);
@@ -256,22 +256,37 @@ static __global__ void __launch_bounds__(MMVQ_ROWS_NWARPS_MOE *WARP_SIZE, 1)
   }
 }
 
-// A null vx_up runs the plain projection; otherwise gate and up fuse with the activation.
+// A null vx_up runs the plain projection; otherwise gate and up fuse with the activation. `grouped` as mmvq_gguf.cuh's.
 #define MMVQ_ROWS_MOE_LAUNCHER(tag, traits)                                                                      \
   extern "C" void launch_mmvq_gguf_##tag##_moe(const void *vx_gate, const void *vx_up, int64_t expert_stride,  \
                                                const void *vy, const void *ids, float *dst, int ncols_x,       \
                                                int nrows_x, int stride_col_y, int y_div, int n_pairs,          \
-                                               int activation, void *stream) {                                 \
-    const dim3 grid((nrows_x + MMVQ_ROWS_PER_BLOCK_MOE - 1) / MMVQ_ROWS_PER_BLOCK_MOE, n_pairs, 1);            \
+                                               int activation, int grouped, void *stream) {                    \
+    const int row_blocks = (nrows_x + MMVQ_ROWS_PER_BLOCK_MOE - 1) / MMVQ_ROWS_PER_BLOCK_MOE;                  \
     const dim3 block(WARP_SIZE, MMVQ_ROWS_NWARPS_MOE, 1);                                                      \
     cudaStream_t s = static_cast<cudaStream_t>(stream);                                                        \
-    if (vx_up) {                                                                                               \
-      mmvq_rows_moe_kernel<traits, true><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy,             \
-                                                               (const uint32_t *)ids, dst, ncols_x, nrows_x,  \
-                                                               stride_col_y, y_div, activation);              \
+    const uint32_t *id = (const uint32_t *)ids;                                                                \
+    if (grouped) {                                                                                             \
+      const dim3 grid(n_pairs, row_blocks, 1);                                                                 \
+      if (vx_up) {                                                                                             \
+        mmvq_rows_moe_kernel<traits, true, true><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id,  \
+                                                                       dst, ncols_x, nrows_x, stride_col_y,   \
+                                                                       y_div, activation);                    \
+      } else {                                                                                                 \
+        mmvq_rows_moe_kernel<traits, false, true><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id, \
+                                                                        dst, ncols_x, nrows_x, stride_col_y,  \
+                                                                        y_div, activation);                   \
+      }                                                                                                        \
     } else {                                                                                                   \
-      mmvq_rows_moe_kernel<traits, false><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy,            \
-                                                                (const uint32_t *)ids, dst, ncols_x, nrows_x, \
-                                                                stride_col_y, y_div, activation);             \
+      const dim3 grid(row_blocks, n_pairs, 1);                                                                 \
+      if (vx_up) {                                                                                             \
+        mmvq_rows_moe_kernel<traits, true, false><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id, \
+                                                                        dst, ncols_x, nrows_x, stride_col_y,  \
+                                                                        y_div, activation);                   \
+      } else {                                                                                                 \
+        mmvq_rows_moe_kernel<traits, false, false><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy,    \
+                                                                         id, dst, ncols_x, nrows_x,           \
+                                                                         stride_col_y, y_div, activation);    \
+      }                                                                                                        \
     }                                                                                                          \
   }

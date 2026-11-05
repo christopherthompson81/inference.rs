@@ -603,3 +603,85 @@ prompts skipped them (it would see `speculative_conflict` skips without the hook
 **Implication:** MTP 3 is +7.6 % over plain decoding. A step at MTP 3 costs ~11.9 ms (3.12 tokens at 262.9 tok/s)
 against plain decoding's 4.1 ms a token, so the verify, the drafts and the commit's replay together cost ~2.9 plain
 steps. Next: where that step time goes (nsys), since a 4-row MoE verify reads up to 4 tokens' distinct experts.
+
+## Run 24 — 2026-11-05
+
+**Question:** where does an MTP 3 step's time go now that verify steps replay as graphs?
+
+**Command:** `mtp/prof.sh p3 --paged-attn on --pa-context-len 8192 --mtp --mtp-n-predict 3` (nsys
+`--cuda-graph-trace=node` over one 194-token prose request after a warm-up, sqlite export; kernels grouped by
+correlation id per graph launch), and `p0` without MTP for the 1-row decode graph.
+
+Per step (75 steps; nsys slows the run, 171 against 195 tok/s for this prompt):
+
+| part | GPU time |
+|---|---|
+| verify graph (4 rows, 1026 kernels) | 9.5 ms |
+| drafter graph (48 kernels) x 3 | 0.24 ms each |
+| draft lm_head, Q8_0 `mmvq_gguf_q8_0_bf16_plain_cuda1`, eager x 3 | 0.44 ms each, 1.3 ms |
+| commit's Mamba replay and other eager kernels | ~1.4 ms |
+| GPU idle | ~3.2 ms |
+
+Verify graph against the 1-row decode graph (4.8 ms under nsys), per launch:
+
+| kernel | verify | decode |
+|---|---|---|
+| `mmvq_gguf_q4_0_moe_cuda` x 46 | 3793 us | 1023 us |
+| Q8_0 dense matvecs x 52 | 1472 | 1400 |
+| Q5_0 dense matvecs x 46 | 648 | 459 |
+| casts x 116 | 524 | 241 |
+| Mamba gather / copy / scatter / `gemmSN_TN` | ~1010 | none (in place) |
+| `ssm_scan_kernel` x 23 | 237 | 134 |
+
+The dense matvecs stay flat at 4 rows (the DFlash 2 lesson, `dflash2_drafter_investigation.md` Runs 4-5, already
+holds for Q8_0 here). The experts do not: the MoE grid is (928, 24), one block row per (token, expert) pair, each
+pair reading its expert's rows by itself. Verify attention already runs per sequence (`flash_attn_ext_f16` with
+`ncols1 = 4`, DFlash 2 Run 12's fix), so it is not a verify cost at 8K.
+
+**Overlap (temporary probe, removed):** distinct experts per 4-token MoE call, eager MTP 3 run, 14298 calls: mean
+16.45 of 24 pairs (10-19). Reading each distinct expert once would cut the expert traffic to ~69 %.
+
+**Draft head (`--mtp-draft-isq`):**
+
+| config | mean tok/s | accept (len) |
+|---|---|---|
+| MTP 3, Q8_0 draft head | 262.9 | 70.6 % (3.12) |
+| MTP 3, q4_0 draft head | 275.7 | 67.6 % (3.03) |
+| MTP 3, q4k draft head | 271.8 | 66.5 % (3.00) |
+
+**Implication:** two levers, the cheap one already there (a 4-bit draft head). Next: an expert matvec that reads an
+expert once for the tokens routed to it.
+
+## Run 25 — 2026-11-05
+
+**Question:** can the MoE matvec read a shared expert once for its tokens?
+
+**Try 1, grouped blocks (reverted):** a pair leading its expert's group (up to 8 pairs) dotted each weight block
+against every member's activations, the rest returning. Correct for every type (the indexed MoE test with shared,
+repeated and over-full groups), but 167 registers and 128 bytes of stack for the Q4_0 GLU kernel against 56, so
+~3 blocks per SM instead of ~8 in a latency-bound kernel:
+
+| config | mean tok/s |
+|---|---|
+| plain | 246.3 |
+| MTP 3 | 153.6 |
+| MTP 3, q4_0 head | 157.3 |
+
+**Try 2, pairs fast (kept):** the same one-pair blocks, but with several tokens the grid is (pairs, row blocks), so
+every pair's block over one row block runs together and the pairs sharing an expert read its rows from L2 after the
+first. No register change; one-token decode keeps the old order (its pairs are distinct experts). The launchers take
+a `grouped` flag, which `moe_decode_with` sets for more than one token.
+
+| config | mean tok/s | accept (len) |
+|---|---|---|
+| MTP 3 | 272.8 (was 262.9) | 70.2 % (3.11) |
+| MTP 2, q4_0 head | 280.2 | 82.3 % (2.65) |
+| MTP 3, q4_0 head | 295.0 (was 275.7) | 72.7 % (3.18) |
+| MTP 4, q4_0 head | 288.3 | 65.2 % (3.61) |
+
+Profile (`p3b`, MTP 3, q4_0 head): the verify's expert matvec 3793 -> 3099 us per launch (ideal from Run 24's overlap
+~2600), the verify graph 9.5 -> 8.8 ms.
+
+**Implication:** MTP 3 with a q4_0 draft head is 295 tok/s against plain decoding's 246 (+20 %). Left, by size: the
+GPU idle time between graphs (the eager commit and host work), the verify's Mamba gather / copy / scatter (~1 ms,
+in place as the decode step would save the copy and scatter), the 116 casts, and the last ~0.5 ms of expert reuse.

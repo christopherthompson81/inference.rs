@@ -958,8 +958,10 @@ static __device__ void mmvq_core_fused_qkv_impl(
   }
 }
 
-// MoE decode: blockIdx.y is a routed pair, reading expert ids[pair] (expert_stride bytes each) and row pair / y_div
-template <int qk, int qi, typename block_q_t, int vdr, vec_dot_q_cuda_t vec_dot_q_cuda, bool glu>
+// MoE decode: a block is a routed pair's rows, reading expert ids[pair] (expert_stride bytes each) and row pair / y_div.
+// With `pairs_fast` the pairs are the grid's fast dimension, so the pairs sharing an expert read its rows together
+// (from L2 after the first) instead of a pass over the expert apart
+template <int qk, int qi, typename block_q_t, int vdr, vec_dot_q_cuda_t vec_dot_q_cuda, bool glu, bool pairs_fast>
 static __device__ void mmvq_moe_impl(const void *__restrict__ vx_gate, const void *__restrict__ vx_up,
                                      const int64_t expert_stride, const block_q8_1 *__restrict__ y,
                                      const uint32_t *__restrict__ ids, float *__restrict__ dst, const int ncols_x,
@@ -969,7 +971,7 @@ static __device__ void mmvq_moe_impl(const void *__restrict__ vx_gate, const voi
   constexpr int rows_per_cuda_block = MMVQ_ROWS_PER_BLOCK_MOE;
   constexpr int nsums = glu ? 2 : 1;
 
-  const int pair = blockIdx.y;
+  const int pair = pairs_fast ? blockIdx.x : blockIdx.y;
   const int64_t expert_offset = (int64_t)ids[pair] * expert_stride;
   const void *vx[nsums];
   vx[0] = (const char *)vx_gate + expert_offset;
@@ -980,7 +982,7 @@ static __device__ void mmvq_moe_impl(const void *__restrict__ vx_gate, const voi
   dst += (int64_t)pair * nrows_x;
 
   const int tid = WARP_SIZE * threadIdx.y + threadIdx.x;
-  const int row0 = rows_per_cuda_block * blockIdx.x;
+  const int row0 = rows_per_cuda_block * (pairs_fast ? blockIdx.y : blockIdx.x);
   const int blocks_per_row_x = ncols_x / qk;
   constexpr int blocks_per_iter = vdr * nwarps * WARP_SIZE / qi;
 
@@ -1595,32 +1597,48 @@ static __global__ void dequantize_block_iq1_m(const void *__restrict__ vx, dst_t
         ncols_x, nrows_q, nrows_k, nrows_v, stride_col_y);                     \
   }
 
-// A null vx_up runs the plain projection; otherwise gate and up fuse with the activation.
+// A null vx_up runs the plain projection; otherwise gate and up fuse with the activation. `grouped` (several tokens,
+// whose pairs share experts) runs the pairs fast.
 #define MMVQ_MOE_ENTRY(tag, block_q_t, qk_val, qi_val, vdr_val, vec_dot)                                         \
-  template <bool glu>                                                                                          \
+  template <bool glu, bool pairs_fast>                                                                         \
   static __global__ void __launch_bounds__(MMVQ_NWARPS_MOE *WARP_SIZE, 1) mmvq_gguf_##tag##_moe_cuda(         \
       const void *__restrict__ vx_gate, const void *__restrict__ vx_up, const int64_t expert_stride,            \
       const void *__restrict__ vy, const uint32_t *__restrict__ ids, float *__restrict__ dst, const int ncols_x, \
       const int nrows_x, const int stride_col_y, const int y_div, const int activation) {                      \
-    mmvq_moe_impl<qk_val, qi_val, block_q_t, vdr_val, vec_dot, glu>(vx_gate, vx_up, expert_stride,             \
-                                                                     (const block_q8_1 *)vy, ids, dst, ncols_x, \
-                                                                     nrows_x, stride_col_y, y_div, activation); \
+    mmvq_moe_impl<qk_val, qi_val, block_q_t, vdr_val, vec_dot, glu, pairs_fast>(                              \
+        vx_gate, vx_up, expert_stride, (const block_q8_1 *)vy, ids, dst, ncols_x, nrows_x, stride_col_y, y_div, \
+        activation);                                                                                           \
   }                                                                                                            \
   extern "C" void launch_mmvq_gguf_##tag##_moe(const void *vx_gate, const void *vx_up, int64_t expert_stride,  \
                                                const void *vy, const void *ids, float *dst, int ncols_x,       \
                                                int nrows_x, int stride_col_y, int y_div, int n_pairs,          \
-                                               int activation, void *stream) {                                 \
-    const dim3 grid((nrows_x + MMVQ_ROWS_PER_BLOCK_MOE - 1) / MMVQ_ROWS_PER_BLOCK_MOE, n_pairs, 1);            \
+                                               int activation, int grouped, void *stream) {                    \
+    const int row_blocks = (nrows_x + MMVQ_ROWS_PER_BLOCK_MOE - 1) / MMVQ_ROWS_PER_BLOCK_MOE;                  \
     const dim3 block(WARP_SIZE, MMVQ_NWARPS_MOE, 1);                                                           \
     cudaStream_t s = static_cast<cudaStream_t>(stream);                                                        \
-    if (vx_up) {                                                                                               \
-      mmvq_gguf_##tag##_moe_cuda<true><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy,               \
-                                                             (const uint32_t *)ids, dst, ncols_x, nrows_x,    \
-                                                             stride_col_y, y_div, activation);                \
+    const uint32_t *id = (const uint32_t *)ids;                                                                \
+    if (grouped) {                                                                                             \
+      const dim3 grid(n_pairs, row_blocks, 1);                                                                 \
+      if (vx_up) {                                                                                             \
+        mmvq_gguf_##tag##_moe_cuda<true, true><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id,    \
+                                                                     dst, ncols_x, nrows_x, stride_col_y,     \
+                                                                     y_div, activation);                      \
+      } else {                                                                                                 \
+        mmvq_gguf_##tag##_moe_cuda<false, true><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id,   \
+                                                                      dst, ncols_x, nrows_x, stride_col_y,    \
+                                                                      y_div, activation);                     \
+      }                                                                                                        \
     } else {                                                                                                   \
-      mmvq_gguf_##tag##_moe_cuda<false><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy,              \
-                                                              (const uint32_t *)ids, dst, ncols_x, nrows_x,   \
-                                                              stride_col_y, y_div, activation);               \
+      const dim3 grid(row_blocks, n_pairs, 1);                                                                 \
+      if (vx_up) {                                                                                             \
+        mmvq_gguf_##tag##_moe_cuda<true, false><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id,   \
+                                                                      dst, ncols_x, nrows_x, stride_col_y,    \
+                                                                      y_div, activation);                     \
+      } else {                                                                                                 \
+        mmvq_gguf_##tag##_moe_cuda<false, false><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy, id,  \
+                                                                       dst, ncols_x, nrows_x, stride_col_y,   \
+                                                                       y_div, activation);                    \
+      }                                                                                                        \
     }                                                                                                          \
   }
 

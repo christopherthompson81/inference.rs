@@ -1142,6 +1142,7 @@ type MoeLauncher = unsafe extern "C" fn(
     y_div: i32,
     n_pairs: i32,
     activation: i32,
+    grouped: i32,
     stream: *mut std::ffi::c_void,
 );
 
@@ -1376,6 +1377,8 @@ fn moe_decode_with(
         );
     }
     let pairs = tokens * topk;
+    // one token's pairs are distinct experts; several tokens' share some, which a grouped launch reads once
+    let grouped = i32::from(tokens > 1);
     if ids.elem_count() != pairs || ids.dtype() != DType::U32 {
         inference_tensor::bail!(
             "fast_mmvq: expected {pairs} u32 expert ids, got {:?} {:?}",
@@ -1452,6 +1455,7 @@ fn moe_decode_with(
                 topk as i32,
                 pairs as i32,
                 activation,
+                grouped,
                 stream_ptr,
             );
         }
@@ -1501,6 +1505,7 @@ fn moe_decode_with(
                 MOE_DOWN_Y_DIV,
                 pairs as i32,
                 MOE_NO_ACTIVATION,
+                grouped,
                 stream_ptr,
             );
         }
