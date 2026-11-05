@@ -41,8 +41,8 @@ pub(crate) struct Batch {
     // the multiply-adds its heavy dispatches declared
     pub(crate) work: u64,
     pub(crate) retained: Vec<Retained>,
-    // the kernels whose dispatches wrote timestamps 1.. of the profiler's pool, while profiling
-    pub(crate) profiled: Vec<&'static str>,
+    // the dispatches that wrote timestamps 1.. of the profiler's pool, while profiling
+    pub(crate) profiled: Vec<Profiled>,
     pub(crate) queries: Option<vk::QueryPool>,
 }
 
@@ -54,10 +54,16 @@ pub const LABELS_ENV: &str = "INFERENCE_VULKAN_LABELS";
 pub(crate) const PROFILE_QUERIES: u32 = 8192;
 const PROFILE_PRINT_SECS: u64 = 5;
 
-/// Each kernel's dispatch count and GPU time since the last print.
+/// A profiled dispatch: its kernel, and the shape and multiply-adds its op declared, if it did.
+pub(crate) struct Profiled {
+    pub(crate) kernel: &'static str,
+    pub(crate) shape: Option<(String, u64)>,
+}
+
+/// Each kernel and shape's dispatch count, GPU time and multiply-adds since the last print.
 #[derive(Default)]
 pub(crate) struct Profile {
-    kernels: std::collections::HashMap<&'static str, (u64, f64)>,
+    kernels: std::collections::HashMap<(&'static str, String), (u64, f64, u64)>,
     since: Option<std::time::Instant>,
     pub(crate) ns_per_tick: f64,
 }
@@ -70,11 +76,13 @@ impl Profile {
         }
     }
 
-    fn add(&mut self, names: &[&'static str], ticks: &[u64]) {
-        for (i, name) in names.iter().enumerate() {
-            let entry = self.kernels.entry(name).or_default();
+    fn add(&mut self, dispatches: &[Profiled], ticks: &[u64]) {
+        for (i, d) in dispatches.iter().enumerate() {
+            let (shape, macs) = d.shape.clone().unwrap_or_default();
+            let entry = self.kernels.entry((d.kernel, shape)).or_default();
             entry.0 += 1;
             entry.1 += ticks[i + 1].saturating_sub(ticks[i]) as f64 * self.ns_per_tick;
+            entry.2 += macs;
         }
         let since = *self.since.get_or_insert_with(std::time::Instant::now);
         if since.elapsed().as_secs() >= PROFILE_PRINT_SECS {
@@ -86,9 +94,15 @@ impl Profile {
                 since.elapsed().as_secs_f64(),
                 total / 1e6
             );
-            for (name, (count, ns)) in rows {
+            for ((name, shape), (count, ns, macs)) in rows {
+                // two operations a multiply-add
+                let rate = if macs > 0 {
+                    format!(" {:>6.1} TFLOPS", 2.0 * macs as f64 / ns / 1e3)
+                } else {
+                    String::new()
+                };
                 eprintln!(
-                    "  {name:<20} {count:>8} dispatches {:>9.1} ms {:>7.1} us each",
+                    "  {name:<22} {shape:<36} {count:>8} dispatches {:>9.1} ms {:>8.1} us each{rate}",
                     ns / 1e6,
                     ns / 1e3 / count as f64
                 );

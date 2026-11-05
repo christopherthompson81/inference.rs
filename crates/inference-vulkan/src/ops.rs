@@ -18,6 +18,9 @@ const DOT_MIN_K: usize = 64;
 const TILE_M: usize = 64;
 const TILE_N: usize = 64;
 const TILED_MIN: usize = 16;
+// matmul_f32_tiled32's tile, taken below this many 64 x 64 tiles
+const SMALL_TILE: usize = 32;
+const SMALL_TILE_BELOW: usize = 256;
 const MAX_GROUPS_Z: usize = 65_535;
 const MAX_GROUPS: usize = 4096;
 
@@ -177,14 +180,29 @@ impl Recorder<'_> {
         let buffers = [a.buffer.buffer, b.buffer.buffer, op.out.buffer];
         let work = (count as u64).saturating_mul(op.k as u64);
         self.work.set(self.work.get().saturating_add(work));
+        self.profile_shape(
+            || format!("b={} m={} n={} k={}", op.batch, op.m, op.n, op.k),
+            count * op.k,
+        );
         if op.m >= TILED_MIN && op.n >= TILED_MIN && op.batch <= MAX_GROUPS_Z {
-            self.context.kernels.matmul_f32_tiled.dispatch(
+            // a product whose 64 x 64 tiles leave most of the device idle (a router's 128 experts) takes 32 x 32
+            let tiles = op.n.div_ceil(TILE_N) * op.m.div_ceil(TILE_M) * op.batch;
+            let (pipeline, tile_m, tile_n) = if tiles < SMALL_TILE_BELOW {
+                (
+                    &self.context.kernels.matmul_f32_tiled32,
+                    SMALL_TILE,
+                    SMALL_TILE,
+                )
+            } else {
+                (&self.context.kernels.matmul_f32_tiled, TILE_M, TILE_N)
+            };
+            pipeline.dispatch(
                 self,
                 &buffers,
                 &bytes,
                 [
-                    op.n.div_ceil(TILE_N) as u32,
-                    op.m.div_ceil(TILE_M) as u32,
+                    op.n.div_ceil(tile_n) as u32,
+                    op.m.div_ceil(tile_m) as u32,
                     op.batch as u32,
                 ],
             );
@@ -571,6 +589,15 @@ impl Recorder<'_> {
             op.ids.0.buffer,
             op.scratch.buffer,
         ];
+        self.profile_shape(
+            || {
+                format!(
+                    "m={} n={} k={} e={}",
+                    op.rows, op.slots, op.cols, op.experts
+                )
+            },
+            op.rows * op.cols * op.slots,
+        );
         self.context.kernels.moe_mat_vecs(op.ty).dispatch(
             self,
             &buffers,
@@ -621,6 +648,15 @@ impl Recorder<'_> {
             &[op.x.0.buffer, op.routing.buffer, op.scratch.buffer],
             &words(&[op.slots, op.cols, op.x_div, op.x.1])?,
             [pairs_x as u32, pairs.div_ceil(pairs_x) as u32, 1],
+        );
+        self.profile_shape(
+            || {
+                format!(
+                    "m={} n={} k={} e={}",
+                    op.rows, op.slots, op.cols, op.experts
+                )
+            },
+            op.rows * op.cols * op.slots,
         );
         coop.moe_mmc(op.ty).dispatch(
             self,
@@ -675,6 +711,15 @@ impl Recorder<'_> {
             s_off,
             tiles_off,
         ])?;
+        self.profile_shape(
+            || {
+                format!(
+                    "m={} n={} k={} e={}",
+                    op.rows, op.slots, op.cols, op.experts
+                )
+            },
+            op.rows * op.cols * op.slots,
+        );
         self.context.kernels.moe_mm(op.ty).dispatch(
             self,
             &[

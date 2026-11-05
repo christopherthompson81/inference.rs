@@ -1238,3 +1238,48 @@ only type this model uses densely) would buy ~2 % of a prompt and of a decode st
 kernel family. Not taken.
 
 **Where a 512-token prompt stands:** 216 ms (2375 tok/s; CUDA ~120 ms, llama.cpp Vulkan ~126 ms).
+
+### Run 51 - 2026-11-05 ~00:30 (desktop: RTX 3090)
+
+**Question:** what llama.cpp's Vulkan backend does differently on the same prompt. GPU Trace under it hangs as ours
+does (the model load crawls under injection, even at `-ngl 6`); its own `GGML_VK_PERF_LOGGER=1` times each op by
+shape with no injection.
+
+**llama.cpp, a 512-token prompt (~122 ms of GPU):** routed experts `MUL_MAT_ID q4_0` 1.30 ms up / 1.14 ms down a
+layer (int8 MMQ: Q4_0 kept packed in shared memory, 32 outputs a thread); Mamba in `q8_0 10304 x 2688` 532 us
+(53 TFLOPS); Mamba out 215 us; the router `f32 128 x 2688` 36 us; the scan 623 us.
+
+**Change 1:** `INFERENCE_VULKAN_PROFILE` keys its lines by kernel and the op's shape, with us each and TFLOPS (the
+matvec, matrix-core, expert and f32 matmul ops declare them).
+
+**Finding:** our 512-token prompt ran as two forwards, 480 tokens then 32 (every kernel at both shapes; the 32-token
+one's experts at 3-4 TFLOPS, its router 304 us for 32 rows): the pipeline's own chunk plan (`step.rs`) cut a hybrid
+model's prompt at its last full block whether or not anything kept that recurrent checkpoint, where the scheduler's
+plan does so only with prefix caching on. That was the 71 expert dispatches a prompt against llama.cpp's 46.
+
+**Change 2:** the pipeline's plan block-aligns a hybrid prompt only where the prefix cacher accepts paged recurrent
+checkpoints (`accepts_paged_recurrent_prefix`), as the scheduler's does.
+
+**Result (Lightning Q4_0, q8 paged cache):**
+
+| prompt | Vulkan before | after | CUDA before | after |
+|---|---|---|---|---|
+| 512 | 216 ms | 176 ms (2904 tok/s) | 4285 tok/s | 4338 |
+| 2048 | 690 ms | 638 ms | 4247 tok/s | 4340 |
+
+**Remaining against llama.cpp (us a call):** router f32 matmul 317 against 36; Mamba in 777 against 532 and Mamba out
+469 against 215 (our matrix-core matmul loads its activation tiles from global memory each step); routed experts
+1532 / 1355 against 1301 / 1138.
+
+### Run 52 - 2026-11-05 ~01:00 (desktop: RTX 3090)
+
+**Question:** Run 51's two next items: the router's f32 matmul, and the dense matrix-core matmul's activation loads.
+
+**Router:** `matmul_f32_tiled`'s 64 x 64 tiles made 16 workgroups for 512 tokens x 128 experts; `matmul_f32_tiled32`
+(32 x 32 tiles, taken below 256 tiles of 64) makes 64: 317 -> 180 us a call, a 512-token prompt 176 -> 171.5 ms.
+llama.cpp's is 36 us; 64 workgroups still leave the card part idle, so the rest needs a split K.
+
+**Dead end:** the dense matrix-core matmul with each step's activation tile staged in shared memory (`f16vec4` loads
+along the tokens' rows, `coopMatLoad` from there, the step 2 blocks so the three tiles fit in 34 KB): 512-row Q8_0
+36.4 -> 17.5 TOPS, through an aliased `f16vec4` view or the scalar one alike, where the 2-block step alone gives 33.2.
+GPU Trace exported no counters for the slow variant (nan, as for Run 48's), so the cause is unseen; reverted.

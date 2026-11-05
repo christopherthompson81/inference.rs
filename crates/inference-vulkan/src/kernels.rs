@@ -89,6 +89,7 @@ kernels! {
     matmul_f32: MATMUL_F32, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
     matmul_f32_dot: MATMUL_F32_DOT, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
     matmul_f32_tiled: MATMUL_F32_TILED, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
+    matmul_f32_tiled32: MATMUL_F32_TILED32, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
     ssm_conv_step: SSM_CONV_STEP, ops::CONV_STEP_BINDINGS, ops::CONV_STEP_PUSH_BYTES;
     ssm_scan_step: SSM_SCAN_STEP, ops::SCAN_STEP_BINDINGS, ops::SCAN_STEP_PUSH_BYTES;
     ssd_chunk_state: SSD_CHUNK_STATE, ops::SSD_BINDINGS, ops::SCAN_STEP_PUSH_BYTES;
@@ -552,6 +553,10 @@ impl Recorder<'_> {
                 op.y_offset,
                 op.x_rows,
             ])?;
+            self.profile_shape(
+                || format!("m={} n={} k={}", op.rows, op.x_rows, op.cols),
+                op.rows * op.cols * op.x_rows,
+            );
             coop.mul_mmc(op.ty).dispatch(
                 self,
                 &[op.weights.vk_buffer(), scratch.buffer, op.y.buffer],
@@ -593,6 +598,10 @@ impl Recorder<'_> {
                 op.x_rows,
                 s_off,
             ])?;
+            self.profile_shape(
+                || format!("m={} n={} k={}", op.rows, op.x_rows, op.cols),
+                op.rows * op.cols * op.x_rows,
+            );
             pipeline.dispatch(
                 self,
                 &[
@@ -639,6 +648,10 @@ impl Recorder<'_> {
             BlockType::Q5K => &kernels.mat_vecs_q5_k,
             BlockType::Q6K => &kernels.mat_vecs_q6_k,
         };
+        self.profile_shape(
+            || format!("m={} n={} k={}", op.rows, op.x_rows, op.cols),
+            op.rows * op.cols * op.x_rows,
+        );
         pipeline.dispatch(
             self,
             &[

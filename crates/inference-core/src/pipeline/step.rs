@@ -340,7 +340,11 @@ impl dyn Pipeline {
         }
         let chunk_plans = scheduled_prompt_chunks
             .map(|chunks| chunks.into_iter().map(|chunk| vec![chunk]).collect())
-            .or_else(|| self.plan_prompt_chunks(input_seqs, chunk_size, block_size));
+            .or_else(|| {
+                // a hybrid prompt ends a chunk at its last full block only where that checkpoint is kept
+                let checkpoints = ctx.prefix_cacher.accepts_paged_recurrent_prefix();
+                self.plan_prompt_chunks(input_seqs, chunk_size, block_size, checkpoints)
+            });
         let should_chunk = scheduler_visible_prompt_step
             || chunk_plans
                 .as_ref()
@@ -495,6 +499,7 @@ impl dyn Pipeline {
         input_seqs: &[&mut Sequence],
         chunk_size: Option<usize>,
         block_size: usize,
+        checkpoints: bool,
     ) -> Option<Vec<Vec<PromptChunkPlan>>> {
         let chunk_size = chunk_size?;
         if self.whole_prompt() {
@@ -518,7 +523,7 @@ impl dyn Pipeline {
         {
             return None;
         }
-        let block_align = self.cache().is_hybrid().then_some(block_size);
+        let block_align = (checkpoints && self.cache().is_hybrid()).then_some(block_size);
         let prefix_policy = self.speculative_prefix_checkpoint_policy();
         Some(
             input_seqs

@@ -55,7 +55,9 @@ pub struct Recorder<'a> {
     pub(crate) dispatches: Cell<usize>,
     pub(crate) work: Cell<u64>,
     queries: Option<vk::QueryPool>,
-    profiled: RefCell<Vec<&'static str>>,
+    profiled: RefCell<Vec<crate::stream::Profiled>>,
+    // the shape and multiply-adds the next profiled dispatch reports, set by its op
+    shape: RefCell<Option<(String, u64)>>,
 }
 
 impl Context {
@@ -255,6 +257,7 @@ impl Context {
             work: Cell::new(0),
             queries: batch.queries,
             profiled: RefCell::new(std::mem::take(&mut batch.profiled)),
+            shape: RefCell::new(None),
         };
         let out = record(&recorder);
         batch.profiled = recorder.profiled.into_inner();
@@ -314,15 +317,23 @@ impl Context {
 
 impl Recorder<'_> {
     // a timestamp after `kernel`'s dispatch, while profiling and the batch's pool has room
+    /// While profiling, the shape and multiply-adds the next dispatch reports (its op's main one).
+    pub(crate) fn profile_shape(&self, shape: impl FnOnce() -> String, macs: usize) {
+        if self.queries.is_some() {
+            *self.shape.borrow_mut() = Some((shape(), macs as u64));
+        }
+    }
+
     pub(crate) fn profile(&self, kernel: &'static str) {
         let Some(pool) = self.queries else {
             return;
         };
+        let shape = self.shape.borrow_mut().take();
         let mut profiled = self.profiled.borrow_mut();
         if profiled.len() + 1 >= crate::stream::PROFILE_QUERIES as usize {
             return;
         }
-        profiled.push(kernel);
+        profiled.push(crate::stream::Profiled { kernel, shape });
         // SAFETY: the buffer is recording and the query index is in the pool
         unsafe {
             self.context.device.cmd_write_timestamp(
