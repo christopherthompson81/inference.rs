@@ -61,11 +61,11 @@ impl ToolFormatParser for QwenParser {
 // The wrappers are text here; `specialize_tool_call_grammar` makes them token references where the tokenizer has
 // them as special tokens (Qwen3.5/3.8 keep them ordinary added tokens)
 fn qwen_tool_call_lark(tools: &[Tool], include_wrapper: bool) -> String {
-    // Parallel calls arrive as consecutive <tool_call> blocks, so the grammar stays open for more
+    // Parallel calls arrive as consecutive <tool_call> blocks; Nemotron-H ends the last one with a newline before EOS
     let start = if include_wrapper {
-        r#"start: "<tool_call>" (json_call | xml_call) ("\n"? "<tool_call>" (json_call | xml_call))*"#
+        r#"start: "<tool_call>" (json_call | xml_call) ("\n"? "<tool_call>" (json_call | xml_call))* "\n"?"#
     } else {
-        r#"start: (json_call | xml_call) ("\n"? "<tool_call>" (json_call | xml_call))*"#
+        r#"start: (json_call | xml_call) ("\n"? "<tool_call>" (json_call | xml_call))* "\n"?"#
     };
     let json_call = r#"json_call: @json_body "</tool_call>""#;
     let xml_end = r#""</tool_call>""#;
@@ -570,7 +570,12 @@ print(1 < 2)
         let newline = trie.greedy_tokenize(b"\n")[0];
         assert!(mask.is_allowed(newline));
         matcher.consume_token(newline).unwrap();
-        assert!(matcher.compute_mask().unwrap().is_allowed(start_token));
+        let mask = matcher.compute_mask().unwrap();
+        assert!(
+            mask.is_allowed(eos),
+            "EOS must close the turn after a trailing newline"
+        );
+        assert!(mask.is_allowed(start_token));
         matcher.consume_token(start_token).unwrap();
     }
 }
