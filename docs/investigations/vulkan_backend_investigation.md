@@ -1076,3 +1076,21 @@ closed for these. Decode still swings ~+-15 tok/s within a 2-iteration bench, so
 
 **Next:** the matvecs' loads (34- and 22-byte blocks read as u16s) against llama.cpp's Vulkan mul_mat_vec, which
 decodes this file at 176 tok/s.
+
+### Run 42 - 2026-11-04 ~22:30 (desktop: RTX 3090)
+
+**Question:** two more matvec ideas, and barriers only where a dispatch needs one (llama.cpp's Vulkan backend
+records a barrier only when a node overlaps an unsynchronized one's memory).
+
+**Dead ends:**
+- A Q8_0 matvec a quarter block (8 values) a thread, so a subgroup's loads cover 8 adjacent blocks (llama.cpp's
+  `K_PER_ITER = 8`) instead of 32 blocks 34 bytes apart: slower everywhere (lm_head 869 -> 749 GB/s, 2688 x 4096
+  19.8 -> 21.1 us). The L1 already absorbs the whole-block strides.
+- Barrier elision: each binding's writability read off the SPIR-V (NonWritable), and a barrier before a dispatch
+  only when it reads a buffer written, or writes one touched, since the last barrier. Decode recorded 905568
+  barriers in 1000000 dispatches (9.5 % elided): a decode step is a dependency chain. Alternating A/B: 133.8 / 135.7
+  / 138.4 tok/s elided against 140.3 / 133.8 / 132.8 always; no gain, so not kept.
+
+**Where the gap to CUDA is:** ~700 dependent dispatches a token, each drained, ~3 us of fixed cost each on Vulkan
+here against ~1 us for CUDA's stream; ~1.4 ms of the ~1.9 ms gap. The lever is fewer dispatches: the 163 activation
+quantizes, the 167 elementwise maps (residual adds, relu^2, scales) and the 53 row ops folded into their neighbours.
