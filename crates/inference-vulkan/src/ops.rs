@@ -18,6 +18,9 @@ const DOT_MIN_K: usize = 64;
 const TILE_M: usize = 64;
 const TILE_N: usize = 64;
 const TILED_MIN: usize = 16;
+// matmul_f32_tiled32's tile, taken below this many 64 x 64 tiles
+const SMALL_TILE: usize = 32;
+const SMALL_TILE_BELOW: usize = 256;
 const MAX_GROUPS_Z: usize = 65_535;
 const MAX_GROUPS: usize = 4096;
 
@@ -182,13 +185,24 @@ impl Recorder<'_> {
             count * op.k,
         );
         if op.m >= TILED_MIN && op.n >= TILED_MIN && op.batch <= MAX_GROUPS_Z {
-            self.context.kernels.matmul_f32_tiled.dispatch(
+            // a product whose 64 x 64 tiles leave most of the device idle (a router's 128 experts) takes 32 x 32
+            let tiles = op.n.div_ceil(TILE_N) * op.m.div_ceil(TILE_M) * op.batch;
+            let (pipeline, tile_m, tile_n) = if tiles < SMALL_TILE_BELOW {
+                (
+                    &self.context.kernels.matmul_f32_tiled32,
+                    SMALL_TILE,
+                    SMALL_TILE,
+                )
+            } else {
+                (&self.context.kernels.matmul_f32_tiled, TILE_M, TILE_N)
+            };
+            pipeline.dispatch(
                 self,
                 &buffers,
                 &bytes,
                 [
-                    op.n.div_ceil(TILE_N) as u32,
-                    op.m.div_ceil(TILE_M) as u32,
+                    op.n.div_ceil(tile_n) as u32,
+                    op.m.div_ceil(tile_m) as u32,
                     op.batch as u32,
                 ],
             );

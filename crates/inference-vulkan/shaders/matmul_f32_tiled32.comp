@@ -1,0 +1,5 @@
+#version 450
+// matmul_f32_tiled_main.glsl in 32 x 32 tiles, for a product too small to fill the device in 64 x 64 ones
+#extension GL_GOOGLE_include_directive : require
+#define TILE 32
+#include "matmul_f32_tiled_main.glsl"
