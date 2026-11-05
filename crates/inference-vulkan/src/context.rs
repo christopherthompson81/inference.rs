@@ -42,6 +42,8 @@ pub struct Context {
     pub(crate) kernels: Kernels,
     // the matrix-core kernels, on a device that has them
     pub(crate) coop: Option<crate::kernels::CoopKernels>,
+    // labels each dispatch records, under LABELS_ENV
+    pub(crate) labels: Option<ash::ext::debug_utils::Device>,
 }
 
 /// Appends commands to the stream's open command buffer; see [`Context::record`]. Each dispatch is ordered after the
@@ -68,10 +70,15 @@ impl Context {
         // SAFETY: the loader is opened once here and kept alive in `_entry` for the context's life
         let entry = unsafe { ash::Entry::load() }.map_err(|err| Error::Load(err.to_string()))?;
         let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_2);
-        // SAFETY: the create info and the application info it points to outlive the call
+        let labels = std::env::var_os(crate::stream::LABELS_ENV).is_some();
+        let instance_extensions = [ash::ext::debug_utils::NAME.as_ptr()];
+        let instance_extensions: &[_] = if labels { &instance_extensions } else { &[] };
+        // SAFETY: the create info and what it points to outlive the call
         let instance = unsafe {
             entry.create_instance(
-                &vk::InstanceCreateInfo::default().application_info(&app),
+                &vk::InstanceCreateInfo::default()
+                    .application_info(&app)
+                    .enabled_extension_names(instance_extensions),
                 None,
             )?
         };
@@ -173,7 +180,11 @@ impl Context {
         } else {
             None
         };
+        let labels = std::env::var_os(crate::stream::LABELS_ENV)
+            .is_some()
+            .then(|| ash::ext::debug_utils::Device::new(&instance, &device));
         Ok(Arc::new(Self {
+            labels,
             _entry: entry,
             instance,
             device,

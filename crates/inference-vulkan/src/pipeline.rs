@@ -132,8 +132,20 @@ impl Pipeline {
             })
             .collect();
         let context = recorder.context;
+        let label = context.labels.as_ref().map(|labels| {
+            (
+                labels,
+                std::ffi::CString::new(self.name).unwrap_or_default(),
+            )
+        });
         // SAFETY: the command buffer is recording, and the descriptors' buffers outlive the submit (its caller waits)
         unsafe {
+            if let Some((labels, name)) = &label {
+                labels.cmd_begin_debug_utils_label(
+                    recorder.buffer,
+                    &vk::DebugUtilsLabelEXT::default().label_name(name),
+                );
+            }
             context.device.cmd_bind_pipeline(
                 recorder.buffer,
                 vk::PipelineBindPoint::COMPUTE,
@@ -156,6 +168,9 @@ impl Pipeline {
             context
                 .device
                 .cmd_dispatch(recorder.buffer, groups[0], groups[1], groups[2]);
+            if let Some((labels, _)) = &label {
+                labels.cmd_end_debug_utils_label(recorder.buffer);
+            }
             // the next dispatch reads what this one wrote
             let barrier = vk::MemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::SHADER_WRITE)

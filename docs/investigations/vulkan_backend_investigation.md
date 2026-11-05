@@ -1156,3 +1156,26 @@ more than the occupancy buys.
 
 **Next:** the per-dispatch view (warp stall reasons, the kernel's registers) is in the trace file
 (`*.ngfx-gputrace`, opened in `ngfx-ui`), not the CLI export.
+
+### Run 46 - 2026-11-04 ~22:00 (desktop: RTX 3090)
+
+**Question:** counters a kernel, where Run 45's export gave only whole-trace totals.
+
+**Change:** `INFERENCE_VULKAN_LABELS` wraps each dispatch in a `VK_EXT_debug_utils` label named for its kernel; GPU
+Trace then exports a row a range (`GPUTRACE_REGIMES.xls`, times in `D3DPERF_EVENTS.xls`). `scripts/vulkan_gputrace.py`
+runs a binary under `ngfx` headless with the labels on (or reads an export) and prints a table a kernel, its
+counters weighted by each dispatch's time.
+
+**Results:**
+
+| kernel (bench) | us each | sm% | warps% | regs% | L1/LSU% | shared% | DRAM% |
+|---|---|---|---|---|---|---|---|
+| moe_mm_q5_0 (`expert_matmul_throughput`) | 2009 | 44.8 | 30.9 | 81.1 | 71.7 | 36.9 | 26.3 |
+| moe_sort (same) | 213 | 0.2 | 0.2 | 0.2 | 0.1 | 0.0 | 0.0 |
+| mat_vecs_q8_0 (`matvec_bandwidth_at_decode_shapes`) | 20.2 | 16.2 | 19.8 | 52.0 | 41.6 | 1.4 | 67.4 |
+| mat_vecs_q5_0 (same) | 12.3 | 28.7 | 13.2 | 34.8 | 24.6 | 1.8 | 40.8 |
+| quantize_q8_1 (same) | 4.0 | 1.5 | 1.3 | 3.3 | 1.9 | 0.1 | 4.7 |
+
+**Implication:** the expert matmul is register-bound (81 % allocated, 31 % of warps) and load-store-bound (72 %:
+its weights read as u16s, 11 a Q5_0 block, and every token block read from shared memory a dot); `moe_sort` is one
+workgroup's serial tile list, 9.5 % of the experts' time (~6 ms a 512-token prompt), and the cheapest fix.
