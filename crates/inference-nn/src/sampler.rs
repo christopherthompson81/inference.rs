@@ -16,6 +16,9 @@ use tokenizers::Tokenizer;
 static DRY_SEQUENCE_BREAKERS: LazyLock<Vec<String>> =
     LazyLock::new(|| ["\n", ":", "\"", "*"].map(String::from).to_vec());
 const SUPPRESS_TOKEN_LOGIT_BIAS: f32 = -1.0e9;
+// a nucleus without top-k is ranked from this many candidates, growing by this factor until it covers top-p
+const NUCLEUS_FIRST_CANDIDATES: usize = 256;
+const NUCLEUS_GROWTH: usize = 8;
 
 #[derive(Clone, Debug, Default, Serialize, inference_json::FromJson, PartialEq)]
 /// Optional generation defaults parsed from a model's `generation_config.json`.
@@ -790,6 +793,46 @@ fn partial_sort_top_k(probs: &mut [f32], k: usize, zero_rest: bool) -> Vec<(u32,
     idx_probs
 }
 
+/// The candidates a top-k / top-p / min-p filter reads, most likely first, and the top-p cutoff over what top-k keeps;
+/// everything past the candidates is zeroed in `probs`. Without top-k, top-p ranks only a prefix that grows until its
+/// mass reaches the cutoff (the nucleus is the same as a full sort's; a 131K vocabulary's sort cost ~25 ms a token).
+fn kp_candidates(probs: &mut [f32], top_k: i64, top_p: f32) -> (Vec<(u32, f32)>, f32) {
+    let nucleus = top_p > 0.0 && top_p < 1.0;
+    if top_k > 0 || !nucleus {
+        let k = if top_k > 0 {
+            top_k as usize
+        } else {
+            probs.len()
+        };
+        let idx_probs = partial_sort_top_k(probs, k, true);
+        let cutoff = top_p_cutoff(top_p, idx_probs.iter().map(|(_, p)| *p));
+        return (idx_probs, cutoff);
+    }
+    let n = probs.len();
+    let cutoff = top_p_cutoff(top_p, probs.iter().copied());
+    #[allow(clippy::cast_possible_truncation)]
+    let mut idx_probs: Vec<(u32, f32)> = probs
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (i as u32, *p))
+        .collect();
+    let mut m = NUCLEUS_FIRST_CANDIDATES.min(n);
+    loop {
+        if m < n {
+            idx_probs.select_nth_unstable_by(m - 1, cmp_desc_by_prob);
+        }
+        idx_probs[..m].sort_unstable_by(cmp_desc_by_prob);
+        if m == n || idx_probs[..m].iter().map(|(_, p)| *p).sum::<f32>() >= cutoff {
+            for (idx, _) in &idx_probs[m..] {
+                probs[*idx as usize] = 0.0;
+            }
+            idx_probs.truncate(m);
+            return (idx_probs, cutoff);
+        }
+        m = (m * NUCLEUS_GROWTH).min(n);
+    }
+}
+
 /// Find the index of the maximum element in a slice. O(n) scan.
 #[inline]
 fn argmax_f32(values: &[f32]) -> Result<u32> {
@@ -1499,23 +1542,9 @@ impl Sampler {
         let mut probs: Vec<f32> = logits.to_vec1()?;
         let reporting_probs = probs.clone();
 
-        // Determine how many elements we need for partial sort
-        let k = if top_k > 0 {
-            top_k as usize
-        } else {
-            probs.len()
-        };
-
-        // Get sorted top-k indices with partial sort, zeroing out rest
-        let idx_probs = partial_sort_top_k(&mut probs, k, true);
-
-        // TOP P
-        // top-p sampling (or "nucleus sampling") samples from the smallest set of
-        // tokens that exceed probability top_p. This way we never sample tokens that
-        // have very low probabilities and are less likely to go "off the rails".
-
-        // Clamp smaller probabilities to zero.
-        let cutoff = top_p_cutoff(top_p, idx_probs.iter().map(|(_, p)| *p));
+        // the top-k candidates, most likely first, the rest zeroed; top-p (nucleus) then keeps the smallest prefix
+        // that reaches the cutoff
+        let (idx_probs, cutoff) = kp_candidates(&mut probs, top_k, top_p);
         let mut cumsum = 0.;
         for (index, prob) in &idx_probs {
             if cumsum >= cutoff {
@@ -2186,16 +2215,10 @@ impl Sampler {
     }
 
     fn filter_top_kp_min_p(&self, probs: &mut [f32]) {
-        let k = if self.top_k > 0 {
-            self.top_k as usize
-        } else {
-            probs.len()
-        };
-
-        let idx_probs = partial_sort_top_k(probs, k, true);
+        #[allow(clippy::cast_possible_truncation)]
+        let (idx_probs, cutoff) = kp_candidates(probs, self.top_k, self.top_p as f32);
 
         if self.top_p > 0.0 && self.top_p < 1.0 {
-            let cutoff = top_p_cutoff(self.top_p as f32, idx_probs.iter().map(|(_, p)| *p));
             let mut cumsum = 0.0f32;
             for (index, prob) in &idx_probs {
                 if cumsum >= cutoff {
@@ -2387,18 +2410,9 @@ impl Sampler {
             );
         }
         let mut sampling_probs = reporting_probs.to_vec();
-        // Determine how many elements we need for partial sort
-        let k = if top_k > 0 {
-            top_k as usize
-        } else {
-            sampling_probs.len()
-        };
-
-        // Get sorted top-k indices with partial sort, zeroing out rest
-        let idx_probs = partial_sort_top_k(&mut sampling_probs, k, true);
+        let (idx_probs, cutoff) = kp_candidates(&mut sampling_probs, top_k, top_p);
 
         if top_p > 0.0 && top_p < 1.0 {
-            let cutoff = top_p_cutoff(top_p, idx_probs.iter().map(|(_, p)| *p));
             let mut cumsum = 0.;
             for (index, prob) in &idx_probs {
                 if cumsum >= cutoff {
@@ -2752,10 +2766,86 @@ impl Sampler {
 mod tests {
     use super::{
         CustomLogitsProcessor, ModelGenerationDefaults, NoRepeatNgram, SamplingParams, argmax_f32,
-        partial_sort_top_k,
+        kp_candidates, partial_sort_top_k, top_p_cutoff,
     };
     use inference_tensor::{Device, Tensor};
     use std::collections::HashMap;
+
+    // the nucleus a top-p cut keeps, as `probs` with everything else zeroed
+    fn nucleus(mut probs: Vec<f32>, idx_probs: &[(u32, f32)], cutoff: f32) -> Vec<f32> {
+        let mut cumsum = 0.0f32;
+        for (index, prob) in idx_probs {
+            if cumsum >= cutoff {
+                probs[*index as usize] = 0.0;
+            } else {
+                cumsum += prob;
+            }
+        }
+        probs
+    }
+
+    // Ranking only a growing prefix keeps the same nucleus as sorting the whole vocabulary on a peaked distribution (the
+    // first candidates suffice). Where the cut falls among many near-equal tokens (a long tail, or flat: the prefix grows
+    // to every token) the f32 cutoff, summed in another order, can move it by a token, so there the kept set is pinned
+    // as the most likely tokens and its mass to the full sort's
+    #[test]
+    fn a_ranked_prefix_keeps_the_full_sorts_nucleus() {
+        const VOCAB: usize = 131_072;
+        const TOP_P: f32 = 0.95;
+        const MASS_TOLERANCE: f32 = 1e-4;
+        let shapes: [(&str, bool, fn(usize) -> f32); 3] = [
+            ("peaked", true, |i| (-(i as f32) * 0.5).exp()),
+            ("long tail", false, |i| {
+                1.0 / (1.0 + (i * 7 % VOCAB) as f32).powf(1.1)
+            }),
+            ("flat", false, |i| {
+                1.0 + ((i * 2_654_435_761) % 1_000) as f32 * 1e-6
+            }),
+        ];
+        for (name, exact, shape) in shapes {
+            let raw: Vec<f32> = (0..VOCAB).map(shape).collect();
+            let total: f32 = raw.iter().sum();
+            let probs: Vec<f32> = raw.iter().map(|p| p / total).collect();
+
+            let mut full = probs.clone();
+            let sorted = partial_sort_top_k(&mut full, VOCAB, true);
+            let expected = nucleus(
+                full,
+                &sorted,
+                top_p_cutoff(TOP_P, sorted.iter().map(|(_, p)| *p)),
+            );
+
+            let mut fast = probs.clone();
+            let (prefix, cutoff) = kp_candidates(&mut fast, 0, TOP_P);
+            let actual = nucleus(fast, &prefix, cutoff);
+
+            if exact {
+                assert_eq!(actual, expected, "{name}: nucleus");
+            } else {
+                // every kept token is at least as likely as every dropped one
+                let least_kept = actual
+                    .iter()
+                    .copied()
+                    .filter(|p| *p > 0.0)
+                    .fold(f32::INFINITY, f32::min);
+                let most_dropped = (0..VOCAB)
+                    .filter(|&i| actual[i] == 0.0)
+                    .map(|i| probs[i])
+                    .fold(0.0f32, f32::max);
+                assert!(
+                    least_kept >= most_dropped,
+                    "{name}: {least_kept} kept, {most_dropped} dropped"
+                );
+                let mass = |v: &[f32]| v.iter().sum::<f32>();
+                assert!(
+                    (mass(&actual) - mass(&expected)).abs() < MASS_TOLERANCE,
+                    "{name}: kept mass {} against {}",
+                    mass(&actual),
+                    mass(&expected)
+                );
+            }
+        }
+    }
 
     // The device penalties match the host's on every verify row, as the counts grow and when the history is rewritten.
     #[cfg(feature = "cuda")]
