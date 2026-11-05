@@ -1198,3 +1198,20 @@ memory every step. `moe_mm` has the same shape of limit (Run 46).
 
 **Next:** whole-word loads of each step's weight rows (compile-time index math; Run 44's staging spent its time on a
 runtime division a u16).
+
+### Run 48 - 2026-11-04 ~23:00 (desktop: RTX 3090)
+
+**Question:** Run 47's next step: the matrix-core matmuls' weight rows staged as whole words.
+
+**Change tried:** `mmc_stage.glsl` for the 32-value block types: each step's 64 rows copied raw into shared memory a
+u32 a thread along the rows (compile-time index math, a row's slab a word wider for an odd start), then each block
+unpacked from there through a `W16` hook in `int8_dot.glsl`.
+
+**Result:** 512-row Q8_0 36.4 -> 16.5 TOPS, Q5_0 40.2 -> 20.6 (both repeated); reverted. A first run read 11 ms for
+`expert_matmul_throughput`, which the change does not touch, right after a trace session; re-runs gave 2.1-2.2 ms and
+1.8-2.0 on the baseline, so the card's state drifts after GPU Trace and benches want a re-run before a verdict.
+
+**Finding:** unpacking a block from shared memory takes as many 16-bit reads as from global memory (17 for Q8_0),
+so staging adds the copy and saves nothing: the load-store pipe's limit is its instruction count, not coalescing.
+Fewer, wider loads need blocks aligned to their loads (34-, 22- and 18-byte blocks are 2-byte aligned): a Vulkan
+weight layout repacked at load (scales apart from 16-byte quant runs), which every int8 and matrix-core kernel reads.
