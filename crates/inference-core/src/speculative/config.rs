@@ -99,7 +99,7 @@ pub fn reserve_external_mtp_memory_with_runtime(
     dtype: &dyn TryIntoDType,
     device: &Device,
 ) -> anyhow::Result<Option<PagedAttentionConfig>> {
-    #[cfg(not(all(feature = "cuda", feature = "models-qwen", target_family = "unix")))]
+    #[cfg(not(all(feature = "cuda", feature = "drafters", target_family = "unix")))]
     let _ = runtime;
     let Some(cache_config) = cache_config else {
         return Ok(None);
@@ -111,15 +111,14 @@ pub fn reserve_external_mtp_memory_with_runtime(
         return Ok(Some(cache_config));
     }
     let dtype = dtype.try_into_dtype(&[device])?;
-    #[cfg_attr(not(feature = "models-qwen"), allow(unused_mut))]
+    #[cfg_attr(not(feature = "drafters"), allow(unused_mut))]
     let mut cache_config = cache_config;
-    #[cfg(feature = "models-qwen")]
+    #[cfg(feature = "drafters")]
     let local_mtp = MtpConfig {
         model: Some(resolve_mtp_path(mtp_config)?.to_string_lossy().into_owned()),
         ..mtp_config.clone()
     };
-    // DFlash drafters exist only for Qwen3.5 targets
-    #[cfg(feature = "models-qwen")]
+    #[cfg(feature = "drafters")]
     if let Some(dflash_config) = super::dflash::peek_config(&local_mtp)? {
         let max_drafts = dflash_config.max_drafts();
         let drafts = mtp_config
@@ -141,7 +140,7 @@ pub fn reserve_external_mtp_memory_with_runtime(
         }
     }
     let bytes = external_weight_size_in_bytes(mtp_config, dtype)?;
-    #[cfg(all(feature = "cuda", feature = "models-qwen", target_family = "unix"))]
+    #[cfg(all(feature = "cuda", feature = "drafters", target_family = "unix"))]
     let bytes = if device.is_cuda() {
         if let Some(serving_capacity) = cache_config.serving_capacity {
             let (sequence_capacity, retained_prefixes) = super::dflash::windowed_kv_capacities(
@@ -272,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "models-qwen")]
+    #[cfg(feature = "drafters")]
     fn external_dflash_records_auto_and_explicit_checkpoint_depth() -> anyhow::Result<()> {
         let dir = external_checkpoint(
             r#"{

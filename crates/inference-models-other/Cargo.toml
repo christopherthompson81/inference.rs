@@ -16,6 +16,7 @@ homepage.workspace = true
 inference-json.workspace = true
 anyhow.workspace = true
 inference-tensor.workspace = true
+inference-drafters.workspace = true
 image.workspace = true
 inference-audio.workspace = true
 inference-models-speech.workspace = true
@@ -41,5 +42,5 @@ clap.workspace = true
 inference-gguf.workspace = true
 
 [features]
-cuda = ["inference-tensor/cuda", "inference-quant/cuda", "inference-nn/cuda", "inference-models-speech/cuda"]
-metal = ["inference-tensor/metal", "inference-quant/metal", "inference-nn/metal", "inference-models-speech/metal"]
+cuda = ["inference-drafters/cuda", "inference-tensor/cuda", "inference-quant/cuda", "inference-nn/cuda", "inference-models-speech/cuda"]
+metal = ["inference-drafters/metal", "inference-tensor/metal", "inference-quant/metal", "inference-nn/metal", "inference-models-speech/metal"]

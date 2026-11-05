@@ -1,5 +1,5 @@
 //! Qwen models: the Qwen 1, Qwen2, Qwen2-MoE, Qwen3, Qwen3-MoE and Qwen3-Next text models, Qwen2-VL, Qwen2.5-VL, Qwen3-VL (dense and MoE),
-//! Qwen3.5 (dense and MoE) with its DFlash drafter, MiniCPM-o and Muse-Glimmer.
+//! Qwen3.5 (dense and MoE), MiniCPM-o and Muse-Glimmer. Qwen3.5's DFlash and DSpark drafters are `inference-drafters`'.
 #![deny(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use inference_nn::{
@@ -8,7 +8,6 @@ use inference_nn::{
 };
 use inference_nn::{get_mut_arcmutex, serde_default_fn};
 
-pub mod dflash;
 pub mod loaders;
 pub mod minicpmo;
 pub mod muse_glimmer;

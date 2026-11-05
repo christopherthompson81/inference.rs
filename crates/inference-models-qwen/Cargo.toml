@@ -16,6 +16,7 @@ homepage.workspace = true
 inference-json.workspace = true
 anyhow.workspace = true
 inference-tensor.workspace = true
+inference-drafters.workspace = true
 image.workspace = true
 inference-fattn = { workspace = true, optional = true }
 inference-nn.workspace = true
@@ -43,5 +44,6 @@ cuda = [
     "inference-paged-attn/cuda",
     "inference-quant/cuda",
     "inference-nn/cuda",
+    "inference-drafters/cuda",
 ]
-metal = ["inference-tensor/metal", "inference-quant/metal", "inference-nn/metal"]
+metal = ["inference-drafters/metal", "inference-tensor/metal", "inference-quant/metal", "inference-nn/metal"]

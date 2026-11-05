@@ -50,6 +50,7 @@ inference-quant.workspace = true
 inference-nn.workspace = true
 inference-gguf.workspace = true
 inference-models-diffusion.workspace = true
+inference-drafters = { workspace = true, optional = true }
 inference-models-gemma = { workspace = true, optional = true }
 inference-models-llama = { workspace = true, optional = true }
 inference-models-other = { workspace = true, optional = true }
@@ -78,9 +79,11 @@ default = ["all-models"]
 all-models = ["models-gemma", "models-llama", "models-other", "models-phi", "models-qwen"]
 models-gemma = ["dep:inference-models-gemma", "inference-gguf/models-gemma"]
 models-llama = ["dep:inference-models-llama"]
-models-other = ["dep:inference-models-other"]
+models-other = ["dep:inference-models-other", "drafters"]
 models-phi = ["dep:inference-models-phi"]
-models-qwen = ["dep:inference-models-qwen"]
+models-qwen = ["dep:inference-models-qwen", "drafters"]
+# external drafters (DFlash, DSpark), for the families whose targets draft with them
+drafters = ["dep:inference-drafters"]
 cuda = [
     "inference-tensor/cuda",
     "inference-quant/cuda",
@@ -93,6 +96,7 @@ cuda = [
     "inference-models-other?/cuda",
     "inference-models-phi?/cuda",
     "inference-models-qwen?/cuda",
+    "inference-drafters?/cuda",
     "inference-models-speech/cuda",
 ]
 cudnn = ["inference-tensor/cudnn"]
@@ -110,6 +114,7 @@ metal = [
     "inference-models-other?/metal",
     "inference-models-phi?/metal",
     "inference-models-qwen?/metal",
+    "inference-drafters?/metal",
     "inference-models-speech/metal",
 ]
 flash-attn-v3 = ["cuda", "inference-nn/flash-attn-v3"]

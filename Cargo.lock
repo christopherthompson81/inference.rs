@@ -2708,6 +2708,7 @@ dependencies = [
  "indicatif 0.18.3",
  "inference-audio",
  "inference-code-exec",
+ "inference-drafters",
  "inference-gguf",
  "inference-json",
  "inference-mcp",
@@ -2749,6 +2750,24 @@ dependencies = [
  "toktrie",
  "tracing",
  "utoipa",
+]
+
+[[package]]
+name = "inference-drafters"
+version = "0.0.26"
+dependencies = [
+ "anyhow",
+ "inference-fattn",
+ "inference-json",
+ "inference-nn",
+ "inference-paged-attn",
+ "inference-quant",
+ "inference-tensor",
+ "metrics",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -3085,6 +3104,7 @@ dependencies = [
  "image",
  "indicatif 0.18.3",
  "inference-audio",
+ "inference-drafters",
  "inference-gguf",
  "inference-json",
  "inference-models-speech",
@@ -3136,6 +3156,7 @@ dependencies = [
  "anyhow",
  "image",
  "inference-audio",
+ "inference-drafters",
  "inference-fattn",
  "inference-json",
  "inference-nn",

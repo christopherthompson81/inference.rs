@@ -11,6 +11,7 @@ use crate::{
 
 #[cfg(all(feature = "cuda", feature = "cutile", has_nvfp4_cutlass_sm121_kernels))]
 pub(crate) mod cutlass;
+pub mod gguf_blocks;
 
 #[cfg(all(
     test,

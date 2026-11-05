@@ -43,6 +43,8 @@ use crate::{
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
+use inference_drafters::dflash::DFlashLoadTarget;
+use inference_drafters::host::{DrafterAttach, DrafterTarget, ExternalDrafter};
 
 // the Mamba dt clamp without a configured one (transformers' `time_step_limit` default)
 const NO_DT_LIMIT: [f64; 2] = [0.0, f64::MAX];
@@ -1919,10 +1921,12 @@ struct MambaReplay {
     inputs: ReplayInputs,
 }
 
-/// What a verify step's forward leaves for drafting and the commit: the MTP head's capture and the Mamba replays.
+/// What a verify step's forward leaves for drafting and the commit: the MTP head's capture or an external drafter's
+/// taps (over the logits rows), and the Mamba replays.
 #[derive(Clone)]
 struct GraniteSpecGraphState {
-    mtp: Arc<dyn crate::speculative::SpeculativeGraphState>,
+    mtp: Option<Arc<dyn crate::speculative::SpeculativeGraphState>>,
+    taps: Vec<Tensor>,
     replays: Vec<MambaReplay>,
 }
 
@@ -1949,7 +1953,8 @@ impl MambaReplay {
 
 impl crate::speculative::SpeculativeGraphState for GraniteSpecGraphState {
     fn tensors(&self) -> Vec<Tensor> {
-        let mut out = self.mtp.tensors();
+        let mut out = self.mtp.as_ref().map_or_else(Vec::new, |mtp| mtp.tensors());
+        out.extend(self.taps.iter().cloned());
         for replay in &self.replays {
             out.extend(replay.tensors().into_iter().cloned());
         }
@@ -1960,8 +1965,8 @@ impl crate::speculative::SpeculativeGraphState for GraniteSpecGraphState {
         &self,
         tensors: Vec<Tensor>,
     ) -> Result<Box<dyn crate::speculative::SpeculativeGraphState>> {
-        let mtp_len = self.mtp.tensors().len();
-        let expected = mtp_len + self.replays.len() * 4;
+        let mtp_len = self.mtp.as_ref().map_or(0, |mtp| mtp.tensors().len());
+        let expected = mtp_len + self.taps.len() + self.replays.len() * 4;
         if tensors.len() != expected {
             inference_tensor::bail!(
                 "Granite speculative graph state holds {expected} tensors, got {}",
@@ -1969,24 +1974,53 @@ impl crate::speculative::SpeculativeGraphState for GraniteSpecGraphState {
             );
         }
         let mut tensors = tensors.into_iter();
-        let mtp = Arc::from(
-            self.mtp
-                .with_tensors(tensors.by_ref().take(mtp_len).collect())?,
-        );
+        let mtp = self
+            .mtp
+            .as_ref()
+            .map(
+                |mtp| -> Result<Arc<dyn crate::speculative::SpeculativeGraphState>> {
+                    Ok(Arc::from(
+                        mtp.with_tensors(tensors.by_ref().take(mtp_len).collect())?,
+                    ))
+                },
+            )
+            .transpose()?;
+        let taps = tensors.by_ref().take(self.taps.len()).collect();
         let mut replays = self.replays.clone();
         for replay in &mut replays {
             for (dst, src) in replay.tensors_mut().into_iter().zip(tensors.by_ref()) {
                 *dst = src;
             }
         }
-        Ok(Box::new(Self { mtp, replays }))
+        Ok(Box::new(Self { mtp, taps, replays }))
     }
 
     fn for_real_batch(
         &self,
         real_batch: usize,
     ) -> Result<Box<dyn crate::speculative::SpeculativeGraphState>> {
-        let mtp = Arc::from(self.mtp.for_real_batch(real_batch)?);
+        let mtp = self
+            .mtp
+            .as_ref()
+            .map(
+                |mtp| -> Result<Arc<dyn crate::speculative::SpeculativeGraphState>> {
+                    Ok(Arc::from(mtp.for_real_batch(real_batch)?))
+                },
+            )
+            .transpose()?;
+        let taps = self
+            .taps
+            .iter()
+            .map(|tap| {
+                let captured = tap.dim(0)?;
+                if real_batch > captured {
+                    inference_tensor::bail!(
+                        "tap batch {real_batch} exceeds the captured batch {captured}"
+                    );
+                }
+                tap.narrow(0, 0, real_batch)
+            })
+            .collect::<Result<Vec<_>>>()?;
         let mut replays = self.replays.clone();
         for replay in &mut replays {
             let captured = replay.indices.dim(0)?;
@@ -2003,7 +2037,7 @@ impl crate::speculative::SpeculativeGraphState for GraniteSpecGraphState {
                 *tensor = tensor.narrow(0, 0, real_batch)?;
             }
         }
-        Ok(Box::new(Self { mtp, replays }))
+        Ok(Box::new(Self { mtp, taps, replays }))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -2017,6 +2051,7 @@ struct MambaBlock {
     mamba: MambaLayer,
     ffn: Option<BlockFfn>,
     residual_multiplier: f32,
+    mixer_tap: MixerTap,
 }
 
 impl MambaBlock {
@@ -2032,6 +2067,7 @@ impl MambaBlock {
             self.mamba.forward(&normed, cache, batch_kind, pool_slots)
         })?;
         let x = (scale_tensor(mamba_out, self.residual_multiplier)? + x)?;
+        self.mixer_tap.record(&x);
         BlockFfn::residual(self.ffn.as_ref(), x, self.residual_multiplier)
     }
 
@@ -2048,6 +2084,7 @@ impl MambaBlock {
             Ok(out)
         })?;
         let x = (scale_tensor(mamba_out, self.residual_multiplier)? + x)?;
+        self.mixer_tap.record(&x);
         let out = BlockFfn::residual(self.ffn.as_ref(), x, self.residual_multiplier)?;
         Ok((out, inputs.expect("the Mamba pass ran")))
     }
@@ -2076,6 +2113,7 @@ impl MambaBlock {
                 .forward_packed_prefill(&normed, cache, query_lens)
         })?;
         let x = (scale_tensor(mamba_out, self.residual_multiplier)? + x)?;
+        self.mixer_tap.record(&x);
         BlockFfn::residual(self.ffn.as_ref(), x, self.residual_multiplier)
     }
 
@@ -2097,6 +2135,7 @@ impl MambaBlock {
             mamba,
             ffn: BlockFfn::load(vb_m, layout, &load)?,
             residual_multiplier: load.cfg.residual_multiplier,
+            mixer_tap: MixerTap::default(),
         })
     }
 }
@@ -2114,6 +2153,47 @@ impl DecoderLayer {
             Self::Mamba(block) => block.ffn.as_ref(),
         }
     }
+
+    fn mixer_tap(&self) -> &MixerTap {
+        match self {
+            Self::Attention(block) => &block.mixer_tap,
+            Self::Mamba(block) => &block.mixer_tap,
+        }
+    }
+
+    fn mixer_tap_mut(&mut self) -> &mut MixerTap {
+        match self {
+            Self::Attention(block) => &mut block.mixer_tap,
+            Self::Mamba(block) => &mut block.mixer_tap,
+        }
+    }
+}
+
+/// A block's residual stream between its mixer and its FFN, kept when an external drafter taps a checkpoint layer
+/// there (Nemotron-H counts the MoE after a mixer as a layer of its own).
+#[derive(Default)]
+struct MixerTap {
+    enabled: bool,
+    last: Mutex<Option<Tensor>>,
+}
+
+impl MixerTap {
+    fn record(&self, x: &Tensor) {
+        if self.enabled {
+            *self.last.lock().expect("mixer tap poisoned") = Some(x.clone());
+        }
+    }
+
+    fn take(&self) -> Option<Tensor> {
+        self.last.lock().expect("mixer tap poisoned").take()
+    }
+}
+
+/// Where a drafter's tapped checkpoint layer ends inside the model's blocks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TapPoint {
+    AfterMixer(usize),
+    AfterBlock(usize),
 }
 
 /// Nemotron-H's MTP block: an attention mixer and the MoE after it, as the stack's attention blocks are.
@@ -2323,6 +2403,7 @@ struct Block {
     attn: CausalSelfAttention,
     ffn: Option<BlockFfn>,
     residual_multiplier: f32,
+    mixer_tap: MixerTap,
 }
 
 impl Block {
@@ -2342,6 +2423,7 @@ impl Block {
             layer_idx,
         )?;
         let x = (scale_tensor(attn_out, self.residual_multiplier)? + x)?;
+        self.mixer_tap.record(&x);
         BlockFfn::residual(self.ffn.as_ref(), x, self.residual_multiplier)
     }
 
@@ -2367,6 +2449,7 @@ impl Block {
             attn,
             ffn: BlockFfn::load(vb_m, layout, &load)?,
             residual_multiplier: load.cfg.residual_multiplier,
+            mixer_tap: MixerTap::default(),
         })
     }
 }
@@ -2789,6 +2872,43 @@ impl HybridLayout {
         }
     }
 
+    /// Where each checkpoint layer's output is, by the `layers.N` of its block's mixer and FFN names, and how many
+    /// checkpoint layers there are.
+    fn tap_points(&self, layers: &[usize]) -> Result<(Vec<TapPoint>, usize)> {
+        let layer_of = |name: &str| {
+            name.strip_prefix("layers.")
+                .and_then(|rest| rest.split('.').next())
+                .and_then(|n| n.parse::<usize>().ok())
+        };
+        let mut points = HashMap::new();
+        for (block, b) in self.blocks.iter().enumerate() {
+            let mixer = layer_of(&b.names.mixer);
+            let ffn = b.names.ffn.as_ref().and_then(|ffn| layer_of(&ffn.module));
+            match (mixer, ffn) {
+                (Some(mixer), Some(ffn)) if mixer != ffn => {
+                    points.insert(mixer, TapPoint::AfterMixer(block));
+                    points.insert(ffn, TapPoint::AfterBlock(block));
+                }
+                (Some(layer), _) | (None, Some(layer)) => {
+                    points.insert(layer, TapPoint::AfterBlock(block));
+                }
+                (None, None) => {}
+            }
+        }
+        let count = points.keys().max().map_or(0, |last| last + 1);
+        let taps = layers
+            .iter()
+            .map(|layer| {
+                points.get(layer).copied().ok_or_else(|| {
+                    inference_tensor::Error::msg(format!(
+                        "a drafter taps checkpoint layer {layer}, which this model's blocks do not hold"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok((taps, count))
+    }
+
     /// The checkpoint layer each tensor name's `layers.N` belongs to, mapped to its block.
     pub fn block_of_layer(&self) -> HashMap<usize, usize> {
         let layer_of = |name: &str| {
@@ -2899,6 +3019,13 @@ pub struct GraniteMoeHybrid {
     mtp: Option<MtpHead<GraniteMtpBlock>>,
     // the last verify step's Mamba layers, which a commit replays over the rows it keeps
     mamba_replay: Mutex<Vec<MambaReplay>>,
+    // an external drafter (DFlash, DSpark), the layers whose outputs it reads, and the head it drafts with
+    drafter: Mutex<Option<Arc<ExternalDrafter>>>,
+    tap_points: Vec<TapPoint>,
+    draft_lm_head: Option<Arc<dyn QuantMethod>>,
+    // the last forward's taps: over its logits rows, and over every row of a prompt
+    spec_taps: Mutex<Option<Vec<Tensor>>>,
+    prompt_taps: Mutex<Option<Vec<Tensor>>>,
 }
 
 /// Runs before decoder layer `layer_idx` on its input hidden states, as Granite 4 Vision injects image features.
@@ -3160,6 +3287,11 @@ impl GraniteMoeHybrid {
             recurrent_state_bytes,
             mtp: None,
             mamba_replay: Mutex::new(Vec::new()),
+            drafter: Mutex::new(None),
+            tap_points: Vec::new(),
+            draft_lm_head: None,
+            spec_taps: Mutex::new(None),
+            prompt_taps: Mutex::new(None),
             wte,
             layers,
             layer_types,
@@ -3428,15 +3560,21 @@ impl GraniteMoeHybrid {
         let sliding_mask = sliding_mask
             .map(|mask| DeviceMappedMask::new(mask, &*self.mapper))
             .transpose()?;
-        let stash_replays = self.mtp.as_ref().is_some_and(|mtp| mtp.n_predict() > 0)
-            && packed_query_lens.is_none()
-            && recurrent_metadata.as_ref().is_some_and(|metadata| {
-                metadata.batch_kind() == RecurrentBatchKind::SpeculativeDecode
-            })
-            && x.dim(1)? > 1;
+        let stash_replays =
+            crate::speculative::SpeculativeTargetMixin::has_speculative_proposer(self)
+                && packed_query_lens.is_none()
+                && recurrent_metadata.as_ref().is_some_and(|metadata| {
+                    metadata.batch_kind() == RecurrentBatchKind::SpeculativeDecode
+                })
+                && x.dim(1)? > 1;
         let mut replays = Vec::new();
+        let mut taps: Vec<Option<Tensor>> = vec![None; self.tap_points.len()];
 
         for (layer_idx, layer) in self.layers.iter().enumerate() {
+            // a block's output is the next one's input (Mamba decode steps end their iteration early)
+            if layer_idx > 0 {
+                self.collect_taps(&mut taps, layer_idx - 1, &x)?;
+            }
             x = self.mapper.map(x, layer_idx)?;
             x = before_layer(layer_idx, x)?;
 
@@ -3560,12 +3698,28 @@ impl GraniteMoeHybrid {
         }
 
         *self.mamba_replay.lock().expect("mamba replay poisoned") = replays;
+        if !self.tap_points.is_empty() {
+            self.collect_taps(&mut taps, self.layers.len() - 1, &x)?;
+        }
 
         let x = self.mapper.cast_nm_device(&x, false)?;
         let full = self.ln_f.forward(&x)?;
         let x = ctx.logits(&full)?;
         if let Some(mtp) = &self.mtp {
             mtp.record(&full, &x);
+        }
+        if !self.tap_points.is_empty() {
+            let taps = taps
+                .into_iter()
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| inference_tensor::Error::msg("a drafter tap was not recorded"))?;
+            let selected = taps
+                .iter()
+                .map(|tap| ctx.logits(tap))
+                .collect::<Result<Vec<_>>>()?;
+            *self.prompt_taps.lock().expect("prompt taps poisoned") =
+                (recurrent_batch_kind == RecurrentBatchKind::Prefill).then_some(taps);
+            *self.spec_taps.lock().expect("spec taps poisoned") = Some(selected);
         }
 
         let mut logits = ctx.lm_head(&*self.lm_head, &x)?;
@@ -3675,21 +3829,153 @@ impl GraniteMoeHybrid {
     }
 }
 
+impl GraniteMoeHybrid {
+    fn mtp_drafting(&self) -> Option<&MtpHead<GraniteMtpBlock>> {
+        self.mtp.as_ref().filter(|mtp| mtp.n_predict() > 0)
+    }
+
+    fn drafter(&self) -> Option<Arc<ExternalDrafter>> {
+        self.drafter.lock().expect("drafter poisoned").clone()
+    }
+
+    // block `block`'s taps, once it has run: its mixer's output, and `output`, the block's own
+    fn collect_taps(
+        &self,
+        taps: &mut [Option<Tensor>],
+        block: usize,
+        output: &Tensor,
+    ) -> Result<()> {
+        for (slot, point) in taps.iter_mut().zip(&self.tap_points) {
+            let tap = match *point {
+                TapPoint::AfterMixer(b) if b == block => self.layers[b].mixer_tap().take(),
+                TapPoint::AfterBlock(b) if b == block => Some(output.clone()),
+                _ => continue,
+            };
+            *slot = tap
+                .map(|tap| self.mapper.cast_nm_device(&tap, false))
+                .transpose()?;
+        }
+        Ok(())
+    }
+
+    fn attach_external_drafter(
+        &mut self,
+        config: &crate::speculative::MtpConfig,
+        runtime: crate::speculative::MtpRuntimeConfig,
+    ) -> Result<crate::speculative::SpeculativeAttachInfo> {
+        let (recurrent_capacity, serving_capacity) = {
+            let cache = self.kv_cache.hybrid();
+            let recurrent = cache.recurrent_capacity();
+            let serving = cache.fitted_serving_capacity().unwrap_or_else(|| {
+                recurrent.saturating_sub(crate::kv_cache::RECURRENT_GRAPH_PAD_SLOTS)
+            });
+            (recurrent, serving)
+        };
+        let checkpoint_lanes = self.kv_cache.hybrid().checkpoint_lanes();
+        let checkpoint_layers = self.layout.tap_points(&[])?.1;
+        let (drafter, info) = ExternalDrafter::attach(
+            config,
+            DrafterAttach {
+                load: DFlashLoadTarget {
+                    num_layers: checkpoint_layers,
+                    hidden_size: self.cfg.hidden_size,
+                    // Nemotron-H's attention has no positions; the drafter brings its own YaRN
+                    yarn_rope_config: None,
+                    device: &self.device,
+                    dtype: self.dtype,
+                },
+                checkpoint_lanes,
+                recurrent_capacity,
+                serving_capacity,
+                // after the target's paged layers and its MTP head's
+                paged_first_layer: self.paged_kv_config().num_layers(),
+                runtime,
+                recurrent_pad_slots: crate::kv_cache::RECURRENT_GRAPH_PAD_SLOTS,
+            },
+        )?;
+        self.tap_points = self.layout.tap_points(&drafter.target_layer_ids)?.0;
+        for point in &self.tap_points {
+            if let TapPoint::AfterMixer(block) = *point {
+                self.layers[block].mixer_tap_mut().enabled = true;
+            }
+        }
+        self.draft_lm_head = config
+            .draft_lm_head_isq
+            .map(|ty| {
+                self.lm_head.clone().apply_isq(
+                    Some(ty),
+                    self.device.clone(),
+                    &std::sync::atomic::AtomicUsize::new(0),
+                    None,
+                    inference_quant::QuantizeOntoGuard::new(),
+                )
+            })
+            .transpose()?;
+        *self.drafter.lock().expect("drafter poisoned") = Some(Arc::new(drafter));
+        Ok(info)
+    }
+
+    fn detach_external_drafter(&mut self) {
+        *self.drafter.lock().expect("drafter poisoned") = None;
+        self.tap_points.clear();
+        for layer in &mut self.layers {
+            *layer.mixer_tap_mut() = MixerTap::default();
+        }
+        self.draft_lm_head = None;
+        *self.spec_taps.lock().expect("spec taps poisoned") = None;
+        *self.prompt_taps.lock().expect("prompt taps poisoned") = None;
+    }
+}
+
+impl DrafterTarget for GraniteMoeHybrid {
+    fn spec_taps(&self) -> Option<Vec<Tensor>> {
+        self.spec_taps.lock().expect("spec taps poisoned").clone()
+    }
+
+    fn prompt_taps(&self) -> Option<Vec<Tensor>> {
+        self.prompt_taps
+            .lock()
+            .expect("prompt taps poisoned")
+            .clone()
+    }
+
+    fn embed_tokens(&self, ids: &Tensor) -> Result<Tensor> {
+        self.embed(ids)
+    }
+
+    fn token_embedding(&self) -> &Arc<dyn QuantMethod> {
+        &self.wte
+    }
+
+    fn draft_lm_head(&self) -> Arc<dyn QuantMethod> {
+        self.draft_lm_head
+            .clone()
+            .unwrap_or_else(|| self.lm_head.clone())
+    }
+}
+
 impl crate::speculative::SpeculativeTargetMixin for GraniteMoeHybrid {
     fn attach_speculative(
         &mut self,
         config: crate::speculative::SpeculativeConfig,
     ) -> Result<Option<crate::speculative::SpeculativeAttachInfo>> {
+        self.attach_speculative_with_runtime(config, Default::default())
+    }
+
+    fn attach_speculative_with_runtime(
+        &mut self,
+        config: crate::speculative::SpeculativeConfig,
+        runtime: crate::speculative::MtpRuntimeConfig,
+    ) -> Result<Option<crate::speculative::SpeculativeAttachInfo>> {
+        self.detach_external_drafter();
+        if let Some(mtp) = &mut self.mtp {
+            mtp.set_n_predict(0);
+        }
         let crate::speculative::SpeculativeConfig::Mtp(config) = config else {
-            if let Some(mtp) = &mut self.mtp {
-                mtp.set_n_predict(0);
-            }
             return Ok(None);
         };
         if !config.is_builtin() {
-            inference_tensor::bail!(
-                "this model drafts only with its own MTP head, not an external drafter"
-            );
+            return self.attach_external_drafter(&config, runtime).map(Some);
         }
         let Some(mtp) = &mut self.mtp else {
             inference_tensor::bail!(
@@ -3711,23 +3997,67 @@ impl crate::speculative::SpeculativeTargetMixin for GraniteMoeHybrid {
     }
 
     fn has_speculative_proposer(&self) -> bool {
-        self.mtp.as_ref().is_some_and(|mtp| mtp.n_predict() > 0)
+        self.mtp_drafting().is_some() || self.drafter().is_some()
+    }
+
+    fn supports_speculative_prompt_bootstrap(&self) -> bool {
+        self.drafter().is_some()
     }
 
     fn speculative_plan(
         &self,
-        _batch_size: usize,
+        batch_size: usize,
     ) -> Option<crate::speculative::SpeculativeBatchPlan> {
-        self.mtp
-            .as_ref()
-            .filter(|mtp| mtp.n_predict() > 0)
+        if let Some(drafter) = self.drafter() {
+            return Some(drafter.plan(drafter.n_predict(), batch_size));
+        }
+        self.mtp_drafting()
             .map(|mtp| crate::speculative::SpeculativeBatchPlan::new(mtp.n_predict()))
     }
 
+    fn speculative_graph_plans(&self) -> Vec<crate::speculative::SpeculativeGraphPlan> {
+        if let Some(drafter) = self.drafter() {
+            return drafter.graph_plans(drafter.n_predict());
+        }
+        self.mtp_drafting()
+            .map(|mtp| crate::speculative::SpeculativeGraphPlan::new(mtp.n_predict(), None))
+            .into_iter()
+            .collect()
+    }
+
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    fn precapture_speculative_cuda_graphs(&self) -> Result<()> {
+        match self.drafter() {
+            Some(drafter) => drafter.precapture(self, drafter.n_predict()),
+            None => Ok(()),
+        }
+    }
+
+    fn evict_speculative_cuda_graphs(&self, max_entries: usize) -> usize {
+        self.drafter()
+            .map_or(0, |drafter| drafter.evict_cuda_graphs_lru(max_entries))
+    }
+
+    fn speculative_bypass(&mut self, seq_ids: &[usize]) -> Result<()> {
+        if let Some(drafter) = self.drafter() {
+            drafter.mark_seqs_dormant(seq_ids);
+        }
+        Ok(())
+    }
+
+    fn release_speculative_sequences(&mut self, seq_ids: &[usize]) -> Result<()> {
+        if let Some(drafter) = self.drafter() {
+            drafter.release_seqs(seq_ids);
+        }
+        Ok(())
+    }
+
+    inference_drafters::external_drafter_prefix_hooks!(|this| this.drafter());
+
     fn speculative_target_hiddens(&self, rows: &[(usize, usize)]) -> Result<Option<Tensor>> {
-        match &self.mtp {
-            Some(mtp) if mtp.n_predict() > 0 => mtp.target_hiddens(rows),
-            _ => Ok(None),
+        match self.mtp_drafting() {
+            Some(mtp) => mtp.target_hiddens(rows),
+            None => Ok(None),
         }
     }
 
@@ -3735,9 +4065,22 @@ impl crate::speculative::SpeculativeTargetMixin for GraniteMoeHybrid {
         &mut self,
         ctx: crate::speculative::SpeculativePrefillCtx<'_>,
     ) -> Result<()> {
-        match &self.mtp {
-            Some(mtp) if mtp.n_predict() > 0 => mtp.prefill(&|tokens| self.embed(tokens), ctx),
-            _ => Ok(()),
+        if let Some(drafter) = self.drafter() {
+            return drafter.prefill(self, ctx);
+        }
+        match self.mtp_drafting() {
+            Some(mtp) => mtp.prefill(&|tokens| self.embed(tokens), ctx),
+            None => Ok(()),
+        }
+    }
+
+    fn speculative_prepare_propose(
+        &mut self,
+        ctx: crate::speculative::SpeculativeProposePrepareCtx<'_>,
+    ) -> Result<Option<Box<dyn crate::speculative::SpeculativeProposePreparation>>> {
+        match self.drafter() {
+            Some(drafter) => drafter.prepare_propose(self, ctx),
+            None => Ok(None),
         }
     }
 
@@ -3745,11 +4088,12 @@ impl crate::speculative::SpeculativeTargetMixin for GraniteMoeHybrid {
         &mut self,
         ctx: crate::speculative::SpeculativeProposeBatchCtx<'_>,
     ) -> Result<Option<crate::speculative::SpeculativeProposalBatch>> {
-        match &self.mtp {
-            Some(mtp) if mtp.n_predict() > 0 => {
-                mtp.propose(&|tokens| self.embed(tokens), &*self.lm_head, ctx)
-            }
-            _ => Ok(None),
+        if let Some(drafter) = self.drafter() {
+            return drafter.propose(self, ctx, drafter.n_predict(), &self.device);
+        }
+        match self.mtp_drafting() {
+            Some(mtp) => mtp.propose(&|tokens| self.embed(tokens), &*self.lm_head, ctx),
+            None => Ok(None),
         }
     }
 
@@ -3757,42 +4101,48 @@ impl crate::speculative::SpeculativeTargetMixin for GraniteMoeHybrid {
         &mut self,
         rows: &[crate::speculative::SpeculativeCommitRow],
     ) -> Result<()> {
-        self.replay_mamba_layers(rows)
+        self.replay_mamba_layers(rows)?;
+        match self.drafter() {
+            Some(drafter) => drafter.commit_terminal(self, rows),
+            None => Ok(()),
+        }
     }
 
     fn take_speculative_graph_state(
         &self,
     ) -> Option<Box<dyn crate::speculative::SpeculativeGraphState>> {
-        let mtp = self
-            .mtp
-            .as_ref()
-            .filter(|mtp| mtp.n_predict() > 0)?
-            .take_graph_state()?;
+        let (mtp, taps) = match (self.mtp_drafting(), self.drafter()) {
+            (_, Some(_)) => (None, self.spec_taps()?),
+            (Some(mtp), None) => (Some(Arc::from(mtp.take_graph_state()?)), Vec::new()),
+            (None, None) => return None,
+        };
         let replays = self
             .mamba_replay
             .lock()
             .expect("mamba replay poisoned")
             .clone();
-        Some(Box::new(GraniteSpecGraphState {
-            mtp: Arc::from(mtp),
-            replays,
-        }))
+        Some(Box::new(GraniteSpecGraphState { mtp, taps, replays }))
     }
 
     fn install_speculative_graph_state(
         &self,
         state: &dyn crate::speculative::SpeculativeGraphState,
     ) -> Result<()> {
-        let Some(mtp) = self.mtp.as_ref().filter(|mtp| mtp.n_predict() > 0) else {
+        if !self.has_speculative_proposer() {
             return Ok(());
-        };
+        }
         let state = state
             .as_any()
             .downcast_ref::<GraniteSpecGraphState>()
             .ok_or_else(|| {
                 inference_tensor::Error::msg("foreign speculative graph state for Granite")
             })?;
-        mtp.install(&*state.mtp)?;
+        if let (Some(mtp), Some(captured)) = (self.mtp_drafting(), &state.mtp) {
+            mtp.install(&**captured)?;
+        }
+        if self.drafter().is_some() {
+            *self.spec_taps.lock().expect("spec taps poisoned") = Some(state.taps.clone());
+        }
         let mut replays = state.replays.clone();
         // a capture baked in its own step's host slots; graphs run on CUDA, whose scatter reads the device slots
         for replay in &mut replays {

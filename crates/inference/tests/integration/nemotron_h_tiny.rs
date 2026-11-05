@@ -16,6 +16,8 @@ use rand_distr::{Distribution, Normal};
 
 #[path = "../support/decode_graphs.rs"]
 mod decode_graphs;
+#[path = "../support/tiny_drafter.rs"]
+mod tiny_drafter;
 #[path = "../support/traces.rs"]
 mod traces;
 
@@ -82,6 +84,20 @@ const CIMATRIX: &str = "collected.cimatrix";
 const MTP_N_PREDICT: usize = 2;
 // enough steps that drafts are rejected at several positions, each replaying the Mamba state
 const MTP_MAX_LEN: usize = 24;
+// NVIDIA's Lightning drafters tap mixers before their FFN (Nemotron-H counts the MoE after one as its own layer) and
+// block ends: an MoE that ends a block, then an attention and a Mamba mixer each with an FFN after it
+const DRAFTER_TARGET: tiny_drafter::DrafterTarget = tiny_drafter::DrafterTarget {
+    hidden: HIDDEN,
+    vocab: VOCAB,
+    taps: &[1, 3, 5],
+};
+const DFLASH_BLOCK: usize = 4;
+const DFLASH_N_PREDICT: usize = 2;
+// every DSpark layer windowed, as Lightning's are, so its context is the windowed pool
+const DSPARK_WINDOW: usize = 32;
+// DSpark drafts from the anchor row too, so its block of 3 rows yields as many drafts as DFlash's 4
+const DSPARK_BLOCK: usize = 3;
+const DSPARK_MARKOV_RANK: usize = 8;
 
 /// The checkpoint's attention width and, for latent MoE, the routed experts' width.
 #[derive(Clone, Copy)]
@@ -346,8 +362,9 @@ async fn an_mtp_head_drafts_on_the_cpu_without_changing_greedy_output() -> anyho
     if cfg!(any(feature = "cuda", feature = "metal")) {
         return Ok(());
     }
-    mtp_keeps_greedy_output(
+    drafting_keeps_greedy_output(
         TextModelBuilder::with_force_cpu,
+        &|b| b.with_builtin_mtp(Some(MTP_N_PREDICT)),
         Shape::BASE,
         ModelDType::F32,
         None,
@@ -362,8 +379,9 @@ async fn an_mtp_head_drafts_on_vulkan_without_changing_greedy_output() -> anyhow
     if !cfg!(feature = "vulkan") || Device::new_vulkan(0).is_err() {
         return Ok(());
     }
-    mtp_keeps_greedy_output(
+    drafting_keeps_greedy_output(
         |b| b.with_device("vulkan:0"),
+        &|b| b.with_builtin_mtp(Some(MTP_N_PREDICT)),
         Shape::BASE,
         ModelDType::F32,
         None,
@@ -380,8 +398,9 @@ async fn an_mtp_head_drafts_on_cuda_without_changing_greedy_output() -> anyhow::
         return Ok(());
     }
     let snapshotter = decode_graphs::recorder();
-    mtp_keeps_greedy_output(
+    drafting_keeps_greedy_output(
         |b| b,
+        &|b| b.with_builtin_mtp(Some(MTP_N_PREDICT)),
         Target::CudaGraphs.shape(),
         ModelDType::BF16,
         Some(IsqType::Q8_0),
@@ -394,8 +413,69 @@ async fn an_mtp_head_drafts_on_cuda_without_changing_greedy_output() -> anyhow::
     Ok(())
 }
 
-async fn mtp_keeps_greedy_output(
+// with an external drafter on CUDA: DFlash over full attention keeps its context in the target's paged cache
+#[tokio::test]
+async fn a_dflash_drafter_drafts_on_cuda_without_changing_greedy_output() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let drafter = tiny_drafter::tiny_drafter(
+        &DRAFTER_TARGET,
+        serde_json::json!({
+            "architectures": ["DFlashDraftModel"],
+            "block_size": DFLASH_BLOCK,
+            "layer_types": ["full_attention"],
+        }),
+        None,
+    )?;
+    external_drafter_keeps_greedy_output(&drafter, DFLASH_N_PREDICT).await
+}
+
+// DSpark with every layer windowed and a Markov head, as Lightning's, drafts from the windowed pool
+#[tokio::test]
+async fn a_dspark_drafter_drafts_on_cuda_without_changing_greedy_output() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let drafter = tiny_drafter::tiny_drafter(
+        &DRAFTER_TARGET,
+        serde_json::json!({
+            "architectures": ["DSparkDraftModel"],
+            "block_size": DSPARK_BLOCK,
+            "layer_types": ["sliding_attention"],
+            "sliding_window": DSPARK_WINDOW,
+            "markov_rank": DSPARK_MARKOV_RANK,
+            "markov_head_type": "vanilla",
+        }),
+        Some(DSPARK_MARKOV_RANK),
+    )?;
+    external_drafter_keeps_greedy_output(&drafter, DSPARK_BLOCK).await
+}
+
+async fn external_drafter_keeps_greedy_output(
+    drafter: &tempfile::TempDir,
+    n_predict: usize,
+) -> anyhow::Result<()> {
+    let snapshotter = decode_graphs::recorder();
+    let path = drafter.path().to_string_lossy().into_owned();
+    drafting_keeps_greedy_output(
+        |b| b,
+        &|b| b.with_mtp_model(path.clone(), Some(n_predict)),
+        Target::CudaGraphs.shape(),
+        ModelDType::BF16,
+        Some(IsqType::Q8_0),
+        BF16_LOGPROB_TOLERANCE,
+    )
+    .await?;
+    let counters = decode_graphs::Counters::take(&snapshotter);
+    decode_graphs::assert_replayed(&counters);
+    decode_graphs::assert_only_prompts_skip(&counters);
+    Ok(())
+}
+
+async fn drafting_keeps_greedy_output(
     place: fn(TextModelBuilder) -> TextModelBuilder,
+    draft: &dyn Fn(TextModelBuilder) -> TextModelBuilder,
     shape: Shape,
     dtype: ModelDType,
     isq: Option<IsqType>,
@@ -419,10 +499,7 @@ async fn mtp_keeps_greedy_output(
             TextMessages::new().add_message(TextMessageRole::User, "say something long"),
         )
     };
-    let drafting = builder()?
-        .with_builtin_mtp(Some(MTP_N_PREDICT))
-        .build()
-        .await?;
+    let drafting = draft(builder()?).build().await?;
     let (actual, _) = traces::greedy(&drafting, request(), MTP_MAX_LEN).await?;
     let stats = drafting.speculative_stats()?;
     let proposed: usize = stats.data.iter().map(|m| m.draft_tokens_proposed).sum();
@@ -430,7 +507,7 @@ async fn mtp_keeps_greedy_output(
     drop(drafting);
     let plain = builder()?.build().await?;
     let (expected, _) = traces::greedy(&plain, request(), MTP_MAX_LEN).await?;
-    anyhow::ensure!(proposed > 0, "the MTP head never drafted");
+    anyhow::ensure!(proposed > 0, "the drafter never drafted");
     anyhow::ensure!(
         accepted < proposed,
         "every draft was accepted ({accepted}), so no replay ran"
