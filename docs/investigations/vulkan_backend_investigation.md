@@ -1006,3 +1006,28 @@ So an iGPU keeps the matrix cores off by default.
 
 **Trap:** `--paged-attn on` without `--pa-context-len` sizes the cache from free memory (12 GB, 2M tokens of
 Lightning's ~7 KB a token here) and the device map moves 5 layers to the CPU: 250 tok/s at 512.
+
+### Run 39 - 2026-11-04 ~18:30 (desktop: RTX 3090)
+
+**Question:** item (3) of Nemotron-H CUDA Run 18. Vulkan decodes Lightning (Q4_0 experts) at 115-130 tok/s where CUDA
+does 209. Where does a decode step go?
+
+**Commands:** `INFERENCE_VULKAN_PROFILE=1 inference bench --vulkan --prompt-len 16 --gen-len 1024`; perf and
+`/proc/<pid>/task/*/stat` over 5-8 s of steady decode; `nvidia-smi dmon -s pu`; a probe timing 1000 back-to-back
+`map_f32` dispatches (2688 floats) with and without the per-dispatch barrier; llama.cpp `970b51ce7` Vulkan
+`llama-bench -p 512 -n 128 -fa 1` on the same file.
+
+**Findings:**
+- The timestamp profile counts ~375 dispatches a token: ~146 `map_f32`, ~68 `quantize_q8_1`, ~32 `rows_f32`, ~29
+  `mat_vecs_q8_0`, 19 each of the Q4_0 experts and Q5_0 matvecs, ~10 each of router, scan, conv and the f32 matmuls.
+  It summed only ~3.2 ms of GPU a ~10 ms token, a dead end: `nvidia-smi` shows the SMs 98-99 % busy at ~280 W with
+  memory at 32-45 %. Decode is GPU-bound, and the per-dispatch timestamps undercount on NVIDIA (as Run 29 found).
+- The main thread is on the CPU 26 % of a step (1.31 s user in 5 s); the driver's `[vkrt] Analysis` thread spins
+  ~1.8 s of 5 in the kernel by itself, unrelated to our recording.
+- The probe: 7.1-9.2 us a dispatch with the barrier each dispatch records, 1.3 us without. Each barrier drains the
+  GPU, ~7 us of busy-but-idle SMs; at ~375 a token, ~2.6 ms of the step.
+- llama.cpp's Vulkan backend on the same card and file: pp512 4074 tok/s, tg128 176 tok/s (ours ~2200 and 115-130).
+
+**Next:** fewer drains a token. Two levers: fuse the elementwise maps and the activation quantizes into their
+neighbours (fewer dispatches), and record a barrier only where a dispatch reads or overwrites what an earlier,
+unbarriered one wrote (which needs each pipeline's written bindings).
