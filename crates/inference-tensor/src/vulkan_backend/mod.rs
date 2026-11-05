@@ -977,6 +977,8 @@ pub(crate) fn ranked_top_k(logits: &Tensor, temperature: f64) -> Result<Tensor> 
         count,
         dtype: DType::F32,
     };
+    let scratch =
+        Arc::new(device.buffer(inference_vulkan::RankedTopK::scratch_bytes(rows, vocab))?);
     device
         .context
         .record(|r| {
@@ -985,6 +987,7 @@ pub(crate) fn ranked_top_k(logits: &Tensor, temperature: f64) -> Result<Tensor> 
                 vocab,
                 inv_temperature: (1.0 / temperature) as f32,
                 logits: (&x, x_off),
+                scratch: &scratch,
                 out: &out.buffer,
             })
         })
@@ -2089,7 +2092,12 @@ mod tests {
     fn ranked_top_k_matches_a_sort() -> Result<()> {
         let Some(vk) = device() else { return Ok(()) };
         let k = crate::vulkan::RANKED_TOP_K;
-        for (rows, vocab, temperature) in [(3usize, 131_072usize, 0.7f64), (2, 1000, 1.0)] {
+        // whole 4096-logit chunks, a remainder chunk, and one chunk
+        for (rows, vocab, temperature) in [
+            (3usize, 131_072usize, 0.7f64),
+            (1, 151_936, 0.8),
+            (2, 1000, 1.0),
+        ] {
             let mut logits =
                 Tensor::randn(0f32, 3.0, (rows, vocab), &Device::Cpu)?.to_vec2::<f32>()?;
             for row in logits.iter_mut() {

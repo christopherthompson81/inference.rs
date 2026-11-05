@@ -550,7 +550,7 @@ impl Recorder<'_> {
         if op.slots > MAX_GROUPS_X {
             return Err(Error::Invalid(format!("{} expert routes", op.slots)));
         }
-        let groups = op.rows.div_ceil(MOE_MATVEC_ROWS);
+        let groups = op.rows.div_ceil(MATVEC_ROWS);
         let groups_x = groups.min(MAX_GROUPS_X);
         let bytes = words(&[
             op.rows,
@@ -765,8 +765,6 @@ const MAX_DISPATCH_GROUPS: usize = 65535;
 // MAX_PREFILL_SPLITS of them, their partials within PREFILL_PARTIALS_BYTES (a prompt chunk's rows already fill the GPU,
 // and every layer's partials stay live until its batch completes)
 const PREFILL_ROWS: usize = 8;
-// weight rows a moe_mat_vecs workgroup takes
-const MOE_MATVEC_ROWS: usize = 4;
 // paged_prefill_cm's query rows (positions x heads) a workgroup, and the heads it tiles
 const PREFILL_CM_ROWS: usize = 64;
 const PREFILL_CM_HEAD_STEP: usize = 16;
@@ -1311,7 +1309,10 @@ impl Recorder<'_> {
 }
 
 pub(crate) const RANKED_BINDINGS: usize = 2;
-pub(crate) const RANKED_PUSH_BYTES: u32 = 3 * 4;
+pub(crate) const RANKED_PUSH_BYTES: u32 = 2 * 4;
+pub(crate) const RANKED_PART_PUSH_BYTES: u32 = 4 * 4;
+// logits a ranked_topk_part workgroup takes (the last of a row takes the remainder)
+const RANKED_CHUNK: usize = 4096;
 
 /// Each of `rows` f32 logits rows of `vocab` (from `logits`): its [`RankedTopK::K`] largest values sorted
 /// descending (ties to the lower index), their indices as floats, the softmax normalizer at `inv_temperature` and
@@ -1321,6 +1322,8 @@ pub struct RankedTopK<'a> {
     pub vocab: usize,
     pub inv_temperature: f32,
     pub logits: At<'a>,
+    /// each row's chunks' candidates: [`RankedTopK::scratch_bytes`]
+    pub scratch: &'a Arc<Buffer>,
     pub out: &'a Arc<Buffer>,
 }
 
@@ -1330,6 +1333,14 @@ impl RankedTopK<'_> {
     pub fn row_floats() -> usize {
         2 * Self::K + 2
     }
+
+    fn chunks(vocab: usize) -> usize {
+        (vocab / RANKED_CHUNK).max(1)
+    }
+
+    pub fn scratch_bytes(rows: usize, vocab: usize) -> usize {
+        rows * Self::chunks(vocab) * Self::row_floats() * 4
+    }
 }
 
 impl Recorder<'_> {
@@ -1338,6 +1349,8 @@ impl Recorder<'_> {
         if op.vocab < RankedTopK::K
             || !temperature_ok
             || op.out.len() < op.rows * RankedTopK::row_floats() * 4
+            || op.scratch.len() < RankedTopK::scratch_bytes(op.rows, op.vocab)
+            || op.rows > MAX_DISPATCH_GROUPS
         {
             return Err(Error::Invalid(format!(
                 "ranked top-{} of {} rows of {} at inverse temperature {}",
@@ -1350,16 +1363,26 @@ impl Recorder<'_> {
         if op.rows == 0 {
             return Ok(());
         }
+        // each chunk's candidates over many workgroups, then a workgroup a row picks from them
+        let chunks = RankedTopK::chunks(op.vocab);
         let mut bytes = words(&[op.vocab, op.logits.1])?;
         bytes.extend_from_slice(&op.inv_temperature.to_bits().to_le_bytes());
-        let buffers = [op.logits.0, op.out];
+        bytes.extend(words(&[chunks])?);
+        self.context.kernels.ranked_topk_part.dispatch(
+            self,
+            &[op.logits.0.buffer, op.scratch.buffer],
+            &bytes,
+            [chunks as u32, op.rows as u32, 1],
+        );
+        let mut bytes = words(&[chunks])?;
+        bytes.extend_from_slice(&op.inv_temperature.to_bits().to_le_bytes());
         self.context.kernels.ranked_topk.dispatch(
             self,
-            &buffers.map(|b| b.buffer),
+            &[op.scratch.buffer, op.out.buffer],
             &bytes,
             [op.rows as u32, 1, 1],
         );
-        for buffer in buffers {
+        for buffer in [op.logits.0, op.scratch, op.out] {
             self.retain(buffer.clone());
         }
         Ok(())

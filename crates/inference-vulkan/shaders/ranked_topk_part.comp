@@ -1,0 +1,64 @@
+#version 450
+// ranked_topk's first stage: a workgroup a (CHUNK of a row's f32 logits, row), its chunk's K largest values sorted
+// descending (ties to the lower index) with their vocabulary indices, and its max and sum(exp(x * inv_temperature -
+// max * inv_temperature)), for ranked_topk.comp to combine. The last chunk takes the row's remainder, so every chunk
+// holds at least K values. Writes 2K + 2 floats a chunk: values, indices (as bits), max, sum.
+#extension GL_GOOGLE_include_directive : require
+
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) writeonly buffer P { float part[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint vocab;
+    uint x_off;
+    float inv_temperature;
+    uint chunks;
+} pc;
+
+const uint CHUNK = 4096;
+
+uint base;
+uint chunk0;
+#define VALUE(i) x[base + (i)]
+#define INDEX(i) (chunk0 + (i))
+#include "ranked_topk_main.glsl"
+
+void main() {
+    uint t = gl_LocalInvocationID.x;
+    uint chunk = gl_WorkGroupID.x;
+    uint row = gl_WorkGroupID.y;
+    chunk0 = chunk * CHUNK;
+    uint n = chunk + 1 == pc.chunks ? pc.vocab - chunk0 : CHUNK;
+    base = pc.x_off + row * pc.vocab + chunk0;
+
+    float m = -1.0 / 0.0;
+    for (uint i = t; i < n; i += THREADS) {
+        float v = VALUE(i);
+        if (live(v)) {
+            m = max(m, v);
+        }
+    }
+    m = workgroup_max(m);
+    float z = 0.0;
+    if (!isinf(m)) {
+        float scaled_max = m * pc.inv_temperature;
+        for (uint i = t; i < n; i += THREADS) {
+            float v = VALUE(i);
+            if (live(v)) {
+                z += exp(v * pc.inv_temperature - scaled_max);
+            }
+        }
+    }
+    z = workgroup_sum(z);
+    select_top(n);
+
+    uint at = (row * pc.chunks + chunk) * (2 * K + 2);
+    if (t < K) {
+        part[at + t] = cand_v[t];
+        part[at + K + t] = uintBitsToFloat(cand_i[t]);
+    }
+    if (t == 0) {
+        part[at + 2 * K] = m;
+        part[at + 2 * K + 1] = z;
+    }
+}
