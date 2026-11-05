@@ -432,6 +432,25 @@ mod tests {
         );
     }
 
+    // a default derived from the environment (a cache dir under $HOME) matches on the machine that rendered it and fails
+    // everywhere else
+    #[test]
+    fn openapi_names_no_path_of_the_rendering_machine() {
+        let doc = render();
+        for var in ["HOME", "XDG_CACHE_HOME"] {
+            let Ok(value) = std::env::var(var) else {
+                continue;
+            };
+            // "/" alone (a root HOME in a container) is in every path
+            if value.len() > 1 {
+                assert!(
+                    !doc.contains(&value),
+                    "the OpenAPI document carries ${var} ({value}): give that field a schema default of its own"
+                );
+            }
+        }
+    }
+
     #[test]
     #[ignore = "writes docs/openapi.json"]
     fn regenerate_openapi() {

@@ -92,8 +92,9 @@ impl Placement {
 #[derive(Clone, Debug, Serialize, inference_json::FromJson, ToSchema)]
 #[serde(default)]
 pub struct JobsConfig {
-    /// One folder per job: its record, inputs, previews and outputs
-    #[schema(value_type = String)]
+    /// One folder per job: its record, inputs, previews and outputs; unset, the server's cache `inference-rs/engine-jobs`
+    // the derived default would be the generating machine's path, so the document leaves it to the server
+    #[schema(value_type = Option<String>, default = no_schema_default)]
     pub dir: PathBuf,
     /// The `worldstereo-memory-dmd` folder
     #[schema(value_type = Option<String>)]
@@ -241,6 +242,11 @@ fn fetch_models_repo(repo: &str, progress: &dyn Progress) -> anyhow::Result<Path
         progress.advance(i + 1);
     }
     root.ok_or_else(|| anyhow::anyhow!("`{repo}` holds no files"))
+}
+
+// a schema default for a field whose real one the server computes from its own environment
+fn no_schema_default() -> serde_json::Value {
+    serde_json::Value::Null
 }
 
 /// `$XDG_CACHE_HOME/inference-rs/engine-jobs`, or under `~/.cache`.

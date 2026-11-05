@@ -178,7 +178,7 @@ Where jobs keep their folders and which weights they run.
 | Field | Type | Default |
 | --- | --- | --- |
 | `devices` | `list[int] \| None` | optional |
-| `dir` | `str \| None` | `'/home/chris/.cache/inference-rs/engine-jobs'` |
+| `dir` | `str \| None` | optional |
 | `drain_timeout_secs` | `int \| None` | `120` |
 | `lpips` | `str \| None` | optional |
 | `models_repo` | `str \| None` | optional |

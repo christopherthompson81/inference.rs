@@ -7245,9 +7245,12 @@
             "default": null
           },
           "dir": {
-            "type": "string",
-            "description": "One folder per job: its record, inputs, previews and outputs",
-            "default": "/home/chris/.cache/inference-rs/engine-jobs"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "One folder per job: its record, inputs, previews and outputs; unset, the server's cache `inference-rs/engine-jobs`",
+            "default": null
           },
           "drain_timeout_secs": {
             "type": "integer",
