@@ -244,6 +244,19 @@ pub struct ConvStep<'a> {
     pub out: &'a Arc<Buffer>,
 }
 
+/// Mamba-2's gated RMSNorm: `rows` rows of `x` and `gate` (`groups * group_size` f32 each), each value gated by
+/// silu(gate), each group normalized by its RMS, and all scaled by `weight` (`groups * group_size`).
+pub struct GatedRmsNorm<'a> {
+    pub rows: usize,
+    pub groups: usize,
+    pub group_size: usize,
+    pub eps: f32,
+    pub x: At<'a>,
+    pub gate: At<'a>,
+    pub weight: At<'a>,
+    pub out: &'a Arc<Buffer>,
+}
+
 /// `seq` steps of Mamba-2's selective scan on a state pool (`(rows, heads, head_dim, state)` f32, in place); `a`, `d`
 /// and `dt_bias` are `(heads,)` from their buffers' first element; `out` is `(batch, seq, heads, head_dim)`.
 pub struct ScanStep<'a> {
@@ -337,6 +350,30 @@ impl Recorder<'_> {
             &buffers.map(|b| b.buffer),
             &bytes,
             [groups.max(1), 1, 1],
+        );
+        for buffer in buffers {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+
+    pub fn gated_rmsnorm(&self, op: &GatedRmsNorm<'_>) -> Result<()> {
+        let workgroups = op.rows * op.groups;
+        if workgroups == 0 || op.group_size == 0 || workgroups > MAX_DISPATCH_GROUPS {
+            return Err(Error::Invalid(format!(
+                "gated RMSNorm of {} rows of {} groups of {}",
+                op.rows, op.groups, op.group_size
+            )));
+        }
+        let mut bytes = words(&[op.group_size, op.groups])?;
+        bytes.extend_from_slice(&op.eps.to_bits().to_le_bytes());
+        bytes.extend(words(&[op.x.1, op.gate.1, op.weight.1])?);
+        let buffers = [op.x.0, op.gate.0, op.weight.0, op.out];
+        self.context.kernels.gated_rmsnorm.dispatch(
+            self,
+            &buffers.map(|b| b.buffer),
+            &bytes,
+            [workgroups as u32, 1, 1],
         );
         for buffer in buffers {
             self.retain(buffer.clone());
@@ -711,6 +748,8 @@ pub(crate) const PAGED_WRITE_PUSH_BYTES: u32 = 8 * 4;
 pub(crate) const PAGED_WRITE_QUANT_PUSH_BYTES: u32 = 9 * 4;
 pub(crate) const PAGED_DECODE_BINDINGS: usize = 6;
 pub(crate) const PAGED_DECODE_PUSH_BYTES: u32 = 12 * 4;
+pub(crate) const GATED_RMSNORM_BINDINGS: usize = 4;
+pub(crate) const GATED_RMSNORM_PUSH_BYTES: u32 = 6 * 4;
 pub(crate) const PAGED_PREFILL_BINDINGS: usize = 5;
 pub(crate) const PAGED_PREFILL_PUSH_BYTES: u32 = 13 * 4;
 pub(crate) const HADAMARD_BINDINGS: usize = 2;

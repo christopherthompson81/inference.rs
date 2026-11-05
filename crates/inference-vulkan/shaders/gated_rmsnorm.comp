@@ -1,0 +1,57 @@
+#version 450
+// Mamba-2's gated RMSNorm in one pass (CUDA's mamba_gated_rmsnorm): v = x silu(gate) over a row, each group of
+// group_size values scaled by 1 / sqrt(mean(v^2) + eps), then by the weight. A workgroup a (row, group); f32.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : require
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer G { float gate[]; };
+layout(std430, binding = 2) readonly buffer W { float weight[]; };
+layout(std430, binding = 3) writeonly buffer O { float out_[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint group_size;
+    uint groups;
+    float eps;
+    uint x_off;
+    uint gate_off;
+    uint weight_off;
+} pc;
+
+const uint THREADS = 256;
+// one partial a subgroup, for subgroups as narrow as 8
+const uint MAX_SUBGROUPS = 32;
+
+shared float partial[MAX_SUBGROUPS];
+
+float gated(uint i) {
+    float g = gate[pc.gate_off + i];
+    return x[pc.x_off + i] * (g / (1.0 + exp(-g)));
+}
+
+void main() {
+    uint row = gl_WorkGroupID.x / pc.groups;
+    uint group = gl_WorkGroupID.x % pc.groups;
+    uint t = gl_LocalInvocationID.x;
+    uint base = (row * pc.groups + group) * pc.group_size;
+    float sum = 0.0;
+    for (uint i = t; i < pc.group_size; i += THREADS) {
+        float v = gated(base + i);
+        sum += v * v;
+    }
+    sum = subgroupAdd(sum);
+    if (gl_SubgroupInvocationID == 0) {
+        partial[gl_SubgroupID] = sum;
+    }
+    barrier();
+    float total = 0.0;
+    for (uint s = 0; s < gl_NumSubgroups; s++) {
+        total += partial[s];
+    }
+    float inv = inversesqrt(total / float(pc.group_size) + pc.eps);
+    for (uint i = t; i < pc.group_size; i += THREADS) {
+        out_[base + i] = gated(base + i) * inv * weight[pc.weight_off + group * pc.group_size + i];
+    }
+}
