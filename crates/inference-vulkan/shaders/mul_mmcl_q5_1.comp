@@ -1,0 +1,36 @@
+#version 450
+// The large-tile matrix-core prompt matmul over a Q5_1 W: tile y over the tokens in order.
+#extension GL_GOOGLE_include_directive : require
+#include "mul_mmc_head.glsl"
+
+layout(push_constant) uniform PushConstants {
+    uint rows;
+    uint cols;
+    // element offsets into the bound buffers: `w` in u16s, `x` in halves, `y` in floats
+    uint w_base;
+    uint x_base;
+    uint y_base;
+    // tokens; output row t is `rows` long
+    uint m;
+} pc;
+
+#include "q5_1_int8.glsl"
+
+// the tile's tokens (mul_mmcl_main.glsl's BM)
+const uint BM_TOKENS = 128;
+
+uint m0;
+
+bool begin_tile(out uint tokens, out uint w_matrix, out uint x_row0) {
+    m0 = gl_WorkGroupID.y * BM_TOKENS;
+    tokens = min(BM_TOKENS, pc.m - m0);
+    w_matrix = pc.w_base;
+    x_row0 = m0;
+    return true;
+}
+
+uint y_row(uint j) {
+    return m0 + j;
+}
+
+#include "mul_mmcl_main.glsl"

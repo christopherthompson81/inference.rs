@@ -197,10 +197,20 @@ const MMC_PUSH_BYTES: u32 = 6 * 4;
 // a matrix-core workgroup's tile: weight rows by tokens
 const MMC_TILE_N: usize = 64;
 pub(crate) const MMC_TILE_M: usize = 64;
+// mul_mmcl's tile, for matrices of MMCL_MIN_ROWS rows or more (on a 3090 at 512 tokens, 4096 and 10304 rows ran 26
+// and 11 % faster than in 64 x 64 tiles, 2688 and 3712 rows 13-25 % slower), and the tokens the scratch pads to
+// (whole tiles of either)
+const MMCL_TILE: usize = 128;
+const MMCL_MIN_ROWS: usize = 4096;
+const MMC_PAD_M: usize = 128;
+// the halves mul_mmcl loads a token's row by, so a row starts whole
+const MMCL_ALIGN: usize = 8;
 
 pub(crate) struct CoopKernels {
     // by BlockType
     mul_mmc: Vec<Pipeline>,
+    // by BlockType: 128 x 128 tiles
+    mul_mmcl: Vec<Pipeline>,
     convert_f16: Pipeline,
     // by BlockType
     moe_mmc: Vec<Pipeline>,
@@ -234,6 +244,19 @@ impl CoopKernels {
                 Pipeline::with_subgroup(device, spirv, MMC_BINDINGS, MMC_PUSH_BYTES, name, subgroup)
             })
             .collect::<Result<_>>()?;
+        let mul_mmcl = [
+            (shaders::MUL_MMCL_Q8_0, "mul_mmcl_q8_0"),
+            (shaders::MUL_MMCL_Q5_0, "mul_mmcl_q5_0"),
+            (shaders::MUL_MMCL_Q4_0, "mul_mmcl_q4_0"),
+            (shaders::MUL_MMCL_Q4_1, "mul_mmcl_q4_1"),
+            (shaders::MUL_MMCL_Q5_1, "mul_mmcl_q5_1"),
+            (shaders::MUL_MMCL_Q4_K, "mul_mmcl_q4_k"),
+            (shaders::MUL_MMCL_Q5_K, "mul_mmcl_q5_k"),
+            (shaders::MUL_MMCL_Q6_K, "mul_mmcl_q6_k"),
+        ]
+        .into_iter()
+        .map(|(spirv, name)| Pipeline::new(device, spirv, MMC_BINDINGS, MMC_PUSH_BYTES, name))
+        .collect::<Result<_>>()?;
         let convert_f16 = Pipeline::new(
             device,
             shaders::CONVERT_F16,
@@ -287,6 +310,7 @@ impl CoopKernels {
         ];
         Ok(Self {
             mul_mmc,
+            mul_mmcl,
             convert_f16,
             moe_mmc,
             moe_gather_f16,
@@ -310,6 +334,10 @@ impl CoopKernels {
         &self.mul_mmc[ty as usize]
     }
 
+    fn mul_mmcl(&self, ty: BlockType) -> &Pipeline {
+        &self.mul_mmcl[ty as usize]
+    }
+
     pub(crate) fn moe_mmc(&self, ty: BlockType) -> &Pipeline {
         &self.moe_mmc[ty as usize]
     }
@@ -320,6 +348,7 @@ impl CoopKernels {
         for pipeline in self
             .mul_mmc
             .iter()
+            .chain(&self.mul_mmcl)
             .chain(&self.moe_mmc)
             .chain([&self.convert_f16, &self.moe_gather_f16])
             .chain(&self.paged_prefill)
@@ -398,7 +427,7 @@ impl MatVec<'_> {
         let int8 = x_rows * cols / BLOCK_VALUES * (Q8_WORD_BYTES + Q8_SCALE_BYTES);
         // a prompt on the matrix cores takes its tokens as f16, padded to whole tiles
         let f16 = if x_rows > MATVEC_MAX_ROWS {
-            x_rows.next_multiple_of(MMC_TILE_M) * cols * 2
+            x_rows.next_multiple_of(MMC_PAD_M) * cols * 2
         } else {
             0
         };
@@ -535,7 +564,7 @@ impl Recorder<'_> {
             // the tokens as f16 into the scratch, padded to whole tiles with zeros: a tile's last matrices read past
             // its live tokens (outputs dropped), and past a row's end into the next row (against zero weights)
             let count = op.x_rows * op.cols;
-            let padded = (op.x_rows.next_multiple_of(MMC_TILE_M) * op.cols * 2) as u64;
+            let padded = (op.x_rows.next_multiple_of(MMC_PAD_M) * op.cols * 2) as u64;
             self.fill(scratch.buffer, padded.next_multiple_of(4), 0);
             let pairs = count.div_ceil(2).div_ceil(CONVERT_THREADS);
             let pairs_x = pairs.min(MAX_GROUPS_X);
@@ -557,13 +586,21 @@ impl Recorder<'_> {
                 || format!("m={} n={} k={}", op.rows, op.x_rows, op.cols),
                 op.rows * op.cols * op.x_rows,
             );
-            coop.mul_mmc(op.ty).dispatch(
+            let large = op.x_rows >= MMCL_TILE
+                && op.rows >= MMCL_MIN_ROWS
+                && op.cols.is_multiple_of(MMCL_ALIGN);
+            let (pipeline, tile_n, tile_m) = if large {
+                (coop.mul_mmcl(op.ty), MMCL_TILE, MMCL_TILE)
+            } else {
+                (coop.mul_mmc(op.ty), MMC_TILE_N, MMC_TILE_M)
+            };
+            pipeline.dispatch(
                 self,
                 &[op.weights.vk_buffer(), scratch.buffer, op.y.buffer],
                 &bytes,
                 [
-                    op.rows.div_ceil(MMC_TILE_N) as u32,
-                    op.x_rows.div_ceil(MMC_TILE_M) as u32,
+                    op.rows.div_ceil(tile_n) as u32,
+                    op.x_rows.div_ceil(tile_m) as u32,
                     1,
                 ],
             );
@@ -846,6 +883,78 @@ mod tests {
                     assert!(
                         (got - want).abs() <= bound * 1.01 + 1e-5,
                         "{ty:?} x row {m} row {row}: {got} vs {want} (bound {bound})"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // the matrix-core prompt matmuls (64 x 64 and 128 x 128 tiles, both with partial tiles of rows and tokens) against
+    // an f64 product on sampled rows, within the f16 rounding of the weights and the activations
+    #[test]
+    fn matrix_core_prompt_matmuls_match_their_reference() -> Result<()> {
+        let Some(context) = context() else {
+            return Ok(());
+        };
+        if context.coop.is_none() {
+            return Ok(());
+        }
+        const COLS: usize = 2688;
+        const ROW_STEP: usize = 41;
+        // two halves of f16 rounding (the weight's and the activation's) on each product
+        const F16_STEP: f64 = 1.0 / 1024.0;
+        for (ty, rows, x_rows) in [
+            (BlockType::Q8_0, 333usize, 70usize),
+            (BlockType::Q8_0, 4100, 200),
+            (BlockType::Q5_0, 4096, 130),
+        ] {
+            let len = len(ty, rows, COLS);
+            let mut pages = Pages::new(len);
+            weights(ty, pages.bytes(), rows, COLS);
+            let x: Vec<f32> = (0..x_rows * COLS)
+                .map(|i| ((i * 37 % 101) as f32 - 50.0) / (25.0 + (i / COLS) as f32))
+                .collect();
+            let size = ty.block_bytes();
+            let blocks = COLS / BLOCK_VALUES;
+            let weights: Arc<dyn Bound> =
+                Arc::new(Buffer::with_bytes(&context, &pages.bytes()[..len])?);
+            let xs = Arc::new(Buffer::with_f32(&context, &x)?);
+            let ys = Arc::new(Buffer::new(&context, x_rows * rows * 4)?);
+            let scratch = Arc::new(Buffer::new(&context, MatVec::scratch_bytes(x_rows, COLS))?);
+            context.submit(|r| {
+                r.mat_vec(&MatVec {
+                    ty,
+                    weights: &weights,
+                    rows,
+                    cols: COLS,
+                    x: &xs,
+                    x_offset: 0,
+                    y: &ys,
+                    y_offset: 0,
+                    x_rows,
+                    scratch: &scratch,
+                })
+            })?;
+            let got = ys.read_f32()?;
+            let sampled = (0..rows).step_by(ROW_STEP).chain([rows - 1]);
+            for row in sampled {
+                for m in [0, x_rows / 2, x_rows - 1] {
+                    let xm = &x[m * COLS..][..COLS];
+                    let (mut want, mut mass) = (0f64, 0f64);
+                    for b in 0..blocks {
+                        let block = &pages.bytes()[(row * blocks + b) * size..][..size];
+                        let d = f64::from(half::f16::from_le_bytes([block[0], block[1]]).to_f32());
+                        for j in 0..BLOCK_VALUES {
+                            let p = d * value(ty, block, j) * f64::from(xm[b * BLOCK_VALUES + j]);
+                            want += p;
+                            mass += p.abs();
+                        }
+                    }
+                    let got = f64::from(got[m * rows + row]);
+                    assert!(
+                        (got - want).abs() <= mass * F16_STEP + 1e-4,
+                        "{ty:?} {rows} x {x_rows}: token {m} row {row}: {got} vs {want}"
                     );
                 }
             }

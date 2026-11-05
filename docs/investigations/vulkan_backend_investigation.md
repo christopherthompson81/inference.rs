@@ -1283,3 +1283,25 @@ llama.cpp's is 36 us; 64 workgroups still leave the card part idle, so the rest 
 along the tokens' rows, `coopMatLoad` from there, the step 2 blocks so the three tiles fit in 34 KB): 512-row Q8_0
 36.4 -> 17.5 TOPS, through an aliased `f16vec4` view or the scalar one alike, where the 2-block step alone gives 33.2.
 GPU Trace exported no counters for the slow variant (nan, as for Run 48's), so the cause is unseen; reverted.
+
+### Run 53 - 2026-11-05 ~02:00 (desktop: RTX 3090)
+
+**Question:** why Run 52's staged activations halved the dense matrix-core matmul when llama.cpp's matrix-core matmul
+stages both operands.
+
+**Finding (llama.cpp's `mul_mm.comp`, COOPMAT):** its loop is ours staged: load A and B to shared memory, barrier,
+products, barrier; no double buffer, no prefetch. Its large tile is 128 x 128 a workgroup and 64 x 64 a warp (16
+accumulators) where ours was 64 x 64 and 32 x 32 (4): four times the products a staged byte and a barrier serve.
+
+**Change:** `mul_mmcl_main.glsl`, 128 x 128 tiles: 4 subgroups each a 64 x 64 quarter as 4 x 4 accumulators, the
+weights dequantized and the tokens' f16 rows copied (8 halves a load) into shared memory a 2-block step (~37 KB),
+each 16 x 16 result written through a subgroup's 1 KB stage along the weight rows. The scratch pads tokens to 128.
+
+**Results (512 tokens, us a call, against 64 x 64 tiles):** Q8_0 10304 x 2688 777 -> 695 (40.8 TFLOPS), 4096 x 2688
+440 -> 324, but 2688 x 4096 469 -> 526, Q5_0 2688 x 3712 297 -> 370 and 3712 x 2688 256 -> 313; with scalar token
+loads (4 halves a thread a load) the 512-row Q8_0 bench read 28.6 TOPS, with 8-half loads 35.3 (64 x 64: 36.4). So
+the large tile takes matrices of 4096 rows or more, 128 tokens or more: a 512-token prompt 171.5 -> 166.5 ms, 2048
+tokens 634-654 ms (638 before). `matrix_core_prompt_matmuls_match_their_reference` covers both tiles (a sabotaged
+large tile fails it).
+
+**Still behind llama.cpp:** 2688 x 4096 at 469 us against its 215, and the routed experts.
