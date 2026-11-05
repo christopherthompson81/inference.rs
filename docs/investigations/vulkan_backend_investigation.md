@@ -1006,3 +1006,107 @@ So an iGPU keeps the matrix cores off by default.
 
 **Trap:** `--paged-attn on` without `--pa-context-len` sizes the cache from free memory (12 GB, 2M tokens of
 Lightning's ~7 KB a token here) and the device map moves 5 layers to the CPU: 250 tok/s at 512.
+
+### Run 39 - 2026-11-04 ~18:30 (desktop: RTX 3090)
+
+**Question:** item (3) of Nemotron-H CUDA Run 18. Vulkan decodes Lightning (Q4_0 experts) at 115-130 tok/s where CUDA
+does 209. Where does a decode step go?
+
+**Commands:** `INFERENCE_VULKAN_PROFILE=1 inference bench --vulkan --prompt-len 16 --gen-len 1024`; perf and
+`/proc/<pid>/task/*/stat` over 5-8 s of steady decode; `nvidia-smi dmon -s pu`; a probe timing 1000 back-to-back
+`map_f32` dispatches (2688 floats) with and without the per-dispatch barrier; llama.cpp `970b51ce7` Vulkan
+`llama-bench -p 512 -n 128 -fa 1` on the same file.
+
+**Findings:**
+- The timestamp profile counts ~375 dispatches a token: ~146 `map_f32`, ~68 `quantize_q8_1`, ~32 `rows_f32`, ~29
+  `mat_vecs_q8_0`, 19 each of the Q4_0 experts and Q5_0 matvecs, ~10 each of router, scan, conv and the f32 matmuls.
+  It summed only ~3.2 ms of GPU a ~10 ms token, a dead end: `nvidia-smi` shows the SMs 98-99 % busy at ~280 W with
+  memory at 32-45 %. Decode is GPU-bound, and the per-dispatch timestamps undercount on NVIDIA (as Run 29 found).
+- The main thread is on the CPU 26 % of a step (1.31 s user in 5 s); the driver's `[vkrt] Analysis` thread spins
+  ~1.8 s of 5 in the kernel by itself, unrelated to our recording.
+- The probe: 7.1-9.2 us a dispatch with the barrier each dispatch records, 1.3 us without. Each barrier drains the
+  GPU, ~7 us of busy-but-idle SMs; at ~375 a token, ~2.6 ms of the step.
+- llama.cpp's Vulkan backend on the same card and file: pp512 4074 tok/s, tg128 176 tok/s (ours ~2200 and 115-130).
+
+**Next:** fewer drains a token. Two levers: fuse the elementwise maps and the activation quantizes into their
+neighbours (fewer dispatches), and record a barrier only where a dispatch reads or overwrites what an earlier,
+unbarriered one wrote (which needs each pipeline's written bindings).
+
+### Run 40 - 2026-11-04 ~20:30 (desktop: RTX 3090)
+
+**Question:** Run 39's decode step, with the card to itself: what moves it?
+
+**Note:** a Godot editor had been holding 1.7 GB of VRAM and ~37 % of the GPU during Run 39's later checks; it was
+closed for these. Decode still swings ~+-15 tok/s within a 2-iteration bench, so A/Bs here alternate runs.
+
+**Changes and results (Lightning Q4_0 experts, `--paged-attn on --pa-cache-type q8 --pa-context-len 32768`):**
+- `gated_rmsnorm.comp`: Mamba-2's gated RMSNorm (silu gate, per-group RMS, weight) in one dispatch, where the
+  composite took nine a Mamba layer (`a_fused_gated_rmsnorm_matches_its_composite`). Alternating six pairs, fused
+  won all six: 114-121 against 109-115 tok/s (~4 %). The maps it removes were ~0.4 ms of ~8 a token by timestamps.
+- Decode profile (paged, steady window, ~563 tokens): Q8_0 dense matvecs 2.51 ms a token (71 calls, ~530 GB/s),
+  Q4_0 expert matvecs 1.80 ms (46), Q5_0 shared experts 0.79 ms (46), router 0.48 ms, `quantize_q8_1` 0.47 ms (163),
+  `ranked_topk` 0.29 ms (one workgroup for the one row: one SM of 82), paged attention ~0.35 ms.
+- `matvec_bandwidth_at_decode_shapes` and `expert_matvec_bandwidth_at_decode` (new benches): the lm_head shape
+  reads at 871 GB/s, but decode's shapes fall off: Mamba in 713, Mamba out 579, attention q 553, attention k 98, the
+  shared expert 465-534, the routed experts 479-502. Skipping the activation quantize saves 2.5-3 us a call.
+- Experts at 8 rows a workgroup: spills (down 296 us). At 32 threads a workgroup (one subgroup, 4 rows): up 35.2 ->
+  32.4 us, down 33.6 -> 29.6; 2 rows: up 31.1, down 32.8. Dense at 32 threads: decode shapes 1-13 % faster, lm_head
+  unchanged, 8 activation rows Q8_0 410 -> 472 GB/s but Q5_0 393 -> 362.
+- Both at 32 threads, 4 rows: decode 116.7 -> 129-133 tok/s; prompts unchanged (512 tokens 226 ms, 2048 724 ms).
+
+**Next:** the fixed cost a dispatch (~3 us beyond its work, ~600 a token) and the remaining matvec gap to the card's
+~870 GB/s; `ranked_topk` over more of the GPU for a single row.
+
+### Run 41 - 2026-11-04 ~21:30 (desktop: RTX 3090)
+
+**Question:** after Run 40 (~131 tok/s), the sampler's top-128 and the matvecs' occupancy.
+
+**Changes and results (as Run 40's setup):**
+- `ranked_topk` ran a workgroup a row: decode's one row of 131072 logits, read eight times, on one SM (286 us a
+  token). Now `ranked_topk_part` takes 4096-logit chunks over the GPU (each chunk's sorted top-128, max and partial
+  sum; the last chunk takes a row's remainder, so each holds 128 or more), and `ranked_topk` selects again from a
+  row's chunks' candidates in chunk order, so ties still go to the lower index. 29.6 + 28.1 us a token; decode
+  ~131 -> 147-150 tok/s. `ranked_top_k_matches_a_sort` adds a 151936-logit row (a remainder chunk).
+- Dense matvecs at 2 rows a workgroup (more warps a SM for decode's small matrices) and at 1: no better at any
+  decode shape (2688 x 4096: 19.8 us at 4 rows, 21.6 at 2, 20.6 at 1), and lm_head falls from 869 GB/s to 660 / 736.
+  Occupancy is not the matvecs' limit; back to 4 rows.
+
+**Where a token goes now (~6.7 ms wall, CUDA 4.8):** matvecs ~4.5 ms (decode shapes 540-750 GB/s against lm_head's
+870), ~600 dispatches at ~3 us of fixed cost each, the router 0.48 ms, the activation quantizes 0.47 ms.
+
+**Next:** the matvecs' loads (34- and 22-byte blocks read as u16s) against llama.cpp's Vulkan mul_mat_vec, which
+decodes this file at 176 tok/s.
+
+### Run 42 - 2026-11-04 ~22:30 (desktop: RTX 3090)
+
+**Question:** two more matvec ideas, and barriers only where a dispatch needs one (llama.cpp's Vulkan backend
+records a barrier only when a node overlaps an unsynchronized one's memory).
+
+**Dead ends:**
+- A Q8_0 matvec a quarter block (8 values) a thread, so a subgroup's loads cover 8 adjacent blocks (llama.cpp's
+  `K_PER_ITER = 8`) instead of 32 blocks 34 bytes apart: slower everywhere (lm_head 869 -> 749 GB/s, 2688 x 4096
+  19.8 -> 21.1 us). The L1 already absorbs the whole-block strides.
+- Barrier elision: each binding's writability read off the SPIR-V (NonWritable), and a barrier before a dispatch
+  only when it reads a buffer written, or writes one touched, since the last barrier. Decode recorded 905568
+  barriers in 1000000 dispatches (9.5 % elided): a decode step is a dependency chain. Alternating A/B: 133.8 / 135.7
+  / 138.4 tok/s elided against 140.3 / 133.8 / 132.8 always; no gain, so not kept.
+
+**Where the gap to CUDA is:** ~700 dependent dispatches a token, each drained, ~3 us of fixed cost each on Vulkan
+here against ~1 us for CUDA's stream; ~1.4 ms of the ~1.9 ms gap. The lever is fewer dispatches: the 163 activation
+quantizes, the 167 elementwise maps (residual adds, relu^2, scales) and the 53 row ops folded into their neighbours.
+
+### Run 43 - 2026-11-04 ~20:30 (desktop: RTX 3090)
+
+**Question:** Run 42's plan, fewer dispatches; first relu^2 (a Relu then a Sqr on the shared and routed experts, ~46
+dispatches a token) as one map op.
+
+**Note:** KDE's `baloo_file_extractor` was crash-looping (SIGABRT several times a second), systemd-coredump
+parsing each dump at 100 % of a core; decode read 130-141 tok/s in both arms until it was suspended.
+
+**Change:** `MapOp::Relu2` and `inference_tensor::nn::ops::relu_sqr` (the map on Vulkan, relu then sqr elsewhere),
+used by both activations' `Relu2` and the Vulkan routed experts. `a_fused_relu_sqr_matches_relu_then_sqr`: bit-exact
+over a strided view.
+
+**Result (alternating, 512 tokens, 3 iterations):** fused 142.1 / 143.4 / 142.3 tok/s, unfused 143.3 / 142.5 /
+140.2; no measurable gain. A drain after a kernel this small is cheap, so Run 42's ~3 us a dispatch overstates what
+folding the tiny maps recovers; the residual adds and the other small maps would buy as little.

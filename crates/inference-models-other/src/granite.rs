@@ -939,6 +939,19 @@ impl RmsNormGated {
                 self.group_size,
             );
         }
+        if let Some(gate) = gate
+            && hidden_states.device().is_vulkan()
+            && dtype == inference_tensor::DType::F32
+            && gate.dtype() == inference_tensor::DType::F32
+        {
+            return inference_tensor::vulkan::gated_rmsnorm(
+                hidden_states,
+                gate,
+                &self.weight.to_dtype(inference_tensor::DType::F32)?,
+                self.eps as f32,
+                self.group_size,
+            );
+        }
         let mut hidden_states = hidden_states.to_dtype(inference_tensor::DType::F32)?;
 
         // Apply gating if provided

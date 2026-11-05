@@ -118,9 +118,11 @@ kernels! {
     paged_decode_f16: PAGED_DECODE_F16, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
     paged_decode_reduce: PAGED_DECODE_REDUCE, ops::PAGED_REDUCE_BINDINGS, ops::PAGED_REDUCE_PUSH_BYTES;
     flash_attn: FLASH_ATTN, ops::FLASH_BINDINGS, ops::FLASH_PUSH_BYTES;
+    gated_rmsnorm: GATED_RMSNORM, ops::GATED_RMSNORM_BINDINGS, ops::GATED_RMSNORM_PUSH_BYTES;
     paged_prefill: PAGED_PREFILL, ops::PAGED_PREFILL_BINDINGS, ops::PAGED_PREFILL_PUSH_BYTES;
     paged_prefill_f16: PAGED_PREFILL_F16, ops::PAGED_PREFILL_BINDINGS, ops::PAGED_PREFILL_PUSH_BYTES;
     ranked_topk: RANKED_TOPK, ops::RANKED_BINDINGS, ops::RANKED_PUSH_BYTES;
+    ranked_topk_part: RANKED_TOPK_PART, ops::RANKED_BINDINGS, ops::RANKED_PART_PUSH_BYTES;
     penalize: PENALIZE, ops::PENALIZE_BINDINGS, ops::PENALIZE_PUSH_BYTES;
     paged_prefill_quant: PAGED_PREFILL_QUANT, ops::PAGED_PREFILL_BINDINGS, ops::PAGED_PREFILL_PUSH_BYTES;
     paged_decode_quant: PAGED_DECODE_QUANT, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
@@ -947,6 +949,133 @@ mod tests {
                     secs / calls * 1e6
                 );
             }
+        }
+        Ok(())
+    }
+
+    // one token through a hybrid MoE's dense weights (Nemotron Lightning's: Mamba in and out, attention q and k, the
+    // shared expert's up), a record each as decode makes them
+    #[test]
+    #[ignore = "benchmark"]
+    fn matvec_bandwidth_at_decode_shapes() -> Result<()> {
+        let Some(context) = context() else {
+            return Ok(());
+        };
+        const REPEATS: usize = 200;
+        let shapes = [
+            (BlockType::Q8_0, 10_304, 2688),
+            (BlockType::Q8_0, 2688, 4096),
+            (BlockType::Q8_0, 4096, 2688),
+            (BlockType::Q8_0, 256, 2688),
+            (BlockType::Q5_0, 3712, 2688),
+            (BlockType::Q5_0, 2688, 3712),
+        ];
+        for (ty, rows, cols) in shapes {
+            let len = len(ty, rows, cols);
+            let mut pages = Pages::new(len);
+            weights(ty, pages.bytes(), rows, cols);
+            let weights: Arc<dyn Bound> =
+                Arc::new(Buffer::with_bytes(&context, &pages.bytes()[..len])?);
+            let mut xs = Buffer::new(&context, cols * 4)?;
+            xs.fill(0.5f32.to_bits())?;
+            let (xs, ys) = (Arc::new(xs), Arc::new(Buffer::new(&context, rows * 4)?));
+            let scratch = Arc::new(Buffer::new(&context, MatVec::scratch_bytes(1, cols))?);
+            let op = MatVec {
+                ty,
+                weights: &weights,
+                rows,
+                cols,
+                x: &xs,
+                x_offset: 0,
+                y: &ys,
+                y_offset: 0,
+                x_rows: 1,
+                scratch: &scratch,
+            };
+            let run = || -> Result<()> {
+                for _ in 0..REPEATS {
+                    context.record(|r| r.mat_vec(&op))?;
+                }
+                context.synchronize()
+            };
+            run()?;
+            let start = std::time::Instant::now();
+            run()?;
+            let secs = start.elapsed().as_secs_f64() / REPEATS as f64;
+            println!(
+                "{ty:?} {rows} x {cols}: {:.1} us, {:.0} GB/s",
+                secs * 1e6,
+                len as f64 / secs / 1e9
+            );
+        }
+        Ok(())
+    }
+
+    // one token's routes through a stack of 128 Q4_0 experts, as decode runs them: up (one activation row for the six
+    // routes) and down (a row a route)
+    #[test]
+    #[ignore = "benchmark"]
+    fn expert_matvec_bandwidth_at_decode() -> Result<()> {
+        let Some(context) = context() else {
+            return Ok(());
+        };
+        const EXPERTS: usize = 128;
+        const K: usize = 6;
+        const REPEATS: usize = 200;
+        let ty = BlockType::Q4_0;
+        for (rows, cols, x_div) in [(1856usize, 2688usize, K), (2688, 1856, 1)] {
+            let len = EXPERTS * len(ty, rows, cols);
+            let mut pages = Pages::new(len);
+            weights(ty, pages.bytes(), EXPERTS * rows, cols);
+            let weights: Arc<dyn Bound> =
+                Arc::new(Buffer::with_bytes(&context, &pages.bytes()[..len])?);
+            let id_bytes: Vec<u8> = (0..K as u32)
+                .flat_map(|j| (j * 21 + 5).to_le_bytes())
+                .collect();
+            let ids = Arc::new(Buffer::with_bytes(&context, &id_bytes)?);
+            let x: Vec<f32> = (0..K.div_ceil(x_div) * cols)
+                .map(|i| (i % 13) as f32 - 6.0)
+                .collect();
+            let xs = Arc::new(Buffer::with_f32(&context, &x)?);
+            let ys = Arc::new(Buffer::new(&context, K * rows * 4)?);
+            let scratch = Arc::new(Buffer::new(
+                &context,
+                crate::MoeMatVec::scratch_bytes(&context, K, x_div, cols),
+            )?);
+            let routing = Arc::new(Buffer::new(
+                &context,
+                crate::MoeMatVec::routing_bytes(K, EXPERTS),
+            )?);
+            let op = crate::MoeMatVec {
+                ty,
+                weights: &weights,
+                experts: EXPERTS,
+                rows,
+                cols,
+                slots: K,
+                x_div,
+                x: (&xs, 0),
+                ids: (&ids, 0),
+                y: &ys,
+                scratch: &scratch,
+                routing: &routing,
+            };
+            let run = || -> Result<()> {
+                for _ in 0..REPEATS {
+                    context.record(|r| r.moe_mat_vec(&op))?;
+                }
+                context.synchronize()
+            };
+            run()?;
+            let start = std::time::Instant::now();
+            run()?;
+            let secs = start.elapsed().as_secs_f64() / REPEATS as f64;
+            let bytes = K * len / EXPERTS;
+            println!(
+                "Q4_0 experts {rows} x {cols}, {K} routes: {:.1} us, {:.0} GB/s",
+                secs * 1e6,
+                bytes as f64 / secs / 1e9
+            );
         }
         Ok(())
     }

@@ -244,6 +244,19 @@ pub struct ConvStep<'a> {
     pub out: &'a Arc<Buffer>,
 }
 
+/// Mamba-2's gated RMSNorm: `rows` rows of `x` and `gate` (`groups * group_size` f32 each), each value gated by
+/// silu(gate), each group normalized by its RMS, and all scaled by `weight` (`groups * group_size`).
+pub struct GatedRmsNorm<'a> {
+    pub rows: usize,
+    pub groups: usize,
+    pub group_size: usize,
+    pub eps: f32,
+    pub x: At<'a>,
+    pub gate: At<'a>,
+    pub weight: At<'a>,
+    pub out: &'a Arc<Buffer>,
+}
+
 /// `seq` steps of Mamba-2's selective scan on a state pool (`(rows, heads, head_dim, state)` f32, in place); `a`, `d`
 /// and `dt_bias` are `(heads,)` from their buffers' first element; `out` is `(batch, seq, heads, head_dim)`.
 pub struct ScanStep<'a> {
@@ -337,6 +350,30 @@ impl Recorder<'_> {
             &buffers.map(|b| b.buffer),
             &bytes,
             [groups.max(1), 1, 1],
+        );
+        for buffer in buffers {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+
+    pub fn gated_rmsnorm(&self, op: &GatedRmsNorm<'_>) -> Result<()> {
+        let workgroups = op.rows * op.groups;
+        if workgroups == 0 || op.group_size == 0 || workgroups > MAX_DISPATCH_GROUPS {
+            return Err(Error::Invalid(format!(
+                "gated RMSNorm of {} rows of {} groups of {}",
+                op.rows, op.groups, op.group_size
+            )));
+        }
+        let mut bytes = words(&[op.group_size, op.groups])?;
+        bytes.extend_from_slice(&op.eps.to_bits().to_le_bytes());
+        bytes.extend(words(&[op.x.1, op.gate.1, op.weight.1])?);
+        let buffers = [op.x.0, op.gate.0, op.weight.0, op.out];
+        self.context.kernels.gated_rmsnorm.dispatch(
+            self,
+            &buffers.map(|b| b.buffer),
+            &bytes,
+            [workgroups as u32, 1, 1],
         );
         for buffer in buffers {
             self.retain(buffer.clone());
@@ -711,6 +748,8 @@ pub(crate) const PAGED_WRITE_PUSH_BYTES: u32 = 8 * 4;
 pub(crate) const PAGED_WRITE_QUANT_PUSH_BYTES: u32 = 9 * 4;
 pub(crate) const PAGED_DECODE_BINDINGS: usize = 6;
 pub(crate) const PAGED_DECODE_PUSH_BYTES: u32 = 12 * 4;
+pub(crate) const GATED_RMSNORM_BINDINGS: usize = 4;
+pub(crate) const GATED_RMSNORM_PUSH_BYTES: u32 = 6 * 4;
 pub(crate) const PAGED_PREFILL_BINDINGS: usize = 5;
 pub(crate) const PAGED_PREFILL_PUSH_BYTES: u32 = 13 * 4;
 pub(crate) const HADAMARD_BINDINGS: usize = 2;
@@ -1270,7 +1309,10 @@ impl Recorder<'_> {
 }
 
 pub(crate) const RANKED_BINDINGS: usize = 2;
-pub(crate) const RANKED_PUSH_BYTES: u32 = 3 * 4;
+pub(crate) const RANKED_PUSH_BYTES: u32 = 2 * 4;
+pub(crate) const RANKED_PART_PUSH_BYTES: u32 = 4 * 4;
+// logits a ranked_topk_part workgroup takes (the last of a row takes the remainder)
+const RANKED_CHUNK: usize = 4096;
 
 /// Each of `rows` f32 logits rows of `vocab` (from `logits`): its [`RankedTopK::K`] largest values sorted
 /// descending (ties to the lower index), their indices as floats, the softmax normalizer at `inv_temperature` and
@@ -1280,6 +1322,8 @@ pub struct RankedTopK<'a> {
     pub vocab: usize,
     pub inv_temperature: f32,
     pub logits: At<'a>,
+    /// each row's chunks' candidates: [`RankedTopK::scratch_bytes`]
+    pub scratch: &'a Arc<Buffer>,
     pub out: &'a Arc<Buffer>,
 }
 
@@ -1289,6 +1333,14 @@ impl RankedTopK<'_> {
     pub fn row_floats() -> usize {
         2 * Self::K + 2
     }
+
+    fn chunks(vocab: usize) -> usize {
+        (vocab / RANKED_CHUNK).max(1)
+    }
+
+    pub fn scratch_bytes(rows: usize, vocab: usize) -> usize {
+        rows * Self::chunks(vocab) * Self::row_floats() * 4
+    }
 }
 
 impl Recorder<'_> {
@@ -1297,6 +1349,8 @@ impl Recorder<'_> {
         if op.vocab < RankedTopK::K
             || !temperature_ok
             || op.out.len() < op.rows * RankedTopK::row_floats() * 4
+            || op.scratch.len() < RankedTopK::scratch_bytes(op.rows, op.vocab)
+            || op.rows > MAX_DISPATCH_GROUPS
         {
             return Err(Error::Invalid(format!(
                 "ranked top-{} of {} rows of {} at inverse temperature {}",
@@ -1309,16 +1363,26 @@ impl Recorder<'_> {
         if op.rows == 0 {
             return Ok(());
         }
+        // each chunk's candidates over many workgroups, then a workgroup a row picks from them
+        let chunks = RankedTopK::chunks(op.vocab);
         let mut bytes = words(&[op.vocab, op.logits.1])?;
         bytes.extend_from_slice(&op.inv_temperature.to_bits().to_le_bytes());
-        let buffers = [op.logits.0, op.out];
+        bytes.extend(words(&[chunks])?);
+        self.context.kernels.ranked_topk_part.dispatch(
+            self,
+            &[op.logits.0.buffer, op.scratch.buffer],
+            &bytes,
+            [chunks as u32, op.rows as u32, 1],
+        );
+        let mut bytes = words(&[chunks])?;
+        bytes.extend_from_slice(&op.inv_temperature.to_bits().to_le_bytes());
         self.context.kernels.ranked_topk.dispatch(
             self,
-            &buffers.map(|b| b.buffer),
+            &[op.scratch.buffer, op.out.buffer],
             &bytes,
             [op.rows as u32, 1, 1],
         );
-        for buffer in buffers {
+        for buffer in [op.logits.0, op.scratch, op.out] {
             self.retain(buffer.clone());
         }
         Ok(())

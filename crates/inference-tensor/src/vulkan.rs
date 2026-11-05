@@ -70,6 +70,24 @@ pub fn ssm_conv_step(
     }
 }
 
+/// Mamba-2's gated RMSNorm, as `mamba_gated_rmsnorm_cuda` computes it: `x` and `gate` f32 `(.., width)`, `weight`
+/// `(width,)` f32, groups of `group_size` along the last dimension.
+pub fn gated_rmsnorm(
+    x: &Tensor,
+    gate: &Tensor,
+    weight: &Tensor,
+    eps: f32,
+    group_size: usize,
+) -> Result<Tensor> {
+    #[cfg(feature = "vulkan")]
+    return crate::vulkan_backend::gated_rmsnorm(x, gate, weight, eps, group_size);
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = (x, gate, weight, eps, group_size);
+        Err(crate::Error::NotCompiledWithVulkanSupport)
+    }
+}
+
 /// How MoE routing turns logits into scores, or the chosen experts into weights (where `Raw` weighs each by its score).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RouterFn {

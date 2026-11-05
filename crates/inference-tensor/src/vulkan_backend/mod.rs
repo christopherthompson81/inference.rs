@@ -537,6 +537,66 @@ pub(crate) fn ssm_conv_step(
     Ok(tensor_of(out, (batch, seq, channels)))
 }
 
+// max(x, 0)^2 in one map, where `x`'s storage is an f32 Vulkan buffer the map reads
+pub(crate) fn relu_sqr(x: &Tensor) -> Result<Option<Tensor>> {
+    let out = match &*x.storage() {
+        crate::Storage::Vulkan(s) if s.native(x.layout()) => {
+            s.map_f32(MapOp::Relu2, x.layout(), None, [0.0; 2])?
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(tensor_of(out, x.dims())))
+}
+
+pub(crate) fn gated_rmsnorm(
+    x: &Tensor,
+    gate: &Tensor,
+    weight: &Tensor,
+    eps: f32,
+    group_size: usize,
+) -> Result<Tensor> {
+    let width = x.dim(crate::D::Minus1)?;
+    if gate.dims() != x.dims()
+        || weight.elem_count() != width
+        || group_size == 0
+        || width % group_size != 0
+    {
+        crate::bail!(
+            "gated RMSNorm of x {:?}, gate {:?}, weight {:?}, groups of {group_size}",
+            x.dims(),
+            gate.dims(),
+            weight.dims()
+        );
+    }
+    let f32 = DType::F32;
+    let (x, gate, weight) = (x.contiguous()?, gate.contiguous()?, weight.contiguous()?);
+    let (xb, gb, wb) = (bound(&x, f32)?, bound(&gate, f32)?, bound(&weight, f32)?);
+    let device = x.device().as_vulkan_device()?.clone();
+    let count = x.elem_count();
+    let out = VulkanStorage {
+        buffer: Arc::new(device.buffer(count * 4)?),
+        device: device.clone(),
+        count,
+        dtype: f32,
+    };
+    device
+        .context
+        .record(|r| {
+            r.gated_rmsnorm(&inference_vulkan::GatedRmsNorm {
+                rows: count / width,
+                groups: width / group_size,
+                group_size,
+                eps,
+                x: (&xb.0, xb.1),
+                gate: (&gb.0, gb.1),
+                weight: (&wb.0, wb.1),
+                out: &out.buffer,
+            })
+        })
+        .map_err(vk_err)?;
+    Ok(tensor_of(out, x.dims()))
+}
+
 pub(crate) fn moe_router(route: &crate::vulkan::Route<'_>) -> Result<(Tensor, Tensor)> {
     use crate::vulkan::RouterFn as F;
     let (tokens, experts) = route.logits.dims2()?;
@@ -928,6 +988,8 @@ pub(crate) fn ranked_top_k(logits: &Tensor, temperature: f64) -> Result<Tensor> 
         count,
         dtype: DType::F32,
     };
+    let scratch =
+        Arc::new(device.buffer(inference_vulkan::RankedTopK::scratch_bytes(rows, vocab))?);
     device
         .context
         .record(|r| {
@@ -936,6 +998,7 @@ pub(crate) fn ranked_top_k(logits: &Tensor, temperature: f64) -> Result<Tensor> 
                 vocab,
                 inv_temperature: (1.0 / temperature) as f32,
                 logits: (&x, x_off),
+                scratch: &scratch,
                 out: &out.buffer,
             })
         })
@@ -1997,12 +2060,68 @@ mod tests {
         Ok(())
     }
 
+    // relu(x)^2 in one map against the CPU's relu then sqr, over a strided view
+    #[test]
+    fn a_fused_relu_sqr_matches_relu_then_sqr() -> Result<()> {
+        let Some(vk) = device() else { return Ok(()) };
+        let x = Tensor::randn(0f32, 1.0, (6, 1856), &Device::Cpu)?;
+        let want = x.t()?.relu()?.sqr()?.flatten_all()?.to_vec1::<f32>()?;
+        let got = crate::nn::ops::relu_sqr(&x.to_device(&vk)?.t()?)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        assert_eq!(got, want);
+        Ok(())
+    }
+
+    // Mamba-2's gated RMSNorm in one pass against its composite on the CPU: a decode row and a prompt's rows, groups
+    // narrower and wider than a workgroup
+    #[test]
+    fn a_fused_gated_rmsnorm_matches_its_composite() -> Result<()> {
+        let Some(vk) = device() else { return Ok(()) };
+        let eps = 1e-5f32;
+        for (rows, groups, group_size) in [(1usize, 8usize, 512usize), (5, 3, 100), (2, 2, 700)] {
+            let width = groups * group_size;
+            let x = Tensor::randn(0f32, 1.0, (rows, width), &Device::Cpu)?;
+            let gate = Tensor::randn(0f32, 2.0, (rows, width), &Device::Cpu)?;
+            let weight = Tensor::randn(1f32, 0.3, width, &Device::Cpu)?;
+            let gated = (&x * crate::nn::ops::silu(&gate)?)?.reshape((rows, groups, group_size))?;
+            let rms = (gated.sqr()?.mean_keepdim(crate::D::Minus1)? + f64::from(eps))?.sqrt()?;
+            let want = gated
+                .broadcast_div(&rms)?
+                .reshape((rows, width))?
+                .broadcast_mul(&weight)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
+            let got = crate::vulkan::gated_rmsnorm(
+                &x.to_device(&vk)?,
+                &gate.to_device(&vk)?,
+                &weight.to_device(&vk)?,
+                eps,
+                group_size,
+            )?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+            for (g, w) in got.iter().zip(&want) {
+                assert!(
+                    (g - w).abs() <= 1e-4 * w.abs().max(1.0),
+                    "{rows}x{groups}x{group_size}: {g} vs {w}"
+                );
+            }
+        }
+        Ok(())
+    }
+
     // the device's top-K a row against a sort here: ties to the lower index, masked entries never in the sum
     #[test]
     fn ranked_top_k_matches_a_sort() -> Result<()> {
         let Some(vk) = device() else { return Ok(()) };
         let k = crate::vulkan::RANKED_TOP_K;
-        for (rows, vocab, temperature) in [(3usize, 131_072usize, 0.7f64), (2, 1000, 1.0)] {
+        // whole 4096-logit chunks, a remainder chunk, and one chunk
+        for (rows, vocab, temperature) in [
+            (3usize, 131_072usize, 0.7f64),
+            (1, 151_936, 0.8),
+            (2, 1000, 1.0),
+        ] {
             let mut logits =
                 Tensor::randn(0f32, 3.0, (rows, vocab), &Device::Cpu)?.to_vec2::<f32>()?;
             for row in logits.iter_mut() {

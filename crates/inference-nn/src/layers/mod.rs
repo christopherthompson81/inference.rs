@@ -2565,7 +2565,7 @@ impl Module for Activation {
             // https://github.com/huggingface/transformers/blob/12f043eaeaabfef6f6efea411d98e6f6d3c094b7/src/transformers/activations.py#L49-L78
             Self::NewGelu => xs.gelu(),
             Self::Relu => xs.relu(),
-            Self::Relu2 => xs.relu()?.sqr(),
+            Self::Relu2 => inference_tensor::nn::ops::relu_sqr(xs),
             Self::Relu6 => xs.clamp(0f32, 6f32),
             Self::Silu => xs.silu(),
             Self::Sigmoid => inference_tensor::nn::ops::sigmoid(xs),
