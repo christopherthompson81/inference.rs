@@ -1,7 +1,7 @@
 #version 450
-// Groups a step's routes by expert, for moe_mm, into one u32 buffer: `order` (the slots expert by expert, each
-// expert's in slot order) at 0, then at tiles_off the tile count and the tiles, (expert, first place in `order`,
-// routes) each, an expert's routes cut into tiles of TILE. One workgroup.
+// Groups a step's routes by expert, for moe_mm, into one u32 buffer: `order` (the slots expert by expert) at 0,
+// then at tiles_off the tile count and the tiles, (expert, first place in `order`, routes) each, an expert's routes
+// cut into tiles of TILE. One workgroup.
 
 layout(local_size_x = 256) in;
 
@@ -46,18 +46,16 @@ void main() {
                 tiles++;
             }
             sum += counts[e];
+            // from here the expert's cursor
+            counts[e] = 0;
         }
         routing[pc.tiles_off] = tiles;
     }
     barrier();
-    // each expert's routes in slot order: a thread an expert, scanning the slots (a step's are a few thousand)
-    for (uint e = t; e < pc.experts; e += THREADS) {
-        uint at = starts[e];
-        for (uint s = 0; s < pc.slots; s++) {
-            if (ids[pc.ids_off + s] == e) {
-                routing[at] = s;
-                at++;
-            }
-        }
+    // each slot to its expert's next place: an expert's routes in no set order, as each route's output is its own and
+    // only which tile computes it changes (a thread an expert scanning every slot was most of a prompt step's sort)
+    for (uint s = t; s < pc.slots; s += THREADS) {
+        uint e = ids[pc.ids_off + s];
+        routing[starts[e] + atomicAdd(counts[e], 1u)] = s;
     }
 }

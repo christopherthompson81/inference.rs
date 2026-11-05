@@ -1110,3 +1110,131 @@ over a strided view.
 **Result (alternating, 512 tokens, 3 iterations):** fused 142.1 / 143.4 / 142.3 tok/s, unfused 143.3 / 142.5 /
 140.2; no measurable gain. A drain after a kernel this small is cheap, so Run 42's ~3 us a dispatch overstates what
 folding the tiny maps recovers; the residual adds and the other small maps would buy as little.
+
+### Run 44 - 2026-11-04 ~21:30 (desktop: RTX 3090)
+
+**Question:** prompt speed (item 3's other half): where does a 512-token prompt go, against llama.cpp Vulkan's 4074
+tok/s and CUDA's 4285 (ours ~2260)?
+
+**Profile (`INFERENCE_VULKAN_PROFILE`, 40 prompts of 512, steady window, ~22 prompts):** the GPU is busy the whole
+prompt (~220 ms). A prompt: `moe_mm_q4_0` (the routed experts' dp4a row-streaming kernel) ~112 ms, about half;
+`mul_mmc_q8_0` + `_q5_0` (dense on matrix cores) ~54 ms (~28 TFLOPS); `matmul_f32_tiled` ~11 ms; the Mamba conv and
+SSD scans ~16 ms; `moe_sort` ~6 ms; prompt attention ~6 ms. 512 tokens x 6 routes over 128 experts is ~24 routes
+an expert, under the matrix-core experts' 48.
+
+**Dead ends:**
+- The matrix-core experts (64-token tiles) at 16 routes an expert: 512 tokens 226 -> 245 ms.
+- `moe_mmc32`, 32-token tiles of 128 weight rows (`mul_mmc_main.glsl` taking its tile as defines, `moe_sort` its
+  tile as a push constant): `expert_matmul_throughput` 2.81 ms a pass against dp4a's 1.97 (64-token tiles 2.37).
+  Dequantizing a weight tile to f16 is a fixed cost a tile, which fewer tokens a tile pay more of.
+- The dp4a kernel with each step's 256-row weight slab staged in shared memory by coalesced u16 pairs (its rows
+  streamed a thread each make a subgroup's loads span 32 rows): 11.87 ms a pass. The staging's per-element index
+  math and barriers cost far more than the strided loads, which the L1 serves across a row's successive blocks.
+
+**Implication:** the experts' kernel is ~5x off its ALU bound (~20 ms a prompt by instruction count) for reasons
+timestamps cannot show; counters (Nsight Graphics' GPU Trace, the one Vulkan profiler with SM and memory metrics on
+this driver, which exposes no VK_KHR_performance_query) would.
+
+### Run 45 - 2026-11-04 ~21:30 (desktop: RTX 3090)
+
+**Question:** Run 44's expert kernel through hardware counters (Nsight Graphics 2026.4, GPU Trace).
+
+**Getting a trace:** `ngfx --activity "GPU Trace Profiler"` headless needs `QT_QPA_PLATFORM=offscreen` and no
+`--platform` (Qt reads it as its own `-platform`), and `--no-timeout` (the launch times out before a process makes
+its Vulkan device). Under it the full `inference bench` never loaded the model (0 % GPU, 2.7 GB of VRAM after 8
+minutes, both processes spinning a core). The `expert_matmul_throughput` test binary traces cleanly
+(`--start-after-submits 3 --max-duration-ms 200 --auto-export`); the CLI exports whole-trace aggregates only
+(`GPUTRACE_FRAME.xls`), which the expert passes dominate.
+
+**Counters (512 tokens x 6 routes over 128 Q5_0 experts, 1856 x 2688):** graphics engine active 96 %, SM throughput
+19.6 % (0.78 of 4 instructions a cycle), compute warps active 29 % of peak, registers allocated 41 %, L1 31 %, L2
+7.9 %, DRAM 12 %. Latency-bound at low occupancy, nowhere near any bandwidth or issue limit.
+
+**Dead end:** half the accumulators (32-token tiles, `TM` 4 -> 2, `moe_sort`'s tile a push constant): 1.95 -> 3.40 ms
+a pass. Each tile streams its expert's whole rows, so halving the tile doubles the weight reads a token, which costs
+more than the occupancy buys.
+
+**Next:** the per-dispatch view (warp stall reasons, the kernel's registers) is in the trace file
+(`*.ngfx-gputrace`, opened in `ngfx-ui`), not the CLI export.
+
+### Run 46 - 2026-11-04 ~22:00 (desktop: RTX 3090)
+
+**Question:** counters a kernel, where Run 45's export gave only whole-trace totals.
+
+**Change:** `INFERENCE_VULKAN_LABELS` wraps each dispatch in a `VK_EXT_debug_utils` label named for its kernel; GPU
+Trace then exports a row a range (`GPUTRACE_REGIMES.xls`, times in `D3DPERF_EVENTS.xls`). `scripts/vulkan_gputrace.py`
+runs a binary under `ngfx` headless with the labels on (or reads an export) and prints a table a kernel, its
+counters weighted by each dispatch's time.
+
+**Results:**
+
+| kernel (bench) | us each | sm% | warps% | regs% | L1/LSU% | shared% | DRAM% |
+|---|---|---|---|---|---|---|---|
+| moe_mm_q5_0 (`expert_matmul_throughput`) | 2009 | 44.8 | 30.9 | 81.1 | 71.7 | 36.9 | 26.3 |
+| moe_sort (same) | 213 | 0.2 | 0.2 | 0.2 | 0.1 | 0.0 | 0.0 |
+| mat_vecs_q8_0 (`matvec_bandwidth_at_decode_shapes`) | 20.2 | 16.2 | 19.8 | 52.0 | 41.6 | 1.4 | 67.4 |
+| mat_vecs_q5_0 (same) | 12.3 | 28.7 | 13.2 | 34.8 | 24.6 | 1.8 | 40.8 |
+| quantize_q8_1 (same) | 4.0 | 1.5 | 1.3 | 3.3 | 1.9 | 0.1 | 4.7 |
+
+**Implication:** the expert matmul is register-bound (81 % allocated, 31 % of warps) and load-store-bound (72 %:
+its weights read as u16s, 11 a Q5_0 block, and every token block read from shared memory a dot); `moe_sort` is one
+workgroup's serial tile list, 9.5 % of the experts' time (~6 ms a 512-token prompt), and the cheapest fix.
+
+### Run 47 - 2026-11-04 ~22:30 (desktop: RTX 3090)
+
+**Question:** Run 46's cheapest items, measured with `scripts/vulkan_gputrace.py`.
+
+**Changes:**
+- `moe_sort`: a thread an expert scanned every slot to list its routes in slot order; each slot now takes its
+  expert's next place by an atomic cursor (the order within an expert is free: each route's output is its own).
+  212.6 -> 22.8 us a call; `expert_matmul_throughput` 1.95 -> 1.82 ms a pass.
+- The matrix-core matmuls' weight tile as `f16vec4`s, a block's dequantized values in 8 stores rather than 32.
+  512 rows: Q8_0 35.2 -> 36.4 TOPS, Q5_0 39.2 -> 40.2.
+
+**Finding:** `mul_mmc_q8_0` (lm_head, 512 rows) runs its load-store pipe at 91-92 % with the SMs at 22-23 %, before
+and after: the tile stores were not its load. The rest is global: a thread reads its weight blocks as u16s (17 a
+Q8_0 block), neighbouring threads' blocks 34 bytes apart, and each subgroup loads its activation tiles from global
+memory every step. `moe_mm` has the same shape of limit (Run 46).
+
+**Next:** whole-word loads of each step's weight rows (compile-time index math; Run 44's staging spent its time on a
+runtime division a u16).
+
+### Run 48 - 2026-11-04 ~23:00 (desktop: RTX 3090)
+
+**Question:** Run 47's next step: the matrix-core matmuls' weight rows staged as whole words.
+
+**Change tried:** `mmc_stage.glsl` for the 32-value block types: each step's 64 rows copied raw into shared memory a
+u32 a thread along the rows (compile-time index math, a row's slab a word wider for an odd start), then each block
+unpacked from there through a `W16` hook in `int8_dot.glsl`.
+
+**Result:** 512-row Q8_0 36.4 -> 16.5 TOPS, Q5_0 40.2 -> 20.6 (both repeated); reverted. A first run read 11 ms for
+`expert_matmul_throughput`, which the change does not touch, right after a trace session; re-runs gave 2.1-2.2 ms and
+1.8-2.0 on the baseline, so the card's state drifts after GPU Trace and benches want a re-run before a verdict.
+
+**Finding:** unpacking a block from shared memory takes as many 16-bit reads as from global memory (17 for Q8_0),
+so staging adds the copy and saves nothing: the load-store pipe's limit is its instruction count, not coalescing.
+Fewer, wider loads need blocks aligned to their loads (34-, 22- and 18-byte blocks are 2-byte aligned): a Vulkan
+weight layout repacked at load (scales apart from 16-byte quant runs), which every int8 and matrix-core kernel reads.
+
+### Run 49 - 2026-11-04 ~23:30 (desktop: RTX 3090)
+
+**Question:** Run 48's conclusion, a row-split weight layout (each row's blocks' quantized values back to back, then
+their scales: the same bytes, so no memory cost), prototyped before wiring it through every kernel.
+
+**Prototypes (`block_at.glsl` under `ROW_SPLIT`, a type's `unpack_row`, test-only benches repacking the same random
+weights; every pair of outputs bit-identical):**
+
+| kernel, shape | blocks | row-split |
+|---|---|---|
+| Q8_0 matvec 10304 x 2688 / 2688 x 4096 / 4096 x 2688 / 256 x 2688 | 40.7 / 20.9 / 21.1 / 8.8 us | 40.0 / 20.1 / 19.5 / 8.0 |
+| Q8_0 matvec lm_head 131072 x 2688 | 421.5 us | 423.2 |
+| Q8_0 matrix-core, 512 tokens: 10304 x 2688 / 2688 x 4096 / lm_head | 34.4 / 25.6 / 37.1 TOPS | 39.7 / 29.9 / 42.0 |
+| Q4_0 experts, `expert_matmul_throughput` (512 x 6 of 128) | 1.66 ms | 2.93-3.05 |
+
+**Finding:** fewer, wider loads help the tiled kernels (matrix-core 13-17 %, matvecs 2-8 %) and hurt the experts'
+row-streaming kernel 1.8x: a thread streams its own row, and with the scales at the row's end each block's scale is
+another stream's line where the block layout kept it beside the values. The experts are half a prompt, and Q8_0 (the
+only type this model uses densely) would buy ~2 % of a prompt and of a decode step through a new block type in every
+kernel family. Not taken.
+
+**Where a 512-token prompt stands:** 216 ms (2375 tok/s; CUDA ~120 ms, llama.cpp Vulkan ~126 ms).

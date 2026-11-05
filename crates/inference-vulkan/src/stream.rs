@@ -48,6 +48,8 @@ pub(crate) struct Batch {
 
 /// Set to profile the GPU time of each kernel, printed every `PROFILE_PRINT_SECS`.
 pub const PROFILE_ENV: &str = "INFERENCE_VULKAN_PROFILE";
+/// Set to label every dispatch with its kernel's name (VK_EXT_debug_utils), for an external GPU profiler's ranges.
+pub const LABELS_ENV: &str = "INFERENCE_VULKAN_LABELS";
 // timestamps one batch's query pool holds: its opening one and a dispatch's each
 pub(crate) const PROFILE_QUERIES: u32 = 8192;
 const PROFILE_PRINT_SECS: u64 = 5;
