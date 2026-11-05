@@ -9,10 +9,7 @@ use crate::attention::FlashParams;
 use std::sync::{Arc, atomic::Ordering};
 
 use inference_tensor::{IndexOp, Result, Tensor};
-use rand::Rng;
 
-#[cfg(all(feature = "cuda", target_family = "unix"))]
-use crate::cuda::graph_capture::{CudaGraphComponent, CudaGraphEvent, CudaGraphEventGuard};
 use crate::{
     attention::AttentionMask,
     get_mut_arcmutex,
@@ -23,15 +20,13 @@ use crate::{
         SpeculativeCommitRow, SpeculativeConfig, SpeculativeGraphPlan, SpeculativeGraphState,
         SpeculativeKvCache, SpeculativePrefillCtx, SpeculativePrefixReplay, SpeculativeProposal,
         SpeculativeProposalBatch, SpeculativeProposeBatchCtx, SpeculativeProposePreparation,
-        SpeculativeProposePrepareCtx, SpeculativeTapRouting, SpeculativeTargetMixin,
-        TargetAttentionInputs, auto_depth_graph_plans, depths_up_to,
-        paged_rows::make_paged_rows_metadata, proposer::sample_draft_rows,
+        SpeculativeProposePrepareCtx, SpeculativeTargetMixin, TargetAttentionInputs,
+        auto_depth_graph_plans, depths_up_to, paged_rows::make_paged_rows_metadata,
+        proposer::sample_draft_rows,
     },
 };
-use inference_drafters::dflash::{
-    CtxAppend, DFlashDraftModel, DFlashGraphProposalInputs, DFlashLoadTarget,
-    DFlashPreparedContext, DFlashProposalBatch, DFlashSamplingInputs,
-};
+use inference_drafters::dflash::DFlashLoadTarget;
+use inference_drafters::host::{DrafterAttach, DrafterTarget, ExternalDrafter};
 
 use super::{
     Qwen3_5Model,
@@ -55,55 +50,6 @@ const MROPE_DIMS: usize = 3;
 // Feeds prompt rows whose next token is not known yet; their KV is rewritten before it is ever attended to
 const PLACEHOLDER_TOKEN: u32 = 0;
 
-struct DFlashPreparedRow {
-    seq_id: usize,
-    batch_idx: usize,
-    start_pos: usize,
-    offset: usize,
-    rows: usize,
-}
-
-struct DFlashProposePreparation {
-    context: DFlashPreparedContext,
-    rows: Vec<DFlashPreparedRow>,
-}
-
-fn dflash_speculative_batch(batch: DFlashProposalBatch) -> Result<SpeculativeProposalBatch> {
-    let proposals = match batch {
-        DFlashProposalBatch::Tokens(tokens) => {
-            tokens.into_iter().map(SpeculativeProposal::new).collect()
-        }
-        #[cfg(all(feature = "cuda", target_family = "unix"))]
-        DFlashProposalBatch::DeviceTokens(tokens) => {
-            let batch = tokens.dim(0)?;
-            (0..batch)
-                .map(|row| SpeculativeProposal::from_device(tokens.get(row)?))
-                .collect::<Result<Vec<_>>>()?
-        }
-        #[cfg(feature = "cuda")]
-        DFlashProposalBatch::DeviceSparse {
-            tokens,
-            candidate_ids,
-            candidate_probs,
-        } => {
-            let batch = tokens.dim(0)?;
-            if candidate_ids.dim(0)? != batch || candidate_probs.dim(0)? != batch {
-                inference_tensor::bail!("DFlash sparse proposal batch does not match token rows");
-            }
-            (0..batch)
-                .map(|row| {
-                    SpeculativeProposal::with_device_sparse_probs(
-                        tokens.get(row)?,
-                        candidate_ids.get(row)?,
-                        candidate_probs.get(row)?,
-                    )
-                })
-                .collect::<Result<Vec<_>>>()?
-        }
-    };
-    Ok(SpeculativeProposalBatch::new(proposals))
-}
-
 /// The last prompt position of a sequence: its next token is only known once sampled, so the
 /// drafter processes it during bootstrap instead of prefill.
 pub(super) struct PendingPromptTail {
@@ -121,55 +67,6 @@ struct DraftRow {
 }
 
 use crate::speculative::mtp::MtpForwardInputs;
-
-/// The target's paged cache for a drafter that keeps its layers there.
-fn dflash_paged_cache<'a>(
-    drafter: &DFlashDraftModel,
-    cache: &SpeculativeKvCache<'a>,
-) -> Option<inference_drafters::dflash::DFlashPagedCache<'a>> {
-    let SpeculativeKvCache::Paged { metadata, kv_cache } = *cache;
-    drafter
-        .uses_paged_kv()
-        .then_some(inference_drafters::dflash::DFlashPagedCache { kv_cache, metadata })
-}
-
-fn resolve_dflash_n_predict(
-    requested: Option<usize>,
-    max_drafts: usize,
-    checkpoint_lanes: usize,
-) -> Result<usize> {
-    if max_drafts == 0 {
-        inference_tensor::bail!("DFlash drafter yields no drafts per block");
-    }
-    let configured =
-        requested.unwrap_or(max_drafts.min(inference_drafters::dflash::DEFAULT_MAX_DRAFTS));
-    if configured == 0 || configured > max_drafts {
-        inference_tensor::bail!(
-            "requested {configured} draft tokens but this DFlash drafter yields at most {max_drafts} per block"
-        );
-    }
-    if checkpoint_lanes == 1 {
-        return Ok(configured);
-    }
-    let reserved = checkpoint_lanes.checked_sub(1).ok_or_else(|| {
-        inference_tensor::Error::msg("recurrent checkpoint lane count must be nonzero")
-    })?;
-    if reserved > max_drafts {
-        inference_tensor::bail!(
-            "reserved {checkpoint_lanes} recurrent checkpoint lanes but this DFlash drafter yields at most {max_drafts} drafts per block (max {} lanes)",
-            max_drafts + 1
-        );
-    }
-    if let Some(requested) = requested
-        && requested != reserved
-    {
-        inference_tensor::bail!(
-            "requested {requested} draft tokens require {} recurrent checkpoint lanes, but {checkpoint_lanes} lanes were reserved",
-            requested + 1
-        );
-    }
-    Ok(reserved)
-}
 
 impl Qwen3_5TextModel {
     fn mtp_n_predict(&self) -> usize {
@@ -431,20 +328,6 @@ impl Qwen3_5TextModel {
         config: crate::speculative::MtpConfig,
         runtime: MtpRuntimeConfig,
     ) -> Result<Option<SpeculativeAttachInfo>> {
-        let mut drafter = DFlashDraftModel::load(
-            &config,
-            DFlashLoadTarget {
-                num_layers: self.layer_types.len(),
-                hidden_size: self.cfg.hidden_size,
-                yarn_rope_config: self.yarn_rope_config.as_ref(),
-                device: &self.device,
-                dtype: self.dtype,
-            },
-            false,
-        )?;
-        let checkpoint_lanes = self.cache.hybrid().checkpoint_lanes();
-        let n_predict =
-            resolve_dflash_n_predict(config.n_predict, drafter.max_drafts(), checkpoint_lanes)?;
         let recurrent_capacity = self.cache.hybrid().recurrent_capacity();
         let serving_capacity = self
             .cache
@@ -453,15 +336,27 @@ impl Qwen3_5TextModel {
             .unwrap_or_else(|| {
                 recurrent_capacity.saturating_sub(crate::kv_cache::RECURRENT_GRAPH_PAD_SLOTS)
             });
-        let (sequence_capacity, retained_prefixes) =
-            inference_drafters::dflash::windowed_kv_capacities(
-                serving_capacity,
+        let (drafter, info) = ExternalDrafter::attach(
+            &config,
+            DrafterAttach {
+                load: DFlashLoadTarget {
+                    num_layers: self.layer_types.len(),
+                    hidden_size: self.cfg.hidden_size,
+                    yarn_rope_config: self.yarn_rope_config.as_ref(),
+                    device: &self.device,
+                    dtype: self.dtype,
+                },
+                checkpoint_lanes: self.cache.hybrid().checkpoint_lanes(),
                 recurrent_capacity,
-                runtime.prefix_cache_capacity(),
-            );
-        let windowed_kv = drafter.enable_windowed_kv(sequence_capacity, retained_prefixes)?;
-        // the target's own paged layers (and the MTP head's) come first; the speculative config put the drafter's after
-        let paged_kv = !windowed_kv && drafter.enable_paged_kv(self.cfg.num_layers);
+                serving_capacity,
+                // the target's own paged layers (and the MTP head's) come first; the speculative config put the
+                // drafter's after
+                paged_first_layer: self.cfg.num_layers,
+                runtime,
+                recurrent_pad_slots: crate::kv_cache::RECURRENT_GRAPH_PAD_SLOTS,
+            },
+        )?;
+        let n_predict = drafter.n_predict();
         self.set_dflash_tap_layers(drafter.target_layer_ids.clone());
         self.mtp_n_predict.store(n_predict, Ordering::Relaxed);
         self.mtp_auto_depth
@@ -478,376 +373,12 @@ impl Qwen3_5TextModel {
             )?;
             *self.draft_lm_head.lock().expect("draft lm_head poisoned") = Some(head);
         }
-        let adaptive = config.n_predict.is_none()
-            && windowed_kv
-            && inference_drafters::dflash::dflash_adaptive_requested();
-        let max_live_sequences =
-            sequence_capacity.saturating_sub(crate::kv_cache::RECURRENT_GRAPH_PAD_SLOTS);
-        let adaptive = adaptive && drafter.enable_adaptive(n_predict, max_live_sequences);
-        let kind = drafter.kind();
-        let draft_sampling = match drafter.draft_sampling_method() {
-            crate::speculative::MtpDraftSamplingMethod::Auto => {
-                unreachable!("DFlash draft sampling is resolved during loading")
-            }
-            crate::speculative::MtpDraftSamplingMethod::Greedy => "greedy draft",
-            crate::speculative::MtpDraftSamplingMethod::Probabilistic => "probabilistic draft",
-        };
-        let context = match (windowed_kv, paged_kv) {
-            (true, _) => "windowed",
-            (false, true) => "paged",
-            (false, false) => "eager",
-        };
-        let depth = if adaptive {
-            format!("batch-adaptive depth <= {n_predict}")
-        } else {
-            format!("depth {n_predict}")
-        };
-        let name = format!(
-            "{kind} `{}` (block of {}, {depth}, {draft_sampling}, {context} context, taps {:?})",
-            config.model.as_deref().unwrap_or("dflash"),
-            drafter.max_drafts(),
-            drafter.target_layer_ids
-        );
-        *self.dflash.lock().expect("dflash poisoned") = Some(std::sync::Arc::new(drafter));
-        Ok(Some(SpeculativeAttachInfo::mtp(name, n_predict)))
+        *self.dflash.lock().expect("dflash poisoned") = Some(Arc::new(drafter));
+        Ok(Some(info))
     }
 
-    /// The noise rows `[anchor, mask, ...]` that draft `n` tokens, `[batch, rows, hidden]`, embedded in one call.
-    fn dflash_noise_embedding(
-        &self,
-        drafter: &DFlashDraftModel,
-        anchors: &[u32],
-        n: usize,
-    ) -> Result<Tensor> {
-        let block = drafter.query_rows(n);
-        let mut ids = Vec::with_capacity(anchors.len() * block);
-        for anchor in anchors {
-            ids.push(*anchor);
-            ids.extend(std::iter::repeat_n(drafter.mask_token_id(), block - 1));
-        }
-        let ids = Tensor::from_vec(ids, (anchors.len(), block), &self.device)?;
-        let mut emb = self.embed_tokens(&ids)?;
-        let scale = drafter.input_embedding_scale();
-        if (scale - 1.0).abs() > f64::EPSILON {
-            emb = (emb * scale)?;
-        }
-        Ok(emb)
-    }
-
-    fn prepare_dflash_propose(
-        &self,
-        ctx: SpeculativeProposePrepareCtx<'_>,
-    ) -> Result<Option<Box<dyn SpeculativeProposePreparation>>> {
-        let drafter = self
-            .dflash
-            .lock()
-            .expect("dflash poisoned")
-            .clone()
-            .ok_or_else(|| inference_tensor::Error::msg("DFlash prepare without a drafter"))?;
-        if ctx.seq_ids.is_empty() {
-            return Ok(None);
-        }
-        if ctx.seq_ids.len() != ctx.base_lens.len()
-            || ctx.seq_ids.len() != ctx.target_rows.len()
-            || drafter.has_dormant_seq(ctx.seq_ids)
-        {
-            return Ok(None);
-        }
-        let Some(capture) = self.last_spec_capture() else {
-            return Ok(None);
-        };
-        if capture.taps.len() != drafter.target_layer_ids.len() {
-            return Ok(None);
-        }
-        let (source_batch, source_rows, _) = capture.taps[0].dims3()?;
-        let mut appends = Vec::with_capacity(ctx.seq_ids.len());
-        let mut rows = Vec::with_capacity(ctx.seq_ids.len());
-        let mut flat_row_indices = Vec::new();
-        for ((seq_id, base_len), &(batch_idx, count)) in
-            ctx.seq_ids.iter().zip(ctx.base_lens).zip(ctx.target_rows)
-        {
-            if count == 0
-                || batch_idx >= source_batch
-                || count > source_rows
-                || drafter.ctx_next_pos(*seq_id) != Some(*base_len)
-            {
-                return Ok(None);
-            }
-            let flat_start = batch_idx
-                .checked_mul(source_rows)
-                .ok_or_else(|| inference_tensor::Error::msg("DFlash tap row index overflow"))?;
-            let offset = flat_row_indices.len();
-            for row in flat_start..flat_start + count {
-                flat_row_indices.push(u32::try_from(row).map_err(inference_tensor::Error::wrap)?);
-            }
-            appends.push(CtxAppend {
-                seq_id: *seq_id,
-                rows: count,
-                start_pos: *base_len,
-            });
-            rows.push(DFlashPreparedRow {
-                seq_id: *seq_id,
-                batch_idx,
-                start_pos: *base_len,
-                offset,
-                rows: count,
-            });
-        }
-        let context = drafter.prepare_ctx_batch(&capture.taps, flat_row_indices, &appends)?;
-        Ok(Some(Box::new(DFlashProposePreparation { context, rows })))
-    }
-
-    fn dflash_propose(
-        &self,
-        ctx: SpeculativeProposeBatchCtx<'_>,
-    ) -> Result<Option<SpeculativeProposalBatch>> {
-        let drafter = self
-            .dflash
-            .lock()
-            .expect("dflash poisoned")
-            .clone()
-            .ok_or_else(|| inference_tensor::Error::msg("DFlash propose without a drafter"))?;
-        let max_n = self.mtp_n_predict();
-        let batch = ctx.seq_ids.len();
-        if batch == 0 || max_n == 0 {
-            return Ok(None);
-        }
-        let n_predict = ctx.proposal_len;
-        if n_predict == 0 {
-            return Ok(None);
-        }
-        if n_predict > max_n {
-            inference_tensor::bail!(
-                "DFlash proposal length {n_predict} exceeds configured maximum {max_n}"
-            );
-        }
-        let Some(capture) = self.last_spec_capture() else {
-            return Ok(None);
-        };
-        if capture.taps.len() != drafter.target_layer_ids.len() {
-            return Ok(None);
-        }
-        if drafter.has_dormant_seq(ctx.seq_ids) {
-            return Ok(None);
-        }
-
-        let prepared = ctx.preparation.and_then(|preparation| {
-            preparation
-                .as_any()
-                .downcast_ref::<DFlashProposePreparation>()
-        });
-        let prepared_commit = prepared.and_then(|prepared| {
-            let mut appends = Vec::with_capacity(batch);
-            let mut row_indices = Vec::new();
-            for (i, seq_id) in ctx.seq_ids.iter().enumerate() {
-                let (batch_idx, count) = ctx.target_rows[i];
-                let base_len = ctx.base_lens[i];
-                let row = prepared
-                    .rows
-                    .iter()
-                    .find(|row| row.seq_id == *seq_id && row.batch_idx == batch_idx)?;
-                if count == 0
-                    || count > row.rows
-                    || row.start_pos.checked_add(count) != Some(base_len)
-                    || drafter.ctx_next_pos(*seq_id) != Some(row.start_pos)
-                {
-                    return None;
-                }
-                for index in row.offset..row.offset + count {
-                    row_indices.push(u32::try_from(index).ok()?);
-                }
-                appends.push(CtxAppend {
-                    seq_id: *seq_id,
-                    rows: count,
-                    start_pos: row.start_pos,
-                });
-            }
-            Some((prepared, row_indices, appends))
-        });
-        if let Some((prepared, row_indices, appends)) = prepared_commit {
-            drafter.commit_prepared_ctx_batch(
-                &prepared.context,
-                row_indices,
-                &appends,
-                dflash_paged_cache(&drafter, &ctx.cache),
-            )?;
-        } else {
-            let source_rows = capture.taps[0].dim(1)?;
-            let mut appends = Vec::with_capacity(batch);
-            let mut flat_row_indices = Vec::new();
-            for (i, seq_id) in ctx.seq_ids.iter().enumerate() {
-                let (batch_idx, count) = ctx.target_rows[i];
-                let base_len = ctx.base_lens[i];
-                let ctx_next = drafter.ctx_next_pos(*seq_id);
-                let needed = match ctx_next {
-                    Some(next) if next <= base_len => base_len - next,
-                    _ => count.min(base_len),
-                };
-                if needed > 0 {
-                    if needed > count || source_rows < count {
-                        return Ok(None);
-                    }
-                    let start_row = count - needed;
-                    let flat_start = batch_idx
-                        .checked_mul(source_rows)
-                        .and_then(|row| row.checked_add(start_row))
-                        .ok_or_else(|| {
-                            inference_tensor::Error::msg("DFlash tap row index overflow")
-                        })?;
-                    let flat_end = flat_start.checked_add(needed).ok_or_else(|| {
-                        inference_tensor::Error::msg("DFlash tap row index overflow")
-                    })?;
-                    for row in flat_start..flat_end {
-                        flat_row_indices
-                            .push(u32::try_from(row).map_err(inference_tensor::Error::wrap)?);
-                    }
-                    appends.push(CtxAppend {
-                        seq_id: *seq_id,
-                        rows: needed,
-                        start_pos: base_len - needed,
-                    });
-                }
-            }
-            drafter.append_ctx_batch(
-                &capture.taps,
-                flat_row_indices,
-                &appends,
-                dflash_paged_cache(&drafter, &ctx.cache),
-            )?;
-        }
-        if !drafter.contexts_ready_for_draft(ctx.seq_ids) {
-            return Ok(None);
-        }
-        let sampling_values = if drafter.has_selector()
-            && drafter.draft_sampling_method()
-                == crate::speculative::MtpDraftSamplingMethod::Probabilistic
-        {
-            let probabilistic_rows = ctx
-                .sequences
-                .iter()
-                .map(|seq| seq.stochastic_verification_allowed())
-                .collect::<Vec<_>>();
-            if probabilistic_rows.iter().any(|eligible| *eligible) {
-                let mut inverse_temperatures = Vec::with_capacity(batch);
-                for (seq, eligible) in ctx.sequences.iter().zip(&probabilistic_rows) {
-                    if !*eligible {
-                        inverse_temperatures.push(0.0);
-                        continue;
-                    }
-                    let Some(temperature) = seq.sampler().temperature() else {
-                        return Ok(None);
-                    };
-                    let inverse_temperature = (1.0 / temperature) as f32;
-                    if !inverse_temperature.is_finite() || inverse_temperature <= 0.0 {
-                        return Ok(None);
-                    }
-                    inverse_temperatures.push(inverse_temperature);
-                }
-                let mut uniforms = vec![0.0f32; batch * n_predict];
-                for (row, inverse_temperature) in inverse_temperatures.iter().enumerate() {
-                    if *inverse_temperature > 0.0 {
-                        let rng = ctx.sequences[row].sampling_rng(&ctx.rng);
-                        let mut rng = rng.lock().expect("could not lock rng mutex");
-                        for uniform in &mut uniforms[row * n_predict..(row + 1) * n_predict] {
-                            *uniform = rng.random();
-                        }
-                    }
-                }
-                Some((inverse_temperatures, uniforms))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let sampling = sampling_values
-            .as_ref()
-            .map(|(inverse_temperatures, uniforms)| DFlashSamplingInputs {
-                inverse_temperatures,
-                uniforms,
-            });
-        let draft_head = self.draft_lm_head.lock().expect("draft lm_head poisoned");
-        let lm_head = draft_head.as_ref().unwrap_or_else(|| self.lm_head());
-        let graph_proposals = drafter.proposals_cuda_graph(&DFlashGraphProposalInputs {
-            seq_ids: ctx.seq_ids,
-            anchors: ctx.sampled_tokens,
-            start_positions: ctx.base_lens,
-            n_predict,
-            sampling,
-            token_embedding: self.token_embedding(),
-            lm_head,
-        })?;
-        if let Some(proposals) = graph_proposals {
-            return dflash_speculative_batch(proposals).map(Some);
-        }
-        #[cfg(all(feature = "cuda", target_family = "unix"))]
-        let graph_event =
-            CudaGraphEventGuard::new(CudaGraphComponent::DFlash, CudaGraphEvent::EagerFallback);
-        let fallback_result = (|| {
-            let noise = self.dflash_noise_embedding(&drafter, ctx.sampled_tokens, n_predict)?;
-            let hidden = drafter.draft_hidden_batch(
-                ctx.seq_ids,
-                &noise,
-                ctx.base_lens,
-                dflash_paged_cache(&drafter, &ctx.cache),
-            )?;
-            dflash_speculative_batch(drafter.finish_proposals(
-                &hidden,
-                ctx.sampled_tokens,
-                sampling,
-                lm_head,
-            )?)
-            .map(Some)
-        })();
-        #[cfg(all(feature = "cuda", target_family = "unix"))]
-        if fallback_result.is_ok() {
-            graph_event.success();
-        }
-        fallback_result
-    }
-
-    fn dflash_prefill(&self, ctx: SpeculativePrefillCtx<'_>) -> Result<()> {
-        let drafter = self
-            .dflash
-            .lock()
-            .expect("dflash poisoned")
-            .clone()
-            .ok_or_else(|| inference_tensor::Error::msg("DFlash prefill without a drafter"))?;
-        let Some(capture) = self.last_full_capture() else {
-            return Ok(());
-        };
-        if capture.taps.len() != drafter.target_layer_ids.len() {
-            return Ok(());
-        }
-        let (capture_batch, capture_rows, _) = capture.taps[0].dims3()?;
-        let routing = SpeculativeTapRouting::new(
-            ctx.capture_layout(),
-            capture_batch,
-            capture_rows,
-            ctx.batch_indices,
-            ctx.chunk_ranges,
-        )?;
-        drafter.activate_seqs(ctx.seq_ids);
-        let mut appends = Vec::with_capacity(ctx.seq_ids.len());
-        for ((seq_id, &(start, _)), span) in ctx
-            .seq_ids
-            .iter()
-            .zip(ctx.chunk_ranges)
-            .zip(routing.spans())
-        {
-            appends.push(inference_drafters::dflash::CtxAppend {
-                seq_id: *seq_id,
-                rows: span.rows(),
-                start_pos: start,
-            });
-        }
-        let flat_row_indices = routing.flat_row_indices()?;
-        drafter.append_ctx_batch(
-            &capture.taps,
-            flat_row_indices,
-            &appends,
-            dflash_paged_cache(&drafter, &ctx.cache),
-        )
+    fn drafter(&self) -> Option<Arc<ExternalDrafter>> {
+        self.dflash.lock().expect("dflash poisoned").clone()
     }
 
     fn mtp_propose(
@@ -1410,9 +941,7 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
             return None;
         }
         if let Some(drafter) = self.dflash.lock().expect("dflash poisoned").as_ref() {
-            return Some(
-                SpeculativeBatchPlan::new(drafter.plan_n(n, batch_size)).without_target_hiddens(),
-            );
+            return Some(drafter.plan(n, batch_size));
         }
         Some(SpeculativeBatchPlan::new(n))
     }
@@ -1440,19 +969,17 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
             return Vec::new();
         }
         if self.dflash.lock().expect("dflash poisoned").is_some() {
-            return depths_up_to(&inference_drafters::dflash::AUTO_DEPTHS, n);
+            return ExternalDrafter::depth_candidates(n);
         }
         depths_up_to(&AUTO_DEPTHS, n)
     }
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]
     fn precapture_speculative_cuda_graphs(&self) -> Result<()> {
-        let Some(drafter) = self.dflash.lock().expect("dflash poisoned").clone() else {
+        let Some(drafter) = self.drafter() else {
             return Ok(());
         };
-        let draft_head = self.draft_lm_head.lock().expect("draft lm_head poisoned");
-        let lm_head = draft_head.as_ref().unwrap_or_else(|| self.lm_head());
-        drafter.precapture_cuda_graphs(self.mtp_n_predict(), self.token_embedding(), lm_head)
+        drafter.precapture(self, self.mtp_n_predict())
     }
 
     fn evict_speculative_cuda_graphs(&self, max_entries: usize) -> usize {
@@ -1486,8 +1013,9 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
         &mut self,
         ctx: SpeculativeProposeBatchCtx<'_>,
     ) -> Result<Option<SpeculativeProposalBatch>> {
-        if self.dflash.lock().expect("dflash poisoned").is_some() {
-            return self.dflash_propose(ctx);
+        if let Some(drafter) = self.drafter() {
+            let max_n = self.mtp_n_predict();
+            return drafter.propose(self, ctx, max_n, &self.device);
         }
         self.mtp_propose(ctx)
     }
@@ -1496,8 +1024,8 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
         &mut self,
         ctx: SpeculativeProposePrepareCtx<'_>,
     ) -> Result<Option<Box<dyn SpeculativeProposePreparation>>> {
-        if self.dflash.lock().expect("dflash poisoned").is_some() {
-            return self.prepare_dflash_propose(ctx);
+        if let Some(drafter) = self.drafter() {
+            return drafter.prepare_propose(self, ctx);
         }
         Ok(None)
     }
@@ -1518,8 +1046,8 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
         if self.mtp_n_predict() == 0 {
             return Ok(());
         }
-        if self.dflash.lock().expect("dflash poisoned").is_some() {
-            return self.dflash_prefill(ctx);
+        if let Some(drafter) = self.drafter() {
+            return drafter.prefill(self, ctx);
         }
         self.mtp_prefill(ctx)
     }
@@ -1532,7 +1060,10 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
         self.commit_recurrent_prefixes(rows, &checkpoint_rows)?;
         // after the GDN commit, which may rewrite every recurrent pool's state from its checkpoints
         self.commit_ple_prefixes(&checkpoint_rows)?;
-        self.commit_terminal_dflash_context(rows)
+        match self.drafter() {
+            Some(drafter) => drafter.commit_terminal(self, rows),
+            None => Ok(()),
+        }
     }
 
     fn take_speculative_graph_state(&self) -> Option<Box<dyn SpeculativeGraphState>> {
@@ -1554,49 +1085,33 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
 // The wrapper adds media inputs only; speculative decoding is the text model's.
 inference_nn::delegate_speculative_target!(Qwen3_5Model, text: Qwen3_5TextModel);
 
-impl Qwen3_5TextModel {
-    // A finished sequence never drafts again, which is where its kept rows would reach the drafter's context; its
-    // final snapshot needs the drafter at the target's position
-    fn commit_terminal_dflash_context(&self, rows: &[SpeculativeCommitRow]) -> Result<()> {
-        if !rows.iter().any(|row| row.terminal) {
-            return Ok(());
-        }
-        let Some(drafter) = self.dflash.lock().expect("dflash poisoned").clone() else {
-            return Ok(());
-        };
-        if !drafter.supports_paged_auxiliary_prefix_state() {
-            return Ok(());
-        }
-        let Some(capture) = self.last_spec_capture() else {
-            return Ok(());
-        };
-        if capture.taps.len() != drafter.target_layer_ids.len() {
-            return Ok(());
-        }
-        let source_rows = capture.taps[0].dim(1)?;
-        let mut appends = Vec::new();
-        let mut flat_row_indices = Vec::new();
-        for row in rows.iter().filter(|row| row.terminal) {
-            let Some(start_pos) = drafter.ctx_next_pos(row.seq_id) else {
-                continue;
-            };
-            if row.keep_rows > source_rows {
-                continue;
-            }
-            let flat_start = row.batch_idx * source_rows;
-            for flat_row in flat_start..flat_start + row.keep_rows {
-                flat_row_indices
-                    .push(u32::try_from(flat_row).map_err(inference_tensor::Error::wrap)?);
-            }
-            appends.push(CtxAppend {
-                seq_id: row.seq_id,
-                rows: row.keep_rows,
-                start_pos,
-            });
-        }
-        drafter.append_ctx_batch(&capture.taps, flat_row_indices, &appends, None)
+impl DrafterTarget for Qwen3_5TextModel {
+    fn spec_taps(&self) -> Option<Vec<Tensor>> {
+        self.last_spec_capture().map(|capture| capture.taps)
     }
 
+    fn prompt_taps(&self) -> Option<Vec<Tensor>> {
+        self.last_full_capture().map(|capture| capture.taps)
+    }
+
+    fn embed_tokens(&self, ids: &Tensor) -> Result<Tensor> {
+        Qwen3_5TextModel::embed_tokens(self, ids)
+    }
+
+    fn token_embedding(&self) -> &Arc<dyn inference_quant::QuantMethod> {
+        Qwen3_5TextModel::token_embedding(self)
+    }
+
+    fn draft_lm_head(&self) -> Arc<dyn inference_quant::QuantMethod> {
+        let draft_head = self.draft_lm_head.lock().expect("draft lm_head poisoned");
+        draft_head
+            .as_ref()
+            .unwrap_or_else(|| self.lm_head())
+            .clone()
+    }
+}
+
+impl Qwen3_5TextModel {
     // The GDN layers' recurrent state at each row's kept prefix: staged transitions, pool checkpoints, or a replay.
     fn commit_recurrent_prefixes(
         &self,
@@ -1632,7 +1147,7 @@ impl Qwen3_5TextModel {
 
 #[cfg(test)]
 mod tests {
-    use super::{SpecCapture, capture_view, resolve_dflash_n_predict};
+    use super::{SpecCapture, capture_view};
     use inference_tensor::{DType, Device, Tensor};
 
     #[test]
@@ -1648,39 +1163,6 @@ mod tests {
         assert_eq!(
             view.mrope,
             vec![expected.clone(), expected.clone(), expected]
-        );
-    }
-
-    #[test]
-    fn auto_dflash_depth_follows_reserved_checkpoint_lanes() {
-        assert_eq!(resolve_dflash_n_predict(None, 7, 8).unwrap(), 7);
-        assert_eq!(resolve_dflash_n_predict(None, 7, 4).unwrap(), 3);
-    }
-
-    #[test]
-    fn replay_sentinel_keeps_configured_or_default_dflash_depth() {
-        assert_eq!(resolve_dflash_n_predict(None, 7, 1).unwrap(), 7);
-        assert_eq!(resolve_dflash_n_predict(Some(3), 7, 1).unwrap(), 3);
-    }
-
-    #[test]
-    fn explicit_dflash_depth_must_match_reserved_checkpoint_lanes() {
-        assert_eq!(resolve_dflash_n_predict(Some(3), 7, 4).unwrap(), 3);
-        let error = resolve_dflash_n_predict(Some(3), 7, 8)
-            .expect_err("explicit depth must match the reserved lanes");
-        assert!(error.to_string().contains(
-            "requested 3 draft tokens require 4 recurrent checkpoint lanes, but 8 lanes were reserved"
-        ));
-    }
-
-    #[test]
-    fn reserved_dflash_depth_must_fit_the_drafter_block() {
-        let error = resolve_dflash_n_predict(None, 7, 9)
-            .expect_err("reserved lanes must fit the drafter block");
-        assert!(
-            error
-                .to_string()
-                .contains("reserved 9 recurrent checkpoint lanes")
         );
     }
 }
