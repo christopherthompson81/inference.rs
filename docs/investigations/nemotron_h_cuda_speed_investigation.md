@@ -461,3 +461,86 @@ bf16 CUDA's; at 245K the card's demonstrated floor is ~115 s.
 (many tiles through the staged kernels) and GQA-16 cases (32/2 heads) that take the 128-column tile.
 
 **Next:** q8 prompts sit 1.22x bf16 end to end. Item (1) of Run 18: Vulkan's prompt attention over the paged cache.
+
+## Run 20 - 2026-11-05 12:20 (local clock)
+
+**Question:** does Lightning's built-in MTP head speed up CUDA decode, as it did on the CPU (Lightning CPU Run 6: MTP 2
++19 %)?
+
+**Commands:** dev build with `cuda vulkan` at f77f76fcf. `inference serve --max-seqs 1 --format gguf -f
+Lightning-exps-q4_0.gguf` plain, with `--paged-attn on --pa-context-len 8192`, and with `--mtp --mtp-n-predict
+{1,2,3}` added. Four chat prompts (code, a list, prose, counting), greedy, thinking off, 256 tokens; a warm-up pass,
+then a measured one, reading `usage.avg_compl_tok_per_sec` (a harness in the session scratchpad).
+
+**Result (decode tok/s per prompt, mean):**
+
+| config | prompts | mean | MTP accept (len) |
+|---|---|---|---|
+| plain | 243.6 / 245.4 / 247.1 / 247.6 | 245.9 | |
+| paged | 248.8 / 250.2 / 248.7 / 249.8 | 249.4 | |
+| MTP 1 | 225.7 / 199.8 / 211.0 / 244.7 | 220.3 | 87.1 % (1.87) |
+| MTP 2 | 226.7 / 204.3 / 192.2 / 271.5 | 223.7 | 78.2 % (2.56) |
+| MTP 3 | 244.3 / 198.9 / 165.6 / 306.2 | 228.7 | 67.3 % (3.02) |
+
+MTP loses on CUDA despite the CPU's acceptance. MTP 1's step (1.87 tokens at 220 tok/s) is ~8.5 ms against plain's
+4.0: 2.1x a decode step.
+
+**Finding:** with MTP the startup capture fails: "CUDA decode graph precapture failed, graphs will be captured
+lazily: CUDA graph captured forward failed". With debug logging, cudarc reports `CUDA_ERROR_INVALID_VALUE` with no
+caller ("kept for this context's next call"), and a step then fails ("step - Model failed with error:
+DriverError(CUDA_ERROR_INVALID_VALUE)"). Plain and paged runs capture their decode graph at startup (~100 ms).
+
+**Next:** the failing call under capture. User note: DFlash and DSpark drafter heads for Lightning are on Hugging
+Face (NVFP4).
+
+## Run 21 - 2026-11-05 12:47 (local clock)
+
+**Question:** Run 20's failing capture, and whether MTP's output on CUDA is right.
+
+**Correctness first:** MTP's text departed from plain decoding early in 3 of 4 prompts at every depth (characters
+38-111). A new test, `an_mtp_head_drafts_on_cuda_without_changing_greedy_output` (the graph checkpoint: BF16, Q8_0
+experts, paged), failed the same way. An F32 checkpoint failed too, as did one with graphs off, so neither graphs nor
+TF32 cause it; full-f32 cuBLAS for the SSD and the GEMMs changed nothing. One draft or two, the same token
+departed (the third).
+
+**Localized:** a per-layer checksum of row 0 in each forward, plain run against MTP run, step by step. Step 2 matched
+to 2e-7; at step 3 layer 0's input (the embedding) matched and its output (Mamba) was 10 % off. So the recurrent state
+was right after the first commit and wrong after the second. Printing layer 0's gathered pre-state around the verify
+pass: SSM norm 55.84 before, 41.67 after, read through the stash's own tensor. `selective_scan_cuda` advances the
+state it is handed in place, and the stash shared that storage (`to_dtype` to the same dtype is a view), so every
+commit's replay started from the already-advanced state. The CPU's scan writes a new tensor, and Vulkan's branch
+copies first.
+
+**Fix:** the verify pass stashes copies of the gathered conv and SSM states, taken before the pass (one state copy a
+Mamba layer a verify step, ~48 MB for Lightning, ~50 us). A copy taken when the stash was pushed, after the pass,
+had not helped.
+
+**Result (Run 20's prompts, after the fix):**
+
+| config | mean tok/s | MTP accept (len) | text against plain, per prompt |
+|---|---|---|---|
+| paged | 246.2 | | |
+| MTP 1 | 213.5 | 88.4 % (1.88) | departs at char 248 / 222 / 1023 / same |
+| MTP 2 | 229.4 | 82.4 % (2.65) | departs at 38 / 55 / 944 / same |
+| MTP 3 | 233.9 | 72.1 % (3.16) | departs at 38 / 55 / 944 / same |
+
+MTP 1's departures moved from 60-104 to 222-1023. MTP 2 and 3 still part at 38 and 55; whether those are near-ties a
+3-4 row forward rounds the other way (the CPU's Run 6 case) is not yet checked.
+
+**The graph capture (open):** a backtrace hook in cudarc's `record_err` (removed) showed the "no caller" errors are
+frees of the wrong memory around a capture. Freeing an eager allocation inside a capture is invalid, and so is freeing
+a graph allocation whose graph never ran.
+- The MTP head's `record` replaced the warm-up's capture inside the captured forward. For hybrid models
+  (`nonmutating_transition_capture`) the decoder doesn't reinstall the warm state afterwards, so the head is left as
+  the only owner of the graph's tensors. ERNIE's and Qwen3.5's MTP graph tests take the other path and pass.
+- Granite's `mamba_replay` stash has the same two problems, and a third: after a replay the commit needs exactly the
+  graph's stash buffers. It has to become part of the speculative graph state handed to the entry, as the MTP
+  capture is; Qwen3.5's hybrid MTP rolls back by checkpoints and has no stash.
+- A separate head slot for captures made during a capture fixed the head's half but not the stash's (the tiny test
+  still failed); reverted.
+
+Until then MTP runs eagerly on CUDA, and loses to graph-replayed plain decoding (4.0 ms a step against MTP 1's ~8.5).
+
+**Next:** the Mamba stash as graph state, or checkpoint-based rollback for Nemotron-H's verify graphs. The DFlash and
+DSpark drafters for Lightning: the codebase already runs both kinds of drafter for Qwen3.5 (`tiny_dflash`,
+`tiny_dspark`).

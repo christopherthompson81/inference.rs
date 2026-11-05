@@ -3424,6 +3424,9 @@ impl GraniteMoeHybrid {
                         x = if let Some(query_lens) = packed_query_lens.as_deref() {
                             block.forward_packed_prefill(&x, &mut temp_cache, query_lens)?
                         } else if stash_replays {
+                            // the CUDA scan advances the state it is handed in place, so the replay's starting
+                            // state is a copy taken before the pass
+                            let (conv_state, ssm_state) = (conv_state.copy()?, ssm_state.copy()?);
                             let (out, inputs) = block.forward_replayable(&x, &mut temp_cache)?;
                             replays.push(MambaReplay {
                                 layer_idx,
