@@ -113,6 +113,46 @@ impl Recorder<'_> {
         if op.op == RowOp::RmsNorm && op.alpha.is_none() {
             return Err(Error::Invalid("an RMS norm takes its alpha".into()));
         }
+        // a decode row's norm writes its int8 blocks too, cached for the matvecs that read it
+        if op.op == RowOp::RmsNorm
+            && op.rows <= crate::kernels::MATVEC_MAX_ROWS
+            && op.cols.is_multiple_of(crate::kernels::BLOCK_VALUES)
+            && !Arc::ptr_eq(op.x, op.out)
+        {
+            let blocks = Arc::new(Buffer::new(
+                op.out.context(),
+                crate::MatVec::scratch_bytes(op.rows, op.cols),
+            )?);
+            let s_off = op.rows * op.cols / crate::kernels::BLOCK_VALUES
+                * crate::kernels::Q8_WORD_BYTES
+                / crate::kernels::Q8_SCALE_BYTES;
+            let mut bytes = words(&[op.rows, op.cols])?;
+            bytes.extend_from_slice(&op.eps.to_bits().to_le_bytes());
+            bytes.extend(words(&[op.x_offset, alpha_offset, op.out_offset, s_off])?);
+            self.context.kernels.rms_norm_q8.dispatch(
+                self,
+                &[
+                    op.x.buffer,
+                    alpha.buffer,
+                    op.out.buffer,
+                    blocks.buffer,
+                    blocks.buffer,
+                ],
+                &bytes,
+                [op.rows as u32, 1, 1],
+            );
+            self.context.remember_quantized(
+                op.out,
+                op.out_offset,
+                op.rows * op.cols,
+                &blocks,
+                s_off,
+            );
+            for buffer in [op.x, alpha, op.out, &blocks] {
+                self.retain(buffer.clone());
+            }
+            return Ok(());
+        }
         let mut bytes = words(&[op.rows, op.cols, op.op as usize])?;
         bytes.extend_from_slice(&op.eps.to_bits().to_le_bytes());
         bytes.extend(words(&[op.x_offset, alpha_offset, op.out_offset])?);
@@ -387,6 +427,36 @@ impl Recorder<'_> {
         let mut bytes = words(&[op.group_size, op.groups])?;
         bytes.extend_from_slice(&op.eps.to_bits().to_le_bytes());
         bytes.extend(words(&[op.x.1, op.gate.1, op.weight.1])?);
+        let cols = op.groups * op.group_size;
+        // a decode row's norm writes its int8 blocks too, cached for the matvec that reads it
+        if op.rows <= crate::kernels::MATVEC_MAX_ROWS
+            && op.group_size.is_multiple_of(crate::kernels::BLOCK_VALUES)
+            && ![op.x.0, op.gate.0, op.weight.0]
+                .into_iter()
+                .any(|b| Arc::ptr_eq(b, op.out))
+        {
+            let blocks = Arc::new(Buffer::new(
+                op.out.context(),
+                crate::MatVec::scratch_bytes(op.rows, cols),
+            )?);
+            let s_off = op.rows * cols / crate::kernels::BLOCK_VALUES
+                * crate::kernels::Q8_WORD_BYTES
+                / crate::kernels::Q8_SCALE_BYTES;
+            bytes.extend(words(&[s_off])?);
+            let buffers = [op.x.0, op.gate.0, op.weight.0, op.out, &blocks, &blocks];
+            self.context.kernels.gated_rmsnorm_q8.dispatch(
+                self,
+                &buffers.map(|b| b.buffer),
+                &bytes,
+                [workgroups as u32, 1, 1],
+            );
+            self.context
+                .remember_quantized(op.out, 0, op.rows * cols, &blocks, s_off);
+            for buffer in buffers {
+                self.retain(buffer.clone());
+            }
+            return Ok(());
+        }
         let buffers = [op.x.0, op.gate.0, op.weight.0, op.out];
         self.context.kernels.gated_rmsnorm.dispatch(
             self,
@@ -472,6 +542,10 @@ impl Recorder<'_> {
 pub(crate) const MOE_MATVEC_BINDINGS: usize = 5;
 pub(crate) const MOE_MATVEC_PUSH_BYTES: u32 = 10 * 4;
 pub(crate) const MOE_SORT_BINDINGS: usize = 2;
+pub(crate) const RMS_Q8_BINDINGS: usize = 5;
+pub(crate) const GATED_Q8_BINDINGS: usize = 6;
+pub(crate) const GATED_Q8_PUSH_BYTES: u32 = 7 * 4;
+pub(crate) const RMS_Q8_PUSH_BYTES: u32 = 7 * 4;
 pub(crate) const MOE_SORT_PUSH_BYTES: u32 = 5 * 4;
 pub(crate) const MOE_MM_BINDINGS: usize = 5;
 pub(crate) const MOE_MM_PUSH_BYTES: u32 = 8 * 4;
@@ -575,10 +649,13 @@ impl Recorder<'_> {
                 return self.moe_mmc(op, coop, None, expert_bytes);
             }
         }
-        let s_off = self.quantize_rows(op.x, op.slots.div_ceil(op.x_div), op.cols, op.scratch)?;
         if op.slots > MOE_TILED_MIN_SLOTS {
+            let s_off =
+                self.quantize_rows(op.x, op.slots.div_ceil(op.x_div), op.cols, op.scratch)?;
             return self.moe_mm(op, s_off, expert_bytes);
         }
+        let (blocks, s_off) =
+            self.quantized(op.x, op.slots.div_ceil(op.x_div), op.cols, op.scratch)?;
         if op.slots > MAX_GROUPS_X {
             return Err(Error::Invalid(format!("{} expert routes", op.slots)));
         }
@@ -598,10 +675,10 @@ impl Recorder<'_> {
         ])?;
         let buffers = [
             op.weights.vk_buffer(),
-            op.scratch.buffer,
+            blocks.buffer,
             op.y.buffer,
             op.ids.0.buffer,
-            op.scratch.buffer,
+            blocks.buffer,
         ];
         self.profile_shape(
             || {
@@ -1375,16 +1452,26 @@ impl Recorder<'_> {
         // without a mask the queries stand in for its binding, never read
         let mask = op.mask.map_or(op.q.0, |m| m.0);
         let buffers = [op.q.0, op.k.0, op.v.0, mask, op.out];
-        self.context.kernels.flash_attn.dispatch(
-            self,
-            &buffers.map(|b| b.buffer),
-            &bytes,
-            [
-                op.count.div_ceil(row_positions) as u32,
-                (op.kv_heads * chunks) as u32,
-                op.batch as u32,
-            ],
-        );
+        if op.positions == 1 {
+            // one query a head: a workgroup a head, its subgroups splitting the keys
+            self.context.kernels.flash_decode.dispatch(
+                self,
+                &buffers.map(|b| b.buffer),
+                &bytes,
+                [op.heads as u32, 1, op.batch as u32],
+            );
+        } else {
+            self.context.kernels.flash_attn.dispatch(
+                self,
+                &buffers.map(|b| b.buffer),
+                &bytes,
+                [
+                    op.count.div_ceil(row_positions) as u32,
+                    (op.kv_heads * chunks) as u32,
+                    op.batch as u32,
+                ],
+            );
+        }
         let keys = if op.causal { op.keys / 2 + 1 } else { op.keys };
         self.work.set(
             self.work

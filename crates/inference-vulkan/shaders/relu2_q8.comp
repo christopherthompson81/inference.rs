@@ -1,0 +1,50 @@
+#version 450
+// The map's relu(a)^2 over `n` contiguous floats (a multiple of 32), also written as quantize_q8_1's int8 blocks for
+// the matvec that reads it: a thread 4 values, a block 8 lanes, its max and sum clustered over them.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer A { float a[]; };
+layout(std430, binding = 1) writeonly buffer O { float o[]; };
+layout(std430, binding = 2) writeonly buffer Q { uint q[]; };
+layout(std430, binding = 3) writeonly buffer S { vec2 s[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint a_off;
+    uint o_off;
+    // where (d, d * sum q) start in their buffer, in vec2s
+    uint s_off;
+} pc;
+
+const uint LANE_VALUES = 4;
+const uint BLOCK_LANES = 8;
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    uint at = t * LANE_VALUES;
+    // whole blocks of whole clusters, so a cluster is live or not as one
+    bool live = at < pc.n;
+    vec4 v = vec4(0.0);
+    if (live) {
+        for (uint j = 0; j < LANE_VALUES; j++) {
+            float r = max(a[pc.a_off + at + j], 0.0);
+            v[j] = r * r;
+            o[pc.o_off + at + j] = v[j];
+        }
+    }
+    float amax = subgroupClusteredMax(max(max(v.x, v.y), max(v.z, v.w)), BLOCK_LANES);
+    float d = amax / 127.0;
+    float rcp = d > 0.0 ? 1.0 / d : 0.0;
+    ivec4 qv = ivec4(round(v * rcp));
+    int sum = subgroupClusteredAdd(qv.x + qv.y + qv.z + qv.w, BLOCK_LANES);
+    if (live) {
+        q[t] = (uint(qv.x) & 0xffu) | ((uint(qv.y) & 0xffu) << 8) | ((uint(qv.z) & 0xffu) << 16)
+            | ((uint(qv.w) & 0xffu) << 24);
+        if (t % BLOCK_LANES == 0) {
+            s[pc.s_off + t / BLOCK_LANES] = vec2(d, d * float(sum));
+        }
+    }
+}

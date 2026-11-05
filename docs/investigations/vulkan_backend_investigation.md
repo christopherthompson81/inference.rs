@@ -1580,3 +1580,97 @@ and `moe_sort`'s small list; the tuning knobs and probes of Runs 55-61 (`INFEREN
 
 **Result** (one dev build with `cuda vulkan`): 512 tokens ~142-147 ms, 2048 ~519 ms (Run 61's 138-142 / 485-489 were
 with f16 dense sums).
+
+### Run 63 - 2026-11-05 10:15 (desktop: RTX 3090)
+
+**Question:** decode, now the larger gap to CUDA (Run 61: ~67 %).
+
+**Regression check:** coopmat2 on and off (`INFERENCE_VULKAN_NO_CM2`, alternating, 3 rounds) both read ~131 tok/s at
+256 tokens, with one 145. Each run swings +-11-13 inside itself. Chrome and the compositor share the card, and
+CUDA's graphs (+-0.5) shrug that off where our per-step recording does not.
+
+**Finding 1 (profile, ~1500-token decode):** `flash_attn` took 1749 of 4735 GPU ms, 632 us a call, 6 a token (~3.8 ms a
+token at that context). At one position the prompt kernel's grid is a workgroup a kv head (2 for Lightning), each
+walking every key.
+
+**Change 1:** `flash_decode.comp` for one position: a workgroup a query head, its subgroups splitting the keys, each
+with an online softmax merged in shared memory at the end; any subgroup width (a lane's vec4s strided by it).
+`fused_vulkan_attention_matches_its_definition` gains decode cases (Lightning's 32/2 heads at 128 over 1037 keys,
+5 keys, head 64 unmasked). Dropping the merge's rescale fails it. 256 threads: 1024-token decode 115-118 -> 153 tok/s,
+flat in context. 512 threads: 73 -> 36 us a call.
+
+**Change 2:** `moe_router`'s picks reduce by `subgroupMax` and then `subgroupMin` over the tied indices, and one pass
+over the subgroups' bests: two barriers a pick, where it took eight. 17.2 -> 9.5 us. Its test gains 160 experts
+(ties across the 128-thread stride); taking the highest tied index fails it. A 32-thread router (one subgroup) ran
+15.4 us; reverted.
+
+**Finding 2 (idle probe, removed):** the GPU waits ~80 us after each synchronize, once a token (1.1-1.3 % of decode).
+The main thread is busy 18 % of the time and `[vkrt] Analysis` 7 %. So the GPU is ~98 % busy, and the gap is kernel
+time, not host gaps.
+
+**Against llama.cpp Vulkan** (`GGML_VK_PERF_LOGGER=1 llama-bench -p 0 -n 64`, 697 dispatches and 5.63 ms of GPU a
+token, wall 5.68 ms unprofiled), ms a token:
+
+| | ours | llama.cpp |
+|---|---|---|
+| dense q8_0 matvecs | 2.15 | 2.01 |
+| q5_0 shared expert | 0.66 | 0.76 (its down fused with two adds) |
+| routed experts | 1.41 | 1.28 |
+| activation quantize (163 a token) | 0.48 | (none separate) |
+| router logits, top-k, combine | 0.45 | 0.20 |
+| norms | 0.44 | 0.30 |
+| elementwise | 0.35 | 0.83 |
+
+Per-op matvec times are near each other (Mamba in 40.4 / 38.6 us, out 20.5 / 18.6). Where the gap sits: the quantize,
+the router, then the experts and norms.
+
+**Dead end:** a Q8_0 decode matvec on the f32 activations themselves (no quantize; the block's int8 values as floats
+against the rows) ran 10304 x 2688 40.2 -> 53.4 us and 2688 x 4096 20.6 -> 28.7. The extra activation reads cost more
+than the 2.9 us quantize. Removed.
+
+**Where it stands:** ~152-157 tok/s (CUDA 207-214, llama.cpp Vulkan 176).
+
+**Next:** fold the quantize into what writes the activations (the RMS norm before a layer's matvecs; one quantize for
+the shared and routed experts' common input, and for q/k/v). Fuse the router's logits and top-k. Bring the experts'
+matvec to llama.cpp's 25 / 29 us.
+
+### Run 64 - 2026-11-05 11:07 (desktop: RTX 3090)
+
+**Question:** Run 63's largest decode item, 163 activation quantizes a token (0.48 ms).
+
+**Probe (removed):** 22 % of quantizes re-quantized one of the last eight inputs (~36 a token: the shared and routed
+experts' common input, attention's q/k/v).
+
+**Changes:**
+- A cache on the context of decode activations' int8 blocks (up to 8 rows), keyed by buffer, offset and value count.
+  It holds both buffers, so the pool can't hand either out, and drops an entry when anything writes either one.
+  Writes are: a dispatch binding the buffer writably (each pipeline reads its writable bindings off its SPIR-V's
+  NonWritable decorations at creation), a fill, a copy, a host write. `INFERENCE_VULKAN_NO_QCACHE` turns it off.
+  163 -> 128 quantizes a token.
+- `rms_norm_q8`: a decode row's RMS norm (now a subgroup reduction) also writes its output's blocks, each block 8
+  lanes of 4 values with clustered max and sum, and caches them. A first version (a thread a block, a 32-value loop)
+  ran 10.0 us against the 6.9 + 3.0 it replaced; this one runs 7.2. 128 -> 75 a token.
+- `gated_rmsnorm_q8` (Mamba's out-projection input, 3.9 us) and `relu2_q8` (the experts' down-projection inputs,
+  2.2 us, contiguous decode-size runs) the same. 75 -> 6 a token (attention's output projection left).
+- Tests: the scan's bits; a fill between two matvecs of one activation (removing the fill's invalidation fails
+  it); each fused kernel's matvec bitwise against the same values quantized apart (a changed scale fails each).
+  The tiny Nemotron-H engine tests pass on Vulkan (decode against one prefill, MTP greedy output).
+
+**Result:** decode at 1024 tokens ~155 -> 165.6-168.9 tok/s (llama.cpp Vulkan 176, CUDA 207-214).
+
+### Run 65 - 2026-11-05 11:13 (desktop: RTX 3090)
+
+**Question:** Run 63's router (0.45 against llama.cpp's 0.20 ms a token) and expert matvecs (32 / 29 against 25 / 29 us).
+
+- `matmul_f32_dot` (the router's logits, 128 x 2688 f32) at 256 threads with a subgroup reduction, where it had 64
+  threads and a shared-memory tree: 7.1 -> 4.9-5.1 us. The tensor and router tests pass. Decode 165.8-169.2 tok/s,
+  within noise of Run 64.
+- `moe_router` reads 13.4-15.0 us in these profiles against Run 63's 9.5 with no change to it. The per-dispatch
+  timestamps carry the launch and drain around each one, which shift with the neighbours, so small kernels are judged
+  by decode wall time.
+- Expert decode matvecs at 64 threads a workgroup (from 32): `matvec_bandwidth_at_decode` up 29.9-30.4 -> 32.0-32.2
+  us, down 31.1-32.1 -> 33.3 (one run 291 us). Reverted.
+
+**Where decode stands:** 5.92 ms a token (~168 tok/s) against llama.cpp Vulkan's 5.68 (176) and CUDA's ~4.7 (207-214),
+from ~7.6 ms (131 tok/s) at Run 61. The rest of the gap to llama.cpp is spread a few us an op. CUDA's lead is its
+graphs and fused kernels over a ~700-dispatch token.

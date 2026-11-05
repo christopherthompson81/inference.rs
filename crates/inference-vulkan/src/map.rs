@@ -112,6 +112,9 @@ impl Recorder<'_> {
         if n == 0 {
             return Ok(());
         }
+        if !bits && map.op == MapOp::Relu2 && self.relu2_q8(map, n)? {
+            return Ok(());
+        }
         let small = |v: usize| {
             u32::try_from(v).map_err(|_| Error::Invalid(format!("map index {v} past u32")))
         };
@@ -147,6 +150,72 @@ impl Recorder<'_> {
         self.retain(b.buffer.clone());
         self.retain(map.out.buffer.clone());
         Ok(())
+    }
+}
+
+pub(crate) const RELU2_Q8_BINDINGS: usize = 4;
+pub(crate) const RELU2_Q8_PUSH_BYTES: u32 = 4 * 4;
+// the most values a relu^2 quantizes too: a decode step's expert activations (a few rows of a few thousand)
+const RELU2_Q8_MAX: usize = 1 << 16;
+// relu2_q8's values a thread
+const RELU2_LANE_VALUES: usize = 4;
+
+impl Recorder<'_> {
+    // relu(a)^2 over contiguous operands, its int8 blocks written and cached for the matvec that reads it; whether
+    // it ran (a decode-size run of whole blocks, into its own buffer)
+    fn relu2_q8(&self, map: &Map<'_>, n: usize) -> Result<bool> {
+        let contiguous = |o: &Operand<'_>| {
+            let mut stride = 1;
+            map.dims.iter().zip(o.strides).rev().all(|(&d, &s)| {
+                let ok = d == 1 || s == stride;
+                stride *= d;
+                ok
+            })
+        };
+        if !n.is_multiple_of(crate::kernels::BLOCK_VALUES)
+            || n > RELU2_Q8_MAX
+            || !contiguous(&map.a)
+            || !contiguous(&map.out)
+            || Arc::ptr_eq(map.a.buffer, map.out.buffer)
+        {
+            return Ok(false);
+        }
+        let blocks = Arc::new(Buffer::new(
+            map.out.buffer.context(),
+            crate::MatVec::scratch_bytes(1, n),
+        )?);
+        let s_off = n / crate::kernels::BLOCK_VALUES * crate::kernels::Q8_WORD_BYTES
+            / crate::kernels::Q8_SCALE_BYTES;
+        let small = |v: usize| {
+            u32::try_from(v).map_err(|_| Error::Invalid(format!("map index {v} past u32")))
+        };
+        let bytes: Vec<u8> = [
+            small(n)?,
+            small(map.a.offset)?,
+            small(map.out.offset)?,
+            small(s_off)?,
+        ]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+        let threads = n / RELU2_LANE_VALUES;
+        self.context.kernels.relu2_q8.dispatch(
+            self,
+            &[
+                map.a.buffer.buffer,
+                map.out.buffer.buffer,
+                blocks.buffer,
+                blocks.buffer,
+            ],
+            &bytes,
+            [threads.div_ceil(THREADS) as u32, 1, 1],
+        );
+        self.context
+            .remember_quantized(map.out.buffer, map.out.offset, n, &blocks, s_off);
+        for buffer in [map.a.buffer, map.out.buffer, &blocks] {
+            self.retain(buffer.clone());
+        }
+        Ok(true)
     }
 }
 

@@ -1,0 +1,91 @@
+#version 450
+// rows_f32's RMS norm (times `alpha`, a workgroup a row) that also writes its output as quantize_q8_1's int8 blocks
+// (row-major over the rows' blocks), so the matvecs that read it run no quantize: a block's values are recomputed with
+// the expression the output's are written with, so they match quantizing the written row. A block is 8 lanes of 4
+// values, its max and sum clustered over them.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer Alpha { float alpha[]; };
+layout(std430, binding = 2) writeonly buffer O { float o[]; };
+layout(std430, binding = 3) writeonly buffer Q { uint q[]; };
+layout(std430, binding = 4) writeonly buffer S { vec2 s[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint rows;
+    uint cols;
+    float eps;
+    uint x_off;
+    uint alpha_off;
+    uint o_off;
+    // where (d, d * sum q) start in their buffer, in vec2s
+    uint s_off;
+} pc;
+
+const uint THREADS = 256;
+const uint QK = 32;
+// lanes a block, and the values each holds
+const uint BLOCK_LANES = 8;
+const uint LANE_VALUES = QK / BLOCK_LANES;
+// a workgroup's subgroups at most (8-lane subgroups)
+const uint MAX_SUBGROUPS = THREADS / 8;
+
+shared float red[MAX_SUBGROUPS];
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    if (row >= pc.rows) {
+        return;
+    }
+    uint t = gl_LocalInvocationID.x;
+    uint base = pc.x_off + row * pc.cols;
+    float ss = 0.0;
+    for (uint c = t; c < pc.cols; c += THREADS) {
+        float v = x[base + c];
+        ss += v * v;
+    }
+    ss = subgroupAdd(ss);
+    if (subgroupElect()) {
+        red[gl_SubgroupID] = ss;
+    }
+    barrier();
+    float total = 0.0;
+    for (uint g = 0; g < gl_NumSubgroups; g++) {
+        total += red[g];
+    }
+    float scale = 1.0 / sqrt(total / float(pc.cols) + pc.eps);
+    for (uint c = t; c < pc.cols; c += THREADS) {
+        o[pc.o_off + row * pc.cols + c] = x[base + c] * scale * alpha[pc.alpha_off + c];
+    }
+    uint blocks = pc.cols / QK;
+    uint lane = t % BLOCK_LANES;
+    // every lane runs each step (whole clusters), those past the row's blocks writing nothing
+    for (uint b0 = 0; b0 < blocks; b0 += THREADS / BLOCK_LANES) {
+        uint b = b0 + t / BLOCK_LANES;
+        bool live = b < blocks;
+        vec4 v = vec4(0.0);
+        if (live) {
+            uint c = b * QK + lane * LANE_VALUES;
+            for (uint j = 0; j < LANE_VALUES; j++) {
+                v[j] = x[base + c + j] * scale * alpha[pc.alpha_off + c + j];
+            }
+        }
+        vec4 av = abs(v);
+        float amax = subgroupClusteredMax(max(max(av.x, av.y), max(av.z, av.w)), BLOCK_LANES);
+        float d = amax / 127.0;
+        float inv = d > 0.0 ? 1.0 / d : 0.0;
+        ivec4 qv = ivec4(round(v * inv));
+        int sum = subgroupClusteredAdd(qv.x + qv.y + qv.z + qv.w, BLOCK_LANES);
+        if (live) {
+            uint i = row * blocks + b;
+            q[i * BLOCK_LANES + lane] = (uint(qv.x) & 0xffu) | ((uint(qv.y) & 0xffu) << 8)
+                | ((uint(qv.z) & 0xffu) << 16) | ((uint(qv.w) & 0xffu) << 24);
+            if (lane == 0) {
+                s[pc.s_off + i] = vec2(d, d * float(sum));
+            }
+        }
+    }
+}

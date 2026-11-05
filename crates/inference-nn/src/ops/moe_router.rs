@@ -474,6 +474,8 @@ mod tests {
     use inference_tensor::Device;
 
     const EXPERTS: usize = 16;
+    // past the kernel's 128 threads, so a thread holds two experts and ties fall across the stride
+    const WIDE_EXPERTS: usize = 160;
     const TOKENS: usize = 5;
     const TOLERANCE: f32 = 1e-6;
 
@@ -484,15 +486,23 @@ mod tests {
         let Ok(vk) = Device::new_vulkan(0) else {
             return Ok(());
         };
-        let logits: Vec<f32> = (0..TOKENS * EXPERTS)
+        for experts in [EXPERTS, WIDE_EXPERTS] {
+            vulkan_router_case(&vk, experts)?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn vulkan_router_case(vk: &Device, experts: usize) -> Result<()> {
+        let logits: Vec<f32> = (0..TOKENS * experts)
             .map(|i| ((i * 37 % 101) as f32 - 50.0) / 17.0)
             .collect();
-        let logits = Tensor::from_vec(logits, (TOKENS, EXPERTS), &Device::Cpu)?;
+        let logits = Tensor::from_vec(logits, (TOKENS, experts), &Device::Cpu)?;
         let bias = Tensor::from_vec(
-            (0..EXPERTS)
+            (0..experts)
                 .map(|e| e as f32 * 0.01 - 0.05)
                 .collect::<Vec<_>>(),
-            EXPERTS,
+            experts,
             &Device::Cpu,
         )?;
         for score_function in [
@@ -519,9 +529,9 @@ mod tests {
                     };
                     let want =
                         cpu_moe_router_topk(&logits, config, with_bias.then_some(&bias), None)?;
-                    let vbias = bias.to_device(&vk)?;
+                    let vbias = bias.to_device(vk)?;
                     let got = moe_router_topk(
-                        &logits.to_device(&vk)?,
+                        &logits.to_device(vk)?,
                         config,
                         with_bias.then_some(&vbias),
                         None,

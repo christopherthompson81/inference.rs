@@ -1,8 +1,9 @@
 #version 450
 // c[b] = a[b] (m x k) times b[b] (k x n), every operand strided, c contiguous, as matmul_f32.comp: here a workgroup an
-// output element, its threads striding over k and summing through shared memory, for a long k.
+// output element, its threads striding over k and summing by subgroups, then the subgroups' sums, for a long k.
+#extension GL_KHR_shader_subgroup_arithmetic : require
 
-layout(local_size_x = 64) in;
+layout(local_size_x = 256) in;
 
 layout(std430, binding = 0) readonly buffer A { float a[]; };
 layout(std430, binding = 1) readonly buffer B { float bm[]; };
@@ -23,8 +24,10 @@ layout(push_constant) uniform PushConstants {
     uint b_ns;
 } pc;
 
-const uint THREADS = 64;
-shared float red[THREADS];
+const uint THREADS = 256;
+// one sum a subgroup, for subgroups as narrow as 8
+const uint MAX_SUBGROUPS = THREADS / 8;
+shared float red[MAX_SUBGROUPS];
 
 void main() {
     uint e = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
@@ -41,15 +44,16 @@ void main() {
     for (uint j = t; j < pc.k; j += THREADS) {
         s += a[ia + j * pc.a_ks] * bm[ib + j * pc.b_ks];
     }
-    red[t] = s;
-    barrier();
-    for (uint w = THREADS / 2; w > 0; w >>= 1) {
-        if (t < w) {
-            red[t] += red[t + w];
-        }
-        barrier();
+    s = subgroupAdd(s);
+    if (subgroupElect()) {
+        red[gl_SubgroupID] = s;
     }
+    barrier();
     if (t == 0) {
-        c[e] = red[0];
+        float total = 0.0;
+        for (uint g = 0; g < gl_NumSubgroups; g++) {
+            total += red[g];
+        }
+        c[e] = total;
     }
 }

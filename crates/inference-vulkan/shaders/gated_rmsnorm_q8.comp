@@ -1,0 +1,96 @@
+#version 450
+// Mamba-2's gated RMSNorm in one pass (CUDA's mamba_gated_rmsnorm): v = x silu(gate) over a row, each group of
+// group_size values scaled by 1 / sqrt(mean(v^2) + eps), then by the weight. A workgroup a (row, group); f32. This
+// build also writes the output as quantize_q8_1's int8 blocks (row-major over the row's blocks; group_size a multiple
+// of 32), each value recomputed with the output's own expression, a block 8 lanes of 4 values.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+#extension GL_EXT_control_flow_attributes : require
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer G { float gate[]; };
+layout(std430, binding = 2) readonly buffer W { float weight[]; };
+layout(std430, binding = 3) writeonly buffer O { float out_[]; };
+layout(std430, binding = 4) writeonly buffer Q { uint q[]; };
+layout(std430, binding = 5) writeonly buffer S { vec2 s[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint group_size;
+    uint groups;
+    float eps;
+    uint x_off;
+    uint gate_off;
+    uint weight_off;
+    // where (d, d * sum q) start in their buffer, in vec2s
+    uint s_off;
+} pc;
+
+const uint THREADS = 256;
+// one partial a subgroup, for subgroups as narrow as 8
+const uint MAX_SUBGROUPS = 32;
+const uint QK = 32;
+// lanes a block, and the values each holds
+const uint BLOCK_LANES = 8;
+const uint LANE_VALUES = QK / BLOCK_LANES;
+
+shared float partial[MAX_SUBGROUPS];
+
+float gated(uint i) {
+    float g = gate[pc.gate_off + i];
+    return x[pc.x_off + i] * (g / (1.0 + exp(-g)));
+}
+
+void main() {
+    uint row = gl_WorkGroupID.x / pc.groups;
+    uint group = gl_WorkGroupID.x % pc.groups;
+    uint t = gl_LocalInvocationID.x;
+    uint base = (row * pc.groups + group) * pc.group_size;
+    float sum = 0.0;
+    for (uint i = t; i < pc.group_size; i += THREADS) {
+        float v = gated(base + i);
+        sum += v * v;
+    }
+    sum = subgroupAdd(sum);
+    if (gl_SubgroupInvocationID == 0) {
+        partial[gl_SubgroupID] = sum;
+    }
+    barrier();
+    float total = 0.0;
+    for (uint s = 0; s < gl_NumSubgroups; s++) {
+        total += partial[s];
+    }
+    float inv = inversesqrt(total / float(pc.group_size) + pc.eps);
+    for (uint i = t; i < pc.group_size; i += THREADS) {
+        out_[base + i] = gated(base + i) * inv * weight[pc.weight_off + group * pc.group_size + i];
+    }
+    uint blocks = pc.group_size / QK;
+    uint lane = t % BLOCK_LANES;
+    // every lane runs each step (whole clusters), those past the group's blocks writing nothing
+    for (uint b0 = 0; b0 < blocks; b0 += THREADS / BLOCK_LANES) {
+        uint b = b0 + t / BLOCK_LANES;
+        bool live = b < blocks;
+        vec4 v = vec4(0.0);
+        if (live) {
+            uint i = b * QK + lane * LANE_VALUES;
+            for (uint j = 0; j < LANE_VALUES; j++) {
+                v[j] = gated(base + i + j) * inv * weight[pc.weight_off + group * pc.group_size + i + j];
+            }
+        }
+        vec4 av = abs(v);
+        float amax = subgroupClusteredMax(max(max(av.x, av.y), max(av.z, av.w)), BLOCK_LANES);
+        float d = amax / 127.0;
+        float rcp = d > 0.0 ? 1.0 / d : 0.0;
+        ivec4 qv = ivec4(round(v * rcp));
+        int sum = subgroupClusteredAdd(qv.x + qv.y + qv.z + qv.w, BLOCK_LANES);
+        if (live) {
+            uint k = base / QK + b;
+            q[k * BLOCK_LANES + lane] = (uint(qv.x) & 0xffu) | ((uint(qv.y) & 0xffu) << 8)
+                | ((uint(qv.z) & 0xffu) << 16) | ((uint(qv.w) & 0xffu) << 24);
+            if (lane == 0) {
+                s[pc.s_off + k] = vec2(d, d * float(sum));
+            }
+        }
+    }
+}

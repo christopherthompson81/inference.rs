@@ -2018,7 +2018,8 @@ mod tests {
     }
 
     // fused attention against softmax(scale q k^T + mask) v on the CPU: GQA, keys past the positions (a cached prefix), a
-    // partial last tile, with the model's causal mask and without one
+    // partial last tile, with the model's causal mask and without one; and decode's one position over a cache (its own
+    // kernel), fewer keys than a workgroup's subgroups included
     #[test]
     fn fused_vulkan_attention_matches_its_definition() -> Result<()> {
         let Some(vk) = device() else { return Ok(()) };
@@ -2026,6 +2027,9 @@ mod tests {
             (2usize, 32usize, 2usize, 75usize, 75usize, 128usize, true),
             (1, 8, 8, 40, 107, 80, true),
             (1, 6, 2, 33, 33, 64, false),
+            (2, 32, 2, 1, 1037, 128, true),
+            (1, 8, 8, 1, 5, 80, true),
+            (1, 6, 2, 1, 300, 64, false),
         ] {
             let r = |shape: &[usize]| Tensor::randn(0f32, 1.0, shape, &Device::Cpu);
             let q = r(&[batch, heads, positions, head_size])?;
