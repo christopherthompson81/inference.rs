@@ -849,10 +849,10 @@ impl QuantMethod for GgufRawMatMul {
 
     #[cfg(feature = "cuda")]
     fn to_mapped_host(&self) -> Result<Option<Arc<dyn QuantMethod>>> {
-        Ok(self
-            .w
-            .to_mapped_host()?
-            .map(|w| Arc::new(Self::new(w, self.b.clone())) as Arc<dyn QuantMethod>))
+        Ok(self.w.to_mapped_host()?.map(|w| {
+            Arc::new(Self::new(w, self.b.clone()).with_output_scale(self.scale))
+                as Arc<dyn QuantMethod>
+        }))
     }
 
     #[cfg(feature = "cuda")]
