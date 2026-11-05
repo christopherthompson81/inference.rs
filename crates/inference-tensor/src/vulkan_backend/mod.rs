@@ -1794,12 +1794,24 @@ mod tests {
             .map(|i| if i % 3 == 0 { 2 } else { i * 7 % 4 })
             .collect();
         let long: Vec<u32> = (0..400u32).map(|i| (i * 5 + i / 7) % 4).collect();
-        let routes: [&[u32]; 5] = [&[3, 1], &[2, 0, 0, 2, 1, 2], &[1; 18], &prompt, &long];
+        // one expert of 10 routes beside busy ones (the narrowest tiles)
+        let uneven: Vec<u32> = (0..140u32)
+            .map(|i| if i % 14 == 0 { 3 } else { i % 3 })
+            .collect();
+        let routes: [&[u32]; 6] = [
+            &[3, 1],
+            &[2, 0, 0, 2, 1, 2],
+            &[1; 18],
+            &prompt,
+            &long,
+            &uneven,
+        ];
         for dtype in [
             GgmlDType::Q5_0,
             GgmlDType::Q8_0,
             GgmlDType::Q4_0,
             GgmlDType::Q4_1,
+            GgmlDType::Q5_1,
             GgmlDType::Q6K,
         ] {
             let weight = QTensor::quantize(&w.to_device(&vk)?, dtype)?;

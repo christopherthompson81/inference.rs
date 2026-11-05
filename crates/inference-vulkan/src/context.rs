@@ -71,7 +71,8 @@ impl Context {
     pub fn with_matrix_cores(mode: MatrixCores) -> Result<Arc<Self>> {
         // SAFETY: the loader is opened once here and kept alive in `_entry` for the context's life
         let entry = unsafe { ash::Entry::load() }.map_err(|err| Error::Load(err.to_string()))?;
-        let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_2);
+        // 1.3 where the device has it: NV_cooperative_matrix2's shaders are SPIR-V 1.6
+        let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_3);
         let labels = std::env::var_os(crate::stream::LABELS_ENV).is_some();
         let instance_extensions = [ash::ext::debug_utils::NAME.as_ptr()];
         let instance_extensions: &[_] = if labels { &instance_extensions } else { &[] };
@@ -126,9 +127,18 @@ impl Context {
         } && pin.is_some()
             && coop_matrix_f16(&entry, &instance, physical);
         let pin_subgroup = has_coop && pin == Some(SubgroupPin::Required);
+        let has_cm2 = has_coop
+            && properties.api_version >= vk::API_VERSION_1_3
+            && !crate::shaders::MOE_MM_CM2_Q4_0_N128.is_empty()
+            && std::env::var_os(NO_CM2_ENV).is_none()
+            && coop_matrix2(&instance, physical);
         let mut extensions = REQUIRED_EXTENSIONS.map(CStr::as_ptr).to_vec();
         if has_coop {
             extensions.push(ash::khr::cooperative_matrix::NAME.as_ptr());
+        }
+        if has_cm2 {
+            extensions.push(COOP_MATRIX2_NAME.as_ptr());
+            extensions.push(DECODE_VECTOR_NAME.as_ptr());
         }
         if pin_subgroup {
             extensions.push(ash::ext::subgroup_size_control::NAME.as_ptr());
@@ -139,7 +149,10 @@ impl Context {
             vk::PhysicalDeviceVulkan11Features::default().storage_buffer16_bit_access(true);
         let mut features12 = vk::PhysicalDeviceVulkan12Features::default()
             .shader_float16(has_coop)
-            .vulkan_memory_model(has_coop);
+            .vulkan_memory_model(has_coop)
+            .buffer_device_address(has_cm2);
+        let mut cm2_features = CoopMatrix2Features::all();
+        let mut decode_vector = DecodeVectorFeatures::with(vk::TRUE);
         let mut dot_product = vk::PhysicalDeviceShaderIntegerDotProductFeatures::default()
             .shader_integer_dot_product(true);
         let mut coop_features =
@@ -152,6 +165,11 @@ impl Context {
             .push_next(&mut dot_product);
         if has_coop {
             create = create.push_next(&mut coop_features);
+        }
+        if has_cm2 {
+            create = create
+                .push_next(&mut cm2_features)
+                .push_next(&mut decode_vector);
         }
         if pin_subgroup {
             create = create.push_next(&mut size_control);
@@ -178,6 +196,7 @@ impl Context {
             Some(crate::kernels::CoopKernels::new(
                 &device,
                 pin_subgroup.then_some(COOP_SUBGROUP),
+                has_cm2,
             )?)
         } else {
             None
@@ -526,6 +545,119 @@ fn coop_matrix_f16(
             && p.result_type == vk::ComponentTypeKHR::FLOAT32
             && p.scope == vk::ScopeKHR::SUBGROUP
     })
+}
+
+const COOP_MATRIX2_NAME: &CStr = c"VK_NV_cooperative_matrix2";
+// VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_2_FEATURES_NV, past ash's headers
+const COOP_MATRIX2_FEATURES: vk::StructureType = vk::StructureType::from_raw(1_000_593_000);
+/// Set to keep NVIDIA's cooperative matrix 2 kernels off (for A/B runs against the coopmat1 ones).
+pub const NO_CM2_ENV: &str = "INFERENCE_VULKAN_NO_CM2";
+
+// VkPhysicalDeviceCooperativeMatrix2FeaturesNV
+#[repr(C)]
+struct CoopMatrix2Features {
+    s_type: vk::StructureType,
+    p_next: *mut std::ffi::c_void,
+    workgroup_scope: vk::Bool32,
+    flexible_dimensions: vk::Bool32,
+    reductions: vk::Bool32,
+    conversions: vk::Bool32,
+    per_element_operations: vk::Bool32,
+    tensor_addressing: vk::Bool32,
+    block_loads: vk::Bool32,
+}
+
+impl CoopMatrix2Features {
+    fn with(value: vk::Bool32) -> Self {
+        Self {
+            s_type: COOP_MATRIX2_FEATURES,
+            p_next: std::ptr::null_mut(),
+            workgroup_scope: value,
+            flexible_dimensions: value,
+            reductions: value,
+            conversions: value,
+            per_element_operations: value,
+            tensor_addressing: value,
+            block_loads: value,
+        }
+    }
+
+    fn all() -> Self {
+        Self::with(vk::TRUE)
+    }
+
+    fn has_all(&self) -> bool {
+        [
+            self.workgroup_scope,
+            self.flexible_dimensions,
+            self.reductions,
+            self.conversions,
+            self.per_element_operations,
+            self.tensor_addressing,
+            self.block_loads,
+        ]
+        .iter()
+        .all(|&f| f == vk::TRUE)
+    }
+}
+
+const DECODE_VECTOR_NAME: &CStr = c"VK_NV_cooperative_matrix_decode_vector";
+const DECODE_VECTOR_FEATURES: vk::StructureType = vk::StructureType::from_raw(1_000_689_000);
+
+// VkPhysicalDeviceCooperativeMatrixDecodeVectorFeaturesNV: the tensor loads' four-value decode functions
+#[repr(C)]
+struct DecodeVectorFeatures {
+    s_type: vk::StructureType,
+    p_next: *mut std::ffi::c_void,
+    decode_vector: vk::Bool32,
+}
+
+impl DecodeVectorFeatures {
+    fn with(value: vk::Bool32) -> Self {
+        Self {
+            s_type: DECODE_VECTOR_FEATURES,
+            p_next: std::ptr::null_mut(),
+            decode_vector: value,
+        }
+    }
+}
+
+// SAFETY: a repr(C) Vulkan structure led by its sType and pNext
+unsafe impl vk::ExtendsPhysicalDeviceFeatures2 for DecodeVectorFeatures {}
+// SAFETY: as above
+unsafe impl vk::ExtendsDeviceCreateInfo for DecodeVectorFeatures {}
+
+// SAFETY: a repr(C) Vulkan structure led by its sType and pNext
+unsafe impl vk::ExtendsPhysicalDeviceFeatures2 for CoopMatrix2Features {}
+// SAFETY: as above
+unsafe impl vk::ExtendsDeviceCreateInfo for CoopMatrix2Features {}
+
+// whether the device has NVIDIA's cooperative matrix 2 with every feature its kernels use (the decode vector too),
+// and device addresses
+fn coop_matrix2(instance: &ash::Instance, physical: vk::PhysicalDevice) -> bool {
+    // SAFETY: `physical` came from this instance
+    let extensions =
+        unsafe { instance.enumerate_device_extension_properties(physical) }.unwrap_or_default();
+    let has = |name| {
+        extensions
+            .iter()
+            .any(|ext| ext.extension_name_as_c_str() == Ok(name))
+    };
+    if !has(COOP_MATRIX2_NAME) || !has(DECODE_VECTOR_NAME) {
+        return false;
+    }
+    let mut cm2 = CoopMatrix2Features::with(vk::FALSE);
+    let mut decode = DecodeVectorFeatures::with(vk::FALSE);
+    let mut features12 = vk::PhysicalDeviceVulkan12Features::default();
+    let mut features = vk::PhysicalDeviceFeatures2::default()
+        .push_next(&mut features12)
+        .push_next(&mut cm2)
+        .push_next(&mut decode);
+    // SAFETY: as above, and the chained structs outlive the call
+    unsafe { instance.get_physical_device_features2(physical, &mut features) };
+    cm2.has_all()
+        && decode.decode_vector == vk::TRUE
+        && features12.buffer_device_address == vk::TRUE
 }
 
 // whether the device reports a live memory budget (VK_EXT_memory_budget), and its largest device-local heap's size

@@ -335,7 +335,8 @@ impl MoeMatVec<'_> {
         if context.coop.is_none() {
             return int8;
         }
-        int8.max((slots + crate::kernels::MMC_TILE_M) * cols * 2)
+        // the f16 rows in expert order with a tile of zeros past them (the matrix-core paths quantize nothing)
+        int8.max((slots + MOE_GATHER_PAD) * cols * 2)
     }
 
     /// The routing scratch `slots` routes over `experts` take: their order, the tile count and the tiles.
@@ -471,7 +472,7 @@ impl Recorder<'_> {
 pub(crate) const MOE_MATVEC_BINDINGS: usize = 5;
 pub(crate) const MOE_MATVEC_PUSH_BYTES: u32 = 10 * 4;
 pub(crate) const MOE_SORT_BINDINGS: usize = 2;
-pub(crate) const MOE_SORT_PUSH_BYTES: u32 = 4 * 4;
+pub(crate) const MOE_SORT_PUSH_BYTES: u32 = 5 * 4;
 pub(crate) const MOE_MM_BINDINGS: usize = 5;
 pub(crate) const MOE_MM_PUSH_BYTES: u32 = 8 * 4;
 // past this many routes a step's experts take the tiled matmul over routes grouped by expert (moe_sort's tiles of
@@ -479,6 +480,11 @@ pub(crate) const MOE_MM_PUSH_BYTES: u32 = 8 * 4;
 const MOE_TILED_MIN_SLOTS: usize = 64;
 const MOE_TILE: usize = 64;
 const MOE_TILE_N: usize = 256;
+// moe_mm_cm2's weight rows and routes a tile, and the gathered rows' zero padding past the last route (a tile's
+// reach, the larger of the matrix-core kernels')
+const MOE_CM2_TILE_N: usize = 128;
+const MOE_CM2_TILE_M: usize = 128;
+const MOE_GATHER_PAD: usize = 128;
 // the matrix-core expert kernel's weight rows a workgroup, and the routes an expert averages before it beats
 // streaming the rows (its 64-token tiles mostly empty below: 3090, 128 experts, 24 a expert 2.37 against 1.97 ms,
 // 96 a expert 5.16 against 5.55 ms)
@@ -556,10 +562,18 @@ impl Recorder<'_> {
         if op.slots == 0 {
             return Ok(());
         }
-        if op.slots >= op.experts * MMC_MIN_ROUTES_PER_EXPERT
+        if op.slots > MOE_TILED_MIN_SLOTS
             && let Some(coop) = self.context.coop.as_ref()
         {
-            return self.moe_mmc(op, coop, expert_bytes);
+            // NVIDIA's cooperative matrix 2 takes every prompt's experts, the KHR matrix cores only busy ones
+            if let Some(cm2) = coop.moe_mm_cm2(op.ty)
+                && op.cols.is_multiple_of(crate::kernels::CM2_K_STEP)
+            {
+                return self.moe_mmc(op, coop, Some(cm2), expert_bytes);
+            }
+            if op.slots >= op.experts * MMC_MIN_ROUTES_PER_EXPERT {
+                return self.moe_mmc(op, coop, None, expert_bytes);
+            }
         }
         let s_off = self.quantize_rows(op.x, op.slots.div_ceil(op.x_div), op.cols, op.scratch)?;
         if op.slots > MOE_TILED_MIN_SLOTS {
@@ -615,12 +629,13 @@ impl Recorder<'_> {
         Ok(())
     }
 
-    // a prompt's routes: grouped by expert on the GPU, then a tiled matmul over each expert's tiles of them
-    // the routes on matrix cores: sorted by expert, their activations gathered in that order as f16, then the tiles
+    // a prompt's routes on matrix cores: sorted by expert, their activations gathered in that order as f16, then the
+    // tiles; on NVIDIA's cooperative matrix 2 a build a tile width (16 to 128 routes) side by side, else the KHR tile
     fn moe_mmc(
         &self,
         op: &MoeMatVec<'_>,
         coop: &crate::kernels::CoopKernels,
+        cm2: Option<&[crate::pipeline::Pipeline; 4]>,
         expert_bytes: usize,
     ) -> Result<()> {
         if op.scratch.len() < MoeMatVec::scratch_bytes(self.context, op.slots, op.x_div, op.cols) {
@@ -631,15 +646,20 @@ impl Recorder<'_> {
             )));
         }
         let tiles_off = op.slots;
+        let tile = if cm2.is_some() {
+            MOE_CM2_TILE_M
+        } else {
+            crate::kernels::MMC_TILE_M
+        };
         self.context.kernels.moe_sort.dispatch(
             self,
             &[op.ids.0.buffer, op.routing.buffer],
-            &words(&[op.slots, op.experts, op.ids.1, tiles_off])?,
+            &words(&[op.slots, op.experts, op.ids.1, tiles_off, tile])?,
             [1, 1, 1],
         );
         // a tile's last matrices read rows past its routes: the next tile's, or past the last route these zeros
         let pad_at = (op.slots * op.cols * 2) as u64;
-        let pad = (crate::kernels::MMC_TILE_M * op.cols * 2) as u64;
+        let pad = (MOE_GATHER_PAD * op.cols * 2) as u64;
         self.fill_range(op.scratch.buffer, pad_at, pad, 0);
         let pairs = (op.slots * op.cols / 2).div_ceil(crate::kernels::CONVERT_THREADS);
         let pairs_x = pairs.min(MAX_GROUPS_X);
@@ -658,15 +678,14 @@ impl Recorder<'_> {
             },
             op.rows * op.cols * op.slots,
         );
-        coop.moe_mmc(op.ty).dispatch(
-            self,
-            &[
-                op.weights.vk_buffer(),
-                op.scratch.buffer,
-                op.y.buffer,
-                op.routing.buffer,
-            ],
-            &words(&[
+        let buffers = [
+            op.weights.vk_buffer(),
+            op.scratch.buffer,
+            op.y.buffer,
+            op.routing.buffer,
+        ];
+        if let Some(builds) = cm2 {
+            let push = words(&[
                 op.rows,
                 op.cols,
                 op.weights.offset() as usize / 2,
@@ -674,13 +693,39 @@ impl Recorder<'_> {
                 0,
                 expert_bytes / 2,
                 tiles_off,
-            ])?,
-            [
-                op.rows.div_ceil(MMC_TILE_N) as u32,
+                op.slots + MOE_GATHER_PAD,
+            ])?;
+            let groups = [
+                op.rows.div_ceil(MOE_CM2_TILE_N) as u32,
                 MoeMatVec::max_tiles(op.slots, op.experts) as u32,
                 1,
-            ],
-        );
+            ];
+            // the widths' tiles are disjoint, so the builds may run side by side
+            let (last, rest) = builds.split_last().expect("four builds");
+            for pipeline in rest {
+                pipeline.dispatch_beside_next(self, &buffers, &push, groups);
+            }
+            last.dispatch(self, &buffers, &push, groups);
+        } else {
+            coop.moe_mmc(op.ty).dispatch(
+                self,
+                &buffers,
+                &words(&[
+                    op.rows,
+                    op.cols,
+                    op.weights.offset() as usize / 2,
+                    0,
+                    0,
+                    expert_bytes / 2,
+                    tiles_off,
+                ])?,
+                [
+                    op.rows.div_ceil(MMC_TILE_N) as u32,
+                    MoeMatVec::max_tiles(op.slots, op.experts) as u32,
+                    1,
+                ],
+            );
+        }
         self.work.set(
             self.work
                 .get()
@@ -698,7 +743,7 @@ impl Recorder<'_> {
         self.context.kernels.moe_sort.dispatch(
             self,
             &[op.ids.0.buffer, op.routing.buffer],
-            &words(&[op.slots, op.experts, op.ids.1, tiles_off])?,
+            &words(&[op.slots, op.experts, op.ids.1, tiles_off, MOE_TILE])?,
             [1, 1, 1],
         );
         let bytes = words(&[

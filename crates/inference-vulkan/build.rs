@@ -6,6 +6,10 @@ use std::process::Command;
 const SHADER_DIR: &str = "shaders";
 const GLSLC_ENV: &str = "GLSLC";
 const TARGET_ENV: &str = "--target-env=vulkan1.2";
+// NV_cooperative_matrix2 shaders take SPIR-V 1.6; a glslc too old for them (the probe fails) leaves them empty, and the
+// device without
+const CM2_MARK: &str = "_cm2";
+const CM2_TARGET_ENV: &str = "--target-env=vulkan1.3";
 
 fn main() {
     println!("cargo:rerun-if-changed={SHADER_DIR}");
@@ -21,6 +25,7 @@ fn main() {
         .filter(|path| path.extension().is_some_and(|ext| ext == "comp"))
         .collect();
     sources.sort();
+    let cm2_glslc = cm2_supported(&glslc, &out);
     let mut table = String::new();
     for source in &sources {
         let name = source
@@ -28,23 +33,45 @@ fn main() {
             .and_then(|s| s.to_str())
             .expect("shader names are UTF-8");
         let spv = out.join(format!("{name}.spv"));
-        compile(&glslc, source, &spv);
-        table.push_str(&format!(
-            "pub(crate) const {}: &[u8] = include_bytes!({:?});\n",
-            name.to_uppercase(),
-            spv
-        ));
+        let cm2 = name.contains(CM2_MARK);
+        let target = if cm2 { CM2_TARGET_ENV } else { TARGET_ENV };
+        if compile(&glslc, target, source, &spv) {
+            table.push_str(&format!(
+                "pub(crate) const {}: &[u8] = include_bytes!({:?});\n",
+                name.to_uppercase(),
+                spv
+            ));
+        } else if cm2 && !cm2_glslc {
+            println!(
+                "cargo:warning={glslc} cannot compile {name} (NV_cooperative_matrix2); it stays empty"
+            );
+            table.push_str(&format!(
+                "pub(crate) const {}: &[u8] = &[];\n",
+                name.to_uppercase()
+            ));
+        } else {
+            panic!("{glslc} failed on {}", source.display());
+        }
     }
     std::fs::write(out.join("shaders.rs"), table).expect("OUT_DIR is writable");
 }
 
-fn compile(glslc: &str, source: &Path, spv: &Path) {
+fn cm2_supported(glslc: &str, out: &Path) -> bool {
+    let probe = out.join("cm2_probe.comp");
+    std::fs::write(&probe, CM2_PROBE).expect("OUT_DIR is writable");
+    compile(glslc, CM2_TARGET_ENV, &probe, &out.join("cm2_probe.spv"))
+}
+
+const CM2_PROBE: &str =
+    "#version 450\n#extension GL_NV_cooperative_matrix2 : require\nvoid main() {}\n";
+
+fn compile(glslc: &str, target: &str, source: &Path, spv: &Path) -> bool {
     let status = Command::new(glslc)
-        .args([TARGET_ENV, "-O", "-Werror"])
+        .args([target, "-O", "-Werror"])
         .arg(source)
         .arg("-o")
         .arg(spv)
         .status()
         .unwrap_or_else(|err| panic!("the `vulkan` feature compiles its shaders with {glslc} ({err}); install shaderc or set {GLSLC_ENV}"));
-    assert!(status.success(), "{glslc} failed on {}", source.display());
+    status.success()
 }
