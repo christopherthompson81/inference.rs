@@ -1110,3 +1110,27 @@ over a strided view.
 **Result (alternating, 512 tokens, 3 iterations):** fused 142.1 / 143.4 / 142.3 tok/s, unfused 143.3 / 142.5 /
 140.2; no measurable gain. A drain after a kernel this small is cheap, so Run 42's ~3 us a dispatch overstates what
 folding the tiny maps recovers; the residual adds and the other small maps would buy as little.
+
+### Run 44 - 2026-11-04 ~21:30 (desktop: RTX 3090)
+
+**Question:** prompt speed (item 3's other half): where does a 512-token prompt go, against llama.cpp Vulkan's 4074
+tok/s and CUDA's 4285 (ours ~2260)?
+
+**Profile (`INFERENCE_VULKAN_PROFILE`, 40 prompts of 512, steady window, ~22 prompts):** the GPU is busy the whole
+prompt (~220 ms). A prompt: `moe_mm_q4_0` (the routed experts' dp4a row-streaming kernel) ~112 ms, about half;
+`mul_mmc_q8_0` + `_q5_0` (dense on matrix cores) ~54 ms (~28 TFLOPS); `matmul_f32_tiled` ~11 ms; the Mamba conv and
+SSD scans ~16 ms; `moe_sort` ~6 ms; prompt attention ~6 ms. 512 tokens x 6 routes over 128 experts is ~24 routes
+an expert, under the matrix-core experts' 48.
+
+**Dead ends:**
+- The matrix-core experts (64-token tiles) at 16 routes an expert: 512 tokens 226 -> 245 ms.
+- `moe_mmc32`, 32-token tiles of 128 weight rows (`mul_mmc_main.glsl` taking its tile as defines, `moe_sort` its
+  tile as a push constant): `expert_matmul_throughput` 2.81 ms a pass against dp4a's 1.97 (64-token tiles 2.37).
+  Dequantizing a weight tile to f16 is a fixed cost a tile, which fewer tokens a tile pay more of.
+- The dp4a kernel with each step's 256-row weight slab staged in shared memory by coalesced u16 pairs (its rows
+  streamed a thread each make a subgroup's loads span 32 rows): 11.87 ms a pass. The staging's per-element index
+  math and barriers cost far more than the strided loads, which the L1 serves across a row's successive blocks.
+
+**Implication:** the experts' kernel is ~5x off its ALU bound (~20 ms a prompt by instruction count) for reasons
+timestamps cannot show; counters (Nsight Graphics' GPU Trace, the one Vulkan profiler with SM and memory metrics on
+this driver, which exposes no VK_KHR_performance_query) would.
