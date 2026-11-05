@@ -550,7 +550,7 @@ impl Recorder<'_> {
         if op.slots > MAX_GROUPS_X {
             return Err(Error::Invalid(format!("{} expert routes", op.slots)));
         }
-        let groups = op.rows.div_ceil(MATVEC_ROWS);
+        let groups = op.rows.div_ceil(MOE_MATVEC_ROWS);
         let groups_x = groups.min(MAX_GROUPS_X);
         let bytes = words(&[
             op.rows,
@@ -765,6 +765,8 @@ const MAX_DISPATCH_GROUPS: usize = 65535;
 // MAX_PREFILL_SPLITS of them, their partials within PREFILL_PARTIALS_BYTES (a prompt chunk's rows already fill the GPU,
 // and every layer's partials stay live until its batch completes)
 const PREFILL_ROWS: usize = 8;
+// weight rows a moe_mat_vecs workgroup takes
+const MOE_MATVEC_ROWS: usize = 4;
 // paged_prefill_cm's query rows (positions x heads) a workgroup, and the heads it tiles
 const PREFILL_CM_ROWS: usize = 64;
 const PREFILL_CM_HEAD_STEP: usize = 16;

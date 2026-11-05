@@ -10,7 +10,7 @@
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_basic : require
 
-layout(local_size_x = 64) in;
+layout(local_size_x = 32) in;
 
 layout(std430, binding = 0) readonly buffer W { uint16_t w[]; };
 layout(std430, binding = 1) readonly buffer Q { uvec4 xq[]; };
@@ -36,7 +36,7 @@ layout(push_constant) uniform PushConstants {
     uint s_off;
 } pc;
 
-const uint THREADS = 64;
+const uint THREADS = 32;
 const uint QK = 32;
 const uint ROWS = 4;
 const uint MAX_M = 8;

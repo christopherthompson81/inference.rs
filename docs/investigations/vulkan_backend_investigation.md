@@ -1031,3 +1031,28 @@ does 209. Where does a decode step go?
 **Next:** fewer drains a token. Two levers: fuse the elementwise maps and the activation quantizes into their
 neighbours (fewer dispatches), and record a barrier only where a dispatch reads or overwrites what an earlier,
 unbarriered one wrote (which needs each pipeline's written bindings).
+
+### Run 40 - 2026-11-04 ~20:30 (desktop: RTX 3090)
+
+**Question:** Run 39's decode step, with the card to itself: what moves it?
+
+**Note:** a Godot editor had been holding 1.7 GB of VRAM and ~37 % of the GPU during Run 39's later checks; it was
+closed for these. Decode still swings ~+-15 tok/s within a 2-iteration bench, so A/Bs here alternate runs.
+
+**Changes and results (Lightning Q4_0 experts, `--paged-attn on --pa-cache-type q8 --pa-context-len 32768`):**
+- `gated_rmsnorm.comp`: Mamba-2's gated RMSNorm (silu gate, per-group RMS, weight) in one dispatch, where the
+  composite took nine a Mamba layer (`a_fused_gated_rmsnorm_matches_its_composite`). Alternating six pairs, fused
+  won all six: 114-121 against 109-115 tok/s (~4 %). The maps it removes were ~0.4 ms of ~8 a token by timestamps.
+- Decode profile (paged, steady window, ~563 tokens): Q8_0 dense matvecs 2.51 ms a token (71 calls, ~530 GB/s),
+  Q4_0 expert matvecs 1.80 ms (46), Q5_0 shared experts 0.79 ms (46), router 0.48 ms, `quantize_q8_1` 0.47 ms (163),
+  `ranked_topk` 0.29 ms (one workgroup for the one row: one SM of 82), paged attention ~0.35 ms.
+- `matvec_bandwidth_at_decode_shapes` and `expert_matvec_bandwidth_at_decode` (new benches): the lm_head shape
+  reads at 871 GB/s, but decode's shapes fall off: Mamba in 713, Mamba out 579, attention q 553, attention k 98, the
+  shared expert 465-534, the routed experts 479-502. Skipping the activation quantize saves 2.5-3 us a call.
+- Experts at 8 rows a workgroup: spills (down 296 us). At 32 threads a workgroup (one subgroup, 4 rows): up 35.2 ->
+  32.4 us, down 33.6 -> 29.6; 2 rows: up 31.1, down 32.8. Dense at 32 threads: decode shapes 1-13 % faster, lm_head
+  unchanged, 8 activation rows Q8_0 410 -> 472 GB/s but Q5_0 393 -> 362.
+- Both at 32 threads, 4 rows: decode 116.7 -> 129-133 tok/s; prompts unchanged (512 tokens 226 ms, 2048 724 ms).
+
+**Next:** the fixed cost a dispatch (~3 us beyond its work, ~600 a token) and the remaining matvec gap to the card's
+~870 GB/s; `ranked_topk` over more of the GPU for a single row.
