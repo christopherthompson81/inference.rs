@@ -1514,7 +1514,7 @@ class JobsConfig:
     """Where jobs keep their folders and which weights they run."""
 
     devices: list[int] | None = None
-    dir: str | None = "/home/chris/.cache/inference-rs/engine-jobs"
+    dir: str | None = None
     drain_timeout_secs: int | None = 120
     lpips: str | None = None
     models_repo: str | None = None
