@@ -420,9 +420,11 @@ fn vulkan_paged_prefill_matches_each_row_scored_alone() -> Result<()> {
     paged_prefill_rows_score_alone(VULKAN_PREFILL_TOLERANCE)
 }
 
-// on matrix cores where the device has them: Q, K, V and P in f16, as CUDA's flash kernels take them
+// on matrix cores where the device has them, an iGPU's too: Q, K, V and P in f16, as CUDA's flash kernels take them
 #[test]
 fn vulkan_matrix_core_paged_prefill_matches_each_row_scored_alone() -> Result<()> {
+    // SAFETY: nextest runs each test in its own process, and nothing has read the environment yet
+    unsafe { std::env::set_var(inference_tensor::vulkan::IGPU_MATRIX_CORES_ENV, "1") };
     paged_prefill_rows_score_alone(VULKAN_MATRIX_CORE_PREFILL_TOLERANCE)
 }
 

@@ -978,3 +978,31 @@ cost the q8 cache ~5.5 s more, now gone (q8 reads half f16's bytes and is the fa
 of per-token work, attention is ~156 s (~19 TFLOPS); CUDA's q8 is 141 s in all.
 
 **Next:** item (3) of Nemotron-H CUDA Run 18: short prompts and decode at half CUDA's rate.
+
+### Run 38 - 2026-11-04 ~19:30 (laptop: Radeon 780M)
+
+**Question:** do the matrix-core kernels (`mul_mmc_*`, `moe_mmc_*`, `paged_prefill_cm*`) speed up the 780M's prompts?
+They are laid out for 4 subgroups of 32, and RADV runs the 780M's compute at 64 by default (`subgroupSize` 64,
+`minSubgroupSize` 32, `subgroupSizeControl` with compute in `requiredSubgroupSizeStages`).
+
+**Finding:** at RADV's default width the matrix-core prompt path fails (the tiny Nemotron-H's matrix-core test errs).
+So any wave64-default device had broken matmuls there since Run 25, not only the 780M.
+
+**Change:**
+- The matrix-core kernels are built only where compute subgroups are 32 wide or can be made so
+  (`VK_EXT_subgroup_size_control`). Every one of them is created with `requiredSubgroupSize` 32 where needed
+  (`Pipeline::with_subgroup`).
+- `MatrixCores` (`Off`, `Discrete`, `Any`) replaces the bool; `IGPU_MATRIX_CORES_ENV` (`INFERENCE_VULKAN_IGPU_COOPMAT`)
+  picks `Any`, and the two matrix-core tests set it, so an iGPU with matrix cores runs them.
+
+**Result (Lightning recipe A, `bench --vulkan --paged-attn on --pa-context-len 8192`, interleaved, 2 rounds):**
+
+| prompt | dp4a, scalar attention | matrix cores |
+|---|---|---|
+| 512 | 413-419 tok/s | 396-397 tok/s |
+| 2048 | 403-404 tok/s | 372-374 tok/s |
+
+So an iGPU keeps the matrix cores off by default.
+
+**Trap:** `--paged-attn on` without `--pa-context-len` sizes the cache from free memory (12 GB, 2M tokens of
+Lightning's ~7 KB a token here) and the device map moves 5 layers to the CPU: 250 tok/s at 512.
