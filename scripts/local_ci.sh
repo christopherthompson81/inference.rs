@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Canonical local checks with fixed package/feature sets: scripts/local_ci.sh [--lint] [--tests] [--cuda] [--metal]
-# [--vulkan] [--slim] [--docs|--docs-all] [--bindings] [--size|--size-update]. Real-checkpoint tests are not run here:
+# [--vulkan] [--slim] [--docs|--docs-all] [--bindings] [--size|--size-update] [--filter=EXPR]. Real-checkpoint tests are
+# not run here:
 # scripts/deep_checks.sh runs them on request.
 # --metal is the macOS counterpart of --cuda: the metal-only code paths are invisible to a CPU or CUDA lint.
 # --vulkan lints inference-vulkan, inference-tensor and the SDK with the `vulkan` feature and runs the Vulkan tests (needs
@@ -15,8 +16,11 @@
 # dependents; --docs-all checks every crate. Neither renders HTML; `cargo doc` does.
 # --size (Linux) builds the CUDA C ABI library as the wheels do and fails when its file or a large section grew past
 # scripts/bundle_size_baseline.json; --size-update rewrites the baseline (commit it with the change that moved it).
-# --sweep then deletes target/debug artifacts the selected modes no longer use (stale variants pile up otherwise). Every
-# run that builds also deletes what live units no longer read (old codegen units' debug info, older sessions).
+# Each passing mode records what it built (target/debug/.ledger, from a no-op replay), and every run deletes what no mode
+# recorded in the last LEDGER_DAYS: cargo never removes a variant (another feature set or `-p` selection) itself. A
+# build run by hand outside the modes is spared for GRACE_HOURS. --sweep deletes all but the selected modes' artifacts.
+# --filter=EXPR narrows the test suites to a nextest filter expression (doctests skipped) while building exactly what
+# the full suites build: iterating with `cargo nextest -p ...` builds another variant of every crate it touches.
 # Build env (CC/CXX/NVCC) and INFERENCE_TEST_* paths belong in ~/.cargo/config.toml [env]; changing one rebuilds deps.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -33,6 +37,7 @@ bindings=0
 size=0
 size_update=0
 sweep=0
+filter=
 for arg in "$@"; do
     case $arg in
         --lint) lint=1 ;;
@@ -47,6 +52,7 @@ for arg in "$@"; do
         --size) size=1 ;;
         --size-update) size=1 size_update=1 ;;
         --sweep) sweep=1 ;;
+        --filter=*) filter=${arg#--filter=} ;;
         *) echo "unknown option $arg" >&2; exit 2 ;;
     esac
 done
@@ -61,8 +67,11 @@ SLIM_FAMILIES=("" models-gemma models-llama models-other models-phi models-qwen)
 BINDINGS=(build --workspace --lib --example tiny_checkpoint)
 CSHARP=bindings/csharp
 PYTHON=bindings/python
-# The last slim replay's artifacts, so a sweep keeps them on the runs that skip the slim lint.
-SLIM_KEEP=target/debug/.slim-artifacts.json
+LEDGER=target/debug/.ledger
+LEDGER_DAYS=3
+GRACE_HOURS=24
+# incremental dirs per crate kept past its recorded units: their names carry no hash a replay reports
+INCREMENTAL_SLACK=4
 slim_clippy() { cargo clippy -p inference-core -p inference-gguf --lib --tests --no-default-features ${1:+--features inference-core/$1} "${@:2}"; }
 
 if [[ $lint -eq 1 ]]; then
@@ -79,12 +88,15 @@ if [[ $tests -eq 1 || $cuda -eq 1 || $metal -eq 1 ]] && ! cargo nextest --versio
 fi
 # RLIMIT_NPROC counts every process the user runs, so this test never shares the machine with another suite.
 ALONE='package(inference-sandbox) & test(rlimit_nproc_caps_processes)'
-cuda_pid= bindings_pid= size_pid= cuda_log= bindings_log= size_log= tiny= live=
+# a suite's own expression narrowed by --filter; a filter matching none of a suite's tests passes it
+narrowed() { if [[ -n $filter ]]; then echo "($1) & ($filter)"; else echo "$1"; fi; }
+NO_TESTS=(--no-tests=pass)
+cuda_pid= bindings_pid= size_pid= cuda_log= bindings_log= size_log= tiny=
 cleanup() {
     if [[ -n $cuda_pid ]]; then kill "$cuda_pid" 2> /dev/null || true; fi
     if [[ -n $bindings_pid ]]; then kill "$bindings_pid" 2> /dev/null || true; fi
     if [[ -n $size_pid ]]; then kill "$size_pid" 2> /dev/null || true; fi
-    rm -rf "$cuda_log" "$bindings_log" "$size_log" "$tiny" "$live"
+    rm -rf "$cuda_log" "$bindings_log" "$size_log" "$tiny"
 }
 # What the wheels bundle: the default model set, fat LTO, stripped, no host-specific codegen (build_wheels.py). Its
 # fat LTO runs mostly on one core under target/bundle's own lock, so it builds while the suites run.
@@ -104,11 +116,12 @@ if [[ $cuda -eq 1 ]]; then
         # The CUDA suite is GPU-bound, so it runs in the background while the CPU lint and tests use the cores.
         cargo nextest run --no-run --features cuda "${TEST_TARGETS[@]}"
         cuda_log=$(mktemp)
-        cargo nextest run --no-fail-fast --profile cuda --features cuda "${TEST_TARGETS[@]}" -E "not ($ALONE)" \
-            > "$cuda_log" 2>&1 &
+        cargo nextest run --no-fail-fast "${NO_TESTS[@]}" --profile cuda --features cuda "${TEST_TARGETS[@]}" \
+            -E "$(narrowed "not ($ALONE)")" > "$cuda_log" 2>&1 &
         cuda_pid=$!
     else
-        cargo nextest run --no-fail-fast --profile cuda --features cuda "${TEST_TARGETS[@]}"
+        cargo nextest run --no-fail-fast "${NO_TESTS[@]}" --profile cuda --features cuda "${TEST_TARGETS[@]}" \
+            -E "$(narrowed "all()")"
     fi
 fi
 failed=0
@@ -120,8 +133,8 @@ fi
 if [[ $vulkan -eq 1 ]]; then
     VULKAN_PACKAGES=(-p inference-vulkan -p inference-tensor -p inference-paged-attn -p inference-nn -p inference)
     cargo clippy "${VULKAN_PACKAGES[@]}" --features vulkan --tests -- -D warnings || failed=1
-    cargo nextest run --no-fail-fast "${VULKAN_PACKAGES[@]}" --features vulkan \
-        -E 'package(inference-vulkan) | test(vulkan)' || failed=1
+    cargo nextest run --no-fail-fast "${NO_TESTS[@]}" "${VULKAN_PACKAGES[@]}" --features vulkan \
+        -E "$(narrowed 'package(inference-vulkan) | test(vulkan)')" || failed=1
 fi
 if [[ $lint -eq 1 ]]; then
     cargo "${CLIPPY[@]}" -- -D warnings || failed=1
@@ -130,12 +143,13 @@ if [[ $tests -eq 1 ]]; then
     cargo nextest run --no-run "${TEST_TARGETS[@]}"
     start_size_build
     if [[ -n $cuda_pid ]]; then
-        cargo nextest run --no-fail-fast "${TEST_TARGETS[@]}" -E "not ($ALONE)" || failed=1
+        cargo nextest run --no-fail-fast "${NO_TESTS[@]}" "${TEST_TARGETS[@]}" -E "$(narrowed "not ($ALONE)")" \
+            || failed=1
     else
-        cargo nextest run --no-fail-fast "${TEST_TARGETS[@]}" || failed=1
+        cargo nextest run --no-fail-fast "${NO_TESTS[@]}" "${TEST_TARGETS[@]}" -E "$(narrowed "all()")" || failed=1
     fi
     # nextest does not run doctests
-    cargo test --workspace --no-fail-fast --doc || failed=1
+    if [[ -z $filter ]]; then cargo test --workspace --no-fail-fast --doc || failed=1; fi
 fi
 # The binding tests and the CUDA suite need no cargo lock, so the slim lint and the docs check run while they do.
 if [[ $bindings -eq 1 ]]; then
@@ -214,15 +228,17 @@ if [[ -n $cuda_pid ]]; then
     echo "---- CUDA suite ----"
     cat "$cuda_log"
     # Last and alone: it counts every process the user runs, the lint and binding tests above included.
-    cargo nextest run --no-fail-fast --profile cuda --features cuda "${TEST_TARGETS[@]}" -E "$ALONE" || failed=1
+    cargo nextest run --no-fail-fast "${NO_TESTS[@]}" --profile cuda --features cuda "${TEST_TARGETS[@]}" \
+        -E "$(narrowed "$ALONE")" || failed=1
 fi
 cuda_pid= bindings_pid=
-# What live units no longer read (renamed codegen units' split debug info, older incremental sessions) needs no
-# replay to find, so this runs whether or not the checks passed (`--sweep` runs it too).
-if [[ $sweep -eq 0 && $((lint + tests + cuda + metal + slim + docs + bindings)) -gt 0 ]]; then
-    scripts/sweep_target.py target/debug --superseded || true
+builds=$((lint + tests + cuda + metal + vulkan + slim + docs + bindings))
+# A failed run records nothing (a replay would rebuild what failed) and deletes only what live units no longer read:
+# renamed codegen units' split debug info and older incremental sessions, which need no replay to find.
+if [[ $failed -ne 0 ]]; then
+    if [[ $builds -gt 0 ]]; then scripts/sweep_target.py target/debug --superseded || true; fi
+    exit 1
 fi
-[[ $failed -eq 0 ]] || exit 1
 if [[ $size -eq 1 ]]; then
     if [[ $OSTYPE != linux* ]]; then echo "--size measures the Linux CUDA library" >&2; exit 2; fi
     compute_cap=${CUDA_COMPUTE_CAP:-$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1)}
@@ -243,32 +259,54 @@ if [[ $size -eq 1 ]]; then
     scripts/bundle_size.py "${size_args[@]}"
 fi
 # --size builds under target/bundle, which the sweep leaves alone
-if [[ $sweep -eq 1 && $((lint + tests + cuda + metal + slim + docs + bindings)) -gt 0 ]]; then
-    # No-op rebuilds of exactly what the modes above built; their JSON names every live artifact. A failed replay
-    # would under-report, so nothing is deleted unless all of them succeed.
-    live=$(mktemp)
+if [[ $builds -gt 0 ]]; then
+    # No-op rebuilds of exactly what the modes above built; their JSON names every live artifact. A failed replay would
+    # under-report, so it records nothing.
+    mkdir -p "$LEDGER"
+    recorded=()
+    record() {
+        local mode=$1
+        shift
+        if "$@" > "$LEDGER/$mode.json.new"; then
+            mv "$LEDGER/$mode.json.new" "$LEDGER/$mode.json"
+            recorded+=("$LEDGER/$mode.json")
+        else
+            rm -f "$LEDGER/$mode.json.new"
+        fi
+    }
+    replay() { cargo "$@" --message-format=json; }
     # clippy's `-- -D warnings` is part of its fingerprint, so the replay passes it too or it rebuilds every lint unit
-    replay() { cargo "$@" --message-format=json >> "$live"; }
-    lint_replay() { cargo "${CLIPPY[@]}" "$@" --message-format=json -- -D warnings >> "$live"; }
-    if [[ $lint -eq 1 ]]; then lint_replay; fi
-    if [[ $tests -eq 1 ]]; then replay test --no-run "${TEST_TARGETS[@]}"; fi
+    lint_replay() { cargo "$@" --message-format=json -- -D warnings; }
+    slim_replay() {
+        for family in "${SLIM_FAMILIES[@]}"; do slim_clippy "$family" --message-format=json -- -D warnings || return 1; done
+    }
+    if [[ $lint -eq 1 ]]; then record lint lint_replay "${CLIPPY[@]}"; fi
+    if [[ $tests -eq 1 ]]; then record tests replay test --no-run "${TEST_TARGETS[@]}"; fi
     if [[ $cuda -eq 1 ]]; then
-        lint_replay --features cuda
-        replay test --no-run --features cuda "${TEST_TARGETS[@]}"
+        record cuda-lint lint_replay "${CLIPPY[@]}" --features cuda
+        record cuda-tests replay test --no-run --features cuda "${TEST_TARGETS[@]}"
     fi
     if [[ $metal -eq 1 ]]; then
-        lint_replay --features metal
-        replay test --no-run --features metal "${TEST_TARGETS[@]}"
+        record metal-lint lint_replay "${CLIPPY[@]}" --features metal
+        record metal-tests replay test --no-run --features metal "${TEST_TARGETS[@]}"
     fi
-    if [[ $slim -eq 1 && $slim_skip -eq 0 ]]; then
-        : > "$SLIM_KEEP.new"
-        for family in "${SLIM_FAMILIES[@]}"; do
-            slim_clippy "$family" --message-format=json -- -D warnings >> "$SLIM_KEEP.new"
-        done
-        mv "$SLIM_KEEP.new" "$SLIM_KEEP"
+    if [[ $vulkan -eq 1 ]]; then
+        record vulkan-lint lint_replay clippy "${VULKAN_PACKAGES[@]}" --features vulkan --tests
+        record vulkan-tests replay test --no-run "${VULKAN_PACKAGES[@]}" --features vulkan
     fi
-    if [[ $slim -eq 1 && -f $SLIM_KEEP ]]; then cat "$SLIM_KEEP" >> "$live"; fi
-    if [[ ${#DOC_TARGETS[@]} -gt 0 ]]; then doc_build --message-format=json >> "$live"; fi
-    if [[ $bindings -eq 1 ]]; then replay "${BINDINGS[@]}"; fi
-    scripts/sweep_target.py target/debug < "$live"
+    if [[ $slim -eq 1 && $slim_skip -eq 0 ]]; then record slim slim_replay; fi
+    if [[ ${#DOC_TARGETS[@]} -gt 0 ]]; then record docs doc_build --message-format=json; fi
+    if [[ $bindings -eq 1 ]]; then record bindings replay "${BINDINGS[@]}"; fi
+    if [[ $sweep -eq 1 ]]; then
+        ledgers=("${recorded[@]}")
+        sweep_args=()
+    else
+        mapfile -t ledgers < <(find "$LEDGER" -name '*.json' -mtime -"$LEDGER_DAYS")
+        sweep_args=(--grace-hours "$GRACE_HOURS" --slack "$INCREMENTAL_SLACK")
+    fi
+    if [[ ${#ledgers[@]} -gt 0 ]]; then
+        cat "${ledgers[@]}" | scripts/sweep_target.py target/debug "${sweep_args[@]}" || true
+    else
+        scripts/sweep_target.py target/debug --superseded || true
+    fi
 fi
