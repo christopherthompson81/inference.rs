@@ -94,3 +94,46 @@ candidates are drawn in probability order).
 **Implication:** the agent's sampled tool calls are 2.7x faster than at the start; greedy is ~185. What is left is
 sampling itself (MTP accepts ~2.2 tokens a step sampled against ~3 greedy) and the host-side verify rows (logits to
 the host, a CPU softmax, the grammar check). Moving constrained verification onto the device is the next, larger step.
+
+## Run 4 - 2026-11-05
+
+**Question, from the user:** the drop from greedy to sampled shouldn't be that dramatic; is work sent to the CPU?
+
+**Command:** `code/plain.py` (a 400-word story, greedy or sampled, MTP acceptance from the log); `perf record` over a
+sampled one; then an Nsight session (`--cuda-graph-trace=node`) over one greedy and one sampled story, split at the
+pause between them.
+
+**Finding:**
+- Acceptance explains little: length 2.22 greedy against 1.98 sampled (1.12x), while the rate is 186.9 against
+  135.8 tok/s (1.38x).
+- Plain sampling does not run on the CPU: 81 % of the CPU samples are in `libcuda` waiting, no sampler code.
+- The GPU: a sampled step costs 17.5 ms against greedy's 14.4 (272 / 263 steps). The difference is sampling
+  kernels:
+
+| per sampled step | GPU time |
+|---|---|
+| `sparse_rejection_topk_f32_kernel`, once | 1.5-1.9 ms, launched `<<<batch, 1>>>`: one thread |
+| drafter, x3 drafts: `topk_large_stage1` 144 us + `stage2_f32_packed` 207 us + sample 17 us | ~1.1 ms |
+| verify, 4 rows: `topk_large_stage1` (grid y 4) 227 us + stage2 207 us | ~0.43 ms |
+
+- The rejection kernel ran every candidate's work serially on one thread out of local memory: an O(K^2) duplicate
+  check over the 128 candidates at each of 4 positions, `expf` per candidate, then on rejection an O(K x q_width)
+  residual and an O(K^2) insertion sort by token id.
+- `--mtp-draft-sampling greedy` changes nothing on the built-in head (the same tokens to the count): it samples its
+  drafts whenever the request samples.
+
+**Change:** the top-K rejection kernel as a block of one thread a candidate (`prepare_topk_block`,
+`sample_topk_block`): reading and validation, the weights, the duplicate check (each slot against the earlier ones),
+the residual and the draw's ranking by id run per slot; the order-dependent sums (top-k, top-p, min-p, the residual,
+the draw's walk) stay serial on thread 0 in slot order, so outcomes are unchanged. The serial helpers are gone. The
+kernel's 11 cases pass, the four CPU-reference ones (ties, top-p) included.
+
+| plain story | before | after |
+|---|---|---|
+| sampled | 133.4 / 136.4 | **145.3 / 148.6** (the same 539 / 524 tokens: the same outcomes) |
+| greedy | 190.9 | 190.8 |
+
+**Implication:** sampled is now 1.29x behind greedy, of which acceptance is 1.12x. The rest is the ranked top-K
+(`topk_large`: 64 blocks for stage 1, one block merging 8,192 candidates in stage 2), ~1.5 ms a step for the drafter's
+three draws and the verify rows. (Tool-call numbers on this branch are not comparable: it lacks #826's grammar fix,
+so tool-call replies run to max_tokens.)
