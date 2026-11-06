@@ -25,6 +25,9 @@ pub(crate) const VIDEO_MODALITY: u8 = 1 << 2;
 pub const DEFAULT_MAX_NUM_BATCHED_TOKENS: usize = 4096;
 pub const DEFAULT_MAX_PREFILL_CHUNK_TOKENS: usize = 512;
 pub const DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL: usize = 8;
+// an iGPU's prompt chunk: its working set comes out of host RAM, and past 1024 tokens it grows faster than the chunk
+// (Lightning: +4.3 GB at 1024, +21 GB at 4096) for no speed
+const IGPU_MAX_NUM_BATCHED_TOKENS: usize = 1024;
 
 pub(crate) fn modality_signature(sequence: &Sequence) -> u8 {
     let mut signature = 0;
@@ -91,14 +94,14 @@ impl Default for SchedulerLimits {
 
 impl SchedulerLimits {
     // (batched tokens, prompt chunk) with `planned` standing in for an unset chunk
-    fn resolve(self, planned: Option<usize>) -> (usize, usize) {
+    fn resolve(self, planned: Option<usize>, default_batched: usize) -> (usize, usize) {
         let chunk = self
             .max_prefill_chunk_tokens
             .or(planned)
             .unwrap_or(DEFAULT_MAX_PREFILL_CHUNK_TOKENS);
         let batched = self
             .max_num_batched_tokens
-            .unwrap_or(DEFAULT_MAX_NUM_BATCHED_TOKENS.max(chunk));
+            .unwrap_or(default_batched.max(chunk));
         (batched, chunk)
     }
 }
@@ -111,10 +114,18 @@ impl SchedulerConfig {
         max_num_seqs: usize,
         limits: SchedulerLimits,
     ) -> anyhow::Result<Self> {
-        let metadata = pipeline.lock().await.get_metadata();
+        let (metadata, device) = {
+            let pipeline = pipeline.lock().await;
+            (pipeline.get_metadata(), pipeline.device())
+        };
         if paged_attn_requested && let Some(config) = metadata.cache_config.clone() {
+            let default_batched = if device.is_vulkan() && !crate::has_dedicated_memory(&device) {
+                IGPU_MAX_NUM_BATCHED_TOKENS
+            } else {
+                DEFAULT_MAX_NUM_BATCHED_TOKENS
+            };
             let (max_num_batched_tokens, max_prefill_chunk_tokens) =
-                limits.resolve(metadata.prompt_chunk_tokens);
+                limits.resolve(metadata.prompt_chunk_tokens, default_batched);
             return Ok(Self::PagedAttentionMeta {
                 max_num_seqs,
                 max_num_batched_tokens,
@@ -344,20 +355,30 @@ mod tests {
     #[test]
     fn a_planned_prompt_chunk_stands_in_for_an_unset_one() {
         let unset = SchedulerLimits::default();
+        let batched = DEFAULT_MAX_NUM_BATCHED_TOKENS;
         assert_eq!(
-            unset.resolve(None),
-            (
-                DEFAULT_MAX_NUM_BATCHED_TOKENS,
-                DEFAULT_MAX_PREFILL_CHUNK_TOKENS
-            )
+            unset.resolve(None, batched),
+            (batched, DEFAULT_MAX_PREFILL_CHUNK_TOKENS)
         );
-        assert_eq!(unset.resolve(Some(8192)), (8192, 8192));
+        assert_eq!(unset.resolve(Some(8192), batched), (8192, 8192));
         let set = SchedulerLimits {
             max_num_batched_tokens: Some(2048),
             max_prefill_chunk_tokens: Some(1024),
             ..unset
         };
-        assert_eq!(set.resolve(Some(8192)), (2048, 1024));
+        assert_eq!(set.resolve(Some(8192), batched), (2048, 1024));
+        // an iGPU's smaller default, never below the chunk the load planned
+        assert_eq!(
+            unset.resolve(None, IGPU_MAX_NUM_BATCHED_TOKENS),
+            (
+                IGPU_MAX_NUM_BATCHED_TOKENS,
+                DEFAULT_MAX_PREFILL_CHUNK_TOKENS
+            )
+        );
+        assert_eq!(
+            unset.resolve(Some(2048), IGPU_MAX_NUM_BATCHED_TOKENS),
+            (2048, 2048)
+        );
     }
 
     #[test]

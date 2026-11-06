@@ -501,6 +501,7 @@ fn recurrent_kv_floor_bytes(
 fn paged_kv_bytes_per_token(
     paged_attn_config: PagedAttentionConfig,
     dtype: DType,
+    device: &Device,
     model_config: &dyn ModelConfigLike,
 ) -> Result<usize> {
     let plan = inference_nn::paged_attention::cache_plan(
@@ -509,7 +510,7 @@ fn paged_kv_bytes_per_token(
         model_config,
     );
     let (numerator, denominator) =
-        inference_nn::paged_attention::kv_bytes_per_token(&plan, dtype, model_config);
+        inference_nn::paged_attention::kv_bytes_per_token(&plan, dtype, device, model_config);
     Ok(numerator.div_ceil(denominator))
 }
 
@@ -637,7 +638,7 @@ impl RecurrentReservation<'_> {
             .paged_attn_config
             .map(|config| {
                 let kv_bytes_per_token =
-                    paged_kv_bytes_per_token(config, self.dtype, self.model_config)?;
+                    paged_kv_bytes_per_token(config, self.dtype, self.device, self.model_config)?;
                 reserve_recurrent_serving_capacity(
                     self.cache,
                     config,

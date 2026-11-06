@@ -111,6 +111,39 @@ mod tests {
         }
     }
 
+    // what the cache is built at, which the device map and the default cache's size must count too
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn a_vulkan_cache_under_f32_activations_is_sized_as_f16() {
+        use super::{
+            KvCacheLayout, ModelConfigMetadata, PagedCacheLayers, cache_plan, kv_bytes_per_token,
+        };
+        use inference_tensor::{DType, Device};
+        let Ok(vk) = Device::new_vulkan(0) else {
+            return;
+        };
+        let model = ModelConfigMetadata {
+            max_seq_len: 4096,
+            num_layers: 2,
+            hidden_size: 256,
+            num_kv_heads: 2,
+            num_attn_heads: 4,
+            sliding_window: None,
+            k_head_dim: 64,
+            v_head_dim: 64,
+            kv_cache_layout: KvCacheLayout::Standard,
+        };
+        let plan = cache_plan(PagedCacheType::Auto, &PagedCacheLayers::default(), &model);
+        assert_eq!(
+            kv_bytes_per_token(&plan, DType::F32, &vk, &model),
+            kv_bytes_per_token(&plan, DType::F16, &Device::Cpu, &model)
+        );
+        assert_ne!(
+            kv_bytes_per_token(&plan, DType::F32, &Device::Cpu, &model),
+            kv_bytes_per_token(&plan, DType::F16, &Device::Cpu, &model)
+        );
+    }
+
     #[test]
     fn base_device_reservation_rejects_additive_overflow() -> anyhow::Result<()> {
         let config = PagedAttentionConfig::new(
@@ -381,12 +414,15 @@ macro_rules! ctxt_to_blocks {
 // A value's bytes all share this denominator: 32 covers a quantized layer's K-and-V average, (2k + 1 + 2v + 1) / 32.
 const VALUE_BYTES_DENOMINATOR: usize = 32;
 
-/// A token's paged cache bytes over every layer, each at its own type, as (numerator, denominator).
+/// A token's paged cache bytes over every layer, each at its own type, as (numerator, denominator), for a cache on
+/// `device` under activations of `dtype`.
 pub fn kv_bytes_per_token(
     plan: &CachePlan,
     dtype: DType,
+    device: &Device,
     config: &dyn ModelConfigLike,
 ) -> (usize, usize) {
+    let dtype = cache_engine::cache_activation_dtype(dtype, device);
     let numerator = (0..config.num_layers())
         .filter_map(|idx| {
             let elements = config.layer_kv_cache_elements_per_token(idx)?;
@@ -487,7 +523,7 @@ pub fn calculate_cache_config(
             .map_err(anyhow::Error::msg)?;
     }
     let model_dtype = dtype;
-    let token_bytes = kv_bytes_per_token(&plan, dtype, config);
+    let token_bytes = kv_bytes_per_token(&plan, dtype, device, config);
     let dtype = cache_type.to_dtype(dtype);
 
     let mut cache_devices = Vec::new();

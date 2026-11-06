@@ -14,10 +14,11 @@ pub(crate) const MAX_BINDING_BYTES: u64 = 4 << 30;
 const MIN_POOLED_BYTES: u64 = 256;
 const FINE_CLASS_BYTES: u64 = 1 << 20;
 const MAX_POOLED_BYTES: u64 = 1 << 30;
-// The most idle host memory the pool holds before a dropped buffer is freed instead (on an iGPU, the model's RAM).
+// The most idle host memory the pool holds before a dropped buffer is freed instead (on an iGPU, the model's RAM):
+// a default 1024-token prompt chunk's working set (Lightning: ~4.5 GB), so it is reused rather than freed each chunk.
 // Idle device memory is not capped: a prompt's working set cycles through it, and an allocation that runs out of
 // device memory frees it first.
-const MAX_POOL_BYTES: u64 = 2 << 30;
+const MAX_POOL_BYTES: u64 = 6 << 30;
 // Whether a device allocation has fallen back to host memory, so the fallback is reported once
 static SPILLED: AtomicBool = AtomicBool::new(false);
 // The device memory every buffer together leaves free, short of the device's budget: allocating to the edge of a
