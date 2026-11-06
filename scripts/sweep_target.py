@@ -4,6 +4,9 @@
 stdin is `cargo ... --message-format=json` from a replay of every mode to keep. Incremental dir names carry a hash
 cargo does not report, so each crate keeps its newest N, N being its live unit count.
 
+`--grace-hours` spares anything written that recently, so a variant built by hand outside the replayed modes survives
+until it is that old; `--slack` keeps that many incremental dirs per crate past its live count, for the same builds.
+
 `--superseded` instead needs no replay: it deletes what live units no longer read. The split debug info (`.dwo`) of
 codegen units no live rlib or linked binary still names (an incremental rebuild renames a unit's codegen units under the
 same hash, and rustc never removes the old ones' `.dwo`), incremental sessions older than a dir's newest (rustc removes
@@ -18,6 +21,7 @@ import re
 import shutil
 import struct
 import sys
+import time
 from pathlib import Path
 
 HASH = re.compile(r"-([0-9a-f]{16})(?:[.-]|$)")
@@ -131,6 +135,8 @@ def superseded(root):
 
 def delete(stale, root, dry_run):
     freed = 0
+    # a stale variant's split debug info is also superseded, so the two passes can name one file
+    stale = [p for p in dict.fromkeys(stale) if p.exists()]
     for p in stale:
         size = (
             sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
@@ -166,6 +172,18 @@ def main():
         "--superseded",
         action="store_true",
         help="only what live units no longer read, no replay",
+    )
+    ap.add_argument(
+        "--grace-hours",
+        type=float,
+        default=0,
+        help="spare artifacts written this recently",
+    )
+    ap.add_argument(
+        "--slack",
+        type=int,
+        default=0,
+        help="incremental dirs kept per crate past its live count",
     )
     args = ap.parse_args()
     root = args.profile_dir.resolve()
@@ -234,7 +252,10 @@ def main():
         by_crate[d.name.rsplit("-", 1)[0]].append(d)
     for crate, dirs in by_crate.items():
         dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
-        stale += dirs[units_per_crate[crate] :]
+        stale += dirs[units_per_crate[crate] + args.slack :]
+    if args.grace_hours > 0:
+        cutoff = time.time() - args.grace_hours * 3600
+        stale = [p for p in stale if p.stat().st_mtime < cutoff]
 
     # the kept incremental dirs' old sessions are part of the superseded pass; a dropped dir goes whole
     dropped = set(stale)

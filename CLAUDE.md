@@ -56,8 +56,16 @@ scripts/local_ci.sh [--lint] [--tests] [--cuda] [--metal] [--vulkan] [--slim] [-
 # Deep checks on real checkpoints (reference parity, end-to-end real weights), on request; not part of local_ci.sh
 scripts/deep_checks.sh
 
-# Same, then delete target/debug artifacts the selected modes don't use (including on-request example builds).
+# Every run records what its modes built (target/debug/.ledger) and deletes what no mode recorded in 3 days; a build by
+# hand outside the modes survives a day. --sweep deletes all but the selected modes' artifacts (on-request examples too).
 scripts/local_ci.sh --lint --tests --cuda --sweep
+
+# Iterate on a few tests with the suites' own build: a `cargo nextest -p ...` builds another variant of every crate it
+# touches (cargo unifies features per selection), which is what fills target/debug.
+scripts/local_ci.sh --tests --cuda --filter='test(/^nemotron_omni_tiny::/)'
+
+# The `inference` binary for local runs, built one way and recorded in the ledger (not `cargo build -p inference-cli`)
+scripts/build_cli.sh cuda
 
 # Housekeeping measurements (duplication, unused deps; --ir, --incremental, --crate-time, --slow-tests LOG); the routine is in
 # docs/src/content/docs/developer/housekeeping.md
