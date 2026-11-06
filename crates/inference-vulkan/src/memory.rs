@@ -50,6 +50,10 @@ struct Allocation {
 unsafe impl Send for Allocation {}
 
 impl BufferPool {
+    pub(crate) fn device_bytes(&self) -> u64 {
+        self.device_bytes
+    }
+
     /// # Safety
     /// No submit may still use the buffers.
     pub(crate) unsafe fn destroy(&mut self, device: &ash::Device) {

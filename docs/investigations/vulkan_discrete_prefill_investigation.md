@@ -63,3 +63,52 @@ on master at 2K); not followed up.
 prompt's forward grows to the device's edge (peak +1.0 GB at 2K, +2.5 at 4K, +4.0 at 8K, full at 16K). By design the
 CPU records a whole forward ahead of the GPU, so every temporary of it stays alive until its batch's fence, and idle
 pooled device memory is uncapped (synchronized and freed only once the device is full).
+
+## Run 3 - 2026-11-05
+
+**Question, from the user:** VRAM moves during a run while the model rides near the 24 GB edge; can nothing need more
+after load?
+
+**Command:** `serve --vulkan` with a 16,055-token chat prompt, VRAM sampled every 0.2 s; then `bench --vulkan` at 2K-16K.
+
+**Finding, non-paged (the Vulkan default until now):** ready at 19.5 GB; the 16K prompt peaks at 24.1 GB and spills
+(`vulkan: device memory is full (1024 MiB asked, 22216 MiB held, 992 MiB free)`), 1431 prompt tok/s. A prompt is one
+forward, so its whole working set lives at once.
+
+`--paged-attn on` (fixed-size cache, 512-token prompt chunks), one problem after another:
+1. `key must be a cuda tensor`: with `cuda` on, `inference-paged-attn` exports only its CUDA functions, and the Vulkan
+   branches live in the CPU module; `inference-nn` also planned decode for CUDA's kernels. Any `cuda,vulkan` build
+   failed paged attention on Vulkan (the 780M's Vulkan-only build did not).
+2. `Vulkan's paged caches hold head size 128, not 2`: CUDA builds write 4-D `[batch, seq, heads, head]` rows directly;
+   Vulkan's write takes them flattened.
+3. Decode at 8 tok/s: the KV cache took 12,288 MB, the model's whole 2M-token context. `MemoryUsage` reads every Vulkan
+   device as an iGPU (a share of system RAM), and the post-load fit of the cache ran on CUDA only.
+4. With both fixed, still 12,288 MB: post-load free memory read 22,735 MiB, as a discrete GPU's quantized weights reached
+   its memory only on first use; the cache took the room and the weights landed in host memory.
+5. Weights copied at load: a 4,273 MB cache leaving 128 MB for activations (the predicted reserve), so prompts spilled
+   (140 tok/s on 16K) and decode fell to 3-4 tok/s.
+
+**Change:** Vulkan entry points in `inference-paged-attn`'s CUDA build (write, gather, copy, decode to the shared
+module), a Vulkan cache classed Standard and decoded by its own kernel, 4-D writes direct on CUDA only; a discrete
+Vulkan device reports its heap and free memory (`Context::device_memory`), its weights go to device memory at load
+(`QStorage::from_data`), the post-load fit covers it, with 2 GiB left for activations; paged attention defaults on for
+discrete Vulkan GPUs (iGPUs unchanged).
+
+**Finding, after:**
+
+| `serve`, 16K prompt | non-paged | paged, sized |
+|---|---|---|
+| VRAM at ready | 19.5 GB | 22.1-22.4 GB (KV 2.3-2.5 GB, ~410K tokens) |
+| peak | 24.1 GB, spilled | 23.6 GB |
+| prompt | 1431 tok/s | 3779 tok/s |
+| decode (300 tokens) | ~178 | 190-200 |
+
+| bench, paged default | TTFT | peak VRAM |
+|---|---|---|
+| 2K | 385 ms | 23.5 GB |
+| 4K | 969 ms (non-paged 789) | 23.6 GB |
+| 8K | 1.91 s (non-paged 2.08) | 23.6 GB |
+| 16K | 4.23 s (non-paged 18-22, spilled) | 23.6 GB |
+
+Peak no longer depends on the prompt's length. Decode at depth 4 is 156-175 tok/s. The exit segfaults (Run 2) are
+in an NVIDIA driver thread while `exit()` runs: the Vulkan device lives in a static never destroyed.

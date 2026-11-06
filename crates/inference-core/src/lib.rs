@@ -248,7 +248,7 @@ pub use tools::{
 };
 pub use topology::Topology;
 pub use utils::debug::{LogVerbosity, initialize_inference_logging, initialize_logging};
-pub use utils::memory_usage::MemoryUsage;
+pub use utils::memory_usage::{MemoryUsage, has_dedicated_memory};
 pub use utils::normal::{ModelDType, TryIntoDType};
 pub use utils::{paged_attn_supported, paged_attn_supported_on, using_flash_attn};
 

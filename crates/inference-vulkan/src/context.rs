@@ -325,6 +325,20 @@ impl Context {
             .unwrap_or(0)
     }
 
+    /// A discrete device's memory as `(total, free)`: its device-local heap, and what is free in it counting the
+    /// buffer pool's idle device memory, which an allocation frees first; `None` on a unified device.
+    pub fn device_memory(&self) -> Option<(u64, u64)> {
+        if self.unified {
+            return None;
+        }
+        let idle = self
+            .pool
+            .lock()
+            .expect("vulkan pool poisoned")
+            .device_bytes();
+        Some((self.heap_size, self.device_free() + idle))
+    }
+
     /// Whether the device's memory is the host's (an iGPU, or a CPU device), so its buffers are mapped host RAM.
     pub fn is_unified(&self) -> bool {
         self.unified

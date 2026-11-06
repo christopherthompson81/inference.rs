@@ -16,7 +16,7 @@ pub struct CacheOptions {
 #[derive(Args, Clone, inference_json::FromJson)]
 pub struct PagedAttentionOptions {
     /// PagedAttention mode
-    /// - auto: enabled on CUDA, disabled on Metal/CPU (default)
+    /// - auto: enabled on CUDA and discrete Vulkan GPUs, disabled on Metal/CPU/integrated GPUs (default)
     /// - on: force enable (fails if unsupported)
     /// - off: force disable
     #[arg(long = "paged-attn", default_value = "auto", value_enum)]
