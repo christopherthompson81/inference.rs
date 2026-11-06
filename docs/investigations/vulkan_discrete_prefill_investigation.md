@@ -1,0 +1,65 @@
+# Vulkan prefill on a discrete GPU: where long prompts go
+
+Nemotron 3.5 Lightning (`Lightning-exps-q4_0.gguf`) on the RTX 3090 over Vulkan prefills ~3260 tok/s at 4K and ~2000
+at 8K. The model is a hybrid (7 attention layers of 53: 32 query heads, 2 KV heads, head size 128; the rest Mamba-2
+and MoE), so per-token cost should barely grow with length.
+
+## Run 1 - 2026-11-05
+
+**Question:** what takes the extra time at 8K?
+
+**Command:** `INFERENCE_VULKAN_PROFILE=1 inference bench --vulkan --format gguf -m nemotron-lightning-gguf -f
+Lightning-exps-q4_0.gguf --prompt-len {4096,8192} --gen-len 1 --iterations 6 --warmup 1`, the per-kernel blocks summed.
+
+**Finding:**
+
+| kernel | 4K share | 8K share | per dispatch 4K / 8K |
+|---|---|---|---|
+| `flash_attn` | 46.1 % | 63.2 % | 2.88 / 5.6 ms |
+| `mul_mm_cm2_q8_0` | 11.4 % | 7.5 % | |
+| `moe_mm_cm2_q4_0_n128` | 9.2 % | 7.0 % | |
+| `ssm_conv_step` + `ssd_*` | 12.6 % | 10.1 % | |
+
+- Prompt attention runs in `flash_attn` (`vulkan_backend::flash_attn`, f32, no matrix cores); no `paged_prefill` or
+  `paged_prefill_cm` dispatch appears in the bench at either length.
+- Causal attention FLOPs over the 7 layers: 2 N^2 d H = 0.96 TFLOP at 4K, 3.85 at 8K. Against the share of TTFT that
+  is ~1.65 TFLOPS at 4K and ~1.5 at 8K, a few percent of the 3090's f16 tensor rate.
+- The rest scales linearly (MoE / Mamba dispatch time per prefill about doubles from 4K to 8K, as tokens do).
+- A profiled 4K run segfaulted at exit, after the results printed (8K did not); not yet looked at.
+
+**Implication:** the 8K drop is attention's quadratic term showing through a slow kernel: already half the GPU time at
+4K. Prompt attention on matrix cores (as `paged_prefill_cm` does over a paged cache), at even 10-15 TFLOPS, would cut
+4K TTFT ~1.27 -> ~0.75 s and 8K ~4.0 -> ~1.7 s.
+
+## Run 2 - 2026-11-05
+
+**Question:** does prompt attention on matrix cores close the gap?
+
+**Change:** `flash_attn_cm.comp`, `paged_prefill_cm_main.glsl`'s tiling (f16 16 x 16 x 16 cooperative matrices, 64 rows
+a workgroup as positions x the kv head's query heads, 32-key tiles, lazy rescale) over `flash_attn`'s contiguous f32
+Q/K/V, push constants and mask, writing normalized rows directly (no splits). `Recorder::flash_attn` takes it where
+the device has cooperative matrices and heads are multiples of 16 up to 128 with groups up to 64; otherwise the f32
+kernel. The fused-attention test adds a causal-without-mask case past a tile and head 32, at 4e-3 for f16 inputs
+(worst seen 1.3e-3).
+
+**Finding** (3 iterations + 1 warmup, decode 16):
+
+| prompt | TTFT before | TTFT after | tok/s after |
+|---|---|---|---|
+| 2048 | 499 ms | 385 ms | 5315 |
+| 4096 | 1256 ms | 789 ms | 5189 |
+| 8192 | 3.99-4.25 s | 2.08 s | 3941 |
+| 16384 | 34.7 s | 18-22 s | ~790-975 |
+
+`flash_attn_cm` runs 1.5 ms a dispatch at 16K where `flash_attn` took 5.6 ms at 8K. At 16K the run is no longer
+attention-bound: the device fills (`vulkan: device memory is full (1024 MiB asked, 22114 MiB held, 965 MiB free)`) and
+`ssd_chunk_state`, the MoE matmul and `matmul_f32` run 10-20x slower per dispatch over host memory. 16K spilled
+before the change too.
+
+The profiling build segfaults at exit intermittently (4K; also on the #826 binary without this branch's changes, not
+on master at 2K); not followed up.
+
+**Implication:** attention is done. What is left at long prompts is VRAM: loaded the model holds ~19.6 GB of 24, and a
+prompt's forward grows to the device's edge (peak +1.0 GB at 2K, +2.5 at 4K, +4.0 at 8K, full at 16K). By design the
+CPU records a whole forward ahead of the GPU, so every temporary of it stays alive until its batch's fence, and idle
+pooled device memory is uncapped (synchronized and freed only once the device is full).

@@ -223,6 +223,8 @@ pub(crate) struct CoopKernels {
     pub(crate) moe_gather_f16: Pipeline,
     // prompt attention over f32, f16 and quantized paged caches
     paged_prefill: [Pipeline; 3],
+    // prompt attention over contiguous f32 keys and values
+    pub(crate) flash_attn: Pipeline,
     // Q4_0 experts on NV_cooperative_matrix2, where the device has it: a build a tile width, 16 to 128 routes
     // by BlockType, where the type has decode functions
     moe_mm_cm2: Vec<Option<[Pipeline; 4]>>,
@@ -365,6 +367,15 @@ impl CoopKernels {
         specs.extend(mul_mmcl);
         specs.extend(moe_mmc);
         specs.extend(prefill);
+        specs.push(
+            PipelineSpec::new(
+                shaders::FLASH_ATTN_CM,
+                ops::FLASH_BINDINGS,
+                ops::FLASH_PUSH_BYTES,
+                "flash_attn_cm",
+            )
+            .subgroup(subgroup),
+        );
         specs.push(PipelineSpec::new(
             shaders::CONVERT_F16,
             CONVERT_BINDINGS,
@@ -392,6 +403,7 @@ impl CoopKernels {
         let moe_mmc = take(BLOCK_TYPES);
         let paged_prefill: [Pipeline; 3] =
             take(3).try_into().ok().expect("three prefill pipelines");
+        let [flash_attn]: [Pipeline; 1] = take(1).try_into().ok().expect("one attention pipeline");
         let [convert_f16, moe_gather_f16]: [Pipeline; 2] =
             take(2).try_into().ok().expect("two pipelines");
         let mut moe_mm_cm2: Vec<Option<[Pipeline; 4]>> = (0..BLOCK_TYPES).map(|_| None).collect();
@@ -414,6 +426,7 @@ impl CoopKernels {
             moe_mmc,
             moe_gather_f16,
             paged_prefill,
+            flash_attn,
             moe_mm_cm2,
             mul_mm_cm2,
         })
@@ -457,7 +470,7 @@ impl CoopKernels {
             .iter()
             .chain(&self.mul_mmcl)
             .chain(&self.moe_mmc)
-            .chain([&self.convert_f16, &self.moe_gather_f16])
+            .chain([&self.convert_f16, &self.moe_gather_f16, &self.flash_attn])
             .chain(&self.paged_prefill)
             .chain(self.moe_mm_cm2.iter().flatten().flatten())
             .chain(self.mul_mm_cm2.iter().flatten())
