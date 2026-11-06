@@ -1,6 +1,6 @@
 #version 450
 // Mamba-2's gated RMSNorm in one pass (CUDA's mamba_gated_rmsnorm): v = x silu(gate) over a row, each group of
-// group_size values scaled by 1 / sqrt(mean(v^2) + eps), then by the weight. A workgroup a (row, group); f32.
+// group_size values scaled by 1 / sqrt(mean(v^2) + eps), then by the weight. A workgroup a (group, row); f32.
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_EXT_control_flow_attributes : require
 
@@ -32,8 +32,8 @@ float gated(uint i) {
 }
 
 void main() {
-    uint row = gl_WorkGroupID.x / pc.groups;
-    uint group = gl_WorkGroupID.x % pc.groups;
+    uint row = gl_WorkGroupID.y;
+    uint group = gl_WorkGroupID.x;
     uint t = gl_LocalInvocationID.x;
     uint base = (row * pc.groups + group) * pc.group_size;
     float sum = 0.0;

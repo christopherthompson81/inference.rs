@@ -271,7 +271,9 @@ impl CoopKernels {
             (shaders::MUL_MMCL_Q6_K, "mul_mmcl_q6_k"),
         ]
         .into_iter()
-        .map(|(spirv, name)| Pipeline::new(device, spirv, MMC_BINDINGS, MMC_PUSH_BYTES, name))
+        .map(|(spirv, name)| {
+            Pipeline::with_subgroup(device, spirv, MMC_BINDINGS, MMC_PUSH_BYTES, name, subgroup)
+        })
         .collect::<Result<_>>()?;
         let convert_f16 = Pipeline::new(
             device,
@@ -669,7 +671,7 @@ impl Recorder<'_> {
         }
         let kernels = &self.context.kernels;
         if op.x_rows > MATVEC_MAX_ROWS
-            && let Some(coop) = self.context.coop.as_ref()
+            && let Some(coop) = self.context.matmul_coop()
         {
             // the tokens as f16 into the scratch, padded to whole tiles with zeros: a tile's last matrices read past
             // its live tokens (outputs dropped), and past a row's end into the next row (against zero weights)
@@ -1325,7 +1327,8 @@ mod tests {
     // an f64 product on sampled rows, within the f16 rounding of the weights and the activations
     #[test]
     fn matrix_core_prompt_matmuls_match_their_reference() -> Result<()> {
-        let Some(context) = context() else {
+        // an iGPU's matrix cores too, which the default context leaves off
+        let Ok(context) = Context::with_matrix_cores(crate::MatrixCores::Any) else {
             return Ok(());
         };
         if context.coop.is_none() {

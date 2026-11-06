@@ -6,7 +6,7 @@ use crate::{Result, Tensor};
 /// Set to keep a Vulkan device's prompt matmuls off its matrix cores, on the int8 kernels decode uses.
 pub const NO_MATRIX_CORES_ENV: &str = "INFERENCE_VULKAN_NO_COOPMAT";
 
-/// Set to put an integrated GPU's prompt work on its matrix cores too, which by default only a discrete GPU's take.
+/// Set to put an integrated GPU's prompt matmuls on its matrix cores too; by default only its prompt attention takes them.
 pub const IGPU_MATRIX_CORES_ENV: &str = "INFERENCE_VULKAN_IGPU_COOPMAT";
 
 /// Whether `device` is a discrete Vulkan GPU, with memory of its own rather than an iGPU's share of the host's.

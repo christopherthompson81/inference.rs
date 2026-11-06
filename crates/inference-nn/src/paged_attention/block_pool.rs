@@ -755,7 +755,8 @@ impl BlockPool {
 
     fn release_retained_hashes(&mut self, hashes: &[BlockHash]) {
         for hash in hashes {
-            debug_assert!(self.retained_hashes.remove(hash));
+            let retained = self.retained_hashes.remove(hash);
+            debug_assert!(retained);
             if let Some(block_id) = self.retained_hash_to_block.remove(hash) {
                 self.release_physical_block(block_id);
             }
@@ -1404,6 +1405,29 @@ mod tests {
         assert_eq!(pool.num_retained_physical_blocks(), 0);
         assert!(pool.get_cached_block(h0, &[0, 1]).is_some());
         assert!(pool.get_cached_block(h1, &[0, 1]).is_none());
+    }
+
+    #[test]
+    fn a_hash_revoked_under_pressure_is_not_retained_again_when_recached() {
+        let mut pool = BlockPool::new(4, true, 4);
+        pool.set_retention_group_ids(vec![0]);
+        let retention = pool.prefix_block_retention();
+        retention.enable();
+        let hash = hash_block_tokens(None, &[1, 2, 3, 4], None);
+        let first = pool.get_new_blocks(1).unwrap();
+        pool.cache_full_blocks(&first, &[hash], 0, 1, 0);
+        let lease = retention.retain(&[hash]);
+        pool.free_blocks(&first);
+
+        let all = pool.get_new_blocks(3).unwrap();
+        assert!(!lease.is_active());
+        pool.free_blocks(&all);
+
+        let again = pool.get_new_blocks(1).unwrap();
+        pool.cache_full_blocks(&again, &[hash], 0, 1, 0);
+        pool.free_blocks(&again);
+        assert_eq!(pool.num_retained_physical_blocks(), 0);
+        assert_eq!(pool.get_new_blocks(3).map(|ids| ids.len()), Some(3));
     }
 
     #[test]
