@@ -52,9 +52,10 @@ pub(super) struct PagedStepCtx<'a> {
     pub(super) cuda_prompt_preemption_workspace: &'a mut Option<usize>,
 }
 
-/// Tokens each scheduled row had computed before the step and the tokens the step schedules for it.
+/// Tokens each scheduled row had computed and generated before the step and the tokens the step schedules for it.
 struct StepProgress {
     computed_before: Vec<usize>,
+    generated_before: Vec<usize>,
     scheduled: Vec<usize>,
 }
 
@@ -70,6 +71,14 @@ impl StepProgress {
                 seq.advance_num_computed_tokens(scheduled);
             }
         }
+    }
+
+    /// Tokens the step added to its rows' outputs; a speculative row schedules drafts that verification may reject.
+    fn generated(&self, seqs: &[&mut Sequence]) -> usize {
+        seqs.iter()
+            .zip(&self.generated_before)
+            .map(|(seq, before)| seq.generated_len().saturating_sub(*before))
+            .sum()
     }
 }
 
@@ -163,6 +172,7 @@ impl Engine {
                     .iter()
                     .map(|seq| seq.num_computed_tokens())
                     .collect(),
+                generated_before: guards_mut.iter().map(|seq| seq.generated_len()).collect(),
                 scheduled: guards_mut
                     .iter()
                     .enumerate()
@@ -284,13 +294,12 @@ impl Engine {
                 }
             }
 
-            let total_processed_tokens: usize = progress.scheduled.iter().sum();
             if is_prompt {
                 self.logger
-                    .add_prefill_tokens_processed(total_processed_tokens);
+                    .add_prefill_tokens_processed(progress.scheduled.iter().sum());
             } else {
                 self.logger
-                    .add_decode_tokens_processed(total_processed_tokens);
+                    .add_decode_tokens_processed(progress.generated(&guards_mut));
             }
 
             // chunked prefill snapshots inline; a decode tail has already queued the next forward behind this state
