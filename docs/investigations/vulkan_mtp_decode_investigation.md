@@ -170,3 +170,29 @@ verification) the draft drew on the host and each verify row ranked alone.
 
 **Implication:** sampled MTP now runs as greedy MTP does, and MTP 1 matches plain decode on Vulkan in every case, within
 the card's run-to-run spread (~5 %). It does not beat plain: the verify's expert reads bound it (Run 5).
+
+## Run 7 - 2026-11-06 07:57
+
+**Question:** the laptop's check of #830 on the 780M found three gaps: `local_ci.sh --vulkan` never ran the sampler's
+Vulkan tests (its filter is `test(vulkan)` and their names lacked it), the draw had no multi-row device test, and the
+engine log's decode T/s counted every scheduled draft position (MTP 3 logged ~42 when ~23 came out).
+
+**780M results (laptop):** greedy MTP 1 and MTP 3 text equals plain decode on every prompt tried. Four prompts, 256
+tokens, thinking off: plain master 25.6 / PR 25.5, MTP 3 master 31.7 / PR 33.3, PR MTP 1 30.6 tok/s. With thinking on
+(700 tokens) MTP 3 falls below plain on both (22-24 vs 25), acceptance 33-55 %.
+
+**Changes:**
+1. The sampler's three Vulkan tests renamed to contain `vulkan` (`a_vulkan_ranked_draw_matches_the_hosts_support`,
+   `vulkan_penalties_rank_as_the_cpu_does`, `vulkan_ranked_speculative_rows_match_the_cpu`); `nextest -p inference-nn
+   --features vulkan -E 'test(vulkan)'` now runs 6 tests, all passing on the 3090.
+2. `a_vulkan_ranked_draw_keeps_each_row_apart`: four rows with different filters and uniforms in one dispatch, each
+   checked against the host's support for its row alone. Passes.
+3. The paged step logs decode tokens as the growth of each row's generated length over the step, not its scheduled
+   positions.
+
+**Check (3090, Vulkan, MTP 3, q4_0 head):** one 3000-token essay, client 178.9 tok/s; logged decode in the full
+windows 165.4 / 175.0 / 157.0 (each window also holds the step's host time and the request's tail). The four-prompt
+bench: 245.4 / 218.6 / 194.3 / 303.3 tok/s, acceptance 72.6 % (len 3.18).
+
+**Implication:** the log now tracks what clients see. The old binary used for comparison was gone, so the before
+number here is the laptop's.

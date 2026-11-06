@@ -4005,7 +4005,7 @@ mod tests {
     // the device's draw over a ranked row keeps the host's filtered support, and lands each uniform on the token the
     // host's cumulative mass does
     #[test]
-    fn a_ranked_draw_matches_the_hosts_support() {
+    fn a_vulkan_ranked_draw_matches_the_hosts_support() {
         use super::Sampler;
         let Ok(vk) = Device::new_vulkan(0) else {
             return;
@@ -4077,9 +4077,96 @@ mod tests {
         }
     }
 
+    // rows drawn in one dispatch each keep their own filters and uniform, as an MTP step's drafts do
+    #[test]
+    fn a_vulkan_ranked_draw_keeps_each_row_apart() {
+        use super::Sampler;
+        let Ok(vk) = Device::new_vulkan(0) else {
+            return;
+        };
+        const VOCAB: usize = 4096;
+        const TEMPERATURE: f64 = 0.8;
+        // (top-k, top-p, min-p, uniform) per row
+        let rows = [
+            (0, 0.95, 0.0, 0.31f32),
+            (40, 1.0, 0.0, 0.77),
+            (64, 0.8, 0.02, 0.05),
+            (0, 1.0, 0.05, 0.999),
+        ];
+        let logits: Vec<f32> = (0..rows.len())
+            .flat_map(|r| {
+                (0..VOCAB).map(move |i| -0.05 * ((i * (7919 + 2 * r)) % VOCAB) as f32 + 6.0)
+            })
+            .collect();
+        let logits = Tensor::from_vec(logits, (rows.len(), VOCAB), &vk).unwrap();
+        let packed = inference_tensor::vulkan::ranked_top_k(&logits, TEMPERATURE).unwrap();
+        let host = packed.to_vec2::<f32>().unwrap();
+        let params: Vec<u32> = rows
+            .iter()
+            .flat_map(|&(top_k, top_p, min_p, uniform)| {
+                let sampler = Sampler::new(
+                    Some(TEMPERATURE),
+                    0,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    top_k,
+                    top_p,
+                    min_p,
+                    HashMap::new(),
+                    vec![],
+                )
+                .unwrap();
+                sampler.ranked_draw_params(uniform)
+            })
+            .collect();
+        let params = Tensor::from_vec(
+            params,
+            (
+                rows.len(),
+                inference_tensor::vulkan::RANKED_DRAW_PARAM_WORDS,
+            ),
+            &vk,
+        )
+        .unwrap();
+        let (ids, probs, tokens) = inference_tensor::vulkan::ranked_draw(&packed, &params).unwrap();
+        let (ids, probs) = (
+            ids.to_vec2::<u32>().unwrap(),
+            probs.to_vec2::<f32>().unwrap(),
+        );
+        let tokens = tokens.to_vec1::<u32>().unwrap();
+        for (r, &(top_k, top_p, min_p, uniform)) in rows.iter().enumerate() {
+            let support = super::ranked_support(
+                &host[r],
+                (1.0 / TEMPERATURE) as f32,
+                top_k,
+                top_p as f32,
+                min_p as f32,
+            )
+            .expect("the support fits K");
+            let total: f32 = support.sampling.iter().sum();
+            let want: Vec<f32> = support.sampling.iter().map(|p| p / total).collect();
+            assert_eq!(ids[r][..want.len()], support.tokens[..], "row {r}");
+            for (i, (g, w)) in probs[r].iter().zip(&want).enumerate() {
+                assert!((g - w).abs() < 1e-5, "row {r} entry {i}: {g} vs {w}");
+            }
+            let mut acc = 0.0f32;
+            let expected = want
+                .iter()
+                .position(|&p| {
+                    acc += p;
+                    p > 0.0 && uniform < acc
+                })
+                .unwrap_or_else(|| want.iter().rposition(|&p| p > 0.0).unwrap());
+            assert_eq!(tokens[r], support.tokens[expected], "row {r}");
+        }
+    }
+
     // a Vulkan step's rows ranked together give each row the CPU's speculative probabilities
     #[test]
-    fn ranked_speculative_rows_match_the_cpu() {
+    fn vulkan_ranked_speculative_rows_match_the_cpu() {
         use super::Sampler;
         let Ok(vk) = Device::new_vulkan(0) else {
             return;
@@ -4120,7 +4207,7 @@ mod tests {
 
     // penalties and bias on the device, row by row over the context and the drafts before it, as the CPU applies them
     #[test]
-    fn device_penalties_rank_as_the_cpu_does() {
+    fn vulkan_penalties_rank_as_the_cpu_does() {
         use super::Sampler;
         let Ok(vk) = Device::new_vulkan(0) else {
             return;
