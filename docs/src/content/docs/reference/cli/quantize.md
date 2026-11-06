@@ -264,3 +264,17 @@ inference quantize nemotron-transcribe-audio [OPTIONS] --model <MODEL> --output 
 | `-m, --model <MODEL>` | required | The checkpoint directory (`config.json`, `model.safetensors`) |
 | `-o, --output <OUTPUT_PATH>` | required | Output `.gguf` path |
 
+## inference quantize mmproj
+
+A multimodal checkpoint's towers (vision, audio) as one llama.cpp-style mmproj GGUF
+
+```
+inference quantize mmproj [OPTIONS] --model <MODEL> --output <OUTPUT_PATH>
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `-m, --model <MODEL>` | required | The checkpoint directory (`config.json` and the safetensors shards holding the towers; others may be absent) |
+| `-o, --output <OUTPUT_PATH>` | required | Output `.gguf` path |
+| `--matrix-type <MATRIX_TYPE>` |  | The matrices' type (`bf16`, `f16`, `f32`, `q8_0`, ...); the checkpoint's own float type by default. Norms, biases, convolutions and embeddings stay f32 |
+

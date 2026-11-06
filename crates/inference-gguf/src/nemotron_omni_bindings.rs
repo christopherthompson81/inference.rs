@@ -10,11 +10,13 @@ use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
 use inference_tensor::quantized::gguf_file::Value;
 use serde_json::json;
 
+use super::mmproj_writer::{Checkpoint, MmprojSpec, MmprojTensor, Role, Source};
 use super::multimodal_binding_utils::{
     TensorInventory, bind_required, map_usize, validate_projector,
 };
 use super::normal_config::synthesize_normal_config_value;
 use super::normal_registry::CanonicalGgufArchitecture;
+use super::parakeet_audio_bindings as parakeet;
 use super::whisper_audio_bindings::token_id;
 
 pub const PROJECTOR: &str = "nemotron_omni";
@@ -39,6 +41,11 @@ const BLOCK_ROLES: [(&str, &str); 6] = [
     ("attn.qkv", ""),
 ];
 const PROJECTOR_LAYERS: [&str; 3] = ["0", "1", "3"];
+const SOUND_TOKEN: &str = "<so_embedding>";
+const SOUND_ENCODER: &str = "sound_encoder.encoder";
+const SOUND_PROJECTION: &str = "sound_projection";
+// the size llama.cpp warms its graph at; images run at their own grids
+const WARMUP_IMAGE_SIZE: u32 = 512;
 // the towers a checkpoint projector (its safetensors shard) carries under their own names
 const CHECKPOINT_TOWERS: [&str; 4] = [
     "vision_model.",
@@ -57,7 +64,21 @@ pub fn build_nemotron_omni_bindings(archive: &GgufArchive) -> Result<GgufBinding
     for (native, binding) in text.iter() {
         bindings.insert(format!("{LANGUAGE_MODEL}.{native}"), binding.clone());
     }
-    bind_vision(&TensorInventory::from_archive(archive), &mut bindings)?;
+    for (native, binding) in build_nemotron_omni_tower_bindings(archive)?.iter() {
+        bindings.insert(native.to_string(), binding.clone());
+    }
+    Ok(bindings)
+}
+
+/// The projector's towers alone under the checkpoint's names: C-RADIO and `mlp1`, and the sound tower when the
+/// projector carries `parakeet` audio.
+pub fn build_nemotron_omni_tower_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
+    let inventory = TensorInventory::from_archive(archive);
+    let mut bindings = GgufBindingMap::new();
+    bind_vision(&inventory, &mut bindings)?;
+    if parakeet::has_audio(archive.metadata()) {
+        parakeet::bind_audio(&inventory, &mut bindings, SOUND_ENCODER, SOUND_PROJECTION)?;
+    }
     Ok(bindings)
 }
 
@@ -158,6 +179,195 @@ fn bind_vision(inventory: &TensorInventory<'_>, bindings: &mut GgufBindingMap) -
     Ok(())
 }
 
+fn json_usize(value: &serde_json::Value, key: &str) -> Result<usize> {
+    value[key]
+        .as_u64()
+        .map(|v| v as usize)
+        .with_context(|| format!("{FAMILY} config has no `{key}`"))
+}
+
+fn json_f64(value: &serde_json::Value, key: &str) -> Result<f64> {
+    value[key]
+        .as_f64()
+        .with_context(|| format!("{FAMILY} config has no `{key}`"))
+}
+
+fn float_list(value: &serde_json::Value, key: &str) -> Result<Value> {
+    let list = value[key]
+        .as_array()
+        .with_context(|| format!("{FAMILY} config has no `{key}`"))?;
+    Ok(Value::Array(
+        list.iter()
+            .map(|v| v.as_f64().map(|v| Value::F32(v as f32)))
+            .collect::<Option<Vec<_>>>()
+            .with_context(|| format!("{FAMILY} config `{key}` is not a float list"))?,
+    ))
+}
+
+/// Nano Omni's projector, as `bind_vision` and the Parakeet binding read it back: C-RADIO with its full position table
+/// under projector type `nemotron_omni` (Bolt's), the sound tower as llama.cpp's `parakeet`.
+pub fn nano_omni_mmproj_spec(checkpoint: &Checkpoint) -> Result<MmprojSpec> {
+    let config = &checkpoint.config;
+    let mut vision = config["vision_config"].clone();
+    if vision.get("hidden_size").is_none() {
+        inference_nn::vision::radio::fill_radio_shape(&mut vision)?;
+    }
+    let h = json_usize(&vision, "hidden_size")?;
+    let layers = json_usize(&vision, "num_hidden_layers")?;
+    let ffn = (h as f64 * json_f64(&vision, "mlp_ratio")?) as usize;
+    let patch = json_usize(config, "patch_size")?;
+    let merge = (1.0 / json_f64(config, "downsample_ratio")?).round() as usize;
+    let lm_hidden = json_usize(&config["llm_config"], "hidden_size")?;
+    let pixels = |key: &str| -> Result<Value> {
+        Ok(Value::U32(
+            (json_usize(&vision, key)? * patch * patch) as u32,
+        ))
+    };
+    let mut spec = MmprojSpec {
+        metadata: vec![
+            ("clip.has_vision_encoder".into(), Value::Bool(true)),
+            (
+                super::multimodal_binding_utils::VISION_PROJECTOR_TYPE.into(),
+                Value::String(PROJECTOR.into()),
+            ),
+            ("clip.vision.nemotron_omni".into(), Value::Bool(true)),
+            (
+                "clip.vision.projection_dim".into(),
+                Value::U32(lm_hidden as u32),
+            ),
+            (
+                "clip.vision.image_size".into(),
+                Value::U32(WARMUP_IMAGE_SIZE),
+            ),
+            ("clip.vision.patch_size".into(), Value::U32(patch as u32)),
+            ("clip.vision.embedding_length".into(), Value::U32(h as u32)),
+            (
+                "clip.vision.feed_forward_length".into(),
+                Value::U32(ffn as u32),
+            ),
+            ("clip.vision.block_count".into(), Value::U32(layers as u32)),
+            (
+                "clip.vision.attention.head_count".into(),
+                Value::U32(json_usize(&vision, "num_attention_heads")? as u32),
+            ),
+            (
+                "clip.vision.image_mean".into(),
+                float_list(config, "norm_mean")?,
+            ),
+            (
+                "clip.vision.image_std".into(),
+                float_list(config, "norm_std")?,
+            ),
+            (
+                "clip.vision.attention.layer_norm_epsilon".into(),
+                Value::F32(json_f64(&vision, "layer_norm_eps")? as f32),
+            ),
+            ("clip.use_gelu".into(), Value::Bool(true)),
+            (
+                "clip.vision.projector.scale_factor".into(),
+                Value::U32(merge as u32),
+            ),
+            (
+                "clip.vision.image_min_pixels".into(),
+                pixels("min_num_patches")?,
+            ),
+            (
+                "clip.vision.image_max_pixels".into(),
+                pixels("max_num_patches")?,
+            ),
+        ],
+        tensors: Vec::new(),
+    };
+    let patches = format!("{RADIO}.patch_generator");
+    let kernel = |native: &str| -> Result<Source> {
+        let shape = checkpoint.shape(native)?;
+        let channels = shape[1] / (patch * patch);
+        Ok(Source::tensor(native).reshape(vec![shape[0], channels, patch, patch]))
+    };
+    spec.tensors.push(MmprojTensor::new(
+        PATCH_EMBED,
+        kernel(&format!("{patches}.embedder.weight"))?,
+        Role::Float,
+    ));
+    let video = format!("{patches}.video_embedder.weight");
+    if checkpoint.contains(&video) {
+        spec.tensors.push(MmprojTensor::new(
+            VIDEO_PATCH_EMBED,
+            kernel(&video)?,
+            Role::Float,
+        ));
+    }
+    let positions = format!("{patches}.pos_embed");
+    let grid = checkpoint.shape(&positions)?;
+    spec.tensors.push(MmprojTensor::new(
+        POSITIONS,
+        Source::tensor(positions).reshape(vec![grid[grid.len() - 2], h]),
+        Role::Float,
+    ));
+    spec.tensors.push(MmprojTensor::new(
+        PREFIX_TOKENS,
+        Source::tensor(format!("{patches}.cls_token.token")),
+        Role::Float,
+    ));
+    for layer in 0..layers {
+        let ours = format!("{RADIO}.blocks.{layer}");
+        let theirs = format!("v.blk.{layer}");
+        for (native, source) in BLOCK_ROLES {
+            for suffix in ["weight", "bias"] {
+                let role = if suffix == "weight" && !native.starts_with("norm") {
+                    Role::Matrix
+                } else {
+                    Role::Float
+                };
+                let name = format!("{ours}.{native}.{suffix}");
+                if !source.is_empty() {
+                    spec.tensors.push(MmprojTensor::new(
+                        format!("{theirs}.{source}.{suffix}"),
+                        Source::tensor(name),
+                        role,
+                    ));
+                    continue;
+                }
+                // RADIO's fused qkv as llama.cpp's three
+                for (part, gguf) in ["attn_q", "attn_k", "attn_v"].iter().enumerate() {
+                    spec.tensors.push(MmprojTensor::new(
+                        format!("{theirs}.{gguf}.{suffix}"),
+                        Source::tensor(name.clone()).rows(part * h, h),
+                        role,
+                    ));
+                }
+            }
+        }
+    }
+    for layer in PROJECTOR_LAYERS {
+        let role = if layer == "0" {
+            Role::Float
+        } else {
+            Role::Matrix
+        };
+        spec.tensors.push(MmprojTensor::new(
+            format!("mm.model.mlp.{layer}.weight"),
+            Source::tensor(format!("mlp1.{layer}.weight")),
+            role,
+        ));
+    }
+    if config
+        .get("sound_config")
+        .is_some_and(|sound| !sound.is_null())
+    {
+        let audio = parakeet::audio_spec(
+            checkpoint,
+            &config["sound_config"],
+            SOUND_ENCODER,
+            SOUND_PROJECTION,
+            lm_hidden,
+        )?;
+        spec.metadata.extend(audio.metadata);
+        spec.tensors.extend(audio.tensors);
+    }
+    Ok(spec)
+}
+
 /// The config the text and projector GGUFs describe: the decoder from the `nemotron_h_moe` metadata, the tower and
 /// projector from the projector's.
 pub fn synthesize_nemotron_omni_config(archive: &GgufArchive) -> Result<String> {
@@ -201,6 +411,10 @@ fn nemotron_omni_config(
             .map_err(|error| anyhow::anyhow!("{error}"))?;
     let mut config = vision_config(metadata, shapes)?;
     config["llm_config"] = text;
+    if parakeet::has_audio(metadata) {
+        config["sound_config"] = parakeet::sound_config(metadata, shapes)?;
+        config["sound_context_token_id"] = json!(token_id(metadata, SOUND_TOKEN, FAMILY)?);
+    }
     Ok(config.to_string())
 }
 

@@ -20,8 +20,8 @@ use super::serve::{self, extract_device_settings};
 use crate::args::{
     AdapterOptions, AsrQuantizeOptions, CacheOptions, DeviceOptions, FormatOptions,
     GgufQuantizeOptions, GlobalOptions, HiDreamQuantizeOptions, ImatrixConvertOptions,
-    MatformerSelection, ModelSourceOptions, ModelType, MultimodalAdapterOptions, MultimodalOptions,
-    NemotronTranscribeAudioOptions, QuantizationOptions, QuantizeDeviceOptions,
+    MatformerSelection, MmprojOptions, ModelSourceOptions, ModelType, MultimodalAdapterOptions,
+    MultimodalOptions, NemotronTranscribeAudioOptions, QuantizationOptions, QuantizeDeviceOptions,
     QuantizeModelSourceOptions, QuantizeModelType, QuantizeMultimodalOptions,
     QuantizeQuantizationOptions, WorldgenQuantizeOptions,
 };
@@ -206,6 +206,24 @@ pub fn run_nemotron_transcribe_audio(options: NemotronTranscribeAudioOptions) ->
         written,
         options.output_path.display(),
         std::fs::metadata(&options.output_path)?.len() as f64 / MIB
+    );
+    Ok(())
+}
+
+/// Writes a checkpoint's towers as one mmproj GGUF.
+pub fn run_mmproj_quantize(options: MmprojOptions) -> Result<()> {
+    initialize_logging();
+    let summary = gguf_requantize::write_mmproj(
+        &options.model,
+        &options.output_path,
+        options.matrix_type.as_deref(),
+    )?;
+    info!(
+        "Wrote {} {} projector tensors to {} ({:.1} MiB)",
+        summary.tensors,
+        summary.architecture,
+        options.output_path.display(),
+        summary.bytes as f64 / MIB
     );
     Ok(())
 }
@@ -708,7 +726,8 @@ mod tests {
             | QuantizeCommand::Worldgen(_)
             | QuantizeCommand::Gguf(_)
             | QuantizeCommand::Imatrix(_)
-            | QuantizeCommand::NemotronTranscribeAudio(_) => {
+            | QuantizeCommand::NemotronTranscribeAudio(_)
+            | QuantizeCommand::Mmproj(_) => {
                 unreachable!("these tests quantize UQFF")
             }
         }

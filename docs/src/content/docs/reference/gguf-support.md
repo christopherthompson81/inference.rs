@@ -129,6 +129,20 @@ inference serve --format gguf -m lmstudio-community/Nemotron-3-Nano-Omni-30B-A3B
 Images run at the checkpoint's dynamic resolution, as with Bolt; each clip takes one token per encoder frame (one per
 80 ms). Video is not yet supported.
 
+`inference quantize mmproj` writes the same towers as one llama.cpp-style projector, so the pair then loads with no
+base repository and runs in llama.cpp too: C-RADIO with its full position table under Bolt's `nemotron_omni` projector
+type, the sound encoder as llama.cpp's `parakeet`, and the checkpoint's chat template (the published text GGUF's has no
+media parts). It reads a checkpoint directory with only the shards that hold the towers present:
+
+```bash
+inference quantize mmproj -m /path/to/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16 -o mmproj-nano-omni.gguf
+inference serve --format gguf -m lmstudio-community/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF \
+  -f Nemotron-3-Nano-Omni-30B-A3B-Reasoning-Q4_K_M.gguf --mmproj mmproj-nano-omni.gguf
+```
+
+Matrices keep the checkpoint's float type unless `--matrix-type` names another (`f16`, `q8_0`, ...); norms, biases,
+convolutions and embeddings stay f32, as llama.cpp's converter keeps them.
+
 Muse Glimmer GGUFs require a companion `muse-glimmer` projector. Current published GGUF
 repositories also require `--tok-model-id meta-models/Muse-Glimmer-30B` because they do not carry
 enough base-model configuration metadata for standalone loading. Image input is supported. Video

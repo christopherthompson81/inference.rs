@@ -1518,6 +1518,13 @@ impl GGUFLoader {
                 source.chat_template = Some(template);
             }
         }
+        // a projector written from the checkpoint carries its template, media parts and all
+        if source.chat_template.is_some()
+            && let Some(inference_tensor::quantized::gguf_file::Value::String(template)) =
+                archive.metadata_value(crate::gguf::mmproj_writer::CHAT_TEMPLATE_KEY)
+        {
+            source.chat_template = Some(template.clone());
+        }
         #[cfg(feature = "models-gemma")]
         let source = {
             let mut source = source;
@@ -1847,10 +1854,14 @@ fn describes_own_config(
     let Some(architecture) = text(model, "general.architecture") else {
         return false;
     };
+    // a projector with both encoders names each one's type
     projectors.iter().any(|projector| {
-        text(projector, "clip.projector_type").is_some_and(|projector| {
-            multimodal_vision_registry::describes_own_config(&architecture, &projector)
-        })
+        ["clip.projector_type", "clip.vision.projector_type"]
+            .iter()
+            .filter_map(|key| text(projector, key))
+            .any(|projector| {
+                multimodal_vision_registry::describes_own_config(&architecture, &projector)
+            })
     })
 }
 

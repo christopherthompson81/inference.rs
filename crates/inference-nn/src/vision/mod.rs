@@ -3,4 +3,5 @@ pub mod llava_tiling;
 pub mod mrope;
 pub mod multimodal_layout;
 pub mod qwen3_vl;
+pub mod radio;
 pub mod siglip;

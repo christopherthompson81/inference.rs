@@ -32,6 +32,25 @@ pub enum QuantizeCommand {
     /// Nemotron 3.5 Transcribe's audio GGUF (its `--mmproj`) from NVIDIA's checkpoint directory
     #[command(name = "nemotron-transcribe-audio")]
     NemotronTranscribeAudio(NemotronTranscribeAudioOptions),
+
+    /// A multimodal checkpoint's towers (vision, audio) as one llama.cpp-style mmproj GGUF
+    Mmproj(MmprojOptions),
+}
+
+#[derive(Args, Clone)]
+pub struct MmprojOptions {
+    /// The checkpoint directory (`config.json` and the safetensors shards holding the towers; others may be absent)
+    #[arg(short = 'm', long)]
+    pub model: PathBuf,
+
+    /// Output `.gguf` path
+    #[arg(short = 'o', long = "output")]
+    pub output_path: PathBuf,
+
+    /// The matrices' type (`bf16`, `f16`, `f32`, `q8_0`, ...); the checkpoint's own float type by default. Norms,
+    /// biases, convolutions and embeddings stay f32
+    #[arg(long = "matrix-type")]
+    pub matrix_type: Option<String>,
 }
 
 #[derive(Args, Clone)]
@@ -583,7 +602,8 @@ pub fn resolve_quantize_command(
             | QuantizeCommand::Worldgen(_)
             | QuantizeCommand::Gguf(_)
             | QuantizeCommand::Imatrix(_)
-            | QuantizeCommand::NemotronTranscribeAudio(_)),
+            | QuantizeCommand::NemotronTranscribeAudio(_)
+            | QuantizeCommand::Mmproj(_)),
         ) => {
             return Ok(other);
         }
@@ -649,7 +669,8 @@ mod tests {
             | QuantizeCommand::Worldgen(_)
             | QuantizeCommand::Gguf(_)
             | QuantizeCommand::Imatrix(_)
-            | QuantizeCommand::NemotronTranscribeAudio(_) => {
+            | QuantizeCommand::NemotronTranscribeAudio(_)
+            | QuantizeCommand::Mmproj(_) => {
                 unreachable!("these tests quantize UQFF")
             }
         }
