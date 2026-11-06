@@ -467,6 +467,60 @@ pub trait SpeculativeProposer {
     ) -> Result<SpeculativeProposalBatch>;
 }
 
+/// As [`sample_draft_rows`], each row drawn from its ranked top-K on Vulkan where its sampler takes that path, with
+/// the supports drawn from when every row did (the verifier's proposal distribution; otherwise it ranks the logits).
+pub fn sample_ranked_draft_rows(
+    logits: &Tensor,
+    sequences: &[&dyn DraftSequence],
+    contexts: &mut [Vec<u32>],
+    rng: &Arc<Mutex<Isaac64Rng>>,
+) -> Result<(Vec<u32>, Option<Vec<crate::sampler::RankedProbs>>)> {
+    let ranked = logits.device().is_vulkan()
+        && sequences
+            .iter()
+            .all(|seq| !seq.sampler().is_argmax() && seq.stochastic_verification_allowed());
+    if !ranked {
+        return Ok((sample_draft_rows(logits, sequences, contexts, rng)?, None));
+    }
+    let batch = sequences.len();
+    let mut tokens = Vec::with_capacity(batch);
+    let mut supports = Some(Vec::with_capacity(batch));
+    for (row, seq) in sequences.iter().enumerate() {
+        let row_logits = logits.get(row)?.to_dtype(inference_tensor::DType::F32)?;
+        let sequence_rng = seq.sampling_rng(rng);
+        let token = match seq.sampler().sample_ranked_draft(
+            &row_logits,
+            &contexts[row],
+            seq.prompt_tokens(),
+            sequence_rng.clone(),
+        )? {
+            Some((token, support)) => {
+                if let Some(supports) = supports.as_mut() {
+                    supports.push(support);
+                }
+                token
+            }
+            None => {
+                supports = None;
+                seq.sampler()
+                    .sample(
+                        row_logits,
+                        &contexts[row],
+                        seq.prompt_tokens(),
+                        false,
+                        sequence_rng,
+                        false,
+                        batch > 1,
+                    )?
+                    .token
+            }
+        };
+        contexts[row].push(token);
+        tokens.push(token);
+    }
+    Ok((tokens, supports))
+}
+
 /// Sample one draft token per row of `logits` (`[rows, vocab]`) with each row's own sampler.
 pub fn sample_draft_rows(
     logits: &Tensor,

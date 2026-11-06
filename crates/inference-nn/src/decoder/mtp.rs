@@ -18,7 +18,6 @@ use crate::{
         SpeculativeProposalBatch, SpeculativeProposeBatchCtx,
         mtp::{MtpDraft, MtpForwardInputs},
         paged_rows::make_paged_rows_metadata,
-        proposer::sample_draft_rows,
     },
     utils::unvarbuilder::UnVarBuilder,
 };
@@ -56,8 +55,19 @@ struct DraftRow {
 /// The token each row reads: host values, or a `[rows]` U32 tensor a device sampler left on the GPU.
 enum RowTokens<'a> {
     Host(Vec<u32>),
-    #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
     Device(&'a Tensor),
+}
+
+// what a Vulkan sampled draft chain reads besides its first logits, draft and positions
+struct VulkanDraftCtx<'a> {
+    embed: &'a dyn Fn(&Tensor) -> Result<Tensor>,
+    lm_head: &'a dyn QuantMethod,
+    kv_cache: &'a [(Tensor, Tensor)],
+    paged_meta: &'a PagedAttentionMeta,
+    sequences: &'a [&'a dyn crate::speculative::DraftSequence],
+    seq_ids: &'a [usize],
+    rng: &'a Arc<Mutex<rand_isaac::Isaac64Rng>>,
+    n_predict: usize,
 }
 
 /// The target's last forward, post final norm: every row, and the rows its logits came from.
@@ -293,6 +303,94 @@ impl MtpHead<StandardMtpBlock> {
 }
 
 impl<B: MtpBlock> MtpHead<B> {
+    // each draft step ranked, drawn and chained on the device: no read-back until the verifier's
+    fn vulkan_sampled_drafts(
+        &self,
+        ctx: VulkanDraftCtx<'_>,
+        first: Tensor,
+        mut draft: MtpDraft,
+        mut cursor: Vec<usize>,
+    ) -> Result<SpeculativeProposalBatch> {
+        use rand::Rng;
+        let batch = ctx.sequences.len();
+        let device = draft.chain_hidden.device().clone();
+        let (mut tokens, mut ids, mut probs) = (Vec::new(), Vec::new(), Vec::new());
+        let mut step_logits = first;
+        for step in 0..ctx.n_predict {
+            let logits = step_logits.to_dtype(inference_tensor::DType::F32)?;
+            let mut packed = Vec::with_capacity(batch);
+            let mut params =
+                Vec::with_capacity(batch * inference_tensor::vulkan::RANKED_DRAW_PARAM_WORDS);
+            for (row, seq) in ctx.sequences.iter().enumerate() {
+                let sampler = seq.sampler();
+                packed.push(inference_tensor::vulkan::ranked_top_k(
+                    &logits.narrow(0, row, 1)?,
+                    sampler.ranked_temperature(),
+                )?);
+                let uniform: f32 = seq
+                    .sampling_rng(ctx.rng)
+                    .lock()
+                    .expect("could not lock rng mutex")
+                    .random();
+                params.extend(sampler.ranked_draw_params(uniform));
+            }
+            let packed = Tensor::cat(&packed, 0)?;
+            let params = Tensor::from_vec(
+                params,
+                (batch, inference_tensor::vulkan::RANKED_DRAW_PARAM_WORDS),
+                &device,
+            )?;
+            let (step_ids, step_probs, drafts) =
+                inference_tensor::vulkan::ranked_draw(&packed, &params)?;
+            ids.push(step_ids);
+            probs.push(step_probs);
+            tokens.push(drafts.clone());
+            if step + 1 == ctx.n_predict {
+                break;
+            }
+            let chained = ctx
+                .seq_ids
+                .iter()
+                .zip(cursor.iter_mut())
+                .map(|(&seq_id, position)| {
+                    *position += 1;
+                    DraftRow {
+                        seq_id,
+                        position: *position,
+                    }
+                })
+                .collect::<Vec<_>>();
+            draft = self.forward_rows(
+                ctx.embed,
+                &chained,
+                RowTokens::Device(&drafts),
+                &draft.chain_hidden,
+                ctx.kv_cache,
+                ctx.paged_meta,
+            )?;
+            step_logits = ctx.lm_head.forward(&draft.logits_hidden)?;
+        }
+        // [batch, n_predict] tokens, [batch, n_predict, K] supports
+        let tokens = Tensor::stack(&tokens, 1)?;
+        let (ids, probs) = (Tensor::stack(&ids, 1)?, Tensor::stack(&probs, 1)?);
+        let proposals = (0..batch)
+            .map(|row| {
+                Ok(SpeculativeProposal {
+                    tokens: crate::speculative::SpeculativeTokens::from_device(tokens.get(row)?)?,
+                    distribution: Some(
+                        crate::speculative::SpeculativeProposalDistribution::SparseProbs(
+                            crate::speculative::SparseSpeculativeProbs::new(
+                                ids.get(row)?,
+                                probs.get(row)?,
+                            )?,
+                        ),
+                    ),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(SpeculativeProposalBatch::new(proposals))
+    }
+
     pub fn from_parts(parts: MtpHeadParts<B>) -> Self {
         Self {
             embedding_norm: parts.embedding_norm,
@@ -797,6 +895,37 @@ impl<B: MtpBlock> MtpHead<B> {
             }
         }
 
+        // sampled drafts on a Vulkan GPU stay there too: each step ranked and drawn on the device, the support it drew
+        // from kept as the proposal's distribution for the verifier (a grammar's verify reads only the tokens)
+        if draft.chain_hidden.device().is_vulkan()
+            && ctx.sequences.iter().all(|seq| !seq.sampler().is_argmax())
+        {
+            let first = lm_head.forward(&draft.logits_hidden)?;
+            if ctx
+                .sequences
+                .iter()
+                .all(|seq| seq.sampler().can_draw_on_vulkan(&first))
+            {
+                return self
+                    .vulkan_sampled_drafts(
+                        VulkanDraftCtx {
+                            embed,
+                            lm_head,
+                            kv_cache,
+                            paged_meta,
+                            sequences: ctx.sequences,
+                            seq_ids: ctx.seq_ids,
+                            rng: &ctx.rng,
+                            n_predict,
+                        },
+                        first,
+                        draft,
+                        cursor,
+                    )
+                    .map(Some);
+            }
+        }
+
         // greedy drafts on a Vulkan GPU stay there: each step's argmax feeds the next without a read-back
         if draft.chain_hidden.device().is_vulkan()
             && ctx.sequences.iter().all(|seq| seq.sampler().is_argmax())
@@ -862,9 +991,25 @@ impl<B: MtpBlock> MtpHead<B> {
             .collect::<Vec<_>>();
         let mut tokens = vec![Vec::with_capacity(n_predict); batch];
         let mut logits = Vec::with_capacity(n_predict);
+        // each step's ranked supports per row, kept while every step's row drew from one
+        let mut supports: Option<Vec<Vec<crate::sampler::RankedProbs>>> =
+            Some((0..batch).map(|_| Vec::with_capacity(n_predict)).collect());
         for step in 0..n_predict {
             let step_logits = lm_head.forward(&draft.logits_hidden)?;
-            let drafts = sample_draft_rows(&step_logits, ctx.sequences, &mut contexts, &ctx.rng)?;
+            let (drafts, step_supports) = crate::speculative::proposer::sample_ranked_draft_rows(
+                &step_logits,
+                ctx.sequences,
+                &mut contexts,
+                &ctx.rng,
+            )?;
+            match (supports.as_mut(), step_supports) {
+                (Some(rows), Some(step_rows)) => {
+                    for (row, support) in rows.iter_mut().zip(step_rows) {
+                        row.push(support);
+                    }
+                }
+                _ => supports = None,
+            }
             logits.push(step_logits);
             for (i, draft) in drafts.iter().enumerate() {
                 tokens[i].push(*draft);
@@ -893,6 +1038,20 @@ impl<B: MtpBlock> MtpHead<B> {
                 paged_meta,
             )?;
         }
+        // the draws' own supports, on the host, so the verifier need not rank the draft logits again
+        if let Some(rows) = supports
+            && let Some(distributions) = sparse_host_distributions(&rows)?
+        {
+            let proposals = tokens
+                .into_iter()
+                .zip(distributions)
+                .map(|(tokens, distribution)| SpeculativeProposal {
+                    tokens: crate::speculative::SpeculativeTokens::Host(tokens),
+                    distribution: Some(distribution),
+                })
+                .collect();
+            return Ok(Some(SpeculativeProposalBatch::new(proposals)));
+        }
         // [n_predict, batch, vocab] -> per sequence [n_predict, vocab]
         let logits = Tensor::stack(&logits, 1)?;
         let proposals = tokens
@@ -914,6 +1073,39 @@ impl<B: MtpBlock> MtpHead<B> {
         }
         self.block.add_residual(uvb_m);
     }
+}
+
+// each sequence's draft supports as sparse `[n_predict, width]` host rows; `None` where a sequence's widths differ
+fn sparse_host_distributions(
+    rows: &[Vec<crate::sampler::RankedProbs>],
+) -> Result<Option<Vec<crate::speculative::SpeculativeProposalDistribution>>> {
+    let mut out = Vec::with_capacity(rows.len());
+    for steps in rows {
+        let Some(width) = steps.first().map(|step| step.tokens.len()) else {
+            return Ok(None);
+        };
+        if steps.iter().any(|step| step.tokens.len() != width) {
+            return Ok(None);
+        }
+        let ids = steps
+            .iter()
+            .flat_map(|step| step.tokens.iter().copied())
+            .collect();
+        let probs = steps
+            .iter()
+            .flat_map(|step| step.sampling.iter().copied())
+            .collect();
+        let shape = (steps.len(), width);
+        out.push(
+            crate::speculative::SpeculativeProposalDistribution::SparseProbs(
+                crate::speculative::SparseSpeculativeProbs::new(
+                    Tensor::from_vec(ids, shape, &Device::Cpu)?,
+                    Tensor::from_vec(probs, shape, &Device::Cpu)?,
+                )?,
+            ),
+        );
+    }
+    Ok(Some(out))
 }
 
 /// Each row's argmax as a `[rows]` U32 tensor, left on the device.

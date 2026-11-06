@@ -6,7 +6,9 @@ use rand::Rng;
 use rand_isaac::Isaac64Rng;
 
 use crate::pipeline::Pipeline;
-use crate::pipeline::sampling::{finish_or_add_toks_to_seq, sample_sequence};
+use crate::pipeline::sampling::{
+    SampleOptions, finish_or_add_toks_to_seq, sample_sequence, sample_sequence_with_first,
+};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 #[cfg(feature = "cuda")]
 use crate::sampler::CudaSpeculativeSamplingPlan;
@@ -856,6 +858,23 @@ pub(crate) fn sparse_rejection_device_verify_batch(
     })
 }
 
+// a draw from a ranked row's support, as the sampler's own ranked path draws it
+fn ranked_draw(
+    row: &crate::sampler::RankedProbs,
+    rng: &std::sync::Mutex<Isaac64Rng>,
+) -> Result<Logprobs> {
+    use rand::distr::{Distribution, weighted::WeightedIndex};
+    let distr = WeightedIndex::new(&row.sampling)
+        .map_err(|e| inference_tensor::Error::Msg(format!("a ranked verify row's weights: {e}")))?;
+    let selected = distr.sample(&mut *rng.lock().expect("could not lock rng mutex"));
+    Ok(Logprobs {
+        token: row.tokens[selected],
+        logprob: row.reporting[selected].ln(),
+        top_logprobs: None,
+        bytes: None,
+    })
+}
+
 fn device_token_logprobs(token: u32) -> Logprobs {
     Logprobs {
         token,
@@ -988,6 +1007,21 @@ pub(crate) async fn finish_verified_step(
         && !return_logprobs
         && seq.sampler().is_plain_argmax())
     .then_some(greedy_tolerance);
+    // a host-verified Vulkan row's first draw comes from every verify row ranked at once, not a read-back a row
+    let ranked_rows = if device_verification.is_none()
+        && !return_logprobs
+        && verify_logits.device().is_vulkan()
+        && !seq.sampler().is_argmax()
+    {
+        seq.sampler().ranked_speculative_rows(
+            &verify_logits,
+            seq.get_toks(),
+            &proposal,
+            seq.prompt_tokens(),
+        )?
+    } else {
+        None
+    };
     let mut accepted = 0usize;
     for (idx, draft) in proposal.iter().copied().enumerate() {
         let (sampled, accepted_by_device) = match &device_verification {
@@ -1009,18 +1043,25 @@ pub(crate) async fn finish_verified_step(
             }
             None => {
                 let row = logit_row(&verify_logits, idx)?;
+                let first = ranked_rows
+                    .as_ref()
+                    .map(|rows| ranked_draw(&rows[idx], &seq.sampling_rng(&rng)))
+                    .transpose()?;
                 (
-                    sample_sequence(
+                    sample_sequence_with_first(
                         row.clone(),
                         seq,
-                        return_logprobs,
-                        eos_tok,
-                        general_metadata.llg_factory.clone(),
-                        general_metadata.max_seq_len,
-                        rng.clone(),
-                        false,
-                        false,
-                        false,
+                        first,
+                        SampleOptions {
+                            return_logprobs,
+                            eos_tok,
+                            llg_factory: general_metadata.llg_factory.clone(),
+                            max_model_len: general_metadata.max_seq_len,
+                            rng: rng.clone(),
+                            use_async_pool: false,
+                            sample_speculative: false,
+                            multiple_sequences: false,
+                        },
                     )
                     .await?,
                     None,

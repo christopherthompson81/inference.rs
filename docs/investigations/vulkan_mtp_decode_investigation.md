@@ -114,7 +114,7 @@ over greedy MTP prose replies; then `INFERENCE_VULKAN_PROFILE`.
 stacks); `INFERENCE_VULKAN_PROFILE`; then an alternating A/B of plain decode and MTP 1/2/3 (6 replies each, the last 4).
 
 **Finding, host:** 12.8 % of host time uploaded tiny tensors (`storage_from_cpu_storage` -> `Buffer::write` -> a recorded
-copy): `Tensor::arange` slots in `MambaLayer::forward_full` (twice a Mamba layer, every step) and `Tensor::new(rows)`
+copy): slot index tensors built in `MambaLayer::forward_full` (twice a Mamba layer, every step) and `Tensor::new(rows)`
 in the commit replay's `pick` (four a layer). One core was busy for the whole ~18.5 ms step, ~16 us of host per
 dispatch.
 
@@ -138,3 +138,35 @@ bandwidth: MTP 3's expert reads cost ~4x a plain token's, a ceiling of ~2.14 / 1
 **Implication:** on Vulkan the MoE expert reads, not host overhead, now bound the verify; one draft is the best
 setting (+4-12 % over plain), three the worst. Further gains need fewer bytes a step (copies ~1.2 ms, the two
 vocabulary projections ~1.2 ms), not fewer round trips.
+
+## Run 6 - 2026-11-06
+
+**Question, from the user:** sampled drafting and verifying on the Vulkan GPU.
+
+**Command:** the sync counter over sampled MTP 1 replies (`code/vk_sampled.py`, `code/vk_tool_sampled.py`); then two
+alternating rounds of `code/vk_call.py` against plain decode.
+
+**Finding, before:** a sampled step synchronized ~3 times: the draft's ranked draw read back to draw on the host, the
+verifier ranking the draft logits again (`new_ranked`) and the target rows. Under a tool-call grammar (no stochastic
+verification) the draft drew on the host and each verify row ranked alone.
+
+**Changes:**
+1. The draft draw's own support is the proposal distribution (`sample_ranked_draft_rows`), so the verifier does not
+   rank the draft logits again: 3 -> 2 syncs, speed unchanged (165-178).
+2. `ranked_draw.comp`: a token drawn on the device from a ranked row under the sampler's filters (`ranked_support`'s
+   rules; a nucleus past K cut at K), writing the support's ids and probabilities. The MTP chain ranks, draws and feeds
+   each draft step there (`vulkan_sampled_drafts`), the support kept as the proposal's `SparseProbs`. Rejection stays
+   exact: the verifier uses the support the draft was drawn from. `a_ranked_draw_matches_the_hosts_support` pins
+   the support and the token at five uniforms against the host, over five filter settings.
+3. A host-verified (grammar-constrained) Vulkan step ranks every verify row at once and draws each row's first token
+   from its support (`sample_sequence_with_first`); the grammar check and masked resample run as before.
+4. Constrained sequences draft on the device too: their verify reads only the tokens.
+
+| Vulkan, MTP 1 vs plain, tok/s | greedy prose | greedy tool | sampled prose | sampled tool |
+|---|---|---|---|---|
+| plain, two rounds | 188-200 | 194-200 | 191-200 | 196-200 |
+| MTP 1 before | 190-196 | 183-195 | 176-190 | 168-174 |
+| MTP 1 after | 194-198 | 197-200 | 185-196 | 192-196 |
+
+**Implication:** sampled MTP now runs as greedy MTP does, and MTP 1 matches plain decode on Vulkan in every case, within
+the card's run-to-run spread (~5 %). It does not beat plain: the verify's expert reads bound it (Run 5).

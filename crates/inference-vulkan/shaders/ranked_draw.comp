@@ -1,0 +1,99 @@
+#version 450
+// A token drawn from each row of ranked_topk's packed rows (`2K + 2` floats: values, indices, normalizer, scaled max)
+// under a sampler's filters, as the host's `ranked_support` applies them: softmax at the row's temperature over the
+// top-k (K without one), top-p as a share of what the top-k keeps (the whole vocabulary without one), min-p against
+// the top probability. Writes the support's ids and normalized probabilities (the draw's proposal distribution) and
+// the token at `uniform` of its cumulative mass. A nucleus past K is cut at K: the verifier reads this support back.
+layout(local_size_x = 1) in;
+
+const uint K = 128;
+// per row: inverse temperature, top-k (0 for none), top-p, min-p (as float bits) and the uniform in [0, 1)
+const uint PARAM_WORDS = 5;
+
+layout(std430, binding = 0) readonly buffer P { float packed[]; };
+layout(std430, binding = 1) readonly buffer Q { uint params[]; };
+layout(std430, binding = 2) writeonly buffer I { uint ids[]; };
+layout(std430, binding = 3) writeonly buffer R { float probs[]; };
+layout(std430, binding = 4) writeonly buffer T { uint tokens[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint rows;
+    // the packed rows' and the params' offsets, in words
+    uint p_off;
+    uint q_off;
+} pc;
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    if (row >= pc.rows) {
+        return;
+    }
+    uint p = pc.p_off + row * (2 * K + 2);
+    uint q = pc.q_off + row * PARAM_WORDS;
+    float inv_t = uintBitsToFloat(params[q]);
+    uint top_k = params[q + 1];
+    float top_p = uintBitsToFloat(params[q + 2]);
+    float min_p = uintBitsToFloat(params[q + 3]);
+    float uniform_ = uintBitsToFloat(params[q + 4]);
+    float denom = packed[p + 2 * K];
+    float scaled_max = packed[p + 2 * K + 1];
+    uint k = top_k > 0 ? min(top_k, K) : K;
+
+    float reporting[K];
+    float kept = 0.0;
+    for (uint i = 0; i < K; i++) {
+        reporting[i] = i < k ? exp(packed[p + i] * inv_t - scaled_max) / denom : 0.0;
+        kept += reporting[i];
+    }
+    float sampling[K];
+    for (uint i = 0; i < K; i++) {
+        sampling[i] = reporting[i];
+    }
+    if (top_p > 0.0 && top_p < 1.0) {
+        float cutoff = top_p * (top_k > 0 ? kept : 1.0);
+        float cumsum = 0.0;
+        for (uint i = 0; i < k; i++) {
+            if (cumsum >= cutoff) {
+                sampling[i] = 0.0;
+            } else {
+                cumsum += sampling[i];
+            }
+        }
+    }
+    if (min_p > 0.0 && min_p < 1.0) {
+        float threshold = reporting[0] * min_p;
+        for (uint i = 0; i < k; i++) {
+            if (threshold >= reporting[i]) {
+                sampling[i] = 0.0;
+            }
+        }
+    }
+    float total = 0.0;
+    for (uint i = 0; i < K; i++) {
+        total += sampling[i];
+    }
+    // nothing finite survived: the top candidate alone
+    if (!(total > 0.0) || isinf(total)) {
+        for (uint i = 0; i < K; i++) {
+            sampling[i] = i == 0 ? 1.0 : 0.0;
+        }
+        total = 1.0;
+    }
+    float target = uniform_ * total;
+    float acc = 0.0;
+    uint chosen = K;
+    uint last = 0;
+    for (uint i = 0; i < K; i++) {
+        uint id = uint(packed[p + K + i]);
+        ids[row * K + i] = id;
+        probs[row * K + i] = sampling[i] / total;
+        if (sampling[i] > 0.0) {
+            last = i;
+            acc += sampling[i];
+            if (chosen == K && target < acc) {
+                chosen = i;
+            }
+        }
+    }
+    tokens[row] = uint(packed[p + K + (chosen == K ? last : chosen)]);
+}

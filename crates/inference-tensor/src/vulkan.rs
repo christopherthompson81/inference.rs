@@ -199,6 +199,23 @@ pub fn penalize(
     }
 }
 
+/// Words a row of [`ranked_draw`]'s params holds: inverse temperature, top-k (0 for none), top-p and min-p (f32
+/// bits), and the uniform the draw lands at.
+pub const RANKED_DRAW_PARAM_WORDS: usize = 5;
+
+/// A token drawn on the device from each row of [`ranked_top_k`]'s packed `(rows, 2K + 2)` rows under the u32
+/// `(rows, RANKED_DRAW_PARAM_WORDS)` params: the support's `(rows, K)` u32 ids and f32 normalized probabilities (the
+/// draw's distribution; a nucleus past K is cut there), and the `(rows,)` u32 tokens.
+pub fn ranked_draw(packed: &Tensor, params: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
+    #[cfg(feature = "vulkan")]
+    return crate::vulkan_backend::ranked_draw(packed, params);
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = (packed, params);
+        Err(crate::Error::NotCompiledWithVulkanSupport)
+    }
+}
+
 /// The values a row of [`ranked_top_k`] holds.
 pub const RANKED_TOP_K: usize = 128;
 

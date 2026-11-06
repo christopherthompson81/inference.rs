@@ -20,8 +20,8 @@ pub use map::{MAX_DIMS, Map, MapOp, Operand};
 pub use memory::{Bound, Buffer, ImportedMemory, f32_bytes};
 pub use ops::{
     At, CacheShape, ConvStep, FlashAttn, GatedRmsNorm, MatMul, MatOperand, MoeMatVec, PagedDecode,
-    PagedPrefill, PagedWrite, Penalize, RankedTopK, Router, RouterFn, RowOp, Rows, ScanStep,
-    Select,
+    PagedPrefill, PagedWrite, Penalize, RankedDraw, RankedTopK, Router, RouterFn, RowOp, Rows,
+    ScanStep, Select,
 };
 pub use stream::Retained;
 

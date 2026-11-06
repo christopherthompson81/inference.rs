@@ -1046,6 +1046,57 @@ pub(crate) fn ranked_top_k(logits: &Tensor, temperature: f64) -> Result<Tensor> 
     ))
 }
 
+pub(crate) fn ranked_draw(packed: &Tensor, params: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
+    let k = inference_vulkan::RankedTopK::K;
+    let (rows, width) = packed.dims2()?;
+    if width != inference_vulkan::RankedTopK::row_floats()
+        || params.dims2()? != (rows, inference_vulkan::RankedDraw::PARAM_WORDS)
+    {
+        crate::bail!(
+            "a ranked draw takes packed (rows, {}) and params (rows, {}), got {:?} and {:?}",
+            inference_vulkan::RankedTopK::row_floats(),
+            inference_vulkan::RankedDraw::PARAM_WORDS,
+            packed.dims(),
+            params.dims()
+        );
+    }
+    let (packed, params) = (packed.contiguous()?, params.contiguous()?);
+    let (p, p_off) = bound(&packed, DType::F32)?;
+    let (q, q_off) = bound(&params, DType::U32)?;
+    let device = packed.device().as_vulkan_device()?.clone();
+    let storage = |count: usize, dtype: DType| -> Result<VulkanStorage> {
+        Ok(VulkanStorage {
+            buffer: Arc::new(device.buffer(count * 4)?),
+            device: device.clone(),
+            count,
+            dtype,
+        })
+    };
+    let (ids, probs, tokens) = (
+        storage(rows * k, DType::U32)?,
+        storage(rows * k, DType::F32)?,
+        storage(rows, DType::U32)?,
+    );
+    device
+        .context
+        .record(|r| {
+            r.ranked_draw(&inference_vulkan::RankedDraw {
+                rows,
+                packed: (&p, p_off),
+                params: (&q, q_off),
+                ids: &ids.buffer,
+                probs: &probs.buffer,
+                tokens: &tokens.buffer,
+            })
+        })
+        .map_err(vk_err)?;
+    Ok((
+        tensor_of(ids, (rows, k)),
+        tensor_of(probs, (rows, k)),
+        tensor_of(tokens, (rows,)),
+    ))
+}
+
 pub(crate) fn paged_decode(op: &crate::vulkan::PagedDecode<'_>) -> Result<Tensor> {
     let (seqs, heads, head_size) = op.q.dims3()?;
     let shape = cache_shape(op.key_cache, op.value_cache, head_size)?;
