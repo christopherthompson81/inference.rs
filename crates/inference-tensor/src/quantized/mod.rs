@@ -136,14 +136,20 @@ impl QVulkanStorage {
     }
 
     // loaded blocks: on a discrete GPU they reach its memory now, so what is sized after the load (the KV cache)
-    // sees them; a refused copy is retried, and reported, on first use
+    // sees them
     fn loaded(blocks: Box<dyn QuantizedType>, device: &crate::VulkanDevice) -> Self {
         let storage = Self::new(blocks, device);
-        #[cfg(feature = "vulkan")]
-        if !device.context().is_unified() && vulkan_block_type(storage.blocks.dtype()).is_some() {
-            let _ = storage.gpu_copy();
-        }
+        storage.filled();
         storage
+    }
+
+    // its blocks now hold their values (loaded, or quantized at load): a discrete GPU's copy is made now; a refused
+    // copy is retried, and reported, on first use
+    fn filled(&self) {
+        #[cfg(feature = "vulkan")]
+        if !self.device.context().is_unified() && vulkan_block_type(self.blocks.dtype()).is_some() {
+            let _ = self.gpu_copy();
+        }
     }
 
     // a GPU-run type's blocks moved into one driver buffer that both sides read, or `None` (the type stays on the host,
@@ -349,6 +355,7 @@ impl QStorage {
                 storage
                     .blocks
                     .from_float(src.to_cpu_storage()?.as_slice::<f32>()?);
+                storage.filled();
             }
             (QStorage::Metal(storage), Storage::Metal(src)) => storage.quantize(src)?,
             (QStorage::Cuda(storage), Storage::Cuda(src)) => storage.quantize(src)?,
@@ -374,6 +381,7 @@ impl QStorage {
                     imatrix_weights,
                     n_per_row,
                 );
+                storage.filled();
             }
             (QStorage::Metal(storage), Storage::Metal(src)) => {
                 storage.quantize_imatrix(src, imatrix_weights, n_per_row)?
@@ -394,6 +402,7 @@ impl QStorage {
             (QStorage::Metal(storage), Storage::Cpu(src)) => storage.quantize_onto(src)?,
             (QStorage::Vulkan(storage), Storage::Cpu(src)) => {
                 storage.blocks.from_float(src.as_slice::<f32>()?);
+                storage.filled();
             }
             (QStorage::Cuda(storage), Storage::Cpu(src)) => storage.quantize_onto(src)?,
             _ => crate::bail!("Invalid quantize source storage locations: not on cpu"),
@@ -924,8 +933,18 @@ impl QTensor {
     }
 
     pub fn dequantize(&self, device: &Device) -> Result<Tensor> {
-        let storage = self.storage.dequantize(self.shape.elem_count())?;
         let none = crate::op::BackpropOp::none();
+        // a Vulkan weight's blocks live on the host: a host dequantize skips the device's copy of the floats
+        if let (QStorage::Vulkan(storage), Device::Cpu) = (&self.storage, device) {
+            let floats = storage.blocks.dequantize(self.shape.elem_count())?;
+            return Ok(crate::tensor::from_storage(
+                Storage::Cpu(floats),
+                self.shape.clone(),
+                none,
+                false,
+            ));
+        }
+        let storage = self.storage.dequantize(self.shape.elem_count())?;
         crate::tensor::from_storage(storage, self.shape.clone(), none, false).to_device(device)
     }
 

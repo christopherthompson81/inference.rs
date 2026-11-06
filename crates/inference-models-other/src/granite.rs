@@ -3002,6 +3002,8 @@ pub struct GraniteMoeHybrid {
     layer_types: Vec<GraniteLayerType>,
     ln_f: RmsNorm,
     lm_head: Arc<dyn QuantMethod>,
+    // the lm_head's weights, which an MTP draft head re-quantizes
+    lm_head_elements: usize,
     dtype: DType,
     hybrid_cache: Arc<Mutex<GraniteHybridCache>>,
     // EitherCache for pipeline integration
@@ -3292,6 +3294,7 @@ impl GraniteMoeHybrid {
             draft_lm_head: None,
             spec_taps: Mutex::new(None),
             prompt_taps: Mutex::new(None),
+            lm_head_elements: cfg.vocab_size * cfg.hidden_size,
             wte,
             layers,
             layer_types,
@@ -3960,6 +3963,12 @@ impl crate::speculative::SpeculativeTargetMixin for GraniteMoeHybrid {
         config: crate::speculative::SpeculativeConfig,
     ) -> Result<Option<crate::speculative::SpeculativeAttachInfo>> {
         self.attach_speculative_with_runtime(config, Default::default())
+    }
+
+    fn mtp_draft_head_bytes(&self, isq: inference_quant::IsqType) -> Option<usize> {
+        self.mtp.as_ref()?;
+        let dtype = inference_tensor::quantized::GgmlDType::try_from(isq).ok()?;
+        Some(self.lm_head_elements / dtype.block_size() * dtype.type_size())
     }
 
     fn attach_speculative_with_runtime(

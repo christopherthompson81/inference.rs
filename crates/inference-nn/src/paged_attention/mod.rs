@@ -258,12 +258,16 @@ pub struct PagedAttentionConfig {
     pub auxiliary_layers: Option<AuxiliaryPagedLayers>,
     /// A default-sized cache must get its whole need, or the load fails (so a scheduler can make room and retry)
     pub need_floor: bool,
+    /// The ISQ an MTP draft head is re-quantized to when speculative decoding attaches, after the cache is sized
+    pub draft_head_isq: Option<inference_quant::IsqType>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CacheMemoryReservations {
     pub primary_device_bytes: usize,
     pub secondary_device_bytes: usize,
+    /// Weights made on the primary device after the cache (an MTP draft head), on top of every other reserve
+    pub late_weight_bytes: usize,
 }
 
 impl PagedAttentionConfig {
@@ -288,6 +292,7 @@ impl PagedAttentionConfig {
             default_memory: false,
             auxiliary_layers: None,
             need_floor: false,
+            draft_head_isq: None,
         })
     }
 
@@ -364,6 +369,7 @@ impl PagedAttentionConfig {
         Ok(CacheMemoryReservations {
             primary_device_bytes,
             secondary_device_bytes: self.mapped_activation_memory_reservation_bytes,
+            late_weight_bytes: 0,
         })
     }
 }
@@ -562,6 +568,11 @@ pub fn calculate_cache_config(
         };
         let reserved_bytes = if device.is_vulkan() {
             reserved_bytes.max(VULKAN_ACTIVATION_RESERVE_BYTES)
+        } else {
+            reserved_bytes
+        };
+        let reserved_bytes = if device.location() == primary_device {
+            reserved_bytes.saturating_add(memory_reservations.late_weight_bytes)
         } else {
             reserved_bytes
         };

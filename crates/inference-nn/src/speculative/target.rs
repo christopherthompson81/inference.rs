@@ -113,6 +113,11 @@ pub trait SpeculativeTargetMixin {
         false
     }
 
+    /// Device bytes an MTP draft head re-quantized to `isq` takes when it attaches; `None` without such a head.
+    fn mtp_draft_head_bytes(&self, _isq: inference_quant::IsqType) -> Option<usize> {
+        None
+    }
+
     fn supports_recurrent_speculative_checkpoints(&self) -> bool {
         false
     }

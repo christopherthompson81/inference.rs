@@ -104,11 +104,17 @@ impl DecoderCore {
         .reserve(args.mapper.as_ref())?;
 
         let (cache_config, cache_engine) = if let Some(paged_attn_config) = args.paged_attn_config {
+            let mut reservations = paged_attn_config
+                .memory_reservations()
+                .map_err(inference_tensor::Error::msg)?;
+            // the draft head speculative decoding makes after the load must still find room on the device
+            reservations.late_weight_bytes = paged_attn_config
+                .draft_head_isq
+                .and_then(|isq| args.model.target.mtp_draft_head_bytes(isq))
+                .unwrap_or(0);
             let cache_config = calculate_cache_config(
                 paged_attn_config.mem_gpu,
-                paged_attn_config
-                    .memory_reservations()
-                    .map_err(inference_tensor::Error::msg)?,
+                reservations,
                 paged_attn_config.block_size,
                 args.dtype,
                 paged_attn_config.cache_type,
