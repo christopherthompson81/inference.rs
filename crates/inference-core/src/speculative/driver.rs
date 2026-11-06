@@ -24,6 +24,7 @@ use super::proposer::{
 use super::staging::{StagedBatchState, staged_batch_state};
 use super::verifier::{
     DeviceVerification, VerificationInput, VerificationOutcome, finish_verified_step,
+    vulkan_greedy_verify_batch,
 };
 #[cfg(feature = "cuda")]
 use super::verifier::{
@@ -49,6 +50,8 @@ fn materialize_prepared_proposals(prepared: &mut [Option<PreparedVerification>])
                 .as_ref()?
                 .proposal
                 .as_device()
+                // a Vulkan row's drafts come back with its verify tokens
+                .filter(|tokens| !tokens.device().is_vulkan())
                 .map(|tokens| (idx, tokens.clone()))
         })
         .collect::<Vec<_>>();
@@ -579,6 +582,30 @@ where
     let mut device_verifications = std::iter::repeat_with(|| None)
         .take(seqs.len())
         .collect::<Vec<Option<DeviceVerification>>>();
+    // Vulkan's greedy rows: their argmax on the device, every row and its drafts read back in one transfer
+    let pending = device_verifications
+        .iter()
+        .zip(&prepared)
+        .map(|(done, prepared)| match (done, prepared) {
+            (None, Some(prepared)) => Some(prepared.proposal.as_device()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if pending.iter().any(Option::is_some) {
+        let verified = vulkan_greedy_verify_batch(seqs, logits, &pending)?;
+        for (idx, verified) in verified.into_iter().enumerate() {
+            let Some(verified) = verified else {
+                continue;
+            };
+            if let Some(drafts) = verified.drafts {
+                prepared[idx]
+                    .as_mut()
+                    .expect("a verified row has a proposal")
+                    .proposal = SpeculativeTokens::Host(drafts);
+            }
+            device_verifications[idx] = Some(DeviceVerification::TargetTokens(verified.targets));
+        }
+    }
 
     let mut outcomes: Vec<Option<VerificationOutcome>> = Vec::with_capacity(seqs.len());
     let mut cache_outcomes: Vec<Option<SpeculativeCacheOutcome>> = Vec::with_capacity(seqs.len());

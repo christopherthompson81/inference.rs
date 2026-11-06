@@ -36,6 +36,73 @@ pub(crate) fn can_greedy_device_verify(seq: &Sequence) -> bool {
     }
 }
 
+/// A Vulkan greedy row's target tokens, and its drafts when they were on the device.
+pub(crate) struct VulkanGreedyVerification {
+    pub(crate) targets: Vec<u32>,
+    pub(crate) drafts: Option<Vec<u32>>,
+}
+
+/// Each plain-greedy Vulkan row's target tokens from one argmax over every such row's verify logits, read back in one
+/// transfer with the rows' device drafts, by position in `logits`; rows that need the host's sampler stay `None`.
+pub(crate) fn vulkan_greedy_verify_batch(
+    seqs: &[&mut Sequence],
+    logits: &[Tensor],
+    drafts: &[Option<Option<&Tensor>>],
+) -> Result<Vec<Option<VulkanGreedyVerification>>> {
+    let mut outputs = std::iter::repeat_with(|| None)
+        .take(logits.len())
+        .collect::<Vec<_>>();
+    let mut selected = Vec::new();
+    let mut rows = Vec::new();
+    for (idx, (seq, logits)) in seqs.iter().zip(logits).enumerate() {
+        let Some(device_drafts) = drafts[idx] else {
+            continue;
+        };
+        let greedy = logits.device().is_vulkan()
+            && device_drafts.is_none_or(|d| d.device().same_device(logits.device()))
+            && !seq.return_logprobs()
+            && !seq.sampling_logprob_required()
+            && matches!(seq.recognizer, SequenceRecognizer::None)
+            && !seq.tool_call_constrains_sampling()
+            && seq.sampler().is_plain_argmax();
+        if !greedy {
+            continue;
+        }
+        let logits = match *logits.dims() {
+            [1, rows, vocab] => logits.reshape((rows, vocab))?,
+            [_, _] => logits.clone(),
+            _ => continue,
+        };
+        rows.push(logits.dim(0)?);
+        selected.push((idx, logits, device_drafts));
+    }
+    if selected.is_empty() {
+        return Ok(outputs);
+    }
+    let stacked = Tensor::cat(&selected.iter().map(|(_, l, _)| l).collect::<Vec<_>>(), 0)?;
+    // the drafts ride the same read as the targets, after them
+    let mut parts = vec![
+        stacked
+            .argmax(inference_tensor::D::Minus1)?
+            .to_dtype(inference_tensor::DType::U32)?,
+    ];
+    for (_, _, device_drafts) in &selected {
+        if let Some(d) = device_drafts {
+            parts.push(d.flatten_all()?.to_dtype(inference_tensor::DType::U32)?);
+        }
+    }
+    let mut tokens = Tensor::cat(&parts.iter().collect::<Vec<_>>(), 0)?.to_vec1::<u32>()?;
+    let target_count: usize = rows.iter().sum();
+    let mut draft_tokens = tokens.split_off(target_count).into_iter();
+    for ((idx, _, device_drafts), targets) in
+        selected.iter().zip(partition_device_tokens(tokens, &rows)?)
+    {
+        let drafts = device_drafts.map(|d| draft_tokens.by_ref().take(d.elem_count()).collect());
+        outputs[*idx] = Some(VulkanGreedyVerification { targets, drafts });
+    }
+    Ok(outputs)
+}
+
 pub(crate) fn can_batch_greedy_device_verify(seqs: &[&mut Sequence]) -> bool {
     crate::speculative::staging::staged_batch_width(seqs).is_some()
         && seqs.iter().all(|seq| can_greedy_device_verify(seq))
@@ -1099,7 +1166,6 @@ fn validate_device_verification(
     Ok(())
 }
 
-#[cfg(any(feature = "cuda", test))]
 fn partition_device_tokens(tokens: Vec<u32>, row_counts: &[usize]) -> Result<Vec<Vec<u32>>> {
     let expected = row_counts.iter().try_fold(0usize, |total, &rows| {
         total.checked_add(rows).ok_or_else(|| {

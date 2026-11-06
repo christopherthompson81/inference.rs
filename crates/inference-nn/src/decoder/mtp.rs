@@ -797,6 +797,64 @@ impl<B: MtpBlock> MtpHead<B> {
             }
         }
 
+        // greedy drafts on a Vulkan GPU stay there: each step's argmax feeds the next without a read-back
+        if draft.chain_hidden.device().is_vulkan()
+            && ctx.sequences.iter().all(|seq| seq.sampler().is_argmax())
+        {
+            let mut steps = Vec::with_capacity(n_predict);
+            let mut logits = Vec::with_capacity(n_predict);
+            for step in 0..n_predict {
+                let step_logits = lm_head.forward(&draft.logits_hidden)?;
+                let drafts = step_logits
+                    .argmax(D::Minus1)?
+                    .to_dtype(inference_tensor::DType::U32)?;
+                steps.push(drafts.clone());
+                logits.push(step_logits);
+                if step + 1 == n_predict {
+                    break;
+                }
+                let chained = ctx
+                    .seq_ids
+                    .iter()
+                    .zip(cursor.iter_mut())
+                    .map(|(&seq_id, position)| {
+                        *position += 1;
+                        DraftRow {
+                            seq_id,
+                            position: *position,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                // an argmax is always a vocabulary id, so no clamp (a host round trip on Vulkan)
+                draft = self.forward_rows(
+                    embed,
+                    &chained,
+                    RowTokens::Device(&drafts),
+                    &draft.chain_hidden,
+                    kv_cache,
+                    paged_meta,
+                )?;
+            }
+            // [batch, n_predict] tokens, [batch, n_predict, vocab] logits
+            let tokens = Tensor::stack(&steps, 1)?;
+            let logits = Tensor::stack(&logits, 1)?;
+            let proposals = (0..batch)
+                .map(|row| {
+                    Ok(SpeculativeProposal {
+                        tokens: crate::speculative::SpeculativeTokens::from_device(
+                            tokens.get(row)?,
+                        )?,
+                        distribution: Some(
+                            crate::speculative::SpeculativeProposalDistribution::Logits(
+                                logits.get(row)?,
+                            ),
+                        ),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(Some(SpeculativeProposalBatch::new(proposals)));
+        }
+
         let mut contexts = ctx
             .sequences
             .iter()

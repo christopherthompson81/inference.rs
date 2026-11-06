@@ -78,3 +78,30 @@ from `INFERENCE_VULKAN_PROFILE`.
 
 **Implication:** a Vulkan device path: top-1 on the GPU for greedy drafts and verify, drafts left on the device across
 draft steps; then sampled drafts and verification.
+
+## Run 4 - 2026-11-05
+
+**Question:** how many times does a Vulkan verify step wait on the GPU, and where?
+
+**Command:** a temporary counter in `Context::synchronize` printing every 97th call's source lines (`TMP_SYNC_LOG`),
+over greedy MTP prose replies; then `INFERENCE_VULKAN_PROFILE`.
+
+**Finding and changes, one sync site at a time** (MTP 3, q4_0 head, greedy, 481-token replies):
+
+| step | syncs a reply | decode tok/s |
+|---|---|---|
+| Run 2 | 2716 (~12 a step) | ~112 |
+| greedy drafts on the device (argmax, `RowTokens::Device`), no clamp of their ids | ~920 | ~133 |
+| verify rows' argmax in one device call, read back at once (`vulkan_greedy_verify_batch`) | ~680 | ~143 |
+| drafts read with the verify tokens; snapshot scatters by host index | ~194 (~1 a step) | 133-143 |
+
+- `drafts.clamp(...)` on u32 ids synchronized each draft step on Vulkan; an argmax is always an id, so the Vulkan path
+  drops it.
+- `sampler.rs` greedy read each verify row's argmax with its own `to_scalar`.
+- `copy_recurrent_row` (prefix snapshots) built device index tensors that the non-CUDA scatter read back.
+- With one sync a step the GPU is busy ~65 % (3.24 s of 5 s): a verify step is ~12 ms of GPU work (plain decode ~5 ms a
+  token): the 4-row verify forward, ~410 `copy_b32` (Mamba checkpoints) and ~130 `index_b32` a step, the draft steps.
+  The rest is the CPU recording ~1,100 dispatches a step while the GPU waits.
+
+**Implication:** MTP on Vulkan (~115-143 tok/s) still trails plain Vulkan decode (~199). What is left is GPU work a step
+(the checkpoint copies, the verify forward's 4-row matvecs) and recording overlapping the GPU, not round trips.
