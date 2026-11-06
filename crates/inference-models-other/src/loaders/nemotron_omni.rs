@@ -11,9 +11,7 @@ pub struct NemotronOmniPrefixer;
 impl MultimodalPromptPrefixer for NemotronOmniPrefixer {}
 
 fn text_config(config: &str) -> Result<String> {
-    Ok(serde_json::to_string(
-        &Config::from_json(config)?.llm_config,
-    )?)
+    Ok(serde_json::to_string(&Config::parse(config)?.llm_config)?)
 }
 
 impl MultimodalModelLoader for NemotronOmniLoader {
@@ -25,14 +23,14 @@ impl MultimodalModelLoader for NemotronOmniLoader {
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
         Ok(Box::new(NemotronOmniModel::new(
-            &Config::from_json(config)?,
+            &Config::parse(config)?,
             vb,
             normal_loading_metadata,
             attention_mechanism,
         )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        Ok(Box::new(Config::from_json(config)?))
+        Ok(Box::new(Config::parse(config)?))
     }
     fn supports_paged_attention(&self, _config: &str) -> bool {
         true
@@ -40,9 +38,13 @@ impl MultimodalModelLoader for NemotronOmniLoader {
     fn supports_prefix_cacher(&self, _config: &str) -> bool {
         true
     }
-    fn modalities(&self, _config: &str) -> Result<Modalities> {
+    fn modalities(&self, config: &str) -> Result<Modalities> {
+        let mut input = vec![SupportedModality::Text, SupportedModality::Vision];
+        if Config::parse(config)?.sound_config.is_some() {
+            input.push(SupportedModality::Audio);
+        }
         Ok(Modalities {
-            input: vec![SupportedModality::Text, SupportedModality::Vision],
+            input,
             output: vec![SupportedModality::Text],
         })
     }
@@ -102,7 +104,7 @@ impl DeviceMappedModelLoader for NemotronOmniLoader {
         else {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
-        let cfg = Config::from_json(config)?;
+        let cfg = Config::parse(config)?;
         let seq_len = max_seq_len.min(&ATTENTION_CHUNK_SIZE);
         Ok(max_batch_size * cfg.llm_config.num_attention_heads * seq_len * seq_len)
     }
@@ -114,7 +116,7 @@ impl DeviceMappedModelLoader for NemotronOmniLoader {
         let AutoDeviceMapParams::Multimodal { max_batch_size, .. } = params else {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
-        let cfg = Config::from_json(config)?;
+        let cfg = Config::parse(config)?;
         // the largest image's MLP activations (attention runs fused); the projector's are no wider
         let v = &cfg.vision_config;
         Ok(max_batch_size * v.max_num_patches * v.intermediate_size())
@@ -134,7 +136,7 @@ impl DeviceMappedModelLoader for NemotronOmniLoader {
             quantization,
             matformer_config,
         )?;
-        let cfg = Config::from_json(config)?;
+        let cfg = Config::parse(config)?;
         let v = &cfg.vision_config;
         let (h, ffn) = (v.hidden_size, v.intermediate_size());
         let merged = h * cfg.merge() * cfg.merge();
@@ -145,7 +147,11 @@ impl DeviceMappedModelLoader for NemotronOmniLoader {
             + cfg.projector_hidden_size * cfg.llm_config.hidden_size;
         // the position grid stays in f32, which it is resized in
         let positions = side * side * h * DType::F32.size_in_bytes();
-        Ok(text + (tower + projector) * dtype.size_in_bytes() + positions)
+        let sound = cfg
+            .sound_config
+            .as_ref()
+            .map_or(0, |sound| sound.weight_elements(cfg.llm_config.hidden_size));
+        Ok(text + (tower + projector + sound) * dtype.size_in_bytes() + positions)
     }
     fn layer_sizes_in_bytes(
         &self,

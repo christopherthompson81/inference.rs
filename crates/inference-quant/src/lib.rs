@@ -224,7 +224,8 @@ pub use fp8_config::{
     Nvfp4LinearSpec, Nvfp4ScaleNames, ScaleConvention,
 };
 pub use gguf::archive::{
-    GgufArchive, GgufDType, GgufEndian, GgufShardInfo, GgufTensorData, GgufTensorInfo, GgufVersion,
+    CHECKPOINT_PROJECTOR, GgufArchive, GgufDType, GgufEndian, GgufShardInfo, GgufTensorData,
+    GgufTensorInfo, GgufVersion,
 };
 pub use gguf::cpu::cpu_indexed_moe_forward;
 pub use gguf::cpu_experts;
