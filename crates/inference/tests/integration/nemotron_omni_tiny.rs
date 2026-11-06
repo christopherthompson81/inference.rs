@@ -1,7 +1,8 @@
 //! A tiny random-weight Nemotron-H Omni (C-RADIO, pixel shuffle, ReLU^2 projector, Nemotron-H): an image expands to
 //! `<img>`, one `<image>` per token of its patch grid, `</img>`; images of two sizes in one request take their own
 //! counts; and a repeat served from the prefix cache decodes the same tokens. A clip beside them goes through a
-//! Parakeet encoder and expands to `<so_start>`, one `<so_embedding>` per encoder frame, `<so_end>`.
+//! Parakeet encoder and expands to `<so_start>`, one `<so_embedding>` per encoder frame, `<so_end>`. The towers written
+//! as an mmproj bind back to the checkpoint's tensors unchanged.
 
 use std::collections::HashMap;
 
@@ -512,5 +513,60 @@ async fn a_clip_expands_to_its_encoder_frames_beside_an_image() -> anyhow::Resul
             assert!((la - lb).abs() < LOGPROB_TOLERANCE, "{la} vs {lb}");
         }
     }
+    Ok(())
+}
+
+// Nano Omni's architecture, which the projector writer knows; the tiny tower is the same layout
+const NANO_OMNI: &str = "NemotronH_Nano_Omni_Reasoning_V3";
+
+#[test]
+fn the_towers_written_as_an_mmproj_bind_back_unchanged() -> anyhow::Result<()> {
+    let checkpoint = checkpoint()?;
+    let dir = checkpoint.path();
+    let mut config = config();
+    config["architectures"] = serde_json::json!([NANO_OMNI]);
+    std::fs::write(dir.join("config.json"), config.to_string())?;
+    let out = dir.join("mmproj.gguf");
+    let summary = inference_gguf::mmproj_writer::write_mmproj(dir, &out, None)?;
+    assert_eq!(summary.architecture, NANO_OMNI);
+
+    let archive = std::sync::Arc::new(inference_quant::GgufArchive::open([&out])?);
+    let bindings =
+        inference_gguf::nemotron_omni_bindings::build_nemotron_omni_tower_bindings(&archive)?;
+    let source = std::sync::Arc::new(inference_quant::GgufWeightSource::new(
+        archive.clone(),
+        &bindings,
+        inference_tensor::DType::F32,
+    )?);
+    let vb = source.sharded_var_builder(Device::Cpu);
+    let weights = inference_tensor::safetensors::load(dir.join("model.safetensors"), &Device::Cpu)?;
+    let towers = [
+        "vision_model.",
+        "mlp1.",
+        "sound_encoder.",
+        "sound_projection.",
+    ];
+    let mut checked = 0;
+    for (name, want) in &weights {
+        if !towers.iter().any(|prefix| name.starts_with(prefix)) {
+            continue;
+        }
+        let got = vb.get_unchecked(name)?;
+        // the position table comes back without its leading unit dim, which the tower reshapes away
+        assert_eq!(got.elem_count(), want.elem_count(), "{name}");
+        let want = want.reshape(got.dims())?;
+        let diff = (got - want.to_dtype(inference_tensor::DType::F32)?)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+        assert_eq!(diff, 0.0, "{name} differs by {diff}");
+        checked += 1;
+    }
+    assert!(checked > 50, "only {checked} tower tensors checked");
+    assert!(matches!(
+        archive.metadata_value(inference_gguf::mmproj_writer::CHAT_TEMPLATE_KEY),
+        Some(inference_tensor::quantized::gguf_file::Value::String(template)) if template == TEMPLATE
+    ));
     Ok(())
 }
