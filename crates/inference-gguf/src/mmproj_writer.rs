@@ -34,6 +34,12 @@ pub enum Source {
         start: usize,
         len: usize,
     },
+    /// A square grid of `width`-wide rows (a position table) resized bilinearly to `side x side`, without aligned
+    /// corners, as `(1, side * side, width)`.
+    Grid {
+        input: Box<Source>,
+        side: usize,
+    },
 }
 
 impl Source {
@@ -43,6 +49,13 @@ impl Source {
 
     pub fn reshape(self, dims: Vec<usize>) -> Self {
         Self::Reshape(Box::new(self), dims)
+    }
+
+    pub fn grid(self, side: usize) -> Self {
+        Self::Grid {
+            input: Box::new(self),
+            side,
+        }
     }
 
     pub fn rows(self, start: usize, len: usize) -> Self {
@@ -59,6 +72,23 @@ impl Source {
                 .load(name, &Device::Cpu)
                 .with_context(|| format!("checkpoint tensor `{name}`"))?,
             Self::Reshape(input, dims) => input.materialize(weights)?.reshape(dims.as_slice())?,
+            Self::Grid { input, side } => {
+                let table = input.materialize(weights)?.to_dtype(DType::F32)?;
+                let width = *table.dims().last().unwrap_or(&1);
+                let cells = table.elem_count() / width;
+                let from = (cells as f64).sqrt() as usize;
+                if from * from != cells {
+                    bail!("a {cells}-cell grid is not square");
+                }
+                table
+                    .reshape((from, from, width))?
+                    .permute((2, 0, 1))?
+                    .unsqueeze(0)?
+                    .upsample_bilinear2d(*side, *side, false)?
+                    .squeeze(0)?
+                    .permute((1, 2, 0))?
+                    .reshape((1, side * side, width))?
+            }
             Self::Rows { input, start, len } => {
                 input.materialize(weights)?.narrow(0, *start, *len)?
             }
@@ -117,6 +147,8 @@ impl Checkpoint {
             }
             let text = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading {}", path.display()))?;
+            // Python's `json` writes non-finite floats bare (Nano VL's `time_step_limit`)
+            let text = inference_nn::loaders::encode_non_finite_floats(&text);
             Ok(Some(
                 serde_json::from_str(&text)
                     .with_context(|| format!("parsing {}", path.display()))?,
@@ -191,10 +223,16 @@ fn shard_files(dir: &Path, index: Option<serde_json::Value>) -> Result<Vec<PathB
 
 // families by the checkpoint's `architectures[0]`
 type SpecBuilder = fn(&Checkpoint) -> Result<MmprojSpec>;
-const FAMILIES: [(&str, SpecBuilder); 1] = [(
-    "NemotronH_Nano_Omni_Reasoning_V3",
-    super::nemotron_omni_bindings::nano_omni_mmproj_spec,
-)];
+const FAMILIES: [(&str, SpecBuilder); 2] = [
+    (
+        "NemotronH_Nano_Omni_Reasoning_V3",
+        super::nemotron_omni_bindings::nano_omni_mmproj_spec,
+    ),
+    (
+        "NemotronH_Nano_VL_V2",
+        super::nemotron_omni_bindings::nano_vl_mmproj_spec,
+    ),
+];
 
 /// The architectures `write_mmproj` writes a projector for.
 pub fn mmproj_architectures() -> impl Iterator<Item = &'static str> {

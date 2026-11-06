@@ -20,6 +20,15 @@ use super::parakeet_audio_bindings as parakeet;
 use super::whisper_audio_bindings::token_id;
 
 pub const PROJECTOR: &str = "nemotron_omni";
+/// llama.cpp's projector for Nano VL: C-RADIO on fixed tiles, its position table at the tile's grid.
+pub const V2_VL_PROJECTOR: &str = "nemotron_v2_vl";
+const FUSED_QKV: &str = "attn_qkv";
+const VISION_PROJECTOR_KEY: &str = "clip.vision.projector_type";
+const STANDALONE_PROJECTOR_KEY: &str = "clip.projector_type";
+// llama.cpp's InternVL key, which its `nemotron_v2_vl` path does not read
+const MAX_TILES_KEY: &str = "clip.vision.preproc_max_tiles";
+// NVIDIA's `max_num_tiles` default
+const DEFAULT_MAX_TILES: usize = 12;
 pub const TEXT_ARCHITECTURE: &str = "nemotron_h_moe";
 /// The dense decoder a checkpoint projector also pairs with (Nano VL 12B's Nemotron Nano 2).
 pub const DENSE_TEXT_ARCHITECTURE: &str = "nemotron_h";
@@ -58,10 +67,8 @@ const CHECKPOINT_TOWERS: [&str; 4] = [
 
 pub fn build_nemotron_omni_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
     validate_projector(archive, PROJECTOR)?;
-    let text = super::nemotron_h_bindings::build_nemotron_h_bindings(
-        archive,
-        CanonicalGgufArchitecture::NemotronHMoe,
-    )?;
+    let text =
+        super::nemotron_h_bindings::build_nemotron_h_bindings(archive, text_architecture(archive))?;
     let mut bindings = GgufBindingMap::new();
     for (native, binding) in text.iter() {
         bindings.insert(format!("{LANGUAGE_MODEL}.{native}"), binding.clone());
@@ -89,13 +96,8 @@ pub fn build_nemotron_omni_tower_bindings(archive: &GgufArchive) -> Result<GgufB
 /// name.
 pub fn build_nemotron_omni_checkpoint_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
     validate_projector(archive, inference_quant::CHECKPOINT_PROJECTOR)?;
-    let architecture = match archive.metadata_value("general.architecture") {
-        Some(Value::String(name)) if name == DENSE_TEXT_ARCHITECTURE => {
-            CanonicalGgufArchitecture::NemotronH
-        }
-        _ => CanonicalGgufArchitecture::NemotronHMoe,
-    };
-    let text = super::nemotron_h_bindings::build_nemotron_h_bindings(archive, architecture)?;
+    let text =
+        super::nemotron_h_bindings::build_nemotron_h_bindings(archive, text_architecture(archive))?;
     let mut bindings = GgufBindingMap::new();
     for (native, binding) in text.iter() {
         bindings.insert(format!("{LANGUAGE_MODEL}.{native}"), binding.clone());
@@ -115,6 +117,29 @@ pub fn build_nemotron_omni_checkpoint_bindings(archive: &GgufArchive) -> Result<
     for name in towers {
         bindings.insert(name.clone(), GgufTensorBinding::tensor(name.clone()));
     }
+    Ok(bindings)
+}
+
+fn text_architecture(archive: &GgufArchive) -> CanonicalGgufArchitecture {
+    match archive.metadata_value("general.architecture") {
+        Some(Value::String(name)) if name == DENSE_TEXT_ARCHITECTURE => {
+            CanonicalGgufArchitecture::NemotronH
+        }
+        _ => CanonicalGgufArchitecture::NemotronHMoe,
+    }
+}
+
+/// A dense `nemotron_h` text GGUF beside a `nemotron_v2_vl` projector (Nano VL's, llama.cpp's or ours): the decoder,
+/// and C-RADIO with its fused qkv and tile-sized position table.
+pub fn build_nemotron_v2_vl_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
+    validate_projector(archive, V2_VL_PROJECTOR)?;
+    let text =
+        super::nemotron_h_bindings::build_nemotron_h_bindings(archive, text_architecture(archive))?;
+    let mut bindings = GgufBindingMap::new();
+    for (native, binding) in text.iter() {
+        bindings.insert(format!("{LANGUAGE_MODEL}.{native}"), binding.clone());
+    }
+    bind_vision(&TensorInventory::from_archive(archive), &mut bindings)?;
     Ok(bindings)
 }
 
@@ -153,7 +178,10 @@ fn bind_vision(inventory: &TensorInventory<'_>, bindings: &mut GgufBindingMap) -
         let theirs = format!("v.blk.{layer}");
         for (native, source) in BLOCK_ROLES {
             for suffix in ["weight", "bias"] {
-                let binding = if source.is_empty() {
+                let fused = format!("{theirs}.{FUSED_QKV}.{suffix}");
+                let binding = if source.is_empty() && inventory.contains(&fused) {
+                    GgufTensorBinding::tensor(fused)
+                } else if source.is_empty() {
                     GgufTensorBinding::concat(
                         ["attn_q", "attn_k", "attn_v"]
                             .iter()
@@ -214,6 +242,39 @@ fn float_list(value: &serde_json::Value, key: &str) -> Result<Value> {
 /// under projector type `nemotron_omni` (Bolt's), the sound tower as llama.cpp's `parakeet`.
 pub fn nano_omni_mmproj_spec(checkpoint: &Checkpoint) -> Result<MmprojSpec> {
     let config = &checkpoint.config;
+    let mut spec = radio_spec(checkpoint, RadioFile::Omni)?;
+    let lm_hidden = json_usize(&config["llm_config"], "hidden_size")?;
+    if config
+        .get("sound_config")
+        .is_some_and(|sound| !sound.is_null())
+    {
+        let audio = parakeet::audio_spec(
+            checkpoint,
+            &config["sound_config"],
+            SOUND_ENCODER,
+            SOUND_PROJECTION,
+            lm_hidden,
+        )?;
+        spec.metadata.extend(audio.metadata);
+        spec.tensors.extend(audio.tensors);
+    }
+    Ok(spec)
+}
+
+/// Nano VL's projector in llama.cpp's `nemotron_v2_vl` layout: a fused qkv, the position table resized to the tile's
+/// grid as RADIO resizes it for a tile, and the checkpoint's tile count. llama.cpp runs it as one 512-pixel image.
+pub fn nano_vl_mmproj_spec(checkpoint: &Checkpoint) -> Result<MmprojSpec> {
+    radio_spec(checkpoint, RadioFile::V2Vl)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RadioFile {
+    Omni,
+    V2Vl,
+}
+
+fn radio_spec(checkpoint: &Checkpoint, file: RadioFile) -> Result<MmprojSpec> {
+    let config = &checkpoint.config;
     let mut vision = config["vision_config"].clone();
     if vision.get("hidden_size").is_none() {
         inference_nn::vision::radio::fill_radio_shape(&mut vision)?;
@@ -229,22 +290,25 @@ pub fn nano_omni_mmproj_spec(checkpoint: &Checkpoint) -> Result<MmprojSpec> {
             (json_usize(&vision, key)? * patch * patch) as u32,
         ))
     };
+    let projector = match file {
+        RadioFile::Omni => PROJECTOR,
+        RadioFile::V2Vl => V2_VL_PROJECTOR,
+    };
+    let tile = config["force_image_size"]
+        .as_u64()
+        .map_or(WARMUP_IMAGE_SIZE as usize, |size| size as usize);
     let mut spec = MmprojSpec {
         metadata: vec![
             ("clip.has_vision_encoder".into(), Value::Bool(true)),
             (
                 super::multimodal_binding_utils::VISION_PROJECTOR_TYPE.into(),
-                Value::String(PROJECTOR.into()),
+                Value::String(projector.into()),
             ),
-            ("clip.vision.nemotron_omni".into(), Value::Bool(true)),
             (
                 "clip.vision.projection_dim".into(),
                 Value::U32(lm_hidden as u32),
             ),
-            (
-                "clip.vision.image_size".into(),
-                Value::U32(WARMUP_IMAGE_SIZE),
-            ),
+            ("clip.vision.image_size".into(), Value::U32(tile as u32)),
             ("clip.vision.patch_size".into(), Value::U32(patch as u32)),
             ("clip.vision.embedding_length".into(), Value::U32(h as u32)),
             (
@@ -273,6 +337,12 @@ pub fn nano_omni_mmproj_spec(checkpoint: &Checkpoint) -> Result<MmprojSpec> {
                 "clip.vision.projector.scale_factor".into(),
                 Value::U32(merge as u32),
             ),
+        ],
+        tensors: Vec::new(),
+    };
+    match file {
+        RadioFile::Omni => spec.metadata.extend([
+            ("clip.vision.nemotron_omni".into(), Value::Bool(true)),
             (
                 "clip.vision.image_min_pixels".into(),
                 pixels("min_num_patches")?,
@@ -281,9 +351,17 @@ pub fn nano_omni_mmproj_spec(checkpoint: &Checkpoint) -> Result<MmprojSpec> {
                 "clip.vision.image_max_pixels".into(),
                 pixels("max_num_patches")?,
             ),
-        ],
-        tensors: Vec::new(),
-    };
+        ]),
+        RadioFile::V2Vl => {
+            let tiles = checkpoint
+                .preprocessor
+                .as_ref()
+                .and_then(|pre| pre["max_num_tiles"].as_u64())
+                .map_or(DEFAULT_MAX_TILES, |tiles| tiles as usize);
+            spec.metadata
+                .push((MAX_TILES_KEY.into(), Value::U32(tiles as u32)));
+        }
+    }
     let patches = format!("{RADIO}.patch_generator");
     let kernel = |native: &str| -> Result<Source> {
         let shape = checkpoint.shape(native)?;
@@ -296,7 +374,8 @@ pub fn nano_omni_mmproj_spec(checkpoint: &Checkpoint) -> Result<MmprojSpec> {
         Role::Float,
     ));
     let video = format!("{patches}.video_embedder.weight");
-    if checkpoint.contains(&video) {
+    // llama.cpp's `nemotron_v2_vl` takes no video
+    if file == RadioFile::Omni && checkpoint.contains(&video) {
         spec.tensors.push(MmprojTensor::new(
             VIDEO_PATCH_EMBED,
             kernel(&video)?,
@@ -305,11 +384,12 @@ pub fn nano_omni_mmproj_spec(checkpoint: &Checkpoint) -> Result<MmprojSpec> {
     }
     let positions = format!("{patches}.pos_embed");
     let grid = checkpoint.shape(&positions)?;
-    spec.tensors.push(MmprojTensor::new(
-        POSITIONS,
-        Source::tensor(positions).reshape(vec![grid[grid.len() - 2], h]),
-        Role::Float,
-    ));
+    let positions = match file {
+        RadioFile::Omni => Source::tensor(positions).reshape(vec![grid[grid.len() - 2], h]),
+        RadioFile::V2Vl => Source::tensor(positions).grid(tile / patch),
+    };
+    spec.tensors
+        .push(MmprojTensor::new(POSITIONS, positions, Role::Float));
     spec.tensors.push(MmprojTensor::new(
         PREFIX_TOKENS,
         Source::tensor(format!("{patches}.cls_token.token")),
@@ -326,6 +406,14 @@ pub fn nano_omni_mmproj_spec(checkpoint: &Checkpoint) -> Result<MmprojSpec> {
                     Role::Float
                 };
                 let name = format!("{ours}.{native}.{suffix}");
+                if source.is_empty() && file == RadioFile::V2Vl {
+                    spec.tensors.push(MmprojTensor::new(
+                        format!("{theirs}.{FUSED_QKV}.{suffix}"),
+                        Source::tensor(name),
+                        role,
+                    ));
+                    continue;
+                }
                 if !source.is_empty() {
                     spec.tensors.push(MmprojTensor::new(
                         format!("{theirs}.{source}.{suffix}"),
@@ -356,20 +444,6 @@ pub fn nano_omni_mmproj_spec(checkpoint: &Checkpoint) -> Result<MmprojSpec> {
             Source::tensor(format!("mlp1.{layer}.weight")),
             role,
         ));
-    }
-    if config
-        .get("sound_config")
-        .is_some_and(|sound| !sound.is_null())
-    {
-        let audio = parakeet::audio_spec(
-            checkpoint,
-            &config["sound_config"],
-            SOUND_ENCODER,
-            SOUND_PROJECTION,
-            lm_hidden,
-        )?;
-        spec.metadata.extend(audio.metadata);
-        spec.tensors.extend(audio.tensors);
     }
     Ok(spec)
 }
@@ -436,13 +510,40 @@ fn vision_config(
     };
     let patch = map_usize(metadata, "clip.vision.patch_size")?;
     let hidden = map_usize(metadata, "clip.vision.embedding_length")?;
-    let positions = shape(POSITIONS)?[0];
+    // `(cells, hidden)` in Bolt's file, `(1, cells, hidden)` in `nemotron_v2_vl`'s
+    let positions = shape(POSITIONS)?.iter().product::<usize>() / hidden;
     let side = (positions as f64).sqrt() as usize;
     if side * side != positions {
         bail!("{FAMILY} position grid of {positions} is not square");
     }
     let per_patch = patch * patch;
-    Ok(json!({
+    let tiled = [VISION_PROJECTOR_KEY, STANDALONE_PROJECTOR_KEY]
+        .iter()
+        .any(|key| matches!(metadata.get(*key), Some(Value::String(p)) if p == V2_VL_PROJECTOR));
+    // a tiled projector runs each image as InternVL's tiles of its image size, a thumbnail after them
+    let (budget, tiles) = if tiled {
+        let max_tiles = match metadata.get(MAX_TILES_KEY) {
+            Some(Value::U32(tiles)) => *tiles as usize,
+            _ => DEFAULT_MAX_TILES,
+        };
+        (
+            json!({}),
+            json!({
+                "force_image_size": map_usize(metadata, "clip.vision.image_size")?,
+                "use_thumbnail": true,
+                "max_num_tiles": max_tiles,
+            }),
+        )
+    } else {
+        (
+            json!({
+                "min_num_patches": map_usize(metadata, "clip.vision.image_min_pixels")? / per_patch,
+                "max_num_patches": map_usize(metadata, "clip.vision.image_max_pixels")? / per_patch,
+            }),
+            json!({}),
+        )
+    };
+    let mut config = json!({
         "architectures": ["NemotronH_Omni_Reasoning_V3"],
         "model_type": "nemotron_h_omni",
         "vision_config": {
@@ -455,8 +556,6 @@ fn vision_config(
             "num_cls_tokens": shape(PREFIX_TOKENS)?[0],
             "num_registers": 0,
             "max_img_size": side * patch,
-            "min_num_patches": map_usize(metadata, "clip.vision.image_min_pixels")? / per_patch,
-            "max_num_patches": map_usize(metadata, "clip.vision.image_max_pixels")? / per_patch,
         },
         "downsample_ratio": 1.0 / map_usize(metadata, "clip.vision.projector.scale_factor")? as f64,
         "img_context_token_id": token_id(metadata, IMAGE_TOKEN, FAMILY)?,
@@ -465,7 +564,14 @@ fn vision_config(
         "patch_size": patch,
         "projector_hidden_size": shape(PROJECTOR_IN)?[0],
         "vision_final_layernorm": shapes.contains_key(POST_NORM),
-    }))
+    });
+    for (key, value) in budget.as_object().into_iter().flatten() {
+        config["vision_config"][key] = value.clone();
+    }
+    for (key, value) in tiles.as_object().into_iter().flatten() {
+        config[key] = value.clone();
+    }
+    Ok(config)
 }
 
 #[cfg(test)]
@@ -539,6 +645,48 @@ mod tests {
         ] {
             assert!(bindings.get(native).is_some(), "`{native}` is not bound");
         }
+    }
+
+    // `nemotron_v2_vl` names no patch budget: its images are tiles of its image size, a thumbnail after them
+    #[test]
+    fn a_v2_vl_projector_describes_a_tiled_tower() {
+        let mut shapes = mmproj_tensors().into_iter().collect::<HashMap<_, _>>();
+        shapes.insert(POSITIONS.to_string(), vec![1, GRID * GRID, HIDDEN]);
+        let mut metadata = HashMap::new();
+        for (key, value) in [
+            ("clip.vision.patch_size", PATCH),
+            ("clip.vision.embedding_length", HIDDEN),
+            ("clip.vision.attention.head_count", 2),
+            ("clip.vision.block_count", 2),
+            ("clip.vision.feed_forward_length", FFN),
+            ("clip.vision.image_size", GRID * PATCH),
+            ("clip.vision.projector.scale_factor", 2),
+            (MAX_TILES_KEY, 6),
+        ] {
+            metadata.insert(key.to_string(), Value::U32(value as u32));
+        }
+        metadata.insert(
+            STANDALONE_PROJECTOR_KEY.to_string(),
+            Value::String(V2_VL_PROJECTOR.to_string()),
+        );
+        metadata.insert(
+            "clip.vision.attention.layer_norm_epsilon".to_string(),
+            Value::F32(1e-6),
+        );
+        for key in ["clip.vision.image_mean", "clip.vision.image_std"] {
+            metadata.insert(key.to_string(), Value::Array(vec![Value::F32(0.5); 3]));
+        }
+        let mut tokens = (0..10)
+            .map(|i| Value::String(format!("<t{i}>")))
+            .collect::<Vec<_>>();
+        tokens[IMAGE_ID] = Value::String(IMAGE_TOKEN.to_string());
+        metadata.insert(TOKENS_KEY.to_string(), Value::Array(tokens));
+        let config = vision_config(&metadata, &shapes).unwrap();
+        assert_eq!(config["vision_config"]["max_img_size"], GRID * PATCH);
+        assert!(config["vision_config"].get("min_num_patches").is_none());
+        assert_eq!(config["force_image_size"], GRID * PATCH);
+        assert_eq!(config["max_num_tiles"], 6);
+        assert_eq!(config["use_thumbnail"], true);
     }
 
     #[test]

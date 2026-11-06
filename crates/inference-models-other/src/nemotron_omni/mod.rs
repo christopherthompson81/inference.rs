@@ -70,6 +70,9 @@ pub struct Config {
     pub force_image_size: Option<usize>,
     #[serde(default)]
     pub use_thumbnail: Option<bool>,
+    /// The tile count a config synthesized from a projector states (`preprocessor_config.json` holds it otherwise).
+    #[serde(default)]
+    pub max_num_tiles: Option<usize>,
 }
 
 /// How an image becomes the tower's input.
@@ -106,7 +109,9 @@ impl Config {
             (Some(min), Some(max), _) => Ok(ImageLayout::Budget { min, max }),
             (_, _, Some(size)) => Ok(ImageLayout::Tiles {
                 size,
-                max_tiles: max_tiles.unwrap_or(DEFAULT_MAX_TILES),
+                max_tiles: max_tiles
+                    .or(self.max_num_tiles)
+                    .unwrap_or(DEFAULT_MAX_TILES),
                 thumbnail: self.use_thumbnail.unwrap_or(true),
             }),
             _ => inference_tensor::bail!(

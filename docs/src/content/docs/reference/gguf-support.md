@@ -78,6 +78,7 @@ files when the repository and GGUF metadata identify them unambiguously. The dir
 | Muse Glimmer | `muse-glimmer` |
 | Nemotron 3.5 Bolt (Nemotron-H Omni) | `nemotron_h_moe` (projector `nemotron_omni`) |
 | Nemotron 3 Nano Omni (Nemotron-H Omni) | `nemotron_h_moe` (the checkpoint's safetensors shard as projector) |
+| Nemotron Nano 12B v2 VL (Nemotron-H Omni) | `nemotron_h` (projector `nemotron_v2_vl`, or the checkpoint's shard) |
 | PaddleOCR-VL (1.5, 1.6) | `paddleocr` |
 | Qwen2-VL and Qwen2.5-VL | `qwen2vl` |
 | Qwen3-VL | `qwen3vl` |
@@ -142,8 +143,11 @@ inference serve --format gguf -m lmstudio-community/Nemotron-3-Nano-Omni-30B-A3B
 
 Nemotron Nano 12B v2 VL loads the same way from a dense `nemotron_h` text GGUF: its first safetensors shard
 (`nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16`, 3.8 GB) holds the C-RADIO tower and `mlp1`. Images are cut into InternVL's
-tiles (up to 12 of 512 pixels on the closest aspect ratio, and a thumbnail), as the checkpoint's processor does; the
-published `nemotron_v2_vl` projectors run them as one fixed 512-pixel image.
+tiles (up to 12 of 512 pixels on the closest aspect ratio, and a thumbnail), as the checkpoint's processor does. A
+`nemotron_v2_vl` projector loads too, the published ones included, and its images are tiled the same way (llama.cpp
+runs that projector as one fixed 512-pixel image). `inference quantize mmproj` writes Nano VL's as `nemotron_v2_vl` with
+the checkpoint's CLIP normalization (the published files carry ImageNet's), its position table resized for a 512-pixel
+tile as RADIO resizes it, and its tile count.
 
 Matrices keep the checkpoint's float type unless `--matrix-type` names another (`f16`, `q8_0`, ...); norms, biases,
 convolutions and embeddings stay f32, as llama.cpp's converter keeps them.

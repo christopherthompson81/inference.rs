@@ -54,6 +54,8 @@ pub enum NativeMultimodalGgufFamily {
     NemotronOmni,
     /// Nemotron-H Omni's towers from the checkpoint's own safetensors shard (no published projector has Nano Omni's).
     NemotronOmniCheckpoint,
+    /// Nano VL's tiled C-RADIO under llama.cpp's `nemotron_v2_vl` layout.
+    NemotronV2Vl,
     NemotronTranscribe,
     PaddleOcrVl,
     Qwen2Audio,
@@ -95,6 +97,7 @@ pub fn describes_own_config(architecture: &str, projector: &str) -> bool {
                 | NativeMultimodalGgufFamily::GlmAsr
                 | NativeMultimodalGgufFamily::MERaLiON2
                 | NativeMultimodalGgufFamily::NemotronOmni
+                | NativeMultimodalGgufFamily::NemotronV2Vl
                 | NativeMultimodalGgufFamily::NemotronTranscribe
                 | NativeMultimodalGgufFamily::Qwen2Audio
                 | NativeMultimodalGgufFamily::Ultravox
@@ -118,7 +121,9 @@ impl NativeMultimodalGgufFamily {
             Self::Lfm2Vl => MultimodalLoaderType::Lfm2Vl,
             Self::MERaLiON2 => MultimodalLoaderType::MERaLiON2,
             Self::MuseGlimmer => MultimodalLoaderType::MuseGlimmer,
-            Self::NemotronOmni | Self::NemotronOmniCheckpoint => MultimodalLoaderType::NemotronOmni,
+            Self::NemotronOmni | Self::NemotronOmniCheckpoint | Self::NemotronV2Vl => {
+                MultimodalLoaderType::NemotronOmni
+            }
             Self::NemotronTranscribe => MultimodalLoaderType::NemotronTranscribe,
             Self::PaddleOcrVl => MultimodalLoaderType::PaddleOcrVl,
             Self::Qwen2Audio => MultimodalLoaderType::Qwen2Audio,
@@ -133,7 +138,9 @@ impl NativeMultimodalGgufFamily {
             Self::GlmAsr => synthesize_glm_asr_config(archive).map(Some),
             #[cfg(any(test, feature = "models-gemma"))]
             Self::MERaLiON2 => synthesize_meralion2_config(archive).map(Some),
-            Self::NemotronOmni => synthesize_nemotron_omni_config(archive).map(Some),
+            Self::NemotronOmni | Self::NemotronV2Vl => {
+                synthesize_nemotron_omni_config(archive).map(Some)
+            }
             Self::NemotronTranscribe => nemotron_transcribe_config(archive).map(Some),
             Self::Qwen2Audio => synthesize_qwen2_audio_config(archive).map(Some),
             Self::Ultravox => synthesize_ultravox_config(archive).map(Some),
@@ -163,6 +170,7 @@ impl NativeMultimodalGgufFamily {
             // NoPE attention: no rotary pairing applies
             | Self::NemotronOmni
             | Self::NemotronOmniCheckpoint
+            | Self::NemotronV2Vl
             | Self::NemotronTranscribe
             | Self::Ultravox
             | Self::VoxtralChat => RopePairing::Adjacent,
@@ -192,6 +200,7 @@ impl NativeMultimodalGgufFamily {
             Self::MuseGlimmer => build_muse_glimmer_bindings(archive),
             Self::NemotronOmni => build_nemotron_omni_bindings(archive),
             Self::NemotronOmniCheckpoint => build_nemotron_omni_checkpoint_bindings(archive),
+            Self::NemotronV2Vl => nemotron_omni_bindings::build_nemotron_v2_vl_bindings(archive),
             Self::NemotronTranscribe => build_nemotron_transcribe_bindings(archive),
             Self::PaddleOcrVl => build_paddleocr_vl_bindings(archive),
             Self::Qwen2Audio => build_qwen2_audio_bindings(archive),
@@ -202,7 +211,7 @@ impl NativeMultimodalGgufFamily {
 }
 
 // (vision projector type, the text architecture it pairs with, family)
-const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 20] = [
+const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 21] = [
     ("gemma3", "gemma3", NativeMultimodalGgufFamily::Gemma3),
     ("gemma3nv", "gemma3n", NativeMultimodalGgufFamily::Gemma3n),
     (
@@ -254,6 +263,11 @@ const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 20] = [
         inference_quant::CHECKPOINT_PROJECTOR,
         nemotron_omni_bindings::DENSE_TEXT_ARCHITECTURE,
         NativeMultimodalGgufFamily::NemotronOmniCheckpoint,
+    ),
+    (
+        nemotron_omni_bindings::V2_VL_PROJECTOR,
+        nemotron_omni_bindings::DENSE_TEXT_ARCHITECTURE,
+        NativeMultimodalGgufFamily::NemotronV2Vl,
     ),
     (
         paddleocr_vl_bindings::PROJECTOR,
