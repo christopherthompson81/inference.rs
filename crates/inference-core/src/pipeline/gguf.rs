@@ -1102,7 +1102,9 @@ impl GGUFLoader {
             if paths.get_config_filename().as_os_str().is_empty() || decoder_embedding.is_some() {
                 None
             } else {
-                Some(fs::read_to_string(paths.get_config_filename())?)
+                Some(inference_nn::loaders::encode_non_finite_floats(
+                    &fs::read_to_string(paths.get_config_filename())?,
+                ))
             };
         let explicit_loader = external_config
             .as_deref()
@@ -1390,7 +1392,9 @@ impl GGUFLoader {
         let external_config = if paths.get_config_filename().as_os_str().is_empty() {
             None
         } else {
-            Some(fs::read_to_string(paths.get_config_filename())?)
+            Some(inference_nn::loaders::encode_non_finite_floats(
+                &fs::read_to_string(paths.get_config_filename())?,
+            ))
         };
         let tensor_names = archive.tensors().keys().cloned().collect::<Vec<_>>();
         let config = prepare_gemma3_text_config(
@@ -1485,7 +1489,9 @@ impl GGUFLoader {
             }
         };
         let config = if !paths.get_config_filename().as_os_str().is_empty() {
-            fs::read_to_string(paths.get_config_filename())?
+            inference_nn::loaders::encode_non_finite_floats(&fs::read_to_string(
+                paths.get_config_filename(),
+            )?)
         } else if let Some(config) = synthesized_config {
             config
         } else {

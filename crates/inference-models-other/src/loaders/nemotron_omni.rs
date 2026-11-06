@@ -119,7 +119,7 @@ impl DeviceMappedModelLoader for NemotronOmniLoader {
         let cfg = Config::parse(config)?;
         // the largest image's MLP activations (attention runs fused); the projector's are no wider
         let v = &cfg.vision_config;
-        Ok(max_batch_size * v.max_num_patches * v.intermediate_size())
+        Ok(max_batch_size * cfg.max_image_patches()? * v.intermediate_size())
     }
     fn non_mapped_size_in_bytes(
         &self,

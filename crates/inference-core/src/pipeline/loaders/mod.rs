@@ -82,7 +82,8 @@ pub(crate) fn load_model_config(
     config_path: &std::path::Path,
     use_checkpoint_quantization: bool,
 ) -> Result<String> {
-    let config = std::fs::read_to_string(config_path)?;
+    let config =
+        inference_nn::loaders::encode_non_finite_floats(&std::fs::read_to_string(config_path)?);
     let config = match config_path.file_name().and_then(|name| name.to_str()) {
         Some(name) if DECISION_CONFIGS.contains(&name) => {
             merge_decision_config(config_path, &config)?

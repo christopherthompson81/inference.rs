@@ -116,7 +116,7 @@ fn main() -> Result<()> {
         None => gguf_tower(&args.gguf, dtype, &device)?,
     };
     let tower = RadioTower::new(&cfg, vb, cfg.llm_config.hidden_size)?;
-    let processor = NemotronOmniInputsProcessor::new(&cfg);
+    let processor = NemotronOmniInputsProcessor::new(&cfg, None)?;
     let mut dumps = std::fs::read_dir(&args.dumps)?
         .map(|e| e.map(|e| e.path()))
         .collect::<std::io::Result<Vec<_>>>()?;
@@ -130,7 +130,12 @@ fn main() -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("{} has no {name}", path.display()))
         };
         let image = image::open(path.with_extension("png"))?;
-        let (patches, (rows, cols)) = processor.patches(&image);
+        // Bolt's budget layout gives each image one tile
+        let (patches, (rows, cols)) = processor
+            .patches(&image)
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("no tile for {}", path.display()))?;
         println!("{}: {rows} x {cols} patches", path.display());
         let patches = Tensor::from_vec(patches, (rows * cols, ()), &Device::Cpu)?;
         compare("patches", &patches, get("patches")?)?;

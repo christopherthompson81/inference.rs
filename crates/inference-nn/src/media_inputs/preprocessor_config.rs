@@ -63,6 +63,7 @@ pub struct PreProcessorConfig {
     pub max_image_tokens: Option<usize>,
     pub tile_size: Option<usize>,
     pub use_thumbnail: Option<bool>,
+    pub max_num_tiles: Option<usize>,
 
     pub audio_compression_rate: Option<usize>,
     pub audio_downsample_rate: Option<usize>,

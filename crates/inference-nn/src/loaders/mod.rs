@@ -1,12 +1,14 @@
 //! What a model family knows about loading its models: the loader traits and their sizing and placement helpers.
 
 mod isq;
+mod non_finite;
 mod placement;
 mod rope;
 mod sizing;
 mod types;
 
 pub use isq::*;
+pub use non_finite::*;
 pub use placement::*;
 pub use rope::*;
 pub use sizing::*;

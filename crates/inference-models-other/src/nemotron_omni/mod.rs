@@ -21,6 +21,8 @@ use crate::{
 };
 
 pub const MODEL: &str = "Nemotron-H Omni";
+// InternVL's tile count, NVIDIA's `max_num_tiles` default
+pub const DEFAULT_MAX_TILES: usize = 12;
 pub const LANGUAGE_MODEL: &str = "language_model";
 
 #[derive(Debug, Clone, inference_json::FromJson, Serialize)]
@@ -34,8 +36,11 @@ pub struct VisionConfig {
     pub num_registers: usize,
     /// The CPE grid's side in pixels: `max_img_size / patch_size` positions a side.
     pub max_img_size: usize,
-    pub min_num_patches: usize,
-    pub max_num_patches: usize,
+    /// The patch budget a dynamic-resolution image is sized to; without one, images are cut into tiles.
+    #[serde(default)]
+    pub min_num_patches: Option<usize>,
+    #[serde(default)]
+    pub max_num_patches: Option<usize>,
 }
 
 impl VisionConfig {
@@ -60,6 +65,25 @@ pub struct Config {
     pub sound_config: Option<sound::SoundConfig>,
     #[serde(default)]
     pub sound_context_token_id: Option<u32>,
+    /// A tiled checkpoint's tile side in pixels (Nano VL's 512).
+    #[serde(default)]
+    pub force_image_size: Option<usize>,
+    #[serde(default)]
+    pub use_thumbnail: Option<bool>,
+}
+
+/// How an image becomes the tower's input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageLayout {
+    /// One tile on a patch grid sized to `min..=max` patches, aspect kept (Bolt, Nano Omni).
+    Budget { min: usize, max: usize },
+    /// InternVL's tiles: up to `max_tiles` squares of `size` pixels on the closest aspect ratio, and a thumbnail of
+    /// the whole image after them when there is more than one (Nano VL).
+    Tiles {
+        size: usize,
+        max_tiles: usize,
+        thumbnail: bool,
+    },
 }
 
 impl Config {
@@ -74,6 +98,31 @@ impl Config {
             }
         }
         Ok(Self::from_json(&value.to_string())?)
+    }
+
+    pub fn image_layout(&self, max_tiles: Option<usize>) -> Result<ImageLayout> {
+        let v = &self.vision_config;
+        match (v.min_num_patches, v.max_num_patches, self.force_image_size) {
+            (Some(min), Some(max), _) => Ok(ImageLayout::Budget { min, max }),
+            (_, _, Some(size)) => Ok(ImageLayout::Tiles {
+                size,
+                max_tiles: max_tiles.unwrap_or(DEFAULT_MAX_TILES),
+                thumbnail: self.use_thumbnail.unwrap_or(true),
+            }),
+            _ => inference_tensor::bail!(
+                "{MODEL}: the config has neither a patch budget nor `force_image_size`"
+            ),
+        }
+    }
+
+    /// The most patches one image runs through the tower: its budget, or every tile and the thumbnail.
+    pub fn max_image_patches(&self) -> Result<usize> {
+        Ok(match self.image_layout(None)? {
+            ImageLayout::Budget { max, .. } => max,
+            ImageLayout::Tiles {
+                size, max_tiles, ..
+            } => (max_tiles + 1) * (size / self.patch_size).pow(2),
+        })
     }
 
     /// The pixel shuffle's factor on each side.
