@@ -60,3 +60,37 @@ flat one), the kept set is the most likely tokens and its mass matches within 1e
 
 **Implication:** a sampled tool call is 2.5x faster; it still trails greedy (98 against 185) through the host-sampled,
 exact-match verify, and plain sampling trails greedy (136 against 188) through MTP's lower acceptance when sampled.
+
+## Run 3 - 2026-11-05
+
+**Question:** with the sort gone, where does a sampled tool call's time go, and does the Code tab's demo get faster?
+
+**Command:** `perf record` over `code/speed_call.py` again; `code/accept.py` (one 400-word sampled reply as text and as a
+`write` call, MTP acceptance read from the log between them); the demo (`code/demo.py`, 2-minute limit) three times
+on #826's branch (the grammar fix) with and without this branch's commit.
+
+**Finding:**
+- CPU samples: 63 % in `libcuda` (waiting on the GPU), the sampler's `select_nth` partition 7 %, then
+  `WeightedIndex::new` 3.4 % and `expf` 3.4 %: the draw still built its index over all 131,072 probabilities, nearly
+  all zero after the nucleus cut.
+- Acceptance under sampling is about the same with or without the grammar: plain text 38.7 / 32.3 % (length 2.16 /
+  1.97), a tool call 36.6 / 56.0 % (2.10 / 2.68). With deterministic drafts, host exact-match verification accepts a
+  draft with probability p(draft), as rejection sampling does, so the grammar path loses no acceptance; what it adds
+  is host work per verify row.
+- The demo: #826 alone 63.1 / 73.3 / 64.4 s; with the ranked-prefix nucleus 59.8 / 40.8 / 54.4 s (every run passing
+  its 19 tests).
+
+**Change:** `sample_candidates`: the multinomial draw over the nucleus's tokens only, in ascending token order, so
+its cumulative weights, its one rng draw and the token it picks are those of a draw over the whole vocabulary. A test
+draws 200 seeds both ways on a distribution whose ranks are scattered over the vocabulary (it fails if the
+candidates are drawn in probability order).
+
+| sampled tool call | tok/s |
+|---|---|
+| before Run 2 | 39.7 |
+| ranked-prefix nucleus | 98.1 / 98.1 |
+| + draw over the candidates | 105.1 / 106.2 (the same 237 / 284 tokens as before it: the same draws) |
+
+**Implication:** the agent's sampled tool calls are 2.7x faster than at the start; greedy is ~185. What is left is
+sampling itself (MTP accepts ~2.2 tokens a step sampled against ~3 greedy) and the host-side verify rows (logits to
+the host, a CPU softmax, the grammar check). Moving constrained verification onto the device is the next, larger step.

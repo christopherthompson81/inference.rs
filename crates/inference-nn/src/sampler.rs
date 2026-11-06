@@ -2423,28 +2423,55 @@ impl Sampler {
             }
         }
 
-        if min_p <= 0.0 || min_p >= 1.0 {
-            return self.sample_multinomial(&sampling_probs, reporting_probs, return_logprobs, rng);
-        }
-
-        // Get max_p from first sorted element
-        let max_p = idx_probs.first().map(|(_, p)| *p).unwrap_or(0.0);
-
-        // MIN P
-
-        // min-p sampling samples from the tokens whose prob are greater than
-        // (max prob of token in dist) * min_p
-
-        // Clamp smaller probabilities to zero.
-        let min_p_threshold = max_p * min_p;
-        for (index, prob) in &idx_probs {
-            if min_p_threshold >= *prob {
-                sampling_probs[*index as usize] = 0.0;
+        if min_p > 0.0 && min_p < 1.0 {
+            // min-p keeps the tokens more likely than (the most likely one's probability) * min_p
+            let max_p = idx_probs.first().map(|(_, p)| *p).unwrap_or(0.0);
+            let min_p_threshold = max_p * min_p;
+            for (index, prob) in &idx_probs {
+                if min_p_threshold >= *prob {
+                    sampling_probs[*index as usize] = 0.0;
+                }
             }
         }
+        if idx_probs.len() == sampling_probs.len() {
+            return self.sample_multinomial(&sampling_probs, reporting_probs, return_logprobs, rng);
+        }
+        self.sample_candidates(
+            &sampling_probs,
+            &idx_probs,
+            reporting_probs,
+            return_logprobs,
+            rng,
+        )
+    }
 
-        // Sample with clamped probabilities.
-        self.sample_multinomial(&sampling_probs, reporting_probs, return_logprobs, rng)
+    /// One multinomial draw over the candidates `sampling_probs` keeps (every other entry is zero): the same weights in
+    /// the same token order as a draw over the whole vocabulary, so the same rng draw picks the same token.
+    fn sample_candidates(
+        &self,
+        sampling_probs: &[f32],
+        candidates: &[(u32, f32)],
+        reporting_probs: &[f32],
+        return_logprobs: bool,
+        rng: Arc<Mutex<Isaac64Rng>>,
+    ) -> Result<Logprobs> {
+        let mut tokens: Vec<u32> = candidates
+            .iter()
+            .map(|(index, _)| *index)
+            .filter(|index| sampling_probs[*index as usize] > 0.0)
+            .collect();
+        tokens.sort_unstable();
+        let weights: Vec<f32> = tokens
+            .iter()
+            .map(|index| sampling_probs[*index as usize])
+            .collect();
+        let distr = WeightedIndex::new(&weights)
+            .map_err(|e| Error::Msg(format!("Failed to construct multinomial sampler: {e}")))?;
+        let next_token = {
+            let mut rng = rng.lock().expect("could not lock rng mutex");
+            tokens[distr.sample(&mut *rng)]
+        };
+        self.logprobs_from_probs(next_token, reporting_probs, return_logprobs)
     }
 
     fn apply_penalties(
@@ -2793,7 +2820,9 @@ mod tests {
         const VOCAB: usize = 131_072;
         const TOP_P: f32 = 0.95;
         const MASS_TOLERANCE: f32 = 1e-4;
-        let shapes: [(&str, bool, fn(usize) -> f32); 3] = [
+        // a name, whether the nucleus must match exactly, each token's weight
+        type Shape = (&'static str, bool, fn(usize) -> f32);
+        let shapes: [Shape; 3] = [
             ("peaked", true, |i| (-(i as f32) * 0.5).exp()),
             ("long tail", false, |i| {
                 1.0 / (1.0 + (i * 7 % VOCAB) as f32).powf(1.1)
@@ -2914,6 +2943,60 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    // A draw over the nucleus's tokens alone picks the token a draw over the whole vocabulary would, seed for seed
+    #[test]
+    fn a_draw_over_the_candidates_picks_the_full_vocabularys_token() {
+        use super::Sampler;
+        use rand::SeedableRng;
+        use rand_isaac::Isaac64Rng;
+        use std::sync::{Arc, Mutex};
+        const VOCAB: usize = 131_072;
+        const TOP_P: f32 = 0.95;
+        const DRAWS: u64 = 200;
+        let sampler = Sampler::new(
+            None,
+            10,
+            None,
+            None,
+            None,
+            None,
+            None,
+            32,
+            0.1,
+            0.05,
+            HashMap::new(),
+            vec![],
+        )
+        .unwrap();
+        // ranks scattered over the vocabulary, so most likely first is not token order
+        const SCATTER: usize = 7919;
+        let mut raw = vec![0.0f32; VOCAB];
+        for rank in 0..VOCAB {
+            raw[rank * SCATTER % VOCAB] = (-(rank as f32) * 0.05).exp();
+        }
+        let total: f32 = raw.iter().sum();
+        let probs: Vec<f32> = raw.iter().map(|p| p / total).collect();
+
+        let mut full = probs.clone();
+        let sorted = partial_sort_top_k(&mut full, VOCAB, true);
+        let nucleus_probs = nucleus(
+            full,
+            &sorted,
+            top_p_cutoff(TOP_P, sorted.iter().map(|(_, p)| *p)),
+        );
+        for seed in 0..DRAWS {
+            let rng = || Arc::new(Mutex::new(Isaac64Rng::seed_from_u64(seed)));
+            let candidates = sampler
+                .sample_top_kp_min_p(&probs, 0, TOP_P, 0.0, false, rng())
+                .unwrap();
+            let whole = sampler
+                .sample_multinomial(&nucleus_probs, &probs, false, rng())
+                .unwrap();
+            assert_eq!(candidates.token, whole.token, "seed {seed}");
+            assert_eq!(candidates.logprob, whole.logprob, "seed {seed}");
+        }
     }
 
     #[test]
