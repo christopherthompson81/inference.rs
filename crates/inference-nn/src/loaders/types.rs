@@ -235,7 +235,7 @@ macro_rules! multimodal_loader_table {
             NemotronTranscribe { cli: "nemotron_transcribe", hf: "Nemotron3_5TranscribeForConditionalGeneration", loader: NemotronTranscribeLoader, feature: "models-other" },
             NemotronOmni {
                 cli: "nemotron_omni",
-                hf: "NemotronH_Omni_Reasoning_V3" | "NemotronH_Nano_Omni_Reasoning_V3",
+                hf: "NemotronH_Omni_Reasoning_V3" | "NemotronH_Nano_Omni_Reasoning_V3" | "NemotronH_Nano_VL_V2",
                 loader: NemotronOmniLoader, feature: "models-other",
             },
             GraniteSpeech {

@@ -44,7 +44,7 @@ mod float_pair {
     use serde::{Deserialize, Serialize, de::Error};
     use serde_json::{Value, json};
 
-    const ENCODED: &str = "__float__";
+    const ENCODED: &str = inference_nn::loaders::NON_FINITE_FLOAT_KEY;
 
     pub fn serialize<S: serde::Serializer>(
         pair: &Option<[f64; 2]>,

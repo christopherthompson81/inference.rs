@@ -23,7 +23,9 @@ use crate::paged_attention::{
     block_hash::{MultimodalAttentionPolicy, MultimodalKind},
 };
 
-use super::{Config, ImagePatches, MODEL, NemotronOmniSpecificArgs, sound::SoundConfig};
+use super::{
+    Config, ImageLayout, ImagePatches, MODEL, NemotronOmniSpecificArgs, sound::SoundConfig,
+};
 
 pub const IMAGE_TOKEN: &str = "<image>";
 pub const IMAGE_START: &str = "<img>";
@@ -37,8 +39,7 @@ const PIXEL_SCALE: f32 = 255.0;
 pub struct NemotronOmniInputsProcessor {
     patch_size: usize,
     merge: usize,
-    min_patches: usize,
-    max_patches: usize,
+    layout: ImageLayout,
     mean: Vec<f32>,
     std: Vec<f32>,
     image_token: u32,
@@ -67,10 +68,35 @@ impl SoundInputs {
     }
 }
 
-// the sequence's images, patches concatenated in prompt order, and each one's patch grid
+// the sequence's images as tiles, patches concatenated in prompt order: each tile's grid and each image's tiles
 struct Preprocessed {
     patches: Tensor,
-    grids: Vec<(usize, usize)>,
+    tiles: Vec<(usize, usize)>,
+    images: Vec<std::ops::Range<usize>>,
+}
+
+/// InternVL's tiling of a `width x height` image: `(cols, rows)` of the closest aspect ratio among the grids of at
+/// most `max_tiles`, a tie going to the larger grid when the image covers more than half of it.
+pub fn tile_grid((width, height): (usize, usize), size: usize, max_tiles: usize) -> (usize, usize) {
+    let mut ratios = (1..=max_tiles)
+        .flat_map(|i| (1..=max_tiles).map(move |j| (i, j)))
+        .filter(|&(i, j)| i * j <= max_tiles)
+        .collect::<Vec<_>>();
+    ratios.sort_by_key(|&(i, j)| i * j);
+    let aspect = width as f64 / height as f64;
+    let area = (width * height) as f64;
+    let mut best = (1, 1);
+    let mut best_diff = f64::INFINITY;
+    for (i, j) in ratios {
+        let diff = (aspect - i as f64 / j as f64).abs();
+        if diff < best_diff {
+            best_diff = diff;
+            best = (i, j);
+        } else if diff == best_diff && area > 0.5 * (size * size * i * j) as f64 {
+            best = (i, j);
+        }
+    }
+    best
 }
 
 /// `(rows, cols)` of the tile an `width x height` image is resized to, as NVIDIA's processor picks it.
@@ -110,12 +136,12 @@ pub fn target_grid(
 }
 
 impl NemotronOmniInputsProcessor {
-    pub fn new(cfg: &Config) -> Self {
-        Self {
+    pub fn new(cfg: &Config, max_tiles: Option<usize>) -> Result<Self> {
+        let layout = cfg.image_layout(max_tiles)?;
+        Ok(Self {
             patch_size: cfg.patch_size,
             merge: cfg.merge(),
-            min_patches: cfg.vision_config.min_num_patches,
-            max_patches: cfg.vision_config.max_num_patches,
+            layout,
             mean: cfg.norm_mean.clone(),
             std: cfg.norm_std.clone(),
             image_token: cfg.img_context_token_id,
@@ -128,7 +154,7 @@ impl NemotronOmniInputsProcessor {
                     config: config.clone(),
                     token,
                 }),
-        }
+        })
     }
 
     fn clips(&self, seq: &dyn MediaSequence) -> anyhow::Result<Vec<Vec<f32>>> {
@@ -141,40 +167,23 @@ impl NemotronOmniInputsProcessor {
         mono_clips(seq, sound.config.sampling_rate)
     }
 
-    /// One image's normalized `(rows * cols, 3 * patch * patch)` patches and its grid.
-    pub fn patches(&self, image: &DynamicImage) -> (Vec<f32>, (usize, usize)) {
-        let rgb = image.to_rgb8();
-        let (width, height) = (rgb.width() as usize, rgb.height() as usize);
-        let (rows, cols) = target_grid(
-            (width, height),
-            self.patch_size,
-            self.merge,
-            (self.min_patches, self.max_patches),
-        );
+    // `rows x cols` patches from the window at (`y`, `x`) of `planes` (`CHANNELS` planes of `height x width`), normalized
+    fn window(
+        &self,
+        planes: &[f32],
+        (height, width): (usize, usize),
+        (y, x): (usize, usize),
+        (rows, cols): (usize, usize),
+        out: &mut Vec<f32>,
+    ) {
         let p = self.patch_size;
-        let (out_h, out_w) = (rows * p, cols * p);
-        let mut planes = vec![0f32; CHANNELS * height * width];
-        for (i, pixel) in rgb.pixels().enumerate() {
-            for c in 0..CHANNELS {
-                planes[c * height * width + i] = f32::from(pixel[c]);
-            }
-        }
-        if (out_h, out_w) != (height, width) {
-            planes = inference_vision::aa_bicubic_resize_planar(
-                &planes,
-                CHANNELS,
-                (height, width),
-                (out_h, out_w),
-            );
-        }
-        let mut patches = Vec::with_capacity(planes.len());
         for row in 0..rows {
             for col in 0..cols {
                 for c in 0..CHANNELS {
-                    let plane = &planes[c * out_h * out_w..][..out_h * out_w];
+                    let plane = &planes[c * height * width..][..height * width];
                     for py in 0..p {
-                        let line = &plane[(row * p + py) * out_w + col * p..][..p];
-                        patches.extend(
+                        let line = &plane[(y + row * p + py) * width + x + col * p..][..p];
+                        out.extend(
                             line.iter()
                                 .map(|&v| (v / PIXEL_SCALE - self.mean[c]) / self.std[c]),
                         );
@@ -182,44 +191,130 @@ impl NemotronOmniInputsProcessor {
                 }
             }
         }
-        (patches, (rows, cols))
+    }
+
+    /// One image's tiles, in order: each tile's normalized `(rows * cols, 3 * patch * patch)` patches and its grid.
+    pub fn patches(&self, image: &DynamicImage) -> Vec<(Vec<f32>, (usize, usize))> {
+        let rgb = image.to_rgb8();
+        let (width, height) = (rgb.width() as usize, rgb.height() as usize);
+        let mut planes = vec![0f32; CHANNELS * height * width];
+        for (i, pixel) in rgb.pixels().enumerate() {
+            for c in 0..CHANNELS {
+                planes[c * height * width + i] = f32::from(pixel[c]);
+            }
+        }
+        let resized = |(out_h, out_w): (usize, usize)| {
+            if (out_h, out_w) == (height, width) {
+                planes.clone()
+            } else {
+                inference_vision::aa_bicubic_resize_planar(
+                    &planes,
+                    CHANNELS,
+                    (height, width),
+                    (out_h, out_w),
+                )
+            }
+        };
+        let p = self.patch_size;
+        match self.layout {
+            ImageLayout::Budget { min, max } => {
+                let (rows, cols) = target_grid((width, height), p, self.merge, (min, max));
+                let out = (rows * p, cols * p);
+                let mut patches = Vec::new();
+                self.window(&resized(out), out, (0, 0), (rows, cols), &mut patches);
+                vec![(patches, (rows, cols))]
+            }
+            ImageLayout::Tiles {
+                size,
+                max_tiles,
+                thumbnail,
+            } => {
+                let (across, down) = tile_grid((width, height), size, max_tiles);
+                let out = (down * size, across * size);
+                let whole = resized(out);
+                let grid = (size / p, size / p);
+                let mut tiles = Vec::with_capacity(across * down + 1);
+                for ty in 0..down {
+                    for tx in 0..across {
+                        let mut patches = Vec::new();
+                        self.window(&whole, out, (ty * size, tx * size), grid, &mut patches);
+                        tiles.push((patches, grid));
+                    }
+                }
+                if thumbnail && tiles.len() > 1 {
+                    let mut patches = Vec::new();
+                    self.window(
+                        &resized((size, size)),
+                        (size, size),
+                        (0, 0),
+                        grid,
+                        &mut patches,
+                    );
+                    tiles.push((patches, grid));
+                }
+                tiles
+            }
+        }
     }
 
     fn tokens(&self, (rows, cols): (usize, usize)) -> usize {
         rows * cols / (self.merge * self.merge)
     }
 
+    // an image's tokens: every tile's, shuffled
+    fn image_tokens(&self, processed: &Preprocessed, image: usize) -> usize {
+        processed.tiles[processed.images[image].clone()]
+            .iter()
+            .map(|&grid| self.tokens(grid))
+            .sum()
+    }
+
     fn cached_or_preprocess(&self, seq: &mut dyn MediaSequence) -> Result<Preprocessed> {
         let mm = seq.multimodal();
-        if let (Some(patches), Some(grids)) = (&mm.cached_pixel_values, &mm.cached_img_thw) {
-            let grids = grids
-                .to_vec2::<u32>()?
-                .into_iter()
+        // one row per tile: the image it belongs to and its grid
+        if let (Some(patches), Some(rows)) = (&mm.cached_pixel_values, &mm.cached_img_thw) {
+            let rows = rows.to_vec2::<u32>()?;
+            let tiles = rows
+                .iter()
                 .map(|g| (g[1] as usize, g[2] as usize))
                 .collect();
+            let mut images: Vec<std::ops::Range<usize>> = Vec::new();
+            for (i, g) in rows.iter().enumerate() {
+                match images.get_mut(g[0] as usize) {
+                    Some(range) => range.end = i + 1,
+                    None => images.push(i..i + 1),
+                }
+            }
             return Ok(Preprocessed {
                 patches: patches.clone(),
-                grids,
+                tiles,
+                images,
             });
         }
         let images = seq.clone_images().expect("Need images by this point.");
         let mut all = Vec::new();
-        let mut grids = Vec::with_capacity(images.len());
-        for image in &images {
-            let (patches, grid) = self.patches(image);
-            all.extend(patches);
-            grids.push(grid);
+        let mut tiles = Vec::new();
+        let mut ranges = Vec::with_capacity(images.len());
+        let mut rows = Vec::new();
+        for (index, image) in images.iter().enumerate() {
+            let start = tiles.len();
+            for (patches, grid) in self.patches(image) {
+                all.extend(patches);
+                rows.extend([index as u32, grid.0 as u32, grid.1 as u32]);
+                tiles.push(grid);
+            }
+            ranges.push(start..tiles.len());
         }
         let width = CHANNELS * self.patch_size * self.patch_size;
         let patches = Tensor::from_vec(all, ((), width), &Device::Cpu)?;
-        let rows = grids
-            .iter()
-            .flat_map(|&(r, c)| [1, r as u32, c as u32])
-            .collect::<Vec<_>>();
         let mm = seq.multimodal_mut();
         mm.cached_pixel_values = Some(patches.clone());
-        mm.cached_img_thw = Some(Tensor::from_vec(rows, (grids.len(), 3), &Device::Cpu)?);
-        Ok(Preprocessed { patches, grids })
+        mm.cached_img_thw = Some(Tensor::from_vec(rows, (tiles.len(), 3), &Device::Cpu)?);
+        Ok(Preprocessed {
+            patches,
+            tiles,
+            images: ranges,
+        })
     }
 
     fn maybe_expand_prompt(
@@ -233,12 +328,12 @@ impl NemotronOmniInputsProcessor {
         if seq.multimodal().has_changed_prompt {
             return Ok(());
         }
-        let grids = images.map_or(&[][..], |images| &images.grids);
         let mut expanded = seq.get_initial_prompt().to_string();
-        let image_counts = grids
-            .iter()
-            .map(|&grid| self.tokens(grid))
-            .collect::<Vec<_>>();
+        let image_counts = images.map_or_else(Vec::new, |images| {
+            (0..images.images.len())
+                .map(|image| self.image_tokens(images, image))
+                .collect::<Vec<_>>()
+        });
         expanded = expand(
             &expanded,
             (IMAGE_TOKEN, IMAGE_START, IMAGE_END),
@@ -276,7 +371,7 @@ impl NemotronOmniInputsProcessor {
                         &ids, token, start_id, end_id,
                     ))
                 };
-            if !grids.is_empty() {
+            if images.is_some_and(|images| !images.images.is_empty()) {
                 let hashes = seq
                     .image_hashes()
                     .ok_or_else(|| anyhow::anyhow!("{MODEL} images are missing content hashes"))?;
@@ -307,16 +402,26 @@ impl NemotronOmniInputsProcessor {
         Ok(())
     }
 
-    // the images in `range`, each its own patches
+    // the tiles of the images in `range`, each its own patches
     fn select(
         processed: &Preprocessed,
         range: std::ops::Range<usize>,
     ) -> Result<Vec<ImagePatches>> {
-        let mut offset = processed.grids[..range.start]
+        let (Some(first), Some(last)) = (
+            processed.images.get(range.start),
+            range
+                .end
+                .checked_sub(1)
+                .and_then(|i| processed.images.get(i)),
+        ) else {
+            return Ok(Vec::new());
+        };
+        let tiles = first.start..last.end;
+        let mut offset = processed.tiles[..tiles.start]
             .iter()
             .map(|(r, c)| r * c)
             .sum::<usize>();
-        processed.grids[range]
+        processed.tiles[tiles]
             .iter()
             .map(|&(rows, cols)| {
                 let patches = processed.patches.narrow(0, offset, rows * cols)?;
@@ -440,7 +545,7 @@ impl MultimodalInputsProcessor for NemotronOmniInputsProcessor {
                 let Some(processed) = processed else {
                     continue;
                 };
-                let count = processed.grids.len();
+                let count = processed.images.len();
                 let range = if seq.is_chunked_prefill_view() {
                     seq.active_local_multimodal_item_range(MultimodalKind::Image, count)
                         .ok_or_else(|| {
@@ -502,7 +607,26 @@ impl MultimodalInputsProcessor for NemotronOmniInputsProcessor {
 
 #[cfg(test)]
 mod tests {
-    use super::target_grid;
+    use super::{target_grid, tile_grid};
+
+    // `(cols, rows)` NVIDIA's `calculate_targets` gives for the same sizes at 512 with 12 tiles
+    #[test]
+    fn tiles_follow_internvls_closest_aspect_ratio() {
+        for (size, want) in [
+            ((470, 152), (3, 1)),
+            ((640, 480), (4, 3)),
+            ((512, 512), (1, 1)),
+            ((1920, 1080), (4, 2)),
+            ((100, 5000), (1, 12)),
+            // a tie with 1 x 1, taken by the larger grid as the image covers more than half of it
+            ((1000, 1000), (2, 2)),
+            ((300, 200), (3, 2)),
+            ((1024, 768), (4, 3)),
+            ((2000, 500), (4, 1)),
+        ] {
+            assert_eq!(tile_grid(size, 512, 12), want, "{size:?}");
+        }
+    }
 
     const BUDGET: (usize, usize) = (1024, 13312);
 

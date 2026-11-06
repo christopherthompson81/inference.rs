@@ -21,6 +21,8 @@ use super::whisper_audio_bindings::token_id;
 
 pub const PROJECTOR: &str = "nemotron_omni";
 pub const TEXT_ARCHITECTURE: &str = "nemotron_h_moe";
+/// The dense decoder a checkpoint projector also pairs with (Nano VL 12B's Nemotron Nano 2).
+pub const DENSE_TEXT_ARCHITECTURE: &str = "nemotron_h";
 const FAMILY: &str = "Nemotron-H Omni";
 const IMAGE_TOKEN: &str = "<image>";
 const LANGUAGE_MODEL: &str = "language_model";
@@ -82,14 +84,18 @@ pub fn build_nemotron_omni_tower_bindings(archive: &GgufArchive) -> Result<GgufB
     Ok(bindings)
 }
 
-/// A `nemotron_h_moe` text GGUF beside the checkpoint's own shard of towers (Nano Omni's vision and sound): the decoder
-/// as `build_nemotron_omni_bindings` binds it, every tower tensor under its own name.
+/// A `nemotron_h_moe` or `nemotron_h` text GGUF beside the checkpoint's own shard of towers (Nano Omni's vision and
+/// sound, Nano VL's vision): the decoder as `build_nemotron_omni_bindings` binds it, every tower tensor under its own
+/// name.
 pub fn build_nemotron_omni_checkpoint_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
     validate_projector(archive, inference_quant::CHECKPOINT_PROJECTOR)?;
-    let text = super::nemotron_h_bindings::build_nemotron_h_bindings(
-        archive,
-        CanonicalGgufArchitecture::NemotronHMoe,
-    )?;
+    let architecture = match archive.metadata_value("general.architecture") {
+        Some(Value::String(name)) if name == DENSE_TEXT_ARCHITECTURE => {
+            CanonicalGgufArchitecture::NemotronH
+        }
+        _ => CanonicalGgufArchitecture::NemotronHMoe,
+    };
+    let text = super::nemotron_h_bindings::build_nemotron_h_bindings(archive, architecture)?;
     let mut bindings = GgufBindingMap::new();
     for (native, binding) in text.iter() {
         bindings.insert(format!("{LANGUAGE_MODEL}.{native}"), binding.clone());

@@ -2,7 +2,8 @@
 //! `<img>`, one `<image>` per token of its patch grid, `</img>`; images of two sizes in one request take their own
 //! counts; and a repeat served from the prefix cache decodes the same tokens. A clip beside them goes through a
 //! Parakeet encoder and expands to `<so_start>`, one `<so_embedding>` per encoder frame, `<so_end>`. The towers written
-//! as an mmproj bind back to the checkpoint's tensors unchanged.
+//! as an mmproj bind back to the checkpoint's tensors unchanged. A tiled checkpoint (Nano VL's InternVL tiles) cuts each
+//! image to its closest aspect ratio's tiles and a thumbnail.
 
 use std::collections::HashMap;
 
@@ -568,5 +569,55 @@ fn the_towers_written_as_an_mmproj_bind_back_unchanged() -> anyhow::Result<()> {
         archive.metadata_value(inference_gguf::mmproj_writer::CHAT_TEMPLATE_KEY),
         Some(inference_tensor::quantized::gguf_file::Value::String(template)) if template == TEMPLATE
     ));
+    Ok(())
+}
+
+// Nano VL's layout on the tiny tower: 32-pixel tiles (2 x 2 patches, one token each), at most 4
+const TILE: usize = 32;
+const MAX_TILES: usize = 4;
+// 100 x 70 is closest to 1 x 1 and 2 x 2 alike, and covers more than half of 2 x 2: 4 tiles and the thumbnail
+const WIDE_TILES: usize = 5;
+// 40 x 40 is 1 x 1, and a single tile has no thumbnail
+const SQUARE_TILES: usize = 1;
+
+#[tokio::test]
+async fn a_tiled_checkpoint_takes_a_token_per_tile_and_the_thumbnail() -> anyhow::Result<()> {
+    let checkpoint = checkpoint()?;
+    let dir = checkpoint.path();
+    let mut config = config();
+    let vision = config["vision_config"].as_object_mut().expect("an object");
+    vision.remove("min_num_patches");
+    vision.remove("max_num_patches");
+    config["force_image_size"] = serde_json::json!(TILE);
+    config["use_thumbnail"] = serde_json::json!(true);
+    std::fs::write(dir.join("config.json"), config.to_string())?;
+    std::fs::write(
+        dir.join("preprocessor_config.json"),
+        serde_json::json!({ "max_num_tiles": MAX_TILES }).to_string(),
+    )?;
+    let model = build(dir).await?;
+    let text_only = model
+        .send_chat_request(
+            RequestBuilder::new()
+                .add_message(TextMessageRole::User, PROMPT)
+                .set_sampler_max_len(MAX_LEN),
+        )
+        .await?
+        .usage
+        .prompt_tokens;
+    for (image, tiles) in [(WIDE, WIDE_TILES), (SQUARE, SQUARE_TILES)] {
+        let response = model.send_chat_request(request(&[image])).await?;
+        // the tiles' tokens, `<img>` and `</img>`, and the template's newline
+        let added = response.usage.prompt_tokens - text_only;
+        assert_eq!(
+            added,
+            tiles + DELIMITERS + 1,
+            "{image:?} added {added} tokens"
+        );
+        assert!(
+            !trace(&response).is_empty(),
+            "the tiled request generated nothing"
+        );
+    }
     Ok(())
 }

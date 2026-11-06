@@ -202,7 +202,7 @@ impl NativeMultimodalGgufFamily {
 }
 
 // (vision projector type, the text architecture it pairs with, family)
-const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 19] = [
+const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 20] = [
     ("gemma3", "gemma3", NativeMultimodalGgufFamily::Gemma3),
     ("gemma3nv", "gemma3n", NativeMultimodalGgufFamily::Gemma3n),
     (
@@ -248,6 +248,11 @@ const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 19] = [
     (
         inference_quant::CHECKPOINT_PROJECTOR,
         nemotron_omni_bindings::TEXT_ARCHITECTURE,
+        NativeMultimodalGgufFamily::NemotronOmniCheckpoint,
+    ),
+    (
+        inference_quant::CHECKPOINT_PROJECTOR,
+        nemotron_omni_bindings::DENSE_TEXT_ARCHITECTURE,
         NativeMultimodalGgufFamily::NemotronOmniCheckpoint,
     ),
     (
@@ -409,6 +414,12 @@ mod tests {
             ),
             (
                 "nemotron_h_moe",
+                inference_quant::CHECKPOINT_PROJECTOR,
+                NativeMultimodalGgufFamily::NemotronOmniCheckpoint,
+                RopePairing::Adjacent,
+            ),
+            (
+                "nemotron_h",
                 inference_quant::CHECKPOINT_PROJECTOR,
                 NativeMultimodalGgufFamily::NemotronOmniCheckpoint,
                 RopePairing::Adjacent,

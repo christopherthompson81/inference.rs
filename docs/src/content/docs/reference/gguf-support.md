@@ -140,6 +140,11 @@ inference serve --format gguf -m lmstudio-community/Nemotron-3-Nano-Omni-30B-A3B
   -f Nemotron-3-Nano-Omni-30B-A3B-Reasoning-Q4_K_M.gguf --mmproj mmproj-nano-omni.gguf
 ```
 
+Nemotron Nano 12B v2 VL loads the same way from a dense `nemotron_h` text GGUF: its first safetensors shard
+(`nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16`, 3.8 GB) holds the C-RADIO tower and `mlp1`. Images are cut into InternVL's
+tiles (up to 12 of 512 pixels on the closest aspect ratio, and a thumbnail), as the checkpoint's processor does; the
+published `nemotron_v2_vl` projectors run them as one fixed 512-pixel image.
+
 Matrices keep the checkpoint's float type unless `--matrix-type` names another (`f16`, `q8_0`, ...); norms, biases,
 convolutions and embeddings stay f32, as llama.cpp's converter keeps them.
 
