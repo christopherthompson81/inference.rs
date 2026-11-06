@@ -1691,8 +1691,8 @@ mod tests {
     // attention with f16 queries, keys, values and probabilities (f32 sums): unit-variance inputs land within ~1.5e-3
     const F16_ATTENTION_TOLERANCE: f32 = 4e-3;
     // a 2688-term dot product over activations rounded to int8 blocks, against the outputs' RMS: unit-normal weights
-    // and activations leave ~0.6 % (one deviation), and the worst of a few hundred outputs lands near three
-    const INT8_DOT_TOLERANCE: f32 = 3e-2;
+    // and activations leave ~0.6 % (one deviation), and the worst of the expert test's ~28k outputs reaches ~3.1 %
+    const INT8_DOT_TOLERANCE: f32 = 5e-2;
 
     fn assert_same(got: &Tensor, want: &Tensor) -> Result<()> {
         assert_close(got, want, TOLERANCE)
