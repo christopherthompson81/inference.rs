@@ -20,7 +20,10 @@ use super::{
     mistral3_bindings::build_mistral3_bindings,
     multimodal_binding_utils::{metadata_string, projector_type},
     muse_glimmer_bindings::build_muse_glimmer_bindings,
-    nemotron_omni_bindings::{self, build_nemotron_omni_bindings, synthesize_nemotron_omni_config},
+    nemotron_omni_bindings::{
+        self, build_nemotron_omni_bindings, build_nemotron_omni_checkpoint_bindings,
+        synthesize_nemotron_omni_config,
+    },
     nemotron_transcribe_bindings::{
         self, build_nemotron_transcribe_bindings, nemotron_transcribe_config,
     },
@@ -49,6 +52,8 @@ pub enum NativeMultimodalGgufFamily {
     MERaLiON2,
     MuseGlimmer,
     NemotronOmni,
+    /// Nemotron-H Omni's towers from the checkpoint's own safetensors shard (no published projector has Nano Omni's).
+    NemotronOmniCheckpoint,
     NemotronTranscribe,
     PaddleOcrVl,
     Qwen2Audio,
@@ -113,7 +118,7 @@ impl NativeMultimodalGgufFamily {
             Self::Lfm2Vl => MultimodalLoaderType::Lfm2Vl,
             Self::MERaLiON2 => MultimodalLoaderType::MERaLiON2,
             Self::MuseGlimmer => MultimodalLoaderType::MuseGlimmer,
-            Self::NemotronOmni => MultimodalLoaderType::NemotronOmni,
+            Self::NemotronOmni | Self::NemotronOmniCheckpoint => MultimodalLoaderType::NemotronOmni,
             Self::NemotronTranscribe => MultimodalLoaderType::NemotronTranscribe,
             Self::PaddleOcrVl => MultimodalLoaderType::PaddleOcrVl,
             Self::Qwen2Audio => MultimodalLoaderType::Qwen2Audio,
@@ -157,6 +162,7 @@ impl NativeMultimodalGgufFamily {
             | Self::MuseGlimmer
             // NoPE attention: no rotary pairing applies
             | Self::NemotronOmni
+            | Self::NemotronOmniCheckpoint
             | Self::NemotronTranscribe
             | Self::Ultravox
             | Self::VoxtralChat => RopePairing::Adjacent,
@@ -185,6 +191,7 @@ impl NativeMultimodalGgufFamily {
             Self::Lfm2Vl => build_lfm2_vl_bindings(archive),
             Self::MuseGlimmer => build_muse_glimmer_bindings(archive),
             Self::NemotronOmni => build_nemotron_omni_bindings(archive),
+            Self::NemotronOmniCheckpoint => build_nemotron_omni_checkpoint_bindings(archive),
             Self::NemotronTranscribe => build_nemotron_transcribe_bindings(archive),
             Self::PaddleOcrVl => build_paddleocr_vl_bindings(archive),
             Self::Qwen2Audio => build_qwen2_audio_bindings(archive),
@@ -195,7 +202,7 @@ impl NativeMultimodalGgufFamily {
 }
 
 // (vision projector type, the text architecture it pairs with, family)
-const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 18] = [
+const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 19] = [
     ("gemma3", "gemma3", NativeMultimodalGgufFamily::Gemma3),
     ("gemma3nv", "gemma3n", NativeMultimodalGgufFamily::Gemma3n),
     (
@@ -239,6 +246,11 @@ const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 18] = [
         NativeMultimodalGgufFamily::NemotronTranscribe,
     ),
     (
+        inference_quant::CHECKPOINT_PROJECTOR,
+        nemotron_omni_bindings::TEXT_ARCHITECTURE,
+        NativeMultimodalGgufFamily::NemotronOmniCheckpoint,
+    ),
+    (
         paddleocr_vl_bindings::PROJECTOR,
         paddleocr_vl_bindings::ARCHITECTURE,
         NativeMultimodalGgufFamily::PaddleOcrVl,
@@ -264,9 +276,17 @@ fn family_from_names(
     architecture: &str,
     projector: Option<&str>,
 ) -> Result<Option<NativeMultimodalGgufFamily>> {
-    let Some((projector, expected, family)) =
-        projector.and_then(|projector| FAMILY_NAMES.iter().find(|(name, ..)| *name == projector))
-    else {
+    // a checkpoint projector pairs with several text architectures, so the pair picks the family
+    let Some((projector, expected, family)) = projector.and_then(|projector| {
+        let named = || {
+            FAMILY_NAMES
+                .iter()
+                .filter(move |(name, ..)| *name == projector)
+        };
+        named()
+            .find(|(_, text, _)| *text == architecture)
+            .or_else(|| named().next())
+    }) else {
         return Ok(None);
     };
     require_architecture(architecture, expected, projector)?;
@@ -385,6 +405,12 @@ mod tests {
                 "nemotron_h_moe",
                 "nemotron_transcribe",
                 NativeMultimodalGgufFamily::NemotronTranscribe,
+                RopePairing::Adjacent,
+            ),
+            (
+                "nemotron_h_moe",
+                inference_quant::CHECKPOINT_PROJECTOR,
+                NativeMultimodalGgufFamily::NemotronOmniCheckpoint,
                 RopePairing::Adjacent,
             ),
         ] {

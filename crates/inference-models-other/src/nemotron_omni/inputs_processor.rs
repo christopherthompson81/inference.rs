@@ -1,27 +1,36 @@
-//! Nemotron-H Omni's image processor: one tile per image on a patch grid sized to a patch budget (aspect kept, sides
-//! even), antialiased bicubic in float, then `<image>` expanded to `<img>`, one `<image>` per token, `</img>`.
+//! Nemotron-H Omni's inputs: one tile per image on a patch grid sized to a patch budget (aspect kept, sides even),
+//! antialiased bicubic in float, `<image>` expanded to `<img>`, one `<image>` per token, `</img>`; each clip's
+//! normalized log-mel, `<so_embedding>` expanded to `<so_start>`, one `<so_embedding>` per encoder frame, `<so_end>`.
 
 use std::{any::Any, sync::Arc};
 
 use image::DynamicImage;
+use inference_audio::nemo::NemoMel;
 use inference_tensor::{Device, Result, Tensor};
 use tokenizers::Tokenizer;
 
 use crate::device_map::DeviceMapper;
 use crate::media_inputs::{
-    media::{build_mm_features_from_ranges, find_placeholder_delimited_ranges},
+    audio_prompt::{active_clip_range, mono_clips},
+    media::{MultimodalPromptLayout, find_placeholder_delimited_ranges},
     processor::{
         InputProcessorOutput, InputsHost, InputsProcessorValidationError, MediaSequence,
         ModelInputs, MultimodalInputsProcessor, TextInputs,
     },
 };
-use crate::paged_attention::{PagedAttentionMeta, block_hash::MultimodalKind};
+use crate::paged_attention::{
+    PagedAttentionMeta,
+    block_hash::{MultimodalAttentionPolicy, MultimodalKind},
+};
 
-use super::{Config, ImagePatches, MODEL, NemotronOmniSpecificArgs};
+use super::{Config, ImagePatches, MODEL, NemotronOmniSpecificArgs, sound::SoundConfig};
 
 pub const IMAGE_TOKEN: &str = "<image>";
 pub const IMAGE_START: &str = "<img>";
 pub const IMAGE_END: &str = "</img>";
+pub const SOUND_TOKEN: &str = "<so_embedding>";
+pub const SOUND_START: &str = "<so_start>";
+pub const SOUND_END: &str = "<so_end>";
 const CHANNELS: usize = 3;
 const PIXEL_SCALE: f32 = 255.0;
 
@@ -33,6 +42,29 @@ pub struct NemotronOmniInputsProcessor {
     mean: Vec<f32>,
     std: Vec<f32>,
     image_token: u32,
+    sound: Option<SoundInputs>,
+}
+
+struct SoundInputs {
+    config: SoundConfig,
+    mel: NemoMel,
+    token: u32,
+}
+
+impl SoundInputs {
+    // the clip's `floor(samples / hop)` log-mel frames through the encoder's subsampling
+    fn tokens(&self, samples: usize) -> usize {
+        self.config.frames(samples / super::sound::HOP_LENGTH)
+    }
+
+    fn features(&self, pcm: &[f32]) -> anyhow::Result<Tensor> {
+        let (features, frames) = self.mel.features(pcm)?;
+        Ok(Tensor::from_vec(
+            features,
+            (frames, self.config.num_mel_bins),
+            &Device::Cpu,
+        )?)
+    }
 }
 
 // the sequence's images, patches concatenated in prompt order, and each one's patch grid
@@ -87,7 +119,26 @@ impl NemotronOmniInputsProcessor {
             mean: cfg.norm_mean.clone(),
             std: cfg.norm_std.clone(),
             image_token: cfg.img_context_token_id,
+            sound: cfg
+                .sound_config
+                .as_ref()
+                .zip(cfg.sound_context_token_id)
+                .map(|(config, token)| SoundInputs {
+                    mel: NemoMel::new(config.mel()),
+                    config: config.clone(),
+                    token,
+                }),
         }
+    }
+
+    fn clips(&self, seq: &dyn MediaSequence) -> anyhow::Result<Vec<Vec<f32>>> {
+        if !seq.has_audios() {
+            return Ok(Vec::new());
+        }
+        let Some(sound) = &self.sound else {
+            anyhow::bail!("{MODEL}: this checkpoint has no sound encoder");
+        };
+        mono_clips(seq, sound.config.sampling_rate)
     }
 
     /// One image's normalized `(rows * cols, 3 * patch * patch)` patches and its grid.
@@ -175,28 +226,36 @@ impl NemotronOmniInputsProcessor {
         &self,
         tokenizer: &Tokenizer,
         seq: &mut dyn MediaSequence,
-        processed: &Preprocessed,
+        images: Option<&Preprocessed>,
+        clips: &[Vec<f32>],
         paged_attn_metadata: Option<&mut PagedAttentionMeta>,
     ) -> anyhow::Result<()> {
         if seq.multimodal().has_changed_prompt {
             return Ok(());
         }
-        let prompt = seq.get_initial_prompt();
-        let placeholders = prompt.matches(IMAGE_TOKEN).count();
-        if placeholders != processed.grids.len() {
-            return Err(InputsProcessorValidationError(format!(
-                "The number of `{IMAGE_TOKEN}` tokens ({placeholders}) must match the number of images ({})",
-                processed.grids.len()
-            ))
-            .into());
-        }
-        let mut parts = prompt.split(IMAGE_TOKEN);
-        let mut expanded = parts.next().unwrap_or_default().to_string();
-        for (&grid, part) in processed.grids.iter().zip(parts) {
-            expanded.push_str(IMAGE_START);
-            expanded.push_str(&IMAGE_TOKEN.repeat(self.tokens(grid)));
-            expanded.push_str(IMAGE_END);
-            expanded.push_str(part);
+        let grids = images.map_or(&[][..], |images| &images.grids);
+        let mut expanded = seq.get_initial_prompt().to_string();
+        let image_counts = grids
+            .iter()
+            .map(|&grid| self.tokens(grid))
+            .collect::<Vec<_>>();
+        expanded = expand(
+            &expanded,
+            (IMAGE_TOKEN, IMAGE_START, IMAGE_END),
+            &image_counts,
+            "images",
+        )?;
+        if let Some(sound) = &self.sound {
+            let counts = clips
+                .iter()
+                .map(|clip| sound.tokens(clip.len()))
+                .collect::<Vec<_>>();
+            expanded = expand(
+                &expanded,
+                (SOUND_TOKEN, SOUND_START, SOUND_END),
+                &counts,
+                "audio clips",
+            )?;
         }
         seq.set_initial_prompt(expanded.clone());
         let ids = tokenizer
@@ -205,22 +264,43 @@ impl NemotronOmniInputsProcessor {
             .get_ids()
             .to_vec();
         if seq.mm_features().is_empty() {
-            let hashes = seq
-                .image_hashes()
-                .ok_or_else(|| anyhow::anyhow!("{MODEL} images are missing content hashes"))?
-                .to_vec();
-            let (Some(start), Some(end)) = (
-                tokenizer.token_to_id(IMAGE_START),
-                tokenizer.token_to_id(IMAGE_END),
-            ) else {
-                anyhow::bail!("{MODEL} tokenizer has no `{IMAGE_START}` / `{IMAGE_END}`");
-            };
-            let ranges = find_placeholder_delimited_ranges(&ids, self.image_token, start, end);
-            seq.set_mm_features(build_mm_features_from_ranges(
-                &ranges,
-                &hashes,
-                MultimodalKind::Image,
-            ));
+            let mut layout = MultimodalPromptLayout::default();
+            let delimited =
+                |token: u32, start: &str, end: &str| -> anyhow::Result<Vec<(usize, usize)>> {
+                    let (Some(start_id), Some(end_id)) =
+                        (tokenizer.token_to_id(start), tokenizer.token_to_id(end))
+                    else {
+                        anyhow::bail!("{MODEL} tokenizer has no `{start}` / `{end}`");
+                    };
+                    Ok(find_placeholder_delimited_ranges(
+                        &ids, token, start_id, end_id,
+                    ))
+                };
+            if !grids.is_empty() {
+                let hashes = seq
+                    .image_hashes()
+                    .ok_or_else(|| anyhow::anyhow!("{MODEL} images are missing content hashes"))?;
+                let ranges = delimited(self.image_token, IMAGE_START, IMAGE_END)?;
+                layout.extend_ranges(
+                    &ranges,
+                    hashes,
+                    MultimodalKind::Image,
+                    MultimodalAttentionPolicy::Causal,
+                );
+            }
+            if let Some(sound) = self.sound.as_ref().filter(|_| !clips.is_empty()) {
+                let hashes = seq
+                    .audio_hashes()
+                    .ok_or_else(|| anyhow::anyhow!("{MODEL} clips are missing content hashes"))?;
+                let ranges = delimited(sound.token, SOUND_START, SOUND_END)?;
+                layout.extend_ranges(
+                    &ranges,
+                    hashes,
+                    MultimodalKind::Audio,
+                    MultimodalAttentionPolicy::Causal,
+                );
+            }
+            seq.set_mm_features(layout.into_features());
         }
         seq.set_toks_and_reallocate(ids, paged_attn_metadata);
         seq.multimodal_mut().has_changed_prompt = true;
@@ -251,6 +331,33 @@ impl NemotronOmniInputsProcessor {
     }
 }
 
+/// `prompt` with its `i`th `token` (of `tags`, the token and its opening and closing tags) as `counts[i]` tokens between
+/// the tags.
+fn expand(
+    prompt: &str,
+    (token, start, end): (&str, &str, &str),
+    counts: &[usize],
+    items: &str,
+) -> anyhow::Result<String> {
+    let placeholders = prompt.matches(token).count();
+    if placeholders != counts.len() {
+        return Err(InputsProcessorValidationError(format!(
+            "The number of `{token}` tokens ({placeholders}) must match the number of {items} ({})",
+            counts.len()
+        ))
+        .into());
+    }
+    let mut parts = prompt.split(token);
+    let mut expanded = parts.next().unwrap_or_default().to_string();
+    for (&count, part) in counts.iter().zip(parts) {
+        expanded.push_str(start);
+        expanded.push_str(&token.repeat(count));
+        expanded.push_str(end);
+        expanded.push_str(part);
+    }
+    Ok(expanded)
+}
+
 impl MultimodalInputsProcessor for NemotronOmniInputsProcessor {
     fn prepare_for_paged_prompt_planning(
         &self,
@@ -261,17 +368,23 @@ impl MultimodalInputsProcessor for NemotronOmniInputsProcessor {
         mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
     ) -> anyhow::Result<()> {
         let Some(tokenizer) = tokenizer else {
-            anyhow::bail!("{MODEL} image processor requires a tokenizer");
+            anyhow::bail!("{MODEL} inputs processor requires a tokenizer");
         };
         for seq in input_seqs {
-            if !seq.has_images() || seq.multimodal().has_changed_prompt {
+            if !(seq.has_images() || seq.has_audios()) || seq.multimodal().has_changed_prompt {
                 continue;
             }
-            let processed = self.cached_or_preprocess(&mut **seq)?;
+            let processed = if seq.has_images() {
+                Some(self.cached_or_preprocess(&mut **seq)?)
+            } else {
+                None
+            };
+            let clips = self.clips(&**seq)?;
             self.maybe_expand_prompt(
                 &tokenizer,
                 &mut **seq,
-                &processed,
+                processed.as_ref(),
+                &clips,
                 paged_attn_metadata.as_deref_mut(),
             )?;
         }
@@ -297,18 +410,36 @@ impl MultimodalInputsProcessor for NemotronOmniInputsProcessor {
             anyhow::bail!("Vision model must have kv cache.");
         }
         let Some(tokenizer) = tokenizer else {
-            anyhow::bail!("{MODEL} image processor requires a tokenizer");
+            anyhow::bail!("{MODEL} inputs processor requires a tokenizer");
         };
         let mut images = Vec::new();
+        let mut sounds = Vec::new();
         if is_prompt {
-            for seq in input_seqs.iter_mut().filter(|seq| seq.has_images()) {
-                let processed = self.cached_or_preprocess(&mut **seq)?;
+            for seq in input_seqs
+                .iter_mut()
+                .filter(|seq| seq.has_images() || seq.has_audios())
+            {
+                let processed = if seq.has_images() {
+                    Some(self.cached_or_preprocess(&mut **seq)?)
+                } else {
+                    None
+                };
+                let clips = self.clips(&**seq)?;
                 self.maybe_expand_prompt(
                     &tokenizer,
                     &mut **seq,
-                    &processed,
+                    processed.as_ref(),
+                    &clips,
                     paged_attn_metadata.as_mut(),
                 )?;
+                if let Some(sound) = self.sound.as_ref().filter(|_| !clips.is_empty()) {
+                    for clip in &clips[active_clip_range(&**seq, clips.len(), MODEL)?] {
+                        sounds.push(sound.features(clip)?);
+                    }
+                }
+                let Some(processed) = processed else {
+                    continue;
+                };
                 let count = processed.grids.len();
                 let range = if seq.is_chunked_prefill_view() {
                     seq.active_local_multimodal_item_range(MultimodalKind::Image, count)
@@ -355,7 +486,7 @@ impl MultimodalInputsProcessor for NemotronOmniInputsProcessor {
                 context_lens,
                 position_ids,
                 pixel_values: None,
-                model_specific_args: Box::new(NemotronOmniSpecificArgs { images }),
+                model_specific_args: Box::new(NemotronOmniSpecificArgs { images, sounds }),
                 paged_attn_meta,
                 flash_meta,
                 recurrent_batch_kind: if is_prompt {

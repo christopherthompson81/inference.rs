@@ -77,6 +77,7 @@ files when the repository and GGUF metadata identify them unambiguously. The dir
 | LFM2-VL and LFM2.5-VL | `lfm2` |
 | Muse Glimmer | `muse-glimmer` |
 | Nemotron 3.5 Bolt (Nemotron-H Omni) | `nemotron_h_moe` (projector `nemotron_omni`) |
+| Nemotron 3 Nano Omni (Nemotron-H Omni) | `nemotron_h_moe` (the checkpoint's safetensors shard as projector) |
 | PaddleOCR-VL (1.5, 1.6) | `paddleocr` |
 | Qwen2-VL and Qwen2.5-VL | `qwen2vl` |
 | Qwen3-VL | `qwen3vl` |
@@ -111,6 +112,22 @@ metadata, and the projector holds the checkpoint's C-RADIO tower and projector u
 video, which the projector's video patch embedder serves, is not yet. On a 24 GB GPU the text GGUF and the tower
 together do not fit: map a few blocks to the CPU (`-n "0:43"`), as Bolt's IQ2_XXS experts cannot stay in host memory
 on their own.
+
+Nemotron 3 Nano Omni takes images and audio, but no published projector carries its sound encoder, and the published
+`nemotron_v2_vl` projectors keep its position table cut to one 512-pixel image. Its towers load from NVIDIA's own
+checkpoint instead: the first safetensors shard of `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16` (4 GB) holds
+the whole C-RADIO tower, the Parakeet sound encoder and both projectors. Pass it as the projector beside a text GGUF,
+with that repository (or a directory with its `config.json`, tokenizer and processor files) as `--tok-model-id`:
+
+```bash
+inference serve --format gguf -m lmstudio-community/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF \
+  -f Nemotron-3-Nano-Omni-30B-A3B-Reasoning-Q4_K_M.gguf \
+  --mmproj /path/to/model-00001-of-00017.safetensors \
+  --tok-model-id nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16
+```
+
+Images run at the checkpoint's dynamic resolution, as with Bolt; each clip takes one token per encoder frame (one per
+80 ms). Video is not yet supported.
 
 Muse Glimmer GGUFs require a companion `muse-glimmer` projector. Current published GGUF
 repositories also require `--tok-model-id meta-models/Muse-Glimmer-30B` because they do not carry

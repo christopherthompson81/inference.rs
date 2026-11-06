@@ -49,6 +49,13 @@ const ADAPTER_TYPE: &str = "adapter";
 const CLIP_ARCHITECTURE: &str = "clip";
 // an untyped clip archive is a projector only if it names one; a bare text CLIP is not
 const CLIP_PROJECTOR_TYPE: &str = "clip.projector_type";
+/// The projector type a safetensors component reports: towers under the checkpoint's own tensor names.
+pub const CHECKPOINT_PROJECTOR: &str = "checkpoint";
+const SAFETENSORS_EXTENSION: &str = "safetensors";
+// ggml's type ids of the float dtypes a checkpoint stores
+const GGML_F32: u32 = 0;
+const GGML_F16: u32 = 1;
+const GGML_BF16: u32 = 30;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GgufEndian {
@@ -591,12 +598,98 @@ impl GgufArchive {
         Ok(())
     }
 
-    /// Opens independent GGUF components while keeping adjacent split shards in one archive.
+    /// A checkpoint's safetensors file as a projector component: its float tensors under their own names, reporting
+    /// `CHECKPOINT_PROJECTOR`.
+    pub fn open_safetensors(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let file = File::open(&path)
+            .map_err(Error::wrap)
+            .map_err(|err| err.with_path(&path))?;
+        // The mapping is read-only and remains owned by the archive.
+        let mmap = unsafe { MmapOptions::new().map(&file) }
+            .map_err(Error::wrap)
+            .map_err(|err| err.with_path(&path))?;
+        let (header_len, header) = safetensors::SafeTensors::read_metadata(&mmap)
+            .map_err(Error::wrap)
+            .map_err(|err| err.with_path(&path))?;
+        let data_start = header_len + size_of::<u64>();
+        let mut tensors = HashMap::new();
+        for (name, info) in header.tensors() {
+            let raw = match info.dtype {
+                safetensors::Dtype::F32 => GGML_F32,
+                safetensors::Dtype::F16 => GGML_F16,
+                safetensors::Dtype::BF16 => GGML_BF16,
+                // integer buffers (a batch norm's sample count) are training state
+                _ => continue,
+            };
+            let dtype = GgufDType::new(raw);
+            let (start, end) = info.data_offsets;
+            let range = data_start + start..data_start + end;
+            tensors.insert(
+                name.clone(),
+                GgufTensorInfo {
+                    name,
+                    shape: info.shape.clone(),
+                    dtype,
+                    shard_index: 0,
+                    relative_offset: start as u64,
+                    data_range: Some(range.clone()),
+                    storage_range: range,
+                    stored_dtype: dtype,
+                },
+            );
+        }
+        let metadata = HashMap::from([
+            (
+                GENERAL_TYPE.to_string(),
+                Value::String(MMPROJ_TYPE.to_string()),
+            ),
+            (
+                CLIP_PROJECTOR_TYPE.to_string(),
+                Value::String(CHECKPOINT_PROJECTOR.to_string()),
+            ),
+        ]);
+        let info = GgufShardInfo {
+            path,
+            version: GgufVersion::V3,
+            endian: GgufEndian::Little,
+            alignment: 1,
+            tensor_data_offset: data_start,
+            file_len: mmap.len(),
+        };
+        Ok(Self {
+            mappings: vec![mmap],
+            shards: vec![info],
+            metadata,
+            tensors,
+        })
+    }
+
+    /// Opens independent GGUF components while keeping adjacent split shards in one archive; a `.safetensors` path
+    /// is a component of its own (`open_safetensors`).
     pub fn open_components<I, P>(paths: I) -> Result<Vec<Self>>
     where
         I: IntoIterator<Item = P>,
         P: AsRef<Path>,
     {
+        let (checkpoints, ggufs): (Vec<PathBuf>, Vec<PathBuf>) = paths
+            .into_iter()
+            .map(|path| path.as_ref().to_path_buf())
+            .partition(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == SAFETENSORS_EXTENSION)
+            });
+        let mut components = checkpoints
+            .iter()
+            .map(Self::open_safetensors)
+            .collect::<Result<Vec<_>>>()?;
+        if !ggufs.is_empty() || components.is_empty() {
+            components.extend(Self::open_gguf_components(ggufs)?);
+        }
+        Ok(components)
+    }
+
+    fn open_gguf_components(paths: Vec<PathBuf>) -> Result<Vec<Self>> {
         let mut parsed = parse_shards(paths)?;
         if parsed.is_empty() {
             inference_tensor::bail!("at least one GGUF file is required");
@@ -2127,6 +2220,69 @@ pub(crate) mod tests {
                 .unwrap()
                 .to_string()?,
             "qwen3"
+        );
+        Ok(())
+    }
+
+    // a checkpoint shard beside a text GGUF: its float tensors under their own names, integer buffers left out
+    #[test]
+    fn a_safetensors_shard_merges_as_a_checkpoint_projector() -> Result<()> {
+        let main_file = write_test_gguf(
+            &[
+                (
+                    "general.architecture",
+                    Value::String("nemotron_h_moe".to_string()),
+                ),
+                (GENERAL_TYPE, Value::String("model".to_string())),
+            ],
+            &[TestTensor {
+                name: "token_embd.weight",
+                shape: vec![8],
+                dtype: 0,
+                data: vec![1; 32],
+                offset: None,
+            }],
+            DEFAULT_ALIGNMENT,
+        );
+        let dir = tempfile::tempdir().map_err(Error::wrap)?;
+        let shard = dir.path().join("model-00001-of-00002.safetensors");
+        let weight = inference_tensor::Tensor::arange(0f32, 6., &inference_tensor::Device::Cpu)?
+            .reshape((2, 3))?
+            .to_dtype(inference_tensor::DType::BF16)?;
+        let count = inference_tensor::Tensor::new(&[3i64], &inference_tensor::Device::Cpu)?;
+        inference_tensor::safetensors::save(
+            &HashMap::from([
+                (
+                    "sound_projection.linear1.weight".to_string(),
+                    weight.clone(),
+                ),
+                ("sound_encoder.norm.num_batches_tracked".to_string(), count),
+            ]),
+            &shard,
+        )?;
+
+        let mut archive = GgufArchive::open([main_file.path()])?;
+        let components = GgufArchive::open_components([&shard])?;
+        assert_eq!(components.len(), 1);
+        archive.merge_components(components)?;
+        assert!(matches!(
+            archive.metadata_value(CLIP_PROJECTOR_TYPE),
+            Some(Value::String(projector)) if projector == CHECKPOINT_PROJECTOR
+        ));
+        assert!(!archive.contains_tensor("sound_encoder.norm.num_batches_tracked"));
+        let info = archive.tensor_info("sound_projection.linear1.weight")?;
+        assert_eq!(info.shape(), [2, 3]);
+        assert_eq!(info.dtype().raw(), GGML_BF16);
+        let read = archive.load_qtensor(
+            "sound_projection.linear1.weight",
+            &inference_tensor::Device::Cpu,
+        )?;
+        let read = read.dequantize(&inference_tensor::Device::Cpu)?;
+        assert_eq!(
+            read.to_vec2::<f32>()?,
+            weight
+                .to_dtype(inference_tensor::DType::F32)?
+                .to_vec2::<f32>()?
         );
         Ok(())
     }

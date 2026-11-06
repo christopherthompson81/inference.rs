@@ -71,7 +71,7 @@ pub struct FormatOptions {
     #[arg(short = 'f', long)]
     pub quantized_file: Option<String>,
 
-    /// GGUF projector override; auto-selected when unambiguous (semicolon-separated for multiple)
+    /// GGUF projector or a checkpoint's safetensors tower shard; auto-selected when unambiguous (semicolon-separated)
     #[arg(long)]
     pub mmproj: Option<String>,
 

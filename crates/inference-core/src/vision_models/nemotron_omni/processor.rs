@@ -8,7 +8,7 @@ use crate::pipeline::MessagesAction;
 use crate::vision_models::media_host::media_processor;
 
 processor_factory!(NemotronOmniLoader => |model_config, _, _, _| {
-    let cfg = Config::from_json(model_config).expect("Failed to parse Nemotron-H Omni config");
+    let cfg = Config::parse(model_config).expect("Failed to parse Nemotron-H Omni config");
     media_processor(
         NemotronOmniInputsProcessor::new(&cfg),
         &[IMAGE_TOKEN, IMAGE_START, IMAGE_END],

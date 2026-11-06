@@ -23,7 +23,7 @@ inference agent [OPTIONS] [COMMAND]
 | `--max-model-len <MAX_MODEL_LEN>` |  | Runtime model context length |
 | `--format <FORMAT>` |  | Model format: plain (safetensors), GGUF, or GGML. Auto-detected from `-f` when not specified. Possible values: `plain`, `gguf`, `ggml`. |
 | `-f, --quantized-file <QUANTIZED_FILE>` |  | GGUF/GGML filename(s); the suffix selects the format (semicolon-separated for multiple) |
-| `--mmproj <MMPROJ>` |  | GGUF projector override; auto-selected when unambiguous (semicolon-separated for multiple) |
+| `--mmproj <MMPROJ>` |  | GGUF projector or a checkpoint's safetensors tower shard; auto-selected when unambiguous (semicolon-separated) |
 | `--tok-model-id <TOK_MODEL_ID>` |  | Optional model ID overriding configuration, tokenizer, and processor assets for a quantized model |
 | `--gqa <GQA>` | `1` | GQA value for GGML models |
 | `--enable-lora` | `false` | Enable dynamic LoRA without preloading an adapter. Supports compatible text and multimodal language models, including GGUF. Vision, audio, and projector adapters are unsupported |
@@ -117,7 +117,7 @@ inference agent auto [OPTIONS] --model-id <MODEL_ID>
 | `--max-model-len <MAX_MODEL_LEN>` |  | Runtime model context length |
 | `--format <FORMAT>` |  | Model format: plain (safetensors), GGUF, or GGML. Auto-detected from `-f` when not specified. Possible values: `plain`, `gguf`, `ggml`. |
 | `-f, --quantized-file <QUANTIZED_FILE>` |  | GGUF/GGML filename(s); the suffix selects the format (semicolon-separated for multiple) |
-| `--mmproj <MMPROJ>` |  | GGUF projector override; auto-selected when unambiguous (semicolon-separated for multiple) |
+| `--mmproj <MMPROJ>` |  | GGUF projector or a checkpoint's safetensors tower shard; auto-selected when unambiguous (semicolon-separated) |
 | `--tok-model-id <TOK_MODEL_ID>` |  | Optional model ID overriding configuration, tokenizer, and processor assets for a quantized model |
 | `--gqa <GQA>` | `1` | GQA value for GGML models |
 | `--enable-lora` | `false` | Enable dynamic LoRA without preloading an adapter. Supports compatible text and multimodal language models, including GGUF. Vision, audio, and projector adapters are unsupported |
@@ -168,7 +168,7 @@ inference agent text [OPTIONS] --model-id <MODEL_ID>
 | `--max-model-len <MAX_MODEL_LEN>` |  | Runtime model context length |
 | `--format <FORMAT>` |  | Model format: plain (safetensors), GGUF, or GGML. Auto-detected from `-f` when not specified. Possible values: `plain`, `gguf`, `ggml`. |
 | `-f, --quantized-file <QUANTIZED_FILE>` |  | GGUF/GGML filename(s); the suffix selects the format (semicolon-separated for multiple) |
-| `--mmproj <MMPROJ>` |  | GGUF projector override; auto-selected when unambiguous (semicolon-separated for multiple) |
+| `--mmproj <MMPROJ>` |  | GGUF projector or a checkpoint's safetensors tower shard; auto-selected when unambiguous (semicolon-separated) |
 | `--tok-model-id <TOK_MODEL_ID>` |  | Optional model ID overriding configuration, tokenizer, and processor assets for a quantized model |
 | `--gqa <GQA>` | `1` | GQA value for GGML models |
 | `--enable-lora` | `false` | Enable dynamic LoRA without preloading an adapter. Supports compatible text and multimodal language models, including GGUF. Vision, audio, and projector adapters are unsupported |
@@ -215,7 +215,7 @@ inference agent multimodal [OPTIONS] --model-id <MODEL_ID>
 | `--max-model-len <MAX_MODEL_LEN>` |  | Runtime model context length |
 | `--format <FORMAT>` |  | Model format: plain (safetensors), GGUF, or GGML. Auto-detected from `-f` when not specified. Possible values: `plain`, `gguf`, `ggml`. |
 | `-f, --quantized-file <QUANTIZED_FILE>` |  | GGUF/GGML filename(s); the suffix selects the format (semicolon-separated for multiple) |
-| `--mmproj <MMPROJ>` |  | GGUF projector override; auto-selected when unambiguous (semicolon-separated for multiple) |
+| `--mmproj <MMPROJ>` |  | GGUF projector or a checkpoint's safetensors tower shard; auto-selected when unambiguous (semicolon-separated) |
 | `--tok-model-id <TOK_MODEL_ID>` |  | Optional model ID overriding configuration, tokenizer, and processor assets for a quantized model |
 | `--gqa <GQA>` | `1` | GQA value for GGML models |
 | `--enable-lora` | `false` | Enable dynamic LoRA for the language model without preloading an adapter. Vision, audio, and projector adapters are unsupported |
@@ -315,7 +315,7 @@ inference agent embedding [OPTIONS] --model-id <MODEL_ID>
 | `--max-model-len <MAX_MODEL_LEN>` |  | Runtime model context length |
 | `--format <FORMAT>` |  | Model format: plain (safetensors), GGUF, or GGML. Auto-detected from `-f` when not specified. Possible values: `plain`, `gguf`, `ggml`. |
 | `-f, --quantized-file <QUANTIZED_FILE>` |  | GGUF/GGML filename(s); the suffix selects the format (semicolon-separated for multiple) |
-| `--mmproj <MMPROJ>` |  | GGUF projector override; auto-selected when unambiguous (semicolon-separated for multiple) |
+| `--mmproj <MMPROJ>` |  | GGUF projector or a checkpoint's safetensors tower shard; auto-selected when unambiguous (semicolon-separated) |
 | `--tok-model-id <TOK_MODEL_ID>` |  | Optional model ID overriding configuration, tokenizer, and processor assets for a quantized model |
 | `--gqa <GQA>` | `1` | GQA value for GGML models |
 | `--quant <QUANT>` |  | Quantization target. Inference commands select a matching GGUF or UQFF artifact when available. Source checkpoints without a matching UQFF use in-situ quantization. `tune` evaluates the requested level instead of selecting an artifact. Accepts numeric levels (`2`, `3`, `4`, `5`, `6`, `8`) or supported quantization names |

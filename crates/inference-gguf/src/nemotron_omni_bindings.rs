@@ -39,6 +39,13 @@ const BLOCK_ROLES: [(&str, &str); 6] = [
     ("attn.qkv", ""),
 ];
 const PROJECTOR_LAYERS: [&str; 3] = ["0", "1", "3"];
+// the towers a checkpoint projector (its safetensors shard) carries under their own names
+const CHECKPOINT_TOWERS: [&str; 4] = [
+    "vision_model.",
+    "mlp1.",
+    "sound_encoder.",
+    "sound_projection.",
+];
 
 pub fn build_nemotron_omni_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
     validate_projector(archive, PROJECTOR)?;
@@ -51,6 +58,36 @@ pub fn build_nemotron_omni_bindings(archive: &GgufArchive) -> Result<GgufBinding
         bindings.insert(format!("{LANGUAGE_MODEL}.{native}"), binding.clone());
     }
     bind_vision(&TensorInventory::from_archive(archive), &mut bindings)?;
+    Ok(bindings)
+}
+
+/// A `nemotron_h_moe` text GGUF beside the checkpoint's own shard of towers (Nano Omni's vision and sound): the decoder
+/// as `build_nemotron_omni_bindings` binds it, every tower tensor under its own name.
+pub fn build_nemotron_omni_checkpoint_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
+    validate_projector(archive, inference_quant::CHECKPOINT_PROJECTOR)?;
+    let text = super::nemotron_h_bindings::build_nemotron_h_bindings(
+        archive,
+        CanonicalGgufArchitecture::NemotronHMoe,
+    )?;
+    let mut bindings = GgufBindingMap::new();
+    for (native, binding) in text.iter() {
+        bindings.insert(format!("{LANGUAGE_MODEL}.{native}"), binding.clone());
+    }
+    let towers = archive
+        .tensors()
+        .keys()
+        .filter(|name| {
+            CHECKPOINT_TOWERS
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+        })
+        .collect::<Vec<_>>();
+    if towers.is_empty() {
+        bail!("{FAMILY} checkpoint projector has no tower tensors");
+    }
+    for name in towers {
+        bindings.insert(name.clone(), GgufTensorBinding::tensor(name.clone()));
+    }
     Ok(bindings)
 }
 
