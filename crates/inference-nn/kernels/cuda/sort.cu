@@ -91,8 +91,9 @@ apply_sparse_penalties_f32(const void *x, void *dst, const uint32_t *token_ids,
       frequency_penalty, presence_penalty, repetition_penalty);
 }
 
-// One sequence's rows of [rows, vocab] logits penalized from its dense counts of the tokens seen (prompt and
-// generated) and generated; row j also counts drafts[0..j), the drafted tokens before it (MTP verify rows).
+// One sequence's rows of [rows, vocab] logits penalized from its dense counts
+// of the tokens seen (prompt and generated) and generated; row j also counts
+// drafts[0..j), the drafted tokens before it (MTP verify rows).
 __global__ void apply_dense_penalties_f32_kernel(
     const float *__restrict__ src, float *__restrict__ dst,
     const float *__restrict__ seen, const float *__restrict__ generated,
@@ -112,9 +113,11 @@ __global__ void apply_dense_penalties_f32_kernel(
     }
     const int64_t i = static_cast<int64_t>(j) * vocab + v;
     float value = src[i];
-    value -= count * frequency_penalty + (count > 0.0f ? presence_penalty : 0.0f);
+    value -=
+        count * frequency_penalty + (count > 0.0f ? presence_penalty : 0.0f);
     if (repetition_penalty != 1.0f && was_seen) {
-      value = value > 0.0f ? value / repetition_penalty : value * repetition_penalty;
+      value = value > 0.0f ? value / repetition_penalty
+                           : value * repetition_penalty;
     }
     dst[i] = value;
   }
@@ -136,9 +139,11 @@ extern "C" void apply_dense_penalties_f32(
       repetition_penalty);
 }
 
-extern "C" void apply_sparse_logits_bias_f32(
-    const void *x, void *dst, const uint32_t *token_ids, const float *biases,
-    const int n, const int n_tokens, int64_t stream) {
+extern "C" void apply_sparse_logits_bias_f32(const void *x, void *dst,
+                                             const uint32_t *token_ids,
+                                             const float *biases, const int n,
+                                             const int n_tokens,
+                                             int64_t stream) {
   if (n <= 0) {
     return;
   }
@@ -160,8 +165,7 @@ extern "C" void apply_sparse_logits_bias_f32(
 
 __global__ void apply_causal_mask_f32_kernel(float *__restrict__ scores,
                                              const int batch_heads,
-                                             const int q_len,
-                                             const int kv_len,
+                                             const int q_len, const int kv_len,
                                              const int q_offset,
                                              const int prefix_len) {
   const int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -180,8 +184,8 @@ __global__ void apply_causal_mask_f32_kernel(float *__restrict__ scores,
 
 extern "C" void apply_causal_mask_f32(void *scores, const int batch_heads,
                                       const int q_len, const int kv_len,
-                                      const int q_offset,
-                                      const int prefix_len, int64_t stream) {
+                                      const int q_offset, const int prefix_len,
+                                      int64_t stream) {
   if (batch_heads <= 0 || q_len <= 0 || kv_len <= 0) {
     return;
   }
@@ -259,8 +263,7 @@ __host__ __forceinline__ int rms_vec8_block_size(const int vec_cols) {
   return std::min(std::max(rounded, 32), 1024);
 }
 
-__device__ __forceinline__ float rms_block_sum(float value,
-                                               float *warp_sums) {
+__device__ __forceinline__ float rms_block_sum(float value, float *warp_sums) {
   const unsigned mask = 0xffffffffu;
   const int lane = threadIdx.x & 31;
   const int warp = threadIdx.x >> 5;
@@ -290,29 +293,37 @@ __device__ __forceinline__ float rms_block_sum(float value,
   return warp_sums[0];
 }
 
-// transformers' RMSNorm casts the normalized value to the activation dtype, then scales by the weight and casts again
-// torch's rsqrt is the correctly rounded 1 / sqrt; rsqrtf's approximation flips some of the casts that order rounds
-__device__ __forceinline__ float rms_inv(const bool round_normed, const float mean_square) {
+// transformers' RMSNorm casts the normalized value to the activation dtype,
+// then scales by the weight and casts again torch's rsqrt is the correctly
+// rounded 1 / sqrt; rsqrtf's approximation flips some of the casts that order
+// rounds
+__device__ __forceinline__ float rms_inv(const bool round_normed,
+                                         const float mean_square) {
   // the _rn intrinsics stay correctly rounded under --use_fast_math
-  return round_normed ? __fdiv_rn(1.0f, __fsqrt_rn(mean_square)) : rsqrtf(mean_square);
+  return round_normed ? __fdiv_rn(1.0f, __fsqrt_rn(mean_square))
+                      : rsqrtf(mean_square);
 }
 
 template <typename T>
-__device__ __forceinline__ float rms_scaled(const float x, const float inv_rms, const float weight,
+__device__ __forceinline__ float rms_scaled(const float x, const float inv_rms,
+                                            const float weight,
                                             const bool round_normed) {
   if (!round_normed) {
     return x * inv_rms * weight;
   }
-  const float normed = rms_residual_to_float(rms_residual_from_float<T>(x * inv_rms));
+  const float normed =
+      rms_residual_to_float(rms_residual_from_float<T>(x * inv_rms));
   return rms_residual_to_float(rms_residual_from_float<T>(normed * weight));
 }
 
 template <typename T>
-__global__ void rms_norm_residual_vec8_kernel(
-    const T *__restrict__ x, const T *__restrict__ residual,
-    const T *__restrict__ weight, const T *__restrict__ scale,
-    T *__restrict__ dst, const int ncols, const float eps,
-    const bool round_normed) {
+__global__ void rms_norm_residual_vec8_kernel(const T *__restrict__ x,
+                                              const T *__restrict__ residual,
+                                              const T *__restrict__ weight,
+                                              const T *__restrict__ scale,
+                                              T *__restrict__ dst,
+                                              const int ncols, const float eps,
+                                              const bool round_normed) {
   using Vec = rms_vec8<T>;
   __shared__ float reduce[32];
   const int row = blockIdx.x;
@@ -323,7 +334,8 @@ __global__ void rms_norm_residual_vec8_kernel(
       scale == nullptr ? 1.0f : rms_residual_to_float(scale[0]);
 
   const Vec *__restrict__ x_vec = reinterpret_cast<const Vec *>(x);
-  const Vec *__restrict__ residual_vec = reinterpret_cast<const Vec *>(residual);
+  const Vec *__restrict__ residual_vec =
+      reinterpret_cast<const Vec *>(residual);
   const Vec *__restrict__ weight_vec = reinterpret_cast<const Vec *>(weight);
   Vec *__restrict__ dst_vec = reinterpret_cast<Vec *>(dst);
 
@@ -332,7 +344,8 @@ __global__ void rms_norm_residual_vec8_kernel(
     sum += rms_vec8_sum_squares(x_vec[row_offset + col]);
   }
   const float inv_rms =
-      rms_inv(round_normed, rms_block_sum(sum, reduce) / static_cast<float>(ncols) + eps);
+      rms_inv(round_normed,
+              rms_block_sum(sum, reduce) / static_cast<float>(ncols) + eps);
 
   for (int col = tid; col < vec_cols; col += blockDim.x) {
     const int idx = row_offset + col;
@@ -342,8 +355,9 @@ __global__ void rms_norm_residual_vec8_kernel(
     Vec out;
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
-      const float normed = rms_scaled<T>(rms_residual_to_float(x_value.data[i]), inv_rms,
-                                         rms_residual_to_float(weight_value.data[i]), round_normed);
+      const float normed = rms_scaled<T>(
+          rms_residual_to_float(x_value.data[i]), inv_rms,
+          rms_residual_to_float(weight_value.data[i]), round_normed);
       const float value =
           (rms_residual_to_float(residual_value.data[i]) + normed) *
           scale_value;
@@ -374,10 +388,12 @@ __global__ void rms_norm_residual_kernel(const T *__restrict__ x,
     sum += value * value;
   }
   const float inv_rms =
-      rms_inv(round_normed, rms_block_sum(sum, reduce) / static_cast<float>(ncols) + eps);
+      rms_inv(round_normed,
+              rms_block_sum(sum, reduce) / static_cast<float>(ncols) + eps);
   for (int col = tid; col < ncols; col += blockDim.x) {
-    const float normed = rms_scaled<T>(rms_residual_to_float(x[row_offset + col]), inv_rms,
-                                       rms_residual_to_float(weight[col]), round_normed);
+    const float normed =
+        rms_scaled<T>(rms_residual_to_float(x[row_offset + col]), inv_rms,
+                      rms_residual_to_float(weight[col]), round_normed);
     const float value =
         (rms_residual_to_float(residual[row_offset + col]) + normed) *
         scale_value;
@@ -400,11 +416,10 @@ void launch_rms_norm_residual(const void *x, const void *residual,
     if (rms_vec8_supported<T>(x, residual, weight, dst, ncols)) {
       const int block = rms_vec8_block_size(ncols / 8);
       rms_norm_residual_vec8_kernel<T><<<nrows, block, 0, custream>>>(
-          reinterpret_cast<const T *>(x),
-          reinterpret_cast<const T *>(residual),
+          reinterpret_cast<const T *>(x), reinterpret_cast<const T *>(residual),
           reinterpret_cast<const T *>(weight),
-          reinterpret_cast<const T *>(scale), reinterpret_cast<T *>(dst),
-          ncols, eps, round_normed);
+          reinterpret_cast<const T *>(scale), reinterpret_cast<T *>(dst), ncols,
+          eps, round_normed);
       return;
     }
   }
@@ -417,10 +432,12 @@ void launch_rms_norm_residual(const void *x, const void *residual,
 }
 
 template <typename T>
-__global__ void add_rms_norm_vec8_kernel(
-    const T *__restrict__ x, const T *__restrict__ residual,
-    const T *__restrict__ weight, T *__restrict__ residual_dst,
-    T *__restrict__ norm_dst, const int ncols, const float eps) {
+__global__ void add_rms_norm_vec8_kernel(const T *__restrict__ x,
+                                         const T *__restrict__ residual,
+                                         const T *__restrict__ weight,
+                                         T *__restrict__ residual_dst,
+                                         T *__restrict__ norm_dst,
+                                         const int ncols, const float eps) {
   using Vec = rms_vec8<T>;
   __shared__ float reduce[32];
   const int tid = threadIdx.x;
@@ -428,7 +445,8 @@ __global__ void add_rms_norm_vec8_kernel(
   const int row_offset = blockIdx.x * vec_cols;
 
   const Vec *__restrict__ x_vec = reinterpret_cast<const Vec *>(x);
-  const Vec *__restrict__ residual_vec = reinterpret_cast<const Vec *>(residual);
+  const Vec *__restrict__ residual_vec =
+      reinterpret_cast<const Vec *>(residual);
   const Vec *__restrict__ weight_vec = reinterpret_cast<const Vec *>(weight);
   Vec *__restrict__ residual_dst_vec = reinterpret_cast<Vec *>(residual_dst);
   Vec *__restrict__ norm_dst_vec = reinterpret_cast<Vec *>(norm_dst);
@@ -468,10 +486,11 @@ __global__ void add_rms_norm_vec8_kernel(
 }
 
 template <typename T>
-__global__ void add_rms_norm_kernel(
-    const T *__restrict__ x, const T *__restrict__ residual,
-    const T *__restrict__ weight, T *__restrict__ residual_dst,
-    T *__restrict__ norm_dst, const int ncols, const float eps) {
+__global__ void
+add_rms_norm_kernel(const T *__restrict__ x, const T *__restrict__ residual,
+                    const T *__restrict__ weight, T *__restrict__ residual_dst,
+                    T *__restrict__ norm_dst, const int ncols,
+                    const float eps) {
   __shared__ float reduce[32];
   const int tid = threadIdx.x;
   const int row_offset = blockIdx.x * ncols;
@@ -497,9 +516,9 @@ __global__ void add_rms_norm_kernel(
 
 template <typename T>
 void launch_add_rms_norm(const void *x, const void *residual,
-                         const void *weight, void *residual_dst,
-                         void *norm_dst, const int nrows, const int ncols,
-                         const float eps, int64_t stream) {
+                         const void *weight, void *residual_dst, void *norm_dst,
+                         const int nrows, const int ncols, const float eps,
+                         int64_t stream) {
   if (nrows <= 0 || ncols <= 0) {
     return;
   }
@@ -511,8 +530,7 @@ void launch_add_rms_norm(const void *x, const void *residual,
         rms_vec8_aligned<T>(norm_dst)) {
       const int block = rms_vec8_block_size(ncols / 8);
       add_rms_norm_vec8_kernel<T><<<nrows, block, 0, custream>>>(
-          reinterpret_cast<const T *>(x),
-          reinterpret_cast<const T *>(residual),
+          reinterpret_cast<const T *>(x), reinterpret_cast<const T *>(residual),
           reinterpret_cast<const T *>(weight),
           reinterpret_cast<T *>(residual_dst), reinterpret_cast<T *>(norm_dst),
           ncols, eps);
@@ -523,9 +541,8 @@ void launch_add_rms_norm(const void *x, const void *residual,
   const int block = ncols < 1024 ? 32 : 1024;
   add_rms_norm_kernel<T><<<nrows, block, 0, custream>>>(
       reinterpret_cast<const T *>(x), reinterpret_cast<const T *>(residual),
-      reinterpret_cast<const T *>(weight),
-      reinterpret_cast<T *>(residual_dst), reinterpret_cast<T *>(norm_dst),
-      ncols, eps);
+      reinterpret_cast<const T *>(weight), reinterpret_cast<T *>(residual_dst),
+      reinterpret_cast<T *>(norm_dst), ncols, eps);
 }
 
 template <typename T>
@@ -545,7 +562,8 @@ __global__ void rms_norm_residual_then_rms_norm_vec8_kernel(
       scale == nullptr ? 1.0f : rms_residual_to_float(scale[0]);
 
   const Vec *__restrict__ x_vec = reinterpret_cast<const Vec *>(x);
-  const Vec *__restrict__ residual_vec = reinterpret_cast<const Vec *>(residual);
+  const Vec *__restrict__ residual_vec =
+      reinterpret_cast<const Vec *>(residual);
   const Vec *__restrict__ residual_weight_vec =
       reinterpret_cast<const Vec *>(residual_weight);
   const Vec *__restrict__ norm_weight_vec =
@@ -557,9 +575,9 @@ __global__ void rms_norm_residual_then_rms_norm_vec8_kernel(
   for (int col = tid; col < vec_cols; col += blockDim.x) {
     sum += rms_vec8_sum_squares(x_vec[row_offset + col]);
   }
-  const float inv_rms =
-      rms_inv(round_normed, rms_block_sum(sum, reduce) / static_cast<float>(ncols) +
-             residual_eps);
+  const float inv_rms = rms_inv(
+      round_normed,
+      rms_block_sum(sum, reduce) / static_cast<float>(ncols) + residual_eps);
 
   float residual_sum = 0.0f;
   for (int col = tid; col < vec_cols; col += blockDim.x) {
@@ -570,21 +588,23 @@ __global__ void rms_norm_residual_then_rms_norm_vec8_kernel(
     Vec out;
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
-      const float normed = rms_scaled<T>(rms_residual_to_float(x_value.data[i]), inv_rms,
-                                         rms_residual_to_float(residual_weight_value.data[i]),
-                                         round_normed);
+      const float normed = rms_scaled<T>(
+          rms_residual_to_float(x_value.data[i]), inv_rms,
+          rms_residual_to_float(residual_weight_value.data[i]), round_normed);
       const float value =
           (rms_residual_to_float(residual_value.data[i]) + normed) *
           scale_value;
       out.data[i] = rms_residual_from_float<T>(value);
-      const float kept = round_normed ? rms_residual_to_float(out.data[i]) : value;
+      const float kept =
+          round_normed ? rms_residual_to_float(out.data[i]) : value;
       residual_sum += kept * kept;
     }
     residual_dst_vec[idx] = out;
   }
   const float norm_inv_rms =
-      rms_inv(round_normed, rms_block_sum(residual_sum, reduce) / static_cast<float>(ncols) +
-             norm_eps);
+      rms_inv(round_normed,
+              rms_block_sum(residual_sum, reduce) / static_cast<float>(ncols) +
+                  norm_eps);
 
   for (int col = tid; col < vec_cols; col += blockDim.x) {
     const int idx = row_offset + col;
@@ -593,10 +613,9 @@ __global__ void rms_norm_residual_then_rms_norm_vec8_kernel(
     Vec out;
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
-      const float value = rms_scaled<T>(rms_residual_to_float(residual_value.data[i]),
-                                        norm_inv_rms,
-                                        rms_residual_to_float(norm_weight_value.data[i]),
-                                        round_normed);
+      const float value = rms_scaled<T>(
+          rms_residual_to_float(residual_value.data[i]), norm_inv_rms,
+          rms_residual_to_float(norm_weight_value.data[i]), round_normed);
       out.data[i] = rms_residual_from_float<T>(value);
     }
     norm_dst_vec[idx] = out;
@@ -622,27 +641,31 @@ __global__ void rms_norm_residual_then_rms_norm_kernel(
     const float value = rms_residual_to_float(x[row_offset + col]);
     sum += value * value;
   }
-  const float inv_rms =
-      rms_inv(round_normed, rms_block_sum(sum, reduce) / static_cast<float>(ncols) +
-             residual_eps);
+  const float inv_rms = rms_inv(
+      round_normed,
+      rms_block_sum(sum, reduce) / static_cast<float>(ncols) + residual_eps);
   float residual_sum = 0.0f;
   for (int col = tid; col < ncols; col += blockDim.x) {
     const int idx = row_offset + col;
-    const float normed = rms_scaled<T>(rms_residual_to_float(x[idx]), inv_rms,
-                                       rms_residual_to_float(residual_weight[col]), round_normed);
+    const float normed = rms_scaled<T>(
+        rms_residual_to_float(x[idx]), inv_rms,
+        rms_residual_to_float(residual_weight[col]), round_normed);
     const float value =
         (rms_residual_to_float(residual[idx]) + normed) * scale_value;
     residual_dst[idx] = rms_residual_from_float<T>(value);
-    const float kept = round_normed ? rms_residual_to_float(residual_dst[idx]) : value;
+    const float kept =
+        round_normed ? rms_residual_to_float(residual_dst[idx]) : value;
     residual_sum += kept * kept;
   }
   const float norm_inv_rms =
-      rms_inv(round_normed, rms_block_sum(residual_sum, reduce) / static_cast<float>(ncols) +
-             norm_eps);
+      rms_inv(round_normed,
+              rms_block_sum(residual_sum, reduce) / static_cast<float>(ncols) +
+                  norm_eps);
   for (int col = tid; col < ncols; col += blockDim.x) {
     const int idx = row_offset + col;
-    const float value = rms_scaled<T>(rms_residual_to_float(residual_dst[idx]), norm_inv_rms,
-                                      rms_residual_to_float(norm_weight[col]), round_normed);
+    const float value =
+        rms_scaled<T>(rms_residual_to_float(residual_dst[idx]), norm_inv_rms,
+                      rms_residual_to_float(norm_weight[col]), round_normed);
     norm_dst[idx] = rms_residual_from_float<T>(value);
   }
 }
@@ -651,9 +674,8 @@ template <typename T>
 void launch_rms_norm_residual_then_rms_norm(
     const void *x, const void *residual, const void *residual_weight,
     const void *scale, const void *norm_weight, void *residual_dst,
-    void *norm_dst, const int nrows, const int ncols,
-    const float residual_eps, const float norm_eps, const bool round_normed,
-    int64_t stream) {
+    void *norm_dst, const int nrows, const int ncols, const float residual_eps,
+    const float norm_eps, const bool round_normed, int64_t stream) {
   if (nrows <= 0 || ncols <= 0) {
     return;
   }
@@ -663,8 +685,7 @@ void launch_rms_norm_residual_then_rms_norm(
                 std::is_same<T, __nv_bfloat16>::value) {
     if (rms_vec8_supported<T>(x, residual, residual_weight, residual_dst,
                               ncols) &&
-        rms_vec8_aligned<T>(norm_weight) &&
-        rms_vec8_aligned<T>(norm_dst)) {
+        rms_vec8_aligned<T>(norm_weight) && rms_vec8_aligned<T>(norm_dst)) {
       const int block = rms_vec8_block_size(ncols / 8);
       rms_norm_residual_then_rms_norm_vec8_kernel<T>
           <<<nrows, block, 0, custream>>>(
@@ -685,17 +706,17 @@ void launch_rms_norm_residual_then_rms_norm(
       reinterpret_cast<const T *>(x), reinterpret_cast<const T *>(residual),
       reinterpret_cast<const T *>(residual_weight),
       reinterpret_cast<const T *>(scale),
-      reinterpret_cast<const T *>(norm_weight), reinterpret_cast<T *>(residual_dst),
-      reinterpret_cast<T *>(norm_dst), ncols, residual_eps, norm_eps, round_normed);
+      reinterpret_cast<const T *>(norm_weight),
+      reinterpret_cast<T *>(residual_dst), reinterpret_cast<T *>(norm_dst),
+      ncols, residual_eps, norm_eps, round_normed);
 }
 
 template <typename T>
 __global__ void rms_norm_strided_4d_kernel(
     const T *__restrict__ x, const T *__restrict__ weight, T *__restrict__ dst,
     const int64_t stride_b, const int64_t stride_h, const int64_t stride_s,
-    const int64_t stride_d, const int batch, const int heads,
-    const int seq_len, const int head_dim, const float eps,
-    const bool round_normed) {
+    const int64_t stride_d, const int batch, const int heads, const int seq_len,
+    const int head_dim, const float eps, const bool round_normed) {
   __shared__ float reduce[32];
   const int row = blockIdx.x;
   const int tid = threadIdx.x;
@@ -714,15 +735,18 @@ __global__ void rms_norm_strided_4d_kernel(
     sum += value * value;
   }
   const float inv_rms =
-      rms_inv(round_normed, rms_block_sum(sum, reduce) / static_cast<float>(head_dim) + eps);
+      rms_inv(round_normed,
+              rms_block_sum(sum, reduce) / static_cast<float>(head_dim) + eps);
   for (int col = tid; col < head_dim; col += blockDim.x) {
-    const float value = rms_scaled<T>(rms_residual_to_float(x[src_base + col * stride_d]), inv_rms,
-                                      rms_residual_to_float(weight[col]), round_normed);
+    const float value = rms_scaled<T>(
+        rms_residual_to_float(x[src_base + col * stride_d]), inv_rms,
+        rms_residual_to_float(weight[col]), round_normed);
     dst[dst_base + col] = rms_residual_from_float<T>(value);
   }
 }
 
-// Unit-stride rows whose bases and length are multiples of 8 elements: 16-byte loads, same math as the strided kernel.
+// Unit-stride rows whose bases and length are multiples of 8 elements: 16-byte
+// loads, same math as the strided kernel.
 template <typename T>
 __global__ void rms_norm_rows_vec8_kernel(
     const T *__restrict__ x, const T *__restrict__ weight, T *__restrict__ dst,
@@ -740,7 +764,8 @@ __global__ void rms_norm_rows_vec8_kernel(
   const int vec_cols = head_dim / 8;
   const Vec *__restrict__ x_vec = reinterpret_cast<const Vec *>(
       x + static_cast<int64_t>(batch_idx) * stride_b +
-      static_cast<int64_t>(head) * stride_h + static_cast<int64_t>(seq) * stride_s);
+      static_cast<int64_t>(head) * stride_h +
+      static_cast<int64_t>(seq) * stride_s);
   const Vec *__restrict__ weight_vec = reinterpret_cast<const Vec *>(weight);
   Vec *__restrict__ dst_vec =
       reinterpret_cast<Vec *>(dst + static_cast<int64_t>(row) * head_dim);
@@ -750,27 +775,30 @@ __global__ void rms_norm_rows_vec8_kernel(
     sum += rms_vec8_sum_squares(x_vec[col]);
   }
   const float inv_rms =
-      rms_inv(round_normed, rms_block_sum(sum, reduce) / static_cast<float>(head_dim) + eps);
+      rms_inv(round_normed,
+              rms_block_sum(sum, reduce) / static_cast<float>(head_dim) + eps);
   for (int col = tid; col < vec_cols; col += blockDim.x) {
     const Vec x_value = x_vec[col];
     const Vec weight_value = weight_vec[col];
     Vec out;
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
-      out.data[i] = rms_residual_from_float<T>(
-          rms_scaled<T>(rms_residual_to_float(x_value.data[i]), inv_rms,
-                        rms_residual_to_float(weight_value.data[i]), round_normed));
+      out.data[i] = rms_residual_from_float<T>(rms_scaled<T>(
+          rms_residual_to_float(x_value.data[i]), inv_rms,
+          rms_residual_to_float(weight_value.data[i]), round_normed));
     }
     dst_vec[col] = out;
   }
 }
 
 template <typename T>
-void launch_rms_norm_strided_4d(
-    const void *x, const void *weight, void *dst, const int64_t stride_b,
-    const int64_t stride_h, const int64_t stride_s, const int64_t stride_d,
-    const int batch, const int heads, const int seq_len, const int head_dim,
-    const float eps, const bool round_normed, int64_t stream) {
+void launch_rms_norm_strided_4d(const void *x, const void *weight, void *dst,
+                                const int64_t stride_b, const int64_t stride_h,
+                                const int64_t stride_s, const int64_t stride_d,
+                                const int batch, const int heads,
+                                const int seq_len, const int head_dim,
+                                const float eps, const bool round_normed,
+                                int64_t stream) {
   if (batch <= 0 || heads <= 0 || seq_len <= 0 || head_dim <= 0) {
     return;
   }
@@ -822,7 +850,8 @@ extern "C" void rms_norm_residual_bf16(const void *x, const void *residual,
                                        const int ncols, const float eps,
                                        const int round_normed, int64_t stream) {
   launch_rms_norm_residual<__nv_bfloat16>(x, residual, weight, scale, dst,
-                                          nrows, ncols, eps, round_normed != 0, stream);
+                                          nrows, ncols, eps, round_normed != 0,
+                                          stream);
 }
 
 extern "C" void add_rms_norm_f32(const void *x, const void *residual,
@@ -830,8 +859,8 @@ extern "C" void add_rms_norm_f32(const void *x, const void *residual,
                                  void *norm_dst, const int nrows,
                                  const int ncols, const float eps,
                                  int64_t stream) {
-  launch_add_rms_norm<float>(x, residual, weight, residual_dst, norm_dst,
-                             nrows, ncols, eps, stream);
+  launch_add_rms_norm<float>(x, residual, weight, residual_dst, norm_dst, nrows,
+                             ncols, eps, stream);
 }
 
 extern "C" void add_rms_norm_f16(const void *x, const void *residual,
@@ -855,9 +884,8 @@ extern "C" void add_rms_norm_bf16(const void *x, const void *residual,
 extern "C" void rms_norm_residual_then_rms_norm_f32(
     const void *x, const void *residual, const void *residual_weight,
     const void *scale, const void *norm_weight, void *residual_dst,
-    void *norm_dst, const int nrows, const int ncols,
-    const float residual_eps, const float norm_eps, const int round_normed,
-    int64_t stream) {
+    void *norm_dst, const int nrows, const int ncols, const float residual_eps,
+    const float norm_eps, const int round_normed, int64_t stream) {
   launch_rms_norm_residual_then_rms_norm<float>(
       x, residual, residual_weight, scale, norm_weight, residual_dst, norm_dst,
       nrows, ncols, residual_eps, norm_eps, round_normed != 0, stream);
@@ -866,9 +894,8 @@ extern "C" void rms_norm_residual_then_rms_norm_f32(
 extern "C" void rms_norm_residual_then_rms_norm_f16(
     const void *x, const void *residual, const void *residual_weight,
     const void *scale, const void *norm_weight, void *residual_dst,
-    void *norm_dst, const int nrows, const int ncols,
-    const float residual_eps, const float norm_eps, const int round_normed,
-    int64_t stream) {
+    void *norm_dst, const int nrows, const int ncols, const float residual_eps,
+    const float norm_eps, const int round_normed, int64_t stream) {
   launch_rms_norm_residual_then_rms_norm<__half>(
       x, residual, residual_weight, scale, norm_weight, residual_dst, norm_dst,
       nrows, ncols, residual_eps, norm_eps, round_normed != 0, stream);
@@ -877,9 +904,8 @@ extern "C" void rms_norm_residual_then_rms_norm_f16(
 extern "C" void rms_norm_residual_then_rms_norm_bf16(
     const void *x, const void *residual, const void *residual_weight,
     const void *scale, const void *norm_weight, void *residual_dst,
-    void *norm_dst, const int nrows, const int ncols,
-    const float residual_eps, const float norm_eps, const int round_normed,
-    int64_t stream) {
+    void *norm_dst, const int nrows, const int ncols, const float residual_eps,
+    const float norm_eps, const int round_normed, int64_t stream) {
   launch_rms_norm_residual_then_rms_norm<__nv_bfloat16>(
       x, residual, residual_weight, scale, norm_weight, residual_dst, norm_dst,
       nrows, ncols, residual_eps, norm_eps, round_normed != 0, stream);
@@ -910,9 +936,9 @@ extern "C" void rms_norm_strided_4d_bf16(
     const int64_t stride_h, const int64_t stride_s, const int64_t stride_d,
     const int batch, const int heads, const int seq_len, const int head_dim,
     const float eps, const int round_normed, int64_t stream) {
-  launch_rms_norm_strided_4d<__nv_bfloat16>(x, weight, dst, stride_b, stride_h,
-                                            stride_s, stride_d, batch, heads,
-                                            seq_len, head_dim, eps, round_normed != 0, stream);
+  launch_rms_norm_strided_4d<__nv_bfloat16>(
+      x, weight, dst, stride_b, stride_h, stride_s, stride_d, batch, heads,
+      seq_len, head_dim, eps, round_normed != 0, stream);
 }
 
 template <typename T> inline __device__ void swap(T &a, T &b) {
@@ -967,7 +993,8 @@ int next_power_of_2(int x) {
   return n;
 }
 
-// The value every element sorts before; std::numeric_limits has no half or bf16 specialization, so those are spelled out
+// The value every element sorts before; std::numeric_limits has no half or bf16
+// specialization, so those are spelled out
 template <typename T> T sort_pad(bool asc) {
   if constexpr (std::numeric_limits<T>::has_infinity) {
     return asc ? std::numeric_limits<T>::infinity()
@@ -990,7 +1017,8 @@ template <> __nv_bfloat16 sort_pad<__nv_bfloat16>(bool asc) {
   return __nv_bfloat16(raw);
 }
 
-// Pads on the device, so a captured sort references no host buffers that are gone by replay
+// Pads on the device, so a captured sort references no host buffers that are
+// gone by replay
 template <typename T>
 __global__ void bitonic_pad_kernel(const T *x_row, T *x_pad, uint32_t *dst_pad,
                                    int ncols, int ncols_pad, T pad) {
@@ -1060,8 +1088,9 @@ ASORT_OP(uint8_t, asort_desc_u8, false)
 ASORT_OP(uint32_t, asort_desc_u32, false)
 ASORT_OP(int64_t, asort_desc_i64, false)
 
-// One block per row, indices bitonic-sorted in shared memory; padding slots compare past every real index, so nothing
-// is copied or allocated. Adapted from llama.cpp's ggml-cuda/argsort.cu (MIT) by way of candle-kernels.
+// One block per row, indices bitonic-sorted in shared memory; padding slots
+// compare past every real index, so nothing is copied or allocated. Adapted
+// from llama.cpp's ggml-cuda/argsort.cu (MIT) by way of candle-kernels.
 template <typename T, bool ASC>
 __global__ void argsort_rows_kernel(const T *__restrict__ x,
                                     uint32_t *__restrict__ dst, const int ncols,
@@ -1115,10 +1144,11 @@ void launch_argsort_rows(const void *x, uint32_t *dst, int nrows, int ncols,
   }
 }
 
-// dtype: 0 u8, 1 u32, 2 i64, 3 bf16, 4 f16, 5 f32, 6 f64 (ARGSORT_DTYPE_* in topk.rs); nonzero return on a bad code
+// dtype: 0 u8, 1 u32, 2 i64, 3 bf16, 4 f16, 5 f32, 6 f64 (ARGSORT_DTYPE_* in
+// topk.rs); nonzero return on a bad code
 extern "C" int argsort_rows(const void *x, void *dst, const int nrows,
-                             const int ncols, const int dtype, const bool asc,
-                             int64_t stream) {
+                            const int ncols, const int dtype, const bool asc,
+                            int64_t stream) {
   uint32_t *out = reinterpret_cast<uint32_t *>(dst);
   const cudaStream_t custream = (cudaStream_t)stream;
   switch (dtype) {
@@ -1481,7 +1511,8 @@ __launch_bounds__(MOE_ROUTER_ROWS_PER_BLOCK * 32, 1) __global__
         selection[i] += selection_bias[expert];
       }
     }
-    // past the experts (fewer than a warp's lanes) a sigmoid score is 0, which a negative bias on every expert loses to
+    // past the experts (fewer than a warp's lanes) a sigmoid score is 0, which
+    // a negative bias on every expert loses to
     if (selection[i] != selection[i] ||
         (n_experts % 32 != 0 && expert >= n_experts)) {
       selection[i] = -INFINITY;
@@ -1733,6 +1764,48 @@ __device__ __forceinline__ float block_reduce_sum_f32(float val) {
   return val;
 }
 
+// A chunk sorts in shared memory, and a row's per-chunk lists merge in one
+// warp, where these fit; either keeps the selection's order: by value, the
+// lower index first on a tie, NaN and -inf never picked
+constexpr int TOPK_LARGE_MAX_MERGE_LISTS = 1024;
+// a chunk sorts two values a thread
+constexpr int TOPK_LARGE_STAGE1_THREADS = 1024;
+
+// a precedes b: valid before invalid (NaN, -inf), then the larger value, then
+// the lower index
+__device__ __forceinline__ bool topk_precedes(float a_value, uint32_t a_index,
+                                              float b_value, uint32_t b_index) {
+  const bool a_valid = a_value == a_value && a_value != -INFINITY;
+  const bool b_valid = b_value == b_value && b_value != -INFINITY;
+  if (a_valid != b_valid) {
+    return a_valid;
+  }
+  if (!a_valid) {
+    return false;
+  }
+  return a_value > b_value || (a_value == b_value && a_index < b_index);
+}
+
+__host__ __device__ __forceinline__ bool is_power_of_two(const int n) {
+  return n > 0 && (n & (n - 1)) == 0;
+}
+
+// the sort's values and indices, or the scan's used flags
+size_t topk_large_stage1_smem(const int chunk_size) {
+  return is_power_of_two(chunk_size)
+             ? static_cast<size_t>(chunk_size) *
+                   (sizeof(float) + sizeof(uint32_t))
+             : static_cast<size_t>(chunk_size) * sizeof(bool);
+}
+
+// the merge's list heads, or the scan's used flags
+size_t topk_large_stage2_smem(const int nblocks, const int k) {
+  return nblocks <= TOPK_LARGE_MAX_MERGE_LISTS
+             ? static_cast<size_t>(nblocks) * (sizeof(int) + sizeof(float))
+             : static_cast<size_t>(nblocks) * static_cast<size_t>(k) *
+                   sizeof(bool);
+}
+
 // Large-vocabulary top-k for token sampling. The MoE top-k kernel above stages
 // a full row in shared memory, which is not viable for 100k+ vocabularies. This
 // kernel scans fixed-size chunks, emits per-chunk top-k candidates, and can
@@ -1746,8 +1819,7 @@ template <> __device__ __forceinline__ float topk_to_float<__half>(__half x) {
 }
 
 template <>
-__device__ __forceinline__ float
-topk_to_float<__nv_bfloat16>(__nv_bfloat16 x) {
+__device__ __forceinline__ float topk_to_float<__nv_bfloat16>(__nv_bfloat16 x) {
   return __bfloat162float(x);
 }
 
@@ -1778,58 +1850,100 @@ __global__ void topk_large_stage1(
   const int block_size = blockDim.x;
 
   extern __shared__ char smem[];
-  bool *s_used = reinterpret_cast<bool *>(smem);
-
-  for (int i = tid; i < chunk_size; i += block_size) {
-    s_used[i] = false;
-  }
-  __syncthreads();
-
-  for (int ki = 0; ki < k; ++ki) {
-    float local_max = -INFINITY;
-    int local_idx = -1;
-
-    for (int local = tid; local < width; local += block_size) {
-      const float candidate = topk_to_float(input[start + local]);
-      if (!s_used[local] && candidate == candidate && candidate > local_max) {
-        local_max = candidate;
-        local_idx = start + local;
+  if (is_power_of_two(chunk_size)) {
+    // the chunk sorted once in shared memory (bitonic), its first k written
+    float *s_values = reinterpret_cast<float *>(smem);
+    uint32_t *s_indices = reinterpret_cast<uint32_t *>(s_values + chunk_size);
+    for (int i = tid; i < chunk_size; i += block_size) {
+      s_values[i] = i < width ? topk_to_float(input[start + i]) : -INFINITY;
+      s_indices[i] = static_cast<uint32_t>(start + i);
+    }
+    __syncthreads();
+    for (int size = 2; size <= chunk_size; size <<= 1) {
+      for (int stride = size >> 1; stride > 0; stride >>= 1) {
+        for (int i = tid; i < chunk_size; i += block_size) {
+          const int j = i ^ stride;
+          if (j > i) {
+            const bool forward = (i & size) == 0;
+            const bool swap = forward
+                                  ? topk_precedes(s_values[j], s_indices[j],
+                                                  s_values[i], s_indices[i])
+                                  : topk_precedes(s_values[i], s_indices[i],
+                                                  s_values[j], s_indices[j]);
+            if (swap) {
+              const float value = s_values[i];
+              const uint32_t index = s_indices[i];
+              s_values[i] = s_values[j];
+              s_indices[i] = s_indices[j];
+              s_values[j] = value;
+              s_indices[j] = index;
+            }
+          }
+        }
+        __syncthreads();
       }
     }
+    for (int ki = tid; ki < k; ki += block_size) {
+      const float value = s_values[ki];
+      const bool valid = value == value && value != -INFINITY;
+      block_values[chunk * k + ki] = valid ? value : -INFINITY;
+      block_indices[chunk * k + ki] = valid ? s_indices[ki] : 0;
+    }
+    __syncthreads();
+  } else {
+    bool *s_used = reinterpret_cast<bool *>(smem);
 
-    int warp_max_idx;
-    float warp_max =
-        warp_reduce_max_with_idx<float>(local_max, local_idx, warp_max_idx);
-
-    __shared__ float warp_maxes[32];
-    __shared__ int warp_indices[32];
-
-    const int warp_id = tid / 32;
-    const int lane_id = tid % 32;
-    const int num_warps = (block_size + 31) / 32;
-
-    if (lane_id == 0) {
-      warp_maxes[warp_id] = warp_max;
-      warp_indices[warp_id] = warp_max_idx;
+    for (int i = tid; i < chunk_size; i += block_size) {
+      s_used[i] = false;
     }
     __syncthreads();
 
-    if (tid < 32) {
-      float val = (tid < num_warps) ? warp_maxes[tid] : -INFINITY;
-      int idx = (tid < num_warps) ? warp_indices[tid] : -1;
-      int final_idx;
-      float final_max = warp_reduce_max_with_idx<float>(val, idx, final_idx);
+    for (int ki = 0; ki < k; ++ki) {
+      float local_max = -INFINITY;
+      int local_idx = -1;
 
-      if (tid == 0) {
-        block_values[chunk * k + ki] = final_max;
-        block_indices[chunk * k + ki] =
-            final_idx >= 0 ? static_cast<uint32_t>(final_idx) : 0;
-        if (final_idx >= start && final_idx < end) {
-          s_used[final_idx - start] = true;
+      for (int local = tid; local < width; local += block_size) {
+        const float candidate = topk_to_float(input[start + local]);
+        if (!s_used[local] && candidate == candidate && candidate > local_max) {
+          local_max = candidate;
+          local_idx = start + local;
         }
       }
+
+      int warp_max_idx;
+      float warp_max =
+          warp_reduce_max_with_idx<float>(local_max, local_idx, warp_max_idx);
+
+      __shared__ float warp_maxes[32];
+      __shared__ int warp_indices[32];
+
+      const int warp_id = tid / 32;
+      const int lane_id = tid % 32;
+      const int num_warps = (block_size + 31) / 32;
+
+      if (lane_id == 0) {
+        warp_maxes[warp_id] = warp_max;
+        warp_indices[warp_id] = warp_max_idx;
+      }
+      __syncthreads();
+
+      if (tid < 32) {
+        float val = (tid < num_warps) ? warp_maxes[tid] : -INFINITY;
+        int idx = (tid < num_warps) ? warp_indices[tid] : -1;
+        int final_idx;
+        float final_max = warp_reduce_max_with_idx<float>(val, idx, final_idx);
+
+        if (tid == 0) {
+          block_values[chunk * k + ki] = final_max;
+          block_indices[chunk * k + ki] =
+              final_idx >= 0 ? static_cast<uint32_t>(final_idx) : 0;
+          if (final_idx >= start && final_idx < end) {
+            s_used[final_idx - start] = true;
+          }
+        }
+      }
+      __syncthreads();
     }
-    __syncthreads();
   }
 
   if constexpr (COMPUTE_SOFTMAX) {
@@ -1876,7 +1990,8 @@ __global__ void topk_large_ranked_stage1_radix(
   const size_t row = blockIdx.y;
   const int chunk = blockIdx.x;
   const int start = chunk * RANKED_TOPK_RADIX_CAPACITY;
-  const int thread_start = start + threadIdx.x * RANKED_TOPK_RADIX_ITEMS_PER_THREAD;
+  const int thread_start =
+      start + threadIdx.x * RANKED_TOPK_RADIX_ITEMS_PER_THREAD;
   input += row * static_cast<size_t>(ncols);
   const size_t candidate_stride = static_cast<size_t>(gridDim.x) * k;
   block_values += row * candidate_stride + static_cast<size_t>(chunk) * k;
@@ -1908,10 +2023,11 @@ __global__ void topk_large_ranked_stage1_radix(
   }
 }
 
-__global__ void topk_large_ranked_stage2_radix(
-    const float *__restrict__ block_values,
-    const uint32_t *__restrict__ block_indices, float *__restrict__ packed_out,
-    const int nblocks, const int k) {
+__global__ void
+topk_large_ranked_stage2_radix(const float *__restrict__ block_values,
+                               const uint32_t *__restrict__ block_indices,
+                               float *__restrict__ packed_out,
+                               const int nblocks, const int k) {
   using BlockSort =
       cub::BlockRadixSort<float, RANKED_TOPK_RADIX_THREADS,
                           RANKED_TOPK_RADIX_ITEMS_PER_THREAD, uint32_t>;
@@ -1940,16 +2056,16 @@ __global__ void topk_large_ranked_stage2_radix(
     const int rank = threadIdx.x * RANKED_TOPK_RADIX_ITEMS_PER_THREAD + item;
     if (rank < k) {
       packed_out[rank] = keys[item];
-      packed_out[k + rank] = keys[item] > -INFINITY
-                                 ? static_cast<float>(indices[item])
-                                 : 0.0f;
+      packed_out[k + rank] =
+          keys[item] > -INFINITY ? static_cast<float>(indices[item]) : 0.0f;
     }
   }
 }
 
-__global__ void sample_ranked_topk_kernel(
-    const float *__restrict__ packed, const float *__restrict__ params,
-    uint32_t *__restrict__ tokens, const int nrows, const int packed_k) {
+__global__ void sample_ranked_topk_kernel(const float *__restrict__ packed,
+                                          const float *__restrict__ params,
+                                          uint32_t *__restrict__ tokens,
+                                          const int nrows, const int packed_k) {
   const int row = blockIdx.x * blockDim.x + threadIdx.x;
   if (row >= nrows) {
     return;
@@ -2052,9 +2168,9 @@ __global__ void sample_ranked_topk_kernel(
                                                  : UINT32_MAX;
 }
 
-extern "C" void sample_ranked_topk(
-    const float *packed, const float *params, uint32_t *tokens,
-    const int nrows, const int packed_k, int64_t stream) {
+extern "C" void sample_ranked_topk(const float *packed, const float *params,
+                                   uint32_t *tokens, const int nrows,
+                                   const int packed_k, int64_t stream) {
   if (nrows <= 0 || packed_k <= 0) {
     return;
   }
@@ -2064,7 +2180,8 @@ extern "C" void sample_ranked_topk(
       packed, params, tokens, nrows, packed_k);
 }
 
-// Draws a draft from the ranked top-k (top-k 0: the whole packed width) and writes the filtered q it drew from.
+// Draws a draft from the ranked top-k (top-k 0: the whole packed width) and
+// writes the filtered q it drew from.
 __global__ void sample_ranked_topk_distribution_kernel(
     const float *__restrict__ packed, const float *__restrict__ params,
     uint32_t *__restrict__ tokens, uint32_t *__restrict__ ids,
@@ -2159,25 +2276,28 @@ extern "C" void sample_ranked_topk_distribution(
   }
   const int block = RANKED_TOPK_SAMPLE_THREADS;
   const int grid = (nrows + block - 1) / block;
-  sample_ranked_topk_distribution_kernel<<<grid, block, 0, (cudaStream_t)stream>>>(
+  sample_ranked_topk_distribution_kernel<<<grid, block, 0,
+                                           (cudaStream_t)stream>>>(
       packed, params, tokens, ids, probs, nrows, packed_k);
 }
 
 constexpr int NUCLEUS_SAMPLE_THREADS = 1024;
 // Halves [NUCLEUS_MIN_SCORE, 0] each step, far below f32 spacing after 40.
 constexpr int NUCLEUS_BISECTION_STEPS = 40;
-// expf underflows to 0 below this, so lower scores (masked -inf included) carry no mass.
+// expf underflows to 0 below this, so lower scores (masked -inf included) carry
+// no mass.
 constexpr float NUCLEUS_MIN_SCORE = -104.0f;
 
 using NucleusReduce = cub::BlockReduce<float, NUCLEUS_SAMPLE_THREADS>;
 
-// Sum over the row of exp(logit * inverse_temperature - scaled_max), on every thread of the block.
+// Sum over the row of exp(logit * inverse_temperature - scaled_max), on every
+// thread of the block.
 template <typename T>
-__device__ float nucleus_row_normalizer(const T *row_logits, const int vocab,
-                                        const float inv_temperature,
-                                        const float scaled_max,
-                                        typename NucleusReduce::TempStorage &temp,
-                                        float &shared) {
+__device__ float
+nucleus_row_normalizer(const T *row_logits, const int vocab,
+                       const float inv_temperature, const float scaled_max,
+                       typename NucleusReduce::TempStorage &temp,
+                       float &shared) {
   float local = 0.0f;
   for (int i = threadIdx.x; i < vocab; i += NUCLEUS_SAMPLE_THREADS) {
     local += expf(topk_to_float(row_logits[i]) * inv_temperature - scaled_max);
@@ -2190,36 +2310,38 @@ __device__ float nucleus_row_normalizer(const T *row_logits, const int vocab,
   return shared;
 }
 
-// The full-vocabulary normalizer of each ranked row, scaled by its sequence's inverse temperature.
+// The full-vocabulary normalizer of each ranked row, scaled by its sequence's
+// inverse temperature.
 template <typename T>
 __global__ void __launch_bounds__(NUCLEUS_SAMPLE_THREADS)
-    ranked_row_normalizers_kernel(const T *__restrict__ logits,
-                                  const float *__restrict__ packed,
-                                  const float *__restrict__ inverse_temperatures,
-                                  float *__restrict__ normalizers, const int vocab,
-                                  const int packed_k, const int rows_per_sequence) {
+    ranked_row_normalizers_kernel(
+        const T *__restrict__ logits, const float *__restrict__ packed,
+        const float *__restrict__ inverse_temperatures,
+        float *__restrict__ normalizers, const int vocab, const int packed_k,
+        const int rows_per_sequence) {
   __shared__ typename NucleusReduce::TempStorage temp;
   __shared__ float shared;
   const int row = blockIdx.x;
   const float inv_temperature = inverse_temperatures[row / rows_per_sequence];
   const float scaled_max =
       packed[static_cast<size_t>(row) * 2 * packed_k] * inv_temperature;
-  const float total = nucleus_row_normalizer(
-      logits + static_cast<size_t>(row) * vocab, vocab, inv_temperature,
-      scaled_max, temp, shared);
+  const float total =
+      nucleus_row_normalizer(logits + static_cast<size_t>(row) * vocab, vocab,
+                             inv_temperature, scaled_max, temp, shared);
   if (threadIdx.x == 0) {
     normalizers[row] = total;
   }
 }
 
-// Top-p / min-p over the whole vocabulary by the CPU sampler's rule; a nucleus wider than the ranked top-k bisects.
+// Top-p / min-p over the whole vocabulary by the CPU sampler's rule; a nucleus
+// wider than the ranked top-k bisects.
 template <typename T>
 __global__ void __launch_bounds__(NUCLEUS_SAMPLE_THREADS)
     sample_nucleus_kernel(const T *__restrict__ logits,
-                                      const float *__restrict__ packed,
-                                      const float *__restrict__ params,
-                                      uint32_t *__restrict__ tokens,
-                                      const int vocab, const int packed_k) {
+                          const float *__restrict__ packed,
+                          const float *__restrict__ params,
+                          uint32_t *__restrict__ tokens, const int vocab,
+                          const int packed_k) {
   using Reduce = NucleusReduce;
   using ReduceInt = cub::BlockReduce<int, NUCLEUS_SAMPLE_THREADS>;
   using Scan = cub::BlockScan<float, NUCLEUS_SAMPLE_THREADS>;
@@ -2256,9 +2378,11 @@ __global__ void __launch_bounds__(NUCLEUS_SAMPLE_THREADS)
   const bool filter_top_p = top_p > 0.0f && top_p < 1.0f;
   const bool filter_min_p = min_p > 0.0f && min_p < 1.0f;
 
-  // Weights are exp(score - max), so the top token weighs 1 and min-p compares weights against min_p itself.
-  const float total = nucleus_row_normalizer(row_logits, vocab, inv_temperature,
-                                             scaled_max, temp.reduce, shared_float);
+  // Weights are exp(score - max), so the top token weighs 1 and min-p compares
+  // weights against min_p itself.
+  const float total =
+      nucleus_row_normalizer(row_logits, vocab, inv_temperature, scaled_max,
+                             temp.reduce, shared_float);
   const float cutoff = top_p * total;
 
   if (tid == 0) {
@@ -2354,7 +2478,8 @@ __global__ void __launch_bounds__(NUCLEUS_SAMPLE_THREADS)
     threshold = low;
   }
 
-  const int chunk = (vocab + NUCLEUS_SAMPLE_THREADS - 1) / NUCLEUS_SAMPLE_THREADS;
+  const int chunk =
+      (vocab + NUCLEUS_SAMPLE_THREADS - 1) / NUCLEUS_SAMPLE_THREADS;
   const int begin = min(tid * chunk, vocab);
   const int end = min(begin + chunk, vocab);
   float partial = 0.0f;
@@ -2391,7 +2516,8 @@ __global__ void __launch_bounds__(NUCLEUS_SAMPLE_THREADS)
     }
   }
   __syncthreads();
-  const int row_last_kept = ReduceInt(temp.reduce_int).Reduce(last_kept, cub::Max());
+  const int row_last_kept =
+      ReduceInt(temp.reduce_int).Reduce(last_kept, cub::Max());
   if (tid == 0) {
     if (shared_token == UINT32_MAX && row_last_kept >= 0) {
       shared_token = static_cast<uint32_t>(row_last_kept);
@@ -2412,17 +2538,21 @@ extern "C" void ranked_row_normalizers(const void *logits, const float *packed,
   }
   const cudaStream_t custream = (cudaStream_t)stream;
   if (dtype == 0) {
-    ranked_row_normalizers_kernel<__half><<<nrows, NUCLEUS_SAMPLE_THREADS, 0, custream>>>(
-        static_cast<const __half *>(logits), packed, inverse_temperatures,
-        normalizers, vocab, packed_k, rows_per_sequence);
+    ranked_row_normalizers_kernel<__half>
+        <<<nrows, NUCLEUS_SAMPLE_THREADS, 0, custream>>>(
+            static_cast<const __half *>(logits), packed, inverse_temperatures,
+            normalizers, vocab, packed_k, rows_per_sequence);
   } else if (dtype == 1) {
-    ranked_row_normalizers_kernel<__nv_bfloat16><<<nrows, NUCLEUS_SAMPLE_THREADS, 0, custream>>>(
-        static_cast<const __nv_bfloat16 *>(logits), packed, inverse_temperatures,
-        normalizers, vocab, packed_k, rows_per_sequence);
+    ranked_row_normalizers_kernel<__nv_bfloat16>
+        <<<nrows, NUCLEUS_SAMPLE_THREADS, 0, custream>>>(
+            static_cast<const __nv_bfloat16 *>(logits), packed,
+            inverse_temperatures, normalizers, vocab, packed_k,
+            rows_per_sequence);
   } else {
-    ranked_row_normalizers_kernel<float><<<nrows, NUCLEUS_SAMPLE_THREADS, 0, custream>>>(
-        static_cast<const float *>(logits), packed, inverse_temperatures,
-        normalizers, vocab, packed_k, rows_per_sequence);
+    ranked_row_normalizers_kernel<float>
+        <<<nrows, NUCLEUS_SAMPLE_THREADS, 0, custream>>>(
+            static_cast<const float *>(logits), packed, inverse_temperatures,
+            normalizers, vocab, packed_k, rows_per_sequence);
   }
 }
 
@@ -2436,14 +2566,20 @@ extern "C" void sample_nucleus(const void *logits, const float *packed,
   }
   const cudaStream_t custream = (cudaStream_t)stream;
   if (dtype == 0) {
-    sample_nucleus_kernel<__half><<<nrows, NUCLEUS_SAMPLE_THREADS, 0, custream>>>(
-        static_cast<const __half *>(logits), packed, params, tokens, vocab, packed_k);
+    sample_nucleus_kernel<__half>
+        <<<nrows, NUCLEUS_SAMPLE_THREADS, 0, custream>>>(
+            static_cast<const __half *>(logits), packed, params, tokens, vocab,
+            packed_k);
   } else if (dtype == 1) {
-    sample_nucleus_kernel<__nv_bfloat16><<<nrows, NUCLEUS_SAMPLE_THREADS, 0, custream>>>(
-        static_cast<const __nv_bfloat16 *>(logits), packed, params, tokens, vocab, packed_k);
+    sample_nucleus_kernel<__nv_bfloat16>
+        <<<nrows, NUCLEUS_SAMPLE_THREADS, 0, custream>>>(
+            static_cast<const __nv_bfloat16 *>(logits), packed, params, tokens,
+            vocab, packed_k);
   } else {
-    sample_nucleus_kernel<float><<<nrows, NUCLEUS_SAMPLE_THREADS, 0, custream>>>(
-        static_cast<const float *>(logits), packed, params, tokens, vocab, packed_k);
+    sample_nucleus_kernel<float>
+        <<<nrows, NUCLEUS_SAMPLE_THREADS, 0, custream>>>(
+            static_cast<const float *>(logits), packed, params, tokens, vocab,
+            packed_k);
   }
 }
 
@@ -2466,15 +2602,17 @@ __global__ void topk_large_stage2_f32_packed(
       block_maxes += block_offset;
       block_sums += block_offset;
     }
-    packed_out +=
-        row * static_cast<size_t>(2 * k + (COMPUTE_SOFTMAX ? 2 : 0));
+    packed_out += row * static_cast<size_t>(2 * k + (COMPUTE_SOFTMAX ? 2 : 0));
   }
 
   extern __shared__ char smem[];
   bool *s_used = reinterpret_cast<bool *>(smem);
+  const bool merge = nblocks <= TOPK_LARGE_MAX_MERGE_LISTS;
 
-  for (int i = tid; i < n_candidates; i += block_size) {
-    s_used[i] = false;
+  if (!merge) {
+    for (int i = tid; i < n_candidates; i += block_size) {
+      s_used[i] = false;
+    }
   }
   __syncthreads();
 
@@ -2524,6 +2662,50 @@ __global__ void topk_large_stage2_f32_packed(
     __syncthreads();
   }
 
+  if (merge) {
+    // each chunk's list is sorted: a k-way merge of their heads in the first
+    // warp, ties to the lower chunk (the lower token range), as the full scan's
+    // lowest position
+    if (warp_id == 0) {
+      int *s_head = reinterpret_cast<int *>(smem);
+      float *s_head_value = reinterpret_cast<float *>(s_head + nblocks);
+      for (int list = lane_id; list < nblocks; list += 32) {
+        s_head[list] = 0;
+        s_head_value[list] = block_values[list * k];
+      }
+      __syncwarp();
+      for (int ki = 0; ki < k; ++ki) {
+        float local_max = -INFINITY;
+        int local_list = -1;
+        for (int list = lane_id; list < nblocks; list += 32) {
+          const float candidate = s_head_value[list];
+          if (candidate == candidate && candidate > local_max) {
+            local_max = candidate;
+            local_list = list;
+          }
+        }
+        int best_list;
+        const float best =
+            warp_reduce_max_with_idx<float>(local_max, local_list, best_list);
+        if (lane_id == 0) {
+          packed_out[ki] = best;
+          packed_out[k + ki] =
+              best_list >= 0
+                  ? static_cast<float>(
+                        block_indices[best_list * k + s_head[best_list]])
+                  : 0.0f;
+          if (best_list >= 0) {
+            const int next = ++s_head[best_list];
+            s_head_value[best_list] =
+                next < k ? block_values[best_list * k + next] : -INFINITY;
+          }
+        }
+        __syncwarp();
+      }
+    }
+    return;
+  }
+
   for (int ki = 0; ki < k; ++ki) {
     float local_max = -INFINITY;
     int local_pos = -1;
@@ -2570,11 +2752,12 @@ __global__ void topk_large_stage2_f32_packed(
 }
 
 template <typename T, bool BATCHED, bool COMPUTE_SUMS>
-__global__ void top1_large_stage1(
-    const T *__restrict__ input, float *__restrict__ block_values,
-    uint32_t *__restrict__ block_indices, float *__restrict__ block_sums,
-    const int ncols, const int chunk_size,
-    const float *__restrict__ inv_temperatures) {
+__global__ void top1_large_stage1(const T *__restrict__ input,
+                                  float *__restrict__ block_values,
+                                  uint32_t *__restrict__ block_indices,
+                                  float *__restrict__ block_sums,
+                                  const int ncols, const int chunk_size,
+                                  const float *__restrict__ inv_temperatures) {
   const size_t row = BATCHED ? blockIdx.y : 0;
   const int chunk = blockIdx.x;
   if constexpr (BATCHED) {
@@ -2816,12 +2999,10 @@ __global__ void categorical_large_stage2_f32_packed(
 }
 
 template <bool BATCHED>
-__global__ void
-top1_large_stage2_f32_packed(const float *__restrict__ block_values,
-                             const uint32_t *__restrict__ block_indices,
-                             float *__restrict__ packed_out,
-                             uint32_t *__restrict__ token_ids_out,
-                             const int nblocks) {
+__global__ void top1_large_stage2_f32_packed(
+    const float *__restrict__ block_values,
+    const uint32_t *__restrict__ block_indices, float *__restrict__ packed_out,
+    uint32_t *__restrict__ token_ids_out, const int nblocks) {
   const int tid = threadIdx.x;
   const int block_size = blockDim.x;
   if constexpr (BATCHED) {
@@ -2873,11 +3054,9 @@ top1_large_stage2_f32_packed(const float *__restrict__ block_values,
     float final_max = warp_reduce_max_with_idx<float>(val, pos, final_pos);
 
     if (tid == 0) {
-      const uint32_t token_id = row_has_nan
-                                    ? UINT32_MAX
-                                    : final_pos >= 0
-                                          ? block_indices[final_pos]
-                                          : 0;
+      const uint32_t token_id = row_has_nan      ? UINT32_MAX
+                                : final_pos >= 0 ? block_indices[final_pos]
+                                                 : 0;
       if (packed_out != nullptr) {
         packed_out[0] = row_has_nan ? NAN : final_max;
         packed_out[1] = row_has_nan ? NAN : static_cast<float>(token_id);
@@ -2897,18 +3076,17 @@ extern "C" void topk_large_f32_packed(const float *input, float *block_values,
                                       float inv_temperature, int64_t stream) {
   const cudaStream_t custream = (cudaStream_t)stream;
   constexpr int block_size = 256;
-  const size_t stage1_smem = static_cast<size_t>(chunk_size) * sizeof(bool);
-  const size_t stage2_smem =
-      static_cast<size_t>(nblocks) * static_cast<size_t>(k) * sizeof(bool);
+  const size_t stage1_smem = topk_large_stage1_smem(chunk_size);
+  const size_t stage2_smem = topk_large_stage2_smem(nblocks, k);
 
   topk_large_stage1<float, false, true>
-      <<<nblocks, block_size, stage1_smem, custream>>>(
-      input, block_values, block_indices, block_maxes, block_sums, ncols, k,
-      chunk_size, nullptr, inv_temperature);
+      <<<nblocks, TOPK_LARGE_STAGE1_THREADS, stage1_smem, custream>>>(
+          input, block_values, block_indices, block_maxes, block_sums, ncols, k,
+          chunk_size, nullptr, inv_temperature);
   topk_large_stage2_f32_packed<false, true>
-      <<<1, block_size, stage2_smem, custream>>>(
-      block_values, block_indices, block_maxes, block_sums, packed_out, nblocks,
-      k);
+      <<<1, block_size, stage2_smem, custream>>>(block_values, block_indices,
+                                                 block_maxes, block_sums,
+                                                 packed_out, nblocks, k);
 }
 
 template <typename T>
@@ -2919,13 +3097,12 @@ void launch_topk_large_packed_batched(
     int64_t stream) {
   const cudaStream_t custream = (cudaStream_t)stream;
   constexpr int block_size = 256;
-  const size_t stage1_smem = static_cast<size_t>(chunk_size) * sizeof(bool);
-  const size_t stage2_smem =
-      static_cast<size_t>(nblocks) * static_cast<size_t>(k) * sizeof(bool);
+  const size_t stage1_smem = topk_large_stage1_smem(chunk_size);
+  const size_t stage2_smem = topk_large_stage2_smem(nblocks, k);
   const dim3 stage1_grid(nblocks, nrows);
 
   topk_large_stage1<T, true, true>
-      <<<stage1_grid, block_size, stage1_smem, custream>>>(
+      <<<stage1_grid, TOPK_LARGE_STAGE1_THREADS, stage1_smem, custream>>>(
           input, block_values, block_indices, block_maxes, block_sums, ncols, k,
           chunk_size, inv_temperatures, 0.0f);
   topk_large_stage2_f32_packed<true, true>
@@ -2952,17 +3129,17 @@ cudaError_t launch_topk_large_ranked_packed_batched(
     int chunk_size, int nblocks, int64_t stream) {
   const cudaStream_t custream = (cudaStream_t)stream;
   bool radix_launched = false;
-  cudaError_t status = inference_radix_topk::launch(
-      input, packed_out, radix_workspace, nrows, ncols, k, custream,
-      &radix_launched);
+  cudaError_t status =
+      inference_radix_topk::launch(input, packed_out, radix_workspace, nrows,
+                                   ncols, k, custream, &radix_launched);
   if (status != cudaSuccess || radix_launched) {
     return status;
   }
   const dim3 stage1_grid(nblocks, nrows);
-  const bool use_radix =
-      chunk_size == RANKED_TOPK_RADIX_CAPACITY &&
-      k >= RANKED_TOPK_RADIX_MIN_K && k <= RANKED_TOPK_RADIX_MAX_K &&
-      nblocks * k <= RANKED_TOPK_RADIX_CAPACITY;
+  const bool use_radix = chunk_size == RANKED_TOPK_RADIX_CAPACITY &&
+                         k >= RANKED_TOPK_RADIX_MIN_K &&
+                         k <= RANKED_TOPK_RADIX_MAX_K &&
+                         nblocks * k <= RANKED_TOPK_RADIX_CAPACITY;
   if (use_radix) {
     topk_large_ranked_stage1_radix<T>
         <<<stage1_grid, RANKED_TOPK_RADIX_THREADS, 0, custream>>>(
@@ -2971,19 +3148,18 @@ cudaError_t launch_topk_large_ranked_packed_batched(
     if (status != cudaSuccess) {
       return status;
     }
-    topk_large_ranked_stage2_radix
-        <<<nrows, RANKED_TOPK_RADIX_THREADS, 0, custream>>>(
-            block_values, block_indices, packed_out, nblocks, k);
+    topk_large_ranked_stage2_radix<<<nrows, RANKED_TOPK_RADIX_THREADS, 0,
+                                     custream>>>(block_values, block_indices,
+                                                 packed_out, nblocks, k);
     return cudaGetLastError();
   }
 
   constexpr int block_size = 256;
-  const size_t stage1_smem = static_cast<size_t>(chunk_size) * sizeof(bool);
-  const size_t stage2_smem =
-      static_cast<size_t>(nblocks) * static_cast<size_t>(k) * sizeof(bool);
+  const size_t stage1_smem = topk_large_stage1_smem(chunk_size);
+  const size_t stage2_smem = topk_large_stage2_smem(nblocks, k);
 
   topk_large_stage1<T, true, false>
-      <<<stage1_grid, block_size, stage1_smem, custream>>>(
+      <<<stage1_grid, TOPK_LARGE_STAGE1_THREADS, stage1_smem, custream>>>(
           input, block_values, block_indices, nullptr, nullptr, ncols, k,
           chunk_size, nullptr, 0.0f);
   status = cudaGetLastError();
@@ -2992,7 +3168,8 @@ cudaError_t launch_topk_large_ranked_packed_batched(
   }
   topk_large_stage2_f32_packed<true, false>
       <<<nrows, block_size, stage2_smem, custream>>>(
-          block_values, block_indices, nullptr, nullptr, packed_out, nblocks, k);
+          block_values, block_indices, nullptr, nullptr, packed_out, nblocks,
+          k);
   return cudaGetLastError();
 }
 
@@ -3005,8 +3182,8 @@ extern "C" int topk_large_ranked_f32_packed_batched(
     float *packed_out, void *radix_workspace, int nrows, int ncols, int k,
     int chunk_size, int nblocks, int64_t stream) {
   return static_cast<int>(launch_topk_large_ranked_packed_batched(
-      input, block_values, block_indices, packed_out, radix_workspace, nrows, ncols, k,
-      chunk_size, nblocks, stream));
+      input, block_values, block_indices, packed_out, radix_workspace, nrows,
+      ncols, k, chunk_size, nblocks, stream));
 }
 
 extern "C" int topk_large_ranked_bf16_packed_batched(
@@ -3014,8 +3191,8 @@ extern "C" int topk_large_ranked_bf16_packed_batched(
     float *packed_out, void *radix_workspace, int nrows, int ncols, int k,
     int chunk_size, int nblocks, int64_t stream) {
   return static_cast<int>(launch_topk_large_ranked_packed_batched(
-      input, block_values, block_indices, packed_out, radix_workspace, nrows, ncols, k,
-      chunk_size, nblocks, stream));
+      input, block_values, block_indices, packed_out, radix_workspace, nrows,
+      ncols, k, chunk_size, nblocks, stream));
 }
 
 extern "C" int topk_large_ranked_f16_packed_batched(
@@ -3023,8 +3200,8 @@ extern "C" int topk_large_ranked_f16_packed_batched(
     float *packed_out, void *radix_workspace, int nrows, int ncols, int k,
     int chunk_size, int nblocks, int64_t stream) {
   return static_cast<int>(launch_topk_large_ranked_packed_batched(
-      input, block_values, block_indices, packed_out, radix_workspace, nrows, ncols, k,
-      chunk_size, nblocks, stream));
+      input, block_values, block_indices, packed_out, radix_workspace, nrows,
+      ncols, k, chunk_size, nblocks, stream));
 }
 
 template <typename T, bool BATCHED>
@@ -3037,70 +3214,74 @@ void launch_top1_large_packed(const T *input, float *block_values,
   const dim3 stage1_grid(nblocks, BATCHED ? nrows : 1);
 
   top1_large_stage1<T, BATCHED, false>
-      <<<stage1_grid, block_size, 0, custream>>>(
-      input, block_values, block_indices, nullptr, ncols, chunk_size, nullptr);
+      <<<stage1_grid, block_size, 0, custream>>>(input, block_values,
+                                                 block_indices, nullptr, ncols,
+                                                 chunk_size, nullptr);
   top1_large_stage2_f32_packed<BATCHED>
       <<<BATCHED ? nrows : 1, block_size, 0, custream>>>(
-      block_values, block_indices, packed_out, token_ids_out, nblocks);
+          block_values, block_indices, packed_out, token_ids_out, nblocks);
 }
 
 extern "C" void top1_large_f32_packed(const float *input, float *block_values,
                                       uint32_t *block_indices,
                                       float *packed_out,
                                       uint32_t *token_ids_out, int ncols,
-                                      int chunk_size, int nblocks, int64_t stream) {
-  launch_top1_large_packed<float, false>(
-      input, block_values, block_indices, packed_out, token_ids_out, 1, ncols,
-      chunk_size, nblocks, stream);
+                                      int chunk_size, int nblocks,
+                                      int64_t stream) {
+  launch_top1_large_packed<float, false>(input, block_values, block_indices,
+                                         packed_out, token_ids_out, 1, ncols,
+                                         chunk_size, nblocks, stream);
 }
 
-extern "C" void top1_large_bf16_packed(
-    const __nv_bfloat16 *input, float *block_values, uint32_t *block_indices,
-    float *packed_out, uint32_t *token_ids_out, int ncols, int chunk_size,
-    int nblocks, int64_t stream) {
+extern "C" void
+top1_large_bf16_packed(const __nv_bfloat16 *input, float *block_values,
+                       uint32_t *block_indices, float *packed_out,
+                       uint32_t *token_ids_out, int ncols, int chunk_size,
+                       int nblocks, int64_t stream) {
   launch_top1_large_packed<__nv_bfloat16, false>(
       input, block_values, block_indices, packed_out, token_ids_out, 1, ncols,
       chunk_size, nblocks, stream);
 }
 
-extern "C" void top1_large_f16_packed(
-    const __half *input, float *block_values, uint32_t *block_indices,
-    float *packed_out, uint32_t *token_ids_out, int ncols, int chunk_size,
-    int nblocks, int64_t stream) {
-  launch_top1_large_packed<__half, false>(
-      input, block_values, block_indices, packed_out, token_ids_out, 1, ncols,
-      chunk_size, nblocks, stream);
+extern "C" void top1_large_f16_packed(const __half *input, float *block_values,
+                                      uint32_t *block_indices,
+                                      float *packed_out,
+                                      uint32_t *token_ids_out, int ncols,
+                                      int chunk_size, int nblocks,
+                                      int64_t stream) {
+  launch_top1_large_packed<__half, false>(input, block_values, block_indices,
+                                          packed_out, token_ids_out, 1, ncols,
+                                          chunk_size, nblocks, stream);
 }
 
-extern "C" void top1_large_f32_packed_batched(const float *input,
-                                              float *block_values,
-                                              uint32_t *block_indices,
-                                              float *packed_out,
-                                              uint32_t *token_ids_out,
-                                              int nrows, int ncols,
-                                              int chunk_size, int nblocks,
-                                              int64_t stream) {
-  launch_top1_large_packed<float, true>(
-      input, block_values, block_indices, packed_out, token_ids_out, nrows,
-      ncols, chunk_size, nblocks, stream);
+extern "C" void
+top1_large_f32_packed_batched(const float *input, float *block_values,
+                              uint32_t *block_indices, float *packed_out,
+                              uint32_t *token_ids_out, int nrows, int ncols,
+                              int chunk_size, int nblocks, int64_t stream) {
+  launch_top1_large_packed<float, true>(input, block_values, block_indices,
+                                        packed_out, token_ids_out, nrows, ncols,
+                                        chunk_size, nblocks, stream);
 }
 
-extern "C" void top1_large_bf16_packed_batched(
-    const __nv_bfloat16 *input, float *block_values, uint32_t *block_indices,
-    float *packed_out, uint32_t *token_ids_out, int nrows, int ncols,
-    int chunk_size, int nblocks, int64_t stream) {
+extern "C" void
+top1_large_bf16_packed_batched(const __nv_bfloat16 *input, float *block_values,
+                               uint32_t *block_indices, float *packed_out,
+                               uint32_t *token_ids_out, int nrows, int ncols,
+                               int chunk_size, int nblocks, int64_t stream) {
   launch_top1_large_packed<__nv_bfloat16, true>(
       input, block_values, block_indices, packed_out, token_ids_out, nrows,
       ncols, chunk_size, nblocks, stream);
 }
 
-extern "C" void top1_large_f16_packed_batched(
-    const __half *input, float *block_values, uint32_t *block_indices,
-    float *packed_out, uint32_t *token_ids_out, int nrows, int ncols,
-    int chunk_size, int nblocks, int64_t stream) {
-  launch_top1_large_packed<__half, true>(
-      input, block_values, block_indices, packed_out, token_ids_out, nrows,
-      ncols, chunk_size, nblocks, stream);
+extern "C" void
+top1_large_f16_packed_batched(const __half *input, float *block_values,
+                              uint32_t *block_indices, float *packed_out,
+                              uint32_t *token_ids_out, int nrows, int ncols,
+                              int chunk_size, int nblocks, int64_t stream) {
+  launch_top1_large_packed<__half, true>(input, block_values, block_indices,
+                                         packed_out, token_ids_out, nrows,
+                                         ncols, chunk_size, nblocks, stream);
 }
 
 extern "C" void categorical_large_f32_packed_batched(
@@ -3114,9 +3295,9 @@ extern "C" void categorical_large_f32_packed_batched(
       static_cast<size_t>(chunk_size) * 2 * sizeof(float);
 
   top1_large_stage1<float, true, true>
-      <<<stage1_grid, block_size, 0, custream>>>(
-      input, block_values, nullptr, block_sums, ncols, chunk_size,
-      inv_temperatures);
+      <<<stage1_grid, block_size, 0, custream>>>(input, block_values, nullptr,
+                                                 block_sums, ncols, chunk_size,
+                                                 inv_temperatures);
   categorical_large_stage2_f32_packed<<<nrows, block_size, stage2_smem,
                                         custream>>>(
       input, inv_temperatures, uniforms, block_values, block_sums, packed_out,

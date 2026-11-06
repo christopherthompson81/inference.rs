@@ -137,3 +137,40 @@ kernel's 11 cases pass, the four CPU-reference ones (ties, top-p) included.
 (`topk_large`: 64 blocks for stage 1, one block merging 8,192 candidates in stage 2), ~1.5 ms a step for the drafter's
 three draws and the verify rows. (Tool-call numbers on this branch are not comparable: it lacks #826's grammar fix,
 so tool-call replies run to max_tokens.)
+
+## Run 5 - 2026-11-05
+
+**Question:** after the rejection kernel, the ranked top-K (`topk_large`) was ~1.5 ms a sampled step; can it keep its
+order and get fast?
+
+**Reading:** both stages selected by k = 128 rounds of argmax: stage 1 rescanned its 2,048-value chunk from global memory
+with two barriers a round, in 64 blocks; stage 2 rescanned a row's 8,192 candidates the same way in one block.
+
+**Change:** stage 1 sorts its chunk once in shared memory (bitonic, by value then lower index, NaN and -inf last and
+written as (-inf, 0) as before) when the chunk is a power of two, launched with 1,024 threads (two values a thread);
+stage 2 merges the chunks' sorted lists in one warp (each round compares the list heads, ties to the lower chunk,
+the lower index range) when a row has at most 1,024 lists. Other shapes keep the argmax rounds. Stage 2's
+block-wide softmax prologue is untouched, so the normalizers top-p reads are the same bits. The top-K, sort,
+sampler and rejection suites pass (ties across chunks, special values, offsets, mixed temperatures).
+
+Nsight over one sampled story (263 steps), per launch:
+
+| kernel | before | sort + merge (256 threads) |
+|---|---|---|
+| `sparse_rejection_topk_f32_kernel` | 1,476-1,906 us | 99.7 us (Run 4's block kernel) |
+| `topk_large_stage1` | 144 us | 111 us |
+| `topk_large_stage2_f32_packed` | 207 us | 74.7 us |
+
+| prose story, 600 tokens | Run 4 | sort + merge | stage 1 at 1,024 threads |
+|---|---|---|---|
+| sampled | 145.3 / 148.6 | 153.0 / 156.2 | **154.1 / 157.8** |
+| greedy | 190.8 | 190.1 | 190.9 |
+
+The sampled replies are the same 539 / 524 tokens throughout: the same outcomes.
+
+**Check, from the user** (why greedy reads 190 when plain decode was ~250 and MTP ~300): the same build on Run 25's
+benchmark (`mtp/run.sh`, 4 prompts x 256 tokens, 8K context): plain 251.0 / 251.0 / 249.4 / 250.7 (mean 250.5),
+MTP 3 with the q4_0 head 331.2 / 251.2 / 228.2 / 397.5 (mean 302.0, length 3.18). This run's 600-token prose story with a 32K context is
+MTP's weakest case (the benchmark's prose prompt alone is 228); no regression.
+
+**Implication:** sampled now trails greedy by 1.21x on prose, acceptance accounting for 1.12x of it.
