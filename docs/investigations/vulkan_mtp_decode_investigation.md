@@ -105,3 +105,36 @@ over greedy MTP prose replies; then `INFERENCE_VULKAN_PROFILE`.
 
 **Implication:** MTP on Vulkan (~115-143 tok/s) still trails plain Vulkan decode (~199). What is left is GPU work a step
 (the checkpoint copies, the verify forward's 4-row matvecs) and recording overlapping the GPU, not round trips.
+
+## Run 5 - 2026-11-05
+
+**Question:** with one sync a step, what holds the step: the host or the GPU?
+
+**Command:** `perf record --call-graph lbr` on the server during greedy MTP 3 decode (DWARF unwinding lost the
+stacks); `INFERENCE_VULKAN_PROFILE`; then an alternating A/B of plain decode and MTP 1/2/3 (6 replies each, the last 4).
+
+**Finding, host:** 12.8 % of host time uploaded tiny tensors (`storage_from_cpu_storage` -> `Buffer::write` -> a recorded
+copy): `Tensor::arange` slots in `MambaLayer::forward_full` (twice a Mamba layer, every step) and `Tensor::new(rows)`
+in the commit replay's `pick` (four a layer). One core was busy for the whole ~18.5 ms step, ~16 us of host per
+dispatch.
+
+**Change:** `MambaLayer::identity_slots` keeps the slots for the last batch size; the replay builds each group's rows
+once (none when the group is the whole batch). MTP 3: ~140 -> 163-169 tok/s.
+
+**Finding, GPU:** busy ~84 % after it (under the profiler). Per step (~362 steps a window): expert matvecs 3.38 ms, q8
+matvecs 2.56, `copy_b32` 1.19, q5 0.75, the draft head 0.61, row ops 0.57, router 0.39, scan 0.32; ~11.6 ms. Four tokens
+route to ~22 distinct experts of 128 (6 each), so the experts' weights (~2.8 GB a step) are read at ~88 % of the 3090's
+bandwidth: MTP 3's expert reads cost ~4x a plain token's, a ceiling of ~2.14 / 11.6 ms ~ 184 tok/s.
+
+| greedy prose, mean of the last 4 | round 1 | round 2 |
+|---|---|---|
+| plain | 173.3 | 182.0 |
+| MTP 1 | **194.5** | **188.4** |
+| MTP 2 | 176.8 | 180.8 |
+| MTP 3 | 158.4 | 156.8 |
+
+(acceptance len: MTP 1 1.64, MTP 2 1.95, MTP 3 2.12)
+
+**Implication:** on Vulkan the MoE expert reads, not host overhead, now bound the verify; one draft is the best
+setting (+4-12 % over plain), three the worst. Further gains need fewer bytes a step (copies ~1.2 ms, the two
+vocabulary projections ~1.2 ms), not fewer round trips.
