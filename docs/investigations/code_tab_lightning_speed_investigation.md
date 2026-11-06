@@ -174,3 +174,36 @@ MTP 3 with the q4_0 head 331.2 / 251.2 / 228.2 / 397.5 (mean 302.0, length 3.18)
 MTP's weakest case (the benchmark's prose prompt alone is 228); no regression.
 
 **Implication:** sampled now trails greedy by 1.21x on prose, acceptance accounting for 1.12x of it.
+
+## Run 6 - 2026-11-05
+
+**Question, from the user:** why does a sampled tool call still trail sampled prose?
+
+**Command:** `code/accept.py` (a 400-word story as text and as a `write` call, sampled) on #826 plus Runs 2-5; then an
+Nsight session over both and a `perf record --call-graph dwarf` over a tool call.
+
+**Finding:**
+- Same acceptance (length 2.04-2.13 both), 160-165 tok/s prose against 111-112 for the tool call.
+- Per verify step, Nsight: prose 15.9 ms wall, 12.1 ms GPU busy (76 %); the tool call 24.5 ms wall, 12.0 ms busy (49 %),
+  and 1,045 MB copied to the host against 50 MB. The GPU does the same work; in the tool call it waits half the step.
+- The host, per verify row under the grammar (`sample_sequence` -> `Sampler::sample`): the full 131K logits copied over
+  and cast, a CPU softmax (8 % of samples), top-p's `select_nth` over the vocabulary (13 %), then the draw and the
+  grammar check, row after row. Vulkan already ranks such a row on the device (`vulkan_ranked_support`); CUDA had no
+  counterpart, so its constrained rows always took the full CPU path.
+
+**Change:** `Sampler::sample` on a CUDA row with a temperature, top-k within K or top-p / min-p, and no penalties, bias,
+processors or DRY: the row's top-128 and full-vocabulary normalizer from `cuda_topk_logits_f32_packed_batched`,
+read back as 258 floats, filtered by `ranked_support` as the CPU filters, and drawn over the candidates; a nucleus past
+K takes the full path. The grammar check after it is unchanged (a rejected token still takes the masked full path). For
+a given seed the drawn token can differ from the CPU's (the same distribution), as CUDA's batched sampling already
+does. A test pins the device row's support against a host-ranked one, and its refusal of a nucleus past K.
+
+| sampled, same acceptance | before | after |
+|---|---|---|
+| prose | 160-165 | 164-168 |
+| tool call | 111-112 | **154-174** |
+
+The Code tab demo (2-minute limit), three runs: 41.1 / 46.8 / 43.8 s, all passing (Run 3: 41-60 s; at the start 63-73).
+
+**Implication:** a sampled tool call decodes as fast as sampled prose. Altogether a sampled tool call went 39.7 -> ~165
+tok/s, and sampled prose 135 -> ~165.

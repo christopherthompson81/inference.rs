@@ -1708,6 +1708,64 @@ impl Sampler {
             && logits.elem_count() >= inference_tensor::vulkan::RANKED_TOP_K
     }
 
+    // the CUDA counterpart of `can_rank_on_vulkan`, for a row with no penalties or bias (they reshape the logits the
+    // ranking reads)
+    #[cfg(feature = "cuda")]
+    fn can_rank_on_cuda(&self, logits: &Tensor) -> bool {
+        let vocab = logits.elem_count();
+        let Some(max_k) = crate::ops::cuda_topk_ranked_packed_max_k(vocab) else {
+            return false;
+        };
+        let filters = if self.top_k > 0 {
+            self.top_k as usize <= max_k
+        } else {
+            (self.top_p > 0.0 && self.top_p < 1.0) || (self.min_p > 0.0 && self.min_p < 1.0)
+        };
+        logits.device().is_cuda()
+            && self.temperature.is_some_and(|t| t > 0.0)
+            && filters
+            && self.logits_processors.is_empty()
+            && self
+                .dry_params
+                .as_ref()
+                .is_none_or(|params| params.multiplier == 0.0)
+            && !self.needs_penalties()
+            && self.logits_bias.is_empty()
+    }
+
+    // a CUDA row's ranked top-K and full-vocabulary normalizer from the device, filtered here; `None` where the filters
+    // reach past it
+    #[cfg(feature = "cuda")]
+    fn cuda_ranked_support(&self, logits: &Tensor) -> Result<Option<RankedSupport>> {
+        let temperature = self.temperature.unwrap_or(1.0);
+        #[allow(clippy::cast_possible_truncation)]
+        let inv_temperature = (1.0 / temperature) as f32;
+        let row = logits
+            .flatten_all()?
+            .to_dtype(inference_tensor::DType::F32)?;
+        let vocab = row.dim(0)?;
+        let Some(k) = crate::ops::cuda_topk_ranked_packed_max_k(vocab) else {
+            return Ok(None);
+        };
+        let inverse_temperatures = Tensor::new(&[inv_temperature], row.device())?;
+        let packed = crate::ops::cuda_topk_logits_f32_packed_batched(
+            &row.reshape((1, vocab))?,
+            k,
+            &inverse_temperatures,
+        )?
+        .packed
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+        #[allow(clippy::cast_possible_truncation)]
+        Ok(ranked_support(
+            &packed,
+            inv_temperature,
+            self.top_k,
+            self.top_p as f32,
+            self.min_p as f32,
+        ))
+    }
+
     // a vocabulary row's ranked top-K from the device, filtered here; `None` where the filters reach past it
     fn vulkan_ranked_support(
         &self,
@@ -2711,6 +2769,27 @@ impl Sampler {
             && !sample_speculative
             && self.can_rank_on_vulkan(&logits)
             && let Some(support) = self.vulkan_ranked_support(&logits, context, prompt_len)?
+        {
+            let distr = WeightedIndex::new(&support.sampling).map_err(|e| {
+                Error::Msg(format!("Failed to construct the ranked top-k sampler: {e}"))
+            })?;
+            let selected = distr.sample(&mut *rng.lock().expect("could not lock rng mutex"));
+            return Ok(Logprobs {
+                token: support.tokens[selected],
+                logprob: support.reporting[selected].ln(),
+                top_logprobs: None,
+                bytes: None,
+            });
+        }
+
+        // likewise on CUDA, where a row is sampled alone (a grammar-constrained one, whose verify rows each sample
+        // here); the batched device paths serve the rest
+        #[cfg(feature = "cuda")]
+        if logits.device().is_cuda()
+            && !return_logprobs
+            && !sample_speculative
+            && self.can_rank_on_cuda(&logits)
+            && let Some(support) = self.cuda_ranked_support(&logits)?
         {
             let distr = WeightedIndex::new(&support.sampling).map_err(|e| {
                 Error::Msg(format!("Failed to construct the ranked top-k sampler: {e}"))
@@ -3735,6 +3814,66 @@ mod tests {
         assert_eq!(sampled.logprob, 0.0);
         assert!(sampler.sample_cuda_top1_row(&[4.5]).is_err());
         assert!(sampler.sample_cuda_top1_row(&[f32::NAN, f32::NAN]).is_err());
+    }
+
+    // a CUDA row ranked on the device keeps the support a row ranked on the host does, and refuses a nucleus past K
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn a_cuda_ranked_row_keeps_the_hosts_support() -> inference_tensor::Result<()> {
+        use super::{Sampler, ranked_support};
+        crate::skip_without_cuda!();
+        const VOCAB: usize = 131_072;
+        const PROB_TOLERANCE: f32 = 1e-5;
+        let device = Device::new_cuda(0).unwrap();
+        let temperature = 0.8f64;
+        let inv = (1.0 / temperature) as f32;
+        let peaked: Vec<f32> = (0..VOCAB)
+            .map(|i| -0.12 * ((i * 7919) % VOCAB) as f32 + if i % 9 == 0 { 0.5 } else { 0.0 })
+            .collect();
+        let flat: Vec<f32> = (0..VOCAB).map(|i| ((i * 31) % 17) as f32 * 0.01).collect();
+        for (row, top_p, fits) in [(&peaked, 0.95f64, true), (&flat, 0.95, false)] {
+            let sampler = Sampler::new(
+                Some(temperature),
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                0,
+                top_p,
+                0.0,
+                HashMap::new(),
+                vec![],
+            )
+            .unwrap();
+            let logits = Tensor::from_vec(row.clone(), VOCAB, &device).unwrap();
+            assert!(sampler.can_rank_on_cuda(&logits));
+            let device_support = sampler.cuda_ranked_support(&logits).unwrap();
+            assert_eq!(device_support.is_some(), fits, "top-p {top_p}");
+            let Some(device_support) = device_support else {
+                continue;
+            };
+            let k = crate::ops::cuda_topk_ranked_packed_max_k(VOCAB).unwrap();
+            let mut order: Vec<usize> = (0..VOCAB).collect();
+            order.sort_by(|&a, &b| row[b].total_cmp(&row[a]).then(a.cmp(&b)));
+            let scaled_max = row[order[0]] * inv;
+            let denom: f32 = row.iter().map(|v| (v * inv - scaled_max).exp()).sum();
+            let mut packed: Vec<f32> = order[..k].iter().map(|&i| row[i]).collect();
+            packed.extend(order[..k].iter().map(|&i| i as f32));
+            packed.extend([denom, scaled_max]);
+            let host_support = ranked_support(&packed, inv, 0, top_p as f32, 0.0).unwrap();
+            assert_eq!(device_support.tokens, host_support.tokens);
+            for (device_prob, host_prob) in
+                device_support.sampling.iter().zip(&host_support.sampling)
+            {
+                assert!(
+                    (device_prob - host_prob).abs() < PROB_TOLERANCE,
+                    "{device_prob} against {host_prob}"
+                );
+            }
+        }
+        Ok(())
     }
 
     // the ranked top-K a row filters as the CPU does: top-k, top-p, min-p and their mixes, a nucleus past K refused
