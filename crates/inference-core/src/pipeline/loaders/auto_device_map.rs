@@ -99,12 +99,13 @@ pub fn get_device_layers(
     let cache_plan = paged_attn_config.as_ref().map(|cfg| {
         inference_nn::paged_attention::cache_plan(cfg.cache_type, &cfg.cache_layers, &*model_cfg)
     });
+    let cache_dtype = crate::paged_attention::cache_activation_dtype(dtype, &devices[0]);
     let value_bytes = |idx: usize| {
         cache_plan
             .as_ref()
             .and_then(|plan| plan.layers.get(idx))
             .map_or((dtype.size_in_bytes(), 1), |cache| {
-                cache.bytes_per_value(dtype)
+                cache.bytes_per_value(cache_dtype)
             })
     };
     let kv_cache_elems = match paged_attn_config {
