@@ -1,3 +1,6 @@
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use ash::vk;
 
 use crate::{Error, Recorder, Result};
@@ -14,6 +17,11 @@ pub(crate) struct Pipeline {
     // bit b: binding b's buffer may be written (its block not decorated NonWritable)
     pub(crate) writes: u64,
 }
+
+// where compiled pipelines persist, under the user's cache directory, a file per device and driver build
+const DISK_CACHE_SUBDIR: &str = "inference-rs/vulkan";
+// VkPipelineCacheHeaderVersionOne: header length, version, vendor, device (u32 each), then the cache UUID
+const CACHE_HEADER_BYTES: usize = 16 + vk::UUID_SIZE;
 
 // SPIR-V opcodes and decorations the binding scan reads
 const OP_TYPE_POINTER: u32 = 32;
@@ -80,26 +88,173 @@ fn writable_bindings(code: &[u32]) -> u64 {
     writes
 }
 
-impl Pipeline {
-    pub(crate) fn new(
+/// A pipeline cache read from and written back to the user's cache directory, so a context whose shaders were
+/// compiled before skips the driver's compile.
+pub(crate) struct DiskCache {
+    pub(crate) cache: vk::PipelineCache,
+    path: Option<PathBuf>,
+    loaded: usize,
+}
+
+fn user_cache() -> Option<PathBuf> {
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+}
+
+// whether `data` is a cache this device and driver wrote: drivers need not check a foreign one
+fn header_matches(data: &[u8], properties: &vk::PhysicalDeviceProperties) -> bool {
+    let word = |at: usize| u32::from_le_bytes(data[at..at + 4].try_into().expect("4 bytes"));
+    data.len() >= CACHE_HEADER_BYTES
+        && word(0) as usize >= CACHE_HEADER_BYTES
+        && word(4) == vk::PipelineCacheHeaderVersion::ONE.as_raw() as u32
+        && word(8) == properties.vendor_id
+        && word(12) == properties.device_id
+        && data[16..CACHE_HEADER_BYTES] == properties.pipeline_cache_uuid
+}
+
+impl DiskCache {
+    pub(crate) fn open(
         device: &ash::Device,
-        spirv: &[u8],
-        bindings: usize,
-        push_bytes: u32,
-        name: &'static str,
+        properties: &vk::PhysicalDeviceProperties,
     ) -> Result<Self> {
-        Self::with_subgroup(device, spirv, bindings, push_bytes, name, None)
+        let uuid: String = properties
+            .pipeline_cache_uuid
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let path = user_cache().map(|dir| {
+            dir.join(DISK_CACHE_SUBDIR).join(format!(
+                "{:04x}-{:04x}-{uuid}.bin",
+                properties.vendor_id, properties.device_id
+            ))
+        });
+        let data = path
+            .as_ref()
+            .and_then(|path| std::fs::read(path).ok())
+            .filter(|data| header_matches(data, properties))
+            .unwrap_or_default();
+        // SAFETY: the create info and its data outlive the call
+        let cache = unsafe {
+            device.create_pipeline_cache(
+                &vk::PipelineCacheCreateInfo::default().initial_data(&data),
+                None,
+            )?
+        };
+        Ok(Self {
+            cache,
+            path,
+            loaded: data.len(),
+        })
     }
 
-    /// [`Self::new`], its subgroups `subgroup` invocations wide when given (VK_EXT_subgroup_size_control).
-    pub(crate) fn with_subgroup(
-        device: &ash::Device,
-        spirv: &[u8],
+    /// Writes the cache back where it grew (best effort: a read-only cache only costs the next run its compile),
+    /// then destroys it.
+    ///
+    /// # Safety
+    /// No pipeline creation may still be using the cache.
+    pub(crate) unsafe fn finish(self, device: &ash::Device) {
+        // SAFETY: the caller's contract
+        let data = unsafe { device.get_pipeline_cache_data(self.cache) }.unwrap_or_default();
+        if let Some(path) = &self.path
+            && data.len() != self.loaded
+            && let Some(dir) = path.parent()
+            && std::fs::create_dir_all(dir).is_ok()
+        {
+            // a temporary beside it, renamed into place, so another process never reads half a file
+            let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+            if std::fs::write(&temporary, &data).is_ok()
+                && std::fs::rename(&temporary, path).is_err()
+            {
+                let _ = std::fs::remove_file(&temporary);
+            }
+        }
+        // SAFETY: the caller's contract
+        unsafe { device.destroy_pipeline_cache(self.cache, None) };
+    }
+}
+
+/// What [`Pipeline::build_all`] builds one pipeline from.
+#[derive(Clone, Copy)]
+pub(crate) struct PipelineSpec {
+    pub(crate) spirv: &'static [u8],
+    pub(crate) bindings: usize,
+    pub(crate) push_bytes: u32,
+    pub(crate) name: &'static str,
+    pub(crate) subgroup: Option<u32>,
+}
+
+impl PipelineSpec {
+    pub(crate) const fn new(
+        spirv: &'static [u8],
         bindings: usize,
         push_bytes: u32,
         name: &'static str,
-        subgroup: Option<u32>,
-    ) -> Result<Self> {
+    ) -> Self {
+        Self {
+            spirv,
+            bindings,
+            push_bytes,
+            name,
+            subgroup: None,
+        }
+    }
+
+    pub(crate) const fn subgroup(self, subgroup: Option<u32>) -> Self {
+        Self { subgroup, ..self }
+    }
+}
+
+impl Pipeline {
+    /// Every spec's pipeline, in order, built across the machine's cores through `cache`: the driver compiles each
+    /// one on the calling thread.
+    pub(crate) fn build_all(
+        device: &ash::Device,
+        cache: vk::PipelineCache,
+        specs: &[PipelineSpec],
+    ) -> Result<Vec<Self>> {
+        let next = AtomicUsize::new(0);
+        let workers = std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .min(specs.len());
+        let mut built: Vec<(usize, Result<Self>)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut out = Vec::new();
+                        loop {
+                            let index = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(spec) = specs.get(index) else {
+                                break out;
+                            };
+                            out.push((index, Self::build(device, cache, spec)));
+                        }
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                })
+                .collect()
+        });
+        built.sort_by_key(|(index, _)| *index);
+        built.into_iter().map(|(_, pipeline)| pipeline).collect()
+    }
+
+    // its subgroups `subgroup` invocations wide when given (VK_EXT_subgroup_size_control); vkCreateComputePipelines
+    // synchronizes the cache itself
+    fn build(device: &ash::Device, cache: vk::PipelineCache, spec: &PipelineSpec) -> Result<Self> {
+        let PipelineSpec {
+            spirv,
+            bindings,
+            push_bytes,
+            name,
+            subgroup,
+        } = *spec;
         let code = ash::util::read_spv(&mut std::io::Cursor::new(spirv))
             .map_err(|err| Error::Invalid(format!("embedded SPIR-V: {err}")))?;
         let writes = writable_bindings(&code);
@@ -143,7 +298,7 @@ impl Pipeline {
                 stage = stage.push_next(&mut required);
             }
             let created = device.create_compute_pipelines(
-                vk::PipelineCache::null(),
+                cache,
                 &[vk::ComputePipelineCreateInfo::default()
                     .stage(stage)
                     .layout(layout)],

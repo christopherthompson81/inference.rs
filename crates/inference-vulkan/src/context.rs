@@ -208,16 +208,20 @@ impl Context {
                 properties.limits.timestamp_period,
             ))));
         }
-        let kernels = Kernels::new(&device)?;
+        let disk_cache = crate::pipeline::DiskCache::open(&device, &properties)?;
+        let kernels = Kernels::new(&device, disk_cache.cache)?;
         let coop = if has_coop {
             Some(crate::kernels::CoopKernels::new(
                 &device,
+                disk_cache.cache,
                 pin_subgroup.then_some(COOP_SUBGROUP),
                 has_cm2,
             )?)
         } else {
             None
         };
+        // SAFETY: every pipeline is built
+        unsafe { disk_cache.finish(&device) };
         let labels = std::env::var_os(crate::stream::LABELS_ENV)
             .is_some()
             .then(|| ash::ext::debug_utils::Device::new(&instance, &device));
