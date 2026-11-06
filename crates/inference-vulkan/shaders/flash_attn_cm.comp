@@ -1,0 +1,256 @@
+#version 450
+// flash_attn.comp's prompt attention on matrix cores (VK_KHR_cooperative_matrix, f16 16 x 16 x 16 into f32), with its
+// bindings and push constants, as paged_prefill_cm_main.glsl over contiguous keys and values: a workgroup (BR / group
+// positions, kv head, batch) takes the positions x the kv head's query heads as its rows, stages BC keys and values as
+// f16 a tile, and each of its 4 subgroups (of 32) scores its 16 rows against the tile, takes their softmax in pairs of
+// threads and adds P V into its accumulators. A row's running max moves only when a tile passes it by RESCALE nats.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_KHR_shader_subgroup_vote : require
+
+layout(local_size_x = 128) in;
+
+layout(std430, binding = 0) readonly buffer Q { vec4 q[]; };
+layout(std430, binding = 1) readonly buffer K { vec4 k[]; };
+layout(std430, binding = 2) readonly buffer V { vec4 v[]; };
+layout(std430, binding = 3) readonly buffer MK { float mask[]; };
+layout(std430, binding = 4) writeonly buffer O { float o[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint positions;
+    uint keys;
+    uint heads;
+    uint kv_heads;
+    uint head4;
+    float scale;
+    // in vec4s, the mask's in floats
+    uint q_off;
+    uint k_off;
+    uint v_off;
+    uint m_off;
+    uint o_off;
+    uint has_mask;
+    uint causal;
+    // flash_attn.comp's row split, unused here
+    uint row_heads;
+    uint row_positions;
+    // the first position of this piece of the call
+    uint first;
+} pc;
+
+const uint THREADS = 128;
+const uint SUBGROUPS = 4;
+const uint M = 16;
+// query rows a workgroup (M a subgroup), and keys a tile
+const uint BR = SUBGROUPS * M;
+const uint BC = 32;
+const uint MAX_HEAD = 128;
+const uint MAX_CHUNKS = MAX_HEAD / M;
+// tile row strides, padded against bank conflicts
+const uint KV_STRIDE = MAX_HEAD + 8;
+const uint S_STRIDE = BC + 4;
+const uint P_STRIDE = BC + 8;
+// finite, since NVIDIA's exp(-inf - m) leaks weight to masked keys; a caller's -inf clamps to it
+const float MASKED = -1e30;
+// how far a tile's max may pass a row's reference before the row is rescaled (P stays below e^8 in f16)
+const float RESCALE = 8.0;
+
+shared float16_t keys_sh[BC * KV_STRIDE];
+shared float16_t vals[BC * KV_STRIDE];
+// a subgroup's 16 x BC scores, then its scratch for rescaling and writing out one 16 x 16 accumulator
+shared float scores[BR * S_STRIDE];
+shared float16_t probs[BR * P_STRIDE];
+shared float corr_sh[BR];
+
+void main() {
+    uint kvh = gl_WorkGroupID.y;
+    uint batch = gl_WorkGroupID.z;
+    uint t = gl_LocalInvocationID.x;
+    uint sg = gl_SubgroupID;
+    uint lane = gl_SubgroupInvocationID;
+    uint group = pc.heads / pc.kv_heads;
+    uint positions = BR / group;
+    uint pos0 = pc.first + gl_WorkGroupID.x * positions;
+    uint hs4 = pc.head4;
+    uint hs = hs4 * 4;
+    uint chunks = hs / M;
+    uint offset = pc.keys - pc.positions;
+
+    // this thread's row of the softmax (a pair of lanes a row, half the tile each)
+    uint srow = sg * M + lane / 2;
+    uint side = lane % 2;
+    uint spos = pos0 + srow / group;
+    bool live = srow < positions * group && spos < pc.positions;
+    uint row_end = !live ? 0 : (pc.causal != 0 ? min(pc.keys, spos + offset + 1) : pc.keys);
+
+    // the workgroup's last position sees the most
+    uint last = min(pos0 + positions, pc.positions) - 1;
+    uint end = pc.causal != 0 ? min(pc.keys, last + offset + 1) : pc.keys;
+    uint kv_base = (batch * pc.kv_heads + kvh) * pc.keys * hs4;
+
+    // Q's rows as f16 A matrices, staged through `keys_sh` half a workgroup at a time
+    coopmat<float16_t, gl_ScopeSubgroup, M, M, gl_MatrixUseA> qa[MAX_CHUNKS];
+    [[unroll]] for (uint half_ = 0; half_ < 2; half_++) {
+        for (uint i = t; i < BC * hs4; i += THREADS) {
+            uint r = half_ * BC + i / hs4;
+            uint d = (i % hs4) * 4;
+            uint p = pos0 + r / group;
+            vec4 x = vec4(0.0);
+            if (r < positions * group && p < pc.positions) {
+                uint head = kvh * group + r % group;
+                x = q[pc.q_off + ((batch * pc.heads + head) * pc.positions + p) * hs4 + d / 4];
+            }
+            uint at = (i / hs4) * KV_STRIDE + d;
+            keys_sh[at] = float16_t(x.x);
+            keys_sh[at + 1] = float16_t(x.y);
+            keys_sh[at + 2] = float16_t(x.z);
+            keys_sh[at + 3] = float16_t(x.w);
+        }
+        barrier();
+        if (sg / 2 == half_) {
+            [[unroll]] for (uint c = 0; c < MAX_CHUNKS; c++) {
+                if (c < chunks) {
+                    coopMatLoad(qa[c], keys_sh, ((sg % 2) * M) * KV_STRIDE + c * M, KV_STRIDE,
+                                gl_CooperativeMatrixLayoutRowMajor);
+                }
+            }
+        }
+        barrier();
+    }
+
+    coopmat<float, gl_ScopeSubgroup, M, M, gl_MatrixUseAccumulator> acc[MAX_CHUNKS];
+    [[unroll]] for (uint c = 0; c < MAX_CHUNKS; c++) {
+        acc[c] = coopmat<float, gl_ScopeSubgroup, M, M, gl_MatrixUseAccumulator>(0.0);
+    }
+    float m = MASKED;
+    float l = 0.0;
+
+    for (uint p0 = 0; p0 < end; p0 += BC) {
+        // the tile's keys and values as (key, dims) rows; past `end` both are zeros, so a stale NaN cannot reach P V
+        for (uint i = t; i < BC * hs4; i += THREADS) {
+            uint p = i / hs4;
+            uint d = (i % hs4) * 4;
+            bool in_tile = p0 + p < end;
+            uint at4 = kv_base + (p0 + p) * hs4 + d / 4;
+            vec4 kx = in_tile ? k[pc.k_off + at4] : vec4(0.0);
+            vec4 vx = in_tile ? v[pc.v_off + at4] : vec4(0.0);
+            uint at = p * KV_STRIDE + d;
+            keys_sh[at] = float16_t(kx.x);
+            keys_sh[at + 1] = float16_t(kx.y);
+            keys_sh[at + 2] = float16_t(kx.z);
+            keys_sh[at + 3] = float16_t(kx.w);
+            vals[at] = float16_t(vx.x);
+            vals[at + 1] = float16_t(vx.y);
+            vals[at + 2] = float16_t(vx.z);
+            vals[at + 3] = float16_t(vx.w);
+        }
+        barrier();
+
+        // the subgroup's 16 x BC scores
+        [[unroll]] for (uint c = 0; c < BC / M; c++) {
+            coopmat<float, gl_ScopeSubgroup, M, M, gl_MatrixUseAccumulator> s =
+                coopmat<float, gl_ScopeSubgroup, M, M, gl_MatrixUseAccumulator>(0.0);
+            [[unroll]] for (uint j = 0; j < MAX_CHUNKS; j++) {
+                if (j < chunks) {
+                    coopmat<float16_t, gl_ScopeSubgroup, M, M, gl_MatrixUseB> kb;
+                    coopMatLoad(kb, keys_sh, (c * M) * KV_STRIDE + j * M, KV_STRIDE,
+                                gl_CooperativeMatrixLayoutColumnMajor);
+                    s = coopMatMulAdd(qa[j], kb, s);
+                }
+            }
+            coopMatStore(s, scores, (sg * M) * S_STRIDE + c * M, S_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+        }
+        subgroupMemoryBarrierShared();
+        subgroupBarrier();
+
+        float sv[BC / 2];
+        float tile_max = MASKED;
+        [[unroll]] for (uint j = 0; j < BC / 2; j++) {
+            uint key = p0 + side * (BC / 2) + j;
+            bool valid = key < row_end;
+            float score = scores[srow * S_STRIDE + side * (BC / 2) + j] * pc.scale;
+            if (valid && pc.has_mask != 0) {
+                score += mask[pc.m_off + spos * pc.keys + key];
+            }
+            sv[j] = valid ? max(score, MASKED) : MASKED;
+            tile_max = max(tile_max, sv[j]);
+        }
+        tile_max = max(tile_max, subgroupShuffleXor(tile_max, 1));
+        float corr = 1.0;
+        bool moved = tile_max > m + RESCALE || (m == MASKED && tile_max > MASKED);
+        if (moved) {
+            corr = m == MASKED ? 0.0 : exp(m - tile_max);
+            m = tile_max;
+            l *= corr;
+        }
+        [[unroll]] for (uint j = 0; j < BC / 2; j++) {
+            float e = sv[j] > MASKED ? exp(sv[j] - m) : 0.0;
+            l += e;
+            probs[srow * P_STRIDE + side * (BC / 2) + j] = float16_t(e);
+        }
+        if (side == 0) {
+            corr_sh[srow] = corr;
+        }
+        // a moved row with output so far scales its accumulators: each 16 x 16 through the subgroup's score rows
+        if (subgroupAny(moved && corr != 0.0)) {
+            subgroupMemoryBarrierShared();
+            subgroupBarrier();
+            [[unroll]] for (uint c = 0; c < MAX_CHUNKS; c++) {
+                if (c < chunks) {
+                    coopMatStore(acc[c], scores, (sg * M) * S_STRIDE, S_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+                    subgroupMemoryBarrierShared();
+                    subgroupBarrier();
+                    [[unroll]] for (uint e = lane; e < M * M; e += 32) {
+                        uint r = e / M;
+                        scores[(sg * M + r) * S_STRIDE + e % M] *= corr_sh[sg * M + r];
+                    }
+                    subgroupMemoryBarrierShared();
+                    subgroupBarrier();
+                    coopMatLoad(acc[c], scores, (sg * M) * S_STRIDE, S_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+                    subgroupBarrier();
+                }
+            }
+        }
+        subgroupMemoryBarrierShared();
+        subgroupBarrier();
+
+        // P V into the accumulators
+        [[unroll]] for (uint c = 0; c < BC / M; c++) {
+            coopmat<float16_t, gl_ScopeSubgroup, M, M, gl_MatrixUseA> pa;
+            coopMatLoad(pa, probs, (sg * M) * P_STRIDE + c * M, P_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+            [[unroll]] for (uint j = 0; j < MAX_CHUNKS; j++) {
+                if (j < chunks) {
+                    coopmat<float16_t, gl_ScopeSubgroup, M, M, gl_MatrixUseB> vb;
+                    coopMatLoad(vb, vals, (c * M) * KV_STRIDE + j * M, KV_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+                    acc[j] = coopMatMulAdd(pa, vb, acc[j]);
+                }
+            }
+        }
+        barrier();
+    }
+
+    l += subgroupShuffleXor(l, 1);
+    float inv = l > 0.0 ? 1.0 / l : 0.0;
+    uint head = kvh * group + srow % group;
+    uint at = pc.o_off * 4 + ((batch * pc.heads + head) * pc.positions + spos) * hs;
+    // each accumulator through the subgroup's score rows: a lane pair writes its row's 16 values
+    [[unroll]] for (uint c = 0; c < MAX_CHUNKS; c++) {
+        if (c < chunks) {
+            coopMatStore(acc[c], scores, (sg * M) * S_STRIDE, S_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+            subgroupMemoryBarrierShared();
+            subgroupBarrier();
+            if (live) {
+                [[unroll]] for (uint j = 0; j < M / 2; j++) {
+                    uint col = side * (M / 2) + j;
+                    o[at + c * M + col] = scores[srow * S_STRIDE + col] * inv;
+                }
+            }
+            subgroupBarrier();
+        }
+    }
+}

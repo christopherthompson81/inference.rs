@@ -9,7 +9,6 @@ use std::{collections::HashMap, sync::Once};
 use inference_fattn::{FattnOptions, KvScales as FattnKvScales, Packed, PagedKv};
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use inference_paged_attn::kv_quant;
-#[cfg(not(all(feature = "cuda", target_family = "unix")))]
 use inference_paged_attn::paged_attention;
 use inference_paged_attn::reshape_and_cache;
 #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -249,7 +248,8 @@ fn cache_input_can_write_directly(tensor: &Tensor) -> Result<bool> {
     let row_stride = match *dims {
         [_, _, _] => stride[0],
         [batch, seq_len, _, _] => {
-            if !cfg!(all(feature = "cuda", target_family = "unix")) {
+            // only CUDA's writes take the rows strided in batches
+            if !cfg!(all(feature = "cuda", target_family = "unix")) || !tensor.device().is_cuda() {
                 return Ok(false);
             }
             let row_stride = if seq_len == 1 { stride[0] } else { stride[1] };
@@ -1857,6 +1857,17 @@ impl PagedAttention {
                 tensors.attention_mask,
             );
         }
+        // a CUDA build plans for CUDA's kernels; a Vulkan device takes its own paged decode
+        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        if key_cache_ref.device().is_vulkan() {
+            return self.run_standard_paged_decode(
+                ctx,
+                &query,
+                key_cache_ref,
+                value_cache_ref,
+                &dev,
+            );
+        }
         let attention_backend = AttentionBackendKind::from_cache(key_cache_ref, value_cache_ref);
         if ctx.sdpa_params.chunk.is_some()
             && !matches!(attention_backend, AttentionBackendKind::FlashInfer)
@@ -2319,7 +2330,6 @@ impl PagedAttention {
         self.run_decode_gather_sdpa(ctx, query, key_cache, value_cache, dev, attention_mask)
     }
 
-    #[cfg(not(all(feature = "cuda", target_family = "unix")))]
     fn run_standard_paged_decode(
         &self,
         ctx: &PagedForwardCtx<'_>,
@@ -2847,10 +2857,8 @@ mod tests {
         assert_eq!(row_strided.dims(), &[2, 3, 2, 4]);
         assert_eq!(row_strided.stride(), &[48, 16, 4, 1]);
         assert_eq!(cache_input_shape(&row_strided)?, (6, 2, 4));
-        assert_eq!(
-            cache_input_can_write_directly(&row_strided)?,
-            cfg!(all(feature = "cuda", target_family = "unix"))
-        );
+        // batched rows write directly only on a CUDA device
+        assert!(!cache_input_can_write_directly(&row_strided)?);
 
         let row_strided = packed
             .narrow(1, 0, 1)?

@@ -8,9 +8,12 @@ pub enum AttentionBackendKind {
 
 impl AttentionBackendKind {
     pub fn from_cache(key_cache: &Tensor, value_cache: &Tensor) -> Self {
+        // Vulkan's kernels read its quantized HND rows behind the Standard entry points
         #[cfg(all(feature = "cuda", target_family = "unix"))]
         {
-            if inference_paged_attn::is_flashinfer_cache(key_cache, value_cache) {
+            if !key_cache.device().is_vulkan()
+                && inference_paged_attn::is_flashinfer_cache(key_cache, value_cache)
+            {
                 return Self::FlashInfer;
             }
         }

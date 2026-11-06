@@ -27,6 +27,14 @@ const PAGED_PREFILL_MIN_PIECE_ROWS: usize = 8;
 
 static CONTEXT: OnceLock<std::result::Result<Arc<Context>, String>> = OnceLock::new();
 
+// the device goes before the libraries' own exit handlers, which otherwise tear the driver down under its threads
+#[cfg(unix)]
+extern "C" fn shut_down_at_exit() {
+    if let Some(Ok(context)) = CONTEXT.get() {
+        context.shut_down();
+    }
+}
+
 fn vk_err(err: inference_vulkan::Error) -> crate::Error {
     crate::Error::wrap(err)
 }
@@ -1567,7 +1575,13 @@ impl BackendDevice for VulkanDevice {
                 } else {
                     MatrixCores::Default
                 };
-                Context::with_matrix_cores(mode).map_err(|err| err.to_string())
+                let context = Context::with_matrix_cores(mode).map_err(|err| err.to_string())?;
+                #[cfg(unix)]
+                // SAFETY: the handler only reads the initialized static
+                unsafe {
+                    libc::atexit(shut_down_at_exit);
+                }
+                Ok(context)
             })
             .clone()
             .map_err(crate::Error::msg)?;
@@ -1674,6 +1688,8 @@ mod tests {
     const TOLERANCE: f32 = 1e-5;
     // a 2688-term dot product summed in another order
     const DOT_TOLERANCE: f32 = 1e-3;
+    // attention with f16 queries, keys, values and probabilities (f32 sums): unit-variance inputs land within ~1.5e-3
+    const F16_ATTENTION_TOLERANCE: f32 = 4e-3;
     // a 2688-term dot product over activations rounded to int8 blocks, against the outputs' RMS: unit-normal weights
     // and activations leave ~0.6 % (one deviation), and the worst of a few hundred outputs lands near three
     const INT8_DOT_TOLERANCE: f32 = 3e-2;
@@ -2047,18 +2063,23 @@ mod tests {
     }
 
     // fused attention against softmax(scale q k^T + mask) v on the CPU: GQA, keys past the positions (a cached prefix), a
-    // partial last tile, with the model's causal mask and without one; and decode's one position over a cache (its own
-    // kernel), fewer keys than a workgroup's subgroups included
+    // partial last tile, with the model's causal mask and without one, causal without a mask; and decode's one position
+    // over a cache (its own kernel), fewer keys than a workgroup's subgroups included. Heads of 16s run on matrix cores
+    // where the device has them, in f16.
     #[test]
     fn fused_vulkan_attention_matches_its_definition() -> Result<()> {
         let Some(vk) = device() else { return Ok(()) };
-        for (batch, heads, kv_heads, positions, keys, head_size, masked) in [
-            (2usize, 32usize, 2usize, 75usize, 75usize, 128usize, true),
-            (1, 8, 8, 40, 107, 80, true),
-            (1, 6, 2, 33, 33, 64, false),
-            (2, 32, 2, 1, 1037, 128, true),
-            (1, 8, 8, 1, 5, 80, true),
-            (1, 6, 2, 1, 300, 64, false),
+        for (batch, heads, kv_heads, positions, keys, head_size, masked, causal_only) in [
+            (
+                2usize, 32usize, 2usize, 75usize, 75usize, 128usize, true, false,
+            ),
+            (1, 8, 8, 40, 107, 80, true, false),
+            (1, 6, 2, 33, 33, 64, false, false),
+            (1, 32, 2, 261, 300, 128, false, true),
+            (1, 4, 1, 70, 70, 32, true, false),
+            (2, 32, 2, 1, 1037, 128, true, false),
+            (1, 8, 8, 1, 5, 80, true, false),
+            (1, 6, 2, 1, 300, 64, false, false),
         ] {
             let r = |shape: &[usize]| Tensor::randn(0f32, 1.0, shape, &Device::Cpu);
             let q = r(&[batch, heads, positions, head_size])?;
@@ -2083,7 +2104,7 @@ mod tests {
                     .reshape((batch, heads, keys, head_size))
             };
             let scores = (q.matmul(&expand(&k)?.t()?)? * f64::from(scale))?;
-            let scores = if masked {
+            let scores = if masked || causal_only {
                 scores.broadcast_add(&mask)?
             } else {
                 scores
@@ -2097,10 +2118,16 @@ mod tests {
                 v: &on(&v)?,
                 mask: masked.then_some(&mask_vk),
                 scale,
-                causal: masked,
+                causal: masked || causal_only,
             })?
             .expect("the kernel takes this shape");
-            assert_close(&got, &want, 1e-4)?;
+            let on_matrix_cores = positions > 1 && head_size.is_multiple_of(16);
+            let tolerance = if on_matrix_cores {
+                F16_ATTENTION_TOLERANCE
+            } else {
+                1e-4
+            };
+            assert_close(&got, &want, tolerance)?;
         }
         Ok(())
     }

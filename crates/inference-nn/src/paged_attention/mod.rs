@@ -49,6 +49,9 @@ const GPU_MIN_RESERVE_BYTES: usize = 512 * 1024 * 1024;
 const CUDA_FREE_FLOOR_DIVISOR: usize = 128;
 const CUDA_FREE_FLOOR_MIN_BYTES: usize = 512 * 1024 * 1024;
 const CUDA_FREE_FLOOR_MAX_BYTES: usize = 2 * 1024 * 1024 * 1024;
+// the device memory a discrete Vulkan GPU's KV cache leaves for activations: its buffer pool holds a recorded step's
+// temporaries until the step's fence, more than CUDA's stream-ordered frees do
+const VULKAN_ACTIVATION_RESERVE_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
 /// Free memory a CUDA engine keeps on a device of `total_bytes`: below it, prompts reclaim captured decode graphs.
 pub fn cuda_free_floor_bytes(total_bytes: usize) -> usize {
@@ -521,6 +524,11 @@ pub fn calculate_cache_config(
         } else {
             memory_reservations.secondary_device_bytes
         };
+        let reserved_bytes = if device.is_vulkan() {
+            reserved_bytes.max(VULKAN_ACTIVATION_RESERVE_BYTES)
+        } else {
+            reserved_bytes
+        };
         // Weight loading enqueues stream-ordered frees without draining; sync so the memory
         // reading and the cache allocation right after this see the real free VRAM.
         if device.is_cuda() {
@@ -532,7 +540,9 @@ pub fn calculate_cache_config(
             #[cfg(not(feature = "cuda"))]
             device.synchronize()?;
         }
-        let post_load_memory = if model_weight_size_in_bytes.is_none() && device.is_cuda() {
+        let post_load_memory = if model_weight_size_in_bytes.is_none()
+            && crate::utils::memory_usage::has_dedicated_memory(device)
+        {
             Some(MemoryUsage.query(device)?)
         } else {
             None

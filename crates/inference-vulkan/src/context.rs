@@ -48,6 +48,8 @@ pub struct Context {
     pub(crate) labels: Option<ash::ext::debug_utils::Device>,
     // decode activations already quantized, until something writes their buffer or their blocks'
     quantized: Mutex<Vec<Quantized>>,
+    // set by `shut_down`: the device is gone, so what drops after leaks and what records fails
+    pub(crate) shut: std::sync::atomic::AtomicBool,
 }
 
 /// A decode activation's int8 blocks (quantize_q8_1's, at `s_off` in `blocks`) for `values` contiguous floats of `x`
@@ -208,16 +210,20 @@ impl Context {
                 properties.limits.timestamp_period,
             ))));
         }
-        let kernels = Kernels::new(&device)?;
+        let disk_cache = crate::pipeline::DiskCache::open(&device, &properties)?;
+        let kernels = Kernels::new(&device, disk_cache.cache)?;
         let coop = if has_coop {
             Some(crate::kernels::CoopKernels::new(
                 &device,
+                disk_cache.cache,
                 pin_subgroup.then_some(COOP_SUBGROUP),
                 has_cm2,
             )?)
         } else {
             None
         };
+        // SAFETY: every pipeline is built
+        unsafe { disk_cache.finish(&device) };
         let labels = std::env::var_os(crate::stream::LABELS_ENV)
             .is_some()
             .then(|| ash::ext::debug_utils::Device::new(&instance, &device));
@@ -244,6 +250,7 @@ impl Context {
             kernels,
             coop,
             quantized: Mutex::default(),
+            shut: std::sync::atomic::AtomicBool::new(false),
         }))
     }
 
@@ -321,6 +328,20 @@ impl Context {
             .unwrap_or(0)
     }
 
+    /// A discrete device's memory as `(total, free)`: its device-local heap, and what is free in it counting the
+    /// buffer pool's idle device memory, which an allocation frees first; `None` on a unified device.
+    pub fn device_memory(&self) -> Option<(u64, u64)> {
+        if self.unified {
+            return None;
+        }
+        let idle = self
+            .pool
+            .lock()
+            .expect("vulkan pool poisoned")
+            .device_bytes();
+        Some((self.heap_size, self.device_free() + idle))
+    }
+
     /// Whether the device's memory is the host's (an iGPU, or a CPU device), so its buffers are mapped host RAM.
     pub fn is_unified(&self) -> bool {
         self.unified
@@ -330,6 +351,7 @@ impl Context {
     /// What the commands read or write must be [`Recorder::retain`]ed, or outlive the next [`Self::synchronize`].
     pub fn record<T>(&self, record: impl FnOnce(&Recorder<'_>) -> Result<T>) -> Result<T> {
         let mut stream = self.stream.lock().expect("vulkan stream poisoned");
+        self.live()?;
         let batch = stream.open(&self.device)?;
         let recorder = Recorder {
             context: self,
@@ -363,18 +385,16 @@ impl Context {
     }
 
     pub fn flush(&self) -> Result<()> {
-        self.stream
-            .lock()
-            .expect("vulkan stream poisoned")
-            .flush(&self.device, self.queue)
+        let mut stream = self.stream.lock().expect("vulkan stream poisoned");
+        self.live()?;
+        stream.flush(&self.device, self.queue)
     }
 
     /// Submits what is recorded and waits for the GPU to finish everything submitted.
     pub fn synchronize(&self) -> Result<()> {
-        self.stream
-            .lock()
-            .expect("vulkan stream poisoned")
-            .synchronize(&self.device, self.queue)
+        let mut stream = self.stream.lock().expect("vulkan stream poisoned");
+        self.live()?;
+        stream.synchronize(&self.device, self.queue)
     }
 
     /// [`Self::synchronize`] unless the stream is in use (a buffer allocated while recording), so it never waits on
@@ -383,6 +403,7 @@ impl Context {
         let Ok(mut stream) = self.stream.try_lock() else {
             return Ok(false);
         };
+        self.live()?;
         stream.synchronize(&self.device, self.queue)?;
         Ok(true)
     }
@@ -508,11 +529,42 @@ impl Recorder<'_> {
     }
 }
 
-impl Drop for Context {
-    fn drop(&mut self) {
-        let stream = self.stream.get_mut().expect("vulkan stream poisoned");
+impl Context {
+    pub(crate) fn is_shut(&self) -> bool {
+        self.shut.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn live(&self) -> Result<()> {
+        if self.is_shut() {
+            return Err(Error::Invalid("the Vulkan device was shut down".into()));
+        }
+        Ok(())
+    }
+
+    /// Waits for the GPU, then destroys the device and instance while buffers and clones of the context may remain:
+    /// those leak when they drop and recording fails. For process exit, which otherwise tears the driver down under
+    /// its own still-running threads (NVIDIA's crash there).
+    pub fn shut_down(&self) {
+        let mut stream = self
+            .stream
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.shut.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            return;
+        }
+        let mut pool = self
+            .pool
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // SAFETY: the stream's lock keeps every recording out, the GPU is idle after the wait, and nothing uses the
+        // device after `shut` (buffers leak, recording fails)
+        unsafe { self.destroy(&mut stream, &mut pool) };
+    }
+
+    // SAFETY: no submit may still run, nor anything use the device after
+    unsafe fn destroy(&self, stream: &mut Stream, pool: &mut BufferPool) {
         let _ = stream.synchronize(&self.device, self.queue);
-        // SAFETY: everything submitted finished above, and every object here was created from this device
+        // SAFETY: the caller's contract; every object here was created from this device
         unsafe {
             let _ = self.device.device_wait_idle();
             self.kernels.destroy(&self.device);
@@ -520,13 +572,28 @@ impl Drop for Context {
                 coop.destroy(&self.device);
             }
             stream.destroy(&self.device);
-            self.pool
-                .get_mut()
-                .expect("vulkan pool poisoned")
-                .destroy(&self.device);
+            pool.destroy(&self.device);
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
         }
+    }
+}
+
+impl Drop for Context {
+    fn drop(&mut self) {
+        if self.is_shut() {
+            return;
+        }
+        let mut stream = self
+            .stream
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut pool = self
+            .pool
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // SAFETY: the last reference is dropping, so nothing else records or uses the device
+        unsafe { self.destroy(&mut stream, &mut pool) };
     }
 }
 

@@ -16,6 +16,9 @@ use tokenizers::Tokenizer;
 static DRY_SEQUENCE_BREAKERS: LazyLock<Vec<String>> =
     LazyLock::new(|| ["\n", ":", "\"", "*"].map(String::from).to_vec());
 const SUPPRESS_TOKEN_LOGIT_BIAS: f32 = -1.0e9;
+// a nucleus without top-k is ranked from this many candidates, growing by this factor until it covers top-p
+const NUCLEUS_FIRST_CANDIDATES: usize = 256;
+const NUCLEUS_GROWTH: usize = 8;
 
 #[derive(Clone, Debug, Default, Serialize, inference_json::FromJson, PartialEq)]
 /// Optional generation defaults parsed from a model's `generation_config.json`.
@@ -790,6 +793,46 @@ fn partial_sort_top_k(probs: &mut [f32], k: usize, zero_rest: bool) -> Vec<(u32,
     idx_probs
 }
 
+/// The candidates a top-k / top-p / min-p filter reads, most likely first, and the top-p cutoff over what top-k keeps;
+/// everything past the candidates is zeroed in `probs`. Without top-k, top-p ranks only a prefix that grows until its
+/// mass reaches the cutoff (the nucleus is the same as a full sort's; a 131K vocabulary's sort cost ~25 ms a token).
+fn kp_candidates(probs: &mut [f32], top_k: i64, top_p: f32) -> (Vec<(u32, f32)>, f32) {
+    let nucleus = top_p > 0.0 && top_p < 1.0;
+    if top_k > 0 || !nucleus {
+        let k = if top_k > 0 {
+            top_k as usize
+        } else {
+            probs.len()
+        };
+        let idx_probs = partial_sort_top_k(probs, k, true);
+        let cutoff = top_p_cutoff(top_p, idx_probs.iter().map(|(_, p)| *p));
+        return (idx_probs, cutoff);
+    }
+    let n = probs.len();
+    let cutoff = top_p_cutoff(top_p, probs.iter().copied());
+    #[allow(clippy::cast_possible_truncation)]
+    let mut idx_probs: Vec<(u32, f32)> = probs
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (i as u32, *p))
+        .collect();
+    let mut m = NUCLEUS_FIRST_CANDIDATES.min(n);
+    loop {
+        if m < n {
+            idx_probs.select_nth_unstable_by(m - 1, cmp_desc_by_prob);
+        }
+        idx_probs[..m].sort_unstable_by(cmp_desc_by_prob);
+        if m == n || idx_probs[..m].iter().map(|(_, p)| *p).sum::<f32>() >= cutoff {
+            for (idx, _) in &idx_probs[m..] {
+                probs[*idx as usize] = 0.0;
+            }
+            idx_probs.truncate(m);
+            return (idx_probs, cutoff);
+        }
+        m = (m * NUCLEUS_GROWTH).min(n);
+    }
+}
+
 /// Find the index of the maximum element in a slice. O(n) scan.
 #[inline]
 fn argmax_f32(values: &[f32]) -> Result<u32> {
@@ -1499,23 +1542,9 @@ impl Sampler {
         let mut probs: Vec<f32> = logits.to_vec1()?;
         let reporting_probs = probs.clone();
 
-        // Determine how many elements we need for partial sort
-        let k = if top_k > 0 {
-            top_k as usize
-        } else {
-            probs.len()
-        };
-
-        // Get sorted top-k indices with partial sort, zeroing out rest
-        let idx_probs = partial_sort_top_k(&mut probs, k, true);
-
-        // TOP P
-        // top-p sampling (or "nucleus sampling") samples from the smallest set of
-        // tokens that exceed probability top_p. This way we never sample tokens that
-        // have very low probabilities and are less likely to go "off the rails".
-
-        // Clamp smaller probabilities to zero.
-        let cutoff = top_p_cutoff(top_p, idx_probs.iter().map(|(_, p)| *p));
+        // the top-k candidates, most likely first, the rest zeroed; top-p (nucleus) then keeps the smallest prefix
+        // that reaches the cutoff
+        let (idx_probs, cutoff) = kp_candidates(&mut probs, top_k, top_p);
         let mut cumsum = 0.;
         for (index, prob) in &idx_probs {
             if cumsum >= cutoff {
@@ -1677,6 +1706,64 @@ impl Sampler {
                 .as_ref()
                 .is_none_or(|params| params.multiplier == 0.0)
             && logits.elem_count() >= inference_tensor::vulkan::RANKED_TOP_K
+    }
+
+    // the CUDA counterpart of `can_rank_on_vulkan`, for a row with no penalties or bias (they reshape the logits the
+    // ranking reads)
+    #[cfg(feature = "cuda")]
+    fn can_rank_on_cuda(&self, logits: &Tensor) -> bool {
+        let vocab = logits.elem_count();
+        let Some(max_k) = crate::ops::cuda_topk_ranked_packed_max_k(vocab) else {
+            return false;
+        };
+        let filters = if self.top_k > 0 {
+            self.top_k as usize <= max_k
+        } else {
+            (self.top_p > 0.0 && self.top_p < 1.0) || (self.min_p > 0.0 && self.min_p < 1.0)
+        };
+        logits.device().is_cuda()
+            && self.temperature.is_some_and(|t| t > 0.0)
+            && filters
+            && self.logits_processors.is_empty()
+            && self
+                .dry_params
+                .as_ref()
+                .is_none_or(|params| params.multiplier == 0.0)
+            && !self.needs_penalties()
+            && self.logits_bias.is_empty()
+    }
+
+    // a CUDA row's ranked top-K and full-vocabulary normalizer from the device, filtered here; `None` where the filters
+    // reach past it
+    #[cfg(feature = "cuda")]
+    fn cuda_ranked_support(&self, logits: &Tensor) -> Result<Option<RankedSupport>> {
+        let temperature = self.temperature.unwrap_or(1.0);
+        #[allow(clippy::cast_possible_truncation)]
+        let inv_temperature = (1.0 / temperature) as f32;
+        let row = logits
+            .flatten_all()?
+            .to_dtype(inference_tensor::DType::F32)?;
+        let vocab = row.dim(0)?;
+        let Some(k) = crate::ops::cuda_topk_ranked_packed_max_k(vocab) else {
+            return Ok(None);
+        };
+        let inverse_temperatures = Tensor::new(&[inv_temperature], row.device())?;
+        let packed = crate::ops::cuda_topk_logits_f32_packed_batched(
+            &row.reshape((1, vocab))?,
+            k,
+            &inverse_temperatures,
+        )?
+        .packed
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+        #[allow(clippy::cast_possible_truncation)]
+        Ok(ranked_support(
+            &packed,
+            inv_temperature,
+            self.top_k,
+            self.top_p as f32,
+            self.min_p as f32,
+        ))
     }
 
     // a vocabulary row's ranked top-K from the device, filtered here; `None` where the filters reach past it
@@ -2186,16 +2273,10 @@ impl Sampler {
     }
 
     fn filter_top_kp_min_p(&self, probs: &mut [f32]) {
-        let k = if self.top_k > 0 {
-            self.top_k as usize
-        } else {
-            probs.len()
-        };
-
-        let idx_probs = partial_sort_top_k(probs, k, true);
+        #[allow(clippy::cast_possible_truncation)]
+        let (idx_probs, cutoff) = kp_candidates(probs, self.top_k, self.top_p as f32);
 
         if self.top_p > 0.0 && self.top_p < 1.0 {
-            let cutoff = top_p_cutoff(self.top_p as f32, idx_probs.iter().map(|(_, p)| *p));
             let mut cumsum = 0.0f32;
             for (index, prob) in &idx_probs {
                 if cumsum >= cutoff {
@@ -2387,18 +2468,9 @@ impl Sampler {
             );
         }
         let mut sampling_probs = reporting_probs.to_vec();
-        // Determine how many elements we need for partial sort
-        let k = if top_k > 0 {
-            top_k as usize
-        } else {
-            sampling_probs.len()
-        };
-
-        // Get sorted top-k indices with partial sort, zeroing out rest
-        let idx_probs = partial_sort_top_k(&mut sampling_probs, k, true);
+        let (idx_probs, cutoff) = kp_candidates(&mut sampling_probs, top_k, top_p);
 
         if top_p > 0.0 && top_p < 1.0 {
-            let cutoff = top_p_cutoff(top_p, idx_probs.iter().map(|(_, p)| *p));
             let mut cumsum = 0.;
             for (index, prob) in &idx_probs {
                 if cumsum >= cutoff {
@@ -2409,28 +2481,55 @@ impl Sampler {
             }
         }
 
-        if min_p <= 0.0 || min_p >= 1.0 {
-            return self.sample_multinomial(&sampling_probs, reporting_probs, return_logprobs, rng);
-        }
-
-        // Get max_p from first sorted element
-        let max_p = idx_probs.first().map(|(_, p)| *p).unwrap_or(0.0);
-
-        // MIN P
-
-        // min-p sampling samples from the tokens whose prob are greater than
-        // (max prob of token in dist) * min_p
-
-        // Clamp smaller probabilities to zero.
-        let min_p_threshold = max_p * min_p;
-        for (index, prob) in &idx_probs {
-            if min_p_threshold >= *prob {
-                sampling_probs[*index as usize] = 0.0;
+        if min_p > 0.0 && min_p < 1.0 {
+            // min-p keeps the tokens more likely than (the most likely one's probability) * min_p
+            let max_p = idx_probs.first().map(|(_, p)| *p).unwrap_or(0.0);
+            let min_p_threshold = max_p * min_p;
+            for (index, prob) in &idx_probs {
+                if min_p_threshold >= *prob {
+                    sampling_probs[*index as usize] = 0.0;
+                }
             }
         }
+        if idx_probs.len() == sampling_probs.len() {
+            return self.sample_multinomial(&sampling_probs, reporting_probs, return_logprobs, rng);
+        }
+        self.sample_candidates(
+            &sampling_probs,
+            &idx_probs,
+            reporting_probs,
+            return_logprobs,
+            rng,
+        )
+    }
 
-        // Sample with clamped probabilities.
-        self.sample_multinomial(&sampling_probs, reporting_probs, return_logprobs, rng)
+    /// One multinomial draw over the candidates `sampling_probs` keeps (every other entry is zero): the same weights in
+    /// the same token order as a draw over the whole vocabulary, so the same rng draw picks the same token.
+    fn sample_candidates(
+        &self,
+        sampling_probs: &[f32],
+        candidates: &[(u32, f32)],
+        reporting_probs: &[f32],
+        return_logprobs: bool,
+        rng: Arc<Mutex<Isaac64Rng>>,
+    ) -> Result<Logprobs> {
+        let mut tokens: Vec<u32> = candidates
+            .iter()
+            .map(|(index, _)| *index)
+            .filter(|index| sampling_probs[*index as usize] > 0.0)
+            .collect();
+        tokens.sort_unstable();
+        let weights: Vec<f32> = tokens
+            .iter()
+            .map(|index| sampling_probs[*index as usize])
+            .collect();
+        let distr = WeightedIndex::new(&weights)
+            .map_err(|e| Error::Msg(format!("Failed to construct multinomial sampler: {e}")))?;
+        let next_token = {
+            let mut rng = rng.lock().expect("could not lock rng mutex");
+            tokens[distr.sample(&mut *rng)]
+        };
+        self.logprobs_from_probs(next_token, reporting_probs, return_logprobs)
     }
 
     fn apply_penalties(
@@ -2683,6 +2782,27 @@ impl Sampler {
             });
         }
 
+        // likewise on CUDA, where a row is sampled alone (a grammar-constrained one, whose verify rows each sample
+        // here); the batched device paths serve the rest
+        #[cfg(feature = "cuda")]
+        if logits.device().is_cuda()
+            && !return_logprobs
+            && !sample_speculative
+            && self.can_rank_on_cuda(&logits)
+            && let Some(support) = self.cuda_ranked_support(&logits)?
+        {
+            let distr = WeightedIndex::new(&support.sampling).map_err(|e| {
+                Error::Msg(format!("Failed to construct the ranked top-k sampler: {e}"))
+            })?;
+            let selected = distr.sample(&mut *rng.lock().expect("could not lock rng mutex"));
+            return Ok(Logprobs {
+                token: support.tokens[selected],
+                logprob: support.reporting[selected].ln(),
+                top_logprobs: None,
+                bytes: None,
+            });
+        }
+
         #[cfg(feature = "metal")]
         if logits.device().is_metal()
             && self.can_sample_topk_on_device(
@@ -2752,10 +2872,88 @@ impl Sampler {
 mod tests {
     use super::{
         CustomLogitsProcessor, ModelGenerationDefaults, NoRepeatNgram, SamplingParams, argmax_f32,
-        partial_sort_top_k,
+        kp_candidates, partial_sort_top_k, top_p_cutoff,
     };
     use inference_tensor::{Device, Tensor};
     use std::collections::HashMap;
+
+    // the nucleus a top-p cut keeps, as `probs` with everything else zeroed
+    fn nucleus(mut probs: Vec<f32>, idx_probs: &[(u32, f32)], cutoff: f32) -> Vec<f32> {
+        let mut cumsum = 0.0f32;
+        for (index, prob) in idx_probs {
+            if cumsum >= cutoff {
+                probs[*index as usize] = 0.0;
+            } else {
+                cumsum += prob;
+            }
+        }
+        probs
+    }
+
+    // Ranking only a growing prefix keeps the same nucleus as sorting the whole vocabulary on a peaked distribution (the
+    // first candidates suffice). Where the cut falls among many near-equal tokens (a long tail, or flat: the prefix grows
+    // to every token) the f32 cutoff, summed in another order, can move it by a token, so there the kept set is pinned
+    // as the most likely tokens and its mass to the full sort's
+    #[test]
+    fn a_ranked_prefix_keeps_the_full_sorts_nucleus() {
+        const VOCAB: usize = 131_072;
+        const TOP_P: f32 = 0.95;
+        const MASS_TOLERANCE: f32 = 1e-4;
+        // a name, whether the nucleus must match exactly, each token's weight
+        type Shape = (&'static str, bool, fn(usize) -> f32);
+        let shapes: [Shape; 3] = [
+            ("peaked", true, |i| (-(i as f32) * 0.5).exp()),
+            ("long tail", false, |i| {
+                1.0 / (1.0 + (i * 7 % VOCAB) as f32).powf(1.1)
+            }),
+            ("flat", false, |i| {
+                1.0 + ((i * 2_654_435_761) % 1_000) as f32 * 1e-6
+            }),
+        ];
+        for (name, exact, shape) in shapes {
+            let raw: Vec<f32> = (0..VOCAB).map(shape).collect();
+            let total: f32 = raw.iter().sum();
+            let probs: Vec<f32> = raw.iter().map(|p| p / total).collect();
+
+            let mut full = probs.clone();
+            let sorted = partial_sort_top_k(&mut full, VOCAB, true);
+            let expected = nucleus(
+                full,
+                &sorted,
+                top_p_cutoff(TOP_P, sorted.iter().map(|(_, p)| *p)),
+            );
+
+            let mut fast = probs.clone();
+            let (prefix, cutoff) = kp_candidates(&mut fast, 0, TOP_P);
+            let actual = nucleus(fast, &prefix, cutoff);
+
+            if exact {
+                assert_eq!(actual, expected, "{name}: nucleus");
+            } else {
+                // every kept token is at least as likely as every dropped one
+                let least_kept = actual
+                    .iter()
+                    .copied()
+                    .filter(|p| *p > 0.0)
+                    .fold(f32::INFINITY, f32::min);
+                let most_dropped = (0..VOCAB)
+                    .filter(|&i| actual[i] == 0.0)
+                    .map(|i| probs[i])
+                    .fold(0.0f32, f32::max);
+                assert!(
+                    least_kept >= most_dropped,
+                    "{name}: {least_kept} kept, {most_dropped} dropped"
+                );
+                let mass = |v: &[f32]| v.iter().sum::<f32>();
+                assert!(
+                    (mass(&actual) - mass(&expected)).abs() < MASS_TOLERANCE,
+                    "{name}: kept mass {} against {}",
+                    mass(&actual),
+                    mass(&expected)
+                );
+            }
+        }
+    }
 
     // The device penalties match the host's on every verify row, as the counts grow and when the history is rewritten.
     #[cfg(feature = "cuda")]
@@ -2824,6 +3022,60 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    // A draw over the nucleus's tokens alone picks the token a draw over the whole vocabulary would, seed for seed
+    #[test]
+    fn a_draw_over_the_candidates_picks_the_full_vocabularys_token() {
+        use super::Sampler;
+        use rand::SeedableRng;
+        use rand_isaac::Isaac64Rng;
+        use std::sync::{Arc, Mutex};
+        const VOCAB: usize = 131_072;
+        const TOP_P: f32 = 0.95;
+        const DRAWS: u64 = 200;
+        let sampler = Sampler::new(
+            None,
+            10,
+            None,
+            None,
+            None,
+            None,
+            None,
+            32,
+            0.1,
+            0.05,
+            HashMap::new(),
+            vec![],
+        )
+        .unwrap();
+        // ranks scattered over the vocabulary, so most likely first is not token order
+        const SCATTER: usize = 7919;
+        let mut raw = vec![0.0f32; VOCAB];
+        for rank in 0..VOCAB {
+            raw[rank * SCATTER % VOCAB] = (-(rank as f32) * 0.05).exp();
+        }
+        let total: f32 = raw.iter().sum();
+        let probs: Vec<f32> = raw.iter().map(|p| p / total).collect();
+
+        let mut full = probs.clone();
+        let sorted = partial_sort_top_k(&mut full, VOCAB, true);
+        let nucleus_probs = nucleus(
+            full,
+            &sorted,
+            top_p_cutoff(TOP_P, sorted.iter().map(|(_, p)| *p)),
+        );
+        for seed in 0..DRAWS {
+            let rng = || Arc::new(Mutex::new(Isaac64Rng::seed_from_u64(seed)));
+            let candidates = sampler
+                .sample_top_kp_min_p(&probs, 0, TOP_P, 0.0, false, rng())
+                .unwrap();
+            let whole = sampler
+                .sample_multinomial(&nucleus_probs, &probs, false, rng())
+                .unwrap();
+            assert_eq!(candidates.token, whole.token, "seed {seed}");
+            assert_eq!(candidates.logprob, whole.logprob, "seed {seed}");
+        }
     }
 
     #[test]
@@ -3562,6 +3814,66 @@ mod tests {
         assert_eq!(sampled.logprob, 0.0);
         assert!(sampler.sample_cuda_top1_row(&[4.5]).is_err());
         assert!(sampler.sample_cuda_top1_row(&[f32::NAN, f32::NAN]).is_err());
+    }
+
+    // a CUDA row ranked on the device keeps the support a row ranked on the host does, and refuses a nucleus past K
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn a_cuda_ranked_row_keeps_the_hosts_support() -> inference_tensor::Result<()> {
+        use super::{Sampler, ranked_support};
+        crate::skip_without_cuda!();
+        const VOCAB: usize = 131_072;
+        const PROB_TOLERANCE: f32 = 1e-5;
+        let device = Device::new_cuda(0).unwrap();
+        let temperature = 0.8f64;
+        let inv = (1.0 / temperature) as f32;
+        let peaked: Vec<f32> = (0..VOCAB)
+            .map(|i| -0.12 * ((i * 7919) % VOCAB) as f32 + if i % 9 == 0 { 0.5 } else { 0.0 })
+            .collect();
+        let flat: Vec<f32> = (0..VOCAB).map(|i| ((i * 31) % 17) as f32 * 0.01).collect();
+        for (row, top_p, fits) in [(&peaked, 0.95f64, true), (&flat, 0.95, false)] {
+            let sampler = Sampler::new(
+                Some(temperature),
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                0,
+                top_p,
+                0.0,
+                HashMap::new(),
+                vec![],
+            )
+            .unwrap();
+            let logits = Tensor::from_vec(row.clone(), VOCAB, &device).unwrap();
+            assert!(sampler.can_rank_on_cuda(&logits));
+            let device_support = sampler.cuda_ranked_support(&logits).unwrap();
+            assert_eq!(device_support.is_some(), fits, "top-p {top_p}");
+            let Some(device_support) = device_support else {
+                continue;
+            };
+            let k = crate::ops::cuda_topk_ranked_packed_max_k(VOCAB).unwrap();
+            let mut order: Vec<usize> = (0..VOCAB).collect();
+            order.sort_by(|&a, &b| row[b].total_cmp(&row[a]).then(a.cmp(&b)));
+            let scaled_max = row[order[0]] * inv;
+            let denom: f32 = row.iter().map(|v| (v * inv - scaled_max).exp()).sum();
+            let mut packed: Vec<f32> = order[..k].iter().map(|&i| row[i]).collect();
+            packed.extend(order[..k].iter().map(|&i| i as f32));
+            packed.extend([denom, scaled_max]);
+            let host_support = ranked_support(&packed, inv, 0, top_p as f32, 0.0).unwrap();
+            assert_eq!(device_support.tokens, host_support.tokens);
+            for (device_prob, host_prob) in
+                device_support.sampling.iter().zip(&host_support.sampling)
+            {
+                assert!(
+                    (device_prob - host_prob).abs() < PROB_TOLERANCE,
+                    "{device_prob} against {host_prob}"
+                );
+            }
+        }
+        Ok(())
     }
 
     // the ranked top-K a row filters as the CPU does: top-k, top-p, min-p and their mixes, a nucleus past K refused

@@ -34,6 +34,16 @@ impl DeviceMemory {
 
 pub struct MemoryUsage;
 
+/// Whether `device` holds its own memory apart from the host's: CUDA, or a discrete Vulkan GPU.
+pub fn has_dedicated_memory(device: &Device) -> bool {
+    match device {
+        Device::Cuda(_) => true,
+        #[cfg(feature = "vulkan")]
+        Device::Vulkan(dev) => dev.context().device_memory().is_some(),
+        _ => false,
+    }
+}
+
 #[cfg(feature = "cuda")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CudaMemoryPoolUsage {
@@ -138,6 +148,13 @@ impl MemoryUsage {
             #[cfg(not(feature = "metal"))]
             Device::Metal(_) => {
                 inference_tensor::bail!("Cannot query memory for Metal device")
+            }
+            #[cfg(feature = "vulkan")]
+            Device::Vulkan(dev) if let Some((total, free)) = dev.context().device_memory() => {
+                Ok(DeviceMemory::Discrete {
+                    total: usize::try_from(total)?,
+                    free: usize::try_from(free)?,
+                })
             }
             // a unified-memory iGPU: its budget is the share of system RAM an integrated CUDA device gets
             Device::Vulkan(_) => {

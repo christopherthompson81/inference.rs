@@ -135,6 +135,17 @@ impl QVulkanStorage {
         }
     }
 
+    // loaded blocks: on a discrete GPU they reach its memory now, so what is sized after the load (the KV cache)
+    // sees them; a refused copy is retried, and reported, on first use
+    fn loaded(blocks: Box<dyn QuantizedType>, device: &crate::VulkanDevice) -> Self {
+        let storage = Self::new(blocks, device);
+        #[cfg(feature = "vulkan")]
+        if !device.context().is_unified() && vulkan_block_type(storage.blocks.dtype()).is_some() {
+            let _ = storage.gpu_copy();
+        }
+        storage
+    }
+
     // a GPU-run type's blocks moved into one driver buffer that both sides read, or `None` (the type stays on the host,
     // the device has its own memory, or the driver refused the allocation and the lazy copy will report it)
     #[cfg(feature = "vulkan")]
@@ -252,7 +263,7 @@ impl QStorage {
         let data: &[u8] = &data;
         match device {
             Device::Cpu => Ok(Self::Cpu(dtype.from_data(Cow::Borrowed(data)))),
-            Device::Vulkan(device) => Ok(Self::Vulkan(QVulkanStorage::new(
+            Device::Vulkan(device) => Ok(Self::Vulkan(QVulkanStorage::loaded(
                 dtype.from_data(Cow::Borrowed(data)),
                 device,
             ))),

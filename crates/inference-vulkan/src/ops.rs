@@ -1467,6 +1467,18 @@ impl Recorder<'_> {
                 &bytes,
                 [op.heads as u32, 1, op.batch as u32],
             );
+        } else if let Some(pipeline) = self.flash_attn_cm(op) {
+            let group = op.heads / op.kv_heads;
+            pipeline.dispatch(
+                self,
+                &buffers.map(|b| b.buffer),
+                &bytes,
+                [
+                    op.count.div_ceil(PREFILL_CM_ROWS / group) as u32,
+                    op.kv_heads as u32,
+                    op.batch as u32,
+                ],
+            );
         } else {
             self.context.kernels.flash_attn.dispatch(
                 self,
@@ -1489,6 +1501,20 @@ impl Recorder<'_> {
             self.retain(buffer.clone());
         }
         Ok(())
+    }
+}
+
+impl Recorder<'_> {
+    // the matrix-core prompt attention, for the heads and groups paged_prefill_cm tiles
+    fn flash_attn_cm(&self, op: &FlashAttn<'_>) -> Option<&crate::pipeline::Pipeline> {
+        let group = op.heads / op.kv_heads;
+        if !op.head_size.is_multiple_of(PREFILL_CM_HEAD_STEP)
+            || op.head_size > PREFILL_CM_MAX_HEAD
+            || group > PREFILL_CM_ROWS
+        {
+            return None;
+        }
+        Some(&self.context.coop.as_ref()?.flash_attn)
     }
 }
 

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::map::{MAP_BINDINGS, MAP_PUSH_BYTES};
 use crate::memory::{Bound, Buffer};
 use crate::ops;
-use crate::pipeline::Pipeline;
+use crate::pipeline::{Pipeline, PipelineSpec};
 use crate::{Error, Recorder, Result, shaders};
 
 // values a block of the 32-value types holds
@@ -38,9 +38,11 @@ macro_rules! kernels {
         }
 
         impl Kernels {
-            pub(crate) fn new(device: &ash::Device) -> Result<Self> {
+            pub(crate) fn new(device: &ash::Device, cache: ash::vk::PipelineCache) -> Result<Self> {
+                let specs = [$(PipelineSpec::new(shaders::$spirv, $bindings, $push, stringify!($name)),)*];
+                let mut built = Pipeline::build_all(device, cache, &specs)?.into_iter();
                 Ok(Self {
-                    $($name: Pipeline::new(device, shaders::$spirv, $bindings, $push, stringify!($name))?,)*
+                    $($name: built.next().expect("a pipeline a spec"),)*
                 })
             }
 
@@ -221,6 +223,8 @@ pub(crate) struct CoopKernels {
     pub(crate) moe_gather_f16: Pipeline,
     // prompt attention over f32, f16 and quantized paged caches
     paged_prefill: [Pipeline; 3],
+    // prompt attention over contiguous f32 keys and values
+    pub(crate) flash_attn: Pipeline,
     // Q4_0 experts on NV_cooperative_matrix2, where the device has it: a build a tile width, 16 to 128 routes
     // by BlockType, where the type has decode functions
     moe_mm_cm2: Vec<Option<[Pipeline; 4]>>,
@@ -243,8 +247,13 @@ const CONVERT_PUSH_BYTES: u32 = 2 * 4;
 pub(crate) const CONVERT_THREADS: usize = 256;
 
 impl CoopKernels {
-    pub(crate) fn new(device: &ash::Device, subgroup: Option<u32>, cm2: bool) -> Result<Self> {
-        let sources = [
+    pub(crate) fn new(
+        device: &ash::Device,
+        cache: ash::vk::PipelineCache,
+        subgroup: Option<u32>,
+        cm2: bool,
+    ) -> Result<Self> {
+        let mul_mmc = [
             (shaders::MUL_MMC_Q8_0, "mul_mmc_q8_0"),
             (shaders::MUL_MMC_Q5_0, "mul_mmc_q5_0"),
             (shaders::MUL_MMC_Q4_0, "mul_mmc_q4_0"),
@@ -253,13 +262,10 @@ impl CoopKernels {
             (shaders::MUL_MMC_Q4_K, "mul_mmc_q4_k"),
             (shaders::MUL_MMC_Q5_K, "mul_mmc_q5_k"),
             (shaders::MUL_MMC_Q6_K, "mul_mmc_q6_k"),
-        ];
-        let mul_mmc = sources
-            .into_iter()
-            .map(|(spirv, name)| {
-                Pipeline::with_subgroup(device, spirv, MMC_BINDINGS, MMC_PUSH_BYTES, name, subgroup)
-            })
-            .collect::<Result<_>>()?;
+        ]
+        .map(|(spirv, name)| {
+            PipelineSpec::new(spirv, MMC_BINDINGS, MMC_PUSH_BYTES, name).subgroup(subgroup)
+        });
         let mul_mmcl = [
             (shaders::MUL_MMCL_Q8_0, "mul_mmcl_q8_0"),
             (shaders::MUL_MMCL_Q5_0, "mul_mmcl_q5_0"),
@@ -270,18 +276,9 @@ impl CoopKernels {
             (shaders::MUL_MMCL_Q5_K, "mul_mmcl_q5_k"),
             (shaders::MUL_MMCL_Q6_K, "mul_mmcl_q6_k"),
         ]
-        .into_iter()
         .map(|(spirv, name)| {
-            Pipeline::with_subgroup(device, spirv, MMC_BINDINGS, MMC_PUSH_BYTES, name, subgroup)
-        })
-        .collect::<Result<_>>()?;
-        let convert_f16 = Pipeline::new(
-            device,
-            shaders::CONVERT_F16,
-            CONVERT_BINDINGS,
-            CONVERT_PUSH_BYTES,
-            "convert_f16",
-        )?;
+            PipelineSpec::new(spirv, MMC_BINDINGS, MMC_PUSH_BYTES, name).subgroup(subgroup)
+        });
         let moe_mmc = [
             (shaders::MOE_MMC_Q8_0, "moe_mmc_q8_0"),
             (shaders::MOE_MMC_Q5_0, "moe_mmc_q5_0"),
@@ -292,103 +289,134 @@ impl CoopKernels {
             (shaders::MOE_MMC_Q5_K, "moe_mmc_q5_k"),
             (shaders::MOE_MMC_Q6_K, "moe_mmc_q6_k"),
         ]
-        .into_iter()
         .map(|(spirv, name)| {
-            Pipeline::with_subgroup(
-                device,
-                spirv,
-                MOE_MMC_BINDINGS,
-                MOE_MMC_PUSH_BYTES,
-                name,
-                subgroup,
-            )
-        })
-        .collect::<Result<_>>()?;
-        let moe_gather_f16 = Pipeline::new(
-            device,
-            shaders::MOE_GATHER_F16,
-            MOE_GATHER_BINDINGS,
-            MOE_GATHER_PUSH_BYTES,
-            "moe_gather_f16",
-        )?;
-        let prefill = |spirv, name| {
-            Pipeline::with_subgroup(
-                device,
+            PipelineSpec::new(spirv, MOE_MMC_BINDINGS, MOE_MMC_PUSH_BYTES, name).subgroup(subgroup)
+        });
+        let prefill = [
+            (shaders::PAGED_PREFILL_CM, "paged_prefill_cm"),
+            (shaders::PAGED_PREFILL_CM_F16, "paged_prefill_cm_f16"),
+            (shaders::PAGED_PREFILL_CM_QUANT, "paged_prefill_cm_quant"),
+        ]
+        .map(|(spirv, name)| {
+            PipelineSpec::new(
                 spirv,
                 ops::PAGED_PREFILL_BINDINGS,
                 ops::PAGED_PREFILL_PUSH_BYTES,
                 name,
-                subgroup,
             )
-        };
-        let paged_prefill = [
-            prefill(shaders::PAGED_PREFILL_CM, "paged_prefill_cm")?,
-            prefill(shaders::PAGED_PREFILL_CM_F16, "paged_prefill_cm_f16")?,
-            prefill(shaders::PAGED_PREFILL_CM_QUANT, "paged_prefill_cm_quant")?,
+            .subgroup(subgroup)
+        });
+        let cm2_spec =
+            |(spirv, name)| PipelineSpec::new(spirv, MOE_CM2_BINDINGS, MOE_CM2_PUSH_BYTES, name);
+        let mul_mm_cm2_types = [
+            (BlockType::Q8_0, shaders::MUL_MM_CM2_Q8_0, "mul_mm_cm2_q8_0"),
+            (BlockType::Q5_0, shaders::MUL_MM_CM2_Q5_0, "mul_mm_cm2_q5_0"),
+            (BlockType::Q4_0, shaders::MUL_MM_CM2_Q4_0, "mul_mm_cm2_q4_0"),
+            (BlockType::Q4_1, shaders::MUL_MM_CM2_Q4_1, "mul_mm_cm2_q4_1"),
+            (BlockType::Q5_1, shaders::MUL_MM_CM2_Q5_1, "mul_mm_cm2_q5_1"),
         ];
-        let cm2_pipeline =
-            |spirv, name| Pipeline::new(device, spirv, MOE_CM2_BINDINGS, MOE_CM2_PUSH_BYTES, name);
+        let moe_mm_cm2_types = [
+            (
+                BlockType::Q8_0,
+                [
+                    (shaders::MOE_MM_CM2_Q8_0_N16, "moe_mm_cm2_q8_0_n16"),
+                    (shaders::MOE_MM_CM2_Q8_0_N32, "moe_mm_cm2_q8_0_n32"),
+                    (shaders::MOE_MM_CM2_Q8_0_N64, "moe_mm_cm2_q8_0_n64"),
+                    (shaders::MOE_MM_CM2_Q8_0_N128, "moe_mm_cm2_q8_0_n128"),
+                ],
+            ),
+            (
+                BlockType::Q5_0,
+                [
+                    (shaders::MOE_MM_CM2_Q5_0_N16, "moe_mm_cm2_q5_0_n16"),
+                    (shaders::MOE_MM_CM2_Q5_0_N32, "moe_mm_cm2_q5_0_n32"),
+                    (shaders::MOE_MM_CM2_Q5_0_N64, "moe_mm_cm2_q5_0_n64"),
+                    (shaders::MOE_MM_CM2_Q5_0_N128, "moe_mm_cm2_q5_0_n128"),
+                ],
+            ),
+            (
+                BlockType::Q4_0,
+                [
+                    (shaders::MOE_MM_CM2_Q4_0_N16, "moe_mm_cm2_q4_0_n16"),
+                    (shaders::MOE_MM_CM2_Q4_0_N32, "moe_mm_cm2_q4_0_n32"),
+                    (shaders::MOE_MM_CM2_Q4_0_N64, "moe_mm_cm2_q4_0_n64"),
+                    (shaders::MOE_MM_CM2_Q4_0_N128, "moe_mm_cm2_q4_0_n128"),
+                ],
+            ),
+            (
+                BlockType::Q4_1,
+                [
+                    (shaders::MOE_MM_CM2_Q4_1_N16, "moe_mm_cm2_q4_1_n16"),
+                    (shaders::MOE_MM_CM2_Q4_1_N32, "moe_mm_cm2_q4_1_n32"),
+                    (shaders::MOE_MM_CM2_Q4_1_N64, "moe_mm_cm2_q4_1_n64"),
+                    (shaders::MOE_MM_CM2_Q4_1_N128, "moe_mm_cm2_q4_1_n128"),
+                ],
+            ),
+            (
+                BlockType::Q5_1,
+                [
+                    (shaders::MOE_MM_CM2_Q5_1_N16, "moe_mm_cm2_q5_1_n16"),
+                    (shaders::MOE_MM_CM2_Q5_1_N32, "moe_mm_cm2_q5_1_n32"),
+                    (shaders::MOE_MM_CM2_Q5_1_N64, "moe_mm_cm2_q5_1_n64"),
+                    (shaders::MOE_MM_CM2_Q5_1_N128, "moe_mm_cm2_q5_1_n128"),
+                ],
+            ),
+        ];
+        let mut specs = Vec::new();
+        specs.extend(mul_mmc);
+        specs.extend(mul_mmcl);
+        specs.extend(moe_mmc);
+        specs.extend(prefill);
+        specs.push(
+            PipelineSpec::new(
+                shaders::FLASH_ATTN_CM,
+                ops::FLASH_BINDINGS,
+                ops::FLASH_PUSH_BYTES,
+                "flash_attn_cm",
+            )
+            .subgroup(subgroup),
+        );
+        specs.push(PipelineSpec::new(
+            shaders::CONVERT_F16,
+            CONVERT_BINDINGS,
+            CONVERT_PUSH_BYTES,
+            "convert_f16",
+        ));
+        specs.push(PipelineSpec::new(
+            shaders::MOE_GATHER_F16,
+            MOE_GATHER_BINDINGS,
+            MOE_GATHER_PUSH_BYTES,
+            "moe_gather_f16",
+        ));
+        if cm2 {
+            specs.extend(mul_mm_cm2_types.map(|(_, spirv, name)| cm2_spec((spirv, name))));
+            specs.extend(
+                moe_mm_cm2_types
+                    .iter()
+                    .flat_map(|(_, builds)| builds.map(cm2_spec)),
+            );
+        }
+        let mut built = Pipeline::build_all(device, cache, &specs)?.into_iter();
+        let mut take = |n: usize| built.by_ref().take(n).collect::<Vec<_>>();
+        let mul_mmc = take(BLOCK_TYPES);
+        let mul_mmcl = take(BLOCK_TYPES);
+        let moe_mmc = take(BLOCK_TYPES);
+        let paged_prefill: [Pipeline; 3] =
+            take(3).try_into().ok().expect("three prefill pipelines");
+        let [flash_attn]: [Pipeline; 1] = take(1).try_into().ok().expect("one attention pipeline");
+        let [convert_f16, moe_gather_f16]: [Pipeline; 2] =
+            take(2).try_into().ok().expect("two pipelines");
         let mut moe_mm_cm2: Vec<Option<[Pipeline; 4]>> = (0..BLOCK_TYPES).map(|_| None).collect();
         let mut mul_mm_cm2: Vec<Option<Pipeline>> = (0..BLOCK_TYPES).map(|_| None).collect();
         if cm2 {
-            for (ty, spirv, name) in [
-                (BlockType::Q8_0, shaders::MUL_MM_CM2_Q8_0, "mul_mm_cm2_q8_0"),
-                (BlockType::Q5_0, shaders::MUL_MM_CM2_Q5_0, "mul_mm_cm2_q5_0"),
-                (BlockType::Q4_0, shaders::MUL_MM_CM2_Q4_0, "mul_mm_cm2_q4_0"),
-                (BlockType::Q4_1, shaders::MUL_MM_CM2_Q4_1, "mul_mm_cm2_q4_1"),
-                (BlockType::Q5_1, shaders::MUL_MM_CM2_Q5_1, "mul_mm_cm2_q5_1"),
-            ] {
-                mul_mm_cm2[ty as usize] = Some(cm2_pipeline(spirv, name)?);
+            for ((ty, _, _), pipeline) in mul_mm_cm2_types
+                .into_iter()
+                .zip(take(mul_mm_cm2_types.len()))
+            {
+                mul_mm_cm2[ty as usize] = Some(pipeline);
             }
-            for (ty, builds) in [
-                (
-                    BlockType::Q8_0,
-                    [
-                        (shaders::MOE_MM_CM2_Q8_0_N16, "moe_mm_cm2_q8_0_n16"),
-                        (shaders::MOE_MM_CM2_Q8_0_N32, "moe_mm_cm2_q8_0_n32"),
-                        (shaders::MOE_MM_CM2_Q8_0_N64, "moe_mm_cm2_q8_0_n64"),
-                        (shaders::MOE_MM_CM2_Q8_0_N128, "moe_mm_cm2_q8_0_n128"),
-                    ],
-                ),
-                (
-                    BlockType::Q5_0,
-                    [
-                        (shaders::MOE_MM_CM2_Q5_0_N16, "moe_mm_cm2_q5_0_n16"),
-                        (shaders::MOE_MM_CM2_Q5_0_N32, "moe_mm_cm2_q5_0_n32"),
-                        (shaders::MOE_MM_CM2_Q5_0_N64, "moe_mm_cm2_q5_0_n64"),
-                        (shaders::MOE_MM_CM2_Q5_0_N128, "moe_mm_cm2_q5_0_n128"),
-                    ],
-                ),
-                (
-                    BlockType::Q4_0,
-                    [
-                        (shaders::MOE_MM_CM2_Q4_0_N16, "moe_mm_cm2_q4_0_n16"),
-                        (shaders::MOE_MM_CM2_Q4_0_N32, "moe_mm_cm2_q4_0_n32"),
-                        (shaders::MOE_MM_CM2_Q4_0_N64, "moe_mm_cm2_q4_0_n64"),
-                        (shaders::MOE_MM_CM2_Q4_0_N128, "moe_mm_cm2_q4_0_n128"),
-                    ],
-                ),
-                (
-                    BlockType::Q4_1,
-                    [
-                        (shaders::MOE_MM_CM2_Q4_1_N16, "moe_mm_cm2_q4_1_n16"),
-                        (shaders::MOE_MM_CM2_Q4_1_N32, "moe_mm_cm2_q4_1_n32"),
-                        (shaders::MOE_MM_CM2_Q4_1_N64, "moe_mm_cm2_q4_1_n64"),
-                        (shaders::MOE_MM_CM2_Q4_1_N128, "moe_mm_cm2_q4_1_n128"),
-                    ],
-                ),
-                (
-                    BlockType::Q5_1,
-                    [
-                        (shaders::MOE_MM_CM2_Q5_1_N16, "moe_mm_cm2_q5_1_n16"),
-                        (shaders::MOE_MM_CM2_Q5_1_N32, "moe_mm_cm2_q5_1_n32"),
-                        (shaders::MOE_MM_CM2_Q5_1_N64, "moe_mm_cm2_q5_1_n64"),
-                        (shaders::MOE_MM_CM2_Q5_1_N128, "moe_mm_cm2_q5_1_n128"),
-                    ],
-                ),
-            ] {
-                let [a, b, c, d] = builds.map(|(spirv, name)| cm2_pipeline(spirv, name));
-                moe_mm_cm2[ty as usize] = Some([a?, b?, c?, d?]);
+            for (ty, _) in moe_mm_cm2_types {
+                moe_mm_cm2[ty as usize] = Some(take(4).try_into().ok().expect("four tile widths"));
             }
         }
         Ok(Self {
@@ -398,6 +426,7 @@ impl CoopKernels {
             moe_mmc,
             moe_gather_f16,
             paged_prefill,
+            flash_attn,
             moe_mm_cm2,
             mul_mm_cm2,
         })
@@ -441,7 +470,7 @@ impl CoopKernels {
             .iter()
             .chain(&self.mul_mmcl)
             .chain(&self.moe_mmc)
-            .chain([&self.convert_f16, &self.moe_gather_f16])
+            .chain([&self.convert_f16, &self.moe_gather_f16, &self.flash_attn])
             .chain(&self.paged_prefill)
             .chain(self.moe_mm_cm2.iter().flatten().flatten())
             .chain(self.mul_mm_cm2.iter().flatten())
