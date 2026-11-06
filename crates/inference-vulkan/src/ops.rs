@@ -418,8 +418,14 @@ impl Recorder<'_> {
     }
 
     pub fn gated_rmsnorm(&self, op: &GatedRmsNorm<'_>) -> Result<()> {
-        let workgroups = op.rows * op.groups;
-        if workgroups == 0 || op.group_size == 0 || workgroups > MAX_DISPATCH_GROUPS {
+        // groups across x and rows down y, so a long prompt's rows fit the grid
+        let grid = [op.groups as u32, op.rows as u32, 1];
+        if op.rows == 0
+            || op.groups == 0
+            || op.group_size == 0
+            || op.rows > MAX_DISPATCH_GROUPS
+            || op.groups > MAX_DISPATCH_GROUPS
+        {
             return Err(Error::Invalid(format!(
                 "gated RMSNorm of {} rows of {} groups of {}",
                 op.rows, op.groups, op.group_size
@@ -449,7 +455,7 @@ impl Recorder<'_> {
                 self,
                 &buffers.map(|b| b.buffer),
                 &bytes,
-                [workgroups as u32, 1, 1],
+                grid,
             );
             self.context
                 .remember_quantized(op.out, 0, op.rows * cols, &blocks, s_off);
@@ -459,12 +465,10 @@ impl Recorder<'_> {
             return Ok(());
         }
         let buffers = [op.x.0, op.gate.0, op.weight.0, op.out];
-        self.context.kernels.gated_rmsnorm.dispatch(
-            self,
-            &buffers.map(|b| b.buffer),
-            &bytes,
-            [workgroups as u32, 1, 1],
-        );
+        self.context
+            .kernels
+            .gated_rmsnorm
+            .dispatch(self, &buffers.map(|b| b.buffer), &bytes, grid);
         for buffer in buffers {
             self.retain(buffer.clone());
         }

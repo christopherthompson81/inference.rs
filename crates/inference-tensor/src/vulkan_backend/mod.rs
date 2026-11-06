@@ -2159,7 +2159,14 @@ mod tests {
     fn a_fused_gated_rmsnorm_matches_its_composite() -> Result<()> {
         let Some(vk) = device() else { return Ok(()) };
         let eps = 1e-5f32;
-        for (rows, groups, group_size) in [(1usize, 8usize, 512usize), (5, 3, 100), (2, 2, 700)] {
+        // the last past 65535 (rows x groups) workgroups, a long prompt's
+        let shapes = [
+            (1usize, 8usize, 512usize),
+            (5, 3, 100),
+            (2, 2, 700),
+            (8300, 8, 32),
+        ];
+        for (rows, groups, group_size) in shapes {
             let width = groups * group_size;
             let x = Tensor::randn(0f32, 1.0, (rows, width), &Device::Cpu)?;
             let gate = Tensor::randn(0f32, 2.0, (rows, width), &Device::Cpu)?;
