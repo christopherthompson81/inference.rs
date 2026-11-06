@@ -1485,6 +1485,54 @@ pub async fn sample_sequence(
     sample_speculative: bool,
     multiple_sequences: bool,
 ) -> Result<Logprobs> {
+    sample_sequence_with_first(
+        logits,
+        seq,
+        None,
+        SampleOptions {
+            return_logprobs,
+            eos_tok,
+            llg_factory,
+            max_model_len,
+            rng,
+            use_async_pool,
+            sample_speculative,
+            multiple_sequences,
+        },
+    )
+    .await
+}
+
+/// [`sample_sequence`]'s options.
+pub struct SampleOptions<'a> {
+    pub return_logprobs: bool,
+    pub eos_tok: Option<&'a [u32]>,
+    pub llg_factory: Option<Arc<llguidance::ParserFactory>>,
+    pub max_model_len: usize,
+    pub rng: Arc<std::sync::Mutex<Isaac64Rng>>,
+    pub use_async_pool: bool,
+    pub sample_speculative: bool,
+    pub multiple_sequences: bool,
+}
+
+/// [`sample_sequence`], its first, unconstrained draw `first` where the caller already made it (from a row ranked
+/// with others); the grammar check and its masked resample run as they do after the sampler's own draw.
+pub async fn sample_sequence_with_first(
+    logits: Tensor,
+    seq: &mut Sequence,
+    first: Option<Logprobs>,
+    options: SampleOptions<'_>,
+) -> Result<Logprobs> {
+    let SampleOptions {
+        return_logprobs,
+        eos_tok,
+        llg_factory,
+        max_model_len,
+        rng,
+        use_async_pool,
+        sample_speculative,
+        multiple_sequences,
+    } = options;
     activate_required_tool_call_grammar(seq, llg_factory.as_ref(), max_model_len, false);
     let rng = seq.sampling_rng(&rng);
 
@@ -1495,7 +1543,9 @@ pub async fn sample_sequence(
     let prompt_len = seq.prompt_tokens();
     let rng_clone = rng.clone();
     let logits_clone = logits.clone();
-    let first_lobprobs_response = if use_async_pool {
+    let first_lobprobs_response = if let Some(first) = first {
+        first
+    } else if use_async_pool {
         tokio_rayon::spawn(move || {
             sampler.sample(
                 logits_clone,

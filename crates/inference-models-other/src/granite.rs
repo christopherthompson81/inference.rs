@@ -1019,9 +1019,25 @@ struct MambaLayer {
     n_groups: usize,
     time_step_min: f64,
     time_step_max: f64,
+    // the Vulkan conv and scan steps' identity slots for the last batch size, made once rather than once a step
+    identity_slots: Mutex<Option<Tensor>>,
 }
 
 impl MambaLayer {
+    fn identity_slots(&self, rows: usize, device: &Device) -> Result<Tensor> {
+        let mut held = self.identity_slots.lock().expect("identity slots poisoned");
+        if let Some(slots) = held
+            .as_ref()
+            .filter(|slots| slots.dim(0).ok() == Some(rows) && slots.device().same_device(device))
+        {
+            return Ok(slots.clone());
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let slots = Tensor::arange(0u32, rows as u32, device)?;
+        *held = Some(slots.clone());
+        Ok(slots)
+    }
+
     fn load(
         vb: ShardedVarBuilder,
         cfg: &Config,
@@ -1119,6 +1135,7 @@ impl MambaLayer {
             n_groups,
             time_step_min,
             time_step_max,
+            identity_slots: Mutex::new(None),
         })
     }
 
@@ -1581,7 +1598,7 @@ impl MambaLayer {
             let device = hidden_states_b_c.device();
             // the kernel shifts the state in place, and a gathered state may share a snapshot's storage
             cache.conv_state = cache.conv_state.to_dtype(f32)?.force_contiguous()?;
-            let slots = Tensor::arange(0u32, hidden_states_b_c.dim(0)? as u32, device)?;
+            let slots = self.identity_slots(hidden_states_b_c.dim(0)?, device)?;
             return inference_tensor::vulkan::ssm_conv_step(
                 &hidden_states_b_c.to_dtype(f32)?.contiguous()?,
                 &self.conv1d_weight.squeeze(1)?.to_dtype(f32)?.contiguous()?,
@@ -1783,7 +1800,7 @@ impl MambaLayer {
                 .ssm_state
                 .to_dtype(inference_tensor::DType::F32)?
                 .force_contiguous()?;
-            let slots = Tensor::arange(0u32, batch_size as u32, hidden_states.device())?;
+            let slots = self.identity_slots(batch_size, hidden_states.device())?;
             let y = inference_tensor::vulkan::ssm_scan_step(&inference_tensor::vulkan::ScanStep {
                 x: &hidden_states.contiguous()?,
                 dt: &dt.to_dtype(inference_tensor::DType::F32)?.contiguous()?,
@@ -3002,6 +3019,8 @@ pub struct GraniteMoeHybrid {
     layer_types: Vec<GraniteLayerType>,
     ln_f: RmsNorm,
     lm_head: Arc<dyn QuantMethod>,
+    // the lm_head's weights, which an MTP draft head re-quantizes
+    lm_head_elements: usize,
     dtype: DType,
     hybrid_cache: Arc<Mutex<GraniteHybridCache>>,
     // EitherCache for pipeline integration
@@ -3292,6 +3311,7 @@ impl GraniteMoeHybrid {
             draft_lm_head: None,
             spec_taps: Mutex::new(None),
             prompt_taps: Mutex::new(None),
+            lm_head_elements: cfg.vocab_size * cfg.hidden_size,
             wte,
             layers,
             layer_types,
@@ -3785,15 +3805,31 @@ impl GraniteMoeHybrid {
             return Ok(());
         }
         let mut cache = self.kv_cache.hybrid();
+        // each group's rows on the device once, not once a layer and tensor; `None` where a group is the whole batch
+        let batch = replays[0].indices.dim(0)?;
+        let device = replays[0].indices.device().clone();
+        let group_rows = groups
+            .values()
+            .map(|rows| {
+                #[allow(clippy::cast_possible_truncation)]
+                let whole =
+                    rows.len() == batch && rows.iter().enumerate().all(|(i, &r)| r == i as u32);
+                (!whole)
+                    .then(|| Tensor::new(rows.as_slice(), &device))
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>>>()?;
         for replay in &replays {
             let DecoderLayer::Mamba(block) = &self.layers[replay.layer_idx] else {
                 inference_tensor::bail!("Mamba replay of non-Mamba layer {}", replay.layer_idx);
             };
-            for (&keep, batch_rows) in &groups {
+            for ((&keep, batch_rows), rows_on_device) in groups.iter().zip(&group_rows) {
                 // the stashed conv input and dt are views into the input projection
                 let pick = |t: &Tensor| -> Result<Tensor> {
-                    t.contiguous()?
-                        .index_select(&Tensor::new(batch_rows.as_slice(), t.device())?, 0)
+                    match rows_on_device {
+                        Some(rows) => t.contiguous()?.index_select(rows, 0),
+                        None => Ok(t.clone()),
+                    }
                 };
                 let mut state = MambaLayerCache {
                     conv_state: pick(&replay.conv_state)?,
@@ -3960,6 +3996,12 @@ impl crate::speculative::SpeculativeTargetMixin for GraniteMoeHybrid {
         config: crate::speculative::SpeculativeConfig,
     ) -> Result<Option<crate::speculative::SpeculativeAttachInfo>> {
         self.attach_speculative_with_runtime(config, Default::default())
+    }
+
+    fn mtp_draft_head_bytes(&self, isq: inference_quant::IsqType) -> Option<usize> {
+        self.mtp.as_ref()?;
+        let dtype = inference_tensor::quantized::GgmlDType::try_from(isq).ok()?;
+        Some(self.lm_head_elements / dtype.block_size() * dtype.type_size())
     }
 
     fn attach_speculative_with_runtime(
@@ -4442,6 +4484,7 @@ mod tests {
             n_groups: NUM_GROUPS,
             time_step_min: NO_DT_LIMIT[0],
             time_step_max: NO_DT_LIMIT[1],
+            identity_slots: Mutex::new(None),
         })
     }
 

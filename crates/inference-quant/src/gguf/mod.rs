@@ -760,6 +760,8 @@ impl QuantMethod for GgufMatMul {
             }
 
             let t = match &self.w {
+                // the quantize below reads a host copy, and Vulkan's blocks are host-side: no device floats between
+                QMatMul::QTensor(q) if q.device().is_vulkan() => q.dequantize(&Device::Cpu)?,
                 QMatMul::QTensor(q) => q.dequantize(&q.device())?,
                 QMatMul::TensorF16(t) | QMatMul::Tensor(t) => t.clone(),
             };

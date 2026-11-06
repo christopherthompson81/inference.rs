@@ -1518,6 +1518,53 @@ impl Recorder<'_> {
     }
 }
 
+pub(crate) const RANKED_DRAW_BINDINGS: usize = 5;
+pub(crate) const RANKED_DRAW_PUSH_BYTES: u32 = 3 * 4;
+
+/// A token drawn from each of `rows` packed [`RankedTopK`] rows under its sampler's filters, with the support it was
+/// drawn from: `params` holds [`RankedDraw::PARAM_WORDS`] words a row (inverse temperature, top-k or 0, top-p and
+/// min-p as f32 bits, a uniform in `[0, 1)`); `ids` and `probs` take [`RankedTopK::K`] entries a row (u32, f32),
+/// `tokens` one u32 a row.
+pub struct RankedDraw<'a> {
+    pub rows: usize,
+    pub packed: At<'a>,
+    pub params: At<'a>,
+    pub ids: &'a Arc<Buffer>,
+    pub probs: &'a Arc<Buffer>,
+    pub tokens: &'a Arc<Buffer>,
+}
+
+impl RankedDraw<'_> {
+    pub const PARAM_WORDS: usize = 5;
+}
+
+impl Recorder<'_> {
+    pub fn ranked_draw(&self, op: &RankedDraw<'_>) -> Result<()> {
+        let k = RankedTopK::K;
+        if op.ids.len() < op.rows * k * 4
+            || op.probs.len() < op.rows * k * 4
+            || op.tokens.len() < op.rows * 4
+            || op.rows > MAX_DISPATCH_GROUPS
+        {
+            return Err(Error::Invalid(format!("ranked draw of {} rows", op.rows)));
+        }
+        if op.rows == 0 {
+            return Ok(());
+        }
+        let buffers = [op.packed.0, op.params.0, op.ids, op.probs, op.tokens];
+        self.context.kernels.ranked_draw.dispatch(
+            self,
+            &buffers.map(|b| b.buffer),
+            &words(&[op.rows, op.packed.1, op.params.1])?,
+            [op.rows as u32, 1, 1],
+        );
+        for buffer in buffers {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+}
+
 pub(crate) const RANKED_BINDINGS: usize = 2;
 pub(crate) const RANKED_PUSH_BYTES: u32 = 2 * 4;
 pub(crate) const RANKED_PART_PUSH_BYTES: u32 = 4 * 4;

@@ -2185,14 +2185,22 @@ impl HybridCache {
             })?;
             Tensor::from_vec(vec![row], (1,), device)
         };
+        let host_target = [u32::try_from(to).map_err(|_| {
+            inference_tensor::Error::msg(format!("recurrent physical slot {to} exceeds u32"))
+        })?];
         for cache in &mut self.caches {
             if let HybridLayerCache::Recurrent(pool) = cache {
                 let source = rows(from, pool.device())?;
                 let target = rows(to, pool.device())?;
                 let conv = pool.gather_conv_state(&source)?;
                 let recurrent = pool.gather_recurrent_state(&source)?;
-                pool.scatter_conv_state(&target, &conv)?;
-                pool.scatter_recurrent_state(&target, &recurrent)?;
+                // the host knows the slot: off CUDA a device index would be read back to find it
+                pool.scatter_conv_state_with_host_indices(&target, Some(&host_target), &conv)?;
+                pool.scatter_recurrent_state_with_host_indices(
+                    &target,
+                    Some(&host_target),
+                    &recurrent,
+                )?;
             }
         }
         Ok(())

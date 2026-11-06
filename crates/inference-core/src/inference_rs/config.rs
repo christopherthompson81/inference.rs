@@ -253,7 +253,10 @@ impl ModelLoaderConfig {
             silent: self.silent,
             mapper: self.device_map_setting.clone(),
             in_situ_quant: self.isq,
-            paged_attn_config: self.paged_attn_config,
+            paged_attn_config: self.paged_attn_config.map(|mut config| {
+                config.draft_head_isq = self.mtp_config.as_ref().and_then(|mtp| mtp.drafter_isq);
+                config
+            }),
             multi_row_decode: self.mtp_config.is_some(),
             embeddings_on_host: self.embeddings_on_host,
             moe_expert_cache: self.moe_expert_cache,

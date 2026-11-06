@@ -1789,6 +1789,66 @@ impl Sampler {
         ))
     }
 
+    /// Whether Vulkan's ranked draw serves this sampler's drafts wholly on the device: the ranked path with nothing it
+    /// would have to read back (penalties and bias count the drafts the host does not see).
+    pub fn can_draw_on_vulkan(&self, logits: &Tensor) -> bool {
+        logits.device().is_vulkan()
+            && self.temperature.is_some()
+            && self.can_rank_on_vulkan(logits)
+            && !self.needs_penalties()
+            && self.logits_bias.is_empty()
+    }
+
+    /// The ranked draw's params for one row at `uniform` ([`inference_tensor::vulkan::RANKED_DRAW_PARAM_WORDS`]).
+    pub fn ranked_draw_params(&self, uniform: f32) -> [u32; 5] {
+        let temperature = self.temperature.unwrap_or(1.0);
+        [
+            ((1.0 / temperature) as f32).to_bits(),
+            u32::try_from(self.top_k.max(0)).unwrap_or(u32::MAX),
+            (self.top_p as f32).to_bits(),
+            (self.min_p as f32).to_bits(),
+            uniform.to_bits(),
+        ]
+    }
+
+    /// The temperature a ranked draw ranks at.
+    pub fn ranked_temperature(&self) -> f64 {
+        self.temperature.unwrap_or(1.0)
+    }
+
+    /// A draft token drawn from `logits`' ranked top-K on Vulkan, with the normalized support it was drawn from (the
+    /// verifier's proposal distribution); `None` where the ranked path does not serve this row.
+    pub fn sample_ranked_draft(
+        &self,
+        logits: &Tensor,
+        context: &[u32],
+        prompt_len: usize,
+        rng: Arc<Mutex<Isaac64Rng>>,
+    ) -> Result<Option<(u32, RankedProbs)>> {
+        if !logits.device().is_vulkan() || !self.can_rank_on_vulkan(logits) {
+            return Ok(None);
+        }
+        let Some(support) = self.vulkan_ranked_support(logits, context, prompt_len)? else {
+            return Ok(None);
+        };
+        let total: f32 = support.sampling.iter().sum();
+        if !(total > 0.0 && total.is_finite()) {
+            return Ok(None);
+        }
+        let distr = WeightedIndex::new(&support.sampling).map_err(|e| {
+            Error::Msg(format!("Failed to construct the ranked draft sampler: {e}"))
+        })?;
+        let selected = distr.sample(&mut *rng.lock().expect("could not lock rng mutex"));
+        Ok(Some((
+            support.tokens[selected],
+            RankedProbs {
+                tokens: support.tokens,
+                sampling: support.sampling.iter().map(|p| p / total).collect(),
+                reporting: support.reporting,
+            },
+        )))
+    }
+
     /// Every row of `logits` (`(.., rows, vocab)`) ranked on Vulkan in one dispatch and read back once, where this
     /// sampler's filters keep each row within its top-K; `None` otherwise, for the row-by-row path. Row `i` is
     /// penalized over `context` and the `drafts` before it, as the CPU's verifier sees it once those are accepted.
@@ -3938,6 +3998,81 @@ mod tests {
             }
             for (i, (g, w)) in got.iter().zip(&want).enumerate() {
                 assert!((g - w).abs() < 1e-5, "{filters:?} token {i}: {g} vs {w}");
+            }
+        }
+    }
+
+    // the device's draw over a ranked row keeps the host's filtered support, and lands each uniform on the token the
+    // host's cumulative mass does
+    #[test]
+    fn a_ranked_draw_matches_the_hosts_support() {
+        use super::Sampler;
+        let Ok(vk) = Device::new_vulkan(0) else {
+            return;
+        };
+        const VOCAB: usize = 4096;
+        let row: Vec<f32> = (0..VOCAB)
+            .map(|i| -0.05 * ((i * 7919) % VOCAB) as f32 + 6.0)
+            .collect();
+        // (temperature, top-k, top-p, min-p)
+        for (temperature, top_k, top_p, min_p) in [
+            (0.7, 0, 0.95, 0.0),
+            (1.0, 40, 1.0, 0.0),
+            (0.6, 20, 0.9, 0.0),
+            (1.2, 0, 1.0, 0.05),
+            (0.8, 64, 0.8, 0.02),
+        ] {
+            let sampler = Sampler::new(
+                Some(temperature),
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                top_k,
+                top_p,
+                min_p,
+                HashMap::new(),
+                vec![],
+            )
+            .unwrap();
+            let logits = Tensor::from_vec(row.clone(), (1, VOCAB), &vk).unwrap();
+            let packed = inference_tensor::vulkan::ranked_top_k(&logits, temperature).unwrap();
+            let host = packed.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            let support = super::ranked_support(
+                &host,
+                (1.0 / temperature) as f32,
+                top_k,
+                top_p as f32,
+                min_p as f32,
+            )
+            .expect("the support fits K");
+            let total: f32 = support.sampling.iter().sum();
+            let want: Vec<f32> = support.sampling.iter().map(|p| p / total).collect();
+            for uniform in [0.0f32, 0.13, 0.5, 0.87, 0.999] {
+                let params = sampler.ranked_draw_params(uniform);
+                let params = Tensor::from_vec(params.to_vec(), (1, 5), &vk).unwrap();
+                let (ids, probs, token) =
+                    inference_tensor::vulkan::ranked_draw(&packed, &params).unwrap();
+                let ids = ids.flatten_all().unwrap().to_vec1::<u32>().unwrap();
+                let probs = probs.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+                let token = token.to_vec1::<u32>().unwrap()[0];
+                let filters = (temperature, top_k, top_p, min_p);
+                assert_eq!(ids[..want.len()], support.tokens[..], "{filters:?}");
+                for (i, (g, w)) in probs.iter().zip(&want).enumerate() {
+                    assert!((g - w).abs() < 1e-5, "{filters:?} entry {i}: {g} vs {w}");
+                }
+                assert!(probs[want.len()..].iter().all(|&p| p == 0.0), "{filters:?}");
+                let mut acc = 0.0f32;
+                let expected = want
+                    .iter()
+                    .position(|&p| {
+                        acc += p;
+                        p > 0.0 && uniform < acc
+                    })
+                    .unwrap_or_else(|| want.iter().rposition(|&p| p > 0.0).unwrap());
+                assert_eq!(token, support.tokens[expected], "{filters:?} at {uniform}");
             }
         }
     }
