@@ -112,3 +112,20 @@ discrete Vulkan GPUs (iGPUs unchanged).
 
 Peak no longer depends on the prompt's length. Decode at depth 4 is 156-175 tok/s. The exit segfaults (Run 2) are
 in an NVIDIA driver thread while `exit()` runs: the Vulkan device lives in a static never destroyed.
+
+## Run 4 - 2026-11-05
+
+**Question:** what are the exit segfaults (2 of 4 paged bench runs at 4K/8K, most profiled runs)?
+
+**Command:** `coredumpctl debug <pid>` on two cores, `thread apply all bt`.
+
+**Finding:** the faulting thread is the NVIDIA driver's own (`libnvidia-glvkspirv` called from `libnvidia-glcore`); the
+main thread is in `exit()` -> `_dl_fini` -> `mi_process_done` (mimalloc's purge). The Vulkan context lives in
+`vulkan_backend::CONTEXT`, a static never dropped, so the device and instance are never destroyed and the libraries'
+exit handlers run under the driver's live threads. Not new: the #826 binary crashed the same way under profiling.
+
+**Change:** `Context::shut_down` waits for the GPU and destroys the pipelines, pool, stream, device and instance while
+other references remain (after it a buffer's drop leaks, recording and allocating fail); the backend registers it
+with `atexit` when it creates the context, so it runs before the libraries' teardown.
+
+**Result:** 0 crashes in 8 bench runs (4K and 8K alternating) and 3 profiled runs.

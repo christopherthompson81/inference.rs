@@ -226,6 +226,7 @@ impl Buffer {
         device_local: bool,
         pooled: bool,
     ) -> Result<Self> {
+        context.live()?;
         let out_of_memory =
             |r: &Result<Self>| matches!(r, Err(Error::Vk(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)));
         if device_local {
@@ -467,6 +468,10 @@ pub fn f32_bytes(values: &[f32]) -> &[u8] {
 impl Drop for Buffer {
     // a recorded command retains what it uses, so nothing submitted reads a buffer once it drops
     fn drop(&mut self) {
+        // the device is gone: its memory went with it
+        if self.context.is_shut() {
+            return;
+        }
         let allocation = Allocation {
             buffer: self.buffer,
             memory: self.memory,
@@ -673,6 +678,9 @@ impl ImportedMemory {
 
 impl Drop for ImportedMemory {
     fn drop(&mut self) {
+        if self.context.is_shut() {
+            return;
+        }
         // SAFETY: every submit is waited on, so the GPU no longer reads the pages
         unsafe {
             self.context.device.destroy_buffer(self.buffer, None);

@@ -27,6 +27,14 @@ const PAGED_PREFILL_MIN_PIECE_ROWS: usize = 8;
 
 static CONTEXT: OnceLock<std::result::Result<Arc<Context>, String>> = OnceLock::new();
 
+// the device goes before the libraries' own exit handlers, which otherwise tear the driver down under its threads
+#[cfg(unix)]
+extern "C" fn shut_down_at_exit() {
+    if let Some(Ok(context)) = CONTEXT.get() {
+        context.shut_down();
+    }
+}
+
 fn vk_err(err: inference_vulkan::Error) -> crate::Error {
     crate::Error::wrap(err)
 }
@@ -1567,7 +1575,13 @@ impl BackendDevice for VulkanDevice {
                 } else {
                     MatrixCores::Default
                 };
-                Context::with_matrix_cores(mode).map_err(|err| err.to_string())
+                let context = Context::with_matrix_cores(mode).map_err(|err| err.to_string())?;
+                #[cfg(unix)]
+                // SAFETY: the handler only reads the initialized static
+                unsafe {
+                    libc::atexit(shut_down_at_exit);
+                }
+                Ok(context)
             })
             .clone()
             .map_err(crate::Error::msg)?;
