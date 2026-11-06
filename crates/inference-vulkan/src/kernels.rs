@@ -671,7 +671,7 @@ impl Recorder<'_> {
         }
         let kernels = &self.context.kernels;
         if op.x_rows > MATVEC_MAX_ROWS
-            && let Some(coop) = self.context.coop.as_ref()
+            && let Some(coop) = self.context.matmul_coop()
         {
             // the tokens as f16 into the scratch, padded to whole tiles with zeros: a tile's last matrices read past
             // its live tokens (outputs dropped), and past a row's end into the next row (against zero weights)

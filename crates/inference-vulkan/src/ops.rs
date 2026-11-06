@@ -373,7 +373,7 @@ impl MoeMatVec<'_> {
         cols: usize,
     ) -> usize {
         let int8 = crate::MatVec::scratch_bytes(slots.div_ceil(x_div), cols);
-        if context.coop.is_none() {
+        if context.matmul_coop().is_none() {
             return int8;
         }
         // the f16 rows in expert order with a tile of zeros past them (the matrix-core paths quantize nothing)
@@ -644,7 +644,7 @@ impl Recorder<'_> {
             return Ok(());
         }
         if op.slots > MOE_TILED_MIN_SLOTS
-            && let Some(coop) = self.context.coop.as_ref()
+            && let Some(coop) = self.context.matmul_coop()
         {
             // NVIDIA's cooperative matrix 2 takes every prompt's experts, the KHR matrix cores only busy ones
             if let Some(cm2) = coop.moe_mm_cm2(op.ty)

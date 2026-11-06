@@ -42,6 +42,8 @@ pub struct Context {
     pub(crate) kernels: Kernels,
     // the matrix-core kernels, on a device that has them
     pub(crate) coop: Option<crate::kernels::CoopKernels>,
+    // the prompt matmuls take them too (prompt attention always does)
+    coop_matmuls: bool,
     // labels each dispatch records, under LABELS_ENV
     pub(crate) labels: Option<ash::ext::debug_utils::Device>,
     // decode activations already quantized, until something writes their buffer or their blocks'
@@ -79,7 +81,7 @@ pub struct Recorder<'a> {
 impl Context {
     /// The first integrated GPU (else any GPU) that takes compute work, imports host memory and pushes descriptors.
     pub fn new() -> Result<Arc<Self>> {
-        Self::with_matrix_cores(MatrixCores::Discrete)
+        Self::with_matrix_cores(MatrixCores::Default)
     }
 
     /// [`Self::new`], with prompt matmuls on the device's matrix cores (VK_KHR_cooperative_matrix) where `mode` allows
@@ -138,8 +140,7 @@ impl Context {
         let pin = coop_subgroup(&instance, physical);
         let has_coop = match matrix_cores {
             MatrixCores::Off => false,
-            MatrixCores::Discrete => !unified,
-            MatrixCores::Any => true,
+            MatrixCores::Default | MatrixCores::Any => true,
         } && pin.is_some()
             && coop_matrix_f16(&entry, &instance, physical);
         let pin_subgroup = has_coop && pin == Some(SubgroupPin::Required);
@@ -220,7 +221,9 @@ impl Context {
         let labels = std::env::var_os(crate::stream::LABELS_ENV)
             .is_some()
             .then(|| ash::ext::debug_utils::Device::new(&instance, &device));
+        let coop_matmuls = matrix_cores == MatrixCores::Any || !unified;
         Ok(Arc::new(Self {
+            coop_matmuls,
             labels,
             _entry: entry,
             instance,
@@ -354,6 +357,11 @@ impl Context {
     }
 
     /// Submits what is recorded without waiting for it.
+    // the matrix-core kernels where the prompt matmuls take them
+    pub(crate) fn matmul_coop(&self) -> Option<&crate::kernels::CoopKernels> {
+        self.coop.as_ref().filter(|_| self.coop_matmuls)
+    }
+
     pub fn flush(&self) -> Result<()> {
         self.stream
             .lock()
@@ -528,8 +536,9 @@ const COOP_SUBGROUP: u32 = 32;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MatrixCores {
     Off,
-    /// A discrete GPU's only: an iGPU's lose to its dp4a kernels (a 780M's prompts run 4-8% slower on them).
-    Discrete,
+    /// Everything on a discrete GPU, an iGPU's attention only: its matmuls lose to dp4a (a 780M's 2048-token prompt
+    /// ran 10% slower on them) where its attention over a long cache gains 3.7x.
+    Default,
     Any,
 }
 

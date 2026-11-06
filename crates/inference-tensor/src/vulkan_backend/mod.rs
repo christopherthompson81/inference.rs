@@ -1565,7 +1565,7 @@ impl BackendDevice for VulkanDevice {
                 } else if set(crate::vulkan::IGPU_MATRIX_CORES_ENV) {
                     MatrixCores::Any
                 } else {
-                    MatrixCores::Discrete
+                    MatrixCores::Default
                 };
                 Context::with_matrix_cores(mode).map_err(|err| err.to_string())
             })
