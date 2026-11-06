@@ -31,3 +31,32 @@ tower and `mlp1`) as `--mmproj` and the checkpoint directory as `--tok-model-id`
   Decode 100 tok/s.
 
 **Implication:** Nano VL works on the shard route. Next for it: a writer family for `inference quantize mmproj`.
+
+## Run 2 - 2026-11-06 14:20
+
+**Question:** can Nano VL's tower go into one mmproj that both engines run, and can our loader take the published one?
+
+**Changes:** the writer's RADIO spec takes two layouts: Bolt's `nemotron_omni` (split qkv, full position table, patch
+budget) for Nano Omni, and llama.cpp's `nemotron_v2_vl` (fused `attn_qkv`, the table resized to the tile's 32 x 32 grid
+with `align_corners=False`, `clip.vision.preproc_max_tiles`) for Nano VL. A grid-resize source does the table. Bolt's
+vision binding takes a fused qkv as it is; the config synthesis gives a `nemotron_v2_vl` projector the tiled layout
+(`force_image_size` from `clip.vision.image_size`, the tile count, a thumbnail). New family `NemotronV2Vl`
+(`nemotron_v2_vl` + `nemotron_h`). The writer reads configs through the non-finite rewrite as well (it failed on Nano
+VL's `Infinity` first).
+
+**Command:** `inference quantize mmproj -m nemotron-nano-vl-12b-bf16` (shard 1 of 7 on disk); gguf-py diff against the
+published `...-BF16-mmproj.gguf`; `llama-mtmd-cli --jinja` (its non-jinja path rejects this GGUF's template) and
+`inference serve` with no `--tok-model-id` on each.
+
+**Finding:**
+- 390 tensors, as the published file; 389 byte-identical. `v.position_embd` differs as intended: max abs 0.109 against
+  a mean magnitude of 0.0064, so `align_corners` is far from a rounding matter at the grid's edges. Keys: ours CLIP mean
+  [0.4815, 0.4578, 0.4082] where the published file has ImageNet's [0.485, 0.456, 0.406]; ours names the type under
+  `clip.vision.projector_type`, the published one under `clip.projector_type`; ours adds the tile count.
+- llama.cpp on ours and on the published file: the page read line for line on both.
+- Ours on ours and on the published file: the page (794 prompt tokens) and the table (1054) on both, tiled, the same
+  answers; 94-100 tok/s decode.
+- `a_tiled_tower_written_as_nemotron_v2_vl_binds_back`: the tiny tiled tower written and bound back, every tensor equal
+  to the checkpoint's but the table, which equals the checkpoint's resized by the tower's own bilinear op.
+
+**Implication:** Nano VL runs from a GGUF pair alone, ours or the published one, in both engines.

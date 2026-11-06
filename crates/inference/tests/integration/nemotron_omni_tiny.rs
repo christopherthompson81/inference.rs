@@ -621,3 +621,65 @@ async fn a_tiled_checkpoint_takes_a_token_per_tile_and_the_thumbnail() -> anyhow
     }
     Ok(())
 }
+
+// Nano VL's architecture: the tiled tower, written under llama.cpp's `nemotron_v2_vl`
+const NANO_VL: &str = "NemotronH_Nano_VL_V2";
+const POS_EMBED: &str = "vision_model.radio_model.model.patch_generator.pos_embed";
+
+#[test]
+fn a_tiled_tower_written_as_nemotron_v2_vl_binds_back() -> anyhow::Result<()> {
+    let checkpoint = checkpoint()?;
+    let dir = checkpoint.path();
+    let mut config = config();
+    config["architectures"] = serde_json::json!([NANO_VL]);
+    config["force_image_size"] = serde_json::json!(TILE);
+    let vision = config["vision_config"].as_object_mut().expect("an object");
+    vision.remove("min_num_patches");
+    vision.remove("max_num_patches");
+    std::fs::write(dir.join("config.json"), config.to_string())?;
+    let out = dir.join("mmproj.gguf");
+    inference_gguf::mmproj_writer::write_mmproj(dir, &out, None)?;
+
+    let archive = std::sync::Arc::new(inference_quant::GgufArchive::open([&out])?);
+    let bindings =
+        inference_gguf::nemotron_omni_bindings::build_nemotron_omni_tower_bindings(&archive)?;
+    let source = std::sync::Arc::new(inference_quant::GgufWeightSource::new(
+        archive.clone(),
+        &bindings,
+        inference_tensor::DType::F32,
+    )?);
+    let vb = source.sharded_var_builder(Device::Cpu);
+    let weights = inference_tensor::safetensors::load(dir.join("model.safetensors"), &Device::Cpu)?;
+    let side = MAX_IMG_SIZE / PATCH;
+    let tile = TILE / PATCH;
+    let mut checked = 0;
+    for (name, want) in &weights {
+        if !(name.starts_with("vision_model.") || name.starts_with("mlp1.")) {
+            continue;
+        }
+        // the position table at the tile's grid, as the tower resizes it for a tile
+        let want = if name == POS_EMBED {
+            want.reshape((side, side, VISION_HIDDEN))?
+                .permute((2, 0, 1))?
+                .unsqueeze(0)?
+                .upsample_bilinear2d(tile, tile, false)?
+                .squeeze(0)?
+                .permute((1, 2, 0))?
+                .reshape((1, tile * tile, VISION_HIDDEN))?
+        } else {
+            want.clone()
+        };
+        let got = vb.get_unchecked(name)?;
+        assert_eq!(got.elem_count(), want.elem_count(), "{name}");
+        let want = want.reshape(got.dims())?;
+        let diff = (got - want)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+        assert!(diff < 1e-6, "{name} differs by {diff}");
+        checked += 1;
+    }
+    assert!(checked > 10, "only {checked} tower tensors checked");
+    Ok(())
+}
