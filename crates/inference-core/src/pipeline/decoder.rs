@@ -211,6 +211,13 @@ impl DecoderModel {
         }
     }
 
+    fn captures_recurrent_state_mid_chunk(&self) -> bool {
+        match self {
+            Self::Text(model) => model.captures_recurrent_state_mid_chunk(),
+            Self::Multimodal(model) => model.captures_recurrent_state_mid_chunk(),
+        }
+    }
+
     fn multimodal(&self) -> Option<&dyn MultimodalModel> {
         match self {
             Self::Text(_) => None,
@@ -1212,6 +1219,17 @@ impl Pipeline for DecoderPipeline {
                 self.core.metadata.activation_dtype,
                 DType::F16 | DType::BF16
             )
+    }
+
+    // only scheduler-visible chunks (CUDA) skip the checkpoint split, and only where no drafter keeps its own state there
+    fn captures_recurrent_state_mid_chunk(&self) -> bool {
+        self.model.captures_recurrent_state_mid_chunk()
+            && self.cache().is_hybrid()
+            && self.model.device().is_cuda()
+            && !self.whole_prompt()
+            && !self
+                .speculative_prefix_checkpoint_policy()
+                .uses_auxiliary_state(0)
     }
 
     fn supports_batched_cuda_sampling(&self) -> bool {

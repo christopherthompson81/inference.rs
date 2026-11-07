@@ -1308,6 +1308,11 @@ pub trait Pipeline:
         false
     }
 
+    /// A hybrid model's prompt chunks may run past a recurrent checkpoint, which the forward captures in passing.
+    fn captures_recurrent_state_mid_chunk(&self) -> bool {
+        false
+    }
+
     fn adapter_runtime(&self) -> Option<Arc<crate::DynamicLoraRuntime>> {
         None
     }
@@ -1500,6 +1505,8 @@ pub trait Pipeline:
         Box::pin(std::future::ready(Ok(false)))
     }
 
+    /// Caches `seq`'s first `cached_tokens` with its recurrent state there: the live state, or `captured`, a snapshot a
+    /// forward wrote partway through its chunk (released when the prefix is not kept).
     fn snapshot_paged_recurrent_prefix(
         &mut self,
         seq: &Sequence,
@@ -1507,19 +1514,26 @@ pub trait Pipeline:
         block_size: usize,
         cached_tokens: usize,
         write_through: bool,
+        captured: Option<crate::kv_cache::RecurrentSnapshotSlot>,
     ) -> Result<(), inference_tensor::Error> {
+        let skip = |this: &mut Self| match captured {
+            Some(snapshot) => this.cache().hybrid().release_recurrent_snapshot(snapshot),
+            None => Ok(()),
+        };
         if cached_tokens == 0
             || !cached_tokens.is_multiple_of(block_size)
             || !self.cache().is_hybrid()
             || !prefix_cacher.accepts_paged_recurrent_prefix()
         {
-            return Ok(());
+            return skip(self);
         }
         let Some(slot_idx) = seq.recurrent_state_idx() else {
-            return Ok(());
+            return skip(self);
         };
 
-        self.flush_recurrent_speculative_transitions(&[*seq.id()])?;
+        if captured.is_none() {
+            self.flush_recurrent_speculative_transitions(&[*seq.id()])?;
+        }
 
         let adapter_key = adapter_generation_key(seq.adapter_generation());
         let block_hashes = compute_block_hashes(
@@ -1530,14 +1544,17 @@ pub trait Pipeline:
         );
         let n_blocks = cached_tokens / block_size;
         if block_hashes.len() < n_blocks {
-            return Ok(());
+            return skip(self);
         }
+        let snapshot = match captured {
+            Some(snapshot) => Some(snapshot),
+            None => self
+                .cache()
+                .hybrid()
+                .store_recurrent_snapshot(*seq.id(), slot_idx)?,
+        };
         // No idle slot, so there is nowhere to keep the state
-        let Some(snapshot) = self
-            .cache()
-            .hybrid()
-            .store_recurrent_snapshot(*seq.id(), slot_idx)?
-        else {
+        let Some(snapshot) = snapshot else {
             if let Some(last) = block_hashes[..n_blocks].last() {
                 prefix_cacher
                     .record_entry_cause(*last, crate::prefix_cacher::NO_SNAPSHOT_SLOT_REASON);

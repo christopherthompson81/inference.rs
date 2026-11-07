@@ -44,6 +44,11 @@ pub trait NormalModel: IsqModel + AnyMoeBaseModelMixin + SpeculativeTargetMixin 
     fn supports_packed_prefill(&self) -> bool {
         false
     }
+    /// The forward takes `HybridCache::set_recurrent_captures`: recurrent states partway through a prompt chunk, so
+    /// a chunk need not end where a prefix checkpoint goes.
+    fn captures_recurrent_state_mid_chunk(&self) -> bool {
+        false
+    }
     /// The prompt is read bidirectionally, so it runs in one pass and no cached prefix stands for part of it.
     fn bidirectional_prompt(&self) -> bool {
         false
@@ -103,6 +108,11 @@ pub trait MultimodalModel:
         self.is_block_diffusion()
     }
     fn supports_packed_prefill(&self) -> bool {
+        false
+    }
+    /// The forward takes `HybridCache::set_recurrent_captures`: recurrent states partway through a prompt chunk, so
+    /// a chunk need not end where a prefix checkpoint goes.
+    fn captures_recurrent_state_mid_chunk(&self) -> bool {
         false
     }
     /// The prompt is read bidirectionally, so it runs in one pass and no cached prefix stands for part of it.

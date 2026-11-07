@@ -81,6 +81,8 @@ const VULKAN_CPU_INT8_LOGPROB_TOLERANCE: f32 = 0.5;
 // stale state is off by nats
 const BF16_LOGPROB_TOLERANCE: f32 = 0.1;
 const CIMATRIX: &str = "collected.cimatrix";
+const PREFIX_CACHE_SEQS: usize = 4;
+const PAGED_BLOCK: usize = 32;
 const MTP_N_PREDICT: usize = 2;
 // enough steps that drafts are rejected at several positions, each replaying the Mamba state
 const MTP_MAX_LEN: usize = 24;
@@ -532,6 +534,45 @@ async fn a_long_prompt_on_cuda_scores_as_its_decode() -> anyhow::Result<()> {
         Target::Cuda,
     )
     .await
+}
+
+// the prompt fits one chunk, so its checkpoint at the last full block is a state the Mamba scan captured on its way
+// past it; the repeat resumes there and decodes as the first did
+#[tokio::test]
+async fn a_repeated_prompt_resumes_from_a_state_captured_mid_chunk() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let dir = checkpoint_with(Target::Cuda.shape())?;
+    let model = TextModelBuilder::new(dir.path().to_string_lossy())
+        .with_dtype(Target::Cuda.dtype())
+        .with_prefix_cache_n(Some(PREFIX_CACHE_SEQS))
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        .build()
+        .await?;
+    let prompt = "say something long ".repeat(LONG_PROMPT_REPEATS);
+    let request =
+        || RequestBuilder::from(TextMessages::new().add_message(TextMessageRole::User, &prompt));
+    let prompt_len = model
+        .tokenize_chat(ChatRequest::from(request()).request)
+        .await?
+        .tokens
+        .len();
+    anyhow::ensure!(
+        prompt_len > PAGED_BLOCK && !prompt_len.is_multiple_of(PAGED_BLOCK),
+        "a {prompt_len}-token prompt leaves no tail past a full block"
+    );
+    let (first, first_cached) = traces::greedy(&model, request(), MAX_LEN).await?;
+    let (second, second_cached) = traces::greedy(&model, request(), MAX_LEN).await?;
+    anyhow::ensure!(
+        first_cached == 0 && second_cached == (prompt_len - 1) / PAGED_BLOCK * PAGED_BLOCK,
+        "cached prompt tokens of {prompt_len}: {first_cached} then {second_cached}"
+    );
+    anyhow::ensure!(
+        traces::close(&first, &second, Target::Cuda.tolerance()),
+        "resuming from the captured state changed decoding: {first:?} vs {second:?}"
+    );
+    Ok(())
 }
 
 // in BF16 with quantized experts (dense ones route on the host) the paged decode steps replay captured CUDA graphs,

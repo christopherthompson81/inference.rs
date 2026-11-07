@@ -28,9 +28,9 @@ pub use hybrid_cache::{
     GdnPendingTransitionSpec,
 };
 pub use hybrid_cache::{
-    HybridCache, HybridCacheConfig, HybridLayerCache, HybridLayerType, RecurrentLayerConfig,
-    RecurrentSnapshotSlot, RecurrentSnapshotState, RecurrentStateLayout, RecurrentStatePool,
-    RecurrentStateSnapshot, RecurrentStateSpec, recurrent_pool_capacity,
+    HybridCache, HybridCacheConfig, HybridLayerCache, HybridLayerType, RecurrentCapturePoint,
+    RecurrentLayerConfig, RecurrentSnapshotSlot, RecurrentSnapshotState, RecurrentStateLayout,
+    RecurrentStatePool, RecurrentStateSnapshot, RecurrentStateSpec, recurrent_pool_capacity,
 };
 pub use rotating_cache::{RotatingCache, RotatingCacheSnapshot};
 pub use single_cache::{SingleCache, SingleCacheSnapshot};

@@ -503,7 +503,7 @@ const PLANNED_SLOT_STEPS: usize = 64;
 const MAX_PLANNED_PROMPT_CHUNK: usize = 8192;
 // Prompt chunk the planner keeps room for before it caches more experts: one slot step is a few percent of decode,
 // while a 512-token chunk reads prompts about 3x slower (qwen4exp investigation Runs 27 and 42)
-const MIN_PLANNED_PROMPT_CHUNK: usize = 2048;
+const MIN_PLANNED_PROMPT_CHUNK: usize = 1024;
 // Prefix snapshots a planned offload keeps in the recurrent pool: each holds a sequence's recurrent state (~111 MB on
 // Qwen3.8-Flash-Next), VRAM the expert cache would otherwise take
 const OFFLOAD_PREFIX_SNAPSHOTS: usize = 2;

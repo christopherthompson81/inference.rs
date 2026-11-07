@@ -4,6 +4,13 @@ use inference_tensor::DType;
 
 use crate::topology::Topology;
 
+// Bytes a prompt token takes in an MoE prefill chunk, per input or intermediate value of each routed expert and per
+// hidden value of the residual stream's temporaries: fit to peak memory over 512-8192 token chunks of Qwen3.6-35B-A3B
+// and Qwen3.8-Flash-Next with offloaded experts; Nemotron 3 Super (latent experts) lands within 3% of it
+const PROMPT_ROUTED_INPUT_BYTES: usize = 6;
+const PROMPT_ROUTED_INTERMEDIATE_BYTES: usize = 16;
+const PROMPT_RESIDUAL_HIDDEN_BYTES: usize = 40;
+
 #[macro_export]
 macro_rules! bias_if {
     ($cond:expr, $size:expr) => {
@@ -313,6 +320,19 @@ impl DecoderLayerShape {
             kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         }
     }
+}
+
+/// Activation bytes a prompt token adds to an MoE prefill chunk, for `top_k` routed experts that take `expert_input`
+/// values (the hidden size, or a latent MoE's latent size) through `expert_intermediate`.
+pub fn moe_prompt_activation_bytes_per_token(
+    top_k: usize,
+    expert_input: usize,
+    expert_intermediate: usize,
+    hidden: usize,
+) -> usize {
+    let routed = PROMPT_ROUTED_INPUT_BYTES * expert_input
+        + PROMPT_ROUTED_INTERMEDIATE_BYTES * expert_intermediate;
+    top_k * routed + PROMPT_RESIDUAL_HIDDEN_BYTES * hidden
 }
 
 #[cfg(test)]
