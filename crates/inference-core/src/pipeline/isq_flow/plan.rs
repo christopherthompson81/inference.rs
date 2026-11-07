@@ -146,37 +146,33 @@ impl AutoDeviceMapSizes {
     }
 }
 
-/// A built-in MTP head's expert projections, and the types the loader requantizes them to: while the model's experts
-/// are offloaded the head's stay on the GPU (qwen4exp investigation Run 45). The 640-wide down takes the 32-wide Q4_0,
-/// as Q2_K needs 256-wide rows.
-pub(crate) const MTP_HEAD_EXPERTS: [(&str, GgufType, IsqType); 3] = [
-    (
-        "mtp.layers.0.mlp.experts.gate_proj.weight",
-        GgufType::Q2K,
-        IsqType::Q2K,
-    ),
-    (
-        "mtp.layers.0.mlp.experts.up_proj.weight",
-        GgufType::Q2K,
-        IsqType::Q2K,
-    ),
-    (
-        "mtp.layers.0.mlp.experts.down_proj.weight",
-        GgufType::Q4_0,
-        IsqType::Q4_0,
-    ),
-];
+// The types a built-in MTP head's expert stacks requantize to while they stay on the GPU beside offloaded experts
+// (qwen4exp investigation Run 45): Q2_K where a row is 256 wide, else the 32-wide Q4_0 (Qwen's 640, Super's 2688)
+const MTP_HEAD_EXPERT_TYPE: (GgufType, IsqType) = (GgufType::Q2K, IsqType::Q2K);
+const MTP_HEAD_NARROW_EXPERT_TYPE: (GgufType, IsqType) = (GgufType::Q4_0, IsqType::Q4_0);
 
-// The bytes a source's MTP head experts take on the GPU at the types they are requantized to, when it holds them
-fn mtp_head_resident_bytes(source: &dyn QuantizedWeightSource) -> Option<usize> {
-    MTP_HEAD_EXPERTS
-        .iter()
-        .map(|(name, ty, _)| {
-            let blocks = source.mapped_blocks(name)?;
-            let elements = blocks.dims.iter().product::<usize>();
-            Some(elements / ty.block_size() * ty.type_size())
-        })
-        .sum()
+/// A built-in MTP head's expert stacks the source holds, each with the type it requantizes to and its bytes there;
+/// empty unless the source holds every one the loader names.
+pub(crate) fn mtp_head_resident_experts(
+    loader: &dyn DeviceMappedModelLoader,
+    config: &str,
+    source: &dyn QuantizedWeightSource,
+) -> Result<Vec<(String, IsqType, usize)>> {
+    let mut stacks = Vec::new();
+    for name in loader.mtp_head_expert_weights(config)? {
+        let Some(blocks) = source.mapped_blocks(&name) else {
+            return Ok(Vec::new());
+        };
+        let row = blocks.dims.last().copied().unwrap_or(0);
+        let (gguf, isq) = if row.is_multiple_of(MTP_HEAD_EXPERT_TYPE.0.block_size()) {
+            MTP_HEAD_EXPERT_TYPE
+        } else {
+            MTP_HEAD_NARROW_EXPERT_TYPE
+        };
+        let elements = blocks.dims.iter().product::<usize>();
+        stacks.push((name, isq, elements / gguf.block_size() * gguf.type_size()));
+    }
+    Ok(stacks)
 }
 
 impl AutoDeviceMapSizes {
@@ -200,12 +196,9 @@ impl AutoDeviceMapSizes {
             ),
             None => (expert_bytes, experts),
         };
-        Ok(self.with_experts_cached(
-            &expert_bytes,
-            &experts,
-            slots,
-            mtp_head_resident_bytes(source),
-        ))
+        let head = mtp_head_resident_experts(inputs.loader, inputs.config, source)?;
+        let head = (!head.is_empty()).then(|| head.iter().map(|(_, _, bytes)| bytes).sum());
+        Ok(self.with_experts_cached(&expert_bytes, &experts, slots, head))
     }
 
     // `head`: an MTP head's experts' bytes when they stay on the GPU requantized, rather than cached like a layer's

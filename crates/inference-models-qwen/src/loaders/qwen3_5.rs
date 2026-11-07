@@ -38,6 +38,12 @@ const FLASH_NEXT_ISQ: &[&str] = &[
 ];
 const FLASH_NEXT_MIXER_ISQ: &str = r"^(language_model\.model|model\.language_model|model)\.hyper_connection_mixer\.(input_mix_weight_down|input_mix_weight_up)\.weight$";
 const MTP_LAYERS: &str = r"^mtp\.layers\.(\d+)";
+// A built-in MTP head's routed expert stacks, which stay on the GPU while the model's are offloaded
+const MTP_HEAD_EXPERTS: [&str; 3] = [
+    "mtp.layers.0.mlp.experts.gate_proj.weight",
+    "mtp.layers.0.mlp.experts.up_proj.weight",
+    "mtp.layers.0.mlp.experts.down_proj.weight",
+];
 // A dense model's prefill bytes a token: the most peak memory a token took over 512-4096 token chunks of Qwen3.5 0.8B,
 // 9B and 27B (135, 266 and 397 KB against intermediate sizes 3584, 12288 and 17408), covered by base plus slope
 const PROMPT_DENSE_BASE_BYTES: usize = 66 * 1024;
@@ -216,6 +222,16 @@ pub(super) fn prompt_activation_bytes_per_token(cfg: &TextConfig) -> usize {
     )
 }
 
+pub(super) fn mtp_head_expert_weights(moe_head: bool) -> Vec<String> {
+    if !moe_head {
+        return Vec::new();
+    }
+    MTP_HEAD_EXPERTS
+        .iter()
+        .map(|name| name.to_string())
+        .collect()
+}
+
 pub(super) fn mtp_head_elems(cfg: &TextConfig, weight_pack_factor: usize) -> Result<usize> {
     let fc = 2 * cfg.hidden_size * cfg.hidden_size / weight_pack_factor;
     let layer = decoder_layer_elems(cfg, LayerType::FullAttention, weight_pack_factor)?;
@@ -386,6 +402,12 @@ macro_rules! qwen3_5_loader {
             fn prompt_activation_bytes_per_token(&self, config: &str) -> Result<Option<usize>> {
                 let cfg = parse_config(config, $moe)?;
                 Ok(Some(prompt_activation_bytes_per_token(&cfg.text_config)))
+            }
+            fn mtp_head_expert_weights(&self, config: &str) -> Result<Vec<String>> {
+                let cfg = parse_config(config, $moe)?;
+                Ok(mtp_head_expert_weights(
+                    cfg.mtp && cfg.text_config.num_experts > 0,
+                ))
             }
             fn non_mapped_layer_sizes_in_bytes(
                 &self,

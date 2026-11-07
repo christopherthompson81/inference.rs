@@ -173,3 +173,83 @@ branch, planner        104/1024      11.93-12.17          491 3.94, 496 3.90, 50
 The split is gone: master's 489-512-token prompts take 4.8-5.6 s, the branch's 3.9-4.2 s. Decode at the same map is
 unchanged. The planner's 1024-token floor gives 104 slots here (no game holding VRAM): -4% decode for +57% prefill on
 long prompts.
+
+## Run 5 - 2026-11-06 21:15
+
+Question: does Super run with its MTP head, which no published GGUF carries?
+
+Reference head: llama.cpp (970b51ce7) `convert_hf_to_gguf.py --mtp` over a scratch directory holding links to the BF16
+checkpoint's shards 1 (embeddings), 49 (norm_f, lm_head, most of `mtp.*`) and 50, its configs, and an index trimmed to
+those shards (1,888 of 42,683 tensors). BF16: 21 tensors, 8.0 GB, `blk.88` (`nextn.eh_proj/enorm/hnorm`, attention,
+`post_attention_norm`, `nextn.shared_head_norm`, 512 latent experts, shared expert, router with `exp_probs_b`) plus
+`token_embd`, `output_norm` and `output`; `nemotron_h_moe.block_count` 89, `nextn_predict_layers` 1. Q8_0: 4.3 GB.
+
+Our archive refused the head: it repeats the model's `token_embd`, `output_norm` and `output` (so it also runs as a
+standalone draft), and `merge_mtp_head` rejected any tensor already in the model. Now a repeated tensor outside the
+blocks keeps the model's copy; one inside a block still fails (test `an_mtp_head_file_extends_the_model_it_is_listed_with`).
+
+```
+serve -m /mnt/data/models -f "nemotron-super-gguf/Nemotron-3-Super-120B-Q4_K.gguf;nemotron-super-mtp/<head>" \
+  --mtp --mtp-n-predict 2 --pa-context-len 16384
+```
+
+BF16 head: no expert offload at all; the map put layers 0-14 on the GPU and 15-48 on the CPU, with PagedAttention
+off. `layer_expert_bytes` returns `None` for the whole model when any expert stack is not a type the CPU expert path
+runs, and the head's experts were BF16. Resident, those 512 BF16 experts would take ~5.6 GB of VRAM, so the head
+has to be quantized like the trunk.
+
+Q8_0 head: experts offloaded (104 slots, chunk 1024, 49 repeating layers). The decode graph precapture failed ("moe
+experts offloaded ... to_cpu_storage during CUDA graph capture"), and its teardown logged 252 "CUDA error with no
+caller to return it to ... CUDA_ERROR_INVALID_VALUE" lines: the burst the user saw once at the end of a web UI code
+demo on the Qwen3.8 27B + DFlash 2 slot, which did not reproduce in four reruns (likely a lazy capture failing
+there). `supports_cuda_decode_graphs` checks the trunk's MoE layers (`decode_is_device_only`), not the MTP head's.
+
+Decode (prose x3, 512 tokens, after a warm-up): 12.37, 11.94, 11.74 tok/s, MTP acceptance 54-74% (2.1-2.5 tokens a
+step), against 11.93-12.17 without the head at the same map (Run 4): no gain. As on the other offloaded MoE models,
+a 3-token verify routes to up to ~3x the distinct experts a layer and the CPU misses grow with them, and the step
+here also runs without graphs.
+
+Implication: the head loads and drafts correctly. Fix the graph check for the head's experts and the failed-capture
+log spam; MTP itself will not pay on this card while experts are offloaded.
+
+## Run 6 - 2026-11-06 22:00
+
+Question: the Flash-Next work (qwen4exp investigation Runs 41-52) made MTP pay with offloaded experts through a
+resident, requantized head, one draft, and graphed verify steps, built for the Qwen3.5 family alone. Do they carry
+over to Nemotron-H once they are generic, so a new model gets them by naming its head's experts?
+
+Built:
+- Graphs: a model reports the most query tokens a captured decode step may hold (`cuda_decode_graph_max_tokens`);
+  Granite/Nemotron-H with offloaded experts (trunk or head) report the offload's split limit, 8 tokens
+  (`OFFLOADED_GRAPH_MAX_TOKENS`: a larger batch reads its routes on the host). Precapture skips wider buckets and a
+  lazy capture runs them eager. With 2 drafts the 4-sequence bucket was 12 tokens, its capture failed and took the
+  whole precapture with it (Run 5's 252 error lines); now 8 graphs capture, no error lines, ~1,000 replays a request.
+- Resident head experts, generic: loaders name a built-in head's expert stacks (`mtp_head_expert_weights`; Qwen3.5's
+  three, Nemotron-H's `mtp.layers.1.mixer.experts.{up,down}_proj`), and the requant type follows each stack's row
+  width (Q2_K where 256 divides it, else the 32-wide Q4_0) in place of Qwen's fixed table (`MTP_HEAD_EXPERTS`).
+  Granite's head MoE loads without the expert cache.
+- One draft by default with offloaded experts: `DEFAULT_MTP_N_PREDICT_OFFLOADED` moved to `inference_nn::decoder`,
+  used by Qwen3.5 and Granite.
+- Nemotron-H's loader sizes its head (`non_mapped_layer_sizes_in_bytes`, and in `non_mapped_size_in_bytes` as the
+  sizing expects: it swaps the head's estimate for the source's bytes and then its experts for their resident size).
+  Before, the head went uncounted and the planner gave the MTP load 112 slots, 8 more than without it, and the load
+  ran out of memory for its 37 MB KV cache.
+
+Head footprint, measured: at 32 slots / chunk 1024 the head adds 1.55 GB after load (13,726 against 12,176 MiB),
+peaking 2.4 GB higher while it requantizes.
+
+Not fixed (found on the way): with `--max-prefill-chunk-tokens` given, the planner still reserves the activations of
+the chunk it would have picked (8192 tokens, 9.7 GB at 32 slots; ~6 GB at 64), since the flag reaches only the
+scheduler. Loads with explicit slots and chunk run out of memory for nothing; the flag needs to reach the planner.
+
+No flags but `--mtp` (planner: 88 slots, chunk 1536, n_predict 1, 21.2 GB in use), against plain (104 slots, chunk
+1024), same client, one warm-up, 512 tokens, three each:
+
+```
+                      prose (hash map)       code (LRU cache)       accept
+MTP, resident head    12.07 12.58 12.23      14.28 13.55 13.80      70-100%, 1.70-2.00 tokens a step
+plain                 12.51 12.29 12.23      13.40 13.65 13.62
+```
+
+Break-even on prose, +2% on code: where Flash-Next ended (Run 52: tie on prose, +3% on code). The head's resident
+experts cost 16 slots, and a 2-token verify still misses about twice a plain step's experts on the CPU.

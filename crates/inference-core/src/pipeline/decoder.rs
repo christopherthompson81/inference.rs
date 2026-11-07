@@ -211,6 +211,20 @@ impl DecoderModel {
         }
     }
 
+    #[cfg(feature = "cuda")]
+    fn cuda_decode_graph_max_tokens(&self) -> Option<usize> {
+        match self {
+            Self::Text(model) => model.cuda_decode_graph_max_tokens(),
+            Self::Multimodal(model) => model.cuda_decode_graph_max_tokens(),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_decode_graph_fits(&self, bucket: usize, q_len: usize) -> bool {
+        self.cuda_decode_graph_max_tokens()
+            .is_none_or(|max| bucket.saturating_mul(q_len) <= max)
+    }
+
     fn captures_recurrent_state_mid_chunk(&self) -> bool {
         match self {
             Self::Text(model) => model.captures_recurrent_state_mid_chunk(),
@@ -688,7 +702,9 @@ impl DecoderPipeline {
             );
             return Ok(None);
         }
-        let Some(bucket) = cuda_graph_batch_bucket(CudaGraphComponent::Target, q_len, batch) else {
+        let Some(bucket) = cuda_graph_batch_bucket(CudaGraphComponent::Target, q_len, batch)
+            .filter(|&bucket| self.model.cuda_decode_graph_fits(bucket, q_len))
+        else {
             record_cuda_graph_dispatch(
                 CudaGraphComponent::Target,
                 CudaGraphDispatchMode::Eager,
@@ -919,6 +935,7 @@ impl DecoderPipeline {
             );
             for bucket in cuda_graph_precapture_batches(CudaGraphComponent::Target, q_len)
                 .filter(|bucket| *bucket <= max_bucket.min(width_max_bucket))
+                .filter(|&bucket| self.model.cuda_decode_graph_fits(bucket, q_len))
             {
                 let Some(step) = CudaGraphDecodeStep::padded(
                     inputs.step_inputs(live.as_deref(), graph_pad_slot, token_window.as_ref()),

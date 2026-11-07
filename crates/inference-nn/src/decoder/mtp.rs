@@ -414,6 +414,10 @@ impl<B: MtpBlock> MtpHead<B> {
         }
     }
 
+    pub fn block(&self) -> &B {
+        &self.block
+    }
+
     pub fn n_predict(&self) -> usize {
         self.n_predict
     }

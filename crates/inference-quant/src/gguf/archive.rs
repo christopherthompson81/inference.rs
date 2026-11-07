@@ -28,6 +28,7 @@ pub(crate) const DEFAULT_ALIGNMENT: usize = 32;
 // an MTP head file's keys that describe the model it extends
 const BLOCK_COUNT_SUFFIX: &str = ".block_count";
 const NEXTN_KEY: &str = ".nextn_";
+const BLOCK_TENSOR_PREFIX: &str = "blk.";
 const NEXTN_PREDICT_LAYERS_SUFFIX: &str = ".nextn_predict_layers";
 const MAX_STRING_LENGTH: u64 = 1 << 30;
 const MAX_ARRAY_ELEMENTS: u64 = 1 << 30;
@@ -586,6 +587,11 @@ impl GgufArchive {
         } = head;
         for (name, mut tensor) in tensors {
             if self.tensors.contains_key(&name) {
+                // llama.cpp's `--mtp` export repeats what the head shares with the model (embeddings, final norm,
+                // lm_head) so it also runs as a standalone draft; the model's copy serves both
+                if !name.starts_with(BLOCK_TENSOR_PREFIX) {
+                    continue;
+                }
                 inference_tensor::bail!(
                     "GGUF tensor `{name}` is in both the model and its MTP head"
                 );
@@ -1831,7 +1837,7 @@ pub(crate) mod tests {
     }
 
     // An MTP head file listed after the model: its block count and `nextn` keys describe the merged model, any other
-    // key it repeats keeps the model's value, and its tensors join the model's.
+    // key it repeats keeps the model's value, and its tensors join the model's, the model's copy of any it repeats.
     #[test]
     fn an_mtp_head_file_extends_the_model_it_is_listed_with() -> Result<()> {
         let f32_data = (0..8)
@@ -1849,7 +1855,10 @@ pub(crate) mod tests {
         model_metadata.push(("qwen3.context_length", Value::U32(4096)));
         let model = write_test_gguf(
             &model_metadata,
-            &[tensor("blk.1.attn_norm.weight")],
+            &[
+                tensor("blk.1.attn_norm.weight"),
+                tensor("token_embd.weight"),
+            ],
             DEFAULT_ALIGNMENT,
         );
         let mut head_metadata = base_metadata();
@@ -1858,7 +1867,10 @@ pub(crate) mod tests {
         head_metadata.push(("qwen3.context_length", Value::U32(1)));
         let head = write_test_gguf(
             &head_metadata,
-            &[tensor("blk.2.nextn.enorm.weight")],
+            &[
+                tensor("blk.2.nextn.enorm.weight"),
+                tensor("token_embd.weight"),
+            ],
             DEFAULT_ALIGNMENT,
         );
 
@@ -1875,7 +1887,16 @@ pub(crate) mod tests {
         ));
         assert!(archive.tensors().contains_key("blk.1.attn_norm.weight"));
         assert!(archive.tensors().contains_key("blk.2.nextn.enorm.weight"));
+        assert_eq!(archive.tensors()["token_embd.weight"].shard_index, 0);
         assert_eq!(archive.shards().len(), 2);
+
+        // a block tensor in both is two answers to one weight
+        let clash = write_test_gguf(
+            &head_metadata,
+            &[tensor("blk.1.attn_norm.weight")],
+            DEFAULT_ALIGNMENT,
+        );
+        assert!(GgufArchive::open([model.path(), clash.path()]).is_err());
         Ok(())
     }
 
