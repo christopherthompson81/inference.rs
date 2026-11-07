@@ -17,6 +17,7 @@ mod deepseek_family_tests;
 pub mod ernie4_5;
 #[cfg(test)]
 mod ernie4_5_tests;
+pub mod falcon_h1;
 pub mod glm4;
 pub mod glm4_moe;
 pub mod glm4_moe_lite;
@@ -56,6 +57,7 @@ inference_nn::json_config!(
     bert::Config,
     jina_v3::Config,
     modern_bert::Config,
+    falcon_h1::Config,
     nemotron_h::Config,
     nemotron_omni::Config,
     nemotron_transcribe::Config,

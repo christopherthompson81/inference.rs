@@ -8,6 +8,19 @@ use inference_tensor::quantized::gguf_file::Value as GgufValue;
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 use std::{collections::HashMap, error::Error, fmt, num::TryFromIntError};
 
+// llama.cpp's converter folds Falcon-H1's muP multipliers into the weights, so a checkpoint's config beside its GGUF
+// must not apply them again
+const FALCON_H1_FOLDED_MULTIPLIERS: [&str; 9] = [
+    "embedding_multiplier",
+    "lm_head_multiplier",
+    "attention_in_multiplier",
+    "attention_out_multiplier",
+    "key_multiplier",
+    "ssm_in_multiplier",
+    "ssm_out_multiplier",
+    "ssm_multipliers",
+    "mlp_multipliers",
+];
 const DEFAULT_ROPE_THETA: f64 = 10_000.0;
 const GEMMA2_27B_LAYER_COUNT: usize = 46;
 const GPT_OSS_ALPHA: f64 = 1.702;
@@ -218,6 +231,10 @@ pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; NORMAL_LOADER_TYPE_COUN
         loader: NormalLoaderType::NemotronHPuzzle,
         build: build_nemotron_h,
     },
+    NormalConfigBuilder {
+        loader: NormalLoaderType::FalconH1,
+        build: build_falcon_h1,
+    },
 ];
 
 pub fn synthesize_normal_config(
@@ -305,6 +322,11 @@ pub fn normalize_external_normal_config(
             CanonicalGgufArchitecture::Qwen35 | CanonicalGgufArchitecture::Qwen35Moe
         ) {
             text_config.insert(GDN_V_HEAD_LAYOUT_CONFIG_KEY.to_string(), json!("tiled"));
+        }
+        if architecture == CanonicalGgufArchitecture::FalconH1 {
+            for key in FALCON_H1_FOLDED_MULTIPLIERS {
+                text_config.remove(key);
+            }
         }
         text_config.insert(
             "architectures".to_string(),
@@ -1686,6 +1708,75 @@ fn build_nemotron_h(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
         "tie_word_embeddings".into(),
         json!(metadata.tie_word_embeddings()),
     );
+    Ok(JsonValue::Object(config))
+}
+
+// llama.cpp folds the muP multipliers into the weights, so they keep their default of one here
+fn build_falcon_h1(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
+    reject_unsupported_rope_scaling(metadata, "Falcon-H1")?;
+    let hidden = metadata.required_usize("embedding_length")?;
+    let heads = metadata.required_usize("attention.head_count")?;
+    let inner = metadata.required_usize("ssm.inner_size")?;
+    let mamba_heads = metadata.required_usize("ssm.time_step_rank")?;
+    let mut config = JsonMap::new();
+    config.insert("vocab_size".into(), json!(metadata.vocab_size()?));
+    config.insert("hidden_size".into(), json!(hidden));
+    config.insert(
+        "intermediate_size".into(),
+        json!(metadata.required_uniform_usize("feed_forward_length")?),
+    );
+    config.insert(
+        "num_hidden_layers".into(),
+        json!(transformer_block_count(metadata)?),
+    );
+    config.insert("num_attention_heads".into(), json!(heads));
+    config.insert(
+        "num_key_value_heads".into(),
+        json!(metadata.required_uniform_usize("attention.head_count_kv")?),
+    );
+    config.insert("head_dim".into(), json!(metadata.head_dim(hidden, heads)?));
+    config.insert("rms_norm_eps".into(), json!(metadata.norm_epsilon()?));
+    config.insert(
+        "rope_theta".into(),
+        json!(metadata.rope_theta(Some(DEFAULT_ROPE_THETA))?),
+    );
+    config.insert(
+        "max_position_embeddings".into(),
+        json!(metadata.required_usize("context_length")?),
+    );
+    config.insert(
+        "tie_word_embeddings".into(),
+        json!(metadata.tie_word_embeddings()),
+    );
+    config.insert("mamba_d_ssm".into(), json!(inner));
+    config.insert("mamba_n_heads".into(), json!(mamba_heads));
+    config.insert("mamba_d_head".into(), json!(inner / mamba_heads));
+    config.insert(
+        "mamba_n_groups".into(),
+        json!(metadata.required_usize("ssm.group_count")?),
+    );
+    config.insert(
+        "mamba_d_state".into(),
+        json!(metadata.required_usize("ssm.state_size")?),
+    );
+    config.insert(
+        "mamba_d_conv".into(),
+        json!(metadata.required_usize("ssm.conv_kernel")?),
+    );
+    config.insert(
+        "mamba_conv_bias".into(),
+        json!(metadata.has_tensor_marker(".ssm_conv1d.bias")),
+    );
+    config.insert(
+        "mamba_proj_bias".into(),
+        json!(metadata.has_tensor_marker(".ssm_in.bias")),
+    );
+    config.insert(
+        "mamba_rms_norm".into(),
+        json!(metadata.has_tensor_marker(".ssm_norm")),
+    );
+    config.insert("mamba_norm_before_gate".into(), json!(false));
+    config.insert("quantization_config".into(), JsonValue::Null);
     Ok(JsonValue::Object(config))
 }
 
@@ -3160,8 +3251,8 @@ mod tests {
         pub use inference_models_gemma::{gemma, gemma2};
         pub use inference_models_llama::{llama, mistral, mixtral, smollm3};
         pub use inference_models_other::{
-            deepseek, ernie4_5, glm4, glm4_moe, glm4_moe_lite, gpt_oss, granite, hunyuan_v1_dense,
-            hunyuan_v1_moe, lfm2, nemotron_h, olmo, starcoder2,
+            deepseek, ernie4_5, falcon_h1, glm4, glm4_moe, glm4_moe_lite, gpt_oss, granite,
+            hunyuan_v1_dense, hunyuan_v1_moe, lfm2, nemotron_h, olmo, starcoder2,
         };
         pub use inference_models_phi::{phi2, phi3, phi3_5_moe};
         pub use inference_models_qwen::{qwen1, qwen2, qwen2_moe, qwen3, qwen3_moe, qwen3_next};
@@ -3372,6 +3463,7 @@ mod tests {
                 | NormalLoaderType::GraniteMoeHybrid
                 | NormalLoaderType::NemotronH
                 | NormalLoaderType::NemotronHPuzzle
+                | NormalLoaderType::FalconH1
         ) {
             insert_u32(&mut metadata, architecture, "ssm.conv_kernel", 4);
             insert_u32(&mut metadata, architecture, "ssm.inner_size", 1_024);
@@ -3385,6 +3477,7 @@ mod tests {
             NormalLoaderType::GraniteMoeHybrid
                 | NormalLoaderType::NemotronH
                 | NormalLoaderType::NemotronHPuzzle
+                | NormalLoaderType::FalconH1
         ) {
             tensors.extend(
                 ["blk.1.ssm_a.weight", "blk.1.ssm_conv1d.weight"]
@@ -3583,6 +3676,9 @@ mod tests {
             }
             NormalLoaderType::NemotronH | NormalLoaderType::NemotronHPuzzle => {
                 assert_deserializes(loader, config, models::nemotron_h::Config::from_json)
+            }
+            NormalLoaderType::FalconH1 => {
+                assert_deserializes(loader, config, models::falcon_h1::Config::from_json)
             }
             NormalLoaderType::GptOss => {
                 assert_deserializes(loader, config, models::gpt_oss::Config::from_json)
@@ -4138,6 +4234,27 @@ mod tests {
         .unwrap();
         let value: JsonValue = serde_json::from_str(&normalized).unwrap();
         assert!(value["quantization_config"].is_null());
+    }
+
+    #[test]
+    fn a_falcon_h1_checkpoint_config_beside_its_gguf_drops_the_folded_multipliers() {
+        let raw = json!({
+            "architectures": ["FalconH1ForCausalLM"],
+            "embedding_multiplier": 5.6,
+            "ssm_multipliers": [0.3, 0.25, 0.3, 0.5, 0.3],
+            "rope_theta": 1e11
+        })
+        .to_string();
+        let normalized = normalize_external_normal_config(
+            &NormalLoaderType::FalconH1,
+            CanonicalGgufArchitecture::FalconH1,
+            &raw,
+        )
+        .unwrap();
+        let value: JsonValue = serde_json::from_str(&normalized).unwrap();
+        assert!(value.get("embedding_multiplier").is_none());
+        assert!(value.get("ssm_multipliers").is_none());
+        assert_eq!(value["rope_theta"], json!(1e11));
     }
 
     #[test]

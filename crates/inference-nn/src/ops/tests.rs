@@ -255,6 +255,7 @@ inference_tensor::gpu_cases!(
         cuda_moe_router_with_fewer_experts_than_lanes_picks_only_experts,
         cuda_selective_scan_matches_the_cpu_scan_gathered_and_in_a_pool,
         cuda_chunked_ssd_scan_matches_the_cpu_scan,
+        cuda_chunked_ssd_scan_holds_a_steep_decay,
         cuda_mamba_gated_rmsnorm_matches_the_composite,
         cuda_qk_norm_rope_positions_preserves_projection_layout,
         cuda_qk_norm_rope_writes_token_major_from_packed_projection,
@@ -955,6 +956,80 @@ fn cuda_chunked_ssd_scan_matches_the_cpu_scan() -> inference_tensor::Result<()> 
             .abs()?
             .max_all()?
             .to_scalar::<f32>()?;
+        let scale = expected.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert!(
+            error < TOLERANCE * scale,
+            "{label}: max error {error} at scale {scale}"
+        );
+    }
+    Ok(())
+}
+
+// Falcon-H1's steepest heads (A near -1e8) with near-zero steps between ordinary ones: the chunk's prefix sums round
+// a later position a few ulp under an earlier one, which must not turn into exp of a positive exponent
+#[cfg(feature = "cuda")]
+fn cuda_chunked_ssd_scan_holds_a_steep_decay() -> inference_tensor::Result<()> {
+    const SEQ: usize = 300;
+    const HEADS: usize = 4;
+    const HEAD_DIM: usize = 16;
+    const STATE: usize = 32;
+    const STEEP: [f32; HEADS] = [-2.0e8, -2.4e6, -80.0, -0.5];
+    // every other step's softplus about 1e-13, the rest random around 3 so the prefix sums round
+    const TINY_DT: f32 = -30.0;
+    const TOLERANCE: f32 = 2e-3;
+    let device = Device::new_cuda(0)?;
+    let rand = |shape: &[usize]| Tensor::randn(0f32, 0.5, shape, &Device::Cpu);
+    let ordinary = Tensor::rand(1f32, 5.0, SEQ * HEADS, &Device::Cpu)?.to_vec1::<f32>()?;
+    let dt = ordinary
+        .into_iter()
+        .enumerate()
+        .map(|(i, raw)| {
+            if (i / HEADS).is_multiple_of(2) {
+                TINY_DT
+            } else {
+                raw
+            }
+        })
+        .collect::<Vec<_>>();
+    let host = [
+        rand(&[1, SEQ, HEADS, HEAD_DIM])?,
+        Tensor::from_vec(dt, (1, SEQ, HEADS), &Device::Cpu)?,
+        Tensor::new(&STEEP, &Device::Cpu)?,
+        rand(&[1, SEQ, 1, STATE])?,
+        rand(&[1, SEQ, 1, STATE])?,
+        rand(&[HEADS])?,
+        Tensor::zeros(HEADS, DType::F32, &Device::Cpu)?,
+    ];
+    let state = rand(&[1, HEADS, HEAD_DIM, STATE])?;
+    let gpu = host
+        .iter()
+        .map(|t| t.to_device(&device))
+        .collect::<inference_tensor::Result<Vec<_>>>()?;
+    fn inputs(t: &[Tensor]) -> super::SelectiveScan<'_> {
+        super::SelectiveScan {
+            x: &t[0],
+            dt: &t[1],
+            a: &t[2],
+            b: &t[3],
+            c: &t[4],
+            d: &t[5],
+            dt_bias: &t[6],
+            dt_min: 0.0,
+            dt_max: f32::INFINITY,
+        }
+    }
+    let mut expected_state = state.clone();
+    let expected = super::selective_scan_cpu(inputs(&host), &mut expected_state)?;
+    let mut gpu_state = state.to_device(&device)?;
+    let y = crate::cuda::ssm::selective_scan_cuda(inputs(&gpu), &mut gpu_state, None)?;
+    for (label, actual, expected) in [
+        ("output", &y, &expected),
+        ("state", &gpu_state, &expected_state),
+    ] {
+        let actual = actual.to_device(&Device::Cpu)?;
+        let sum = actual.sum_all()?.to_scalar::<f32>()?;
+        assert!(sum.is_finite(), "{label} is not finite");
+        let error = (actual - expected)?.abs()?.max_all()?.to_scalar::<f32>()?;
         let scale = expected.abs()?.max_all()?.to_scalar::<f32>()?;
         assert!(
             error < TOLERANCE * scale,

@@ -151,6 +151,7 @@ impl DeviceMappedModelLoader for GraniteMoeHybridLoader {
                     crate::granite::GraniteLayerType::Attention
                     | crate::granite::GraniteLayerType::SlidingAttention => attention_elems,
                     crate::granite::GraniteLayerType::Mamba => mamba_elems,
+                    crate::granite::GraniteLayerType::Parallel => attention_elems + mamba_elems,
                 };
                 (common_elems + operator_elems) * dtype.size_in_bytes()
             })

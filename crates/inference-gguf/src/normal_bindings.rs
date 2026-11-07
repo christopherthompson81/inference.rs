@@ -49,7 +49,31 @@ pub fn build_normal_bindings(
             .map(|(name, binding)| (qwen1_name(name), binding.clone()))
             .collect());
     }
+    if matches!(loader, NormalLoaderType::FalconH1) {
+        return Ok(bindings
+            .iter()
+            .map(|(name, binding)| (falcon_h1_name(name), binding.clone()))
+            .collect());
+    }
     Ok(bindings)
+}
+
+// Falcon-H1 names its FFN half and final norm its own way, and TII's GGUFs store `ffn_norm` without `.weight`
+const FALCON_H1_RENAMES: &[(&str, &str)] = &[
+    (".post_attention_layernorm.", ".pre_ff_layernorm."),
+    (".mlp.", ".feed_forward."),
+    ("model.norm.", "model.final_layernorm."),
+];
+
+fn falcon_h1_name(name: &str) -> String {
+    let mut renamed = name.to_string();
+    for (from, to) in FALCON_H1_RENAMES {
+        renamed = renamed.replace(from, to);
+    }
+    if renamed.ends_with('.') {
+        renamed.push_str("weight");
+    }
+    renamed
 }
 
 // Qwen 1 keeps its checkpoint's names (`transformer.h.N.attn.c_attn`), where the bindings above write Llama's
@@ -344,6 +368,7 @@ fn bind_block_tensor(
                 CanonicalGgufArchitecture::Granite
                     | CanonicalGgufArchitecture::GraniteMoe
                     | CanonicalGgufArchitecture::GraniteHybrid
+                    | CanonicalGgufArchitecture::FalconH1
             )
         {
             binding = granite_ssm_binding(archive, role, source, binding)?;
