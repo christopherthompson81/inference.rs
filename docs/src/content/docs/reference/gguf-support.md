@@ -44,6 +44,7 @@ Fine-tunes and model sizes within a family use the same entry.
 | Mamba-2 (Mamba-Codestral) | `mamba2` |
 | Mamba and Falcon-Mamba | `mamba` |
 | Jamba (Jamba 1.x, Jamba Reasoning, Jamba2) | `jamba` |
+| RWKV-7 | `rwkv7` |
 | OLMo 1 | `olmo` |
 | OLMo 2 and Olmo 3 | `olmo2` |
 | OLMoE | `olmoe` |

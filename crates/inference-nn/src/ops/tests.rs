@@ -257,6 +257,7 @@ inference_tensor::gpu_cases!(
         cuda_chunked_ssd_scan_matches_the_cpu_scan,
         cuda_chunked_ssd_scan_holds_a_steep_decay,
         cuda_selective_scan_with_a_per_state_item_matches_the_cpu_scan,
+        cuda_rwkv7_wkv_matches_the_cpu_recurrence,
         cuda_mamba_gated_rmsnorm_matches_the_composite,
         cuda_qk_norm_rope_positions_preserves_projection_layout,
         cuda_qk_norm_rope_writes_token_major_from_packed_projection,
@@ -1097,6 +1098,56 @@ fn cuda_selective_scan_with_a_per_state_item_matches_the_cpu_scan() -> inference
                 "{state_size} items, {label}: max error {error} at scale {scale}"
             );
         }
+    }
+    Ok(())
+}
+
+// RWKV-7's WKV recurrence: the CUDA kernel (a thread per value row) against the CPU op, two sequences of 40 steps
+#[cfg(feature = "cuda")]
+fn cuda_rwkv7_wkv_matches_the_cpu_recurrence() -> inference_tensor::Result<()> {
+    const B: usize = 2;
+    const T: usize = 40;
+    const H: usize = 3;
+    const N: usize = 64;
+    const TOLERANCE: f32 = 1e-4;
+    let device = Device::new_cuda(0)?;
+    let rand = |shape: &[usize]| Tensor::randn(0f32, 0.3, shape, &Device::Cpu);
+    let mut host = Vec::new();
+    for i in 0..6 {
+        let t = rand(&[B, T, H, N])?;
+        // the decay in (0, 1)
+        host.push(if i == 1 { t.abs()?.neg()?.exp()? } else { t });
+    }
+    let state = rand(&[B, H, N, N])?;
+    let gpu = host
+        .iter()
+        .map(|t| t.to_device(&device))
+        .collect::<inference_tensor::Result<Vec<_>>>()?;
+    fn view(t: &[Tensor]) -> super::Wkv7<'_> {
+        super::Wkv7 {
+            r: &t[0],
+            w: &t[1],
+            k: &t[2],
+            v: &t[3],
+            a: &t[4],
+            b: &t[5],
+        }
+    }
+    let cpu_state = state.copy()?;
+    let expected = super::rwkv7_wkv(view(&host), &cpu_state)?;
+    let gpu_state = state.to_device(&device)?;
+    let y = super::rwkv7_wkv(view(&gpu), &gpu_state)?;
+    for (label, actual, expected) in [("output", &y, &expected), ("state", &gpu_state, &cpu_state)]
+    {
+        let error = (actual.to_device(&Device::Cpu)? - expected)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        let scale = expected.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert!(
+            error < TOLERANCE * scale.max(1.0),
+            "{label}: max error {error} at scale {scale}"
+        );
     }
     Ok(())
 }

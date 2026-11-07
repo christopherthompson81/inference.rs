@@ -2,8 +2,8 @@ use inference_nn::loaders::NormalLoaderType;
 pub use inference_nn::model::RopePairing;
 use std::{error::Error, fmt, str::FromStr};
 
-pub const NORMAL_LOADER_TYPE_COUNT: usize = 48;
-pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 41;
+pub const NORMAL_LOADER_TYPE_COUNT: usize = 49;
+pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 42;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CanonicalGgufArchitecture {
@@ -48,6 +48,7 @@ pub enum CanonicalGgufArchitecture {
     Mamba2,
     Mamba,
     Jamba,
+    Rwkv7,
 }
 
 impl CanonicalGgufArchitecture {
@@ -94,6 +95,7 @@ impl CanonicalGgufArchitecture {
             Self::Mamba2 => "mamba2",
             Self::Mamba => "mamba",
             Self::Jamba => "jamba",
+            Self::Rwkv7 => "rwkv7",
         }
     }
 }
@@ -150,6 +152,7 @@ impl FromStr for CanonicalGgufArchitecture {
             "mamba2" => Ok(Self::Mamba2),
             "mamba" => Ok(Self::Mamba),
             "jamba" => Ok(Self::Jamba),
+            "rwkv7" => Ok(Self::Rwkv7),
             _ => Err(NormalGgufRegistryError::UnknownArchitecture(
                 value.to_string(),
             )),
@@ -517,6 +520,8 @@ const MAMBA2_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Mamba2];
 const MAMBA_LOADERS: &[NormalLoaderType] =
     &[NormalLoaderType::Mamba, NormalLoaderType::FalconMamba];
 const JAMBA_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Jamba];
+const RWKV7_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Rwkv7];
+const RWKV7_TENSORS: &[&str] = &[".time_mix_lerp_fused."];
 const OLMO_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Olmo];
 // Olmo 3 converts as olmo2 with a sliding-window pattern
 const OLMO2_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Olmo2, NormalLoaderType::Olmo3];
@@ -861,6 +866,15 @@ pub const GGUF_SCHEMAS: &[GgufSchema; CANONICAL_GGUF_ARCHITECTURE_COUNT] = &[
         rope_pairing: RopePairing::HalfSplit,
         required_metadata: NO_REQUIREMENTS,
         required_tensors: SSM_TENSORS,
+        unsupported_metadata: NO_REQUIREMENTS,
+    },
+    // no attention: the pairing is never used
+    GgufSchema {
+        architecture: CanonicalGgufArchitecture::Rwkv7,
+        compatible_loaders: RWKV7_LOADERS,
+        rope_pairing: RopePairing::HalfSplit,
+        required_metadata: NO_REQUIREMENTS,
+        required_tensors: RWKV7_TENSORS,
         unsupported_metadata: NO_REQUIREMENTS,
     },
     // NoPE attention: the pairing is never used
@@ -1226,6 +1240,11 @@ pub const NORMAL_MODEL_ADAPTERS: &[NativeModelAdapter; NORMAL_LOADER_TYPE_COUNT]
             GgufLayout::PerLayerInventory,
             GgufLayout::GraniteSsm,
         ],
+    },
+    NativeModelAdapter {
+        loader: NormalLoaderType::Rwkv7,
+        architectures: &[CanonicalGgufArchitecture::Rwkv7],
+        layouts: &[GgufLayout::Direct, GgufLayout::PerLayerInventory],
     },
     NativeModelAdapter {
         loader: NormalLoaderType::Jamba,

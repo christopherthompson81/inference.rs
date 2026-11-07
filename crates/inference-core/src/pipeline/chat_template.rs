@@ -70,8 +70,9 @@ pub fn calculate_eos_tokens(
                 Either::Left(id) => vec![*id],
                 Either::Right(ids) => ids.clone(),
             };
+            // the vocabulary's key, which a byte-level token's decoded text is not (`ĊĊ`, not two newlines)
             for id in ids {
-                let Ok(s) = tokenizer.decode(&[id], false) else {
+                let Some(s) = tokenizer.id_to_token(id) else {
                     warn!(
                         "Ignoring generation config EOS token id {id}: not in the tokenizer vocabulary"
                     );
@@ -90,8 +91,8 @@ pub fn calculate_eos_tokens(
             };
             for id in ids {
                 let s = tokenizer
-                    .decode(&[id], false)
-                    .unwrap_or_else(|_| panic!("Unable to decode id {id})"));
+                    .id_to_token(id)
+                    .unwrap_or_else(|| panic!("Token id {id} is not in the tokenizer vocabulary"));
                 if !bos_tok_ids.contains(&s) {
                     bos_tok_ids.push(s);
                 }
@@ -120,13 +121,19 @@ pub fn calculate_eos_tokens(
 
     let mut eos_toks = Vec::new();
     for eos_tok in eos_tok_ids {
-        eos_toks.push(
-            tokenizer
-                .get_vocab(true)
-                .get(&eos_tok)
-                .copied()
-                .unwrap_or_else(|| panic!("Unable to extract `{eos_tok}` EOS token.")),
-        )
+        // a vocabulary key, or text that is one token (RWKV's "\n\n", which its byte-level vocabulary keys otherwise)
+        let id = tokenizer
+            .get_vocab(true)
+            .get(&eos_tok)
+            .copied()
+            .or_else(|| {
+                let encoding = tokenizer.encode_fast(eos_tok.as_str(), false).ok()?;
+                match encoding.get_ids() {
+                    [id] => Some(*id),
+                    _ => None,
+                }
+            });
+        eos_toks.push(id.unwrap_or_else(|| panic!("Unable to extract `{eos_tok}` EOS token.")));
     }
     eos_toks
 }
@@ -376,6 +383,21 @@ mod tests {
         .unwrap();
 
         assert_eq!(calculate_eos_tokens(&template, None, &tokenizer), vec![1]);
+    }
+
+    // a byte-level vocabulary keys "\n\n" as "ĊĊ": the generation config's end token is found by its key
+    #[test]
+    fn a_byte_level_end_token_is_found_by_its_vocabulary_key() {
+        let tokens = ["<s>", "a", "\n", "\n\n"].map(|t| t.as_bytes().to_vec());
+        let tokenizer = inference_gguf::rwkv_tokenizer::rwkv_world_tokenizer(&tokens).unwrap();
+        let template: ChatTemplate =
+            serde_json::from_value(serde_json::json!({ "chat_template": "{{ x }}" })).unwrap();
+        let gen_conf: GenerationConfig =
+            serde_json::from_value(serde_json::json!({ "eos_token_id": 3 })).unwrap();
+        assert_eq!(
+            calculate_eos_tokens(&template, Some(&gen_conf), &tokenizer),
+            vec![3]
+        );
     }
 
     #[test]

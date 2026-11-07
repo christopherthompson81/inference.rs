@@ -76,6 +76,8 @@ mod norm;
 pub use norm::*;
 mod ssm_cpu;
 pub use ssm_cpu::*;
+mod rwkv;
+pub use rwkv::*;
 #[cfg(feature = "cuda")]
 mod rope;
 #[cfg(feature = "cuda")]

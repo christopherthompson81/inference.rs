@@ -86,7 +86,7 @@ unsafe fn state_row_step_avx2(row: &mut [f32], b: &[f32], c: &[f32], decay: f32,
 
 // A buffer the barrier pool's items each write their own disjoint elements of
 #[derive(Clone, Copy)]
-struct SharedMut(*mut f32);
+pub(crate) struct SharedMut(pub(crate) *mut f32);
 
 // SAFETY: every item touches only its own elements, and the buffer outlives the pool call
 unsafe impl Send for SharedMut {}
@@ -94,7 +94,7 @@ unsafe impl Sync for SharedMut {}
 
 impl SharedMut {
     // SAFETY: `start..start + len` is in bounds and touched by this item alone
-    unsafe fn slice<'a>(self, start: usize, len: usize) -> &'a mut [f32] {
+    pub(crate) unsafe fn slice<'a>(self, start: usize, len: usize) -> &'a mut [f32] {
         unsafe { std::slice::from_raw_parts_mut(self.0.add(start), len) }
     }
 }

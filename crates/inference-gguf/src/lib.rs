@@ -32,6 +32,7 @@ pub mod paddleocr_vl_bindings;
 pub mod parakeet_audio_bindings;
 pub mod qwen2_audio_bindings;
 pub mod qwen_multimodal_bindings;
+pub mod rwkv_tokenizer;
 pub mod ultravox_bindings;
 pub mod voxtral_bindings;
 mod whisper_audio_bindings;

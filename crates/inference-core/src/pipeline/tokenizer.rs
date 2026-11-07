@@ -124,10 +124,18 @@ struct TekkenTokenizer {
     special_tokens: Vec<TekkenSpecialToken>,
 }
 
-/// The tokenizer files a checkpoint may ship in place of `tokenizer.json`: Mistral's and Qwen 1's tiktoken ranks.
+/// The tokenizer files a checkpoint may ship in place of `tokenizer.json`: Mistral's and Qwen 1's tiktoken ranks, and
+/// RWKV's world vocabulary.
 pub(crate) const TEKKEN_TOKENIZER: &str = "tekken.json";
 pub(crate) const QWEN_TIKTOKEN_TOKENIZER: &str = "qwen.tiktoken";
-pub(crate) const NATIVE_TOKENIZERS: [&str; 2] = [TEKKEN_TOKENIZER, QWEN_TIKTOKEN_TOKENIZER];
+pub(crate) const NATIVE_TOKENIZERS: [&str; 3] = [
+    TEKKEN_TOKENIZER,
+    QWEN_TIKTOKEN_TOKENIZER,
+    inference_gguf::rwkv_tokenizer::RWKV_VOCAB_FILE,
+];
+// the embedding's rows when a vocabulary file's config does not say
+const RWKV_DEFAULT_VOCAB: usize = 65_536;
+const RWKV_ADDED_TOKENS: &str = "added_tokens.json";
 
 // tokenization_qwen.py: the specials follow the 151,643 ranks
 const TOKENIZER_CONFIG: &str = "tokenizer_config.json";
@@ -272,6 +280,32 @@ fn bpe_from_ranks(
     Ok(tokenizer)
 }
 
+// RWKV's world vocabulary, padded to the config's vocabulary beside it as llama.cpp's converter pads it
+fn load_rwkv_vocab(path: &Path) -> Result<Tokenizer> {
+    let vocab_size = std::fs::read_to_string(path.with_file_name("config.json"))
+        .ok()
+        .and_then(|config| serde_json::from_str::<serde_json::Value>(&config).ok())
+        .and_then(|config| usize::try_from(config.get("vocab_size")?.as_u64()?).ok())
+        .unwrap_or(RWKV_DEFAULT_VOCAB);
+    // the HF tokenizer's name for token 0 (its end of text), llama.cpp's `<s>` when none is given
+    let first = std::fs::read_to_string(path.with_file_name(RWKV_ADDED_TOKENS))
+        .ok()
+        .and_then(|added| serde_json::from_str::<HashMap<String, u32>>(&added).ok())
+        .and_then(|added| {
+            added
+                .into_iter()
+                .find(|(_, id)| *id == 0)
+                .map(|(name, _)| name)
+        })
+        .unwrap_or_else(|| inference_gguf::rwkv_tokenizer::RWKV_BOS.to_string());
+    let tokens = inference_gguf::rwkv_tokenizer::parse_rwkv_vocab(
+        &std::fs::read_to_string(path)?,
+        &first,
+        vocab_size,
+    )?;
+    inference_gguf::rwkv_tokenizer::rwkv_world_tokenizer(&tokens)
+}
+
 /// May fix the tokenizer according to: https://gist.github.com/jneuff/682d47b786329f19291d166957b3274a
 pub(crate) fn get_tokenizer<P: AsRef<Path> + Clone>(
     p: P,
@@ -280,6 +314,7 @@ pub(crate) fn get_tokenizer<P: AsRef<Path> + Clone>(
     let native = match p.as_ref().file_name().and_then(|name| name.to_str()) {
         Some(TEKKEN_TOKENIZER) => Some(load_tekken_tokenizer(p.clone())?),
         Some(QWEN_TIKTOKEN_TOKENIZER) => Some(load_qwen_tiktoken(p.clone())?),
+        Some(inference_gguf::rwkv_tokenizer::RWKV_VOCAB_FILE) => Some(load_rwkv_vocab(p.as_ref())?),
         _ => None,
     };
     if let Some(mut tokenizer) = native {

@@ -490,8 +490,13 @@ pub(crate) fn get_chat_template(
     }
 }
 
-// Mistral and Qwen 1 checkpoints ship tiktoken ranks in place of a HF tokenizer
+// Mistral and Qwen 1 checkpoints ship tiktoken ranks in place of a HF tokenizer; an RWKV vocabulary wins over a
+// tokenizer.json beside it, which some RWKV conversions carry from another model
 fn native_or_hf_tokenizer(repo: &RepoFiles<'_>) -> Result<PathBuf> {
+    let rwkv = inference_gguf::rwkv_tokenizer::RWKV_VOCAB_FILE;
+    if repo.has(rwkv) {
+        return repo.get(rwkv);
+    }
     if !repo.has("tokenizer.json")
         && let Some(native) = super::tokenizer::NATIVE_TOKENIZERS
             .into_iter()
