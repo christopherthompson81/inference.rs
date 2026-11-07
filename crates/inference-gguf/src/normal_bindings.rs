@@ -33,6 +33,9 @@ pub fn build_normal_bindings(
     if matches!(loader, NormalLoaderType::Rwkv7) {
         return rwkv7_bindings(archive);
     }
+    if matches!(loader, NormalLoaderType::Rwkv6) {
+        return rwkv6_bindings(archive);
+    }
     // Nemotron-H's tensors with no attention or feed-forward, under transformers' `backbone`
     if matches!(loader, NormalLoaderType::Mamba2) {
         let bindings =
@@ -291,6 +294,81 @@ fn rwkv7_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
                     _ => continue,
                 }
             }
+        };
+        bindings.insert(target, binding);
+    }
+    Ok(bindings)
+}
+
+// the order llama.cpp fuses RWKV-6's five data-dependent mixes in
+const RWKV6_MIXES: [&str; 5] = [
+    "time_maa_w",
+    "time_maa_k",
+    "time_maa_v",
+    "time_maa_r",
+    "time_maa_g",
+];
+const RWKV6_ROOT: [(&str, &str); 6] = [
+    ("token_embd.weight", "rwkv.embeddings.weight"),
+    ("token_embd_norm.weight", "rwkv.blocks.0.pre_ln.weight"),
+    ("token_embd_norm.bias", "rwkv.blocks.0.pre_ln.bias"),
+    ("output_norm.weight", "rwkv.ln_out.weight"),
+    ("output_norm.bias", "rwkv.ln_out.bias"),
+    ("output.weight", "head.weight"),
+];
+
+// llama.cpp's `rwkv6` GGUF under RWKV's HF names: its converter transposed the LoRAs (`w2` permuted) and fused the
+// five mixes; its output and channel-mix value weights stay divided, as the config's `rescaled_every` says
+fn rwkv6_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
+    let mut bindings = GgufBindingMap::new();
+    for (source, native) in RWKV6_ROOT {
+        if archive.tensors().contains_key(source) {
+            bindings.insert(native.to_string(), GgufTensorBinding::tensor(source));
+        }
+    }
+    for name in archive.tensors().keys() {
+        let Some((layer, role, suffix)) = parse_block_tensor(name) else {
+            continue;
+        };
+        let p = format!("rwkv.blocks.{layer}");
+        let (a, f) = (format!("{p}.attention"), format!("{p}.feed_forward"));
+        let shape = archive.tensor_info(name)?.shape().to_vec();
+        let width = shape.iter().product::<usize>();
+        let tensor = || GgufTensorBinding::tensor(name);
+        let row = || tensor().reshape(vec![1, 1, width]);
+        if role == "time_mix_lerp_fused" {
+            let hidden = width / RWKV6_MIXES.len();
+            for (i, mix) in RWKV6_MIXES.iter().enumerate() {
+                let binding = tensor()
+                    .reshape(vec![RWKV6_MIXES.len(), hidden])
+                    .slice(0, i, 1)
+                    .reshape(vec![1, 1, hidden]);
+                bindings.insert(format!("{a}.{mix}"), binding);
+            }
+            continue;
+        }
+        let (target, binding) = match role {
+            "attn_norm" => (format!("{p}.ln1.{suffix}"), tensor()),
+            "attn_norm_2" => (format!("{p}.ln2.{suffix}"), tensor()),
+            "time_mix_lerp_x" => (format!("{a}.time_maa_x"), row()),
+            "time_mix_w1" => (format!("{a}.time_maa_w1"), tensor().transpose(0, 1)),
+            "time_mix_w2" => (format!("{a}.time_maa_w2"), tensor().permute(vec![0, 2, 1])),
+            "time_mix_decay" => (format!("{a}.time_decay"), row()),
+            "time_mix_decay_w1" => (format!("{a}.time_decay_w1"), tensor().transpose(0, 1)),
+            "time_mix_decay_w2" => (format!("{a}.time_decay_w2"), tensor().transpose(0, 1)),
+            "time_mix_first" => (format!("{a}.time_faaaa"), tensor()),
+            "time_mix_receptance" => (format!("{a}.receptance.{suffix}"), tensor()),
+            "time_mix_key" => (format!("{a}.key.{suffix}"), tensor()),
+            "time_mix_value" => (format!("{a}.value.{suffix}"), tensor()),
+            "time_mix_gate" => (format!("{a}.gate.{suffix}"), tensor()),
+            "time_mix_output" => (format!("{a}.output.{suffix}"), tensor()),
+            "time_mix_ln" => (format!("{a}.ln_x.{suffix}"), tensor()),
+            "channel_mix_lerp_k" => (format!("{f}.time_maa_k"), row()),
+            "channel_mix_lerp_r" => (format!("{f}.time_maa_r"), row()),
+            "channel_mix_key" => (format!("{f}.key.{suffix}"), tensor()),
+            "channel_mix_receptance" => (format!("{f}.receptance.{suffix}"), tensor()),
+            "channel_mix_value" => (format!("{f}.value.{suffix}"), tensor()),
+            _ => continue,
         };
         bindings.insert(target, binding);
     }

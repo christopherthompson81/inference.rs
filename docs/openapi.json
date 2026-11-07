@@ -10137,6 +10137,7 @@
           "gpt_oss",
           "falcon_h1",
           "jamba",
+          "rwkv6",
           "rwkv7",
           "mamba",
           "falcon_mamba",

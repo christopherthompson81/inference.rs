@@ -73,12 +73,18 @@ fn rwkv7_wkv_cpu(wkv: Wkv7<'_>, state: &Tensor) -> Result<Tensor> {
 }
 
 /// The token shift's lerps over `x` `(batch, seq, hidden)`: for each of `mixes` `(n, hidden)`,
-/// `x + (prev - x) * mix` with `prev` the previous token's `x` and `last` `(batch, hidden)` before the first. Returns
-/// the mixes `(n, batch, seq, hidden)` and the sequence's last token `(batch, hidden)`.
-pub fn rwkv7_token_shift(x: &Tensor, last: &Tensor, mixes: &Tensor) -> Result<(Tensor, Tensor)> {
+/// `x + (prev - x) * (mix + extra)` with `prev` the previous token's `x` and `last` `(batch, hidden)` before the first,
+/// `extra` (RWKV-6's data-dependent part, `(n, batch, seq, hidden)`) zero when absent. Returns the mixes `(n, batch,
+/// seq, hidden)` and the sequence's last token `(batch, hidden)`.
+pub fn rwkv_token_shift(
+    x: &Tensor,
+    last: &Tensor,
+    mixes: &Tensor,
+    extra: Option<&Tensor>,
+) -> Result<(Tensor, Tensor)> {
     if x.device().is_cuda() {
         #[cfg(feature = "cuda")]
-        return crate::cuda::rwkv::rwkv7_token_shift_cuda(x, last, mixes);
+        return crate::cuda::rwkv::rwkv_token_shift_cuda(x, last, mixes, extra);
     }
     let s = x.dim(1)?;
     let last_in = last.unsqueeze(1)?.to_dtype(x.dtype())?;
@@ -90,12 +96,99 @@ pub fn rwkv7_token_shift(x: &Tensor, last: &Tensor, mixes: &Tensor) -> Result<(T
     let shifted = (prev - x)?;
     let mixes = mixes.to_dtype(x.dtype())?;
     let mixed = (0..mixes.dim(0)?)
-        .map(|m| x + shifted.broadcast_mul(&mixes.get(m)?)?)
+        .map(|m| {
+            let mix = match extra {
+                Some(extra) => extra
+                    .get(m)?
+                    .to_dtype(x.dtype())?
+                    .broadcast_add(&mixes.get(m)?)?,
+                None => mixes.get(m)?,
+            };
+            x + shifted.broadcast_mul(&mix)?
+        })
         .collect::<Result<Vec<_>>>()?;
     Ok((
         Tensor::stack(&mixed, 0)?,
         x.narrow(1, s - 1, 1)?.squeeze(1)?,
     ))
+}
+
+/// One RWKV-6 time-mix's inputs between its projections and the output projection, `(batch, seq, hidden)` in the
+/// activations' dtype: the receptance, `k`, `v`, the decay before its exps (`time_decay` plus its LoRA) and the gate
+/// before its SiLU; `u` (`time_first`) and the group norm's weight and bias are `(hidden,)`.
+#[derive(Clone, Copy)]
+pub struct TimeMix6<'a> {
+    pub r: &'a Tensor,
+    pub k: &'a Tensor,
+    pub v: &'a Tensor,
+    pub w: &'a Tensor,
+    pub g: &'a Tensor,
+    pub u: &'a Tensor,
+    pub norm_w: &'a Tensor,
+    pub norm_b: &'a Tensor,
+    pub norm_eps: f64,
+    pub heads: usize,
+    pub head_dim: usize,
+}
+
+/// RWKV-6's time-mix between its projections and the output projection: `w = exp(-exp(w))`, per head
+/// `y = r (S + diag(u) k^T v)` and `S = diag(w) S + k^T v` over `state` (f32 `(batch, heads, key, value)`, advanced
+/// in place), the group norm per head, times `silu(g)`. On CUDA one kernel.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+pub fn rwkv6_time_mix(tm: TimeMix6<'_>, state: &Tensor) -> Result<Tensor> {
+    if tm.r.device().is_cuda() {
+        #[cfg(feature = "cuda")]
+        return crate::cuda::rwkv::rwkv6_time_mix_cuda(tm, state);
+    }
+    let (batch, seq, h) = tm.r.dims3()?;
+    let (heads, n) = (tm.heads, tm.head_dim);
+    let read =
+        |t: &Tensor| -> Result<Vec<f32>> { t.to_dtype(DType::F32)?.flatten_all()?.to_vec1() };
+    let [r, k, v, w, g, u, norm_w, norm_b] =
+        [tm.r, tm.k, tm.v, tm.w, tm.g, tm.u, tm.norm_w, tm.norm_b].map(read);
+    let (r, k, v, w, g) = (r?, k?, v?, w?, g?);
+    let (u, norm_w, norm_b) = (u?, norm_w?, norm_b?);
+    let mut s = read(state)?;
+    let mut y = vec![0f32; batch * seq * h];
+    let (states, out) = (
+        super::ssm_cpu::SharedMut(s.as_mut_ptr()),
+        super::ssm_cpu::SharedMut(y.as_mut_ptr()),
+    );
+    inference_tensor::utils::barrier_pool().execute_chunked(batch * heads, |items| {
+        for item in items {
+            let (bi, head) = (item / heads, item % heads);
+            // SAFETY: each (batch, head) owns its state block and its output columns
+            let s = unsafe { states.slice(item * n * n, n * n) };
+            let c0 = head * n;
+            for t in 0..seq {
+                let at = (bi * seq + t) * h + c0;
+                // SAFETY: as above
+                let yt = unsafe { out.slice(at, n) };
+                let decay = (0..n).map(|i| (-w[at + i].exp()).exp()).collect::<Vec<_>>();
+                yt.fill(0.0);
+                for i in 0..n {
+                    let (ri, ki, ui) = (r[at + i], k[at + i], u[c0 + i]);
+                    let row = &mut s[i * n..(i + 1) * n];
+                    for j in 0..n {
+                        let kv = ki * v[at + j];
+                        yt[j] += ri * (row[j] + ui * kv);
+                        row[j] = row[j] * decay[i] + kv;
+                    }
+                }
+                let mean = yt.iter().sum::<f32>() / n as f32;
+                let var = yt.iter().map(|y| (y - mean).powi(2)).sum::<f32>() / n as f32;
+                let inv = 1.0 / (var + tm.norm_eps as f32).sqrt();
+                for j in 0..n {
+                    let c = c0 + j;
+                    let gate = g[at + j];
+                    let normed = (yt[j] - mean) * inv * norm_w[c] + norm_b[c];
+                    yt[j] = normed * gate / (1.0 + (-gate).exp());
+                }
+            }
+        }
+    });
+    state.inplace_op1(&WriteState(&s))?;
+    Tensor::from_vec(y, (batch, seq, h), tm.r.device())?.to_dtype(tm.r.dtype())
 }
 
 /// One time-mix's inputs between its projections and `o_proj`, `(batch, seq, hidden)` in the activations' dtype:

@@ -118,9 +118,9 @@ extern "C" void rwkv7_wkv_cuda(const float *r, const float *w, const float *k,
 template <typename T>
 __global__ void
 rwkv7_token_shift_kernel(const T *__restrict__ x, const T *__restrict__ last,
-                         const T *__restrict__ mix, T *__restrict__ out,
-                         T *__restrict__ new_last, int batch, int seq_len,
-                         int hidden, int mixes) {
+                         const T *__restrict__ mix, const T *__restrict__ extra,
+                         T *__restrict__ out, T *__restrict__ new_last,
+                         int batch, int seq_len, int hidden, int mixes) {
   const size_t items = (size_t)batch * seq_len * hidden;
   const size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= items)
@@ -131,9 +131,12 @@ rwkv7_token_shift_kernel(const T *__restrict__ x, const T *__restrict__ last,
   const float xi = rwkv_to_float(x[i]);
   const float prev = t == 0 ? rwkv_to_float(last[(size_t)b * hidden + c])
                             : rwkv_to_float(x[i - hidden]);
-  for (int m = 0; m < mixes; m++)
-    out[m * items + i] = rwkv_from_float<T>(
-        xi + (prev - xi) * rwkv_to_float(mix[(size_t)m * hidden + c]));
+  for (int m = 0; m < mixes; m++) {
+    float mi = rwkv_to_float(mix[(size_t)m * hidden + c]);
+    if (extra)
+      mi += rwkv_to_float(extra[m * items + i]);
+    out[m * items + i] = rwkv_from_float<T>(xi + (prev - xi) * mi);
+  }
   if (t == seq_len - 1)
     new_last[(size_t)b * hidden + c] = x[i];
 }
@@ -222,17 +225,17 @@ __global__ void __launch_bounds__(RWKV7_HEAD_SIZE)
 
 // dtype: 0 f16, 1 bf16, 2 f32
 extern "C" void rwkv7_token_shift_cuda(const void *x, const void *last,
-                                       const void *mix, void *out,
-                                       void *new_last, int batch, int seq_len,
-                                       int hidden, int mixes, int dtype,
-                                       int64_t stream) {
+                                       const void *mix, const void *extra,
+                                       void *out, void *new_last, int batch,
+                                       int seq_len, int hidden, int mixes,
+                                       int dtype, int64_t stream) {
   const size_t items = (size_t)batch * seq_len * hidden;
   const int blocks = (items + RWKV7_SHIFT_THREADS - 1) / RWKV7_SHIFT_THREADS;
   const cudaStream_t s = (cudaStream_t)stream;
 #define RWKV7_SHIFT(T)                                                         \
   rwkv7_token_shift_kernel<T><<<blocks, RWKV7_SHIFT_THREADS, 0, s>>>(          \
-      (const T *)x, (const T *)last, (const T *)mix, (T *)out, (T *)new_last,  \
-      batch, seq_len, hidden, mixes)
+      (const T *)x, (const T *)last, (const T *)mix, (const T *)extra,         \
+      (T *)out, (T *)new_last, batch, seq_len, hidden, mixes)
   if (dtype == 0)
     RWKV7_SHIFT(__half);
   else if (dtype == 1)
@@ -252,4 +255,80 @@ extern "C" void rwkv7_time_mix_cuda(const Rwkv7TimeMixParams *p, int batch,
     rwkv7_time_mix_kernel<__nv_bfloat16><<<blocks, RWKV7_HEAD_SIZE, 0, s>>>(*p);
   else
     rwkv7_time_mix_kernel<float><<<blocks, RWKV7_HEAD_SIZE, 0, s>>>(*p);
+}
+
+struct Rwkv6TimeMixParams {
+  // (batch, seq, hidden): the projections, the decay before its exps
+  // (time_decay plus its LoRA), the gate before its SiLU
+  const void *r, *k, *v, *w, *g;
+  // (hidden,) f32: time_first (the current token's bonus), the group norm's
+  // weight and bias
+  const float *u, *norm_w, *norm_b;
+  float *state;
+  void *out;
+  int seq_len, heads;
+  float norm_eps;
+};
+
+// RWKV-6's time-mix between its projections and the output projection for one
+// (sequence, head), a thread per value column j holding S[:, j] (state
+// (batch, heads, key i, value j)): w = exp(-exp(w)), y_j = sum_i r_i (S_ij +
+// u_i k_i v_j), S_ij = S_ij w_i + k_i v_j, then the group norm and silu(g).
+template <typename T>
+__global__ void __launch_bounds__(RWKV7_HEAD_SIZE)
+    rwkv6_time_mix_kernel(const Rwkv6TimeMixParams p) {
+  constexpr int N = RWKV7_HEAD_SIZE;
+  const int j = threadIdx.x;
+  const int batch = blockIdx.x / p.heads, head = blockIdx.x % p.heads;
+  const int hidden = p.heads * N, c = head * N + j;
+  __shared__ float s_r[N], s_k[N], s_w[N], s_u[N], scratch[2];
+  const T *r = (const T *)p.r, *k = (const T *)p.k, *v = (const T *)p.v;
+  const T *w = (const T *)p.w, *g = (const T *)p.g;
+  T *out = (T *)p.out;
+  s_u[j] = p.u[c];
+  const float norm_w = p.norm_w[c], norm_b = p.norm_b[c];
+
+  float *column = p.state + ((size_t)batch * p.heads + head) * N * N + j;
+  float s[N];
+#pragma unroll
+  for (int i = 0; i < N; i++)
+    s[i] = column[(size_t)i * N];
+
+  for (int t = 0; t < p.seq_len; t++) {
+    const size_t at = ((size_t)batch * p.seq_len + t) * hidden + c;
+    __syncthreads();
+    s_r[j] = rwkv_to_float(r[at]);
+    s_k[j] = rwkv_to_float(k[at]);
+    s_w[j] = expf(-expf(rwkv_to_float(w[at])));
+    __syncthreads();
+    const float vj = rwkv_to_float(v[at]);
+    float y = 0.0f;
+#pragma unroll
+    for (int i = 0; i < N; i++) {
+      const float kv = s_k[i] * vj;
+      y += s_r[i] * (s[i] + s_u[i] * kv);
+      s[i] = s[i] * s_w[i] + kv;
+    }
+    const float mean = rwkv_head_sum(y, scratch) / N;
+    const float centered = y - mean;
+    const float var = rwkv_head_sum(centered * centered, scratch) / N;
+    const float normed = centered * rsqrtf(var + p.norm_eps) * norm_w + norm_b;
+    const float gate = rwkv_to_float(g[at]);
+    out[at] = rwkv_from_float<T>(normed * gate / (1.0f + expf(-gate)));
+  }
+#pragma unroll
+  for (int i = 0; i < N; i++)
+    column[(size_t)i * N] = s[i];
+}
+
+extern "C" void rwkv6_time_mix_cuda(const Rwkv6TimeMixParams *p, int batch,
+                                    int dtype, int64_t stream) {
+  const int blocks = batch * p->heads;
+  const cudaStream_t s = (cudaStream_t)stream;
+  if (dtype == 0)
+    rwkv6_time_mix_kernel<__half><<<blocks, RWKV7_HEAD_SIZE, 0, s>>>(*p);
+  else if (dtype == 1)
+    rwkv6_time_mix_kernel<__nv_bfloat16><<<blocks, RWKV7_HEAD_SIZE, 0, s>>>(*p);
+  else
+    rwkv6_time_mix_kernel<float><<<blocks, RWKV7_HEAD_SIZE, 0, s>>>(*p);
 }

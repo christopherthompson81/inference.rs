@@ -44,7 +44,7 @@ mod qwen3_sliding_window_tiny;
 mod qwen4exp_text_tiny;
 mod qwen_vl_tiny;
 mod rope_encoder_embedding_tiny;
-mod rwkv7_tiny;
+mod rwkv_tiny;
 mod silero_tiny;
 mod sortformer_tiny;
 mod ultravox_tiny;

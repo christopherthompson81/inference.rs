@@ -300,3 +300,44 @@ gguf_perplexity_parity.sh rwkv7-1.5B-world.Q8_0: ref 1.4331, ours 1.4322; rwkv7-
 | 1.5B Q8_0 prefill, 4,215 tokens | 10,538 tok/s | 13,090 tok/s | pp4096 9,844 |
 | 191M F32 decode | 204.6 tok/s | 500.0 tok/s | tg128 520.42 |
 | 191M F32 prefill | 42,576 tok/s | 40,922 tok/s | pp4096 36,721 |
+
+## Run 7 - 2026-11-07 16:30
+
+Question: step 3's second part. Does RWKV-6 (`Rwkv6ForCausalLM` in RWKV's HF layout, llama.cpp's `rwkv6`) run on
+RWKV-7's stack?
+
+Reference read: llama.cpp 970b51ce7 `src/models/rwkv6-base.cpp`, `rwkv6.cpp`, `conversion/rwkv.py`; the
+RWKV/v6-Finch-1B6-HF checkpoint's tensors.
+
+- The time-mix's token shift is data dependent: `xxx = x + sx maa_x`, `tanh(xxx w1)` split five ways through `w2`
+  (w, k, v, r, g), each mix `x + sx (maa + lora)`. The decay `exp(-exp(time_decay + tanh(xw decay_w1) decay_w2))`. WKV-6
+  reads the state before the step and adds the current token through `u` (`time_faaaa`): per head
+  `y = r (S + diag(u) k^T v)`, `S = diag(w) S + k^T v`. The group norm (eps `1e-5 * head_size_divisor^2`), `silu(g)`,
+  `output`. The channel-mix: `sigmoid(receptance(xr)) * value(relu(key(xk))^2)`.
+- The config's `num_attention_heads` (64) is not the heads; `hidden / head_size` (32) is, as `time_faaaa` has them.
+- llama.cpp's converter divides each layer's `output` and channel-mix `value` by `2^(layer / rescale_every)` and halves
+  the hidden state after every `rescale_every`th layer to match; a checkpoint's `rescale_every` is fp16 only (its
+  weights as trained). The synthesized GGUF config carries `rescaled_every` for the halving; undoing the division in
+  the binding would dequantize those weights.
+
+Built: the stack RWKV-7 had, shared as `rwkv.rs` (`RwkvModel` over `RwkvBlock`s: the ends, the hybrid cache, the
+gather and scatter, the GGUF halving); RWKV-6's layers in `rwkv6.rs`; the token-shift op taking RWKV-6's per-position
+offsets; a fused RWKV-6 time-mix kernel (a thread per value column holding it, the decay, the recurrence, the group norm
+and the SiLU gate) with its CPU composite; the `rwkv6` GGUF binding (the LoRAs transposed back, the fused lerp split).
+
+```
+gpu case cuda_rwkv6_fused_time_mix_matches_the_composite: within 1e-4 (and the token shift with offsets)
+gguf_perplexity_parity.sh rwkv6-1b6-bf16 (llama.cpp's convert of the HF checkpoint):  ref 1.5097, ours 1.5114
+checkpoint (pytorch_model.bin) against our GGUF, 417 tokens, bf16:  mean KL 2.06e-04, max 8.34e-03, top-1 0.990
+  the same in f32, 207 tokens:  mean KL 3.31e-12, max 6.49e-11, top-1 1.000 (the GGUF's divided weights round in bf16)
+```
+
+| RWKV-6 1.6B BF16 on the 3090 | ours | llama.cpp |
+|---|---|---|
+| decode, 400 tokens | 163.1 / 166.5 tok/s | tg128 169.18 |
+| prefill, 4,215 tokens | 10,538 tok/s | pp4096 3,825.77 |
+
+"User: What is the capital of France?\n\nAssistant:" -> " The capital of France is Paris." The tiny test is now
+`rwkv_tiny`, over an RWKV-7 and an RWKV-6.
+
+Next: QRWKV6 and ARWKV7 (Qwen2.5 blocks with RWKV time-mixes).
