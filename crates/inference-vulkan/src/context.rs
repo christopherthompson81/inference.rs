@@ -347,6 +347,11 @@ impl Context {
         self.unified
     }
 
+    /// Whether f32 matmuls run on the device's matrix cores, multiplying their inputs rounded to f16.
+    pub fn has_matrix_cores(&self) -> bool {
+        self.coop.is_some()
+    }
+
     /// Appends `record`'s commands to the stream without waiting for them; a batch that has grown long is submitted.
     /// What the commands read or write must be [`Recorder::retain`]ed, or outlive the next [`Self::synchronize`].
     pub fn record<T>(&self, record: impl FnOnce(&Recorder<'_>) -> Result<T>) -> Result<T> {

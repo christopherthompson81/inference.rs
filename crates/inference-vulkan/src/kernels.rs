@@ -226,6 +226,8 @@ pub(crate) struct CoopKernels {
     paged_prefill: [Pipeline; 3],
     // prompt attention over contiguous f32 keys and values
     pub(crate) flash_attn: Pipeline,
+    // matmul_f32_tiled's product, its tiles in f16
+    pub(crate) matmul_f32: Pipeline,
     // Q4_0 experts on NV_cooperative_matrix2, where the device has it: a build a tile width, 16 to 128 routes
     // by BlockType, where the type has decode functions
     moe_mm_cm2: Vec<Option<[Pipeline; 4]>>,
@@ -377,6 +379,15 @@ impl CoopKernels {
             )
             .subgroup(subgroup),
         );
+        specs.push(
+            PipelineSpec::new(
+                shaders::MATMUL_F32_CM,
+                ops::BINDINGS,
+                ops::MATMUL_PUSH_BYTES,
+                "matmul_f32_cm",
+            )
+            .subgroup(subgroup),
+        );
         specs.push(PipelineSpec::new(
             shaders::CONVERT_F16,
             CONVERT_BINDINGS,
@@ -405,6 +416,7 @@ impl CoopKernels {
         let paged_prefill: [Pipeline; 3] =
             take(3).try_into().ok().expect("three prefill pipelines");
         let [flash_attn]: [Pipeline; 1] = take(1).try_into().ok().expect("one attention pipeline");
+        let [matmul_f32]: [Pipeline; 1] = take(1).try_into().ok().expect("one matmul pipeline");
         let [convert_f16, moe_gather_f16]: [Pipeline; 2] =
             take(2).try_into().ok().expect("two pipelines");
         let mut moe_mm_cm2: Vec<Option<[Pipeline; 4]>> = (0..BLOCK_TYPES).map(|_| None).collect();
@@ -428,6 +440,7 @@ impl CoopKernels {
             moe_gather_f16,
             paged_prefill,
             flash_attn,
+            matmul_f32,
             moe_mm_cm2,
             mul_mm_cm2,
         })

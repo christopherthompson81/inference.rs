@@ -1943,14 +1943,66 @@ mod tests {
     #[test]
     fn vulkan_tiled_matmuls_match_the_cpu() -> Result<()> {
         let Some(vk) = device() else { return Ok(()) };
+        // on matrix cores the inputs are rounded to f16, whose products f32 holds exactly: the reference rounds them too
+        let cores = vk.as_vulkan_device()?.context.has_matrix_cores();
+        let rounded = |t: &Tensor| -> Result<Tensor> {
+            if cores {
+                t.to_dtype(DType::F16)?.to_dtype(DType::F32)
+            } else {
+                Ok(t.clone())
+            }
+        };
+        let check = |a: &Tensor, b: &Tensor| -> Result<()> {
+            let got = a.to_device(&vk)?.matmul(&b.to_device(&vk)?)?;
+            assert_close(&got, &rounded(a)?.matmul(&rounded(b)?)?, DOT_TOLERANCE)
+        };
         let q = Tensor::randn(0f32, 1., (3, 70, 40), &Device::Cpu)?;
         let k = Tensor::randn(0f32, 1., (3, 131, 40), &Device::Cpu)?;
         let v = Tensor::randn(0f32, 1., (3, 131, 24), &Device::Cpu)?;
-        let (vq, vk_, vv) = (q.to_device(&vk)?, k.to_device(&vk)?, v.to_device(&vk)?);
-        let scores = q.matmul(&k.t()?)?;
-        assert_close(&vq.matmul(&vk_.t()?)?, &scores, DOT_TOLERANCE)?;
-        let vscores = scores.to_device(&vk)?;
-        assert_close(&vscores.matmul(&vv)?, &scores.matmul(&v)?, DOT_TOLERANCE)?;
+        // b transposed (k its unit stride), then an unaligned k against an n-contiguous b
+        check(&q, &k.t()?)?;
+        check(&q.matmul(&k.t()?)?, &v)?;
+        // whole 128 x 128 tiles and their edges, against a transposed weight and an n-contiguous b
+        let x = Tensor::randn(0f32, 1., (1, 300, 256), &Device::Cpu)?;
+        let w = Tensor::randn(0f32, 1., (260, 256), &Device::Cpu)?;
+        check(&x, &w.t()?.unsqueeze(0)?)?;
+        let y = Tensor::randn(0f32, 1., (2, 64, 200), &Device::Cpu)?;
+        check(
+            &x.narrow(1, 0, 130)?.narrow(2, 0, 64)?.repeat((2, 1, 1))?,
+            &y,
+        )?;
+        // a strided a (its k not unit): no vector loads
+        check(&q.transpose(1, 2)?.contiguous()?.transpose(1, 2)?, &k.t()?)?;
+        Ok(())
+    }
+
+    // f32 matmul throughput at a speech encoder's shapes (Parakeet over 10 minutes: 7500 frames, 1024 wide, a
+    // transposed weight), on whichever kernel the device takes
+    #[test]
+    #[ignore]
+    fn f32_matmul_throughput() -> Result<()> {
+        let Some(vk) = device() else { return Ok(()) };
+        const RUNS: usize = 10;
+        for (m, n, k) in [
+            (7500, 4096, 1024),
+            (7500, 1024, 4096),
+            (7500, 1024, 1024),
+            (7500, 256, 1024),
+            (1024, 256, 1024),
+        ] {
+            let x = Tensor::randn(0f32, 1., (m, k), &vk)?;
+            let w = Tensor::randn(0f32, 1., (n, k), &vk)?;
+            x.matmul(&w.t()?)?.sum_all()?.to_scalar::<f32>()?;
+            let start = std::time::Instant::now();
+            let mut last = None;
+            for _ in 0..RUNS {
+                last = Some(x.matmul(&w.t()?)?);
+            }
+            last.expect("runs").sum_all()?.to_scalar::<f32>()?;
+            let secs = start.elapsed().as_secs_f64() / RUNS as f64;
+            let tflops = 2.0 * (m * n * k) as f64 / secs / 1e12;
+            eprintln!("{m} x {n} x {k}: {:.1} ms, {tflops:.2} TFLOPS", secs * 1e3);
+        }
         Ok(())
     }
 

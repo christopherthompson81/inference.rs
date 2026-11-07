@@ -1674,3 +1674,39 @@ experts' common input, attention's q/k/v).
 **Where decode stands:** 5.92 ms a token (~168 tok/s) against llama.cpp Vulkan's 5.68 (176) and CUDA's ~4.7 (207-214),
 from ~7.6 ms (131 tok/s) at Run 61. The rest of the gap to llama.cpp is spread a few us an op. CUDA's lead is its
 graphs and fused kernels over a ~700-dispatch token.
+
+### Run 66 - 2026-11-07 (laptop: Radeon 780M)
+
+**Question:** speech on the iGPU. Parakeet TDT 0.6B v3 and Nemotron-3 Diarization, served together (`from-config`
+with `vulkan = true`), over the first 10 minutes of a three-speaker meeting: Vulkan took as long as the CPU (ASR 71 s
+against 70, diarization 31 against 19), the GPU ~40 % busy and the CPU under one core.
+
+**Finding:** the CPU fallbacks, not the GPU. `perf` put 91 % of the CPU in `Buffer::read_into`: Parakeet's two
+depthwise convs (256 groups) split a group a call, each of the 515 calls reading the whole 1.2 GB input back (~600 GB,
+36 s of 75), the conv itself 2.6 s. The diarizer's `gelu_erf` had no kernel and round-tripped too (591 calls, ~10 s).
+With both fixed the GPU's time is ~75 % f32 matmuls at ~1 TFLOPS (`matmul_f32_tiled`).
+
+**Change:**
+- A depthwise conv on Vulkan stays one call, as on the CPU whose kernel runs it; `gelu_erf` is a map op (an erfc
+  polynomial, as GLSL has no erf, within 1.5e-7).
+- `matmul_f32_cm`: the tiled product on matrix cores wherever the device has them (iGPUs too, as f32 has no int8 path
+  to lose to), its inputs rounded to f16 into f32 accumulators: 128 x 128 tiles over 8 subgroups, 64-deep k steps
+  loaded as vec4s where aligned and prefetched into registers during the products, b's shared tile following its unit
+  stride, eight row tiles sweeping the columns together. At 7500 x {4096 x 1024, 1024 x 4096, 1024 x 1024}
+  (`f32_matmul_throughput`): 0.99 / 1.11 / 0.93 -> 1.7-1.8 / 2.3-2.5 / 1.5-1.7 TFLOPS. The first cut (64 x 64 tiles,
+  scalar loads) ran 0.5; grouping the row tiles took the large weight from 1.2 to 1.8.
+
+**Tests:** `vulkan_tiled_matmuls_match_the_cpu` against the CPU over the same f16-rounded inputs, where the device
+multiplies on matrix cores (a transposed weight and an n-contiguous b, unaligned and strided operands, whole tiles and
+their edges); the f32 kernel fails it there, as does a prefetch that stops a step early. `gelu_erf` from -10 to 10.
+
+**Result (10 minutes of audio):**
+
+| | CPU | Vulkan before | depthwise + gelu_erf | + matrix cores |
+|---|---|---|---|---|
+| ASR | 68 s | 71 s | 38 s | 28.8 s |
+| diarization | 19.6 s | 31 s | 21 s | 15.7 s |
+| both, one request | 81 s | 77 s | 46 s | 34.4 s |
+
+The transcript and every word's speaker match the CPU's f32 run. Lightning recipe A (KLD against BF16, 40 chunks of
+512): 0.00894 with the kernel, 0.00886 without, top-1 96.26 / 96.16 %.
