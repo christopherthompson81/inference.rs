@@ -28,10 +28,6 @@ impl NormalModelLoader for MambaLoader {
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         Ok(Box::new(Config::from_json(config)?))
     }
-    // no attention layer, so no KV to page; the recurrent state lives in the hybrid cache
-    fn supports_paged_attention(&self, _config: &str) -> Result<bool> {
-        Ok(false)
-    }
 }
 
 impl IsqModelLoader for MambaLoader {

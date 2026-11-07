@@ -79,9 +79,6 @@ impl NormalModelLoader for ArwkvLoader {
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         Ok(Box::new(ArwkvConfig::from_json(config)?))
     }
-    fn supports_paged_attention(&self, _config: &str) -> Result<bool> {
-        Ok(false)
-    }
 }
 
 impl IsqModelLoader for ArwkvLoader {
@@ -156,9 +153,6 @@ impl NormalModelLoader for Qrwkv6Loader {
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         Ok(Box::new(Qrwkv6Config::from_json(config)?))
-    }
-    fn supports_paged_attention(&self, _config: &str) -> Result<bool> {
-        Ok(false)
     }
 }
 

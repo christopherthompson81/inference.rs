@@ -2,7 +2,8 @@
 //! with weightless dt, B and C norms, A per channel and state item) and a Jamba (Mamba 1 with weighted norms around a
 //! NoPE attention layer, softmax-routed SwiGLU experts beside a dense MLP). Decoding step by step through the state
 //! scores the tokens as one prefill over them does, a repeated prompt resumes from the prefix cache to the same text,
-//! and a long prompt (Mamba-2's chunked scan, Mamba 1's sequential one) scores on CUDA as on the CPU.
+//! and a long prompt (Mamba-2's chunked scan, Mamba 1's sequential one) scores on CUDA as on the CPU, its decode (a
+//! replayed CUDA graph) scoring as a CPU prefill does.
 
 use std::collections::HashMap;
 
@@ -385,7 +386,23 @@ async fn long_prompt_scores_on_cuda_as_on_the_cpu(kind: Kind) -> anyhow::Result<
             );
         }
     }
+    // the CUDA decode (replaying its captured step) scores each token as the CPU scores the whole sequence
     let (decoded, _) = traces::greedy(&gpu, chat("say something"), MAX_LEN).await?;
     anyhow::ensure!(!decoded.is_empty(), "{kind:?}: CUDA decoded nothing");
+    let mut tokens = cpu
+        .tokenize_chat(ChatRequest::from(chat("say something")).request)
+        .await?
+        .tokens;
+    tokens.extend(decoded.iter().map(|(token, _)| *token));
+    let scored = scores(&cpu, tokens).await?;
+    let prefilled = scored[scored.len() - decoded.len()..]
+        .iter()
+        .map(|logprob| logprob.unwrap_or(f32::NAN));
+    for (step, ((_, decoded), prefilled)) in decoded.iter().zip(prefilled).enumerate() {
+        anyhow::ensure!(
+            (decoded - prefilled).abs() < CUDA_LOGPROB_TOLERANCE,
+            "{kind:?} step {step}: CUDA decoded {decoded}, CPU prefill {prefilled}"
+        );
+    }
     Ok(())
 }

@@ -133,6 +133,7 @@ pub struct RwkvModel {
     device: Device,
     mapper: Box<dyn crate::device_map::DeviceMapper + Send + Sync>,
     cfg: ModelConfigMetadata,
+    recurrent_state_bytes: usize,
 }
 
 impl RwkvModel {
@@ -244,6 +245,7 @@ impl RwkvModel {
             cache: EitherCache::Hybrid(Arc::new(Mutex::new(cache))),
             device: normal_loading_metadata.real_device,
             mapper,
+            recurrent_state_bytes: shape.recurrent_state_bytes(dtype),
             cfg: ModelConfigMetadata {
                 max_seq_len: MAX_POSITIONS,
                 num_layers: shape.layers,
@@ -371,6 +373,23 @@ impl NormalModel for RwkvModel {
 
     fn config(&self) -> &ModelConfigMetadata {
         &self.cfg
+    }
+
+    // every layer recurrent: the paged cache holds no KV, the recurrent pool holds each sequence's state
+    fn model_config(&self) -> Arc<dyn crate::paged_attention::ModelConfigLike + Send + Sync> {
+        Arc::new(
+            crate::paged_attention::HybridPagedKvCacheConfig::new(
+                self.cfg.clone(),
+                vec![false; self.cfg.num_layers],
+            )
+            .with_recurrent_state_bytes(self.recurrent_state_bytes),
+        )
+    }
+
+    // decode reads and writes the recurrent pool through device slot indices
+    #[cfg(feature = "cuda")]
+    fn supports_cuda_decode_graphs(&self) -> bool {
+        true
     }
 }
 
