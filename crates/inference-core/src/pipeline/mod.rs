@@ -1313,6 +1313,11 @@ pub trait Pipeline:
         false
     }
 
+    /// The model's encoding of a request's media whose token count it decides, before the prompt is expanded.
+    fn encode_prompt_media(&self, _seq: &mut Sequence) -> Result<(), inference_tensor::Error> {
+        Ok(())
+    }
+
     fn adapter_runtime(&self) -> Option<Arc<crate::DynamicLoraRuntime>> {
         None
     }

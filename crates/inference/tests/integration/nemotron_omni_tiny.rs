@@ -87,6 +87,9 @@ const FRAME: (u32, u32) = (64, 48);
 const FRAMES: usize = 3;
 const VIDEO_FPS: f64 = 4.0;
 const TUBELET_TOKENS: usize = 2;
+// EVS at half: two 2-token tubelets keep max(2, int(4 * 0.5)) = 2 tokens, the first tubelet's, so the second keeps none
+const PRUNING_RATE: f64 = 0.5;
+const PRUNED_TOKENS: usize = 2;
 // the tiny checkpoint's video patch embedder, which Nano VL's projector does not carry
 const VIDEO_EMBEDDER: &str = "video_embedder.weight";
 
@@ -587,6 +590,43 @@ async fn a_video_expands_to_its_tubelets_beside_an_image() -> anyhow::Result<()>
     let first = trace(&first);
     assert!(!first.is_empty(), "the video request generated nothing");
     let second = trace(&model.send_chat_request(video_request(&[SQUARE], 1)).await?);
+    assert_eq!(first.len(), second.len());
+    for ((a, la), (b, lb)) in first.iter().zip(&second) {
+        assert_eq!(a, b);
+        assert!((la - lb).abs() < LOGPROB_TOLERANCE, "{la} vs {lb}");
+    }
+    Ok(())
+}
+
+// with EVS the tubelets are encoded at admission and only their kept tokens join the prompt (the second tubelet's
+// block empty), and a cached repeat decodes as the first did
+#[tokio::test]
+async fn a_pruned_video_keeps_its_first_tubelet_and_decodes_the_same_again() -> anyhow::Result<()> {
+    let full = checkpoint()?;
+    let full = build(full.path())
+        .await?
+        .send_chat_request(video_request(&[], 1))
+        .await?
+        .usage
+        .prompt_tokens;
+    let checkpoint = checkpoint()?;
+    let mut config = config();
+    config["video_pruning_rate"] = serde_json::json!(PRUNING_RATE);
+    std::fs::write(checkpoint.path().join("config.json"), config.to_string())?;
+    let model = build(checkpoint.path()).await?;
+    let first = model.send_chat_request(video_request(&[], 1)).await?;
+    assert_eq!(
+        full - first.usage.prompt_tokens,
+        PRUNED_TOKENS,
+        "pruning kept {} of {full} prompt tokens",
+        first.usage.prompt_tokens
+    );
+    let first = trace(&first);
+    assert!(
+        !first.is_empty(),
+        "the pruned video request generated nothing"
+    );
+    let second = trace(&model.send_chat_request(video_request(&[], 1)).await?);
     assert_eq!(first.len(), second.len());
     for ((a, la), (b, lb)) in first.iter().zip(&second) {
         assert_eq!(a, b);

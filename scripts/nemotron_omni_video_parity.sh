@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # One-off parity check of our Nemotron 3 Nano Omni video path (frame resize, tubelets through `video_embedder`, pixel
 # shuffle, mlp1, the timestamped prompt) against transformers' own NemotronH Omni video processor and RADIO model:
-# each tubelet's patches, tower features and projected embeddings, and the `<video>` replacement text. EVS pruning is
-# not compared (rate 0: every token kept). Not part of local_ci.sh: it needs torch and transformers (5.19+), so
+# each tubelet's patches, tower features and projected embeddings, the `<video>` replacement text, and EVS's kept
+# tokens at the checkpoint's `video_pruning_rate`. Not part of local_ci.sh: it needs torch and transformers (5.19+), so
 # OMNI_PYTHON names the interpreter that has them.
 #
 # Usage: scripts/nemotron_omni_video_parity.sh <checkpoint> <frames_dir> [--fps F] [--stride S] [--cpu] [--bf16]
@@ -42,6 +42,7 @@ from PIL import Image
 from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers import RadioConfig, RadioModel
+from transformers.models.nemotron_h_omni.modeling_nemotron_h_omni import compute_retention_mask
 from transformers.models.nemotron_h_omni.processing_nemotron_h_omni import NemotronH_Omni_Reasoning_V3Processor
 from transformers.models.nemotron_h_omni.video_processing_nemotron_h_omni import (
     NemotronH_Omni_Reasoning_V3VideoProcessor,
@@ -140,14 +141,24 @@ with torch.no_grad():
     rows, cols = h // radio.patch_size, w // radio.patch_size
     shuffled = pixel_shuffle(features.reshape(packed.shape[0], rows, cols, -1))
     embeds = project(shuffled.reshape(packed.shape[0], -1, shuffled.shape[-1]))
+# EVS as the reference applies it, on a (T, 1, N) grid: it reshapes to a square of sqrt(N) a side, which only a square
+# tubelet has, and the comparison is per position either way
+rate = cfg.get("video_pruning_rate", 0.0)
+keep = compute_retention_mask(
+    video_embeds=embeds.reshape(-1, embeds.shape[-1]),
+    thw=(embeds.shape[0], 1, embeds.shape[1]),
+    spatial_merge_size=1,
+    q=rate,
+).reshape(embeds.shape[0], embeds.shape[1])
 os.makedirs(f"{out}/frames")
 for name, image in zip(names, images):
     image.save(f"{out}/frames/{os.path.splitext(name)[0]}.png")
-json.dump({"fps": fps, "indices": indices, "replacement": replacement}, open(f"{out}/video.json", "w"))
+json.dump({"fps": fps, "indices": indices, "replacement": replacement, "rate": rate}, open(f"{out}/video.json", "w"))
 save_file({
     "patches": model.embeddings._image_to_patches(packed).cpu().contiguous(),
     "features": features.cpu().contiguous(),
     "embeds": embeds.cpu().contiguous(),
+    "kept": keep.to(torch.uint8).cpu().contiguous(),
 }, f"{out}/video.safetensors")
 print(f"reference: {len(images)} frames, {packed.shape[0]} tubelets of {rows} x {cols} patches")
 PY

@@ -27,7 +27,7 @@ use crate::paged_attention::{
 };
 
 use super::{
-    Config, ImageLayout, ImagePatches, MODEL, NemotronOmniSpecificArgs, VideoLayout,
+    Config, EncodedVideos, ImageLayout, ImagePatches, MODEL, NemotronOmniSpecificArgs, VideoLayout,
     sound::SoundConfig,
 };
 
@@ -239,14 +239,6 @@ pub fn target_grid(
 impl NemotronOmniInputsProcessor {
     pub fn new(cfg: &Config, max_tiles: Option<usize>) -> Result<Self> {
         let layout = cfg.image_layout(max_tiles)?;
-        if let Some(rate) = cfg.video_pruning_rate.filter(|&rate| rate > 0.0)
-            && cfg.vision_config.video_layout().is_some()
-        {
-            tracing::info!(
-                rate,
-                "{MODEL}: videos keep every tubelet's tokens; the reference's EVS pruning is not applied"
-            );
-        }
         Ok(Self {
             patch_size: cfg.patch_size,
             merge: cfg.merge(),
@@ -507,12 +499,13 @@ impl NemotronOmniInputsProcessor {
                 .collect::<Vec<_>>()
         });
         let temporal = self.video.map_or(1, |video| video.temporal);
+        let tokens = images.map_or_else(Vec::new, |images| self.tubelet_tokens(&*seq, images));
         let videos = seq
             .videos()
             .unwrap_or_default()
             .iter()
-            .zip(images.map_or(&[][..], |images| &images.videos))
-            .map(|(video, tubelets)| (tubelet_labels(video, temporal), self.tokens(tubelets.grid)))
+            .zip(tokens)
+            .map(|(video, tokens)| (tubelet_labels(video, temporal), tokens))
             .collect::<Vec<_>>();
         let (mut expanded, blocks) =
             expand_visual(seq.get_initial_prompt(), &image_counts, &videos)?;
@@ -583,8 +576,12 @@ impl NemotronOmniInputsProcessor {
                         })?
                         .iter()
                         .zip(&videos)
-                        .flat_map(|(&hash, (labels, _))| {
-                            (0..labels.len()).map(move |tubelet| tubelet_hash(hash, tubelet))
+                        .flat_map(|(&hash, (_, tokens))| {
+                            tokens
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, n)| **n > 0)
+                                .map(move |(tubelet, _)| tubelet_hash(hash, tubelet))
                         })
                         .collect::<Vec<_>>();
                     layout.extend_ranges(
@@ -643,32 +640,69 @@ impl NemotronOmniInputsProcessor {
                     rows,
                     cols,
                     video: false,
+                    encoded: None,
                 })
             })
             .collect()
     }
 
-    // the sequence's `item`th tubelet, counting through its videos
-    fn tubelet(&self, processed: &Preprocessed, mut item: usize) -> anyhow::Result<ImagePatches> {
+    // tubelet `tubelet` of video `video`, as the tower takes it
+    fn tubelet(
+        &self,
+        processed: &Preprocessed,
+        video: usize,
+        tubelet: usize,
+    ) -> Result<ImagePatches> {
         let temporal = self.video.map_or(1, |video| video.temporal);
-        for video in &processed.videos {
-            if item < video.count {
-                let (rows, cols) = video.grid;
-                let frames = rows * cols * temporal;
-                let patches = processed
-                    .patches
-                    .narrow(0, video.start + item * frames, frames)?
-                    .reshape((rows * cols, ()))?;
-                return Ok(ImagePatches {
-                    patches,
-                    rows,
-                    cols,
-                    video: true,
-                });
-            }
-            item -= video.count;
-        }
-        anyhow::bail!("{MODEL}: no tubelet {item} among the videos")
+        let video = processed.videos[video];
+        let (rows, cols) = video.grid;
+        let frames = rows * cols * temporal;
+        let patches = processed
+            .patches
+            .narrow(0, video.start + tubelet * frames, frames)?
+            .reshape((rows * cols, ()))?;
+        Ok(ImagePatches {
+            patches,
+            rows,
+            cols,
+            video: true,
+            encoded: None,
+        })
+    }
+
+    /// Each of the sequence's videos as its tubelets, for a model that encodes them before the prompt is expanded.
+    pub fn video_tubelets(
+        &self,
+        seq: &mut dyn MediaSequence,
+    ) -> anyhow::Result<Vec<Vec<ImagePatches>>> {
+        let processed = self.cached_or_preprocess(seq)?;
+        Ok((0..processed.videos.len())
+            .map(|video| {
+                (0..processed.videos[video].count)
+                    .map(|tubelet| self.tubelet(&processed, video, tubelet))
+                    .collect::<Result<Vec<_>>>()
+            })
+            .collect::<Result<Vec<_>>>()?)
+    }
+
+    // each video's tokens a tubelet: those its encoding kept, else the whole grid's
+    fn tubelet_tokens(&self, seq: &dyn MediaSequence, processed: &Preprocessed) -> Vec<Vec<usize>> {
+        let encoded = seq
+            .multimodal()
+            .encoded_media
+            .as_ref()
+            .and_then(|encoded| encoded.downcast_ref::<EncodedVideos>());
+        processed
+            .videos
+            .iter()
+            .enumerate()
+            .map(
+                |(video, tubelets)| match encoded.and_then(|e| e.0.get(video)) {
+                    Some(kept) => kept.iter().map(|t| t.dim(0).unwrap_or(0)).collect(),
+                    None => vec![self.tokens(tubelets.grid); tubelets.count],
+                },
+            )
+            .collect()
     }
 
     // the image tiles and video tubelets this step's placeholders hold, in prompt order
@@ -677,11 +711,25 @@ impl NemotronOmniInputsProcessor {
         seq: &dyn MediaSequence,
         processed: &Preprocessed,
     ) -> anyhow::Result<Vec<ImagePatches>> {
-        let tubelets = processed
-            .videos
+        // a video item is a tubelet that kept tokens, as the prompt has a block of them for each
+        let items = self
+            .tubelet_tokens(seq, processed)
             .iter()
-            .map(|video| video.count)
-            .sum::<usize>();
+            .enumerate()
+            .flat_map(|(video, tokens)| {
+                tokens
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, n)| **n > 0)
+                    .map(move |(tubelet, _)| (video, tubelet))
+            })
+            .collect::<Vec<_>>();
+        let encoded = seq
+            .multimodal()
+            .encoded_media
+            .as_ref()
+            .and_then(|encoded| encoded.downcast_ref::<EncodedVideos>());
+        let tubelets = items.len();
         let active = |kind, count| -> anyhow::Result<std::ops::Range<usize>> {
             if count == 0 {
                 Ok(0..0)
@@ -704,7 +752,10 @@ impl NemotronOmniInputsProcessor {
                     out.extend(Self::select(processed, item..item + 1)?);
                 }
                 MultimodalKind::Video if videos.contains(&item) => {
-                    out.push(self.tubelet(processed, item)?);
+                    let (video, tubelet) = items[item];
+                    let mut patches = self.tubelet(processed, video, tubelet)?;
+                    patches.encoded = encoded.map(|e| e.0[video][tubelet].clone());
+                    out.push(patches);
                 }
                 _ => {}
             }
@@ -744,22 +795,23 @@ fn image_block(tokens: usize) -> String {
     format!("{IMAGE_START}{}{IMAGE_END}", IMAGE_TOKEN.repeat(tokens))
 }
 
-/// What a `<video>` becomes: each tubelet's label and `tokens`-token `<img>` block, the tubelets joined by newlines.
-pub fn video_replacement(labels: &[String], tokens: usize) -> String {
+/// What a `<video>` becomes: each tubelet's label and `<img>` block of its tokens, the tubelets joined by newlines.
+pub fn video_replacement(labels: &[String], tokens: &[usize]) -> String {
     labels
         .iter()
-        .map(|label| format!("{label}{}", image_block(tokens)))
+        .zip(tokens)
+        .map(|(label, &tokens)| format!("{label}{}", image_block(tokens)))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
 /// `prompt` with its `<image>`s and `<video>`s expanded in the order they appear: the `i`th image as one `<img>` block
-/// of `images[i]` tokens, the `i`th video as its tubelets' blocks, each after its label, joined by newlines; and the
-/// kind of every `<img>` block written, in order.
+/// of `images[i]` tokens, the `i`th video as its tubelets' blocks of their tokens, each after its label, joined by
+/// newlines; and the kind of every block written that holds tokens, in order.
 fn expand_visual(
     prompt: &str,
     images: &[usize],
-    videos: &[(Vec<String>, usize)],
+    videos: &[(Vec<String>, Vec<usize>)],
 ) -> anyhow::Result<(String, Vec<MultimodalKind>)> {
     for (token, expected, items) in [
         (IMAGE_TOKEN, images.len(), "images"),
@@ -790,8 +842,13 @@ fn expand_visual(
         out.push_str(&rest[..at]);
         if video {
             let (labels, tokens) = videos.next().expect("counted above");
-            out.push_str(&video_replacement(labels, *tokens));
-            kinds.extend(labels.iter().map(|_| MultimodalKind::Video));
+            out.push_str(&video_replacement(labels, tokens));
+            kinds.extend(
+                tokens
+                    .iter()
+                    .filter(|n| **n > 0)
+                    .map(|_| MultimodalKind::Video),
+            );
             rest = &rest[at + VIDEO_TOKEN.len()..];
         } else {
             block(&mut out, *images.next().expect("counted above"));
@@ -974,7 +1031,8 @@ mod tests {
     #[test]
     fn images_and_videos_expand_where_they_stand() -> anyhow::Result<()> {
         let labels = vec!["A: ".to_string(), "B: ".to_string()];
-        let (text, kinds) = expand_visual("x<video>\ny<image>z", &[1], &[(labels, 2)])?;
+        let (text, kinds) =
+            expand_visual("x<video>\ny<image>z", &[1], &[(labels.clone(), vec![2, 2])])?;
         let block = |n: usize| format!("<img>{}</img>", IMAGE_TOKEN.repeat(n));
         assert_eq!(
             text,
@@ -988,6 +1046,10 @@ mod tests {
                 MultimodalKind::Image
             ]
         );
+        // a pruned tubelet that kept nothing keeps its label and an empty block, and is no item
+        let (text, kinds) = expand_visual("<video>", &[], &[(labels, vec![3, 0])])?;
+        assert_eq!(text, format!("A: {}\nB: {}", block(3), block(0)));
+        assert_eq!(kinds, [MultimodalKind::Video]);
         assert!(expand_visual("<video>", &[], &[]).is_err());
         Ok(())
     }

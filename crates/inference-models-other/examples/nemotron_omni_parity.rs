@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Parser;
 use inference_models_other::nemotron_omni::{
-    Config, ImagePatches,
+    Config, ImagePatches, evs,
     inputs_processor::{NemotronOmniInputsProcessor, tubelet_labels, video_replacement},
     radio::RadioTower,
 };
@@ -167,6 +167,7 @@ fn main() -> Result<()> {
             rows,
             cols,
             video: false,
+            encoded: None,
         };
         let reference = image(get("patches")?.to_device(&device)?);
         let features = tower.features(&reference)?;
@@ -228,7 +229,7 @@ fn video(
     );
     let labels = tubelet_labels(&input, temporal);
     let tokens = rows * cols / (cfg.merge() * cfg.merge());
-    let text = video_replacement(&labels, tokens);
+    let text = video_replacement(&labels, &vec![tokens; labels.len()]);
     let reference_text = meta["replacement"].as_str().unwrap_or_default();
     anyhow::ensure!(
         text == reference_text,
@@ -249,6 +250,7 @@ fn video(
     let ours = Tensor::from_vec(patches, (tubelets, rows * cols, ()), &Device::Cpu)?;
     compare("patches", &ours, get("patches")?)?;
     let mut worst = 1f64;
+    let mut ours_embeds = Vec::with_capacity(tubelets);
     for tubelet in 0..tubelets {
         let tubelet_patches = |patches: &Tensor| -> Result<ImagePatches> {
             Ok(ImagePatches {
@@ -256,6 +258,7 @@ fn video(
                 rows,
                 cols,
                 video: true,
+                encoded: None,
             })
         };
         println!(" tubelet {tubelet}");
@@ -276,6 +279,44 @@ fn video(
             &embeds,
             &get("embeds")?.get(tubelet)?,
         )?);
+        ours_embeds.push(embeds.to_device(&Device::Cpu)?);
+    }
+    let rate = meta["rate"].as_f64().unwrap_or(0.0);
+    if rate > 0.0 {
+        let reference = get("kept")?.to_vec2::<u8>()?;
+        let mask = |kept: Vec<Vec<usize>>| {
+            kept.iter()
+                .map(|positions| {
+                    let mut row = vec![0u8; rows * cols / (cfg.merge() * cfg.merge())];
+                    positions.iter().for_each(|&p| row[p] = 1);
+                    row
+                })
+                .collect::<Vec<_>>()
+        };
+        let agreement = |ours: &[Vec<u8>]| {
+            let same = ours
+                .iter()
+                .flatten()
+                .zip(reference.iter().flatten())
+                .filter(|(a, b)| a == b)
+                .count();
+            same as f64 / reference.iter().flatten().count() as f64
+        };
+        let on_reference = mask(evs::retained(get("embeds")?, rate)?);
+        let on_ours = mask(evs::retained(&Tensor::stack(&ours_embeds, 0)?, rate)?);
+        let kept = |m: &[Vec<u8>]| m.iter().flatten().filter(|&&k| k == 1).count();
+        println!(
+            "  EVS at {rate}: reference keeps {}, ours {} on its embeddings ({:.4} agree), {} on ours ({:.4} agree)",
+            kept(&reference),
+            kept(&on_reference),
+            agreement(&on_reference),
+            kept(&on_ours),
+            agreement(&on_ours)
+        );
+        anyhow::ensure!(
+            on_reference == reference,
+            "EVS kept other tokens on the reference's embeddings"
+        );
     }
     Ok(worst)
 }

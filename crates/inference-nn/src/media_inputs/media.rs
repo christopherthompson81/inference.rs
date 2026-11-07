@@ -199,6 +199,9 @@ pub struct MultimodalData {
     pub cached_num_crops: Option<Vec<usize>>,
     pub cached_img_thw: Option<Tensor>,
     pub cached_vid_thw: Option<Tensor>,
+    /// What the model's tower made of the sequence's media before its prompt was expanded
+    /// (`MultimodalModel::encode_prompt_media`), in the model's own form.
+    pub encoded_media: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
     /// Complete image grid metadata, including prefix-cached images.
     pub rope_img_grid_thw: Option<Tensor>,
     /// Complete video grid metadata, including prefix-cached videos.
@@ -232,6 +235,7 @@ impl MultimodalData {
             cached_num_crops: None,
             cached_img_thw: None,
             cached_vid_thw: None,
+            encoded_media: None,
             rope_img_grid_thw: None,
             rope_vid_grid_thw: None,
             mrope_position_delta: None,
@@ -385,6 +389,7 @@ impl MultimodalData {
         self.cached_num_crops = None;
         self.cached_img_thw = None;
         self.cached_vid_thw = None;
+        self.encoded_media = None;
     }
 
     /// Per-item multimodal feature positions for prefix caching block hashing.

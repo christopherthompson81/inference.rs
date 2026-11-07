@@ -132,6 +132,14 @@ pub trait MultimodalModel:
     fn supports_mixed_media_batches(&self) -> bool {
         false
     }
+    /// Runs before a request's prompt is expanded, for media whose token count depends on what the tower makes of it
+    /// (a video whose redundant tokens are pruned): the result goes in the sequence's `encoded_media`.
+    fn encode_prompt_media(
+        &self,
+        _seq: &mut dyn crate::media_inputs::processor::MediaSequence,
+    ) -> inference_tensor::Result<()> {
+        Ok(())
+    }
     /// As `NormalModel::joint_decision`, for a text model under a vision tower.
     fn joint_decision(
         &self,
