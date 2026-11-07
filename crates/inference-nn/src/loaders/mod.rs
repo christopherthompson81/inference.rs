@@ -430,7 +430,7 @@ pub fn with_alignment_tokenizer(config: &str, tokenizer: &str) -> Result<String>
 /// The repository a config names for its text model when it does not describe that model itself (Ultravox's
 /// `text_model_id`), whose config [`MultimodalModelLoader::with_companion_config`] merges in.
 pub fn companion_model_id(config: &str) -> Result<Option<String>> {
-    let config: serde_json::Value = serde_json::from_str(config)?;
+    let config: serde_json::Value = serde_json::from_str(&encode_non_finite_floats(config))?;
     if config.get(COMPANION_CONFIG_KEY).is_some() {
         return Ok(None);
     }

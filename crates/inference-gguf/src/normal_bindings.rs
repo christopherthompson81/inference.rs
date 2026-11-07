@@ -21,6 +21,20 @@ pub fn build_normal_bindings(
     ) {
         return super::nemotron_h_bindings::build_nemotron_h_bindings(archive, architecture);
     }
+    // Nemotron-H's tensors with no attention or feed-forward, under transformers' `backbone`
+    if matches!(loader, NormalLoaderType::Mamba2) {
+        let bindings =
+            super::nemotron_h_bindings::build_nemotron_h_bindings(archive, architecture)?;
+        return Ok(bindings
+            .iter()
+            .map(|(name, binding)| {
+                let name = name
+                    .strip_prefix(NEMOTRON_H_ROOT)
+                    .map_or_else(|| name.to_string(), |rest| format!("{MAMBA2_ROOT}{rest}"));
+                (name, binding.clone())
+            })
+            .collect());
+    }
     let mut bindings = GgufBindingMap::new();
     let block_count = native_block_count(archive, architecture)?;
     bind_root_tensors(archive, loader, architecture, &mut bindings);
@@ -57,6 +71,9 @@ pub fn build_normal_bindings(
     }
     Ok(bindings)
 }
+
+const NEMOTRON_H_ROOT: &str = "model.";
+const MAMBA2_ROOT: &str = "backbone.";
 
 // Falcon-H1 names its FFN half and final norm its own way, and TII's GGUFs store `ffn_norm` without `.weight`
 const FALCON_H1_RENAMES: &[(&str, &str)] = &[

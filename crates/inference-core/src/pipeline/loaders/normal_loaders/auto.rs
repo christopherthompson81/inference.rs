@@ -5,12 +5,23 @@ pub struct AutoNormalLoader;
 
 #[derive(inference_json::FromJson)]
 struct AutoNormalLoaderConfig {
+    #[serde(default)]
     architectures: Vec<String>,
+    model_type: Option<String>,
 }
 
 impl AutoNormalLoader {
     fn get_loader(config: &str) -> Result<Box<dyn NormalModelLoader>> {
         let auto_cfg: AutoNormalLoaderConfig = serde_json::from_str(config)?;
+        if auto_cfg.architectures.is_empty()
+            && let Some(tp) = auto_cfg
+                .model_type
+                .as_deref()
+                .and_then(NormalLoaderType::from_model_type)
+        {
+            once_log_debug(format!("Automatic loader type determined to be `{tp}`"));
+            return tp.loader();
+        }
         if auto_cfg.architectures.len() != 1 {
             anyhow::bail!("Expected to have one name for `architectures` config field.")
         }

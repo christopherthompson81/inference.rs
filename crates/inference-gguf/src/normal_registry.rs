@@ -2,8 +2,8 @@ use inference_nn::loaders::NormalLoaderType;
 pub use inference_nn::model::RopePairing;
 use std::{error::Error, fmt, str::FromStr};
 
-pub const NORMAL_LOADER_TYPE_COUNT: usize = 44;
-pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 38;
+pub const NORMAL_LOADER_TYPE_COUNT: usize = 45;
+pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 39;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CanonicalGgufArchitecture {
@@ -45,6 +45,7 @@ pub enum CanonicalGgufArchitecture {
     NemotronH,
     NemotronHMoe,
     FalconH1,
+    Mamba2,
 }
 
 impl CanonicalGgufArchitecture {
@@ -88,6 +89,7 @@ impl CanonicalGgufArchitecture {
             Self::NemotronH => "nemotron_h",
             Self::NemotronHMoe => "nemotron_h_moe",
             Self::FalconH1 => "falcon-h1",
+            Self::Mamba2 => "mamba2",
         }
     }
 }
@@ -141,6 +143,7 @@ impl FromStr for CanonicalGgufArchitecture {
             "nemotron_h" => Ok(Self::NemotronH),
             "nemotron_h_moe" => Ok(Self::NemotronHMoe),
             "falcon-h1" => Ok(Self::FalconH1),
+            "mamba2" => Ok(Self::Mamba2),
             _ => Err(NormalGgufRegistryError::UnknownArchitecture(
                 value.to_string(),
             )),
@@ -503,6 +506,7 @@ const NEMOTRON_H_LOADERS: &[NormalLoaderType] = &[
     NormalLoaderType::NemotronHPuzzle,
 ];
 const FALCON_H1_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::FalconH1];
+const MAMBA2_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Mamba2];
 const OLMO_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Olmo];
 // Olmo 3 converts as olmo2 with a sliding-window pattern
 const OLMO2_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Olmo2, NormalLoaderType::Olmo3];
@@ -827,6 +831,15 @@ pub const GGUF_SCHEMAS: &[GgufSchema; CANONICAL_GGUF_ARCHITECTURE_COUNT] = &[
     GgufSchema {
         architecture: CanonicalGgufArchitecture::FalconH1,
         compatible_loaders: FALCON_H1_LOADERS,
+        rope_pairing: RopePairing::HalfSplit,
+        required_metadata: NO_REQUIREMENTS,
+        required_tensors: SSM_TENSORS,
+        unsupported_metadata: NO_REQUIREMENTS,
+    },
+    // no attention: the pairing is never used
+    GgufSchema {
+        architecture: CanonicalGgufArchitecture::Mamba2,
+        compatible_loaders: MAMBA2_LOADERS,
         rope_pairing: RopePairing::HalfSplit,
         required_metadata: NO_REQUIREMENTS,
         required_tensors: SSM_TENSORS,
@@ -1163,6 +1176,15 @@ pub const NORMAL_MODEL_ADAPTERS: &[NativeModelAdapter; NORMAL_LOADER_TYPE_COUNT]
     NativeModelAdapter {
         loader: NormalLoaderType::FalconH1,
         architectures: &[CanonicalGgufArchitecture::FalconH1],
+        layouts: &[
+            GgufLayout::Direct,
+            GgufLayout::PerLayerInventory,
+            GgufLayout::GraniteSsm,
+        ],
+    },
+    NativeModelAdapter {
+        loader: NormalLoaderType::Mamba2,
+        architectures: &[CanonicalGgufArchitecture::Mamba2],
         layouts: &[
             GgufLayout::Direct,
             GgufLayout::PerLayerInventory,

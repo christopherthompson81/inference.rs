@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Parity check of our Falcon-H1 against transformers on a real checkpoint (e.g. tiiuae/Falcon-H1-0.5B-Instruct).
+"""Parity check of a causal LM checkpoint against transformers (Falcon-H1, Mamba-2 and other recurrent hybrids).
 
 Both sides score the same prompt, long enough to cross a Mamba chunk, in f32 on the CPU; the script reports the mean
 KL(transformers || ours) over positions, top-1 agreement and the largest logit difference, then decodes GENERATED tokens
-greedily on both sides and compares them. The checkpoint's muP multipliers run on the activations here; a GGUF has
-them folded in. Fails past --max-kl or on a different continuation. Not part of local_ci.sh: it needs transformers with
-torch and our library (`scripts/local_ci.sh --bindings` builds it), found through the checkout's bindings.
+greedily on both sides and compares them. Fails past --max-kl or on a different continuation. Not part of local_ci.sh:
+it needs transformers with torch and our library (`scripts/local_ci.sh --bindings` builds it), found through the
+checkout's bindings.
 
-Usage: PYTHONPATH=bindings/python INFERENCE_NATIVE_DIR=target/debug python3 scripts/falcon_h1_parity.py <checkpoint>
+Usage: PYTHONPATH=bindings/python INFERENCE_NATIVE_DIR=target/debug python3 scripts/causal_lm_parity.py <checkpoint>
            [--max-kl X] [--device cpu|cuda:0] [--dtype f32|bf16]
 """
 
@@ -20,7 +20,7 @@ DEFAULT_MAX_KL = 1e-4
 # bf16 weights and activations against an f32 reference
 BF16_MAX_KL = 2e-2
 GENERATED = 24
-# a few hundred tokens: past the 0.5B's 128-token Mamba chunk, so the chunked scan carries state between chunks
+# a few hundred tokens: past a 128-token Mamba chunk, so the chunked scan carries state between chunks
 PROMPT = (
     "The history of the printing press begins in the fifteenth century. Johannes Gutenberg, a goldsmith from "
     "Mainz, combined a screw press with movable metal type, an oil-based ink and a hand mould for casting letters. "

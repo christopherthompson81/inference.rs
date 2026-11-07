@@ -41,6 +41,7 @@ Fine-tunes and model sizes within a family use the same entry.
 | Granite SWA (swash) dense and MoE | `granite_swa` |
 | Nemotron-H dense and MoE | `nemotron_h`, `nemotron_h_moe` |
 | Falcon-H1 | `falcon-h1` |
+| Mamba-2 (Mamba-Codestral) | `mamba2` |
 | OLMo 1 | `olmo` |
 | OLMo 2 and Olmo 3 | `olmo2` |
 | OLMoE | `olmoe` |

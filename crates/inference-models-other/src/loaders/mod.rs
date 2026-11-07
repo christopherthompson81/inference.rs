@@ -38,6 +38,7 @@ mod hunyuan_v1_moe;
 mod lfm2;
 mod lfm2_decision;
 mod lfm2vl;
+mod mamba2;
 mod modern_bert;
 mod modern_bert_decision;
 mod nemotron_h;
@@ -68,6 +69,7 @@ pub use hunyuan_v1_moe::*;
 pub use lfm2::*;
 pub use lfm2_decision::*;
 pub use lfm2vl::*;
+pub use mamba2::*;
 pub use modern_bert::*;
 pub use modern_bert_decision::*;
 pub use nemotron_h::*;
@@ -86,6 +88,7 @@ inference_nn::boxed_loaders!(
     Ernie4_5Loader,
     Ernie4_5MoeLoader,
     FalconH1Loader,
+    Mamba2Loader,
     GLM4Loader,
     GLM4MoeLiteLoader,
     GLM4MoeLoader,

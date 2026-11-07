@@ -40,7 +40,7 @@ serde_default_fn!(f64, default_norm_eps, 1e-5);
 serde_default_fn!(usize, default_max_position_embeddings, 4096);
 
 // NeMo-exported configs write non-finite floats as `{"__float__": "Infinity"}`; serde_json would write `null`
-mod float_pair {
+pub(crate) mod float_pair {
     use serde::{Deserialize, Serialize, de::Error};
     use serde_json::{Value, json};
 

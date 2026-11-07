@@ -37,6 +37,7 @@ pub mod lfm2;
 pub mod lfm2_decision;
 pub mod lfm2_vl;
 pub mod loaders;
+pub mod mamba2;
 pub mod modern_bert;
 pub mod modern_bert_decision;
 pub mod nemotron_h;
@@ -76,6 +77,7 @@ inference_nn::json_config!(
     hunyuan_v1_dense::Config,
     hunyuan_v1_moe::Config,
     lfm2::Config,
+    mamba2::Config,
     olmo::OlmoConfig,
     olmo::Olmo2Config,
     olmo::OlmoeConfig,

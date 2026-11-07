@@ -26,6 +26,7 @@ mod llama_head_dim_tiny;
 mod llama_tiny;
 mod llava_tiny;
 mod local_attention_tiny;
+mod mamba2_tiny;
 mod meralion2_tiny;
 mod nemotron3_diarization_tiny;
 mod nemotron_h_tiny;

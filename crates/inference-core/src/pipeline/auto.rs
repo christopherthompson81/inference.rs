@@ -195,6 +195,7 @@ impl AutoLoaderBuilder {
 struct AutoConfig {
     #[serde(default)]
     architectures: Vec<String>,
+    model_type: Option<String>,
 }
 
 struct ConfigArtifacts {
@@ -603,6 +604,14 @@ fn detect(model_id: &str, artifacts: &ConfigArtifacts) -> Result<Detected> {
         }
     })?;
     let cfg: AutoConfig = serde_json::from_str(config)?;
+    if cfg.architectures.is_empty()
+        && let Some(tp) = cfg
+            .model_type
+            .as_deref()
+            .and_then(NormalLoaderType::from_model_type)
+    {
+        return Ok(Detected::Normal(tp));
+    }
     if cfg.architectures.len() != 1 {
         anyhow::bail!("Expected exactly one architecture in config");
     }
@@ -868,6 +877,26 @@ mod tests {
             Detected::Transcription(crate::pipeline::TranscriptionLoaderType::Parakeet)
         ));
         Ok(())
+    }
+
+    // state-spaces' HF conversions of Mamba-2 write only `model_type`, which transformers' Auto classes go by
+    #[test]
+    fn a_config_without_architectures_is_detected_by_its_model_type() {
+        let detected = detect(
+            "local/mamba2",
+            &ConfigArtifacts {
+                contents: Some(r#"{"model_type":"mamba2","hidden_size":8}"#.to_string()),
+                sentence_transformers_present: false,
+                repo_files: Vec::new(),
+                remote_access_issue: None,
+                weight_index: None,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            detected,
+            Detected::Normal(NormalLoaderType::Mamba2)
+        ));
     }
 
     #[test]
