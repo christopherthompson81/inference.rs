@@ -51,6 +51,9 @@ const TOP_K: usize = 2;
 const LONG_PROMPT_REPEATS: usize = 12;
 // whole Q8_0 blocks, so a quantized load runs its experts from their blocks on the CPU
 const EXPERT_WIDTH: usize = 32;
+// a Puzzle stack's pruned experts, narrower and fewer a token than its MTP head's
+const PUZZLE_EXPERT_WIDTH: usize = 16;
+const PUZZLE_TOP_K: usize = 1;
 const SHARED_WIDTH: usize = 40;
 // narrower than the model, as Super's and Bolt's latent experts are
 const LATENT_WIDTH: usize = 16;
@@ -106,13 +109,29 @@ const DSPARK_MARKOV_RANK: usize = 8;
 struct Shape {
     head_dim: usize,
     latent: Option<usize>,
+    // a Puzzle checkpoint: experts set per layer (`block_configs`) and the MTP head's in `mtp_block_configs`
+    puzzle: bool,
 }
 
 impl Shape {
     const BASE: Self = Self {
         head_dim: HEAD_DIM,
         latent: None,
+        puzzle: false,
     };
+    const PUZZLE: Self = Self {
+        puzzle: true,
+        ..Self::BASE
+    };
+
+    // the routed experts' width and count a token in a stack MoE layer, then in the MTP head's
+    fn expert_widths(self) -> ((usize, usize), (usize, usize)) {
+        if self.puzzle {
+            ((PUZZLE_EXPERT_WIDTH, PUZZLE_TOP_K), (EXPERT_WIDTH, TOP_K))
+        } else {
+            ((EXPERT_WIDTH, TOP_K), (EXPERT_WIDTH, TOP_K))
+        }
+    }
 }
 
 fn config(shape: Shape) -> serde_json::Value {
@@ -146,6 +165,34 @@ fn config(shape: Shape) -> serde_json::Value {
     });
     if let Some(latent) = shape.latent {
         config["moe_latent_size"] = latent.into();
+    }
+    if shape.puzzle {
+        let ((width, top_k), (head_width, head_top_k)) = shape.expert_widths();
+        let object = config.as_object_mut().expect("an object");
+        for key in [
+            "num_experts_per_tok",
+            "moe_intermediate_size",
+            "mtp_layers_block_type",
+        ] {
+            object.remove(key);
+        }
+        config["architectures"] = serde_json::json!(["NemotronHPuzzleForCausalLM"]);
+        config["model_type"] = serde_json::json!("nemotron_h_puzzle");
+        config["block_configs"] = LAYERS
+            .iter()
+            .map(|&kind| match kind {
+                "moe" => serde_json::json!({
+                    "block_type": kind,
+                    "moe_intermediate_size": width,
+                    "num_experts_per_tok": top_k,
+                }),
+                _ => serde_json::json!({ "block_type": kind }),
+            })
+            .collect();
+        config["mtp_block_configs"] = serde_json::json!([
+            { "block_type": "attention" },
+            { "block_type": "moe", "moe_intermediate_size": head_width, "num_experts_per_tok": head_top_k },
+        ]);
     }
     config
 }
@@ -198,7 +245,7 @@ fn weights(shape: Shape) -> anyhow::Result<HashMap<String, Tensor>> {
                 ("out_proj.weight".into(), random(rng, &[HIDDEN, inner])?),
             ],
             "attention" => attention_tensors(rng, head_dim)?,
-            "moe" => moe_tensors(rng, expert_in, shape.latent)?,
+            "moe" => moe_tensors(rng, expert_in, shape.expert_widths().0.0, shape.latent)?,
             _ => vec![
                 ("up_proj.weight".into(), random(rng, &[MLP_WIDTH, HIDDEN])?),
                 (
@@ -230,7 +277,7 @@ fn weights(shape: Shape) -> anyhow::Result<HashMap<String, Tensor>> {
     for (name, tensor) in attention_tensors(rng, head_dim)? {
         weights.insert(format!("mtp.layers.0.mixer.{name}"), tensor);
     }
-    for (name, tensor) in moe_tensors(rng, expert_in, shape.latent)? {
+    for (name, tensor) in moe_tensors(rng, expert_in, shape.expert_widths().1.0, shape.latent)? {
         weights.insert(format!("mtp.layers.1.mixer.{name}"), tensor);
     }
     Ok(weights)
@@ -261,6 +308,7 @@ fn attention_tensors(rng: &mut StdRng, head_dim: usize) -> anyhow::Result<Vec<(S
 fn moe_tensors(
     rng: &mut StdRng,
     expert_in: usize,
+    width: usize,
     latent: Option<usize>,
 ) -> anyhow::Result<Vec<(String, Tensor)>> {
     let mut moe = vec![
@@ -281,11 +329,11 @@ fn moe_tensors(
     for e in 0..EXPERTS {
         moe.push((
             format!("experts.{e}.up_proj.weight"),
-            random(rng, &[EXPERT_WIDTH, expert_in])?,
+            random(rng, &[width, expert_in])?,
         ));
         moe.push((
             format!("experts.{e}.down_proj.weight"),
-            random(rng, &[expert_in, EXPERT_WIDTH])?,
+            random(rng, &[expert_in, width])?,
         ));
     }
     // drawn last, so the other checkpoints keep their weights
@@ -368,6 +416,23 @@ async fn an_mtp_head_drafts_on_the_cpu_without_changing_greedy_output() -> anyho
         TextModelBuilder::with_force_cpu,
         &|b| b.with_builtin_mtp(Some(MTP_N_PREDICT)),
         Shape::BASE,
+        ModelDType::F32,
+        None,
+        LOGPROB_TOLERANCE,
+    )
+    .await
+}
+
+// a Puzzle checkpoint's MTP head takes its experts from `mtp_block_configs`, not the stack's pruned ones
+#[tokio::test]
+async fn a_puzzle_mtp_head_drafts_without_changing_greedy_output() -> anyhow::Result<()> {
+    if cfg!(any(feature = "cuda", feature = "metal")) {
+        return Ok(());
+    }
+    drafting_keeps_greedy_output(
+        TextModelBuilder::with_force_cpu,
+        &|b| b.with_builtin_mtp(Some(MTP_N_PREDICT)),
+        Shape::PUZZLE,
         ModelDType::F32,
         None,
         LOGPROB_TOLERANCE,
@@ -611,11 +676,11 @@ impl Target {
         match self {
             Self::CudaGraphs => Shape {
                 head_dim: GRAPH_HEAD_DIM,
-                latent: None,
+                ..Shape::BASE
             },
             Self::CpuLatent => Shape {
-                head_dim: HEAD_DIM,
                 latent: Some(LATENT_WIDTH),
+                ..Shape::BASE
             },
             Self::Cpu
             | Self::CpuPaged

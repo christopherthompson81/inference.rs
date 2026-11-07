@@ -1,6 +1,7 @@
 //! Nemotron-H from llama.cpp's `nemotron_h` / `nemotron_h_moe` GGUFs, bound to transformers' names (`model.*`, each
 //! layer's `norm` and `mixer`). The MTP block llama.cpp folds in after the stack (`nextn`) binds to the checkpoint's
-//! `mtp.layers.0` (input fusion and attention) and `mtp.layers.1` (MoE and final norm).
+//! `mtp.layers.0` (input fusion and attention) and `mtp.layers.1` (MoE and final norm); a head kept as two blocks (a
+//! Puzzle GGUF from a llama.cpp fork, `nextn_predict_layers` 2) binds its first to the one and its second to the other.
 
 use anyhow::Result;
 use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
@@ -23,15 +24,17 @@ pub fn build_nemotron_h_bindings(
     architecture: CanonicalGgufArchitecture,
 ) -> Result<GgufBindingMap> {
     let prefix = architecture.as_str();
+    let head_blocks = super::normal_bindings::metadata_optional_usize(
+        archive,
+        &format!("{prefix}.nextn_predict_layers"),
+    )?
+    .unwrap_or(0);
+    if head_blocks > 2 {
+        anyhow::bail!("Nemotron-H GGUF with {head_blocks} MTP blocks is not supported");
+    }
     let block_count =
         super::normal_bindings::metadata_usize(archive, &format!("{prefix}.block_count"))?
-            .saturating_sub(
-                super::normal_bindings::metadata_optional_usize(
-                    archive,
-                    &format!("{prefix}.nextn_predict_layers"),
-                )?
-                .unwrap_or(0),
-            );
+            .saturating_sub(head_blocks);
     let mut bindings = GgufBindingMap::new();
     for (source, native) in ROOT {
         if archive.tensors().contains_key(source) {
@@ -42,8 +45,8 @@ pub fn build_nemotron_h_bindings(
         let Some((layer, role, suffix)) = super::normal_bindings::parse_block_tensor(name) else {
             continue;
         };
-        let nextn = layer == block_count;
-        if layer > block_count {
+        let nextn = layer >= block_count;
+        if layer >= block_count + head_blocks.max(1) {
             continue;
         }
         // `<weight>.scale`, NVFP4's tensor-wide scale, which the shared parser leaves on the role
@@ -52,9 +55,11 @@ pub fn build_nemotron_h_bindings(
             _ => (role, suffix),
         };
         // a trunk layer holds one mixer or one feed-forward under one name; the MTP block holds both, under two
-        let (m, f) = match nextn {
-            true => (MTP_MIXER.to_string(), MTP_FFN.to_string()),
-            false => {
+        let (m, f) = match (nextn, layer - block_count.min(layer), head_blocks) {
+            (true, 0, 2) => (MTP_MIXER.to_string(), MTP_MIXER.to_string()),
+            (true, 1, _) => (MTP_FFN.to_string(), MTP_FFN.to_string()),
+            (true, _, _) => (MTP_MIXER.to_string(), MTP_FFN.to_string()),
+            (false, _, _) => {
                 let p = format!("model.layers.{layer}");
                 (p.clone(), p)
             }

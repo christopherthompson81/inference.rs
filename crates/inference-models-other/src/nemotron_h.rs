@@ -74,6 +74,9 @@ mod float_pair {
     }
 }
 
+/// `Config::moe_spec`'s layer for the MTP head's MoE, past every layer of the stack.
+pub const MTP_LAYER: usize = usize::MAX;
+
 /// One layer of a Puzzle checkpoint (`nemotron_h_puzzle`: Nemotron Labs 3 Puzzle, Bolt): its kind and, for MoE, the
 /// experts it was pruned to.
 #[derive(Debug, Clone, inference_json::FromJson, Serialize)]
@@ -150,6 +153,8 @@ pub struct Config {
     #[serde(default)]
     pub num_nextn_predict_layers: usize,
     pub mtp_layers_block_type: Option<Vec<String>>,
+    /// A Puzzle checkpoint's MTP head, layer by layer as `block_configs` gives the stack's (its MoE's experts there).
+    pub mtp_block_configs: Option<Vec<BlockConfig>>,
     /// The loader's flag that `--mtp` asked for the checkpoint's MTP head.
     #[serde(default, rename = "_inference_mtp")]
     pub mtp: bool,
@@ -259,12 +264,20 @@ impl Config {
         })
     }
 
-    /// Layer `layer`'s experts: the model's, as a Puzzle checkpoint's `block_configs` prunes them.
+    /// Layer `layer`'s experts: the model's, as a Puzzle checkpoint's `block_configs` prunes them; at `MTP_LAYER`
+    /// the head's, as its `mtp_block_configs` gives them.
     pub fn moe_spec(&self, layer: usize) -> NemotronMoeSpec {
-        let block = self
-            .block_configs
-            .as_ref()
-            .and_then(|blocks| blocks.get(layer));
+        let block = if layer == MTP_LAYER {
+            self.mtp_block_configs.as_ref().and_then(|blocks| {
+                blocks
+                    .iter()
+                    .find(|b| LayerKind::parse(&b.block_type).ok() == Some(LayerKind::Moe))
+            })
+        } else {
+            self.block_configs
+                .as_ref()
+                .and_then(|blocks| blocks.get(layer))
+        };
         NemotronMoeSpec {
             num_experts: block
                 .and_then(|b| b.n_routed_experts)
@@ -293,7 +306,12 @@ impl Config {
                 self.num_nextn_predict_layers
             );
         }
-        let kinds = match &self.mtp_layers_block_type {
+        let types = self.mtp_layers_block_type.clone().or_else(|| {
+            self.mtp_block_configs
+                .as_ref()
+                .map(|blocks| blocks.iter().map(|b| b.block_type.clone()).collect())
+        });
+        let kinds = match types {
             Some(types) => types
                 .iter()
                 .map(|t| LayerKind::parse(t))
@@ -315,8 +333,7 @@ impl Config {
                         norm: "layers.1.norm".into(),
                         module: "layers.1.mixer".into(),
                         kind: FfnKind::Moe,
-                        // no `block_configs` entry covers the MTP layer, so the model's own experts
-                        moe: Some(self.moe_spec(usize::MAX)),
+                        moe: Some(self.moe_spec(MTP_LAYER)),
                     }),
                 },
             },

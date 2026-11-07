@@ -1540,9 +1540,8 @@ fn build_nemotron_h(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     let nextn_layers = metadata
         .optional_usize("nextn_predict_layers")?
         .unwrap_or(0);
-    let blocks = metadata
-        .required_usize("block_count")?
-        .saturating_sub(nextn_layers);
+    let total = metadata.required_usize("block_count")?;
+    let blocks = total.saturating_sub(nextn_layers);
     let layer_types = (0..blocks)
         .map(|layer| nemotron_h_layer_type(metadata, layer))
         .collect::<Vec<_>>();
@@ -1568,7 +1567,11 @@ fn build_nemotron_h(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     config.insert("vocab_size".into(), json!(metadata.vocab_size()?));
     config.insert("hidden_size".into(), json!(hidden));
     config.insert("layers_block_type".into(), json!(layer_types));
-    config.insert("num_nextn_predict_layers".into(), json!(nextn_layers));
+    // the head is one attention layer and one MoE, in one block (llama.cpp's `--mtp`) or one each
+    config.insert(
+        "num_nextn_predict_layers".into(),
+        json!(nextn_layers.min(1)),
+    );
     config.insert("num_attention_heads".into(), json!(heads));
     config.insert("num_key_value_heads".into(), json!(kv_heads));
     config.insert("head_dim".into(), json!(metadata.head_dim(hidden, heads)?));
@@ -1594,16 +1597,37 @@ fn build_nemotron_h(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     );
     if let Some(experts) = metadata.optional_usize("expert_count")? {
         // a Puzzle checkpoint's (Bolt's) per layer; its routers' rows give each layer's expert count
-        let per_layer = |suffix| -> SynthesisResult<Vec<usize>> {
-            metadata.per_layer_usize(suffix, blocks)?.ok_or_else(|| {
+        // the stack's entries, and the head's when the arrays run past it (a head kept as blocks of its own)
+        let per_layer = |suffix| -> SynthesisResult<(Vec<usize>, Vec<usize>)> {
+            let count = match metadata.optional_usize_values(suffix)? {
+                Some(values) if values.len() == total && nextn_layers > 0 => total,
+                _ => blocks,
+            };
+            let mut values = metadata.per_layer_usize(suffix, count)?.ok_or_else(|| {
                 NormalConfigSynthesisError::new(format!(
                     "GGUF metadata is missing `{}`",
                     metadata.key(suffix)
                 ))
-            })
+            })?;
+            let head = values.split_off(blocks.min(values.len()));
+            Ok((values, head))
         };
-        let used = per_layer("expert_used_count")?;
-        let widths = per_layer("expert_feed_forward_length")?;
+        let (used, head_used) = per_layer("expert_used_count")?;
+        let (widths, head_widths) = per_layer("expert_feed_forward_length")?;
+        // a Puzzle head's own experts, from the head block that routes
+        if let Some((top_k, width)) = head_used
+            .iter()
+            .zip(&head_widths)
+            .find(|(top_k, _)| **top_k > 0)
+        {
+            config.insert(
+                "mtp_block_configs".into(),
+                json!([
+                    { "block_type": "attention" },
+                    { "block_type": "moe", "num_experts_per_tok": top_k, "moe_intermediate_size": width },
+                ]),
+            );
+        }
         let widest = |values: &[usize]| values.iter().copied().max().unwrap_or(0);
         config.insert("n_routed_experts".into(), json!(experts));
         config.insert("num_experts_per_tok".into(), json!(widest(&used)));
@@ -3948,6 +3972,51 @@ mod tests {
             json!(["full_attention", "conv", "full_attention", "conv"])
         );
         assert_eq!(config["conv_L_cache"], 3);
+        assert_native_config_deserializes(&loader, config);
+    }
+
+    // a Puzzle GGUF whose MTP head is two blocks after the stack (attention, then MoE), its per-layer arrays running
+    // through them: the stack keeps its own experts and the head's come from its MoE block's entries
+    #[test]
+    fn a_two_block_puzzle_head_takes_its_experts_from_the_arrays_past_the_stack() {
+        let loader = NormalLoaderType::NemotronHPuzzle;
+        let (architecture, mut metadata, mut tensors) = default_fixture(&loader);
+        insert_u32(&mut metadata, architecture, "block_count", 6);
+        insert_u32(&mut metadata, architecture, "nextn_predict_layers", 2);
+        insert_u32(&mut metadata, architecture, "expert_count", 8);
+        insert_u32_array(
+            &mut metadata,
+            architecture,
+            "expert_used_count",
+            &[0, 2, 0, 3, 0, 6],
+        );
+        insert_u32_array(
+            &mut metadata,
+            architecture,
+            "expert_feed_forward_length",
+            &[0, 16, 0, 24, 0, 40],
+        );
+        tensors.extend(
+            ["blk.4.attn_q.weight", "blk.5.ffn_gate_inp.weight"]
+                .into_iter()
+                .map(str::to_string),
+        );
+        let config = synthesize_normal_config_value(&loader, &metadata, &tensors).unwrap();
+        assert_eq!(config["num_nextn_predict_layers"], 1);
+        assert_eq!(
+            config["mtp_block_configs"],
+            json!([
+                { "block_type": "attention" },
+                { "block_type": "moe", "num_experts_per_tok": 6, "moe_intermediate_size": 40 },
+            ])
+        );
+        assert_eq!(
+            config["layers_block_type"].as_array().map(Vec::len),
+            Some(4)
+        );
+        let parsed = models::nemotron_h::Config::from_json(&config.to_string()).unwrap();
+        let head = parsed.moe_spec(models::nemotron_h::MTP_LAYER);
+        assert_eq!((head.top_k, head.intermediate_size), (6, 40));
         assert_native_config_deserializes(&loader, config);
     }
 

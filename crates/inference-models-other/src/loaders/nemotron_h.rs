@@ -2,7 +2,7 @@ use super::*;
 
 use inference_nn::utils::varbuilder_utils::DeviceForLoadTensor;
 
-use crate::nemotron_h::{Config, LayerKind};
+use crate::nemotron_h::{Config, LayerKind, MTP_LAYER};
 
 const EMBEDDINGS_WEIGHT: &str = "embeddings.weight";
 const MTP_PREFIX: &str = "mtp";
@@ -133,12 +133,22 @@ impl IsqModelLoader for NemotronHLoader {
 }
 
 impl DeviceMappedModelLoader for NemotronHLoader {
+    // the MTP head after the stack is one non-mapped layer, whether its GGUF keeps it as one block or two (a Puzzle
+    // head's attention and MoE, which `mtp_block_configs` lists)
     fn checkpoint_layer_groups(&self, config: &str) -> Result<Option<Vec<usize>>> {
-        let blocks = Config::from_json(config)?.layout()?.block_of_layer();
+        let cfg = Config::from_json(config)?;
+        let blocks = cfg.layout()?.block_of_layer();
         let layers = blocks.keys().max().map_or(0, |last| last + 1);
+        let mapped = blocks.values().max().map_or(0, |last| last + 1);
+        let head = match (cfg.mtp_layout()?, &cfg.mtp_block_configs) {
+            (None, _) => 0,
+            (Some(_), Some(head)) => head.len(),
+            (Some(_), None) => 1,
+        };
         Ok(Some(
             (0..layers)
                 .map(|l| blocks.get(&l).copied().unwrap_or(0))
+                .chain(std::iter::repeat_n(mapped, head))
                 .collect(),
         ))
     }
@@ -182,8 +192,8 @@ impl DeviceMappedModelLoader for NemotronHLoader {
             return Ok(Vec::new());
         }
         let h = cfg.hidden_size;
-        let head = layer_elems(&cfg, usize::MAX, LayerKind::Attention, weight_pack_factor)
-            + layer_elems(&cfg, usize::MAX, LayerKind::Moe, weight_pack_factor)
+        let head = layer_elems(&cfg, MTP_LAYER, LayerKind::Attention, weight_pack_factor)
+            + layer_elems(&cfg, MTP_LAYER, LayerKind::Moe, weight_pack_factor)
             + 2 * h * h / weight_pack_factor
             + 3 * h;
         Ok(vec![head * dtype.size_in_bytes()])
