@@ -46,6 +46,8 @@ Fine-tunes and model sizes within a family use the same entry.
 | Jamba (Jamba 1.x, Jamba Reasoning, Jamba2) | `jamba` |
 | RWKV-6 | `rwkv6` |
 | RWKV-7 | `rwkv7` |
+| ARWKV (RWKV-7 time-mixes in Qwen2) | `arwkv7` |
+| QRWKV6 (RWKV-6 time-mixes in Qwen2) | `rwkv6qwen2` |
 | OLMo 1 | `olmo` |
 | OLMo 2 and Olmo 3 | `olmo2` |
 | OLMoE | `olmoe` |

@@ -2,8 +2,8 @@ use inference_nn::loaders::NormalLoaderType;
 pub use inference_nn::model::RopePairing;
 use std::{error::Error, fmt, str::FromStr};
 
-pub const NORMAL_LOADER_TYPE_COUNT: usize = 50;
-pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 43;
+pub const NORMAL_LOADER_TYPE_COUNT: usize = 52;
+pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 45;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CanonicalGgufArchitecture {
@@ -50,6 +50,8 @@ pub enum CanonicalGgufArchitecture {
     Jamba,
     Rwkv7,
     Rwkv6,
+    Arwkv7,
+    Rwkv6Qwen2,
 }
 
 impl CanonicalGgufArchitecture {
@@ -98,6 +100,8 @@ impl CanonicalGgufArchitecture {
             Self::Jamba => "jamba",
             Self::Rwkv7 => "rwkv7",
             Self::Rwkv6 => "rwkv6",
+            Self::Arwkv7 => "arwkv7",
+            Self::Rwkv6Qwen2 => "rwkv6qwen2",
         }
     }
 }
@@ -156,6 +160,8 @@ impl FromStr for CanonicalGgufArchitecture {
             "jamba" => Ok(Self::Jamba),
             "rwkv7" => Ok(Self::Rwkv7),
             "rwkv6" => Ok(Self::Rwkv6),
+            "arwkv7" => Ok(Self::Arwkv7),
+            "rwkv6qwen2" => Ok(Self::Rwkv6Qwen2),
             _ => Err(NormalGgufRegistryError::UnknownArchitecture(
                 value.to_string(),
             )),
@@ -525,6 +531,8 @@ const MAMBA_LOADERS: &[NormalLoaderType] =
 const JAMBA_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Jamba];
 const RWKV7_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Rwkv7];
 const RWKV6_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Rwkv6];
+const ARWKV7_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Arwkv];
+const RWKV6_QWEN2_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Qrwkv6];
 // both RWKV versions fuse their token-shift mixes into one tensor
 const RWKV7_TENSORS: &[&str] = &[".time_mix_lerp_fused."];
 const OLMO_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Olmo];
@@ -885,6 +893,22 @@ pub const GGUF_SCHEMAS: &[GgufSchema; CANONICAL_GGUF_ARCHITECTURE_COUNT] = &[
     GgufSchema {
         architecture: CanonicalGgufArchitecture::Rwkv7,
         compatible_loaders: RWKV7_LOADERS,
+        rope_pairing: RopePairing::HalfSplit,
+        required_metadata: NO_REQUIREMENTS,
+        required_tensors: RWKV7_TENSORS,
+        unsupported_metadata: NO_REQUIREMENTS,
+    },
+    GgufSchema {
+        architecture: CanonicalGgufArchitecture::Arwkv7,
+        compatible_loaders: ARWKV7_LOADERS,
+        rope_pairing: RopePairing::HalfSplit,
+        required_metadata: NO_REQUIREMENTS,
+        required_tensors: RWKV7_TENSORS,
+        unsupported_metadata: NO_REQUIREMENTS,
+    },
+    GgufSchema {
+        architecture: CanonicalGgufArchitecture::Rwkv6Qwen2,
+        compatible_loaders: RWKV6_QWEN2_LOADERS,
         rope_pairing: RopePairing::HalfSplit,
         required_metadata: NO_REQUIREMENTS,
         required_tensors: RWKV7_TENSORS,
@@ -1262,6 +1286,16 @@ pub const NORMAL_MODEL_ADAPTERS: &[NativeModelAdapter; NORMAL_LOADER_TYPE_COUNT]
     NativeModelAdapter {
         loader: NormalLoaderType::Rwkv7,
         architectures: &[CanonicalGgufArchitecture::Rwkv7],
+        layouts: &[GgufLayout::Direct, GgufLayout::PerLayerInventory],
+    },
+    NativeModelAdapter {
+        loader: NormalLoaderType::Arwkv,
+        architectures: &[CanonicalGgufArchitecture::Arwkv7],
+        layouts: &[GgufLayout::Direct, GgufLayout::PerLayerInventory],
+    },
+    NativeModelAdapter {
+        loader: NormalLoaderType::Qrwkv6,
+        architectures: &[CanonicalGgufArchitecture::Rwkv6Qwen2],
         layouts: &[GgufLayout::Direct, GgufLayout::PerLayerInventory],
     },
     NativeModelAdapter {

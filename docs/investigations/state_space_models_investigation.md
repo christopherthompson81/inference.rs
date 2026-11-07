@@ -341,3 +341,79 @@ checkpoint (pytorch_model.bin) against our GGUF, 417 tokens, bf16:  mean KL 2.06
 `rwkv_tiny`, over an RWKV-7 and an RWKV-6.
 
 Next: QRWKV6 and ARWKV7 (Qwen2.5 blocks with RWKV time-mixes).
+
+## Run 8 - 2026-11-07 15:00
+
+Question: step 3's last part. Do ARWKV (`RwkvHybridForCausalLM`, llama.cpp's `arwkv7`) and QRWKV6
+(`RWKV6Qwen2ForCausalLM`, llama.cpp's `rwkv6qwen2`) run on the RWKV stack, as RWKV time-mixes in Qwen2's decoder?
+
+Reference read: RWKV-Red-Team/ARWKV-R1-1B5's `modeling_rwkv_hybrid.py` and `wkv.py`, recursal/QRWKV6-7B-Instruct's
+`modeling_rwkv6qwen2.py`; llama.cpp 970b51ce7 `src/models/arwkv7.cpp`, `rwkv6qwen2.cpp`, `rwkv6-base.cpp`
+(`is_qrwkv`), `rwkv7-base.cpp`, `conversion/rwkv.py`.
+
+- Both layers are Qwen2's: an RMSNorm, the time-mix in attention's place (its token shift over the normed input, one
+  shift per layer), a residual, an RMSNorm, the SwiGLU MLP. No channel-mix, no `pre_norm`.
+- ARWKV's time-mix is RWKV-7's in BlinkDL's layout (`receptance`, `x @ w1` plain LoRA matrices with `w0` their bias,
+  `(1, 1, hidden)` vectors) under `self_attn.time_mixer`, with the gate (`sigmoid(xg g1) g2 + 1`, the `+ 1` absent in
+  llama.cpp) and the group norm optional; R1 1.5B has neither (five mixes; its `x_g` is unused). The decay
+  `-softplus(-z) - 0.5` taken as `exp(-exp(w))` is fla's `exp(-0.6065 sigmoid(z))`.
+- QRWKV6's time-mix: RWKV-6's data-dependent token shift (its LoRA stacked r, k, v, w, g; llama.cpp's converter
+  reorders it w, k, v, r, g), Qwen2's `q/k/v_proj` with biases and grouped key/value heads (28 over 4, head size 128),
+  `g = sigmoid(gate(xg))`, the log decay `-exp(w)` clamped at -5 (HF; llama.cpp has no clamp), `k (1 - decay)`, then
+  gated linear attention: the state decays before the step's update and the output reads it after,
+  `S = diag(w) S + k^T v`, `y = 128^-0.5 r S`. No `u`, no group norm.
+
+Built: the stack takes RMSNorms, no `pre_norm` and one shift per layer; RWKV-7's time-mix loads either layout with the
+gate and group norm optional (the fused kernel skips each when its pointer is null); a QRWKV6 kernel (a thread per value
+column, head size 64 or 128, each key/value head read in place for its group) with its CPU composite; `rwkv_hybrid.rs`
+and both loaders; the `arwkv7` and `rwkv6qwen2` GGUF bindings and configs.
+
+```
+gguf_perplexity_parity.sh ARWKV-R1-1B5.Q8_0 (mradermacher):  ref 6.0421, ours 6.0510 (+0.15%)
+gguf_perplexity_parity.sh QRWKV6-7B-Instruct.Q4_K_M (mradermacher), README.md:  ref 2.4920, ours 2.5108 (+0.75%)
+  without the -5 clamp:                                                        ours 2.4891 (-0.12%)
+the same, reference/openai-compatibility.md:                                   ref 22.1715, ours 21.9712 (-0.90%)
+  without the clamp:                                                           ours 22.1538 (-0.08%)
+```
+
+The clamp moves perplexity either way by under 1% and accounts for the whole gap to llama.cpp; without it both texts
+land within 0.12%. Kept, as the model's own code has it.
+
+ARWKV's checkpoint path, against llama.cpp's converter's F32 GGUF of it: its HF code does not run as published (its
+`wkv.py` imports an `AttnState` its `hybrid_cache.py` lacks, and it needs `rwkvfla`), so the reference is llama.cpp
+on that GGUF. The converter does not know the tokenizer's hash; run with the pre-tokenizer named `deepseek-r1-qwen`, as
+mradermacher's GGUF names it.
+
+```
+checkpoint (bf16 safetensors read as f32, CPU) against our F32 GGUF, 214 tokens:  mean KL 0.00, top-1 1.000, max diff 0
+gguf_perplexity_parity.sh arwkv-r1-1b5-f32 (the converter's):  ref 5.8691, ours 5.8711 (+0.03%)
+```
+
+Tiny tests: `rwkv_tiny` takes an ARWKV kind (with the gate and group norm, which R1 lacks) and a QRWKV6 kind (two heads
+over one key/value head); the GPU cases cover the RWKV-7 time-mix without gate and norm and QRWKV6 at head sizes 64 and
+128, decays reaching the clamp.
+
+## Run 9 - 2026-11-07 15:20
+
+Question: how fast are they against llama.cpp on the 3090, and where does decode go?
+
+| on the 3090 | ours | llama.cpp `llama-bench -fa 1` |
+|---|---|---|
+| ARWKV-R1 1.5B Q8_0, decode 400 tokens | 166.5 / 166.9 tok/s | tg128 207.45 |
+| ARWKV-R1 1.5B Q8_0, prefill ~4,300 tokens | 14,381 / 14,358 tok/s | pp4096 10,061 |
+| QRWKV6 7B Q4_K_M, decode 400 tokens | 100.8 / 101.3 tok/s | tg128 107.89 |
+| QRWKV6 7B Q4_K_M, prefill ~4,330 tokens | 4,634 / 4,615 tok/s | pp4096 1,601 |
+
+Chat (thinking off): QRWKV6 "The capital of France is Paris."; ARWKV-R1 opens its own `<think>` and reasons to Paris.
+
+Moving the hybrids' MLP from a hand-written SwiGLU to the shared `Mlp` (merged gate and up, the fused GLU matmul) did
+not move ARWKV's decode (165 -> 166.5). nsys over a 200-token decode, the last 40 tokens: about 1,050 kernels a token,
+4.2 ms of GPU time a token against 6.0 ms wall, so about 1.8 ms of launch overhead. Per layer: five Q8_0 matvecs and the
+fused GLU (2.1 ms a token together), nine cuBLAS kernels for the three LoRAs' six small matmuls (0.5 ms), five bf16
+adds (two residuals, three LoRA biases), the state gather and scatter (about six index kernels), the token shift and
+the time-mix (0.25 ms). Decode graphs only capture on the paged path (`decoder.rs` dispatches without paged metadata
+to plain launches), and RWKV runs without paged attention, so every launch is paid per token; llama.cpp replays a
+graph. QRWKV6 at 7B is matmul-bound, so it sits closer.
+
+Next: graph capture for decode without paged attention would close ARWKV's gap (and serve every recurrent-only model);
+outside this step.

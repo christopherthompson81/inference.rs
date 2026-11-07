@@ -16,6 +16,8 @@
 #define RWKV7_DECAY_SCALE (-0.6065306597126334f)
 // F.normalize's floor on a head's key norm
 #define RWKV7_KK_EPS 1e-12f
+// QRWKV6's floor on the log decay (its HF model clamps -exp(w) at -5)
+#define QRWKV6_LOG_DECAY_FLOOR (-5.0f)
 
 template <typename T> __device__ __forceinline__ float rwkv_to_float(T value) {
   return static_cast<float>(value);
@@ -146,6 +148,7 @@ struct Rwkv7TimeMixParams {
   // first-layer value and its LoRA output (null on the first layer)
   const void *r, *w, *k, *v, *a, *g, *v_first, *v_mix;
   // (hidden,) f32: k_k, k_a, r_k (per head), the group norm's weight and bias
+  // (null without a group norm; g null without a gate)
   const float *k_k, *k_a, *r_k, *norm_w, *norm_b;
   float *state;
   void *out;
@@ -169,7 +172,9 @@ __global__ void __launch_bounds__(RWKV7_HEAD_SIZE)
   const T *v_first = (const T *)p.v_first, *v_mix = (const T *)p.v_mix;
   T *out = (T *)p.out;
   const float k_k = p.k_k[c], k_a = p.k_a[c], r_k = p.r_k[c];
-  const float norm_w = p.norm_w[c], norm_b = p.norm_b[c];
+  const bool has_norm = p.norm_w != nullptr;
+  const float norm_w = has_norm ? p.norm_w[c] : 1.0f;
+  const float norm_b = has_norm ? p.norm_b[c] : 0.0f;
 
   float *row = p.state + (((size_t)batch * p.heads + head) * N + i) * N;
   float s[N];
@@ -211,12 +216,16 @@ __global__ void __launch_bounds__(RWKV7_HEAD_SIZE)
       s[j] = s[j] * s_w[j] + vi * s_k[j] + sa * s_b[j];
       y += s[j] * s_r[j];
     }
-    const float mean = rwkv_head_sum(y, scratch) / N;
-    const float centered = y - mean;
-    const float var = rwkv_head_sum(centered * centered, scratch) / N;
-    const float normed = centered * rsqrtf(var + p.norm_eps) * norm_w + norm_b;
+    float normed = y;
+    if (has_norm) {
+      const float mean = rwkv_head_sum(y, scratch) / N;
+      const float centered = y - mean;
+      const float var = rwkv_head_sum(centered * centered, scratch) / N;
+      normed = centered * rsqrtf(var + p.norm_eps) * norm_w + norm_b;
+    }
     const float bonus = rwkv_head_sum(ri * kn * r_k, scratch);
-    out[at] = rwkv_from_float<T>((normed + bonus * vi) * rwkv_to_float(g[at]));
+    const float gate = g ? rwkv_to_float(g[at]) : 1.0f;
+    out[at] = rwkv_from_float<T>((normed + bonus * vi) * gate);
   }
 #pragma unroll
   for (int j = 0; j < N; j++)
@@ -331,4 +340,87 @@ extern "C" void rwkv6_time_mix_cuda(const Rwkv6TimeMixParams *p, int batch,
     rwkv6_time_mix_kernel<__nv_bfloat16><<<blocks, RWKV7_HEAD_SIZE, 0, s>>>(*p);
   else
     rwkv6_time_mix_kernel<float><<<blocks, RWKV7_HEAD_SIZE, 0, s>>>(*p);
+}
+
+struct Qrwkv6TimeMixParams {
+  // r, w (the decay before its exps) and g (the gate before its sigmoid) are
+  // (batch, seq, heads * N); k and v (batch, seq, kv_heads * N)
+  const void *r, *k, *v, *w, *g;
+  float *state;
+  void *out;
+  int seq_len, heads, kv_heads;
+  float scale;
+};
+
+// QRWKV6's (RWKV6Qwen2) time-mix for one (sequence, head), a thread per value
+// column j holding S[:, j] (state (batch, heads, key i, value j)): the log
+// decay -exp(w) clamped at QRWKV6_LOG_DECAY_FLOOR, k scaled by 1 - decay, the
+// GLA update S_ij = S_ij w_i + k_i v_j before y_j = scale sum_i r_i S_ij, then
+// sigmoid(g). A key/value head serves heads / kv_heads heads.
+template <typename T, int N>
+__global__ void __launch_bounds__(N)
+    qrwkv6_time_mix_kernel(const Qrwkv6TimeMixParams p) {
+  const int j = threadIdx.x;
+  const int batch = blockIdx.x / p.heads, head = blockIdx.x % p.heads;
+  const int kv_head = head / (p.heads / p.kv_heads);
+  const int hidden = p.heads * N, kv_hidden = p.kv_heads * N;
+  const int c = head * N + j, kv_c = kv_head * N + j;
+  __shared__ float s_r[N], s_k[N], s_w[N];
+  const T *r = (const T *)p.r, *k = (const T *)p.k, *v = (const T *)p.v;
+  const T *w = (const T *)p.w, *g = (const T *)p.g;
+  T *out = (T *)p.out;
+
+  float *column = p.state + ((size_t)batch * p.heads + head) * N * N + j;
+  float s[N];
+#pragma unroll
+  for (int i = 0; i < N; i++)
+    s[i] = column[(size_t)i * N];
+
+  for (int t = 0; t < p.seq_len; t++) {
+    const size_t at = ((size_t)batch * p.seq_len + t) * hidden + c;
+    const size_t kv_at = ((size_t)batch * p.seq_len + t) * kv_hidden + kv_c;
+    const float decay =
+        expf(fmaxf(-expf(rwkv_to_float(w[at])), QRWKV6_LOG_DECAY_FLOOR));
+    __syncthreads();
+    s_r[j] = rwkv_to_float(r[at]) * p.scale;
+    s_k[j] = rwkv_to_float(k[kv_at]) * (1.0f - decay);
+    s_w[j] = decay;
+    __syncthreads();
+    const float vj = rwkv_to_float(v[kv_at]);
+    float y = 0.0f;
+#pragma unroll
+    for (int i = 0; i < N; i++) {
+      s[i] = s[i] * s_w[i] + s_k[i] * vj;
+      y += s_r[i] * s[i];
+    }
+    out[at] = rwkv_from_float<T>(y * rwkv_sigmoid(rwkv_to_float(g[at])));
+  }
+#pragma unroll
+  for (int i = 0; i < N; i++)
+    column[(size_t)i * N] = s[i];
+}
+
+template <int N>
+static void qrwkv6_launch(const Qrwkv6TimeMixParams *p, int batch, int dtype,
+                          cudaStream_t s) {
+  const int blocks = batch * p->heads;
+  if (dtype == 0)
+    qrwkv6_time_mix_kernel<__half, N><<<blocks, N, 0, s>>>(*p);
+  else if (dtype == 1)
+    qrwkv6_time_mix_kernel<__nv_bfloat16, N><<<blocks, N, 0, s>>>(*p);
+  else
+    qrwkv6_time_mix_kernel<float, N><<<blocks, N, 0, s>>>(*p);
+}
+
+// head_size 64 or 128; returns 0 when it is neither
+extern "C" int qrwkv6_time_mix_cuda(const Qrwkv6TimeMixParams *p, int batch,
+                                    int head_size, int dtype, int64_t stream) {
+  const cudaStream_t s = (cudaStream_t)stream;
+  if (head_size == 64)
+    qrwkv6_launch<64>(p, batch, dtype, s);
+  else if (head_size == 128)
+    qrwkv6_launch<128>(p, batch, dtype, s);
+  else
+    return 0;
+  return 1;
 }

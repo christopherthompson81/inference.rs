@@ -10139,6 +10139,8 @@
           "jamba",
           "rwkv6",
           "rwkv7",
+          "arwkv",
+          "qrwkv6",
           "mamba",
           "falcon_mamba",
           "mamba2",

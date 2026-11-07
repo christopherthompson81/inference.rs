@@ -192,8 +192,9 @@ pub fn rwkv6_time_mix(tm: TimeMix6<'_>, state: &Tensor) -> Result<Tensor> {
 }
 
 /// One time-mix's inputs between its projections and `o_proj`, `(batch, seq, hidden)` in the activations' dtype:
-/// the receptance, the decay LoRA's raw output, `k`, `v`, the rate LoRA's raw output, the gate, and past the first
-/// layer the first layer's `v` with the value-mix LoRA's raw output. The vectors are `(hidden,)` (`r_k` per head).
+/// the receptance, the decay LoRA's raw output, `k`, `v`, the rate LoRA's raw output, the gate (ARWKV has none), and
+/// past the first layer the first layer's `v` with the value-mix LoRA's raw output. The vectors are `(hidden,)` (`r_k`
+/// per head); `norm` the group norm's weight and bias, absent in ARWKV.
 #[derive(Clone, Copy)]
 pub struct TimeMix7<'a> {
     pub r: &'a Tensor,
@@ -201,13 +202,12 @@ pub struct TimeMix7<'a> {
     pub k: &'a Tensor,
     pub v: &'a Tensor,
     pub a: &'a Tensor,
-    pub g: &'a Tensor,
+    pub g: Option<&'a Tensor>,
     pub v_mix: Option<(&'a Tensor, &'a Tensor)>,
     pub k_k: &'a Tensor,
     pub k_a: &'a Tensor,
     pub r_k: &'a Tensor,
-    pub norm_w: &'a Tensor,
-    pub norm_b: &'a Tensor,
+    pub norm: Option<(&'a Tensor, &'a Tensor)>,
     pub norm_eps: f64,
     pub heads: usize,
     pub head_dim: usize,
@@ -230,7 +230,7 @@ pub fn rwkv7_time_mix(tm: TimeMix7<'_>, state: &Tensor) -> Result<Tensor> {
     use inference_tensor::nn::ops::sigmoid;
     let (b, s, h) = tm.r.dims3()?;
     let f32 = |t: &Tensor| t.to_dtype(DType::F32);
-    let (r, k, g) = (f32(tm.r)?, f32(tm.k)?, f32(tm.g)?);
+    let (r, k) = (f32(tm.r)?, f32(tm.k)?);
     let w = (sigmoid(&f32(tm.w)?)? * DECAY_SCALE)?.exp()?;
     let a = sigmoid(&f32(tm.a)?)?;
     let mut v = f32(tm.v)?;
@@ -260,19 +260,99 @@ pub fn rwkv7_time_mix(tm: TimeMix7<'_>, state: &Tensor) -> Result<Tensor> {
         },
         state,
     )?;
-    let mean = y.mean_keepdim(D::Minus1)?;
-    let centered = y.broadcast_sub(&mean)?;
-    let var = centered.sqr()?.mean_keepdim(D::Minus1)?;
-    let y = centered
-        .broadcast_div(&(var + tm.norm_eps)?.sqrt()?)?
-        .reshape((b, s, h))?
-        .broadcast_mul(&vector(tm.norm_w)?)?
-        .broadcast_add(&vector(tm.norm_b)?)?;
+    let y = match tm.norm {
+        Some((norm_w, norm_b)) => {
+            let mean = y.mean_keepdim(D::Minus1)?;
+            let centered = y.broadcast_sub(&mean)?;
+            let var = centered.sqr()?.mean_keepdim(D::Minus1)?;
+            centered
+                .broadcast_div(&(var + tm.norm_eps)?.sqrt()?)?
+                .reshape((b, s, h))?
+                .broadcast_mul(&vector(norm_w)?)?
+                .broadcast_add(&vector(norm_b)?)?
+        }
+        None => y.reshape((b, s, h))?,
+    };
     // the bonus: each head's (r . k r_k) times its value
     let r_k = vector(tm.r_k)?.reshape((tm.heads, tm.head_dim))?;
     let rk = r.mul(&k)?.broadcast_mul(&r_k)?.sum_keepdim(D::Minus1)?;
-    let y = (y + rk.broadcast_mul(&v)?.reshape((b, s, h))?)?.mul(&g)?;
+    let mut y = (y + rk.broadcast_mul(&v)?.reshape((b, s, h))?)?;
+    if let Some(g) = tm.g {
+        y = y.mul(&f32(g)?)?;
+    }
     y.to_dtype(tm.r.dtype())
+}
+
+/// QRWKV6's (RWKV6Qwen2) time-mix inputs between its projections and `o_proj`, in the activations' dtype: `r`, the
+/// decay before its exps (`time_decay` plus its LoRA) and the gate before its sigmoid `(batch, seq, heads * head_dim)`,
+/// `k` and `v` `(batch, seq, kv_heads * head_dim)`, each key/value head serving `heads / kv_heads` heads.
+#[derive(Clone, Copy)]
+pub struct TimeMixQrwkv6<'a> {
+    pub r: &'a Tensor,
+    pub k: &'a Tensor,
+    pub v: &'a Tensor,
+    pub w: &'a Tensor,
+    pub g: &'a Tensor,
+    pub heads: usize,
+    pub kv_heads: usize,
+    pub head_dim: usize,
+}
+
+/// QRWKV6's floor on the log decay `-exp(w)`, as its HF model clamps it
+pub const QRWKV6_LOG_DECAY_FLOOR: f32 = -5.0;
+
+/// QRWKV6's time-mix: `w = exp(max(-exp(w), -5))`, `k (1 - w)`, per head the gated linear attention
+/// `S = diag(w) S + k^T v`, `y = head_dim^-0.5 r S` over `state` (f32 `(batch, heads, key, value)`, advanced in place),
+/// times `sigmoid(g)`. On CUDA one kernel.
+#[allow(clippy::cast_precision_loss)]
+pub fn qrwkv6_time_mix(tm: TimeMixQrwkv6<'_>, state: &Tensor) -> Result<Tensor> {
+    if tm.r.device().is_cuda() {
+        #[cfg(feature = "cuda")]
+        return crate::cuda::rwkv::qrwkv6_time_mix_cuda(tm, state);
+    }
+    let (batch, seq, h) = tm.r.dims3()?;
+    let (heads, n) = (tm.heads, tm.head_dim);
+    let (kv_h, group) = (tm.kv_heads * n, heads / tm.kv_heads);
+    let scale = (n as f32).powf(-0.5);
+    let read =
+        |t: &Tensor| -> Result<Vec<f32>> { t.to_dtype(DType::F32)?.flatten_all()?.to_vec1() };
+    let [r, k, v, w, g] = [tm.r, tm.k, tm.v, tm.w, tm.g].map(read);
+    let (r, k, v, w, g) = (r?, k?, v?, w?, g?);
+    let mut s = read(state)?;
+    let mut y = vec![0f32; batch * seq * h];
+    let (states, out) = (
+        super::ssm_cpu::SharedMut(s.as_mut_ptr()),
+        super::ssm_cpu::SharedMut(y.as_mut_ptr()),
+    );
+    inference_tensor::utils::barrier_pool().execute_chunked(batch * heads, |items| {
+        for item in items {
+            let (bi, head) = (item / heads, item % heads);
+            // SAFETY: each (batch, head) owns its state block and its output columns
+            let s = unsafe { states.slice(item * n * n, n * n) };
+            let (c0, kv0) = (head * n, head / group * n);
+            for t in 0..seq {
+                let (at, kv_at) = ((bi * seq + t) * h + c0, (bi * seq + t) * kv_h + kv0);
+                // SAFETY: as above
+                let yt = unsafe { out.slice(at, n) };
+                yt.fill(0.0);
+                for i in 0..n {
+                    let decay = (-w[at + i].exp()).max(QRWKV6_LOG_DECAY_FLOOR).exp();
+                    let (ri, ki) = (r[at + i] * scale, k[kv_at + i] * (1.0 - decay));
+                    let row = &mut s[i * n..(i + 1) * n];
+                    for j in 0..n {
+                        row[j] = row[j] * decay + ki * v[kv_at + j];
+                        yt[j] += ri * row[j];
+                    }
+                }
+                for j in 0..n {
+                    let gate = g[at + j];
+                    yt[j] /= 1.0 + (-gate).exp();
+                }
+            }
+        }
+    });
+    state.inplace_op1(&WriteState(&s))?;
+    Tensor::from_vec(y, (batch, seq, h), tm.r.device())?.to_dtype(tm.r.dtype())
 }
 
 // copies the advanced state back into the caller's tensor

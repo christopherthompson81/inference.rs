@@ -1,5 +1,6 @@
-//! Tiny random-weight RWKV stacks (two layers, two heads): an RWKV-7 in flash-linear-attention's layout and an RWKV-6
-//! in RWKV's HF layout. Decoding step by step through the token shifts and WKV state scores the tokens as one prefill
+//! Tiny random-weight RWKV stacks (two layers, two heads): an RWKV-7 in flash-linear-attention's layout, an RWKV-6
+//! in RWKV's HF layout, and the Qwen2 hybrids: ARWKV (RWKV-7's time-mix in BlinkDL's layout, with its gate and group
+//! norm) and QRWKV6 (gated linear attention over one key/value head). Decoding step by step through the token shifts and WKV state scores the tokens as one prefill
 //! over them does, a repeated prompt resumes from the prefix cache to the same text, and a long prompt scores on CUDA
 //! (the fused kernels) as on the CPU.
 
@@ -49,9 +50,13 @@ const LONG_PROMPT_REPEATS: usize = 12;
 enum Kind {
     Rwkv7,
     Rwkv6,
+    Arwkv,
+    Qrwkv6,
 }
 
-const KINDS: [Kind; 2] = [Kind::Rwkv7, Kind::Rwkv6];
+const KINDS: [Kind; 4] = [Kind::Rwkv7, Kind::Rwkv6, Kind::Arwkv, Kind::Qrwkv6];
+// QRWKV6's key/value heads, each serving `HEADS / KV_HEADS` heads
+const KV_HEADS: usize = 1;
 
 // (name, shape, all ones / all zeros / random)
 #[derive(Clone, Copy)]
@@ -158,8 +163,82 @@ fn weight_shapes(kind: Kind) -> Vec<(String, Vec<usize>, Init)> {
                 shapes.push((format!("{f}.value.weight"), vec![HIDDEN, FFN], Random));
             }
         }
+        Kind::Arwkv | Kind::Qrwkv6 => {
+            shapes.push((
+                "model.embed_tokens.weight".into(),
+                vec![VOCAB, HIDDEN],
+                Random,
+            ));
+            shapes.push(("model.norm.weight".into(), vec![HIDDEN], Ones));
+            shapes.push(("lm_head.weight".into(), vec![VOCAB, HIDDEN], Random));
+            for layer in 0..LAYERS {
+                let l = format!("model.layers.{layer}");
+                for norm in ["input_layernorm", "post_attention_layernorm"] {
+                    shapes.push((format!("{l}.{norm}.weight"), vec![HIDDEN], Ones));
+                }
+                for (proj, shape) in [
+                    ("gate_proj", [FFN, HIDDEN]),
+                    ("up_proj", [FFN, HIDDEN]),
+                    ("down_proj", [HIDDEN, FFN]),
+                ] {
+                    shapes.push((format!("{l}.mlp.{proj}.weight"), shape.to_vec(), Random));
+                }
+                hybrid_time_mix(kind, &format!("{l}.self_attn"), &mut shapes);
+            }
+        }
     }
     shapes
+}
+
+fn hybrid_time_mix(kind: Kind, a: &str, shapes: &mut Vec<(String, Vec<usize>, Init)>) {
+    use Init::*;
+    let row = vec![1, 1, HIDDEN];
+    if let Kind::Arwkv = kind {
+        let a = format!("{a}.time_mixer");
+        for proj in ["receptance", "key", "value", "output"] {
+            shapes.push((format!("{a}.{proj}.weight"), vec![HIDDEN, HIDDEN], Random));
+        }
+        for mix in ["x_r", "x_w", "x_k", "x_v", "x_a", "x_g"] {
+            shapes.push((format!("{a}.{mix}"), row.clone(), Random));
+        }
+        // the value mix's LoRA on layer 0 too, unused there, as ARWKV's checkpoints have it
+        for lora in ["w", "a", "v", "g"] {
+            shapes.push((format!("{a}.{lora}1"), vec![HIDDEN, RANK], Random));
+            shapes.push((format!("{a}.{lora}2"), vec![RANK, HIDDEN], Random));
+            if lora != "g" {
+                shapes.push((format!("{a}.{lora}0"), row.clone(), Random));
+            }
+        }
+        shapes.push((format!("{a}.k_k"), row.clone(), Random));
+        shapes.push((format!("{a}.k_a"), row.clone(), Random));
+        shapes.push((format!("{a}.r_k"), vec![HEADS, HEAD_DIM], Random));
+        shapes.push((format!("{a}.ln_x.weight"), vec![HIDDEN], Ones));
+        shapes.push((format!("{a}.ln_x.bias"), vec![HIDDEN], Zeros));
+        return;
+    }
+    let kv = KV_HEADS * HEAD_DIM;
+    for mix in ["x", "r", "k", "v", "w", "g"] {
+        shapes.push((format!("{a}.time_maa_{mix}"), row.clone(), Random));
+    }
+    shapes.push((
+        format!("{a}.time_maa_w1"),
+        vec![HIDDEN, 5 * MIX_RANK],
+        Random,
+    ));
+    shapes.push((
+        format!("{a}.time_maa_w2"),
+        vec![5, MIX_RANK, HIDDEN],
+        Random,
+    ));
+    shapes.push((format!("{a}.time_decay"), row, Random));
+    shapes.push((format!("{a}.time_decay_w1"), vec![HIDDEN, RANK], Random));
+    shapes.push((format!("{a}.time_decay_w2"), vec![RANK, HIDDEN], Random));
+    for (proj, out) in [("q_proj", HIDDEN), ("k_proj", kv), ("v_proj", kv)] {
+        shapes.push((format!("{a}.{proj}.weight"), vec![out, HIDDEN], Random));
+        shapes.push((format!("{a}.{proj}.bias"), vec![out], Random));
+    }
+    shapes.push((format!("{a}.o_proj.weight"), vec![HIDDEN, HIDDEN], Random));
+    shapes.push((format!("{a}.gate.weight"), vec![HIDDEN, HIDDEN], Random));
 }
 
 fn checkpoint(kind: Kind) -> anyhow::Result<tempfile::TempDir> {
@@ -196,6 +275,22 @@ fn checkpoint(kind: Kind) -> anyhow::Result<tempfile::TempDir> {
             "head_size": HEAD_DIM,
             "layer_norm_epsilon": 1e-5,
             "rescale_every": 6,
+        }),
+        Kind::Arwkv => serde_json::json!({
+            "architectures": ["RwkvHybridForCausalLM"],
+            "model_type": "rwkv_hybrid",
+            "head_size": HEAD_DIM,
+            "rms_norm_eps": 1e-6,
+            "wkv_has_gate": true,
+            "wkv_has_group_norm": true,
+        }),
+        Kind::Qrwkv6 => serde_json::json!({
+            "architectures": ["RWKV6Qwen2ForCausalLM"],
+            "model_type": "rwkv6qwen2",
+            "num_attention_heads": HEADS,
+            "num_key_value_heads": KV_HEADS,
+            "rms_norm_eps": 1e-6,
+            "attention_bias": true,
         }),
     };
     let mut config = config.as_object().cloned().expect("an object");
