@@ -43,6 +43,12 @@ macro_rules! normal_loader_types {
                     ),
                 }
             }
+
+            /// The loader for a config that names no `architectures`, as transformers' Auto classes take its
+            /// `model_type` (early HF conversions such as state-spaces' Mamba-2 write only that).
+            pub fn from_model_type(model_type: &str) -> Option<Self> {
+                [$(Self::$variant),*].into_iter().find(|loader| loader.model_type_name() == model_type)
+            }
         }
 
         impl FromStr for NormalLoaderType {
@@ -188,6 +194,7 @@ macro_rules! normal_loader_table {
             },
             GptOss { cli: "gpt_oss", hf: "GptOssForCausalLM", model_type: "gpt_oss", loader: GptOssLoader, feature: "models-other" },
             FalconH1 { cli: "falcon_h1", hf: "FalconH1ForCausalLM", model_type: "falcon_h1", loader: FalconH1Loader, feature: "models-other" },
+            Mamba2 { cli: "mamba2", hf: "Mamba2ForCausalLM", model_type: "mamba2", loader: Mamba2Loader, feature: "models-other" },
             NemotronH { cli: "nemotron_h", hf: "NemotronHForCausalLM", model_type: "nemotron_h", loader: NemotronHLoader, feature: "models-other" },
             NemotronHPuzzle {
                 cli: "nemotron_h_puzzle",

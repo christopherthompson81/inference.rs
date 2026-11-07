@@ -330,8 +330,9 @@ fn ssd_scan(
     let window = chunks.min(SSD_WINDOW_CHUNKS);
     let hp = h * p;
     let hpn = hp * n;
+    // cs keeps each prefix sum with its rounding error
     let per_chunk = [
-        h * l,
+        2 * h * l,
         h,
         l * hp,
         l * hp,

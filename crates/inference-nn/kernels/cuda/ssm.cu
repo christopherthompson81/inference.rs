@@ -172,12 +172,40 @@ selective_scan_cuda(const float *x, const float *dt, const float *A,
 // window of chunks at a time: per chunk the scan becomes matmuls (cuBLAS, run
 // by the caller between these kernels), only the state carried from chunk to
 // chunk running in order. Scratch layouts, k a chunk of the window and L the
-// chunk length: cs [k][h][L] (dt summed within the chunk), decay [k][h], xdt
+// chunk length: cs [k][h][2][L] (dt summed within the chunk, a sum and its
+// rounding error), decay [k][h], xdt
 // and xw (x * dt, xw also decayed to the chunk's end) [k][L][h][p], bg and cg
 // (B and C, zero past the prompt) [k][g][L][n], cb [k][g][t_in][t_out], m
 // [k][h][t_in][t_out], ds and sprev [k][h][p][n], yi and ys (the chunk's own
 // and the carried state's outputs) [k][L][h][p].
 #define SSD_CHUNK 256
+
+// A sum carried with its rounding error (two-sum), so a difference of two
+// nearby prefix sums keeps ~48 bits: times a steep A (Falcon-H1's reach -2e8)
+// one f32 ulp of a sum in the hundreds is an exponent in the thousands.
+struct Compensated {
+  float hi, lo;
+};
+
+__device__ __forceinline__ Compensated compensated_add(Compensated a,
+                                                       Compensated b) {
+  const float s = __fadd_rn(a.hi, b.hi);
+  const float bb = __fsub_rn(s, a.hi);
+  const float err =
+      __fadd_rn(__fsub_rn(a.hi, __fsub_rn(s, bb)), __fsub_rn(b.hi, bb));
+  const float lo = __fadd_rn(__fadd_rn(a.lo, b.lo), err);
+  const float hi = __fadd_rn(s, lo);
+  return {hi, __fsub_rn(lo, __fsub_rn(hi, s))};
+}
+
+// later minus earlier; the prefix sums are monotone in exact arithmetic, so a
+// rounding below zero clamps there
+__device__ __forceinline__ float compensated_gap(const float *later,
+                                                 const float *earlier) {
+  return fmaxf(__fadd_rn(__fsub_rn(later[0], earlier[0]),
+                         __fsub_rn(later[SSD_CHUNK], earlier[SSD_CHUNK])),
+               0.0f);
+}
 
 struct SsdParams {
   const float *x, *dt, *A, *B, *C, *D, *dt_bias;
@@ -191,6 +219,7 @@ struct SsdParams {
 __global__ void __launch_bounds__(SSD_CHUNK)
     ssd_prepare_kernel(const SsdParams p) {
   __shared__ float s_cs[SSD_CHUNK];
+  __shared__ float s_lo[SSD_CHUNK];
   __shared__ float s_dt[SSD_CHUNK];
   const int h = blockIdx.x, k = blockIdx.y, t = threadIdx.x;
   const int H = p.n_heads, P = p.head_dim, N = p.d_state, G = p.n_groups;
@@ -205,21 +234,29 @@ __global__ void __launch_bounds__(SSD_CHUNK)
   }
   s_dt[t] = v;
   s_cs[t] = v;
+  s_lo[t] = 0.0f;
   __syncthreads();
   for (int off = 1; off < SSD_CHUNK; off <<= 1) {
-    const float add = t >= off ? s_cs[t - off] : 0.0f;
+    const Compensated add = t >= off ? Compensated{s_cs[t - off], s_lo[t - off]}
+                                     : Compensated{0.0f, 0.0f};
     __syncthreads();
-    s_cs[t] += add;
+    const Compensated sum = compensated_add({s_cs[t], s_lo[t]}, add);
+    s_cs[t] = sum.hi;
+    s_lo[t] = sum.lo;
     __syncthreads();
   }
   const float a = p.A[h];
-  const float cs_last = s_cs[SSD_CHUNK - 1];
-  p.cs[((size_t)k * H + h) * SSD_CHUNK + t] = s_cs[t];
+  float *cs = p.cs + ((size_t)k * H + h) * 2 * SSD_CHUNK;
+  cs[t] = s_cs[t];
+  cs[SSD_CHUNK + t] = s_lo[t];
+  const float mine[2] = {s_cs[t], s_lo[t]};
+  const float last[2] = {s_cs[SSD_CHUNK - 1], s_lo[SSD_CHUNK - 1]};
   if (t == 0)
-    p.decay[k * H + h] = expf(a * cs_last);
-  // s_cs becomes each position's decay to the chunk's end; the prefix sum's rounding can leave a later sum a few ulp
-  // under an earlier one, which a large |A| (Falcon-H1's reach 1e8) would turn into exp of a positive exponent
-  const float to_end = expf(fminf(a * (cs_last - s_cs[t]), 0.0f));
+    p.decay[k * H + h] = expf(a * (last[0] + last[1]));
+  // s_cs becomes each position's decay to the chunk's end
+  const float to_end = expf(a * fmaxf(__fadd_rn(__fsub_rn(last[0], mine[0]),
+                                                __fsub_rn(last[1], mine[1])),
+                                      0.0f));
   __syncthreads();
   s_cs[t] = to_end;
   __syncthreads();
@@ -258,11 +295,12 @@ __global__ void __launch_bounds__(SSD_CHUNK)
   const int t_out = threadIdx.x;
   const int H = p.n_heads, G = p.n_groups;
   const int g = h / (H / G);
-  const float *cs = p.cs + ((size_t)k * H + h) * SSD_CHUNK;
+  const float *cs = p.cs + ((size_t)k * H + h) * 2 * SSD_CHUNK;
   float v = 0.0f;
   if (t_in <= t_out) {
     const size_t cb = (((size_t)k * G + g) * SSD_CHUNK + t_in) * SSD_CHUNK;
-    v = expf(fminf(p.A[h] * (cs[t_out] - cs[t_in]), 0.0f)) * p.cb[cb + t_out];
+    v = expf(p.A[h] * compensated_gap(cs + t_out, cs + t_in)) *
+        p.cb[cb + t_out];
   }
   p.m[(((size_t)k * H + h) * SSD_CHUNK + t_in) * SSD_CHUNK + t_out] = v;
 }
@@ -297,7 +335,8 @@ __global__ void ssd_finish_kernel(const SsdParams p) {
   if (tok >= p.seq_len)
     return;
   const size_t o = ((size_t)tok * H + h) * P + i % P;
-  const float decay = expf(p.A[h] * p.cs[((size_t)k * H + h) * SSD_CHUNK + t]);
+  const float *cs = p.cs + ((size_t)k * H + h) * 2 * SSD_CHUNK + t;
+  const float decay = expf(p.A[h] * (cs[0] + cs[SSD_CHUNK]));
   p.y[o] = p.ys[i] * decay + p.yi[i] + p.D[h] * p.x[o];
 }
 
