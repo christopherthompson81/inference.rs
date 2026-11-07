@@ -230,6 +230,14 @@ impl SupportedArch for NormalLoaderType {
                     ex!("openai/gpt-oss-120b", "120b"),
                 ],
             },
+            Self::FalconH1 => ArchMetadata {
+                families: &["Falcon-H1"],
+                modalities: m,
+                examples: &[
+                    ex!("tiiuae/Falcon-H1-7B-Instruct"),
+                    ex!("tiiuae/Falcon-H1-7B-Instruct-GGUF", "GGUF"),
+                ],
+            },
             Self::NemotronH => ArchMetadata {
                 families: &["Nemotron-H"],
                 modalities: m,

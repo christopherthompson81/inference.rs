@@ -234,6 +234,7 @@ impl Config {
                     names: BlockNames {
                         norm: format!("{layer}.norm"),
                         mixer: format!("{layer}.mixer"),
+                        mamba: None,
                         ffn: None,
                     },
                 });
@@ -329,6 +330,7 @@ impl Config {
                 names: BlockNames {
                     norm: "layers.0.norm".into(),
                     mixer: "layers.0.mixer".into(),
+                    mamba: None,
                     ffn: Some(FfnNames {
                         norm: "layers.1.norm".into(),
                         module: "layers.1.mixer".into(),
@@ -394,6 +396,8 @@ impl Config {
             mamba_norm_group_size: Some(self.mamba_num_heads * self.mamba_head_dim / self.n_groups),
             mamba_dt_limit: self.time_step_limit,
             mamba_f32_state: self.mamba_ssm_cache_dtype == F32_STATE,
+            mamba_gated_norm: true,
+            mup: None,
         })
     }
 }

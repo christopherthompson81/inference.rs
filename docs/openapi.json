@@ -10135,6 +10135,7 @@
           "granite_swa",
           "granitemoe_swa",
           "gpt_oss",
+          "falcon_h1",
           "nemotron_h",
           "nemotron_h_puzzle",
           "hunyuanv1dense",

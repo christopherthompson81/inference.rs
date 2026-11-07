@@ -2,8 +2,8 @@ use inference_nn::loaders::NormalLoaderType;
 pub use inference_nn::model::RopePairing;
 use std::{error::Error, fmt, str::FromStr};
 
-pub const NORMAL_LOADER_TYPE_COUNT: usize = 43;
-pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 37;
+pub const NORMAL_LOADER_TYPE_COUNT: usize = 44;
+pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 38;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CanonicalGgufArchitecture {
@@ -44,6 +44,7 @@ pub enum CanonicalGgufArchitecture {
     Lfm2Moe,
     NemotronH,
     NemotronHMoe,
+    FalconH1,
 }
 
 impl CanonicalGgufArchitecture {
@@ -86,6 +87,7 @@ impl CanonicalGgufArchitecture {
             Self::Lfm2Moe => "lfm2moe",
             Self::NemotronH => "nemotron_h",
             Self::NemotronHMoe => "nemotron_h_moe",
+            Self::FalconH1 => "falcon-h1",
         }
     }
 }
@@ -138,6 +140,7 @@ impl FromStr for CanonicalGgufArchitecture {
             "lfm2moe" => Ok(Self::Lfm2Moe),
             "nemotron_h" => Ok(Self::NemotronH),
             "nemotron_h_moe" => Ok(Self::NemotronHMoe),
+            "falcon-h1" => Ok(Self::FalconH1),
             _ => Err(NormalGgufRegistryError::UnknownArchitecture(
                 value.to_string(),
             )),
@@ -499,6 +502,7 @@ const NEMOTRON_H_LOADERS: &[NormalLoaderType] = &[
     NormalLoaderType::NemotronH,
     NormalLoaderType::NemotronHPuzzle,
 ];
+const FALCON_H1_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::FalconH1];
 const OLMO_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Olmo];
 // Olmo 3 converts as olmo2 with a sliding-window pattern
 const OLMO2_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Olmo2, NormalLoaderType::Olmo3];
@@ -816,6 +820,15 @@ pub const GGUF_SCHEMAS: &[GgufSchema; CANONICAL_GGUF_ARCHITECTURE_COUNT] = &[
         compatible_loaders: NEMOTRON_H_LOADERS,
         rope_pairing: RopePairing::HalfSplit,
         required_metadata: MOE_METADATA,
+        required_tensors: SSM_TENSORS,
+        unsupported_metadata: NO_REQUIREMENTS,
+    },
+    // llama.cpp ropes it NeoX-style and leaves q/k as the checkpoint has them
+    GgufSchema {
+        architecture: CanonicalGgufArchitecture::FalconH1,
+        compatible_loaders: FALCON_H1_LOADERS,
+        rope_pairing: RopePairing::HalfSplit,
+        required_metadata: NO_REQUIREMENTS,
         required_tensors: SSM_TENSORS,
         unsupported_metadata: NO_REQUIREMENTS,
     },
@@ -1145,6 +1158,15 @@ pub const NORMAL_MODEL_ADAPTERS: &[NativeModelAdapter; NORMAL_LOADER_TYPE_COUNT]
             GgufLayout::StackedExperts,
             GgufLayout::PerLayerInventory,
             GgufLayout::SqueezedShortConv,
+        ],
+    },
+    NativeModelAdapter {
+        loader: NormalLoaderType::FalconH1,
+        architectures: &[CanonicalGgufArchitecture::FalconH1],
+        layouts: &[
+            GgufLayout::Direct,
+            GgufLayout::PerLayerInventory,
+            GgufLayout::GraniteSsm,
         ],
     },
     NativeModelAdapter {

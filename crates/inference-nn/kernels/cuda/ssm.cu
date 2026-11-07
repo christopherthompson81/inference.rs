@@ -217,8 +217,9 @@ __global__ void __launch_bounds__(SSD_CHUNK)
   p.cs[((size_t)k * H + h) * SSD_CHUNK + t] = s_cs[t];
   if (t == 0)
     p.decay[k * H + h] = expf(a * cs_last);
-  // s_cs becomes each position's decay to the chunk's end
-  const float to_end = expf(a * (cs_last - s_cs[t]));
+  // s_cs becomes each position's decay to the chunk's end; the prefix sum's rounding can leave a later sum a few ulp
+  // under an earlier one, which a large |A| (Falcon-H1's reach 1e8) would turn into exp of a positive exponent
+  const float to_end = expf(fminf(a * (cs_last - s_cs[t]), 0.0f));
   __syncthreads();
   s_cs[t] = to_end;
   __syncthreads();
@@ -261,7 +262,7 @@ __global__ void __launch_bounds__(SSD_CHUNK)
   float v = 0.0f;
   if (t_in <= t_out) {
     const size_t cb = (((size_t)k * G + g) * SSD_CHUNK + t_in) * SSD_CHUNK;
-    v = expf(p.A[h] * (cs[t_out] - cs[t_in])) * p.cb[cb + t_out];
+    v = expf(fminf(p.A[h] * (cs[t_out] - cs[t_in]), 0.0f)) * p.cb[cb + t_out];
   }
   p.m[(((size_t)k * H + h) * SSD_CHUNK + t_in) * SSD_CHUNK + t_out] = v;
 }

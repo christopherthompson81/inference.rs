@@ -70,6 +70,7 @@ const NEMOTRON_MLP: [AnyMoeLoraTarget; 2] = [
 ];
 
 serde_default_fn!(bool, word_emb_default, true);
+serde_default_fn!(bool, default_true, true);
 serde_default_fn!(f32, default_one, 1.0);
 serde_default_fn!(f32, default_rope_theta, 10_000.0);
 serde_default_fn!(usize, default_mamba_d_conv, 4);
@@ -95,11 +96,17 @@ pub enum GraniteLayerType {
     #[serde(rename = "sliding_attention")]
     SlidingAttention,
     Mamba,
+    /// Attention and a Mamba mixer side by side on one norm, their outputs summed (Falcon-H1).
+    Parallel,
 }
 
 impl GraniteLayerType {
     pub fn is_attention(&self) -> bool {
         !matches!(self, Self::Mamba)
+    }
+
+    pub fn has_recurrent_state(&self) -> bool {
+        matches!(self, Self::Mamba | Self::Parallel)
     }
 }
 
@@ -192,6 +199,25 @@ pub struct Config {
     pub mamba_dt_limit: Option<[f64; 2]>,
     #[serde(default)]
     pub mamba_f32_state: bool,
+    // Falcon-H1: a Mamba output gated without the grouped norm, and the muP multipliers (a GGUF has them folded in)
+    #[serde(default = "default_true")]
+    pub mamba_gated_norm: bool,
+    #[serde(default)]
+    pub mup: Option<MupMultipliers>,
+}
+
+/// Falcon-H1's muP multipliers on the activations of a parallel block's attention, Mamba and MLP.
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
+pub struct MupMultipliers {
+    pub attention_in: f32,
+    pub attention_out: f32,
+    pub key: f32,
+    pub ssm_in: f32,
+    pub ssm_out: f32,
+    /// Over the Mamba input projection's z, x, B, C and dt.
+    pub ssm: [f32; 5],
+    /// The MLP's gate and down projections.
+    pub mlp: [f32; 2],
 }
 
 impl Config {
@@ -341,6 +367,81 @@ impl MlpLayer for GraniteMlp {
 }
 
 impl crate::amoe::AnyMoeTrainableLayer for GraniteMlp {}
+
+/// Falcon-H1's SwiGLU with its muP multipliers: the gate scaled inside the activation, the down projection after.
+#[derive(Clone)]
+struct MupMlp {
+    gate: Arc<dyn QuantMethod>,
+    up: Arc<dyn QuantMethod>,
+    down: Arc<dyn QuantMethod>,
+    gate_scale: f32,
+    down_scale: f32,
+    params: Vec<usize>,
+}
+
+impl MupMlp {
+    fn new(
+        vb: ShardedVarBuilder,
+        cfg: &Config,
+        [gate_scale, down_scale]: [f32; 2],
+        comm: &Arc<inference_quant::Comm>,
+    ) -> Result<Self> {
+        let column = |name| {
+            ColumnParallelLayer::new(
+                cfg.hidden_size,
+                cfg.intermediate_size,
+                &cfg.quantization_config,
+                false,
+                comm,
+                vb.pp(name),
+            )
+        };
+        Ok(Self {
+            gate: column("gate_proj")?,
+            up: column("up_proj")?,
+            down: RowParallelLayer::new(
+                cfg.intermediate_size,
+                cfg.hidden_size,
+                &cfg.quantization_config,
+                false,
+                comm,
+                vb.pp("down_proj"),
+            )?,
+            gate_scale,
+            down_scale,
+            params: vec![cfg.hidden_size, cfg.intermediate_size],
+        })
+    }
+}
+
+impl MlpLayer for MupMlp {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let gate = scale_tensor(self.gate.forward(xs)?, self.gate_scale)?;
+        let gated = crate::ops::mul_and_act(
+            &gate,
+            &self.up.forward(xs)?,
+            crate::layers::Activation::Silu,
+        )?;
+        scale_tensor(self.down.forward(&gated)?, self.down_scale)
+    }
+    fn clone(&self) -> Box<dyn MlpLayer> {
+        Box::new(Clone::clone(self))
+    }
+    fn get_params(&self) -> &[usize] {
+        &self.params
+    }
+    fn hidden_act(&self) -> crate::layers::Activation {
+        crate::layers::Activation::Silu
+    }
+    fn new_added_delta(&self, _deltas: Vec<Option<Tensor>>) -> Result<Box<dyn MlpLayer>> {
+        inference_tensor::bail!("LoRA adapter not supported for Falcon-H1's MLP")
+    }
+    fn dtype_device(&self) -> (inference_tensor::DType, inference_tensor::Device) {
+        self.gate.dtype_and_device()
+    }
+}
+
+impl crate::amoe::AnyMoeTrainableLayer for MupMlp {}
 
 // MoE (Mixture of Experts) Implementation
 
@@ -1010,8 +1111,11 @@ struct MambaLayer {
     a_log: Tensor,
     d: Tensor,
     scan: ScanConstants,
-    norm: RmsNormGated,
+    norm: Option<RmsNormGated>,
     out_proj: Arc<dyn QuantMethod>,
+    // muP (Falcon-H1): the input and each of z, x, B, C and dt scaled as one vector over the projection, the output
+    in_scale: Option<Tensor>,
+    out_scale: f32,
     num_heads: usize,
     head_dim: usize,
     intermediate_size: usize,
@@ -1087,13 +1191,37 @@ impl MambaLayer {
         let mut dt_bias = params.get(num_heads, "dt_bias")?;
         let mut a_log = params.get(num_heads, "A_log")?;
         let mut d = params.get(num_heads, "D")?;
-        let norm = RmsNormGated::new(
-            intermediate_size,
-            cfg.mamba_norm_group_size.unwrap_or(intermediate_size),
-            cfg.rms_norm_eps,
-            vb.pp("norm"),
-            isq_target_device,
-        )?;
+        let norm = cfg
+            .mamba_gated_norm
+            .then(|| {
+                RmsNormGated::new(
+                    intermediate_size,
+                    cfg.mamba_norm_group_size.unwrap_or(intermediate_size),
+                    cfg.rms_norm_eps,
+                    vb.pp("norm"),
+                    isq_target_device,
+                )
+            })
+            .transpose()?;
+        let in_scale = cfg
+            .mup
+            .as_ref()
+            .map(|mup| {
+                let groups = n_groups * ssm_state_size;
+                let [z, x, b, c, dt] = mup.ssm.map(|m| m * mup.ssm_in);
+                let scale = [
+                    (z, intermediate_size),
+                    (x, intermediate_size),
+                    (b, groups),
+                    (c, groups),
+                    (dt, num_heads),
+                ]
+                .into_iter()
+                .flat_map(|(m, n)| std::iter::repeat_n(m, n))
+                .collect::<Vec<f32>>();
+                Tensor::new(scale, isq_target_device.unwrap_or(vb.device()))
+            })
+            .transpose()?;
 
         let out_proj = ReplicatedLayer::new(
             intermediate_size,
@@ -1128,6 +1256,8 @@ impl MambaLayer {
             d,
             norm,
             out_proj,
+            in_scale,
+            out_scale: cfg.mup.as_ref().map_or(1.0, |mup| mup.ssm_out),
             num_heads,
             head_dim,
             intermediate_size,
@@ -1140,9 +1270,25 @@ impl MambaLayer {
         })
     }
 
+    // the scan's output gated by `z` (through the grouped norm when the layer has one), projected back
+    fn output(&self, y: &Tensor, gate: &Tensor, dtype: DType) -> Result<Tensor> {
+        let y = match &self.norm {
+            Some(norm) => norm.forward(y, Some(gate))?,
+            None => y
+                .to_dtype(DType::F32)?
+                .broadcast_mul(&inference_tensor::nn::ops::silu(
+                    &gate.to_dtype(DType::F32)?,
+                )?)?,
+        };
+        scale_tensor(self.out_proj.forward(&y.to_dtype(dtype)?)?, self.out_scale)
+    }
+
     fn projected_parts(&self, x: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
         let groups_time_state_size = self.n_groups * self.ssm_state_size;
-        let projected = self.in_proj.forward(x)?;
+        let mut projected = self.in_proj.forward(x)?;
+        if let Some(scale) = &self.in_scale {
+            projected = projected.broadcast_mul(&scale.to_dtype(projected.dtype())?)?;
+        }
         let gate = projected.narrow(inference_tensor::D::Minus1, 0, self.intermediate_size)?;
         let hidden_states_b_c = projected.narrow(
             inference_tensor::D::Minus1,
@@ -1166,8 +1312,7 @@ impl MambaLayer {
         let (batch_size, seq_len, _) = x.dims3()?;
         let (gate, hidden_states_b_c, dt) = self.projected_parts(x)?;
         let y = self.forward_full(&hidden_states_b_c, &dt, cache, batch_size, seq_len)?;
-        let y = self.norm.forward(&y, Some(&gate))?;
-        let out = self.out_proj.forward(&y.to_dtype(x.dtype())?)?;
+        let out = self.output(&y, &gate, x.dtype())?;
         Ok((
             out,
             ReplayInputs {
@@ -1205,8 +1350,9 @@ impl MambaLayer {
         uvb.add_tensor("dt_bias", self.dt_bias.clone());
         uvb.add_tensor("A_log", self.a_log.clone());
         uvb.add_tensor("D", self.d.clone());
-        uvb.pp("norm")
-            .add_tensor("weight", self.norm.weight.clone());
+        if let Some(norm) = &self.norm {
+            uvb.pp("norm").add_tensor("weight", norm.weight.clone());
+        }
         uvb.pp("out_proj").add(&self.out_proj);
         uvb.to_safetensors()
     }
@@ -1243,11 +1389,7 @@ impl MambaLayer {
             self.forward_full(&hidden_states_b_c, &dt, cache, batch_size, seq_len)?
         };
 
-        // Apply gated normalization
-        let y = self.norm.forward(&y, Some(&gate))?;
-
-        // Output projection
-        self.out_proj.forward(&y.to_dtype(dtype)?)
+        self.output(&y, &gate, dtype)
     }
 
     fn forward_packed_prefill(
@@ -1304,8 +1446,7 @@ impl MambaLayer {
         cache.conv_state = Tensor::cat(&conv_states, 0)?;
         cache.ssm_state = Tensor::cat(&ssm_states, 0)?;
         let y = Tensor::cat(&outputs, 1)?;
-        let y = self.norm.forward(&y, Some(&gate))?;
-        self.out_proj.forward(&y.to_dtype(dtype)?)
+        self.output(&y, &gate, dtype)
     }
 
     // a prefill whose scan also stops after each capture point's tokens: the output and each point's (conv, ssm)
@@ -1377,7 +1518,6 @@ impl MambaLayer {
         cache.conv_state = Tensor::cat(&conv_states, 0)?;
         cache.ssm_state = Tensor::cat(&ssm_states, 0)?;
         let y = Tensor::cat(&row_outputs, if packed { 1 } else { 0 })?;
-        let y = self.norm.forward(&y, Some(&gate))?;
         let captured = captured
             .into_iter()
             .map(|state| {
@@ -1386,7 +1526,7 @@ impl MambaLayer {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok((self.out_proj.forward(&y.to_dtype(dtype)?)?, captured))
+        Ok((self.output(&y, &gate, dtype)?, captured))
     }
 
     fn forward_cached(
@@ -2012,6 +2152,8 @@ struct ReplayInputs {
 #[derive(Clone)]
 struct MambaReplay {
     layer_idx: usize,
+    // the cache layer holding its state: `layer_idx` but for a parallel block's
+    slot: usize,
     // the pool slots of the step's batch rows, and on the host where the step had them
     indices: Tensor,
     host_indices: Option<Vec<u32>>,
@@ -2153,38 +2295,59 @@ struct MambaBlock {
     mixer_tap: MixerTap,
 }
 
+/// A Mamba block's input: the residual stream, its norm, and (in a parallel block) the attention output beside it.
+struct MambaIn<'a> {
+    x: &'a Tensor,
+    normed: Tensor,
+    side: Option<Tensor>,
+}
+
 impl MambaBlock {
-    fn forward(
-        &self,
-        x: &Tensor,
-        cache: &mut MambaLayerCache,
-        batch_kind: RecurrentBatchKind,
-        pool_slots: Option<&Tensor>,
-    ) -> Result<Tensor> {
-        let normed = self.rms_1.forward(x)?;
-        let mamba_out = in_activation_dtype(cache, normed.dtype(), |cache| {
-            self.mamba.forward(&normed, cache, batch_kind, pool_slots)
-        })?;
-        let x = (scale_tensor(mamba_out, self.residual_multiplier)? + x)?;
+    fn input<'a>(&self, x: &'a Tensor) -> Result<MambaIn<'a>> {
+        Ok(MambaIn {
+            x,
+            normed: self.rms_1.forward(x)?,
+            side: None,
+        })
+    }
+
+    // the mixer's output (and the attention beside it) into the residual, then the FFN
+    fn finish(&self, input: &MambaIn<'_>, out: Tensor) -> Result<Tensor> {
+        let mixed = match &input.side {
+            Some(side) => (out + side)?,
+            None => out,
+        };
+        let x = (scale_tensor(mixed, self.residual_multiplier)? + input.x)?;
         self.mixer_tap.record(&x);
         BlockFfn::residual(self.ffn.as_ref(), x, self.residual_multiplier)
     }
 
+    fn forward(
+        &self,
+        input: MambaIn<'_>,
+        cache: &mut MambaLayerCache,
+        batch_kind: RecurrentBatchKind,
+        pool_slots: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        let mamba_out = in_activation_dtype(cache, input.normed.dtype(), |cache| {
+            self.mamba
+                .forward(&input.normed, cache, batch_kind, pool_slots)
+        })?;
+        self.finish(&input, mamba_out)
+    }
+
     fn forward_replayable(
         &self,
-        x: &Tensor,
+        input: MambaIn<'_>,
         cache: &mut MambaLayerCache,
     ) -> Result<(Tensor, ReplayInputs)> {
-        let normed = self.rms_1.forward(x)?;
         let mut inputs = None;
-        let mamba_out = in_activation_dtype(cache, normed.dtype(), |cache| {
-            let (out, replay) = self.mamba.forward_replayable(&normed, cache)?;
+        let mamba_out = in_activation_dtype(cache, input.normed.dtype(), |cache| {
+            let (out, replay) = self.mamba.forward_replayable(&input.normed, cache)?;
             inputs = Some(replay);
             Ok(out)
         })?;
-        let x = (scale_tensor(mamba_out, self.residual_multiplier)? + x)?;
-        self.mixer_tap.record(&x);
-        let out = BlockFfn::residual(self.ffn.as_ref(), x, self.residual_multiplier)?;
+        let out = self.finish(&input, mamba_out)?;
         Ok((out, inputs.expect("the Mamba pass ran")))
     }
 
@@ -2202,36 +2365,32 @@ impl MambaBlock {
 
     fn forward_packed_prefill(
         &self,
-        x: &Tensor,
+        input: MambaIn<'_>,
         cache: &mut MambaLayerCache,
         query_lens: &[usize],
     ) -> Result<Tensor> {
-        let normed = self.rms_1.forward(x)?;
-        let mamba_out = in_activation_dtype(cache, normed.dtype(), |cache| {
+        let mamba_out = in_activation_dtype(cache, input.normed.dtype(), |cache| {
             self.mamba
-                .forward_packed_prefill(&normed, cache, query_lens)
+                .forward_packed_prefill(&input.normed, cache, query_lens)
         })?;
-        let x = (scale_tensor(mamba_out, self.residual_multiplier)? + x)?;
-        self.mixer_tap.record(&x);
-        BlockFfn::residual(self.ffn.as_ref(), x, self.residual_multiplier)
+        self.finish(&input, mamba_out)
     }
 
     // `forward`'s prefill with `MambaLayer::forward_captured`'s states, the conv states in the cache's dtype
     fn forward_captured(
         &self,
-        x: &Tensor,
+        input: MambaIn<'_>,
         cache: &mut MambaLayerCache,
         rows: &[Range<usize>],
         packed: bool,
         points: &[RecurrentCapturePoint],
     ) -> Result<(Tensor, Vec<(Tensor, Tensor)>)> {
-        let normed = self.rms_1.forward(x)?;
         let conv_dtype = cache.conv_state.dtype();
         let mut captured = Vec::new();
-        let mamba_out = in_activation_dtype(cache, normed.dtype(), |cache| {
-            let (out, states) = self
-                .mamba
-                .forward_captured(&normed, cache, rows, packed, points)?;
+        let mamba_out = in_activation_dtype(cache, input.normed.dtype(), |cache| {
+            let (out, states) =
+                self.mamba
+                    .forward_captured(&input.normed, cache, rows, packed, points)?;
             captured = states;
             Ok(out)
         })?;
@@ -2239,9 +2398,7 @@ impl MambaBlock {
             .into_iter()
             .map(|(conv, ssm)| Ok((conv.to_dtype(conv_dtype)?, ssm)))
             .collect::<Result<Vec<_>>>()?;
-        let x = (scale_tensor(mamba_out, self.residual_multiplier)? + x)?;
-        self.mixer_tap.record(&x);
-        let out = BlockFfn::residual(self.ffn.as_ref(), x, self.residual_multiplier)?;
+        let out = self.finish(&input, mamba_out)?;
         Ok((out, captured))
     }
 
@@ -2252,9 +2409,10 @@ impl MambaBlock {
         } else {
             None
         };
+        let mixer = names.mamba.as_ref().unwrap_or(&names.mixer);
         let mamba = MambaLayer::load(
             load.mapper
-                .set_device(load.layer_idx, vb_m.pp(&names.mixer), load.loading_isq),
+                .set_device(load.layer_idx, vb_m.pp(mixer), load.loading_isq),
             load.cfg,
             isq_target_device,
         )?;
@@ -2268,31 +2426,86 @@ impl MambaBlock {
     }
 }
 
+/// Falcon-H1's layer: attention and a Mamba mixer on one input norm, their outputs summed into the residual. The
+/// Mamba block holds the norm and the FFN; its recurrent state is a cache layer of its own after the stack's.
+struct ParallelBlock {
+    attn: Box<CausalSelfAttention>,
+    mamba: MambaBlock,
+}
+
+impl ParallelBlock {
+    fn load(
+        vb_m: &ShardedVarBuilder,
+        layout: &HybridLayout,
+        load: BlockLoad<'_>,
+        rope: Option<Arc<RotaryEmbedding>>,
+        paged_attn: Option<PagedAttention>,
+    ) -> Result<Self> {
+        let names = &layout.blocks[load.layer_idx].names;
+        let attn = CausalSelfAttention::load(
+            load.mapper
+                .set_device(load.layer_idx, vb_m.pp(&names.mixer), load.loading_isq),
+            load.cfg,
+            load.layer_idx,
+            rope,
+            paged_attn,
+            load.comm,
+        )?;
+        Ok(Self {
+            attn: Box::new(attn),
+            mamba: MambaBlock::load(vb_m, layout, load)?,
+        })
+    }
+}
+
 /// Enum to represent either an attention or mamba layer
 enum DecoderLayer {
     Attention(Block),
     Mamba(MambaBlock),
+    Parallel(ParallelBlock),
 }
 
 impl DecoderLayer {
     fn ffn(&self) -> Option<&BlockFfn> {
         match self {
             Self::Attention(block) => block.ffn.as_ref(),
-            Self::Mamba(block) => block.ffn.as_ref(),
+            Self::Mamba(block) | Self::Parallel(ParallelBlock { mamba: block, .. }) => {
+                block.ffn.as_ref()
+            }
+        }
+    }
+
+    fn ffn_mut(&mut self) -> &mut Option<BlockFfn> {
+        match self {
+            Self::Attention(block) => &mut block.ffn,
+            Self::Mamba(block) | Self::Parallel(ParallelBlock { mamba: block, .. }) => {
+                &mut block.ffn
+            }
         }
     }
 
     fn mixer_tap(&self) -> &MixerTap {
         match self {
             Self::Attention(block) => &block.mixer_tap,
-            Self::Mamba(block) => &block.mixer_tap,
+            Self::Mamba(block) | Self::Parallel(ParallelBlock { mamba: block, .. }) => {
+                &block.mixer_tap
+            }
         }
     }
 
     fn mixer_tap_mut(&mut self) -> &mut MixerTap {
         match self {
             Self::Attention(block) => &mut block.mixer_tap,
-            Self::Mamba(block) => &mut block.mixer_tap,
+            Self::Mamba(block) | Self::Parallel(ParallelBlock { mamba: block, .. }) => {
+                &mut block.mixer_tap
+            }
+        }
+    }
+
+    fn mamba(&self) -> Option<&MambaBlock> {
+        match self {
+            Self::Attention(_) => None,
+            Self::Mamba(block) | Self::Parallel(ParallelBlock { mamba: block, .. }) => Some(block),
         }
     }
 }
@@ -2377,6 +2590,10 @@ struct CausalSelfAttention {
     rotary_emb: Option<Arc<RotaryEmbedding>>, // Optional - None when position_embedding_type == "nope"
     paged_attn: Option<PagedAttention>,
     sdpa_params: SdpaParams,
+    // muP (Falcon-H1): the input, the keys and the output scaled
+    in_scale: f32,
+    key_scale: f32,
+    out_scale: f32,
 }
 
 impl CausalSelfAttention {
@@ -2390,9 +2607,11 @@ impl CausalSelfAttention {
         layer_idx: usize,
     ) -> Result<Tensor> {
         let (b_sz, seq_len, _) = x.dims3()?;
+        let x = &scale_tensor(x.clone(), self.in_scale)?;
 
         let (mut q, mut k, mut v) =
             crate::ops::qkv_projections(x, &*self.q_proj, &*self.k_proj, &*self.v_proj)?;
+        k = scale_tensor(k, self.key_scale)?;
         (q, k, v) = if seq_len != 1 {
             let q = q
                 .reshape((b_sz, seq_len, self.num_attention_heads, self.head_dim))?
@@ -2436,8 +2655,7 @@ impl CausalSelfAttention {
         } else {
             y.reshape((b_sz, seq_len, ()))?
         };
-        let res = self.o_proj.forward(&y)?;
-        Ok(res)
+        scale_tensor(self.o_proj.forward(&y)?, self.out_scale)
     }
 
     fn load(
@@ -2509,6 +2727,9 @@ impl CausalSelfAttention {
             head_dim: cfg.head_dim(),
             rotary_emb: rope, // Now optional
             paged_attn,
+            in_scale: cfg.mup.as_ref().map_or(1.0, |mup| mup.attention_in),
+            key_scale: cfg.mup.as_ref().map_or(1.0, |mup| mup.key),
+            out_scale: cfg.mup.as_ref().map_or(1.0, |mup| mup.attention_out),
             sdpa_params: SdpaParams {
                 n_kv_groups: inference_quant::compute_n_kv_groups(
                     cfg.num_key_value_heads(),
@@ -2632,6 +2853,20 @@ impl BlockFfn {
                     .then(|| GraniteMoE::new(cfg, vb.pp("block_sparse_moe")))
                     .transpose()?
                     .map(HybridMoe::Granite),
+            ),
+            FfnKind::SwiGlu => (
+                Some(match &cfg.mup {
+                    Some(mup) => Box::new(MupMlp::new(vb, cfg, mup.mlp, load.comm)?),
+                    None => Box::new(crate::layers::Mlp::new(
+                        vb,
+                        cfg.hidden_size,
+                        cfg.intermediate_size,
+                        &cfg.quantization_config,
+                        crate::layers::Activation::Silu,
+                        load.comm,
+                    )?) as Box<dyn MlpLayer>,
+                }),
+                None,
             ),
             FfnKind::Mlp => (
                 Some(Box::new(PlainMlp::new(
@@ -2900,6 +3135,8 @@ pub enum FfnKind {
     Granite,
     /// Nemotron-H's squared-ReLU `up_proj`/`down_proj`.
     Mlp,
+    /// Falcon-H1's SwiGLU `gate_proj`/`up_proj`/`down_proj`.
+    SwiGlu,
     /// Nemotron-H's experts ([`NemotronMoeSpec`]).
     Moe,
 }
@@ -2919,6 +3156,8 @@ pub struct FfnNames {
 pub struct BlockNames {
     pub norm: String,
     pub mixer: String,
+    /// A parallel block's Mamba mixer, beside its attention `mixer`.
+    pub mamba: Option<String>,
     pub ffn: Option<FfnNames>,
 }
 
@@ -2939,18 +3178,24 @@ pub fn recurrent_state_bytes(cfg: &Config, mamba_layers: usize, dtype: DType) ->
                 * cfg.mamba_state_dtype().unwrap_or(dtype).size_in_bytes())
 }
 
-/// The paged cache's view of a hybrid layout: only attention layers page (an MTP head's is the one after the stack's),
-/// and each sequence holds `recurrent_state_bytes`.
+/// The paged cache's view of a hybrid layout: only attention layers page (a parallel block's recurrent slots follow
+/// the stack's, an MTP head's after those), and each sequence holds `recurrent_state_bytes`.
 pub fn hybrid_paged_kv_config(
     base: ModelConfigMetadata,
     layout: &HybridLayout,
     mtp: bool,
     recurrent_state_bytes: usize,
 ) -> HybridPagedKvCacheConfig {
+    let parallel = layout
+        .blocks
+        .iter()
+        .filter(|block| block.mixer == GraniteLayerType::Parallel)
+        .count();
     let paged_layers = layout
         .blocks
         .iter()
         .map(|block| !matches!(block.mixer, GraniteLayerType::Mamba))
+        .chain(std::iter::repeat_n(false, parallel))
         .chain(mtp.then_some(true))
         .collect();
     HybridPagedKvCacheConfig::new(base, paged_layers)
@@ -2982,6 +3227,7 @@ impl HybridLayout {
                     names: BlockNames {
                         norm: format!("{layer}.input_layernorm"),
                         mixer: format!("{layer}.{mixer_name}"),
+                        mamba: None,
                         ffn: Some(FfnNames {
                             norm: format!("{layer}.post_attention_layernorm"),
                             module: layer,
@@ -3058,6 +3304,52 @@ impl HybridLayout {
     }
 }
 
+// a layer's KV cache: the model's normal cache, else the pipeline's hybrid cache, else the model's own
+fn attention_cache<'a>(
+    layer_idx: usize,
+    normal: &'a mut Option<std::sync::MutexGuard<'_, crate::kv_cache::NormalCache>>,
+    pipeline: &'a mut Option<std::sync::MutexGuard<'_, HybridCache>>,
+    internal: &'a mut GraniteHybridCache,
+) -> Option<&'a mut KvCache> {
+    if let Some(normal) = normal.as_mut() {
+        return normal.0.get_mut(layer_idx);
+    }
+    if let Some(HybridLayerCache::Attention(kv_cache)) =
+        pipeline.as_mut().and_then(|cache| cache.get_mut(layer_idx))
+    {
+        return Some(kv_cache);
+    }
+    match &mut internal.caches[layer_idx] {
+        GraniteLayerCache::Attention(kv_cache) => Some(kv_cache),
+        GraniteLayerCache::Mamba(_) => None,
+    }
+}
+
+/// The cache's layers: each block's own (a parallel block's as attention), then a recurrent one per parallel block;
+/// and each block's recurrent slot.
+fn cache_slots(layer_types: &[GraniteLayerType]) -> (Vec<GraniteLayerType>, Vec<Option<usize>>) {
+    let mut slots = layer_types
+        .iter()
+        .map(|t| match t {
+            GraniteLayerType::Parallel => GraniteLayerType::Attention,
+            t => t.clone(),
+        })
+        .collect::<Vec<_>>();
+    let recurrent = layer_types
+        .iter()
+        .enumerate()
+        .map(|(layer, t)| match t {
+            GraniteLayerType::Mamba => Some(layer),
+            GraniteLayerType::Parallel => {
+                slots.push(GraniteLayerType::Mamba);
+                Some(slots.len() - 1)
+            }
+            _ => None,
+        })
+        .collect();
+    (slots, recurrent)
+}
+
 /// Local enum to represent either a KV cache or Mamba cache for a layer
 /// (used internally by GraniteMoeHybrid - not exported)
 enum GraniteLayerCache {
@@ -3088,7 +3380,9 @@ impl GraniteHybridCache {
         let mut caches = Vec::with_capacity(layer_types.len());
         for (layer_type, device) in layer_types.iter().zip(layer_devices) {
             match layer_type {
-                GraniteLayerType::Attention | GraniteLayerType::SlidingAttention => {
+                GraniteLayerType::Attention
+                | GraniteLayerType::SlidingAttention
+                | GraniteLayerType::Parallel => {
                     caches.push(GraniteLayerCache::Attention(KvCache::new_normal(
                         2,
                         cfg.max_position_embeddings,
@@ -3128,6 +3422,8 @@ pub struct GraniteMoeHybrid {
     layout: HybridLayout,
     layers: Vec<DecoderLayer>,
     layer_types: Vec<GraniteLayerType>,
+    // each layer's recurrent state's cache slot: its own index for a Mamba block, one after the stack's for a parallel
+    recurrent_slots: Vec<Option<usize>>,
     ln_f: RmsNorm,
     lm_head: Arc<dyn QuantMethod>,
     // the lm_head's weights, which an MTP draft head re-quantizes
@@ -3300,7 +3596,7 @@ impl GraniteMoeHybrid {
         // Log layer configuration
         let num_mamba = layer_types
             .iter()
-            .filter(|t| matches!(t, GraniteLayerType::Mamba))
+            .filter(|t| t.has_recurrent_state())
             .count();
         let num_attn = layer_types.iter().filter(|t| t.is_attention()).count();
         tracing::info!(
@@ -3330,7 +3626,9 @@ impl GraniteMoeHybrid {
             };
 
             let layer = match &layer_types[i] {
-                GraniteLayerType::Attention | GraniteLayerType::SlidingAttention => {
+                GraniteLayerType::Attention
+                | GraniteLayerType::SlidingAttention
+                | GraniteLayerType::Parallel => {
                     let rotary_emb = cfg.layer_rope_theta(i).map(|theta| {
                         ropes
                             .get(&(device.location(), theta.to_bits()))
@@ -3343,9 +3641,15 @@ impl GraniteMoeHybrid {
                             Some(PagedAttention::new(head_dim, device, None)?)
                         }
                     };
-                    DecoderLayer::Attention(Block::load(
-                        &vb_m, &layout, load, rotary_emb, paged_attn,
-                    )?)
+                    if layer_types[i] == GraniteLayerType::Parallel {
+                        DecoderLayer::Parallel(ParallelBlock::load(
+                            &vb_m, &layout, load, rotary_emb, paged_attn,
+                        )?)
+                    } else {
+                        DecoderLayer::Attention(Block::load(
+                            &vb_m, &layout, load, rotary_emb, paged_attn,
+                        )?)
+                    }
                 }
                 GraniteLayerType::Mamba => {
                     DecoderLayer::Mamba(MambaBlock::load(&vb_m, &layout, load)?)
@@ -3354,16 +3658,28 @@ impl GraniteMoeHybrid {
             layers.push(layer);
         }
 
+        // a parallel block pages its attention at its own index; its recurrent state is a slot after the stack's
+        let (slot_types, recurrent_slots) = cache_slots(&layer_types);
+        let slot_devices = (0..slot_types.len())
+            .map(|slot| {
+                let layer = recurrent_slots
+                    .iter()
+                    .position(|&s| s == Some(slot))
+                    .unwrap_or(slot);
+                layer_devices[layer].clone()
+            })
+            .collect::<Vec<_>>();
+
         // Create hybrid cache for internal use
         let hybrid_cache = Arc::new(Mutex::new(GraniteHybridCache::new(
-            &layer_types,
+            &slot_types,
             cfg,
-            &layer_devices,
+            &slot_devices,
             vb_m.dtype(),
         )?));
 
         // Create pipeline-compatible hybrid cache config
-        let pipeline_layer_types: Vec<HybridLayerType> = layer_types
+        let pipeline_layer_types: Vec<HybridLayerType> = slot_types
             .iter()
             .map(|lt| match lt {
                 GraniteLayerType::Mamba => HybridLayerType::Recurrent,
@@ -3386,7 +3702,7 @@ impl GraniteMoeHybrid {
         };
 
         let pipeline_cache = Arc::new(Mutex::new(
-            HybridCache::new(hybrid_cache_config, vb_m.dtype(), &layer_devices).map_err(|e| {
+            HybridCache::new(hybrid_cache_config, vb_m.dtype(), &slot_devices).map_err(|e| {
                 inference_tensor::Error::Msg(format!("Failed to create hybrid cache: {}", e))
             })?,
         ));
@@ -3394,7 +3710,7 @@ impl GraniteMoeHybrid {
         let num_attention_heads = cfg.num_attention_heads / mapper.get_comm_for(0)?.world_size();
         let has_mamba = layer_types
             .iter()
-            .any(|layer_type| matches!(layer_type, GraniteLayerType::Mamba));
+            .any(GraniteLayerType::has_recurrent_state);
         let has_sliding = layer_types.contains(&GraniteLayerType::SlidingAttention);
         if has_mamba && has_sliding {
             inference_tensor::bail!(
@@ -3406,7 +3722,7 @@ impl GraniteMoeHybrid {
         });
         let mamba_layers = layer_types
             .iter()
-            .filter(|layer_type| matches!(layer_type, GraniteLayerType::Mamba))
+            .filter(|layer_type| layer_type.has_recurrent_state())
             .count();
         let recurrent_state_bytes = recurrent_state_bytes(cfg, mamba_layers, vb_m.dtype());
 
@@ -3426,6 +3742,7 @@ impl GraniteMoeHybrid {
             wte,
             layers,
             layer_types,
+            recurrent_slots,
             ln_f,
             lm_head,
             dtype,
@@ -3450,7 +3767,7 @@ impl GraniteMoeHybrid {
             device: normal_loading_metadata.real_device,
             cfg: ModelConfigMetadata {
                 max_seq_len: cfg.max_position_embeddings,
-                num_layers: num_blocks,
+                num_layers: slot_types.len(),
                 hidden_size: cfg.hidden_size,
                 num_kv_heads: (cfg.num_key_value_heads() / mapper.get_comm_for(0)?.world_size())
                     .max(1),
@@ -3482,6 +3799,11 @@ impl GraniteMoeHybrid {
         loading_isq: bool,
         attention_mechanism: &AttentionImplementation,
     ) -> Result<Self> {
+        if self.layer_types.contains(&GraniteLayerType::Parallel) {
+            inference_tensor::bail!(
+                "an MTP head beside parallel attention and Mamba blocks is not supported"
+            );
+        }
         let kv_layer_idx = self.layers.len();
         let mut layout = self.layout.clone();
         layout.blocks.push(mtp.block.clone());
@@ -3557,7 +3879,11 @@ impl GraniteMoeHybrid {
     }
 
     pub fn paged_kv_config(&self) -> Arc<dyn ModelConfigLike + Send + Sync> {
-        if !self.layer_types.contains(&GraniteLayerType::Mamba) {
+        if !self
+            .layer_types
+            .iter()
+            .any(GraniteLayerType::has_recurrent_state)
+        {
             return Arc::new(self.cfg.clone());
         }
         let config = hybrid_paged_kv_config(
@@ -3717,51 +4043,70 @@ impl GraniteMoeHybrid {
             x = self.mapper.map(x, layer_idx)?;
             x = before_layer(layer_idx, x)?;
 
-            match layer {
+            let layer_mask = match (&self.layer_types[layer_idx], &sliding_mask) {
+                (GraniteLayerType::SlidingAttention, Some(sliding)) => sliding,
+                _ => &mask,
+            };
+            let (block, input, slot) = match layer {
                 DecoderLayer::Attention(block) => {
-                    let layer_mask = match (&self.layer_types[layer_idx], &sliding_mask) {
-                        (GraniteLayerType::SlidingAttention, Some(sliding)) => sliding,
-                        _ => &mask,
-                    };
-                    if let Some(normal) = normal_cache.as_mut() {
-                        let mask_for_layer = &layer_mask.get(x.device());
-                        x = block.forward(
-                            &x,
-                            mask_for_layer,
-                            &mut normal.0[layer_idx],
-                            ctx,
-                            layer_idx,
-                        )?;
-                    } else if let Some(HybridLayerCache::Attention(kv_cache)) = pipeline_cache
-                        .as_mut()
-                        .and_then(|cache| cache.get_mut(layer_idx))
-                    {
-                        let mask_for_layer = &layer_mask.get(x.device());
-                        x = block.forward(&x, mask_for_layer, kv_cache, ctx, layer_idx)?;
-                    } else if let GraniteLayerCache::Attention(kv_cache) =
-                        &mut internal_cache.caches[layer_idx]
-                    {
+                    if let Some(kv_cache) = attention_cache(
+                        layer_idx,
+                        &mut normal_cache,
+                        &mut pipeline_cache,
+                        &mut internal_cache,
+                    ) {
                         let mask_for_layer = &layer_mask.get(x.device());
                         x = block.forward(&x, mask_for_layer, kv_cache, ctx, layer_idx)?;
                     }
+                    continue;
                 }
-                DecoderLayer::Mamba(block) => {
+                DecoderLayer::Mamba(block) => (block, block.input(&x)?, layer_idx),
+                DecoderLayer::Parallel(parallel) => {
+                    let mut input = parallel.mamba.input(&x)?;
+                    let kv_cache = attention_cache(
+                        layer_idx,
+                        &mut normal_cache,
+                        &mut pipeline_cache,
+                        &mut internal_cache,
+                    )
+                    .ok_or_else(|| {
+                        inference_tensor::Error::msg(format!(
+                            "parallel block {layer_idx} has no attention cache"
+                        ))
+                    })?;
+                    let mask_for_layer = &layer_mask.get(x.device());
+                    input.side = Some(parallel.attn.forward(
+                        &input.normed,
+                        mask_for_layer,
+                        kv_cache,
+                        ctx,
+                        layer_idx,
+                    )?);
+                    let slot = self.recurrent_slots[layer_idx].ok_or_else(|| {
+                        inference_tensor::Error::msg(format!(
+                            "parallel block {layer_idx} has no recurrent slot"
+                        ))
+                    })?;
+                    (&parallel.mamba, input, slot)
+                }
+            };
+            {
+                {
                     if let (Some(metadata), Some(pipeline_cache)) =
                         (recurrent_metadata.as_ref(), pipeline_cache.as_mut())
                     {
-                        let indices = pipeline_cache
-                            .state_indices_for_layer(layer_idx)?
-                            .ok_or_else(|| {
+                        let indices = pipeline_cache.state_indices_for_layer(slot)?.ok_or_else(
+                            || {
                                 inference_tensor::Error::msg(format!(
-                                    "Hybrid cache layer {layer_idx} is missing recurrent state indices"
+                                    "Hybrid cache layer {slot} is missing recurrent state indices"
                                 ))
-                            })?;
-                        let captures = pipeline_cache.recurrent_captures_for_layer(layer_idx)?;
-                        let Some(HybridLayerCache::Recurrent(pool)) =
-                            pipeline_cache.get_mut(layer_idx)
+                            },
+                        )?;
+                        let captures = pipeline_cache.recurrent_captures_for_layer(slot)?;
+                        let Some(HybridLayerCache::Recurrent(pool)) = pipeline_cache.get_mut(slot)
                         else {
                             inference_tensor::bail!(
-                                "Hybrid cache layer {layer_idx} is not recurrent for Granite"
+                                "Hybrid cache layer {slot} is not recurrent for Granite"
                             );
                         };
                         // a CUDA or CPU decode step runs on the pool's rows in place, skipping the gather and scatter
@@ -3778,7 +4123,7 @@ impl GraniteMoeHybrid {
                                 ssm_state: pool.recurrent_state.clone(),
                             };
                             x = block.forward(
-                                &x,
+                                input,
                                 &mut pool_cache,
                                 RecurrentBatchKind::Decode,
                                 Some(&indices),
@@ -3812,7 +4157,7 @@ impl GraniteMoeHybrid {
                             let points =
                                 captures.iter().map(|(point, _)| *point).collect::<Vec<_>>();
                             let (out, states) = block.forward_captured(
-                                &x,
+                                input,
                                 &mut temp_cache,
                                 &rows,
                                 packed,
@@ -3824,14 +4169,15 @@ impl GraniteMoeHybrid {
                             }
                             out
                         } else if let Some(query_lens) = packed_query_lens.as_deref() {
-                            block.forward_packed_prefill(&x, &mut temp_cache, query_lens)?
+                            block.forward_packed_prefill(input, &mut temp_cache, query_lens)?
                         } else if stash_replays {
                             // the CUDA scan advances the state it is handed in place, so the replay's starting
                             // state is a copy taken before the pass
                             let (conv_state, ssm_state) = (conv_state.copy()?, ssm_state.copy()?);
-                            let (out, inputs) = block.forward_replayable(&x, &mut temp_cache)?;
+                            let (out, inputs) = block.forward_replayable(input, &mut temp_cache)?;
                             replays.push(MambaReplay {
                                 layer_idx,
+                                slot,
                                 indices: indices.clone(),
                                 host_indices: metadata.state_indices_host().map(<[u32]>::to_vec),
                                 conv_state,
@@ -3840,7 +4186,7 @@ impl GraniteMoeHybrid {
                             });
                             out
                         } else {
-                            block.forward(&x, &mut temp_cache, metadata.batch_kind(), None)?
+                            block.forward(input, &mut temp_cache, metadata.batch_kind(), None)?
                         };
 
                         pool.scatter_conv_state_with_host_indices(
@@ -3855,12 +4201,12 @@ impl GraniteMoeHybrid {
                         )?;
                     } else {
                         if let GraniteLayerCache::Mamba(mamba_cache) =
-                            &mut internal_cache.caches[layer_idx]
+                            &mut internal_cache.caches[slot]
                         {
                             if recurrent_batch_kind == RecurrentBatchKind::Prefill {
                                 mamba_cache.reset()?;
                             }
-                            x = block.forward(&x, mamba_cache, recurrent_batch_kind, None)?;
+                            x = block.forward(input, mamba_cache, recurrent_batch_kind, None)?;
                         }
                     }
                 }
@@ -3908,9 +4254,10 @@ impl GraniteMoeHybrid {
             let names = &block.names;
             let (rms_1, ffn) = match layer {
                 DecoderLayer::Attention(block) => (&block.rms_1, &block.ffn),
-                DecoderLayer::Mamba(block) => {
+                DecoderLayer::Mamba(block)
+                | DecoderLayer::Parallel(ParallelBlock { mamba: block, .. }) => {
                     uvb_m
-                        .pp(&names.mixer)
+                        .pp(names.mamba.as_ref().unwrap_or(&names.mixer))
                         .extend(block.mamba.residual_tensors());
                     (&block.rms_1, &block.ffn)
                 }
@@ -3970,7 +4317,7 @@ impl GraniteMoeHybrid {
             })
             .collect::<Result<Vec<_>>>()?;
         for replay in &replays {
-            let DecoderLayer::Mamba(block) = &self.layers[replay.layer_idx] else {
+            let Some(block) = self.layers[replay.layer_idx].mamba() else {
                 inference_tensor::bail!("Mamba replay of non-Mamba layer {}", replay.layer_idx);
             };
             for ((&keep, batch_rows), rows_on_device) in groups.iter().zip(&group_rows) {
@@ -3995,12 +4342,8 @@ impl GraniteMoeHybrid {
                     .host_indices
                     .as_ref()
                     .map(|host| batch_rows.iter().map(|&row| host[row as usize]).collect());
-                let Some(HybridLayerCache::Recurrent(pool)) = cache.get_mut(replay.layer_idx)
-                else {
-                    inference_tensor::bail!(
-                        "Hybrid cache layer {} is not recurrent",
-                        replay.layer_idx
-                    );
+                let Some(HybridLayerCache::Recurrent(pool)) = cache.get_mut(replay.slot) else {
+                    inference_tensor::bail!("Hybrid cache layer {} is not recurrent", replay.slot);
                 };
                 let host_slots = host_slots.as_deref();
                 pool.scatter_conv_state_with_host_indices(&slots, host_slots, &state.conv_state)?;
@@ -4376,7 +4719,9 @@ impl NormalModel for GraniteMoeHybrid {
     // unless its experts route on the host (Granite's own, or dense ungated stacks)
     #[cfg(feature = "cuda")]
     fn supports_cuda_decode_graphs(&self) -> bool {
-        self.layer_types.contains(&GraniteLayerType::Mamba)
+        self.layer_types
+            .iter()
+            .any(GraniteLayerType::has_recurrent_state)
             && self
                 .layers
                 .iter()
@@ -4401,7 +4746,9 @@ impl NormalModel for GraniteMoeHybrid {
         .then_some(crate::moe::OFFLOADED_GRAPH_MAX_TOKENS)
     }
     fn captures_recurrent_state_mid_chunk(&self) -> bool {
-        self.layer_types.contains(&GraniteLayerType::Mamba)
+        self.layer_types
+            .iter()
+            .any(GraniteLayerType::has_recurrent_state)
     }
     fn supports_packed_prefill(&self) -> bool {
         !self.has_sinks
@@ -4417,13 +4764,8 @@ impl AnyMoeBaseModelMixin for GraniteMoeHybrid {
     fn get_mlps(&self) -> Vec<&dyn MlpLayer> {
         let mut mlps = Vec::new();
         for layer in &self.layers {
-            match layer {
-                DecoderLayer::Attention(Block { ffn, .. })
-                | DecoderLayer::Mamba(MambaBlock { ffn, .. }) => {
-                    if let Some(mlp) = ffn.as_ref().and_then(|ffn| ffn.mlp.as_deref()) {
-                        mlps.push(mlp);
-                    }
-                }
+            if let Some(mlp) = layer.ffn().and_then(|ffn| ffn.mlp.as_deref()) {
+                mlps.push(mlp);
             }
         }
         mlps
@@ -4431,13 +4773,8 @@ impl AnyMoeBaseModelMixin for GraniteMoeHybrid {
     fn get_mlps_mut(&mut self) -> Vec<&mut Box<dyn MlpLayer>> {
         let mut mlps = Vec::new();
         for layer in &mut self.layers {
-            match layer {
-                DecoderLayer::Attention(Block { ffn, .. })
-                | DecoderLayer::Mamba(MambaBlock { ffn, .. }) => {
-                    if let Some(mlp) = ffn.as_mut().and_then(|ffn| ffn.mlp.as_mut()) {
-                        mlps.push(mlp);
-                    }
-                }
+            if let Some(mlp) = layer.ffn_mut().as_mut().and_then(|ffn| ffn.mlp.as_mut()) {
+                mlps.push(mlp);
             }
         }
         mlps
@@ -4522,6 +4859,8 @@ impl AnyMoeBaseModelMixin for GraniteMoeHybrid {
                             mamba_norm_group_size: None,
                             mamba_dt_limit: None,
                             mamba_f32_state: false,
+                            mamba_gated_norm: true,
+                            mup: None,
                         };
                         row.push(Box::new(GraniteMlp::new(
                             vb.pp(layer_idx)
@@ -4541,13 +4880,11 @@ impl AnyMoeBaseModelMixin for GraniteMoeHybrid {
             }
         }
         for (layer_idx, expert) in layers.into_iter().zip(experts) {
-            let mlp_box = match &mut self.layers[layer_idx] {
-                DecoderLayer::Attention(Block { ffn, .. })
-                | DecoderLayer::Mamba(MambaBlock { ffn, .. }) => {
-                    ffn.as_mut().and_then(|ffn| ffn.mlp.as_mut())
-                }
-            }
-            .ok_or_else(|| inference_tensor::Error::msg("Granite layer has no shared MLP"))?;
+            let mlp_box = self.layers[layer_idx]
+                .ffn_mut()
+                .as_mut()
+                .and_then(|ffn| ffn.mlp.as_mut())
+                .ok_or_else(|| inference_tensor::Error::msg("Granite layer has no shared MLP"))?;
             let mut experts_all = vec![mlp_box.clone()];
             experts_all.extend(expert);
             let (dtype, device) = mlp_box.dtype_device();
@@ -4643,14 +4980,16 @@ mod tests {
             dt_bias,
             a_log,
             d,
-            norm: RmsNormGated {
+            norm: Some(RmsNormGated {
                 weight: norm_weight.clone(),
                 #[cfg(feature = "cuda")]
                 weight_f32: norm_weight.to_dtype(DType::F32)?,
                 eps: 1e-5,
                 group_size: INTERMEDIATE_SIZE,
-            },
+            }),
             out_proj: unquant_linear(out_proj_weight, Some(out_proj_bias))?,
+            in_scale: None,
+            out_scale: 1.0,
             num_heads: NUM_HEADS,
             head_dim: HEAD_DIM,
             intermediate_size: INTERMEDIATE_SIZE,

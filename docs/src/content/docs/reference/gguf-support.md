@@ -40,6 +40,7 @@ Fine-tunes and model sizes within a family use the same entry.
 | Granite hybrid | `granitehybrid` |
 | Granite SWA (swash) dense and MoE | `granite_swa` |
 | Nemotron-H dense and MoE | `nemotron_h`, `nemotron_h_moe` |
+| Falcon-H1 | `falcon-h1` |
 | OLMo 1 | `olmo` |
 | OLMo 2 and Olmo 3 | `olmo2` |
 | OLMoE | `olmoe` |
