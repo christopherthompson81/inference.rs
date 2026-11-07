@@ -306,6 +306,8 @@ pub struct Sequence {
     stop_pending_emissions: VecDeque<PendingStreamingEmission>,
     ready_streaming_emissions: VecDeque<PendingStreamingEmission>,
     stream_idx: usize,
+    // a chat reply drops the whitespace it opens with; a completion's text is the model's, indentation included
+    trim_leading_whitespace: bool,
     pub recognizer: SequenceRecognizer,
     scheduling_urgency: usize, // The number of passes since scheduling
 
@@ -427,6 +429,7 @@ impl Sequence {
             stop_pending_emissions: VecDeque::new(),
             ready_streaming_emissions: VecDeque::new(),
             stream_idx: 0,
+            trim_leading_whitespace: true,
             last_completion_bytes_len: 0,
             last_logprob: 0.0,
             last_is_done: None,
@@ -1036,12 +1039,9 @@ impl Sequence {
 
             let is_first = self.stream_idx == 0;
             self.stream_idx += bytes.len();
-            let text = String::from_utf8_lossy(&bytes);
-            let text = if is_first {
-                text.trim_start().to_string()
-            } else {
-                text.to_string()
-            };
+            let text = self
+                .reply_start(&String::from_utf8_lossy(&bytes), is_first)
+                .to_string();
             for idx in 0..group_len {
                 let emission = self
                     .ready_streaming_emissions
@@ -1127,6 +1127,19 @@ impl Sequence {
 
     pub fn responder(&self) -> Sender<Response> {
         self.responder.clone()
+    }
+
+    pub(crate) fn set_trim_leading_whitespace(&mut self, trim: bool) {
+        self.trim_leading_whitespace = trim;
+    }
+
+    /// The reply's text from its start, `text` trimmed as the reply's first piece when it is one.
+    pub(crate) fn reply_start<'a>(&self, text: &'a str, is_first: bool) -> &'a str {
+        if is_first && self.trim_leading_whitespace {
+            text.trim_start()
+        } else {
+            text
+        }
     }
 
     pub(crate) fn set_prefix_warmup(&mut self, prefix_warmup: bool) {
@@ -1299,11 +1312,7 @@ impl Sequence {
         let is_first = self.stream_idx == 0;
         let decoded = String::from_utf8_lossy(&self.completion_bytes[self.stream_idx..]);
         self.stream_idx = self.completion_bytes.len();
-        if is_first {
-            decoded.trim_start().to_string()
-        } else {
-            decoded.to_string()
-        }
+        self.reply_start(&decoded, is_first).to_string()
     }
 
     /// Peeks at the delta between the last two decoded sequences, but does not advance the stream index.
@@ -1335,13 +1344,10 @@ impl Sequence {
         }
         let new_decoded = String::from_utf8_lossy(&pending[..consumed]);
 
-        // The first token usually starts with a space. We don't want to add that to the delta.
-        // Since we're using the completion_bytes, we need to take care of that ourselves.
-        // Had we used HF's Tokenizer, it would have taken care of that for us.
-        if is_first {
-            return (Some(new_decoded.trim_start().to_string()), consumed);
-        }
-        (Some(new_decoded.to_string()), consumed)
+        (
+            Some(self.reply_start(&new_decoded, is_first).to_string()),
+            consumed,
+        )
     }
 
     pub fn timestamp(&self) -> u128 {
@@ -2453,6 +2459,24 @@ mod tests {
             seq.is_done(7, Some(&eos_tokens), 1024),
             Some(StopReason::Length(1))
         );
+    }
+
+    // a code completion that opens with an indent keeps it; a chat reply drops the whitespace it opens with
+    #[test]
+    fn only_a_chat_reply_trims_the_whitespace_it_starts_with() {
+        for (chat, expected) in [(false, "    if n == 0"), (true, "if n == 0")] {
+            let mut seq = make_test_sequence();
+            seq.set_trim_leading_whitespace(chat);
+            seq.add_token(test_logprobs(7), b"    if".to_vec(), None);
+            assert_eq!(
+                seq.get_delta().unwrap().as_deref(),
+                Some(expected.split(" n").next().unwrap())
+            );
+            seq.add_token(test_logprobs(8), b" n == 0".to_vec(), None);
+            assert_eq!(seq.get_final_delta(), " n == 0");
+            let full = String::from_utf8_lossy(seq.completion_bytes()).to_string();
+            assert_eq!(seq.reply_start(&full, true), expected);
+        }
     }
 
     #[test]
