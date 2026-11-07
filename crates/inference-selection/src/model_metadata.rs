@@ -241,6 +241,16 @@ impl SupportedArch for NormalLoaderType {
                     ex!("tiiuae/Falcon-H1-Tiny-90M-Instruct"),
                 ],
             },
+            Self::Mamba => ArchMetadata {
+                families: &["Mamba"],
+                modalities: m,
+                examples: &[ex!("state-spaces/mamba-2.8b-hf")],
+            },
+            Self::FalconMamba => ArchMetadata {
+                families: &["Falcon-Mamba"],
+                modalities: m,
+                examples: &[ex!("tiiuae/falcon-mamba-7b-instruct")],
+            },
             Self::Mamba2 => ArchMetadata {
                 families: &["Mamba-2", "Mamba-Codestral"],
                 modalities: m,

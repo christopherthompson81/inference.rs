@@ -61,7 +61,9 @@ pub fn selective_scan_cuda(
     let y_buf = unsafe { dev.alloc::<f32>(batch_size * seq_len * n_heads * head_dim) }?;
     let stream = dev.cuda_stream().cu_stream() as i64;
 
-    if slot_ptr.is_null() && seq_len >= SSD_MIN_TOKENS {
+    // Mamba 1's A, one per state item, which the chunked scan's per-head decays cannot carry
+    let a_per_state = d_state > 1 && a.elem_count() == n_heads * d_state;
+    if slot_ptr.is_null() && seq_len >= SSD_MIN_TOKENS && !a_per_state {
         let shape = SsdShape {
             batch_size,
             seq_len,
@@ -111,6 +113,7 @@ pub fn selective_scan_cuda(
                 seq_len as i32,
                 scan.dt_min,
                 scan.dt_max,
+                i32::from(a_per_state),
                 stream,
             );
         }

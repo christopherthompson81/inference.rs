@@ -140,6 +140,7 @@ impl Config {
             mamba_f32_state: true,
             mamba_gated_norm: true,
             mup: None,
+            mamba1: None,
         })
     }
 }

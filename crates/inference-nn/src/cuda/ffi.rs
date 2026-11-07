@@ -1340,7 +1340,7 @@ inference_tensor::kernel_library! {
         pub fn selective_scan_cuda(
             x: *const f32,              // (batch, seq_len, n_heads * head_dim)
             dt: *const f32,             // (batch, seq_len, n_heads)
-            a: *const f32,              // (n_heads,) - negative exp of A_log
+            a: *const f32,              // (n_heads,) or (n_heads, d_state) - negative exp of A_log
             b: *const f32,              // (batch, seq_len, n_groups * d_state)
             c: *const f32,              // (batch, seq_len, n_groups * d_state)
             d: *const f32,              // (n_heads,)
@@ -1356,6 +1356,7 @@ inference_tensor::kernel_library! {
             seq_len: i32,
             dt_min: f32,
             dt_max: f32,
+            a_per_state: i32,
             stream: i64,
         );
         // chunked SSD prompt scan, over `cuda::ssm::SsdParams`
