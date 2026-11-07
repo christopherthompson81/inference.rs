@@ -25,7 +25,7 @@ pub use inference_nn::loaders::NormalLoaderType;
 macro_rules! normal_loader_dispatch {
     ($($variant:ident {
         cli: $cli:tt,
-        hf: $hf:literal,
+        hf: $hf:literal $(| $hf_alias:literal)*,
         model_type: $model_type:literal,
         loader: $loader:ident
         $(, feature: $feature:literal)? $(,)?

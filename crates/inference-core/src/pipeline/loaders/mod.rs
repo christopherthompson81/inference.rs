@@ -84,6 +84,10 @@ pub(crate) fn load_model_config(
 ) -> Result<String> {
     let config =
         inference_nn::loaders::encode_non_finite_floats(&std::fs::read_to_string(config_path)?);
+    let config = match inference_nn::loaders::mamba_ssm_config(&serde_json::from_str(&config)?) {
+        Some(translated) => serde_json::to_string(&translated)?,
+        None => config,
+    };
     let config = match config_path.file_name().and_then(|name| name.to_str()) {
         Some(name) if DECISION_CONFIGS.contains(&name) => {
             merge_decision_config(config_path, &config)?

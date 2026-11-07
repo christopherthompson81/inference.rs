@@ -417,3 +417,23 @@ graph. QRWKV6 at 7B is matmul-bound, so it sits closer.
 
 Next: graph capture for decode without paged attention would close ARWKV's gap (and serve every recurrent-only model);
 outside this step.
+
+## Run 10 - 2026-11-07 16:40
+
+Question: #588's scope check before closing. Every class it lists loads but two: `Rwkv7ForCausalLM` (the issue's
+spelling beside fla's `RWKV7ForCausalLM`) and `MambaLMHeadModel` (state-spaces' original `mamba_ssm` checkpoints).
+
+- The normal loader table now takes HF class aliases (`hf: "A" | "B"`, as the multimodal one does); RWKV-7 reads
+  either spelling.
+- A `mamba_ssm` config (state-spaces/mamba-130m, mamba2-130m) has no `architectures` or `model_type`: `d_model`,
+  `n_layer`, `ssm_cfg` (`{"layer": "Mamba2"}` for Mamba-2), a vocabulary padded to `pad_vocab_size_multiple` in the
+  weights (50277 -> 50280, and 50288 at 16), `tie_embeddings`. The weights are transformers' names but for
+  `backbone.embedding` (transformers' `backbone.embeddings`). No tokenizer ships (the README points to GPT-NeoX's), so
+  a run passes one (`--tok-model-id` or `tokenizer_json`).
+- The config is translated when read (`inference_nn::loaders::mamba_ssm_config`), marked `_inference_mamba_ssm` so the
+  Mamba and Mamba-2 layouts read `backbone.embedding`.
+
+```
+state-spaces/mamba-130m (pytorch_model.bin, f32) against its HF conversion, CPU f32, 183 tokens:  KL 0.00, max diff 0
+state-spaces/mamba2-130m (f16) against its HF conversion, CPU f32, 183 tokens:  KL 0.00, max diff 0
+```
