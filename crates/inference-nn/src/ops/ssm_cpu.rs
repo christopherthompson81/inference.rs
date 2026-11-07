@@ -6,9 +6,9 @@ use inference_tensor::{DType, Device, Result, Tensor};
 use rayon::prelude::*;
 
 /// The scan's inputs, as the CPU and CUDA scans take them (all f32, contiguous after the call's copies):
-/// `x` `(batch, seq, heads, head_dim)`, `dt` `(batch, seq, heads)` before bias and softplus, `a` `(heads,)` (already
-/// negated), `b` and `c` `(batch, seq, groups, state)` (heads split evenly over the groups), `d` and `dt_bias`
-/// `(heads,)`.
+/// `x` `(batch, seq, heads, head_dim)`, `dt` `(batch, seq, heads)` before bias and softplus, `a` `(heads,)` or, for
+/// Mamba 1, `(heads, state)` (already negated), `b` and `c` `(batch, seq, groups, state)` (heads split evenly over
+/// the groups), `d` and `dt_bias` `(heads,)`.
 #[derive(Clone, Copy)]
 pub struct SelectiveScan<'a> {
     pub x: &'a Tensor,
@@ -37,6 +37,16 @@ fn state_row_step(row: &mut [f32], b: &[f32], c: &[f32], decay: f32, dtx: f32) -
     }
     let mut lanes = [0f32; DOT_LANES];
     for (i, ((sn, &bn), &cn)) in row.iter_mut().zip(b).zip(c).enumerate() {
+        *sn = *sn * decay + dtx * bn;
+        lanes[i % DOT_LANES] += *sn * cn;
+    }
+    lanes.iter().sum()
+}
+
+// a row whose items decay at rates of their own (Mamba 1's A, one per state item)
+fn state_row_step_per_item(row: &mut [f32], b: &[f32], c: &[f32], decays: &[f32], dtx: f32) -> f32 {
+    let mut lanes = [0f32; DOT_LANES];
+    for (i, (((sn, &bn), &cn), &decay)) in row.iter_mut().zip(b).zip(c).zip(decays).enumerate() {
         *sn = *sn * decay + dtx * bn;
         lanes[i % DOT_LANES] += *sn * cn;
     }
@@ -167,6 +177,7 @@ impl ScanInputs {
         let [batch, seq, heads, head_dim, groups, d_state] = self.shape;
         let heads_per_group = heads / groups;
         let head_state = self.head_state();
+        let a_per_state = d_state > 1 && self.a.len() == heads * d_state;
         let mut y = vec![0f32; batch * seq * heads * head_dim];
         let out = SharedMut(y.as_mut_ptr());
         // one item per (batch, head): its state block and its outputs, strided through `y`
@@ -180,22 +191,37 @@ impl ScanInputs {
                 // SAFETY: the item's state block is its own
                 let s = unsafe { state.slice(0, head_state) };
                 let (bi, h) = (item / heads, item % heads);
+                let mut decays = vec![0f32; if a_per_state { d_state } else { 0 }];
                 for t in 0..seq {
                     let step = (bi * seq + t) * heads + h;
                     let raw = self.dt[step] + self.dt_bias[h];
                     let dt_t = (1.0 + raw.exp())
                         .ln()
                         .clamp(self.dt_range[0], self.dt_range[1]);
-                    let decay = (dt_t * self.a[h]).exp();
+                    let decay = if a_per_state {
+                        0.0
+                    } else {
+                        (dt_t * self.a[h]).exp()
+                    };
                     let group_step = (bi * seq + t) * groups + h / heads_per_group;
                     let bt = &self.b[group_step * d_state..(group_step + 1) * d_state];
                     let ct = &self.c[group_step * d_state..(group_step + 1) * d_state];
                     let xt = &self.x[step * head_dim..(step + 1) * head_dim];
                     // SAFETY: step `t` of head `h` in batch row `bi` is this item's alone
                     let yt = unsafe { out.slice(step * head_dim, head_dim) };
+                    if a_per_state {
+                        for (decay, &a) in decays.iter_mut().zip(&self.a[h * d_state..]) {
+                            *decay = (dt_t * a).exp();
+                        }
+                    }
                     for (p, row) in s.chunks_exact_mut(d_state).enumerate() {
-                        yt[p] =
-                            state_row_step(row, bt, ct, decay, dt_t * xt[p]) + self.d[h] * xt[p];
+                        let dtx = dt_t * xt[p];
+                        let carried = if a_per_state {
+                            state_row_step_per_item(row, bt, ct, &decays, dtx)
+                        } else {
+                            state_row_step(row, bt, ct, decay, dtx)
+                        };
+                        yt[p] = carried + self.d[h] * xt[p];
                     }
                 }
             }
@@ -463,6 +489,65 @@ mod tests {
             pool.narrow(0, 1, 1)?.flatten_all()?.to_vec1::<f32>()?,
             before.narrow(0, 1, 1)?.flatten_all()?.to_vec1::<f32>()?
         );
+        Ok(())
+    }
+
+    // Mamba 1: each channel a head of width 1, one group, A per (channel, state item); against the recurrence
+    // written out per step
+    #[test]
+    fn a_scan_with_a_per_state_item_follows_the_recurrence() -> Result<()> {
+        const CHANNELS: usize = 6;
+        const STATE: usize = 5;
+        const SEQ: usize = 7;
+        let inputs = [
+            rand(&[1, SEQ, CHANNELS, 1])?,
+            rand(&[1, SEQ, CHANNELS])?,
+            (rand(&[CHANNELS, STATE])?.abs()? * -1.0)?,
+            rand(&[1, SEQ, 1, STATE])?,
+            rand(&[1, SEQ, 1, STATE])?,
+            rand(&[CHANNELS])?,
+            rand(&[CHANNELS])?,
+        ];
+        let initial = rand(&[1, CHANNELS, 1, STATE])?;
+        let mut state = initial.copy()?;
+        let y = selective_scan_cpu(
+            SelectiveScan {
+                x: &inputs[0],
+                dt: &inputs[1],
+                a: &inputs[2],
+                b: &inputs[3],
+                c: &inputs[4],
+                d: &inputs[5],
+                dt_bias: &inputs[6],
+                dt_min: 0.0,
+                dt_max: f32::MAX,
+            },
+            &mut state,
+        )?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+        let [x, dt, a, b, c, d, bias] =
+            inputs.map(|t| t.flatten_all().unwrap().to_vec1::<f32>().unwrap());
+        let mut h = initial.flatten_all()?.to_vec1::<f32>()?;
+        for t in 0..SEQ {
+            for ch in 0..CHANNELS {
+                let step = (1.0 + (dt[t * CHANNELS + ch] + bias[ch]).exp()).ln();
+                let xt = x[t * CHANNELS + ch];
+                let mut want = d[ch] * xt;
+                for n in 0..STATE {
+                    let i = ch * STATE + n;
+                    h[i] = h[i] * (step * a[i]).exp() + step * b[t * STATE + n] * xt;
+                    want += h[i] * c[t * STATE + n];
+                }
+                let got = y[t * CHANNELS + ch];
+                assert!(
+                    (got - want).abs() < 1e-5,
+                    "step {t} channel {ch}: {got} vs {want}"
+                );
+            }
+        }
+        let state = state.flatten_all()?.to_vec1::<f32>()?;
+        assert!(state.iter().zip(&h).all(|(s, h)| (s - h).abs() < 1e-5));
         Ok(())
     }
 

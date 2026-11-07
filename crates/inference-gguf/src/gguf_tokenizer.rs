@@ -32,6 +32,12 @@ const GPT2_REGEX: &str =
 const LLAMA3_REGEX: &str = "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
 const QWEN2_REGEX: &str = "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
 const QWEN35_REGEX: &str = "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?[\\p{L}\\p{M}]+|\\p{N}| ?[^\\s\\p{L}\\p{M}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
+// llama.cpp's falcon split: runs of punctuation, GPT-2's split, then digits in threes
+const FALCON_REGEXES: &[&str] = &[
+    "[\\p{P}\\$\\+<=>\\^~\\|`]+",
+    "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)",
+    "[0-9][0-9][0-9]",
+];
 const DEEPSEEK_LLM_REGEXES: &[&str] = &[
     r"[\r\n]",
     r"\s?[A-Za-z\x{b5}\x{c0}-\x{d6}\x{d8}-\x{f6}\x{f8}-\x{1ba}\x{1bc}-\x{1bf}\x{1c4}-\x{293}\x{295}-\x{2af}\x{370}-\x{373}\x{376}\x{377}\x{37b}-\x{37d}\x{37f}\x{386}\x{388}-\x{38a}\x{38c}\x{38e}-\x{3a1}\x{3a3}-\x{3f5}\x{3f7}-\x{481}\x{48a}-\x{52f}\x{531}-\x{556}\x{10a0}-\x{10c5}\x{13a0}-\x{13f5}\x{13f8}-\x{13fd}\x{1c90}-\x{1cba}\x{1cbd}-\x{1cbf}\x{1d00}-\x{1d2b}\x{1d6b}-\x{1d77}\x{1d79}-\x{1d9a}\x{1e00}-\x{1f15}\x{1f18}-\x{1f1d}\x{1f20}-\x{1f45}\x{1f48}-\x{1f4d}\x{1f50}-\x{1f57}\x{1f59}\x{1f5b}\x{1f5d}\x{1f5f}-\x{1f7d}\x{1f80}-\x{1fb4}\x{1fb6}-\x{1fbc}\x{1fbe}\x{1fc2}-\x{1fc4}\x{1fc6}-\x{1fcc}\x{1fd0}-\x{1fd3}\x{1fd6}-\x{1fdb}\x{1fe0}-\x{1fec}\x{1ff2}-\x{1ff4}\x{1ff6}-\x{1ffc}\x{2102}\x{2107}\x{210a}-\x{2113}\x{2115}\x{2119}-\x{211d}\x{2124}\x{2126}\x{2128}\x{212a}-\x{212d}\x{212f}-\x{2134}\x{2139}\x{213c}-\x{213f}\x{2145}-\x{2149}\x{214e}\x{2183}\x{2184}\x{2c00}-\x{2c7b}\x{2c7e}-\x{2ce4}\x{2ceb}-\x{2cee}\x{2cf2}\x{2cf3}\x{a640}-\x{a66d}\x{a680}-\x{a69b}\x{a722}-\x{a76f}\x{a771}-\x{a787}\x{a78b}-\x{a78e}\x{ab70}-\x{abbf}\x{fb00}-\x{fb06}\x{fb13}-\x{fb17}\x{ff21}-\x{ff3a}\x{ff41}-\x{ff5a}\x{10400}-\x{1044f}\x{104b0}-\x{104d3}\x{104d8}-\x{104fb}\x{10c80}-\x{10cb2}\x{10cc0}-\x{10cf2}\x{118a0}-\x{118df}\x{1e900}-\x{1e943}]+",
@@ -555,6 +561,7 @@ enum BpePreTokenizerKind {
     DeepSeekV3,
     Gpt4O,
     Tekken,
+    Falcon,
 }
 
 #[derive(Debug)]
@@ -645,6 +652,12 @@ fn bpe_pre_tokenizer_spec(pre: Option<&str>) -> Result<BpePreTokenizerSpec> {
         "gpt-4o" | "llama4" => BpePreTokenizerSpec {
             kind: BpePreTokenizerKind::Gpt4O,
             regexes: &[GPT4O_REGEX],
+            ignore_merges: false,
+            normalize_nfc: false,
+        },
+        "falcon" => BpePreTokenizerSpec {
+            kind: BpePreTokenizerKind::Falcon,
+            regexes: FALCON_REGEXES,
             ignore_merges: false,
             normalize_nfc: false,
         },
@@ -1662,6 +1675,7 @@ mod tests {
                 3,
             ),
             ("hunyuan", BpePreTokenizerKind::Qwen2, false, false, 1),
+            ("falcon", BpePreTokenizerKind::Falcon, false, false, 3),
             ("gpt-4o", BpePreTokenizerKind::Gpt4O, false, false, 1),
             ("tekken", BpePreTokenizerKind::Tekken, true, false, 1),
         ];

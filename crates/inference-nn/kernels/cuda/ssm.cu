@@ -14,6 +14,9 @@
 
 #define WARP_SIZE 32
 #define GATED_NORM_THREADS 256
+// Mamba 1's scan: a thread per channel, its state items in registers
+#define MAMBA1_STATE 16
+#define MAMBA1_THREADS 128
 
 static __device__ __forceinline__ float warp_reduce_sum(float x) {
 #pragma unroll
@@ -26,7 +29,8 @@ static __device__ __forceinline__ float warp_reduce_sum(float x) {
 // Mamba-2 SSM scan: each warp runs one (head, head_offset) row across the
 // timesteps, each lane `c_factor` state items. Shapes: x (batch, seq_len,
 // n_heads, head_dim); dt (batch, seq_len, n_heads), before dt_bias and
-// softplus; A, D and dt_bias (n_heads,), A already -exp(A_log); B and C (batch,
+// softplus; D and dt_bias (n_heads,); A already -exp(A_log), (n_heads,) or
+// with a_per_state (n_heads, d_state) as Mamba 1 has it; B and C (batch,
 // seq_len, n_groups, d_state), the heads split evenly over the groups; y
 // (batch, seq_len, n_heads, head_dim). state is (rows, n_heads, head_dim,
 // d_state): row b without slot_indices, else row slot_indices[b], a negative
@@ -40,7 +44,7 @@ __global__ void __launch_bounds__(WARP_SIZE, 1)
                     float *__restrict__ state, float *__restrict__ y,
                     const int32_t *__restrict__ slot_indices, int n_heads,
                     int n_groups, int head_dim, int d_state, int seq_len,
-                    float dt_min, float dt_max) {
+                    float dt_min, float dt_max, int a_per_state) {
   // Grid: (n_heads * head_dim, batch_size)
   const int batch_idx = blockIdx.y;
   const int warp_idx = blockIdx.x;
@@ -65,7 +69,15 @@ __global__ void __launch_bounds__(WARP_SIZE, 1)
     return;
   }
 
-  const float a_val = A[head_idx];
+  const float a_val = A[a_per_state ? 0 : head_idx];
+  float a_state[c_factor];
+#pragma unroll
+  for (int j = 0; j < c_factor; j++) {
+    const int state_off = lane * c_factor + j;
+    a_state[j] = a_per_state && state_off < d_state
+                     ? A[(size_t)head_idx * d_state + state_off]
+                     : a_val;
+  }
   const float d_val = D[head_idx];
   const float dt_bias_val = dt_bias[head_idx];
   const int group = head_idx / (n_heads / n_groups);
@@ -106,7 +118,8 @@ __global__ void __launch_bounds__(WARP_SIZE, 1)
       const float c_val = C[bc_base + state_off];
 
       // state = state * dA + B * x_dt
-      reg_state[j] = reg_state[j] * dA + b_val * x_dt;
+      const float decay = a_per_state ? expf(dt_val * a_state[j]) : dA;
+      reg_state[j] = reg_state[j] * decay + b_val * x_dt;
       state_sum += reg_state[j] * c_val;
     }
 
@@ -126,45 +139,115 @@ __global__ void __launch_bounds__(WARP_SIZE, 1)
 }
 
 template <int c_factor>
-static void launch_ssm_scan(dim3 grid, cudaStream_t stream, const float *x,
-                            const float *dt, const float *A, const float *B,
-                            const float *C, const float *D,
-                            const float *dt_bias, float *state, float *y,
-                            const int32_t *slot_indices, int n_heads,
-                            int n_groups, int head_dim, int d_state,
-                            int seq_len, float dt_min, float dt_max) {
+static void
+launch_ssm_scan(dim3 grid, cudaStream_t stream, const float *x, const float *dt,
+                const float *A, const float *B, const float *C, const float *D,
+                const float *dt_bias, float *state, float *y,
+                const int32_t *slot_indices, int n_heads, int n_groups,
+                int head_dim, int d_state, int seq_len, float dt_min,
+                float dt_max, int a_per_state) {
   ssm_scan_kernel<c_factor><<<grid, WARP_SIZE, 0, stream>>>(
       x, dt, A, B, C, D, dt_bias, state, y, slot_indices, n_heads, n_groups,
-      head_dim, d_state, seq_len, dt_min, dt_max);
+      head_dim, d_state, seq_len, dt_min, dt_max, a_per_state);
 }
 
-extern "C" void
-selective_scan_cuda(const float *x, const float *dt, const float *A,
-                    const float *B, const float *C, const float *D,
-                    const float *dt_bias, float *state, float *y,
-                    const int32_t *slot_indices, int batch_size, int n_heads,
-                    int n_groups, int head_dim, int d_state, int seq_len,
-                    float dt_min, float dt_max, int64_t stream) {
+// Mamba 1 (A per channel and state item, heads of width one, one group): each
+// thread runs one channel's MAMBA1_STATE items across the timesteps, the step's
+// B and C shared by the block. Shapes and slots as ssm_scan_kernel's.
+__global__ void __launch_bounds__(MAMBA1_THREADS) ssm_scan_channels_kernel(
+    const float *__restrict__ x, const float *__restrict__ dt,
+    const float *__restrict__ A, const float *__restrict__ B,
+    const float *__restrict__ C, const float *__restrict__ D,
+    const float *__restrict__ dt_bias, float *__restrict__ state,
+    float *__restrict__ y, const int32_t *__restrict__ slot_indices,
+    int channels, int seq_len, float dt_min, float dt_max) {
+  __shared__ float s_bc[2 * MAMBA1_STATE];
+  const int batch_idx = blockIdx.y;
+  const int ch = blockIdx.x * MAMBA1_THREADS + threadIdx.x;
+  const bool live = ch < channels;
+  const int slot = slot_indices ? slot_indices[batch_idx] : batch_idx;
+  const size_t row = (size_t)batch_idx * seq_len;
+
+  float a[MAMBA1_STATE], h[MAMBA1_STATE];
+  const size_t state_base = ((size_t)slot * channels + ch) * MAMBA1_STATE;
+#pragma unroll
+  for (int n = 0; n < MAMBA1_STATE; n++) {
+    a[n] = live ? A[(size_t)ch * MAMBA1_STATE + n] : 0.0f;
+    h[n] = live && slot >= 0 ? state[state_base + n] : 0.0f;
+  }
+  const float d_val = live ? D[ch] : 0.0f;
+  const float bias = live ? dt_bias[ch] : 0.0f;
+
+  for (int t = 0; t < seq_len; t++) {
+    if (threadIdx.x < 2 * MAMBA1_STATE) {
+      const int n = threadIdx.x % MAMBA1_STATE;
+      const float *src = threadIdx.x < MAMBA1_STATE ? B : C;
+      s_bc[threadIdx.x] = src[(row + t) * MAMBA1_STATE + n];
+    }
+    __syncthreads();
+    if (live) {
+      const size_t at = (row + t) * channels + ch;
+      if (slot < 0) {
+        y[at] = 0.0f;
+      } else {
+        float dt_val = dt[at] + bias;
+        dt_val = (dt_val > 20.0f) ? dt_val : logf(1.0f + expf(dt_val));
+        dt_val = fminf(fmaxf(dt_val, dt_min), dt_max);
+        const float x_val = x[at];
+        const float x_dt = x_val * dt_val;
+        float sum = 0.0f;
+#pragma unroll
+        for (int n = 0; n < MAMBA1_STATE; n++) {
+          h[n] = h[n] * expf(dt_val * a[n]) + s_bc[n] * x_dt;
+          sum += h[n] * s_bc[MAMBA1_STATE + n];
+        }
+        y[at] = sum + d_val * x_val;
+      }
+    }
+    __syncthreads();
+  }
+  if (live && slot >= 0) {
+#pragma unroll
+    for (int n = 0; n < MAMBA1_STATE; n++)
+      state[state_base + n] = h[n];
+  }
+}
+
+extern "C" void selective_scan_cuda(
+    const float *x, const float *dt, const float *A, const float *B,
+    const float *C, const float *D, const float *dt_bias, float *state,
+    float *y, const int32_t *slot_indices, int batch_size, int n_heads,
+    int n_groups, int head_dim, int d_state, int seq_len, float dt_min,
+    float dt_max, int a_per_state, int64_t stream) {
   const cudaStream_t custream = (cudaStream_t)stream;
+  if (a_per_state && head_dim == 1 && n_groups == 1 &&
+      d_state == MAMBA1_STATE) {
+    dim3 channel_grid((n_heads + MAMBA1_THREADS - 1) / MAMBA1_THREADS,
+                      batch_size);
+    ssm_scan_channels_kernel<<<channel_grid, MAMBA1_THREADS, 0, custream>>>(
+        x, dt, A, B, C, D, dt_bias, state, y, slot_indices, n_heads, seq_len,
+        dt_min, dt_max);
+    return;
+  }
   dim3 grid(n_heads * head_dim, batch_size);
   // items per lane: d_state up to 256
   const int c_factor = (d_state + WARP_SIZE - 1) / WARP_SIZE;
   if (c_factor == 1) {
     launch_ssm_scan<1>(grid, custream, x, dt, A, B, C, D, dt_bias, state, y,
                        slot_indices, n_heads, n_groups, head_dim, d_state,
-                       seq_len, dt_min, dt_max);
+                       seq_len, dt_min, dt_max, a_per_state);
   } else if (c_factor == 2) {
     launch_ssm_scan<2>(grid, custream, x, dt, A, B, C, D, dt_bias, state, y,
                        slot_indices, n_heads, n_groups, head_dim, d_state,
-                       seq_len, dt_min, dt_max);
+                       seq_len, dt_min, dt_max, a_per_state);
   } else if (c_factor <= 4) {
     launch_ssm_scan<4>(grid, custream, x, dt, A, B, C, D, dt_bias, state, y,
                        slot_indices, n_heads, n_groups, head_dim, d_state,
-                       seq_len, dt_min, dt_max);
+                       seq_len, dt_min, dt_max, a_per_state);
   } else {
     launch_ssm_scan<8>(grid, custream, x, dt, A, B, C, D, dt_bias, state, y,
                        slot_indices, n_heads, n_groups, head_dim, d_state,
-                       seq_len, dt_min, dt_max);
+                       seq_len, dt_min, dt_max, a_per_state);
   }
 }
 

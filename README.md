@@ -36,7 +36,7 @@ bindings over that ABI, so every surface does the same things.
 
 | | |
 |---|---|
-| **Text** | Llama, Qwen 2-3.8, Qwen3-Next and Qwen3.8-Flash-Next, Gemma 1-4, Mistral, Phi, DeepSeek V2/V3/R1, GLM-4, GPT-OSS, Granite 4, Nemotron-H (Nemotron 3 Nano), Falcon-H1, Mamba-2 (Mamba-Codestral), HunYuan, LFM2 and more, dense and MoE; block-diffusion text with DiffusionGemma |
+| **Text** | Llama, Qwen 2-3.8, Qwen3-Next and Qwen3.8-Flash-Next, Gemma 1-4, Mistral, Phi, DeepSeek V2/V3/R1, GLM-4, GPT-OSS, Granite 4, Nemotron-H (Nemotron 3 Nano), Falcon-H1, Mamba, Falcon-Mamba, Mamba-2 (Mamba-Codestral), HunYuan, LFM2 and more, dense and MoE; block-diffusion text with DiffusionGemma |
 | **Vision and video** | Qwen-VL 2-3.6 and Qwen3.8-Flash-Next, Gemma 3/3n/4, Llama 3.2 Vision and Llama 4, Mistral Small 3, Muse Glimmer, LLaVA, Idefics, SmolVLM, Phi-4-multimodal, MiniCPM-o, PaddleOCR-VL, Nemotron 3.5 Bolt and Super VL, Nemotron 3 Nano Omni (images and video through C-RADIO, from NVIDIA's checkpoint or a GGUF and mmproj) |
 | **Speech recognition** | OpenAI Whisper (tiny to large-v3-turbo) with word timestamps and translation to English; NVIDIA Parakeet (CTC, RNN-T, TDT) and Nemotron streaming ASR, from transformers, `.nemo` or GGUF, with word timestamps and beam search; Nemotron 3.5 Transcribe (30B-A4B), with word timestamps from its CTC head and its own speaker attribution, from NVIDIA's checkpoint or a GGUF pair that fits one 24 GB GPU; Qwen3-ASR, GLM-ASR, Voxtral and Voxtral Realtime |
 | **Audio understanding** | Qwen2-Audio, Audio Flamingo 3 and Music Flamingo, MERaLiON-2, Ultravox and Voxtral: questions about speech, sound and music through chat |

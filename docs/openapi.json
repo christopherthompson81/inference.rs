@@ -10136,6 +10136,8 @@
           "granitemoe_swa",
           "gpt_oss",
           "falcon_h1",
+          "mamba",
+          "falcon_mamba",
           "mamba2",
           "nemotron_h",
           "nemotron_h_puzzle",

@@ -21,6 +21,12 @@ pub fn build_normal_bindings(
     ) {
         return super::nemotron_h_bindings::build_nemotron_h_bindings(archive, architecture);
     }
+    if matches!(
+        loader,
+        NormalLoaderType::Mamba | NormalLoaderType::FalconMamba
+    ) {
+        return mamba1_bindings(archive);
+    }
     // Nemotron-H's tensors with no attention or feed-forward, under transformers' `backbone`
     if matches!(loader, NormalLoaderType::Mamba2) {
         let bindings =
@@ -68,6 +74,50 @@ pub fn build_normal_bindings(
             .iter()
             .map(|(name, binding)| (falcon_h1_name(name), binding.clone()))
             .collect());
+    }
+    Ok(bindings)
+}
+
+const MAMBA1_ROOT: [(&str, &str); 3] = [
+    ("token_embd.weight", "backbone.embeddings.weight"),
+    ("output_norm.weight", "backbone.norm_f.weight"),
+    ("output.weight", "lm_head.weight"),
+];
+
+// llama.cpp's `mamba` GGUF (Mamba 1, Falcon-Mamba) under transformers' names; `ssm_dt` is `dt_proj`, weight and bias
+fn mamba1_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
+    let mut bindings = GgufBindingMap::new();
+    for (source, native) in MAMBA1_ROOT {
+        if archive.tensors().contains_key(source) {
+            bindings.insert(native.to_string(), GgufTensorBinding::tensor(source));
+        }
+    }
+    for name in archive.tensors().keys() {
+        let Some((layer, role, suffix)) = parse_block_tensor(name) else {
+            continue;
+        };
+        let p = format!("backbone.layers.{layer}");
+        let target = match role {
+            "attn_norm" => format!("{p}.norm.{suffix}"),
+            "ssm_in" => format!("{p}.mixer.in_proj.{suffix}"),
+            "ssm_conv1d" => format!("{p}.mixer.conv1d.{suffix}"),
+            "ssm_x" => format!("{p}.mixer.x_proj.{suffix}"),
+            "ssm_dt" => format!("{p}.mixer.dt_proj.{suffix}"),
+            "ssm_a" => format!("{p}.mixer.A_log"),
+            "ssm_d" => format!("{p}.mixer.D"),
+            "ssm_out" => format!("{p}.mixer.out_proj.{suffix}"),
+            _ => continue,
+        };
+        let mut binding = GgufTensorBinding::tensor(name);
+        let shape = archive.tensor_info(name)?.shape().to_vec();
+        binding = match role {
+            "ssm_conv1d" if shape.len() == 2 => binding.reshape(vec![shape[0], 1, shape[1]]),
+            // A per (channel, state item), stored as -exp(A_log)
+            "ssm_a" => binding.affine(-1.0, 0.0).log(),
+            "ssm_d" => binding.reshape(vec![shape.iter().product()]),
+            _ => binding,
+        };
+        bindings.insert(target, binding);
     }
     Ok(bindings)
 }

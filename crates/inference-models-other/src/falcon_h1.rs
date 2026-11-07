@@ -235,6 +235,7 @@ impl Config {
             mamba_f32_state: true,
             mamba_gated_norm: self.mamba_rms_norm,
             mup: self.mup(),
+            mamba1: None,
         })
     }
 }

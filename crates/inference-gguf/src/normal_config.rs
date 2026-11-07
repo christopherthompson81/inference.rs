@@ -239,6 +239,14 @@ pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; NORMAL_LOADER_TYPE_COUN
         loader: NormalLoaderType::Mamba2,
         build: build_mamba2,
     },
+    NormalConfigBuilder {
+        loader: NormalLoaderType::Mamba,
+        build: build_mamba,
+    },
+    NormalConfigBuilder {
+        loader: NormalLoaderType::FalconMamba,
+        build: build_mamba,
+    },
 ];
 
 pub fn synthesize_normal_config(
@@ -1839,6 +1847,55 @@ fn build_mamba2(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     Ok(JsonValue::Object(config))
 }
 
+// Falcon-Mamba is mamba with `ssm.dt_b_c_rms`, which the config carries as its flag for the dt, B and C norms
+fn build_mamba(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
+    let mut config = JsonMap::new();
+    config.insert(
+        "dt_b_c_norm".into(),
+        json!(metadata.optional_bool("ssm.dt_b_c_rms")?.unwrap_or(false)),
+    );
+    config.insert("vocab_size".into(), json!(metadata.vocab_size()?));
+    config.insert(
+        "hidden_size".into(),
+        json!(metadata.required_usize("embedding_length")?),
+    );
+    config.insert(
+        "num_hidden_layers".into(),
+        json!(metadata.required_usize("block_count")?),
+    );
+    config.insert(
+        "intermediate_size".into(),
+        json!(metadata.required_usize("ssm.inner_size")?),
+    );
+    config.insert(
+        "state_size".into(),
+        json!(metadata.required_usize("ssm.state_size")?),
+    );
+    config.insert(
+        "conv_kernel".into(),
+        json!(metadata.required_usize("ssm.conv_kernel")?),
+    );
+    config.insert(
+        "time_step_rank".into(),
+        json!(metadata.required_usize("ssm.time_step_rank")?),
+    );
+    config.insert("layer_norm_epsilon".into(), json!(metadata.norm_epsilon()?));
+    config.insert(
+        "use_conv_bias".into(),
+        json!(metadata.has_tensor_marker(".ssm_conv1d.bias")),
+    );
+    config.insert(
+        "use_bias".into(),
+        json!(metadata.has_tensor_marker(".ssm_in.bias")),
+    );
+    config.insert(
+        "tie_word_embeddings".into(),
+        json!(metadata.tie_word_embeddings()),
+    );
+    config.insert("quantization_config".into(), JsonValue::Null);
+    Ok(JsonValue::Object(config))
+}
+
 fn build_olmoe(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     reject_unsupported_rope_scaling(metadata, "OLMoE")?;
     let intermediate_size = match metadata.optional_usize("expert_feed_forward_length")? {
@@ -3311,7 +3368,7 @@ mod tests {
         pub use inference_models_llama::{llama, mistral, mixtral, smollm3};
         pub use inference_models_other::{
             deepseek, ernie4_5, falcon_h1, glm4, glm4_moe, glm4_moe_lite, gpt_oss, granite,
-            hunyuan_v1_dense, hunyuan_v1_moe, lfm2, mamba2, nemotron_h, olmo, starcoder2,
+            hunyuan_v1_dense, hunyuan_v1_moe, lfm2, mamba, mamba2, nemotron_h, olmo, starcoder2,
         };
         pub use inference_models_phi::{phi2, phi3, phi3_5_moe};
         pub use inference_models_qwen::{qwen1, qwen2, qwen2_moe, qwen3, qwen3_moe, qwen3_next};
@@ -3524,6 +3581,8 @@ mod tests {
                 | NormalLoaderType::NemotronHPuzzle
                 | NormalLoaderType::FalconH1
                 | NormalLoaderType::Mamba2
+                | NormalLoaderType::Mamba
+                | NormalLoaderType::FalconMamba
         ) {
             insert_u32(&mut metadata, architecture, "ssm.conv_kernel", 4);
             insert_u32(&mut metadata, architecture, "ssm.inner_size", 1_024);
@@ -3539,6 +3598,8 @@ mod tests {
                 | NormalLoaderType::NemotronHPuzzle
                 | NormalLoaderType::FalconH1
                 | NormalLoaderType::Mamba2
+                | NormalLoaderType::Mamba
+                | NormalLoaderType::FalconMamba
         ) {
             tensors.extend(
                 ["blk.1.ssm_a.weight", "blk.1.ssm_conv1d.weight"]
@@ -3743,6 +3804,9 @@ mod tests {
             }
             NormalLoaderType::Mamba2 => {
                 assert_deserializes(loader, config, models::mamba2::Config::from_json)
+            }
+            NormalLoaderType::Mamba | NormalLoaderType::FalconMamba => {
+                assert_deserializes(loader, config, models::mamba::Config::from_json)
             }
             NormalLoaderType::GptOss => {
                 assert_deserializes(loader, config, models::gpt_oss::Config::from_json)

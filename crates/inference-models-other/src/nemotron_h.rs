@@ -398,6 +398,7 @@ impl Config {
             mamba_f32_state: self.mamba_ssm_cache_dtype == F32_STATE,
             mamba_gated_norm: true,
             mup: None,
+            mamba1: None,
         })
     }
 }

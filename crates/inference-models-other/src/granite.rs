@@ -204,6 +204,17 @@ pub struct Config {
     pub mamba_gated_norm: bool,
     #[serde(default)]
     pub mup: Option<MupMultipliers>,
+    /// Mamba 1's selection projections in place of Mamba-2's (Mamba, Falcon-Mamba): the heads are its channels.
+    #[serde(default)]
+    pub mamba1: Option<Mamba1Spec>,
+}
+
+/// Mamba 1's mixer: `x_proj` to dt (`dt_rank` wide), B and C after the conv, `dt_proj` back to the channels, and A
+/// per (channel, state item). Falcon-Mamba normalizes dt, B and C (no weight) at `dt_b_c_norm_eps`.
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
+pub struct Mamba1Spec {
+    pub dt_rank: usize,
+    pub dt_b_c_norm_eps: Option<f64>,
 }
 
 /// Falcon-H1's muP multipliers on the activations of a parallel block's attention, Mamba and MLP.
@@ -286,7 +297,11 @@ impl Config {
         self.mamba_f32_state.then_some(DType::F32)
     }
 
+    /// The conv's channels: Mamba-2's x, B and C, Mamba 1's x alone.
     pub fn mamba_conv_dim(&self) -> usize {
+        if self.mamba1.is_some() {
+            return self.mamba_intermediate_size();
+        }
         self.mamba_intermediate_size() + 2 * self.mamba_n_groups * self.mamba_d_state
     }
 }
@@ -1102,9 +1117,46 @@ impl ScanConstants {
     }
 }
 
-/// Mamba2-style mixer layer
+/// Mamba 1's selection: dt, B and C from the conv's output, dt back to the channels with `dt_proj`'s bias (a GGUF linear
+/// carries the bias its file has, so it stays there and the scan's dt bias is zero).
+struct Selection {
+    x_proj: Arc<dyn QuantMethod>,
+    dt_proj: Arc<dyn QuantMethod>,
+    dt_rank: usize,
+    // Falcon-Mamba's weightless RMSNorms over dt and over B and C, unit weights
+    norm: Option<(RmsNorm, RmsNorm)>,
+}
+
+impl Selection {
+    // `x` the conv's output `(..., channels)`: `[b, c, dt]`, dt before its bias
+    fn project(&self, x: &Tensor, d_state: usize) -> Result<[Tensor; 3]> {
+        let flat = x.dims().len() == 2;
+        let x = if flat { x.unsqueeze(1)? } else { x.clone() };
+        let params = self.x_proj.forward(&x)?;
+        let last = inference_tensor::D::Minus1;
+        let mut dt = params.narrow(last, 0, self.dt_rank)?;
+        let mut b = params.narrow(last, self.dt_rank, d_state)?;
+        let mut c = params.narrow(last, self.dt_rank + d_state, d_state)?;
+        if let Some((dt_norm, state_norm)) = &self.norm {
+            // the norm kernel sums its squares in f32, as transformers runs them
+            dt = dt_norm.forward(&dt.contiguous()?)?;
+            b = state_norm.forward(&b.contiguous()?)?;
+            c = state_norm.forward(&c.contiguous()?)?;
+        }
+        // a slice of x_proj's rows, which a GGUF matmul reads as if contiguous
+        let dt = self.dt_proj.forward(&dt.contiguous()?)?;
+        let out = [b, c, dt];
+        if flat {
+            return Ok(out.map(|t| t.squeeze(1).expect("a one-token row")));
+        }
+        Ok(out)
+    }
+}
+
+/// The Mamba mixer: Mamba-2's, or Mamba 1's with a `selection`
 struct MambaLayer {
     in_proj: Arc<dyn QuantMethod>,
+    selection: Option<Selection>,
     conv1d_weight: Tensor,
     conv1d_bias: Option<Tensor>,
     dt_bias: Tensor,
@@ -1156,7 +1208,11 @@ impl MambaLayer {
         let conv_kernel_size = cfg.mamba_d_conv;
         let n_groups = cfg.mamba_n_groups;
 
-        let projection_size = intermediate_size + conv_dim + num_heads;
+        // Mamba 1 projects x and z alone; dt, B and C come after the conv
+        let projection_size = match cfg.mamba1 {
+            Some(_) => 2 * intermediate_size,
+            None => intermediate_size + conv_dim + num_heads,
+        };
         let projection_vb = |name: &str| {
             let vb = vb.pp(name);
             if let Some(device) = isq_target_device {
@@ -1188,8 +1244,49 @@ impl MambaLayer {
         } else {
             vb.clone()
         };
-        let mut dt_bias = params.get(num_heads, "dt_bias")?;
-        let mut a_log = params.get(num_heads, "A_log")?;
+        let selection = cfg
+            .mamba1
+            .as_ref()
+            .map(|spec| -> Result<Selection> {
+                let device = isq_target_device.unwrap_or(vb.device());
+                Ok(Selection {
+                    x_proj: ReplicatedLayer::new(
+                        intermediate_size,
+                        spec.dt_rank + 2 * ssm_state_size,
+                        &cfg.quantization_config,
+                        false,
+                        projection_vb("x_proj"),
+                    )?,
+                    dt_proj: ReplicatedLayer::new(
+                        spec.dt_rank,
+                        intermediate_size,
+                        &cfg.quantization_config,
+                        true,
+                        projection_vb("dt_proj"),
+                    )?,
+                    dt_rank: spec.dt_rank,
+                    norm: spec
+                        .dt_b_c_norm_eps
+                        .map(|eps| -> Result<_> {
+                            let unit = |n: usize| {
+                                RmsNorm::from_w(Tensor::ones(n, vb.dtype(), device)?, eps)
+                            };
+                            Ok((unit(spec.dt_rank)?, unit(ssm_state_size)?))
+                        })
+                        .transpose()?,
+                })
+            })
+            .transpose()?;
+        let (mut dt_bias, mut a_log) = match &selection {
+            Some(_) => (
+                Tensor::zeros(intermediate_size, DType::F32, vb.device())?,
+                params.get((num_heads, ssm_state_size), "A_log")?,
+            ),
+            None => (
+                params.get(num_heads, "dt_bias")?,
+                params.get(num_heads, "A_log")?,
+            ),
+        };
         let mut d = params.get(num_heads, "D")?;
         let norm = cfg
             .mamba_gated_norm
@@ -1248,6 +1345,7 @@ impl MambaLayer {
         let [time_step_min, time_step_max] = cfg.mamba_dt_limit.unwrap_or(NO_DT_LIMIT);
         Ok(Self {
             in_proj,
+            selection,
             conv1d_weight,
             conv1d_bias,
             scan: ScanConstants::new(&a_log, &d, &dt_bias)?,
@@ -1286,6 +1384,14 @@ impl MambaLayer {
     fn projected_parts(&self, x: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
         let groups_time_state_size = self.n_groups * self.ssm_state_size;
         let mut projected = self.in_proj.forward(x)?;
+        if self.selection.is_some() {
+            // x then z; dt comes after the conv, so its slot is empty
+            let last = inference_tensor::D::Minus1;
+            let hidden = projected.narrow(last, 0, self.intermediate_size)?;
+            let gate = projected.narrow(last, self.intermediate_size, self.intermediate_size)?;
+            let dt = projected.narrow(last, 0, 0)?;
+            return Ok((gate, hidden, dt));
+        }
         if let Some(scale) = &self.in_scale {
             projected = projected.broadcast_mul(&scale.to_dtype(projected.dtype())?)?;
         }
@@ -1301,6 +1407,32 @@ impl MambaLayer {
             self.num_heads,
         )?;
         Ok((gate, hidden_states_b_c, dt))
+    }
+
+    // the conv's output as the scan reads it, `[x, b, c, dt]`: Mamba-2's x, B and C slices and the projected dt, or
+    // Mamba 1's x with its selection
+    fn scan_parts(&self, conv_out: &Tensor, dt: &Tensor) -> Result<[Tensor; 4]> {
+        let last = inference_tensor::D::Minus1;
+        let x = conv_out.narrow(last, 0, self.intermediate_size)?;
+        if let Some(selection) = &self.selection {
+            let [b, c, dt] = selection.project(&x, self.ssm_state_size)?;
+            return Ok([x, b, c, dt]);
+        }
+        let groups = self.n_groups * self.ssm_state_size;
+        let b = conv_out.narrow(last, self.intermediate_size, groups)?;
+        let c = conv_out.narrow(last, self.intermediate_size + groups, groups)?;
+        Ok([x, b, c, dt.clone()])
+    }
+
+    // A for every state item, `(heads, head_dim, state)`: Mamba-2's per head, Mamba 1's per (channel, item)
+    fn a_items(&self) -> Result<Tensor> {
+        let a = &self.scan.a;
+        let a = match a.dims().len() {
+            1 => a.unsqueeze(1)?.unsqueeze(2)?,
+            _ => a.unsqueeze(1)?,
+        };
+        a.expand((self.num_heads, self.head_dim, self.ssm_state_size))?
+            .to_dtype(DType::F32)
     }
 
     // a multi-token verify step's pass that also hands back its conv input and dt, for a replay over the kept rows
@@ -1347,7 +1479,13 @@ impl MambaLayer {
         if let Some(bias) = &self.conv1d_bias {
             uvb_conv.add_tensor("bias", bias.clone());
         }
-        uvb.add_tensor("dt_bias", self.dt_bias.clone());
+        match &self.selection {
+            Some(selection) => {
+                uvb.pp("x_proj").add(&selection.x_proj);
+                uvb.pp("dt_proj").add(&selection.dt_proj);
+            }
+            None => uvb.add_tensor("dt_bias", self.dt_bias.clone()),
+        }
         uvb.add_tensor("A_log", self.a_log.clone());
         uvb.add_tensor("D", self.d.clone());
         if let Some(norm) = &self.norm {
@@ -1413,7 +1551,7 @@ impl MambaLayer {
                 ssm_heads,
                 ssm_head_dim,
                 ssm_state_width,
-                expected_conv_dim: self.intermediate_size + 2 * self.n_groups * self.ssm_state_size,
+                expected_conv_dim: self.conv1d_weight.dim(0)?,
                 expected_conv_width: self.conv_kernel_size,
                 expected_ssm_heads: self.num_heads,
                 expected_ssm_head_dim: self.head_dim,
@@ -1537,23 +1675,9 @@ impl MambaLayer {
         batch_size: usize,
         pool_slots: Option<&Tensor>,
     ) -> Result<Tensor> {
-        let groups_time_state_size = self.n_groups * self.ssm_state_size;
-
         let hidden_states_b_c = self.conv_step(hidden_states_b_c, cache, pool_slots)?;
-
-        // Split into hidden_states, B, C
-        let hidden_states =
-            hidden_states_b_c.narrow(inference_tensor::D::Minus1, 0, self.intermediate_size)?;
-        let b = hidden_states_b_c.narrow(
-            inference_tensor::D::Minus1,
-            self.intermediate_size,
-            groups_time_state_size,
-        )?;
-        let c = hidden_states_b_c.narrow(
-            inference_tensor::D::Minus1,
-            self.intermediate_size + groups_time_state_size,
-            groups_time_state_size,
-        )?;
+        let [hidden_states, b, c, dt] = self.scan_parts(&hidden_states_b_c, dt)?;
+        let dt = &dt;
 
         if pool_slots.is_some() && hidden_states.device().is_metal() {
             inference_tensor::bail!(
@@ -1567,8 +1691,6 @@ impl MambaLayer {
         }
 
         // SSM computation for single token
-        let a = self.scan.a.clone();
-
         // dt with bias and softplus
         let dt_dtype = dt.dtype();
         let dt_bias = self
@@ -1587,12 +1709,7 @@ impl MambaLayer {
             .unsqueeze(2)?
             .expand((batch_size, self.num_heads, self.head_dim))?;
 
-        // a: (num_heads) -> (num_heads, head_dim, state_size)
-        let a = a
-            .unsqueeze(1)?
-            .unsqueeze(2)?
-            .expand((self.num_heads, self.head_dim, self.ssm_state_size))?
-            .to_dtype(inference_tensor::DType::F32)?;
+        let a = self.a_items()?;
 
         // dA = exp(dt * A): (batch, num_heads, head_dim, state_size)
         let da = dt
@@ -1712,6 +1829,7 @@ impl MambaLayer {
         } else if let Some(slots) = pool_slots.filter(|_| {
             x.device().is_vulkan()
                 && self.ssm_state_size == inference_tensor::vulkan::SCAN_STEP_STATE
+                && self.selection.is_none()
         }) {
             inference_tensor::vulkan::ssm_scan_step(&inference_tensor::vulkan::ScanStep {
                 x: &x.contiguous()?,
@@ -1917,23 +2035,9 @@ impl MambaLayer {
         batch_size: usize,
         seq_len: usize,
     ) -> Result<Tensor> {
-        let groups_time_state_size = self.n_groups * self.ssm_state_size;
-
         let hidden_states_b_c = self.conv_prefill(hidden_states_b_c, cache)?;
-
-        // Split into hidden_states, B, C
-        let hidden_states =
-            hidden_states_b_c.narrow(inference_tensor::D::Minus1, 0, self.intermediate_size)?;
-        let b = hidden_states_b_c.narrow(
-            inference_tensor::D::Minus1,
-            self.intermediate_size,
-            groups_time_state_size,
-        )?;
-        let c = hidden_states_b_c.narrow(
-            inference_tensor::D::Minus1,
-            self.intermediate_size + groups_time_state_size,
-            groups_time_state_size,
-        )?;
+        let [hidden_states, b, c, dt] = self.scan_parts(&hidden_states_b_c, dt)?;
+        let dt = &dt;
 
         // Reshape for SSM first
         let hidden_states = hidden_states
@@ -1965,8 +2069,9 @@ impl MambaLayer {
         #[cfg(not(feature = "cuda"))]
         let use_cuda = false;
 
+        // Metal's scan takes A per head, which Mamba 1's per-item A is not
         #[cfg(feature = "metal")]
-        let use_metal = hidden_states.device().is_metal();
+        let use_metal = hidden_states.device().is_metal() && self.selection.is_none();
         #[cfg(not(feature = "metal"))]
         let use_metal = false;
 
@@ -2016,6 +2121,7 @@ impl MambaLayer {
             y.reshape((batch_size, seq_len, self.intermediate_size))
         } else if hidden_states.device().is_vulkan()
             && self.ssm_state_size == inference_tensor::vulkan::SCAN_STEP_STATE
+            && self.selection.is_none()
         {
             // the kernel advances the state in place, and a gathered state may share a snapshot's storage
             let ssm_state = cache
@@ -2085,7 +2191,7 @@ impl MambaLayer {
                 let c_t = c.i((.., t, .., ..))?;
 
                 // dA = exp(dt * A)
-                let a_expanded = a.unsqueeze(0)?.unsqueeze(2)?.unsqueeze(3)?.expand((
+                let a_expanded = self.a_items()?.unsqueeze(0)?.expand((
                     batch_size,
                     self.num_heads,
                     self.head_dim,
@@ -4861,6 +4967,7 @@ impl AnyMoeBaseModelMixin for GraniteMoeHybrid {
                             mamba_f32_state: false,
                             mamba_gated_norm: true,
                             mup: None,
+                            mamba1: None,
                         };
                         row.push(Box::new(GraniteMlp::new(
                             vb.pp(layer_idx)
@@ -4966,6 +5073,7 @@ mod tests {
         )?;
         Ok(MambaLayer {
             in_proj: unquant_linear(in_proj_weight, Some(in_proj_bias))?,
+            selection: None,
             conv1d_weight: Tensor::from_vec(
                 patterned(CONV_DIM * CONV_WIDTH, 5, 0.08, 0.01),
                 (CONV_DIM, 1, CONV_WIDTH),
