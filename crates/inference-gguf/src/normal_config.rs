@@ -251,6 +251,10 @@ pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; NORMAL_LOADER_TYPE_COUN
         loader: NormalLoaderType::Jamba,
         build: build_jamba,
     },
+    NormalConfigBuilder {
+        loader: NormalLoaderType::Rwkv7,
+        build: build_rwkv7,
+    },
 ];
 
 pub fn synthesize_normal_config(
@@ -2002,6 +2006,42 @@ fn build_jamba(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     Ok(JsonValue::Object(config))
 }
 
+fn build_rwkv7(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
+    let mut config = JsonMap::new();
+    config.insert("vocab_size".into(), json!(metadata.vocab_size()?));
+    config.insert(
+        "hidden_size".into(),
+        json!(metadata.required_usize("embedding_length")?),
+    );
+    config.insert(
+        "num_hidden_layers".into(),
+        json!(metadata.required_usize("block_count")?),
+    );
+    config.insert(
+        "head_dim".into(),
+        json!(metadata.required_usize("wkv.head_size")?),
+    );
+    config.insert(
+        "intermediate_size".into(),
+        json!(metadata.required_uniform_usize("feed_forward_length")?),
+    );
+    config.insert("norm_eps".into(), json!(metadata.norm_epsilon()?));
+    for (key, suffix) in [
+        ("decay_low_rank_dim", "attention.decay_lora_rank"),
+        ("a_low_rank_dim", "attention.iclr_lora_rank"),
+        ("v_low_rank_dim", "attention.value_residual_mix_lora_rank"),
+        ("gate_low_rank_dim", "attention.gate_lora_rank"),
+    ] {
+        config.insert(key.into(), json!(metadata.required_usize(suffix)?));
+    }
+    config.insert(
+        "tie_word_embeddings".into(),
+        json!(metadata.tie_word_embeddings()),
+    );
+    config.insert("quantization_config".into(), JsonValue::Null);
+    Ok(JsonValue::Object(config))
+}
+
 fn build_olmoe(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     reject_unsupported_rope_scaling(metadata, "OLMoE")?;
     let intermediate_size = match metadata.optional_usize("expert_feed_forward_length")? {
@@ -3474,7 +3514,7 @@ mod tests {
         pub use inference_models_llama::{llama, mistral, mixtral, smollm3};
         pub use inference_models_other::{
             deepseek, ernie4_5, falcon_h1, glm4, glm4_moe, glm4_moe_lite, gpt_oss, granite,
-            hunyuan_v1_dense, hunyuan_v1_moe, jamba, lfm2, mamba, mamba2, nemotron_h, olmo,
+            hunyuan_v1_dense, hunyuan_v1_moe, jamba, lfm2, mamba, mamba2, nemotron_h, olmo, rwkv7,
             starcoder2,
         };
         pub use inference_models_phi::{phi2, phi3, phi3_5_moe};
@@ -3716,6 +3756,18 @@ mod tests {
                     .map(str::to_string),
             );
         }
+        if matches!(loader, NormalLoaderType::Rwkv7) {
+            insert_u32(&mut metadata, architecture, "wkv.head_size", 64);
+            for suffix in [
+                "attention.decay_lora_rank",
+                "attention.iclr_lora_rank",
+                "attention.value_residual_mix_lora_rank",
+                "attention.gate_lora_rank",
+            ] {
+                insert_u32(&mut metadata, architecture, suffix, 32);
+            }
+            tensors.push("blk.0.time_mix_lerp_fused.weight".to_string());
+        }
         if matches!(
             loader,
             NormalLoaderType::Qwen3Next
@@ -3919,6 +3971,9 @@ mod tests {
             }
             NormalLoaderType::Jamba => {
                 assert_deserializes(loader, config, models::jamba::Config::from_json)
+            }
+            NormalLoaderType::Rwkv7 => {
+                assert_deserializes(loader, config, models::rwkv7::Config::from_json)
             }
             NormalLoaderType::GptOss => {
                 assert_deserializes(loader, config, models::gpt_oss::Config::from_json)

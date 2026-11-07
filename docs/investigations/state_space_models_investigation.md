@@ -206,3 +206,97 @@ The tiny test (`mamba_tiny`) takes a Jamba kind: Mamba 1 + MoE, NoPE attention +
 it prefills, resumes from the prefix cache, and scores on CUDA as on the CPU.
 
 Next: step 3, RWKV 6/7.
+
+## Run 5 - 2026-11-07 14:30
+
+Question: step 3's first part. Does RWKV-7 (flash-linear-attention's `RWKV7ForCausalLM`, llama.cpp's `rwkv7` GGUF)
+run on the hybrid cache's recurrent plumbing, and what does its world tokenizer need?
+
+Reference read: llama.cpp 970b51ce7 `src/models/rwkv7-base.cpp`, `rwkv7.cpp`, `ggml-cpu/ops.cpp`
+(`ggml_compute_forward_rwkv_wkv7_f32`), `ggml-cuda/wkv.cu`, `conversion/rwkv.py`, `llama-vocab.cpp`
+(`llm_tokenizer_rwkv`); the fla-hub/rwkv7-191M-world checkpoint's tensors.
+
+- A layer: token shift (a lerp with the previous token, six mixes), r/k/v projections, decay
+  `exp(-0.6065 sigmoid(w0 + w2 tanh(w1 x)))`, the in-context rate `a = sigmoid(a0 + a2 a1 x)`, the value mixed toward
+  the first layer's `v` (`v_lora`, absent on layer 0), the gate `g2 sigmoid(g1 x)`, `kk` = L2-normed `k * k_k` per
+  head, `k (1 + (a - 1) k_a)`; then WKV-7 with `a = -kk`, `b = kk * a`: per head `S = S diag(w) + v k^T + (S a) b^T`,
+  `y = S r`; a group norm per head (eps `head_dim * norm_eps`), the bonus `(r . k r_k) v`, the gate, `o_proj`. The
+  channel-mix: token shift, `value(relu(key(x))^2)`. LayerNorms with biases, a `pre_norm` on layer 0's input.
+- The world tokenizer is a greedy longest match over 65,529 byte tokens (up to 128 bytes). The HF tokenizer is
+  Python remote code; one RWKV HF conversion carries a stray GPT-NeoX tokenizer.json (50,254 tokens).
+
+Built:
+
+- The tokenizer as a Hugging Face one: bytes mapped to GPT-2's byte-level characters, a split by one regex alternating
+  every token longest first (fancy-regex hands it to `regex`, whose leftmost-first semantics take the longest token at
+  each position), then a whole-piece lookup. WordPiece is a greedy longest match too, but tries every end of the word
+  from its end down: with the prompt as one word that is quadratic, and no byte splits the text where the greedy match
+  cannot cross (spaces and newlines sit inside tokens; only control and some lead bytes never do). On the 191M's
+  vocabulary: built in 0.3 s; 3 KB of README.md gives llama.cpp's 1,051 tokens exactly; 300 KB tokenizes in 50 ms and
+  equals a written-out greedy match (but for a literal `<s>`, which it reads as the special token, as HF does).
+- The WKV-7 op: CPU (per head over the barrier pool) and CUDA (llama.cpp's kernel: a block per (sequence, head), a
+  thread per state row in registers), state f32 `(batch, heads, N, N)` advanced in place.
+- `rwkv7.rs` on the hybrid cache: every layer recurrent, its two shifted inputs in the conv slot (`2 * hidden`, width
+  one), its WKV matrices `Opaque [heads, N, N]` f32; LFM2's gather and scatter per layer, a first chunk from zero. No
+  paged attention, as Mamba-2.
+- The `rwkv7` GGUF binding (the fused lerp split into the six mixes, `r_k` back to `(heads, N)`), the `rwkv` tokenizer
+  model, and the world vocabulary file read where a checkpoint has no tokenizer.json (and over a stray one).
+
+Fixes on the way:
+
+- A generation config's end tokens were turned into strings by decoding, then looked up as vocabulary keys: a
+  byte-level token's decoded text is not its key (`"\n\n"` against `"ĊĊ"`). They are looked up by `id_to_token` now; a
+  text end token (RWKV's tokenizer_config says `"\n\n"`) falls back to its encoding when that is one token.
+- llama.cpp GGUFs may name a built-in template (`rwkv-world`) instead of carrying one; the name was rendered as the
+  prompt. The named template now reads as llama.cpp's jinja for it.
+- Some RWKV GGUFs name ids 1 and 2 (the `\x00` and `\x01` bytes, from fla's config) as BOS and EOS; token 0 is the
+  vocabulary's end of text, as its tokenizer.json has it, and is all three now.
+
+```
+gguf_perplexity_parity.sh rwkv7-191m-f32 (llama.cpp's convert of the fla checkpoint):  ref 1.6759, ours 1.6747
+checkpoint against our GGUF (F32, CPU, 417 tokens):  same tokens, mean KL 0.00, top-1 1.000
+gguf_perplexity_parity.sh rwkv7-1.5B-world.Q8_0 (mradermacher):  ref 1.4331, ours 1.4334
+```
+
+| on the 3090, against llama.cpp `llama-bench` | ours | llama.cpp |
+|---|---|---|
+| 191M F32, decode 400 tokens | 204.6 tok/s | tg128 520.42 |
+| 191M F32, prefill 4,215 tokens | 42,576 tok/s | pp4096 36,721 |
+| 1.5B Q8_0, decode 400 tokens | 91.3 / 92.6 tok/s | tg128 209.59 |
+| 1.5B Q8_0, prefill 4,215 tokens | 10,538 tok/s | pp4096 9,844 |
+
+Decode is launch-bound. nsys over 100 decode steps of the 1.5B: about 2,000 kernels a token, 6.4 ms of GPU time, the
+quantized matmuls 27% of it; the rest small element-wise kernels (per layer about 10 f32 multiplies, 7 casts, 9 adds)
+at 1.5-2 us each. Decode graphs do not capture (only the paged path captures, and a model with no attention layer
+runs without it). Converting the per-step parameter casts once at load did not move it (84-85 tok/s). Next: fuse the
+element-wise chains (the six token-shift mixes; `kk`, `k` and `a`; the group norm, bonus and gate) into a few kernels.
+
+Chat on the 1.5B (`rwkv-world`, thinking on by default as llama.cpp's template has it): "What is the capital of
+France?" -> reasoning "The capital of France is Paris."; with thinking off, the same as content. Three requests at once
+decode as each does alone.
+
+## Run 6 - 2026-11-07 15:30
+
+Question: does fusing RWKV-7's element-wise chains close Run 5's decode gap?
+
+Two kernels beside WKV-7, each with the CPU composite it replaces as the op's CPU path (`ops::rwkv7_token_shift`,
+`ops::rwkv7_time_mix`):
+
+- the token shift: every mix of a layer's input in one pass (`x + (prev - x) * mix`, the previous token from the input
+  itself and the state's last before the first), the sequence's last token out as the new state;
+- the time-mix from its projections to `o_proj`, inside the WKV kernel's block per (sequence, head): the decay, rate
+  and value mix, `kk` (an L2 norm by a sum over the head's 64 threads) and `k`, the state update, the group norm (two
+  sums), the bonus (one sum) and the gate, reading and writing the activations' dtype.
+
+```
+gpu case cuda_rwkv7_fused_time_mix_matches_the_composite (f32, with and without the value mix): within 1e-4
+rwkv7_tiny, CUDA against the CPU: within 5e-3
+gguf_perplexity_parity.sh rwkv7-1.5B-world.Q8_0: ref 1.4331, ours 1.4322; rwkv7-191m-f32: ref 1.6759, ours 1.6754
+```
+
+| on the 3090 | Run 5 | fused | llama.cpp |
+|---|---|---|---|
+| 1.5B Q8_0 decode, 400 tokens | 91.3 / 92.6 tok/s | 219.3 / 219.8 tok/s | tg128 209.59 |
+| 1.5B Q8_0 prefill, 4,215 tokens | 10,538 tok/s | 13,090 tok/s | pp4096 9,844 |
+| 191M F32 decode | 204.6 tok/s | 500.0 tok/s | tg128 520.42 |
+| 191M F32 prefill | 42,576 tok/s | 40,922 tok/s | pp4096 36,721 |

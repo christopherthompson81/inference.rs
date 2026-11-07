@@ -30,6 +30,9 @@ pub fn build_normal_bindings(
     if matches!(loader, NormalLoaderType::Jamba) {
         return mamba1_bindings(archive, &JAMBA_NAMES);
     }
+    if matches!(loader, NormalLoaderType::Rwkv7) {
+        return rwkv7_bindings(archive);
+    }
     // Nemotron-H's tensors with no attention or feed-forward, under transformers' `backbone`
     if matches!(loader, NormalLoaderType::Mamba2) {
         let bindings =
@@ -169,6 +172,125 @@ fn mamba1_bindings(archive: &GgufArchive, names: &Mamba1Names) -> Result<GgufBin
             // transformers routes in f32
             "ffn_gate_inp" => binding.cast(DType::F32),
             _ => binding,
+        };
+        bindings.insert(target, binding);
+    }
+    Ok(bindings)
+}
+
+// llama.cpp fuses the six token-shift mixes along the first dim in this order
+const RWKV7_MIXES: [&str; 6] = ["x_r", "x_w", "x_k", "x_v", "x_a", "x_g"];
+const RWKV7_ROOT: [(&str, &str); 6] = [
+    ("token_embd.weight", "model.embeddings.weight"),
+    ("token_embd_norm.weight", "model.layers.0.pre_norm.weight"),
+    ("token_embd_norm.bias", "model.layers.0.pre_norm.bias"),
+    ("output_norm.weight", "model.norm.weight"),
+    ("output_norm.bias", "model.norm.bias"),
+    ("output.weight", "lm_head.weight"),
+];
+
+// llama.cpp's `rwkv7` GGUF under flash-linear-attention's names; its LoRAs are fla's as they are (`w1` the down
+// projection, `w2` the up, `w0` the up's bias)
+fn rwkv7_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
+    let head_size = metadata_usize(archive, "rwkv7.wkv.head_size")?;
+    let mut bindings = GgufBindingMap::new();
+    for (source, native) in RWKV7_ROOT {
+        if archive.tensors().contains_key(source) {
+            bindings.insert(native.to_string(), GgufTensorBinding::tensor(source));
+        }
+    }
+    for name in archive.tensors().keys() {
+        let Some((layer, role, suffix)) = parse_block_tensor(name) else {
+            continue;
+        };
+        let (p, a) = (
+            format!("model.layers.{layer}"),
+            format!("model.layers.{layer}.attn"),
+        );
+        let shape = archive.tensor_info(name)?.shape().to_vec();
+        let flat = || GgufTensorBinding::tensor(name).reshape(vec![shape.iter().product()]);
+        if role == "time_mix_lerp_fused" {
+            let width = shape.iter().product::<usize>() / RWKV7_MIXES.len();
+            for (i, mix) in RWKV7_MIXES.iter().enumerate() {
+                let binding = GgufTensorBinding::tensor(name)
+                    .reshape(vec![RWKV7_MIXES.len(), width])
+                    .slice(0, i, 1)
+                    .reshape(vec![1, 1, width]);
+                bindings.insert(format!("{a}.{mix}"), binding);
+            }
+            continue;
+        }
+        let lora = |which: &str, part: &str| format!("{a}.{which}_lora.lora.{part}");
+        let (target, binding) = match role {
+            "attn_norm" => (
+                format!("{p}.attn_norm.{suffix}"),
+                GgufTensorBinding::tensor(name),
+            ),
+            "attn_norm_2" => (
+                format!("{p}.ffn_norm.{suffix}"),
+                GgufTensorBinding::tensor(name),
+            ),
+            "time_mix_receptance" => (
+                format!("{a}.r_proj.{suffix}"),
+                GgufTensorBinding::tensor(name),
+            ),
+            "time_mix_key" => (
+                format!("{a}.k_proj.{suffix}"),
+                GgufTensorBinding::tensor(name),
+            ),
+            "time_mix_value" => (
+                format!("{a}.v_proj.{suffix}"),
+                GgufTensorBinding::tensor(name),
+            ),
+            "time_mix_output" => (
+                format!("{a}.o_proj.{suffix}"),
+                GgufTensorBinding::tensor(name),
+            ),
+            "time_mix_ln" => (
+                format!("{a}.g_norm.{suffix}"),
+                GgufTensorBinding::tensor(name),
+            ),
+            "time_mix_k_k" => (format!("{a}.k_k"), flat()),
+            "time_mix_k_a" => (format!("{a}.k_a"), flat()),
+            // flattened by the converter, `(heads, head_size)` in the checkpoint
+            "time_mix_r_k" => {
+                let width = shape.iter().product::<usize>();
+                let binding =
+                    GgufTensorBinding::tensor(name).reshape(vec![width / head_size, head_size]);
+                (format!("{a}.r_k"), binding)
+            }
+            "channel_mix_key" => (
+                format!("{p}.ffn.key.{suffix}"),
+                GgufTensorBinding::tensor(name),
+            ),
+            "channel_mix_value" => (
+                format!("{p}.ffn.value.{suffix}"),
+                GgufTensorBinding::tensor(name),
+            ),
+            "channel_mix_lerp_k" => (format!("{p}.ffn.x_k"), flat()),
+            role => {
+                let Some((which, part)) = role
+                    .strip_prefix("time_mix_")
+                    .and_then(|rest| rest.split_at_checked(1))
+                    .filter(|(which, part)| {
+                        matches!(*which, "w" | "a" | "v" | "g") && part.len() == 1
+                    })
+                else {
+                    continue;
+                };
+                match part {
+                    "0" => (format!("{}.bias", lora(which, "2")), flat()),
+                    "1" => (
+                        format!("{}.weight", lora(which, "0")),
+                        GgufTensorBinding::tensor(name),
+                    ),
+                    "2" => (
+                        format!("{}.weight", lora(which, "2")),
+                        GgufTensorBinding::tensor(name),
+                    ),
+                    _ => continue,
+                }
+            }
         };
         bindings.insert(target, binding);
     }

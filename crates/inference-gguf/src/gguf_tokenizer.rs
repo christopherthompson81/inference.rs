@@ -27,6 +27,7 @@ use tracing::info;
 type BpeVocab = AHashMap<String, u32>;
 type BpeMerges = Vec<(String, String)>;
 
+const RWKV_TOKENIZER_MODEL: &str = "rwkv";
 const GPT2_REGEX: &str =
     "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)";
 const LLAMA3_REGEX: &str = "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
@@ -245,6 +246,17 @@ pub fn convert_gguf_metadata_to_hf_tokenizer(
         "gpt2" => bpe_tokenizer(&props)?,
         WORDPIECE_TOKENIZER_MODEL => wordpiece_tokenizer(&props, &token_types, values)?,
         SPM_UNIGRAM_TOKENIZER_MODEL => spm_unigram_tokenizer(&props, values)?,
+        RWKV_TOKENIZER_MODEL => {
+            let tokens = props
+                .tokens
+                .iter()
+                .map(|t| crate::rwkv_tokenizer::unescape_gguf_rwkv_token(t))
+                .collect::<Vec<_>>();
+            (
+                crate::rwkv_tokenizer::rwkv_world_tokenizer(&tokens)?,
+                TokenizerKind::GreedyTrie,
+            )
+        }
         other => {
             anyhow::bail!("Tokenizer model `{other}` not supported.");
         }
@@ -292,21 +304,22 @@ pub fn convert_gguf_metadata_to_hf_tokenizer(
         info!("Tokenizer: {tokenizer:?}");
     }
 
-    let unk = match props.unk {
-        Some(u) => Some(props.tokens[u as usize].clone()),
-        _ => None,
-    };
-
-    let bos = match props.bos {
-        Some(b) => Some(props.tokens[b as usize].clone()),
-        None => None,
-    };
-
+    // RWKV's world vocabulary ends a text with token 0 and holds raw bytes from id 1, which some conversions name as
+    // BOS and EOS (`\x00`, `\x01`, from fla's config): its token 0 is all three, as its tokenizer.json has it
+    if props.model == RWKV_TOKENIZER_MODEL {
+        let end = tokenizer.id_to_token(0);
+        return Ok(GgufTokenizerConversion {
+            bos: end.clone(),
+            eos: end.clone(),
+            unk: end,
+            tokenizer,
+        });
+    }
     Ok(GgufTokenizerConversion {
-        tokenizer,
-        bos,
+        bos: props.bos.map(|b| props.tokens[b as usize].clone()),
         eos: Some(props.tokens[props.eos as usize].clone()),
-        unk,
+        unk: props.unk.map(|u| props.tokens[u as usize].clone()),
+        tokenizer,
     })
 }
 
@@ -546,6 +559,8 @@ enum TokenizerKind {
     Unigram,
     Bpe,
     WordPiece,
+    // RWKV's longest match at each position
+    GreedyTrie,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

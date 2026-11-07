@@ -50,6 +50,7 @@ mod neo_bert;
 mod nomic_bert;
 mod olmo;
 mod paddleocr_vl;
+mod rwkv7;
 mod starcoder2;
 
 #[cfg(test)]
@@ -83,6 +84,7 @@ pub use neo_bert::*;
 pub use nomic_bert::*;
 pub use olmo::*;
 pub use paddleocr_vl::*;
+pub use rwkv7::*;
 pub use starcoder2::*;
 
 inference_nn::boxed_loaders!(
@@ -94,6 +96,7 @@ inference_nn::boxed_loaders!(
     FalconH1Loader,
     JambaLoader,
     MambaLoader,
+    Rwkv7Loader,
     Mamba2Loader,
     GLM4Loader,
     GLM4MoeLiteLoader,

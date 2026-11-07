@@ -52,6 +52,7 @@ pub mod paddleocr_vl;
 #[cfg(test)]
 mod paddleocr_vl_tests;
 mod rope_encoder;
+pub mod rwkv7;
 pub mod starcoder2;
 #[cfg(test)]
 mod starcoder2_tests;
@@ -87,5 +88,6 @@ inference_nn::json_config!(
     olmo::OlmoeConfig,
     lfm2_vl::config::Config,
     paddleocr_vl::config::Config,
+    rwkv7::Config,
     starcoder2::Config,
 );

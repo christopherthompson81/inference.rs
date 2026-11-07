@@ -257,6 +257,8 @@ inference_tensor::gpu_cases!(
         cuda_chunked_ssd_scan_matches_the_cpu_scan,
         cuda_chunked_ssd_scan_holds_a_steep_decay,
         cuda_selective_scan_with_a_per_state_item_matches_the_cpu_scan,
+        cuda_rwkv7_wkv_matches_the_cpu_recurrence,
+        cuda_rwkv7_fused_time_mix_matches_the_composite,
         cuda_mamba_gated_rmsnorm_matches_the_composite,
         cuda_qk_norm_rope_positions_preserves_projection_layout,
         cuda_qk_norm_rope_writes_token_major_from_packed_projection,
@@ -1097,6 +1099,139 @@ fn cuda_selective_scan_with_a_per_state_item_matches_the_cpu_scan() -> inference
                 "{state_size} items, {label}: max error {error} at scale {scale}"
             );
         }
+    }
+    Ok(())
+}
+
+// RWKV-7's WKV recurrence: the CUDA kernel (a thread per value row) against the CPU op, two sequences of 40 steps
+#[cfg(feature = "cuda")]
+fn cuda_rwkv7_wkv_matches_the_cpu_recurrence() -> inference_tensor::Result<()> {
+    const B: usize = 2;
+    const T: usize = 40;
+    const H: usize = 3;
+    const N: usize = 64;
+    const TOLERANCE: f32 = 1e-4;
+    let device = Device::new_cuda(0)?;
+    let rand = |shape: &[usize]| Tensor::randn(0f32, 0.3, shape, &Device::Cpu);
+    let mut host = Vec::new();
+    for i in 0..6 {
+        let t = rand(&[B, T, H, N])?;
+        // the decay in (0, 1)
+        host.push(if i == 1 { t.abs()?.neg()?.exp()? } else { t });
+    }
+    let state = rand(&[B, H, N, N])?;
+    let gpu = host
+        .iter()
+        .map(|t| t.to_device(&device))
+        .collect::<inference_tensor::Result<Vec<_>>>()?;
+    fn view(t: &[Tensor]) -> super::Wkv7<'_> {
+        super::Wkv7 {
+            r: &t[0],
+            w: &t[1],
+            k: &t[2],
+            v: &t[3],
+            a: &t[4],
+            b: &t[5],
+        }
+    }
+    let cpu_state = state.copy()?;
+    let expected = super::rwkv7_wkv(view(&host), &cpu_state)?;
+    let gpu_state = state.to_device(&device)?;
+    let y = super::rwkv7_wkv(view(&gpu), &gpu_state)?;
+    for (label, actual, expected) in [("output", &y, &expected), ("state", &gpu_state, &cpu_state)]
+    {
+        let error = (actual.to_device(&Device::Cpu)? - expected)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        let scale = expected.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert!(
+            error < TOLERANCE * scale.max(1.0),
+            "{label}: max error {error} at scale {scale}"
+        );
+    }
+    Ok(())
+}
+
+// the fused token shift and time-mix kernels against the CPU composites, the time-mix with and without the value mix,
+// over two sequences of 30 steps
+#[cfg(feature = "cuda")]
+fn cuda_rwkv7_fused_time_mix_matches_the_composite() -> inference_tensor::Result<()> {
+    const B: usize = 2;
+    const T: usize = 30;
+    const H: usize = 2;
+    const N: usize = 64;
+    const C: usize = H * N;
+    const MIXES: usize = 6;
+    const NORM_EPS: f64 = 64e-5;
+    const TOLERANCE: f32 = 1e-4;
+    let device = Device::new_cuda(0)?;
+    let rand = |shape: &[usize]| Tensor::randn(0f32, 0.5, shape, &Device::Cpu);
+    let close = |label: &str, actual: &Tensor, expected: &Tensor| -> inference_tensor::Result<()> {
+        let error = (actual.to_device(&Device::Cpu)? - expected)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        let scale = expected.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert!(
+            error < TOLERANCE * scale.max(1.0),
+            "{label}: max error {error} at scale {scale}"
+        );
+        Ok(())
+    };
+    let (x, last, mixes) = (rand(&[B, T, C])?, rand(&[B, C])?, rand(&[MIXES, C])?);
+    let (want_mixed, want_last) = super::rwkv7_token_shift(&x, &last, &mixes)?;
+    let (mixed, new_last) = super::rwkv7_token_shift(
+        &x.to_device(&device)?,
+        &last.to_device(&device)?,
+        &mixes.to_device(&device)?,
+    )?;
+    close("token shift", &mixed, &want_mixed)?;
+    close("last token", &new_last, &want_last)?;
+
+    let inputs = (0..8)
+        .map(|_| rand(&[B, T, C]))
+        .collect::<inference_tensor::Result<Vec<_>>>()?;
+    let vectors = (0..5)
+        .map(|_| rand(&[C]))
+        .collect::<inference_tensor::Result<Vec<_>>>()?;
+    let state = rand(&[B, H, N, N])?;
+    for with_mix in [false, true] {
+        fn view<'a>(t: &'a [Tensor], v: &'a [Tensor], with_mix: bool) -> super::TimeMix7<'a> {
+            super::TimeMix7 {
+                r: &t[0],
+                w: &t[1],
+                k: &t[2],
+                v: &t[3],
+                a: &t[4],
+                g: &t[5],
+                v_mix: with_mix.then_some((&t[6], &t[7])),
+                k_k: &v[0],
+                k_a: &v[1],
+                r_k: &v[2],
+                norm_w: &v[3],
+                norm_b: &v[4],
+                norm_eps: NORM_EPS,
+                heads: H,
+                head_dim: N,
+            }
+        }
+        let cpu_state = state.copy()?;
+        let expected = super::rwkv7_time_mix(view(&inputs, &vectors, with_mix), &cpu_state)?;
+        let gpu = |t: &[Tensor]| {
+            t.iter()
+                .map(|t| t.to_device(&device))
+                .collect::<inference_tensor::Result<Vec<_>>>()
+        };
+        let (gpu_inputs, gpu_vectors) = (gpu(&inputs)?, gpu(&vectors)?);
+        let gpu_state = state.to_device(&device)?;
+        let y = super::rwkv7_time_mix(view(&gpu_inputs, &gpu_vectors, with_mix), &gpu_state)?;
+        close(&format!("time-mix (value mix {with_mix})"), &y, &expected)?;
+        close(
+            &format!("state (value mix {with_mix})"),
+            &gpu_state,
+            &cpu_state,
+        )?;
     }
     Ok(())
 }
