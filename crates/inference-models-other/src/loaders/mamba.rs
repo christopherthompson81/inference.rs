@@ -33,7 +33,7 @@ impl NormalModelLoader for MambaLoader {
 impl IsqModelLoader for MambaLoader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[
-            r"^backbone\.embeddings\.weight$",
+            r"^backbone\.embeddings?\.weight$",
             r"^lm_head\.(weight|bias)$",
         ])
     }

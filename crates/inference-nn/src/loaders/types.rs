@@ -7,7 +7,7 @@ use anyhow::Result;
 macro_rules! normal_loader_types {
     ($($variant:ident {
         cli: $cli:tt,
-        hf: $hf:literal,
+        hf: $hf:literal $(| $hf_alias:literal)*,
         model_type: $model_type:literal,
         loader: $loader:ident
         $(, feature: $feature:literal)? $(,)?
@@ -37,7 +37,7 @@ macro_rules! normal_loader_types {
 
             pub fn from_causal_lm_name(name: &str) -> Result<Self> {
                 match name {
-                    $($hf => Ok(Self::$variant),)*
+                    $($hf $(| $hf_alias)* => Ok(Self::$variant),)*
                     other => anyhow::bail!(
                         "Unsupported Hugging Face Transformers -CausalLM model class `{other}`. Please raise an issue."
                     ),
@@ -196,7 +196,7 @@ macro_rules! normal_loader_table {
             FalconH1 { cli: "falcon_h1", hf: "FalconH1ForCausalLM", model_type: "falcon_h1", loader: FalconH1Loader, feature: "models-other" },
             Jamba { cli: "jamba", hf: "JambaForCausalLM", model_type: "jamba", loader: JambaLoader, feature: "models-other" },
             Rwkv6 { cli: "rwkv6", hf: "Rwkv6ForCausalLM", model_type: "rwkv6", loader: Rwkv6Loader, feature: "models-other" },
-            Rwkv7 { cli: "rwkv7", hf: "RWKV7ForCausalLM", model_type: "rwkv7", loader: Rwkv7Loader, feature: "models-other" },
+            Rwkv7 { cli: "rwkv7", hf: "RWKV7ForCausalLM" | "Rwkv7ForCausalLM", model_type: "rwkv7", loader: Rwkv7Loader, feature: "models-other" },
             Arwkv { cli: "arwkv", hf: "RwkvHybridForCausalLM", model_type: "rwkv_hybrid", loader: ArwkvLoader, feature: "models-other" },
             Qrwkv6 { cli: "qrwkv6", hf: "RWKV6Qwen2ForCausalLM", model_type: "rwkv6qwen2", loader: Qrwkv6Loader, feature: "models-other" },
             Mamba { cli: "mamba", hf: "MambaForCausalLM", model_type: "mamba", loader: MambaLoader, feature: "models-other" },

@@ -11,6 +11,8 @@ use crate::granite::{
 use crate::serde_default_fn;
 
 const EMBEDDINGS: &str = "embeddings";
+// `mamba_ssm`'s own checkpoints
+const MAMBA_SSM_EMBEDDINGS: &str = "embedding";
 const FINAL_NORM: &str = "norm_f";
 // normalizes dt, B and C after `x_proj`
 pub const FALCON_MAMBA: &str = "falcon_mamba";
@@ -57,6 +59,9 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub tie_word_embeddings: bool,
     pub quantization_config: Option<QuantizedConfig>,
+    /// Set when the config was translated from `mamba_ssm`'s (see `MAMBA_SSM_CONFIG_KEY`).
+    #[serde(default, rename = "_inference_mamba_ssm")]
+    pub mamba_ssm: bool,
 }
 
 impl Config {
@@ -97,7 +102,11 @@ impl Config {
             .collect();
         HybridLayout {
             blocks,
-            embeddings: EMBEDDINGS,
+            embeddings: if self.mamba_ssm {
+                MAMBA_SSM_EMBEDDINGS
+            } else {
+                EMBEDDINGS
+            },
             final_norm: FINAL_NORM,
         }
     }

@@ -10,6 +10,8 @@ use crate::nemotron_h::float_pair;
 use crate::serde_default_fn;
 
 const EMBEDDINGS: &str = "embeddings";
+// `mamba_ssm`'s own checkpoints
+const MAMBA_SSM_EMBEDDINGS: &str = "embedding";
 const FINAL_NORM: &str = "norm_f";
 // no attention layers, so no heads or positions; the context the planner may offer a sequence
 const NO_ATTENTION_HEADS: usize = 1;
@@ -55,6 +57,9 @@ pub struct Config {
     #[serde(default)]
     pub tie_word_embeddings: bool,
     pub quantization_config: Option<QuantizedConfig>,
+    /// Set when the config was translated from `mamba_ssm`'s (see `MAMBA_SSM_CONFIG_KEY`).
+    #[serde(default, rename = "_inference_mamba_ssm")]
+    pub mamba_ssm: bool,
 }
 
 impl Config {
@@ -76,7 +81,11 @@ impl Config {
             .collect();
         HybridLayout {
             blocks,
-            embeddings: EMBEDDINGS,
+            embeddings: if self.mamba_ssm {
+                MAMBA_SSM_EMBEDDINGS
+            } else {
+                EMBEDDINGS
+            },
             final_norm: FINAL_NORM,
         }
     }
