@@ -151,3 +151,58 @@ The norms without the casts: perplexity 1.4296 (1.4291 with them). "What is the 
 France is Paris."
 
 Next: Jamba (Mamba 1 layers with dt/B/C norms that have weights, attention without RoPE, MoE).
+
+## Run 4 - 2026-11-07 13:15
+
+Question: step 2's second half. Does Jamba (`JambaForCausalLM`) run on what Runs 1-3 built?
+
+Reference read: transformers 5.19 `models/jamba`, llama.cpp 970b51ce7 `conversion/jamba.py`.
+
+- Layer `i` is attention when `i % attn_layer_period == attn_layer_offset`, Mamba 1 otherwise; its feed-forward is a MoE
+  when `num_experts > 1` and `i % expert_layer_period == expert_layer_offset`, a SwiGLU MLP otherwise. Norms
+  `input_layernorm` and `pre_ff_layernorm`, `final_layernorm`, `model.embed_tokens`.
+- Attention has no position embedding (the RoPE helper is imported but never applied).
+- The Mamba 1 mixer normalizes dt, B and C with weighted RMSNorms (`dt_layernorm`, `b_layernorm`, `c_layernorm`, at
+  `rms_norm_eps`), where Falcon-Mamba's have no weights.
+- The MoE: `router` (no bias), a softmax top k with no renormalizing, SwiGLU experts, no shared expert.
+- llama.cpp writes no periods: attention layers are those with KV heads in a per-layer `head_count_kv`, MoE layers
+  those with stacked `ffn_*_exps`; `ssm_dt_norm`, `ssm_b_norm` and `ssm_c_norm` are the three norms.
+- Checkpoints: Jamba-tiny-dev (8 experts), AI21-Jamba-Reasoning-3B and Jamba2-3B (one expert, so a dense MLP on every
+  layer; an official Q4_K_M GGUF). Jamba Mini 1.7 (52B) is gated, so not tried.
+
+Built: `jamba.rs` and its loader; the hybrid MoE takes Jamba's routing (`MoeRouting::Jamba`: the `router`, softmax top
+k unnormalized, SwiGLU experts, no shared expert, no selection bias) beside Nemotron-H's; Mamba 1's norm is weighted or
+not (`DtBcNorm`); the `jamba` GGUF binds through the Mamba 1 binding with attention and feed-forward names, its periods
+from the KV heads and the expert tensors.
+
+```
+causal_lm_parity.py jamba-tiny-dev            184 tokens: mean KL 7.35e-09, top-1 1.000; greedy 24 identical
+gguf_perplexity_parity.sh jamba-reasoning-3b-Q4_K_M:   reference 1.9099, ours 1.7667 (-0.0750)
+```
+
+Ours under the reference by 7.5% is the better side, but large. Tokenizing 3 KB of README.md: llama.cpp 1,130 tokens,
+ours 1,107 with no BOS, the model's own tokenizer.json 1,108 with its BOS, otherwise ours exactly. llama.cpp's SPM path
+(the vocabulary's scores, `add_space_prefix` false) splits `media="` into three tokens where the tokenizer.json has one,
+so llama.cpp scores another text. The missing BOS was ours: the GGUF's SentencePiece BPE built no post-processor, so
+`add_bos_token` (true here) was ignored. It now adds the BOS as the BPE path already did (a test beside it).
+
+```
+gguf_perplexity_parity.sh jamba-reasoning-3b-Q4_K_M:   reference 1.9099, ours 1.4743 (-0.2281)
+gguf_perplexity_parity.sh mamba-codestral-gguf (SPM, add_bos):  Q4_0 1.2950 (ref 1.2958), Q8_0 1.2983 (ref 1.2989)
+causal_lm_parity.py jamba-reasoning-3b (BF16 checkpoint, F32, CPU):  184 tokens: mean KL 5.47e-09, top-1 1.000,
+  max logit diff 0.0045; greedy 24 identical
+gguf_perplexity_parity.sh jamba-tiny-dev-f32 (llama.cpp's convert, stacked experts):  reference 1.6847, ours 1.6870
+```
+
+The 3B matches transformers, so the gap to llama.cpp is its tokenization. Jamba Reasoning 3B Q4_K_M on the 3090: 262K
+of context, decode graphs captured; it reasons through "How many positive divisors does 360 have?" coherently.
+
+| | ours | llama.cpp `llama-bench -fa 1` |
+|---|---|---|
+| decode, 400 tokens | 333.1 / 332.8 tok/s | tg128 255.19 |
+| prefill, 3,902 tokens (no prefix cache) | 8,788 / 8,808 tok/s | pp4096 9,258.39 |
+
+The tiny test (`mamba_tiny`) takes a Jamba kind: Mamba 1 + MoE, NoPE attention + MLP, Mamba 1 + MoE, which decodes as
+it prefills, resumes from the prefix cache, and scores on CUDA as on the CPU.
+
+Next: step 3, RWKV 6/7.

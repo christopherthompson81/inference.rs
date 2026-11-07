@@ -56,6 +56,7 @@ const V5_GATE_UP: &str = "gate_up_proj";
 const V5_DOWN: &str = "down_proj";
 // Nemotron-H's MoE: `mixer.gate` with its `e_score_correction_bias`, `mixer.shared_experts`
 const NEMOTRON_ROUTER: &str = "gate";
+const JAMBA_ROUTER: &str = "router";
 const NEMOTRON_SELECTION_BIAS: &str = "e_score_correction_bias";
 const NEMOTRON_SHARED_EXPERTS: &str = "shared_experts";
 // latent MoE (Super, Bolt): the routed experts run between these two, the router and shared expert at full width
@@ -210,12 +211,22 @@ pub struct Config {
 }
 
 /// Mamba 1's mixer: `x_proj` to dt (`dt_rank` wide), B and C after the conv, `dt_proj` back to the channels, and A
-/// per (channel, state item). Falcon-Mamba normalizes dt, B and C (no weight) at `dt_b_c_norm_eps`.
+/// per (channel, state item), with Falcon-Mamba's or Jamba's RMSNorms over dt, B and C when `dt_b_c_norm` is set.
 #[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct Mamba1Spec {
     pub dt_rank: usize,
-    pub dt_b_c_norm_eps: Option<f64>,
+    pub dt_b_c_norm: Option<DtBcNorm>,
 }
+
+/// Mamba 1's RMSNorms over dt, B and C: Falcon-Mamba's without weights, Jamba's `dt_layernorm`, `b_layernorm` and
+/// `c_layernorm` with them.
+#[derive(Debug, Clone, inference_json::FromJson, Serialize)]
+pub struct DtBcNorm {
+    pub eps: f64,
+    pub weighted: bool,
+}
+
+const DT_B_C_NORMS: [&str; 3] = ["dt_layernorm", "b_layernorm", "c_layernorm"];
 
 /// Falcon-H1's muP multipliers on the activations of a parallel block's attention, Mamba and MLP.
 #[derive(Debug, Clone, inference_json::FromJson, Serialize)]
@@ -1123,8 +1134,9 @@ struct Selection {
     x_proj: Arc<dyn QuantMethod>,
     dt_proj: Arc<dyn QuantMethod>,
     dt_rank: usize,
-    // Falcon-Mamba's weightless RMSNorms over dt and over B and C, unit weights
-    norm: Option<(RmsNorm, RmsNorm)>,
+    // the RMSNorms over dt, B and C (Falcon-Mamba's with unit weights)
+    norm: Option<[RmsNorm; 3]>,
+    weighted_norm: bool,
 }
 
 impl Selection {
@@ -1137,11 +1149,11 @@ impl Selection {
         let mut dt = params.narrow(last, 0, self.dt_rank)?;
         let mut b = params.narrow(last, self.dt_rank, d_state)?;
         let mut c = params.narrow(last, self.dt_rank + d_state, d_state)?;
-        if let Some((dt_norm, state_norm)) = &self.norm {
+        if let Some([dt_norm, b_norm, c_norm]) = &self.norm {
             // the norm kernel sums its squares in f32, as transformers runs them
             dt = dt_norm.forward(&dt.contiguous()?)?;
-            b = state_norm.forward(&b.contiguous()?)?;
-            c = state_norm.forward(&c.contiguous()?)?;
+            b = b_norm.forward(&b.contiguous()?)?;
+            c = c_norm.forward(&c.contiguous()?)?;
         }
         // a slice of x_proj's rows, which a GGUF matmul reads as if contiguous
         let dt = self.dt_proj.forward(&dt.contiguous()?)?;
@@ -1266,14 +1278,25 @@ impl MambaLayer {
                     )?,
                     dt_rank: spec.dt_rank,
                     norm: spec
-                        .dt_b_c_norm_eps
-                        .map(|eps| -> Result<_> {
-                            let unit = |n: usize| {
-                                RmsNorm::from_w(Tensor::ones(n, vb.dtype(), device)?, eps)
+                        .dt_b_c_norm
+                        .as_ref()
+                        .map(|norm| -> Result<[RmsNorm; 3]> {
+                            let make = |name: &str, n: usize| {
+                                if norm.weighted {
+                                    RmsNorm::new(n, norm.eps, projection_vb(name))
+                                } else {
+                                    RmsNorm::from_w(Tensor::ones(n, vb.dtype(), device)?, norm.eps)
+                                }
                             };
-                            Ok((unit(spec.dt_rank)?, unit(ssm_state_size)?))
+                            let [dt, b, c] = DT_B_C_NORMS;
+                            Ok([
+                                make(dt, spec.dt_rank)?,
+                                make(b, ssm_state_size)?,
+                                make(c, ssm_state_size)?,
+                            ])
                         })
                         .transpose()?,
+                    weighted_norm: spec.dt_b_c_norm.as_ref().is_some_and(|norm| norm.weighted),
                 })
             })
             .transpose()?;
@@ -1483,6 +1506,11 @@ impl MambaLayer {
             Some(selection) => {
                 uvb.pp("x_proj").add(&selection.x_proj);
                 uvb.pp("dt_proj").add(&selection.dt_proj);
+                if let Some(norms) = selection.norm.as_ref().filter(|_| selection.weighted_norm) {
+                    for (name, norm) in DT_B_C_NORMS.iter().zip(norms) {
+                        uvb.pp(name).add_tensor("weight", norm.weight().clone());
+                    }
+                }
             }
             None => uvb.add_tensor("dt_bias", self.dt_bias.clone()),
         }
@@ -3052,12 +3080,14 @@ impl HybridMoe {
 /// renormalized and scaled), squared-ReLU experts with no gate, and one shared expert beside them.
 struct NemotronMoe {
     gate: inference_tensor::nn::Linear,
-    bias: Tensor,
+    // Nemotron-H's selection bias; Jamba routes without one
+    bias: Option<Tensor>,
     experts: MoEExperts,
     latent: Option<NemotronLatent>,
-    shared: PlainMlp,
+    shared: Option<PlainMlp>,
     top_k: usize,
     scale: f32,
+    routing: MoeRouting,
 }
 
 impl NemotronMoe {
@@ -3069,15 +3099,18 @@ impl NemotronMoe {
         comm: &Arc<inference_quant::Comm>,
         loading_isq: bool,
     ) -> Result<Self> {
+        let jamba = spec.routing == MoeRouting::Jamba;
         let router_vb = vb
-            .pp(NEMOTRON_ROUTER)
+            .pp(if jamba { JAMBA_ROUTER } else { NEMOTRON_ROUTER })
             .set_device(device.clone())
             .set_dtype(DType::F32);
         // a GGUF of a Puzzle checkpoint gives each layer's expert count only by its router's rows
         let router = router_vb.get_unchecked("weight")?;
         let num_experts = router.dim(0)?;
         let gate = inference_tensor::nn::Linear::new(router, None);
-        let bias = router_vb.get(num_experts, NEMOTRON_SELECTION_BIAS)?;
+        let bias = (!jamba)
+            .then(|| router_vb.get(num_experts, NEMOTRON_SELECTION_BIAS))
+            .transpose()?;
         let latent = spec
             .latent_size
             .map(|size| NemotronLatent::load(cfg, size, &vb))
@@ -3089,24 +3122,32 @@ impl NemotronMoe {
                 hidden_size: spec.latent_size.unwrap_or(cfg.hidden_size),
                 moe_intermediate_size: spec.intermediate_size,
                 expert_proj_names: ExpertProjNames::DEFAULT,
-                gated: false,
+                gated: jamba,
             },
             vb.clone(),
             device,
             comm,
             loading_isq,
             &cfg.quantization_config,
-            crate::layers::Activation::Relu2,
+            if jamba {
+                crate::layers::Activation::Silu
+            } else {
+                crate::layers::Activation::Relu2
+            },
         )?;
-        let shared = PlainMlp::new(
-            vb.pp(NEMOTRON_SHARED_EXPERTS),
-            &[cfg.hidden_size, spec.shared_intermediate_size],
-            &NEMOTRON_MLP,
-            false,
-            &cfg.quantization_config,
-            crate::layers::Activation::Relu2,
-            comm,
-        )?;
+        let shared = (spec.shared_intermediate_size > 0)
+            .then(|| {
+                PlainMlp::new(
+                    vb.pp(NEMOTRON_SHARED_EXPERTS),
+                    &[cfg.hidden_size, spec.shared_intermediate_size],
+                    &NEMOTRON_MLP,
+                    false,
+                    &cfg.quantization_config,
+                    crate::layers::Activation::Relu2,
+                    comm,
+                )
+            })
+            .transpose()?;
         Ok(Self {
             gate,
             bias,
@@ -3115,6 +3156,7 @@ impl NemotronMoe {
             shared,
             top_k: spec.top_k,
             scale: spec.routed_scaling_factor,
+            routing: spec.routing,
         })
     }
 
@@ -3122,30 +3164,43 @@ impl NemotronMoe {
         let (b_size, seq_len, hidden) = xs.dims3()?;
         let xs_flat = xs.reshape(((), hidden))?;
         let logits = self.gate.forward(&xs_flat.to_dtype(DType::F32)?)?;
+        // Jamba: the softmax's top k as they are, unnormalized
+        let (score_function, renormalize) = match self.routing {
+            MoeRouting::Nemotron => (crate::ops::MoeRouterScoreFunction::Sigmoid, true),
+            MoeRouting::Jamba => (crate::ops::MoeRouterScoreFunction::Softmax, false),
+        };
         let topk = crate::ops::moe_router_topk(
             &logits,
             crate::ops::MoeRouterTopKConfig {
                 top_k: self.top_k,
-                score_function: crate::ops::MoeRouterScoreFunction::Sigmoid,
+                score_function,
                 selected_weight: crate::ops::MoeRouterSelectedWeight::Score,
-                renormalize: true,
+                renormalize,
                 norm_min: NEMOTRON_NORM_MIN,
                 output_scale: self.scale,
                 logit_clip: None,
             },
-            Some(&self.bias),
+            self.bias.as_ref(),
             None,
         )?;
         let routed_in = match &self.latent {
             Some(latent) => latent.down.forward(xs)?,
             None => xs.clone(),
         };
+        let Some(shared_mlp) = &self.shared else {
+            let routed = self
+                .experts
+                .forward(&routed_in, topk.values, &topk.indices)?;
+            return routed
+                .reshape((b_size, seq_len, routed_in.dims3()?.2))?
+                .to_dtype(xs.dtype());
+        };
         // the shared expert runs while offloaded experts' misses are on the CPU
         let (routed, shared) = self.experts.forward_overlapping(
             &routed_in,
             topk.values,
             &topk.indices,
-            &mut || MlpLayer::forward(&self.shared, xs),
+            &mut || MlpLayer::forward(shared_mlp, xs),
         )?;
         let routed = routed
             .reshape((b_size, seq_len, routed_in.dims3()?.2))?
@@ -3160,9 +3215,14 @@ impl NemotronMoe {
     // the router stays as the checkpoint has it; ISQ takes the experts and the shared expert
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
-        let router = uvb.pp(NEMOTRON_ROUTER);
+        let router = uvb.pp(match self.routing {
+            MoeRouting::Nemotron => NEMOTRON_ROUTER,
+            MoeRouting::Jamba => JAMBA_ROUTER,
+        });
         router.add(&self.gate);
-        router.add_tensor(NEMOTRON_SELECTION_BIAS, self.bias.clone());
+        if let Some(bias) = &self.bias {
+            router.add_tensor(NEMOTRON_SELECTION_BIAS, bias.clone());
+        }
         if let Some(latent) = &self.latent {
             uvb.pp(NEMOTRON_LATENT_DOWN).add(&latent.down);
             uvb.pp(NEMOTRON_LATENT_UP).add(&latent.up);
@@ -3232,6 +3292,16 @@ pub struct NemotronMoeSpec {
     pub routed_scaling_factor: f32,
     /// The width the routed experts run at, when it is not the model's.
     pub latent_size: Option<usize>,
+    pub routing: MoeRouting,
+}
+
+/// How a hybrid MoE routes and what its experts are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MoeRouting {
+    /// Nemotron-H: a biased sigmoid, its top k renormalized and scaled; squared-ReLU experts beside a shared one.
+    Nemotron,
+    /// Jamba: `router`'s softmax top k, unnormalized; SwiGLU experts, no shared expert.
+    Jamba,
 }
 
 /// Which feed-forward a block's FFN half loads.

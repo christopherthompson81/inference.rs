@@ -279,6 +279,7 @@ class NormalLoaderType(str, Enum):
     GRANITEMOE_SWA = "granitemoe_swa"
     GPT_OSS = "gpt_oss"
     FALCON_H1 = "falcon_h1"
+    JAMBA = "jamba"
     MAMBA = "mamba"
     FALCON_MAMBA = "falcon_mamba"
     MAMBA2 = "mamba2"

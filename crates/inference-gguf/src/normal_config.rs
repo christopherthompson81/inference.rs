@@ -247,6 +247,10 @@ pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; NORMAL_LOADER_TYPE_COUN
         loader: NormalLoaderType::FalconMamba,
         build: build_mamba,
     },
+    NormalConfigBuilder {
+        loader: NormalLoaderType::Jamba,
+        build: build_jamba,
+    },
 ];
 
 pub fn synthesize_normal_config(
@@ -1896,6 +1900,108 @@ fn build_mamba(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     Ok(JsonValue::Object(config))
 }
 
+// the period and offset of the layers `is_layer` picks, as Jamba's config writes them; one such layer repeats once per
+// stack
+fn layer_period(layers: &[usize], block_count: usize) -> (usize, usize) {
+    match layers {
+        [] => (block_count, 0),
+        [only] => (block_count, *only),
+        [first, second, ..] => (second - first, *first),
+    }
+}
+
+// llama.cpp writes no attention or expert periods: attention layers are those with KV heads, MoE layers those with
+// stacked experts
+fn build_jamba(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
+    let hidden = metadata.required_usize("embedding_length")?;
+    let block_count = metadata.required_usize("block_count")?;
+    let kv = metadata
+        .per_layer_usize("attention.head_count_kv", block_count)?
+        .ok_or_else(|| {
+            NormalConfigSynthesisError::new(format!(
+                "Standalone `jamba` config requires `{}`",
+                metadata.key("attention.head_count_kv")
+            ))
+        })?;
+    let attention = (0..block_count).filter(|&l| kv[l] > 0).collect::<Vec<_>>();
+    let experts = (0..block_count)
+        .filter(|&l| metadata.layer_has_tensor(l, ".ffn_gate_exps."))
+        .collect::<Vec<_>>();
+    let (attn_period, attn_offset) = layer_period(&attention, block_count);
+    let (expert_period, expert_offset) = layer_period(&experts, block_count);
+    let inner = metadata.required_usize("ssm.inner_size")?;
+    let mut config = JsonMap::new();
+    config.insert("vocab_size".into(), json!(metadata.vocab_size()?));
+    config.insert("hidden_size".into(), json!(hidden));
+    config.insert(
+        "intermediate_size".into(),
+        json!(metadata.required_uniform_usize("feed_forward_length")?),
+    );
+    config.insert("num_hidden_layers".into(), json!(block_count));
+    config.insert(
+        "num_attention_heads".into(),
+        json!(metadata.required_uniform_usize("attention.head_count")?),
+    );
+    config.insert(
+        "num_key_value_heads".into(),
+        json!(metadata.required_uniform_nonzero_usize("attention.head_count_kv")?),
+    );
+    config.insert("rms_norm_eps".into(), json!(metadata.norm_epsilon()?));
+    config.insert(
+        "max_position_embeddings".into(),
+        json!(metadata.required_usize("context_length")?),
+    );
+    config.insert("attn_layer_period".into(), json!(attn_period));
+    config.insert("attn_layer_offset".into(), json!(attn_offset));
+    config.insert("expert_layer_period".into(), json!(expert_period));
+    config.insert("expert_layer_offset".into(), json!(expert_offset));
+    let num_experts = if experts.is_empty() {
+        1
+    } else {
+        metadata.required_usize("expert_count")?
+    };
+    config.insert("num_experts".into(), json!(num_experts));
+    config.insert(
+        "num_experts_per_tok".into(),
+        json!(metadata.optional_usize("expert_used_count")?.unwrap_or(1)),
+    );
+    config.insert(
+        "mamba_d_state".into(),
+        json!(metadata.required_usize("ssm.state_size")?),
+    );
+    config.insert(
+        "mamba_d_conv".into(),
+        json!(metadata.required_usize("ssm.conv_kernel")?),
+    );
+    config.insert(
+        "mamba_expand".into(),
+        json!(exact_div(
+            metadata,
+            "ssm inner size / embedding length",
+            inner,
+            hidden
+        )?),
+    );
+    config.insert(
+        "mamba_dt_rank".into(),
+        json!(metadata.required_usize("ssm.time_step_rank")?),
+    );
+    config.insert(
+        "mamba_conv_bias".into(),
+        json!(metadata.has_tensor_marker(".ssm_conv1d.bias")),
+    );
+    config.insert(
+        "mamba_proj_bias".into(),
+        json!(metadata.has_tensor_marker(".ssm_in.bias")),
+    );
+    config.insert(
+        "tie_word_embeddings".into(),
+        json!(metadata.tie_word_embeddings()),
+    );
+    config.insert("quantization_config".into(), JsonValue::Null);
+    Ok(JsonValue::Object(config))
+}
+
 fn build_olmoe(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     reject_unsupported_rope_scaling(metadata, "OLMoE")?;
     let intermediate_size = match metadata.optional_usize("expert_feed_forward_length")? {
@@ -3368,7 +3474,8 @@ mod tests {
         pub use inference_models_llama::{llama, mistral, mixtral, smollm3};
         pub use inference_models_other::{
             deepseek, ernie4_5, falcon_h1, glm4, glm4_moe, glm4_moe_lite, gpt_oss, granite,
-            hunyuan_v1_dense, hunyuan_v1_moe, lfm2, mamba, mamba2, nemotron_h, olmo, starcoder2,
+            hunyuan_v1_dense, hunyuan_v1_moe, jamba, lfm2, mamba, mamba2, nemotron_h, olmo,
+            starcoder2,
         };
         pub use inference_models_phi::{phi2, phi3, phi3_5_moe};
         pub use inference_models_qwen::{qwen1, qwen2, qwen2_moe, qwen3, qwen3_moe, qwen3_next};
@@ -3583,6 +3690,7 @@ mod tests {
                 | NormalLoaderType::Mamba2
                 | NormalLoaderType::Mamba
                 | NormalLoaderType::FalconMamba
+                | NormalLoaderType::Jamba
         ) {
             insert_u32(&mut metadata, architecture, "ssm.conv_kernel", 4);
             insert_u32(&mut metadata, architecture, "ssm.inner_size", 1_024);
@@ -3600,6 +3708,7 @@ mod tests {
                 | NormalLoaderType::Mamba2
                 | NormalLoaderType::Mamba
                 | NormalLoaderType::FalconMamba
+                | NormalLoaderType::Jamba
         ) {
             tensors.extend(
                 ["blk.1.ssm_a.weight", "blk.1.ssm_conv1d.weight"]
@@ -3807,6 +3916,9 @@ mod tests {
             }
             NormalLoaderType::Mamba | NormalLoaderType::FalconMamba => {
                 assert_deserializes(loader, config, models::mamba::Config::from_json)
+            }
+            NormalLoaderType::Jamba => {
+                assert_deserializes(loader, config, models::jamba::Config::from_json)
             }
             NormalLoaderType::GptOss => {
                 assert_deserializes(loader, config, models::gpt_oss::Config::from_json)

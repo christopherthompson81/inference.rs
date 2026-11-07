@@ -675,6 +675,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `NormalLoaderType.GRANITEMOE_SWA` | `'granitemoe_swa'` |
 | `NormalLoaderType.GPT_OSS` | `'gpt_oss'` |
 | `NormalLoaderType.FALCON_H1` | `'falcon_h1'` |
+| `NormalLoaderType.JAMBA` | `'jamba'` |
 | `NormalLoaderType.MAMBA` | `'mamba'` |
 | `NormalLoaderType.FALCON_MAMBA` | `'falcon_mamba'` |
 | `NormalLoaderType.MAMBA2` | `'mamba2'` |
