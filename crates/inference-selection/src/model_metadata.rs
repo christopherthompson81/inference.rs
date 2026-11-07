@@ -241,6 +241,15 @@ impl SupportedArch for NormalLoaderType {
                     ex!("tiiuae/Falcon-H1-Tiny-90M-Instruct"),
                 ],
             },
+            Self::Jamba => ArchMetadata {
+                families: &["Jamba", "Jamba Reasoning", "Jamba2"],
+                modalities: m,
+                examples: &[
+                    ex!("ai21labs/AI21-Jamba-Reasoning-3B"),
+                    ex!("ai21labs/AI21-Jamba-Reasoning-3B-GGUF", "GGUF"),
+                    ex!("ai21labs/AI21-Jamba-Mini-1.7"),
+                ],
+            },
             Self::Mamba => ArchMetadata {
                 families: &["Mamba"],
                 modalities: m,

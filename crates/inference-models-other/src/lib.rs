@@ -32,6 +32,7 @@ mod hunyuan_dense_tests;
 mod hunyuan_rope;
 pub mod hunyuan_v1_dense;
 pub mod hunyuan_v1_moe;
+pub mod jamba;
 pub mod jina_v3;
 pub mod lfm2;
 pub mod lfm2_decision;
@@ -57,6 +58,7 @@ mod starcoder2_tests;
 
 inference_nn::json_config!(
     bert::Config,
+    jamba::Config,
     jina_v3::Config,
     modern_bert::Config,
     falcon_h1::Config,

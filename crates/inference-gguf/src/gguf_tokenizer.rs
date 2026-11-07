@@ -804,6 +804,9 @@ fn spm_bpe_tokenizer(p: &PropsGGUF) -> Result<(Tokenizer, TokenizerKind)> {
         Some(Decoder::Sequence(decoders)),
         Some(normalizer),
     )?;
+    if let Some(template) = bos_template(p)? {
+        tokenizer.with_post_processor(Some(processors::PostProcessorWrapper::Template(template)));
+    }
     for id in [p.bos, Some(p.eos), Some(unk)].into_iter().flatten() {
         tokenizer
             .add_special_tokens([AddedToken::from(p.tokens[id as usize].clone(), true)])
@@ -867,18 +870,8 @@ fn bpe_tokenizer(p: &PropsGGUF) -> Result<(Tokenizer, TokenizerKind)> {
     let byte_level = processors::PostProcessorWrapper::ByteLevel(
         processors::byte_level::ByteLevel::new(false, false, false),
     );
-    // `<|begin_of_text|> $A` as a Llama 3 tokenizer.json has it, when the GGUF asks for its BOS
-    let post_processor = match bos.filter(|_| p.add_bos) {
-        Some(bos) => {
-            let bos_token = p.tokens[bos as usize].to_string();
-            let template = processors::template::TemplateProcessing::builder()
-                .try_single(format!("{bos_token}:0 $A:0"))
-                .map_err(anyhow::Error::msg)?
-                .try_pair(format!("{bos_token}:0 $A:0 $B:1"))
-                .map_err(anyhow::Error::msg)?
-                .special_tokens(vec![(bos_token, bos)])
-                .build()
-                .map_err(anyhow::Error::msg)?;
+    let post_processor = match bos_template(p)? {
+        Some(template) => {
             processors::PostProcessorWrapper::Sequence(processors::sequence::Sequence::new(vec![
                 byte_level,
                 processors::PostProcessorWrapper::Template(template),
@@ -896,6 +889,23 @@ fn bpe_tokenizer(p: &PropsGGUF) -> Result<(Tokenizer, TokenizerKind)> {
     }
 
     Ok((tokenizer, TokenizerKind::Bpe))
+}
+
+// `<bos> $A`, as a Llama tokenizer.json has it, when the GGUF asks for its BOS
+fn bos_template(p: &PropsGGUF) -> Result<Option<processors::template::TemplateProcessing>> {
+    let Some(bos) = p.bos.filter(|_| p.add_bos) else {
+        return Ok(None);
+    };
+    let bos_token = p.tokens[bos as usize].to_string();
+    let template = processors::template::TemplateProcessing::builder()
+        .try_single(format!("{bos_token}:0 $A:0"))
+        .map_err(anyhow::Error::msg)?
+        .try_pair(format!("{bos_token}:0 $A:0 $B:1"))
+        .map_err(anyhow::Error::msg)?
+        .special_tokens(vec![(bos_token, bos)])
+        .build()
+        .map_err(anyhow::Error::msg)?;
+    Ok(Some(template))
 }
 
 fn bpe_vocab_and_merges(p: &PropsGGUF) -> Result<(BpeVocab, BpeMerges)> {
@@ -1830,6 +1840,20 @@ mod tests {
             prefixed.decode(&[9], false).map_err(anyhow::Error::msg)?,
             "a"
         );
+        // and its BOS when it asks, as llama.cpp and the model's tokenizer.json add it (Jamba)
+        let with_bos = spm_bpe_tokenizer(&PropsGGUF {
+            add_bos: true,
+            ..props(Some(false))
+        })?
+        .0;
+        let ids = |add_special| -> Result<Vec<u32>> {
+            let encoding = with_bos
+                .encode_fast("a", add_special)
+                .map_err(anyhow::Error::msg)?;
+            Ok(encoding.get_ids().to_vec())
+        };
+        assert_eq!(ids(true)?, [1, 4]);
+        assert_eq!(ids(false)?, [4]);
         Ok(())
     }
 

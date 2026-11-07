@@ -25,7 +25,10 @@ pub fn build_normal_bindings(
         loader,
         NormalLoaderType::Mamba | NormalLoaderType::FalconMamba
     ) {
-        return mamba1_bindings(archive);
+        return mamba1_bindings(archive, &MAMBA1_NAMES);
+    }
+    if matches!(loader, NormalLoaderType::Jamba) {
+        return mamba1_bindings(archive, &JAMBA_NAMES);
     }
     // Nemotron-H's tensors with no attention or feed-forward, under transformers' `backbone`
     if matches!(loader, NormalLoaderType::Mamba2) {
@@ -78,16 +81,48 @@ pub fn build_normal_bindings(
     Ok(bindings)
 }
 
-const MAMBA1_ROOT: [(&str, &str); 3] = [
-    ("token_embd.weight", "backbone.embeddings.weight"),
-    ("output_norm.weight", "backbone.norm_f.weight"),
-    ("output.weight", "lm_head.weight"),
-];
+// transformers' names for a Mamba 1 stack: the root, each layer's prefix, its first norm and its mixer, and for
+// Jamba its attention, second norm and feed-forward
+struct Mamba1Names {
+    root: [(&'static str, &'static str); 3],
+    layer: &'static str,
+    norm: &'static str,
+    mixer: &'static str,
+    attention: Option<&'static str>,
+    ffn: Option<(&'static str, &'static str)>,
+}
 
-// llama.cpp's `mamba` GGUF (Mamba 1, Falcon-Mamba) under transformers' names; `ssm_dt` is `dt_proj`, weight and bias
-fn mamba1_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
+const MAMBA1_NAMES: Mamba1Names = Mamba1Names {
+    root: [
+        ("token_embd.weight", "backbone.embeddings.weight"),
+        ("output_norm.weight", "backbone.norm_f.weight"),
+        ("output.weight", "lm_head.weight"),
+    ],
+    layer: "backbone.layers",
+    norm: "norm",
+    mixer: "mixer",
+    attention: None,
+    ffn: None,
+};
+
+const JAMBA_NAMES: Mamba1Names = Mamba1Names {
+    root: [
+        ("token_embd.weight", "model.embed_tokens.weight"),
+        ("output_norm.weight", "model.final_layernorm.weight"),
+        ("output.weight", "lm_head.weight"),
+    ],
+    layer: "model.layers",
+    norm: "input_layernorm",
+    mixer: "mamba",
+    attention: Some("self_attn"),
+    ffn: Some(("pre_ff_layernorm", "feed_forward")),
+};
+
+// llama.cpp's `mamba` (Mamba 1, Falcon-Mamba) and `jamba` GGUFs under transformers' names; `ssm_dt` is `dt_proj`,
+// weight and bias, and Jamba's experts stay stacked as llama.cpp wrote them
+fn mamba1_bindings(archive: &GgufArchive, names: &Mamba1Names) -> Result<GgufBindingMap> {
     let mut bindings = GgufBindingMap::new();
-    for (source, native) in MAMBA1_ROOT {
+    for (source, native) in names.root {
         if archive.tensors().contains_key(source) {
             bindings.insert(native.to_string(), GgufTensorBinding::tensor(source));
         }
@@ -96,16 +131,32 @@ fn mamba1_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
         let Some((layer, role, suffix)) = parse_block_tensor(name) else {
             continue;
         };
-        let p = format!("backbone.layers.{layer}");
-        let target = match role {
-            "attn_norm" => format!("{p}.norm.{suffix}"),
-            "ssm_in" => format!("{p}.mixer.in_proj.{suffix}"),
-            "ssm_conv1d" => format!("{p}.mixer.conv1d.{suffix}"),
-            "ssm_x" => format!("{p}.mixer.x_proj.{suffix}"),
-            "ssm_dt" => format!("{p}.mixer.dt_proj.{suffix}"),
-            "ssm_a" => format!("{p}.mixer.A_log"),
-            "ssm_d" => format!("{p}.mixer.D"),
-            "ssm_out" => format!("{p}.mixer.out_proj.{suffix}"),
+        let p = format!("{}.{layer}", names.layer);
+        let m = names.mixer;
+        let target = match (role, names.attention, names.ffn) {
+            ("attn_norm", ..) => format!("{p}.{}.{suffix}", names.norm),
+            ("ssm_in", ..) => format!("{p}.{m}.in_proj.{suffix}"),
+            ("ssm_conv1d", ..) => format!("{p}.{m}.conv1d.{suffix}"),
+            ("ssm_x", ..) => format!("{p}.{m}.x_proj.{suffix}"),
+            ("ssm_dt", ..) => format!("{p}.{m}.dt_proj.{suffix}"),
+            ("ssm_dt_norm", ..) => format!("{p}.{m}.dt_layernorm.{suffix}"),
+            ("ssm_b_norm", ..) => format!("{p}.{m}.b_layernorm.{suffix}"),
+            ("ssm_c_norm", ..) => format!("{p}.{m}.c_layernorm.{suffix}"),
+            ("ssm_a", ..) => format!("{p}.{m}.A_log"),
+            ("ssm_d", ..) => format!("{p}.{m}.D"),
+            ("ssm_out", ..) => format!("{p}.{m}.out_proj.{suffix}"),
+            ("attn_q", Some(a), _) => format!("{p}.{a}.q_proj.{suffix}"),
+            ("attn_k", Some(a), _) => format!("{p}.{a}.k_proj.{suffix}"),
+            ("attn_v", Some(a), _) => format!("{p}.{a}.v_proj.{suffix}"),
+            ("attn_output", Some(a), _) => format!("{p}.{a}.o_proj.{suffix}"),
+            ("ffn_norm", _, Some((norm, _))) => format!("{p}.{norm}.{suffix}"),
+            ("ffn_gate", _, Some((_, f))) => format!("{p}.{f}.gate_proj.{suffix}"),
+            ("ffn_up", _, Some((_, f))) => format!("{p}.{f}.up_proj.{suffix}"),
+            ("ffn_down", _, Some((_, f))) => format!("{p}.{f}.down_proj.{suffix}"),
+            ("ffn_gate_inp", _, Some((_, f))) => format!("{p}.{f}.router.{suffix}"),
+            ("ffn_gate_exps", _, Some((_, f))) => format!("{p}.{f}.experts.gate_proj.{suffix}"),
+            ("ffn_up_exps", _, Some((_, f))) => format!("{p}.{f}.experts.up_proj.{suffix}"),
+            ("ffn_down_exps", _, Some((_, f))) => format!("{p}.{f}.experts.down_proj.{suffix}"),
             _ => continue,
         };
         let mut binding = GgufTensorBinding::tensor(name);
@@ -115,6 +166,8 @@ fn mamba1_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
             // A per (channel, state item), stored as -exp(A_log)
             "ssm_a" => binding.affine(-1.0, 0.0).log(),
             "ssm_d" => binding.reshape(vec![shape.iter().product()]),
+            // transformers routes in f32
+            "ffn_gate_inp" => binding.cast(DType::F32),
             _ => binding,
         };
         bindings.insert(target, binding);

@@ -5,7 +5,9 @@ use inference_quant::QuantizedConfig;
 use inference_tensor::Result;
 use serde::Serialize;
 
-use crate::granite::{BlockNames, GraniteLayerType, HybridBlock, HybridLayout, Mamba1Spec};
+use crate::granite::{
+    BlockNames, DtBcNorm, GraniteLayerType, HybridBlock, HybridLayout, Mamba1Spec,
+};
 use crate::serde_default_fn;
 
 const EMBEDDINGS: &str = "embeddings";
@@ -150,8 +152,12 @@ impl Config {
             mup: None,
             mamba1: Some(Mamba1Spec {
                 dt_rank: self.dt_rank()?,
-                dt_b_c_norm_eps: (self.dt_b_c_norm || self.model_type == FALCON_MAMBA)
-                    .then_some(self.mixer_rms_eps),
+                dt_b_c_norm: (self.dt_b_c_norm || self.model_type == FALCON_MAMBA).then_some(
+                    DtBcNorm {
+                        eps: self.mixer_rms_eps,
+                        weighted: false,
+                    },
+                ),
             }),
         })
     }
@@ -180,12 +186,14 @@ mod tests {
             (Some(80), Some(1), 80)
         );
         let spec = granite.mamba1.unwrap();
-        assert_eq!((spec.dt_rank, spec.dt_b_c_norm_eps), (3, None));
+        assert_eq!(spec.dt_rank, 3);
+        assert!(spec.dt_b_c_norm.is_none());
         let falcon = config(r#", "model_type": "falcon_mamba", "intermediate_size": 64, "expand": 16, "time_step_rank": 8"#)
             .granite()
             .unwrap();
         assert_eq!(falcon.mamba_inner_size, Some(64));
         let spec = falcon.mamba1.unwrap();
-        assert_eq!((spec.dt_rank, spec.dt_b_c_norm_eps), (8, Some(1e-6)));
+        let norm = spec.dt_b_c_norm.unwrap();
+        assert_eq!((spec.dt_rank, norm.eps, norm.weighted), (8, 1e-6, false));
     }
 }

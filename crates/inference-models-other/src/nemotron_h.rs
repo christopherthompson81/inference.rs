@@ -292,6 +292,7 @@ impl Config {
             shared_intermediate_size: self.moe_shared_expert_intermediate_size,
             routed_scaling_factor: self.routed_scaling_factor,
             latent_size: self.moe_latent_size,
+            routing: crate::granite::MoeRouting::Nemotron,
         }
     }
 
