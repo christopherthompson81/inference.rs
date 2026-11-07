@@ -25,6 +25,8 @@ pub const MODEL: &str = "Nemotron-H Omni";
 // InternVL's tile count, NVIDIA's `max_num_tiles` default
 pub const DEFAULT_MAX_TILES: usize = 12;
 pub const LANGUAGE_MODEL: &str = "language_model";
+// the patches a video frame is resized to when the config does not say: the reference processor's default
+pub const DEFAULT_VIDEO_TARGET_PATCHES: usize = 1024;
 
 #[derive(Debug, Clone, inference_json::FromJson, Serialize)]
 pub struct VisionConfig {
@@ -65,11 +67,14 @@ pub struct VideoLayout {
 impl VisionConfig {
     /// The video layout of a checkpoint with a `video_embedder`; `None` for an image-only tower.
     pub fn video_layout(&self) -> Option<VideoLayout> {
-        if self.separate_video_embedder != Some(true) {
+        // Nano Omni's timm config states `separate_video_embedder`; transformers' (Bolt, Super VL) only the tubelet
+        if self.separate_video_embedder == Some(false) {
             return None;
         }
         Some(VideoLayout {
-            target: self.video_target_num_patches?,
+            target: self
+                .video_target_num_patches
+                .unwrap_or(DEFAULT_VIDEO_TARGET_PATCHES),
             keep_aspect: self.video_maintain_aspect_ratio.unwrap_or(true),
             temporal: self.video_temporal_patch_size?,
         })
@@ -135,6 +140,13 @@ impl Config {
             }
         }
         Ok(Self::from_json(&value.to_string())?)
+    }
+
+    /// Whether a LayerNorm runs on the tower's features before the projector; unset, the reference builds one when
+    /// the decoder has MTP layers (Megatron gives every block of the shared config one).
+    pub fn final_layernorm(&self) -> bool {
+        self.vision_final_layernorm
+            .unwrap_or(self.llm_config.num_nextn_predict_layers > 0)
     }
 
     pub fn image_layout(&self, max_tiles: Option<usize>) -> Result<ImageLayout> {
@@ -208,12 +220,6 @@ impl NemotronOmniModel {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
-        // unset, the reference infers the LayerNorm from the decoder's MTP layers, which this config does not read
-        if cfg.vision_final_layernorm != Some(false) {
-            inference_tensor::bail!(
-                "{MODEL}: only checkpoints with `vision_final_layernorm: false` are supported"
-            );
-        }
         let vision = radio::RadioTower::new(cfg, vb.clone(), cfg.llm_config.hidden_size)?;
         let sound = match (&cfg.sound_config, cfg.sound_context_token_id) {
             (Some(sound), Some(token)) => Some((
@@ -397,5 +403,43 @@ impl MultimodalModel for NemotronOmniModel {
 
     fn supports_mixed_media_batches(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vision(extra: serde_json::Value) -> VisionConfig {
+        let mut config = serde_json::json!({
+            "hidden_size": 8, "num_attention_heads": 2, "num_hidden_layers": 1, "layer_norm_eps": 1e-6,
+            "mlp_ratio": 4.0, "num_cls_tokens": 1, "num_registers": 0, "max_img_size": 64,
+        });
+        for (key, value) in extra.as_object().into_iter().flatten() {
+            config[key] = value.clone();
+        }
+        serde_json::from_value(config).unwrap()
+    }
+
+    #[test]
+    fn a_tubelet_size_alone_offers_video_at_the_reference_frame_target() {
+        let layout = vision(serde_json::json!({"video_temporal_patch_size": 2})).video_layout();
+        assert_eq!(
+            layout,
+            Some(VideoLayout {
+                target: DEFAULT_VIDEO_TARGET_PATCHES,
+                keep_aspect: true,
+                temporal: 2,
+            })
+        );
+        let timm = vision(serde_json::json!({
+            "video_temporal_patch_size": 2, "separate_video_embedder": true, "video_target_num_patches": 512,
+        }));
+        assert_eq!(timm.video_layout().map(|layout| layout.target), Some(512));
+        let off = vision(
+            serde_json::json!({"video_temporal_patch_size": 2, "separate_video_embedder": false}),
+        );
+        assert_eq!(off.video_layout(), None);
+        assert_eq!(vision(serde_json::json!({})).video_layout(), None);
     }
 }

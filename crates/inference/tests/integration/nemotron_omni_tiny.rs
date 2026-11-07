@@ -635,6 +635,56 @@ async fn a_pruned_video_keeps_its_first_tubelet_and_decodes_the_same_again() -> 
     Ok(())
 }
 
+// Super VL's LayerNorm on the tower's features, which a decoder with MTP layers brings
+const FINAL_NORM: &str = "vision_projector.vision_final_layernorm";
+const FINAL_NORM_SEED: u64 = 7;
+
+fn add_final_norm(dir: &std::path::Path) -> anyhow::Result<()> {
+    let path = dir.join("model.safetensors");
+    let mut weights = inference_tensor::safetensors::load(&path, &Device::Cpu)?;
+    let rng = &mut StdRng::seed_from_u64(FINAL_NORM_SEED);
+    weights.insert(
+        format!("{FINAL_NORM}.weight"),
+        near_one(rng, &[VISION_HIDDEN])?,
+    );
+    weights.insert(format!("{FINAL_NORM}.bias"), random(rng, &[VISION_HIDDEN])?);
+    inference_tensor::safetensors::save(&weights, path)?;
+    Ok(())
+}
+
+// Super VL's config states no `vision_final_layernorm`: its decoder's MTP layers bring the norm, as the reference infers
+#[tokio::test]
+async fn an_mtp_decoder_normalizes_the_tower_features() -> anyhow::Result<()> {
+    let plain = checkpoint()?;
+    let plain = trace(
+        &build(plain.path())
+            .await?
+            .send_chat_request(request(&[SQUARE]))
+            .await?,
+    );
+    let checkpoint = checkpoint()?;
+    add_final_norm(checkpoint.path())?;
+    let mut config = config();
+    config
+        .as_object_mut()
+        .expect("the config is an object")
+        .remove("vision_final_layernorm");
+    config["llm_config"]["num_nextn_predict_layers"] = serde_json::json!(1);
+    std::fs::write(checkpoint.path().join("config.json"), config.to_string())?;
+    let normed = trace(
+        &build(checkpoint.path())
+            .await?
+            .send_chat_request(request(&[SQUARE]))
+            .await?,
+    );
+    assert!(
+        !normed.is_empty(),
+        "the normed image request generated nothing"
+    );
+    assert_ne!(plain, normed, "the final LayerNorm changed nothing");
+    Ok(())
+}
+
 // Nano Omni's architecture, which the projector writer knows; the tiny tower is the same layout
 const NANO_OMNI: &str = "NemotronH_Nano_Omni_Reasoning_V3";
 
@@ -642,6 +692,7 @@ const NANO_OMNI: &str = "NemotronH_Nano_Omni_Reasoning_V3";
 fn the_towers_written_as_an_mmproj_bind_back_unchanged() -> anyhow::Result<()> {
     let checkpoint = checkpoint()?;
     let dir = checkpoint.path();
+    add_final_norm(dir)?;
     let mut config = config();
     config["architectures"] = serde_json::json!([NANO_OMNI]);
     std::fs::write(dir.join("config.json"), config.to_string())?;
@@ -662,6 +713,7 @@ fn the_towers_written_as_an_mmproj_bind_back_unchanged() -> anyhow::Result<()> {
     let towers = [
         "vision_model.",
         "mlp1.",
+        "vision_projector.",
         "sound_encoder.",
         "sound_projection.",
     ];

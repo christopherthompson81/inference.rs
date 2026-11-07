@@ -6,7 +6,7 @@
 # OMNI_PYTHON names the interpreter that has them.
 #
 # Usage: scripts/nemotron_omni_video_parity.sh <checkpoint> <frames_dir> [--fps F] [--stride S] [--cpu] [--bf16]
-#   checkpoint  a NemotronH_Nano_Omni_Reasoning_V3 directory: config.json, preprocessor_config.json and the shards
+#   checkpoint  a Nano Omni, Bolt or Super VL directory: config.json, preprocessor_config.json and the shards
 #               holding `vision_model.*` and `mlp1.*` (the rest of the model is not read)
 #   frames_dir  the video's sampled frames as PNG or JPEG files, in name order
 #   --fps       the source video's frame rate (default 30), --stride its frames between samples (default 15)
@@ -68,10 +68,11 @@ model = RadioModel(radio)
 model.make_preprocessor_external()
 index = json.load(open(f"{checkpoint}/model.safetensors.index.json"))["weight_map"]
 st = {}
-for shard in sorted({f for k, f in index.items() if k.startswith(("vision_model.", "mlp1."))}):
+TOWERS = ("vision_model.", "mlp1.", "vision_projector.")
+for shard in sorted({f for k, f in index.items() if k.startswith(TOWERS)}):
     with safe_open(f"{checkpoint}/{shard}", "pt") as h:
         for k in h.keys():
-            if k.startswith(("vision_model.", "mlp1.")):
+            if k.startswith(TOWERS):
                 st[k] = h.get_tensor(k).float()
 # the released checkpoint's timm names onto transformers' RadioModel, as its conversion mapping does
 P = "vision_model.radio_model.model."
@@ -94,15 +95,16 @@ missing, unexpected = model.load_state_dict(sd, strict=False)
 assert not unexpected and all("layer_scale" in k or k == "summary_idxs" for k in missing), missing
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model = model.to(device).eval()
-mlp = {k: v.to(device) for k, v in st.items() if k.startswith("mlp1.")}
+mlp = {k: v.to(device) for k, v in st.items() if k.startswith(("mlp1.", "vision_projector."))}
 
 processor = NemotronH_Omni_Reasoning_V3VideoProcessor(
     norm_mean=pre["norm_mean"],
     norm_std=pre["norm_std"],
     patch_size=pre["patch_size"],
     downsample_ratio=pre["downsample_ratio"],
-    video_target_num_patches=vision["video_target_num_patches"],
-    video_maintain_aspect_ratio=vision["video_maintain_aspect_ratio"],
+    # Nano Omni's vision config states the frame rule; Bolt's and Super VL's keep it in the preprocessor config
+    video_target_num_patches=vision.get("video_target_num_patches", pre.get("video_target_num_patches", 1024)),
+    video_maintain_aspect_ratio=vision.get("video_maintain_aspect_ratio", pre.get("video_maintain_aspect_ratio", True)),
     do_sample_frames=False,
 )
 names = sorted(f for f in os.listdir(frames_dir) if f.lower().endswith((".png", ".jpg", ".jpeg")))
@@ -128,6 +130,13 @@ def pixel_shuffle(x, s=0.5):
     x = x.view(n, int(h * s), int(w * s), int(c / (s * s)))
     return x.permute(0, 2, 1, 3).contiguous()
 
+# the LayerNorm on RADIO's features a decoder with MTP layers brings (Super VL), before the shuffle
+def final_norm(x):
+    norm = "vision_projector.vision_final_layernorm."
+    if norm + "weight" not in mlp:
+        return x
+    return F.layer_norm(x, x.shape[-1:], mlp[norm + "weight"], mlp[norm + "bias"], vision["layer_norm_eps"])
+
 def project(x):
     x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-5) * mlp["mlp1.0.weight"]
     return F.linear(torch.relu(F.linear(x, mlp["mlp1.1.weight"])).square(), mlp["mlp1.3.weight"])
@@ -139,7 +148,7 @@ packed = pixels.reshape(-1, temporal * c, h, w)
 with torch.no_grad():
     features = model(packed).features
     rows, cols = h // radio.patch_size, w // radio.patch_size
-    shuffled = pixel_shuffle(features.reshape(packed.shape[0], rows, cols, -1))
+    shuffled = pixel_shuffle(final_norm(features).reshape(packed.shape[0], rows, cols, -1))
     embeds = project(shuffled.reshape(packed.shape[0], -1, shuffled.shape[-1]))
 # EVS as the reference applies it, on a (T, 1, N) grid: it reshapes to a square of sqrt(N) a side, which only a square
 # tubelet has, and the comparison is per position either way

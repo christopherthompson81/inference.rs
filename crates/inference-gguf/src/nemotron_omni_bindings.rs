@@ -40,12 +40,17 @@ const PATCH_EMBED: &str = "v.patch_embd.weight";
 const VIDEO_PATCH_EMBED: &str = "v.patch_embd.weight.1";
 // the patches a video frame is resized to, Nano Omni's `video_target_num_patches`, which a projector does not state
 const VIDEO_TARGET_PATCHES: usize = 1024;
+// EVS's share of a video's later tokens dropped, every released checkpoint's `video_pruning_rate`, not in a projector
+const VIDEO_PRUNING_RATE: f64 = 0.7;
 const CHANNELS: usize = 3;
 const POSITIONS: &str = "v.position_embd.weight";
 const PREFIX_TOKENS: &str = "v.class_embd";
 const PROJECTOR_IN: &str = "mm.model.mlp.1.weight";
 // a final LayerNorm on the tower, which the reference adds for decoders with MTP
 const POST_NORM: &str = "v.post_ln.weight";
+const POST_NORM_PREFIX: &str = "v.post_ln";
+// the LayerNorm on the tower's features a decoder with MTP layers brings (Super VL), under the checkpoint's name
+const FINAL_NORM: &str = "vision_projector.vision_final_layernorm";
 const BLOCK_ROLES: [(&str, &str); 6] = [
     ("attn.proj", "attn_out"),
     ("mlp.fc1", "ffn_up"),
@@ -61,9 +66,10 @@ const SOUND_PROJECTION: &str = "sound_projection";
 // the size llama.cpp warms its graph at; images run at their own grids
 const WARMUP_IMAGE_SIZE: u32 = 512;
 // the towers a checkpoint projector (its safetensors shard) carries under their own names
-const CHECKPOINT_TOWERS: [&str; 4] = [
+const CHECKPOINT_TOWERS: [&str; 5] = [
     "vision_model.",
     "mlp1.",
+    "vision_projector.",
     "sound_encoder.",
     "sound_projection.",
 ];
@@ -212,6 +218,16 @@ fn bind_vision(inventory: &TensorInventory<'_>, bindings: &mut GgufBindingMap) -
             format!("mlp1.{layer}.weight"),
             format!("mm.model.mlp.{layer}.weight"),
         )?;
+    }
+    if inventory.contains(POST_NORM) {
+        for suffix in ["weight", "bias"] {
+            bind_required(
+                inventory,
+                bindings,
+                format!("{FINAL_NORM}.{suffix}"),
+                format!("{POST_NORM_PREFIX}.{suffix}"),
+            )?;
+        }
     }
     Ok(())
 }
@@ -436,6 +452,15 @@ fn radio_spec(checkpoint: &Checkpoint, file: RadioFile) -> Result<MmprojSpec> {
             }
         }
     }
+    if checkpoint.contains(&format!("{FINAL_NORM}.weight")) {
+        for suffix in ["weight", "bias"] {
+            spec.tensors.push(MmprojTensor::new(
+                format!("{POST_NORM_PREFIX}.{suffix}"),
+                Source::tensor(format!("{FINAL_NORM}.{suffix}")),
+                Role::Float,
+            ));
+        }
+    }
     for layer in PROJECTOR_LAYERS {
         let role = if layer == "0" {
             Role::Float
@@ -578,6 +603,7 @@ fn vision_config(
         config["vision_config"]["video_temporal_patch_size"] = json!(temporal);
         config["vision_config"]["video_target_num_patches"] = json!(VIDEO_TARGET_PATCHES);
         config["vision_config"]["video_maintain_aspect_ratio"] = json!(true);
+        config["video_pruning_rate"] = json!(VIDEO_PRUNING_RATE);
     }
     for (key, value) in tiles.as_object().into_iter().flatten() {
         config[key] = value.clone();
@@ -739,5 +765,7 @@ mod tests {
         assert_eq!(config["img_context_token_id"], IMAGE_ID);
         assert_eq!(config["projector_hidden_size"], PROJECTOR_HIDDEN);
         assert_eq!(config["vision_final_layernorm"], false);
+        assert_eq!(vision["video_temporal_patch_size"], 2);
+        assert_eq!(config["video_pruning_rate"], VIDEO_PRUNING_RATE);
     }
 }
