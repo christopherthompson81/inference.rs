@@ -3,6 +3,7 @@
 
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+pub mod evs;
 pub mod inputs_processor;
 pub mod radio;
 pub mod sound;
@@ -176,7 +177,12 @@ pub struct ImagePatches {
     pub rows: usize,
     pub cols: usize,
     pub video: bool,
+    /// The decoder embeddings already made of it (a pruned video tubelet's kept tokens), in place of the tower's.
+    pub encoded: Option<Tensor>,
 }
+
+/// A sequence's videos as the tower saw them before the prompt was expanded: each tubelet's kept embeddings.
+pub struct EncodedVideos(pub Vec<Vec<Tensor>>);
 
 pub struct NemotronOmniSpecificArgs {
     /// The images and video tubelets whose placeholders this step holds, in prompt order.
@@ -188,6 +194,8 @@ pub struct NemotronOmniSpecificArgs {
 pub struct NemotronOmniModel {
     text: GraniteMoeHybrid,
     vision: radio::RadioTower,
+    // EVS: a video's tubelets encoded before its prompt is expanded, the redundant tokens dropped
+    video_pruning: Option<(f64, inputs_processor::NemotronOmniInputsProcessor)>,
     sound: Option<(sound::SoundTower, u32)>,
     image_token: u32,
     text_root: &'static str,
@@ -228,9 +236,17 @@ impl NemotronOmniModel {
             normal_loading_metadata,
             attention_mechanism,
         )?;
+        let video_pruning = match cfg.video_pruning_rate.filter(|&rate| rate > 0.0) {
+            Some(rate) if cfg.vision_config.video_layout().is_some() => Some((
+                rate,
+                inputs_processor::NemotronOmniInputsProcessor::new(cfg, None)?,
+            )),
+            _ => None,
+        };
         Ok(Self {
             text,
             vision,
+            video_pruning,
             sound,
             image_token: cfg.img_context_token_id,
             text_root: root,
@@ -248,7 +264,10 @@ impl NemotronOmniModel {
             let projected = args
                 .images
                 .iter()
-                .map(|image| self.vision.forward(image))
+                .map(|image| match &image.encoded {
+                    Some(embeds) => Ok(embeds.clone()),
+                    None => self.vision.forward(image),
+                })
                 .collect::<Result<Vec<_>>>()?;
             let projected = Tensor::cat(&projected, 0)?.to_device(embeds.device())?;
             embeds = place_token_features(&embeds, input_ids, self.image_token, &projected, MODEL)?;
@@ -333,6 +352,47 @@ impl MultimodalModel for NemotronOmniModel {
 
     fn supports_packed_prefill(&self) -> bool {
         false
+    }
+
+    fn encode_prompt_media(
+        &self,
+        seq: &mut dyn crate::media_inputs::processor::MediaSequence,
+    ) -> Result<()> {
+        let Some((rate, processor)) = &self.video_pruning else {
+            return Ok(());
+        };
+        if !seq.has_videos()
+            || seq.multimodal().has_changed_prompt
+            || seq.multimodal().encoded_media.is_some()
+        {
+            return Ok(());
+        }
+        let encoded = processor
+            .video_tubelets(seq)
+            .map_err(inference_tensor::Error::msg)?
+            .into_iter()
+            .map(|tubelets| {
+                let embeds = tubelets
+                    .iter()
+                    .map(|tubelet| self.vision.forward(tubelet))
+                    .collect::<Result<Vec<_>>>()?;
+                let embeds = Tensor::stack(&embeds, 0)?;
+                let kept = evs::retained(&embeds, *rate)?;
+                kept.iter()
+                    .enumerate()
+                    .map(|(tubelet, positions)| {
+                        let index = Tensor::from_vec(
+                            positions.iter().map(|&p| p as u32).collect::<Vec<_>>(),
+                            positions.len(),
+                            embeds.device(),
+                        )?;
+                        embeds.get(tubelet)?.index_select(&index, 0)
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .collect::<Result<Vec<_>>>()?;
+        seq.multimodal_mut().encoded_media = Some(std::sync::Arc::new(EncodedVideos(encoded)));
+        Ok(())
     }
 
     fn supports_mixed_media_batches(&self) -> bool {

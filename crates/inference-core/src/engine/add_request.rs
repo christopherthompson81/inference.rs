@@ -1190,6 +1190,9 @@ impl Engine {
         }
         let pipeline = get_mut_arcmutex!(self.pipeline);
         pipeline
+            .encode_prompt_media(seq)
+            .map_err(|error| Box::new(Response::InternalError(error.into())))?;
+        pipeline
             .get_processor()
             .inputs_processor()
             .prepare_for_paged_prompt_planning(

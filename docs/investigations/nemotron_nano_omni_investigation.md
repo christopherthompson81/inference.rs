@@ -202,3 +202,38 @@ GGUF route: llama.cpp's published projector (`mmproj-...-BF16.gguf`) has no vide
 there (frames per tubelet from its shape, the reference's 1024-patch frame target, which projectors do not state).
 Q4_K_M + our projector, the same clip: video offered, 1,152 prompt tokens, "A blue background. A yellow square is
 partially visible on the left edge ... moved towards the center ... moved further right".
+
+## Run 7 - 2026-11-07 00:15
+
+Question: EVS. Can a video's tokens be pruned as the reference does, when the pruning depends on the tower's output
+and the prompt is otherwise fixed before any forward?
+
+Built: `MultimodalModel::encode_prompt_media`, which admission calls before it expands a request's prompt (the
+pipeline is held there already); its result rides on the sequence (`MultimodalData::encoded_media`). Nano Omni, with
+a pruning rate above 0, runs each video's tubelets through the tower there, computes the retention (`evs.rs`: the
+first tubelet kept at dissimilarity 255, `1 - cosine` to the same position one tubelet earlier, a stable descending
+sort, `max(N, int(T * N * (1 - q)))` kept, positions in order) and keeps each tubelet's kept embeddings. The prompt
+then gives each tubelet's block its kept count; a tubelet that kept nothing keeps its label and an empty `<img></img>`
+and is no multimodal item; a step hands the kept embeddings to the decoder in place of the tower's. Video sampling now
+2 fps up to 256 frames (the model card's launch).
+
+The reference reshapes each tubelet to a square of `sqrt(N)` a side before comparing; that holds only for square
+tubelets (a 16:9 frame's 252 tokens fail it), and the comparison is per position, so ours runs on flat positions.
+
+Parity (`nemotron_omni_video_parity.sh`, now also transformers' `compute_retention_mask` at the checkpoint's 0.7 on a
+`(T, 1, N)` grid):
+
+```
+5 synthetic frames, 3 tubelets of 26 x 38: reference keeps 247, ours 247 on its embeddings and on ours (all agree)
+16 frames of the moving-square clip (8 fps, stride 2), 8 tubelets of 24 x 42: reference keeps 604, ours 604 on its
+    embeddings and on ours (1.0000 agree); `<video>` text identical (14,766 bytes); lowest cosine 0.9999998
+```
+
+Tiny (`a_pruned_video_keeps_its_first_tubelet_and_decodes_the_same_again`, F32 CPU): rate 0.5 on two 2-token
+tubelets keeps the first tubelet's 2 (the second block empty), 2 prompt tokens fewer than without pruning, and a
+cached repeat decodes the same.
+
+End to end (Q4_K_M + shard 1, the 4 s clip): 446 prompt tokens against 1,152 without EVS, 14.0 s against 22.3 s, the
+reasoning still "a yellow square ... on the left ... has moved". A repeat hit 384 cached tokens in 4.0 s; its
+reasoning text differed from the first's (BF16, the cached and uncached passes split the prompt differently; the F32
+tiny repeat is exact).

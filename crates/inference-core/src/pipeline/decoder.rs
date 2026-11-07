@@ -1238,6 +1238,13 @@ impl Pipeline for DecoderPipeline {
             )
     }
 
+    fn encode_prompt_media(&self, seq: &mut Sequence) -> Result<(), inference_tensor::Error> {
+        match self.model.multimodal() {
+            Some(model) => model.encode_prompt_media(seq),
+            None => Ok(()),
+        }
+    }
+
     // only scheduler-visible chunks (CUDA) skip the checkpoint split, and only where no drafter keeps its own state there
     fn captures_recurrent_state_mid_chunk(&self) -> bool {
         self.model.captures_recurrent_state_mid_chunk()

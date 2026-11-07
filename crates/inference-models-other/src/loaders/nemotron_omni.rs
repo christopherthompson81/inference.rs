@@ -6,12 +6,11 @@ use crate::nemotron_omni::{Config, LANGUAGE_MODEL, NemotronOmniModel};
 /// `MultimodalLoader` for Nemotron-H Omni (`NemotronH_Omni_Reasoning_V3`): images through C-RADIO into Nemotron-H.
 pub struct NemotronOmniLoader;
 
-// the model card's sampling for short clips, 2 fps; capped at its 1080p frame count, since every tubelet's tokens
-// reach the decoder here (no EVS pruning)
+// the model card's vLLM launch: 2 fps, at most 256 frames (a 2-minute clip; ~9.7K tokens after EVS at 0.7)
 const VIDEO_SAMPLING: VideoFrameSampling = VideoFrameSampling::Fps {
     fps: 2.0,
     min_frames: 2,
-    max_frames: 128,
+    max_frames: 256,
 };
 
 pub struct NemotronOmniPrefixer;
