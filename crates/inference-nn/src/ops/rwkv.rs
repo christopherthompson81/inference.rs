@@ -72,6 +72,116 @@ fn rwkv7_wkv_cpu(wkv: Wkv7<'_>, state: &Tensor) -> Result<Tensor> {
     Tensor::from_vec(y, (batch, seq, heads, n), wkv.r.device())
 }
 
+/// The token shift's lerps over `x` `(batch, seq, hidden)`: for each of `mixes` `(n, hidden)`,
+/// `x + (prev - x) * mix` with `prev` the previous token's `x` and `last` `(batch, hidden)` before the first. Returns
+/// the mixes `(n, batch, seq, hidden)` and the sequence's last token `(batch, hidden)`.
+pub fn rwkv7_token_shift(x: &Tensor, last: &Tensor, mixes: &Tensor) -> Result<(Tensor, Tensor)> {
+    if x.device().is_cuda() {
+        #[cfg(feature = "cuda")]
+        return crate::cuda::rwkv::rwkv7_token_shift_cuda(x, last, mixes);
+    }
+    let s = x.dim(1)?;
+    let last_in = last.unsqueeze(1)?.to_dtype(x.dtype())?;
+    let prev = if s == 1 {
+        last_in
+    } else {
+        Tensor::cat(&[last_in, x.narrow(1, 0, s - 1)?], 1)?
+    };
+    let shifted = (prev - x)?;
+    let mixes = mixes.to_dtype(x.dtype())?;
+    let mixed = (0..mixes.dim(0)?)
+        .map(|m| x + shifted.broadcast_mul(&mixes.get(m)?)?)
+        .collect::<Result<Vec<_>>>()?;
+    Ok((
+        Tensor::stack(&mixed, 0)?,
+        x.narrow(1, s - 1, 1)?.squeeze(1)?,
+    ))
+}
+
+/// One time-mix's inputs between its projections and `o_proj`, `(batch, seq, hidden)` in the activations' dtype:
+/// the receptance, the decay LoRA's raw output, `k`, `v`, the rate LoRA's raw output, the gate, and past the first
+/// layer the first layer's `v` with the value-mix LoRA's raw output. The vectors are `(hidden,)` (`r_k` per head).
+#[derive(Clone, Copy)]
+pub struct TimeMix7<'a> {
+    pub r: &'a Tensor,
+    pub w: &'a Tensor,
+    pub k: &'a Tensor,
+    pub v: &'a Tensor,
+    pub a: &'a Tensor,
+    pub g: &'a Tensor,
+    pub v_mix: Option<(&'a Tensor, &'a Tensor)>,
+    pub k_k: &'a Tensor,
+    pub k_a: &'a Tensor,
+    pub r_k: &'a Tensor,
+    pub norm_w: &'a Tensor,
+    pub norm_b: &'a Tensor,
+    pub norm_eps: f64,
+    pub heads: usize,
+    pub head_dim: usize,
+}
+
+// fla's `w = -exp(-0.5) * sigmoid(..)`, the decay `exp(w)` in (0.545, 1)
+const DECAY_SCALE: f64 = -0.606_530_659_712_633_4;
+// F.normalize's floor on a head's key norm
+const KK_NORM_EPS: f64 = 1e-12;
+
+/// RWKV-7's time-mix between its projections and `o_proj`: the decay, rate and value mix, `kk` and `k`, the WKV
+/// recurrence over `state` (advanced in place), the group norm per head, the bonus and the gate. Returns the input to
+/// `o_proj` in the activations' dtype; on CUDA one kernel.
+pub fn rwkv7_time_mix(tm: TimeMix7<'_>, state: &Tensor) -> Result<Tensor> {
+    if tm.r.device().is_cuda() {
+        #[cfg(feature = "cuda")]
+        return crate::cuda::rwkv::rwkv7_time_mix_cuda(tm, state);
+    }
+    use inference_tensor::D;
+    use inference_tensor::nn::ops::sigmoid;
+    let (b, s, h) = tm.r.dims3()?;
+    let f32 = |t: &Tensor| t.to_dtype(DType::F32);
+    let (r, k, g) = (f32(tm.r)?, f32(tm.k)?, f32(tm.g)?);
+    let w = (sigmoid(&f32(tm.w)?)? * DECAY_SCALE)?.exp()?;
+    let a = sigmoid(&f32(tm.a)?)?;
+    let mut v = f32(tm.v)?;
+    if let Some((first, mix)) = tm.v_mix {
+        v = (&v + (f32(first)? - &v)?.mul(&sigmoid(&f32(mix)?)?)?)?;
+    }
+    let vector = |t: &Tensor| t.to_dtype(DType::F32)?.flatten_all();
+    let heads = |t: &Tensor| t.reshape((b, s, tm.heads, tm.head_dim));
+    let kk = heads(&k.broadcast_mul(&vector(tm.k_k)?)?)?;
+    let norm = kk
+        .sqr()?
+        .sum_keepdim(D::Minus1)?
+        .sqrt()?
+        .maximum(KK_NORM_EPS)?;
+    let kk = kk.broadcast_div(&norm)?;
+    // k (1 + (a - 1) k_a)
+    let k = (&k + (&a - 1.0)?.broadcast_mul(&vector(tm.k_a)?)?.mul(&k)?)?;
+    let (r, w, k, v, a) = (heads(&r)?, heads(&w)?, heads(&k)?, heads(&v)?, heads(&a)?);
+    let y = rwkv7_wkv(
+        Wkv7 {
+            r: &r.contiguous()?,
+            w: &w.contiguous()?,
+            k: &k.contiguous()?,
+            v: &v.contiguous()?,
+            a: &kk.neg()?.contiguous()?,
+            b: &kk.mul(&a)?.contiguous()?,
+        },
+        state,
+    )?;
+    let mean = y.mean_keepdim(D::Minus1)?;
+    let centered = y.broadcast_sub(&mean)?;
+    let var = centered.sqr()?.mean_keepdim(D::Minus1)?;
+    let y = centered
+        .broadcast_div(&(var + tm.norm_eps)?.sqrt()?)?
+        .reshape((b, s, h))?
+        .broadcast_mul(&vector(tm.norm_w)?)?
+        .broadcast_add(&vector(tm.norm_b)?)?;
+    // the bonus: each head's (r . k r_k) times its value
+    let r_k = vector(tm.r_k)?.reshape((tm.heads, tm.head_dim))?;
+    let rk = r.mul(&k)?.broadcast_mul(&r_k)?.sum_keepdim(D::Minus1)?;
+    let y = (y + rk.broadcast_mul(&v)?.reshape((b, s, h))?)?.mul(&g)?;
+    y.to_dtype(tm.r.dtype())
+}
+
 // copies the advanced state back into the caller's tensor
 struct WriteState<'a>(&'a [f32]);
 

@@ -274,3 +274,29 @@ element-wise chains (the six token-shift mixes; `kk`, `k` and `a`; the group nor
 Chat on the 1.5B (`rwkv-world`, thinking on by default as llama.cpp's template has it): "What is the capital of
 France?" -> reasoning "The capital of France is Paris."; with thinking off, the same as content. Three requests at once
 decode as each does alone.
+
+## Run 6 - 2026-11-07 15:30
+
+Question: does fusing RWKV-7's element-wise chains close Run 5's decode gap?
+
+Two kernels beside WKV-7, each with the CPU composite it replaces as the op's CPU path (`ops::rwkv7_token_shift`,
+`ops::rwkv7_time_mix`):
+
+- the token shift: every mix of a layer's input in one pass (`x + (prev - x) * mix`, the previous token from the input
+  itself and the state's last before the first), the sequence's last token out as the new state;
+- the time-mix from its projections to `o_proj`, inside the WKV kernel's block per (sequence, head): the decay, rate
+  and value mix, `kk` (an L2 norm by a sum over the head's 64 threads) and `k`, the state update, the group norm (two
+  sums), the bonus (one sum) and the gate, reading and writing the activations' dtype.
+
+```
+gpu case cuda_rwkv7_fused_time_mix_matches_the_composite (f32, with and without the value mix): within 1e-4
+rwkv7_tiny, CUDA against the CPU: within 5e-3
+gguf_perplexity_parity.sh rwkv7-1.5B-world.Q8_0: ref 1.4331, ours 1.4322; rwkv7-191m-f32: ref 1.6759, ours 1.6754
+```
+
+| on the 3090 | Run 5 | fused | llama.cpp |
+|---|---|---|---|
+| 1.5B Q8_0 decode, 400 tokens | 91.3 / 92.6 tok/s | 219.3 / 219.8 tok/s | tg128 209.59 |
+| 1.5B Q8_0 prefill, 4,215 tokens | 10,538 tok/s | 13,090 tok/s | pp4096 9,844 |
+| 191M F32 decode | 204.6 tok/s | 500.0 tok/s | tg128 520.42 |
+| 191M F32 prefill | 42,576 tok/s | 40,922 tok/s | pp4096 36,721 |

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use inference_quant::{QuantMethod, QuantizedConfig, ReplicatedLayer, ShardedVarBuilder};
 use inference_tensor::nn::LayerNorm;
-use inference_tensor::{D, DType, Device, Module, Result, Tensor};
+use inference_tensor::{DType, Device, Module, Result, Tensor};
 use serde::Serialize;
 
 use crate::gdn::RecurrentBatchKind;
@@ -23,10 +23,6 @@ use crate::paged_attention::{AttentionImplementation, ModelConfigMetadata};
 use crate::serde_default_fn;
 use crate::utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder};
 
-// fla's `w = -exp(-0.5) * sigmoid(..)`, so the decay `exp(w)` stays in (0.545, 1)
-const DECAY_SCALE: f64 = -0.606_530_659_712_633_4;
-// F.normalize's floor on a head's key norm
-const KK_NORM_EPS: f64 = 1e-12;
 /// The context the planner may offer a sequence: RWKV has no positions.
 pub const MAX_POSITIONS: usize = 1 << 20;
 // the six token-shift mixes in the order the time-mix reads them
@@ -101,7 +97,8 @@ impl LoRA {
 }
 
 struct TimeMix {
-    mixes: [Tensor; 6],
+    // the six token-shift mixes stacked `(6, hidden)`, in `TIME_MIXES`' order
+    mixes: Tensor,
     r_proj: Arc<dyn QuantMethod>,
     k_proj: Arc<dyn QuantMethod>,
     v_proj: Arc<dyn QuantMethod>,
@@ -125,12 +122,14 @@ impl TimeMix {
         let h = cfg.hidden_size;
         let q = &cfg.quantization_config;
         let proj = |name: &str| ReplicatedLayer::new(h, h, q, false, vb.pp(name));
-        let mixes = TIME_MIXES.map(|name| vb.get((1, 1, h), name));
-        let [r, w, k, v, a, g] = mixes;
+        let mixes = TIME_MIXES
+            .iter()
+            .map(|name| vb.get((1, 1, h), name)?.reshape(h))
+            .collect::<Result<Vec<_>>>()?;
         // the vectors the f32 part of a step reads, converted once
         let f32 = |t: Tensor| t.to_dtype(DType::F32);
         Ok(Self {
-            mixes: [r?, w?, k?, v?, a?, g?],
+            mixes: Tensor::stack(&mixes, 0)?,
             r_proj: proj("r_proj")?,
             k_proj: proj("k_proj")?,
             v_proj: proj("v_proj")?,
@@ -154,75 +153,57 @@ impl TimeMix {
         })
     }
 
-    // `x` normed `(b, s, h)`, `prev` the inputs shifted by one token, `state` the heads' WKV matrices (advanced),
-    // `v_first` the first layer's value (set by it)
+    // `x` normed `(b, s, h)`, `last` the token before it per sequence `(b, h)`, `state` the heads' WKV matrices
+    // (advanced), `v_first` the first layer's value (set by it); returns the output and `x`'s last token
     fn forward(
         &self,
         x: &Tensor,
-        prev: &Tensor,
+        last: &Tensor,
         state: &Tensor,
         v_first: &mut Option<Tensor>,
-    ) -> Result<Tensor> {
-        let (b, s, h) = x.dims3()?;
-        let shifted = (prev - x)?;
-        let mixed = |i: usize| x + shifted.broadcast_mul(&self.mixes[i])?;
-        let [xr, xw, xk, xv, xa, xg] = [0, 1, 2, 3, 4, 5].map(mixed);
+    ) -> Result<(Tensor, Tensor)> {
+        let (mixed, new_last) = crate::ops::rwkv7_token_shift(x, last, &self.mixes)?;
+        let [xr, xw, xk, xv, xa, xg] = [0, 1, 2, 3, 4, 5].map(|i| mixed.get(i));
         let (xr, xw, xk, xv, xa, xg) = (xr?, xw?, xk?, xv?, xa?, xg?);
-        let f32 = |t: Tensor| t.to_dtype(DType::F32);
-        let r = f32(self.r_proj.forward(&xr)?)?;
-        let w = f32(self.w_lora.forward(&xw, Some(Tensor::tanh))?)?;
-        let w = (inference_tensor::nn::ops::sigmoid(&w)? * DECAY_SCALE)?.exp()?;
-        let k = f32(self.k_proj.forward(&xk)?)?;
-        let mut v = f32(self.v_proj.forward(&xv)?)?;
-        match (&self.v_lora, v_first.as_ref()) {
-            (Some(lora), Some(first)) => {
-                let mix = inference_tensor::nn::ops::sigmoid(&f32(lora.forward(&xv, None)?)?)?;
-                v = (&v + (first - &v)?.mul(&mix)?)?;
-            }
-            _ => *v_first = Some(v.clone()),
-        }
-        let a = inference_tensor::nn::ops::sigmoid(&f32(self.a_lora.forward(&xa, None)?)?)?;
-        let g = f32(self
+        let r = self.r_proj.forward(&xr)?;
+        let w = self.w_lora.forward(&xw, Some(Tensor::tanh))?;
+        let k = self.k_proj.forward(&xk)?;
+        let v = self.v_proj.forward(&xv)?;
+        let a = self.a_lora.forward(&xa, None)?;
+        let g = self
             .g_lora
-            .forward(&xg, Some(inference_tensor::nn::ops::sigmoid))?)?;
-        let heads = |t: &Tensor| t.reshape((b, s, self.heads, self.head_dim));
-        let kk = heads(&k.broadcast_mul(&self.k_k)?)?;
-        let norm = kk
-            .sqr()?
-            .sum_keepdim(D::Minus1)?
-            .sqrt()?
-            .maximum(KK_NORM_EPS)?;
-        let kk = kk.broadcast_div(&norm)?;
-        // k (1 + (a - 1) k_a)
-        let k = (&k + (&a - 1.0)?.broadcast_mul(&self.k_a)?.mul(&k)?)?;
-        let (r, w, k, v, a) = (heads(&r)?, heads(&w)?, heads(&k)?, heads(&v)?, heads(&a)?);
-        let y = crate::ops::rwkv7_wkv(
-            crate::ops::Wkv7 {
-                r: &r.contiguous()?,
-                w: &w.contiguous()?,
-                k: &k.contiguous()?,
-                v: &v.contiguous()?,
-                a: &kk.neg()?.contiguous()?,
-                b: &kk.mul(&a)?.contiguous()?,
+            .forward(&xg, Some(inference_tensor::nn::ops::sigmoid))?;
+        let v_mix = match (&self.v_lora, v_first.as_ref()) {
+            (Some(lora), Some(_)) => Some(lora.forward(&xv, None)?),
+            _ => {
+                *v_first = Some(v.clone());
+                None
+            }
+        };
+        let y = crate::ops::rwkv7_time_mix(
+            crate::ops::TimeMix7 {
+                r: &r,
+                w: &w,
+                k: &k,
+                v: &v,
+                a: &a,
+                g: &g,
+                v_mix: v_mix
+                    .as_ref()
+                    .zip(v_first.as_ref())
+                    .map(|(mix, first)| (first, mix)),
+                k_k: &self.k_k,
+                k_a: &self.k_a,
+                r_k: &self.r_k,
+                norm_w: &self.g_norm.0,
+                norm_b: &self.g_norm.1,
+                norm_eps: self.g_norm_eps,
+                heads: self.heads,
+                head_dim: self.head_dim,
             },
             state,
         )?;
-        // the group norm over each head
-        let mean = y.mean_keepdim(D::Minus1)?;
-        let centered = y.broadcast_sub(&mean)?;
-        let var = centered.sqr()?.mean_keepdim(D::Minus1)?;
-        let y = centered.broadcast_div(&(var + self.g_norm_eps)?.sqrt()?)?;
-        let y = y.reshape((b, s, h))?;
-        let y = y
-            .broadcast_mul(&self.g_norm.0)?
-            .broadcast_add(&self.g_norm.1)?;
-        // the bonus: each head's (r . k r_k) times its value
-        let rk = r
-            .mul(&k)?
-            .broadcast_mul(&self.r_k)?
-            .sum_keepdim(D::Minus1)?;
-        let y = (y + rk.broadcast_mul(&v)?.reshape((b, s, h))?)?.mul(&g)?;
-        self.o_proj.forward(&y.to_dtype(x.dtype())?)
+        Ok((self.o_proj.forward(&y.to_dtype(x.dtype())?)?, new_last))
     }
 }
 
@@ -237,15 +218,19 @@ impl ChannelMix {
         let (h, ffn) = (cfg.hidden_size, cfg.ffn_size());
         let q = &cfg.quantization_config;
         Ok(Self {
-            mix: vb.get(h, "x_k")?,
+            mix: vb.get(h, "x_k")?.reshape((1, h))?,
             key: ReplicatedLayer::new(h, ffn, q, false, vb.pp("key"))?,
             value: ReplicatedLayer::new(ffn, h, q, false, vb.pp("value"))?,
         })
     }
 
-    fn forward(&self, x: &Tensor, prev: &Tensor) -> Result<Tensor> {
-        let xk = (x + (prev - x)?.broadcast_mul(&self.mix)?)?;
-        self.value.forward(&self.key.forward(&xk)?.relu()?.sqr()?)
+    // returns the output and `x`'s last token
+    fn forward(&self, x: &Tensor, last: &Tensor) -> Result<(Tensor, Tensor)> {
+        let (mixed, new_last) = crate::ops::rwkv7_token_shift(x, last, &self.mix)?;
+        let out = self
+            .value
+            .forward(&self.key.forward(&mixed.get(0)?)?.relu()?.sqr()?)?;
+        Ok((out, new_last))
     }
 }
 
@@ -264,16 +249,6 @@ fn layer_norm(cfg: &Config, vb: ShardedVarBuilder) -> Result<LayerNorm> {
         ..Default::default()
     };
     crate::layers::layer_norm(cfg.hidden_size, config, vb)
-}
-
-// the inputs shifted by one token: the state's last token, then all but the sequence's last
-fn shift(x: &Tensor, last: &Tensor) -> Result<Tensor> {
-    let s = x.dim(1)?;
-    let last = last.unsqueeze(1)?.to_dtype(x.dtype())?;
-    if s == 1 {
-        return Ok(last);
-    }
-    Tensor::cat(&[last, x.narrow(1, 0, s - 1)?], 1)
 }
 
 pub struct Model {
@@ -436,18 +411,13 @@ impl Model {
             if let Some(pre_norm) = &layer.pre_norm {
                 x = pre_norm.forward(&x)?;
             }
-            let last = |t: &Tensor| t.narrow(1, t.dim(1)? - 1, 1)?.squeeze(1);
             let xn = layer.attn_norm.forward(&x)?;
-            let prev = shift(&xn, &shifts.narrow(1, 0, self.hidden)?.squeeze(2)?)?;
-            let attn_last = last(&xn)?;
-            x = (&x + layer.attn.forward(&xn, &prev, &state, &mut v_first)?)?;
+            let shift = |at: usize| shifts.narrow(1, at, self.hidden)?.squeeze(2);
+            let (out, attn_last) = layer.attn.forward(&xn, &shift(0)?, &state, &mut v_first)?;
+            x = (&x + out)?;
             let xn = layer.ffn_norm.forward(&x)?;
-            let prev = shift(
-                &xn,
-                &shifts.narrow(1, self.hidden, self.hidden)?.squeeze(2)?,
-            )?;
-            let ffn_last = last(&xn)?;
-            x = (&x + layer.ffn.forward(&xn, &prev)?)?;
+            let (out, ffn_last) = layer.ffn.forward(&xn, &shift(self.hidden)?)?;
+            x = (&x + out)?;
             shifts = Tensor::cat(&[attn_last, ffn_last], 1)?
                 .unsqueeze(2)?
                 .to_dtype(shifts.dtype())?;
@@ -484,8 +454,15 @@ impl IsqModel for Model {
             l.pp("attn_norm").add(&layer.attn_norm);
             l.pp("ffn_norm").add(&layer.ffn_norm);
             let a = l.pp("attn");
-            for (name, mix) in TIME_MIXES.iter().zip(&layer.attn.mixes) {
-                a.add_tensor(name, mix.clone());
+            for (i, name) in TIME_MIXES.iter().enumerate() {
+                let mix = layer
+                    .attn
+                    .mixes
+                    .get(i)
+                    .and_then(|m| m.reshape((1, 1, m.dim(0)?)));
+                if let Ok(mix) = mix {
+                    a.add_tensor(name, mix);
+                }
             }
             for (name, lora) in [
                 ("w_lora", Some(&layer.attn.w_lora)),
@@ -506,7 +483,9 @@ impl IsqModel for Model {
                 .add_tensor("weight", layer.attn.g_norm.0.clone());
             a.pp("g_norm")
                 .add_tensor("bias", layer.attn.g_norm.1.clone());
-            l.pp("ffn").add_tensor("x_k", layer.ffn.mix.clone());
+            if let Ok(mix) = layer.ffn.mix.flatten_all() {
+                l.pp("ffn").add_tensor("x_k", mix);
+            }
         }
         uvb.to_safetensors()
     }
