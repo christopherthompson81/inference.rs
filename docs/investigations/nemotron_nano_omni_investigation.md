@@ -163,3 +163,42 @@ layout). EVS does not: the prompt's length depends on the tower's output, and he
 tokens before any forward (the encoder cache is the model's, inside the forward). With rate 0 the reference keeps
 every token, a mode it supports. Plan: video with no pruning first, against torch at rate 0; EVS needs a step that
 encodes a request's video before its prompt is final.
+
+## Run 6 - 2026-11-06 23:40
+
+Question: does our video path (no EVS) match transformers', and does the model see a video end to end?
+
+Built: `video_embedder` in the tower (a tubelet's stacked frames in place of the patch embedder); the processor's
+frame grid (`video_grid`), tubelet patches (each patch's frames as consecutive 768-wide rows of the cached pixel
+tensor, the last frame repeated), labels (`tubelet_labels`), and one ordered pass over `<image>` and `<video>`
+(`expand_visual`) that records each `<img>` block's kind; tubelets are their own multimodal items (kind Video, hash of
+the video's and the index), so a prefill chunk can split a video between tubelets, and a step's images and tubelets
+reach the tower in prompt order. Video sampling 2 fps, at most 128 frames. EVS is logged as not applied.
+
+Reference: `scripts/nemotron_omni_video_parity.sh` (transformers 5.19's native `NemotronH_Omni_Reasoning_V3`
+video processor and `replace_video_token`, `RadioModel` with `video_patch_projection` from shard 1, the projector by
+hand; transformers 5.19 renamed RADIO's attention to `attention.{q,k,v,o}_proj`), f32 on CUDA, five synthetic 352 x
+240 frames at fps 30, stride 15:
+
+```
+reference: 5 frames, 3 tubelets of 26 x 38 patches
+`<video>` text: identical (5393 bytes; "Frame 1 sampled at 0.00 seconds and frame 2 sampled at 0.49 seconds: ", ...,
+                "Frame 5 sampled at 1.98 seconds: ")
+patches: max diff 5.7e-5, cosine 1.0000000 (the fifth frame repeated into tubelet 2)
+tubelets 0-2: features cosine 1.0000000, embeds 1.0000000 (max diff 2.3e-3 to 3.9e-3 of ~9), from our patches the same
+```
+
+End to end (Q4_K_M GGUF + shard 1, `--tok-model-id` the checkpoint), a synthetic 4 s clip at 8 fps (a yellow square
+crossing a blue field left to right), as a `video_url` data URI: 1,152 prompt tokens (8 frames sampled, 4 tubelets of
+256), 22 s. The reasoning: "Background: Solid blue color. Object: A yellow square ... The yellow shape starts on the
+left side. It moves horizontally to the right." Found on the way: a chunked prefill with no images asked for the
+images' active range and failed ("chunk is missing its active Image range"); a kind with no items is an empty range.
+
+Next: EVS, which needs the video encoded before the prompt is final.
+
+GGUF route: llama.cpp's published projector (`mmproj-...-BF16.gguf`) has no video patch embedder (only
+`v.patch_embd.weight`), so a load from it offers no video. Ours (`inference quantize mmproj`, #833) writes it as
+`v.patch_embd.weight.1`; the config synthesized from a projector now declares the video layout when that tensor is
+there (frames per tubelet from its shape, the reference's 1024-patch frame target, which projectors do not state).
+Q4_K_M + our projector, the same clip: video offered, 1,152 prompt tokens, "A blue background. A yellow square is
+partially visible on the left edge ... moved towards the center ... moved further right".

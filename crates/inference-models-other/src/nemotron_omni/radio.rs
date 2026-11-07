@@ -7,7 +7,7 @@ use inference_quant::{QuantMethod, ShardedVarBuilder};
 use inference_tensor::nn::{LayerNorm, Module};
 use inference_tensor::{D, DType, Device, Result, Tensor};
 
-use super::{Config, VisionConfig};
+use super::{Config, ImagePatches, VisionConfig};
 use crate::attention::{AttentionMask, FlashParams, SdpaParams};
 use crate::layers::{RmsNorm, Sdpa, layer_norm};
 
@@ -81,6 +81,8 @@ impl Block {
 
 pub struct RadioTower {
     embedder: Arc<dyn QuantMethod>,
+    // a tubelet's stacked frames in place of `embedder`, when the checkpoint takes video
+    video_embedder: Option<Arc<dyn QuantMethod>>,
     // (1, hidden, rows, cols), f32
     pos_grid: Tensor,
     prefix: Tensor,
@@ -115,8 +117,21 @@ impl RadioTower {
         let merge = cfg.merge();
         let shuffled = h * merge * merge;
         let mlp = vb.pp("mlp1");
+        let video_embedder = v
+            .video_layout()
+            .map(|video| {
+                inference_quant::linear_b(
+                    video.temporal * patch_in,
+                    h,
+                    false,
+                    &None,
+                    patches.pp("video_embedder"),
+                )
+            })
+            .transpose()?;
         Ok(Self {
             embedder: inference_quant::linear_b(patch_in, h, false, &None, patches.pp("embedder"))?,
+            video_embedder,
             pos_grid,
             prefix,
             blocks,
@@ -160,10 +175,19 @@ impl RadioTower {
             .to_dtype(self.dtype)
     }
 
-    /// RADIO's patch features for one image's `(rows * cols, 3 * patch * patch)` patches, its prefix tokens dropped.
-    pub fn features(&self, patches: &Tensor, rows: usize, cols: usize) -> Result<Tensor> {
-        let patches = patches.to_device(self.device())?.to_dtype(self.dtype)?;
-        let embedded = (self.embedder.forward(&patches)? + self.positions(rows, cols)?)?;
+    /// RADIO's patch features for one image or tubelet, its prefix tokens dropped.
+    pub fn features(&self, image: &ImagePatches) -> Result<Tensor> {
+        let (rows, cols) = (image.rows, image.cols);
+        let embedder = match (&self.video_embedder, image.video) {
+            (_, false) => &self.embedder,
+            (Some(embedder), true) => embedder,
+            (None, true) => inference_tensor::bail!("this vision tower has no `video_embedder`"),
+        };
+        let patches = image
+            .patches
+            .to_device(self.device())?
+            .to_dtype(self.dtype)?;
+        let embedded = (embedder.forward(&patches)? + self.positions(rows, cols)?)?;
         let mut xs =
             Tensor::cat(&[&self.prefix.to_dtype(self.dtype)?, &embedded], 0)?.unsqueeze(0)?;
         for block in &self.blocks {
@@ -173,10 +197,10 @@ impl RadioTower {
         xs.squeeze(0)?.narrow(0, prefix, rows * cols)
     }
 
-    /// The decoder embeddings of one image: `(rows * cols / merge^2, lm_hidden)`.
-    pub fn forward(&self, patches: &Tensor, rows: usize, cols: usize) -> Result<Tensor> {
-        let features = self.features(patches, rows, cols)?;
-        let shuffled = pixel_shuffle(&features, rows, cols, self.merge)?;
+    /// The decoder embeddings of one image or tubelet: `(rows * cols / merge^2, lm_hidden)`.
+    pub fn forward(&self, image: &ImagePatches) -> Result<Tensor> {
+        let features = self.features(image)?;
+        let shuffled = pixel_shuffle(&features, image.rows, image.cols, self.merge)?;
         let xs = self.norm.forward(&shuffled)?;
         let xs = self.linear1.forward(&xs)?.relu()?.sqr()?;
         self.linear2.forward(&xs)

@@ -1,9 +1,18 @@
 use super::*;
 
+use crate::media_inputs::video::VideoFrameSampling;
 use crate::nemotron_omni::{Config, LANGUAGE_MODEL, NemotronOmniModel};
 
 /// `MultimodalLoader` for Nemotron-H Omni (`NemotronH_Omni_Reasoning_V3`): images through C-RADIO into Nemotron-H.
 pub struct NemotronOmniLoader;
+
+// the model card's sampling for short clips, 2 fps; capped at its 1080p frame count, since every tubelet's tokens
+// reach the decoder here (no EVS pruning)
+const VIDEO_SAMPLING: VideoFrameSampling = VideoFrameSampling::Fps {
+    fps: 2.0,
+    min_frames: 2,
+    max_frames: 128,
+};
 
 pub struct NemotronOmniPrefixer;
 
@@ -38,9 +47,16 @@ impl MultimodalModelLoader for NemotronOmniLoader {
     fn supports_prefix_cacher(&self, _config: &str) -> bool {
         true
     }
+    fn video_frame_sampling(&self, _config: &str) -> VideoFrameSampling {
+        VIDEO_SAMPLING
+    }
     fn modalities(&self, config: &str) -> Result<Modalities> {
+        let cfg = Config::parse(config)?;
         let mut input = vec![SupportedModality::Text, SupportedModality::Vision];
-        if Config::parse(config)?.sound_config.is_some() {
+        if cfg.vision_config.video_layout().is_some() {
+            input.push(SupportedModality::Video);
+        }
+        if cfg.sound_config.is_some() {
             input.push(SupportedModality::Audio);
         }
         Ok(Modalities {
