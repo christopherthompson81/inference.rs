@@ -272,3 +272,28 @@ after:  "Reserving 1216 MB ...", loads, 17,502 MiB in use, a 5.5K-token prompt a
 Qwen3.8-Flash-Next UD-IQ4_XS, no flags (`fn_bench.sh`, scratch): the planner still takes 128 slots and a 2048-token
 chunk, the room past its slots holding more than either floor, so the floor change leaves it as it was. Decode 26-39
 tok/s prose and 32-39 code (the first rounds warming), prefill 573-736 tok/s at 5.5K tokens, peak 22,256 MiB.
+
+## Run 8 - 2026-11-07 04:15
+
+Question: does Puzzle (`nemotron_h_puzzle`, 75B-A9B) draft with its MTP head, and is it worth it on the offload?
+
+Built: the head's experts come from `mtp_block_configs` (Puzzle has no top-level `num_experts_per_tok` or
+`moe_intermediate_size`; the head would have been built with 7688-wide experts). Mainline llama.cpp's converter drops
+Puzzle's head; a community GGUF made with a fork (`MRockatansky/...-Puzzle-75B-A9B-MTP-GGUF`, IQ4_NL, 45 GB) keeps it as
+two blocks past the stack (blk.88 attention + nextn norms, blk.89 MoE + shared_head_norm), `nextn_predict_layers` 2,
+per-layer arrays 90 long. Bindings map the two blocks onto `mtp.layers.{0,1}`; config synthesis reads the head's top-k
+and width from the arrays past the stack. Tiny test: a Puzzle head (pruned stack experts, a wider top-k head) drafts
+without changing greedy output.
+
+```
+serve -p 1235 --no-ui --pa-context-len 16384 --format gguf -m <puzzle-mtp-gguf> -f <IQ4_NL> [--mtp]
+MTP:   q3 KV, 184 slots of 512, chunk 1024, 8 decode graphs; "Canberra" question answered correctly
+plain: 200 slots, chunk 1024, 4 decode graphs
+500-token greedy, code / prose prompts alternating (puzzle_q.py, scratch), thinking off:
+MTP    36.6 (cold) 58.2 | 58.1 57.6 60.2 59.2       accept 79-95%, 1.8-1.95 tokens a step
+plain  51.4 58.0 53.0 56.9 54.5 55.0
+```
+
+Warm: about 59 tok/s with MTP against 55 plain (+7%), unlike Super's break-even (Run 6). Puzzle's pruned experts
+leave more of each layer cached (184-200 of 512 slots), so a 2-token verify misses fewer experts on the CPU. Load
+average reached 9 during the runs, which was the server's CPU expert kernels; nothing else was running.
