@@ -55,6 +55,7 @@ mod rope_encoder;
 pub mod rwkv;
 pub mod rwkv6;
 pub mod rwkv7;
+pub mod rwkv_hybrid;
 pub mod starcoder2;
 #[cfg(test)]
 mod starcoder2_tests;
@@ -92,5 +93,7 @@ inference_nn::json_config!(
     paddleocr_vl::config::Config,
     rwkv6::Config,
     rwkv7::Config,
+    rwkv_hybrid::ArwkvConfig,
+    rwkv_hybrid::Qrwkv6Config,
     starcoder2::Config,
 );

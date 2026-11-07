@@ -260,6 +260,22 @@ impl SupportedArch for NormalLoaderType {
                 modalities: m,
                 examples: &[ex!("fla-hub/rwkv7-1.5B-world")],
             },
+            Self::Arwkv => ArchMetadata {
+                families: &["ARWKV"],
+                modalities: m,
+                examples: &[
+                    ex!("RWKV-Red-Team/ARWKV-R1-1B5"),
+                    ex!("mradermacher/ARWKV-R1-1B5-GGUF", "GGUF"),
+                ],
+            },
+            Self::Qrwkv6 => ArchMetadata {
+                families: &["QRWKV6"],
+                modalities: m,
+                examples: &[
+                    ex!("recursal/QRWKV6-7B-Instruct"),
+                    ex!("mradermacher/QRWKV6-7B-Instruct-GGUF", "GGUF"),
+                ],
+            },
             Self::Mamba => ArchMetadata {
                 families: &["Mamba"],
                 modalities: m,

@@ -282,6 +282,8 @@ class NormalLoaderType(str, Enum):
     JAMBA = "jamba"
     RWKV6 = "rwkv6"
     RWKV7 = "rwkv7"
+    ARWKV = "arwkv"
+    QRWKV6 = "qrwkv6"
     MAMBA = "mamba"
     FALCON_MAMBA = "falcon_mamba"
     MAMBA2 = "mamba2"

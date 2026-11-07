@@ -197,6 +197,8 @@ macro_rules! normal_loader_table {
             Jamba { cli: "jamba", hf: "JambaForCausalLM", model_type: "jamba", loader: JambaLoader, feature: "models-other" },
             Rwkv6 { cli: "rwkv6", hf: "Rwkv6ForCausalLM", model_type: "rwkv6", loader: Rwkv6Loader, feature: "models-other" },
             Rwkv7 { cli: "rwkv7", hf: "RWKV7ForCausalLM", model_type: "rwkv7", loader: Rwkv7Loader, feature: "models-other" },
+            Arwkv { cli: "arwkv", hf: "RwkvHybridForCausalLM", model_type: "rwkv_hybrid", loader: ArwkvLoader, feature: "models-other" },
+            Qrwkv6 { cli: "qrwkv6", hf: "RWKV6Qwen2ForCausalLM", model_type: "rwkv6qwen2", loader: Qrwkv6Loader, feature: "models-other" },
             Mamba { cli: "mamba", hf: "MambaForCausalLM", model_type: "mamba", loader: MambaLoader, feature: "models-other" },
             FalconMamba { cli: "falcon_mamba", hf: "FalconMambaForCausalLM", model_type: "falcon_mamba", loader: MambaLoader, feature: "models-other" },
             Mamba2 { cli: "mamba2", hf: "Mamba2ForCausalLM", model_type: "mamba2", loader: Mamba2Loader, feature: "models-other" },

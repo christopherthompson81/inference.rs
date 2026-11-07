@@ -260,6 +260,7 @@ inference_tensor::gpu_cases!(
         cuda_rwkv7_wkv_matches_the_cpu_recurrence,
         cuda_rwkv7_fused_time_mix_matches_the_composite,
         cuda_rwkv6_fused_time_mix_matches_the_composite,
+        cuda_qrwkv6_fused_time_mix_matches_the_composite,
         cuda_mamba_gated_rmsnorm_matches_the_composite,
         cuda_qk_norm_rope_positions_preserves_projection_layout,
         cuda_qk_norm_rope_writes_token_major_from_packed_projection,
@@ -1154,8 +1155,8 @@ fn cuda_rwkv7_wkv_matches_the_cpu_recurrence() -> inference_tensor::Result<()> {
     Ok(())
 }
 
-// the fused token shift and time-mix kernels against the CPU composites, the time-mix with and without the value mix,
-// over two sequences of 30 steps
+// the fused token shift and time-mix kernels against the CPU composites, the time-mix with and without the value mix
+// and in ARWKV's form (no gate, no group norm), over two sequences of 30 steps
 #[cfg(feature = "cuda")]
 fn cuda_rwkv7_fused_time_mix_matches_the_composite() -> inference_tensor::Result<()> {
     const B: usize = 2;
@@ -1198,28 +1199,32 @@ fn cuda_rwkv7_fused_time_mix_matches_the_composite() -> inference_tensor::Result
         .map(|_| rand(&[C]))
         .collect::<inference_tensor::Result<Vec<_>>>()?;
     let state = rand(&[B, H, N, N])?;
-    for with_mix in [false, true] {
-        fn view<'a>(t: &'a [Tensor], v: &'a [Tensor], with_mix: bool) -> super::TimeMix7<'a> {
+    for (with_mix, gated) in [(false, true), (true, true), (true, false)] {
+        fn view<'a>(
+            t: &'a [Tensor],
+            v: &'a [Tensor],
+            with_mix: bool,
+            gated: bool,
+        ) -> super::TimeMix7<'a> {
             super::TimeMix7 {
                 r: &t[0],
                 w: &t[1],
                 k: &t[2],
                 v: &t[3],
                 a: &t[4],
-                g: &t[5],
+                g: gated.then_some(&t[5]),
                 v_mix: with_mix.then_some((&t[6], &t[7])),
                 k_k: &v[0],
                 k_a: &v[1],
                 r_k: &v[2],
-                norm_w: &v[3],
-                norm_b: &v[4],
+                norm: gated.then_some((&v[3], &v[4])),
                 norm_eps: NORM_EPS,
                 heads: H,
                 head_dim: N,
             }
         }
         let cpu_state = state.copy()?;
-        let expected = super::rwkv7_time_mix(view(&inputs, &vectors, with_mix), &cpu_state)?;
+        let expected = super::rwkv7_time_mix(view(&inputs, &vectors, with_mix, gated), &cpu_state)?;
         let gpu = |t: &[Tensor]| {
             t.iter()
                 .map(|t| t.to_device(&device))
@@ -1227,10 +1232,15 @@ fn cuda_rwkv7_fused_time_mix_matches_the_composite() -> inference_tensor::Result
         };
         let (gpu_inputs, gpu_vectors) = (gpu(&inputs)?, gpu(&vectors)?);
         let gpu_state = state.to_device(&device)?;
-        let y = super::rwkv7_time_mix(view(&gpu_inputs, &gpu_vectors, with_mix), &gpu_state)?;
-        close(&format!("time-mix (value mix {with_mix})"), &y, &expected)?;
+        let y =
+            super::rwkv7_time_mix(view(&gpu_inputs, &gpu_vectors, with_mix, gated), &gpu_state)?;
         close(
-            &format!("state (value mix {with_mix})"),
+            &format!("time-mix (value mix {with_mix}, gated {gated})"),
+            &y,
+            &expected,
+        )?;
+        close(
+            &format!("state (value mix {with_mix}, gated {gated})"),
             &gpu_state,
             &cpu_state,
         )?;
@@ -1310,6 +1320,62 @@ fn cuda_rwkv6_fused_time_mix_matches_the_composite() -> inference_tensor::Result
     let y = super::rwkv6_time_mix(view(&gpu_inputs, &gpu_vectors), &gpu_state)?;
     close("rwkv6 time-mix", &y, &expected)?;
     close("rwkv6 state", &gpu_state, &cpu_state)?;
+    Ok(())
+}
+
+// QRWKV6's GLA kernel against the CPU composite at both head sizes, four heads over two key/value heads, decays that
+// reach the clamp
+#[cfg(feature = "cuda")]
+fn cuda_qrwkv6_fused_time_mix_matches_the_composite() -> inference_tensor::Result<()> {
+    const B: usize = 2;
+    const T: usize = 30;
+    const H: usize = 4;
+    const KV: usize = 2;
+    const TOLERANCE: f32 = 1e-4;
+    let device = Device::new_cuda(0)?;
+    for n in [64, 128] {
+        let rand = |shape: &[usize], std: f32| Tensor::randn(0f32, std, shape, &Device::Cpu);
+        let (r, k, v, g) = (
+            rand(&[B, T, H * n], 0.5)?,
+            rand(&[B, T, KV * n], 0.5)?,
+            rand(&[B, T, KV * n], 0.5)?,
+            rand(&[B, T, H * n], 1.0)?,
+        );
+        let w = rand(&[B, T, H * n], 1.5)?;
+        let state = rand(&[B, H, n, n], 0.5)?;
+        fn view<'a>(t: [&'a Tensor; 5], n: usize) -> super::TimeMixQrwkv6<'a> {
+            super::TimeMixQrwkv6 {
+                r: t[0],
+                k: t[1],
+                v: t[2],
+                w: t[3],
+                g: t[4],
+                heads: H,
+                kv_heads: KV,
+                head_dim: n,
+            }
+        }
+        let cpu_state = state.copy()?;
+        let expected = super::qrwkv6_time_mix(view([&r, &k, &v, &w, &g], n), &cpu_state)?;
+        let gpu = [&r, &k, &v, &w, &g].map(|t| t.to_device(&device).unwrap());
+        let gpu_state = state.to_device(&device)?;
+        let y = super::qrwkv6_time_mix(
+            view([&gpu[0], &gpu[1], &gpu[2], &gpu[3], &gpu[4]], n),
+            &gpu_state,
+        )?;
+        for (label, actual, want) in [("output", &y, &expected), ("state", &gpu_state, &cpu_state)]
+        {
+            let error = (actual.to_device(&Device::Cpu)? - want)?
+                .abs()?
+                .max_all()?
+                .to_scalar::<f32>()?;
+            let scale = want.abs()?.max_all()?.to_scalar::<f32>()?;
+            assert!(
+                error < TOLERANCE * scale.max(1.0),
+                "qrwkv6 {label} at head size {n}: max error {error} at scale {scale}"
+            );
+        }
+    }
     Ok(())
 }
 

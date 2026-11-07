@@ -51,34 +51,128 @@ impl Config {
     }
 }
 
-/// A low-rank projection, `up(act(down(x))) (+ bias)`, as fla's `LoRA` holds it.
-struct LoRA {
-    down: Arc<dyn QuantMethod>,
-    up: Arc<dyn QuantMethod>,
+/// A time-mix's names: fla's (`r_proj`, `Linear` LoRAs) or BlinkDL's (`receptance`, `w1`/`w2` matrices), as ARWKV's.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Layout {
+    Fla,
+    Blink,
+}
+
+impl Layout {
+    // the receptance, key, value and output projections
+    fn projections(self) -> [&'static str; 4] {
+        match self {
+            Self::Fla => ["r_proj", "k_proj", "v_proj", "o_proj"],
+            Self::Blink => ["receptance", "key", "value", "output"],
+        }
+    }
+
+    fn norm(self) -> &'static str {
+        match self {
+            Self::Fla => "g_norm",
+            Self::Blink => "ln_x",
+        }
+    }
+}
+
+/// What a time-mix holds beyond its widths.
+pub(crate) struct TimeMixSpec<'a> {
+    pub layout: Layout,
+    pub hidden: usize,
+    pub heads: usize,
+    pub head_dim: usize,
+    pub gated: bool,
+    pub group_norm: bool,
+    pub group_norm_eps: f64,
+    /// fla's decay, rate, value and gate LoRA ranks (BlinkDL's matrices carry their own)
+    pub ranks: [usize; 4],
+    pub quantization_config: &'a Option<QuantizedConfig>,
+}
+
+/// A low-rank projection, `up(act(down(x))) (+ bias)`: fla's `LoRA` (`Linear`s) or BlinkDL's matrices (`x @ w1`).
+enum LoRA {
+    Linear {
+        down: Arc<dyn QuantMethod>,
+        up: Arc<dyn QuantMethod>,
+    },
+    Matrix {
+        down: Tensor,
+        up: Tensor,
+        bias: Option<Tensor>,
+    },
 }
 
 impl LoRA {
-    fn load(cfg: &Config, rank: usize, bias: bool, vb: ShardedVarBuilder) -> Result<Self> {
-        let vb = vb.pp("lora");
-        let h = cfg.hidden_size;
-        Ok(Self {
-            down: ReplicatedLayer::new(h, rank, &cfg.quantization_config, false, vb.pp(0))?,
-            up: ReplicatedLayer::new(rank, h, &cfg.quantization_config, bias, vb.pp(2))?,
+    // `name` the LoRA's letter (`w`, `a`, `v`, `g`)
+    fn load(
+        spec: &TimeMixSpec<'_>,
+        name: &str,
+        rank: usize,
+        bias: bool,
+        vb: &ShardedVarBuilder,
+    ) -> Result<Self> {
+        let h = spec.hidden;
+        Ok(match spec.layout {
+            Layout::Fla => {
+                let q = spec.quantization_config;
+                let vb = vb.pp(format!("{name}_lora")).pp("lora");
+                Self::Linear {
+                    down: ReplicatedLayer::new(h, rank, q, false, vb.pp(0))?,
+                    up: ReplicatedLayer::new(rank, h, q, bias, vb.pp(2))?,
+                }
+            }
+            Layout::Blink => Self::Matrix {
+                down: vb.get_unchecked(&format!("{name}1"))?,
+                up: vb.get_unchecked(&format!("{name}2"))?,
+                bias: bias
+                    .then(|| vb.get((1, 1, h), &format!("{name}0"))?.reshape(h))
+                    .transpose()?,
+            },
         })
     }
 
     fn forward(&self, x: &Tensor, act: Option<fn(&Tensor) -> Result<Tensor>>) -> Result<Tensor> {
-        let mid = self.down.forward(x)?;
+        let mid = match self {
+            Self::Linear { down, .. } => down.forward(x)?,
+            Self::Matrix { down, .. } => x.broadcast_matmul(down)?,
+        };
         let mid = match act {
             Some(act) => act(&mid)?,
             None => mid,
         };
-        self.up.forward(&mid)
+        match self {
+            Self::Linear { up, .. } => up.forward(&mid),
+            Self::Matrix { up, bias, .. } => {
+                let out = mid.broadcast_matmul(up)?;
+                match bias {
+                    Some(bias) => out.broadcast_add(bias),
+                    None => Ok(out),
+                }
+            }
+        }
+    }
+
+    fn residual_tensors(&self, name: &str, a: &UnVarBuilder) {
+        match self {
+            Self::Linear { down, up } => {
+                let p = a.pp(format!("{name}_lora")).pp("lora");
+                p.pp(0).add(down);
+                p.pp(2).add(up);
+            }
+            Self::Matrix { down, up, bias } => {
+                a.add_tensor(format!("{name}1"), down.clone());
+                a.add_tensor(format!("{name}2"), up.clone());
+                if let Some(Ok(bias)) = bias.as_ref().map(|b| b.unsqueeze(0)?.unsqueeze(0)) {
+                    a.add_tensor(format!("{name}0"), bias);
+                }
+            }
+        }
     }
 }
 
-struct TimeMix {
-    // the six token-shift mixes stacked `(6, hidden)`, in `TIME_MIXES`' order
+pub(crate) struct TimeMix {
+    layout: Layout,
+    // the token-shift mixes stacked `(n, hidden)`, in `TIME_MIXES`' order (no `x_g` without a gate)
     mixes: Tensor,
     r_proj: Arc<dyn QuantMethod>,
     k_proj: Arc<dyn QuantMethod>,
@@ -88,55 +182,72 @@ struct TimeMix {
     a_lora: LoRA,
     // the first layer's value is every later layer's residual, so it has no mix of its own
     v_lora: Option<LoRA>,
-    g_lora: LoRA,
+    g_lora: Option<LoRA>,
     k_k: Tensor,
     k_a: Tensor,
     r_k: Tensor,
-    g_norm: (Tensor, Tensor),
+    g_norm: Option<(Tensor, Tensor)>,
     g_norm_eps: f64,
     heads: usize,
     head_dim: usize,
 }
 
 impl TimeMix {
-    fn load(cfg: &Config, layer: usize, vb: ShardedVarBuilder) -> Result<Self> {
-        let h = cfg.hidden_size;
-        let q = &cfg.quantization_config;
+    pub(crate) fn load(
+        spec: &TimeMixSpec<'_>,
+        layer: usize,
+        vb: ShardedVarBuilder,
+    ) -> Result<Self> {
+        let h = spec.hidden;
+        let q = spec.quantization_config;
         let proj = |name: &str| ReplicatedLayer::new(h, h, q, false, vb.pp(name));
-        let mixes = TIME_MIXES
+        let [r_proj, k_proj, v_proj, o_proj] = spec.layout.projections();
+        let mixes = TIME_MIXES[..TIME_MIXES.len() - usize::from(!spec.gated)]
             .iter()
             .map(|name| vb.get((1, 1, h), name)?.reshape(h))
             .collect::<Result<Vec<_>>>()?;
         // the vectors the f32 part of a step reads, converted once
         let f32 = |t: Tensor| t.to_dtype(DType::F32);
+        let vector = |name: &str| match spec.layout {
+            Layout::Fla => f32(vb.get(h, name)?),
+            Layout::Blink => f32(vb.get((1, 1, h), name)?.reshape(h)?),
+        };
+        let [w_rank, a_rank, v_rank, g_rank] = spec.ranks;
+        let norm = vb.pp(spec.layout.norm());
         Ok(Self {
+            layout: spec.layout,
             mixes: Tensor::stack(&mixes, 0)?,
-            r_proj: proj("r_proj")?,
-            k_proj: proj("k_proj")?,
-            v_proj: proj("v_proj")?,
-            o_proj: proj("o_proj")?,
-            w_lora: LoRA::load(cfg, cfg.decay_low_rank_dim, true, vb.pp("w_lora"))?,
-            a_lora: LoRA::load(cfg, cfg.a_low_rank_dim, true, vb.pp("a_lora"))?,
+            r_proj: proj(r_proj)?,
+            k_proj: proj(k_proj)?,
+            v_proj: proj(v_proj)?,
+            o_proj: proj(o_proj)?,
+            w_lora: LoRA::load(spec, "w", w_rank, true, &vb)?,
+            a_lora: LoRA::load(spec, "a", a_rank, true, &vb)?,
             v_lora: (layer > 0)
-                .then(|| LoRA::load(cfg, cfg.v_low_rank_dim, true, vb.pp("v_lora")))
+                .then(|| LoRA::load(spec, "v", v_rank, true, &vb))
                 .transpose()?,
-            g_lora: LoRA::load(cfg, cfg.gate_low_rank_dim, false, vb.pp("g_lora"))?,
-            k_k: f32(vb.get(h, "k_k")?)?,
-            k_a: f32(vb.get(h, "k_a")?)?,
-            r_k: f32(vb.get((cfg.heads(), cfg.head_dim), "r_k")?)?,
-            g_norm: (
-                f32(vb.pp("g_norm").get(h, "weight")?)?,
-                f32(vb.pp("g_norm").get(h, "bias")?)?,
-            ),
-            g_norm_eps: cfg.head_dim as f64 * cfg.norm_eps,
-            heads: cfg.heads(),
-            head_dim: cfg.head_dim,
+            g_lora: spec
+                .gated
+                .then(|| LoRA::load(spec, "g", g_rank, false, &vb))
+                .transpose()?,
+            k_k: vector("k_k")?,
+            k_a: vector("k_a")?,
+            r_k: f32(vb.get((spec.heads, spec.head_dim), "r_k")?)?,
+            g_norm: spec
+                .group_norm
+                .then(|| -> Result<(Tensor, Tensor)> {
+                    Ok((f32(norm.get(h, "weight")?)?, f32(norm.get(h, "bias")?)?))
+                })
+                .transpose()?,
+            g_norm_eps: spec.group_norm_eps,
+            heads: spec.heads,
+            head_dim: spec.head_dim,
         })
     }
 
-    // `x` normed `(b, s, h)`, `last` the token before it per sequence `(b, h)`, `state` the heads' WKV matrices
-    // (advanced), `v_first` the first layer's value (set by it); returns the output and `x`'s last token
-    fn forward(
+    /// `x` normed `(b, s, h)`, `last` the token before it per sequence `(b, h)`, `state` the heads' WKV matrices
+    /// (advanced), `v_first` the first layer's value (set by it); returns the output and `x`'s last token.
+    pub(crate) fn forward(
         &self,
         x: &Tensor,
         last: &Tensor,
@@ -144,16 +255,22 @@ impl TimeMix {
         v_first: &mut Option<Tensor>,
     ) -> Result<(Tensor, Tensor)> {
         let (mixed, new_last) = crate::ops::rwkv_token_shift(x, last, &self.mixes, None)?;
-        let [xr, xw, xk, xv, xa, xg] = [0, 1, 2, 3, 4, 5].map(|i| mixed.get(i));
-        let (xr, xw, xk, xv, xa, xg) = (xr?, xw?, xk?, xv?, xa?, xg?);
+        let [xr, xw, xk, xv, xa] = [0, 1, 2, 3, 4].map(|i| mixed.get(i));
+        let (xr, xw, xk, xv, xa) = (xr?, xw?, xk?, xv?, xa?);
         let r = self.r_proj.forward(&xr)?;
         let w = self.w_lora.forward(&xw, Some(Tensor::tanh))?;
         let k = self.k_proj.forward(&xk)?;
         let v = self.v_proj.forward(&xv)?;
         let a = self.a_lora.forward(&xa, None)?;
-        let g = self
+        let mut g = self
             .g_lora
-            .forward(&xg, Some(inference_tensor::nn::ops::sigmoid))?;
+            .as_ref()
+            .map(|lora| lora.forward(&mixed.get(5)?, Some(inference_tensor::nn::ops::sigmoid)))
+            .transpose()?;
+        // BlinkDL's gate is `sigmoid(xg w1) w2 + 1`
+        if self.layout == Layout::Blink {
+            g = g.map(|g| g + 1.0).transpose()?;
+        }
         let v_mix = match (&self.v_lora, v_first.as_ref()) {
             (Some(lora), Some(_)) => Some(lora.forward(&xv, None)?),
             _ => {
@@ -168,7 +285,7 @@ impl TimeMix {
                 k: &k,
                 v: &v,
                 a: &a,
-                g: &g,
+                g: g.as_ref(),
                 v_mix: v_mix
                     .as_ref()
                     .zip(v_first.as_ref())
@@ -176,8 +293,7 @@ impl TimeMix {
                 k_k: &self.k_k,
                 k_a: &self.k_a,
                 r_k: &self.r_k,
-                norm_w: &self.g_norm.0,
-                norm_b: &self.g_norm.1,
+                norm: self.g_norm.as_ref().map(|(w, b)| (w, b)),
                 norm_eps: self.g_norm_eps,
                 heads: self.heads,
                 head_dim: self.head_dim,
@@ -185,6 +301,41 @@ impl TimeMix {
             state,
         )?;
         Ok((self.o_proj.forward(&y.to_dtype(x.dtype())?)?, new_last))
+    }
+
+    /// The tensors ISQ does not take, under the time-mix's prefix.
+    pub(crate) fn residual_tensors(&self, a: &UnVarBuilder) {
+        let vector = |t: &Tensor| match self.layout {
+            Layout::Fla => Ok(t.clone()),
+            Layout::Blink => t.reshape((1, 1, t.dim(0)?)),
+        };
+        for (i, name) in TIME_MIXES.iter().enumerate() {
+            let mix = self.mixes.get(i).and_then(|m| m.reshape((1, 1, m.dim(0)?)));
+            if let Ok(mix) = mix {
+                a.add_tensor(name, mix);
+            }
+        }
+        for (name, lora) in [
+            ("w", Some(&self.w_lora)),
+            ("a", Some(&self.a_lora)),
+            ("v", self.v_lora.as_ref()),
+            ("g", self.g_lora.as_ref()),
+        ] {
+            if let Some(lora) = lora {
+                lora.residual_tensors(name, a);
+            }
+        }
+        for (name, t) in [("k_k", &self.k_k), ("k_a", &self.k_a)] {
+            if let Ok(t) = vector(t) {
+                a.add_tensor(name, t);
+            }
+        }
+        a.add_tensor("r_k", self.r_k.clone());
+        if let Some((w, b)) = &self.g_norm {
+            let norm = a.pp(self.layout.norm());
+            norm.add_tensor("weight", w.clone());
+            norm.add_tensor("bias", b.clone());
+        }
     }
 }
 
@@ -226,51 +377,25 @@ impl RwkvBlock for Layer {
     fn forward(
         &self,
         x: &Tensor,
-        [attn_shift, ffn_shift]: [&Tensor; 2],
+        shifts: &[Tensor],
         state: &Tensor,
         v_first: &mut Option<Tensor>,
-    ) -> Result<[Tensor; 3]> {
+    ) -> Result<(Tensor, Vec<Tensor>)> {
+        let [attn_shift, ffn_shift] = shifts else {
+            inference_tensor::bail!("an RWKV layer reads two token shifts");
+        };
         let xn = self.attn_norm.forward(x)?;
         let (out, attn_last) = self.attn.forward(&xn, attn_shift, state, v_first)?;
         let x = (x + out)?;
         let xn = self.ffn_norm.forward(&x)?;
         let (out, ffn_last) = self.ffn.forward(&xn, ffn_shift)?;
-        Ok([(x + out)?, attn_last, ffn_last])
+        Ok(((x + out)?, vec![attn_last, ffn_last]))
     }
 
     fn residual_tensors(&self, l: &UnVarBuilder) {
         l.pp("attn_norm").add(&self.attn_norm);
         l.pp("ffn_norm").add(&self.ffn_norm);
-        let a = l.pp("attn");
-        for (i, name) in TIME_MIXES.iter().enumerate() {
-            let mix = self
-                .attn
-                .mixes
-                .get(i)
-                .and_then(|m| m.reshape((1, 1, m.dim(0)?)));
-            if let Ok(mix) = mix {
-                a.add_tensor(name, mix);
-            }
-        }
-        for (name, lora) in [
-            ("w_lora", Some(&self.attn.w_lora)),
-            ("a_lora", Some(&self.attn.a_lora)),
-            ("v_lora", self.attn.v_lora.as_ref()),
-            ("g_lora", Some(&self.attn.g_lora)),
-        ] {
-            if let Some(lora) = lora {
-                let p = a.pp(name).pp("lora");
-                p.pp(0).add(&lora.down);
-                p.pp(2).add(&lora.up);
-            }
-        }
-        a.add_tensor("k_k", self.attn.k_k.clone());
-        a.add_tensor("k_a", self.attn.k_a.clone());
-        a.add_tensor("r_k", self.attn.r_k.clone());
-        a.pp("g_norm")
-            .add_tensor("weight", self.attn.g_norm.0.clone());
-        a.pp("g_norm")
-            .add_tensor("bias", self.attn.g_norm.1.clone());
+        self.attn.residual_tensors(&l.pp("attn"));
         if let Ok(mix) = self.ffn.mix.flatten_all() {
             l.pp("ffn").add_tensor("x_k", mix);
         }
@@ -286,6 +411,25 @@ const NAMES: RwkvNames = RwkvNames {
 };
 
 impl Config {
+    fn time_mix_spec(&self) -> TimeMixSpec<'_> {
+        TimeMixSpec {
+            layout: Layout::Fla,
+            hidden: self.hidden_size,
+            heads: self.heads(),
+            head_dim: self.head_dim,
+            gated: true,
+            group_norm: true,
+            group_norm_eps: self.head_dim as f64 * self.norm_eps,
+            ranks: [
+                self.decay_low_rank_dim,
+                self.a_low_rank_dim,
+                self.v_low_rank_dim,
+                self.gate_low_rank_dim,
+            ],
+            quantization_config: &self.quantization_config,
+        }
+    }
+
     pub(crate) fn shape(&self) -> RwkvShape<'_> {
         RwkvShape {
             vocab: self.vocab_size,
@@ -297,6 +441,8 @@ impl Config {
             norm_eps: self.norm_eps,
             quantization_config: &self.quantization_config,
             rescaled_every: None,
+            rms_norm: false,
+            shifts: 2,
         }
     }
 }
@@ -308,11 +454,11 @@ pub fn model(
     meta: NormalLoadingMetadata,
 ) -> Result<RwkvModel> {
     let shape = cfg.shape();
-    RwkvModel::new(&shape, NAMES, "pre_norm", vb, meta, |layer, vb| {
+    RwkvModel::new(&shape, NAMES, Some("pre_norm"), vb, meta, |layer, vb, _| {
         Ok(Box::new(Layer {
             attn_norm: shape.layer_norm(vb.pp("attn_norm"))?,
             ffn_norm: shape.layer_norm(vb.pp("ffn_norm"))?,
-            attn: TimeMix::load(cfg, layer, vb.pp("attn"))?,
+            attn: TimeMix::load(&cfg.time_mix_spec(), layer, vb.pp("attn"))?,
             ffn: ChannelMix::load(cfg, vb.pp("ffn"))?,
         }) as Box<dyn RwkvBlock>)
     })

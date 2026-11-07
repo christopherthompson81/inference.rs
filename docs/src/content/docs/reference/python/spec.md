@@ -678,6 +678,8 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `NormalLoaderType.JAMBA` | `'jamba'` |
 | `NormalLoaderType.RWKV6` | `'rwkv6'` |
 | `NormalLoaderType.RWKV7` | `'rwkv7'` |
+| `NormalLoaderType.ARWKV` | `'arwkv'` |
+| `NormalLoaderType.QRWKV6` | `'qrwkv6'` |
 | `NormalLoaderType.MAMBA` | `'mamba'` |
 | `NormalLoaderType.FALCON_MAMBA` | `'falcon_mamba'` |
 | `NormalLoaderType.MAMBA2` | `'mamba2'` |

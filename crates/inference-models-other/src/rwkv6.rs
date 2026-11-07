@@ -76,6 +76,8 @@ impl Config {
             norm_eps: self.layer_norm_epsilon,
             quantization_config: &self.quantization_config,
             rescaled_every: self.rescaled_every,
+            rms_norm: false,
+            shifts: 2,
         }
     }
 }
@@ -142,18 +144,13 @@ impl TimeMix {
     }
 
     fn forward(&self, x: &Tensor, last: &Tensor, state: &Tensor) -> Result<(Tensor, Tensor)> {
-        let (b, s, h) = x.dims3()?;
-        let mixes = TIME_MIXES.len();
-        let (xxx, new_last) = crate::ops::rwkv_token_shift(x, last, &self.maa_x, None)?;
-        // the mixes' data-dependent parts: tanh(xxx w1), split per mix, through each mix's w2
-        let lora = xxx.get(0)?.broadcast_matmul(&self.maa_w1)?.tanh()?;
-        let rank = lora.dim(2)? / mixes;
-        let lora = lora
-            .reshape((b * s, mixes, rank))?
-            .transpose(0, 1)?
-            .contiguous()?;
-        let extra = lora.matmul(&self.maa_w2)?.reshape((mixes, b, s, h))?;
-        let (mixed, _) = crate::ops::rwkv_token_shift(x, last, &self.maa, Some(&extra))?;
+        let shift = DataDependentShift {
+            maa_x: &self.maa_x,
+            maa: &self.maa,
+            maa_w1: &self.maa_w1,
+            maa_w2: &self.maa_w2,
+        };
+        let (mixed, new_last) = shift.forward(x, last)?;
         let [xw, xk, xv, xr, xg] = [0, 1, 2, 3, 4].map(|i| mixed.get(i));
         let (xw, xk, xv, xr, xg) = (xw?, xk?, xv?, xr?, xg?);
         let w = xw
@@ -178,6 +175,34 @@ impl TimeMix {
             state,
         )?;
         Ok((self.output.forward(&y.to_dtype(x.dtype())?)?, new_last))
+    }
+}
+
+/// RWKV-6's data-dependent token shift: `maa_x` `(1, hidden)`, the mixes `(n, hidden)` and their LoRA, `(hidden,
+/// n * rank)` then `(n, rank, hidden)`.
+pub(crate) struct DataDependentShift<'a> {
+    pub maa_x: &'a Tensor,
+    pub maa: &'a Tensor,
+    pub maa_w1: &'a Tensor,
+    pub maa_w2: &'a Tensor,
+}
+
+impl DataDependentShift<'_> {
+    /// The mixed inputs `(n, b, s, h)` and `x`'s last token.
+    pub fn forward(&self, x: &Tensor, last: &Tensor) -> Result<(Tensor, Tensor)> {
+        let (b, s, h) = x.dims3()?;
+        let mixes = self.maa.dim(0)?;
+        let (xxx, new_last) = crate::ops::rwkv_token_shift(x, last, self.maa_x, None)?;
+        // the mixes' data-dependent parts: tanh(xxx w1), split per mix, through each mix's w2
+        let lora = xxx.get(0)?.broadcast_matmul(self.maa_w1)?.tanh()?;
+        let rank = lora.dim(2)? / mixes;
+        let lora = lora
+            .reshape((b * s, mixes, rank))?
+            .transpose(0, 1)?
+            .contiguous()?;
+        let extra = lora.matmul(self.maa_w2)?.reshape((mixes, b, s, h))?;
+        let (mixed, _) = crate::ops::rwkv_token_shift(x, last, self.maa, Some(&extra))?;
+        Ok((mixed, new_last))
     }
 }
 
@@ -224,10 +249,13 @@ impl RwkvBlock for Layer {
     fn forward(
         &self,
         x: &Tensor,
-        [attn_shift, ffn_shift]: [&Tensor; 2],
+        shifts: &[Tensor],
         state: &Tensor,
         _v_first: &mut Option<Tensor>,
-    ) -> Result<[Tensor; 3]> {
+    ) -> Result<(Tensor, Vec<Tensor>)> {
+        let [attn_shift, ffn_shift] = shifts else {
+            inference_tensor::bail!("an RWKV layer reads two token shifts");
+        };
         let (out, attn_last) = self
             .attention
             .forward(&self.ln1.forward(x)?, attn_shift, state)?;
@@ -235,7 +263,7 @@ impl RwkvBlock for Layer {
         let (out, ffn_last) = self
             .feed_forward
             .forward(&self.ln2.forward(&x)?, ffn_shift)?;
-        Ok([(x + out)?, attn_last, ffn_last])
+        Ok(((x + out)?, vec![attn_last, ffn_last]))
     }
 
     fn residual_tensors(&self, l: &UnVarBuilder) {
@@ -287,7 +315,7 @@ pub fn model(
     meta: NormalLoadingMetadata,
 ) -> Result<RwkvModel> {
     let shape = cfg.shape();
-    RwkvModel::new(&shape, NAMES, "pre_ln", vb, meta, |_, vb| {
+    RwkvModel::new(&shape, NAMES, Some("pre_ln"), vb, meta, |_, vb, _| {
         Ok(Box::new(Layer {
             ln1: shape.layer_norm(vb.pp("ln1"))?,
             ln2: shape.layer_norm(vb.pp("ln2"))?,

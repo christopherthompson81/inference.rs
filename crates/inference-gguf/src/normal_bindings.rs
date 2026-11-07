@@ -36,6 +36,12 @@ pub fn build_normal_bindings(
     if matches!(loader, NormalLoaderType::Rwkv6) {
         return rwkv6_bindings(archive);
     }
+    if matches!(loader, NormalLoaderType::Arwkv) {
+        return arwkv7_bindings(archive);
+    }
+    if matches!(loader, NormalLoaderType::Qrwkv6) {
+        return rwkv6qwen2_bindings(archive);
+    }
     // Nemotron-H's tensors with no attention or feed-forward, under transformers' `backbone`
     if matches!(loader, NormalLoaderType::Mamba2) {
         let bindings =
@@ -368,6 +374,172 @@ fn rwkv6_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
             "channel_mix_key" => (format!("{f}.key.{suffix}"), tensor()),
             "channel_mix_receptance" => (format!("{f}.receptance.{suffix}"), tensor()),
             "channel_mix_value" => (format!("{f}.value.{suffix}"), tensor()),
+            _ => continue,
+        };
+        bindings.insert(target, binding);
+    }
+    Ok(bindings)
+}
+
+const RWKV_HYBRID_ROOT: [(&str, &str); 3] = [
+    ("token_embd.weight", "model.embed_tokens.weight"),
+    ("output_norm.weight", "model.norm.weight"),
+    ("output.weight", "lm_head.weight"),
+];
+// ARWKV's fused mixes, the gate's last when the model has one
+const ARWKV7_MIXES: [&str; 6] = ["x_r", "x_w", "x_k", "x_v", "x_a", "x_g"];
+// QRWKV6's checkpoint stacks its mix LoRAs r, k, v, w, g; llama.cpp's converter reorders them w, k, v, r, g, and
+// this permutation (its own inverse) takes either order to the other
+const RWKV6_QWEN2_MIX_ORDER: [usize; 5] = [3, 1, 2, 0, 4];
+
+// the hybrids' Qwen2 half: the roots, the two RMSNorms and the MLP; the role's target or `None` for a time-mix tensor
+fn rwkv_hybrid_qwen2_target(prefix: &str, role: &str, suffix: &str) -> Option<String> {
+    let name = match role {
+        "attn_norm" => "input_layernorm",
+        "ffn_norm" => "post_attention_layernorm",
+        "ffn_gate" => "mlp.gate_proj",
+        "ffn_up" => "mlp.up_proj",
+        "ffn_down" => "mlp.down_proj",
+        _ => return None,
+    };
+    Some(format!("{prefix}.{name}.{suffix}"))
+}
+
+fn rwkv_hybrid_root(archive: &GgufArchive, bindings: &mut GgufBindingMap) {
+    for (source, native) in RWKV_HYBRID_ROOT {
+        if archive.tensors().contains_key(source) {
+            bindings.insert(native.to_string(), GgufTensorBinding::tensor(source));
+        }
+    }
+}
+
+// llama.cpp's `arwkv7` GGUF under ARWKV's names: BlinkDL's LoRA matrices (`x @ w1`), which the converter transposed,
+// and its vectors as `(1, 1, hidden)` rows
+fn arwkv7_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
+    let head_size = metadata_usize(archive, "arwkv7.wkv.head_size")?;
+    let mut bindings = GgufBindingMap::new();
+    rwkv_hybrid_root(archive, &mut bindings);
+    for name in archive.tensors().keys() {
+        let Some((layer, role, suffix)) = parse_block_tensor(name) else {
+            continue;
+        };
+        let p = format!("model.layers.{layer}");
+        let a = format!("{p}.self_attn.time_mixer");
+        let shape = archive.tensor_info(name)?.shape().to_vec();
+        let width = shape.iter().product::<usize>();
+        let tensor = || GgufTensorBinding::tensor(name);
+        let row = || tensor().reshape(vec![1, 1, width]);
+        if let Some(target) = rwkv_hybrid_qwen2_target(&p, role, suffix) {
+            bindings.insert(target, tensor());
+            continue;
+        }
+        if role == "time_mix_lerp_fused" {
+            // five mixes, or six with the gate
+            let mixes = shape[0];
+            let hidden = width / mixes;
+            for (i, mix) in ARWKV7_MIXES.iter().take(mixes).enumerate() {
+                let binding = tensor()
+                    .reshape(vec![mixes, hidden])
+                    .slice(0, i, 1)
+                    .reshape(vec![1, 1, hidden]);
+                bindings.insert(format!("{a}.{mix}"), binding);
+            }
+            continue;
+        }
+        let (target, binding) = match role {
+            "time_mix_receptance" => (format!("{a}.receptance.{suffix}"), tensor()),
+            "time_mix_key" => (format!("{a}.key.{suffix}"), tensor()),
+            "time_mix_value" => (format!("{a}.value.{suffix}"), tensor()),
+            "time_mix_output" => (format!("{a}.output.{suffix}"), tensor()),
+            "time_mix_ln" => (format!("{a}.ln_x.{suffix}"), tensor()),
+            "time_mix_k_k" => (format!("{a}.k_k"), row()),
+            "time_mix_k_a" => (format!("{a}.k_a"), row()),
+            "time_mix_r_k" => (
+                format!("{a}.r_k"),
+                tensor().reshape(vec![width / head_size, head_size]),
+            ),
+            role => {
+                let Some((which, part)) = role
+                    .strip_prefix("time_mix_")
+                    .and_then(|rest| rest.split_at_checked(1))
+                    .filter(|(which, part)| {
+                        matches!(*which, "w" | "a" | "v" | "g") && part.len() == 1
+                    })
+                else {
+                    continue;
+                };
+                match part {
+                    "0" => (format!("{a}.{which}0"), row()),
+                    "1" | "2" => (format!("{a}.{which}{part}"), tensor().transpose(0, 1)),
+                    _ => continue,
+                }
+            }
+        };
+        bindings.insert(target, binding);
+    }
+    Ok(bindings)
+}
+
+// llama.cpp's `rwkv6qwen2` GGUF under QRWKV6's names: Qwen2's projections with their biases, RWKV-6's LoRAs transposed
+// back (`w2` permuted) and the mix LoRAs returned to the checkpoint's order
+fn rwkv6qwen2_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
+    let mut bindings = GgufBindingMap::new();
+    rwkv_hybrid_root(archive, &mut bindings);
+    let mixes = RWKV6_QWEN2_MIX_ORDER.len();
+    for name in archive.tensors().keys() {
+        let Some((layer, role, suffix)) = parse_block_tensor(name) else {
+            continue;
+        };
+        let p = format!("model.layers.{layer}");
+        let a = format!("{p}.self_attn");
+        let shape = archive.tensor_info(name)?.shape().to_vec();
+        let width = shape.iter().product::<usize>();
+        let tensor = || GgufTensorBinding::tensor(name);
+        let row = || tensor().reshape(vec![1, 1, width]);
+        if let Some(target) = rwkv_hybrid_qwen2_target(&p, role, suffix) {
+            bindings.insert(target, tensor());
+            continue;
+        }
+        if role == "time_mix_lerp_fused" {
+            let hidden = width / RWKV6_MIXES.len();
+            for (i, mix) in RWKV6_MIXES.iter().enumerate() {
+                let binding = tensor()
+                    .reshape(vec![RWKV6_MIXES.len(), hidden])
+                    .slice(0, i, 1)
+                    .reshape(vec![1, 1, hidden]);
+                bindings.insert(format!("{a}.{mix}"), binding);
+            }
+            continue;
+        }
+        // the mix LoRA's five blocks along `dim` of `binding` (`len` wide), in the checkpoint's order
+        let reordered = |binding: GgufTensorBinding, dim: usize, len: usize| {
+            let block = len / mixes;
+            let parts = RWKV6_QWEN2_MIX_ORDER
+                .iter()
+                .map(|i| binding.clone().slice(dim, i * block, block))
+                .collect();
+            GgufTensorBinding::concat(parts, dim)
+        };
+        let (target, binding) = match role {
+            "time_mix_lerp_x" => (format!("{a}.time_maa_x"), row()),
+            // `(5 rank, hidden)` stored, `(hidden, 5 rank)` read
+            "time_mix_w1" => (
+                format!("{a}.time_maa_w1"),
+                reordered(tensor().transpose(0, 1), 1, shape[0]),
+            ),
+            // `(5, hidden, rank)` stored, `(5, rank, hidden)` read
+            "time_mix_w2" => (
+                format!("{a}.time_maa_w2"),
+                reordered(tensor().permute(vec![0, 2, 1]), 0, mixes),
+            ),
+            "time_mix_decay" => (format!("{a}.time_decay"), row()),
+            "time_mix_decay_w1" => (format!("{a}.time_decay_w1"), tensor().transpose(0, 1)),
+            "time_mix_decay_w2" => (format!("{a}.time_decay_w2"), tensor().transpose(0, 1)),
+            "time_mix_receptance" => (format!("{a}.q_proj.{suffix}"), tensor()),
+            "time_mix_key" => (format!("{a}.k_proj.{suffix}"), tensor()),
+            "time_mix_value" => (format!("{a}.v_proj.{suffix}"), tensor()),
+            "time_mix_gate" => (format!("{a}.gate.{suffix}"), tensor()),
+            "time_mix_output" => (format!("{a}.o_proj.{suffix}"), tensor()),
             _ => continue,
         };
         bindings.insert(target, binding);

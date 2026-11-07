@@ -1,12 +1,15 @@
-//! The stack RWKV-6 and RWKV-7 share: embeddings, layers that each read the previous token through two token shifts
-//! and carry per-head WKV matrices, a final LayerNorm and the head. No attention: each layer's state is the hybrid
-//! cache's conv slot (its two shifted inputs, `2 * hidden` wide and one step deep) and its WKV matrices (f32).
+//! The stack RWKV-6, RWKV-7 and their Qwen2 hybrids share: embeddings, layers that each read the previous token
+//! through their token shifts (two in RWKV, one in the hybrids) and carry per-head WKV matrices, a final norm and the
+//! head. No attention: each layer's state is the hybrid cache's conv slot (its shifted inputs, one step deep) and its
+//! WKV matrices (f32).
 
 use std::sync::{Arc, Mutex};
 
 use inference_quant::{QuantMethod, QuantizedConfig, ReplicatedLayer, ShardedVarBuilder};
 use inference_tensor::nn::LayerNorm;
 use inference_tensor::{DType, Device, Module, Result, Tensor};
+
+use crate::layers::RmsNorm;
 
 use crate::gdn::RecurrentBatchKind;
 use crate::kv_cache::{
@@ -21,17 +24,17 @@ use crate::utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder};
 /// The context the planner may offer a sequence: RWKV has no positions.
 pub const MAX_POSITIONS: usize = 1 << 20;
 
-/// One RWKV layer: its time-mix and channel-mix with their norms.
+/// One RWKV layer: its time-mix and channel-mix (or MLP) with their norms.
 pub(crate) trait RwkvBlock: Send + Sync {
-    /// `x` advanced through the layer, with the time-mix's and channel-mix's last inputs (the next step's shifts);
-    /// `shifts` the previous ones, `state` the WKV matrices (advanced in place), `v_first` RWKV-7's first value.
+    /// `x` advanced through the layer, with each token shift's last input (the next step's shifts); `shifts` the
+    /// previous ones `(b, hidden)` each, `state` the WKV matrices (advanced in place), `v_first` RWKV-7's first value.
     fn forward(
         &self,
         x: &Tensor,
-        shifts: [&Tensor; 2],
+        shifts: &[Tensor],
         state: &Tensor,
         v_first: &mut Option<Tensor>,
-    ) -> Result<[Tensor; 3]>;
+    ) -> Result<(Tensor, Vec<Tensor>)>;
 
     /// The tensors ISQ does not take, under the layer's prefix.
     fn residual_tensors(&self, uvb: &UnVarBuilder);
@@ -46,6 +49,30 @@ pub(crate) struct RwkvNames {
     pub head: &'static str,
 }
 
+/// RWKV's LayerNorms or the hybrids' RMSNorms.
+pub(crate) enum RwkvNorm {
+    Layer(LayerNorm),
+    Rms(RmsNorm),
+}
+
+impl Module for RwkvNorm {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Layer(norm) => norm.forward(x),
+            Self::Rms(norm) => norm.forward(x),
+        }
+    }
+}
+
+impl RwkvNorm {
+    pub fn residual_tensors(&self, uvb: &UnVarBuilder) {
+        match self {
+            Self::Layer(norm) => uvb.add(norm),
+            Self::Rms(norm) => uvb.add(norm),
+        }
+    }
+}
+
 /// The stack's widths and its norms.
 pub(crate) struct RwkvShape<'a> {
     pub vocab: usize,
@@ -55,6 +82,10 @@ pub(crate) struct RwkvShape<'a> {
     pub layers: usize,
     pub tie_word_embeddings: bool,
     pub norm_eps: f64,
+    /// RMSNorms (the Qwen2 hybrids) in place of LayerNorms
+    pub rms_norm: bool,
+    /// the token shifts per layer: the time-mix's and the channel-mix's, or only the time-mix's in the hybrids
+    pub shifts: usize,
     pub quantization_config: &'a Option<QuantizedConfig>,
     /// llama.cpp's RWKV-6 GGUFs divide each layer's output weights by `2^(layer / n)` and halve the hidden state
     /// after every `n`th layer to match.
@@ -62,10 +93,10 @@ pub(crate) struct RwkvShape<'a> {
 }
 
 impl RwkvShape<'_> {
-    /// A sequence's state: per layer the two shifted inputs and the heads' WKV matrices in f32.
+    /// A sequence's state: per layer the shifted inputs and the heads' WKV matrices in f32.
     pub fn recurrent_state_bytes(&self, dtype: DType) -> usize {
         self.layers
-            * (2 * self.hidden * dtype.size_in_bytes()
+            * (self.shifts * self.hidden * dtype.size_in_bytes()
                 + self.heads * self.head_dim * self.head_dim * DType::F32.size_in_bytes())
     }
 
@@ -76,19 +107,27 @@ impl RwkvShape<'_> {
         };
         crate::layers::layer_norm(self.hidden, config, vb)
     }
+
+    pub fn norm(&self, vb: ShardedVarBuilder) -> Result<RwkvNorm> {
+        Ok(if self.rms_norm {
+            RwkvNorm::Rms(RmsNorm::new(self.hidden, self.norm_eps, vb)?)
+        } else {
+            RwkvNorm::Layer(self.layer_norm(vb)?)
+        })
+    }
 }
 
 pub struct RwkvModel {
     embeddings: Arc<dyn QuantMethod>,
-    // layer 0's LayerNorm on the embeddings
-    pre_norm: LayerNorm,
+    // layer 0's LayerNorm on the embeddings (RWKV's, not the hybrids'), with its name in the layer
+    pre_norm: Option<(LayerNorm, &'static str)>,
     blocks: Vec<Box<dyn RwkvBlock>>,
-    norm: LayerNorm,
+    norm: RwkvNorm,
     lm_head: Arc<dyn QuantMethod>,
     names: RwkvNames,
-    pre_norm_name: &'static str,
     dtype: DType,
     hidden: usize,
+    shifts: usize,
     rescaled_every: Option<usize>,
     cache: EitherCache,
     device: Device,
@@ -97,15 +136,20 @@ pub struct RwkvModel {
 }
 
 impl RwkvModel {
-    /// The stack over `block` (each layer's builder, from its device-placed `VarBuilder`); `pre_norm` names layer 0's
-    /// LayerNorm on the embeddings inside its layer.
+    /// The stack over `block` (each layer's builder, from its device-placed `VarBuilder` and its comm); `pre_norm`
+    /// names layer 0's LayerNorm on the embeddings inside its layer, when it has one.
     pub(crate) fn new(
         shape: &RwkvShape<'_>,
         names: RwkvNames,
-        pre_norm: &'static str,
+        pre_norm: Option<&'static str>,
         vb: ShardedVarBuilder,
         normal_loading_metadata: NormalLoadingMetadata,
-        block: impl Fn(usize, ShardedVarBuilder) -> Result<Box<dyn RwkvBlock>> + Sync,
+        block: impl Fn(
+            usize,
+            ShardedVarBuilder,
+            &Arc<inference_quant::Comm>,
+        ) -> Result<Box<dyn RwkvBlock>>
+        + Sync,
     ) -> Result<Self> {
         if shape.hidden != shape.heads * shape.head_dim {
             inference_tensor::bail!(
@@ -129,7 +173,7 @@ impl RwkvModel {
                 .then(|| mapper.set_nm_device(vb_head.clone(), loading_isq)),
             shape.quantization_config,
         )?;
-        let norm = shape.layer_norm(mapper.set_nm_device(vb_m.pp(names.norm), false))?;
+        let norm = shape.norm(mapper.set_nm_device(vb_m.pp(names.norm), false))?;
         let lm_head = if shape.tie_word_embeddings {
             embeddings.clone()
         } else {
@@ -142,15 +186,24 @@ impl RwkvModel {
             )?
         };
         let vb_l = vb_m.pp(names.layers);
-        let pre_norm_layer =
-            shape.layer_norm(mapper.set_device(0, vb_l.pp(0), loading_isq).pp(pre_norm))?;
+        let pre_norm = pre_norm
+            .map(|name| -> Result<(LayerNorm, &'static str)> {
+                let vb = mapper.set_device(0, vb_l.pp(0), loading_isq).pp(name);
+                Ok((shape.layer_norm(vb)?, name))
+            })
+            .transpose()?;
         let blocks = NiceProgressBar::<_, 'b'>(
             0..shape.layers,
             "Loading repeating layers",
             &normal_loading_metadata.multi_progress,
         )
         .par_iter_if_isq(|layer| {
-            block(layer, mapper.set_device(layer, vb_l.pp(layer), loading_isq))
+            let comm = mapper.get_comm_for(layer)?;
+            block(
+                layer,
+                mapper.set_device(layer, vb_l.pp(layer), loading_isq),
+                &comm,
+            )
         })?;
         let layer_devices = (0..shape.layers)
             .map(|layer| {
@@ -165,7 +218,7 @@ impl RwkvModel {
                 layer_types: vec![HybridLayerType::Recurrent; shape.layers],
                 max_seq_len: MAX_POSITIONS,
                 recurrent: RecurrentLayerConfig {
-                    conv_dim: 2 * shape.hidden,
+                    conv_dim: shape.shifts * shape.hidden,
                     conv_width: 1,
                     state: RecurrentStateSpec::Opaque {
                         dims: vec![shape.heads, shape.head_dim, shape.head_dim],
@@ -179,14 +232,14 @@ impl RwkvModel {
         )?;
         Ok(Self {
             embeddings,
-            pre_norm: pre_norm_layer,
+            pre_norm,
             blocks,
             norm,
             lm_head,
             names,
-            pre_norm_name: pre_norm,
             dtype,
             hidden: shape.hidden,
+            shifts: shape.shifts,
             rescaled_every: shape.rescaled_every.filter(|n| *n > 0),
             cache: EitherCache::Hybrid(Arc::new(Mutex::new(cache))),
             device: normal_loading_metadata.real_device,
@@ -207,7 +260,10 @@ impl RwkvModel {
 
     fn forward(&self, input_ids: &Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
         let x = self.embeddings.embedding_forward(input_ids, self.dtype)?;
-        let mut x = self.pre_norm.forward(&self.mapper.map(x, 0)?)?;
+        let mut x = self.mapper.map(x, 0)?;
+        if let Some((pre_norm, _)) = &self.pre_norm {
+            x = pre_norm.forward(&x)?;
+        }
         let metadata = ctx.recurrent_metadata().cloned().ok_or_else(|| {
             inference_tensor::Error::msg("RWKV needs the hybrid cache's recurrent metadata")
         })?;
@@ -225,11 +281,11 @@ impl RwkvModel {
             let Some(HybridLayerCache::Recurrent(pool)) = cache.get_mut(layer_idx) else {
                 inference_tensor::bail!("RWKV layer {layer_idx} is not recurrent in the cache");
             };
-            // the shifts `(b, 2h, 1)` and the WKV matrices, copied so the update never writes a snapshot's rows
+            // the shifts `(b, n h, 1)` and the WKV matrices, copied so the update never writes a snapshot's rows
             let (shifts, state) = if fresh {
                 let rows = indices.dim(0)?;
                 (
-                    Tensor::zeros((rows, 2 * self.hidden, 1), x.dtype(), x.device())?,
+                    Tensor::zeros((rows, self.shifts * self.hidden, 1), x.dtype(), x.device())?,
                     Tensor::zeros(
                         pool.recurrent_state.dims()[1..].to_vec(),
                         DType::F32,
@@ -244,9 +300,10 @@ impl RwkvModel {
                     pool.gather_recurrent_state(&indices)?.copy()?,
                 )
             };
-            let shift = |at: usize| shifts.narrow(1, at, self.hidden)?.squeeze(2);
-            let [out, attn_last, ffn_last] =
-                block.forward(&x, [&shift(0)?, &shift(self.hidden)?], &state, &mut v_first)?;
+            let previous = (0..self.shifts)
+                .map(|i| shifts.narrow(1, i * self.hidden, self.hidden)?.squeeze(2))
+                .collect::<Result<Vec<_>>>()?;
+            let (out, lasts) = block.forward(&x, &previous, &state, &mut v_first)?;
             x = out;
             if self
                 .rescaled_every
@@ -254,7 +311,7 @@ impl RwkvModel {
             {
                 x = (x * 0.5)?;
             }
-            let shifts = Tensor::cat(&[attn_last, ffn_last], 1)?
+            let shifts = Tensor::cat(&lasts, 1)?
                 .unsqueeze(2)?
                 .to_dtype(shifts.dtype())?;
             pool.scatter_conv_state_with_host_indices(
@@ -281,9 +338,11 @@ impl IsqModel for RwkvModel {
         let uvb = UnVarBuilder::new();
         let uvb_m = uvb.pp(self.names.root);
         uvb_m.pp(self.names.embeddings).add(&self.embeddings);
-        uvb_m.pp(self.names.norm).add(&self.norm);
+        self.norm.residual_tensors(&uvb_m.pp(self.names.norm));
         let layers = uvb_m.pp(self.names.layers);
-        layers.pp(0).pp(self.pre_norm_name).add(&self.pre_norm);
+        if let Some((pre_norm, name)) = &self.pre_norm {
+            layers.pp(0).pp(name).add(pre_norm);
+        }
         for (i, block) in self.blocks.iter().enumerate() {
             block.residual_tensors(&layers.pp(i));
         }

@@ -165,8 +165,9 @@ pub fn rwkv7_time_mix_cuda(
         inference_tensor::bail!("rwkv7_time_mix_cuda: the state must be contiguous");
     }
     let same = |t: &Tensor| -> inference_tensor::Result<Tensor> { t.to_dtype(dtype)?.contiguous() };
-    let [r, w, k, v, a, g] = [tm.r, tm.w, tm.k, tm.v, tm.a, tm.g].map(same);
-    let (r, w, k, v, a, g) = (r?, w?, k?, v?, a?, g?);
+    let [r, w, k, v, a] = [tm.r, tm.w, tm.k, tm.v, tm.a].map(same);
+    let (r, w, k, v, a) = (r?, w?, k?, v?, a?);
+    let g = tm.g.map(same).transpose()?;
     let mix = tm
         .v_mix
         .map(
@@ -180,11 +181,16 @@ pub fn rwkv7_time_mix_cuda(
             .flatten_all()?
             .contiguous()
     };
-    let vectors = [tm.k_k, tm.k_a, tm.r_k, tm.norm_w, tm.norm_b].map(f32);
-    let [k_k, k_a, r_k, norm_w, norm_b] = vectors;
-    let vectors = [k_k?, k_a?, r_k?, norm_w?, norm_b?];
+    let [k_k, k_a, r_k] = [tm.k_k, tm.k_a, tm.r_k].map(f32);
+    let vectors = [k_k?, k_a?, r_k?];
+    let norm = tm
+        .norm
+        .map(|(w, b)| -> inference_tensor::Result<(Tensor, Tensor)> { Ok((f32(w)?, f32(b)?)) })
+        .transpose()?;
     let out = Tensor::zeros((batch, seq_len, hidden), dtype, r.device())?;
     let null = std::ptr::null::<core::ffi::c_void>();
+    let optional =
+        |t: Option<&Tensor>| t.map_or(Ok(null), |t| device_ptr(t).map(|p| p as *const _));
     let params = TimeMixParams {
         inputs: [
             device_ptr(&r)? as *const _,
@@ -192,7 +198,7 @@ pub fn rwkv7_time_mix_cuda(
             device_ptr(&k)? as *const _,
             device_ptr(&v)? as *const _,
             device_ptr(&a)? as *const _,
-            device_ptr(&g)? as *const _,
+            optional(g.as_ref())?,
             mix.as_ref()
                 .map_or(Ok(null), |(f, _)| device_ptr(f).map(|p| p as *const _))?,
             mix.as_ref()
@@ -202,8 +208,8 @@ pub fn rwkv7_time_mix_cuda(
             device_ptr(&vectors[0])? as *const f32,
             device_ptr(&vectors[1])? as *const f32,
             device_ptr(&vectors[2])? as *const f32,
-            device_ptr(&vectors[3])? as *const f32,
-            device_ptr(&vectors[4])? as *const f32,
+            optional(norm.as_ref().map(|n| &n.0))?.cast(),
+            optional(norm.as_ref().map(|n| &n.1))?.cast(),
         ],
         state: device_ptr(state)? as *mut f32,
         out: device_ptr(&out)? as *mut _,
@@ -293,6 +299,82 @@ pub fn rwkv6_time_mix_cuda(
             batch as i32,
             dtype_code(dtype)?,
             stream,
+        );
+    }
+    Ok(out)
+}
+
+#[cfg(feature = "cuda")]
+#[repr(C)]
+struct Qrwkv6TimeMixParams {
+    inputs: [*const core::ffi::c_void; 5],
+    state: *mut f32,
+    out: *mut core::ffi::c_void,
+    seq_len: i32,
+    heads: i32,
+    kv_heads: i32,
+    scale: f32,
+}
+
+/// [`crate::ops::qrwkv6_time_mix`] on CUDA, one kernel.
+#[cfg(feature = "cuda")]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss
+)]
+pub fn qrwkv6_time_mix_cuda(
+    tm: crate::ops::TimeMixQrwkv6<'_>,
+    state: &inference_tensor::Tensor,
+) -> inference_tensor::Result<inference_tensor::Tensor> {
+    use inference_tensor::Tensor;
+    let dtype = tm.r.dtype();
+    let (batch, seq_len, hidden) = tm.r.dims3()?;
+    if hidden != tm.heads * tm.head_dim || tm.kv_heads == 0 || !tm.heads.is_multiple_of(tm.kv_heads)
+    {
+        inference_tensor::bail!(
+            "qrwkv6_time_mix_cuda: {hidden} wide is not {} heads of {} over {} key/value heads",
+            tm.heads,
+            tm.head_dim,
+            tm.kv_heads
+        );
+    }
+    if !state.is_contiguous() {
+        inference_tensor::bail!("qrwkv6_time_mix_cuda: the state must be contiguous");
+    }
+    let same = |t: &Tensor| -> inference_tensor::Result<Tensor> { t.to_dtype(dtype)?.contiguous() };
+    let [r, k, v, w, g] = [tm.r, tm.k, tm.v, tm.w, tm.g].map(same);
+    let (r, k, v, w, g) = (r?, k?, v?, w?, g?);
+    let out = Tensor::zeros((batch, seq_len, hidden), dtype, r.device())?;
+    let params = Qrwkv6TimeMixParams {
+        inputs: [
+            device_ptr(&r)? as *const _,
+            device_ptr(&k)? as *const _,
+            device_ptr(&v)? as *const _,
+            device_ptr(&w)? as *const _,
+            device_ptr(&g)? as *const _,
+        ],
+        state: device_ptr(state)? as *mut f32,
+        out: device_ptr(&out)? as *mut _,
+        seq_len: seq_len as i32,
+        heads: tm.heads as i32,
+        kv_heads: tm.kv_heads as i32,
+        scale: (tm.head_dim as f32).powf(-0.5),
+    };
+    let stream = r.device().as_cuda_device()?.cuda_stream().cu_stream() as i64;
+    let ran = unsafe {
+        crate::cuda::ffi::qrwkv6_time_mix_cuda(
+            (&raw const params).cast(),
+            batch as i32,
+            tm.head_dim as i32,
+            dtype_code(dtype)?,
+            stream,
+        )
+    };
+    if ran == 0 {
+        inference_tensor::bail!(
+            "qrwkv6_time_mix_cuda: no kernel for heads of {}",
+            tm.head_dim
         );
     }
     Ok(out)
