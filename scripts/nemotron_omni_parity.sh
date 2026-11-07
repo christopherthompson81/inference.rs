@@ -84,7 +84,7 @@ missing, unexpected = model.load_state_dict(sd, strict=False)
 assert not unexpected and all("layer_scale" in k or k == "summary_idxs" for k in missing), missing
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model = model.to(device).eval()
-mlp = {k: v.to(device) for k, v in st.items() if k.startswith("mlp1.")}
+mlp = {k: v.to(device) for k, v in st.items() if k.startswith(("mlp1.", "vision_projector."))}
 processor = NemotronH_Omni_Reasoning_V3ImageProcessor(**json.load(open(f"{checkpoint}/preprocessor_config.json")))
 
 # NVIDIA's `pixel_shuffle` (ps_version v2) and `mlp1`: RMSNorm, linear, ReLU^2, linear
@@ -93,6 +93,13 @@ def pixel_shuffle(x, s=0.5):
     x = x.view(n, w, int(h * s), int(c / s)).permute(0, 2, 1, 3).contiguous()
     x = x.view(n, int(h * s), int(w * s), int(c / (s * s)))
     return x.permute(0, 2, 1, 3).contiguous()
+
+# the LayerNorm on RADIO's features a decoder with MTP layers brings (Super VL), before the shuffle
+def final_norm(x):
+    norm = "vision_projector.vision_final_layernorm."
+    if norm + "weight" not in mlp:
+        return x
+    return F.layer_norm(x, x.shape[-1:], mlp[norm + "weight"], mlp[norm + "bias"], vision["layer_norm_eps"])
 
 def project(x):
     x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-5) * mlp["mlp1.0.weight"]
@@ -105,7 +112,7 @@ for n, path in enumerate(images):
     with torch.no_grad():
         features = model(pixels).features
         rows, cols = pixels.shape[-2] // radio.patch_size, pixels.shape[-1] // radio.patch_size
-        shuffled = pixel_shuffle(features.reshape(1, rows, cols, -1))
+        shuffled = pixel_shuffle(final_norm(features).reshape(1, rows, cols, -1))
         embeds = project(shuffled.reshape(1, -1, shuffled.shape[-1]))
     image.save(f"{out}/{n}.png")
     save_file({

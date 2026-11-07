@@ -455,11 +455,19 @@ impl SupportedArch for MultimodalLoaderType {
                 ],
             },
             Self::NemotronOmni => ArchMetadata {
-                families: &["Nemotron-H Omni (Nemotron 3.5 Bolt)"],
-                modalities: &[Text, Vision],
+                families: &[
+                    "Nemotron-H Omni (Nemotron 3.5 Bolt, Nemotron 3.5 Super VL, Nemotron 3 Nano Omni, Nemotron Nano 12B v2 VL)",
+                ],
+                modalities: &[Text, Vision, Video, Audio],
                 examples: &[
                     ex!("nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16"),
                     ex!("nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-GGUF", "GGUF"),
+                    ex!("nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"),
+                    ex!(
+                        "ggml-org/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-GGUF",
+                        "GGUF"
+                    ),
+                    ex!("nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16"),
                 ],
             },
             Self::NemotronTranscribe => ArchMetadata {

@@ -14,6 +14,8 @@ use crate::layers::{RmsNorm, Sdpa, layer_norm};
 // the projector's RMSNorm epsilon (NVIDIA's MLP default)
 const PROJECTOR_EPS: f64 = 1e-5;
 const CHANNELS: usize = 3;
+pub const FINAL_NORM_PREFIX: &str = "vision_projector";
+pub const FINAL_NORM: &str = "vision_final_layernorm";
 
 struct Block {
     norm1: LayerNorm,
@@ -87,6 +89,8 @@ pub struct RadioTower {
     pos_grid: Tensor,
     prefix: Tensor,
     blocks: Vec<Block>,
+    // on the features before the pixel shuffle, when the decoder has MTP layers (Super VL)
+    final_norm: Option<LayerNorm>,
     norm: RmsNorm,
     linear1: Arc<dyn QuantMethod>,
     linear2: Arc<dyn QuantMethod>,
@@ -129,12 +133,17 @@ impl RadioTower {
                 )
             })
             .transpose()?;
+        let final_norm = cfg
+            .final_layernorm()
+            .then(|| layer_norm(h, v.layer_norm_eps, vb.pp(FINAL_NORM_PREFIX).pp(FINAL_NORM)))
+            .transpose()?;
         Ok(Self {
             embedder: inference_quant::linear_b(patch_in, h, false, &None, patches.pp("embedder"))?,
             video_embedder,
             pos_grid,
             prefix,
             blocks,
+            final_norm,
             norm: RmsNorm::new(shuffled, PROJECTOR_EPS, mlp.pp("0"))?,
             linear1: inference_quant::linear_b(
                 shuffled,
@@ -199,7 +208,10 @@ impl RadioTower {
 
     /// The decoder embeddings of one image or tubelet: `(rows * cols / merge^2, lm_hidden)`.
     pub fn forward(&self, image: &ImagePatches) -> Result<Tensor> {
-        let features = self.features(image)?;
+        let mut features = self.features(image)?;
+        if let Some(norm) = &self.final_norm {
+            features = norm.forward(&features)?;
+        }
         let shuffled = pixel_shuffle(&features, image.rows, image.cols, self.merge)?;
         let xs = self.norm.forward(&shuffled)?;
         let xs = self.linear1.forward(&xs)?.relu()?.sqr()?;

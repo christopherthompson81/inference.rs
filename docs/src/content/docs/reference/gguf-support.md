@@ -77,6 +77,7 @@ files when the repository and GGUF metadata identify them unambiguously. The dir
 | LFM2-VL and LFM2.5-VL | `lfm2` |
 | Muse Glimmer | `muse-glimmer` |
 | Nemotron 3.5 Bolt (Nemotron-H Omni) | `nemotron_h_moe` (projector `nemotron_omni`) |
+| Nemotron 3.5 Super VL (Nemotron-H Omni) | `nemotron_h_moe` (projector `nemotron_omni`) |
 | Nemotron 3 Nano Omni (Nemotron-H Omni) | `nemotron_h_moe` (the checkpoint's safetensors shard as projector) |
 | Nemotron Nano 12B v2 VL (Nemotron-H Omni) | `nemotron_h` (projector `nemotron_v2_vl`, or the checkpoint's shard) |
 | PaddleOCR-VL (1.5, 1.6) | `paddleocr` |
@@ -109,8 +110,10 @@ MERaLiON-2's official GGUFs come from the repo's patched llama.cpp (`meralion` p
 end-of-message tokens end a generation as its EOS does.
 
 NVIDIA's Nemotron 3.5 Bolt GGUF and its `mmproj` load with no base repository: the config comes from the two files'
-metadata, and the projector holds the checkpoint's C-RADIO tower and projector unchanged. Image input is supported;
-video, which the projector's video patch embedder serves, is not yet. On a 24 GB GPU the text GGUF and the tower
+metadata, and the projector holds the checkpoint's C-RADIO tower and projector unchanged. Images and video are
+supported (a video's tokens pruned with EVS at the released checkpoints' rate, 0.7). Nemotron 3.5 Super VL's GGUF and
+mmproj (`ggml-org/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-GGUF`) load the same way, its tower's final LayerNorm from
+the projector's `v.post_ln`. On a 24 GB GPU the text GGUF and the tower
 together do not fit: map a few blocks to the CPU (`-n "0:43"`), as Bolt's IQ2_XXS experts cannot stay in host memory
 on their own.
 

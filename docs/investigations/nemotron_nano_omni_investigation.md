@@ -237,3 +237,56 @@ End to end (Q4_K_M + shard 1, the 4 s clip): 446 prompt tokens against 1,152 wit
 reasoning still "a yellow square ... on the left ... has moved". A repeat hit 384 cached tokens in 4.0 s; its
 reasoning text differed from the first's (BF16, the cached and uncached passes split the prompt differently; the F32
 tiny repeat is exact).
+
+## Run 8 - 2026-11-07 04:50
+
+Question: closing #565, does video (and the rest of the Omni path) cover Bolt and Nemotron 3.5 Super VL, which share
+`NemotronH_Omni_Reasoning_V3` with Nano Omni?
+
+Findings:
+
+- Bolt's and Super VL's configs are transformers' layout: `vision_config.video_temporal_patch_size: 2` and no
+  `separate_video_embedder`; the frame rule (`video_target_num_patches` 1024, aspect kept) is in
+  `preprocessor_config.json`. Our video gate wanted `separate_video_embedder: true`, so neither offered video from its
+  checkpoint. Bolt's GGUF route already did: NVIDIA's Bolt mmproj carries `v.patch_embd.weight.1`.
+- Bolt's own remote processor (image processor in video mode) against transformers' `NemotronH_Omni_Reasoning_V3`
+  video processor on the 16-frame clip: identical pixels (max diff 0.0, 252 tokens a frame); its `<video>` expansion is
+  the same code as transformers' `replace_video_token`.
+- Super VL's config omits `vision_final_layernorm`; the reference then builds a LayerNorm on RADIO's features (before
+  the pixel shuffle) whenever the decoder has MTP layers (`num_nextn_predict_layers` 1 here), stored as
+  `vision_projector.vision_final_layernorm.{weight,bias}`. We refused any checkpoint without `vision_final_layernorm:
+  false`, so Super VL did not load at all, images included. llama.cpp converts it to `v.post_ln` (ggml-org's Super VL
+  mmproj has it, and the video embedder).
+- A projector-only GGUF load had no `video_pruning_rate`, so EVS never ran from a projector.
+
+Built: video from a tubelet size alone (frame target defaulting to the processor's 1024); the final LayerNorm, inferred
+from the decoder's MTP layers when unset, bound from `v.post_ln` and written to it by `quantize mmproj`; a projector's
+synthesized config takes the released checkpoints' pruning rate 0.7. Both parity scripts apply the norm when the
+checkpoint has it, and the video one reads the frame rule from the preprocessor config.
+
+```
+nemotron_omni_video_parity.sh <bolt shards 61-62> omni_frames16 --fps 8 --stride 2
+  `<video>` text identical (14,766 bytes), lowest cosine 0.9999998, EVS at 0.7 keeps 604 / 604 (1.0000 agree)
+nemotron_omni_parity.sh <super-vl shards 61-63> table.png f010.png
+  20 x 56 and 26 x 44 patches, lowest cosine 1.0000000 (features and embeds, with the final LayerNorm)
+nemotron_omni_video_parity.sh <super-vl shards 61-63> omni_frames16 --fps 8 --stride 2
+  `<video>` text identical, lowest cosine 0.9999997, EVS 604 / 604
+```
+
+Bolt end to end (`serve -f NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf`, its mmproj, the 4 s moving-square clip):
+modalities Text, Vision, Video; 437 prompt tokens (EVS). "Describe what happens" got "a yellow vertical line in the
+center ... static" (wrong); "where is the yellow square at the start and at the end" got "left side ... right side"
+(right), as did two frames sent as images. The 24 GB file's IQ2_XXS experts are the likely limit on the free-form
+answer; the tower path matches the reference.
+
+Super VL GGUF route (`ggml-org/...-Super-VL-120B-A12B-GGUF`, Q4_0 text + BF16 mmproj): `nemotron_omni_parity.sh
+--gguf` on the same two images, lowest cosine 1.0000000 (the norm bound from `v.post_ln`). End to end, `serve
+--pa-context-len 16384 -f <Q4_0> --mmproj <BF16 mmproj>` (80 of 512 expert slots cached): modalities Text, Vision,
+Video; the fruit table read exactly (Fruit / Colour / Count, Apple Red 12, Lemon Yellow 7). The clip, EVS on (437
+prompt tokens): "a small, centered, yellow vertical line ... expands horizontally"; asked where the square is at the
+start and at the end, "starts on the left side ... moves to the right side"; its shape, "a vertical rectangle ... moves
+from left to right". EVS off (rate 0 for one build, 1,143 prompt tokens): still "a yellow vertical line in the center",
+now with invented olive rectangles, and the same "vertical rectangle ... left to right". So the line reading is the
+model on this synthetic clip, not pruning; Nano Omni described the same clip as a moving square (Run 6).
+
+Implication: #565's scope is covered for all three `NemotronH_Omni_Reasoning_V3` checkpoints.
