@@ -651,13 +651,14 @@ impl ExpertCachePlan<'_> {
 
     // The activations of a MIN_PLANNED_PROMPT_CHUNK-token prompt chunk, for a loader that reports them
     fn prompt_chunk_floor(&self) -> Result<usize> {
-        if self.paged_attn_config.is_none() {
+        let Some(cfg) = self.paged_attn_config else {
             return Ok(0);
-        }
+        };
         let (loader, config) = (self.sizing.loader, self.sizing.config);
+        let tokens = cfg.prompt_chunk_tokens.unwrap_or(MIN_PLANNED_PROMPT_CHUNK);
         Ok(loader
             .prompt_activation_bytes_per_token(config)?
-            .map_or(0, |bytes| bytes * MIN_PLANNED_PROMPT_CHUNK))
+            .map_or(0, |bytes| bytes * tokens))
     }
 
     // The longest prompt chunk, in multiples of the default chunk up to MAX_PLANNED_PROMPT_CHUNK, whose activations fit
@@ -674,8 +675,15 @@ impl ExpertCachePlan<'_> {
         else {
             return Ok(None);
         };
-        if self.paged_attn_config.is_none() || self.offloadable_experts()?.is_none() {
+        let Some(cfg) = self.paged_attn_config else {
             return Ok(None);
+        };
+        if self.offloadable_experts()?.is_none() {
+            return Ok(None);
+        }
+        // a chunk the scheduler was told to run is the one to reserve for
+        if let Some(chunk) = cfg.prompt_chunk_tokens {
+            return Ok(Some((chunk, chunk * per_token)));
         }
         let context = self.planned_context(params)?;
         let Some(spare) = self.spare(Some(slots), &context, self.activations(params)?)? else {
@@ -960,10 +968,12 @@ pub(crate) fn resolve_map_setting(
     if let Some((chunk, bytes)) = prompt_chunk
         && let Some(cfg) = paged_attn_config.take()
     {
-        info!(
-            chunk,
-            "prompt chunks sized to the memory the expert cache leaves (`--max-prefill-chunk-tokens` chooses)"
-        );
+        if cfg.prompt_chunk_tokens.is_none() {
+            info!(
+                chunk,
+                "prompt chunks sized to the memory the expert cache leaves (`--max-prefill-chunk-tokens` chooses)"
+            );
+        }
         *paged_attn_config = Some(cfg.with_base_device_memory_reservation(bytes)?);
     }
     let sizing = super::isq_flow::AutoDeviceMapSizingInputs {

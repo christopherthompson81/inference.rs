@@ -819,7 +819,11 @@ impl InferenceRsForServerBuilder {
             self.paged_cache_type,
             !paged_attn,
         )?
-        .map(|config| config.with_cache_layers(self.paged_cache_layers))
+        .map(|config| {
+            config
+                .with_cache_layers(self.paged_cache_layers)
+                .with_prompt_chunk_tokens(self.max_prefill_chunk_tokens.map(NonZeroUsize::get))
+        })
         .map(|config| {
             config
                 .with_recurrent_snapshot_slots(self.host_backed_gpu_prefixes())
@@ -955,7 +959,11 @@ impl InferenceRsForServerBuilder {
                 self.paged_cache_type,
                 !paged_attn,
             )?
-            .map(|config| config.with_cache_layers(self.paged_cache_layers))
+            .map(|config| {
+                config
+                    .with_cache_layers(self.paged_cache_layers)
+                    .with_prompt_chunk_tokens(self.max_prefill_chunk_tokens.map(NonZeroUsize::get))
+            })
             .map(|config| {
                 config
                     .with_recurrent_snapshot_slots(host_backed_gpu_prefixes)
