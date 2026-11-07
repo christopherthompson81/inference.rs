@@ -253,3 +253,22 @@ plain                 12.51 12.29 12.23      13.40 13.65 13.62
 
 Break-even on prose, +2% on code: where Flash-Next ended (Run 52: tie on prose, +3% on code). The head's resident
 experts cost 16 slots, and a 2-token verify still misses about twice a plain step's experts on the CPU.
+
+## Run 7 - 2026-11-06 22:40
+
+Question: Run 6's open bug, and does the 1024-token chunk floor (Run 3) change a Qwen offload?
+
+Built: `--max-prefill-chunk-tokens` reaches the load (`PagedAttentionConfig::prompt_chunk_tokens`, set by the server
+builder beside the scheduler's limit). The expert-cache planner keeps room for that chunk's activations in place of
+MIN_PLANNED_PROMPT_CHUNK's, and reserves for it in place of planning a chunk.
+
+```
+serve ... --moe-expert-cache 64 --max-prefill-chunk-tokens 1024 -f "<Super Q4_K>;<Q8_0 head>" --mtp
+before: "Reserving 6688 MB ... for post-load model components", then "PagedAttention KV cache requires 37 MB but only
+        0 MB is safely available after model loading"
+after:  "Reserving 1216 MB ...", loads, 17,502 MiB in use, a 5.5K-token prompt at 213 tok/s
+```
+
+Qwen3.8-Flash-Next UD-IQ4_XS, no flags (`fn_bench.sh`, scratch): the planner still takes 128 slots and a 2048-token
+chunk, the room past its slots holding more than either floor, so the floor change leaves it as it was. Decode 26-39
+tok/s prose and 32-39 code (the first rounds warming), prefill 573-736 tok/s at 5.5K tokens, peak 22,256 MiB.

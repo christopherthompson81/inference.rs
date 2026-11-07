@@ -133,3 +133,33 @@ defaults: the 24.5 GB text GGUF spills experts to pageable host memory), then ch
 
 **Implication:** the route works. Left for #565 on Nano Omni: video (`video_embedder`, EVS pruning), and a speed pass
 for the 24.5 GB GGUF on one 24 GB GPU.
+
+## Run 5 - 2026-11-06 23:10
+
+Question: what does the reference do with video, and what does it need from this engine?
+
+Read: the checkpoint's `modeling.py` (`extract_video_feature`, `generate`), `processing.py` (the `<video>`
+expansion), `image_processing.py` (`_compute_target_patches_video`), `evs.py`, and `video_processing.py`, which the
+first download lacked (fetched alone from nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16). Config:
+`video_temporal_patch_size` 2, `video_target_num_patches` 1024, `video_maintain_aspect_ratio` true,
+`video_pruning_rate` 0.7, `separate_video_embedder` true; the tower shard holds
+`vision_model.radio_model.model.patch_generator.video_embedder.weight`.
+
+- Frames: each resized (torch bicubic, antialias, align_corners false) to ~1024 16-px patches with the aspect ratio
+  kept, each side snapped to the pixel shuffle's 2 (round up if the product still fits 1024, else down), then
+  `(x/255 - mean) / std` with the image path's norm.
+- Tubelets: frames in pairs (the last repeated to make the count even), stacked on the channel axis
+  `(N/2, 2*3, H, W)`; RADIO runs with `video_embedder` (Linear 2*3*16*16 -> width) in place of the patch `embedder`,
+  everything else as for an image. Then the image path's pixel shuffle and `mlp1`: (wp*hp)/4 tokens a tubelet.
+- Prompt: per tubelet `"Frame {i} sampled at {t:.2f} seconds and frame {i+1} sampled at {t':.2f} seconds: "`
+  (t = source frame index * int(1000/fps) / 1000; plain "Frame i" without fps), then `<img>`, the tokens as the image
+  token (id 18; `video_context_token_id` 131081 decodes to nothing), `</img>`; tubelets joined by "\n".
+- EVS (rate 0.7): over the projected tokens, keep all of the first tubelet and, of the rest, those least like the
+  same position one tubelet earlier (1 - cosine), `max(one tubelet, int(T * tokens * 0.3))` in all, stable order; the
+  pruned positions leave `inputs_embeds` and `input_ids` before the language model runs.
+
+Implication: everything but EVS fits the image route (a second patch embedder, a frame resize rule, a prompt
+layout). EVS does not: the prompt's length depends on the tower's output, and here the input processor fixes the
+tokens before any forward (the encoder cache is the model's, inside the forward). With rate 0 the reference keeps
+every token, a mode it supports. Plan: video with no pruning first, against torch at rate 0; EVS needs a step that
+encodes a request's video before its prompt is final.

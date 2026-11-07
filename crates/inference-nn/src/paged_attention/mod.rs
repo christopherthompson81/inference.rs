@@ -260,6 +260,9 @@ pub struct PagedAttentionConfig {
     pub need_floor: bool,
     /// The ISQ an MTP draft head is re-quantized to when speculative decoding attaches, after the cache is sized
     pub draft_head_isq: Option<inference_quant::IsqType>,
+    /// The prompt chunk the scheduler was told to run (`--max-prefill-chunk-tokens`), which a load sizes for in place
+    /// of planning one.
+    pub prompt_chunk_tokens: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -293,7 +296,13 @@ impl PagedAttentionConfig {
             auxiliary_layers: None,
             need_floor: false,
             draft_head_isq: None,
+            prompt_chunk_tokens: None,
         })
+    }
+
+    pub fn with_prompt_chunk_tokens(mut self, tokens: Option<usize>) -> Self {
+        self.prompt_chunk_tokens = tokens;
+        self
     }
 
     pub fn with_auxiliary_layers(mut self, layers: AuxiliaryPagedLayers) -> Self {
