@@ -231,11 +231,14 @@ impl SupportedArch for NormalLoaderType {
                 ],
             },
             Self::FalconH1 => ArchMetadata {
-                families: &["Falcon-H1"],
+                families: &["Falcon-H1", "Falcon-H1R", "Falcon-H1-Tiny"],
                 modalities: m,
                 examples: &[
                     ex!("tiiuae/Falcon-H1-7B-Instruct"),
                     ex!("tiiuae/Falcon-H1-7B-Instruct-GGUF", "GGUF"),
+                    ex!("tiiuae/Falcon-H1-34B-Instruct-GGUF", "GGUF"),
+                    ex!("tiiuae/Falcon-H1R-7B"),
+                    ex!("tiiuae/Falcon-H1-Tiny-90M-Instruct"),
                 ],
             },
             Self::NemotronH => ArchMetadata {

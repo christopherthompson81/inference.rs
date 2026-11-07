@@ -86,3 +86,32 @@ Tiny tests (`falcon_h1_tiny`, F32 on the CPU): a checkpoint's multipliers applie
 weights with them folded in (with and without the gated norm), and a gated-norm model decodes a cached repeat the same.
 The first run of the second failed: "kv-cache: requested capacity (547) above max seq len (512)": the hybrid cache grows
 its KV cache by a fixed step past the prompt, beyond a 512-position config; the fixture now has 4,096.
+
+## Run 3 - 2026-11-07 09:50
+
+Question: do the rest of the family (Falcon-H1-Tiny 90M, Falcon-H1R 7B, the 34B) run on what Runs 1-2 built? What is
+new: Tiny ties its embeddings and has Mamba head dim 32 with no gated norm; the 34B has two Mamba groups (B and C per
+group, the gated norm over d_ssm / 2); H1R is the 7B's shape with a reasoning template.
+
+```
+python3 scripts/falcon_h1_parity.py falcon-h1-tiny-90m            (F32, CPU)
+  198 tokens: mean KL 2.18e-07 (worst 3.90e-06), top-1 agreement 1.000, max logit diff 0.0194; greedy 24 identical
+serve --format gguf -f Falcon-H1-Tiny-90M-Instruct-Q8_0.gguf       "Paris."
+serve --format gguf -f Falcon-H1R-7B-Q4_K_M.gguf
+  before: every chat request "Internal server error"; log "too many arguments (in chat_template:43)"
+```
+
+The H1R template calls `message.get('content','')`, and minijinja-contrib 2.14's pycompat `dict.get` takes only the
+key. Our method shim now takes the two-argument form (a test beside the `str.index` one). After: it thinks inside
+`<think>`, which reaches `reasoning_content` ("360 = 2^3 * 3^2 * 5 ... 24"), then answers 24; decode 102.8 tok/s.
+
+34B Instruct Q4_K_M (18.93 GiB, 72 parallel blocks, two Mamba groups): coherent ("Rayleigh scattering ..."); beside
+the weights the planner fits one sequence and 12,704 tokens of context. Against llama.cpp 970b51ce7 `llama-bench -fa 1`:
+
+| | ours | llama.cpp |
+|---|---|---|
+| decode, 400 tokens | 35.7 tok/s (two runs) | tg128 33.79 |
+| prefill, 1,912 tokens | 1,186 / 1,203 tok/s | pp2048 1,201.67 |
+
+The 34B's two groups were the one shape no earlier run had covered; with the Tiny, the 0.5B and the 7B that is every
+config variation in the released family.

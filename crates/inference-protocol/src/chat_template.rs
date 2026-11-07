@@ -499,7 +499,7 @@ fn preprocess_gemma4_tool_messages(messages: &mut Vec<IndexMap<String, MessageCo
 }
 
 /// pycompat's Python methods, plus `str.index` / `str.rindex`, which it lacks (Granite 4 Vision's template uses
-/// `index`). Like its `find`, they return a byte offset, so templates may compare the two.
+/// `index`), and `dict.get` with a default (Falcon-H1R's). Like its `find`, the indexes are byte offsets.
 fn python_method(
     state: &minijinja::State,
     value: &Value,
@@ -515,6 +515,9 @@ fn python_method(
         return found
             .map(|offset| Value::from(offset as i64))
             .ok_or_else(|| Error::new(ErrorKind::InvalidOperation, "substring not found"));
+    }
+    if let (Some(map), "get", [key, default]) = (value.as_object(), method, args) {
+        return Ok(map.get_value(key).unwrap_or_else(|| default.clone()));
     }
     minijinja_contrib::pycompat::unknown_method_callback(state, value, method, args)
 }
@@ -754,6 +757,27 @@ mod tests {
             ["1", "5", "1"]
         );
         assert!(render("{{ messages[0].content.index('<d>') }}").is_err());
+    }
+
+    #[test]
+    fn templates_get_a_dict_key_with_a_default() {
+        let rendered = apply_chat_template_to(
+            vec![user_text_message("hi")],
+            false,
+            None,
+            None,
+            &ChatTemplateValue(Either::Left(
+                "{{ messages[0].get('content', 'none') }} {{ messages[0].get('name', 'none') }} \
+                 {{ messages[0].get('name') is none }}"
+                    .to_string(),
+            )),
+            None,
+            None,
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(rendered, "hi none true");
     }
 
     // as transformers renders it: no `date_string`, so Llama 3.x templates take their `strftime_now` branch
