@@ -414,6 +414,10 @@ impl ModelConfigLike for HybridPagedKvCacheConfig {
     fn layer_has_paged_kv_cache(&self, layer_idx: usize) -> bool {
         self.paged_layers.get(layer_idx).copied().unwrap_or(true)
     }
+    // a recurrent layer runs no attention
+    fn layer_is_attended(&self, layer_idx: usize) -> bool {
+        self.layer_has_paged_kv_cache(layer_idx)
+    }
     fn prefix_prefill_attention_features(
         &self,
         layer_idx: usize,

@@ -539,6 +539,17 @@ pub fn calculate_cache_config(
     }
     let model_dtype = dtype;
     let token_bytes = kv_bytes_per_token(&plan, dtype, device, config);
+    // no attention layer, so the blocks hold no KV: the context bounds them, not memory
+    if token_bytes.0 == 0 {
+        let num_gpu_blocks = config.max_seq_len().div_ceil(block_size) + 1;
+        return Ok(CacheConfig {
+            block_size,
+            num_gpu_blocks,
+            cache_type,
+            layer_types: plan.layers,
+            kv_cache_group_ids: config.kv_cache_group_ids(),
+        });
+    }
     let dtype = cache_type.to_dtype(dtype);
 
     let mut cache_devices = Vec::new();

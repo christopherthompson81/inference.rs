@@ -103,6 +103,11 @@ impl DecoderCore {
         }
         .reserve(args.mapper.as_ref())?;
 
+        // with no paged KV a chunked prompt buys nothing, and each chunk costs a pass over every layer's state
+        let prompt_chunk_tokens = args.prompt_chunk_tokens.or_else(|| {
+            (args.model.config.total_kv_cache_elements_per_token() == 0)
+                .then_some(crate::scheduler::DEFAULT_MAX_NUM_BATCHED_TOKENS)
+        });
         let (cache_config, cache_engine) = if let Some(paged_attn_config) = args.paged_attn_config {
             let mut reservations = paged_attn_config
                 .memory_reservations()
@@ -174,7 +179,7 @@ impl DecoderCore {
                 label_decision: args.label_decision,
                 audio_transcriber: args.audio_transcriber,
                 prompt_activation_bytes_per_token: args.prompt_activation_bytes_per_token,
-                prompt_chunk_tokens: args.prompt_chunk_tokens,
+                prompt_chunk_tokens,
             }),
             tokenizer: args.tokenizer.into(),
             chat_template: Arc::new(args.chat_template),
