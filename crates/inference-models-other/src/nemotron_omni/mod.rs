@@ -41,9 +41,39 @@ pub struct VisionConfig {
     pub min_num_patches: Option<usize>,
     #[serde(default)]
     pub max_num_patches: Option<usize>,
+    /// The patches a video frame is resized to, aspect kept when `video_maintain_aspect_ratio`.
+    #[serde(default)]
+    pub video_target_num_patches: Option<usize>,
+    #[serde(default)]
+    pub video_maintain_aspect_ratio: Option<bool>,
+    /// Frames one temporal patch (tubelet) stacks on the channel axis, embedded by `video_embedder`.
+    #[serde(default)]
+    pub video_temporal_patch_size: Option<usize>,
+    #[serde(default)]
+    pub separate_video_embedder: Option<bool>,
+}
+
+/// How a video becomes the tower's input: frames on a grid of about `target` patches, `temporal` frames a tubelet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoLayout {
+    pub target: usize,
+    pub keep_aspect: bool,
+    pub temporal: usize,
 }
 
 impl VisionConfig {
+    /// The video layout of a checkpoint with a `video_embedder`; `None` for an image-only tower.
+    pub fn video_layout(&self) -> Option<VideoLayout> {
+        if self.separate_video_embedder != Some(true) {
+            return None;
+        }
+        Some(VideoLayout {
+            target: self.video_target_num_patches?,
+            keep_aspect: self.video_maintain_aspect_ratio.unwrap_or(true),
+            temporal: self.video_temporal_patch_size?,
+        })
+    }
+
     pub fn intermediate_size(&self) -> usize {
         (self.hidden_size as f64 * self.mlp_ratio) as usize
     }
@@ -73,6 +103,9 @@ pub struct Config {
     /// The tile count a config synthesized from a projector states (`preprocessor_config.json` holds it otherwise).
     #[serde(default)]
     pub max_num_tiles: Option<usize>,
+    /// EVS: the share of a video's tokens after its first tubelet the reference drops as redundant before the decoder.
+    #[serde(default)]
+    pub video_pruning_rate: Option<f64>,
 }
 
 /// How an image becomes the tower's input.
@@ -136,15 +169,17 @@ impl Config {
     }
 }
 
-/// One image as the processor cut it: `(rows * cols, 3 * patch * patch)` normalized patches, row-major.
+/// One image as the processor cut it: `(rows * cols, 3 * patch * patch)` normalized patches, row-major; or one video
+/// tubelet, its frames' patches side by side, `(rows * cols, temporal * 3 * patch * patch)`.
 pub struct ImagePatches {
     pub patches: Tensor,
     pub rows: usize,
     pub cols: usize,
+    pub video: bool,
 }
 
 pub struct NemotronOmniSpecificArgs {
-    /// The images whose placeholders this step holds, in prompt order.
+    /// The images and video tubelets whose placeholders this step holds, in prompt order.
     pub images: Vec<ImagePatches>,
     /// The clips whose placeholders this step holds, in prompt order: each one's `(frames, mels)` normalized log-mel.
     pub sounds: Vec<Tensor>,
@@ -213,7 +248,7 @@ impl NemotronOmniModel {
             let projected = args
                 .images
                 .iter()
-                .map(|image| self.vision.forward(&image.patches, image.rows, image.cols))
+                .map(|image| self.vision.forward(image))
                 .collect::<Result<Vec<_>>>()?;
             let projected = Tensor::cat(&projected, 0)?.to_device(embeds.device())?;
             embeds = place_token_features(&embeds, input_ids, self.image_token, &projected, MODEL)?;

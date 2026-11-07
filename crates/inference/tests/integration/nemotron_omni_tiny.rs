@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use inference::{
     AudioInput, MessageMedia, Model, ModelDType, MultimodalMessages, MultimodalModelBuilder,
-    RequestBuilder, TextMessageRole,
+    RequestBuilder, TextMessageRole, VideoInput,
 };
 use inference_tensor::{Device, Tensor};
 use rand::{SeedableRng, rngs::StdRng};
@@ -20,7 +20,7 @@ const TOKENIZER: &str = concat!(
     "/tests/fixtures/paddleocr_vl/tiny/tokenizer.json"
 );
 // `<image>\n` per image part and `<so_embedding>\n` per audio part, as the checkpoints' templates write them
-const TEMPLATE: &str = "{%- for message in messages -%}{{- message['role'] + ': ' -}}{%- if message['content'] is string -%}{{- message['content'] -}}{%- else -%}{%- for chunk in message['content'] -%}{%- if chunk['type'] == 'image' -%}{{- '<image>\\n' -}}{%- elif chunk['type'] == 'audio' -%}{{- '<so_embedding>\\n' -}}{%- elif chunk['type'] == 'text' -%}{{- chunk['text'] -}}{%- endif -%}{%- endfor -%}{%- endif -%}{{- '\\n' -}}{%- endfor -%}{%- if add_generation_prompt -%}{{- 'assistant: ' -}}{%- endif -%}";
+const TEMPLATE: &str = "{%- for message in messages -%}{{- message['role'] + ': ' -}}{%- if message['content'] is string -%}{{- message['content'] -}}{%- else -%}{%- for chunk in message['content'] -%}{%- if chunk['type'] == 'image' -%}{{- '<image>\\n' -}}{%- elif chunk['type'] == 'audio' -%}{{- '<so_embedding>\\n' -}}{%- elif chunk['type'] == 'video' -%}{{- '<video>\\n' -}}{%- elif chunk['type'] == 'text' -%}{{- chunk['text'] -}}{%- endif -%}{%- endfor -%}{%- endif -%}{{- '\\n' -}}{%- endfor -%}{%- if add_generation_prompt -%}{{- 'assistant: ' -}}{%- endif -%}";
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/llama_tiny");
 const FIXTURE_FILES: [&str; 2] = ["generation_config.json", "tokenizer_config.json"];
 // appended after the tiny tokenizer's own
@@ -80,6 +80,15 @@ const SQUARE: (u32, u32, usize) = (40, 40, 4);
 const DELIMITERS: usize = 2;
 // cached KV comes from a different prefill than a full recompute, so logprobs match only to rounding
 const LOGPROB_TOLERANCE: f32 = 1e-3;
+// a 64 x 48 frame on a grid of about 16 patches: 2 x 4 (merged, 2 tokens a tubelet), two tubelets of three frames
+const VIDEO_TARGET_PATCHES: usize = 16;
+const TEMPORAL: usize = 2;
+const FRAME: (u32, u32) = (64, 48);
+const FRAMES: usize = 3;
+const VIDEO_FPS: f64 = 4.0;
+const TUBELET_TOKENS: usize = 2;
+// the tiny checkpoint's video patch embedder, which Nano VL's projector does not carry
+const VIDEO_EMBEDDER: &str = "video_embedder.weight";
 
 fn config() -> serde_json::Value {
     serde_json::json!({
@@ -121,6 +130,10 @@ fn config() -> serde_json::Value {
             "max_img_size": MAX_IMG_SIZE,
             "min_num_patches": MIN_PATCHES,
             "max_num_patches": MAX_PATCHES,
+            "video_target_num_patches": VIDEO_TARGET_PATCHES,
+            "video_maintain_aspect_ratio": true,
+            "video_temporal_patch_size": TEMPORAL,
+            "separate_video_embedder": true,
         },
         "llm_config": {
             "architectures": ["NemotronHForCausalLM"],
@@ -217,6 +230,10 @@ fn vision_weights(rng: &mut StdRng, weights: &mut HashMap<String, Tensor>) -> an
     weights.insert(
         format!("{patches}.pos_embed"),
         random(rng, &[1, side * side, h])?,
+    );
+    weights.insert(
+        format!("{patches}.video_embedder.weight"),
+        random(rng, &[h, TEMPORAL * 3 * PATCH * PATCH])?,
     );
     weights.insert(
         format!("{patches}.cls_token.token"),
@@ -517,6 +534,67 @@ async fn a_clip_expands_to_its_encoder_frames_beside_an_image() -> anyhow::Resul
     Ok(())
 }
 
+fn video() -> VideoInput {
+    let frames = (0..FRAMES as u32)
+        .map(|f| {
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(FRAME.0, FRAME.1, |x, y| {
+                image::Rgb([
+                    (x * 3 + f * 40) as u8,
+                    (y * 5) as u8,
+                    ((x + y + f * 20) * 2) as u8,
+                ])
+            }))
+        })
+        .collect();
+    VideoInput::from_frames(frames, VIDEO_FPS, None)
+}
+
+fn video_request(images: &[(u32, u32, usize)], videos: usize) -> RequestBuilder {
+    let media = MessageMedia {
+        images: images.iter().map(|&size| image(size)).collect(),
+        videos: (0..videos).map(|_| video()).collect(),
+        ..MessageMedia::default()
+    };
+    RequestBuilder::from(MultimodalMessages::new().add_multimodal_message(
+        TextMessageRole::User,
+        PROMPT,
+        media,
+    ))
+    .set_sampler_max_len(MAX_LEN)
+    .set_sampler_topk(1)
+    .return_logprobs(true)
+    .set_sampler_topn_logprobs(1)
+}
+
+// a video beside an image: its tubelets' blocks (and their labels) join the prompt, and a repeat that the prefix
+// cache serves decodes as the first did
+#[tokio::test]
+async fn a_video_expands_to_its_tubelets_beside_an_image() -> anyhow::Result<()> {
+    let checkpoint = checkpoint()?;
+    let model = build(checkpoint.path()).await?;
+    let image_only = model
+        .send_chat_request(video_request(&[SQUARE], 0))
+        .await?
+        .usage
+        .prompt_tokens;
+    let first = model.send_chat_request(video_request(&[SQUARE], 1)).await?;
+    let tubelets = FRAMES.div_ceil(TEMPORAL);
+    let added = first.usage.prompt_tokens - image_only;
+    assert!(
+        added > tubelets * (TUBELET_TOKENS + DELIMITERS),
+        "a {tubelets}-tubelet video added {added} tokens"
+    );
+    let first = trace(&first);
+    assert!(!first.is_empty(), "the video request generated nothing");
+    let second = trace(&model.send_chat_request(video_request(&[SQUARE], 1)).await?);
+    assert_eq!(first.len(), second.len());
+    for ((a, la), (b, lb)) in first.iter().zip(&second) {
+        assert_eq!(a, b);
+        assert!((la - lb).abs() < LOGPROB_TOLERANCE, "{la} vs {lb}");
+    }
+    Ok(())
+}
+
 // Nano Omni's architecture, which the projector writer knows; the tiny tower is the same layout
 const NANO_OMNI: &str = "NemotronH_Nano_Omni_Reasoning_V3";
 
@@ -636,6 +714,8 @@ fn a_tiled_tower_written_as_nemotron_v2_vl_binds_back() -> anyhow::Result<()> {
     let vision = config["vision_config"].as_object_mut().expect("an object");
     vision.remove("min_num_patches");
     vision.remove("max_num_patches");
+    // Nano VL's tower takes no video
+    vision.remove("separate_video_embedder");
     std::fs::write(dir.join("config.json"), config.to_string())?;
     let out = dir.join("mmproj.gguf");
     inference_gguf::mmproj_writer::write_mmproj(dir, &out, None)?;
@@ -654,7 +734,9 @@ fn a_tiled_tower_written_as_nemotron_v2_vl_binds_back() -> anyhow::Result<()> {
     let tile = TILE / PATCH;
     let mut checked = 0;
     for (name, want) in &weights {
-        if !(name.starts_with("vision_model.") || name.starts_with("mlp1.")) {
+        if !(name.starts_with("vision_model.") || name.starts_with("mlp1."))
+            || name.ends_with(VIDEO_EMBEDDER)
+        {
             continue;
         }
         // the position table at the tile's grid, as the tower resizes it for a tile

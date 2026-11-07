@@ -38,6 +38,9 @@ const LANGUAGE_MODEL: &str = "language_model";
 const RADIO: &str = "vision_model.radio_model.model";
 const PATCH_EMBED: &str = "v.patch_embd.weight";
 const VIDEO_PATCH_EMBED: &str = "v.patch_embd.weight.1";
+// the patches a video frame is resized to, Nano Omni's `video_target_num_patches`, which a projector does not state
+const VIDEO_TARGET_PATCHES: usize = 1024;
+const CHANNELS: usize = 3;
 const POSITIONS: &str = "v.position_embd.weight";
 const PREFIX_TOKENS: &str = "v.class_embd";
 const PROJECTOR_IN: &str = "mm.model.mlp.1.weight";
@@ -567,6 +570,14 @@ fn vision_config(
     });
     for (key, value) in budget.as_object().into_iter().flatten() {
         config["vision_config"][key] = value.clone();
+    }
+    // the video patch embedder takes a tubelet's frames stacked on the channel axis
+    if let Some(video) = shapes.get(VIDEO_PATCH_EMBED) {
+        let temporal = video.iter().product::<usize>() / (hidden * CHANNELS * per_patch);
+        config["vision_config"]["separate_video_embedder"] = json!(true);
+        config["vision_config"]["video_temporal_patch_size"] = json!(temporal);
+        config["vision_config"]["video_target_num_patches"] = json!(VIDEO_TARGET_PATCHES);
+        config["vision_config"]["video_maintain_aspect_ratio"] = json!(true);
     }
     for (key, value) in tiles.as_object().into_iter().flatten() {
         config[key] = value.clone();

@@ -1,7 +1,9 @@
 //! Nemotron-H Omni's inputs: one tile per image on a patch grid sized to a patch budget (aspect kept, sides even),
-//! antialiased bicubic in float, `<image>` expanded to `<img>`, one `<image>` per token, `</img>`; each clip's
-//! normalized log-mel, `<so_embedding>` expanded to `<so_start>`, one `<so_embedding>` per encoder frame, `<so_end>`.
+//! antialiased bicubic in float, `<image>` expanded to `<img>`, one `<image>` per token, `</img>`; a video's frames on
+//! one grid, paired into tubelets, each a timestamped `<img>` block; each clip's normalized log-mel, `<so_embedding>`
+//! expanded to `<so_start>`, one `<so_embedding>` per encoder frame, `<so_end>`.
 
+use std::hash::{Hash, Hasher};
 use std::{any::Any, sync::Arc};
 
 use image::DynamicImage;
@@ -17,6 +19,7 @@ use crate::media_inputs::{
         InputProcessorOutput, InputsHost, InputsProcessorValidationError, MediaSequence,
         ModelInputs, MultimodalInputsProcessor, TextInputs,
     },
+    video::VideoInput,
 };
 use crate::paged_attention::{
     PagedAttentionMeta,
@@ -24,7 +27,8 @@ use crate::paged_attention::{
 };
 
 use super::{
-    Config, ImageLayout, ImagePatches, MODEL, NemotronOmniSpecificArgs, sound::SoundConfig,
+    Config, ImageLayout, ImagePatches, MODEL, NemotronOmniSpecificArgs, VideoLayout,
+    sound::SoundConfig,
 };
 
 pub const IMAGE_TOKEN: &str = "<image>";
@@ -33,8 +37,10 @@ pub const IMAGE_END: &str = "</img>";
 pub const SOUND_TOKEN: &str = "<so_embedding>";
 pub const SOUND_START: &str = "<so_start>";
 pub const SOUND_END: &str = "<so_end>";
+pub const VIDEO_TOKEN: &str = "<video>";
 const CHANNELS: usize = 3;
 const PIXEL_SCALE: f32 = 255.0;
+const MS_PER_SECOND: f64 = 1000.0;
 
 pub struct NemotronOmniInputsProcessor {
     patch_size: usize,
@@ -43,6 +49,7 @@ pub struct NemotronOmniInputsProcessor {
     mean: Vec<f32>,
     std: Vec<f32>,
     image_token: u32,
+    video: Option<VideoLayout>,
     sound: Option<SoundInputs>,
 }
 
@@ -68,11 +75,105 @@ impl SoundInputs {
     }
 }
 
-// the sequence's images as tiles, patches concatenated in prompt order: each tile's grid and each image's tiles
+// the sequence's images as tiles, then its videos' tubelets, patches concatenated in that order (a tubelet's patch as
+// its frames' rows one after another): each tile's grid and each image's tiles, each video's tubelets
 struct Preprocessed {
     patches: Tensor,
     tiles: Vec<(usize, usize)>,
     images: Vec<std::ops::Range<usize>>,
+    videos: Vec<VideoTubelets>,
+}
+
+// one video's tubelets: how many, their grid, and their first row in `Preprocessed::patches`
+#[derive(Clone, Copy)]
+struct VideoTubelets {
+    count: usize,
+    grid: (usize, usize),
+    start: usize,
+}
+
+/// `(rows, cols)` a `width x height` video frame is resized to: about `target` patches, aspect kept, each side a
+/// multiple of `merge` (rounded up while the product still fits), as NVIDIA's `_compute_target_patches_video`.
+pub fn video_grid(
+    (width, height): (usize, usize),
+    target: usize,
+    merge: usize,
+    keep_aspect: bool,
+) -> (usize, usize) {
+    if !keep_aspect {
+        let side = merge.max((target as f64).sqrt() as usize / merge * merge);
+        return (side, side);
+    }
+    let aspect = width as f64 / height.max(1) as f64;
+    // Python's `round`, ties to even
+    let mut rows = ((target as f64 / aspect).sqrt().round_ties_even() as usize).max(1);
+    let mut cols = ((target as f64 * aspect).sqrt().round_ties_even() as usize).max(1);
+    if merge > 1 {
+        let up = |side: usize| side + (merge - side % merge) % merge;
+        if up(rows) * up(cols) <= target {
+            (rows, cols) = (up(rows), up(cols));
+        } else {
+            rows = merge.max(rows - rows % merge);
+            cols = merge.max(cols - cols % merge);
+        }
+    }
+    (rows, cols)
+}
+
+/// Each tubelet's label: `"Frame i sampled at t seconds and frame i+1 sampled at t' seconds: "`, a frame's time its
+/// source index at `int(1000 / fps)` ms a frame (vLLM's `get_video_repl`), or `"Frame i"` with no frame rate.
+pub fn tubelet_labels(video: &VideoInput, temporal: usize) -> Vec<String> {
+    let frames = video.frames.len();
+    let frame_ms = (video.fps > 0.0).then(|| (MS_PER_SECOND / video.fps).trunc());
+    (0..frames.div_ceil(temporal))
+        .map(|tubelet| {
+            let parts = (0..temporal)
+                .map(|j| tubelet * temporal + j)
+                .take_while(|&frame| frame < frames)
+                .enumerate()
+                .map(|(j, frame)| {
+                    let prefix = if j == 0 { "Frame" } else { "frame" };
+                    match frame_ms {
+                        Some(ms) => {
+                            let index = video.sampled_indices.get(frame).copied().unwrap_or(frame);
+                            let seconds = index as f64 * ms / MS_PER_SECOND;
+                            format!("{prefix} {} sampled at {seconds:.2} seconds", frame + 1)
+                        }
+                        None => format!("{prefix} {}", frame + 1),
+                    }
+                })
+                .collect::<Vec<_>>();
+            format!("{}: ", parts.join(" and "))
+        })
+        .collect()
+}
+
+// an image's `CHANNELS` planes of `height x width` pixels, as floats in 0..=255
+fn planes(image: &DynamicImage) -> (Vec<f32>, (usize, usize)) {
+    let rgb = image.to_rgb8();
+    let (width, height) = (rgb.width() as usize, rgb.height() as usize);
+    let mut planes = vec![0f32; CHANNELS * height * width];
+    for (i, pixel) in rgb.pixels().enumerate() {
+        for c in 0..CHANNELS {
+            planes[c * height * width + i] = f32::from(pixel[c]);
+        }
+    }
+    (planes, (height, width))
+}
+
+fn resized(planes: &[f32], size: (usize, usize), out: (usize, usize)) -> Vec<f32> {
+    if out == size {
+        planes.to_vec()
+    } else {
+        inference_vision::aa_bicubic_resize_planar(planes, CHANNELS, size, out)
+    }
+}
+
+// a video tubelet's content hash: its video's and its place in it
+fn tubelet_hash(video: u64, tubelet: usize) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (video, tubelet).hash(&mut hasher);
+    hasher.finish()
 }
 
 /// InternVL's tiling of a `width x height` image: `(cols, rows)` of the closest aspect ratio among the grids of at
@@ -138,6 +239,14 @@ pub fn target_grid(
 impl NemotronOmniInputsProcessor {
     pub fn new(cfg: &Config, max_tiles: Option<usize>) -> Result<Self> {
         let layout = cfg.image_layout(max_tiles)?;
+        if let Some(rate) = cfg.video_pruning_rate.filter(|&rate| rate > 0.0)
+            && cfg.vision_config.video_layout().is_some()
+        {
+            tracing::info!(
+                rate,
+                "{MODEL}: videos keep every tubelet's tokens; the reference's EVS pruning is not applied"
+            );
+        }
         Ok(Self {
             patch_size: cfg.patch_size,
             merge: cfg.merge(),
@@ -145,6 +254,7 @@ impl NemotronOmniInputsProcessor {
             mean: cfg.norm_mean.clone(),
             std: cfg.norm_std.clone(),
             image_token: cfg.img_context_token_id,
+            video: cfg.vision_config.video_layout(),
             sound: cfg
                 .sound_config
                 .as_ref()
@@ -195,26 +305,8 @@ impl NemotronOmniInputsProcessor {
 
     /// One image's tiles, in order: each tile's normalized `(rows * cols, 3 * patch * patch)` patches and its grid.
     pub fn patches(&self, image: &DynamicImage) -> Vec<(Vec<f32>, (usize, usize))> {
-        let rgb = image.to_rgb8();
-        let (width, height) = (rgb.width() as usize, rgb.height() as usize);
-        let mut planes = vec![0f32; CHANNELS * height * width];
-        for (i, pixel) in rgb.pixels().enumerate() {
-            for c in 0..CHANNELS {
-                planes[c * height * width + i] = f32::from(pixel[c]);
-            }
-        }
-        let resized = |(out_h, out_w): (usize, usize)| {
-            if (out_h, out_w) == (height, width) {
-                planes.clone()
-            } else {
-                inference_vision::aa_bicubic_resize_planar(
-                    &planes,
-                    CHANNELS,
-                    (height, width),
-                    (out_h, out_w),
-                )
-            }
-        };
+        let (planes, (height, width)) = planes(image);
+        let resized = |out: (usize, usize)| resized(&planes, (height, width), out);
         let p = self.patch_size;
         match self.layout {
             ImageLayout::Budget { min, max } => {
@@ -257,6 +349,56 @@ impl NemotronOmniInputsProcessor {
         }
     }
 
+    /// One video's tubelets on one grid: each tubelet's patches, its frames' `(3 * patch * patch)` rows one after
+    /// another a patch (the last frame repeated to fill the final tubelet), and the grid.
+    pub fn video_patches(
+        &self,
+        video: &VideoInput,
+    ) -> anyhow::Result<(Vec<f32>, usize, (usize, usize))> {
+        let Some(layout) = self.video else {
+            anyhow::bail!("{MODEL}: this checkpoint's vision tower takes no video");
+        };
+        let Some(first) = video.frames.first() else {
+            anyhow::bail!("{MODEL}: a video with no frames");
+        };
+        let grid = video_grid(
+            (first.width() as usize, first.height() as usize),
+            layout.target,
+            self.merge,
+            layout.keep_aspect,
+        );
+        let p = self.patch_size;
+        let out = (grid.0 * p, grid.1 * p);
+        let frames = video
+            .frames
+            .iter()
+            .map(|frame| {
+                let (planes, size) = planes(frame);
+                let mut patches = Vec::new();
+                self.window(
+                    &resized(&planes, size, out),
+                    out,
+                    (0, 0),
+                    grid,
+                    &mut patches,
+                );
+                patches
+            })
+            .collect::<Vec<_>>();
+        let tubelets = frames.len().div_ceil(layout.temporal);
+        let width = CHANNELS * p * p;
+        let mut all = Vec::with_capacity(tubelets * layout.temporal * frames[0].len());
+        for tubelet in 0..tubelets {
+            for patch in 0..grid.0 * grid.1 {
+                for j in 0..layout.temporal {
+                    let frame = &frames[(tubelet * layout.temporal + j).min(frames.len() - 1)];
+                    all.extend_from_slice(&frame[patch * width..][..width]);
+                }
+            }
+        }
+        Ok((all, tubelets, grid))
+    }
+
     fn tokens(&self, (rows, cols): (usize, usize)) -> usize {
         rows * cols / (self.merge * self.merge)
     }
@@ -269,15 +411,17 @@ impl NemotronOmniInputsProcessor {
             .sum()
     }
 
-    fn cached_or_preprocess(&self, seq: &mut dyn MediaSequence) -> Result<Preprocessed> {
+    fn cached_or_preprocess(&self, seq: &mut dyn MediaSequence) -> anyhow::Result<Preprocessed> {
         let mm = seq.multimodal();
-        // one row per tile: the image it belongs to and its grid
+        let width = CHANNELS * self.patch_size * self.patch_size;
+        let temporal = self.video.map_or(1, |video| video.temporal);
+        // one row per tile (the image it belongs to and its grid), and per video (its tubelets and their grid)
         if let (Some(patches), Some(rows)) = (&mm.cached_pixel_values, &mm.cached_img_thw) {
             let rows = rows.to_vec2::<u32>()?;
             let tiles = rows
                 .iter()
                 .map(|g| (g[1] as usize, g[2] as usize))
-                .collect();
+                .collect::<Vec<(usize, usize)>>();
             let mut images: Vec<std::ops::Range<usize>> = Vec::new();
             for (i, g) in rows.iter().enumerate() {
                 match images.get_mut(g[0] as usize) {
@@ -285,18 +429,32 @@ impl NemotronOmniInputsProcessor {
                     None => images.push(i..i + 1),
                 }
             }
+            let mut start = tiles.iter().map(|(r, c)| r * c).sum::<usize>();
+            let videos = match &mm.cached_vid_thw {
+                Some(rows) => rows
+                    .to_vec2::<u32>()?
+                    .iter()
+                    .map(|g| {
+                        let (count, grid) = (g[0] as usize, (g[1] as usize, g[2] as usize));
+                        let video = VideoTubelets { count, grid, start };
+                        start += count * grid.0 * grid.1 * temporal;
+                        video
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
             return Ok(Preprocessed {
                 patches: patches.clone(),
                 tiles,
                 images,
+                videos,
             });
         }
-        let images = seq.clone_images().expect("Need images by this point.");
         let mut all = Vec::new();
         let mut tiles = Vec::new();
-        let mut ranges = Vec::with_capacity(images.len());
+        let mut ranges = Vec::new();
         let mut rows = Vec::new();
-        for (index, image) in images.iter().enumerate() {
+        for (index, image) in seq.clone_images().unwrap_or_default().iter().enumerate() {
             let start = tiles.len();
             for (patches, grid) in self.patches(image) {
                 all.extend(patches);
@@ -305,15 +463,30 @@ impl NemotronOmniInputsProcessor {
             }
             ranges.push(start..tiles.len());
         }
-        let width = CHANNELS * self.patch_size * self.patch_size;
+        let mut videos = Vec::new();
+        let mut video_rows = Vec::new();
+        for video in seq.videos().unwrap_or_default() {
+            let (patches, count, grid) = self.video_patches(video)?;
+            videos.push(VideoTubelets {
+                count,
+                grid,
+                start: all.len() / width,
+            });
+            all.extend(patches);
+            video_rows.extend([count as u32, grid.0 as u32, grid.1 as u32]);
+        }
         let patches = Tensor::from_vec(all, ((), width), &Device::Cpu)?;
         let mm = seq.multimodal_mut();
         mm.cached_pixel_values = Some(patches.clone());
         mm.cached_img_thw = Some(Tensor::from_vec(rows, (tiles.len(), 3), &Device::Cpu)?);
+        mm.cached_vid_thw = (!videos.is_empty())
+            .then(|| Tensor::from_vec(video_rows, (videos.len(), 3), &Device::Cpu))
+            .transpose()?;
         Ok(Preprocessed {
             patches,
             tiles,
             images: ranges,
+            videos,
         })
     }
 
@@ -328,18 +501,21 @@ impl NemotronOmniInputsProcessor {
         if seq.multimodal().has_changed_prompt {
             return Ok(());
         }
-        let mut expanded = seq.get_initial_prompt().to_string();
         let image_counts = images.map_or_else(Vec::new, |images| {
             (0..images.images.len())
                 .map(|image| self.image_tokens(images, image))
                 .collect::<Vec<_>>()
         });
-        expanded = expand(
-            &expanded,
-            (IMAGE_TOKEN, IMAGE_START, IMAGE_END),
-            &image_counts,
-            "images",
-        )?;
+        let temporal = self.video.map_or(1, |video| video.temporal);
+        let videos = seq
+            .videos()
+            .unwrap_or_default()
+            .iter()
+            .zip(images.map_or(&[][..], |images| &images.videos))
+            .map(|(video, tubelets)| (tubelet_labels(video, temporal), self.tokens(tubelets.grid)))
+            .collect::<Vec<_>>();
+        let (mut expanded, blocks) =
+            expand_visual(seq.get_initial_prompt(), &image_counts, &videos)?;
         if let Some(sound) = &self.sound {
             let counts = clips
                 .iter()
@@ -371,17 +547,53 @@ impl NemotronOmniInputsProcessor {
                         &ids, token, start_id, end_id,
                     ))
                 };
-            if images.is_some_and(|images| !images.images.is_empty()) {
-                let hashes = seq
-                    .image_hashes()
-                    .ok_or_else(|| anyhow::anyhow!("{MODEL} images are missing content hashes"))?;
+            if !blocks.is_empty() {
                 let ranges = delimited(self.image_token, IMAGE_START, IMAGE_END)?;
-                layout.extend_ranges(
-                    &ranges,
-                    hashes,
-                    MultimodalKind::Image,
-                    MultimodalAttentionPolicy::Causal,
-                );
+                if ranges.len() != blocks.len() {
+                    anyhow::bail!(
+                        "{MODEL}: {} image blocks in the prompt where {} were written",
+                        ranges.len(),
+                        blocks.len()
+                    );
+                }
+                let of = |kind| {
+                    ranges
+                        .iter()
+                        .zip(&blocks)
+                        .filter(|(_, block)| **block == kind)
+                        .map(|(range, _)| *range)
+                        .collect::<Vec<_>>()
+                };
+                if !image_counts.is_empty() {
+                    let hashes = seq.image_hashes().ok_or_else(|| {
+                        anyhow::anyhow!("{MODEL} images are missing content hashes")
+                    })?;
+                    layout.extend_ranges(
+                        &of(MultimodalKind::Image),
+                        hashes,
+                        MultimodalKind::Image,
+                        MultimodalAttentionPolicy::Causal,
+                    );
+                }
+                if !videos.is_empty() {
+                    let hashes = seq
+                        .video_hashes()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("{MODEL} videos are missing content hashes")
+                        })?
+                        .iter()
+                        .zip(&videos)
+                        .flat_map(|(&hash, (labels, _))| {
+                            (0..labels.len()).map(move |tubelet| tubelet_hash(hash, tubelet))
+                        })
+                        .collect::<Vec<_>>();
+                    layout.extend_ranges(
+                        &of(MultimodalKind::Video),
+                        &hashes,
+                        MultimodalKind::Video,
+                        MultimodalAttentionPolicy::Causal,
+                    );
+                }
             }
             if let Some(sound) = self.sound.as_ref().filter(|_| !clips.is_empty()) {
                 let hashes = seq
@@ -430,9 +642,74 @@ impl NemotronOmniInputsProcessor {
                     patches,
                     rows,
                     cols,
+                    video: false,
                 })
             })
             .collect()
+    }
+
+    // the sequence's `item`th tubelet, counting through its videos
+    fn tubelet(&self, processed: &Preprocessed, mut item: usize) -> anyhow::Result<ImagePatches> {
+        let temporal = self.video.map_or(1, |video| video.temporal);
+        for video in &processed.videos {
+            if item < video.count {
+                let (rows, cols) = video.grid;
+                let frames = rows * cols * temporal;
+                let patches = processed
+                    .patches
+                    .narrow(0, video.start + item * frames, frames)?
+                    .reshape((rows * cols, ()))?;
+                return Ok(ImagePatches {
+                    patches,
+                    rows,
+                    cols,
+                    video: true,
+                });
+            }
+            item -= video.count;
+        }
+        anyhow::bail!("{MODEL}: no tubelet {item} among the videos")
+    }
+
+    // the image tiles and video tubelets this step's placeholders hold, in prompt order
+    fn visuals(
+        &self,
+        seq: &dyn MediaSequence,
+        processed: &Preprocessed,
+    ) -> anyhow::Result<Vec<ImagePatches>> {
+        let tubelets = processed
+            .videos
+            .iter()
+            .map(|video| video.count)
+            .sum::<usize>();
+        let active = |kind, count| -> anyhow::Result<std::ops::Range<usize>> {
+            if count == 0 {
+                Ok(0..0)
+            } else if seq.is_chunked_prefill_view() {
+                seq.active_local_multimodal_item_range(kind, count)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("{MODEL} chunk is missing its active {kind:?} range")
+                    })
+            } else {
+                Ok(seq.count_prefix_cached_mm_items_by_kind(kind)..count)
+            }
+        };
+        let images = active(MultimodalKind::Image, processed.images.len())?;
+        let videos = active(MultimodalKind::Video, tubelets)?;
+        let mut out = Vec::new();
+        for feature in seq.mm_features() {
+            let item = feature.item_range.start;
+            match feature.kind {
+                MultimodalKind::Image if images.contains(&item) => {
+                    out.extend(Self::select(processed, item..item + 1)?);
+                }
+                MultimodalKind::Video if videos.contains(&item) => {
+                    out.push(self.tubelet(processed, item)?);
+                }
+                _ => {}
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -463,6 +740,69 @@ fn expand(
     Ok(expanded)
 }
 
+fn image_block(tokens: usize) -> String {
+    format!("{IMAGE_START}{}{IMAGE_END}", IMAGE_TOKEN.repeat(tokens))
+}
+
+/// What a `<video>` becomes: each tubelet's label and `tokens`-token `<img>` block, the tubelets joined by newlines.
+pub fn video_replacement(labels: &[String], tokens: usize) -> String {
+    labels
+        .iter()
+        .map(|label| format!("{label}{}", image_block(tokens)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `prompt` with its `<image>`s and `<video>`s expanded in the order they appear: the `i`th image as one `<img>` block
+/// of `images[i]` tokens, the `i`th video as its tubelets' blocks, each after its label, joined by newlines; and the
+/// kind of every `<img>` block written, in order.
+fn expand_visual(
+    prompt: &str,
+    images: &[usize],
+    videos: &[(Vec<String>, usize)],
+) -> anyhow::Result<(String, Vec<MultimodalKind>)> {
+    for (token, expected, items) in [
+        (IMAGE_TOKEN, images.len(), "images"),
+        (VIDEO_TOKEN, videos.len(), "videos"),
+    ] {
+        let placeholders = prompt.matches(token).count();
+        if placeholders != expected {
+            return Err(InputsProcessorValidationError(format!(
+                "The number of `{token}` tokens ({placeholders}) must match the number of {items} ({expected})"
+            ))
+            .into());
+        }
+    }
+    let block = |out: &mut String, tokens: usize| out.push_str(&image_block(tokens));
+    let (mut images, mut videos) = (images.iter(), videos.iter());
+    let mut out = String::with_capacity(prompt.len());
+    let mut kinds = Vec::new();
+    let mut rest = prompt;
+    loop {
+        let next_image = rest.find(IMAGE_TOKEN);
+        let next_video = rest.find(VIDEO_TOKEN);
+        let (at, video) = match (next_image, next_video) {
+            (Some(i), Some(v)) => (i.min(v), v < i),
+            (Some(i), None) => (i, false),
+            (None, Some(v)) => (v, true),
+            (None, None) => break,
+        };
+        out.push_str(&rest[..at]);
+        if video {
+            let (labels, tokens) = videos.next().expect("counted above");
+            out.push_str(&video_replacement(labels, *tokens));
+            kinds.extend(labels.iter().map(|_| MultimodalKind::Video));
+            rest = &rest[at + VIDEO_TOKEN.len()..];
+        } else {
+            block(&mut out, *images.next().expect("counted above"));
+            kinds.push(MultimodalKind::Image);
+            rest = &rest[at + IMAGE_TOKEN.len()..];
+        }
+    }
+    out.push_str(rest);
+    Ok((out, kinds))
+}
+
 impl MultimodalInputsProcessor for NemotronOmniInputsProcessor {
     fn prepare_for_paged_prompt_planning(
         &self,
@@ -476,10 +816,12 @@ impl MultimodalInputsProcessor for NemotronOmniInputsProcessor {
             anyhow::bail!("{MODEL} inputs processor requires a tokenizer");
         };
         for seq in input_seqs {
-            if !(seq.has_images() || seq.has_audios()) || seq.multimodal().has_changed_prompt {
+            if !(seq.has_images() || seq.has_videos() || seq.has_audios())
+                || seq.multimodal().has_changed_prompt
+            {
                 continue;
             }
-            let processed = if seq.has_images() {
+            let processed = if seq.has_images() || seq.has_videos() {
                 Some(self.cached_or_preprocess(&mut **seq)?)
             } else {
                 None
@@ -522,9 +864,9 @@ impl MultimodalInputsProcessor for NemotronOmniInputsProcessor {
         if is_prompt {
             for seq in input_seqs
                 .iter_mut()
-                .filter(|seq| seq.has_images() || seq.has_audios())
+                .filter(|seq| seq.has_images() || seq.has_videos() || seq.has_audios())
             {
-                let processed = if seq.has_images() {
+                let processed = if seq.has_images() || seq.has_videos() {
                     Some(self.cached_or_preprocess(&mut **seq)?)
                 } else {
                     None
@@ -545,16 +887,7 @@ impl MultimodalInputsProcessor for NemotronOmniInputsProcessor {
                 let Some(processed) = processed else {
                     continue;
                 };
-                let count = processed.images.len();
-                let range = if seq.is_chunked_prefill_view() {
-                    seq.active_local_multimodal_item_range(MultimodalKind::Image, count)
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("{MODEL} image chunk is missing its active image range")
-                        })?
-                } else {
-                    seq.count_prefix_cached_mm_items_by_kind(MultimodalKind::Image)..count
-                };
-                images.extend(Self::select(&processed, range)?);
+                images.extend(self.visuals(&**seq, &processed)?);
             }
         }
 
@@ -607,7 +940,57 @@ impl MultimodalInputsProcessor for NemotronOmniInputsProcessor {
 
 #[cfg(test)]
 mod tests {
-    use super::{target_grid, tile_grid};
+    use super::{
+        IMAGE_TOKEN, MultimodalKind, VideoInput, expand_visual, target_grid, tile_grid,
+        tubelet_labels, video_grid,
+    };
+
+    // transformers' `_compute_target_patches` for the same frames: 352 x 240 at 1024 patches rounds 26 x 39 up to
+    // 26 x 40, over budget, so down to 26 x 38 (the parity run's grid)
+    #[test]
+    fn a_video_frame_takes_the_references_grid() {
+        assert_eq!(video_grid((352, 240), 1024, 2, true), (26, 38));
+        assert_eq!(video_grid((64, 48), 16, 2, true), (2, 4));
+        assert_eq!(video_grid((640, 360), 1024, 2, false), (32, 32));
+    }
+
+    // vLLM's labels: frame times at int(1000 / fps) ms a frame from the sampled indices, the odd frame alone
+    #[test]
+    fn tubelets_are_labelled_with_their_frames_times() {
+        let frames = (0..3)
+            .map(|_| image::DynamicImage::new_rgb8(4, 4))
+            .collect();
+        let video = VideoInput::from_frames(frames, 30.0, Some(vec![0, 15, 30]));
+        assert_eq!(
+            tubelet_labels(&video, 2),
+            [
+                "Frame 1 sampled at 0.00 seconds and frame 2 sampled at 0.49 seconds: ",
+                "Frame 3 sampled at 0.99 seconds: "
+            ]
+        );
+    }
+
+    // placeholders expand in prompt order, a video as one block per tubelet after its label
+    #[test]
+    fn images_and_videos_expand_where_they_stand() -> anyhow::Result<()> {
+        let labels = vec!["A: ".to_string(), "B: ".to_string()];
+        let (text, kinds) = expand_visual("x<video>\ny<image>z", &[1], &[(labels, 2)])?;
+        let block = |n: usize| format!("<img>{}</img>", IMAGE_TOKEN.repeat(n));
+        assert_eq!(
+            text,
+            format!("xA: {}\nB: {}\ny{}z", block(2), block(2), block(1))
+        );
+        assert_eq!(
+            kinds,
+            [
+                MultimodalKind::Video,
+                MultimodalKind::Video,
+                MultimodalKind::Image
+            ]
+        );
+        assert!(expand_visual("<video>", &[], &[]).is_err());
+        Ok(())
+    }
 
     // `(cols, rows)` NVIDIA's `calculate_targets` gives for the same sizes at 512 with 12 tiles
     #[test]
