@@ -28,8 +28,9 @@ use super::forward::{MoEForward, MoEForwardConfig};
 use super::ungated::{grouped_ungated_with, indexed_mmvq_ungated_with};
 
 // Largest batch the cache and CPU split serves (the indexed matvec's limit); a larger one stages the experts it routes
-// to on the GPU, since copying an expert costs about what the CPU takes for one token through it
-const SPLIT_MAX_TOKENS: usize = 8;
+// to on the GPU, since copying an expert costs about what the CPU takes for one token through it, reading its routes
+// on the host, which no CUDA graph can capture
+pub const SPLIT_MAX_TOKENS: usize = 8;
 // Copies a layer has in flight before its misses stop being admitted: a speculative verify misses far more experts than
 // the copy stream lands before they are evicted again, so a deeper queue only delays every fill
 const MAX_PENDING_FILLS: usize = 4;

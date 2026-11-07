@@ -65,6 +65,11 @@ pub trait NormalModel: IsqModel + AnyMoeBaseModelMixin + SpeculativeTargetMixin 
     fn supports_cuda_decode_graphs(&self) -> bool {
         false
     }
+    /// The most query tokens a captured decode step may hold (its batch bucket times its width); `None` for no limit.
+    #[cfg(feature = "cuda")]
+    fn cuda_decode_graph_max_tokens(&self) -> Option<usize> {
+        None
+    }
     fn model_config(&self) -> Arc<dyn ModelConfigLike + Send + Sync> {
         Arc::new(self.config().clone())
     }
@@ -103,6 +108,11 @@ pub trait MultimodalModel:
     #[cfg(feature = "cuda")]
     fn supports_cuda_decode_graphs_for_args(&self, _model_specific_args: &dyn Any) -> bool {
         self.supports_cuda_decode_graphs()
+    }
+    /// The most query tokens a captured decode step may hold (its batch bucket times its width); `None` for no limit.
+    #[cfg(feature = "cuda")]
+    fn cuda_decode_graph_max_tokens(&self) -> Option<usize> {
+        None
     }
     fn requires_uniform_completion_batch(&self) -> bool {
         self.is_block_diffusion()

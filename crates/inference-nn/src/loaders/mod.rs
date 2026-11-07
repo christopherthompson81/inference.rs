@@ -141,6 +141,11 @@ pub trait DeviceMappedModelLoader {
     ) -> Result<Vec<usize>> {
         Ok(Vec::new())
     }
+    /// A built-in MTP head's expert stacks, by the names the model loads them under: while the model's experts are
+    /// offloaded these stay on the GPU, requantized small, so a draft never waits on a miss.
+    fn mtp_head_expert_weights(&self, _config: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
     /// Activation bytes each prompt token adds to a prefill chunk, where the loader knows them: an MoE model whose
     /// experts stay in host memory sizes its prompt chunk by them.
     fn prompt_activation_bytes_per_token(&self, _config: &str) -> Result<Option<usize>> {

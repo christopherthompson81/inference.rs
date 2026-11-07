@@ -5,6 +5,9 @@ use inference_nn::utils::varbuilder_utils::DeviceForLoadTensor;
 use crate::nemotron_h::{Config, LayerKind};
 
 const EMBEDDINGS_WEIGHT: &str = "embeddings.weight";
+const MTP_PREFIX: &str = "mtp";
+// the latent experts' two stacks (squared-ReLU, no gate)
+const MTP_EXPERT_STACKS: [&str; 2] = ["up_proj", "down_proj"];
 // NeMo's speech models keep the decoder's ends under Llama's names
 const NEMO_EMBEDDINGS_WEIGHT: &str = "embed_tokens.weight";
 pub const NEMO_DECODER_ENDS: (&str, &str) = ("embed_tokens", "norm");
@@ -149,7 +152,7 @@ impl DeviceMappedModelLoader for NemotronHLoader {
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
         let cfg = Config::from_json(config)?;
-        standard_non_mapped_size_in_bytes(
+        let ends = standard_non_mapped_size_in_bytes(
             LanguageModelEnds {
                 hidden_size: cfg.hidden_size,
                 vocab_size: cfg.vocab_size,
@@ -158,7 +161,50 @@ impl DeviceMappedModelLoader for NemotronHLoader {
             quantization,
             dtype,
             weight_pack_factor,
-        )
+        )?;
+        // the MTP head loads with the non-mapped weights, so its bytes count in them
+        let head = self
+            .non_mapped_layer_sizes_in_bytes(config, dtype, weight_pack_factor)?
+            .iter()
+            .sum::<usize>();
+        Ok(ends + head)
+    }
+    // the head's attention layer and MoE (`moe_spec` past the stack: no `block_configs` entry covers it), its input
+    // projection over [embedding; hidden] and its three norms
+    fn non_mapped_layer_sizes_in_bytes(
+        &self,
+        config: &str,
+        dtype: DType,
+        weight_pack_factor: usize,
+    ) -> Result<Vec<usize>> {
+        let cfg = Config::from_json(config)?;
+        if cfg.mtp_layout()?.is_none() {
+            return Ok(Vec::new());
+        }
+        let h = cfg.hidden_size;
+        let head = layer_elems(&cfg, usize::MAX, LayerKind::Attention, weight_pack_factor)
+            + layer_elems(&cfg, usize::MAX, LayerKind::Moe, weight_pack_factor)
+            + 2 * h * h / weight_pack_factor
+            + 3 * h;
+        Ok(vec![head * dtype.size_in_bytes()])
+    }
+    fn mtp_head_expert_weights(&self, config: &str) -> Result<Vec<String>> {
+        let cfg = Config::from_json(config)?;
+        Ok(match cfg.mtp_layout()? {
+            Some(mtp) => {
+                let module = mtp
+                    .block
+                    .names
+                    .ffn
+                    .map(|ffn| ffn.module)
+                    .unwrap_or_default();
+                MTP_EXPERT_STACKS
+                    .iter()
+                    .map(|stack| format!("{MTP_PREFIX}.{module}.experts.{stack}.weight"))
+                    .collect()
+            }
+            None => Vec::new(),
+        })
     }
     // the widest MoE layer's (a Puzzle checkpoint prunes them unevenly); a dense model's experts never leave the GPU
     fn prompt_activation_bytes_per_token(&self, config: &str) -> Result<Option<usize>> {
@@ -187,32 +233,8 @@ impl DeviceMappedModelLoader for NemotronHLoader {
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
         let cfg = Config::from_json(config)?;
-        let h = cfg.hidden_size;
-        let layer_elems = |layer: usize, kind: LayerKind| match kind {
-            LayerKind::Attention => {
-                let q = cfg.num_attention_heads * cfg.head_dim;
-                let kv = cfg.num_key_value_heads.unwrap_or(cfg.num_attention_heads) * cfg.head_dim;
-                (h * q * 2 + h * kv * 2) / weight_pack_factor
-            }
-            LayerKind::Mamba => {
-                let inner = cfg.mamba_num_heads * cfg.mamba_head_dim;
-                let conv_dim = inner + 2 * cfg.n_groups * cfg.ssm_state_size;
-                let in_proj = (inner + conv_dim + cfg.mamba_num_heads) * h;
-                (in_proj + inner * h) / weight_pack_factor
-                    + conv_dim * (cfg.conv_kernel + 1)
-                    + cfg.mamba_num_heads * 3
-                    + inner
-            }
-            LayerKind::Moe => {
-                let spec = cfg.moe_spec(layer);
-                let expert_in = spec.latent_size.unwrap_or(h);
-                let experts = spec.num_experts * spec.intermediate_size * expert_in * 2;
-                let latent = spec.latent_size.map_or(0, |latent| latent * h * 2);
-                let shared = spec.shared_intermediate_size * h * 2;
-                (experts + latent + shared) / weight_pack_factor + spec.num_experts * (h + 1)
-            }
-            LayerKind::Mlp => cfg.intermediate_size * h * 2 / weight_pack_factor,
-        } + h;
+        let layer_elems =
+            |layer: usize, kind: LayerKind| layer_elems(&cfg, layer, kind, weight_pack_factor);
         // a block holds its mixer layer and the feed-forward layer after it
         let mut sizes: Vec<usize> = Vec::new();
         for (layer, kind) in cfg.layer_kinds()?.into_iter().enumerate() {
@@ -255,6 +277,37 @@ impl DeviceMappedModelLoader for NemotronHLoader {
             base, &layout, mtp, state,
         )))
     }
+}
+
+// one layer's weights in elements: its mixer or feed-forward and its norm
+fn layer_elems(cfg: &Config, layer: usize, kind: LayerKind, weight_pack_factor: usize) -> usize {
+    let h = cfg.hidden_size;
+    let mixer = match kind {
+        LayerKind::Attention => {
+            let q = cfg.num_attention_heads * cfg.head_dim;
+            let kv = cfg.num_key_value_heads.unwrap_or(cfg.num_attention_heads) * cfg.head_dim;
+            (h * q * 2 + h * kv * 2) / weight_pack_factor
+        }
+        LayerKind::Mamba => {
+            let inner = cfg.mamba_num_heads * cfg.mamba_head_dim;
+            let conv_dim = inner + 2 * cfg.n_groups * cfg.ssm_state_size;
+            let in_proj = (inner + conv_dim + cfg.mamba_num_heads) * h;
+            (in_proj + inner * h) / weight_pack_factor
+                + conv_dim * (cfg.conv_kernel + 1)
+                + cfg.mamba_num_heads * 3
+                + inner
+        }
+        LayerKind::Moe => {
+            let spec = cfg.moe_spec(layer);
+            let expert_in = spec.latent_size.unwrap_or(h);
+            let experts = spec.num_experts * spec.intermediate_size * expert_in * 2;
+            let latent = spec.latent_size.map_or(0, |latent| latent * h * 2);
+            let shared = spec.shared_intermediate_size * h * 2;
+            (experts + latent + shared) / weight_pack_factor + spec.num_experts * (h + 1)
+        }
+        LayerKind::Mlp => cfg.intermediate_size * h * 2 / weight_pack_factor,
+    };
+    mixer + h
 }
 
 #[cfg(test)]

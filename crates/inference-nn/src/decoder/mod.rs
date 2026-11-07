@@ -44,6 +44,9 @@ const MERGED_GATE_UP_CHUNKS: usize = 2;
 const O_PROJ: &str = "o_proj";
 // draft tokens per step when `--mtp-n-predict` names none; one MTP layer chained this deep stays well accepted
 pub const DEFAULT_MTP_N_PREDICT: usize = 2;
+// With experts offloaded every verified token's missed experts run on the CPU; one draft ties or beats none on
+// Qwen3.8-Flash-Next and two lose (qwen4exp investigation Runs 43 and 52)
+pub const DEFAULT_MTP_N_PREDICT_OFFLOADED: usize = 1;
 // Phi-3 GGUFs carry their LongRoPE factors as tensors
 const PHI_ROPE_FACTORS: (&str, &str) = ("rope_factors_short.weight", "rope_factors_long.weight");
 // Llama 3 checkpoints may carry per-frequency rope factors under this name

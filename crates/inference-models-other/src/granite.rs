@@ -3500,7 +3500,15 @@ impl GraniteMoeHybrid {
                 Some(PagedAttention::new(cfg.head_dim(), &device, None)?)
             }
         };
-        let block = Block::load(&vb, &layout, load, None, paged_attn)?;
+        // with the model's experts offloaded the head's stay on the GPU, requantized small by the loader: its misses
+        // would cost each draft more than its forward
+        let block = Block::load(
+            &vb.clone().with_moe_expert_cache(None),
+            &layout,
+            load,
+            None,
+            paged_attn,
+        )?;
         let norm = |name: &str| -> Result<Norm> {
             Ok(Norm::Rms(RmsNorm::new(
                 cfg.hidden_size,
@@ -4166,9 +4174,17 @@ impl crate::speculative::SpeculativeTargetMixin for GraniteMoeHybrid {
                 "`--mtp` asked for this model's MTP head, which its checkpoint does not carry"
             );
         };
-        let n_predict = config
-            .n_predict
-            .unwrap_or(crate::decoder::DEFAULT_MTP_N_PREDICT);
+        let offloaded = self.layers.iter().any(|layer| {
+            matches!(
+                layer.ffn().and_then(|ffn| ffn.moe.as_ref()),
+                Some(HybridMoe::Nemotron(moe)) if moe.experts.is_offloaded()
+            )
+        });
+        let n_predict = config.n_predict.unwrap_or(if offloaded {
+            crate::decoder::DEFAULT_MTP_N_PREDICT_OFFLOADED
+        } else {
+            crate::decoder::DEFAULT_MTP_N_PREDICT
+        });
         if n_predict == 0 {
             inference_tensor::bail!("MTP needs at least one draft token");
         }
@@ -4369,6 +4385,20 @@ impl NormalModel for GraniteMoeHybrid {
                     Some(HybridMoe::Granite(_)) => false,
                     Some(HybridMoe::Nemotron(moe)) => moe.experts.decode_is_device_only(),
                 })
+    }
+    // offloaded experts route a larger batch on the host; the MTP head's count as the trunk's
+    #[cfg(feature = "cuda")]
+    fn cuda_decode_graph_max_tokens(&self) -> Option<usize> {
+        let offloaded = |ffn: Option<&BlockFfn>| match ffn.and_then(|ffn| ffn.moe.as_ref()) {
+            Some(HybridMoe::Nemotron(moe)) => moe.experts.is_offloaded(),
+            _ => false,
+        };
+        (self.layers.iter().any(|layer| offloaded(layer.ffn()))
+            || self
+                .mtp
+                .as_ref()
+                .is_some_and(|head| offloaded(head.block().block.ffn.as_ref())))
+        .then_some(crate::moe::OFFLOADED_GRAPH_MAX_TOKENS)
     }
     fn captures_recurrent_state_mid_chunk(&self) -> bool {
         self.layer_types.contains(&GraniteLayerType::Mamba)

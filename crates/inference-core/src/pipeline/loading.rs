@@ -1168,10 +1168,12 @@ pub(crate) struct LoadSession {
 }
 
 // Requantizes a built-in MTP head's experts for the GPU, where they stay while the model's are offloaded
-fn mtp_head_expert_overrides() -> Result<Vec<inference_quant::ImmediateIsqOverride>> {
-    super::isq_flow::MTP_HEAD_EXPERTS
+fn mtp_head_expert_overrides(
+    stacks: &[(String, inference_quant::IsqType, usize)],
+) -> Result<Vec<inference_quant::ImmediateIsqOverride>> {
+    stacks
         .iter()
-        .map(|(name, _, ty)| {
+        .map(|(name, ty, _)| {
             Ok(inference_quant::ImmediateIsqOverride {
                 predicate: Some(regex::Regex::new(&format!("^{}$", regex::escape(name)))?),
                 layer_range: None,
@@ -1321,12 +1323,9 @@ pub(crate) fn open_load_session(
                 .map(|topology| topology.immediate_overrides())
                 .unwrap_or_default();
             let offloaded = planned_moe_expert_cache.or(moe_expert_cache).is_some();
-            if offloaded
-                && weight_source
-                    .as_ref()
-                    .is_some_and(|source| source.contains(super::isq_flow::MTP_HEAD_EXPERTS[0].0))
-            {
-                overrides.extend(mtp_head_expert_overrides()?);
+            if offloaded && let Some(source) = weight_source.as_ref() {
+                let stacks = super::isq_flow::mtp_head_resident_experts(mapped, config, &**source)?;
+                overrides.extend(mtp_head_expert_overrides(&stacks)?);
             }
             overrides
         },

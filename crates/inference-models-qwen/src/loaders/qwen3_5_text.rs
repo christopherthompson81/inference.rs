@@ -166,6 +166,11 @@ macro_rules! qwen3_5_text_loader {
                     &cfg,
                 )))
             }
+            fn mtp_head_expert_weights(&self, config: &str) -> Result<Vec<String>> {
+                let moe_head = mtp_requested(config)?
+                    && parse_qwen35_text_config(config, $moe)?.num_experts > 0;
+                Ok(super::qwen3_5::mtp_head_expert_weights(moe_head))
+            }
             fn non_mapped_layer_sizes_in_bytes(
                 &self,
                 config: &str,
