@@ -1,6 +1,7 @@
 use super::*;
 
-use crate::rwkv7::{Config, MAX_POSITIONS};
+use crate::rwkv::MAX_POSITIONS;
+use crate::rwkv7::Config;
 
 /// `NormalLoader` for RWKV-7 (`RWKV7ForCausalLM`, flash-linear-attention's layout).
 pub struct Rwkv7Loader;
@@ -11,13 +12,12 @@ impl NormalModelLoader for Rwkv7Loader {
         config: &str,
         vb: ShardedVarBuilder,
         normal_loading_metadata: NormalLoadingMetadata,
-        attention_mechanism: AttentionImplementation,
+        _attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        Ok(Box::new(crate::rwkv7::Model::new(
+        Ok(Box::new(crate::rwkv7::model(
             &Config::from_json(config)?,
             vb,
             normal_loading_metadata,
-            attention_mechanism,
         )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
@@ -109,7 +109,7 @@ impl DeviceMappedModelLoader for Rwkv7Loader {
                 base,
                 vec![false; cfg.num_hidden_layers],
             )
-            .with_recurrent_state_bytes(cfg.recurrent_state_bytes(DType::F32)),
+            .with_recurrent_state_bytes(cfg.shape().recurrent_state_bytes(DType::F32)),
         ))
     }
 }

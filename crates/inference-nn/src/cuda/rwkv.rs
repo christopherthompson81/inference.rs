@@ -88,13 +88,14 @@ fn device_ptr(t: &inference_tensor::Tensor) -> inference_tensor::Result<u64> {
     })
 }
 
-/// [`crate::ops::rwkv7_token_shift`] on CUDA, one kernel for every mix.
+/// [`crate::ops::rwkv_token_shift`] on CUDA, one kernel for every mix.
 #[cfg(feature = "cuda")]
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-pub fn rwkv7_token_shift_cuda(
+pub fn rwkv_token_shift_cuda(
     x: &inference_tensor::Tensor,
     last: &inference_tensor::Tensor,
     mixes: &inference_tensor::Tensor,
+    extra: Option<&inference_tensor::Tensor>,
 ) -> inference_tensor::Result<(inference_tensor::Tensor, inference_tensor::Tensor)> {
     use inference_tensor::Tensor;
     let x = x.contiguous()?;
@@ -102,6 +103,9 @@ pub fn rwkv7_token_shift_cuda(
     let mixes_n = mixes.dim(0)?;
     let last = last.to_dtype(x.dtype())?.contiguous()?;
     let mixes = mixes.to_dtype(x.dtype())?.contiguous()?;
+    let extra = extra
+        .map(|e| e.to_dtype(x.dtype())?.contiguous())
+        .transpose()?;
     let out = Tensor::zeros((mixes_n, batch, seq_len, hidden), x.dtype(), x.device())?;
     let new_last = Tensor::zeros((batch, hidden), x.dtype(), x.device())?;
     let stream = x.device().as_cuda_device()?.cuda_stream().cu_stream() as i64;
@@ -110,6 +114,10 @@ pub fn rwkv7_token_shift_cuda(
             device_ptr(&x)? as *const _,
             device_ptr(&last)? as *const _,
             device_ptr(&mixes)? as *const _,
+            match &extra {
+                Some(e) => device_ptr(e)? as *const _,
+                None => std::ptr::null(),
+            },
             device_ptr(&out)? as *mut _,
             device_ptr(&new_last)? as *mut _,
             batch as i32,
@@ -206,6 +214,81 @@ pub fn rwkv7_time_mix_cuda(
     let stream = r.device().as_cuda_device()?.cuda_stream().cu_stream() as i64;
     unsafe {
         crate::cuda::ffi::rwkv7_time_mix_cuda(
+            (&raw const params).cast(),
+            batch as i32,
+            dtype_code(dtype)?,
+            stream,
+        );
+    }
+    Ok(out)
+}
+
+#[cfg(feature = "cuda")]
+#[repr(C)]
+struct Rwkv6TimeMixParams {
+    inputs: [*const core::ffi::c_void; 5],
+    vectors: [*const f32; 3],
+    state: *mut f32,
+    out: *mut core::ffi::c_void,
+    seq_len: i32,
+    heads: i32,
+    norm_eps: f32,
+}
+
+/// [`crate::ops::rwkv6_time_mix`] on CUDA, one kernel.
+#[cfg(feature = "cuda")]
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+pub fn rwkv6_time_mix_cuda(
+    tm: crate::ops::TimeMix6<'_>,
+    state: &inference_tensor::Tensor,
+) -> inference_tensor::Result<inference_tensor::Tensor> {
+    use inference_tensor::Tensor;
+    let dtype = tm.r.dtype();
+    let (batch, seq_len, hidden) = tm.r.dims3()?;
+    let supported = unsafe { crate::cuda::ffi::rwkv7_head_size() } as usize;
+    if tm.head_dim != supported || hidden != tm.heads * tm.head_dim {
+        inference_tensor::bail!(
+            "rwkv6_time_mix_cuda: {} heads of {}, the kernel runs heads of {supported}",
+            tm.heads,
+            tm.head_dim
+        );
+    }
+    if !state.is_contiguous() {
+        inference_tensor::bail!("rwkv6_time_mix_cuda: the state must be contiguous");
+    }
+    let same = |t: &Tensor| -> inference_tensor::Result<Tensor> { t.to_dtype(dtype)?.contiguous() };
+    let [r, k, v, w, g] = [tm.r, tm.k, tm.v, tm.w, tm.g].map(same);
+    let (r, k, v, w, g) = (r?, k?, v?, w?, g?);
+    let f32 = |t: &Tensor| -> inference_tensor::Result<Tensor> {
+        t.to_dtype(inference_tensor::DType::F32)?
+            .flatten_all()?
+            .contiguous()
+    };
+    let [u, norm_w, norm_b] = [tm.u, tm.norm_w, tm.norm_b].map(f32);
+    let (u, norm_w, norm_b) = (u?, norm_w?, norm_b?);
+    let out = Tensor::zeros((batch, seq_len, hidden), dtype, r.device())?;
+    let params = Rwkv6TimeMixParams {
+        inputs: [
+            device_ptr(&r)? as *const _,
+            device_ptr(&k)? as *const _,
+            device_ptr(&v)? as *const _,
+            device_ptr(&w)? as *const _,
+            device_ptr(&g)? as *const _,
+        ],
+        vectors: [
+            device_ptr(&u)? as *const f32,
+            device_ptr(&norm_w)? as *const f32,
+            device_ptr(&norm_b)? as *const f32,
+        ],
+        state: device_ptr(state)? as *mut f32,
+        out: device_ptr(&out)? as *mut _,
+        seq_len: seq_len as i32,
+        heads: tm.heads as i32,
+        norm_eps: tm.norm_eps as f32,
+    };
+    let stream = r.device().as_cuda_device()?.cuda_stream().cu_stream() as i64;
+    unsafe {
+        crate::cuda::ffi::rwkv6_time_mix_cuda(
             (&raw const params).cast(),
             batch as i32,
             dtype_code(dtype)?,

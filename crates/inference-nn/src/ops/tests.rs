@@ -259,6 +259,7 @@ inference_tensor::gpu_cases!(
         cuda_selective_scan_with_a_per_state_item_matches_the_cpu_scan,
         cuda_rwkv7_wkv_matches_the_cpu_recurrence,
         cuda_rwkv7_fused_time_mix_matches_the_composite,
+        cuda_rwkv6_fused_time_mix_matches_the_composite,
         cuda_mamba_gated_rmsnorm_matches_the_composite,
         cuda_qk_norm_rope_positions_preserves_projection_layout,
         cuda_qk_norm_rope_writes_token_major_from_packed_projection,
@@ -1180,11 +1181,12 @@ fn cuda_rwkv7_fused_time_mix_matches_the_composite() -> inference_tensor::Result
         Ok(())
     };
     let (x, last, mixes) = (rand(&[B, T, C])?, rand(&[B, C])?, rand(&[MIXES, C])?);
-    let (want_mixed, want_last) = super::rwkv7_token_shift(&x, &last, &mixes)?;
-    let (mixed, new_last) = super::rwkv7_token_shift(
+    let (want_mixed, want_last) = super::rwkv_token_shift(&x, &last, &mixes, None)?;
+    let (mixed, new_last) = super::rwkv_token_shift(
         &x.to_device(&device)?,
         &last.to_device(&device)?,
         &mixes.to_device(&device)?,
+        None,
     )?;
     close("token shift", &mixed, &want_mixed)?;
     close("last token", &new_last, &want_last)?;
@@ -1233,6 +1235,81 @@ fn cuda_rwkv7_fused_time_mix_matches_the_composite() -> inference_tensor::Result
             &cpu_state,
         )?;
     }
+    Ok(())
+}
+
+// RWKV-6: the fused time-mix kernel (a thread per value column) and the token shift with data-dependent offsets
+// against the CPU composites, two sequences of 30 steps
+#[cfg(feature = "cuda")]
+fn cuda_rwkv6_fused_time_mix_matches_the_composite() -> inference_tensor::Result<()> {
+    const B: usize = 2;
+    const T: usize = 30;
+    const H: usize = 2;
+    const N: usize = 64;
+    const C: usize = H * N;
+    const MIXES: usize = 5;
+    const NORM_EPS: f64 = 64e-5;
+    const TOLERANCE: f32 = 1e-4;
+    let device = Device::new_cuda(0)?;
+    let rand = |shape: &[usize]| Tensor::randn(0f32, 0.5, shape, &Device::Cpu);
+    let close = |label: &str, actual: &Tensor, expected: &Tensor| -> inference_tensor::Result<()> {
+        let error = (actual.to_device(&Device::Cpu)? - expected)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        let scale = expected.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert!(
+            error < TOLERANCE * scale.max(1.0),
+            "{label}: max error {error} at scale {scale}"
+        );
+        Ok(())
+    };
+    let (x, last, mixes, extra) = (
+        rand(&[B, T, C])?,
+        rand(&[B, C])?,
+        rand(&[MIXES, C])?,
+        rand(&[MIXES, B, T, C])?,
+    );
+    let (want, _) = super::rwkv_token_shift(&x, &last, &mixes, Some(&extra))?;
+    let gpu = |t: &Tensor| t.to_device(&device);
+    let (mixed, _) =
+        super::rwkv_token_shift(&gpu(&x)?, &gpu(&last)?, &gpu(&mixes)?, Some(&gpu(&extra)?))?;
+    close("token shift with offsets", &mixed, &want)?;
+
+    let inputs = (0..5)
+        .map(|_| rand(&[B, T, C]))
+        .collect::<inference_tensor::Result<Vec<_>>>()?;
+    let vectors = (0..3)
+        .map(|_| rand(&[C]))
+        .collect::<inference_tensor::Result<Vec<_>>>()?;
+    let state = rand(&[B, H, N, N])?;
+    fn view<'a>(t: &'a [Tensor], v: &'a [Tensor]) -> super::TimeMix6<'a> {
+        super::TimeMix6 {
+            r: &t[0],
+            k: &t[1],
+            v: &t[2],
+            w: &t[3],
+            g: &t[4],
+            u: &v[0],
+            norm_w: &v[1],
+            norm_b: &v[2],
+            norm_eps: NORM_EPS,
+            heads: H,
+            head_dim: N,
+        }
+    }
+    let cpu_state = state.copy()?;
+    let expected = super::rwkv6_time_mix(view(&inputs, &vectors), &cpu_state)?;
+    let all = |t: &[Tensor]| {
+        t.iter()
+            .map(|t| t.to_device(&device))
+            .collect::<inference_tensor::Result<Vec<_>>>()
+    };
+    let (gpu_inputs, gpu_vectors) = (all(&inputs)?, all(&vectors)?);
+    let gpu_state = state.to_device(&device)?;
+    let y = super::rwkv6_time_mix(view(&gpu_inputs, &gpu_vectors), &gpu_state)?;
+    close("rwkv6 time-mix", &y, &expected)?;
+    close("rwkv6 state", &gpu_state, &cpu_state)?;
     Ok(())
 }
 

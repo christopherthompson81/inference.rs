@@ -50,6 +50,7 @@ mod neo_bert;
 mod nomic_bert;
 mod olmo;
 mod paddleocr_vl;
+mod rwkv6;
 mod rwkv7;
 mod starcoder2;
 
@@ -84,6 +85,7 @@ pub use neo_bert::*;
 pub use nomic_bert::*;
 pub use olmo::*;
 pub use paddleocr_vl::*;
+pub use rwkv6::*;
 pub use rwkv7::*;
 pub use starcoder2::*;
 
@@ -96,6 +98,7 @@ inference_nn::boxed_loaders!(
     FalconH1Loader,
     JambaLoader,
     MambaLoader,
+    Rwkv6Loader,
     Rwkv7Loader,
     Mamba2Loader,
     GLM4Loader,

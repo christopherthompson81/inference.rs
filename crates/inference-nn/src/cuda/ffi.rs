@@ -1380,6 +1380,7 @@ inference_tensor::kernel_library! {
             x: *const c_void,
             last: *const c_void,
             mix: *const c_void,
+            extra: *const c_void,
             out: *mut c_void,
             new_last: *mut c_void,
             batch: i32,
@@ -1391,6 +1392,8 @@ inference_tensor::kernel_library! {
         );
         // over `cuda::rwkv::TimeMixParams`
         pub fn rwkv7_time_mix_cuda(params: *const c_void, batch: i32, dtype: i32, stream: i64);
+        // over `cuda::rwkv::Rwkv6TimeMixParams`
+        pub fn rwkv6_time_mix_cuda(params: *const c_void, batch: i32, dtype: i32, stream: i64);
         // chunked SSD prompt scan, over `cuda::ssm::SsdParams`
         pub fn ssd_chunk_length() -> i32;
         pub fn ssd_prepare_cuda(params: *const c_void, stream: i64);

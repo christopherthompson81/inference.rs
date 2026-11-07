@@ -250,6 +250,11 @@ impl SupportedArch for NormalLoaderType {
                     ex!("ai21labs/AI21-Jamba-Mini-1.7"),
                 ],
             },
+            Self::Rwkv6 => ArchMetadata {
+                families: &["RWKV-6"],
+                modalities: m,
+                examples: &[ex!("RWKV/v6-Finch-1B6-HF")],
+            },
             Self::Rwkv7 => ArchMetadata {
                 families: &["RWKV-7"],
                 modalities: m,

@@ -195,6 +195,7 @@ macro_rules! normal_loader_table {
             GptOss { cli: "gpt_oss", hf: "GptOssForCausalLM", model_type: "gpt_oss", loader: GptOssLoader, feature: "models-other" },
             FalconH1 { cli: "falcon_h1", hf: "FalconH1ForCausalLM", model_type: "falcon_h1", loader: FalconH1Loader, feature: "models-other" },
             Jamba { cli: "jamba", hf: "JambaForCausalLM", model_type: "jamba", loader: JambaLoader, feature: "models-other" },
+            Rwkv6 { cli: "rwkv6", hf: "Rwkv6ForCausalLM", model_type: "rwkv6", loader: Rwkv6Loader, feature: "models-other" },
             Rwkv7 { cli: "rwkv7", hf: "RWKV7ForCausalLM", model_type: "rwkv7", loader: Rwkv7Loader, feature: "models-other" },
             Mamba { cli: "mamba", hf: "MambaForCausalLM", model_type: "mamba", loader: MambaLoader, feature: "models-other" },
             FalconMamba { cli: "falcon_mamba", hf: "FalconMambaForCausalLM", model_type: "falcon_mamba", loader: MambaLoader, feature: "models-other" },

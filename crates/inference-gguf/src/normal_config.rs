@@ -255,6 +255,10 @@ pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; NORMAL_LOADER_TYPE_COUN
         loader: NormalLoaderType::Rwkv7,
         build: build_rwkv7,
     },
+    NormalConfigBuilder {
+        loader: NormalLoaderType::Rwkv6,
+        build: build_rwkv6,
+    },
 ];
 
 pub fn synthesize_normal_config(
@@ -2042,6 +2046,39 @@ fn build_rwkv7(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     Ok(JsonValue::Object(config))
 }
 
+// the converter divides the output weights by 2^(layer / n), which `rescaled_every` tells the model to undo
+fn build_rwkv6(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
+    let mut config = JsonMap::new();
+    config.insert("vocab_size".into(), json!(metadata.vocab_size()?));
+    config.insert(
+        "hidden_size".into(),
+        json!(metadata.required_usize("embedding_length")?),
+    );
+    config.insert(
+        "num_hidden_layers".into(),
+        json!(metadata.required_usize("block_count")?),
+    );
+    config.insert(
+        "head_size".into(),
+        json!(metadata.required_usize("wkv.head_size")?),
+    );
+    config.insert(
+        "intermediate_size".into(),
+        json!(metadata.required_uniform_usize("feed_forward_length")?),
+    );
+    config.insert("layer_norm_epsilon".into(), json!(metadata.norm_epsilon()?));
+    config.insert(
+        "rescaled_every".into(),
+        json!(metadata.optional_usize("rescale_every_n_layers")?),
+    );
+    config.insert(
+        "tie_word_embeddings".into(),
+        json!(metadata.tie_word_embeddings()),
+    );
+    config.insert("quantization_config".into(), JsonValue::Null);
+    Ok(JsonValue::Object(config))
+}
+
 fn build_olmoe(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     reject_unsupported_rope_scaling(metadata, "OLMoE")?;
     let intermediate_size = match metadata.optional_usize("expert_feed_forward_length")? {
@@ -3514,8 +3551,8 @@ mod tests {
         pub use inference_models_llama::{llama, mistral, mixtral, smollm3};
         pub use inference_models_other::{
             deepseek, ernie4_5, falcon_h1, glm4, glm4_moe, glm4_moe_lite, gpt_oss, granite,
-            hunyuan_v1_dense, hunyuan_v1_moe, jamba, lfm2, mamba, mamba2, nemotron_h, olmo, rwkv7,
-            starcoder2,
+            hunyuan_v1_dense, hunyuan_v1_moe, jamba, lfm2, mamba, mamba2, nemotron_h, olmo, rwkv6,
+            rwkv7, starcoder2,
         };
         pub use inference_models_phi::{phi2, phi3, phi3_5_moe};
         pub use inference_models_qwen::{qwen1, qwen2, qwen2_moe, qwen3, qwen3_moe, qwen3_next};
@@ -3756,6 +3793,10 @@ mod tests {
                     .map(str::to_string),
             );
         }
+        if matches!(loader, NormalLoaderType::Rwkv6) {
+            insert_u32(&mut metadata, architecture, "wkv.head_size", 64);
+            tensors.push("blk.0.time_mix_lerp_fused.weight".to_string());
+        }
         if matches!(loader, NormalLoaderType::Rwkv7) {
             insert_u32(&mut metadata, architecture, "wkv.head_size", 64);
             for suffix in [
@@ -3974,6 +4015,9 @@ mod tests {
             }
             NormalLoaderType::Rwkv7 => {
                 assert_deserializes(loader, config, models::rwkv7::Config::from_json)
+            }
+            NormalLoaderType::Rwkv6 => {
+                assert_deserializes(loader, config, models::rwkv6::Config::from_json)
             }
             NormalLoaderType::GptOss => {
                 assert_deserializes(loader, config, models::gpt_oss::Config::from_json)
