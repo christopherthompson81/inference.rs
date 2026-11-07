@@ -34,7 +34,7 @@ use inference_webui::{UI_ROUTE, UiOptions};
 
 const MEBIBYTE_BYTES: usize = 1024 * 1024;
 // the device `--vulkan` asks for; the Vulkan backend drives one
-const VULKAN_DEVICE: &str = "vulkan:0";
+pub(crate) const VULKAN_DEVICE: &str = "vulkan:0";
 
 /// Run the HTTP server with the specified model
 #[allow(clippy::too_many_arguments)]

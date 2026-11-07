@@ -192,6 +192,7 @@ fn unary_op(name: &str) -> Option<MapOp> {
         "sqr" => MapOp::Sqr,
         "sqrt" => MapOp::Sqrt,
         "gelu" => MapOp::Gelu,
+        "gelu_erf" => MapOp::GeluErf,
         "silu" => MapOp::Silu,
         "abs" => MapOp::Abs,
         "ceil" => MapOp::Ceil,
@@ -1737,6 +1738,9 @@ mod tests {
 
     // the GPU's exp, tanh and the like round differently from the CPU's
     const TOLERANCE: f32 = 1e-5;
+    // erf GELU from -10 to 10 in steps of 0.01: both tails and the bend between
+    const GELU_ERF_STEPS: f32 = 1000.;
+    const GELU_ERF_STEP: f64 = 0.01;
     // a 2688-term dot product summed in another order
     const DOT_TOLERANCE: f32 = 1e-3;
     // attention with f16 queries, keys, values and probabilities (f32 sums): unit-variance inputs land within ~1.5e-3
@@ -1800,6 +1804,9 @@ mod tests {
         assert_same(&view(&va)?.silu()?, &view(&a)?.silu()?)?;
         assert_same(&view(&va)?.tanh()?, &view(&a)?.tanh()?)?;
         assert_same(&view(&va)?.relu()?, &view(&a)?.relu()?)?;
+        let wide = Tensor::arange(-GELU_ERF_STEPS, GELU_ERF_STEPS, &Device::Cpu)?
+            .affine(GELU_ERF_STEP, 0.)?;
+        assert_same(&wide.to_device(&vk)?.gelu_erf()?, &wide.gelu_erf()?)?;
         assert_same(&((view(&va)? * 3.)? + 0.25)?, &((view(&a)? * 3.)? + 0.25)?)?;
         let vz = Tensor::zeros((4, 6), DType::F32, &vk)?;
         let z = Tensor::zeros((4, 6), DType::F32, &Device::Cpu)?;

@@ -124,12 +124,13 @@ impl ParamsConvTranspose2D {
 
 impl Tensor {
     // CUDA runs many small groups in one direct kernel (few wide groups are faster as per-group GEMMs, 3090: 2x256 ch
-    // 10x slower direct, 32x16 7x faster); CPU only depthwise (256 ch 36x faster, 8x8 ch 3x slower); the conv
-    // backprop ops carry no group count, so tracked graphs split
+    // 10x slower direct, 32x16 7x faster); CPU only depthwise (256 ch 36x faster, 8x8 ch 3x slower), and Vulkan as the
+    // CPU, whose kernels its convs run on (a group a call read the whole input back each time); the conv backprop ops
+    // carry no group count, so tracked graphs split
     fn native_grouped_conv(&self, kernel: &Self, groups: usize, c_in_per_group: usize) -> bool {
         let native = match self.device() {
             Device::Cuda(_) => groups >= c_in_per_group,
-            Device::Cpu => c_in_per_group == 1,
+            Device::Cpu | Device::Vulkan(_) => c_in_per_group == 1,
             _ => false,
         };
         native && !self.track_op() && !kernel.track_op()
