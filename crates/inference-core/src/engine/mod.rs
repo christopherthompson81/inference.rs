@@ -697,7 +697,7 @@ impl Engine {
                 pipeline.supports_packed_prefill(),
                 pipeline.cache().is_hybrid(),
                 pipeline.device().is_cuda() && !pipeline.whole_prompt(),
-                pipeline.cache().is_hybrid(),
+                pipeline.cache().is_hybrid() && !pipeline.captures_recurrent_state_mid_chunk(),
                 pipeline.speculative_prefix_checkpoint_policy(),
             )
         };
@@ -739,7 +739,7 @@ impl Engine {
 
         let has_paged_attention = get_mut_arcmutex!(scheduler).kv_cache_manager().is_some();
         let paged_block_retention = if has_paged_attention
-            && prompt_chunks_require_block_alignment
+            && prefill_has_per_sequence_state
             && !no_prefix_cache
             && prefix_cache_n > 0
         {

@@ -160,6 +160,25 @@ impl DeviceMappedModelLoader for NemotronHLoader {
             weight_pack_factor,
         )
     }
+    // the widest MoE layer's (a Puzzle checkpoint prunes them unevenly); a dense model's experts never leave the GPU
+    fn prompt_activation_bytes_per_token(&self, config: &str) -> Result<Option<usize>> {
+        let cfg = Config::from_json(config)?;
+        Ok(cfg
+            .layer_kinds()?
+            .into_iter()
+            .enumerate()
+            .filter(|(_, kind)| *kind == LayerKind::Moe)
+            .map(|(layer, _)| {
+                let spec = cfg.moe_spec(layer);
+                inference_nn::loaders::moe_prompt_activation_bytes_per_token(
+                    spec.top_k,
+                    spec.latent_size.unwrap_or(cfg.hidden_size),
+                    spec.intermediate_size,
+                    cfg.hidden_size,
+                )
+            })
+            .max())
+    }
     fn layer_sizes_in_bytes(
         &self,
         config: &str,

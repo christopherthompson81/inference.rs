@@ -38,12 +38,6 @@ const FLASH_NEXT_ISQ: &[&str] = &[
 ];
 const FLASH_NEXT_MIXER_ISQ: &str = r"^(language_model\.model|model\.language_model|model)\.hyper_connection_mixer\.(input_mix_weight_down|input_mix_weight_up)\.weight$";
 const MTP_LAYERS: &str = r"^mtp\.layers\.(\d+)";
-// Bytes a prompt token takes in an MoE prefill chunk, per hidden or intermediate value of each routed expert and per
-// hidden value of the residual stream's temporaries: fit to peak memory over 512-8192 token chunks of two models
-// (Qwen3.6-35B-A3B and Qwen3.8-Flash-Next) with offloaded experts
-const PROMPT_ROUTED_HIDDEN_BYTES: usize = 6;
-const PROMPT_ROUTED_INTERMEDIATE_BYTES: usize = 16;
-const PROMPT_RESIDUAL_HIDDEN_BYTES: usize = 40;
 // A dense model's prefill bytes a token: the most peak memory a token took over 512-4096 token chunks of Qwen3.5 0.8B,
 // 9B and 27B (135, 266 and 397 KB against intermediate sizes 3584, 12288 and 17408), covered by base plus slope
 const PROMPT_DENSE_BASE_BYTES: usize = 66 * 1024;
@@ -214,9 +208,12 @@ pub(super) fn prompt_activation_bytes_per_token(cfg: &TextConfig) -> usize {
         return PROMPT_DENSE_BASE_BYTES
             + PROMPT_DENSE_INTERMEDIATE_BYTES * cfg.intermediate_size.unwrap_or_default();
     }
-    let routed = PROMPT_ROUTED_HIDDEN_BYTES * cfg.hidden_size
-        + PROMPT_ROUTED_INTERMEDIATE_BYTES * cfg.moe_intermediate_size;
-    cfg.num_experts_per_tok * routed + PROMPT_RESIDUAL_HIDDEN_BYTES * cfg.hidden_size
+    inference_nn::loaders::moe_prompt_activation_bytes_per_token(
+        cfg.num_experts_per_tok,
+        cfg.hidden_size,
+        cfg.moe_intermediate_size,
+        cfg.hidden_size,
+    )
 }
 
 pub(super) fn mtp_head_elems(cfg: &TextConfig, weight_pack_factor: usize) -> Result<usize> {

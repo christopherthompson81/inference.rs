@@ -19,6 +19,7 @@ use crate::gdn::RecurrentBatchKind;
 use crate::kv_cache::EitherCache;
 use crate::kv_cache::KvCache;
 use crate::kv_cache::NormalCacheType;
+use crate::kv_cache::RecurrentCapturePoint;
 use crate::model::ForwardMaskCache;
 use crate::model::IsqModel;
 use crate::model::ModelForwardContext;
@@ -1307,6 +1308,87 @@ impl MambaLayer {
         self.out_proj.forward(&y.to_dtype(dtype)?)
     }
 
+    // a prefill whose scan also stops after each capture point's tokens: the output and each point's (conv, ssm)
+    // state in the order given; `rows` are each sequence's tokens, along the packed sequence or one batch row apiece
+    fn forward_captured(
+        &self,
+        x: &Tensor,
+        cache: &mut MambaLayerCache,
+        rows: &[Range<usize>],
+        packed: bool,
+        points: &[RecurrentCapturePoint],
+    ) -> Result<(Tensor, Vec<(Tensor, Tensor)>)> {
+        let dtype = x.dtype();
+        let (gate, hidden_states_b_c, dt) = self.projected_parts(x)?;
+        let mut captured: Vec<Option<(Tensor, Tensor)>> = vec![None; points.len()];
+        let mut row_outputs = Vec::with_capacity(rows.len());
+        let mut conv_states = Vec::with_capacity(rows.len());
+        let mut ssm_states = Vec::with_capacity(rows.len());
+        for (state_index, range) in rows.iter().enumerate() {
+            let batch = if packed { 0 } else { state_index };
+            let (hbc, dt) = (
+                hidden_states_b_c.narrow(0, batch, 1)?,
+                dt.narrow(0, batch, 1)?,
+            );
+            let mut segment_cache = MambaLayerCache {
+                conv_state: cache.conv_state.narrow(0, state_index, 1)?,
+                ssm_state: cache.ssm_state.narrow(0, state_index, 1)?,
+            };
+            let mut cuts = points
+                .iter()
+                .enumerate()
+                .filter(|(_, point)| point.row == state_index)
+                .map(|(i, point)| (point.offset, Some(i)))
+                .collect::<Vec<_>>();
+            if let Some((offset, _)) = cuts
+                .iter()
+                .find(|(offset, _)| *offset == 0 || *offset >= range.len())
+            {
+                inference_tensor::bail!(
+                    "a Mamba capture after {offset} of a {}-token sequence is not inside it",
+                    range.len()
+                );
+            }
+            cuts.sort_unstable();
+            cuts.push((range.len(), None));
+            let mut start = 0;
+            let mut segments = Vec::with_capacity(cuts.len());
+            for (end, point) in cuts {
+                segments.push(self.forward_full(
+                    &hbc.narrow(1, range.start + start, end - start)?,
+                    &dt.narrow(1, range.start + start, end - start)?,
+                    &mut segment_cache,
+                    1,
+                    end - start,
+                )?);
+                // the scan advances the state it is handed in place, so a capture is a copy
+                if let Some(i) = point {
+                    captured[i] = Some((
+                        segment_cache.conv_state.copy()?,
+                        segment_cache.ssm_state.copy()?,
+                    ));
+                }
+                start = end;
+            }
+            row_outputs.push(Tensor::cat(&segments, 1)?);
+            conv_states.push(segment_cache.conv_state);
+            ssm_states.push(segment_cache.ssm_state);
+        }
+        cache.conv_state = Tensor::cat(&conv_states, 0)?;
+        cache.ssm_state = Tensor::cat(&ssm_states, 0)?;
+        let y = Tensor::cat(&row_outputs, if packed { 1 } else { 0 })?;
+        let y = self.norm.forward(&y, Some(&gate))?;
+        let captured = captured
+            .into_iter()
+            .map(|state| {
+                state.ok_or_else(|| {
+                    inference_tensor::Error::msg("a Mamba capture names no sequence")
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok((self.out_proj.forward(&y.to_dtype(dtype)?)?, captured))
+    }
+
     fn forward_cached(
         &self,
         hidden_states_b_c: &Tensor, // (batch, conv_dim)
@@ -2132,6 +2214,35 @@ impl MambaBlock {
         let x = (scale_tensor(mamba_out, self.residual_multiplier)? + x)?;
         self.mixer_tap.record(&x);
         BlockFfn::residual(self.ffn.as_ref(), x, self.residual_multiplier)
+    }
+
+    // `forward`'s prefill with `MambaLayer::forward_captured`'s states, the conv states in the cache's dtype
+    fn forward_captured(
+        &self,
+        x: &Tensor,
+        cache: &mut MambaLayerCache,
+        rows: &[Range<usize>],
+        packed: bool,
+        points: &[RecurrentCapturePoint],
+    ) -> Result<(Tensor, Vec<(Tensor, Tensor)>)> {
+        let normed = self.rms_1.forward(x)?;
+        let conv_dtype = cache.conv_state.dtype();
+        let mut captured = Vec::new();
+        let mamba_out = in_activation_dtype(cache, normed.dtype(), |cache| {
+            let (out, states) = self
+                .mamba
+                .forward_captured(&normed, cache, rows, packed, points)?;
+            captured = states;
+            Ok(out)
+        })?;
+        let captured = captured
+            .into_iter()
+            .map(|(conv, ssm)| Ok((conv.to_dtype(conv_dtype)?, ssm)))
+            .collect::<Result<Vec<_>>>()?;
+        let x = (scale_tensor(mamba_out, self.residual_multiplier)? + x)?;
+        self.mixer_tap.record(&x);
+        let out = BlockFfn::residual(self.ffn.as_ref(), x, self.residual_multiplier)?;
+        Ok((out, captured))
     }
 
     fn load(vb_m: &ShardedVarBuilder, layout: &HybridLayout, load: BlockLoad<'_>) -> Result<Self> {
@@ -3637,6 +3748,7 @@ impl GraniteMoeHybrid {
                                     "Hybrid cache layer {layer_idx} is missing recurrent state indices"
                                 ))
                             })?;
+                        let captures = pipeline_cache.recurrent_captures_for_layer(layer_idx)?;
                         let Some(HybridLayerCache::Recurrent(pool)) =
                             pipeline_cache.get_mut(layer_idx)
                         else {
@@ -3673,7 +3785,37 @@ impl GraniteMoeHybrid {
                             ssm_state: ssm_state.clone(),
                         };
 
-                        x = if let Some(query_lens) = packed_query_lens.as_deref() {
+                        x = if !captures.is_empty() {
+                            if stash_replays
+                                || matches!(metadata.batch_kind(), RecurrentBatchKind::Decode)
+                            {
+                                inference_tensor::bail!("Mamba captures run only in a prompt pass");
+                            }
+                            let (rows, packed) = match packed_query_lens.as_deref() {
+                                Some(query_lens) => {
+                                    let (batch, tokens, _) = x.dims3()?;
+                                    (packed_mamba_query_ranges(batch, tokens, query_lens)?, true)
+                                }
+                                None => {
+                                    let (batch, tokens, _) = x.dims3()?;
+                                    (vec![0..tokens; batch], false)
+                                }
+                            };
+                            let points =
+                                captures.iter().map(|(point, _)| *point).collect::<Vec<_>>();
+                            let (out, states) = block.forward_captured(
+                                &x,
+                                &mut temp_cache,
+                                &rows,
+                                packed,
+                                &points,
+                            )?;
+                            for ((_, slot), (conv, ssm)) in captures.iter().zip(states) {
+                                pool.scatter_conv_state(slot, &conv)?;
+                                pool.scatter_recurrent_state(slot, &ssm)?;
+                            }
+                            out
+                        } else if let Some(query_lens) = packed_query_lens.as_deref() {
                             block.forward_packed_prefill(&x, &mut temp_cache, query_lens)?
                         } else if stash_replays {
                             // the CUDA scan advances the state it is handed in place, so the replay's starting
@@ -4227,6 +4369,9 @@ impl NormalModel for GraniteMoeHybrid {
                     Some(HybridMoe::Granite(_)) => false,
                     Some(HybridMoe::Nemotron(moe)) => moe.experts.decode_is_device_only(),
                 })
+    }
+    fn captures_recurrent_state_mid_chunk(&self) -> bool {
+        self.layer_types.contains(&GraniteLayerType::Mamba)
     }
     fn supports_packed_prefill(&self) -> bool {
         !self.has_sinks

@@ -527,6 +527,14 @@ pub struct RecurrentSnapshotSlot {
     id: u64,
 }
 
+/// Where in a forward's tokens a recurrent state is captured: after `offset` tokens of batch row `row` (a packed
+/// prefill's `row`th sequence).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecurrentCapturePoint {
+    pub row: usize,
+    pub offset: usize,
+}
+
 impl RecurrentSnapshotSlot {
     /// A handle no pool issued, for tests of code that only stores handles.
     #[doc(hidden)]
@@ -1141,6 +1149,9 @@ pub struct HybridCache {
     // Scratch slot CUDA graph pad rows write into; allocated on first use, dropped on reset
     graph_pad_slot: Option<usize>,
     next_snapshot_id: u64,
+    // the next forward's mid-chunk captures, each with its snapshot slot's physical index
+    recurrent_captures: Vec<(RecurrentCapturePoint, u32)>,
+    device_capture_indices: Vec<(Device, Vec<Tensor>)>,
 }
 
 impl HybridCache {
@@ -1216,6 +1227,8 @@ impl HybridCache {
             recurrent_capacity_floor: INITIAL_POOL_CAPACITY,
             graph_pad_slot: None,
             next_snapshot_id: 0,
+            recurrent_captures: Vec::new(),
+            device_capture_indices: Vec::new(),
         };
         cache.publish_recurrent_slot_metrics();
         Ok(cache)
@@ -2214,6 +2227,20 @@ impl HybridCache {
     ) -> Result<Option<RecurrentSnapshotSlot>> {
         self.ensure_recurrent_slot_owned(slot_idx, RecurrentSlotOwner::Sequence(sequence_id))?;
         self.ensure_recurrent_slot_initialized(slot_idx)?;
+        let Some(snapshot) = self.reserve_recurrent_snapshot()? else {
+            return Ok(None);
+        };
+        let (from, to) = (
+            self.active_physical_slot(slot_idx)?,
+            self.physical_slot(snapshot.slot, 0)?,
+        );
+        self.copy_recurrent_row(from, to)?;
+        Ok(Some(snapshot))
+    }
+
+    /// A snapshot slot for a forward to write a mid-chunk state into (`set_recurrent_captures`); `None` when every slot
+    /// is a sequence's.
+    pub fn reserve_recurrent_snapshot(&mut self) -> Result<Option<RecurrentSnapshotSlot>> {
         let target = match self.slot_owners.iter().position(Option::is_none) {
             Some(target) => target,
             None => match self.oldest_snapshot_slot() {
@@ -2235,14 +2262,70 @@ impl HybridCache {
         self.pristine_zero_slots[target] = false;
         self.last_released_sequence_owners[target] = None;
         self.committed_lanes[target] = 0;
-        let (from, to) = (
-            self.active_physical_slot(slot_idx)?,
-            self.physical_slot(target, 0)?,
-        );
-        self.copy_recurrent_row(from, to)?;
         self.initialized_slots[target] = true;
         self.publish_recurrent_slot_metrics();
         Ok(Some(RecurrentSnapshotSlot { slot: target, id }))
+    }
+
+    /// States the next forward writes into snapshot slots partway through its tokens, replacing any set before.
+    pub fn set_recurrent_captures(
+        &mut self,
+        captures: &[(RecurrentCapturePoint, RecurrentSnapshotSlot)],
+    ) -> Result<()> {
+        self.recurrent_captures = captures
+            .iter()
+            .map(|(point, snapshot)| {
+                let slot = u32::try_from(self.physical_slot(snapshot.slot, 0)?)
+                    .map_err(|_| inference_tensor::Error::msg("recurrent slot exceeds u32"))?;
+                Ok((*point, slot))
+            })
+            .collect::<Result<_>>()?;
+        self.device_capture_indices.clear();
+        Ok(())
+    }
+
+    pub fn clear_recurrent_captures(&mut self) {
+        self.recurrent_captures.clear();
+        self.device_capture_indices.clear();
+    }
+
+    /// The pending captures with each one's physical slot as a one-element index on `layer`'s device, in the order
+    /// they were set.
+    pub fn recurrent_captures_for_layer(
+        &mut self,
+        layer: usize,
+    ) -> Result<Vec<(RecurrentCapturePoint, Tensor)>> {
+        if self.recurrent_captures.is_empty() {
+            return Ok(Vec::new());
+        }
+        let device = match self.caches.get(layer) {
+            Some(HybridLayerCache::Recurrent(pool)) => pool.device().clone(),
+            _ => return Ok(Vec::new()),
+        };
+        if let Some((_, indices)) = self
+            .device_capture_indices
+            .iter()
+            .find(|(cached, _)| cached.same_device(&device))
+        {
+            return Ok(self
+                .recurrent_captures
+                .iter()
+                .map(|(point, _)| *point)
+                .zip(indices.iter().cloned())
+                .collect());
+        }
+        let indices = self
+            .recurrent_captures
+            .iter()
+            .map(|(_, slot)| Tensor::from_vec(vec![*slot], (1,), &device))
+            .collect::<Result<Vec<_>>>()?;
+        self.device_capture_indices.push((device, indices.clone()));
+        Ok(self
+            .recurrent_captures
+            .iter()
+            .map(|(point, _)| *point)
+            .zip(indices)
+            .collect())
     }
 
     /// A held snapshot's state copied to the host, one entry per recurrent layer; `None` once the pool reclaimed it.

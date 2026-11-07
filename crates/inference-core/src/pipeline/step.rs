@@ -141,8 +141,16 @@ impl RowOutputs {
 struct StepInput {
     processed: anyhow::Result<InputProcessorOutput>,
     recurrent_boundaries: Vec<(usize, usize)>,
+    recurrent_captures: Vec<RecurrentCapture>,
     prompt_chunk: Option<SpeculativePromptChunk>,
     computed_updates: Vec<(usize, usize)>,
+}
+
+/// A recurrent checkpoint inside a row's prompt chunk, which the forward captures as it passes.
+struct RecurrentCapture {
+    seq_idx: usize,
+    chunk_start: usize,
+    boundary: usize,
 }
 
 /// A paged step's forwards, before sampling.
@@ -389,6 +397,7 @@ impl dyn Pipeline {
                 vec![StepInput {
                     processed: self.process_step_inputs(input_seqs, ctx, Some(metadata)),
                     recurrent_boundaries: Vec::new(),
+                    recurrent_captures: Vec::new(),
                     prompt_chunk,
                     computed_updates: Vec::new(),
                 }]
@@ -558,6 +567,7 @@ impl dyn Pipeline {
             scheduler_visible_is_final,
         } = prompt;
         let hybrid_recurrent = self.cache().is_hybrid();
+        let captures_mid_chunk = scheduler_visible && self.captures_recurrent_state_mid_chunk();
         let prefix_policy = self.speculative_prefix_checkpoint_policy();
         let originals = input_seqs
             .iter()
@@ -602,6 +612,7 @@ impl dyn Pipeline {
             );
 
             let mut recurrent_boundaries = Vec::new();
+            let mut recurrent_captures = Vec::new();
             let mut prompt_chunk = SpeculativePromptChunk {
                 rows: Vec::with_capacity(active_indices.len()),
                 is_final_prompt_chunk,
@@ -613,6 +624,18 @@ impl dyn Pipeline {
                 seq.set_prefill_toks(originals[seq_idx].0[..chunk.end].to_vec());
                 if checkpoint_boundaries[seq_idx].contains(&chunk.end) {
                     recurrent_boundaries.push((seq_idx, chunk.end));
+                }
+                if captures_mid_chunk {
+                    recurrent_captures.extend(
+                        checkpoint_boundaries[seq_idx]
+                            .iter()
+                            .filter(|&&boundary| chunk.start < boundary && boundary < chunk.end)
+                            .map(|&boundary| RecurrentCapture {
+                                seq_idx,
+                                chunk_start: chunk.start,
+                                boundary,
+                            }),
+                    );
                 }
                 prompt_chunk.rows.push(SpeculativePromptRow {
                     seq_idx,
@@ -653,6 +676,7 @@ impl dyn Pipeline {
             inputs.push(StepInput {
                 processed,
                 recurrent_boundaries,
+                recurrent_captures,
                 prompt_chunk: Some(prompt_chunk),
                 computed_updates,
             });
@@ -665,6 +689,37 @@ impl dyn Pipeline {
             seq.set_prefill_toks(tokens.clone());
         }
         inputs
+    }
+
+    // a snapshot slot for each checkpoint inside a row's chunk, handed to the forward; `(seq_idx, boundary, slot)`
+    // for the ones that got a slot
+    fn install_recurrent_captures(
+        &self,
+        captures: &[RecurrentCapture],
+        seq_indices: &[usize],
+    ) -> inference_tensor::Result<Vec<(usize, usize, crate::kv_cache::RecurrentSnapshotSlot)>> {
+        if captures.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut hybrid = self.cache().hybrid();
+        let mut points = Vec::with_capacity(captures.len());
+        let mut captured = Vec::with_capacity(captures.len());
+        for capture in captures {
+            let Some(row) = seq_indices.iter().position(|&idx| idx == capture.seq_idx) else {
+                continue;
+            };
+            let Some(snapshot) = hybrid.reserve_recurrent_snapshot()? else {
+                break;
+            };
+            let point = crate::kv_cache::RecurrentCapturePoint {
+                row,
+                offset: capture.boundary - capture.chunk_start,
+            };
+            points.push((point, snapshot));
+            captured.push((capture.seq_idx, capture.boundary, snapshot));
+        }
+        hybrid.set_recurrent_captures(&points)?;
+        Ok(captured)
     }
 
     fn install_recurrent_slots(
@@ -712,6 +767,7 @@ impl dyn Pipeline {
             let StepInput {
                 processed,
                 recurrent_boundaries,
+                recurrent_captures,
                 prompt_chunk,
                 computed_updates,
             } = step_input;
@@ -728,16 +784,32 @@ impl dyn Pipeline {
             if self.cache().is_hybrid() {
                 self.install_recurrent_slots(input_seqs, &seq_indices)?;
             }
+            let captured = self.install_recurrent_captures(&recurrent_captures, &seq_indices)?;
             let start = Instant::now();
             #[cfg(feature = "cuda")]
             let forward = if cuda_decode_lookahead {
-                self.forward_step(inputs, ctx.return_raw_logits)?
+                self.forward_step(inputs, ctx.return_raw_logits)
             } else {
-                ForwardStepResult::eager(self.forward_inputs(inputs, ctx.return_raw_logits)?)
+                self.forward_inputs(inputs, ctx.return_raw_logits)
+                    .map(ForwardStepResult::eager)
             };
             #[cfg(not(feature = "cuda"))]
-            let forward =
-                ForwardStepResult::eager(self.forward_inputs(inputs, ctx.return_raw_logits)?);
+            let forward = self
+                .forward_inputs(inputs, ctx.return_raw_logits)
+                .map(ForwardStepResult::eager);
+            if !captured.is_empty() {
+                self.cache().hybrid().clear_recurrent_captures();
+            }
+            let forward = match forward {
+                Ok(forward) => forward,
+                Err(err) => {
+                    let mut hybrid = self.cache().hybrid();
+                    for (_, _, snapshot) in captured {
+                        hybrid.release_recurrent_snapshot(snapshot)?;
+                    }
+                    return Err(err);
+                }
+            };
             #[cfg(feature = "cuda")]
             let mut cuda_decode = forward.cuda_decode;
             let result = forward
@@ -758,6 +830,17 @@ impl dyn Pipeline {
                     speculative_metadata.block_size,
                     end,
                     true,
+                    None,
+                )?;
+            }
+            for (seq_idx, boundary, snapshot) in captured {
+                self.snapshot_paged_recurrent_prefix(
+                    &*input_seqs[seq_idx],
+                    ctx.prefix_cacher,
+                    speculative_metadata.block_size,
+                    boundary,
+                    true,
+                    Some(snapshot),
                 )?;
             }
 

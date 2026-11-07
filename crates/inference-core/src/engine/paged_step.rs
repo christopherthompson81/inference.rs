@@ -705,6 +705,7 @@ impl Engine {
                 block_size,
                 encoded_len,
                 !decode,
+                None,
             ) {
                 tracing::warn!(
                     "Failed snapshotting recurrent prefix for sequence {}: {e}",
