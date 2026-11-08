@@ -1,0 +1,9 @@
+#version 450
+// head size 256 (8 query heads a kv head at most): paged_decode_main.glsl over f16 caches.
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define CACHE_F16
+#define DECODE_MAX_HEAD4 64
+#define DECODE_MAX_GROUP 8
+#include "paged_decode_main.glsl"

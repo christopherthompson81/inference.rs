@@ -135,6 +135,9 @@ kernels! {
     penalize: PENALIZE, ops::PENALIZE_BINDINGS, ops::PENALIZE_PUSH_BYTES;
     paged_prefill_quant: PAGED_PREFILL_QUANT, ops::PAGED_PREFILL_BINDINGS, ops::PAGED_PREFILL_PUSH_BYTES;
     paged_decode_quant: PAGED_DECODE_QUANT, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
+    paged_decode_h256: PAGED_DECODE_H256, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
+    paged_decode_h256_f16: PAGED_DECODE_H256_F16, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
+    paged_decode_h256_quant: PAGED_DECODE_H256_QUANT, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
     paged_cache_write_quant: PAGED_CACHE_WRITE_QUANT, ops::PAGED_WRITE_BINDINGS, ops::PAGED_WRITE_QUANT_PUSH_BYTES;
     hadamard_32: HADAMARD_32, ops::HADAMARD_BINDINGS, ops::HADAMARD_PUSH_BYTES;
 }
@@ -150,12 +153,14 @@ impl Kernels {
     }
 
     pub(crate) fn paged_decode(&self, shape: ops::CacheShape) -> &Pipeline {
-        if shape.quant.is_some() {
-            &self.paged_decode_quant
-        } else if shape.f16 {
-            &self.paged_decode_f16
-        } else {
-            &self.paged_decode
+        let wide = shape.head_size > ops::MAX_PAGED_NARROW_HEAD;
+        match (shape.quant.is_some(), shape.f16, wide) {
+            (true, _, false) => &self.paged_decode_quant,
+            (true, _, true) => &self.paged_decode_h256_quant,
+            (false, true, false) => &self.paged_decode_f16,
+            (false, true, true) => &self.paged_decode_h256_f16,
+            (false, false, false) => &self.paged_decode,
+            (false, false, true) => &self.paged_decode_h256,
         }
     }
 

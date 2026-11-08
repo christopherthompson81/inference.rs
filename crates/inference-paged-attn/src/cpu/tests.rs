@@ -260,21 +260,27 @@ fn copy_blocks_duplicates_the_source_block() -> Result<()> {
 }
 
 // Vulkan's cache writes and decode attention against the CPU's: the same rows written to both caches, then one query
-// a sequence through block tables that skip around the cache
+// a sequence through block tables that skip around the cache, at head 64 and at Qwen3.5's 256 (its wide kernel), 4
+// and 8 query heads a kv head
 #[test]
 fn vulkan_paged_attention_matches_the_cpu() -> Result<()> {
     let Ok(vk) = Device::new_vulkan(0) else {
         return Ok(());
     };
+    for (heads, head) in [(4usize, 64usize), (8, 256), (16, 256)] {
+        vulkan_paged_attention_case(&vk, heads, head)?;
+    }
+    Ok(())
+}
+
+fn vulkan_paged_attention_case(vk: &Device, heads: usize, head: usize) -> Result<()> {
     const BLOCKS: usize = 6;
     const BLOCK: usize = 4;
     const KV_HEADS: usize = 2;
-    const HEADS: usize = 4;
-    const HEAD: usize = 64;
     const X: usize = 4;
     const TOKENS: usize = 13;
     let rows = |scale: f64| -> Result<Tensor> {
-        Tensor::randn(0f32, 1., (TOKENS, KV_HEADS, HEAD), &Device::Cpu)? * scale
+        Tensor::randn(0f32, 1., (TOKENS, KV_HEADS, head), &Device::Cpu)? * scale
     };
     let (key, value) = (rows(1.0)?, rows(0.5)?);
     // seq 0 fills blocks 4 and 1 (tokens 0..7), seq 1 blocks 2 and 5 (6 tokens), one slot skipped
@@ -286,21 +292,21 @@ fn vulkan_paged_attention_matches_the_cpu() -> Result<()> {
     let slots = Tensor::new(slots.as_slice(), &Device::Cpu)?;
     let caches = |device: &Device| -> Result<(Tensor, Tensor)> {
         Ok((
-            Tensor::zeros((BLOCKS, KV_HEADS, HEAD / X, BLOCK, X), DType::F32, device)?,
-            Tensor::zeros((BLOCKS, KV_HEADS, HEAD, BLOCK), DType::F32, device)?,
+            Tensor::zeros((BLOCKS, KV_HEADS, head / X, BLOCK, X), DType::F32, device)?,
+            Tensor::zeros((BLOCKS, KV_HEADS, head, BLOCK), DType::F32, device)?,
         ))
     };
     let (kc, vc) = caches(&Device::Cpu)?;
-    let (vkc, vvc) = caches(&vk)?;
+    let (vkc, vvc) = caches(vk)?;
     reshape_and_cache(&key, &value, None, None, &kc, &vc, &slots)?;
     reshape_and_cache(
-        &key.to_device(&vk)?,
-        &value.to_device(&vk)?,
+        &key.to_device(vk)?,
+        &value.to_device(vk)?,
         None,
         None,
         &vkc,
         &vvc,
-        &slots.to_device(&vk)?,
+        &slots.to_device(vk)?,
     )?;
     assert_eq!(
         vkc.flatten_all()?.to_vec1::<f32>()?,
@@ -310,21 +316,21 @@ fn vulkan_paged_attention_matches_the_cpu() -> Result<()> {
         vvc.flatten_all()?.to_vec1::<f32>()?,
         vc.flatten_all()?.to_vec1::<f32>()?
     );
-    let q = Tensor::randn(0f32, 1., (2, HEADS, HEAD), &Device::Cpu)?;
+    let q = Tensor::randn(0f32, 1., (2, heads, head), &Device::Cpu)?;
     let tables = Tensor::new(&[[4u32, 1], [2, 5]], &Device::Cpu)?;
     let lens = Tensor::new(&[7u32, 5], &Device::Cpu)?;
-    let scale = 1.0 / (HEAD as f32).sqrt();
+    let scale = 1.0 / (head as f32).sqrt();
     let want = paged_attention(
         &q, None, None, &kc, &vc, &tables, &lens, None, 7, scale, NO_SOFTCAP, None,
     )?;
     let got = paged_attention(
-        &q.to_device(&vk)?,
+        &q.to_device(vk)?,
         None,
         None,
         &vkc,
         &vvc,
-        &tables.to_device(&vk)?,
-        &lens.to_device(&vk)?,
+        &tables.to_device(vk)?,
+        &lens.to_device(vk)?,
         None,
         7,
         scale,

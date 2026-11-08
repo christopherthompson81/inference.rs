@@ -1052,8 +1052,9 @@ pub(crate) const PAGED_REDUCE_PUSH_BYTES: u32 = 3 * 4;
 // the decode shader's geometry: the positions a workgroup takes, a tile of whole blocks, its threads, the query heads
 // a kv head serves and those a value thread sums, and the cache's vec4 rows (x)
 const PAGED_CHUNK: usize = 64;
-// the shared tiles' head size, sized for occupancy
-const MAX_PAGED_HEAD: usize = 128;
+// the shared tiles' head size, sized for occupancy; decode has a wide build to MAX_PAGED_WIDE_HEAD (Qwen3.5's 256)
+pub(crate) const MAX_PAGED_NARROW_HEAD: usize = 128;
+const MAX_PAGED_WIDE_HEAD: usize = 256;
 // the partials one piece of a call holds; many queries (an MTP head reading a whole prompt) run in pieces
 const PAGED_PARTIALS_BYTES: usize = 256 << 20;
 const PAGED_TILE: usize = 32;
@@ -1299,7 +1300,7 @@ impl Recorder<'_> {
         let s = op.shape;
         let group = op.heads / s.kv_heads.max(1);
         if s.head_size == 0
-            || s.head_size > MAX_PAGED_HEAD
+            || s.head_size > MAX_PAGED_NARROW_HEAD
             || !s.head_size.is_multiple_of(2 * PAGED_X)
             || !s.readable()
             || s.kv_heads == 0
@@ -1395,7 +1396,7 @@ impl Recorder<'_> {
         let group = op.heads / s.kv_heads.max(1);
         let chunks = op.max_context.div_ceil(PAGED_CHUNK).max(1);
         if s.head_size == 0
-            || s.head_size > MAX_PAGED_HEAD
+            || s.head_size > MAX_PAGED_WIDE_HEAD
             || !PAGED_THREADS.is_multiple_of(s.head_size)
             || !s.readable()
             || s.kv_heads == 0
