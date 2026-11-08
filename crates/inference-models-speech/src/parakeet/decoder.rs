@@ -22,7 +22,8 @@ pub struct Emission {
 }
 
 // a weight `(n, k)` the decoder multiplies a row or a beam's rows at a time: on the CPU inside the model's bf16 scope,
-// through a bf16 copy made at its first product (the f32 LSTM and joint had streamed 47 MB from memory a token)
+// on any CPU (the copy widens to f32 for its products), through a bf16 copy made at its first product (the f32 LSTM
+// and joint had streamed 47 MB from memory a token)
 struct DecodeWeight {
     weight: Tensor,
     bf16: OnceLock<Bf16RowWeights>,
@@ -37,9 +38,7 @@ impl DecodeWeight {
     }
 
     fn matmul_t(&self, x: &Tensor) -> Result<Tensor> {
-        if !(x.device().is_cpu()
-            && x.dtype() == DType::F32
-            && inference_tensor::cpu::bf16_enabled())
+        if !(x.device().is_cpu() && x.dtype() == DType::F32 && inference_tensor::cpu::bf16_scope())
         {
             return x.matmul(&self.weight.t()?);
         }

@@ -447,10 +447,26 @@ mod tests {
                 .fold(0f64, f64::max);
             assert!(worst < TOLERANCE, "t {t} head {head}: {worst}");
         }
-        // outside the scope the CPU keeps the composite
-        let x = Tensor::zeros((1, 1, 4, 32), DType::F32, &Device::Cpu)?;
-        let p = Tensor::zeros((1, 1, 7, 32), DType::F32, &Device::Cpu)?;
-        assert!(crate::cpu::rel_pos_attention(&x, &x, &x, &x, &p, 3)?.is_none());
+        // outside the scope the CPU takes the f32 kernel
+        let x = Tensor::randn(0f32, 0.5, (1, 1, 4, 32), &Device::Cpu)?;
+        let p = Tensor::randn(0f32, 0.5, (1, 1, 7, 32), &Device::Cpu)?;
+        let outside = crate::cpu::rel_pos_attention(&x, &x, &x, &x, &p, 3)?.expect("AVX2 takes it");
+        let xs = x.flatten_all()?.to_vec1::<f32>()?;
+        let ps = p.flatten_all()?.to_vec1::<f32>()?;
+        let f32_kernel = crate::cpu_backend::relpos_attn_f32::attention(&super::RelPosAttn {
+            qc: &xs,
+            qp: &xs,
+            k: &xs,
+            v: &xs,
+            p: &ps,
+            heads: 1,
+            t: 4,
+            keys: 4,
+            d: 32,
+            p_rows: 7,
+            pos_base: 3,
+        });
+        assert_eq!(outside.flatten_all()?.to_vec1::<f32>()?, f32_kernel);
         Ok(())
     }
 }

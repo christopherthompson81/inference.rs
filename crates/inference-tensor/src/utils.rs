@@ -416,6 +416,30 @@ pub fn barrier_pool() -> &'static BarrierPool {
     BARRIER_POOL.get_or_init(|| BarrierPool::new(candle_num_threads().saturating_sub(1)))
 }
 
+/// Set to `0` to keep large f32 products on the physical cores' threads on a CPU with SMT.
+pub const GEMM_SMT_ENV: &str = "INFERENCE_CPU_GEMM_SMT";
+
+/// A pool of one thread per logical CPU for large f32 products, on a CPU with more logical CPUs than physical cores
+/// and no `RAYON_NUM_THREADS`: gemm's microkernel leaves FMA slots a sibling thread fills (an i7-10700K's 7564 x 4096
+/// x 1024 ran 356 -> 468 GFLOPS at 16 threads). Everything else keeps the physical cores.
+pub fn smt_gemm_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let off = std::env::var(GEMM_SMT_ENV).is_ok_and(|v| v == "0")
+            || std::env::var_os("RAYON_NUM_THREADS").is_some();
+        let logical = std::thread::available_parallelism().map_or(1, usize::from);
+        if off || logical <= get_num_threads() {
+            return None;
+        }
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(logical)
+            .thread_name(|i| format!("gemm-smt-{i}"))
+            .build()
+            .ok()
+    })
+    .as_ref()
+}
+
 pub fn with_threadpool<F: FnOnce() -> R + Send, R: Send>(f: F) -> R {
     candle_pool().install(f)
 }
