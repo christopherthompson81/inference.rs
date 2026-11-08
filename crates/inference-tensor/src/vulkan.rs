@@ -65,6 +65,7 @@ pub enum BlockKind {
     Q6K,
     Iq4Xs,
     Iq3S,
+    Q3K,
 }
 
 /// A weight of ggml blocks in a Vulkan device's memory: `(experts, rows, cols)`, one expert for a dense matrix.

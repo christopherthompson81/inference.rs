@@ -811,11 +811,35 @@ mod vulkan_block_tests {
                 (state >> 56) as u8
             })
             .collect();
+        // where the type keeps its f16 d: first for the i-quants, last for Q3_K
+        let d_at = if ty == GgufType::Q3K {
+            ty.type_size() - 2
+        } else {
+            0
+        };
         for block in bytes.chunks_exact_mut(ty.type_size()) {
-            let d = half::f16::from_f32(0.002 + f32::from(block[2]) * 1e-5);
-            block[..2].copy_from_slice(&d.to_le_bytes());
+            let d = half::f16::from_f32(0.002 + f32::from(block[3]) * 1e-5);
+            block[d_at..d_at + 2].copy_from_slice(&d.to_le_bytes());
         }
         bytes
+    }
+
+    // ggml's reference values of `bytes`: the raw-GGUF dequantizer for the i-quants, Candle's for the k-quants it holds
+    fn reference(ty: GgufType, bytes: &[u8], dims: (usize, usize, usize)) -> Result<Tensor> {
+        use inference_tensor::quantized::{GgmlDType, QStorage, QTensor};
+        if ty == GgufType::Q3K {
+            let storage = QStorage::from_data(
+                std::borrow::Cow::Borrowed(bytes),
+                &Device::Cpu,
+                GgmlDType::Q3K,
+            )?;
+            return QTensor::new(storage, dims)?.dequantize(&Device::Cpu);
+        }
+        Tensor::from_vec(
+            inference_quant::dequantize_rows(ty, COLS, bytes)?,
+            dims,
+            &Device::Cpu,
+        )
     }
 
     fn assert_close(got: &Tensor, want: &Tensor, what: &str) -> Result<()> {
@@ -833,10 +857,10 @@ mod vulkan_block_tests {
         Ok(())
     }
 
-    // each i-quant's blocks through the expert matvec (decode's few routes and a prompt's many) and the dense matmul
+    // each type's blocks (the i-quants and Q3_K) through the expert matvec (decode's few routes and a prompt's many) and the dense matmul
     // (a step's rows and a prompt's), against ggml's reference dequantization
     #[test]
-    fn vulkan_iq_block_weights_match_their_dequantized_rows() -> Result<()> {
+    fn vulkan_gguf_block_weights_match_their_dequantized_rows() -> Result<()> {
         let Ok(vk) = Device::new_vulkan(0) else {
             return Ok(());
         };
@@ -844,13 +868,10 @@ mod vulkan_block_tests {
         for (ty, kind) in [
             (GgufType::Iq4Xs, BlockKind::Iq4Xs),
             (GgufType::Iq3S, BlockKind::Iq3S),
+            (GgufType::Q3K, BlockKind::Q3K),
         ] {
             let bytes = blocks(ty, EXPERTS * ROWS, 7);
-            let w = Tensor::from_vec(
-                inference_quant::dequantize_rows(ty, COLS, &bytes)?,
-                (EXPERTS, ROWS, COLS),
-                &cpu,
-            )?;
+            let w = reference(ty, &bytes, (EXPERTS, ROWS, COLS))?;
             let stack = BlockWeight::new(&vk, kind, (EXPERTS, ROWS, COLS), &bytes)?;
             for tokens in [3usize, 200] {
                 let k = 2;

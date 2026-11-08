@@ -1,0 +1,6 @@
+#version 450
+// The multi-row matvec over a Q3_K W.
+#extension GL_GOOGLE_include_directive : require
+#include "mat_vec_head.glsl"
+#include "q3_k_int8.glsl"
+#include "mat_vec_main.glsl"

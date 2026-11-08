@@ -191,3 +191,20 @@ Qwen3.6-35B-A3B UD-IQ4_XS: 73 tok/s
 
 Greedy text: both give CUDA's text word for word. Left: residual adds into the next norm (48 a token) and the
 gate and up matvecs as one; model code, ~8% each.
+
+## Run 8 - 2026-11-08 09:40
+
+Q3_K on Vulkan: `q3_k_int8.glsl` (ggml's dequantize_row_q3_K: high bit from hmask, low pairs, a 6-bit scale per 16,
+the -4 as Q6_K carries its -32, through the activation sums), the eight family wrappers, `BlockType::Q3K` (110 bytes),
+and the dtype maps (`GgmlDType::Q3K` for QTensors, `GgufType::Q3K` for raw blocks and the expert stacks). Tests: Q3_K
+joins `vulkan_quantized_matmuls_match_the_dequantized_weight` (QTensor) and the block-weight test (renamed
+`vulkan_gguf_block_weights_match_their_dequantized_rows`, its reference Candle's dequantization for the k-quant);
+an off-by-one offset fails both.
+
+The 35B's next-token-prediction layer (blk.40: Q3_K gate and up, Q4_K down) now runs on the device:
+
+```
+Qwen3.6-35B-A3B UD-IQ4_XS, 3,000-token stream:  plain 72.5 tok/s, --mtp (n_predict 2) 88.9 tok/s
+```
+
+Greedy text with --mtp: CUDA's, word for word.

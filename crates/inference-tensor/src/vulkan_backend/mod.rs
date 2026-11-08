@@ -940,6 +940,7 @@ pub(crate) fn block_type(kind: crate::vulkan::BlockKind) -> BlockType {
         K::Q6K => BlockType::Q6K,
         K::Iq4Xs => BlockType::IQ4XS,
         K::Iq3S => BlockType::IQ3S,
+        K::Q3K => BlockType::Q3K,
     }
 }
 
@@ -2248,6 +2249,7 @@ mod tests {
             GgmlDType::Q4_0,
             GgmlDType::Q4_1,
             GgmlDType::Q5_1,
+            GgmlDType::Q3K,
             GgmlDType::Q4K,
             GgmlDType::Q5K,
             GgmlDType::Q6K,
