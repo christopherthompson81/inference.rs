@@ -48,6 +48,10 @@ shared float partial[ROWS * MAX_M][MAX_SUBGROUPS];
 #include "block_at.glsl"
 
 void main() {
+#ifdef TYPE_SHARED_INIT
+    // the block type's lookup tables into shared memory, before any thread can leave
+    type_shared_init();
+#endif
     uint slot = gl_WorkGroupID.z;
     uint expert = ids[pc.ids_off + slot];
     uint before = 0;

@@ -4,6 +4,18 @@
 // shifted 8 - 2l and 7 - 2l), each four unsigned values, negated where bit j of signs[4i + l] is set.
 #include "iq3s_grid.glsl"
 
+// the grid in shared memory: a constant array indexed per lane serializes on NVIDIA
+shared uint IQ3S_GRID_SH[512];
+
+#define TYPE_SHARED_INIT
+void type_shared_init() {
+    uint threads = gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_WorkGroupSize.z;
+    for (uint i = gl_LocalInvocationIndex; i < 512; i += threads) {
+        IQ3S_GRID_SH[i] = IQ3S_GRID[i];
+    }
+    barrier();
+}
+
 const uint SUPER_VALUES = 256;
 #define SPLIT_HALVES 0
 #define NO_OFFSET
@@ -34,8 +46,8 @@ vec4 unpack_sub(uint base, uint sub, out uvec4 lo, out uvec4 hi) {
         uint i1 = iq3s_byte(base, q) | ((qh << (8 - 2 * l)) & 256u);
         uint i2 = iq3s_byte(base, q + 1) | ((qh << (7 - 2 * l)) & 256u);
         uint signs = iq3s_byte(base, 74 + 4 * sub + l);
-        words[2 * l] = iq3s_signed(IQ3S_GRID[i1], signs);
-        words[2 * l + 1] = iq3s_signed(IQ3S_GRID[i2], signs >> 4);
+        words[2 * l] = iq3s_signed(IQ3S_GRID_SH[i1], signs);
+        words[2 * l + 1] = iq3s_signed(IQ3S_GRID_SH[i2], signs >> 4);
     }
     lo = uvec4(words[0], words[1], words[2], words[3]);
     hi = uvec4(words[4], words[5], words[6], words[7]);

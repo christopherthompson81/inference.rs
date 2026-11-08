@@ -146,3 +146,19 @@ Left: buffer pool churn. With the KV cache sized to the card, free memory sits a
 evicts pooled buffers on each miss: ~800 evictions and ~0.5 s of `vkAllocateMemory` per 2 s of prompt (counters,
 removed). A 4 GB activation reserve (KV 4256 -> 2208 MB) cut evictions to ~60 a window but prefill moved only
 375 -> 460 / 294 tok/s (noisy), and the pool grows into whatever is free. Not changed: it trades KV capacity.
+
+## Run 6 - 2026-11-08 08:10
+
+Question: can the IQ4_XS matvec stream like the K-quants? (Run 4 left it at 245 GB/s, its table lookup four selects
+and a shift a value, about ten instructions against the int8 dot's eight a block.)
+
+A `TYPE_SHARED_INIT` hook at the start of every family's main fills a type's shared tables before any thread can
+leave. IQ4_XS keeps a 256-entry table indexed by a whole byte, both nibbles' int8 values in one read (4 reads a word
+instead of 8 select chains); IQ3_S copies `iq3s_grid` to shared memory, a constant array indexed per lane serializing
+on NVIDIA.
+
+```
+mat_vecs_iq4_xs m=17408 k=5120: 194 -> 93 us (508 GB/s; Q5_K m=10240 k=5120: 58 us, 570 GB/s)
+Qwen3.8-27B IQ4_XS:        prefill 476 / decode 15.7 -> 463 (+-59) / 25.7 tok/s
+Qwen3.6-35B-A3B UD-IQ4_XS: 2038 / 55.7 -> 2508 / 61.7
+```
