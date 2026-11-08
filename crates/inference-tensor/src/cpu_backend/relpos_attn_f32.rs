@@ -53,15 +53,40 @@ mod x86 {
     // 634-664, 512 642)
     const PV_DEPTH: usize = 256;
 
-    // `rows` rows of `d` from `src`, rows past `live` zero
-    fn pad_rows(src: &[f32], live: usize, rows: usize, d: usize) -> Vec<f32> {
+    // a head's `d` columns of an operand whose rows are `width` apart
+    #[derive(Clone, Copy)]
+    struct Head<'a> {
+        src: &'a [f32],
+        width: usize,
+        at: usize,
+        d: usize,
+    }
+
+    impl Head<'_> {
+        fn row(&self, r: usize) -> &[f32] {
+            &self.src[r * self.width + self.at..][..self.d]
+        }
+    }
+
+    // `rows` query rows, each (x + bias) scale, rows past `live` zero
+    fn pad_rows(head: Head, bias: &[f32], scale: f32, live: usize, rows: usize) -> Vec<f32> {
+        let d = head.d;
+        let bias = &bias[head.at..][..d];
         let mut out = vec![0f32; rows * d];
-        out[..live * d].copy_from_slice(&src[..live * d]);
+        out.par_chunks_mut(d)
+            .take(live)
+            .enumerate()
+            .for_each(|(r, row)| {
+                for ((y, x), b) in row.iter_mut().zip(head.row(r)).zip(bias) {
+                    *y = (x + b) * scale;
+                }
+            });
         out
     }
 
-    // NR-column panels over `cols` rows of `src` (row `first + c` for column c, zero outside 0..live): (panels, d, NR)
-    fn pack_panels(src: &[f32], live: usize, first: isize, cols: usize, d: usize) -> Vec<f32> {
+    // NR-column panels over `cols` rows of `head` (row `first + c` for column c, zero outside 0..live): (panels, d, NR)
+    fn pack_panels(head: Head, live: usize, first: isize, cols: usize) -> Vec<f32> {
+        let d = head.d;
         let mut out = vec![0f32; cols * d];
         out.par_chunks_mut(d * NR)
             .enumerate()
@@ -71,7 +96,7 @@ mod x86 {
                     if row < 0 || row as usize >= live {
                         continue;
                     }
-                    for (dd, value) in src[row as usize * d..][..d].iter().enumerate() {
+                    for (dd, value) in head.row(row as usize).iter().enumerate() {
                         out[dd * NR + j] = *value;
                     }
                 }
@@ -80,13 +105,14 @@ mod x86 {
     }
 
     // values as (d / NR, keys, NR): each d-panel's columns, key by key (zero past `live`)
-    fn pack_values(src: &[f32], live: usize, keys: usize, d: usize) -> Vec<f32> {
+    fn pack_values(head: Head, live: usize, keys: usize) -> Vec<f32> {
+        let d = head.d;
         let mut out = vec![0f32; d * keys];
         out.par_chunks_mut(keys * NR)
             .enumerate()
             .for_each(|(panel, out)| {
                 for key in 0..live {
-                    out[key * NR..][..NR].copy_from_slice(&src[key * d + panel * NR..][..NR]);
+                    out[key * NR..][..NR].copy_from_slice(&head.row(key)[panel * NR..][..NR]);
                 }
             });
         out
@@ -242,25 +268,29 @@ mod x86 {
         let shift = (pos_base + 1) % NR;
         let base = shift as isize - FRONT as isize;
         let p_cols = (pos_base + keys_pad + SPAN + FRONT).next_multiple_of(NR);
-        fn per_head(x: &[f32], h: usize, n: usize, d: usize) -> &[f32] {
-            &x[h * n * d..][..n * d]
-        }
+        let width = heads * d;
+        let head = |src, h: usize| Head {
+            src,
+            width,
+            at: h * d,
+            d,
+        };
         let qc: Vec<Vec<f32>> = (0..heads)
-            .map(|h| pad_rows(per_head(op.qc, h, t, d), t, rows, d))
+            .map(|h| pad_rows(head(op.q, h), op.bias_u, op.scale, t, rows))
             .collect();
         let qp: Vec<Vec<f32>> = (0..heads)
-            .map(|h| pad_rows(per_head(op.qp, h, t, d), t, rows, d))
+            .map(|h| pad_rows(head(op.q, h), op.bias_v, op.scale, t, rows))
             .collect();
         let kp: Vec<Vec<f32>> = (0..heads)
-            .map(|h| pack_panels(per_head(op.k, h, keys, d), keys, 0, keys_pad, d))
+            .map(|h| pack_panels(head(op.k, h), keys, 0, keys_pad))
             .collect();
         let vp: Vec<Vec<f32>> = (0..heads)
-            .map(|h| pack_values(per_head(op.v, h, keys, d), keys, keys_pad, d))
+            .map(|h| pack_values(head(op.v, h), keys, keys_pad))
             .collect();
         let pp: Vec<Vec<f32>> = (0..heads)
-            .map(|h| pack_panels(per_head(op.p, h, p_rows, d), p_rows, base, p_cols, d))
+            .map(|h| pack_panels(head(op.p, h), p_rows, base, p_cols))
             .collect();
-        let mut out = vec![0f32; heads * t * d];
+        let mut out = vec![0f32; t * width];
         let out_at = out.as_mut_ptr() as usize;
         let tasks: Vec<(usize, usize)> = (0..heads)
             .flat_map(|h| (0..rows).step_by(R).map(move |i0| (h, i0)))
@@ -331,10 +361,10 @@ mod x86 {
                 }
                 for r in 0..R.min(t.saturating_sub(i0)) {
                     let inv = if l[r] > 0.0 { 1.0 / l[r] } else { 0.0 };
-                    // SAFETY: row (h, i0 + r) of `out`, written by this task alone
+                    // SAFETY: head h's columns of row i0 + r of `out`, written by this task alone
                     let dst = unsafe {
                         std::slice::from_raw_parts_mut(
-                            (out_at as *mut f32).add((h * t + i0 + r) * d),
+                            (out_at as *mut f32).add((i0 + r) * width + h * d),
                             d,
                         )
                     };
@@ -357,9 +387,9 @@ mod x86 {
 mod tests {
     use crate::{DType, Device, Tensor};
 
-    // against its definition in f64: content and position scores (row i reading position row pos_base - i + j), the
-    // softmax and its values; a partial last query tile and key chunk, two heads, head sizes 128, 32 and 16, a run
-    // past one key chunk
+    // against its definition in f64: content and position scores (row i reading position row pos_base - i + j) of the
+    // biased, scaled queries, the softmax and its values; operands laid out as projections (heads side by side in a
+    // row), a partial last query tile and key chunk, head sizes 128, 32 and 16, a run past one key chunk
     #[test]
     fn f32_relative_position_attention_matches_its_definition() -> crate::Result<()> {
         if !super::supports(16) {
@@ -367,17 +397,21 @@ mod tests {
         }
         // f32 sums against f64 ones, and the exp's ~1e-7
         const TOLERANCE: f64 = 1e-5;
+        const SCALE: f32 = 0.3;
         for (t, head) in [(150, 128), (70, 32), (600, 16)] {
             let (heads, p_rows, pos_base) = (2, 2 * t - 1, t - 1);
-            let randn =
-                |rows: usize| Tensor::randn(0f32, 0.5, (1, heads, rows, head), &Device::Cpu);
-            let (qc, qp, k, v, p) = (randn(t)?, randn(t)?, randn(t)?, randn(t)?, randn(p_rows)?);
+            let width = heads * head;
+            let randn = |rows: usize| Tensor::randn(0f32, 0.5, (1, rows, width), &Device::Cpu);
+            let (q, k, v, p) = (randn(t)?, randn(t)?, randn(t)?, randn(p_rows)?);
+            let (bias_u, bias_v) = (randn(1)?, randn(1)?);
             let slice = |x: &Tensor| x.flatten_all()?.to_vec1::<f32>();
-            let (qcv, qpv, kv, vv, pv) =
-                (slice(&qc)?, slice(&qp)?, slice(&k)?, slice(&v)?, slice(&p)?);
+            let (qv, kv, vv, pv) = (slice(&q)?, slice(&k)?, slice(&v)?, slice(&p)?);
+            let (buv, bvv) = (slice(&bias_u)?, slice(&bias_v)?);
             let got = super::attention(&crate::cpu_backend::relpos_attn::RelPosAttn {
-                qc: &qcv,
-                qp: &qpv,
+                q: &qv,
+                bias_u: &buv,
+                bias_v: &bvv,
+                scale: SCALE,
                 k: &kv,
                 v: &vv,
                 p: &pv,
@@ -388,19 +422,29 @@ mod tests {
                 p_rows,
                 pos_base,
             });
-            let wide = |x: &Tensor| x.to_dtype(DType::F64);
+            let split = |x: &Tensor| -> crate::Result<Tensor> {
+                let rows = x.dim(1)?;
+                x.reshape((1, rows, heads, head))?
+                    .transpose(1, 2)?
+                    .to_dtype(DType::F64)
+            };
+            let scaled = |bias: &Tensor| split(&(q.broadcast_add(bias)? * f64::from(SCALE))?);
             let ids: Vec<u32> = (0..t)
                 .flat_map(|i| (0..t).map(move |j| (pos_base - i + j) as u32))
                 .collect();
             let ids =
                 Tensor::from_vec(ids, (1, 1, t, t), &Device::Cpu)?.repeat((1, heads, 1, 1))?;
-            let content = wide(&qc)?.matmul(&wide(&k)?.t()?)?;
-            let position = wide(&qp)?
-                .matmul(&wide(&p)?.t()?)?
+            let content = scaled(&bias_u)?.matmul(&split(&k)?.t()?)?;
+            let position = scaled(&bias_v)?
+                .matmul(&split(&p)?.t()?)?
                 .contiguous()?
                 .gather(&ids, 3)?;
             let probs = crate::nn::ops::softmax_last_dim(&(content + position)?)?;
-            let want = probs.matmul(&wide(&v)?)?.flatten_all()?.to_vec1::<f64>()?;
+            let want = probs
+                .matmul(&split(&v)?)?
+                .transpose(1, 2)?
+                .flatten_all()?
+                .to_vec1::<f64>()?;
             let worst = got
                 .iter()
                 .zip(&want)

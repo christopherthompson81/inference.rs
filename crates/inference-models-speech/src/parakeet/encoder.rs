@@ -317,24 +317,48 @@ impl RelPositionAttention {
     fn forward(&self, xs: &Tensor, positions: &Tensor, blocks: &[QueryBlock]) -> Result<Tensor> {
         let (b, t, _) = xs.dims3()?;
         let scale = (self.head_dim as f64).powf(-0.5);
-        let q = self.heads(&self.q.forward(xs)?)?;
-        let k = self.heads(&self.k.forward(xs)?)?;
-        let v = self.heads(&self.v.forward(xs)?)?;
+        let (q, k, v) = (
+            self.q.forward(xs)?,
+            self.k.forward(xs)?,
+            self.v.forward(xs)?,
+        );
         // rows a..b over keys c..c+K read position rows from T - b + c: offsets b-1-c down to a-(c+K-1)
         let first = |b: &QueryBlock| t - b.start - b.rows + b.keys_from;
         let band = |b: &QueryBlock| first(b)..first(b) + b.rows + b.keys - 1;
         // only the rows some block reads: all 2T-1 for full attention, a band set by the context when chunked
         let lo = blocks.iter().map(|b| band(b).start).min().unwrap_or(0);
         let hi = blocks.iter().map(|b| band(b).end).max().unwrap_or(0);
-        let p = self.heads(&self.pos.forward(&positions.narrow(1, lo, hi - lo)?)?)?;
+        let p = self.pos.forward(&positions.narrow(1, lo, hi - lo)?)?;
+        let full = blocks
+            .iter()
+            .all(|b| b.mask.is_none() && b.keys_from == 0 && b.keys == t);
+        // on the CPU (bf16 pairs inside the model's bf16 scope, else f32 on AVX2): fused over the projections as they
+        // are, biased and scaled as it packs them, so no (rows, keys) scores, per-head copies or scaled queries exist
+        if full
+            && xs.device().is_cpu()
+            && let Some(attn) =
+                inference_tensor::cpu::rel_pos_attention(&inference_tensor::cpu::RelPosOperands {
+                    q: &q,
+                    bias_u: &self.bias_u,
+                    bias_v: &self.bias_v,
+                    scale: scale as f32,
+                    k: &k,
+                    v: &v,
+                    positions: &p,
+                    heads: self.heads,
+                    pos_base: t - 1 - lo,
+                })?
+        {
+            return self.o.forward(&attn);
+        }
+        // each projection moved in and dropped once split: a shadowed one would live beside its copy to the end
+        let split = |x: Tensor| self.heads(&x);
+        let (q, k, v, p) = (split(q)?, split(k)?, split(v)?, split(p)?);
         // scaled before the products, so the (rows, keys) scores take no extra pass
         let q_content = (q.broadcast_add(&self.bias_u)? * scale)?;
         let q_position = (q.broadcast_add(&self.bias_v)? * scale)?;
         // full attention fused on an iGPU that has it: no (rows, keys) scores in memory, so no blocks either; a discrete
         // GPU's matrix cores run the blocks' products faster (a 3090 over 10 minutes: 2.6 s against 7.0 fused)
-        let full = blocks
-            .iter()
-            .all(|b| b.mask.is_none() && b.keys_from == 0 && b.keys == t);
         if full
             && xs.device().is_vulkan()
             && !inference_tensor::vulkan::is_discrete(xs.device())
@@ -346,23 +370,6 @@ impl RelPositionAttention {
                 positions: &p,
                 pos_base: t - 1 - lo,
             })?
-        {
-            let attn = attn
-                .transpose(1, 2)?
-                .reshape((b, t, self.heads * self.head_dim))?;
-            return self.o.forward(&attn);
-        }
-        // and on a CPU with bf16 pairs, inside the model's bf16 scope (`bf16_matmuls`): no scores in memory either
-        if full
-            && xs.device().is_cpu()
-            && let Some(attn) = inference_tensor::cpu::rel_pos_attention(
-                &q_content,
-                &q_position,
-                &k,
-                &v,
-                &p,
-                t - 1 - lo,
-            )?
         {
             let attn = attn
                 .transpose(1, 2)?

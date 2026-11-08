@@ -1479,3 +1479,25 @@ diarization 2433-2651 -> 2139-2174, settled after requests ~2050 -> ~1920; both 
 **What is left at the peak:** the attention's operands (q, k, v and the positions made contiguous per head, 146 MB,
 then packed again by the fused kernel, ~90 MB) and the residual stream. Reading the projections in place would need
 the fused kernel to take strided rows.
+
+## Run 51 - 2026-11-08 (laptop: Ryzen 7 7840U, CPU only)
+
+**Question:** after Run 50, the attention's operands are live at the peak: q, k, v and the positions copied
+contiguous per head (146 MB over 10 minutes), the two biased, scaled query sets (60 MB), all packed again by the fused
+kernel, and its output copied back from per-head order. Can the kernel read the projections as they are?
+
+**Change:** `cpu::rel_pos_attention` takes `RelPosOperands`: the projections `(1, rows, heads * d)` as they come, the
+two biases and the scale. The kernel reads each head at column `h * d` of rows `heads * d` wide, makes
+`(q + bias) scale` as it packs the queries, and writes its output in the projections' layout, so nothing is split per
+head, scaled or transposed first; #873's f32 kernel for AVX2 (`relpos_attn_f32`) takes the same operands. Parakeet's
+attention calls it before splitting heads; the other paths split after (each projection moved into the split and
+dropped, so none lives beside its copy). Tests: both kernels' against their definitions, over projection-layout
+operands with biases and a scale.
+
+**Result:** live heap at the peak 2134 -> 2079 MB (the peak is now the attention's projections, ~150 MB, beside the
+residual stream). A/B against master with #873: asr 23.66 -> 23.16 s (3 rounds); with `INFERENCE_CPU_NO_BF16` (the f32
+kernel) 39.41 -> 39.23 s. Outputs byte-identical on the CPU (bf16 and f32 paths) and the iGPU; the iGPU's peaks
+unchanged.
+
+**Dead end:** packing the bf16 gemm's A a block of rows at a time (8 MB a block) took 4 MB off the peak, now elsewhere,
+for 1.4 % of the transcription (5.7 % while B repacked per block).
