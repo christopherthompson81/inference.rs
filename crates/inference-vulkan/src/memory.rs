@@ -24,6 +24,13 @@ static SPILLED: AtomicBool = AtomicBool::new(false);
 // The device memory every buffer together leaves free, short of the device's budget: allocating to the edge of a
 // discrete GPU's memory stalls its driver for seconds
 const ROOM_MARGIN_BYTES: u64 = 512 << 20;
+// An idle device buffer none has reused for this long is an earlier phase's size (a speech model's subsampling, then
+// its encoder, then a diarizer each take their own classes): a new allocation frees it first, so the pool holds one
+// phase's working set rather than the sum of every phase's
+const STALE_IDLE: std::time::Duration = std::time::Duration::from_millis(150);
+// Idle device bytes the pool keeps however stale, so a model's whole working set (a prompt's, paused between
+// requests) survives; past them a miss frees the stale ones, and an idle engine the rest
+const STALE_KEEP_BYTES: u64 = 1 << 30;
 /// The device memory a discrete GPU's long-lived buffers leave free, for activations, caches and scratch.
 pub const EXACT_RESERVE_BYTES: u64 = 2 << 30;
 // A host write to or read of device memory goes through staging buffers of up to this, a submit each
@@ -45,6 +52,8 @@ struct Allocation {
     memory: vk::DeviceMemory,
     ptr: *mut u8,
     size: u64,
+    // when it came back to the pool
+    idle_since: Option<std::time::Instant>,
 }
 
 // SAFETY: the handles and mapping are only used by whoever takes the allocation out of the pool's lock
@@ -243,6 +252,15 @@ impl Buffer {
         let out_of_memory =
             |r: &Result<Self>| matches!(r, Err(Error::Vk(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)));
         if device_local {
+            let stale = context
+                .pool
+                .lock()
+                .expect("vulkan pool poisoned")
+                .drain_stale(std::time::Instant::now());
+            for allocation in stale {
+                // SAFETY: a pooled allocation is one no submit uses any longer
+                unsafe { allocation.release(context) };
+            }
             make_room(context, capacity)?;
         }
         let first = Self::allocate_once(context, len, capacity, device_local, pooled);
@@ -490,6 +508,7 @@ impl Drop for Buffer {
             memory: self.memory,
             ptr: self.ptr,
             size: self.capacity,
+            idle_since: None,
         };
         let refused = if self.pooled {
             self.context
@@ -508,13 +527,23 @@ impl Drop for Buffer {
 }
 
 impl Context {
-    /// Frees the pool's idle buffers on a unified-memory device, where they are host RAM held for reuse: for an idle
-    /// engine, whose next request may be hours off.
+    /// Frees the pool's idle buffers, for an idle engine whose next request may be hours off: on a unified-memory device
+    /// all of them (host RAM held for reuse), on a discrete one the device memory past STALE_KEEP_BYTES, largest first
+    /// (a long request's temporaries, GBs; a model's ordinary working set stays for its next request).
     pub fn release_idle(&self) {
-        if !self.is_unified() {
+        // the last request's batches finish first, so their temporaries are idle too
+        if !self.try_synchronize().unwrap_or(false) {
             return;
         }
-        let idle = self.pool.lock().expect("vulkan pool poisoned").drain(false);
+        let mut pool = self.pool.lock().expect("vulkan pool poisoned");
+        let mut idle = pool.drain(false);
+        while !self.is_unified() && pool.device_bytes > STALE_KEEP_BYTES {
+            match pool.pop_largest(true) {
+                Some(allocation) => idle.push(allocation),
+                None => break,
+            }
+        }
+        drop(pool);
         for allocation in idle {
             // SAFETY: a pooled allocation is one no submit uses any longer
             unsafe { allocation.release(self) };
@@ -565,6 +594,29 @@ impl BufferPool {
         Some(allocation)
     }
 
+    // past STALE_KEEP_BYTES idle, the idle device allocations none has taken for STALE_IDLE, out of the pool
+    fn drain_stale(&mut self, now: std::time::Instant) -> Vec<Allocation> {
+        let mut out = Vec::new();
+        if self.device_bytes <= STALE_KEEP_BYTES {
+            return out;
+        }
+        for (&(local, capacity), allocations) in &mut self.free {
+            if !local {
+                continue;
+            }
+            let stale = allocations
+                .iter()
+                .take_while(|a| {
+                    a.idle_since
+                        .is_some_and(|t| now.duration_since(t) >= STALE_IDLE)
+                })
+                .count();
+            self.device_bytes -= capacity * stale as u64;
+            out.extend(allocations.drain(..stale));
+        }
+        out
+    }
+
     // every idle allocation of one placement, out of the pool
     fn drain(&mut self, device_local: bool) -> Vec<Allocation> {
         let mut out = Vec::new();
@@ -612,7 +664,10 @@ impl BufferPool {
         self.free
             .entry((device_local, capacity))
             .or_default()
-            .push(allocation);
+            .push(Allocation {
+                idle_since: Some(std::time::Instant::now()),
+                ..allocation
+            });
         None
     }
 }
@@ -751,9 +806,10 @@ mod tests {
         Ok(())
     }
 
-    // an iGPU's dropped buffers wait in the pool for reuse until the idle release hands them back
+    // dropped buffers wait in the pool for reuse until the idle release hands them back: all of an iGPU's host RAM, a
+    // discrete GPU's device memory past STALE_KEEP_BYTES
     #[test]
-    fn an_idle_release_empties_a_unified_pool() -> Result<()> {
+    fn an_idle_release_empties_the_pool() -> Result<()> {
         let context = match Context::new() {
             Ok(context) => context,
             Err(err) => {
@@ -761,15 +817,62 @@ mod tests {
                 return Ok(());
             }
         };
-        if !context.is_unified() {
-            return Ok(());
-        }
-        let idle = |context: &Context| context.pool.lock().expect("vulkan pool poisoned").bytes;
+        let idle = |context: &Context| {
+            let pool = context.pool.lock().expect("vulkan pool poisoned");
+            pool.bytes + pool.device_bytes
+        };
+        context.release_idle();
         let before = idle(&context);
         drop(Buffer::new(&context, 3 << 20)?);
         assert!(idle(&context) > before);
         context.release_idle();
-        assert_eq!(idle(&context), 0);
+        if context.is_unified() {
+            assert_eq!(idle(&context), 0);
+            return Ok(());
+        }
+        // a discrete GPU keeps up to STALE_KEEP_BYTES of it, and frees what is past them
+        assert_eq!(idle(&context), before + capacity(3 << 20));
+        let big: Vec<_> = (0..STALE_KEEP_BYTES / (256 << 20) + 2)
+            .map(|_| Buffer::new(&context, 256 << 20))
+            .collect::<Result<_>>()?;
+        drop(big);
+        context.release_idle();
+        assert!(idle(&context) <= STALE_KEEP_BYTES);
+        Ok(())
+    }
+
+    // a discrete GPU's allocation that misses, past STALE_KEEP_BYTES idle, frees the idle buffers none has reused for
+    // STALE_IDLE (an earlier phase's sizes), and keeps those just given back
+    #[test]
+    fn a_missed_allocation_frees_stale_idle_buffers() -> Result<()> {
+        let context = match Context::new() {
+            Ok(context) => context,
+            Err(err) => {
+                eprintln!("skipping: {err}");
+                return Ok(());
+            }
+        };
+        if context.is_unified() {
+            return Ok(());
+        }
+        context.release_idle();
+        let idle = |context: &Context| context.pool.lock().unwrap().device_bytes;
+        // under STALE_KEEP_BYTES idle, a stale buffer stays
+        drop(Buffer::new(&context, 3 << 20)?);
+        std::thread::sleep(STALE_IDLE + std::time::Duration::from_millis(20));
+        drop(Buffer::new(&context, 5 << 20)?);
+        assert_eq!(idle(&context), capacity(3 << 20) + capacity(5 << 20));
+        context.release_idle();
+        // past it, the stale classes go and the 64 MiB one just given back stays
+        let big: Vec<_> = (0..STALE_KEEP_BYTES / (256 << 20) + 1)
+            .map(|_| Buffer::new(&context, 256 << 20))
+            .collect::<Result<_>>()?;
+        drop(big);
+        std::thread::sleep(STALE_IDLE + std::time::Duration::from_millis(20));
+        drop(Buffer::new(&context, 64 << 20)?);
+        assert_eq!(idle(&context), capacity(64 << 20));
+        let _fresh = Buffer::new(&context, 7 << 20)?;
+        assert_eq!(idle(&context), capacity(64 << 20));
         Ok(())
     }
 
