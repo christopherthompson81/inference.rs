@@ -1381,3 +1381,27 @@ the forward; the transcription loader sets it for Parakeet's offline encoder and
 `scripts/bf16_check.sh` measures a model with bf16 inputs forced (`INFERENCE_CPU_BF16`) against f32
 (`INFERENCE_CPU_NO_BF16`): an ASR's words, a diarizer's speaker-frames (0.5 % may move), an LLM's KLD (1e-3 may rise).
 On the meeting: Parakeet 1614 words, 0 differing, 4 starts moved; the diarizer 0.137 % of 46,824 speaker-frames.
+
+## Run 47 - 2026-11-08 (laptop: Ryzen 7 7840U, CPU only)
+
+**Question:** with Run 46's bf16 products, attention is about half of Parakeet's CPU time: a 512-query block's
+content and position scores (8 x 512 x 7500 and x 8011) written out, a softmax pass over them, and the values in f32
+(their 128 columns pack as much as they multiply). Does fusing it pay?
+
+**Change:** `cpu_backend::relpos_attn`, the relative-position attention fused on AVX-512 BF16, inside the model's bf16
+scope (`inference_tensor::cpu::rel_pos_attention`; Parakeet's encoder takes it for full attention on the CPU):
+- A task takes 32 query rows of a head and walks the keys 512 at a time: content scores against the chunk, position
+  scores against the 543 position rows the chunk's pairs read, each pair's diagonal added, an online softmax, and
+  P V into the rows' outputs.
+- Keys, values and positions are packed as bf16 pairs once a call; 32-row tiles and 512-key chunks keep every span on
+  one alignment of the positions' 32-column panels.
+- The probabilities go into P V as two bf16 terms, their rounding and what it left (~16 bits): one term alone moved a
+  word of the meeting ("dinosaur" -> "dinosaur,").
+- Each row's step (the position add, its max, Cephes' exp, the sum, both bf16 terms) runs on 16 lanes: scalar, it had
+  held the kernel to 650 ms a layer.
+
+**Tests:** against the definition over the same bf16-rounded inputs, in f64 (worst 1.4e-3; a diagonal one column off
+fails it), at 150 x 128, 70 x 32 and 600 x 64 (past a key chunk); outside the scope the CPU keeps the composite.
+
+**Result:** a layer (8 heads, 7500 x 128) 342 ms, ~1.37 TFLOPS of products. A/B, ASR 35.92 -> 27.93 s; both models in
+one request 35.9 s. `scripts/bf16_check.sh asr` on the meeting: 1614 words unchanged, 2 starts a frame off.
