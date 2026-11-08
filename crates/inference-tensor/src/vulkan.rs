@@ -22,6 +22,20 @@ pub fn is_discrete(device: &crate::Device) -> bool {
     }
 }
 
+/// Whether `device` is a discrete Vulkan GPU with matrix cores (cooperative matrices), which take f16 weights in place.
+pub fn has_matrix_cores(device: &crate::Device) -> bool {
+    #[cfg(feature = "vulkan")]
+    return device.as_vulkan_device().is_ok_and(|d| {
+        let context = d.context();
+        !context.is_unified() && context.has_matrix_cores()
+    });
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = device;
+        false
+    }
+}
+
 /// The states a Mamba head's row holds that [`ssm_scan_step`] takes (its lanes a row times states a lane).
 pub const SCAN_STEP_STATE: usize = 128;
 
@@ -304,6 +318,18 @@ pub enum GatedNorm {
     NormThenSilu,
     /// as `NormThenSilu` with `sigmoid(gate)`
     NormThenSigmoid,
+}
+
+/// `x` (f32, `(.., k)`) times an f16 `(n, k)` weight transposed, on a Vulkan device's matrix cores: `(.., n)` f32, or
+/// `None` where the device has none or the product is too small for them.
+pub fn linear_half_weight(x: &Tensor, weight: &Tensor) -> Result<Option<Tensor>> {
+    #[cfg(feature = "vulkan")]
+    return crate::vulkan_backend::linear_half_weight(x, weight);
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = (x, weight);
+        Ok(None)
+    }
 }
 
 /// `(x + residual, rms_norm(x + residual) * weight)` in one dispatch, for a decode's few f32 rows on Vulkan; `None`

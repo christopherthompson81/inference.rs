@@ -24,22 +24,34 @@ static SPILLED: AtomicBool = AtomicBool::new(false);
 // The device memory every buffer together leaves free, short of the device's budget: allocating to the edge of a
 // discrete GPU's memory stalls its driver for seconds
 const ROOM_MARGIN_BYTES: u64 = 512 << 20;
+// An idle device buffer none has reused for this long is an earlier phase's size (a speech model's subsampling, then
+// its encoder, then a diarizer each take their own classes): a new allocation frees it first, so the pool holds one
+// phase's working set rather than the sum of every phase's
+const STALE_IDLE: std::time::Duration = std::time::Duration::from_millis(150);
+// Idle device bytes the pool keeps however stale, so a model's whole working set (a prompt's, paused between
+// requests) survives; past them a miss frees the stale ones, and an idle engine the rest
+const STALE_KEEP_BYTES: u64 = 1 << 30;
 /// The device memory a discrete GPU's long-lived buffers leave free, for activations, caches and scratch.
 pub const EXACT_RESERVE_BYTES: u64 = 2 << 30;
 // A host write to or read of device memory goes through staging buffers of up to this, a submit each
 const STAGING_BYTES: usize = 64 << 20;
 
+// an allocation back in the pool, and when it came back
+type PoolEntry = (std::time::Instant, Arc<Held>);
+
 /// Buffers nothing references any longer, by placement and capacity, for new ones to reuse: a Vulkan allocation costs
 /// tens of microseconds, and a model step allocates hundreds of short-lived tensors.
 #[derive(Default)]
 pub(crate) struct BufferPool {
-    free: HashMap<(bool, u64), Vec<Allocation>>,
+    // oldest first in each class
+    free: HashMap<(bool, u64), Vec<PoolEntry>>,
     // idle host bytes (capped), and idle device bytes (counted, not capped)
     bytes: u64,
     device_bytes: u64,
 }
 
 // a buffer, its memory and the memory's mapping
+#[derive(Clone, Copy)]
 struct Allocation {
     buffer: vk::Buffer,
     memory: vk::DeviceMemory,
@@ -47,8 +59,39 @@ struct Allocation {
     size: u64,
 }
 
-// SAFETY: the handles and mapping are only used by whoever takes the allocation out of the pool's lock
-unsafe impl Send for Allocation {}
+/// A pooled allocation, shared by the buffer using it, the pool while it is idle, and the batches whose commands use
+/// it (they retain this, not the buffer): freed when the last of them drops it. A device buffer goes back to the pool
+/// when its last user drops it, before the work recorded on it finishes, and the work recorded after takes it: the
+/// stream orders every command after the ones before (a barrier follows each), as CUDA's allocator reuses a block in
+/// stream order. The CPU never maps a device buffer; a mapped one waits for its batches before it is reused.
+pub(crate) struct Held {
+    // weak, so the pool's entries do not keep their context alive
+    context: std::sync::Weak<Context>,
+    allocation: Allocation,
+}
+
+// SAFETY: the handles and mapping are only used by whoever holds the buffer the allocation backs
+unsafe impl Send for Held {}
+unsafe impl Sync for Held {}
+
+impl Held {
+    // whether nothing but the pool holds it: no buffer, and no batch whose commands may still run on it
+    fn idle(held: &Arc<Held>) -> bool {
+        Arc::strong_count(held) == 1
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        // a context dropping or shut down frees (or leaks) its memory itself
+        if let Some(context) = self.context.upgrade()
+            && !context.is_shut()
+        {
+            // SAFETY: the last holder is gone, so no command still uses it
+            unsafe { self.allocation.release(&context) };
+        }
+    }
+}
 
 impl BufferPool {
     pub(crate) fn device_bytes(&self) -> u64 {
@@ -58,9 +101,9 @@ impl BufferPool {
     /// # Safety
     /// No submit may still use the buffers.
     pub(crate) unsafe fn destroy(&mut self, device: &ash::Device) {
-        for allocation in self.free.drain().flat_map(|(_, allocations)| allocations) {
-            // SAFETY: the caller's contract
-            unsafe { allocation.free(device) };
+        for (_, held) in self.free.drain().flat_map(|(_, allocations)| allocations) {
+            // SAFETY: the caller's contract; the held allocation's own drop skips a dropping or shut context
+            unsafe { held.allocation.free(device) };
         }
         self.bytes = 0;
         self.device_bytes = 0;
@@ -147,7 +190,8 @@ pub struct Buffer {
     ptr: *mut u8,
     len: usize,
     capacity: u64,
-    pooled: bool,
+    // a pooled buffer's allocation; a buffer without one frees its own when it drops
+    held: Option<Arc<Held>>,
 }
 
 // SAFETY: the mapping is plain memory, and the Vulkan handles are only used through the context's synchronized calls
@@ -190,13 +234,13 @@ impl Buffer {
         {
             pooled = take();
         }
-        if let Some(Allocation {
-            buffer,
-            memory,
-            ptr,
-            ..
-        }) = pooled
-        {
+        if let Some(held) = pooled {
+            let Allocation {
+                buffer,
+                memory,
+                ptr,
+                ..
+            } = held.allocation;
             return Ok(Self {
                 context: context.clone(),
                 buffer,
@@ -204,7 +248,7 @@ impl Buffer {
                 ptr,
                 len,
                 capacity,
-                pooled: true,
+                held: Some(held),
             });
         }
         Self::allocate(context, len, capacity, device_local, true)
@@ -243,6 +287,12 @@ impl Buffer {
         let out_of_memory =
             |r: &Result<Self>| matches!(r, Err(Error::Vk(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)));
         if device_local {
+            let stale = context
+                .pool
+                .lock()
+                .expect("vulkan pool poisoned")
+                .drain_stale(std::time::Instant::now());
+            drop(stale);
             make_room(context, capacity)?;
         }
         let first = Self::allocate_once(context, len, capacity, device_local, pooled);
@@ -255,10 +305,7 @@ impl Buffer {
             .lock()
             .expect("vulkan pool poisoned")
             .drain(true);
-        for allocation in idle {
-            // SAFETY: a pooled allocation is one no submit uses any longer
-            unsafe { allocation.release(context) };
-        }
+        drop(idle);
         let retried = Self::allocate_once(context, len, capacity, true, pooled);
         if !out_of_memory(&retried) {
             return retried;
@@ -332,6 +379,17 @@ impl Buffer {
             if device_local {
                 context.device_bytes.fetch_add(capacity, Ordering::Relaxed);
             }
+            let held = pooled.then(|| {
+                Arc::new(Held {
+                    context: Arc::downgrade(context),
+                    allocation: Allocation {
+                        buffer,
+                        memory,
+                        ptr,
+                        size: capacity,
+                    },
+                })
+            });
             Ok(Self {
                 context: context.clone(),
                 buffer,
@@ -339,8 +397,16 @@ impl Buffer {
                 ptr,
                 len,
                 capacity,
-                pooled,
+                held,
             })
+        }
+    }
+
+    // what a command using it retains: its allocation where pooled, else the buffer
+    pub(crate) fn retained(self: Arc<Self>) -> crate::Retained {
+        match &self.held {
+            Some(held) => held.clone(),
+            None => self,
         }
     }
 
@@ -479,46 +545,56 @@ pub fn f32_bytes(values: &[f32]) -> &[u8] {
 }
 
 impl Drop for Buffer {
-    // a recorded command retains what it uses, so nothing submitted reads a buffer once it drops
+    // a recorded command retains what it uses (a pooled buffer's allocation, an unpooled buffer itself), so a freed
+    // allocation is one nothing submitted uses
     fn drop(&mut self) {
         // the device is gone: its memory went with it
         if self.context.is_shut() {
             return;
         }
-        let allocation = Allocation {
-            buffer: self.buffer,
-            memory: self.memory,
-            ptr: self.ptr,
-            size: self.capacity,
-        };
-        let refused = if self.pooled {
-            self.context
-                .pool
-                .lock()
-                .expect("vulkan pool poisoned")
-                .give(self.ptr.is_null(), self.capacity, allocation)
-        } else {
-            Some(allocation)
-        };
-        if let Some(allocation) = refused {
-            // SAFETY: see above
-            unsafe { allocation.release(&self.context) };
+        match self.held.take() {
+            Some(held) => {
+                let refused = self
+                    .context
+                    .pool
+                    .lock()
+                    .expect("vulkan pool poisoned")
+                    .give(self.ptr.is_null(), self.capacity, held);
+                drop(refused);
+            }
+            None => {
+                let allocation = Allocation {
+                    buffer: self.buffer,
+                    memory: self.memory,
+                    ptr: self.ptr,
+                    size: self.capacity,
+                };
+                // SAFETY: see above
+                unsafe { allocation.release(&self.context) };
+            }
         }
     }
 }
 
 impl Context {
-    /// Frees the pool's idle buffers on a unified-memory device, where they are host RAM held for reuse: for an idle
-    /// engine, whose next request may be hours off.
+    /// Frees the pool's idle buffers, for an idle engine whose next request may be hours off: on a unified-memory device
+    /// all of them (host RAM held for reuse), on a discrete one the device memory past STALE_KEEP_BYTES, largest first
+    /// (a long request's temporaries, GBs; a model's ordinary working set stays for its next request).
     pub fn release_idle(&self) {
-        if !self.is_unified() {
+        // the last request's batches finish first, so their temporaries are idle too
+        if !self.try_synchronize().unwrap_or(false) {
             return;
         }
-        let idle = self.pool.lock().expect("vulkan pool poisoned").drain(false);
-        for allocation in idle {
-            // SAFETY: a pooled allocation is one no submit uses any longer
-            unsafe { allocation.release(self) };
+        let mut pool = self.pool.lock().expect("vulkan pool poisoned");
+        let mut idle = pool.drain(false);
+        while !self.is_unified() && pool.device_bytes > STALE_KEEP_BYTES {
+            match pool.pop_largest(true) {
+                Some(held) => idle.push(held),
+                None => break,
+            }
         }
+        drop(pool);
+        drop(idle);
     }
 }
 
@@ -533,8 +609,7 @@ fn make_room(context: &Context, capacity: u64) -> Result<()> {
             .expect("vulkan pool poisoned")
             .pop_largest(true);
         match largest {
-            // SAFETY: a pooled allocation is one no submit uses any longer
-            Some(allocation) => unsafe { allocation.release(context) },
+            Some(held) => drop(held),
             None if !synchronized => {
                 synchronized = true;
                 if !context.try_synchronize()? {
@@ -548,61 +623,89 @@ fn make_room(context: &Context, capacity: u64) -> Result<()> {
 }
 
 impl BufferPool {
-    // the largest idle allocation of one placement, out of the pool
-    fn pop_largest(&mut self, device_local: bool) -> Option<Allocation> {
-        let key = self
+    // the largest allocation of one placement that nothing but the pool holds, out of the pool: freed as it drops
+    fn pop_largest(&mut self, device_local: bool) -> Option<Arc<Held>> {
+        let (key, at) = self
             .free
             .iter()
-            .filter(|(key, allocations)| key.0 == device_local && !allocations.is_empty())
-            .map(|(&key, _)| key)
-            .max_by_key(|&(_, capacity)| capacity)?;
-        let allocation = self.free.get_mut(&key)?.pop()?;
-        if device_local {
-            self.device_bytes -= key.1;
-        } else {
-            self.bytes -= key.1;
-        }
-        Some(allocation)
+            .filter(|(key, _)| key.0 == device_local)
+            .filter_map(|(&key, entries)| {
+                entries
+                    .iter()
+                    .rposition(|(_, held)| Held::idle(held))
+                    .map(|at| (key, at))
+            })
+            .max_by_key(|&((_, capacity), _)| capacity)?;
+        let (_, held) = self.free.get_mut(&key)?.remove(at);
+        self.forget(key, 1);
+        Some(held)
     }
 
-    // every idle allocation of one placement, out of the pool
-    fn drain(&mut self, device_local: bool) -> Vec<Allocation> {
+    // idle bytes taken off the count as `n` entries of class `key` leave
+    fn forget(&mut self, (local, capacity): (bool, u64), n: usize) {
+        if local {
+            self.device_bytes -= capacity * n as u64;
+        } else {
+            self.bytes -= capacity * n as u64;
+        }
+    }
+
+    // past STALE_KEEP_BYTES idle, the device allocations none has taken for STALE_IDLE, out of the pool
+    fn drain_stale(&mut self, now: std::time::Instant) -> Vec<Arc<Held>> {
         let mut out = Vec::new();
-        self.free.retain(|&(local, capacity), allocations| {
-            if local != device_local {
-                return true;
-            }
-            if local {
-                self.device_bytes -= capacity * allocations.len() as u64;
-            } else {
-                self.bytes -= capacity * allocations.len() as u64;
-            }
-            out.append(allocations);
-            false
-        });
+        if self.device_bytes <= STALE_KEEP_BYTES {
+            return out;
+        }
+        let keys: Vec<_> = self.free.keys().copied().filter(|key| key.0).collect();
+        for key in keys {
+            let entries = self.free.get_mut(&key).expect("a listed class");
+            let stale = entries
+                .iter()
+                .take_while(|(since, _)| now.duration_since(*since) >= STALE_IDLE)
+                .count();
+            out.extend(entries.drain(..stale).map(|(_, held)| held));
+            self.forget(key, stale);
+        }
         out
     }
 
-    fn take(&mut self, device_local: bool, capacity: u64) -> Option<Allocation> {
-        let allocation = self.free.get_mut(&(device_local, capacity))?.pop()?;
-        if device_local {
-            self.device_bytes -= capacity;
-        } else {
-            self.bytes -= capacity;
+    // every allocation of one placement, out of the pool
+    fn drain(&mut self, device_local: bool) -> Vec<Arc<Held>> {
+        let keys: Vec<_> = self
+            .free
+            .keys()
+            .copied()
+            .filter(|key| key.0 == device_local)
+            .collect();
+        let mut out = Vec::new();
+        for key in keys {
+            let entries = self.free.remove(&key).expect("a listed class");
+            self.forget(key, entries.len());
+            out.extend(entries.into_iter().map(|(_, held)| held));
         }
-        Some(allocation)
+        out
     }
 
-    // keeps `allocation` for reuse, or hands it back to be freed when it is not a pooled size or the pool is full
-    fn give(
-        &mut self,
-        device_local: bool,
-        capacity: u64,
-        allocation: Allocation,
-    ) -> Option<Allocation> {
+    // the newest allocation of a class; a mapped one only once no batch holds it, since the CPU writes it in place
+    fn take(&mut self, device_local: bool, capacity: u64) -> Option<Arc<Held>> {
+        let key = (device_local, capacity);
+        let entries = self.free.get_mut(&key)?;
+        let at = if device_local {
+            entries.len().checked_sub(1)?
+        } else {
+            entries.iter().rposition(|(_, held)| Held::idle(held))?
+        };
+        let (_, held) = entries.remove(at);
+        self.forget(key, 1);
+        Some(held)
+    }
+
+    // keeps `held` for reuse, or hands it back (to be freed as it drops) when it is not a pooled size or the pool is
+    // full
+    fn give(&mut self, device_local: bool, capacity: u64, held: Arc<Held>) -> Option<Arc<Held>> {
         if capacity > MAX_POOLED_BYTES || (!device_local && self.bytes + capacity > MAX_POOL_BYTES)
         {
-            return Some(allocation);
+            return Some(held);
         }
         if device_local {
             self.device_bytes += capacity;
@@ -612,7 +715,7 @@ impl BufferPool {
         self.free
             .entry((device_local, capacity))
             .or_default()
-            .push(allocation);
+            .push((std::time::Instant::now(), held));
         None
     }
 }
@@ -751,9 +854,10 @@ mod tests {
         Ok(())
     }
 
-    // an iGPU's dropped buffers wait in the pool for reuse until the idle release hands them back
+    // dropped buffers wait in the pool for reuse until the idle release hands them back: all of an iGPU's host RAM, a
+    // discrete GPU's device memory past STALE_KEEP_BYTES
     #[test]
-    fn an_idle_release_empties_a_unified_pool() -> Result<()> {
+    fn an_idle_release_empties_the_pool() -> Result<()> {
         let context = match Context::new() {
             Ok(context) => context,
             Err(err) => {
@@ -761,15 +865,107 @@ mod tests {
                 return Ok(());
             }
         };
-        if !context.is_unified() {
-            return Ok(());
-        }
-        let idle = |context: &Context| context.pool.lock().expect("vulkan pool poisoned").bytes;
+        let idle = |context: &Context| {
+            let pool = context.pool.lock().expect("vulkan pool poisoned");
+            pool.bytes + pool.device_bytes
+        };
+        context.release_idle();
         let before = idle(&context);
         drop(Buffer::new(&context, 3 << 20)?);
         assert!(idle(&context) > before);
         context.release_idle();
-        assert_eq!(idle(&context), 0);
+        if context.is_unified() {
+            assert_eq!(idle(&context), 0);
+            return Ok(());
+        }
+        // a discrete GPU keeps up to STALE_KEEP_BYTES of it, and frees what is past them
+        assert_eq!(idle(&context), before + capacity(3 << 20));
+        let big: Vec<_> = (0..STALE_KEEP_BYTES / (256 << 20) + 2)
+            .map(|_| Buffer::new(&context, 256 << 20))
+            .collect::<Result<_>>()?;
+        drop(big);
+        context.release_idle();
+        assert!(idle(&context) <= STALE_KEEP_BYTES);
+        Ok(())
+    }
+
+    // a discrete GPU's allocation that misses, past STALE_KEEP_BYTES idle, frees the idle buffers none has reused for
+    // STALE_IDLE (an earlier phase's sizes), and keeps those just given back
+    #[test]
+    fn a_missed_allocation_frees_stale_idle_buffers() -> Result<()> {
+        let context = match Context::new() {
+            Ok(context) => context,
+            Err(err) => {
+                eprintln!("skipping: {err}");
+                return Ok(());
+            }
+        };
+        if context.is_unified() {
+            return Ok(());
+        }
+        context.release_idle();
+        let idle = |context: &Context| context.pool.lock().unwrap().device_bytes;
+        // under STALE_KEEP_BYTES idle, a stale buffer stays
+        drop(Buffer::new(&context, 3 << 20)?);
+        std::thread::sleep(STALE_IDLE + std::time::Duration::from_millis(20));
+        drop(Buffer::new(&context, 5 << 20)?);
+        assert_eq!(idle(&context), capacity(3 << 20) + capacity(5 << 20));
+        context.release_idle();
+        // past it, the stale classes go and the 64 MiB one just given back stays
+        let big: Vec<_> = (0..STALE_KEEP_BYTES / (256 << 20) + 1)
+            .map(|_| Buffer::new(&context, 256 << 20))
+            .collect::<Result<_>>()?;
+        drop(big);
+        std::thread::sleep(STALE_IDLE + std::time::Duration::from_millis(20));
+        drop(Buffer::new(&context, 64 << 20)?);
+        assert_eq!(idle(&context), capacity(64 << 20));
+        let _fresh = Buffer::new(&context, 7 << 20)?;
+        assert_eq!(idle(&context), capacity(64 << 20));
+        Ok(())
+    }
+
+    // a device buffer its last user drops while a copy from it is pending is the next buffer of its size, before the
+    // copy finishes; the stream orders that buffer's fill after the copy, which still reads the old values
+    #[test]
+    fn a_dropped_buffer_is_reused_in_stream_order() -> Result<()> {
+        let context = match Context::new() {
+            Ok(context) => context,
+            Err(err) => {
+                eprintln!("skipping: {err}");
+                return Ok(());
+            }
+        };
+        if context.is_unified() {
+            return Ok(());
+        }
+        const BYTES: usize = 8 << 20;
+        let source = Arc::new(Buffer::new(&context, BYTES)?);
+        let copy = Arc::new(Buffer::new(&context, BYTES)?);
+        let reused_handle = source.buffer;
+        context.record(|r| {
+            r.fill(source.buffer, BYTES as u64, 1);
+            r.copy(source.buffer, 0, copy.buffer, 0, BYTES as u64);
+            r.retain(source.clone());
+            r.retain(copy.clone());
+            Ok(())
+        })?;
+        drop(source);
+        let mut next = Buffer::new(&context, BYTES)?;
+        assert_eq!(
+            next.buffer, reused_handle,
+            "the dropped allocation is taken again"
+        );
+        next.fill(2)?;
+        let words = |bytes: Vec<u8>| -> Vec<u32> {
+            bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|w| u32::from_le_bytes(*w))
+                .collect()
+        };
+        assert!(words(copy.read()?).iter().all(|&w| w == 1));
+        assert!(words(next.read()?).iter().all(|&w| w == 2));
         Ok(())
     }
 
@@ -797,9 +993,9 @@ mod tests {
         assert_eq!(context.device_bytes.load(Ordering::Relaxed), expect(held));
         if device {
             let largest = context.pool.lock().unwrap().pop_largest(true).unwrap();
-            assert_eq!(largest.size, capacity(40 << 20));
-            // SAFETY: a pooled allocation is one no submit uses
-            unsafe { largest.release(&context) };
+            assert_eq!(largest.allocation.size, capacity(40 << 20));
+            // the pool's was the last hold, so it frees as it drops
+            drop(largest);
             assert_eq!(
                 context.device_bytes.load(Ordering::Relaxed),
                 expect(held - capacity(40 << 20))

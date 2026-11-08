@@ -96,6 +96,7 @@ kernels! {
     glu_mat_vecs_iq3_s: MUL_MAT_VECS_GLU_IQ3_S, GLU_MATVECS_BINDINGS, GLU_MATVECS_PUSH_BYTES;
     glu_mat_vecs_q3_k: MUL_MAT_VECS_GLU_Q3_K, GLU_MATVECS_BINDINGS, GLU_MATVECS_PUSH_BYTES;
     quantize_q8_1: QUANTIZE_Q8_1, QUANTIZE_BINDINGS, QUANTIZE_PUSH_BYTES;
+    widen_f16: WIDEN_F16, CONVERT_BINDINGS, CONVERT_PUSH_BYTES;
     mul_mm_q8_0: MUL_MM_Q8_0, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
     mul_mm_q5_0: MUL_MM_Q5_0, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
     mul_mm_q4_0: MUL_MM_Q4_0, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
@@ -293,6 +294,8 @@ pub(crate) struct CoopKernels {
     pub(crate) flash_attn: Pipeline,
     // matmul_f32_tiled's product, its tiles in f16
     pub(crate) matmul_f32: Pipeline,
+    // the same over an f16 b
+    pub(crate) matmul_f32_bh: Pipeline,
     // prompt attention with a relative-position term
     pub(crate) flash_attn_relpos: Pipeline,
     // Q4_0 experts on NV_cooperative_matrix2, where the device has it: a build a tile width, 16 to 128 routes
@@ -466,6 +469,15 @@ impl CoopKernels {
         );
         specs.push(
             PipelineSpec::new(
+                shaders::MATMUL_F32_CM_BH,
+                ops::BINDINGS,
+                ops::MATMUL_PUSH_BYTES,
+                "matmul_f32_cm_bh",
+            )
+            .subgroup(subgroup),
+        );
+        specs.push(
+            PipelineSpec::new(
                 shaders::FLASH_ATTN_RELPOS_CM,
                 ops::RELPOS_BINDINGS,
                 ops::RELPOS_PUSH_BYTES,
@@ -501,8 +513,8 @@ impl CoopKernels {
         let paged_prefill: [Pipeline; 3] =
             take(3).try_into().ok().expect("three prefill pipelines");
         let [flash_attn]: [Pipeline; 1] = take(1).try_into().ok().expect("one attention pipeline");
-        let [matmul_f32, flash_attn_relpos]: [Pipeline; 2] =
-            take(2).try_into().ok().expect("two pipelines");
+        let [matmul_f32, matmul_f32_bh, flash_attn_relpos]: [Pipeline; 3] =
+            take(3).try_into().ok().expect("three pipelines");
         let [convert_f16, moe_gather_f16]: [Pipeline; 2] =
             take(2).try_into().ok().expect("two pipelines");
         let mut moe_mm_cm2: Vec<Option<[Pipeline; 4]>> = (0..BLOCK_TYPES).map(|_| None).collect();
@@ -527,6 +539,7 @@ impl CoopKernels {
             paged_prefill,
             flash_attn,
             matmul_f32,
+            matmul_f32_bh,
             flash_attn_relpos,
             moe_mm_cm2,
             mul_mm_cm2,
@@ -800,6 +813,51 @@ impl Recorder<'_> {
         self.retain(op.ids.0.clone());
         self.retain(op.y.clone());
         Ok(())
+    }
+
+    /// `count` f16s at `src` as f32s into `dst` from its start.
+    pub fn widen_f16(&self, src: crate::At<'_>, count: usize, dst: &Arc<Buffer>) -> Result<()> {
+        if src.0.len() / 2 < src.1 + count || dst.len() / 4 < count {
+            return Err(Error::Invalid(format!("a widening of {count} halves")));
+        }
+        if count == 0 {
+            return Ok(());
+        }
+        let groups = count.div_ceil(CONVERT_THREADS);
+        let groups_x = groups.min(MAX_GROUPS_X);
+        self.context.kernels.widen_f16.dispatch(
+            self,
+            &[src.0.buffer, dst.buffer],
+            &push_words(&[count, src.1, 0])?,
+            [groups_x as u32, groups.div_ceil(groups_x) as u32, 1],
+        );
+        self.retain(src.0.clone());
+        self.retain(dst.clone());
+        Ok(())
+    }
+
+    /// `count` f32s at `src` as f16s into `dst` from its start, on a device whose matrix cores have the conversion
+    /// kernel; whether it did.
+    pub fn narrow_f16(&self, src: crate::At<'_>, count: usize, dst: &Arc<Buffer>) -> Result<bool> {
+        let Some(coop) = self.context.coop.as_ref() else {
+            return Ok(false);
+        };
+        // the kernel writes whole pairs
+        if src.0.len() / 4 < src.1 + count || dst.len() < count.next_multiple_of(2) * 2 {
+            return Err(Error::Invalid(format!("a narrowing of {count} floats")));
+        }
+        let pairs = count.div_ceil(2);
+        let groups = pairs.div_ceil(CONVERT_THREADS);
+        let groups_x = groups.min(MAX_GROUPS_X);
+        coop.convert_f16.dispatch(
+            self,
+            &[src.0.buffer, dst.buffer],
+            &push_words(&[count, src.1, 0])?,
+            [groups_x as u32, groups.div_ceil(groups_x) as u32, 1],
+        );
+        self.retain(src.0.clone());
+        self.retain(dst.clone());
+        Ok(true)
     }
 
     pub fn mat_vec(&self, op: &MatVec<'_>) -> Result<()> {

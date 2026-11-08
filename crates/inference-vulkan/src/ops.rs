@@ -372,6 +372,56 @@ impl Recorder<'_> {
         Ok(())
     }
 
+    /// [`Self::matmul_f32`] with `op.b` stored as f16 (a weight kept in f16), on matrix cores; `false` (nothing recorded)
+    /// where the device has none or the product is too small for their tiles.
+    pub fn matmul_f32_half_b(&self, op: &MatMul<'_>) -> Result<bool> {
+        let Some(coop) = self.context.coop.as_ref() else {
+            return Ok(false);
+        };
+        if op.m < TILED_MIN || op.n < TILED_MIN || op.batch > MAX_GROUPS_Z {
+            return Ok(false);
+        }
+        let (a, b) = (op.a, op.b);
+        let bytes = words(&[
+            op.batch,
+            op.m,
+            op.n,
+            op.k,
+            a.offset,
+            a.batch_stride,
+            a.row_stride,
+            a.col_stride,
+            b.offset,
+            b.batch_stride,
+            b.row_stride,
+            b.col_stride,
+        ])?;
+        let count = op.batch * op.m * op.n;
+        self.work.set(
+            self.work
+                .get()
+                .saturating_add((count as u64).saturating_mul(op.k as u64)),
+        );
+        self.profile_shape(
+            || format!("b={} m={} n={} k={} half b", op.batch, op.m, op.n, op.k),
+            count * op.k,
+        );
+        coop.matmul_f32_bh.dispatch(
+            self,
+            &[a.buffer.buffer, b.buffer.buffer, op.out.buffer],
+            &bytes,
+            [
+                op.n.div_ceil(CM_TILE) as u32,
+                op.m.div_ceil(CM_TILE) as u32,
+                op.batch as u32,
+            ],
+        );
+        for buffer in [a.buffer, b.buffer, op.out] {
+            self.retain(buffer.clone());
+        }
+        Ok(true)
+    }
+
     pub fn matmul_f32(&self, op: &MatMul<'_>) -> Result<()> {
         let count = op.batch * op.m * op.n;
         if count == 0 {

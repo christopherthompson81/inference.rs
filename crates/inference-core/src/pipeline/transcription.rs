@@ -384,7 +384,7 @@ impl Loader for DiarizationLoader {
             self.model_id.clone(),
             AudioModel::Diarizer(diarizer),
             dtype,
-        ))))
+        )?)))
     }
 
     fn load_model_from_path(
@@ -589,7 +589,7 @@ impl Loader for VoiceActivityLoader {
             self.model_id.clone(),
             AudioModel::Silero(vad),
             inference_tensor::DType::F32,
-        ))))
+        )?)))
     }
 
     fn load_model_from_path(
@@ -768,7 +768,7 @@ impl Loader for TranscriptionLoader {
                 self.model_id.clone(),
                 model,
                 dtype,
-            ))));
+            )?)));
         }
         let asr = match &paths.checkpoint {
             AsrCheckpoint::Whisper(_) => unreachable!("a Whisper checkpoint loaded above"),
@@ -784,7 +784,7 @@ impl Loader for TranscriptionLoader {
             self.model_id.clone(),
             model,
             dtype,
-        ))))
+        )?)))
     }
 
     fn get_id(&self) -> String {
@@ -797,7 +797,11 @@ impl Loader for TranscriptionLoader {
 }
 
 impl TranscriptionPipeline {
-    fn new(model_id: String, model: AudioModel, activation_dtype: inference_tensor::DType) -> Self {
+    fn new(
+        model_id: String,
+        mut model: AudioModel,
+        activation_dtype: inference_tensor::DType,
+    ) -> Result<Self> {
         // a VAD answers with times, not text
         let output = match model {
             AudioModel::Parakeet { .. } | AudioModel::Whisper(_) => vec![SupportedModality::Text],
@@ -810,7 +814,16 @@ impl TranscriptionPipeline {
             AudioModel::Diarizer(Diarizer::Nemotron3(_)) => true,
             _ => false,
         };
-        Self {
+        // the same models keep their projection weights in f16 on a discrete Vulkan GPU's matrix cores, which round
+        // their inputs to f16 anyway: half the weights' memory (Parakeet's ~1.1 GB), its products unchanged
+        if bf16_matmuls {
+            match &mut model {
+                AudioModel::Parakeet { asr, .. } => asr.halve_weights()?,
+                AudioModel::Diarizer(Diarizer::Nemotron3(diarizer)) => diarizer.halve_weights()?,
+                _ => {}
+            }
+        }
+        Ok(Self {
             model_id,
             model,
             metadata: Arc::new(GeneralMetadata {
@@ -839,7 +852,7 @@ impl TranscriptionPipeline {
             }),
             dummy_cache: EitherCache::Full(Cache::new(0)),
             sessions: HashMap::new(),
-        }
+        })
     }
 }
 

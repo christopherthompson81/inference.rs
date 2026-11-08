@@ -22,6 +22,10 @@ pub(crate) const BYTES_PER_SUBMIT: u64 = 256 << 20;
 /// ahead of the GPU otherwise, and the temporaries its batches hold (a long prompt's, many GB) would fill device memory,
 /// or an iGPU's host RAM.
 pub(crate) const DISCRETE_MAX_IN_FLIGHT: usize = 3;
+/// The buffer bytes the batches in flight may have allocated before a submit waits for the oldest (one batch may
+/// pass it): a long speech request's batches each allocate a whole BYTES_PER_SUBMIT, two in flight rather than three;
+/// at half this, Qwen3.8-27B's batches waited too (prefill 342 tok/s, was ~500).
+pub(crate) const MAX_IN_FLIGHT_BYTES: u64 = 512 << 20;
 
 /// A resource a recorded command uses, kept alive until the command finishes.
 pub type Retained = Arc<dyn Any + Send + Sync>;
@@ -48,6 +52,8 @@ pub(crate) struct Batch {
     // the dispatches that wrote timestamps 1.. of the profiler's pool, while profiling
     pub(crate) profiled: Vec<Profiled>,
     pub(crate) queries: Option<vk::QueryPool>,
+    // the buffer bytes allocated while it recorded, which its retained temporaries hold until it finishes
+    pub(crate) bytes: u64,
 }
 
 /// Set to profile the GPU time of each kernel, printed every `PROFILE_PRINT_SECS`.
@@ -165,16 +171,23 @@ impl Stream {
                 retained: Vec::new(),
                 profiled: Vec::new(),
                 queries,
+                bytes: 0,
             });
         }
         Ok(self.open.as_mut().expect("opened above"))
     }
 
-    /// Submits the open batch, if any, without waiting for it.
-    pub(crate) fn flush(&mut self, device: &ash::Device, queue: vk::Queue) -> Result<()> {
-        let Some(batch) = self.open.take() else {
+    /// Submits the open batch, if any, without waiting for it; it allocated `bytes` while recording.
+    pub(crate) fn flush(
+        &mut self,
+        device: &ash::Device,
+        queue: vk::Queue,
+        bytes: u64,
+    ) -> Result<()> {
+        let Some(mut batch) = self.open.take() else {
             return Ok(());
         };
+        batch.bytes = bytes;
         let buffers = [batch.buffer];
         // SAFETY: the buffer was begun in `open` and is ended once here; its fence is unsignaled
         unsafe {
@@ -187,7 +200,10 @@ impl Stream {
         }
         self.in_flight.push_back(batch);
         if let Some(max) = self.max_in_flight {
-            while self.in_flight.len() > max {
+            let held = |s: &Self| s.in_flight.iter().map(|b| b.bytes).sum::<u64>();
+            while self.in_flight.len() > max
+                || (self.in_flight.len() > 1 && held(self) > MAX_IN_FLIGHT_BYTES)
+            {
                 self.wait_oldest(device)?;
             }
         }
@@ -216,7 +232,7 @@ impl Stream {
 
     /// Submits the open batch and waits for everything submitted.
     pub(crate) fn synchronize(&mut self, device: &ash::Device, queue: vk::Queue) -> Result<()> {
-        self.flush(device, queue)?;
+        self.flush(device, queue, 0)?;
         self.reap(device, true)
     }
 
