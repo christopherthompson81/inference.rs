@@ -1423,3 +1423,25 @@ scalar), the f32 SiLU and sigmoid (a libm `exp` an element), and the decoder's s
 word list, a song and a 24 s sample unchanged. On an Abkhaz story (a language the model does not know, its words
 guesses) 4 spans move; the bf16 encoder alone moves 3 spans of it from f32 (and 8 of the word list), the decoder's
 copies on top 2.
+
+## Run 49 - 2026-11-08 (laptop: Ryzen 7 7840U, CPU only)
+
+**Question:** the CPU held the speech models' weights in f32 (3.1 GB loaded, 4.3 GB peak with both models on the
+10-minute meeting; CUDA on the 3090 1.9 and 2.4). The bf16 scope's large products round the weights to bf16 as they
+pack them, so a weight kept in bf16 gives those products unchanged. Does keeping it so cost anything?
+
+**Change:** `Linear::to_half` (which the transcription pipeline calls for the `bf16_matmuls` models, Run 5 of
+`vulkan_speech_memory_investigation.md`) keeps a CPU weight in bf16 where the scope may take bf16 inputs (AVX-512
+BF16, `INFERENCE_CPU_NO_BF16` unset, so `bf16_check.sh`'s f32 side stays f32). `Linear::forward` sends its large
+products to the bf16 gemm with B as bf16 (`gemm_bf16::BOperand::Bf16`: packing rearranges, nothing converts); a
+smaller one, or one outside the scope, multiplies a widened copy. Test:
+`a_bf16_weight_linear_matches_its_f32_layer_on_the_cpu` (1, 3 and 512 rows, in and out of the scope).
+
+**Result** (process RSS MB, f32 weights -> bf16):
+
+```
+loaded 3123 -> 2731 (2050-2590 after the first requests); asr peak 4122-4133 -> 2670-2731; diar 3651 -> 2588;
+both models 4338 -> 2931
+asr 22.34-22.63 -> 21.96-22.08 s, diar 8.17 -> 8.25 s, both 28.64 -> 28.63 s
+meeting transcript and diarization byte-identical; eight clips of 3-33 s (both models) byte-identical
+```
