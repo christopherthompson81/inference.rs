@@ -549,8 +549,13 @@ impl Recorder<'_> {
         self.dispatches.set(self.dispatches.get() + 1);
     }
 
-    /// Keeps `resource` alive until the commands recorded here have finished.
+    /// Keeps `resource` alive until the commands recorded here have finished: a pooled buffer's allocation rather than
+    /// the buffer, which goes back to the pool for later-recorded work when its last user drops it.
     pub fn retain(&self, resource: Retained) {
+        let resource = match resource.downcast::<crate::Buffer>() {
+            Ok(buffer) => buffer.retained(),
+            Err(other) => other,
+        };
         self.retained.borrow_mut().push(resource);
     }
 }

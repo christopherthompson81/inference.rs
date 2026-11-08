@@ -127,3 +127,33 @@ Kept at 512 MB. Checks: lint, CPU (3153), CUDA (3356) and the Vulkan set pass.
 Where it stands (MiB above the idle desktop): Vulkan ~4600-5100 peak, CUDA ~2440. Load 2466 against 1895, the rest
 a request's working set against CUDA's ~550. Next: stream-ordered reuse of a dropped buffer by the work recorded
 after it.
+
+## Run 7 - 2026-11-08 13:40
+
+Question: can a dropped buffer be reused by the work recorded after it, as CUDA's allocator reuses a block in stream
+order, rather than once its batch's fence signals?
+
+Checked first: every ordered dispatch ends with a compute barrier, copies and fills have barriers on both sides, and
+a barrier's first scope is every command earlier in submission order (other command buffers included). The one
+dispatch free to overlap the next (the MoE cm2 tile widths) runs inside one op ending in an ordered dispatch, so no
+tensor drops between them. The CPU never maps a discrete GPU's device buffer (staging copies on the stream).
+
+Change: a pooled allocation is an `Arc<Held>`, shared by its buffer, the pool while idle, and the batches whose
+commands use it (`Recorder::retain` keeps a pooled buffer's `Held`, not the buffer), and freed when the last drops
+it. A buffer goes back to the pool when its last user drops it; a device allocation is taken again at once, a mapped
+one (host staging, an iGPU's) only once no batch holds it. Freeing room prefers allocations nothing else holds, and
+synchronizes before the rest. Test: `a_dropped_buffer_is_reused_in_stream_order` (a buffer dropped with a copy from
+it pending is the next of its size; that buffer's fill runs after the copy, which reads the old values).
+
+```
+10-minute clip: peak 4795 / 4794 / 4933 MiB (desktop 1232; Run 6 5816-6314); load 3233; asr 2.65-2.69 s, diar
+1.00-1.02 s, both 3.23-3.33 s; 0 word diffs; diarization 150 segments, the CPU's speakers, within 0.01 s
+greedy text (greedy.sh): 27B, 35B, 0.8B as before, word for word
+0.8B, alternating with the old retention: stream 177.5 / 184.1 / 181.0 vs 183.6 / 180.0 / 173.6 tok/s;
+  prefill 9688 / 9598 / 9584 vs 9578 / 9432 / 9399
+27B 493 / 29.2, 35B 2890 / 75.9
+```
+
+Checks: lint, CPU (3153), CUDA (3356), `--vulkan` (63), and the Vulkan set three times (662) pass.
+
+Where it stands, MiB above the idle desktop: after load 2001 (CUDA 1895), peak 3562-3701 (CUDA ~2440).

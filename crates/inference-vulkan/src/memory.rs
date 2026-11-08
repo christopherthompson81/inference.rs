@@ -36,28 +36,62 @@ pub const EXACT_RESERVE_BYTES: u64 = 2 << 30;
 // A host write to or read of device memory goes through staging buffers of up to this, a submit each
 const STAGING_BYTES: usize = 64 << 20;
 
+// an allocation back in the pool, and when it came back
+type PoolEntry = (std::time::Instant, Arc<Held>);
+
 /// Buffers nothing references any longer, by placement and capacity, for new ones to reuse: a Vulkan allocation costs
 /// tens of microseconds, and a model step allocates hundreds of short-lived tensors.
 #[derive(Default)]
 pub(crate) struct BufferPool {
-    free: HashMap<(bool, u64), Vec<Allocation>>,
+    // oldest first in each class
+    free: HashMap<(bool, u64), Vec<PoolEntry>>,
     // idle host bytes (capped), and idle device bytes (counted, not capped)
     bytes: u64,
     device_bytes: u64,
 }
 
 // a buffer, its memory and the memory's mapping
+#[derive(Clone, Copy)]
 struct Allocation {
     buffer: vk::Buffer,
     memory: vk::DeviceMemory,
     ptr: *mut u8,
     size: u64,
-    // when it came back to the pool
-    idle_since: Option<std::time::Instant>,
 }
 
-// SAFETY: the handles and mapping are only used by whoever takes the allocation out of the pool's lock
-unsafe impl Send for Allocation {}
+/// A pooled allocation, shared by the buffer using it, the pool while it is idle, and the batches whose commands use
+/// it (they retain this, not the buffer): freed when the last of them drops it. A device buffer goes back to the pool
+/// when its last user drops it, before the work recorded on it finishes, and the work recorded after takes it: the
+/// stream orders every command after the ones before (a barrier follows each), as CUDA's allocator reuses a block in
+/// stream order. The CPU never maps a device buffer; a mapped one waits for its batches before it is reused.
+pub(crate) struct Held {
+    // weak, so the pool's entries do not keep their context alive
+    context: std::sync::Weak<Context>,
+    allocation: Allocation,
+}
+
+// SAFETY: the handles and mapping are only used by whoever holds the buffer the allocation backs
+unsafe impl Send for Held {}
+unsafe impl Sync for Held {}
+
+impl Held {
+    // whether nothing but the pool holds it: no buffer, and no batch whose commands may still run on it
+    fn idle(held: &Arc<Held>) -> bool {
+        Arc::strong_count(held) == 1
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        // a context dropping or shut down frees (or leaks) its memory itself
+        if let Some(context) = self.context.upgrade()
+            && !context.is_shut()
+        {
+            // SAFETY: the last holder is gone, so no command still uses it
+            unsafe { self.allocation.release(&context) };
+        }
+    }
+}
 
 impl BufferPool {
     pub(crate) fn device_bytes(&self) -> u64 {
@@ -67,9 +101,9 @@ impl BufferPool {
     /// # Safety
     /// No submit may still use the buffers.
     pub(crate) unsafe fn destroy(&mut self, device: &ash::Device) {
-        for allocation in self.free.drain().flat_map(|(_, allocations)| allocations) {
-            // SAFETY: the caller's contract
-            unsafe { allocation.free(device) };
+        for (_, held) in self.free.drain().flat_map(|(_, allocations)| allocations) {
+            // SAFETY: the caller's contract; the held allocation's own drop skips a dropping or shut context
+            unsafe { held.allocation.free(device) };
         }
         self.bytes = 0;
         self.device_bytes = 0;
@@ -156,7 +190,8 @@ pub struct Buffer {
     ptr: *mut u8,
     len: usize,
     capacity: u64,
-    pooled: bool,
+    // a pooled buffer's allocation; a buffer without one frees its own when it drops
+    held: Option<Arc<Held>>,
 }
 
 // SAFETY: the mapping is plain memory, and the Vulkan handles are only used through the context's synchronized calls
@@ -199,13 +234,13 @@ impl Buffer {
         {
             pooled = take();
         }
-        if let Some(Allocation {
-            buffer,
-            memory,
-            ptr,
-            ..
-        }) = pooled
-        {
+        if let Some(held) = pooled {
+            let Allocation {
+                buffer,
+                memory,
+                ptr,
+                ..
+            } = held.allocation;
             return Ok(Self {
                 context: context.clone(),
                 buffer,
@@ -213,7 +248,7 @@ impl Buffer {
                 ptr,
                 len,
                 capacity,
-                pooled: true,
+                held: Some(held),
             });
         }
         Self::allocate(context, len, capacity, device_local, true)
@@ -257,10 +292,7 @@ impl Buffer {
                 .lock()
                 .expect("vulkan pool poisoned")
                 .drain_stale(std::time::Instant::now());
-            for allocation in stale {
-                // SAFETY: a pooled allocation is one no submit uses any longer
-                unsafe { allocation.release(context) };
-            }
+            drop(stale);
             make_room(context, capacity)?;
         }
         let first = Self::allocate_once(context, len, capacity, device_local, pooled);
@@ -273,10 +305,7 @@ impl Buffer {
             .lock()
             .expect("vulkan pool poisoned")
             .drain(true);
-        for allocation in idle {
-            // SAFETY: a pooled allocation is one no submit uses any longer
-            unsafe { allocation.release(context) };
-        }
+        drop(idle);
         let retried = Self::allocate_once(context, len, capacity, true, pooled);
         if !out_of_memory(&retried) {
             return retried;
@@ -350,6 +379,17 @@ impl Buffer {
             if device_local {
                 context.device_bytes.fetch_add(capacity, Ordering::Relaxed);
             }
+            let held = pooled.then(|| {
+                Arc::new(Held {
+                    context: Arc::downgrade(context),
+                    allocation: Allocation {
+                        buffer,
+                        memory,
+                        ptr,
+                        size: capacity,
+                    },
+                })
+            });
             Ok(Self {
                 context: context.clone(),
                 buffer,
@@ -357,8 +397,16 @@ impl Buffer {
                 ptr,
                 len,
                 capacity,
-                pooled,
+                held,
             })
+        }
+    }
+
+    // what a command using it retains: its allocation where pooled, else the buffer
+    pub(crate) fn retained(self: Arc<Self>) -> crate::Retained {
+        match &self.held {
+            Some(held) => held.clone(),
+            None => self,
         }
     }
 
@@ -497,31 +545,33 @@ pub fn f32_bytes(values: &[f32]) -> &[u8] {
 }
 
 impl Drop for Buffer {
-    // a recorded command retains what it uses, so nothing submitted reads a buffer once it drops
+    // a recorded command retains what it uses (a pooled buffer's allocation, an unpooled buffer itself), so a freed
+    // allocation is one nothing submitted uses
     fn drop(&mut self) {
         // the device is gone: its memory went with it
         if self.context.is_shut() {
             return;
         }
-        let allocation = Allocation {
-            buffer: self.buffer,
-            memory: self.memory,
-            ptr: self.ptr,
-            size: self.capacity,
-            idle_since: None,
-        };
-        let refused = if self.pooled {
-            self.context
-                .pool
-                .lock()
-                .expect("vulkan pool poisoned")
-                .give(self.ptr.is_null(), self.capacity, allocation)
-        } else {
-            Some(allocation)
-        };
-        if let Some(allocation) = refused {
-            // SAFETY: see above
-            unsafe { allocation.release(&self.context) };
+        match self.held.take() {
+            Some(held) => {
+                let refused = self
+                    .context
+                    .pool
+                    .lock()
+                    .expect("vulkan pool poisoned")
+                    .give(self.ptr.is_null(), self.capacity, held);
+                drop(refused);
+            }
+            None => {
+                let allocation = Allocation {
+                    buffer: self.buffer,
+                    memory: self.memory,
+                    ptr: self.ptr,
+                    size: self.capacity,
+                };
+                // SAFETY: see above
+                unsafe { allocation.release(&self.context) };
+            }
         }
     }
 }
@@ -539,15 +589,12 @@ impl Context {
         let mut idle = pool.drain(false);
         while !self.is_unified() && pool.device_bytes > STALE_KEEP_BYTES {
             match pool.pop_largest(true) {
-                Some(allocation) => idle.push(allocation),
+                Some(held) => idle.push(held),
                 None => break,
             }
         }
         drop(pool);
-        for allocation in idle {
-            // SAFETY: a pooled allocation is one no submit uses any longer
-            unsafe { allocation.release(self) };
-        }
+        drop(idle);
     }
 }
 
@@ -562,8 +609,7 @@ fn make_room(context: &Context, capacity: u64) -> Result<()> {
             .expect("vulkan pool poisoned")
             .pop_largest(true);
         match largest {
-            // SAFETY: a pooled allocation is one no submit uses any longer
-            Some(allocation) => unsafe { allocation.release(context) },
+            Some(held) => drop(held),
             None if !synchronized => {
                 synchronized = true;
                 if !context.try_synchronize()? {
@@ -577,84 +623,89 @@ fn make_room(context: &Context, capacity: u64) -> Result<()> {
 }
 
 impl BufferPool {
-    // the largest idle allocation of one placement, out of the pool
-    fn pop_largest(&mut self, device_local: bool) -> Option<Allocation> {
-        let key = self
+    // the largest allocation of one placement that nothing but the pool holds, out of the pool: freed as it drops
+    fn pop_largest(&mut self, device_local: bool) -> Option<Arc<Held>> {
+        let (key, at) = self
             .free
             .iter()
-            .filter(|(key, allocations)| key.0 == device_local && !allocations.is_empty())
-            .map(|(&key, _)| key)
-            .max_by_key(|&(_, capacity)| capacity)?;
-        let allocation = self.free.get_mut(&key)?.pop()?;
-        if device_local {
-            self.device_bytes -= key.1;
-        } else {
-            self.bytes -= key.1;
-        }
-        Some(allocation)
+            .filter(|(key, _)| key.0 == device_local)
+            .filter_map(|(&key, entries)| {
+                entries
+                    .iter()
+                    .rposition(|(_, held)| Held::idle(held))
+                    .map(|at| (key, at))
+            })
+            .max_by_key(|&((_, capacity), _)| capacity)?;
+        let (_, held) = self.free.get_mut(&key)?.remove(at);
+        self.forget(key, 1);
+        Some(held)
     }
 
-    // past STALE_KEEP_BYTES idle, the idle device allocations none has taken for STALE_IDLE, out of the pool
-    fn drain_stale(&mut self, now: std::time::Instant) -> Vec<Allocation> {
+    // idle bytes taken off the count as `n` entries of class `key` leave
+    fn forget(&mut self, (local, capacity): (bool, u64), n: usize) {
+        if local {
+            self.device_bytes -= capacity * n as u64;
+        } else {
+            self.bytes -= capacity * n as u64;
+        }
+    }
+
+    // past STALE_KEEP_BYTES idle, the device allocations none has taken for STALE_IDLE, out of the pool
+    fn drain_stale(&mut self, now: std::time::Instant) -> Vec<Arc<Held>> {
         let mut out = Vec::new();
         if self.device_bytes <= STALE_KEEP_BYTES {
             return out;
         }
-        for (&(local, capacity), allocations) in &mut self.free {
-            if !local {
-                continue;
-            }
-            let stale = allocations
+        let keys: Vec<_> = self.free.keys().copied().filter(|key| key.0).collect();
+        for key in keys {
+            let entries = self.free.get_mut(&key).expect("a listed class");
+            let stale = entries
                 .iter()
-                .take_while(|a| {
-                    a.idle_since
-                        .is_some_and(|t| now.duration_since(t) >= STALE_IDLE)
-                })
+                .take_while(|(since, _)| now.duration_since(*since) >= STALE_IDLE)
                 .count();
-            self.device_bytes -= capacity * stale as u64;
-            out.extend(allocations.drain(..stale));
+            out.extend(entries.drain(..stale).map(|(_, held)| held));
+            self.forget(key, stale);
         }
         out
     }
 
-    // every idle allocation of one placement, out of the pool
-    fn drain(&mut self, device_local: bool) -> Vec<Allocation> {
+    // every allocation of one placement, out of the pool
+    fn drain(&mut self, device_local: bool) -> Vec<Arc<Held>> {
+        let keys: Vec<_> = self
+            .free
+            .keys()
+            .copied()
+            .filter(|key| key.0 == device_local)
+            .collect();
         let mut out = Vec::new();
-        self.free.retain(|&(local, capacity), allocations| {
-            if local != device_local {
-                return true;
-            }
-            if local {
-                self.device_bytes -= capacity * allocations.len() as u64;
-            } else {
-                self.bytes -= capacity * allocations.len() as u64;
-            }
-            out.append(allocations);
-            false
-        });
+        for key in keys {
+            let entries = self.free.remove(&key).expect("a listed class");
+            self.forget(key, entries.len());
+            out.extend(entries.into_iter().map(|(_, held)| held));
+        }
         out
     }
 
-    fn take(&mut self, device_local: bool, capacity: u64) -> Option<Allocation> {
-        let allocation = self.free.get_mut(&(device_local, capacity))?.pop()?;
-        if device_local {
-            self.device_bytes -= capacity;
+    // the newest allocation of a class; a mapped one only once no batch holds it, since the CPU writes it in place
+    fn take(&mut self, device_local: bool, capacity: u64) -> Option<Arc<Held>> {
+        let key = (device_local, capacity);
+        let entries = self.free.get_mut(&key)?;
+        let at = if device_local {
+            entries.len().checked_sub(1)?
         } else {
-            self.bytes -= capacity;
-        }
-        Some(allocation)
+            entries.iter().rposition(|(_, held)| Held::idle(held))?
+        };
+        let (_, held) = entries.remove(at);
+        self.forget(key, 1);
+        Some(held)
     }
 
-    // keeps `allocation` for reuse, or hands it back to be freed when it is not a pooled size or the pool is full
-    fn give(
-        &mut self,
-        device_local: bool,
-        capacity: u64,
-        allocation: Allocation,
-    ) -> Option<Allocation> {
+    // keeps `held` for reuse, or hands it back (to be freed as it drops) when it is not a pooled size or the pool is
+    // full
+    fn give(&mut self, device_local: bool, capacity: u64, held: Arc<Held>) -> Option<Arc<Held>> {
         if capacity > MAX_POOLED_BYTES || (!device_local && self.bytes + capacity > MAX_POOL_BYTES)
         {
-            return Some(allocation);
+            return Some(held);
         }
         if device_local {
             self.device_bytes += capacity;
@@ -664,10 +715,7 @@ impl BufferPool {
         self.free
             .entry((device_local, capacity))
             .or_default()
-            .push(Allocation {
-                idle_since: Some(std::time::Instant::now()),
-                ..allocation
-            });
+            .push((std::time::Instant::now(), held));
         None
     }
 }
@@ -876,6 +924,51 @@ mod tests {
         Ok(())
     }
 
+    // a device buffer its last user drops while a copy from it is pending is the next buffer of its size, before the
+    // copy finishes; the stream orders that buffer's fill after the copy, which still reads the old values
+    #[test]
+    fn a_dropped_buffer_is_reused_in_stream_order() -> Result<()> {
+        let context = match Context::new() {
+            Ok(context) => context,
+            Err(err) => {
+                eprintln!("skipping: {err}");
+                return Ok(());
+            }
+        };
+        if context.is_unified() {
+            return Ok(());
+        }
+        const BYTES: usize = 8 << 20;
+        let source = Arc::new(Buffer::new(&context, BYTES)?);
+        let copy = Arc::new(Buffer::new(&context, BYTES)?);
+        let reused_handle = source.buffer;
+        context.record(|r| {
+            r.fill(source.buffer, BYTES as u64, 1);
+            r.copy(source.buffer, 0, copy.buffer, 0, BYTES as u64);
+            r.retain(source.clone());
+            r.retain(copy.clone());
+            Ok(())
+        })?;
+        drop(source);
+        let mut next = Buffer::new(&context, BYTES)?;
+        assert_eq!(
+            next.buffer, reused_handle,
+            "the dropped allocation is taken again"
+        );
+        next.fill(2)?;
+        let words = |bytes: Vec<u8>| -> Vec<u32> {
+            bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|w| u32::from_le_bytes(*w))
+                .collect()
+        };
+        assert!(words(copy.read()?).iter().all(|&w| w == 1));
+        assert!(words(next.read()?).iter().all(|&w| w == 2));
+        Ok(())
+    }
+
     // device memory is counted while a buffer lives and while the pool holds it, and released largest first
     #[test]
     fn device_bytes_follow_buffers_through_the_pool() -> Result<()> {
@@ -900,9 +993,9 @@ mod tests {
         assert_eq!(context.device_bytes.load(Ordering::Relaxed), expect(held));
         if device {
             let largest = context.pool.lock().unwrap().pop_largest(true).unwrap();
-            assert_eq!(largest.size, capacity(40 << 20));
-            // SAFETY: a pooled allocation is one no submit uses
-            unsafe { largest.release(&context) };
+            assert_eq!(largest.allocation.size, capacity(40 << 20));
+            // the pool's was the last hold, so it frees as it drops
+            drop(largest);
             assert_eq!(
                 context.device_bytes.load(Ordering::Relaxed),
                 expect(held - capacity(40 << 20))
