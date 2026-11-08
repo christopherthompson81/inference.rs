@@ -180,7 +180,16 @@ impl Buffer {
                 .expect("vulkan pool poisoned")
                 .take(device_local, capacity)
         };
-        let pooled = take();
+        let mut pooled = take();
+        // short of room, finished work's buffers come back before any idle one is freed: a prompt's temporaries
+        // (recorded a forward ahead of the GPU) are the sizes the next ones take
+        while pooled.is_none()
+            && device_local
+            && context.device_free() < capacity + ROOM_MARGIN_BYTES
+            && context.try_wait_oldest()?
+        {
+            pooled = take();
+        }
         if let Some(Allocation {
             buffer,
             memory,

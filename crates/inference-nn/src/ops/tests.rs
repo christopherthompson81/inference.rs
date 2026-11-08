@@ -3002,3 +3002,46 @@ fn vulkan_fused_glu_matches_the_cpu() -> inference_tensor::Result<()> {
     }
     Ok(())
 }
+
+// a residual add and the RMS norm of its sum on Vulkan, fused for a decode's rows (one, a verify step's three, a
+// 4096-wide row) and unfused past them, against the CPU's add and norm
+#[test]
+fn vulkan_add_rms_norm_matches_the_cpu() -> inference_tensor::Result<()> {
+    let Ok(vk) = Device::new_vulkan(0) else {
+        return Ok(());
+    };
+    const TOLERANCE: f32 = 1e-5;
+    const EPS: f64 = 1e-6;
+    let cpu = Device::Cpu;
+    let max_diff = |got: &Tensor, want: &Tensor| -> inference_tensor::Result<f32> {
+        (got.to_device(&cpu)? - want)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()
+    };
+    for (rows, cols) in [(1usize, 1024usize), (3, 2048), (1, 4096), (9, 1024)] {
+        let x = Tensor::randn(0f32, 1.0, (1, rows, cols), &cpu)?;
+        let residual = Tensor::randn(0f32, 3.0, (1, rows, cols), &cpu)?;
+        let weight = Tensor::randn(1f32, 0.2, cols, &cpu)?;
+        let sum = (&x + &residual)?;
+        let want = crate::ops::rms_norm(&sum, &weight, EPS as f32)?;
+        let (xv, rv, wv) = (
+            x.to_device(&vk)?,
+            residual.to_device(&vk)?,
+            weight.to_device(&vk)?,
+        );
+        let fused = inference_tensor::vulkan::add_rms_norm(&xv, &rv, &wv, EPS as f32)?;
+        assert_eq!(fused.is_some(), rows <= 8, "{rows} rows of {cols}");
+        let norm = crate::layers::RmsNorm::from_w(wv, EPS)?;
+        let (got_sum, got) = norm.forward_add_rms_norm(&xv, &rv)?;
+        assert_eq!(
+            max_diff(&got_sum, &sum)?,
+            0.0,
+            "{rows} rows of {cols}: the sum"
+        );
+        let diff = max_diff(&got, &want)?;
+        assert!(diff < TOLERANCE, "{rows} rows of {cols}: {diff}");
+    }
+    Ok(())
+}

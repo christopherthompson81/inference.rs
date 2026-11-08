@@ -154,6 +154,10 @@ impl QuantMethod for PendingIsqLayer {
         self.resolve().ok()?.get_qtensor()
     }
 
+    fn vulkan_block_weight(&self) -> Option<inference_tensor::vulkan::BlockWeight> {
+        self.resolve().ok()?.vulkan_block_weight()
+    }
+
     #[cfg(all(feature = "cuda", has_marlin_kernels))]
     fn prepare_gguf_affine_raw(
         &self,

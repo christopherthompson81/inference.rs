@@ -1,13 +1,17 @@
 // Reads of the weight buffer `w` (u16s) and the int8 dot of one 32-value block, for the matvecs that include it after
-// declaring `w`.
+// declaring `w`. A kernel reading two weights defines W16 to pick between them.
+
+#ifndef W16
+#define W16(at) w[at]
+#endif
 
 // the 32 bits at u16 index `at`
 uint word(uint at) {
-    return uint(w[at]) | (uint(w[at + 1]) << 16);
+    return uint(W16(at)) | (uint(W16(at + 1)) << 16);
 }
 
 float half_at(uint at) {
-    return unpackHalf2x16(uint(w[at])).x;
+    return unpackHalf2x16(uint(W16(at))).x;
 }
 
 int dot4(uvec4 a, uvec4 b) {

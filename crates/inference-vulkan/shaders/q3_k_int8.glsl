@@ -8,7 +8,7 @@ const uint SUPER_VALUES = 256;
 const uint SUPER_U16 = 55;
 
 uint q3_byte(uint base, uint i) {
-    return (uint(w[base + i / 2]) >> (8 * (i % 2))) & 0xffu;
+    return (uint(W16(base + i / 2)) >> (8 * (i % 2))) & 0xffu;
 }
 
 // scale k of 16: its low four bits from bytes 0..7 (low nibble, then high), its top two from bytes 8..11

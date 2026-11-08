@@ -799,6 +799,56 @@ pub(crate) fn relu_sqr(x: &Tensor) -> Result<Option<Tensor>> {
     Ok(Some(tensor_of(out, x.dims())))
 }
 
+/// [`crate::vulkan::add_rms_norm`]'s kernel: `None` unless all three are contiguous f32 on Vulkan and the rows a decode's.
+pub(crate) fn add_rms_norm(
+    x: &Tensor,
+    residual: &Tensor,
+    weight: &Tensor,
+    eps: f32,
+) -> Result<Option<(Tensor, Tensor)>> {
+    let f32 = DType::F32;
+    let on_vulkan = |t: &Tensor| t.device().is_vulkan() && t.dtype() == f32 && t.is_contiguous();
+    let Some(&cols) = x.dims().last() else {
+        return Ok(None);
+    };
+    let rows = x.elem_count() / cols.max(1);
+    if !(on_vulkan(x) && on_vulkan(residual) && on_vulkan(weight))
+        || residual.dims() != x.dims()
+        || weight.elem_count() != cols
+        || !inference_vulkan::AddRmsNorm::fits(rows, cols)
+    {
+        return Ok(None);
+    }
+    let (xb, rb, wb) = (bound(x, f32)?, bound(residual, f32)?, bound(weight, f32)?);
+    let device = x.device().as_vulkan_device()?.clone();
+    let count = x.elem_count();
+    let storage = || -> Result<VulkanStorage> {
+        Ok(VulkanStorage {
+            buffer: Arc::new(device.buffer(count * 4)?),
+            device: device.clone(),
+            count,
+            dtype: f32,
+        })
+    };
+    let (sum, out) = (storage()?, storage()?);
+    device
+        .context
+        .record(|r| {
+            r.add_rms_norm(&inference_vulkan::AddRmsNorm {
+                rows,
+                cols,
+                eps,
+                x: (&xb.0, xb.1),
+                residual: (&rb.0, rb.1),
+                alpha: (&wb.0, wb.1),
+                sum: &sum.buffer,
+                out: &out.buffer,
+            })
+        })
+        .map_err(vk_err)?;
+    Ok(Some((tensor_of(sum, x.dims()), tensor_of(out, x.dims()))))
+}
+
 pub(crate) fn gated_rmsnorm(
     x: &Tensor,
     gate: &Tensor,
@@ -851,18 +901,22 @@ pub(crate) fn gated_rmsnorm(
     Ok(tensor_of(out, x.dims()))
 }
 
-pub(crate) fn glu(a: &Tensor, b: &Tensor, act: crate::vulkan::GluAct) -> Result<Option<Tensor>> {
+fn glu_op(act: crate::vulkan::GluAct) -> MapOp {
     use crate::vulkan::GluAct as G;
-    if a.dims() != b.dims() || a.dtype() != DType::F32 || b.dtype() != DType::F32 {
-        return Ok(None);
-    }
-    let op = match act {
+    match act {
         G::Silu => MapOp::SiluMul,
         G::Gelu => MapOp::GeluMul,
         G::Relu => MapOp::ReluMul,
         G::GeluErf => MapOp::GeluErfMul,
         G::Sigmoid => MapOp::SigmoidMul,
-    };
+    }
+}
+
+pub(crate) fn glu(a: &Tensor, b: &Tensor, act: crate::vulkan::GluAct) -> Result<Option<Tensor>> {
+    if a.dims() != b.dims() || a.dtype() != DType::F32 || b.dtype() != DType::F32 {
+        return Ok(None);
+    }
+    let op = glu_op(act);
     let (a_storage, a_l) = a.storage_and_layout();
     let (b_storage, b_l) = b.storage_and_layout();
     let (crate::Storage::Vulkan(a_vk), crate::Storage::Vulkan(b_vk)) = (&*a_storage, &*b_storage)
@@ -941,6 +995,23 @@ pub(crate) fn block_type(kind: crate::vulkan::BlockKind) -> BlockType {
         K::Iq4Xs => BlockType::IQ4XS,
         K::Iq3S => BlockType::IQ3S,
         K::Q3K => BlockType::Q3K,
+    }
+}
+
+pub(crate) fn block_kind(ty: BlockType) -> crate::vulkan::BlockKind {
+    use crate::vulkan::BlockKind as K;
+    match ty {
+        BlockType::Q8_0 => K::Q8_0,
+        BlockType::Q5_0 => K::Q5_0,
+        BlockType::Q4_0 => K::Q4_0,
+        BlockType::Q4_1 => K::Q4_1,
+        BlockType::Q5_1 => K::Q5_1,
+        BlockType::Q4K => K::Q4K,
+        BlockType::Q5K => K::Q5K,
+        BlockType::Q6K => K::Q6K,
+        BlockType::IQ4XS => K::Iq4Xs,
+        BlockType::IQ3S => K::Iq3S,
+        BlockType::Q3K => K::Q3K,
     }
 }
 
@@ -1551,6 +1622,52 @@ pub(crate) fn quantized_mat_vec(
         })
         .map_err(vk_err)?;
     Ok(out)
+}
+
+/// [`BlockWeight::glu_mat_vec`](crate::vulkan::BlockWeight::glu_mat_vec)'s kernel, `None` past a decode's rows.
+pub(crate) fn glu_mat_vec(
+    xs: &Tensor,
+    (gate, up): (&Arc<Buffer>, &Arc<Buffer>),
+    ty: BlockType,
+    (n, k): (usize, usize),
+    act: crate::vulkan::GluAct,
+) -> Result<Option<Tensor>> {
+    let (storage, l) = xs.storage_and_layout();
+    let crate::Storage::Vulkan(x) = &*storage else {
+        return Ok(None);
+    };
+    let rows = l.shape().elem_count() / k.max(1);
+    if x.dtype != DType::F32
+        || !l.is_contiguous()
+        || l.shape().dims().last() != Some(&k)
+        || !(1..=inference_vulkan::MATVEC_MAX_ROWS).contains(&rows)
+    {
+        return Ok(None);
+    }
+    let out = x.empty(rows * n, DType::F32)?;
+    let scratch = Arc::new(x.device.buffer(MatVec::scratch_bytes(rows, k))?);
+    let (gate, up): (Arc<dyn Bound>, Arc<dyn Bound>) = (gate.clone(), up.clone());
+    x.device
+        .context
+        .record(|r| {
+            r.glu_mat_vec(&inference_vulkan::GluMatVec {
+                ty,
+                gate: &gate,
+                up: &up,
+                act: glu_op(act),
+                rows: n,
+                cols: k,
+                x: &x.buffer,
+                x_offset: l.start_offset(),
+                y: &out.buffer,
+                x_rows: rows,
+                scratch: &scratch,
+            })
+        })
+        .map_err(vk_err)?;
+    let mut dims = l.shape().dims().to_vec();
+    *dims.last_mut().expect("dims hold k") = n;
+    Ok(Some(tensor_of(out, dims)))
 }
 
 /// The `count` rows of a `vocab x cols` quantized weight at the u32 `ids` (bound at their element offset).

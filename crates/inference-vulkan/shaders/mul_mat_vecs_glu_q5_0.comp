@@ -1,0 +1,7 @@
+#version 450
+// The multi-row matvec over a gate and an up Q5_0 W, ending in their GLU.
+#extension GL_GOOGLE_include_directive : require
+#define GLU
+#include "mat_vec_head.glsl"
+#include "q5_0_int8.glsl"
+#include "mat_vec_main.glsl"

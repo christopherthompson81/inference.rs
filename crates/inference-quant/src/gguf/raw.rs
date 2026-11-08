@@ -901,6 +901,15 @@ impl QuantMethod for GgufRawMatMul {
         Some(&self.w)
     }
 
+    fn vulkan_block_weight(&self) -> Option<inference_tensor::vulkan::BlockWeight> {
+        match &self.w.storage {
+            RawStorage::Vulkan { weight, .. } if self.b.is_none() && self.scale.is_none() => {
+                Some(weight.clone())
+            }
+            _ => None,
+        }
+    }
+
     fn cpu_gguf_blocks(&self) -> Option<super::cpu_experts::CpuGgufBlocks<'_>> {
         match &self.w.storage {
             RawStorage::Cpu(bytes) if self.b.is_none() => Some(super::cpu_experts::CpuGgufBlocks {

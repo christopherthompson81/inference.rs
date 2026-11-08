@@ -127,6 +127,14 @@ impl QuantMethod for DynamicLoraLinear {
         }
     }
 
+    fn vulkan_block_weight(&self) -> Option<inference_tensor::vulkan::BlockWeight> {
+        if self.site_is_active() {
+            None
+        } else {
+            self.base.vulkan_block_weight()
+        }
+    }
+
     #[cfg(all(feature = "cuda", has_marlin_kernels))]
     fn prepare_gguf_affine_raw(
         &self,

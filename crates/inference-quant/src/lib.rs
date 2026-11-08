@@ -2052,6 +2052,11 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
         None
     }
 
+    /// The bias-free weight as Vulkan's block kernels read it, for the fused decode matvecs.
+    fn vulkan_block_weight(&self) -> Option<inference_tensor::vulkan::BlockWeight> {
+        None
+    }
+
     /// The weight's GGUF blocks in host memory, as the CPU kernels read them in place.
     fn cpu_gguf_blocks(&self) -> Option<gguf::cpu_experts::CpuGgufBlocks<'_>> {
         None
@@ -2561,6 +2566,23 @@ pub fn try_fused_quantized_gate_up(
             &gate_q, &up_q, xs, activation,
         )?))
     }
+}
+
+/// A decode's gate and up GGUF projections and their GLU as one Vulkan matvec, or `None` where it does not apply.
+pub fn try_fused_gate_up_vulkan(
+    xs: &Tensor,
+    gate: &dyn QuantMethod,
+    up: &dyn QuantMethod,
+    activation: GluActivationType,
+) -> Result<Option<Tensor>> {
+    if !xs.device().is_vulkan() || gate.stats_snapshot().is_some() || up.stats_snapshot().is_some()
+    {
+        return Ok(None);
+    }
+    let (Some(gate_w), Some(up_w)) = (gate.vulkan_block_weight(), up.vulkan_block_weight()) else {
+        return Ok(None);
+    };
+    gate_w.glu_mat_vec(&up_w, xs, utils::vulkan_glu_act(activation))
 }
 
 /// CPU fused m==1 matmuls sharing one lhs: one input quantization + one parallel region

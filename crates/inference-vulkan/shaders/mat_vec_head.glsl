@@ -5,7 +5,8 @@
 // then sum by subgroup. The including shader includes a `*_int8.glsl` between this and mat_vec_main.glsl: its
 // SUPER_VALUES (values a stored block holds, 32 or 256) and SUPER_U16 (its size), and `unpack_sub`, which turns 32
 // values of a stored block into int8 halves q (values 0..15 and 16..31) and coefficients (s_lo, s_hi, o_lo, o_hi)
-// with w = s q + o over each half.
+// with w = s q + o over each half. With GLU defined, a second weight of the same shape and type (`w2`, the GLU's up
+// projection) is read beside `w` (its gate) and y[m] = act(W x[m]) * (W2 x[m]).
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_control_flow_attributes : require
 #extension GL_EXT_integer_dot_product : require
@@ -18,6 +19,12 @@ layout(std430, binding = 0) readonly buffer W { uint16_t w[]; };
 layout(std430, binding = 1) readonly buffer Q { uvec4 xq[]; };
 layout(std430, binding = 2) writeonly buffer Y { float y[]; };
 layout(std430, binding = 3) readonly buffer S { vec2 xs[]; };
+#ifdef GLU
+layout(std430, binding = 4) readonly buffer W2 { uint16_t w2[]; };
+// which weight the type's reads take: set to a constant before each unpack, so it folds once inlined
+uint wsel = 0;
+#define W16(at) (wsel == 0u ? w[at] : w2[at])
+#endif
 
 layout(push_constant) uniform PushConstants {
     uint rows;
@@ -31,6 +38,11 @@ layout(push_constant) uniform PushConstants {
     uint m;
     // where the blocks' (d, d * sum q) start, in vec2s (the packed words come first in the same buffer)
     uint s_off;
+#ifdef GLU
+    // `w2` as `w_base`, and the GLU's MapOp number
+    uint w2_base;
+    uint act;
+#endif
 } pc;
 
 const uint THREADS = 32;
@@ -40,4 +52,10 @@ const uint MAX_M = 8;
 // a subgroup's sums, combined across the workgroup's subgroups by thread 0
 const uint MAX_SUBGROUPS = THREADS / 8;
 shared float partial[ROWS * MAX_M][MAX_SUBGROUPS];
+#ifdef GLU
+shared float partial2[ROWS * MAX_M][MAX_SUBGROUPS];
+#endif
 #include "int8_dot.glsl"
+#ifdef GLU
+#include "glu_act.glsl"
+#endif

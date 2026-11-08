@@ -8,7 +8,7 @@ const uint SUPER_VALUES = 256;
 const uint SUPER_U16 = 105;
 
 int scale_at(uint base, uint i) {
-    return int(((uint(w[base + 96 + i / 2]) >> (8 * (i % 2))) & 0xffu) << 24) >> 24;
+    return int(((uint(W16(base + 96 + i / 2)) >> (8 * (i % 2))) & 0xffu) << 24) >> 24;
 }
 
 vec4 unpack_sub(uint base, uint sub, out uvec4 lo, out uvec4 hi) {

@@ -1,6 +1,7 @@
 #version 450
 // out = op(a[, b]) elementwise over a shape of up to MAX_DIMS dims, every operand strided (a stride of 0 broadcasts).
 // A grid-stride loop over the output's elements, which are unravelled row-major over `dims`.
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 256) in;
 
@@ -56,27 +57,8 @@ const uint SIGN = 26;
 const uint ELU = 27;
 const uint SIGMOID = 28;
 const uint RELU2 = 29;
-// a GLU's halves: act(x) * y
-const uint SILU_MUL = 31;
-const uint GELU_MUL = 32;
-const uint RELU_MUL = 33;
-const uint GELU_ERF_MUL = 34;
-const uint SIGMOID_MUL = 35;
 const uint GELU_ERF = 30;
-
-const float GELU_C = 0.7978845608028654;
-const float GELU_K = 0.044715;
-const float INV_SQRT2 = 0.7071067811865476;
-
-// GLSL has no erf: Abramowitz and Stegun 7.1.26's erfc(z) for z >= 0 (erf within 1.5e-7), taken directly below zero
-// where 1 + erf(x) would cancel
-float gelu_erf(float x) {
-    float z = abs(x) * INV_SQRT2;
-    float t = 1.0 / (1.0 + 0.3275911 * z);
-    float poly = ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t;
-    float erfc = poly * exp(-z * z);
-    return x >= 0.0 ? x * (1.0 - 0.5 * erfc) : 0.5 * x * erfc;
-}
+#include "glu_act.glsl"
 
 float apply(float x, float y) {
     switch (pc.op) {
@@ -95,7 +77,7 @@ float apply(float x, float y) {
         case RECIP: return 1.0 / x;
         case SILU: return x / (1.0 + exp(-x));
         case RELU: return max(x, 0.0);
-        case GELU: return 0.5 * x * (1.0 + tanh(GELU_C * (x + GELU_K * x * x * x)));
+        case GELU: return gelu_tanh(x);
         case TANH: return tanh(x);
         case ABS: return abs(x);
         case AFFINE: return x * pc.p0 + pc.p1;
@@ -112,11 +94,11 @@ float apply(float x, float y) {
         case SIGMOID: return 1.0 / (1.0 + exp(-x));
         case RELU2: { float r = max(x, 0.0); return r * r; }
         case GELU_ERF: return gelu_erf(x);
-        case SILU_MUL: return x / (1.0 + exp(-x)) * y;
-        case GELU_MUL: return 0.5 * x * (1.0 + tanh(GELU_C * (x + GELU_K * x * x * x))) * y;
-        case RELU_MUL: return max(x, 0.0) * y;
-        case GELU_ERF_MUL: return gelu_erf(x) * y;
-        case SIGMOID_MUL: return y / (1.0 + exp(-x));
+        case SILU_MUL:
+        case GELU_MUL:
+        case RELU_MUL:
+        case GELU_ERF_MUL:
+        case SIGMOID_MUL: return glu(pc.op, x, y);
     }
     return x;
 }

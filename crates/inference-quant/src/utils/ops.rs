@@ -2207,15 +2207,7 @@ pub fn fused_glu(a: &Tensor, b: &Tensor, activation: GluActivationType) -> Resul
     // the fused op has no Vulkan kernel (its storages would round-trip the host); the activation and the product run
     // as the device's elementwise kernels
     if a.device().is_vulkan() {
-        use inference_tensor::vulkan::GluAct as G;
-        let fused = match activation {
-            GluActivationType::Silu => G::Silu,
-            GluActivationType::Gelu => G::Gelu,
-            GluActivationType::Relu => G::Relu,
-            GluActivationType::GeluErf => G::GeluErf,
-            GluActivationType::Sigmoid => G::Sigmoid,
-        };
-        if let Some(out) = inference_tensor::vulkan::glu(a, b, fused)? {
+        if let Some(out) = inference_tensor::vulkan::glu(a, b, vulkan_glu_act(activation))? {
             return Ok(out);
         }
         let act = match activation {
@@ -2232,6 +2224,17 @@ pub fn fused_glu(a: &Tensor, b: &Tensor, activation: GluActivationType) -> Resul
     let b = b.contiguous()?;
 
     a.apply_op2_no_bwd(&b, &FusedGlu(activation))
+}
+
+pub(crate) fn vulkan_glu_act(activation: GluActivationType) -> inference_tensor::vulkan::GluAct {
+    use inference_tensor::vulkan::GluAct as G;
+    match activation {
+        GluActivationType::Silu => G::Silu,
+        GluActivationType::Gelu => G::Gelu,
+        GluActivationType::Relu => G::Relu,
+        GluActivationType::GeluErf => G::GeluErf,
+        GluActivationType::Sigmoid => G::Sigmoid,
+    }
 }
 
 #[cfg(feature = "cuda")]

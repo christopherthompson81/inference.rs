@@ -423,6 +423,16 @@ impl Context {
         Ok(true)
     }
 
+    /// Waits for the oldest submitted batch, returning its buffers to the pool, unless the stream is in use or nothing is
+    /// in flight; whether it waited.
+    pub(crate) fn try_wait_oldest(&self) -> Result<bool> {
+        let Ok(mut stream) = self.stream.try_lock() else {
+            return Ok(false);
+        };
+        self.live()?;
+        stream.wait_oldest(&self.device)
+    }
+
     /// [`Self::record`], then [`Self::synchronize`].
     pub fn submit<T>(&self, record: impl FnOnce(&Recorder<'_>) -> Result<T>) -> Result<T> {
         let out = self.record(record)?;
