@@ -315,6 +315,8 @@ pub fn by_simd(plain: Snapshot, avx512: Snapshot) -> Snapshot {
     if std::arch::is_x86_feature_detected!("avx512f") {
         return avx512;
     }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = avx512;
     plain
 }
 
