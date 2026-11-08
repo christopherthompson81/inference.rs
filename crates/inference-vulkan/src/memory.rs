@@ -170,6 +170,9 @@ impl Buffer {
             return Err(Error::Invalid(format!("a buffer of {len} bytes")));
         }
         let capacity = capacity(len as u64);
+        context
+            .allocated
+            .fetch_add(capacity, std::sync::atomic::Ordering::Relaxed);
         let take = || {
             context
                 .pool
@@ -495,6 +498,21 @@ impl Drop for Buffer {
     }
 }
 
+impl Context {
+    /// Frees the pool's idle buffers on a unified-memory device, where they are host RAM held for reuse: for an idle
+    /// engine, whose next request may be hours off.
+    pub fn release_idle(&self) {
+        if !self.is_unified() {
+            return;
+        }
+        let idle = self.pool.lock().expect("vulkan pool poisoned").drain(false);
+        for allocation in idle {
+            // SAFETY: a pooled allocation is one no submit uses any longer
+            unsafe { allocation.release(self) };
+        }
+    }
+}
+
 // frees idle device buffers, the largest first, until `capacity` more device memory leaves ROOM_MARGIN_BYTES free;
 // once the pool is empty, the finished work's buffers come back to it first (once)
 fn make_room(context: &Context, capacity: u64) -> Result<()> {
@@ -721,6 +739,28 @@ mod tests {
             Buffer::new(&context, LEN)?.is_mapped(),
             context.is_unified()
         );
+        Ok(())
+    }
+
+    // an iGPU's dropped buffers wait in the pool for reuse until the idle release hands them back
+    #[test]
+    fn an_idle_release_empties_a_unified_pool() -> Result<()> {
+        let context = match Context::new() {
+            Ok(context) => context,
+            Err(err) => {
+                eprintln!("skipping: {err}");
+                return Ok(());
+            }
+        };
+        if !context.is_unified() {
+            return Ok(());
+        }
+        let idle = |context: &Context| context.pool.lock().expect("vulkan pool poisoned").bytes;
+        let before = idle(&context);
+        drop(Buffer::new(&context, 3 << 20)?);
+        assert!(idle(&context) > before);
+        context.release_idle();
+        assert_eq!(idle(&context), 0);
         Ok(())
     }
 

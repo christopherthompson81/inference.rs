@@ -14,9 +14,13 @@ pub(crate) const DISPATCHES_WHEN_IDLE: usize = 8;
 /// The multiply-adds a batch submits after, well inside the driver's job timeout (~2 s on amdgpu) at the slowest
 /// kernels' rate.
 pub(crate) const WORK_PER_SUBMIT: u64 = 4_000_000_000;
-/// Submitted batches a discrete GPU's stream lets run unfinished before a submit waits for the oldest: the CPU records
-/// a whole forward ahead of the GPU otherwise, and the temporaries its batches hold (a long prompt's, many GB) would
-/// fill device memory.
+/// The buffer bytes allocated since the last submit that submit the batch recording: a batch keeps its temporaries
+/// alive until it finishes, so with [`DISCRETE_MAX_IN_FLIGHT`] in flight this bounds a forward's live temporaries
+/// (on an iGPU, host RAM: Parakeet's subsampling over 10 minutes had held 4 GB, many small kernels a batch).
+pub(crate) const BYTES_PER_SUBMIT: u64 = 256 << 20;
+/// Submitted batches a stream lets run unfinished before a submit waits for the oldest: the CPU records a whole forward
+/// ahead of the GPU otherwise, and the temporaries its batches hold (a long prompt's, many GB) would fill device memory,
+/// or an iGPU's host RAM.
 pub(crate) const DISCRETE_MAX_IN_FLIGHT: usize = 3;
 
 /// A resource a recorded command uses, kept alive until the command finishes.

@@ -168,6 +168,16 @@ pub fn flash_attn(op: &FlashAttn<'_>) -> Result<Option<Tensor>> {
     }
 }
 
+/// Frees `device`'s idle pooled buffers where they are host RAM (an iGPU); nothing elsewhere.
+pub fn release_idle_memory(device: &crate::Device) {
+    #[cfg(feature = "vulkan")]
+    if let crate::Device::Vulkan(device) = device {
+        device.context().release_idle();
+    }
+    #[cfg(not(feature = "vulkan"))]
+    let _ = device;
+}
+
 /// Attention with a relative-position term (Transformer-XL's, as the FastConformer's), a query head a key head:
 /// score(i, j) = `q_content`_i . `k`_j + `q_position`_i . `positions`[pos_base - i + j], both query sets scaled
 /// beforehand, softmax over the keys, times `v`. `q_content` and `q_position` are `(batch, heads, rows, head_size)`,

@@ -1742,6 +1742,10 @@ impl Engine {
                     debug_assert!(cuda_decode_lease.is_none());
                     self.reclaim_idle_cuda_graph_memory(&mut cuda_memory_pool);
                 }
+                // an iGPU's pooled buffers are host RAM: an idle server hands them back
+                inference_tensor::vulkan::release_idle_memory(
+                    &get_mut_arcmutex!(self.pipeline).device(),
+                );
                 if channel_disconnected {
                     break 'lp;
                 }

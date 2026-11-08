@@ -1754,3 +1754,44 @@ The transcript and every word's speaker and start match the CPU's f32 run; 9 of 
 10 ms frame at the 0.5 threshold. Lightning recipe A: KLD 0.00894, top-1 96.26 % (unchanged); 4096-token prefill
 459.6 tok/s, decode 25.7. What is left of ASR: attention 5.4 s (~1.6 TFLOPS), the encoder's matmuls ~3.8 s, the
 decode's 7000 sequential steps 2.7 s.
+
+### Run 68 - 2026-11-08 (laptop: Radeon 780M)
+
+**Question:** after Run 67's speed, the memory. Both models loaded hold 2.9 GB of GTT; over 10 minutes of audio a
+transcription peaked at 11.8 GB (14.4 on a second run), transcription with diarization at 14.7, and 9.1 GB stayed
+held after the requests.
+
+**Finding (GTT sampled at 20 ms; the working set with the pool's idle cap set to 512 MB for the measurement):**
+- The iGPU's stream had no bound on batches in flight (`max_in_flight` was set for discrete GPUs only), so the CPU
+  recorded the encoder ahead of the GPU and every batch's temporaries stayed alive: +4.5 GB within 0.25 s of a
+  request, before the GPU could have run it.
+- The subsampling over 60,000 frames at once: its first conv's output alone is 2 GB.
+- Chunked, the subsampling still held 4 GB (4096 frames) or 2.9 GB (1024): batches closed by dispatch count and
+  multiply-adds, and a chunk's kernels are small on both, so a batch held several chunks' temporaries.
+- Between requests the pool kept its idle buffers up to its 6 GiB cap: with Parakeet's and the diarizer's sizes
+  both pooled, ~4.5 GB of host RAM held by an idle server.
+
+**Change:**
+- The in-flight bound (3 batches) on every device.
+- A batch also submits once the buffers allocated since the last submit reach 256 MB (`BYTES_PER_SUBMIT`), so the
+  bound covers bytes as well as work.
+- The offline subsampling runs in 1024-frame chunks with an 8-frame halo each side (an output reads inputs within 7
+  of eight times its index), its frames as the whole pass gives them.
+- An idle engine frees an iGPU's pooled buffers (`Context::release_idle`), where CUDA reclaims its graph memory.
+
+**Tests:** the chunked subsampling against the whole pass (without the halo it fails); the idle release empties a
+unified pool (a release that keeps the buffers fails it).
+
+**Result (10 minutes, transcription with diarization in one server):**
+
+| | before | now |
+|---|---|---|
+| ASR peak (first / second run) | 11.8 / 14.4 GB | 6.0 / 5.9 GB |
+| diarization peak | 10.2 GB | 4.5 GB |
+| both, peak | 14.7 GB | 7.0 GB |
+| held after the requests | 9.1 GB | 2.9 GB (the weights) |
+| ASR / both | 14.0 / 18.1 s | 14.9-15.2 / 18.8 s |
+
+The transcript and every word's speaker match the CPU's f32 run. Lightning recipe A at 4096 tokens: prefill
+442-455 tok/s and decode 24.7-25.7 with the changes on or off (the spread of one setting across runs), its peak GTT
+31.7 -> 28.6 GB.
