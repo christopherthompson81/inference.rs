@@ -56,6 +56,12 @@ const uint SIGN = 26;
 const uint ELU = 27;
 const uint SIGMOID = 28;
 const uint RELU2 = 29;
+// a GLU's halves: act(x) * y
+const uint SILU_MUL = 31;
+const uint GELU_MUL = 32;
+const uint RELU_MUL = 33;
+const uint GELU_ERF_MUL = 34;
+const uint SIGMOID_MUL = 35;
 const uint GELU_ERF = 30;
 
 const float GELU_C = 0.7978845608028654;
@@ -106,6 +112,11 @@ float apply(float x, float y) {
         case SIGMOID: return 1.0 / (1.0 + exp(-x));
         case RELU2: { float r = max(x, 0.0); return r * r; }
         case GELU_ERF: return gelu_erf(x);
+        case SILU_MUL: return x / (1.0 + exp(-x)) * y;
+        case GELU_MUL: return 0.5 * x * (1.0 + tanh(GELU_C * (x + GELU_K * x * x * x))) * y;
+        case RELU_MUL: return max(x, 0.0) * y;
+        case GELU_ERF_MUL: return gelu_erf(x) * y;
+        case SIGMOID_MUL: return y / (1.0 + exp(-x));
     }
     return x;
 }
@@ -125,7 +136,7 @@ void main() {
             io += c * pc.o_strides[d - 1];
         }
         float x = pc.op == FILL ? 0.0 : a[ia];
-        float y = pc.op >= ADD && pc.op <= MINIMUM ? b[ib] : 0.0;
+        float y = (pc.op >= ADD && pc.op <= MINIMUM) || pc.op >= SILU_MUL ? b[ib] : 0.0;
         o[io] = apply(x, y);
     }
 }

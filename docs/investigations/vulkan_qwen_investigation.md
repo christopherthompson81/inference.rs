@@ -162,3 +162,32 @@ mat_vecs_iq4_xs m=17408 k=5120: 194 -> 93 us (508 GB/s; Q5_K m=10240 k=5120: 58 
 Qwen3.8-27B IQ4_XS:        prefill 476 / decode 15.7 -> 463 (+-59) / 25.7 tok/s
 Qwen3.6-35B-A3B UD-IQ4_XS: 2038 / 55.7 -> 2508 / 61.7
 ```
+
+## Run 7 - 2026-11-08 09:00
+
+Question: which small dispatches bound the 0.8B's decode? `map_f32` dispatches now carry their op and size in the
+profile (`Add n=1024`). Per token (~600 dispatches): rms_norm_q8 61, quantize_q8_1 48, the MLP's gate and up matvecs
+48, residual `Add` 48, `Silu` + `Mul` 24 each (the GLU, two ops since Run 5), a GDN state `Copy` of 262,144 values
+18.6, and Gated DeltaNet's output norm as ~7 elementwise ops a GDN layer (Sqr, mean, Sqrt, Div, weight Mul, Silu,
+Mul).
+
+Changes:
+- `gated_rmsnorm` (Mamba-2's: norm of x * silu(g)) takes a mode for GDN's order (norm of x, weight, then silu or
+  sigmoid of the gate), its int8-writing build too; GDN's `RmsNormGated` runs it on Vulkan with a group as wide as
+  the head, the weight shared across heads (`vulkan_gated_gdn_norm_matches_the_cpu`, both gates, a decode row and
+  a prompt's).
+- GLU map ops (`SiluMul`, `GeluMul`, `ReluMul`, `GeluErfMul`, `SigmoidMul`: act(a) * b in one dispatch) for
+  `fused_glu` and the Vulkan MoE experts.
+- The GDN recurrence advances the checkout's own pool-row view in place (the CPU path's condition), so commit skips
+  the copy (`vulkan_gdn_recurrence_advances_a_pool_row_in_place`: the row advanced, the others untouched).
+Dead end: `inference bench`'s decode (64 tokens at depth 4) swings 180-196 tok/s run to run; a 3,000-token greedy
+stream is steadier.
+
+```
+3,000-token stream, mean decode after the first 50 tokens:
+Qwen3.5-0.8B Q8_0: 146 (Run 5) -> 172 (fused GDN norm) -> 181 tok/s (GLU op, in-place state)
+Qwen3.6-35B-A3B UD-IQ4_XS: 73 tok/s
+```
+
+Greedy text: both give CUDA's text word for word. Left: residual adds into the next norm (48 a token) and the
+gate and up matvecs as one; model code, ~8% each.

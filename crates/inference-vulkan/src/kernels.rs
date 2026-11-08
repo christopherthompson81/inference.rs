@@ -1208,6 +1208,8 @@ mod tests {
                 groups: GROUPS,
                 group_size: GROUP,
                 eps: 1e-5,
+                norm_first: false,
+                sigmoid: false,
                 x: (&xs, 0),
                 gate: (&gate, 0),
                 weight: (&scale, 0),

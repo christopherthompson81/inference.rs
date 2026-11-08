@@ -55,11 +55,18 @@ pub enum MapOp {
     Relu2 = 29,
     /// `x * (1 + erf(x / sqrt 2)) / 2`
     GeluErf = 30,
+    /// a GLU's halves, `act(a) * b`
+    SiluMul = 31,
+    GeluMul = 32,
+    ReluMul = 33,
+    GeluErfMul = 34,
+    SigmoidMul = 35,
 }
 
 impl MapOp {
     fn binary(self) -> bool {
         (MapOp::Add as u32..=MapOp::Minimum as u32).contains(&(self as u32))
+            || self as u32 >= MapOp::SiluMul as u32
     }
 }
 
@@ -142,6 +149,7 @@ impl Recorder<'_> {
             &self.context.kernels.map_f32
         };
         let groups = n.div_ceil(THREADS).min(MAX_GROUPS) as u32;
+        self.profile_shape(|| format!("{:?} n={n}", map.op), 0);
         pipeline.dispatch(
             self,
             &[map.a.buffer.buffer, b.buffer.buffer, map.out.buffer.buffer],

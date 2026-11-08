@@ -121,8 +121,15 @@ impl VulkanExperts {
             .to_dtype(inference_tensor::DType::U32)?
             .reshape((tokens, k))?
             .contiguous()?;
-        let hidden = (inference_tensor::nn::ops::silu(&gate.expert_mat_vec(&xs, &ids, k)?)?
-            * up.expert_mat_vec(&xs, &ids, k)?)?;
+        let (g, u) = (
+            gate.expert_mat_vec(&xs, &ids, k)?,
+            up.expert_mat_vec(&xs, &ids, k)?,
+        );
+        let hidden =
+            match inference_tensor::vulkan::glu(&g, &u, inference_tensor::vulkan::GluAct::Silu)? {
+                Some(hidden) => hidden,
+                None => (inference_tensor::nn::ops::silu(&g)? * u)?,
+            };
         let ys = down.expert_mat_vec(&hidden, &ids, 1)?;
         let weights = forward
             .topk_weights

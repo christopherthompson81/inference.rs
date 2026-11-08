@@ -635,7 +635,13 @@ pub(crate) fn gdn_recurrence(
             dtype: f32,
         })
     };
-    let state_out = alloc(state.elem_count())?;
+    // in place only where the caller's tensor is itself the contiguous state, so the write lands in its storage
+    let in_place = op.in_place && op.state.is_contiguous() && op.state.dtype() == f32;
+    let state_out = if in_place {
+        None
+    } else {
+        Some(alloc(state.elem_count())?)
+    };
     let out = alloc(batch * seq * v_heads * head_v)?;
     device
         .context
@@ -657,15 +663,19 @@ pub(crate) fn gdn_recurrence(
                 a_log: &a_logb.0,
                 dt_bias: &dt_biasb.0,
                 state_in: (&sb.0, sb.1),
-                state_out: &state_out.buffer,
+                state_out: match &state_out {
+                    Some(fresh) => (&fresh.buffer, 0),
+                    None => (&sb.0, sb.1),
+                },
                 out: &out.buffer,
             })
         })
         .map_err(vk_err)?;
-    Ok(Some((
-        tensor_of(out, (batch, seq, v_heads, head_v)),
-        tensor_of(state_out, (batch, v_heads, head_k, head_v)),
-    )))
+    let state = match state_out {
+        Some(fresh) => tensor_of(fresh, (batch, v_heads, head_k, head_v)),
+        None => op.state.clone(),
+    };
+    Ok(Some((tensor_of(out, (batch, seq, v_heads, head_v)), state)))
 }
 
 pub(crate) fn ssm_scan_step(step: &crate::vulkan::ScanStep<'_>) -> Result<Tensor> {
@@ -795,6 +805,7 @@ pub(crate) fn gated_rmsnorm(
     weight: &Tensor,
     eps: f32,
     group_size: usize,
+    order: crate::vulkan::GatedNorm,
 ) -> Result<Tensor> {
     let width = x.dim(crate::D::Minus1)?;
     if gate.dims() != x.dims()
@@ -828,6 +839,8 @@ pub(crate) fn gated_rmsnorm(
                 groups: width / group_size,
                 group_size,
                 eps,
+                norm_first: !matches!(order, crate::vulkan::GatedNorm::Mamba2),
+                sigmoid: matches!(order, crate::vulkan::GatedNorm::NormThenSigmoid),
                 x: (&xb.0, xb.1),
                 gate: (&gb.0, gb.1),
                 weight: (&wb.0, wb.1),
@@ -836,6 +849,31 @@ pub(crate) fn gated_rmsnorm(
         })
         .map_err(vk_err)?;
     Ok(tensor_of(out, x.dims()))
+}
+
+pub(crate) fn glu(a: &Tensor, b: &Tensor, act: crate::vulkan::GluAct) -> Result<Option<Tensor>> {
+    use crate::vulkan::GluAct as G;
+    if a.dims() != b.dims() || a.dtype() != DType::F32 || b.dtype() != DType::F32 {
+        return Ok(None);
+    }
+    let op = match act {
+        G::Silu => MapOp::SiluMul,
+        G::Gelu => MapOp::GeluMul,
+        G::Relu => MapOp::ReluMul,
+        G::GeluErf => MapOp::GeluErfMul,
+        G::Sigmoid => MapOp::SigmoidMul,
+    };
+    let (a_storage, a_l) = a.storage_and_layout();
+    let (b_storage, b_l) = b.storage_and_layout();
+    let (crate::Storage::Vulkan(a_vk), crate::Storage::Vulkan(b_vk)) = (&*a_storage, &*b_storage)
+    else {
+        return Ok(None);
+    };
+    if !a_vk.native(a_l) {
+        return Ok(None);
+    }
+    let out = a_vk.map_f32(op, a_l, Some((b_vk, b_l)), [0.0; 2])?;
+    Ok(Some(tensor_of(out, a.dims())))
 }
 
 pub(crate) fn moe_router(route: &crate::vulkan::Route<'_>) -> Result<(Tensor, Tensor)> {

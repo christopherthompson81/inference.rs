@@ -15,6 +15,7 @@ layout(std430, binding = 2) readonly buffer A { float a[]; };
 layout(std430, binding = 3) readonly buffer ALog { float a_log[]; };
 layout(std430, binding = 4) readonly buffer DtBias { float dt_bias[]; };
 layout(std430, binding = 5) readonly buffer StateIn { float state_in[]; };
+// may be StateIn's own buffer: a thread reads its column before the tokens and writes it after
 layout(std430, binding = 6) writeonly buffer StateOut { float state_out[]; };
 layout(std430, binding = 7) writeonly buffer Out { float o[]; };
 
@@ -34,6 +35,8 @@ layout(push_constant) uniform PushConstants {
     uint a_off;
     uint state_off;
     float eps;
+    // where state_out's rows start: the input's own, updated in place, or a fresh buffer's
+    uint out_off;
 } pc;
 
 const uint THREADS = 128;
@@ -118,7 +121,7 @@ void main() {
         barrier();
     }
 
-    uint out_base = (seq_idx * pc.v_heads + hv) * pc.head_k * pc.head_v + j;
+    uint out_base = pc.out_off + (seq_idx * pc.v_heads + hv) * pc.head_k * pc.head_v + j;
     if (column) {
         [[unroll]] for (uint i = 0; i < MAX_K; i++) {
             if (i < pc.head_k) {
