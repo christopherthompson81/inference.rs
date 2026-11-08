@@ -87,6 +87,32 @@ fn bf16_bits(x: f32) -> u32 {
     half::bf16::from_f32(x).to_bits() as u32
 }
 
+// `src` (k values) as k / 2 pairs into `out` (an odd k's last half zero): 16 values an instruction, a scalar tail
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn row_pairs(src: &[f32], out: &mut [u32]) {
+    let whole = src.len() / LANES * LANES;
+    // SAFETY: callers run only where `available`; each step reads LANES values and writes LANES / 2 pairs in range
+    unsafe { row_pairs_avx512(&src[..whole], out.as_mut_ptr()) };
+    for (p, pair) in out.iter_mut().enumerate().skip(whole / 2) {
+        let hi = src.get(2 * p + 1).map_or(0, |&x| bf16_bits(x));
+        *pair = bf16_bits(src[2 * p]) | hi << 16;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bf16")]
+unsafe fn row_pairs_avx512(src: &[f32], out: *mut u32) {
+    unsafe {
+        for (i, chunk) in src.as_chunks::<LANES>().0.iter().enumerate() {
+            let halves = _mm512_cvtneps_pbh(_mm512_loadu_ps(chunk.as_ptr()));
+            _mm256_storeu_si256(
+                out.add(i * LANES / 2).cast(),
+                std::mem::transmute::<__m256bh, __m256i>(halves),
+            );
+        }
+    }
+}
+
 /// `dst` (`batch` products of `m` x `n`, row-major, one after another) = `a` (`m` x `k`) `b` (`k` x `n`) through
 /// bf16 inputs, product `i`'s operands `a_skip` and `b_skip` elements on; call only where [`available`].
 #[cfg(target_arch = "x86_64")]
@@ -112,6 +138,10 @@ pub fn gemm(
         if r >= m {
             return;
         }
+        if a.cs == 1 {
+            row_pairs(&a.data[bi * a_skip + r * a.rs..][..k], row);
+            return;
+        }
         let at = |kk: usize| a.data[bi * a_skip + r * a.rs + kk * a.cs];
         for (p, pair) in row.iter_mut().enumerate() {
             let hi = if 2 * p + 1 < k {
@@ -128,8 +158,17 @@ pub fn gemm(
         .enumerate()
         .for_each(|(i, out)| {
             let (bi, panel) = (i / panels, i % panels);
+            // a column contiguous along k (a transposed weight's rows) converts a vector at a time
+            let mut column = vec![0u32; if b.rs == 1 { pairs } else { 0 }];
             for j in 0..NR.min(n - panel * NR) {
                 let col = panel * NR + j;
+                if b.rs == 1 {
+                    row_pairs(&b.data[bi * b_skip + col * b.cs..][..k], &mut column);
+                    for (p, pair) in column.iter().enumerate() {
+                        out[p * NR + j] = *pair;
+                    }
+                    continue;
+                }
                 let at = |kk: usize| b.data[bi * b_skip + kk * b.rs + col * b.cs];
                 for p in 0..pairs {
                     let hi = if 2 * p + 1 < k {
@@ -287,6 +326,28 @@ mod tests {
         );
         assert!(off(&inside, &outside)? > 1e-2, "the scope changed nothing");
         Ok(())
+    }
+
+    // a row's pairs from 16 values an instruction equal the scalar rounding's, a partial vector and odd k included
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn vector_row_pairs_match_scalar_ones() {
+        if !available() {
+            return;
+        }
+        for k in [1usize, 15, 16, 17, 33, 100] {
+            let src: Vec<f32> = (0..k)
+                .map(|i| ((i * 2654435761) % 1000) as f32 / 37.0 - 13.0)
+                .collect();
+            let mut got = vec![0u32; k.div_ceil(2)];
+            row_pairs(&src, &mut got);
+            let want: Vec<u32> = (0..k.div_ceil(2))
+                .map(|p| {
+                    bf16_bits(src[2 * p]) | src.get(2 * p + 1).map_or(0, |&x| bf16_bits(x)) << 16
+                })
+                .collect();
+            assert_eq!(got, want, "k {k}");
+        }
     }
 
     // against f32 sums over the same bf16-rounded inputs: edge tiles (rows, columns, odd k) and strided operands

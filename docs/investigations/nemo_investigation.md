@@ -1405,3 +1405,21 @@ fails it), at 150 x 128, 70 x 32 and 600 x 64 (past a key chunk); outside the sc
 
 **Result:** a layer (8 heads, 7500 x 128) 342 ms, ~1.37 TFLOPS of products. A/B, ASR 35.92 -> 27.93 s; both models in
 one request 35.9 s. `scripts/bf16_check.sh asr` on the meeting: 1614 words unchanged, 2 starts a frame off.
+
+## Run 48 - 2026-11-08 (laptop: Ryzen 7 7840U, CPU only)
+
+**Question:** after Run 47, what else holds Parakeet's 10 minutes on the CPU? A profile: the bf16 packing (6.5 %,
+scalar), the f32 SiLU and sigmoid (a libm `exp` an element), and the decoder's single-row products (9.4 %).
+
+**Changes**, each an A/B of release builds alternating, the meeting's words unchanged:
+- The bf16 packing converts 16 values an instruction (`gemm_bf16::row_pairs`): ASR 27.9 -> 26.6 s, the diarizer
+  11.0 -> 9.4 s.
+- SiLU and sigmoid take the vectorized Cephes `exp` (`cpu::erf::fast_exp`), whose rounding had been `f32::round`, half
+  away from zero, which has no instruction and was a libm call: ASR 24.33 -> 23.80 s, the diarizer flat.
+- The predictor's LSTM (two 2560 x 1281) and the joint (8198 x 640) read 47 MB of f32 a token, past the 16 MB L3. Inside
+  the bf16 scope they multiply through bf16 copies (`cpu::Bf16RowWeights`, f32 products and sums): ASR 23.65 -> 22.30 s.
+
+**Bf16 decoder weights:** the meeting's 1614 words and `en_long`'s 58 unchanged, their starts too; a 4-minute Abkhaz
+word list, a song and a 24 s sample unchanged. On an Abkhaz story (a language the model does not know, its words
+guesses) 4 spans move; the bf16 encoder alone moves 3 spans of it from f32 (and 8 of the word list), the decoder's
+copies on top 2.

@@ -43,6 +43,7 @@ pub fn attention(_op: &RelPosAttn) -> Vec<f32> {
 mod x86 {
     use super::RelPosAttn;
     use crate::cpu::erf::fast_exp;
+    use crate::cpu_backend::gemm_bf16::row_pairs;
     use rayon::prelude::*;
     use std::arch::x86_64::*;
 
@@ -75,12 +76,7 @@ mod x86 {
         out.par_chunks_mut(d / 2)
             .take(live)
             .enumerate()
-            .for_each(|(r, row)| {
-                let s = &src[r * d..][..d];
-                for (p, x) in row.iter_mut().enumerate() {
-                    *x = pair(s[2 * p], s[2 * p + 1]);
-                }
-            });
+            .for_each(|(r, row)| row_pairs(&src[r * d..][..d], row));
         out
     }
 
@@ -92,14 +88,15 @@ mod x86 {
         out.par_chunks_mut(pairs * NR)
             .enumerate()
             .for_each(|(panel, out)| {
+                let mut column = vec![0u32; pairs];
                 for j in 0..NR {
                     let row = first + (panel * NR + j) as isize;
                     if row < 0 || row as usize >= live {
                         continue;
                     }
-                    let s = &src[row as usize * d..][..d];
-                    for p in 0..pairs {
-                        out[p * NR + j] = pair(s[2 * p], s[2 * p + 1]);
+                    row_pairs(&src[row as usize * d..][..d], &mut column);
+                    for (p, pair) in column.iter().enumerate() {
+                        out[p * NR + j] = *pair;
                     }
                 }
             });

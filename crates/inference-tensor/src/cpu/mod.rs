@@ -3,6 +3,9 @@
 pub mod erf;
 pub(crate) mod features;
 pub mod kernels;
+mod row_weights;
+
+pub use row_weights::Bf16RowWeights;
 
 /// Transformer-XL relative-position attention fused on the CPU's AVX-512 BF16, inside [`with_bf16_matmuls`]:
 /// score(i, j) = `q_content`_i . `k`_j + `q_position`_i . `positions`[pos_base - i + j], both query sets scaled
@@ -74,7 +77,7 @@ pub fn rel_pos_attention(
 }
 
 pub use crate::cpu_backend::gemm_bf16::{
-    BF16_ENV, NO_BF16_ENV, forced as bf16_forced, with_bf16_matmuls,
+    BF16_ENV, NO_BF16_ENV, enabled as bf16_enabled, forced as bf16_forced, with_bf16_matmuls,
 };
 
 #[allow(unused)]

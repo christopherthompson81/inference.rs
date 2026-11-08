@@ -728,7 +728,7 @@ impl UnaryOpT for Silu {
     }
     #[inline(always)]
     fn f32(v: f32) -> f32 {
-        v / (1.0 + (-v).exp())
+        v / (1.0 + crate::cpu::erf::fast_exp(-v))
     }
     #[inline(always)]
     fn f64(v: f64) -> f64 {
