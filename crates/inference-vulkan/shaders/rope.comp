@@ -1,0 +1,57 @@
+#version 450
+// RoPE as inference_quant's CPU kernel takes it: x (batch, heads, seq, head_dim) f32, a thread a rotated pair (x, y)
+// of a row: (i, i + rot) for neox, (2i, 2i + 1) otherwise, rotated by the row's cos/sin (rot wide) at the token's
+// position, its token row, or its sequence index; the head's columns past 2 rot copy through.
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer Cos { float cos_t[]; };
+layout(std430, binding = 2) readonly buffer Sin { float sin_t[]; };
+layout(std430, binding = 3) readonly buffer Pos { uint positions[]; };
+layout(std430, binding = 4) writeonly buffer O { float o[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint heads;
+    uint seq;
+    uint head_dim;
+    uint rot;
+    // 0: positions[token], 1: the token's row (batch seq rows), 2: its sequence index (seq rows)
+    uint mode;
+    uint neox;
+    uint x_off;
+    uint cos_off;
+    uint sin_off;
+    uint pos_off;
+} pc;
+
+void main() {
+    uint pass_cols = pc.head_dim - 2 * pc.rot;
+    // a row's work items: its rot pairs, then its passed-through columns
+    uint per_row = pc.rot + pass_cols;
+    uint total = pc.batch * pc.heads * pc.seq * per_row;
+    uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint e = gl_GlobalInvocationID.x; e < total; e += stride) {
+        uint row = e / per_row;
+        uint item = e % per_row;
+        uint base = row * pc.head_dim;
+        if (item >= pc.rot) {
+            uint col = 2 * pc.rot + item - pc.rot;
+            o[base + col] = x[pc.x_off + base + col];
+            continue;
+        }
+        uint b = row / (pc.heads * pc.seq);
+        uint t = row % pc.seq;
+        uint token = b * pc.seq + t;
+        uint cache_row = pc.mode == 0 ? positions[pc.pos_off + token] : (pc.mode == 1 ? token : t);
+        float c = cos_t[pc.cos_off + cache_row * pc.rot + item];
+        float s = sin_t[pc.sin_off + cache_row * pc.rot + item];
+        uint xi = pc.neox != 0 ? item : 2 * item;
+        uint yi = pc.neox != 0 ? item + pc.rot : 2 * item + 1;
+        float xv = x[pc.x_off + base + xi];
+        float yv = x[pc.x_off + base + yi];
+        o[base + xi] = xv * c - yv * s;
+        o[base + yi] = yv * c + xv * s;
+    }
+}

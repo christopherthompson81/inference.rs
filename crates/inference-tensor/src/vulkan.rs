@@ -52,6 +52,52 @@ pub fn ssm_scan_step(step: &ScanStep<'_>) -> Result<Tensor> {
     }
 }
 
+/// RoPE as inference_quant's CPU kernel takes it: `x` `(batch, heads, seq, head_dim)`, `cos`/`sin` `(rows, rot)` rows
+/// a position (`positions` `(batch seq,)` u32 picks them), a token (`batch seq` rows) or a sequence index (`seq` rows);
+/// `None` where the device or dtypes have no kernel.
+pub fn rope(
+    x: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    positions: Option<&Tensor>,
+    is_neox: bool,
+) -> Result<Option<Tensor>> {
+    #[cfg(feature = "vulkan")]
+    return crate::vulkan_backend::rope(x, cos, sin, positions, is_neox);
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = (x, cos, sin, positions, is_neox);
+        Err(crate::Error::NotCompiledWithVulkanSupport)
+    }
+}
+
+/// Gated DeltaNet's recurrence from the convolved `mixed` `(batch, seq, conv_dim)` (q and k `k_heads * head_k` each,
+/// then v), `b` and `a` `(batch, seq, v_heads)`, `a_log` and `dt_bias` `(v_heads,)`, all f32, over `state` `(batch,
+/// v_heads, head_k, head_v)` f32 key-major; value head h reads key head h % k_heads when `tiled`, else h / (v_heads /
+/// k_heads). `None` where the device has no kernel for the widths.
+pub struct GdnRecurrence<'a> {
+    pub mixed: &'a Tensor,
+    pub b: &'a Tensor,
+    pub a: &'a Tensor,
+    pub a_log: &'a Tensor,
+    pub dt_bias: &'a Tensor,
+    pub state: &'a Tensor,
+    pub k_heads: usize,
+    pub tiled: bool,
+    pub eps: f32,
+}
+
+/// The recurrence's output `(batch, seq, v_heads, head_v)` and the advanced state.
+pub fn gdn_recurrence(op: &GdnRecurrence<'_>) -> Result<Option<(Tensor, Tensor)>> {
+    #[cfg(feature = "vulkan")]
+    return crate::vulkan_backend::gdn_recurrence(op);
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = op;
+        Err(crate::Error::NotCompiledWithVulkanSupport)
+    }
+}
+
 /// `seq` steps of Mamba's causal conv and SiLU: `x` `(batch, seq, channels)`, `weight` `(channels, kernel)`, `bias`
 /// `(channels,)`, f32; the pool `(rows, channels, kernel)` shifts in place at the u32 `slots` rows.
 pub fn ssm_conv_step(

@@ -1,0 +1,129 @@
+#version 450
+// Gated DeltaNet's recurrence from the convolved q | k | v rows, gdn/backend.rs's CPU pass in order: a workgroup a
+// (value head, sequence), a thread a value column j holding S[:, j] (state (rows, v_heads, head_k, head_v), key-major).
+// Per token: q and k L2-normed over their key head, q times head_k^-0.5; beta = sigmoid(b);
+// decay = exp(-exp(a_log) softplus(a + dt_bias)); S *= decay; S += k beta (v - k^T S); y = q^T S.
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+
+layout(local_size_x = 128) in;
+
+layout(std430, binding = 0) readonly buffer Mixed { float mixed[]; };
+layout(std430, binding = 1) readonly buffer B { float b[]; };
+layout(std430, binding = 2) readonly buffer A { float a[]; };
+layout(std430, binding = 3) readonly buffer ALog { float a_log[]; };
+layout(std430, binding = 4) readonly buffer DtBias { float dt_bias[]; };
+layout(std430, binding = 5) readonly buffer StateIn { float state_in[]; };
+layout(std430, binding = 6) writeonly buffer StateOut { float state_out[]; };
+layout(std430, binding = 7) writeonly buffer Out { float o[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint seq;
+    uint k_heads;
+    uint v_heads;
+    uint head_k;
+    uint head_v;
+    // a token's row in mixed, and where its keys and values start
+    uint conv_dim;
+    uint key_dim;
+    // 1: value head h reads key head h % k_heads, else h / (v_heads / k_heads)
+    uint tiled;
+    uint mixed_off;
+    uint b_off;
+    uint a_off;
+    uint state_off;
+    float eps;
+} pc;
+
+const uint THREADS = 128;
+const uint MAX_K = 128;
+// softplus is the identity past this, as the CPU pass takes it
+const float SOFTPLUS_LINEAR = 20.0;
+// enough for the smallest subgroups a 128-thread workgroup splits into
+const uint MAX_SUBGROUPS = 32;
+
+shared float s_q[MAX_K];
+shared float s_k[MAX_K];
+shared float red_q[MAX_SUBGROUPS];
+shared float red_k[MAX_SUBGROUPS];
+
+void main() {
+    uint hv = gl_WorkGroupID.x;
+    uint seq_idx = gl_WorkGroupID.y;
+    uint j = gl_LocalInvocationID.x;
+    uint hk = pc.tiled != 0 ? hv % pc.k_heads : hv / (pc.v_heads / pc.k_heads);
+    uint base = pc.state_off + (seq_idx * pc.v_heads + hv) * pc.head_k * pc.head_v + j;
+    bool column = j < pc.head_v;
+    float scale = inversesqrt(float(pc.head_k));
+    float rate = exp(a_log[hv]);
+    float bias = dt_bias[hv];
+
+    float s[MAX_K];
+    [[unroll]] for (uint i = 0; i < MAX_K; i++) {
+        s[i] = column && i < pc.head_k ? state_in[base + i * pc.head_v] : 0.0;
+    }
+
+    for (uint t = 0; t < pc.seq; t++) {
+        uint token = seq_idx * pc.seq + t;
+        uint row = pc.mixed_off + token * pc.conv_dim;
+        float qj = 0.0;
+        float kj = 0.0;
+        if (j < pc.head_k) {
+            qj = mixed[row + hk * pc.head_k + j];
+            kj = mixed[row + pc.key_dim + hk * pc.head_k + j];
+        }
+        float sq = subgroupAdd(qj * qj);
+        float sk = subgroupAdd(kj * kj);
+        if (subgroupElect()) {
+            red_q[gl_SubgroupID] = sq;
+            red_k[gl_SubgroupID] = sk;
+        }
+        barrier();
+        float q_sum = 0.0;
+        float k_sum = 0.0;
+        for (uint w = 0; w < gl_NumSubgroups; w++) {
+            q_sum += red_q[w];
+            k_sum += red_k[w];
+        }
+        if (j < pc.head_k) {
+            s_q[j] = qj * scale / sqrt(q_sum + pc.eps);
+            s_k[j] = kj / sqrt(k_sum + pc.eps);
+        }
+        barrier();
+        uint gate = token * pc.v_heads + hv;
+        float beta = 1.0 / (1.0 + exp(-b[pc.b_off + gate]));
+        float x = a[pc.a_off + gate] + bias;
+        float softplus = x > SOFTPLUS_LINEAR ? x : (x > 0.0 ? x + log(1.0 + exp(-x)) : log(1.0 + exp(x)));
+        float decay = exp(-rate * softplus);
+        if (column) {
+            float kv = 0.0;
+            [[unroll]] for (uint i = 0; i < MAX_K; i++) {
+                if (i < pc.head_k) {
+                    s[i] *= decay;
+                    kv += s_k[i] * s[i];
+                }
+            }
+            float delta = beta * (mixed[row + 2 * pc.key_dim + hv * pc.head_v + j] - kv);
+            float y = 0.0;
+            [[unroll]] for (uint i = 0; i < MAX_K; i++) {
+                if (i < pc.head_k) {
+                    s[i] += s_k[i] * delta;
+                    y += s_q[i] * s[i];
+                }
+            }
+            o[(token * pc.v_heads + hv) * pc.head_v + j] = y;
+        }
+        // the next token's norms and rows overwrite these
+        barrier();
+    }
+
+    uint out_base = (seq_idx * pc.v_heads + hv) * pc.head_k * pc.head_v + j;
+    if (column) {
+        [[unroll]] for (uint i = 0; i < MAX_K; i++) {
+            if (i < pc.head_k) {
+                state_out[out_base + i * pc.head_v] = s[i];
+            }
+        }
+    }
+}

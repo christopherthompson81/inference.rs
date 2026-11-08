@@ -97,6 +97,8 @@ kernels! {
     matmul_f32_tiled32: MATMUL_F32_TILED32, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
     ssm_conv_step: SSM_CONV_STEP, ops::CONV_STEP_BINDINGS, ops::CONV_STEP_PUSH_BYTES;
     ssm_scan_step: SSM_SCAN_STEP, ops::SCAN_STEP_BINDINGS, ops::SCAN_STEP_PUSH_BYTES;
+    gdn_recurrence: GDN_RECURRENCE, ops::GDN_BINDINGS, ops::GDN_PUSH_BYTES;
+    rope: ROPE, ops::ROPE_BINDINGS, ops::ROPE_PUSH_BYTES;
     ssd_chunk_state: SSD_CHUNK_STATE, ops::SSD_BINDINGS, ops::SCAN_STEP_PUSH_BYTES;
     ssd_state_pass: SSD_STATE_PASS, ops::SSD_BINDINGS, ops::SCAN_STEP_PUSH_BYTES;
     ssd_chunk_out: SSD_CHUNK_OUT, ops::SSD_BINDINGS, ops::SCAN_STEP_PUSH_BYTES;

@@ -50,3 +50,30 @@ recording bounds decode and prompts loop per token. The 35B's profile has no exp
 experts have no Vulkan kernel and run on the CPU.
 
 Next: GDN on Vulkan (the recurrence and causal conv as kernels), then IQ4_XS expert kernels for the 35B.
+
+## Run 3 - 2026-11-08 05:10
+
+GDN on Vulkan:
+- `gdn_recurrence.comp`: the CPU pass's recurrence from the convolved rows, a workgroup a (value head, sequence),
+  a thread a value column holding S[:, j] in registers (head_k and head_v up to 128), reading the checked-out
+  key-major state and writing the advanced one (the cache commits it back as before).
+- The causal conv is Mamba's conv step (`ssm_conv_step`: the state the last `kernel` inputs, no bias, SiLU), in
+  place on the checked-out rows, for a prompt as for a step.
+- RoPE as a kernel (`rope.comp`, a thread a rotated pair), the composite kept for other dtypes.
+Parity tests (each fails when its kernel is broken on purpose): `vulkan_gdn_recurrence_matches_the_cpu` (Qwen3.6's
+16/32 heads at 128, both layouts, a step and a 37-token prompt over two sequences), `vulkan_gdn_conv_matches_the_cpu`,
+`vulkan_rope_matches_the_cpu_kernel`.
+
+```
+Qwen3.5-0.8B Q8_0, prefill (2048) / decode:
+  composite RoPE + GDN       765 / 29.3 tok/s
+  + GDN recurrence kernel   1189 / 68.0
+  + conv step + RoPE kernel 2186 / 89.6
+Qwen3.6-35B-A3B UD-IQ4_XS:   97 / 14.7 (from 84 / 7.5)
+```
+
+Greedy text matches CUDA's (35B's sixth token is a near tie that flips: " gas" -1.19 here, " molecules" -1.18 on CUDA).
+
+The 35B's experts (gguf-py over the file): IQ3_S 78 tensors 8.38 GiB, IQ4_XS 39 tensors 5.18 GiB, Q6_K 3, Q3_K 2,
+Q4_K 1; attention, GDN and shared experts Q8_0. Neither i-quant has a Vulkan kernel, so the experts compute
+through the fallback. Next (user): IQ4_XS and IQ3_S kernels.

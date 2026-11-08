@@ -695,7 +695,7 @@ fn apply_rotary_q_inner(
         return metal_apply_rotary_q(q, cos, sin, positions, is_neox);
     }
     if q.device().is_vulkan() {
-        return composite_apply_rotary(q, cos, sin, positions, is_neox);
+        return vulkan_apply_rotary(q, cos, sin, positions, is_neox);
     }
     cpu_apply_rotary_q(q, cos, sin, positions, is_neox)
 }
@@ -741,12 +741,27 @@ fn apply_rotary_qk_inner(
         return metal_apply_rotary_qk(q, k, cos, sin, positions, is_neox);
     }
     if q.device().is_vulkan() {
+        let positions = positions.map(|p| p.to_device(q.device())).transpose()?;
         return Ok((
-            composite_apply_rotary(q, cos, sin, positions, is_neox)?,
-            composite_apply_rotary(k, cos, sin, positions, is_neox)?,
+            vulkan_apply_rotary(q, cos, sin, positions.as_ref(), is_neox)?,
+            vulkan_apply_rotary(k, cos, sin, positions.as_ref(), is_neox)?,
         ));
     }
     cpu_apply_rotary_qk(q, k, cos, sin, positions, is_neox)
+}
+
+// Vulkan's kernel where it takes the dtype, else the composite
+fn vulkan_apply_rotary(
+    x: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    positions: Option<&Tensor>,
+    is_neox: bool,
+) -> Result<Tensor> {
+    match inference_tensor::vulkan::rope(x, cos, sin, positions, is_neox)? {
+        Some(out) => Ok(out),
+        None => composite_apply_rotary(x, cos, sin, positions, is_neox),
+    }
 }
 
 // The CPU kernel's rotation in tensor ops, for a device with no RoPE kernel: `x` `(b, h, s, d)`, `cos`/`sin` rows a

@@ -377,6 +377,13 @@ pub(crate) const CONV_STEP_BINDINGS: usize = 6;
 pub(crate) const CONV_STEP_PUSH_BYTES: u32 = 10 * 4;
 pub(crate) const SCAN_STEP_BINDINGS: usize = 10;
 pub(crate) const SCAN_STEP_PUSH_BYTES: u32 = 14 * 4;
+pub(crate) const ROPE_BINDINGS: usize = 5;
+pub(crate) const ROPE_PUSH_BYTES: u32 = 11 * 4;
+const ROPE_THREADS: usize = 256;
+pub(crate) const GDN_BINDINGS: usize = 8;
+pub(crate) const GDN_PUSH_BYTES: u32 = 13 * 4;
+// gdn_recurrence.comp's threads, a value column each, and the key rows a thread's registers hold
+const GDN_MAX_HEAD: usize = 128;
 // the scan step's lanes a state row and states a lane, and the rows a 256-thread workgroup takes
 const SCAN_LANES: usize = 32;
 const SCAN_VEC: usize = 4;
@@ -440,6 +447,65 @@ pub struct ScanStep<'a> {
     /// Scratch of [`Self::chunked_scratch_bytes`], with which a sequence of [`SSD_MIN_SEQ`] or more runs as chunked
     /// SSD (each chunk's scan as dot products, only the state carried between chunks in order).
     pub scratch: Option<&'a Arc<Buffer>>,
+}
+
+/// Gated DeltaNet's recurrence over `seq` tokens of `batch` sequences from the convolved rows `mixed` (a token's
+/// `conv_dim` f32s: q and k `key_dim` each, then v), the gate inputs `b` and `a` `(tokens, v_heads)`, `a_log` and
+/// `dt_bias` `(v_heads,)` from their buffers' start; reads `state_in` `(batch, v_heads, head_k, head_v)` key-major, writes
+/// the advanced state to `state_out` and `(tokens, v_heads, head_v)` to `out`.
+pub struct GdnRecurrence<'a> {
+    pub batch: usize,
+    pub seq: usize,
+    pub k_heads: usize,
+    pub v_heads: usize,
+    pub head_k: usize,
+    pub head_v: usize,
+    pub conv_dim: usize,
+    pub key_dim: usize,
+    pub tiled: bool,
+    pub eps: f32,
+    pub mixed: At<'a>,
+    pub b: At<'a>,
+    pub a: At<'a>,
+    pub a_log: &'a Arc<Buffer>,
+    pub dt_bias: &'a Arc<Buffer>,
+    pub state_in: At<'a>,
+    pub state_out: &'a Arc<Buffer>,
+    pub out: &'a Arc<Buffer>,
+}
+
+/// Where a RoPE row's cos/sin come from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RopeRows {
+    /// The u32 position a token: `positions[b * seq + t]`.
+    Positions,
+    /// The token's own row (`batch * seq` rows).
+    Tokens,
+    /// The token's sequence index (`seq` rows).
+    Sequence,
+}
+
+/// RoPE over `x` `(batch, heads, seq, head_dim)` f32 with `rot`-wide cos/sin rows, into `out` (x's shape).
+pub struct Rope<'a> {
+    pub batch: usize,
+    pub heads: usize,
+    pub seq: usize,
+    pub head_dim: usize,
+    pub rot: usize,
+    pub rows: RopeRows,
+    pub neox: bool,
+    pub x: At<'a>,
+    pub cos: At<'a>,
+    pub sin: At<'a>,
+    pub positions: At<'a>,
+    pub out: &'a Arc<Buffer>,
+}
+
+impl GdnRecurrence<'_> {
+    /// Whether the kernel takes heads of these widths.
+    pub fn supports(head_k: usize, head_v: usize) -> bool {
+        (1..=GDN_MAX_HEAD).contains(&head_k) && (1..=GDN_MAX_HEAD).contains(&head_v)
+    }
 }
 
 impl ScanStep<'_> {
@@ -570,6 +636,106 @@ impl Recorder<'_> {
             .kernels
             .gated_rmsnorm
             .dispatch(self, &buffers.map(|b| b.buffer), &bytes, grid);
+        for buffer in buffers {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+
+    pub fn rope(&self, op: &Rope<'_>) -> Result<()> {
+        if op.rot == 0 || 2 * op.rot > op.head_dim {
+            return Err(Error::Invalid(format!(
+                "RoPE of {} rotated columns in a head of {}",
+                2 * op.rot,
+                op.head_dim
+            )));
+        }
+        let rows = op.batch * op.heads * op.seq;
+        if rows == 0 {
+            return Ok(());
+        }
+        let mode = match op.rows {
+            RopeRows::Positions => 0,
+            RopeRows::Tokens => 1,
+            RopeRows::Sequence => 2,
+        };
+        let bytes = words(&[
+            op.batch,
+            op.heads,
+            op.seq,
+            op.head_dim,
+            op.rot,
+            mode,
+            usize::from(op.neox),
+            op.x.1,
+            op.cos.1,
+            op.sin.1,
+            op.positions.1,
+        ])?;
+        let buffers = [op.x.0, op.cos.0, op.sin.0, op.positions.0, op.out];
+        let items = rows * (op.head_dim - op.rot);
+        let groups = items.div_ceil(ROPE_THREADS).clamp(1, MAX_GROUPS_X);
+        self.context.kernels.rope.dispatch(
+            self,
+            &buffers.map(|b| b.buffer),
+            &bytes,
+            [groups as u32, 1, 1],
+        );
+        for buffer in buffers {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+
+    pub fn gdn_recurrence(&self, op: &GdnRecurrence<'_>) -> Result<()> {
+        if !GdnRecurrence::supports(op.head_k, op.head_v)
+            || op.k_heads == 0
+            || !op.v_heads.is_multiple_of(op.k_heads)
+        {
+            return Err(Error::Invalid(format!(
+                "a GDN recurrence of {} value heads over {} key heads, widths {} and {}",
+                op.v_heads, op.k_heads, op.head_k, op.head_v
+            )));
+        }
+        if op.batch == 0 || op.seq == 0 {
+            return Ok(());
+        }
+        let mut bytes = words(&[
+            op.seq,
+            op.k_heads,
+            op.v_heads,
+            op.head_k,
+            op.head_v,
+            op.conv_dim,
+            op.key_dim,
+            usize::from(op.tiled),
+            op.mixed.1,
+            op.b.1,
+            op.a.1,
+            op.state_in.1,
+        ])?;
+        bytes.extend_from_slice(&op.eps.to_bits().to_le_bytes());
+        let buffers = [
+            op.mixed.0,
+            op.b.0,
+            op.a.0,
+            op.a_log,
+            op.dt_bias,
+            op.state_in.0,
+            op.state_out,
+            op.out,
+        ];
+        self.context.kernels.gdn_recurrence.dispatch(
+            self,
+            &buffers.map(|b| b.buffer),
+            &bytes,
+            [op.v_heads as u32, op.batch as u32, 1],
+        );
+        self.work.set(
+            self.work.get().saturating_add(
+                (4 * op.batch * op.seq * op.v_heads * op.head_k * op.head_v) as u64,
+            ),
+        );
         for buffer in buffers {
             self.retain(buffer.clone());
         }

@@ -525,6 +525,139 @@ fn tensor_of(storage: VulkanStorage, shape: impl Into<Shape>) -> Tensor {
     )
 }
 
+pub(crate) fn rope(
+    x: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    positions: Option<&Tensor>,
+    is_neox: bool,
+) -> Result<Option<Tensor>> {
+    let (batch, heads, seq, head_dim) = x.dims4()?;
+    let f32 = DType::F32;
+    if x.dtype() != f32 {
+        return Ok(None);
+    }
+    let rot = cos.dim(crate::D::Minus1)?;
+    let device = x.device().as_vulkan_device()?.clone();
+    let table = |t: &Tensor| t.to_dtype(f32)?.to_device(x.device())?.contiguous();
+    let (cos, sin) = (table(cos)?, table(sin)?);
+    let tokens = batch * seq;
+    let rows = match positions {
+        Some(_) => inference_vulkan::RopeRows::Positions,
+        None if cos.elem_count() == tokens * rot => inference_vulkan::RopeRows::Tokens,
+        None => inference_vulkan::RopeRows::Sequence,
+    };
+    // the kernel binds a positions buffer either way
+    let positions = match positions {
+        Some(p) => p
+            .to_dtype(DType::U32)?
+            .to_device(x.device())?
+            .contiguous()?,
+        None => cos.zeros_like()?.to_dtype(DType::U32)?,
+    };
+    let x = x.contiguous()?;
+    let [xb, cb, sb, pb] = [
+        bound(&x, f32)?,
+        bound(&cos, f32)?,
+        bound(&sin, f32)?,
+        bound(&positions, DType::U32)?,
+    ];
+    let count = x.elem_count();
+    let out = VulkanStorage {
+        buffer: Arc::new(device.buffer(count * 4)?),
+        device: device.clone(),
+        count,
+        dtype: f32,
+    };
+    device
+        .context
+        .record(|r| {
+            r.rope(&inference_vulkan::Rope {
+                batch,
+                heads,
+                seq,
+                head_dim,
+                rot,
+                rows,
+                neox: is_neox,
+                x: (&xb.0, xb.1),
+                cos: (&cb.0, cb.1),
+                sin: (&sb.0, sb.1),
+                positions: (&pb.0, pb.1),
+                out: &out.buffer,
+            })
+        })
+        .map_err(vk_err)?;
+    Ok(Some(tensor_of(out, (batch, heads, seq, head_dim))))
+}
+
+pub(crate) fn gdn_recurrence(
+    op: &crate::vulkan::GdnRecurrence<'_>,
+) -> Result<Option<(Tensor, Tensor)>> {
+    let (batch, seq, conv_dim) = op.mixed.dims3()?;
+    let (state_batch, v_heads, head_k, head_v) = op.state.dims4()?;
+    let f32 = DType::F32;
+    if state_batch != batch
+        || !inference_vulkan::GdnRecurrence::supports(head_k, head_v)
+        || op.b.dims3()? != (batch, seq, v_heads)
+        || op.a.dims3()? != (batch, seq, v_heads)
+        || ![op.mixed, op.b, op.a, op.a_log, op.dt_bias, op.state]
+            .iter()
+            .all(|t| t.dtype() == f32)
+    {
+        return Ok(None);
+    }
+    let [mixed, b, a, a_log, dt_bias, state] =
+        [op.mixed, op.b, op.a, op.a_log, op.dt_bias, op.state].map(|t| t.contiguous());
+    let [mixed, b, a, a_log, dt_bias, state] = [mixed?, b?, a?, a_log?, dt_bias?, state?];
+    let [mb, bb, ab, a_logb, dt_biasb, sb] =
+        [&mixed, &b, &a, &a_log, &dt_bias, &state].map(|t| bound(t, f32));
+    let [mb, bb, ab, a_logb, dt_biasb, sb] = [mb?, bb?, ab?, a_logb?, dt_biasb?, sb?];
+    if [a_logb.1, dt_biasb.1] != [0; 2] {
+        crate::bail!("the GDN recurrence reads a_log and dt_bias from their buffers' start");
+    }
+    let device = op.mixed.device().as_vulkan_device()?.clone();
+    let alloc = |count: usize| -> Result<VulkanStorage> {
+        Ok(VulkanStorage {
+            buffer: Arc::new(device.buffer(count * 4)?),
+            device: device.clone(),
+            count,
+            dtype: f32,
+        })
+    };
+    let state_out = alloc(state.elem_count())?;
+    let out = alloc(batch * seq * v_heads * head_v)?;
+    device
+        .context
+        .record(|r| {
+            r.gdn_recurrence(&inference_vulkan::GdnRecurrence {
+                batch,
+                seq,
+                k_heads: op.k_heads,
+                v_heads,
+                head_k,
+                head_v,
+                conv_dim,
+                key_dim: op.k_heads * head_k,
+                tiled: op.tiled,
+                eps: op.eps,
+                mixed: (&mb.0, mb.1),
+                b: (&bb.0, bb.1),
+                a: (&ab.0, ab.1),
+                a_log: &a_logb.0,
+                dt_bias: &dt_biasb.0,
+                state_in: (&sb.0, sb.1),
+                state_out: &state_out.buffer,
+                out: &out.buffer,
+            })
+        })
+        .map_err(vk_err)?;
+    Ok(Some((
+        tensor_of(out, (batch, seq, v_heads, head_v)),
+        tensor_of(state_out, (batch, v_heads, head_k, head_v)),
+    )))
+}
+
 pub(crate) fn ssm_scan_step(step: &crate::vulkan::ScanStep<'_>) -> Result<Tensor> {
     let unified = step.x.device().as_vulkan_device()?.context.is_unified();
     let chunked = !unified || step.x.dim(1)? >= UNIFIED_CHUNKED_SCAN_MIN_SEQ;
