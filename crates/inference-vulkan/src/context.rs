@@ -1,5 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::CStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ash::vk;
@@ -7,7 +8,8 @@ use ash::vk;
 use crate::kernels::Kernels;
 use crate::memory::BufferPool;
 use crate::stream::{
-    DISPATCHES_PER_SUBMIT, DISPATCHES_WHEN_IDLE, Retained, Stream, WORK_PER_SUBMIT,
+    BYTES_PER_SUBMIT, DISPATCHES_PER_SUBMIT, DISPATCHES_WHEN_IDLE, Retained, Stream,
+    WORK_PER_SUBMIT,
 };
 use crate::{Error, Result};
 
@@ -39,6 +41,9 @@ pub struct Context {
     queue: vk::Queue,
     stream: Mutex<Stream>,
     pub(crate) pool: Mutex<BufferPool>,
+    // buffer bytes handed out, and the count at the last submit
+    pub(crate) allocated: AtomicU64,
+    flushed_at: AtomicU64,
     pub(crate) kernels: Kernels,
     // the matrix-core kernels, on a device that has them
     pub(crate) coop: Option<crate::kernels::CoopKernels>,
@@ -202,9 +207,7 @@ impl Context {
         // SAFETY: the family was checked to exist and queue 0 was asked for
         let queue = unsafe { device.get_device_queue(family, 0) };
         let mut stream = Stream::new(&device, family)?;
-        if !unified {
-            stream.max_in_flight = Some(crate::stream::DISCRETE_MAX_IN_FLIGHT);
-        }
+        stream.max_in_flight = Some(crate::stream::DISCRETE_MAX_IN_FLIGHT);
         if std::env::var_os(crate::stream::PROFILE_ENV).is_some() {
             stream.profile = Some(Box::new(crate::stream::Profile::new(f64::from(
                 properties.limits.timestamp_period,
@@ -247,6 +250,8 @@ impl Context {
             queue,
             stream: Mutex::new(stream),
             pool: Mutex::default(),
+            allocated: AtomicU64::new(0),
+            flushed_at: AtomicU64::new(0),
             kernels,
             coop,
             quantized: Mutex::default(),
@@ -374,11 +379,14 @@ impl Context {
         batch.dispatches += recorder.dispatches.get();
         batch.work += recorder.work.get();
         let dispatches = batch.dispatches;
+        let allocated = self.allocated.load(Ordering::Relaxed);
         if dispatches >= DISPATCHES_PER_SUBMIT
             || batch.work >= WORK_PER_SUBMIT
+            || allocated - self.flushed_at.load(Ordering::Relaxed) >= BYTES_PER_SUBMIT
             || (dispatches >= DISPATCHES_WHEN_IDLE && stream.idle(&self.device)?)
         {
             stream.flush(&self.device, self.queue)?;
+            self.flushed_at.store(allocated, Ordering::Relaxed);
         }
         out
     }
@@ -392,6 +400,8 @@ impl Context {
     pub fn flush(&self) -> Result<()> {
         let mut stream = self.stream.lock().expect("vulkan stream poisoned");
         self.live()?;
+        self.flushed_at
+            .store(self.allocated.load(Ordering::Relaxed), Ordering::Relaxed);
         stream.flush(&self.device, self.queue)
     }
 

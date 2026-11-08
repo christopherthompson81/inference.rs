@@ -16,6 +16,10 @@ const FEED_FORWARD_WEIGHT: f64 = 0.5;
 const MIN_FEATURE_FRAMES: usize = 2;
 // attention rows per block, about 40 s of audio at 80 ms a frame
 const QUERY_BLOCK: usize = 512;
+// feature frames an offline subsampling takes at a time (~10 s): its first conv's output over 10 minutes is 2 GB, and
+// the chunks a GPU has in flight each hold their own (a 780M over 10 minutes: 4 GB at 4096 frames, 2.9 GB at 1024, and
+// 1.4 GB once a batch also submits by the bytes it allocates)
+const SUBSAMPLING_CHUNK: usize = 1024;
 
 fn linear_maybe_bias(i: usize, o: usize, bias: bool, vb: VarBuilder) -> Result<Linear> {
     if bias {
@@ -124,6 +128,34 @@ impl Subsampling {
 
     /// `(1, frames, mels)` to `(1, frames / factor, hidden)`.
     fn forward(&self, features: &Tensor) -> Result<Tensor> {
+        if self.causal_pad.is_some() || features.dim(1)? <= SUBSAMPLING_CHUNK {
+            return self.forward_whole(features);
+        }
+        self.forward_chunked(features, SUBSAMPLING_CHUNK)
+    }
+
+    // the offline (symmetric) subsampling over time chunks of `chunk` frames (a multiple of the factor): an output
+    // frame reads the inputs within `reach` of factor times its index, so a window from a multiple of the factor and
+    // `halo` frames wider each side computes its chunk's outputs as the whole pass does
+    fn forward_chunked(&self, features: &Tensor, chunk: usize) -> Result<Tensor> {
+        let (f, frames) = (self.factor(), features.dim(1)?);
+        let pad = (self.kernel - 1) / 2;
+        let reach = pad * (f - 1) / (self.stride - 1);
+        let halo = reach.next_multiple_of(f);
+        let total =
+            (0..self.steps()).fold(frames, |x, _| (x + 2 * pad - self.kernel) / self.stride + 1);
+        let mut outs = Vec::with_capacity(total.div_ceil(chunk / f));
+        for o0 in (0..total).step_by(chunk / f) {
+            let o1 = (o0 + chunk / f).min(total);
+            let start = (o0 * f).saturating_sub(halo);
+            let end = (o1 * f + halo).min(frames);
+            let window = self.forward_whole(&features.narrow(1, start, end - start)?)?;
+            outs.push(window.narrow(1, (o0 * f - start) / f, o1 - o0)?);
+        }
+        Tensor::cat(&outs, 1)
+    }
+
+    fn forward_whole(&self, features: &Tensor) -> Result<Tensor> {
         let mut xs = self
             .first
             .forward(&self.pad(features.unsqueeze(1)?)?)?
@@ -830,6 +862,44 @@ mod tests {
     }
 
     // llama.cpp's GGUF stores the conv's batch norm folded into a scale and shift; both forms compute the same
+    // the offline subsampling over time chunks gives the whole pass's frames (to the CPU gemm's summation order, which
+    // follows the matrix's size): three stride-2 steps, a partial last chunk
+    #[test]
+    fn a_chunked_subsampling_matches_the_whole_pass() -> Result<()> {
+        const CHUNKED_TOLERANCE: f32 = 1e-5;
+        let (ch, mels, hidden) = (4, 16, 8);
+        let cfg: EncoderConfig = serde_json::from_value(serde_json::json!({
+            "hidden_size": hidden, "intermediate_size": 8, "num_hidden_layers": 1, "num_attention_heads": 1,
+            "num_mel_bins": mels, "conv_kernel_size": 3, "subsampling_conv_channels": ch,
+            "subsampling_conv_kernel_size": 3, "subsampling_conv_stride": 2, "subsampling_factor": 8,
+        }))
+        .map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
+        let dev = Device::Cpu;
+        let mut weights = std::collections::HashMap::new();
+        let mut add = |name: &str, shape: &[usize]| -> Result<()> {
+            weights.insert(name.to_string(), Tensor::randn(0f32, 0.5, shape, &dev)?);
+            Ok(())
+        };
+        add("layers.0.weight", &[ch, 1, 3, 3])?;
+        add("layers.0.bias", &[ch])?;
+        for (dw, pw) in [(2, 3), (5, 6)] {
+            add(&format!("layers.{dw}.weight"), &[ch, 1, 3, 3])?;
+            add(&format!("layers.{dw}.bias"), &[ch])?;
+            add(&format!("layers.{pw}.weight"), &[ch, ch, 1, 1])?;
+            add(&format!("layers.{pw}.bias"), &[ch])?;
+        }
+        add("linear.weight", &[hidden, ch * mels / 8])?;
+        add("linear.bias", &[hidden])?;
+        let sub = Subsampling::new(&cfg, VarBuilder::from_tensors(weights, DType::F32, &dev))?;
+        let features = Tensor::randn(0f32, 1., (1, 300, mels), &dev)?;
+        let whole = sub.forward_whole(&features)?;
+        let chunked = sub.forward_chunked(&features, 64)?;
+        assert_eq!(chunked.dims(), whole.dims());
+        let off = (chunked - whole)?.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert!(off < CHUNKED_TOLERANCE, "{off}");
+        Ok(())
+    }
+
     #[test]
     fn a_folded_conv_norm_matches_its_running_statistics() -> Result<()> {
         let (h, k) = (4, 3);
