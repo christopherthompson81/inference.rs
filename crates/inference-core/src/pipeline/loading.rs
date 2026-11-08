@@ -1350,6 +1350,15 @@ pub(crate) fn open_load_session(
         prepared: prepared_weight_source,
         combined: weight_source,
     } = open_weight_sources(uqff_files, prepared_weight_source)?;
+    // a cache holding every expert of the largest layer is the resident load
+    let largest_layer_experts = match weight_source.as_ref() {
+        Some(source) => source
+            .layer_expert_bytes()?
+            .and_then(|(_, experts)| experts.into_iter().max()),
+        None => None,
+    };
+    let moe_expert_cache = moe_expert_cache
+        .filter(|&slots| largest_layer_experts.is_none_or(|experts| slots < experts));
 
     if let (Some(adjust), false, false, DeviceMapSetting::Auto(params)) =
         (auto_device_map_params, write_uqff, distributed, &mapper)

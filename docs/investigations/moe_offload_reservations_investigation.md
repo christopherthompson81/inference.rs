@@ -169,3 +169,24 @@ plans Flash-Next's chunk at 2,560: older planner code, not a comparison for this
 Planner tests: `resident_at_the_shorter_context_beats_slots_at_the_longer`; the preflight's MLA estimate is pinned
 (`mla_prefix_workspace_is_the_latent_not_per_head_keys`, 115 MiB at 512 queries over 3,911 tokens; F32 still takes
 the per-head estimate, over 4x that).
+
+## Run 5 - 2026-11-07 22:50
+
+Question (the issue's second item): why `--moe-expert-cache 256` was refused ("exceeds total capacity by 6286MB").
+
+On this branch it no longer fails: the requested path shrinks a cache that does not fit (`shrink_expert_slots`),
+and the map's MLA KV no longer overcounts. But 256 of 256 experts shrank to 244 slots (a requested cache keeps the
+offload margins), and an all-expert request sized as resident then ran through the expert-cache machinery, whose
+staging it did not count: CUDA_ERROR_OUT_OF_MEMORY in `moe experts forward`, decode 49 tok/s before it.
+
+Change: a request that holds every expert of the largest layer is dropped where the load filters the request, so it
+is the resident load.
+
+```
+--moe-expert-cache 256: resident, 35,712-token KV, 3.9K prompt fine, decode 111.5 tok/s (256-token story)
+--moe-expert-cache 240: offloaded (file mapping, pageable), 126,720-token KV, decode 87.0 tok/s
+```
+
+The issue's third item (activation reserve following the prompt chunk): with the MLA prefix path flat, a resident
+prefill peaks ~260 MiB above idle at 512-token chunks (Run 3) and runs inside the free floor, so the 64 MB estimate
+is left as it is.
