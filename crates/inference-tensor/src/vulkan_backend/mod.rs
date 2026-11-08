@@ -75,7 +75,8 @@ impl VulkanDevice {
         count: usize,
         dtype: DType,
     ) -> Result<VulkanStorage> {
-        let mut buffer = self.buffer(bytes.len())?;
+        let mut buffer =
+            Buffer::for_upload(&self.context, bytes.len().max(MIN_BUFFER_BYTES)).map_err(vk_err)?;
         buffer.write(0, bytes).map_err(vk_err)?;
         Ok(VulkanStorage {
             buffer: Arc::new(buffer),

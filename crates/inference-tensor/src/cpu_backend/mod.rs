@@ -959,9 +959,9 @@ fn copy2d_<T: Copy>(
 const PARALLEL_TRANSPOSE_ELEMS: usize = 1 << 16;
 // multiply-adds from which a matmul parks the elementwise pool's spinning workers (~0.2 ms here, far past a wake-up),
 // and from which an f32 one may take bf16 inputs
-const REST_POOL_MIN_WORK: usize = 1 << 26;
+pub(crate) const REST_POOL_MIN_WORK: usize = 1 << 26;
 // output columns from which a bf16 product outruns f32 (an attention head's 128 lost: 512 -> 329 GFLOPS)
-const BF16_MIN_COLS: usize = 256;
+pub(crate) const BF16_MIN_COLS: usize = 256;
 // a strided copy of this many elements or more splits its blocks over the threads: one thread copying a speech
 // encoder's heads (30 MB a tensor) kept the rest idle
 const PARALLEL_COPY_ELEMS: usize = 1 << 18;
@@ -1602,11 +1602,11 @@ impl Map2 for MatMul {
                     cs: lhs_cs,
                 },
                 a_skip,
-                &gemm_bf16::Strided {
+                &gemm_bf16::BOperand::F32(gemm_bf16::Strided {
                     data: rhs,
                     rs: rhs_rs,
                     cs: rhs_cs,
-                },
+                }),
                 b_skip,
                 &mut out,
             );

@@ -814,7 +814,7 @@ impl TranscriptionPipeline {
             AudioModel::Diarizer(Diarizer::Nemotron3(_)) => true,
             _ => false,
         };
-        // the same models keep their projection weights in f16 on a discrete Vulkan GPU's matrix cores, which round
+        // the same models keep their projection weights in f16 on a Vulkan GPU's matrix cores, which round
         // their inputs to f16 anyway: half the weights' memory (Parakeet's ~1.1 GB), its products unchanged
         if bf16_matmuls {
             match &mut model {

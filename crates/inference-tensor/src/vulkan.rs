@@ -22,13 +22,13 @@ pub fn is_discrete(device: &crate::Device) -> bool {
     }
 }
 
-/// Whether `device` is a discrete Vulkan GPU with matrix cores (cooperative matrices), which take f16 weights in place.
+/// Whether `device` is a Vulkan GPU with matrix cores (cooperative matrices), which its f32 matmuls round to f16 on
+/// and which take f16 weights in place (an iGPU's prompt matmuls of quantized weights stay off them).
 pub fn has_matrix_cores(device: &crate::Device) -> bool {
     #[cfg(feature = "vulkan")]
-    return device.as_vulkan_device().is_ok_and(|d| {
-        let context = d.context();
-        !context.is_unified() && context.has_matrix_cores()
-    });
+    return device
+        .as_vulkan_device()
+        .is_ok_and(|d| d.context().has_matrix_cores());
     #[cfg(not(feature = "vulkan"))]
     {
         let _ = device;

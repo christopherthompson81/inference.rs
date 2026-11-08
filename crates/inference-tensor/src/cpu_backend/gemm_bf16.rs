@@ -43,9 +43,13 @@ std::thread_local! {
 /// Whether this thread's large f32 matmuls take bf16 inputs: inside [`with_bf16_matmuls`], on a CPU that multiplies
 /// bf16 pairs, with [`NO_BF16_ENV`] unset.
 pub fn enabled() -> bool {
+    IN_SCOPE.get() && allowed()
+}
+
+/// Whether a scope may take bf16 matmul inputs here: a CPU that multiplies bf16 pairs, with [`NO_BF16_ENV`] unset.
+pub fn allowed() -> bool {
     static ALLOWED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    IN_SCOPE.get()
-        && *ALLOWED.get_or_init(|| available() && std::env::var_os(NO_BF16_ENV).is_none())
+    *ALLOWED.get_or_init(|| available() && std::env::var_os(NO_BF16_ENV).is_none())
 }
 
 /// Runs `f` with this thread's large f32 CPU matmuls taking bf16 inputs, where the CPU multiplies bf16 pairs and
@@ -79,6 +83,17 @@ pub struct Strided<'a> {
     pub data: &'a [f32],
     pub rs: usize,
     pub cs: usize,
+}
+
+/// B's elements: f32, rounded to bf16 as they are packed, or bf16 already (a weight kept so, `Linear::to_half`).
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+pub enum BOperand<'a> {
+    F32(Strided<'a>),
+    Bf16 {
+        data: &'a [u16],
+        rs: usize,
+        cs: usize,
+    },
 }
 
 // round to nearest even, as `vcvtneps2bf16` does
@@ -124,7 +139,7 @@ pub fn gemm(
     k: usize,
     a: &Strided,
     a_skip: usize,
-    b: &Strided,
+    b: &BOperand,
     b_skip: usize,
     dst: &mut [f32],
 ) {
@@ -158,6 +173,25 @@ pub fn gemm(
         .enumerate()
         .for_each(|(i, out)| {
             let (bi, panel) = (i / panels, i % panels);
+            let b = match b {
+                BOperand::F32(b) => b,
+                &BOperand::Bf16 { data, rs, cs } => {
+                    for j in 0..NR.min(n - panel * NR) {
+                        let at = bi * b_skip + (panel * NR + j) * cs;
+                        let half = |kk: usize| {
+                            if kk < k {
+                                u32::from(data[at + kk * rs])
+                            } else {
+                                0
+                            }
+                        };
+                        for p in 0..pairs {
+                            out[p * NR + j] = half(2 * p) | half(2 * p + 1) << 16;
+                        }
+                    }
+                    return;
+                }
+            };
             // a column contiguous along k (a transposed weight's rows) converts a vector at a time
             let mut column = vec![0u32; if b.rs == 1 { pairs } else { 0 }];
             for j in 0..NR.min(n - panel * NR) {
@@ -236,7 +270,7 @@ pub fn gemm(
     _k: usize,
     _a: &Strided,
     _a_skip: usize,
-    _b: &Strided,
+    _b: &BOperand,
     _b_skip: usize,
     _dst: &mut [f32],
 ) {
@@ -375,11 +409,11 @@ mod tests {
                     cs: 1,
                 },
                 0,
-                &Strided {
+                &BOperand::F32(Strided {
                     data: &b,
                     rs: 1,
                     cs: k,
-                },
+                }),
                 0,
                 &mut got,
             );

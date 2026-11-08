@@ -76,8 +76,73 @@ pub fn rel_pos_attention(
     )?))
 }
 
+/// `x` (f32, `(.., k)`) times a bf16 `(n, k)` weight transposed (`Linear::to_half`'s on a CPU), `(.., n)` f32: the bf16
+/// products the scope's f32 matmuls take, the weight read as it is. `None` outside [`with_bf16_matmuls`] or for a
+/// product the scope keeps in f32 (the caller widens the weight).
+pub fn linear_bf16_weight(
+    x: &crate::Tensor,
+    weight: &crate::Tensor,
+) -> crate::Result<Option<crate::Tensor>> {
+    use crate::cpu_backend::{BF16_MIN_COLS, REST_POOL_MIN_WORK, gemm_bf16};
+    let (n, k) = weight.dims2()?;
+    let rows = x.elem_count() / k.max(1);
+    if x.dtype() != crate::DType::F32
+        || weight.dtype() != crate::DType::BF16
+        || !x.device().is_cpu()
+        || !weight.device().is_cpu()
+        || x.dims().last() != Some(&k)
+        || rows * n * k < REST_POOL_MIN_WORK
+        || n < BF16_MIN_COLS
+        || !gemm_bf16::enabled()
+    {
+        return Ok(None);
+    }
+    let (x, weight) = (x.contiguous()?, weight.contiguous()?);
+    let (xs, xl) = x.storage_and_layout();
+    let (ws, wl) = weight.storage_and_layout();
+    let (
+        crate::Storage::Cpu(crate::CpuStorage::F32(xv)),
+        crate::Storage::Cpu(crate::CpuStorage::BF16(wv)),
+    ) = (&*xs, &*ws)
+    else {
+        crate::bail!("a bf16-weight linear takes CPU f32 rows and a CPU bf16 weight");
+    };
+    let xv = &xv[xl.start_offset()..][..rows * k];
+    let wv = &wv[wl.start_offset()..][..n * k];
+    // SAFETY: bf16 is a u16's bits
+    let wv = unsafe { std::slice::from_raw_parts(wv.as_ptr().cast::<u16>(), wv.len()) };
+    let mut out = vec![0f32; rows * n];
+    gemm_bf16::gemm(
+        1,
+        rows,
+        n,
+        k,
+        &gemm_bf16::Strided {
+            data: xv,
+            rs: k,
+            cs: 1,
+        },
+        0,
+        &gemm_bf16::BOperand::Bf16 {
+            data: wv,
+            rs: 1,
+            cs: k,
+        },
+        0,
+        &mut out,
+    );
+    let mut dims = x.dims().to_vec();
+    *dims.last_mut().expect("rank >= 1") = n;
+    Ok(Some(crate::Tensor::from_vec(
+        out,
+        dims,
+        &crate::Device::Cpu,
+    )?))
+}
+
 pub use crate::cpu_backend::gemm_bf16::{
-    BF16_ENV, NO_BF16_ENV, enabled as bf16_enabled, forced as bf16_forced, with_bf16_matmuls,
+    BF16_ENV, NO_BF16_ENV, allowed as bf16_allowed, enabled as bf16_enabled, forced as bf16_forced,
+    with_bf16_matmuls,
 };
 
 #[allow(unused)]
