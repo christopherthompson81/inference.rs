@@ -1249,3 +1249,135 @@ The position table in chunked mode (#391).
 - **TDT v3 (full attention), unchanged:** warm 8.60-8.65 s, 619/619 emissions.
 - **Assessment:** the saving is ~0.8 s at 300 s, as the arithmetic predicts. The full table is 7.5k rows, about 7.7 GMAC per layer; the band is 1.2k. It grows linearly with length, so the 24-minute bound saves about 4x that.
 - **Build matters:** the script's own run of ours, in the dev build with debug assertions, took 32.2 s to encode the 300 s clip, against 18.9 s without them.
+
+## Run 43 - 2026-11-08 (laptop: Ryzen 7 7840U, CPU only)
+
+**Question:** Parakeet TDT 0.6B v3 and Nemotron-3 Diarization on the CPU, the 10 minutes of the meeting Vulkan's Runs
+66-68 used (`from-config` with `cpu = true`): ASR 62.5 s, diarization 17.1 s, both in one request 73.5 s.
+
+**Finding:**
+- The encoder takes 61 of the 63 s, the decoder 2.4.
+- f32 gemm is ~70 % of the samples. The feed-forwards run at 565 GFLOPS; attention's batched products (8 heads of
+  512 x 7500 x 128, and of 512 x 128 x 7500) at ~300, as the batch loop ran one head at a time on all threads.
+- The 8 compute threads were ~57 % busy (all 16 CPUs ~50 %). The engine thread worked alone in between: strided copies
+  (`copy_strided_src`, 44 % of its samples), zeroing fresh outputs (17 %), and its share of the scores' add.
+- 16 threads ran no faster than 8 (encoder 59.5 s against 59.6, decode slower): the work is f32 FMAs, which
+  hyperthreads share.
+
+**Change:**
+- A batched matmul runs its products side by side, each on its share of the threads.
+- gemm's AVX-512 kernels, taken where the CPU has avx512f (`gemm-f32`'s `x86-v4`).
+- Large strided copies split their blocks over the threads.
+- The matmul, softmax, RMS norm and layer norm outputs are not zeroed before they are written whole.
+- Attention's rel-shift, sum and softmax are one CPU pass (`RelShiftSoftmax`), bit for bit the composite.
+- Long sigmoid and affine maps run on the pool.
+
+**Tests:** the fused softmax against its composite, bit for bit (an off-by-one shift fails it). The three Qwen
+snapshot tests whose f32 logits move under AVX-512 (a few 1e-4) take a second snapshot on avx512f CPUs (`by_simd`).
+
+**Result (CPU, 10 minutes):**
+
+| | before | now |
+|---|---|---|
+| ASR | 62.5 s | 48.2 s |
+| diarization | 17.1 s | 17.0 s |
+| both, one request | 73.5 s | 60.2 s |
+
+The transcript and every word's speaker match the earlier CPU run. Attention products at 8 threads: 284-315 ->
+405-423 GFLOPS (the batch split), feed-forwards 565 -> 691 (AVX-512). Lightning recipe A on the CPU: prefill (512)
+99.3 -> 103.0 tok/s, decode 17.1 -> 17.2. What is left: the encoder's matmuls (~32 s by their measured rates), and the
+diarizer's small per-chunk products, whose operand packing is 14 % of its samples. Its barrier-pool threads spin
+(19 %); parking them at once took diarization 16.8 -> 15.2 s, left as is since the spin limit serves CPU decode.
+
+## Run 44 - 2026-11-08 (laptop: Ryzen 7 7840U, CPU only)
+
+**Question:** what is left after Run 43 (ASR 48.2 s, diarization 17.0 s)?
+
+**Finding:**
+- ASR: Parakeet's fused softmax spent a tenth of the encoder in libm's `expf`, a call an element.
+- Diarization: 23 chunks of ~27 s, each the 31-layer transformer over 684 rows (cache and chunk), 0.7 s a step.
+  Summed over the 713 layer steps, the query-key scores took 1.69 s against ~0.5 by gemm's rate at that shape: a
+  contiguous copy of the transposed keys, then a scaling of the (8, 684, 684) scores.
+- The chunks cannot batch, as each reads the speaker cache the last one updated. Fewer threads only slow it (4:
+  19.9 s, 6: 17.3, 8: 15.9).
+
+**Change:**
+- Parakeet's fused softmax takes `fast_exp` (Cephes, ~1e-7 relative), which vectorizes.
+- On the CPU, the diarizer scales its queries rather than its scores (2^-3 at head 64, the same bits), and its matmul
+  reads the transposed keys in place. A GPU keeps the old order: on Vulkan, scaling the queries first moved 126 of
+  284 segments, as its f16 matmul inputs round small queries.
+
+**Result (CPU, 10 minutes):** ASR 48.2 -> 39.6 s, diarization 17.0 -> 12.5-13.4 s, both in one request 60.2 -> 50.1 s.
+The transcript and every word's speaker match the earlier CPU run; the CPU and Vulkan diarizations each match their
+own earlier runs exactly.
+
+## Run 45 - 2026-11-08 (laptop: Ryzen 7 7840U, CPU only)
+
+**Question:** after Run 44, how busy are the threads, and where is the rest? (Times in this run are A/B pairs from one
+session, alternating binaries: the laptop's absolute times drift by ~10 % with its temperature.)
+
+**Finding:**
+- ASR: the 8 compute threads ~75 % busy, gemm 82 % of samples at 560-645 GFLOPS (~70 % of the f32 peak). Per
+  1024-frame chunk the subsampling's projection ran over ~130 rows at 107 GFLOPS.
+- Diarization: the compute threads ~60 % busy. The engine thread spent half its samples in libm's `erff` (`erfc2`,
+  `expf`): the GELU runs on the elementwise pool, the matmul threads waiting on it. Its small products (684 rows) run
+  at 300-450 GFLOPS in place, 470-560 alone with one weight (a cycle through 31 weights: 390-520).
+
+**Change:**
+- The CPU's f32 erf GELU takes Abramowitz and Stegun's erfc through a Cephes exp, as Vulkan's map kernel computes
+  it: branch-free, so it vectorizes (`gelu_erf_f32`, `fast_exp` now in `inference_tensor::cpu::erf`, which
+  inference-nn re-exports). Within 1e-6 x max(1, |x|) of the f64 libm GELU from -8 to 8.
+- The subsampling projects every chunk's frames at once.
+
+**Tests:** the f32 GELU against the f64 one (an erfc 1e-4 off fails it). Every snapshot test passes unchanged.
+
+**Result (A/B, 3 alternating rounds):** diarization 15.85 -> 14.03 s with the GELU; ASR 45.35 -> 45.13 s with the
+one projection (noise level). The transcript, its speakers and the diarization are bit for bit unchanged. What is
+left of ASR is gemm at ~70 % of the f32 peak and the fused softmax (9 %, memory-bound over the scores).
+
+**Later (same day):** while a matmul runs on rayon's threads, the elementwise pool's 7 idle workers spun (35 % each
+during diarization), sharing cores with it; parking them outright took diarization 16.8 -> 15.2 s but CPU decode 17.0
+-> 16.1 tok/s. `BarrierPool::rest` parks them until their next job, which a CPU matmul of 2^26 multiply-adds or more
+calls first (~0.2 ms here, far past a wake-up): A/B, diarization 14.06 -> 13.78 s, ASR 44.94 -> 44.83, Lightning CPU
+decode 16.7-16.8 -> 16.8-16.9 tok/s.
+
+The diarizer's query, key and value projections load as one `[query | key | value]` weight (the fused path its
+quantized loads already take): 684 x 512 x 512 products had run at ~346 GFLOPS in place against ~445 for the
+1536-wide one. A/B, diarization 13.60 -> 13.17 s; both devices' diarizations unchanged.
+
+## Run 46 - 2026-11-08 (laptop: Ryzen 7 7840U, CPU only)
+
+**Question:** gemm is ~80 % of the speech models' CPU time at ~70 % of the f32 peak. Does AVX-512 BF16
+(`vdpbf16ps`, 32 multiply-adds an instruction, twice f32 FMA's) keep their outputs?
+
+**Accuracy first (each large matmul's inputs rounded to bf16, then f32 gemm):** the meeting's 1614 words and a
+20-second clip's 58 unchanged, 2 starts a frame off. The real kernel: words unchanged, 4 starts a frame off, 0.14 % of
+the diarizer's speaker-frames moved (Vulkan's f16 path moves 0.08-0.10 % against the CPU). Lightning's CPU KLD is the
+same to the digit (its large products are all quantized).
+
+**Change:** `cpu_backend::gemm_bf16`, a 6 x 32 microkernel over packed bf16 pairs (A's rows along k, B in 32-column
+panels a 16-lane load holds pairs of), the tasks over the batch, row blocks and panel groups sized to give each thread
+a few. A model opts in around its forward (`inference_tensor::cpu::with_bf16_matmuls`), for f32 products of 2^26
+multiply-adds and 256 columns or more on a CPU with avx512bf16; `INFERENCE_CPU_NO_BF16` turns it off. Parakeet's
+encoder and the diarizer's step opt in. As a global default it had moved other f32 models' CPU results by up to 0.4 %
+(a layout model's batched forward against its single one).
+
+| bf16 kernel | f32 gemm | bf16 |
+|---|---|---|
+| 7500 x 4096 x 1024 | 647 GFLOPS | 1337 |
+| 7500 x 1024 x 1024 | 569 | 1055 |
+| 8 x 512 x 7500 x 128 (scores) | 467 | 560 |
+| 8 x 512 x 128 x 7500 (values) | 512 | 329: stays f32 |
+
+**Tests:** the kernel against f32 sums of the rounded inputs (edge tiles, odd k, a strided operand; a dropped pair
+half fails it); a scoped matmul takes bf16 inputs and an unscoped one f32's.
+
+**Result (A/B):** ASR 38.67 -> 32.93 s, diarization 11.38 -> 9.10 s; both in one request 40.6 s (Run 43's start:
+73.5).
+
+**Policy (same day):** bf16 holds for most f32 models but is not safe to assume, so a model takes it only once
+measured. The opt-in is a loader property, `GeneralMetadata::bf16_matmuls`, which the engine's step applies around
+the forward; the transcription loader sets it for Parakeet's offline encoder and the Nemotron-3 diarizer.
+`scripts/bf16_check.sh` measures a model with bf16 inputs forced (`INFERENCE_CPU_BF16`) against f32
+(`INFERENCE_CPU_NO_BF16`): an ASR's words, a diarizer's speaker-frames (0.5 % may move), an LLM's KLD (1e-3 may rise).
+On the meeting: Parakeet 1614 words, 0 differing, 4 starts moved; the diarizer 0.137 % of 46,824 speaker-frames.

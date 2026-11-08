@@ -100,7 +100,17 @@ impl crate::CustomOp1 for Sigmoid {
                 }))
             }
             CpuStorage::F32(slice) => {
-                CpuStorage::F32(crate::cpu_backend::unary_map(slice, layout, fwd))
+                // over the pool's threads where long (a conformer's GLU gates, 7.7M a layer, had run on one)
+                CpuStorage::F32(crate::cpu_backend::unary_map_vec_par(
+                    slice,
+                    layout,
+                    fwd,
+                    |xs, ys| {
+                        for (x, y) in xs.iter().zip(ys.iter_mut()) {
+                            *y = fwd(*x);
+                        }
+                    },
+                ))
             }
             CpuStorage::F64(slice) => {
                 CpuStorage::F64(crate::cpu_backend::unary_map(slice, layout, fwd))
@@ -344,7 +354,13 @@ impl crate::CustomOp1 for SoftmaxLastDim {
             let el_count = layout.shape().elem_count();
             let dims = layout.shape().dims();
             let dim_m1 = dims[dims.len() - 1];
-            let mut dst = vec![T::zero(); el_count];
+            // each row is written whole before a read, so not zeroed first (one thread zeroing it held the rest)
+            let mut dst = Vec::with_capacity(el_count);
+            // SAFETY: T is plain old data, as alloc_uninit takes it
+            #[allow(clippy::uninit_vec)]
+            unsafe {
+                dst.set_len(el_count)
+            };
             src.par_chunks(dim_m1)
                 .zip(dst.par_chunks_mut(dim_m1))
                 .for_each(|(src, dst)| {
@@ -548,7 +564,13 @@ impl crate::CustomOp2 for RmsNorm {
             let dims = layout.shape().dims();
             let dim_m1 = dims[dims.len() - 1];
             let n_rows = el_count / dim_m1;
-            let mut dst = vec![T::zero(); el_count];
+            // each row is written whole before a read, so not zeroed first (one thread zeroing it held the rest)
+            let mut dst = Vec::with_capacity(el_count);
+            // SAFETY: T is plain old data, as alloc_uninit takes it
+            #[allow(clippy::uninit_vec)]
+            unsafe {
+                dst.set_len(el_count)
+            };
 
             fn rms_row<
                 T: crate::WithDType
@@ -744,7 +766,13 @@ impl crate::CustomOp3 for LayerNorm {
             let el_count = layout.shape().elem_count();
             let dims = layout.shape().dims();
             let dim_m1 = dims[dims.len() - 1];
-            let mut dst = vec![T::zero(); el_count];
+            // each row is written whole before a read, so not zeroed first (one thread zeroing it held the rest)
+            let mut dst = Vec::with_capacity(el_count);
+            // SAFETY: T is plain old data, as alloc_uninit takes it
+            #[allow(clippy::uninit_vec)]
+            unsafe {
+                dst.set_len(el_count)
+            };
             src.par_chunks(dim_m1)
                 .zip(dst.par_chunks_mut(dim_m1))
                 .for_each(|(src, dst)| {

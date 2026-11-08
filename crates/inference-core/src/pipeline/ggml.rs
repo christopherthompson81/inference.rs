@@ -251,6 +251,7 @@ impl Loader for GGMLLoader {
                 label_decision: None,
                 audio_transcriber: None,
                 prompt_activation_bytes_per_token: None,
+                bf16_matmuls: false,
             }),
             generation_defaults,
         })))

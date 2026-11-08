@@ -15,6 +15,7 @@ pub use utils::{
 mod conv1d_direct;
 mod conv2d;
 mod conv_grouped;
+pub(crate) mod gemm_bf16;
 use conv_grouped::GroupedConv;
 use conv2d::Conv2D;
 
@@ -386,7 +387,17 @@ impl Map1 for Affine {
     fn f<T: WithDType>(&self, vs: &[T], layout: &Layout) -> Result<Vec<T>> {
         let mul = T::from_f64(self.0);
         let add = T::from_f64(self.1);
-        Ok(unary_map(vs, layout, |v| v * mul + add))
+        // over the pool's threads where long: a speech encoder's scaled queries had run on one
+        Ok(utils::unary_map_vec_par(
+            vs,
+            layout,
+            |v| v * mul + add,
+            |xs, ys| {
+                for (x, y) in xs.iter().zip(ys.iter_mut()) {
+                    *y = *x * mul + add;
+                }
+            },
+        ))
     }
 }
 
@@ -945,6 +956,14 @@ fn copy2d_<T: Copy>(
 
 // a transposed copy of fewer elements runs on one thread, through the tiles as a larger one
 const PARALLEL_TRANSPOSE_ELEMS: usize = 1 << 16;
+// multiply-adds from which a matmul parks the elementwise pool's spinning workers (~0.2 ms here, far past a wake-up),
+// and from which an f32 one may take bf16 inputs
+const REST_POOL_MIN_WORK: usize = 1 << 26;
+// output columns from which a bf16 product outruns f32 (an attention head's 128 lost: 512 -> 329 GFLOPS)
+const BF16_MIN_COLS: usize = 256;
+// a strided copy of this many elements or more splits its blocks over the threads: one thread copying a speech
+// encoder's heads (30 MB a tensor) kept the rest idle
+const PARALLEL_COPY_ELEMS: usize = 1 << 18;
 // rows and columns of the tiles a transposed copy goes through, so reads and writes both stay in cache
 const TRANSPOSE_TILE: usize = 32;
 
@@ -1023,6 +1042,19 @@ fn copy_strided_src_<T: Copy + Send + Sync>(
             block_len,
             count,
             src_stride,
+        } if count * block_len >= PARALLEL_COPY_ELEMS && block_len > 0 => dst
+            [dst_offset..dst_offset + count * block_len]
+            .par_chunks_mut(block_len)
+            .enumerate()
+            .for_each(|(i, row)| {
+                let at = start_offset + i * src_stride;
+                row.copy_from_slice(&src[at..at + block_len]);
+            }),
+        crate::StridedBlocks::UniformBlocks {
+            start_offset,
+            block_len,
+            count,
+            src_stride,
         } => copy2d_(
             src,
             dst,
@@ -1042,6 +1074,16 @@ fn copy_strided_src_<T: Copy + Send + Sync>(
             for (dst_elem, src_index) in dst.iter_mut().zip(block_start_index) {
                 *dst_elem = src[src_index]
             }
+        }
+        crate::StridedBlocks::MultipleBlocks {
+            block_start_index,
+            block_len,
+        } if block_start_index.len() * block_len >= PARALLEL_COPY_ELEMS => {
+            let starts: Vec<usize> = block_start_index.collect();
+            dst[dst_offset..dst_offset + starts.len() * block_len]
+                .par_chunks_mut(block_len)
+                .zip(starts.par_iter())
+                .for_each(|(block, &at)| block.copy_from_slice(&src[at..at + block_len]));
         }
         crate::StridedBlocks::MultipleBlocks {
             block_start_index,
@@ -1533,12 +1575,65 @@ impl Map2 for MatMul {
         let (a_skip, b_skip) = self.ab_skip(lhs_l, rhs_l)?;
         let c_skip: usize = m * n;
 
+        // a large f32 product through bf16 inputs where the CPU multiplies bf16 pairs: twice the rate (a 7840U's
+        // feed-forwards 647 -> 1337 GFLOPS); a narrow one packs as much as it multiplies, so it stays f32
+        if T::DTYPE == DType::F32
+            && b * m * n * k >= REST_POOL_MIN_WORK
+            && n >= BF16_MIN_COLS
+            && gemm_bf16::enabled()
+        {
+            // SAFETY: T is f32, checked above
+            let (lhs, rhs) = unsafe {
+                (
+                    std::slice::from_raw_parts(lhs.as_ptr().cast::<f32>(), lhs.len()),
+                    std::slice::from_raw_parts(rhs.as_ptr().cast::<f32>(), rhs.len()),
+                )
+            };
+            let mut out = vec![0f32; b * m * n];
+            gemm_bf16::gemm(
+                b,
+                m,
+                n,
+                k,
+                &gemm_bf16::Strided {
+                    data: lhs,
+                    rs: lhs_rs,
+                    cs: lhs_cs,
+                },
+                a_skip,
+                &gemm_bf16::Strided {
+                    data: rhs,
+                    rs: rhs_rs,
+                    cs: rhs_cs,
+                },
+                b_skip,
+                &mut out,
+            );
+            // SAFETY: T is f32
+            return Ok(unsafe { std::mem::transmute::<Vec<f32>, Vec<T>>(out) });
+        }
+        // the elementwise pool's idle workers park for a long product rather than spin beside its threads
+        if b * m * n * k >= REST_POOL_MIN_WORK {
+            crate::utils::barrier_pool().rest();
+        }
         let dst_shape: Shape = (m, n).into();
         let dst_strides = dst_shape.stride_contiguous();
         let dst_rs = dst_strides[0];
         let dst_cs = dst_strides[1];
 
-        let mut dst = vec![T::zero(); b * m * n];
+        // gemm writes every output when it reads none (k > 0), so the buffer need not be zeroed first: one thread
+        // zeroing a 123 MB score tensor kept the others idle
+        let mut dst = if k > 0 {
+            let mut dst = Vec::with_capacity(b * m * n);
+            // SAFETY: T is plain old data, as alloc_uninit takes it, and gemm overwrites each element before a read
+            #[allow(clippy::uninit_vec)]
+            unsafe {
+                dst.set_len(b * m * n)
+            };
+            dst
+        } else {
+            vec![T::zero(); b * m * n]
+        };
         // gemm's result follows its thread count, so it keeps the pool's width rather than the lease's
         let num_threads = crate::utils::get_num_threads();
         let parallelism = if num_threads > 1 {
@@ -1581,6 +1676,44 @@ impl Map2 for MatMul {
                     unsafe {
                         *(dst_ptr as *mut f32).add(col) = dot_f32(lhs, &rhs[col * rhs_cs..][..k])
                     };
+                }
+            });
+            return Ok(dst);
+        }
+        // a batch's products run side by side, each on its share of the threads: one at a time, a small product (an
+        // attention head's 512 x 7500 x 128) spends its threads waiting on each other (300 -> 460-530 GFLOPS, 7840U)
+        if b > 1 && num_threads > 1 {
+            let threads = num_threads / b;
+            let parallelism = if threads > 1 {
+                Parallelism::Rayon(threads)
+            } else {
+                Parallelism::None
+            };
+            let dst_at = dst.as_mut_ptr() as usize;
+            (0..b).into_par_iter().for_each(|step| {
+                // SAFETY: each step writes its own c_skip-long slice of `dst`, which outlives the loop
+                unsafe {
+                    gemm(
+                        m,
+                        n,
+                        k,
+                        (dst_at as *mut T).add(step * c_skip),
+                        dst_cs as isize,
+                        dst_rs as isize,
+                        false,
+                        lhs[step * a_skip..].as_ptr(),
+                        lhs_cs as isize,
+                        lhs_rs as isize,
+                        rhs[step * b_skip..].as_ptr(),
+                        rhs_cs as isize,
+                        rhs_rs as isize,
+                        T::zero(),
+                        T::one(),
+                        false,
+                        false,
+                        false,
+                        parallelism,
+                    )
                 }
             });
             return Ok(dst);

@@ -308,6 +308,18 @@ pub struct Snapshot {
     pub l2: f32,
 }
 
+/// `avx512` on an x86 CPU with avx512f, whose f32 matmuls (gemm's AVX-512 kernels) sum in another order; `plain`
+/// elsewhere.
+pub fn by_simd(plain: Snapshot, avx512: Snapshot) -> Snapshot {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx512f") {
+        return avx512;
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = avx512;
+    plain
+}
+
 /// The x86 snapshot, or the arm64 one: BF16 and quantized CPU kernels round in a different order on each.
 pub fn by_arch(x86: Snapshot, aarch64: Snapshot) -> Snapshot {
     if cfg!(target_arch = "aarch64") {

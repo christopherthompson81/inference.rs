@@ -4,7 +4,8 @@ use anyhow::Result;
 use inference_nn::loaders::NormalModelLoader;
 use inference_nn::paged_attention::AttentionImplementation;
 use inference_nn::testing::{
-    Snapshot, assert_snapshot, forward_normal, load_synthesized, metadata, names_digest, patched,
+    Snapshot, assert_snapshot, by_simd, forward_normal, load_synthesized, metadata, names_digest,
+    patched,
 };
 use inference_tensor::DType;
 use serde_json::{Value, json};
@@ -62,11 +63,18 @@ fn qwen2_prefill() -> Result<()> {
         &Qwen2Loader,
         &qwen2_config(),
         0xcbc6_ffeb_dece_a351,
-        &Snapshot {
-            probes: [0.10115375, 1.5709375, 0.59350157, 0.6359584],
-            sum: 35.15997,
-            l2: 17.545107,
-        },
+        &by_simd(
+            Snapshot {
+                probes: [0.10115375, 1.5709375, 0.59350157, 0.6359584],
+                sum: 35.15997,
+                l2: 17.545107,
+            },
+            Snapshot {
+                probes: [0.101017125, 1.5709374, 0.5935015, 0.63631344],
+                sum: 35.15918,
+                l2: 17.544928,
+            },
+        ),
     )
 }
 
@@ -81,10 +89,17 @@ fn qwen2_prefill_with_a_sliding_layer() -> Result<()> {
         &Qwen2Loader,
         &config,
         0xcbc6_ffeb_dece_a351,
-        &Snapshot {
-            probes: [0.10115375, 1.5709375, 0.6692579, 0.95223856],
-            sum: 42.161827,
-            l2: 17.714283,
-        },
+        &by_simd(
+            Snapshot {
+                probes: [0.10115375, 1.5709375, 0.6692579, 0.95223856],
+                sum: 42.161827,
+                l2: 17.714283,
+            },
+            Snapshot {
+                probes: [0.101017125, 1.5709374, 0.6692579, 0.95223826],
+                sum: 42.162533,
+                l2: 17.71423,
+            },
+        ),
     )
 }

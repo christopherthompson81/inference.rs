@@ -983,7 +983,7 @@ impl UnaryOpT for GeluErf {
     }
     #[inline(always)]
     fn f32(v: f32) -> f32 {
-        (crate::cpu::erf::erf_f32(v * std::f32::consts::FRAC_1_SQRT_2) + 1.) * 0.5 * v
+        crate::cpu::erf::gelu_erf_f32(v)
     }
     #[inline(always)]
     fn f64(v: f64) -> f64 {
@@ -1226,6 +1226,22 @@ mod tests {
                     "{name} {dtype:?} on {device:?}: {off} of {STEPS} values off"
                 );
             }
+        }
+        Ok(())
+    }
+
+    // the f32 erf GELU (Abramowitz and Stegun's erfc, a fast exp) against the f64 one through libm's erf
+    #[test]
+    fn the_f32_erf_gelu_tracks_the_f64_one() -> crate::Result<()> {
+        const GELU_F32_TOLERANCE: f64 = 1e-6;
+        let xs = inputs(DType::F32, &Device::Cpu)?;
+        let got = xs.gelu_erf()?.to_dtype(DType::F64)?.to_vec1::<f64>()?;
+        let want = xs.to_dtype(DType::F64)?.gelu_erf()?.to_vec1::<f64>()?;
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                (g - w).abs() <= GELU_F32_TOLERANCE * w.abs().max(1.0),
+                "{i}: {g} vs {w}"
+            );
         }
         Ok(())
     }

@@ -274,8 +274,8 @@ impl dyn Pipeline {
         let preserve_causal_generation =
             self.preserves_causal_generation(input_seqs, input_seqs.len() > 1, ctx);
         let start = Instant::now();
-        let result = self
-            .forward_inputs(inputs, ctx.return_raw_logits)?
+        let bf16 = self.get_metadata().bf16_matmuls;
+        let result = in_precision(bf16, || self.forward_inputs(inputs, ctx.return_raw_logits))?
             .into_cpu_for_batch(input_seqs.len(), preserve_causal_generation)?;
         let mut exec_duration = start.elapsed();
         outputs.scatter(0, &result, seq_indices)?;
@@ -786,16 +786,16 @@ impl dyn Pipeline {
             }
             let captured = self.install_recurrent_captures(&recurrent_captures, &seq_indices)?;
             let start = Instant::now();
+            let bf16 = self.get_metadata().bf16_matmuls;
             #[cfg(feature = "cuda")]
             let forward = if cuda_decode_lookahead {
                 self.forward_step(inputs, ctx.return_raw_logits)
             } else {
-                self.forward_inputs(inputs, ctx.return_raw_logits)
+                in_precision(bf16, || self.forward_inputs(inputs, ctx.return_raw_logits))
                     .map(ForwardStepResult::eager)
             };
             #[cfg(not(feature = "cuda"))]
-            let forward = self
-                .forward_inputs(inputs, ctx.return_raw_logits)
+            let forward = in_precision(bf16, || self.forward_inputs(inputs, ctx.return_raw_logits))
                 .map(ForwardStepResult::eager);
             if !captured.is_empty() {
                 self.cache().hybrid().clear_recurrent_captures();
@@ -1022,5 +1022,15 @@ impl dyn Pipeline {
             }
         }
         Ok(())
+    }
+}
+
+// a model whose loader measured it to hold under bf16 matmul inputs takes them on the CPU (`bf16_matmuls`), as
+// every model does under `INFERENCE_CPU_BF16` for its measurement
+fn in_precision<R>(bf16: bool, forward: impl FnOnce() -> R) -> R {
+    if bf16 || inference_tensor::cpu::bf16_forced() {
+        inference_tensor::cpu::with_bf16_matmuls(forward)
+    } else {
+        forward()
     }
 }

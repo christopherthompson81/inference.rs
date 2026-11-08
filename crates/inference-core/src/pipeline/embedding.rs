@@ -472,6 +472,7 @@ impl EmbeddingLoader {
                     label_decision: prepared.and_then(|source| source.label_decision.clone()),
                     audio_transcriber: None,
                     prompt_activation_bytes_per_token: None,
+                    bf16_matmuls: false,
                 }),
                 mapper: pipeline_mapper,
                 modules,

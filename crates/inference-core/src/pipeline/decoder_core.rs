@@ -179,6 +179,7 @@ impl DecoderCore {
                 label_decision: args.label_decision,
                 audio_transcriber: args.audio_transcriber,
                 prompt_activation_bytes_per_token: args.prompt_activation_bytes_per_token,
+                bf16_matmuls: false,
                 prompt_chunk_tokens,
             }),
             tokenizer: args.tokenizer.into(),

@@ -164,6 +164,7 @@ When adding new model architectures:
    HF detection from it, and core expands its feature-gated loader dispatch from the same row. Embedding loaders are listed by hand in
    `EmbeddingLoaderType` (`embedding_loaders/mod.rs`).
 4. Add the GGUF bindings in `crates/inference-gguf/src/` if the model loads from GGUF
+5. If the model runs f32 matmuls on the CPU, try bf16 first: `scripts/bf16_check.sh` runs it with and without bf16 matmul inputs on a long input (minutes of audio, thousands of tokens) and compares by the model's own measure. A model that passes sets `GeneralMetadata::bf16_matmuls` in its loader; one that fails stays f32, with the result noted beside the setting. Existing models stay f32 until measured the same way.
 
 When adding new quantization methods:
 1. Implement in `crates/inference-quant/src/`

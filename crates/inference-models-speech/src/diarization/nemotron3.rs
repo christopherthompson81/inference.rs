@@ -200,17 +200,15 @@ impl Layer {
         let projections = match projections {
             Some(projections) => projections,
             None => {
-                let no_bias = |name: &str| -> Result<NemoProjection> {
-                    let weight = attn.pp(name).get((h, h), "weight")?;
-                    Ok(NemoProjection::Dense(Linear::new(weight, None)))
-                };
+                let weight = |name: &str| attn.pp(name).get((h, h), "weight");
+                // one [query | key | value] product: three of 512 columns ran a fifth slower a FLOP than one of 1536
+                let qkv = Tensor::cat(
+                    &[weight("q_proj")?, weight("k_proj")?, weight("v_proj")?],
+                    0,
+                )?;
                 let dense = |linear: Result<Linear>| linear.map(NemoProjection::Dense);
                 NemoLayerProjections {
-                    qkv: NemoQkv::Split([
-                        no_bias("q_proj")?,
-                        no_bias("k_proj")?,
-                        no_bias("v_proj")?,
-                    ]),
+                    qkv: NemoQkv::Fused(NemoProjection::Dense(Linear::new(qkv, None))),
                     o: dense(linear(h, h, attn.pp("o_proj")))?,
                     fc1: dense(linear(h, cfg.intermediate_size, vb.pp("mlp").pp("fc1")))?,
                     fc2: dense(linear(cfg.intermediate_size, h, vb.pp("mlp").pp("fc2")))?,
@@ -282,7 +280,14 @@ impl Layer {
         let k = self.rope(k, cos, sin)?;
         let v = self.heads(&v?)?;
         let scale = (self.head_dim as f64).powf(-0.5);
-        let scores = (q.matmul(&k.t()?.contiguous()?)? * scale)?;
+        // the CPU scales the queries, a tenth the values of the (heads, T, T) scores (2^-3 at head 64: the same
+        // bits), and its matmul reads the transposed keys in place; a GPU keeps its scaled scores (its f16 matmul
+        // inputs round small queries) and contiguous keys
+        let scores = if q.device().is_cpu() {
+            (q * scale)?.matmul(&k.t()?)?
+        } else {
+            (q.matmul(&k.t()?.contiguous()?)? * scale)?
+        };
         let attn = ops::softmax_last_dim(&scores)?.matmul(&v)?;
         let attn = attn
             .transpose(1, 2)?

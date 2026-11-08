@@ -7,7 +7,7 @@ use anyhow::Result;
 use inference_nn::loaders::NormalModelLoader;
 use inference_nn::paged_attention::AttentionImplementation;
 use inference_nn::testing::{
-    Snapshot, assert_snapshot, forward_normal, load_synthesized, metadata, names_digest,
+    Snapshot, assert_snapshot, by_simd, forward_normal, load_synthesized, metadata, names_digest,
 };
 use inference_tensor::DType;
 use serde_json::json;
@@ -76,10 +76,17 @@ fn qwen2_moe_prefill() -> Result<()> {
         "tensor names moved: {:#x}",
         names_digest(names.keys())
     );
-    let expected = Snapshot {
-        probes: [0.47817624, 1.0926645, 1.072909, 0.45752057],
-        sum: 33.996353,
-        l2: 18.433144,
-    };
+    let expected = by_simd(
+        Snapshot {
+            probes: [0.47817624, 1.0926645, 1.072909, 0.45752057],
+            sum: 33.996353,
+            l2: 18.433144,
+        },
+        Snapshot {
+            probes: [0.47807702, 1.0926647, 1.072909, 0.457954],
+            sum: 33.99527,
+            l2: 18.433096,
+        },
+    );
     assert_snapshot(&forward_normal(model.as_ref())?, VOCAB, &expected)
 }
