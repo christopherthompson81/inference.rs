@@ -17,6 +17,7 @@ mod conv2d;
 mod conv_grouped;
 pub(crate) mod gemm_bf16;
 pub(crate) mod relpos_attn;
+pub(crate) mod relpos_attn_f32;
 use conv_grouped::GroupedConv;
 use conv2d::Conv2D;
 
@@ -1635,8 +1636,14 @@ impl Map2 for MatMul {
         } else {
             vec![T::zero(); b * m * n]
         };
+        // a large product takes every logical CPU where SMT has them (`smt_gemm_pool`)
+        let smt_pool = (T::DTYPE == DType::F32 && b * m * n * k >= REST_POOL_MIN_WORK)
+            .then(crate::utils::smt_gemm_pool)
+            .flatten();
         // gemm's result follows its thread count, so it keeps the pool's width rather than the lease's
-        let num_threads = crate::utils::get_num_threads();
+        let num_threads = smt_pool.map_or_else(crate::utils::get_num_threads, |pool| {
+            pool.current_num_threads()
+        });
         let parallelism = if num_threads > 1 {
             Parallelism::Rayon(num_threads)
         } else {
@@ -1681,73 +1688,79 @@ impl Map2 for MatMul {
             });
             return Ok(dst);
         }
-        // a batch's products run side by side, each on its share of the threads: one at a time, a small product (an
-        // attention head's 512 x 7500 x 128) spends its threads waiting on each other (300 -> 460-530 GFLOPS, 7840U)
-        if b > 1 && num_threads > 1 {
-            let threads = num_threads / b;
-            let parallelism = if threads > 1 {
-                Parallelism::Rayon(threads)
-            } else {
-                Parallelism::None
-            };
-            let dst_at = dst.as_mut_ptr() as usize;
-            (0..b).into_par_iter().for_each(|step| {
-                // SAFETY: each step writes its own c_skip-long slice of `dst`, which outlives the loop
+        let run = move || -> Result<Vec<T>> {
+            // a batch's products run side by side, each on its share of the threads: one at a time, a small product (an
+            // attention head's 512 x 7500 x 128) spends its threads waiting on each other (300 -> 460-530 GFLOPS, 7840U)
+            if b > 1 && num_threads > 1 {
+                let threads = num_threads / b;
+                let parallelism = if threads > 1 {
+                    Parallelism::Rayon(threads)
+                } else {
+                    Parallelism::None
+                };
+                let dst_at = dst.as_mut_ptr() as usize;
+                (0..b).into_par_iter().for_each(|step| {
+                    // SAFETY: each step writes its own c_skip-long slice of `dst`, which outlives the loop
+                    unsafe {
+                        gemm(
+                            m,
+                            n,
+                            k,
+                            (dst_at as *mut T).add(step * c_skip),
+                            dst_cs as isize,
+                            dst_rs as isize,
+                            false,
+                            lhs[step * a_skip..].as_ptr(),
+                            lhs_cs as isize,
+                            lhs_rs as isize,
+                            rhs[step * b_skip..].as_ptr(),
+                            rhs_cs as isize,
+                            rhs_rs as isize,
+                            T::zero(),
+                            T::one(),
+                            false,
+                            false,
+                            false,
+                            parallelism,
+                        )
+                    }
+                });
+                return Ok(dst);
+            }
+            for step in 0..b {
+                let lhs_p = &lhs[step * a_skip..];
+                let rhs_p = &rhs[step * b_skip..];
+                let dst_p = &mut dst[step * c_skip..];
                 unsafe {
                     gemm(
-                        m,
-                        n,
-                        k,
-                        (dst_at as *mut T).add(step * c_skip),
-                        dst_cs as isize,
-                        dst_rs as isize,
-                        false,
-                        lhs[step * a_skip..].as_ptr(),
-                        lhs_cs as isize,
-                        lhs_rs as isize,
-                        rhs[step * b_skip..].as_ptr(),
-                        rhs_cs as isize,
-                        rhs_rs as isize,
-                        T::zero(),
-                        T::one(),
-                        false,
-                        false,
-                        false,
+                        /* m: usize = */ m,
+                        /* n: usize = */ n,
+                        /* k: usize = */ k,
+                        /* dst: *mut T = */ dst_p.as_mut_ptr(),
+                        /* dst_cs: isize = */ dst_cs as isize,
+                        /* dst_rs: isize = */ dst_rs as isize,
+                        /* read_dst: bool = */ false,
+                        /* lhs: *const T = */ lhs_p.as_ptr(),
+                        /* lhs_cs: isize = */ lhs_cs as isize,
+                        /* lhs_rs: isize = */ lhs_rs as isize,
+                        /* rhs: *const T = */ rhs_p.as_ptr(),
+                        /* rhs_cs: isize = */ rhs_cs as isize,
+                        /* rhs_rs: isize = */ rhs_rs as isize,
+                        /* alpha: T = */ T::zero(),
+                        /* beta: T = */ T::one(),
+                        /* conj_dst: bool = */ false,
+                        /* conj_lhs: bool = */ false,
+                        /* conj_rhs: bool = */ false,
                         parallelism,
                     )
                 }
-            });
-            return Ok(dst);
-        }
-        for step in 0..b {
-            let lhs_p = &lhs[step * a_skip..];
-            let rhs_p = &rhs[step * b_skip..];
-            let dst_p = &mut dst[step * c_skip..];
-            unsafe {
-                gemm(
-                    /* m: usize = */ m,
-                    /* n: usize = */ n,
-                    /* k: usize = */ k,
-                    /* dst: *mut T = */ dst_p.as_mut_ptr(),
-                    /* dst_cs: isize = */ dst_cs as isize,
-                    /* dst_rs: isize = */ dst_rs as isize,
-                    /* read_dst: bool = */ false,
-                    /* lhs: *const T = */ lhs_p.as_ptr(),
-                    /* lhs_cs: isize = */ lhs_cs as isize,
-                    /* lhs_rs: isize = */ lhs_rs as isize,
-                    /* rhs: *const T = */ rhs_p.as_ptr(),
-                    /* rhs_cs: isize = */ rhs_cs as isize,
-                    /* rhs_rs: isize = */ rhs_rs as isize,
-                    /* alpha: T = */ T::zero(),
-                    /* beta: T = */ T::one(),
-                    /* conj_dst: bool = */ false,
-                    /* conj_lhs: bool = */ false,
-                    /* conj_rhs: bool = */ false,
-                    parallelism,
-                )
             }
+            Ok(dst)
+        };
+        match smt_pool {
+            Some(pool) => pool.install(run),
+            None => run(),
         }
-        Ok(dst)
     }
 
     #[cfg(feature = "accelerate")]
@@ -3653,6 +3666,27 @@ macro_rules! map_dtype {
 #[cfg(test)]
 mod tests {
     use crate::{DType, Device, IndexOp, Result, Tensor};
+
+    // a product past the SMT pool's threshold, on every logical CPU where SMT has them (`smt_gemm_pool`), against
+    // its f64 sums: a large product's threads and their split are the pool's
+    #[test]
+    fn a_large_f32_product_on_the_smt_pool_matches_its_sums() -> Result<()> {
+        const TOLERANCE: f64 = 1e-4;
+        let dev = Device::Cpu;
+        let (m, n, k) = (300, 520, 700);
+        assert!(m * n * k >= super::REST_POOL_MIN_WORK);
+        let a = Tensor::randn(0f32, 1., (m, k), &dev)?;
+        let b = Tensor::randn(0f32, 1., (k, n), &dev)?;
+        let got = a.matmul(&b)?.to_dtype(DType::F64)?;
+        let want = a.to_dtype(DType::F64)?.matmul(&b.to_dtype(DType::F64)?)?;
+        let diff = (got - want)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f64>()?;
+        assert!(diff < TOLERANCE, "{diff}");
+        Ok(())
+    }
 
     // the tiled copy of a transpose against reading each element by hand: whole and partial tiles, a start offset,
     // a broadcast batch, one thread and many

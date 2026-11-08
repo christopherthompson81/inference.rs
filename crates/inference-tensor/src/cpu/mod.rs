@@ -7,11 +7,11 @@ mod row_weights;
 
 pub use row_weights::Bf16RowWeights;
 
-/// Transformer-XL relative-position attention fused on the CPU's AVX-512 BF16, inside [`with_bf16_matmuls`]:
-/// score(i, j) = `q_content`_i . `k`_j + `q_position`_i . `positions`[pos_base - i + j], both query sets scaled
-/// beforehand, a softmax over the keys, times `v`. The queries are `(1, heads, t, d)`, `k` and `v` `(1, heads, keys,
-/// d)`, `positions` `(1, heads, p_rows, d)`; the output is laid out as the queries. `None` outside the scope, off a CPU
-/// with bf16 pairs, or for a shape the kernel does not take.
+/// Transformer-XL relative-position attention fused on the CPU: on AVX-512 BF16 inside [`with_bf16_matmuls`], else in
+/// f32 on AVX2 and FMA. score(i, j) = `q_content`_i . `k`_j + `q_position`_i . `positions`[pos_base - i + j], both
+/// query sets scaled beforehand, a softmax over the keys, times `v`. The queries are `(1, heads, t, d)`, `k` and `v`
+/// `(1, heads, keys, d)`, `positions` `(1, heads, p_rows, d)`; the output is laid out as the queries. `None` on a CPU
+/// with neither, or for a shape the kernels do not take.
 pub fn rel_pos_attention(
     q_content: &crate::Tensor,
     q_position: &crate::Tensor,
@@ -33,11 +33,14 @@ pub fn rel_pos_attention(
         || !operands
             .iter()
             .all(|x| x.device().is_cpu() && x.dtype() == crate::DType::F32)
-        || !crate::cpu_backend::gemm_bf16::enabled()
-        || !crate::cpu_backend::relpos_attn::supports(d)
         || pos_base + 1 < t
         || pos_base + keys > p_rows
     {
+        return Ok(None);
+    }
+    let bf16 =
+        crate::cpu_backend::gemm_bf16::enabled() && crate::cpu_backend::relpos_attn::supports(d);
+    if !bf16 && !crate::cpu_backend::relpos_attn_f32::supports(d) {
         return Ok(None);
     }
     // the operands' storage, borrowed (a layer's had taken ~50 ms to copy out)
@@ -55,20 +58,24 @@ pub fn rel_pos_attention(
             _ => crate::bail!("relative-position attention takes CPU f32 operands"),
         })
         .collect::<crate::Result<Vec<&[f32]>>>()?;
-    let out =
-        crate::cpu_backend::relpos_attn::attention(&crate::cpu_backend::relpos_attn::RelPosAttn {
-            qc: slices[0],
-            qp: slices[1],
-            k: slices[2],
-            v: slices[3],
-            p: slices[4],
-            heads,
-            t,
-            keys,
-            d,
-            p_rows,
-            pos_base,
-        });
+    let op = crate::cpu_backend::relpos_attn::RelPosAttn {
+        qc: slices[0],
+        qp: slices[1],
+        k: slices[2],
+        v: slices[3],
+        p: slices[4],
+        heads,
+        t,
+        keys,
+        d,
+        p_rows,
+        pos_base,
+    };
+    let out = if bf16 {
+        crate::cpu_backend::relpos_attn::attention(&op)
+    } else {
+        crate::cpu_backend::relpos_attn_f32::attention(&op)
+    };
     Ok(Some(crate::Tensor::from_vec(
         out,
         (batch, heads, t, d),

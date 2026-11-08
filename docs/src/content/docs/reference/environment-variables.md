@@ -47,6 +47,7 @@ For the offline workflow (pre-downloading models, local paths), see [run models]
 | `CANDLE_BARRIER_POOL_SPIN_LIMIT` | Advanced CPU tuning. Overrides the spin count used by Candle's persistent barrier pool before worker threads park. |
 | `INFERENCE_CPU_NO_BF16` | Keeps large CPU f32 matmuls in f32 for the models that opt into bf16 inputs. On a CPU with AVX-512 BF16, a model measured to hold its outputs under them (Parakeet's offline encoder, the Nemotron-3 diarizer) runs its f32 matmuls of 2^26 multiply-adds or more and 256 or more output columns with bf16 inputs and f32 sums, at about twice the rate. |
 | `INFERENCE_CPU_BF16` | Lets every model's CPU forward take bf16 matmul inputs as above, to measure a model not yet opted in (`scripts/bf16_check.sh`). |
+| `INFERENCE_CPU_GEMM_SMT` | Set to `0` to keep large CPU f32 matmuls on one thread per physical core. On a CPU with SMT (more logical CPUs than physical cores), they run on every logical CPU by default, as does the fused relative-position attention without AVX-512 BF16: an i7-10700K's large products ran 30-70 % faster. Ignored when `RAYON_NUM_THREADS` is set. |
 
 See [CPU threads and affinity](/guides/perf/throughput-tuning/#cpu-threads-and-affinity) for examples.
 
