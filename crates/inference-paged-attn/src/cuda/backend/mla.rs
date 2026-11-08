@@ -305,7 +305,14 @@ pub fn flashinfer_mla_decode(
         || o_indptr.dims1()? != batch_size + 1
         || kv_chunk_size.dims1()? != 1
     {
-        inference_tensor::bail!("flashinfer_mla_decode metadata tensor shapes are invalid");
+        inference_tensor::bail!(
+            "flashinfer_mla_decode metadata for {batch_size} rows has request indices {:?}, kv tiles {:?}, o_indptr \
+             {:?} and kv chunk size {:?}",
+            request_indices.dims(),
+            kv_tile_indices.dims(),
+            o_indptr.dims(),
+            kv_chunk_size.dims()
+        );
     }
 
     let dtype_code = match dtype {

@@ -112,6 +112,7 @@ impl Glm4MoeConfig {
                     self.moe_intermediate_size * self.n_shared_experts,
                 )),
                 router: self.router_config(),
+                expert_proj_names: crate::moe::ExpertProjNames::DEFAULT,
             }),
             attn: Glm4MoeAttnConfig {
                 num_key_value_heads: self.num_key_value_heads,

@@ -39,7 +39,7 @@ mod whisper_audio_bindings;
 
 pub use chat_template::{get_gguf_chat_template, get_gguf_chat_template_from_metadata};
 pub use gguf_tokenizer::{
-    GgufTokenizerConversion, convert_gguf_metadata_to_hf_tokenizer,
+    GgufTokenizerConversion, KIMI_K2_REGEX, convert_gguf_metadata_to_hf_tokenizer,
     validate_external_gguf_tokenizer,
 };
 pub use inference_nn::gguf::Content;

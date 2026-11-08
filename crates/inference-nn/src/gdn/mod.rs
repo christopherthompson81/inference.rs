@@ -5,6 +5,7 @@
 mod backend;
 mod cache;
 mod config;
+mod kda;
 mod layer;
 pub(crate) mod norm;
 mod packed;
@@ -15,6 +16,7 @@ pub use cache::GdnLayerCache;
 pub use config::{
     GDN_V_HEAD_LAYOUT_CONFIG_KEY, GdnConfig, GdnOutputGate, GdnStateDType, GdnVHeadLayout,
 };
+pub use kda::{KdaConfig, KimiDeltaAttention};
 pub use layer::GdnForwardContext;
 pub use layer::{
     GatedDeltaNet, GdnForwardStash, GdnSpeculativeStash, GdnTransitionCommitConfig,

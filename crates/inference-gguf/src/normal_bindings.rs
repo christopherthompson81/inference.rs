@@ -42,6 +42,9 @@ pub fn build_normal_bindings(
     if matches!(loader, NormalLoaderType::Qrwkv6) {
         return rwkv6qwen2_bindings(archive);
     }
+    if matches!(loader, NormalLoaderType::KimiLinear) {
+        return kimi_linear_bindings(archive, architecture);
+    }
     // Nemotron-H's tensors with no attention or feed-forward, under transformers' `backbone`
     if matches!(loader, NormalLoaderType::Mamba2) {
         let bindings =
@@ -541,6 +544,72 @@ fn rwkv6qwen2_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
             "time_mix_gate" => (format!("{a}.gate.{suffix}"), tensor()),
             "time_mix_output" => (format!("{a}.o_proj.{suffix}"), tensor()),
             _ => continue,
+        };
+        bindings.insert(target, binding);
+    }
+    Ok(bindings)
+}
+
+// Kimi's MoE module where DeepSeek's bindings write `mlp`; stacked GGUF experts keep `gate_proj`/`up_proj`/`down_proj`,
+// as Mixtral's do
+const KIMI_MOE_RENAMES: [(&str, &str); 3] = [
+    (".mlp.experts.", ".block_sparse_moe.experts."),
+    (".mlp.shared_experts.", ".block_sparse_moe.shared_experts."),
+    (".mlp.gate.", ".block_sparse_moe.gate."),
+];
+// a KDA layer's tensors the DeepSeek bindings have no names for (or Mamba's), and the checkpoint's
+const KIMI_KDA_ROLES: [(&str, &str); 6] = [
+    ("ssm_f_a", "f_a_proj"),
+    ("ssm_f_b", "f_b_proj"),
+    ("ssm_g_a", "g_a_proj"),
+    ("ssm_g_b", "g_b_proj"),
+    ("ssm_beta", "b_proj"),
+    ("ssm_norm", "o_norm"),
+];
+
+// llama.cpp's `kimi-linear` GGUF: DeepSeek's names for the MLA layers and the MoE under Kimi's, and the KDA layers'
+// own. The converter stored `-exp(A_log)` and named `dt_bias` `ssm_dt.bias`; the convs are `(1, width, 1, kernel)`.
+fn kimi_linear_bindings(
+    archive: &GgufArchive,
+    architecture: CanonicalGgufArchitecture,
+) -> Result<GgufBindingMap> {
+    let kernel = metadata_usize(archive, "kimi-linear.ssm.conv_kernel")?;
+    let deepseek = build_normal_bindings(archive, &NormalLoaderType::DeepSeekV3, architecture)?;
+    let mut bindings: GgufBindingMap = deepseek
+        .iter()
+        .filter(|(name, _)| !name.contains(".mamba."))
+        .map(|(name, binding)| {
+            let renamed = KIMI_MOE_RENAMES
+                .iter()
+                .find(|(from, _)| name.contains(from))
+                .map_or_else(|| name.to_string(), |(from, to)| name.replacen(from, to, 1));
+            (renamed, binding.clone())
+        })
+        .collect();
+    for name in archive.tensors().keys() {
+        let Some((layer, role, suffix)) = parse_block_tensor(name) else {
+            continue;
+        };
+        let a = format!("model.layers.{layer}.self_attn");
+        let tensor = || GgufTensorBinding::tensor(name);
+        let (target, binding) = match role {
+            "ssm_conv1d_q" | "ssm_conv1d_k" | "ssm_conv1d_v" => {
+                let width = archive.tensor_info(name)?.shape().iter().product::<usize>() / kernel;
+                let which = &role[role.len() - 1..];
+                (
+                    format!("{a}.{which}_conv1d.weight"),
+                    tensor().reshape(vec![width, 1, kernel]),
+                )
+            }
+            // log(-(-exp(A_log)))
+            "ssm_a" => (format!("{a}.A_log"), tensor().affine(-1.0, 0.0).log()),
+            "ssm_dt" => (format!("{a}.dt_bias"), tensor()),
+            role => {
+                let Some((_, module)) = KIMI_KDA_ROLES.iter().find(|(r, _)| *r == role) else {
+                    continue;
+                };
+                (format!("{a}.{module}.{suffix}"), tensor())
+            }
         };
         bindings.insert(target, binding);
     }

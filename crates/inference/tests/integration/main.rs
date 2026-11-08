@@ -21,6 +21,7 @@ mod granite_speech_tiny;
 mod granite_tiny;
 mod hidream_o1_tiny;
 mod jina_v5_tiny;
+mod kimi_linear_tiny;
 mod kokoro_tiny;
 mod llama_head_dim_tiny;
 mod llama_tiny;

@@ -198,6 +198,7 @@ macro_rules! normal_loader_table {
             Rwkv6 { cli: "rwkv6", hf: "Rwkv6ForCausalLM", model_type: "rwkv6", loader: Rwkv6Loader, feature: "models-other" },
             Rwkv7 { cli: "rwkv7", hf: "RWKV7ForCausalLM" | "Rwkv7ForCausalLM", model_type: "rwkv7", loader: Rwkv7Loader, feature: "models-other" },
             Arwkv { cli: "arwkv", hf: "RwkvHybridForCausalLM", model_type: "rwkv_hybrid", loader: ArwkvLoader, feature: "models-other" },
+            KimiLinear { cli: "kimi_linear", hf: "KimiLinearForCausalLM", model_type: "kimi_linear", loader: KimiLinearLoader, feature: "models-other" },
             Qrwkv6 { cli: "qrwkv6", hf: "RWKV6Qwen2ForCausalLM", model_type: "rwkv6qwen2", loader: Qrwkv6Loader, feature: "models-other" },
             Mamba { cli: "mamba", hf: "MambaForCausalLM", model_type: "mamba", loader: MambaLoader, feature: "models-other" },
             FalconMamba { cli: "falcon_mamba", hf: "FalconMambaForCausalLM", model_type: "falcon_mamba", loader: MambaLoader, feature: "models-other" },

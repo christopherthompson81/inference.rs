@@ -140,6 +140,7 @@ impl DeepSeekConfig {
                     .n_shared_experts
                     .map(|n| SharedExpert::Sharded(self.moe_intermediate_size * n)),
                 router: self.router_config(version),
+                expert_proj_names: crate::moe::ExpertProjNames::DEFAULT,
             }),
             attn: MlaConfig {
                 q_lora_rank: self.q_lora_rank,

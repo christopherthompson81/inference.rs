@@ -76,12 +76,14 @@ impl MlaKvBProjection {
             inference_tensor::bail!("split MLA key projection is not available");
         };
         ensure_split_lora_inactive(key, value)?;
+        // a quantized projection may compute in f32; the attention reads the activations' dtype
         if supports_indexed_cuda_projection(key.as_ref(), query) {
             indexed_head_forward(key.as_ref(), query)
         } else {
             let (key_weight, _) = expanded_split_weights(key, value, expanded_weights)?;
             dense_head_forward(query, &key_weight, false)
-        }
+        }?
+        .to_dtype(query.dtype())
     }
 
     pub fn project_value(&self, value_states: &Tensor) -> Result<Tensor> {
@@ -99,7 +101,8 @@ impl MlaKvBProjection {
         } else {
             let (_, value_weight) = expanded_split_weights(key, value, expanded_weights)?;
             dense_head_forward(value_states, &value_weight, true)
-        }
+        }?
+        .to_dtype(value_states.dtype())
     }
 
     pub fn expanded_kv(

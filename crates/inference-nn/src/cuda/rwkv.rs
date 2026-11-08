@@ -56,7 +56,7 @@ pub fn rwkv7_wkv_cuda(
 }
 
 #[cfg(feature = "cuda")]
-fn dtype_code(dtype: inference_tensor::DType) -> inference_tensor::Result<i32> {
+pub(crate) fn dtype_code(dtype: inference_tensor::DType) -> inference_tensor::Result<i32> {
     match dtype {
         inference_tensor::DType::F16 => Ok(0),
         inference_tensor::DType::BF16 => Ok(1),
@@ -67,7 +67,7 @@ fn dtype_code(dtype: inference_tensor::DType) -> inference_tensor::Result<i32> {
 
 // a CUDA tensor's device pointer at its offset
 #[cfg(feature = "cuda")]
-fn device_ptr(t: &inference_tensor::Tensor) -> inference_tensor::Result<u64> {
+pub(crate) fn device_ptr(t: &inference_tensor::Tensor) -> inference_tensor::Result<u64> {
     use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
     use inference_tensor::{DType, Storage};
     let (s, l) = t.storage_and_layout();
@@ -81,6 +81,7 @@ fn device_ptr(t: &inference_tensor::Tensor) -> inference_tensor::Result<u64> {
         }};
     }
     Ok(match t.dtype() {
+        DType::U32 => at!(u32),
         DType::F16 => at!(half::f16),
         DType::BF16 => at!(half::bf16),
         DType::F32 => at!(f32),

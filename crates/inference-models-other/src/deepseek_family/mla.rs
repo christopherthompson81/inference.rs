@@ -96,7 +96,8 @@ pub struct MlaAttention {
     kv_a_layernorm: RmsNorm,
     kv_b_proj: MlaKvBProjection,
     o_proj: Arc<dyn QuantMethod>,
-    rotary_emb: Arc<DeepSeekV2RotaryEmbedding>,
+    // none for Kimi's MLA, whose rope part of the key carries no positions
+    rotary_emb: Option<Arc<DeepSeekV2RotaryEmbedding>>,
     dims: MlaDims,
     q_head_dim: usize,
     paged_attn: Option<PagedAttention>,
@@ -144,10 +145,12 @@ impl LayerAttention for MlaAttention {
 
         let ckv = self.kv_a_layernorm.forward(&compressed_kv)?;
 
-        let rope_positions = ctx
-            .text_positions(q_pe.device(), q_pe.dim(2)?)?
-            .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
-        (q_pe, k_pe) = self.rotary_emb.forward(&q_pe, &k_pe, rope_positions)?;
+        if let Some(rotary_emb) = &self.rotary_emb {
+            let rope_positions = ctx
+                .text_positions(q_pe.device(), q_pe.dim(2)?)?
+                .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
+            (q_pe, k_pe) = rotary_emb.forward(&q_pe, &k_pe, rope_positions)?;
+        }
         let metadata = ctx.paged_layer(layer_idx);
 
         let use_mla_decode = should_use_mla_decode(
@@ -370,6 +373,27 @@ impl FamilyAttention for MlaAttention {
         vb: ShardedVarBuilder,
         paged_attn: Option<PagedAttention>,
     ) -> Result<Self> {
+        Self::load(ctx, Some(rotary_emb), vb, paged_attn)
+    }
+
+    fn model_metadata(
+        cfg: &FamilyConfig<MlaConfig>,
+        attention_mechanism: &AttentionImplementation,
+        real_device: &Device,
+        world_size: usize,
+    ) -> ModelConfigMetadata {
+        Self::metadata(cfg, attention_mechanism, real_device, world_size)
+    }
+}
+
+impl MlaAttention {
+    /// The layer under `vb`; `rotary_emb` none for an MLA without positions (Kimi's).
+    pub fn load(
+        ctx: &LayerCtx<'_, MlaConfig>,
+        rotary_emb: Option<Arc<DeepSeekV2RotaryEmbedding>>,
+        vb: ShardedVarBuilder,
+        paged_attn: Option<PagedAttention>,
+    ) -> Result<Self> {
         let LayerCtx {
             cfg,
             mapper,
@@ -520,7 +544,8 @@ impl FamilyAttention for MlaAttention {
         })
     }
 
-    fn model_metadata(
+    /// The paged cache's view of the stack's layers.
+    pub fn metadata(
         cfg: &FamilyConfig<MlaConfig>,
         attention_mechanism: &AttentionImplementation,
         real_device: &Device,

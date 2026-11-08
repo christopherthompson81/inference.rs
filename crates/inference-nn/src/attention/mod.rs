@@ -738,8 +738,8 @@ impl Sdpa {
                         let context_layer = cublaslt.batch_matmul(
                             &v_flat.t()?.contiguous()?,
                             &attention_scores,
-                            // We save one allocation
-                            Some(&q_flat),
+                            // the output reuses q's buffer when it has q's shape (MLA's values are narrower)
+                            (head_dim == v_head_dim).then_some(&q_flat),
                             None,
                             None,
                             None,

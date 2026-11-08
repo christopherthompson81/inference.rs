@@ -50,6 +50,7 @@ pub struct MoeSpec {
     pub moe_layer_freq: Option<usize>,
     pub shared_expert: Option<SharedExpert>,
     pub router: GroupedRouterConfig,
+    pub expert_proj_names: crate::moe::ExpertProjNames,
 }
 
 /// The shared expert of a MoE layer and its intermediate size.
@@ -238,7 +239,11 @@ pub struct Moe {
 }
 
 impl Moe {
-    fn new<A>(ctx: &LayerCtx<'_, A>, vb: ShardedVarBuilder, real_device: Device) -> Result<Self> {
+    pub(crate) fn new<A>(
+        ctx: &LayerCtx<'_, A>,
+        vb: ShardedVarBuilder,
+        real_device: Device,
+    ) -> Result<Self> {
         let LayerCtx {
             cfg,
             mapper,
@@ -258,7 +263,7 @@ impl Moe {
             num_experts_per_tok: spec.num_experts_per_tok.unwrap(),
             hidden_size: cfg.hidden_size,
             moe_intermediate_size: spec.moe_intermediate_size,
-            expert_proj_names: crate::moe::ExpertProjNames::DEFAULT,
+            expert_proj_names: spec.expert_proj_names,
             gated: true,
         };
 

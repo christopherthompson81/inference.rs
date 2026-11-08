@@ -1394,6 +1394,14 @@ inference_tensor::kernel_library! {
         pub fn rwkv7_time_mix_cuda(params: *const c_void, batch: i32, dtype: i32, stream: i64);
         // over `cuda::rwkv::Rwkv6TimeMixParams`
         pub fn rwkv6_time_mix_cuda(params: *const c_void, batch: i32, dtype: i32, stream: i64);
+        // over `cuda::kda::KdaParams`; 0 when no kernel runs `head_size`
+        pub fn kda_cuda(
+            params: *const c_void,
+            batch: i32,
+            head_size: i32,
+            dtype: i32,
+            stream: i64,
+        ) -> i32;
         // over `cuda::rwkv::Qrwkv6TimeMixParams`; 0 when no kernel runs `head_size`
         pub fn qrwkv6_time_mix_cuda(
             params: *const c_void,

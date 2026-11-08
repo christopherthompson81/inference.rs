@@ -662,6 +662,29 @@ impl DecodePagedRows {
         rows
     }
 
+    // the split KV chunk and the tiles a row may take: the standard backend's MLA decode reads one unsplit tile a row
+    fn decode_tiles(
+        &self,
+        block_size: usize,
+        batch_size: usize,
+        max_context_len: usize,
+        max_block_table_len: usize,
+    ) -> (Option<usize>, usize) {
+        if self.use_standard_metadata {
+            return (None, 1);
+        }
+        let split_pages = flashinfer_decode_split_pages(
+            block_size,
+            batch_size,
+            self.num_kv_heads,
+            max_context_len,
+        );
+        let tiles_per_row = max_block_table_len
+            .max(1)
+            .div_ceil(flashinfer_decode_split_capacity_pages(block_size));
+        (Some(split_pages), tiles_per_row)
+    }
+
     fn graph_block_table_len(
         &self,
         blocks: usize,
@@ -872,20 +895,13 @@ impl DecodePagedRows {
         let tile_plan = requirements
             .flashinfer_tile_plan
             .then(|| {
-                let decode_split_pages = flashinfer_decode_split_pages(
-                    block_size,
-                    batch_size,
-                    self.num_kv_heads,
-                    max_context_len,
-                );
-                let tiles_per_row = max_block_table_len
-                    .max(1)
-                    .div_ceil(flashinfer_decode_split_capacity_pages(block_size));
+                let (split_pages, tiles_per_row) =
+                    self.decode_tiles(block_size, batch_size, max_context_len, max_block_table_len);
                 make_paged_kv_decode_tensors(
                     &block_tables,
                     paged_attn_context_lens,
                     block_size,
-                    Some(decode_split_pages),
+                    split_pages,
                     batch_size * tiles_per_row,
                 )
             })
@@ -961,20 +977,17 @@ impl DecodePagedRows {
             let tile_plan = requirements
                 .flashinfer_tile_plan
                 .then(|| {
-                    let split_pages = flashinfer_decode_split_pages(
+                    let (split_pages, tiles_per_row) = self.decode_tiles(
                         block_size,
                         batch_size,
-                        self.num_kv_heads,
                         full_max_context_len,
+                        full_max_block_table_len,
                     );
-                    let tiles_per_row = full_max_block_table_len
-                        .max(1)
-                        .div_ceil(flashinfer_decode_split_capacity_pages(block_size));
                     make_paged_kv_decode_tensors(
                         full_block_tables,
                         full_paged_attn_context_lens,
                         block_size,
-                        Some(split_pages),
+                        split_pages,
                         full_block_tables.len() * tiles_per_row,
                     )
                 })

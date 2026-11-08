@@ -10140,6 +10140,7 @@
           "rwkv6",
           "rwkv7",
           "arwkv",
+          "kimi_linear",
           "qrwkv6",
           "mamba",
           "falcon_mamba",
