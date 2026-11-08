@@ -124,3 +124,20 @@ Run 2's open question (7564 x 1024 x 1024 at 315 GFLOPS on the SMT pool against 
 the benchmark's operand layout: it multiplied a row-major (k, n) weight, the model a transposed (n, k) one. As the
 model multiplies it (a temporary benchmark, 20 calls): pool 541 / 501 GFLOPS, RAYON_NUM_THREADS=16 551 / 527, pool
 off 409 / 394. Nothing to fix.
+
+## Run 7 - 2026-11-08 19:00 (the laptop's Ryzen 7 7840U, AVX-512 BF16, measured by the other session)
+
+#873 against its base 68b2014df, on the 10-minute meeting:
+
+```
+bf16 path (default): asr and both-models responses byte-identical; asr 22.67 vs 22.62 s
+  standalone diarization: 65 of 46,836 speaker-frames moved (0.14 %), the same each run of a build; the
+  both-models response's word speakers identical. Diar 8.06 / 14.25 / 13.22 s against 7.72 / 12.65 / 11.76 (rounds
+  2-3 ran hot there)
+INFERENCE_CPU_NO_BF16=1 (relpos_attn_f32, the SMT pool, the softmax): asr, diar and both byte-identical to the
+  base's f32 path; asr 38.5 -> 36.7 s, diar 11.5 -> 10.9, both 47.7 -> 46.2 (one run each)
+```
+
+The moved frames come from Run 5's softmax exp (`fast_exp`, ~1e-7) tipping a few near-threshold frames on the bf16
+path; this desktop's diarization (f32 path) stayed byte-identical. Within `scripts/bf16_check.sh`'s 0.5 % for a
+diarizer.
