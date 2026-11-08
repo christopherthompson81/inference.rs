@@ -117,3 +117,10 @@ diarizations a server, a temporary libm toggle): fast 15.99-16.31 s against libm
 Every CPU f32 softmax now takes `fast_exp`; the CPU suite (3160) passes, its pinned outputs unchanged; the clip's
 diarization is byte-identical to the CPU reference and its 1698 words unchanged. This machine drifted slower over the
 session (Qwen3.8-27B's Vulkan prefill read 362-433 on master against 480-533 earlier), so only alternating runs count.
+
+## Run 6 - 2026-11-08 18:20
+
+Run 2's open question (7564 x 1024 x 1024 at 315 GFLOPS on the SMT pool against 512-539 at RAYON_NUM_THREADS=16) was
+the benchmark's operand layout: it multiplied a row-major (k, n) weight, the model a transposed (n, k) one. As the
+model multiplies it (a temporary benchmark, 20 calls): pool 541 / 501 GFLOPS, RAYON_NUM_THREADS=16 551 / 527, pool
+off 409 / 394. Nothing to fix.
