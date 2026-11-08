@@ -380,12 +380,13 @@ impl Context {
         batch.work += recorder.work.get();
         let dispatches = batch.dispatches;
         let allocated = self.allocated.load(Ordering::Relaxed);
+        let since = allocated - self.flushed_at.load(Ordering::Relaxed);
         if dispatches >= DISPATCHES_PER_SUBMIT
             || batch.work >= WORK_PER_SUBMIT
-            || allocated - self.flushed_at.load(Ordering::Relaxed) >= BYTES_PER_SUBMIT
+            || since >= BYTES_PER_SUBMIT
             || (dispatches >= DISPATCHES_WHEN_IDLE && stream.idle(&self.device)?)
         {
-            stream.flush(&self.device, self.queue)?;
+            stream.flush(&self.device, self.queue, since)?;
             self.flushed_at.store(allocated, Ordering::Relaxed);
         }
         out
@@ -400,9 +401,9 @@ impl Context {
     pub fn flush(&self) -> Result<()> {
         let mut stream = self.stream.lock().expect("vulkan stream poisoned");
         self.live()?;
-        self.flushed_at
-            .store(self.allocated.load(Ordering::Relaxed), Ordering::Relaxed);
-        stream.flush(&self.device, self.queue)
+        let allocated = self.allocated.load(Ordering::Relaxed);
+        let since = allocated - self.flushed_at.swap(allocated, Ordering::Relaxed);
+        stream.flush(&self.device, self.queue, since)
     }
 
     /// Submits what is recorded and waits for the GPU to finish everything submitted.

@@ -37,10 +37,37 @@ impl Linear {
     pub fn bias(&self) -> Option<&Tensor> {
         self.bias.as_ref()
     }
+
+    /// This layer with its f32 weight kept in f16 on a discrete Vulkan GPU with matrix cores, which round their inputs
+    /// to f16 anyway: half the weight's memory, its products unchanged there (the bias stays f32). Otherwise itself.
+    pub fn to_half(&self) -> Result<Self> {
+        if !crate::vulkan::has_matrix_cores(self.weight.device())
+            || self.weight.dtype() != crate::DType::F32
+            || self.weight.rank() != 2
+        {
+            return Ok(self.clone());
+        }
+        Ok(Self::new(
+            self.weight.to_dtype(crate::DType::F16)?,
+            self.bias.clone(),
+        ))
+    }
 }
 
 impl super::Module for Linear {
     fn forward(&self, x: &Tensor) -> crate::Result<Tensor> {
+        // a weight kept in f16 on Vulkan (`Linear::to_half`): the matrix cores read it as it is, any other product a
+        // widened copy
+        if self.weight.dtype() != x.dtype() && x.device().is_vulkan() {
+            if let Some(y) = crate::vulkan::linear_half_weight(x, &self.weight)? {
+                return match &self.bias {
+                    None => Ok(y),
+                    Some(bias) => y.broadcast_add(bias),
+                };
+            }
+            let widened = Self::new(self.weight.to_dtype(x.dtype())?, self.bias.clone());
+            return widened.forward(x);
+        }
         // When possible, we avoid using a broadcasted matmul as it is much slower
         // than the standard matmul for the cuda and cpu backends.
         let x = match *x.dims() {

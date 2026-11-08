@@ -799,6 +799,62 @@ pub(crate) fn relu_sqr(x: &Tensor) -> Result<Option<Tensor>> {
     Ok(Some(tensor_of(out, x.dims())))
 }
 
+/// [`crate::vulkan::linear_half_weight`]'s kernel.
+pub(crate) fn linear_half_weight(x: &Tensor, weight: &Tensor) -> Result<Option<Tensor>> {
+    let (n, k) = weight.dims2()?;
+    if x.dtype() != DType::F32
+        || weight.dtype() != DType::F16
+        || !x.is_contiguous()
+        || !weight.is_contiguous()
+        || x.dims().last() != Some(&k)
+        || !x.device().is_vulkan()
+    {
+        return Ok(None);
+    }
+    let rows = x.elem_count() / k.max(1);
+    let (xb, wb) = (bound(x, DType::F32)?, bound(weight, DType::F16)?);
+    let device = x.device().as_vulkan_device()?.clone();
+    let out = VulkanStorage {
+        buffer: Arc::new(device.buffer(rows * n * 4)?),
+        device: device.clone(),
+        count: rows * n,
+        dtype: DType::F32,
+    };
+    // the weight's (n, k) rows are b's columns: b (k x n) has unit stride along k
+    let recorded = device
+        .context
+        .record(|r| {
+            r.matmul_f32_half_b(&MatMul {
+                batch: 1,
+                m: rows,
+                n,
+                k,
+                a: MatOperand {
+                    buffer: &xb.0,
+                    offset: xb.1,
+                    batch_stride: 0,
+                    row_stride: k,
+                    col_stride: 1,
+                },
+                b: MatOperand {
+                    buffer: &wb.0,
+                    offset: wb.1,
+                    batch_stride: 0,
+                    row_stride: 1,
+                    col_stride: k,
+                },
+                out: &out.buffer,
+            })
+        })
+        .map_err(vk_err)?;
+    if !recorded {
+        return Ok(None);
+    }
+    let mut dims = x.dims().to_vec();
+    *dims.last_mut().expect("dims hold k") = n;
+    Ok(Some(tensor_of(out, dims)))
+}
+
 /// [`crate::vulkan::add_rms_norm`]'s kernel: `None` unless all three are contiguous f32 on Vulkan and the rows a decode's.
 pub(crate) fn add_rms_norm(
     x: &Tensor,
@@ -1785,6 +1841,34 @@ impl BackendStorage for VulkanStorage {
             self.copy_words(l, &out, 0, &contiguous_strides(l.shape().dims()))?;
             return Ok(out);
         }
+        // f16 and f32 convert on the device (a weight kept in f16, widened for a product the matrix cores do not take)
+        let count = l.shape().elem_count();
+        if l.is_contiguous() {
+            let at = (&self.buffer, l.start_offset());
+            match (self.dtype, dtype) {
+                (DType::F16, DType::F32) => {
+                    let out = self.empty(count, dtype)?;
+                    self.device
+                        .context
+                        .record(|r| r.widen_f16(at, count, &out.buffer))
+                        .map_err(vk_err)?;
+                    return Ok(out);
+                }
+                (DType::F32, DType::F16) => {
+                    // the kernel writes whole pairs
+                    let out = self.empty(count.next_multiple_of(2), dtype)?;
+                    let narrowed = self
+                        .device
+                        .context
+                        .record(|r| r.narrow_f16(at, count, &out.buffer))
+                        .map_err(vk_err)?;
+                    if narrowed {
+                        return Ok(VulkanStorage { count, ..out });
+                    }
+                }
+                _ => {}
+            }
+        }
         on_cpu!(self, |cpu| cpu.to_dtype(l, dtype))
     }
 
@@ -2250,6 +2334,8 @@ mod tests {
     // a 2688-term dot product over activations rounded to int8 blocks, against the outputs' RMS: unit-normal weights
     // and activations leave ~0.6 % (one deviation), and the worst of the expert test's ~28k outputs reaches ~3.1 %
     const INT8_DOT_TOLERANCE: f32 = 5e-2;
+    // f16 weights against f32 ones where the f32 kernel does not round them (a few rows): f16's 2^-11, summed
+    const HALF_WEIGHT_TOLERANCE: f32 = 2e-3;
 
     fn assert_same(got: &Tensor, want: &Tensor) -> Result<()> {
         assert_close(got, want, TOLERANCE)
@@ -2348,6 +2434,61 @@ mod tests {
                 .to_vec2::<f32>()?,
             a.to_vec2::<f32>()?
         );
+        Ok(())
+    }
+
+    // f16 and f32 convert on the device as the CPU converts them: an odd count, and from a slice's offset
+    #[test]
+    fn vulkan_half_conversions_match_the_cpu() -> Result<()> {
+        use crate::IndexOp;
+        let Some(vk) = device() else { return Ok(()) };
+        let x = (Tensor::randn(0f32, 3., 1003, &Device::Cpu)? * 7.)?;
+        let xv = x.to_device(&vk)?;
+        for (cpu, gpu) in [(x.clone(), xv.clone()), (x.i(2..)?, xv.i(2..)?)] {
+            let want = cpu.to_dtype(DType::F16)?;
+            let half = gpu.to_dtype(DType::F16)?;
+            assert_eq!(half.dims(), want.dims());
+            assert_eq!(half.to_vec1::<half::f16>()?, want.to_vec1::<half::f16>()?);
+            let wide = half.to_dtype(DType::F32)?;
+            assert_eq!(
+                wide.to_vec1::<f32>()?,
+                want.to_dtype(DType::F32)?.to_vec1::<f32>()?
+            );
+        }
+        Ok(())
+    }
+
+    // a linear layer's weight kept in f16 on matrix cores (`Linear::to_half`) gives the f32 layer's products there: a
+    // prompt's rows on the f16-weight kernel, a few rows through the widened weight; a bias added either way
+    #[test]
+    fn a_half_weight_linear_matches_its_f32_layer() -> Result<()> {
+        use crate::Module;
+        use crate::nn::Linear;
+        let Some(vk) = device() else { return Ok(()) };
+        if !crate::vulkan::has_matrix_cores(&vk) {
+            return Ok(());
+        }
+        // 300 x 1000 x 384: partial tiles both ways
+        let w = Tensor::randn(0f32, 0.05, (1000, 384), &Device::Cpu)?.to_device(&vk)?;
+        let b = Tensor::randn(0f32, 1., 1000, &Device::Cpu)?.to_device(&vk)?;
+        let full = Linear::new(w, Some(b));
+        let half = full.to_half()?;
+        assert_eq!(half.weight().dtype(), DType::F16);
+        for rows in [300usize, 3] {
+            let x = Tensor::randn(0f32, 1., (1, rows, 384), &Device::Cpu)?.to_device(&vk)?;
+            let (want, got) = (full.forward(&x)?, half.forward(&x)?);
+            assert_eq!(got.dims(), want.dims());
+            let diff = (got - &want)?
+                .abs()?
+                .flatten_all()?
+                .max(0)?
+                .to_scalar::<f32>()?;
+            let scale = want.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+            assert!(
+                diff <= HALF_WEIGHT_TOLERANCE * scale,
+                "{rows} rows: {diff} of {scale}"
+            );
+        }
         Ok(())
     }
 

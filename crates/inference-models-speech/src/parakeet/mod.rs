@@ -154,6 +154,11 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
 }
 
 impl Parakeet {
+    /// Its encoder's projection weights kept in f16 where the device's matrix cores take them.
+    pub fn halve_weights(&mut self) -> Result<()> {
+        self.encoder.halve_weights()
+    }
+
     pub fn load(files: &ParakeetFiles, device: &Device, dtype: DType) -> Result<Self> {
         let config: ParakeetConfig = read_json(&files.config)?;
         let processor: ProcessorConfig = read_json(&files.processor_config)?;

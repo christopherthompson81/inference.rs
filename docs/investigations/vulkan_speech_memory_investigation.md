@@ -84,3 +84,46 @@ both 4.48 / 4.33 s; 0 word diffs. After each request: 3029 / 4128 / 3449 MiB abo
 The combined request read 3.0-4.3 s on master and 4.3-4.5 here: within master's spread, noted. Tests:
 `an_idle_release_empties_the_pool` (all of an iGPU's, a discrete GPU's past 1 GiB),
 `a_missed_allocation_frees_stale_idle_buffers` (a stale class kept under 1 GiB idle, freed past it, a fresh one kept).
+
+## Run 5 - 2026-11-08 12:30
+
+Question: can the models #866 measured to hold under bf16 matmul inputs (`bf16_matmuls`: Parakeet's offline
+encoder, the Nemotron-3 diarizer) keep their weights in f16 on a discrete GPU? `matmul_f32_cm` already rounds both
+operands to f16 into its shared tiles, so an f16 weight there gives the same products.
+
+- `matmul_f32_cm_bh`: the matrix-core matmul with b stored as f16. `Linear::to_half` keeps a weight in f16 on a
+  discrete GPU with matrix cores, and `Linear::forward` sends f32 activations against it there, other shapes
+  through a widened copy; the transcription pipeline halves the flagged models' encoder projections after load.
+- First version: the kernel widened b's f16 to f32 in registers and back to f16 for the shared tile, ~40% slower
+  (7564 x 4096 x 1024: 2.50 ms against 1.77). b now stays f16 from load to tile: 1.62-1.68 ms; the diarizer's shapes
+  (684 x 512 x 2048 and the rest) level with f32. Dead end on the way: loading uvec2 words and unpacking, no change.
+- The widened copy took a host round trip: Vulkan's `to_dtype` ran every dtype change on the CPU, and diarization
+  read 1.4 s in about half the runs (1.0 with f32 weights). f16 to f32 now runs on the device (`widen_f16`), and f32
+  to f16 too where the matrix-core kernels are (`convert_f16`).
+- Tests: `a_half_weight_linear_matches_its_f32_layer` (300 rows on the f16 kernel, 3 through the widened copy, with
+  a bias; a wrong b stride fails it), `vulkan_half_conversions_match_the_cpu` (odd count, sliced offset, both ways,
+  bit for bit).
+
+```
+10-minute clip: load 3658 MiB (was 4167-4200); asr 2.61-2.86 s, diar 1.00-1.16 s, both 3.27-3.61 s (4.3-4.5 before);
+peak 6413-6846 MiB (8404-8559 before); 0 word diffs; diarization 150 segments within 0.01 s of the CPU's
+```
+
+## Run 6 - 2026-11-08 13:00
+
+Question: how much of the rest is temporaries that batches in flight hold? With one batch of 64 MB in flight
+(temporary build): peak 5229 / 5402 MiB, asr 2.62 / 2.64 s, diar 1.01 / 1.02 s. A batch count of one would cost a
+decode step's overlap, so the cap counts bytes instead: a submit waits for the oldest batch while the batches in
+flight have allocated more than `MAX_IN_FLIGHT_BYTES` (and more than one is in flight).
+
+```
+256 MB: speech peak 5422-5747 MiB; 0.8B 9818 / 226; 35B 2913 / 78; 27B 342 / 27.2 (was ~480-500 / 30): its
+  batches waited too
+512 MB: speech peak 5816 / 6314 MiB, asr 2.67-2.73 s, diar 1.01-1.02 s; 27B 533 / 30.8, 498 / 29.2
+```
+
+Kept at 512 MB. Checks: lint, CPU (3153), CUDA (3356) and the Vulkan set pass.
+
+Where it stands (MiB above the idle desktop): Vulkan ~4600-5100 peak, CUDA ~2440. Load 2466 against 1895, the rest
+a request's working set against CUDA's ~550. Next: stream-ordered reuse of a dropped buffer by the work recorded
+after it.

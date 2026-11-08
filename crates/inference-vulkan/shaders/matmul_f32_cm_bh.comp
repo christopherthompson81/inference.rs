@@ -1,0 +1,5 @@
+#version 450
+// The f32 matmul on matrix cores over an f16 b (a weight kept in f16).
+#extension GL_GOOGLE_include_directive : require
+#define B_HALF
+#include "matmul_f32_cm_main.glsl"

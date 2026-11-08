@@ -723,6 +723,38 @@ pub struct Encoder {
     context: Option<ChunkedContext>,
 }
 
+// `layer` with its weight kept in f16 where `Linear::to_half` keeps it
+fn halve(layer: &mut Linear) -> Result<()> {
+    *layer = layer.to_half()?;
+    Ok(())
+}
+
+impl Encoder {
+    /// Its projections' weights kept in f16 where the device's matrix cores take them (`Linear::to_half`).
+    pub fn halve_weights(&mut self) -> Result<()> {
+        halve(&mut self.subsampling.linear)?;
+        for block in &mut self.blocks {
+            let attn = &mut block.attn;
+            for layer in [
+                &mut block.ff1.up,
+                &mut block.ff1.down,
+                &mut attn.q,
+                &mut attn.k,
+                &mut attn.v,
+                &mut attn.o,
+                &mut attn.pos,
+                &mut block.conv.pointwise1,
+                &mut block.conv.pointwise2,
+                &mut block.ff2.up,
+                &mut block.ff2.down,
+            ] {
+                halve(layer)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Encoder {
     pub fn new(cfg: &EncoderConfig, vb: VarBuilder) -> Result<Self> {
         if cfg.is_streaming() && cfg.chunked_context().is_none() {

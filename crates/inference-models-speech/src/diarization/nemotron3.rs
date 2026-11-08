@@ -144,6 +144,14 @@ pub enum NemoProjection {
 }
 
 impl NemoProjection {
+    // a dense projection with its weight kept in f16 where `Linear::to_half` keeps it
+    fn halve(&mut self) -> Result<()> {
+        if let Self::Dense(linear) = self {
+            *linear = linear.to_half()?;
+        }
+        Ok(())
+    }
+
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         match self {
             Self::Dense(linear) => linear.forward(xs),
@@ -316,6 +324,28 @@ pub struct NemoTransformer {
 }
 
 impl NemoTransformer {
+    /// Its projections' weights kept in f16 where the device's matrix cores take them (`Linear::to_half`).
+    pub fn halve_weights(&mut self) -> Result<()> {
+        if let Some(embedder) = &mut self.embedder {
+            *embedder = embedder.to_half()?;
+        }
+        for layer in &mut self.layers {
+            let p = &mut layer.projections;
+            match &mut p.qkv {
+                NemoQkv::Fused(qkv) => qkv.halve()?,
+                NemoQkv::Split(split) => {
+                    for projection in split {
+                        projection.halve()?;
+                    }
+                }
+            }
+            for projection in [&mut p.o, &mut p.fc1, &mut p.fc2] {
+                projection.halve()?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(config: NemoTransformerConfig, vb: VarBuilder) -> Result<Self> {
         Self::build(config, vb, None)
     }
@@ -427,6 +457,11 @@ pub struct Nemotron3Diarizer {
 }
 
 impl Nemotron3Diarizer {
+    /// Its encoder's projection weights kept in f16 where the device's matrix cores take them.
+    pub fn halve_weights(&mut self) -> Result<()> {
+        self.encoder.halve_weights()
+    }
+
     pub fn load(files: &Nemotron3Files, device: &Device, dtype: DType) -> Result<Self> {
         // SAFETY: the weights are read-only for the model's life; a file changed underneath it is undefined
         let vb = unsafe { VarBuilder::from_mmaped_safetensors(&files.weights, dtype, device)? };
