@@ -2978,3 +2978,27 @@ fn vulkan_rope_matches_the_cpu_kernel() -> inference_tensor::Result<()> {
     }
     Ok(())
 }
+
+// the GLU on Vulkan (the device's elementwise kernels) against the CPU's fused op, every activation
+#[test]
+fn vulkan_fused_glu_matches_the_cpu() -> inference_tensor::Result<()> {
+    use inference_quant::GluActivationType as A;
+    let Ok(vk) = Device::new_vulkan(0) else {
+        return Ok(());
+    };
+    const TOLERANCE: f32 = 1e-5;
+    let cpu = Device::Cpu;
+    let a = Tensor::randn(0f32, 2.0, (7, 96), &cpu)?;
+    let b = Tensor::randn(0f32, 1.0, (7, 96), &cpu)?;
+    for act in [A::Silu, A::Gelu, A::Relu, A::GeluErf, A::Sigmoid] {
+        let want = inference_quant::fused_glu(&a, &b, act)?;
+        let got = inference_quant::fused_glu(&a.to_device(&vk)?, &b.to_device(&vk)?, act)?;
+        let diff = (got.to_device(&cpu)? - &want)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+        assert!(diff < TOLERANCE, "{act:?}: {diff}");
+    }
+    Ok(())
+}

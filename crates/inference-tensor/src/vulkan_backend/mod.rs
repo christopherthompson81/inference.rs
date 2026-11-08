@@ -317,7 +317,9 @@ impl VulkanStorage {
         dim: usize,
         gather: bool,
     ) -> Option<Result<Self>> {
-        if !word_sized(self.dtype)
+        // 16-bit rows of an even length select as words, half as many (an f16 KV cache's blocks)
+        let halves = self.dtype.size_in_bytes() == 2 && !gather;
+        if !(word_sized(self.dtype) || halves)
             || ids.dtype != DType::U32
             || !l.is_contiguous()
             || !ids_l.is_contiguous()
@@ -327,6 +329,14 @@ impl VulkanStorage {
         let dims = l.shape().dims();
         let left: usize = dims[..dim].iter().product();
         let right: usize = dims[dim + 1..].iter().product();
+        let (words, src_offset) = if halves {
+            if !right.is_multiple_of(2) || !l.start_offset().is_multiple_of(2) {
+                return None;
+            }
+            (right / 2, l.start_offset() / 2)
+        } else {
+            (right, l.start_offset())
+        };
         let n = if gather {
             ids_l.shape().dims()[dim]
         } else {
@@ -340,10 +350,10 @@ impl VulkanStorage {
             r.select_b32(&Select {
                 left,
                 src_dim: dims[dim],
-                right,
+                right: words,
                 n,
                 gather,
-                src: (&self.buffer, l.start_offset()),
+                src: (&self.buffer, src_offset),
                 ids: (&ids.buffer, ids_l.start_offset()),
                 out: &out.buffer,
             })
@@ -2344,6 +2354,37 @@ mod tests {
 
     // row ops, row selection and matmuls on the GPU: RMS norm, softmax, sigmoid, last-dim reductions, embedding and
     // gather lookups, and batched matmuls with a transposed operand
+    // f16 and bf16 rows selected on the GPU as words: an even row (a KV cache's blocks), an odd row and a row at an odd
+    // offset (the CPU's fallback), against the CPU
+    #[test]
+    fn vulkan_half_index_select_matches_the_cpu() -> Result<()> {
+        let Some(vk) = device() else { return Ok(()) };
+        let ids = Tensor::new(&[4u32, 0, 4, 2], &Device::Cpu)?;
+        for dtype in [DType::F16, DType::BF16] {
+            for (shape, offset) in [
+                (&[6usize, 3, 8][..], 0usize),
+                (&[6, 5][..], 0),
+                (&[7, 6][..], 1),
+            ] {
+                let n: usize = shape.iter().product();
+                let x = Tensor::arange(0f32, n as f32, &Device::Cpu)?.to_dtype(dtype)?;
+                let x = x.narrow(0, offset, n - offset)?;
+                let rows = (n - offset) / shape[1..].iter().product::<usize>();
+                let mut dims = shape.to_vec();
+                dims[0] = rows;
+                let x = x.narrow(0, 0, dims.iter().product())?.reshape(dims)?;
+                let want = x.index_select(&ids, 0)?;
+                let got = x.to_device(&vk)?.index_select(&ids.to_device(&vk)?, 0)?;
+                assert_eq!(
+                    got.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
+                    want.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
+                    "{dtype:?} {shape:?} at {offset}"
+                );
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn vulkan_row_ops_selection_and_matmuls_match_the_cpu() -> Result<()> {
         let Some(vk) = device() else { return Ok(()) };

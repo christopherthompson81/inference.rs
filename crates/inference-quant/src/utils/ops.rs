@@ -2204,6 +2204,19 @@ pub fn fused_glu(a: &Tensor, b: &Tensor, activation: GluActivationType) -> Resul
         return a.apply_op2_no_bwd(b, &FusedGlu(activation));
     }
 
+    // the fused op has no Vulkan kernel (its storages would round-trip the host); the activation and the product run
+    // as the device's elementwise kernels
+    if a.device().is_vulkan() {
+        let act = match activation {
+            GluActivationType::Silu => a.silu()?,
+            GluActivationType::Gelu => a.gelu()?,
+            GluActivationType::Relu => a.relu()?,
+            GluActivationType::GeluErf => a.gelu_erf()?,
+            GluActivationType::Sigmoid => inference_tensor::nn::ops::sigmoid(a)?,
+        };
+        return act * b;
+    }
+
     let a = a.contiguous()?;
     let b = b.contiguous()?;
 
