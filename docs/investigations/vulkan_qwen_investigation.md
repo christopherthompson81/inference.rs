@@ -208,3 +208,89 @@ Qwen3.6-35B-A3B UD-IQ4_XS, 3,000-token stream:  plain 72.5 tok/s, --mtp (n_predi
 ```
 
 Greedy text with --mtp: CUDA's, word for word.
+
+## Run 9 - 2026-11-08 09:30
+
+Question: does one matvec for the MLP's gate and up (ending in their GLU) cut decode time? (User: do the open items:
+gate+up pairing, add+norm fusion, pool churn.)
+
+`mul_mat_vecs_glu_<type>` (mat_vec_main with `GLU` defined): a second weight binding, every block decoded from both
+weights and dotted with the same int8 activation block, `act(g) * u` written by thread 0. The type files' weight
+reads go through a `W16()` accessor that the GLU build points at either buffer by a selector set to a constant before
+each unpack (folded once inlined). `QuantMethod::vulkan_block_weight` hands out a dense weight's device blocks (QTensor
+and raw i-quant GGUF layers, forwarded by the pending and LoRA wrappers); `quantized_ffn` tries it for decode rows on
+Vulkan. Test: `vulkan_glu_matvec_matches_its_projections` (Candle's types and the raw i-quants, every activation, one
+and three rows, against the separate matvecs within 1e-5 of the output's max; nine rows give none). Pointing the up
+read at the gate's buffer fails it (Q8_0: 4187 of 988).
+Dead end: comparing the GLU of CPU products to the device's within 2e-2 fails for sigmoid and relu (3-7%): the int8
+activations' error in the gate turns into one of up's size, so the check is against the device's own matvecs.
+
+```
+INFERENCE_VULKAN_PROFILE, 0.8B decode per 5 s: GPU 1521 -> 1348 ms
+  before: mat_vecs m=3584 8.2 us x2 + Silu 2.3 + Mul 1.9 a layer; after: glu_mat_vecs_q8_0 14.2 us
+3,000-token stream (stream_rate.sh):
+Qwen3.5-0.8B Q8_0:          181 -> 183.6, 173.7 tok/s (host-bound: GPU busy ~27% of the window)
+Qwen3.6-35B-A3B UD-IQ4_XS:  72.5 -> 75.1 tok/s
+Qwen3.8-27B IQ4_XS:         30.3 tok/s (no earlier stream; Run 6's 25.7 was `inference bench`)
+```
+
+Greedy text (greedy.sh): the 0.8B's sixth token is now CUDA's " sunlight" (-1.318).
+
+## Run 10 - 2026-11-08 09:50
+
+Question: does folding the residual add into the next norm cut decode dispatches? The Qwen3.5 layers already add
+and norm through `forward_add_rms_norm` (CUDA fuses it); on Vulkan it was `Add n=1024` (48 a token on the 0.8B)
+then `rms_norm_q8`.
+
+`rms_norm_q8` takes an add mode (the residual bound beside x, the sum written as the row loads); `AddRmsNorm` records
+it for a decode's rows (at most 8, whole 32-value blocks, up to 16,384 wide), and `rms_norm_forward_add` takes it on
+Vulkan before the add-then-norm fallback (`vulkan_add_rms_norm_matches_the_cpu`: one, three and nine rows, the sum
+exact and the norm within 1e-5 of the CPU's; a subtracted residual fails it).
+
+```
+profile: Add n=1024 23,104 a 5 s window -> gone (48 left a window, the prompt's)
+3,000-token stream, five 0.8B runs: 172.5, 192.7, 190.5, 198.7, 197.5 (median 192.7; Run 7 181)
+Qwen3.6-35B-A3B UD-IQ4_XS: 74.4   Qwen3.8-27B IQ4_XS: 30.8
+```
+
+The 0.8B swings ~20 tok/s run to run (clocks 1965 MHz, no thermal throttle bits); the gain is inside a run or two's
+noise. Seen in passing: `rows_f32` takes ~250 us a token on the 0.8B (the 248K-wide logits' row op), ~5% of a step.
+
+## Run 11 - 2026-11-08 10:00
+
+Regression found while benchmarking the pool (from Run 7, merged in #865): a 2048-token prompt on the 27B fails with
+`gated RMSNorm of 98304 rows of 1 groups of 128`. GDN's norm runs a row a head a token (2048 x 48), and the kernel
+took rows down one grid dimension (at most 65,535); Run 7 only ran chat-length prompts. Rows now go down y and on
+through z (`rows` in the push constants, the last slice's overhang idle); `vulkan_gated_gdn_norm_matches_the_cpu`
+adds 4,200 tokens of 16 heads (67,200 rows).
+
+## Run 12 - 2026-11-08 10:30
+
+Question: what does the pool's churn cost with the KV cache sized to the card, and what helps without trading KV?
+Temporary counters (misses, evictions, `vkAllocateMemory` time, missed and idle classes; removed) on the 27B's
+2048-token prompt (`inference bench --prompt-len 2048`, KV 4846 MB):
+
+```
+a 2 s window: ~330 misses, ~330 evictions (~20 GB), alloc ~0.3 s; free at the 512 MB margin, 0.5-1.1 GB idle
+missed classes (MiB): 160, 192, 96, 80, 48, 40 (the prompt's activations); idle: other classes
+```
+
+Change: a pooled device allocation short of room first waits for the oldest submitted batch (its retained buffers
+return to the pool) and retries the pool, before `make_room` frees idle buffers. Evictions ~150 a window.
+Dead end: the 4 GB reserve again (KV 4846 -> 2798 MB): evictions ~30 a window, alloc ~0.05 s, TTFT 496 / 572 tok/s
+(+-81 / 44) against 465-505: at most ~10% for 42% of the KV cache. Not changed.
+
+```
+alternating pairs (TMP_NOWAIT toggle, removed), prefill 2048 / decode tok/s:
+Qwen3.8-27B:  wait 497.9, 495.9, 492.2 (+-27-31)  vs  505.9, 504.8, 497.8 (+-81-89); TTFT 4150 vs 4207 ms
+Qwen3.6-35B:  wait 2966.8, 2971.3  vs  2840.4, 2860.9
+Qwen3.5-0.8B: wait 9905.7, 9908.0  vs  9909.8, 9918.8
+```
+
+The 27B is level (its spread narrower), the 35B's prefill ~4% faster; kept. The 27B's prompt stays GPU-bound with
+the churn it has left (its allocations overlap the GPU's work, the CPU recording ahead).
+
+Checks: lint, CPU (3149) and CUDA (3352) suites pass; the Vulkan set (655) passes, with a flake under the full
+parallel run: one of `a_vulkan_weight_holds_its_blocks_once` or `vulkan_quantized_cache_scores_as_its_dequantized_rows`
+(q4/q4 decode, max diff 0.0013) fails ~1 run in 10, each taking ~3.5 s against ~0.3 s alone. Master's code fails the
+same way (1 of 15 runs, the storage test), and this branch with the pool wait off does too (1 of 15): not from here.
