@@ -48,6 +48,15 @@ fn choice_seed(seed: Option<u64>, response_index: usize) -> Option<u64> {
     })
 }
 
+// `audio`'s samples, out of it (its rate and channels stay)
+fn take_audio(audio: &mut AudioInput) -> AudioInput {
+    AudioInput {
+        samples: std::mem::take(&mut audio.samples),
+        sample_rate: audio.sample_rate,
+        channels: audio.channels,
+    }
+}
+
 // Fields of the request message the per-choice loop needs after the message itself is consumed for the prompt.
 struct MessageExtras {
     is_chat: bool,
@@ -62,7 +71,8 @@ struct MessageExtras {
 }
 
 impl MessageExtras {
-    fn of(messages: &RequestMessage) -> Self {
+    // a one-shot audio request's recording moves out of the message, which keeps only what the prompt needs
+    fn of(messages: &mut RequestMessage) -> Self {
         let mut extras = Self {
             is_chat: false,
             echo_prompt: false,
@@ -113,7 +123,7 @@ impl MessageExtras {
             }
             RequestMessage::Transcription { audio, options } => {
                 extras.seq_step_type = SeqStepType::OneShot;
-                extras.audios = Some(vec![audio.clone()]);
+                extras.audios = Some(vec![take_audio(audio)]);
                 extras.one_shot = Some(OneShotParams::Transcription(options.clone()));
             }
             RequestMessage::TranscriptionStream { request } => {
@@ -122,12 +132,12 @@ impl MessageExtras {
             }
             RequestMessage::VoiceActivity { audio, options } => {
                 extras.seq_step_type = SeqStepType::OneShot;
-                extras.audios = Some(vec![audio.clone()]);
+                extras.audios = Some(vec![take_audio(audio)]);
                 extras.one_shot = Some(OneShotParams::VoiceActivity(options.clone()));
             }
             RequestMessage::Diarization { audio, options } => {
                 extras.seq_step_type = SeqStepType::OneShot;
-                extras.audios = Some(vec![audio.clone()]);
+                extras.audios = Some(vec![take_audio(audio)]);
                 extras.one_shot = Some(OneShotParams::Diarization(options.clone()));
             }
             RequestMessage::Embedding { .. }
@@ -322,7 +332,7 @@ impl Engine {
             None => None,
         };
         self.validate_request_kind(&request)?;
-        let mut extras = MessageExtras::of(&request.messages);
+        let mut extras = MessageExtras::of(&mut request.messages);
         let embedding_task = self.resolve_embedding_task(&mut request.messages)?;
         let truncate_sequence = request.truncate_sequence;
 
@@ -524,7 +534,12 @@ impl Engine {
                     None
                 },
                 extras.images.clone(),
-                extras.audios.clone(),
+                // the last choice takes the media rather than a copy (a recording is tens of MB)
+                if response_index + 1 == request.sampling_params.n_choices {
+                    extras.audios.take()
+                } else {
+                    extras.audios.clone()
+                },
                 extras.videos.clone(),
                 block_size,
                 tool_call_state,

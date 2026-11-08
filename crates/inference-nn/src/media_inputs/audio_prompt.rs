@@ -26,6 +26,7 @@ pub fn mono_clips(seq: &dyn MediaSequence, sample_rate: u32) -> anyhow::Result<V
                 Ok(mono)
             } else {
                 inference_audio::mel::resample(&mono, audio.sample_rate, sample_rate)
+                    .map(std::borrow::Cow::into_owned)
             }
         })
         .collect()

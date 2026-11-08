@@ -1545,6 +1545,11 @@ impl Sequence {
         self.multimodal.clone_audios()
     }
 
+    /// The audios moved out, for a one-shot request (a transcription), whose sequence ends with the step taking them.
+    pub fn move_audios(&mut self) -> Option<Vec<AudioInput>> {
+        self.multimodal.move_audios()
+    }
+
     pub fn audios(&self) -> Option<&[AudioInput]> {
         self.multimodal.audios()
     }

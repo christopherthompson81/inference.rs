@@ -753,6 +753,7 @@ impl NemotronTranscribeModel {
             mono
         } else {
             inference_audio::mel::resample(&mono, audio.sample_rate, inputs_processor::SAMPLE_RATE)?
+                .into_owned()
         };
         let clip = inputs_processor::audio_clip(&self.mel, &pcm)?;
         let streams =

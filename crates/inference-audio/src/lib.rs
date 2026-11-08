@@ -95,7 +95,11 @@ impl AudioInput {
         let mut channels = codec_params.channels.map(|c| c.count() as u16).unwrap_or(1);
         let mut decoder =
             symphonia::default::get_codecs().make(&codec_params, &DecoderOptions::default())?;
-        let mut samples = Vec::new();
+        // the stated length up front: grown by doubling, a long recording's buffer held up to twice its samples
+        let stated = codec_params
+            .n_frames
+            .map_or(0, |frames| frames as usize * usize::from(channels));
+        let mut samples = Vec::with_capacity(stated.min(max_samples));
         loop {
             match format.next_packet() {
                 Ok(packet) if packet.track_id() != track_id => {}
@@ -119,6 +123,7 @@ impl AudioInput {
                 Err(e) => return Err(e.into()),
             }
         }
+        samples.shrink_to_fit();
         Ok(Self {
             samples,
             sample_rate,
@@ -127,6 +132,14 @@ impl AudioInput {
     }
 
     /// Convert multi channel audio to mono by averaging channels.
+    /// [`Self::to_mono`], borrowed when the samples are mono already.
+    pub fn mono(&self) -> std::borrow::Cow<'_, [f32]> {
+        if self.channels <= 1 {
+            return std::borrow::Cow::Borrowed(&self.samples);
+        }
+        std::borrow::Cow::Owned(self.to_mono())
+    }
+
     pub fn to_mono(&self) -> Vec<f32> {
         if self.channels <= 1 {
             return self.samples.clone();

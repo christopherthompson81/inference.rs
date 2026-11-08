@@ -80,6 +80,7 @@ impl AudioProcessor {
                 audio_input.sample_rate,
                 self.target_sample_rate,
             )?
+            .into_owned()
         } else {
             dithered_samples
         };

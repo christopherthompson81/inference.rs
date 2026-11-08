@@ -76,12 +76,13 @@ pub fn rel_pos_attention(
     )?))
 }
 
-/// `x` (f32, `(.., k)`) times a bf16 `(n, k)` weight transposed (`Linear::to_half`'s on a CPU), `(.., n)` f32: the bf16
-/// products the scope's f32 matmuls take, the weight read as it is. `None` outside [`with_bf16_matmuls`] or for a
-/// product the scope keeps in f32 (the caller widens the weight).
+/// `x` (f32, `(.., k)`) times a bf16 `(n, k)` weight transposed (`Linear::to_half`'s on a CPU), plus `bias`, `(.., n)`
+/// f32: the bf16 products the scope's f32 matmuls take, the weight read as it is and the bias added in place. `None`
+/// outside [`with_bf16_matmuls`] or for a product the scope keeps in f32 (the caller widens the weight).
 pub fn linear_bf16_weight(
     x: &crate::Tensor,
     weight: &crate::Tensor,
+    bias: Option<&crate::Tensor>,
 ) -> crate::Result<Option<crate::Tensor>> {
     use crate::cpu_backend::{BF16_MIN_COLS, REST_POOL_MIN_WORK, gemm_bf16};
     let (n, k) = weight.dims2()?;
@@ -131,6 +132,18 @@ pub fn linear_bf16_weight(
         0,
         &mut out,
     );
+    if let Some(bias) = bias {
+        let bias = bias
+            .flatten_all()?
+            .to_dtype(crate::DType::F32)?
+            .to_vec1::<f32>()?;
+        if bias.len() != n {
+            crate::bail!("a bias of {} for {n} outputs", bias.len());
+        }
+        rows_in_place(&mut out, n, |row| {
+            row.iter_mut().zip(&bias).for_each(|(y, b)| *y += b)
+        });
+    }
     let mut dims = x.dims().to_vec();
     *dims.last_mut().expect("rank >= 1") = n;
     Ok(Some(crate::Tensor::from_vec(
@@ -138,6 +151,60 @@ pub fn linear_bf16_weight(
         dims,
         &crate::Device::Cpu,
     )?))
+}
+
+// `f` over each `width`-long row of `values` (the last may be shorter), the rows split over the elementwise pool
+fn rows_in_place(values: &mut [f32], width: usize, f: impl Fn(&mut [f32]) + Sync) {
+    let (at, total) = (values.as_mut_ptr() as usize, values.len());
+    crate::utils::barrier_pool().execute_chunked(total.div_ceil(width), |rows| {
+        for row in rows {
+            let len = width.min(total - row * width);
+            // SAFETY: the chunks are disjoint rows of `values`, which outlives the call
+            f(unsafe { std::slice::from_raw_parts_mut((at as *mut f32).add(row * width), len) });
+        }
+    });
+}
+
+// SiLU over a CPU f32 storage's values, in place
+struct SiluInPlace;
+
+impl crate::InplaceOp1 for SiluInPlace {
+    fn name(&self) -> &'static str {
+        "silu-in-place"
+    }
+
+    fn cpu_fwd(
+        &self,
+        storage: &mut crate::CpuStorage,
+        layout: &crate::Layout,
+    ) -> crate::Result<()> {
+        use crate::op::UnaryOpT;
+        let crate::CpuStorage::F32(values) = storage else {
+            crate::bail!("an in-place SiLU takes f32");
+        };
+        let values = &mut values[layout.start_offset()..][..layout.shape().elem_count()];
+        rows_in_place(values, SILU_ROW, |row| {
+            row.iter_mut().for_each(|v| *v = crate::op::Silu::f32(*v))
+        });
+        Ok(())
+    }
+}
+
+// values a task of the in-place SiLU takes
+const SILU_ROW: usize = 1 << 14;
+
+/// SiLU over `x`'s values in place, on the CPU, where `x` is contiguous f32: for an activation nothing else holds (a
+/// projection's fresh output), which then needs no second buffer of its size. Whether it ran.
+pub fn silu_in_place(x: &crate::Tensor) -> crate::Result<bool> {
+    if !x.device().is_cpu()
+        || x.dtype() != crate::DType::F32
+        || !x.is_contiguous()
+        || x.elem_count() == 0
+    {
+        return Ok(false);
+    }
+    x.inplace_op1(&SiluInPlace)?;
+    Ok(true)
 }
 
 pub use crate::cpu_backend::gemm_bf16::{
@@ -489,5 +556,24 @@ pub(crate) unsafe fn vec_scalar_add_bf16(scalar: bf16, xs: *const bf16, ys: *mut
             return neon::vec_scalar_add_bf16(scalar, xs, ys, k);
         }
         scalar_vec_scalar_add_bf16(scalar, xs, ys, k)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{Device, Tensor};
+
+    // the in-place SiLU equals the op's over a length past one task with a short tail, and leaves a strided view alone
+    #[test]
+    fn silu_in_place_matches_the_op() -> crate::Result<()> {
+        let x = Tensor::randn(0f32, 3., (3, super::SILU_ROW + 17), &Device::Cpu)?;
+        let want = crate::nn::ops::silu(&x)?.to_vec2::<f32>()?;
+        assert!(super::silu_in_place(&x)?);
+        assert_eq!(x.to_vec2::<f32>()?, want);
+        assert!(
+            !super::silu_in_place(&x.t()?)?,
+            "a strided tensor is left to the op"
+        );
+        Ok(())
     }
 }

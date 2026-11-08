@@ -49,6 +49,7 @@ impl VoxtralAudioProcessor {
         // Resample if necessary
         let samples = if audio.sample_rate != self.sampling_rate {
             inference_audio::mel::resample(&mono, audio.sample_rate, self.sampling_rate)?
+                .into_owned()
         } else {
             mono
         };
