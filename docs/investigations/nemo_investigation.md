@@ -1288,3 +1288,25 @@ The transcript and every word's speaker match the earlier CPU run. Attention pro
 99.3 -> 103.0 tok/s, decode 17.1 -> 17.2. What is left: the encoder's matmuls (~32 s by their measured rates), and the
 diarizer's small per-chunk products, whose operand packing is 14 % of its samples. Its barrier-pool threads spin
 (19 %); parking them at once took diarization 16.8 -> 15.2 s, left as is since the spin limit serves CPU decode.
+
+## Run 44 - 2026-11-08 (laptop: Ryzen 7 7840U, CPU only)
+
+**Question:** what is left after Run 43 (ASR 48.2 s, diarization 17.0 s)?
+
+**Finding:**
+- ASR: Parakeet's fused softmax spent a tenth of the encoder in libm's `expf`, a call an element.
+- Diarization: 23 chunks of ~27 s, each the 31-layer transformer over 684 rows (cache and chunk), 0.7 s a step.
+  Summed over the 713 layer steps, the query-key scores took 1.69 s against ~0.5 by gemm's rate at that shape: a
+  contiguous copy of the transposed keys, then a scaling of the (8, 684, 684) scores.
+- The chunks cannot batch, as each reads the speaker cache the last one updated. Fewer threads only slow it (4:
+  19.9 s, 6: 17.3, 8: 15.9).
+
+**Change:**
+- Parakeet's fused softmax takes `fast_exp` (Cephes, ~1e-7 relative), which vectorizes.
+- On the CPU, the diarizer scales its queries rather than its scores (2^-3 at head 64, the same bits), and its matmul
+  reads the transposed keys in place. A GPU keeps the old order: on Vulkan, scaling the queries first moved 126 of
+  284 segments, as its f16 matmul inputs round small queries.
+
+**Result (CPU, 10 minutes):** ASR 48.2 -> 39.6 s, diarization 17.0 -> 12.5-13.4 s, both in one request 60.2 -> 50.1 s.
+The transcript and every word's speaker match the earlier CPU run; the CPU and Vulkan diarizations each match their
+own earlier runs exactly.

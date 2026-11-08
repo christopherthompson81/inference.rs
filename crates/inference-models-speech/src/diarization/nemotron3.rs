@@ -282,7 +282,14 @@ impl Layer {
         let k = self.rope(k, cos, sin)?;
         let v = self.heads(&v?)?;
         let scale = (self.head_dim as f64).powf(-0.5);
-        let scores = (q.matmul(&k.t()?.contiguous()?)? * scale)?;
+        // the CPU scales the queries, a tenth the values of the (heads, T, T) scores (2^-3 at head 64: the same
+        // bits), and its matmul reads the transposed keys in place; a GPU keeps its scaled scores (its f16 matmul
+        // inputs round small queries) and contiguous keys
+        let scores = if q.device().is_cpu() {
+            (q * scale)?.matmul(&k.t()?)?
+        } else {
+            (q.matmul(&k.t()?.contiguous()?)? * scale)?
+        };
         let attn = ops::softmax_last_dim(&scores)?.matmul(&v)?;
         let attn = attn
             .transpose(1, 2)?

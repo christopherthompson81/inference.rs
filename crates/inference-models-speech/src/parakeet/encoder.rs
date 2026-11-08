@@ -1,3 +1,4 @@
+use inference_nn::attention::fast_exp;
 use inference_tensor::cpu::kernels::VecOps;
 use inference_tensor::nn::{
     Conv2d, Conv2dConfig, LayerNorm, Linear, Module, VarBuilder, conv2d, layer_norm, linear, ops,
@@ -425,8 +426,8 @@ impl RelPositionAttention {
 
 // (Q, T+Q-1) offset scores to (Q, T) key scores: (r, j) is flat element Q-1 + r(P-1) + j, a view plus one copy
 // the softmax of each row of (rows, keys) content scores plus its rel-shifted position scores (row r reads columns
-// rows - 1 - r on), in one pass on the CPU, as `softmax_last_dim(content + rel_shift(position, keys))` computes it:
-// the sum and the shift's strided read had each taken a pass over every head's scores
+// rows - 1 - r on), in one pass on the CPU, as `softmax_last_dim(content + rel_shift(position, keys))` computes it
+// but for its exp: the sum and the shift's strided read had each taken a pass over every head's scores
 struct RelShiftSoftmax;
 
 impl CustomOp2 for RelShiftSoftmax {
@@ -472,8 +473,9 @@ impl CustomOp2 for RelShiftSoftmax {
             let mut max = f32::NEG_INFINITY;
             // SAFETY: `dst` holds `keys` values
             unsafe { f32::vec_reduce_max(dst.as_ptr(), &mut max, keys) };
+            // Cephes' exp (~1e-7 relative) vectorizes where libm's is a call an element: a tenth of the encoder
             for d in dst.iter_mut() {
-                *d = (*d - max).exp();
+                *d = fast_exp(*d - max);
             }
             let mut sum = 0f32;
             // SAFETY: as above
@@ -935,18 +937,17 @@ mod tests {
     }
 
     // llama.cpp's GGUF stores the conv's batch norm folded into a scale and shift; both forms compute the same
-    // the fused CPU softmax gives what the shift, the sum and the softmax give apart, bit for bit
+    // the fused CPU softmax gives what the shift, the sum and the softmax give apart, to its exp's rounding
     #[test]
     fn the_fused_rel_shift_softmax_matches_its_composite() -> Result<()> {
+        const FAST_EXP_TOLERANCE: f32 = 1e-6;
         let (heads, rows, keys) = (2, 5, 9);
         let content = Tensor::randn(0f32, 2., (1, heads, rows, keys), &Device::Cpu)?;
         let position = Tensor::randn(0f32, 2., (1, heads, rows, rows + keys - 1), &Device::Cpu)?;
         let fused = content.apply_op2_no_bwd(&position, &RelShiftSoftmax)?;
         let apart = ops::softmax_last_dim(&(&content + rel_shift(&position, keys)?)?)?;
-        assert_eq!(
-            fused.flatten_all()?.to_vec1::<f32>()?,
-            apart.flatten_all()?.to_vec1::<f32>()?
-        );
+        let off = (fused - apart)?.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert!(off < FAST_EXP_TOLERANCE, "{off}");
         Ok(())
     }
 
