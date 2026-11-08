@@ -318,12 +318,14 @@ impl RelPositionAttention {
         // scaled before the products, so the (rows, keys) scores take no extra pass
         let q_content = (q.broadcast_add(&self.bias_u)? * scale)?;
         let q_position = (q.broadcast_add(&self.bias_v)? * scale)?;
-        // full attention fused on a GPU that has it: no (rows, keys) scores in memory, so no blocks either
+        // full attention fused on an iGPU that has it: no (rows, keys) scores in memory, so no blocks either; a discrete
+        // GPU's matrix cores run the blocks' products faster (a 3090 over 10 minutes: 2.6 s against 7.0 fused)
         let full = blocks
             .iter()
             .all(|b| b.mask.is_none() && b.keys_from == 0 && b.keys == t);
         if full
             && xs.device().is_vulkan()
+            && !inference_tensor::vulkan::is_discrete(xs.device())
             && let Some(attn) = inference_tensor::vulkan::rel_pos_attn(&RelPosAttn {
                 q_content: &q_content,
                 q_position: &q_position,

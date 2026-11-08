@@ -2380,6 +2380,82 @@ mod tests {
         Ok(())
     }
 
+    // f32 products against the CPU's over the inputs as the device rounds them: widths that leave c's rows off 16-byte
+    // alignment (2T - 1 relative positions), with b along n and transposed, a partial tile and a batch of heads
+    #[test]
+    fn vulkan_matmul_matches_the_cpu_at_odd_widths() -> Result<()> {
+        let Some(vk) = device() else { return Ok(()) };
+        let rounded = |t: &Tensor| -> Result<Tensor> {
+            if vk.as_vulkan_device()?.context.has_matrix_cores() {
+                t.to_dtype(DType::F16)?.to_dtype(DType::F32)
+            } else {
+                Ok(t.clone())
+            }
+        };
+        for (batch, m, n) in [(1usize, 300usize, 599usize), (8, 257, 513), (2, 256, 258)] {
+            for transposed in [false, true] {
+                let a = Tensor::randn(0f32, 1.0, (batch, m, 128), &Device::Cpu)?;
+                let b = if transposed {
+                    Tensor::randn(0f32, 1.0, (batch, n, 128), &Device::Cpu)?.t()?
+                } else {
+                    Tensor::randn(0f32, 1.0, (batch, 128, n), &Device::Cpu)?
+                };
+                let got = a.to_device(&vk)?.matmul(&b.to_device(&vk)?)?;
+                assert_close(&got, &rounded(&a)?.matmul(&rounded(&b)?)?, DOT_TOLERANCE)?;
+            }
+        }
+        Ok(())
+    }
+
+    // one Parakeet layer's full attention over 10 minutes (7,564 frames, 8 heads of 128): GPU time a call and the
+    // useful rate (content scores, position scores and values, 2 flops a multiply-add each)
+    #[test]
+    #[ignore = "benchmark"]
+    fn relative_position_attention_throughput() -> Result<()> {
+        const FRAMES: usize = 7564;
+        const HEADS: usize = 8;
+        const HEAD: usize = 128;
+        const REPEATS: usize = 10;
+        let Some(vk) = device() else { return Ok(()) };
+        if !vk.as_vulkan_device()?.context.has_matrix_cores() {
+            return Ok(());
+        }
+        let randn = |rows: usize| Tensor::randn(0f32, 0.5, (1, HEADS, rows, HEAD), &vk);
+        let (qc, qp, k, v) = (
+            randn(FRAMES)?,
+            randn(FRAMES)?,
+            randn(FRAMES)?,
+            randn(FRAMES)?,
+        );
+        let p = randn(2 * FRAMES - 1)?;
+        let call = || -> Result<Tensor> {
+            Ok(crate::vulkan::rel_pos_attn(&crate::vulkan::RelPosAttn {
+                q_content: &qc,
+                q_position: &qp,
+                k: &k,
+                v: &v,
+                positions: &p,
+                pos_base: FRAMES - 1,
+            })?
+            .expect("the device takes it"))
+        };
+        call()?;
+        vk.synchronize()?;
+        let start = std::time::Instant::now();
+        for _ in 0..REPEATS {
+            call()?;
+        }
+        vk.synchronize()?;
+        let secs = start.elapsed().as_secs_f64() / REPEATS as f64;
+        let flops = 6.0 * (FRAMES * FRAMES * HEADS * HEAD) as f64;
+        println!(
+            "relpos attention {FRAMES} x {HEADS} x {HEAD}: {:.2} ms, {:.1} TFLOPS",
+            secs * 1e3,
+            flops / secs / 1e12
+        );
+        Ok(())
+    }
+
     // partial last tile, with the model's causal mask and without one, causal without a mask; and decode's one position
     // over a cache (its own kernel), fewer keys than a workgroup's subgroups included. Heads of 16s run on matrix cores
     // where the device has them, in f16.

@@ -177,7 +177,8 @@ void main() {
         barrier();
     }
     uint c_base = z * pc.m * pc.n;
-    bool whole = m0 + BM <= pc.m && n0 + BN <= pc.n;
+    // a tile stores straight to c only on 16-byte rows: NVIDIA's driver stores misaligned ones wrong (odd widths)
+    bool whole = m0 + BM <= pc.m && n0 + BN <= pc.n && pc.n % 4 == 0;
     uint lane = gl_SubgroupInvocationID;
     [[unroll]] for (uint i = 0; i < TM; i++) {
         [[unroll]] for (uint j = 0; j < TN; j++) {
