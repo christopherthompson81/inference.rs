@@ -200,17 +200,15 @@ impl Layer {
         let projections = match projections {
             Some(projections) => projections,
             None => {
-                let no_bias = |name: &str| -> Result<NemoProjection> {
-                    let weight = attn.pp(name).get((h, h), "weight")?;
-                    Ok(NemoProjection::Dense(Linear::new(weight, None)))
-                };
+                let weight = |name: &str| attn.pp(name).get((h, h), "weight");
+                // one [query | key | value] product: three of 512 columns ran a fifth slower a FLOP than one of 1536
+                let qkv = Tensor::cat(
+                    &[weight("q_proj")?, weight("k_proj")?, weight("v_proj")?],
+                    0,
+                )?;
                 let dense = |linear: Result<Linear>| linear.map(NemoProjection::Dense);
                 NemoLayerProjections {
-                    qkv: NemoQkv::Split([
-                        no_bias("q_proj")?,
-                        no_bias("k_proj")?,
-                        no_bias("v_proj")?,
-                    ]),
+                    qkv: NemoQkv::Fused(NemoProjection::Dense(Linear::new(qkv, None))),
                     o: dense(linear(h, h, attn.pp("o_proj")))?,
                     fc1: dense(linear(h, cfg.intermediate_size, vb.pp("mlp").pp("fc1")))?,
                     fc2: dense(linear(cfg.intermediate_size, h, vb.pp("mlp").pp("fc2")))?,

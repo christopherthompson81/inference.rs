@@ -1340,3 +1340,7 @@ during diarization), sharing cores with it; parking them outright took diarizati
 -> 16.1 tok/s. `BarrierPool::rest` parks them until their next job, which a CPU matmul of 2^26 multiply-adds or more
 calls first (~0.2 ms here, far past a wake-up): A/B, diarization 14.06 -> 13.78 s, ASR 44.94 -> 44.83, Lightning CPU
 decode 16.7-16.8 -> 16.8-16.9 tok/s.
+
+The diarizer's query, key and value projections load as one `[query | key | value]` weight (the fused path its
+quantized loads already take): 684 x 512 x 512 products had run at ~346 GFLOPS in place against ~445 for the
+1536-wide one. A/B, diarization 13.60 -> 13.17 s; both devices' diarizations unchanged.
