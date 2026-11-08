@@ -1374,3 +1374,10 @@ half fails it); a scoped matmul takes bf16 inputs and an unscoped one f32's.
 
 **Result (A/B):** ASR 38.67 -> 32.93 s, diarization 11.38 -> 9.10 s; both in one request 40.6 s (Run 43's start:
 73.5).
+
+**Policy (same day):** bf16 holds for most f32 models but is not safe to assume, so a model takes it only once
+measured. The opt-in is a loader property, `GeneralMetadata::bf16_matmuls`, which the engine's step applies around
+the forward; the transcription loader sets it for Parakeet's offline encoder and the Nemotron-3 diarizer.
+`scripts/bf16_check.sh` measures a model with bf16 inputs forced (`INFERENCE_CPU_BF16`) against f32
+(`INFERENCE_CPU_NO_BF16`): an ASR's words, a diarizer's speaker-frames (0.5 % may move), an LLM's KLD (1e-3 may rise).
+On the meeting: Parakeet 1614 words, 0 differing, 4 starts moved; the diarizer 0.137 % of 46,824 speaker-frames.

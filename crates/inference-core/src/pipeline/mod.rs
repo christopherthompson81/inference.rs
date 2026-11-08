@@ -830,6 +830,9 @@ pub struct GeneralMetadata {
     pub audio_transcriber: Option<inference_nn::loaders::AudioTranscriber>,
     /// What a prompt token's activations take beyond the attention workspace, for a model whose loader reports it.
     pub prompt_activation_bytes_per_token: Option<usize>,
+    /// Whether the model's large CPU f32 matmuls may take bf16 inputs (`inference_tensor::cpu::with_bf16_matmuls`):
+    /// set by a loader for a model measured to hold its outputs under them, f32 otherwise.
+    pub bf16_matmuls: bool,
 }
 
 impl GeneralMetadata {

@@ -803,6 +803,13 @@ impl TranscriptionPipeline {
             AudioModel::Parakeet { .. } | AudioModel::Whisper(_) => vec![SupportedModality::Text],
             AudioModel::Silero(_) | AudioModel::Diarizer(_) => Vec::new(),
         };
+        // the models measured to hold under bf16 matmul inputs (nemo_investigation.md, Run 46): Parakeet TDT v3's
+        // offline encoder, its words unchanged over 10 minutes, and Nemotron-3's diarizer, 0.14 % of its frames moved
+        let bf16_matmuls = match &model {
+            AudioModel::Parakeet { asr, .. } => !asr.can_stream(),
+            AudioModel::Diarizer(Diarizer::Nemotron3(_)) => true,
+            _ => false,
+        };
         Self {
             model_id,
             model,
@@ -828,6 +835,7 @@ impl TranscriptionPipeline {
                 label_decision: None,
                 audio_transcriber: None,
                 prompt_activation_bytes_per_token: None,
+                bf16_matmuls,
             }),
             dummy_cache: EitherCache::Full(Cache::new(0)),
             sessions: HashMap::new(),

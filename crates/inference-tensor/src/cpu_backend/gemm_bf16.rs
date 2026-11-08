@@ -19,6 +19,14 @@ const TASKS_PER_THREAD: usize = 4;
 
 /// Set to keep CPU f32 matmuls in f32 where a model would let them take bf16 inputs (for accuracy, or A/B runs).
 pub const NO_BF16_ENV: &str = "INFERENCE_CPU_NO_BF16";
+/// Set to let every model's CPU forward take bf16 matmul inputs, to measure one not yet opted in.
+pub const BF16_ENV: &str = "INFERENCE_CPU_BF16";
+
+/// Whether [`BF16_ENV`] lets every model take bf16 matmul inputs.
+pub fn forced() -> bool {
+    static FORCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FORCED.get_or_init(|| std::env::var_os(BF16_ENV).is_some())
+}
 
 std::thread_local! {
     // whether this thread's matmuls run inside `with_bf16_matmuls`

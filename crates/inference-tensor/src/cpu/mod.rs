@@ -4,7 +4,9 @@ pub mod erf;
 pub(crate) mod features;
 pub mod kernels;
 
-pub use crate::cpu_backend::gemm_bf16::{NO_BF16_ENV, with_bf16_matmuls};
+pub use crate::cpu_backend::gemm_bf16::{
+    BF16_ENV, NO_BF16_ENV, forced as bf16_forced, with_bf16_matmuls,
+};
 
 #[allow(unused)]
 trait Cpu {

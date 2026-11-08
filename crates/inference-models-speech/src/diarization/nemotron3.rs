@@ -578,8 +578,7 @@ impl Nemotron3Diarizer {
                 Some(c) => Tensor::cat(&[&c.unsqueeze(0)?, &chunk_embeds], 1)?,
                 None => chunk_embeds,
             };
-            // measured to hold the f32 run's speakers (10 minutes: 0.14 % of its speaker-frames moved)
-            let logits = inference_tensor::cpu::with_bf16_matmuls(|| self.step(&input))?;
+            let logits = self.step(&input)?;
             // the cache scores encoder frames: each one's 10 ms sigmoids, averaged
             let probs = ops::sigmoid(&logits.to_dtype(DType::F32)?)?
                 .reshape((logits.dim(0)? / factor, factor, self.num_speakers()))?
