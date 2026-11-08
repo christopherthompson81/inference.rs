@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
+use inference_tensor::cpu::Bf16RowWeights;
 use inference_tensor::nn::{Embedding, Linear, Module, VarBuilder, embedding, linear, ops};
-use inference_tensor::{D, Error, IndexOp, Result, Tensor};
+use inference_tensor::{D, DType, Error, IndexOp, Result, Tensor};
 
 use super::config::{HeadKind, ParakeetConfig};
 
@@ -19,11 +21,63 @@ pub struct Emission {
     pub frames: usize,
 }
 
+// a weight `(n, k)` the decoder multiplies a row or a beam's rows at a time: on the CPU inside the model's bf16 scope,
+// through a bf16 copy made at its first product (the f32 LSTM and joint had streamed 47 MB from memory a token)
+struct DecodeWeight {
+    weight: Tensor,
+    bf16: OnceLock<Bf16RowWeights>,
+}
+
+impl DecodeWeight {
+    fn new(weight: Tensor) -> Self {
+        Self {
+            weight,
+            bf16: OnceLock::new(),
+        }
+    }
+
+    fn matmul_t(&self, x: &Tensor) -> Result<Tensor> {
+        if !(x.device().is_cpu()
+            && x.dtype() == DType::F32
+            && inference_tensor::cpu::bf16_enabled())
+        {
+            return x.matmul(&self.weight.t()?);
+        }
+        if self.bf16.get().is_none() {
+            let _ = self.bf16.set(Bf16RowWeights::new(&self.weight)?);
+        }
+        self.bf16.get().expect("set above").matmul_t(x)
+    }
+}
+
+// the joint's output layer
+pub(super) struct DecodeLinear {
+    weight: DecodeWeight,
+    bias: Option<Tensor>,
+}
+
+impl DecodeLinear {
+    fn new(linear: Linear) -> Self {
+        Self {
+            weight: DecodeWeight::new(linear.weight().clone()),
+            bias: linear.bias().cloned(),
+        }
+    }
+
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let y = self.weight.matmul_t(x)?;
+        match &self.bias {
+            Some(bias) => y.broadcast_add(bias),
+            None => Ok(y),
+        }
+    }
+}
+
 // one layer of PyTorch's LSTM (gates i, f, g, o), stepped a token at a time
 struct LstmLayer {
     // `[w_ih, w_hh, b_ih + b_hh]`, a gate a row: one matmul of `[x, h, 1]` against its transpose gives the gates, each
     // gate's weights contiguous (a GPU's decode matvec reads them in order: a 780M ran 4.5x slower over the transpose)
-    weights: Tensor,
+    weights: DecodeWeight,
     one: Tensor,
 }
 
@@ -43,14 +97,17 @@ impl LstmLayer {
         )?
         .contiguous()?;
         let one = Tensor::ones((1, 1), weights.dtype(), weights.device())?;
-        Ok(Self { weights, one })
+        Ok(Self {
+            weights: DecodeWeight::new(weights),
+            one,
+        })
     }
 
     /// `x`, `h` and `c` are `(1, hidden)`; returns the new `(h, c)`.
     fn step(&self, x: &Tensor, h: &Tensor, c: &Tensor) -> Result<(Tensor, Tensor)> {
         let hidden = h.dim(1)?;
         let ones = self.one.broadcast_as((h.dim(0)?, 1))?;
-        let g = Tensor::cat(&[x, h, &ones], 1)?.matmul(&self.weights.t()?)?;
+        let g = self.weights.matmul_t(&Tensor::cat(&[x, h, &ones], 1)?)?;
         let gates = ops::sigmoid(&g)?;
         let i = gates.narrow(1, 0, hidden)?;
         let f = gates.narrow(1, hidden, hidden)?;
@@ -137,7 +194,7 @@ pub(super) enum Head {
     Transducer {
         encoder_projector: Linear,
         predictor: Predictor,
-        joint: Linear,
+        joint: DecodeLinear,
         vocab: usize,
         blank: u32,
         durations: Vec<usize>,
@@ -174,11 +231,11 @@ impl Head {
         Ok(Self::Transducer {
             encoder_projector: linear(hidden, dec, vb.pp("encoder_projector"))?,
             predictor: Predictor::new(cfg, dec, vb.pp("decoder"))?,
-            joint: linear(
+            joint: DecodeLinear::new(linear(
                 dec,
                 cfg.vocab_size + durations.len(),
                 vb.pp("joint").pp("head"),
-            )?,
+            )?),
             vocab: cfg.vocab_size,
             blank: cfg.blank_token_id.unwrap_or(cfg.vocab_size as u32 - 1),
             durations,
@@ -322,7 +379,7 @@ impl Head {
 
 struct Transducer<'a> {
     predictor: &'a Predictor,
-    joint: &'a Linear,
+    joint: &'a DecodeLinear,
     vocab: usize,
     blank: u32,
     durations: &'a [usize],
