@@ -86,11 +86,12 @@ kernels! {
     mul_mm_q6_k: MUL_MM_Q6_K, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
     map_f32: MAP_F32, MAP_BINDINGS, MAP_PUSH_BYTES;
     copy_b32: COPY_B32, MAP_BINDINGS, MAP_PUSH_BYTES;
-    rows_f32: ROWS_F32, ops::BINDINGS, ops::ROWS_PUSH_BYTES;
+    rows_f32: ROWS_F32, ops::ROWS_BINDINGS, ops::ROWS_PUSH_BYTES;
     rms_norm_q8: RMS_NORM_Q8, ops::RMS_Q8_BINDINGS, ops::RMS_Q8_PUSH_BYTES;
     relu2_q8: RELU2_Q8, crate::map::RELU2_Q8_BINDINGS, crate::map::RELU2_Q8_PUSH_BYTES;
     index_b32: INDEX_B32, ops::BINDINGS, ops::INDEX_PUSH_BYTES;
     matmul_f32: MATMUL_F32, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
+    conv2d_f32: CONV2D_F32, ops::BINDINGS, ops::CONV2D_PUSH_BYTES;
     matmul_f32_dot: MATMUL_F32_DOT, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
     matmul_f32_tiled: MATMUL_F32_TILED, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
     matmul_f32_tiled32: MATMUL_F32_TILED32, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
@@ -218,7 +219,7 @@ pub(crate) struct CoopKernels {
     mul_mmc: Vec<Pipeline>,
     // by BlockType: 128 x 128 tiles
     mul_mmcl: Vec<Pipeline>,
-    convert_f16: Pipeline,
+    pub(crate) convert_f16: Pipeline,
     // by BlockType
     moe_mmc: Vec<Pipeline>,
     pub(crate) moe_gather_f16: Pipeline,
@@ -228,6 +229,8 @@ pub(crate) struct CoopKernels {
     pub(crate) flash_attn: Pipeline,
     // matmul_f32_tiled's product, its tiles in f16
     pub(crate) matmul_f32: Pipeline,
+    // prompt attention with a relative-position term
+    pub(crate) flash_attn_relpos: Pipeline,
     // Q4_0 experts on NV_cooperative_matrix2, where the device has it: a build a tile width, 16 to 128 routes
     // by BlockType, where the type has decode functions
     moe_mm_cm2: Vec<Option<[Pipeline; 4]>>,
@@ -246,7 +249,7 @@ pub(crate) const MOE_MMC_PUSH_BYTES: u32 = 7 * 4;
 pub(crate) const MOE_GATHER_BINDINGS: usize = 3;
 pub(crate) const MOE_GATHER_PUSH_BYTES: u32 = 4 * 4;
 const CONVERT_BINDINGS: usize = 2;
-const CONVERT_PUSH_BYTES: u32 = 2 * 4;
+const CONVERT_PUSH_BYTES: u32 = 3 * 4;
 pub(crate) const CONVERT_THREADS: usize = 256;
 
 impl CoopKernels {
@@ -388,6 +391,15 @@ impl CoopKernels {
             )
             .subgroup(subgroup),
         );
+        specs.push(
+            PipelineSpec::new(
+                shaders::FLASH_ATTN_RELPOS_CM,
+                ops::RELPOS_BINDINGS,
+                ops::RELPOS_PUSH_BYTES,
+                "flash_attn_relpos_cm",
+            )
+            .subgroup(subgroup),
+        );
         specs.push(PipelineSpec::new(
             shaders::CONVERT_F16,
             CONVERT_BINDINGS,
@@ -416,7 +428,8 @@ impl CoopKernels {
         let paged_prefill: [Pipeline; 3] =
             take(3).try_into().ok().expect("three prefill pipelines");
         let [flash_attn]: [Pipeline; 1] = take(1).try_into().ok().expect("one attention pipeline");
-        let [matmul_f32]: [Pipeline; 1] = take(1).try_into().ok().expect("one matmul pipeline");
+        let [matmul_f32, flash_attn_relpos]: [Pipeline; 2] =
+            take(2).try_into().ok().expect("two pipelines");
         let [convert_f16, moe_gather_f16]: [Pipeline; 2] =
             take(2).try_into().ok().expect("two pipelines");
         let mut moe_mm_cm2: Vec<Option<[Pipeline; 4]>> = (0..BLOCK_TYPES).map(|_| None).collect();
@@ -441,6 +454,7 @@ impl CoopKernels {
             paged_prefill,
             flash_attn,
             matmul_f32,
+            flash_attn_relpos,
             moe_mm_cm2,
             mul_mm_cm2,
         })
@@ -726,7 +740,7 @@ impl Recorder<'_> {
             coop.convert_f16.dispatch(
                 self,
                 &[op.x.buffer, scratch.buffer],
-                &push_words(&[count, op.x_offset])?,
+                &push_words(&[count, op.x_offset, 0])?,
                 [pairs_x as u32, pairs.div_ceil(pairs_x) as u32, 1],
             );
             let bytes = push_words(&[
@@ -1071,6 +1085,7 @@ mod tests {
                     x: &xs,
                     x_offset: 0,
                     alpha: Some((&alphas, 0)),
+                    beta: None,
                     out: &normed,
                     out_offset: 0,
                 })?;

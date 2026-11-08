@@ -361,11 +361,19 @@ pub(crate) fn rows(
     storage: &VulkanStorage,
     l: &Layout,
     alpha: Option<(&VulkanStorage, &Layout)>,
+    beta: Option<(&VulkanStorage, &Layout)>,
     op: RowOp,
     eps: f32,
 ) -> Result<Option<(VulkanStorage, Shape)>> {
-    let alpha_ok = alpha.is_none_or(|(a, al)| a.dtype == DType::F32 && al.is_contiguous());
-    if storage.dtype != DType::F32 || !l.is_contiguous() || l.shape().rank() == 0 || !alpha_ok {
+    let param_ok = |p: Option<(&VulkanStorage, &Layout)>| {
+        p.is_none_or(|(a, al)| a.dtype == DType::F32 && al.is_contiguous())
+    };
+    if storage.dtype != DType::F32
+        || !l.is_contiguous()
+        || l.shape().rank() == 0
+        || !param_ok(alpha)
+        || !param_ok(beta)
+    {
         return Ok(None);
     }
     let dims = l.shape().dims();
@@ -396,6 +404,7 @@ pub(crate) fn rows(
                 x: &storage.buffer,
                 x_offset: l.start_offset(),
                 alpha: alpha.map(|(a, al)| (&a.buffer, al.start_offset())),
+                beta: beta.map(|(b, bl)| (&b.buffer, bl.start_offset())),
                 out: &out.buffer,
                 out_offset: 0,
             })
@@ -418,6 +427,81 @@ pub(crate) fn sigmoid(
 }
 
 // a contiguous f32 or u32 Vulkan tensor's buffer and first element
+pub(crate) fn rel_pos_attn(op: &crate::vulkan::RelPosAttn<'_>) -> Result<Option<Tensor>> {
+    let f32 = DType::F32;
+    let (batch, heads, positions, head_size) = op.q_content.dims4()?;
+    let (_, _, keys, _) = op.k.dims4()?;
+    let (_, _, p_rows, _) = op.positions.dims4()?;
+    let device = op.q_content.device().as_vulkan_device()?.clone();
+    let shapes_match = op.q_position.dims() == op.q_content.dims()
+        && op.k.dims() == [batch, heads, keys, head_size]
+        && op.v.dims() == op.k.dims()
+        && op.positions.dims() == [batch, heads, p_rows, head_size];
+    let operands = [op.q_content, op.q_position, op.k, op.v, op.positions];
+    if !shapes_match
+        || !operands.iter().all(|t| t.dtype() == f32)
+        || !inference_vulkan::RelPosAttn::supports(head_size)
+        || !device.context.has_matrix_cores()
+        || op.pos_base + 1 < positions
+        || op.pos_base + keys > p_rows
+    {
+        return Ok(None);
+    }
+    let [qc, qp, k, v, p] = operands.map(|t| t.contiguous());
+    let [qc, qp, k, v, p] = [qc?, qp?, k?, v?, p?];
+    let [qcb, qpb, kb, vb, pb] = [&qc, &qp, &k, &v, &p].map(|t| bound(t, f32));
+    let [qcb, qpb, kb, vb, pb] = [qcb?, qpb?, kb?, vb?, pb?];
+    if [qcb.1, qpb.1].iter().any(|o| o % 4 != 0) {
+        return Ok(None);
+    }
+    // keys, values and positions as padded f16 tables the kernel loads matrices from
+    let table = |x: &(Arc<Buffer>, usize), rows: usize| -> Result<Arc<Buffer>> {
+        let bytes = inference_vulkan::RelPosAttn::table_bytes(batch, heads, rows, head_size);
+        let table = Arc::new(device.buffer(bytes)?);
+        let count = batch * heads * rows * head_size;
+        device
+            .context
+            .record(|r| r.relpos_table((&x.0, x.1), count, head_size, &table))
+            .map_err(vk_err)?;
+        Ok(table)
+    };
+    let (kt, vt, pt) = (table(&kb, keys)?, table(&vb, keys)?, table(&pb, p_rows)?);
+    let count = batch * heads * positions * head_size;
+    let out = VulkanStorage {
+        buffer: Arc::new(device.buffer(count * 4)?),
+        device: device.clone(),
+        count,
+        dtype: f32,
+    };
+    let piece = inference_vulkan::RelPosAttn::piece_positions(heads, keys, head_size);
+    // a piece a record, so the stream submits between them
+    for first in (0..positions).step_by(piece) {
+        device
+            .context
+            .record(|r| {
+                r.relpos_attn(&inference_vulkan::RelPosAttn {
+                    batch,
+                    heads,
+                    positions,
+                    keys,
+                    head_size,
+                    p_rows,
+                    pos_base: op.pos_base,
+                    first,
+                    count: piece.min(positions - first),
+                    qc: (&qcb.0, qcb.1),
+                    qp: (&qpb.0, qpb.1),
+                    k: &kt,
+                    v: &vt,
+                    p: &pt,
+                    out: &out.buffer,
+                })
+            })
+            .map_err(vk_err)?;
+    }
+    Ok(Some(tensor_of(out, (batch, heads, positions, head_size))))
+}
+
 fn bound(t: &Tensor, dtype: DType) -> Result<(Arc<Buffer>, usize)> {
     if t.dtype() != dtype || !t.is_contiguous() {
         crate::bail!(
@@ -1301,7 +1385,7 @@ impl BackendStorage for VulkanStorage {
             ReduceOp::ArgMax => RowOp::ArgMax,
         };
         if dims == [l.shape().rank().saturating_sub(1)]
-            && let Some((out, _)) = rows(self, l, None, row_op, 0.0)?
+            && let Some((out, _)) = rows(self, l, None, None, row_op, 0.0)?
         {
             return Ok(out);
         }
@@ -1374,6 +1458,41 @@ impl BackendStorage for VulkanStorage {
         kernel_l: &Layout,
         params: &ParamsConv2D,
     ) -> Result<Self> {
+        let native = self.dtype == DType::F32
+            && kernel.dtype == DType::F32
+            && l.stride().len() == 4
+            && kernel_l.is_contiguous();
+        if native {
+            let p = params;
+            let (o_h, o_w) = (p.out_h(), p.out_w());
+            let out = self.empty(p.b_size * p.groups * p.c_out * o_h * o_w, DType::F32)?;
+            let s = l.stride();
+            self.device
+                .context
+                .record(|r| {
+                    r.conv2d_f32(&inference_vulkan::Conv2d {
+                        batch: p.b_size,
+                        c_in: p.c_in,
+                        c_out: p.c_out,
+                        groups: p.groups,
+                        i_h: p.i_h,
+                        i_w: p.i_w,
+                        k_h: p.k_h,
+                        k_w: p.k_w,
+                        o_h,
+                        o_w,
+                        padding: p.padding,
+                        stride: p.stride,
+                        dilation: p.dilation,
+                        x: (&self.buffer, l.start_offset()),
+                        x_strides: [s[0], s[1], s[2], s[3]],
+                        w: (&kernel.buffer, kernel_l.start_offset()),
+                        out: &out.buffer,
+                    })
+                })
+                .map_err(vk_err)?;
+            return Ok(out);
+        }
         on_cpu!(self, |cpu, kernel| cpu.conv2d(l, &kernel, kernel_l, params))
     }
 
@@ -2016,6 +2135,15 @@ mod tests {
         let (vx, valpha) = (x.to_device(&vk)?, alpha.to_device(&vk)?);
         let ops = crate::nn::ops::rms_norm;
         assert_same(&ops(&vx, &valpha, 1e-6)?, &ops(&x, &alpha, 1e-6)?)?;
+        // off-centre rows, so the mean matters
+        let shifted = (&x * 1.5)?.affine(1., 2.)?;
+        let beta = Tensor::randn(0f32, 0.5, 300, &Device::Cpu)?;
+        let (vshifted, vbeta) = (shifted.to_device(&vk)?, beta.to_device(&vk)?);
+        let norm = crate::nn::ops::layer_norm;
+        assert_same(
+            &norm(&vshifted, &valpha, &vbeta, 1e-5)?,
+            &norm(&shifted, &alpha, &beta, 1e-5)?,
+        )?;
         assert_same(
             &crate::nn::ops::softmax_last_dim(&vx)?,
             &crate::nn::ops::softmax_last_dim(&x)?,
@@ -2173,6 +2301,85 @@ mod tests {
     }
 
     // fused attention against softmax(scale q k^T + mask) v on the CPU: GQA, keys past the positions (a cached prefix), a
+    // a direct conv2d against the CPU's: one input channel strided and padded, depthwise, two groups, dilated, and a
+    // strided input view; a pointwise conv is a matmul, its inputs rounded to f16 where it runs on matrix cores
+    #[test]
+    fn vulkan_conv2d_matches_the_cpu() -> Result<()> {
+        let Some(vk) = device() else { return Ok(()) };
+        let check = |x: &Tensor, w: &Tensor, padding, stride, dilation, groups| -> Result<()> {
+            let got =
+                x.to_device(&vk)?
+                    .conv2d(&w.to_device(&vk)?, padding, stride, dilation, groups)?;
+            assert_close(
+                &got,
+                &x.conv2d(w, padding, stride, dilation, groups)?,
+                DOT_TOLERANCE,
+            )
+        };
+        let randn = |dims: &[usize]| Tensor::randn(0f32, 1., dims, &Device::Cpu);
+        let x1 = randn(&[2, 1, 37, 20])?;
+        check(&x1, &randn(&[8, 1, 3, 3])?, 1, 2, 1, 1)?;
+        let x8 = randn(&[2, 8, 19, 10])?;
+        check(&x8, &randn(&[8, 1, 3, 3])?, 1, 2, 1, 8)?;
+        let pointwise = randn(&[16, 8, 1, 1])?;
+        let got = x8
+            .to_device(&vk)?
+            .conv2d(&pointwise.to_device(&vk)?, 0, 1, 1, 1)?;
+        let rounded = |t: &Tensor| -> Result<Tensor> {
+            if vk.as_vulkan_device()?.context.has_matrix_cores() {
+                t.to_dtype(DType::F16)?.to_dtype(DType::F32)
+            } else {
+                Ok(t.clone())
+            }
+        };
+        let want = rounded(&x8)?.conv2d(&rounded(&pointwise)?, 0, 1, 1, 1)?;
+        assert_close(&got, &want, DOT_TOLERANCE)?;
+        check(&x8, &randn(&[6, 4, 3, 3])?, 2, 1, 2, 2)?;
+        check(&x8.transpose(2, 3)?, &randn(&[8, 8, 3, 3])?, 1, 1, 1, 1)?;
+        Ok(())
+    }
+
+    // relative-position attention against its definition over the same f16-rounded inputs: content and position
+    // scores (row i reading position row pos_base - i + j), the softmax and its values; a partial last workgroup (its
+    // later subgroups past the positions) and key tile, two heads, head sizes of 128 and 32
+    #[test]
+    fn relative_position_attention_matches_its_definition() -> Result<()> {
+        let Some(vk) = device() else { return Ok(()) };
+        if !vk.as_vulkan_device()?.context.has_matrix_cores() {
+            return Ok(());
+        }
+        let f16 = |t: &Tensor| t.to_dtype(DType::F16)?.to_dtype(DType::F32);
+        for (t, head) in [(150, 128), (70, 32)] {
+            let (heads, p_rows, pos_base) = (2, 2 * t - 1, t - 1);
+            let randn =
+                |rows: usize| Tensor::randn(0f32, 0.5, (1, heads, rows, head), &Device::Cpu);
+            let (qc, qp, k, v, p) = (randn(t)?, randn(t)?, randn(t)?, randn(t)?, randn(p_rows)?);
+            let got = crate::vulkan::rel_pos_attn(&crate::vulkan::RelPosAttn {
+                q_content: &qc.to_device(&vk)?,
+                q_position: &qp.to_device(&vk)?,
+                k: &k.to_device(&vk)?,
+                v: &v.to_device(&vk)?,
+                positions: &p.to_device(&vk)?,
+                pos_base,
+            })?
+            .expect("the device takes it");
+            let ids: Vec<u32> = (0..t)
+                .flat_map(|i| (0..t).map(move |j| (pos_base - i + j) as u32))
+                .collect();
+            let ids =
+                Tensor::from_vec(ids, (1, 1, t, t), &Device::Cpu)?.repeat((1, heads, 1, 1))?;
+            let content = f16(&qc)?.matmul(&f16(&k)?.t()?)?;
+            let position = f16(&qp)?
+                .matmul(&f16(&p)?.t()?)?
+                .contiguous()?
+                .gather(&ids, 3)?;
+            let probs = crate::nn::ops::softmax_last_dim(&(content + position)?)?;
+            let want = probs.matmul(&f16(&v)?)?;
+            assert_close(&got, &want, F16_ATTENTION_TOLERANCE)?;
+        }
+        Ok(())
+    }
+
     // partial last tile, with the model's causal mask and without one, causal without a mask; and decode's one position
     // over a cache (its own kernel), fewer keys than a workgroup's subgroups included. Heads of 16s run on matrix cores
     // where the device has them, in f16.

@@ -1710,3 +1710,47 @@ their edges); the f32 kernel fails it there, as does a prefetch that stops a ste
 
 The transcript and every word's speaker match the CPU's f32 run. Lightning recipe A (KLD against BF16, 40 chunks of
 512): 0.00894 with the kernel, 0.00886 without, top-1 96.26 / 96.16 %.
+
+### Run 67 - 2026-11-07 (laptop: Radeon 780M)
+
+**Question:** after Run 66, where do Parakeet's 28.8 s and the diarizer's go?
+
+**Finding:** the encoder took 17.7 s of a 21 s transcription, the decode 2.7 s, the mel 0.2 s; the GPU sat idle ~7 s.
+- Attention materialised its scores: a 512-query block's content and position scores (8 x 512 x 7500 and x 8011), a
+  rel-shift, their sum and its softmax, ~0.7 GB of traffic a block over 360 blocks: `map_f32`, `rows_f32` and
+  `copy_b32` ~7 s, their matmuls ~3.4 s.
+- The subsampling convs still ran on the CPU through readbacks (~3 s idle), and `LayerNorm` had no Vulkan path (a
+  CustomOp3, which had no Vulkan hook).
+- The LSTM's gate weights were `(k, n)`: `matmul_f32_dot` read them 2560 floats apart, 733 us a step at ~18 GB/s.
+- The diarizer's mel ran one frame at a time on one core, over every power bin of every filter.
+
+**Change:**
+- `flash_attn_relpos_cm`: full relative-position attention fused on matrix cores, one call a layer: each subgroup's
+  16 rows score a 32-key tile and multiply their position queries against the 48 position rows the tile's pairs read
+  (a contiguous span), taking each pair's diagonal entry; keys, values and positions load as matrices from padded f16
+  tables (`convert_f16` with an output offset), so the subgroups run without workgroup barriers. The encoder takes it
+  for unmasked full attention on Vulkan; chunked (streaming) attention keeps its blocks.
+- `conv2d_f32`, a direct conv2d (any groups, stride, padding, dilation; Vulkan no longer splits grouped convs), and a
+  pointwise conv as a matmul (its direct form re-read every channel: 450 ms a call against the matmul's ~25).
+- `LayerNorm` as a row op (`E[x^2] - mean^2`, as the CPU's), through a new `CustomOp3::vulkan_fwd`.
+- The LSTM keeps `[w_ih, w_hh, b]` a gate a row and multiplies by its transpose (733 -> 178 us a step); a step's
+  token and duration argmaxes read back together.
+- The mel: frames across threads, each filter over its nonzero span (the terms left out are exact zeros).
+
+**Tests:** relative-position attention against its definition over f16-rounded inputs (a shifted diagonal or a
+missing content term fails it); conv2d against the CPU, strided, padded, depthwise, grouped, dilated and over a
+strided view (ignoring dilation fails it), the pointwise case against f16-rounded inputs; the Vulkan layer norm (one
+without beta fails it).
+
+**Result (10 minutes):**
+
+| | Run 66 | now |
+|---|---|---|
+| ASR | 28.8 s | 14.9 s |
+| diarization | 15.7 s | 4.1-4.9 s |
+| both, one request | 34.4 s | 18.7 s |
+
+The transcript and every word's speaker and start match the CPU's f32 run; 9 of the diarizer's 284 segments move a
+10 ms frame at the 0.5 threshold. Lightning recipe A: KLD 0.00894, top-1 96.26 % (unchanged); 4096-token prefill
+459.6 tok/s, decode 25.7. What is left of ASR: attention 5.4 s (~1.6 TFLOPS), the encoder's matmuls ~3.8 s, the
+decode's 7000 sequential steps 2.7 s.

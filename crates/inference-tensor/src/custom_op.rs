@@ -163,6 +163,20 @@ pub trait CustomOp3 {
         ))
     }
 
+    /// As [`CustomOp1::vulkan_fwd`].
+    #[allow(clippy::too_many_arguments)]
+    fn vulkan_fwd(
+        &self,
+        _s1: &VulkanStorage,
+        _l1: &Layout,
+        _s2: &VulkanStorage,
+        _l2: &Layout,
+        _s3: &VulkanStorage,
+        _l3: &Layout,
+    ) -> Result<Option<(VulkanStorage, Shape)>> {
+        Ok(None)
+    }
+
     fn bwd(
         &self,
         _arg1: &Tensor,

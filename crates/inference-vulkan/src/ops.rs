@@ -6,9 +6,13 @@ use crate::memory::Buffer;
 use crate::{Error, Recorder, Result};
 
 pub(crate) const BINDINGS: usize = 3;
-pub(crate) const ROWS_PUSH_BYTES: u32 = 7 * 4;
+pub(crate) const ROWS_BINDINGS: usize = 4;
+pub(crate) const ROWS_PUSH_BYTES: u32 = 8 * 4;
 pub(crate) const INDEX_PUSH_BYTES: u32 = 8 * 4;
 pub(crate) const MATMUL_PUSH_BYTES: u32 = 12 * 4;
+pub(crate) const CONV2D_PUSH_BYTES: u32 = 19 * 4;
+// conv2d_f32's outputs a workgroup
+const CONV2D_THREADS: usize = 256;
 const MAX_GROUPS_X: usize = 65_535;
 const INDEX_THREADS: usize = 256;
 const MATMUL_THREADS: usize = 64;
@@ -39,16 +43,41 @@ pub enum RowOp {
     /// the index of the row's largest element (the first of equals), its bits in the f32 output
     ArgMax = 5,
     ArgMin = 6,
+    /// `(x - mean(x)) / sqrt(var(x) + eps) * alpha + beta`
+    LayerNorm = 7,
 }
 
 impl RowOp {
     /// Whether the op writes one value a row rather than a row.
     pub fn reduces(self) -> bool {
-        !matches!(self, RowOp::RmsNorm | RowOp::Softmax)
+        !matches!(self, RowOp::RmsNorm | RowOp::Softmax | RowOp::LayerNorm)
     }
 }
 
-/// `rows` contiguous rows of `cols` from `x_offset`; `alpha` (`cols` from `alpha_offset`) is read by `RmsNorm` alone.
+/// A direct 2D convolution: `x` `(batch, groups * c_in, i_h, i_w)` at `x_strides`, `w` contiguous `(groups * c_out,
+/// c_in, k_h, k_w)`, into a contiguous `(batch, groups * c_out, o_h, o_w)` `out`; zero padding.
+pub struct Conv2d<'a> {
+    pub batch: usize,
+    pub c_in: usize,
+    pub c_out: usize,
+    pub groups: usize,
+    pub i_h: usize,
+    pub i_w: usize,
+    pub k_h: usize,
+    pub k_w: usize,
+    pub o_h: usize,
+    pub o_w: usize,
+    pub padding: usize,
+    pub stride: usize,
+    pub dilation: usize,
+    pub x: At<'a>,
+    pub x_strides: [usize; 4],
+    pub w: At<'a>,
+    pub out: &'a Arc<Buffer>,
+}
+
+/// `rows` contiguous rows of `cols` from `x_offset`; `alpha` and `beta` (`cols` from their offsets) are read by the norms
+/// alone, `beta` by `LayerNorm`.
 pub struct Rows<'a> {
     pub op: RowOp,
     pub rows: usize,
@@ -57,6 +86,7 @@ pub struct Rows<'a> {
     pub x: &'a Arc<Buffer>,
     pub x_offset: usize,
     pub alpha: Option<(&'a Arc<Buffer>, usize)>,
+    pub beta: Option<(&'a Arc<Buffer>, usize)>,
     pub out: &'a Arc<Buffer>,
     pub out_offset: usize,
 }
@@ -115,6 +145,12 @@ impl Recorder<'_> {
         if op.op == RowOp::RmsNorm && op.alpha.is_none() {
             return Err(Error::Invalid("an RMS norm takes its alpha".into()));
         }
+        if op.op == RowOp::LayerNorm && (op.alpha.is_none() || op.beta.is_none()) {
+            return Err(Error::Invalid(
+                "a layer norm takes its alpha and beta".into(),
+            ));
+        }
+        let (beta, beta_offset) = op.beta.unwrap_or((op.x, 0));
         // a decode row's norm writes its int8 blocks too, cached for the matvecs that read it
         if op.op == RowOp::RmsNorm
             && op.rows <= crate::kernels::MATVEC_MAX_ROWS
@@ -158,15 +194,20 @@ impl Recorder<'_> {
         }
         let mut bytes = words(&[op.rows, op.cols, op.op as usize])?;
         bytes.extend_from_slice(&op.eps.to_bits().to_le_bytes());
-        bytes.extend(words(&[op.x_offset, alpha_offset, op.out_offset])?);
+        bytes.extend(words(&[
+            op.x_offset,
+            alpha_offset,
+            op.out_offset,
+            beta_offset,
+        ])?);
         let groups_x = op.rows.min(MAX_GROUPS_X);
         self.context.kernels.rows_f32.dispatch(
             self,
-            &[op.x.buffer, alpha.buffer, op.out.buffer],
+            &[op.x.buffer, alpha.buffer, op.out.buffer, beta.buffer],
             &bytes,
             [groups_x as u32, op.rows.div_ceil(groups_x) as u32, 1],
         );
-        for buffer in [op.x, alpha, op.out] {
+        for buffer in [op.x, alpha, op.out, beta] {
             self.retain(buffer.clone());
         }
         Ok(())
@@ -195,6 +236,50 @@ impl Recorder<'_> {
             [groups, 1, 1],
         );
         for buffer in [op.src.0, op.ids.0, op.out] {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+
+    pub fn conv2d_f32(&self, op: &Conv2d<'_>) -> Result<()> {
+        let count = op.batch * op.groups * op.c_out * op.o_h * op.o_w;
+        if count == 0 {
+            return Ok(());
+        }
+        let [sb, sc, sh, sw] = op.x_strides;
+        let bytes = words(&[
+            op.batch,
+            op.c_in,
+            op.c_out,
+            op.groups,
+            op.i_h,
+            op.i_w,
+            op.k_h,
+            op.k_w,
+            op.o_h,
+            op.o_w,
+            op.padding,
+            op.stride,
+            op.dilation,
+            op.x.1,
+            sb,
+            sc,
+            sh,
+            sw,
+            op.w.1,
+        ])?;
+        let groups = count.div_ceil(CONV2D_THREADS);
+        let groups_x = groups.min(MAX_GROUPS_X);
+        let buffers = [op.x.0, op.w.0, op.out];
+        self.context.kernels.conv2d_f32.dispatch(
+            self,
+            &buffers.map(|b| b.buffer),
+            &bytes,
+            [groups_x as u32, groups.div_ceil(groups_x) as u32, 1],
+        );
+        let work = (count * op.c_in * op.k_h * op.k_w) as u64;
+        self.work.set(self.work.get().saturating_add(work));
+        for buffer in buffers {
             self.retain(buffer.clone());
         }
         Ok(())
@@ -1573,6 +1658,144 @@ impl Recorder<'_> {
             &buffers.map(|b| b.buffer),
             &words(&[op.rows, op.packed.1, op.params.1])?,
             [op.rows as u32, 1, 1],
+        );
+        for buffer in buffers {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+}
+
+pub(crate) const RELPOS_BINDINGS: usize = 6;
+pub(crate) const RELPOS_PUSH_BYTES: u32 = 10 * 4;
+// flash_attn_relpos_cm's padding rows before its tables' first head (FRONT) and after their last (a span runs up to
+// 33 past, a key tile 31)
+const RELPOS_FRONT: usize = 64;
+const RELPOS_BACK: usize = 64;
+// its query rows a workgroup
+const RELPOS_ROWS: usize = 64;
+// f32s a convert_f16 thread takes
+const CONVERT_VALUES: usize = 2;
+
+/// Attention with a relative-position term (Transformer-XL's, as the FastConformer's), a query head a key head:
+/// score(i, j) = qc_i . k_j + qp_i . p[pos_base - i + j], both query sets scaled beforehand, softmax over the keys.
+/// `qc`, `qp`, `out` are contiguous f32 `(batch, heads, positions, head_size)`; `k`, `v` and `p` the f16 tables
+/// [`Recorder::relpos_table`] wrote from `(batch, heads, keys, head_size)` keys and values and `(batch, heads, p_rows,
+/// head_size)` positions; the call takes positions `first..first + count`.
+pub struct RelPosAttn<'a> {
+    pub batch: usize,
+    pub heads: usize,
+    pub positions: usize,
+    pub keys: usize,
+    pub head_size: usize,
+    pub p_rows: usize,
+    pub pos_base: usize,
+    pub first: usize,
+    pub count: usize,
+    pub qc: At<'a>,
+    pub qp: At<'a>,
+    pub k: &'a Arc<Buffer>,
+    pub v: &'a Arc<Buffer>,
+    pub p: &'a Arc<Buffer>,
+    pub out: &'a Arc<Buffer>,
+}
+
+impl RelPosAttn<'_> {
+    /// Whether the kernel takes this head size.
+    pub fn supports(head_size: usize) -> bool {
+        head_size > 0
+            && head_size.is_multiple_of(PREFILL_CM_HEAD_STEP)
+            && head_size <= PREFILL_CM_MAX_HEAD
+    }
+
+    /// An f16 table's bytes over `rows` a head, padded before its first head and after its last.
+    pub fn table_bytes(batch: usize, heads: usize, rows: usize, head_size: usize) -> usize {
+        (RELPOS_FRONT + batch * heads * rows + RELPOS_BACK) * head_size * 2
+    }
+
+    /// Positions a piece of a call takes so its multiply-adds stay within one submit's work: the content, position
+    /// (a tile's span, ~1.5 its keys) and value products.
+    pub fn piece_positions(heads: usize, keys: usize, head_size: usize) -> usize {
+        let per_position = (7 * heads * keys.max(1) * head_size) as u64;
+        let positions = (crate::stream::WORK_PER_SUBMIT / per_position) as usize;
+        positions.max(RELPOS_ROWS).next_multiple_of(RELPOS_ROWS)
+    }
+}
+
+impl Recorder<'_> {
+    /// `x` (`count` f32s of `(batch, heads, rows, head_size)`) as one of [`RelPosAttn`]'s f16 tables into `table`
+    /// ([`RelPosAttn::table_bytes`]), its padding zeros.
+    pub fn relpos_table(
+        &self,
+        x: At<'_>,
+        count: usize,
+        head_size: usize,
+        table: &Arc<Buffer>,
+    ) -> Result<()> {
+        let coop = self.context.coop.as_ref().ok_or_else(|| {
+            Error::Invalid("relative-position attention runs on matrix cores".into())
+        })?;
+        let bytes = (count + (RELPOS_FRONT + RELPOS_BACK) * head_size) * 2;
+        self.fill(table.buffer, bytes.next_multiple_of(4) as u64, 0);
+        let pairs = count.div_ceil(CONVERT_VALUES);
+        let groups = pairs.div_ceil(crate::kernels::CONVERT_THREADS);
+        let groups_x = groups.min(MAX_GROUPS_X);
+        coop.convert_f16.dispatch(
+            self,
+            &[x.0.buffer, table.buffer],
+            &words(&[count, x.1, RELPOS_FRONT * head_size / CONVERT_VALUES])?,
+            [groups_x as u32, groups.div_ceil(groups_x) as u32, 1],
+        );
+        self.retain(x.0.clone());
+        self.retain(table.clone());
+        Ok(())
+    }
+
+    pub fn relpos_attn(&self, op: &RelPosAttn<'_>) -> Result<()> {
+        let vec4 = |at: usize| at.is_multiple_of(FLASH_VEC);
+        let coop = self.context.coop.as_ref();
+        if !RelPosAttn::supports(op.head_size)
+            || op.first + op.count > op.positions
+            || op.pos_base + 1 < op.positions
+            || op.pos_base + op.keys > op.p_rows
+            || ![op.qc.1, op.qp.1].into_iter().all(vec4)
+            || coop.is_none()
+        {
+            return Err(Error::Invalid(format!(
+                "relative-position attention of {} heads, head size {}, {} positions over {} keys and {} position rows",
+                op.heads, op.head_size, op.positions, op.keys, op.p_rows
+            )));
+        }
+        if op.count == 0 || op.batch == 0 {
+            return Ok(());
+        }
+        let bytes = words(&[
+            op.positions,
+            op.keys,
+            op.heads,
+            op.head_size / FLASH_VEC,
+            op.p_rows,
+            op.pos_base,
+            op.qc.1 / FLASH_VEC,
+            op.qp.1 / FLASH_VEC,
+            0,
+            op.first,
+        ])?;
+        let buffers = [op.qc.0, op.qp.0, op.k, op.v, op.p, op.out];
+        coop.expect("checked above").flash_attn_relpos.dispatch(
+            self,
+            &buffers.map(|b| b.buffer),
+            &bytes,
+            [
+                op.count.div_ceil(RELPOS_ROWS) as u32,
+                op.heads as u32,
+                op.batch as u32,
+            ],
+        );
+        self.work.set(
+            self.work.get().saturating_add(
+                (7 * op.batch * op.heads * op.count * op.keys * op.head_size) as u64,
+            ),
         );
         for buffer in buffers {
             self.retain(buffer.clone());

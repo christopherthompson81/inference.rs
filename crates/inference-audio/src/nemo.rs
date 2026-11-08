@@ -1,4 +1,5 @@
 use anyhow::{Result, bail};
+use rayon::prelude::*;
 
 use crate::fft::{Complex64, Fft, plan_forward_f64};
 use crate::mel::slaney_filterbank;
@@ -28,7 +29,8 @@ pub struct NemoMelConfig {
 /// Slaney mel power, `ln(x + 2^-24)`, then optionally per-feature mean and variance normalisation.
 pub struct NemoMel {
     config: NemoMelConfig,
-    filters: Vec<Vec<f64>>,
+    // each mel's nonzero span of power bins: its first bin and weights (the terms left out are exact zeros)
+    filters: Vec<(usize, Vec<f64>)>,
     window: Vec<f64>,
     fft: std::sync::Arc<dyn Fft<f64>>,
 }
@@ -44,7 +46,15 @@ impl NemoMel {
         };
         let filters = slaney_filterbank(config.sample_rate, config.n_fft, config.n_mels)
             .into_iter()
-            .map(|row| row.into_iter().map(|f| f64::from(round(f))).collect())
+            .map(|row| {
+                let row: Vec<f64> = row.into_iter().map(|f| f64::from(round(f))).collect();
+                let first = row.iter().position(|&f| f != 0.0).unwrap_or(0);
+                let end = row
+                    .iter()
+                    .rposition(|&f| f != 0.0)
+                    .map_or(first, |last| last + 1);
+                (first, row[first..end].to_vec())
+            })
             .collect();
         // torch.hann_window(periodic=False) centred inside the FFT frame, as torch.stft pads a short window
         let offset = (config.n_fft - config.win_length) / 2;
@@ -76,8 +86,9 @@ impl NemoMel {
         for (p, b) in scratch.power.iter_mut().zip(&scratch.buffer) {
             *p = b.norm_sqr();
         }
-        for (o, filter) in out.iter_mut().zip(&self.filters) {
-            let energy: f64 = filter.iter().zip(&scratch.power).map(|(f, p)| f * p).sum();
+        for (o, (first, filter)) in out.iter_mut().zip(&self.filters) {
+            let power = &scratch.power[*first..];
+            let energy: f64 = filter.iter().zip(power).map(|(f, p)| f * p).sum();
             *o = (energy + LOG_GUARD).ln();
         }
     }
@@ -116,14 +127,16 @@ impl NemoMel {
             previous = s;
         }
         let mut features = vec![0f64; frames * n_mels];
-        let mut scratch = FrameScratch::new(n_fft);
-        for t in 0..frames {
-            self.frame(
-                &padded[t * hop_length..t * hop_length + n_fft],
-                &mut features[t * n_mels..(t + 1) * n_mels],
-                &mut scratch,
-            );
-        }
+        features.par_chunks_mut(n_mels).enumerate().for_each_init(
+            || FrameScratch::new(n_fft),
+            |scratch, (t, out)| {
+                self.frame(
+                    &padded[t * hop_length..t * hop_length + n_fft],
+                    out,
+                    scratch,
+                )
+            },
+        );
         if self.config.normalize {
             for m in 0..n_mels {
                 let column = (0..frames).map(|t| features[t * n_mels + m]);

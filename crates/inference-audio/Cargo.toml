@@ -18,3 +18,4 @@ hound.workspace = true
 symphonia.workspace = true
 rustfft.workspace = true
 rubato.workspace = true
+rayon.workspace = true

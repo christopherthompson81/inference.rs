@@ -1,7 +1,9 @@
 use inference_tensor::nn::{
     Conv2d, Conv2dConfig, LayerNorm, Linear, Module, VarBuilder, conv2d, layer_norm, linear, ops,
 };
+use inference_tensor::vulkan::RelPosAttn;
 use inference_tensor::{D, DType, Device, Result, Tensor};
+use rayon::prelude::*;
 
 use super::config::{ChunkedContext, EncoderConfig};
 
@@ -284,6 +286,26 @@ impl RelPositionAttention {
         // scaled before the products, so the (rows, keys) scores take no extra pass
         let q_content = (q.broadcast_add(&self.bias_u)? * scale)?;
         let q_position = (q.broadcast_add(&self.bias_v)? * scale)?;
+        // full attention fused on a GPU that has it: no (rows, keys) scores in memory, so no blocks either
+        let full = blocks
+            .iter()
+            .all(|b| b.mask.is_none() && b.keys_from == 0 && b.keys == t);
+        if full
+            && xs.device().is_vulkan()
+            && let Some(attn) = inference_tensor::vulkan::rel_pos_attn(&RelPosAttn {
+                q_content: &q_content,
+                q_position: &q_position,
+                k: &k,
+                v: &v,
+                positions: &p,
+                pos_base: t - 1 - lo,
+            })?
+        {
+            let attn = attn
+                .transpose(1, 2)?
+                .reshape((b, t, self.heads * self.head_dim))?;
+            return self.o.forward(&attn);
+        }
         let mut outs = Vec::with_capacity(blocks.len());
         for b in blocks {
             let keys = k.narrow(2, b.keys_from, b.keys)?;
@@ -765,16 +787,22 @@ pub fn relative_positions(
     dtype: DType,
     device: &Device,
 ) -> Result<Tensor> {
-    let half = hidden / 2;
-    let mut table = Vec::with_capacity((2 * t - 1) * hidden);
-    for i in 0..2 * t - 1 {
-        let offset = (t as f64 - 1.0) - i as f64;
-        for f in 0..half {
-            let angle = offset / POSITION_BASE.powf(2.0 * f as f64 / hidden as f64);
-            table.push(angle.sin() as f32);
-            table.push(angle.cos() as f32);
-        }
-    }
+    // a row a thread: a long recording's table is millions of sinusoids, ahead of every layer
+    let divisors: Vec<f64> = (0..hidden / 2)
+        .map(|f| POSITION_BASE.powf(2.0 * f as f64 / hidden as f64))
+        .collect();
+    let mut table = vec![0f32; (2 * t - 1) * hidden];
+    table
+        .par_chunks_mut(hidden)
+        .enumerate()
+        .for_each(|(i, row)| {
+            let offset = (t as f64 - 1.0) - i as f64;
+            for (pair, divisor) in row.as_chunks_mut::<2>().0.iter_mut().zip(&divisors) {
+                let (sin, cos) = (offset / divisor).sin_cos();
+                pair[0] = sin as f32;
+                pair[1] = cos as f32;
+            }
+        });
     Tensor::from_vec(table, (1, 2 * t - 1, hidden), device)?.to_dtype(dtype)
 }
 
