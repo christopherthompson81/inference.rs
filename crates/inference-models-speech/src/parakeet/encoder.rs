@@ -151,13 +151,19 @@ impl Subsampling {
             let o1 = (o0 + chunk / f).min(total);
             let start = (o0 * f).saturating_sub(halo);
             let end = (o1 * f + halo).min(frames);
-            let window = self.forward_whole(&features.narrow(1, start, end - start)?)?;
+            let window = self.convs(&features.narrow(1, start, end - start)?)?;
             outs.push(window.narrow(1, (o0 * f - start) / f, o1 - o0)?);
         }
-        Tensor::cat(&outs, 1)
+        // the projection over every chunk's frames at once: a chunk's ~130 rows had run it at a fifth of the rate
+        self.linear.forward(&Tensor::cat(&outs, 1)?)
     }
 
     fn forward_whole(&self, features: &Tensor) -> Result<Tensor> {
+        self.linear.forward(&self.convs(features)?)
+    }
+
+    // the convs, to `(1, frames / factor, channels x frequency)` ahead of the projection
+    fn convs(&self, features: &Tensor) -> Result<Tensor> {
         let mut xs = self
             .first
             .forward(&self.pad(features.unsqueeze(1)?)?)?
@@ -168,8 +174,7 @@ impl Subsampling {
                 .relu()?;
         }
         let (b, c, t, f) = xs.dims4()?;
-        let xs = xs.transpose(1, 2)?.reshape((b, t, c * f))?;
-        self.linear.forward(&xs)
+        xs.transpose(1, 2)?.reshape((b, t, c * f))
     }
 }
 

@@ -1310,3 +1310,27 @@ diarizer's small per-chunk products, whose operand packing is 14 % of its sample
 **Result (CPU, 10 minutes):** ASR 48.2 -> 39.6 s, diarization 17.0 -> 12.5-13.4 s, both in one request 60.2 -> 50.1 s.
 The transcript and every word's speaker match the earlier CPU run; the CPU and Vulkan diarizations each match their
 own earlier runs exactly.
+
+## Run 45 - 2026-11-08 (laptop: Ryzen 7 7840U, CPU only)
+
+**Question:** after Run 44, how busy are the threads, and where is the rest? (Times in this run are A/B pairs from one
+session, alternating binaries: the laptop's absolute times drift by ~10 % with its temperature.)
+
+**Finding:**
+- ASR: the 8 compute threads ~75 % busy, gemm 82 % of samples at 560-645 GFLOPS (~70 % of the f32 peak). Per
+  1024-frame chunk the subsampling's projection ran over ~130 rows at 107 GFLOPS.
+- Diarization: the compute threads ~60 % busy. The engine thread spent half its samples in libm's `erff` (`erfc2`,
+  `expf`): the GELU runs on the elementwise pool, the matmul threads waiting on it. Its small products (684 rows) run
+  at 300-450 GFLOPS in place, 470-560 alone with one weight (a cycle through 31 weights: 390-520).
+
+**Change:**
+- The CPU's f32 erf GELU takes Abramowitz and Stegun's erfc through a Cephes exp, as Vulkan's map kernel computes
+  it: branch-free, so it vectorizes (`gelu_erf_f32`, `fast_exp` now in `inference_tensor::cpu::erf`, which
+  inference-nn re-exports). Within 1e-6 x max(1, |x|) of the f64 libm GELU from -8 to 8.
+- The subsampling projects every chunk's frames at once.
+
+**Tests:** the f32 GELU against the f64 one (an erfc 1e-4 off fails it). Every snapshot test passes unchanged.
+
+**Result (A/B, 3 alternating rounds):** diarization 15.85 -> 14.03 s with the GELU; ASR 45.35 -> 45.13 s with the
+one projection (noise level). The transcript, its speakers and the diarization are bit for bit unchanged. What is
+left of ASR is gemm at ~70 % of the f32 peak and the fused softmax (9 %, memory-bound over the scores).
