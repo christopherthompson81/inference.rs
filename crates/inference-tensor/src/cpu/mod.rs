@@ -4,6 +4,75 @@ pub mod erf;
 pub(crate) mod features;
 pub mod kernels;
 
+/// Transformer-XL relative-position attention fused on the CPU's AVX-512 BF16, inside [`with_bf16_matmuls`]:
+/// score(i, j) = `q_content`_i . `k`_j + `q_position`_i . `positions`[pos_base - i + j], both query sets scaled
+/// beforehand, a softmax over the keys, times `v`. The queries are `(1, heads, t, d)`, `k` and `v` `(1, heads, keys,
+/// d)`, `positions` `(1, heads, p_rows, d)`; the output is laid out as the queries. `None` outside the scope, off a CPU
+/// with bf16 pairs, or for a shape the kernel does not take.
+pub fn rel_pos_attention(
+    q_content: &crate::Tensor,
+    q_position: &crate::Tensor,
+    k: &crate::Tensor,
+    v: &crate::Tensor,
+    positions: &crate::Tensor,
+    pos_base: usize,
+) -> crate::Result<Option<crate::Tensor>> {
+    let (batch, heads, t, d) = q_content.dims4()?;
+    let (_, _, keys, _) = k.dims4()?;
+    let (_, _, p_rows, _) = positions.dims4()?;
+    let operands = [q_content, q_position, k, v, positions];
+    let shapes = q_position.dims() == q_content.dims()
+        && k.dims() == [batch, heads, keys, d]
+        && v.dims() == k.dims()
+        && positions.dims() == [batch, heads, p_rows, d];
+    if batch != 1
+        || !shapes
+        || !operands
+            .iter()
+            .all(|x| x.device().is_cpu() && x.dtype() == crate::DType::F32)
+        || !crate::cpu_backend::gemm_bf16::enabled()
+        || !crate::cpu_backend::relpos_attn::supports(d)
+        || pos_base + 1 < t
+        || pos_base + keys > p_rows
+    {
+        return Ok(None);
+    }
+    // the operands' storage, borrowed (a layer's had taken ~50 ms to copy out)
+    let contiguous = operands
+        .iter()
+        .map(|x| x.contiguous())
+        .collect::<crate::Result<Vec<_>>>()?;
+    let held: Vec<_> = contiguous.iter().map(|x| x.storage_and_layout()).collect();
+    let slices = held
+        .iter()
+        .map(|(storage, layout)| match &**storage {
+            crate::Storage::Cpu(crate::CpuStorage::F32(values)) => {
+                Ok(&values[layout.start_offset()..][..layout.shape().elem_count()])
+            }
+            _ => crate::bail!("relative-position attention takes CPU f32 operands"),
+        })
+        .collect::<crate::Result<Vec<&[f32]>>>()?;
+    let out =
+        crate::cpu_backend::relpos_attn::attention(&crate::cpu_backend::relpos_attn::RelPosAttn {
+            qc: slices[0],
+            qp: slices[1],
+            k: slices[2],
+            v: slices[3],
+            p: slices[4],
+            heads,
+            t,
+            keys,
+            d,
+            p_rows,
+            pos_base,
+        });
+    Ok(Some(crate::Tensor::from_vec(
+        out,
+        (batch, heads, t, d),
+        &crate::Device::Cpu,
+    )?))
+}
+
 pub use crate::cpu_backend::gemm_bf16::{
     BF16_ENV, NO_BF16_ENV, forced as bf16_forced, with_bf16_matmuls,
 };

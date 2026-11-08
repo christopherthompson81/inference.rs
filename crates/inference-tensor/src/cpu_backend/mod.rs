@@ -16,6 +16,7 @@ mod conv1d_direct;
 mod conv2d;
 mod conv_grouped;
 pub(crate) mod gemm_bf16;
+pub(crate) mod relpos_attn;
 use conv_grouped::GroupedConv;
 use conv2d::Conv2D;
 

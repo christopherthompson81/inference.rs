@@ -347,6 +347,23 @@ impl RelPositionAttention {
                 .reshape((b, t, self.heads * self.head_dim))?;
             return self.o.forward(&attn);
         }
+        // and on a CPU with bf16 pairs, inside the model's bf16 scope (`bf16_matmuls`): no scores in memory either
+        if full
+            && xs.device().is_cpu()
+            && let Some(attn) = inference_tensor::cpu::rel_pos_attention(
+                &q_content,
+                &q_position,
+                &k,
+                &v,
+                &p,
+                t - 1 - lo,
+            )?
+        {
+            let attn = attn
+                .transpose(1, 2)?
+                .reshape((b, t, self.heads * self.head_dim))?;
+            return self.o.forward(&attn);
+        }
         let mut outs = Vec::with_capacity(blocks.len());
         for b in blocks {
             let keys = k.narrow(2, b.keys_from, b.keys)?;
