@@ -1249,3 +1249,42 @@ The position table in chunked mode (#391).
 - **TDT v3 (full attention), unchanged:** warm 8.60-8.65 s, 619/619 emissions.
 - **Assessment:** the saving is ~0.8 s at 300 s, as the arithmetic predicts. The full table is 7.5k rows, about 7.7 GMAC per layer; the band is 1.2k. It grows linearly with length, so the 24-minute bound saves about 4x that.
 - **Build matters:** the script's own run of ours, in the dev build with debug assertions, took 32.2 s to encode the 300 s clip, against 18.9 s without them.
+
+## Run 43 - 2026-11-08 (laptop: Ryzen 7 7840U, CPU only)
+
+**Question:** Parakeet TDT 0.6B v3 and Nemotron-3 Diarization on the CPU, the 10 minutes of the meeting Vulkan's Runs
+66-68 used (`from-config` with `cpu = true`): ASR 62.5 s, diarization 17.1 s, both in one request 73.5 s.
+
+**Finding:**
+- The encoder takes 61 of the 63 s, the decoder 2.4.
+- f32 gemm is ~70 % of the samples. The feed-forwards run at 565 GFLOPS; attention's batched products (8 heads of
+  512 x 7500 x 128, and of 512 x 128 x 7500) at ~300, as the batch loop ran one head at a time on all threads.
+- The 8 compute threads were ~57 % busy (all 16 CPUs ~50 %). The engine thread worked alone in between: strided copies
+  (`copy_strided_src`, 44 % of its samples), zeroing fresh outputs (17 %), and its share of the scores' add.
+- 16 threads ran no faster than 8 (encoder 59.5 s against 59.6, decode slower): the work is f32 FMAs, which
+  hyperthreads share.
+
+**Change:**
+- A batched matmul runs its products side by side, each on its share of the threads.
+- gemm's AVX-512 kernels, taken where the CPU has avx512f (`gemm-f32`'s `x86-v4`).
+- Large strided copies split their blocks over the threads.
+- The matmul, softmax, RMS norm and layer norm outputs are not zeroed before they are written whole.
+- Attention's rel-shift, sum and softmax are one CPU pass (`RelShiftSoftmax`), bit for bit the composite.
+- Long sigmoid and affine maps run on the pool.
+
+**Tests:** the fused softmax against its composite, bit for bit (an off-by-one shift fails it). The three Qwen
+snapshot tests whose f32 logits move under AVX-512 (a few 1e-4) take a second snapshot on avx512f CPUs (`by_simd`).
+
+**Result (CPU, 10 minutes):**
+
+| | before | now |
+|---|---|---|
+| ASR | 62.5 s | 48.2 s |
+| diarization | 17.1 s | 17.0 s |
+| both, one request | 73.5 s | 60.2 s |
+
+The transcript and every word's speaker match the earlier CPU run. Attention products at 8 threads: 284-315 ->
+405-423 GFLOPS (the batch split), feed-forwards 565 -> 691 (AVX-512). Lightning recipe A on the CPU: prefill (512)
+99.3 -> 103.0 tok/s, decode 17.1 -> 17.2. What is left: the encoder's matmuls (~32 s by their measured rates), and the
+diarizer's small per-chunk products, whose operand packing is 14 % of its samples. Its barrier-pool threads spin
+(19 %); parking them at once took diarization 16.8 -> 15.2 s, left as is since the spin limit serves CPU decode.

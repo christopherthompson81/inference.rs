@@ -1,8 +1,9 @@
+use inference_tensor::cpu::kernels::VecOps;
 use inference_tensor::nn::{
     Conv2d, Conv2dConfig, LayerNorm, Linear, Module, VarBuilder, conv2d, layer_norm, linear, ops,
 };
 use inference_tensor::vulkan::RelPosAttn;
-use inference_tensor::{D, DType, Device, Result, Tensor};
+use inference_tensor::{CpuStorage, CustomOp2, D, DType, Device, Layout, Result, Shape, Tensor};
 use rayon::prelude::*;
 
 use super::config::{ChunkedContext, EncoderConfig};
@@ -349,11 +350,19 @@ impl RelPositionAttention {
             let position = q_position
                 .narrow(2, b.start, b.rows)?
                 .matmul(&window.t()?)?;
-            let mut scores = (content + rel_shift(&position, b.keys)?)?;
-            if let Some(mask) = &b.mask {
-                scores = scores.broadcast_add(mask)?;
-            }
-            outs.push(ops::softmax_last_dim(&scores)?.matmul(&values)?);
+            let probs = match &b.mask {
+                None if content.device().is_cpu() => {
+                    content.apply_op2_no_bwd(&position, &RelShiftSoftmax)?
+                }
+                mask => {
+                    let mut scores = (content + rel_shift(&position, b.keys)?)?;
+                    if let Some(mask) = mask {
+                        scores = scores.broadcast_add(mask)?;
+                    }
+                    ops::softmax_last_dim(&scores)?
+                }
+            };
+            outs.push(probs.matmul(&values)?);
         }
         let attn = Tensor::cat(&outs, 2)?;
         let attn = attn
@@ -415,6 +424,68 @@ impl RelPositionAttention {
 }
 
 // (Q, T+Q-1) offset scores to (Q, T) key scores: (r, j) is flat element Q-1 + r(P-1) + j, a view plus one copy
+// the softmax of each row of (rows, keys) content scores plus its rel-shifted position scores (row r reads columns
+// rows - 1 - r on), in one pass on the CPU, as `softmax_last_dim(content + rel_shift(position, keys))` computes it:
+// the sum and the shift's strided read had each taken a pass over every head's scores
+struct RelShiftSoftmax;
+
+impl CustomOp2 for RelShiftSoftmax {
+    fn name(&self) -> &'static str {
+        "rel-shift-softmax"
+    }
+
+    fn cpu_fwd(
+        &self,
+        content: &CpuStorage,
+        content_l: &Layout,
+        position: &CpuStorage,
+        position_l: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        let (CpuStorage::F32(content), CpuStorage::F32(position)) = (content, position) else {
+            inference_tensor::bail!("rel-shift-softmax takes f32 scores")
+        };
+        let (Some((c0, c1)), Some((p0, p1))) = (
+            content_l.contiguous_offsets(),
+            position_l.contiguous_offsets(),
+        ) else {
+            inference_tensor::bail!("rel-shift-softmax takes contiguous scores")
+        };
+        let (content, position) = (&content[c0..c1], &position[p0..p1]);
+        let dims = content_l.dims();
+        let (rows, keys) = (dims[dims.len() - 2], dims[dims.len() - 1]);
+        let wide = position_l.dims()[dims.len() - 1];
+        if wide + 1 < rows + keys {
+            inference_tensor::bail!("{wide} position columns for {rows} rows over {keys} keys")
+        }
+        let mut out = Vec::with_capacity(content.len());
+        // SAFETY: f32 takes any bit pattern, and every row is written below before it is read
+        #[allow(clippy::uninit_vec)]
+        unsafe {
+            out.set_len(content.len())
+        };
+        out.par_chunks_mut(keys).enumerate().for_each(|(row, dst)| {
+            let shift = rows - 1 - row % rows;
+            let pos = &position[row * wide + shift..][..keys];
+            for ((d, c), p) in dst.iter_mut().zip(&content[row * keys..]).zip(pos) {
+                *d = c + p;
+            }
+            let mut max = f32::NEG_INFINITY;
+            // SAFETY: `dst` holds `keys` values
+            unsafe { f32::vec_reduce_max(dst.as_ptr(), &mut max, keys) };
+            for d in dst.iter_mut() {
+                *d = (*d - max).exp();
+            }
+            let mut sum = 0f32;
+            // SAFETY: as above
+            unsafe { f32::vec_reduce_sum(dst.as_ptr(), &mut sum, keys) };
+            for d in dst.iter_mut() {
+                *d /= sum;
+            }
+        });
+        Ok((CpuStorage::F32(out), Shape::from_dims(dims)))
+    }
+}
+
 fn rel_shift(scores: &Tensor, t: usize) -> Result<Tensor> {
     let (b, h, q, p) = scores.dims4()?;
     // a lone row reads columns 0..T, one wider than the (P-1)-wide rows of the view
@@ -864,6 +935,21 @@ mod tests {
     }
 
     // llama.cpp's GGUF stores the conv's batch norm folded into a scale and shift; both forms compute the same
+    // the fused CPU softmax gives what the shift, the sum and the softmax give apart, bit for bit
+    #[test]
+    fn the_fused_rel_shift_softmax_matches_its_composite() -> Result<()> {
+        let (heads, rows, keys) = (2, 5, 9);
+        let content = Tensor::randn(0f32, 2., (1, heads, rows, keys), &Device::Cpu)?;
+        let position = Tensor::randn(0f32, 2., (1, heads, rows, rows + keys - 1), &Device::Cpu)?;
+        let fused = content.apply_op2_no_bwd(&position, &RelShiftSoftmax)?;
+        let apart = ops::softmax_last_dim(&(&content + rel_shift(&position, keys)?)?)?;
+        assert_eq!(
+            fused.flatten_all()?.to_vec1::<f32>()?,
+            apart.flatten_all()?.to_vec1::<f32>()?
+        );
+        Ok(())
+    }
+
     // the offline subsampling over time chunks gives the whole pass's frames (to the CPU gemm's summation order, which
     // follows the matrix's size): three stride-2 steps, a partial last chunk
     #[test]
