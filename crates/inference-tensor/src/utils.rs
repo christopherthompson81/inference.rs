@@ -30,6 +30,8 @@ struct BarrierPoolInner {
     handles: OnceLock<Box<[Thread]>>,
     work: UnsafeCell<WorkDesc>,
     stop: AtomicBool,
+    // the workers park rather than spin until the next job: set ahead of long work elsewhere
+    rest: AtomicBool,
     panic_payload: Mutex<Option<Box<dyn Any + Send>>>,
 }
 
@@ -131,6 +133,7 @@ impl BarrierPool {
                 data: std::ptr::null(),
             }),
             stop: AtomicBool::new(false),
+            rest: AtomicBool::new(false),
             panic_payload: Mutex::new(None),
         });
 
@@ -164,7 +167,7 @@ impl BarrierPool {
                                     return;
                                 }
                                 spins += 1;
-                                if spins < spin_limit {
+                                if spins < spin_limit && !inner.rest.load(Ordering::Relaxed) {
                                     spin_loop();
                                 } else {
                                     // Park deposits a token; unpark() before park() returns immediately - no race.
@@ -285,6 +288,7 @@ impl BarrierPool {
         let mut guard = self.call_lock.lock().unwrap();
         let new_gen = guard.wrapping_add(1);
         *guard = new_gen;
+        self.inner.rest.store(false, Ordering::Relaxed);
 
         unsafe {
             let work = &mut *self.inner.work.get();
@@ -344,6 +348,12 @@ impl BarrierPool {
 
     // Static per-tid slices make every op wait for the slowest thread; a shared cursor
     // lets fast threads absorb a straggler's work instead of spinning at the barrier.
+    /// Parks the idle workers now rather than after their spin, until the next job: for a caller about to run long
+    /// work on other threads (a large matmul on rayon's), whose cores the spinning hyperthreads would share.
+    pub fn rest(&self) {
+        self.inner.rest.store(true, Ordering::Relaxed);
+    }
+
     pub fn execute_chunked<F: Fn(std::ops::Range<usize>) + Sync>(&self, n_items: usize, f: F) {
         if n_items == 0 {
             return;

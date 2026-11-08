@@ -955,6 +955,8 @@ fn copy2d_<T: Copy>(
 
 // a transposed copy of fewer elements runs on one thread, through the tiles as a larger one
 const PARALLEL_TRANSPOSE_ELEMS: usize = 1 << 16;
+// multiply-adds from which a matmul parks the elementwise pool's spinning workers (~0.2 ms here, far past a wake-up)
+const REST_POOL_MIN_WORK: usize = 1 << 26;
 // a strided copy of this many elements or more splits its blocks over the threads: one thread copying a speech
 // encoder's heads (30 MB a tensor) kept the rest idle
 const PARALLEL_COPY_ELEMS: usize = 1 << 18;
@@ -1569,6 +1571,10 @@ impl Map2 for MatMul {
         let (a_skip, b_skip) = self.ab_skip(lhs_l, rhs_l)?;
         let c_skip: usize = m * n;
 
+        // the elementwise pool's idle workers park for a long product rather than spin beside its threads
+        if b * m * n * k >= REST_POOL_MIN_WORK {
+            crate::utils::barrier_pool().rest();
+        }
         let dst_shape: Shape = (m, n).into();
         let dst_strides = dst_shape.stride_contiguous();
         let dst_rs = dst_strides[0];

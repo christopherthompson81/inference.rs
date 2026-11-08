@@ -1334,3 +1334,9 @@ session, alternating binaries: the laptop's absolute times drift by ~10 % with i
 **Result (A/B, 3 alternating rounds):** diarization 15.85 -> 14.03 s with the GELU; ASR 45.35 -> 45.13 s with the
 one projection (noise level). The transcript, its speakers and the diarization are bit for bit unchanged. What is
 left of ASR is gemm at ~70 % of the f32 peak and the fused softmax (9 %, memory-bound over the scores).
+
+**Later (same day):** while a matmul runs on rayon's threads, the elementwise pool's 7 idle workers spun (35 % each
+during diarization), sharing cores with it; parking them outright took diarization 16.8 -> 15.2 s but CPU decode 17.0
+-> 16.1 tok/s. `BarrierPool::rest` parks them until their next job, which a CPU matmul of 2^26 multiply-adds or more
+calls first (~0.2 ms here, far past a wake-up): A/B, diarization 14.06 -> 13.78 s, ASR 44.94 -> 44.83, Lightning CPU
+decode 16.7-16.8 -> 16.8-16.9 tok/s.
