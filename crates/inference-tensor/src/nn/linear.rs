@@ -38,7 +38,7 @@ impl Linear {
         self.bias.as_ref()
     }
 
-    /// This layer with its f32 weight kept in f16 on a discrete Vulkan GPU with matrix cores, which round their inputs
+    /// This layer with its f32 weight kept in f16 on a Vulkan GPU with matrix cores, which round their inputs
     /// to f16 anyway: half the weight's memory, its products unchanged there (the bias stays f32). Otherwise itself.
     pub fn to_half(&self) -> Result<Self> {
         if !crate::vulkan::has_matrix_cores(self.weight.device())

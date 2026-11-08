@@ -189,3 +189,25 @@ Lightning greedy text, 5 prompts x 300 tokens: identical to master
 
 Where it stands on the 780M, MB above idle: loaded ~2790, peak ~4180 with both models (a request's working set ~1.4
 GB, was ~3.7).
+
+## Run 9 - 2026-11-08 (laptop: Radeon 780M iGPU)
+
+Question: Run 5 keeps the flagged models' encoder projections in f16 only on a discrete GPU. The 780M's f32 matmuls
+run `matrix_cores`' kernels too (`matmul_f32` and `matmul_f32_half_b` take `context.coop` directly; only quantized
+prompt matmuls keep off an iGPU's matrix cores, Run 38 of `vulkan_backend_investigation.md`), so they round to f16
+already. Does the same hold there?
+
+Check first: `INFERENCE_VULKAN_IGPU_COOPMAT=1` (the quantized paths on matrix cores too) gives the speech models'
+outputs byte-identical, asr 14.20-14.26 -> 14.39-14.71 s: their matmuls were on the matrix cores either way.
+
+Change: `vulkan::has_matrix_cores` (what `Linear::to_half` asks) holds for any Vulkan GPU with matrix cores.
+
+```
+10-minute meeting, GTT MB (Run 8 -> f16 weights), 2 alternating rounds:
+loaded 3040 -> 1693; asr peak 4256 -> 2909; diar 3227 -> 1880; both 4404-4420 -> 3064-3069
+asr 13.94-14.28 -> 14.00 s, diar 4.00-4.03 -> 3.85-3.88 s, both 17.82-18.17 -> 17.49-17.54 s
+transcript and diarization byte-identical; six clips of 4-33 s (both models) byte-identical
+```
+
+Where it stands on the 780M, MB above idle (~250): loaded ~1440, peak ~2810 with both models (the 3090: CUDA 1895
+and ~2440, Vulkan 2001 and 3562-3701).
