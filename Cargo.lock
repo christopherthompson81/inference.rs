@@ -2582,6 +2582,7 @@ version = "0.0.26"
 dependencies = [
  "anyhow",
  "hound",
+ "rayon",
  "rubato",
  "rustfft",
  "symphonia",

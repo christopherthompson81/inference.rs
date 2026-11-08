@@ -56,9 +56,21 @@ const uint SIGN = 26;
 const uint ELU = 27;
 const uint SIGMOID = 28;
 const uint RELU2 = 29;
+const uint GELU_ERF = 30;
 
 const float GELU_C = 0.7978845608028654;
 const float GELU_K = 0.044715;
+const float INV_SQRT2 = 0.7071067811865476;
+
+// GLSL has no erf: Abramowitz and Stegun 7.1.26's erfc(z) for z >= 0 (erf within 1.5e-7), taken directly below zero
+// where 1 + erf(x) would cancel
+float gelu_erf(float x) {
+    float z = abs(x) * INV_SQRT2;
+    float t = 1.0 / (1.0 + 0.3275911 * z);
+    float poly = ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t;
+    float erfc = poly * exp(-z * z);
+    return x >= 0.0 ? x * (1.0 - 0.5 * erfc) : 0.5 * x * erfc;
+}
 
 float apply(float x, float y) {
     switch (pc.op) {
@@ -93,6 +105,7 @@ float apply(float x, float y) {
         case ELU: return x >= 0.0 ? x : pc.p0 * (exp(x) - 1.0);
         case SIGMOID: return 1.0 / (1.0 + exp(-x));
         case RELU2: { float r = max(x, 0.0); return r * r; }
+        case GELU_ERF: return gelu_erf(x);
     }
     return x;
 }

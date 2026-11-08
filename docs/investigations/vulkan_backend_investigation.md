@@ -1674,3 +1674,83 @@ experts' common input, attention's q/k/v).
 **Where decode stands:** 5.92 ms a token (~168 tok/s) against llama.cpp Vulkan's 5.68 (176) and CUDA's ~4.7 (207-214),
 from ~7.6 ms (131 tok/s) at Run 61. The rest of the gap to llama.cpp is spread a few us an op. CUDA's lead is its
 graphs and fused kernels over a ~700-dispatch token.
+
+### Run 66 - 2026-11-07 (laptop: Radeon 780M)
+
+**Question:** speech on the iGPU. Parakeet TDT 0.6B v3 and Nemotron-3 Diarization, served together (`from-config`
+with `vulkan = true`), over the first 10 minutes of a three-speaker meeting: Vulkan took as long as the CPU (ASR 71 s
+against 70, diarization 31 against 19), the GPU ~40 % busy and the CPU under one core.
+
+**Finding:** the CPU fallbacks, not the GPU. `perf` put 91 % of the CPU in `Buffer::read_into`: Parakeet's two
+depthwise convs (256 groups) split a group a call, each of the 515 calls reading the whole 1.2 GB input back (~600 GB,
+36 s of 75), the conv itself 2.6 s. The diarizer's `gelu_erf` had no kernel and round-tripped too (591 calls, ~10 s).
+With both fixed the GPU's time is ~75 % f32 matmuls at ~1 TFLOPS (`matmul_f32_tiled`).
+
+**Change:**
+- A depthwise conv on Vulkan stays one call, as on the CPU whose kernel runs it; `gelu_erf` is a map op (an erfc
+  polynomial, as GLSL has no erf, within 1.5e-7).
+- `matmul_f32_cm`: the tiled product on matrix cores wherever the device has them (iGPUs too, as f32 has no int8 path
+  to lose to), its inputs rounded to f16 into f32 accumulators: 128 x 128 tiles over 8 subgroups, 64-deep k steps
+  loaded as vec4s where aligned and prefetched into registers during the products, b's shared tile following its unit
+  stride, eight row tiles sweeping the columns together. At 7500 x {4096 x 1024, 1024 x 4096, 1024 x 1024}
+  (`f32_matmul_throughput`): 0.99 / 1.11 / 0.93 -> 1.7-1.8 / 2.3-2.5 / 1.5-1.7 TFLOPS. The first cut (64 x 64 tiles,
+  scalar loads) ran 0.5; grouping the row tiles took the large weight from 1.2 to 1.8.
+
+**Tests:** `vulkan_tiled_matmuls_match_the_cpu` against the CPU over the same f16-rounded inputs, where the device
+multiplies on matrix cores (a transposed weight and an n-contiguous b, unaligned and strided operands, whole tiles and
+their edges); the f32 kernel fails it there, as does a prefetch that stops a step early. `gelu_erf` from -10 to 10.
+
+**Result (10 minutes of audio):**
+
+| | CPU | Vulkan before | depthwise + gelu_erf | + matrix cores |
+|---|---|---|---|---|
+| ASR | 68 s | 71 s | 38 s | 28.8 s |
+| diarization | 19.6 s | 31 s | 21 s | 15.7 s |
+| both, one request | 81 s | 77 s | 46 s | 34.4 s |
+
+The transcript and every word's speaker match the CPU's f32 run. Lightning recipe A (KLD against BF16, 40 chunks of
+512): 0.00894 with the kernel, 0.00886 without, top-1 96.26 / 96.16 %.
+
+### Run 67 - 2026-11-07 (laptop: Radeon 780M)
+
+**Question:** after Run 66, where do Parakeet's 28.8 s and the diarizer's go?
+
+**Finding:** the encoder took 17.7 s of a 21 s transcription, the decode 2.7 s, the mel 0.2 s; the GPU sat idle ~7 s.
+- Attention materialised its scores: a 512-query block's content and position scores (8 x 512 x 7500 and x 8011), a
+  rel-shift, their sum and its softmax, ~0.7 GB of traffic a block over 360 blocks: `map_f32`, `rows_f32` and
+  `copy_b32` ~7 s, their matmuls ~3.4 s.
+- The subsampling convs still ran on the CPU through readbacks (~3 s idle), and `LayerNorm` had no Vulkan path (a
+  CustomOp3, which had no Vulkan hook).
+- The LSTM's gate weights were `(k, n)`: `matmul_f32_dot` read them 2560 floats apart, 733 us a step at ~18 GB/s.
+- The diarizer's mel ran one frame at a time on one core, over every power bin of every filter.
+
+**Change:**
+- `flash_attn_relpos_cm`: full relative-position attention fused on matrix cores, one call a layer: each subgroup's
+  16 rows score a 32-key tile and multiply their position queries against the 48 position rows the tile's pairs read
+  (a contiguous span), taking each pair's diagonal entry; keys, values and positions load as matrices from padded f16
+  tables (`convert_f16` with an output offset), so the subgroups run without workgroup barriers. The encoder takes it
+  for unmasked full attention on Vulkan; chunked (streaming) attention keeps its blocks.
+- `conv2d_f32`, a direct conv2d (any groups, stride, padding, dilation; Vulkan no longer splits grouped convs), and a
+  pointwise conv as a matmul (its direct form re-read every channel: 450 ms a call against the matmul's ~25).
+- `LayerNorm` as a row op (`E[x^2] - mean^2`, as the CPU's), through a new `CustomOp3::vulkan_fwd`.
+- The LSTM keeps `[w_ih, w_hh, b]` a gate a row and multiplies by its transpose (733 -> 178 us a step); a step's
+  token and duration argmaxes read back together.
+- The mel: frames across threads, each filter over its nonzero span (the terms left out are exact zeros).
+
+**Tests:** relative-position attention against its definition over f16-rounded inputs (a shifted diagonal or a
+missing content term fails it); conv2d against the CPU, strided, padded, depthwise, grouped, dilated and over a
+strided view (ignoring dilation fails it), the pointwise case against f16-rounded inputs; the Vulkan layer norm (one
+without beta fails it).
+
+**Result (10 minutes):**
+
+| | Run 66 | now |
+|---|---|---|
+| ASR | 28.8 s | 14.9 s |
+| diarization | 15.7 s | 4.1-4.9 s |
+| both, one request | 34.4 s | 18.7 s |
+
+The transcript and every word's speaker and start match the CPU's f32 run; 9 of the diarizer's 284 segments move a
+10 ms frame at the 0.5 threshold. Lightning recipe A: KLD 0.00894, top-1 96.26 % (unchanged); 4096-token prefill
+459.6 tok/s, decode 25.7. What is left of ASR: attention 5.4 s (~1.6 TFLOPS), the encoder's matmuls ~3.8 s, the
+decode's 7000 sequential steps 2.7 s.

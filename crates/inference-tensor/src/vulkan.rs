@@ -168,6 +168,30 @@ pub fn flash_attn(op: &FlashAttn<'_>) -> Result<Option<Tensor>> {
     }
 }
 
+/// Attention with a relative-position term (Transformer-XL's, as the FastConformer's), a query head a key head:
+/// score(i, j) = `q_content`_i . `k`_j + `q_position`_i . `positions`[pos_base - i + j], both query sets scaled
+/// beforehand, softmax over the keys, times `v`. `q_content` and `q_position` are `(batch, heads, rows, head_size)`,
+/// `k` and `v` `(batch, heads, keys, head_size)`, `positions` `(batch, heads, p_rows, head_size)`; the output is laid
+/// out as the queries. On matrix cores, its inputs rounded to f16; `None` where the device or shape has no kernel.
+pub struct RelPosAttn<'a> {
+    pub q_content: &'a Tensor,
+    pub q_position: &'a Tensor,
+    pub k: &'a Tensor,
+    pub v: &'a Tensor,
+    pub positions: &'a Tensor,
+    pub pos_base: usize,
+}
+
+pub fn rel_pos_attn(op: &RelPosAttn<'_>) -> Result<Option<Tensor>> {
+    #[cfg(feature = "vulkan")]
+    return crate::vulkan_backend::rel_pos_attn(op);
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = op;
+        Err(crate::Error::NotCompiledWithVulkanSupport)
+    }
+}
+
 /// The packed top-[`RANKED_TOP_K`] of each row of f32 `logits` `(rows, vocab)`: `(rows, 2 K + 2)`, the largest values
 /// sorted descending (ties to the lower index), their indices as floats, the softmax normalizer at `1 / temperature`
 /// and the max over the temperature (CUDA's packed top-k layout).

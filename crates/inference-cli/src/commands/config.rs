@@ -135,8 +135,9 @@ async fn run_run_config(cfg: crate::config::RunConfig) -> Result<()> {
 fn build_model_specs(
     models: &[crate::config::ModelEntry],
     runtime: &RuntimeOptions,
-) -> Result<(Vec<ModelSpec>, bool)> {
-    let cpu = crate::config::models_cpu(models)?;
+) -> Result<(Vec<ModelSpec>, Option<&'static str>)> {
+    let device = crate::config::models_device(models)?;
+    let cpu = device == Some("cpu");
 
     let mut specs = Vec::new();
     for entry in models {
@@ -182,7 +183,7 @@ fn build_model_specs(
             pinned: entry.pinned,
         });
     }
-    Ok((specs, cpu))
+    Ok((specs, device))
 }
 
 /// What a TOML config describes, before its models are resolved.
@@ -202,11 +203,11 @@ struct ConfigSpecInputs<'a> {
 
 /// The engine a TOML config loads: every model it lists, sharing its runtime settings.
 fn config_spec(inputs: ConfigSpecInputs<'_>) -> Result<EngineSpec> {
-    let (models, cpu) = build_model_specs(inputs.models, inputs.runtime)?;
+    let (models, device) = build_model_specs(inputs.models, inputs.runtime)?;
     let (paged_attn, memory_mb, memory_fraction, context_len, block_size, cache_type, cache_layers) =
         inputs.paged_attn.into_builder_flags();
     let base = RuntimeSpec {
-        device: cpu.then(|| "cpu".to_string()),
+        device: device.map(str::to_string),
         seed: inputs.global.seed,
         token_source: Some(inputs.global.token_source.to_string()),
         log: inputs.global.log.clone(),
@@ -277,6 +278,44 @@ model_id = "org/model"
         assert_eq!(config.models[0].format.gqa, 1);
     }
 
+    #[test]
+    fn a_config_runs_its_models_on_the_device_they_all_name() {
+        let config = |devices: [&str; 2]| {
+            let input = format!(
+                r#"
+command = "serve"
+
+[[models]]
+model_id = "org/asr"
+[models.device]
+{}
+
+[[models]]
+model_id = "org/diarizer"
+[models.device]
+{}
+"#,
+                devices[0], devices[1]
+            );
+            let CliConfig::Serve(config) = toml::from_str(&input).unwrap() else {
+                unreachable!()
+            };
+            build_model_specs(&config.models, &config.runtime).map(|(_, device)| device)
+        };
+        assert_eq!(
+            config(["vulkan = true", "vulkan = true"]).unwrap(),
+            Some(crate::commands::serve::VULKAN_DEVICE)
+        );
+        assert_eq!(
+            config(["vulkan = true", ""]).unwrap(),
+            Some(crate::commands::serve::VULKAN_DEVICE)
+        );
+        assert_eq!(config(["cpu = true", ""]).unwrap(), Some("cpu"));
+        assert_eq!(config(["", ""]).unwrap(), None);
+        assert!(config(["vulkan = true", "vulkan = false"]).is_err());
+        assert!(config(["vulkan = true", "cpu = true"]).is_err());
+    }
+
     #[tokio::test]
     async fn from_config_infers_gguf_for_an_exact_file() {
         let root = std::env::temp_dir().join(format!("inference-gguf-{}", uuid::Uuid::new_v4()));
@@ -301,9 +340,9 @@ mmproj = "mmproj-BF16.gguf"
             unreachable!()
         };
 
-        let (models, cpu) = build_model_specs(&config.models, &config.runtime).unwrap();
+        let (models, device) = build_model_specs(&config.models, &config.runtime).unwrap();
         assert_eq!(models.len(), 1);
-        assert!(!cpu);
+        assert_eq!(device, None);
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -336,9 +375,9 @@ lora = [
         };
         assert!(config.models[0].adapter.dynamic_lora_enabled());
 
-        let (models, cpu) = build_model_specs(&config.models, &config.runtime).unwrap();
+        let (models, device) = build_model_specs(&config.models, &config.runtime).unwrap();
         assert_eq!(models.len(), 1);
-        assert!(!cpu);
+        assert_eq!(device, None);
 
         fs::remove_dir_all(root).unwrap();
     }

@@ -21,7 +21,8 @@ pub struct Emission {
 
 // one layer of PyTorch's LSTM (gates i, f, g, o), stepped a token at a time
 struct LstmLayer {
-    // `[w_ih; w_hh; b_ih + b_hh]` transposed, so one matmul of `[x, h, 1]` gives the gates
+    // `[w_ih, w_hh, b_ih + b_hh]`, a gate a row: one matmul of `[x, h, 1]` against its transpose gives the gates, each
+    // gate's weights contiguous (a GPU's decode matvec reads them in order: a 780M ran 4.5x slower over the transpose)
     weights: Tensor,
     one: Tensor,
 }
@@ -34,11 +35,11 @@ impl LstmLayer {
             + vb.get(gates, &format!("bias_hh_l{layer}"))?)?;
         let weights = Tensor::cat(
             &[
-                get("weight_ih", (gates, hidden))?.t()?,
-                get("weight_hh", (gates, hidden))?.t()?,
-                bias.unsqueeze(0)?,
+                get("weight_ih", (gates, hidden))?,
+                get("weight_hh", (gates, hidden))?,
+                bias.unsqueeze(1)?,
             ],
-            0,
+            1,
         )?
         .contiguous()?;
         let one = Tensor::ones((1, 1), weights.dtype(), weights.device())?;
@@ -49,7 +50,7 @@ impl LstmLayer {
     fn step(&self, x: &Tensor, h: &Tensor, c: &Tensor) -> Result<(Tensor, Tensor)> {
         let hidden = h.dim(1)?;
         let ones = self.one.broadcast_as((h.dim(0)?, 1))?;
-        let g = Tensor::cat(&[x, h, &ones], 1)?.matmul(&self.weights)?;
+        let g = Tensor::cat(&[x, h, &ones], 1)?.matmul(&self.weights.t()?)?;
         let gates = ops::sigmoid(&g)?;
         let i = gates.narrow(1, 0, hidden)?;
         let f = gates.narrow(1, hidden, hidden)?;
@@ -357,18 +358,21 @@ impl Transducer<'_> {
                         .relu()?,
                 )?
                 .squeeze(0)?;
-            let token = logits
-                .narrow(0, 0, self.vocab)?
-                .argmax(0)?
-                .to_scalar::<u32>()?;
-            let mut step = if self.durations.is_empty() {
-                usize::from(token == self.blank)
+            // the token and its duration read back together: each read waits on the device
+            let token_pick = logits.narrow(0, 0, self.vocab)?.argmax_keepdim(0)?;
+            let picks = if self.durations.is_empty() {
+                token_pick
             } else {
-                let d = logits
+                let duration_pick = logits
                     .narrow(0, self.vocab, self.durations.len())?
-                    .argmax(0)?
-                    .to_scalar::<u32>()?;
-                self.durations[d as usize]
+                    .argmax_keepdim(0)?;
+                Tensor::cat(&[token_pick, duration_pick], 0)?
+            }
+            .to_vec1::<u32>()?;
+            let token = picks[0];
+            let mut step = match picks.get(1) {
+                Some(&d) => self.durations[d as usize],
+                None => usize::from(token == self.blank),
             };
             if token == self.blank {
                 step = step.max(1);

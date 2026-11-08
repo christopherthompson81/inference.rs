@@ -53,6 +53,8 @@ pub enum MapOp {
     Sigmoid = 28,
     /// `max(x, 0)^2`
     Relu2 = 29,
+    /// `x * (1 + erf(x / sqrt 2)) / 2`
+    GeluErf = 30,
 }
 
 impl MapOp {

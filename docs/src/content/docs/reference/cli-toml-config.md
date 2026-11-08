@@ -170,7 +170,7 @@ Each `[[models]]` entry can carry nested sections whose field shapes mirror the 
 | `[models.format]` | Weight format selection and overrides (`format`, `quantized_file`, `mmproj`, `tok_model_id`, and GGML `gqa`). |
 | `[models.adapter]` | LoRA adapter configuration. |
 | `[models.quantization]` | Quantization and artifact selection: `quant` (same as `--quant`), `isq` (explicit ISQ, same as `--isq`), `from_uqff`, `isq_organization`, `imatrix`, `calibration_file`. |
-| `[models.device]` | Device placement: `cpu`, `device_layers`, `topology`, `hf_cache`, `max_seq_len`, `max_batch_size`. `cpu` must be consistent across every entry. |
+| `[models.device]` | Device placement: `cpu`, `vulkan`, `device_layers`, `topology`, `hf_cache`, `max_seq_len`, `max_batch_size`. The models share one device: `cpu` and `vulkan` must each be consistent across every entry, and not both set. |
 | `[models.multimodal]` | Multimodal load-time caps: `max_edge` (resize images to this longest edge, aspect kept), `max_num_images` (per request), `max_image_length` (largest image dimension planned for in device mapping), `encoder_cache_memory_mb` (encoder cache cap in MiB). |
 
 Dynamic LoRA uses structured adapter entries and explicit per-request selection. For `command = "run"`, the top-level `adapter` key selects the initial alias; omit it to run the base model.
@@ -287,7 +287,7 @@ Invalid configs abort startup with a message identifying the problem:
 
 - At least one entry in `[[models]]` for `run`. A `serve` config may list none: the server starts empty, and admins load models through the [model manager](/reference/http-api/#model-manager) from `model_folders` and the Hugging Face cache.
 - `default_model_id` matches a `model_id` in `[[models]]`.
-- `cpu` is consistent across all models when set.
+- `cpu` and `vulkan` are each consistent across all models when set, and not both true.
 - `search_embedding_model` requires `enable_search = true` (or `agent = true`).
 - `code_exec_python`, `code_exec_timeout`, and `code_exec_workdir` each require `enable_code_execution = true` (or `agent = true`).
 

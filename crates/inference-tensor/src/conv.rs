@@ -124,12 +124,14 @@ impl ParamsConvTranspose2D {
 
 impl Tensor {
     // CUDA runs many small groups in one direct kernel (few wide groups are faster as per-group GEMMs, 3090: 2x256 ch
-    // 10x slower direct, 32x16 7x faster); CPU only depthwise (256 ch 36x faster, 8x8 ch 3x slower); the conv
-    // backprop ops carry no group count, so tracked graphs split
+    // 10x slower direct, 32x16 7x faster); CPU only depthwise (256 ch 36x faster, 8x8 ch 3x slower); Vulkan's direct
+    // conv2d any (a group a call had read the whole input back each); the conv backprop ops carry no group count, so
+    // tracked graphs split
     fn native_grouped_conv(&self, kernel: &Self, groups: usize, c_in_per_group: usize) -> bool {
         let native = match self.device() {
             Device::Cuda(_) => groups >= c_in_per_group,
             Device::Cpu => c_in_per_group == 1,
+            Device::Vulkan(_) => true,
             _ => false,
         };
         native && !self.track_op() && !kernel.track_op()
@@ -325,6 +327,17 @@ impl Tensor {
         }
         if c_out % groups != 0 {
             crate::bail!("out_channel {c_out} is not divisible by the number of groups {groups}")
+        }
+        // a pointwise conv is a matmul, which Vulkan runs on its matrix cores: its direct kernel reads every input
+        // channel again an output (a 780M's Parakeet subsampling, 256 channels: 450 ms a call)
+        if self.device().is_vulkan()
+            && (k_h, k_w, stride, padding, groups) == (1, 1, 1, 0, 1)
+            && !self.track_op()
+            && !kernel.track_op()
+        {
+            let xs = self.reshape((b_size, c_in, i_h * i_w))?;
+            let w = kernel.reshape((c_out, c_in))?.broadcast_left(b_size)?;
+            return w.matmul(&xs)?.reshape((b_size, c_out, i_h, i_w));
         }
         let params = ParamsConv2D {
             b_size,

@@ -321,6 +321,7 @@ impl crate::CustomOp1 for SoftmaxLastDim {
             storage,
             layout,
             None,
+            None,
             inference_vulkan::RowOp::Softmax,
             0.0,
         );
@@ -502,6 +503,7 @@ impl crate::CustomOp2 for RmsNorm {
             s1,
             l1,
             Some((s2, l2)),
+            None,
             inference_vulkan::RowOp::RmsNorm,
             self.eps,
         );
@@ -674,6 +676,31 @@ struct LayerNorm {
 impl crate::CustomOp3 for LayerNorm {
     fn name(&self) -> &'static str {
         "layer-norm"
+    }
+
+    fn vulkan_fwd(
+        &self,
+        s1: &crate::VulkanStorage,
+        l1: &Layout,
+        s2: &crate::VulkanStorage,
+        l2: &Layout,
+        s3: &crate::VulkanStorage,
+        l3: &Layout,
+    ) -> Result<Option<(crate::VulkanStorage, Shape)>> {
+        #[cfg(feature = "vulkan")]
+        return crate::vulkan_backend::rows(
+            s1,
+            l1,
+            Some((s2, l2)),
+            Some((s3, l3)),
+            inference_vulkan::RowOp::LayerNorm,
+            self.eps,
+        );
+        #[cfg(not(feature = "vulkan"))]
+        {
+            let _ = (s1, l1, s2, l2, s3, l3);
+            Ok(None)
+        }
     }
 
     fn cpu_fwd(

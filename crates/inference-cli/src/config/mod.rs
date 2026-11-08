@@ -137,6 +137,8 @@ pub struct DeviceOptionsToml {
     #[serde(default)]
     pub cpu: Option<bool>,
     #[serde(default)]
+    pub vulkan: Option<bool>,
+    #[serde(default)]
     pub device_layers: Option<Vec<String>>,
     #[serde(default)]
     pub topology: Option<PathBuf>,
@@ -195,7 +197,7 @@ fn validate_config(config: &CliConfig) -> Result<()> {
         }
     }
 
-    models_cpu(models)?;
+    models_device(models)?;
     for model in models {
         if model.max_model_len == Some(0) {
             anyhow::bail!("max_model_len must be greater than zero");
@@ -209,12 +211,28 @@ fn validate_config(config: &CliConfig) -> Result<()> {
     Ok(())
 }
 
-/// Whether the models run on the CPU; they share one device, so every `device.cpu` that is set must agree.
-pub(crate) fn models_cpu(models: &[ModelEntry]) -> anyhow::Result<bool> {
-    let mut settings = models.iter().filter_map(|model| model.device.cpu);
+/// The runtime device the models share (`None` for the automatic choice), so every `device.cpu` and every
+/// `device.vulkan` that is set must agree.
+pub(crate) fn models_device(models: &[ModelEntry]) -> anyhow::Result<Option<&'static str>> {
+    let cpu = consistent_flag(models, "cpu", |device| device.cpu)?;
+    let vulkan = consistent_flag(models, "vulkan", |device| device.vulkan)?;
+    match (cpu, vulkan) {
+        (true, true) => anyhow::bail!("cpu and vulkan cannot both be set"),
+        (true, false) => Ok(Some("cpu")),
+        (false, true) => Ok(Some(crate::commands::serve::VULKAN_DEVICE)),
+        (false, false) => Ok(None),
+    }
+}
+
+fn consistent_flag(
+    models: &[ModelEntry],
+    name: &str,
+    flag: fn(&DeviceOptionsToml) -> Option<bool>,
+) -> anyhow::Result<bool> {
+    let mut settings = models.iter().filter_map(|model| flag(&model.device));
     let first = settings.next();
-    if first.is_some_and(|cpu| settings.any(|other| other != cpu)) {
-        anyhow::bail!("cpu must be consistent across all models (found both true and false)");
+    if first.is_some_and(|set| settings.any(|other| other != set)) {
+        anyhow::bail!("{name} must be consistent across all models (found both true and false)");
     }
     Ok(first.unwrap_or(false))
 }
@@ -242,7 +260,7 @@ impl DeviceOptionsToml {
         let defaults = DeviceOptions::default();
         DeviceOptions {
             cpu,
-            vulkan: false,
+            vulkan: self.vulkan.unwrap_or(false),
             device_layers: self.device_layers.clone(),
             topology: self.topology.clone(),
             hf_cache: self.hf_cache.clone(),
