@@ -27,6 +27,10 @@ const ROOM_MARGIN_BYTES: u64 = 512 << 20;
 // An idle device buffer none has reused for this long is an earlier phase's size (a speech model's subsampling, then
 // its encoder, then a diarizer each take their own classes): a new allocation frees it first, so the pool holds one
 // phase's working set rather than the sum of every phase's
+// A device allocation that misses its class takes an idle one up to this much larger (num / den): a phase's sizes
+// differ from the last one's by less than that (a speech request's 96 and 112 MiB temporaries beside idle 128s)
+const FIT_RATIO_NUM: u64 = 3;
+const FIT_RATIO_DEN: u64 = 2;
 const STALE_IDLE: std::time::Duration = std::time::Duration::from_millis(150);
 // Idle device bytes the pool keeps however stale, so a model's whole working set (a prompt's, paused between
 // requests) survives; past them a miss frees the stale ones, and an idle engine the rest
@@ -257,6 +261,8 @@ impl Buffer {
                 ..
             } = held.allocation;
             let early = !ptr.is_null() && !Held::idle(&held);
+            // a larger class's allocation goes back to its own class
+            let capacity = held.allocation.size;
             return Ok(Self {
                 context: context.clone(),
                 buffer,
@@ -737,8 +743,36 @@ impl BufferPool {
         out
     }
 
-    // the newest allocation of a class; a mapped one that no batch holds first, and with `idle_only` only such a one
+    // the newest allocation of a class, or for device memory the smallest class up to FIT_RATIO_* larger that holds
+    // one; a mapped one that no batch holds first, and with `idle_only` only such a one
     fn take(&mut self, device_local: bool, capacity: u64, idle_only: bool) -> Option<Arc<Held>> {
+        if let Some(held) = self.take_class(device_local, capacity, idle_only) {
+            return Some(held);
+        }
+        if !device_local {
+            return None;
+        }
+        let limit = capacity / FIT_RATIO_DEN * FIT_RATIO_NUM;
+        let mut larger: Vec<u64> = self
+            .free
+            .iter()
+            .filter(|(key, entries)| {
+                key.0 && key.1 > capacity && key.1 <= limit && !entries.is_empty()
+            })
+            .map(|(key, _)| key.1)
+            .collect();
+        larger.sort_unstable();
+        larger
+            .into_iter()
+            .find_map(|c| self.take_class(true, c, idle_only))
+    }
+
+    fn take_class(
+        &mut self,
+        device_local: bool,
+        capacity: u64,
+        idle_only: bool,
+    ) -> Option<Arc<Held>> {
         let key = (device_local, capacity);
         let entries = self.free.get_mut(&key)?;
         let newest = entries.len().checked_sub(1)?;
@@ -1048,6 +1082,42 @@ mod tests {
         while context.try_wait_oldest()? && Arc::strong_count(&copy) > 1 {}
         let upload = Buffer::with_bytes(&context, &[3u8; BYTES])?;
         assert!(upload.read()?.iter().all(|&b| b == 3));
+        Ok(())
+    }
+
+    // a discrete GPU's allocation that misses its class takes an idle buffer up to 1.5 times its size, which goes
+    // back to its own class; past that ratio it allocates
+    #[test]
+    fn a_miss_takes_an_idle_buffer_a_little_larger() -> Result<()> {
+        let context = match Context::new() {
+            Ok(context) => context,
+            Err(err) => {
+                eprintln!("skipping: {err}");
+                return Ok(());
+            }
+        };
+        if context.is_unified() {
+            return Ok(());
+        }
+        context.release_idle();
+        let big = Buffer::new(&context, 128 << 20)?;
+        let handle = big.buffer;
+        drop(big);
+        let fit = Buffer::new(&context, 100 << 20)?;
+        assert_eq!(fit.buffer, handle, "100 MiB takes the idle 128 MiB buffer");
+        assert_eq!(fit.capacity, capacity(128 << 20));
+        drop(fit);
+        let small = Buffer::new(&context, 70 << 20)?;
+        assert_ne!(
+            small.buffer, handle,
+            "past 1.5 times, a 70 MiB buffer is its own"
+        );
+        let idle = context.pool.lock().unwrap().device_bytes;
+        assert_eq!(
+            idle,
+            capacity(128 << 20),
+            "the 128 MiB buffer went back to its class"
+        );
         Ok(())
     }
 
