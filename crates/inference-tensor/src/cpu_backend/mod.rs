@@ -15,6 +15,7 @@ pub use utils::{
 mod conv1d_direct;
 mod conv2d;
 mod conv_grouped;
+pub(crate) mod gemm_bf16;
 use conv_grouped::GroupedConv;
 use conv2d::Conv2D;
 
@@ -955,8 +956,11 @@ fn copy2d_<T: Copy>(
 
 // a transposed copy of fewer elements runs on one thread, through the tiles as a larger one
 const PARALLEL_TRANSPOSE_ELEMS: usize = 1 << 16;
-// multiply-adds from which a matmul parks the elementwise pool's spinning workers (~0.2 ms here, far past a wake-up)
+// multiply-adds from which a matmul parks the elementwise pool's spinning workers (~0.2 ms here, far past a wake-up),
+// and from which an f32 one may take bf16 inputs
 const REST_POOL_MIN_WORK: usize = 1 << 26;
+// output columns from which a bf16 product outruns f32 (an attention head's 128 lost: 512 -> 329 GFLOPS)
+const BF16_MIN_COLS: usize = 256;
 // a strided copy of this many elements or more splits its blocks over the threads: one thread copying a speech
 // encoder's heads (30 MB a tensor) kept the rest idle
 const PARALLEL_COPY_ELEMS: usize = 1 << 18;
@@ -1571,6 +1575,43 @@ impl Map2 for MatMul {
         let (a_skip, b_skip) = self.ab_skip(lhs_l, rhs_l)?;
         let c_skip: usize = m * n;
 
+        // a large f32 product through bf16 inputs where the CPU multiplies bf16 pairs: twice the rate (a 7840U's
+        // feed-forwards 647 -> 1337 GFLOPS); a narrow one packs as much as it multiplies, so it stays f32
+        if T::DTYPE == DType::F32
+            && b * m * n * k >= REST_POOL_MIN_WORK
+            && n >= BF16_MIN_COLS
+            && gemm_bf16::enabled()
+        {
+            // SAFETY: T is f32, checked above
+            let (lhs, rhs) = unsafe {
+                (
+                    std::slice::from_raw_parts(lhs.as_ptr().cast::<f32>(), lhs.len()),
+                    std::slice::from_raw_parts(rhs.as_ptr().cast::<f32>(), rhs.len()),
+                )
+            };
+            let mut out = vec![0f32; b * m * n];
+            gemm_bf16::gemm(
+                b,
+                m,
+                n,
+                k,
+                &gemm_bf16::Strided {
+                    data: lhs,
+                    rs: lhs_rs,
+                    cs: lhs_cs,
+                },
+                a_skip,
+                &gemm_bf16::Strided {
+                    data: rhs,
+                    rs: rhs_rs,
+                    cs: rhs_cs,
+                },
+                b_skip,
+                &mut out,
+            );
+            // SAFETY: T is f32
+            return Ok(unsafe { std::mem::transmute::<Vec<f32>, Vec<T>>(out) });
+        }
         // the elementwise pool's idle workers park for a long product rather than spin beside its threads
         if b * m * n * k >= REST_POOL_MIN_WORK {
             crate::utils::barrier_pool().rest();

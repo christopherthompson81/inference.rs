@@ -45,6 +45,7 @@ For the offline workflow (pre-downloading models, local paths), see [run models]
 | `INFERENCE_RS_CPU_KV_F32` | Set (to anything but `0`) to keep the CPU KV cache in f32 where it would otherwise use f16 (on CPUs with fast f16 support). |
 | `INFERENCE_RS_FORCE_AVX2` | Set to `1` to use the AVX2 attention kernels on a CPU that also has AVX-512. |
 | `CANDLE_BARRIER_POOL_SPIN_LIMIT` | Advanced CPU tuning. Overrides the spin count used by Candle's persistent barrier pool before worker threads park. |
+| `INFERENCE_CPU_NO_BF16` | Keeps the speech models' large CPU f32 matmuls in f32. Without it, on a CPU with AVX-512 BF16, Parakeet's encoder and the Nemotron-3 diarizer run their f32 matmuls of 2^26 multiply-adds or more and 256 or more output columns with bf16 inputs and f32 sums, at about twice the rate. Other models are unaffected. |
 
 See [CPU threads and affinity](/guides/perf/throughput-tuning/#cpu-threads-and-affinity) for examples.
 

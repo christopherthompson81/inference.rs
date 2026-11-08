@@ -1344,3 +1344,33 @@ decode 16.7-16.8 -> 16.8-16.9 tok/s.
 The diarizer's query, key and value projections load as one `[query | key | value]` weight (the fused path its
 quantized loads already take): 684 x 512 x 512 products had run at ~346 GFLOPS in place against ~445 for the
 1536-wide one. A/B, diarization 13.60 -> 13.17 s; both devices' diarizations unchanged.
+
+## Run 46 - 2026-11-08 (laptop: Ryzen 7 7840U, CPU only)
+
+**Question:** gemm is ~80 % of the speech models' CPU time at ~70 % of the f32 peak. Does AVX-512 BF16
+(`vdpbf16ps`, 32 multiply-adds an instruction, twice f32 FMA's) keep their outputs?
+
+**Accuracy first (each large matmul's inputs rounded to bf16, then f32 gemm):** the meeting's 1614 words and a
+20-second clip's 58 unchanged, 2 starts a frame off. The real kernel: words unchanged, 4 starts a frame off, 0.14 % of
+the diarizer's speaker-frames moved (Vulkan's f16 path moves 0.08-0.10 % against the CPU). Lightning's CPU KLD is the
+same to the digit (its large products are all quantized).
+
+**Change:** `cpu_backend::gemm_bf16`, a 6 x 32 microkernel over packed bf16 pairs (A's rows along k, B in 32-column
+panels a 16-lane load holds pairs of), the tasks over the batch, row blocks and panel groups sized to give each thread
+a few. A model opts in around its forward (`inference_tensor::cpu::with_bf16_matmuls`), for f32 products of 2^26
+multiply-adds and 256 columns or more on a CPU with avx512bf16; `INFERENCE_CPU_NO_BF16` turns it off. Parakeet's
+encoder and the diarizer's step opt in. As a global default it had moved other f32 models' CPU results by up to 0.4 %
+(a layout model's batched forward against its single one).
+
+| bf16 kernel | f32 gemm | bf16 |
+|---|---|---|
+| 7500 x 4096 x 1024 | 647 GFLOPS | 1337 |
+| 7500 x 1024 x 1024 | 569 | 1055 |
+| 8 x 512 x 7500 x 128 (scores) | 467 | 560 |
+| 8 x 512 x 128 x 7500 (values) | 512 | 329: stays f32 |
+
+**Tests:** the kernel against f32 sums of the rounded inputs (edge tiles, odd k, a strided operand; a dropped pair
+half fails it); a scoped matmul takes bf16 inputs and an unscoped one f32's.
+
+**Result (A/B):** ASR 38.67 -> 32.93 s, diarization 11.38 -> 9.10 s; both in one request 40.6 s (Run 43's start:
+73.5).
