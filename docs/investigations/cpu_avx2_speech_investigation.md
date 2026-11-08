@@ -105,3 +105,15 @@ asr 42.8 / 44.6 s (Run 3 47.7 / 48.8), diar 14.7 / 14.5 s; 1698 words identical,
 
 Diarization, profiled (`perf_diar.sh`, 11.4 s under perf): gemm 66 %, libm `__expf_fma` 5.7 % (the softmax), the
 elementwise pool's spin 6 %. The laptop's f32 diarization was 11.4 s (Run 46), so this CPU is level with it there.
+
+## Run 5 - 2026-11-08 18:00
+
+Question: the CPU f32 softmax spent 5.7 % of a diarization in libm's `expf`: does `fast_exp` (Cephes, ~1e-7) help?
+
+Dead end first: passing the exp as a `fn` pointer made each element an indirect call. Alternating runs (three 10-minute
+diarizations a server, a temporary libm toggle): fast 15.99-16.31 s against libm 14.71-15.11. As a generic closure
+(inlined, vectorized): fast 14.05-14.44 s against libm 14.62-15.21, kept.
+
+Every CPU f32 softmax now takes `fast_exp`; the CPU suite (3160) passes, its pinned outputs unchanged; the clip's
+diarization is byte-identical to the CPU reference and its 1698 words unchanged. This machine drifted slower over the
+session (Qwen3.8-27B's Vulkan prefill read 362-433 on master against 480-533 earlier), so only alternating runs count.

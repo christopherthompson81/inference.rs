@@ -350,6 +350,7 @@ impl crate::CustomOp1 for SoftmaxLastDim {
         fn softmax<T: crate::WithDType + num_traits::Float>(
             src: &[T],
             layout: &Layout,
+            exp: impl Fn(T) -> T + Sync,
         ) -> Result<(CpuStorage, Shape)> {
             let src = match layout.contiguous_offsets() {
                 None => crate::bail!("input has to be contiguous"),
@@ -371,7 +372,7 @@ impl crate::CustomOp1 for SoftmaxLastDim {
                     let mut max = T::neg_infinity();
                     unsafe { T::vec_reduce_max(src.as_ptr(), &mut max, dim_m1) };
                     for (s, d) in src.iter().zip(dst.iter_mut()) {
-                        *d = (*s - max).exp();
+                        *d = exp(*s - max);
                     }
                     let mut sum_exp = T::zero();
                     unsafe { T::vec_reduce_sum(dst.as_ptr(), &mut sum_exp, dim_m1) };
@@ -384,10 +385,12 @@ impl crate::CustomOp1 for SoftmaxLastDim {
         }
 
         match storage {
-            CpuStorage::BF16(slice) => softmax::<half::bf16>(slice, layout),
-            CpuStorage::F16(slice) => softmax::<half::f16>(slice, layout),
-            CpuStorage::F32(slice) => softmax::<f32>(slice, layout),
-            CpuStorage::F64(slice) => softmax::<f64>(slice, layout),
+            CpuStorage::BF16(slice) => softmax::<half::bf16>(slice, layout, num_traits::Float::exp),
+            CpuStorage::F16(slice) => softmax::<half::f16>(slice, layout, num_traits::Float::exp),
+            // Cephes' exp (~1e-7 relative), inlined (the generic closure), vectorizes where libm's is a call an
+            // element: a 10-minute diarization 14.6-15.2 -> 14.1-14.4 s on an i7-10700K
+            CpuStorage::F32(slice) => softmax::<f32>(slice, layout, crate::cpu::erf::fast_exp),
+            CpuStorage::F64(slice) => softmax::<f64>(slice, layout, f64::exp),
             _ => crate::bail!("unsupported dtype for softmax {:?}", storage),
         }
     }
