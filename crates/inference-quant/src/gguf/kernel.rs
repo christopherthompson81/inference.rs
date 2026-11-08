@@ -175,6 +175,24 @@ impl GgufType {
         Self::RAW_BLOCKS.into_iter().find(|ty| ty.id() == id)
     }
 
+    /// The Vulkan block kernels' name for this type, where they take it.
+    pub fn vulkan_block_kind(self) -> Option<inference_tensor::vulkan::BlockKind> {
+        use inference_tensor::vulkan::BlockKind as K;
+        Some(match self {
+            Self::Q8_0 => K::Q8_0,
+            Self::Q5_0 => K::Q5_0,
+            Self::Q4_0 => K::Q4_0,
+            Self::Q4_1 => K::Q4_1,
+            Self::Q5_1 => K::Q5_1,
+            Self::Q4K => K::Q4K,
+            Self::Q5K => K::Q5K,
+            Self::Q6K => K::Q6K,
+            Self::Iq4Xs => K::Iq4Xs,
+            Self::Iq3S => K::Iq3S,
+            _ => return None,
+        })
+    }
+
     pub fn block_size(self) -> usize {
         GgufDType::new(self.layout_id())
             .block_size()

@@ -12,6 +12,8 @@ const BLOCKS: usize = 8;
 // a Vulkan prompt row against the CPU, relative: the f32 kernel, and matrix cores (f16 Q, K, V and P; 1.0e-4 seen)
 const VULKAN_PREFILL_TOLERANCE: f32 = 1e-4;
 const VULKAN_MATRIX_CORE_PREFILL_TOLERANCE: f32 = 1e-3;
+// the wide (head 256) build stages keys and values as f16
+const VULKAN_WIDE_PREFILL_TOLERANCE: f32 = 2e-3;
 // a quantized cache's rows against their dequantized values, absolute: decode in f32, and the prompt on matrix cores,
 // which round the dequantized rows to f16 (1.4e-3 seen)
 const QUANT_DECODE_TOLERANCE: f32 = 1e-3;
@@ -442,10 +444,24 @@ fn paged_prefill_rows_score_alone(tolerance: f32) -> Result<()> {
     let Ok(vk) = Device::new_vulkan(0) else {
         return Ok(());
     };
+    // Nemotron-H's heads, and Qwen3.5's 256-wide ones on the wide build
+    for (heads, head, tolerance) in [
+        (32usize, 128usize, tolerance),
+        (12, 256, VULKAN_WIDE_PREFILL_TOLERANCE.max(tolerance)),
+    ] {
+        paged_prefill_rows_score_alone_case(&vk, heads, head, tolerance)?;
+    }
+    Ok(())
+}
+
+fn paged_prefill_rows_score_alone_case(
+    vk: &Device,
+    heads: usize,
+    head: usize,
+    tolerance: f32,
+) -> Result<()> {
     const BLOCK: usize = 16;
     const KV_HEADS: usize = 2;
-    const HEADS: usize = 32;
-    const HEAD: usize = 128;
     const CONTEXT: usize = 2500;
     const ROWS: usize = 70;
     let max_blocks = CONTEXT.div_ceil(BLOCK);
@@ -455,11 +471,11 @@ fn paged_prefill_rows_score_alone(tolerance: f32) -> Result<()> {
         let kc = Tensor::randn(
             0f32,
             1.,
-            (blocks, KV_HEADS, HEAD / x, BLOCK, x),
+            (blocks, KV_HEADS, head / x, BLOCK, x),
             &Device::Cpu,
         )?
         .to_dtype(dtype)?;
-        let vc = Tensor::randn(0f32, 1., (blocks, KV_HEADS, HEAD, BLOCK), &Device::Cpu)?
+        let vc = Tensor::randn(0f32, 1., (blocks, KV_HEADS, head, BLOCK), &Device::Cpu)?
             .to_dtype(dtype)?;
         let table: Vec<u32> = (0..max_blocks as u32)
             .map(|b| (b * 7 + 3) % blocks as u32)
@@ -469,8 +485,8 @@ fn paged_prefill_rows_score_alone(tolerance: f32) -> Result<()> {
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen.len(), max_blocks, "a block a position range");
-        let q = Tensor::randn(0f32, 1., (ROWS, HEADS, HEAD), &Device::Cpu)?;
-        let scale = 1.0 / (HEAD as f32).sqrt();
+        let q = Tensor::randn(0f32, 1., (ROWS, heads, head), &Device::Cpu)?;
+        let scale = 1.0 / (head as f32).sqrt();
         let tables = Tensor::from_vec(table.repeat(ROWS), (ROWS, max_blocks), &Device::Cpu)?;
         let lens: Vec<u32> = (0..ROWS).map(|r| (CONTEXT - ROWS + r + 1) as u32).collect();
         let want = paged_attention(
@@ -487,13 +503,13 @@ fn paged_prefill_rows_score_alone(tolerance: f32) -> Result<()> {
             NO_SOFTCAP,
             None,
         )?;
-        let on = |t: &Tensor| t.to_device(&vk);
+        let on = |t: &Tensor| t.to_device(vk);
         let got =
             inference_tensor::vulkan::paged_prefill(&inference_tensor::vulkan::PagedPrefill {
                 q: &on(&q)?,
                 key_cache: &on(&kc)?,
                 value_cache: &on(&vc)?,
-                block_table: &Tensor::new(table.as_slice(), &vk)?,
+                block_table: &Tensor::new(table.as_slice(), vk)?,
                 context: CONTEXT,
                 scale,
             })?;
@@ -505,7 +521,7 @@ fn paged_prefill_rows_score_alone(tolerance: f32) -> Result<()> {
         {
             assert!(
                 (g - w).abs() <= tolerance * w.abs().max(1.0),
-                "{dtype:?}: {g} vs {w}"
+                "{dtype:?} head {head}: {g} vs {w}"
             );
         }
     }

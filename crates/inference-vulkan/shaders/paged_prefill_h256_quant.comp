@@ -1,0 +1,8 @@
+#version 450
+// head size 256: paged_prefill_main.glsl over quantized HND caches (kv_quant.glsl), the query already rotated.
+#extension GL_GOOGLE_include_directive : require
+#define CACHE_QUANT
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define PREFILL_WIDE
+#include "paged_prefill_main.glsl"

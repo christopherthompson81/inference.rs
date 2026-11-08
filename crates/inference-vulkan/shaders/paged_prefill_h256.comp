@@ -1,0 +1,7 @@
+#version 450
+// paged_prefill_main.glsl at head size 256
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#define PREFILL_WIDE
+#include "paged_prefill_main.glsl"

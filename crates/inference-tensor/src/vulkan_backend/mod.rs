@@ -879,6 +879,90 @@ pub(crate) fn moe_router(route: &crate::vulkan::Route<'_>) -> Result<(Tensor, Te
     Ok((tensor_of(values, shape), tensor_of(indices, shape)))
 }
 
+pub(crate) fn block_type(kind: crate::vulkan::BlockKind) -> BlockType {
+    use crate::vulkan::BlockKind as K;
+    match kind {
+        K::Q8_0 => BlockType::Q8_0,
+        K::Q5_0 => BlockType::Q5_0,
+        K::Q4_0 => BlockType::Q4_0,
+        K::Q4_1 => BlockType::Q4_1,
+        K::Q5_1 => BlockType::Q5_1,
+        K::Q4K => BlockType::Q4K,
+        K::Q5K => BlockType::Q5K,
+        K::Q6K => BlockType::Q6K,
+        K::Iq4Xs => BlockType::IQ4XS,
+        K::Iq3S => BlockType::IQ3S,
+    }
+}
+
+// `bytes` of `kind` blocks, `(experts, rows, cols)`, in `device`'s memory
+pub(crate) fn block_weight(
+    device: &crate::Device,
+    kind: crate::vulkan::BlockKind,
+    (experts, rows, cols): (usize, usize, usize),
+    bytes: &[u8],
+) -> Result<Arc<Buffer>> {
+    let ty = block_type(kind);
+    if !cols.is_multiple_of(ty.block_values())
+        || bytes.len() != experts * rows * cols / ty.block_values() * ty.block_bytes()
+    {
+        crate::bail!(
+            "{kind:?} ({experts}, {rows}, {cols}) does not take {} bytes",
+            bytes.len()
+        );
+    }
+    device.as_vulkan_device()?.weight_copy(bytes)
+}
+
+// the rows of a `vocab x cols` weight of `ty` blocks at the u32 `ids`
+pub(crate) fn block_embedding(
+    weights: &Arc<Buffer>,
+    ty: BlockType,
+    (vocab, cols): (usize, usize),
+    ids: &Tensor,
+) -> Result<Tensor> {
+    let ids = ids.to_dtype(DType::U32)?.contiguous()?;
+    let count = ids.elem_count();
+    let (storage, layout) = ids.storage_and_layout();
+    let crate::Storage::Vulkan(ids_storage) = &*storage else {
+        crate::bail!("Vulkan block rows at ids on {:?}", ids.device());
+    };
+    let device = ids_storage.device.clone();
+    let out = quantized_embedding(
+        (ids_storage.buffer(), layout.start_offset()),
+        count,
+        weights,
+        ty,
+        vocab,
+        cols,
+        &device,
+    )?;
+    drop(storage);
+    Ok(tensor_of(out, (count, cols)))
+}
+
+// `x (.., cols)` times a `rows x cols` weight of `ty` blocks, transposed
+pub(crate) fn block_matmul(
+    weights: &Arc<Buffer>,
+    ty: BlockType,
+    (rows, cols): (usize, usize),
+    x: &Tensor,
+) -> Result<Tensor> {
+    let x = x.to_dtype(DType::F32)?.contiguous()?;
+    let mut dims = x.dims().to_vec();
+    if dims.last() != Some(&cols) {
+        crate::bail!("a ({rows}, {cols}) block weight times {:?}", x.shape());
+    }
+    let (storage, layout) = x.storage_and_layout();
+    let crate::Storage::Vulkan(xs) = &*storage else {
+        crate::bail!("a Vulkan block weight times a tensor on {:?}", x.device());
+    };
+    let out = quantized_mat_vec(xs, layout, weights, ty, rows, cols)?;
+    drop(storage);
+    *dims.last_mut().expect("dims hold cols") = rows;
+    Ok(tensor_of(out, dims))
+}
+
 /// `y[slot] = W[ids[slot]] x[slot / x_div]` over a Q5_0 expert stack `(experts, rows, cols)` copied to `weights`, `ids`
 /// `(tokens, k)`.
 pub(crate) fn expert_mat_vec(

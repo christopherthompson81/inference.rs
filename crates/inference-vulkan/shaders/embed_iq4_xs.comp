@@ -1,0 +1,6 @@
+#version 450
+// The rows of a IQ4_XS matrix at a list of ids, dequantized.
+#extension GL_GOOGLE_include_directive : require
+#include "embed_head.glsl"
+#include "iq4_xs_int8.glsl"
+#include "embed_main.glsl"

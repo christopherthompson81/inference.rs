@@ -1206,6 +1206,9 @@ const MAX_DISPATCH_GROUPS: usize = 65535;
 // MAX_PREFILL_SPLITS of them, their partials within PREFILL_PARTIALS_BYTES (a prompt chunk's rows already fill the GPU,
 // and every layer's partials stay live until its batch completes)
 const PREFILL_ROWS: usize = 8;
+// threads a (row, head) in paged_prefill_main.glsl's narrow and wide builds
+const PREFILL_LANES: usize = 2;
+const PREFILL_WIDE_LANES: usize = 4;
 // paged_prefill_cm's query rows (positions x heads) a workgroup, and the heads it tiles
 const PREFILL_CM_ROWS: usize = 64;
 const PREFILL_CM_HEAD_STEP: usize = 16;
@@ -1218,7 +1221,7 @@ pub(crate) const PAGED_REDUCE_PUSH_BYTES: u32 = 3 * 4;
 // the decode shader's geometry: the positions a workgroup takes, a tile of whole blocks, its threads, the query heads
 // a kv head serves and those a value thread sums, and the cache's vec4 rows (x)
 const PAGED_CHUNK: usize = 64;
-// the shared tiles' head size, sized for occupancy; decode has a wide build to MAX_PAGED_WIDE_HEAD (Qwen3.5's 256)
+// the shared tiles' head size, sized for occupancy; decode and prefill have wide builds to 256 (Qwen3.5's)
 pub(crate) const MAX_PAGED_NARROW_HEAD: usize = 128;
 const MAX_PAGED_WIDE_HEAD: usize = 256;
 // the partials one piece of a call holds; many queries (an MTP head reading a whole prompt) run in pieces
@@ -1465,9 +1468,15 @@ impl Recorder<'_> {
     pub fn paged_prefill(&self, op: &PagedPrefill<'_>) -> Result<()> {
         let s = op.shape;
         let group = op.heads / s.kv_heads.max(1);
+        // the wide build holds a (row, head) in four threads, half the narrow one's rows a workgroup
+        let (lanes, rows_a_group) = if s.head_size > MAX_PAGED_NARROW_HEAD {
+            (PREFILL_WIDE_LANES, PREFILL_ROWS / 2)
+        } else {
+            (PREFILL_LANES, PREFILL_ROWS)
+        };
         if s.head_size == 0
-            || s.head_size > MAX_PAGED_NARROW_HEAD
-            || !s.head_size.is_multiple_of(2 * PAGED_X)
+            || s.head_size > MAX_PAGED_WIDE_HEAD
+            || !s.head_size.is_multiple_of(lanes * PAGED_X)
             || !s.readable()
             || s.kv_heads == 0
             || !op.heads.is_multiple_of(s.kv_heads)
@@ -1525,7 +1534,7 @@ impl Recorder<'_> {
                 [
                     splits as u32,
                     s.kv_heads as u32,
-                    op.rows.div_ceil(PREFILL_ROWS) as u32,
+                    op.rows.div_ceil(rows_a_group) as u32,
                 ],
             ),
         }

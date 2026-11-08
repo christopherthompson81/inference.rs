@@ -68,6 +68,8 @@ kernels! {
     embed_q4_k: EMBED_Q4_K, EMBED_BINDINGS, EMBED_PUSH_BYTES;
     embed_q5_k: EMBED_Q5_K, EMBED_BINDINGS, EMBED_PUSH_BYTES;
     embed_q6_k: EMBED_Q6_K, EMBED_BINDINGS, EMBED_PUSH_BYTES;
+    embed_iq4_xs: EMBED_IQ4_XS, EMBED_BINDINGS, EMBED_PUSH_BYTES;
+    embed_iq3_s: EMBED_IQ3_S, EMBED_BINDINGS, EMBED_PUSH_BYTES;
     mat_vecs_q5_0: MUL_MAT_VECS_Q5_0, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
     mat_vecs_q4_0: MUL_MAT_VECS_Q4_0, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
     mat_vecs_q4_1: MUL_MAT_VECS_Q4_1, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
@@ -75,6 +77,8 @@ kernels! {
     mat_vecs_q4_k: MUL_MAT_VECS_Q4_K, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
     mat_vecs_q5_k: MUL_MAT_VECS_Q5_K, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
     mat_vecs_q6_k: MUL_MAT_VECS_Q6_K, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
+    mat_vecs_iq4_xs: MUL_MAT_VECS_IQ4_XS, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
+    mat_vecs_iq3_s: MUL_MAT_VECS_IQ3_S, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
     quantize_q8_1: QUANTIZE_Q8_1, QUANTIZE_BINDINGS, QUANTIZE_PUSH_BYTES;
     mul_mm_q8_0: MUL_MM_Q8_0, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
     mul_mm_q5_0: MUL_MM_Q5_0, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
@@ -84,6 +88,8 @@ kernels! {
     mul_mm_q4_k: MUL_MM_Q4_K, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
     mul_mm_q5_k: MUL_MM_Q5_K, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
     mul_mm_q6_k: MUL_MM_Q6_K, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
+    mul_mm_iq4_xs: MUL_MM_IQ4_XS, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
+    mul_mm_iq3_s: MUL_MM_IQ3_S, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
     map_f32: MAP_F32, MAP_BINDINGS, MAP_PUSH_BYTES;
     copy_b32: COPY_B32, MAP_BINDINGS, MAP_PUSH_BYTES;
     rows_f32: ROWS_F32, ops::ROWS_BINDINGS, ops::ROWS_PUSH_BYTES;
@@ -110,6 +116,8 @@ kernels! {
     moe_mat_vecs_q4_k: MOE_MAT_VECS_Q4_K, ops::MOE_MATVEC_BINDINGS, ops::MOE_MATVEC_PUSH_BYTES;
     moe_mat_vecs_q5_k: MOE_MAT_VECS_Q5_K, ops::MOE_MATVEC_BINDINGS, ops::MOE_MATVEC_PUSH_BYTES;
     moe_mat_vecs_q6_k: MOE_MAT_VECS_Q6_K, ops::MOE_MATVEC_BINDINGS, ops::MOE_MATVEC_PUSH_BYTES;
+    moe_mat_vecs_iq4_xs: MOE_MAT_VECS_IQ4_XS, ops::MOE_MATVEC_BINDINGS, ops::MOE_MATVEC_PUSH_BYTES;
+    moe_mat_vecs_iq3_s: MOE_MAT_VECS_IQ3_S, ops::MOE_MATVEC_BINDINGS, ops::MOE_MATVEC_PUSH_BYTES;
     moe_sort: MOE_SORT, ops::MOE_SORT_BINDINGS, ops::MOE_SORT_PUSH_BYTES;
     moe_mm_q8_0: MOE_MM_Q8_0, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
     moe_mm_q5_0: MOE_MM_Q5_0, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
@@ -119,6 +127,8 @@ kernels! {
     moe_mm_q4_k: MOE_MM_Q4_K, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
     moe_mm_q5_k: MOE_MM_Q5_K, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
     moe_mm_q6_k: MOE_MM_Q6_K, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
+    moe_mm_iq4_xs: MOE_MM_IQ4_XS, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
+    moe_mm_iq3_s: MOE_MM_IQ3_S, ops::MOE_MM_BINDINGS, ops::MOE_MM_PUSH_BYTES;
     moe_router: MOE_ROUTER, ops::ROUTER_BINDINGS, ops::ROUTER_PUSH_BYTES;
     paged_cache_write: PAGED_CACHE_WRITE, ops::PAGED_WRITE_BINDINGS, ops::PAGED_WRITE_PUSH_BYTES;
     paged_cache_write_f16: PAGED_CACHE_WRITE_F16, ops::PAGED_WRITE_BINDINGS, ops::PAGED_WRITE_PUSH_BYTES;
@@ -136,6 +146,9 @@ kernels! {
     ranked_draw: RANKED_DRAW, ops::RANKED_DRAW_BINDINGS, ops::RANKED_DRAW_PUSH_BYTES;
     penalize: PENALIZE, ops::PENALIZE_BINDINGS, ops::PENALIZE_PUSH_BYTES;
     paged_prefill_quant: PAGED_PREFILL_QUANT, ops::PAGED_PREFILL_BINDINGS, ops::PAGED_PREFILL_PUSH_BYTES;
+    paged_prefill_h256: PAGED_PREFILL_H256, ops::PAGED_PREFILL_BINDINGS, ops::PAGED_PREFILL_PUSH_BYTES;
+    paged_prefill_h256_f16: PAGED_PREFILL_H256_F16, ops::PAGED_PREFILL_BINDINGS, ops::PAGED_PREFILL_PUSH_BYTES;
+    paged_prefill_h256_quant: PAGED_PREFILL_H256_QUANT, ops::PAGED_PREFILL_BINDINGS, ops::PAGED_PREFILL_PUSH_BYTES;
     paged_decode_quant: PAGED_DECODE_QUANT, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
     paged_decode_h256: PAGED_DECODE_H256, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
     paged_decode_h256_f16: PAGED_DECODE_H256_F16, ops::PAGED_DECODE_BINDINGS, ops::PAGED_DECODE_PUSH_BYTES;
@@ -167,12 +180,14 @@ impl Kernels {
     }
 
     pub(crate) fn paged_prefill(&self, shape: ops::CacheShape) -> &Pipeline {
-        if shape.quant.is_some() {
-            &self.paged_prefill_quant
-        } else if shape.f16 {
-            &self.paged_prefill_f16
-        } else {
-            &self.paged_prefill
+        let wide = shape.head_size > ops::MAX_PAGED_NARROW_HEAD;
+        match (shape.quant.is_some(), shape.f16, wide) {
+            (true, _, false) => &self.paged_prefill_quant,
+            (true, _, true) => &self.paged_prefill_h256_quant,
+            (false, true, false) => &self.paged_prefill_f16,
+            (false, true, true) => &self.paged_prefill_h256_f16,
+            (false, false, false) => &self.paged_prefill,
+            (false, false, true) => &self.paged_prefill_h256,
         }
     }
 
@@ -187,6 +202,8 @@ impl Kernels {
             BlockType::Q4K => &self.moe_mat_vecs_q4_k,
             BlockType::Q5K => &self.moe_mat_vecs_q5_k,
             BlockType::Q6K => &self.moe_mat_vecs_q6_k,
+            BlockType::IQ4XS => &self.moe_mat_vecs_iq4_xs,
+            BlockType::IQ3S => &self.moe_mat_vecs_iq3_s,
         }
     }
 
@@ -201,6 +218,8 @@ impl Kernels {
             BlockType::Q4K => &self.moe_mm_q4_k,
             BlockType::Q5K => &self.moe_mm_q5_k,
             BlockType::Q6K => &self.moe_mm_q6_k,
+            BlockType::IQ4XS => &self.moe_mm_iq4_xs,
+            BlockType::IQ3S => &self.moe_mm_iq3_s,
         }
     }
 }
@@ -245,7 +264,7 @@ pub(crate) struct CoopKernels {
     mul_mm_cm2: Vec<Option<Pipeline>>,
 }
 // BlockType's variants
-const BLOCK_TYPES: usize = 8;
+const BLOCK_TYPES: usize = 10;
 // the cm2 kernels' tile (weight rows, and tokens of the prompt matmul), and their K step: a row a whole number of them
 const CM2_TILE: usize = 128;
 pub(crate) const CM2_K_STEP: usize = 64;
@@ -275,6 +294,8 @@ impl CoopKernels {
             (shaders::MUL_MMC_Q4_K, "mul_mmc_q4_k"),
             (shaders::MUL_MMC_Q5_K, "mul_mmc_q5_k"),
             (shaders::MUL_MMC_Q6_K, "mul_mmc_q6_k"),
+            (shaders::MUL_MMC_IQ4_XS, "mul_mmc_iq4_xs"),
+            (shaders::MUL_MMC_IQ3_S, "mul_mmc_iq3_s"),
         ]
         .map(|(spirv, name)| {
             PipelineSpec::new(spirv, MMC_BINDINGS, MMC_PUSH_BYTES, name).subgroup(subgroup)
@@ -288,6 +309,8 @@ impl CoopKernels {
             (shaders::MUL_MMCL_Q4_K, "mul_mmcl_q4_k"),
             (shaders::MUL_MMCL_Q5_K, "mul_mmcl_q5_k"),
             (shaders::MUL_MMCL_Q6_K, "mul_mmcl_q6_k"),
+            (shaders::MUL_MMCL_IQ4_XS, "mul_mmcl_iq4_xs"),
+            (shaders::MUL_MMCL_IQ3_S, "mul_mmcl_iq3_s"),
         ]
         .map(|(spirv, name)| {
             PipelineSpec::new(spirv, MMC_BINDINGS, MMC_PUSH_BYTES, name).subgroup(subgroup)
@@ -301,6 +324,8 @@ impl CoopKernels {
             (shaders::MOE_MMC_Q4_K, "moe_mmc_q4_k"),
             (shaders::MOE_MMC_Q5_K, "moe_mmc_q5_k"),
             (shaders::MOE_MMC_Q6_K, "moe_mmc_q6_k"),
+            (shaders::MOE_MMC_IQ4_XS, "moe_mmc_iq4_xs"),
+            (shaders::MOE_MMC_IQ3_S, "moe_mmc_iq3_s"),
         ]
         .map(|(spirv, name)| {
             PipelineSpec::new(spirv, MOE_MMC_BINDINGS, MOE_MMC_PUSH_BYTES, name).subgroup(subgroup)
@@ -535,6 +560,10 @@ pub enum BlockType {
     Q5K,
     /// 256 six-bit values, an int8 scale per 16
     Q6K,
+    /// 256 values as indices into a 16-entry nonlinear table, a 6-bit scale per 32
+    IQ4XS,
+    /// 256 values from a 512-entry grid of four, with signs, a 4-bit scale per 32
+    IQ3S,
 }
 
 impl BlockType {
@@ -549,13 +578,15 @@ impl BlockType {
             Self::Q4K => 144,
             Self::Q5K => 176,
             Self::Q6K => 210,
+            Self::IQ4XS => 136,
+            Self::IQ3S => 110,
         }
     }
 
     /// The values one stored block holds; a row's length is a multiple of it.
     pub fn block_values(self) -> usize {
         match self {
-            Self::Q4K | Self::Q5K | Self::Q6K => 256,
+            Self::Q4K | Self::Q5K | Self::Q6K | Self::IQ4XS | Self::IQ3S => 256,
             _ => BLOCK_VALUES,
         }
     }
@@ -688,6 +719,8 @@ impl Recorder<'_> {
             BlockType::Q4K => &kernels.embed_q4_k,
             BlockType::Q5K => &kernels.embed_q5_k,
             BlockType::Q6K => &kernels.embed_q6_k,
+            BlockType::IQ4XS => &kernels.embed_iq4_xs,
+            BlockType::IQ3S => &kernels.embed_iq3_s,
         };
         let bytes = push_words(&[
             op.vocab,
@@ -846,6 +879,8 @@ impl Recorder<'_> {
                 BlockType::Q4K => &kernels.mul_mm_q4_k,
                 BlockType::Q5K => &kernels.mul_mm_q5_k,
                 BlockType::Q6K => &kernels.mul_mm_q6_k,
+                BlockType::IQ4XS => &kernels.mul_mm_iq4_xs,
+                BlockType::IQ3S => &kernels.mul_mm_iq3_s,
             };
             let bytes = push_words(&[
                 op.rows,
@@ -904,6 +939,8 @@ impl Recorder<'_> {
             BlockType::Q4K => &kernels.mat_vecs_q4_k,
             BlockType::Q5K => &kernels.mat_vecs_q5_k,
             BlockType::Q6K => &kernels.mat_vecs_q6_k,
+            BlockType::IQ4XS => &kernels.mat_vecs_iq4_xs,
+            BlockType::IQ3S => &kernels.mat_vecs_iq3_s,
         };
         self.profile_shape(
             || format!("m={} n={} k={}", op.rows, op.x_rows, op.cols),

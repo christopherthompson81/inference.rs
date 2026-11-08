@@ -52,6 +52,115 @@ pub fn ssm_scan_step(step: &ScanStep<'_>) -> Result<Tensor> {
     }
 }
 
+/// The block types a [`BlockWeight`] takes, as ggml stores them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockKind {
+    Q8_0,
+    Q5_0,
+    Q4_0,
+    Q4_1,
+    Q5_1,
+    Q4K,
+    Q5K,
+    Q6K,
+    Iq4Xs,
+    Iq3S,
+}
+
+/// A weight of ggml blocks in a Vulkan device's memory: `(experts, rows, cols)`, one expert for a dense matrix.
+#[derive(Clone)]
+pub struct BlockWeight {
+    #[cfg(feature = "vulkan")]
+    buffer: std::sync::Arc<inference_vulkan::Buffer>,
+    kind: BlockKind,
+    dims: (usize, usize, usize),
+}
+
+impl std::fmt::Debug for BlockWeight {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BlockWeight")
+            .field("kind", &self.kind)
+            .field("dims", &self.dims)
+            .finish()
+    }
+}
+
+impl BlockWeight {
+    /// `bytes` (row-major blocks, `experts * rows` rows of `cols`) copied to `device`'s memory.
+    pub fn new(
+        device: &crate::Device,
+        kind: BlockKind,
+        dims: (usize, usize, usize),
+        bytes: &[u8],
+    ) -> Result<Self> {
+        #[cfg(feature = "vulkan")]
+        return Ok(Self {
+            buffer: crate::vulkan_backend::block_weight(device, kind, dims, bytes)?,
+            kind,
+            dims,
+        });
+        #[cfg(not(feature = "vulkan"))]
+        {
+            let _ = (device, kind, dims, bytes);
+            Err(crate::Error::NotCompiledWithVulkanSupport)
+        }
+    }
+
+    pub fn dims(&self) -> (usize, usize, usize) {
+        self.dims
+    }
+
+    /// `y[slot] = W[ids[slot]] x[slot / x_div]`: `x` f32 rows of `cols`, `ids` u32 `(tokens, k)`; `(slots, rows)`.
+    pub fn expert_mat_vec(&self, x: &Tensor, ids: &Tensor, x_div: usize) -> Result<Tensor> {
+        #[cfg(feature = "vulkan")]
+        return crate::vulkan_backend::expert_mat_vec(
+            &self.buffer,
+            crate::vulkan_backend::block_type(self.kind),
+            self.dims,
+            &x.to_dtype(crate::DType::F32)?.contiguous()?,
+            &ids.to_dtype(crate::DType::U32)?.contiguous()?,
+            x_div,
+        );
+        #[cfg(not(feature = "vulkan"))]
+        {
+            let _ = (x, ids, x_div);
+            Err(crate::Error::NotCompiledWithVulkanSupport)
+        }
+    }
+
+    /// The first expert's rows at the u32 `ids`, dequantized: `(ids, cols)` f32.
+    pub fn embedding(&self, ids: &Tensor) -> Result<Tensor> {
+        #[cfg(feature = "vulkan")]
+        return crate::vulkan_backend::block_embedding(
+            &self.buffer,
+            crate::vulkan_backend::block_type(self.kind),
+            (self.dims.1, self.dims.2),
+            ids,
+        );
+        #[cfg(not(feature = "vulkan"))]
+        {
+            let _ = ids;
+            Err(crate::Error::NotCompiledWithVulkanSupport)
+        }
+    }
+
+    /// `x (.., cols)` times the first expert's matrix transposed: `(.., rows)` f32.
+    pub fn matmul(&self, x: &Tensor) -> Result<Tensor> {
+        #[cfg(feature = "vulkan")]
+        return crate::vulkan_backend::block_matmul(
+            &self.buffer,
+            crate::vulkan_backend::block_type(self.kind),
+            (self.dims.1, self.dims.2),
+            x,
+        );
+        #[cfg(not(feature = "vulkan"))]
+        {
+            let _ = x;
+            Err(crate::Error::NotCompiledWithVulkanSupport)
+        }
+    }
+}
+
 /// RoPE as inference_quant's CPU kernel takes it: `x` `(batch, heads, seq, head_dim)`, `cos`/`sin` `(rows, rot)` rows
 /// a position (`positions` `(batch seq,)` u32 picks them), a token (`batch seq` rows) or a sequence index (`seq` rows);
 /// `None` where the device or dtypes have no kernel.
