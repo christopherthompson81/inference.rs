@@ -118,7 +118,7 @@ mod vulkan_tests {
     use super::{GdnOutputGate, RmsNormGated};
 
     // the one-pass Vulkan norm against the composite on the CPU: both gates, a decode row (whose norm also writes int8
-    // blocks for the next matvec) and a prompt's rows, 16 heads of 128
+    // blocks for the next matvec), a prompt's rows, and a long prompt's head rows past one grid dimension; 16 heads of 128
     #[test]
     fn vulkan_gated_gdn_norm_matches_the_cpu() -> Result<()> {
         let Ok(vk) = Device::new_vulkan(0) else {
@@ -138,7 +138,8 @@ mod vulkan_tests {
                 eps: 1e-6,
                 gate,
             };
-            for rows in [1usize, 37] {
+            // 4200 tokens: 67,200 head rows
+            for rows in [1usize, 37, 4200] {
                 let x = Tensor::randn(0f32, 1.0, (rows, 16, 128), &cpu)?;
                 let g = Tensor::randn(0f32, 2.0, (rows, 16, 128), &cpu)?;
                 let want = norm.forward(&x, &g)?;

@@ -590,13 +590,18 @@ impl Recorder<'_> {
     }
 
     pub fn gated_rmsnorm(&self, op: &GatedRmsNorm<'_>) -> Result<()> {
-        // groups across x and rows down y, so a long prompt's rows fit the grid
-        let grid = [op.groups as u32, op.rows as u32, 1];
+        // groups across x, rows down y and on through z
+        let rows_y = op.rows.min(MAX_DISPATCH_GROUPS);
+        let grid = [
+            op.groups as u32,
+            rows_y as u32,
+            op.rows.div_ceil(rows_y.max(1)) as u32,
+        ];
         if op.rows == 0
             || op.groups == 0
             || op.group_size == 0
-            || op.rows > MAX_DISPATCH_GROUPS
             || op.groups > MAX_DISPATCH_GROUPS
+            || op.rows.div_ceil(rows_y) > MAX_DISPATCH_GROUPS
         {
             return Err(Error::Invalid(format!(
                 "gated RMSNorm of {} rows of {} groups of {}",
@@ -623,7 +628,7 @@ impl Recorder<'_> {
             let s_off = op.rows * cols / crate::kernels::BLOCK_VALUES
                 * crate::kernels::Q8_WORD_BYTES
                 / crate::kernels::Q8_SCALE_BYTES;
-            bytes.extend(words(&[s_off, mode])?);
+            bytes.extend(words(&[s_off, mode, op.rows])?);
             let buffers = [op.x.0, op.gate.0, op.weight.0, op.out, &blocks, &blocks];
             self.context.kernels.gated_rmsnorm_q8.dispatch(
                 self,
@@ -638,7 +643,7 @@ impl Recorder<'_> {
             }
             return Ok(());
         }
-        bytes.extend(words(&[mode])?);
+        bytes.extend(words(&[mode, op.rows])?);
         let buffers = [op.x.0, op.gate.0, op.weight.0, op.out];
         self.context
             .kernels
@@ -827,7 +832,7 @@ pub(crate) const RMS_Q8_BINDINGS: usize = 5;
 // rms_norm_q8's widest row: its 1024 threads hold 4 values a pass, 4 passes
 const RMS_Q8_MAX_COLS: usize = 16384;
 pub(crate) const GATED_Q8_BINDINGS: usize = 6;
-pub(crate) const GATED_Q8_PUSH_BYTES: u32 = 8 * 4;
+pub(crate) const GATED_Q8_PUSH_BYTES: u32 = 9 * 4;
 pub(crate) const RMS_Q8_PUSH_BYTES: u32 = 7 * 4;
 pub(crate) const MOE_SORT_PUSH_BYTES: u32 = 5 * 4;
 pub(crate) const MOE_MM_BINDINGS: usize = 5;
@@ -1199,7 +1204,7 @@ pub(crate) const PAGED_WRITE_QUANT_PUSH_BYTES: u32 = 9 * 4;
 pub(crate) const PAGED_DECODE_BINDINGS: usize = 6;
 pub(crate) const PAGED_DECODE_PUSH_BYTES: u32 = 12 * 4;
 pub(crate) const GATED_RMSNORM_BINDINGS: usize = 4;
-pub(crate) const GATED_RMSNORM_PUSH_BYTES: u32 = 7 * 4;
+pub(crate) const GATED_RMSNORM_PUSH_BYTES: u32 = 8 * 4;
 pub(crate) const PAGED_PREFILL_BINDINGS: usize = 5;
 pub(crate) const PAGED_PREFILL_PUSH_BYTES: u32 = 13 * 4;
 pub(crate) const HADAMARD_BINDINGS: usize = 2;

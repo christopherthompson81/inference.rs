@@ -21,6 +21,8 @@ layout(push_constant) uniform PushConstants {
     uint weight_off;
     // bit 0: the norm first and the gate after (Gated DeltaNet's), bit 1: a sigmoid gate rather than SiLU
     uint mode;
+    // rows down y and on through z (a long prompt's rows past one grid dimension), the last slice's overhang idle
+    uint rows;
 } pc;
 
 const uint THREADS = 256;
@@ -48,7 +50,10 @@ float scaled(uint i, float s) {
 }
 
 void main() {
-    uint row = gl_WorkGroupID.y;
+    uint row = gl_WorkGroupID.z * gl_NumWorkGroups.y + gl_WorkGroupID.y;
+    if (row >= pc.rows) {
+        return;
+    }
     uint group = gl_WorkGroupID.x;
     uint t = gl_LocalInvocationID.x;
     uint base = (row * pc.groups + group) * pc.group_size;
