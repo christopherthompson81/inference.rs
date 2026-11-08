@@ -101,6 +101,7 @@ impl Glm4MoeLiteConfig {
                     self.moe_intermediate_size * self.n_shared_experts,
                 )),
                 router: self.router_config(),
+                expert_proj_names: crate::moe::ExpertProjNames::DEFAULT,
             }),
             attn: MlaConfig {
                 q_lora_rank: Some(self.q_lora_rank),

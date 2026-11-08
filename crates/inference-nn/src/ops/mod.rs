@@ -78,6 +78,8 @@ mod ssm_cpu;
 pub use ssm_cpu::*;
 mod rwkv;
 pub use rwkv::*;
+mod kda;
+pub use kda::*;
 #[cfg(feature = "cuda")]
 mod rope;
 #[cfg(feature = "cuda")]

@@ -926,7 +926,19 @@ pub(crate) fn resolve_map_setting(
         let planned = probe.planned_context(params)?;
         let fits_resident =
             !offloadable || probe.fits(None, &planned, probe.activations(params)?)?;
-        let chosen = offload_cache_type(cache, offloadable, asked, || Ok(fits_resident))?;
+        // an MLA latent cache keeps the model's dtype
+        let model_config = sizing.loader.model_config(sizing.config)?;
+        let latent = (0..model_config.num_layers()).any(|layer| {
+            matches!(
+                model_config.kv_cache_layout_for_layer(layer),
+                inference_nn::paged_attention::KvCacheLayout::Mla { .. }
+            )
+        });
+        let chosen = if latent {
+            cache
+        } else {
+            offload_cache_type(cache, offloadable, asked, || Ok(fits_resident))?
+        };
         if let Some(cfg) = paged_attn_config.as_mut() {
             if chosen != cache {
                 info!(

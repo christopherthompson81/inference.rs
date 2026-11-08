@@ -267,6 +267,10 @@ pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; NORMAL_LOADER_TYPE_COUN
         loader: NormalLoaderType::Qrwkv6,
         build: build_rwkv6qwen2,
     },
+    NormalConfigBuilder {
+        loader: NormalLoaderType::KimiLinear,
+        build: build_kimi_linear,
+    },
 ];
 
 pub fn synthesize_normal_config(
@@ -2157,6 +2161,106 @@ fn build_rwkv6qwen2(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     Ok(JsonValue::Object(config))
 }
 
+// the converter marks a KDA layer with no key/value heads and an MLA layer with one (its latent cache's); the
+// checkpoint numbers its full layers from one
+fn build_kimi_linear(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
+    let layers = metadata.required_usize("block_count")?;
+    let kv_heads = metadata.required_usize_values("attention.head_count_kv")?;
+    let full_attn_layers = (0..layers)
+        .filter(|&layer| {
+            kv_heads
+                .get(layer)
+                .or(kv_heads.first())
+                .is_some_and(|n| *n > 0)
+        })
+        .map(|layer| layer + 1)
+        .collect::<Vec<_>>();
+    let heads = metadata.required_usize("attention.head_count")?;
+    let rope = metadata.required_usize("rope.dimension_count")?;
+    let mut config = JsonMap::new();
+    config.insert("vocab_size".into(), json!(metadata.vocab_size()?));
+    config.insert(
+        "hidden_size".into(),
+        json!(metadata.required_usize("embedding_length")?),
+    );
+    config.insert("num_hidden_layers".into(), json!(layers));
+    config.insert(
+        "intermediate_size".into(),
+        json!(metadata.required_uniform_usize("feed_forward_length")?),
+    );
+    config.insert("num_attention_heads".into(), json!(heads));
+    config.insert("rms_norm_eps".into(), json!(metadata.norm_epsilon()?));
+    config.insert(
+        "tie_word_embeddings".into(),
+        json!(metadata.tie_word_embeddings()),
+    );
+    config.insert(
+        "q_lora_rank".into(),
+        json!(metadata.optional_usize("attention.q_lora_rank")?),
+    );
+    config.insert(
+        "kv_lora_rank".into(),
+        json!(metadata.required_usize("attention.kv_lora_rank")?),
+    );
+    config.insert("qk_rope_head_dim".into(), json!(rope));
+    config.insert(
+        "qk_nope_head_dim".into(),
+        json!(metadata.required_usize("attention.key_length_mla")? - rope),
+    );
+    config.insert(
+        "v_head_dim".into(),
+        json!(metadata.required_usize("attention.value_length_mla")?),
+    );
+    config.insert("mla_use_nope".into(), json!(true));
+    config.insert(
+        "num_experts".into(),
+        json!(metadata.required_usize("expert_count")?),
+    );
+    config.insert(
+        "num_experts_per_token".into(),
+        json!(metadata.required_usize("expert_used_count")?),
+    );
+    config.insert(
+        "moe_intermediate_size".into(),
+        json!(metadata.required_uniform_usize("expert_feed_forward_length")?),
+    );
+    config.insert(
+        "num_shared_experts".into(),
+        json!(metadata.optional_usize("expert_shared_count")?.unwrap_or(0)),
+    );
+    config.insert(
+        "first_k_dense_replace".into(),
+        json!(
+            metadata
+                .optional_usize("leading_dense_block_count")?
+                .unwrap_or(0)
+        ),
+    );
+    config.insert(
+        "routed_scaling_factor".into(),
+        json!(
+            metadata
+                .optional_f64("expert_weights_scale")?
+                .unwrap_or(1.0)
+        ),
+    );
+    config.insert(
+        "model_max_length".into(),
+        json!(metadata.required_usize("context_length")?),
+    );
+    config.insert(
+        "linear_attn_config".into(),
+        json!({
+            "full_attn_layers": full_attn_layers,
+            "head_dim": metadata.required_usize("kda.head_dim")?,
+            "num_heads": heads,
+            "short_conv_kernel_size": metadata.required_usize("ssm.conv_kernel")?,
+        }),
+    );
+    config.insert("quantization_config".into(), JsonValue::Null);
+    Ok(JsonValue::Object(config))
+}
+
 fn build_olmoe(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     reject_unsupported_rope_scaling(metadata, "OLMoE")?;
     let intermediate_size = match metadata.optional_usize("expert_feed_forward_length")? {
@@ -3629,8 +3733,8 @@ mod tests {
         pub use inference_models_llama::{llama, mistral, mixtral, smollm3};
         pub use inference_models_other::{
             deepseek, ernie4_5, falcon_h1, glm4, glm4_moe, glm4_moe_lite, gpt_oss, granite,
-            hunyuan_v1_dense, hunyuan_v1_moe, jamba, lfm2, mamba, mamba2, nemotron_h, olmo,
-            rwkv_hybrid, rwkv6, rwkv7, starcoder2,
+            hunyuan_v1_dense, hunyuan_v1_moe, jamba, kimi_linear, lfm2, mamba, mamba2, nemotron_h,
+            olmo, rwkv_hybrid, rwkv6, rwkv7, starcoder2,
         };
         pub use inference_models_phi::{phi2, phi3, phi3_5_moe};
         pub use inference_models_qwen::{qwen1, qwen2, qwen2_moe, qwen3, qwen3_moe, qwen3_next};
@@ -3707,6 +3811,7 @@ mod tests {
                 | NormalLoaderType::Phi3_5MoE
                 | NormalLoaderType::DeepSeekV2
                 | NormalLoaderType::DeepSeekV3
+                | NormalLoaderType::KimiLinear
                 | NormalLoaderType::GLM4MoeLite
                 | NormalLoaderType::GLM4Moe
                 | NormalLoaderType::Qwen2Moe
@@ -3809,11 +3914,17 @@ mod tests {
             );
         }
 
+        if matches!(loader, NormalLoaderType::KimiLinear) {
+            insert_u32(&mut metadata, architecture, "kda.head_dim", 64);
+            insert_u32(&mut metadata, architecture, "ssm.conv_kernel", 4);
+            tensors.push("blk.0.ssm_f_a.weight".to_string());
+        }
         if matches!(
             loader,
             NormalLoaderType::DeepSeekV2
                 | NormalLoaderType::DeepSeekV3
                 | NormalLoaderType::GLM4MoeLite
+                | NormalLoaderType::KimiLinear
         ) {
             insert_u32(&mut metadata, architecture, "rope.dimension_count", 32);
             insert_u32(&mut metadata, architecture, "attention.q_lora_rank", 128);
@@ -4106,6 +4217,9 @@ mod tests {
             }
             NormalLoaderType::Qrwkv6 => {
                 assert_deserializes(loader, config, models::rwkv_hybrid::Qrwkv6Config::from_json)
+            }
+            NormalLoaderType::KimiLinear => {
+                assert_deserializes(loader, config, models::kimi_linear::Config::from_json)
             }
             NormalLoaderType::GptOss => {
                 assert_deserializes(loader, config, models::gpt_oss::Config::from_json)

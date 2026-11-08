@@ -40,6 +40,7 @@ pub mod graph_metadata;
 pub mod indexed_copy;
 #[cfg(feature = "cuda")]
 pub mod input_packing;
+pub mod kda;
 pub mod moe;
 #[cfg(feature = "cuda")]
 pub mod phase_timer;

@@ -261,6 +261,7 @@ inference_tensor::gpu_cases!(
         cuda_rwkv7_fused_time_mix_matches_the_composite,
         cuda_rwkv6_fused_time_mix_matches_the_composite,
         cuda_qrwkv6_fused_time_mix_matches_the_composite,
+        cuda_kda_matches_the_composite,
         cuda_mamba_gated_rmsnorm_matches_the_composite,
         cuda_qk_norm_rope_positions_preserves_projection_layout,
         cuda_qk_norm_rope_writes_token_major_from_packed_projection,
@@ -1375,6 +1376,70 @@ fn cuda_qrwkv6_fused_time_mix_matches_the_composite() -> inference_tensor::Resul
                 "qrwkv6 {label} at head size {n}: max error {error} at scale {scale}"
             );
         }
+    }
+    Ok(())
+}
+
+// KDA's kernel against the CPU composite at both head sizes: two sequences of 30 steps whose states are rows 2 and 0
+// of a three-row pool, as the hybrid cache's CUDA checkout hands them over
+#[cfg(feature = "cuda")]
+fn cuda_kda_matches_the_composite() -> inference_tensor::Result<()> {
+    const B: usize = 2;
+    const T: usize = 30;
+    const H: usize = 2;
+    const POOL: usize = 3;
+    const NORM_EPS: f64 = 1e-5;
+    const TOLERANCE: f32 = 1e-4;
+    let device = Device::new_cuda(0)?;
+    for n in [64, 128] {
+        let rand = |shape: &[usize], std: f32| Tensor::randn(0f32, std, shape, &Device::Cpu);
+        let inputs =
+            [0, 1, 2, 3, 4].map(|i| rand(&[B, T, H * n], if i == 3 { 2.0 } else { 0.5 }).unwrap());
+        let b = rand(&[B, T, H], 1.0)?;
+        let (dt_bias, a_log, norm_w) = (rand(&[H * n], 0.5)?, rand(&[H], 0.5)?, rand(&[n], 0.5)?);
+        let state = rand(&[POOL, H, n, n], 0.5)?;
+        let slots = Tensor::new(&[2u32, 0], &Device::Cpu)?;
+        let run = |device: &Device| -> inference_tensor::Result<(Tensor, Tensor)> {
+            let on = |t: &Tensor| t.to_device(device);
+            let [q, k, v, f, gate] = inputs.each_ref().map(|t| on(t).unwrap());
+            let (b, dt_bias, a_log, norm_w) = (on(&b)?, on(&dt_bias)?, on(&a_log)?, on(&norm_w)?);
+            let (state, slots) = (on(&state)?.copy()?, on(&slots)?);
+            let y = super::kda(
+                super::Kda {
+                    q: &q,
+                    k: &k,
+                    v: &v,
+                    f: &f,
+                    gate: &gate,
+                    b: &b,
+                    dt_bias: &dt_bias,
+                    a_log: &a_log,
+                    norm_w: &norm_w,
+                    norm_eps: NORM_EPS,
+                    heads: H,
+                    head_dim: n,
+                    slots: Some(&slots),
+                },
+                &state,
+            )?;
+            Ok((y.to_device(&Device::Cpu)?, state.to_device(&Device::Cpu)?))
+        };
+        let (want_y, want_state) = run(&Device::Cpu)?;
+        let (y, gpu_state) = run(&device)?;
+        for (label, actual, want) in [("output", &y, &want_y), ("state", &gpu_state, &want_state)] {
+            let error = (actual - want)?.abs()?.max_all()?.to_scalar::<f32>()?;
+            let scale = want.abs()?.max_all()?.to_scalar::<f32>()?;
+            assert!(
+                error < TOLERANCE * scale.max(1.0),
+                "kda {label} at head size {n}: max error {error} at scale {scale}"
+            );
+        }
+        // the pool row no sequence names stays as it was
+        let untouched = (gpu_state.get(1)? - state.get(1)?)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        assert_eq!(untouched, 0.0, "kda wrote pool row 1 at head size {n}");
     }
     Ok(())
 }

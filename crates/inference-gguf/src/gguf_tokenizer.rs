@@ -31,6 +31,9 @@ const RWKV_TOKENIZER_MODEL: &str = "rwkv";
 const GPT2_REGEX: &str =
     "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)";
 const LLAMA3_REGEX: &str = "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
+/// Kimi K2's split (`tokenization_kimi.py`'s `pat_str`): Han runs apart from other letters, which the intersections
+/// leave out of the word runs.
+pub const KIMI_K2_REGEX: &str = r"[\p{Han}]+|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 const QWEN2_REGEX: &str = "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
 const QWEN35_REGEX: &str = "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?[\\p{L}\\p{M}]+|\\p{N}| ?[^\\s\\p{L}\\p{M}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
 // llama.cpp's falcon split: runs of punctuation, GPT-2's split, then digits in threes
@@ -577,6 +580,7 @@ enum BpePreTokenizerKind {
     Gpt4O,
     Tekken,
     Falcon,
+    KimiK2,
 }
 
 #[derive(Debug)]
@@ -605,6 +609,12 @@ fn bpe_pre_tokenizer_spec(pre: Option<&str>) -> Result<BpePreTokenizerSpec> {
         "dbrx" => BpePreTokenizerSpec {
             kind: BpePreTokenizerKind::Dbrx,
             regexes: &[LLAMA3_REGEX],
+            ignore_merges: false,
+            normalize_nfc: false,
+        },
+        "kimi-k2" => BpePreTokenizerSpec {
+            kind: BpePreTokenizerKind::KimiK2,
+            regexes: &[KIMI_K2_REGEX],
             ignore_merges: false,
             normalize_nfc: false,
         },

@@ -268,6 +268,17 @@ impl SupportedArch for NormalLoaderType {
                     ex!("mradermacher/ARWKV-R1-1B5-GGUF", "GGUF"),
                 ],
             },
+            Self::KimiLinear => ArchMetadata {
+                families: &["Kimi-Linear"],
+                modalities: m,
+                examples: &[
+                    ex!("moonshotai/Kimi-Linear-48B-A3B-Instruct"),
+                    ex!(
+                        "bartowski/moonshotai_Kimi-Linear-48B-A3B-Instruct-GGUF",
+                        "GGUF"
+                    ),
+                ],
+            },
             Self::Qrwkv6 => ArchMetadata {
                 families: &["QRWKV6"],
                 modalities: m,

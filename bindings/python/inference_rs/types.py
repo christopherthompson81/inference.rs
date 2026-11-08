@@ -283,6 +283,7 @@ class NormalLoaderType(str, Enum):
     RWKV6 = "rwkv6"
     RWKV7 = "rwkv7"
     ARWKV = "arwkv"
+    KIMI_LINEAR = "kimi_linear"
     QRWKV6 = "qrwkv6"
     MAMBA = "mamba"
     FALCON_MAMBA = "falcon_mamba"

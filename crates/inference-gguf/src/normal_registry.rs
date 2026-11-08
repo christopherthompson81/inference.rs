@@ -2,8 +2,8 @@ use inference_nn::loaders::NormalLoaderType;
 pub use inference_nn::model::RopePairing;
 use std::{error::Error, fmt, str::FromStr};
 
-pub const NORMAL_LOADER_TYPE_COUNT: usize = 52;
-pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 45;
+pub const NORMAL_LOADER_TYPE_COUNT: usize = 53;
+pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 46;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CanonicalGgufArchitecture {
@@ -52,6 +52,7 @@ pub enum CanonicalGgufArchitecture {
     Rwkv6,
     Arwkv7,
     Rwkv6Qwen2,
+    KimiLinear,
 }
 
 impl CanonicalGgufArchitecture {
@@ -102,6 +103,7 @@ impl CanonicalGgufArchitecture {
             Self::Rwkv6 => "rwkv6",
             Self::Arwkv7 => "arwkv7",
             Self::Rwkv6Qwen2 => "rwkv6qwen2",
+            Self::KimiLinear => "kimi-linear",
         }
     }
 }
@@ -162,6 +164,7 @@ impl FromStr for CanonicalGgufArchitecture {
             "rwkv6" => Ok(Self::Rwkv6),
             "arwkv7" => Ok(Self::Arwkv7),
             "rwkv6qwen2" => Ok(Self::Rwkv6Qwen2),
+            "kimi-linear" => Ok(Self::KimiLinear),
             _ => Err(NormalGgufRegistryError::UnknownArchitecture(
                 value.to_string(),
             )),
@@ -533,6 +536,9 @@ const RWKV7_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Rwkv7];
 const RWKV6_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Rwkv6];
 const ARWKV7_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Arwkv];
 const RWKV6_QWEN2_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Qrwkv6];
+const KIMI_LINEAR_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::KimiLinear];
+// the KDA layers' decay LoRA
+const KIMI_LINEAR_TENSORS: &[&str] = &[".ssm_f_a."];
 // both RWKV versions fuse their token-shift mixes into one tensor
 const RWKV7_TENSORS: &[&str] = &[".time_mix_lerp_fused."];
 const OLMO_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Olmo];
@@ -904,6 +910,15 @@ pub const GGUF_SCHEMAS: &[GgufSchema; CANONICAL_GGUF_ARCHITECTURE_COUNT] = &[
         rope_pairing: RopePairing::HalfSplit,
         required_metadata: NO_REQUIREMENTS,
         required_tensors: RWKV7_TENSORS,
+        unsupported_metadata: NO_REQUIREMENTS,
+    },
+    // its MLA layers carry no positions: the pairing is never used
+    GgufSchema {
+        architecture: CanonicalGgufArchitecture::KimiLinear,
+        compatible_loaders: KIMI_LINEAR_LOADERS,
+        rope_pairing: RopePairing::HalfSplit,
+        required_metadata: NO_REQUIREMENTS,
+        required_tensors: KIMI_LINEAR_TENSORS,
         unsupported_metadata: NO_REQUIREMENTS,
     },
     GgufSchema {
@@ -1292,6 +1307,15 @@ pub const NORMAL_MODEL_ADAPTERS: &[NativeModelAdapter; NORMAL_LOADER_TYPE_COUNT]
         loader: NormalLoaderType::Arwkv,
         architectures: &[CanonicalGgufArchitecture::Arwkv7],
         layouts: &[GgufLayout::Direct, GgufLayout::PerLayerInventory],
+    },
+    NativeModelAdapter {
+        loader: NormalLoaderType::KimiLinear,
+        architectures: &[CanonicalGgufArchitecture::KimiLinear],
+        layouts: &[
+            GgufLayout::Direct,
+            GgufLayout::StackedExperts,
+            GgufLayout::PerLayerInventory,
+        ],
     },
     NativeModelAdapter {
         loader: NormalLoaderType::Qrwkv6,

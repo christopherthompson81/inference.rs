@@ -145,7 +145,7 @@ impl FamilyLoaderSpec {
         )
     }
 
-    fn attention_elems(&self, weight_pack_factor: usize) -> usize {
+    pub(super) fn attention_elems(&self, weight_pack_factor: usize) -> usize {
         let h = self.hidden_size;
         let heads = self.num_attention_heads;
         match self.attention {
@@ -194,7 +194,7 @@ impl FamilyLoaderSpec {
         }
     }
 
-    fn mlp_elems(&self, layer_idx: usize, weight_pack_factor: usize) -> usize {
+    pub(super) fn mlp_elems(&self, layer_idx: usize, weight_pack_factor: usize) -> usize {
         let h = self.hidden_size;
         match self.moe_layer(layer_idx) {
             Some(moe) => {
@@ -237,6 +237,10 @@ impl FamilyLoaderSpec {
 
     /// KV planning sizes a paged cache, so MLA reports what the model does under paged attention on CUDA.
     pub fn model_config(&self) -> Box<dyn ModelConfigLike> {
+        Box::new(self.metadata())
+    }
+
+    pub(super) fn metadata(&self) -> ModelConfigMetadata {
         let (v_head_dim, kv_cache_layout) = match self.attention {
             AttentionSizing::Mla {
                 q_head_dim,
@@ -259,7 +263,7 @@ impl FamilyLoaderSpec {
                 crate::paged_attention::KvCacheLayout::Standard,
             ),
         };
-        Box::new(ModelConfigMetadata {
+        ModelConfigMetadata {
             max_seq_len: self.max_position_embeddings,
             num_layers: self.num_hidden_layers,
             hidden_size: self.hidden_size,
@@ -269,7 +273,7 @@ impl FamilyLoaderSpec {
             k_head_dim: self.k_head_dim,
             v_head_dim,
             kv_cache_layout,
-        })
+        }
     }
 }
 

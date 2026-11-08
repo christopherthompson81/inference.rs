@@ -124,15 +124,19 @@ struct TekkenTokenizer {
     special_tokens: Vec<TekkenSpecialToken>,
 }
 
-/// The tokenizer files a checkpoint may ship in place of `tokenizer.json`: Mistral's and Qwen 1's tiktoken ranks, and
-/// RWKV's world vocabulary.
+/// The tokenizer files a checkpoint may ship in place of `tokenizer.json`: Mistral's, Qwen 1's and Kimi's tiktoken
+/// ranks, and RWKV's world vocabulary.
 pub(crate) const TEKKEN_TOKENIZER: &str = "tekken.json";
 pub(crate) const QWEN_TIKTOKEN_TOKENIZER: &str = "qwen.tiktoken";
-pub(crate) const NATIVE_TOKENIZERS: [&str; 3] = [
+pub(crate) const KIMI_TIKTOKEN_TOKENIZER: &str = "tiktoken.model";
+pub(crate) const NATIVE_TOKENIZERS: [&str; 4] = [
     TEKKEN_TOKENIZER,
     QWEN_TIKTOKEN_TOKENIZER,
+    KIMI_TIKTOKEN_TOKENIZER,
     inference_gguf::rwkv_tokenizer::RWKV_VOCAB_FILE,
 ];
+// tokenization_kimi.py: the specials follow the ranks, two past its reserved count
+const KIMI_SPECIALS: usize = 256 + 2;
 // the embedding's rows when a vocabulary file's config does not say
 const RWKV_DEFAULT_VOCAB: usize = 65_536;
 const RWKV_ADDED_TOKENS: &str = "added_tokens.json";
@@ -188,16 +192,50 @@ fn load_tekken_tokenizer<P: AsRef<Path>>(path: P) -> Result<Tokenizer> {
 }
 
 // Lines of `<base64 token> <rank>`
-fn load_qwen_tiktoken<P: AsRef<Path>>(path: P) -> Result<Tokenizer> {
+fn tiktoken_ranks(path: &Path) -> Result<HashMap<Vec<u8>, u32>> {
     let raw = std::fs::read_to_string(path)?;
     let mut bpe_ranks: HashMap<Vec<u8>, u32> = HashMap::new();
     for line in raw.lines().filter(|line| !line.is_empty()) {
         let (token, rank) = line
             .split_once(' ')
-            .ok_or_else(|| anyhow!("qwen.tiktoken line without a rank: {line:?}"))?;
+            .ok_or_else(|| anyhow!("tiktoken line without a rank: {line:?}"))?;
         let token = base64::engine::general_purpose::STANDARD.decode(token)?;
         bpe_ranks.insert(token, rank.parse()?);
     }
+    Ok(bpe_ranks)
+}
+
+// Kimi's specials take the tokenizer config's names, `<|reserved_token_N|>` where it gives none
+fn load_kimi_tiktoken(path: &Path) -> Result<Tokenizer> {
+    let bpe_ranks = tiktoken_ranks(path)?;
+    let names = std::fs::read_to_string(path.with_file_name(TOKENIZER_CONFIG))
+        .ok()
+        .and_then(|config| serde_json::from_str::<serde_json::Value>(&config).ok())
+        .and_then(|config| config.get(ADDED_TOKENS_DECODER).cloned())
+        .and_then(|decoder| decoder.as_object().cloned())
+        .unwrap_or_default();
+    #[allow(clippy::cast_possible_truncation)]
+    let first_special = bpe_ranks.len() as u32;
+    #[allow(clippy::cast_possible_truncation)]
+    let specials = (first_special..first_special + KIMI_SPECIALS as u32)
+        .map(|id| {
+            let name = names
+                .get(&id.to_string())
+                .and_then(|token| token.get("content")?.as_str().map(str::to_string))
+                .unwrap_or_else(|| format!("<|reserved_token_{id}|>"));
+            (name, id)
+        })
+        .collect();
+    bpe_from_ranks(
+        &bpe_ranks,
+        0,
+        specials,
+        inference_gguf::KIMI_K2_REGEX.to_string(),
+    )
+}
+
+fn load_qwen_tiktoken<P: AsRef<Path>>(path: P) -> Result<Tokenizer> {
+    let bpe_ranks = tiktoken_ranks(path.as_ref())?;
     #[allow(clippy::cast_possible_truncation)]
     let first_special = bpe_ranks.len() as u32;
     let names = QWEN_SPECIALS
@@ -314,6 +352,7 @@ pub(crate) fn get_tokenizer<P: AsRef<Path> + Clone>(
     let native = match p.as_ref().file_name().and_then(|name| name.to_str()) {
         Some(TEKKEN_TOKENIZER) => Some(load_tekken_tokenizer(p.clone())?),
         Some(QWEN_TIKTOKEN_TOKENIZER) => Some(load_qwen_tiktoken(p.clone())?),
+        Some(KIMI_TIKTOKEN_TOKENIZER) => Some(load_kimi_tiktoken(p.as_ref())?),
         Some(inference_gguf::rwkv_tokenizer::RWKV_VOCAB_FILE) => Some(load_rwkv_vocab(p.as_ref())?),
         _ => None,
     };
@@ -356,7 +395,8 @@ pub(crate) fn get_tokenizer<P: AsRef<Path> + Clone>(
 #[cfg(test)]
 mod tests {
     use super::{
-        load_qwen_tiktoken, merge_config_added_tokens, repair_tokenizer_json, tokenizer_from_bytes,
+        load_kimi_tiktoken, load_qwen_tiktoken, merge_config_added_tokens, repair_tokenizer_json,
+        tokenizer_from_bytes,
     };
     use base64::Engine;
     use serde_json::{Value, json};
@@ -417,6 +457,45 @@ mod tests {
             tokenizer.token_to_id("<|extra_204|>"),
             Some(MERGED_RANK + 1 + 3 + 204)
         );
+        Ok(())
+    }
+
+    // Kimi's specials follow the ranks under the config's names, unnamed ones reserved; a Han run splits from the
+    // letters after it, which its split keeps out of the word runs
+    #[test]
+    fn a_kimi_tiktoken_file_names_its_specials_from_the_config_and_splits_han_apart()
+    -> anyhow::Result<()> {
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let han = "\u{4e2d}".as_bytes();
+        let han_a = [han, b"a"].concat();
+        // the byte ranks, then the Han character's prefix, the character, and the character with `a`
+        let mut ranks = (0..=u8::MAX)
+            .map(|byte| format!("{} {byte}", encode(&[byte])))
+            .collect::<Vec<_>>();
+        let pieces = [&han[..2], han, &han_a[..]];
+        let base = 256u32;
+        for (rank, piece) in (base..).zip(pieces) {
+            ranks.push(format!("{} {rank}", encode(piece)));
+        }
+        let (han_id, first_special) = (base + 1, base + 3);
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join(super::KIMI_TIKTOKEN_TOKENIZER);
+        std::fs::write(&path, ranks.join("\n"))?;
+        std::fs::write(
+            dir.path().join(super::TOKENIZER_CONFIG),
+            json!({"added_tokens_decoder": {first_special.to_string(): {"content": "[BOS]"}}})
+                .to_string(),
+        )?;
+        let tokenizer = load_kimi_tiktoken(&path)?;
+        assert_eq!(tokenizer.token_to_id("[BOS]"), Some(first_special));
+        assert_eq!(
+            tokenizer.token_to_id(&format!("<|reserved_token_{}|>", first_special + 1)),
+            Some(first_special + 1)
+        );
+        let encoding = tokenizer
+            .encode(std::str::from_utf8(&han_a)?, false)
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(encoding.get_ids(), [han_id, u32::from(b'a')]);
         Ok(())
     }
 

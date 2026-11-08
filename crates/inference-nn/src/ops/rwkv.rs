@@ -356,7 +356,7 @@ pub fn qrwkv6_time_mix(tm: TimeMixQrwkv6<'_>, state: &Tensor) -> Result<Tensor> 
 }
 
 // copies the advanced state back into the caller's tensor
-struct WriteState<'a>(&'a [f32]);
+pub(crate) struct WriteState<'a>(pub(crate) &'a [f32]);
 
 impl inference_tensor::InplaceOp1 for WriteState<'_> {
     fn name(&self) -> &'static str {
