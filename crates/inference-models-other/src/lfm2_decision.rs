@@ -342,7 +342,8 @@ impl Audio {
     fn embeds(&self, audio: &inference_audio::AudioInput) -> Result<Tensor> {
         let mut pcm =
             inference_audio::mel::resample(&audio.to_mono(), audio.sample_rate, AUDIO_SAMPLE_RATE)
-                .map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
+                .map_err(|e| inference_tensor::Error::Msg(e.to_string()))?
+                .into_owned();
         pcm.truncate(AUDIO_MAX_SAMPLES);
         if pcm.len() < AUDIO_MIN_SAMPLES {
             pcm.resize(AUDIO_MIN_SAMPLES, 0.0);

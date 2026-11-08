@@ -61,10 +61,15 @@ const MAX_RATIO_RELATIVE: f64 = 2.0;
 const STREAM_CHUNK: usize = 1024;
 
 /// Band-limited sinc resampling of mono `samples`; returns them unchanged at the same rate.
-pub fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32>> {
+pub fn resample(
+    samples: &[f32],
+    from_rate: u32,
+    to_rate: u32,
+) -> Result<std::borrow::Cow<'_, [f32]>> {
     use rubato::Resampler;
+    // borrowed at the same rate: a long recording's samples are tens of MB a copy
     if from_rate == to_rate {
-        return Ok(samples.to_vec());
+        return Ok(std::borrow::Cow::Borrowed(samples));
     }
     let mut resampler = rubato::SincFixedIn::<f32>::new(
         to_rate as f64 / from_rate as f64,
@@ -73,7 +78,9 @@ pub fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32
         samples.len(),
         1,
     )?;
-    Ok(resampler.process(&[samples], None)?.swap_remove(0))
+    Ok(std::borrow::Cow::Owned(
+        resampler.process(&[samples], None)?.swap_remove(0),
+    ))
 }
 
 /// [`resample`] over audio that arrives in pieces: rubato's sinc resampler fed fixed chunks, its state carried

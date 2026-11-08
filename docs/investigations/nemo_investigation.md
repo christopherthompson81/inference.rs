@@ -1445,3 +1445,37 @@ both models 4338 -> 2931
 asr 22.34-22.63 -> 21.96-22.08 s, diar 8.17 -> 8.25 s, both 28.64 -> 28.63 s
 meeting transcript and diarization byte-identical; eight clips of 3-33 s (both models) byte-identical
 ```
+
+## Run 50 - 2026-11-08 (laptop: Ryzen 7 7840U, CPU only)
+
+**Question:** after Run 49, both models on the 10-minute meeting still peak ~0.9-1.0 GB above the weights (CUDA on the
+3090: ~0.5). What is live at the peak?
+
+**Method:** mimalloc first: with `MIMALLOC_PURGE_DELAY=0` RSS reads 1661 MB loaded (2729 by default) and 2714 at the
+peak (2921), so ~1 GB of the loaded figure is freed memory mimalloc keeps (the f32 weights before Run 49's bf16
+copies) while the request's working set is live. Then heaptrack (`--record-only`, on a build with the system
+allocator) and a replay of its event stream for the live heap at the request's peak, by call site.
+
+**Found** (live heap at the peak 2416 MB, weights ~1430):
+- The recording, 38 MB a copy, in 7-8 copies across the two requests (they run at once): the engine's per-request
+  extras and each sequence cloned it, the inputs processor cloned it again, and each model's `to_mono` and same-rate
+  `resample` copied it.
+- The feed-forward: SiLU wrote a second (7500, 4096) buffer beside the projection's (123 MB), and the projection's
+  bias add a third while it ran.
+- The decoder's buffer grew by doubling (72 MB for a 37 MB clip).
+
+**Changes:**
+- A one-shot audio request's recording moves out of its message (`MessageExtras::of`), into its last choice's
+  sequence, and out of the sequence (`Sequence::move_audios`) rather than being cloned at each step.
+- `AudioInput::mono` borrows mono samples; `mel::resample` borrows at the same rate (a `Cow`).
+- `audio::from_bytes` reserves the container's stated length and shrinks to fit.
+- The bf16-weight linear adds its bias into its own output; Parakeet's feed-forward runs SiLU in place on the CPU
+  (`cpu::silu_in_place`). Test: `silu_in_place_matches_the_op`.
+
+**Result:** live heap at the peak 2416 -> 2134 MB. RSS (2 alternating rounds): both models 2913-2920 -> 2650-2709 MB,
+diarization 2433-2651 -> 2139-2174, settled after requests ~2050 -> ~1920; both 30.9-31.8 -> 30.3-31.0 s. The meeting
+(asr, diarization, both) and six clips (an mp3 among them) byte-identical.
+
+**What is left at the peak:** the attention's operands (q, k, v and the positions made contiguous per head, 146 MB,
+then packed again by the fused kernel, ~90 MB) and the residual stream. Reading the projections in place would need
+the fused kernel to take strided rows.

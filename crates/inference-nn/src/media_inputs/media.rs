@@ -297,6 +297,13 @@ impl MultimodalData {
         }
     }
 
+    /// The audios themselves, out of the data, for a one-shot request whose sequence ends with its step.
+    pub fn move_audios(&mut self) -> Option<Vec<AudioInput>> {
+        self.input_audios
+            .as_mut()
+            .map(|audios| std::mem::take(audios.audios_mut()))
+    }
+
     pub fn clone_audios(&self) -> Option<Vec<AudioInput>> {
         self.input_audios.as_ref().map(|a| a.clone_audios())
     }

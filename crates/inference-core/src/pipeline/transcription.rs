@@ -227,11 +227,12 @@ impl InputsProcessor for TranscriptionInputsProcessor {
         _paged_attn_metadata: Option<PagedAttentionMeta>,
         _mapper: Option<&dyn DeviceMapper>,
     ) -> Result<InputProcessorOutput> {
+        // taken, not cloned: a one-shot request's sequence ends with this step, and a long recording is tens of MB
         let audios = input_seqs
-            .iter()
+            .iter_mut()
             .map(|seq| {
                 match (
-                    seq.audios().and_then(|a| a.first().cloned()),
+                    seq.move_audios().and_then(|a| a.into_iter().next()),
                     seq.transcription_stream(),
                 ) {
                     (Some(audio), _) => Ok(AudioRequest::Audio(audio)),
@@ -1012,7 +1013,7 @@ impl Pipeline for TranscriptionPipeline {
                             Err("Parakeet transcribes; it does not translate".to_string())
                         }
                         AudioRequest::Audio(audio) => {
-                            let pcm = audio.to_mono();
+                            let pcm = audio.mono();
                             match vad {
                                 Some(vad) => {
                                     asr.transcribe_with_vad(&pcm, audio.sample_rate, vad, request)
@@ -1035,7 +1036,7 @@ impl Pipeline for TranscriptionPipeline {
                                 .to_string())
                         }
                         AudioRequest::Audio(audio) => asr
-                            .transcribe(&audio.to_mono(), audio.sample_rate, request)
+                            .transcribe(&audio.mono(), audio.sample_rate, request)
                             .map(TranscriptionOutcome::Whole)
                             .map_err(|e| e.to_string()),
                     })
@@ -1047,7 +1048,7 @@ impl Pipeline for TranscriptionPipeline {
                     .zip(&options)
                     .map(|(input, options)| {
                         let audio = input.audio();
-                        vad.detect(&audio.to_mono(), audio.sample_rate, options)
+                        vad.detect(&audio.mono(), audio.sample_rate, options)
                             .map_err(|e| e.to_string())
                     })
                     .collect(),
@@ -1059,7 +1060,7 @@ impl Pipeline for TranscriptionPipeline {
                     .map(|(input, options)| {
                         let audio = input.audio();
                         diarizer
-                            .diarize(&audio.to_mono(), audio.sample_rate, options.threshold)
+                            .diarize(&audio.mono(), audio.sample_rate, options.threshold)
                             .map_err(|e| e.to_string())
                     })
                     .collect(),

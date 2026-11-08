@@ -325,7 +325,9 @@ impl Whisper {
         let pcm = if sample_rate == SAMPLE_RATE {
             pcm.to_vec()
         } else {
-            inference_audio::mel::resample(pcm, sample_rate, SAMPLE_RATE).map_err(msg)?
+            inference_audio::mel::resample(pcm, sample_rate, SAMPLE_RATE)
+                .map_err(msg)?
+                .into_owned()
         };
         let duration = pcm.len() as f64 / f64::from(SAMPLE_RATE);
         let content_frames = pcm.len() / HOP_LENGTH;

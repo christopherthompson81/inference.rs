@@ -62,12 +62,13 @@ impl super::Module for Linear {
         // a weight kept in half precision (`Linear::to_half`): the matrix cores or the CPU's bf16 products read it as
         // it is, any other product a widened copy
         if self.weight.dtype() != x.dtype() && (x.device().is_vulkan() || x.device().is_cpu()) {
-            let y = if x.device().is_cpu() {
-                crate::cpu::linear_bf16_weight(x, &self.weight)?
-            } else {
-                crate::vulkan::linear_half_weight(x, &self.weight)?
-            };
-            if let Some(y) = y {
+            if x.device().is_cpu() {
+                if let Some(y) =
+                    crate::cpu::linear_bf16_weight(x, &self.weight, self.bias.as_ref())?
+                {
+                    return Ok(y);
+                }
+            } else if let Some(y) = crate::vulkan::linear_half_weight(x, &self.weight)? {
                 return match &self.bias {
                     None => Ok(y),
                     Some(bias) => y.broadcast_add(bias),
