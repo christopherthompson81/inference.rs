@@ -20,6 +20,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 inference-json.workspace = true
 mimalloc = { workspace = true, features = ["local_dynamic_tls"] }
+libmimalloc-sys.workspace = true
 anyhow.workspace = true
 inference-tensor.workspace = true
 image.workspace = true

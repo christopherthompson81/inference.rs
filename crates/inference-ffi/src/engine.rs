@@ -261,6 +261,7 @@ pub unsafe extern "C" fn inference_engine_load_with_callbacks(
             out_arg(out_engine, "out_engine")?;
             let spec = arg_bytes(spec, spec_len, "spec")?;
             let callbacks = engine_callbacks(callbacks)?;
+            inference_tensor::utils::set_idle_release(crate::release_idle_memory);
             let engine = BlockingEngine::load_json(spec, callbacks).map_err(load_failure)?;
             out_engine.write(Box::into_raw(Box::new(inference_engine { engine })));
             Ok(())

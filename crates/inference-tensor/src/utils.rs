@@ -410,6 +410,34 @@ impl Drop for BarrierPool {
 }
 
 static BARRIER_POOL: OnceLock<BarrierPool> = OnceLock::new();
+static SMT_GEMM_POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+// what frees the allocator's idle memory on the calling thread, registered by the binary that chose the allocator
+static IDLE_RELEASE: OnceLock<fn()> = OnceLock::new();
+
+/// Registers what frees the global allocator's idle memory on the calling thread (mimalloc's `mi_collect`): the binary
+/// that chose the allocator registers it, and [`release_idle_memory`] runs it on every CPU worker thread.
+pub fn set_idle_release(release: fn()) {
+    let _ = IDLE_RELEASE.set(release);
+}
+
+/// Runs the registered release (see [`set_idle_release`]) on this thread and every worker of the CPU pools that exist,
+/// for an idle engine: an allocator keeps the pages each thread freed for that thread (a speech request's ~1 GB).
+pub fn release_idle_memory() {
+    let Some(&release) = IDLE_RELEASE.get() else {
+        return;
+    };
+    release();
+    rayon::broadcast(|_| release());
+    for pool in [POOL.get(), SMT_GEMM_POOL.get().and_then(Option::as_ref)]
+        .into_iter()
+        .flatten()
+    {
+        pool.broadcast(|_| release());
+    }
+    if let Some(pool) = BARRIER_POOL.get() {
+        pool.execute(|_| release());
+    }
+}
 
 /// Persistent barrier pool
 pub fn barrier_pool() -> &'static BarrierPool {
@@ -423,21 +451,21 @@ pub const GEMM_SMT_ENV: &str = "INFERENCE_CPU_GEMM_SMT";
 /// and no `RAYON_NUM_THREADS`: gemm's microkernel leaves FMA slots a sibling thread fills (an i7-10700K's 7564 x 4096
 /// x 1024 ran 356 -> 468 GFLOPS at 16 threads). Everything else keeps the physical cores.
 pub fn smt_gemm_pool() -> Option<&'static rayon::ThreadPool> {
-    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
-    POOL.get_or_init(|| {
-        let off = std::env::var(GEMM_SMT_ENV).is_ok_and(|v| v == "0")
-            || std::env::var_os("RAYON_NUM_THREADS").is_some();
-        let logical = std::thread::available_parallelism().map_or(1, usize::from);
-        if off || logical <= get_num_threads() {
-            return None;
-        }
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(logical)
-            .thread_name(|i| format!("gemm-smt-{i}"))
-            .build()
-            .ok()
-    })
-    .as_ref()
+    SMT_GEMM_POOL
+        .get_or_init(|| {
+            let off = std::env::var(GEMM_SMT_ENV).is_ok_and(|v| v == "0")
+                || std::env::var_os("RAYON_NUM_THREADS").is_some();
+            let logical = std::thread::available_parallelism().map_or(1, usize::from);
+            if off || logical <= get_num_threads() {
+                return None;
+            }
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(logical)
+                .thread_name(|i| format!("gemm-smt-{i}"))
+                .build()
+                .ok()
+        })
+        .as_ref()
 }
 
 pub fn with_threadpool<F: FnOnce() -> R + Send, R: Send>(f: F) -> R {
@@ -720,5 +748,24 @@ mod barrier_pool_tests {
         for active in 0..3 {
             assert_eq!(ranges(active), all);
         }
+    }
+}
+
+#[cfg(test)]
+mod idle_release_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static RELEASES: AtomicUsize = AtomicUsize::new(0);
+
+    fn count() {
+        RELEASES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // the registered release runs on the caller and on the workers of the pools that exist (rayon's at least one)
+    #[test]
+    fn an_idle_release_reaches_the_worker_threads() {
+        super::set_idle_release(count);
+        super::release_idle_memory();
+        assert!(RELEASES.load(Ordering::Relaxed) >= 2);
     }
 }

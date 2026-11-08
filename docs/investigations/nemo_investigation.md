@@ -1501,3 +1501,27 @@ unchanged.
 
 **Dead end:** packing the bf16 gemm's A a block of rows at a time (8 MB a block) took 4 MB off the peak, now elsewhere,
 for 1.4 % of the transcription (5.7 % while B repacked per block).
+
+## Run 52 - 2026-11-08 (laptop: Ryzen 7 7840U, CPU only)
+
+**Question:** Run 50 found mimalloc keeping ~1 GB of freed pages after a load (the f32 weights before the bf16
+copies) and some after each request: freed memory stays with the thread that freed it until that thread allocates
+again, and an idle server's threads do not. Can an idle engine hand it back?
+
+**Change:** `utils::set_idle_release` registers what frees the global allocator's idle memory on the calling thread;
+the binaries that choose mimalloc (the CLI, the C ABI) register `mi_collect(true)`. `utils::release_idle_memory` runs
+it on the calling thread and on every worker of the CPU pools that exist (rayon's global pool, the candle and SMT gemm
+pools, the barrier pool), and the engine calls it when its scheduler goes idle, beside the iGPU's pool release. Test:
+`an_idle_release_reaches_the_worker_threads`.
+
+**Result** (RSS MB, the two models served on the CPU, 10-minute meeting):
+
+```
+loaded 2730 -> 1708; after each request ~1880-1950 -> ~1750-1775; first request's peak 2754 -> 2465, later ones level
+A/B, 3 rounds: asr 23.61 -> 23.60 s, diar 8.54 -> 8.55 s; output byte-identical
+```
+
+**Not done:** the request's peak is now two near-equal points, ~2075-2079 MB live: the feed-forward (its up
+projection beside the bf16 gemm's packed A) and the attention (the projections beside the fused kernel's packed
+copies). Lowering it needs both: A packed by row blocks (1.4 % of the transcription, Run 51) and the projections
+dropped once packed (splitting both kernels into pack and run), ~60-70 MB together.

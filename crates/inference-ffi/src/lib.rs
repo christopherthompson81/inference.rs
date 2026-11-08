@@ -12,6 +12,12 @@ use inference_tensor::Device;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+// an idle engine hands back the pages mimalloc keeps per thread, as the `inference` binary's does
+pub(crate) fn release_idle_memory() {
+    // SAFETY: mi_collect takes no pointers and is safe on any thread
+    unsafe { libmimalloc_sys::mi_collect(true) };
+}
+
 pub mod callbacks;
 pub mod engine;
 pub mod layout;
