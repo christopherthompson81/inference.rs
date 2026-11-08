@@ -34,8 +34,15 @@ use inference_api::{LogVerbosity, initialize_inference_logging};
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+// an idle engine hands back the pages mimalloc keeps per thread (the weights' f32 copies after a model halves them)
+fn release_idle_memory() {
+    // SAFETY: mi_collect takes no pointers and is safe on any thread
+    unsafe { libmimalloc_sys::mi_collect(true) };
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    inference_tensor::utils::set_idle_release(release_idle_memory);
     inference_tensor::utils::init_global_threadpool();
     let cli = Cli::parse();
     init_tracing(cli.global.verbose);
