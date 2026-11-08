@@ -89,3 +89,19 @@ Checks: lint, CPU (3159), CUDA (3362), `--vulkan` (63) pass.
 Where it stands (no debug assertions): asr 135 (dev build) / 86 -> ~48 s, diar 27 / 15-16 -> ~15 s. Left: the
 decoder's dot products (~7 %), the diarizer (a plain transformer: gemm plus a softmax composite), and gemm's
 7564 x 1024 x 1024 at the SMT pool.
+
+## Run 4 - 2026-11-08 17:10
+
+Question: the decoder's dot products (7 %): Parakeet's LSTM and joint stream ~34 MB of f32 weights a step past the
+16 MB L3. #869 holds them as bf16 copies (`cpu::Bf16RowWeights`, plain Rust that widens to f32) inside the model's
+bf16 scope, but gated on `bf16_enabled()`, which also needs AVX-512 BF16. A weight's bf16 rounding is within the
+model's measured property (both operands rounded), and the copy needs no bf16 pairs, so the decoder now asks
+`cpu::bf16_scope()` (the model's scope, `INFERENCE_CPU_NO_BF16` unset) instead. Test:
+`the_scope_holds_whatever_the_cpu_multiplies`.
+
+```
+asr 42.8 / 44.6 s (Run 3 47.7 / 48.8), diar 14.7 / 14.5 s; 1698 words identical, 0 ms start shifts
+```
+
+Diarization, profiled (`perf_diar.sh`, 11.4 s under perf): gemm 66 %, libm `__expf_fma` 5.7 % (the softmax), the
+elementwise pool's spin 6 %. The laptop's f32 diarization was 11.4 s (Run 46), so this CPU is level with it there.

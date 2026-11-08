@@ -52,6 +52,13 @@ pub fn allowed() -> bool {
     *ALLOWED.get_or_init(|| available() && std::env::var_os(NO_BF16_ENV).is_none())
 }
 
+/// Whether this thread is inside a model's bf16 scope ([`with_bf16_matmuls`]) with [`NO_BF16_ENV`] unset, whatever
+/// the CPU multiplies: bf16-held weights that widen to f32 for the products need no bf16 pairs.
+pub fn in_scope() -> bool {
+    static ALLOWED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    IN_SCOPE.get() && *ALLOWED.get_or_init(|| std::env::var_os(NO_BF16_ENV).is_none())
+}
+
 /// Runs `f` with this thread's large f32 CPU matmuls taking bf16 inputs, where the CPU multiplies bf16 pairs and
 /// [`NO_BF16_ENV`] is unset: a model measured to hold under them opts in around its forward (others keep f32).
 pub fn with_bf16_matmuls<R>(f: impl FnOnce() -> R) -> R {
@@ -326,6 +333,14 @@ unsafe fn tile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // a model's bf16 scope holds on any CPU, apart from whether its products take bf16 pairs
+    #[test]
+    fn the_scope_holds_whatever_the_cpu_multiplies() {
+        assert!(!super::in_scope());
+        assert!(super::with_bf16_matmuls(super::in_scope));
+        assert!(!super::in_scope());
+    }
 
     // a large f32 matmul takes bf16 inputs inside the scope alone: outside it the product is f32's, inside it the
     // rounded inputs'

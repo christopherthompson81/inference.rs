@@ -149,7 +149,7 @@ pub fn linear_bf16_weight(
 
 pub use crate::cpu_backend::gemm_bf16::{
     BF16_ENV, NO_BF16_ENV, allowed as bf16_allowed, enabled as bf16_enabled, forced as bf16_forced,
-    with_bf16_matmuls,
+    in_scope as bf16_scope, with_bf16_matmuls,
 };
 
 #[allow(unused)]
