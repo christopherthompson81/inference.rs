@@ -803,9 +803,12 @@ impl dyn Pipeline {
             let forward = match forward {
                 Ok(forward) => forward,
                 Err(err) => {
-                    let mut hybrid = self.cache().hybrid();
-                    for (_, _, snapshot) in captured {
-                        hybrid.release_recurrent_snapshot(snapshot)?;
+                    // only a hybrid cache captures
+                    if !captured.is_empty() {
+                        let mut hybrid = self.cache().hybrid();
+                        for (_, _, snapshot) in captured {
+                            hybrid.release_recurrent_snapshot(snapshot)?;
+                        }
                     }
                     return Err(err);
                 }

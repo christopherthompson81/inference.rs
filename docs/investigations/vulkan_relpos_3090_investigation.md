@@ -109,3 +109,27 @@ GPU peak: 8,895 MiB (master's fused 7,554; 1,217 before load)
 For the 780M (not measured here): the staged kernel (K, V and each half-workgroup's P span through shared memory,
 f16vec4 stores) took the 3090 from 223 to 125 ms a layer; worth an A/B there with
 `relative_position_attention_throughput`.
+
+## Run 6 - 2026-11-08 04:05
+
+Question (the Vulkan session's ask): does an LLM on Vulkan move across #859 (and #862)? Lightning's weights were
+deleted after #565; the user chose a local stand-in. CLI at eac8c98ec (before #859) against master e034660ea,
+`inference bench --vulkan --prompt-len 4096 --gen-len 128`.
+
+Stand-ins that do not run on Vulkan, before #859 as after (not regressions):
+- Qwen3.6-35B-A3B UD-IQ4_XS: "unsupported CPU RoPE dtype F32 F32 F32"; Qwen3.8-27B IQ4_XS: no IQ4_XS kernel.
+- TinyLlama Q4_K_M: panicked "Got normal cache, expected hybrid cache": a failed paged forward released recurrent
+  snapshots through `cache().hybrid()` on a plain cache (#837). With that path guarded, the error underneath is
+  "RoPE positions must be CPU u32": `inference_quant::rotary` has CUDA and Metal branches and no Vulkan one, so a
+  RoPE model reaches the CPU kernel with device tensors. Vulkan runs RoPE-free models (Nemotron-H, the SSMs).
+- Jamba reasoning 3B Q4_K_M: "paged decode of 20 heads over 1 kv heads, head size 128" (no kernel for that ratio).
+
+Mamba-Codestral 7B Q4_0 (Mamba-2, Lightning's scan path) runs; warm-up 3, 6 iterations, alternating builds:
+
+```
+                 prefill (4096)          decode (128)
+before #859      2115.0 / 1629.0 tok/s   123.1 / 122.9 tok/s
+master           2099.4 / 2111.1 tok/s   128.0 / 127.5 tok/s
+```
+
+(1629 is one run's outlier, +-700 across its iterations.) No regression.
