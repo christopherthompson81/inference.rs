@@ -164,9 +164,13 @@ fn forward_lora_q() -> Result<()> {
     assert_snapshot(&forward_case(Some(Q_LORA), false)?, &expected)
 }
 
+// k_b/v_b as safetensors store them, heads flattened into rows
 #[test]
-fn forward_split_kv_b_errors_on_2d_weights() -> Result<()> {
-    // pins current behaviour: 2-D k_b/v_b load from safetensors, then the split projection wants 3-D (GGUF) weights
-    assert_err_contains(forward_case(None, true), "unexpected rank");
-    Ok(())
+fn forward_split_kv_b_from_2d_weights() -> Result<()> {
+    let expected = Snapshot {
+        probes: [0.6271209, -1.0030097, -0.27535832, -0.89435995],
+        sum: -28.886215,
+        l2: 17.77773,
+    };
+    assert_snapshot(&forward_case(None, true)?, &expected)
 }

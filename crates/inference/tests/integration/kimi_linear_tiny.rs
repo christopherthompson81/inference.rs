@@ -56,11 +56,20 @@ const MAX_LEN: usize = 8;
 const LOGPROB_TOLERANCE: f32 = 1e-3;
 const CUDA_LOGPROB_TOLERANCE: f32 = 5e-3;
 const LONG_PROMPT_REPEATS: usize = 12;
+// prompt chunk that puts the long prompt's later chunks behind a cached prefix
+const PREFIX_CHUNK_TOKENS: usize = 16;
+const BF16_LOGPROB_TOLERANCE: f32 = 5e-2;
+// split kv_b attends in the 512-wide latent, fused per head: f32 sums in another order
+const SPLIT_LOGPROB_TOLERANCE: f32 = 5e-3;
 
-#[derive(Clone, Copy, Debug)]
-struct Kind;
+// how the checkpoint stores MLA's kv_b: HF's one projection, or the per-head key and value halves GGUFs carry
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Kind {
+    FusedKvB,
+    SplitKvB,
+}
 
-const KIND: Kind = Kind;
+const KIND: Kind = Kind::FusedKvB;
 
 // (name, shape, all ones / random)
 #[derive(Clone, Copy)]
@@ -192,7 +201,7 @@ fn weight_shapes() -> Vec<(String, Vec<usize>, Init)> {
     shapes
 }
 
-fn checkpoint(_kind: Kind) -> anyhow::Result<tempfile::TempDir> {
+fn checkpoint(kind: Kind) -> anyhow::Result<tempfile::TempDir> {
     let rng = &mut StdRng::seed_from_u64(WEIGHT_SEED);
     let normal = Normal::new(0f32, WEIGHT_STD)?;
     let mut weights = HashMap::new();
@@ -207,6 +216,9 @@ fn checkpoint(_kind: Kind) -> anyhow::Result<tempfile::TempDir> {
             }
         };
         weights.insert(name, tensor);
+    }
+    if kind == Kind::SplitKvB {
+        split_kv_b(&mut weights)?;
     }
     let config = serde_json::json!({
         "architectures": ["KimiLinearForCausalLM"],
@@ -246,6 +258,35 @@ fn checkpoint(_kind: Kind) -> anyhow::Result<tempfile::TempDir> {
     std::fs::write(dir.path().join("config.json"), config.to_string())?;
     inference_tensor::safetensors::save(&weights, dir.path().join("model.safetensors"))?;
     Ok(dir)
+}
+
+// kv_b `(heads (nope + v), lora)` into k_b `(heads lora, nope)` and v_b `(heads v, lora)`
+fn split_kv_b(weights: &mut HashMap<String, Tensor>) -> anyhow::Result<()> {
+    let fused = weights
+        .keys()
+        .filter(|name| name.ends_with(".kv_b_proj.weight"))
+        .cloned()
+        .collect::<Vec<_>>();
+    for name in fused {
+        let prefix = name.trim_end_matches("kv_b_proj.weight");
+        let kv_b =
+            weights
+                .remove(&name)
+                .expect("listed")
+                .reshape((MLA_HEADS, NOPE + V_HEAD, KV_LORA))?;
+        let k_b = kv_b
+            .narrow(1, 0, NOPE)?
+            .transpose(1, 2)?
+            .contiguous()?
+            .reshape((MLA_HEADS * KV_LORA, NOPE))?;
+        let v_b = kv_b
+            .narrow(1, NOPE, V_HEAD)?
+            .contiguous()?
+            .reshape((MLA_HEADS * V_HEAD, KV_LORA))?;
+        weights.insert(format!("{prefix}k_b_proj.weight"), k_b);
+        weights.insert(format!("{prefix}v_b_proj.weight"), v_b);
+    }
+    Ok(())
 }
 
 fn chat(prompt: &str) -> RequestBuilder {
@@ -323,9 +364,38 @@ async fn repeated_prompt_resumes_to_the_same_text(kind: Kind) -> anyhow::Result<
     Ok(())
 }
 
+async fn split_kv_b_scores_as_fused() -> anyhow::Result<()> {
+    let (fused_dir, split_dir) = (checkpoint(Kind::FusedKvB)?, checkpoint(Kind::SplitKvB)?);
+    let (fused, split) = (cpu_model(&fused_dir).await?, cpu_model(&split_dir).await?);
+    let tokens = fused
+        .tokenize_chat(ChatRequest::from(chat("say something long")).request)
+        .await?
+        .tokens;
+    let expected = scores(&fused, tokens.clone()).await?;
+    let actual = scores(&split, tokens).await?;
+    for (position, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
+        if let (Some(expected), Some(actual)) = (expected, actual) {
+            anyhow::ensure!(
+                (expected - actual).abs() < SPLIT_LOGPROB_TOLERANCE,
+                "position {position}: fused {expected}, split {actual}"
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn cpu_model(dir: &tempfile::TempDir) -> anyhow::Result<inference::Model> {
+    Ok(TextModelBuilder::new(dir.path().to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .with_force_cpu()
+        .build()
+        .await?)
+}
+
 concurrent_cases!(
     concurrent_cases,
     [
+        split_kv_b_scores_as_fused: 0,
         a_step_by_step_decode_scores_as_one_prefill: 0,
         a_repeated_prompt_resumes_from_the_prefix_cache_to_the_same_text: 0,
     ]
@@ -337,6 +407,42 @@ async fn a_long_prompt_scores_on_cuda_as_on_the_cpu() -> anyhow::Result<()> {
         return Ok(());
     }
     long_prompt_scores_on_cuda_as_on_the_cpu(KIND).await
+}
+
+#[tokio::test]
+async fn bf16_prompt_chunks_over_a_cached_prefix_score_as_one_chunk_on_cuda() -> anyhow::Result<()>
+{
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let dir = checkpoint(Kind::SplitKvB)?;
+    let build = |chunk: Option<usize>| -> anyhow::Result<_> {
+        let builder = TextModelBuilder::new(dir.path().to_string_lossy())
+            .with_dtype(ModelDType::BF16)
+            .with_prefix_cache_n(None)
+            .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?);
+        let builder = match chunk {
+            Some(tokens) => builder
+                .with_max_prefill_chunk_tokens(tokens)
+                .with_max_num_batched_tokens(tokens),
+            None => builder,
+        };
+        Ok(builder.build())
+    };
+    let (whole, chunked) = (
+        build(None)?.await?,
+        build(Some(PREFIX_CHUNK_TOKENS))?.await?,
+    );
+    // bf16 near-ties flip later greedy steps either way; the first token reads every chunk's cache
+    let prompt = "say something long ".repeat(LONG_PROMPT_REPEATS);
+    let (expected, _) = traces::greedy(&whole, chat(&prompt), 1).await?;
+    let (actual, _) = traces::greedy(&chunked, chat(&prompt), 1).await?;
+    let ((expected_token, expected), (actual_token, actual)) = (expected[0], actual[0]);
+    anyhow::ensure!(
+        expected_token == actual_token && (expected - actual).abs() < BF16_LOGPROB_TOLERANCE,
+        "one chunk {expected_token} {expected}, chunked {actual_token} {actual}"
+    );
+    Ok(())
 }
 
 async fn long_prompt_scores_on_cuda_as_on_the_cpu(kind: Kind) -> anyhow::Result<()> {

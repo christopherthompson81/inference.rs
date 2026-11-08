@@ -418,6 +418,11 @@ pub fn mla_cache_forward(
 
     let prefix_lens = seqlen_offsets;
     let needs_prefix = prefix_lens.iter().any(|&len| len > 0);
+    // q absorbed into the latent space: every head attends the one latent head
+    let absorbed = needs_prefix
+        && v.dim(D::Minus1)? == kv_lora_rank
+        && q.dim(D::Minus1)? == kv_lora_rank + qk_rope_head_dim
+        && latent_flash_supported(q, kv_lora_rank, qk_rope_head_dim)?;
     if !needs_prefix && !matches!(attention_mask, AttentionMask::None) {
         project_split_mla_value(
             mla_direct_attention(q, k, v, attention_mask, flash_params, sdpa_params)?,
@@ -491,6 +496,7 @@ pub fn mla_cache_forward(
                 .to_device(q.device())?;
 
         let total_prefix_tokens: usize = prefix_lens.iter().sum();
+        let mut latent_prefix = None;
         let mut k_prefix = None;
         let mut v_prefix = None;
         let mut prefix_offsets = Vec::with_capacity(bs + 1);
@@ -524,31 +530,36 @@ pub fn mla_cache_forward(
                 &cu_seq_lens,
                 &token_to_seq,
             )?;
-
-            let (k_nope_prefix, v_prefix_full) = if let Some(fused) = kv_b_proj.fused_projection() {
-                let kv_prefix = fused.forward(&ckv_prefix)?.reshape((
-                    total_prefix_tokens,
-                    num_attention_heads,
-                    qk_nope_head_dim + v_head_dim,
-                ))?;
-                let kv_prefix = kv_prefix.split(&[qk_nope_head_dim, v_head_dim], D::Minus1)?;
-                (kv_prefix[0].clone(), kv_prefix[1].clone())
+            if absorbed {
+                // one latent head; per-head copies of the prefix grow with the context
+                latent_prefix = Some(Tensor::cat(&[&ckv_prefix, &kpe_prefix], D::Minus1)?);
             } else {
-                let latent = ckv_prefix.unsqueeze(1)?.expand((
+                let (k_nope_prefix, v_prefix_full) = if let Some(fused) =
+                    kv_b_proj.fused_projection()
+                {
+                    let kv_prefix = fused.forward(&ckv_prefix)?.reshape((
+                        total_prefix_tokens,
+                        num_attention_heads,
+                        qk_nope_head_dim + v_head_dim,
+                    ))?;
+                    let kv_prefix = kv_prefix.split(&[qk_nope_head_dim, v_head_dim], D::Minus1)?;
+                    (kv_prefix[0].clone(), kv_prefix[1].clone())
+                } else {
+                    let latent = ckv_prefix.unsqueeze(1)?.expand((
+                        total_prefix_tokens,
+                        num_attention_heads,
+                        kv_lora_rank,
+                    ))?;
+                    (latent.clone(), latent)
+                };
+                let kpe_prefix = kpe_prefix.unsqueeze(1)?.expand((
                     total_prefix_tokens,
                     num_attention_heads,
-                    kv_lora_rank,
+                    qk_rope_head_dim,
                 ))?;
-                (latent.clone(), latent)
-            };
-            let kpe_prefix = kpe_prefix.unsqueeze(1)?.expand((
-                total_prefix_tokens,
-                num_attention_heads,
-                qk_rope_head_dim,
-            ))?;
-            let k_prefix_full = Tensor::cat(&[&k_nope_prefix, &kpe_prefix], D::Minus1)?;
-            k_prefix = Some(k_prefix_full);
-            v_prefix = Some(v_prefix_full);
+                k_prefix = Some(Tensor::cat(&[&k_nope_prefix, &kpe_prefix], D::Minus1)?);
+                v_prefix = Some(v_prefix_full);
+            }
         }
 
         let mut outputs = Vec::with_capacity(bs);
@@ -577,6 +588,39 @@ pub fn mla_cache_forward(
             }
 
             let prefix_len = prefix_lens[seq_idx];
+            if absorbed {
+                let latent_prefix_i = latent_prefix
+                    .as_ref()
+                    .filter(|_| prefix_len > 0)
+                    .map(|t| t.narrow(0, prefix_offsets[seq_idx], prefix_len))
+                    .transpose()?;
+                let cur = Tensor::cat(
+                    &[
+                        &ckv.narrow(0, seq_idx, 1)?
+                            .squeeze(0)?
+                            .narrow(0, 0, cur_len)?,
+                        &k_pe
+                            .narrow(0, seq_idx, 1)?
+                            .reshape((seq_len, qk_rope_head_dim))?
+                            .narrow(0, 0, cur_len)?,
+                    ],
+                    D::Minus1,
+                )?;
+                let latent = match latent_prefix_i {
+                    Some(prefix) => Tensor::cat(&[&prefix, &cur], 0)?,
+                    None => cur,
+                };
+                let out =
+                    latent_flash_attention(&q_i, &latent, kv_lora_rank, sdpa_params.softmax_scale)?;
+                let mut out = project_split_mla_value(out, kv_b_proj)?
+                    .squeeze(0)?
+                    .transpose(0, 1)?;
+                if cur_len < seq_len {
+                    out = out.pad_with_zeros(D::Minus(3), 0, seq_len - cur_len)?;
+                }
+                outputs.push(out);
+                continue;
+            }
             let k_full = if let Some(k_prefix_full) = &k_prefix {
                 let start = prefix_offsets[seq_idx];
                 let k_prefix_i = if prefix_len > 0 {
@@ -648,6 +692,70 @@ pub fn mla_cache_forward(
         }
         Tensor::cat(&outputs, 0)
     }
+}
+
+// fattn's GQA path, the one that runs MLA's head dim, takes K/V lengths in multiples of this (FATTN_KQ_STRIDE)
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+const LATENT_KV_STRIDE: usize = 256;
+
+// whether flash attention runs every head of `q` against one latent head (MLA's 512 + 64)
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+fn latent_flash_supported(q: &Tensor, kv_lora_rank: usize, rope: usize) -> Result<bool> {
+    let (_, heads, _, _) = q.dims4()?;
+    let width = kv_lora_rank + rope;
+    let probe_q = Tensor::zeros((1, 1, heads, width), q.dtype(), q.device())?;
+    let probe_k = Tensor::zeros((1, LATENT_KV_STRIDE, 1, width), q.dtype(), q.device())?;
+    let probe_v = probe_k.narrow(D::Minus1, 0, kv_lora_rank)?;
+    inference_fattn::supported(
+        &probe_q,
+        &probe_k,
+        &probe_v,
+        &inference_fattn::FattnOptions {
+            scale: 1.0,
+            mask: Some(inference_fattn::causal_mask(
+                1,
+                LATENT_KV_STRIDE,
+                q.device(),
+            )?),
+            ..Default::default()
+        },
+    )
+}
+
+// `q (1, heads, seq, latent + rope)` against `latent (ctx, latent + rope)` as one head whose values are its first
+// `kv_lora_rank` columns, causal from the end through a mask (fattn runs MLA's width only with its GQA path, which
+// reads one), the keys padded to LATENT_KV_STRIDE behind `-inf` columns; `(1, heads, seq, kv_lora_rank)`
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+fn latent_flash_attention(
+    q: &Tensor,
+    latent: &Tensor,
+    kv_lora_rank: usize,
+    scale: f32,
+) -> Result<Tensor> {
+    let (ctx, width) = latent.dims2()?;
+    let q = q.transpose(1, 2)?.contiguous()?;
+    let seq = q.dim(1)?;
+    let padded = ctx.div_ceil(LATENT_KV_STRIDE) * LATENT_KV_STRIDE;
+    let k = latent
+        .to_dtype(q.dtype())?
+        .pad_with_zeros(0, 0, padded - ctx)?
+        .contiguous()?
+        .reshape((1, padded, 1, width))?;
+    let v = k.narrow(D::Minus1, 0, kv_lora_rank)?;
+    let mask = inference_fattn::causal_mask(seq, ctx, q.device())?;
+    let mask = if padded > ctx {
+        let hidden = Tensor::full(f32::NEG_INFINITY, (1, seq, padded - ctx), q.device())?
+            .to_dtype(mask.dtype())?;
+        Tensor::cat(&[&mask, &hidden], 2)?.contiguous()?
+    } else {
+        mask
+    };
+    let opts = inference_fattn::FattnOptions {
+        scale,
+        mask: Some(mask),
+        ..Default::default()
+    };
+    inference_fattn::flash_attn(&q, &k, &v, &opts)?.transpose(1, 2)
 }
 
 #[cfg(not(all(feature = "cuda", target_family = "unix")))]

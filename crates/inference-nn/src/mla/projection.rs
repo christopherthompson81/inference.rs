@@ -195,22 +195,26 @@ fn supports_indexed_cuda_projection(projection: &dyn QuantMethod, input: &Tensor
     if !input.device().is_cuda() {
         return false;
     }
-    projection.get_qtensor().is_none_or(|weight| {
-        matches!(
-            weight.dtype(),
-            GgmlDType::Q4_0
-                | GgmlDType::Q4_1
-                | GgmlDType::Q5_0
-                | GgmlDType::Q5_1
-                | GgmlDType::Q8_0
-                | GgmlDType::Q8_1
-                | GgmlDType::Q2K
-                | GgmlDType::Q3K
-                | GgmlDType::Q4K
-                | GgmlDType::Q5K
-                | GgmlDType::Q6K
-        )
-    })
+    let Some(weight) = projection.get_qtensor() else {
+        // a dense weight gathers per head only stored by head, as GGUFs do; safetensors flatten them
+        return projection
+            .unquant_weight_bias()
+            .is_none_or(|(weight, _)| weight.rank() == 3);
+    };
+    matches!(
+        weight.dtype(),
+        GgmlDType::Q4_0
+            | GgmlDType::Q4_1
+            | GgmlDType::Q5_0
+            | GgmlDType::Q5_1
+            | GgmlDType::Q8_0
+            | GgmlDType::Q8_1
+            | GgmlDType::Q2K
+            | GgmlDType::Q3K
+            | GgmlDType::Q4K
+            | GgmlDType::Q5K
+            | GgmlDType::Q6K
+    )
 }
 
 fn dense_head_forward(input: &Tensor, weight: &Tensor, transpose_weight: bool) -> Result<Tensor> {
@@ -235,6 +239,7 @@ fn dense_head_forward(input: &Tensor, weight: &Tensor, transpose_weight: bool) -
     };
     input
         .to_dtype(DType::F32)?
+        .contiguous()?
         .broadcast_matmul(&weight.unsqueeze(0)?)?
         .to_dtype(input.dtype())?
         .reshape((batch, num_heads, seq_len, out_dim))
@@ -248,8 +253,18 @@ fn expanded_split_weights(
     if let Some(weights) = cache.get() {
         return Ok(weights.clone());
     }
-    let key = key.dequantize_w()?;
-    let value = value.dequantize_w()?;
+    let (key, value) = (key.dequantize_w()?, value.dequantize_w()?);
+    // a checkpoint's safetensors flatten the heads: K `(heads lora, nope)`, V `(heads v, lora)`
+    let (key, value) = if key.rank() == 2 {
+        let lora = value.dim(1)?;
+        let heads = key.dim(0)? / lora;
+        (
+            key.reshape((heads, lora, key.dim(1)?))?,
+            value.reshape((heads, value.dim(0)? / heads, lora))?,
+        )
+    } else {
+        (key, value)
+    };
     let (num_heads, kv_lora_rank, qk_nope_head_dim) = key.dims3()?;
     let (value_heads, v_head_dim, value_kv_lora_rank) = value.dims3()?;
     if value_heads != num_heads || value_kv_lora_rank != kv_lora_rank {

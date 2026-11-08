@@ -83,11 +83,15 @@ fn forward_fused_kv_b() -> Result<()> {
     assert_snapshot(&forward_case(false)?, &expected)
 }
 
+// k_b/v_b as safetensors store them, heads flattened into rows
 #[test]
-fn forward_split_kv_b_errors_on_2d_weights() -> Result<()> {
-    // pins current behaviour: 2-D k_b/v_b load from safetensors, then the split projection wants 3-D (GGUF) weights
-    assert_err_contains(forward_case(true), "unexpected rank");
-    Ok(())
+fn forward_split_kv_b_from_2d_weights() -> Result<()> {
+    let expected = Snapshot {
+        probes: [0.62711865, -1.225315, -0.02301575, -0.54107714],
+        sum: -27.286913,
+        l2: 16.98094,
+    };
+    assert_snapshot(&forward_case(true)?, &expected)
 }
 
 #[test]
