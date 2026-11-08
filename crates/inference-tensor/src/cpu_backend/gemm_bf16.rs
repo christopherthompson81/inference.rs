@@ -3,18 +3,25 @@
 //! as panels of `NR` columns whose 16-lane loads hold each column's pair. A task takes a block of rows over a group of
 //! panels, each `MR` x `NR` tile summing the whole of k in registers.
 
+#[cfg(target_arch = "x86_64")]
 use rayon::prelude::*;
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
 // a tile's rows (each a broadcast pair a step) and columns (two 16-lane accumulators)
+#[cfg(target_arch = "x86_64")]
 const MR: usize = 6;
+#[cfg(target_arch = "x86_64")]
 const NR: usize = 32;
+#[cfg(target_arch = "x86_64")]
 const LANES: usize = 16;
 // rows and panels a task takes at most (a panel stays in cache over its rows' tiles), fewer where the product would
 // leave threads idle: TASKS_PER_THREAD a thread at least
+#[cfg(target_arch = "x86_64")]
 const MC: usize = 96;
+#[cfg(target_arch = "x86_64")]
 const PANELS_PER_TASK: usize = 4;
+#[cfg(target_arch = "x86_64")]
 const TASKS_PER_THREAD: usize = 4;
 
 /// Set to keep CPU f32 matmuls in f32 where a model would let them take bf16 inputs (for accuracy, or A/B runs).
@@ -66,6 +73,8 @@ pub fn available() -> bool {
 }
 
 /// An operand's elements and strides: element (r, c) at `data[r * rs + c * cs]`.
+// read by the x86_64 kernel alone
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 pub struct Strided<'a> {
     pub data: &'a [f32],
     pub rs: usize,
@@ -73,12 +82,14 @@ pub struct Strided<'a> {
 }
 
 // round to nearest even, as `vcvtneps2bf16` does
+#[cfg(target_arch = "x86_64")]
 fn bf16_bits(x: f32) -> u32 {
     half::bf16::from_f32(x).to_bits() as u32
 }
 
 /// `dst` (`batch` products of `m` x `n`, row-major, one after another) = `a` (`m` x `k`) `b` (`k` x `n`) through
 /// bf16 inputs, product `i`'s operands `a_skip` and `b_skip` elements on; call only where [`available`].
+#[cfg(target_arch = "x86_64")]
 #[allow(clippy::too_many_arguments)]
 pub fn gemm(
     batch: usize,
@@ -160,7 +171,6 @@ pub fn gemm(
                 }
                 // SAFETY: the tile's rows are r..r + live < m and its columns panel * NR + cols <= n, each written by
                 // this task alone; `available` was checked by the caller
-                #[cfg(target_arch = "x86_64")]
                 unsafe {
                     tile(
                         &ap[(bi * rows + r) * pairs..][..MR * pairs],
@@ -175,6 +185,23 @@ pub fn gemm(
             }
         }
     });
+}
+
+/// [`available`] is false off x86_64, so nothing calls this there.
+#[cfg(not(target_arch = "x86_64"))]
+#[allow(clippy::too_many_arguments)]
+pub fn gemm(
+    _batch: usize,
+    _m: usize,
+    _n: usize,
+    _k: usize,
+    _a: &Strided,
+    _a_skip: usize,
+    _b: &Strided,
+    _b_skip: usize,
+    _dst: &mut [f32],
+) {
+    unreachable!("bf16 matmuls run on x86_64's AVX-512 BF16")
 }
 
 // one MR x NR tile over every pair: `a` holds MR rows of `pairs`, `b` a panel; `live` rows and `cols` columns stored
