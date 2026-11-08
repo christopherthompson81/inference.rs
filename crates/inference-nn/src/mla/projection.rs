@@ -38,6 +38,32 @@ impl MlaKvBProjection {
         }
     }
 
+    /// `q_nope (b, heads, seq, nope)` absorbed into the latent space: `(b, heads, seq, kv_lora_rank)`.
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    pub fn absorb_query(&self, q_nope: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Split { .. } => self.project_query(q_nope),
+            Self::Fused(projection) => {
+                let (key, _) = fused_head_weights(projection.as_ref(), q_nope, q_nope.dim(3)?)?;
+                q_nope.contiguous()?.broadcast_matmul(&key.unsqueeze(0)?)
+            }
+        }
+    }
+
+    /// Attention over the latent `(b, heads, seq, kv_lora_rank)` into each head's values; `nope` is q's unroped width.
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    pub fn latent_value(&self, latent: &Tensor, nope: usize) -> Result<Tensor> {
+        match self {
+            Self::Split { .. } => self.project_value(latent),
+            Self::Fused(projection) => {
+                let (_, value) = fused_head_weights(projection.as_ref(), latent, nope)?;
+                latent
+                    .contiguous()?
+                    .broadcast_matmul(&value.transpose(1, 2)?.contiguous()?.unsqueeze(0)?)
+            }
+        }
+    }
+
     pub fn fused_layer(&self) -> Option<&Arc<dyn QuantMethod>> {
         match self {
             Self::Fused(projection) => Some(projection),
@@ -191,26 +217,49 @@ fn indexed_head_forward(projection: &dyn QuantMethod, input: &Tensor) -> Result<
         .transpose(1, 2)
 }
 
+// a fused kv_b `(heads (nope + v), lora)` as per-head K `(heads, nope, lora)` and V `(heads, v, lora)` in `like`'s
+// dtype, its heads read from `like (b, heads, ..)`
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+fn fused_head_weights(
+    projection: &dyn QuantMethod,
+    like: &Tensor,
+    nope: usize,
+) -> Result<(Tensor, Tensor)> {
+    let heads = like.dim(1)?;
+    let weight = projection.dequantize_w()?.to_dtype(like.dtype())?;
+    let (rows, lora) = weight.dims2()?;
+    let per_head = rows / heads;
+    let weight = weight.reshape((heads, per_head, lora))?;
+    Ok((
+        weight.narrow(1, 0, nope)?.contiguous()?,
+        weight.narrow(1, nope, per_head - nope)?,
+    ))
+}
+
 fn supports_indexed_cuda_projection(projection: &dyn QuantMethod, input: &Tensor) -> bool {
     if !input.device().is_cuda() {
         return false;
     }
-    projection.get_qtensor().is_none_or(|weight| {
-        matches!(
-            weight.dtype(),
-            GgmlDType::Q4_0
-                | GgmlDType::Q4_1
-                | GgmlDType::Q5_0
-                | GgmlDType::Q5_1
-                | GgmlDType::Q8_0
-                | GgmlDType::Q8_1
-                | GgmlDType::Q2K
-                | GgmlDType::Q3K
-                | GgmlDType::Q4K
-                | GgmlDType::Q5K
-                | GgmlDType::Q6K
-        )
-    })
+    let Some(weight) = projection.get_qtensor() else {
+        // a dense weight gathers per head only stored by head, as GGUFs do; safetensors flatten them
+        return projection
+            .unquant_weight_bias()
+            .is_none_or(|(weight, _)| weight.rank() == 3);
+    };
+    matches!(
+        weight.dtype(),
+        GgmlDType::Q4_0
+            | GgmlDType::Q4_1
+            | GgmlDType::Q5_0
+            | GgmlDType::Q5_1
+            | GgmlDType::Q8_0
+            | GgmlDType::Q8_1
+            | GgmlDType::Q2K
+            | GgmlDType::Q3K
+            | GgmlDType::Q4K
+            | GgmlDType::Q5K
+            | GgmlDType::Q6K
+    )
 }
 
 fn dense_head_forward(input: &Tensor, weight: &Tensor, transpose_weight: bool) -> Result<Tensor> {
@@ -235,6 +284,7 @@ fn dense_head_forward(input: &Tensor, weight: &Tensor, transpose_weight: bool) -
     };
     input
         .to_dtype(DType::F32)?
+        .contiguous()?
         .broadcast_matmul(&weight.unsqueeze(0)?)?
         .to_dtype(input.dtype())?
         .reshape((batch, num_heads, seq_len, out_dim))
@@ -248,8 +298,18 @@ fn expanded_split_weights(
     if let Some(weights) = cache.get() {
         return Ok(weights.clone());
     }
-    let key = key.dequantize_w()?;
-    let value = value.dequantize_w()?;
+    let (key, value) = (key.dequantize_w()?, value.dequantize_w()?);
+    // a checkpoint's safetensors flatten the heads: K `(heads lora, nope)`, V `(heads v, lora)`
+    let (key, value) = if key.rank() == 2 {
+        let lora = value.dim(1)?;
+        let heads = key.dim(0)? / lora;
+        (
+            key.reshape((heads, lora, key.dim(1)?))?,
+            value.reshape((heads, value.dim(0)? / heads, lora))?,
+        )
+    } else {
+        (key, value)
+    };
     let (num_heads, kv_lora_rank, qk_nope_head_dim) = key.dims3()?;
     let (value_heads, v_head_dim, value_kv_lora_rank) = value.dims3()?;
     if value_heads != num_heads || value_kv_lora_rank != kv_lora_rank {

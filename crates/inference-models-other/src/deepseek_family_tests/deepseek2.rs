@@ -145,11 +145,15 @@ fn forward_lora_q() -> Result<()> {
     assert_snapshot(&forward_case(Some(Q_LORA), false, V_DIM)?, &expected)
 }
 
+// k_b/v_b as safetensors store them, heads flattened into rows
 #[test]
-fn forward_split_kv_b_errors_on_2d_weights() -> Result<()> {
-    // pins current behaviour: 2-D k_b/v_b load from safetensors, then the split projection wants 3-D (GGUF) weights
-    assert_err_contains(forward_case(Some(Q_LORA), true, V_DIM), "unexpected rank");
-    Ok(())
+fn forward_split_kv_b_from_2d_weights() -> Result<()> {
+    let expected = Snapshot {
+        probes: [0.49916297, -1.0769737, -0.35623208, -0.52134],
+        sum: -27.860432,
+        l2: 16.97945,
+    };
+    assert_snapshot(&forward_case(Some(Q_LORA), true, V_DIM)?, &expected)
 }
 
 // DeepSeek-V2/V3 value heads are narrower than their query heads (128 vs 192).

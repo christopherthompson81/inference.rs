@@ -1,6 +1,6 @@
 use crate::device_map::AutoDeviceMapParams;
 use crate::paged_attention::{
-    CacheMemoryReservations, DEFAULT_PAGED_ATTENTION_BLOCK_SIZE, MemoryGpuConfig, ModelConfigLike,
+    CacheMemoryReservations, DEFAULT_PAGED_ATTENTION_BLOCK_SIZE, MemoryGpuConfig,
     calculate_cache_config, device_memory_cap,
 };
 use crate::utils::debug::DeviceRepr;
@@ -33,17 +33,6 @@ fn post_load_memory_config(
         MemoryGpuConfig::Utilization(_) if !resolve_utilization_after_load => pre_load_budget,
         _ => requested,
     }
-}
-
-fn calculate_value_block_shape(
-    model_config: &dyn ModelConfigLike,
-    block_size: usize,
-) -> (usize, usize, usize) {
-    (
-        model_config.num_kv_heads(),
-        model_config.v_head_dim(),
-        block_size,
-    )
 }
 
 macro_rules! b_to_mb {
@@ -108,7 +97,8 @@ pub fn get_device_layers(
                 cache.bytes_per_value(cache_dtype)
             })
     };
-    let kv_cache_elems = match paged_attn_config {
+    // (tokens a paged cache holds, or None) and the elements a non-paged cache holds per layer
+    let (paged_kv_tokens, kv_cache_elems) = match paged_attn_config {
         Some(cfg) => {
             // The mapping estimate is bounded independently from the post-load memory mode.
             let requested_mem_gpu = cfg.mem_gpu;
@@ -130,10 +120,13 @@ pub fn get_device_layers(
                     let avail_bytes = MemoryUsage.query(primary_dev)?.available();
                     let cap = device_memory_cap(avail_bytes, primary_dev);
                     let act_overhead = non_mapped_max.max(mapped_max);
-                    let budget_mb = cap
-                        .saturating_sub(act_overhead)
-                        .saturating_sub(base_device_memory_reservation_bytes)
-                        / (1024 * 1024);
+                    // best effort shrinks to what the weights leave rather than pushing layers off the GPU
+                    let occupied = saturating_memory_sum([
+                        remaining,
+                        act_overhead,
+                        base_device_memory_reservation_bytes,
+                    ]);
+                    let budget_mb = cap.saturating_sub(occupied) / (1024 * 1024);
                     MemoryGpuConfig::BestEffortMbAmount {
                         target_mb: budget_mb.min(target_mb),
                         min_mb,
@@ -193,13 +186,7 @@ pub fn get_device_layers(
                 Some(total_model_size_in_bytes),
                 Some(max_seq_len * max_batch_size),
             )?;
-            let key_sz = cache.num_gpu_blocks
-                * model_cfg.num_kv_heads()
-                * model_cfg.k_head_dim()
-                * cache.block_size;
-            let val_shape = calculate_value_block_shape(&*model_cfg, cache.block_size);
-            let val_sz = cache.num_gpu_blocks * val_shape.0 * val_shape.1 * val_shape.2;
-            key_sz + val_sz
+            (Some(cache.num_gpu_blocks * cache.block_size), 0)
         }
         None => {
             let key_shape = [
@@ -214,17 +201,24 @@ pub fn get_device_layers(
                 max_seq_len,
                 model_cfg.v_head_dim(),
             ];
-            key_shape.iter().product::<usize>() + val_shape.iter().product::<usize>()
+            (
+                None,
+                key_shape.iter().product::<usize>() + val_shape.iter().product::<usize>(),
+            )
         }
     };
     // Per paged layer; hybrid models leave the recurrent/linear layers out of the cache entirely.
+    // a paged layer's own elements (an MLA latent is far narrower than per-head K/V)
     let kv_bytes_for_layer = |idx: usize| {
-        if model_cfg.layer_has_paged_kv_cache(idx) {
-            let (num, den) = value_bytes(idx);
-            (kv_cache_elems * num).div_ceil(den)
-        } else {
-            0
-        }
+        let elems = match paged_kv_tokens {
+            Some(tokens) => model_cfg
+                .layer_kv_cache_elements_per_token(idx)
+                .map_or(0, |per_token| per_token * tokens),
+            None if model_cfg.layer_has_paged_kv_cache(idx) => kv_cache_elems,
+            None => 0,
+        };
+        let (num, den) = value_bytes(idx);
+        (elems * num).div_ceil(den)
     };
     // Paged layers past the mapped stack (an MTP head) are charged to the non-mapped device.
     let extra_kv_bytes = (num_layers..model_cfg.num_layers())
