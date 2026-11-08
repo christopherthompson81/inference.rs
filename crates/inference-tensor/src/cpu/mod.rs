@@ -7,27 +7,47 @@ mod row_weights;
 
 pub use row_weights::Bf16RowWeights;
 
+/// A relative-position attention's operands as a layer's projections give them: `q` `(1, t, heads * d)`, `k` and `v`
+/// `(1, keys, heads * d)`, `positions` `(1, p_rows, heads * d)`, and the content and position biases `bias_u`,
+/// `bias_v` (`heads * d` values, any shape); pair `(i, j)` reads position row `pos_base - i + j`.
+pub struct RelPosOperands<'a> {
+    pub q: &'a crate::Tensor,
+    pub bias_u: &'a crate::Tensor,
+    pub bias_v: &'a crate::Tensor,
+    pub scale: f32,
+    pub k: &'a crate::Tensor,
+    pub v: &'a crate::Tensor,
+    pub positions: &'a crate::Tensor,
+    pub heads: usize,
+    pub pos_base: usize,
+}
+
 /// Transformer-XL relative-position attention fused on the CPU: on AVX-512 BF16 inside [`with_bf16_matmuls`], else in
-/// f32 on AVX2 and FMA. score(i, j) = `q_content`_i . `k`_j + `q_position`_i . `positions`[pos_base - i + j], both
-/// query sets scaled beforehand, a softmax over the keys, times `v`. The queries are `(1, heads, t, d)`, `k` and `v`
-/// `(1, heads, keys, d)`, `positions` `(1, heads, p_rows, d)`; the output is laid out as the queries. `None` on a CPU
-/// with neither, or for a shape the kernels do not take.
-pub fn rel_pos_attention(
-    q_content: &crate::Tensor,
-    q_position: &crate::Tensor,
-    k: &crate::Tensor,
-    v: &crate::Tensor,
-    positions: &crate::Tensor,
-    pos_base: usize,
-) -> crate::Result<Option<crate::Tensor>> {
-    let (batch, heads, t, d) = q_content.dims4()?;
-    let (_, _, keys, _) = k.dims4()?;
-    let (_, _, p_rows, _) = positions.dims4()?;
-    let operands = [q_content, q_position, k, v, positions];
-    let shapes = q_position.dims() == q_content.dims()
-        && k.dims() == [batch, heads, keys, d]
+/// f32 on AVX2 and FMA. score(i, j) = qc_i . k_j + qp_i . positions[pos_base - i + j] per head, with qc = (q + bias_u)
+/// scale and qp = (q + bias_v) scale, a softmax over the keys, times `v`. Each head is read where the projections put
+/// it, so nothing is split per head first; the output is `(1, t, heads * d)`, as `q`. `None` on a CPU with neither, or
+/// for a shape the kernels do not take.
+pub fn rel_pos_attention(op: &RelPosOperands) -> crate::Result<Option<crate::Tensor>> {
+    let RelPosOperands {
+        q,
+        k,
+        v,
+        positions,
+        heads,
+        pos_base,
+        ..
+    } = *op;
+    let (batch, t, width) = q.dims3()?;
+    let (_, keys, _) = k.dims3()?;
+    let (_, p_rows, _) = positions.dims3()?;
+    let d = width / heads.max(1);
+    let operands = [q, k, v, positions];
+    let shapes = heads * d == width
+        && k.dims() == [batch, keys, width]
         && v.dims() == k.dims()
-        && positions.dims() == [batch, heads, p_rows, d];
+        && positions.dims() == [batch, p_rows, width]
+        && op.bias_u.elem_count() == width
+        && op.bias_v.elem_count() == width;
     if batch != 1
         || !shapes
         || !operands
@@ -58,12 +78,20 @@ pub fn rel_pos_attention(
             _ => crate::bail!("relative-position attention takes CPU f32 operands"),
         })
         .collect::<crate::Result<Vec<&[f32]>>>()?;
+    let bias = |b: &crate::Tensor| {
+        b.flatten_all()?
+            .to_dtype(crate::DType::F32)?
+            .to_vec1::<f32>()
+    };
+    let (bias_u, bias_v) = (bias(op.bias_u)?, bias(op.bias_v)?);
     let op = crate::cpu_backend::relpos_attn::RelPosAttn {
-        qc: slices[0],
-        qp: slices[1],
-        k: slices[2],
-        v: slices[3],
-        p: slices[4],
+        q: slices[0],
+        bias_u: &bias_u,
+        bias_v: &bias_v,
+        scale: op.scale,
+        k: slices[1],
+        v: slices[2],
+        p: slices[3],
         heads,
         t,
         keys,
@@ -78,7 +106,7 @@ pub fn rel_pos_attention(
     };
     Ok(Some(crate::Tensor::from_vec(
         out,
-        (batch, heads, t, d),
+        (batch, t, width),
         &crate::Device::Cpu,
     )?))
 }
