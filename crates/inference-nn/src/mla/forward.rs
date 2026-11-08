@@ -418,11 +418,8 @@ pub fn mla_cache_forward(
 
     let prefix_lens = seqlen_offsets;
     let needs_prefix = prefix_lens.iter().any(|&len| len > 0);
-    // q absorbed into the latent space: every head attends the one latent head
-    let absorbed = needs_prefix
-        && v.dim(D::Minus1)? == kv_lora_rank
-        && q.dim(D::Minus1)? == kv_lora_rank + qk_rope_head_dim
-        && latent_flash_supported(q, kv_lora_rank, qk_rope_head_dim)?;
+    // a cached prefix attends as the one latent head, every head's q absorbed into it (split k_b/v_b absorb it before)
+    let absorbed = needs_prefix && latent_flash_supported(q, kv_lora_rank, qk_rope_head_dim)?;
     if !needs_prefix && !matches!(attention_mask, AttentionMask::None) {
         project_split_mla_value(
             mla_direct_attention(q, k, v, attention_mask, flash_params, sdpa_params)?,
@@ -610,9 +607,29 @@ pub fn mla_cache_forward(
                     Some(prefix) => Tensor::cat(&[&prefix, &cur], 0)?,
                     None => cur,
                 };
-                let out =
-                    latent_flash_attention(&q_i, &latent, kv_lora_rank, sdpa_params.softmax_scale)?;
-                let mut out = project_split_mla_value(out, kv_b_proj)?
+                let q_latent = if kv_b_proj.is_split() {
+                    q_i
+                } else {
+                    Tensor::cat(
+                        &[
+                            &kv_b_proj.absorb_query(&q_i.narrow(
+                                D::Minus1,
+                                0,
+                                qk_nope_head_dim,
+                            )?)?,
+                            &q_i.narrow(D::Minus1, qk_nope_head_dim, qk_rope_head_dim)?,
+                        ],
+                        D::Minus1,
+                    )?
+                };
+                let out = latent_flash_attention(
+                    &q_latent,
+                    &latent,
+                    kv_lora_rank,
+                    sdpa_params.softmax_scale,
+                )?;
+                let mut out = kv_b_proj
+                    .latent_value(&out, qk_nope_head_dim)?
                     .squeeze(0)?
                     .transpose(0, 1)?;
                 if cur_len < seq_len {

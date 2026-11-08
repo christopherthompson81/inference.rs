@@ -415,33 +415,35 @@ async fn bf16_prompt_chunks_over_a_cached_prefix_score_as_one_chunk_on_cuda() ->
     if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
         return Ok(());
     }
-    let dir = checkpoint(Kind::SplitKvB)?;
-    let build = |chunk: Option<usize>| -> anyhow::Result<_> {
-        let builder = TextModelBuilder::new(dir.path().to_string_lossy())
-            .with_dtype(ModelDType::BF16)
-            .with_prefix_cache_n(None)
-            .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?);
-        let builder = match chunk {
-            Some(tokens) => builder
-                .with_max_prefill_chunk_tokens(tokens)
-                .with_max_num_batched_tokens(tokens),
-            None => builder,
+    for kind in [Kind::FusedKvB, Kind::SplitKvB] {
+        let dir = checkpoint(kind)?;
+        let build = |chunk: Option<usize>| -> anyhow::Result<_> {
+            let builder = TextModelBuilder::new(dir.path().to_string_lossy())
+                .with_dtype(ModelDType::BF16)
+                .with_prefix_cache_n(None)
+                .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?);
+            let builder = match chunk {
+                Some(tokens) => builder
+                    .with_max_prefill_chunk_tokens(tokens)
+                    .with_max_num_batched_tokens(tokens),
+                None => builder,
+            };
+            Ok(builder.build())
         };
-        Ok(builder.build())
-    };
-    let (whole, chunked) = (
-        build(None)?.await?,
-        build(Some(PREFIX_CHUNK_TOKENS))?.await?,
-    );
-    // bf16 near-ties flip later greedy steps either way; the first token reads every chunk's cache
-    let prompt = "say something long ".repeat(LONG_PROMPT_REPEATS);
-    let (expected, _) = traces::greedy(&whole, chat(&prompt), 1).await?;
-    let (actual, _) = traces::greedy(&chunked, chat(&prompt), 1).await?;
-    let ((expected_token, expected), (actual_token, actual)) = (expected[0], actual[0]);
-    anyhow::ensure!(
-        expected_token == actual_token && (expected - actual).abs() < BF16_LOGPROB_TOLERANCE,
-        "one chunk {expected_token} {expected}, chunked {actual_token} {actual}"
-    );
+        let (whole, chunked) = (
+            build(None)?.await?,
+            build(Some(PREFIX_CHUNK_TOKENS))?.await?,
+        );
+        // bf16 near-ties flip later greedy steps either way; the first token reads every chunk's cache
+        let prompt = "say something long ".repeat(LONG_PROMPT_REPEATS);
+        let (expected, _) = traces::greedy(&whole, chat(&prompt), 1).await?;
+        let (actual, _) = traces::greedy(&chunked, chat(&prompt), 1).await?;
+        let ((expected_token, expected), (actual_token, actual)) = (expected[0], actual[0]);
+        anyhow::ensure!(
+            expected_token == actual_token && (expected - actual).abs() < BF16_LOGPROB_TOLERANCE,
+            "{kind:?}: one chunk {expected_token} {expected}, chunked {actual_token} {actual}"
+        );
+    }
     Ok(())
 }
 

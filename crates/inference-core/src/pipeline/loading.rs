@@ -572,17 +572,13 @@ impl ExpertCachePlan<'_> {
         let tokens = params.max_seq_len() * params.max_batch_size();
         let cache = match self.paged_attn_config {
             Some(cfg) => {
-                let plan =
-                    crate::paged_attention::cache_plan(cfg.cache_type, &cfg.cache_layers, &*model);
-                let (num, den) =
-                    crate::paged_attention::kv_bytes_per_token(&plan, self.dtype, primary, &*model);
                 let held_back = match cfg.mem_gpu {
                     crate::MemoryGpuConfig::Utilization(fraction) => {
                         (cap as f64 * (1.0 - f64::from(fraction)).max(0.0)) as usize
                     }
                     _ => 0,
                 };
-                (tokens * num).div_ceil(den)
+                self.kv_bytes(cfg, tokens)?
                     + held_back
                     + cfg.base_device_memory_reservation_bytes
                     + recurrent_pool_bytes(&*model, cfg)
@@ -593,6 +589,19 @@ impl ExpertCachePlan<'_> {
             None => tokens * model.total_kv_cache_elements_per_token() * self.dtype.size_in_bytes(),
         };
         Ok(cap.checked_sub(sizes.total_model_size_in_bytes + activations + cache))
+    }
+
+    // The paged cache's bytes for `tokens`
+    fn kv_bytes(&self, cfg: &PagedAttentionConfig, tokens: usize) -> Result<usize> {
+        let model = self.sizing.loader.model_config(self.sizing.config)?;
+        let plan = crate::paged_attention::cache_plan(cfg.cache_type, &cfg.cache_layers, &*model);
+        let (num, den) = crate::paged_attention::kv_bytes_per_token(
+            &plan,
+            self.dtype,
+            &self.devices[0],
+            &*model,
+        );
+        Ok((tokens * num).div_ceil(den))
     }
 
     // Activations as the load reserves them, for the requested map rather than the longer planned context (prompts
@@ -611,6 +620,11 @@ impl ExpertCachePlan<'_> {
             Some(crate::MemoryGpuConfig::ContextSize(tokens)) => tokens,
             _ => 0,
         }
+    }
+
+    // The context the map and a context-sized paged cache ask for, not the planner's longer default
+    fn requested(&self, params: &AutoDeviceMapParams) -> AutoDeviceMapParams {
+        params.with_max_seq_len(params.max_seq_len().max(self.requested_context()))
     }
 
     fn planned_context(&self, params: &AutoDeviceMapParams) -> Result<AutoDeviceMapParams> {
@@ -702,10 +716,8 @@ impl ExpertCachePlan<'_> {
             return Ok(None);
         };
         let activations = self.activations(params)?;
-        let requested = self.requested_context();
         if let Some(asked) = self.sizing.moe_expert_cache {
-            // the context the map and a context-sized paged cache ask for, not the planner's longer default
-            let context = params.with_max_seq_len(params.max_seq_len().max(requested));
+            let context = self.requested(params);
             if self.fits(Some(asked), &context, activations)? {
                 return Ok(None);
             }
@@ -728,9 +740,10 @@ impl ExpertCachePlan<'_> {
             return Ok(fitting);
         }
         let target = self.planned_context(params)?;
+        let requested = self.requested(params);
         // an offload keeps room for a usable prompt chunk; fitting resident needs none
         let chunk_floor = self.prompt_chunk_floor()?;
-        let plan = plan_expert_slots(experts, [&target, params], |slots, params| {
+        let plan = plan_expert_slots(experts, [&target, &requested], |slots, params| {
             let floor = if slots.is_some() { chunk_floor } else { 0 };
             self.fits(slots, params, activations + floor)
         })?;
@@ -788,15 +801,17 @@ fn planned_offload_context(max_seq_len: usize, requested: usize, window: usize) 
 }
 
 // The most experts per layer to cache (with the context it fits), trying each multiple of 1/PLANNED_SLOT_STEPS of a
-// layer's experts and then none, for the longer context first; `None` when the weights fit resident beside the first
-// context, or nothing fits at all
+// layer's experts and then none, for the longer context first; `None` when the weights fit resident beside either
+// context (every expert on the GPU beats a longer context), or nothing fits at all
 fn plan_expert_slots<C: Copy>(
     experts: usize,
     contexts: [C; 2],
     mut fits: impl FnMut(Option<usize>, C) -> Result<bool>,
 ) -> Result<Option<(usize, C)>> {
-    if fits(None, contexts[0])? {
-        return Ok(None);
+    for context in contexts {
+        if fits(None, context)? {
+            return Ok(None);
+        }
     }
     let step = (experts / PLANNED_SLOT_STEPS).max(1);
     let candidates = (1..experts.div_ceil(step))
@@ -871,6 +886,27 @@ fn need_sized_default_cache(
     Ok(())
 }
 
+// The share of the free floor `need_sized_default_cache` reserved that `device_memory_cap`'s reserve already holds back
+fn default_floor_overlap(cfg: &PagedAttentionConfig, primary: &Device) -> Result<usize> {
+    if !cfg.default_memory
+        || !primary.is_cuda()
+        || !matches!(
+            cfg.mem_gpu,
+            crate::MemoryGpuConfig::BestEffortMbAmount { .. }
+        )
+    {
+        return Ok(0);
+    }
+    let memory = crate::MemoryUsage.query(primary)?;
+    let available = memory.available();
+    let held_back = available - crate::paged_attention::device_memory_cap(available, primary);
+    Ok(
+        crate::paged_attention::cuda_free_floor_bytes(memory.total())
+            .min(held_back)
+            .min(cfg.base_device_memory_reservation_bytes),
+    )
+}
+
 /// UQFF writing loads unmapped, tensor parallelism shards instead of mapping, and an automatic map is sized here.
 pub(crate) fn resolve_map_setting(
     inputs: MapSettingInputs<'_>,
@@ -921,11 +957,59 @@ pub(crate) fn resolve_map_setting(
             paged_attn_config,
         };
         let offloadable = probe.offloadable_experts()?.is_some();
+        // a model that may keep every expert resident counts the default cache's free floor and `device_memory_cap`'s
+        // reserve as the same free memory; an offload plan keeps both
+        let floor_overlap = match paged_attn_config.as_mut() {
+            Some(cfg) if offloadable => {
+                let overlap = default_floor_overlap(cfg, &available_devices[0])?;
+                cfg.base_device_memory_reservation_bytes -= overlap;
+                overlap
+            }
+            _ => 0,
+        };
+        let probe = ExpertCachePlan {
+            sizing,
+            devices: available_devices,
+            dtype,
+            paged_attn_config,
+        };
         let asked = sizing.moe_expert_cache.is_some();
-        // the planner moves experts off the GPU itself when the weights do not fit resident beside the planned context
+        // the planner moves experts off the GPU itself when the weights fit resident beside neither the planned context
+        // nor the requested one
         let planned = probe.planned_context(params)?;
-        let fits_resident =
-            !offloadable || probe.fits(None, &planned, probe.activations(params)?)?;
+        let activations = probe.activations(params)?;
+        let requested = probe.requested(params);
+        let fits_planned = !offloadable || probe.fits(None, &planned, activations)?;
+        let fits_resident = fits_planned || probe.fits(None, &requested, activations)?;
+        // resident only at the requested context: a best-effort cache keeps at least that, so the recurrent pool's
+        // KV floor is what the planner counted rather than a share of the device
+        let floor_bytes = match paged_attn_config.as_ref() {
+            Some(cfg) if !fits_planned && fits_resident => {
+                Some(probe.kv_bytes(cfg, requested.max_seq_len() * requested.max_batch_size())?)
+            }
+            _ => None,
+        };
+        if (asked || !fits_resident)
+            && let Some(cfg) = paged_attn_config.as_mut()
+        {
+            cfg.base_device_memory_reservation_bytes += floor_overlap;
+        }
+        if let Some(bytes) = floor_bytes
+            && let Some(cfg) = paged_attn_config.as_mut()
+            && let crate::MemoryGpuConfig::BestEffortMbAmount {
+                target_mb,
+                min_mb: None,
+            } = cfg.mem_gpu
+        {
+            cfg.mem_gpu = crate::MemoryGpuConfig::BestEffortMbAmount {
+                target_mb,
+                min_mb: Some(
+                    bytes
+                        .div_ceil(crate::pipeline::BYTES_PER_MIB)
+                        .min(target_mb),
+                ),
+            };
+        }
         // an MLA latent cache keeps the model's dtype
         let model_config = sizing.loader.model_config(sizing.config)?;
         let latent = (0..model_config.num_layers()).any(|layer| {
@@ -1770,6 +1854,11 @@ mod expert_slot_plan_tests {
     fn the_most_slots_that_fit_win_in_sixty_fourths_of_the_experts() {
         assert_eq!(plan(Some(202), None), Some((200, 0)));
         assert_eq!(plan(Some(3), None), Some((0, 0)));
+    }
+
+    #[test]
+    fn resident_at_the_shorter_context_beats_slots_at_the_longer() {
+        assert_eq!(plan(Some(200), Some(EXPERTS)), None);
     }
 
     #[test]

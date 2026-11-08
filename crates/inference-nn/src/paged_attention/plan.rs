@@ -1,7 +1,7 @@
 use inference_tensor::{DType, Result};
 
 use super::{
-    ModelConfigLike, attention_backend::AttentionBackendKind,
+    KvCacheLayout, ModelConfigLike, attention_backend::AttentionBackendKind,
     config::PrefixPrefillAttentionFeatures,
 };
 #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -10,6 +10,8 @@ use crate::flashinfer::{self, FlashInferDecodePlan, FlashInferDecodePlanInput};
 // fattn's f16 peak in output-sized units: an f32 Q copy and f32 output (two each) and the f16 result
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 const FATTN_F16_OUTPUT_PEAK: usize = 5;
+// fattn's GQA path, which runs MLA's latent prefix, takes key lengths in multiples of this
+const MLA_LATENT_KV_STRIDE: usize = 256;
 
 #[derive(Clone, Copy, Debug)]
 pub struct PrefixPrefillPlanInput {
@@ -509,6 +511,23 @@ pub fn prompt_prefill_workspace(
     let own_layers = model.num_layers() - model.auxiliary_paged_layers();
     for layer_idx in (0..own_layers).filter(|&layer_idx| model.layer_has_paged_kv_cache(layer_idx))
     {
+        if let KvCacheLayout::Mla {
+            kv_lora_rank,
+            kpe_head_dim,
+        } = model.kv_cache_layout_for_layer(layer_idx)
+            && input.device_is_cuda
+            && matches!(input.activation_dtype, DType::F16 | DType::BF16)
+        {
+            let latent = mla_latent_prefill_workspace(
+                input,
+                model.num_attn_heads_for_layer(layer_idx),
+                kv_lora_rank,
+                kpe_head_dim,
+                model.k_head_dim_for_layer(layer_idx),
+            )?;
+            max_layer_transient = max_layer_transient.max(latent);
+            continue;
+        }
         let fa3_num_sm = input.fa3_num_sm_by_layer.get(layer_idx).copied().flatten();
         let features = model.prefix_prefill_attention_features(layer_idx);
         let plan_input = features.map(|features| {
@@ -613,6 +632,48 @@ pub fn prompt_prefill_workspace(
         bytes,
         gather_workspace_bytes,
     })
+}
+
+// An MLA layer's cached prefix attending as one latent head (`mla_cache_forward`): the gathered latents, and per
+// sequence its latent keys padded for fattn with their mask, q absorbed and transposed, and fattn's f32 output beside
+// the latent result and the heads' values (`head_dim`, q's per-head width, bounds them)
+fn mla_latent_prefill_workspace(
+    input: PromptPrefillWorkspaceInput<'_>,
+    heads: usize,
+    kv_lora_rank: usize,
+    rope: usize,
+    head_dim: usize,
+) -> Result<usize> {
+    let dtype = input.activation_dtype.size_in_bytes();
+    let width = kv_lora_rank + rope;
+    let gathered = checked_tensor_bytes(
+        &[
+            checked_sum(input.full_context_lens, "MLA latent prefix")?,
+            width,
+        ],
+        dtype,
+        "MLA latent prefix",
+    )?;
+    let mut peak = 0usize;
+    for (&query, &context) in input.query_lens.iter().zip(input.full_context_lens) {
+        let padded = context.div_ceil(MLA_LATENT_KV_STRIDE) * MLA_LATENT_KV_STRIDE;
+        let sequence = checked_sum(
+            &[
+                checked_tensor_bytes(&[2 * padded, width], dtype, "MLA latent keys")?,
+                checked_tensor_bytes(&[3 * query, padded], DType::F16.size_in_bytes(), "MLA mask")?,
+                checked_tensor_bytes(&[2 * query, heads, width], dtype, "MLA latent query")?,
+                checked_tensor_bytes(
+                    &[query, heads, kv_lora_rank],
+                    4 + dtype,
+                    "MLA latent output",
+                )?,
+                checked_tensor_bytes(&[query, heads, head_dim], dtype, "MLA value output")?,
+            ],
+            "MLA latent sequence",
+        )?;
+        peak = peak.max(sequence);
+    }
+    checked_sum(&[gathered, peak], "MLA latent prefill")
 }
 
 fn prompt_plan_input(
@@ -1145,6 +1206,46 @@ mod tests {
             !fattn_reads_cache(256)
         );
         assert!(workspace.bytes >= workspace.gather_workspace_bytes);
+    }
+
+    // Kimi-Linear's MLA layers: 32 heads over a 512 + 64 latent, q 128 + 64 wide per head
+    fn mla_workspace_model() -> ModelConfigMetadata {
+        ModelConfigMetadata {
+            max_seq_len: 131_072,
+            num_layers: 2,
+            hidden_size: 2304,
+            num_kv_heads: 32,
+            num_attn_heads: 32,
+            sliding_window: None,
+            k_head_dim: 192,
+            v_head_dim: 192,
+            kv_cache_layout: KvCacheLayout::Mla {
+                kv_lora_rank: 512,
+                kpe_head_dim: 64,
+            },
+        }
+    }
+
+    #[test]
+    fn mla_prefix_workspace_is_the_latent_not_per_head_keys() {
+        let model = mla_workspace_model();
+        let query_lens = [512];
+        let context_lens = [3_911];
+        let latent =
+            prompt_prefill_workspace(Some(&model), workspace_input(&query_lens, &context_lens))
+                .unwrap();
+        // 3,911 latents, keys padded to 4,096 with their mask, absorbed q, fattn's f32 + bf16 output, the values
+        assert_eq!(latent.bytes, 120_897_408);
+        assert_eq!(latent.gather_workspace_bytes, 0);
+        let per_head = prompt_prefill_workspace(
+            Some(&model),
+            PromptPrefillWorkspaceInput {
+                activation_dtype: DType::F32,
+                ..workspace_input(&query_lens, &context_lens)
+            },
+        )
+        .unwrap();
+        assert!(per_head.bytes > 4 * latent.bytes, "{per_head:?}");
     }
 
     #[test]

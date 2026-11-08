@@ -95,3 +95,77 @@ model); in F32 the two agree within 2e-6 over 8 steps, so the test compares the 
 chunk's cache. Scaling the latent softmax by 2 fails it.
 
 Next: the planner (resident at the requested context; no offload reserve on the resident candidate).
+
+## Run 3 - 2026-11-07 21:40
+
+Question: with prefill flat, does Kimi Q3_K_M run all-resident at a 4K context, and what does the planner charge it?
+
+Margins cut to 128 MB again (temporarily), `--pa-context-len 4096`: the planner chose resident, but the map put
+layer 26 on the CPU, which disables PagedAttention, and the prompt hit CUDA_ERROR_OUT_OF_MEMORY. The map's terms
+(logged temporarily): KV 682 MiB for 4,096 tokens. `get_device_layers` charged every paged layer
+`num_kv_heads * k_head_dim` per token (32 x (192 + 128)), where MLA's latent holds 512 + 64: about 32 MiB.
+Fixed: the map takes each layer's own `layer_kv_cache_elements_per_token` (the planner already did).
+
+Real margins, `--pa-context-len 4096`: every layer on the GPU, 130 blocks (4,128 tokens), idle 23,464 MiB used
+(1,221 of it other processes). The 3.9K prompt was refused at admission: "CUDA memory pressure prevented prompt
+admission requiring 554172416 bytes". The prompt preflight (`prompt_prefill_workspace`) still sized MLA layers as
+the per-head gather + SDPA the latent path replaced; `--max-num-batched-tokens 512` gave the same 554 MB, so it is
+the prefix estimate, not the chunk. Fixed: MLA layers on CUDA at f16/bf16 get the latent path's workspace (gathered
+latents, padded keys and mask, absorbed q, fattn output). Fused kv_b (HF checkpoints) now takes the latent prefix
+path too (q absorbed through the fused weight's K rows, values through its V rows), so the estimate holds for both;
+the tiny chunked test runs both kinds, and doubling the fused absorbed q fails it.
+
+Result, resident at 4K:
+
+```
+prompt 3,911: 5.14 s with 128 generated, prefill 1,292 tok/s (offloaded: ~470), decode 64.6 tok/s
+peak 23,724 MiB of 24,576 (852 MiB free at the peak)
+```
+
+Repeating one greedy request gives the same opening text but 78 or 128 tokens: the run-to-run logprob noise seen in
+Run 2 flips the stop token; a cached and an uncached run differ alike.
+
+Planner on a default load (no flags), with resident at the requested context now tried before any slots
+(`plan_expert_slots` tries resident at both contexts first; `fits_resident` also counts the requested one):
+
+```
+slots=None tokens=32768 cap=22099 model=21681 act=64 cache=1070   (misses by 716)
+slots=None tokens=4096  cap=22099 model=21681 act=64 cache=849    (misses by 495)
+```
+
+cache at 4K = 32 KV + 512 MB free floor + 305 recurrent pool. `cap` already holds back `device_memory_cap`'s 512 MB,
+and the default cache adds the 512 MB free floor on top; the run above left 852 MiB free at its peak, so resident
+fits in practice where the planner's two margins together refuse it. Charging the larger of the two rather than
+their sum would leave it short by ~7 MiB at this desktop's usage. Margins are the open decision.
+
+## Run 4 - 2026-11-07 22:30
+
+Decision (user): charge the cap reserve and the free floor as overlapping for the resident check. (The pool trim
+offered with it saves nothing: a resident Kimi already holds 7 rows = 4 sequences + 1 graph pad + 2 snapshots.)
+
+Changes:
+- For a model whose experts can offload, the default cache's free floor reserves only what exceeds
+  `device_memory_cap`'s reserve while resident is tried; an offload restores the full floor (its 1 GiB runtime
+  reserve was measured beside it).
+- Resident at the requested context (a default load's 4,096) is tried before any slots; when it wins only there, a
+  best-effort cache keeps at least that context's KV as its minimum, so the recurrent pool's KV floor is what the
+  planner counted. Without that minimum the pool budgeted 5% of the device for KV and served 1 sequence (`fitted_seqs=1`)
+  while the cache took 403 MB.
+- The map's best-effort KV budget subtracts the weights, as its utilization branch did: on the first default resident
+  load it pushed layer 26 to the CPU to make room for a 1M-token context.
+
+Default load, no flags (`inference serve --format gguf ... Q3_K_M.gguf`):
+
+```
+Layers 0-26: cuda[0]; recurrent pool capacity=7; KV 307 MB, 39,872 tokens
+idle 23,720 MiB, peak 23,980 MiB of 24,576 (3.9K and 7.8K prompts, 4 concurrent requests in another run)
+```
+
+Offload plans are unchanged by construction (the floor is restored before the offload branch). Qwen3.8-Flash-Next
+UD-IQ4_XS: slots 128 of 512, 32K q3 KV (380 MB), chunk 1,024 (base reservation 1,536 MiB = floor + 1 GiB, as on
+master). Qwen3.6-35B UD-IQ4_XS: resident, 262K KV (5,120 MB), as before. The LAN copy of master (1807d0c92, Nov 1)
+plans Flash-Next's chunk at 2,560: older planner code, not a comparison for this branch.
+
+Planner tests: `resident_at_the_shorter_context_beats_slots_at_the_longer`; the preflight's MLA estimate is pinned
+(`mla_prefix_workspace_is_the_latent_not_per_head_keys`, 115 MiB at 512 queries over 3,911 tokens; F32 still takes
+the per-head estimate, over 4x that).

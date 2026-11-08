@@ -38,6 +38,32 @@ impl MlaKvBProjection {
         }
     }
 
+    /// `q_nope (b, heads, seq, nope)` absorbed into the latent space: `(b, heads, seq, kv_lora_rank)`.
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    pub fn absorb_query(&self, q_nope: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Split { .. } => self.project_query(q_nope),
+            Self::Fused(projection) => {
+                let (key, _) = fused_head_weights(projection.as_ref(), q_nope, q_nope.dim(3)?)?;
+                q_nope.contiguous()?.broadcast_matmul(&key.unsqueeze(0)?)
+            }
+        }
+    }
+
+    /// Attention over the latent `(b, heads, seq, kv_lora_rank)` into each head's values; `nope` is q's unroped width.
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    pub fn latent_value(&self, latent: &Tensor, nope: usize) -> Result<Tensor> {
+        match self {
+            Self::Split { .. } => self.project_value(latent),
+            Self::Fused(projection) => {
+                let (_, value) = fused_head_weights(projection.as_ref(), latent, nope)?;
+                latent
+                    .contiguous()?
+                    .broadcast_matmul(&value.transpose(1, 2)?.contiguous()?.unsqueeze(0)?)
+            }
+        }
+    }
+
     pub fn fused_layer(&self) -> Option<&Arc<dyn QuantMethod>> {
         match self {
             Self::Fused(projection) => Some(projection),
@@ -189,6 +215,25 @@ fn indexed_head_forward(projection: &dyn QuantMethod, input: &Tensor) -> Result<
     output
         .reshape((batch, seq_len, num_heads, out_dim))?
         .transpose(1, 2)
+}
+
+// a fused kv_b `(heads (nope + v), lora)` as per-head K `(heads, nope, lora)` and V `(heads, v, lora)` in `like`'s
+// dtype, its heads read from `like (b, heads, ..)`
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+fn fused_head_weights(
+    projection: &dyn QuantMethod,
+    like: &Tensor,
+    nope: usize,
+) -> Result<(Tensor, Tensor)> {
+    let heads = like.dim(1)?;
+    let weight = projection.dequantize_w()?.to_dtype(like.dtype())?;
+    let (rows, lora) = weight.dims2()?;
+    let per_head = rows / heads;
+    let weight = weight.reshape((heads, per_head, lora))?;
+    Ok((
+        weight.narrow(1, 0, nope)?.contiguous()?,
+        weight.narrow(1, nope, per_head - nope)?,
+    ))
 }
 
 fn supports_indexed_cuda_projection(projection: &dyn QuantMethod, input: &Tensor) -> bool {
