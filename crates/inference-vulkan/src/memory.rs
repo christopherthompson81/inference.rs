@@ -63,7 +63,7 @@ struct Allocation {
 /// it (they retain this, not the buffer): freed when the last of them drops it. A device buffer goes back to the pool
 /// when its last user drops it, before the work recorded on it finishes, and the work recorded after takes it: the
 /// stream orders every command after the ones before (a barrier follows each), as CUDA's allocator reuses a block in
-/// stream order. The CPU never maps a device buffer; a mapped one waits for its batches before it is reused.
+/// stream order. A mapped one taken so (`Buffer::early`) is written on the stream, not in place, while batches hold it.
 pub(crate) struct Held {
     // weak, so the pool's entries do not keep their context alive
     context: std::sync::Weak<Context>,
@@ -192,6 +192,8 @@ pub struct Buffer {
     capacity: u64,
     // a pooled buffer's allocation; a buffer without one frees its own when it drops
     held: Option<Arc<Held>>,
+    // mapped and taken from the pool while batches recorded before it still held it: the CPU writes it on the stream
+    early: AtomicBool,
 }
 
 // SAFETY: the mapping is plain memory, and the Vulkan handles are only used through the context's synchronized calls
@@ -201,15 +203,28 @@ unsafe impl Sync for Buffer {}
 impl Buffer {
     /// A buffer where the device's kernels read fastest: the device's memory, or mapped host RAM on a unified device.
     pub fn new(context: &Arc<Context>, len: usize) -> Result<Self> {
-        Self::placed(context, len, !context.unified)
+        Self::placed(context, len, !context.unified, false)
     }
 
-    /// A buffer in host RAM the CPU maps, wherever the device's own memory is.
+    /// A buffer as [`Self::new`] places it, for the CPU to write before the GPU uses it: where mapped, one no submitted
+    /// work still uses, so the write lands in place.
+    pub fn for_upload(context: &Arc<Context>, len: usize) -> Result<Self> {
+        Self::placed(context, len, !context.unified, true)
+    }
+
+    /// A buffer in host RAM the CPU maps, wherever the device's own memory is, which no submitted work still uses (the
+    /// CPU writes it in place).
     pub fn host(context: &Arc<Context>, len: usize) -> Result<Self> {
-        Self::placed(context, len, false)
+        Self::placed(context, len, false, true)
     }
 
-    fn placed(context: &Arc<Context>, len: usize, device_local: bool) -> Result<Self> {
+    // `idle_only` keeps a mapped buffer from being taken in stream order
+    fn placed(
+        context: &Arc<Context>,
+        len: usize,
+        device_local: bool,
+        idle_only: bool,
+    ) -> Result<Self> {
         if len == 0 || len as u64 > MAX_BINDING_BYTES {
             return Err(Error::Invalid(format!("a buffer of {len} bytes")));
         }
@@ -218,11 +233,11 @@ impl Buffer {
             .allocated
             .fetch_add(capacity, std::sync::atomic::Ordering::Relaxed);
         let take = || {
-            context
-                .pool
-                .lock()
-                .expect("vulkan pool poisoned")
-                .take(device_local, capacity)
+            context.pool.lock().expect("vulkan pool poisoned").take(
+                device_local,
+                capacity,
+                idle_only,
+            )
         };
         let mut pooled = take();
         // short of room, finished work's buffers come back before any idle one is freed: a prompt's temporaries
@@ -241,6 +256,7 @@ impl Buffer {
                 ptr,
                 ..
             } = held.allocation;
+            let early = !ptr.is_null() && !Held::idle(&held);
             return Ok(Self {
                 context: context.clone(),
                 buffer,
@@ -249,6 +265,7 @@ impl Buffer {
                 len,
                 capacity,
                 held: Some(held),
+                early: AtomicBool::new(early),
             });
         }
         Self::allocate(context, len, capacity, device_local, true)
@@ -398,6 +415,7 @@ impl Buffer {
                 len,
                 capacity,
                 held,
+                early: AtomicBool::new(false),
             })
         }
     }
@@ -412,7 +430,7 @@ impl Buffer {
 
     /// A buffer holding `bytes`.
     pub fn with_bytes(context: &Arc<Context>, bytes: &[u8]) -> Result<Self> {
-        let mut buffer = Self::new(context, bytes.len())?;
+        let mut buffer = Self::for_upload(context, bytes.len())?;
         buffer.write(0, bytes)?;
         Ok(buffer)
     }
@@ -439,8 +457,31 @@ impl Buffer {
         !self.ptr.is_null()
     }
 
-    /// The mapping's first byte, when mapped; what the CPU writes there the GPU must not be using.
+    // whether the CPU may write the mapping in place: mapped, and no batch recorded before the buffer was taken may
+    // still use it
+    fn in_place(&self) -> bool {
+        if self.ptr.is_null() {
+            return false;
+        }
+        if !self.early.load(Ordering::Relaxed) {
+            return true;
+        }
+        let free = self
+            .held
+            .as_ref()
+            .is_none_or(|held| Arc::strong_count(held) == 1);
+        if free {
+            self.early.store(false, Ordering::Relaxed);
+        }
+        free
+    }
+
+    /// The mapping's first byte, when mapped and no earlier work may still use it; what the CPU writes there the GPU
+    /// must not be using.
     pub fn mapped_ptr(&self) -> Option<std::ptr::NonNull<u8>> {
+        if !self.in_place() {
+            return None;
+        }
         std::ptr::NonNull::new(self.ptr)
     }
 
@@ -455,7 +496,7 @@ impl Buffer {
                 self.len
             )));
         }
-        if self.is_mapped() {
+        if self.in_place() {
             // SAFETY: the range is in the mapping, which nothing else writes while `&mut self` is held
             unsafe {
                 std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.ptr.add(offset), bytes.len())
@@ -470,6 +511,7 @@ impl Buffer {
             self.context.record(|recorder| {
                 recorder.copy(staging.buffer, 0, self.buffer, at, chunk.len() as u64);
                 recorder.retain(staging.clone());
+                self.retain_in(recorder);
                 Ok(())
             })?;
             self.context.flush()?;
@@ -480,7 +522,7 @@ impl Buffer {
     /// Fills the buffer with copies of `word`, ordered as [`Self::write`] is.
     pub fn fill(&mut self, word: u32) -> Result<()> {
         self.context.forget_quantized(self.buffer);
-        if self.is_mapped() {
+        if self.in_place() {
             let words = self.len / 4;
             // SAFETY: the mapping is page aligned and `len` bytes long, unique while `&mut self` is held
             unsafe { std::slice::from_raw_parts_mut(self.ptr.cast::<u32>(), words) }.fill(word);
@@ -494,8 +536,17 @@ impl Buffer {
         let (buffer, size) = (self.buffer, self.capacity);
         self.context.record(|recorder| {
             recorder.fill(buffer, size, word);
+            self.retain_in(recorder);
             Ok(())
         })
+    }
+
+    // a pooled buffer's allocation kept by the batch a command writing it is recorded in: dropped before the command
+    // runs, it would otherwise look idle, and a mapped one be written in place under it
+    fn retain_in(&self, recorder: &crate::Recorder<'_>) {
+        if let Some(held) = &self.held {
+            recorder.retain(held.clone());
+        }
     }
 
     /// Reads the buffer's first `out.len()` bytes once the GPU has finished everything recorded so far.
@@ -686,14 +737,16 @@ impl BufferPool {
         out
     }
 
-    // the newest allocation of a class; a mapped one only once no batch holds it, since the CPU writes it in place
-    fn take(&mut self, device_local: bool, capacity: u64) -> Option<Arc<Held>> {
+    // the newest allocation of a class; a mapped one that no batch holds first, and with `idle_only` only such a one
+    fn take(&mut self, device_local: bool, capacity: u64, idle_only: bool) -> Option<Arc<Held>> {
         let key = (device_local, capacity);
         let entries = self.free.get_mut(&key)?;
-        let at = if device_local {
-            entries.len().checked_sub(1)?
-        } else {
-            entries.iter().rposition(|(_, held)| Held::idle(held))?
+        let newest = entries.len().checked_sub(1)?;
+        let at = match entries.iter().rposition(|(_, held)| Held::idle(held)) {
+            _ if device_local => newest,
+            Some(at) => at,
+            None if idle_only => return None,
+            None => newest,
         };
         let (_, held) = entries.remove(at);
         self.forget(key, 1);
@@ -924,8 +977,9 @@ mod tests {
         Ok(())
     }
 
-    // a device buffer its last user drops while a copy from it is pending is the next buffer of its size, before the
-    // copy finishes; the stream orders that buffer's fill after the copy, which still reads the old values
+    // a buffer its last user drops while a copy from it is pending is the next buffer of its size, before the copy
+    // finishes (a mapped one too, written on the stream meanwhile); the stream orders that buffer's fill after the
+    // copy, which still reads the old values
     #[test]
     fn a_dropped_buffer_is_reused_in_stream_order() -> Result<()> {
         let context = match Context::new() {
@@ -935,9 +989,6 @@ mod tests {
                 return Ok(());
             }
         };
-        if context.is_unified() {
-            return Ok(());
-        }
         const BYTES: usize = 8 << 20;
         let source = Arc::new(Buffer::new(&context, BYTES)?);
         let copy = Arc::new(Buffer::new(&context, BYTES)?);
@@ -966,6 +1017,37 @@ mod tests {
         };
         assert!(words(copy.read()?).iter().all(|&w| w == 1));
         assert!(words(next.read()?).iter().all(|&w| w == 2));
+        Ok(())
+    }
+
+    // a buffer taken in stream order, filled on the stream and dropped before the fill runs, is not an upload's once
+    // the work before it finishes: the fill's batch holds it, so the upload's bytes are what it reads back
+    #[test]
+    fn a_pending_fill_keeps_its_buffer_from_an_upload() -> Result<()> {
+        let context = match Context::new() {
+            Ok(context) => context,
+            Err(err) => {
+                eprintln!("skipping: {err}");
+                return Ok(());
+            }
+        };
+        const BYTES: usize = 8 << 20;
+        let source = Arc::new(Buffer::new(&context, BYTES)?);
+        let copy = Arc::new(Buffer::new(&context, BYTES)?);
+        context.record(|r| {
+            r.copy(source.buffer, 0, copy.buffer, 0, BYTES as u64);
+            r.retain(source.clone());
+            r.retain(copy.clone());
+            Ok(())
+        })?;
+        context.flush()?;
+        drop(source);
+        let mut next = Buffer::new(&context, BYTES)?;
+        next.fill(2)?;
+        drop(next);
+        while context.try_wait_oldest()? && Arc::strong_count(&copy) > 1 {}
+        let upload = Buffer::with_bytes(&context, &[3u8; BYTES])?;
+        assert!(upload.read()?.iter().all(|&b| b == 3));
         Ok(())
     }
 

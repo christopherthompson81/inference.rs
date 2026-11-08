@@ -157,3 +157,35 @@ greedy text (greedy.sh): 27B, 35B, 0.8B as before, word for word
 Checks: lint, CPU (3153), CUDA (3356), `--vulkan` (63), and the Vulkan set three times (662) pass.
 
 Where it stands, MiB above the idle desktop: after load 2001 (CUDA 1895), peak 3562-3701 (CUDA ~2440).
+
+## Run 8 - 2026-11-08 (laptop: Radeon 780M iGPU, unified memory)
+
+Question: Run 7's stream-ordered reuse skips an iGPU, whose buffers are all mapped host RAM: a dropped one waits for
+its batches before anything takes it again. How far does the 780M's working set come down with it?
+
+Baseline (master 2b0b1f9da, 10-minute meeting, GTT MB; idle ~240, loaded ~3020): asr peak 5409-5519, diar 4455-4505,
+both models in one request 6573-6719. CUDA's request working set is ~0.5 GB; the 780M's was ~3.5 GB.
+
+Change: a mapped pooled buffer is taken in stream order too, an idle one first. Where batches recorded before it was
+taken may still hold it (`Buffer::early`), the CPU writes and fills it on the stream (a staging copy, a recorded fill)
+rather than in place, and `mapped_ptr` gives none; once those batches finish it is written in place again. Staging
+buffers and uploads (`Buffer::for_upload`: `with_bytes`, a tensor's bytes) take only idle ones, so an upload stays a
+memcpy.
+
+Bug on the way: a recorded fill or staging copy did not retain the buffer it wrote. A mapped buffer dropped before
+such a command ran looked idle once the earlier batches finished, an upload took it and wrote it in place, and the
+pending fill then overwrote the upload. Lightning's greedy text moved near the end of a 400-token reply, the same in
+every run of one build, and a build whose `take` ran slower matched master (fewer buffers were taken early). Both
+commands now retain the written buffer's allocation. Test: `a_pending_fill_keeps_its_buffer_from_an_upload` (fails
+without the retain); `a_dropped_buffer_is_reused_in_stream_order` now runs on an iGPU too.
+
+```
+10-minute meeting, GTT MB peak (master -> stream order):
+asr   5409-5519 -> 4256        diar 4455-4505 -> 3207-3227        both 6573-6719 -> 4400-4420
+A/B, 3 rounds: asr 14.78 -> 14.78 s, diar 4.21 -> 4.02 s; transcript (1614 words) and diarization byte-identical
+Lightning (Q5 experts, 2048 prompt): prefill 453 -> 469 tok/s, decode 24.9-25.1 -> 25.1-25.8 tok/s
+Lightning greedy text, 5 prompts x 300 tokens: identical to master
+```
+
+Where it stands on the 780M, MB above idle: loaded ~2790, peak ~4180 with both models (a request's working set ~1.4
+GB, was ~3.7).
