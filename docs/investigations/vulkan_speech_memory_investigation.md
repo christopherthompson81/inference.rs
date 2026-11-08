@@ -211,3 +211,29 @@ transcript and diarization byte-identical; six clips of 4-33 s (both models) byt
 
 Where it stands on the 780M, MB above idle (~250): loaded ~1440, peak ~2810 with both models (the 3090: CUDA 1895
 and ~2440, Vulkan 2001 and 3562-3701).
+
+## Run 8 - 2026-11-08 17:30
+
+Question: after #870-#875 the pair on the 3090's Vulkan still peaks highest (~3.6-3.7 GB above the desktop; the
+780M 3.1, the laptop's CPU 2.7, CUDA 2.4). Load is 2.0 GB, level with CUDA's 1.9: what is the request's ~1.7 GB?
+
+Temporary tracking (each live device buffer of 16 MiB and up with its caller, and the pool's idle classes, printed
+at each new high of held memory; removed): at the peak, 3371 MiB held, 1327 of it idle in the pool, ~460 MiB of
+large buffers live. Idle at the peak: 128 MiB x4, 112 x2, 96 x2, 2 x61 and smaller. The 112 and 96 MiB allocations
+had been made beside idle 128s, the pool taking exact classes only.
+
+Change: a device allocation that misses its class takes the smallest idle class up to 1.5x its size, which goes back
+to its own class (`a_miss_takes_an_idle_buffer_a_little_larger`).
+Dead end: lowering the idle keep (`STALE_KEEP_BYTES`) to 256 MiB raised the peak (4329 MiB) and cost the 0.8B's
+prefill ~1.3 %; kept 1 GiB.
+
+```
+nvidia-smi peak (desktop 862 MiB), master c03913572 against this, alternated in one session:
+master:    4564 / 4440 / 4564 MiB
+best fit:  3906 / 4255 / 4045 MiB   (3.04-3.39 GB above the desktop, from 3.58-3.70)
+asr 2.55-2.65 s, diar 0.94-0.98 s; outputs byte-identical to master's; Qwen greedy text identical;
+0.8B 9789 / 236, 27B 434 / 30.5, 35B 2966 / 77 (as before)
+```
+
+Checks: lint, CPU (3162), CUDA (3365), `--vulkan` (65), the Vulkan set twice (673) pass. The peak varies ~0.35 GB
+run to run with the phases' timing; the rest is the pool's 1 GiB idle keep and small classes (2-5 MiB).
