@@ -51,8 +51,8 @@ vec4 unpack_sub(uint base, uint sub, out uvec4 lo, out uvec4 hi) {
         lo[i] = l;
         hi[i] = h;
     }
-    uint scale_byte = (uint(w[base + 2 + sub / 4]) >> (8 * ((sub / 2) % 2))) & 0xffu;
-    uint ls = ((scale_byte >> (4 * (sub % 2))) & 0xfu) | (((uint(w[base + 1]) >> (2 * sub)) & 3u) << 4);
+    uint scale_byte = (uint(W16(base + 2 + sub / 4)) >> (8 * ((sub / 2) % 2))) & 0xffu;
+    uint ls = ((scale_byte >> (4 * (sub % 2))) & 0xfu) | (((uint(W16(base + 1)) >> (2 * sub)) & 3u) << 4);
     float s = half_at(base) * float(int(ls) - 32);
     return vec4(s, s, 0.0, 0.0);
 }

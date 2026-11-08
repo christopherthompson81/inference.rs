@@ -22,7 +22,7 @@ const uint SUPER_VALUES = 256;
 const uint SUPER_U16 = 55;
 
 uint iq3s_byte(uint base, uint i) {
-    return (uint(w[base + i / 2]) >> (8 * (i % 2))) & 0xffu;
+    return (uint(W16(base + i / 2)) >> (8 * (i % 2))) & 0xffu;
 }
 
 // a grid entry's four values as int8, negated where the low four bits of `signs` say

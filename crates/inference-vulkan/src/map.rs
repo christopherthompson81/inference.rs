@@ -64,9 +64,13 @@ pub enum MapOp {
 }
 
 impl MapOp {
+    /// A GLU's halves, act(a) * b.
+    pub fn is_glu(self) -> bool {
+        self as u32 >= MapOp::SiluMul as u32
+    }
+
     fn binary(self) -> bool {
-        (MapOp::Add as u32..=MapOp::Minimum as u32).contains(&(self as u32))
-            || self as u32 >= MapOp::SiluMul as u32
+        (MapOp::Add as u32..=MapOp::Minimum as u32).contains(&(self as u32)) || self.is_glu()
     }
 }
 

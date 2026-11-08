@@ -24,6 +24,7 @@ pub(crate) use ops::fused_split_glu_quantized_bf16;
 pub use ops::gptoss_swiglu_fused;
 pub use ops::softcap;
 pub use ops::softmax_with_sinks;
+pub(crate) use ops::vulkan_glu_act;
 pub use ops::{BitWiseOp, LeftshiftOp, NonZeroOp};
 pub use ops::{GluActivationType, fused_glu, fused_split_glu};
 pub(crate) use uqff::{data_to_bytes, dtype_to_uqff_code, uqff_code_to_dtype};

@@ -339,6 +339,13 @@ pub fn quantized_ffn(
         return down.forward(&inter);
     }
 
+    if let Some(activation_type) = glu_activation_type(act)
+        && let Some(inter) =
+            inference_quant::try_fused_gate_up_vulkan(xs, gate, up, activation_type)?
+    {
+        return down.forward(&inter);
+    }
+
     if xs.device().is_cpu()
         && let Some(mut out) = inference_quant::try_fused_gemv_shared_lhs_cpu(xs, &[gate, up])?
     {

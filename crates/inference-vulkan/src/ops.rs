@@ -91,6 +91,40 @@ pub struct Rows<'a> {
     pub out_offset: usize,
 }
 
+/// A residual add and the RMS norm of its sum, for a decode's few rows: `sum = x + residual`, `out` its norm times
+/// `alpha`, both `rows x cols` from offset 0; see [`AddRmsNorm::fits`].
+pub struct AddRmsNorm<'a> {
+    pub rows: usize,
+    pub cols: usize,
+    pub eps: f32,
+    pub x: At<'a>,
+    pub residual: At<'a>,
+    pub alpha: At<'a>,
+    pub sum: &'a Arc<Buffer>,
+    pub out: &'a Arc<Buffer>,
+}
+
+impl AddRmsNorm<'_> {
+    /// Whether the fused kernel takes `rows` rows of `cols`.
+    pub fn fits(rows: usize, cols: usize) -> bool {
+        rows > 0
+            && rows <= crate::kernels::MATVEC_MAX_ROWS
+            && cols.is_multiple_of(crate::kernels::BLOCK_VALUES)
+            && cols <= RMS_Q8_MAX_COLS
+    }
+}
+
+// one rms_norm_q8 dispatch (of AddRmsNorm::fits), with the residual and where the sum goes for an add
+struct RmsQ8<'a> {
+    rows: usize,
+    cols: usize,
+    eps: f32,
+    x: At<'a>,
+    alpha: At<'a>,
+    out: At<'a>,
+    add: Option<(At<'a>, At<'a>)>,
+}
+
 /// Row selection over 32-bit words of `src`, contiguous as `(left, src_dim, right)`, into a contiguous `out`.
 pub struct Select<'a> {
     pub left: usize,
@@ -153,44 +187,18 @@ impl Recorder<'_> {
         let (beta, beta_offset) = op.beta.unwrap_or((op.x, 0));
         // a decode row's norm writes its int8 blocks too, cached for the matvecs that read it
         if op.op == RowOp::RmsNorm
-            && op.rows <= crate::kernels::MATVEC_MAX_ROWS
-            && op.cols.is_multiple_of(crate::kernels::BLOCK_VALUES)
-            && op.cols <= RMS_Q8_MAX_COLS
+            && AddRmsNorm::fits(op.rows, op.cols)
             && !Arc::ptr_eq(op.x, op.out)
         {
-            let blocks = Arc::new(Buffer::new(
-                op.out.context(),
-                crate::MatVec::scratch_bytes(op.rows, op.cols),
-            )?);
-            let s_off = op.rows * op.cols / crate::kernels::BLOCK_VALUES
-                * crate::kernels::Q8_WORD_BYTES
-                / crate::kernels::Q8_SCALE_BYTES;
-            let mut bytes = words(&[op.rows, op.cols])?;
-            bytes.extend_from_slice(&op.eps.to_bits().to_le_bytes());
-            bytes.extend(words(&[op.x_offset, alpha_offset, op.out_offset, s_off])?);
-            self.context.kernels.rms_norm_q8.dispatch(
-                self,
-                &[
-                    op.x.buffer,
-                    alpha.buffer,
-                    op.out.buffer,
-                    blocks.buffer,
-                    blocks.buffer,
-                ],
-                &bytes,
-                [op.rows as u32, 1, 1],
-            );
-            self.context.remember_quantized(
-                op.out,
-                op.out_offset,
-                op.rows * op.cols,
-                &blocks,
-                s_off,
-            );
-            for buffer in [op.x, alpha, op.out, &blocks] {
-                self.retain(buffer.clone());
-            }
-            return Ok(());
+            return self.rms_norm_q8(&RmsQ8 {
+                rows: op.rows,
+                cols: op.cols,
+                eps: op.eps,
+                x: (op.x, op.x_offset),
+                alpha: (alpha, alpha_offset),
+                out: (op.out, op.out_offset),
+                add: None,
+            });
         }
         let mut bytes = words(&[op.rows, op.cols, op.op as usize])?;
         bytes.extend_from_slice(&op.eps.to_bits().to_le_bytes());
@@ -208,6 +216,85 @@ impl Recorder<'_> {
             [groups_x as u32, op.rows.div_ceil(groups_x) as u32, 1],
         );
         for buffer in [op.x, alpha, op.out, beta] {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+
+    pub fn add_rms_norm(&self, op: &AddRmsNorm<'_>) -> Result<()> {
+        let len = op.rows * op.cols;
+        let fits = AddRmsNorm::fits(op.rows, op.cols)
+            && op.x.0.len() / 4 >= op.x.1 + len
+            && op.residual.0.len() / 4 >= op.residual.1 + len
+            && op.alpha.0.len() / 4 >= op.alpha.1 + op.cols
+            && op.sum.len() / 4 >= len
+            && op.out.len() / 4 >= len
+            && !Arc::ptr_eq(op.x.0, op.out)
+            && !Arc::ptr_eq(op.residual.0, op.out);
+        if !fits {
+            return Err(Error::Invalid(format!(
+                "an add and RMS norm of {} rows of {}",
+                op.rows, op.cols
+            )));
+        }
+        self.rms_norm_q8(&RmsQ8 {
+            rows: op.rows,
+            cols: op.cols,
+            eps: op.eps,
+            x: op.x,
+            alpha: op.alpha,
+            out: (op.out, 0),
+            add: Some((op.residual, (op.sum, 0))),
+        })
+    }
+
+    // its int8 blocks cached for the matvecs reading `out`
+    fn rms_norm_q8(&self, op: &RmsQ8<'_>) -> Result<()> {
+        let RmsQ8 {
+            rows,
+            cols,
+            eps,
+            x,
+            alpha,
+            out,
+            add,
+        } = *op;
+        let blocks = Arc::new(Buffer::new(
+            out.0.context(),
+            crate::MatVec::scratch_bytes(rows, cols),
+        )?);
+        let s_off = rows * cols / crate::kernels::BLOCK_VALUES * crate::kernels::Q8_WORD_BYTES
+            / crate::kernels::Q8_SCALE_BYTES;
+        // without an add, x stands in for the residual and the sum, neither read nor written
+        let (r, sum) = add.unwrap_or((x, x));
+        let mut bytes = words(&[rows, cols])?;
+        bytes.extend_from_slice(&eps.to_bits().to_le_bytes());
+        bytes.extend(words(&[
+            x.1,
+            alpha.1,
+            out.1,
+            s_off,
+            usize::from(add.is_some()),
+            r.1,
+            sum.1,
+        ])?);
+        self.context.kernels.rms_norm_q8.dispatch(
+            self,
+            &[
+                x.0.buffer,
+                alpha.0.buffer,
+                out.0.buffer,
+                blocks.buffer,
+                blocks.buffer,
+                r.0.buffer,
+                sum.0.buffer,
+            ],
+            &bytes,
+            [rows as u32, 1, 1],
+        );
+        self.context
+            .remember_quantized(out.0, out.1, rows * cols, &blocks, s_off);
+        for buffer in [x.0, alpha.0, out.0, &blocks, r.0, sum.0] {
             self.retain(buffer.clone());
         }
         Ok(())
@@ -828,12 +915,12 @@ impl Recorder<'_> {
 pub(crate) const MOE_MATVEC_BINDINGS: usize = 5;
 pub(crate) const MOE_MATVEC_PUSH_BYTES: u32 = 10 * 4;
 pub(crate) const MOE_SORT_BINDINGS: usize = 2;
-pub(crate) const RMS_Q8_BINDINGS: usize = 5;
+pub(crate) const RMS_Q8_BINDINGS: usize = 7;
 // rms_norm_q8's widest row: its 1024 threads hold 4 values a pass, 4 passes
 const RMS_Q8_MAX_COLS: usize = 16384;
 pub(crate) const GATED_Q8_BINDINGS: usize = 6;
 pub(crate) const GATED_Q8_PUSH_BYTES: u32 = 9 * 4;
-pub(crate) const RMS_Q8_PUSH_BYTES: u32 = 7 * 4;
+pub(crate) const RMS_Q8_PUSH_BYTES: u32 = 10 * 4;
 pub(crate) const MOE_SORT_PUSH_BYTES: u32 = 5 * 4;
 pub(crate) const MOE_MM_BINDINGS: usize = 5;
 pub(crate) const MOE_MM_PUSH_BYTES: u32 = 8 * 4;

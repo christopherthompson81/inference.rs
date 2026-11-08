@@ -14,6 +14,9 @@ const MATVEC_ROWS: usize = 4;
 // same buffer)
 const MATVECS_BINDINGS: usize = 4;
 const MATVECS_PUSH_BYTES: u32 = 7 * 4;
+// the matvec's, plus the up weight and its offset and the GLU's op
+const GLU_MATVECS_BINDINGS: usize = 5;
+const GLU_MATVECS_PUSH_BYTES: u32 = 9 * 4;
 const EMBED_BINDINGS: usize = 3;
 const EMBED_PUSH_BYTES: u32 = 5 * 4;
 const EMBED_THREADS: usize = 64;
@@ -81,6 +84,17 @@ kernels! {
     mat_vecs_iq4_xs: MUL_MAT_VECS_IQ4_XS, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
     mat_vecs_iq3_s: MUL_MAT_VECS_IQ3_S, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
     mat_vecs_q3_k: MUL_MAT_VECS_Q3_K, MATVECS_BINDINGS, MATVECS_PUSH_BYTES;
+    glu_mat_vecs_q8_0: MUL_MAT_VECS_GLU_Q8_0, GLU_MATVECS_BINDINGS, GLU_MATVECS_PUSH_BYTES;
+    glu_mat_vecs_q5_0: MUL_MAT_VECS_GLU_Q5_0, GLU_MATVECS_BINDINGS, GLU_MATVECS_PUSH_BYTES;
+    glu_mat_vecs_q4_0: MUL_MAT_VECS_GLU_Q4_0, GLU_MATVECS_BINDINGS, GLU_MATVECS_PUSH_BYTES;
+    glu_mat_vecs_q4_1: MUL_MAT_VECS_GLU_Q4_1, GLU_MATVECS_BINDINGS, GLU_MATVECS_PUSH_BYTES;
+    glu_mat_vecs_q5_1: MUL_MAT_VECS_GLU_Q5_1, GLU_MATVECS_BINDINGS, GLU_MATVECS_PUSH_BYTES;
+    glu_mat_vecs_q4_k: MUL_MAT_VECS_GLU_Q4_K, GLU_MATVECS_BINDINGS, GLU_MATVECS_PUSH_BYTES;
+    glu_mat_vecs_q5_k: MUL_MAT_VECS_GLU_Q5_K, GLU_MATVECS_BINDINGS, GLU_MATVECS_PUSH_BYTES;
+    glu_mat_vecs_q6_k: MUL_MAT_VECS_GLU_Q6_K, GLU_MATVECS_BINDINGS, GLU_MATVECS_PUSH_BYTES;
+    glu_mat_vecs_iq4_xs: MUL_MAT_VECS_GLU_IQ4_XS, GLU_MATVECS_BINDINGS, GLU_MATVECS_PUSH_BYTES;
+    glu_mat_vecs_iq3_s: MUL_MAT_VECS_GLU_IQ3_S, GLU_MATVECS_BINDINGS, GLU_MATVECS_PUSH_BYTES;
+    glu_mat_vecs_q3_k: MUL_MAT_VECS_GLU_Q3_K, GLU_MATVECS_BINDINGS, GLU_MATVECS_PUSH_BYTES;
     quantize_q8_1: QUANTIZE_Q8_1, QUANTIZE_BINDINGS, QUANTIZE_PUSH_BYTES;
     mul_mm_q8_0: MUL_MM_Q8_0, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
     mul_mm_q5_0: MUL_MM_Q5_0, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
@@ -193,6 +207,23 @@ impl Kernels {
             (false, true, true) => &self.paged_prefill_h256_f16,
             (false, false, false) => &self.paged_prefill,
             (false, false, true) => &self.paged_prefill_h256,
+        }
+    }
+
+    /// The decode matvec over a gate and an up weight of `ty`'s blocks, ending in their GLU.
+    pub(crate) fn glu_mat_vecs(&self, ty: BlockType) -> &Pipeline {
+        match ty {
+            BlockType::Q8_0 => &self.glu_mat_vecs_q8_0,
+            BlockType::Q5_0 => &self.glu_mat_vecs_q5_0,
+            BlockType::Q4_0 => &self.glu_mat_vecs_q4_0,
+            BlockType::Q4_1 => &self.glu_mat_vecs_q4_1,
+            BlockType::Q5_1 => &self.glu_mat_vecs_q5_1,
+            BlockType::Q4K => &self.glu_mat_vecs_q4_k,
+            BlockType::Q5K => &self.glu_mat_vecs_q5_k,
+            BlockType::Q6K => &self.glu_mat_vecs_q6_k,
+            BlockType::IQ4XS => &self.glu_mat_vecs_iq4_xs,
+            BlockType::IQ3S => &self.glu_mat_vecs_iq3_s,
+            BlockType::Q3K => &self.glu_mat_vecs_q3_k,
         }
     }
 
@@ -636,6 +667,22 @@ impl MatVec<'_> {
     }
 }
 
+/// A decode GLU: `y[m] = act(G x[m]) * (U x[m])` for `x_rows` (at most [`MATVEC_MAX_ROWS`]) activation rows, `G`
+/// and `U` both `rows x cols` weights of `ty` blocks, in one matvec; `act` is a GLU's [`MapOp`](crate::MapOp).
+pub struct GluMatVec<'a> {
+    pub ty: BlockType,
+    pub gate: &'a Arc<dyn Bound>,
+    pub up: &'a Arc<dyn Bound>,
+    pub act: crate::MapOp,
+    pub rows: usize,
+    pub cols: usize,
+    pub x: &'a Arc<Buffer>,
+    pub x_offset: usize,
+    pub y: &'a Arc<Buffer>,
+    pub x_rows: usize,
+    pub scratch: &'a Arc<Buffer>,
+}
+
 /// The rows of a `vocab x cols` matrix of `ty` blocks in `weights` at the u32 `ids` (`count` of them), dequantized to
 /// `count x cols` floats in `y`.
 pub struct Embed<'a> {
@@ -975,6 +1022,63 @@ impl Recorder<'_> {
         );
         self.retain(scratch.clone());
         self.retain(op.weights.clone() as crate::Retained);
+        self.retain(op.x.clone());
+        self.retain(op.y.clone());
+        Ok(())
+    }
+    pub fn glu_mat_vec(&self, op: &GluMatVec<'_>) -> Result<()> {
+        let weight_fits = |w: &Arc<dyn Bound>| {
+            w.offset().is_multiple_of(2)
+                && w.bytes() >= op.rows * op.cols / op.ty.block_values() * op.ty.block_bytes()
+        };
+        let fits = op.cols.is_multiple_of(op.ty.block_values())
+            && weight_fits(op.gate)
+            && weight_fits(op.up)
+            && op.act.is_glu()
+            && op.x.len() / 4 >= op.x_offset + op.x_rows * op.cols
+            && op.y.len() / 4 >= op.x_rows * op.rows
+            && (1..=MATVEC_MAX_ROWS).contains(&op.x_rows)
+            && op.scratch.len() >= MatVec::scratch_bytes(op.x_rows, op.cols);
+        if !fits {
+            return Err(Error::Invalid(format!(
+                "a {}x{} {:?} GLU matvec over {} rows",
+                op.rows, op.cols, op.ty, op.x_rows
+            )));
+        }
+        let (blocks, s_off) =
+            self.quantized((op.x, op.x_offset), op.x_rows, op.cols, op.scratch)?;
+        let groups = op.rows.div_ceil(MATVEC_ROWS);
+        let groups_x = groups.min(MAX_GROUPS_X);
+        let bytes = push_words(&[
+            op.rows,
+            op.cols,
+            op.gate.offset() as usize / 2,
+            0,
+            groups_x,
+            op.x_rows,
+            s_off,
+            op.up.offset() as usize / 2,
+            op.act as usize,
+        ])?;
+        self.profile_shape(
+            || format!("glu m={} n={} k={}", op.rows, op.x_rows, op.cols),
+            2 * op.rows * op.cols * op.x_rows,
+        );
+        self.context.kernels.glu_mat_vecs(op.ty).dispatch(
+            self,
+            &[
+                op.gate.vk_buffer(),
+                blocks.buffer,
+                op.y.buffer,
+                blocks.buffer,
+                op.up.vk_buffer(),
+            ],
+            &bytes,
+            [groups_x as u32, groups.div_ceil(groups_x) as u32, 1],
+        );
+        self.retain(blocks);
+        self.retain(op.gate.clone() as crate::Retained);
+        self.retain(op.up.clone() as crate::Retained);
         self.retain(op.x.clone());
         self.retain(op.y.clone());
         Ok(())

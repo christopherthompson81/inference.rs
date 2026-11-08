@@ -799,6 +799,8 @@ mod vulkan_block_tests {
     const COLS: usize = 512;
     // against the f32 product of the dequantized rows: the activations are int8 blocks on the device
     const RELATIVE_TOLERANCE: f32 = 2e-2;
+    // a fused kernel against the separate ones, over the same int8 activations
+    const FUSED_TOLERANCE: f32 = 1e-5;
 
     // random blocks with each block's leading f16 scale small and finite
     fn blocks(ty: GgufType, rows: usize, seed: u64) -> Vec<u8> {
@@ -907,6 +909,80 @@ mod vulkan_block_tests {
                     &format!("{ty:?} dense, {tokens} rows"),
                 )?;
             }
+        }
+        Ok(())
+    }
+
+    // a decode's gate and up as one GLU matvec, for Candle's block types and the raw i-quants: a step's row and a
+    // verify step's, each activation, against the separate matvecs (tested against the CPU) and the GLU; past a decode's
+    // rows, none
+    #[test]
+    fn vulkan_glu_matvec_matches_its_projections() -> Result<()> {
+        use inference_quant::{GluActivationType as G, QuantMethod, QuantMethodConfig};
+        use inference_tensor::quantized::{GgmlDType, QTensor};
+        use std::sync::Arc;
+        let Ok(vk) = Device::new_vulkan(0) else {
+            return Ok(());
+        };
+        let cpu = Device::Cpu;
+        let mut pairs: Vec<(String, [Arc<dyn QuantMethod>; 2])> = Vec::new();
+        for dtype in [
+            GgmlDType::Q8_0,
+            GgmlDType::Q4_1,
+            GgmlDType::Q3K,
+            GgmlDType::Q4K,
+            GgmlDType::Q6K,
+        ] {
+            let layer = || -> Result<Arc<dyn QuantMethod>> {
+                let w = Tensor::randn(0f32, 1.0, (ROWS, COLS), &vk)?;
+                Ok(Arc::new(inference_quant::GgufMatMul::new(
+                    QuantMethodConfig::Gguf {
+                        q_weight: Arc::new(QTensor::quantize(&w, dtype)?),
+                        b: None,
+                    },
+                )?))
+            };
+            pairs.push((format!("{dtype:?}"), [layer()?, layer()?]));
+        }
+        for ty in [GgufType::Iq4Xs, GgufType::Iq3S] {
+            let layer = |seed: u64| -> Result<Arc<dyn QuantMethod>> {
+                let raw = inference_quant::RawGgufTensor::new(
+                    ty,
+                    &[ROWS, COLS],
+                    blocks(ty, ROWS, seed),
+                    &vk,
+                )?;
+                Ok(Arc::new(inference_quant::GgufRawMatMul::new(raw, None)))
+            };
+            pairs.push((format!("{ty:?}"), [layer(3)?, layer(4)?]));
+        }
+        let cases = [
+            (G::Silu, 1usize),
+            (G::Silu, 3),
+            (G::GeluErf, 3),
+            (G::Gelu, 1),
+            (G::Relu, 1),
+            (G::Sigmoid, 3),
+        ];
+        for (name, [gate, up]) in &pairs {
+            for (act, rows) in cases {
+                let x = Tensor::randn(0f32, 1.0, (1, rows, COLS), &vk)?;
+                let got = inference_quant::try_fused_gate_up_vulkan(&x, &**gate, &**up, act)?
+                    .unwrap_or_else(|| panic!("{name}: no GLU matvec"));
+                let want = inference_quant::fused_glu(&gate.forward(&x)?, &up.forward(&x)?, act)?
+                    .to_device(&cpu)?;
+                let max = |t: Tensor| t.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>();
+                let (diff, scale) = (max((got.to_device(&cpu)? - &want)?)?, max(want)?);
+                assert!(
+                    diff <= FUSED_TOLERANCE * scale,
+                    "{name} {act:?}, {rows} rows: {diff} of {scale}"
+                );
+            }
+            let prompt = Tensor::zeros((1, 9, COLS), inference_tensor::DType::F32, &vk)?;
+            assert!(
+                inference_quant::try_fused_gate_up_vulkan(&prompt, &**gate, &**up, G::Silu)?
+                    .is_none()
+            );
         }
         Ok(())
     }

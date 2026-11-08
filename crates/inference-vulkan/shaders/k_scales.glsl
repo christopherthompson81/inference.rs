@@ -2,7 +2,7 @@
 // get_scale_min_k4).
 
 uint scale_byte(uint at, uint i) {
-    return (uint(w[at + i / 2]) >> (8 * (i % 2))) & 0xffu;
+    return (uint(W16(at + i / 2)) >> (8 * (i % 2))) & 0xffu;
 }
 
 // sub-block j's (scale, min)

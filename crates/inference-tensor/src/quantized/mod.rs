@@ -1419,6 +1419,22 @@ impl QTensor {
         let _ = (x, ids, x_div);
         Ok(None)
     }
+
+    /// This `rows x cols` weight as a Vulkan block weight, where it is on Vulkan and the kernels take its type.
+    pub fn vulkan_block_weight(&self) -> Result<Option<crate::vulkan::BlockWeight>> {
+        #[cfg(feature = "vulkan")]
+        if let QStorage::Vulkan(weight) = &self.storage
+            && let Some(ty) = vulkan_block_type(weight.blocks.dtype())
+            && let Ok((rows, cols)) = self.shape.dims2()
+        {
+            return Ok(Some(crate::vulkan::BlockWeight::from_buffer(
+                weight.gpu_copy()?,
+                ty,
+                (1, rows, cols),
+            )));
+        }
+        Ok(None)
+    }
 }
 
 impl crate::CustomOp1 for QTensor {

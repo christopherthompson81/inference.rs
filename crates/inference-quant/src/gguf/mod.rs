@@ -606,6 +606,15 @@ impl QuantMethod for GgufMatMul {
         }
     }
 
+    fn vulkan_block_weight(&self) -> Option<inference_tensor::vulkan::BlockWeight> {
+        match (&self.w, &self.b) {
+            (inference_tensor::quantized::QMatMul::QTensor(qt), None) => {
+                qt.vulkan_block_weight().ok().flatten()
+            }
+            _ => None,
+        }
+    }
+
     #[cfg(feature = "cuda")]
     fn kernel_weight(&self) -> Option<&dyn kernel::KernelWeight> {
         match &self.w {

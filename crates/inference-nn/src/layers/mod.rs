@@ -410,6 +410,12 @@ fn rms_norm_forward_add(
     {
         return crate::ops::cuda_add_rms_norm(x, residual, weight, eps as f32);
     }
+    if x.device().is_vulkan()
+        && let Some(fused) =
+            inference_tensor::vulkan::add_rms_norm(x, residual, weight, eps as f32)?
+    {
+        return Ok(fused);
+    }
 
     let sum = (x + residual)?;
     let normed = crate::ops::rms_norm(&sum, weight, eps as f32)?;

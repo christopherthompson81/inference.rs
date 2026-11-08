@@ -107,8 +107,42 @@ impl BlockWeight {
         }
     }
 
+    #[cfg(feature = "vulkan")]
+    pub(crate) fn from_buffer(
+        buffer: std::sync::Arc<inference_vulkan::Buffer>,
+        ty: inference_vulkan::BlockType,
+        dims: (usize, usize, usize),
+    ) -> Self {
+        Self {
+            buffer,
+            kind: crate::vulkan_backend::block_kind(ty),
+            dims,
+        }
+    }
+
     pub fn dims(&self) -> (usize, usize, usize) {
         self.dims
+    }
+
+    /// `act(x G^T) * (x U^T)` for this gate and `up`, dense weights of one shape and kind, as one matvec: `None` unless
+    /// `x` is a decode's few contiguous f32 rows on Vulkan.
+    pub fn glu_mat_vec(&self, up: &Self, x: &Tensor, act: GluAct) -> Result<Option<Tensor>> {
+        if self.kind != up.kind || self.dims != up.dims || self.dims.0 != 1 {
+            return Ok(None);
+        }
+        #[cfg(feature = "vulkan")]
+        return crate::vulkan_backend::glu_mat_vec(
+            x,
+            (&self.buffer, &up.buffer),
+            crate::vulkan_backend::block_type(self.kind),
+            (self.dims.1, self.dims.2),
+            act,
+        );
+        #[cfg(not(feature = "vulkan"))]
+        {
+            let _ = (x, act);
+            Err(crate::Error::NotCompiledWithVulkanSupport)
+        }
     }
 
     /// `y[slot] = W[ids[slot]] x[slot / x_div]`: `x` f32 rows of `cols`, `ids` u32 `(tokens, k)`; `(slots, rows)`.
@@ -270,6 +304,23 @@ pub enum GatedNorm {
     NormThenSilu,
     /// as `NormThenSilu` with `sigmoid(gate)`
     NormThenSigmoid,
+}
+
+/// `(x + residual, rms_norm(x + residual) * weight)` in one dispatch, for a decode's few f32 rows on Vulkan; `None`
+/// where the kernel does not take the shapes.
+pub fn add_rms_norm(
+    x: &Tensor,
+    residual: &Tensor,
+    weight: &Tensor,
+    eps: f32,
+) -> Result<Option<(Tensor, Tensor)>> {
+    #[cfg(feature = "vulkan")]
+    return crate::vulkan_backend::add_rms_norm(x, residual, weight, eps);
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = (x, residual, weight, eps);
+        Ok(None)
+    }
 }
 
 /// [`gated_rmsnorm`] with the gate where `order` puts it.
