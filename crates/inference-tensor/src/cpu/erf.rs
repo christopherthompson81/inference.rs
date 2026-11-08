@@ -19,15 +19,17 @@ const AS_A: [f32; 5] = [
     1.061_405_4,
 ];
 
-/// Cephes-style exp, ~1e-7 relative, for inputs a softmax or erfc gives (at most 0): branch-free, so a loop of it
-/// vectorizes, where libm's is a call an element.
+/// Cephes-style exp, ~1e-7 relative over [-87, 87] (clamped outside): branch-free, so a loop of it vectorizes,
+/// where libm's is a call an element.
 #[inline(always)]
 pub fn fast_exp(x: f32) -> f32 {
     const LOG2E: f32 = std::f32::consts::LOG2_E;
     const C0: f32 = 0.693_359_4;
     const C1: f32 = -2.121_944_4e-4;
+    const ROUND_MAGIC: f32 = 12_582_912.0;
     let x = x.clamp(-87.0, 87.0);
-    let z = (x * LOG2E).round();
+    // nearest by the add of 1.5 * 2^23: `round` (half away from zero) has no instruction, so it was a libm call
+    let z = (x * LOG2E + ROUND_MAGIC) - ROUND_MAGIC;
     let r = x - z * C0 - z * C1;
     let r2 = r * r;
     let p = r + r2
@@ -50,5 +52,22 @@ pub fn gelu_erf_f32(x: f32) -> f32 {
         x * (1.0 - 0.5 * erfc)
     } else {
         0.5 * x * erfc
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fast_exp;
+
+    #[test]
+    fn fast_exp_matches_f64_both_signs() {
+        let worst = (-8700..=8700)
+            .map(|i| i as f32 / 100.0)
+            .map(|x| {
+                let want = (x as f64).exp();
+                ((fast_exp(x) as f64 - want) / want).abs()
+            })
+            .fold(0.0f64, f64::max);
+        assert!(worst < 5e-7, "worst relative error {worst}");
     }
 }
