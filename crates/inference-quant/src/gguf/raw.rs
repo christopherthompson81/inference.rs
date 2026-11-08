@@ -44,6 +44,11 @@ enum RawStorage {
     // The blocks as a flat U8 tensor
     #[cfg(feature = "metal")]
     Metal(Tensor),
+    // The blocks in the device's memory, run by its block kernels; not read back
+    Vulkan {
+        weight: inference_tensor::vulkan::BlockWeight,
+        device: Device,
+    },
 }
 
 /// A weight of ggml blocks, row-major: `[rows, cols]`, or `[experts, rows, cols]` for an MoE expert stack.
@@ -152,6 +157,7 @@ impl RawGgufTensor {
             RawStorage::Cuda { device, .. } => Device::Cuda(device.clone()),
             #[cfg(feature = "metal")]
             RawStorage::Metal(blocks) => blocks.device().clone(),
+            RawStorage::Vulkan { device, .. } => device.clone(),
         }
     }
 
@@ -175,6 +181,9 @@ impl RawGgufTensor {
             }
             #[cfg(feature = "metal")]
             RawStorage::Metal(blocks) => blocks.to_vec1::<u8>(),
+            RawStorage::Vulkan { .. } => {
+                inference_tensor::bail!("{:?} blocks on Vulkan are not read back", self.ty)
+            }
         }
     }
 
@@ -244,6 +253,31 @@ impl RawGgufTensor {
                 let len = bytes.len();
                 RawStorage::Metal(Tensor::from_vec(bytes, len, device)?)
             }
+            Device::Vulkan(_) if self.ty.vulkan_block_kind().is_some() => {
+                let kind = self.ty.vulkan_block_kind().expect("checked above");
+                let (rows, cols) = self.flat_dims();
+                let experts = match self.shape.dims() {
+                    [experts, _, _] => *experts,
+                    _ => 1,
+                };
+                let owned;
+                let bytes = match &self.storage {
+                    RawStorage::Cpu(bytes) => bytes.as_slice(),
+                    _ => {
+                        owned = self.bytes()?;
+                        owned.as_slice()
+                    }
+                };
+                RawStorage::Vulkan {
+                    weight: inference_tensor::vulkan::BlockWeight::new(
+                        device,
+                        kind,
+                        (experts, rows / experts, cols),
+                        bytes,
+                    )?,
+                    device: device.clone(),
+                }
+            }
             #[allow(unreachable_patterns)]
             other => {
                 inference_tensor::bail!("{:?} weights are not supported on {other:?}", self.ty)
@@ -267,6 +301,9 @@ impl RawGgufTensor {
             return Tensor::zeros(dims, DType::F32, &self.device());
         }
         let gathered = match &self.storage {
+            RawStorage::Vulkan { weight, device } => {
+                return weight.embedding(&flat.to_device(device)?)?.reshape(dims);
+            }
             RawStorage::Cpu(bytes) => {
                 let ids = flat.to_vec1::<u32>()?;
                 if let Some(id) = ids.iter().find(|&&id| id as usize >= rows) {
@@ -384,6 +421,10 @@ impl RawGgufTensor {
         let row_bytes = self.ty.row_bytes(cols).expect("validated at construction");
         let dims = (ids.len(), rows, cols);
         match &self.storage {
+            RawStorage::Vulkan { .. } => inference_tensor::bail!(
+                "{:?} experts on Vulkan run through its expert kernels, not dequantized",
+                self.ty
+            ),
             RawStorage::Cpu(bytes) => {
                 let expert_bytes = rows * row_bytes;
                 let selected = ids
@@ -939,6 +980,13 @@ impl QuantMethod for GgufRawMatMul {
         }
         #[cfg(feature = "metal")]
         if let Some(out) = self.metal_forward(a)? {
+            return self.add_bias(out);
+        }
+        if let RawStorage::Vulkan { weight, .. } = &self.w.storage
+            && a.device().is_vulkan()
+            && weight.dims().0 == 1
+        {
+            let out = weight.matmul(a)?.to_dtype(a.dtype())?;
             return self.add_bias(out);
         }
         if let Some(out) = self.cpu_forward(a)? {

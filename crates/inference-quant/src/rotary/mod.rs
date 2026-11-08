@@ -694,6 +694,9 @@ fn apply_rotary_q_inner(
     if q.device().is_metal() {
         return metal_apply_rotary_q(q, cos, sin, positions, is_neox);
     }
+    if q.device().is_vulkan() {
+        return vulkan_apply_rotary(q, cos, sin, positions, is_neox);
+    }
     cpu_apply_rotary_q(q, cos, sin, positions, is_neox)
 }
 
@@ -737,7 +740,86 @@ fn apply_rotary_qk_inner(
     if q.device().is_metal() {
         return metal_apply_rotary_qk(q, k, cos, sin, positions, is_neox);
     }
+    if q.device().is_vulkan() {
+        let positions = positions.map(|p| p.to_device(q.device())).transpose()?;
+        return Ok((
+            vulkan_apply_rotary(q, cos, sin, positions.as_ref(), is_neox)?,
+            vulkan_apply_rotary(k, cos, sin, positions.as_ref(), is_neox)?,
+        ));
+    }
     cpu_apply_rotary_qk(q, k, cos, sin, positions, is_neox)
+}
+
+// Vulkan's kernel where it takes the dtype, else the composite
+fn vulkan_apply_rotary(
+    x: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    positions: Option<&Tensor>,
+    is_neox: bool,
+) -> Result<Tensor> {
+    match inference_tensor::vulkan::rope(x, cos, sin, positions, is_neox)? {
+        Some(out) => Ok(out),
+        None => composite_apply_rotary(x, cos, sin, positions, is_neox),
+    }
+}
+
+// The CPU kernel's rotation in tensor ops, for a device with no RoPE kernel: `x` `(b, h, s, d)`, `cos`/`sin` rows a
+// position (`positions` `(b s)` picks them), a token (`(b s)` rows or `(b, s, rot)`) or a sequence index (`s` rows)
+fn composite_apply_rotary(
+    x: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    positions: Option<&Tensor>,
+    is_neox: bool,
+) -> Result<Tensor> {
+    use inference_tensor::D;
+    let (batch, _, seq_len, head_dim) = x.dims4()?;
+    let rot = cos.dim(D::Minus1)?;
+    if rot == 0 || rot * 2 > head_dim {
+        inference_tensor::bail!(
+            "RoPE rot dim {} is incompatible with head dim {head_dim}",
+            rot * 2
+        );
+    }
+    let table = |t: &Tensor| -> Result<Tensor> {
+        let t = t.to_dtype(x.dtype())?.to_device(x.device())?;
+        let rows = match positions {
+            Some(positions) => {
+                let ids = positions.flatten_all()?.to_device(x.device())?;
+                t.index_select(&ids, 0)?.reshape((batch, seq_len, rot))?
+            }
+            None if t.elem_count() == batch * seq_len * rot => t.reshape((batch, seq_len, rot))?,
+            None => t.reshape((1, seq_len, rot))?,
+        };
+        rows.unsqueeze(1)
+    };
+    let (cos, sin) = (table(cos)?, table(sin)?);
+    let (first, second) = if is_neox {
+        (x.narrow(D::Minus1, 0, rot)?, x.narrow(D::Minus1, rot, rot)?)
+    } else {
+        let pairs =
+            x.narrow(D::Minus1, 0, 2 * rot)?
+                .reshape((batch, x.dim(1)?, seq_len, rot, 2))?;
+        (
+            pairs.narrow(D::Minus1, 0, 1)?.squeeze(D::Minus1)?,
+            pairs.narrow(D::Minus1, 1, 1)?.squeeze(D::Minus1)?,
+        )
+    };
+    let rotated_first = (first.broadcast_mul(&cos)? - second.broadcast_mul(&sin)?)?;
+    let rotated_second = (second.broadcast_mul(&cos)? + first.broadcast_mul(&sin)?)?;
+    let rotated = if is_neox {
+        Tensor::cat(&[&rotated_first, &rotated_second], D::Minus1)?
+    } else {
+        Tensor::stack(&[&rotated_first, &rotated_second], D::Minus1)?.flatten_from(D::Minus2)?
+    };
+    if 2 * rot == head_dim {
+        return Ok(rotated);
+    }
+    Tensor::cat(
+        &[&rotated, &x.narrow(D::Minus1, 2 * rot, head_dim - 2 * rot)?],
+        D::Minus1,
+    )
 }
 
 #[cfg(feature = "cuda")]
@@ -1339,5 +1421,82 @@ mod tests {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod composite_tests {
+    use inference_tensor::{DType, Device, Result, Tensor};
+
+    const BATCH: usize = 2;
+    const HEADS: usize = 3;
+    const SEQ_LEN: usize = 5;
+    const CACHE_ROWS: usize = 11;
+    const TOLERANCE: f32 = 1e-5;
+
+    fn ramp(shape: &[usize], scale: f64, offset: f64) -> Result<Tensor> {
+        let n: usize = shape.iter().product();
+        Tensor::arange(0f32, n as f32, &Device::Cpu)?
+            .affine(scale, offset)?
+            .sin()?
+            .reshape(shape)
+    }
+
+    fn assert_close(a: &Tensor, b: &Tensor) -> Result<()> {
+        let diff = (a - b)?.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        assert!(diff < TOLERANCE, "max difference {diff}");
+        Ok(())
+    }
+
+    // both layouts, a partial rotation (head 16, 6 of it rotated), positions and each cache row form, against the
+    // CPU kernel
+    #[test]
+    fn composite_rope_matches_the_cpu_kernel() -> Result<()> {
+        for (head_dim, rot) in [(16usize, 8usize), (16, 3)] {
+            let x = ramp(&[BATCH, HEADS, SEQ_LEN, head_dim], 0.07, 0.1)?;
+            for is_neox in [true, false] {
+                let (cos, sin) = (
+                    ramp(&[CACHE_ROWS, rot], 0.11, 0.2)?,
+                    ramp(&[CACHE_ROWS, rot], 0.13, 0.5)?,
+                );
+                let positions = Tensor::new(&[3u32, 0, 7, 10, 2, 9, 1, 4, 8, 5], &Device::Cpu)?;
+                assert_close(
+                    &super::composite_apply_rotary(&x, &cos, &sin, Some(&positions), is_neox)?,
+                    &super::cpu_apply_rotary_q(&x, &cos, &sin, Some(&positions), is_neox)?,
+                )?;
+                for rows in [
+                    vec![BATCH, SEQ_LEN, rot],
+                    vec![BATCH * SEQ_LEN, rot],
+                    vec![SEQ_LEN, rot],
+                ] {
+                    let (cos, sin) = (ramp(&rows, 0.11, 0.2)?, ramp(&rows, 0.13, 0.5)?);
+                    assert_close(
+                        &super::composite_apply_rotary(&x, &cos, &sin, None, is_neox)?,
+                        &super::cpu_apply_rotary_q(&x, &cos, &sin, None, is_neox)?,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn composite_rope_takes_the_tables_in_another_dtype() -> Result<()> {
+        let x = ramp(&[1, HEADS, SEQ_LEN, 8], 0.07, 0.1)?;
+        let (cos, sin) = (
+            ramp(&[SEQ_LEN, 4], 0.11, 0.2)?,
+            ramp(&[SEQ_LEN, 4], 0.13, 0.5)?,
+        );
+        let half = |t: &Tensor| t.to_dtype(DType::F16);
+        assert_close(
+            &super::composite_apply_rotary(&x, &half(&cos)?, &half(&sin)?, None, true)?,
+            &super::cpu_apply_rotary_q(
+                &x,
+                &half(&cos)?.to_dtype(DType::F32)?,
+                &half(&sin)?.to_dtype(DType::F32)?,
+                None,
+                true,
+            )?,
+        )
     }
 }

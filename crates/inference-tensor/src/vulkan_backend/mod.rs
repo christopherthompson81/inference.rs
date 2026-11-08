@@ -525,6 +525,139 @@ fn tensor_of(storage: VulkanStorage, shape: impl Into<Shape>) -> Tensor {
     )
 }
 
+pub(crate) fn rope(
+    x: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    positions: Option<&Tensor>,
+    is_neox: bool,
+) -> Result<Option<Tensor>> {
+    let (batch, heads, seq, head_dim) = x.dims4()?;
+    let f32 = DType::F32;
+    if x.dtype() != f32 {
+        return Ok(None);
+    }
+    let rot = cos.dim(crate::D::Minus1)?;
+    let device = x.device().as_vulkan_device()?.clone();
+    let table = |t: &Tensor| t.to_dtype(f32)?.to_device(x.device())?.contiguous();
+    let (cos, sin) = (table(cos)?, table(sin)?);
+    let tokens = batch * seq;
+    let rows = match positions {
+        Some(_) => inference_vulkan::RopeRows::Positions,
+        None if cos.elem_count() == tokens * rot => inference_vulkan::RopeRows::Tokens,
+        None => inference_vulkan::RopeRows::Sequence,
+    };
+    // the kernel binds a positions buffer either way
+    let positions = match positions {
+        Some(p) => p
+            .to_dtype(DType::U32)?
+            .to_device(x.device())?
+            .contiguous()?,
+        None => cos.zeros_like()?.to_dtype(DType::U32)?,
+    };
+    let x = x.contiguous()?;
+    let [xb, cb, sb, pb] = [
+        bound(&x, f32)?,
+        bound(&cos, f32)?,
+        bound(&sin, f32)?,
+        bound(&positions, DType::U32)?,
+    ];
+    let count = x.elem_count();
+    let out = VulkanStorage {
+        buffer: Arc::new(device.buffer(count * 4)?),
+        device: device.clone(),
+        count,
+        dtype: f32,
+    };
+    device
+        .context
+        .record(|r| {
+            r.rope(&inference_vulkan::Rope {
+                batch,
+                heads,
+                seq,
+                head_dim,
+                rot,
+                rows,
+                neox: is_neox,
+                x: (&xb.0, xb.1),
+                cos: (&cb.0, cb.1),
+                sin: (&sb.0, sb.1),
+                positions: (&pb.0, pb.1),
+                out: &out.buffer,
+            })
+        })
+        .map_err(vk_err)?;
+    Ok(Some(tensor_of(out, (batch, heads, seq, head_dim))))
+}
+
+pub(crate) fn gdn_recurrence(
+    op: &crate::vulkan::GdnRecurrence<'_>,
+) -> Result<Option<(Tensor, Tensor)>> {
+    let (batch, seq, conv_dim) = op.mixed.dims3()?;
+    let (state_batch, v_heads, head_k, head_v) = op.state.dims4()?;
+    let f32 = DType::F32;
+    if state_batch != batch
+        || !inference_vulkan::GdnRecurrence::supports(head_k, head_v)
+        || op.b.dims3()? != (batch, seq, v_heads)
+        || op.a.dims3()? != (batch, seq, v_heads)
+        || ![op.mixed, op.b, op.a, op.a_log, op.dt_bias, op.state]
+            .iter()
+            .all(|t| t.dtype() == f32)
+    {
+        return Ok(None);
+    }
+    let [mixed, b, a, a_log, dt_bias, state] =
+        [op.mixed, op.b, op.a, op.a_log, op.dt_bias, op.state].map(|t| t.contiguous());
+    let [mixed, b, a, a_log, dt_bias, state] = [mixed?, b?, a?, a_log?, dt_bias?, state?];
+    let [mb, bb, ab, a_logb, dt_biasb, sb] =
+        [&mixed, &b, &a, &a_log, &dt_bias, &state].map(|t| bound(t, f32));
+    let [mb, bb, ab, a_logb, dt_biasb, sb] = [mb?, bb?, ab?, a_logb?, dt_biasb?, sb?];
+    if [a_logb.1, dt_biasb.1] != [0; 2] {
+        crate::bail!("the GDN recurrence reads a_log and dt_bias from their buffers' start");
+    }
+    let device = op.mixed.device().as_vulkan_device()?.clone();
+    let alloc = |count: usize| -> Result<VulkanStorage> {
+        Ok(VulkanStorage {
+            buffer: Arc::new(device.buffer(count * 4)?),
+            device: device.clone(),
+            count,
+            dtype: f32,
+        })
+    };
+    let state_out = alloc(state.elem_count())?;
+    let out = alloc(batch * seq * v_heads * head_v)?;
+    device
+        .context
+        .record(|r| {
+            r.gdn_recurrence(&inference_vulkan::GdnRecurrence {
+                batch,
+                seq,
+                k_heads: op.k_heads,
+                v_heads,
+                head_k,
+                head_v,
+                conv_dim,
+                key_dim: op.k_heads * head_k,
+                tiled: op.tiled,
+                eps: op.eps,
+                mixed: (&mb.0, mb.1),
+                b: (&bb.0, bb.1),
+                a: (&ab.0, ab.1),
+                a_log: &a_logb.0,
+                dt_bias: &dt_biasb.0,
+                state_in: (&sb.0, sb.1),
+                state_out: &state_out.buffer,
+                out: &out.buffer,
+            })
+        })
+        .map_err(vk_err)?;
+    Ok(Some((
+        tensor_of(out, (batch, seq, v_heads, head_v)),
+        tensor_of(state_out, (batch, v_heads, head_k, head_v)),
+    )))
+}
+
 pub(crate) fn ssm_scan_step(step: &crate::vulkan::ScanStep<'_>) -> Result<Tensor> {
     let unified = step.x.device().as_vulkan_device()?.context.is_unified();
     let chunked = !unified || step.x.dim(1)? >= UNIFIED_CHUNKED_SCAN_MIN_SEQ;
@@ -744,6 +877,90 @@ pub(crate) fn moe_router(route: &crate::vulkan::Route<'_>) -> Result<(Tensor, Te
         .map_err(vk_err)?;
     let shape = (tokens, route.top_k);
     Ok((tensor_of(values, shape), tensor_of(indices, shape)))
+}
+
+pub(crate) fn block_type(kind: crate::vulkan::BlockKind) -> BlockType {
+    use crate::vulkan::BlockKind as K;
+    match kind {
+        K::Q8_0 => BlockType::Q8_0,
+        K::Q5_0 => BlockType::Q5_0,
+        K::Q4_0 => BlockType::Q4_0,
+        K::Q4_1 => BlockType::Q4_1,
+        K::Q5_1 => BlockType::Q5_1,
+        K::Q4K => BlockType::Q4K,
+        K::Q5K => BlockType::Q5K,
+        K::Q6K => BlockType::Q6K,
+        K::Iq4Xs => BlockType::IQ4XS,
+        K::Iq3S => BlockType::IQ3S,
+    }
+}
+
+// `bytes` of `kind` blocks, `(experts, rows, cols)`, in `device`'s memory
+pub(crate) fn block_weight(
+    device: &crate::Device,
+    kind: crate::vulkan::BlockKind,
+    (experts, rows, cols): (usize, usize, usize),
+    bytes: &[u8],
+) -> Result<Arc<Buffer>> {
+    let ty = block_type(kind);
+    if !cols.is_multiple_of(ty.block_values())
+        || bytes.len() != experts * rows * cols / ty.block_values() * ty.block_bytes()
+    {
+        crate::bail!(
+            "{kind:?} ({experts}, {rows}, {cols}) does not take {} bytes",
+            bytes.len()
+        );
+    }
+    device.as_vulkan_device()?.weight_copy(bytes)
+}
+
+// the rows of a `vocab x cols` weight of `ty` blocks at the u32 `ids`
+pub(crate) fn block_embedding(
+    weights: &Arc<Buffer>,
+    ty: BlockType,
+    (vocab, cols): (usize, usize),
+    ids: &Tensor,
+) -> Result<Tensor> {
+    let ids = ids.to_dtype(DType::U32)?.contiguous()?;
+    let count = ids.elem_count();
+    let (storage, layout) = ids.storage_and_layout();
+    let crate::Storage::Vulkan(ids_storage) = &*storage else {
+        crate::bail!("Vulkan block rows at ids on {:?}", ids.device());
+    };
+    let device = ids_storage.device.clone();
+    let out = quantized_embedding(
+        (ids_storage.buffer(), layout.start_offset()),
+        count,
+        weights,
+        ty,
+        vocab,
+        cols,
+        &device,
+    )?;
+    drop(storage);
+    Ok(tensor_of(out, (count, cols)))
+}
+
+// `x (.., cols)` times a `rows x cols` weight of `ty` blocks, transposed
+pub(crate) fn block_matmul(
+    weights: &Arc<Buffer>,
+    ty: BlockType,
+    (rows, cols): (usize, usize),
+    x: &Tensor,
+) -> Result<Tensor> {
+    let x = x.to_dtype(DType::F32)?.contiguous()?;
+    let mut dims = x.dims().to_vec();
+    if dims.last() != Some(&cols) {
+        crate::bail!("a ({rows}, {cols}) block weight times {:?}", x.shape());
+    }
+    let (storage, layout) = x.storage_and_layout();
+    let crate::Storage::Vulkan(xs) = &*storage else {
+        crate::bail!("a Vulkan block weight times a tensor on {:?}", x.device());
+    };
+    let out = quantized_mat_vec(xs, layout, weights, ty, rows, cols)?;
+    drop(storage);
+    *dims.last_mut().expect("dims hold cols") = rows;
+    Ok(tensor_of(out, dims))
 }
 
 /// `y[slot] = W[ids[slot]] x[slot / x_div]` over a Q5_0 expert stack `(experts, rows, cols)` copied to `weights`, `ids`

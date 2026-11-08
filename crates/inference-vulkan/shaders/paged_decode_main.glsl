@@ -74,8 +74,13 @@ const uint THREADS = 256;
 const uint CHUNK = 64;
 // a multiple of the block size, so a tile holds whole blocks
 const uint TILE = 32;
-const uint MAX_HEAD4 = 32;
-const uint MAX_GROUP = 16;
+// a wide build (head size 256) defines both, its group bounded by the value heads a thread sums anyway
+#ifndef DECODE_MAX_HEAD4
+#define DECODE_MAX_HEAD4 32
+#define DECODE_MAX_GROUP 16
+#endif
+const uint MAX_HEAD4 = DECODE_MAX_HEAD4;
+const uint MAX_GROUP = DECODE_MAX_GROUP;
 // the heads a thread scores a position for
 const uint SCORE_HEADS = MAX_GROUP / (THREADS / TILE);
 // the heads a value thread sums for (its dimension's vec4 read once for them all)

@@ -236,6 +236,33 @@ pub fn apply_recurrence_from_convolved(
         );
     }
 
+    if mixed_qkv.device().is_vulkan()
+        && cache.state_layout == RecurrentStateLayout::GdnKeyMajor
+        && let Some((output, state)) =
+            inference_tensor::vulkan::gdn_recurrence(&inference_tensor::vulkan::GdnRecurrence {
+                mixed: &mixed_qkv.to_dtype(DType::F32)?.reshape((
+                    batch_size,
+                    seq_len,
+                    dims.conv_dim,
+                ))?,
+                b: &b
+                    .to_dtype(DType::F32)?
+                    .reshape((batch_size, seq_len, dims.num_v_heads))?,
+                a: &a
+                    .to_dtype(DType::F32)?
+                    .reshape((batch_size, seq_len, dims.num_v_heads))?,
+                a_log: &a_log.to_dtype(DType::F32)?.flatten_all()?,
+                dt_bias: &dt_bias.to_dtype(DType::F32)?.flatten_all()?,
+                state: &cache.recurrent_state.to_dtype(DType::F32)?,
+                k_heads: dims.num_k_heads,
+                tiled: dims.v_head_layout == GdnVHeadLayout::Tiled,
+                eps: QK_NORM_EPS_F32,
+            })?
+    {
+        cache.recurrent_state = state.to_dtype(cache.recurrent_state.dtype())?;
+        return output.to_dtype(dtype);
+    }
+
     let q = mixed_qkv.narrow(D::Minus1, 0, dims.key_dim)?;
     let k = mixed_qkv.narrow(D::Minus1, dims.key_dim, dims.key_dim)?;
     let v = mixed_qkv.narrow(D::Minus1, dims.key_dim * 2, dims.value_dim)?;
@@ -812,11 +839,31 @@ pub fn causal_conv1d(
     cache: &mut GdnLayerCache,
     batch_kind: RecurrentBatchKind,
 ) -> Result<Tensor> {
-    let (_, seq_len, _) = x.dims3()?;
+    let (batch, seq_len, _) = x.dims3()?;
+    if matches!(batch_kind, RecurrentBatchKind::Decode) && seq_len != 1 {
+        inference_tensor::bail!("GDN decode expects a single-token query.");
+    }
+    // Mamba's conv step is this conv (the state the last `kernel` inputs, no bias, SiLU), in place on the checked-out
+    // rows for a prompt as for a step
+    if x.device().is_vulkan()
+        && cache.conv_state.dtype() == DType::F32
+        && cache.conv_state.is_contiguous()
+    {
+        let weight = conv1d_weight
+            .squeeze(1)?
+            .to_dtype(DType::F32)?
+            .contiguous()?;
+        let slots = Tensor::arange(0u32, batch as u32, x.device())?;
+        return inference_tensor::vulkan::ssm_conv_step(
+            &x.to_dtype(DType::F32)?.contiguous()?,
+            &weight,
+            None,
+            &cache.conv_state,
+            &slots,
+        )?
+        .to_dtype(x.dtype());
+    }
     if matches!(batch_kind, RecurrentBatchKind::Decode) {
-        if seq_len != 1 {
-            inference_tensor::bail!("GDN decode expects a single-token query.");
-        }
         causal_conv1d_update(x, conv1d_weight, dims, cache)
     } else {
         causal_conv1d_full(x, conv1d_weight, dims, cache)
@@ -2195,6 +2242,160 @@ mod tests {
                 2,
                 seq_len,
             )?;
+        }
+        Ok(())
+    }
+
+    // the fused Vulkan recurrence against the CPU pass: Qwen3.6's widths (16 key heads, 32 value heads, 128 wide),
+    // both value-head layouts, a decode step and a prompt over two sequences, output and advanced state
+    #[test]
+    fn vulkan_gdn_recurrence_matches_the_cpu() -> CandleResult<()> {
+        let Ok(vk) = Device::new_vulkan(0) else {
+            return Ok(());
+        };
+        const TOLERANCE: f32 = 1e-4;
+        for layout in [GdnVHeadLayout::Grouped, GdnVHeadLayout::Tiled] {
+            let dims = dims_with_layout(16, 32, 128, 128, layout);
+            for (batch, seq) in [(2usize, 1usize), (2, 37)] {
+                let tokens = batch * seq;
+                let cpu = Device::Cpu;
+                let mixed = Tensor::from_vec(
+                    patterned(tokens * dims.conv_dim, 1, 0.5, 0.0),
+                    (tokens, dims.conv_dim),
+                    &cpu,
+                )?;
+                let gates = |salt| {
+                    Tensor::from_vec(
+                        patterned(tokens * dims.num_v_heads, salt, 2.0, 0.0),
+                        (batch, seq, dims.num_v_heads),
+                        &cpu,
+                    )
+                };
+                let (b, a) = (gates(2)?, gates(3)?);
+                let a_log = Tensor::from_vec(
+                    patterned(dims.num_v_heads, 4, 1.0, 0.0),
+                    dims.num_v_heads,
+                    &cpu,
+                )?;
+                let dt_bias = Tensor::from_vec(
+                    patterned(dims.num_v_heads, 5, 0.5, 0.0),
+                    dims.num_v_heads,
+                    &cpu,
+                )?;
+                let state = Tensor::from_vec(
+                    patterned(
+                        batch * dims.num_v_heads * dims.head_k_dim * dims.head_v_dim,
+                        6,
+                        0.02,
+                        0.0,
+                    ),
+                    (batch, dims.num_v_heads, dims.head_k_dim, dims.head_v_dim),
+                    &cpu,
+                )?;
+                let conv = Tensor::zeros(
+                    (batch, dims.conv_dim, dims.conv_kernel_size),
+                    DType::F32,
+                    &cpu,
+                )?;
+                let run = |device: &Device| -> CandleResult<(Tensor, Tensor)> {
+                    let mut cache = GdnLayerCache::gathered(
+                        conv.to_device(device)?,
+                        state.copy()?.to_device(device)?,
+                        RecurrentStateLayout::GdnKeyMajor,
+                    );
+                    let out = apply_recurrence_from_convolved(
+                        &mixed.to_device(device)?,
+                        &b.to_device(device)?,
+                        &a.to_device(device)?,
+                        &a_log.to_device(device)?,
+                        &dt_bias.to_device(device)?,
+                        &dims,
+                        batch,
+                        seq,
+                        &mut cache,
+                        DType::F32,
+                    )?;
+                    Ok((out.to_device(&cpu)?, cache.recurrent_state.to_device(&cpu)?))
+                };
+                let (want, want_state) = run(&cpu)?;
+                let (got, got_state) = run(&vk)?;
+                for (got, want) in [(&got, &want), (&got_state, &want_state)] {
+                    assert_eq!(got.shape(), want.shape());
+                    let diff = (got - want)?
+                        .abs()?
+                        .flatten_all()?
+                        .max(0)?
+                        .to_scalar::<f32>()?;
+                    assert!(
+                        diff < TOLERANCE,
+                        "{layout:?} batch {batch} seq {seq}: {diff}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // the Vulkan conv (Mamba's conv step over the checked-out rows) against the CPU's: a decode step and a prompt over
+    // two sequences, output and conv state
+    #[test]
+    fn vulkan_gdn_conv_matches_the_cpu() -> CandleResult<()> {
+        let Ok(vk) = Device::new_vulkan(0) else {
+            return Ok(());
+        };
+        const TOLERANCE: f32 = 1e-5;
+        let dims = dims(4, 8, 32, 32);
+        let cpu = Device::Cpu;
+        for (batch, seq, kind) in [
+            (2usize, 1usize, RecurrentBatchKind::Decode),
+            (2, 13, RecurrentBatchKind::Prefill),
+        ] {
+            let x = Tensor::from_vec(
+                patterned(batch * seq * dims.conv_dim, 1, 0.5, 0.0),
+                (batch, seq, dims.conv_dim),
+                &cpu,
+            )?;
+            let weight = Tensor::from_vec(
+                patterned(dims.conv_dim * dims.conv_kernel_size, 2, 0.4, 0.0),
+                (dims.conv_dim, 1, dims.conv_kernel_size),
+                &cpu,
+            )?;
+            let conv = Tensor::from_vec(
+                patterned(batch * dims.conv_dim * dims.conv_kernel_size, 3, 0.3, 0.0),
+                (batch, dims.conv_dim, dims.conv_kernel_size),
+                &cpu,
+            )?;
+            let state = Tensor::zeros(
+                (batch, dims.num_v_heads, dims.head_k_dim, dims.head_v_dim),
+                DType::F32,
+                &cpu,
+            )?;
+            let run = |device: &Device| -> CandleResult<(Tensor, Tensor)> {
+                let mut cache = GdnLayerCache::gathered(
+                    conv.copy()?.to_device(device)?,
+                    state.to_device(device)?,
+                    RecurrentStateLayout::GdnKeyMajor,
+                );
+                let out = causal_conv1d(
+                    &x.to_device(device)?,
+                    &weight.to_device(device)?,
+                    &dims,
+                    &mut cache,
+                    kind,
+                )?;
+                Ok((out.to_device(&cpu)?, cache.conv_state.to_device(&cpu)?))
+            };
+            let (want, want_state) = run(&cpu)?;
+            let (got, got_state) = run(&vk)?;
+            for (got, want) in [(&got, &want), (&got_state, &want_state)] {
+                assert_eq!(got.shape(), want.shape());
+                let diff = (got - want)?
+                    .abs()?
+                    .flatten_all()?
+                    .max(0)?
+                    .to_scalar::<f32>()?;
+                assert!(diff < TOLERANCE, "batch {batch} seq {seq}: {diff}");
+            }
         }
         Ok(())
     }

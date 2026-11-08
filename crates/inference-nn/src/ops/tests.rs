@@ -2907,3 +2907,74 @@ fn unquantized_projections_merge_into_one_matmul() -> inference_tensor::Result<(
     assert!(MergedDenseProjection::merge_unquantized(&[b, wider])?.is_none());
     Ok(())
 }
+
+// Vulkan's RoPE kernel against the CPU kernel: both layouts, a partial rotation, positions and each cache row form
+#[test]
+fn vulkan_rope_matches_the_cpu_kernel() -> inference_tensor::Result<()> {
+    let Ok(vk) = Device::new_vulkan(0) else {
+        return Ok(());
+    };
+    const BATCH: usize = 2;
+    const SEQ: usize = 5;
+    const CACHE_ROWS: usize = 11;
+    const TOLERANCE: f32 = 1e-5;
+    let cpu = Device::Cpu;
+    let ramp = |shape: &[usize], scale: f64, offset: f64| -> inference_tensor::Result<Tensor> {
+        let n: usize = shape.iter().product();
+        Tensor::arange(0f32, n as f32, &cpu)?
+            .affine(scale, offset)?
+            .sin()?
+            .reshape(shape)
+    };
+    let max_diff = |a: &Tensor, b: &Tensor| -> inference_tensor::Result<f32> {
+        (a.to_device(&cpu)? - b)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()
+    };
+    for (head, rot) in [(16usize, 8usize), (16, 3)] {
+        let q = ramp(&[BATCH, 4, SEQ, head], 0.07, 0.1)?;
+        let k = ramp(&[BATCH, 2, SEQ, head], 0.05, 0.4)?;
+        for is_neox in [true, false] {
+            let (cos, sin) = (
+                ramp(&[CACHE_ROWS, rot], 0.11, 0.2)?,
+                ramp(&[CACHE_ROWS, rot], 0.13, 0.5)?,
+            );
+            let positions = Tensor::new(&[3u32, 0, 7, 10, 2, 9, 1, 4, 8, 5], &cpu)?;
+            let (want_q, want_k) =
+                inference_quant::rotary::apply_rotary_qk(&q, &k, &cos, &sin, &positions, is_neox)?;
+            let (got_q, got_k) = inference_quant::rotary::apply_rotary_qk(
+                &q.to_device(&vk)?,
+                &k.to_device(&vk)?,
+                &cos.to_device(&vk)?,
+                &sin.to_device(&vk)?,
+                &positions,
+                is_neox,
+            )?;
+            assert!(
+                max_diff(&got_q, &want_q)? < TOLERANCE && max_diff(&got_k, &want_k)? < TOLERANCE
+            );
+            for rows in [
+                vec![BATCH, SEQ, rot],
+                vec![BATCH * SEQ, rot],
+                vec![SEQ, rot],
+            ] {
+                let (cos, sin) = (ramp(&rows, 0.11, 0.2)?, ramp(&rows, 0.13, 0.5)?);
+                let want =
+                    inference_quant::rotary::apply_rotary_q_preselected(&q, &cos, &sin, is_neox)?;
+                let got = inference_quant::rotary::apply_rotary_q_preselected(
+                    &q.to_device(&vk)?,
+                    &cos.to_device(&vk)?,
+                    &sin.to_device(&vk)?,
+                    is_neox,
+                )?;
+                assert!(
+                    max_diff(&got, &want)? < TOLERANCE,
+                    "{rows:?} neox {is_neox}"
+                );
+            }
+        }
+    }
+    Ok(())
+}

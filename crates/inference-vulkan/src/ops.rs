@@ -377,6 +377,13 @@ pub(crate) const CONV_STEP_BINDINGS: usize = 6;
 pub(crate) const CONV_STEP_PUSH_BYTES: u32 = 10 * 4;
 pub(crate) const SCAN_STEP_BINDINGS: usize = 10;
 pub(crate) const SCAN_STEP_PUSH_BYTES: u32 = 14 * 4;
+pub(crate) const ROPE_BINDINGS: usize = 5;
+pub(crate) const ROPE_PUSH_BYTES: u32 = 11 * 4;
+const ROPE_THREADS: usize = 256;
+pub(crate) const GDN_BINDINGS: usize = 8;
+pub(crate) const GDN_PUSH_BYTES: u32 = 13 * 4;
+// gdn_recurrence.comp's threads, a value column each, and the key rows a thread's registers hold
+const GDN_MAX_HEAD: usize = 128;
 // the scan step's lanes a state row and states a lane, and the rows a 256-thread workgroup takes
 const SCAN_LANES: usize = 32;
 const SCAN_VEC: usize = 4;
@@ -440,6 +447,65 @@ pub struct ScanStep<'a> {
     /// Scratch of [`Self::chunked_scratch_bytes`], with which a sequence of [`SSD_MIN_SEQ`] or more runs as chunked
     /// SSD (each chunk's scan as dot products, only the state carried between chunks in order).
     pub scratch: Option<&'a Arc<Buffer>>,
+}
+
+/// Gated DeltaNet's recurrence over `seq` tokens of `batch` sequences from the convolved rows `mixed` (a token's
+/// `conv_dim` f32s: q and k `key_dim` each, then v), the gate inputs `b` and `a` `(tokens, v_heads)`, `a_log` and
+/// `dt_bias` `(v_heads,)` from their buffers' start; reads `state_in` `(batch, v_heads, head_k, head_v)` key-major, writes
+/// the advanced state to `state_out` and `(tokens, v_heads, head_v)` to `out`.
+pub struct GdnRecurrence<'a> {
+    pub batch: usize,
+    pub seq: usize,
+    pub k_heads: usize,
+    pub v_heads: usize,
+    pub head_k: usize,
+    pub head_v: usize,
+    pub conv_dim: usize,
+    pub key_dim: usize,
+    pub tiled: bool,
+    pub eps: f32,
+    pub mixed: At<'a>,
+    pub b: At<'a>,
+    pub a: At<'a>,
+    pub a_log: &'a Arc<Buffer>,
+    pub dt_bias: &'a Arc<Buffer>,
+    pub state_in: At<'a>,
+    pub state_out: &'a Arc<Buffer>,
+    pub out: &'a Arc<Buffer>,
+}
+
+/// Where a RoPE row's cos/sin come from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RopeRows {
+    /// The u32 position a token: `positions[b * seq + t]`.
+    Positions,
+    /// The token's own row (`batch * seq` rows).
+    Tokens,
+    /// The token's sequence index (`seq` rows).
+    Sequence,
+}
+
+/// RoPE over `x` `(batch, heads, seq, head_dim)` f32 with `rot`-wide cos/sin rows, into `out` (x's shape).
+pub struct Rope<'a> {
+    pub batch: usize,
+    pub heads: usize,
+    pub seq: usize,
+    pub head_dim: usize,
+    pub rot: usize,
+    pub rows: RopeRows,
+    pub neox: bool,
+    pub x: At<'a>,
+    pub cos: At<'a>,
+    pub sin: At<'a>,
+    pub positions: At<'a>,
+    pub out: &'a Arc<Buffer>,
+}
+
+impl GdnRecurrence<'_> {
+    /// Whether the kernel takes heads of these widths.
+    pub fn supports(head_k: usize, head_v: usize) -> bool {
+        (1..=GDN_MAX_HEAD).contains(&head_k) && (1..=GDN_MAX_HEAD).contains(&head_v)
+    }
 }
 
 impl ScanStep<'_> {
@@ -570,6 +636,106 @@ impl Recorder<'_> {
             .kernels
             .gated_rmsnorm
             .dispatch(self, &buffers.map(|b| b.buffer), &bytes, grid);
+        for buffer in buffers {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+
+    pub fn rope(&self, op: &Rope<'_>) -> Result<()> {
+        if op.rot == 0 || 2 * op.rot > op.head_dim {
+            return Err(Error::Invalid(format!(
+                "RoPE of {} rotated columns in a head of {}",
+                2 * op.rot,
+                op.head_dim
+            )));
+        }
+        let rows = op.batch * op.heads * op.seq;
+        if rows == 0 {
+            return Ok(());
+        }
+        let mode = match op.rows {
+            RopeRows::Positions => 0,
+            RopeRows::Tokens => 1,
+            RopeRows::Sequence => 2,
+        };
+        let bytes = words(&[
+            op.batch,
+            op.heads,
+            op.seq,
+            op.head_dim,
+            op.rot,
+            mode,
+            usize::from(op.neox),
+            op.x.1,
+            op.cos.1,
+            op.sin.1,
+            op.positions.1,
+        ])?;
+        let buffers = [op.x.0, op.cos.0, op.sin.0, op.positions.0, op.out];
+        let items = rows * (op.head_dim - op.rot);
+        let groups = items.div_ceil(ROPE_THREADS).clamp(1, MAX_GROUPS_X);
+        self.context.kernels.rope.dispatch(
+            self,
+            &buffers.map(|b| b.buffer),
+            &bytes,
+            [groups as u32, 1, 1],
+        );
+        for buffer in buffers {
+            self.retain(buffer.clone());
+        }
+        Ok(())
+    }
+
+    pub fn gdn_recurrence(&self, op: &GdnRecurrence<'_>) -> Result<()> {
+        if !GdnRecurrence::supports(op.head_k, op.head_v)
+            || op.k_heads == 0
+            || !op.v_heads.is_multiple_of(op.k_heads)
+        {
+            return Err(Error::Invalid(format!(
+                "a GDN recurrence of {} value heads over {} key heads, widths {} and {}",
+                op.v_heads, op.k_heads, op.head_k, op.head_v
+            )));
+        }
+        if op.batch == 0 || op.seq == 0 {
+            return Ok(());
+        }
+        let mut bytes = words(&[
+            op.seq,
+            op.k_heads,
+            op.v_heads,
+            op.head_k,
+            op.head_v,
+            op.conv_dim,
+            op.key_dim,
+            usize::from(op.tiled),
+            op.mixed.1,
+            op.b.1,
+            op.a.1,
+            op.state_in.1,
+        ])?;
+        bytes.extend_from_slice(&op.eps.to_bits().to_le_bytes());
+        let buffers = [
+            op.mixed.0,
+            op.b.0,
+            op.a.0,
+            op.a_log,
+            op.dt_bias,
+            op.state_in.0,
+            op.state_out,
+            op.out,
+        ];
+        self.context.kernels.gdn_recurrence.dispatch(
+            self,
+            &buffers.map(|b| b.buffer),
+            &bytes,
+            [op.v_heads as u32, op.batch as u32, 1],
+        );
+        self.work.set(
+            self.work.get().saturating_add(
+                (4 * op.batch * op.seq * op.v_heads * op.head_k * op.head_v) as u64,
+            ),
+        );
         for buffer in buffers {
             self.retain(buffer.clone());
         }
@@ -1040,6 +1206,9 @@ const MAX_DISPATCH_GROUPS: usize = 65535;
 // MAX_PREFILL_SPLITS of them, their partials within PREFILL_PARTIALS_BYTES (a prompt chunk's rows already fill the GPU,
 // and every layer's partials stay live until its batch completes)
 const PREFILL_ROWS: usize = 8;
+// threads a (row, head) in paged_prefill_main.glsl's narrow and wide builds
+const PREFILL_LANES: usize = 2;
+const PREFILL_WIDE_LANES: usize = 4;
 // paged_prefill_cm's query rows (positions x heads) a workgroup, and the heads it tiles
 const PREFILL_CM_ROWS: usize = 64;
 const PREFILL_CM_HEAD_STEP: usize = 16;
@@ -1052,8 +1221,9 @@ pub(crate) const PAGED_REDUCE_PUSH_BYTES: u32 = 3 * 4;
 // the decode shader's geometry: the positions a workgroup takes, a tile of whole blocks, its threads, the query heads
 // a kv head serves and those a value thread sums, and the cache's vec4 rows (x)
 const PAGED_CHUNK: usize = 64;
-// the shared tiles' head size, sized for occupancy
-const MAX_PAGED_HEAD: usize = 128;
+// the shared tiles' head size, sized for occupancy; decode and prefill have wide builds to 256 (Qwen3.5's)
+pub(crate) const MAX_PAGED_NARROW_HEAD: usize = 128;
+const MAX_PAGED_WIDE_HEAD: usize = 256;
 // the partials one piece of a call holds; many queries (an MTP head reading a whole prompt) run in pieces
 const PAGED_PARTIALS_BYTES: usize = 256 << 20;
 const PAGED_TILE: usize = 32;
@@ -1298,9 +1468,15 @@ impl Recorder<'_> {
     pub fn paged_prefill(&self, op: &PagedPrefill<'_>) -> Result<()> {
         let s = op.shape;
         let group = op.heads / s.kv_heads.max(1);
+        // the wide build holds a (row, head) in four threads, half the narrow one's rows a workgroup
+        let (lanes, rows_a_group) = if s.head_size > MAX_PAGED_NARROW_HEAD {
+            (PREFILL_WIDE_LANES, PREFILL_ROWS / 2)
+        } else {
+            (PREFILL_LANES, PREFILL_ROWS)
+        };
         if s.head_size == 0
-            || s.head_size > MAX_PAGED_HEAD
-            || !s.head_size.is_multiple_of(2 * PAGED_X)
+            || s.head_size > MAX_PAGED_WIDE_HEAD
+            || !s.head_size.is_multiple_of(lanes * PAGED_X)
             || !s.readable()
             || s.kv_heads == 0
             || !op.heads.is_multiple_of(s.kv_heads)
@@ -1358,7 +1534,7 @@ impl Recorder<'_> {
                 [
                     splits as u32,
                     s.kv_heads as u32,
-                    op.rows.div_ceil(PREFILL_ROWS) as u32,
+                    op.rows.div_ceil(rows_a_group) as u32,
                 ],
             ),
         }
@@ -1395,7 +1571,7 @@ impl Recorder<'_> {
         let group = op.heads / s.kv_heads.max(1);
         let chunks = op.max_context.div_ceil(PAGED_CHUNK).max(1);
         if s.head_size == 0
-            || s.head_size > MAX_PAGED_HEAD
+            || s.head_size > MAX_PAGED_WIDE_HEAD
             || !PAGED_THREADS.is_multiple_of(s.head_size)
             || !s.readable()
             || s.kv_heads == 0

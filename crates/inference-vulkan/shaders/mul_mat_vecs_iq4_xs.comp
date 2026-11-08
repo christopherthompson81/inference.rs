@@ -1,0 +1,6 @@
+#version 450
+// The multi-row matvec over a IQ4_XS W.
+#extension GL_GOOGLE_include_directive : require
+#include "mat_vec_head.glsl"
+#include "iq4_xs_int8.glsl"
+#include "mat_vec_main.glsl"

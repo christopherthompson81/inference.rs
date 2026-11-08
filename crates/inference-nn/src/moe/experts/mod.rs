@@ -65,6 +65,7 @@ enum MoEExpertsBackendImpl {
     Cutlass(CutlassExpertsWeights),
     Fast(FastExpertsWeights),
     MappedCpu(Box<MappedCpuExperts>),
+    Vulkan(Box<VulkanExperts>),
     #[cfg(feature = "cuda")]
     Offloaded(Box<offload::OffloadedExperts>),
     Ungated(ungated::UngatedExpertsWeights),
@@ -100,6 +101,40 @@ impl MappedCpuExperts {
     }
 }
 
+/// GGUF experts in a Vulkan device's memory, their blocks copied once: gate and up through the expert matvec, the
+/// activation, then down.
+struct VulkanExperts {
+    // gate, up, down; each `(experts, rows, cols)`
+    stacks: [inference_tensor::vulkan::BlockWeight; 3],
+}
+
+impl VulkanExperts {
+    fn forward(&self, forward: &MoEForward, config: MoEForwardConfig) -> Result<Tensor> {
+        let [gate, up, down] = &self.stacks;
+        let (tokens, k) = (forward.shape.num_tokens, config.num_experts_per_tok);
+        let xs = forward
+            .xs_flat
+            .to_dtype(inference_tensor::DType::F32)?
+            .contiguous()?;
+        let ids = forward
+            .topk_ids
+            .to_dtype(inference_tensor::DType::U32)?
+            .reshape((tokens, k))?
+            .contiguous()?;
+        let hidden = (inference_tensor::nn::ops::silu(&gate.expert_mat_vec(&xs, &ids, k)?)?
+            * up.expert_mat_vec(&xs, &ids, k)?)?;
+        let ys = down.expert_mat_vec(&hidden, &ids, 1)?;
+        let weights = forward
+            .topk_weights
+            .to_dtype(inference_tensor::DType::F32)?
+            .reshape((tokens, 1, k))?;
+        weights
+            .matmul(&ys.reshape((tokens, k, ys.dim(1)?))?)?
+            .reshape(forward.shape.flat())?
+            .to_dtype(forward.original_dtype)
+    }
+}
+
 impl MoEExpertsBackendImpl {
     fn forward(&self, forward: &MoEForward, config: MoEForwardConfig) -> Result<Tensor> {
         match self {
@@ -120,6 +155,9 @@ impl MoEExpertsBackendImpl {
             Self::MappedCpu(w) => w
                 .forward(forward, config)
                 .map_err(|err| err.context("moe experts mapped cpu")),
+            Self::Vulkan(w) => w
+                .forward(forward, config)
+                .map_err(|err| err.context("moe experts vulkan")),
             #[cfg(feature = "cuda")]
             Self::Offloaded(w) => w
                 .forward(forward, config, None)
@@ -191,7 +229,18 @@ impl MoEExperts {
             ));
         }
         let experts_vb = vb.pp("experts").set_device(layer_device.clone());
-        // Vulkan's experts run on the CPU's kernels from host memory until it has its own
+        if layer_device.is_vulkan()
+            && let Some(vulkan) = Self::load_vulkan(&experts_vb, comm, act, &layer_device)?
+        {
+            return Ok(Self::from_backend(
+                MoEExpertsBackendImpl::Vulkan(Box::new(vulkan)),
+                None,
+                cfg,
+                comm,
+                act,
+            ));
+        }
+        // Vulkan's experts of a type its kernels do not take run on the CPU's kernels from host memory
         if (layer_device.is_cpu() || layer_device.is_vulkan())
             && let Some(mapped) = Self::load_mapped_cpu(&experts_vb, comm, act)
         {
@@ -375,6 +424,50 @@ impl MoEExperts {
     }
 
     // GGUF stacks the block kernels run, left in the mapping; not when ISQ, LoRA or sharding needs layers of its own
+    // SiLU-gated GGUF experts of types Vulkan's kernels take, copied to the device from their mapping
+    fn load_vulkan(
+        experts_vb: &ShardedVarBuilder,
+        comm: &Arc<inference_quant::Comm>,
+        act: Activation,
+        device: &Device,
+    ) -> Result<Option<VulkanExperts>> {
+        if !matches!(
+            backends::glu_activation(act),
+            Some(inference_quant::GluActivationType::Silu)
+        ) || comm.world_size() > 1
+            || inference_quant::get_immediate_isq().is_some()
+            || experts_vb.lora_registry().is_some()
+        {
+            return Ok(None);
+        }
+        let Some(source) = experts_vb.weight_source() else {
+            return Ok(None);
+        };
+        let keys = inference_quant::QuantizedExpertKeys::new(&experts_vb.prefix());
+        let [Some(gate), Some(up), Some(down)] = [&keys.gate, &keys.up, &keys.down].map(|key| {
+            source
+                .mapped_blocks(key)
+                .filter(|blocks| blocks.dims.len() == 3)
+                .and_then(|blocks| Some((blocks.ty.vulkan_block_kind()?, blocks)))
+        }) else {
+            return Ok(None);
+        };
+        let upload = |(kind, blocks): (
+            inference_tensor::vulkan::BlockKind,
+            inference_quant::MappedBlocks,
+        )| {
+            inference_tensor::vulkan::BlockWeight::new(
+                device,
+                kind,
+                (blocks.dims[0], blocks.dims[1], blocks.dims[2]),
+                blocks.bytes(),
+            )
+        };
+        Ok(Some(VulkanExperts {
+            stacks: [upload(gate)?, upload(up)?, upload(down)?],
+        }))
+    }
+
     fn load_mapped_cpu(
         experts_vb: &ShardedVarBuilder,
         comm: &Arc<inference_quant::Comm>,
@@ -683,5 +776,148 @@ impl MoEExperts {
             num_experts_per_tok: self.num_experts_per_tok,
             act: self.act,
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::cast_possible_truncation)]
+mod vulkan_block_tests {
+    use inference_quant::GgufType;
+    use inference_tensor::vulkan::{BlockKind, BlockWeight};
+    use inference_tensor::{Device, Result, Tensor};
+
+    const EXPERTS: usize = 3;
+    // not a multiple of the kernels' rows a workgroup, so a partial last group runs
+    const ROWS: usize = 37;
+    const COLS: usize = 512;
+    // against the f32 product of the dequantized rows: the activations are int8 blocks on the device
+    const RELATIVE_TOLERANCE: f32 = 2e-2;
+
+    // random blocks with each block's leading f16 scale small and finite
+    fn blocks(ty: GgufType, rows: usize, seed: u64) -> Vec<u8> {
+        let mut state = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let mut bytes: Vec<u8> = (0..rows * ty.row_bytes(COLS).expect("whole blocks"))
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (state >> 56) as u8
+            })
+            .collect();
+        for block in bytes.chunks_exact_mut(ty.type_size()) {
+            let d = half::f16::from_f32(0.002 + f32::from(block[2]) * 1e-5);
+            block[..2].copy_from_slice(&d.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn assert_close(got: &Tensor, want: &Tensor, what: &str) -> Result<()> {
+        let got = got.to_device(&Device::Cpu)?;
+        let scale = want.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let diff = (got - want)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+        assert!(
+            diff <= RELATIVE_TOLERANCE * scale,
+            "{what}: {diff} of {scale}"
+        );
+        Ok(())
+    }
+
+    // each i-quant's blocks through the expert matvec (decode's few routes and a prompt's many) and the dense matmul
+    // (a step's rows and a prompt's), against ggml's reference dequantization
+    #[test]
+    fn vulkan_iq_block_weights_match_their_dequantized_rows() -> Result<()> {
+        let Ok(vk) = Device::new_vulkan(0) else {
+            return Ok(());
+        };
+        let cpu = Device::Cpu;
+        for (ty, kind) in [
+            (GgufType::Iq4Xs, BlockKind::Iq4Xs),
+            (GgufType::Iq3S, BlockKind::Iq3S),
+        ] {
+            let bytes = blocks(ty, EXPERTS * ROWS, 7);
+            let w = Tensor::from_vec(
+                inference_quant::dequantize_rows(ty, COLS, &bytes)?,
+                (EXPERTS, ROWS, COLS),
+                &cpu,
+            )?;
+            let stack = BlockWeight::new(&vk, kind, (EXPERTS, ROWS, COLS), &bytes)?;
+            for tokens in [3usize, 200] {
+                let k = 2;
+                let x = Tensor::randn(0f32, 1.0, (tokens, COLS), &cpu)?;
+                let ids: Vec<u32> = (0..tokens * k)
+                    .map(|s| ((s * 7 + s / k) % EXPERTS) as u32)
+                    .collect();
+                let id_t = Tensor::from_vec(ids.clone(), (tokens, k), &cpu)?;
+                let got = stack.expert_mat_vec(&x.to_device(&vk)?, &id_t.to_device(&vk)?, k)?;
+                let want = Tensor::cat(
+                    &ids.iter()
+                        .enumerate()
+                        .map(|(slot, &e)| {
+                            x.narrow(0, slot / k, 1)?.matmul(&w.get(e as usize)?.t()?)
+                        })
+                        .collect::<Result<Vec<_>>>()?,
+                    0,
+                )?;
+                assert_close(&got, &want, &format!("{ty:?} experts, {tokens} tokens"))?;
+            }
+            let dense = BlockWeight::new(
+                &vk,
+                kind,
+                (1, ROWS, COLS),
+                &bytes[..ROWS * ty.row_bytes(COLS).expect("rows")],
+            )?;
+            for tokens in [3usize, 300] {
+                let x = Tensor::randn(0f32, 1.0, (tokens, COLS), &cpu)?;
+                let got = dense.matmul(&x.to_device(&vk)?)?;
+                assert_close(
+                    &got,
+                    &x.matmul(&w.get(0)?.t()?)?,
+                    &format!("{ty:?} dense, {tokens} rows"),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    // a raw GGUF i-quant weight moved to Vulkan: its matmul (a step's rows and a prompt's) and its rows at ids
+    #[test]
+    fn vulkan_raw_gguf_iq_weights_match_the_cpu() -> Result<()> {
+        use inference_quant::QuantMethod;
+        let Ok(vk) = Device::new_vulkan(0) else {
+            return Ok(());
+        };
+        let cpu = Device::Cpu;
+        for ty in [GgufType::Iq4Xs, GgufType::Iq3S] {
+            let bytes = blocks(ty, ROWS, 11);
+            let w = Tensor::from_vec(
+                inference_quant::dequantize_rows(ty, COLS, &bytes)?,
+                (ROWS, COLS),
+                &cpu,
+            )?;
+            let raw = inference_quant::RawGgufTensor::new(ty, &[ROWS, COLS], bytes, &vk)?;
+            let layer = inference_quant::GgufRawMatMul::new(raw.clone(), None);
+            for tokens in [2usize, 300] {
+                let x = Tensor::randn(0f32, 1.0, (tokens, COLS), &cpu)?;
+                let got = layer.forward_raw(&x.to_device(&vk)?)?;
+                assert_close(
+                    &got,
+                    &x.matmul(&w.t()?)?,
+                    &format!("{ty:?} raw, {tokens} rows"),
+                )?;
+            }
+            let ids = Tensor::new(&[5u32, 0, 36, 5], &cpu)?;
+            let got = raw.embedding(&ids.to_device(&vk)?)?;
+            let diff = (got.to_device(&cpu)? - w.index_select(&ids, 0)?)?
+                .abs()?
+                .flatten_all()?
+                .max(0)?
+                .to_scalar::<f32>()?;
+            assert!(diff < 1e-5, "{ty:?} rows: {diff}");
+        }
+        Ok(())
     }
 }

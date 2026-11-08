@@ -1,6 +1,6 @@
 // One sequence's prompt rows against vLLM-layout caches (x = 4; f32, or f16 with CACHE_F16) through its block table,
 // row r of `rows` causal over the first `context - rows + r + 1` positions, split over the context: a workgroup a
-// (split, kv head, ROWS query rows) holds each (row, query head of the kv head) in a pair of threads (half the head
+// (split, kv head, ROWS query rows) holds each (row, query head of the kv head) in LANES threads (a part of the head
 // each), stages TILE positions of keys and values in shared memory for every row to read, and keeps a flash-style
 // running max, exponential sum and value sum over its split. It writes paged_decode's partials (max, sum, value sum
 // a (row, head, split)), which paged_decode_reduce combines.
@@ -74,22 +74,34 @@ uint quant_row(uint block, uint kvh, uint p, uint words) {
 #endif
 
 const uint THREADS = 256;
-const uint ROWS = 8;
 const uint MAX_GROUP = 16;
 const uint TILE = 32;
+// the wide build (head size 256) holds a (row, head) in four threads and stages the tiles as f16, so its registers
+// and shared tiles stay the narrow build's
+#ifdef PREFILL_WIDE
+const uint MAX_HEAD4 = 64;
+const uint LANES = 4;
+#define STAGE_VEC4 f16vec4
+#define STAGE_FLOAT float16_t
+#else
 const uint MAX_HEAD4 = 32;
-// a thread's half of a head, in vec4s
-const uint HALF4 = MAX_HEAD4 / 2;
+const uint LANES = 2;
+#define STAGE_VEC4 vec4
+#define STAGE_FLOAT float
+#endif
+const uint ROWS = THREADS / (LANES * MAX_GROUP);
+// a thread's part of a head, in vec4s
+const uint HALF4 = MAX_HEAD4 / LANES;
 // a masked score: finite, as -inf scores came out wrong through exp on NVIDIA's driver (half the masked positions'
 // weight leaked into the sums); a tile of nothing but these leaves the running sums alone
 const float MASKED = -1e30;
 
 // a tile's keys and values, a position a padded row of vec4s
 const uint ROW4 = MAX_HEAD4 + 1;
-shared vec4 keys[TILE * ROW4];
+shared STAGE_VEC4 keys[TILE * ROW4];
 // values as floats: the transposing loader writes single components, which a vec4 array would turn into racing
 // whole-vector stores
-shared float vals[TILE * ROW4 * 4];
+shared STAGE_FLOAT vals[TILE * ROW4 * 4];
 
 void main() {
     uint split = gl_WorkGroupID.x;
@@ -98,7 +110,7 @@ void main() {
     uint t = gl_LocalInvocationID.x;
     uint group = pc.heads / pc.kv_heads;
     uint hs4 = pc.head_size / 4;
-    uint half4 = hs4 / 2;
+    uint half4 = hs4 / LANES;
     uint bs = pc.block_size;
     uint block_vec4s = hs4 * bs;
     uint kv_slab = kvh * block_vec4s;
@@ -107,9 +119,9 @@ void main() {
     uint v_words = quant_row_words(pc.head_size, pc.v_bits);
 #endif
 
-    // a pair of threads a (row, head): lane `side` holds vec4s side * half4..
-    uint pair = t / 2;
-    uint side = t % 2;
+    // LANES threads a (row, head): lane `side` holds vec4s side * half4..
+    uint pair = t / LANES;
+    uint side = t % LANES;
     uint r = pair / MAX_GROUP;
     uint g = pair % MAX_GROUP;
     uint row = row0 + r;
@@ -146,7 +158,7 @@ void main() {
                 v = vec4(key_at(row, d, pc.k_bits, pc.head_size), key_at(row, d + 1, pc.k_bits, pc.head_size),
                          key_at(row, d + 2, pc.k_bits, pc.head_size), key_at(row, d + 3, pc.k_bits, pc.head_size));
             }
-            keys[p * ROW4 + d / 4] = v;
+            keys[p * ROW4 + d / 4] = STAGE_VEC4(v);
         }
         for (uint i = t; i < TILE * hs4; i += THREADS) {
             uint p = i / hs4;
@@ -157,7 +169,8 @@ void main() {
                 row = quant_row(block_tables[table + first_block + p / bs], kvh, p % bs, v_words);
             }
             [[unroll]] for (uint c = 0; c < 4; c++) {
-                vals[p * ROW4 * 4 + d + c] = in_span ? value_at(row, d + c, pc.v_bits, pc.head_size) : 0.0;
+                vals[p * ROW4 * 4 + d + c] =
+                    STAGE_FLOAT(in_span ? value_at(row, d + c, pc.v_bits, pc.head_size) : 0.0);
             }
         }
 #else
@@ -170,7 +183,7 @@ void main() {
                 uint block = block_tables[table + first_block + bt];
                 v = vec4(key_cache[block * pc.kv_heads * block_vec4s + kv_slab + rr]);
             }
-            keys[p * ROW4 + key_dims(rr, bs)] = v;
+            keys[p * ROW4 + key_dims(rr, bs)] = STAGE_VEC4(v);
         }
         for (uint i = t; i < TILE * hs4; i += THREADS) {
             uint bt = i / block_vec4s;
@@ -187,7 +200,7 @@ void main() {
                 }
             }
             [[unroll]] for (uint c = 0; c < 4; c++) {
-                vals[(p4 * 4 + c) * ROW4 * 4 + d] = v[c];
+                vals[(p4 * 4 + c) * ROW4 * 4 + d] = STAGE_FLOAT(v[c]);
             }
         }
 #endif
@@ -198,10 +211,10 @@ void main() {
             float dot_half = 0.0;
             [[unroll]] for (uint i = 0; i < HALF4; i++) {
                 if (i < half4) {
-                    dot_half += dot(qv[i], keys[p * ROW4 + side * half4 + i]);
+                    dot_half += dot(qv[i], vec4(keys[p * ROW4 + side * half4 + i]));
                 }
             }
-            float sc = subgroupClusteredAdd(dot_half, 2) * pc.scale;
+            float sc = subgroupClusteredAdd(dot_half, LANES) * pc.scale;
             s[p] = p0 + p < min(len, end) ? sc : MASKED;
             tile_max = max(tile_max, s[p]);
         }
@@ -218,7 +231,8 @@ void main() {
                 [[unroll]] for (uint i = 0; i < HALF4; i++) {
                     if (i < half4) {
                         uint at = (p * ROW4 + side * half4 + i) * 4;
-                        acc[i] += e * vec4(vals[at], vals[at + 1], vals[at + 2], vals[at + 3]);
+                        acc[i] += e * vec4(float(vals[at]), float(vals[at + 1]), float(vals[at + 2]),
+                                           float(vals[at + 3]));
                     }
                 }
             }

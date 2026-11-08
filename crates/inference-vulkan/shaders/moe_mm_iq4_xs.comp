@@ -1,0 +1,55 @@
+#version 450
+// The many-route matmul over a stack of IQ4_XS experts: y[slot] = W[expert] x[slot / x_div] for the routes moe_sort
+// grouped by expert, grid y a tile of its tile list (past the list's count leaving at once).
+#extension GL_GOOGLE_include_directive : require
+// an expert's routes in a prompt step are a few dozen: a tile of up to 64 tokens (moe_sort's TILE), its weight rows
+// streamed a thread each
+#define TN 1
+#define TM 4
+#include "mat_mul_q_head.glsl"
+
+layout(std430, binding = 4) readonly buffer Routing { uint routing[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint rows;
+    uint cols;
+    // element offsets into the bound buffers: `w` in u16s, `y` in floats
+    uint w_base;
+    uint y_base;
+    // slots an activation row serves (a projection of the token's input: its routes), or 1 (of each route's own)
+    uint x_div;
+    // u16s from one expert's matrix to the next
+    uint expert_u16;
+    // where the blocks' (d, d * sum q) start, in vec2s
+    uint s_off;
+    // where moe_sort's tile count and tiles start in `routing` (its `order` at 0)
+    uint tiles_off;
+} pc;
+
+#include "iq4_xs_int8.glsl"
+
+uint first;
+
+bool begin_tile(out uint tokens, out uint w_matrix) {
+    uint tile = gl_WorkGroupID.y;
+    tokens = 0;
+    w_matrix = 0;
+    if (tile >= routing[pc.tiles_off]) {
+        return false;
+    }
+    uint at = pc.tiles_off + 1 + 3 * tile;
+    w_matrix = pc.w_base + routing[at] * pc.expert_u16;
+    first = routing[at + 1];
+    tokens = routing[at + 2];
+    return true;
+}
+
+uint x_row(uint j) {
+    return routing[first + j] / pc.x_div;
+}
+
+uint y_row(uint j) {
+    return routing[first + j];
+}
+
+#include "mat_mul_q_rows.glsl"

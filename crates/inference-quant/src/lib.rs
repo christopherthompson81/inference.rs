@@ -252,6 +252,7 @@ pub use gguf::fast_mmvq::{
 };
 pub use gguf::kernel::GgufType;
 pub use gguf::mapped::MappedBlocks;
+pub use gguf::raw::{GgufRawMatMul, RawGgufTensor, dequantize_rows};
 pub use gguf::{GgufMatMul, unquantized_activation_forward};
 pub use gguf::{iq_quantize, requantize};
 /// Runs `f`; without CUDA there are no tile-ordered matvecs to share an input's quantized activations.

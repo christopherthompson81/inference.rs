@@ -1,0 +1,6 @@
+#version 450
+// paged_decode at head size 256 (8 query heads a kv head at most)
+#extension GL_GOOGLE_include_directive : require
+#define DECODE_MAX_HEAD4 64
+#define DECODE_MAX_GROUP 8
+#include "paged_decode_main.glsl"
