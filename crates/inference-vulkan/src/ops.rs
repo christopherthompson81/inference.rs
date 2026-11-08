@@ -381,7 +381,7 @@ pub(crate) const ROPE_BINDINGS: usize = 5;
 pub(crate) const ROPE_PUSH_BYTES: u32 = 11 * 4;
 const ROPE_THREADS: usize = 256;
 pub(crate) const GDN_BINDINGS: usize = 8;
-pub(crate) const GDN_PUSH_BYTES: u32 = 13 * 4;
+pub(crate) const GDN_PUSH_BYTES: u32 = 14 * 4;
 // gdn_recurrence.comp's threads, a value column each, and the key rows a thread's registers hold
 const GDN_MAX_HEAD: usize = 128;
 // the scan step's lanes a state row and states a lane, and the rows a 256-thread workgroup takes
@@ -418,6 +418,10 @@ pub struct GatedRmsNorm<'a> {
     pub groups: usize,
     pub group_size: usize,
     pub eps: f32,
+    /// Gated DeltaNet's order, the norm of x then the gate, rather than Mamba-2's norm of the gated x
+    pub norm_first: bool,
+    /// a sigmoid gate rather than SiLU
+    pub sigmoid: bool,
     pub x: At<'a>,
     pub gate: At<'a>,
     pub weight: At<'a>,
@@ -470,7 +474,8 @@ pub struct GdnRecurrence<'a> {
     pub a_log: &'a Arc<Buffer>,
     pub dt_bias: &'a Arc<Buffer>,
     pub state_in: At<'a>,
-    pub state_out: &'a Arc<Buffer>,
+    /// the advanced state: `state_in`'s own rows (in place) or a fresh buffer's
+    pub state_out: At<'a>,
     pub out: &'a Arc<Buffer>,
 }
 
@@ -601,6 +606,8 @@ impl Recorder<'_> {
         let mut bytes = words(&[op.group_size, op.groups])?;
         bytes.extend_from_slice(&op.eps.to_bits().to_le_bytes());
         bytes.extend(words(&[op.x.1, op.gate.1, op.weight.1])?);
+        // gated_rmsnorm*.comp's NORM_FIRST and SIGMOID_GATE bits
+        let mode = usize::from(op.norm_first) | (usize::from(op.sigmoid) << 1);
         let cols = op.groups * op.group_size;
         // a decode row's norm writes its int8 blocks too, cached for the matvec that reads it
         if op.rows <= crate::kernels::MATVEC_MAX_ROWS
@@ -616,7 +623,7 @@ impl Recorder<'_> {
             let s_off = op.rows * cols / crate::kernels::BLOCK_VALUES
                 * crate::kernels::Q8_WORD_BYTES
                 / crate::kernels::Q8_SCALE_BYTES;
-            bytes.extend(words(&[s_off])?);
+            bytes.extend(words(&[s_off, mode])?);
             let buffers = [op.x.0, op.gate.0, op.weight.0, op.out, &blocks, &blocks];
             self.context.kernels.gated_rmsnorm_q8.dispatch(
                 self,
@@ -631,6 +638,7 @@ impl Recorder<'_> {
             }
             return Ok(());
         }
+        bytes.extend(words(&[mode])?);
         let buffers = [op.x.0, op.gate.0, op.weight.0, op.out];
         self.context
             .kernels
@@ -715,6 +723,7 @@ impl Recorder<'_> {
             op.state_in.1,
         ])?;
         bytes.extend_from_slice(&op.eps.to_bits().to_le_bytes());
+        bytes.extend(words(&[op.state_out.1])?);
         let buffers = [
             op.mixed.0,
             op.b.0,
@@ -722,7 +731,7 @@ impl Recorder<'_> {
             op.a_log,
             op.dt_bias,
             op.state_in.0,
-            op.state_out,
+            op.state_out.0,
             op.out,
         ];
         self.context.kernels.gdn_recurrence.dispatch(
@@ -818,7 +827,7 @@ pub(crate) const RMS_Q8_BINDINGS: usize = 5;
 // rms_norm_q8's widest row: its 1024 threads hold 4 values a pass, 4 passes
 const RMS_Q8_MAX_COLS: usize = 16384;
 pub(crate) const GATED_Q8_BINDINGS: usize = 6;
-pub(crate) const GATED_Q8_PUSH_BYTES: u32 = 7 * 4;
+pub(crate) const GATED_Q8_PUSH_BYTES: u32 = 8 * 4;
 pub(crate) const RMS_Q8_PUSH_BYTES: u32 = 7 * 4;
 pub(crate) const MOE_SORT_PUSH_BYTES: u32 = 5 * 4;
 pub(crate) const MOE_MM_BINDINGS: usize = 5;
@@ -1190,7 +1199,7 @@ pub(crate) const PAGED_WRITE_QUANT_PUSH_BYTES: u32 = 9 * 4;
 pub(crate) const PAGED_DECODE_BINDINGS: usize = 6;
 pub(crate) const PAGED_DECODE_PUSH_BYTES: u32 = 12 * 4;
 pub(crate) const GATED_RMSNORM_BINDINGS: usize = 4;
-pub(crate) const GATED_RMSNORM_PUSH_BYTES: u32 = 6 * 4;
+pub(crate) const GATED_RMSNORM_PUSH_BYTES: u32 = 7 * 4;
 pub(crate) const PAGED_PREFILL_BINDINGS: usize = 5;
 pub(crate) const PAGED_PREFILL_PUSH_BYTES: u32 = 13 * 4;
 pub(crate) const HADAMARD_BINDINGS: usize = 2;

@@ -1,6 +1,10 @@
 #include "block_at.glsl"
 
 void main() {
+#ifdef TYPE_SHARED_INIT
+    // the block type's lookup tables into shared memory, before any thread can leave
+    type_shared_init();
+#endif
     uint row0 = (gl_WorkGroupID.y * pc.groups_x + gl_WorkGroupID.x) * ROWS;
     uint tid = gl_LocalInvocationID.x;
     uint blocks = pc.cols / QK;

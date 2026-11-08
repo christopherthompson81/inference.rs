@@ -1,6 +1,7 @@
 #version 450
 // Mamba-2's gated RMSNorm in one pass (CUDA's mamba_gated_rmsnorm): v = x silu(gate) over a row, each group of
-// group_size values scaled by 1 / sqrt(mean(v^2) + eps), then by the weight. A workgroup a (group, row); f32. This
+// group_size values scaled by 1 / sqrt(mean(v^2) + eps), then by the weight; or (mode) Gated DeltaNet's, the norm
+// of x then the gate. A workgroup a (group, row); f32. This
 // build also writes the output as quantize_q8_1's int8 blocks (row-major over the row's blocks; group_size a multiple
 // of 32), each value recomputed with the output's own expression, a block 8 lanes of 4 values.
 #extension GL_KHR_shader_subgroup_arithmetic : require
@@ -25,6 +26,8 @@ layout(push_constant) uniform PushConstants {
     uint weight_off;
     // where (d, d * sum q) start in their buffer, in vec2s
     uint s_off;
+    // bit 0: the norm first and the gate after (Gated DeltaNet's), bit 1: a sigmoid gate rather than SiLU
+    uint mode;
 } pc;
 
 const uint THREADS = 256;
@@ -37,9 +40,22 @@ const uint LANE_VALUES = QK / BLOCK_LANES;
 
 shared float partial[MAX_SUBGROUPS];
 
-float gated(uint i) {
+const uint NORM_FIRST = 1u;
+const uint SIGMOID_GATE = 2u;
+
+float act(uint i) {
     float g = gate[pc.gate_off + i];
-    return x[pc.x_off + i] * (g / (1.0 + exp(-g)));
+    return (pc.mode & SIGMOID_GATE) != 0u ? 1.0 / (1.0 + exp(-g)) : g / (1.0 + exp(-g));
+}
+
+// what the norm sums the squares of: x, or x gated
+float gated(uint i) {
+    return (pc.mode & NORM_FIRST) != 0u ? x[pc.x_off + i] : x[pc.x_off + i] * act(i);
+}
+
+// value i scaled by `s` (the norm and the weight), gated after the norm in that mode
+float scaled(uint i, float s) {
+    return (pc.mode & NORM_FIRST) != 0u ? x[pc.x_off + i] * s * act(i) : gated(i) * s;
 }
 
 void main() {
@@ -63,7 +79,7 @@ void main() {
     }
     float inv = inversesqrt(total / float(pc.group_size) + pc.eps);
     for (uint i = t; i < pc.group_size; i += THREADS) {
-        out_[base + i] = gated(base + i) * inv * weight[pc.weight_off + group * pc.group_size + i];
+        out_[base + i] = scaled(base + i, inv * weight[pc.weight_off + group * pc.group_size + i]);
     }
     uint blocks = pc.group_size / QK;
     uint lane = t % BLOCK_LANES;
@@ -75,7 +91,7 @@ void main() {
         if (live) {
             uint i = b * QK + lane * LANE_VALUES;
             for (uint j = 0; j < LANE_VALUES; j++) {
-                v[j] = gated(base + i + j) * inv * weight[pc.weight_off + group * pc.group_size + i + j];
+                v[j] = scaled(base + i + j, inv * weight[pc.weight_off + group * pc.group_size + i + j]);
             }
         }
         vec4 av = abs(v);

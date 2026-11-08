@@ -36,6 +36,10 @@ void dequantize(uvec4 lo, uvec4 hi, vec4 c, uint at) {
 }
 
 void main() {
+#ifdef TYPE_SHARED_INIT
+    // the block type's lookup tables into shared memory, before any thread can leave
+    type_shared_init();
+#endif
     uint t = gl_LocalInvocationID.x;
     uint n0 = gl_WorkGroupID.x * BN;
     uint tokens, w_matrix, x_row0;

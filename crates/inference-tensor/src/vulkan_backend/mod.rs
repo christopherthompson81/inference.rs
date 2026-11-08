@@ -317,7 +317,9 @@ impl VulkanStorage {
         dim: usize,
         gather: bool,
     ) -> Option<Result<Self>> {
-        if !word_sized(self.dtype)
+        // 16-bit rows of an even length select as words, half as many (an f16 KV cache's blocks)
+        let halves = self.dtype.size_in_bytes() == 2 && !gather;
+        if !(word_sized(self.dtype) || halves)
             || ids.dtype != DType::U32
             || !l.is_contiguous()
             || !ids_l.is_contiguous()
@@ -327,6 +329,14 @@ impl VulkanStorage {
         let dims = l.shape().dims();
         let left: usize = dims[..dim].iter().product();
         let right: usize = dims[dim + 1..].iter().product();
+        let (words, src_offset) = if halves {
+            if !right.is_multiple_of(2) || !l.start_offset().is_multiple_of(2) {
+                return None;
+            }
+            (right / 2, l.start_offset() / 2)
+        } else {
+            (right, l.start_offset())
+        };
         let n = if gather {
             ids_l.shape().dims()[dim]
         } else {
@@ -340,10 +350,10 @@ impl VulkanStorage {
             r.select_b32(&Select {
                 left,
                 src_dim: dims[dim],
-                right,
+                right: words,
                 n,
                 gather,
-                src: (&self.buffer, l.start_offset()),
+                src: (&self.buffer, src_offset),
                 ids: (&ids.buffer, ids_l.start_offset()),
                 out: &out.buffer,
             })
@@ -625,7 +635,13 @@ pub(crate) fn gdn_recurrence(
             dtype: f32,
         })
     };
-    let state_out = alloc(state.elem_count())?;
+    // in place only where the caller's tensor is itself the contiguous state, so the write lands in its storage
+    let in_place = op.in_place && op.state.is_contiguous() && op.state.dtype() == f32;
+    let state_out = if in_place {
+        None
+    } else {
+        Some(alloc(state.elem_count())?)
+    };
     let out = alloc(batch * seq * v_heads * head_v)?;
     device
         .context
@@ -647,15 +663,19 @@ pub(crate) fn gdn_recurrence(
                 a_log: &a_logb.0,
                 dt_bias: &dt_biasb.0,
                 state_in: (&sb.0, sb.1),
-                state_out: &state_out.buffer,
+                state_out: match &state_out {
+                    Some(fresh) => (&fresh.buffer, 0),
+                    None => (&sb.0, sb.1),
+                },
                 out: &out.buffer,
             })
         })
         .map_err(vk_err)?;
-    Ok(Some((
-        tensor_of(out, (batch, seq, v_heads, head_v)),
-        tensor_of(state_out, (batch, v_heads, head_k, head_v)),
-    )))
+    let state = match state_out {
+        Some(fresh) => tensor_of(fresh, (batch, v_heads, head_k, head_v)),
+        None => op.state.clone(),
+    };
+    Ok(Some((tensor_of(out, (batch, seq, v_heads, head_v)), state)))
 }
 
 pub(crate) fn ssm_scan_step(step: &crate::vulkan::ScanStep<'_>) -> Result<Tensor> {
@@ -785,6 +805,7 @@ pub(crate) fn gated_rmsnorm(
     weight: &Tensor,
     eps: f32,
     group_size: usize,
+    order: crate::vulkan::GatedNorm,
 ) -> Result<Tensor> {
     let width = x.dim(crate::D::Minus1)?;
     if gate.dims() != x.dims()
@@ -818,6 +839,8 @@ pub(crate) fn gated_rmsnorm(
                 groups: width / group_size,
                 group_size,
                 eps,
+                norm_first: !matches!(order, crate::vulkan::GatedNorm::Mamba2),
+                sigmoid: matches!(order, crate::vulkan::GatedNorm::NormThenSigmoid),
                 x: (&xb.0, xb.1),
                 gate: (&gb.0, gb.1),
                 weight: (&wb.0, wb.1),
@@ -826,6 +849,31 @@ pub(crate) fn gated_rmsnorm(
         })
         .map_err(vk_err)?;
     Ok(tensor_of(out, x.dims()))
+}
+
+pub(crate) fn glu(a: &Tensor, b: &Tensor, act: crate::vulkan::GluAct) -> Result<Option<Tensor>> {
+    use crate::vulkan::GluAct as G;
+    if a.dims() != b.dims() || a.dtype() != DType::F32 || b.dtype() != DType::F32 {
+        return Ok(None);
+    }
+    let op = match act {
+        G::Silu => MapOp::SiluMul,
+        G::Gelu => MapOp::GeluMul,
+        G::Relu => MapOp::ReluMul,
+        G::GeluErf => MapOp::GeluErfMul,
+        G::Sigmoid => MapOp::SigmoidMul,
+    };
+    let (a_storage, a_l) = a.storage_and_layout();
+    let (b_storage, b_l) = b.storage_and_layout();
+    let (crate::Storage::Vulkan(a_vk), crate::Storage::Vulkan(b_vk)) = (&*a_storage, &*b_storage)
+    else {
+        return Ok(None);
+    };
+    if !a_vk.native(a_l) {
+        return Ok(None);
+    }
+    let out = a_vk.map_f32(op, a_l, Some((b_vk, b_l)), [0.0; 2])?;
+    Ok(Some(tensor_of(out, a.dims())))
 }
 
 pub(crate) fn moe_router(route: &crate::vulkan::Route<'_>) -> Result<(Tensor, Tensor)> {
@@ -892,6 +940,7 @@ pub(crate) fn block_type(kind: crate::vulkan::BlockKind) -> BlockType {
         K::Q6K => BlockType::Q6K,
         K::Iq4Xs => BlockType::IQ4XS,
         K::Iq3S => BlockType::IQ3S,
+        K::Q3K => BlockType::Q3K,
     }
 }
 
@@ -2200,6 +2249,7 @@ mod tests {
             GgmlDType::Q4_0,
             GgmlDType::Q4_1,
             GgmlDType::Q5_1,
+            GgmlDType::Q3K,
             GgmlDType::Q4K,
             GgmlDType::Q5K,
             GgmlDType::Q6K,
@@ -2344,6 +2394,37 @@ mod tests {
 
     // row ops, row selection and matmuls on the GPU: RMS norm, softmax, sigmoid, last-dim reductions, embedding and
     // gather lookups, and batched matmuls with a transposed operand
+    // f16 and bf16 rows selected on the GPU as words: an even row (a KV cache's blocks), an odd row and a row at an odd
+    // offset (the CPU's fallback), against the CPU
+    #[test]
+    fn vulkan_half_index_select_matches_the_cpu() -> Result<()> {
+        let Some(vk) = device() else { return Ok(()) };
+        let ids = Tensor::new(&[4u32, 0, 4, 2], &Device::Cpu)?;
+        for dtype in [DType::F16, DType::BF16] {
+            for (shape, offset) in [
+                (&[6usize, 3, 8][..], 0usize),
+                (&[6, 5][..], 0),
+                (&[7, 6][..], 1),
+            ] {
+                let n: usize = shape.iter().product();
+                let x = Tensor::arange(0f32, n as f32, &Device::Cpu)?.to_dtype(dtype)?;
+                let x = x.narrow(0, offset, n - offset)?;
+                let rows = (n - offset) / shape[1..].iter().product::<usize>();
+                let mut dims = shape.to_vec();
+                dims[0] = rows;
+                let x = x.narrow(0, 0, dims.iter().product())?.reshape(dims)?;
+                let want = x.index_select(&ids, 0)?;
+                let got = x.to_device(&vk)?.index_select(&ids.to_device(&vk)?, 0)?;
+                assert_eq!(
+                    got.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
+                    want.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,
+                    "{dtype:?} {shape:?} at {offset}"
+                );
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn vulkan_row_ops_selection_and_matmuls_match_the_cpu() -> Result<()> {
         let Some(vk) = device() else { return Ok(()) };

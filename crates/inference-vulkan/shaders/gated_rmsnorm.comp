@@ -1,6 +1,7 @@
 #version 450
 // Mamba-2's gated RMSNorm in one pass (CUDA's mamba_gated_rmsnorm): v = x silu(gate) over a row, each group of
-// group_size values scaled by 1 / sqrt(mean(v^2) + eps), then by the weight. A workgroup a (group, row); f32.
+// group_size values scaled by 1 / sqrt(mean(v^2) + eps), then by the weight; or (mode) Gated DeltaNet's, the norm
+// of x then the gate. A workgroup a (group, row); f32.
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_EXT_control_flow_attributes : require
 
@@ -18,6 +19,8 @@ layout(push_constant) uniform PushConstants {
     uint x_off;
     uint gate_off;
     uint weight_off;
+    // bit 0: the norm first and the gate after (Gated DeltaNet's), bit 1: a sigmoid gate rather than SiLU
+    uint mode;
 } pc;
 
 const uint THREADS = 256;
@@ -26,9 +29,22 @@ const uint MAX_SUBGROUPS = 32;
 
 shared float partial[MAX_SUBGROUPS];
 
-float gated(uint i) {
+const uint NORM_FIRST = 1u;
+const uint SIGMOID_GATE = 2u;
+
+float act(uint i) {
     float g = gate[pc.gate_off + i];
-    return x[pc.x_off + i] * (g / (1.0 + exp(-g)));
+    return (pc.mode & SIGMOID_GATE) != 0u ? 1.0 / (1.0 + exp(-g)) : g / (1.0 + exp(-g));
+}
+
+// what the norm sums the squares of: x, or x gated
+float gated(uint i) {
+    return (pc.mode & NORM_FIRST) != 0u ? x[pc.x_off + i] : x[pc.x_off + i] * act(i);
+}
+
+// value i scaled by `s` (the norm and the weight), gated after the norm in that mode
+float scaled(uint i, float s) {
+    return (pc.mode & NORM_FIRST) != 0u ? x[pc.x_off + i] * s * act(i) : gated(i) * s;
 }
 
 void main() {
@@ -52,6 +68,6 @@ void main() {
     }
     float inv = inversesqrt(total / float(pc.group_size) + pc.eps);
     for (uint i = t; i < pc.group_size; i += THREADS) {
-        out_[base + i] = gated(base + i) * inv * weight[pc.weight_off + group * pc.group_size + i];
+        out_[base + i] = scaled(base + i, inv * weight[pc.weight_off + group * pc.group_size + i]);
     }
 }

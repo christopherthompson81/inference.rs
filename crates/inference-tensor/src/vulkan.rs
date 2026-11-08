@@ -65,6 +65,7 @@ pub enum BlockKind {
     Q6K,
     Iq4Xs,
     Iq3S,
+    Q3K,
 }
 
 /// A weight of ggml blocks in a Vulkan device's memory: `(experts, rows, cols)`, one expert for a dense matrix.
@@ -194,6 +195,8 @@ pub struct GdnRecurrence<'a> {
     pub k_heads: usize,
     pub tiled: bool,
     pub eps: f32,
+    /// advance `state`'s own storage (a contiguous f32 view nothing else reads), returning it
+    pub in_place: bool,
 }
 
 /// The recurrence's output `(batch, seq, v_heads, head_v)` and the advanced state.
@@ -234,11 +237,55 @@ pub fn gated_rmsnorm(
     eps: f32,
     group_size: usize,
 ) -> Result<Tensor> {
+    gated_rmsnorm_in(x, gate, weight, eps, group_size, GatedNorm::Mamba2)
+}
+
+/// A GLU's activation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GluAct {
+    Silu,
+    Gelu,
+    Relu,
+    GeluErf,
+    Sigmoid,
+}
+
+/// `act(a) * b` in one pass, `a` and `b` f32 of one shape; `None` where the device has no kernel for the layout.
+pub fn glu(a: &Tensor, b: &Tensor, act: GluAct) -> Result<Option<Tensor>> {
     #[cfg(feature = "vulkan")]
-    return crate::vulkan_backend::gated_rmsnorm(x, gate, weight, eps, group_size);
+    return crate::vulkan_backend::glu(a, b, act);
     #[cfg(not(feature = "vulkan"))]
     {
-        let _ = (x, gate, weight, eps, group_size);
+        let _ = (a, b, act);
+        Err(crate::Error::NotCompiledWithVulkanSupport)
+    }
+}
+
+/// Where a gated RMSNorm's gate goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GatedNorm {
+    /// the norm of `x * silu(gate)`, then the weight (Mamba-2)
+    Mamba2,
+    /// the norm of `x`, the weight, then `silu(gate)` (Gated DeltaNet)
+    NormThenSilu,
+    /// as `NormThenSilu` with `sigmoid(gate)`
+    NormThenSigmoid,
+}
+
+/// [`gated_rmsnorm`] with the gate where `order` puts it.
+pub fn gated_rmsnorm_in(
+    x: &Tensor,
+    gate: &Tensor,
+    weight: &Tensor,
+    eps: f32,
+    group_size: usize,
+    order: GatedNorm,
+) -> Result<Tensor> {
+    #[cfg(feature = "vulkan")]
+    return crate::vulkan_backend::gated_rmsnorm(x, gate, weight, eps, group_size, order);
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = (x, gate, weight, eps, group_size, order);
         Err(crate::Error::NotCompiledWithVulkanSupport)
     }
 }

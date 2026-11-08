@@ -189,6 +189,7 @@ impl GgufType {
             Self::Q6K => K::Q6K,
             Self::Iq4Xs => K::Iq4Xs,
             Self::Iq3S => K::Iq3S,
+            Self::Q3K => K::Q3K,
             _ => return None,
         })
     }

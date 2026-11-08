@@ -257,6 +257,9 @@ pub fn apply_recurrence_from_convolved(
                 k_heads: dims.num_k_heads,
                 tiled: dims.v_head_layout == GdnVHeadLayout::Tiled,
                 eps: QK_NORM_EPS_F32,
+                // the checkout's own view of the pool row, which commit then skips; anything else is a copy
+                in_place: cache.pool_views.map(|[_, state]| state)
+                    == Some(cache.recurrent_state.id()),
             })?
     {
         cache.recurrent_state = state.to_dtype(cache.recurrent_state.dtype())?;
@@ -2396,6 +2399,100 @@ mod tests {
                     .to_scalar::<f32>()?;
                 assert!(diff < TOLERANCE, "batch {batch} seq {seq}: {diff}");
             }
+        }
+        Ok(())
+    }
+
+    // the in-place path: the checkout's own view of a pool row (as `checkout` hands out for one sequence) advances the
+    // pool's storage itself, the other rows left alone
+    #[test]
+    fn vulkan_gdn_recurrence_advances_a_pool_row_in_place() -> CandleResult<()> {
+        let Ok(vk) = Device::new_vulkan(0) else {
+            return Ok(());
+        };
+        const TOLERANCE: f32 = 1e-4;
+        const ROWS: usize = 3;
+        const ROW: usize = 1;
+        let dims = dims_with_layout(16, 32, 128, 128, GdnVHeadLayout::Grouped);
+        let cpu = Device::Cpu;
+        let (seq, tokens) = (5usize, 5usize);
+        let mixed = Tensor::from_vec(
+            patterned(tokens * dims.conv_dim, 1, 0.5, 0.0),
+            (tokens, dims.conv_dim),
+            &cpu,
+        )?;
+        let gates = |salt| {
+            Tensor::from_vec(
+                patterned(tokens * dims.num_v_heads, salt, 2.0, 0.0),
+                (1, seq, dims.num_v_heads),
+                &cpu,
+            )
+        };
+        let (b, a) = (gates(2)?, gates(3)?);
+        let a_log = Tensor::from_vec(
+            patterned(dims.num_v_heads, 4, 1.0, 0.0),
+            dims.num_v_heads,
+            &cpu,
+        )?;
+        let dt_bias = Tensor::from_vec(
+            patterned(dims.num_v_heads, 5, 0.5, 0.0),
+            dims.num_v_heads,
+            &cpu,
+        )?;
+        let pool = Tensor::from_vec(
+            patterned(
+                ROWS * dims.num_v_heads * dims.head_k_dim * dims.head_v_dim,
+                6,
+                0.02,
+                0.0,
+            ),
+            (ROWS, dims.num_v_heads, dims.head_k_dim, dims.head_v_dim),
+            &cpu,
+        )?;
+        let conv = Tensor::zeros((1, dims.conv_dim, dims.conv_kernel_size), DType::F32, &cpu)?;
+        let run = |device: &Device, pool: &Tensor, view: bool| -> CandleResult<(Tensor, Tensor)> {
+            let mut cache = GdnLayerCache::gathered(
+                conv.to_device(device)?,
+                if view {
+                    pool.narrow(0, ROW, 1)?
+                } else {
+                    pool.narrow(0, ROW, 1)?.copy()?
+                },
+                RecurrentStateLayout::GdnKeyMajor,
+            );
+            if view {
+                cache.pool_views = Some([cache.conv_state.id(), cache.recurrent_state.id()]);
+            }
+            let out = apply_recurrence_from_convolved(
+                &mixed.to_device(device)?,
+                &b.to_device(device)?,
+                &a.to_device(device)?,
+                &a_log.to_device(device)?,
+                &dt_bias.to_device(device)?,
+                &dims,
+                1,
+                seq,
+                &mut cache,
+                DType::F32,
+            )?;
+            Ok((out.to_device(&cpu)?, cache.recurrent_state.to_device(&cpu)?))
+        };
+        let (want, want_state) = run(&cpu, &pool, false)?;
+        let vk_pool = pool.to_device(&vk)?;
+        let (got, _) = run(&vk, &vk_pool, true)?;
+        let pool_after = vk_pool.to_device(&cpu)?;
+        let max =
+            |x: Tensor| -> CandleResult<f32> { x.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>() };
+        assert!(max((got - want)?)? < TOLERANCE, "output");
+        assert!(
+            max((pool_after.narrow(0, ROW, 1)? - want_state)?)? < TOLERANCE,
+            "the pool row advanced"
+        );
+        for row in [0, 2] {
+            assert!(
+                max((pool_after.narrow(0, row, 1)? - pool.narrow(0, row, 1)?)?)? == 0.0,
+                "row {row} untouched"
+            );
         }
         Ok(())
     }

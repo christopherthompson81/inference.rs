@@ -257,6 +257,7 @@ fn vulkan_block_type(dtype: GgmlDType) -> Option<inference_vulkan::BlockType> {
         GgmlDType::Q4_0 => BlockType::Q4_0,
         GgmlDType::Q4_1 => BlockType::Q4_1,
         GgmlDType::Q5_1 => BlockType::Q5_1,
+        GgmlDType::Q3K => BlockType::Q3K,
         GgmlDType::Q4K => BlockType::Q4K,
         GgmlDType::Q5K => BlockType::Q5K,
         GgmlDType::Q6K => BlockType::Q6K,

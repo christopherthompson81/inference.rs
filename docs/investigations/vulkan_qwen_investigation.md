@@ -114,3 +114,97 @@ The 27B's prefill: the GPU is busy ~1.6 s of each 5 s window, its matmuls at 25-
 is ~2.9 s at 30 TFLOPS, so ~560 tok/s is the ceiling). perf sees our threads blocked and the NVIDIA driver's
 `[vkrt] Analysis` thread spinning; `strace -c` counts 27K ioctls (82 us each) over the run. Not resolved here.
 Decode at 12.9 tok/s is the IQ4_XS matvec's 245 GB/s.
+
+## Run 5 - 2026-11-08 07:30
+
+Question: why does the 27B's prompt leave the GPU idle? (User: the open gaps, in order.)
+
+- Our per-dispatch profile summed ~1.7 s of GPU work per 5 s; `nvidia-smi dmon` showed SM 49-89% at ~230 W, and nsys
+  (`--trace=vulkan`) showed the queue busy throughout, with 5.7 s of a 14 s prompt in `vkWaitForFences`. Attributing
+  nsys batch time to our labels failed: 1,532 of the batches were empty submits, their spans queue time.
+- Temporary counters (fence waits, allocations, staging reads and writes): each 2 s window read ~6.7 GB back to the
+  host and wrote ~3.4 GB. A backtrace on reads over 16 MB: `apply_op2_no_bwd<FusedGlu>`. `inference_quant::fused_glu`
+  is a custom op with CUDA and Metal kernels and none on Vulkan, so every dense MLP (and shared expert) read its gate
+  and up activations to the host, multiplied there and uploaded the product, on prompts and on decode steps.
+  Fixed: on Vulkan the activation and the product run as the device's elementwise kernels
+  (`vulkan_fused_glu_matches_the_cpu`, every activation).
+- Also found: `index_select` of an f16 tensor (the attention layers' KV cache, 69.7M values, 32 a prompt) fell back to
+  the CPU, `select_b32` taking 32-bit types only. 16-bit rows of an even length now select as words
+  (`vulkan_half_index_select_matches_the_cpu`).
+
+```
+inference bench --vulkan --prompt-len 512,2048 --gen-len 64, 3090 (prefill 2048 / decode):
+Qwen3.5-0.8B Q8_0:          2186 / 90.0  ->  9632 / 191.0 tok/s
+Qwen3.6-35B-A3B UD-IQ4_XS:  1678 / 38.1  ->  2038 /  55.7
+Qwen3.8-27B IQ4_XS:          169 / 12.9  ->   476 /  15.7
+```
+
+Greedy text: the 27B now gives CUDA's text word for word; the 0.8B's sixth token is a near tie either way (CUDA
+" sunlight" -1.31 vs -1.43, here " Ray" -1.34 vs -1.41).
+
+Left: buffer pool churn. With the KV cache sized to the card, free memory sits at the 512 MB margin and `make_room`
+evicts pooled buffers on each miss: ~800 evictions and ~0.5 s of `vkAllocateMemory` per 2 s of prompt (counters,
+removed). A 4 GB activation reserve (KV 4256 -> 2208 MB) cut evictions to ~60 a window but prefill moved only
+375 -> 460 / 294 tok/s (noisy), and the pool grows into whatever is free. Not changed: it trades KV capacity.
+
+## Run 6 - 2026-11-08 08:10
+
+Question: can the IQ4_XS matvec stream like the K-quants? (Run 4 left it at 245 GB/s, its table lookup four selects
+and a shift a value, about ten instructions against the int8 dot's eight a block.)
+
+A `TYPE_SHARED_INIT` hook at the start of every family's main fills a type's shared tables before any thread can
+leave. IQ4_XS keeps a 256-entry table indexed by a whole byte, both nibbles' int8 values in one read (4 reads a word
+instead of 8 select chains); IQ3_S copies `iq3s_grid` to shared memory, a constant array indexed per lane serializing
+on NVIDIA.
+
+```
+mat_vecs_iq4_xs m=17408 k=5120: 194 -> 93 us (508 GB/s; Q5_K m=10240 k=5120: 58 us, 570 GB/s)
+Qwen3.8-27B IQ4_XS:        prefill 476 / decode 15.7 -> 463 (+-59) / 25.7 tok/s
+Qwen3.6-35B-A3B UD-IQ4_XS: 2038 / 55.7 -> 2508 / 61.7
+```
+
+## Run 7 - 2026-11-08 09:00
+
+Question: which small dispatches bound the 0.8B's decode? `map_f32` dispatches now carry their op and size in the
+profile (`Add n=1024`). Per token (~600 dispatches): rms_norm_q8 61, quantize_q8_1 48, the MLP's gate and up matvecs
+48, residual `Add` 48, `Silu` + `Mul` 24 each (the GLU, two ops since Run 5), a GDN state `Copy` of 262,144 values
+18.6, and Gated DeltaNet's output norm as ~7 elementwise ops a GDN layer (Sqr, mean, Sqrt, Div, weight Mul, Silu,
+Mul).
+
+Changes:
+- `gated_rmsnorm` (Mamba-2's: norm of x * silu(g)) takes a mode for GDN's order (norm of x, weight, then silu or
+  sigmoid of the gate), its int8-writing build too; GDN's `RmsNormGated` runs it on Vulkan with a group as wide as
+  the head, the weight shared across heads (`vulkan_gated_gdn_norm_matches_the_cpu`, both gates, a decode row and
+  a prompt's).
+- GLU map ops (`SiluMul`, `GeluMul`, `ReluMul`, `GeluErfMul`, `SigmoidMul`: act(a) * b in one dispatch) for
+  `fused_glu` and the Vulkan MoE experts.
+- The GDN recurrence advances the checkout's own pool-row view in place (the CPU path's condition), so commit skips
+  the copy (`vulkan_gdn_recurrence_advances_a_pool_row_in_place`: the row advanced, the others untouched).
+Dead end: `inference bench`'s decode (64 tokens at depth 4) swings 180-196 tok/s run to run; a 3,000-token greedy
+stream is steadier.
+
+```
+3,000-token stream, mean decode after the first 50 tokens:
+Qwen3.5-0.8B Q8_0: 146 (Run 5) -> 172 (fused GDN norm) -> 181 tok/s (GLU op, in-place state)
+Qwen3.6-35B-A3B UD-IQ4_XS: 73 tok/s
+```
+
+Greedy text: both give CUDA's text word for word. Left: residual adds into the next norm (48 a token) and the
+gate and up matvecs as one; model code, ~8% each.
+
+## Run 8 - 2026-11-08 09:40
+
+Q3_K on Vulkan: `q3_k_int8.glsl` (ggml's dequantize_row_q3_K: high bit from hmask, low pairs, a 6-bit scale per 16,
+the -4 as Q6_K carries its -32, through the activation sums), the eight family wrappers, `BlockType::Q3K` (110 bytes),
+and the dtype maps (`GgmlDType::Q3K` for QTensors, `GgufType::Q3K` for raw blocks and the expert stacks). Tests: Q3_K
+joins `vulkan_quantized_matmuls_match_the_dequantized_weight` (QTensor) and the block-weight test (renamed
+`vulkan_gguf_block_weights_match_their_dequantized_rows`, its reference Candle's dequantization for the k-quant);
+an off-by-one offset fails both.
+
+The 35B's next-token-prediction layer (blk.40: Q3_K gate and up, Q4_K down) now runs on the device:
+
+```
+Qwen3.6-35B-A3B UD-IQ4_XS, 3,000-token stream:  plain 72.5 tok/s, --mtp (n_predict 2) 88.9 tok/s
+```
+
+Greedy text with --mtp: CUDA's, word for word.

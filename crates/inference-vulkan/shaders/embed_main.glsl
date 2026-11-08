@@ -1,6 +1,10 @@
 #include "block_at.glsl"
 
 void main() {
+#ifdef TYPE_SHARED_INIT
+    // the block type's lookup tables into shared memory, before any thread can leave
+    type_shared_init();
+#endif
     uint g = gl_GlobalInvocationID.x;
     if (g >= pc.count * pc.blocks) {
         return;
