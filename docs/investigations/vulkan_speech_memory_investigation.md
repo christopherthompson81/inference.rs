@@ -367,3 +367,39 @@ One stream already overlaps the two models: both 2.8 s against 3.1-3.2 s in turn
 cost ~0.15 s more and stay unmerged. What is left against CUDA: the diarizer's own time (0.84 against 0.65 s) and the
 first combined request's extra 0.6-0.9 s, which is not allocation (that request allocates ~20 new device buffers,
 ~10 ms); the second asr request after a start is ~1 s slower on both builds too.
+
+## Run 13 - 2026-11-09 02:40
+
+Question: what is the first combined request's extra 0.6-0.9 s on the 3090's Vulkan (Run 12), and the second asr
+request's ~1 s?
+
+Both are one event, and it is not ours. Per-batch GPU timestamps (temporary print in the profiler) over eight
+back-to-back clip10 asr requests: the encoder's FF matmul (bf16 matrix cores, 7564 x 4096 x 1024) runs 1.7 ms, then
+from one dispatch to the next 44 ms, then 30, 16.7, 3.6 over ~0.5-0.8 s (every matrix-core dispatch alike, element-wise
+ones unchanged at 0.08 ms), then 1.7 again. It lands in the third request about 1.6-1.8 s in on most starts; a 20 s idle
+start moves nothing, a 60 s pause after two requests moved it to the fourth after the pause, and later requests never
+repeat it (12 in a row: only the third slow). CUDA, 12 in a row: 2.29-2.36 s, none slow.
+
+Ruled out, each by measurement:
+- allocation: no device allocation or free during any request (logged every one); no spill to host memory
+- buffers: the slow and fast dispatches bind the same three buffers, offsets and strides (vec4 load path either way)
+- clocks/heat: nvidia-smi 1845-1860 MHz, memory 9751 MHz, P0 through it; recurring heat would repeat, it does not
+- another context: nsys GPU context-switch trace shows only our context over the window; CUDA hidden from the
+  process (CUDA_VISIBLE_DEVICES=) still slow
+- data: all eight transcripts byte-identical; without matrix cores (INFERENCE_VULKAN_NO_COOPMAT) no slow window
+  (but 5.0 s a request)
+
+nsys GPU metrics (10 kHz) over the window: GPC clock 1844 MHz, SMs active ~90 %, but SM issue 38 -> 2-12 %, tensor
+11 -> 1 %, DRAM writes 14 -> 55 % and reads 18 -> 29 % of peak, copy engines idle, PCIe idle. The SMs are resident and
+stalled on memory while something writes at ~0.5 TB/s that is not our work.
+
+Reproduced without the model: an ignored test looping the two FF matmuls on fixed tensors (bf16, pooled outputs, no
+other kernels): 1.64 ms each for ~12 s, then one 38 / 16.7 / 3.6 ms stretch, then 1.26 ms for good (23 % faster than
+before, and past what f32 accumulation on this card should give). 20000 tiny matrix-core dispatches first moved it to
+9 s, so it is not a plain dispatch count. Driver 615.71.10. No public report of it found.
+
+Implication: a driver-side change to the matrix-core pipeline after sustained use (a slow, write-heavy transition,
+then a faster binary). Run 12's "first combined request" and "second asr" costs are this one-time event landing
+there, and the combined request's steady state was already level with in-turn plus CUDA's overlap gain. Left: whether
+a load-time warm-up can trigger it before serving (it costs ~0.5-1 s of GPU once either way), and whether the faster
+binary changes the products (transcripts identical across it).
