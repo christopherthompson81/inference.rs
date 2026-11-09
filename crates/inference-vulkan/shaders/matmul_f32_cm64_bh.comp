@@ -1,0 +1,6 @@
+#version 450
+// The f32 matmul on matrix cores over an f16 b, in 64 x 64 tiles.
+#extension GL_GOOGLE_include_directive : require
+#define B_HALF
+#define TILE64
+#include "matmul_f32_cm_main.glsl"
