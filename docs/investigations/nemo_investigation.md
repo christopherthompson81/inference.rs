@@ -1525,3 +1525,41 @@ A/B, 3 rounds: asr 23.61 -> 23.60 s, diar 8.54 -> 8.55 s; output byte-identical
 projection beside the bf16 gemm's packed A) and the attention (the projections beside the fused kernel's packed
 copies). Lowering it needs both: A packed by row blocks (1.4 % of the transcription, Run 51) and the projections
 dropped once packed (splitting both kernels into pack and run), ~60-70 MB together.
+
+## Run 53 - 2026-11-09 (laptop: Ryzen 7 7840U, CPU only)
+
+**Question:** the desktop's #878 found bf16 decoder copies changing words against full f32 on AVX2 (made f16 there).
+On this CPU, does the bf16 encoder change any? Clips compared word for word with punctuation, against
+`INFERENCE_CPU_NO_BF16=1` (the scope off: f32 throughout): the meeting and `en_long`, each also at -6 dB (samples
+halved), a 4-minute Abkhaz word list, a 24 s sample, a 17 s sentence.
+
+**Found:** at -6 dB the meeting's "reverse it back. Right. So then" reads "reverse it back, right? So then"; listened
+to, "Right." is a second speaker, so the bf16 reading is wrong. Bisected with temporary switches running one part of
+the encoder without bf16 inputs (f32 products over the same weights): only the fused attention recovers it, not the
+projections, feed-forward or convolution; within it, two bf16 terms of the queries, keys or values do not, two terms of
+the positions do. It takes layers 16-18 together (no single one), so a per-layer fix would fit one clip. The attention
+in f32 throughout costs 32 % of the transcription (23.99 -> 31.57 s).
+
+**Two terms of the positions**, fused through the existing tile (each position row as 2 d values, its bf16 rounding
+then what that left, met by two copies of each position query): 12.8 % (23.51 -> 26.53 s). Floor: the position product
+is a quarter of the kernel's products, the kernel ~40 % of the transcription.
+
+**Change:** the position scores add an int8 correction instead: what bf16 left of each position row (p - bf16(p)) and
+each position query quantized to int8 on a scale of their own, multiplied by `vpdpbusd` (64 byte products an
+instruction, twice `vdpbf16ps`'s pairs; the queries offset to u8 and the offset taken off through each column's sum),
+scaled and added to the bf16 product in the same tile walk. `supports` asks for AVX-512 VNNI too (every AVX-512 BF16
+CPU has it). Test: `position_scores_carry_their_int8_correction` (content zero, values exact in bf16: 7.4e-4 against
+unrounded positions, bf16 positions alone 0.085).
+
+**Result** (spans against full f32 over the seven clips; diarization speaker-frames moved against f32, of 46,824):
+
+```
+                    asr (4 rounds)        spans   diarization   -6 dB "back. Right."
+master (bf16)       22.81-23.70 s          10         64         no
+two bf16 terms      +12.8 %                 2         25         yes
+int8 correction     +7.7 % (23.70 -> 25.52) 3-5       25         yes
+```
+
+The spans left are near-ties that move with any change (the int8 build's went 3 -> 5 between half-away and to-even
+rounding of the quantization). One is a word on the clean meeting, f32 "in compliance to the program", int8 "with":
+listened to, "with" is said (the f32 reading is the error there). Full f32 is not ground truth at a near-tie.
