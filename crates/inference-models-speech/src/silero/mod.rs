@@ -171,7 +171,13 @@ impl SileroVad {
                     *gj = xj + bj;
                 }
                 // `g += W_hh h` a column at a time
-                for (column, &hk) in self.w_hh_t.chunks_exact(4 * HIDDEN).zip(h.iter()) {
+                for (column, &hk) in self
+                    .w_hh_t
+                    .as_chunks::<{ 4 * HIDDEN }>()
+                    .0
+                    .iter()
+                    .zip(h.iter())
+                {
                     for (gj, w) in g.iter_mut().zip(column) {
                         *gj += w * hk;
                     }
