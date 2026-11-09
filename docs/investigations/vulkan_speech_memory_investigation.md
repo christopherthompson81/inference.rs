@@ -643,3 +643,33 @@ Vulkan and 3167 CPU tests passed; `two_streams_record_at_once` and `streams_wait
 Transcripts byte-identical. A lone model pays ~0.03 s a request on average for the cross-stream bookkeeping (within
 noise of master); the combined request comes down from 2.94-3.13 (Run 18, one queue) to 2.68-2.86, ~0.15 s from CUDA,
 about diar's own gap (0.85 against 0.69).
+
+## Run 21 - 2026-11-09 16:40
+
+Question: the diarizer's own gap to CUDA (0.85 against 0.69, the rest of the combined request's).
+
+`diar8.sh` (scratch: a warm-up, then N diarization requests on clip10 back to back), PROF=1, one 5 s window (~6
+requests, ~590 ms of GPU each against 0.86 s walls): matmul_bf16_cm 49 %, conv2d_bf16 19 %, map_bf16 17 %, rows_bf16
+8 %, copy_b16 6 %. conv2d, with its shapes now labelled in the profiler: `b=1 c=192x1536/1 1x684 k=1x3 s=1`, a dense
+conv1d (192 -> 1536 channels, kernel 3) at 0.2 TFLOPS, 4.9-5.0 ms a dispatch, ~110 ms a request. The direct kernel
+runs a thread an output over 576 multiply-adds.
+
+Change: a dense bf16 convolution (one group, window c_in * k_h * k_w of 64 or more, 16 or more output channels and
+positions) on matrix cores unfolds its input (`im2col_bf16`, cols `(b, c_in * k_h * k_w, o_h * o_w)`, zeros over the
+padding) and runs one batched matmul, weight `(c_out, c_in * k_h * k_w)` against cols, into the conv's output layout.
+Depthwise, grouped, f32 and small convolutions keep the direct kernel. The bf16 test gained a strided-view conv1d
+(padded; strided and dilated) and a padded strided two-batch conv2d past the threshold; with im2col writing zeros it
+fails. `scripts/local_ci.sh --lint --vulkan`: clean, 68 passed.
+
+That conv now: im2col 7.6 us + `m=1536 n=684 k=576` matmul 44.6 us (27.2 TFLOPS), from 5 ms. Diarization output byte
+identical. Walls, alternated, profiler off:
+
+    diar alone (diar8, 8 a run)   Vulkan 0.74-0.76, 0.74-0.76   CUDA 0.68-0.69, 0.68-0.69
+    first.sh (NB=5)    asr    diar   both
+      Vulkan           2.44   0.72   2.66-2.78
+                       2.34   0.74   2.59-2.75
+      CUDA             2.30   0.67   2.55-2.67
+                       2.38   0.69   2.62-2.67
+
+The combined request is within ~0.05-0.1 s of CUDA's. What is left in diar: small matmuls at 128 x 128 tiles filling
+few SMs (m=684 n=512 k=2048: 24 workgroups, 10 TFLOPS), and ~17 % element-wise maps.

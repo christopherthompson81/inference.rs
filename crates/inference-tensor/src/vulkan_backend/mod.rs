@@ -3233,6 +3233,30 @@ mod tests {
             &wide(&x)?.conv2d(&wide(&w)?, 1, 2, 1, 8)?,
             BF16_TOLERANCE,
         )?;
+        // dense convolutions past UNFOLD_MIN_K run as a matmul over their unfolded input on matrix cores: a conv1d from a
+        // strided view, padded, strided and dilated, and a padded strided conv2d over two batches
+        let x1d = randn(&[2, 100, 32])?.to_dtype(bf16)?.transpose(1, 2)?;
+        for (padding, stride, dilation) in [(1, 1, 1), (2, 2, 2)] {
+            let w = randn(&[48, 32, 3])?.to_dtype(bf16)?;
+            let got =
+                x1d.to_device(&vk)?
+                    .conv1d(&w.to_device(&vk)?, padding, stride, dilation, 1)?;
+            assert_close(
+                &wide(&got)?,
+                &wide(&x1d)?.conv1d(&wide(&w)?, padding, stride, dilation, 1)?,
+                BF16_TOLERANCE,
+            )?;
+        }
+        let (x, w) = (
+            randn(&[2, 16, 21, 18])?.to_dtype(bf16)?,
+            randn(&[24, 16, 3, 3])?.to_dtype(bf16)?,
+        );
+        let got = x.to_device(&vk)?.conv2d(&w.to_device(&vk)?, 1, 2, 1, 1)?;
+        assert_close(
+            &wide(&got)?,
+            &wide(&x)?.conv2d(&wide(&w)?, 1, 2, 1, 1)?,
+            BF16_TOLERANCE,
+        )?;
         Ok(())
     }
 

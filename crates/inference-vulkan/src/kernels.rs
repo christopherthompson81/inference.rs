@@ -121,6 +121,7 @@ kernels! {
     matmul_f32: MATMUL_F32, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
     conv2d_f32: CONV2D_F32, ops::BINDINGS, ops::CONV2D_PUSH_BYTES;
     conv2d_bf16: CONV2D_BF16, ops::BINDINGS, ops::CONV2D_PUSH_BYTES;
+    im2col_bf16: IM2COL_BF16, ops::IM2COL_BINDINGS, ops::CONV2D_PUSH_BYTES;
     matmul_f32_dot: MATMUL_F32_DOT, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
     matmul_bf16: MATMUL_BF16, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
     matmul_bf16_dot: MATMUL_BF16_DOT, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
