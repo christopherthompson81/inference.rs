@@ -72,16 +72,75 @@ pub(crate) struct Held {
     // weak, so the pool's entries do not keep their context alive
     context: std::sync::Weak<Context>,
     allocation: Allocation,
+    usage: Usage,
+}
+
+/// Which batch wrote some memory, and which streams have used it since it was handed out: the first command to use a
+/// fresh buffer writes it (a tensor is immutable after its op), so a reader on another stream waits for that batch,
+/// and readers never wait on each other. A buffer another stream reads must not be written again in place.
+#[derive(Default)]
+pub(crate) struct Usage {
+    // the writing batch's stream above its number, 0 for none yet
+    producer: std::sync::atomic::AtomicU64,
+    streams: std::sync::atomic::AtomicU32,
 }
 
 // SAFETY: the handles and mapping are only used by whoever holds the buffer the allocation backs
 unsafe impl Send for Held {}
 unsafe impl Sync for Held {}
 
+// a producer packs its stream above its batch number
+const USAGE_STREAM_SHIFT: u32 = 56;
+
+impl Usage {
+    /// Marks a use by stream `stream`'s batch `serial`; the batch that wrote the memory, if another did.
+    pub(crate) fn note(&self, stream: usize, serial: u64) -> Option<(usize, u64)> {
+        self.streams.fetch_or(1 << stream, Ordering::AcqRel);
+        let packed = ((stream as u64) << USAGE_STREAM_SHIFT) | serial;
+        match self
+            .producer
+            .compare_exchange(0, packed, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => None,
+            Err(previous) => Self::unpack(previous),
+        }
+    }
+
+    pub(crate) fn producer(&self) -> Option<(usize, u64)> {
+        Self::unpack(self.producer.load(Ordering::Acquire))
+    }
+
+    // whether no stream but `stream` has used it
+    fn only(&self, stream: usize) -> bool {
+        self.streams.load(Ordering::Acquire) & !(1 << stream) == 0
+    }
+
+    // a fresh buffer's: nothing wrote it yet
+    fn reset(&self) {
+        self.producer.store(0, Ordering::Release);
+        self.streams.store(0, Ordering::Release);
+    }
+
+    fn unpack(packed: u64) -> Option<(usize, u64)> {
+        let serial = packed & ((1 << USAGE_STREAM_SHIFT) - 1);
+        (serial != 0).then_some(((packed >> USAGE_STREAM_SHIFT) as usize, serial))
+    }
+}
+
 impl Held {
     // whether nothing but the pool holds it: no buffer, and no batch whose commands may still run on it
     fn idle(held: &Arc<Held>) -> bool {
         Arc::strong_count(held) == 1
+    }
+
+    pub(crate) fn usage(&self) -> &Usage {
+        &self.usage
+    }
+
+    // whether `stream` may take it before the work using it finishes: idle, or used by that stream alone, whose order
+    // puts the new work after the old
+    fn takeable(held: &Arc<Held>, stream: usize) -> bool {
+        Held::idle(held) || held.usage.only(stream)
     }
 }
 
@@ -198,6 +257,8 @@ pub struct Buffer {
     held: Option<Arc<Held>>,
     // mapped and taken from the pool while batches recorded before it still held it: the CPU writes it on the stream
     early: AtomicBool,
+    // an unpooled buffer's last use (a pooled one's is its allocation's)
+    usage: Usage,
 }
 
 // SAFETY: the mapping is plain memory, and the Vulkan handles are only used through the context's synchronized calls
@@ -233,14 +294,14 @@ impl Buffer {
             return Err(Error::Invalid(format!("a buffer of {len} bytes")));
         }
         let capacity = capacity(len as u64);
-        context
-            .allocated
-            .fetch_add(capacity, std::sync::atomic::Ordering::Relaxed);
+        context.count_allocated(capacity);
+        let stream = context.current_stream();
         let take = || {
             context.pool.lock().expect("vulkan pool poisoned").take(
                 device_local,
                 capacity,
                 idle_only,
+                stream,
             )
         };
         let mut pooled = take();
@@ -263,6 +324,7 @@ impl Buffer {
             let early = !ptr.is_null() && !Held::idle(&held);
             // a larger class's allocation goes back to its own class
             let capacity = held.allocation.size;
+            held.usage.reset();
             return Ok(Self {
                 context: context.clone(),
                 buffer,
@@ -272,6 +334,7 @@ impl Buffer {
                 capacity,
                 held: Some(held),
                 early: AtomicBool::new(early),
+                usage: Usage::default(),
             });
         }
         Self::allocate(context, len, capacity, device_local, true)
@@ -411,6 +474,7 @@ impl Buffer {
                         ptr,
                         size: capacity,
                     },
+                    usage: Usage::default(),
                 })
             });
             Ok(Self {
@@ -422,11 +486,25 @@ impl Buffer {
                 capacity,
                 held,
                 early: AtomicBool::new(false),
+                usage: Usage::default(),
             })
         }
     }
 
     // what a command using it retains: its allocation where pooled, else the buffer
+    /// Its memory's last use.
+    pub(crate) fn usage(&self) -> &Usage {
+        self.held.as_ref().map_or(&self.usage, |held| &held.usage)
+    }
+
+    // waits for the batch that wrote it, whatever stream it is on
+    fn wait_for_use(&self) -> Result<()> {
+        match self.usage().producer() {
+            Some((stream, serial)) => self.context.wait_for(stream, serial),
+            None => Ok(()),
+        }
+    }
+
     pub(crate) fn retained(self: Arc<Self>) -> crate::Retained {
         match &self.held {
             Some(held) => held.clone(),
@@ -550,8 +628,9 @@ impl Buffer {
     // a pooled buffer's allocation kept by the batch a command writing it is recorded in: dropped before the command
     // runs, it would otherwise look idle, and a mapped one be written in place under it
     fn retain_in(&self, recorder: &crate::Recorder<'_>) {
-        if let Some(held) = &self.held {
-            recorder.retain(held.clone());
+        match &self.held {
+            Some(held) => recorder.retain(held.clone()),
+            None => recorder.note(&self.usage),
         }
     }
 
@@ -561,6 +640,7 @@ impl Buffer {
         let out = &mut out[..len];
         if self.is_mapped() {
             self.context.synchronize()?;
+            self.wait_for_use()?;
             // SAFETY: the range is in the mapping, which the GPU no longer writes
             unsafe { std::ptr::copy_nonoverlapping(self.ptr, out.as_mut_ptr(), len) };
             return Ok(());
@@ -570,6 +650,8 @@ impl Buffer {
             let at = (i * STAGING_BYTES) as u64;
             self.context.record(|recorder| {
                 recorder.copy(self.buffer, at, staging.buffer, 0, chunk.len() as u64);
+                self.retain_in(recorder);
+                staging.retain_in(recorder);
                 Ok(())
             })?;
             staging.read_into(chunk)?;
@@ -638,6 +720,11 @@ impl Context {
     /// all of them (host RAM held for reuse), on a discrete one the device memory past STALE_KEEP_BYTES, largest first
     /// (a long request's temporaries, GBs; a model's ordinary working set stays for its next request).
     pub fn release_idle(&self) {
+        // another model's stream may still run (its engine releases once it is idle too), and waiting on it here would
+        // stall its recording
+        if self.streams() > 1 && !self.quiet() {
+            return;
+        }
         // the last request's batches finish first, so their temporaries are idle too
         if !self.try_synchronize().unwrap_or(false) {
             return;
@@ -743,10 +830,16 @@ impl BufferPool {
         out
     }
 
-    // the newest allocation of a class, or for device memory the smallest class up to FIT_RATIO_* larger that holds
-    // one; a mapped one that no batch holds first, and with `idle_only` only such a one
-    fn take(&mut self, device_local: bool, capacity: u64, idle_only: bool) -> Option<Arc<Held>> {
-        if let Some(held) = self.take_class(device_local, capacity, idle_only) {
+    // the newest allocation of a class `stream` may take, or for device memory the smallest class up to FIT_RATIO_*
+    // larger that holds one; a mapped one that no batch holds first, and with `idle_only` only such a one
+    fn take(
+        &mut self,
+        device_local: bool,
+        capacity: u64,
+        idle_only: bool,
+        stream: usize,
+    ) -> Option<Arc<Held>> {
+        if let Some(held) = self.take_class(device_local, capacity, idle_only, stream) {
             return Some(held);
         }
         if !device_local {
@@ -764,7 +857,7 @@ impl BufferPool {
         larger.sort_unstable();
         larger
             .into_iter()
-            .find_map(|c| self.take_class(true, c, idle_only))
+            .find_map(|c| self.take_class(true, c, idle_only, stream))
     }
 
     fn take_class(
@@ -772,10 +865,14 @@ impl BufferPool {
         device_local: bool,
         capacity: u64,
         idle_only: bool,
+        stream: usize,
     ) -> Option<Arc<Held>> {
         let key = (device_local, capacity);
         let entries = self.free.get_mut(&key)?;
-        let newest = entries.len().checked_sub(1)?;
+        // another stream's allocation only once its work finished: taken early, the new work would wait on it
+        let newest = entries
+            .iter()
+            .rposition(|(_, held)| Held::takeable(held, stream))?;
         let at = match entries.iter().rposition(|(_, held)| Held::idle(held)) {
             _ if device_local => newest,
             Some(at) => at,
@@ -1052,6 +1149,139 @@ mod tests {
         assert!(words(copy.read()?).iter().all(|&w| w == 1));
         assert!(words(next.read()?).iter().all(|&w| w == 2));
         Ok(())
+    }
+
+    // words of a buffer's bytes
+    fn words(bytes: Vec<u8>) -> Vec<u32> {
+        bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|w| u32::from_le_bytes(*w))
+            .collect()
+    }
+
+    // streams order through the buffers they share: a copy recorded on one stream reads what another stream's still
+    // open (unsubmitted) batch writes, and an unpooled buffer written on one is read on the other; a buffer another
+    // stream still uses is not taken from the pool early
+    #[test]
+    fn streams_wait_for_each_others_writes_and_reads() -> Result<()> {
+        let context = match Context::new() {
+            Ok(context) => context,
+            Err(err) => {
+                eprintln!("skipping: {err}");
+                return Ok(());
+            }
+        };
+        const BYTES: usize = 32 << 20;
+        let (a, b) = (1, 2);
+        let shared = Arc::new(Buffer::new(&context, BYTES)?);
+        let copy = Arc::new(Buffer::new(&context, BYTES)?);
+        {
+            let _a = context.stream_scope(a);
+            // a long run of fills ahead of the last, so the copy would overtake them unordered
+            context.record(|r| {
+                for word in 0..32 {
+                    r.fill(shared.buffer, BYTES as u64, word);
+                }
+                r.fill(shared.buffer, BYTES as u64, 7);
+                r.retain(shared.clone());
+                Ok(())
+            })?;
+        }
+        {
+            let _b = context.stream_scope(b);
+            context.record(|r| {
+                r.copy(shared.buffer, 0, copy.buffer, 0, BYTES as u64);
+                r.retain(shared.clone());
+                r.retain(copy.clone());
+                Ok(())
+            })?;
+        }
+        assert!(
+            words(copy.read()?).iter().all(|&w| w == 7),
+            "the copy read the other stream's last fill"
+        );
+        let mut weight = Buffer::exact(&context, BYTES)?;
+        weight.write(0, &[5u8; BYTES])?;
+        let weight = Arc::new(weight);
+        let read = Arc::new(Buffer::new(&context, BYTES)?);
+        {
+            let _b = context.stream_scope(b);
+            context.record(|r| {
+                r.copy(weight.buffer, 0, read.buffer, 0, BYTES as u64);
+                r.retain(weight.clone());
+                r.retain(read.clone());
+                Ok(())
+            })?;
+            assert!(read.read()?.iter().all(|&v| v == 5));
+        }
+        if context.streams() > 1 && !context.is_unified() {
+            let busy = Arc::new(Buffer::new(&context, BYTES)?);
+            let handle = busy.buffer;
+            {
+                let _a = context.stream_scope(a);
+                context.record(|r| {
+                    r.fill(busy.buffer, BYTES as u64, 3);
+                    r.retain(busy.clone());
+                    Ok(())
+                })?;
+            }
+            drop(busy);
+            let _b = context.stream_scope(b);
+            let other = Buffer::new(&context, BYTES)?;
+            assert_ne!(
+                other.buffer, handle,
+                "another stream's pending buffer stays in the pool"
+            );
+        }
+        context.synchronize_all()
+    }
+
+    // two threads, a stream each, recording at once over buffers of their own and one they both read: each sees its
+    // own results, and neither waits forever on the other
+    #[test]
+    fn two_streams_record_at_once() -> Result<()> {
+        let context = match Context::new() {
+            Ok(context) => context,
+            Err(err) => {
+                eprintln!("skipping: {err}");
+                return Ok(());
+            }
+        };
+        const BYTES: usize = 4 << 20;
+        const ROUNDS: u32 = 200;
+        let mut shared = Buffer::new(&context, BYTES)?;
+        shared.fill(11)?;
+        let shared = Arc::new(shared);
+        let run = |key: usize| -> Result<()> {
+            let _scope = context.stream_scope(key);
+            let own = Arc::new(Buffer::new(&context, BYTES)?);
+            for round in 0..ROUNDS {
+                let word = key as u32 * 1000 + round;
+                let scratch = Arc::new(Buffer::new(&context, BYTES)?);
+                context.record(|r| {
+                    r.copy(shared.buffer, 0, scratch.buffer, 0, BYTES as u64);
+                    r.fill(own.buffer, BYTES as u64, word);
+                    r.retain(shared.clone());
+                    r.retain(scratch.clone());
+                    r.retain(own.clone());
+                    Ok(())
+                })?;
+                if round % 50 == 49 {
+                    assert!(words(own.read()?).iter().all(|&w| w == word));
+                    assert!(words(scratch.read()?).iter().all(|&w| w == 11));
+                }
+            }
+            Ok(())
+        };
+        std::thread::scope(|s| {
+            let first = s.spawn(|| run(1));
+            let second = s.spawn(|| run(2));
+            first.join().expect("first stream")?;
+            second.join().expect("second stream")
+        })?;
+        context.synchronize_all()
     }
 
     // a buffer taken in stream order, filled on the stream and dropped before the fill runs, is not an upload's once

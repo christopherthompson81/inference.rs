@@ -550,3 +550,96 @@ Speech, same session, Chrome and VS Code GPU processes on the 3090 throughout (b
 
 Master's second slow asr request (the 8th) and its 7.78 s combined one are not explained; Run 13 never saw two.
 `scripts/local_ci.sh --vulkan`: clean, 66 passed.
+
+## Run 18 - 2026-11-09 12:30
+
+Question: where the combined request's gap to CUDA is now, and how much of it the coopmat matmul could close.
+
+`first.sh` (cold start, asr and diar once, five combined requests 6 s apart), profiler off, the branch's build,
+backends alternated (Chrome and VS Code GPU processes on the 3090 throughout):
+
+                asr         diar         both
+    Vulkan      2.37, 2.27  0.84, 0.83   2.94-3.13
+    CUDA        2.33, 2.35  0.68, 0.67   2.57-2.61
+
+asr alone is level now. The combined request is ~0.45 s behind: CUDA's runs ~0.4 s under asr + diar in turn, Vulkan's
+~0.15 s under. Diar alone is 0.16 s behind.
+
+One combined request's profile (PROF=1, one 9.3 s window, 3.3 s wall under the profiler): 2372 ms of GPU time, so ~1 s
+of the wall has the GPU idle. By kernel: matmul_bf16_cm 1070 ms (45 %), map_bf16 530 (22 %), matmul_bf16_dot 199,
+copy_b16 190, rows_bf16 186, conv2d_bf16 182. The matmul's top shapes:
+
+    b=8 m=512 n=128 k=7564      336 x 499 us   168 ms  15.9 TFLOPS
+    b=8 m=512 n=8075 k=128      336 x 342 us   115 ms  24.8
+    b=8 m=512 n=7564 k=128      336 x 325 us   109 ms  24.4
+    m=684 n=512 k=2048          651 x 142 us    92 ms  10.1
+    m=7564 n=4096 k=1024         48 x 1773 us   85 ms  35.8
+    m=7564 n=1024 k=4096         49 x 1663 us   82 ms  38.1
+    m=7564 n=1024 k=1024        120 x 465 us    56 ms  34.1
+    m=684 n=2048 k=512          651 x 78 us     51 ms  18.4
+    m=380 n=512 k=2048           31 x 1452 us   45 ms   0.5
+    b=8 m=684 n=64 k=684        651 x 62 us     40 ms   7.8
+
+Implication: the FF shapes Run 15 compared with ggml (1.73 against ~1.0 ms) are ~220 ms of the 1070; most of the
+matmul time is the batched attention-block shapes (16-25 TFLOPS) and the diarizer's small ones (8-18), and one shape
+(m=380 n=512 k=2048, 0.5 TFLOPS) is a fallback-rate outlier. The ~1 s of GPU idle in a combined request is as large as
+the whole gap. A kernel at ggml's rate everywhere would cut ~0.45 s of GPU time, but only the part of it on the
+critical path shows in the wall.
+
+## Run 19 - 2026-11-09 13:20
+
+Question: where the combined request's GPU idle is (Run 18), and whether Run 12's stream per model pays now.
+
+`nsys_both.sh` (scratch: warm asr and diar, two combined requests, `--trace=vulkan --vulkan-gpu-workload=batch`).
+Submits and fence waits per thread, in the asr-only request: encoder to 1.18 s, then the TDT decoder's step loop
+1.18-2.18 s (a submit and a fence wait a step, ~13k submits); diar alone 0.56 s of submits. In a combined request
+(2.83-2.85 s under nsys): diar's thread submits 0-2.04 s (its 0.56 s stretched over the asr encoder's), asr's decoder
+loop runs dense only from 2.04-2.09 s, the moment diar's last batch goes, to the end (~0.8 s). Before that each
+decoder step waits on one queue behind diar's batches. Request start to first GPU work: 0.37 s (CPU side).
+
+So the combined request runs encoder + diar + decoder nearly in series; CUDA's streams let the decoder's small steps
+run between diar's kernels. Run 12's `vulkan-streams` (a queue per model, timeline semaphores, producer-tracked cross-
+stream waits) rebuilt on these fixes (local `vulkan-streams-owed`: cherry-picked owed barriers and the compute-only
+queue, its queue placement made to give each stream its own queue of family 2), cold start, asr and diar once, five
+combined requests, profiler off, two servers:
+
+                         asr    diar   both
+    one queue (Run 18)   2.37   0.84   2.94-3.13
+                         2.27   0.83
+    streams + fixes      2.35   0.87   2.72-2.93
+                         2.42   0.87   2.75-2.91
+    CUDA (Run 18)        2.33   0.68   2.57-2.61
+                         2.35   0.67
+
+Streams now take ~0.25 s off the combined request (Run 12 measured them under the stall, which hid it); what is left to
+CUDA (~0.2 s) is about diar's own gap (0.84 against 0.67). The streams branch is a WIP (713 lines over context,
+memory and stream); it needs its tests and a review pass before it can go in.
+
+## Run 20 - 2026-11-09 15:10
+
+Question: Run 19's streams, ported onto master (owed barriers and the compute-only queue are in since #881): do they
+hold up, and what do they cost a lone model.
+
+Port: `vulkan-streams`' code on the new branch, its queue placement cut down. With the main queue already the
+compute-only family, the WIP's alternation between a graphics family and a compute family never ran, so a discrete GPU
+now takes up to MAX_STREAMS (4) queues of that one family (3090: 8 offered) and an iGPU keeps one; with one family,
+buffers stay EXCLUSIVE (the CONCURRENT sharing helper went). `scripts/local_ci.sh --lint --tests --vulkan`: clean, 68
+Vulkan and 3167 CPU tests passed; `two_streams_record_at_once` and `streams_wait_for_each_others_writes_and_reads`
+20 of 20 repeats.
+
+`first.sh` (NB=5), profiler off, backends alternated, Chrome and VS Code on the GPU as before:
+
+                 asr    diar   both
+    streams      2.45   0.85   2.72-2.86
+                 2.39   0.85   2.68-2.83
+    CUDA         2.39   0.69   2.59-2.62
+                 2.33   0.69   2.62-2.67
+
+`asr8.sh` (eight asr requests back to back), profiler off, the two binaries alternated:
+
+    master   2.32-2.42, 2.31-2.43
+    streams  2.37-2.52, 2.36-2.46
+
+Transcripts byte-identical. A lone model pays ~0.03 s a request on average for the cross-stream bookkeeping (within
+noise of master); the combined request comes down from 2.94-3.13 (Run 18, one queue) to 2.68-2.86, ~0.15 s from CUDA,
+about diar's own gap (0.85 against 0.69).

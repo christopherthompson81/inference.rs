@@ -1,6 +1,7 @@
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ffi::CStr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ash::vk;
@@ -13,13 +14,51 @@ use crate::stream::{
 };
 use crate::{Error, Result};
 
+// queues a discrete GPU's streams take: stream 0 for loads and whatever runs unscoped, the rest shared out to the
+// models that ask for their own (`Context::stream_scope`); an iGPU keeps one
+const MAX_STREAMS: usize = 4;
+
+thread_local! {
+    // the stream this thread records on, set by a `StreamScope`
+    static CURRENT_STREAM: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Records this thread's work on the stream [`Context::stream_scope`] chose, until it drops.
+pub struct StreamScope {
+    previous: usize,
+}
+
+impl Drop for StreamScope {
+    fn drop(&mut self) {
+        CURRENT_STREAM.with(|current| current.set(self.previous));
+    }
+}
+
+// a stream, and what other streams read of it without its lock
+struct Lane {
+    stream: Mutex<Stream>,
+    timeline: vk::Semaphore,
+    submitted: AtomicU64,
+    // a batch number known finished, at least
+    completed: AtomicU64,
+    // another stream waits on the open batch: whoever holds the stream next submits it
+    flush_requested: AtomicBool,
+    // buffer bytes handed out while it recorded, and the count at its last submit
+    allocated: AtomicU64,
+    flushed_at: AtomicU64,
+}
+
 const REQUIRED_EXTENSIONS: [&CStr; 3] = [
     ash::ext::external_memory_host::NAME,
     ash::khr::push_descriptor::NAME,
     ash::khr::shader_integer_dot_product::NAME,
 ];
 
-/// One Vulkan device and its compute queue, with the kernels' pipelines built on it.
+/// One Vulkan device and its compute queues, a stream each, with the kernels' pipelines built on it. Work on one
+/// stream runs in order; a batch that reads a buffer another stream's unfinished batch wrote waits for that batch
+/// (`memory::Usage`), so streams share what one of them wrote, as a model's weights uploaded before it runs. Two
+/// streams' open batches each reading what the other wrote would wait on each other: streams are for models that
+/// exchange nothing else.
 pub struct Context {
     _entry: ash::Entry,
     instance: ash::Instance,
@@ -38,12 +77,11 @@ pub struct Context {
     // device-local bytes every live and pooled buffer holds
     pub(crate) device_bytes: std::sync::atomic::AtomicU64,
     name: String,
-    queue: vk::Queue,
-    stream: Mutex<Stream>,
+    lanes: Vec<Lane>,
+    // the stream each scoped key records on, and the next to hand out
+    assigned: Mutex<HashMap<usize, usize>>,
+    next_stream: AtomicUsize,
     pub(crate) pool: Mutex<BufferPool>,
-    // buffer bytes handed out, and the count at the last submit
-    pub(crate) allocated: AtomicU64,
-    flushed_at: AtomicU64,
     pub(crate) kernels: Kernels,
     // the matrix-core kernels, on a device that has them
     pub(crate) coop: Option<crate::kernels::CoopKernels>,
@@ -76,6 +114,10 @@ const QUANTIZED_KEPT: usize = 4;
 pub struct Recorder<'a> {
     pub(crate) context: &'a Context,
     pub(crate) buffer: vk::CommandBuffer,
+    // the stream and the number of the batch it records into
+    pub(crate) stream: usize,
+    pub(crate) serial: u64,
+    waits: RefCell<Vec<(usize, u64)>>,
     retained: RefCell<Vec<Retained>>,
     pub(crate) dispatches: Cell<usize>,
     pub(crate) work: Cell<u64>,
@@ -142,7 +184,16 @@ impl Context {
         let unified = properties.device_type != vk::PhysicalDeviceType::DISCRETE_GPU;
         let (has_budget, heap_size) = memory_budget(&instance, physical);
 
-        let priorities = [1.0f32];
+        // SAFETY: `physical` came from this instance
+        let family_props =
+            unsafe { instance.get_physical_device_queue_family_properties(physical) };
+        // queues of the one family, a stream each (beside each other on NVIDIA's compute family); an iGPU keeps one
+        let streams = if unified {
+            1
+        } else {
+            MAX_STREAMS.min(family_props[family as usize].queue_count as usize)
+        };
+        let priorities = vec![1.0f32; streams];
         let queues = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(family)
             .queue_priorities(&priorities)];
@@ -174,6 +225,7 @@ impl Context {
         let mut features11 =
             vk::PhysicalDeviceVulkan11Features::default().storage_buffer16_bit_access(true);
         let mut features12 = vk::PhysicalDeviceVulkan12Features::default()
+            .timeline_semaphore(true)
             .shader_float16(has_coop)
             .vulkan_memory_model(has_coop)
             .buffer_device_address(has_cm2);
@@ -206,14 +258,26 @@ impl Context {
         let memory_properties = unsafe { instance.get_physical_device_memory_properties(physical) };
         let host_memory = ash::ext::external_memory_host::Device::new(&instance, &device);
         let push_descriptor = ash::khr::push_descriptor::Device::new(&instance, &device);
-        // SAFETY: the family was checked to exist and queue 0 was asked for
-        let queue = unsafe { device.get_device_queue(family, 0) };
-        let mut stream = Stream::new(&device, family)?;
-        stream.max_in_flight = Some(crate::stream::DISCRETE_MAX_IN_FLIGHT);
-        if std::env::var_os(crate::stream::PROFILE_ENV).is_some() {
-            stream.profile = Some(Box::new(crate::stream::Profile::new(f64::from(
-                properties.limits.timestamp_period,
-            ))));
+        let mut lanes = Vec::with_capacity(streams);
+        for index in 0..streams as u32 {
+            // SAFETY: the family's first `streams` queues were asked for
+            let queue = unsafe { device.get_device_queue(family, index) };
+            let mut stream = Stream::new(&device, family, queue)?;
+            stream.max_in_flight = Some(crate::stream::DISCRETE_MAX_IN_FLIGHT);
+            if std::env::var_os(crate::stream::PROFILE_ENV).is_some() {
+                stream.profile = Some(Box::new(crate::stream::Profile::new(f64::from(
+                    properties.limits.timestamp_period,
+                ))));
+            }
+            lanes.push(Lane {
+                timeline: stream.timeline,
+                stream: Mutex::new(stream),
+                submitted: AtomicU64::new(0),
+                completed: AtomicU64::new(0),
+                flush_requested: AtomicBool::new(false),
+                allocated: AtomicU64::new(0),
+                flushed_at: AtomicU64::new(0),
+            });
         }
         let disk_cache = crate::pipeline::DiskCache::open(&device, &properties)?;
         let kernels = Kernels::new(&device, disk_cache.cache)?;
@@ -249,11 +313,10 @@ impl Context {
             heap_size,
             device_bytes: std::sync::atomic::AtomicU64::new(0),
             name,
-            queue,
-            stream: Mutex::new(stream),
+            lanes,
+            assigned: Mutex::default(),
+            next_stream: AtomicUsize::new(0),
             pool: Mutex::default(),
-            allocated: AtomicU64::new(0),
-            flushed_at: AtomicU64::new(0),
             kernels,
             coop,
             quantized: Mutex::default(),
@@ -359,15 +422,57 @@ impl Context {
         self.coop.is_some()
     }
 
-    /// Appends `record`'s commands to the stream without waiting for them; a batch that has grown long is submitted.
-    /// What the commands read or write must be [`Recorder::retain`]ed, or outlive the next [`Self::synchronize`].
+    /// The streams work can record on (one on an iGPU).
+    pub fn streams(&self) -> usize {
+        self.lanes.len()
+    }
+
+    /// Records this thread's work on `key`'s own stream (handed out from stream 1 on, in turn, the first time a key
+    /// asks) until the scope drops; unscoped work records on stream 0. A key is any number naming one model.
+    pub fn stream_scope(&self, key: usize) -> StreamScope {
+        let stream = if self.lanes.len() > 1 {
+            let others = self.lanes.len() - 1;
+            *self
+                .assigned
+                .lock()
+                .expect("vulkan streams poisoned")
+                .entry(key)
+                .or_insert_with(|| 1 + self.next_stream.fetch_add(1, Ordering::Relaxed) % others)
+        } else {
+            0
+        };
+        StreamScope {
+            previous: CURRENT_STREAM.with(|current| current.replace(stream)),
+        }
+    }
+
+    // the stream this thread records on
+    pub(crate) fn current_stream(&self) -> usize {
+        CURRENT_STREAM.with(Cell::get).min(self.lanes.len() - 1)
+    }
+
+    // buffer bytes this thread's stream hands out, which bound how long its batch records
+    pub(crate) fn count_allocated(&self, bytes: u64) {
+        self.lanes[self.current_stream()]
+            .allocated
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Appends `record`'s commands to this thread's stream without waiting for them; a batch that has grown long is
+    /// submitted. What the commands read or write must be [`Recorder::retain`]ed, or outlive the next
+    /// [`Self::synchronize`].
     pub fn record<T>(&self, record: impl FnOnce(&Recorder<'_>) -> Result<T>) -> Result<T> {
-        let mut stream = self.stream.lock().expect("vulkan stream poisoned");
+        let index = self.current_stream();
+        let lane = &self.lanes[index];
+        let mut stream = lane.stream.lock().expect("vulkan stream poisoned");
         self.live()?;
         let batch = stream.open(&self.device)?;
         let recorder = Recorder {
             context: self,
             buffer: batch.buffer,
+            stream: index,
+            serial: batch.serial,
+            waits: RefCell::new(Vec::new()),
             retained: RefCell::new(Vec::new()),
             dispatches: Cell::new(0),
             work: Cell::new(0),
@@ -380,58 +485,175 @@ impl Context {
         batch.owed = recorder.owed.get();
         batch.profiled = recorder.profiled.into_inner();
         batch.retained.append(&mut recorder.retained.into_inner());
+        batch.waits.append(&mut recorder.waits.into_inner());
         batch.dispatches += recorder.dispatches.get();
         batch.work += recorder.work.get();
         let dispatches = batch.dispatches;
-        let allocated = self.allocated.load(Ordering::Relaxed);
-        let since = allocated - self.flushed_at.load(Ordering::Relaxed);
+        let since =
+            lane.allocated.load(Ordering::Relaxed) - lane.flushed_at.load(Ordering::Relaxed);
         if dispatches >= DISPATCHES_PER_SUBMIT
             || batch.work >= WORK_PER_SUBMIT
             || since >= BYTES_PER_SUBMIT
+            || lane.flush_requested.load(Ordering::Acquire)
             || (dispatches >= DISPATCHES_WHEN_IDLE && stream.idle(&self.device)?)
         {
-            stream.flush(&self.device, self.queue, since)?;
-            self.flushed_at.store(allocated, Ordering::Relaxed);
+            self.flush_lane(index, &mut stream)?;
         }
         out
     }
 
-    /// Submits what is recorded without waiting for it.
+    // submits stream `index`'s open batch after the other streams' batches it waits for, then sees those submitted
+    fn flush_lane(&self, index: usize, stream: &mut Stream) -> Result<()> {
+        for (other, serial) in self.submit_lane(index, stream)? {
+            self.see_submitted(other, serial)?;
+        }
+        Ok(())
+    }
+
+    // submits stream `index`'s open batch after the other streams' batches it waits for; those batches
+    fn submit_lane(&self, index: usize, stream: &mut Stream) -> Result<Vec<(usize, u64)>> {
+        let lane = &self.lanes[index];
+        lane.flush_requested.store(false, Ordering::Release);
+        let allocated = lane.allocated.load(Ordering::Relaxed);
+        let since = allocated - lane.flushed_at.swap(allocated, Ordering::Relaxed);
+        let mut needs: Vec<(usize, u64)> = Vec::new();
+        for &(other, serial) in stream.open_waits() {
+            match needs.iter_mut().find(|(o, _)| *o == other) {
+                Some(need) => need.1 = need.1.max(serial),
+                None => needs.push((other, serial)),
+            }
+        }
+        needs.retain(|&(other, serial)| !self.finished(other, serial));
+        let waits: Vec<_> = needs
+            .iter()
+            .map(|&(other, serial)| (self.lanes[other].timeline, serial))
+            .collect();
+        stream.flush(&self.device, since, &waits)?;
+        lane.submitted.store(stream.submitted, Ordering::Release);
+        Ok(needs)
+    }
+
+    // waits until stream `index` has submitted batch `serial`: asked of whoever holds the stream, or done here. Its
+    // holder never waits on another stream's lock, so this ends once it lets go.
+    fn see_submitted(&self, index: usize, serial: u64) -> Result<()> {
+        let lane = &self.lanes[index];
+        while lane.submitted.load(Ordering::Acquire) < serial {
+            lane.flush_requested.store(true, Ordering::Release);
+            match lane.stream.try_lock() {
+                Ok(mut stream) => {
+                    if stream.submitted < serial {
+                        self.flush_lane(index, &mut stream)?;
+                    }
+                }
+                Err(_) => std::thread::yield_now(),
+            }
+        }
+        Ok(())
+    }
+
+    // whether stream `index`'s batch `serial` has finished
+    pub(crate) fn finished(&self, index: usize, serial: u64) -> bool {
+        let lane = &self.lanes[index];
+        if lane.completed.load(Ordering::Acquire) >= serial {
+            return true;
+        }
+        // SAFETY: the semaphore belongs to this device
+        let value = unsafe { self.device.get_semaphore_counter_value(lane.timeline) }.unwrap_or(0);
+        lane.completed.fetch_max(value, Ordering::AcqRel);
+        value >= serial
+    }
+
+    /// Waits for stream `index`'s batch `serial`, submitting it first if it still records; called with no stream's
+    /// lock held.
+    pub(crate) fn wait_for(&self, index: usize, serial: u64) -> Result<()> {
+        if self.finished(index, serial) {
+            return Ok(());
+        }
+        self.see_submitted(index, serial)?;
+        let semaphores = [self.lanes[index].timeline];
+        let values = [serial];
+        let wait = vk::SemaphoreWaitInfo::default()
+            .semaphores(&semaphores)
+            .values(&values);
+        // SAFETY: the semaphore belongs to this device and the batch it waits for is submitted
+        unsafe { self.device.wait_semaphores(&wait, u64::MAX)? };
+        self.lanes[index]
+            .completed
+            .fetch_max(serial, Ordering::AcqRel);
+        Ok(())
+    }
+
     // the matrix-core kernels where the prompt matmuls take them
     pub(crate) fn matmul_coop(&self) -> Option<&crate::kernels::CoopKernels> {
         self.coop.as_ref().filter(|_| self.coop_matmuls)
     }
 
+    /// Submits what this thread's stream recorded without waiting for it.
     pub fn flush(&self) -> Result<()> {
-        let mut stream = self.stream.lock().expect("vulkan stream poisoned");
+        let index = self.current_stream();
+        let mut stream = self.lanes[index]
+            .stream
+            .lock()
+            .expect("vulkan stream poisoned");
         self.live()?;
-        let allocated = self.allocated.load(Ordering::Relaxed);
-        let since = allocated - self.flushed_at.swap(allocated, Ordering::Relaxed);
-        stream.flush(&self.device, self.queue, since)
+        self.flush_lane(index, &mut stream)
     }
 
-    /// Submits what is recorded and waits for the GPU to finish everything submitted.
+    /// Submits what this thread's stream recorded and waits for the GPU to finish everything submitted on it.
     pub fn synchronize(&self) -> Result<()> {
-        let mut stream = self.stream.lock().expect("vulkan stream poisoned");
+        let index = self.current_stream();
+        let mut stream = self.lanes[index]
+            .stream
+            .lock()
+            .expect("vulkan stream poisoned");
         self.live()?;
-        stream.synchronize(&self.device, self.queue)
+        self.flush_lane(index, &mut stream)?;
+        stream.reap(&self.device, true)
     }
 
-    /// [`Self::synchronize`] unless the stream is in use (a buffer allocated while recording), so it never waits on
-    /// itself; whether it waited.
+    /// [`Self::synchronize`] on every stream.
+    pub fn synchronize_all(&self) -> Result<()> {
+        for index in 0..self.lanes.len() {
+            let mut stream = self.lanes[index]
+                .stream
+                .lock()
+                .expect("vulkan stream poisoned");
+            self.live()?;
+            self.flush_lane(index, &mut stream)?;
+            stream.reap(&self.device, true)?;
+        }
+        Ok(())
+    }
+
+    /// [`Self::synchronize_all`], skipping a stream in use (a buffer allocated while recording, here or on another
+    /// thread), so it never waits on itself; whether every stream finished.
     pub(crate) fn try_synchronize(&self) -> Result<bool> {
-        let Ok(mut stream) = self.stream.try_lock() else {
-            return Ok(false);
-        };
-        self.live()?;
-        stream.synchronize(&self.device, self.queue)?;
-        Ok(true)
+        let mut all = true;
+        for index in 0..self.lanes.len() {
+            let Ok(mut stream) = self.lanes[index].stream.try_lock() else {
+                all = false;
+                continue;
+            };
+            self.live()?;
+            self.flush_lane(index, &mut stream)?;
+            stream.reap(&self.device, true)?;
+        }
+        Ok(all)
     }
 
-    /// Waits for the oldest submitted batch, returning its buffers to the pool, unless the stream is in use or nothing is
-    /// in flight; whether it waited.
+    // whether no stream has work recorded or running, asked without waiting for any
+    pub(crate) fn quiet(&self) -> bool {
+        self.lanes.iter().all(|lane| {
+            lane.stream
+                .try_lock()
+                .is_ok_and(|stream| stream.quiet(&self.device).unwrap_or(false))
+        })
+    }
+
+    /// Waits for the oldest batch this thread's stream submitted, returning its buffers to the pool, unless the stream
+    /// is in use or nothing is in flight; whether it waited.
     pub(crate) fn try_wait_oldest(&self) -> Result<bool> {
-        let Ok(mut stream) = self.stream.try_lock() else {
+        let Ok(mut stream) = self.lanes[self.current_stream()].stream.try_lock() else {
             return Ok(false);
         };
         self.live()?;
@@ -558,10 +780,30 @@ impl Recorder<'_> {
     /// the buffer, which goes back to the pool for later-recorded work when its last user drops it.
     pub fn retain(&self, resource: Retained) {
         let resource = match resource.downcast::<crate::Buffer>() {
-            Ok(buffer) => buffer.retained(),
-            Err(other) => other,
+            Ok(buffer) => {
+                self.note(buffer.usage());
+                buffer.retained()
+            }
+            Err(other) => match other.downcast::<crate::memory::Held>() {
+                Ok(held) => {
+                    self.note(held.usage());
+                    held
+                }
+                Err(other) => other,
+            },
         };
         self.retained.borrow_mut().push(resource);
+    }
+
+    /// Marks a buffer's memory used by this batch: the batch that wrote it, if another stream's and unfinished, is
+    /// waited for first.
+    pub(crate) fn note(&self, usage: &crate::memory::Usage) {
+        if let Some((stream, serial)) = usage.note(self.stream, self.serial)
+            && stream != self.stream
+            && !self.context.finished(stream, serial)
+        {
+            self.waits.borrow_mut().push((stream, serial));
+        }
     }
 }
 
@@ -581,10 +823,7 @@ impl Context {
     /// those leak when they drop and recording fails. For process exit, which otherwise tears the driver down under
     /// its own still-running threads (NVIDIA's crash there).
     pub fn shut_down(&self) {
-        let mut stream = self
-            .stream
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut streams = self.lock_streams();
         if self.shut.swap(true, std::sync::atomic::Ordering::AcqRel) {
             return;
         }
@@ -592,14 +831,35 @@ impl Context {
             .pool
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // SAFETY: the stream's lock keeps every recording out, the GPU is idle after the wait, and nothing uses the
+        // SAFETY: the streams' locks keep every recording out, the GPU is idle after the wait, and nothing uses the
         // device after `shut` (buffers leak, recording fails)
-        unsafe { self.destroy(&mut stream, &mut pool) };
+        unsafe { self.destroy(&mut streams, &mut pool) };
+    }
+
+    fn lock_streams(&self) -> Vec<std::sync::MutexGuard<'_, Stream>> {
+        self.lanes
+            .iter()
+            .map(|lane| {
+                lane.stream
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+            })
+            .collect()
     }
 
     // SAFETY: no submit may still run, nor anything use the device after
-    unsafe fn destroy(&self, stream: &mut Stream, pool: &mut BufferPool) {
-        let _ = stream.synchronize(&self.device, self.queue);
+    unsafe fn destroy(
+        &self,
+        streams: &mut [std::sync::MutexGuard<'_, Stream>],
+        pool: &mut BufferPool,
+    ) {
+        // every stream submitted before any is waited on: a batch may wait on another stream's
+        for (index, stream) in streams.iter_mut().enumerate() {
+            let _ = self.submit_lane(index, stream);
+        }
+        for stream in streams.iter_mut() {
+            let _ = stream.reap(&self.device, true);
+        }
         // SAFETY: the caller's contract; every object here was created from this device
         unsafe {
             let _ = self.device.device_wait_idle();
@@ -607,7 +867,9 @@ impl Context {
             if let Some(coop) = &self.coop {
                 coop.destroy(&self.device);
             }
-            stream.destroy(&self.device);
+            for stream in streams.iter_mut() {
+                stream.destroy(&self.device);
+            }
             pool.destroy(&self.device);
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
@@ -620,16 +882,13 @@ impl Drop for Context {
         if self.is_shut() {
             return;
         }
-        let mut stream = self
-            .stream
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut streams = self.lock_streams();
         let mut pool = self
             .pool
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         // SAFETY: the last reference is dropping, so nothing else records or uses the device
-        unsafe { self.destroy(&mut stream, &mut pool) };
+        unsafe { self.destroy(&mut streams, &mut pool) };
     }
 }
 

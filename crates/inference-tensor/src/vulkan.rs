@@ -447,6 +447,30 @@ pub fn flash_attn(op: &FlashAttn<'_>) -> Result<Option<Tensor>> {
     }
 }
 
+/// Records this thread's work on `device` on `key`'s own stream (its own queue, beside other keys' work) until the
+/// scope drops: `key` names one model, which shares nothing with the others but its loaded weights. Nothing on a device
+/// with one stream, or another kind of device.
+#[must_use]
+pub struct StreamScope {
+    #[cfg(feature = "vulkan")]
+    _scope: Option<inference_vulkan::StreamScope>,
+}
+
+pub fn stream_scope(device: &crate::Device, key: usize) -> StreamScope {
+    #[cfg(feature = "vulkan")]
+    return StreamScope {
+        _scope: device
+            .as_vulkan_device()
+            .ok()
+            .map(|d| d.context().stream_scope(key)),
+    };
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = (device, key);
+        StreamScope {}
+    }
+}
+
 /// Frees `device`'s idle pooled buffers where they are host RAM (an iGPU); nothing elsewhere.
 pub fn release_idle_memory(device: &crate::Device) {
     #[cfg(feature = "vulkan")]
