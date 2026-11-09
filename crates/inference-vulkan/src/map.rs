@@ -1,4 +1,4 @@
-//! Elementwise maps over strided operands: `map_f32` and `map_bf16` compute, `copy_b32` and `copy_b16` copy 4- and
+//! Elementwise maps over strided operands: `map_f32` and `map_half` compute, `copy_b32` and `copy_b16` copy 4- and
 //! 2-byte elements bit for bit.
 
 use std::sync::Arc;
@@ -75,13 +75,20 @@ impl MapOp {
     }
 }
 
-// what a map's kernel reads and writes: f32 or bf16 values, or 4- or 2-byte elements bit for bit
+// what a map's kernel reads and writes: f32 or 16-bit float values, or 4- or 2-byte elements bit for bit
 #[derive(Clone, Copy, PartialEq)]
 enum Elements {
     F32,
-    Bf16,
+    Half(Half),
     Bits32,
     Bits16,
+}
+
+/// The 16-bit float format of a kernel's operands, computed in f32 either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Half {
+    Bf16,
+    F16,
 }
 
 /// One operand: its buffer, the element its first index starts at, and its stride along each of the map's dims.
@@ -108,10 +115,10 @@ impl Recorder<'_> {
         self.map(map, params, Elements::F32)
     }
 
-    /// [`Self::map_f32`] over bf16 operands, computed in f32.
-    pub fn map_bf16(&self, map: &Map<'_>) -> Result<()> {
+    /// [`Self::map_f32`] over 16-bit float operands, computed in f32.
+    pub fn map_half(&self, map: &Map<'_>, half: Half) -> Result<()> {
         let params = map.params.map(f32::to_bits);
-        self.map(map, params, Elements::Bf16)
+        self.map(map, params, Elements::Half(half))
     }
 
     /// [`Self::copy_b32`] over 2-byte elements, `fill` the half `Fill` writes.
@@ -177,7 +184,8 @@ impl Recorder<'_> {
         let kernels = &self.context.kernels;
         let pipeline = match elements {
             Elements::F32 => &kernels.map_f32,
-            Elements::Bf16 => &kernels.map_bf16,
+            Elements::Half(Half::Bf16) => &kernels.map_bf16,
+            Elements::Half(Half::F16) => &kernels.map_f16,
             Elements::Bits32 => &kernels.copy_b32,
             Elements::Bits16 => &kernels.copy_b16,
         };

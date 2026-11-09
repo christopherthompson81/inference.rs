@@ -1,5 +1,5 @@
 #version 450
-// The per-row ops over bf16 rows.
+// The per-row ops over bf16 rows (f16 under HALF_F16).
 #extension GL_GOOGLE_include_directive : require
 #define BF16
 #include "rows_main.glsl"

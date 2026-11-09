@@ -4,9 +4,9 @@
 // memory as f16, the next step's loads in flight while each subgroup multiplies its 32 x 64 part as 16 x 16 x 16 f16
 // products into f32 accumulators. a's tile is k-contiguous; b's follows its unit stride, k (a transposed weight) or n.
 // Inputs past f16's range overflow, and each is rounded to f16, whose products f32 holds exactly. With B_HALF, b is
-// stored as f16 (a weight kept in f16), read as the f32 build reads it rounded. With BF16 a, b and c are bf16: four
-// values ride in a uvec2 (as few registers as an f16vec4) until the tile store rounds them to f16, and c goes out
-// through the staging tile.
+// stored as f16 (a weight kept in f16), read as the f32 build reads it rounded. With BF16 a, b and c are bf16 (f16
+// under HALF_F16): four values ride in a uvec2 (as few registers as an f16vec4) until the tile store rounds them to
+// f16, and c goes out through the staging tile.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_EXT_control_flow_attributes : require
@@ -24,7 +24,7 @@ layout(local_size_x = THREADS_X) in;
 
 #ifdef BF16
 #extension GL_GOOGLE_include_directive : require
-#include "bf16.glsl"
+#include "half.glsl"
 #define AVEC uvec2
 #define BVEC uvec2
 layout(std430, binding = 0) readonly buffer A { uint16_t a[]; };
@@ -37,8 +37,8 @@ layout(std430, binding = 2) buffer C { uint16_t c[]; };
 #define B_AT(i) uint(bm[i])
 
 f16vec4 tile4(uvec2 v) {
-    return f16vec4(bf16_bits_to_f32(v.x & 0xffffu), bf16_bits_to_f32(v.x >> 16),
-                   bf16_bits_to_f32(v.y & 0xffffu), bf16_bits_to_f32(v.y >> 16));
+    return f16vec4(half_to_f32(v.x & 0xffffu), half_to_f32(v.x >> 16),
+                   half_to_f32(v.y & 0xffffu), half_to_f32(v.y >> 16));
 }
 
 void pack(inout uvec2 v, uint i, uint bits) {
@@ -255,7 +255,7 @@ void main() {
                     uint r = row + e / TILE, cc = col + e % TILE;
                     if (r < pc.m && cc < pc.n) {
 #ifdef BF16
-                        c[c_base + r * pc.n + cc] = uint16_t(f32_to_bf16_bits(stage[sg][e]));
+                        c[c_base + r * pc.n + cc] = uint16_t(f32_to_half(stage[sg][e]));
 #else
                         c[c_base + r * pc.n + cc] = stage[sg][e];
 #endif

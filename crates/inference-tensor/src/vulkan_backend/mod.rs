@@ -5,7 +5,7 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
 use inference_vulkan::{
-    BlockType, Bound, Buffer, Context, MAX_DIMS, Map, MapOp, MatMul, MatOperand, MatVec,
+    BlockType, Bound, Buffer, Context, Half, MAX_DIMS, Map, MapOp, MatMul, MatOperand, MatVec,
     MatrixCores, Operand, RowOp, Rows, Select,
 };
 
@@ -237,9 +237,18 @@ fn copyable(dtype: DType) -> bool {
     word_sized(dtype) || matches!(dtype, DType::BF16 | DType::F16 | DType::I16)
 }
 
-// the dtypes the elementwise and row kernels compute over (bf16 in f32)
+// the dtypes the elementwise and row kernels compute over (the 16-bit floats in f32)
 fn computed(dtype: DType) -> bool {
-    matches!(dtype, DType::F32 | DType::BF16)
+    dtype == DType::F32 || half_of(dtype).is_some()
+}
+
+// the 16-bit float kernels' format for `dtype`
+fn half_of(dtype: DType) -> Option<Half> {
+    match dtype {
+        DType::BF16 => Some(Half::Bf16),
+        DType::F16 => Some(Half::F16),
+        _ => None,
+    }
 }
 
 impl VulkanStorage {
@@ -283,15 +292,12 @@ impl VulkanStorage {
             },
             params,
         };
-        let bf16 = self.dtype == DType::BF16;
+        let half = half_of(self.dtype);
         self.device
             .context
-            .record(|r| {
-                if bf16 {
-                    r.map_bf16(&map)
-                } else {
-                    r.map_f32(&map)
-                }
+            .record(|r| match half {
+                Some(half) => r.map_half(&map, half),
+                None => r.map_f32(&map),
             })
             .map_err(vk_err)?;
         Ok(out)
@@ -337,20 +343,23 @@ impl VulkanStorage {
         Ok(out)
     }
 
-    // `count` contiguous values from element `from`, converted between f32 and bf16
-    fn convert_bf16(&self, from: usize, count: usize, dtype: DType) -> Result<Self> {
+    // `count` contiguous values from element `from`, converted between f32 and a 16-bit float (one of the two f32)
+    fn convert_half(&self, from: usize, count: usize, dtype: DType) -> Result<Self> {
         let out = self.empty(count, dtype)?;
         let widen = dtype == DType::F32;
+        let half = half_of(if widen { self.dtype } else { dtype }).ok_or_else(|| {
+            crate::Error::Msg(format!("no {:?} to {dtype:?} conversion", self.dtype))
+        })?;
         self.device
             .context
-            .record(|r| r.convert_bf16((&self.buffer, from), count, &out.buffer, widen))
+            .record(|r| r.convert_half((&self.buffer, from), count, &out.buffer, widen, half))
             .map_err(vk_err)?;
         Ok(out)
     }
 
-    // the whole storage as f32, its layouts as valid over the copy as over `self`
+    // the whole 16-bit float storage as f32, its layouts as valid over the copy as over `self`
     fn widened(&self) -> Result<Self> {
-        self.convert_bf16(0, self.count, DType::F32)
+        self.convert_half(0, self.count, DType::F32)
     }
 
     // index_select (`gather` false) or gather of contiguous 32-bit `self` by contiguous u32 `ids` along `dim`
@@ -406,7 +415,7 @@ impl VulkanStorage {
         Some(recorded.map_err(vk_err).map(|()| out))
     }
 
-    // whether the elementwise kernels compute over it: f32 or bf16, of a rank they take
+    // whether the elementwise kernels compute over it: f32 or a 16-bit float, of a rank they take
     fn native(&self, l: &Layout) -> bool {
         computed(self.dtype) && l.shape().rank() <= MAX_DIMS
     }
@@ -421,7 +430,7 @@ pub(crate) fn rows(
     op: RowOp,
     eps: f32,
 ) -> Result<Option<(VulkanStorage, Shape)>> {
-    let bf16 = storage.dtype == DType::BF16;
+    let half = half_of(storage.dtype);
     let param_ok = |p: Option<(&VulkanStorage, &Layout)>| {
         p.is_none_or(|(a, al)| a.dtype == storage.dtype && al.is_contiguous())
     };
@@ -462,10 +471,9 @@ pub(crate) fn rows(
                 out: &out.buffer,
                 out_offset: 0,
             };
-            if bf16 {
-                r.rows_bf16(&op)
-            } else {
-                r.rows_f32(&op)
+            match half {
+                Some(half) => r.rows_half(&op, half),
+                None => r.rows_f32(&op),
             }
         })
         .map_err(vk_err)?;
@@ -1903,11 +1911,11 @@ impl BackendStorage for VulkanStorage {
                 return Ok(out);
             }
         }
-        // a bf16 reduction no kernel takes (over another dim) reduces an f32 copy
-        if self.dtype == DType::BF16 {
+        // a 16-bit reduction no kernel takes (over another dim) reduces an f32 copy
+        if half_of(self.dtype).is_some() {
             let out = self.widened()?.reduce_op(op, l, dims)?;
             if out.dtype == DType::F32 {
-                return out.to_dtype(&Layout::contiguous(out.count), DType::BF16);
+                return out.to_dtype(&Layout::contiguous(out.count), self.dtype);
             }
             return Ok(out);
         }
@@ -1922,33 +1930,7 @@ impl BackendStorage for VulkanStorage {
         if dtype == self.dtype && copyable(dtype) && l.shape().rank() <= MAX_DIMS {
             return self.contiguous_copy(l);
         }
-        // bf16 converts on the device through f32: a strided source is copied contiguous first
         let count = l.shape().elem_count();
-        if (self.dtype == DType::BF16 || dtype == DType::BF16) && l.shape().rank() <= MAX_DIMS {
-            let src = if self.dtype == DType::BF16 || self.dtype == DType::F32 {
-                if l.is_contiguous() {
-                    None
-                } else {
-                    Some(self.contiguous_copy(l)?)
-                }
-            } else {
-                Some(self.to_dtype(l, DType::F32)?)
-            };
-            let (src, from) = match &src {
-                Some(src) => (src, 0),
-                None => (self, l.start_offset()),
-            };
-            let flat = Layout::contiguous(count);
-            if src.dtype == DType::BF16 {
-                let wide = src.convert_bf16(from, count, DType::F32)?;
-                return if dtype == DType::F32 {
-                    Ok(wide)
-                } else {
-                    wide.to_dtype(&flat, dtype)
-                };
-            }
-            return src.convert_bf16(from, count, DType::BF16);
-        }
         // f16 and f32 convert on the device (a weight kept in f16, widened for a product the matrix cores do not take)
         if l.is_contiguous() {
             let at = (&self.buffer, l.start_offset());
@@ -1975,6 +1957,33 @@ impl BackendStorage for VulkanStorage {
                 }
                 _ => {}
             }
+        }
+        // a 16-bit float converts on the device through f32: a strided source is copied contiguous first
+        let (from_half, to_half) = (half_of(self.dtype).is_some(), half_of(dtype).is_some());
+        if (from_half || to_half) && l.shape().rank() <= MAX_DIMS {
+            let src = if from_half || self.dtype == DType::F32 {
+                if l.is_contiguous() {
+                    None
+                } else {
+                    Some(self.contiguous_copy(l)?)
+                }
+            } else {
+                Some(self.to_dtype(l, DType::F32)?)
+            };
+            let (src, from) = match &src {
+                Some(src) => (src, 0),
+                None => (self, l.start_offset()),
+            };
+            let flat = Layout::contiguous(count);
+            if half_of(src.dtype).is_some() {
+                let wide = src.convert_half(from, count, DType::F32)?;
+                return if dtype == DType::F32 {
+                    Ok(wide)
+                } else {
+                    wide.to_dtype(&flat, dtype)
+                };
+            }
+            return src.convert_half(from, count, dtype);
         }
         on_cpu!(self, |cpu| cpu.to_dtype(l, dtype))
     }
@@ -2021,7 +2030,7 @@ impl BackendStorage for VulkanStorage {
             let l_out = p.l_out();
             let out = self.empty(p.b_size * p.groups * p.c_out * l_out, self.dtype)?;
             let s = l.stride();
-            let bf16 = self.dtype == DType::BF16;
+            let half = half_of(self.dtype);
             self.device
                 .context
                 .record(|r| {
@@ -2044,10 +2053,9 @@ impl BackendStorage for VulkanStorage {
                         w: (&kernel.buffer, kernel_l.start_offset()),
                         out: &out.buffer,
                     };
-                    if bf16 {
-                        r.conv2d_bf16(&op)
-                    } else {
-                        r.conv2d_f32(&op)
+                    match half {
+                        Some(half) => r.conv2d_half(&op, half),
+                        None => r.conv2d_f32(&op),
                     }
                 })
                 .map_err(vk_err)?;
@@ -2083,7 +2091,7 @@ impl BackendStorage for VulkanStorage {
             let (o_h, o_w) = (p.out_h(), p.out_w());
             let out = self.empty(p.b_size * p.groups * p.c_out * o_h * o_w, self.dtype)?;
             let s = l.stride();
-            let bf16 = self.dtype == DType::BF16;
+            let half = half_of(self.dtype);
             self.device
                 .context
                 .record(|r| {
@@ -2106,10 +2114,9 @@ impl BackendStorage for VulkanStorage {
                         w: (&kernel.buffer, kernel_l.start_offset()),
                         out: &out.buffer,
                     };
-                    if bf16 {
-                        r.conv2d_bf16(&op)
-                    } else {
-                        r.conv2d_f32(&op)
+                    match half {
+                        Some(half) => r.conv2d_half(&op, half),
+                        None => r.conv2d_f32(&op),
                     }
                 })
                 .map_err(vk_err)?;
@@ -2273,17 +2280,17 @@ impl BackendStorage for VulkanStorage {
                 .map_err(vk_err)?;
             return Ok(out);
         }
-        if let (DType::BF16, DType::BF16, (Some(a_bs), Some(b_bs))) =
-            (self.dtype, rhs.dtype, strides)
+        if let (Some(half), true, (Some(a_bs), Some(b_bs))) =
+            (half_of(self.dtype), rhs.dtype == self.dtype, strides)
         {
             let (a_st, b_st) = (l.stride(), rhs_l.stride());
             let (ar, br) = (a_st.len(), b_st.len());
-            let out = self.empty(batch * m * n, DType::BF16)?;
+            let out = self.empty(batch * m * n, self.dtype)?;
             let recorded = self
                 .device
                 .context
                 .record(|r| {
-                    r.matmul_bf16(&MatMul {
+                    let op = MatMul {
                         batch,
                         m,
                         n,
@@ -2303,17 +2310,18 @@ impl BackendStorage for VulkanStorage {
                             col_stride: b_st[br - 1],
                         },
                         out: &out.buffer,
-                    })
+                    };
+                    r.matmul_half(&op, half)
                 })
                 .map_err(vk_err)?;
             if recorded {
                 return Ok(out);
             }
         }
-        // a bf16 product the matrix cores do not take (none, or too small for their tiles) runs in f32
-        if self.dtype == DType::BF16 && rhs.dtype == DType::BF16 {
+        // a 16-bit product the matrix cores do not take (none, or too small for their tiles) runs in f32
+        if half_of(self.dtype).is_some() && rhs.dtype == self.dtype {
             let product = self.widened()?.matmul(&rhs.widened()?, bmnk, l, rhs_l)?;
-            return product.to_dtype(&Layout::contiguous(batch * m * n), DType::BF16);
+            return product.to_dtype(&Layout::contiguous(batch * m * n), self.dtype);
         }
         on_cpu!(self, |cpu, rhs| cpu.matmul(&rhs, bmnk, l, rhs_l))
     }
@@ -3164,33 +3172,53 @@ mod tests {
         Ok(())
     }
 
-    // bf16 on the device against the CPU: conversions (ties included) and copies bit for bit, the maps and rows within
-    // a bf16 rounding of the CPU's bf16 ops, products and convolutions against f32 over the same bf16 values (matrix-core
-    // tiles and the f32 fallback below them)
+    // bf16 and f16 on the device against the CPU: conversions (ties included) and copies bit for bit, the maps and rows
+    // within a 16-bit rounding of the CPU's ops, products and convolutions against f32 over the same 16-bit values
+    // (matrix-core tiles and the f32 fallback below them)
     #[test]
-    fn vulkan_bf16_ops_match_the_cpu() -> Result<()> {
+    fn vulkan_half_ops_match_the_cpu() -> Result<()> {
         let Some(vk) = device() else { return Ok(()) };
-        let bf16 = DType::BF16;
-        let randn = |dims: &[usize]| Tensor::randn(0f32, 1., dims, &Device::Cpu);
-        let bits = |t: &Tensor| -> Result<Vec<u16>> {
-            Ok(t.flatten_all()?
-                .to_vec1::<half::bf16>()?
-                .into_iter()
-                .map(half::bf16::to_bits)
-                .collect())
-        };
-        // the halfway points between neighbouring bf16s round to even, as the CPU's
-        let ties: Vec<f32> = [
+        // the halfway points between neighbouring values round to even, as the CPU's; past the range is infinite
+        let bf16_ties = [
             0x3f80_8000u32,
             0x3f81_8000,
             0xc000_8000,
             0x7f7f_ffff,
             0x7f80_0000,
             0x0001_2345,
-        ]
-        .into_iter()
-        .map(f32::from_bits)
-        .collect();
+        ];
+        let f16_ties = [
+            0x3f80_1000u32,
+            0x3f80_3000,
+            0xc000_2000,
+            0x477f_f000,
+            0x7f7f_ffff,
+            0x3586_37bd,
+            0x7f80_0000,
+        ];
+        half_ops_match_the_cpu(&vk, DType::BF16, &bf16_ties)?;
+        half_ops_match_the_cpu(&vk, DType::F16, &f16_ties)
+    }
+
+    fn half_ops_match_the_cpu(vk: &Device, bf16: DType, ties: &[u32]) -> Result<()> {
+        let vk = vk.clone();
+        let randn = |dims: &[usize]| Tensor::randn(0f32, 1., dims, &Device::Cpu);
+        let bits = |t: &Tensor| -> Result<Vec<u16>> {
+            let t = t.flatten_all()?;
+            Ok(match t.dtype() {
+                DType::F16 => t
+                    .to_vec1::<half::f16>()?
+                    .into_iter()
+                    .map(half::f16::to_bits)
+                    .collect(),
+                _ => t
+                    .to_vec1::<half::bf16>()?
+                    .into_iter()
+                    .map(half::bf16::to_bits)
+                    .collect(),
+            })
+        };
+        let ties: Vec<f32> = ties.iter().copied().map(f32::from_bits).collect();
         let ties = Tensor::new(ties.as_slice(), &Device::Cpu)?;
         assert_eq!(
             bits(&ties.to_device(&vk)?.to_dtype(bf16)?)?,

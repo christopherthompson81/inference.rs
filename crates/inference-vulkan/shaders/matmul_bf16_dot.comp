@@ -1,5 +1,5 @@
 #version 450
-// The per-output product with a workgroup an output, over bf16 operands.
+// The per-output product with a workgroup an output, over bf16 operands (f16 under HALF_F16).
 #extension GL_GOOGLE_include_directive : require
 #define BF16
 #include "matmul_f32_dot_main.glsl"

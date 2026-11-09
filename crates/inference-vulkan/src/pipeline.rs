@@ -182,6 +182,8 @@ pub(crate) struct PipelineSpec {
     pub(crate) push_bytes: u32,
     pub(crate) name: &'static str,
     pub(crate) subgroup: Option<u32>,
+    // the shader's specialization constant 0 (a 16-bit float kernel's `HALF_F16`), where it is given
+    pub(crate) constant: Option<u32>,
 }
 
 impl PipelineSpec {
@@ -197,6 +199,14 @@ impl PipelineSpec {
             push_bytes,
             name,
             subgroup: None,
+            constant: None,
+        }
+    }
+
+    pub(crate) const fn constant(self, value: u32) -> Self {
+        Self {
+            constant: Some(value),
+            ..self
         }
     }
 
@@ -254,6 +264,7 @@ impl Pipeline {
             push_bytes,
             name,
             subgroup,
+            constant,
         } = *spec;
         let code = ash::util::read_spv(&mut std::io::Cursor::new(spirv))
             .map_err(|err| Error::Invalid(format!("embedded SPIR-V: {err}")))?;
@@ -296,6 +307,17 @@ impl Pipeline {
                 .name(c"main");
             if subgroup.is_some() {
                 stage = stage.push_next(&mut required);
+            }
+            let entries = [vk::SpecializationMapEntry::default()
+                .constant_id(0)
+                .offset(0)
+                .size(4)];
+            let data = constant.unwrap_or_default().to_ne_bytes();
+            let specialization = vk::SpecializationInfo::default()
+                .map_entries(&entries)
+                .data(&data);
+            if constant.is_some() {
+                stage = stage.specialization_info(&specialization);
             }
             let created = device.create_compute_pipelines(
                 cache,

@@ -35,14 +35,14 @@ const MATMUL_Q_PUSH_BYTES: u32 = 6 * 4;
 
 /// Every kernel's pipeline on one device: its field, its embedded SPIR-V, its storage buffers and push-constant bytes.
 macro_rules! kernels {
-    ($($name:ident: $spirv:ident, $bindings:expr, $push:expr;)*) => {
+    ($($name:ident: $spirv:ident, $bindings:expr, $push:expr $(, $constant:expr)?;)*) => {
         pub(crate) struct Kernels {
             $(pub(crate) $name: Pipeline,)*
         }
 
         impl Kernels {
             pub(crate) fn new(device: &ash::Device, cache: ash::vk::PipelineCache) -> Result<Self> {
-                let specs = [$(PipelineSpec::new(shaders::$spirv, $bindings, $push, stringify!($name)),)*];
+                let specs = [$(PipelineSpec::new(shaders::$spirv, $bindings, $push, stringify!($name))$(.constant($constant))?,)*];
                 let mut built = Pipeline::build_all(device, cache, &specs)?.into_iter();
                 Ok(Self {
                     $($name: built.next().expect("a pipeline a spec"),)*
@@ -98,6 +98,7 @@ kernels! {
     quantize_q8_1: QUANTIZE_Q8_1, QUANTIZE_BINDINGS, QUANTIZE_PUSH_BYTES;
     widen_f16: WIDEN_F16, CONVERT_BINDINGS, CONVERT_PUSH_BYTES;
     convert_bf16: CONVERT_BF16, CONVERT_BINDINGS, CONVERT_BF16_PUSH_BYTES;
+    convert_half_f16: CONVERT_BF16, CONVERT_BINDINGS, CONVERT_BF16_PUSH_BYTES, HALF_F16;
     mul_mm_q8_0: MUL_MM_Q8_0, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
     mul_mm_q5_0: MUL_MM_Q5_0, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
     mul_mm_q4_0: MUL_MM_Q4_0, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
@@ -111,20 +112,25 @@ kernels! {
     mul_mm_q3_k: MUL_MM_Q3_K, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
     map_f32: MAP_F32, MAP_BINDINGS, MAP_PUSH_BYTES;
     map_bf16: MAP_BF16, MAP_BINDINGS, MAP_PUSH_BYTES;
+    map_f16: MAP_BF16, MAP_BINDINGS, MAP_PUSH_BYTES, HALF_F16;
     copy_b32: COPY_B32, MAP_BINDINGS, MAP_PUSH_BYTES;
     copy_b16: COPY_B16, MAP_BINDINGS, MAP_PUSH_BYTES;
     rows_f32: ROWS_F32, ops::ROWS_BINDINGS, ops::ROWS_PUSH_BYTES;
     rows_bf16: ROWS_BF16, ops::ROWS_BINDINGS, ops::ROWS_PUSH_BYTES;
+    rows_f16: ROWS_BF16, ops::ROWS_BINDINGS, ops::ROWS_PUSH_BYTES, HALF_F16;
     rms_norm_q8: RMS_NORM_Q8, ops::RMS_Q8_BINDINGS, ops::RMS_Q8_PUSH_BYTES;
     relu2_q8: RELU2_Q8, crate::map::RELU2_Q8_BINDINGS, crate::map::RELU2_Q8_PUSH_BYTES;
     index_b32: INDEX_B32, ops::BINDINGS, ops::INDEX_PUSH_BYTES;
     matmul_f32: MATMUL_F32, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
     conv2d_f32: CONV2D_F32, ops::BINDINGS, ops::CONV2D_PUSH_BYTES;
     conv2d_bf16: CONV2D_BF16, ops::BINDINGS, ops::CONV2D_PUSH_BYTES;
+    conv2d_f16: CONV2D_BF16, ops::BINDINGS, ops::CONV2D_PUSH_BYTES, HALF_F16;
     im2col_bf16: IM2COL_BF16, ops::IM2COL_BINDINGS, ops::CONV2D_PUSH_BYTES;
     matmul_f32_dot: MATMUL_F32_DOT, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
     matmul_bf16: MATMUL_BF16, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
+    matmul_f16: MATMUL_BF16, ops::BINDINGS, ops::MATMUL_PUSH_BYTES, HALF_F16;
     matmul_bf16_dot: MATMUL_BF16_DOT, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
+    matmul_f16_dot: MATMUL_BF16_DOT, ops::BINDINGS, ops::MATMUL_PUSH_BYTES, HALF_F16;
     matmul_f32_tiled: MATMUL_F32_TILED, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
     matmul_f32_tiled32: MATMUL_F32_TILED32, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
     ssm_conv_step: SSM_CONV_STEP, ops::CONV_STEP_BINDINGS, ops::CONV_STEP_PUSH_BYTES;
@@ -305,8 +311,9 @@ pub(crate) struct CoopKernels {
     // the same over an f16 b
     pub(crate) matmul_f32_bh: Pipeline,
     pub(crate) matmul_bf16_cm: Pipeline,
-    // the three in 64 x 64 tiles: f32, f16 b, bf16
-    pub(crate) matmul_cm64: [Pipeline; 3],
+    pub(crate) matmul_f16_cm: Pipeline,
+    // the four in 64 x 64 tiles: f32, f16 b, bf16, f16
+    pub(crate) matmul_cm64: [Pipeline; 4],
     // prompt attention with a relative-position term
     pub(crate) flash_attn_relpos: Pipeline,
     // Q4_0 experts on NV_cooperative_matrix2, where the device has it: a build a tile width, 16 to 128 routes
@@ -330,6 +337,8 @@ const CONVERT_BINDINGS: usize = 2;
 const CONVERT_PUSH_BYTES: u32 = 3 * 4;
 // count, the two bases, and the direction
 const CONVERT_BF16_PUSH_BYTES: u32 = 4 * 4;
+// the 16-bit float kernels' specialization constant: their values f16 rather than bf16
+const HALF_F16: u32 = 1;
 pub(crate) const CONVERT_THREADS: usize = 256;
 
 impl CoopKernels {
@@ -498,15 +507,28 @@ impl CoopKernels {
             )
             .subgroup(subgroup),
         );
-        for (spirv, name) in [
-            (shaders::MATMUL_F32_CM64, "matmul_f32_cm64"),
-            (shaders::MATMUL_F32_CM64_BH, "matmul_f32_cm64_bh"),
-            (shaders::MATMUL_BF16_CM64, "matmul_bf16_cm64"),
+        specs.push(
+            PipelineSpec::new(
+                shaders::MATMUL_BF16_CM,
+                ops::BINDINGS,
+                ops::MATMUL_PUSH_BYTES,
+                "matmul_f16_cm",
+            )
+            .subgroup(subgroup)
+            .constant(HALF_F16),
+        );
+        for (spirv, name, constant) in [
+            (shaders::MATMUL_F32_CM64, "matmul_f32_cm64", None),
+            (shaders::MATMUL_F32_CM64_BH, "matmul_f32_cm64_bh", None),
+            (shaders::MATMUL_BF16_CM64, "matmul_bf16_cm64", None),
+            (shaders::MATMUL_BF16_CM64, "matmul_f16_cm64", Some(HALF_F16)),
         ] {
-            specs.push(
-                PipelineSpec::new(spirv, ops::BINDINGS, ops::MATMUL_PUSH_BYTES, name)
-                    .subgroup(subgroup),
-            );
+            let spec = PipelineSpec::new(spirv, ops::BINDINGS, ops::MATMUL_PUSH_BYTES, name)
+                .subgroup(subgroup);
+            specs.push(match constant {
+                Some(value) => spec.constant(value),
+                None => spec,
+            });
         }
         specs.push(
             PipelineSpec::new(
@@ -545,12 +567,12 @@ impl CoopKernels {
         let paged_prefill: [Pipeline; 3] =
             take(3).try_into().ok().expect("three prefill pipelines");
         let [flash_attn]: [Pipeline; 1] = take(1).try_into().ok().expect("one attention pipeline");
-        let [matmul_f32, matmul_f32_bh, matmul_bf16_cm]: [Pipeline; 3] =
-            take(3).try_into().ok().expect("three matmul pipelines");
-        let matmul_cm64: [Pipeline; 3] = take(3)
+        let [matmul_f32, matmul_f32_bh, matmul_bf16_cm, matmul_f16_cm]: [Pipeline; 4] =
+            take(4).try_into().ok().expect("four matmul pipelines");
+        let matmul_cm64: [Pipeline; 4] = take(4)
             .try_into()
             .ok()
-            .expect("three 64-tile matmul pipelines");
+            .expect("four 64-tile matmul pipelines");
         let [flash_attn_relpos]: [Pipeline; 1] = take(1)
             .try_into()
             .ok()
@@ -581,6 +603,7 @@ impl CoopKernels {
             matmul_f32,
             matmul_f32_bh,
             matmul_bf16_cm,
+            matmul_f16_cm,
             matmul_cm64,
             flash_attn_relpos,
             moe_mm_cm2,
@@ -878,18 +901,19 @@ impl Recorder<'_> {
         Ok(())
     }
 
-    /// `count` values at `src` into `dst` from its start: f32s as bf16s, or with `widen` bf16s as f32s.
-    pub fn convert_bf16(
+    /// `count` values at `src` into `dst` from its start: f32s as 16-bit floats, or with `widen` 16-bit floats as f32s.
+    pub fn convert_half(
         &self,
         src: crate::At<'_>,
         count: usize,
         dst: &Arc<Buffer>,
         widen: bool,
+        half: crate::Half,
     ) -> Result<()> {
         let (src_size, dst_size) = if widen { (2, 4) } else { (4, 2) };
         if src.0.len() / src_size < src.1 + count || dst.len() / dst_size < count {
             return Err(Error::Invalid(format!(
-                "a bf16 conversion of {count} values"
+                "a {half:?} conversion of {count} values"
             )));
         }
         if count == 0 {
@@ -897,7 +921,11 @@ impl Recorder<'_> {
         }
         let groups = count.div_ceil(CONVERT_THREADS);
         let groups_x = groups.min(MAX_GROUPS_X);
-        self.context.kernels.convert_bf16.dispatch(
+        let pipeline = match half {
+            crate::Half::Bf16 => &self.context.kernels.convert_bf16,
+            crate::Half::F16 => &self.context.kernels.convert_half_f16,
+        };
+        pipeline.dispatch(
             self,
             &[src.0.buffer, dst.buffer],
             &push_words(&[count, src.1, 0, usize::from(widen)])?,

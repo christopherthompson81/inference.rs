@@ -807,19 +807,26 @@ impl Loader for TranscriptionLoader {
     }
 }
 
-// `auto` on a discrete Vulkan GPU with matrix cores is bf16, as CUDA's auto is: activations half the size (a 10-minute
-// Parakeet request's working set), the products rounded to f16 on the matrix cores either way
+// `auto` is f16 where it would be bf16 on CUDA, and on a discrete Vulkan GPU with matrix cores: activations half the
+// size of f32's at bf16's speed, and a word moves from f32 about 1/8 as often as under bf16 (f16's three more bits;
+// transcription_deletions_investigation.md, Runs 4 and 5)
 fn audio_dtype(
     dtype: &dyn crate::TryIntoDType,
     device: &Device,
 ) -> Result<inference_tensor::DType> {
-    if dtype.is_auto()
-        && inference_tensor::vulkan::is_discrete(device)
+    use inference_tensor::DType;
+    if !dtype.is_auto() {
+        return dtype.try_into_dtype(&[device]);
+    }
+    if inference_tensor::vulkan::is_discrete(device)
         && inference_tensor::vulkan::has_matrix_cores(device)
     {
-        return Ok(inference_tensor::DType::BF16);
+        return Ok(DType::F16);
     }
-    dtype.try_into_dtype(&[device])
+    match dtype.try_into_dtype(&[device])? {
+        DType::BF16 if device.is_cuda() => Ok(DType::F16),
+        resolved => Ok(resolved),
+    }
 }
 
 impl TranscriptionPipeline {
