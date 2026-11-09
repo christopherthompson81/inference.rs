@@ -316,7 +316,7 @@ impl Context {
             lanes,
             assigned: Mutex::default(),
             next_stream: AtomicUsize::new(0),
-            pool: Mutex::default(),
+            pool: Mutex::new(BufferPool::new(unified)),
             kernels,
             coop,
             quantized: Mutex::default(),
