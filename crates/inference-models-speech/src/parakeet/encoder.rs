@@ -22,6 +22,8 @@ const QUERY_BLOCK: usize = 512;
 // the chunks a GPU has in flight each hold their own (a 780M over 10 minutes: 4 GB at 4096 frames, 2.9 GB at 1024, and
 // 1.4 GB once a batch also submits by the bytes it allocates)
 const SUBSAMPLING_CHUNK: usize = 1024;
+// feed-forward rows a GPU takes at a time: over 10 minutes the (t, 4 hidden) projection and its SiLU are 123 MB each
+const FEED_FORWARD_ROWS: usize = 2048;
 
 fn linear_maybe_bias(i: usize, o: usize, bias: bool, vb: VarBuilder) -> Result<Linear> {
     if bias {
@@ -203,6 +205,18 @@ impl FeedForward {
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let t = xs.dim(1)?;
+        if xs.device().is_cpu() || t <= FEED_FORWARD_ROWS {
+            return self.rows(xs);
+        }
+        let parts = (0..t)
+            .step_by(FEED_FORWARD_ROWS)
+            .map(|start| self.rows(&xs.narrow(1, start, FEED_FORWARD_ROWS.min(t - start))?))
+            .collect::<Result<Vec<_>>>()?;
+        Tensor::cat(&parts, 1)
+    }
+
+    fn rows(&self, xs: &Tensor) -> Result<Tensor> {
         let hidden = self.up.forward(xs)?;
         // the CPU's SiLU over the fresh projection in place: a second (t, 4 hidden) buffer was 123 MB over 10 minutes
         if inference_tensor::cpu::silu_in_place(&hidden)? {
@@ -705,14 +719,16 @@ impl Block {
         })
     }
 
-    fn forward(&self, xs: &Tensor, positions: &Tensor, blocks: &[QueryBlock]) -> Result<Tensor> {
-        let xs = (xs + (self.ff1.forward(&self.norm_ff1.forward(xs)?)? * FEED_FORWARD_WEIGHT)?)?;
-        let xs = (&xs
+    // each residual replaces the last: shadowing ones kept all five (t, hidden) copies to the end of the block
+    fn forward(&self, xs: Tensor, positions: &Tensor, blocks: &[QueryBlock]) -> Result<Tensor> {
+        let mut xs =
+            (&xs + (self.ff1.forward(&self.norm_ff1.forward(&xs)?)? * FEED_FORWARD_WEIGHT)?)?;
+        xs = (&xs
             + self
                 .attn
                 .forward(&self.norm_attn.forward(&xs)?, positions, blocks)?)?;
-        let xs = (&xs + self.conv.forward(&self.norm_conv.forward(&xs)?)?)?;
-        let xs = (&xs + (self.ff2.forward(&self.norm_ff2.forward(&xs)?)? * FEED_FORWARD_WEIGHT)?)?;
+        xs = (&xs + self.conv.forward(&self.norm_conv.forward(&xs)?)?)?;
+        xs = (&xs + (self.ff2.forward(&self.norm_ff2.forward(&xs)?)? * FEED_FORWARD_WEIGHT)?)?;
         self.norm_out.forward(&xs)
     }
 }
@@ -824,10 +840,12 @@ impl Encoder {
         })
     }
 
-    pub fn forward(&self, features: &Tensor) -> Result<Tensor> {
-        let xs = self.subsample(features)?;
+    // the features and the subsampled frames go once used, rather than live through every block
+    pub fn forward(&self, features: Tensor) -> Result<Tensor> {
+        let xs = self.subsample(&features)?;
+        drop(features);
         let positions = relative_positions(xs.dim(1)?, self.hidden, xs.dtype(), xs.device())?;
-        self.encode(&xs, &positions)
+        self.encode_owned(xs, &positions)
     }
 
     /// The pre-encode alone: `(1, frames, mels)` features to `(1, frames / factor, hidden)`, before input scaling.
@@ -837,10 +855,18 @@ impl Encoder {
 
     /// The conformer blocks over `subsample`'s output, `positions` being `relative_positions` for its length.
     pub fn encode(&self, xs: &Tensor, positions: &Tensor) -> Result<Tensor> {
+        self.encode_owned(xs.clone(), positions)
+    }
+
+    fn encode_owned(&self, xs: Tensor, positions: &Tensor) -> Result<Tensor> {
         let blocks = query_blocks(xs.dim(1)?, self.context, xs.dtype(), xs.device())?;
-        let mut xs = (xs * self.input_scale)?;
+        let mut xs = if self.input_scale == 1.0 {
+            xs
+        } else {
+            (xs * self.input_scale)?
+        };
         for block in &self.blocks {
-            xs = block.forward(&xs, positions, &blocks)?;
+            xs = block.forward(xs, positions, &blocks)?;
         }
         Ok(xs)
     }

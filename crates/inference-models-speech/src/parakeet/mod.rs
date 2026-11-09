@@ -476,7 +476,7 @@ impl Parakeet {
         let n_mels = self.mel.config().n_mels;
         let features =
             Tensor::from_vec(features, (1, frames, n_mels), &self.device)?.to_dtype(self.dtype)?;
-        let encoded = self.encoder.forward(&features)?;
+        let encoded = self.encoder.forward(features)?;
         match &self.prompts {
             Some(prompts) => prompts.forward(&encoded, prompts.id(language)?),
             None => Ok(encoded),
