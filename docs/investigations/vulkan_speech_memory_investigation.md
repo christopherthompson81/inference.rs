@@ -614,3 +614,32 @@ combined requests, profiler off, two servers:
 Streams now take ~0.25 s off the combined request (Run 12 measured them under the stall, which hid it); what is left to
 CUDA (~0.2 s) is about diar's own gap (0.84 against 0.67). The streams branch is a WIP (713 lines over context,
 memory and stream); it needs its tests and a review pass before it can go in.
+
+## Run 20 - 2026-11-09 15:10
+
+Question: Run 19's streams, ported onto master (owed barriers and the compute-only queue are in since #881): do they
+hold up, and what do they cost a lone model.
+
+Port: `vulkan-streams`' code on the new branch, its queue placement cut down. With the main queue already the
+compute-only family, the WIP's alternation between a graphics family and a compute family never ran, so a discrete GPU
+now takes up to MAX_STREAMS (4) queues of that one family (3090: 8 offered) and an iGPU keeps one; with one family,
+buffers stay EXCLUSIVE (the CONCURRENT sharing helper went). `scripts/local_ci.sh --lint --tests --vulkan`: clean, 68
+Vulkan and 3167 CPU tests passed; `two_streams_record_at_once` and `streams_wait_for_each_others_writes_and_reads`
+20 of 20 repeats.
+
+`first.sh` (NB=5), profiler off, backends alternated, Chrome and VS Code on the GPU as before:
+
+                 asr    diar   both
+    streams      2.45   0.85   2.72-2.86
+                 2.39   0.85   2.68-2.83
+    CUDA         2.39   0.69   2.59-2.62
+                 2.33   0.69   2.62-2.67
+
+`asr8.sh` (eight asr requests back to back), profiler off, the two binaries alternated:
+
+    master   2.32-2.42, 2.31-2.43
+    streams  2.37-2.52, 2.36-2.46
+
+Transcripts byte-identical. A lone model pays ~0.03 s a request on average for the cross-stream bookkeeping (within
+noise of master); the combined request comes down from 2.94-3.13 (Run 18, one queue) to 2.68-2.86, ~0.15 s from CUDA,
+about diar's own gap (0.85 against 0.69).

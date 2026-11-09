@@ -14,7 +14,7 @@ mod shaders {
     include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
 }
 
-pub use context::{Context, MatrixCores, NO_CM2_ENV, Recorder};
+pub use context::{Context, MatrixCores, NO_CM2_ENV, Recorder, StreamScope};
 pub use kernels::{BlockType, Embed, GluMatVec, MATVEC_MAX_ROWS, MatVec};
 pub use map::{MAX_DIMS, Map, MapOp, Operand};
 pub use memory::{Bound, Buffer, ImportedMemory, f32_bytes};

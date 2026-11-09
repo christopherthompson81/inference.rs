@@ -66,10 +66,15 @@ impl Owed {
 /// A resource a recorded command uses, kept alive until the command finishes.
 pub type Retained = Arc<dyn Any + Send + Sync>;
 
-/// Command buffers in order: the one recording, those submitted and not known finished, and spare ones. A submitted
-/// buffer keeps every resource its commands use alive until its fence signals.
+/// Command buffers in order on one queue: the one recording, those submitted and not known finished, and spare ones. A
+/// submitted buffer keeps every resource its commands use alive until its fence signals. Batches are numbered from 1;
+/// the stream's timeline semaphore takes each one's number as it finishes, so another stream's batch can wait on it.
 pub(crate) struct Stream {
     pool: vk::CommandPool,
+    queue: vk::Queue,
+    pub(crate) timeline: vk::Semaphore,
+    // the number of the last batch submitted
+    pub(crate) submitted: u64,
     pub(crate) profile: Option<Box<Profile>>,
     // the most submitted batches left unfinished, if bounded
     pub(crate) max_in_flight: Option<usize>,
@@ -83,6 +88,9 @@ pub(crate) struct Stream {
 pub(crate) struct Batch {
     pub(crate) buffer: vk::CommandBuffer,
     fence: vk::Fence,
+    pub(crate) serial: u64,
+    // other streams' batches it waits for, by stream: their numbers, unfinished when its commands were recorded
+    pub(crate) waits: Vec<(usize, u64)>,
     pub(crate) dispatches: usize,
     // the multiply-adds its heavy dispatches declared
     pub(crate) work: u64,
@@ -162,14 +170,28 @@ impl Profile {
 }
 
 impl Stream {
-    pub(crate) fn new(device: &ash::Device, family: u32) -> Result<Self> {
+    pub(crate) fn new(device: &ash::Device, family: u32, queue: vk::Queue) -> Result<Self> {
         let info = vk::CommandPoolCreateInfo::default()
             .queue_family_index(family)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
-        // SAFETY: the create info outlives the call
-        let pool = unsafe { device.create_command_pool(&info, None)? };
+        let mut timeline = vk::SemaphoreTypeCreateInfo::default()
+            .semaphore_type(vk::SemaphoreType::TIMELINE)
+            .initial_value(0);
+        // SAFETY: the create infos outlive the calls
+        let (pool, timeline) = unsafe {
+            (
+                device.create_command_pool(&info, None)?,
+                device.create_semaphore(
+                    &vk::SemaphoreCreateInfo::default().push_next(&mut timeline),
+                    None,
+                )?,
+            )
+        };
         Ok(Self {
             pool,
+            queue,
+            timeline,
+            submitted: 0,
             profile: None,
             max_in_flight: None,
             open: None,
@@ -206,6 +228,8 @@ impl Stream {
             self.open = Some(Batch {
                 buffer,
                 fence,
+                serial: self.submitted + 1,
+                waits: Vec::new(),
                 dispatches: 0,
                 work: 0,
                 retained: Vec::new(),
@@ -218,12 +242,18 @@ impl Stream {
         Ok(self.open.as_mut().expect("opened above"))
     }
 
-    /// Submits the open batch, if any, without waiting for it; it allocated `bytes` while recording.
+    /// The other streams' batches the open batch waits for.
+    pub(crate) fn open_waits(&self) -> &[(usize, u64)] {
+        self.open.as_ref().map_or(&[], |b| &b.waits)
+    }
+
+    /// Submits the open batch, if any, without waiting for it, after `waits` (other streams' timelines reaching the
+    /// values given); it allocated `bytes` while recording.
     pub(crate) fn flush(
         &mut self,
         device: &ash::Device,
-        queue: vk::Queue,
         bytes: u64,
+        waits: &[(vk::Semaphore, u64)],
     ) -> Result<()> {
         let Some(mut batch) = self.open.take() else {
             return Ok(());
@@ -231,15 +261,26 @@ impl Stream {
         batch.bytes = bytes;
         self.owed = batch.owed;
         let buffers = [batch.buffer];
-        // SAFETY: the buffer was begun in `open` and is ended once here; its fence is unsignaled
+        let (semaphores, values): (Vec<_>, Vec<_>) = waits.iter().copied().unzip();
+        let stages = vec![vk::PipelineStageFlags::ALL_COMMANDS; waits.len()];
+        let signal = [self.timeline];
+        let signal_values = [batch.serial];
+        let mut timeline = vk::TimelineSemaphoreSubmitInfo::default()
+            .wait_semaphore_values(&values)
+            .signal_semaphore_values(&signal_values);
+        let submit = vk::SubmitInfo::default()
+            .command_buffers(&buffers)
+            .wait_semaphores(&semaphores)
+            .wait_dst_stage_mask(&stages)
+            .signal_semaphores(&signal)
+            .push_next(&mut timeline);
+        // SAFETY: the buffer was begun in `open` and is ended once here; its fence is unsignaled, and the timeline's
+        // value rises with each batch
         unsafe {
             device.end_command_buffer(batch.buffer)?;
-            device.queue_submit(
-                queue,
-                &[vk::SubmitInfo::default().command_buffers(&buffers)],
-                batch.fence,
-            )?;
+            device.queue_submit(self.queue, &[submit], batch.fence)?;
         }
+        self.submitted = batch.serial;
         self.in_flight.push_back(batch);
         if let Some(max) = self.max_in_flight {
             let held = |s: &Self| s.in_flight.iter().map(|b| b.bytes).sum::<u64>();
@@ -250,6 +291,11 @@ impl Stream {
             }
         }
         self.reap(device, false)
+    }
+
+    /// Whether nothing is recorded and unsubmitted, and every submitted batch has finished.
+    pub(crate) fn quiet(&self, device: &ash::Device) -> Result<bool> {
+        Ok(self.open.is_none() && self.idle(device)?)
     }
 
     /// Whether every submitted batch has finished.
@@ -272,14 +318,8 @@ impl Stream {
         Ok(true)
     }
 
-    /// Submits the open batch and waits for everything submitted.
-    pub(crate) fn synchronize(&mut self, device: &ash::Device, queue: vk::Queue) -> Result<()> {
-        self.flush(device, queue, 0)?;
-        self.reap(device, true)
-    }
-
     // releases the batches that finished (all of them, waiting, when `wait`), keeping their buffers as spares
-    fn reap(&mut self, device: &ash::Device, wait: bool) -> Result<()> {
+    pub(crate) fn reap(&mut self, device: &ash::Device, wait: bool) -> Result<()> {
         let mut profile = self.profile.as_mut();
         while let Some(batch) = self.in_flight.front() {
             // SAFETY: the fence belongs to this device and was submitted with its batch
@@ -327,6 +367,7 @@ impl Stream {
             for (_, fence) in self.spare.drain(..) {
                 device.destroy_fence(fence, None);
             }
+            device.destroy_semaphore(self.timeline, None);
             device.destroy_command_pool(self.pool, None);
         }
     }

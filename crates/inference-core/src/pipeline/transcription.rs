@@ -1006,6 +1006,11 @@ impl Pipeline for TranscriptionPipeline {
         return_raw_logits: bool,
     ) -> inference_tensor::Result<ForwardInputsResult> {
         assert!(!return_raw_logits);
+        // its own Vulkan stream, so a transcription and its diarization overlap on the GPU as CUDA's streams do
+        let _stream = inference_tensor::vulkan::stream_scope(
+            self.model.device(),
+            std::ptr::from_ref(self).addr(),
+        );
         let ModelInputs {
             audios,
             options,
