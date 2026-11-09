@@ -239,7 +239,36 @@ pub fn decode_file_to_wav(
         },
     };
     let partial = out.with_extension("part");
-    let mut writer = hound::WavWriter::create(&partial, spec)?;
+    let written = write_wav(&mut decoder, &partial, spec, rate, mono);
+    match written {
+        Ok(frames) => {
+            std::fs::rename(&partial, out)?;
+            Ok(DecodedWav {
+                frames,
+                sample_rate: rate,
+                channels,
+            })
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&partial);
+            Err(error)
+        }
+    }
+}
+
+// `decoder`'s audio into a WAV at `path` as `spec` says, resampled to `rate`, downmixed with `mono`; its frames
+fn write_wav(
+    decoder: &mut Decoder,
+    path: &std::path::Path,
+    spec: hound::WavSpec,
+    rate: u32,
+    mono: bool,
+) -> Result<u64> {
+    let (channels, float) = (
+        spec.channels,
+        spec.sample_format == hound::SampleFormat::Float,
+    );
+    let mut writer = hound::WavWriter::create(path, spec)?;
     let mut resamplers = (0..channels)
         .map(|_| mel::StreamResampler::new(decoder.sample_rate, rate))
         .collect::<Result<Vec<_>>>()?;
@@ -291,12 +320,7 @@ pub fn decode_file_to_wav(
         .collect::<Result<Vec<_>>>()?;
     frames += write(&tails, &mut writer)?;
     writer.finalize()?;
-    std::fs::rename(&partial, out)?;
-    Ok(DecodedWav {
-        frames,
-        sample_rate: rate,
-        channels,
-    })
+    Ok(frames)
 }
 
 // a container's first audio track, decoded a packet at a time
@@ -319,7 +343,11 @@ impl Decoder {
         let probed = symphonia::default::get_probe().format(
             &Hint::new(),
             mss,
-            &FormatOptions::default(),
+            // gapless: MP3's LAME delay and padding, and Ogg's pre-skip and end trim, cut from the packets
+            &FormatOptions {
+                enable_gapless: true,
+                ..Default::default()
+            },
             &MetadataOptions::default(),
         )?;
         let format = probed.format;
@@ -492,11 +520,19 @@ impl Codec {
                 let frames = decoder
                     .decode(packet.buf(), OPUS_MAX_FRAMES, pcm)
                     .map_err(|e| anyhow::anyhow!("Opus: {e:?}"))?;
-                let dropped = (*skip).min(frames);
-                *skip -= dropped;
-                // the last packet's padding stays (a few ms): no container states the length reliably enough to cut it
+                let (front, back) = (packet.trim_start as usize, packet.trim_end as usize);
+                // a container that trims (Ogg, gapless) trims the pre-skip too; Matroska leaves it to the header's
+                let start = if front > 0 {
+                    *skip = 0;
+                    front.min(frames)
+                } else {
+                    let dropped = (*skip).min(frames);
+                    *skip -= dropped;
+                    dropped
+                };
+                let end = frames.saturating_sub(back).max(start);
                 let c = usize::from(*channels);
-                out.extend_from_slice(&pcm[dropped * c..frames * c]);
+                out.extend_from_slice(&pcm[start * c..end * c]);
                 Ok(Some(*channels))
             }
         }
@@ -566,17 +602,14 @@ mod tests {
     }
 
     // a synthetic 1 s 440 Hz tone, encoded by ffmpeg's libopus at 16 kbit/s into Ogg: decoded at 48 kHz, its pre-skip
-    // dropped (a packet's padding at most past the second), the tone's pitch intact
+    // and end trim cut (gapless), the tone's pitch intact
     #[cfg(feature = "opus")]
     #[test]
     fn opus_decodes_at_48_khz_past_its_pre_skip() {
         const RATE: usize = 48_000;
-        // one 20 ms packet's frames, the most padding the last one adds
-        const PACKET: usize = 960;
         let audio = AudioInput::from_bytes(include_bytes!("fixtures/tone_440hz_1s.opus")).unwrap();
         assert_eq!((audio.sample_rate, audio.channels), (RATE as u32, 1));
-        let frames = audio.samples.len();
-        assert!((RATE..=RATE + PACKET).contains(&frames), "{frames} frames");
+        assert_eq!(audio.samples.len(), RATE);
         // the steady middle crosses zero twice a cycle
         let middle = &audio.samples[RATE / 4..3 * RATE / 4];
         let crossings = middle
@@ -651,6 +684,31 @@ mod tests {
             (48_000, 1, "opus")
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // a synthetic 0.5 s 16 kHz tone encoded by LAME: its encoder delay and padding cut (gapless), so it starts and ends
+    // where the tone does, as ffmpeg decodes it
+    #[test]
+    fn an_mp3_decodes_without_its_encoder_delay() {
+        let audio =
+            AudioInput::from_bytes(include_bytes!("fixtures/tone_440hz_half_s.mp3")).unwrap();
+        assert_eq!((audio.sample_rate, audio.channels), (16_000, 1));
+        assert_eq!(audio.samples.len(), 8_000);
+        // the tone starts at once: no delay's worth of near silence before it
+        assert!(audio.samples[..64].iter().any(|s| s.abs() > 0.05));
+    }
+
+    // input that fills the resampler's chunks exactly leaves nothing pending, and finishing still flushes its filter
+    #[test]
+    fn a_stream_resampler_finishes_on_a_whole_chunk() {
+        let mut resampler = crate::mel::StreamResampler::new(44_100, 16_000).unwrap();
+        let input = vec![0.25f32; 1024 * 40];
+        let mut out = resampler.push(&input).unwrap();
+        out.extend(resampler.finish().unwrap());
+        assert_eq!(
+            out.len(),
+            (input.len() as f64 * 16_000.0 / 44_100.0).round() as usize
+        );
     }
 
     #[test]
