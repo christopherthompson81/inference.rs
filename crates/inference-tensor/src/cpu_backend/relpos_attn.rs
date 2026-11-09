@@ -1,11 +1,13 @@
-//! Transformer-XL relative-position attention fused on AVX-512 BF16 (`vdpbf16ps`), a query head a key head:
-//! score(i, j) = qc_i . k_j + qp_i . p[pos_base - i + j], with qc = (q + bias_u) scale and qp = (q + bias_v) scale
-//! made as the queries are packed, a softmax over the keys,
-//! times v, with no (rows, keys) scores leaving cache. A task takes `R` query rows of a head and walks the keys `C` at
-//! a time: content scores against the chunk, position scores against the `R + C - 1` position rows its (row, key)
-//! pairs read (one contiguous span), each pair's diagonal entry added, an online softmax, and P V into the rows'
-//! outputs. Keys, values and positions are packed as bf16 pairs once a call; `R` and `C` multiples of the panel width
-//! keep every span on the same alignment of the positions' panels, so they are packed once too.
+//! Transformer-XL relative-position attention fused on AVX-512 BF16 (`vdpbf16ps`), a query head a key head: score(i, j)
+//! = qc_i . k_j + qp_i . p[pos_base - i + j], with qc = (q + bias_u) scale and qp = (q + bias_v) scale made as the
+//! queries are packed, a softmax over the keys, times v, with no (rows, keys) scores leaving cache. A task takes `R`
+//! query rows of a head and walks the keys `C` at a time: content scores against the chunk, position scores against the
+//! `R + C - 1` position rows its (row, key) pairs read (one contiguous span), each pair's diagonal entry added, an
+//! online softmax, and P V into the rows' outputs. Keys, values and positions are packed as bf16 pairs once a call; `R`
+//! and `C` multiples of the panel width keep every span on the same alignment of the positions' panels, so they are
+//! packed once too. The position scores add an int8 product (`vpdpbusd`) of what bf16 left of each position row, on a
+//! scale a row: bf16 positions alone moved a sentence break between two speakers, and two bf16 terms cost 12.8 % of a
+//! transcription against the int8 term's 7.7 %.
 
 /// The operands as a layer's projections give them, contiguous f32 rows of `heads * d` (head h's d values at column
 /// h * d): queries `(t, ..)`, keys and values `(keys, ..)`, positions `(p_rows, ..)`, the biases `heads * d` values;
@@ -28,9 +30,16 @@ pub struct RelPosAttn<'a> {
     pub pos_base: usize,
 }
 
-/// Whether the kernel takes a head size: whole panels of values, on a CPU that multiplies bf16 pairs.
+/// Whether the kernel takes a head size: whole panels of values, on a CPU that multiplies bf16 pairs and int8 quads.
 pub fn supports(d: usize) -> bool {
-    d > 0 && d.is_multiple_of(32) && super::gemm_bf16::available()
+    d > 0 && d.is_multiple_of(32) && super::gemm_bf16::available() && vnni()
+}
+
+fn vnni() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    return std::arch::is_x86_feature_detected!("avx512vnni");
+    #[cfg(not(target_arch = "x86_64"))]
+    false
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -153,6 +162,163 @@ mod x86 {
                 }
             });
         out
+    }
+
+    // the int8 correction of the position scores: each position row's remainder after bf16 (p - bf16(p)) and each
+    // position query, quantized to int8 on a scale of their own, so q . p_lo (~2^-8 of the score) keeps ~7 bits
+    const I8_MAX: f32 = 127.0;
+    // the queries ride unsigned (`vpdpbusd` takes u8 x i8): this much added, taken off again through the column sums
+    const U8_OFFSET: i32 = 128;
+    // int8 values a u32 holds
+    const QUAD: usize = 4;
+
+    // `values` (a multiple of 16) on int8's scale, `max |v| / 127`, rounded to nearest even and offset by `offset`,
+    // four bytes a u32 into `out`; the scale and the unoffset values' sum
+    #[target_feature(enable = "avx512f")]
+    unsafe fn quads(values: &[f32], offset: i32, mut out: impl FnMut(usize, u32)) -> (f32, i32) {
+        let chunks = values.as_chunks::<LANES>().0;
+        let mut peak = _mm512_setzero_ps();
+        for chunk in chunks {
+            // SAFETY: the chunk holds LANES floats
+            peak = _mm512_max_ps(
+                peak,
+                _mm512_abs_ps(unsafe { _mm512_loadu_ps(chunk.as_ptr()) }),
+            );
+        }
+        let scale = _mm512_reduce_max_ps(peak) / I8_MAX;
+        let inv = _mm512_set1_ps(if scale > 0.0 { 1.0 / scale } else { 0.0 });
+        let (low, high) = (
+            _mm512_set1_epi32(-(I8_MAX as i32)),
+            _mm512_set1_epi32(I8_MAX as i32),
+        );
+        let mut sum = _mm512_setzero_si512();
+        for (c, chunk) in chunks.iter().enumerate() {
+            // SAFETY: as above
+            let x = unsafe { _mm512_loadu_ps(chunk.as_ptr()) };
+            let q = _mm512_min_epi32(
+                _mm512_max_epi32(_mm512_cvtps_epi32(_mm512_mul_ps(x, inv)), low),
+                high,
+            );
+            sum = _mm512_add_epi32(sum, q);
+            let bytes = _mm512_cvtepi32_epi8(_mm512_add_epi32(q, _mm512_set1_epi32(offset)));
+            // SAFETY: 16 bytes are 4 u32s
+            let words: [u32; LANES / QUAD] = unsafe { std::mem::transmute(bytes) };
+            for (w, word) in words.into_iter().enumerate() {
+                out(c * LANES / QUAD + w, word);
+            }
+        }
+        (scale, _mm512_reduce_add_epi32(sum))
+    }
+
+    // the position queries, (x + bias) scale, as (rows, d / 4) u8 quads (offset by U8_OFFSET) and a scale a row
+    fn pack_rows_u8(
+        head: Head,
+        bias: &[f32],
+        scale: f32,
+        live: usize,
+        rows: usize,
+    ) -> (Vec<u32>, Vec<f32>) {
+        let d = head.d;
+        let bias = &bias[head.at..][..d];
+        let mut out = vec![0u32; rows * d / QUAD];
+        let mut scales = vec![0f32; rows];
+        out.par_chunks_mut(d / QUAD)
+            .zip(scales.par_iter_mut())
+            .take(live)
+            .enumerate()
+            .for_each_init(
+                || vec![0f32; d],
+                |scaled, (r, (row, row_scale))| {
+                    for ((y, x), b) in scaled.iter_mut().zip(head.row(r)).zip(bias) {
+                        *y = (x + b) * scale;
+                    }
+                    // SAFETY: `supports` checked AVX-512, and d is a multiple of 32
+                    *row_scale = unsafe { quads(scaled, U8_OFFSET, |at, word| row[at] = word) }.0;
+                },
+            );
+        (out, scales)
+    }
+
+    // the positions' remainders after bf16 as NR-column panels of i8 quads, (panels, d / 4, NR), with each column's
+    // scale and sum (rows as `pack_panels` lays them out, zero outside 0..live)
+    fn pack_remainders(
+        head: Head,
+        live: usize,
+        first: isize,
+        cols: usize,
+    ) -> (Vec<u32>, Vec<f32>, Vec<i32>) {
+        let d = head.d;
+        let groups = d / QUAD;
+        let mut out = vec![0u32; cols * groups];
+        let mut scales = vec![0f32; cols];
+        let mut sums = vec![0i32; cols];
+        out.par_chunks_mut(groups * NR)
+            .zip(scales.par_chunks_mut(NR).zip(sums.par_chunks_mut(NR)))
+            .enumerate()
+            .for_each(|(panel, (out, (scales, sums)))| {
+                let mut rest = vec![0f32; d];
+                for j in 0..NR {
+                    let row = first + (panel * NR + j) as isize;
+                    if row < 0 || row as usize >= live {
+                        continue;
+                    }
+                    for (r, x) in rest.iter_mut().zip(head.row(row as usize)) {
+                        *r = x - f32::from_bits(bf16_bits(*x) << 16);
+                    }
+                    // SAFETY: as above
+                    (scales[j], sums[j]) =
+                        unsafe { quads(&rest, 0, |g, word| out[g * NR + j] = word) };
+                }
+            });
+        (out, scales, sums)
+    }
+
+    // the int8 correction of an MR x NR tile of position scores: `a`'s MR rows of u8 quads (`a_stride` apart, scales
+    // `a_scale`) over `groups` quads of panel `b` (its columns' sums `b_sum` and scales `b_scale`), added into `dst`
+    #[target_feature(enable = "avx512f,avx512vnni")]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn tile_i8(
+        a: *const u32,
+        a_stride: usize,
+        a_scale: *const f32,
+        groups: usize,
+        b: *const u32,
+        b_sum: *const i32,
+        b_scale: *const f32,
+        dst: *mut f32,
+        dst_rs: usize,
+    ) {
+        unsafe {
+            let mut acc = [[_mm512_setzero_si512(); 2]; MR];
+            for g in 0..groups {
+                let b0 = _mm512_loadu_si512(b.add(g * NR).cast());
+                let b1 = _mm512_loadu_si512(b.add(g * NR + LANES).cast());
+                for (r, acc) in acc.iter_mut().enumerate() {
+                    let av = _mm512_set1_epi32(*a.add(r * a_stride + g) as i32);
+                    acc[0] = _mm512_dpbusd_epi32(acc[0], av, b0);
+                    acc[1] = _mm512_dpbusd_epi32(acc[1], av, b1);
+                }
+            }
+            let offset = _mm512_set1_epi32(U8_OFFSET);
+            let sums = [
+                _mm512_mullo_epi32(_mm512_loadu_si512(b_sum.cast()), offset),
+                _mm512_mullo_epi32(_mm512_loadu_si512(b_sum.add(LANES).cast()), offset),
+            ];
+            let scales = [
+                _mm512_loadu_ps(b_scale),
+                _mm512_loadu_ps(b_scale.add(LANES)),
+            ];
+            for (r, acc) in acc.iter().enumerate() {
+                let row = dst.add(r * dst_rs);
+                let row_scale = _mm512_set1_ps(*a_scale.add(r));
+                for half in 0..2 {
+                    let dot = _mm512_cvtepi32_ps(_mm512_sub_epi32(acc[half], sums[half]));
+                    let at = row.add(half * LANES);
+                    let scaled = _mm512_mul_ps(dot, _mm512_mul_ps(scales[half], row_scale));
+                    _mm512_storeu_ps(at, _mm512_add_ps(_mm512_loadu_ps(at), scaled));
+                }
+            }
+        }
     }
 
     // an MR x NR tile: `a`'s MR rows (`a_stride` pairs apart) over `pairs` pairs of panel `b`, into `dst` (`dst_rs`
@@ -330,6 +496,15 @@ mod x86 {
         let pp: Vec<Vec<u32>> = (0..heads)
             .map(|h| pack_panels(head(op.p, h), p_rows, base, p_cols))
             .collect();
+        // the positions' bf16 rounding corrected through int8: one bf16 term alone moved a sentence break between two
+        // speakers in a 10-minute meeting at -6 dB
+        let groups = d / QUAD;
+        let qp8: Vec<(Vec<u32>, Vec<f32>)> = (0..heads)
+            .map(|h| pack_rows_u8(head(op.q, h), op.bias_v, op.scale, t, rows))
+            .collect();
+        let pl: Vec<(Vec<u32>, Vec<f32>, Vec<i32>)> = (0..heads)
+            .map(|h| pack_remainders(head(op.p, h), p_rows, base, p_cols))
+            .collect();
         let mut out = vec![0f32; t * width];
         let out_at = out.as_mut_ptr() as usize;
         let tasks: Vec<(usize, usize)> = (0..heads)
@@ -337,6 +512,7 @@ mod x86 {
             .collect();
         tasks.into_par_iter().for_each(|(h, i0)| {
             let (qc, qp, kp, vp, pp) = (&qc[h], &qp[h], &kp[h], &vp[h], &pp[h]);
+            let ((qp8, qp_scale), (pl, pl_scale, pl_sum)) = (&qp8[h], &pl[h]);
             let mut s = vec![0f32; R * C];
             let mut sp = vec![0f32; R * SPAN];
             // the probabilities as two bf16 terms, p's rounding and what it left: ~16 bits, where one alone moved a
@@ -376,6 +552,18 @@ mod x86 {
                                 sp.as_mut_ptr().add(g * SPAN + col_panel * NR),
                                 SPAN,
                                 false,
+                            );
+                            let col = (q0 + col_panel) * NR;
+                            tile_i8(
+                                qp8.as_ptr().add((i0 + g) * groups),
+                                groups,
+                                qp_scale.as_ptr().add(i0 + g),
+                                groups,
+                                pl.as_ptr().add(col * groups),
+                                pl_sum.as_ptr().add(col),
+                                pl_scale.as_ptr().add(col),
+                                sp.as_mut_ptr().add(g * SPAN + col_panel * NR),
+                                SPAN,
                             );
                         }
                     }
@@ -545,6 +733,62 @@ mod tests {
             pos_base: 3,
         });
         assert_eq!(outside.flatten_all()?.to_vec1::<f32>()?, f32_kernel);
+        Ok(())
+    }
+
+    // the position scores keep ~15 bits (bf16 and an int8 correction of what it left): with the content scores zero
+    // and values bf16 holds exactly, the output differs from one over unrounded positions (queries rounded as packed)
+    // by little more than the probabilities' two terms; bf16 positions alone miss by ~0.08
+    #[test]
+    fn position_scores_carry_their_int8_correction() -> crate::Result<()> {
+        if !super::supports(32) {
+            return Ok(());
+        }
+        const TOLERANCE: f64 = 2e-3;
+        let (t, head, heads) = (200, 64, 1);
+        let (p_rows, pos_base) = (2 * t - 1, t - 1);
+        let q = Tensor::randn(0f32, 1., (1, t, head), &Device::Cpu)?;
+        let p = Tensor::randn(0f32, 1., (1, p_rows, head), &Device::Cpu)?;
+        let k = Tensor::zeros((1, t, head), DType::F32, &Device::Cpu)?;
+        // multiples of 1/8 in [-4, 4): exact in bf16
+        let v = ((Tensor::rand(0f32, 1., (1, t, head), &Device::Cpu)? * 64.)?.floor()? / 8.)?;
+        let v = (v - 4.)?;
+        let zero = Tensor::zeros(head, DType::F32, &Device::Cpu)?;
+        let got = crate::cpu::with_bf16_matmuls(|| {
+            crate::cpu::rel_pos_attention(&crate::cpu::RelPosOperands {
+                q: &q,
+                bias_u: &zero,
+                bias_v: &zero,
+                scale: 1.0,
+                k: &k,
+                v: &v,
+                positions: &p,
+                heads,
+                pos_base,
+            })
+        })?
+        .expect("the CPU takes it");
+        let ids: Vec<u32> = (0..t)
+            .flat_map(|i| (0..t).map(move |j| (pos_base - i + j) as u32))
+            .collect();
+        let ids = Tensor::from_vec(ids, (1, t, t), &Device::Cpu)?;
+        let rounded_q = q.to_dtype(DType::BF16)?.to_dtype(DType::F64)?;
+        let scores = rounded_q
+            .matmul(&p.to_dtype(DType::F64)?.t()?)?
+            .contiguous()?
+            .gather(&ids, 2)?;
+        let probs = crate::nn::ops::softmax_last_dim(&scores)?;
+        let want = probs
+            .matmul(&v.to_dtype(DType::F64)?)?
+            .flatten_all()?
+            .to_vec1::<f64>()?;
+        let got = got.to_dtype(DType::F64)?.flatten_all()?.to_vec1::<f64>()?;
+        let worst = got
+            .iter()
+            .zip(&want)
+            .map(|(g, w)| (g - w).abs())
+            .fold(0f64, f64::max);
+        assert!(worst < TOLERANCE, "worst {worst}");
         Ok(())
     }
 }
