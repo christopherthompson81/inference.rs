@@ -332,3 +332,38 @@ moves. Qwen 0.8B's greedy text on Vulkan (f32 activations) is unchanged.
 Where it stands: the pair's peak on the 3090's Vulkan is level with CUDA's (2.37 against 2.41 GB above the desktop,
 from 3.18), and ASR and diarization run faster than in f32. Not done: the 780M (an iGPU stays f32; its fused relpos
 attention is f32-only), bf16 flash/relpos kernels, and LLMs (their fused kernels take f32 activations).
+
+## Run 12 - 2026-11-09 00:30
+
+Question: the combined request (Parakeet with `diarization_model`, the two engines run at once) looked to gain nothing
+on the 3090's Vulkan (3.2-3.5 s against asr 2.30 + diar 0.85), where CUDA's takes 2.53 against 2.97. Would a stream
+(queue) per model give Vulkan CUDA's overlap?
+
+Tried (branch `vulkan-streams`, local, not for merge): a stream per queue (up to 4: stream 0 for loads and unscoped
+work, the transcription pipeline's forward on its own), timeline semaphores between them, and each allocation's
+producing batch plus the streams that used it (`Usage`), so a reader on another stream waits for the writer and the
+pool hands another stream's buffer out only once idle. First cut tracked the last use of any kind: two streams
+reading one buffer waited on each other's open batches and deadlocked (`two_streams_record_at_once` hung); the
+producer-only tracking passed it 15 times. The idle engine's release had synchronized every stream, the other model's
+included (now skipped while another stream works). Queues of one family, and the compute-only family beside the
+main one: no difference.
+
+Within one combined request (forward start and end per model): diar 1.2 s (0.68 alone), asr 3.65 s (2.17 alone); the
+kernel time summed over the profile rises ~30 % when both queues run. The GPU shares out rather than fills gaps.
+
+Measured again with repeats, the premise was wrong: the first runs had timed a server's first combined request.
+
+```
+clip10, a server each, five requests of each kind (seconds)
+                    asr                       diar          both
+master (one stream) 2.24-2.49 (3.37 the 2nd)  0.83-0.85     2.66-2.85
+streams             2.26-2.55 (3.1-3.3 2nd)   0.84-0.88     2.84-3.05
+cold start, asr and diar once, then both five times:
+Vulkan master       2.23-2.26                 0.83-0.85     3.46-3.80, then 2.78-2.91
+CUDA                2.24-2.26                 0.65          2.47-2.51 (no first-request cost)
+```
+
+One stream already overlaps the two models: both 2.8 s against 3.1-3.2 s in turn, the ~0.4 s CUDA saves. The streams
+cost ~0.15 s more and stay unmerged. What is left against CUDA: the diarizer's own time (0.84 against 0.65 s) and the
+first combined request's extra 0.6-0.9 s, which is not allocation (that request allocates ~20 new device buffers,
+~10 ms); the second asr request after a start is ~1 s slower on both builds too.
