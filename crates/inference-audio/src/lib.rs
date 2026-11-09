@@ -19,6 +19,8 @@ use symphonia::core::{
     probe::Hint,
 };
 
+// s16's full scale as symphonia and hound read it (`s / 32768`), so a write back is lossless
+const PCM16_SCALE: f32 = 32_768.0;
 // 30 minutes of 48 kHz stereo; compressed input can otherwise expand to tens of GB
 const MAX_DECODED_AUDIO_SAMPLES: usize = 48_000 * 2 * 30 * 60;
 
@@ -280,7 +282,7 @@ fn write_wav(
                 if float {
                     writer.write_sample(v)?;
                 } else {
-                    writer.write_sample((v.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16)?;
+                    writer.write_sample(to_s16(v))?;
                 }
             }
         }
@@ -539,6 +541,13 @@ impl Codec {
     }
 }
 
+// a sample read as `s / 32768` back to the s16 it came from: rounded to nearest, clamped to the type's range
+fn to_s16(v: f32) -> i16 {
+    (v * PCM16_SCALE)
+        .round()
+        .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16
+}
+
 // a track's codec, by symphonia's short name (Opus by its own: symphonia registers no decoder for it)
 fn codec_name(params: &symphonia::core::codecs::CodecParameters) -> &'static str {
     if params.codec == symphonia::core::codecs::CODEC_TYPE_OPUS {
@@ -668,6 +677,15 @@ mod tests {
             (kept.sample_rate, kept.channels, kept.frames),
             (RATE, 2, FRAMES as u64)
         );
+        // s16 through f32 and back: the same samples, bit for bit
+        let read = |p: &std::path::Path| -> Vec<i16> {
+            hound::WavReader::open(p)
+                .unwrap()
+                .samples::<i16>()
+                .map(Result::unwrap)
+                .collect()
+        };
+        assert_eq!(read(&out), read(&path));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
