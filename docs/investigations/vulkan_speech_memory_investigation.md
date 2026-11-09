@@ -709,3 +709,54 @@ first.sh (NB=5) and diar8, profiler off, alternated:
     diar8 Vulkan 0.67-0.68
 
 Vulkan is level with CUDA on all three.
+
+## Run 23 - 2026-11-09 21:00 (laptop: Radeon 780M iGPU)
+
+Question: on the 780M, after #880-#884, where the speech pair's peak goes, and what of it is lossless to take back.
+`speech_mem`-style runs: meeting10 (10 minutes), one `from-config` with both models, asr, diar, both; GTT MB.
+
+#881-#884 on the 780M against #880: words, segments and diarization byte identical in f32, bf16 and on the CPU;
+times and peaks within noise (f32 both 18.2 / 18.0 s, peak 3103 / 3115).
+
+Profile (temporary pool tracker, removed) at the f32 transcription peak, ~1.18 GB above loaded: the pool's idle
+mapped buffers ~600 MiB; each conformer block's shadowed residuals (up to five 32 MiB copies live to the block's end)
+and the features and subsampled frames live through all 24 blocks; the feed-forward's 128 MiB up projection beside its
+SiLU (the CPU's is in place); attention's per-head copies (q, k, v 32 MiB each, positions 64) and the fused kernel's
+f16 tables and output.
+
+Changes:
+- Parakeet's encoder: each residual replaces the last, the inputs drop once used, a GPU's feed-forward in 2048-row
+  pieces. f32 transcription peak 1217 -> 1069 above loaded; CPU RSS 2493 -> 2387 (both 2671 -> 2568).
+- A bf16 model's fused relpos attention on an iGPU widens its operands to f32: bf16 asr 16.4 -> 14.6 s.
+- The pool on a unified device: its mapped buffers took neither the discrete GPU's best fit (a miss takes an idle
+  class up to 1.5x) nor its stale release (an idle class none reused for 150 ms freed at the next miss); the cap is
+  6 GiB of idle host memory. Sweep (f32, one build, environment switches, removed):
+
+```
+                      asr peak  both peak
+current               2815      2979
+best fit              2702      2782
+stale, keep 0         2815      2461
+stale, keep 512 MiB   2815      2465
+fit + stale (keep 0)  2702      2449
+cap 1 GiB             2815      2908
+cap 512 MiB           3227      3201   asr ~1 s slower
+64 x 64 tiles         2814      2923   no faster
+```
+
+  Fit + stale, three alternated rounds against current: asr 14.1-14.9 / 14.2-14.9 s, peaks 2636-2684 / 2795-2797,
+  both 2424-2430 / 2951-2961; loaded ~30 MB higher (a long-lived buffer in a larger class). Llama 3 8B Q6_K and Qwen3
+  0.6B Q6_K (2048-token prefill, 64 decoded): 171-173 / 12.3-12.4 and 1813-1835 / 99-100 tok/s either way, peaks equal.
+
+```
+final build      asr peak  both peak   (loaded)
+f32  before      2819      2975        1750
+f32  after       2701      2450        1781
+bf16 before      2450      2464        1706
+bf16 after       2400      2380        1714
+```
+
+Where it stands: f32 on the 780M now peaks within ~70 MB of bf16 with both models, so the iGPU's f32 default costs
+little. Left: attention's per-head copies and the kernel's output transpose (~100-200 MiB of short-lived buffers at the
+transcription peak), which a table kernel reading the projections by stride and an output written as (b, t, hidden)
+would remove.
