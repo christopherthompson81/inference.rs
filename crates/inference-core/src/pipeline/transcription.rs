@@ -206,6 +206,7 @@ struct ModelInputs {
     options: Vec<SegmentOptions>,
     diarization: Vec<DiarizationOptions>,
     transcription: Vec<inference_models_speech::TranscriptionOptions>,
+    progress: Vec<Option<crate::TranscriptionProgressHook>>,
 }
 
 impl InputsProcessor for TranscriptionInputsProcessor {
@@ -254,6 +255,10 @@ impl InputsProcessor for TranscriptionInputsProcessor {
                 diarization: input_seqs
                     .iter()
                     .map(|seq| seq.diarization_options().cloned().unwrap_or_default())
+                    .collect(),
+                progress: input_seqs
+                    .iter()
+                    .map(|seq| seq.transcription_progress().cloned())
                     .collect(),
                 transcription: input_seqs
                     .iter()
@@ -1016,6 +1021,7 @@ impl Pipeline for TranscriptionPipeline {
             options,
             diarization,
             transcription,
+            progress,
         } = *inputs.downcast().expect("Downcast failed.");
         let Self {
             model, sessions, ..
@@ -1025,24 +1031,24 @@ impl Pipeline for TranscriptionPipeline {
                 transcripts: audios
                     .iter()
                     .zip(&transcription)
-                    .map(|(input, request)| match input {
+                    .zip(&progress)
+                    .map(|((input, request), progress)| match input {
                         AudioRequest::Stream(stream) => {
                             stream_step(asr, sessions, stream).map(TranscriptionOutcome::Stream)
                         }
                         AudioRequest::Audio(_) if request.translate => {
                             Err("Parakeet transcribes; it does not translate".to_string())
                         }
-                        AudioRequest::Audio(audio) => {
-                            let pcm = audio.mono();
-                            match vad {
-                                Some(vad) => {
-                                    asr.transcribe_with_vad(&pcm, audio.sample_rate, vad, request)
-                                }
-                                None => asr.transcribe(&pcm, audio.sample_rate, request),
-                            }
+                        AudioRequest::Audio(audio) => asr
+                            .transcribe_reporting(
+                                &audio.mono(),
+                                audio.sample_rate,
+                                vad.as_ref(),
+                                request,
+                                progress.as_ref().map(|hook| &*hook.0),
+                            )
                             .map(TranscriptionOutcome::Whole)
-                            .map_err(|e| e.to_string())
-                        }
+                            .map_err(|e| e.to_string()),
                     })
                     .collect(),
             },

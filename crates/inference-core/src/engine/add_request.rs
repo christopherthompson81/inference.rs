@@ -121,10 +121,17 @@ impl MessageExtras {
                 extras.seq_step_type = SeqStepType::OneShot;
                 extras.one_shot = Some(OneShotParams::Speech(options.clone()));
             }
-            RequestMessage::Transcription { audio, options } => {
+            RequestMessage::Transcription {
+                audio,
+                options,
+                progress,
+            } => {
                 extras.seq_step_type = SeqStepType::OneShot;
                 extras.audios = Some(vec![take_audio(audio)]);
-                extras.one_shot = Some(OneShotParams::Transcription(options.clone()));
+                extras.one_shot = Some(OneShotParams::Transcription(
+                    options.clone(),
+                    progress.clone(),
+                ));
             }
             RequestMessage::TranscriptionStream { request } => {
                 extras.seq_step_type = SeqStepType::OneShot;

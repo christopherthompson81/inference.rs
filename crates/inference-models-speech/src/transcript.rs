@@ -19,6 +19,28 @@ pub struct Transcription {
     pub language: Option<String>,
 }
 
+/// What a windowed transcription reports as it goes.
+pub enum TranscriptionProgress<'a> {
+    /// The audio's length and the windows it is cut into, `(start, end)` seconds, before the first runs.
+    Started {
+        duration: f64,
+        windows: &'a [(f64, f64)],
+    },
+    /// Window `index`'s transcript, its times where it sits in the whole audio.
+    Window {
+        index: usize,
+        start: f64,
+        end: f64,
+        transcript: &'a Transcription,
+    },
+}
+
+/// Told of a transcription's progress; `false` stops it before its next window, with [`TRANSCRIPTION_STOPPED`].
+pub type ProgressFn = dyn Fn(TranscriptionProgress<'_>) -> bool + Send + Sync;
+
+/// The error a transcription its progress stopped ends with.
+pub const TRANSCRIPTION_STOPPED: &str = "the transcription was stopped";
+
 /// What one transcription request asks for beyond its audio.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, inference_json::FromJson)]
 pub struct TranscriptionOptions {

@@ -473,17 +473,7 @@ async fn transcribe_inner(
     request: TranscriptionRequest,
     audio: &[u8],
 ) -> Result<TranscriptionOutput, ApiError> {
-    if request
-        .beam_size
-        .is_some_and(|b| !(1..=MAX_BEAM_SIZE).contains(&b))
-    {
-        return Err(ApiError::new(
-            ApiErrorKind::InvalidRequest,
-            format!("`beam_size` must be 1 to {MAX_BEAM_SIZE}"),
-            Some("invalid_beam_size"),
-            Some("beam_size"),
-        ));
-    }
+    check_beam(&request)?;
     let audio = decode_audio(audio)?;
     let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
     let model = (request.model != DEFAULT_MODEL_ID).then_some(request.model.as_str());
@@ -551,6 +541,7 @@ async fn transcribe_inner(
             beam_size: request.beam_size,
             translate: request.task == TranscriptionTask::Translate,
         },
+        progress: None,
     };
     let Some(diarizer) = request.diarization_model.clone() else {
         return match run(state, &request.model, repr, speech(audio)).await? {
@@ -572,8 +563,23 @@ async fn transcribe_inner(
     }
 }
 
+pub(crate) fn check_beam(request: &TranscriptionRequest) -> Result<(), ApiError> {
+    if request
+        .beam_size
+        .is_some_and(|b| !(1..=MAX_BEAM_SIZE).contains(&b))
+    {
+        return Err(ApiError::new(
+            ApiErrorKind::InvalidRequest,
+            format!("`beam_size` must be 1 to {MAX_BEAM_SIZE}"),
+            Some("invalid_beam_size"),
+            Some("beam_size"),
+        ));
+    }
+    Ok(())
+}
+
 // a diarization model's speaker turns over the clip
-async fn speaker_turns(
+pub(crate) async fn speaker_turns(
     state: &SharedInferenceRsState,
     diarizer: &str,
     audio: AudioInput,
@@ -732,7 +738,7 @@ fn transcript_token_budget(seconds: f64) -> usize {
 }
 
 // each word's speaker: the turn it overlaps most, else the turn nearest its middle; 0 without any turns
-fn word_speakers(words: &[TimedText], turns: &[SpeakerSegment]) -> Vec<usize> {
+pub(crate) fn word_speakers(words: &[TimedText], turns: &[SpeakerSegment]) -> Vec<usize> {
     words
         .iter()
         .map(|word| {
@@ -1011,15 +1017,17 @@ fn render_diarization(
     })
 }
 
-fn decode_audio(audio: &[u8]) -> Result<AudioInput, ApiError> {
-    AudioInput::from_bytes(audio).map_err(|e| {
-        ApiError::new(
-            ApiErrorKind::InvalidRequest,
-            format!("The audio could not be decoded: {e}"),
-            Some("invalid_audio"),
-            Some("file"),
-        )
-    })
+pub(crate) fn decode_audio(audio: &[u8]) -> Result<AudioInput, ApiError> {
+    AudioInput::from_bytes(audio).map_err(audio_error)
+}
+
+pub(crate) fn audio_error(error: anyhow::Error) -> ApiError {
+    ApiError::new(
+        ApiErrorKind::InvalidRequest,
+        format!("The audio could not be decoded: {error}"),
+        Some("invalid_audio"),
+        Some("file"),
+    )
 }
 
 fn encode_speech(

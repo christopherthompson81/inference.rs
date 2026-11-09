@@ -60,74 +60,60 @@ impl AudioInput {
 
     fn from_bytes_limited(bytes: &[u8], max_samples: usize) -> Result<Self> {
         let cursor = std::io::Cursor::new(bytes.to_vec());
-        let mss = MediaSourceStream::new(Box::new(cursor), Default::default());
-        let hint = Hint::new();
-        let probed = symphonia::default::get_probe().format(
-            &hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )?;
-        let mut format = probed.format;
-        // a video's default track is its picture, so the first track with a sample rate is the audio
-        let track = format
-            .tracks()
-            .iter()
-            .find(|t| {
-                t.codec_params.codec != CODEC_TYPE_NULL && t.codec_params.sample_rate.is_some()
-            })
-            .ok_or_else(|| anyhow::anyhow!("no audio track in a codec this server decodes"))?;
-        let track_id = track.id;
-        let mut codec_params = track.codec_params.clone();
-        // Matroska leaves PCM's packet size unstated; no packet holds more frames than the whole input
-        if codec_params.max_frames_per_packet.is_none() {
-            let channels = codec_params.channels.map_or(1, |c| c.count());
-            let sample_bytes = codec_params
-                .bits_per_coded_sample
-                .map_or(1, |bits| bits.div_ceil(8));
-            codec_params.max_frames_per_packet =
-                Some((bytes.len() / (channels * sample_bytes as usize)) as u64 + 1);
-        }
-        let sample_rate = codec_params
-            .sample_rate
-            .ok_or_else(|| anyhow::anyhow!("unknown sample rate"))?;
-        #[allow(clippy::cast_possible_truncation)]
-        let mut channels = codec_params.channels.map(|c| c.count() as u16).unwrap_or(1);
-        let mut decoder =
-            symphonia::default::get_codecs().make(&codec_params, &DecoderOptions::default())?;
+        let mut decoder = Decoder::open(Box::new(cursor), bytes.len() as u64)?;
         // the stated length up front: grown by doubling, a long recording's buffer held up to twice its samples
-        let stated = codec_params
-            .n_frames
-            .map_or(0, |frames| frames as usize * usize::from(channels));
-        let mut samples = Vec::with_capacity(stated.min(max_samples));
-        loop {
-            match format.next_packet() {
-                Ok(packet) if packet.track_id() != track_id => {}
-                Ok(packet) => {
-                    let decoded = decoder.decode(&packet)?;
-                    // Matroska may leave the channel layout to the codec's own header (AAC's does)
-                    channels = decoded.spec().channels.count().try_into()?;
-                    let mut buf =
-                        SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
-                    buf.copy_interleaved_ref(decoded);
-                    if samples.len() + buf.samples().len() > max_samples {
-                        anyhow::bail!("audio exceeds the {max_samples} decoded sample limit");
-                    }
-                    samples.extend_from_slice(buf.samples());
-                }
-                Err(symphonia::core::errors::Error::IoError(e))
-                    if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-                {
-                    break;
-                }
-                Err(e) => return Err(e.into()),
+        let mut samples = Vec::with_capacity(decoder.stated_samples().min(max_samples));
+        let mut packet = Vec::new();
+        while decoder.next(&mut packet)? {
+            if samples.len() + packet.len() > max_samples {
+                anyhow::bail!("audio exceeds the {max_samples} decoded sample limit");
             }
+            samples.extend_from_slice(&packet);
         }
         samples.shrink_to_fit();
         Ok(Self {
             samples,
+            sample_rate: decoder.sample_rate,
+            channels: decoder.channels,
+        })
+    }
+
+    /// Decodes the audio file at `path` to mono at `sample_rate` as it reads, so a long recording at another rate or
+    /// in stereo never sits whole in memory as decoded; at most `max_samples` samples out.
+    pub fn from_file_mono(
+        path: &std::path::Path,
+        sample_rate: u32,
+        max_samples: usize,
+    ) -> Result<Self> {
+        let file = std::fs::File::open(path)?;
+        let len = file.metadata()?.len();
+        let mut decoder = Decoder::open(Box::new(file), len)?;
+        let mut resampler = mel::StreamResampler::new(decoder.sample_rate, sample_rate)?;
+        let ratio = f64::from(sample_rate) / f64::from(decoder.sample_rate);
+        let stated = (decoder.stated_frames() as f64 * ratio) as usize;
+        let mut samples = Vec::with_capacity(stated.min(max_samples));
+        let (mut packet, mut mono) = (Vec::new(), Vec::new());
+        while decoder.next(&mut packet)? {
+            let channels = usize::from(decoder.channels.max(1));
+            mono.clear();
+            mono.extend(
+                packet
+                    .chunks_exact(channels)
+                    .map(|frame| frame.iter().sum::<f32>() / channels as f32),
+            );
+            let out = resampler.push(&mono)?;
+            if samples.len() + out.len() > max_samples {
+                anyhow::bail!("audio exceeds the {max_samples} decoded sample limit");
+            }
+            samples.extend_from_slice(&out);
+        }
+        samples.extend(resampler.finish()?);
+        samples.truncate(max_samples);
+        samples.shrink_to_fit();
+        Ok(Self {
+            samples,
             sample_rate,
-            channels,
+            channels: 1,
         })
     }
 
@@ -195,11 +181,150 @@ impl AudioInput {
     }
 }
 
+// a container's first audio track, decoded a packet at a time
+struct Decoder {
+    format: Box<dyn symphonia::core::formats::FormatReader>,
+    decoder: Box<dyn symphonia::core::codecs::Decoder>,
+    track_id: u32,
+    sample_rate: u32,
+    // the last packet's, which Matroska may leave to the codec's own header (AAC's does)
+    channels: u16,
+    frames: Option<u64>,
+}
+
+impl Decoder {
+    // `len`: the source's bytes, bounding a packet where the container states no size
+    fn open(source: Box<dyn symphonia::core::io::MediaSource>, len: u64) -> Result<Self> {
+        let mss = MediaSourceStream::new(source, Default::default());
+        let probed = symphonia::default::get_probe().format(
+            &Hint::new(),
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )?;
+        let format = probed.format;
+        // a video's default track is its picture, so the first track with a sample rate is the audio
+        let track = format
+            .tracks()
+            .iter()
+            .find(|t| {
+                t.codec_params.codec != CODEC_TYPE_NULL && t.codec_params.sample_rate.is_some()
+            })
+            .ok_or_else(|| anyhow::anyhow!("no audio track in a codec this server decodes"))?;
+        let track_id = track.id;
+        let mut codec_params = track.codec_params.clone();
+        // Matroska leaves PCM's packet size unstated; no packet holds more frames than the whole input
+        if codec_params.max_frames_per_packet.is_none() {
+            let channels = codec_params.channels.map_or(1, |c| c.count());
+            let sample_bytes = codec_params
+                .bits_per_coded_sample
+                .map_or(1, |bits| bits.div_ceil(8));
+            codec_params.max_frames_per_packet =
+                Some(len / (channels as u64 * u64::from(sample_bytes)) + 1);
+        }
+        let sample_rate = codec_params
+            .sample_rate
+            .ok_or_else(|| anyhow::anyhow!("unknown sample rate"))?;
+        #[allow(clippy::cast_possible_truncation)]
+        let channels = codec_params.channels.map(|c| c.count() as u16).unwrap_or(1);
+        let decoder =
+            symphonia::default::get_codecs().make(&codec_params, &DecoderOptions::default())?;
+        Ok(Self {
+            format,
+            decoder,
+            track_id,
+            sample_rate,
+            channels,
+            frames: codec_params.n_frames,
+        })
+    }
+
+    // the frames the container states, 0 when it states none
+    fn stated_frames(&self) -> usize {
+        self.frames.unwrap_or(0) as usize
+    }
+
+    fn stated_samples(&self) -> usize {
+        self.stated_frames() * usize::from(self.channels)
+    }
+
+    // the next packet's interleaved samples into `out`; false at the end
+    fn next(&mut self, out: &mut Vec<f32>) -> Result<bool> {
+        loop {
+            match self.format.next_packet() {
+                Ok(packet) if packet.track_id() != self.track_id => {}
+                Ok(packet) => {
+                    let decoded = self.decoder.decode(&packet)?;
+                    self.channels = decoded.spec().channels.count().try_into()?;
+                    let mut buf =
+                        SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
+                    buf.copy_interleaved_ref(decoded);
+                    out.clear();
+                    out.extend_from_slice(buf.samples());
+                    return Ok(true);
+                }
+                Err(symphonia::core::errors::Error::IoError(e))
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    return Ok(false);
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::AudioInput;
     use hound::{SampleFormat, WavSpec, WavWriter};
     use std::io::Cursor;
+
+    // a 48 kHz stereo file decoded to 16 kHz mono as it reads: as decoding it whole, downmixing and resampling, and
+    // capped where asked
+    #[test]
+    fn a_file_decodes_to_mono_at_the_asked_rate() {
+        const RATE: u32 = 48_000;
+        const FRAMES: usize = 3 * RATE as usize + 77;
+        let dir = std::env::temp_dir().join(format!("inference-audio-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stereo.wav");
+        let spec = WavSpec {
+            channels: 2,
+            sample_rate: RATE,
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        };
+        let mut writer = WavWriter::create(&path, spec).unwrap();
+        for i in 0..FRAMES {
+            let t = i as f32 / RATE as f32;
+            writer
+                .write_sample(((t * 440.0 * std::f32::consts::TAU).sin() * 9000.0) as i16)
+                .unwrap();
+            writer
+                .write_sample(((t * 660.0 * std::f32::consts::TAU).sin() * 9000.0) as i16)
+                .unwrap();
+        }
+        writer.finalize().unwrap();
+        let streamed = AudioInput::from_file_mono(&path, 16_000, usize::MAX).unwrap();
+        assert_eq!((streamed.sample_rate, streamed.channels), (16_000, 1));
+        assert_eq!(
+            streamed.samples.len(),
+            (FRAMES as f64 / 3.0).round() as usize
+        );
+        let whole = AudioInput::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
+        let mono = whole.to_mono();
+        let want = crate::mel::resample(&mono, RATE, 16_000).unwrap();
+        let worst = streamed
+            .samples
+            .iter()
+            .zip(want.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(worst < 1e-3, "worst {worst}");
+        assert!(AudioInput::from_file_mono(&path, 16_000, 1000).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn read_wav_roundtrip() {

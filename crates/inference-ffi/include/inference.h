@@ -48,7 +48,7 @@ extern "C" {
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
 #define INFERENCE_ABI_VERSION_MINOR 0
-#define INFERENCE_ABI_VERSION_PATCH 26
+#define INFERENCE_ABI_VERSION_PATCH 27
 
 typedef enum inference_status {
     INFERENCE_OK = 0,
@@ -77,7 +77,7 @@ typedef enum inference_status {
 
 /* (major << 16) | (minor << 8) | patch of the ABI this library implements. */
 INFERENCE_API uint32_t inference_abi_version(void);
-/* Human-readable build identification, e.g. "inference.rs 0.0.26 (cuda)". Static. */
+/* Human-readable build identification, e.g. "inference.rs 0.0.27 (cuda)". Static. */
 INFERENCE_API const char *inference_build_version(void);
 /* Detail of the most recent failing inference_* call on this thread; "" after a success. Never NULL. */
 INFERENCE_API const char *inference_last_error(void);
@@ -320,7 +320,8 @@ INFERENCE_API inference_status inference_chat_stream_open_with_media(const infer
 /* Waits up to timeout_ms (< 0 waits indefinitely, 0 polls) for the next event of a stream. On an event, out_event
  * receives {"event": <name>, "data": ...}. Chat streams emit "chunk" (data: a chat.completion.chunk),
  * "agentic_tool_call_progress", "agentic_tool_approval_required", "file_produced" and "error"; completion streams emit
- * "chunk" (data: a text_completion chunk) and "error". An error's data is the OpenAI error JSON, and an error event is always the last event. On a timeout out_event is NULL and
+ * "chunk" (data: a text_completion chunk) and "error"; transcription streams their own (see
+ * inference_transcription_stream_open). An error's data is the OpenAI error JSON, and an error event is always the last event. On a timeout out_event is NULL and
  * out_done 0. Once the stream has ended, out_event is NULL and out_done 1. out_event and out_done are required. */
 INFERENCE_API inference_status inference_stream_next(inference_stream *stream, int64_t timeout_ms,
                                                     inference_string **out_event, int32_t *out_done);
@@ -452,6 +453,20 @@ INFERENCE_API inference_status inference_speech_generation(const inference_engin
 INFERENCE_API inference_status inference_transcription(const inference_engine *engine, const char *request,
                                                       size_t request_len, const uint8_t *audio, size_t audio_len,
                                                       inference_blob **out_blob);
+/* Transcribes a whole recording as a stream (poll it with inference_stream_next, stop it with inference_stream_cancel):
+ * its windows (Parakeet's VAD windows of up to 2 minutes past 5 minutes of audio) as each finishes. request is
+ * inference_transcription's JSON (and "diarization_model"?), with "path"? (a local audio file, decoded to 16 kHz
+ * mono as it reads, up to 12 hours; audio is then NULL) and "from_seconds"? (start there, for resuming; times stay
+ * the recording's). Otherwise audio is audio_len bytes of an encoded file, as for inference_transcription. Events:
+ * "started" {"duration", "windows": [{"index", "start", "end"}]}, then per window "window" {"index", "start", "end",
+ * "text", "words": [{"word", "start", "end"}]} and "progress" {"done", "total", "seconds_done"}, and last "done" (the
+ * verbose_json transcript, with words and segments, and speakers with "diarization_model"), "canceled" or "error"
+ * (the error envelope). A cancel takes effect before the next window. A model that transcribes a recording whole
+ * (Whisper, an audio-in language model) sends only the last event, or refuses the request. */
+INFERENCE_API inference_status inference_transcription_stream_open(const inference_engine *engine,
+                                                                  const char *request, size_t request_len,
+                                                                  const uint8_t *audio, size_t audio_len,
+                                                                  inference_stream **out_stream);
 /* Opens a streamed transcription on a cache-aware streaming recogniser (Nemotron streaming ASR): audio is pushed as it
  * arrives and each push returns the text it completes, the model deciding as it would over the whole recording.
  * request is {"model"?, "language"?, "sample_rate"? (of the pushed audio, default 16000; resampled to the model's),

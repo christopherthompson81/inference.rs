@@ -1788,6 +1788,16 @@ impl Engine {
         self.transcription(parse_json(request)?, audio).await
     }
 
+    /// Transcribes a whole recording as a stream of events, its windows as each finishes: `audio` bytes, or the
+    /// request's `path` (a local file, decoded as it reads). See [`crate::speech_streams`] for the events.
+    pub async fn transcription_stream_json(
+        &self,
+        request: &[u8],
+        audio: Option<Vec<u8>>,
+    ) -> Result<crate::speech_streams::SpeechStream, ApiError> {
+        crate::speech_streams::transcription_events(self.state().clone(), request, audio)
+    }
+
     /// Opens a streamed transcription on a cache-aware streaming model, fed audio as it arrives.
     pub async fn transcription_session(
         &self,

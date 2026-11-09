@@ -2481,7 +2481,7 @@ dependencies = [
 
 [[package]]
 name = "inference"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2518,7 +2518,7 @@ dependencies = [
 
 [[package]]
 name = "inference-agent"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "bm25",
@@ -2546,7 +2546,7 @@ dependencies = [
 
 [[package]]
 name = "inference-api"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2584,7 +2584,7 @@ dependencies = [
 
 [[package]]
 name = "inference-audio"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "hound",
@@ -2596,7 +2596,7 @@ dependencies = [
 
 [[package]]
 name = "inference-chat-protocols"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "either",
@@ -2614,7 +2614,7 @@ dependencies = [
 
 [[package]]
 name = "inference-cli"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "axum",
@@ -2657,7 +2657,7 @@ dependencies = [
 
 [[package]]
 name = "inference-code-exec"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2677,7 +2677,7 @@ dependencies = [
 
 [[package]]
 name = "inference-coder"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2699,7 +2699,7 @@ dependencies = [
 
 [[package]]
 name = "inference-core"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "ahash",
  "anyhow",
@@ -2763,7 +2763,7 @@ dependencies = [
 
 [[package]]
 name = "inference-drafters"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "inference-fattn",
@@ -2781,7 +2781,7 @@ dependencies = [
 
 [[package]]
 name = "inference-examples"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "clap",
@@ -2800,7 +2800,7 @@ dependencies = [
 
 [[package]]
 name = "inference-fattn"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "float8",
@@ -2812,7 +2812,7 @@ dependencies = [
 
 [[package]]
 name = "inference-ffi"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2837,7 +2837,7 @@ dependencies = [
 
 [[package]]
 name = "inference-flash-attn-v3"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "half",
@@ -2849,7 +2849,7 @@ dependencies = [
 
 [[package]]
 name = "inference-gguf"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "ahash",
  "anyhow",
@@ -2873,7 +2873,7 @@ dependencies = [
 
 [[package]]
 name = "inference-http"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "axum",
@@ -2898,7 +2898,7 @@ dependencies = [
 
 [[package]]
 name = "inference-jobs"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "hf-hub",
@@ -2925,7 +2925,7 @@ dependencies = [
 
 [[package]]
 name = "inference-json"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "axum",
  "either",
@@ -2938,7 +2938,7 @@ dependencies = [
 
 [[package]]
 name = "inference-json-derive"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2947,7 +2947,7 @@ dependencies = [
 
 [[package]]
 name = "inference-kernel-build"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "fs2",
  "glob",
@@ -2964,7 +2964,7 @@ dependencies = [
 
 [[package]]
 name = "inference-layout"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "clap",
@@ -2981,7 +2981,7 @@ dependencies = [
 
 [[package]]
 name = "inference-macros"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",
@@ -2991,7 +2991,7 @@ dependencies = [
 
 [[package]]
 name = "inference-mcp"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3014,7 +3014,7 @@ dependencies = [
 
 [[package]]
 name = "inference-metal-compile"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "candle-metal-kernels",
  "objc2-metal",
@@ -3022,7 +3022,7 @@ dependencies = [
 
 [[package]]
 name = "inference-models-decision"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "inference-nn",
  "inference-protocol",
@@ -3033,7 +3033,7 @@ dependencies = [
 
 [[package]]
 name = "inference-models-diffusion"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "clap",
@@ -3058,7 +3058,7 @@ dependencies = [
 
 [[package]]
 name = "inference-models-gemma"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "image",
@@ -3084,7 +3084,7 @@ dependencies = [
 
 [[package]]
 name = "inference-models-llama"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "image",
@@ -3108,7 +3108,7 @@ dependencies = [
 
 [[package]]
 name = "inference-models-other"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "clap",
@@ -3139,7 +3139,7 @@ dependencies = [
 
 [[package]]
 name = "inference-models-phi"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "either",
@@ -3162,7 +3162,7 @@ dependencies = [
 
 [[package]]
 name = "inference-models-qwen"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "image",
@@ -3187,7 +3187,7 @@ dependencies = [
 
 [[package]]
 name = "inference-models-speech"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "clap",
@@ -3214,7 +3214,7 @@ dependencies = [
 
 [[package]]
 name = "inference-nn"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "akin",
  "anyhow",
@@ -3260,7 +3260,7 @@ dependencies = [
 
 [[package]]
 name = "inference-paged-attn"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "candle-metal-kernels",
@@ -3277,7 +3277,7 @@ dependencies = [
 
 [[package]]
 name = "inference-protocol"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3306,7 +3306,7 @@ dependencies = [
 
 [[package]]
 name = "inference-quant"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "base64 0.22.1",
  "bytemuck",
@@ -3344,7 +3344,7 @@ dependencies = [
 
 [[package]]
 name = "inference-recon"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "flate2",
@@ -3367,7 +3367,7 @@ dependencies = [
 
 [[package]]
 name = "inference-sandbox"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "inference-json",
  "itoa",
@@ -3384,7 +3384,7 @@ dependencies = [
 
 [[package]]
 name = "inference-selection"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "candle-metal-kernels",
@@ -3411,7 +3411,7 @@ dependencies = [
 
 [[package]]
 name = "inference-server-core"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "axum",
@@ -3463,7 +3463,7 @@ dependencies = [
 
 [[package]]
 name = "inference-tensor"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "accelerate-src",
  "byteorder",
@@ -3499,14 +3499,14 @@ dependencies = [
 
 [[package]]
 name = "inference-tensor-kernels"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "inference-kernel-build",
 ]
 
 [[package]]
 name = "inference-vision"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "fast_image_resize",
  "image",
@@ -3515,7 +3515,7 @@ dependencies = [
 
 [[package]]
 name = "inference-vulkan"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "ash",
  "half",
@@ -3523,7 +3523,7 @@ dependencies = [
 
 [[package]]
 name = "inference-webui"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "anyhow",
  "axum",

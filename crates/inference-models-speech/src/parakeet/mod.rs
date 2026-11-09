@@ -21,7 +21,10 @@ use inference_tensor::{DType, Device, Error, Result, Tensor};
 use tokenizers::Tokenizer;
 
 use crate::silero::{SegmentOptions, SileroVad, speech_segments};
-use crate::{TimedText, Transcription, TranscriptionOptions};
+use crate::{
+    ProgressFn, TRANSCRIPTION_STOPPED, TimedText, Transcription, TranscriptionOptions,
+    TranscriptionProgress,
+};
 pub use config::{
     EncoderConfig, FeatureConfig, HeadKind, MODEL_TYPES, ParakeetConfig, ProcessorConfig,
     STREAMING_ENCODER_TYPE,
@@ -237,18 +240,7 @@ impl Parakeet {
         sample_rate: u32,
         options: &TranscriptionOptions,
     ) -> Result<Transcription> {
-        let language = self.language(options)?;
-        // checked before resampling, which would copy hours of audio the model then refuses
-        let pcm =
-            inference_audio::mel::resample(pcm, sample_rate, self.sample_rate()).map_err(msg)?;
-        let rate = self.sample_rate();
-        let duration = pcm.len() as f64 / f64::from(rate);
-        if duration <= MAX_SECONDS {
-            return self.transcribe_samples(&pcm, language, options.beam_size);
-        }
-        // past full attention's bound, and with no VAD to find the silences, cut where the audio is quietest
-        let windows = quiet_windows(&pcm, rate);
-        self.transcribe_windows(&pcm, &windows, language, options.beam_size)
+        self.transcribe_reporting(pcm, sample_rate, None, options, None)
     }
 
     fn identifies(&self, language: &str) -> bool {
@@ -281,36 +273,55 @@ impl Parakeet {
         vad: &SileroVad,
         options: &TranscriptionOptions,
     ) -> Result<Transcription> {
+        self.transcribe_reporting(pcm, sample_rate, Some(vad), options, None)
+    }
+
+    /// `transcribe` (with `vad`, `transcribe_with_vad`), telling `progress` of its windows as each finishes.
+    pub fn transcribe_reporting(
+        &self,
+        pcm: &[f32],
+        sample_rate: u32,
+        vad: Option<&SileroVad>,
+        options: &TranscriptionOptions,
+        progress: Option<&ProgressFn>,
+    ) -> Result<Transcription> {
         let language = self.language(options)?;
         let beam = options.beam_size;
         let rate = self.sample_rate();
-        if vad.config().sample_rate != rate {
+        if let Some(vad) = vad
+            && vad.config().sample_rate != rate
+        {
             return Err(msg(format!(
                 "the VAD runs at {} Hz and Parakeet at {rate} Hz",
                 vad.config().sample_rate
             )));
         }
+        // checked before resampling, which would copy hours of audio the model then refuses
         let pcm = inference_audio::mel::resample(pcm, sample_rate, rate).map_err(msg)?;
         let duration = pcm.len() as f64 / f64::from(rate);
-        if duration <= LONG_FORM_SECONDS {
-            return self.transcribe_samples(&pcm, language, beam);
-        }
-        let options = SegmentOptions {
-            max_speech_duration_s: Some(WINDOW_SECONDS),
-            ..SegmentOptions::default()
+        let windows = match vad {
+            _ if duration <= vad.map_or(MAX_SECONDS, |_| LONG_FORM_SECONDS) => vec![(0, pcm.len())],
+            // past full attention's bound, and with no VAD to find the silences, cut where the audio is quietest
+            None => quiet_windows(&pcm, rate),
+            Some(vad) => {
+                let options = SegmentOptions {
+                    max_speech_duration_s: Some(WINDOW_SECONDS),
+                    ..SegmentOptions::default()
+                };
+                let probabilities = vad.probabilities(&pcm)?;
+                let speech = speech_segments(
+                    &probabilities,
+                    pcm.len(),
+                    rate,
+                    vad.config().chunk_size,
+                    &options,
+                );
+                let window_samples = (WINDOW_SECONDS * f64::from(rate)) as usize;
+                let edge = (WINDOW_EDGE_SECONDS * f64::from(rate)) as usize;
+                widen(&windows(&speech, window_samples), pcm.len(), edge)
+            }
         };
-        let probabilities = vad.probabilities(&pcm)?;
-        let speech = speech_segments(
-            &probabilities,
-            pcm.len(),
-            rate,
-            vad.config().chunk_size,
-            &options,
-        );
-        let window_samples = (WINDOW_SECONDS * f64::from(rate)) as usize;
-        let edge = (WINDOW_EDGE_SECONDS * f64::from(rate)) as usize;
-        let windows = widen(&windows(&speech, window_samples), pcm.len(), edge);
-        self.transcribe_windows(&pcm, &windows, language, beam)
+        self.transcribe_windows(&pcm, &windows, language, beam, progress)
     }
 
     // each `(start, end)` sample window transcribed alone, its words moved to where it sits in `pcm`
@@ -320,8 +331,21 @@ impl Parakeet {
         windows: &[(usize, usize)],
         language: Option<&str>,
         beam: Option<usize>,
+        progress: Option<&ProgressFn>,
     ) -> Result<Transcription> {
         let rate = self.sample_rate();
+        let seconds = |at: usize| at as f64 / f64::from(rate);
+        let spans: Vec<(f64, f64)> = windows
+            .iter()
+            .map(|&(a, b)| (seconds(a), seconds(b)))
+            .collect();
+        let started = TranscriptionProgress::Started {
+            duration: seconds(pcm.len()),
+            windows: &spans,
+        };
+        if !progress.is_none_or(|progress| progress(started)) {
+            return Err(msg(TRANSCRIPTION_STOPPED));
+        }
         let mut merged = Transcription {
             text: String::new(),
             tokens: Vec::new(),
@@ -329,22 +353,38 @@ impl Parakeet {
             duration: pcm.len() as f64 / f64::from(rate),
             language: None,
         };
-        for &(start, end) in windows {
+        for (index, &(start, end)) in windows.iter().enumerate() {
             let offset = start as f64 / f64::from(rate);
             let part = self.transcribe_samples(&pcm[start..end], language, beam)?;
-            merged.language = merged.language.or(part.language);
+            merged.language = merged.language.or(part.language.clone());
             let shift = |t: TimedText| TimedText {
                 start: t.start + offset,
                 end: t.end + offset,
                 ..t
             };
-            merged.tokens.extend(part.tokens.into_iter().map(shift));
-            merged.words.extend(part.words.into_iter().map(shift));
+            let part = Transcription {
+                tokens: part.tokens.into_iter().map(shift).collect(),
+                words: part.words.into_iter().map(shift).collect(),
+                ..part
+            };
+            let keep_going = progress.is_none_or(|progress| {
+                progress(TranscriptionProgress::Window {
+                    index,
+                    start: spans[index].0,
+                    end: spans[index].1,
+                    transcript: &part,
+                })
+            });
+            merged.tokens.extend(part.tokens);
+            merged.words.extend(part.words);
             if !part.text.is_empty() {
                 if !merged.text.is_empty() {
                     merged.text.push(' ');
                 }
                 merged.text.push_str(&part.text);
+            }
+            if !keep_going && index + 1 < windows.len() {
+                return Err(msg(TRANSCRIPTION_STOPPED));
             }
         }
         Ok(merged)

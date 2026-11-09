@@ -784,6 +784,47 @@ pub unsafe extern "C" fn inference_transcription(
     }
 }
 
+/// Safety: `engine` is a live handle, `request` valid for `request_len` bytes, `audio` NULL or valid for `audio_len`
+/// bytes, and `out_stream` for a write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_transcription_stream_open(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    audio: *const u8,
+    audio_len: usize,
+    out_stream: *mut *mut inference_stream,
+) -> inference_status {
+    unsafe {
+        stream_call(
+            engine,
+            request,
+            request_len,
+            out_stream,
+            |engine, request| {
+                engine
+                    .transcription_stream_json(request, audio_arg(audio, audio_len)?)
+                    .map_err(api_failure)
+            },
+        )
+    }
+}
+
+// audio bytes a stream copies, or none where the request names a file; the in-memory form takes what an upload does
+unsafe fn audio_arg(audio: *const u8, audio_len: usize) -> FfiResult<Option<Vec<u8>>> {
+    unsafe {
+        if audio.is_null() {
+            return Ok(None);
+        }
+        if audio_len > MAX_FILE_UPLOAD_BYTES {
+            return Err(api_failure(file_too_large()));
+        }
+        Ok(Some(
+            arg_bytes(audio.cast::<c_char>(), audio_len, "audio")?.to_vec(),
+        ))
+    }
+}
+
 /// Safety: `engine` is a live handle, `request` valid for `request_len` bytes, `audio` for `audio_len` bytes and
 /// `out_blob` for a write.
 #[unsafe(no_mangle)]

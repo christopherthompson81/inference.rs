@@ -43,6 +43,7 @@ pub mod sdk;
 // for the crates above the engine that fetch checkpoints from the Hub or sample video frames as it does
 pub use inference_core::{TokenSource, VideoFrameSampling, build_api_with_cache, remote_fetch};
 pub mod skill_store;
+pub mod speech_streams;
 pub mod system;
 pub mod transcription_session;
 pub mod types;

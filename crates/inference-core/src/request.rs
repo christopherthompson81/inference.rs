@@ -102,6 +102,9 @@ pub enum RequestMessage {
         #[serde(skip)]
         audio: AudioInput,
         options: inference_models_speech::TranscriptionOptions,
+        /// Told of a windowed transcription's windows as they finish, and able to stop it between them.
+        #[serde(skip)]
+        progress: Option<TranscriptionProgressHook>,
     },
     VoiceActivity {
         #[serde(skip)]
@@ -252,6 +255,16 @@ pub const FINISH_REASON_LENGTH: &str = "length";
 /// A flag the requester sets to cancel its request; cloning shares it.
 #[derive(Clone, Debug, Default)]
 pub struct RequestCancellation(Arc<AtomicBool>);
+
+/// A transcription's progress callback ([`inference_models_speech::ProgressFn`]), shared with the request.
+#[derive(Clone)]
+pub struct TranscriptionProgressHook(pub Arc<inference_models_speech::ProgressFn>);
+
+impl std::fmt::Debug for TranscriptionProgressHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TranscriptionProgressHook")
+    }
+}
 
 impl RequestCancellation {
     pub fn cancel(&self) {

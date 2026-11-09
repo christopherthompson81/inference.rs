@@ -934,6 +934,18 @@ transcription(request_json: str, audio: bytes) -> Blob
 
 Transcribes encoded audio (WAV, MP3, FLAC, ...); the blob's MIME type names the response format.
 
+### `JsonEngine.transcription_stream`
+
+```text
+transcription_stream(
+    request_json: str,
+    audio: bytes | None = None,
+) -> Stream
+```
+
+Transcribes a whole recording as `started`, per-window `window` and `progress`, and a last `done`,
+`canceled` or `error` event; `audio` bytes, or None with a local file's `path` in the request.
+
 ### `JsonEngine.device_snapshots`
 
 ```text

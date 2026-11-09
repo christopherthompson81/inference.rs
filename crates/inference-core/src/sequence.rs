@@ -61,7 +61,10 @@ pub struct DecisionInput {
 pub enum OneShotParams {
     Diffusion(DiffusionGenerationParams),
     Speech(SpeechOptions),
-    Transcription(inference_models_speech::TranscriptionOptions),
+    Transcription(
+        inference_models_speech::TranscriptionOptions,
+        Option<crate::TranscriptionProgressHook>,
+    ),
     TranscriptionStream(crate::TranscriptionStreamRequest),
     VoiceActivity(inference_models_speech::silero::SegmentOptions),
     Diarization(inference_models_speech::diarization::DiarizationOptions),
@@ -1702,7 +1705,14 @@ impl Sequence {
 
     pub fn transcription_options(&self) -> Option<&inference_models_speech::TranscriptionOptions> {
         match &self.one_shot {
-            Some(OneShotParams::Transcription(options)) => Some(options),
+            Some(OneShotParams::Transcription(options, _)) => Some(options),
+            _ => None,
+        }
+    }
+
+    pub fn transcription_progress(&self) -> Option<&crate::TranscriptionProgressHook> {
+        match &self.one_shot {
+            Some(OneShotParams::Transcription(_, progress)) => progress.as_ref(),
             _ => None,
         }
     }

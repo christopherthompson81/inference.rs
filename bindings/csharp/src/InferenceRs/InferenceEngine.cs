@@ -444,6 +444,23 @@ public sealed unsafe class InferenceEngine : IDisposable
         return Owned.TakeBlob(blob);
     }
 
+    /// <summary>Transcribes a whole recording as a stream of events: <c>started</c> (its windows), then a <c>window</c>
+    /// (its text and words) and a <c>progress</c> as each finishes, and last <c>done</c> (the verbose_json transcript),
+    /// <c>canceled</c> or <c>error</c>. Canceling stops it before its next window.</summary>
+    /// <param name="requestJson">A transcription request, with <c>"path"</c> (a local file, decoded as it reads) when
+    /// <paramref name="audio"/> is null, and <c>"from_seconds"</c>? to resume part way.</param>
+    /// <param name="audio">An encoded file's bytes, or null with a <c>"path"</c>.</param>
+    public EngineStream TranscriptionStream(string requestJson, byte[]? audio = null)
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        using var bytes = audio is null ? null : new PinnedBytes(audio);
+        var status = NativeMethods.inference_transcription_stream_open(
+            engine.Handle, request.Pointer, request.Length, bytes is null ? null : bytes.Pointer,
+            bytes?.Length ?? 0, out var stream);
+        return Stream(status, stream, nameof(NativeMethods.inference_transcription_stream_open));
+    }
+
     /// <summary>Opens a streamed transcription on a cache-aware streaming recogniser (Nemotron streaming ASR).</summary>
     /// <param name="requestJson"><c>{"model"?, "language"?, "sample_rate"?, "response_format"?, "timestamp_granularities"?}</c>;
     /// the pushed audio is at <c>sample_rate</c> (default 16000).</param>
