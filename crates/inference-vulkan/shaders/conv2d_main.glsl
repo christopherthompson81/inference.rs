@@ -1,12 +1,13 @@
 // A direct 2D convolution, a thread an output: x `(b, groups * c_in, i_h, i_w)` strided, the kernel contiguous
 // `(groups * c_out, c_in, k_h, k_w)`, the output contiguous `(b, groups * c_out, o_h, o_w)`; zero padding, as the
-// CPU's conv2d (a conv1d is one row, padded along w alone). With BF16 every operand is bf16, summed in f32.
+// CPU's conv2d (a conv1d is one row, padded along w alone). With BF16 every operand is bf16 (f16 under
+// HALF_F16), summed in f32.
 #ifdef BF16
 #extension GL_EXT_shader_16bit_storage : require
-#include "bf16.glsl"
+#include "half.glsl"
 #define ELEM uint16_t
-#define LOAD(v) bf16_bits_to_f32(uint(v))
-#define STORE(v) uint16_t(f32_to_bf16_bits(v))
+#define LOAD(v) half_to_f32(uint(v))
+#define STORE(v) uint16_t(f32_to_half(v))
 #else
 #define ELEM float
 #define LOAD(v) (v)

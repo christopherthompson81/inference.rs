@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::memory::Buffer;
-use crate::{Error, Recorder, Result};
+use crate::{Error, Half, Recorder, Result};
 
 pub(crate) const BINDINGS: usize = 3;
 pub(crate) const ROWS_BINDINGS: usize = 4;
@@ -207,15 +207,16 @@ fn words(values: &[usize]) -> Result<Vec<u8>> {
 
 impl Recorder<'_> {
     pub fn rows_f32(&self, op: &Rows<'_>) -> Result<()> {
-        self.rows(op, false)
+        self.rows(op, None)
     }
 
-    /// [`Self::rows_f32`] over bf16 rows, `alpha` and `beta`, computed in f32 (an arg reduction's out still u32s).
-    pub fn rows_bf16(&self, op: &Rows<'_>) -> Result<()> {
-        self.rows(op, true)
+    /// [`Self::rows_f32`] over 16-bit float rows, `alpha` and `beta`, computed in f32 (an arg reduction's out still
+    /// u32s).
+    pub fn rows_half(&self, op: &Rows<'_>, half: Half) -> Result<()> {
+        self.rows(op, Some(half))
     }
 
-    fn rows(&self, op: &Rows<'_>, bf16: bool) -> Result<()> {
+    fn rows(&self, op: &Rows<'_>, half: Option<Half>) -> Result<()> {
         if op.rows == 0 {
             return Ok(());
         }
@@ -230,7 +231,7 @@ impl Recorder<'_> {
         }
         let (beta, beta_offset) = op.beta.unwrap_or((op.x, 0));
         // a decode row's norm writes its int8 blocks too, cached for the matvecs that read it
-        if !bf16
+        if half.is_none()
             && op.op == RowOp::RmsNorm
             && AddRmsNorm::fits(op.rows, op.cols)
             && !Arc::ptr_eq(op.x, op.out)
@@ -255,10 +256,10 @@ impl Recorder<'_> {
         ])?);
         let groups_x = op.rows.min(MAX_GROUPS_X);
         let kernels = &self.context.kernels;
-        let pipeline = if bf16 {
-            &kernels.rows_bf16
-        } else {
-            &kernels.rows_f32
+        let pipeline = match half {
+            None => &kernels.rows_f32,
+            Some(Half::Bf16) => &kernels.rows_bf16,
+            Some(Half::F16) => &kernels.rows_f16,
         };
         pipeline.dispatch(
             self,
@@ -380,20 +381,22 @@ impl Recorder<'_> {
     }
 
     pub fn conv2d_f32(&self, op: &Conv2d<'_>) -> Result<()> {
-        self.conv2d(op, false)
+        self.conv2d(op, None)
     }
 
-    /// [`Self::conv2d_f32`] over bf16 operands, summed in f32.
-    pub fn conv2d_bf16(&self, op: &Conv2d<'_>) -> Result<()> {
-        self.conv2d(op, true)
+    /// [`Self::conv2d_f32`] over 16-bit float operands, summed in f32.
+    pub fn conv2d_half(&self, op: &Conv2d<'_>, half: Half) -> Result<()> {
+        self.conv2d(op, Some(half))
     }
 
-    fn conv2d(&self, op: &Conv2d<'_>, bf16: bool) -> Result<()> {
+    fn conv2d(&self, op: &Conv2d<'_>, half: Option<Half>) -> Result<()> {
         let count = op.batch * op.groups * op.c_out * op.o_h * op.o_w;
         if count == 0 {
             return Ok(());
         }
-        if bf16 && self.conv2d_unfolded(op)? {
+        if let Some(half) = half
+            && self.conv2d_unfolded(op, half)?
+        {
             return Ok(());
         }
         let bytes = conv2d_words(op)?;
@@ -419,10 +422,10 @@ impl Recorder<'_> {
             work,
         );
         let kernels = &self.context.kernels;
-        let pipeline = if bf16 {
-            &kernels.conv2d_bf16
-        } else {
-            &kernels.conv2d_f32
+        let pipeline = match half {
+            None => &kernels.conv2d_f32,
+            Some(Half::Bf16) => &kernels.conv2d_bf16,
+            Some(Half::F16) => &kernels.conv2d_f16,
         };
         pipeline.dispatch(
             self,
@@ -437,9 +440,9 @@ impl Recorder<'_> {
         Ok(())
     }
 
-    // a dense bf16 convolution as a matmul over its unfolded input, on matrix cores; whether it took it (a thread an
+    // a dense 16-bit convolution as a matmul over its unfolded input, on matrix cores; whether it took it (a thread an
     // output, the direct kernel ran Sortformer's 192 -> 1536 conv1d at 0.2 TFLOPS)
-    fn conv2d_unfolded(&self, op: &Conv2d<'_>) -> Result<bool> {
+    fn conv2d_unfolded(&self, op: &Conv2d<'_>, half: Half) -> Result<bool> {
         let k = op.c_in * op.k_h * op.k_w;
         let n = op.o_h * op.o_w;
         if op.groups != 1
@@ -477,15 +480,18 @@ impl Recorder<'_> {
             row_stride: n,
             col_stride: 1,
         };
-        self.matmul_bf16(&MatMul {
-            batch: op.batch,
-            m: op.c_out,
-            n,
-            k,
-            a: weight,
-            b: unfolded,
-            out: op.out,
-        })
+        self.matmul_half(
+            &MatMul {
+                batch: op.batch,
+                m: op.c_out,
+                n,
+                k,
+                a: weight,
+                b: unfolded,
+                out: op.out,
+            },
+            half,
+        )
     }
 
     /// [`Self::matmul_f32`] with `op.b` stored as f16 (a weight kept in f16), on matrix cores; `false` (nothing recorded)
@@ -497,16 +503,21 @@ impl Recorder<'_> {
         self.matmul_cm(op, [&coop.matmul_f32_bh, &coop.matmul_cm64[1]], "half b")
     }
 
-    /// [`Self::matmul_f32`] over bf16 operands into a bf16 `out`: on matrix cores (the inputs rounded to f16 as the f32
-    /// product's are), and a product too small for their tiles in f32 sums; `false` (nothing recorded) for a tiled
-    /// product on a device without them.
-    pub fn matmul_bf16(&self, op: &MatMul<'_>) -> Result<bool> {
+    /// [`Self::matmul_f32`] over 16-bit float operands into an `out` of the same: on matrix cores (the inputs rounded
+    /// to f16 as the f32 product's are), and a product too small for their tiles in f32 sums; `false` (nothing
+    /// recorded) for a tiled product on a device without them.
+    pub fn matmul_half(&self, op: &MatMul<'_>, half: Half) -> Result<bool> {
         let tiled = op.m >= TILED_MIN && op.n >= TILED_MIN && op.batch <= MAX_GROUPS_Z;
         if tiled {
             return match self.context.coop.as_ref() {
-                Some(coop) => {
-                    self.matmul_cm(op, [&coop.matmul_bf16_cm, &coop.matmul_cm64[2]], "bf16")
-                }
+                Some(coop) => match half {
+                    Half::Bf16 => {
+                        self.matmul_cm(op, [&coop.matmul_bf16_cm, &coop.matmul_cm64[2]], "bf16")
+                    }
+                    Half::F16 => {
+                        self.matmul_cm(op, [&coop.matmul_f16_cm, &coop.matmul_cm64[3]], "f16")
+                    }
+                },
                 None => Ok(false),
             };
         }
@@ -533,9 +544,13 @@ impl Recorder<'_> {
         let work = (count as u64).saturating_mul(op.k as u64);
         self.work.set(self.work.get().saturating_add(work));
         let kernels = &self.context.kernels;
+        let (dot, simple) = match half {
+            Half::Bf16 => (&kernels.matmul_bf16_dot, &kernels.matmul_bf16),
+            Half::F16 => (&kernels.matmul_f16_dot, &kernels.matmul_f16),
+        };
         if op.k >= DOT_MIN_K {
             let groups_x = count.min(MAX_GROUPS_X);
-            kernels.matmul_bf16_dot.dispatch(
+            dot.dispatch(
                 self,
                 &buffers,
                 &bytes,
@@ -543,9 +558,7 @@ impl Recorder<'_> {
             );
         } else {
             let groups = count.div_ceil(MATMUL_THREADS).min(MAX_GROUPS) as u32;
-            kernels
-                .matmul_bf16
-                .dispatch(self, &buffers, &bytes, [groups, 1, 1]);
+            simple.dispatch(self, &buffers, &bytes, [groups, 1, 1]);
         }
         for buffer in [a.buffer, b.buffer, op.out] {
             self.retain(buffer.clone());

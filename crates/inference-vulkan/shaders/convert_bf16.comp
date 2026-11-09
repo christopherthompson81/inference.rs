@@ -1,8 +1,9 @@
 #version 450
-// `count` values from src_base into dst from dst_base, one a thread: f32 to bf16, or with WIDEN bf16 to f32.
+// `count` values from src_base into dst from dst_base, one a thread: f32 to bf16 (f16 under HALF_F16), or with WIDEN
+// back to f32.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_GOOGLE_include_directive : require
-#include "bf16.glsl"
+#include "half.glsl"
 
 layout(local_size_x = 256) in;
 
@@ -24,8 +25,8 @@ void main() {
         return;
     }
     if (pc.widen != 0) {
-        d32[pc.dst_base + i] = bf16_bits_to_f32(uint(s16[pc.src_base + i]));
+        d32[pc.dst_base + i] = half_to_f32(uint(s16[pc.src_base + i]));
     } else {
-        d16[pc.dst_base + i] = uint16_t(f32_to_bf16_bits(s32[pc.src_base + i]));
+        d16[pc.dst_base + i] = uint16_t(f32_to_half(s32[pc.src_base + i]));
     }
 }

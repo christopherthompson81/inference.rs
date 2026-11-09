@@ -1,12 +1,12 @@
 // Per-row ops over `rows` contiguous rows of `cols` f32s, a workgroup a row: RMS norm (times `alpha`), layer norm (times
 // `alpha`, plus `beta`), softmax, and the reductions; an arg reduction writes the index's bits. With BF16 every operand
-// is bf16, computed in f32.
+// is bf16 (f16 under HALF_F16), computed in f32.
 #ifdef BF16
 #extension GL_EXT_shader_16bit_storage : require
-#include "bf16.glsl"
+#include "half.glsl"
 #define ELEM uint16_t
-#define LOAD(v) bf16_bits_to_f32(uint(v))
-#define STORE(v) uint16_t(f32_to_bf16_bits(v))
+#define LOAD(v) half_to_f32(uint(v))
+#define STORE(v) uint16_t(f32_to_half(v))
 #else
 #define ELEM float
 #define LOAD(v) (v)

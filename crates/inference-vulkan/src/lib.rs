@@ -18,7 +18,7 @@ pub use context::{
     Context, DeviceSummary, MatrixCores, NO_CM2_ENV, Recorder, StreamScope, devices,
 };
 pub use kernels::{BlockType, Embed, GluMatVec, MATVEC_MAX_ROWS, MatVec};
-pub use map::{MAX_DIMS, Map, MapOp, Operand};
+pub use map::{Half, MAX_DIMS, Map, MapOp, Operand};
 pub use memory::{Bound, Buffer, ImportedMemory, f32_bytes};
 pub use ops::{
     AddRmsNorm, At, CacheShape, Conv2d, ConvStep, FlashAttn, GatedRmsNorm, GdnRecurrence, MatMul,

@@ -1,5 +1,5 @@
 #version 450
-// The matmul on matrix cores over bf16 operands.
+// The matmul on matrix cores over bf16 operands (f16 under HALF_F16).
 #extension GL_GOOGLE_include_directive : require
 #define BF16
 #include "matmul_f32_cm_main.glsl"

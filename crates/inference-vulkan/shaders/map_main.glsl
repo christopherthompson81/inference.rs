@@ -1,12 +1,12 @@
 // out = op(a[, b]) elementwise over a shape of up to MAX_DIMS dims, every operand strided (a stride of 0 broadcasts).
 // A grid-stride loop over the output's elements, which are unravelled row-major over `dims`. With BF16 every operand
-// is bf16, computed in f32.
+// is bf16 (f16 under HALF_F16), computed in f32.
 #ifdef BF16
 #extension GL_EXT_shader_16bit_storage : require
-#include "bf16.glsl"
+#include "half.glsl"
 #define ELEM uint16_t
-#define LOAD(v) bf16_bits_to_f32(uint(v))
-#define STORE(v) uint16_t(f32_to_bf16_bits(v))
+#define LOAD(v) half_to_f32(uint(v))
+#define STORE(v) uint16_t(f32_to_half(v))
 #else
 #define ELEM float
 #define LOAD(v) (v)
