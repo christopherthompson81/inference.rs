@@ -403,3 +403,150 @@ then a faster binary). Run 12's "first combined request" and "second asr" costs 
 there, and the combined request's steady state was already level with in-turn plus CUDA's overlap gain. Left: whether
 a load-time warm-up can trigger it before serving (it costs ~0.5-1 s of GPU once either way), and whether the faster
 binary changes the products (transcripts identical across it).
+
+## Run 14 - 2026-11-09 08:10
+
+Question: what starts the matrix-core transition, so a load-time warm-up can trigger it; and why CUDA never shows it.
+
+Command: an ignored soak test (temporary, `dbg_cm_soak` in inference-tensor's Vulkan tests) looping the FF matmul
+(7564x1024 @ 1024x4096, bf16, synchronized each dispatch), with env knobs for a sleep between dispatches, an idle start,
+a pre-phase of other shapes, fresh buffers per phase, the cache directory and the queue family:
+`SOAK_PHASES=... cargo nextest run -p inference-vulkan -p inference-tensor -p inference-paged-attn -p inference-nn -p inference --features vulkan --run-ignored only --no-capture -E 'test(dbg_cm_soak)'`
+
+Raw findings (onset = the first 44 ms dispatch; the staircase is 44 x5, 31 x7, 17 x12, 3.6 x~60 every time):
+- back to back: 8.16, 8.16, 8.16 s (one later session of runs: ~12.2 s); 1.72 ms before, 1.29-1.33 ms after
+- sleep after each dispatch: 1.6 ms (50 % duty) 8.14 / 8.23 s; 5 ms 8.76; 20 ms 9.85; 50 ms (~3 %) 10.79; 200 ms 14.5
+- 20 s idle before the first dispatch: onset at 28.0 s (8 s after the first dispatch)
+- after the transition, 60 s idle: the first ~17 dispatches 10 ms (clocks ramping back), then 1.28 ms, no staircase
+- after the transition, freshly uploaded operands: 1.30 ms from the first dispatch, no staircase (not per-buffer)
+- pre-phases of other shapes, then the FF matmul: 256^3 x 112k (6 s) then FF: onset 8.1 s; 256^3 or 1024^3 for 12 s:
+  no staircase in them (none over 4 ms) and FF afterwards still 1.72 ms with no onset in 5-6 s; 2048^3 and 4096^3 busy:
+  staircase inside the pre-phase at 7.98 s and 8.43 s (11.7 ms and 96 ms dispatches)
+- thin pre-phases with 50 ms sleeps for 16 s (2048x64x2048, 1536x64, 1024x64, 2048x256): no staircase, FF after 1.71 ms
+- __GL_SHADER_DISK_CACHE=0: onset 10.5 s; empty XDG cache (ours and the driver's): onset 12.3 s, and 12.2 s again with
+  that cache filled
+- compute-only queue family (family 2 on the 3090, temporary pick in pick_device): onset 8.06 s, same staircase, 1.30 ms
+  after
+
+The 3090 also drives the desktop (kwin_wayland, plasmashell, Xwayland, firefox on it).
+
+Implication: wall time from the first GPU-filling matrix-core dispatches (~8-12 s, stretched by sparse use), not work
+done or input length, and not the pipeline or shader caches or the queue family. Once it fires it holds for the
+process. Short or thin matrix-core dispatches never start it, so a cheap warm-up has to be long full-GPU dispatches
+for ~8-11 s. CUDA (cuBLAS / our SASS, no driver compile) never shows it, which keeps the driver's Vulkan path as the
+suspect. Not yet tried: queue global priority (VK_KHR_global_priority is offered), a CUDA soak of the same GEMM at the
+kernel level, the gap length that resets the count.
+
+## Run 15 - 2026-11-09 09:00
+
+Question: is the transition the driver's Vulkan path in general (as CUDA's absence suggests), or something in our
+kernel; ideas from llama.cpp's Vulkan backend.
+
+Queue global priority (temporary VkDeviceQueueGlobalPriorityCreateInfoKHR): LOW onset 8.16 s, same staircase; HIGH
+and REALTIME fail device creation without privileges. ggml-vulkan's NVIDIA-specific handling (a submit mutex, pipeline
+robustness off on some pipelines, a compute-only queue, its device architecture checks) has nothing that reads on it.
+
+ggml at the same shape: a standalone program over llama.cpp's build_vulkan (master 970b51ce7) looping one
+`ggml_mul_mat` (weight 4096 x 1024, activations 7564 x 1024) on Vulkan0, synchronized, timed per run, 20-25 s each:
+- bf16, NV_coopmat2: 1.17-1.20 ms from the start, no slow run
+- bf16, GGML_VK_DISABLE_COOPMAT2=1 (KHR_coopmat, our extension): 1.06-1.08 ms, no slow run
+- f16, KHR_coopmat: 0.79-0.81 ms, no slow run
+- bf16 without bf16 coopmat (GGML_VK_DISABLE_BFLOAT16=1): 3.7 ms (its scalar path), no slow run
+
+So the driver's KHR coopmat path does not do this to ggml's kernel; it is something about ours. Bisecting our shader
+(each a temporary edit, soak 20-22 s, bf16 unless noted):
+- f32 build of the same shader (matmul_f32_cm): onset 12.1 s (56 / 43.5 / 31 ms ...), 1.81 ms before
+- BK 32 (shared 28.8 KB): no onset in 20 s, 2.09-2.16 ms throughout
+- BK 64 with the staging tile cut to 1 KB (~38 KB shared, results wrong, timing only): onset 10.47 s
+- BK 32 plus a 16 KB shared pad kept live (~45 KB, as BK 64): no onset in 22 s, 2.11-2.16 ms
+- BK 64, the kk loop [[dont_unroll]]: onset 12.30 s
+- allocation: one VkDeviceMemory per buffer from memory type 1/2 (DEVICE_LOCAL only), not the ReBAR type 5
+
+Compiled statistics (VK_KHR_pipeline_executable_properties, temporary dump at pipeline build): matmul_bf16_cm 171
+registers, 60.5 KB binary, 45184 B shared; matmul_f32_cm 235, matmul_f32_cm_bh 209. BK 32: 182 / 141 KB / 28800 B
+(f32 193). Both sides of the split sit at one 256-thread workgroup per SM by registers, so neither shared memory nor
+registers separate the variants that trigger from those that do not.
+
+Implication: the trigger is in our coopmat kernel's runtime behaviour at BK 64 (not its shared size, registers or
+unrolling), and ggml's kernels avoid it while also running faster (bf16 1.07 ms, f16 0.80, against our 1.72 before the
+transition and 1.29 after). Next: either keep bisecting what in ours trips it, or bring the kernel toward ggml's
+mul_mm design (128 threads, BK 16-32, native bf16 coopmat via GL_EXT_bfloat16), which would answer both at once.
+
+## Run 16 - 2026-11-09 10:30
+
+Question: is the trigger our shader (Run 15's reading), and if not, what in our runtime.
+
+Our shader toward ggml's geometry (temporary edits, bf16 soak, 20-22 s):
+- 128 threads, 64 x 64 subgroup tiles, BK 32, register prefetch kept: 235 registers, 24.6 KB shared, 1.41 ms, onset 12.09 s
+- same without the register prefetch (global to shared directly, as ggml): 168 registers, 1.43 ms, onset 8.05 s
+- same with b k-contiguous (a transposed weight): 1.51 ms, onset 8.05 s
+- INFERENCE_VULKAN_NO_CM2=1 (no coopmat2 pipelines, no buffer device address): onset 8.05 s
+- our non-coopmat tiled f32 kernel (INFERENCE_VULKAN_NO_COOPMAT): 8.2 ms, no onset in 25 s
+
+ggml's own SPIR-V in our runtime (an ignored test building matmul_f16_cm1.spv from llama.cpp's build with ggml's large
+coopmat1 spec constants, dispatched through our Pipeline): 1.00 ms, onset 13.0 s (38.8 ms dispatches). ggml's harness
+running that kernel (f16 at GGML_PREC_F32, so f32 accumulation) and its bf16 one: 1.02-1.04 ms and 1.08-1.10 ms, no
+onset in 25 s; also clean with GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM=1 (plain device-local memory), constant data, and
+the binary renamed `inference`. So not the shader: Run 15's "something about ours" was the runtime.
+
+Correction to Run 13: a GeForce 3090 runs f16 tensor products with f32 accumulation at half rate (~71 TFLOPS), and
+this product is 63.4 GFLOP (floor ~0.89 ms); 1.26 ms after the transition is ~50 TFLOPS, not past that bound.
+
+Runtime differences, each with ggml's kernel in our runtime on queue family 0, all still onset at 11.5-13 s:
+dropping external_memory_host, integer dot product and the Vulkan memory model (singly and together); descriptor
+sets in place of push descriptors; our coopmat pipelines not built; robustBufferAccess on; every supported 1.0-1.3
+feature on (as ggml enables); spinning on vkGetFenceStatus (as ggml's final wait) in place of vkWaitForFences.
+A raw ash harness in our test binary (no Context: its own instance, device, three buffers, descriptor set, a dispatch
+a submit): family 0 onset 11.5 s (also outside nextest); family 2 (compute only, as ggml picks) clean for 24 s, with
+or without ggml's second queue on transfer family 1.
+
+Our runtime on family 2: still onset (ggml kernel 12.8 s, ours 8.25 s). Family 2 with everything removed (DBG_SKIP
+emh,dot,vmm, NO_CM2, no coop kernels, descriptor sets) clean for 24 s; adding back one at a time: push descriptors
+onset 12.1 s; coop kernels, coopmat2, the extensions each clean.
+
+Reading at the time: either of two things starts the transition on this driver: a queue from the graphics+compute
+family, or dispatches bound with push descriptors (VK_KHR_push_descriptor). Run 17 corrects the second half.
+
+## Run 17 - 2026-11-09 11:40
+
+Question: does a compute-only queue with descriptor sets (Run 16's reading) end the transition in our runtime.
+
+Descriptor sets (a pool per batch, a set allocated and written per dispatch, the pools reset when the batch is reaped)
+plus the compute-only family: the bf16 soak still onset 12.29 s, f32 12.33 s, ggml's kernel 12.1 s; with coopmat2 off,
+our coopmat kernels not built and the extensions dropped (singly and all together), still 12.2-12.9 s. Run 16's clean
+family-2 run had bound one set, written once, through a probe helper that records no barrier, while its "push
+descriptors" run went through Pipeline::dispatch, which records a COMPUTE -> COMPUTE barrier after every ordered
+dispatch. Probes on family 2 with ggml's kernel, 30 s each:
+- one static set: clean; one set rewritten before every dispatch: clean; two sets alternating: clean
+- a fresh set from a fresh pool every dispatch: clean; one pool reset before every dispatch (1 set, and 256): clean
+- one static set plus the barrier after the dispatch: onset 12.30 s
+- the per-batch descriptor path without the barrier (dispatch_beside_next): clean
+- the barrier before each dispatch instead: clean
+- four dispatches a submit with barriers between them, none after the last: clean (3.9 ms a submit)
+
+Finding: the trigger is a command buffer whose last command is a pipeline barrier (our ordered dispatch's barrier,
+recorded after it, ends every submit), or a queue of the graphics family (the raw harness, no barriers at all). Push
+descriptors are not involved.
+
+Fix (descriptor sets reverted, push descriptors kept): the barrier an ordered dispatch or a transfer needs is owed
+rather than recorded, and recorded ahead of the next command (a dispatch settles it before binding; a transfer always
+orders after everything before it); what a batch still owes at submit goes in at the start of the next batch, which
+a barrier there orders after everything submitted earlier on the queue. And the queue comes from a compute-only family
+where the device has one (family 2 on the 3090; RADV's 780M has one too, not run: the laptop is left alone).
+
+`matrix_core_matmuls_hold_their_pace` (ignored benchmark, inference-tensor): the FF matmul back to back for 20 s, fails
+on a dispatch past 8x the median. Fix: 10948 matmuls, median 1.728 ms, worst 2.652 ms. Master: 12461, median 1.298 ms,
+worst 45.789 ms (fails). The transition's faster matmul goes with it: our kernel stays at 1.73 ms where master's
+reaches 1.30 after the stall; ggml's kernel ran ~1.0 ms either side of it, so a kernel nearer ggml's is the way to that
+speed now (Run 16: 128 threads, BK 32, no register prefetch gave 1.43).
+
+Speech, same session, Chrome and VS Code GPU processes on the 3090 throughout (both builds alike):
+- 12 asr requests back to back (asr8.sh, profiler on): master 2.77 2.68 3.25 2.69 2.61 2.59 2.57 3.53 2.68 2.67 2.67
+  2.61; fix 2.47 2.50 2.51 2.57 2.52 2.55 2.50 2.48 2.52 2.54 2.52 2.44 (a first fix run: 2.86 2.74 then 2.59-2.75).
+  Transcripts byte-identical to Run 13's.
+- cold start, asr and diar once, six combined requests 6 s apart (first.sh, NB=6): master asr 2.54, diar 0.84, both
+  3.49 3.30 3.52 7.78 3.37 3.36; fix asr 2.48, diar 0.85, both 3.40 3.37 3.26 3.35 3.22 3.26 (a three-request run:
+  3.45 3.38 3.29). Neither reaches Run 12's 2.66-2.85 today; the GPU had other clients this session.
+
+Master's second slow asr request (the 8th) and its 7.78 s combined one are not explained; Run 13 never saw two.
+`scripts/local_ci.sh --vulkan`: clean, 66 passed.

@@ -27,6 +27,42 @@ pub(crate) const DISCRETE_MAX_IN_FLIGHT: usize = 3;
 /// at half this, Qwen3.8-27B's batches waited too (prefill 342 tok/s, was ~500).
 pub(crate) const MAX_IN_FLIGHT_BYTES: u64 = 512 << 20;
 
+/// A barrier's scope on one side, its stages and accesses. Work owes the next command its barrier rather than ending on
+/// one: NVIDIA's driver (615.71) stalls matrix-core kernels ~1 s some seconds into work whose submits end on barriers.
+#[derive(Clone, Copy)]
+pub(crate) struct Owed {
+    pub(crate) stages: vk::PipelineStageFlags,
+    pub(crate) access: vk::AccessFlags,
+}
+
+impl Owed {
+    /// A dispatch's writes.
+    pub(crate) const WRITES: Self = Self {
+        stages: vk::PipelineStageFlags::COMPUTE_SHADER,
+        access: vk::AccessFlags::SHADER_WRITE,
+    };
+    /// A dispatch's reads and writes.
+    pub(crate) const COMPUTE: Self = Self {
+        stages: vk::PipelineStageFlags::COMPUTE_SHADER,
+        access: vk::AccessFlags::from_raw(
+            vk::AccessFlags::SHADER_READ.as_raw() | vk::AccessFlags::SHADER_WRITE.as_raw(),
+        ),
+    };
+    /// Compute and transfer work alike, every access.
+    pub(crate) const ALL: Self = Self {
+        stages: vk::PipelineStageFlags::from_raw(
+            vk::PipelineStageFlags::COMPUTE_SHADER.as_raw()
+                | vk::PipelineStageFlags::TRANSFER.as_raw(),
+        ),
+        access: vk::AccessFlags::from_raw(
+            vk::AccessFlags::SHADER_READ.as_raw()
+                | vk::AccessFlags::SHADER_WRITE.as_raw()
+                | vk::AccessFlags::TRANSFER_READ.as_raw()
+                | vk::AccessFlags::TRANSFER_WRITE.as_raw(),
+        ),
+    };
+}
+
 /// A resource a recorded command uses, kept alive until the command finishes.
 pub type Retained = Arc<dyn Any + Send + Sync>;
 
@@ -38,6 +74,8 @@ pub(crate) struct Stream {
     // the most submitted batches left unfinished, if bounded
     pub(crate) max_in_flight: Option<usize>,
     open: Option<Batch>,
+    // the barrier the last submitted batch owed, recorded at the start of the next
+    owed: Option<Owed>,
     in_flight: VecDeque<Batch>,
     spare: Vec<(vk::CommandBuffer, vk::Fence)>,
 }
@@ -54,6 +92,7 @@ pub(crate) struct Batch {
     pub(crate) queries: Option<vk::QueryPool>,
     // the buffer bytes allocated while it recorded, which its retained temporaries hold until it finishes
     pub(crate) bytes: u64,
+    pub(crate) owed: Option<Owed>,
 }
 
 /// Set to profile the GPU time of each kernel, printed every `PROFILE_PRINT_SECS`.
@@ -134,6 +173,7 @@ impl Stream {
             profile: None,
             max_in_flight: None,
             open: None,
+            owed: None,
             in_flight: VecDeque::new(),
             spare: Vec::new(),
         })
@@ -172,6 +212,7 @@ impl Stream {
                 profiled: Vec::new(),
                 queries,
                 bytes: 0,
+                owed: self.owed.take(),
             });
         }
         Ok(self.open.as_mut().expect("opened above"))
@@ -188,6 +229,7 @@ impl Stream {
             return Ok(());
         };
         batch.bytes = bytes;
+        self.owed = batch.owed;
         let buffers = [batch.buffer];
         // SAFETY: the buffer was begun in `open` and is ended once here; its fence is unsignaled
         unsafe {

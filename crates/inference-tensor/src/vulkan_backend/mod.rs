@@ -3304,6 +3304,46 @@ mod tests {
         Ok(())
     }
 
+    // matrix-core matmuls back to back hold their pace: NVIDIA's driver (615.71) once put them through a ~1 s stall
+    // (40 ms dispatches) 8-12 s into such work, while command buffers ended on barriers or ran on a graphics queue
+    #[test]
+    #[ignore = "benchmark"]
+    fn matrix_core_matmuls_hold_their_pace() -> Result<()> {
+        const SECS: f64 = 20.;
+        // clocks ramp from idle over the first dispatches
+        const SETTLE_SECS: f64 = 1.;
+        const WORST_OVER_MEDIAN: f64 = 8.;
+        let Some(vk) = device() else { return Ok(()) };
+        if !vk.as_vulkan_device()?.context.has_matrix_cores() {
+            return Ok(());
+        }
+        // a Parakeet FF matmul over 10 minutes
+        let a = Tensor::randn(0f32, 1., (7564, 1024), &vk)?.to_dtype(DType::BF16)?;
+        let b = Tensor::randn(0f32, 1., (1024, 4096), &vk)?.to_dtype(DType::BF16)?;
+        let start = std::time::Instant::now();
+        let mut times = vec![];
+        while start.elapsed().as_secs_f64() < SECS {
+            let t = std::time::Instant::now();
+            a.matmul(&b)?;
+            vk.synchronize()?;
+            if start.elapsed().as_secs_f64() > SETTLE_SECS {
+                times.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+        }
+        let worst = times.iter().copied().fold(0., f64::max);
+        times.sort_by(f64::total_cmp);
+        let median = times[times.len() / 2];
+        eprintln!(
+            "{} matmuls: median {median:.3} ms, worst {worst:.3} ms",
+            times.len()
+        );
+        assert!(
+            worst < WORST_OVER_MEDIAN * median,
+            "a {worst:.1} ms matmul against a {median:.2} ms median"
+        );
+        Ok(())
+    }
+
     // one Parakeet layer's full attention over 10 minutes (7,564 frames, 8 heads of 128): GPU time a call and the
     // useful rate (content scores, position scores and values, 2 flops a multiply-add each)
     #[test]

@@ -390,6 +390,7 @@ impl Pipeline {
                 std::ffi::CString::new(self.name).unwrap_or_default(),
             )
         });
+        recorder.settle(crate::stream::Owed::COMPUTE);
         // SAFETY: the command buffer is recording, and the descriptors' buffers outlive the submit (its caller waits)
         unsafe {
             if let Some((labels, name)) = &label {
@@ -423,21 +424,10 @@ impl Pipeline {
             if let Some((labels, _)) = &label {
                 labels.cmd_end_debug_utils_label(recorder.buffer);
             }
-            if ordered {
-                // the next dispatch reads what this one wrote
-                let barrier = vk::MemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE);
-                context.device.cmd_pipeline_barrier(
-                    recorder.buffer,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[barrier],
-                    &[],
-                    &[],
-                );
-            }
+        }
+        if ordered {
+            // the next command reads what this one wrote
+            recorder.owe(crate::stream::Owed::WRITES);
         }
         recorder.dispatches.set(recorder.dispatches.get() + 1);
         recorder.profile(self.name);
