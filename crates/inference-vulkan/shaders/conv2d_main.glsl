@@ -19,29 +19,7 @@ layout(std430, binding = 0) readonly buffer X { ELEM x[]; };
 layout(std430, binding = 1) readonly buffer W { ELEM w[]; };
 layout(std430, binding = 2) writeonly buffer O { ELEM o[]; };
 
-layout(push_constant) uniform PushConstants {
-    uint batch;
-    // a group's channels
-    uint c_in;
-    uint c_out;
-    uint groups;
-    uint i_h;
-    uint i_w;
-    uint k_h;
-    uint k_w;
-    uint o_h;
-    uint o_w;
-    uint pad_h;
-    uint pad_w;
-    uint stride;
-    uint dilation;
-    uint x_off;
-    uint x_sb;
-    uint x_sc;
-    uint x_sh;
-    uint x_sw;
-    uint w_off;
-} pc;
+#include "conv2d_push.glsl"
 
 void main() {
     uint total = gl_NumWorkGroups.x * gl_WorkGroupSize.x;

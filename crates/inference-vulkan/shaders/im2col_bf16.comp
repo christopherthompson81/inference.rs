@@ -1,0 +1,35 @@
+#version 450
+// A 2D convolution's input unfolded for a matmul: cols `(b, c_in * k_h * k_w, o_h * o_w)` from x (one group, strided),
+// each window's values in the kernel's order, zero where the window covers padding.
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer X { uint16_t x[]; };
+layout(std430, binding = 1) writeonly buffer Cols { uint16_t cols[]; };
+
+#include "conv2d_push.glsl"
+
+void main() {
+    uint total = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    uint n = pc.o_h * pc.o_w;
+    uint window = pc.k_h * pc.k_w;
+    uint k = pc.c_in * window;
+    uint count = pc.batch * k * n;
+    for (uint e = gl_GlobalInvocationID.y * total + gl_GlobalInvocationID.x; e < count; e += total * gl_NumWorkGroups.y) {
+        uint col = e % n;
+        uint row = (e / n) % k;
+        uint b = e / (n * k);
+        uint ci = row / window;
+        uint kh = (row % window) / pc.k_w;
+        uint kw = row % pc.k_w;
+        int ih = int((col / pc.o_w) * pc.stride + kh * pc.dilation) - int(pc.pad_h);
+        int iw = int((col % pc.o_w) * pc.stride + kw * pc.dilation) - int(pc.pad_w);
+        uint v = 0u;
+        if (ih >= 0 && ih < int(pc.i_h) && iw >= 0 && iw < int(pc.i_w)) {
+            v = uint(x[pc.x_off + b * pc.x_sb + ci * pc.x_sc + uint(ih) * pc.x_sh + uint(iw) * pc.x_sw]);
+        }
+        cols[e] = uint16_t(v);
+    }
+}

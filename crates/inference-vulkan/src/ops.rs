@@ -11,6 +11,9 @@ pub(crate) const ROWS_PUSH_BYTES: u32 = 8 * 4;
 pub(crate) const INDEX_PUSH_BYTES: u32 = 8 * 4;
 pub(crate) const MATMUL_PUSH_BYTES: u32 = 12 * 4;
 pub(crate) const CONV2D_PUSH_BYTES: u32 = 20 * 4;
+pub(crate) const IM2COL_BINDINGS: usize = 2;
+// a dense convolution's window (c_in * k_h * k_w) from which it runs as a matmul over its unfolded input
+const UNFOLD_MIN_K: usize = 64;
 // conv2d_f32's outputs a workgroup
 const CONV2D_THREADS: usize = 256;
 const MAX_GROUPS_X: usize = 65_535;
@@ -159,6 +162,33 @@ pub struct MatMul<'a> {
     pub a: MatOperand<'a>,
     pub b: MatOperand<'a>,
     pub out: &'a Arc<Buffer>,
+}
+
+// a convolution's push constants, as conv2d_push.glsl reads them
+fn conv2d_words(op: &Conv2d<'_>) -> Result<Vec<u8>> {
+    let [sb, sc, sh, sw] = op.x_strides;
+    words(&[
+        op.batch,
+        op.c_in,
+        op.c_out,
+        op.groups,
+        op.i_h,
+        op.i_w,
+        op.k_h,
+        op.k_w,
+        op.o_h,
+        op.o_w,
+        op.padding.0,
+        op.padding.1,
+        op.stride,
+        op.dilation,
+        op.x.1,
+        sb,
+        sc,
+        sh,
+        sw,
+        op.w.1,
+    ])
 }
 
 fn words(values: &[usize]) -> Result<Vec<u8>> {
@@ -359,32 +389,31 @@ impl Recorder<'_> {
         if count == 0 {
             return Ok(());
         }
-        let [sb, sc, sh, sw] = op.x_strides;
-        let bytes = words(&[
-            op.batch,
-            op.c_in,
-            op.c_out,
-            op.groups,
-            op.i_h,
-            op.i_w,
-            op.k_h,
-            op.k_w,
-            op.o_h,
-            op.o_w,
-            op.padding.0,
-            op.padding.1,
-            op.stride,
-            op.dilation,
-            op.x.1,
-            sb,
-            sc,
-            sh,
-            sw,
-            op.w.1,
-        ])?;
+        if bf16 && self.conv2d_unfolded(op)? {
+            return Ok(());
+        }
+        let bytes = conv2d_words(op)?;
         let groups = count.div_ceil(CONV2D_THREADS);
         let groups_x = groups.min(MAX_GROUPS_X);
         let buffers = [op.x.0, op.w.0, op.out];
+        let work = count * op.c_in * op.k_h * op.k_w;
+        self.profile_shape(
+            || {
+                format!(
+                    "b={} c={}x{}/{} {}x{} k={}x{} s={}",
+                    op.batch,
+                    op.c_in,
+                    op.c_out,
+                    op.groups,
+                    op.i_h,
+                    op.i_w,
+                    op.k_h,
+                    op.k_w,
+                    op.stride
+                )
+            },
+            work,
+        );
         let kernels = &self.context.kernels;
         let pipeline = if bf16 {
             &kernels.conv2d_bf16
@@ -397,12 +426,62 @@ impl Recorder<'_> {
             &bytes,
             [groups_x as u32, groups.div_ceil(groups_x) as u32, 1],
         );
-        let work = (count * op.c_in * op.k_h * op.k_w) as u64;
-        self.work.set(self.work.get().saturating_add(work));
+        self.work.set(self.work.get().saturating_add(work as u64));
         for buffer in buffers {
             self.retain(buffer.clone());
         }
         Ok(())
+    }
+
+    // a dense bf16 convolution as a matmul over its unfolded input, on matrix cores; whether it took it (a thread an
+    // output, the direct kernel ran Sortformer's 192 -> 1536 conv1d at 0.2 TFLOPS)
+    fn conv2d_unfolded(&self, op: &Conv2d<'_>) -> Result<bool> {
+        let k = op.c_in * op.k_h * op.k_w;
+        let n = op.o_h * op.o_w;
+        if op.groups != 1
+            || k < UNFOLD_MIN_K
+            || op.c_out < TILED_MIN
+            || n < TILED_MIN
+            || op.batch > MAX_GROUPS_Z
+            || self.context.matmul_coop().is_none()
+        {
+            return Ok(false);
+        }
+        let count = op.batch * k * n;
+        let cols = Arc::new(Buffer::new(op.out.context(), count * 2)?);
+        let groups = count.div_ceil(CONV2D_THREADS);
+        let groups_x = groups.min(MAX_GROUPS_X);
+        self.context.kernels.im2col_bf16.dispatch(
+            self,
+            &[op.x.0.buffer, cols.buffer],
+            &conv2d_words(op)?,
+            [groups_x as u32, groups.div_ceil(groups_x) as u32, 1],
+        );
+        self.retain(op.x.0.clone());
+        self.retain(cols.clone());
+        let weight = MatOperand {
+            buffer: op.w.0,
+            offset: op.w.1,
+            batch_stride: 0,
+            row_stride: k,
+            col_stride: 1,
+        };
+        let unfolded = MatOperand {
+            buffer: &cols,
+            offset: 0,
+            batch_stride: k * n,
+            row_stride: n,
+            col_stride: 1,
+        };
+        self.matmul_bf16(&MatMul {
+            batch: op.batch,
+            m: op.c_out,
+            n,
+            k,
+            a: weight,
+            b: unfolded,
+            out: op.out,
+        })
     }
 
     /// [`Self::matmul_f32`] with `op.b` stored as f16 (a weight kept in f16), on matrix cores; `false` (nothing recorded)
