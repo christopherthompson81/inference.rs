@@ -550,3 +550,38 @@ Speech, same session, Chrome and VS Code GPU processes on the 3090 throughout (b
 
 Master's second slow asr request (the 8th) and its 7.78 s combined one are not explained; Run 13 never saw two.
 `scripts/local_ci.sh --vulkan`: clean, 66 passed.
+
+## Run 18 - 2026-11-09 12:30
+
+Question: where the combined request's gap to CUDA is now, and how much of it the coopmat matmul could close.
+
+`first.sh` (cold start, asr and diar once, five combined requests 6 s apart), profiler off, the branch's build,
+backends alternated (Chrome and VS Code GPU processes on the 3090 throughout):
+
+                asr         diar         both
+    Vulkan      2.37, 2.27  0.84, 0.83   2.94-3.13
+    CUDA        2.33, 2.35  0.68, 0.67   2.57-2.61
+
+asr alone is level now. The combined request is ~0.45 s behind: CUDA's runs ~0.4 s under asr + diar in turn, Vulkan's
+~0.15 s under. Diar alone is 0.16 s behind.
+
+One combined request's profile (PROF=1, one 9.3 s window, 3.3 s wall under the profiler): 2372 ms of GPU time, so ~1 s
+of the wall has the GPU idle. By kernel: matmul_bf16_cm 1070 ms (45 %), map_bf16 530 (22 %), matmul_bf16_dot 199,
+copy_b16 190, rows_bf16 186, conv2d_bf16 182. The matmul's top shapes:
+
+    b=8 m=512 n=128 k=7564      336 x 499 us   168 ms  15.9 TFLOPS
+    b=8 m=512 n=8075 k=128      336 x 342 us   115 ms  24.8
+    b=8 m=512 n=7564 k=128      336 x 325 us   109 ms  24.4
+    m=684 n=512 k=2048          651 x 142 us    92 ms  10.1
+    m=7564 n=4096 k=1024         48 x 1773 us   85 ms  35.8
+    m=7564 n=1024 k=4096         49 x 1663 us   82 ms  38.1
+    m=7564 n=1024 k=1024        120 x 465 us    56 ms  34.1
+    m=684 n=2048 k=512          651 x 78 us     51 ms  18.4
+    m=380 n=512 k=2048           31 x 1452 us   45 ms   0.5
+    b=8 m=684 n=64 k=684        651 x 62 us     40 ms   7.8
+
+Implication: the FF shapes Run 15 compared with ggml (1.73 against ~1.0 ms) are ~220 ms of the 1070; most of the
+matmul time is the batched attention-block shapes (16-25 TFLOPS) and the diarizer's small ones (8-18), and one shape
+(m=380 n=512 k=2048, 0.5 TFLOPS) is a fallback-rate outlier. The ~1 s of GPU idle in a combined request is as large as
+the whole gap. A kernel at ggml's rate everywhere would cut ~0.45 s of GPU time, but only the part of it on the
+critical path shows in the wall.
