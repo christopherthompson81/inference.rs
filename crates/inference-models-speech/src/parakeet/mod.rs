@@ -43,6 +43,8 @@ const WINDOW_EDGE_SECONDS: f64 = 1.0;
 // without a VAD, audio past MAX_SECONDS is cut at the quietest frame this far back from each window's end
 const QUIET_SEARCH_SECONDS: f64 = 20.0;
 const QUIET_FRAME_SECONDS: f64 = 0.1;
+// how far past a resume point a window may end and still count as done before it
+const RESUME_SLACK_SECONDS: f64 = 1e-6;
 // tokens transformers' processor pins to the end of the token before them, as NeMo does for TDT
 const ATTACHED_PUNCTUATION: [&str; 11] = [
     "?", "'", "\u{a1}", "\u{bf}", "-", ":", ",", "%", "/", ".", "!",
@@ -321,7 +323,7 @@ impl Parakeet {
                 widen(&windows(&speech, window_samples), pcm.len(), edge)
             }
         };
-        self.transcribe_windows(&pcm, &windows, language, beam, progress)
+        self.transcribe_windows(&pcm, &windows, language, beam, options.resume_at, progress)
     }
 
     // each `(start, end)` sample window transcribed alone, its words moved to where it sits in `pcm`
@@ -331,10 +333,14 @@ impl Parakeet {
         windows: &[(usize, usize)],
         language: Option<&str>,
         beam: Option<usize>,
+        resume_at: Option<f64>,
         progress: Option<&ProgressFn>,
     ) -> Result<Transcription> {
         let rate = self.sample_rate();
         let seconds = |at: usize| at as f64 / f64::from(rate);
+        // a window ending at the resume point is done; a small slack absorbs the second's round trip through f64
+        let done =
+            |end: usize| resume_at.is_some_and(|at| seconds(end) <= at + RESUME_SLACK_SECONDS);
         let spans: Vec<(f64, f64)> = windows
             .iter()
             .map(|&(a, b)| (seconds(a), seconds(b)))
@@ -354,6 +360,9 @@ impl Parakeet {
             language: None,
         };
         for (index, &(start, end)) in windows.iter().enumerate() {
+            if done(end) {
+                continue;
+            }
             let offset = start as f64 / f64::from(rate);
             let part = self.transcribe_samples(&pcm[start..end], language, beam)?;
             merged.language = merged.language.or(part.language.clone());

@@ -115,6 +115,9 @@ pub enum RequestMessage {
         #[serde(skip)]
         audio: AudioInput,
         options: inference_models_speech::diarization::DiarizationOptions,
+        /// Told the seconds done after each chunk, and able to stop it between them.
+        #[serde(skip)]
+        progress: Option<DiarizationProgressHook>,
     },
     /// One step of a streamed transcription the transcription pipeline keeps between requests.
     TranscriptionStream {
@@ -259,6 +262,18 @@ pub struct RequestCancellation(Arc<AtomicBool>);
 /// A transcription's progress callback ([`inference_models_speech::ProgressFn`]), shared with the request.
 #[derive(Clone)]
 pub struct TranscriptionProgressHook(pub Arc<inference_models_speech::ProgressFn>);
+
+/// A diarization's progress callback ([`inference_models_speech::diarization::DiarizationProgressFn`]).
+#[derive(Clone)]
+pub struct DiarizationProgressHook(
+    pub Arc<inference_models_speech::diarization::DiarizationProgressFn>,
+);
+
+impl std::fmt::Debug for DiarizationProgressHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DiarizationProgressHook")
+    }
+}
 
 impl std::fmt::Debug for TranscriptionProgressHook {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -810,6 +810,31 @@ pub unsafe extern "C" fn inference_transcription_stream_open(
     }
 }
 
+/// Safety: as for `inference_transcription_stream_open`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_diarization_stream_open(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    audio: *const u8,
+    audio_len: usize,
+    out_stream: *mut *mut inference_stream,
+) -> inference_status {
+    unsafe {
+        stream_call(
+            engine,
+            request,
+            request_len,
+            out_stream,
+            |engine, request| {
+                engine
+                    .diarization_stream_json(request, audio_arg(audio, audio_len)?)
+                    .map_err(api_failure)
+            },
+        )
+    }
+}
+
 // audio bytes a stream copies, or none where the request names a file; the in-memory form takes what an upload does
 unsafe fn audio_arg(audio: *const u8, audio_len: usize) -> FfiResult<Option<Vec<u8>>> {
     unsafe {

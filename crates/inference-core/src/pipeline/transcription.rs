@@ -207,6 +207,7 @@ struct ModelInputs {
     diarization: Vec<DiarizationOptions>,
     transcription: Vec<inference_models_speech::TranscriptionOptions>,
     progress: Vec<Option<crate::TranscriptionProgressHook>>,
+    diarization_progress: Vec<Option<crate::DiarizationProgressHook>>,
 }
 
 impl InputsProcessor for TranscriptionInputsProcessor {
@@ -259,6 +260,10 @@ impl InputsProcessor for TranscriptionInputsProcessor {
                 progress: input_seqs
                     .iter()
                     .map(|seq| seq.transcription_progress().cloned())
+                    .collect(),
+                diarization_progress: input_seqs
+                    .iter()
+                    .map(|seq| seq.diarization_progress().cloned())
                     .collect(),
                 transcription: input_seqs
                     .iter()
@@ -1022,6 +1027,7 @@ impl Pipeline for TranscriptionPipeline {
             diarization,
             transcription,
             progress,
+            diarization_progress,
         } = *inputs.downcast().expect("Downcast failed.");
         let Self {
             model, sessions, ..
@@ -1083,10 +1089,16 @@ impl Pipeline for TranscriptionPipeline {
                 results: audios
                     .iter()
                     .zip(&diarization)
-                    .map(|(input, options)| {
+                    .zip(&diarization_progress)
+                    .map(|((input, options), progress)| {
                         let audio = input.audio();
                         diarizer
-                            .diarize(&audio.mono(), audio.sample_rate, options.threshold)
+                            .diarize_reporting(
+                                &audio.mono(),
+                                audio.sample_rate,
+                                options.threshold,
+                                progress.as_ref().map(|hook| &*hook.0),
+                            )
                             .map_err(|e| e.to_string())
                     })
                     .collect(),

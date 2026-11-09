@@ -540,6 +540,7 @@ async fn transcribe_inner(
             language: request.language.clone(),
             beam_size: request.beam_size,
             translate: request.task == TranscriptionTask::Translate,
+            resume_at: None,
         },
         progress: None,
     };
@@ -594,6 +595,7 @@ pub(crate) async fn speaker_turns(
     let turns = RequestMessage::Diarization {
         audio,
         options: DiarizationOptions { threshold: None },
+        progress: None,
     };
     run(state, diarizer, repr, turns).await
 }
@@ -970,6 +972,7 @@ async fn diarize_inner(
         options: DiarizationOptions {
             threshold: request.threshold,
         },
+        progress: None,
     };
     match run(state, &request.model, repr, messages).await? {
         Response::Diarization(diarization) => render_diarization(&request, diarization),
@@ -977,7 +980,7 @@ async fn diarize_inner(
     }
 }
 
-fn render_diarization(
+pub(crate) fn render_diarization(
     request: &DiarizationRequest,
     diarization: Diarization,
 ) -> Result<DiarizationOutput, ApiError> {

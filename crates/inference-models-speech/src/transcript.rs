@@ -51,4 +51,8 @@ pub struct TranscriptionOptions {
     /// Write an English translation instead of a transcript, for a model that can.
     #[serde(default)]
     pub translate: bool,
+    /// Resume at this second: windows planned over the whole audio, those ending at or before it skipped, so the
+    /// rest come out as in an uninterrupted run.
+    #[serde(default)]
+    pub resume_at: Option<f64>,
 }

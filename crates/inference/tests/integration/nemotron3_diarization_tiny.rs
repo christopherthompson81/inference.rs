@@ -132,3 +132,56 @@ async fn diarization_repeats_exactly_on_the_default_device() -> anyhow::Result<(
     }
     Ok(())
 }
+
+// a recording diarized as a stream: `started` with its length, a `progress` per chunk rising to it, and last `done`
+// with the one-shot response's segments; canceled at its first chunk it stops before the last
+#[tokio::test]
+async fn a_recording_diarizes_as_a_stream_of_chunk_progress() -> anyhow::Result<()> {
+    use futures::StreamExt;
+    let dir = tiny_nemotron3_diarization()?;
+    let model = DiarizationModelBuilder::new(dir.path().to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .with_force_cpu()
+        .build()
+        .await?;
+    let wav = chirp_wav();
+    let whole = model.diarization(DiarizationRequest::new(), &wav).await?;
+    let whole: serde_json::Value = serde_json::from_str(&whole.body)?;
+    let read = |stream: inference_api::speech_streams::SpeechStream, cancel: bool| async move {
+        let mut events = stream.events;
+        let mut out: Vec<serde_json::Value> = Vec::new();
+        while let Some(event) = events.next().await {
+            let event: serde_json::Value = serde_json::from_str(&event).unwrap();
+            if cancel && event["event"] == "progress" {
+                stream.cancellation.cancel();
+            }
+            out.push(event);
+        }
+        out
+    };
+    let events = read(
+        model
+            .diarization_stream_json(b"{}", Some(wav.clone()))
+            .await?,
+        false,
+    )
+    .await;
+    assert_eq!(events[0]["event"], "started");
+    assert!((events[0]["data"]["duration"].as_f64().unwrap() - SECONDS).abs() < 1e-6);
+    let progress: Vec<f64> = events
+        .iter()
+        .filter(|e| e["event"] == "progress")
+        .map(|e| e["data"]["seconds_done"].as_f64().unwrap())
+        .collect();
+    assert!(progress.len() > 1, "{} chunks", progress.len());
+    assert!(progress.windows(2).all(|p| p[0] < p[1]));
+    assert!((progress.last().unwrap() - SECONDS).abs() < 1e-6);
+    let done = events.last().unwrap();
+    assert_eq!(done["event"], "done");
+    assert_eq!(done["data"]["segments"], whole["segments"]);
+    let canceled = read(model.diarization_stream_json(b"{}", Some(wav)).await?, true).await;
+    assert_eq!(canceled.last().unwrap()["event"], "canceled");
+    // the chunk running when the cancel lands still finishes and reports
+    assert!(canceled.iter().filter(|e| e["event"] == "progress").count() < progress.len());
+    Ok(())
+}

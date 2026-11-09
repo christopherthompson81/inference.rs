@@ -320,8 +320,8 @@ INFERENCE_API inference_status inference_chat_stream_open_with_media(const infer
 /* Waits up to timeout_ms (< 0 waits indefinitely, 0 polls) for the next event of a stream. On an event, out_event
  * receives {"event": <name>, "data": ...}. Chat streams emit "chunk" (data: a chat.completion.chunk),
  * "agentic_tool_call_progress", "agentic_tool_approval_required", "file_produced" and "error"; completion streams emit
- * "chunk" (data: a text_completion chunk) and "error"; transcription streams their own (see
- * inference_transcription_stream_open). An error's data is the OpenAI error JSON, and an error event is always the last event. On a timeout out_event is NULL and
+ * "chunk" (data: a text_completion chunk) and "error"; transcription and diarization streams their own (see
+ * inference_transcription_stream_open and inference_diarization_stream_open). An error's data is the OpenAI error JSON, and an error event is always the last event. On a timeout out_event is NULL and
  * out_done 0. Once the stream has ended, out_event is NULL and out_done 1. out_event and out_done are required. */
 INFERENCE_API inference_status inference_stream_next(inference_stream *stream, int64_t timeout_ms,
                                                     inference_string **out_event, int32_t *out_done);
@@ -513,6 +513,16 @@ INFERENCE_API inference_status inference_voice_activity(const inference_engine *
 INFERENCE_API inference_status inference_diarization(const inference_engine *engine, const char *request,
                                                     size_t request_len, const uint8_t *audio, size_t audio_len,
                                                     inference_blob **out_blob);
+/* Diarizes a whole recording as a stream (poll it with inference_stream_next, stop it with inference_stream_cancel):
+ * one pass, so a speaker keeps its number throughout. request is inference_diarization's JSON, with "path"? (a local
+ * audio file, decoded to 16 kHz mono as it reads, up to 12 hours; audio is then NULL) and "from_seconds"? (start
+ * there; times stay the recording's); otherwise audio is audio_len bytes of an encoded file. Events: "started"
+ * {"duration"}, a "progress" {"seconds_done", "duration"} after each of the model's chunks, and last "done" (the json
+ * response: {"duration", "num_speakers", "segments": [{"speaker", "start", "end"}]}), "canceled" or "error" (the
+ * error envelope). A cancel takes effect before the next chunk. */
+INFERENCE_API inference_status inference_diarization_stream_open(const inference_engine *engine, const char *request,
+                                                                size_t request_len, const uint8_t *audio,
+                                                                size_t audio_len, inference_stream **out_stream);
 /* Answers the approval an "agentic_tool_approval_required" stream event named (its "approval_id"); the request is
  * {"decision": "approve" | "deny", "remember_for_session"?, "message"?} and out_response receives {"status":
  * "resolved" | "queued"}. An unknown approval is INFERENCE_ERR_NOT_FOUND. Approvals only arise on streamed requests

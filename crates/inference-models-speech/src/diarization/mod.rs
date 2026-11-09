@@ -32,10 +32,44 @@ impl Diarizer {
         sample_rate: u32,
         threshold: Option<f32>,
     ) -> inference_tensor::Result<Diarization> {
+        self.diarize_reporting(pcm, sample_rate, threshold, None)
+    }
+
+    /// [`Self::diarize`], telling `progress` the seconds done after each chunk.
+    pub fn diarize_reporting(
+        &self,
+        pcm: &[f32],
+        sample_rate: u32,
+        threshold: Option<f32>,
+        progress: Option<&DiarizationProgressFn>,
+    ) -> inference_tensor::Result<Diarization> {
         match self {
-            Self::Nemotron3(d) => d.diarize(pcm, sample_rate, threshold),
-            Self::Sortformer(d) => d.diarize(pcm, sample_rate, threshold),
+            Self::Nemotron3(d) => d.diarize_reporting(pcm, sample_rate, threshold, progress),
+            Self::Sortformer(d) => d.diarize_reporting(pcm, sample_rate, threshold, progress),
         }
+    }
+}
+
+/// Told the seconds a diarization has done and its audio's total after each chunk; `false` stops it before the next
+/// chunk, with [`DIARIZATION_STOPPED`].
+pub type DiarizationProgressFn = dyn Fn(f64, f64) -> bool + Send + Sync;
+
+/// The error a diarization its progress stopped ends with.
+pub const DIARIZATION_STOPPED: &str = "the diarization was stopped";
+
+// after a chunk that leaves `rows` output frames done: whether to go on
+fn chunk_done(
+    progress: Option<&DiarizationProgressFn>,
+    rows: usize,
+    frame_seconds: f64,
+    duration: f64,
+) -> inference_tensor::Result<()> {
+    let done = (rows as f64 * frame_seconds).min(duration);
+    match progress {
+        Some(progress) if !progress(done, duration) => Err(inference_tensor::Error::Msg(
+            DIARIZATION_STOPPED.to_string(),
+        )),
+        _ => Ok(()),
     }
 }
 

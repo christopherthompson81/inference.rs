@@ -946,6 +946,18 @@ transcription_stream(
 Transcribes a whole recording as `started`, per-window `window` and `progress`, and a last `done`,
 `canceled` or `error` event; `audio` bytes, or None with a local file's `path` in the request.
 
+### `JsonEngine.diarization_stream`
+
+```text
+diarization_stream(
+    request_json: str,
+    audio: bytes | None = None,
+) -> Stream
+```
+
+Diarizes a whole recording as `started`, a `progress` after each chunk, and a last `done`, `canceled` or
+`error` event; `audio` bytes, or None with a local file's `path` in the request.
+
 ### `JsonEngine.device_snapshots`
 
 ```text

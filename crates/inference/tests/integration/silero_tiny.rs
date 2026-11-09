@@ -123,7 +123,7 @@ async fn stream_events(
 
 // a long recording streamed from a file: its windows up front, each window's words and its progress as it finishes,
 // and last the transcript the one-shot request gives; canceled at its first window it stops before the last, and
-// from a second in, its times stay the recording's
+// resumed at a window's end it runs the rest of the same windows as the whole run did
 #[tokio::test]
 async fn a_long_recording_streams_its_windows_as_they_finish() -> anyhow::Result<()> {
     let vad = tiny_silero_gguf(true)?;
@@ -154,6 +154,7 @@ async fn a_long_recording_streams_its_windows_as_they_finish() -> anyhow::Result
         None,
     )
     .await;
+    let all = events.clone();
     let names: Vec<&str> = events
         .iter()
         .map(|e| e["event"].as_str().unwrap())
@@ -192,7 +193,11 @@ async fn a_long_recording_streams_its_windows_as_they_finish() -> anyhow::Result
     assert_eq!(canceled.last().unwrap()["event"], "canceled");
     assert!(canceled.iter().filter(|e| e["event"] == "window").count() < windows);
 
-    let resumed = serde_json::json!({ "path": path, "from_seconds": WINDOW_SECONDS }).to_string();
+    // resumed at the first window's end: the same plan, the first window skipped, the rest as the whole run's
+    let whole_windows: Vec<&serde_json::Value> =
+        all.iter().filter(|e| e["event"] == "window").collect();
+    let first_end = whole_windows[0]["data"]["end"].as_f64().unwrap();
+    let resumed = serde_json::json!({ "path": path, "from_seconds": first_end }).to_string();
     let events = stream_events(
         model
             .transcription_stream_json(resumed.as_bytes(), None)
@@ -200,19 +205,14 @@ async fn a_long_recording_streams_its_windows_as_they_finish() -> anyhow::Result
         None,
     )
     .await;
-    assert_eq!(
-        events[0]["data"]["windows"][0]["start"].as_f64(),
-        Some(WINDOW_SECONDS)
-    );
+    assert_eq!(events[0]["data"]["windows"], all[0]["data"]["windows"]);
+    let rest: Vec<&serde_json::Value> = events.iter().filter(|e| e["event"] == "window").collect();
+    assert_eq!(rest.len(), whole_windows.len() - 1);
+    for (resumed, whole) in rest.iter().zip(&whole_windows[1..]) {
+        assert_eq!(resumed["data"], whole["data"]);
+    }
     let done = &events.last().unwrap()["data"];
     assert!((done["duration"].as_f64().unwrap() - LONG_SECONDS).abs() < 1e-3);
-    assert!(
-        done["words"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|w| w["start"].as_f64().unwrap() >= WINDOW_SECONDS)
-    );
 
     let both = model
         .transcription_stream_json(request.as_bytes(), Some(wav))

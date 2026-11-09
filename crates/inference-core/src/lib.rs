@@ -221,7 +221,7 @@ pub use pipeline::{
 pub use pipeline::{Phi2Loader, Phi3Loader, Phi3VLoader};
 pub use request::{
     ApproximateUserLocation, CalibrationAction, CalibrationRequest, Constraint,
-    DetokenizationRequest, FINISH_REASON_CANCELED, FINISH_REASON_LENGTH,
+    DetokenizationRequest, DiarizationProgressHook, FINISH_REASON_CANCELED, FINISH_REASON_LENGTH,
     ImageGenerationResponseFormat, JointDecisionRequest, LlguidanceGrammar, MessageContent,
     NormalRequest, ReasoningEffort, RequantizeRequest, Request, RequestCancellation,
     RequestMessage, SearchContextSize, TokenizationRequest, TranscriptionProgressHook,

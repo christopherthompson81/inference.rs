@@ -143,6 +143,19 @@ spec = t.EngineSpec(
 )
 ```
 
+### Streaming a whole recording
+
+Through the C ABI and its bindings, `inference_transcription_stream_open` (Python `transcription_stream`, C#
+`TranscriptionStream`) transcribes a recording as a stream of events instead of one blocking call: `started` with
+the windows the model cut, then a `window` (its text and words) and a `progress` as each finishes, and last `done`
+(the `verbose_json` transcript), `canceled` or `error`. The request takes `"path"`, a local file decoded to 16 kHz
+mono as it reads (up to 12 hours, never held whole at its own rate), in place of audio bytes, and `"from_seconds"`
+to resume at a window's end: the windows are planned over the whole recording again and the finished ones skipped,
+so the rest come out as in an uninterrupted run. A cancel takes effect before the next window.
+`inference_diarization_stream_open` (`diarization_stream`, `DiarizationStream`) does the same for diarization: a
+`progress` after each of the model's chunks and the usual response in `done`, in one pass, so a speaker keeps its
+number across the whole recording.
+
 ## Nemotron-3 Diarization: who speaks when
 
 ```bash

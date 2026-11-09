@@ -138,6 +138,20 @@ impl BlockingEngine {
         })
     }
 
+    /// [`Engine::diarization_stream_json`]: a whole recording's diarization as a stream of events.
+    pub fn diarization_stream_json(
+        &self,
+        request: &[u8],
+        audio: Option<Vec<u8>>,
+    ) -> Result<BlockingStream, ApiError> {
+        self.stream(request, |engine, request| async move {
+            engine
+                .diarization_stream_json(&request, audio)
+                .await
+                .map(|stream| (stream.events, stream.cancellation))
+        })
+    }
+
     pub fn completion_json(&self, request: &[u8]) -> Result<String, ApiError> {
         self.call(request, |engine, request| async move {
             engine.completion_json(&request).await

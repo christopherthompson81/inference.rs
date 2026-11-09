@@ -431,6 +431,14 @@ class JsonEngine:
         data = bytes_arg(audio)
         return self._stream("inference_transcription_stream_open", request_json, data, len(data))
 
+    def diarization_stream(self, request_json: str, audio: bytes | None = None) -> Stream:
+        """Diarizes a whole recording as `started`, a `progress` after each chunk, and a last `done`, `canceled` or
+        `error` event; `audio` bytes, or None with a local file's `path` in the request."""
+        if audio is None:
+            return self._stream("inference_diarization_stream_open", request_json, None, 0)
+        data = bytes_arg(audio)
+        return self._stream("inference_diarization_stream_open", request_json, data, len(data))
+
     def device_snapshots(self, request_json: str = "{}") -> str:
         """What each CUDA device holds now: free and total bytes, its lease holder and its resident models."""
         return self._call("inference_devices_snapshot", request_json)
