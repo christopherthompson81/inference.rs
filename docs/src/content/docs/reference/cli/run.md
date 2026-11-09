@@ -38,7 +38,7 @@ inference run [OPTIONS] [COMMAND]
 | `--imatrix <IMATRIX>` |  | imatrix file for enhanced quantization |
 | `--calibration-file <CALIBRATION_FILE>` |  | Calibration file for imatrix generation |
 | `--cpu` | `false` | Force CPU-only execution |
-| `--vulkan` | `false` | Run on the Vulkan iGPU (a build with the `vulkan` feature); ops without a Vulkan kernel run on the CPU |
+| `--vulkan` | `false` | Run on Vulkan (a `vulkan` build), a discrete GPU where there is one; ops without a Vulkan kernel run on the CPU |
 | `-n, --device-layers <DEVICE_LAYERS>` |  | Device layer mapping (format: ORD:NUM;... e.g., "0:10;1:20") Omit for automatic device mapping |
 | `--topology <TOPOLOGY>` |  | Topology YAML file for device mapping |
 | `--hf-cache <HF_CACHE>` |  | Custom Hugging Face cache directory |
@@ -140,7 +140,7 @@ inference run auto [OPTIONS] --model-id <MODEL_ID>
 | `--imatrix <IMATRIX>` |  | imatrix file for enhanced quantization |
 | `--calibration-file <CALIBRATION_FILE>` |  | Calibration file for imatrix generation |
 | `--cpu` | `false` | Force CPU-only execution |
-| `--vulkan` | `false` | Run on the Vulkan iGPU (a build with the `vulkan` feature); ops without a Vulkan kernel run on the CPU |
+| `--vulkan` | `false` | Run on Vulkan (a `vulkan` build), a discrete GPU where there is one; ops without a Vulkan kernel run on the CPU |
 | `-n, --device-layers <DEVICE_LAYERS>` |  | Device layer mapping (format: ORD:NUM;... e.g., "0:10;1:20") Omit for automatic device mapping |
 | `--topology <TOPOLOGY>` |  | Topology YAML file for device mapping |
 | `--hf-cache <HF_CACHE>` |  | Custom Hugging Face cache directory |
@@ -191,7 +191,7 @@ inference run text [OPTIONS] --model-id <MODEL_ID>
 | `--imatrix <IMATRIX>` |  | imatrix file for enhanced quantization |
 | `--calibration-file <CALIBRATION_FILE>` |  | Calibration file for imatrix generation |
 | `--cpu` | `false` | Force CPU-only execution |
-| `--vulkan` | `false` | Run on the Vulkan iGPU (a build with the `vulkan` feature); ops without a Vulkan kernel run on the CPU |
+| `--vulkan` | `false` | Run on Vulkan (a `vulkan` build), a discrete GPU where there is one; ops without a Vulkan kernel run on the CPU |
 | `-n, --device-layers <DEVICE_LAYERS>` |  | Device layer mapping (format: ORD:NUM;... e.g., "0:10;1:20") Omit for automatic device mapping |
 | `--topology <TOPOLOGY>` |  | Topology YAML file for device mapping |
 | `--hf-cache <HF_CACHE>` |  | Custom Hugging Face cache directory |
@@ -238,7 +238,7 @@ inference run multimodal [OPTIONS] --model-id <MODEL_ID>
 | `--imatrix <IMATRIX>` |  | imatrix file for enhanced quantization |
 | `--calibration-file <CALIBRATION_FILE>` |  | Calibration file for imatrix generation |
 | `--cpu` | `false` | Force CPU-only execution |
-| `--vulkan` | `false` | Run on the Vulkan iGPU (a build with the `vulkan` feature); ops without a Vulkan kernel run on the CPU |
+| `--vulkan` | `false` | Run on Vulkan (a `vulkan` build), a discrete GPU where there is one; ops without a Vulkan kernel run on the CPU |
 | `-n, --device-layers <DEVICE_LAYERS>` |  | Device layer mapping (format: ORD:NUM;... e.g., "0:10;1:20") Omit for automatic device mapping |
 | `--topology <TOPOLOGY>` |  | Topology YAML file for device mapping |
 | `--hf-cache <HF_CACHE>` |  | Custom Hugging Face cache directory |
@@ -274,7 +274,7 @@ inference run diffusion [OPTIONS] --model-id <MODEL_ID>
 | `--max-model-len <MAX_MODEL_LEN>` |  | Runtime model context length |
 | `--diffusion-arch <DIFFUSION_ARCH>` | `flux` | Diffusion architecture: flux, flux-offloaded, hidream-o1 or hidream-o1-dev |
 | `--cpu` | `false` | Force CPU-only execution |
-| `--vulkan` | `false` | Run on the Vulkan iGPU (a build with the `vulkan` feature); ops without a Vulkan kernel run on the CPU |
+| `--vulkan` | `false` | Run on Vulkan (a `vulkan` build), a discrete GPU where there is one; ops without a Vulkan kernel run on the CPU |
 | `-n, --device-layers <DEVICE_LAYERS>` |  | Device layer mapping (format: ORD:NUM;... e.g., "0:10;1:20") Omit for automatic device mapping |
 | `--topology <TOPOLOGY>` |  | Topology YAML file for device mapping |
 | `--hf-cache <HF_CACHE>` |  | Custom Hugging Face cache directory |
@@ -298,7 +298,7 @@ inference run speech [OPTIONS] --model-id <MODEL_ID>
 | `--hf-overrides <HF_OVERRIDES>` |  | Recursively merged JSON overrides for the Hugging Face model config |
 | `--max-model-len <MAX_MODEL_LEN>` |  | Runtime model context length |
 | `--cpu` | `false` | Force CPU-only execution |
-| `--vulkan` | `false` | Run on the Vulkan iGPU (a build with the `vulkan` feature); ops without a Vulkan kernel run on the CPU |
+| `--vulkan` | `false` | Run on Vulkan (a `vulkan` build), a discrete GPU where there is one; ops without a Vulkan kernel run on the CPU |
 | `-n, --device-layers <DEVICE_LAYERS>` |  | Device layer mapping (format: ORD:NUM;... e.g., "0:10;1:20") Omit for automatic device mapping |
 | `--topology <TOPOLOGY>` |  | Topology YAML file for device mapping |
 | `--hf-cache <HF_CACHE>` |  | Custom Hugging Face cache directory |
@@ -333,7 +333,7 @@ inference run embedding [OPTIONS] --model-id <MODEL_ID>
 | `--imatrix <IMATRIX>` |  | imatrix file for enhanced quantization |
 | `--calibration-file <CALIBRATION_FILE>` |  | Calibration file for imatrix generation |
 | `--cpu` | `false` | Force CPU-only execution |
-| `--vulkan` | `false` | Run on the Vulkan iGPU (a build with the `vulkan` feature); ops without a Vulkan kernel run on the CPU |
+| `--vulkan` | `false` | Run on Vulkan (a `vulkan` build), a discrete GPU where there is one; ops without a Vulkan kernel run on the CPU |
 | `-n, --device-layers <DEVICE_LAYERS>` |  | Device layer mapping (format: ORD:NUM;... e.g., "0:10;1:20") Omit for automatic device mapping |
 | `--topology <TOPOLOGY>` |  | Topology YAML file for device mapping |
 | `--hf-cache <HF_CACHE>` |  | Custom Hugging Face cache directory |

@@ -183,7 +183,8 @@ typedef struct inference_transcription_session inference_transcription_session;
 /* Loads an engine from a JSON spec, the EngineSpec schema in docs/openapi.json: {"model": <model selection>,
  * "model_id"?, "runtime"?, "agentic"?, "adapters"?, "skills"?, "anymoe"?}, or several models as "models": [{"model",
  * "model_id"?, per-model overrides}] with "default_model_id"? in place of "model" and "model_id". "runtime" holds the
- * device ("auto" | "cpu" | "cuda:N" | "metal:N"), batching, quantization, paged-attention cache sizing and MTP;
+ * device ("auto" | "cpu" | "cuda:N" | "metal:N" | "vulkan:N"; Vulkan devices are numbered as inference_system_info
+ * lists them, discrete GPUs first, and a process opens one), batching, quantization, paged-attention cache sizing and MTP;
  * "agentic" the tool loop's limits and permission, search reranking, and the MCP client, code execution and shell
  * tools. The model selection is the ModelSelected JSON, e.g. {"Plain": {"model_id": "org/model"}}. A malformed spec is
  * INFERENCE_ERR_INVALID_ARGUMENT, a device or feature this build or machine lacks is INFERENCE_ERR_NOT_AVAILABLE, and
@@ -653,7 +654,9 @@ INFERENCE_API inference_status inference_tokenize_chat(const inference_engine *e
                                                       size_t request_len, inference_string **out_response);
 
 /* Host, device and build information, and environment diagnostics (the /v1/system/info and /v1/system/doctor
- * JSON). They need no engine. */
+ * JSON). They need no engine. A Vulkan build's info lists each Vulkan device it can open as {"kind": "vulkan",
+ * "ordinal" (N in "vulkan:N"), "name", "total_memory_bytes" (its largest device-local heap), "unified_memory",
+ * "device_type": "discrete" | "integrated" | "virtual" | "cpu"}, discrete GPUs first. */
 INFERENCE_API inference_status inference_system_info(inference_string **out_response);
 INFERENCE_API inference_status inference_system_doctor(inference_string **out_response);
 /* Picks the quantization and settings that fit a model on this machine without loading it (the POST /v1/models/tune

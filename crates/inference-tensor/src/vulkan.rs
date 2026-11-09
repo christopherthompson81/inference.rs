@@ -471,6 +471,38 @@ pub fn stream_scope(device: &crate::Device, key: usize) -> StreamScope {
     }
 }
 
+/// A Vulkan device the backend can open, as `vulkan:N` names it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VulkanDeviceInfo {
+    pub ordinal: usize,
+    pub name: String,
+    /// `discrete`, `integrated`, `virtual` or `cpu`.
+    pub kind: &'static str,
+    pub memory_bytes: u64,
+    pub vendor_id: u32,
+}
+
+/// The Vulkan devices the backend can open, in `vulkan:N` order (discrete GPUs first), read without opening one.
+pub fn devices() -> Result<Vec<VulkanDeviceInfo>> {
+    #[cfg(feature = "vulkan")]
+    return inference_vulkan::devices()
+        .map(|devices| {
+            devices
+                .into_iter()
+                .map(|d| VulkanDeviceInfo {
+                    ordinal: d.ordinal,
+                    name: d.name,
+                    kind: d.kind,
+                    memory_bytes: d.memory_bytes,
+                    vendor_id: d.vendor_id,
+                })
+                .collect()
+        })
+        .map_err(|err| crate::Error::Msg(err.to_string()));
+    #[cfg(not(feature = "vulkan"))]
+    Err(crate::Error::NotCompiledWithVulkanSupport)
+}
+
 /// Frees `device`'s idle pooled buffers where they are host RAM (an iGPU); nothing elsewhere.
 pub fn release_idle_memory(device: &crate::Device) {
     #[cfg(feature = "vulkan")]

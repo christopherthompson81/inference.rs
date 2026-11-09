@@ -1262,6 +1262,38 @@ mod tests {
         }
     }
 
+    // the devices listed are those that open, discrete ones first, and an ordinal past them names none
+    #[test]
+    fn devices_list_in_vulkan_n_order_and_open_by_ordinal() -> Result<()> {
+        let Ok(devices) = crate::devices() else {
+            return Ok(());
+        };
+        if devices.is_empty() {
+            return Ok(());
+        }
+        let rank = |kind: &str| {
+            ["discrete", "integrated", "virtual", "cpu"]
+                .iter()
+                .position(|k| *k == kind)
+        };
+        assert!(
+            devices
+                .windows(2)
+                .all(|pair| rank(pair[0].kind) <= rank(pair[1].kind))
+        );
+        assert!(
+            devices
+                .iter()
+                .enumerate()
+                .all(|(i, d)| d.ordinal == i && !d.name.is_empty())
+        );
+        let context = Context::open(0, crate::MatrixCores::Default)?;
+        assert_eq!(context.device_name(), devices[0].name);
+        drop(context);
+        assert!(Context::open(devices.len(), crate::MatrixCores::Default).is_err());
+        Ok(())
+    }
+
     fn len(ty: BlockType, rows: usize, cols: usize) -> usize {
         rows * cols / BLOCK_VALUES * ty.block_bytes()
     }
