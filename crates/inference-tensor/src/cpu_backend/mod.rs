@@ -15,7 +15,10 @@ pub use utils::{
 mod conv1d_direct;
 mod conv2d;
 mod conv_grouped;
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod fma_tile;
 pub(crate) mod gemm_bf16;
+pub(crate) mod gemm_halfw;
 pub(crate) mod relpos_attn;
 pub(crate) mod relpos_attn_f32;
 use conv_grouped::GroupedConv;

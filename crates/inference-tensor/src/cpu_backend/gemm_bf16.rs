@@ -52,6 +52,13 @@ pub fn allowed() -> bool {
     *ALLOWED.get_or_init(|| available() && std::env::var_os(NO_BF16_ENV).is_none())
 }
 
+/// Whether a model measured under bf16 may keep bf16 weights on a CPU without bf16 pairs (widened as its products pack
+/// them): [`NO_BF16_ENV`] unset.
+pub fn weights_allowed() -> bool {
+    static ALLOWED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ALLOWED.get_or_init(|| std::env::var_os(NO_BF16_ENV).is_none())
+}
+
 /// Whether this thread is inside a model's bf16 scope ([`with_bf16_matmuls`]) with [`NO_BF16_ENV`] unset, whatever
 /// the CPU multiplies: bf16-held weights that widen to f32 for the products need no bf16 pairs.
 pub fn in_scope() -> bool {
