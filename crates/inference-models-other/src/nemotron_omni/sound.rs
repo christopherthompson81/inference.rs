@@ -156,7 +156,7 @@ impl SoundTower {
     /// The encoder's `(encoder frames, hidden)` output for one clip's `(frames, mels)` normalized log-mel.
     pub fn encode(&self, features: &Tensor) -> Result<Tensor> {
         self.encoder
-            .forward(&features.unsqueeze(0)?.to_dtype(self.dtype)?)?
+            .forward(features.unsqueeze(0)?.to_dtype(self.dtype)?)?
             .squeeze(0)
     }
 

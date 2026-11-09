@@ -22,6 +22,8 @@ const QUERY_BLOCK: usize = 512;
 // the chunks a GPU has in flight each hold their own (a 780M over 10 minutes: 4 GB at 4096 frames, 2.9 GB at 1024, and
 // 1.4 GB once a batch also submits by the bytes it allocates)
 const SUBSAMPLING_CHUNK: usize = 1024;
+// feed-forward rows a GPU takes at a time: over 10 minutes the (t, 4 hidden) projection and its SiLU are 123 MB each
+const FEED_FORWARD_ROWS: usize = 2048;
 
 fn linear_maybe_bias(i: usize, o: usize, bias: bool, vb: VarBuilder) -> Result<Linear> {
     if bias {
@@ -203,6 +205,18 @@ impl FeedForward {
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let t = xs.dim(1)?;
+        if xs.device().is_cpu() || t <= FEED_FORWARD_ROWS {
+            return self.rows(xs);
+        }
+        let parts = (0..t)
+            .step_by(FEED_FORWARD_ROWS)
+            .map(|start| self.rows(&xs.narrow(1, start, FEED_FORWARD_ROWS.min(t - start))?))
+            .collect::<Result<Vec<_>>>()?;
+        Tensor::cat(&parts, 1)
+    }
+
+    fn rows(&self, xs: &Tensor) -> Result<Tensor> {
         let hidden = self.up.forward(xs)?;
         // the CPU's SiLU over the fresh projection in place: a second (t, 4 hidden) buffer was 123 MB over 10 minutes
         if inference_tensor::cpu::silu_in_place(&hidden)? {
@@ -354,28 +368,22 @@ impl RelPositionAttention {
         // each projection moved in and dropped once split: a shadowed one would live beside its copy to the end
         let split = |x: Tensor| self.heads(&x);
         let (q, k, v, p) = (split(q)?, split(k)?, split(v)?, split(p)?);
-        // scaled before the products, so the (rows, keys) scores take no extra pass
-        let q_content = (q.broadcast_add(&self.bias_u)? * scale)?;
-        let q_position = (q.broadcast_add(&self.bias_v)? * scale)?;
         // full attention fused on an iGPU that has it: no (rows, keys) scores in memory, so no blocks either; a discrete
         // GPU's matrix cores run the blocks' products faster (a 3090 over 10 minutes: 2.6 s against 7.0 fused)
         if full
             && xs.device().is_vulkan()
             && !inference_tensor::vulkan::is_discrete(xs.device())
-            && let Some(attn) = inference_tensor::vulkan::rel_pos_attn(&RelPosAttn {
-                q_content: &q_content,
-                q_position: &q_position,
-                k: &k,
-                v: &v,
-                positions: &p,
-                pos_base: t - 1 - lo,
-            })?
+            && let Some(attn) = self.fused_f32(&q, &k, &v, &p, scale, t - 1 - lo)?
         {
             let attn = attn
                 .transpose(1, 2)?
-                .reshape((b, t, self.heads * self.head_dim))?;
+                .reshape((b, t, self.heads * self.head_dim))?
+                .to_dtype(q.dtype())?;
             return self.o.forward(&attn);
         }
+        // scaled before the products, so the (rows, keys) scores take no extra pass
+        let q_content = (q.broadcast_add(&self.bias_u)? * scale)?;
+        let q_position = (q.broadcast_add(&self.bias_v)? * scale)?;
         let mut outs = Vec::with_capacity(blocks.len());
         for b in blocks {
             let keys = k.narrow(2, b.keys_from, b.keys)?;
@@ -408,6 +416,29 @@ impl RelPositionAttention {
 }
 
 impl RelPositionAttention {
+    // the fused kernel is f32: a bf16 model widens its (t, hidden) operands, far less than bf16 (rows, keys) scores
+    // cost, and the scores keep f32's precision (a 780M over 10 minutes: bf16 asr 16.4 -> 14.6 s, peak 2.57 -> 2.44 GB)
+    fn fused_f32(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        positions: &Tensor,
+        scale: f64,
+        pos_base: usize,
+    ) -> Result<Option<Tensor>> {
+        let wide = |x: &Tensor| x.to_dtype(DType::F32);
+        let q = wide(q)?;
+        inference_tensor::vulkan::rel_pos_attn(&RelPosAttn {
+            q_content: &(q.broadcast_add(&wide(&self.bias_u)?)? * scale)?,
+            q_position: &(q.broadcast_add(&wide(&self.bias_v)?)? * scale)?,
+            k: &wide(k)?,
+            v: &wide(v)?,
+            positions: &wide(positions)?,
+            pos_base,
+        })
+    }
+
     /// `(1, heads, 2W - 1, head_dim)` projected positions for a streaming window of `w` frames.
     fn window_positions(
         &self,
@@ -688,14 +719,16 @@ impl Block {
         })
     }
 
-    fn forward(&self, xs: &Tensor, positions: &Tensor, blocks: &[QueryBlock]) -> Result<Tensor> {
-        let xs = (xs + (self.ff1.forward(&self.norm_ff1.forward(xs)?)? * FEED_FORWARD_WEIGHT)?)?;
-        let xs = (&xs
+    // each residual replaces the last: shadowing ones kept all five (t, hidden) copies to the end of the block
+    fn forward(&self, xs: Tensor, positions: &Tensor, blocks: &[QueryBlock]) -> Result<Tensor> {
+        let mut xs =
+            (&xs + (self.ff1.forward(&self.norm_ff1.forward(&xs)?)? * FEED_FORWARD_WEIGHT)?)?;
+        xs = (&xs
             + self
                 .attn
                 .forward(&self.norm_attn.forward(&xs)?, positions, blocks)?)?;
-        let xs = (&xs + self.conv.forward(&self.norm_conv.forward(&xs)?)?)?;
-        let xs = (&xs + (self.ff2.forward(&self.norm_ff2.forward(&xs)?)? * FEED_FORWARD_WEIGHT)?)?;
+        xs = (&xs + self.conv.forward(&self.norm_conv.forward(&xs)?)?)?;
+        xs = (&xs + (self.ff2.forward(&self.norm_ff2.forward(&xs)?)? * FEED_FORWARD_WEIGHT)?)?;
         self.norm_out.forward(&xs)
     }
 }
@@ -807,10 +840,12 @@ impl Encoder {
         })
     }
 
-    pub fn forward(&self, features: &Tensor) -> Result<Tensor> {
-        let xs = self.subsample(features)?;
+    // the features and the subsampled frames go once used, rather than live through every block
+    pub fn forward(&self, features: Tensor) -> Result<Tensor> {
+        let xs = self.subsample(&features)?;
+        drop(features);
         let positions = relative_positions(xs.dim(1)?, self.hidden, xs.dtype(), xs.device())?;
-        self.encode(&xs, &positions)
+        self.encode_owned(xs, &positions)
     }
 
     /// The pre-encode alone: `(1, frames, mels)` features to `(1, frames / factor, hidden)`, before input scaling.
@@ -820,10 +855,18 @@ impl Encoder {
 
     /// The conformer blocks over `subsample`'s output, `positions` being `relative_positions` for its length.
     pub fn encode(&self, xs: &Tensor, positions: &Tensor) -> Result<Tensor> {
+        self.encode_owned(xs.clone(), positions)
+    }
+
+    fn encode_owned(&self, xs: Tensor, positions: &Tensor) -> Result<Tensor> {
         let blocks = query_blocks(xs.dim(1)?, self.context, xs.dtype(), xs.device())?;
-        let mut xs = (xs * self.input_scale)?;
+        let mut xs = if self.input_scale == 1.0 {
+            xs
+        } else {
+            (xs * self.input_scale)?
+        };
         for block in &self.blocks {
-            xs = block.forward(&xs, positions, &blocks)?;
+            xs = block.forward(xs, positions, &blocks)?;
         }
         Ok(xs)
     }

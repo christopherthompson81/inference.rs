@@ -354,7 +354,7 @@ impl Audio {
             .map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
         let n_mels = self.mel.config().n_mels;
         let features = Tensor::from_vec(features, (1, frames, n_mels), &self.device)?;
-        let xs = self.encoder.forward(&features)?.squeeze(0)?;
+        let xs = self.encoder.forward(features)?.squeeze(0)?;
         let mlp =
             |[up, down]: &[Linear; 2], xs: &Tensor| down.forward(&up.forward(xs)?.gelu_erf()?);
         let xs = mlp(&self.adapter, &self.adapter_norm.forward(&xs)?)?;

@@ -52,6 +52,8 @@ pub(crate) struct BufferPool {
     // idle host bytes (capped), and idle device bytes (counted, not capped)
     bytes: u64,
     device_bytes: u64,
+    // an iGPU's mapped buffers are its device memory: fitted and freed when stale as a discrete GPU's device ones are
+    unified: bool,
 }
 
 // a buffer, its memory and the memory's mapping
@@ -157,6 +159,13 @@ impl Drop for Held {
 }
 
 impl BufferPool {
+    pub(crate) fn new(unified: bool) -> Self {
+        Self {
+            unified,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn device_bytes(&self) -> u64 {
         self.device_bytes
     }
@@ -372,13 +381,15 @@ impl Buffer {
         context.live()?;
         let out_of_memory =
             |r: &Result<Self>| matches!(r, Err(Error::Vk(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)));
-        if device_local {
+        if device_local || context.unified {
             let stale = context
                 .pool
                 .lock()
                 .expect("vulkan pool poisoned")
                 .drain_stale(std::time::Instant::now());
             drop(stale);
+        }
+        if device_local {
             make_room(context, capacity)?;
         }
         let first = Self::allocate_once(context, len, capacity, device_local, pooled);
@@ -794,13 +805,23 @@ impl BufferPool {
         }
     }
 
-    // past STALE_KEEP_BYTES idle, the device allocations none has taken for STALE_IDLE, out of the pool
+    // past STALE_KEEP_BYTES idle, the device allocations none has taken for STALE_IDLE, out of the pool; an iGPU's
+    // mapped ones past none (its idle engine frees them all anyway)
     fn drain_stale(&mut self, now: std::time::Instant) -> Vec<Arc<Held>> {
         let mut out = Vec::new();
-        if self.device_bytes <= STALE_KEEP_BYTES {
+        let (local, idle, keep) = match self.unified {
+            true => (false, self.bytes, 0),
+            false => (true, self.device_bytes, STALE_KEEP_BYTES),
+        };
+        if idle <= keep {
             return out;
         }
-        let keys: Vec<_> = self.free.keys().copied().filter(|key| key.0).collect();
+        let keys: Vec<_> = self
+            .free
+            .keys()
+            .copied()
+            .filter(|key| key.0 == local)
+            .collect();
         for key in keys {
             let entries = self.free.get_mut(&key).expect("a listed class");
             let stale = entries
@@ -830,8 +851,8 @@ impl BufferPool {
         out
     }
 
-    // the newest allocation of a class `stream` may take, or for device memory the smallest class up to FIT_RATIO_*
-    // larger that holds one; a mapped one that no batch holds first, and with `idle_only` only such a one
+    // the newest allocation of a class `stream` may take, or for device memory (an iGPU's mapped too) the smallest class
+    // up to FIT_RATIO_* larger that holds one; a mapped one that no batch holds first, and with `idle_only` only such a one
     fn take(
         &mut self,
         device_local: bool,
@@ -842,7 +863,7 @@ impl BufferPool {
         if let Some(held) = self.take_class(device_local, capacity, idle_only, stream) {
             return Some(held);
         }
-        if !device_local {
+        if !device_local && !self.unified {
             return None;
         }
         let limit = capacity / FIT_RATIO_DEN * FIT_RATIO_NUM;
@@ -850,14 +871,14 @@ impl BufferPool {
             .free
             .iter()
             .filter(|(key, entries)| {
-                key.0 && key.1 > capacity && key.1 <= limit && !entries.is_empty()
+                key.0 == device_local && key.1 > capacity && key.1 <= limit && !entries.is_empty()
             })
             .map(|(key, _)| key.1)
             .collect();
         larger.sort_unstable();
         larger
             .into_iter()
-            .find_map(|c| self.take_class(true, c, idle_only, stream))
+            .find_map(|c| self.take_class(device_local, c, idle_only, stream))
     }
 
     fn take_class(
@@ -1073,8 +1094,8 @@ mod tests {
         Ok(())
     }
 
-    // a discrete GPU's allocation that misses, past STALE_KEEP_BYTES idle, frees the idle buffers none has reused for
-    // STALE_IDLE (an earlier phase's sizes), and keeps those just given back
+    // an allocation that misses, past STALE_KEEP_BYTES idle on a discrete GPU (past none on an iGPU), frees the idle
+    // buffers none has reused for STALE_IDLE (an earlier phase's sizes), and keeps those just given back
     #[test]
     fn a_missed_allocation_frees_stale_idle_buffers() -> Result<()> {
         let context = match Context::new() {
@@ -1084,15 +1105,19 @@ mod tests {
                 return Ok(());
             }
         };
-        if context.is_unified() {
-            return Ok(());
-        }
         context.release_idle();
-        let idle = |context: &Context| context.pool.lock().unwrap().device_bytes;
-        // under STALE_KEEP_BYTES idle, a stale buffer stays
+        let idle = |context: &Context| {
+            let pool = context.pool.lock().unwrap();
+            pool.bytes + pool.device_bytes
+        };
         drop(Buffer::new(&context, 3 << 20)?);
         std::thread::sleep(STALE_IDLE + std::time::Duration::from_millis(20));
         drop(Buffer::new(&context, 5 << 20)?);
+        if context.is_unified() {
+            assert_eq!(idle(&context), capacity(5 << 20));
+            return Ok(());
+        }
+        // under STALE_KEEP_BYTES idle, a stale buffer stays
         assert_eq!(idle(&context), capacity(3 << 20) + capacity(5 << 20));
         context.release_idle();
         // past it, the stale classes go and the 64 MiB one just given back stays
@@ -1315,8 +1340,8 @@ mod tests {
         Ok(())
     }
 
-    // a discrete GPU's allocation that misses its class takes an idle buffer up to 1.5 times its size, which goes
-    // back to its own class; past that ratio it allocates
+    // an allocation that misses its class takes an idle buffer up to 1.5 times its size, which goes back to its own
+    // class; past that ratio it allocates
     #[test]
     fn a_miss_takes_an_idle_buffer_a_little_larger() -> Result<()> {
         let context = match Context::new() {
@@ -1326,9 +1351,6 @@ mod tests {
                 return Ok(());
             }
         };
-        if context.is_unified() {
-            return Ok(());
-        }
         context.release_idle();
         let big = Buffer::new(&context, 128 << 20)?;
         let handle = big.buffer;
@@ -1342,9 +1364,9 @@ mod tests {
             small.buffer, handle,
             "past 1.5 times, a 70 MiB buffer is its own"
         );
-        let idle = context.pool.lock().unwrap().device_bytes;
+        let pool = context.pool.lock().unwrap();
         assert_eq!(
-            idle,
+            pool.bytes + pool.device_bytes,
             capacity(128 << 20),
             "the 128 MiB buffer went back to its class"
         );
