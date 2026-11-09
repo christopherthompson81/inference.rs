@@ -144,9 +144,14 @@ impl StreamResampler {
             return Ok(Vec::new());
         };
         let inner = inner.get_mut().expect("get_mut takes no lock to poison");
-        let mut out = inner
-            .process_partial(Some(&[&self.pending]), None)?
-            .swap_remove(0);
+        // nothing pending (the input filled whole chunks) has no partial step: rubato refuses an empty one
+        let mut out = if self.pending.is_empty() {
+            Vec::new()
+        } else {
+            inner
+                .process_partial(Some(&[&self.pending]), None)?
+                .swap_remove(0)
+        };
         self.pending.clear();
         // the input still inside the filter comes out with the silence pushed after it
         out.extend(inner.process_partial::<&[f32]>(None, None)?.swap_remove(0));

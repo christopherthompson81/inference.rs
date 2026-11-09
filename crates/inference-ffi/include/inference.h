@@ -677,6 +677,18 @@ INFERENCE_API inference_status inference_models_scan(const char *request, size_t
                                                     inference_string **out_response);
 INFERENCE_API inference_status inference_hf_cache_delete(const char *request, size_t request_len,
                                                         inference_string **out_response);
+/* Audio files, read without an engine: whatever the transcription calls decode (WAV, MP3, FLAC, Vorbis, AAC/MP4,
+ * Opus in Ogg, Matroska or WebM, ...). inference_audio_probe takes {"path"} and returns {"duration" (seconds, null
+ * where the container does not state it), "sample_rate", "channels", "codec"} from the container's header, decoding
+ * nothing. inference_audio_decode takes {"path", "out_path", "sample_rate"? (default the file's; 8000 to 192000),
+ * "channels"? (1 downmixes; default the file's), "sample_format"? ("s16" | "f32")} and writes a WAV at out_path as it
+ * decodes, never holding the recording (written beside it and renamed into place when complete; a WAV holds at most
+ * 4 GiB, about 6 hours of 48 kHz stereo s16); it returns {"path", "duration", "sample_rate", "channels", "frames"}.
+ * A file that does not decode is INFERENCE_ERR_INVALID_REQUEST. */
+INFERENCE_API inference_status inference_audio_probe(const char *request, size_t request_len,
+                                                    inference_string **out_response);
+INFERENCE_API inference_status inference_audio_decode(const char *request, size_t request_len,
+                                                     inference_string **out_response);
 /* Starts downloading a Hugging Face repository into the cache: {"repo_id", "revision"? ("main"), "files"? (these
  * files), "quant"? (a GGUF quantization the repository publishes, "Q4_K_M" or "4": its files and the projector
  * beside it), "token_source"? ("cache" | "none" | "literal:<token>" | "env:<variable>"), "hf_cache_path"?}; with neither "files" nor

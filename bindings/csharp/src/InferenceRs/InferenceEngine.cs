@@ -686,6 +686,14 @@ public sealed unsafe class InferenceEngine : IDisposable
     /// <summary>The models in <c>{"folders", "hf_cache"}</c>: those folders and, when asked, the Hugging Face cache.</summary>
     public static string ScanModels(string requestJson) => EngineFree(requestJson, NativeMethods.inference_models_scan, nameof(NativeMethods.inference_models_scan));
 
+    /// <summary>An audio file's <c>{"duration", "sample_rate", "channels", "codec"}</c>, from its container's header;
+    /// needs no engine.</summary>
+    public static string ProbeAudio(string requestJson) => EngineFree(requestJson, NativeMethods.inference_audio_probe, nameof(NativeMethods.inference_audio_probe));
+
+    /// <summary>Decodes <c>{"path"}</c> into a WAV at <c>"out_path"</c> as it reads (<c>"sample_rate"</c>?,
+    /// <c>"channels"</c>? 1 downmixes, <c>"sample_format"</c>? s16 or f32); needs no engine.</summary>
+    public static string DecodeAudio(string requestJson) => EngineFree(requestJson, NativeMethods.inference_audio_decode, nameof(NativeMethods.inference_audio_decode));
+
     /// <summary>Deletes <c>{"repo_id"}</c> from the Hugging Face cache, every revision.</summary>
     public static string DeleteCachedRepo(string requestJson) => EngineFree(requestJson, NativeMethods.inference_hf_cache_delete, nameof(NativeMethods.inference_hf_cache_delete));
 

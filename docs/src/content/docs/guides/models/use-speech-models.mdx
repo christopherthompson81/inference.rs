@@ -156,6 +156,11 @@ so the rest come out as in an uninterrupted run. A cancel takes effect before th
 `progress` after each of the model's chunks and the usual response in `done`, in one pass, so a speaker keeps its
 number across the whole recording.
 
+Without an engine, `inference_audio_probe` (Python `probe_audio`, C# `ProbeAudio`) reads a file's duration, rate,
+channels and codec from its header, and `inference_audio_decode` (`decode_audio`, `DecodeAudio`) writes a WAV copy
+of it as it decodes (resampled, downmixed to mono on request), for playback or a waveform. Both read what the
+transcription calls read, Opus included (in Ogg, Matroska or WebM, behind inference-audio's default `opus` feature).
+
 ## Nemotron-3 Diarization: who speaks when
 
 ```bash

@@ -715,6 +715,17 @@ def scan_models(request_json: str) -> str:
     return _engine_free("inference_models_scan", request_json)
 
 
+def probe_audio(request_json: str) -> str:
+    """`{"path"}`'s duration, sample rate, channels and codec, from its container's header; needs no engine."""
+    return _engine_free("inference_audio_probe", request_json)
+
+
+def decode_audio(request_json: str) -> str:
+    """Decodes `{"path"}` into a WAV at `"out_path"` as it reads (`"sample_rate"`?, `"channels"`? 1 downmixes,
+    `"sample_format"`? s16 or f32); needs no engine."""
+    return _engine_free("inference_audio_decode", request_json)
+
+
 def delete_cached_repo(request_json: str) -> str:
     """Deletes `{"repo_id"}` from the Hugging Face cache, every revision."""
     return _engine_free("inference_hf_cache_delete", request_json)

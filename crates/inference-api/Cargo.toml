@@ -27,6 +27,7 @@ indexmap.workspace = true
 inference-core = { workspace = true, features = ["utoipa"] }
 inference-layout.workspace = true
 inference-agent.workspace = true
+inference-audio.workspace = true
 inference-selection = { workspace = true, features = ["utoipa"] }
 inference-quant.workspace = true
 inference-models-decision.workspace = true
