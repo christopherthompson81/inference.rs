@@ -541,6 +541,7 @@ async fn transcribe_inner(
             beam_size: request.beam_size,
             translate: request.task == TranscriptionTask::Translate,
             resume_at: None,
+            max_window_seconds: None,
         },
         progress: None,
     };

@@ -301,13 +301,22 @@ impl Parakeet {
         // checked before resampling, which would copy hours of audio the model then refuses
         let pcm = inference_audio::mel::resample(pcm, sample_rate, rate).map_err(msg)?;
         let duration = pcm.len() as f64 / f64::from(rate);
+        // a requested window length plans windows at any length; the default only past what one pass takes
+        let window_seconds = options
+            .max_window_seconds
+            .map_or(WINDOW_SECONDS, |m| m.min(MAX_SECONDS));
+        let whole = match (options.max_window_seconds, vad) {
+            (Some(_), _) => duration <= window_seconds,
+            (None, Some(_)) => duration <= LONG_FORM_SECONDS,
+            (None, None) => duration <= MAX_SECONDS,
+        };
         let windows = match vad {
-            _ if duration <= vad.map_or(MAX_SECONDS, |_| LONG_FORM_SECONDS) => vec![(0, pcm.len())],
+            _ if whole => vec![(0, pcm.len())],
             // past full attention's bound, and with no VAD to find the silences, cut where the audio is quietest
-            None => quiet_windows(&pcm, rate),
+            None => quiet_windows(&pcm, rate, window_seconds),
             Some(vad) => {
                 let options = SegmentOptions {
-                    max_speech_duration_s: Some(WINDOW_SECONDS),
+                    max_speech_duration_s: Some(window_seconds),
                     ..SegmentOptions::default()
                 };
                 let probabilities = vad.probabilities(&pcm)?;
@@ -318,7 +327,7 @@ impl Parakeet {
                     vad.config().chunk_size,
                     &options,
                 );
-                let window_samples = (WINDOW_SECONDS * f64::from(rate)) as usize;
+                let window_samples = (window_seconds * f64::from(rate)) as usize;
                 let edge = (WINDOW_EDGE_SECONDS * f64::from(rate)) as usize;
                 widen(&windows(&speech, window_samples), pcm.len(), edge)
             }
@@ -635,10 +644,11 @@ fn windows(speech: &[(usize, usize)], max: usize) -> Vec<(usize, usize)> {
     out
 }
 
-// back-to-back windows of at most WINDOW_SECONDS, each ending at the quietest frame of its last QUIET_SEARCH_SECONDS
-fn quiet_windows(pcm: &[f32], rate: u32) -> Vec<(usize, usize)> {
-    let window = (WINDOW_SECONDS * f64::from(rate)) as usize;
-    let search = (QUIET_SEARCH_SECONDS * f64::from(rate)) as usize;
+// back-to-back windows of at most `seconds`, each ending at the quietest frame of its last QUIET_SEARCH_SECONDS (half a
+// window at most)
+fn quiet_windows(pcm: &[f32], rate: u32, seconds: f64) -> Vec<(usize, usize)> {
+    let window = (seconds * f64::from(rate)) as usize;
+    let search = (QUIET_SEARCH_SECONDS.min(seconds / 2.0) * f64::from(rate)) as usize;
     let frame = ((QUIET_FRAME_SECONDS * f64::from(rate)) as usize).max(1);
     let mut out = Vec::new();
     let mut start = 0;
@@ -720,6 +730,7 @@ mod tests {
     // without a VAD, long audio splits back to back at the quiet stretch before each window's limit
     #[test]
     fn quiet_windows_cut_at_the_quietest_frame() {
+        const SHORT_WINDOW_SECONDS: f64 = 15.0;
         let rate = 100;
         let seconds = 300;
         // a tone throughout, silent for 2 s at 110 s and 225 s
@@ -733,7 +744,7 @@ mod tests {
                 }
             })
             .collect();
-        let windows = quiet_windows(&pcm, rate as u32);
+        let windows = quiet_windows(&pcm, rate as u32, WINDOW_SECONDS);
         assert_eq!(windows.first().map(|w| w.0), Some(0));
         assert_eq!(windows.last().map(|w| w.1), Some(pcm.len()));
         assert!(windows.windows(2).all(|pair| pair[0].1 == pair[1].0));
@@ -750,6 +761,15 @@ mod tests {
         assert!(
             (110.0..112.0).contains(&cuts[0]) && (225.0..227.0).contains(&cuts[1]),
             "cuts {cuts:?}"
+        );
+        // a requested 15 s window: every window inside it, back to back, its search narrowed to half a window
+        let short = quiet_windows(&pcm, rate as u32, SHORT_WINDOW_SECONDS);
+        assert!(short.len() > 2 * windows.len());
+        assert!(short.windows(2).all(|pair| pair[0].1 == pair[1].0));
+        assert!(
+            short
+                .iter()
+                .all(|w| w.1 - w.0 <= (SHORT_WINDOW_SECONDS as usize) * rate)
         );
     }
 

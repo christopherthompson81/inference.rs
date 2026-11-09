@@ -55,4 +55,8 @@ pub struct TranscriptionOptions {
     /// rest come out as in an uninterrupted run.
     #[serde(default)]
     pub resume_at: Option<f64>,
+    /// Windows of at most this many seconds at any length of audio (cut at the VAD's silences, else the quietest
+    /// moments); unset keeps the model's own plan.
+    #[serde(default)]
+    pub max_window_seconds: Option<f64>,
 }

@@ -66,6 +66,7 @@ pub(crate) async fn open(
             beam_size: None,
             translate: false,
             resume_at: None,
+            max_window_seconds: None,
         },
         sample_rate: request.sample_rate,
     };

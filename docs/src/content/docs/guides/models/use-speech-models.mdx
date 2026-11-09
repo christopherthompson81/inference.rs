@@ -151,7 +151,10 @@ the windows the model cut, then a `window` (its text and words) and a `progress`
 (the `verbose_json` transcript), `canceled` or `error`. The request takes `"path"`, a local file decoded to 16 kHz
 mono as it reads (up to 12 hours, never held whole at its own rate), in place of audio bytes, and `"from_seconds"`
 to resume at a window's end: the windows are planned over the whole recording again and the finished ones skipped,
-so the rest come out as in an uninterrupted run. A cancel takes effect before the next window.
+so the rest come out as in an uninterrupted run. A cancel takes effect before the next window. `"max_window_seconds"`
+(5 or more) plans shorter windows at any length of audio, cut at the VAD's silences: Parakeet, like NeMo, can skip a
+sentence in a long window (a 2-minute window of a telephone call lost whole sentences that 15-second ones kept), but
+under 5 seconds it can switch language from one window to the next.
 `inference_diarization_stream_open` (`diarization_stream`, `DiarizationStream`) does the same for diarization: a
 `progress` after each of the model's chunks and the usual response in `done`, in one pass, so a speaker keeps its
 number across the whole recording.
