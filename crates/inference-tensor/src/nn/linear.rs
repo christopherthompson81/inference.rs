@@ -38,15 +38,19 @@ impl Linear {
         self.bias.as_ref()
     }
 
-    /// This layer with its f32 weight kept in half precision where its large products round it so anyway: f16 on a
-    /// Vulkan GPU with matrix cores, bf16 on a CPU whose bf16 scope may take bf16 inputs. Half the weight's memory,
-    /// those products unchanged (the bias stays f32); smaller ones read a widened copy. Otherwise itself.
+    /// This layer with its f32 weight kept in half precision, for a model measured to hold under it: f16 on a Vulkan GPU
+    /// with matrix cores and bf16 on a CPU with bf16 pairs (their large products round it so anyway), f16 on an AVX2
+    /// CPU (its products widen it as they pack). Half the weight's memory (the bias stays f32). Otherwise itself.
     pub fn to_half(&self) -> Result<Self> {
         let device = self.weight.device();
         let half = if crate::vulkan::has_matrix_cores(device) {
             crate::DType::F16
-        } else if device.is_cpu() && crate::cpu::bf16_allowed() {
-            crate::DType::BF16
+        } else if let Some(half) = (device.is_cpu() && self.weight.rank() == 2)
+            .then(|| self.weight.dim(0).map(crate::cpu::half_weight_dtype))
+            .transpose()?
+            .flatten()
+        {
+            half
         } else {
             return Ok(self.clone());
         };
@@ -171,6 +175,35 @@ mod tests {
                 "{rows} rows outside"
             );
         }
+        Ok(())
+    }
+
+    // on a CPU without bf16 pairs, a halved layer keeps an f16 weight its products widen as they pack: the f32 layer's
+    // over the rounded weight, for a step's rows and a prompt's, with its bias
+    #[test]
+    fn an_f16_weight_linear_widens_its_weight_without_bf16_pairs() -> crate::Result<()> {
+        if crate::cpu::bf16_allowed() || crate::cpu::half_weight_dtype(320).is_none() {
+            return Ok(());
+        }
+        let (n, k) = (320, 512);
+        let weight = Tensor::randn(0f32, 1., (n, k), &Device::Cpu)?;
+        let bias = Tensor::randn(0f32, 1., n, &Device::Cpu)?;
+        let halved = Linear::new(weight.clone(), Some(bias.clone())).to_half()?;
+        assert_eq!(halved.weight().dtype(), DType::F16);
+        let rounded = Linear::new(
+            weight.to_dtype(DType::F16)?.to_dtype(DType::F32)?,
+            Some(bias),
+        );
+        for rows in [1, 3, 512] {
+            let x = Tensor::randn(0f32, 1., (1, rows, k), &Device::Cpu)?;
+            let (got, want) = (halved.forward(&x)?, rounded.forward(&x)?);
+            assert_eq!(got.dims(), [1, rows, n]);
+            let off = (got - want)?.abs()?.max_all()?.to_scalar::<f32>()?;
+            assert!(off < 1e-3, "{rows} rows: {off}");
+        }
+        // a width past whole panels keeps f32
+        let odd = Linear::new(Tensor::randn(0f32, 1., (100, k), &Device::Cpu)?, None).to_half()?;
+        assert_eq!(odd.weight().dtype(), DType::F32);
         Ok(())
     }
 }

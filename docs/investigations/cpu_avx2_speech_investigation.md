@@ -141,3 +141,77 @@ INFERENCE_CPU_NO_BF16=1 (relpos_attn_f32, the SMT pool, the softmax): asr, diar 
 The moved frames come from Run 5's softmax exp (`fast_exp`, ~1e-7) tipping a few near-threshold frames on the bf16
 path; this desktop's diarization (f32 path) stayed byte-identical. Within `scripts/bf16_check.sh`'s 0.5 % for a
 diarizer.
+
+## Run 8 - 2026-11-08 20:00
+
+Question (the other session's suggestion): can the bf16-measured speech models keep bf16 weights on an AVX2 CPU too?
+On the 10700K they load at ~3.1 GB RSS against the 7840U's ~1.7, `Linear::to_half` halving on a CPU with bf16 pairs
+only.
+
+Kernel: `cpu_backend::gemm_bf16w`, x (f32) times a bf16 `(n, k)` weight's transpose: 192-row by 64-column tasks on the
+SMT pool, the weight widened to f32 into 16-column panels 256 deep as each task packs them, the 6 x 16 FMA tile (now
+`cpu_backend::fma_tile`, shared with `relpos_attn_f32`). All f32 but the weight. Tests: against the f32 product over
+the rounded weight (partial row groups, a ragged depth; a 0.1 % wrong widening fails it), and `Linear::to_half` on an
+AVX2 CPU (1, 3 and 512 rows with a bias; a 100-row weight stays f32).
+
+```
+benchmark (no debug assertions), GFLOPS:     KC 256, MC 96 / 192 / 48       gemm f32
+7564 x 4096 x 1024 (feed-forward up)         538 / 602 / 328                 437-475
+7564 x 1024 x 4096 (feed-forward down)       419 / 457 / 337                 422-450
+7564 x 1024 x 1024 (attention projections)   468 / 517 / 355                 311-317
+684 x 2048 x 512, 684 x 512 x 2048 (diarizer) 471, 442 / 581, 528 / 365, 350  446-545, 406-473
+KC 384, 512 (MC 96): lower on every shape. Kept MC 192, KC 256.
+```
+
+Measurement (`bf16_check.sh`'s criteria by hand: it needs AVX-512 BF16 and a release build). Both models served
+once each way (`INFERENCE_CPU_NO_BF16=1` keeps f32 weights), seven clips: the 10-minute clip, its -6 dB, noise and
+0.97x tempo variants, and 20 / 45 / 90 s slices:
+
+```
+loaded RSS 3100 -> 1711 MiB; asr on the long clips 46.5-48.8 -> 41.6-45.5 s, diar 13.9-14.5 -> 13.5-15.3 s
+clip10     1698 words: 1 differing span (night. Log -> night, log), 2 starts moved | speaker-frames 0.000 % moved
+var_gain   1698 words: 1 differing span (fifteen -> fifty), 2 starts moved         | 0.000 %
+var_noise  1698 words: 0, 0 starts                                                 | 0.000 %
+var_tempo  1698 words: 0, 3 starts                                                 | 0.000 %
+short20 / short45 / short90: 43 / 99 / 250 words, 0 differing, 0 starts            | 0.000 %
+```
+
+The diarizer passes (no speaker-frame moved on any clip). Parakeet fails the ASR rule (no word may change): two of
+four long clips change a word, the second the same near-tie word ("fifteen") the Vulkan blocked path once flipped.
+Its bf16 property was measured on the laptop's meeting with bf16 inputs; these clips were not part of it.
+
+## Run 9 - 2026-11-08 21:00
+
+Question: is there accuracy to recover? Run 8 said Parakeet failed under bf16 weights; its baseline was wrong.
+
+- f16 instead of bf16 for the AVX2 weights (the kernel widens them anyway; three more mantissa bits, the same size;
+  `gemm_halfw` now takes either): the same two words changed, 0 starts moved instead of 2.
+- The same two flips under 8x finer rounding pointed elsewhere. `INFERENCE_CPU_NO_BF16=1` also turns off the
+  decoder's bf16 copies (#869, extended to AVX2 in #873), so Run 8 compared against a full-f32 decoder. Master's
+  default against full f32: the same two words change (clip10 "night. Log -> night, log", var_gain "fifteen ->
+  fifty"). The encoder's halved weights against master's default: 0 words on every clip (f16: 1 start; bf16: 6).
+  Earlier word checks (`cmp.py`) lowercased and stripped punctuation, hiding the first.
+- The decoder's copies in f16 (`cpu::HalfRowWeights`, F16C widening 8 lanes at a time; bf16 where a CPU lacks F16C)
+  with the encoder's weights in f16, against full f32 on all seven clips: 0 differing words, 0 starts moved, 0.000 %
+  of speaker-frames.
+- The halved diarizer read ~8 % slower (15.5-15.7 s against 14.4-14.6 in f32, alternated): the elementwise pool spun
+  beside the kernel's threads (20 % of samples against 6 %), matmul parking it for a long product and this path not.
+  Parked the same way: 13.9-14.1 s against 14.0-14.5.
+
+```
+seven clips, no debug assertions:     master default             this branch
+loaded RSS                            3126 MiB                   1712 MiB
+request peak (10-minute clip's asr, diar and both, sampled every 100 ms): f32 weights 4058 MiB, this branch 2826 MiB
+asr, 10-minute clips                  44.3-47.1 s                44.6-47.7 s
+diar, 10-minute clips                 13.5-14.3 s                13.9-14.2 s
+short20 / 45 / 90 asr                 1.16 / 2.40 / 4.81 s       1.01 / 1.98 / 4.26 s
+words, starts, speaker-frames against full f32: master 2 words and 1 start changed; this branch none
+```
+
+Tests: `a_half_weight_product_matches_the_rounded_weights` (f16 and bf16), `an_f16_weight_linear_widens_its_weight_
+without_bf16_pairs`, `matches_the_rounded_weights_product` (the decoder copies, both formats, a tail past whole 16-lane
+steps). Lint, CPU (3165), CUDA (3368), `--vulkan` (65) pass.
+
+The process's lifetime high (VmHWM) stays ~5.0 GB: loading reads the f32 weights before `to_half` copies them.
+On a CPU with AVX-512 BF16 (the 7840U) the decoder's copies also become f16 (it has F16C); its encoder keeps bf16
+and its bf16 matmul inputs, whose words were measured on the laptop's meeting only.

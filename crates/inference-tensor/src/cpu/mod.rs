@@ -5,7 +5,7 @@ pub(crate) mod features;
 pub mod kernels;
 mod row_weights;
 
-pub use row_weights::Bf16RowWeights;
+pub use row_weights::HalfRowWeights;
 
 /// A relative-position attention's operands as a layer's projections give them: `q` `(1, t, heads * d)`, `k` and `v`
 /// `(1, keys, heads * d)`, `positions` `(1, p_rows, heads * d)`, and the content and position biases `bias_u`,
@@ -111,9 +111,26 @@ pub fn rel_pos_attention(op: &RelPosOperands) -> crate::Result<Option<crate::Ten
     )?))
 }
 
-/// `x` (f32, `(.., k)`) times a bf16 `(n, k)` weight transposed (`Linear::to_half`'s on a CPU), plus `bias`, `(.., n)`
-/// f32: the bf16 products the scope's f32 matmuls take, the weight read as it is and the bias added in place. `None`
-/// outside [`with_bf16_matmuls`] or for a product the scope keeps in f32 (the caller widens the weight).
+/// The 16-bit type an `(n, _)` f32 weight of a model measured under bf16 is held as on this CPU, if any: bf16 where it
+/// multiplies bf16 pairs (its products read it as it is), f16 where AVX2 widens whole 64-column panels as it packs
+/// them (three more mantissa bits than bf16 at the same size: bf16 weights changed a word on two of four 10-minute
+/// clips on an i7-10700K); [`NO_BF16_ENV`] unset either way.
+pub fn half_weight_dtype(n: usize) -> Option<crate::DType> {
+    if crate::cpu_backend::gemm_bf16::allowed() {
+        Some(crate::DType::BF16)
+    } else if crate::cpu_backend::gemm_bf16::weights_allowed()
+        && crate::cpu_backend::gemm_halfw::supports(n)
+    {
+        Some(crate::DType::F16)
+    } else {
+        None
+    }
+}
+
+/// `x` (f32, `(.., k)`) times a 16-bit `(n, k)` weight transposed (`Linear::to_half`'s on a CPU), plus `bias`, `(.., n)`
+/// f32, the bias added in place: a bf16 weight's large products inside [`with_bf16_matmuls`] as the scope takes them
+/// on bf16 pairs; others, on AVX2, f32 products over the weight widened as it packs. `None` where neither applies (the
+/// caller widens the weight).
 pub fn linear_bf16_weight(
     x: &crate::Tensor,
     weight: &crate::Tensor,
@@ -122,51 +139,72 @@ pub fn linear_bf16_weight(
     use crate::cpu_backend::{BF16_MIN_COLS, REST_POOL_MIN_WORK, gemm_bf16};
     let (n, k) = weight.dims2()?;
     let rows = x.elem_count() / k.max(1);
+    let half = match weight.dtype() {
+        crate::DType::BF16 => crate::cpu_backend::gemm_halfw::Half::Bf16,
+        crate::DType::F16 => crate::cpu_backend::gemm_halfw::Half::F16,
+        _ => return Ok(None),
+    };
     if x.dtype() != crate::DType::F32
-        || weight.dtype() != crate::DType::BF16
         || !x.device().is_cpu()
         || !weight.device().is_cpu()
         || x.dims().last() != Some(&k)
-        || rows * n * k < REST_POOL_MIN_WORK
-        || n < BF16_MIN_COLS
-        || !gemm_bf16::enabled()
     {
+        return Ok(None);
+    }
+    // the bf16 pairs' kernel for a large product inside the scope; else the weight widened as it packs, any size
+    let pairs = half == crate::cpu_backend::gemm_halfw::Half::Bf16
+        && rows * n * k >= REST_POOL_MIN_WORK
+        && n >= BF16_MIN_COLS
+        && gemm_bf16::enabled();
+    if !pairs && !crate::cpu_backend::gemm_halfw::supports(n) {
         return Ok(None);
     }
     let (x, weight) = (x.contiguous()?, weight.contiguous()?);
     let (xs, xl) = x.storage_and_layout();
     let (ws, wl) = weight.storage_and_layout();
-    let (
-        crate::Storage::Cpu(crate::CpuStorage::F32(xv)),
-        crate::Storage::Cpu(crate::CpuStorage::BF16(wv)),
-    ) = (&*xs, &*ws)
-    else {
-        crate::bail!("a bf16-weight linear takes CPU f32 rows and a CPU bf16 weight");
+    let crate::Storage::Cpu(crate::CpuStorage::F32(xv)) = &*xs else {
+        crate::bail!("a half-weight linear takes CPU f32 rows");
     };
     let xv = &xv[xl.start_offset()..][..rows * k];
-    let wv = &wv[wl.start_offset()..][..n * k];
-    // SAFETY: bf16 is a u16's bits
-    let wv = unsafe { std::slice::from_raw_parts(wv.as_ptr().cast::<u16>(), wv.len()) };
+    let at = wl.start_offset();
+    // SAFETY: bf16 and f16 are a u16's bits
+    let wv = match &*ws {
+        crate::Storage::Cpu(crate::CpuStorage::BF16(w)) => unsafe {
+            std::slice::from_raw_parts(w[at..].as_ptr().cast::<u16>(), n * k)
+        },
+        crate::Storage::Cpu(crate::CpuStorage::F16(w)) => unsafe {
+            std::slice::from_raw_parts(w[at..].as_ptr().cast::<u16>(), n * k)
+        },
+        _ => crate::bail!("a half-weight linear takes a CPU bf16 or f16 weight"),
+    };
     let mut out = vec![0f32; rows * n];
-    gemm_bf16::gemm(
-        1,
-        rows,
-        n,
-        k,
-        &gemm_bf16::Strided {
-            data: xv,
-            rs: k,
-            cs: 1,
-        },
-        0,
-        &gemm_bf16::BOperand::Bf16 {
-            data: wv,
-            rs: 1,
-            cs: k,
-        },
-        0,
-        &mut out,
-    );
+    if !pairs {
+        // the elementwise pool's idle workers park for a long product rather than spin beside its threads, as matmul's
+        if rows * n * k >= REST_POOL_MIN_WORK {
+            crate::utils::barrier_pool().rest();
+        }
+        crate::cpu_backend::gemm_halfw::gemm(xv, wv, half, rows, n, k, &mut out);
+    } else {
+        gemm_bf16::gemm(
+            1,
+            rows,
+            n,
+            k,
+            &gemm_bf16::Strided {
+                data: xv,
+                rs: k,
+                cs: 1,
+            },
+            0,
+            &gemm_bf16::BOperand::Bf16 {
+                data: wv,
+                rs: 1,
+                cs: k,
+            },
+            0,
+            &mut out,
+        );
+    }
     if let Some(bias) = bias {
         let bias = bias
             .flatten_all()?

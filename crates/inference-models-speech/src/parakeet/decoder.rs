@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use inference_tensor::cpu::Bf16RowWeights;
+use inference_tensor::cpu::HalfRowWeights;
 use inference_tensor::nn::{Embedding, Linear, Module, VarBuilder, embedding, linear, ops};
 use inference_tensor::{D, DType, Error, IndexOp, Result, Tensor};
 
@@ -22,18 +22,18 @@ pub struct Emission {
 }
 
 // a weight `(n, k)` the decoder multiplies a row or a beam's rows at a time: on the CPU inside the model's bf16 scope,
-// on any CPU (the copy widens to f32 for its products), through a bf16 copy made at its first product (the f32 LSTM
+// on any CPU (the copy widens to f32 for its products), through a 16-bit copy made at its first product (the f32 LSTM
 // and joint had streamed 47 MB from memory a token)
 struct DecodeWeight {
     weight: Tensor,
-    bf16: OnceLock<Bf16RowWeights>,
+    half: OnceLock<HalfRowWeights>,
 }
 
 impl DecodeWeight {
     fn new(weight: Tensor) -> Self {
         Self {
             weight,
-            bf16: OnceLock::new(),
+            half: OnceLock::new(),
         }
     }
 
@@ -42,10 +42,10 @@ impl DecodeWeight {
         {
             return x.matmul(&self.weight.t()?);
         }
-        if self.bf16.get().is_none() {
-            let _ = self.bf16.set(Bf16RowWeights::new(&self.weight)?);
+        if self.half.get().is_none() {
+            let _ = self.half.set(HalfRowWeights::new(&self.weight)?);
         }
-        self.bf16.get().expect("set above").matmul_t(x)
+        self.half.get().expect("set above").matmul_t(x)
     }
 }
 
