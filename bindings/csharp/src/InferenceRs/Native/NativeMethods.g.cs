@@ -7,7 +7,7 @@ namespace InferenceRs.Native;
 internal static unsafe partial class NativeMethods
 {
     /// <summary>The ABI these declarations mirror; while it is 0.0.x any other version may differ anywhere.</summary>
-    internal const uint AbiVersion = (0 << 16) | (0 << 8) | 26;
+    internal const uint AbiVersion = (0 << 16) | (0 << 8) | 27;
 
     [LibraryImport(Library)]
     internal static partial uint inference_abi_version();
@@ -221,6 +221,10 @@ internal static unsafe partial class NativeMethods
         IntPtr engine, byte* request, nuint requestLen, byte* audio, nuint audioLen, out IntPtr outBlob);
 
     [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_transcription_stream_open(
+        IntPtr engine, byte* request, nuint requestLen, byte* audio, nuint audioLen, out IntPtr outStream);
+
+    [LibraryImport(Library)]
     internal static partial InferenceStatus inference_transcription_session_open(
         IntPtr engine, byte* request, nuint requestLen, out IntPtr outSession);
 
@@ -242,6 +246,10 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(Library)]
     internal static partial InferenceStatus inference_diarization(
         IntPtr engine, byte* request, nuint requestLen, byte* audio, nuint audioLen, out IntPtr outBlob);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_diarization_stream_open(
+        IntPtr engine, byte* request, nuint requestLen, byte* audio, nuint audioLen, out IntPtr outStream);
 
     [LibraryImport(Library)]
     internal static partial InferenceStatus inference_approval_resolve(

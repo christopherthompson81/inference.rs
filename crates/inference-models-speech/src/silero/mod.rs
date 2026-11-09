@@ -62,8 +62,8 @@ pub struct SileroVad {
     stft: Tensor,
     encoder: Vec<Conv1d>,
     w_ih_t: Tensor,
-    // the recurrence and head run on the host: one step per chunk is far too small for a device launch each
-    w_hh: Vec<f32>,
+    // host-side (a step per chunk is too small for a launch), `(HIDDEN, 4 * HIDDEN)` so each step's product vectorizes
+    w_hh_t: Vec<f32>,
     bias: Vec<f32>,
     head: Vec<f32>,
     head_bias: f32,
@@ -101,7 +101,7 @@ impl SileroVad {
             stft,
             encoder,
             w_ih_t: lstm.get((gates, HIDDEN), "weight_ih")?.t()?.contiguous()?,
-            w_hh: host(lstm.get((gates, HIDDEN), "weight_hh")?)?,
+            w_hh_t: host(lstm.get((gates, HIDDEN), "weight_hh")?.t()?.contiguous()?)?,
             bias: host(bias)?,
             head: host(head.get((1, HIDDEN, 1), "weight")?)?,
             head_bias: host(head.get(1, "bias")?)?[0],
@@ -167,11 +167,20 @@ impl SileroVad {
         let mut g = vec![0f32; 4 * HIDDEN];
         gx.iter()
             .map(|x| {
-                for (j, gj) in g.iter_mut().enumerate() {
-                    let row = &self.w_hh[j * HIDDEN..(j + 1) * HIDDEN];
-                    *gj = x[j]
-                        + self.bias[j]
-                        + row.iter().zip(h.iter()).map(|(w, h)| w * h).sum::<f32>();
+                for ((gj, xj), bj) in g.iter_mut().zip(x).zip(&self.bias) {
+                    *gj = xj + bj;
+                }
+                // `g += W_hh h` a column at a time
+                for (column, &hk) in self
+                    .w_hh_t
+                    .as_chunks::<{ 4 * HIDDEN }>()
+                    .0
+                    .iter()
+                    .zip(h.iter())
+                {
+                    for (gj, w) in g.iter_mut().zip(column) {
+                        *gj += w * hk;
+                    }
                 }
                 for j in 0..HIDDEN {
                     let (i, f) = (sigmoid(g[j]), sigmoid(g[HIDDEN + j]));

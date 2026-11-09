@@ -61,10 +61,16 @@ pub struct DecisionInput {
 pub enum OneShotParams {
     Diffusion(DiffusionGenerationParams),
     Speech(SpeechOptions),
-    Transcription(inference_models_speech::TranscriptionOptions),
+    Transcription(
+        inference_models_speech::TranscriptionOptions,
+        Option<crate::TranscriptionProgressHook>,
+    ),
     TranscriptionStream(crate::TranscriptionStreamRequest),
     VoiceActivity(inference_models_speech::silero::SegmentOptions),
-    Diarization(inference_models_speech::diarization::DiarizationOptions),
+    Diarization(
+        inference_models_speech::diarization::DiarizationOptions,
+        Option<crate::DiarizationProgressHook>,
+    ),
     Embedding(EmbeddingParams),
 }
 
@@ -1702,7 +1708,14 @@ impl Sequence {
 
     pub fn transcription_options(&self) -> Option<&inference_models_speech::TranscriptionOptions> {
         match &self.one_shot {
-            Some(OneShotParams::Transcription(options)) => Some(options),
+            Some(OneShotParams::Transcription(options, _)) => Some(options),
+            _ => None,
+        }
+    }
+
+    pub fn transcription_progress(&self) -> Option<&crate::TranscriptionProgressHook> {
+        match &self.one_shot {
+            Some(OneShotParams::Transcription(_, progress)) => progress.as_ref(),
             _ => None,
         }
     }
@@ -1718,7 +1731,14 @@ impl Sequence {
         &self,
     ) -> Option<&inference_models_speech::diarization::DiarizationOptions> {
         match &self.one_shot {
-            Some(OneShotParams::Diarization(options)) => Some(options),
+            Some(OneShotParams::Diarization(options, _)) => Some(options),
+            _ => None,
+        }
+    }
+
+    pub fn diarization_progress(&self) -> Option<&crate::DiarizationProgressHook> {
+        match &self.one_shot {
+            Some(OneShotParams::Diarization(_, progress)) => progress.as_ref(),
             _ => None,
         }
     }

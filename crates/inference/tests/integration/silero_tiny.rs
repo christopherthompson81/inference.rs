@@ -102,3 +102,124 @@ async fn long_audio_transcribes_in_windows_cut_at_the_vads_silences() -> anyhow:
     assert!(words.iter().all(|w| w.end <= verbose.duration));
     Ok(())
 }
+
+// the events of a whole-recording transcription stream, read to its end, and their names
+async fn stream_events(
+    stream: inference_api::speech_streams::SpeechStream,
+    cancel_at_window: Option<u64>,
+) -> Vec<serde_json::Value> {
+    use futures::StreamExt;
+    let mut events = stream.events;
+    let mut out = Vec::new();
+    while let Some(event) = events.next().await {
+        let event: serde_json::Value = serde_json::from_str(&event).unwrap();
+        if event["event"] == "window" && event["data"]["index"].as_u64() == cancel_at_window {
+            stream.cancellation.cancel();
+        }
+        out.push(event);
+    }
+    out
+}
+
+// a long recording streamed from a file: its windows up front, each window's words and its progress as it finishes,
+// and last the transcript the one-shot request gives; canceled at its first window it stops before the last, and
+// resumed at a window's end it runs the rest of the same windows as the whole run did
+#[tokio::test]
+async fn a_long_recording_streams_its_windows_as_they_finish() -> anyhow::Result<()> {
+    let vad = tiny_silero_gguf(true)?;
+    let checkpoint = parakeet_support::tiny_parakeet_checkpoint(parakeet_support::HEADS[0])?;
+    let model = TranscriptionModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_vad_model_id(vad.path().to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .with_force_cpu()
+        .build()
+        .await?;
+    let wav = tone_wav(LONG_SECONDS);
+    let file = tempfile::NamedTempFile::with_suffix(".wav")?;
+    std::fs::write(file.path(), &wav)?;
+    let path = file.path().to_string_lossy().to_string();
+    let mut one_shot = TranscriptionRequest::new(TranscriptionResponseFormat::VerboseJson);
+    one_shot.timestamp_granularities = vec![
+        inference::TimestampGranularity::Word,
+        inference::TimestampGranularity::Segment,
+    ];
+    let whole: serde_json::Value =
+        serde_json::from_str(&model.transcription(one_shot, &wav).await?.body)?;
+
+    let request = serde_json::json!({ "path": path }).to_string();
+    let events = stream_events(
+        model
+            .transcription_stream_json(request.as_bytes(), None)
+            .await?,
+        None,
+    )
+    .await;
+    let all = events.clone();
+    let names: Vec<&str> = events
+        .iter()
+        .map(|e| e["event"].as_str().unwrap())
+        .collect();
+    let windows = events[0]["data"]["windows"].as_array().unwrap().len();
+    assert!(windows >= 2, "{windows} windows");
+    let mut expected = vec!["started"];
+    expected.extend(std::iter::repeat_n(["window", "progress"], windows).flatten());
+    expected.push("done");
+    assert_eq!(names, expected);
+    for (i, window) in events.iter().filter(|e| e["event"] == "window").enumerate() {
+        assert_eq!(window["data"]["index"], i);
+    }
+    let last_progress = &events[events.len() - 2]["data"];
+    assert_eq!(
+        (
+            last_progress["done"].as_u64(),
+            last_progress["total"].as_u64()
+        ),
+        (Some(windows as u64), Some(windows as u64))
+    );
+    let done = &events.last().unwrap()["data"];
+    assert_eq!(done["text"], whole["text"]);
+    assert_eq!(
+        done["words"].as_array().map(Vec::len),
+        whole["words"].as_array().map(Vec::len)
+    );
+
+    let canceled = stream_events(
+        model
+            .transcription_stream_json(request.as_bytes(), None)
+            .await?,
+        Some(0),
+    )
+    .await;
+    assert_eq!(canceled.last().unwrap()["event"], "canceled");
+    assert!(canceled.iter().filter(|e| e["event"] == "window").count() < windows);
+
+    // resumed at the first window's end: the same plan, the first window skipped, the rest as the whole run's
+    let whole_windows: Vec<&serde_json::Value> =
+        all.iter().filter(|e| e["event"] == "window").collect();
+    let first_end = whole_windows[0]["data"]["end"].as_f64().unwrap();
+    let resumed = serde_json::json!({ "path": path, "from_seconds": first_end }).to_string();
+    let events = stream_events(
+        model
+            .transcription_stream_json(resumed.as_bytes(), None)
+            .await?,
+        None,
+    )
+    .await;
+    assert_eq!(events[0]["data"]["windows"], all[0]["data"]["windows"]);
+    let rest: Vec<&serde_json::Value> = events.iter().filter(|e| e["event"] == "window").collect();
+    assert_eq!(rest.len(), whole_windows.len() - 1);
+    for (resumed, whole) in rest.iter().zip(&whole_windows[1..]) {
+        assert_eq!(resumed["data"], whole["data"]);
+    }
+    let done = &events.last().unwrap()["data"];
+    assert!((done["duration"].as_f64().unwrap() - LONG_SECONDS).abs() < 1e-3);
+
+    let both = model
+        .transcription_stream_json(request.as_bytes(), Some(wav))
+        .await;
+    assert_eq!(
+        both.err().map(|e| e.kind),
+        Some(ApiErrorKind::InvalidRequest)
+    );
+    Ok(())
+}

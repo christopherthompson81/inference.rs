@@ -81,7 +81,7 @@ out = POINTER(c_void_p)
 buffer = (c_char_p, c_size_t)
 
 # BEGIN GENERATED from inference.h by bindings/scripts/generate_native.py
-ABI_VERSION = (0 << 16) | (0 << 8) | 26
+ABI_VERSION = (0 << 16) | (0 << 8) | 27
 
 # name: (restype, argtypes)
 SIGNATURES = {
@@ -145,12 +145,14 @@ SIGNATURES = {
     "inference_prompt_logits": (status, (c_void_p, *buffer, out, out)),
     "inference_speech_generation": (status, (c_void_p, *buffer, out)),
     "inference_transcription": (status, (c_void_p, *buffer, *buffer, out)),
+    "inference_transcription_stream_open": (status, (c_void_p, *buffer, *buffer, out)),
     "inference_transcription_session_open": (status, (c_void_p, *buffer, out)),
     "inference_transcription_session_push": (status, (c_void_p, *buffer, out)),
     "inference_transcription_session_finish": (status, (c_void_p, out, out)),
     "inference_transcription_session_free": (None, (c_void_p,)),
     "inference_voice_activity": (status, (c_void_p, *buffer, *buffer, out)),
     "inference_diarization": (status, (c_void_p, *buffer, *buffer, out)),
+    "inference_diarization_stream_open": (status, (c_void_p, *buffer, *buffer, out)),
     "inference_approval_resolve": (status, (c_void_p, *buffer, *buffer, out)),
     "inference_file_upload": (status, (c_void_p, *buffer, c_char_p, c_char_p, c_char_p, out)),
     "inference_files_list": (status, (c_void_p, out)),

@@ -167,7 +167,8 @@ pub use inference_mcp::{
 };
 pub use inference_mcp::{McpClient, McpClientConfig, McpServerConfig, McpServerSource};
 pub use inference_models_speech::{
-    SpeechGenerationConfig, SpeechOptions, TimedText, Transcription, TranscriptionOptions,
+    ProgressFn, SpeechGenerationConfig, SpeechOptions, TimedText, Transcription,
+    TranscriptionOptions, TranscriptionProgress,
     diarization::{Diarization, DiarizationOptions, SpeakerSegment},
     parakeet::{PRESETS as ASR_QUANT_PRESETS, QuantPolicy as AsrQuantPolicy},
     silero::{SegmentOptions, VoiceActivity},
@@ -220,13 +221,14 @@ pub use pipeline::{
 pub use pipeline::{Phi2Loader, Phi3Loader, Phi3VLoader};
 pub use request::{
     ApproximateUserLocation, CalibrationAction, CalibrationRequest, Constraint,
-    DetokenizationRequest, FINISH_REASON_CANCELED, FINISH_REASON_LENGTH,
+    DetokenizationRequest, DiarizationProgressHook, FINISH_REASON_CANCELED, FINISH_REASON_LENGTH,
     ImageGenerationResponseFormat, JointDecisionRequest, LlguidanceGrammar, MessageContent,
     NormalRequest, ReasoningEffort, RequantizeRequest, Request, RequestCancellation,
-    RequestMessage, SearchContextSize, TokenizationRequest, TranscriptionStreamOp,
-    TranscriptionStreamRequest, TranscriptionStreamUpdate, WebSearchContentType, WebSearchFilters,
-    WebSearchImageSettings, WebSearchOptions, WebSearchReturnTokenBudget, WebSearchUserLocation,
-    WordTimestampsRequest, resolve_reasoning_controls,
+    RequestMessage, SearchContextSize, TokenizationRequest, TranscriptionProgressHook,
+    TranscriptionStreamOp, TranscriptionStreamRequest, TranscriptionStreamUpdate,
+    WebSearchContentType, WebSearchFilters, WebSearchImageSettings, WebSearchOptions,
+    WebSearchReturnTokenBudget, WebSearchUserLocation, WordTimestampsRequest,
+    resolve_reasoning_controls,
 };
 pub use response::*;
 pub use sampler::{

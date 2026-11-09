@@ -18,7 +18,10 @@ mod weight_norm;
 pub mod whisper;
 
 pub use dia::{DiaConfig, DiaPipeline};
-pub use transcript::{TimedText, Transcription, TranscriptionOptions};
+pub use transcript::{
+    ProgressFn, TRANSCRIPTION_STOPPED, TimedText, Transcription, TranscriptionOptions,
+    TranscriptionProgress,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub enum SpeechGenerationConfig {

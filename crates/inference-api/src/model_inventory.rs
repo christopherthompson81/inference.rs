@@ -143,7 +143,7 @@ fn is_relative_name(name: &str) -> bool {
             .all(|part| matches!(part, std::path::Component::Normal(_)))
 }
 
-fn event(name: &str, data: serde_json::Value) -> String {
+pub(crate) fn event(name: &str, data: serde_json::Value) -> String {
     json!({ "event": name, "data": data }).to_string()
 }
 
@@ -258,9 +258,9 @@ pub(crate) fn model_download_from(
 }
 
 // a download's events; once nobody reads them, the download stops
-struct CancelOnDrop {
-    events: std::pin::Pin<Box<dyn Stream<Item = String> + Send>>,
-    cancellation: RequestCancellation,
+pub(crate) struct CancelOnDrop {
+    pub(crate) events: std::pin::Pin<Box<dyn Stream<Item = String> + Send>>,
+    pub(crate) cancellation: RequestCancellation,
 }
 
 impl Stream for CancelOnDrop {

@@ -597,6 +597,17 @@ impl Nemotron3Diarizer {
     /// As [`Self::logits`], from `frames` rows of [`Self::features`] (or features computed alike), for every frame
     /// of the whole encoder steps they fill (the last one's zero-padded frames too).
     pub fn logits_of_features(&self, features: &[f32], frames: usize) -> Result<Tensor> {
+        self.logits_reporting(features, frames, None)
+    }
+
+    // `logits_of_features`, reporting each chunk's end to `progress`
+    fn logits_reporting(
+        &self,
+        features: &[f32],
+        frames: usize,
+        progress: Option<&super::DiarizationProgressFn>,
+    ) -> Result<Tensor> {
+        let duration = frames as f64 * self.frame_seconds;
         let factor = self.config.audio_config.subsampling_factor;
         let total = frames.div_ceil(factor);
         let (chunk, context) = (self.config.chunk_length, self.config.chunk_right_context);
@@ -622,6 +633,12 @@ impl Nemotron3Diarizer {
                 .to_vec1::<f32>()?;
             cache.update(&input.squeeze(0)?, &probs, 0, frames_here)?;
             out.push(logits.narrow(0, cached_len * factor, frames_here * factor)?);
+            super::chunk_done(
+                progress,
+                (start + frames_here) * factor,
+                self.frame_seconds,
+                duration,
+            )?;
         }
         Tensor::cat(&out, 0)
     }
@@ -633,9 +650,24 @@ impl Nemotron3Diarizer {
         sample_rate: u32,
         threshold: Option<f32>,
     ) -> Result<Diarization> {
+        self.diarize_reporting(pcm, sample_rate, threshold, None)
+    }
+
+    /// [`Self::diarize`], telling `progress` the seconds done after each chunk.
+    pub fn diarize_reporting(
+        &self,
+        pcm: &[f32],
+        sample_rate: u32,
+        threshold: Option<f32>,
+        progress: Option<&super::DiarizationProgressFn>,
+    ) -> Result<Diarization> {
         let pcm =
             inference_audio::mel::resample(pcm, sample_rate, self.sample_rate()).map_err(msg)?;
-        let probabilities = ops::sigmoid(&self.logits(&pcm)?)?
+        let (features, frames) = self.features(&pcm)?;
+        let logits = self
+            .logits_reporting(&features, frames, progress)?
+            .narrow(0, 0, frames)?;
+        let probabilities = ops::sigmoid(&logits)?
             .to_dtype(DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;

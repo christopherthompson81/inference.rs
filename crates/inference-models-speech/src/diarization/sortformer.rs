@@ -294,6 +294,16 @@ impl SortformerDiarizer {
     /// `(frames, speakers)` row-major speech probabilities of mono `pcm` at the model's rate, as NeMo's
     /// `forward_streaming` runs it: each chunk's mel slice with its context, behind the cache.
     pub fn probabilities(&self, pcm: &[f32]) -> Result<Vec<f32>> {
+        self.probabilities_reporting(pcm, None)
+    }
+
+    // `probabilities`, reporting each chunk's end to `progress`
+    fn probabilities_reporting(
+        &self,
+        pcm: &[f32],
+        progress: Option<&super::DiarizationProgressFn>,
+    ) -> Result<Vec<f32>> {
+        let duration = pcm.len() as f64 / f64::from(self.sample_rate());
         let m = &self.config.sortformer_modules;
         let (features, frames) = self.features(pcm)?;
         let mels = self.config.preprocessor.features;
@@ -321,6 +331,7 @@ impl SortformerDiarizer {
             out.extend_from_slice(&probs[first * s..(first + chunk_frames) * s]);
             cache.update(&input, &probs, left, chunk_frames)?;
             start = end;
+            super::chunk_done(progress, out.len() / s, self.frame_seconds, duration)?;
         }
         Ok(out)
     }
@@ -332,9 +343,20 @@ impl SortformerDiarizer {
         sample_rate: u32,
         threshold: Option<f32>,
     ) -> Result<Diarization> {
+        self.diarize_reporting(pcm, sample_rate, threshold, None)
+    }
+
+    /// [`Self::diarize`], telling `progress` the seconds done after each chunk.
+    pub fn diarize_reporting(
+        &self,
+        pcm: &[f32],
+        sample_rate: u32,
+        threshold: Option<f32>,
+        progress: Option<&super::DiarizationProgressFn>,
+    ) -> Result<Diarization> {
         let pcm =
             inference_audio::mel::resample(pcm, sample_rate, self.sample_rate()).map_err(msg)?;
-        let probabilities = self.probabilities(&pcm)?;
+        let probabilities = self.probabilities_reporting(&pcm, progress)?;
         let s = self.num_speakers();
         let segments = speaker_segments(
             &probabilities,
