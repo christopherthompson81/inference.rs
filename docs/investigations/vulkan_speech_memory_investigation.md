@@ -673,3 +673,39 @@ identical. Walls, alternated, profiler off:
 
 The combined request is within ~0.05-0.1 s of CUDA's. What is left in diar: small matmuls at 128 x 128 tiles filling
 few SMs (m=684 n=512 k=2048: 24 workgroups, 10 TFLOPS), and ~17 % element-wise maps.
+
+## Run 22 - 2026-11-09 18:30
+
+Question: the diarizer's small matmuls (Run 21: 128 x 128 tiles, m=684 n=512 k=2048 in 24 workgroups at 10 TFLOPS)
+and its element-wise maps.
+
+Change: the matrix-core matmul builds a 64 x 64 tile too (TILE64: 128 threads, four 32 x 32 subgroup parts, the same
+k step and loads; f32, f16-b and bf16 builds), which a discrete GPU's product takes below 160 tiles of 128 x 128. The
+iGPU keeps 128 x 128 (unmeasured there). Tests: a 2100 x 1300 product added to the tiled f32 and bf16 matmul tests so
+the 128 x 128 build keeps coverage (the existing shapes now take 64 x 64); `scripts/local_ci.sh --lint --vulkan` clean.
+
+Diar profile (PROF=1, one window), matmul_bf16_cm64 at the diarizer's shapes, per dispatch, against Run 21's 128 x 128:
+
+    m=684 n=512 k=2048      142.8 -> 88.6 us   (10.0 -> 16.2 TFLOPS)
+    m=684 n=2048 k=512       79.8 -> 68.9 us
+    m=684 n=1536 k=512       40.7 -> 48.8 us   (72 tiles: the one that lost)
+    m=684 n=512 k=512        40.0 -> 24.9 us
+    b=8 m=684 n=64 k=684     61.2 -> 36.4 us
+
+Threshold 160 against 64 (asr8, diar8, binaries alternated, two rounds): asr 2.33-2.42 / 2.30-2.48, diar 0.67-0.71 /
+0.68-0.73; the same within noise, kept at 160. Diarization output byte identical.
+
+Tried and reverted: the diarizer layer's attention through the fused Vulkan kernel (flash_attn taking bf16 by
+converting to f32 and back). flash_attn_cm took 715 ms of a 2866 ms window (25 %), more than the unfused scores, scale,
+softmax and value matmul it replaced; walls unchanged (0.67-0.69); output moved four segment edges by 10 ms. The RoPE
+kernel is f32 alone too, so the maps left (rotate_half's neg and cat, the RoPE muls and adds, head copies: ~25 % of
+diar's GPU time) need bf16 kernels to fuse.
+
+first.sh (NB=5) and diar8, profiler off, alternated:
+
+                 asr          diar         both
+    Vulkan       2.34, 2.36   0.67, 0.70   2.57-2.71
+    CUDA         2.38, 2.38   0.68, 0.70   2.61-2.67
+    diar8 Vulkan 0.67-0.68
+
+Vulkan is level with CUDA on all three.

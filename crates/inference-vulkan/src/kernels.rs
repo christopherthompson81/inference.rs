@@ -305,6 +305,8 @@ pub(crate) struct CoopKernels {
     // the same over an f16 b
     pub(crate) matmul_f32_bh: Pipeline,
     pub(crate) matmul_bf16_cm: Pipeline,
+    // the three in 64 x 64 tiles: f32, f16 b, bf16
+    pub(crate) matmul_cm64: [Pipeline; 3],
     // prompt attention with a relative-position term
     pub(crate) flash_attn_relpos: Pipeline,
     // Q4_0 experts on NV_cooperative_matrix2, where the device has it: a build a tile width, 16 to 128 routes
@@ -496,6 +498,16 @@ impl CoopKernels {
             )
             .subgroup(subgroup),
         );
+        for (spirv, name) in [
+            (shaders::MATMUL_F32_CM64, "matmul_f32_cm64"),
+            (shaders::MATMUL_F32_CM64_BH, "matmul_f32_cm64_bh"),
+            (shaders::MATMUL_BF16_CM64, "matmul_bf16_cm64"),
+        ] {
+            specs.push(
+                PipelineSpec::new(spirv, ops::BINDINGS, ops::MATMUL_PUSH_BYTES, name)
+                    .subgroup(subgroup),
+            );
+        }
         specs.push(
             PipelineSpec::new(
                 shaders::FLASH_ATTN_RELPOS_CM,
@@ -533,8 +545,16 @@ impl CoopKernels {
         let paged_prefill: [Pipeline; 3] =
             take(3).try_into().ok().expect("three prefill pipelines");
         let [flash_attn]: [Pipeline; 1] = take(1).try_into().ok().expect("one attention pipeline");
-        let [matmul_f32, matmul_f32_bh, matmul_bf16_cm, flash_attn_relpos]: [Pipeline; 4] =
-            take(4).try_into().ok().expect("four pipelines");
+        let [matmul_f32, matmul_f32_bh, matmul_bf16_cm]: [Pipeline; 3] =
+            take(3).try_into().ok().expect("three matmul pipelines");
+        let matmul_cm64: [Pipeline; 3] = take(3)
+            .try_into()
+            .ok()
+            .expect("three 64-tile matmul pipelines");
+        let [flash_attn_relpos]: [Pipeline; 1] = take(1)
+            .try_into()
+            .ok()
+            .expect("one relative-position pipeline");
         let [convert_f16, moe_gather_f16]: [Pipeline; 2] =
             take(2).try_into().ok().expect("two pipelines");
         let mut moe_mm_cm2: Vec<Option<[Pipeline; 4]>> = (0..BLOCK_TYPES).map(|_| None).collect();
@@ -561,6 +581,7 @@ impl CoopKernels {
             matmul_f32,
             matmul_f32_bh,
             matmul_bf16_cm,
+            matmul_cm64,
             flash_attn_relpos,
             moe_mm_cm2,
             mul_mm_cm2,

@@ -2812,6 +2812,12 @@ mod tests {
         // b transposed (k its unit stride), then an unaligned k against an n-contiguous b
         check(&q, &k.t()?)?;
         check(&q.matmul(&k.t()?)?, &v)?;
+        // enough tiles for the 128 x 128 build on a discrete GPU (smaller products take 64 x 64 there), with edges
+        let wide = Tensor::randn(0f32, 1., (1, 2100, 128), &Device::Cpu)?;
+        check(
+            &wide,
+            &Tensor::randn(0f32, 1., (128, 1300), &Device::Cpu)?.unsqueeze(0)?,
+        )?;
         // whole 128 x 128 tiles and their edges, against a transposed weight and an n-contiguous b
         let x = Tensor::randn(0f32, 1., (1, 300, 256), &Device::Cpu)?;
         let w = Tensor::randn(0f32, 1., (260, 256), &Device::Cpu)?;
@@ -3062,7 +3068,6 @@ mod tests {
         Ok(())
     }
 
-    // fused attention against softmax(scale q k^T + mask) v on the CPU: GQA, keys past the positions (a cached prefix), a
     // a direct conv2d against the CPU's: one input channel strided and padded, depthwise, two groups, dilated, and a
     // strided input view; a pointwise conv is a matmul, its inputs rounded to f16 where it runs on matrix cores
     #[test]
@@ -3212,7 +3217,7 @@ mod tests {
         assert_same(&f.to_device(&vk)?.sum_keepdim(1)?, &f.sum_keepdim(1)?)?;
         let wide = |t: &Tensor| t.to_dtype(DType::F32);
         // a product past the matrix-core tiles and two below them (a short and a long k), each over a transposed weight
-        for (m, n, k) in [(300, 260, 200), (7, 33, 40), (1, 70, 640)] {
+        for (m, n, k) in [(300, 260, 200), (2100, 1300, 96), (7, 33, 40), (1, 70, 640)] {
             let (x, w) = (
                 randn(&[m, k])?.to_dtype(bf16)?,
                 randn(&[n, k])?.to_dtype(bf16)?,

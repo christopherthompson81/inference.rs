@@ -29,6 +29,10 @@ const TILED_MIN: usize = 16;
 const SMALL_TILE: usize = 32;
 // matmul_f32_cm's tile
 const CM_TILE: usize = 128;
+const CM_SMALL_TILE: usize = 64;
+// a discrete GPU's matrix-core product with fewer 128 x 128 tiles than this takes 64 x 64 ones (the 3090's 82 SMs ran
+// Sortformer's 684 x 512 x 2048 in 24 workgroups, 10 TFLOPS)
+const CM_SMALL_BELOW: usize = 160;
 const SMALL_TILE_BELOW: usize = 256;
 const MAX_GROUPS_Z: usize = 65_535;
 const MAX_GROUPS: usize = 4096;
@@ -490,7 +494,7 @@ impl Recorder<'_> {
         let Some(coop) = self.context.coop.as_ref() else {
             return Ok(false);
         };
-        self.matmul_cm(op, &coop.matmul_f32_bh, "half b")
+        self.matmul_cm(op, [&coop.matmul_f32_bh, &coop.matmul_cm64[1]], "half b")
     }
 
     /// [`Self::matmul_f32`] over bf16 operands into a bf16 `out`: on matrix cores (the inputs rounded to f16 as the f32
@@ -500,7 +504,9 @@ impl Recorder<'_> {
         let tiled = op.m >= TILED_MIN && op.n >= TILED_MIN && op.batch <= MAX_GROUPS_Z;
         if tiled {
             return match self.context.coop.as_ref() {
-                Some(coop) => self.matmul_cm(op, &coop.matmul_bf16_cm, "bf16"),
+                Some(coop) => {
+                    self.matmul_cm(op, [&coop.matmul_bf16_cm, &coop.matmul_cm64[2]], "bf16")
+                }
                 None => Ok(false),
             };
         }
@@ -547,10 +553,11 @@ impl Recorder<'_> {
         Ok(true)
     }
 
+    // `builds`: the 128 x 128 tile's, then the 64 x 64 one's
     fn matmul_cm(
         &self,
         op: &MatMul<'_>,
-        pipeline: &crate::pipeline::Pipeline,
+        builds: [&crate::pipeline::Pipeline; 2],
         kind: &str,
     ) -> Result<bool> {
         if op.m < TILED_MIN || op.n < TILED_MIN || op.batch > MAX_GROUPS_Z {
@@ -581,13 +588,14 @@ impl Recorder<'_> {
             || format!("b={} m={} n={} k={} {kind}", op.batch, op.m, op.n, op.k),
             count * op.k,
         );
+        let (pipeline, tile) = self.cm_build(op, builds);
         pipeline.dispatch(
             self,
             &[a.buffer.buffer, b.buffer.buffer, op.out.buffer],
             &bytes,
             [
-                op.n.div_ceil(CM_TILE) as u32,
-                op.m.div_ceil(CM_TILE) as u32,
+                op.n.div_ceil(tile) as u32,
+                op.m.div_ceil(tile) as u32,
                 op.batch as u32,
             ],
         );
@@ -595,6 +603,20 @@ impl Recorder<'_> {
             self.retain(buffer.clone());
         }
         Ok(true)
+    }
+
+    // the matrix-core build a product takes, and its tile; 64 x 64 on a discrete GPU alone, the iGPU's unmeasured
+    fn cm_build<'p>(
+        &self,
+        op: &MatMul<'_>,
+        [large, small]: [&'p crate::pipeline::Pipeline; 2],
+    ) -> (&'p crate::pipeline::Pipeline, usize) {
+        let tiles = op.n.div_ceil(CM_TILE) * op.m.div_ceil(CM_TILE) * op.batch;
+        if !self.context.is_unified() && tiles < CM_SMALL_BELOW {
+            (small, CM_SMALL_TILE)
+        } else {
+            (large, CM_TILE)
+        }
     }
 
     pub fn matmul_f32(&self, op: &MatMul<'_>) -> Result<()> {
@@ -628,13 +650,14 @@ impl Recorder<'_> {
         // on an iGPU too, unlike the quantized matmuls: f32 has no int8 dot product to lose to (a 780M's Parakeet
         // encoder products ran ~1 TFLOPS tiled, 1.5-2.4 here)
         if tiled && let Some(coop) = self.context.coop.as_ref() {
-            coop.matmul_f32.dispatch(
+            let (pipeline, tile) = self.cm_build(op, [&coop.matmul_f32, &coop.matmul_cm64[0]]);
+            pipeline.dispatch(
                 self,
                 &buffers,
                 &bytes,
                 [
-                    op.n.div_ceil(CM_TILE) as u32,
-                    op.m.div_ceil(CM_TILE) as u32,
+                    op.n.div_ceil(tile) as u32,
+                    op.m.div_ceil(tile) as u32,
                     op.batch as u32,
                 ],
             );

@@ -14,7 +14,13 @@
 #extension GL_KHR_memory_scope_semantics : require
 #extension GL_KHR_shader_subgroup_basic : require
 
-layout(local_size_x = 256) in;
+// TILE64 builds a 64 x 64 tile over four subgroups, for products whose 128 x 128 tiles leave most of the device idle
+#ifdef TILE64
+#define THREADS_X 128
+#else
+#define THREADS_X 256
+#endif
+layout(local_size_x = THREADS_X) in;
 
 #ifdef BF16
 #extension GL_GOOGLE_include_directive : require
@@ -74,17 +80,26 @@ layout(push_constant) uniform PushConstants {
     uint b_ns;
 } pc;
 
-const uint THREADS = 256;
+const uint THREADS = THREADS_X;
 // row tiles that sweep the columns together, so the workgroups in flight share their a and b panels in the cache (a
 // 780M at 7500 x 4096 x 1024: 1.2 TFLOPS a row of tiles at a time, 1.8 four or eight)
 const uint GROUP_M = 8;
+#ifdef TILE64
+const uint BM = 64;
+const uint BN = 64;
+#else
 const uint BM = 128;
 const uint BN = 128;
+#endif
 const uint BK = 64;
 const uint TILE = 16;
 // a subgroup's part of the tile: SG_M x SG_N, as SG_M / TILE x SG_N / TILE products
 const uint SG_M = 32;
+#ifdef TILE64
+const uint SG_N = 32;
+#else
 const uint SG_N = 64;
+#endif
 const uint TM = SG_M / TILE;
 const uint TN = SG_N / TILE;
 // the tile's vec4s a thread loads a step, of each operand
