@@ -585,3 +585,32 @@ matmul time is the batched attention-block shapes (16-25 TFLOPS) and the diarize
 (m=380 n=512 k=2048, 0.5 TFLOPS) is a fallback-rate outlier. The ~1 s of GPU idle in a combined request is as large as
 the whole gap. A kernel at ggml's rate everywhere would cut ~0.45 s of GPU time, but only the part of it on the
 critical path shows in the wall.
+
+## Run 19 - 2026-11-09 13:20
+
+Question: where the combined request's GPU idle is (Run 18), and whether Run 12's stream per model pays now.
+
+`nsys_both.sh` (scratch: warm asr and diar, two combined requests, `--trace=vulkan --vulkan-gpu-workload=batch`).
+Submits and fence waits per thread, in the asr-only request: encoder to 1.18 s, then the TDT decoder's step loop
+1.18-2.18 s (a submit and a fence wait a step, ~13k submits); diar alone 0.56 s of submits. In a combined request
+(2.83-2.85 s under nsys): diar's thread submits 0-2.04 s (its 0.56 s stretched over the asr encoder's), asr's decoder
+loop runs dense only from 2.04-2.09 s, the moment diar's last batch goes, to the end (~0.8 s). Before that each
+decoder step waits on one queue behind diar's batches. Request start to first GPU work: 0.37 s (CPU side).
+
+So the combined request runs encoder + diar + decoder nearly in series; CUDA's streams let the decoder's small steps
+run between diar's kernels. Run 12's `vulkan-streams` (a queue per model, timeline semaphores, producer-tracked cross-
+stream waits) rebuilt on these fixes (local `vulkan-streams-owed`: cherry-picked owed barriers and the compute-only
+queue, its queue placement made to give each stream its own queue of family 2), cold start, asr and diar once, five
+combined requests, profiler off, two servers:
+
+                         asr    diar   both
+    one queue (Run 18)   2.37   0.84   2.94-3.13
+                         2.27   0.83
+    streams + fixes      2.35   0.87   2.72-2.93
+                         2.42   0.87   2.75-2.91
+    CUDA (Run 18)        2.33   0.68   2.57-2.61
+                         2.35   0.67
+
+Streams now take ~0.25 s off the combined request (Run 12 measured them under the stall, which hid it); what is left to
+CUDA (~0.2 s) is about diar's own gap (0.84 against 0.67). The streams branch is a WIP (713 lines over context,
+memory and stream); it needs its tests and a review pass before it can go in.
