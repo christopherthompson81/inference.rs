@@ -83,6 +83,8 @@ pub struct Recorder<'a> {
     profiled: RefCell<Vec<crate::stream::Profiled>>,
     // the shape and multiply-adds the next profiled dispatch reports, set by its op
     shape: RefCell<Option<(String, u64)>>,
+    // the barrier the commands so far owe the next one
+    owed: Cell<Option<crate::stream::Owed>>,
 }
 
 impl Context {
@@ -372,8 +374,10 @@ impl Context {
             queries: batch.queries,
             profiled: RefCell::new(std::mem::take(&mut batch.profiled)),
             shape: RefCell::new(None),
+            owed: Cell::new(batch.owed),
         };
         let out = record(&recorder);
+        batch.owed = recorder.owed.get();
         batch.profiled = recorder.profiled.into_inner();
         batch.retained.append(&mut recorder.retained.into_inner());
         batch.dispatches += recorder.dispatches.get();
@@ -513,40 +517,41 @@ impl Recorder<'_> {
         });
     }
 
-    // a transfer command between barriers that order it with the compute work on either side
+    // a transfer command ordered with the compute work on either side
     fn transfer(&self, command: impl FnOnce(&ash::Device, vk::CommandBuffer)) {
-        let device = &self.context.device;
-        let all = vk::AccessFlags::SHADER_READ
-            | vk::AccessFlags::SHADER_WRITE
-            | vk::AccessFlags::TRANSFER_READ
-            | vk::AccessFlags::TRANSFER_WRITE;
-        let stages = vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::TRANSFER;
+        // after everything before it, whatever the commands before owe
+        self.owe(crate::stream::Owed::ALL);
+        self.settle(crate::stream::Owed::ALL);
+        command(&self.context.device, self.buffer);
+        self.owe(crate::stream::Owed::ALL);
+        self.dispatches.set(self.dispatches.get() + 1);
+    }
+
+    /// Records the barrier the commands before owe, if any, ahead of a command in `next`'s stages and accesses.
+    pub(crate) fn settle(&self, next: crate::stream::Owed) {
+        let Some(owed) = self.owed.take() else {
+            return;
+        };
         let barrier = vk::MemoryBarrier::default()
-            .src_access_mask(all)
-            .dst_access_mask(all);
+            .src_access_mask(owed.access)
+            .dst_access_mask(next.access);
         // SAFETY: the command buffer is recording
         unsafe {
-            device.cmd_pipeline_barrier(
+            self.context.device.cmd_pipeline_barrier(
                 self.buffer,
-                stages,
-                stages,
-                vk::DependencyFlags::empty(),
-                &[barrier],
-                &[],
-                &[],
-            );
-            command(device, self.buffer);
-            device.cmd_pipeline_barrier(
-                self.buffer,
-                stages,
-                stages,
+                owed.stages,
+                next.stages,
                 vk::DependencyFlags::empty(),
                 &[barrier],
                 &[],
                 &[],
             );
         }
-        self.dispatches.set(self.dispatches.get() + 1);
+    }
+
+    /// Orders the next command after what was just recorded (the barrier goes in ahead of it, see [`Self::settle`]).
+    pub(crate) fn owe(&self, owed: crate::stream::Owed) {
+        self.owed.set(Some(owed));
     }
 
     /// Keeps `resource` alive until the commands recorded here have finished: a pooled buffer's allocation rather than
@@ -870,9 +875,13 @@ fn pick_device(instance: &ash::Instance) -> Result<(vk::PhysicalDevice, u32)> {
         if !REQUIRED_EXTENSIONS.iter().all(|name| has(name)) {
             continue;
         }
+        // a compute-only family where there is one: on a graphics queue NVIDIA's driver stalls matrix-core kernels ~1 s
+        let compute =
+            |f: &&vk::QueueFamilyProperties| f.queue_flags.contains(vk::QueueFlags::COMPUTE);
         let Some(family) = families
             .iter()
-            .position(|f| f.queue_flags.contains(vk::QueueFlags::COMPUTE))
+            .position(|f| compute(&f) && !f.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+            .or_else(|| families.iter().position(|f| compute(&f)))
         else {
             continue;
         };
