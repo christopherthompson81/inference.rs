@@ -8,6 +8,7 @@ use std::{
 use inference_api::{
     Engine, EngineLoadError,
     api_error::{ApiError, ApiErrorKind},
+    audio_files::{audio_decode_json, audio_probe_json},
     blocking::{
         BlockingEngine, BlockingStream, BlockingTranscriptionSession, StreamPoll,
         model_download_stream,
@@ -1621,6 +1622,26 @@ pub unsafe extern "C" fn inference_model_inspect(
     out_response: *mut *mut inference_string,
 ) -> inference_status {
     unsafe { engine_free_json_call(request, request_len, out_response, model_inspect_json) }
+}
+
+/// Safety: `request` is valid for `request_len` bytes and `out_response` for a write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_audio_probe(
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    unsafe { engine_free_json_call(request, request_len, out_response, audio_probe_json) }
+}
+
+/// Safety: `request` is valid for `request_len` bytes and `out_response` for a write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_audio_decode(
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    unsafe { engine_free_json_call(request, request_len, out_response, audio_decode_json) }
 }
 
 /// Safety: `request` is valid for `request_len` bytes and `out_response` for a write.

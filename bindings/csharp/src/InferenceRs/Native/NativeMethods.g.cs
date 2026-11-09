@@ -397,6 +397,14 @@ internal static unsafe partial class NativeMethods
         byte* request, nuint requestLen, out IntPtr outResponse);
 
     [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_audio_probe(
+        byte* request, nuint requestLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_audio_decode(
+        byte* request, nuint requestLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
     internal static partial InferenceStatus inference_model_download_open(
         byte* request, nuint requestLen, out IntPtr outStream);
 

@@ -188,6 +188,8 @@ SIGNATURES = {
     "inference_model_inspect": (status, (*buffer, out)),
     "inference_models_scan": (status, (*buffer, out)),
     "inference_hf_cache_delete": (status, (*buffer, out)),
+    "inference_audio_probe": (status, (*buffer, out)),
+    "inference_audio_decode": (status, (*buffer, out)),
     "inference_model_download_open": (status, (*buffer, out)),
     "inference_blob_data": (c_void_p, (c_void_p,)),
     "inference_blob_len": (c_size_t, (c_void_p,)),

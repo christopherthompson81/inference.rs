@@ -16,6 +16,12 @@ homepage.workspace = true
 anyhow.workspace = true
 hound.workspace = true
 symphonia.workspace = true
+rusty-opus = { workspace = true, optional = true }
 rustfft.workspace = true
 rubato.workspace = true
 rayon.workspace = true
+
+[features]
+default = ["opus"]
+# Opus in Ogg, Matroska and WebM, which symphonia demuxes but does not decode
+opus = ["dep:rusty-opus"]

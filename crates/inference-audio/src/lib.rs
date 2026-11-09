@@ -181,15 +181,135 @@ impl AudioInput {
     }
 }
 
+/// What an audio file holds, read from its container's header: no audio is decoded.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioInfo {
+    /// Seconds, where the container states its length.
+    pub duration: Option<f64>,
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// The codec's short name (`pcm_s16le`, `mp3`, `aac`, `opus`, ...).
+    pub codec: String,
+}
+
+/// [`AudioInfo`] of the file at `path`.
+pub fn probe_file(path: &std::path::Path) -> Result<AudioInfo> {
+    let file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let decoder = Decoder::open(Box::new(file), len)?;
+    Ok(AudioInfo {
+        duration: decoder.stated_seconds(),
+        sample_rate: decoder.sample_rate,
+        channels: decoder.channels,
+        codec: decoder.codec_name.to_string(),
+    })
+}
+
+/// A WAV that [`decode_file_to_wav`] wrote.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecodedWav {
+    pub frames: u64,
+    pub sample_rate: u32,
+    pub channels: u16,
+}
+
+/// Decodes the audio file at `path` into a WAV at `out` as it reads, never holding the recording: at `sample_rate`
+/// (default the file's), downmixed to mono with `mono`, 16-bit or (`float`) 32-bit float samples. It is written
+/// beside `out` and renamed into place once complete.
+pub fn decode_file_to_wav(
+    path: &std::path::Path,
+    out: &std::path::Path,
+    sample_rate: Option<u32>,
+    mono: bool,
+    float: bool,
+) -> Result<DecodedWav> {
+    let file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let mut decoder = Decoder::open(Box::new(file), len)?;
+    let rate = sample_rate.unwrap_or(decoder.sample_rate);
+    let channels = if mono { 1 } else { decoder.channels.max(1) };
+    let spec = hound::WavSpec {
+        channels,
+        sample_rate: rate,
+        bits_per_sample: if float { 32 } else { 16 },
+        sample_format: if float {
+            hound::SampleFormat::Float
+        } else {
+            hound::SampleFormat::Int
+        },
+    };
+    let partial = out.with_extension("part");
+    let mut writer = hound::WavWriter::create(&partial, spec)?;
+    let mut resamplers = (0..channels)
+        .map(|_| mel::StreamResampler::new(decoder.sample_rate, rate))
+        .collect::<Result<Vec<_>>>()?;
+    let write = |planes: &[Vec<f32>], writer: &mut hound::WavWriter<_>| -> Result<u64> {
+        let frames = planes.iter().map(Vec::len).min().unwrap_or(0);
+        for i in 0..frames {
+            for plane in planes {
+                let v = plane[i];
+                if float {
+                    writer.write_sample(v)?;
+                } else {
+                    writer.write_sample((v.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16)?;
+                }
+            }
+        }
+        Ok(frames as u64)
+    };
+    let (mut packet, mut frames) = (Vec::new(), 0u64);
+    while decoder.next(&mut packet)? {
+        let have = usize::from(decoder.channels.max(1));
+        let planes: Vec<Vec<f32>> = if mono {
+            vec![
+                packet
+                    .chunks_exact(have)
+                    .map(|f| f.iter().sum::<f32>() / have as f32)
+                    .collect(),
+            ]
+        } else {
+            // a packet with fewer channels than the file's first repeats its last one
+            (0..usize::from(channels))
+                .map(|c| {
+                    packet
+                        .chunks_exact(have)
+                        .map(|f| f[c.min(have - 1)])
+                        .collect()
+                })
+                .collect()
+        };
+        let planes = planes
+            .iter()
+            .zip(resamplers.iter_mut())
+            .map(|(plane, resampler)| resampler.push(plane))
+            .collect::<Result<Vec<_>>>()?;
+        frames += write(&planes, &mut writer)?;
+    }
+    let tails = resamplers
+        .iter_mut()
+        .map(mel::StreamResampler::finish)
+        .collect::<Result<Vec<_>>>()?;
+    frames += write(&tails, &mut writer)?;
+    writer.finalize()?;
+    std::fs::rename(&partial, out)?;
+    Ok(DecodedWav {
+        frames,
+        sample_rate: rate,
+        channels,
+    })
+}
+
 // a container's first audio track, decoded a packet at a time
 struct Decoder {
     format: Box<dyn symphonia::core::formats::FormatReader>,
-    decoder: Box<dyn symphonia::core::codecs::Decoder>,
+    codec: Codec,
     track_id: u32,
     sample_rate: u32,
     // the last packet's, which Matroska may leave to the codec's own header (AAC's does)
     channels: u16,
     frames: Option<u64>,
+    time_base: Option<symphonia::core::units::TimeBase>,
+    codec_name: &'static str,
 }
 
 impl Decoder {
@@ -227,15 +347,35 @@ impl Decoder {
             .ok_or_else(|| anyhow::anyhow!("unknown sample rate"))?;
         #[allow(clippy::cast_possible_truncation)]
         let channels = codec_params.channels.map(|c| c.count() as u16).unwrap_or(1);
-        let decoder =
-            symphonia::default::get_codecs().make(&codec_params, &DecoderOptions::default())?;
+        let codec = Codec::new(&codec_params, channels)?;
+        // Opus decodes at 48 kHz whatever its container states (Matroska states the encoder's input rate)
+        #[cfg(feature = "opus")]
+        let sample_rate = if matches!(codec, Codec::Opus { .. }) {
+            OPUS_RATE
+        } else {
+            sample_rate
+        };
         Ok(Self {
             format,
-            decoder,
+            codec,
             track_id,
             sample_rate,
             channels,
             frames: codec_params.n_frames,
+            time_base: codec_params.time_base,
+            codec_name: codec_name(&codec_params),
+        })
+    }
+
+    // the length the container states, in seconds, where it states one
+    fn stated_seconds(&self) -> Option<f64> {
+        let frames = self.frames?;
+        Some(match self.time_base {
+            Some(base) => {
+                let time = base.calc_time(frames);
+                time.seconds as f64 + time.frac
+            }
+            None => frames as f64 / f64::from(self.sample_rate),
         })
     }
 
@@ -254,13 +394,10 @@ impl Decoder {
             match self.format.next_packet() {
                 Ok(packet) if packet.track_id() != self.track_id => {}
                 Ok(packet) => {
-                    let decoded = self.decoder.decode(&packet)?;
-                    self.channels = decoded.spec().channels.count().try_into()?;
-                    let mut buf =
-                        SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
-                    buf.copy_interleaved_ref(decoded);
                     out.clear();
-                    out.extend_from_slice(buf.samples());
+                    if let Some(channels) = self.codec.decode(&packet, out)? {
+                        self.channels = channels;
+                    }
                     return Ok(true);
                 }
                 Err(symphonia::core::errors::Error::IoError(e))
@@ -272,6 +409,108 @@ impl Decoder {
             }
         }
     }
+}
+
+// the track's decoder: symphonia's own, or for Opus (which symphonia demuxes but does not decode) a pure-Rust port
+enum Codec {
+    Symphonia(Box<dyn symphonia::core::codecs::Decoder>),
+    #[cfg(feature = "opus")]
+    Opus {
+        decoder: Box<rusty_opus::OpusDecoder>,
+        channels: u16,
+        // the pre-skip frames still to drop, the encoder's lookahead
+        skip: usize,
+        pcm: Vec<f32>,
+    },
+}
+
+// the rate Opus decodes at, whatever rate its header names
+#[cfg(feature = "opus")]
+const OPUS_RATE: u32 = 48_000;
+// a packet's most frames: 120 ms at 48 kHz
+#[cfg(feature = "opus")]
+const OPUS_MAX_FRAMES: usize = 5760;
+// where an OpusHead names its pre-skip (little-endian u16 after the magic, version and channel count)
+#[cfg(feature = "opus")]
+const OPUS_HEAD_PRE_SKIP: usize = 10;
+
+impl Codec {
+    fn new(params: &symphonia::core::codecs::CodecParameters, channels: u16) -> Result<Self> {
+        #[cfg(feature = "opus")]
+        if params.codec == symphonia::core::codecs::CODEC_TYPE_OPUS {
+            if !(1..=2).contains(&channels) {
+                anyhow::bail!("Opus with {channels} channels is not decoded, only mono and stereo");
+            }
+            let head_skip = params
+                .extra_data
+                .as_deref()
+                .filter(|head| {
+                    head.starts_with(b"OpusHead") && head.len() >= OPUS_HEAD_PRE_SKIP + 2
+                })
+                .map(|head| {
+                    u16::from_le_bytes([head[OPUS_HEAD_PRE_SKIP], head[OPUS_HEAD_PRE_SKIP + 1]])
+                });
+            let skip = params.delay.or(head_skip.map(u32::from)).unwrap_or(0) as usize;
+            let decoder = rusty_opus::OpusDecoder::new(OPUS_RATE as i32, usize::from(channels))
+                .map_err(|e| anyhow::anyhow!("Opus: {e:?}"))?;
+            let pcm = vec![0f32; OPUS_MAX_FRAMES * usize::from(channels)];
+            return Ok(Self::Opus {
+                decoder: Box::new(decoder),
+                channels,
+                skip,
+                pcm,
+            });
+        }
+        let _ = channels;
+        Ok(Self::Symphonia(
+            symphonia::default::get_codecs().make(params, &DecoderOptions::default())?,
+        ))
+    }
+
+    // `packet`'s interleaved samples appended to `out`, and their channel count where the codec states it
+    fn decode(
+        &mut self,
+        packet: &symphonia::core::formats::Packet,
+        out: &mut Vec<f32>,
+    ) -> Result<Option<u16>> {
+        match self {
+            Self::Symphonia(decoder) => {
+                let decoded = decoder.decode(packet)?;
+                let channels = decoded.spec().channels.count().try_into()?;
+                let mut buf = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
+                buf.copy_interleaved_ref(decoded);
+                out.extend_from_slice(buf.samples());
+                Ok(Some(channels))
+            }
+            #[cfg(feature = "opus")]
+            Self::Opus {
+                decoder,
+                channels,
+                skip,
+                pcm,
+            } => {
+                let frames = decoder
+                    .decode(packet.buf(), OPUS_MAX_FRAMES, pcm)
+                    .map_err(|e| anyhow::anyhow!("Opus: {e:?}"))?;
+                let dropped = (*skip).min(frames);
+                *skip -= dropped;
+                // the last packet's padding stays (a few ms): no container states the length reliably enough to cut it
+                let c = usize::from(*channels);
+                out.extend_from_slice(&pcm[dropped * c..frames * c]);
+                Ok(Some(*channels))
+            }
+        }
+    }
+}
+
+// a track's codec, by symphonia's short name (Opus by its own: symphonia registers no decoder for it)
+fn codec_name(params: &symphonia::core::codecs::CodecParameters) -> &'static str {
+    if params.codec == symphonia::core::codecs::CODEC_TYPE_OPUS {
+        return "opus";
+    }
+    symphonia::default::get_codecs()
+        .get_codec(params.codec)
+        .map_or("unknown", |codec| codec.short_name)
 }
 
 #[cfg(test)]
@@ -323,6 +562,94 @@ mod tests {
             .fold(0f32, f32::max);
         assert!(worst < 1e-3, "worst {worst}");
         assert!(AudioInput::from_file_mono(&path, 16_000, 1000).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // a synthetic 1 s 440 Hz tone, encoded by ffmpeg's libopus at 16 kbit/s into Ogg: decoded at 48 kHz, its pre-skip
+    // dropped (a packet's padding at most past the second), the tone's pitch intact
+    #[cfg(feature = "opus")]
+    #[test]
+    fn opus_decodes_at_48_khz_past_its_pre_skip() {
+        const RATE: usize = 48_000;
+        // one 20 ms packet's frames, the most padding the last one adds
+        const PACKET: usize = 960;
+        let audio = AudioInput::from_bytes(include_bytes!("fixtures/tone_440hz_1s.opus")).unwrap();
+        assert_eq!((audio.sample_rate, audio.channels), (RATE as u32, 1));
+        let frames = audio.samples.len();
+        assert!((RATE..=RATE + PACKET).contains(&frames), "{frames} frames");
+        // the steady middle crosses zero twice a cycle
+        let middle = &audio.samples[RATE / 4..3 * RATE / 4];
+        let crossings = middle
+            .windows(2)
+            .filter(|w| (w[0] < 0.0) != (w[1] < 0.0))
+            .count();
+        assert!(
+            (438..=442).contains(&crossings),
+            "{crossings} crossings in half a second"
+        );
+    }
+
+    // a probe reads the header alone; a decode to WAV downmixes and resamples as from_file_mono does, written whole
+    #[test]
+    fn a_file_probes_and_decodes_to_a_wav() {
+        const RATE: u32 = 48_000;
+        const FRAMES: usize = 2 * RATE as usize;
+        let dir = std::env::temp_dir().join(format!("inference-audio-wav-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stereo.wav");
+        let spec = WavSpec {
+            channels: 2,
+            sample_rate: RATE,
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        };
+        let mut writer = WavWriter::create(&path, spec).unwrap();
+        for i in 0..FRAMES {
+            let t = i as f32 / RATE as f32;
+            writer
+                .write_sample(((t * 300.0 * std::f32::consts::TAU).sin() * 8000.0) as i16)
+                .unwrap();
+            writer
+                .write_sample(((t * 500.0 * std::f32::consts::TAU).sin() * 8000.0) as i16)
+                .unwrap();
+        }
+        writer.finalize().unwrap();
+        let info = super::probe_file(&path).unwrap();
+        assert_eq!(
+            (info.sample_rate, info.channels, info.codec.as_str()),
+            (RATE, 2, "pcm_s16le")
+        );
+        assert!((info.duration.unwrap() - 2.0).abs() < 1e-9);
+        let out = dir.join("mono.wav");
+        let wav = super::decode_file_to_wav(&path, &out, Some(16_000), true, true).unwrap();
+        assert_eq!(
+            (wav.sample_rate, wav.channels, wav.frames),
+            (16_000, 1, (FRAMES / 3) as u64)
+        );
+        assert!(!out.with_extension("part").exists());
+        let written = AudioInput::read_wav(out.to_str().unwrap()).unwrap();
+        let streamed = AudioInput::from_file_mono(&path, 16_000, usize::MAX).unwrap();
+        assert_eq!(written.samples, streamed.samples);
+        let kept = super::decode_file_to_wav(&path, &out, None, false, false).unwrap();
+        assert_eq!(
+            (kept.sample_rate, kept.channels, kept.frames),
+            (RATE, 2, FRAMES as u64)
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(feature = "opus")]
+    #[test]
+    fn an_opus_file_probes_as_opus_at_48_khz() {
+        let dir = std::env::temp_dir().join(format!("inference-audio-opus-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tone.opus");
+        std::fs::write(&path, include_bytes!("fixtures/tone_440hz_1s.opus")).unwrap();
+        let info = super::probe_file(&path).unwrap();
+        assert_eq!(
+            (info.sample_rate, info.channels, info.codec.as_str()),
+            (48_000, 1, "opus")
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

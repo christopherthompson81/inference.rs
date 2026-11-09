@@ -2558,6 +2558,7 @@ dependencies = [
  "indexmap",
  "indicatif 0.18.3",
  "inference-agent",
+ "inference-audio",
  "inference-core",
  "inference-json",
  "inference-layout",
@@ -2591,6 +2592,7 @@ dependencies = [
  "rayon",
  "rubato",
  "rustfft",
+ "rusty-opus",
  "symphonia",
 ]
 
@@ -5345,6 +5347,12 @@ name = "rustversion"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
+
+[[package]]
+name = "rusty-opus"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46604e6809c06441da1cfdde1f0cc25a4f2bf42c7d005aa387c2875c02d78762"
 
 [[package]]
 name = "rustyline"
