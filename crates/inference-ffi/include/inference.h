@@ -456,8 +456,10 @@ INFERENCE_API inference_status inference_transcription(const inference_engine *e
 /* Transcribes a whole recording as a stream (poll it with inference_stream_next, stop it with inference_stream_cancel):
  * its windows (Parakeet's VAD windows of up to 2 minutes past 5 minutes of audio) as each finishes. request is
  * inference_transcription's JSON (and "diarization_model"?), with "path"? (a local audio file, decoded to 16 kHz
- * mono as it reads, up to 12 hours; audio is then NULL) and "from_seconds"? (start there, for resuming; times stay
- * the recording's). Otherwise audio is audio_len bytes of an encoded file, as for inference_transcription. Events:
+ * mono as it reads, up to 12 hours; audio is then NULL), "from_seconds"? (start there, for resuming; times stay
+ * the recording's) and "max_window_seconds"? (windows of at most this, 5 or more, at any length of audio: cut at the
+ * VAD's silences, else the quietest moments; shorter windows skip less speech, but under 5 s Parakeet can switch
+ * language between windows). Otherwise audio is audio_len bytes of an encoded file, as for inference_transcription. Events:
  * "started" {"duration", "windows": [{"index", "start", "end"}]}, then per window "window" {"index", "start", "end",
  * "text", "words": [{"word", "start", "end"}]} and "progress" {"done", "total", "seconds_done"}, and last "done" (the
  * verbose_json transcript, with words and segments, and speakers with "diarization_model"), "canceled" or "error"

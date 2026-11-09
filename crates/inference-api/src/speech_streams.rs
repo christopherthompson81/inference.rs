@@ -38,6 +38,10 @@ const MAX_STREAM_SAMPLES: usize = 12 * 60 * 60 * STREAM_SAMPLE_RATE as usize;
 // the request fields a stream takes beyond its request's own
 const PATH_FIELD: &str = "path";
 const FROM_SECONDS_FIELD: &str = "from_seconds";
+const MAX_WINDOW_FIELD: &str = "max_window_seconds";
+// the shortest window a transcription stream plans: under ~5 s Parakeet, which identifies the language itself, can
+// switch language from one window to the next
+const MIN_WINDOW_SECONDS: f64 = 5.0;
 
 /// A speech stream's events, each `{"event": <name>, "data": ...}`, and what stops it.
 pub struct SpeechStream {
@@ -49,6 +53,7 @@ pub struct SpeechStream {
 struct Source {
     path: Option<PathBuf>,
     from_seconds: f64,
+    max_window_seconds: Option<f64>,
 }
 
 // `body`'s `path` and `from_seconds`, and the rest of it; `audio` is the bytes the caller gave, if any
@@ -76,8 +81,28 @@ fn split_source(body: &[u8], audio: &Option<Vec<u8>>) -> Result<(Source, Vec<u8>
                 ApiError::invalid_request("`from_seconds` must be a number of seconds, 0 or more")
             })?,
     };
+    let max_window_seconds = match fields.remove(MAX_WINDOW_FIELD) {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_f64()
+                .filter(|s| s.is_finite() && *s >= MIN_WINDOW_SECONDS)
+                .ok_or_else(|| {
+                    ApiError::invalid_request(format!(
+                        "`max_window_seconds` must be a number of seconds, {MIN_WINDOW_SECONDS} or more"
+                    ))
+                })?,
+        ),
+    };
     let rest = serde_json::to_vec(&fields).map_err(|_| ApiError::internal())?;
-    Ok((Source { path, from_seconds }, rest))
+    Ok((
+        Source {
+            path,
+            from_seconds,
+            max_window_seconds,
+        },
+        rest,
+    ))
 }
 
 /// Transcribes a whole recording, `audio` bytes or the request's `path` (a local file, decoded as it reads), as a
@@ -203,6 +228,7 @@ async fn transcribe(
     canceled: &RequestCancellation,
 ) -> Result<Value, ApiError> {
     let resume_at = (source.from_seconds > 0.0).then_some(source.from_seconds);
+    let max_window_seconds = source.max_window_seconds;
     let audio = load_audio(source, bytes, false, canceled).await?;
     let progress = report(events.clone(), canceled.clone());
     let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
@@ -213,6 +239,7 @@ async fn transcribe(
             beam_size: request.beam_size,
             translate: request.task == TranscriptionTask::Translate,
             resume_at,
+            max_window_seconds,
         },
         progress: Some(progress.clone()),
     };

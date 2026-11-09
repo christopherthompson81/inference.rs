@@ -20,6 +20,7 @@ const TONE_HZ: f32 = 330.0;
 // past Parakeet's 5-minute long-form threshold, so the VAD cuts it into 2-minute windows
 const LONG_SECONDS: f64 = 301.0;
 const WINDOW_SECONDS: f64 = 120.0;
+const CAPPED_WINDOW_SECONDS: f64 = 30.0;
 
 fn tone_wav(seconds: f64) -> Vec<u8> {
     let pcm: Vec<f32> = (0..(seconds * f64::from(RATE)) as usize)
@@ -213,6 +214,28 @@ async fn a_long_recording_streams_its_windows_as_they_finish() -> anyhow::Result
     }
     let done = &events.last().unwrap()["data"];
     assert!((done["duration"].as_f64().unwrap() - LONG_SECONDS).abs() < 1e-3);
+
+    // windows of at most 30 s, asked for: the always-speech VAD cuts the one run there
+    let capped = serde_json::json!({ "path": path, "max_window_seconds": CAPPED_WINDOW_SECONDS })
+        .to_string();
+    let events = stream_events(
+        model
+            .transcription_stream_json(capped.as_bytes(), None)
+            .await?,
+        None,
+    )
+    .await;
+    let plan = events[0]["data"]["windows"].as_array().unwrap();
+    assert!(
+        plan.len() >= (LONG_SECONDS / CAPPED_WINDOW_SECONDS) as usize,
+        "{} windows",
+        plan.len()
+    );
+    // a window reaches up to a second into the gaps around it
+    assert!(plan.iter().all(|w| {
+        w["end"].as_f64().unwrap() - w["start"].as_f64().unwrap() <= CAPPED_WINDOW_SECONDS + 2.0
+    }));
+    assert_eq!(events.last().unwrap()["event"], "done");
 
     let both = model
         .transcription_stream_json(request.as_bytes(), Some(wav))
