@@ -26,6 +26,8 @@ const PAGED_PREFILL_WORK_PER_SUBMIT: usize = 16_000_000_000;
 const PAGED_PREFILL_MIN_PIECE_ROWS: usize = 8;
 
 static CONTEXT: OnceLock<std::result::Result<Arc<Context>, String>> = OnceLock::new();
+// the `vulkan:N` the process opened: the backend drives one device a process
+static OPENED: OnceLock<usize> = OnceLock::new();
 
 // the device goes before the libraries' own exit handlers, which otherwise tear the driver down under its threads
 #[cfg(unix)]
@@ -2404,8 +2406,21 @@ impl BackendDevice for VulkanDevice {
     type Storage = VulkanStorage;
 
     fn new(ordinal: usize) -> Result<Self> {
-        if ordinal != 0 {
-            crate::bail!("the Vulkan backend drives one device, ordinal 0, not {ordinal}");
+        // an ordinal the machine has none for is refused before anything opens, so it costs the process no device
+        if OPENED.get().is_none() {
+            let count = inference_vulkan::devices().map_or(0, |devices| devices.len());
+            if count > 0 && ordinal >= count {
+                crate::bail!(
+                    "no Vulkan device {ordinal}: this machine has {count} (vulkan:0 to vulkan:{})",
+                    count - 1
+                );
+            }
+        }
+        let opened = *OPENED.get_or_init(|| ordinal);
+        if opened != ordinal {
+            crate::bail!(
+                "the Vulkan backend drives one device a process: vulkan:{opened} is open, not vulkan:{ordinal}"
+            );
         }
         let context = CONTEXT
             .get_or_init(|| {
@@ -2417,7 +2432,7 @@ impl BackendDevice for VulkanDevice {
                 } else {
                     MatrixCores::Default
                 };
-                let context = Context::with_matrix_cores(mode).map_err(|err| err.to_string())?;
+                let context = Context::open(opened, mode).map_err(|err| err.to_string())?;
                 #[cfg(unix)]
                 // SAFETY: the handler only reads the initialized static
                 unsafe {
@@ -2434,7 +2449,9 @@ impl BackendDevice for VulkanDevice {
     }
 
     fn location(&self) -> DeviceLocation {
-        DeviceLocation::Vulkan { gpu_id: 0 }
+        DeviceLocation::Vulkan {
+            gpu_id: OPENED.get().copied().unwrap_or(0),
+        }
     }
 
     fn same_device(&self, rhs: &Self) -> bool {
@@ -3121,6 +3138,28 @@ mod tests {
                 &x1d.conv1d(&w, padding, stride, dilation, groups)?,
                 DOT_TOLERANCE,
             )?;
+        }
+        Ok(())
+    }
+
+    // an ordinal the machine has no device for is refused without taking the process's one device, which then opens
+    // as vulkan:0, after which another ordinal is refused
+    #[test]
+    fn vulkan_devices_open_by_ordinal_once_a_process() -> Result<()> {
+        let Ok(listed) = crate::vulkan::devices() else {
+            return Ok(());
+        };
+        if listed.is_empty() {
+            return Ok(());
+        }
+        assert!(Device::new_vulkan(listed.len()).is_err());
+        let Some(vk) = device() else { return Ok(()) };
+        assert!(matches!(
+            vk.location(),
+            crate::DeviceLocation::Vulkan { gpu_id: 0 }
+        ));
+        if listed.len() > 1 {
+            assert!(Device::new_vulkan(1).is_err());
         }
         Ok(())
     }

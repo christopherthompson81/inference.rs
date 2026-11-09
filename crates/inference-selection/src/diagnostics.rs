@@ -56,6 +56,9 @@ pub struct DeviceInfo {
     /// Whether this build carries CUDA kernels for the device's arch; without them the device cannot be used
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kernels_built: Option<bool>,
+    /// A Vulkan device's kind: `discrete`, `integrated`, `virtual` or `cpu`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_type: Option<String>,
 }
 
 // fattn (inference-fattn) runs causal, packed and paged attention on Turing's mma or newer
@@ -190,6 +193,7 @@ fn collect_devices(sys: &System) -> Vec<DeviceInfo> {
         flash_attn_v3_compatible: None,
         unified_memory: None,
         kernels_built: None,
+        device_type: None,
     });
 
     #[cfg(feature = "cuda")]
@@ -216,6 +220,7 @@ fn collect_devices(sys: &System) -> Vec<DeviceInfo> {
                     .as_ref()
                     .map(inference_nn::utils::normal::is_integrated_gpu),
                 kernels_built,
+                device_type: None,
             });
         }
     }
@@ -239,9 +244,27 @@ fn collect_devices(sys: &System) -> Vec<DeviceInfo> {
                     flash_attn_v3_compatible: None,    // Flash Attn v3 is CUDA Hopper only
                     unified_memory: Some(true),        // Apple Silicon always uses unified memory
                     kernels_built: None,
+                    device_type: None,
                 });
             }
         }
+    }
+
+    // every device a Vulkan build can open, as `vulkan:N` numbers them (none in a build without Vulkan)
+    for vk in inference_tensor::vulkan::devices().unwrap_or_default() {
+        devices.push(DeviceInfo {
+            kind: "vulkan".to_string(),
+            ordinal: Some(vk.ordinal),
+            name: Some(vk.name),
+            total_memory_bytes: Some(vk.memory_bytes),
+            available_memory_bytes: None,
+            compute_capability: None,
+            flash_attn_compatible: None,
+            flash_attn_v3_compatible: None,
+            unified_memory: Some(matches!(vk.kind, "integrated" | "cpu")),
+            kernels_built: None,
+            device_type: Some(vk.kind.to_string()),
+        });
     }
 
     devices

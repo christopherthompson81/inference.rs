@@ -130,7 +130,7 @@ pub struct Recorder<'a> {
 }
 
 impl Context {
-    /// The first integrated GPU (else any GPU) that takes compute work, imports host memory and pushes descriptors.
+    /// The preferred device ([`devices`]' first) that takes compute work and imports host memory.
     pub fn new() -> Result<Arc<Self>> {
         Self::with_matrix_cores(MatrixCores::Default)
     }
@@ -138,23 +138,15 @@ impl Context {
     /// [`Self::new`], with prompt matmuls on the device's matrix cores (VK_KHR_cooperative_matrix) where `mode` allows
     /// and the device has them.
     pub fn with_matrix_cores(mode: MatrixCores) -> Result<Arc<Self>> {
-        // SAFETY: the loader is opened once here and kept alive in `_entry` for the context's life
-        let entry = unsafe { ash::Entry::load() }.map_err(|err| Error::Load(err.to_string()))?;
-        // 1.3 where the device has it: NV_cooperative_matrix2's shaders are SPIR-V 1.6
-        let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_3);
+        Self::open(0, mode)
+    }
+
+    /// [`Self::with_matrix_cores`] on [`devices`]' `ordinal`th device.
+    pub fn open(ordinal: usize, mode: MatrixCores) -> Result<Arc<Self>> {
         let labels = std::env::var_os(crate::stream::LABELS_ENV).is_some();
-        let instance_extensions = [ash::ext::debug_utils::NAME.as_ptr()];
-        let instance_extensions: &[_] = if labels { &instance_extensions } else { &[] };
-        // SAFETY: the create info and what it points to outlive the call
-        let instance = unsafe {
-            entry.create_instance(
-                &vk::InstanceCreateInfo::default()
-                    .application_info(&app)
-                    .enabled_extension_names(instance_extensions),
-                None,
-            )?
-        };
-        match Self::with_instance(entry, instance.clone(), mode) {
+        let (entry, instance) = open_instance(labels)?;
+        // a clone of the loader kept here: a failed context drops its own, and the instance is destroyed through it
+        match Self::with_instance(entry.clone(), instance.clone(), ordinal, mode) {
             Ok(context) => Ok(context),
             Err(err) => {
                 // SAFETY: nothing was created from the instance that is still alive
@@ -167,9 +159,23 @@ impl Context {
     fn with_instance(
         entry: ash::Entry,
         instance: ash::Instance,
+        ordinal: usize,
         matrix_cores: MatrixCores,
     ) -> Result<Arc<Self>> {
-        let (physical, family) = pick_device(&instance)?;
+        let eligible = eligible(&instance)?;
+        let count = eligible.len();
+        let Some(&Eligible {
+            physical, family, ..
+        }) = eligible.get(ordinal)
+        else {
+            return Err(match count {
+                0 => Error::NoDevice,
+                _ => Error::Invalid(format!(
+                    "no Vulkan device {ordinal}: this machine has {count} (vulkan:0 to vulkan:{})",
+                    count - 1
+                )),
+            });
+        };
         // SAFETY: `physical` came from this instance
         let properties = unsafe { instance.get_physical_device_properties(physical) };
         let name = properties
@@ -1112,8 +1118,79 @@ fn memory_budget(instance: &ash::Instance, physical: vk::PhysicalDevice) -> (boo
     (has_budget, heap)
 }
 
-// an integrated GPU first: its memory is the host's, which the crate's zero-copy imports rely on for speed
-fn pick_device(instance: &ash::Instance) -> Result<(vk::PhysicalDevice, u32)> {
+// the loader and an instance on it, with debug labels when asked
+fn open_instance(labels: bool) -> Result<(ash::Entry, ash::Instance)> {
+    // SAFETY: the loader stays open as long as the returned entry
+    let entry = unsafe { ash::Entry::load() }.map_err(|err| Error::Load(err.to_string()))?;
+    // 1.3 where the device has it: NV_cooperative_matrix2's shaders are SPIR-V 1.6
+    let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_3);
+    let instance_extensions = [ash::ext::debug_utils::NAME.as_ptr()];
+    let instance_extensions: &[_] = if labels { &instance_extensions } else { &[] };
+    // SAFETY: the create info and what it points to outlive the call
+    let instance = unsafe {
+        entry.create_instance(
+            &vk::InstanceCreateInfo::default()
+                .application_info(&app)
+                .enabled_extension_names(instance_extensions),
+            None,
+        )?
+    };
+    Ok((entry, instance))
+}
+
+// a device the crate runs on, and the queue family it takes
+struct Eligible {
+    physical: vk::PhysicalDevice,
+    family: u32,
+    properties: vk::PhysicalDeviceProperties,
+}
+
+/// A device the backend can open, as `vulkan:N` names it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceSummary {
+    /// `N` in `vulkan:N`.
+    pub ordinal: usize,
+    pub name: String,
+    /// `discrete`, `integrated`, `virtual` or `cpu`.
+    pub kind: &'static str,
+    /// The largest device-local heap: on an integrated GPU, the host memory it may use.
+    pub memory_bytes: u64,
+    pub vendor_id: u32,
+}
+
+/// The devices the backend can open, in the order `vulkan:N` numbers them: discrete GPUs first (faster than an
+/// integrated one wherever both are), then integrated, virtual and CPU ones, each kind in the driver's order.
+pub fn devices() -> Result<Vec<DeviceSummary>> {
+    let (_entry, instance) = open_instance(false)?;
+    let listed = eligible(&instance).map(|eligible| {
+        eligible
+            .iter()
+            .enumerate()
+            .map(|(ordinal, device)| DeviceSummary {
+                ordinal,
+                name: device
+                    .properties
+                    .device_name_as_c_str()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                kind: match device.properties.device_type {
+                    vk::PhysicalDeviceType::DISCRETE_GPU => "discrete",
+                    vk::PhysicalDeviceType::INTEGRATED_GPU => "integrated",
+                    vk::PhysicalDeviceType::VIRTUAL_GPU => "virtual",
+                    _ => "cpu",
+                },
+                memory_bytes: memory_budget(&instance, device.physical).1,
+                vendor_id: device.properties.vendor_id,
+            })
+            .collect()
+    });
+    // SAFETY: nothing created from the instance outlives this call
+    unsafe { instance.destroy_instance(None) };
+    listed
+}
+
+// the devices with the extensions and a compute queue the crate needs, discrete first
+fn eligible(instance: &ash::Instance) -> Result<Vec<Eligible>> {
     // SAFETY: the instance is alive
     let devices = unsafe { instance.enumerate_physical_devices()? };
     let mut candidates = Vec::new();
@@ -1144,16 +1221,18 @@ fn pick_device(instance: &ash::Instance) -> Result<(vk::PhysicalDevice, u32)> {
         else {
             continue;
         };
-        let rank = match properties.device_type {
-            vk::PhysicalDeviceType::INTEGRATED_GPU => 0,
-            vk::PhysicalDeviceType::DISCRETE_GPU => 1,
-            _ => 2,
-        };
-        candidates.push((rank, physical, family as u32));
+        candidates.push(Eligible {
+            physical,
+            family: family as u32,
+            properties,
+        });
     }
-    candidates.sort_by_key(|&(rank, ..)| rank);
-    candidates
-        .first()
-        .map(|&(_, physical, family)| (physical, family))
-        .ok_or(Error::NoDevice)
+    // stable, so devices of one kind keep the driver's order
+    candidates.sort_by_key(|device| match device.properties.device_type {
+        vk::PhysicalDeviceType::DISCRETE_GPU => 0,
+        vk::PhysicalDeviceType::INTEGRATED_GPU => 1,
+        vk::PhysicalDeviceType::VIRTUAL_GPU => 2,
+        _ => 3,
+    });
+    Ok(candidates)
 }

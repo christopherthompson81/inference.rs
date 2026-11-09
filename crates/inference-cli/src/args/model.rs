@@ -635,7 +635,7 @@ pub struct DeviceOptions {
     #[arg(long)]
     pub cpu: bool,
 
-    /// Run on the Vulkan iGPU (a build with the `vulkan` feature); ops without a Vulkan kernel run on the CPU
+    /// Run on Vulkan (a `vulkan` build), a discrete GPU where there is one; ops without a Vulkan kernel run on the CPU
     #[arg(long, conflicts_with = "cpu")]
     pub vulkan: bool,
 
