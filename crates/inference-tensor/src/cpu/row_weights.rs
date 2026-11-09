@@ -97,7 +97,10 @@ fn dot_f16(x: &[f32], w: &[u16]) -> f32 {
     // SAFETY: f16 rows are made only where F16C, AVX2 and FMA are
     return unsafe { x86::dot_f16(x, w) };
     #[cfg(not(target_arch = "x86_64"))]
-    unreachable!("f16 rows are held on x86_64 alone")
+    {
+        let _ = (x, w);
+        unreachable!("f16 rows are held on x86_64 alone")
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
