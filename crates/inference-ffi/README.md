@@ -20,7 +20,13 @@ Current modules:
 ```bash
 cargo build --release -p inference-ffi                   # CPU
 cargo build --release -p inference-ffi --features cuda   # adds the "cuda" backend
+cargo build --release -p inference-ffi --features vulkan # adds the "vulkan" backend (device "vulkan:0")
+# speech only (Parakeet, Nemotron-3-Diarization, ...): no text-model families, no code execution
+cargo build --release -p inference-ffi --no-default-features --features vulkan
 ```
+
+The speech-only Vulkan build on Linux x86-64 (fat LTO, `--profile bundle`) is ~53 MiB fully stripped; the bundle
+profile keeps the symbol table (~10 MiB more), which `strip` drops.
 
 The library is written to `target/release/`. rustc exports only the crate's `#[no_mangle]` functions, and
 `tests/export_surface.py` checks that they match the header exactly.
