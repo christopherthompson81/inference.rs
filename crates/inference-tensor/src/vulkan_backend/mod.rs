@@ -230,6 +230,16 @@ fn word_sized(dtype: DType) -> bool {
     matches!(dtype, DType::F32 | DType::U32 | DType::I32)
 }
 
+// the dtypes whose elements the GPU copies bit for bit, as 32- or 16-bit words
+fn copyable(dtype: DType) -> bool {
+    word_sized(dtype) || matches!(dtype, DType::BF16 | DType::F16 | DType::I16)
+}
+
+// the dtypes the elementwise and row kernels compute over (bf16 in f32)
+fn computed(dtype: DType) -> bool {
+    matches!(dtype, DType::F32 | DType::BF16)
+}
+
 impl VulkanStorage {
     fn empty(&self, count: usize, dtype: DType) -> Result<Self> {
         Ok(Self {
@@ -248,7 +258,7 @@ impl VulkanStorage {
         }
     }
 
-    // `op` over `l`'s elements (and `rhs`'s, laid out as `rhs_l`) into a new contiguous f32 storage
+    // `op` over `l`'s elements (and `rhs`'s, laid out as `rhs_l`) into a new contiguous storage of `self`'s dtype
     fn map_f32(
         &self,
         op: MapOp,
@@ -257,29 +267,35 @@ impl VulkanStorage {
         params: [f32; 2],
     ) -> Result<Self> {
         let dims = l.shape().dims();
-        let out = self.empty(l.shape().elem_count(), DType::F32)?;
+        let out = self.empty(l.shape().elem_count(), self.dtype)?;
         let strides = contiguous_strides(dims);
+        let map = Map {
+            op,
+            dims,
+            a: self.operand(l),
+            b: rhs.map(|(rhs, rhs_l)| rhs.operand(rhs_l)),
+            out: Operand {
+                buffer: &out.buffer,
+                offset: 0,
+                strides: &strides,
+            },
+            params,
+        };
+        let bf16 = self.dtype == DType::BF16;
         self.device
             .context
             .record(|r| {
-                r.map_f32(&Map {
-                    op,
-                    dims,
-                    a: self.operand(l),
-                    b: rhs.map(|(rhs, rhs_l)| rhs.operand(rhs_l)),
-                    out: Operand {
-                        buffer: &out.buffer,
-                        offset: 0,
-                        strides: &strides,
-                    },
-                    params,
-                })
+                if bf16 {
+                    r.map_bf16(&map)
+                } else {
+                    r.map_f32(&map)
+                }
             })
             .map_err(vk_err)?;
         Ok(out)
     }
 
-    // copies `src_l`'s elements of `self` into `dst` from `dst_offset`, at `dst_strides`, as 32-bit words
+    // copies `src_l`'s elements of `self` into `dst` from `dst_offset`, at `dst_strides`, as 32- or 16-bit words
     fn copy_words(
         &self,
         src_l: &Layout,
@@ -287,26 +303,52 @@ impl VulkanStorage {
         dst_offset: usize,
         dst_strides: &[usize],
     ) -> Result<()> {
+        let map = Map {
+            op: MapOp::Copy,
+            dims: src_l.shape().dims(),
+            a: self.operand(src_l),
+            b: None,
+            out: Operand {
+                buffer: &dst.buffer,
+                offset: dst_offset,
+                strides: dst_strides,
+            },
+            params: [0.0; 2],
+        };
+        let words = word_sized(self.dtype);
         self.device
             .context
             .record(|r| {
-                r.copy_b32(
-                    &Map {
-                        op: MapOp::Copy,
-                        dims: src_l.shape().dims(),
-                        a: self.operand(src_l),
-                        b: None,
-                        out: Operand {
-                            buffer: &dst.buffer,
-                            offset: dst_offset,
-                            strides: dst_strides,
-                        },
-                        params: [0.0; 2],
-                    },
-                    0,
-                )
+                if words {
+                    r.copy_b32(&map, 0)
+                } else {
+                    r.copy_b16(&map, 0)
+                }
             })
             .map_err(vk_err)
+    }
+
+    // a contiguous copy of `l`'s elements
+    fn contiguous_copy(&self, l: &Layout) -> Result<Self> {
+        let out = self.empty(l.shape().elem_count(), self.dtype)?;
+        self.copy_words(l, &out, 0, &contiguous_strides(l.shape().dims()))?;
+        Ok(out)
+    }
+
+    // `count` contiguous values from element `from`, converted between f32 and bf16
+    fn convert_bf16(&self, from: usize, count: usize, dtype: DType) -> Result<Self> {
+        let out = self.empty(count, dtype)?;
+        let widen = dtype == DType::F32;
+        self.device
+            .context
+            .record(|r| r.convert_bf16((&self.buffer, from), count, &out.buffer, widen))
+            .map_err(vk_err)?;
+        Ok(out)
+    }
+
+    // the whole storage as f32, its layouts as valid over the copy as over `self`
+    fn widened(&self) -> Result<Self> {
+        self.convert_bf16(0, self.count, DType::F32)
     }
 
     // index_select (`gather` false) or gather of contiguous 32-bit `self` by contiguous u32 `ids` along `dim`
@@ -362,8 +404,9 @@ impl VulkanStorage {
         Some(recorded.map_err(vk_err).map(|()| out))
     }
 
+    // whether the elementwise kernels compute over it: f32 or bf16, of a rank they take
     fn native(&self, l: &Layout) -> bool {
-        self.dtype == DType::F32 && l.shape().rank() <= MAX_DIMS
+        computed(self.dtype) && l.shape().rank() <= MAX_DIMS
     }
 }
 
@@ -376,10 +419,12 @@ pub(crate) fn rows(
     op: RowOp,
     eps: f32,
 ) -> Result<Option<(VulkanStorage, Shape)>> {
+    let bf16 = storage.dtype == DType::BF16;
     let param_ok = |p: Option<(&VulkanStorage, &Layout)>| {
-        p.is_none_or(|(a, al)| a.dtype == DType::F32 && al.is_contiguous())
+        p.is_none_or(|(a, al)| a.dtype == storage.dtype && al.is_contiguous())
     };
-    if storage.dtype != DType::F32
+    let arg = matches!(op, RowOp::ArgMax | RowOp::ArgMin);
+    if !computed(storage.dtype)
         || !l.is_contiguous()
         || l.shape().rank() == 0
         || !param_ok(alpha)
@@ -393,21 +438,17 @@ pub(crate) fn rows(
     let (out_count, out_dtype, out_dims) = if op.reduces() {
         let mut out_dims = dims.to_vec();
         *out_dims.last_mut().expect("rank checked") = 1;
-        let dtype = if matches!(op, RowOp::ArgMax | RowOp::ArgMin) {
-            DType::U32
-        } else {
-            DType::F32
-        };
+        let dtype = if arg { DType::U32 } else { storage.dtype };
         (rows, dtype, out_dims)
     } else {
-        (rows * cols, DType::F32, dims.to_vec())
+        (rows * cols, storage.dtype, dims.to_vec())
     };
     let out = storage.empty(out_count, out_dtype)?;
     storage
         .device
         .context
         .record(|r| {
-            r.rows_f32(&Rows {
+            let op = Rows {
                 op,
                 rows,
                 cols,
@@ -418,7 +459,12 @@ pub(crate) fn rows(
                 beta: beta.map(|(b, bl)| (&b.buffer, bl.start_offset())),
                 out: &out.buffer,
                 out_offset: 0,
-            })
+            };
+            if bf16 {
+                r.rows_bf16(&op)
+            } else {
+                r.rows_f32(&op)
+            }
         })
         .map_err(vk_err)?;
     Ok(Some((out, Shape::from(out_dims))))
@@ -970,7 +1016,7 @@ fn glu_op(act: crate::vulkan::GluAct) -> MapOp {
 }
 
 pub(crate) fn glu(a: &Tensor, b: &Tensor, act: crate::vulkan::GluAct) -> Result<Option<Tensor>> {
-    if a.dims() != b.dims() || a.dtype() != DType::F32 || b.dtype() != DType::F32 {
+    if a.dims() != b.dims() || !computed(a.dtype()) || b.dtype() != a.dtype() {
         return Ok(None);
     }
     let op = glu_op(act);
@@ -1776,7 +1822,7 @@ impl BackendStorage for VulkanStorage {
     type Device = VulkanDevice;
 
     fn try_clone(&self, _: &Layout) -> Result<Self> {
-        if word_sized(self.dtype) {
+        if copyable(self.dtype) {
             let out = self.empty(self.count, self.dtype)?;
             self.copy_words(&Layout::contiguous(self.count), &out, 0, &[1])?;
             return Ok(out);
@@ -1824,9 +1870,43 @@ impl BackendStorage for VulkanStorage {
             ReduceOp::Min => RowOp::Min,
             ReduceOp::ArgMax => RowOp::ArgMax,
         };
-        if dims == [l.shape().rank().saturating_sub(1)]
+        let rank = l.shape().rank();
+        if dims == [rank.saturating_sub(1)]
             && let Some((out, _)) = rows(self, l, None, None, row_op, 0.0)?
         {
+            return Ok(out);
+        }
+        // one other dim: moved last and copied contiguous, the rows' results come out in the remaining dims' order
+        if let [d] = *dims
+            && d + 1 < rank
+            && copyable(self.dtype)
+            && rank <= MAX_DIMS
+        {
+            let order: Vec<usize> = (0..rank).filter(|&i| i != d).chain([d]).collect();
+            let (shape, stride) = (l.shape().dims(), l.stride());
+            let moved = Layout::new(
+                Shape::from(order.iter().map(|&i| shape[i]).collect::<Vec<_>>()),
+                order.iter().map(|&i| stride[i]).collect(),
+                l.start_offset(),
+            );
+            let flat = self.contiguous_copy(&moved)?;
+            if let Some((out, _)) = rows(
+                &flat,
+                &Layout::contiguous(moved.shape()),
+                None,
+                None,
+                row_op,
+                0.0,
+            )? {
+                return Ok(out);
+            }
+        }
+        // a bf16 reduction no kernel takes (over another dim) reduces an f32 copy
+        if self.dtype == DType::BF16 {
+            let out = self.widened()?.reduce_op(op, l, dims)?;
+            if out.dtype == DType::F32 {
+                return out.to_dtype(&Layout::contiguous(out.count), DType::BF16);
+            }
             return Ok(out);
         }
         on_cpu!(self, |cpu| cpu.reduce_op(op, l, dims))
@@ -1837,13 +1917,37 @@ impl BackendStorage for VulkanStorage {
     }
 
     fn to_dtype(&self, l: &Layout, dtype: DType) -> Result<Self> {
-        if dtype == self.dtype && word_sized(dtype) && l.shape().rank() <= MAX_DIMS {
-            let out = self.empty(l.shape().elem_count(), dtype)?;
-            self.copy_words(l, &out, 0, &contiguous_strides(l.shape().dims()))?;
-            return Ok(out);
+        if dtype == self.dtype && copyable(dtype) && l.shape().rank() <= MAX_DIMS {
+            return self.contiguous_copy(l);
+        }
+        // bf16 converts on the device through f32: a strided source is copied contiguous first
+        let count = l.shape().elem_count();
+        if (self.dtype == DType::BF16 || dtype == DType::BF16) && l.shape().rank() <= MAX_DIMS {
+            let src = if self.dtype == DType::BF16 || self.dtype == DType::F32 {
+                if l.is_contiguous() {
+                    None
+                } else {
+                    Some(self.contiguous_copy(l)?)
+                }
+            } else {
+                Some(self.to_dtype(l, DType::F32)?)
+            };
+            let (src, from) = match &src {
+                Some(src) => (src, 0),
+                None => (self, l.start_offset()),
+            };
+            let flat = Layout::contiguous(count);
+            if src.dtype == DType::BF16 {
+                let wide = src.convert_bf16(from, count, DType::F32)?;
+                return if dtype == DType::F32 {
+                    Ok(wide)
+                } else {
+                    wide.to_dtype(&flat, dtype)
+                };
+            }
+            return src.convert_bf16(from, count, DType::BF16);
         }
         // f16 and f32 convert on the device (a weight kept in f16, widened for a product the matrix cores do not take)
-        let count = l.shape().elem_count();
         if l.is_contiguous() {
             let at = (&self.buffer, l.start_offset());
             match (self.dtype, dtype) {
@@ -1881,7 +1985,7 @@ impl BackendStorage for VulkanStorage {
     }
 
     fn binary_impl<B: BinaryOpT>(&self, rhs: &Self, l: &Layout, rhs_l: &Layout) -> Result<Self> {
-        if let Some(op) = binary_op(B::NAME).filter(|_| self.native(l) && rhs.dtype == DType::F32) {
+        if let Some(op) = binary_op(B::NAME).filter(|_| self.native(l) && rhs.dtype == self.dtype) {
             return self.map_f32(op, l, Some((rhs, rhs_l)), [0.0; 2]);
         }
         on_cpu!(self, |cpu, rhs| cpu.binary_impl::<B>(&rhs, l, rhs_l))
@@ -1905,6 +2009,48 @@ impl BackendStorage for VulkanStorage {
         kernel_l: &Layout,
         params: &ParamsConv1D,
     ) -> Result<Self> {
+        // one row of the 2D convolution, padded along its length alone
+        let native = computed(self.dtype)
+            && kernel.dtype == self.dtype
+            && l.stride().len() == 3
+            && kernel_l.is_contiguous();
+        if native {
+            let p = params;
+            let l_out = p.l_out();
+            let out = self.empty(p.b_size * p.groups * p.c_out * l_out, self.dtype)?;
+            let s = l.stride();
+            let bf16 = self.dtype == DType::BF16;
+            self.device
+                .context
+                .record(|r| {
+                    let op = inference_vulkan::Conv2d {
+                        batch: p.b_size,
+                        c_in: p.c_in,
+                        c_out: p.c_out,
+                        groups: p.groups,
+                        i_h: 1,
+                        i_w: p.l_in,
+                        k_h: 1,
+                        k_w: p.k_size,
+                        o_h: 1,
+                        o_w: l_out,
+                        padding: (0, p.padding),
+                        stride: p.stride,
+                        dilation: p.dilation,
+                        x: (&self.buffer, l.start_offset()),
+                        x_strides: [s[0], s[1], 0, s[2]],
+                        w: (&kernel.buffer, kernel_l.start_offset()),
+                        out: &out.buffer,
+                    };
+                    if bf16 {
+                        r.conv2d_bf16(&op)
+                    } else {
+                        r.conv2d_f32(&op)
+                    }
+                })
+                .map_err(vk_err)?;
+            return Ok(out);
+        }
         on_cpu!(self, |cpu, kernel| cpu.conv1d(l, &kernel, kernel_l, params))
     }
 
@@ -1926,19 +2072,20 @@ impl BackendStorage for VulkanStorage {
         kernel_l: &Layout,
         params: &ParamsConv2D,
     ) -> Result<Self> {
-        let native = self.dtype == DType::F32
-            && kernel.dtype == DType::F32
+        let native = computed(self.dtype)
+            && kernel.dtype == self.dtype
             && l.stride().len() == 4
             && kernel_l.is_contiguous();
         if native {
             let p = params;
             let (o_h, o_w) = (p.out_h(), p.out_w());
-            let out = self.empty(p.b_size * p.groups * p.c_out * o_h * o_w, DType::F32)?;
+            let out = self.empty(p.b_size * p.groups * p.c_out * o_h * o_w, self.dtype)?;
             let s = l.stride();
+            let bf16 = self.dtype == DType::BF16;
             self.device
                 .context
                 .record(|r| {
-                    r.conv2d_f32(&inference_vulkan::Conv2d {
+                    let op = inference_vulkan::Conv2d {
                         batch: p.b_size,
                         c_in: p.c_in,
                         c_out: p.c_out,
@@ -1949,14 +2096,19 @@ impl BackendStorage for VulkanStorage {
                         k_w: p.k_w,
                         o_h,
                         o_w,
-                        padding: p.padding,
+                        padding: (p.padding, p.padding),
                         stride: p.stride,
                         dilation: p.dilation,
                         x: (&self.buffer, l.start_offset()),
                         x_strides: [s[0], s[1], s[2], s[3]],
                         w: (&kernel.buffer, kernel_l.start_offset()),
                         out: &out.buffer,
-                    })
+                    };
+                    if bf16 {
+                        r.conv2d_bf16(&op)
+                    } else {
+                        r.conv2d_f32(&op)
+                    }
                 })
                 .map_err(vk_err)?;
             return Ok(out);
@@ -2119,11 +2271,53 @@ impl BackendStorage for VulkanStorage {
                 .map_err(vk_err)?;
             return Ok(out);
         }
+        if let (DType::BF16, DType::BF16, (Some(a_bs), Some(b_bs))) =
+            (self.dtype, rhs.dtype, strides)
+        {
+            let (a_st, b_st) = (l.stride(), rhs_l.stride());
+            let (ar, br) = (a_st.len(), b_st.len());
+            let out = self.empty(batch * m * n, DType::BF16)?;
+            let recorded = self
+                .device
+                .context
+                .record(|r| {
+                    r.matmul_bf16(&MatMul {
+                        batch,
+                        m,
+                        n,
+                        k,
+                        a: MatOperand {
+                            buffer: &self.buffer,
+                            offset: l.start_offset(),
+                            batch_stride: a_bs,
+                            row_stride: a_st[ar - 2],
+                            col_stride: a_st[ar - 1],
+                        },
+                        b: MatOperand {
+                            buffer: &rhs.buffer,
+                            offset: rhs_l.start_offset(),
+                            batch_stride: b_bs,
+                            row_stride: b_st[br - 2],
+                            col_stride: b_st[br - 1],
+                        },
+                        out: &out.buffer,
+                    })
+                })
+                .map_err(vk_err)?;
+            if recorded {
+                return Ok(out);
+            }
+        }
+        // a bf16 product the matrix cores do not take (none, or too small for their tiles) runs in f32
+        if self.dtype == DType::BF16 && rhs.dtype == DType::BF16 {
+            let product = self.widened()?.matmul(&rhs.widened()?, bmnk, l, rhs_l)?;
+            return product.to_dtype(&Layout::contiguous(batch * m * n), DType::BF16);
+        }
         on_cpu!(self, |cpu, rhs| cpu.matmul(&rhs, bmnk, l, rhs_l))
     }
 
     fn copy_strided_src(&self, dst: &mut Self, dst_offset: usize, src_l: &Layout) -> Result<()> {
-        if word_sized(self.dtype) && dst.dtype == self.dtype && src_l.shape().rank() <= MAX_DIMS {
+        if copyable(self.dtype) && dst.dtype == self.dtype && src_l.shape().rank() <= MAX_DIMS {
             return self.copy_words(
                 src_l,
                 dst,
@@ -2146,7 +2340,7 @@ impl BackendStorage for VulkanStorage {
         src_offset: usize,
         dst_offset: usize,
     ) -> Result<()> {
-        if word_sized(self.dtype) && dst.dtype == self.dtype {
+        if copyable(self.dtype) && dst.dtype == self.dtype {
             let src_l = Layout::new(Shape::from((d1, d2)), vec![src_stride1, 1], src_offset);
             return self.copy_words(&src_l, dst, dst_offset, &[dst_stride1, 1]);
         }
@@ -2164,14 +2358,17 @@ impl BackendStorage for VulkanStorage {
     }
 
     fn const_set(&mut self, v: crate::scalar::Scalar, l: &Layout) -> Result<()> {
+        use crate::scalar::Scalar;
         let fill = match v {
-            crate::scalar::Scalar::F32(v) => Some(v.to_bits()),
-            crate::scalar::Scalar::U32(v) => Some(v),
-            crate::scalar::Scalar::I32(v) => Some(v as u32),
+            Scalar::F32(v) => Some(v.to_bits()),
+            Scalar::U32(v) => Some(v),
+            Scalar::I32(v) => Some(v as u32),
+            Scalar::BF16(v) => Some(u32::from(v.to_bits())),
+            Scalar::F16(v) => Some(u32::from(v.to_bits())),
+            Scalar::I16(v) => Some(u32::from(v as u16)),
             _ => None,
         };
-        if let Some(fill) = fill.filter(|_| word_sized(self.dtype) && l.shape().rank() <= MAX_DIMS)
-        {
+        if let Some(fill) = fill.filter(|_| copyable(self.dtype) && l.shape().rank() <= MAX_DIMS) {
             let out = Operand {
                 buffer: &self.buffer,
                 offset: l.start_offset(),
@@ -2188,7 +2385,13 @@ impl BackendStorage for VulkanStorage {
             return self
                 .device
                 .context
-                .record(|r| r.copy_b32(&map, fill))
+                .record(|r| {
+                    if word_sized(self.dtype) {
+                        r.copy_b32(&map, fill)
+                    } else {
+                        r.copy_b16(&map, fill as u16)
+                    }
+                })
                 .map_err(vk_err);
         }
         let mut cpu = self.cpu()?;
@@ -2328,6 +2531,8 @@ mod tests {
     // erf GELU from -10 to 10 in steps of 0.01: both tails and the bend between
     const GELU_ERF_STEPS: f32 = 1000.;
     const GELU_ERF_STEP: f64 = 0.01;
+    // a bf16 result against the f32 one: a bf16 rounding (2^-8 relative) and a little more for the sums' order
+    const BF16_TOLERANCE: f32 = 8e-3;
     // a 2688-term dot product summed in another order
     const DOT_TOLERANCE: f32 = 1e-3;
     // attention with f16 queries, keys, values and probabilities (f32 sums): unit-variance inputs land within ~1.5e-3
@@ -2893,6 +3098,141 @@ mod tests {
         assert_close(&got, &want, DOT_TOLERANCE)?;
         check(&x8, &randn(&[6, 4, 3, 3])?, 2, 1, 2, 2)?;
         check(&x8.transpose(2, 3)?, &randn(&[8, 8, 3, 3])?, 1, 1, 1, 1)?;
+        // conv1d as one row: padded along its length alone, strided input, groups, stride and dilation
+        let x1d = randn(&[2, 40, 6])?.transpose(1, 2)?;
+        for (w, padding, stride, dilation, groups) in [
+            (randn(&[5, 6, 3])?, 1, 1, 1, 1),
+            (randn(&[6, 2, 3])?, 2, 2, 2, 3),
+        ] {
+            let got = x1d.to_device(&vk)?.conv1d(
+                &w.to_device(&vk)?,
+                padding,
+                stride,
+                dilation,
+                groups,
+            )?;
+            assert_close(
+                &got,
+                &x1d.conv1d(&w, padding, stride, dilation, groups)?,
+                DOT_TOLERANCE,
+            )?;
+        }
+        Ok(())
+    }
+
+    // bf16 on the device against the CPU: conversions (ties included) and copies bit for bit, the maps and rows within
+    // a bf16 rounding of the CPU's bf16 ops, products and convolutions against f32 over the same bf16 values (matrix-core
+    // tiles and the f32 fallback below them)
+    #[test]
+    fn vulkan_bf16_ops_match_the_cpu() -> Result<()> {
+        let Some(vk) = device() else { return Ok(()) };
+        let bf16 = DType::BF16;
+        let randn = |dims: &[usize]| Tensor::randn(0f32, 1., dims, &Device::Cpu);
+        let bits = |t: &Tensor| -> Result<Vec<u16>> {
+            Ok(t.flatten_all()?
+                .to_vec1::<half::bf16>()?
+                .into_iter()
+                .map(half::bf16::to_bits)
+                .collect())
+        };
+        // the halfway points between neighbouring bf16s round to even, as the CPU's
+        let ties: Vec<f32> = [
+            0x3f80_8000u32,
+            0x3f81_8000,
+            0xc000_8000,
+            0x7f7f_ffff,
+            0x7f80_0000,
+            0x0001_2345,
+        ]
+        .into_iter()
+        .map(f32::from_bits)
+        .collect();
+        let ties = Tensor::new(ties.as_slice(), &Device::Cpu)?;
+        assert_eq!(
+            bits(&ties.to_device(&vk)?.to_dtype(bf16)?)?,
+            bits(&ties.to_dtype(bf16)?)?
+        );
+        let a = randn(&[4, 6, 8])?.to_dtype(bf16)?;
+        let va = a.to_device(&vk)?;
+        let view = |t: &Tensor| t.transpose(0, 2).and_then(|t| t.narrow(1, 1, 3));
+        assert_eq!(
+            bits(&view(&va)?.contiguous()?)?,
+            bits(&view(&a)?.contiguous()?)?
+        );
+        assert_eq!(
+            bits(&view(&va)?.to_dtype(DType::F32)?.to_dtype(bf16)?)?,
+            bits(&view(&a)?)?
+        );
+        assert_eq!(
+            bits(&Tensor::cat(&[&va, &va.affine(2., 0.)?], 1)?)?,
+            bits(&Tensor::cat(&[&a, &a.affine(2., 0.)?], 1)?)?
+        );
+        let vz = Tensor::zeros((4, 6, 8), bf16, &vk)?;
+        let z = Tensor::zeros((4, 6, 8), bf16, &Device::Cpu)?;
+        vz.slice_set(&va.narrow(1, 0, 3)?.contiguous()?, 1, 2)?;
+        z.slice_set(&a.narrow(1, 0, 3)?.contiguous()?, 1, 2)?;
+        assert_eq!(bits(&vz)?, bits(&z)?);
+        let near = |got: &Tensor, want: &Tensor| {
+            assert_eq!(got.dtype(), bf16);
+            assert_close(
+                &got.to_dtype(DType::F32)?,
+                &want.to_dtype(DType::F32)?,
+                BF16_TOLERANCE,
+            )
+        };
+        let row = randn(&[8])?.to_dtype(bf16)?;
+        let vrow = row.to_device(&vk)?;
+        near(
+            &va.broadcast_mul(&vrow)?
+                .to_dtype(DType::F32)?
+                .to_dtype(bf16)?,
+            &a.broadcast_mul(&row)?,
+        )?;
+        near(&view(&va)?.exp()?, &view(&a)?.exp()?)?;
+        near(&view(&va)?.silu()?, &view(&a)?.silu()?)?;
+        near(&((view(&va)? * 3.)? + 0.25)?, &((view(&a)? * 3.)? + 0.25)?)?;
+        near(
+            &crate::nn::ops::softmax_last_dim(&va)?,
+            &crate::nn::ops::softmax_last_dim(&a)?,
+        )?;
+        let (w, b) = (randn(&[8])?.to_dtype(bf16)?, randn(&[8])?.to_dtype(bf16)?);
+        near(
+            &crate::nn::ops::layer_norm(&va, &w.to_device(&vk)?, &b.to_device(&vk)?, 1e-5)?,
+            &crate::nn::ops::layer_norm(&a, &w, &b, 1e-5)?,
+        )?;
+        // sums against f32's: the CPU's bf16 sum rounds at every step, the kernels' once
+        let f = a.to_dtype(DType::F32)?;
+        near(&va.sum_keepdim(2)?, &f.sum_keepdim(2)?)?;
+        near(&va.sum_keepdim(1)?, &f.sum_keepdim(1)?)?;
+        near(&va.max_keepdim(0)?, &a.max_keepdim(0)?)?;
+        assert_eq!(
+            va.argmax_keepdim(2)?.to_vec3::<u32>()?,
+            a.argmax_keepdim(2)?.to_vec3::<u32>()?
+        );
+        assert_same(&f.to_device(&vk)?.sum_keepdim(1)?, &f.sum_keepdim(1)?)?;
+        let wide = |t: &Tensor| t.to_dtype(DType::F32);
+        // a product past the matrix-core tiles and two below them (a short and a long k), each over a transposed weight
+        for (m, n, k) in [(300, 260, 200), (7, 33, 40), (1, 70, 640)] {
+            let (x, w) = (
+                randn(&[m, k])?.to_dtype(bf16)?,
+                randn(&[n, k])?.to_dtype(bf16)?,
+            );
+            let got = x.to_device(&vk)?.matmul(&w.to_device(&vk)?.t()?)?;
+            assert_eq!(got.dtype(), bf16);
+            let want = wide(&x)?.matmul(&wide(&w)?.t()?)?;
+            assert_close(&wide(&got)?, &want, BF16_TOLERANCE)?;
+        }
+        let (x, w) = (
+            randn(&[2, 8, 19, 10])?.to_dtype(bf16)?,
+            randn(&[8, 1, 3, 3])?.to_dtype(bf16)?,
+        );
+        let got = x.to_device(&vk)?.conv2d(&w.to_device(&vk)?, 1, 2, 1, 8)?;
+        assert_eq!(got.dtype(), bf16);
+        assert_close(
+            &wide(&got)?,
+            &wide(&x)?.conv2d(&wide(&w)?, 1, 2, 1, 8)?,
+            BF16_TOLERANCE,
+        )?;
         Ok(())
     }
 

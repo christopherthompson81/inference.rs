@@ -1,0 +1,5 @@
+#version 450
+// The elementwise map over bf16 operands.
+#extension GL_GOOGLE_include_directive : require
+#define BF16
+#include "map_main.glsl"

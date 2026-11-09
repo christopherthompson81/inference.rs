@@ -10,7 +10,7 @@ pub(crate) const ROWS_BINDINGS: usize = 4;
 pub(crate) const ROWS_PUSH_BYTES: u32 = 8 * 4;
 pub(crate) const INDEX_PUSH_BYTES: u32 = 8 * 4;
 pub(crate) const MATMUL_PUSH_BYTES: u32 = 12 * 4;
-pub(crate) const CONV2D_PUSH_BYTES: u32 = 19 * 4;
+pub(crate) const CONV2D_PUSH_BYTES: u32 = 20 * 4;
 // conv2d_f32's outputs a workgroup
 const CONV2D_THREADS: usize = 256;
 const MAX_GROUPS_X: usize = 65_535;
@@ -67,7 +67,8 @@ pub struct Conv2d<'a> {
     pub k_w: usize,
     pub o_h: usize,
     pub o_w: usize,
-    pub padding: usize,
+    /// along h and w
+    pub padding: (usize, usize),
     pub stride: usize,
     pub dilation: usize,
     pub x: At<'a>,
@@ -172,6 +173,15 @@ fn words(values: &[usize]) -> Result<Vec<u8>> {
 
 impl Recorder<'_> {
     pub fn rows_f32(&self, op: &Rows<'_>) -> Result<()> {
+        self.rows(op, false)
+    }
+
+    /// [`Self::rows_f32`] over bf16 rows, `alpha` and `beta`, computed in f32 (an arg reduction's out still u32s).
+    pub fn rows_bf16(&self, op: &Rows<'_>) -> Result<()> {
+        self.rows(op, true)
+    }
+
+    fn rows(&self, op: &Rows<'_>, bf16: bool) -> Result<()> {
         if op.rows == 0 {
             return Ok(());
         }
@@ -186,7 +196,8 @@ impl Recorder<'_> {
         }
         let (beta, beta_offset) = op.beta.unwrap_or((op.x, 0));
         // a decode row's norm writes its int8 blocks too, cached for the matvecs that read it
-        if op.op == RowOp::RmsNorm
+        if !bf16
+            && op.op == RowOp::RmsNorm
             && AddRmsNorm::fits(op.rows, op.cols)
             && !Arc::ptr_eq(op.x, op.out)
         {
@@ -209,7 +220,13 @@ impl Recorder<'_> {
             beta_offset,
         ])?);
         let groups_x = op.rows.min(MAX_GROUPS_X);
-        self.context.kernels.rows_f32.dispatch(
+        let kernels = &self.context.kernels;
+        let pipeline = if bf16 {
+            &kernels.rows_bf16
+        } else {
+            &kernels.rows_f32
+        };
+        pipeline.dispatch(
             self,
             &[op.x.buffer, alpha.buffer, op.out.buffer, beta.buffer],
             &bytes,
@@ -329,6 +346,15 @@ impl Recorder<'_> {
     }
 
     pub fn conv2d_f32(&self, op: &Conv2d<'_>) -> Result<()> {
+        self.conv2d(op, false)
+    }
+
+    /// [`Self::conv2d_f32`] over bf16 operands, summed in f32.
+    pub fn conv2d_bf16(&self, op: &Conv2d<'_>) -> Result<()> {
+        self.conv2d(op, true)
+    }
+
+    fn conv2d(&self, op: &Conv2d<'_>, bf16: bool) -> Result<()> {
         let count = op.batch * op.groups * op.c_out * op.o_h * op.o_w;
         if count == 0 {
             return Ok(());
@@ -345,7 +371,8 @@ impl Recorder<'_> {
             op.k_w,
             op.o_h,
             op.o_w,
-            op.padding,
+            op.padding.0,
+            op.padding.1,
             op.stride,
             op.dilation,
             op.x.1,
@@ -358,7 +385,13 @@ impl Recorder<'_> {
         let groups = count.div_ceil(CONV2D_THREADS);
         let groups_x = groups.min(MAX_GROUPS_X);
         let buffers = [op.x.0, op.w.0, op.out];
-        self.context.kernels.conv2d_f32.dispatch(
+        let kernels = &self.context.kernels;
+        let pipeline = if bf16 {
+            &kernels.conv2d_bf16
+        } else {
+            &kernels.conv2d_f32
+        };
+        pipeline.dispatch(
             self,
             &buffers.map(|b| b.buffer),
             &bytes,
@@ -378,6 +411,69 @@ impl Recorder<'_> {
         let Some(coop) = self.context.coop.as_ref() else {
             return Ok(false);
         };
+        self.matmul_cm(op, &coop.matmul_f32_bh, "half b")
+    }
+
+    /// [`Self::matmul_f32`] over bf16 operands into a bf16 `out`: on matrix cores (the inputs rounded to f16 as the f32
+    /// product's are), and a product too small for their tiles in f32 sums; `false` (nothing recorded) for a tiled
+    /// product on a device without them.
+    pub fn matmul_bf16(&self, op: &MatMul<'_>) -> Result<bool> {
+        let tiled = op.m >= TILED_MIN && op.n >= TILED_MIN && op.batch <= MAX_GROUPS_Z;
+        if tiled {
+            return match self.context.coop.as_ref() {
+                Some(coop) => self.matmul_cm(op, &coop.matmul_bf16_cm, "bf16"),
+                None => Ok(false),
+            };
+        }
+        let count = op.batch * op.m * op.n;
+        if count == 0 {
+            return Ok(true);
+        }
+        let (a, b) = (op.a, op.b);
+        let bytes = words(&[
+            op.batch,
+            op.m,
+            op.n,
+            op.k,
+            a.offset,
+            a.batch_stride,
+            a.row_stride,
+            a.col_stride,
+            b.offset,
+            b.batch_stride,
+            b.row_stride,
+            b.col_stride,
+        ])?;
+        let buffers = [a.buffer.buffer, b.buffer.buffer, op.out.buffer];
+        let work = (count as u64).saturating_mul(op.k as u64);
+        self.work.set(self.work.get().saturating_add(work));
+        let kernels = &self.context.kernels;
+        if op.k >= DOT_MIN_K {
+            let groups_x = count.min(MAX_GROUPS_X);
+            kernels.matmul_bf16_dot.dispatch(
+                self,
+                &buffers,
+                &bytes,
+                [groups_x as u32, count.div_ceil(groups_x) as u32, 1],
+            );
+        } else {
+            let groups = count.div_ceil(MATMUL_THREADS).min(MAX_GROUPS) as u32;
+            kernels
+                .matmul_bf16
+                .dispatch(self, &buffers, &bytes, [groups, 1, 1]);
+        }
+        for buffer in [a.buffer, b.buffer, op.out] {
+            self.retain(buffer.clone());
+        }
+        Ok(true)
+    }
+
+    fn matmul_cm(
+        &self,
+        op: &MatMul<'_>,
+        pipeline: &crate::pipeline::Pipeline,
+        kind: &str,
+    ) -> Result<bool> {
         if op.m < TILED_MIN || op.n < TILED_MIN || op.batch > MAX_GROUPS_Z {
             return Ok(false);
         }
@@ -403,10 +499,10 @@ impl Recorder<'_> {
                 .saturating_add((count as u64).saturating_mul(op.k as u64)),
         );
         self.profile_shape(
-            || format!("b={} m={} n={} k={} half b", op.batch, op.m, op.n, op.k),
+            || format!("b={} m={} n={} k={} {kind}", op.batch, op.m, op.n, op.k),
             count * op.k,
         );
-        coop.matmul_f32_bh.dispatch(
+        pipeline.dispatch(
             self,
             &[a.buffer.buffer, b.buffer.buffer, op.out.buffer],
             &bytes,

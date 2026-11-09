@@ -56,6 +56,11 @@ impl FromStr for ModelDType {
 /// Type which can be converted to a DType
 pub trait TryIntoDType {
     fn try_into_dtype(&self, devices: &[&Device]) -> Result<DType>;
+
+    /// Whether the dtype is left to the loader (`auto`), which a model family may choose for itself.
+    fn is_auto(&self) -> bool {
+        false
+    }
 }
 
 impl TryIntoDType for DType {
@@ -175,6 +180,10 @@ fn determine_auto_dtype_all(devices: &[&Device]) -> inference_tensor::Result<DTy
 }
 
 impl TryIntoDType for ModelDType {
+    fn is_auto(&self) -> bool {
+        matches!(self, Self::Auto)
+    }
+
     fn try_into_dtype(&self, devices: &[&Device]) -> Result<DType> {
         let dtype = match self {
             Self::Auto => determine_auto_dtype_all(devices).map_err(anyhow::Error::msg)?,

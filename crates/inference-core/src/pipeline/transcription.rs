@@ -346,7 +346,7 @@ impl Loader for DiarizationLoader {
             Repo::with_revision(self.model_id.clone(), RepoType::Model, revision.clone()),
         );
         let id = std::path::Path::new(&self.model_id);
-        let dtype = options.dtype.try_into_dtype(&[options.device])?;
+        let dtype = audio_dtype(options.dtype, options.device)?;
         let get = |file: &str| crate::pipeline::hf::get_file(&api, id, file, &revision);
         // Nemotron-3's repo carries a `.nemo` beside its transformers files; those win where a config resolves
         let transformers_config = (!id.is_file()).then(|| get(CONFIG).ok()).flatten();
@@ -754,7 +754,7 @@ impl Loader for TranscriptionLoader {
                 files.config.display()
             )
         }
-        let dtype = dtype.try_into_dtype(&[device])?;
+        let dtype = audio_dtype(dtype, device)?;
         let vad = match (&paths.vad, self.vad_model_id.as_deref()) {
             (Some(file), _) => Some(read_silero(file, device)?),
             (None, Some(id)) => Some(read_silero(
@@ -795,6 +795,21 @@ impl Loader for TranscriptionLoader {
     fn get_kind(&self) -> ModelKind {
         ModelKind::Normal
     }
+}
+
+// `auto` on a discrete Vulkan GPU with matrix cores is bf16, as CUDA's auto is: activations half the size (a 10-minute
+// Parakeet request's working set), the products rounded to f16 on the matrix cores either way
+fn audio_dtype(
+    dtype: &dyn crate::TryIntoDType,
+    device: &Device,
+) -> Result<inference_tensor::DType> {
+    if dtype.is_auto()
+        && inference_tensor::vulkan::is_discrete(device)
+        && inference_tensor::vulkan::has_matrix_cores(device)
+    {
+        return Ok(inference_tensor::DType::BF16);
+    }
+    dtype.try_into_dtype(&[device])
 }
 
 impl TranscriptionPipeline {

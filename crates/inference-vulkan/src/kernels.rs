@@ -97,6 +97,7 @@ kernels! {
     glu_mat_vecs_q3_k: MUL_MAT_VECS_GLU_Q3_K, GLU_MATVECS_BINDINGS, GLU_MATVECS_PUSH_BYTES;
     quantize_q8_1: QUANTIZE_Q8_1, QUANTIZE_BINDINGS, QUANTIZE_PUSH_BYTES;
     widen_f16: WIDEN_F16, CONVERT_BINDINGS, CONVERT_PUSH_BYTES;
+    convert_bf16: CONVERT_BF16, CONVERT_BINDINGS, CONVERT_BF16_PUSH_BYTES;
     mul_mm_q8_0: MUL_MM_Q8_0, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
     mul_mm_q5_0: MUL_MM_Q5_0, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
     mul_mm_q4_0: MUL_MM_Q4_0, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
@@ -109,14 +110,20 @@ kernels! {
     mul_mm_iq3_s: MUL_MM_IQ3_S, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
     mul_mm_q3_k: MUL_MM_Q3_K, MATVECS_BINDINGS, MATMUL_Q_PUSH_BYTES;
     map_f32: MAP_F32, MAP_BINDINGS, MAP_PUSH_BYTES;
+    map_bf16: MAP_BF16, MAP_BINDINGS, MAP_PUSH_BYTES;
     copy_b32: COPY_B32, MAP_BINDINGS, MAP_PUSH_BYTES;
+    copy_b16: COPY_B16, MAP_BINDINGS, MAP_PUSH_BYTES;
     rows_f32: ROWS_F32, ops::ROWS_BINDINGS, ops::ROWS_PUSH_BYTES;
+    rows_bf16: ROWS_BF16, ops::ROWS_BINDINGS, ops::ROWS_PUSH_BYTES;
     rms_norm_q8: RMS_NORM_Q8, ops::RMS_Q8_BINDINGS, ops::RMS_Q8_PUSH_BYTES;
     relu2_q8: RELU2_Q8, crate::map::RELU2_Q8_BINDINGS, crate::map::RELU2_Q8_PUSH_BYTES;
     index_b32: INDEX_B32, ops::BINDINGS, ops::INDEX_PUSH_BYTES;
     matmul_f32: MATMUL_F32, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
     conv2d_f32: CONV2D_F32, ops::BINDINGS, ops::CONV2D_PUSH_BYTES;
+    conv2d_bf16: CONV2D_BF16, ops::BINDINGS, ops::CONV2D_PUSH_BYTES;
     matmul_f32_dot: MATMUL_F32_DOT, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
+    matmul_bf16: MATMUL_BF16, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
+    matmul_bf16_dot: MATMUL_BF16_DOT, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
     matmul_f32_tiled: MATMUL_F32_TILED, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
     matmul_f32_tiled32: MATMUL_F32_TILED32, ops::BINDINGS, ops::MATMUL_PUSH_BYTES;
     ssm_conv_step: SSM_CONV_STEP, ops::CONV_STEP_BINDINGS, ops::CONV_STEP_PUSH_BYTES;
@@ -296,6 +303,7 @@ pub(crate) struct CoopKernels {
     pub(crate) matmul_f32: Pipeline,
     // the same over an f16 b
     pub(crate) matmul_f32_bh: Pipeline,
+    pub(crate) matmul_bf16_cm: Pipeline,
     // prompt attention with a relative-position term
     pub(crate) flash_attn_relpos: Pipeline,
     // Q4_0 experts on NV_cooperative_matrix2, where the device has it: a build a tile width, 16 to 128 routes
@@ -317,6 +325,8 @@ pub(crate) const MOE_GATHER_BINDINGS: usize = 3;
 pub(crate) const MOE_GATHER_PUSH_BYTES: u32 = 4 * 4;
 const CONVERT_BINDINGS: usize = 2;
 const CONVERT_PUSH_BYTES: u32 = 3 * 4;
+// count, the two bases, and the direction
+const CONVERT_BF16_PUSH_BYTES: u32 = 4 * 4;
 pub(crate) const CONVERT_THREADS: usize = 256;
 
 impl CoopKernels {
@@ -478,6 +488,15 @@ impl CoopKernels {
         );
         specs.push(
             PipelineSpec::new(
+                shaders::MATMUL_BF16_CM,
+                ops::BINDINGS,
+                ops::MATMUL_PUSH_BYTES,
+                "matmul_bf16_cm",
+            )
+            .subgroup(subgroup),
+        );
+        specs.push(
+            PipelineSpec::new(
                 shaders::FLASH_ATTN_RELPOS_CM,
                 ops::RELPOS_BINDINGS,
                 ops::RELPOS_PUSH_BYTES,
@@ -513,8 +532,8 @@ impl CoopKernels {
         let paged_prefill: [Pipeline; 3] =
             take(3).try_into().ok().expect("three prefill pipelines");
         let [flash_attn]: [Pipeline; 1] = take(1).try_into().ok().expect("one attention pipeline");
-        let [matmul_f32, matmul_f32_bh, flash_attn_relpos]: [Pipeline; 3] =
-            take(3).try_into().ok().expect("three pipelines");
+        let [matmul_f32, matmul_f32_bh, matmul_bf16_cm, flash_attn_relpos]: [Pipeline; 4] =
+            take(4).try_into().ok().expect("four pipelines");
         let [convert_f16, moe_gather_f16]: [Pipeline; 2] =
             take(2).try_into().ok().expect("two pipelines");
         let mut moe_mm_cm2: Vec<Option<[Pipeline; 4]>> = (0..BLOCK_TYPES).map(|_| None).collect();
@@ -540,6 +559,7 @@ impl CoopKernels {
             flash_attn,
             matmul_f32,
             matmul_f32_bh,
+            matmul_bf16_cm,
             flash_attn_relpos,
             moe_mm_cm2,
             mul_mm_cm2,
@@ -829,6 +849,36 @@ impl Recorder<'_> {
             self,
             &[src.0.buffer, dst.buffer],
             &push_words(&[count, src.1, 0])?,
+            [groups_x as u32, groups.div_ceil(groups_x) as u32, 1],
+        );
+        self.retain(src.0.clone());
+        self.retain(dst.clone());
+        Ok(())
+    }
+
+    /// `count` values at `src` into `dst` from its start: f32s as bf16s, or with `widen` bf16s as f32s.
+    pub fn convert_bf16(
+        &self,
+        src: crate::At<'_>,
+        count: usize,
+        dst: &Arc<Buffer>,
+        widen: bool,
+    ) -> Result<()> {
+        let (src_size, dst_size) = if widen { (2, 4) } else { (4, 2) };
+        if src.0.len() / src_size < src.1 + count || dst.len() / dst_size < count {
+            return Err(Error::Invalid(format!(
+                "a bf16 conversion of {count} values"
+            )));
+        }
+        if count == 0 {
+            return Ok(());
+        }
+        let groups = count.div_ceil(CONVERT_THREADS);
+        let groups_x = groups.min(MAX_GROUPS_X);
+        self.context.kernels.convert_bf16.dispatch(
+            self,
+            &[src.0.buffer, dst.buffer],
+            &push_words(&[count, src.1, 0, usize::from(widen)])?,
             [groups_x as u32, groups.div_ceil(groups_x) as u32, 1],
         );
         self.retain(src.0.clone());

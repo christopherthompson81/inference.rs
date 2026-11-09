@@ -237,3 +237,98 @@ asr 2.55-2.65 s, diar 0.94-0.98 s; outputs byte-identical to master's; Qwen gree
 
 Checks: lint, CPU (3162), CUDA (3365), `--vulkan` (65), the Vulkan set twice (673) pass. The peak varies ~0.35 GB
 run to run with the phases' timing; the rest is the pool's 1 GiB idle keep and small classes (2-5 MiB).
+
+## Run 10 - 2026-11-08 22:00
+
+Question: the pair on the 3090's Vulkan still peaks above CUDA (`phase.sh`: nvidia-smi every 50 ms, the max per phase,
+MiB above the idle desktop). What is left?
+
+```
+                     load    loaded  asr     diar    both    times (asr / diar / both)
+CUDA (bf16 model)    1896    1960    2376    2376    2408    2.31 / 0.66 / 2.53 s
+Vulkan master        2603    2303    2969-3008  2597-2655  3044   2.52-2.59 / 0.92-0.95 / 3.09-3.12 s
+```
+
+Temporary tracking (held device bytes at each new high, the pool's idle classes, a live census by class; removed):
+
+- Load: the high is the halving pass (Run 5's `Linear::to_half`), not a request: every f32 projection uploaded,
+  narrowed to f16, and its f32 source dropped into the pool: 3289 MiB held with 2030 idle (16 MiB x96, 4 MiB x120)
+  at the end. The idle engine's release keeps 1 GiB of it, and ~470 MiB of 4 and 2 MiB classes stay idle into the
+  requests, sizes nothing takes.
+- Requests: at the ASR peak ~2.67-2.95 GB held: ~1.2 GB f16 weights, ~1.0 GB live activations (31 MB hidden-state
+  tensors x9, the attention blocks' 128 and 64 MiB scores, 124 MB feed-forward), 0.5-0.9 GB idle (128 MiB x4 from
+  the previous block shape while the next allocates 32/64s).
+- CUDA's working set is ~0.5 GB because it runs the whole model in bf16 (`DType selected is BF16`): its activations
+  are half the size. Vulkan selects f32 (`determine_auto_dtype_all`: its kernels take f32 activations).
+
+Tried (each A/B'd in the same session):
+
+```
+free the f32 sources during halving (Linear::halve: convert, replace, Context::free_idle), 3 rounds vs master:
+  loaded 2303 -> 1912, load spike 2603-3467 -> 2577-2603, but asr 2969-3008 -> 3097, both 3044 -> 3141
+  (the requests had been reusing the leftover idle classes); end state equal (1789-1808)
++ STALE_KEEP_BYTES 256 MiB:            asr peak 2843 held, smi peak 3108-3174 (no clear change)
++ STALE_IDLE 30 ms:                    smi peak 3000; asr 2.73 s (noise or cost, not separated)
++ FIT_RATIO 2x (instead of 1.5x):      worse, 3075-3084
+QUERY_BLOCK 256 (instead of 512):      peak 3018-3033, asr 2.85-2.89 s (+12 %)
+```
+
+None kept. The fused `flash_attn_relpos_cm` would drop the score tensors but is ~2x slower on the 3090
+(`vulkan_relpos_3090_investigation.md`, Run 1).
+
+Where it stands: Vulkan ~3.0-3.1 GB above the desktop at peak, CUDA 2.4. The gap is f32 activations (~0.5 GB) and
+the pool's idle size classes (~0.5-0.7 GB). Closing it needs f16 activations on Vulkan (its elementwise, norm,
+softmax and conv kernels) or a pool that splits large idle allocations for smaller requests, as CUDA's does.
+
+## Run 11 - 2026-11-08 23:30
+
+Question: Run 10 put the rest of the gap on f32 activations. Can Vulkan run the pair in bf16, as CUDA's auto does?
+
+Survey (`dtype = "bf16"` on both models, a counter in the CPU fallbacks, a 20 s clip): every bf16 op but index_select
+went to the CPU (f32 to bf16 conversions 1120, binary ops 491, strided copies 472, matmuls 190, unary 143, affine 55,
+the convs); the ASR request failed outright (the CPU's matmul takes no bf16). The f32 run's own fallbacks: one conv1d
+(the diarizer's upsampling, a call a step) and one reduction.
+
+Change: bf16 storage computed in f32 (`bf16.glsl`: widening is a shift, narrowing rounds to nearest even). Each kernel's
+body moved to a `*_main.glsl` with element macros, its f32 build byte-identical SPIR-V (checked for map, rows, conv2d,
+matmul, matmul_dot, matmul_cm and matmul_cm_bh), and a bf16 build beside it: map_bf16, rows_bf16 (an arg reduction
+writes its u32 as two halves), conv2d_bf16, matmul_bf16 / matmul_bf16_dot (the products below the matrix-core tiles,
+a decode step's), and matmul_bf16_cm (four bf16s ride in a uvec2, as many registers as the f16 build's f16vec4,
+rounded to f16 at the tile store as the f32 build's inputs are; c through the staging tile). Plus copy_b16 (any 2-byte
+element, strided, and fills) and convert_bf16. On the way: conv1d on the device as one row of conv2d (its padding split
+into h and w), and a reduction over a middle dim moved last and copied contiguous (both f32 and bf16; both had gone to
+the CPU). `auto` on a discrete Vulkan GPU with matrix cores is bf16 for the speech loaders (`TryIntoDType::is_auto`).
+Test: `vulkan_bf16_ops_match_the_cpu` (conversions and copies bit for bit, ties included; maps and rows within a bf16
+rounding; products at tile and fallback sizes, conv2d, argmax, middle-dim sums); conv1d in `vulkan_conv2d_matches_the_cpu`.
+
+First build: peak level with CUDA but asr 2.71-2.76 s (f32 2.52-2.59). Profile over two 10-minute requests: GPU time
+3414 ms against f32's 3361, `convert_bf16` 443 ms in 53,544 dispatches: the decoder's small products and argmax had
+taken the widen-to-f32 fallback. With matmul_bf16 / _dot and the bf16 argmax: 3219 ms (matmul_bf16_cm 1563, map 723,
+dot 336, copy 290, rows 245; f32: matmul 1539, map 717, rows 457, copy 340, dot 270).
+
+```
+phase.sh, MiB above the desktop, three rounds alternating with master (f32)
+                 load    loaded  asr     diar    both    times (asr / diar / both)
+master f32       2603-3467  2303  2969   2626-2793  3182   2.56-2.59 / 0.96-0.99 / 4.29-4.36 s
+bf16             1625    1756    2349    2357    2370-2378  2.28-2.32 / 0.83-0.87 / 3.22-3.48 s
+CUDA (bf16)      1896    1960    2376    2376    2408   2.31 / 0.66 / 2.53 s (Run 10)
+```
+
+Words (punctuation counted) and diarization frames (10 ms), seven clips, against Vulkan f32 and CUDA:
+
+```
+             bf16 vs f32                                        CUDA vs f32                          bf16 vs CUDA
+short20/45/90  0 diffs; 1 / 0 / 6 frames                         0 diffs; 10 / 0 / 5 frames           0 diffs
+var_gain     fifteen -> fifty, storm bitten -> storm-bitten,     fifteen -> fifty, night, log ->      2 diffs, 8 frames
+             night, log -> night. Log; 14 frames                 night. Log (twice); 12 frames
+var_noise    fifty -> fifteen; 37 frames                         fifty -> fifteen; 48 frames          0 diffs, 27 frames
+var_tempo    0 diffs; 6 frames                                   shone, wind -> shone. Wind; 7        1 diff, 3 frames
+clip10       weather, wind -> weather. Wind; 11 frames           0 diffs; 12 frames                   1 diff, 11 frames
+```
+
+The fifteen/fifty near-ties are `vulkan_relpos_3090_investigation.md`'s; bf16 on Vulkan moves about what CUDA's bf16
+moves. Qwen 0.8B's greedy text on Vulkan (f32 activations) is unchanged.
+
+Where it stands: the pair's peak on the 3090's Vulkan is level with CUDA's (2.37 against 2.41 GB above the desktop,
+from 3.18), and ASR and diarization run faster than in f32. Not done: the 780M (an iGPU stays f32; its fused relpos
+attention is f32-only), bf16 flash/relpos kernels, and LLMs (their fused kernels take f32 activations).

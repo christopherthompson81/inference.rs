@@ -1,4 +1,5 @@
-//! Elementwise maps over strided operands: `map_f32` for f32 arithmetic, `copy_b32` for any 4-byte element bit for bit.
+//! Elementwise maps over strided operands: `map_f32` and `map_bf16` compute, `copy_b32` and `copy_b16` copy 4- and
+//! 2-byte elements bit for bit.
 
 use std::sync::Arc;
 
@@ -74,6 +75,15 @@ impl MapOp {
     }
 }
 
+// what a map's kernel reads and writes: f32 or bf16 values, or 4- or 2-byte elements bit for bit
+#[derive(Clone, Copy, PartialEq)]
+enum Elements {
+    F32,
+    Bf16,
+    Bits32,
+    Bits16,
+}
+
 /// One operand: its buffer, the element its first index starts at, and its stride along each of the map's dims.
 #[derive(Clone, Copy)]
 pub struct Operand<'a> {
@@ -95,7 +105,24 @@ pub struct Map<'a> {
 impl Recorder<'_> {
     pub fn map_f32(&self, map: &Map<'_>) -> Result<()> {
         let params = map.params.map(f32::to_bits);
-        self.map(map, params, false)
+        self.map(map, params, Elements::F32)
+    }
+
+    /// [`Self::map_f32`] over bf16 operands, computed in f32.
+    pub fn map_bf16(&self, map: &Map<'_>) -> Result<()> {
+        let params = map.params.map(f32::to_bits);
+        self.map(map, params, Elements::Bf16)
+    }
+
+    /// [`Self::copy_b32`] over 2-byte elements, `fill` the half `Fill` writes.
+    pub fn copy_b16(&self, map: &Map<'_>, fill: u16) -> Result<()> {
+        if !matches!(map.op, MapOp::Copy | MapOp::Fill) {
+            return Err(Error::Invalid(format!(
+                "copy_b16 runs Copy and Fill, not {:?}",
+                map.op
+            )));
+        }
+        self.map(map, [u32::from(fill), 0], Elements::Bits16)
     }
 
     /// [`Self::map_f32`]'s `Copy` and `Fill` over 4-byte elements of any type, `fill` the word `Fill` writes.
@@ -106,10 +133,10 @@ impl Recorder<'_> {
                 map.op
             )));
         }
-        self.map(map, [fill, 0], true)
+        self.map(map, [fill, 0], Elements::Bits32)
     }
 
-    fn map(&self, map: &Map<'_>, params: [u32; 2], bits: bool) -> Result<()> {
+    fn map(&self, map: &Map<'_>, params: [u32; 2], elements: Elements) -> Result<()> {
         let rank = map.dims.len();
         let b = map.b.unwrap_or(map.a);
         let n: usize = map.dims.iter().product();
@@ -125,7 +152,7 @@ impl Recorder<'_> {
         if n == 0 {
             return Ok(());
         }
-        if !bits && map.op == MapOp::Relu2 && self.relu2_q8(map, n)? {
+        if elements == Elements::F32 && map.op == MapOp::Relu2 && self.relu2_q8(map, n)? {
             return Ok(());
         }
         let small = |v: usize| {
@@ -147,10 +174,12 @@ impl Recorder<'_> {
             }
         }
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-        let pipeline = if bits {
-            &self.context.kernels.copy_b32
-        } else {
-            &self.context.kernels.map_f32
+        let kernels = &self.context.kernels;
+        let pipeline = match elements {
+            Elements::F32 => &kernels.map_f32,
+            Elements::Bf16 => &kernels.map_bf16,
+            Elements::Bits32 => &kernels.copy_b32,
+            Elements::Bits16 => &kernels.copy_b16,
         };
         let groups = n.div_ceil(THREADS).min(MAX_GROUPS) as u32;
         self.profile_shape(|| format!("{:?} n={n}", map.op), 0);

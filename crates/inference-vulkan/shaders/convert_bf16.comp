@@ -1,0 +1,31 @@
+#version 450
+// `count` values from src_base into dst from dst_base, one a thread: f32 to bf16, or with WIDEN bf16 to f32.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_GOOGLE_include_directive : require
+#include "bf16.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer S { float s32[]; };
+layout(std430, binding = 0) readonly buffer S16 { uint16_t s16[]; };
+layout(std430, binding = 1) writeonly buffer D { float d32[]; };
+layout(std430, binding = 1) writeonly buffer D16 { uint16_t d16[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint count;
+    uint src_base;
+    uint dst_base;
+    uint widen;
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.y * (gl_NumWorkGroups.x * 256) + gl_GlobalInvocationID.x;
+    if (i >= pc.count) {
+        return;
+    }
+    if (pc.widen != 0) {
+        d32[pc.dst_base + i] = bf16_bits_to_f32(uint(s16[pc.src_base + i]));
+    } else {
+        d16[pc.dst_base + i] = uint16_t(f32_to_bf16_bits(s32[pc.src_base + i]));
+    }
+}
