@@ -1,0 +1,44 @@
+#version 450
+// out = a, or out = the fill's low 16 bits, over any 2-byte element type bit for bit, strided as in map_main.glsl.
+#extension GL_EXT_shader_16bit_storage : require
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer A { uint16_t a[]; };
+layout(std430, binding = 1) readonly buffer B { uint16_t b[]; };
+layout(std430, binding = 2) buffer O { uint16_t o[]; };
+
+const uint MAX_DIMS = 6;
+
+layout(push_constant) uniform PushConstants {
+    uint n;
+    uint rank;
+    uint op;
+    uint p0;
+    uint p1;
+    uint a_off;
+    uint b_off;
+    uint o_off;
+    uint dims[MAX_DIMS];
+    uint a_strides[MAX_DIMS];
+    uint b_strides[MAX_DIMS];
+    uint o_strides[MAX_DIMS];
+} pc;
+
+const uint FILL = 22;
+
+void main() {
+    uint total = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    for (uint i = gl_GlobalInvocationID.x; i < pc.n; i += total) {
+        uint rest = i;
+        uint ia = pc.a_off;
+        uint io = pc.o_off;
+        for (uint d = pc.rank; d > 0; d--) {
+            uint c = rest % pc.dims[d - 1];
+            rest /= pc.dims[d - 1];
+            ia += c * pc.a_strides[d - 1];
+            io += c * pc.o_strides[d - 1];
+        }
+        o[io] = pc.op == FILL ? uint16_t(pc.p0) : a[ia];
+    }
+}

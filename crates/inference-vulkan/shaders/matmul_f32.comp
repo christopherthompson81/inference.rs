@@ -1,40 +1,4 @@
 #version 450
-// c[b] = a[b] (m x k) times b[b] (k x n), every operand strided, c contiguous; a thread an output element.
-
-layout(local_size_x = 64) in;
-
-layout(std430, binding = 0) readonly buffer A { float a[]; };
-layout(std430, binding = 1) readonly buffer B { float bm[]; };
-layout(std430, binding = 2) buffer C { float c[]; };
-
-layout(push_constant) uniform PushConstants {
-    uint batch;
-    uint m;
-    uint n;
-    uint k;
-    uint a_off;
-    uint a_bs;
-    uint a_ms;
-    uint a_ks;
-    uint b_off;
-    uint b_bs;
-    uint b_ks;
-    uint b_ns;
-} pc;
-
-void main() {
-    uint total = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
-    uint count = pc.batch * pc.m * pc.n;
-    for (uint e = gl_GlobalInvocationID.x; e < count; e += total) {
-        uint col = e % pc.n;
-        uint row = (e / pc.n) % pc.m;
-        uint bat = e / (pc.n * pc.m);
-        uint ia = pc.a_off + bat * pc.a_bs + row * pc.a_ms;
-        uint ib = pc.b_off + bat * pc.b_bs + col * pc.b_ns;
-        float s = 0.0;
-        for (uint j = 0; j < pc.k; j++) {
-            s += a[ia + j * pc.a_ks] * bm[ib + j * pc.b_ks];
-        }
-        c[e] = s;
-    }
-}
+// The per-output product over f32 operands.
+#extension GL_GOOGLE_include_directive : require
+#include "matmul_f32_main.glsl"

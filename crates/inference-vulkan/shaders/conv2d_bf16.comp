@@ -1,0 +1,5 @@
+#version 450
+// The direct 2D convolution over bf16 operands.
+#extension GL_GOOGLE_include_directive : require
+#define BF16
+#include "conv2d_main.glsl"
