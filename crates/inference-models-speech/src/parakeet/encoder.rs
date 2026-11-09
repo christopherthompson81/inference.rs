@@ -354,28 +354,22 @@ impl RelPositionAttention {
         // each projection moved in and dropped once split: a shadowed one would live beside its copy to the end
         let split = |x: Tensor| self.heads(&x);
         let (q, k, v, p) = (split(q)?, split(k)?, split(v)?, split(p)?);
-        // scaled before the products, so the (rows, keys) scores take no extra pass
-        let q_content = (q.broadcast_add(&self.bias_u)? * scale)?;
-        let q_position = (q.broadcast_add(&self.bias_v)? * scale)?;
         // full attention fused on an iGPU that has it: no (rows, keys) scores in memory, so no blocks either; a discrete
         // GPU's matrix cores run the blocks' products faster (a 3090 over 10 minutes: 2.6 s against 7.0 fused)
         if full
             && xs.device().is_vulkan()
             && !inference_tensor::vulkan::is_discrete(xs.device())
-            && let Some(attn) = inference_tensor::vulkan::rel_pos_attn(&RelPosAttn {
-                q_content: &q_content,
-                q_position: &q_position,
-                k: &k,
-                v: &v,
-                positions: &p,
-                pos_base: t - 1 - lo,
-            })?
+            && let Some(attn) = self.fused_f32(&q, &k, &v, &p, scale, t - 1 - lo)?
         {
             let attn = attn
                 .transpose(1, 2)?
-                .reshape((b, t, self.heads * self.head_dim))?;
+                .reshape((b, t, self.heads * self.head_dim))?
+                .to_dtype(q.dtype())?;
             return self.o.forward(&attn);
         }
+        // scaled before the products, so the (rows, keys) scores take no extra pass
+        let q_content = (q.broadcast_add(&self.bias_u)? * scale)?;
+        let q_position = (q.broadcast_add(&self.bias_v)? * scale)?;
         let mut outs = Vec::with_capacity(blocks.len());
         for b in blocks {
             let keys = k.narrow(2, b.keys_from, b.keys)?;
@@ -408,6 +402,29 @@ impl RelPositionAttention {
 }
 
 impl RelPositionAttention {
+    // the fused kernel is f32: a bf16 model widens its (t, hidden) operands, far less than bf16 (rows, keys) scores
+    // cost, and the scores keep f32's precision (a 780M over 10 minutes: bf16 asr 16.4 -> 14.6 s, peak 2.57 -> 2.44 GB)
+    fn fused_f32(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        positions: &Tensor,
+        scale: f64,
+        pos_base: usize,
+    ) -> Result<Option<Tensor>> {
+        let wide = |x: &Tensor| x.to_dtype(DType::F32);
+        let q = wide(q)?;
+        inference_tensor::vulkan::rel_pos_attn(&RelPosAttn {
+            q_content: &(q.broadcast_add(&wide(&self.bias_u)?)? * scale)?,
+            q_position: &(q.broadcast_add(&wide(&self.bias_v)?)? * scale)?,
+            k: &wide(k)?,
+            v: &wide(v)?,
+            positions: &wide(positions)?,
+            pos_base,
+        })
+    }
+
     /// `(1, heads, 2W - 1, head_dim)` projected positions for a streaming window of `w` frames.
     fn window_positions(
         &self,
