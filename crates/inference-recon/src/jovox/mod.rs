@@ -235,7 +235,7 @@ impl JoVox {
 // The sampler driving `flow` under `kv`: the condition alone, or it then the zero condition when guided
 fn sample_structure(
     flow: &Flow,
-    kv: &[flow::CrossKv],
+    kv: &[crate::trellis2::dit::CrossKv],
     options: &SampleOptions,
     rng: &mut dyn sampler::Uniform,
     progress: &dyn Progress,
