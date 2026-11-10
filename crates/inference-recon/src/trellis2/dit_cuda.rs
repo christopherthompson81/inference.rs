@@ -144,6 +144,7 @@ pub fn ln_mod(
 /// `gain` `[heads, d]` and rounded when given, then rotated by `rope` `(cos, sin)` `[tokens, d/2]` when given.
 pub fn heads(
     src: &Tensor,
+    bias: &Tensor,
     part: usize,
     gain: Option<&Tensor>,
     rope: Option<(&Tensor, &Tensor)>,
@@ -153,6 +154,7 @@ pub fn heads(
     let dev = cuda_device(src)?;
     let src = src.contiguous()?;
     view!(src, bf16, sg, sv);
+    view!(bias, bf16, bg, bv);
     let mut out = unsafe { dev.alloc::<bf16>(batch * heads * tokens * d) }?;
     let rows = (batch * tokens * heads) as u32;
     let cfg = LaunchConfig {
@@ -176,6 +178,7 @@ pub fn heads(
                 "head_norm_rope_bf16",
                 cfg,
                 &sv,
+                &bv,
                 &token_stride,
                 &offset,
                 &gv,
@@ -197,6 +200,7 @@ pub fn heads(
                 "head_norm_rope_bf16",
                 cfg,
                 &sv,
+                &bv,
                 &token_stride,
                 &offset,
                 &gv,
@@ -217,6 +221,7 @@ pub fn heads(
                 "head_norm_rope_bf16",
                 cfg,
                 &sv,
+                &bv,
                 &token_stride,
                 &offset,
                 &NULL,
@@ -232,17 +237,23 @@ pub fn heads(
         }
         (None, Some(_)) => inference_tensor::bail!("heads rotates only normalized heads"),
     }
-    drop(sg);
+    drop((sg, bg));
     Ok(output(&dev, out, (batch, heads, tokens, d)))
 }
 
-/// `x + y * gate` (`gate` chunk `chunk` of `m` `[batch, 6c]`), or `x + y` without one, in bf16.
-pub fn residual(x: &Tensor, y: &Tensor, gate: Option<(&Tensor, usize)>) -> Result<Tensor> {
+/// `x + (y + bias) * gate` (`gate` chunk `chunk` of `m` `[batch, 6c]`), or `x + (y + bias)` without one, in bf16.
+pub fn residual(
+    x: &Tensor,
+    y: &Tensor,
+    bias: &Tensor,
+    gate: Option<(&Tensor, usize)>,
+) -> Result<Tensor> {
     let (batch, tokens, c) = x.dims3()?;
     let dev = cuda_device(x)?;
     let (x, y) = (x.contiguous()?, y.contiguous()?);
     view!(x, bf16, xg, xv);
     view!(y, bf16, yg, yv);
+    view!(bias, bf16, bg, bv);
     let n = (batch * tokens * c) as i64;
     let mut out = unsafe { dev.alloc::<bf16>(n as usize) }?;
     let cfg = LaunchConfig {
@@ -262,6 +273,7 @@ pub fn residual(x: &Tensor, y: &Tensor, gate: Option<(&Tensor, usize)>) -> Resul
                 cfg,
                 &xv,
                 &yv,
+                &bv,
                 &mv,
                 &stride,
                 &at,
@@ -279,6 +291,7 @@ pub fn residual(x: &Tensor, y: &Tensor, gate: Option<(&Tensor, usize)>) -> Resul
                 cfg,
                 &xv,
                 &yv,
+                &bv,
                 &NULL,
                 &0i32,
                 &0i32,
@@ -289,7 +302,27 @@ pub fn residual(x: &Tensor, y: &Tensor, gate: Option<(&Tensor, usize)>) -> Resul
             );
         }
     }
-    drop((xg, yg));
+    drop((xg, yg, bg));
+    Ok(output(&dev, out, (batch, tokens, c)))
+}
+
+/// `gelu(x + bias)` (tanh form) for `x` `[batch, tokens, c]`, as the ops round it.
+pub fn bias_gelu(x: &Tensor, bias: &Tensor) -> Result<Tensor> {
+    let (batch, tokens, c) = x.dims3()?;
+    let dev = cuda_device(x)?;
+    let x = x.contiguous()?;
+    view!(x, bf16, xg, xv);
+    view!(bias, bf16, bg, bv);
+    let n = (batch * tokens * c) as i64;
+    let mut out = unsafe { dev.alloc::<bf16>(n as usize) }?;
+    let cfg = LaunchConfig {
+        grid_dim: ((n as u32).div_ceil(BLOCK), 1, 1),
+        block_dim: (BLOCK, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let c32 = c as i32;
+    launch!(dev, "bias_gelu_bf16", cfg, &xv, &bv, &n, &c32, &mut out);
+    drop((xg, bg));
     Ok(output(&dev, out, (batch, tokens, c)))
 }
 
@@ -303,7 +336,8 @@ mod tests {
         [
             ln_mod_matches_the_ops,
             heads_match_the_ops,
-            residual_matches_the_ops
+            residual_matches_the_ops,
+            bias_gelu_matches_the_ops
         ]
     );
 
@@ -389,7 +423,9 @@ mod tests {
             .collect();
         let rope = crate::trellis2::dit::Rope::new(&positions, d, &dev)?;
         let (cos, sin) = rope.tables();
-        let q = qkv.narrow(2, 0, 1)?.squeeze(2)?;
+        let bias = Tensor::randn(0f32, 0.5, 3 * h * d, &dev)?.to_dtype(DType::BF16)?;
+        let qkv_b = qkv.broadcast_add(&bias.reshape((3, h, d))?)?;
+        let q = qkv_b.narrow(2, 0, 1)?.squeeze(2)?;
         let normed = {
             let x = q.to_dtype(DType::F32)?;
             let norm = x.sqr()?.sum_keepdim(D::Minus1)?.sqrt()?.maximum(1e-12)?;
@@ -398,17 +434,17 @@ mod tests {
                 .to_dtype(DType::BF16)?
         };
         let want = rope.apply(&normed)?.transpose(1, 2)?;
-        let got = heads(&qkv, 0, Some(&gain), Some((cos, sin)), 1e-12)?;
+        let got = heads(&qkv, &bias, 0, Some(&gain), Some((cos, sin)), 1e-12)?;
         assert!(
             worst(&got, &want)? <= TOLERANCE,
             "rotated: {}",
             worst(&got, &want)?
         );
-        let v = qkv.narrow(2, 2, 1)?.squeeze(2)?.transpose(1, 2)?;
+        let v = qkv_b.narrow(2, 2, 1)?.squeeze(2)?.transpose(1, 2)?;
         assert_eq!(
-            worst(&heads(&qkv, 2, None, None, 1e-12)?, &v)?,
+            worst(&heads(&qkv, &bias, 2, None, None, 1e-12)?, &v)?,
             0.0,
-            "v is copied"
+            "v is copied with its bias"
         );
         Ok(())
     }
@@ -417,23 +453,39 @@ mod tests {
         let Some(dev) = device() else { return Ok(()) };
         let (b, n, c) = (2, 41, 96);
         let x = Tensor::randn(0f32, 1.0, (b, n, c), &dev)?.to_dtype(DType::BF16)?;
-        let y = Tensor::randn(0f32, 1.0, (b, n, c), &dev)?.to_dtype(DType::BF16)?;
+        let y_raw = Tensor::randn(0f32, 1.0, (b, n, c), &dev)?.to_dtype(DType::BF16)?;
+        let bias = Tensor::randn(0f32, 0.5, c, &dev)?.to_dtype(DType::BF16)?;
+        let y = y_raw.broadcast_add(&bias)?;
         let m = Tensor::randn(0f32, 1.0, (b, 6 * c), &dev)?.to_dtype(DType::BF16)?;
         let gate = m.narrow(1, 2 * c, c)?.unsqueeze(1)?;
         let want = (&x + y.broadcast_mul(&gate)?)?;
         assert_eq!(
-            worst(&residual(&x, &y, Some((&m, 2)))?, &want)?,
+            worst(&residual(&x, &y_raw, &bias, Some((&m, 2)))?, &want)?,
             0.0,
             "gated"
         );
         let m1 = m.narrow(0, 0, 1)?;
         let want = (&x + y.broadcast_mul(&m1.narrow(1, 2 * c, c)?.unsqueeze(1)?)?)?;
         assert_eq!(
-            worst(&residual(&x, &y, Some((&m1, 2)))?, &want)?,
+            worst(&residual(&x, &y_raw, &bias, Some((&m1, 2)))?, &want)?,
             0.0,
             "broadcast gate"
         );
-        assert_eq!(worst(&residual(&x, &y, None)?, &(&x + &y)?)?, 0.0, "plain");
+        assert_eq!(
+            worst(&residual(&x, &y_raw, &bias, None)?, &(&x + &y)?)?,
+            0.0,
+            "plain"
+        );
+        Ok(())
+    }
+
+    fn bias_gelu_matches_the_ops() -> Result<()> {
+        let Some(dev) = device() else { return Ok(()) };
+        let (b, n, c) = (2, 33, 160);
+        let x = Tensor::randn(0f32, 2.0, (b, n, c), &dev)?.to_dtype(DType::BF16)?;
+        let bias = Tensor::randn(0f32, 0.5, c, &dev)?.to_dtype(DType::BF16)?;
+        let want = x.broadcast_add(&bias)?.gelu()?;
+        assert_eq!(worst(&bias_gelu(&x, &bias)?, &want)?, 0.0);
         Ok(())
     }
 }

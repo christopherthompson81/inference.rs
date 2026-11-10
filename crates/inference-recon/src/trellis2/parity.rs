@@ -1115,3 +1115,62 @@ fn every_pipeline_stage_matches_the_reference() -> Result<()> {
     assert!(rms < 1e-5, "vertex attributes rms {rms}");
     Ok(())
 }
+
+fn tensor_hash(t: &Tensor) -> Result<u64> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    t.to_dtype(DType::F32)?
+        .flatten_all()?
+        .to_vec1::<f32>()?
+        .iter()
+        .for_each(|v| v.to_bits().hash(&mut h));
+    Ok(h.finish())
+}
+
+// TRELLIS2_DIR and TRELLIS2_FULL_REF: the 1024 shape and texture latents decoded (after a warm-up), timed and hashed
+#[test]
+#[ignore = "needs the TRELLIS.2 checkpoint, a reference dump and a GPU"]
+fn decoding_is_timed() -> Result<()> {
+    use super::decoder::TEXTURE_DECODER;
+    let (Some(dir), Some(reference)) = (
+        std::env::var_os("TRELLIS2_DIR").map(PathBuf::from),
+        std::env::var_os("TRELLIS2_FULL_REF"),
+    ) else {
+        return Ok(());
+    };
+    let device = Device::new_cuda(0)?;
+    let refs = inference_tensor::safetensors::load(PathBuf::from(reference), &Device::Cpu)?;
+    let cells = coords(&refs["s2.coords"])?;
+    let shape = ShapeDecoder::load(
+        SHAPE_DECODER,
+        DType::F16,
+        vb(dir.join(DECODER_FILE), &device)?,
+    )?;
+    let texture = ShapeDecoder::load(
+        TEXTURE_DECODER,
+        DType::F16,
+        vb(
+            dir.join("ckpts/tex_dec_next_dc_f16c32_fp16.safetensors"),
+            &device,
+        )?,
+    )?;
+    let shape_latents = refs["s2.out"].to_device(&device)?;
+    let tex_latents = refs["s3.out"].to_device(&device)?;
+    for run in 0..2 {
+        device.synchronize()?;
+        let start = std::time::Instant::now();
+        let (shape_out, subs) = shape.forward(&cells, &shape_latents, None, &mut |_, _| {})?;
+        device.synchronize()?;
+        let shaped = start.elapsed().as_secs_f64();
+        let (tex_out, _) = texture.forward(&cells, &tex_latents, Some(&subs), &mut |_, _| {})?;
+        device.synchronize()?;
+        println!(
+            "run {run}: shape {shaped:.2} s, texture {:.2} s, {} cells, hashes {:x} {:x}",
+            start.elapsed().as_secs_f64() - shaped,
+            shape_out.coords.len(),
+            tensor_hash(&shape_out.feats)?,
+            tensor_hash(&tex_out.feats)?
+        );
+    }
+    Ok(())
+}
