@@ -386,6 +386,69 @@ mod tests {
     }
 
     #[test]
+    fn a_baked_cube_writes_a_glb_whose_accessors_fit_their_views() {
+        let vertices: Vec<V3> = (0..8)
+            .map(|i| {
+                [
+                    (i & 1) as f32 - 0.5,
+                    ((i >> 1) & 1) as f32 - 0.5,
+                    ((i >> 2) & 1) as f32 - 0.5,
+                ]
+                .map(|c| c * 0.5)
+            })
+            .collect();
+        let quads = [
+            [0, 2, 3, 1],
+            [4, 5, 7, 6],
+            [0, 1, 5, 4],
+            [2, 6, 7, 3],
+            [0, 4, 6, 2],
+            [1, 3, 7, 5],
+        ];
+        let faces = quads
+            .iter()
+            .flat_map(|q: &[u32; 4]| [[q[0], q[1], q[2]], [q[0], q[2], q[3]]])
+            .collect();
+        let mesh = Mesh { vertices, faces };
+        let res = 8i32;
+        let coords: Vec<[i32; 3]> = (0..res * res * res)
+            .map(|i| [i / (res * res), (i / res) % res, i % res])
+            .collect();
+        let values = vec![[0.5f32; 6]; coords.len()];
+        let options = BakeOptions {
+            texture_size: 64,
+            ..BakeOptions::default()
+        };
+        let baked = bake(&mesh, &coords, &values, res as usize, &options).expect("a cube bakes");
+        assert_eq!(
+            baked.unwrapped.normals.len(),
+            baked.unwrapped.mesh.vertices.len()
+        );
+        let glb = super::super::glb::to_textured_glb(&baked);
+        let json_len = u32::from_le_bytes(glb[12..16].try_into().expect("4 bytes")) as usize;
+        let gltf: serde_json::Value =
+            serde_json::from_slice(&glb[20..20 + json_len]).expect("the JSON chunk");
+        let components = |t: &str| match t {
+            "SCALAR" => 1,
+            "VEC2" => 2,
+            "VEC3" => 3,
+            _ => 4,
+        };
+        for accessor in gltf["accessors"].as_array().expect("accessors") {
+            let view =
+                &gltf["bufferViews"][accessor["bufferView"].as_u64().expect("a view") as usize];
+            let bytes = accessor["count"].as_u64().expect("a count")
+                * 4
+                * components(accessor["type"].as_str().expect("a type"));
+            assert_eq!(
+                bytes,
+                view["byteLength"].as_u64().expect("a length"),
+                "{accessor}"
+            );
+        }
+    }
+
+    #[test]
     fn a_triangle_covers_the_texels_whose_centers_it_holds() {
         let uvs = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
         let texels = rasterize(&[[0, 1, 2]], &uvs, 4);

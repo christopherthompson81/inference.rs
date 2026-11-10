@@ -353,6 +353,8 @@ pub fn uv_unwrap(mesh: &Mesh) -> Result<Unwrapped, inference_xatlas::Error> {
         .iter()
         .map(|&v| mesh.vertices[v as usize])
         .collect();
+    let normals = vertex_normals(&mesh);
+    out.normals = out.source.iter().map(|&v| normals[v as usize]).collect();
     Ok(out)
 }
 
