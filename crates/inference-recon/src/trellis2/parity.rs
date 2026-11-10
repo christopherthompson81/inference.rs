@@ -291,6 +291,10 @@ fn holes_and_simplification_match_the_reference() -> Result<()> {
     Ok(())
 }
 
+// every this many texels sampled for the surface color comparison
+const SAMPLE_STRIDE: usize = 7;
+// mean color difference (of 255) allowed between our baked surface and the reference's
+const MAX_MEAN_COLOR_DIFF: f32 = 3.0;
 // relative difference allowed in chart count and seam length
 const CHART_TOLERANCE: f64 = 1e-3;
 
@@ -479,6 +483,8 @@ fn inconsistent_edges(mesh: &super::mesh::Mesh) -> usize {
         .count()
 }
 
+type MeshPass = fn(&mut super::mesh::Mesh);
+
 // TRELLIS2_TOPOLOGY_REF: CuMesh's duplicate, non-manifold, component and orientation passes, each from the
 // reference's previous stage (`topology_ref.py`, scratch)
 #[test]
@@ -489,7 +495,7 @@ fn topology_passes_match_the_reference() -> Result<()> {
     };
     let refs = inference_tensor::safetensors::load(reference, &Device::Cpu)?;
     let stage = |name: &str| mesh_of(&refs, &format!("{name}.v"), &format!("{name}.f"));
-    let passes: [(&str, &str, fn(&mut super::mesh::Mesh)); 4] = [
+    let passes: [(&str, &str, MeshPass); 4] = [
         ("input", "dedup", super::cleanup::remove_duplicate_faces),
         ("dedup", "repair", super::cleanup::repair_non_manifold_edges),
         ("repair", "small", |m| {
@@ -536,6 +542,140 @@ fn topology_passes_match_the_reference() -> Result<()> {
         assert_eq!(ours.faces, theirs.faces, "{to} faces");
         assert_eq!(ours.vertices, theirs.vertices, "{to} vertices");
     }
+    Ok(())
+}
+
+// barycentric weights of a point on the triangle
+fn weights(q: [f32; 3], [a, b, c]: [[f32; 3]; 3]) -> [f32; 3] {
+    let d = |x: [f32; 3], y: [f32; 3]| x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+    let s = |x: [f32; 3], y: [f32; 3]| [x[0] - y[0], x[1] - y[1], x[2] - y[2]];
+    let (v0, v1, v2) = (s(b, a), s(c, a), s(q, a));
+    let (d00, d01, d11, d20, d21) = (d(v0, v0), d(v0, v1), d(v1, v1), d(v2, v0), d(v2, v1));
+    let den = d00 * d11 - d01 * d01;
+    let v = (d11 * d20 - d01 * d21) / den;
+    let w = (d00 * d21 - d01 * d20) / den;
+    [1.0 - v - w, v, w]
+}
+
+// TRELLIS2_FULL_REF's mesh and texture volume through o-voxel's `to_glb` (TRELLIS2_BAKE_REF, `bake_ref.py`, scratch)
+#[test]
+#[ignore = "needs reference dumps"]
+fn the_bake_matches_the_reference() -> Result<()> {
+    let (Some(input), Some(reference)) = (
+        std::env::var_os("TRELLIS2_FULL_REF"),
+        std::env::var_os("TRELLIS2_BAKE_REF"),
+    ) else {
+        return Ok(());
+    };
+    let refs = inference_tensor::safetensors::load(reference, &Device::Cpu)?;
+    let bytes = |k: &str| -> Result<Vec<u8>> { refs[k].flatten_all()?.to_vec1::<u8>() };
+    let unknown: Vec<bool> = bytes("unknown")?.iter().map(|&m| m != 0).collect();
+    let size = refs["unknown"].dim(0)?;
+    // OpenCV's Telea on the reference's own unfilled textures
+    for (name, channels, radius) in [
+        ("color", 3, 3.0),
+        ("metallic", 1, 1.0),
+        ("roughness", 1, 1.0),
+        ("alpha", 1, 1.0),
+    ] {
+        let mut ours = bytes(&format!("{name}.in"))?;
+        let start = std::time::Instant::now();
+        inference_vision::inpaint_telea(&mut ours, size, size, channels, &unknown, radius);
+        let theirs = bytes(&format!("{name}.out"))?;
+        let differ = ours.iter().zip(&theirs).filter(|(a, b)| a != b).count();
+        println!(
+            "{name} inpainted in {:.2} s: {differ} of {} values differ",
+            start.elapsed().as_secs_f64(),
+            ours.len()
+        );
+        assert_eq!(differ, 0, "{name} inpainting");
+    }
+    let full = inference_tensor::safetensors::load(input, &Device::Cpu)?;
+    let mesh = mesh_of(&full, "mesh.v", "mesh.f")?;
+    let coords = coords(&full["tex.coords"])?;
+    let values: Vec<[f32; 6]> = full["tex.attrs"]
+        .to_vec2::<f32>()?
+        .iter()
+        .map(|r| std::array::from_fn(|k| r[k]))
+        .collect();
+    let resolution = full["resolution"].to_dtype(DType::I64)?.to_vec1::<i64>()?[0] as usize;
+    let start = std::time::Instant::now();
+
+    let baked = super::bake::bake(&mesh, &coords, &values, resolution, &Default::default())
+        .map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
+    let theirs = mesh_of(&refs, "final.v", "final.f")?;
+    let their_uvs: Vec<[f32; 2]> = refs["final.uv"]
+        .to_vec2::<f32>()?
+        .iter()
+        .map(|r| [r[0], r[1]])
+        .collect();
+    println!(
+        "baked in {:.1} s: {} vertices / {} faces vs {} / {}, {} texels \
+         covered vs {}",
+        start.elapsed().as_secs_f64(),
+        baked.unwrapped.mesh.vertices.len(),
+        baked.unwrapped.mesh.faces.len(),
+        theirs.vertices.len(),
+        theirs.faces.len(),
+        baked.covered,
+        unknown.iter().filter(|&&u| !u).count()
+    );
+    // the reference's covered texels placed on its surface, looked up through our atlas
+    let their_texels = super::bake::rasterize(&theirs.faces, &their_uvs, size);
+    let bvh = super::bake::Bvh::new(&baked.unwrapped.mesh);
+    let their_color = bytes("color.in")?;
+    let s = size as f64;
+    let diffs: Vec<f32> = (0..size * size)
+        .step_by(SAMPLE_STRIDE)
+        .filter(|&t| their_texels[t] > 0 && !unknown[t])
+        .map(|t| {
+            let f = theirs.faces[their_texels[t] as usize - 1];
+            let uv = f.map(|v| their_uvs[v as usize].map(|c| f64::from(c) * s));
+            let p = [(t % size) as f64 + 0.5, (t / size) as f64 + 0.5];
+            let area = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| {
+                (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+            };
+            let total = area(uv[0], uv[1], uv[2]);
+            let w = [
+                area(uv[1], uv[2], p) / total,
+                area(uv[2], uv[0], p) / total,
+                area(uv[0], uv[1], p) / total,
+            ];
+            let pos = (0..3).fold([0f32; 3], |acc, k| {
+                let v = theirs.vertices[f[k] as usize];
+                [0, 1, 2].map(|a| acc[a] + v[a] * w[k] as f32)
+            });
+            let (face, q) = bvh.closest_face(pos);
+            let ours_f = baked.unwrapped.mesh.faces[face as usize];
+            let bw = weights(q, ours_f.map(|v| baked.unwrapped.mesh.vertices[v as usize]));
+            let uv = (0..3).fold([0f32; 2], |acc, k| {
+                let u = baked.unwrapped.uvs[ours_f[k] as usize];
+                [acc[0] + u[0] * bw[k], acc[1] + u[1] * bw[k]]
+            });
+            let texel = |c: f32| ((c * size as f32) as usize).min(size - 1);
+            let ours_t = texel(uv[1]) * size + texel(uv[0]);
+            (0..3)
+                .map(|c| {
+                    (f32::from(baked.base_color[4 * ours_t + c])
+                        - f32::from(their_color[3 * t + c]))
+                    .abs()
+                })
+                .sum::<f32>()
+                / 3.0
+        })
+        .collect();
+    let mut sorted = diffs.clone();
+    sorted.sort_by(f32::total_cmp);
+    let mean = diffs.iter().sum::<f32>() / diffs.len() as f32;
+    let at = |q: f64| sorted[((sorted.len() - 1) as f64 * q) as usize];
+    println!(
+        "surface color over {} texels: mean abs diff {mean:.2} levels, p50 {:.1} p90 {:.1} p99 {:.1}",
+        diffs.len(),
+        at(0.5),
+        at(0.9),
+        at(0.99)
+    );
+    assert!(mean < MAX_MEAN_COLOR_DIFF, "surface color");
     Ok(())
 }
 

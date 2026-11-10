@@ -1,6 +1,7 @@
 //! TRELLIS.2's second stage: the shape flow fills a voxel structure's cells with latents under the image, the decoder
 //! turns them into a 1024^3 flexible dual grid, and the grid into a mesh, its small holes filled and its faces reduced.
 
+pub mod bake;
 pub mod charts;
 pub mod cleanup;
 pub mod decoder;

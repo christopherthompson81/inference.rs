@@ -270,11 +270,39 @@ pub fn chart_meshes(mesh: &Mesh, charts: &[u32]) -> Vec<(Vec<u32>, Vec<[u32; 3]>
         .collect()
 }
 
+/// CuMesh's `compute_vertex_normals`: the sum of the faces' cross products, normalized, or the first face's cross
+/// product (unnormalized) when the sum vanishes.
+pub fn vertex_normals(mesh: &Mesh) -> Vec<V3> {
+    let mut sums = vec![[0f32; 3]; mesh.vertices.len()];
+    let mut first: Vec<Option<V3>> = vec![None; mesh.vertices.len()];
+    for f in &mesh.faces {
+        let [a, b, c] = f.map(|i| mesh.vertices[i as usize]);
+        let n = cross(sub(b, a), sub(c, a));
+        for &v in f {
+            let v = v as usize;
+            for k in 0..3 {
+                sums[v][k] += n[k];
+            }
+            first[v].get_or_insert(n);
+        }
+    }
+    sums.iter()
+        .zip(first)
+        .map(|(s, first)| {
+            let inv = 1.0 / norm(*s);
+            let n = s.map(|x| x * inv);
+            if n[0].is_nan() { first.unwrap_or(n) } else { n }
+        })
+        .collect()
+}
+
 /// A mesh cut along its atlas seams: each vertex's uv and source vertex, the atlas size in texels.
 #[derive(Clone, Debug)]
 pub struct Unwrapped {
     pub mesh: Mesh,
     pub uvs: Vec<[f32; 2]>,
+    /// Each vertex's normal: CuMesh's, the normalized sum of its faces' area-weighted normals
+    pub normals: Vec<V3>,
     pub source: Vec<u32>,
     pub width: u32,
     pub height: u32,
@@ -306,6 +334,7 @@ pub fn uv_unwrap(mesh: &Mesh) -> Result<Unwrapped, inference_xatlas::Error> {
             faces: Vec::new(),
         },
         uvs: Vec::new(),
+        normals: Vec::new(),
         source: Vec::new(),
         width: atlas.width,
         height: atlas.height,

@@ -262,6 +262,8 @@ async fn main() -> Result<()> {
             out,
             variant,
             seed,
+            vertex_colors,
+            texture_size,
             trellis2,
             trellis_large,
             dinov3,
@@ -271,7 +273,7 @@ async fn main() -> Result<()> {
         } => {
             use inference_jobs::image_to_3d::Variant;
             use inference_jobs::image_to_3d::{
-                ImageTo3dOptions, NoProgress, fetch_models, generate_3d_on,
+                BakeOptions, ImageTo3dOptions, NoProgress, fetch_models, generate_3d_on,
             };
             use inference_jobs::voxels::needs_background_removal;
             let variant = match variant.as_str() {
@@ -283,6 +285,10 @@ async fn main() -> Result<()> {
                 variant,
                 seed,
                 remove_background,
+                bake: (!vertex_colors).then(|| BakeOptions {
+                    texture_size,
+                    ..BakeOptions::default()
+                }),
             };
             let birefnet = needs_background_removal(&image, remove_background)?.then_some(birefnet);
             let models = fetch_models(trellis2, trellis_large, dinov3, birefnet, &NoProgress)?;
@@ -294,8 +300,8 @@ async fn main() -> Result<()> {
             let report = generate_3d_on(&models, &image, &out, &options, &NoProgress, &device)?;
             println!(
                 "{} vertices, {} faces ({} extracted) at {}^3{} in {} ({:.1} s)",
-                report.vertices,
-                report.faces,
+                report.glb_vertices,
+                report.glb_faces,
                 report.raw_faces,
                 report.resolution,
                 if report.background_removed {

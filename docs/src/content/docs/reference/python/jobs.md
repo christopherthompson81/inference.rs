@@ -13,7 +13,9 @@ TRELLIS.2's textured mesh of the object in the job's one image.
 | `placement` | `Placement \| None` | optional |
 | `remove_background` | `bool \| None` | optional |
 | `seed` | `int \| None` | optional |
+| `texture_size` | `int \| None` | optional |
 | `variant` | `Trellis2Variant \| None` | optional |
+| `vertex_colors` | `bool \| None` | optional |
 
 
 ## `JobDeleted`

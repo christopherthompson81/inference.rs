@@ -215,10 +215,7 @@ pub fn unwrap(meshes: &[MeshInput]) -> Result<AtlasOutput, Error> {
                             }
                         })
                         .collect(),
-                    triangles: indices
-                        .chunks_exact(3)
-                        .map(|t| [t[0], t[1], t[2]])
-                        .collect(),
+                    triangles: indices.as_chunks::<3>().0.to_vec(),
                     invalid_charts: charts
                         .iter()
                         .filter(|c| c.kind == CHART_TYPE_INVALID)

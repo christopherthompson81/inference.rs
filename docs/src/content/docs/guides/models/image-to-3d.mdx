@@ -5,8 +5,8 @@ description: TRELLIS.2 turns one image of an object into a textured mesh (GLB); 
 
 Two commands turn one image of an object into 3D:
 
-- `inference image-to-3d` runs TRELLIS.2 end to end: a textured mesh (`model.glb`, with per-vertex PBR color and
-  material) from its own sparse structure, shape and texture stages.
+- `inference image-to-3d` runs TRELLIS.2 end to end: a textured mesh (`model.glb`, its PBR volume baked into base
+  color and metallic-roughness textures) from its own sparse structure, shape and texture stages.
 - `inference voxels` runs JoVox for the object's voxel structure and meshes it with TRELLIS.2's shape stage
   (geometry only).
 
@@ -25,6 +25,8 @@ inference image-to-3d --image chair.png --out chair/ --variant 512 --seed 3
 | `--variant` | `1024-cascade` | `1024-cascade`: shape at 512, upsampled and sampled again at 1024, texture at 1024 (the reference's default). `512`: everything at 512, faster and coarser |
 | `--seed` | 0 | Seeds every stage's noise |
 | `--remove-background` | off | Run BiRefNet even when the image has transparency of its own |
+| `--texture-size` | 2048 | The baked textures' width and height |
+| `--vertex-colors` | off | Per-vertex color and material instead of baked textures: no unwrapping or baking, about a minute faster |
 | `--trellis2`, `--trellis-large`, `--dinov3`, `--birefnet` | fetched | Local checkpoint folders |
 | `--cpu` | off | Run on the CPU (very slow) |
 
@@ -32,24 +34,30 @@ The stages: DINOv3 conditions at 512^2 (and 1024^2 for the cascade); a dense flo
 TRELLIS-image-large's decoder turns into occupancy (pooled to 32^3); shape latents are sampled on those cells (at 512,
 then for the cascade on the cells the shape decoder upsamples them to, at 1024); texture latents beside them; the shape
 decoder extracts the surface from a flexible dual grid and the texture decoder, following its subdivisions, a volume
-of base color, metallic, roughness and alpha, sampled trilinearly at each vertex. The mesh's small holes are filled and
-it is simplified to at most a million faces.
+of base color, metallic, roughness and alpha. The export follows TRELLIS.2's `to_glb` without its remesh: small holes
+filled, the mesh simplified to at most a million faces and its topology cleaned (duplicate faces, non-manifold edges,
+specks, winding), clustered by normal cones and unwrapped with xatlas into one atlas; each covered texel is placed on
+the extracted surface and given the volume's trilinear attributes, and the texels between charts are inpainted so
+seams don't bleed.
 
-On an RTX 3090, the robot example: `1024-cascade` 62 s at a 7.5 GB peak, `512` 20 s at 5.7 GB.
+On an RTX 3090, the robot example: `1024-cascade` 135 s (about 66 s of it the CPU export) at a 7.5 GB GPU peak; with
+`--vertex-colors` 62 s. `512` takes 20 s plus its export.
 
 ```
 chair/
-  model.glb      the mesh; COLOR_0 = base color and alpha, _METALLIC and _ROUGHNESS per vertex
-  mesh.ply       the same mesh, geometry only
+  model.glb      the unwrapped mesh with normals, a base color + alpha texture and a metallic-roughness texture
+                 (with --vertex-colors: COLOR_0 = base color and alpha, _METALLIC and _ROUGHNESS per vertex)
+  mesh.ply       the simplified mesh before unwrapping, geometry only
   prepared.png   the object as cut out
   meta.json      variant, resolution, cell and face counts, timing
 ```
 
-The mesh sits in the unit cube centered on the origin, z up. Base color is per vertex (no UV texture yet); glTF viewers
-show `COLOR_0`, and the material's metallic and roughness factors are the vertices' means.
+The GLB sits in the unit cube centered on the origin, y up as glTF expects (the PLY keeps TRELLIS's z up). The baked
+material is double-sided and opaque. With `--vertex-colors`, glTF viewers show `COLOR_0`, and the material's metallic
+and roughness factors are the vertices' means.
 
-As a server job: `{"kind": "image_to_3d"}` with one image, optionally `seed`, `variant` (`"1024_cascade"` or `"512"`)
-and `remove_background`; outputs under `model/`.
+As a server job: `{"kind": "image_to_3d"}` with one image, optionally `seed`, `variant` (`"1024_cascade"` or `"512"`),
+`remove_background`, `vertex_colors` and `texture_size`; outputs under `model/`.
 
 ## JoVox voxels
 

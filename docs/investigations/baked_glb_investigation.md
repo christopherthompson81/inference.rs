@@ -91,3 +91,57 @@ and ours has no more inconsistent edges.
 
 The input's 247K inconsistent edges (of ~1.3M) are inherited from the extracted mesh (whose faces matched the
 reference's exactly, trellis2_mesh Run 3), so `to_glb`'s final unify matters for the baked GLB's normals.
+
+## Run 5 - 2026-11-10 (evening)
+
+Question: does a port of OpenCV's Telea inpainting (`inference_vision::inpaint_telea`) give cv2's bytes? `to_glb` fills
+every texel no face covers: base color radius 3 (3 channels), metallic / roughness / alpha radius 1.
+
+Reference: the installed cv2 is 5.0.0 (build info: baseline SSE SSE2 SSE3, GCC 14.2); its `photo/src/inpaint.cpp` at
+the 5.0.0 tag equals the 5.x branch (the 4.x branch has a SIMD rewrite meant to be bit-identical). Ported from it,
+keeping its quirks: FIFO ties in the heap, the band and the distance ring marched outward first (negated `t`),
+central image differences doubled, `km`/`lp` edge clamps, and `round_cast`'s `saturate_cast<uchar>(sat + 0.5)`
+(round half to even of sat + 0.5).
+
+`bake_ref.py` (scratch) runs `to_glb` on the 1024-cascade reference dump with `cv2.inpaint` wrapped to record its
+inputs and outputs. First comparison on those textures:
+
+    color inpainted in 4.06 s: 22778 of 12582912 values differ   (all in unknown texels, 18859 of them by 1)
+    metallic 14473 / roughness 140278 / alpha 12903 of 4194304 differ
+
+A float32 Python transcription of the 5.0.0 source (scratch `inpaint_sim/sim.py`) agreed with the Rust port, not
+cv2, on 200 generated small cases (36 failing; smallest 5x4, one value: 101 vs 102). The failing pixel sat on an
+exact tie: sat = 100.99999 here vs >= 101.0 there, and 101.5 rounds to even, 102. Not FMA (the baseline has none;
+contracting the accumulations made it worse: 50 failing) and not `sat`'s precision. Sweeping which unqualified math
+calls take double: `lev = 1/(1 + fabs(dt))` computed in double, with 1 + |dt| never rounded to float, makes all 200
+cases match. Under `using namespace cv` the unqualified `fabs` binds the C library's double `fabs`, while `sqrt` in
+`sat` stays float (taking it in double broke 2 cases).
+
+Implication: kept as a one-line comment at the `lev` line; pinned unit tests for a flat hole and that border tie,
+both with cv2's outputs. The real-texture comparison is rerun in Run 6.
+
+## Run 6 - 2026-11-10 (evening)
+
+Question: does the whole bake (`trellis2::bake::bake`: `to_glb`'s cleanup chain, our clustering + vendored xatlas,
+UV rasterization, BVH projection onto the extracted mesh, trilinear sampling, Telea) match `to_glb` end to end?
+
+`bake_ref.py` (scratch, needed nvdiffrast built into scratch: CUDA 13.4, `-std=c++20`) on the 1024-cascade reference
+dump (4.3M extracted faces, 2.1M texture voxels): 303 s, of which ~287 s in xatlas's ComputeCharts (1374 clusters,
+one huge chart dominating). Test `the_bake_matches_the_reference` (TRELLIS2_FULL_REF + TRELLIS2_BAKE_REF):
+
+    color / metallic / roughness / alpha inpainted: 0 differing values each (2048^2)
+    baked in 64.6 s: 686384 vertices / 963916 faces vs 696700 / 970159, 2358795 texels covered vs 2346119
+    surface color over 334439 texels: mean abs diff 0.57 levels, p50 0.3 p90 1.3 p99 6.0
+
+Surface color: each reference texel's 3D point (its atlas, rasterized by our rasterizer) looked up on our baked mesh
+through our atlas. The tail (p99 6) is at chart borders and where the simplifications differ. Our xatlas run is
+~4.5x faster than the reference's on the same input: our clusters differ (Run 2) and none is the reference's
+outlier chart.
+
+End to end through the CLI (`inference image-to-3d`, 1024-cascade, robot photo, background removed): 135.4 s wall
+(generation ~69 s, export 66.5 s), 3.76 GB peak RSS, GLB 710518 vertices / 986697 faces with 2048^2 base color and
+metallic-roughness PNGs. Rendered with nvdiffrast beside the reference's `to_glb` output (scratch `render.py`): both
+cleanly textured, no black seams; poses differ as separate generations do.
+
+Both GLBs are now y-up as `to_glb` writes them ((x, y, z) -> (x, z, -y)); the vertex-color GLB used to keep the
+z-up frame. The extracted-mesh PLY keeps TRELLIS's frame.

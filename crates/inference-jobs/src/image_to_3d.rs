@@ -1,16 +1,19 @@
 //! Image to 3D with TRELLIS.2 end to end: the object cut out (BiRefNet unless it already has transparency), its
-//! sparse structure, shape and texture latents, and the mesh they decode to with its PBR attributes. Writes a GLB with
-//! per-vertex color and material, the mesh as a PLY, the prepared image and a `meta.json`.
+//! sparse structure, shape and texture latents, and the mesh they decode to with its PBR attributes. Writes a GLB (the
+//! mesh cleaned, unwrapped and its PBR volume baked into textures, or per-vertex color and material), the extracted
+//! mesh as a PLY, the prepared image and a `meta.json`.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use inference_recon::trellis2::glb::to_glb;
+use inference_recon::trellis2::bake::bake;
+use inference_recon::trellis2::glb::{to_glb, to_textured_glb};
 use inference_recon::trellis2::pipeline::{self, Trellis2Paths};
 use inference_tensor::Device;
 use serde::Serialize;
 
 pub use inference_recon::progress::{NoProgress, Progress};
+pub use inference_recon::trellis2::bake::BakeOptions;
 pub use inference_recon::trellis2::pipeline::Variant;
 
 pub const GLB_FILE: &str = "model.glb";
@@ -33,6 +36,8 @@ pub struct ImageTo3dOptions {
     pub seed: u64,
     /// Remove the background even when the image has transparency of its own
     pub remove_background: bool,
+    /// Bake textures (`None`: per-vertex color and material instead)
+    pub bake: Option<BakeOptions>,
 }
 
 impl Default for ImageTo3dOptions {
@@ -41,6 +46,7 @@ impl Default for ImageTo3dOptions {
             variant: Variant::Cascade1024,
             seed: 0,
             remove_background: false,
+            bake: Some(BakeOptions::default()),
         }
     }
 }
@@ -57,6 +63,11 @@ pub struct ImageTo3dReport {
     pub raw_faces: usize,
     pub vertices: usize,
     pub faces: usize,
+    /// The GLB's textures' size, when baked
+    pub texture_size: Option<usize>,
+    pub glb_vertices: usize,
+    pub glb_faces: usize,
+    pub export_seconds: f64,
     pub total_seconds: f64,
 }
 
@@ -125,8 +136,9 @@ pub fn fetch_models(
     })
 }
 
-/// The 3D object in `image` into `out_dir`: `model.glb` (mesh with per-vertex base color and alpha as `COLOR_0`,
-/// metallic and roughness as custom attributes), `mesh.ply`, `prepared.png` (the cut-out object) and `meta.json`.
+/// The 3D object in `image` into `out_dir`: `model.glb` (baked: base color and metallic-roughness textures; otherwise
+/// per-vertex base color and alpha as `COLOR_0`, metallic and roughness as custom attributes), `mesh.ply`,
+/// `prepared.png` (the cut-out object) and `meta.json`.
 pub fn generate_3d_on(
     models: &ImageTo3dModels,
     image: &Path,
@@ -161,7 +173,31 @@ pub fn generate_3d_on(
         progress,
         device,
     )?;
-    std::fs::write(out_dir.join(GLB_FILE), to_glb(&out.mesh, &out.attrs))?;
+    let export = Instant::now();
+    progress.stage("export", 0);
+    let (glb, glb_vertices, glb_faces) = match &options.bake {
+        Some(bake_options) => {
+            let baked = bake(
+                &out.extracted,
+                &out.voxels,
+                &out.voxel_attrs,
+                out.resolution,
+                bake_options,
+            )?;
+            let counts = (
+                baked.unwrapped.mesh.vertices.len(),
+                baked.unwrapped.mesh.faces.len(),
+            );
+            (to_textured_glb(&baked), counts.0, counts.1)
+        }
+        None => (
+            to_glb(&out.mesh, &out.attrs),
+            out.mesh.vertices.len(),
+            out.mesh.faces.len(),
+        ),
+    };
+    std::fs::write(out_dir.join(GLB_FILE), glb)?;
+    let export_seconds = export.elapsed().as_secs_f64();
     std::fs::write(out_dir.join(MESH_FILE), out.mesh.to_ply())?;
     let report = ImageTo3dReport {
         variant: match options.variant {
@@ -177,6 +213,10 @@ pub fn generate_3d_on(
         raw_faces: out.raw_faces,
         vertices: out.mesh.vertices.len(),
         faces: out.mesh.faces.len(),
+        texture_size: options.bake.map(|b| b.texture_size),
+        glb_vertices,
+        glb_faces,
+        export_seconds,
         total_seconds: start.elapsed().as_secs_f64(),
     };
     std::fs::write(out_dir.join(META_FILE), serde_json::to_vec_pretty(&report)?)?;

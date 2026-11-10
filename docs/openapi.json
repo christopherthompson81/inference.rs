@@ -6750,6 +6750,15 @@
             "format": "int64",
             "minimum": 0
           },
+          "texture_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The baked textures' width and height (2048 by default)",
+            "minimum": 0
+          },
           "variant": {
             "oneOf": [
               {
@@ -6759,6 +6768,13 @@
                 "$ref": "#/components/schemas/Trellis2Variant"
               }
             ]
+          },
+          "vertex_colors": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Per-vertex color and material instead of baked textures (faster: no unwrapping or baking)"
           }
         }
       },

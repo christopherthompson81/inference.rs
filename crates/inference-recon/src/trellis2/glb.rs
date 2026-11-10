@@ -19,6 +19,9 @@ const UNSIGNED_INT: u32 = 5125;
 const ARRAY_BUFFER: u32 = 34962;
 const ELEMENT_ARRAY_BUFFER: u32 = 34963;
 const TRIANGLES: u32 = 4;
+const LINEAR: u32 = 9729;
+const LINEAR_MIPMAP_LINEAR: u32 = 9987;
+const REPEAT: u32 = 10497;
 const PAD: u8 = 0x20;
 // a weight sum this small means no voxel around the point
 const MIN_WEIGHT: f32 = 1e-12;
@@ -75,6 +78,55 @@ pub fn sample_attributes(
         .collect()
 }
 
+// a binary glTF of the JSON and the binary chunk
+fn assemble(gltf: &serde_json::Value, mut bin: Vec<u8>) -> Vec<u8> {
+    let mut json = serde_json::to_vec(gltf).expect("a JSON value serializes");
+    while !json.len().is_multiple_of(4) {
+        json.push(PAD);
+    }
+    pad(&mut bin);
+    let total = 12 + 8 + json.len() + 8 + bin.len();
+    let mut out = Vec::with_capacity(total);
+    for word in [
+        GLB_MAGIC,
+        GLB_VERSION,
+        total as u32,
+        json.len() as u32,
+        CHUNK_JSON,
+    ] {
+        out.extend_from_slice(&word.to_le_bytes());
+    }
+    out.extend_from_slice(&json);
+    for word in [bin.len() as u32, CHUNK_BIN] {
+        out.extend_from_slice(&word.to_le_bytes());
+    }
+    out.extend_from_slice(&bin);
+    out
+}
+
+fn pad(bin: &mut Vec<u8>) {
+    while !bin.len().is_multiple_of(4) {
+        bin.push(0);
+    }
+}
+
+/// TRELLIS.2's z-up frame to glTF's y-up one, as `to_glb` turns it: (x, y, z) -> (x, z, -y)
+pub fn y_up(v: [f32; 3]) -> [f32; 3] {
+    [v[0], v[2], -v[1]]
+}
+
+fn bounds(points: &[[f32; 3]]) -> ([f32; 3], [f32; 3]) {
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for v in points {
+        for a in 0..3 {
+            min[a] = min[a].min(v[a]);
+            max[a] = max[a].max(v[a]);
+        }
+    }
+    (min, max)
+}
+
 fn push_f32s(bin: &mut Vec<u8>, values: impl Iterator<Item = f32>) -> (usize, usize) {
     let start = bin.len();
     for v in values {
@@ -83,19 +135,13 @@ fn push_f32s(bin: &mut Vec<u8>, values: impl Iterator<Item = f32>) -> (usize, us
     (start, bin.len() - start)
 }
 
-/// The mesh as a binary glTF with each vertex's PBR attributes (clamped to [0, 1]).
+/// The mesh as a binary glTF (y up) with each vertex's PBR attributes (clamped to [0, 1]).
 pub fn to_glb(mesh: &Mesh, attrs: &[Pbr]) -> Vec<u8> {
     let clamp = |v: f32| v.clamp(0.0, 1.0);
     let mut bin = Vec::new();
-    let mut min = [f32::INFINITY; 3];
-    let mut max = [f32::NEG_INFINITY; 3];
-    for v in &mesh.vertices {
-        for a in 0..3 {
-            min[a] = min[a].min(v[a]);
-            max[a] = max[a].max(v[a]);
-        }
-    }
-    let positions = push_f32s(&mut bin, mesh.vertices.iter().flatten().copied());
+    let vertices: Vec<[f32; 3]> = mesh.vertices.iter().map(|&v| y_up(v)).collect();
+    let (min, max) = bounds(&vertices);
+    let positions = push_f32s(&mut bin, vertices.iter().flatten().copied());
     let colors = push_f32s(
         &mut bin,
         attrs
@@ -150,30 +196,102 @@ pub fn to_glb(mesh: &Mesh, attrs: &[Pbr]) -> Vec<u8> {
             {"bufferView": 4, "componentType": UNSIGNED_INT, "count": mesh.faces.len() * 3, "type": "SCALAR"},
         ],
     });
-    let mut json = serde_json::to_vec(&gltf).expect("a JSON value serializes");
-    while !json.len().is_multiple_of(4) {
-        json.push(PAD);
-    }
-    while !bin.len().is_multiple_of(4) {
-        bin.push(0);
-    }
-    let total = 12 + 8 + json.len() + 8 + bin.len();
-    let mut out = Vec::with_capacity(total);
-    for word in [
-        GLB_MAGIC,
-        GLB_VERSION,
-        total as u32,
-        json.len() as u32,
-        CHUNK_JSON,
-    ] {
-        out.extend_from_slice(&word.to_le_bytes());
-    }
-    out.extend_from_slice(&json);
-    for word in [bin.len() as u32, CHUNK_BIN] {
-        out.extend_from_slice(&word.to_le_bytes());
-    }
-    out.extend_from_slice(&bin);
+    assemble(&gltf, bin)
+}
+
+// PNG bytes of a `size` x `size` image with `channels` 3 or 4
+fn png(pixels: &[u8], size: usize, channels: usize) -> Vec<u8> {
+    let color = if channels == 4 {
+        image::ExtendedColorType::Rgba8
+    } else {
+        image::ExtendedColorType::Rgb8
+    };
+    let mut out = Vec::new();
+    image::ImageEncoder::write_image(
+        image::codecs::png::PngEncoder::new(&mut out),
+        pixels,
+        size as u32,
+        size as u32,
+        color,
+    )
+    .expect("a whole image encodes");
     out
+}
+
+/// The baked mesh as a binary glTF (y up): positions, normals and uvs, a base color + alpha texture and a
+/// metallic-roughness texture, double-sided as `to_glb` makes it without a remesh.
+pub fn to_textured_glb(baked: &super::bake::Baked) -> Vec<u8> {
+    let u = &baked.unwrapped;
+    let mut bin = Vec::new();
+    let vertices: Vec<[f32; 3]> = u.mesh.vertices.iter().map(|&v| y_up(v)).collect();
+    let (min, max) = bounds(&vertices);
+    let positions = push_f32s(&mut bin, vertices.iter().flatten().copied());
+    let normals = push_f32s(&mut bin, u.normals.iter().flat_map(|&n| y_up(n)));
+    let uvs = push_f32s(&mut bin, u.uvs.iter().flatten().copied());
+    let start = bin.len();
+    for i in u.mesh.faces.iter().flatten() {
+        bin.extend_from_slice(&i.to_le_bytes());
+    }
+    let indices = (start, bin.len() - start);
+    let mut image_view = |pixels: &[u8], channels: usize| {
+        let start = bin.len();
+        bin.extend_from_slice(&png(pixels, baked.size, channels));
+        let view = (start, bin.len() - start);
+        pad(&mut bin);
+        view
+    };
+    let base = image_view(&baked.base_color, 4);
+    let material = image_view(&baked.metallic_roughness, 3);
+    let view = |(offset, length): (usize, usize), target: Option<u32>| {
+        let mut v = json!({"buffer": 0, "byteOffset": offset, "byteLength": length});
+        if let Some(t) = target {
+            v["target"] = json!(t);
+        }
+        v
+    };
+    let n = u.mesh.vertices.len();
+    let gltf = json!({
+        "asset": {"version": "2.0", "generator": "inference.rs"},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"mesh": 0}],
+        "meshes": [{"primitives": [{
+            "attributes": {"POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2},
+            "indices": 3,
+            "material": 0,
+            "mode": TRIANGLES,
+        }]}],
+        "materials": [{
+            "pbrMetallicRoughness": {
+                "baseColorFactor": [1.0, 1.0, 1.0, 1.0],
+                "baseColorTexture": {"index": 0},
+                "metallicFactor": 1.0,
+                "roughnessFactor": 1.0,
+                "metallicRoughnessTexture": {"index": 1},
+            },
+            "alphaMode": "OPAQUE",
+            "doubleSided": true,
+        }],
+        "samplers": [{"magFilter": LINEAR, "minFilter": LINEAR_MIPMAP_LINEAR, "wrapS": REPEAT, "wrapT": REPEAT}],
+        "textures": [{"sampler": 0, "source": 0}, {"sampler": 0, "source": 1}],
+        "images": [{"bufferView": 4, "mimeType": "image/png"}, {"bufferView": 5, "mimeType": "image/png"}],
+        "buffers": [{"byteLength": bin.len()}],
+        "bufferViews": [
+            view(positions, Some(ARRAY_BUFFER)),
+            view(normals, Some(ARRAY_BUFFER)),
+            view(uvs, Some(ARRAY_BUFFER)),
+            view(indices, Some(ELEMENT_ARRAY_BUFFER)),
+            view(base, None),
+            view(material, None),
+        ],
+        "accessors": [
+            {"bufferView": 0, "componentType": FLOAT, "count": n, "type": "VEC3", "min": min, "max": max},
+            {"bufferView": 1, "componentType": FLOAT, "count": n, "type": "VEC3"},
+            {"bufferView": 2, "componentType": FLOAT, "count": n, "type": "VEC2"},
+            {"bufferView": 3, "componentType": UNSIGNED_INT, "count": u.mesh.faces.len() * 3, "type": "SCALAR"},
+        ],
+    });
+    assemble(&gltf, bin)
 }
 
 #[cfg(test)]
