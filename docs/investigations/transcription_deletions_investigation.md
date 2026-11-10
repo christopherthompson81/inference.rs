@@ -300,3 +300,27 @@ did (0.65 s against the VAD's share of the stream). One clip; the 13-word run is
 pass recovers. With the pass the totals level: sequential diarization costs the concurrency the VAD plan had.
 What it buys: the overlapped turns are known before any transcription, so windows and spans can go in one batch,
 and the gap rule (which needs the first pass's words) is the only thing keeping them apart.
+
+## Run 12 - 2026-11-09 22:50
+
+Question: does Run 11's diarizer plan hold on the other four recordings? No reference there, so each plan against
+the other: non-filler words one has that the other lacks within 1 s, and the runs of 4+ of them.
+
+Command: `scratchpad/drops/plans.py vulkan:0 <five clips>`; `frcheck.py` for the French one.
+
+```
+clip                       words vad/diar   only in VAD plan (runs >= 4)         only in diarizer plan (runs >= 4)
+en 1 (telephone)           1498 / 1496       60 (4 4 6)                           51 (4 5)
+en 2 (telephone)           2182 / 2209       66 (10 4)                            88 (8 7 4 6)
+en 3 (telephone)           2171 / 2160       85 (4 4 4 4 6 5)                     72 (4 5 8)
+de 1                       1440 / 1447      174 (4 18 6 11 6 5 5 5 4)            174 (5 4 10 7 4 4 4 4 4 4 11 5)
+fr 1 (multi-speaker)       1090 /  920      193 (16 5 9 17 30 101)                22 (8)
+```
+
+On the two-speaker clips the plans trade words about evenly. On the French one, where the diarizer finds 8
+speakers, 188 of the VAD plan's 1090 words lie outside every diarized turn: stretches of 5-38 s (one of 100 words
+at 391-429 s) the diarizer gives no speaker at all, so a plan from its turns never transcribes them.
+
+Implication: the diarizer cannot replace the VAD as the plan; it misses speech outright on a many-speaker
+recording. Keep the VAD plan with the diarizer beside it (Run 10), and batch. Separately, words in speech the
+diarizer gives no speaker get the nearest turn's speaker (`word_speakers`), which this clip shows is common.
