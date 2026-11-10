@@ -17,13 +17,13 @@ pub const MAX_HOLE_PERIMETER: f32 = 3e-2;
 pub const MIN_COMPONENT_AREA: f32 = 1e-5;
 /// TRELLIS.2's face budget for the extracted mesh
 pub const SIMPLIFY_TARGET: usize = 1_000_000;
-const START_THRESHOLD: f32 = 1e-8;
-const LAMBDA_EDGE_LENGTH: f32 = 1e-2;
-const LAMBDA_SKINNY: f32 = 1e-3;
+pub(super) const START_THRESHOLD: f32 = 1e-8;
+pub(super) const LAMBDA_EDGE_LENGTH: f32 = 1e-2;
+pub(super) const LAMBDA_SKINNY: f32 = 1e-3;
 // a round removing less than this share of the faces raises the threshold
-const SLOW_ROUND: f64 = 1e-2;
-const THRESHOLD_STEP: f32 = 10.0;
-const SKINNY_EPS: f32 = 1e-12;
+pub(super) const SLOW_ROUND: f64 = 1e-2;
+pub(super) const THRESHOLD_STEP: f32 = 10.0;
+pub(super) const SKINNY_EPS: f32 = 1e-12;
 // vertices a worker gathers edges for at a time
 const EDGE_CHUNK: usize = 4096;
 
@@ -411,6 +411,21 @@ fn simplify_round(mesh: &mut Mesh, threshold: f32) {
         .map(|(f, _)| f.map(|i| remap[i as usize]))
         .collect();
     mesh.vertices = new_verts;
+}
+
+/// [`simplify`] on `device`: on the GPU for a CUDA device (same result), else on the host.
+pub fn simplify_on(
+    mesh: &mut Mesh,
+    target: usize,
+    device: &inference_tensor::Device,
+) -> inference_tensor::Result<()> {
+    #[cfg(feature = "cuda")]
+    if let inference_tensor::Device::Cuda(dev) = device {
+        return super::simplify_cuda::simplify(mesh, target, dev);
+    }
+    let _ = device;
+    simplify(mesh, target);
+    Ok(())
 }
 
 /// Collapses edges until at most `target` faces remain.

@@ -13,6 +13,8 @@ mod parity;
 pub mod pipeline;
 pub mod remesh;
 pub mod shape_flow;
+#[cfg(feature = "cuda")]
+mod simplify_cuda;
 pub mod sparse;
 pub mod structure;
 pub mod vec3;

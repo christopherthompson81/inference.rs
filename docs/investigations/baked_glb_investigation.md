@@ -195,3 +195,29 @@ mapped while loading), which is what `/usr/bin/time`'s 3.9 GB maximum resident c
 
 Next candidates: xatlas's chart growth is the floor here (quadratic in chart size, its output depends on it); our
 simplify (13 s; 25+ s on the remesh's 8.3M faces, against CuMesh's 1 s on the GPU) is the largest piece we own.
+
+## Run 9 - 2026-11-11
+
+Question: the export ran entirely on the CPU while the GPU sat idle; how much does a CUDA port of our largest owned
+step, `cleanup::simplify`, buy, and can it give the host port's exact result?
+
+Benchmark `simplifying_the_remesh_is_timed` (TRELLIS2_REMESH_REF: the remesh's 8.3M-face shell to 1M), host:
+36 rounds (20 at threshold 1e-8, 16 at 1e-7), each 0.1-1.1 s: 13.75 s.
+
+`trellis2::simplify_cuda` + `kernels/cuda/mesh.cu` (the crate's first kernels, fatbin like inference-layout's): the
+mesh stays on the device for every round. Per round: vertex -> face lists (count, scan, fill, then each list sorted
+to the host's ascending order), edges per vertex (each vertex dedupes and ranks its few higher neighbours, so the
+edge list comes out vertex-major and neighbour-ascending like the host's, no global sort), quadrics, costs, the
+per-face cheapest edge (64-bit atomicMin of cost bits << 32 | edge), winners, collapses (winners share no face or
+vertex, so they apply in parallel), compaction by prefix scans. Built with `--fmad=false` so every product rounds as
+on the host.
+
+    simplified on Cpu  in 13.75 s to 465634 vertices / 931728 faces, hash 7c739de25cc0a125
+    simplified on Cuda in  0.49 s to 465634 vertices / 931728 faces, hash 7c739de25cc0a125
+
+Bit-identical, 28x, and faster than CuMesh's own 1.0 s. A GPU case pins it on a bumpy grid (vertices and faces equal).
+`cleanup::simplify_on(mesh, target, device)` dispatches; `bake` and `Generated::vertex_colored` take the device.
+
+End to end (CLI, robot, 1024-cascade): default 115 s -> 87.0 s (export 33.2 s), `--remesh` 128 s -> 93.0 s (export
+38.8 s); same output sizes as before. What is left of the export: xatlas ~28 s (CPU in the reference too), the
+remesh's distance queries ~8 s, chart clustering 3.5 s, inpainting 4.7 s.

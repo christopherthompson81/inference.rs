@@ -603,8 +603,15 @@ fn the_bake_matches_the_reference() -> Result<()> {
     let resolution = full["resolution"].to_dtype(DType::I64)?.to_vec1::<i64>()?[0] as usize;
     let start = std::time::Instant::now();
 
-    let baked = super::bake::bake(&mesh, &coords, &values, resolution, &Default::default())
-        .map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
+    let baked = super::bake::bake(
+        &mesh,
+        &coords,
+        &values,
+        resolution,
+        &Default::default(),
+        &Device::Cpu,
+    )
+    .map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
     let theirs = mesh_of(&refs, "final.v", "final.f")?;
     let their_uvs: Vec<[f32; 2]> = refs["final.uv"]
         .to_vec2::<f32>()?
@@ -745,6 +752,44 @@ fn distances_and_the_remesh_match_the_reference() -> Result<()> {
         / reference.vertices.len() as f64;
     assert!(ratio < 1e-5, "vertex count");
     assert!(ab_99 < DISTANCE_TOLERANCE, "vertex positions");
+    Ok(())
+}
+
+// a mesh's bits, to tell a change that keeps simplification's output from one that moves it
+fn mesh_hash(mesh: &super::mesh::Mesh) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for v in &mesh.vertices {
+        v.map(f32::to_bits).hash(&mut h);
+    }
+    mesh.faces.hash(&mut h);
+    h.finish()
+}
+
+// TRELLIS2_REMESH_REF's remeshed shell (8.3M faces) simplified to the export's budget, timed and hashed
+#[test]
+#[ignore = "needs a reference dump"]
+fn simplifying_the_remesh_is_timed() -> Result<()> {
+    let Some(reference) = std::env::var_os("TRELLIS2_REMESH_REF") else {
+        return Ok(());
+    };
+    let refs = inference_tensor::safetensors::load(reference, &Device::Cpu)?;
+    let input = mesh_of(&refs, "remesh.v", "remesh.f")?;
+    let mut hashes = Vec::new();
+    for device in [Device::Cpu, Device::cuda_if_available(0)?] {
+        let mut mesh = input.clone();
+        let start = std::time::Instant::now();
+        super::cleanup::simplify_on(&mut mesh, super::bake::DECIMATION_TARGET, &device)?;
+        println!(
+            "simplified on {device:?} in {:.2} s to {} vertices / {} faces, hash {:x}",
+            start.elapsed().as_secs_f64(),
+            mesh.vertices.len(),
+            mesh.faces.len(),
+            mesh_hash(&mesh)
+        );
+        hashes.push(mesh_hash(&mesh));
+    }
+    assert_eq!(hashes[0], hashes[1], "the device's result is the host's");
     Ok(())
 }
 

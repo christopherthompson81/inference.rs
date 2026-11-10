@@ -5,6 +5,7 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use inference_tensor::{Device, Result};
 use inference_vision::inpaint_telea;
 use rayon::prelude::*;
 
@@ -288,30 +289,31 @@ fn to_u8(x: f32) -> u8 {
 /// `to_glb`'s cleanup chain before unwrapping: holes filled, simplified to three times the target, duplicate faces,
 /// non-manifold edges and specks fixed, holes filled again, simplified to the target and fixed again, faces wound
 /// consistently. Returns the cleaned mesh and the hole-filled one the texels are projected onto.
-pub fn clean(mesh: &Mesh, target: usize) -> (Mesh, Mesh) {
+pub fn clean(mesh: &Mesh, target: usize, device: &Device) -> Result<(Mesh, Mesh)> {
     let mut m = mesh.clone();
     cleanup::fill_holes(&mut m, cleanup::MAX_HOLE_PERIMETER);
     let original = m.clone();
     for target in [target * FIRST_PASS_FACTOR, target] {
-        cleanup::simplify(&mut m, target);
+        cleanup::simplify_on(&mut m, target, device)?;
         cleanup::remove_duplicate_faces(&mut m);
         cleanup::repair_non_manifold_edges(&mut m);
         cleanup::remove_small_connected_components(&mut m, cleanup::MIN_COMPONENT_AREA);
         cleanup::fill_holes(&mut m, cleanup::MAX_HOLE_PERIMETER);
     }
     cleanup::unify_face_orientations(&mut m);
-    (m, original)
+    Ok((m, original))
 }
 
 /// The mesh (in [-0.5, 0.5]^3) cleaned, unwrapped and baked from the attribute volume (`coords` / `values` at
-/// `resolution`).
+/// `resolution`), simplifying on `device`.
 pub fn bake(
     mesh: &Mesh,
     coords: &[[i32; 3]],
     values: &[[f32; 6]],
     resolution: usize,
     options: &BakeOptions,
-) -> Result<Baked, inference_xatlas::Error> {
+    device: &Device,
+) -> Result<Baked> {
     let (cleaned, bvh) = if options.remesh {
         let mut filled = mesh.clone();
         cleanup::fill_holes(&mut filled, cleanup::MAX_HOLE_PERIMETER);
@@ -322,13 +324,13 @@ pub fn bake(
             BAND,
             PROJECT_BACK,
         );
-        cleanup::simplify(&mut shell, options.decimation_target);
+        cleanup::simplify_on(&mut shell, options.decimation_target, device)?;
         (shell, bvh)
     } else {
-        let (cleaned, original) = clean(mesh, options.decimation_target);
+        let (cleaned, original) = clean(mesh, options.decimation_target, device)?;
         (cleaned, Bvh::new(&original))
     };
-    let unwrapped = uv_unwrap(&cleaned)?;
+    let unwrapped = uv_unwrap(&cleaned).map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
     let size = options.texture_size;
     let texel_faces = rasterize(&unwrapped.mesh.faces, &unwrapped.uvs, size);
     let covered: Vec<usize> = (0..size * size).filter(|&t| texel_faces[t] > 0).collect();
@@ -457,7 +459,15 @@ mod tests {
             texture_size: 64,
             ..BakeOptions::default()
         };
-        let baked = bake(&mesh, &coords, &values, res as usize, &options).expect("a cube bakes");
+        let baked = bake(
+            &mesh,
+            &coords,
+            &values,
+            res as usize,
+            &options,
+            &Device::Cpu,
+        )
+        .expect("a cube bakes");
         assert_eq!(
             baked.unwrapped.normals.len(),
             baked.unwrapped.mesh.vertices.len()

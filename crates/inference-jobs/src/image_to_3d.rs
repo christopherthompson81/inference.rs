@@ -183,11 +183,12 @@ pub fn generate_3d_on(
                 &out.voxel_attrs,
                 out.resolution,
                 bake_options,
+                device,
             )?;
             (to_textured_glb(&baked), baked.unwrapped.mesh)
         }
         None => {
-            let (mesh, attrs) = out.vertex_colored();
+            let (mesh, attrs) = out.vertex_colored(device)?;
             (to_glb(&mesh, &attrs), mesh)
         }
     };
