@@ -3358,6 +3358,7 @@ dependencies = [
  "inference-quant",
  "inference-tensor",
  "inference-vision",
+ "inference-xatlas",
  "rand 0.9.4",
  "rand_distr",
  "rayon",

@@ -152,6 +152,16 @@ impl std::error::Error for Error {}
 
 struct Atlas(*mut XAtlas);
 
+// xatlas leaves an empty array null
+unsafe fn slice<'a, T>(ptr: *const T, len: u32) -> &'a [T] {
+    if len == 0 {
+        &[]
+    } else {
+        // SAFETY: the caller passes one of xatlas's output arrays with its length
+        unsafe { std::slice::from_raw_parts(ptr, len as usize) }
+    }
+}
+
 impl Drop for Atlas {
     fn drop(&mut self) {
         // SAFETY: created by xatlasCreate and destroyed once
@@ -190,12 +200,9 @@ pub fn unwrap(meshes: &[MeshInput]) -> Result<AtlasOutput, Error> {
         let out_meshes = (0..a.mesh_count as usize)
             .map(|m| {
                 let mesh = &*a.meshes.add(m);
-                let vertices =
-                    std::slice::from_raw_parts(mesh.vertex_array, mesh.vertex_count as usize);
-                let indices =
-                    std::slice::from_raw_parts(mesh.index_array, mesh.index_count as usize);
-                let charts =
-                    std::slice::from_raw_parts(mesh.chart_array, mesh.chart_count as usize);
+                let vertices = slice(mesh.vertex_array, mesh.vertex_count);
+                let indices = slice(mesh.index_array, mesh.index_count);
+                let charts = slice(mesh.chart_array, mesh.chart_count);
                 MeshOutput {
                     xref: vertices.iter().map(|v| v.xref).collect(),
                     uvs: vertices

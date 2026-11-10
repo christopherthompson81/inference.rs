@@ -291,6 +291,178 @@ fn holes_and_simplification_match_the_reference() -> Result<()> {
     Ok(())
 }
 
+// relative difference allowed in chart count and seam length
+const CHART_TOLERANCE: f64 = 1e-3;
+
+// total length of the edges between charts or on the boundary
+fn seam_length(mesh: &super::mesh::Mesh, charts: &[u32]) -> f64 {
+    let mut edges: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
+    for (f, t) in mesh.faces.iter().enumerate() {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            edges
+                .entry((a.min(b), a.max(b)))
+                .or_default()
+                .push(f as u32);
+        }
+    }
+    edges
+        .iter()
+        .filter(|(_, fs)| fs.len() != 2 || charts[fs[0] as usize] != charts[fs[1] as usize])
+        .map(|(&(a, b), _)| {
+            let (p, q) = (mesh.vertices[a as usize], mesh.vertices[b as usize]);
+            (0..3)
+                .map(|k| f64::from(p[k] - q[k]).powi(2))
+                .sum::<f64>()
+                .sqrt()
+        })
+        .sum()
+}
+
+// each face's chart named by the chart's lowest face, so one diverging merge does not renumber the rest
+fn chart_roots(charts: &[u32]) -> Vec<u32> {
+    let mut lowest = HashMap::new();
+    for (f, &c) in charts.iter().enumerate() {
+        lowest.entry(c).or_insert(f as u32);
+    }
+    charts.iter().map(|c| lowest[c]).collect()
+}
+
+// TRELLIS2_CHARTS_REF: CuMesh's `compute_charts` with `to_glb`'s options (`charts_ref.py`, scratch)
+#[test]
+#[ignore = "needs a reference dump"]
+fn charts_match_the_reference() -> Result<()> {
+    let Some(reference) = std::env::var_os("TRELLIS2_CHARTS_REF") else {
+        return Ok(());
+    };
+    let refs = inference_tensor::safetensors::load(reference, &Device::Cpu)?;
+    let mut mesh = mesh_of(&refs, "vertices", "faces")?;
+    let faces = mesh.faces.len();
+    super::charts::remove_degenerate_faces(&mut mesh);
+    assert_eq!(
+        mesh.faces.len(),
+        faces,
+        "the reference's faces are already non-degenerate"
+    );
+    let theirs: Vec<u32> = refs["charts"]
+        .to_dtype(DType::I64)?
+        .to_vec1::<i64>()?
+        .iter()
+        .map(|&c| c as u32)
+        .collect();
+    let start = std::time::Instant::now();
+    let ours = super::charts::compute_charts(
+        &mesh,
+        super::charts::CONE_HALF_ANGLE,
+        super::charts::AREA_PENALTY,
+        super::charts::PERIMETER_AREA_PENALTY,
+    );
+    let count = |c: &[u32]| c.iter().max().map_or(0, |&m| m as usize + 1);
+    let (a, b) = (chart_roots(&ours), chart_roots(&theirs));
+    let seconds = start.elapsed().as_secs_f64();
+    let same = a.iter().zip(&b).filter(|(x, y)| x == y).count();
+    // CuMesh normalizes with rsqrtf and sums in tree order, so near ties flip: compare the clustering's quality
+    let seams = |c: &[u32]| seam_length(&mesh, c);
+    let sizes = |c: &[u32]| {
+        let mut n = vec![0usize; count(c)];
+        for &x in c {
+            n[x as usize] += 1;
+        }
+        n.sort_unstable();
+        [0.5, 0.9, 0.99, 1.0].map(|q| n[((n.len() - 1) as f64 * q) as usize])
+    };
+    let (ours_seam, theirs_seam) = (seams(&ours), seams(&theirs));
+    println!(
+        "charts in {seconds:.2} s: {} vs {}, {same}/{faces} faces in the same chart; seams {ours_seam:.3} vs \
+         {theirs_seam:.3}; faces per chart p50/p90/p99/max {:?} vs {:?}",
+        count(&ours),
+        count(&theirs),
+        sizes(&ours),
+        sizes(&theirs)
+    );
+    let ratio = |a: f64, b: f64| (a - b).abs() / b;
+    assert!(
+        ratio(count(&ours) as f64, count(&theirs) as f64) < CHART_TOLERANCE,
+        "chart count"
+    );
+    assert!(
+        ratio(ours_seam, theirs_seam) < CHART_TOLERANCE,
+        "seam length"
+    );
+    Ok(())
+}
+
+// the uv area the faces cover, and how many have none
+fn uv_coverage(faces: &[[u32; 3]], uvs: &[[f32; 2]]) -> (f64, usize) {
+    let areas: Vec<f64> = faces
+        .iter()
+        .map(|t| {
+            let [a, b, c] = t.map(|v| uvs[v as usize].map(f64::from));
+            ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])).abs() / 2.0
+        })
+        .collect();
+    (
+        areas.iter().sum(),
+        areas.iter().filter(|&&a| a == 0.0).count(),
+    )
+}
+
+// TRELLIS2_CHARTS_REF's mesh unwrapped, against CuMesh's `uv_unwrap` (TRELLIS2_UNWRAP_REF, `unwrap_ref.py`, scratch)
+#[test]
+#[ignore = "needs reference dumps"]
+fn the_unwrap_matches_the_reference() -> Result<()> {
+    let (Some(input), Some(reference)) = (
+        std::env::var_os("TRELLIS2_CHARTS_REF"),
+        std::env::var_os("TRELLIS2_UNWRAP_REF"),
+    ) else {
+        return Ok(());
+    };
+    let mesh = mesh_of(
+        &inference_tensor::safetensors::load(input, &Device::Cpu)?,
+        "vertices",
+        "faces",
+    )?;
+    let refs = inference_tensor::safetensors::load(reference, &Device::Cpu)?;
+    let theirs = mesh_of(&refs, "vertices", "faces")?;
+    let their_uvs: Vec<[f32; 2]> = refs["uvs"]
+        .to_vec2::<f32>()?
+        .iter()
+        .map(|r| [r[0], r[1]])
+        .collect();
+    let start = std::time::Instant::now();
+    let ours =
+        super::charts::uv_unwrap(&mesh).map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
+    let seconds = start.elapsed().as_secs_f64();
+    let (ours_area, ours_empty) = uv_coverage(&ours.mesh.faces, &ours.uvs);
+    let (theirs_area, theirs_empty) = uv_coverage(&theirs.faces, &their_uvs);
+    println!(
+        "unwrapped in {seconds:.2} s into {}x{}: {} vertices / {} faces vs {} / {}; uv coverage {ours_area:.4} vs \
+         {theirs_area:.4}; faces without uv area {ours_empty} vs {theirs_empty}",
+        ours.width,
+        ours.height,
+        ours.mesh.vertices.len(),
+        ours.mesh.faces.len(),
+        theirs.vertices.len(),
+        theirs.faces.len()
+    );
+    assert_eq!(
+        ours.mesh.faces.len(),
+        theirs.faces.len(),
+        "every face mapped"
+    );
+    let ratio = |a: f64, b: f64| (a - b).abs() / b;
+    assert!(
+        ratio(
+            ours.mesh.vertices.len() as f64,
+            theirs.vertices.len() as f64
+        ) < CHART_TOLERANCE * 10.0
+    );
+    assert!(
+        ratio(ours_area, theirs_area) < CHART_TOLERANCE * 10.0,
+        "uv coverage"
+    );
+    Ok(())
+}
+
 // JOVOX_DIR, JOVOX_DINOV3 and JOVOX_E2E (the JoVox dump whose `prep` image TRELLIS2_REF was made from)
 #[test]
 #[ignore = "needs the JoVox and DINOv3 checkpoints, reference dumps and a GPU"]
