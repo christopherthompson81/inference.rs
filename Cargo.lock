@@ -3353,6 +3353,7 @@ dependencies = [
  "half",
  "image",
  "inference-json",
+ "inference-kernel-build",
  "inference-models-diffusion",
  "inference-nn",
  "inference-quant",
