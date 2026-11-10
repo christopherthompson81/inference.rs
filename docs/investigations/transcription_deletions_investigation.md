@@ -183,3 +183,27 @@ overlap   WER     sub del ins
 Implication: what is left is overlap and context near-ties, which a second, per-speaker pass reaches at ~50%
 precision as it stands (it would need a filter, e.g. segment length and runs of 3+ new words, and costs about half
 again the ASR time for this clip). Window cuts and dtype are ruled out as the main cause.
+
+## Run 7 - 2026-11-09 20:00
+
+Question (user): one-second overlaps are the ones that code-switch; does a minimum segment length make the second
+pass clean?
+
+Command: `second.py` again, each segment's new and confirmed words kept, then cut by segment length.
+
+```
+min length  segments  seconds  new  confirmed
+0           147       322      145  64 (44%)
+1.0 s        81       288      103  48 (47%)
+1.5 s        64       267       86  45 (52%)
+2.0 s        54       249       81  43 (53%)
+3.0 s        38       210       71  37 (52%)
+```
+
+From 1.5 s up no Spanish is left. The unconfirmed words there are English, and the two biggest blocks (13 words at
+~74.5 s, 9 at ~589 s) fill gaps where the stream has no words at all for 4 s and 6 s, so they look like speech the
+reference leaves out rather than insertions. What remains as noise is mostly a repeated filler or one word beside one
+the stream has. Confirmed-by-ONNX-or-reference understates the precision of a 1.5 s cutoff.
+
+Implication: a second pass over overlapped segments of 1.5 s or more (64 here, 267 s, so about +45% ASR time), its
+new words merged into the timeline, recovers the audible drops with little code-switching.
