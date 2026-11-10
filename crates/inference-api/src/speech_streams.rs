@@ -19,7 +19,7 @@ use crate::{
     api_error::{ApiError, ApiErrorKind},
     generation::{
         audio_error, check_beam, decode_audio, render_diarization, render_transcript, run,
-        speaker_turns, unexpected, word_speakers,
+        speaker_turns, unexpected,
     },
     lora_routing::DEFAULT_MODEL_ID,
     model_inventory::{CancelOnDrop, event},
@@ -27,6 +27,7 @@ use crate::{
         DiarizationRequest, DiarizationResponseFormat, TimestampGranularity, TranscriptionRequest,
         TranscriptionResponseFormat, TranscriptionTask,
     },
+    overlap_pass::{PassContext, noting_windows, overlap_pass},
     request_body::parse_json,
     types::SharedInferenceRsState,
 };
@@ -39,6 +40,8 @@ const MAX_STREAM_SAMPLES: usize = 12 * 60 * 60 * STREAM_SAMPLE_RATE as usize;
 const PATH_FIELD: &str = "path";
 const FROM_SECONDS_FIELD: &str = "from_seconds";
 const MAX_WINDOW_FIELD: &str = "max_window_seconds";
+const SPANS_FIELD: &str = "spans";
+const TURNS_FIELD: &str = "speaker_turns";
 // the shortest window a transcription stream plans: under ~5 s Parakeet, which identifies the language itself, can
 // switch language from one window to the next
 const MIN_WINDOW_SECONDS: f64 = 5.0;
@@ -54,6 +57,7 @@ struct Source {
     path: Option<PathBuf>,
     from_seconds: f64,
     max_window_seconds: Option<f64>,
+    spans: Option<Vec<(f64, f64)>>,
 }
 
 // `body`'s `path` and `from_seconds`, and the rest of it; `audio` is the bytes the caller gave, if any
@@ -94,26 +98,65 @@ fn split_source(body: &[u8], audio: &Option<Vec<u8>>) -> Result<(Source, Vec<u8>
                 })?,
         ),
     };
+    let spans = match fields.remove(SPANS_FIELD) {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(spans(&value)?),
+    };
+    if spans.is_some() && max_window_seconds.is_some() {
+        return Err(ApiError::invalid_request(
+            "`spans` are the windows; give them or `max_window_seconds`, not both",
+        ));
+    }
     let rest = serde_json::to_vec(&fields).map_err(|_| ApiError::internal())?;
     Ok((
         Source {
             path,
             from_seconds,
             max_window_seconds,
+            spans,
         },
         rest,
     ))
+}
+
+// `spans`: `[start, end]` seconds, each start under its end and none before the last one's
+fn spans(value: &Value) -> Result<Vec<(f64, f64)>, ApiError> {
+    let invalid = || {
+        ApiError::invalid_request(
+            "`spans` must be a non-empty list of [start, end] seconds, 0 <= start < end, starts in order",
+        )
+    };
+    let list = value
+        .as_array()
+        .filter(|l| !l.is_empty())
+        .ok_or_else(invalid)?;
+    let mut out: Vec<(f64, f64)> = Vec::with_capacity(list.len());
+    for span in list {
+        let pair = span
+            .as_array()
+            .filter(|p| p.len() == 2)
+            .ok_or_else(invalid)?;
+        let (Some(start), Some(end)) = (pair[0].as_f64(), pair[1].as_f64()) else {
+            return Err(invalid());
+        };
+        let after_last = out.last().is_none_or(|&(last, _)| start >= last);
+        if !(start.is_finite() && end.is_finite() && 0.0 <= start && start < end && after_last) {
+            return Err(invalid());
+        }
+        out.push((start, end));
+    }
+    Ok(out)
 }
 
 /// Transcribes a whole recording, `audio` bytes or the request's `path` (a local file, decoded as it reads), as a
 /// stream: `started` (data: `{"duration", "windows": [{"index", "start", "end"}]}`), then a `window` (data:
 /// `{"index", "start", "end", "text", "words": [{"word", "start", "end"}]}`) and a `progress` (data: `{"done",
 /// "total", "seconds_done"}`) as each window finishes, and last `done` (data: the verbose_json transcript, words and
-/// segments, speakers with `diarization_model`), `canceled` or `error` (data: the error envelope). Times are seconds
-/// into the recording. `from_seconds` resumes at a window's end: the windows are planned over the whole recording as
-/// before and those ending by then skipped, so the rest (and `done`, which holds only them) match the uninterrupted
-/// run. A model that does not window its audio sends only the last event. Canceling stops it before its next
-/// window; dropping the stream cancels it.
+/// segments; with `diarization_model` speakers and its `speaker_turns` over the whole recording), `canceled` or
+/// `error` (data: the error envelope). Times are seconds into the recording. `from_seconds` resumes at a window's end:
+/// the windows are planned over the whole recording as before and those ending by then skipped, so the rest (and
+/// `done`, which holds only them) match the uninterrupted run. A model that does not window its audio sends only the
+/// last event. Canceling stops it before its next window; dropping the stream cancels it.
 pub(crate) fn transcription_events(
     state: SharedInferenceRsState,
     body: &[u8],
@@ -222,49 +265,63 @@ async fn load_audio(
 async fn transcribe(
     state: &SharedInferenceRsState,
     request: TranscriptionRequest,
-    source: Source,
+    mut source: Source,
     bytes: Option<Vec<u8>>,
     events: &mpsc::UnboundedSender<String>,
     canceled: &RequestCancellation,
 ) -> Result<Value, ApiError> {
     let resume_at = (source.from_seconds > 0.0).then_some(source.from_seconds);
     let max_window_seconds = source.max_window_seconds;
+    let spans = source.spans.take();
     let audio = load_audio(source, bytes, false, canceled).await?;
-    let progress = report(events.clone(), canceled.clone());
+    let (progress, windowed) = noting_windows(Some(report(events.clone(), canceled.clone())));
     let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
+    let options = TranscriptionOptions {
+        language: request.language.clone(),
+        beam_size: request.beam_size,
+        translate: request.task == TranscriptionTask::Translate,
+        resume_at,
+        max_window_seconds,
+        spans,
+    };
     let message = |audio| RequestMessage::Transcription {
         audio,
-        options: TranscriptionOptions {
-            language: request.language.clone(),
-            beam_size: request.beam_size,
-            translate: request.task == TranscriptionTask::Translate,
-            resume_at,
-            max_window_seconds,
-        },
+        options: options.clone(),
         progress: Some(progress.clone()),
     };
-    let (transcript, speakers) = match request.diarization_model.clone() {
-        None => (
-            run(state, &request.model, repr, message(audio)).await?,
-            None,
-        ),
-        Some(diarizer) => {
-            let (transcript, turns) = futures::join!(
-                run(state, &request.model, repr, message(audio.clone())),
-                speaker_turns(state, &diarizer, audio),
-            );
-            let Response::Diarization(turns) = turns? else {
-                return Err(unexpected(state));
-            };
-            (transcript?, Some(turns.segments))
-        }
+    let Some(diarizer) = request.diarization_model.clone() else {
+        let Response::Transcription(transcript) =
+            run(state, &request.model, repr, message(audio)).await?
+        else {
+            return Err(unexpected(state));
+        };
+        let output = render_transcript(&request, transcript, None)?;
+        return serde_json::from_str(&output.body).map_err(|_| ApiError::internal());
     };
-    let Response::Transcription(transcript) = transcript else {
+    let (transcript, turns) = futures::join!(
+        run(state, &request.model, repr.clone(), message(audio.clone())),
+        speaker_turns(state, &diarizer, audio.clone()),
+    );
+    let (Response::Transcription(transcript), Response::Diarization(turns)) = (transcript?, turns?)
+    else {
         return Err(unexpected(state));
     };
-    let speakers = speakers.map(|turns| word_speakers(&transcript.words, &turns));
-    let output = render_transcript(&request, transcript, speakers.as_deref())?;
-    serde_json::from_str(&output.body).map_err(|_| ApiError::internal())
+    let ctx = PassContext {
+        state,
+        model: &request.model,
+        repr,
+        options: &options,
+        windowed: windowed.load(Ordering::Relaxed),
+        // the caller's own spans are its own second pass
+        canceled: Some(canceled),
+        enabled: request.overlap_pass != Some(false) && options.spans.is_none(),
+    };
+    let (transcript, speakers) = overlap_pass(ctx, audio, transcript, &turns.segments).await?;
+    let output = render_transcript(&request, transcript, Some(&speakers))?;
+    let mut done: Value = serde_json::from_str(&output.body).map_err(|_| ApiError::internal())?;
+    // the whole recording's turns, so a resumed caller can attribute the words it kept from before
+    done[TURNS_FIELD] = serde_json::to_value(&turns.segments).map_err(|_| ApiError::internal())?;
+    Ok(done)
 }
 
 // the diarization stream's work: its audio loaded, diarized with each chunk reported, rendered

@@ -2353,6 +2353,10 @@ pub struct TranscriptionRequest {
     #[serde(default)]
     #[schema(example = "diarization")]
     pub diarization_model: Option<String>,
+    /// With `diarization_model`, a second pass over the long turns another speaker cuts into, where the first pass
+    /// drops words; on unless `false`. An inference.rs extension.
+    #[serde(default)]
+    pub overlap_pass: Option<bool>,
     /// `translate` writes an English translation (Whisper); `/v1/audio/translations` sets it. An inference.rs
     /// extension.
     #[serde(default)]
@@ -2371,6 +2375,7 @@ impl TranscriptionRequest {
             timestamp_granularities: Vec::new(),
             beam_size: None,
             diarization_model: None,
+            overlap_pass: None,
             task: TranscriptionTask::Transcribe,
         }
     }

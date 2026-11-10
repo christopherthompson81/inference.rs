@@ -35,6 +35,7 @@ const TRANSCRIPTION_FIELDS: &[(&str, Field)] = &[
     ("temperature", Field::Number),
     ("timestamp_granularities", Field::List),
     ("beam_size", Field::Integer),
+    ("overlap_pass", Field::Flag),
 ];
 const VOICE_ACTIVITY_FIELDS: &[(&str, Field)] = &[
     ("threshold", Field::Number),

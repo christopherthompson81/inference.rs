@@ -473,6 +473,8 @@ impl InferenceRs {
             Ok(Err(e)) => return Err(format!("Engine creation failed: {e}")),
             Err(_) => return Err("Engine thread exited before reporting readiness".to_string()),
         }
+        // after the model opened its device, so the handler runs ahead of the driver's at exit
+        inference_tensor::utils::stop_work_at_exit();
 
         Ok(EngineInstance {
             instruction_id,

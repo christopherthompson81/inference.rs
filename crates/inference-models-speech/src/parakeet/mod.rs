@@ -43,6 +43,10 @@ const WINDOW_EDGE_SECONDS: f64 = 1.0;
 // without a VAD, audio past MAX_SECONDS is cut at the quietest frame this far back from each window's end
 const QUIET_SEARCH_SECONDS: f64 = 20.0;
 const QUIET_FRAME_SECONDS: f64 = 0.1;
+// a GPU encodes consecutive windows together, padded to the longest, up to this much padded audio a batch (about
+// one default window's memory); a longer window runs alone
+const BATCH_SECONDS: f64 = 120.0;
+const BATCH_WINDOW_SECONDS: f64 = 30.0;
 // how far past a resume point a window may end and still count as done before it
 const RESUME_SLACK_SECONDS: f64 = 1e-6;
 // tokens transformers' processor pins to the end of the token before them, as NeMo does for TDT
@@ -310,11 +314,12 @@ impl Parakeet {
             (None, Some(_)) => duration <= LONG_FORM_SECONDS,
             (None, None) => duration <= MAX_SECONDS,
         };
-        let windows = match vad {
+        let windows = match (&options.spans, vad) {
+            (Some(spans), _) => span_windows(spans, pcm.len(), rate)?,
             _ if whole => vec![(0, pcm.len())],
             // past full attention's bound, and with no VAD to find the silences, cut where the audio is quietest
-            None => quiet_windows(&pcm, rate, window_seconds),
-            Some(vad) => {
+            (None, None) => quiet_windows(&pcm, rate, window_seconds),
+            (None, Some(vad)) => {
                 let options = SegmentOptions {
                     max_speech_duration_s: Some(window_seconds),
                     ..SegmentOptions::default()
@@ -368,56 +373,121 @@ impl Parakeet {
             duration: pcm.len() as f64 / f64::from(rate),
             language: None,
         };
-        for (index, &(start, end)) in windows.iter().enumerate() {
-            if done(end) {
-                continue;
-            }
-            let offset = start as f64 / f64::from(rate);
-            let part = self.transcribe_samples(&pcm[start..end], language, beam)?;
-            merged.language = merged.language.or(part.language.clone());
-            let shift = |t: TimedText| TimedText {
-                start: t.start + offset,
-                end: t.end + offset,
-                ..t
-            };
-            let part = Transcription {
-                tokens: part.tokens.into_iter().map(shift).collect(),
-                words: part.words.into_iter().map(shift).collect(),
-                ..part
-            };
-            let keep_going = progress.is_none_or(|progress| {
-                progress(TranscriptionProgress::Window {
-                    index,
-                    start: spans[index].0,
-                    end: spans[index].1,
-                    transcript: &part,
-                })
-            });
-            merged.tokens.extend(part.tokens);
-            merged.words.extend(part.words);
-            if !part.text.is_empty() {
-                if !merged.text.is_empty() {
-                    merged.text.push(' ');
-                }
-                merged.text.push_str(&part.text);
-            }
-            if !keep_going && index + 1 < windows.len() {
+        let todo: Vec<usize> = (0..windows.len())
+            .filter(|&i| !done(windows[i].1))
+            .collect();
+        for group in self.batches(&todo, windows) {
+            if inference_tensor::utils::exiting() {
                 return Err(msg(TRANSCRIPTION_STOPPED));
+            }
+            let encoded = self.encode_windows(pcm, windows, &group, language)?;
+            for (index, encoded) in group.into_iter().zip(encoded) {
+                let (start, end) = windows[index];
+                let offset = start as f64 / f64::from(rate);
+                let duration = (end - start) as f64 / f64::from(rate);
+                let emissions = self.head.decode(&encoded, beam)?;
+                drop(encoded);
+                let part = self.transcription(&emissions, duration, language)?;
+                merged.language = merged.language.or(part.language.clone());
+                let shift = |t: TimedText| TimedText {
+                    start: t.start + offset,
+                    end: t.end + offset,
+                    ..t
+                };
+                let part = Transcription {
+                    tokens: part.tokens.into_iter().map(shift).collect(),
+                    words: part.words.into_iter().map(shift).collect(),
+                    ..part
+                };
+                let keep_going = progress.is_none_or(|progress| {
+                    progress(TranscriptionProgress::Window {
+                        index,
+                        start: spans[index].0,
+                        end: spans[index].1,
+                        transcript: &part,
+                    })
+                });
+                merged.tokens.extend(part.tokens);
+                merged.words.extend(part.words);
+                if !part.text.is_empty() {
+                    if !merged.text.is_empty() {
+                        merged.text.push(' ');
+                    }
+                    merged.text.push_str(&part.text);
+                }
+                if !keep_going && index + 1 < windows.len() {
+                    return Err(msg(TRANSCRIPTION_STOPPED));
+                }
             }
         }
         Ok(merged)
     }
 
-    fn transcribe_samples(
+    // `todo`'s windows in order, grouped into batches where the device gains from them, else one each
+    fn batches(&self, todo: &[usize], windows: &[(usize, usize)]) -> Vec<Vec<usize>> {
+        let device = &self.device;
+        let gains = (device.is_cuda()
+            || (device.is_vulkan() && inference_tensor::vulkan::is_discrete(device)))
+            && !self.encoder.can_stream();
+        let rate = f64::from(self.sample_rate());
+        let seconds = |i: usize| (windows[i].1 - windows[i].0) as f64 / rate;
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        let mut longest: f64 = 0.0;
+        for &i in todo {
+            let alone = !gains || seconds(i) > BATCH_WINDOW_SECONDS;
+            let joins = groups.last().is_some_and(|g| {
+                !alone
+                    && seconds(g[0]) <= BATCH_WINDOW_SECONDS
+                    && (g.len() + 1) as f64 * longest.max(seconds(i)) <= BATCH_SECONDS
+            });
+            if joins {
+                longest = longest.max(seconds(i));
+                groups.last_mut().expect("joins a group").push(i);
+            } else {
+                longest = seconds(i);
+                groups.push(vec![i]);
+            }
+        }
+        groups
+    }
+
+    // the encoder output of each of `group`'s windows, together when there are several
+    fn encode_windows(
         &self,
         pcm: &[f32],
+        windows: &[(usize, usize)],
+        group: &[usize],
         language: Option<&str>,
-        beam: Option<usize>,
-    ) -> Result<Transcription> {
-        let duration = pcm.len() as f64 / f64::from(self.sample_rate());
-        let encoded = self.encode(pcm, language)?;
-        let emissions = self.head.decode(&encoded, beam)?;
-        self.transcription(&emissions, duration, language)
+    ) -> Result<Vec<Tensor>> {
+        if let [one] = group {
+            let (start, end) = windows[*one];
+            return Ok(vec![self.encode(&pcm[start..end], language)?]);
+        }
+        let pieces: Vec<&[f32]> = group
+            .iter()
+            .map(|&i| &pcm[windows[i].0..windows[i].1])
+            .collect();
+        self.encode_batch(&pieces, language)
+    }
+
+    /// `encode` over several clips at once (an offline encoder only), each output as `encode` gives it alone.
+    pub fn encode_batch(&self, pcms: &[&[f32]], language: Option<&str>) -> Result<Vec<Tensor>> {
+        let n_mels = self.mel.config().n_mels;
+        let features = pcms
+            .iter()
+            .map(|pcm| {
+                let (features, frames) = self.features(pcm)?;
+                Tensor::from_vec(features, (1, frames, n_mels), &self.device)?.to_dtype(self.dtype)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let encoded = self.encoder.forward_batch(&features)?;
+        match &self.prompts {
+            Some(prompts) => {
+                let id = prompts.id(language)?;
+                encoded.iter().map(|e| prompts.forward(e, id)).collect()
+            }
+            None => Ok(encoded),
+        }
     }
 
     fn transcription(
@@ -642,6 +712,30 @@ fn windows(speech: &[(usize, usize)], max: usize) -> Vec<(usize, usize)> {
         }
     }
     out
+}
+
+// the caller's `(start, end)` seconds as sample windows, cut to the audio; each must hold audio and fit one pass
+fn span_windows(spans: &[(f64, f64)], len: usize, rate: u32) -> Result<Vec<(usize, usize)>> {
+    let at = |seconds: f64| ((seconds * f64::from(rate)).round() as usize).min(len);
+    let max = (MAX_SECONDS * f64::from(rate)) as usize;
+    spans
+        .iter()
+        .map(|&(start, end)| {
+            let (a, b) = (at(start), at(end));
+            if b <= a {
+                return Err(msg(format!(
+                    "the span {start}-{end} s holds no audio (the recording is {:.2} s)",
+                    len as f64 / f64::from(rate)
+                )));
+            }
+            if b - a > max {
+                return Err(msg(format!(
+                    "the span {start}-{end} s is longer than one pass takes ({MAX_SECONDS} s)"
+                )));
+            }
+            Ok((a, b))
+        })
+        .collect()
 }
 
 // back-to-back windows of at most `seconds`, each ending at the quietest frame of its last QUIET_SEARCH_SECONDS (half a

@@ -33,6 +33,7 @@ use crate::{
         diarization_rttm, transcript_srt, transcript_vtt,
     },
     operations::TokenizeRequest,
+    overlap_pass::{PassContext, noting_windows, overlap_pass},
     types::SharedInferenceRsState,
     util::{parse_image_url, validate_model_name},
 };
@@ -534,35 +535,53 @@ async fn transcribe_inner(
         let speakers = word_speakers(&transcript.words, &diarization.segments);
         return render_transcript(&request, transcript, Some(&speakers));
     }
-    let speech = |audio| RequestMessage::Transcription {
+    let options = TranscriptionOptions {
+        language: request.language.clone(),
+        beam_size: request.beam_size,
+        translate: request.task == TranscriptionTask::Translate,
+        resume_at: None,
+        max_window_seconds: None,
+        spans: None,
+    };
+    let speech = |audio, progress| RequestMessage::Transcription {
         audio,
-        options: TranscriptionOptions {
-            language: request.language.clone(),
-            beam_size: request.beam_size,
-            translate: request.task == TranscriptionTask::Translate,
-            resume_at: None,
-            max_window_seconds: None,
-        },
-        progress: None,
+        options: options.clone(),
+        progress,
     };
     let Some(diarizer) = request.diarization_model.clone() else {
-        return match run(state, &request.model, repr, speech(audio)).await? {
+        return match run(state, &request.model, repr, speech(audio, None)).await? {
             Response::Transcription(transcript) => render_transcript(&request, transcript, None),
             _ => Err(unexpected(state)),
         };
     };
+    let (hook, windowed) = noting_windows(None);
     // one upload, both models over it at once
     let (transcript, diarization) = futures::join!(
-        run(state, &request.model, repr, speech(audio.clone())),
-        speaker_turns(state, &diarizer, audio),
+        run(
+            state,
+            &request.model,
+            repr.clone(),
+            speech(audio.clone(), Some(hook))
+        ),
+        speaker_turns(state, &diarizer, audio.clone()),
     );
-    match (transcript?, diarization?) {
-        (Response::Transcription(transcript), Response::Diarization(diarization)) => {
-            let speakers = word_speakers(&transcript.words, &diarization.segments);
-            render_transcript(&request, transcript, Some(&speakers))
-        }
-        _ => Err(unexpected(state)),
-    }
+    let (Response::Transcription(transcript), Response::Diarization(diarization)) =
+        (transcript?, diarization?)
+    else {
+        return Err(unexpected(state));
+    };
+    let ctx = PassContext {
+        state,
+        model: &request.model,
+        repr,
+        options: &options,
+        windowed: windowed.load(std::sync::atomic::Ordering::Relaxed),
+        canceled: None,
+        enabled: request.overlap_pass != Some(false),
+    };
+    let (transcript, speakers) =
+        overlap_pass(ctx, audio, transcript, &diarization.segments).await?;
+    render_transcript(&request, transcript, Some(&speakers))
 }
 
 pub(crate) fn check_beam(request: &TranscriptionRequest) -> Result<(), ApiError> {
@@ -1096,6 +1115,7 @@ mod tests {
             timestamp_granularities: Vec::new(),
             beam_size: None,
             diarization_model: None,
+            overlap_pass: None,
             task: TranscriptionTask::Transcribe,
         };
         let transcript = Transcription {

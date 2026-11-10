@@ -59,4 +59,8 @@ pub struct TranscriptionOptions {
     /// moments); unset keeps the model's own plan.
     #[serde(default)]
     pub max_window_seconds: Option<f64>,
+    /// These `(start, end)` seconds as the windows, each transcribed alone in place of the model's plan (overlaps
+    /// allowed, starts in order).
+    #[serde(default)]
+    pub spans: Option<Vec<(f64, f64)>>,
 }

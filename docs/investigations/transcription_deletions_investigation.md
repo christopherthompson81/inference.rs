@@ -148,3 +148,206 @@ not reproduced in 60 runs after (f16, bf16, f32; with and without nvidia-smi pol
 Remaining deletions against the reference in f32 and f16 alike: backchannels under the other speaker, the 160-165 s
 stretch, the clip's last seconds. Per-speaker segments (vernacula) recover the backchannels at the cost of
 insertions and short-segment code-switching; not done.
+
+## Run 6 - 2026-11-09 19:40
+
+Question (from the app's session, after #891): listening still finds dropped speech, and ONNX output has 112 words in
+39 runs that ours lacks. Which of those are real drops, and are they the window cuts, the dtype, or overlap?
+
+Scripts in `scratchpad/drops/`, Vulkan RTX 3090, bundle `libinference_ffi` at 39a693374, clip 1.
+
+- The 112 is mostly the alignment. ONNX lists an overlapping speaker's segment after the segment it sits in, so a
+  sequence alignment against our time-ordered words drops whatever moved. Counting per ONNX segment instead (its
+  non-filler words with no match in ours within 1 s, `bag.py`): 94, almost all 1-3 word differences (spelling, a
+  repeated word, one-second segments that ONNX reads as Spanish). One 7-word "run" is in our stream word for word.
+- f16 and f32 give the same words on every slice tried (`slices.py`): the remaining drops are not the dtype.
+- Real drops, heard by the model when given less context: a 4-word repetition under the other speaker inside a
+  window (~2:42); a 6-word phrase across the cut at 516.2 s (neither window alone has it, the two joined do); a
+  4-word phrase of the quieter speaker at ~9:26 (the window from 563.6 s drops it, from 565.0 s keeps it); most of
+  the last window (584.6-598.2 s, 14 words, ~18 more heard per segment).
+- Overlapping windows (`overlap.py`: each window widened by N s, words kept by midpoint in their own span):
+
+```
+overlap   WER     sub del ins
+0 s       9.1%    63  29  44    (the stream word for word)
+2 s      11.9%    81  26  70
+4 s      10.8%    63  42  55
+```
+
+  Word times move with context, so a midpoint merge duplicates and drops words at the seams. Not the fix.
+- Second pass over overlapped speech (`second.py`: each of our diarizer's 147 segments that overlap another
+  speaker's, 322 s of audio, transcribed alone with 0.2 s pad; new words = ones the stream lacks within 1 s): 145 new
+  words, 64 confirmed by ONNX or the reference nearby. It recovers each real drop above (and 9 words of the last
+  window) but also adds short-segment Spanish and repeated fillers, as vernacula's output does.
+
+Implication: what is left is overlap and context near-ties, which a second, per-speaker pass reaches at ~50%
+precision as it stands (it would need a filter, e.g. segment length and runs of 3+ new words, and costs about half
+again the ASR time for this clip). Window cuts and dtype are ruled out as the main cause.
+
+## Run 7 - 2026-11-09 20:00
+
+Question (user): one-second overlaps are the ones that code-switch; does a minimum segment length make the second
+pass clean?
+
+Command: `second.py` again, each segment's new and confirmed words kept, then cut by segment length.
+
+```
+min length  segments  seconds  new  confirmed
+0           147       322      145  64 (44%)
+1.0 s        81       288      103  48 (47%)
+1.5 s        64       267       86  45 (52%)
+2.0 s        54       249       81  43 (53%)
+3.0 s        38       210       71  37 (52%)
+```
+
+From 1.5 s up no Spanish is left. The unconfirmed words there are English, and the two biggest blocks (13 words at
+~74.5 s, 9 at ~589 s) fill gaps where the stream has no words at all for 4 s and 6 s, so they look like speech the
+reference leaves out rather than insertions. What remains as noise is mostly a repeated filler or one word beside one
+the stream has. Confirmed-by-ONNX-or-reference understates the precision of a 1.5 s cutoff.
+
+Implication: a second pass over overlapped segments of 1.5 s or more (64 here, 267 s, so about +45% ASR time), its
+new words merged into the timeline, recovers the audible drops with little code-switching.
+
+## Run 8 - 2026-11-09 20:30
+
+Question: the same second pass through the engine, as the app would run it: one transcription stream with `spans`
+(branch `transcription-spans`: each `[start, end]` a window transcribed alone, in place of the VAD plan).
+
+Command: `scratchpad/drops/spans_pass.py vulkan:0 f16 <clip> <stream> <diarization> 1.5 <out>`: our diarizer's
+segments of 1.5 s or more that overlap another speaker's, 0.2 s pad, as `spans`; a span's word is added unless the
+stream has the same word within 1 s.
+
+```
+                     words  WER    sub del ins   deleted runs >= 4   ONNX words unmatched within 1 s
+stream (f16)         1498   9.1%   63  29   44   2                   94
+stream + spans pass  1583  12.3%   56  13  114   0                   71
+```
+
+64 spans (292 s with padding) in 1.70 s on the 3090, on top of the stream's ~2.4 s. Deletions more than halve and
+no long run is left; the insertions are the uncounted speech of Run 7 plus repeated fillers, so WER against this
+reference rises.
+
+## Run 9 - 2026-11-09 21:10
+
+Question (user): keep the second pass as small as possible. Which overlapped turns does it need?
+
+Command: `scratchpad/drops/select.py` (the 64 spans of Run 8, each span's new words kept with its features: the
+share of the turn the other speaker overlaps, the stream's words per second in it, its longest stretch with no
+stream word).
+
+```
+rule                     spans  seconds  new non-filler words  confirmed by ONNX or reference
+all (Run 8)               64     292      79 (100%)            40 (100%)
+stream gap >= 1.0 s       33     163      64 ( 81%)            29 ( 72%)
+stream gap >= 1.5 s       17      93      53 ( 67%)            23 ( 57%)
+stream gap >= 2.0 s       10      68      45 ( 57%)            20 ( 50%)
+overlapped >= 50%          8      22       6 (  8%)             2 (  5%)
+stream < 2 words/s        17      62      48 ( 61%)            18 ( 45%)
+```
+
+Turns sitting under the other speaker add almost nothing. The words come from long turns the other speaker cuts
+into, where the main pass goes quiet: a gap of 1 s or more with no stream word finds half the spans (and 56% of
+the seconds) with 81% of the new words.
+
+Implication: diarize alongside the main pass (as `diarization_model` does now), then transcribe only the overlapped
+turns of 1.5 s or more that hold a 1 s gap in the main pass's words. The gap needs the main pass's words, so the
+spans come after it; batching them makes that cheap.
+
+## Run 10 - 2026-11-09 22:00
+
+Question: the second pass in the engine (`diarization_model` on a transcription, `overlap_pass` on unless false):
+turns of 1.5 s or more that another speaker overlaps and that hold a 1 s gap in the first pass's words, as `spans`.
+Does it hold Run 8's gain, at what cost?
+
+Command: `scratchpad/drops/engine_pass.py vulkan:0 <clip> <out> [off]` (one engine with Parakeet + VAD and
+Nemotron-3 added, stream with `max_window_seconds` 15 and `diarization_model`; one warm-up, three timed).
+
+```
+                       words  WER    sub del ins   deleted runs >= 4   time
+overlap_pass false     1498   9.1%   63  29   44   2                   2.36-2.40 s
+overlap_pass (on)      1566  11.9%   61  16  100   0                   3.27-3.47 s
+app's pass (Run 8)     1583  12.3%   56  13  114   0                   +1.8 s in the app
+```
+
+The gap rule keeps most of Run 8's recovered words for half its spans: +0.9 s against the app's +1.8 s.
+
+Side check, from a review of the Sortformer accuracy work in vernacula: its one fix our cache lacks is merging a
+speaker's gaps under 0.5 s (it reported mean DER 17.2 -> 15.4% on far-field meeting audio). Applied by hand to our
+Nemotron-3 turns on this clip: 254 -> 189 segments, 121 -> 101 of 1.5 s or more. The second pass over the merged
+turns: 35 spans, 236 s, 56 new non-filler words (29 confirmed), against 33 spans, 163 s, 64 (29) unmerged.
+Neutral for the pass (longer spans, same confirmed words); its case rests on diarization accuracy, which this
+clip's reference (no speakers) cannot score.
+
+## Run 11 - 2026-11-09 22:30
+
+Question (user): diarize first and plan the ASR windows from its turns, in place of the VAD; no transcription until
+the turns are known.
+
+Command: `scratchpad/drops/diar_first.py vulkan:0 <clip> df` (one engine, Parakeet without VAD and Nemotron-3; the
+plan: every speaker's turns joined, gaps under 0.3 s closed, runs over 15 s cut at the latest turn end inside 15 s,
+grouped up to 15 s, each reaching up to 1 s into its gaps; run as `spans`; then the Run 10 second pass).
+
+```
+                              WER    sub del ins   deleted runs >= 4      time (sequential)
+VAD plan, no pass (Run 10)    9.1%   63  29   44   2 (4, 6 words)         2.4 s (VAD + ASR, beside diarization)
+diarization plan, no pass     8.9%   64  29   39   1 (13 words, last 6 s)  0.65 diarize + 1.85 ASR
+VAD plan + pass (Run 10)     11.9%   61  16  100   0                      3.3-3.5 s
+diarization plan + pass      11.0%   59  15   90   0                      0.65 + 1.85 + 0.90 = 3.4 s
+```
+
+The diarizer's plan transcribes about as well as the VAD's, slightly fewer insertions, and costs about what the VAD
+did (0.65 s against the VAD's share of the stream). One clip; the 13-word run is the clip's last seconds, which the
+pass recovers. With the pass the totals level: sequential diarization costs the concurrency the VAD plan had.
+What it buys: the overlapped turns are known before any transcription, so windows and spans can go in one batch,
+and the gap rule (which needs the first pass's words) is the only thing keeping them apart.
+
+## Run 12 - 2026-11-09 22:50
+
+Question: does Run 11's diarizer plan hold on the other four recordings? No reference there, so each plan against
+the other: non-filler words one has that the other lacks within 1 s, and the runs of 4+ of them.
+
+Command: `scratchpad/drops/plans.py vulkan:0 <five clips>`; `frcheck.py` for the French one.
+
+```
+clip                       words vad/diar   only in VAD plan (runs >= 4)         only in diarizer plan (runs >= 4)
+en 1 (telephone)           1498 / 1496       60 (4 4 6)                           51 (4 5)
+en 2 (telephone)           2182 / 2209       66 (10 4)                            88 (8 7 4 6)
+en 3 (telephone)           2171 / 2160       85 (4 4 4 4 6 5)                     72 (4 5 8)
+de 1                       1440 / 1447      174 (4 18 6 11 6 5 5 5 4)            174 (5 4 10 7 4 4 4 4 4 4 11 5)
+fr 1 (multi-speaker)       1090 /  920      193 (16 5 9 17 30 101)                22 (8)
+```
+
+On the two-speaker clips the plans trade words about evenly. On the French one, where the diarizer finds 8
+speakers, 188 of the VAD plan's 1090 words lie outside every diarized turn: stretches of 5-38 s (one of 100 words
+at 391-429 s) the diarizer gives no speaker at all, so a plan from its turns never transcribes them.
+
+Implication: the diarizer cannot replace the VAD as the plan; it misses speech outright on a many-speaker
+recording. Keep the VAD plan with the diarizer beside it (Run 10), and batch. Separately, words in speech the
+diarizer gives no speaker get the nearest turn's speaker (`word_speakers`), which this clip shows is common.
+
+## Run 13 - 2026-11-09 23:40
+
+Question: where does a window's time go, and does encoding windows together win it back?
+
+Timing (temporary, not kept): a warm stream over clip 1 on the 3090 (Vulkan f16), 48 windows: encoder 1.21 s,
+decoder 0.56 s. The second pass's 35 spans under 8 s (157 s of audio) took 0.73 s in the encoder: ~21 ms a window
+at any length, the cost of ~400 ops (24 blocks; the depthwise conv alone is 9 shifted products) rather than compute.
+
+Change: on CUDA and a discrete Vulkan GPU, consecutive windows of at most 30 s encode as one batch of up to 120 s of
+padded audio (the longest window times the count). Each window's subsampling runs alone, then the frames are padded
+to the longest; padded keys are -inf in attention and padded frames are zeroed ahead of the conv module's depthwise
+conv, so each window's frames come out as alone. The decoder still runs per window. CPU and iGPU paths unchanged.
+Test: `a_batch_encodes_each_clip_as_alone` (tiny checkpoint, clips of 0.7-3.3 s, 1e-4); without the conv mask it
+fails at 0.07.
+
+```
+                                    words vs unbatched (spans)     time, clip 1 (warm, 3 runs)
+Vulkan, no second pass              0 (word for word)              2.36-2.40 -> 1.83-1.85 s
+Vulkan, with second pass            0 (word for word)              3.27-3.47 -> 2.33-2.37 s
+CUDA, no second pass                1 0 0 2 0 (five clips)         1.77-1.82 s
+CUDA, with second pass              -                              2.20-2.23 s
+CUDA vs f32, unbatched / batched    6 / 7 spans over five clips
+```
+
+On CUDA the batched products round a little differently, at f16's own noise (Run 5: 6 spans from f32). With the
+second pass on, a transcription now takes less than one without it did before.

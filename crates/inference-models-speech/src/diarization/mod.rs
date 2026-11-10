@@ -65,12 +65,14 @@ fn chunk_done(
     duration: f64,
 ) -> inference_tensor::Result<()> {
     let done = (rows as f64 * frame_seconds).min(duration);
-    match progress {
-        Some(progress) if !progress(done, duration) => Err(inference_tensor::Error::Msg(
+    let stopped = inference_tensor::utils::exiting()
+        || progress.is_some_and(|progress| !progress(done, duration));
+    if stopped {
+        return Err(inference_tensor::Error::Msg(
             DIARIZATION_STOPPED.to_string(),
-        )),
-        _ => Ok(()),
+        ));
     }
+    Ok(())
 }
 
 // a speaker counts as speaking in a frame once its probability passes this, as transformers' processor cuts them

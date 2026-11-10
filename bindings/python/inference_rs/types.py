@@ -3349,6 +3349,7 @@ class TranscriptionRequest:
     diarization_model: str | None = None
     language: str | None = None
     model: str | None = None
+    overlap_pass: bool | None = None
     prompt: str | None = None
     response_format: TranscriptionResponseFormat | None = None
     task: TranscriptionTask | None = None

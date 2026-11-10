@@ -409,6 +409,61 @@ impl Drop for BarrierPool {
     }
 }
 
+// set once the process exits: model work stops at its next check and none starts, so no GPU call races the
+// driver's own exit handlers
+static EXITING: AtomicBool = AtomicBool::new(false);
+static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+static EXIT_HANDLER: std::sync::Once = std::sync::Once::new();
+// how long the exit handler waits for work in flight to stop before letting the exit go on
+const EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+const EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Whether the process is exiting: a long loop of model work (windows, chunks) stops at its next step.
+pub fn exiting() -> bool {
+    EXITING.load(Ordering::Acquire)
+}
+
+/// One model forward in flight, counted until dropped, for the exit handler to wait on.
+pub struct InFlight(());
+
+impl InFlight {
+    /// Counts a forward about to run. Once the process is exiting it starts none: the thread parks until the exit
+    /// ends it.
+    pub fn enter() -> Self {
+        IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
+        if exiting() {
+            IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+            loop {
+                std::thread::park();
+            }
+        }
+        InFlight(())
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+extern "C" fn stop_work_for_exit() {
+    EXITING.store(true, Ordering::Release);
+    let deadline = std::time::Instant::now() + EXIT_WAIT;
+    while IN_FLIGHT.load(Ordering::Acquire) > 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(EXIT_POLL);
+    }
+}
+
+/// Registers the exit handler that stops model work before the process exits. Call it once a device is open: exit
+/// handlers run last-registered first, so it then runs ahead of the GPU driver's.
+pub fn stop_work_at_exit() {
+    EXIT_HANDLER.call_once(|| {
+        // SAFETY: the handler only touches atomics and sleeps; registration failing leaves the exit as it was
+        let _ = unsafe { libc::atexit(stop_work_for_exit) };
+    });
+}
+
 static BARRIER_POOL: OnceLock<BarrierPool> = OnceLock::new();
 static SMT_GEMM_POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
 // what frees the allocator's idle memory on the calling thread, registered by the binary that chose the allocator

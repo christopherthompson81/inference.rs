@@ -420,6 +420,13 @@
                         "description": "The speech recognition model to use.",
                         "example": "nvidia/parakeet-tdt-0.6b-v3"
                       },
+                      "overlap_pass": {
+                        "type": [
+                          "boolean",
+                          "null"
+                        ],
+                        "description": "With `diarization_model`, a second pass over the long turns another speaker cuts into, where the first pass\ndrops words; on unless `false`. An inference.rs extension."
+                      },
                       "prompt": {
                         "type": [
                           "string",
@@ -525,6 +532,13 @@
                         "type": "string",
                         "description": "The speech recognition model to use.",
                         "example": "nvidia/parakeet-tdt-0.6b-v3"
+                      },
+                      "overlap_pass": {
+                        "type": [
+                          "boolean",
+                          "null"
+                        ],
+                        "description": "With `diarization_model`, a second pass over the long turns another speaker cuts into, where the first pass\ndrops words; on unless `false`. An inference.rs extension."
                       },
                       "prompt": {
                         "type": [
@@ -15075,6 +15089,13 @@
             "type": "string",
             "description": "The speech recognition model to use.",
             "example": "nvidia/parakeet-tdt-0.6b-v3"
+          },
+          "overlap_pass": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "With `diarization_model`, a second pass over the long turns another speaker cuts into, where the first pass\ndrops words; on unless `false`. An inference.rs extension."
           },
           "prompt": {
             "type": [

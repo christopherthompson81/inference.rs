@@ -108,6 +108,7 @@ fn transcription(language: Option<&str>) -> TranscriptionRequest {
         timestamp_granularities: Vec::new(),
         beam_size: None,
         diarization_model: None,
+        overlap_pass: None,
         task: Default::default(),
     }
 }

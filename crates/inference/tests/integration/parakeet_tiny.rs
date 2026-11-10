@@ -182,6 +182,46 @@ async fn prompted_streaming_repeats_exactly_on_the_default_device() -> anyhow::R
     repeats_exactly_on_the_default_device(HEADS[4]).await
 }
 
+// clips of different lengths encoded together give each clip's frames as encoding it alone does: the padding never
+// reaches attention or the depthwise convs (on the default device: CUDA under `--features cuda`)
+async fn a_batch_encodes_each_clip_as_alone() -> anyhow::Result<()> {
+    const BATCH_TOLERANCE: f32 = 1e-4;
+    const CLIP_SECONDS: [f64; 3] = [2.0, 0.7, 3.3];
+    let checkpoint = tiny_parakeet_checkpoint(HEADS[0])?;
+    let dir = checkpoint.path();
+    let files = inference_models_speech::parakeet::ParakeetFiles {
+        config: dir.join("config.json"),
+        processor_config: dir.join("processor_config.json"),
+        tokenizer: dir.join("tokenizer.json"),
+        weights: vec![dir.join("model.safetensors")],
+    };
+    let device = inference_tensor::Device::cuda_if_available(0)?;
+    let model = inference_models_speech::parakeet::Parakeet::load(
+        &files,
+        &device,
+        inference_tensor::DType::F32,
+    )?;
+    let rate = f64::from(model.sample_rate());
+    let clips: Vec<Vec<f32>> = CLIP_SECONDS
+        .iter()
+        .enumerate()
+        .map(|(c, seconds)| {
+            (0..(seconds * rate) as usize)
+                .map(|i| (0.3 * (i as f64 * (0.01 + 0.004 * c as f64)).sin()) as f32)
+                .collect()
+        })
+        .collect();
+    let pieces: Vec<&[f32]> = clips.iter().map(Vec::as_slice).collect();
+    let batched = model.encode_batch(&pieces, None)?;
+    for (clip, together) in pieces.iter().zip(&batched) {
+        let alone = model.encode(clip, None)?;
+        assert_eq!(together.dims(), alone.dims());
+        let off = (together - &alone)?.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert!(off < BATCH_TOLERANCE, "{off}");
+    }
+    Ok(())
+}
+
 async fn undecodable_audio_is_an_invalid_request() -> anyhow::Result<()> {
     let checkpoint = tiny_parakeet_checkpoint(HEADS[0])?;
     let model = TranscriptionModelBuilder::new(checkpoint.path().to_string_lossy())
@@ -626,6 +666,7 @@ concurrent_cases!(
         ctc_repeats_exactly_on_the_default_device: 348,
         streaming_repeats_exactly_on_the_default_device: 348,
         prompted_streaming_repeats_exactly_on_the_default_device: 348,
+        a_batch_encodes_each_clip_as_alone: 0,
         undecodable_audio_is_an_invalid_request: 0,
         too_short_audio_fails_only_its_own_request: 0,
         a_prompted_model_takes_the_requested_language: 0,
