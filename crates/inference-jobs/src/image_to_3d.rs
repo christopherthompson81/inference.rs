@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use inference_recon::trellis2::bake;
 use inference_recon::trellis2::glb::{to_glb, to_textured_glb};
+use inference_recon::trellis2::mesh::Mesh;
 use inference_recon::trellis2::pipeline::{self, Trellis2Paths};
 use inference_tensor::Device;
 use serde::Serialize;
@@ -165,9 +166,14 @@ pub fn generate_3d_on(
     .expect("a whole image")
     .save(&prepared_path)?;
     progress.preview("the object", &prepared_path);
-    // the bake's shape half runs on its own thread while the texture is made; the scope joins it on every path
+    // the export's shape half (the bake's preparation, or the vertex-colored mesh's cleanup) runs on its own thread
+    // while the texture is made; the scope joins it on every path
+    enum ShapeHalf {
+        Baked(Box<bake::Prepared>),
+        Colored(Mesh),
+    }
     let (out, export, glb, mesh) = std::thread::scope(|scope| -> anyhow::Result<_> {
-        let mut prepared = None;
+        let mut shape_half = None;
         let out = pipeline::generate_with(
             &models.paths,
             &input,
@@ -176,26 +182,32 @@ pub fn generate_3d_on(
             progress,
             device,
             &mut |mesh, resolution| {
-                if let Some(bake_options) = &options.bake {
-                    let mesh = mesh.clone();
-                    prepared = Some(
-                        scope.spawn(move || bake::prepare(&mesh, resolution, bake_options, device)),
-                    );
-                }
+                let mesh = mesh.clone();
+                let bake_options = options.bake.as_ref();
+                shape_half = Some(scope.spawn(move || {
+                    match bake_options {
+                        Some(bake_options) => {
+                            bake::prepare(&mesh, resolution, bake_options, device)
+                                .map(|p| ShapeHalf::Baked(Box::new(p)))
+                        }
+                        None => pipeline::vertex_mesh(&mesh, device).map(ShapeHalf::Colored),
+                    }
+                }));
             },
         )?;
         let export = Instant::now();
         progress.stage("export", 0);
-        let (glb, mesh) = match prepared {
-            Some(prepared) => {
-                let prepared = prepared
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("the bake's preparation panicked"))??;
-                let baked = bake::finish(prepared, &out.voxels, &out.voxel_attrs)?;
+        let shape_half = shape_half
+            .ok_or_else(|| anyhow::anyhow!("generation never handed on its shape"))?
+            .join()
+            .map_err(|_| anyhow::anyhow!("the export's shape half panicked"))??;
+        let (glb, mesh) = match shape_half {
+            ShapeHalf::Baked(prepared) => {
+                let baked = bake::finish(*prepared, &out.voxels, &out.voxel_attrs)?;
                 (to_textured_glb(&baked), baked.unwrapped.mesh)
             }
-            None => {
-                let (mesh, attrs) = out.vertex_colored(device)?;
+            ShapeHalf::Colored(mesh) => {
+                let (mesh, attrs) = out.colored(mesh);
                 (to_glb(&mesh, &attrs), mesh)
             }
         };

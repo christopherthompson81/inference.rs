@@ -32,6 +32,7 @@ const FILE_TYPES: &[(&str, &str)] = &[
     ("webp", "image/webp"),
     ("json", "application/json"),
     ("ply", "application/octet-stream"),
+    ("glb", "model/gltf-binary"),
     ("spz", "application/octet-stream"),
     ("npy", "application/octet-stream"),
 ];

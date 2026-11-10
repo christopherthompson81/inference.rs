@@ -12,7 +12,6 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, StandardNormal};
 
-use super::cleanup;
 use super::decoder::{SHAPE_DECODER, ShapeDecoder, TEXTURE_DECODER, dual_grid};
 use super::glb::{Pbr, sample_attributes};
 use super::mesh::{Mesh, dual_grid_mesh};
@@ -22,6 +21,7 @@ use super::shape_flow::{
 };
 use super::structure::{STRUCTURE_DECODER, StructureDecoder, grid_cells, occupied};
 use super::{PIPELINE_FILE, crop_object};
+use super::{bake, cleanup};
 use crate::dinov3::{Dinov3, Dinov3Spec};
 use crate::jovox::Rgba;
 use crate::progress::{Progress, check};
@@ -87,12 +87,8 @@ pub struct Generated {
 }
 
 impl Generated {
-    /// The mesh with small holes filled, simplified (on `device`) to TRELLIS.2's face budget, and the volume's
-    /// attributes at each vertex.
-    pub fn vertex_colored(&self, device: &Device) -> Result<(Mesh, Vec<Pbr>)> {
-        let mut mesh = self.mesh.clone();
-        cleanup::fill_holes(&mut mesh, cleanup::MAX_HOLE_PERIMETER);
-        cleanup::simplify_on(&mut mesh, cleanup::SIMPLIFY_TARGET, device)?;
+    /// `mesh` (from [`vertex_mesh`]) with the volume's attributes at each vertex.
+    pub fn colored(&self, mesh: Mesh) -> (Mesh, Vec<Pbr>) {
         let res = self.resolution as f32;
         let points: Vec<[f32; 3]> = mesh
             .vertices
@@ -100,8 +96,14 @@ impl Generated {
             .map(|v| v.map(|c| (c + 0.5) * res))
             .collect();
         let attrs = sample_attributes(&self.voxels, &self.voxel_attrs, &points);
-        Ok((mesh, attrs))
+        (mesh, attrs)
     }
+}
+
+/// The extracted `mesh` as the vertex-colored export takes it: the export's cleanup ([`bake::clean`]), simplifying
+/// on `device`; it needs only the shape, so it can run beside the texture stage.
+pub fn vertex_mesh(mesh: &Mesh, device: &Device) -> Result<Mesh> {
+    Ok(bake::clean(mesh, cleanup::SIMPLIFY_TARGET, device)?.0)
 }
 
 struct Stats {

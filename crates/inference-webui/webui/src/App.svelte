@@ -13,7 +13,7 @@
   import ImagesView from "./lib/views/ImagesView.svelte";
   import DocumentsView from "./lib/views/DocumentsView.svelte";
   import ModelsView from "./lib/views/ModelsView.svelte";
-  import WorldsView from "./lib/views/WorldsView.svelte";
+  import SceneView from "./lib/views/SceneView.svelte";
   import CodeView from "./lib/views/CodeView.svelte";
   import { authStore } from "./lib/stores/auth.svelte";
   import { managerStore, SLOTS, type SlotId } from "./lib/stores/manager.svelte";
@@ -30,7 +30,7 @@
     { id: "speech", label: "Text to speech" },
     { id: "images", label: "Images" },
     { id: "documents", label: "Documents" },
-    { id: "worlds", label: "Worlds" },
+    { id: "3d", label: "3D" },
     { id: "models", label: "Models" },
   ] as const;
   type Tab = (typeof TABS)[number]["id"];
@@ -196,8 +196,8 @@
         <ImagesView />
       {:else if tab === "documents"}
         <DocumentsView />
-      {:else if tab === "worlds"}
-        <WorldsView />
+      {:else if tab === "3d"}
+        <SceneView />
       {:else if tab === "code"}
         <CodeView />
       {:else}

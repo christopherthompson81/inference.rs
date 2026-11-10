@@ -70,6 +70,27 @@ export interface ReconstructOptions {
   placement: Placement | null;
 }
 
+/** TRELLIS.2's resolutions: shape at 512 then 1024 on the upsampled cells, or everything at 512. */
+export type Trellis2Variant = "1024_cascade" | "512";
+
+export interface ImageTo3dOptions {
+  seed: number | null;
+  variant: Trellis2Variant | null;
+  remove_background: boolean | null;
+  vertex_colors: boolean | null;
+  texture_size: number | null;
+  remesh: boolean | null;
+  placement: Placement | null;
+}
+
+export interface VoxelOptions {
+  seed: number | null;
+  steps: number | null;
+  remove_background: boolean | null;
+  mesh: boolean | null;
+  placement: Placement | null;
+}
+
 export function isFinished(status: JobStatus): boolean {
   return status === "succeeded" || status === "failed" || status === "cancelled";
 }
@@ -113,6 +134,16 @@ export function submitWorld(panorama: File, options: WorldOptions): Promise<JobR
 /** Cameras, depth, points and splats from photos of one scene, or a video. */
 export function submitReconstruct(files: File[], options: ReconstructOptions): Promise<JobRecord> {
   return submit("reconstruct", options, files);
+}
+
+/** TRELLIS.2's textured mesh (GLB) of the object in one image. */
+export function submitImageTo3d(image: File, options: ImageTo3dOptions): Promise<JobRecord> {
+  return submit("image_to_3d", options, [image]);
+}
+
+/** JoVox's 64^3 voxel structure of the object in one image, meshed by TRELLIS.2 unless `mesh` is false. */
+export function submitVoxels(image: File, options: VoxelOptions): Promise<JobRecord> {
+  return submit("voxels", options, [image]);
 }
 
 export async function listJobs(): Promise<JobRecord[]> {

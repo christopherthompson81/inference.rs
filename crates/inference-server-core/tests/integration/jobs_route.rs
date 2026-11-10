@@ -88,6 +88,7 @@ async fn admins_start_jobs_and_owners_follow_and_fetch_them() -> anyhow::Result<
         image::RgbImage::new(2, 2).save(&look)?;
         ctx.preview("a look", &look);
         std::fs::write(ctx.dir().join("notes.txt"), "not served")?;
+        std::fs::write(ctx.dir().join("model.glb"), "glTF")?;
         Ok(JobResult {
             outputs: vec![JobOutput {
                 name: "look".into(),
@@ -116,6 +117,12 @@ async fn admins_start_jobs_and_owners_follow_and_fetch_them() -> anyhow::Result<
         .await?;
     assert_eq!(image.status(), StatusCode::OK);
     assert_eq!(image.headers()[header::CONTENT_TYPE], "image/png");
+    let model = local
+        .clone()
+        .oneshot(get(&format!("/v1/jobs/{}/files/model.glb", queued.id)))
+        .await?;
+    assert_eq!(model.status(), StatusCode::OK);
+    assert_eq!(model.headers()[header::CONTENT_TYPE], "model/gltf-binary");
     for refused in ["notes.txt", "../job.json", "missing.png"] {
         let response = local
             .clone()

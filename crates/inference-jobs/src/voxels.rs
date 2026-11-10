@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use inference_recon::birefnet::BiRefNet;
 use inference_recon::jovox::{self, JoVox, Rgba, SampleOptions};
-use inference_recon::trellis2::{self, ShapeStage, cleanup};
+use inference_recon::trellis2::{self, ShapeStage, bake, cleanup};
 use inference_tensor::{DType, Device};
 use serde::Serialize;
 
@@ -269,12 +269,11 @@ pub fn generate_voxels_on(
             let cond = model.encode_rgb(&trellis2::condition_image(&prepared)?, size)?;
             drop(model);
             let stage = ShapeStage::load(dir, device)?;
-            let mut mesh = stage.mesh(&cond, &voxels, options.sample.seed, progress)?;
+            let mesh = stage.mesh(&cond, &voxels, options.sample.seed, progress)?;
             drop(stage);
             let raw_faces = mesh.faces.len();
             progress.stage("cleanup", 0);
-            cleanup::fill_holes(&mut mesh, cleanup::MAX_HOLE_PERIMETER);
-            cleanup::simplify(&mut mesh, cleanup::SIMPLIFY_TARGET);
+            let (mesh, _) = bake::clean(&mesh, cleanup::SIMPLIFY_TARGET, device)?;
             std::fs::write(out_dir.join(MESH_FILE), mesh.to_ply())?;
             Some(MeshReport {
                 raw_faces,
