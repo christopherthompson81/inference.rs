@@ -723,12 +723,13 @@ fn distances_and_the_remesh_match_the_reference() -> Result<()> {
     assert!(worst < DISTANCE_TOLERANCE, "distances");
     let domain = super::remesh::Domain::unit_cube(1024);
     let start = std::time::Instant::now();
+    let host = super::bake::Distances::new(&bvh, &Device::Cpu)?;
     let shell = super::remesh::remesh(
-        &bvh,
+        &host,
         &domain,
         super::remesh::BAND,
         super::remesh::PROJECT_BACK,
-    );
+    )?;
     let seconds = start.elapsed().as_secs_f64();
     let reference = mesh_of(&refs, "remesh.v", "remesh.f")?;
     let cell = 1.0 / 1024.0;
@@ -752,6 +753,29 @@ fn distances_and_the_remesh_match_the_reference() -> Result<()> {
         / reference.vertices.len() as f64;
     assert!(ratio < 1e-5, "vertex count");
     assert!(ab_99 < DISTANCE_TOLERANCE, "vertex positions");
+    // the same on a device, when there is one
+    let device = Device::cuda_if_available(0)?;
+    if !device.is_cpu() {
+        let on_device = super::bake::Distances::new(&bvh, &device)?;
+        let start = std::time::Instant::now();
+        let theirs = on_device.unsigned_distance(&points)?;
+        let queried = start.elapsed().as_secs_f64();
+        let start = std::time::Instant::now();
+        let device_shell = super::remesh::remesh(
+            &on_device,
+            &domain,
+            super::remesh::BAND,
+            super::remesh::PROJECT_BACK,
+        )?;
+        println!(
+            "on {device:?}: distances in {queried:.2} s, remeshed in {:.2} s; same distances: {}, same shell: {}",
+            start.elapsed().as_secs_f64(),
+            theirs == ours,
+            mesh_hash(&device_shell) == mesh_hash(&shell)
+        );
+        assert!(theirs == ours, "device distances");
+        assert_eq!(mesh_hash(&device_shell), mesh_hash(&shell), "device shell");
+    }
     Ok(())
 }
 

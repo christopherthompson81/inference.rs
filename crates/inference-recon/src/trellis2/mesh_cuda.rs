@@ -1,5 +1,5 @@
-//! [`super::cleanup::simplify`] on a CUDA device: the mesh stays on the GPU for every round (`kernels/cuda/mesh.cu`),
-//! with the host port's arithmetic, so the result is the host's.
+//! Mesh passes on a CUDA device (`kernels/cuda/mesh.cu`), each giving its host port's result: [`simplify`], whose mesh
+//! stays on the GPU for every round, and closest-point queries over a [`Bvh`].
 
 use inference_tensor::Result;
 use inference_tensor::cuda_backend::cudarc::driver::{
@@ -7,10 +7,12 @@ use inference_tensor::cuda_backend::cudarc::driver::{
 };
 use inference_tensor::cuda_backend::{CudaDevice, WrapErr};
 
+use super::bake::Bvh;
 use super::cleanup::{
     LAMBDA_EDGE_LENGTH, LAMBDA_SKINNY, SKINNY_EPS, SLOW_ROUND, START_THRESHOLD, THRESHOLD_STEP,
 };
 use super::mesh::Mesh;
+use super::vec3::V3;
 
 const MODULE: &str = "inference_recon_mesh";
 static IMAGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mesh.fatbin"));
@@ -269,6 +271,67 @@ pub fn simplify(mesh: &mut Mesh, target: usize, dev: &CudaDevice) -> Result<()> 
     mesh.vertices = flat_v.as_chunks::<3>().0.to_vec();
     mesh.faces = flat_f.as_chunks::<3>().0.to_vec();
     Ok(())
+}
+
+// points one query launch takes, bounding the device buffers
+const QUERY_CHUNK: usize = 1 << 22;
+
+/// A [`Bvh`] on a device, for [`Bvh::unsigned_distance`] queries there.
+pub struct DeviceBvh {
+    dev: CudaDevice,
+    boxes: CudaSlice<f32>,
+    links: CudaSlice<u32>,
+    tris: CudaSlice<f32>,
+    faces: CudaSlice<u32>,
+}
+
+impl DeviceBvh {
+    pub fn new(bvh: &Bvh, dev: &CudaDevice) -> Result<Self> {
+        let (boxes, links, tris, faces) = bvh.flat();
+        Ok(Self {
+            boxes: dev.clone_htod(&boxes)?,
+            links: dev.clone_htod(&links)?,
+            tris: dev.clone_htod(&tris)?,
+            faces: dev.clone_htod(&faces)?,
+            dev: dev.clone(),
+        })
+    }
+
+    /// Each point's distance to the mesh, its closest face and the closest point, as [`Bvh::unsigned_distance`].
+    pub fn unsigned_distance(&self, points: &[V3]) -> Result<Vec<(f32, u32, V3)>> {
+        let dev = &self.dev;
+        let mut out = Vec::with_capacity(points.len());
+        for chunk in points.chunks(QUERY_CHUNK) {
+            let n = chunk.len() as u32;
+            let flat: Vec<f32> = chunk.iter().flatten().copied().collect();
+            let p = dev.clone_htod(&flat)?;
+            let mut distance = alloc::<f32>(dev, chunk.len())?;
+            let mut face = alloc::<u32>(dev, chunk.len())?;
+            let mut closest = alloc::<f32>(dev, 3 * chunk.len())?;
+            launch_n!(
+                dev,
+                "bvh_closest",
+                n,
+                &self.boxes,
+                &self.links,
+                &self.tris,
+                &self.faces,
+                &p,
+                &n,
+                &mut distance,
+                &mut face,
+                &mut closest
+            );
+            let (d, f, c) = (
+                dev.clone_dtoh(&distance)?,
+                dev.clone_dtoh(&face)?,
+                dev.clone_dtoh(&closest)?,
+            );
+            let c = c.as_chunks::<3>().0;
+            out.extend((0..chunk.len()).map(|i| (d[i], f[i], c[i])));
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]

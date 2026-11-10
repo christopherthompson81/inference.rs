@@ -421,7 +421,7 @@ pub fn simplify_on(
 ) -> inference_tensor::Result<()> {
     #[cfg(feature = "cuda")]
     if let inference_tensor::Device::Cuda(dev) = device {
-        return super::simplify_cuda::simplify(mesh, target, dev);
+        return super::mesh_cuda::simplify(mesh, target, dev);
     }
     let _ = device;
     simplify(mesh, target);

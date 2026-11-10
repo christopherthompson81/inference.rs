@@ -7,7 +7,9 @@
 
 use rayon::prelude::*;
 
-use super::bake::Bvh;
+use inference_tensor::Result;
+
+use super::bake::Distances;
 use super::mesh::Mesh;
 use super::vec3::{V3, cross, dot, sub};
 
@@ -71,7 +73,7 @@ fn key([x, y, z]: [u32; 3], side: u64) -> u64 {
 
 /// The voxels at `domain.resolution` the shifted level set may cross, in CuMesh's order (its coarse grid's
 /// x-major order, each kept voxel followed by its children in `CORNERS` order).
-pub fn narrow_band(bvh: &Bvh, domain: &Domain, band: f32) -> Vec<[u32; 3]> {
+pub fn narrow_band(distances: &Distances, domain: &Domain, band: f32) -> Result<Vec<[u32; 3]>> {
     let eps = band * domain.scale / domain.resolution as f32;
     let mut res = domain.resolution as usize;
     while res > COARSE {
@@ -92,13 +94,13 @@ pub fn narrow_band(bvh: &Bvh, domain: &Domain, band: f32) -> Vec<[u32; 3]> {
             .iter()
             .map(|c| domain.point(c.map(|v| v as f32 + 0.5), res as f32))
             .collect();
-        let near = bvh.unsigned_distance(&points);
+        let near = distances.unsigned_distance(&points)?;
         let kept = coords
             .iter()
             .zip(&near)
             .filter(|(_, d)| (d.0 - eps).abs() < HALF_DIAGONAL * cell);
         if res >= domain.resolution as usize {
-            return kept.map(|(c, _)| *c).collect();
+            return Ok(kept.map(|(c, _)| *c).collect());
         }
         res *= 2;
         coords = kept
@@ -108,11 +110,16 @@ pub fn narrow_band(bvh: &Bvh, domain: &Domain, band: f32) -> Vec<[u32; 3]> {
 }
 
 /// The remeshed surface (see the module docs), with vertices moved `project_back` of the way to their closest point
-/// on the mesh `bvh` was built over.
-pub fn remesh(bvh: &Bvh, domain: &Domain, band: f32, project_back: f32) -> Mesh {
+/// on the mesh `distances` query.
+pub fn remesh(
+    distances: &Distances,
+    domain: &Domain,
+    band: f32,
+    project_back: f32,
+) -> Result<Mesh> {
     let res = domain.resolution;
     let eps = band * domain.scale / res as f32;
-    let voxels = narrow_band(bvh, domain, band);
+    let voxels = narrow_band(distances, domain, band)?;
     let side = u64::from(res) + 1;
     // the band's grid vertices, sorted by key, and the level set's value at each
     let mut corners: Vec<u64> = voxels
@@ -128,8 +135,8 @@ pub fn remesh(bvh: &Bvh, domain: &Domain, band: f32, project_back: f32) -> Mesh 
             domain.point(g, res as f32)
         })
         .collect();
-    let values: Vec<f32> = bvh
-        .unsigned_distance(&corner_points)
+    let values: Vec<f32> = distances
+        .unsigned_distance(&corner_points)?
         .iter()
         .map(|d| d.0 - eps)
         .collect();
@@ -259,17 +266,18 @@ pub fn remesh(bvh: &Bvh, domain: &Domain, band: f32, project_back: f32) -> Mesh 
         })
         .collect();
     if project_back > 0.0 {
-        let closest = bvh.unsigned_distance(&vertices);
+        let closest = distances.unsigned_distance(&vertices)?;
         for (v, (_, _, c)) in vertices.iter_mut().zip(closest) {
             *v = std::array::from_fn(|k| v[k] - project_back * (v[k] - c[k]));
         }
     }
-    Mesh { vertices, faces }
+    Ok(Mesh { vertices, faces })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trellis2::bake::Bvh;
 
     #[test]
     fn a_square_remeshes_into_a_closed_shell_around_it() {
@@ -285,7 +293,8 @@ mod tests {
         };
         let bvh = Bvh::new(&mesh);
         let domain = Domain::unit_cube(64);
-        let shell = remesh(&bvh, &domain, BAND, 0.0);
+        let distances = Distances::new(&bvh, &inference_tensor::Device::Cpu).expect("a host query");
+        let shell = remesh(&distances, &domain, BAND, 0.0).expect("a shell");
         assert!(!shell.faces.is_empty());
         // every vertex sits about one band width (1/64 of the domain) from the square
         let eps = BAND * domain.scale / 64.0;

@@ -8,13 +8,13 @@ pub mod decoder;
 pub mod dit;
 pub mod glb;
 pub mod mesh;
+#[cfg(feature = "cuda")]
+mod mesh_cuda;
 #[cfg(test)]
 mod parity;
 pub mod pipeline;
 pub mod remesh;
 pub mod shape_flow;
-#[cfg(feature = "cuda")]
-mod simplify_cuda;
 pub mod sparse;
 pub mod structure;
 pub mod vec3;

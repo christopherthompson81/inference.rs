@@ -221,3 +221,20 @@ Bit-identical, 28x, and faster than CuMesh's own 1.0 s. A GPU case pins it on a 
 End to end (CLI, robot, 1024-cascade): default 115 s -> 87.0 s (export 33.2 s), `--remesh` 128 s -> 93.0 s (export
 38.8 s); same output sizes as before. What is left of the export: xatlas ~28 s (CPU in the reference too), the
 remesh's distance queries ~8 s, chart clustering 3.5 s, inpainting 4.7 s.
+
+## Run 10 - 2026-11-11
+
+Question: the same for the distance queries: the remesh's ~8 s is BVH closest-point queries (band levels, grid
+corners, project back), and the bake's texel projection another 0.5 s.
+
+`bvh_closest` (mesh.cu): the host traversal (nearer child first on a fixed stack, a box skipped when no nearer than
+the best) and Ericson's closest point, `--fmad=false`; the tree uploaded once as flat arrays (`Bvh::flat`,
+`mesh_cuda::DeviceBvh`). `bake::Distances` queries on the device when given one; the remesh and the texel projection
+(now one batched query) take it. `distances_and_the_remesh_match_the_reference`, now also on the device:
+
+    host:   1000000 distances in 5.39 s; remeshed in 7.93 s
+    device: distances in 0.50 s, remeshed in 3.22 s; same distances: true, same shell: true
+
+Bit-identical again; the remesh's remaining 3.2 s is host work (corner keys sorted, value lookups by binary search,
+dual contouring). End to end: `--remesh` 93.0 s -> 86.3 s (export 32.2 s); default unchanged at 87.3 s (its
+projection was 0.5 s).

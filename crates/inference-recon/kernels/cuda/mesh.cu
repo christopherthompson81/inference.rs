@@ -281,3 +281,78 @@ extern "C" __global__ void compact_faces(const u32* faces, const u32* kept, cons
     const u32 o = position[f];
     for (u32 k = 0; k < 3; k++) out[3 * o + k] = remap[faces[3 * f + k]];
 }
+
+// closest points over a bounding volume hierarchy, the host's traversal (nearer child first, a box skipped when no
+// nearer than the best so far) and Ericson's closest point on a triangle
+#define BVH_STACK 128
+
+__device__ __forceinline__ float box_distance2(const float* box, V3 p) {
+    const float d0 = fmaxf(fmaxf(box[0] - p.x, p.x - box[3]), 0.0f);
+    const float d1 = fmaxf(fmaxf(box[1] - p.y, p.y - box[4]), 0.0f);
+    const float d2 = fmaxf(fmaxf(box[2] - p.z, p.z - box[5]), 0.0f);
+    return d0 * d0 + d1 * d1 + d2 * d2;
+}
+
+__device__ __forceinline__ V3 mad3(V3 a, V3 b, float s) { return V3{a.x + b.x * s, a.y + b.y * s, a.z + b.z * s}; }
+
+__device__ V3 closest_on_triangle(V3 p, V3 a, V3 b, V3 c) {
+    const V3 ab = sub3(b, a), ac = sub3(c, a), ap = sub3(p, a);
+    const float d1 = dot3(ab, ap), d2 = dot3(ac, ap);
+    if (d1 <= 0.0f && d2 <= 0.0f) return a;
+    const V3 bp = sub3(p, b);
+    const float d3 = dot3(ab, bp), d4 = dot3(ac, bp);
+    if (d3 >= 0.0f && d4 <= d3) return b;
+    const float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) return mad3(a, ab, d1 / (d1 - d3));
+    const V3 cp = sub3(p, c);
+    const float d5 = dot3(ab, cp), d6 = dot3(ac, cp);
+    if (d6 >= 0.0f && d5 <= d6) return c;
+    const float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) return mad3(a, ac, d2 / (d2 - d6));
+    const float va = d3 * d6 - d5 * d4;
+    if (va <= 0.0f && d4 - d3 >= 0.0f && d5 - d6 >= 0.0f)
+        return mad3(b, sub3(c, b), (d4 - d3) / ((d4 - d3) + (d5 - d6)));
+    const float denom = 1.0f / (va + vb + vc);
+    return mad3(mad3(a, ab, vb * denom), ac, vc * denom);
+}
+
+// boxes: min xyz, max xyz per node; links: (first triangle, count) for a leaf, (right child, 0) for an inner node
+extern "C" __global__ void bvh_closest(const float* boxes, const u32* links, const float* tris, const u32* tri_faces,
+                                       const float* points, u32 n, float* distance, u32* face, float* closest) {
+    const u32 i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const V3 p = load3(points, i);
+    float best = __int_as_float(0x7f800000);
+    V3 best_q = p;
+    u32 best_face = 0;
+    u32 stack[BVH_STACK];
+    u32 top = 1;
+    stack[0] = 0;
+    while (top > 0) {
+        const u32 node = stack[--top];
+        if (box_distance2(boxes + 6 * node, p) >= best) continue;
+        const u32 start = links[2 * node], count = links[2 * node + 1];
+        if (count > 0) {
+            for (u32 t = start; t < start + count; t++) {
+                const float* tri = tris + 9 * t;
+                const V3 q = closest_on_triangle(p, V3{tri[0], tri[1], tri[2]}, V3{tri[3], tri[4], tri[5]},
+                                                 V3{tri[6], tri[7], tri[8]});
+                const V3 d = sub3(q, p);
+                const float d2 = dot3(d, d);
+                if (d2 < best) { best = d2; best_q = q; best_face = tri_faces[t]; }
+            }
+            continue;
+        }
+        const u32 l = node + 1, r = start;
+        const float dl = box_distance2(boxes + 6 * l, p), dr = box_distance2(boxes + 6 * r, p);
+        stack[top] = dl < dr ? r : l;
+        stack[top + 1] = dl < dr ? l : r;
+        top += 2;
+    }
+    const V3 d = sub3(best_q, p);
+    distance[i] = sqrtf(dot3(d, d));
+    face[i] = best_face;
+    closest[3 * i] = best_q.x;
+    closest[3 * i + 1] = best_q.y;
+    closest[3 * i + 2] = best_q.z;
+}
