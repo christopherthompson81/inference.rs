@@ -148,3 +148,38 @@ not reproduced in 60 runs after (f16, bf16, f32; with and without nvidia-smi pol
 Remaining deletions against the reference in f32 and f16 alike: backchannels under the other speaker, the 160-165 s
 stretch, the clip's last seconds. Per-speaker segments (vernacula) recover the backchannels at the cost of
 insertions and short-segment code-switching; not done.
+
+## Run 6 - 2026-11-09 19:40
+
+Question (from the app's session, after #891): listening still finds dropped speech, and ONNX output has 112 words in
+39 runs that ours lacks. Which of those are real drops, and are they the window cuts, the dtype, or overlap?
+
+Scripts in `scratchpad/drops/`, Vulkan RTX 3090, bundle `libinference_ffi` at 39a693374, clip 1.
+
+- The 112 is mostly the alignment. ONNX lists an overlapping speaker's segment after the segment it sits in, so a
+  sequence alignment against our time-ordered words drops whatever moved. Counting per ONNX segment instead (its
+  non-filler words with no match in ours within 1 s, `bag.py`): 94, almost all 1-3 word differences (spelling, a
+  repeated word, one-second segments that ONNX reads as Spanish). One 7-word "run" is in our stream word for word.
+- f16 and f32 give the same words on every slice tried (`slices.py`): the remaining drops are not the dtype.
+- Real drops, heard by the model when given less context: a 4-word repetition under the other speaker inside a
+  window (~2:42); a 6-word phrase across the cut at 516.2 s (neither window alone has it, the two joined do); a
+  4-word phrase of the quieter speaker at ~9:26 (the window from 563.6 s drops it, from 565.0 s keeps it); most of
+  the last window (584.6-598.2 s, 14 words, ~18 more heard per segment).
+- Overlapping windows (`overlap.py`: each window widened by N s, words kept by midpoint in their own span):
+
+```
+overlap   WER     sub del ins
+0 s       9.1%    63  29  44    (the stream word for word)
+2 s      11.9%    81  26  70
+4 s      10.8%    63  42  55
+```
+
+  Word times move with context, so a midpoint merge duplicates and drops words at the seams. Not the fix.
+- Second pass over overlapped speech (`second.py`: each of our diarizer's 147 segments that overlap another
+  speaker's, 322 s of audio, transcribed alone with 0.2 s pad; new words = ones the stream lacks within 1 s): 145 new
+  words, 64 confirmed by ONNX or the reference nearby. It recovers each real drop above (and 9 words of the last
+  window) but also adds short-segment Spanish and repeated fillers, as vernacula's output does.
+
+Implication: what is left is overlap and context near-ties, which a second, per-speaker pass reaches at ~50%
+precision as it stands (it would need a filter, e.g. segment length and runs of 3+ new words, and costs about half
+again the ASR time for this clip). Window cuts and dtype are ruled out as the main cause.
