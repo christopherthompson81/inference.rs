@@ -11,6 +11,8 @@ use super::vec3::{V3, cross, dot, norm, sub};
 
 /// `to_glb`'s defaults
 pub const CONE_HALF_ANGLE: f32 = std::f32::consts::FRAC_PI_2;
+// the unwrap's clusters: tight enough that most flatten as one chart without overlaps
+pub const UNWRAP_CONE_HALF_ANGLE: f32 = std::f32::consts::FRAC_PI_6;
 pub const AREA_PENALTY: f32 = 0.1;
 pub const PERIMETER_AREA_PENALTY: f32 = 1e-4;
 // `remove_degenerate_faces` defaults
@@ -290,12 +292,33 @@ pub struct Unwrapped {
     pub height: u32,
 }
 
+/// Degenerate faces dropped, the mesh clustered by [`compute_charts`] within 30 degree normal cones, and each cluster
+/// taken by xatlas as one chart (split only where it does not parameterize validly), parameterized and packed. Against
+/// CuMesh's settings ([`uv_unwrap_reference`]): an export at 1024 unwraps in about half the time, with less stretch, a
+/// few more seams and slightly lower atlas coverage.
+pub fn uv_unwrap(mesh: &Mesh) -> Result<Unwrapped, inference_xatlas::Error> {
+    uv_unwrap_with(
+        mesh,
+        UNWRAP_CONE_HALF_ANGLE,
+        inference_xatlas::Options { single_chart: true },
+    )
+}
+
 /// CuMesh's `uv_unwrap`: degenerate faces dropped, the clusters of [`compute_charts`] each added to xatlas as a mesh,
 /// charted, parameterized and packed with its defaults, the results gathered in cluster order.
-pub fn uv_unwrap(mesh: &Mesh) -> Result<Unwrapped, inference_xatlas::Error> {
+pub fn uv_unwrap_reference(mesh: &Mesh) -> Result<Unwrapped, inference_xatlas::Error> {
+    uv_unwrap_with(mesh, CONE_HALF_ANGLE, inference_xatlas::Options::default())
+}
+
+/// [`uv_unwrap`] with xatlas `options`.
+pub fn uv_unwrap_with(
+    mesh: &Mesh,
+    cone_half_angle: f32,
+    options: inference_xatlas::Options,
+) -> Result<Unwrapped, inference_xatlas::Error> {
     let mut mesh = mesh.clone();
     remove_degenerate_faces(&mut mesh);
-    let charts = compute_charts(&mesh, CONE_HALF_ANGLE, AREA_PENALTY, PERIMETER_AREA_PENALTY);
+    let charts = compute_charts(&mesh, cone_half_angle, AREA_PENALTY, PERIMETER_AREA_PENALTY);
     let clusters = chart_meshes(&mesh, &charts);
     let positions: Vec<Vec<V3>> = clusters
         .iter()
@@ -309,7 +332,7 @@ pub fn uv_unwrap(mesh: &Mesh) -> Result<Unwrapped, inference_xatlas::Error> {
             triangles: tris,
         })
         .collect();
-    let atlas = inference_xatlas::unwrap(&inputs)?;
+    let atlas = inference_xatlas::unwrap_with(&inputs, options)?;
     let mut out = Unwrapped {
         mesh: Mesh {
             vertices: Vec::new(),

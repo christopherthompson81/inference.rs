@@ -27,7 +27,7 @@ inference image-to-3d --image chair.png --out chair/ --variant 512 --seed 3
 | `--remove-background` | off | Run BiRefNet even when the image has transparency of its own |
 | `--texture-size` | 2048 | The baked textures' width and height |
 | `--remesh` | off | Rebuild the surface first as a closed shell (narrow-band dual contouring of the distance to it, as `to_glb`'s remesh): watertight, single-sided, but about half its faces go to the inside of the shell |
-| `--vertex-colors` | off | Per-vertex color and material instead of baked textures: no unwrapping or baking, about a minute faster |
+| `--vertex-colors` | off | Per-vertex color and material instead of baked textures: no unwrapping or baking, about 15 s faster |
 | `--trellis2`, `--trellis-large`, `--dinov3`, `--birefnet` | fetched | Local checkpoint folders |
 | `--cpu` | off | Run on the CPU (very slow) |
 
@@ -37,12 +37,14 @@ then for the cascade on the cells the shape decoder upsamples them to, at 1024);
 decoder extracts the surface from a flexible dual grid and the texture decoder, following its subdivisions, a volume
 of base color, metallic, roughness and alpha. The export follows TRELLIS.2's `to_glb` without its remesh: small holes
 filled, the mesh simplified to at most a million faces and its topology cleaned (duplicate faces, non-manifold edges,
-specks, winding), clustered by normal cones and unwrapped with xatlas into one atlas; each covered texel is placed on
+specks, winding), clustered within 30 degree normal cones and unwrapped with xatlas into one atlas, each cluster one
+chart unless it would overlap itself (the reference grows xatlas's own charts inside wider clusters: about twice the
+unwrap time for an atlas of the same quality); each covered texel is placed on
 the extracted surface and given the volume's trilinear attributes, and the texels between charts are inpainted so
 seams don't bleed.
 
-On an RTX 3090 with an 8-core CPU, the robot example: `1024-cascade` 115 s (about 47 s of it the CPU export, most of
-that xatlas) at a 7.5 GB GPU peak and 2.3 GB of host memory; `--remesh` 128 s; `--vertex-colors` 62 s. `512` takes
+On an RTX 3090 with an 8-core CPU, the robot example: `1024-cascade` 58 s (about 15 s of it the export, most of that
+xatlas on the CPU) at a 7.5 GB GPU peak and 2.3 GB of host memory; `--remesh` 61 s; `--vertex-colors` 44 s. `512` takes
 20 s plus its export.
 
 ```

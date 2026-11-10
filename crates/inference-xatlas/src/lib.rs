@@ -79,6 +79,7 @@ struct XChartOptions {
     max_iterations: u32,
     use_input_mesh_uvs: bool,
     fix_winding: bool,
+    single_chart: bool,
 }
 
 #[repr(C)]
@@ -129,6 +130,7 @@ pub struct MeshOutput {
     pub triangles: Vec<[u32; 3]>,
     /// Charts xatlas could not parameterize validly
     pub invalid_charts: usize,
+    pub charts: usize,
 }
 
 /// The whole atlas: its size in texels and each mesh's result, in the order added.
@@ -169,8 +171,20 @@ impl Drop for Atlas {
     }
 }
 
+/// How xatlas charts the meshes.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Options {
+    /// Each added mesh is one chart (no chart growth); a chart that does not parameterize validly is still split
+    pub single_chart: bool,
+}
+
 /// Charts, parameterizes and packs `meshes` with xatlas's default chart and pack options, as CuMesh does.
 pub fn unwrap(meshes: &[MeshInput]) -> Result<AtlasOutput, Error> {
+    unwrap_with(meshes, Options::default())
+}
+
+/// [`unwrap`] with `options`.
+pub fn unwrap_with(meshes: &[MeshInput], options: Options) -> Result<AtlasOutput, Error> {
     // SAFETY: the atlas is created here and freed by `Atlas`'s drop; every pointer handed to xatlas outlives the call
     // that reads it (xatlasAddMesh copies the mesh), and the output arrays are read before the atlas is destroyed
     unsafe {
@@ -191,6 +205,7 @@ pub fn unwrap(meshes: &[MeshInput]) -> Result<AtlasOutput, Error> {
         }
         let mut chart = std::mem::zeroed::<XChartOptions>();
         xatlasChartOptionsInit(&mut chart);
+        chart.single_chart = options.single_chart;
         xatlasComputeCharts(atlas.0, &chart);
         let mut pack = std::mem::zeroed::<XPackOptions>();
         xatlasPackOptionsInit(&mut pack);
@@ -220,6 +235,7 @@ pub fn unwrap(meshes: &[MeshInput]) -> Result<AtlasOutput, Error> {
                         .iter()
                         .filter(|c| c.kind == CHART_TYPE_INVALID)
                         .count(),
+                    charts: charts.len(),
                 }
             })
             .collect();
