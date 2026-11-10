@@ -27,7 +27,7 @@ inference image-to-3d --image chair.png --out chair/ --variant 512 --seed 3
 | `--remove-background` | off | Run BiRefNet even when the image has transparency of its own |
 | `--texture-size` | 2048 | The baked textures' width and height |
 | `--remesh` | off | Rebuild the surface first as a closed shell (narrow-band dual contouring of the distance to it, as `to_glb`'s remesh): watertight, single-sided, but about half its faces go to the inside of the shell |
-| `--vertex-colors` | off | Per-vertex color and material instead of baked textures: no unwrapping or baking, about 15 s faster |
+| `--vertex-colors` | off | Per-vertex color and material instead of baked textures: no unwrapping or baking, about 5 s faster |
 | `--trellis2`, `--trellis-large`, `--dinov3`, `--birefnet` | fetched | Local checkpoint folders |
 | `--cpu` | off | Run on the CPU (very slow) |
 
@@ -43,8 +43,9 @@ unwrap time for an atlas of the same quality); each covered texel is placed on
 the extracted surface and given the volume's trilinear attributes, and the texels between charts are inpainted so
 seams don't bleed.
 
-On an RTX 3090 with an 8-core CPU, the robot example: `1024-cascade` 58 s (about 15 s of it the export, most of that
-xatlas on the CPU) at a 7.5 GB GPU peak and 2.3 GB of host memory; `--remesh` 61 s; `--vertex-colors` 44 s. `512` takes
+On an RTX 3090 with an 8-core CPU, the robot example: `1024-cascade` 43 s (the export's cleanup and unwrap run on the CPU
+while the texture is sampled, leaving about 5 s after it) at a 6.1 GB GPU peak and 2.3 GB of host memory;
+`--remesh` 45 s at 7.0 GB (its distance queries share the GPU with the texture stage); `--vertex-colors` 38 s. `512` takes
 20 s plus its export.
 
 ```

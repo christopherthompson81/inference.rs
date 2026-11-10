@@ -359,6 +359,27 @@ pub fn bake(
     options: &BakeOptions,
     device: &Device,
 ) -> Result<Baked> {
+    finish(prepare(mesh, resolution, options, device)?, coords, values)
+}
+
+/// The part of a bake that needs only the shape: the unwrapped mesh, its covered texels and their points in the
+/// volume's grid.
+pub struct Prepared {
+    unwrapped: Unwrapped,
+    size: usize,
+    unknown: Vec<bool>,
+    covered: Vec<usize>,
+    points: Vec<V3>,
+    double_sided: bool,
+}
+
+/// [`bake`]'s shape half (cleanup, unwrap, rasterization and projection), which can run while the texture is made.
+pub fn prepare(
+    mesh: &Mesh,
+    resolution: usize,
+    options: &BakeOptions,
+    device: &Device,
+) -> Result<Prepared> {
     let (cleaned, bvh) = if options.remesh {
         let mut filled = mesh.clone();
         cleanup::fill_holes(&mut filled, cleanup::MAX_HOLE_PERIMETER);
@@ -397,8 +418,27 @@ pub fn bake(
         .into_iter()
         .map(|(_, _, c)| c.map(|v| (v + 0.5) * res))
         .collect();
+    Ok(Prepared {
+        unwrapped,
+        size,
+        unknown: texel_faces.iter().map(|&f| f == 0).collect(),
+        covered,
+        points,
+        double_sided: !options.remesh,
+    })
+}
+
+/// [`bake`]'s texture half: the volume (`coords` / `values`) sampled at the prepared texels and inpainted.
+pub fn finish(prepared: Prepared, coords: &[[i32; 3]], values: &[[f32; 6]]) -> Result<Baked> {
+    let Prepared {
+        unwrapped,
+        size,
+        unknown,
+        covered,
+        points,
+        double_sided,
+    } = prepared;
     let attrs = sample_attributes(coords, values, &points);
-    let unknown: Vec<bool> = texel_faces.iter().map(|&f| f == 0).collect();
     // planes of the covered texels' values, zero elsewhere
     let plane = |channels: usize, get: &(dyn Fn(&Pbr) -> [f32; 3] + Sync)| {
         let mut plane = vec![0u8; size * size * channels];
@@ -442,7 +482,7 @@ pub fn bake(
         metallic_roughness,
         size,
         covered: covered.len(),
-        double_sided: !options.remesh,
+        double_sided,
     })
 }
 

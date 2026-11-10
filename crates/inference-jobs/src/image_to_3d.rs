@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use inference_recon::trellis2::bake::bake;
+use inference_recon::trellis2::bake;
 use inference_recon::trellis2::glb::{to_glb, to_textured_glb};
 use inference_recon::trellis2::pipeline::{self, Trellis2Paths};
 use inference_tensor::Device;
@@ -66,6 +66,7 @@ pub struct ImageTo3dReport {
     pub faces: usize,
     /// The GLB's textures' size, when baked
     pub texture_size: Option<usize>,
+    /// The export after generation; a bake's cleanup and unwrap run beside the texture stage and are not counted
     pub export_seconds: f64,
     pub total_seconds: f64,
 }
@@ -164,34 +165,43 @@ pub fn generate_3d_on(
     .expect("a whole image")
     .save(&prepared_path)?;
     progress.preview("the object", &prepared_path);
-    let out = pipeline::generate(
-        &models.paths,
-        &input,
-        options.variant,
-        options.seed,
-        progress,
-        device,
-    )?;
-    let export = Instant::now();
-    progress.stage("export", 0);
+    // the bake's shape half runs on its own thread while the texture is made; the scope joins it on every path
+    let (out, export, glb, mesh) = std::thread::scope(|scope| -> anyhow::Result<_> {
+        let mut prepared = None;
+        let out = pipeline::generate_with(
+            &models.paths,
+            &input,
+            options.variant,
+            options.seed,
+            progress,
+            device,
+            &mut |mesh, resolution| {
+                if let Some(bake_options) = &options.bake {
+                    let mesh = mesh.clone();
+                    prepared = Some(
+                        scope.spawn(move || bake::prepare(&mesh, resolution, bake_options, device)),
+                    );
+                }
+            },
+        )?;
+        let export = Instant::now();
+        progress.stage("export", 0);
+        let (glb, mesh) = match prepared {
+            Some(prepared) => {
+                let prepared = prepared
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("the bake's preparation panicked"))??;
+                let baked = bake::finish(prepared, &out.voxels, &out.voxel_attrs)?;
+                (to_textured_glb(&baked), baked.unwrapped.mesh)
+            }
+            None => {
+                let (mesh, attrs) = out.vertex_colored(device)?;
+                (to_glb(&mesh, &attrs), mesh)
+            }
+        };
+        Ok((out, export, glb, mesh))
+    })?;
     let raw_faces = out.mesh.faces.len();
-    let (glb, mesh) = match &options.bake {
-        Some(bake_options) => {
-            let baked = bake(
-                &out.mesh,
-                &out.voxels,
-                &out.voxel_attrs,
-                out.resolution,
-                bake_options,
-                device,
-            )?;
-            (to_textured_glb(&baked), baked.unwrapped.mesh)
-        }
-        None => {
-            let (mesh, attrs) = out.vertex_colored(device)?;
-            (to_glb(&mesh, &attrs), mesh)
-        }
-    };
     std::fs::write(out_dir.join(GLB_FILE), glb)?;
     std::fs::write(out_dir.join(MESH_FILE), mesh.to_ply())?;
     let export_seconds = export.elapsed().as_secs_f64();
