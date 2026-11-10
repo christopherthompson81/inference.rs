@@ -59,14 +59,13 @@ pub struct ImageTo3dReport {
     pub background_removed: bool,
     pub structure_cells: usize,
     pub latent_cells: usize,
-    /// The mesh as extracted, before hole filling and simplification
+    /// The mesh as extracted, before any cleanup
     pub raw_faces: usize,
+    /// The GLB's mesh
     pub vertices: usize,
     pub faces: usize,
     /// The GLB's textures' size, when baked
     pub texture_size: Option<usize>,
-    pub glb_vertices: usize,
-    pub glb_faces: usize,
     pub export_seconds: f64,
     pub total_seconds: f64,
 }
@@ -175,30 +174,26 @@ pub fn generate_3d_on(
     )?;
     let export = Instant::now();
     progress.stage("export", 0);
-    let (glb, glb_vertices, glb_faces) = match &options.bake {
+    let raw_faces = out.mesh.faces.len();
+    let (glb, mesh) = match &options.bake {
         Some(bake_options) => {
             let baked = bake(
-                &out.extracted,
+                &out.mesh,
                 &out.voxels,
                 &out.voxel_attrs,
                 out.resolution,
                 bake_options,
             )?;
-            let counts = (
-                baked.unwrapped.mesh.vertices.len(),
-                baked.unwrapped.mesh.faces.len(),
-            );
-            (to_textured_glb(&baked), counts.0, counts.1)
+            (to_textured_glb(&baked), baked.unwrapped.mesh)
         }
-        None => (
-            to_glb(&out.mesh, &out.attrs),
-            out.mesh.vertices.len(),
-            out.mesh.faces.len(),
-        ),
+        None => {
+            let (mesh, attrs) = out.vertex_colored();
+            (to_glb(&mesh, &attrs), mesh)
+        }
     };
     std::fs::write(out_dir.join(GLB_FILE), glb)?;
+    std::fs::write(out_dir.join(MESH_FILE), mesh.to_ply())?;
     let export_seconds = export.elapsed().as_secs_f64();
-    std::fs::write(out_dir.join(MESH_FILE), out.mesh.to_ply())?;
     let report = ImageTo3dReport {
         variant: match options.variant {
             Variant::Res512 => "512",
@@ -210,12 +205,10 @@ pub fn generate_3d_on(
         background_removed: removed,
         structure_cells: out.structure_cells,
         latent_cells: out.latent_cells,
-        raw_faces: out.raw_faces,
-        vertices: out.mesh.vertices.len(),
-        faces: out.mesh.faces.len(),
+        raw_faces,
+        vertices: mesh.vertices.len(),
+        faces: mesh.faces.len(),
         texture_size: options.bake.map(|b| b.texture_size),
-        glb_vertices,
-        glb_faces,
         export_seconds,
         total_seconds: start.elapsed().as_secs_f64(),
     };

@@ -7,6 +7,7 @@
 use rayon::prelude::*;
 
 use super::mesh::Mesh;
+use super::vec3::{V3, cross, dot, norm, sub};
 
 /// `to_glb`'s defaults
 pub const CONE_HALF_ANGLE: f32 = std::f32::consts::FRAC_PI_2;
@@ -15,25 +16,6 @@ pub const PERIMETER_AREA_PENALTY: f32 = 1e-4;
 // `remove_degenerate_faces` defaults
 const DEGENERATE_ABS: f32 = 1e-24;
 const DEGENERATE_REL: f32 = 1e-12;
-
-type V3 = [f32; 3];
-
-fn sub(a: V3, b: V3) -> V3 {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-fn dot(a: V3, b: V3) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-fn cross(a: V3, b: V3) -> V3 {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-fn norm(a: V3) -> f32 {
-    dot(a, a).sqrt()
-}
 
 /// Drops faces with a repeated vertex, or whose area is under `min(1e-12 * longest edge^2, 1e-24)`.
 pub fn remove_degenerate_faces(mesh: &mut Mesh) {

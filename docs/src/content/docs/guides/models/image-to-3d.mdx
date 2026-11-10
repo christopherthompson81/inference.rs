@@ -26,6 +26,7 @@ inference image-to-3d --image chair.png --out chair/ --variant 512 --seed 3
 | `--seed` | 0 | Seeds every stage's noise |
 | `--remove-background` | off | Run BiRefNet even when the image has transparency of its own |
 | `--texture-size` | 2048 | The baked textures' width and height |
+| `--remesh` | off | Rebuild the surface first as a closed shell (narrow-band dual contouring of the distance to it, as `to_glb`'s remesh): watertight, single-sided, but about half its faces go to the inside of the shell |
 | `--vertex-colors` | off | Per-vertex color and material instead of baked textures: no unwrapping or baking, about a minute faster |
 | `--trellis2`, `--trellis-large`, `--dinov3`, `--birefnet` | fetched | Local checkpoint folders |
 | `--cpu` | off | Run on the CPU (very slow) |
@@ -40,24 +41,25 @@ specks, winding), clustered by normal cones and unwrapped with xatlas into one a
 the extracted surface and given the volume's trilinear attributes, and the texels between charts are inpainted so
 seams don't bleed.
 
-On an RTX 3090, the robot example: `1024-cascade` 135 s (about 66 s of it the CPU export) at a 7.5 GB GPU peak; with
-`--vertex-colors` 62 s. `512` takes 20 s plus its export.
+On an RTX 3090 with an 8-core CPU, the robot example: `1024-cascade` 115 s (about 47 s of it the CPU export, most of
+that xatlas) at a 7.5 GB GPU peak and 2.3 GB of host memory; `--remesh` 128 s; `--vertex-colors` 62 s. `512` takes
+20 s plus its export.
 
 ```
 chair/
   model.glb      the unwrapped mesh with normals, a base color + alpha texture and a metallic-roughness texture
                  (with --vertex-colors: COLOR_0 = base color and alpha, _METALLIC and _ROUGHNESS per vertex)
-  mesh.ply       the simplified mesh before unwrapping, geometry only
+  mesh.ply       the GLB's mesh, geometry only
   prepared.png   the object as cut out
   meta.json      variant, resolution, cell and face counts, timing
 ```
 
 The GLB sits in the unit cube centered on the origin, y up as glTF expects (the PLY keeps TRELLIS's z up). The baked
-material is double-sided and opaque. With `--vertex-colors`, glTF viewers show `COLOR_0`, and the material's metallic
+material is opaque, and double-sided unless remeshed. With `--vertex-colors`, glTF viewers show `COLOR_0`, and the material's metallic
 and roughness factors are the vertices' means.
 
 As a server job: `{"kind": "image_to_3d"}` with one image, optionally `seed`, `variant` (`"1024_cascade"` or `"512"`),
-`remove_background`, `vertex_colors` and `texture_size`; outputs under `model/`.
+`remove_background`, `vertex_colors`, `texture_size` and `remesh`; outputs under `model/`.
 
 ## JoVox voxels
 

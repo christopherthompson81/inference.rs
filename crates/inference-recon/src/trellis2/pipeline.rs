@@ -75,19 +75,33 @@ pub struct Trellis2Paths {
     pub dinov3: PathBuf,
 }
 
-/// The mesh as extracted (holes filled, simplified) and each vertex's attributes.
+/// The mesh as extracted and the texture decoder's attribute volume.
 pub struct Generated {
     pub mesh: Mesh,
-    pub attrs: Vec<Pbr>,
-    /// The mesh as extracted, before hole filling and simplification (what a baked export projects onto)
-    pub extracted: Mesh,
     /// The texture decoder's cells and their PBR attributes in [0, 1]
     pub voxels: Vec<[i32; 3]>,
     pub voxel_attrs: Vec<[f32; PBR]>,
     pub structure_cells: usize,
     pub latent_cells: usize,
-    pub raw_faces: usize,
     pub resolution: usize,
+}
+
+impl Generated {
+    /// The mesh with small holes filled, simplified to TRELLIS.2's face budget, and the volume's attributes at each
+    /// vertex.
+    pub fn vertex_colored(&self) -> (Mesh, Vec<Pbr>) {
+        let mut mesh = self.mesh.clone();
+        cleanup::fill_holes(&mut mesh, cleanup::MAX_HOLE_PERIMETER);
+        cleanup::simplify(&mut mesh, cleanup::SIMPLIFY_TARGET);
+        let res = self.resolution as f32;
+        let points: Vec<[f32; 3]> = mesh
+            .vertices
+            .iter()
+            .map(|v| v.map(|c| (c + 0.5) * res))
+            .collect();
+        let attrs = sample_attributes(&self.voxels, &self.voxel_attrs, &points);
+        (mesh, attrs)
+    }
 }
 
 struct Stats {
@@ -379,35 +393,20 @@ pub fn generate(
         .map(|r| std::array::from_fn(|k| r[k]))
         .collect();
     let grid = dual_grid(&shape_out.feats)?;
-    let mut mesh = dual_grid_mesh(
+    let mesh = dual_grid_mesh(
         &shape_out.coords,
         &grid.vertices,
         &grid.crossed,
         &grid.split,
         resolution,
     );
-    let raw_faces = mesh.faces.len();
-    let extracted = mesh.clone();
     check(progress)?;
-
-    progress.stage("cleanup", 0);
-    cleanup::fill_holes(&mut mesh, cleanup::MAX_HOLE_PERIMETER);
-    cleanup::simplify(&mut mesh, cleanup::SIMPLIFY_TARGET);
-    let points: Vec<[f32; 3]> = mesh
-        .vertices
-        .iter()
-        .map(|v| v.map(|c| (c + 0.5) * resolution as f32))
-        .collect();
-    let attrs = sample_attributes(&tex_out.coords, &values, &points);
     Ok(Generated {
         mesh,
-        attrs,
-        extracted,
         voxels: tex_out.coords,
         voxel_attrs: values,
         structure_cells,
         latent_cells: cells.len(),
-        raw_faces,
         resolution,
     })
 }

@@ -1393,6 +1393,7 @@ class ImageTo3dJob:
     """TRELLIS.2's textured mesh of the object in the job's one image."""
 
     placement: Placement | None = None
+    remesh: bool | None = None
     remove_background: bool | None = None
     seed: int | None = None
     texture_size: int | None = None

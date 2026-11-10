@@ -21,6 +21,7 @@ inference image-to-3d [OPTIONS] --image <IMAGE> --out <OUT>
 | `--seed <SEED>` | `0` |  |
 | `--vertex-colors` | `false` | Per-vertex color and material instead of baked textures (no unwrapping or baking) |
 | `--texture-size <TEXTURE_SIZE>` | `2048` | The baked textures' width and height |
+| `--remesh` | `false` | Rebuild the surface as a closed shell (narrow-band dual contouring) before baking |
 | `--trellis2 <TRELLIS2>` |  | The TRELLIS.2-4B folder; fetched from microsoft/TRELLIS.2-4B when unset |
 | `--trellis-large <TRELLIS_LARGE>` |  | The TRELLIS-image-large folder (its structure decoder); fetched when unset |
 | `--dinov3 <DINOV3>` |  | The DINOv3 ViT-L/16 folder; fetched from facebook/dinov3-vitl16-pretrain-lvd1689m (gated) when unset |

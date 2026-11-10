@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rayon::prelude::*;
 
 use super::mesh::Mesh;
+use super::vec3::{V3, add, cross, dot, norm2, scale, sub};
 
 /// TRELLIS.2's hole perimeter limit
 pub const MAX_HOLE_PERIMETER: f32 = 3e-2;
@@ -26,32 +27,8 @@ const SKINNY_EPS: f32 = 1e-12;
 // vertices a worker gathers edges for at a time
 const EDGE_CHUNK: usize = 4096;
 
-type V3 = [f32; 3];
 // edges and their face counts
 type EdgeList = (Vec<(u32, u32)>, Vec<u32>);
-
-fn sub(a: V3, b: V3) -> V3 {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-fn add(a: V3, b: V3) -> V3 {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-fn scale(a: V3, s: f32) -> V3 {
-    [a[0] * s, a[1] * s, a[2] * s]
-}
-fn dot(a: V3, b: V3) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-fn cross(a: V3, b: V3) -> V3 {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-fn norm2(a: V3) -> f32 {
-    dot(a, a)
-}
 
 /// Each vertex's faces, in face order (CuMesh fills them with atomics, in no fixed order).
 struct VertFaces {

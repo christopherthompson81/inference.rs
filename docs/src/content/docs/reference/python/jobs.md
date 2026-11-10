@@ -11,6 +11,7 @@ TRELLIS.2's textured mesh of the object in the job's one image.
 | Field | Type | Default |
 | --- | --- | --- |
 | `placement` | `Placement \| None` | optional |
+| `remesh` | `bool \| None` | optional |
 | `remove_background` | `bool \| None` | optional |
 | `seed` | `int \| None` | optional |
 | `texture_size` | `int \| None` | optional |

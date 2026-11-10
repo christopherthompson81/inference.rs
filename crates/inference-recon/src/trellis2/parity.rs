@@ -291,6 +291,8 @@ fn holes_and_simplification_match_the_reference() -> Result<()> {
     Ok(())
 }
 
+// distance difference allowed against cuBVH's
+const DISTANCE_TOLERANCE: f32 = 1e-6;
 // every this many texels sampled for the surface color comparison
 const SAMPLE_STRIDE: usize = 7;
 // mean color difference (of 255) allowed between our baked surface and the reference's
@@ -676,6 +678,73 @@ fn the_bake_matches_the_reference() -> Result<()> {
         at(0.99)
     );
     assert!(mean < MAX_MEAN_COLOR_DIFF, "surface color");
+    Ok(())
+}
+
+// TRELLIS2_REMESH_REF: cuBVH distances at random points and CuMesh's remesh as `to_glb` runs it on the hole-filled
+// 1024 mesh (`remesh_ref.py`, scratch)
+#[test]
+#[ignore = "needs a reference dump"]
+fn distances_and_the_remesh_match_the_reference() -> Result<()> {
+    let Some(reference) = std::env::var_os("TRELLIS2_REMESH_REF") else {
+        return Ok(());
+    };
+    let refs = inference_tensor::safetensors::load(reference, &Device::Cpu)?;
+    let filled = mesh_of(&refs, "filled.v", "filled.f")?;
+    let start = std::time::Instant::now();
+    let bvh = super::bake::Bvh::new(&filled);
+    let built = start.elapsed().as_secs_f64();
+    let points: Vec<[f32; 3]> = refs["pts"]
+        .to_vec2::<f32>()?
+        .iter()
+        .map(|r| [r[0], r[1], r[2]])
+        .collect();
+    let theirs = refs["dist"].to_vec1::<f32>()?;
+    let start = std::time::Instant::now();
+    let ours = bvh.unsigned_distance(&points);
+    let queried = start.elapsed().as_secs_f64();
+    let worst = ours
+        .iter()
+        .zip(&theirs)
+        .map(|(o, t)| (o.0 - t).abs())
+        .fold(0f32, f32::max);
+    println!(
+        "bvh over {} faces in {built:.2} s; {} distances in {queried:.2} s, worst difference {worst:.2e}",
+        filled.faces.len(),
+        points.len()
+    );
+    assert!(worst < DISTANCE_TOLERANCE, "distances");
+    let domain = super::remesh::Domain::unit_cube(1024);
+    let start = std::time::Instant::now();
+    let shell = super::remesh::remesh(
+        &bvh,
+        &domain,
+        super::remesh::BAND,
+        super::remesh::PROJECT_BACK,
+    );
+    let seconds = start.elapsed().as_secs_f64();
+    let reference = mesh_of(&refs, "remesh.v", "remesh.f")?;
+    let cell = 1.0 / 1024.0;
+    let (ab_mean, ab_99) = nearest(&shell.vertices, &reference.vertices, cell);
+    let same = shell.vertices.len() == reference.vertices.len()
+        && shell
+            .vertices
+            .iter()
+            .zip(&reference.vertices)
+            .all(|(a, b)| (0..3).all(|k| (a[k] - b[k]).abs() < 1e-5));
+    println!(
+        "remeshed in {seconds:.2} s: {} vertices / {} faces vs {} / {}; nearest ours->ref mean {ab_mean:.2e} p99 \
+         {ab_99:.2e}; vertex for vertex: {same}, faces identical: {}",
+        shell.vertices.len(),
+        shell.faces.len(),
+        reference.vertices.len(),
+        reference.faces.len(),
+        shell.faces == reference.faces
+    );
+    let ratio = (shell.vertices.len() as f64 - reference.vertices.len() as f64).abs()
+        / reference.vertices.len() as f64;
+    assert!(ratio < 1e-5, "vertex count");
+    assert!(ab_99 < DISTANCE_TOLERANCE, "vertex positions");
     Ok(())
 }
 

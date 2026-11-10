@@ -219,7 +219,7 @@ fn png(pixels: &[u8], size: usize, channels: usize) -> Vec<u8> {
 }
 
 /// The baked mesh as a binary glTF (y up): positions, normals and uvs, a base color + alpha texture and a
-/// metallic-roughness texture, double-sided as `to_glb` makes it without a remesh.
+/// metallic-roughness texture, double-sided unless remeshed, as `to_glb` makes it.
 pub fn to_textured_glb(baked: &super::bake::Baked) -> Vec<u8> {
     let u = &baked.unwrapped;
     let mut bin = Vec::new();
@@ -270,7 +270,7 @@ pub fn to_textured_glb(baked: &super::bake::Baked) -> Vec<u8> {
                 "metallicRoughnessTexture": {"index": 1},
             },
             "alphaMode": "OPAQUE",
-            "doubleSided": true,
+            "doubleSided": baked.double_sided,
         }],
         "samplers": [{"magFilter": LINEAR, "minFilter": LINEAR_MIPMAP_LINEAR, "wrapS": REPEAT, "wrapT": REPEAT}],
         "textures": [{"sampler": 0, "source": 0}, {"sampler": 0, "source": 1}],
