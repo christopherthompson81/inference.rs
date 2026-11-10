@@ -10,6 +10,7 @@ pub mod jovox;
 pub mod moge;
 pub mod progress;
 pub mod splatting;
+pub mod trellis2;
 pub mod worldmirror;
 pub mod worldstereo;
 

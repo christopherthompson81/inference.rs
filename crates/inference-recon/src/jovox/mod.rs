@@ -198,6 +198,22 @@ impl JoVox {
         })
     }
 
+    /// DINOv3's tokens `[1, tokens, 1024]` for RGB bytes `width x height`, normalized as DINOv3 expects.
+    pub fn encode_rgb(&self, rgb: &[u8], (width, height): (usize, usize)) -> Result<Tensor> {
+        let plane = width * height;
+        let mut data = vec![0f32; 3 * plane];
+        for (i, px) in rgb.as_chunks::<3>().0.iter().enumerate() {
+            for c in 0..3 {
+                data[c * plane + i] = (f32::from(px[c]) / 255.0 - MEAN[c]) / STD[c];
+            }
+        }
+        self.encoder.forward(&Tensor::from_vec(
+            data,
+            (1, 3, height, width),
+            &self.device,
+        )?)
+    }
+
     /// The condition `[1, tokens, 1024]` for a prepared image (see [`prepare`]).
     pub fn condition(&self, image: &Rgba) -> Result<Tensor> {
         self.encoder.forward(&image_tensor(image, &self.device)?)
@@ -235,7 +251,7 @@ impl JoVox {
 // The sampler driving `flow` under `kv`: the condition alone, or it then the zero condition when guided
 fn sample_structure(
     flow: &Flow,
-    kv: &[flow::CrossKv],
+    kv: &[crate::trellis2::dit::CrossKv],
     options: &SampleOptions,
     rng: &mut dyn sampler::Uniform,
     progress: &dyn Progress,

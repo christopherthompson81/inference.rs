@@ -319,8 +319,9 @@ pub enum Command {
         cpu: bool,
     },
 
-    /// The 64^3 voxel structure of the object in one image with JoVox, written as a cube mesh (voxels.ply) beside the
-    /// prepared image and a meta.json; an image without a transparent background has it removed with BiRefNet
+    /// The 3D shape of the object in one image: JoVox's 64^3 voxel structure (voxels.ply, as cubes), meshed by
+    /// TRELLIS.2's second stage (mesh.ply), beside the prepared image and a meta.json; an image without a transparent
+    /// background has it removed with BiRefNet
     Voxels {
         /// The image (png, jpg, webp); an object on a transparent background is used as it is
         #[arg(long)]
@@ -341,6 +342,14 @@ pub enum Command {
         /// The BiRefNet folder; fetched from ZhengPeng7/BiRefNet when unset and the background needs removing
         #[arg(long)]
         birefnet: Option<PathBuf>,
+
+        /// The TRELLIS.2-4B folder; its shape stage is fetched from microsoft/TRELLIS.2-4B when unset
+        #[arg(long)]
+        trellis2: Option<PathBuf>,
+
+        /// Stop at the voxel structure: no mesh
+        #[arg(long)]
+        no_mesh: bool,
 
         #[arg(long, default_value_t = 0)]
         seed: u64,

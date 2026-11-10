@@ -1,6 +1,6 @@
 //! Voxel jobs: what a submission must hold, and a run on real weights that skips unless `INFERENCE_TEST_JOVOX_MODEL`,
-//! `INFERENCE_TEST_DINOV3_MODEL` and `INFERENCE_TEST_BIREFNET_MODEL` are the checkpoint folders and
-//! `INFERENCE_TEST_JOVOX_IMAGE` a photo of an object on an opaque background.
+//! `INFERENCE_TEST_DINOV3_MODEL`, `INFERENCE_TEST_BIREFNET_MODEL` and `INFERENCE_TEST_TRELLIS2_MODEL` are the checkpoint
+//! folders and `INFERENCE_TEST_JOVOX_IMAGE` a photo of an object on an opaque background.
 
 use std::time::Duration;
 
@@ -56,15 +56,23 @@ async fn a_voxel_job_takes_one_image_and_trained_settings() -> anyhow::Result<()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_voxel_job_cuts_out_the_object_and_writes_its_structure() -> anyhow::Result<()> {
+async fn a_voxel_job_cuts_out_the_object_and_meshes_its_structure() -> anyhow::Result<()> {
     let vars = [
         "INFERENCE_TEST_JOVOX_MODEL",
         "INFERENCE_TEST_DINOV3_MODEL",
         "INFERENCE_TEST_BIREFNET_MODEL",
+        "INFERENCE_TEST_TRELLIS2_MODEL",
         "INFERENCE_TEST_JOVOX_IMAGE",
     ]
     .map(std::env::var_os);
-    let [Some(jovox), Some(dinov3), Some(birefnet), Some(photo)] = vars else {
+    let [
+        Some(jovox),
+        Some(dinov3),
+        Some(birefnet),
+        Some(trellis2),
+        Some(photo),
+    ] = vars
+    else {
         return Ok(());
     };
     let tiny = tiny_llama_checkpoint()?;
@@ -79,6 +87,7 @@ async fn a_voxel_job_cuts_out_the_object_and_writes_its_structure() -> anyhow::R
         jovox: Some(jovox.into()),
         dinov3: Some(dinov3.into()),
         birefnet: Some(birefnet.into()),
+        trellis2: Some(trellis2.into()),
         ..Default::default()
     });
     let queued = queue.submit(
@@ -96,7 +105,9 @@ async fn a_voxel_job_cuts_out_the_object_and_writes_its_structure() -> anyhow::R
     assert_eq!(done.status, JobStatus::Succeeded, "{:?}", done.error);
     assert_eq!(done.report["background_removed"], true);
     assert!(done.report["voxels"].as_u64().is_some_and(|n| n > 0));
-    for name in ["voxels", "prepared image", "meta"] {
+    let faces = done.report["mesh"]["faces"].as_u64().unwrap_or(0);
+    assert!(faces > 0 && faces <= 1_000_000, "{faces} mesh faces");
+    for name in ["mesh", "voxels", "prepared image", "meta"] {
         let output = done.outputs.iter().find(|o| o.name == name);
         let output = output.ok_or_else(|| anyhow::anyhow!("no {name} output"))?;
         assert!(std::fs::metadata(queue.file(&model, &done.id, &output.file)?)?.len() > 0);

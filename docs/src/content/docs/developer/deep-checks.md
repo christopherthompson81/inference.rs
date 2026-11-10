@@ -29,6 +29,7 @@ set in `~/.cargo/config.toml` under `[env]` (build scripts track those variables
 | `INFERENCE_TEST_JOVOX_MODEL` | JoVox-64 checkpoint folder | `inference-jobs` `voxels_job` |
 | `INFERENCE_TEST_DINOV3_MODEL` | DINOv3 ViT-L/16 checkpoint folder | `inference-jobs` `voxels_job` |
 | `INFERENCE_TEST_BIREFNET_MODEL` | BiRefNet checkpoint folder | `inference-jobs` `voxels_job` |
+| `INFERENCE_TEST_TRELLIS2_MODEL` | TRELLIS.2-4B folder (`pipeline.json`, `ckpts/`) | `inference-jobs` `voxels_job` |
 | `INFERENCE_TEST_JOVOX_IMAGE` | a photo of one object on an opaque background | `inference-jobs` `voxels_job` |
 
 `iq4_xs_greedy_continuation_matches_llama_cpp` compares against a continuation recorded with mainline `llama-simple

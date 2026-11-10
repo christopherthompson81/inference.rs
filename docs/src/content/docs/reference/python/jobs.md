@@ -187,6 +187,7 @@ Where jobs keep their folders and which weights they run.
 | `models_repo` | `str \| None` | optional |
 | `moge` | `str \| None` | optional |
 | `placement` | `Placement \| None` | `Placement.FASTEST` |
+| `trellis2` | `str \| None` | optional |
 | `wan` | `str \| None` | optional |
 | `worldmirror` | `str \| None` | optional |
 | `worldmirror_repo` | `str \| None` | `'tencent/HY-World-2.0'` |
@@ -238,6 +239,7 @@ JoVox's 64^3 voxel structure of the object in the job's one image.
 | --- | --- | --- |
 | `cfg_strength` | `float \| None` | optional |
 | `fill` | `float \| None` | optional |
+| `mesh` | `bool \| None` | optional |
 | `placement` | `Placement \| None` | optional |
 | `remove_background` | `bool \| None` | optional |
 | `seed` | `int \| None` | optional |

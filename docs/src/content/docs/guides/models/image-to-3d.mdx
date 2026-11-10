@@ -1,12 +1,13 @@
 ---
-title: Voxels from an image
-description: JoVox generates the 64^3 voxel structure of the object in one image; BiRefNet removes its background first.
+title: 3D shapes from an image
+description: JoVox generates the 64^3 voxel structure of the object in one image and TRELLIS.2's second stage meshes it; BiRefNet removes the background first.
 ---
 
-`inference voxels` runs JoVox, a discrete flow-matching model that generates an object's occupancy at 4^3, 16^3 and
-64^3 in one model, conditioned on a single image through DINOv3. The result is the coarse 3D structure of the object
-(which cells it fills), the stage image-to-3D pipelines such as TRELLIS.2 turn into a mesh; meshing is not part of this
-command.
+`inference voxels` turns one image of an object into its 3D shape in two stages. JoVox, a discrete flow-matching
+model, generates the object's occupancy at 4^3, 16^3 and 64^3 in one model, conditioned on the image through DINOv3.
+TRELLIS.2's second stage then fills that structure with shape latents under the same image at 1024^2, decodes them to
+a 1024^3 flexible dual grid and extracts a mesh, its small holes filled and its faces reduced to at most a million.
+`--no-mesh` stops at the voxel structure.
 
 ## Weights
 
@@ -15,9 +16,11 @@ command.
 | JoVox-64 | [xiangjuntang/JoVox-64](https://huggingface.co/xiangjuntang/JoVox-64) | Apache-2.0 |
 | DINOv3 ViT-L/16 | [facebook/dinov3-vitl16-pretrain-lvd1689m](https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m) | DINOv3 License (gated: request access on the page, then `inference login`) |
 | BiRefNet | [ZhengPeng7/BiRefNet](https://huggingface.co/ZhengPeng7/BiRefNet) | MIT |
+| TRELLIS.2-4B (shape flow and decoder) | [microsoft/TRELLIS.2-4B](https://huggingface.co/microsoft/TRELLIS.2-4B) | MIT |
 
 Each is fetched into the Hugging Face cache on first use unless its folder is given (`--jovox`, `--dinov3`,
-`--birefnet`). BiRefNet is only fetched for an image that needs its background removed.
+`--birefnet`, `--trellis2`). BiRefNet is only fetched for an image that needs its background removed, and of
+TRELLIS.2-4B only `pipeline.json` and the two checkpoints the shape stage reads (3.5 GB).
 
 ## Run it
 
@@ -37,9 +40,12 @@ inference voxels --image chair.png --out chair/ --jovox JoVox-64 --dinov3 dinov3
 | `--temperature` | 0 | 0 takes each cell's most likely occupancy; above 0 samples it |
 | `--fill` | 0.74 | The share of the prepared image the object's longest side fills |
 | `--remove-background` | off | Run BiRefNet even when the image has transparency of its own |
+| `--no-mesh` | off | Stop at the voxel structure |
 | `--cpu` | off | Run on the CPU (slow) |
 
-On an RTX 3090 a structure takes 6 to 11 seconds (more voxels, more time) and about 6 GB of VRAM.
+On an RTX 3090 a structure takes 6 to 11 seconds (more voxels, more time) and about 6 GB of VRAM; meshing it adds
+about 30 seconds (the shape flow ~14 s, the decoder ~1.5 s, hole filling and simplification on the CPU ~7 s) and takes
+the peak to about 9.5 GB.
 
 ## Outputs
 
@@ -47,11 +53,12 @@ On an RTX 3090 a structure takes 6 to 11 seconds (more voxels, more time) and ab
 chair/
   prepared.png   what the model sees: the object cut out, centered and scaled to 512 x 512
   voxels.ply     the occupied cells as a cube mesh (only faces between filled and empty cells)
-  meta.json      voxel count, settings and timings
+  mesh.ply       the surface: triangles, at most 1M faces
+  meta.json      voxel count, mesh counts, settings and timings
 ```
 
-The cubes sit in the unit cube centered on the origin: cell `(x, y, z)` spans `(x, y, z) / 64 - 0.5` to
-`(x + 1, y + 1, z + 1) / 64 - 0.5`, with z up.
+Both sit in the unit cube centered on the origin, z up: voxel `(x, y, z)` spans `(x, y, z) / 64 - 0.5` to
+`(x + 1, y + 1, z + 1) / 64 - 0.5`. The mesh is geometry only (no texture or vertex colors).
 
 ## As a server job
 
