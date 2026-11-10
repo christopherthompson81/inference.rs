@@ -101,6 +101,12 @@ impl Rope {
         })
     }
 
+    /// The cos and sin tables.
+    #[cfg(all(test, feature = "cuda"))]
+    pub(crate) fn tables(&self) -> (&Tensor, &Tensor) {
+        (&self.cos, &self.sin)
+    }
+
     pub(crate) fn apply(&self, xs: &Tensor) -> Result<Tensor> {
         let (b, n, h, d) = xs.dims4()?;
         let dtype = xs.dtype();
@@ -273,7 +279,76 @@ impl Block {
         rope: &Rope,
         kv: &CrossKv,
     ) -> Result<Tensor> {
+        #[cfg(feature = "cuda")]
+        if super::dit_cuda::applies(xs) {
+            return self.forward_fused(xs, t_emb, rope, kv);
+        }
         self.forward_inspect(xs, t_emb, rope, kv, &mut |_, _| {})
+    }
+
+    // the six AdaLN vectors `[batch, 6c]`
+    fn modulation(&self, t_emb: &Tensor) -> Result<Tensor> {
+        match &self.modulation {
+            Modulation::Own(linear) => linear.forward(&t_emb.silu()?),
+            // the f32 offset plus the shared vectors, back to their dtype
+            Modulation::Shared(offset) => t_emb
+                .to_dtype(DType::F32)?
+                .broadcast_add(offset)?
+                .to_dtype(t_emb.dtype()),
+        }
+    }
+
+    // `forward` with its norms, modulation, rotations and residuals fused (bf16 on CUDA), the same arithmetic
+    #[cfg(feature = "cuda")]
+    fn forward_fused(
+        &self,
+        xs: &Tensor,
+        t_emb: &Tensor,
+        rope: &Rope,
+        kv: &CrossKv,
+    ) -> Result<Tensor> {
+        use super::dit_cuda::{heads, ln_mod, residual};
+        // chunks of the modulation: shift, scale and gate for attention, then for the MLP
+        const SHIFT_MSA: usize = 0;
+        const SCALE_MSA: usize = 1;
+        const GATE_MSA: usize = 2;
+        const SHIFT_MLP: usize = 3;
+        const SCALE_MLP: usize = 4;
+        const GATE_MLP: usize = 5;
+        let (b, n, c) = xs.dims3()?;
+        let (ln_eps, rms_eps) = (BLOCK_EPS as f32, RMS_EPS as f32);
+        let m = self.modulation(t_emb)?;
+        let h = ln_mod(xs, None, Some((&m, SCALE_MSA, SHIFT_MSA)), ln_eps)?;
+        let qkv = self.qkv.forward(&h)?.reshape((b, n, 3, self.heads, ()))?;
+        let rot = Some((&rope.cos, &rope.sin));
+        let q = heads(&qkv, 0, Some(&self.q_norm.scale), rot, rms_eps)?;
+        let k = heads(&qkv, 1, Some(&self.k_norm.scale), rot, rms_eps)?;
+        let v = heads(&qkv, 2, None, None, rms_eps)?;
+        let attn = sdpa(&q, &k, &v)?;
+        let attn = self
+            .self_out
+            .forward(&attn.transpose(1, 2)?.reshape((b, n, c))?)?;
+        let xs = residual(xs, &attn, Some((&m, GATE_MSA)))?;
+
+        let bias = self
+            .norm2
+            .bias()
+            .expect("the cross-attention norm has a bias");
+        let h = ln_mod(&xs, Some((self.norm2.weight(), bias)), None, ln_eps)?;
+        let q = self
+            .cross_q
+            .forward(&h)?
+            .reshape((b, n, 1, self.heads, ()))?;
+        let q = heads(&q, 0, Some(&self.cross_q_norm.scale), None, rms_eps)?;
+        let attn = sdpa(&q, &kv.k, &kv.v)?;
+        let attn = self
+            .cross_out
+            .forward(&attn.transpose(1, 2)?.reshape((b, n, c))?)?;
+        let xs = residual(&xs, &attn, None)?;
+
+        let h = ln_mod(&xs, None, Some((&m, SCALE_MLP, SHIFT_MLP)), ln_eps)?;
+        let mlp = self.fc2.forward(&self.fc1.forward(&h)?.gelu()?)?;
+        residual(&xs, &mlp, Some((&m, GATE_MLP)))
     }
 
     // `forward`, handing `inspect` the first norm, the rotated q and the attention and MLP outputs
@@ -286,14 +361,7 @@ impl Block {
         inspect: &mut dyn FnMut(&str, &Tensor),
     ) -> Result<Tensor> {
         let (b, n, c) = xs.dims3()?;
-        let m = match &self.modulation {
-            Modulation::Own(linear) => linear.forward(&t_emb.silu()?)?,
-            // the f32 offset plus the shared vectors, back to their dtype
-            Modulation::Shared(offset) => t_emb
-                .to_dtype(DType::F32)?
-                .broadcast_add(offset)?
-                .to_dtype(t_emb.dtype())?,
-        };
+        let m = self.modulation(t_emb)?;
         let part = |i: usize| m.narrow(1, i * c, c)?.unsqueeze(1);
         let (shift_msa, scale_msa, gate_msa) = (part(0)?, part(1)?, part(2)?);
         let (shift_mlp, scale_mlp, gate_mlp) = (part(3)?, part(4)?, part(5)?);

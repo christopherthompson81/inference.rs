@@ -387,10 +387,9 @@ pub fn bake(
             let tri = f.map(|v| unwrapped.uvs[v as usize].map(|c| f64::from(c) * size as f64));
             let p = [(t % size) as f64 + 0.5, (t / size) as f64 + 0.5];
             let w = barycentric(p, tri).expect("a covered texel lies in its face");
-            let pos = (0..3).fold([0f32; 3], |acc, k| {
+            (0..3).fold([0f32; 3], |acc, k| {
                 mad(acc, unwrapped.mesh.vertices[f[k] as usize], w[k] as f32)
-            });
-            pos
+            })
         })
         .collect();
     let points: Vec<V3> = Distances::new(&bvh, device)?

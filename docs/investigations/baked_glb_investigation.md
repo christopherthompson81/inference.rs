@@ -238,3 +238,37 @@ the best) and Ericson's closest point, `--fmad=false`; the tree uploaded once as
 Bit-identical again; the remesh's remaining 3.2 s is host work (corner keys sorted, value lookups by binary search,
 dual contouring). End to end: `--remesh` 93.0 s -> 86.3 s (export 32.2 s); default unchanged at 87.3 s (its
 projection was 0.5 s).
+
+## Run 11 - 2026-11-11
+
+Question: is generation (the CUDA half) near optimal? Timed against the reference pipeline on this box
+(`time_ref.py`, scratch: PyTorch SDPA attention, no flash-attn installed; robot, 1024-cascade):
+
+    reference, warm: 42.4 s (cond 0.5, structure 6.7, shape cascade 23.0, texture 11.0, decode 1.2); cold 101 s
+    ours (synchronized stage timings, temporary): structure 8.8, shape 512 4.5 + 1024 19.9, texture 11.9,
+    decoders 3.8, ~2.5 s of loads: 53.7 s
+
+nsys over our run (~50 s of kernels): attention (`flash_attn_ext_f16`) 13.0 s, bf16 GEMMs 14.3 s, and ~16 s of
+elementwise passes: `bmul_f32` 3.0, bf16<->f32 casts 4.2, `badd_bf16` 2.4, `ucopy_bf16` 1.5, layernorm 1.3,
+`bdiv_f32` 1.3, sums/squares 1.5... The DiT block ran its norms, q/k normalization, rotations, modulation and
+gated residuals as ~30 separate passes, f32 round trips included. (The guidance interval was already honoured: steps
+outside it run the condition alone.)
+
+`kernels/cuda/dit.cu` + `trellis2::dit_cuda`, used by `Block::forward` for bf16 on CUDA (`forward_inspect`, which the
+parity hooks use, keeps the unfused path):
+
+- `ln_mod_bf16`: LayerNorm in f32 (affine for the cross-attention norm), rounded, then `h * (1 + scale) + shift` in
+  bf16 as the ops round it.
+- `head_norm_rope_bf16`: F.normalize times the gain, rounded, then the pair rotations in f32, rounded, written in
+  attention's [batch, heads, tokens, d] layout (no transpose copies; v goes through it as a plain copy).
+- `gate_residual_bf16`: x + y * gate with both roundings.
+
+GPU cases compare each to the unfused ops: residuals exact, norms within one bf16 rounding (reduction order). First
+end-to-end run produced an empty structure: the guided pass broadcasts one modulation row over its batch of two,
+and the kernels read a row per batch; a zero row stride for a one-row modulation fixed it (cases added).
+
+    structure 8.8 -> 5.8 s, shape 512 4.5 -> 2.8 s, shape 1024 19.9 -> 14.8 s, texture 11.9 -> 8.6 s
+    generate 53.7 -> 40.6 s (reference warm 42.4 s); end to end 87 -> 76.1 s
+
+Rendered: the same robot and texture quality (bf16 runs differ in detail anyway). Left: the decoders (3.8 s against
+the reference's 1.2 s: sparse convolutions) and attention, whose kernel converts bf16 to f16 first.
