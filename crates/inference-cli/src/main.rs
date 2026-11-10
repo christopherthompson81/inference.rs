@@ -257,6 +257,56 @@ async fn main() -> Result<()> {
             );
         }
 
+        Command::Voxels {
+            image,
+            out,
+            jovox,
+            dinov3,
+            birefnet,
+            seed,
+            steps,
+            cfg,
+            temperature,
+            fill,
+            remove_background,
+            cpu,
+        } => {
+            use inference_jobs::voxels::{
+                NoProgress, VoxelOptions, fetch_models, generate_voxels_on,
+                needs_background_removal,
+            };
+            let mut options = VoxelOptions {
+                fill,
+                remove_background,
+                ..Default::default()
+            };
+            options.sample.seed = seed;
+            options.sample.steps = steps;
+            options.sample.cfg_strength = cfg;
+            options.sample.temperature = temperature;
+            let birefnet = needs_background_removal(&image, remove_background)?.then_some(birefnet);
+            let models = fetch_models(jovox, dinov3, birefnet, &NoProgress)?;
+            let device = if cpu {
+                inference_tensor::Device::Cpu
+            } else {
+                inference_tensor::Device::cuda_if_available(0)?
+            };
+            let report = generate_voxels_on(&models, &image, &out, &options, &NoProgress, &device)?;
+            println!(
+                "{} voxels at {}^3{} in {} (sampling {:.1} s, total {:.1} s)",
+                report.voxels,
+                report.resolution,
+                if report.background_removed {
+                    ", background removed"
+                } else {
+                    ""
+                },
+                out.display(),
+                report.sample_seconds,
+                report.total_seconds
+            );
+        }
+
         Command::Splat {
             data,
             out,

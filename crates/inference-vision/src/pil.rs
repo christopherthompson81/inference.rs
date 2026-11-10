@@ -56,7 +56,7 @@ pub fn pil_resize_rgba_lanczos(
     new_size: (usize, usize),
 ) -> Vec<u8> {
     let mut premultiplied = pixels.to_vec();
-    for px in premultiplied.chunks_exact_mut(RGBA) {
+    for px in premultiplied.as_chunks_mut::<RGBA>().0 {
         let alpha = u32::from(px[3]);
         for c in &mut px[..3] {
             let t = u32::from(*c) * alpha + 128;
@@ -64,7 +64,7 @@ pub fn pil_resize_rgba_lanczos(
         }
     }
     let mut out = pil_resize(&premultiplied, RGBA, size, new_size, PilFilter::Lanczos);
-    for px in out.chunks_exact_mut(RGBA) {
+    for px in out.as_chunks_mut::<RGBA>().0 {
         let alpha = u32::from(px[3]);
         if alpha != 0 && alpha != 255 {
             for c in &mut px[..3] {

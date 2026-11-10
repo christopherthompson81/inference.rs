@@ -77,34 +77,53 @@ pub struct Rgba {
     pub pixels: Vec<u8>,
 }
 
+/// Whether any pixel is less than opaque.
+pub fn has_transparency(image: &Rgba) -> bool {
+    image
+        .pixels
+        .as_chunks::<RGBA>()
+        .0
+        .iter()
+        .any(|px| px[3] != 255)
+}
+
+/// The image shrunk (PIL Lanczos) to a longest side of 1024 when it is longer, as the reference's prep stage does
+/// before it removes the background.
+pub fn shrink(image: &Rgba) -> Rgba {
+    let longest = image.width.max(image.height);
+    if longest <= MAX_INPUT {
+        return image.clone();
+    }
+    let s = MAX_INPUT as f64 / longest as f64;
+    let (w, h) = (
+        (image.width as f64 * s) as usize,
+        (image.height as f64 * s) as usize,
+    );
+    Rgba {
+        width: w,
+        height: h,
+        pixels: inference_vision::pil_resize_rgba_lanczos(
+            &image.pixels,
+            (image.width, image.height),
+            (w, h),
+        ),
+    }
+}
+
 /// The reference's prep stage: the foreground (alpha above 204) cropped, centered on a transparent square its longest
 /// side fills `fill` of, resized to 512^2. The image must carry its own transparent background.
 pub fn prepare(image: &Rgba, fill: f32) -> Result<Rgba> {
     if !(0.0..=1.0).contains(&fill) || fill == 0.0 {
         inference_tensor::bail!("fill must be in (0, 1], got {fill}");
     }
-    if image.pixels.chunks_exact(RGBA).all(|px| px[3] == 255) {
+    if !has_transparency(image) {
         inference_tensor::bail!(
             "the image has no transparent background: give the object on a transparent background (RGBA)"
         );
     }
-    let mut image = image.clone();
-    let longest = image.width.max(image.height);
-    if longest > MAX_INPUT {
-        let s = MAX_INPUT as f64 / longest as f64;
-        let (w, h) = (
-            (image.width as f64 * s) as usize,
-            (image.height as f64 * s) as usize,
-        );
-        image.pixels = inference_vision::pil_resize_rgba_lanczos(
-            &image.pixels,
-            (image.width, image.height),
-            (w, h),
-        );
-        (image.width, image.height) = (w, h);
-    }
+    let image = shrink(image);
     let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
-    for (i, px) in image.pixels.chunks_exact(RGBA).enumerate() {
+    for (i, px) in image.pixels.as_chunks::<RGBA>().0.iter().enumerate() {
         if px[3] > FOREGROUND_ALPHA {
             let (x, y) = (i % image.width, i / image.width);
             (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
@@ -138,7 +157,7 @@ pub fn prepare(image: &Rgba, fill: f32) -> Result<Rgba> {
 fn image_tensor(image: &Rgba, device: &Device) -> Result<Tensor> {
     let plane = image.width * image.height;
     let mut data = vec![0f32; 3 * plane];
-    for (i, px) in image.pixels.chunks_exact(RGBA).enumerate() {
+    for (i, px) in image.pixels.as_chunks::<RGBA>().0.iter().enumerate() {
         let alpha = f32::from(px[3]) / 255.0;
         for c in 0..3 {
             data[c * plane + i] = (f32::from(px[c]) / 255.0 * alpha - MEAN[c]) / STD[c];
@@ -261,7 +280,9 @@ fn pick(logits: &Tensor, temperature: f32, rng: &mut StdRng) -> Result<Vec<[u16;
             .collect::<Result<_>>()?
     };
     Ok(values
-        .chunks_exact(SLOTS)
+        .as_chunks::<SLOTS>()
+        .0
+        .iter()
         .map(|c| std::array::from_fn(|i| c[i].min(CLASSES as u32 - 1) as u16))
         .collect())
 }
@@ -332,4 +353,69 @@ pub fn voxel_ply(voxels: &[[usize; 3]]) -> Vec<u8> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn counts(ply: &[u8]) -> (usize, usize) {
+        let text = String::from_utf8_lossy(ply);
+        let count = |element: &str| {
+            text.split(&format!("element {element} "))
+                .nth(1)
+                .and_then(|r| r.split_whitespace().next())
+                .and_then(|n| n.parse().ok())
+                .expect("a count")
+        };
+        (count("vertex"), count("face"))
+    }
+
+    #[test]
+    fn touching_voxels_share_no_faces() {
+        assert_eq!(counts(&voxel_ply(&[[3, 4, 5]])), (24, 6));
+        assert_eq!(counts(&voxel_ply(&[[3, 4, 5], [3, 4, 6]])), (40, 10));
+    }
+
+    #[test]
+    fn an_opaque_image_is_refused_and_a_cut_out_one_is_centered() -> Result<()> {
+        let (w, h) = (40, 20);
+        let mut pixels = vec![255u8; w * h * RGBA];
+        assert!(
+            prepare(
+                &Rgba {
+                    width: w,
+                    height: h,
+                    pixels: pixels.clone()
+                },
+                DEFAULT_FILL
+            )
+            .is_err()
+        );
+        // an opaque 10 x 4 block at (2, 3) on a clear background
+        for (i, px) in pixels.as_chunks_mut::<RGBA>().0.iter_mut().enumerate() {
+            let (x, y) = (i % w, i / w);
+            px[3] = if (2..12).contains(&x) && (3..7).contains(&y) {
+                255
+            } else {
+                0
+            };
+        }
+        let out = prepare(
+            &Rgba {
+                width: w,
+                height: h,
+                pixels,
+            },
+            DEFAULT_FILL,
+        )?;
+        assert_eq!((out.width, out.height), (IMAGE_SIZE, IMAGE_SIZE));
+        let alpha = |x: usize, y: usize| out.pixels[(y * IMAGE_SIZE + x) * RGBA + 3];
+        let mid = IMAGE_SIZE / 2;
+        // Lanczos rings inside a block upscaled ~37x, short of full alpha
+        assert!(alpha(mid, mid) > FOREGROUND_ALPHA);
+        assert_eq!(alpha(0, 0), 0);
+        assert_eq!(alpha(mid, 0), 0);
+        Ok(())
+    }
 }

@@ -101,7 +101,7 @@ impl BiRefNet {
         );
         let plane = INPUT_SIZE * INPUT_SIZE;
         let mut data = vec![0f32; 3 * plane];
-        for (i, px) in resized.chunks_exact(3).enumerate() {
+        for (i, px) in resized.as_chunks::<3>().0.iter().enumerate() {
             for c in 0..3 {
                 data[c * plane + i] = (f32::from(px[c]) / 255.0 - MEAN[c]) / STD[c];
             }
@@ -124,7 +124,9 @@ impl BiRefNet {
     pub fn cut_out(&self, rgb: &[u8], size: (usize, usize)) -> Result<Vec<u8>> {
         let mask = self.mask(rgb, size)?;
         Ok(rgb
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .zip(&mask)
             .flat_map(|(px, &a)| [px[0], px[1], px[2], a])
             .collect())

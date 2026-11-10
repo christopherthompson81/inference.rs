@@ -351,3 +351,64 @@ pub fn run(
     out.sort_by_key(|&xyz| key(xyz, 6));
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use rand::SeedableRng;
+
+    use super::*;
+
+    const STEPS: usize = 36;
+
+    fn plan() -> Vec<[f64; 4]> {
+        Schedule {
+            power: 2.0,
+            cleanup_steps: 8,
+            remask_steps: 1,
+        }
+        .plan(0.8, STEPS, 1.0)
+    }
+
+    fn sample(value: u16) -> Vec<[usize; 3]> {
+        let mut rng = StdRng::seed_from_u64(0);
+        run(&plan(), &mut rng, &mut |tokens| {
+            Ok(vec![[value; SLOTS]; tokens.slots.len()])
+        })
+        .expect("the plan reveals every slot")
+    }
+
+    #[test]
+    fn full_slots_fill_the_grid_and_empty_ones_leave_it_empty() {
+        assert_eq!(sample(255).len(), OUTPUT_SIDE.pow(3));
+        assert!(sample(0).is_empty());
+    }
+
+    #[test]
+    fn a_single_child_bit_lands_in_each_cells_first_corner() {
+        // every slot holds only bit 0, the (0, 0, 0) child: one 16^3 cell per 8^3 cell, then one voxel per 32^3 cell
+        let voxels = sample(1);
+        assert_eq!(voxels.len(), (OUTPUT_SIDE / 4).pow(3));
+        assert!(voxels.iter().all(|v| v.iter().all(|&c| c % 2 == 0)));
+    }
+
+    #[test]
+    fn cell_tokens_appear_only_under_occupied_root_slots() {
+        let mut rng = StdRng::seed_from_u64(1);
+        let mut most = 0;
+        run(&plan(), &mut rng, &mut |tokens| {
+            // the root's only occupied child is the first 16^3 cell of each 8^3 cell
+            for (level, xyz) in tokens.levels.iter().zip(&tokens.coords) {
+                if *level == 1 {
+                    assert!(
+                        xyz.iter().all(|&c| c % 2 == 0),
+                        "cell {xyz:?} has no parent bit"
+                    );
+                }
+            }
+            most = most.max(tokens.slots.len() - ROOT_TOKENS);
+            Ok(vec![[1; SLOTS]; tokens.slots.len()])
+        })
+        .expect("the plan reveals every slot");
+        assert_eq!(most, CELL_TOKENS / 8);
+    }
+}

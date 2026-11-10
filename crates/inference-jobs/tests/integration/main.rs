@@ -3,5 +3,6 @@
 #![allow(clippy::duplicate_mod)]
 
 mod jobs;
+mod voxels_job;
 mod world_job;
 mod worldmirror_job;

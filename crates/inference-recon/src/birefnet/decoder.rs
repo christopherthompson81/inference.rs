@@ -89,63 +89,74 @@ impl DeformConv {
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let (b, c, h, w) = xs.dims4()?;
-        let hw = h * w;
-        let device = xs.device();
-        let offset = self.offset.forward(xs)?.reshape((b, (), hw))?;
-        let mask = (inference_tensor::nn::ops::sigmoid(&self.modulator.forward(xs)?)? * 2.0)?
-            .reshape((b, (), hw))?;
-        let flat = xs.reshape((b, c, hw))?;
-        let (ys, xs_) = grid(h, w, device)?;
-        let (hf, wf) = (h as f64, w as f64);
-        let pad = (self.k / 2) as f64;
-        let mut out: Option<Tensor> = None;
-        for tap in 0..self.k * self.k {
-            let (ki, kj) = ((tap / self.k) as f64, (tap % self.k) as f64);
-            let y = ys
-                .broadcast_add(&offset.narrow(1, 2 * tap, 1)?)?
-                .affine(1.0, ki - pad)?;
-            let x = xs_
-                .broadcast_add(&offset.narrow(1, 2 * tap + 1, 1)?)?
-                .affine(1.0, kj - pad)?;
-            let inside = in_range(&y, -1.0, hf)?.mul(&in_range(&x, -1.0, wf)?)?;
-            let (y0, x0) = (y.floor()?, x.floor()?);
-            let (ly, lx) = ((&y - &y0)?, (&x - &x0)?);
-            let (hy, hx) = (ly.affine(-1.0, 1.0)?, lx.affine(-1.0, 1.0)?);
-            let gate = inside.mul(&mask.narrow(1, tap, 1)?)?;
-            let mut sampled: Option<Tensor> = None;
-            for (dy, dx, wy, wx) in [
-                (0.0, 0.0, &hy, &hx),
-                (0.0, 1.0, &hy, &lx),
-                (1.0, 0.0, &ly, &hx),
-                (1.0, 1.0, &ly, &lx),
-            ] {
-                let (cy, cx) = (y0.affine(1.0, dy)?, x0.affine(1.0, dx)?);
-                let valid = in_range(&cy, -0.5, hf - 0.5)?.mul(&in_range(&cx, -0.5, wf - 0.5)?)?;
-                let index = (cy.clamp(0.0, hf - 1.0)? * wf)?
-                    .add(&cx.clamp(0.0, wf - 1.0)?)?
-                    .to_dtype(DType::U32)?
-                    .broadcast_as((b, c, hw))?
-                    .contiguous()?;
-                let weight = wy.mul(wx)?.mul(&valid)?.mul(&gate)?;
-                let v = flat.gather(&index, 2)?.broadcast_mul(&weight)?;
-                sampled = Some(match sampled {
-                    Some(s) => (s + v)?,
-                    None => v,
-                });
-            }
-            let term = self
-                .weight
-                .get(tap)?
-                .unsqueeze(0)?
-                .broadcast_matmul(&sampled.expect("four corners"))?;
-            out = Some(match out {
-                Some(o) => (o + term)?,
-                None => term,
+        let offset = self.offset.forward(xs)?;
+        let mask = (inference_tensor::nn::ops::sigmoid(&self.modulator.forward(xs)?)? * 2.0)?;
+        deform_conv(xs, &offset, &mask, &self.weight, self.k)
+    }
+}
+
+/// `deform_conv2d(xs, offset, weight, padding=k/2, mask)` at stride 1: `offset` `[b, 2 * taps, h, w]` holds each
+/// tap's (dy, dx), `mask` `[b, taps, h, w]` its scale, `weight` is `[taps, out, in]`.
+fn deform_conv(
+    xs: &Tensor,
+    offset: &Tensor,
+    mask: &Tensor,
+    weight: &Tensor,
+    k: usize,
+) -> Result<Tensor> {
+    let (b, c, h, w) = xs.dims4()?;
+    let hw = h * w;
+    let offset = offset.reshape((b, (), hw))?;
+    let mask = mask.reshape((b, (), hw))?;
+    let flat = xs.reshape((b, c, hw))?;
+    let (ys, xs_) = grid(h, w, xs.device())?;
+    let (hf, wf) = (h as f64, w as f64);
+    let pad = (k / 2) as f64;
+    let mut out: Option<Tensor> = None;
+    for tap in 0..k * k {
+        let (ki, kj) = ((tap / k) as f64, (tap % k) as f64);
+        let y = ys
+            .broadcast_add(&offset.narrow(1, 2 * tap, 1)?)?
+            .affine(1.0, ki - pad)?;
+        let x = xs_
+            .broadcast_add(&offset.narrow(1, 2 * tap + 1, 1)?)?
+            .affine(1.0, kj - pad)?;
+        let inside = in_range(&y, -1.0, hf)?.mul(&in_range(&x, -1.0, wf)?)?;
+        let (y0, x0) = (y.floor()?, x.floor()?);
+        let (ly, lx) = ((&y - &y0)?, (&x - &x0)?);
+        let (hy, hx) = (ly.affine(-1.0, 1.0)?, lx.affine(-1.0, 1.0)?);
+        let gate = inside.mul(&mask.narrow(1, tap, 1)?)?;
+        let mut sampled: Option<Tensor> = None;
+        for (dy, dx, wy, wx) in [
+            (0.0, 0.0, &hy, &hx),
+            (0.0, 1.0, &hy, &lx),
+            (1.0, 0.0, &ly, &hx),
+            (1.0, 1.0, &ly, &lx),
+        ] {
+            let (cy, cx) = (y0.affine(1.0, dy)?, x0.affine(1.0, dx)?);
+            let valid = in_range(&cy, -0.5, hf - 0.5)?.mul(&in_range(&cx, -0.5, wf - 0.5)?)?;
+            let index = (cy.clamp(0.0, hf - 1.0)? * wf)?
+                .add(&cx.clamp(0.0, wf - 1.0)?)?
+                .to_dtype(DType::U32)?
+                .broadcast_as((b, c, hw))?
+                .contiguous()?;
+            let weight = wy.mul(wx)?.mul(&valid)?.mul(&gate)?;
+            let v = flat.gather(&index, 2)?.broadcast_mul(&weight)?;
+            sampled = Some(match sampled {
+                Some(s) => (s + v)?,
+                None => v,
             });
         }
-        out.expect("at least one tap").reshape((b, (), h, w))
+        let term = weight
+            .get(tap)?
+            .unsqueeze(0)?
+            .broadcast_matmul(&sampled.expect("four corners"))?;
+        out = Some(match out {
+            Some(o) => (o + term)?,
+            None => term,
+        });
     }
+    out.expect("at least one tap").reshape((b, (), h, w))
 }
 
 // each output pixel's row and column, `[1, 1, h * w]` (f32)
@@ -396,16 +407,91 @@ impl Decoder {
         };
         let mut p = with_patches(x4, &self.ipt[4])?;
         let skips = [x3, x2, x1];
-        for i in 0..3 {
-            p = self.gates[i].forward(&self.blocks[i].forward(&p)?)?;
-            let skip = skips[i];
+        // the 1/16, 1/8 and 1/4 scales' image blocks, deepest first
+        let ipt = self.ipt[1..4].iter().rev();
+        for ((((gate, block), lateral), skip), ipt) in self
+            .gates
+            .iter()
+            .zip(&self.blocks)
+            .zip(&self.laterals)
+            .zip(skips)
+            .zip(ipt)
+        {
+            p = gate.forward(&block.forward(&p)?)?;
             let (_, _, h, w) = skip.dims4()?;
-            p = (resize(&p, h, w)? + self.laterals[i].forward(skip)?)?;
-            p = with_patches(&p, &self.ipt[3 - i])?;
+            p = (resize(&p, h, w)? + lateral.forward(skip)?)?;
+            p = with_patches(&p, ipt)?;
         }
         let p = self.blocks[3].forward(&p)?;
         let (_, _, h, w) = image.dims4()?;
         let p = with_patches(&resize(&p, h, w)?, &self.ipt[0])?;
         self.out.forward(&p)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // torchvision's `deform_conv2d` bilinear: zero outside (-1, h) x (-1, w), zero for corners off the grid
+    fn bilinear(img: &[f32], (h, w): (usize, usize), y: f32, x: f32) -> f32 {
+        if y <= -1.0 || y >= h as f32 || x <= -1.0 || x >= w as f32 {
+            return 0.0;
+        }
+        let (y0, x0) = (y.floor(), x.floor());
+        let (ly, lx) = (y - y0, x - x0);
+        let at = |yy: f32, xx: f32| {
+            if yy < 0.0 || xx < 0.0 || yy > (h - 1) as f32 || xx > (w - 1) as f32 {
+                0.0
+            } else {
+                img[yy as usize * w + xx as usize]
+            }
+        };
+        (1.0 - ly) * (1.0 - lx) * at(y0, x0)
+            + (1.0 - ly) * lx * at(y0, x0 + 1.0)
+            + ly * (1.0 - lx) * at(y0 + 1.0, x0)
+            + ly * lx * at(y0 + 1.0, x0 + 1.0)
+    }
+
+    #[test]
+    fn deformable_conv_matches_a_per_pixel_loop() -> Result<()> {
+        let (c, o, h, w, k) = (2, 3, 5, 6, 3);
+        let taps = k * k;
+        let dev = Device::Cpu;
+        // offsets up to +-3 reach past every edge
+        let xs = Tensor::randn(0f32, 1.0, (1, c, h, w), &dev)?;
+        let offset = (Tensor::rand(-3f32, 3.0, (1, 2 * taps, h, w), &dev)?).contiguous()?;
+        let mask = Tensor::rand(0f32, 2.0, (1, taps, h, w), &dev)?;
+        let weight = Tensor::randn(0f32, 1.0, (taps, o, c), &dev)?;
+        let got = deform_conv(&xs, &offset, &mask, &weight, k)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let img = xs.flatten_all()?.to_vec1::<f32>()?;
+        let off = offset.flatten_all()?.to_vec1::<f32>()?;
+        let m = mask.flatten_all()?.to_vec1::<f32>()?;
+        let wt = weight.flatten_all()?.to_vec1::<f32>()?;
+        let pad = (k / 2) as f32;
+        for oc in 0..o {
+            for py in 0..h {
+                for px in 0..w {
+                    let mut want = 0.0;
+                    for t in 0..taps {
+                        let at = |ch: usize| ch * h * w + py * w + px;
+                        let y = py as f32 - pad + (t / k) as f32 + off[at(2 * t)];
+                        let x = px as f32 - pad + (t % k) as f32 + off[at(2 * t + 1)];
+                        for ic in 0..c {
+                            let v = bilinear(&img[ic * h * w..][..h * w], (h, w), y, x);
+                            want += wt[(t * o + oc) * c + ic] * v * m[at(t)];
+                        }
+                    }
+                    let g = got[(oc * h + py) * w + px];
+                    assert!(
+                        (g - want).abs() < 1e-4,
+                        "out {oc} at ({py}, {px}): {g} vs {want}"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 }

@@ -45,7 +45,7 @@ bindings over that ABI, so every surface does the same things.
 | **Image generation** | FLUX.1 and HiDream-O1-Image (text to image, editing and subject references), from safetensors or GGUF |
 | **Embeddings and documents** | EmbeddingGemma, Qwen3 Embedding, BERT-family, ModernBERT and Nomic encoders; cross-encoder rerankers; PP-DocLayoutV3 document layout detection |
 | **Decisions** | Laya, Julia-1 and d1-omni: typed questions about a text (choose, score, true or false), answered in one forward pass with probabilities over the options |
-| **3D** | WorldMirror 2.0 reconstruction (cameras, depth, normals, points and 3D Gaussian splats from photos or a video); HY-World 2.0 world generation from one panorama with WorldStereo-2 |
+| **3D** | WorldMirror 2.0 reconstruction (cameras, depth, normals, points and 3D Gaussian splats from photos or a video); HY-World 2.0 world generation from one panorama with WorldStereo-2; JoVox 64^3 voxel structures from one image, backgrounds removed with BiRefNet |
 
 The **[supported models reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/supported-models.md)** lists every architecture
 with a copy-paste command. It is generated from the engine's loader registry.
@@ -116,10 +116,14 @@ curl localhost:1234/v1/images/generations -H "Content-Type: application/json" \
 ```bash
 # photos or a video to cameras, depth, a point cloud and 3D Gaussian splats
 inference reconstruct --model HY-WorldMirror-2.0 --input walk.mp4 --fps 1 --max-frames 32 --out recon/
+
+# one object's photo to a 64^3 voxel structure (weights fetched from Hugging Face)
+inference voxels --image chair.jpg --out chair/
 ```
 
 [3D reconstruction](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-3d-reconstruction.mdx) and
-[3D worlds from a panorama](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/generate-3d-worlds.mdx) list the weights each needs.
+[3D worlds from a panorama](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/generate-3d-worlds.mdx) and
+[voxels from an image](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/image-to-voxels.mdx) list the weights each needs.
 
 ## Web UI demo
 

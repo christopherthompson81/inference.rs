@@ -2,7 +2,7 @@
 title: "inference uninstall"
 description: "Remove an installer-managed install"
 sidebar:
-  order: 20
+  order: 21
 ---
 
 <!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->

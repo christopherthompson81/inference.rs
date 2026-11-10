@@ -125,3 +125,21 @@ over 6: 3 and 3. The 4-of-4 split of Run 4 was the draw, not the port.
 
 The end-to-end test (`JOVOX_F32=1` against an `F32=1 DET=2` dump) now asserts the prepared bytes, the condition (rms
 < 1e-4) and, in f32, equal structures under shared draws.
+
+## Run 6 - 2026-11-10 11:40
+
+Question: does the whole path run as a command and a job, and what does it hold on the GPU?
+
+`inference voxels` (CUDA dev build) and the `voxels` job kind (`inference_jobs::voxels`): the image decoded, shrunk
+to 1024 as the reference's prep does, its background removed with BiRefNet when it has no transparency (or on
+request), prepared, encoded, sampled, written as `voxels.ply` (exposed cube faces), `prepared.png` and `meta.json`.
+Missing checkpoints are fetched from their repositories (DINOv3 needs the token's account to have access; BiRefNet only
+when the image needs it).
+```
+robot (RGBA, kept):                    6348 voxels, sampling 5.6 s, total 6.7 s, peak 7177 MiB (idle 1189)
+robot pasted on a grey 900x700 JPEG:   6632 voxels, background removed, sampling 5.6 s, total 7.5 s, peak 6921 MiB
+```
+The cut-out is clean, and orthographic views of both structures show the walking figure, z up. Peak VRAM above idle is
+~6 GB, most of it the F32 flow checkpoint read onto the device before its cast to bf16; the job reserves 8 GiB. The
+deep test `voxels_job::a_voxel_job_cuts_out_the_object_and_writes_its_structure` (the grey-background photo) passes in
+7.8 s.
