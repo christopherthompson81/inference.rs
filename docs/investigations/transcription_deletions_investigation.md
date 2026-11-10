@@ -324,3 +324,30 @@ at 391-429 s) the diarizer gives no speaker at all, so a plan from its turns nev
 Implication: the diarizer cannot replace the VAD as the plan; it misses speech outright on a many-speaker
 recording. Keep the VAD plan with the diarizer beside it (Run 10), and batch. Separately, words in speech the
 diarizer gives no speaker get the nearest turn's speaker (`word_speakers`), which this clip shows is common.
+
+## Run 13 - 2026-11-09 23:40
+
+Question: where does a window's time go, and does encoding windows together win it back?
+
+Timing (temporary, not kept): a warm stream over clip 1 on the 3090 (Vulkan f16), 48 windows: encoder 1.21 s,
+decoder 0.56 s. The second pass's 35 spans under 8 s (157 s of audio) took 0.73 s in the encoder: ~21 ms a window
+at any length, the cost of ~400 ops (24 blocks; the depthwise conv alone is 9 shifted products) rather than compute.
+
+Change: on CUDA and a discrete Vulkan GPU, consecutive windows of at most 30 s encode as one batch of up to 120 s of
+padded audio (the longest window times the count). Each window's subsampling runs alone, then the frames are padded
+to the longest; padded keys are -inf in attention and padded frames are zeroed ahead of the conv module's depthwise
+conv, so each window's frames come out as alone. The decoder still runs per window. CPU and iGPU paths unchanged.
+Test: `a_batch_encodes_each_clip_as_alone` (tiny checkpoint, clips of 0.7-3.3 s, 1e-4); without the conv mask it
+fails at 0.07.
+
+```
+                                    words vs unbatched (spans)     time, clip 1 (warm, 3 runs)
+Vulkan, no second pass              0 (word for word)              2.36-2.40 -> 1.83-1.85 s
+Vulkan, with second pass            0 (word for word)              3.27-3.47 -> 2.33-2.37 s
+CUDA, no second pass                1 0 0 2 0 (five clips)         1.77-1.82 s
+CUDA, with second pass              -                              2.20-2.23 s
+CUDA vs f32, unbatched / batched    6 / 7 spans over five clips
+```
+
+On CUDA the batched products round a little differently, at f16's own noise (Run 5: 6 spans from f32). With the
+second pass on, a transcription now takes less than one without it did before.

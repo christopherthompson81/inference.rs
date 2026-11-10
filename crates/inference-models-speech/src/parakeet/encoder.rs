@@ -390,9 +390,13 @@ impl RelPositionAttention {
             let values = v.narrow(2, b.keys_from, b.keys)?;
             let content = q_content.narrow(2, b.start, b.rows)?.matmul(&keys.t()?)?;
             let window = p.narrow(2, first(b) - lo, b.rows + b.keys - 1)?;
-            let position = q_position
-                .narrow(2, b.start, b.rows)?
-                .matmul(&window.t()?)?;
+            let rows = q_position.narrow(2, b.start, b.rows)?;
+            // one position table serves every item of a batch
+            let position = if rows.dim(0)? == 1 {
+                rows.matmul(&window.t()?)?
+            } else {
+                rows.broadcast_matmul(&window.t()?)?
+            };
             let probs = match &b.mask {
                 None if content.device().is_cpu() => {
                     content.apply_op2_no_bwd(&position, &RelShiftSoftmax)?
@@ -639,9 +643,13 @@ impl ConvModule {
         gated.narrow(D::Minus1, 0, c)? * ops::sigmoid(&gated.narrow(D::Minus1, c, c)?)?
     }
 
-    /// `(B, T, C)` in and out.
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let xs = self.gate(xs)?;
+    /// `(B, T, C)` in and out; `frames` `(B, T, 1)` is 1 on each item's own frames, 0 on a batch's padding.
+    fn forward(&self, xs: &Tensor, frames: Option<&Tensor>) -> Result<Tensor> {
+        let mut xs = self.gate(xs)?;
+        // the padding reads as the zeros a lone window's edge pads with
+        if let Some(frames) = frames {
+            xs = xs.broadcast_mul(frames)?;
+        }
         let (before, after) = if self.causal {
             (self.kernel - 1, 0)
         } else {
@@ -720,14 +728,20 @@ impl Block {
     }
 
     // each residual replaces the last: shadowing ones kept all five (t, hidden) copies to the end of the block
-    fn forward(&self, xs: Tensor, positions: &Tensor, blocks: &[QueryBlock]) -> Result<Tensor> {
+    fn forward(
+        &self,
+        xs: Tensor,
+        positions: &Tensor,
+        blocks: &[QueryBlock],
+        frames: Option<&Tensor>,
+    ) -> Result<Tensor> {
         let mut xs =
             (&xs + (self.ff1.forward(&self.norm_ff1.forward(&xs)?)? * FEED_FORWARD_WEIGHT)?)?;
         xs = (&xs
             + self
                 .attn
                 .forward(&self.norm_attn.forward(&xs)?, positions, blocks)?)?;
-        xs = (&xs + self.conv.forward(&self.norm_conv.forward(&xs)?)?)?;
+        xs = (&xs + self.conv.forward(&self.norm_conv.forward(&xs)?, frames)?)?;
         xs = (&xs + (self.ff2.forward(&self.norm_ff2.forward(&xs)?)? * FEED_FORWARD_WEIGHT)?)?;
         self.norm_out.forward(&xs)
     }
@@ -866,9 +880,69 @@ impl Encoder {
             (xs * self.input_scale)?
         };
         for block in &self.blocks {
-            xs = block.forward(xs, positions, &blocks)?;
+            xs = block.forward(xs, positions, &blocks, None)?;
         }
         Ok(xs)
+    }
+
+    /// `forward` over several `(1, frames, mels)` windows at once, each output as `forward` gives it alone: the
+    /// subsampled windows padded to the longest, the padding masked from attention and zeroed ahead of each conv.
+    /// Offline encoders only.
+    pub fn forward_batch(&self, features: &[Tensor]) -> Result<Vec<Tensor>> {
+        if self.context.is_some() || self.subsampling.causal_pad.is_some() {
+            return Err(inference_tensor::Error::Msg(
+                "a streaming encoder's windows run one at a time".into(),
+            ));
+        }
+        let parts = features
+            .iter()
+            .map(|f| self.subsample(f))
+            .collect::<Result<Vec<_>>>()?;
+        let lengths = parts.iter().map(|p| p.dim(1)).collect::<Result<Vec<_>>>()?;
+        let longest = lengths.iter().copied().max().unwrap_or(0);
+        let Some(first) = parts.first() else {
+            return Ok(Vec::new());
+        };
+        let (dtype, device) = (first.dtype(), first.device().clone());
+        let padded = parts
+            .into_iter()
+            .zip(&lengths)
+            .map(|(p, &len)| p.pad_with_zeros(1, 0, longest - len))
+            .collect::<Result<Vec<_>>>()?;
+        let xs = Tensor::cat(&padded, 0)?;
+        drop(padded);
+        let batch = lengths.len();
+        let own = |len: usize, on: f32, off: f32| {
+            (0..longest).map(move |t| if t < len { on } else { off })
+        };
+        let frames: Vec<f32> = lengths.iter().flat_map(|&len| own(len, 1.0, 0.0)).collect();
+        let frames = Tensor::from_vec(frames, (batch, longest, 1), &device)?.to_dtype(dtype)?;
+        let keys: Vec<f32> = lengths
+            .iter()
+            .flat_map(|&len| own(len, 0.0, f32::NEG_INFINITY))
+            .collect();
+        let keys = Tensor::from_vec(keys, (batch, 1, 1, longest), &device)?.to_dtype(dtype)?;
+        let blocks: Vec<QueryBlock> = query_blocks(longest, None, dtype, &device)?
+            .into_iter()
+            .map(|b| QueryBlock {
+                mask: Some(keys.clone()),
+                ..b
+            })
+            .collect();
+        let positions = relative_positions(longest, self.hidden, dtype, &device)?;
+        let mut xs = if self.input_scale == 1.0 {
+            xs
+        } else {
+            (xs * self.input_scale)?
+        };
+        for block in &self.blocks {
+            xs = block.forward(xs, &positions, &blocks, Some(&frames))?;
+        }
+        lengths
+            .iter()
+            .enumerate()
+            .map(|(i, &len)| xs.narrow(0, i, 1)?.narrow(1, 0, len))
+            .collect()
     }
 
     pub fn hidden_size(&self) -> usize {
@@ -1148,11 +1222,11 @@ mod tests {
             |weights| ConvModule::new(&cfg, VarBuilder::from_tensors(weights, DType::F32, &dev));
         let xs = t(5 * h, 1.1, &[1, 5, h])?;
         let a = module(stats)?
-            .forward(&xs)?
+            .forward(&xs, None)?
             .flatten_all()?
             .to_vec1::<f32>()?;
         let b = module(folded)?
-            .forward(&xs)?
+            .forward(&xs, None)?
             .flatten_all()?
             .to_vec1::<f32>()?;
         for (a, b) in a.iter().zip(&b) {
