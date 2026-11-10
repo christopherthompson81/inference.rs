@@ -317,3 +317,37 @@ cross q's in `head_norm_rope_bf16`, the three output projections' in `gate_resid
 `bias_gelu_bf16` (the tanh GELU, its one contracted product an `fmaf`; the GPU case is exact against the ops). End to
 end: 68.7 -> 68.2 s (generation ~36.3 s against the reference's warm 42.4 s), the same mesh (687104 vertices,
 958912 faces).
+
+## Run 14 - 2026-11-11
+
+Question: can the unwrap skip xatlas's chart growth by taking our clusters (CuMesh's `compute_charts`) as the charts,
+and how different is the result? `ChartOptions::singleChart` (vendored patch, off by default) takes each added mesh
+as one chart, still parameterized (LSCM) and, when invalid, recomputed piecewise. `single_chart_unwrap_is_compared`
+(parity.rs) on TRELLIS2_CHARTS_REF's 944K-face export mesh; L2 stretch area-weighted and normalized (1 = isometric):
+
+    mode               time     islands  boundary  coverage  L2 stretch (worst 1%)
+    default (CuMesh)   14.2 s   83537    1291      0.398     1.032 (1.132)
+    single, cone 90    14.6 s   92990    1453      0.378     1.031 (1.146)
+    single, cone 60    11.9 s   88382    1404      0.385     1.045 (1.125)
+    single, cone 45     9.5 s   87034    1384      0.385     1.023 (1.116)
+    single, cone 30     7.8 s   89747    1401      0.377     1.022 (1.095)
+    single, cone 20     7.8 s  102688    1500      0.359     1.023 (1.095)
+
+At the clusters' 90 degree cone it is no faster: many clusters do not flatten without overlaps and go piecewise,
+whose growth runs the same boundary checks. Tighter cones get there (30 degrees: -45%, slightly less stretch, +7%
+islands, +8% seams, -5% coverage).
+
+xatlas's own timers (`XA_PROFILE`, temporary) on the default path, summed over threads: compute charts 114 s (7.1 s
+wall); placing seeds 54.4 (boundary checks 37.2), growing 22.6 (22.7), merging 10.0, LSCM 10.4, piecewise 14.4
+(14.0). Boundary checks are 65%. Growth re-projects the whole chart on its refit basis for every face, so its grid
+has to be rebuilt; the piecewise patch places vertices once, so its grid can grow instead. Two changes, each keeping
+the atlas hash (8e229b13923a3026):
+
+- `PatchBoundaryGrid` for the piecewise patch (edges added as they join the boundary, interior ones skipped when
+  queried, cells by edge box): piecewise 14.4 -> 2.95 s.
+- `UniformGrid2`'s self-test over the pairs sharing a cell (both orders, as before) instead of a traversal and
+  sorted gather per edge: seeds' checks 35.7 -> 26.3 s, growth's 20.9 -> 16.4 s.
+
+Compute charts 114 -> 82 s summed (7.13 -> 5.15 s wall). End to end (robot, 1024-cascade): 68.2 -> 64.4 s, export
+31.9 -> 27.2 s, the GLB byte-identical. With the grid changes the single-chart lead narrows (cone 30: 8.2 s against
+the default's 13-14 s in the same test, which includes our clustering).

@@ -1174,3 +1174,147 @@ fn decoding_is_timed() -> Result<()> {
     }
     Ok(())
 }
+
+// an unwrap's measures: uv islands, 3D length of the cut mesh's boundary (seams plus the mesh's own boundary),
+// area-weighted L2 stretch (Sander et al.) normalized so a uniform isometric atlas scores 1, and its worst 1% of area
+fn unwrap_measures(u: &super::charts::Unwrapped) -> (usize, f64, f64, f64) {
+    let (v, f) = (&u.mesh.vertices, &u.mesh.faces);
+    let mut parent: Vec<u32> = (0..v.len() as u32).collect();
+    fn find(p: &mut [u32], mut x: u32) -> u32 {
+        while p[x as usize] != x {
+            p[x as usize] = p[p[x as usize] as usize];
+            x = p[x as usize];
+        }
+        x
+    }
+    let mut edges: HashMap<(u32, u32), u32> = HashMap::new();
+    for t in f {
+        for k in 0..3 {
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+            parent[ra as usize] = rb;
+            *edges.entry((a.min(b), a.max(b))).or_default() += 1;
+        }
+    }
+    let islands: HashSet<u32> = f.iter().map(|t| find(&mut parent, t[0])).collect();
+    let len = |a: u32, b: u32| {
+        let (p, q) = (v[a as usize], v[b as usize]);
+        f64::from(((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt())
+    };
+    let boundary: f64 = edges
+        .iter()
+        .filter(|&(_, &n)| n == 1)
+        .map(|(&(a, b), _)| len(a, b))
+        .sum();
+    let mut faces: Vec<(f64, f64)> = Vec::new();
+    let (mut area3, mut area2) = (0f64, 0f64);
+    for t in f {
+        let q = t.map(|i| v[i as usize].map(f64::from));
+        let p = t.map(|i| u.uvs[i as usize].map(f64::from));
+        let a2 = ((p[1][0] - p[0][0]) * (p[2][1] - p[0][1])
+            - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1]))
+            / 2.0;
+        let e1 = [0, 1, 2].map(|k| q[1][k] - q[0][k]);
+        let e2 = [0, 1, 2].map(|k| q[2][k] - q[0][k]);
+        let cr = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+        let a3 = (cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2]).sqrt() / 2.0;
+        if a3 <= 0.0 {
+            continue;
+        }
+        area3 += a3;
+        area2 += a2.abs();
+        if a2.abs() < 1e-30 {
+            faces.push((a3, f64::INFINITY));
+            continue;
+        }
+        let (s, t2) = (p.map(|x| x[0]), p.map(|x| x[1]));
+        let ss: [f64; 3] = std::array::from_fn(|k| {
+            (q[0][k] * (t2[1] - t2[2]) + q[1][k] * (t2[2] - t2[0]) + q[2][k] * (t2[0] - t2[1]))
+                / (2.0 * a2)
+        });
+        let st: [f64; 3] = std::array::from_fn(|k| {
+            (q[0][k] * (s[2] - s[1]) + q[1][k] * (s[0] - s[2]) + q[2][k] * (s[1] - s[0]))
+                / (2.0 * a2)
+        });
+        let l2 = ((ss.iter().map(|x| x * x).sum::<f64>() + st.iter().map(|x| x * x).sum::<f64>())
+            / 2.0)
+            .sqrt();
+        faces.push((a3, l2));
+    }
+    let scale = (area2 / area3).sqrt();
+    let finite: Vec<(f64, f64)> = faces
+        .iter()
+        .map(|&(a, l)| (a, l * scale))
+        .filter(|&(_, l)| l.is_finite())
+        .collect();
+    let mean = (finite.iter().map(|&(a, l)| a * l * l).sum::<f64>()
+        / finite.iter().map(|&(a, _)| a).sum::<f64>())
+    .sqrt();
+    let mut sorted = finite.clone();
+    sorted.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let (mut acc, mut worst) = (0.0, 0.0);
+    for &(a, l) in &sorted {
+        acc += a;
+        worst = l;
+        if acc >= 0.01 * area3 {
+            break;
+        }
+    }
+    (islands.len(), boundary, mean, worst)
+}
+
+// TRELLIS2_CHARTS_REF's mesh unwrapped as CuMesh does and with each cluster taken as one chart, compared
+#[test]
+#[ignore = "needs a reference dump"]
+fn single_chart_unwrap_is_compared() -> Result<()> {
+    let Some(input) = std::env::var_os("TRELLIS2_CHARTS_REF") else {
+        return Ok(());
+    };
+    let mesh = mesh_of(
+        &inference_tensor::safetensors::load(input, &Device::Cpu)?,
+        "vertices",
+        "faces",
+    )?;
+    let full = super::charts::CONE_HALF_ANGLE;
+    let modes: Vec<(f32, bool)> = match std::env::var("TRELLIS2_UNWRAP_MODES").as_deref() {
+        Ok("default") => vec![(90.0, false)],
+        _ => vec![
+            (90.0, false),
+            (90.0, true),
+            (60.0, true),
+            (45.0, true),
+            (30.0, true),
+            (20.0, true),
+        ],
+    };
+    for (degrees, single_chart) in modes {
+        let cone = full * degrees / 90.0;
+        let start = std::time::Instant::now();
+        let u =
+            super::charts::uv_unwrap_with(&mesh, cone, inference_xatlas::Options { single_chart })
+                .map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
+        let seconds = start.elapsed().as_secs_f64();
+        let (coverage, empty) = uv_coverage(&u.mesh.faces, &u.uvs);
+        let (islands, boundary, stretch, worst) = unwrap_measures(&u);
+        println!(
+            "cone {degrees} single chart {single_chart}: {seconds:.2} s, {}x{}, {} vertices, {islands} islands, boundary {boundary:.2}, \
+             coverage {coverage:.4}, {empty} faces without area, L2 stretch {stretch:.4} (worst 1% {worst:.3}), hash {:x}",
+            u.width,
+            u.height,
+            u.mesh.vertices.len(),
+            {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                u.uvs.iter().for_each(|p| p.map(f32::to_bits).hash(&mut h));
+                u.source.hash(&mut h);
+                u.mesh.faces.hash(&mut h);
+                h.finish()
+            }
+        );
+    }
+    Ok(())
+}

@@ -44,6 +44,9 @@ Copyright (c) 2012 Brandon Pelfrey
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#include <algorithm>
+#include <unordered_map>
+#include <vector>
 #include <assert.h>
 #include <float.h> // FLT_MAX
 #include <limits.h>
@@ -3605,6 +3608,10 @@ public:
 		bool bruteForce = m_edges.size() <= 20;
 		if (!bruteForce && m_cellDataOffsets.isEmpty())
 			bruteForce = !createGrid();
+		// inference-xatlas: the grid against itself tests the pairs sharing a cell, in both orders as the per-edge
+		// queries did, without traversing every edge again
+		if (!bruteForce && edges.length == 0 && ignoreEdges.length == 0)
+			return intersectCells(epsilon);
 		const uint32_t *edges1, *edges2 = nullptr;
 		uint32_t edges1Count, edges2Count = 0;
 		if (edges.length == 0) {
@@ -3694,6 +3701,41 @@ public:
 #endif
 
 private:
+	bool edgesIntersect(uint32_t edge1, uint32_t edge2, float epsilon) const
+	{
+		const uint32_t edge1Vertex[2] = { vertexAt(meshEdgeIndex0(edge1)), vertexAt(meshEdgeIndex1(edge1)) };
+		const uint32_t edge2Vertex[2] = { vertexAt(meshEdgeIndex0(edge2)), vertexAt(meshEdgeIndex1(edge2)) };
+		if (edge1Vertex[0] == edge2Vertex[0] || edge1Vertex[0] == edge2Vertex[1] || edge1Vertex[1] == edge2Vertex[0] || edge1Vertex[1] == edge2Vertex[1])
+			return false;
+		const Vector2 &edge1Position1 = m_positions[edge1Vertex[0]];
+		const Vector2 &edge1Position2 = m_positions[edge1Vertex[1]];
+		const Vector2 &edge2Position1 = m_positions[edge2Vertex[0]];
+		const Vector2 &edge2Position2 = m_positions[edge2Vertex[1]];
+		if (!Extents2::intersect(Extents2(edge1Position1, edge1Position2), Extents2(edge2Position1, edge2Position2)))
+			return false;
+		return linesIntersect(edge1Position1, edge1Position2, edge2Position1, edge2Position2, epsilon);
+	}
+
+	bool intersectCells(float epsilon)
+	{
+		for (uint32_t c = 0; c < m_occupiedCells.size(); c++) {
+			m_cellEdges.clear();
+			for (uint32_t offset = cellOffset(m_occupiedCells[c]); offset != UINT32_MAX; offset = m_cellData[offset + 1])
+				m_cellEdges.push_back(m_cellData[offset]);
+			const uint32_t n = m_cellEdges.size();
+			for (uint32_t i = 0; i < n; i++) {
+				for (uint32_t j = i + 1; j < n; j++) {
+					const uint32_t a = m_cellEdges[i], b = m_cellEdges[j];
+					if (a == b)
+						continue;
+					if (edgesIntersect(a, b, epsilon) || edgesIntersect(b, a, epsilon))
+						return true;
+				}
+			}
+		}
+		return false;
+	}
+
 	bool createGrid()
 	{
 		// Compute edge extents. Min will be the grid origin.
@@ -3732,6 +3774,7 @@ private:
 		}
 		m_cellData.clear();
 		m_cellData.reserve(edgeCount * 2);
+		m_occupiedCells.clear();
 		for (uint32_t i = 0; i < edgeCount; i++) {
 			const uint32_t edge = m_edges[i];
 			traverse(edgePosition0(edge), edgePosition1(edge));
@@ -3742,6 +3785,7 @@ private:
 				if (offset == UINT32_MAX) {
 					m_cellDataOffsets[cell] = m_cellData.size();
 					m_cellStamps[cell] = m_stamp;
+					m_occupiedCells.push_back(cell);
 				}
 				else {
 					for (;;) {
@@ -3873,10 +3917,127 @@ private:
 	uint32_t m_gridWidth, m_gridHeight; // in cells
 	Array<uint32_t> m_cellDataOffsets;
 	Array<uint32_t> m_cellStamps;
+	Array<uint32_t> m_occupiedCells, m_cellEdges;
 	uint32_t m_stamp = 0;
 	Array<uint32_t> m_cellData;
 	Array<uint32_t> m_potentialEdges;
 	Array<uint32_t> m_traversedCellOffsets;
+};
+
+// inference-xatlas: the piecewise parameterization's boundary as a hash grid that grows with the patch. Its vertices
+// are placed once, so an accepted candidate only adds edges; edges that have since become interior stay in the cells
+// and the query skips them, which leaves the set it tests what the rebuilt grid held. Cells are gathered by an edge's
+// box, a superset of the cells the rebuilt grid's traversal visits.
+class PatchBoundaryGrid
+{
+public:
+	void reset(ConstArrayView<Vector2> positions, ConstArrayView<uint32_t> indices, Vector2 origin, float cellSize)
+	{
+		m_positions = positions;
+		m_indices = indices;
+		m_origin = origin;
+		m_cellSize = cellSize;
+		m_cells.clear();
+		m_edges.clear();
+		m_long.clear();
+	}
+
+	void append(uint32_t edge)
+	{
+		m_edges.push_back(edge);
+		if (!(m_cellSize > 0.0f))
+			return;
+		int x0, y0, x1, y1;
+		cellRange(edge, &x0, &y0, &x1, &y1);
+		if (int64_t(x1 - x0 + 1) * int64_t(y1 - y0 + 1) > kMaxEdgeCells) {
+			m_long.push_back(edge);
+			return;
+		}
+		for (int y = y0; y <= y1; y++)
+			for (int x = x0; x <= x1; x++)
+				m_cells[key(x, y)].push_back(edge);
+	}
+
+	// UniformGrid2::intersect(epsilon, edges, ignoreEdges) over the boundary edges `isBoundary` keeps
+	template <typename IsBoundary>
+	bool intersect(float epsilon, ConstArrayView<uint32_t> edges, ConstArrayView<uint32_t> ignoreEdges, IsBoundary isBoundary)
+	{
+		const bool bruteForce = !(m_cellSize > 0.0f);
+		for (uint32_t i = 0; i < edges.length; i++) {
+			const uint32_t edge1 = edges[i];
+			const uint32_t edge1Vertex[2] = { vertexAt(meshEdgeIndex0(edge1)), vertexAt(meshEdgeIndex1(edge1)) };
+			const Vector2 &edge1Position1 = m_positions[edge1Vertex[0]];
+			const Vector2 &edge1Position2 = m_positions[edge1Vertex[1]];
+			const Extents2 edge1Extents(edge1Position1, edge1Position2);
+			m_potential.clear();
+			if (bruteForce) {
+				m_potential = m_edges;
+			} else {
+				m_potential = m_long;
+				int x0, y0, x1, y1;
+				cellRange(edge1, &x0, &y0, &x1, &y1);
+				if (int64_t(x1 - x0 + 1) * int64_t(y1 - y0 + 1) > kMaxEdgeCells)
+					m_potential = m_edges;
+				else for (int y = y0; y <= y1; y++)
+					for (int x = x0; x <= x1; x++) {
+						auto it = m_cells.find(key(x, y));
+						if (it != m_cells.end())
+							m_potential.insert(m_potential.end(), it->second.begin(), it->second.end());
+					}
+				std::sort(m_potential.begin(), m_potential.end());
+				m_potential.erase(std::unique(m_potential.begin(), m_potential.end()), m_potential.end());
+			}
+			for (size_t j = 0; j < m_potential.size(); j++) {
+				const uint32_t edge2 = m_potential[j];
+				if (edge1 == edge2 || !isBoundary(edge2))
+					continue;
+				bool ignore = false;
+				for (uint32_t k = 0; k < ignoreEdges.length; k++) {
+					if (edge2 == ignoreEdges[k]) {
+						ignore = true;
+						break;
+					}
+				}
+				if (ignore)
+					continue;
+				const uint32_t edge2Vertex[2] = { vertexAt(meshEdgeIndex0(edge2)), vertexAt(meshEdgeIndex1(edge2)) };
+				if (edge1Vertex[0] == edge2Vertex[0] || edge1Vertex[0] == edge2Vertex[1] || edge1Vertex[1] == edge2Vertex[0] || edge1Vertex[1] == edge2Vertex[1])
+					continue;
+				const Vector2 &edge2Position1 = m_positions[edge2Vertex[0]];
+				const Vector2 &edge2Position2 = m_positions[edge2Vertex[1]];
+				if (!Extents2::intersect(edge1Extents, Extents2(edge2Position1, edge2Position2)))
+					continue;
+				if (linesIntersect(edge1Position1, edge1Position2, edge2Position1, edge2Position2, epsilon))
+					return true;
+			}
+		}
+		return false;
+	}
+
+private:
+	ConstArrayView<Vector2> m_positions;
+	ConstArrayView<uint32_t> m_indices;
+	Vector2 m_origin;
+	float m_cellSize = 0.0f;
+	std::unordered_map<uint64_t, std::vector<uint32_t>> m_cells;
+	std::vector<uint32_t> m_edges, m_long, m_potential;
+	// an edge whose box covers more cells is kept in a list every query reads
+	static constexpr int64_t kMaxEdgeCells = 256;
+
+	static uint64_t key(int x, int y) { return (uint64_t(uint32_t(x)) << 32) | uint32_t(y); }
+	uint32_t vertexAt(uint32_t index) const { return m_indices.length > 0 ? m_indices[index] : index; }
+
+	int cell(float v, float o) const { return int(floorf((v - o) / m_cellSize)); }
+
+	void cellRange(uint32_t edge, int *x0, int *y0, int *x1, int *y1) const
+	{
+		const Vector2 &a = m_positions[vertexAt(meshEdgeIndex0(edge))];
+		const Vector2 &b = m_positions[vertexAt(meshEdgeIndex1(edge))];
+		*x0 = cell(min(a.x, b.x), m_origin.x) - 1;
+		*y0 = cell(min(a.y, b.y), m_origin.y) - 1;
+		*x1 = cell(max(a.x, b.x), m_origin.x) + 1;
+		*y1 = cell(max(a.y, b.y), m_origin.y) + 1;
+	}
 };
 
 struct UvMeshChart
@@ -6626,8 +6787,9 @@ struct PiecewiseParam
 				m_texcoords[vertex] = texcoords[i];
 			}
 			addFaceToPatch(seed);
-			// Initialize the boundary grid.
-			m_boundaryGrid.reset(m_texcoords, m_mesh->indices());
+			// Initialize the boundary grid, its cells about the seed's edge length.
+			const float seedEdge = (length(texcoords[1] - texcoords[0]) + length(texcoords[2] - texcoords[1]) + length(texcoords[0] - texcoords[2])) / 3.0f;
+			m_boundaryGrid.reset(m_texcoords, m_mesh->indices(), texcoords[0], seedEdge);
 			for (Mesh::FaceEdgeIterator it(m_mesh, seed); !it.isDone(); it.advance())
 				m_boundaryGrid.append(it.edge());
 			break;
@@ -6698,7 +6860,10 @@ struct PiecewiseParam
 							m_ignoreBoundaryEdges.push_back(it.oppositeEdge());
 					}
 				}
-				invalid = m_boundaryGrid.intersect(m_mesh->epsilon(), m_newBoundaryEdges, m_ignoreBoundaryEdges);
+				invalid = m_boundaryGrid.intersect(m_mesh->epsilon(), m_newBoundaryEdges, m_ignoreBoundaryEdges, [this](uint32_t edge) {
+					const uint32_t opposite = m_mesh->oppositeEdge(edge);
+					return opposite == UINT32_MAX || !m_faceInPatch.get(meshEdgeFace(opposite));
+				});
 				XA_PROFILE_END(parameterizeChartsPiecewiseBoundaryIntersection)
 			}
 			if (invalid) {
@@ -6714,16 +6879,10 @@ struct PiecewiseParam
 					addFaceToPatch(it.current()->face);
 				// Successfully added candidate face(s) to patch.
 				removeLinkedCandidates(bestCandidate);
-				// Reset the grid with all edges on the patch boundary.
+				// The candidates' edges join the boundary grid; those now interior are skipped when queried.
 				XA_PROFILE_START(parameterizeChartsPiecewiseBoundaryIntersection)
-				m_boundaryGrid.reset(m_texcoords, m_mesh->indices());
-				for (uint32_t i = 0; i < m_patch.size(); i++) {
-					for (Mesh::FaceEdgeIterator it(m_mesh, m_patch[i]); !it.isDone(); it.advance()) {
-						const uint32_t oface = it.oppositeFace();
-						if (oface == UINT32_MAX || !m_faceInPatch.get(oface))
-							m_boundaryGrid.append(it.edge());
-					}
-				}
+				for (uint32_t i = 0; i < m_newBoundaryEdges.size(); i++)
+					m_boundaryGrid.append(m_newBoundaryEdges[i]);
 				XA_PROFILE_END(parameterizeChartsPiecewiseBoundaryIntersection)
 			}
 		}
@@ -6761,7 +6920,7 @@ private:
 	Array<uint32_t> m_patch; // The current chart patch.
 	BitArray m_faceInPatch, m_vertexInPatch; // Face/vertex is in the current patch.
 	BitArray m_faceInvalid; // Face cannot be added to the patch - flipped, cost too high or causes boundary intersection.
-	UniformGrid2 m_boundaryGrid;
+	PatchBoundaryGrid m_boundaryGrid;
 	Array<uint32_t> m_newBoundaryEdges, m_ignoreBoundaryEdges; // Temp arrays used when testing for boundary intersection.
 
 	void addFaceToPatch(uint32_t face)
@@ -7560,6 +7719,23 @@ public:
 		mesh->~Mesh();
 		XA_FREE(mesh);
 #else
+		// inference-xatlas: `singleChart` takes the face group as one chart, skipping chart growth; it still goes
+		// through parameterization and, when that is invalid, the piecewise recompute
+		Basis singleBasis;
+		if (options.singleChart) {
+			Fit::computeBasis(ConstArrayView<Vector3>(&mesh->position(0), mesh->vertexCount()), &singleBasis);
+			const uint32_t faceCount = mesh->faceCount();
+			mesh->~Mesh();
+			XA_FREE(mesh);
+			Array<uint32_t> chartFaces;
+			chartFaces.resize(1 + faceCount);
+			chartFaces[0] = faceCount;
+			for (uint32_t i = 0; i < faceCount; i++)
+				chartFaces[i + 1] = m_faceToSourceFaceMap[i];
+			progress->increment(faceCount);
+			parameterizeCharts(taskScheduler, options, progress, boundaryGrid, chartBuffers, piecewiseParam, chartFaces, 1, &singleBasis, nullptr);
+			return;
+		}
 		XA_PROFILE_START(buildAtlas)
 		atlas.reset(mesh, options);
 		atlas.compute();
@@ -7605,6 +7781,14 @@ public:
 		}
 		XA_PROFILE_END(copyChartFaces)
 #endif
+#if !XA_DEBUG_SINGLE_CHART
+		parameterizeCharts(taskScheduler, options, progress, boundaryGrid, chartBuffers, piecewiseParam, chartFaces, chartCount, nullptr, &atlas);
+	}
+
+	void parameterizeCharts(TaskScheduler *taskScheduler, const ChartOptions &options, Progress *progress, ThreadLocal<UniformGrid2> *boundaryGrid, ThreadLocal<ChartCtorBuffers> *chartBuffers, ThreadLocal<PiecewiseParam> *piecewiseParam, const Array<uint32_t> &chartFaces, uint32_t chartCount, const Basis *singleBasis, segment::Atlas *atlas)
+	{
+		uint32_t offset;
+#endif
 		XA_PROFILE_START(createChartMeshAndParameterizeReal)
 		CreateAndParameterizeChartTaskGroupArgs groupArgs;
 		groupArgs.progress = progress;
@@ -7623,8 +7807,13 @@ public:
 			args.basis = &chartBasis;
 			args.isPlanar = false;
 #else
-			args.basis = &atlas.chartBasis(i);
-			args.chartGeneratorType = atlas.chartGeneratorType(i);
+			if (singleBasis) {
+				args.basis = singleBasis;
+				args.chartGeneratorType = segment::ChartGeneratorType::Clustered;
+			} else {
+				args.basis = &atlas->chartBasis(i);
+				args.chartGeneratorType = atlas->chartGeneratorType(i);
+			}
 #endif
 			args.chart = nullptr;
 			args.chartGroupId = m_id;
