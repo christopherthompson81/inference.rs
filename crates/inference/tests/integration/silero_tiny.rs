@@ -14,6 +14,10 @@ use support::tiny_silero_gguf;
 #[allow(clippy::duplicate_mod)]
 mod parakeet_support;
 
+#[path = "../support/nemotron3_diarization_tiny.rs"]
+#[allow(clippy::duplicate_mod)]
+mod diarization_support;
+
 const RATE: u32 = 16_000;
 const CHUNK: usize = 512;
 const TONE_HZ: f32 = 330.0;
@@ -23,6 +27,9 @@ const WINDOW_SECONDS: f64 = 120.0;
 const CAPPED_WINDOW_SECONDS: f64 = 30.0;
 // overlapping, one reaching past the recording's end (cut there)
 const SPANS: [(f64, f64); 3] = [(10.0, 12.5), (11.0, 14.0), (290.0, 400.0)];
+const DIARIZED_SECONDS: f64 = 40.0;
+const DIARIZED_WINDOW_SECONDS: f64 = 10.0;
+const DIARIZER_ID: &str = "diarizer";
 
 fn tone_wav(seconds: f64) -> Vec<u8> {
     let pcm: Vec<f32> = (0..(seconds * f64::from(RATE)) as usize)
@@ -297,5 +304,75 @@ async fn a_long_recording_streams_its_windows_as_they_finish() -> anyhow::Result
         both.err().map(|e| e.kind),
         Some(ApiErrorKind::InvalidRequest)
     );
+    Ok(())
+}
+
+// with a diarizer in the same engine a stream's `done` carries each word's speaker and the diarizer's turns over the
+// whole recording, the turns the diarizer gives alone, a resumed stream's too; the overlap pass can be switched off
+#[tokio::test]
+async fn a_diarized_stream_ends_with_speakers_and_the_whole_recordings_turns() -> anyhow::Result<()>
+{
+    let vad = tiny_silero_gguf(true)?;
+    let checkpoint = parakeet_support::tiny_parakeet_checkpoint(parakeet_support::HEADS[0])?;
+    let diarizer = diarization_support::tiny_nemotron3_diarization()?;
+    let model = TranscriptionModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_vad_model_id(vad.path().to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .with_force_cpu()
+        .build()
+        .await?;
+    let spec = serde_json::json!({
+        "model": {"Diarization": {"model_id": diarizer.path(), "dtype": "f32"}},
+        "model_id": DIARIZER_ID,
+    });
+    model.add_model_json(spec.to_string().as_bytes()).await?;
+    let wav = tone_wav(DIARIZED_SECONDS);
+    let file = tempfile::NamedTempFile::with_suffix(".wav")?;
+    std::fs::write(file.path(), &wav)?;
+    let path = file.path().to_string_lossy().to_string();
+    let mut alone = inference::DiarizationRequest::new();
+    alone.model = DIARIZER_ID.to_string();
+    let alone: serde_json::Value =
+        serde_json::from_str(&model.diarization(alone, &wav).await?.body)?;
+    let done = |events: &[serde_json::Value]| events.last().unwrap()["data"].clone();
+    for overlap_pass in [true, false] {
+        let request = serde_json::json!({
+            "path": path, "max_window_seconds": DIARIZED_WINDOW_SECONDS,
+            "diarization_model": DIARIZER_ID, "overlap_pass": overlap_pass,
+        });
+        let events = stream_events(
+            model
+                .transcription_stream_json(request.to_string().as_bytes(), None)
+                .await?,
+            None,
+        )
+        .await;
+        assert_eq!(events.last().unwrap()["event"], "done", "{events:?}");
+        let finished = done(&events);
+        assert_eq!(finished["speaker_turns"], alone["segments"]);
+        assert!(
+            finished["words"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|w| w["speaker"].is_u64())
+        );
+        let windows = events[0]["data"]["windows"].as_array().unwrap();
+        assert!(windows.len() >= 2, "{} windows", windows.len());
+        // resumed after the first window: the turns still cover the whole recording
+        let resumed = serde_json::json!({
+            "path": path, "max_window_seconds": DIARIZED_WINDOW_SECONDS,
+            "diarization_model": DIARIZER_ID, "overlap_pass": overlap_pass,
+            "from_seconds": windows[0]["end"],
+        });
+        let events = stream_events(
+            model
+                .transcription_stream_json(resumed.to_string().as_bytes(), None)
+                .await?,
+            None,
+        )
+        .await;
+        assert_eq!(done(&events)["speaker_turns"], alone["segments"]);
+    }
     Ok(())
 }
