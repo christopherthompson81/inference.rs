@@ -351,3 +351,17 @@ the atlas hash (8e229b13923a3026):
 Compute charts 114 -> 82 s summed (7.13 -> 5.15 s wall). End to end (robot, 1024-cascade): 68.2 -> 64.4 s, export
 31.9 -> 27.2 s, the GLB byte-identical. With the grid changes the single-chart lead narrows (cone 30: 8.2 s against
 the default's 13-14 s in the same test, which includes our clustering).
+
+## Run 15 - 2026-11-11
+
+Question: what does the single-chart unwrap at a 30 degree cluster cone look like on a real bake, and what does it
+save there? A temporary env toggle in `bake` (not committed) switched the robot's 1024-cascade export to it; the
+two GLBs rendered with nvdiffrast (`render_pair.py`, scratch: four views each plus a 2x front close-up).
+
+    default:          export 27.2 s, end to end 64.4 s, 687104 vertices, 958912 faces
+    single, cone 30:  export 15.7 s, end to end 57.2 s, 658827 vertices, 958912 faces
+
+At 1024 the saving is larger than on the 944K-face test mesh (11.5 s of export), and the GLB has fewer seam vertices
+here. Rendered, the two are indistinguishable at full views and in the close-up: no visible seams or blur from the
+lower atlas coverage. Not wired in: it gives up matching the reference's atlas, so it would be an option or a
+default change to decide on.
