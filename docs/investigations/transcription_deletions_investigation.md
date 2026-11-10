@@ -226,3 +226,29 @@ stream + spans pass  1583  12.3%   56  13  114   0                   71
 64 spans (292 s with padding) in 1.70 s on the 3090, on top of the stream's ~2.4 s. Deletions more than halve and
 no long run is left; the insertions are the uncounted speech of Run 7 plus repeated fillers, so WER against this
 reference rises.
+
+## Run 9 - 2026-11-09 21:10
+
+Question (user): keep the second pass as small as possible. Which overlapped turns does it need?
+
+Command: `scratchpad/drops/select.py` (the 64 spans of Run 8, each span's new words kept with its features: the
+share of the turn the other speaker overlaps, the stream's words per second in it, its longest stretch with no
+stream word).
+
+```
+rule                     spans  seconds  new non-filler words  confirmed by ONNX or reference
+all (Run 8)               64     292      79 (100%)            40 (100%)
+stream gap >= 1.0 s       33     163      64 ( 81%)            29 ( 72%)
+stream gap >= 1.5 s       17      93      53 ( 67%)            23 ( 57%)
+stream gap >= 2.0 s       10      68      45 ( 57%)            20 ( 50%)
+overlapped >= 50%          8      22       6 (  8%)             2 (  5%)
+stream < 2 words/s        17      62      48 ( 61%)            18 ( 45%)
+```
+
+Turns sitting under the other speaker add almost nothing. The words come from long turns the other speaker cuts
+into, where the main pass goes quiet: a gap of 1 s or more with no stream word finds half the spans (and 56% of
+the seconds) with 81% of the new words.
+
+Implication: diarize alongside the main pass (as `diarization_model` does now), then transcribe only the overlapped
+turns of 1.5 s or more that hold a 1 s gap in the main pass's words. The gap needs the main pass's words, so the
+spans come after it; batching them makes that cheap.
