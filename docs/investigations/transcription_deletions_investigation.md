@@ -277,3 +277,26 @@ Nemotron-3 turns on this clip: 254 -> 189 segments, 121 -> 101 of 1.5 s or more.
 turns: 35 spans, 236 s, 56 new non-filler words (29 confirmed), against 33 spans, 163 s, 64 (29) unmerged.
 Neutral for the pass (longer spans, same confirmed words); its case rests on diarization accuracy, which this
 clip's reference (no speakers) cannot score.
+
+## Run 11 - 2026-11-09 22:30
+
+Question (user): diarize first and plan the ASR windows from its turns, in place of the VAD; no transcription until
+the turns are known.
+
+Command: `scratchpad/drops/diar_first.py vulkan:0 <clip> df` (one engine, Parakeet without VAD and Nemotron-3; the
+plan: every speaker's turns joined, gaps under 0.3 s closed, runs over 15 s cut at the latest turn end inside 15 s,
+grouped up to 15 s, each reaching up to 1 s into its gaps; run as `spans`; then the Run 10 second pass).
+
+```
+                              WER    sub del ins   deleted runs >= 4      time (sequential)
+VAD plan, no pass (Run 10)    9.1%   63  29   44   2 (4, 6 words)         2.4 s (VAD + ASR, beside diarization)
+diarization plan, no pass     8.9%   64  29   39   1 (13 words, last 6 s)  0.65 diarize + 1.85 ASR
+VAD plan + pass (Run 10)     11.9%   61  16  100   0                      3.3-3.5 s
+diarization plan + pass      11.0%   59  15   90   0                      0.65 + 1.85 + 0.90 = 3.4 s
+```
+
+The diarizer's plan transcribes about as well as the VAD's, slightly fewer insertions, and costs about what the VAD
+did (0.65 s against the VAD's share of the stream). One clip; the 13-word run is the clip's last seconds, which the
+pass recovers. With the pass the totals level: sequential diarization costs the concurrency the VAD plan had.
+What it buys: the overlapped turns are known before any transcription, so windows and spans can go in one batch,
+and the gap rule (which needs the first pass's words) is the only thing keeping them apart.
