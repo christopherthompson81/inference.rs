@@ -463,6 +463,82 @@ fn the_unwrap_matches_the_reference() -> Result<()> {
     Ok(())
 }
 
+// manifold edges both of whose faces run it the same way
+fn inconsistent_edges(mesh: &super::mesh::Mesh) -> usize {
+    let at = |t: [u32; 3], v: u32| {
+        t.iter()
+            .position(|&x| x == v)
+            .expect("a vertex of the face")
+    };
+    super::charts::manifold_adjacency(mesh)
+        .iter()
+        .filter(|&&(f0, f1, v0, v1)| {
+            let dir = |t: [u32; 3]| (at(t, v1) + 3 - at(t, v0)) % 3;
+            dir(mesh.faces[f0 as usize]) == dir(mesh.faces[f1 as usize])
+        })
+        .count()
+}
+
+// TRELLIS2_TOPOLOGY_REF: CuMesh's duplicate, non-manifold, component and orientation passes, each from the
+// reference's previous stage (`topology_ref.py`, scratch)
+#[test]
+#[ignore = "needs a reference dump"]
+fn topology_passes_match_the_reference() -> Result<()> {
+    let Some(reference) = std::env::var_os("TRELLIS2_TOPOLOGY_REF") else {
+        return Ok(());
+    };
+    let refs = inference_tensor::safetensors::load(reference, &Device::Cpu)?;
+    let stage = |name: &str| mesh_of(&refs, &format!("{name}.v"), &format!("{name}.f"));
+    let passes: [(&str, &str, fn(&mut super::mesh::Mesh)); 4] = [
+        ("input", "dedup", super::cleanup::remove_duplicate_faces),
+        ("dedup", "repair", super::cleanup::repair_non_manifold_edges),
+        ("repair", "small", |m| {
+            super::cleanup::remove_small_connected_components(m, super::cleanup::MIN_COMPONENT_AREA)
+        }),
+        ("small", "unify", super::cleanup::unify_face_orientations),
+    ];
+    for (from, to, pass) in passes {
+        let mut ours = stage(from)?;
+        let start = std::time::Instant::now();
+        pass(&mut ours);
+        let theirs = stage(to)?;
+        let same = ours
+            .faces
+            .iter()
+            .zip(&theirs.faces)
+            .filter(|(a, b)| a == b)
+            .count();
+        println!(
+            "{to} in {:.2} s: {} vertices / {} faces vs {} / {}, {same} faces identical, vertices identical: {}",
+            start.elapsed().as_secs_f64(),
+            ours.vertices.len(),
+            ours.faces.len(),
+            theirs.vertices.len(),
+            theirs.faces.len(),
+            ours.vertices == theirs.vertices
+        );
+        if to == "unify" {
+            // pieces with conflicting loops wind by union order, and CuMesh's concurrent hooks race there
+            let flips = ours
+                .faces
+                .iter()
+                .zip(&theirs.faces)
+                .filter(|(a, b)| a != b && [a[0], a[2], a[1]] == **b)
+                .count();
+            let (a, b) = (inconsistent_edges(&ours), inconsistent_edges(&theirs));
+            println!(
+                "unify: {flips} differing faces are flips; inconsistently wound manifold edges {a} vs {b}"
+            );
+            assert_eq!(flips + same, ours.faces.len(), "unify only flips");
+            assert!(a <= b, "no more inconsistent edges than the reference");
+            continue;
+        }
+        assert_eq!(ours.faces, theirs.faces, "{to} faces");
+        assert_eq!(ours.vertices, theirs.vertices, "{to} vertices");
+    }
+    Ok(())
+}
+
 // JOVOX_DIR, JOVOX_DINOV3 and JOVOX_E2E (the JoVox dump whose `prep` image TRELLIS2_REF was made from)
 #[test]
 #[ignore = "needs the JoVox and DINOv3 checkpoints, reference dumps and a GPU"]

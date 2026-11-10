@@ -67,3 +67,27 @@ follow from the 18% of faces clustered differently (Run 2); the zero-area faces 
 
 Next: the remove_duplicate_faces / repair_non_manifold_edges / remove_small_connected_components /
 unify_face_orientations chain, then baking.
+
+## Run 4 - 2026-11-10 (evening)
+
+Question: do host ports of CuMesh's `remove_duplicate_faces`, `repair_non_manifold_edges`,
+`remove_small_connected_components(1e-5)` and `unify_face_orientations` match it?
+
+Reference `topology_ref.py` (scratch) runs them in sequence on the 944K-face mesh, dumping each stage; test
+`topology_passes_match_the_reference` (TRELLIS2_TOPOLOGY_REF) runs each of ours from the reference's previous stage:
+
+    dedup  in 0.16 s: 462167 vertices / 943959 faces, identical
+    repair in 0.22 s: 556529 vertices / 943959 faces, identical (corners joined across manifold edges, numbered by
+                      lowest corner, as CuMesh's min-root union)
+    small  in 0.20 s: 474820 vertices / 886361 faces, identical
+    unify  in 0.16 s: same vertices, 793694 faces identical, the other 92667 all flips;
+                      inconsistently wound manifold edges 1406 (ours) vs 7855 (CuMesh), input 247078
+
+Repair splits 94K vertices and the component pass then drops 58K faces: the dual-grid mesh has many pieces touching
+only at vertices or through 3+-face edges. Unify differs only where a piece has conflicting loops: there the result
+depends on union order, and CuMesh's concurrent hooks (`atomicMin` of root<<1|parity, parity 0 winning a tie at the
+same root) race, leaving 5.6x more disagreeing edges than a sequential union-find. The test asserts only flips differ
+and ours has no more inconsistent edges.
+
+The input's 247K inconsistent edges (of ~1.3M) are inherited from the extracted mesh (whose faces matched the
+reference's exactly, trellis2_mesh Run 3), so `to_glb`'s final unify matters for the baked GLB's normals.

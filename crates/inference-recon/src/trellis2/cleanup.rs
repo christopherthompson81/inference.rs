@@ -2,7 +2,7 @@
 //! boundary vertices) under a perimeter get a vertex at the mean of their edge midpoints and a triangle per edge.
 //! Simplification: rounds of parallel edge collapses; each edge costs its quadric error plus length and skinny-triangle
 //! terms, and collapses when it is the cheapest edge at every face around it and under a threshold that grows tenfold
-//! whenever a round removes under 1% of the faces.
+//! whenever a round removes under 1% of the faces. Then the topology passes `to_glb` runs between simplifications.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -12,6 +12,8 @@ use super::mesh::Mesh;
 
 /// TRELLIS.2's hole perimeter limit
 pub const MAX_HOLE_PERIMETER: f32 = 3e-2;
+/// `to_glb`'s smallest kept connected piece (area)
+pub const MIN_COMPONENT_AREA: f32 = 1e-5;
 /// TRELLIS.2's face budget for the extracted mesh
 pub const SIMPLIFY_TARGET: usize = 1_000_000;
 const START_THRESHOLD: f32 = 1e-8;
@@ -454,6 +456,161 @@ pub fn simplify(mesh: &mut Mesh, target: usize) {
     }
 }
 
+/// Drops vertices no face uses, keeping the others' order.
+pub fn remove_unreferenced_vertices(mesh: &mut Mesh) {
+    let mut map = vec![u32::MAX; mesh.vertices.len()];
+    for &v in mesh.faces.iter().flatten() {
+        map[v as usize] = 0;
+    }
+    let mut kept = 0u32;
+    let mut vertices = Vec::new();
+    for (v, m) in map.iter_mut().enumerate() {
+        if *m == 0 {
+            *m = kept;
+            kept += 1;
+            vertices.push(mesh.vertices[v]);
+        }
+    }
+    mesh.vertices = vertices;
+    for f in &mut mesh.faces {
+        *f = f.map(|v| map[v as usize]);
+    }
+}
+
+/// Keeps the first of each set of faces over the same three vertices (in any order).
+pub fn remove_duplicate_faces(mesh: &mut Mesh) {
+    let mut keys: Vec<([u32; 3], u32)> = mesh
+        .faces
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let mut k = *f;
+            k.sort_unstable();
+            (k, i as u32)
+        })
+        .collect();
+    keys.par_sort_unstable();
+    let mut keep = vec![false; mesh.faces.len()];
+    for (i, k) in keys.iter().enumerate() {
+        if i == 0 || keys[i - 1].0 != k.0 {
+            keep[k.1 as usize] = true;
+        }
+    }
+    let mut i = 0;
+    mesh.faces.retain(|_| {
+        i += 1;
+        keep[i - 1]
+    });
+    remove_unreferenced_vertices(mesh);
+}
+
+// union-find root, halving the path
+fn find(parent: &mut [u32], mut x: u32) -> u32 {
+    while parent[x as usize] != x {
+        parent[x as usize] = parent[parent[x as usize] as usize];
+        x = parent[x as usize];
+    }
+    x
+}
+
+fn union_low(parent: &mut [u32], a: u32, b: u32) {
+    let (a, b) = (find(parent, a), find(parent, b));
+    if a != b {
+        parent[a.max(b) as usize] = a.min(b);
+    }
+}
+
+fn corner(face: [u32; 3], v: u32) -> u32 {
+    face.iter()
+        .position(|&x| x == v)
+        .expect("a vertex of the face") as u32
+}
+
+/// Splits vertices where faces meet only through non-manifold edges or a single point: face corners joined across
+/// manifold edges become one vertex, numbered by their lowest corner.
+pub fn repair_non_manifold_edges(mesh: &mut Mesh) {
+    let adjacency = super::charts::manifold_adjacency(mesh);
+    let faces = &mesh.faces;
+    let mut parent: Vec<u32> = (0..faces.len() as u32 * 3).collect();
+    for &(f0, f1, v0, v1) in &adjacency {
+        let (t0, t1) = (faces[f0 as usize], faces[f1 as usize]);
+        for v in [v0, v1] {
+            union_low(&mut parent, 3 * f0 + corner(t0, v), 3 * f1 + corner(t1, v));
+        }
+    }
+    let roots: Vec<u32> = (0..parent.len() as u32)
+        .map(|c| find(&mut parent, c))
+        .collect();
+    let mut ids = vec![u32::MAX; roots.len()];
+    let mut vertices = Vec::new();
+    for (c, &r) in roots.iter().enumerate() {
+        if r as usize == c {
+            ids[c] = vertices.len() as u32;
+            vertices.push(mesh.vertices[faces[c / 3][c % 3] as usize]);
+        }
+    }
+    mesh.faces = (0..faces.len())
+        .map(|f| [0, 1, 2].map(|k| ids[roots[3 * f + k] as usize]))
+        .collect();
+    mesh.vertices = vertices;
+}
+
+/// Drops the pieces (faces joined across manifold edges) whose area is under `min_area`.
+pub fn remove_small_connected_components(mesh: &mut Mesh, min_area: f32) {
+    let mut parent: Vec<u32> = (0..mesh.faces.len() as u32).collect();
+    for &(f0, f1, _, _) in &super::charts::manifold_adjacency(mesh) {
+        union_low(&mut parent, f0, f1);
+    }
+    let mut areas = vec![0f32; parent.len()];
+    let roots: Vec<u32> = (0..parent.len() as u32)
+        .map(|f| find(&mut parent, f))
+        .collect();
+    for (f, &r) in mesh.faces.iter().zip(&roots) {
+        let [a, b, c] = f.map(|i| mesh.vertices[i as usize]);
+        areas[r as usize] += norm2(cross(sub(b, a), sub(c, a))).sqrt() / 2.0;
+    }
+    let mut i = 0;
+    mesh.faces.retain(|_| {
+        i += 1;
+        areas[roots[i - 1] as usize] >= min_area
+    });
+    remove_unreferenced_vertices(mesh);
+}
+
+// root and the parity of the path to it
+fn find_parity(parent: &mut [(u32, bool)], mut x: u32) -> (u32, bool) {
+    let mut flip = false;
+    while parent[x as usize].0 != x {
+        flip ^= parent[x as usize].1;
+        x = parent[x as usize].0;
+    }
+    (x, flip)
+}
+
+/// Winds every piece like its lowest face: faces joined across a manifold edge that both run it the same way disagree,
+/// and each face whose parity to its piece's lowest face is odd is flipped.
+pub fn unify_face_orientations(mesh: &mut Mesh) {
+    let faces = &mesh.faces;
+    let mut parent: Vec<(u32, bool)> = (0..faces.len() as u32).map(|f| (f, false)).collect();
+    for &(f0, f1, v0, v1) in &super::charts::manifold_adjacency(mesh) {
+        let (t0, t1) = (faces[f0 as usize], faces[f1 as usize]);
+        let dir = |t: [u32; 3]| (corner(t, v1) + 3 - corner(t, v0)) % 3;
+        let flipped = dir(t0) == dir(t1);
+        let ((r0, p0), (r1, p1)) = (find_parity(&mut parent, f0), find_parity(&mut parent, f1));
+        if r0 != r1 {
+            parent[r0.max(r1) as usize] = (r0.min(r1), flipped ^ p0 ^ p1);
+        }
+    }
+    let flips: Vec<bool> = (0..faces.len() as u32)
+        .map(|f| find_parity(&mut parent, f).1)
+        .collect();
+    for (f, flip) in mesh.faces.iter_mut().zip(flips) {
+        if flip {
+            *f = [f[0], f[2], f[1]];
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,5 +657,34 @@ mod tests {
         simplify(&mut mesh, 200);
         assert!(mesh.faces.len() <= 200);
         assert!(mesh.vertices.iter().all(|v| v[2] == 0.0));
+    }
+
+    #[test]
+    fn topology_passes_fix_duplicates_fans_specks_and_winding() {
+        let mut mesh = grid(2, 2);
+        let first = mesh.faces[0];
+        mesh.faces.push([first[1], first[2], first[0]]);
+        remove_duplicate_faces(&mut mesh);
+        assert_eq!(mesh.faces.len(), 8);
+        // flip one face: it is wound back to match its piece
+        let wound = mesh.faces[3];
+        mesh.faces[3] = [wound[0], wound[2], wound[1]];
+        unify_face_orientations(&mut mesh);
+        assert_eq!(mesh.faces[3], wound);
+        // a third face on the inner diagonal makes it non-manifold, so that face's corners get vertices of their own
+        let extra = mesh.vertices.len() as u32;
+        mesh.vertices.push([0.25, 0.25, 1.0]);
+        mesh.faces.push([first[0], first[2], extra]);
+        let before = mesh.vertices.len();
+        repair_non_manifold_edges(&mut mesh);
+        assert!(mesh.vertices.len() > before);
+        // a speck far away goes, the grid stays
+        let n = mesh.vertices.len() as u32;
+        mesh.vertices
+            .extend([[5.0, 5.0, 5.0], [5.001, 5.0, 5.0], [5.0, 5.001, 5.0]]);
+        mesh.faces.push([n, n + 1, n + 2]);
+        remove_small_connected_components(&mut mesh, MIN_COMPONENT_AREA);
+        assert!(mesh.vertices.iter().all(|v| v[0] < 5.0));
+        assert!(mesh.faces.len() >= 8);
     }
 }

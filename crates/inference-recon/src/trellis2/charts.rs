@@ -51,7 +51,7 @@ pub fn remove_degenerate_faces(mesh: &mut Mesh) {
 }
 
 /// Pairs of faces sharing an edge that exactly two faces use, with that edge's two vertices.
-fn manifold_adjacency(mesh: &Mesh) -> Vec<(u32, u32, u32, u32)> {
+pub(super) fn manifold_adjacency(mesh: &Mesh) -> Vec<(u32, u32, u32, u32)> {
     let mut edges: Vec<(u32, u32, u32)> = mesh
         .faces
         .par_iter()
