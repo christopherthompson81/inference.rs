@@ -31,7 +31,7 @@ mod torch_resize;
 mod transforms;
 pub(crate) mod utils;
 
-pub use inpaint::inpaint_telea;
+pub use inpaint::{TeleaSchedule, inpaint_telea, telea_schedules};
 pub use ops::{get_resize_image_size, make_pixel_mask, pad};
 pub use pad::{pad_to_max_edge, pad_to_max_image_size};
 pub use pil::{PilFilter, pil_resize, pil_resize_bicubic, pil_resize_rgba_lanczos};

@@ -43,9 +43,9 @@ unwrap time for an atlas of the same quality); each covered texel is placed on
 the extracted surface and given the volume's trilinear attributes, and the texels between charts are inpainted so
 seams don't bleed.
 
-On an RTX 3090 with an 8-core CPU, the robot example: `1024-cascade` 43 s (the export's cleanup and unwrap run on the CPU
-while the texture is sampled, leaving about 5 s after it) at a 6.1 GB GPU peak and 2.3 GB of host memory;
-`--remesh` 45 s at 7.0 GB (its distance queries share the GPU with the texture stage); `--vertex-colors` 38 s. `512` takes
+On an RTX 3090 with an 8-core CPU, the robot example: `1024-cascade` 40 s (the export's cleanup, unwrap and inpainting march
+run on the CPU while the texture is sampled, leaving about 2.5 s after it) at a 6.1 GB GPU peak and 2.5 GB of host
+memory; `--remesh` 45 s at 6.5 GB (its remesh outlasts the texture stage); `--vertex-colors` 38 s. `512` takes
 20 s plus its export.
 
 ```
