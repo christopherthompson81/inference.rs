@@ -207,7 +207,9 @@ impl JoVox {
         } else {
             cond.clone()
         };
-        sample_structure(&self.flow, &self.flow.condition(&both)?, options, progress)
+        let kv = self.flow.condition(&both)?;
+        let mut rng = StdRng::seed_from_u64(options.seed);
+        sample_structure(&self.flow, &kv, options, &mut rng, progress)
     }
 }
 
@@ -216,11 +218,11 @@ fn sample_structure(
     flow: &Flow,
     kv: &[flow::CrossKv],
     options: &SampleOptions,
+    rng: &mut dyn sampler::Uniform,
     progress: &dyn Progress,
 ) -> Result<Vec<[usize; 3]>> {
     let guided = options.cfg_strength != 1.0;
     let plan = SCHEDULE.plan(ROOT_END, options.steps, 1.0);
-    let mut rng = StdRng::seed_from_u64(options.seed);
     let mut draw_rng = StdRng::seed_from_u64(options.seed.wrapping_add(1));
     progress.stage("structure", plan.len());
     let mut step = 0;
@@ -237,7 +239,7 @@ fn sample_structure(
         progress.advance(step);
         pick(&logits, options.temperature, &mut draw_rng)
     };
-    sampler::run(&plan, &mut rng, &mut draw)
+    sampler::run(&plan, rng, &mut draw)
 }
 
 // Each slot's value from its logits `[tokens, 8, 256]`: the most likely, or drawn at `temperature`

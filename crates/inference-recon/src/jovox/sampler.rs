@@ -210,49 +210,68 @@ impl State {
     }
 }
 
-// Remasks `round(known * (1 - keep))` of the eligible known slots, earliest revealed first, ties in random order
-fn erase(level: &mut Level, eligible: &[bool], known: usize, keep: f64, rng: &mut StdRng) {
+/// Uniform draws in [0, 1), a whole level's worth at a time, as the reference draws `torch.rand(shape)`.
+pub trait Uniform {
+    fn fill(&mut self, n: usize) -> Vec<f32>;
+}
+
+impl Uniform for StdRng {
+    fn fill(&mut self, n: usize) -> Vec<f32> {
+        (0..n).map(|_| self.random::<f32>()).collect()
+    }
+}
+
+// The `count` slots of `candidates` with the smallest keys
+fn smallest(candidates: impl Iterator<Item = (f32, usize)>, count: usize) -> Vec<usize> {
+    let mut keyed: Vec<(f32, usize)> = candidates.collect();
+    keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
+    keyed.into_iter().take(count).map(|(_, i)| i).collect()
+}
+
+// Remasks `round(known * (1 - keep))` of the eligible slots, earliest revealed first, ties in random order
+fn erase(level: &mut Level, eligible: &[bool], known: usize, keep: f64, rng: &mut dyn Uniform) {
     let count = (known as f64 * (1.0 - keep)).round_ties_even() as usize;
     if count == 0 {
         return;
     }
-    let mut keys: Vec<(f32, usize)> = eligible
-        .iter()
-        .enumerate()
-        .filter(|&(_, &e)| e)
-        .map(|(i, _)| (level.born[i] as f32 + rng.random::<f32>() * TIE_BREAK, i))
-        .collect();
-    keys.sort_by(|a, b| a.0.total_cmp(&b.0));
-    for &(_, i) in keys.iter().take(count) {
+    let noise = rng.fill(eligible.len());
+    let born = &level.born;
+    let picked = smallest(
+        eligible
+            .iter()
+            .enumerate()
+            .filter(|&(_, &e)| e)
+            .map(|(i, _)| (born[i] as f32 + noise[i] * TIE_BREAK, i)),
+        count,
+    );
+    for i in picked {
         level.mask(i);
     }
 }
 
 // Picks `ceil(masked * share)` (at least one) of the masked slots at random
-fn reveal(masked: &[bool], share: f64, rng: &mut StdRng) -> Vec<usize> {
-    let mut picked: Vec<usize> = masked
-        .iter()
-        .enumerate()
-        .filter(|&(_, &m)| m)
-        .map(|(i, _)| i)
-        .collect();
-    if picked.is_empty() {
-        return picked;
+fn reveal(masked: &[bool], share: f64, rng: &mut dyn Uniform) -> Vec<usize> {
+    let noise = rng.fill(masked.len());
+    let total = masked.iter().filter(|&&m| m).count();
+    if total == 0 {
+        return Vec::new();
     }
-    let count = ((picked.len() as f64 * share).ceil() as usize).clamp(1, picked.len());
-    for i in 0..count {
-        let j = rng.random_range(i..picked.len());
-        picked.swap(i, j);
-    }
-    picked.truncate(count);
-    picked
+    let count = ((total as f64 * share).ceil() as usize).max(1);
+    smallest(
+        masked
+            .iter()
+            .enumerate()
+            .filter(|&(_, &m)| m)
+            .map(|(i, _)| (noise[i], i)),
+        count,
+    )
 }
 
 /// Runs `plan`, drawing every slot of the tokens `draw` is handed (one value per slot, token by token), and returns
 /// the occupied `xyz` cells of the 64^3 grid, in key order.
 pub fn run(
     plan: &[[f64; 4]],
-    rng: &mut StdRng,
+    rng: &mut dyn Uniform,
     draw: &mut dyn FnMut(&Tokens) -> inference_tensor::Result<Vec<[u16; SLOTS]>>,
 ) -> inference_tensor::Result<Vec<[usize; 3]>> {
     let mut st = State::new();

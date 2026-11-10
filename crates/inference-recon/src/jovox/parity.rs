@@ -131,12 +131,106 @@ fn a_structure_samples_under_the_recorded_condition() -> Result<()> {
             seed,
             ..Default::default()
         };
-        let voxels = super::sample_structure(&flow, &kv, &options, &crate::progress::NoProgress)?;
+        let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(seed);
+        let voxels =
+            super::sample_structure(&flow, &kv, &options, &mut rng, &crate::progress::NoProgress)?;
         println!(
             "seed {seed}: {} voxels, {:.2} s",
             voxels.len(),
             start.elapsed().as_secs_f64()
         );
+    }
+    Ok(())
+}
+
+// A counter hash (splitmix64) both sides draw from, so the samplers can be compared draw for draw
+struct Splitmix(u64);
+
+impl super::sampler::Uniform for Splitmix {
+    fn fill(&mut self, n: usize) -> Vec<f32> {
+        (0..n)
+            .map(|_| {
+                self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = self.0;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                z ^= z >> 31;
+                (z >> 40) as f32 / (1u64 << 24) as f32
+            })
+            .collect()
+    }
+}
+
+fn iou(a: &[[usize; 3]], b: &[[usize; 3]]) -> f64 {
+    let a: std::collections::HashSet<_> = a.iter().collect();
+    let b: std::collections::HashSet<_> = b.iter().collect();
+    a.intersection(&b).count() as f64 / a.union(&b).count().max(1) as f64
+}
+
+// JOVOX_DIR, JOVOX_DINOV3 (the encoder's directory), JOVOX_IMAGE and JOVOX_E2E (`e2e_ref.py`'s dump for that image,
+// with `det.{seed}` structures sampled under the shared draws). JOVOX_F32 runs the flow in f32, against a dump made
+// with F32=1: the samples must then be the reference's; in bf16 rounding flips near-tied picks and they drift apart.
+#[test]
+#[ignore = "needs the JoVox and DINOv3 checkpoints, a reference dump and a GPU"]
+fn an_image_matches_the_reference_end_to_end() -> Result<()> {
+    let (Some(dir), Some(dino), Some(image), Some(reference)) = (
+        std::env::var_os("JOVOX_DIR"),
+        std::env::var_os("JOVOX_DINOV3"),
+        std::env::var_os("JOVOX_IMAGE"),
+        std::env::var_os("JOVOX_E2E"),
+    ) else {
+        return Ok(());
+    };
+    let f32_flow = std::env::var_os("JOVOX_F32").is_some();
+    let device = Device::new_cuda(0)?;
+    let refs = inference_tensor::safetensors::load(PathBuf::from(reference), &Device::Cpu)?;
+    let rgba = crate::read_image(std::path::Path::new(&image))
+        .map_err(inference_tensor::Error::wrap)?
+        .to_rgba8();
+    let input = super::Rgba {
+        width: rgba.width() as usize,
+        height: rgba.height() as usize,
+        pixels: rgba.into_raw(),
+    };
+    let prepared = super::prepare(&input, super::DEFAULT_FILL)?;
+    let want = refs["prep"].flatten_all()?.to_vec1::<u8>()?;
+    assert_eq!(prepared.pixels, want, "prepared image");
+
+    let dtype = if f32_flow { DType::F32 } else { DType::BF16 };
+    let model = super::JoVox::load(dir.as_ref(), dino.as_ref(), dtype, &device)?;
+    let cond = model.condition(&prepared)?;
+    let (max, rms) = compare(&cond, &refs["cond"])?;
+    println!("condition: max {max:.3e} rms {rms:.3e}");
+    assert!(rms < 1e-4, "condition relative rms {rms}");
+
+    let kv = model
+        .flow
+        .condition(&Tensor::cat(&[&cond, &cond.zeros_like()?], 0)?)?;
+    for seed in 0.. {
+        let Some(want) = refs.get(&format!("det.{seed}")) else {
+            break;
+        };
+        let want: Vec<[usize; 3]> = want
+            .to_vec2::<i64>()?
+            .iter()
+            .map(|r| [r[0] as usize, r[1] as usize, r[2] as usize])
+            .collect();
+        let ours = super::sample_structure(
+            &model.flow,
+            &kv,
+            &Default::default(),
+            &mut Splitmix(seed),
+            &crate::progress::NoProgress,
+        )?;
+        let iou = iou(&ours, &want);
+        println!(
+            "shared draws, seed {seed}: ours {} voxels, reference {}, IoU {iou:.4}",
+            ours.len(),
+            want.len()
+        );
+        if f32_flow {
+            assert_eq!(ours, want, "seed {seed}");
+        }
     }
     Ok(())
 }
