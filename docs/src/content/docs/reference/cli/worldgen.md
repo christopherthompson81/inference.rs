@@ -2,7 +2,7 @@
 title: "inference worldgen"
 description: "Generate a 3D world from an equirectangular panorama with WorldStereo-2: keyframes along camera trajectories, then WorldMirror 2.0 on them for cameras, depth, points and 3D Gaussian splats"
 sidebar:
-  order: 15
+  order: 16
 ---
 
 <!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->

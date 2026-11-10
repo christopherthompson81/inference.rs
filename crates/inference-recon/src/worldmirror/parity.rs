@@ -15,7 +15,7 @@ fn paths() -> Option<(PathBuf, PathBuf)> {
 }
 
 // max |a - b| and the relative RMS error of `a` against the reference `b`
-pub(super) fn compare(a: &Tensor, b: &Tensor) -> Result<(f32, f32)> {
+pub(crate) fn compare(a: &Tensor, b: &Tensor) -> Result<(f32, f32)> {
     let a = a
         .to_dtype(DType::F32)?
         .to_device(&Device::Cpu)?

@@ -273,4 +273,4 @@ fn trim_pool(device: &Device) -> Result<()> {
 }
 
 #[cfg(test)]
-mod parity;
+pub(crate) mod parity;

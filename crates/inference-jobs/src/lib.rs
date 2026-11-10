@@ -26,6 +26,7 @@ use crate::reconstruction::{
 };
 
 pub mod reconstruction;
+pub mod voxels;
 pub mod worldgen_package;
 
 /// Every job id starts with this.
@@ -46,6 +47,9 @@ const WORLD_DIR: &str = "world";
 #[cfg(feature = "cuda")]
 const SPLATS_DIR: &str = "splats";
 const RECONSTRUCTION_DIR: &str = "reconstruction";
+const VOXELS_DIR: &str = "voxels";
+// a voxel job's peak above idle: the bf16 flow, f32 DINOv3 and BiRefNet with their activations
+const VOXELS_NEED_BYTES: u64 = 8 << 30;
 // files read as a video rather than images
 const VIDEO_EXTENSIONS: [&str; 7] = ["mp4", "m4v", "mov", "avi", "mkv", "webm", "gif"];
 // the checkpoints' places under a models root, as their repositories lay them out
@@ -54,6 +58,15 @@ pub(crate) const WAN_DIR: &str = "Wan2.1-I2V-14B-480P-Diffusers";
 pub(crate) const MOGE_DIR: &str = "moge-2-vitl-normal";
 pub(crate) const WORLDMIRROR_DIR: &str = "HY-World-2.0/HY-WorldMirror-2.0";
 pub(crate) const LPIPS_FILE: &str = "lpips-vgg/lpips_vgg.safetensors";
+pub(crate) const JOVOX_DIR: &str = "JoVox-64";
+pub(crate) const DINOV3_DIR: &str = "dinov3-vitl16-pretrain-lvd1689m";
+pub(crate) const BIREFNET_DIR: &str = "BiRefNet";
+/// Where JoVox-64 is fetched from when no checkpoint is configured.
+pub const JOVOX_REPO: &str = "xiangjuntang/JoVox-64";
+/// Where DINOv3 ViT-L/16 is fetched from (gated: the token's account needs access).
+pub const DINOV3_REPO: &str = "facebook/dinov3-vitl16-pretrain-lvd1689m";
+/// Where BiRefNet is fetched from.
+pub const BIREFNET_REPO: &str = "ZhengPeng7/BiRefNet";
 /// Where WorldMirror 2.0 is fetched from when no checkpoint is configured.
 pub const WORLDMIRROR_REPO: &str = "tencent/HY-World-2.0";
 const WORLDMIRROR_FILES: [&str; 2] = ["config.json", "model.safetensors"];
@@ -61,7 +74,7 @@ const WORLDMIRROR_FILES: [&str; 2] = ["config.json", "model.safetensors"];
 const REPO_SKIPPED: [&str; 2] = [".gitattributes", "README.md"];
 // a file every models repo holds, which finds its snapshot in the hub cache when the hub cannot be reached
 const MODELS_REPO_MARKER: &str = "WorldStereo/worldstereo-memory-dmd/config.json";
-const DOWNLOAD_STAGE: &str = "download";
+pub(crate) const DOWNLOAD_STAGE: &str = "download";
 
 /// How much a job may displace to run.
 #[derive(
@@ -111,6 +124,15 @@ pub struct JobsConfig {
     /// VGG16 features and the LPIPS heads, for splat training
     #[schema(value_type = Option<String>)]
     pub lpips: Option<PathBuf>,
+    /// JoVox-64, for voxel jobs; fetched from its repository when unset
+    #[schema(value_type = Option<String>)]
+    pub jovox: Option<PathBuf>,
+    /// DINOv3 ViT-L/16, JoVox's image encoder; fetched from its gated repository when unset
+    #[schema(value_type = Option<String>)]
+    pub dinov3: Option<PathBuf>,
+    /// BiRefNet, which removes the background of a voxel job's opaque image; fetched from its repository when unset
+    #[schema(value_type = Option<String>)]
+    pub birefnet: Option<PathBuf>,
     /// A Hugging Face repo laid out as a models root, fetched into the hub cache before a job that needs a checkpoint
     /// the fields above leave unset
     pub models_repo: Option<String>,
@@ -133,6 +155,9 @@ impl Default for JobsConfig {
             moge: None,
             worldmirror: None,
             lpips: None,
+            jovox: None,
+            dinov3: None,
+            birefnet: None,
             models_repo: None,
             worldmirror_repo: Some(WORLDMIRROR_REPO.to_string()),
             devices: None,
@@ -144,8 +169,9 @@ impl Default for JobsConfig {
 
 impl JobsConfig {
     /// The checkpoints found under `root` in their repositories' layout: `WorldStereo/worldstereo-memory-dmd`,
-    /// `Wan2.1-I2V-14B-480P-Diffusers`, `moge-2-vitl-normal`, `HY-World-2.0/HY-WorldMirror-2.0` and
-    /// `lpips-vgg/lpips_vgg.safetensors`; a missing one stays unset.
+    /// `Wan2.1-I2V-14B-480P-Diffusers`, `moge-2-vitl-normal`, `HY-World-2.0/HY-WorldMirror-2.0`,
+    /// `lpips-vgg/lpips_vgg.safetensors`, `JoVox-64`, `dinov3-vitl16-pretrain-lvd1689m` and `BiRefNet`; a missing one
+    /// stays unset.
     pub fn with_models_root(mut self, root: &Path) -> Self {
         let found = |relative: &str| {
             let path = root.join(relative);
@@ -156,7 +182,26 @@ impl JobsConfig {
         self.moge = found(MOGE_DIR);
         self.worldmirror = found(WORLDMIRROR_DIR);
         self.lpips = found(LPIPS_FILE);
+        self.jovox = found(JOVOX_DIR);
+        self.dinov3 = found(DINOV3_DIR);
+        self.birefnet = found(BIREFNET_DIR);
         self
+    }
+
+    // this config with the voxel job's unset checkpoints fetched from their repositories into the hub cache
+    fn fetched_voxels(&self, birefnet: bool, progress: &dyn Progress) -> anyhow::Result<Self> {
+        let models = voxels::fetch_models(
+            self.jovox.clone(),
+            self.dinov3.clone(),
+            birefnet.then(|| self.birefnet.clone()),
+            progress,
+        )?;
+        Ok(Self {
+            jovox: Some(models.jovox),
+            dinov3: Some(models.dinov3),
+            birefnet: models.birefnet.or_else(|| self.birefnet.clone()),
+            ..self.clone()
+        })
     }
 
     // whether a checkpoint is set, or will be fetched from a repository before the job runs
@@ -199,7 +244,7 @@ impl JobsConfig {
     }
 }
 
-fn hub_api() -> anyhow::Result<hf_hub::api::sync::Api> {
+pub(crate) fn hub_api() -> anyhow::Result<hf_hub::api::sync::Api> {
     inference_api::build_api_with_cache(&inference_api::TokenSource::CacheToken, false, None)
 }
 
@@ -306,6 +351,32 @@ pub struct ReconstructJob {
     pub placement: Option<Placement>,
 }
 
+/// JoVox's 64^3 voxel structure of the object in the job's one image.
+#[derive(Clone, Debug, Default, Serialize, inference_json::FromJson, ToSchema)]
+pub struct VoxelsJob {
+    #[serde(default)]
+    pub seed: Option<u64>,
+    /// Sampling steps, 36 to 108 (72 by default)
+    #[serde(default)]
+    pub steps: Option<usize>,
+    /// Classifier-free guidance, at least 1 (1.5 by default)
+    #[serde(default)]
+    pub cfg_strength: Option<f32>,
+    /// 0 (the default) takes each slot's most likely value
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    /// The share of the prepared image the object's longest side fills (0.74 by default)
+    #[serde(default)]
+    pub fill: Option<f32>,
+    /// Remove the background with BiRefNet even when the image has transparency of its own (an opaque image always
+    /// has it removed)
+    #[serde(default)]
+    pub remove_background: Option<bool>,
+    /// How much it may displace to run, in place of the server's setting
+    #[serde(default)]
+    pub placement: Option<Placement>,
+}
+
 /// What a job does.
 #[derive(Clone, Debug, Serialize, inference_json::FromJson, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -314,6 +385,8 @@ pub enum JobRequest {
     World(WorldJob),
     /// WorldMirror 2.0 cameras, depth, points and splats from images or a video
     Reconstruct(ReconstructJob),
+    /// JoVox's voxel structure of the object in one image
+    Voxels(VoxelsJob),
 }
 
 impl JobRequest {
@@ -321,6 +394,7 @@ impl JobRequest {
         match self {
             Self::World(_) => "world",
             Self::Reconstruct(_) => "reconstruct",
+            Self::Voxels(_) => "voxels",
         }
     }
 }
@@ -1156,6 +1230,73 @@ fn reconstruct_work(config: &JobsConfig, job: ReconstructJob) -> Result<(Prepare
     Ok((prepare, work))
 }
 
+fn voxels_work(config: &JobsConfig, job: VoxelsJob) -> Result<(Prepare, Work), ApiError> {
+    use crate::voxels::{VoxelModels, VoxelOptions};
+    let mut options = VoxelOptions::default();
+    let s = &mut options.sample;
+    s.seed = job.seed.unwrap_or(s.seed);
+    s.steps = job.steps.unwrap_or(s.steps);
+    s.cfg_strength = job.cfg_strength.unwrap_or(s.cfg_strength);
+    s.temperature = job.temperature.unwrap_or(s.temperature);
+    options.fill = job.fill.unwrap_or(options.fill);
+    options.remove_background = job.remove_background.unwrap_or(false);
+    if !crate::voxels::STEPS_RANGE.contains(&s.steps) {
+        return Err(ApiError::invalid_request(format!(
+            "steps must be in {}..={}",
+            crate::voxels::STEPS_RANGE.start(),
+            crate::voxels::STEPS_RANGE.end()
+        )));
+    }
+    if s.cfg_strength < 1.0 || s.temperature < 0.0 || !(options.fill > 0.0 && options.fill <= 1.0) {
+        return Err(ApiError::invalid_request(
+            "cfg_strength must be >= 1, temperature >= 0 and fill in (0, 1]",
+        ));
+    }
+    let fetched = Arc::new(std::sync::OnceLock::new());
+    let (base, slot) = (config.clone(), fetched.clone());
+    let remove = options.remove_background;
+    let prepare: Prepare = Box::new(move |ctx: &JobContext| {
+        let image = ctx.inputs().into_iter().next();
+        let birefnet = match &image {
+            Some(image) => crate::voxels::needs_background_removal(image, remove)?,
+            None => false,
+        };
+        let _ = slot.set(base.fetched_voxels(birefnet, ctx)?);
+        Ok(())
+    });
+    let work: Work = Box::new(move |ctx: &JobContext| {
+        let config: &JobsConfig = fetched.get().expect("prepared before the work runs");
+        let models = VoxelModels {
+            jovox: fetched_path(&config.jovox, "JoVox-64 checkpoint")?,
+            dinov3: fetched_path(&config.dinov3, "DINOv3 checkpoint")?,
+            birefnet: config.birefnet.clone(),
+        };
+        let device = ctx.device()?.clone();
+        let image = ctx
+            .inputs()
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("a voxel job takes one image"))?;
+        let out = ctx.dir().join(VOXELS_DIR);
+        let report =
+            crate::voxels::generate_voxels_on(&models, &image, &out, &options, ctx, &device)?;
+        let dir = ctx.dir();
+        let outputs = [
+            ("voxels", "voxels/voxels.ply"),
+            ("prepared image", "voxels/prepared.png"),
+            ("meta", "voxels/meta.json"),
+        ]
+        .into_iter()
+        .filter_map(|(name, file)| output(dir, file, name))
+        .collect();
+        Ok(JobResult {
+            outputs,
+            report: serde_json::to_value(report)?,
+        })
+    });
+    Ok((prepare, work))
+}
+
 impl JobQueue {
     /// Sets where jobs keep their folders and which weights they run; takes effect for jobs submitted afterwards.
     pub fn configure(&self, config: JobsConfig) {
@@ -1190,6 +1331,14 @@ impl JobQueue {
                 let placement = job.placement;
                 let work = reconstruct_work(&config, job)?;
                 (JobNeed::Bytes(RECONSTRUCT_NEED_BYTES), placement, work)
+            }
+            JobRequest::Voxels(job) => {
+                if inputs.len() != 1 {
+                    return Err(ApiError::invalid_request("a voxel job takes one image"));
+                }
+                let placement = job.placement;
+                let work = voxels_work(&config, job)?;
+                (JobNeed::Bytes(VOXELS_NEED_BYTES), placement, work)
             }
         };
         let target = Target {

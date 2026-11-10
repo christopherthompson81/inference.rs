@@ -177,9 +177,12 @@ Where jobs keep their folders and which weights they run.
 
 | Field | Type | Default |
 | --- | --- | --- |
+| `birefnet` | `str \| None` | optional |
 | `devices` | `list[int] \| None` | optional |
+| `dinov3` | `str \| None` | optional |
 | `dir` | `str \| None` | optional |
 | `drain_timeout_secs` | `int \| None` | `120` |
+| `jovox` | `str \| None` | optional |
 | `lpips` | `str \| None` | optional |
 | `models_repo` | `str \| None` | optional |
 | `moge` | `str \| None` | optional |
@@ -225,6 +228,21 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | --- | --- |
 | `SceneKind.INDOOR` | `'indoor'` |
 | `SceneKind.OUTDOOR` | `'outdoor'` |
+
+
+## `VoxelsJob`
+
+JoVox's 64^3 voxel structure of the object in the job's one image.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `cfg_strength` | `float \| None` | optional |
+| `fill` | `float \| None` | optional |
+| `placement` | `Placement \| None` | optional |
+| `remove_background` | `bool \| None` | optional |
+| `seed` | `int \| None` | optional |
+| `steps` | `int \| None` | optional |
+| `temperature` | `float \| None` | optional |
 
 
 ## `WorldJob`

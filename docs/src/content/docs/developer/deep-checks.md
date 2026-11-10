@@ -26,6 +26,10 @@ set in `~/.cargo/config.toml` under `[env]` (build scripts track those variables
 | `INFERENCE_TEST_WORLDGEN_PANORAMA` | a 2:1 panorama image | `inference-jobs` `world_job` |
 | `INFERENCE_TEST_WORLDMIRROR_MODEL` | WorldMirror 2.0 checkpoint folder | `inference-jobs` `worldmirror_job` |
 | `INFERENCE_TEST_WORLDMIRROR_IMAGES` | a folder of photos of one scene | `inference-jobs` `worldmirror_job` |
+| `INFERENCE_TEST_JOVOX_MODEL` | JoVox-64 checkpoint folder | `inference-jobs` `voxels_job` |
+| `INFERENCE_TEST_DINOV3_MODEL` | DINOv3 ViT-L/16 checkpoint folder | `inference-jobs` `voxels_job` |
+| `INFERENCE_TEST_BIREFNET_MODEL` | BiRefNet checkpoint folder | `inference-jobs` `voxels_job` |
+| `INFERENCE_TEST_JOVOX_IMAGE` | a photo of one object on an opaque background | `inference-jobs` `voxels_job` |
 
 `iq4_xs_greedy_continuation_matches_llama_cpp` compares against a continuation recorded with mainline `llama-simple
 -n 32` on the same file, so it needs no reference build.

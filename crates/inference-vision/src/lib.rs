@@ -32,7 +32,7 @@ pub(crate) mod utils;
 
 pub use ops::{get_resize_image_size, make_pixel_mask, pad};
 pub use pad::{pad_to_max_edge, pad_to_max_image_size};
-pub use pil::pil_resize_bicubic;
+pub use pil::{PilFilter, pil_resize, pil_resize_bicubic, pil_resize_rgba_lanczos};
 pub use resize::{resize_exact, resize_rgb8};
 pub use torch_resize::{aa_bicubic_resize_planar, aa_bicubic_weights};
 pub use transforms::{InterpolateResize, Normalize, Rescale, ToTensor, ToTensorNoNorm};

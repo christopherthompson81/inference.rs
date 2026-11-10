@@ -1523,9 +1523,12 @@ class JobSubmission:
 class JobsConfig:
     """Where jobs keep their folders and which weights they run."""
 
+    birefnet: str | None = None
     devices: list[int] | None = None
+    dinov3: str | None = None
     dir: str | None = None
     drain_timeout_secs: int | None = 120
+    jovox: str | None = None
     lpips: str | None = None
     models_repo: str | None = None
     moge: str | None = None
@@ -3463,6 +3466,19 @@ class VoiceActivityResponse:
     duration: float
     probabilities: list[float] | None = None
     segments: list[SpeechSegment]
+
+
+@dataclass(kw_only=True)
+class VoxelsJob:
+    """JoVox's 64^3 voxel structure of the object in the job's one image."""
+
+    cfg_strength: float | None = None
+    fill: float | None = None
+    placement: Placement | None = None
+    remove_background: bool | None = None
+    seed: int | None = None
+    steps: int | None = None
+    temperature: float | None = None
 
 
 @dataclass(kw_only=True)

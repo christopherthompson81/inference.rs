@@ -16,7 +16,7 @@ metal-model = { max-threads = 4 }
 default-filter = """
 not (
     (package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|qwen3_5_tool_call|gguf_iq)::/))
-    | (package(inference-jobs) & test(/^(worldmirror_job|world_job)::/))
+    | (package(inference-jobs) & test(/^(worldmirror_job|world_job)::|^voxels_job::a_voxel_job_cuts_out/))
     | (package(inference-ffi) & test(detections))
     | (package(inference-server-core) & test(/^flux::/))
 )
@@ -31,7 +31,7 @@ threads-required = 'num-test-threads'
 default-filter = """
 not (
     (package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|qwen3_5_tool_call|gguf_iq)::/))
-    | (package(inference-jobs) & test(/^(worldmirror_job|world_job)::/))
+    | (package(inference-jobs) & test(/^(worldmirror_job|world_job)::|^voxels_job::a_voxel_job_cuts_out/))
     | (package(inference-ffi) & test(detections))
     | (package(inference-server-core) & test(/^flux::/))
 )
@@ -46,7 +46,7 @@ threads-required = 'num-test-threads'
 [profile.deep]
 default-filter = """
 (package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|qwen3_5_tool_call|gguf_iq)::/))
-    | (package(inference-jobs) & test(/^(worldmirror_job|world_job)::/))
+    | (package(inference-jobs) & test(/^(worldmirror_job|world_job)::|^voxels_job::a_voxel_job_cuts_out/))
 | (package(inference-ffi) & test(detections))
 | (package(inference-server-core) & test(/^flux::/))
 """

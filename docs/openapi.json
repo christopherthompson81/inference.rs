@@ -7175,6 +7175,29 @@
               }
             ],
             "description": "WorldMirror 2.0 cameras, depth, points and splats from images or a video"
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/VoxelsJob",
+                "description": "JoVox's voxel structure of the object in one image"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "voxels"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "JoVox's voxel structure of the object in one image"
           }
         ],
         "description": "What a job does."
@@ -7246,6 +7269,14 @@
         "type": "object",
         "description": "Where jobs keep their folders and which weights they run.",
         "properties": {
+          "birefnet": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "BiRefNet, which removes the background of a voxel job's opaque image; fetched from its repository when unset",
+            "default": null
+          },
           "devices": {
             "type": [
               "array",
@@ -7256,6 +7287,14 @@
               "minimum": 0
             },
             "description": "The CUDA devices jobs may run on; every visible one when unset",
+            "default": null
+          },
+          "dinov3": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "DINOv3 ViT-L/16, JoVox's image encoder; fetched from its gated repository when unset",
             "default": null
           },
           "dir": {
@@ -7272,6 +7311,14 @@
             "description": "How long a job waits for the models on its device to go quiet before it fails, in seconds",
             "default": 120,
             "minimum": 0
+          },
+          "jovox": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "JoVox-64, for voxel jobs; fetched from its repository when unset",
+            "default": null
           },
           "lpips": {
             "type": [
@@ -15598,6 +15645,70 @@
             "items": {
               "$ref": "#/components/schemas/SpeechSegment"
             }
+          }
+        }
+      },
+      "VoxelsJob": {
+        "type": "object",
+        "description": "JoVox's 64^3 voxel structure of the object in the job's one image.",
+        "properties": {
+          "cfg_strength": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Classifier-free guidance, at least 1 (1.5 by default)"
+          },
+          "fill": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "The share of the prepared image the object's longest side fills (0.74 by default)"
+          },
+          "placement": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Placement",
+                "description": "How much it may displace to run, in place of the server's setting"
+              }
+            ]
+          },
+          "remove_background": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Remove the background with BiRefNet even when the image has transparency of its own (an opaque image always\nhas it removed)"
+          },
+          "seed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "steps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Sampling steps, 36 to 108 (72 by default)",
+            "minimum": 0
+          },
+          "temperature": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "0 (the default) takes each slot's most likely value"
           }
         }
       },

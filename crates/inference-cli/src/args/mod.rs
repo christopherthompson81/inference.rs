@@ -319,6 +319,57 @@ pub enum Command {
         cpu: bool,
     },
 
+    /// The 64^3 voxel structure of the object in one image with JoVox, written as a cube mesh (voxels.ply) beside the
+    /// prepared image and a meta.json; an image without a transparent background has it removed with BiRefNet
+    Voxels {
+        /// The image (png, jpg, webp); an object on a transparent background is used as it is
+        #[arg(long)]
+        image: PathBuf,
+
+        /// The output folder, created if missing
+        #[arg(long)]
+        out: PathBuf,
+
+        /// The JoVox-64 folder; fetched from xiangjuntang/JoVox-64 when unset
+        #[arg(long)]
+        jovox: Option<PathBuf>,
+
+        /// The DINOv3 ViT-L/16 folder; fetched from facebook/dinov3-vitl16-pretrain-lvd1689m (gated) when unset
+        #[arg(long)]
+        dinov3: Option<PathBuf>,
+
+        /// The BiRefNet folder; fetched from ZhengPeng7/BiRefNet when unset and the background needs removing
+        #[arg(long)]
+        birefnet: Option<PathBuf>,
+
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+
+        /// Sampling steps, 36 to 108
+        #[arg(long, default_value_t = inference_jobs::voxels::DEFAULT_STEPS)]
+        steps: usize,
+
+        /// Classifier-free guidance, at least 1
+        #[arg(long, default_value_t = inference_jobs::voxels::DEFAULT_CFG)]
+        cfg: f32,
+
+        /// 0 takes each slot's most likely value
+        #[arg(long, default_value_t = 0.0)]
+        temperature: f32,
+
+        /// The share of the prepared image the object's longest side fills
+        #[arg(long, default_value_t = inference_jobs::voxels::DEFAULT_FILL)]
+        fill: f32,
+
+        /// Remove the background even when the image has transparency of its own
+        #[arg(long)]
+        remove_background: bool,
+
+        /// Run on the CPU (slow) instead of the first CUDA device
+        #[arg(long)]
+        cpu: bool,
+    },
+
     /// Generate a 3D world from an equirectangular panorama with WorldStereo-2: keyframes along camera trajectories,
     /// then WorldMirror 2.0 on them for cameras, depth, points and 3D Gaussian splats
     Worldgen {

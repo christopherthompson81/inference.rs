@@ -1,9 +1,12 @@
-//! 3D reconstruction and world generation: WorldMirror's feed-forward cameras, depth, normals, points and Gaussian
-//! splats from images, and WorldStereo-2's generation of new views from a panorama.
+//! 3D reconstruction and generation: WorldMirror's feed-forward cameras, depth, normals, points and Gaussian splats
+//! from images, WorldStereo-2's generation of new views from a panorama, and JoVox's voxel structure from one image.
 
+pub mod birefnet;
 mod conv;
 mod dinov2;
+mod dinov3;
 mod geometry;
+pub mod jovox;
 pub mod moge;
 pub mod progress;
 pub mod splatting;

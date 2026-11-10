@@ -1,0 +1,66 @@
+---
+title: Voxels from an image
+description: JoVox generates the 64^3 voxel structure of the object in one image; BiRefNet removes its background first.
+---
+
+`inference voxels` runs JoVox, a discrete flow-matching model that generates an object's occupancy at 4^3, 16^3 and
+64^3 in one model, conditioned on a single image through DINOv3. The result is the coarse 3D structure of the object
+(which cells it fills), the stage image-to-3D pipelines such as TRELLIS.2 turn into a mesh; meshing is not part of this
+command.
+
+## Weights
+
+| Model | Repository | License |
+|---|---|---|
+| JoVox-64 | [xiangjuntang/JoVox-64](https://huggingface.co/xiangjuntang/JoVox-64) | Apache-2.0 |
+| DINOv3 ViT-L/16 | [facebook/dinov3-vitl16-pretrain-lvd1689m](https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m) | DINOv3 License (gated: request access on the page, then `inference login`) |
+| BiRefNet | [ZhengPeng7/BiRefNet](https://huggingface.co/ZhengPeng7/BiRefNet) | MIT |
+
+Each is fetched into the Hugging Face cache on first use unless its folder is given (`--jovox`, `--dinov3`,
+`--birefnet`). BiRefNet is only fetched for an image that needs its background removed.
+
+## Run it
+
+```bash
+# an object on a transparent background is used as it is; any other image has its background removed
+inference voxels --image chair.jpg --out chair/
+
+# local checkpoints, another sample
+inference voxels --image chair.png --out chair/ --jovox JoVox-64 --dinov3 dinov3-vitl16 --seed 3
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--seed` | 0 | The sampler's seed; an image can have more than one plausible structure, and seeds pick among them |
+| `--steps` | 72 | Sampling steps, 36 to 108 (the range the model was trained on) |
+| `--cfg` | 1.5 | Classifier-free guidance, at least 1 |
+| `--temperature` | 0 | 0 takes each cell's most likely occupancy; above 0 samples it |
+| `--fill` | 0.74 | The share of the prepared image the object's longest side fills |
+| `--remove-background` | off | Run BiRefNet even when the image has transparency of its own |
+| `--cpu` | off | Run on the CPU (slow) |
+
+On an RTX 3090 a structure takes 6 to 11 seconds (more voxels, more time) and about 6 GB of VRAM.
+
+## Outputs
+
+```
+chair/
+  prepared.png   what the model sees: the object cut out, centered and scaled to 512 x 512
+  voxels.ply     the occupied cells as a cube mesh (only faces between filled and empty cells)
+  meta.json      voxel count, settings and timings
+```
+
+The cubes sit in the unit cube centered on the origin: cell `(x, y, z)` spans `(x, y, z) / 64 - 0.5` to
+`(x + 1, y + 1, z + 1) / 64 - 0.5`, with z up.
+
+## As a server job
+
+A server started with `inference serve` takes the same run as a job:
+
+```bash
+curl localhost:1234/v1/jobs -F 'request={"kind": "voxels", "seed": 3}' -F file=@chair.jpg
+```
+
+The request may also set `steps`, `cfg_strength`, `temperature`, `fill` and `remove_background`. The job's outputs are `voxels/voxels.ply`, `voxels/prepared.png` (also its preview) and `voxels/meta.json`. With
+`--world-models <folder>`, checkpoints found there as `JoVox-64`, `dinov3-vitl16-pretrain-lvd1689m` and `BiRefNet` are
+used instead of fetching them.
