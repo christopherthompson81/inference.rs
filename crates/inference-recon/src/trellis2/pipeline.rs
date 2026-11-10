@@ -79,6 +79,11 @@ pub struct Trellis2Paths {
 pub struct Generated {
     pub mesh: Mesh,
     pub attrs: Vec<Pbr>,
+    /// The mesh as extracted, before hole filling and simplification (what a baked export projects onto)
+    pub extracted: Mesh,
+    /// The texture decoder's cells and their PBR attributes in [0, 1]
+    pub voxels: Vec<[i32; 3]>,
+    pub voxel_attrs: Vec<[f32; PBR]>,
     pub structure_cells: usize,
     pub latent_cells: usize,
     pub raw_faces: usize,
@@ -382,6 +387,7 @@ pub fn generate(
         resolution,
     );
     let raw_faces = mesh.faces.len();
+    let extracted = mesh.clone();
     check(progress)?;
 
     progress.stage("cleanup", 0);
@@ -396,6 +402,9 @@ pub fn generate(
     Ok(Generated {
         mesh,
         attrs,
+        extracted,
+        voxels: tex_out.coords,
+        voxel_attrs: values,
         structure_cells,
         latent_cells: cells.len(),
         raw_faces,

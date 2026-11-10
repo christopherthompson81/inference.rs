@@ -1395,7 +1395,9 @@ class ImageTo3dJob:
     placement: Placement | None = None
     remove_background: bool | None = None
     seed: int | None = None
+    texture_size: int | None = None
     variant: Trellis2Variant | None = None
+    vertex_colors: bool | None = None
 
 
 @dataclass(kw_only=True)

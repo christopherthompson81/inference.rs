@@ -108,5 +108,19 @@ async fn an_image_to_3d_job_writes_a_textured_model() -> anyhow::Result<()> {
         let output = output.ok_or_else(|| anyhow::anyhow!("no {name} output"))?;
         assert!(std::fs::metadata(queue.file(&model, &done.id, &output.file)?)?.len() > 0);
     }
+    assert_eq!(done.report["texture_size"], 2048);
+    let model_file = done
+        .outputs
+        .iter()
+        .find(|o| o.name == "model")
+        .expect("a model output");
+    let glb = std::fs::read(queue.file(&model, &done.id, &model_file.file)?)?;
+    let json_len = u32::from_le_bytes(glb[12..16].try_into()?) as usize;
+    let gltf: serde_json::Value = serde_json::from_slice(&glb[20..20 + json_len])?;
+    assert_eq!(
+        gltf["images"].as_array().map(Vec::len),
+        Some(2),
+        "base color and metallic-roughness textures"
+    );
     Ok(())
 }

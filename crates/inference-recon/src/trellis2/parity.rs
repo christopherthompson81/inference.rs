@@ -291,6 +291,394 @@ fn holes_and_simplification_match_the_reference() -> Result<()> {
     Ok(())
 }
 
+// every this many texels sampled for the surface color comparison
+const SAMPLE_STRIDE: usize = 7;
+// mean color difference (of 255) allowed between our baked surface and the reference's
+const MAX_MEAN_COLOR_DIFF: f32 = 3.0;
+// relative difference allowed in chart count and seam length
+const CHART_TOLERANCE: f64 = 1e-3;
+
+// total length of the edges between charts or on the boundary
+fn seam_length(mesh: &super::mesh::Mesh, charts: &[u32]) -> f64 {
+    let mut edges: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
+    for (f, t) in mesh.faces.iter().enumerate() {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            edges
+                .entry((a.min(b), a.max(b)))
+                .or_default()
+                .push(f as u32);
+        }
+    }
+    edges
+        .iter()
+        .filter(|(_, fs)| fs.len() != 2 || charts[fs[0] as usize] != charts[fs[1] as usize])
+        .map(|(&(a, b), _)| {
+            let (p, q) = (mesh.vertices[a as usize], mesh.vertices[b as usize]);
+            (0..3)
+                .map(|k| f64::from(p[k] - q[k]).powi(2))
+                .sum::<f64>()
+                .sqrt()
+        })
+        .sum()
+}
+
+// each face's chart named by the chart's lowest face, so one diverging merge does not renumber the rest
+fn chart_roots(charts: &[u32]) -> Vec<u32> {
+    let mut lowest = HashMap::new();
+    for (f, &c) in charts.iter().enumerate() {
+        lowest.entry(c).or_insert(f as u32);
+    }
+    charts.iter().map(|c| lowest[c]).collect()
+}
+
+// TRELLIS2_CHARTS_REF: CuMesh's `compute_charts` with `to_glb`'s options (`charts_ref.py`, scratch)
+#[test]
+#[ignore = "needs a reference dump"]
+fn charts_match_the_reference() -> Result<()> {
+    let Some(reference) = std::env::var_os("TRELLIS2_CHARTS_REF") else {
+        return Ok(());
+    };
+    let refs = inference_tensor::safetensors::load(reference, &Device::Cpu)?;
+    let mut mesh = mesh_of(&refs, "vertices", "faces")?;
+    let faces = mesh.faces.len();
+    super::charts::remove_degenerate_faces(&mut mesh);
+    assert_eq!(
+        mesh.faces.len(),
+        faces,
+        "the reference's faces are already non-degenerate"
+    );
+    let theirs: Vec<u32> = refs["charts"]
+        .to_dtype(DType::I64)?
+        .to_vec1::<i64>()?
+        .iter()
+        .map(|&c| c as u32)
+        .collect();
+    let start = std::time::Instant::now();
+    let ours = super::charts::compute_charts(
+        &mesh,
+        super::charts::CONE_HALF_ANGLE,
+        super::charts::AREA_PENALTY,
+        super::charts::PERIMETER_AREA_PENALTY,
+    );
+    let count = |c: &[u32]| c.iter().max().map_or(0, |&m| m as usize + 1);
+    let (a, b) = (chart_roots(&ours), chart_roots(&theirs));
+    let seconds = start.elapsed().as_secs_f64();
+    let same = a.iter().zip(&b).filter(|(x, y)| x == y).count();
+    // CuMesh normalizes with rsqrtf and sums in tree order, so near ties flip: compare the clustering's quality
+    let seams = |c: &[u32]| seam_length(&mesh, c);
+    let sizes = |c: &[u32]| {
+        let mut n = vec![0usize; count(c)];
+        for &x in c {
+            n[x as usize] += 1;
+        }
+        n.sort_unstable();
+        [0.5, 0.9, 0.99, 1.0].map(|q| n[((n.len() - 1) as f64 * q) as usize])
+    };
+    let (ours_seam, theirs_seam) = (seams(&ours), seams(&theirs));
+    println!(
+        "charts in {seconds:.2} s: {} vs {}, {same}/{faces} faces in the same chart; seams {ours_seam:.3} vs \
+         {theirs_seam:.3}; faces per chart p50/p90/p99/max {:?} vs {:?}",
+        count(&ours),
+        count(&theirs),
+        sizes(&ours),
+        sizes(&theirs)
+    );
+    let ratio = |a: f64, b: f64| (a - b).abs() / b;
+    assert!(
+        ratio(count(&ours) as f64, count(&theirs) as f64) < CHART_TOLERANCE,
+        "chart count"
+    );
+    assert!(
+        ratio(ours_seam, theirs_seam) < CHART_TOLERANCE,
+        "seam length"
+    );
+    Ok(())
+}
+
+// the uv area the faces cover, and how many have none
+fn uv_coverage(faces: &[[u32; 3]], uvs: &[[f32; 2]]) -> (f64, usize) {
+    let areas: Vec<f64> = faces
+        .iter()
+        .map(|t| {
+            let [a, b, c] = t.map(|v| uvs[v as usize].map(f64::from));
+            ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])).abs() / 2.0
+        })
+        .collect();
+    (
+        areas.iter().sum(),
+        areas.iter().filter(|&&a| a == 0.0).count(),
+    )
+}
+
+// TRELLIS2_CHARTS_REF's mesh unwrapped, against CuMesh's `uv_unwrap` (TRELLIS2_UNWRAP_REF, `unwrap_ref.py`, scratch)
+#[test]
+#[ignore = "needs reference dumps"]
+fn the_unwrap_matches_the_reference() -> Result<()> {
+    let (Some(input), Some(reference)) = (
+        std::env::var_os("TRELLIS2_CHARTS_REF"),
+        std::env::var_os("TRELLIS2_UNWRAP_REF"),
+    ) else {
+        return Ok(());
+    };
+    let mesh = mesh_of(
+        &inference_tensor::safetensors::load(input, &Device::Cpu)?,
+        "vertices",
+        "faces",
+    )?;
+    let refs = inference_tensor::safetensors::load(reference, &Device::Cpu)?;
+    let theirs = mesh_of(&refs, "vertices", "faces")?;
+    let their_uvs: Vec<[f32; 2]> = refs["uvs"]
+        .to_vec2::<f32>()?
+        .iter()
+        .map(|r| [r[0], r[1]])
+        .collect();
+    let start = std::time::Instant::now();
+    let ours =
+        super::charts::uv_unwrap(&mesh).map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
+    let seconds = start.elapsed().as_secs_f64();
+    let (ours_area, ours_empty) = uv_coverage(&ours.mesh.faces, &ours.uvs);
+    let (theirs_area, theirs_empty) = uv_coverage(&theirs.faces, &their_uvs);
+    println!(
+        "unwrapped in {seconds:.2} s into {}x{}: {} vertices / {} faces vs {} / {}; uv coverage {ours_area:.4} vs \
+         {theirs_area:.4}; faces without uv area {ours_empty} vs {theirs_empty}",
+        ours.width,
+        ours.height,
+        ours.mesh.vertices.len(),
+        ours.mesh.faces.len(),
+        theirs.vertices.len(),
+        theirs.faces.len()
+    );
+    assert_eq!(
+        ours.mesh.faces.len(),
+        theirs.faces.len(),
+        "every face mapped"
+    );
+    let ratio = |a: f64, b: f64| (a - b).abs() / b;
+    assert!(
+        ratio(
+            ours.mesh.vertices.len() as f64,
+            theirs.vertices.len() as f64
+        ) < CHART_TOLERANCE * 10.0
+    );
+    assert!(
+        ratio(ours_area, theirs_area) < CHART_TOLERANCE * 10.0,
+        "uv coverage"
+    );
+    Ok(())
+}
+
+// manifold edges both of whose faces run it the same way
+fn inconsistent_edges(mesh: &super::mesh::Mesh) -> usize {
+    let at = |t: [u32; 3], v: u32| {
+        t.iter()
+            .position(|&x| x == v)
+            .expect("a vertex of the face")
+    };
+    super::charts::manifold_adjacency(mesh)
+        .iter()
+        .filter(|&&(f0, f1, v0, v1)| {
+            let dir = |t: [u32; 3]| (at(t, v1) + 3 - at(t, v0)) % 3;
+            dir(mesh.faces[f0 as usize]) == dir(mesh.faces[f1 as usize])
+        })
+        .count()
+}
+
+type MeshPass = fn(&mut super::mesh::Mesh);
+
+// TRELLIS2_TOPOLOGY_REF: CuMesh's duplicate, non-manifold, component and orientation passes, each from the
+// reference's previous stage (`topology_ref.py`, scratch)
+#[test]
+#[ignore = "needs a reference dump"]
+fn topology_passes_match_the_reference() -> Result<()> {
+    let Some(reference) = std::env::var_os("TRELLIS2_TOPOLOGY_REF") else {
+        return Ok(());
+    };
+    let refs = inference_tensor::safetensors::load(reference, &Device::Cpu)?;
+    let stage = |name: &str| mesh_of(&refs, &format!("{name}.v"), &format!("{name}.f"));
+    let passes: [(&str, &str, MeshPass); 4] = [
+        ("input", "dedup", super::cleanup::remove_duplicate_faces),
+        ("dedup", "repair", super::cleanup::repair_non_manifold_edges),
+        ("repair", "small", |m| {
+            super::cleanup::remove_small_connected_components(m, super::cleanup::MIN_COMPONENT_AREA)
+        }),
+        ("small", "unify", super::cleanup::unify_face_orientations),
+    ];
+    for (from, to, pass) in passes {
+        let mut ours = stage(from)?;
+        let start = std::time::Instant::now();
+        pass(&mut ours);
+        let theirs = stage(to)?;
+        let same = ours
+            .faces
+            .iter()
+            .zip(&theirs.faces)
+            .filter(|(a, b)| a == b)
+            .count();
+        println!(
+            "{to} in {:.2} s: {} vertices / {} faces vs {} / {}, {same} faces identical, vertices identical: {}",
+            start.elapsed().as_secs_f64(),
+            ours.vertices.len(),
+            ours.faces.len(),
+            theirs.vertices.len(),
+            theirs.faces.len(),
+            ours.vertices == theirs.vertices
+        );
+        if to == "unify" {
+            // pieces with conflicting loops wind by union order, and CuMesh's concurrent hooks race there
+            let flips = ours
+                .faces
+                .iter()
+                .zip(&theirs.faces)
+                .filter(|(a, b)| a != b && [a[0], a[2], a[1]] == **b)
+                .count();
+            let (a, b) = (inconsistent_edges(&ours), inconsistent_edges(&theirs));
+            println!(
+                "unify: {flips} differing faces are flips; inconsistently wound manifold edges {a} vs {b}"
+            );
+            assert_eq!(flips + same, ours.faces.len(), "unify only flips");
+            assert!(a <= b, "no more inconsistent edges than the reference");
+            continue;
+        }
+        assert_eq!(ours.faces, theirs.faces, "{to} faces");
+        assert_eq!(ours.vertices, theirs.vertices, "{to} vertices");
+    }
+    Ok(())
+}
+
+// barycentric weights of a point on the triangle
+fn weights(q: [f32; 3], [a, b, c]: [[f32; 3]; 3]) -> [f32; 3] {
+    let d = |x: [f32; 3], y: [f32; 3]| x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+    let s = |x: [f32; 3], y: [f32; 3]| [x[0] - y[0], x[1] - y[1], x[2] - y[2]];
+    let (v0, v1, v2) = (s(b, a), s(c, a), s(q, a));
+    let (d00, d01, d11, d20, d21) = (d(v0, v0), d(v0, v1), d(v1, v1), d(v2, v0), d(v2, v1));
+    let den = d00 * d11 - d01 * d01;
+    let v = (d11 * d20 - d01 * d21) / den;
+    let w = (d00 * d21 - d01 * d20) / den;
+    [1.0 - v - w, v, w]
+}
+
+// TRELLIS2_FULL_REF's mesh and texture volume through o-voxel's `to_glb` (TRELLIS2_BAKE_REF, `bake_ref.py`, scratch)
+#[test]
+#[ignore = "needs reference dumps"]
+fn the_bake_matches_the_reference() -> Result<()> {
+    let (Some(input), Some(reference)) = (
+        std::env::var_os("TRELLIS2_FULL_REF"),
+        std::env::var_os("TRELLIS2_BAKE_REF"),
+    ) else {
+        return Ok(());
+    };
+    let refs = inference_tensor::safetensors::load(reference, &Device::Cpu)?;
+    let bytes = |k: &str| -> Result<Vec<u8>> { refs[k].flatten_all()?.to_vec1::<u8>() };
+    let unknown: Vec<bool> = bytes("unknown")?.iter().map(|&m| m != 0).collect();
+    let size = refs["unknown"].dim(0)?;
+    // OpenCV's Telea on the reference's own unfilled textures
+    for (name, channels, radius) in [
+        ("color", 3, 3.0),
+        ("metallic", 1, 1.0),
+        ("roughness", 1, 1.0),
+        ("alpha", 1, 1.0),
+    ] {
+        let mut ours = bytes(&format!("{name}.in"))?;
+        let start = std::time::Instant::now();
+        inference_vision::inpaint_telea(&mut ours, size, size, channels, &unknown, radius);
+        let theirs = bytes(&format!("{name}.out"))?;
+        let differ = ours.iter().zip(&theirs).filter(|(a, b)| a != b).count();
+        println!(
+            "{name} inpainted in {:.2} s: {differ} of {} values differ",
+            start.elapsed().as_secs_f64(),
+            ours.len()
+        );
+        assert_eq!(differ, 0, "{name} inpainting");
+    }
+    let full = inference_tensor::safetensors::load(input, &Device::Cpu)?;
+    let mesh = mesh_of(&full, "mesh.v", "mesh.f")?;
+    let coords = coords(&full["tex.coords"])?;
+    let values: Vec<[f32; 6]> = full["tex.attrs"]
+        .to_vec2::<f32>()?
+        .iter()
+        .map(|r| std::array::from_fn(|k| r[k]))
+        .collect();
+    let resolution = full["resolution"].to_dtype(DType::I64)?.to_vec1::<i64>()?[0] as usize;
+    let start = std::time::Instant::now();
+
+    let baked = super::bake::bake(&mesh, &coords, &values, resolution, &Default::default())
+        .map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
+    let theirs = mesh_of(&refs, "final.v", "final.f")?;
+    let their_uvs: Vec<[f32; 2]> = refs["final.uv"]
+        .to_vec2::<f32>()?
+        .iter()
+        .map(|r| [r[0], r[1]])
+        .collect();
+    println!(
+        "baked in {:.1} s: {} vertices / {} faces vs {} / {}, {} texels \
+         covered vs {}",
+        start.elapsed().as_secs_f64(),
+        baked.unwrapped.mesh.vertices.len(),
+        baked.unwrapped.mesh.faces.len(),
+        theirs.vertices.len(),
+        theirs.faces.len(),
+        baked.covered,
+        unknown.iter().filter(|&&u| !u).count()
+    );
+    // the reference's covered texels placed on its surface, looked up through our atlas
+    let their_texels = super::bake::rasterize(&theirs.faces, &their_uvs, size);
+    let bvh = super::bake::Bvh::new(&baked.unwrapped.mesh);
+    let their_color = bytes("color.in")?;
+    let s = size as f64;
+    let diffs: Vec<f32> = (0..size * size)
+        .step_by(SAMPLE_STRIDE)
+        .filter(|&t| their_texels[t] > 0 && !unknown[t])
+        .map(|t| {
+            let f = theirs.faces[their_texels[t] as usize - 1];
+            let uv = f.map(|v| their_uvs[v as usize].map(|c| f64::from(c) * s));
+            let p = [(t % size) as f64 + 0.5, (t / size) as f64 + 0.5];
+            let area = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| {
+                (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+            };
+            let total = area(uv[0], uv[1], uv[2]);
+            let w = [
+                area(uv[1], uv[2], p) / total,
+                area(uv[2], uv[0], p) / total,
+                area(uv[0], uv[1], p) / total,
+            ];
+            let pos = (0..3).fold([0f32; 3], |acc, k| {
+                let v = theirs.vertices[f[k] as usize];
+                [0, 1, 2].map(|a| acc[a] + v[a] * w[k] as f32)
+            });
+            let (face, q) = bvh.closest_face(pos);
+            let ours_f = baked.unwrapped.mesh.faces[face as usize];
+            let bw = weights(q, ours_f.map(|v| baked.unwrapped.mesh.vertices[v as usize]));
+            let uv = (0..3).fold([0f32; 2], |acc, k| {
+                let u = baked.unwrapped.uvs[ours_f[k] as usize];
+                [acc[0] + u[0] * bw[k], acc[1] + u[1] * bw[k]]
+            });
+            let texel = |c: f32| ((c * size as f32) as usize).min(size - 1);
+            let ours_t = texel(uv[1]) * size + texel(uv[0]);
+            (0..3)
+                .map(|c| {
+                    (f32::from(baked.base_color[4 * ours_t + c])
+                        - f32::from(their_color[3 * t + c]))
+                    .abs()
+                })
+                .sum::<f32>()
+                / 3.0
+        })
+        .collect();
+    let mut sorted = diffs.clone();
+    sorted.sort_by(f32::total_cmp);
+    let mean = diffs.iter().sum::<f32>() / diffs.len() as f32;
+    let at = |q: f64| sorted[((sorted.len() - 1) as f64 * q) as usize];
+    println!(
+        "surface color over {} texels: mean abs diff {mean:.2} levels, p50 {:.1} p90 {:.1} p99 {:.1}",
+        diffs.len(),
+        at(0.5),
+        at(0.9),
+        at(0.99)
+    );
+    assert!(mean < MAX_MEAN_COLOR_DIFF, "surface color");
+    Ok(())
+}
+
 // JOVOX_DIR, JOVOX_DINOV3 and JOVOX_E2E (the JoVox dump whose `prep` image TRELLIS2_REF was made from)
 #[test]
 #[ignore = "needs the JoVox and DINOv3 checkpoints, reference dumps and a GPU"]

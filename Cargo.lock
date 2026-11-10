@@ -3358,6 +3358,7 @@ dependencies = [
  "inference-quant",
  "inference-tensor",
  "inference-vision",
+ "inference-xatlas",
  "rand 0.9.4",
  "rand_distr",
  "rayon",
@@ -3546,6 +3547,13 @@ dependencies = [
  "tower-http",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "inference-xatlas"
+version = "0.0.27"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

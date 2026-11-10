@@ -1,0 +1,16 @@
+[package]
+name = "inference-xatlas"
+readme = "../../README.md"
+authors = ["Chris Thompson"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Vendored xatlas (UV chart segmentation, parameterization and atlas packing) for inference.rs."
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[build-dependencies]
+cc = "1.2"

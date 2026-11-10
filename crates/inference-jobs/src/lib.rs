@@ -433,6 +433,12 @@ pub struct ImageTo3dJob {
     /// has it removed)
     #[serde(default)]
     pub remove_background: Option<bool>,
+    /// Per-vertex color and material instead of baked textures (faster: no unwrapping or baking)
+    #[serde(default)]
+    pub vertex_colors: Option<bool>,
+    /// The baked textures' width and height (2048 by default)
+    #[serde(default)]
+    pub texture_size: Option<u32>,
     /// How much it may displace to run, in place of the server's setting
     #[serde(default)]
     pub placement: Option<Placement>,
@@ -1366,7 +1372,7 @@ fn voxels_work(config: &JobsConfig, job: VoxelsJob) -> Result<(Prepare, Work), A
 }
 
 fn image_to_3d_work(config: &JobsConfig, job: ImageTo3dJob) -> Result<(Prepare, Work), ApiError> {
-    use crate::image_to_3d::{ImageTo3dOptions, fetch_models, generate_3d_on};
+    use crate::image_to_3d::{BakeOptions, ImageTo3dOptions, fetch_models, generate_3d_on};
     use inference_recon::trellis2::pipeline::Variant;
     let options = ImageTo3dOptions {
         variant: match job.variant.unwrap_or_default() {
@@ -1375,6 +1381,12 @@ fn image_to_3d_work(config: &JobsConfig, job: ImageTo3dJob) -> Result<(Prepare, 
         },
         seed: job.seed.unwrap_or(0),
         remove_background: job.remove_background.unwrap_or(false),
+        bake: (!job.vertex_colors.unwrap_or(false)).then(|| BakeOptions {
+            texture_size: job
+                .texture_size
+                .map_or(BakeOptions::default().texture_size, |s| s as usize),
+            ..BakeOptions::default()
+        }),
     };
     let fetched = Arc::new(std::sync::OnceLock::new());
     let (base, slot) = (config.clone(), fetched.clone());

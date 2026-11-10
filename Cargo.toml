@@ -32,6 +32,7 @@ members = [
     "crates/inference-tensor",
     "crates/inference-tensor-kernels",
     "crates/inference-vulkan",
+    "crates/inference-xatlas",
     "crates/inference-kernel-build",
 
     "crates/inference-audio",
@@ -79,6 +80,7 @@ default-members = [
     "crates/inference-tensor",
     "crates/inference-tensor-kernels",
     "crates/inference-vulkan",
+    "crates/inference-xatlas",
     "crates/inference-kernel-build",
 
     "crates/inference-audio",
@@ -276,6 +278,7 @@ inference-models-decision = { path = "crates/inference-models-decision", version
 inference-paged-attn = { path = "crates/inference-paged-attn", version = "0.0.27" }
 inference-metal-compile = { path = "crates/inference-metal-compile", version = "0.0.27" }
 inference-vulkan = { path = "crates/inference-vulkan", version = "0.0.27" }
+inference-xatlas = { path = "crates/inference-xatlas", version = "0.0.27" }
 inference-fattn = { path = "crates/inference-fattn", version = "0.0.27" }
 inference-quant = { path = "crates/inference-quant", version = "0.0.27" }
 inference-vision = { path = "crates/inference-vision", version = "0.0.27" }

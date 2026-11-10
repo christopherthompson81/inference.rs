@@ -379,9 +379,9 @@ pub enum Command {
         cpu: bool,
     },
 
-    /// A textured 3D model of the object in one image with TRELLIS.2: model.glb (mesh with per-vertex PBR color and
-    /// material), mesh.ply, the cut-out image and a meta.json; an image without a transparent background has it
-    /// removed with BiRefNet
+    /// A textured 3D model of the object in one image with TRELLIS.2: model.glb (unwrapped mesh with baked PBR
+    /// textures, or per-vertex color and material), mesh.ply, the cut-out image and a meta.json; an image without a
+    /// transparent background has it removed with BiRefNet
     #[command(name = "image-to-3d")]
     ImageTo3d {
         /// The image (png, jpg, webp)
@@ -398,6 +398,14 @@ pub enum Command {
 
         #[arg(long, default_value_t = 0)]
         seed: u64,
+
+        /// Per-vertex color and material instead of baked textures (no unwrapping or baking)
+        #[arg(long)]
+        vertex_colors: bool,
+
+        /// The baked textures' width and height
+        #[arg(long, default_value_t = inference_jobs::image_to_3d::BakeOptions::default().texture_size)]
+        texture_size: usize,
 
         /// The TRELLIS.2-4B folder; fetched from microsoft/TRELLIS.2-4B when unset
         #[arg(long)]
