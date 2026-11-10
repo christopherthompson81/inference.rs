@@ -4,6 +4,18 @@ description: "World generation and reconstruction jobs: what to run, their recor
 sidebar:
   order: 8
 ---
+## `ImageTo3dJob`
+
+TRELLIS.2's textured mesh of the object in the job's one image.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `placement` | `Placement \| None` | optional |
+| `remove_background` | `bool \| None` | optional |
+| `seed` | `int \| None` | optional |
+| `variant` | `Trellis2Variant \| None` | optional |
+
+
 ## `JobDeleted`
 
 A job removed with its folder.
@@ -188,6 +200,7 @@ Where jobs keep their folders and which weights they run.
 | `moge` | `str \| None` | optional |
 | `placement` | `Placement \| None` | `Placement.FASTEST` |
 | `trellis2` | `str \| None` | optional |
+| `trellis_large` | `str \| None` | optional |
 | `wan` | `str \| None` | optional |
 | `worldmirror` | `str \| None` | optional |
 | `worldmirror_repo` | `str \| None` | `'tencent/HY-World-2.0'` |
@@ -229,6 +242,18 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | --- | --- |
 | `SceneKind.INDOOR` | `'indoor'` |
 | `SceneKind.OUTDOOR` | `'outdoor'` |
+
+
+## `Trellis2Variant`
+
+Which resolutions an image-to-3D job runs TRELLIS.2 at.
+
+Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
+
+| Member | Wire/config name |
+| --- | --- |
+| `Trellis2Variant._1024_CASCADE` | `'1024_cascade'` |
+| `Trellis2Variant._512` | `'512'` |
 
 
 ## `VoxelsJob`

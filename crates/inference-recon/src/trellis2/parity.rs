@@ -81,7 +81,7 @@ fn the_shape_flow_samples_the_reference_latents() -> Result<()> {
     }
     let noise = refs["noise"].to_device(&device)?.unsqueeze(0)?;
     let start = std::time::Instant::now();
-    let x = flow.sample(&noise, &rope, &kv, &SHAPE_SAMPLER, &mut |_| Ok(()))?;
+    let x = flow.sample(&noise, &rope, &kv, None, &SHAPE_SAMPLER, &mut |_| Ok(()))?;
     println!("sampled in {:.2} s", start.elapsed().as_secs_f64());
     let norm: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.join("pipeline.json"))?)
@@ -118,7 +118,9 @@ fn the_decoder_and_mesh_match_the_reference() -> Result<()> {
     let latents = refs["slat"].to_device(&device)?;
     let start = std::time::Instant::now();
     let mut stages = Vec::new();
-    let out = decoder.forward(&cells, &latents, &mut |i, x| stages.push((i, x.clone())))?;
+    let (out, _) = decoder.forward(&cells, &latents, None, &mut |i, x| {
+        stages.push((i, x.clone()))
+    })?;
     println!("decoded in {:.2} s", start.elapsed().as_secs_f64());
     for (i, x) in &stages {
         let Some(want) = refs.get(&format!("dec.{i}.last.coords")) else {
@@ -324,5 +326,266 @@ fn the_condition_matches_the_reference() -> Result<()> {
     let (max, rms) = compare(&cond, &refs["cond"])?;
     println!("crop {pw}x{ph} equal; condition at 1024: max {max:.3e} rms {rms:.3e}");
     assert!(rms < 1e-4, "condition relative rms {rms}");
+    Ok(())
+}
+
+fn set_iou(a: &[[i32; 3]], b: &[[i32; 3]]) -> (usize, usize, usize) {
+    let a: HashSet<_> = a.iter().collect();
+    let b: HashSet<_> = b.iter().collect();
+    (a.len(), b.len(), a.intersection(&b).count())
+}
+
+// TRELLIS2_DIR, TRELLIS_LARGE_DIR (TRELLIS-image-large) and TRELLIS2_FULL_REF (`full_ref.py ... 1024_cascade`): each
+// stage fed the reference's own inputs (its noise, cells and previous stage)
+#[test]
+#[ignore = "needs the TRELLIS.2 checkpoints, a reference dump and a GPU"]
+fn every_pipeline_stage_matches_the_reference() -> Result<()> {
+    use super::decoder::TEXTURE_DECODER;
+    use super::shape_flow::{
+        STRUCTURE_FLOW, STRUCTURE_SAMPLER, TEXTURE_FLOW, TEXTURE_SAMPLER, denormalize,
+    };
+    use super::structure::{STRUCTURE_DECODER, StructureDecoder, grid_cells, occupied};
+    let (Some(dir), Some(large), Some(reference)) = (
+        std::env::var_os("TRELLIS2_DIR").map(PathBuf::from),
+        std::env::var_os("TRELLIS_LARGE_DIR").map(PathBuf::from),
+        std::env::var_os("TRELLIS2_FULL_REF"),
+    ) else {
+        return Ok(());
+    };
+    let device = Device::new_cuda(0)?;
+    let refs = inference_tensor::safetensors::load(PathBuf::from(reference), &Device::Cpu)?;
+    let get = |k: &str| refs[k].to_device(&device);
+    let pipeline: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("pipeline.json"))?)
+            .map_err(inference_tensor::Error::wrap)?;
+    let stat = |group: &str, k: &str| -> Vec<f32> {
+        pipeline["args"][group][k]
+            .as_array()
+            .expect("32 values")
+            .iter()
+            .map(|v| v.as_f64().expect("a number") as f32)
+            .collect()
+    };
+    let shape_stats = (
+        stat("shape_slat_normalization", "mean"),
+        stat("shape_slat_normalization", "std"),
+    );
+    let tex_stats = (
+        stat("tex_slat_normalization", "mean"),
+        stat("tex_slat_normalization", "std"),
+    );
+    let report = |name: &str, a: &Tensor, b: &Tensor| -> Result<f32> {
+        let (max, rms) = compare(a, b)?;
+        println!("{name:>24}: max {max:.3e} rms {rms:.3e}");
+        Ok(rms)
+    };
+    let flow = |file: &str, spec| -> Result<ShapeFlow> {
+        ShapeFlow::load(
+            spec,
+            DType::BF16,
+            vb(dir.join("ckpts").join(file), &device)?,
+        )
+    };
+    let sample = |flow: &ShapeFlow,
+                  cells: &[[usize; 3]],
+                  cond: &Tensor,
+                  noise: &Tensor,
+                  concat: Option<&Tensor>,
+                  params| {
+        let rope = flow.rope(cells)?;
+        let kv = flow.condition(&Tensor::cat(&[cond, &cond.zeros_like()?], 0)?)?;
+        flow.sample(noise, &rope, &kv, concat, params, &mut |_| Ok(()))
+    };
+    let cells_of = |k: &str| -> Result<Vec<[usize; 3]>> {
+        Ok(coords(&refs[k])?
+            .iter()
+            .map(|c| c.map(|v| v as usize))
+            .collect())
+    };
+
+    // structure flow: [1, 8, 16, 16, 16] channel-first in the reference, x-major tokens here
+    let grid: Vec<[usize; 3]> = grid_cells(16)
+        .iter()
+        .map(|c| c.map(|v| v as usize))
+        .collect();
+    let to_tokens =
+        |t: Tensor| -> Result<Tensor> { t.reshape((1, 8, 4096))?.transpose(1, 2)?.contiguous() };
+    let z = sample(
+        &flow("ss_flow_img_dit_1_3B_64_bf16.safetensors", STRUCTURE_FLOW)?,
+        &grid,
+        &get("cond512")?,
+        &to_tokens(get("s0.noise")?)?,
+        None,
+        &STRUCTURE_SAMPLER,
+    )?;
+    report("structure latent", &z, &to_tokens(refs["s0.out"].clone())?)?;
+    let decoder = StructureDecoder::load(
+        STRUCTURE_DECODER,
+        16,
+        DType::F16,
+        vb(
+            large.join("ckpts/ss_dec_conv3d_16l8_fp16.safetensors"),
+            &device,
+        )?,
+    )?;
+    let logits = decoder.forward(&to_tokens(get("s0.out")?)?.squeeze(0)?)?;
+    report(
+        "structure logits",
+        &logits,
+        &refs["ss.logits"].flatten_all()?,
+    )?;
+    let ours: Vec<[i32; 3]> = occupied(&logits.to_vec1::<f32>()?, 64, 32)
+        .iter()
+        .map(|c| c.map(|v| v as i32))
+        .collect();
+    println!(
+        "structure cells (ours, ref, shared): {:?}",
+        set_iou(&ours, &coords(&refs["ss.coords"])?)
+    );
+
+    // shape at 512, upsampled cells, shape at 1024, texture at 1024
+    let lr = sample(
+        &flow(
+            "slat_flow_img2shape_dit_1_3B_512_bf16.safetensors",
+            SHAPE_FLOW_1024,
+        )?,
+        &cells_of("s1.coords")?,
+        &get("cond512")?,
+        &get("s1.noise")?.unsqueeze(0)?,
+        None,
+        &SHAPE_SAMPLER,
+    )?;
+    report("shape latents 512", &lr, &refs["s1.out"])?;
+    let shape_decoder = ShapeDecoder::load(
+        SHAPE_DECODER,
+        DType::F16,
+        vb(dir.join(DECODER_FILE), &device)?,
+    )?;
+    let lr_ref = denormalize(
+        &get("s1.out")?.unsqueeze(0)?,
+        &shape_stats.0,
+        &shape_stats.1,
+    )?
+    .squeeze(0)?;
+    let up = shape_decoder.upsample(&coords(&refs["s1.coords"])?, &lr_ref, 4)?;
+    println!(
+        "upsampled cells (ours, ref, shared): {:?}",
+        set_iou(&up, &coords(&refs["up.coords"])?)
+    );
+    let mut q: Vec<[i32; 3]> = up
+        .iter()
+        .map(|c| c.map(|v| ((v as f32 + 0.5) / 512.0 * 64.0) as i32))
+        .collect();
+    q.sort_unstable();
+    q.dedup();
+    println!(
+        "1024 cells (ours, ref, shared): {:?}",
+        set_iou(&q, &coords(&refs["s2.coords"])?)
+    );
+    let hr = sample(
+        &flow(
+            "slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors",
+            SHAPE_FLOW_1024,
+        )?,
+        &cells_of("s2.coords")?,
+        &get("cond1024")?,
+        &get("s2.noise")?.unsqueeze(0)?,
+        None,
+        &SHAPE_SAMPLER,
+    )?;
+    report("shape latents 1024", &hr, &refs["s2.out"])?;
+    let tex = sample(
+        &flow(
+            "slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors",
+            TEXTURE_FLOW,
+        )?,
+        &cells_of("s3.coords")?,
+        &get("cond1024")?,
+        &get("s3.noise")?.unsqueeze(0)?,
+        Some(&get("s3.concat")?.unsqueeze(0)?),
+        &TEXTURE_SAMPLER,
+    )?;
+    report("texture latents", &tex, &refs["s3.out"])?;
+
+    // decoding the reference's latents: shape subdivisions guide the texture decoder
+    let hr_ref = denormalize(
+        &get("s2.out")?.unsqueeze(0)?,
+        &shape_stats.0,
+        &shape_stats.1,
+    )?
+    .squeeze(0)?;
+    let tex_ref =
+        denormalize(&get("s3.out")?.unsqueeze(0)?, &tex_stats.0, &tex_stats.1)?.squeeze(0)?;
+    let cells = coords(&refs["s2.coords"])?;
+    let (shape_out, subs) = shape_decoder.forward(&cells, &hr_ref, None, &mut |_, _| {})?;
+    drop(shape_decoder);
+    let tex_decoder = ShapeDecoder::load(
+        TEXTURE_DECODER,
+        DType::F16,
+        vb(
+            dir.join("ckpts/tex_dec_next_dc_f16c32_fp16.safetensors"),
+            &device,
+        )?,
+    )?;
+    let (tex_out, _) = tex_decoder.forward(&cells, &tex_ref, Some(&subs), &mut |_, _| {})?;
+    assert_eq!(
+        tex_out.coords, shape_out.coords,
+        "the texture follows the shape's cells"
+    );
+    let attrs = ((tex_out.feats * 0.5)? + 0.5)?;
+    let want = coords(&refs["tex.coords"])?;
+    let row: HashMap<_, usize> = want.iter().enumerate().map(|(r, c)| (*c, r)).collect();
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    for (r, c) in tex_out.coords.iter().enumerate() {
+        if let Some(&w) = row.get(c) {
+            a.push(r as u32);
+            b.push(w as u32);
+        }
+    }
+    println!(
+        "texture cells: {} vs {}, {} shared",
+        tex_out.coords.len(),
+        want.len(),
+        a.len()
+    );
+    let n = a.len();
+    let pick = |t: &Tensor, rows: Vec<u32>| -> Result<Tensor> {
+        t.to_device(&Device::Cpu)?
+            .index_select(&Tensor::from_vec(rows, n, &Device::Cpu)?, 0)
+    };
+    report(
+        "texture attributes",
+        &pick(&attrs, a)?,
+        &pick(&refs["tex.attrs"], b)?,
+    )?;
+
+    // vertex attributes sampled from the reference's own volume at its own vertices
+    let values: Vec<[f32; 6]> = refs["tex.attrs"]
+        .to_vec2::<f32>()?
+        .iter()
+        .map(|r| std::array::from_fn(|k| r[k]))
+        .collect();
+    let points: Vec<[f32; 3]> = refs["mesh.v"]
+        .to_vec2::<f32>()?
+        .iter()
+        .map(|v| [0, 1, 2].map(|k| (v[k] + 0.5) * 1024.0))
+        .collect();
+    let sampled = super::glb::sample_attributes(&want, &values, &points);
+    let flat: Vec<f32> = sampled
+        .iter()
+        .flat_map(|p| {
+            [
+                p.base_color[0],
+                p.base_color[1],
+                p.base_color[2],
+                p.metallic,
+                p.roughness,
+                p.alpha,
+            ]
+        })
+        .collect();
+    let ours = Tensor::from_vec(flat, (sampled.len(), 6), &Device::Cpu)?;
+    let rms = report("vertex attributes", &ours, &refs["vertex.attrs"])?;
+    assert!(rms < 1e-5, "vertex attributes rms {rms}");
     Ok(())
 }

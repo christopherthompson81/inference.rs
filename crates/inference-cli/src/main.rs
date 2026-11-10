@@ -257,6 +257,57 @@ async fn main() -> Result<()> {
             );
         }
 
+        Command::ImageTo3d {
+            image,
+            out,
+            variant,
+            seed,
+            trellis2,
+            trellis_large,
+            dinov3,
+            birefnet,
+            remove_background,
+            cpu,
+        } => {
+            use inference_jobs::image_to_3d::Variant;
+            use inference_jobs::image_to_3d::{
+                ImageTo3dOptions, NoProgress, fetch_models, generate_3d_on,
+            };
+            use inference_jobs::voxels::needs_background_removal;
+            let variant = match variant.as_str() {
+                "1024-cascade" | "1024_cascade" => Variant::Cascade1024,
+                "512" => Variant::Res512,
+                other => anyhow::bail!("--variant must be 1024-cascade or 512, got `{other}`"),
+            };
+            let options = ImageTo3dOptions {
+                variant,
+                seed,
+                remove_background,
+            };
+            let birefnet = needs_background_removal(&image, remove_background)?.then_some(birefnet);
+            let models = fetch_models(trellis2, trellis_large, dinov3, birefnet, &NoProgress)?;
+            let device = if cpu {
+                inference_tensor::Device::Cpu
+            } else {
+                inference_tensor::Device::cuda_if_available(0)?
+            };
+            let report = generate_3d_on(&models, &image, &out, &options, &NoProgress, &device)?;
+            println!(
+                "{} vertices, {} faces ({} extracted) at {}^3{} in {} ({:.1} s)",
+                report.vertices,
+                report.faces,
+                report.raw_faces,
+                report.resolution,
+                if report.background_removed {
+                    ", background removed"
+                } else {
+                    ""
+                },
+                out.display(),
+                report.total_seconds
+            );
+        }
+
         Command::Voxels {
             image,
             out,

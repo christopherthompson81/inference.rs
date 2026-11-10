@@ -379,6 +379,51 @@ pub enum Command {
         cpu: bool,
     },
 
+    /// A textured 3D model of the object in one image with TRELLIS.2: model.glb (mesh with per-vertex PBR color and
+    /// material), mesh.ply, the cut-out image and a meta.json; an image without a transparent background has it
+    /// removed with BiRefNet
+    #[command(name = "image-to-3d")]
+    ImageTo3d {
+        /// The image (png, jpg, webp)
+        #[arg(long)]
+        image: PathBuf,
+
+        /// The output folder, created if missing
+        #[arg(long)]
+        out: PathBuf,
+
+        /// `1024-cascade` (shape at 512, then 1024; texture at 1024) or `512` (faster, coarser)
+        #[arg(long, default_value = "1024-cascade")]
+        variant: String,
+
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+
+        /// The TRELLIS.2-4B folder; fetched from microsoft/TRELLIS.2-4B when unset
+        #[arg(long)]
+        trellis2: Option<PathBuf>,
+
+        /// The TRELLIS-image-large folder (its structure decoder); fetched when unset
+        #[arg(long)]
+        trellis_large: Option<PathBuf>,
+
+        /// The DINOv3 ViT-L/16 folder; fetched from facebook/dinov3-vitl16-pretrain-lvd1689m (gated) when unset
+        #[arg(long)]
+        dinov3: Option<PathBuf>,
+
+        /// The BiRefNet folder; fetched from ZhengPeng7/BiRefNet when unset and the background needs removing
+        #[arg(long)]
+        birefnet: Option<PathBuf>,
+
+        /// Remove the background even when the image has transparency of its own
+        #[arg(long)]
+        remove_background: bool,
+
+        /// Run on the CPU (very slow) instead of the first CUDA device
+        #[arg(long)]
+        cpu: bool,
+    },
+
     /// Generate a 3D world from an equirectangular panorama with WorldStereo-2: keyframes along camera trajectories,
     /// then WorldMirror 2.0 on them for cameras, depth, points and 3D Gaussian splats
     Worldgen {

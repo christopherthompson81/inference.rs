@@ -2,6 +2,7 @@
 // Each test file includes the tiny-checkpoint helpers itself, as the SDK's tests do.
 #![allow(clippy::duplicate_mod)]
 
+mod image_to_3d_job;
 mod jobs;
 mod voxels_job;
 mod world_job;

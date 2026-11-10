@@ -4,11 +4,14 @@
 pub mod cleanup;
 pub mod decoder;
 pub mod dit;
+pub mod glb;
 pub mod mesh;
 #[cfg(test)]
 mod parity;
+pub mod pipeline;
 pub mod shape_flow;
 pub mod sparse;
+pub mod structure;
 
 use std::path::Path;
 
@@ -25,7 +28,7 @@ use decoder::{SHAPE_DECODER, ShapeDecoder, dual_grid};
 use mesh::{Mesh, dual_grid_mesh};
 use shape_flow::{SHAPE_FLOW_1024, SHAPE_SAMPLER, ShapeFlow};
 
-const PIPELINE_FILE: &str = "pipeline.json";
+pub(crate) const PIPELINE_FILE: &str = "pipeline.json";
 const FLOW_FILE: &str = "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors";
 const DECODER_FILE: &str = "ckpts/shape_dec_next_dc_f16c32_fp16.safetensors";
 /// The files of TRELLIS.2-4B the second stage reads.
@@ -148,7 +151,7 @@ impl ShapeStage {
         seed: u64,
         progress: &dyn Progress,
     ) -> Result<Mesh> {
-        let latent = SHAPE_FLOW_1024.latent;
+        let latent = SHAPE_FLOW_1024.out_channels;
         let mut rng = StdRng::seed_from_u64(seed);
         let noise: Vec<f32> = (0..cells.len() * latent)
             .map(|_| StandardNormal.sample(&mut rng))
@@ -161,7 +164,7 @@ impl ShapeStage {
         progress.stage("shape", SHAPE_SAMPLER.steps);
         let x = self
             .flow
-            .sample(&noise, &rope, &kv, &SHAPE_SAMPLER, &mut |step| {
+            .sample(&noise, &rope, &kv, None, &SHAPE_SAMPLER, &mut |step| {
                 progress.advance(step);
                 check(progress)
             })?;
@@ -169,7 +172,9 @@ impl ShapeStage {
         let latents = shape_flow::denormalize(&x, &self.mean, &self.std)?.squeeze(0)?;
         progress.stage("decode", 0);
         let coords: Vec<[i32; 3]> = cells.iter().map(|c| c.map(|v| v as i32)).collect();
-        let out = self.decoder.forward(&coords, &latents, &mut |_, _| {})?;
+        let (out, _) = self
+            .decoder
+            .forward(&coords, &latents, None, &mut |_, _| {})?;
         check(progress)?;
         let grid = dual_grid(&out.feats)?;
         Ok(dual_grid_mesh(

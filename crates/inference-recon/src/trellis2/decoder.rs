@@ -23,13 +23,21 @@ pub const SHAPE_DECODER: DecoderSpec = DecoderSpec {
     channels: [1024, 512, 256, 128, 64],
     blocks: [4, 16, 8, 4, 0],
     latent: 32,
+    out_channels: OUT_CHANNELS,
 };
+/// `tex_dec_next_dc_f16c32_fp16.json`: base color, metallic, roughness, alpha
+pub const TEXTURE_DECODER: DecoderSpec = DecoderSpec {
+    out_channels: PBR_CHANNELS,
+    ..SHAPE_DECODER
+};
+pub const PBR_CHANNELS: usize = 6;
 
 #[derive(Clone, Copy, Debug)]
 pub struct DecoderSpec {
     pub channels: [usize; 5],
     pub blocks: [usize; 5],
     pub latent: usize,
+    pub out_channels: usize,
 }
 
 fn layer_norm(c: usize, affine: Option<VarBuilder>, device: &Device) -> Result<LayerNorm> {
@@ -77,7 +85,8 @@ impl ConvNext {
 /// `SparseResBlockC2S3d`: predicts which children each cell keeps, then a conv to 8 children's channels, rearranged
 /// onto the kept children, and a second conv there; the skip repeats the input's per-child channels.
 struct ChannelToSpace {
-    to_subdiv: AmpLinear,
+    // absent in a decoder that follows another's subdivisions (the texture decoder)
+    to_subdiv: Option<AmpLinear>,
     norm1: LayerNorm,
     conv1: SparseConv,
     norm2: LayerNorm,
@@ -86,10 +95,12 @@ struct ChannelToSpace {
 }
 
 impl ChannelToSpace {
-    fn load(c: usize, out: usize, dtype: DType, vb: VarBuilder) -> Result<Self> {
+    fn load(c: usize, out: usize, predicts: bool, dtype: DType, vb: VarBuilder) -> Result<Self> {
         let device = vb.device().clone();
         Ok(Self {
-            to_subdiv: AmpLinear::load(c, CHILDREN, true, dtype, vb.pp("to_subdiv"))?,
+            to_subdiv: predicts
+                .then(|| AmpLinear::load(c, CHILDREN, true, dtype, vb.pp("to_subdiv")))
+                .transpose()?,
             norm1: layer_norm(c, Some(vb.pp("norm1")), &device)?,
             conv1: SparseConv::load(c, out * CHILDREN, dtype, vb.pp("conv1"))?,
             norm2: layer_norm(out, None, &device)?,
@@ -98,22 +109,46 @@ impl ChannelToSpace {
         })
     }
 
-    fn forward(&self, x: &Sparse, neighbors: &Neighbors) -> Result<(Sparse, Neighbors)> {
-        let n = x.coords.len();
-        let c = x.feats.dim(1)?;
-        let subdiv = self
-            .to_subdiv
+    // the children each cell keeps: its own prediction, or `guide`'s
+    fn keep(&self, x: &Sparse, guide: Option<&Subdivision>) -> Result<Subdivision> {
+        if let Some(guide) = guide {
+            if guide.len() != x.coords.len() {
+                inference_tensor::bail!(
+                    "{} guide subdivisions for {} cells",
+                    guide.len(),
+                    x.coords.len()
+                );
+            }
+            return Ok(guide.clone());
+        }
+        let Some(to_subdiv) = &self.to_subdiv else {
+            inference_tensor::bail!(
+                "a decoder that does not predict subdivisions needs them given"
+            );
+        };
+        let subdiv = to_subdiv
             .forward(&x.feats)?
             .gt(0.0)?
             .to_dtype(DType::U8)?
             .flatten_all()?
             .to_vec1::<u8>()?;
-        let keep: Vec<[bool; CHILDREN]> = subdiv
+        Ok(subdiv
             .as_chunks::<CHILDREN>()
             .0
             .iter()
             .map(|k| std::array::from_fn(|j| k[j] != 0))
-            .collect();
+            .collect())
+    }
+
+    fn forward(
+        &self,
+        x: &Sparse,
+        neighbors: &Neighbors,
+        guide: Option<&Subdivision>,
+    ) -> Result<(Sparse, Neighbors, Subdivision)> {
+        let n = x.coords.len();
+        let c = x.feats.dim(1)?;
+        let keep = self.keep(x, guide)?;
         let (children, rows) = subdivide(&x.coords, &keep);
         let device = x.feats.device();
         let rows = Tensor::from_vec(rows, children.len(), device)?;
@@ -143,13 +178,19 @@ impl ChannelToSpace {
                 feats: (h + skip)?,
             },
             neighbors,
+            keep,
         ))
     }
 }
 
+/// The children each cell of a level keeps, child bit 0 for x, 1 for y, 2 for z.
+pub type Subdivision = Vec<[bool; CHILDREN]>;
+
 /// What the decoder hands each stage's end to, for inspection.
 pub type Inspect<'a> = &'a mut dyn FnMut(usize, &Sparse);
 
+/// `SparseUnetVaeDecoder`: the shape decoder (7 outputs a cell, predicting its subdivisions) or the texture decoder (6
+/// PBR channels, following the shape decoder's subdivisions).
 pub struct ShapeDecoder {
     from_latent: Linear,
     stages: Vec<(Vec<ConvNext>, Option<ChannelToSpace>)>,
@@ -162,6 +203,7 @@ impl ShapeDecoder {
     pub fn load(spec: DecoderSpec, dtype: DType, vb: VarBuilder) -> Result<Self> {
         let device = vb.device().clone();
         let ch = spec.channels;
+        let predicts = spec.out_channels == OUT_CHANNELS;
         let stages = (0..ch.len())
             .map(|i| {
                 let stage = vb.pp("blocks").pp(i);
@@ -170,7 +212,13 @@ impl ShapeDecoder {
                     .collect::<Result<Vec<_>>>()?;
                 let up = (i + 1 < ch.len())
                     .then(|| {
-                        ChannelToSpace::load(ch[i], ch[i + 1], dtype, stage.pp(spec.blocks[i]))
+                        ChannelToSpace::load(
+                            ch[i],
+                            ch[i + 1],
+                            predicts,
+                            dtype,
+                            stage.pp(spec.blocks[i]),
+                        )
                     })
                     .transpose()?;
                 Ok((blocks, up))
@@ -185,36 +233,67 @@ impl ShapeDecoder {
                 Tensor::zeros(last, DType::F32, &device)?,
                 OUT_EPS,
             ),
-            output: inference_tensor::nn::linear(last, OUT_CHANNELS, vb.pp("output_layer"))?,
+            output: inference_tensor::nn::linear(last, spec.out_channels, vb.pp("output_layer"))?,
             dtype,
         })
     }
 
-    /// The finest cells and their 7 outputs `[cells, 7]` (f32) for latents on `coords` (`[cells, latent]`, f32);
-    /// `inspect` sees each stage's first block's input and its end.
+    /// The finest cells and their outputs `[cells, out]` (f32) for latents on `coords` (`[cells, latent]`, f32), with
+    /// the subdivision each level took; a texture decoder takes the shape decoder's as `guide`. `inspect` sees each
+    /// stage's end.
     pub fn forward(
         &self,
         coords: &[[i32; 3]],
         latents: &Tensor,
+        guide: Option<&[Subdivision]>,
         inspect: Inspect,
-    ) -> Result<Sparse> {
+    ) -> Result<(Sparse, Vec<Subdivision>)> {
+        let (x, subs) = self.run(coords, latents, guide, self.stages.len(), inspect)?;
+        let h = self.out_norm.forward(&x.feats.to_dtype(DType::F32)?)?;
+        Ok((x.replace(self.output.forward(&h)?), subs))
+    }
+
+    /// The cells after `times` stages (each a subdivision), without the output: the cascade's upsampling of a
+    /// low-resolution structure (`upsample`).
+    pub fn upsample(
+        &self,
+        coords: &[[i32; 3]],
+        latents: &Tensor,
+        times: usize,
+    ) -> Result<Vec<[i32; 3]>> {
+        Ok(self
+            .run(coords, latents, None, times, &mut |_, _| {})?
+            .0
+            .coords)
+    }
+
+    fn run(
+        &self,
+        coords: &[[i32; 3]],
+        latents: &Tensor,
+        guide: Option<&[Subdivision]>,
+        stages: usize,
+        inspect: Inspect,
+    ) -> Result<(Sparse, Vec<Subdivision>)> {
         let device = latents.device().clone();
         let mut x = Sparse {
             coords: coords.to_vec(),
             feats: self.from_latent.forward(latents)?.to_dtype(self.dtype)?,
         };
         let mut neighbors = Neighbors::new(&x.coords, &device)?;
-        for (i, (blocks, up)) in self.stages.iter().enumerate() {
+        let mut subs = Vec::new();
+        for (i, (blocks, up)) in self.stages.iter().enumerate().take(stages) {
             for block in blocks {
                 x = x.replace(block.forward(&x.feats, &neighbors)?);
             }
             if let Some(up) = up {
-                (x, neighbors) = up.forward(&x, &neighbors)?;
+                let keep;
+                (x, neighbors, keep) = up.forward(&x, &neighbors, guide.map(|g| &g[i]))?;
+                subs.push(keep);
             }
             inspect(i, &x);
         }
-        let h = self.out_norm.forward(&x.feats.to_dtype(DType::F32)?)?;
-        Ok(x.replace(self.output.forward(&h)?))
+        Ok((x, subs))
     }
 }
 
