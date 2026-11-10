@@ -378,3 +378,60 @@ unwrap), p99 5.7. Robot, 1024-cascade, CLI:
     --vertex-colors  44.2 s (export 0.8 s)
 
 Against Run 8's 114.8 / 127.7 / 62 s.
+
+## Run 17 - 2026-11-11
+
+Question: where do time and memory go now, and does the export's shape-only work fit beside the texture stage?
+Temporary `PROFILE` marks (device synchronized) at each stage and export phase, and a sampler (`measure.sh`,
+scratch: nvidia-smi used memory and the process's RssAnon every 0.25 s; 1756 MiB were in use by other processes and
+are subtracted). Robot, 1024-cascade, sequential:
+
+    condition 0.95, structure 6.35, shape 512 3.06, upsample 0.44, shape 1024 15.20, texture 9.03,
+    shape decode 0.94, texture decode 0.93, extract 0.99;
+    export: clean 3.61, clusters 2.43, xatlas 1.96, raster + projection 0.56, sample 0.40, inpaint 4.33, glb 0.27
+    total 52.5 s; GPU peak 6.46 GB (shape 1024 sampling), host anon peak 2.4 GB (inpainting)
+
+Clean, clusters, unwrap, rasterization and projection need only the shape (~8.6 s, mostly CPU). The pipeline now
+decodes the shape and extracts its surface before the texture stage (`generate_with` hands the mesh to a callback;
+the noise draws keep their order), and `bake` splits into `prepare` (the shape half) and `finish` (sampling,
+inpainting); the job runs `prepare` on a scoped thread while the texture flow and decoder run:
+
+    shape decode 26.89, extract 27.93, [prepare beside texture: clean 32.08, clusters 34.59, unwrap 36.40,
+    raster + project 37.25], texture 37.24 (9.3 s, was 9.0), texture decode 38.15, sample 38.43, inpaint 42.49
+
+The GLB is byte-identical to the sequential run. Without the marks:
+
+    default          43.0 s, GPU peak 6.07 GB, host 2.34 GB (was 52.5-58.6 s, 6.46 GB)
+    --remesh         44.9 s, GPU 7.05 GB (its distance queries now share the GPU with the texture stage), host 2.66 GB
+    --vertex-colors  38.1 s, GPU 6.06 GB, host 1.49 GB
+
+The GPU peak dropped because the shape decoder is freed before the texture flow loads. Left on the critical path
+after the texture: inpainting 4.1 s (Telea, four planes side by side, each a serial fast march over ~2M unknown
+texels; the color plane's radius-3 window dominates).
+
+## Run 18 - 2026-11-11
+
+Question: inpainting (4.1 s) is the critical path after the texture stage. Can it shrink without changing a value?
+
+First, how far the unknown texels sit from the charts (`coverage.py`, scratch: the GLB's UV triangles rasterized
+with nvdiffrast, a Euclidean distance transform): 2048^2 texels, 0.488 covered, 2145817 unknown; within 1 texel
+0.261, 2: 0.507, 3: 0.753, 4: 0.893, 8: 0.999, max 13. The gaps are narrow, so filling only a band would save
+nothing.
+
+The port computes a pixel's value once, when it enters the band, from pixels that entered before it (or were
+known), at their final values and arrival times, which never change after entry. So `TeleaSchedule` splits it: the
+sequential march records each entry's pixel, arrival time and gradient; each entry gets a level, one past the deepest
+earlier entry within the window plus one pixel; then each level is evaluated in parallel with the same arithmetic.
+The inward march does not depend on the radius (it reads only the band, at -0 as the outward march leaves it, and
+the region), so `telea_schedules` shares it between the radius-3 and radius-1 schedules, with each radius's outward
+march running beside it.
+
+Against cv2 5.0.0's planes in `the_bake_matches_the_reference`: 0 of 12582912 color values and 0 of 4194304 for each
+material plane differ. Per plane alone (radius 3): setup 0.22 s, outward march 0.45, inward march 0.8, levels 0.64
+(6583 levels for 1848185 entries), values 0.84; color 2.96 -> 2.04 s with the shared, overlapped marches and
+fixed-size accumulators.
+
+The marches depend only on the coverage, known once the atlas is rasterized, so `prepare` builds them beside the
+texture stage and `finish` only evaluates. Robot, 1024-cascade: export after generation 4.65 -> 2.52 s, total 43.0 ->
+39.5 s, the GLB byte-identical; host peak 2.46 GB (the schedules are held through the texture stage). `--remesh`
+44.7 s, GPU 6.49 GB: its remesh makes `prepare` outlast the texture stage.

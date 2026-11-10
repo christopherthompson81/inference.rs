@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use inference_tensor::{Device, Result};
-use inference_vision::inpaint_telea;
+use inference_vision::{TeleaSchedule, telea_schedules};
 use rayon::prelude::*;
 
 use super::charts::{Unwrapped, uv_unwrap};
@@ -359,6 +359,28 @@ pub fn bake(
     options: &BakeOptions,
     device: &Device,
 ) -> Result<Baked> {
+    finish(prepare(mesh, resolution, options, device)?, coords, values)
+}
+
+/// The part of a bake that needs only the shape: the unwrapped mesh, its covered texels and their points in the
+/// volume's grid, and the inpainting marches over the texels left uncovered.
+pub struct Prepared {
+    unwrapped: Unwrapped,
+    size: usize,
+    color_march: TeleaSchedule,
+    material_march: TeleaSchedule,
+    covered: Vec<usize>,
+    points: Vec<V3>,
+    double_sided: bool,
+}
+
+/// [`bake`]'s shape half (cleanup, unwrap, rasterization and projection), which can run while the texture is made.
+pub fn prepare(
+    mesh: &Mesh,
+    resolution: usize,
+    options: &BakeOptions,
+    device: &Device,
+) -> Result<Prepared> {
     let (cleaned, bvh) = if options.remesh {
         let mut filled = mesh.clone();
         cleanup::fill_holes(&mut filled, cleanup::MAX_HOLE_PERIMETER);
@@ -397,8 +419,33 @@ pub fn bake(
         .into_iter()
         .map(|(_, _, c)| c.map(|v| (v + 0.5) * res))
         .collect();
-    let attrs = sample_attributes(coords, values, &points);
     let unknown: Vec<bool> = texel_faces.iter().map(|&f| f == 0).collect();
+    // one march per radius, shared by the planes that fill with it
+    let [color_march, material_march] =
+        telea_schedules(size, size, &unknown, [COLOR_RADIUS, MATERIAL_RADIUS]);
+    Ok(Prepared {
+        unwrapped,
+        size,
+        color_march,
+        material_march,
+        covered,
+        points,
+        double_sided: !options.remesh,
+    })
+}
+
+/// [`bake`]'s texture half: the volume (`coords` / `values`) sampled at the prepared texels and inpainted.
+pub fn finish(prepared: Prepared, coords: &[[i32; 3]], values: &[[f32; 6]]) -> Result<Baked> {
+    let Prepared {
+        unwrapped,
+        size,
+        color_march,
+        material_march,
+        covered,
+        points,
+        double_sided,
+    } = prepared;
+    let attrs = sample_attributes(coords, values, &points);
     // planes of the covered texels' values, zero elsewhere
     let plane = |channels: usize, get: &(dyn Fn(&Pbr) -> [f32; 3] + Sync)| {
         let mut plane = vec![0u8; size * size * channels];
@@ -410,23 +457,22 @@ pub fn bake(
         }
         plane
     };
-    let fill = |channels: usize, radius: f64, get: &(dyn Fn(&Pbr) -> [f32; 3] + Sync)| {
+    let fill = |march: &TeleaSchedule, channels: usize, get: &(dyn Fn(&Pbr) -> [f32; 3] + Sync)| {
         let mut p = plane(channels, get);
-        inpaint_telea(&mut p, size, size, channels, &unknown, radius);
+        march.inpaint(&mut p, channels);
         p
     };
-    // the four fills are independent and each runs serially, so they run side by side
     let ((color, metallic), (roughness, alpha)) = rayon::join(
         || {
             rayon::join(
-                || fill(3, COLOR_RADIUS, &|p| p.base_color),
-                || fill(1, MATERIAL_RADIUS, &|p| [p.metallic; 3]),
+                || fill(&color_march, 3, &|p| p.base_color),
+                || fill(&material_march, 1, &|p| [p.metallic; 3]),
             )
         },
         || {
             rayon::join(
-                || fill(1, MATERIAL_RADIUS, &|p| [p.roughness; 3]),
-                || fill(1, MATERIAL_RADIUS, &|p| [p.alpha; 3]),
+                || fill(&material_march, 1, &|p| [p.roughness; 3]),
+                || fill(&material_march, 1, &|p| [p.alpha; 3]),
             )
         },
     );
@@ -442,7 +488,7 @@ pub fn bake(
         metallic_roughness,
         size,
         covered: covered.len(),
-        double_sided: !options.remesh,
+        double_sided,
     })
 }
 

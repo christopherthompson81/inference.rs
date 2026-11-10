@@ -3515,6 +3515,7 @@ dependencies = [
  "fast_image_resize",
  "image",
  "inference-tensor",
+ "rayon",
 ]
 
 [[package]]

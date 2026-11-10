@@ -236,6 +236,28 @@ pub fn generate(
     progress: &dyn Progress,
     device: &Device,
 ) -> Result<Generated> {
+    generate_with(
+        paths,
+        image,
+        variant,
+        seed,
+        progress,
+        device,
+        &mut |_, _| {},
+    )
+}
+
+/// [`generate`], handing `shape_ready` the extracted mesh and its resolution before the texture stage, so work on the
+/// shape alone can run beside it.
+pub fn generate_with(
+    paths: &Trellis2Paths,
+    image: &Rgba,
+    variant: Variant,
+    seed: u64,
+    progress: &dyn Progress,
+    device: &Device,
+    shape_ready: &mut dyn FnMut(&Mesh, usize),
+) -> Result<Generated> {
     let (flow_dtype, decoder_dtype) = if device.is_cpu() {
         (DType::F32, DType::F32)
     } else {
@@ -353,6 +375,28 @@ pub fn generate(
     };
     check(progress)?;
 
+    // the shape decoded and its surface extracted, handed on before the texture is made; its subdivisions guide the
+    // texture decoder onto the same cells
+    progress.stage("decode", 0);
+    let coords: Vec<[i32; 3]> = cells.iter().map(|c| c.map(|v| v as i32)).collect();
+    let (shape_out, subs) = run.decoder(SHAPE_DECODER_FILE, SHAPE_DECODER)?.forward(
+        &coords,
+        &slat.squeeze(0)?,
+        None,
+        &mut |_, _| {},
+    )?;
+    let grid = dual_grid(&shape_out.feats)?;
+    let mesh = dual_grid_mesh(
+        &shape_out.coords,
+        &grid.vertices,
+        &grid.crossed,
+        &grid.split,
+        resolution,
+    );
+    drop((shape_out, grid));
+    shape_ready(&mesh, resolution);
+    check(progress)?;
+
     // the texture latents, the normalized shape latents beside the noise
     let shape_norm = normalize(&slat, &stats.shape.0, &stats.shape.1)?;
     let x = noise(&mut rng, cells.len(), TEXTURE_FLOW.out_channels, device)?;
@@ -375,15 +419,6 @@ pub fn generate(
     )?;
     let tex = denormalize(&tex, &stats.texture.0, &stats.texture.1)?;
 
-    // decoding: the shape decoder's subdivisions guide the texture decoder onto the same cells
-    progress.stage("decode", 0);
-    let coords: Vec<[i32; 3]> = cells.iter().map(|c| c.map(|v| v as i32)).collect();
-    let (shape_out, subs) = run.decoder(SHAPE_DECODER_FILE, SHAPE_DECODER)?.forward(
-        &coords,
-        &slat.squeeze(0)?,
-        None,
-        &mut |_, _| {},
-    )?;
     let (tex_out, _) = run
         .decoder(TEXTURE_DECODER_FILE, TEXTURE_DECODER)?
         .forward(&coords, &tex.squeeze(0)?, Some(&subs), &mut |_, _| {})?;
@@ -392,14 +427,6 @@ pub fn generate(
         .iter()
         .map(|r| std::array::from_fn(|k| r[k]))
         .collect();
-    let grid = dual_grid(&shape_out.feats)?;
-    let mesh = dual_grid_mesh(
-        &shape_out.coords,
-        &grid.vertices,
-        &grid.crossed,
-        &grid.split,
-        resolution,
-    );
     check(progress)?;
     Ok(Generated {
         mesh,
