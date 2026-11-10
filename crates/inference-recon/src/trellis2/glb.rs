@@ -20,6 +20,11 @@ const ARRAY_BUFFER: u32 = 34962;
 const ELEMENT_ARRAY_BUFFER: u32 = 34963;
 const TRIANGLES: u32 = 4;
 const LINEAR: u32 = 9729;
+// the sRGB transfer function (IEC 61966-2-1)
+const SRGB_LINEAR_KNEE: f32 = 0.04045;
+const SRGB_LINEAR_SLOPE: f32 = 12.92;
+const SRGB_OFFSET: f32 = 0.055;
+const SRGB_GAMMA: f32 = 2.4;
 const LINEAR_MIPMAP_LINEAR: u32 = 9987;
 const REPEAT: u32 = 10497;
 const PAD: u8 = 0x20;
@@ -127,6 +132,15 @@ fn bounds(points: &[[f32; 3]]) -> ([f32; 3], [f32; 3]) {
     (min, max)
 }
 
+// the volume's base color is sRGB, as the baked texture stores it; glTF's COLOR_0 is linear
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= SRGB_LINEAR_KNEE {
+        c / SRGB_LINEAR_SLOPE
+    } else {
+        ((c + SRGB_OFFSET) / (1.0 + SRGB_OFFSET)).powf(SRGB_GAMMA)
+    }
+}
+
 fn push_f32s(bin: &mut Vec<u8>, values: impl Iterator<Item = f32>) -> (usize, usize) {
     let start = bin.len();
     for v in values {
@@ -135,7 +149,7 @@ fn push_f32s(bin: &mut Vec<u8>, values: impl Iterator<Item = f32>) -> (usize, us
     (start, bin.len() - start)
 }
 
-/// The mesh as a binary glTF (y up) with each vertex's PBR attributes (clamped to [0, 1]).
+/// The mesh as a binary glTF (y up) with each vertex's PBR attributes (clamped to [0, 1]; the base color made linear).
 pub fn to_glb(mesh: &Mesh, attrs: &[Pbr]) -> Vec<u8> {
     let clamp = |v: f32| v.clamp(0.0, 1.0);
     let mut bin = Vec::new();
@@ -144,9 +158,10 @@ pub fn to_glb(mesh: &Mesh, attrs: &[Pbr]) -> Vec<u8> {
     let positions = push_f32s(&mut bin, vertices.iter().flatten().copied());
     let colors = push_f32s(
         &mut bin,
-        attrs
-            .iter()
-            .flat_map(|p| [p.base_color[0], p.base_color[1], p.base_color[2], p.alpha].map(clamp)),
+        attrs.iter().flat_map(|p| {
+            let [r, g, b] = p.base_color.map(|c| srgb_to_linear(clamp(c)));
+            [r, g, b, clamp(p.alpha)]
+        }),
     );
     let metallic = push_f32s(&mut bin, attrs.iter().map(|p| clamp(p.metallic)));
     let roughness = push_f32s(&mut bin, attrs.iter().map(|p| clamp(p.roughness)));
@@ -306,6 +321,14 @@ mod tests {
         let out = sample_attributes(&coords, &values, &[[1.0, 0.5, 0.5], [0.5, 0.5, 0.5]]);
         assert!((out[0].metallic - 0.5).abs() < 1e-6);
         assert_eq!(out[1].metallic, 0.0);
+    }
+
+    #[test]
+    fn srgb_colors_become_linear() {
+        assert_eq!(srgb_to_linear(0.0), 0.0);
+        assert!((srgb_to_linear(1.0) - 1.0).abs() < 1e-6);
+        // the standard's mid-gray: 0.5 sRGB is about 0.214 linear
+        assert!((srgb_to_linear(0.5) - 0.214_041).abs() < 1e-5);
     }
 
     #[test]

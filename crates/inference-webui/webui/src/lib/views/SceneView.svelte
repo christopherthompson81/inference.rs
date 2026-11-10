@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import ImageGallery, { type GalleryItem } from "../components/ImageGallery.svelte";
+  import MeshViewer, { type MeshFormat } from "../components/MeshViewer.svelte";
   import SplatViewer, { type SplatFrame } from "../components/SplatViewer.svelte";
   import {
     cancelJob,
@@ -10,13 +11,16 @@
     isFinished,
     jobFileUrl,
     listJobs,
+    submitImageTo3d,
     submitReconstruct,
+    submitVoxels,
     submitWorld,
     type JobEvent,
     type JobRecord,
     type JobStatus,
     type Placement,
-  } from "../services/worlds";
+    type Trellis2Variant,
+  } from "../services/queuedJobs";
 
   // what the job list and a dropped event stream poll at
   const POLL_MS = 5000;
@@ -26,6 +30,12 @@
   const WORLD_SPLATS = "splats/splats.spz";
   const WORLD_SPLAT_REPORT = "splats/splats.json";
   const RECONSTRUCTION_SPLATS = "reconstruction/gaussians.ply";
+  // the image jobs' meshes
+  const MODEL_GLB = "model/model.glb";
+  const VOXELS_PLY = "voxels/voxels.ply";
+  const VOXELS_MESH = "voxels/mesh.ply";
+  const DEFAULT_VOXEL_STEPS = 72;
+  const TEXTURE_SIZES = [1024, 2048, 4096];
   const BADGES: Record<JobStatus, string> = {
     queued: "bg-gray-200 text-gray-700 dark:bg-gray-800 dark:text-gray-300",
     running: "bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300",
@@ -33,14 +43,30 @@
     failed: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300",
     cancelled: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
   };
-  const KINDS: Record<string, string> = { world: "World", reconstruct: "Reconstruction" };
+  const KINDS: Record<string, string> = { world: "World", reconstruct: "Reconstruction", image_to_3d: "Image to 3D", voxels: "Voxels" };
+  type Mode = "world" | "reconstruct" | "image_to_3d" | "voxels";
+  const MODES: { id: Mode; label: string }[] = [
+    { id: "image_to_3d", label: "Object from an image" },
+    { id: "voxels", label: "Voxels from an image" },
+    { id: "world", label: "World from a panorama" },
+    { id: "reconstruct", label: "Scene from photos or a video" },
+  ];
 
   let jobs = $state<JobRecord[]>([]);
   let selected = $state<JobRecord | null>(null);
-  let mode = $state<"world" | "reconstruct">("world");
+  let mode = $state<Mode>("image_to_3d");
   let panorama = $state<File | null>(null);
   let panoramaUrl = $state<string | null>(null);
   let photos = $state<File[]>([]);
+  let image = $state<File | null>(null);
+  let imageUrl = $state<string | null>(null);
+  let variant = $state<Trellis2Variant>("1024_cascade");
+  let textureSize = $state<number | null>(null);
+  let vertexColors = $state(false);
+  let remesh = $state(false);
+  let removeBackground = $state(false);
+  let voxelSteps = $state<number | null>(null);
+  let voxelMesh = $state(true);
   let prompt = $state("");
   let scene = $state<"" | "indoor" | "outdoor">("");
   let seed = $state<number | null>(null);
@@ -53,6 +79,7 @@
   let now = $state(Date.now() / 1000);
   let gallery = $state<{ items: GalleryItem[]; start: number } | null>(null);
   let viewer = $state<{ url: string; frame: SplatFrame; sceneToSplats: number[][] | null; title: string } | null>(null);
+  let meshViewer = $state<{ url: string; format: MeshFormat; flat: boolean; title: string } | null>(null);
 
   let unfollow: (() => void) | null = null;
   let poll: ReturnType<typeof setInterval> | null = null;
@@ -68,6 +95,7 @@
     if (poll) clearInterval(poll);
     if (tick) clearInterval(tick);
     if (panoramaUrl) URL.revokeObjectURL(panoramaUrl);
+    if (imageUrl) URL.revokeObjectURL(imageUrl);
   });
 
   async function refresh() {
@@ -143,21 +171,39 @@
     panoramaUrl = panorama ? URL.createObjectURL(panorama) : null;
   }
 
+  function chooseImage(files: FileList | null) {
+    if (imageUrl) URL.revokeObjectURL(imageUrl);
+    image = files?.[0] ?? null;
+    imageUrl = image ? URL.createObjectURL(image) : null;
+  }
+
+  function send(): Promise<JobRecord> {
+    const room = placement || null;
+    switch (mode) {
+      case "world":
+        return submitWorld(panorama as File, { prompt, scene: scene || null, seed, splats, steps: splats ? steps : null, placement: room });
+      case "reconstruct":
+        return submitReconstruct(photos, { target_size: targetSize, fps: null, max_frames: null, placement: room });
+      case "image_to_3d":
+        return submitImageTo3d(image as File, {
+          seed,
+          variant,
+          remove_background: removeBackground || null,
+          vertex_colors: vertexColors || null,
+          texture_size: vertexColors ? null : textureSize,
+          remesh: remesh || null,
+          placement: room,
+        });
+      case "voxels":
+        return submitVoxels(image as File, { seed, steps: voxelSteps, remove_background: removeBackground || null, mesh: voxelMesh, placement: room });
+    }
+  }
+
   async function submit() {
     busy = true;
     status = "";
     try {
-      const job =
-        mode === "world"
-          ? await submitWorld(panorama as File, {
-              prompt,
-              scene: scene || null,
-              seed,
-              splats,
-              steps: splats ? steps : null,
-              placement: placement || null,
-            })
-          : await submitReconstruct(photos, { target_size: targetSize, fps: null, max_frames: null, placement: placement || null });
+      const job = await send();
       await refresh();
       open(job);
     } catch (error) {
@@ -211,6 +257,16 @@
     return job.outputs.some((output) => output.file === WORLD_SPLATS || output.file === RECONSTRUCTION_SPLATS);
   }
 
+  // the meshes a finished image job can be turned around in
+  function meshes(job: JobRecord): { label: string; file: string; format: MeshFormat; flat: boolean }[] {
+    const made = (file: string) => job.outputs.some((output) => output.file === file);
+    const out: { label: string; file: string; format: MeshFormat; flat: boolean }[] = [];
+    if (made(MODEL_GLB)) out.push({ label: "View model", file: MODEL_GLB, format: "glb", flat: false });
+    if (made(VOXELS_PLY)) out.push({ label: "View voxels", file: VOXELS_PLY, format: "ply", flat: true });
+    if (made(VOXELS_MESH)) out.push({ label: "View mesh", file: VOXELS_MESH, format: "ply", flat: false });
+    return out;
+  }
+
   function title(job: JobRecord): string {
     const prompt = typeof job.request.prompt === "string" ? job.request.prompt : "";
     if (prompt) return prompt;
@@ -227,7 +283,7 @@
     return new Date(seconds * 1000).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
   }
 
-  let ready = $derived(mode === "world" ? panorama != null : photos.length > 0);
+  let ready = $derived(mode === "world" ? panorama != null : mode === "reconstruct" ? photos.length > 0 : image != null);
   const field = "rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm dark:border-gray-700 dark:bg-gray-950";
   const plain = "rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-100 disabled:opacity-50 dark:border-gray-700 dark:hover:bg-gray-800";
   const primary = "rounded-md bg-blue-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50";
@@ -236,7 +292,7 @@
 <div class="flex min-h-0 w-full flex-1 flex-col md:flex-row">
   <aside class="flex max-h-48 shrink-0 flex-col border-b border-gray-200 md:max-h-none md:w-64 md:border-r md:border-b-0 dark:border-gray-800">
     <div class="p-3">
-      <button class="w-full {plain}" onclick={startNew}>New world</button>
+      <button class="w-full {plain}" onclick={startNew}>New</button>
     </div>
     <div class="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
       {#each jobs as job (job.id)}
@@ -265,12 +321,77 @@
       {/if}
 
       {#if !selected}
-        <div class="flex gap-1 self-start rounded-lg bg-gray-100 p-1 text-sm dark:bg-gray-900" role="tablist">
-          <button role="tab" aria-selected={mode === "world"} class="rounded-md px-3 py-1 {mode === 'world' ? 'bg-white shadow-sm dark:bg-gray-800' : ''}" onclick={() => (mode = "world")}>From a panorama</button>
-          <button role="tab" aria-selected={mode === "reconstruct"} class="rounded-md px-3 py-1 {mode === 'reconstruct' ? 'bg-white shadow-sm dark:bg-gray-800' : ''}" onclick={() => (mode = "reconstruct")}>From photos or a video</button>
+        <div class="flex flex-wrap gap-1 self-start rounded-lg bg-gray-100 p-1 text-sm dark:bg-gray-900" role="tablist">
+          {#each MODES as entry (entry.id)}
+            <button role="tab" aria-selected={mode === entry.id} class="rounded-md px-3 py-1 {mode === entry.id ? 'bg-white shadow-sm dark:bg-gray-800' : ''}" onclick={() => (mode = entry.id)}>{entry.label}</button>
+          {/each}
         </div>
 
-        {#if mode === "world"}
+        {#if mode === "image_to_3d" || mode === "voxels"}
+          {#if mode === "image_to_3d"}
+            <p class="text-sm text-gray-600 dark:text-gray-400">
+              TRELLIS.2 builds a textured mesh of the object in one photo: its background removed with BiRefNet, then a voxel structure, the shape and its PBR material, baked into a GLB. About 40 s at 1024 on a 24 GB card, with a 6 GB GPU peak.
+            </p>
+          {:else}
+            <p class="text-sm text-gray-600 dark:text-gray-400">
+              JoVox generates the 64^3 voxel structure of the object in one photo (its background removed with BiRefNet); TRELLIS.2's shape stage can then mesh it. Seconds for the voxels alone.
+            </p>
+          {/if}
+          <label class="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-gray-300 p-4 text-sm text-gray-500 hover:border-blue-400 dark:border-gray-700">
+            {#if imageUrl}
+              <img src={imageUrl} alt="The chosen photo" class="max-h-64 w-full rounded object-contain" />
+              <span>{image?.name}</span>
+            {:else}
+              <span>Choose a photo of one object (a cut-out with transparency keeps its own outline)</span>
+            {/if}
+            <input type="file" accept="image/*" class="hidden" onchange={(e) => chooseImage(e.currentTarget.files)} disabled={busy} />
+          </label>
+          <div class="flex flex-wrap items-end gap-3">
+            {#if mode === "image_to_3d"}
+              <label class="flex flex-col gap-1">
+                <span class="text-[11px] text-gray-500">Resolution</span>
+                <select class={field} bind:value={variant} disabled={busy}>
+                  <option value="1024_cascade">1024 (512, then 1024)</option>
+                  <option value="512">512 (faster, coarser)</option>
+                </select>
+              </label>
+              <label class="flex flex-col gap-1">
+                <span class="text-[11px] text-gray-500">Texture size</span>
+                <select class={field} bind:value={textureSize} disabled={busy || vertexColors}>
+                  <option value={null}>2048 (default)</option>
+                  {#each TEXTURE_SIZES as size (size)}
+                    <option value={size}>{size}</option>
+                  {/each}
+                </select>
+              </label>
+              <label class="flex items-center gap-1.5 pb-1.5 text-sm" title="A closed, single-sided shell around the surface before baking">
+                <input type="checkbox" class="accent-blue-600" bind:checked={remesh} disabled={busy || vertexColors} />
+                Remesh
+              </label>
+              <label class="flex items-center gap-1.5 pb-1.5 text-sm" title="Color and material per vertex instead of baked textures: no unwrapping or baking">
+                <input type="checkbox" class="accent-blue-600" bind:checked={vertexColors} disabled={busy} />
+                Vertex colors
+              </label>
+            {:else}
+              <label class="flex flex-col gap-1">
+                <span class="text-[11px] text-gray-500">Sampling steps</span>
+                <input type="number" min="36" max="108" class="w-28 {field}" bind:value={voxelSteps} placeholder={String(DEFAULT_VOXEL_STEPS)} disabled={busy} />
+              </label>
+              <label class="flex items-center gap-1.5 pb-1.5 text-sm">
+                <input type="checkbox" class="accent-blue-600" bind:checked={voxelMesh} disabled={busy} />
+                Mesh it with TRELLIS.2
+              </label>
+            {/if}
+            <label class="flex flex-col gap-1">
+              <span class="text-[11px] text-gray-500">Seed</span>
+              <input type="number" class="w-28 {field}" bind:value={seed} placeholder="0" disabled={busy} />
+            </label>
+            <label class="flex items-center gap-1.5 pb-1.5 text-sm" title="An opaque photo always has its background removed">
+              <input type="checkbox" class="accent-blue-600" bind:checked={removeBackground} disabled={busy} />
+              Remove the background of a cut-out too
+            </label>
+          </div>
+        {:else if mode === "world"}
           <p class="text-sm text-gray-600 dark:text-gray-400">
             WorldStereo-2 generates views along camera paths around an equirectangular panorama, WorldMirror 2.0 reconstructs them, and Gaussian splats are trained on the result. It takes the GPU to itself, about half an hour on a 24 GB card.
           </p>
@@ -351,6 +472,9 @@
           {#if viewable(job)}
             <button class={primary} onclick={() => view(job)}>View splats</button>
           {/if}
+          {#each meshes(job) as mesh, index (mesh.file)}
+            <button class={index === 0 ? primary : plain} onclick={() => (meshViewer = { url: jobFileUrl(job.id, mesh.file), format: mesh.format, flat: mesh.flat, title: title(job) })}>{mesh.label}</button>
+          {/each}
           {#if !isFinished(job.status)}
             <button class={plain} onclick={() => cancel(job)}>Cancel</button>
           {:else}
@@ -392,7 +516,7 @@
           <div class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
             {#each previewItems(job) as item, index (index)}
               <button class="group flex flex-col gap-1 text-left" onclick={() => (gallery = { items: previewItems(job), start: index })}>
-                <img src={item.url} alt={item.caption} loading="lazy" class="aspect-video w-full rounded object-cover group-hover:opacity-90" />
+                <img src={item.url} alt={item.caption} loading="lazy" class="aspect-video w-full rounded bg-gray-100 object-contain group-hover:opacity-90 dark:bg-gray-900" />
                 <span class="truncate text-[11px] text-gray-500">{item.caption}</span>
               </button>
             {/each}
@@ -413,6 +537,9 @@
 
 {#if gallery}
   <ImageGallery items={gallery.items} start={gallery.start} onClose={() => (gallery = null)} />
+{/if}
+{#if meshViewer}
+  <MeshViewer url={meshViewer.url} format={meshViewer.format} flat={meshViewer.flat} title={meshViewer.title} onClose={() => (meshViewer = null)} />
 {/if}
 {#if viewer}
   <SplatViewer url={viewer.url} frame={viewer.frame} sceneToSplats={viewer.sceneToSplats} title={viewer.title} onClose={() => (viewer = null)} />
