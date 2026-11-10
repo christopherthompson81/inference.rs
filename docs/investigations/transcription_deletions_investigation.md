@@ -207,3 +207,22 @@ the stream has. Confirmed-by-ONNX-or-reference understates the precision of a 1.
 
 Implication: a second pass over overlapped segments of 1.5 s or more (64 here, 267 s, so about +45% ASR time), its
 new words merged into the timeline, recovers the audible drops with little code-switching.
+
+## Run 8 - 2026-11-09 20:30
+
+Question: the same second pass through the engine, as the app would run it: one transcription stream with `spans`
+(branch `transcription-spans`: each `[start, end]` a window transcribed alone, in place of the VAD plan).
+
+Command: `scratchpad/drops/spans_pass.py vulkan:0 f16 <clip> <stream> <diarization> 1.5 <out>`: our diarizer's
+segments of 1.5 s or more that overlap another speaker's, 0.2 s pad, as `spans`; a span's word is added unless the
+stream has the same word within 1 s.
+
+```
+                     words  WER    sub del ins   deleted runs >= 4   ONNX words unmatched within 1 s
+stream (f16)         1498   9.1%   63  29   44   2                   94
+stream + spans pass  1583  12.3%   56  13  114   0                   71
+```
+
+64 spans (292 s with padding) in 1.70 s on the 3090, on top of the stream's ~2.4 s. Deletions more than halve and
+no long run is left; the insertions are the uncounted speech of Run 7 plus repeated fillers, so WER against this
+reference rises.

@@ -39,6 +39,7 @@ const MAX_STREAM_SAMPLES: usize = 12 * 60 * 60 * STREAM_SAMPLE_RATE as usize;
 const PATH_FIELD: &str = "path";
 const FROM_SECONDS_FIELD: &str = "from_seconds";
 const MAX_WINDOW_FIELD: &str = "max_window_seconds";
+const SPANS_FIELD: &str = "spans";
 // the shortest window a transcription stream plans: under ~5 s Parakeet, which identifies the language itself, can
 // switch language from one window to the next
 const MIN_WINDOW_SECONDS: f64 = 5.0;
@@ -54,6 +55,7 @@ struct Source {
     path: Option<PathBuf>,
     from_seconds: f64,
     max_window_seconds: Option<f64>,
+    spans: Option<Vec<(f64, f64)>>,
 }
 
 // `body`'s `path` and `from_seconds`, and the rest of it; `audio` is the bytes the caller gave, if any
@@ -94,15 +96,54 @@ fn split_source(body: &[u8], audio: &Option<Vec<u8>>) -> Result<(Source, Vec<u8>
                 })?,
         ),
     };
+    let spans = match fields.remove(SPANS_FIELD) {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(spans(&value)?),
+    };
+    if spans.is_some() && max_window_seconds.is_some() {
+        return Err(ApiError::invalid_request(
+            "`spans` are the windows; give them or `max_window_seconds`, not both",
+        ));
+    }
     let rest = serde_json::to_vec(&fields).map_err(|_| ApiError::internal())?;
     Ok((
         Source {
             path,
             from_seconds,
             max_window_seconds,
+            spans,
         },
         rest,
     ))
+}
+
+// `spans`: `[start, end]` seconds, each start under its end and none before the last one's
+fn spans(value: &Value) -> Result<Vec<(f64, f64)>, ApiError> {
+    let invalid = || {
+        ApiError::invalid_request(
+            "`spans` must be a non-empty list of [start, end] seconds, 0 <= start < end, starts in order",
+        )
+    };
+    let list = value
+        .as_array()
+        .filter(|l| !l.is_empty())
+        .ok_or_else(invalid)?;
+    let mut out: Vec<(f64, f64)> = Vec::with_capacity(list.len());
+    for span in list {
+        let pair = span
+            .as_array()
+            .filter(|p| p.len() == 2)
+            .ok_or_else(invalid)?;
+        let (Some(start), Some(end)) = (pair[0].as_f64(), pair[1].as_f64()) else {
+            return Err(invalid());
+        };
+        let after_last = out.last().is_none_or(|&(last, _)| start >= last);
+        if !(start.is_finite() && end.is_finite() && 0.0 <= start && start < end && after_last) {
+            return Err(invalid());
+        }
+        out.push((start, end));
+    }
+    Ok(out)
 }
 
 /// Transcribes a whole recording, `audio` bytes or the request's `path` (a local file, decoded as it reads), as a
@@ -229,6 +270,7 @@ async fn transcribe(
 ) -> Result<Value, ApiError> {
     let resume_at = (source.from_seconds > 0.0).then_some(source.from_seconds);
     let max_window_seconds = source.max_window_seconds;
+    let spans = source.spans.clone();
     let audio = load_audio(source, bytes, false, canceled).await?;
     let progress = report(events.clone(), canceled.clone());
     let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
@@ -240,6 +282,7 @@ async fn transcribe(
             translate: request.task == TranscriptionTask::Translate,
             resume_at,
             max_window_seconds,
+            spans: spans.clone(),
         },
         progress: Some(progress.clone()),
     };

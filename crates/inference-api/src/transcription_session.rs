@@ -67,6 +67,7 @@ pub(crate) async fn open(
             translate: false,
             resume_at: None,
             max_window_seconds: None,
+            spans: None,
         },
         sample_rate: request.sample_rate,
     };

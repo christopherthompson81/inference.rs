@@ -310,11 +310,12 @@ impl Parakeet {
             (None, Some(_)) => duration <= LONG_FORM_SECONDS,
             (None, None) => duration <= MAX_SECONDS,
         };
-        let windows = match vad {
+        let windows = match (&options.spans, vad) {
+            (Some(spans), _) => span_windows(spans, pcm.len(), rate)?,
             _ if whole => vec![(0, pcm.len())],
             // past full attention's bound, and with no VAD to find the silences, cut where the audio is quietest
-            None => quiet_windows(&pcm, rate, window_seconds),
-            Some(vad) => {
+            (None, None) => quiet_windows(&pcm, rate, window_seconds),
+            (None, Some(vad)) => {
                 let options = SegmentOptions {
                     max_speech_duration_s: Some(window_seconds),
                     ..SegmentOptions::default()
@@ -642,6 +643,30 @@ fn windows(speech: &[(usize, usize)], max: usize) -> Vec<(usize, usize)> {
         }
     }
     out
+}
+
+// the caller's `(start, end)` seconds as sample windows, cut to the audio; each must hold audio and fit one pass
+fn span_windows(spans: &[(f64, f64)], len: usize, rate: u32) -> Result<Vec<(usize, usize)>> {
+    let at = |seconds: f64| ((seconds * f64::from(rate)).round() as usize).min(len);
+    let max = (MAX_SECONDS * f64::from(rate)) as usize;
+    spans
+        .iter()
+        .map(|&(start, end)| {
+            let (a, b) = (at(start), at(end));
+            if b <= a {
+                return Err(msg(format!(
+                    "the span {start}-{end} s holds no audio (the recording is {:.2} s)",
+                    len as f64 / f64::from(rate)
+                )));
+            }
+            if b - a > max {
+                return Err(msg(format!(
+                    "the span {start}-{end} s is longer than one pass takes ({MAX_SECONDS} s)"
+                )));
+            }
+            Ok((a, b))
+        })
+        .collect()
 }
 
 // back-to-back windows of at most `seconds`, each ending at the quietest frame of its last QUIET_SEARCH_SECONDS (half a

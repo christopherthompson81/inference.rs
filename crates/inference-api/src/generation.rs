@@ -542,6 +542,7 @@ async fn transcribe_inner(
             translate: request.task == TranscriptionTask::Translate,
             resume_at: None,
             max_window_seconds: None,
+            spans: None,
         },
         progress: None,
     };
