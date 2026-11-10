@@ -435,8 +435,8 @@ fn the_unwrap_matches_the_reference() -> Result<()> {
         .map(|r| [r[0], r[1]])
         .collect();
     let start = std::time::Instant::now();
-    let ours =
-        super::charts::uv_unwrap(&mesh).map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
+    let ours = super::charts::uv_unwrap_reference(&mesh)
+        .map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
     let seconds = start.elapsed().as_secs_f64();
     let (ours_area, ours_empty) = uv_coverage(&ours.mesh.faces, &ours.uvs);
     let (theirs_area, theirs_empty) = uv_coverage(&theirs.faces, &their_uvs);
@@ -1267,7 +1267,8 @@ fn unwrap_measures(u: &super::charts::Unwrapped) -> (usize, f64, f64, f64) {
     (islands.len(), boundary, mean, worst)
 }
 
-// TRELLIS2_CHARTS_REF's mesh unwrapped as CuMesh does and with each cluster taken as one chart, compared
+// TRELLIS2_CHARTS_REF's mesh unwrapped as CuMesh does and with each cluster taken as one chart (the default at 30
+// degrees), compared
 #[test]
 #[ignore = "needs a reference dump"]
 fn single_chart_unwrap_is_compared() -> Result<()> {

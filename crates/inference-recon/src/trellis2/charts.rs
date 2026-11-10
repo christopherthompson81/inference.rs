@@ -11,6 +11,8 @@ use super::vec3::{V3, cross, dot, norm, sub};
 
 /// `to_glb`'s defaults
 pub const CONE_HALF_ANGLE: f32 = std::f32::consts::FRAC_PI_2;
+// the unwrap's clusters: tight enough that most flatten as one chart without overlaps
+pub const UNWRAP_CONE_HALF_ANGLE: f32 = std::f32::consts::FRAC_PI_6;
 pub const AREA_PENALTY: f32 = 0.1;
 pub const PERIMETER_AREA_PENALTY: f32 = 1e-4;
 // `remove_degenerate_faces` defaults
@@ -290,9 +292,21 @@ pub struct Unwrapped {
     pub height: u32,
 }
 
+/// Degenerate faces dropped, the mesh clustered by [`compute_charts`] within 30 degree normal cones, and each cluster
+/// taken by xatlas as one chart (split only where it does not parameterize validly), parameterized and packed. Against
+/// CuMesh's settings ([`uv_unwrap_reference`]): an export at 1024 unwraps in about half the time, with less stretch, a
+/// few more seams and slightly lower atlas coverage.
+pub fn uv_unwrap(mesh: &Mesh) -> Result<Unwrapped, inference_xatlas::Error> {
+    uv_unwrap_with(
+        mesh,
+        UNWRAP_CONE_HALF_ANGLE,
+        inference_xatlas::Options { single_chart: true },
+    )
+}
+
 /// CuMesh's `uv_unwrap`: degenerate faces dropped, the clusters of [`compute_charts`] each added to xatlas as a mesh,
 /// charted, parameterized and packed with its defaults, the results gathered in cluster order.
-pub fn uv_unwrap(mesh: &Mesh) -> Result<Unwrapped, inference_xatlas::Error> {
+pub fn uv_unwrap_reference(mesh: &Mesh) -> Result<Unwrapped, inference_xatlas::Error> {
     uv_unwrap_with(mesh, CONE_HALF_ANGLE, inference_xatlas::Options::default())
 }
 

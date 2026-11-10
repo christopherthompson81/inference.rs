@@ -365,3 +365,16 @@ At 1024 the saving is larger than on the 944K-face test mesh (11.5 s of export),
 here. Rendered, the two are indistinguishable at full views and in the close-up: no visible seams or blur from the
 lower atlas coverage. Not wired in: it gives up matching the reference's atlas, so it would be an option or a
 default change to decide on.
+
+## Run 16 - 2026-11-11
+
+Decision (user): the single-chart unwrap at a 30 degree cone becomes the default (`charts::uv_unwrap`;
+`uv_unwrap_reference` keeps CuMesh's settings for the parity test against CuMesh's unwrap). `the_bake_matches_the_reference`
+(surface color looked up through our atlas, so atlas-independent): mean abs diff 0.54 levels (0.57 with CuMesh's
+unwrap), p99 5.7. Robot, 1024-cascade, CLI:
+
+    default          58.6 s (export 15.3 s)
+    --remesh         60.6 s (export 17.0 s)
+    --vertex-colors  44.2 s (export 0.8 s)
+
+Against Run 8's 114.8 / 127.7 / 62 s.
