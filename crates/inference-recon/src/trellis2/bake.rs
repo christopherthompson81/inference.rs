@@ -5,6 +5,7 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use inference_tensor::{Device, Result};
 use inference_vision::inpaint_telea;
 use rayon::prelude::*;
 
@@ -65,6 +66,36 @@ struct Node {
     // leaf: first triangle and count; inner: the right child (the left follows the node)
     start: u32,
     count: u32,
+}
+
+/// Closest-point queries over a [`Bvh`], on a CUDA device when given one (with the host's results).
+pub struct Distances<'a> {
+    bvh: &'a Bvh,
+    #[cfg(feature = "cuda")]
+    device: Option<super::mesh_cuda::DeviceBvh>,
+}
+
+impl<'a> Distances<'a> {
+    pub fn new(bvh: &'a Bvh, device: &Device) -> Result<Self> {
+        let _ = device;
+        Ok(Self {
+            bvh,
+            #[cfg(feature = "cuda")]
+            device: match device {
+                Device::Cuda(dev) => Some(super::mesh_cuda::DeviceBvh::new(bvh, dev)?),
+                _ => None,
+            },
+        })
+    }
+
+    /// [`Bvh::unsigned_distance`], on the device when there is one.
+    pub fn unsigned_distance(&self, points: &[V3]) -> Result<Vec<(f32, u32, V3)>> {
+        #[cfg(feature = "cuda")]
+        if let Some(device) = &self.device {
+            return device.unsigned_distance(points);
+        }
+        Ok(self.bvh.unsigned_distance(points))
+    }
 }
 
 /// A bounding volume hierarchy over a mesh's triangles, for closest-point queries.
@@ -136,6 +167,21 @@ impl Bvh {
                     .powi(2)
             })
             .sum()
+    }
+
+    /// The tree as flat arrays for a device: boxes (min xyz, max xyz), links (start, count), triangles (9 floats),
+    /// and each triangle's face.
+    #[cfg(feature = "cuda")]
+    pub(super) fn flat(&self) -> (Vec<f32>, Vec<u32>, Vec<f32>, Vec<u32>) {
+        let boxes = self
+            .nodes
+            .iter()
+            .flat_map(|n| [n.min, n.max].concat())
+            .collect();
+        let links = self.nodes.iter().flat_map(|n| [n.start, n.count]).collect();
+        let tris = self.tris.iter().flat_map(|(t, _)| t.concat()).collect();
+        let faces = self.tris.iter().map(|(_, f)| *f).collect();
+        (boxes, links, tris, faces)
     }
 
     /// The point of the mesh closest to `p`.
@@ -288,63 +334,68 @@ fn to_u8(x: f32) -> u8 {
 /// `to_glb`'s cleanup chain before unwrapping: holes filled, simplified to three times the target, duplicate faces,
 /// non-manifold edges and specks fixed, holes filled again, simplified to the target and fixed again, faces wound
 /// consistently. Returns the cleaned mesh and the hole-filled one the texels are projected onto.
-pub fn clean(mesh: &Mesh, target: usize) -> (Mesh, Mesh) {
+pub fn clean(mesh: &Mesh, target: usize, device: &Device) -> Result<(Mesh, Mesh)> {
     let mut m = mesh.clone();
     cleanup::fill_holes(&mut m, cleanup::MAX_HOLE_PERIMETER);
     let original = m.clone();
     for target in [target * FIRST_PASS_FACTOR, target] {
-        cleanup::simplify(&mut m, target);
+        cleanup::simplify_on(&mut m, target, device)?;
         cleanup::remove_duplicate_faces(&mut m);
         cleanup::repair_non_manifold_edges(&mut m);
         cleanup::remove_small_connected_components(&mut m, cleanup::MIN_COMPONENT_AREA);
         cleanup::fill_holes(&mut m, cleanup::MAX_HOLE_PERIMETER);
     }
     cleanup::unify_face_orientations(&mut m);
-    (m, original)
+    Ok((m, original))
 }
 
 /// The mesh (in [-0.5, 0.5]^3) cleaned, unwrapped and baked from the attribute volume (`coords` / `values` at
-/// `resolution`).
+/// `resolution`), simplifying on `device`.
 pub fn bake(
     mesh: &Mesh,
     coords: &[[i32; 3]],
     values: &[[f32; 6]],
     resolution: usize,
     options: &BakeOptions,
-) -> Result<Baked, inference_xatlas::Error> {
+    device: &Device,
+) -> Result<Baked> {
     let (cleaned, bvh) = if options.remesh {
         let mut filled = mesh.clone();
         cleanup::fill_holes(&mut filled, cleanup::MAX_HOLE_PERIMETER);
         let bvh = Bvh::new(&filled);
         let mut shell = remesh(
-            &bvh,
+            &Distances::new(&bvh, device)?,
             &Domain::unit_cube(resolution as u32),
             BAND,
             PROJECT_BACK,
-        );
-        cleanup::simplify(&mut shell, options.decimation_target);
+        )?;
+        cleanup::simplify_on(&mut shell, options.decimation_target, device)?;
         (shell, bvh)
     } else {
-        let (cleaned, original) = clean(mesh, options.decimation_target);
+        let (cleaned, original) = clean(mesh, options.decimation_target, device)?;
         (cleaned, Bvh::new(&original))
     };
-    let unwrapped = uv_unwrap(&cleaned)?;
+    let unwrapped = uv_unwrap(&cleaned).map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
     let size = options.texture_size;
     let texel_faces = rasterize(&unwrapped.mesh.faces, &unwrapped.uvs, size);
     let covered: Vec<usize> = (0..size * size).filter(|&t| texel_faces[t] > 0).collect();
     let res = resolution as f32;
-    let points: Vec<V3> = covered
+    let positions: Vec<V3> = covered
         .par_iter()
         .map(|&t| {
             let f = unwrapped.mesh.faces[texel_faces[t] as usize - 1];
             let tri = f.map(|v| unwrapped.uvs[v as usize].map(|c| f64::from(c) * size as f64));
             let p = [(t % size) as f64 + 0.5, (t / size) as f64 + 0.5];
             let w = barycentric(p, tri).expect("a covered texel lies in its face");
-            let pos = (0..3).fold([0f32; 3], |acc, k| {
+            (0..3).fold([0f32; 3], |acc, k| {
                 mad(acc, unwrapped.mesh.vertices[f[k] as usize], w[k] as f32)
-            });
-            bvh.closest(pos).map(|c| (c + 0.5) * res)
+            })
         })
+        .collect();
+    let points: Vec<V3> = Distances::new(&bvh, device)?
+        .unsigned_distance(&positions)?
+        .into_iter()
+        .map(|(_, _, c)| c.map(|v| (v + 0.5) * res))
         .collect();
     let attrs = sample_attributes(coords, values, &points);
     let unknown: Vec<bool> = texel_faces.iter().map(|&f| f == 0).collect();
@@ -457,7 +508,15 @@ mod tests {
             texture_size: 64,
             ..BakeOptions::default()
         };
-        let baked = bake(&mesh, &coords, &values, res as usize, &options).expect("a cube bakes");
+        let baked = bake(
+            &mesh,
+            &coords,
+            &values,
+            res as usize,
+            &options,
+            &Device::Cpu,
+        )
+        .expect("a cube bakes");
         assert_eq!(
             baked.unwrapped.normals.len(),
             baked.unwrapped.mesh.vertices.len()

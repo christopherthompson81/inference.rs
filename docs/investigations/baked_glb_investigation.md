@@ -195,3 +195,80 @@ mapped while loading), which is what `/usr/bin/time`'s 3.9 GB maximum resident c
 
 Next candidates: xatlas's chart growth is the floor here (quadratic in chart size, its output depends on it); our
 simplify (13 s; 25+ s on the remesh's 8.3M faces, against CuMesh's 1 s on the GPU) is the largest piece we own.
+
+## Run 9 - 2026-11-11
+
+Question: the export ran entirely on the CPU while the GPU sat idle; how much does a CUDA port of our largest owned
+step, `cleanup::simplify`, buy, and can it give the host port's exact result?
+
+Benchmark `simplifying_the_remesh_is_timed` (TRELLIS2_REMESH_REF: the remesh's 8.3M-face shell to 1M), host:
+36 rounds (20 at threshold 1e-8, 16 at 1e-7), each 0.1-1.1 s: 13.75 s.
+
+`trellis2::simplify_cuda` + `kernels/cuda/mesh.cu` (the crate's first kernels, fatbin like inference-layout's): the
+mesh stays on the device for every round. Per round: vertex -> face lists (count, scan, fill, then each list sorted
+to the host's ascending order), edges per vertex (each vertex dedupes and ranks its few higher neighbours, so the
+edge list comes out vertex-major and neighbour-ascending like the host's, no global sort), quadrics, costs, the
+per-face cheapest edge (64-bit atomicMin of cost bits << 32 | edge), winners, collapses (winners share no face or
+vertex, so they apply in parallel), compaction by prefix scans. Built with `--fmad=false` so every product rounds as
+on the host.
+
+    simplified on Cpu  in 13.75 s to 465634 vertices / 931728 faces, hash 7c739de25cc0a125
+    simplified on Cuda in  0.49 s to 465634 vertices / 931728 faces, hash 7c739de25cc0a125
+
+Bit-identical, 28x, and faster than CuMesh's own 1.0 s. A GPU case pins it on a bumpy grid (vertices and faces equal).
+`cleanup::simplify_on(mesh, target, device)` dispatches; `bake` and `Generated::vertex_colored` take the device.
+
+End to end (CLI, robot, 1024-cascade): default 115 s -> 87.0 s (export 33.2 s), `--remesh` 128 s -> 93.0 s (export
+38.8 s); same output sizes as before. What is left of the export: xatlas ~28 s (CPU in the reference too), the
+remesh's distance queries ~8 s, chart clustering 3.5 s, inpainting 4.7 s.
+
+## Run 10 - 2026-11-11
+
+Question: the same for the distance queries: the remesh's ~8 s is BVH closest-point queries (band levels, grid
+corners, project back), and the bake's texel projection another 0.5 s.
+
+`bvh_closest` (mesh.cu): the host traversal (nearer child first on a fixed stack, a box skipped when no nearer than
+the best) and Ericson's closest point, `--fmad=false`; the tree uploaded once as flat arrays (`Bvh::flat`,
+`mesh_cuda::DeviceBvh`). `bake::Distances` queries on the device when given one; the remesh and the texel projection
+(now one batched query) take it. `distances_and_the_remesh_match_the_reference`, now also on the device:
+
+    host:   1000000 distances in 5.39 s; remeshed in 7.93 s
+    device: distances in 0.50 s, remeshed in 3.22 s; same distances: true, same shell: true
+
+Bit-identical again; the remesh's remaining 3.2 s is host work (corner keys sorted, value lookups by binary search,
+dual contouring). End to end: `--remesh` 93.0 s -> 86.3 s (export 32.2 s); default unchanged at 87.3 s (its
+projection was 0.5 s).
+
+## Run 11 - 2026-11-11
+
+Question: is generation (the CUDA half) near optimal? Timed against the reference pipeline on this box
+(`time_ref.py`, scratch: PyTorch SDPA attention, no flash-attn installed; robot, 1024-cascade):
+
+    reference, warm: 42.4 s (cond 0.5, structure 6.7, shape cascade 23.0, texture 11.0, decode 1.2); cold 101 s
+    ours (synchronized stage timings, temporary): structure 8.8, shape 512 4.5 + 1024 19.9, texture 11.9,
+    decoders 3.8, ~2.5 s of loads: 53.7 s
+
+nsys over our run (~50 s of kernels): attention (`flash_attn_ext_f16`) 13.0 s, bf16 GEMMs 14.3 s, and ~16 s of
+elementwise passes: `bmul_f32` 3.0, bf16<->f32 casts 4.2, `badd_bf16` 2.4, `ucopy_bf16` 1.5, layernorm 1.3,
+`bdiv_f32` 1.3, sums/squares 1.5... The DiT block ran its norms, q/k normalization, rotations, modulation and
+gated residuals as ~30 separate passes, f32 round trips included. (The guidance interval was already honoured: steps
+outside it run the condition alone.)
+
+`kernels/cuda/dit.cu` + `trellis2::dit_cuda`, used by `Block::forward` for bf16 on CUDA (`forward_inspect`, which the
+parity hooks use, keeps the unfused path):
+
+- `ln_mod_bf16`: LayerNorm in f32 (affine for the cross-attention norm), rounded, then `h * (1 + scale) + shift` in
+  bf16 as the ops round it.
+- `head_norm_rope_bf16`: F.normalize times the gain, rounded, then the pair rotations in f32, rounded, written in
+  attention's [batch, heads, tokens, d] layout (no transpose copies; v goes through it as a plain copy).
+- `gate_residual_bf16`: x + y * gate with both roundings.
+
+GPU cases compare each to the unfused ops: residuals exact, norms within one bf16 rounding (reduction order). First
+end-to-end run produced an empty structure: the guided pass broadcasts one modulation row over its batch of two,
+and the kernels read a row per batch; a zero row stride for a one-row modulation fixed it (cases added).
+
+    structure 8.8 -> 5.8 s, shape 512 4.5 -> 2.8 s, shape 1024 19.9 -> 14.8 s, texture 11.9 -> 8.6 s
+    generate 53.7 -> 40.6 s (reference warm 42.4 s); end to end 87 -> 76.1 s
+
+Rendered: the same robot and texture quality (bf16 runs differ in detail anyway). Left: the decoders (3.8 s against
+the reference's 1.2 s: sparse convolutions) and attention, whose kernel converts bf16 to f16 first.

@@ -87,12 +87,12 @@ pub struct Generated {
 }
 
 impl Generated {
-    /// The mesh with small holes filled, simplified to TRELLIS.2's face budget, and the volume's attributes at each
-    /// vertex.
-    pub fn vertex_colored(&self) -> (Mesh, Vec<Pbr>) {
+    /// The mesh with small holes filled, simplified (on `device`) to TRELLIS.2's face budget, and the volume's
+    /// attributes at each vertex.
+    pub fn vertex_colored(&self, device: &Device) -> Result<(Mesh, Vec<Pbr>)> {
         let mut mesh = self.mesh.clone();
         cleanup::fill_holes(&mut mesh, cleanup::MAX_HOLE_PERIMETER);
-        cleanup::simplify(&mut mesh, cleanup::SIMPLIFY_TARGET);
+        cleanup::simplify_on(&mut mesh, cleanup::SIMPLIFY_TARGET, device)?;
         let res = self.resolution as f32;
         let points: Vec<[f32; 3]> = mesh
             .vertices
@@ -100,7 +100,7 @@ impl Generated {
             .map(|v| v.map(|c| (c + 0.5) * res))
             .collect();
         let attrs = sample_attributes(&self.voxels, &self.voxel_attrs, &points);
-        (mesh, attrs)
+        Ok((mesh, attrs))
     }
 }
 

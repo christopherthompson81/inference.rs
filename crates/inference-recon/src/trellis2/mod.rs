@@ -6,8 +6,12 @@ pub mod charts;
 pub mod cleanup;
 pub mod decoder;
 pub mod dit;
+#[cfg(feature = "cuda")]
+mod dit_cuda;
 pub mod glb;
 pub mod mesh;
+#[cfg(feature = "cuda")]
+mod mesh_cuda;
 #[cfg(test)]
 mod parity;
 pub mod pipeline;

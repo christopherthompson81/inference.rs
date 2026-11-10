@@ -603,8 +603,15 @@ fn the_bake_matches_the_reference() -> Result<()> {
     let resolution = full["resolution"].to_dtype(DType::I64)?.to_vec1::<i64>()?[0] as usize;
     let start = std::time::Instant::now();
 
-    let baked = super::bake::bake(&mesh, &coords, &values, resolution, &Default::default())
-        .map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
+    let baked = super::bake::bake(
+        &mesh,
+        &coords,
+        &values,
+        resolution,
+        &Default::default(),
+        &Device::Cpu,
+    )
+    .map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
     let theirs = mesh_of(&refs, "final.v", "final.f")?;
     let their_uvs: Vec<[f32; 2]> = refs["final.uv"]
         .to_vec2::<f32>()?
@@ -716,12 +723,13 @@ fn distances_and_the_remesh_match_the_reference() -> Result<()> {
     assert!(worst < DISTANCE_TOLERANCE, "distances");
     let domain = super::remesh::Domain::unit_cube(1024);
     let start = std::time::Instant::now();
+    let host = super::bake::Distances::new(&bvh, &Device::Cpu)?;
     let shell = super::remesh::remesh(
-        &bvh,
+        &host,
         &domain,
         super::remesh::BAND,
         super::remesh::PROJECT_BACK,
-    );
+    )?;
     let seconds = start.elapsed().as_secs_f64();
     let reference = mesh_of(&refs, "remesh.v", "remesh.f")?;
     let cell = 1.0 / 1024.0;
@@ -745,6 +753,67 @@ fn distances_and_the_remesh_match_the_reference() -> Result<()> {
         / reference.vertices.len() as f64;
     assert!(ratio < 1e-5, "vertex count");
     assert!(ab_99 < DISTANCE_TOLERANCE, "vertex positions");
+    // the same on a device, when there is one
+    let device = Device::cuda_if_available(0)?;
+    if !device.is_cpu() {
+        let on_device = super::bake::Distances::new(&bvh, &device)?;
+        let start = std::time::Instant::now();
+        let theirs = on_device.unsigned_distance(&points)?;
+        let queried = start.elapsed().as_secs_f64();
+        let start = std::time::Instant::now();
+        let device_shell = super::remesh::remesh(
+            &on_device,
+            &domain,
+            super::remesh::BAND,
+            super::remesh::PROJECT_BACK,
+        )?;
+        println!(
+            "on {device:?}: distances in {queried:.2} s, remeshed in {:.2} s; same distances: {}, same shell: {}",
+            start.elapsed().as_secs_f64(),
+            theirs == ours,
+            mesh_hash(&device_shell) == mesh_hash(&shell)
+        );
+        assert!(theirs == ours, "device distances");
+        assert_eq!(mesh_hash(&device_shell), mesh_hash(&shell), "device shell");
+    }
+    Ok(())
+}
+
+// a mesh's bits, to tell a change that keeps simplification's output from one that moves it
+fn mesh_hash(mesh: &super::mesh::Mesh) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for v in &mesh.vertices {
+        v.map(f32::to_bits).hash(&mut h);
+    }
+    mesh.faces.hash(&mut h);
+    h.finish()
+}
+
+// TRELLIS2_REMESH_REF's remeshed shell (8.3M faces) simplified to the export's budget, timed and hashed
+#[test]
+#[ignore = "needs a reference dump"]
+fn simplifying_the_remesh_is_timed() -> Result<()> {
+    let Some(reference) = std::env::var_os("TRELLIS2_REMESH_REF") else {
+        return Ok(());
+    };
+    let refs = inference_tensor::safetensors::load(reference, &Device::Cpu)?;
+    let input = mesh_of(&refs, "remesh.v", "remesh.f")?;
+    let mut hashes = Vec::new();
+    for device in [Device::Cpu, Device::cuda_if_available(0)?] {
+        let mut mesh = input.clone();
+        let start = std::time::Instant::now();
+        super::cleanup::simplify_on(&mut mesh, super::bake::DECIMATION_TARGET, &device)?;
+        println!(
+            "simplified on {device:?} in {:.2} s to {} vertices / {} faces, hash {:x}",
+            start.elapsed().as_secs_f64(),
+            mesh.vertices.len(),
+            mesh.faces.len(),
+            mesh_hash(&mesh)
+        );
+        hashes.push(mesh_hash(&mesh));
+    }
+    assert_eq!(hashes[0], hashes[1], "the device's result is the host's");
     Ok(())
 }
 
