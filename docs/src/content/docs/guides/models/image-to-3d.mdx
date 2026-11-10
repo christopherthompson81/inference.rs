@@ -1,9 +1,59 @@
 ---
-title: 3D shapes from an image
-description: JoVox generates the 64^3 voxel structure of the object in one image and TRELLIS.2's second stage meshes it; BiRefNet removes the background first.
+title: 3D models from an image
+description: TRELLIS.2 turns one image of an object into a textured mesh (GLB); JoVox generates its voxel structure, which TRELLIS.2's second stage can mesh. BiRefNet removes the background first.
 ---
 
-`inference voxels` turns one image of an object into its 3D shape in two stages. JoVox, a discrete flow-matching
+Two commands turn one image of an object into 3D:
+
+- `inference image-to-3d` runs TRELLIS.2 end to end: a textured mesh (`model.glb`, with per-vertex PBR color and
+  material) from its own sparse structure, shape and texture stages.
+- `inference voxels` runs JoVox for the object's voxel structure and meshes it with TRELLIS.2's shape stage
+  (geometry only).
+
+Both remove the background of an opaque image with BiRefNet first, and take an object on a transparent background as
+it is.
+
+## TRELLIS.2 end to end
+
+```bash
+inference image-to-3d --image chair.jpg --out chair/
+inference image-to-3d --image chair.png --out chair/ --variant 512 --seed 3
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--variant` | `1024-cascade` | `1024-cascade`: shape at 512, upsampled and sampled again at 1024, texture at 1024 (the reference's default). `512`: everything at 512, faster and coarser |
+| `--seed` | 0 | Seeds every stage's noise |
+| `--remove-background` | off | Run BiRefNet even when the image has transparency of its own |
+| `--trellis2`, `--trellis-large`, `--dinov3`, `--birefnet` | fetched | Local checkpoint folders |
+| `--cpu` | off | Run on the CPU (very slow) |
+
+The stages: DINOv3 conditions at 512^2 (and 1024^2 for the cascade); a dense flow samples a 16^3 structure latent that
+TRELLIS-image-large's decoder turns into occupancy (pooled to 32^3); shape latents are sampled on those cells (at 512,
+then for the cascade on the cells the shape decoder upsamples them to, at 1024); texture latents beside them; the shape
+decoder extracts the surface from a flexible dual grid and the texture decoder, following its subdivisions, a volume
+of base color, metallic, roughness and alpha, sampled trilinearly at each vertex. The mesh's small holes are filled and
+it is simplified to at most a million faces.
+
+On an RTX 3090, the robot example: `1024-cascade` 62 s at a 7.5 GB peak, `512` 20 s at 5.7 GB.
+
+```
+chair/
+  model.glb      the mesh; COLOR_0 = base color and alpha, _METALLIC and _ROUGHNESS per vertex
+  mesh.ply       the same mesh, geometry only
+  prepared.png   the object as cut out
+  meta.json      variant, resolution, cell and face counts, timing
+```
+
+The mesh sits in the unit cube centered on the origin, z up. Base color is per vertex (no UV texture yet); glTF viewers
+show `COLOR_0`, and the material's metallic and roughness factors are the vertices' means.
+
+As a server job: `{"kind": "image_to_3d"}` with one image, optionally `seed`, `variant` (`"1024_cascade"` or `"512"`)
+and `remove_background`; outputs under `model/`.
+
+## JoVox voxels
+
+`inference voxels` turns one image of an object into its shape in two stages. JoVox, a discrete flow-matching
 model, generates the object's occupancy at 4^3, 16^3 and 64^3 in one model, conditioned on the image through DINOv3.
 TRELLIS.2's second stage then fills that structure with shape latents under the same image at 1024^2, decodes them to
 a 1024^3 flexible dual grid and extracts a mesh, its small holes filled and its faces reduced to at most a million.
@@ -16,11 +66,13 @@ a 1024^3 flexible dual grid and extracts a mesh, its small holes filled and its 
 | JoVox-64 | [xiangjuntang/JoVox-64](https://huggingface.co/xiangjuntang/JoVox-64) | Apache-2.0 |
 | DINOv3 ViT-L/16 | [facebook/dinov3-vitl16-pretrain-lvd1689m](https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m) | DINOv3 License (gated: request access on the page, then `inference login`) |
 | BiRefNet | [ZhengPeng7/BiRefNet](https://huggingface.co/ZhengPeng7/BiRefNet) | MIT |
-| TRELLIS.2-4B (shape flow and decoder) | [microsoft/TRELLIS.2-4B](https://huggingface.co/microsoft/TRELLIS.2-4B) | MIT |
+| TRELLIS.2-4B | [microsoft/TRELLIS.2-4B](https://huggingface.co/microsoft/TRELLIS.2-4B) | MIT |
+| TRELLIS-image-large (structure decoder, `image-to-3d` only) | [microsoft/TRELLIS-image-large](https://huggingface.co/microsoft/TRELLIS-image-large) | MIT |
 
 Each is fetched into the Hugging Face cache on first use unless its folder is given (`--jovox`, `--dinov3`,
 `--birefnet`, `--trellis2`). BiRefNet is only fetched for an image that needs its background removed, and of
-TRELLIS.2-4B only `pipeline.json` and the two checkpoints the shape stage reads (3.5 GB).
+TRELLIS.2-4B only what each command reads: `voxels` the shape stage's two checkpoints (3.5 GB), `image-to-3d` its seven
+(14 GB).
 
 ## Run it
 

@@ -6720,6 +6720,48 @@
           }
         }
       },
+      "ImageTo3dJob": {
+        "type": "object",
+        "description": "TRELLIS.2's textured mesh of the object in the job's one image.",
+        "properties": {
+          "placement": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Placement",
+                "description": "How much it may displace to run, in place of the server's setting"
+              }
+            ]
+          },
+          "remove_background": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Remove the background with BiRefNet even when the image has transparency of its own (an opaque image always\nhas it removed)"
+          },
+          "seed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "variant": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Trellis2Variant"
+              }
+            ]
+          }
+        }
+      },
       "IncludeOption": {
         "type": "string",
         "description": "Include options for response content.\n\nThis enum specifies additional content to include in the response.\nBy default, certain content may be omitted for efficiency.",
@@ -7198,6 +7240,29 @@
               }
             ],
             "description": "JoVox's voxel structure of the object in one image"
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ImageTo3dJob",
+                "description": "TRELLIS.2's textured mesh of the object in one image"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "image_to_3d"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "TRELLIS.2's textured mesh of the object in one image"
           }
         ],
         "description": "What a job does."
@@ -7358,7 +7423,15 @@
               "string",
               "null"
             ],
-            "description": "TRELLIS.2-4B, whose second stage meshes a voxel job's structure; fetched from its repository when unset",
+            "description": "TRELLIS.2-4B, whose second stage meshes a voxel job's structure and which runs image-to-3D jobs; fetched from\nits repository when unset",
+            "default": null
+          },
+          "trellis_large": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "TRELLIS-image-large, whose sparse-structure decoder TRELLIS.2 reuses; fetched from its repository when unset",
             "default": null
           },
           "wan": {
@@ -15311,6 +15384,14 @@
             "type": "string"
           }
         }
+      },
+      "Trellis2Variant": {
+        "type": "string",
+        "description": "Which resolutions an image-to-3D job runs TRELLIS.2 at.",
+        "enum": [
+          "1024_cascade",
+          "512"
+        ]
       },
       "TruncationStrategy": {
         "type": "string",

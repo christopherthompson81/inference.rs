@@ -25,6 +25,7 @@ use crate::reconstruction::{
     reconstruct_on,
 };
 
+pub mod image_to_3d;
 pub mod reconstruction;
 pub mod voxels;
 pub mod worldgen_package;
@@ -50,6 +51,9 @@ const RECONSTRUCTION_DIR: &str = "reconstruction";
 const VOXELS_DIR: &str = "voxels";
 // a voxel job's peak above idle: the bf16 flows, f32 DINOv3 and BiRefNet, and the decoder's 1024^3 level
 const VOXELS_NEED_BYTES: u64 = 12 << 30;
+// an image-to-3D job's: one flow at a time, but two decoders' 1024^3 levels
+const IMAGE_TO_3D_NEED_BYTES: u64 = 16 << 30;
+const IMAGE_TO_3D_DIR: &str = "model";
 // files read as a video rather than images
 const VIDEO_EXTENSIONS: [&str; 7] = ["mp4", "m4v", "mov", "avi", "mkv", "webm", "gif"];
 // the checkpoints' places under a models root, as their repositories lay them out
@@ -62,12 +66,15 @@ pub(crate) const JOVOX_DIR: &str = "JoVox-64";
 pub(crate) const DINOV3_DIR: &str = "dinov3-vitl16-pretrain-lvd1689m";
 pub(crate) const BIREFNET_DIR: &str = "BiRefNet";
 pub(crate) const TRELLIS2_DIR: &str = "TRELLIS.2-4B";
+pub(crate) const TRELLIS_LARGE_DIR: &str = "TRELLIS-image-large";
 /// Where JoVox-64 is fetched from when no checkpoint is configured.
 pub const JOVOX_REPO: &str = "xiangjuntang/JoVox-64";
 /// Where DINOv3 ViT-L/16 is fetched from (gated: the token's account needs access).
 pub const DINOV3_REPO: &str = "facebook/dinov3-vitl16-pretrain-lvd1689m";
-/// Where TRELLIS.2's shape stage is fetched from.
+/// Where TRELLIS.2 is fetched from.
 pub const TRELLIS2_REPO: &str = "microsoft/TRELLIS.2-4B";
+/// Where the sparse-structure decoder TRELLIS.2 reuses is fetched from.
+pub const TRELLIS_LARGE_REPO: &str = "microsoft/TRELLIS-image-large";
 /// Where BiRefNet is fetched from.
 pub const BIREFNET_REPO: &str = "ZhengPeng7/BiRefNet";
 /// Where WorldMirror 2.0 is fetched from when no checkpoint is configured.
@@ -136,9 +143,13 @@ pub struct JobsConfig {
     /// BiRefNet, which removes the background of a voxel job's opaque image; fetched from its repository when unset
     #[schema(value_type = Option<String>)]
     pub birefnet: Option<PathBuf>,
-    /// TRELLIS.2-4B, whose second stage meshes a voxel job's structure; fetched from its repository when unset
+    /// TRELLIS.2-4B, whose second stage meshes a voxel job's structure and which runs image-to-3D jobs; fetched from
+    /// its repository when unset
     #[schema(value_type = Option<String>)]
     pub trellis2: Option<PathBuf>,
+    /// TRELLIS-image-large, whose sparse-structure decoder TRELLIS.2 reuses; fetched from its repository when unset
+    #[schema(value_type = Option<String>)]
+    pub trellis_large: Option<PathBuf>,
     /// A Hugging Face repo laid out as a models root, fetched into the hub cache before a job that needs a checkpoint
     /// the fields above leave unset
     pub models_repo: Option<String>,
@@ -165,6 +176,7 @@ impl Default for JobsConfig {
             dinov3: None,
             birefnet: None,
             trellis2: None,
+            trellis_large: None,
             models_repo: None,
             worldmirror_repo: Some(WORLDMIRROR_REPO.to_string()),
             devices: None,
@@ -193,6 +205,7 @@ impl JobsConfig {
         self.dinov3 = found(DINOV3_DIR);
         self.birefnet = found(BIREFNET_DIR);
         self.trellis2 = found(TRELLIS2_DIR);
+        self.trellis_large = found(TRELLIS_LARGE_DIR);
         self
     }
 
@@ -395,6 +408,36 @@ pub struct VoxelsJob {
     pub placement: Option<Placement>,
 }
 
+/// Which resolutions an image-to-3D job runs TRELLIS.2 at.
+#[derive(
+    Clone, Copy, Debug, Default, Serialize, inference_json::FromJson, ToSchema, PartialEq, Eq,
+)]
+pub enum Trellis2Variant {
+    /// Shape at 512, then again at 1024 on the upsampled cells; texture at 1024 (the reference's default)
+    #[default]
+    #[serde(rename = "1024_cascade")]
+    Cascade1024,
+    /// Everything at 512: faster, coarser
+    #[serde(rename = "512")]
+    Res512,
+}
+
+/// TRELLIS.2's textured mesh of the object in the job's one image.
+#[derive(Clone, Debug, Default, Serialize, inference_json::FromJson, ToSchema)]
+pub struct ImageTo3dJob {
+    #[serde(default)]
+    pub seed: Option<u64>,
+    #[serde(default)]
+    pub variant: Option<Trellis2Variant>,
+    /// Remove the background with BiRefNet even when the image has transparency of its own (an opaque image always
+    /// has it removed)
+    #[serde(default)]
+    pub remove_background: Option<bool>,
+    /// How much it may displace to run, in place of the server's setting
+    #[serde(default)]
+    pub placement: Option<Placement>,
+}
+
 /// What a job does.
 #[derive(Clone, Debug, Serialize, inference_json::FromJson, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -405,6 +448,9 @@ pub enum JobRequest {
     Reconstruct(ReconstructJob),
     /// JoVox's voxel structure of the object in one image
     Voxels(VoxelsJob),
+    /// TRELLIS.2's textured mesh of the object in one image
+    #[serde(rename = "image_to_3d")]
+    ImageTo3d(ImageTo3dJob),
 }
 
 impl JobRequest {
@@ -413,6 +459,7 @@ impl JobRequest {
             Self::World(_) => "world",
             Self::Reconstruct(_) => "reconstruct",
             Self::Voxels(_) => "voxels",
+            Self::ImageTo3d(_) => "image_to_3d",
         }
     }
 }
@@ -1318,6 +1365,64 @@ fn voxels_work(config: &JobsConfig, job: VoxelsJob) -> Result<(Prepare, Work), A
     Ok((prepare, work))
 }
 
+fn image_to_3d_work(config: &JobsConfig, job: ImageTo3dJob) -> Result<(Prepare, Work), ApiError> {
+    use crate::image_to_3d::{ImageTo3dOptions, fetch_models, generate_3d_on};
+    use inference_recon::trellis2::pipeline::Variant;
+    let options = ImageTo3dOptions {
+        variant: match job.variant.unwrap_or_default() {
+            Trellis2Variant::Cascade1024 => Variant::Cascade1024,
+            Trellis2Variant::Res512 => Variant::Res512,
+        },
+        seed: job.seed.unwrap_or(0),
+        remove_background: job.remove_background.unwrap_or(false),
+    };
+    let fetched = Arc::new(std::sync::OnceLock::new());
+    let (base, slot) = (config.clone(), fetched.clone());
+    let prepare: Prepare = Box::new(move |ctx: &JobContext| {
+        let birefnet = match ctx.inputs().first() {
+            Some(image) => {
+                crate::voxels::needs_background_removal(image, options.remove_background)?
+            }
+            None => false,
+        };
+        let models = fetch_models(
+            base.trellis2.clone(),
+            base.trellis_large.clone(),
+            base.dinov3.clone(),
+            birefnet.then(|| base.birefnet.clone()),
+            ctx,
+        )?;
+        let _ = slot.set(models);
+        Ok(())
+    });
+    let work: Work = Box::new(move |ctx: &JobContext| {
+        let models = fetched.get().expect("prepared before the work runs");
+        let device = ctx.device()?.clone();
+        let image = ctx
+            .inputs()
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("an image-to-3D job takes one image"))?;
+        let out = ctx.dir().join(IMAGE_TO_3D_DIR);
+        let report = generate_3d_on(models, &image, &out, &options, ctx, &device)?;
+        let dir = ctx.dir();
+        let outputs = [
+            ("model", "model/model.glb"),
+            ("mesh", "model/mesh.ply"),
+            ("prepared image", "model/prepared.png"),
+            ("meta", "model/meta.json"),
+        ]
+        .into_iter()
+        .filter_map(|(name, file)| output(dir, file, name))
+        .collect();
+        Ok(JobResult {
+            outputs,
+            report: serde_json::to_value(report)?,
+        })
+    });
+    Ok((prepare, work))
+}
+
 impl JobQueue {
     /// Sets where jobs keep their folders and which weights they run; takes effect for jobs submitted afterwards.
     pub fn configure(&self, config: JobsConfig) {
@@ -1360,6 +1465,16 @@ impl JobQueue {
                 let placement = job.placement;
                 let work = voxels_work(&config, job)?;
                 (JobNeed::Bytes(VOXELS_NEED_BYTES), placement, work)
+            }
+            JobRequest::ImageTo3d(job) => {
+                if inputs.len() != 1 {
+                    return Err(ApiError::invalid_request(
+                        "an image-to-3D job takes one image",
+                    ));
+                }
+                let placement = job.placement;
+                let work = image_to_3d_work(&config, job)?;
+                (JobNeed::Bytes(IMAGE_TO_3D_NEED_BYTES), placement, work)
             }
         };
         let target = Target {

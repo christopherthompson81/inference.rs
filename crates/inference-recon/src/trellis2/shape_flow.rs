@@ -1,6 +1,6 @@
-//! TRELLIS.2's shape flow (`SLatFlowModel`, `slat_flow_img2shape_dit_1_3B_1024`) and its Euler sampler: 32-channel
-//! latents on a 64^3 structure's cells, denoised under a 1024^2 DINOv3 condition with classifier-free guidance over an
-//! interval of the schedule.
+//! TRELLIS.2's flows (`SLatFlowModel` for the shape and texture latents, `SparseStructureFlowModel` for the dense
+//! structure latent: the same DiT, here over a full grid's cells) and their Euler sampler: latents on a structure's
+//! cells, denoised under a DINOv3 condition with classifier-free guidance over an interval of the schedule.
 
 use inference_tensor::nn::{LayerNorm, Linear, Module, VarBuilder};
 use inference_tensor::{DType, Device, Result, Tensor};
@@ -12,23 +12,40 @@ const OUT_EPS: f64 = 1e-5;
 // the sampler hands the model `1000 * t`
 const TIME_SCALE: f64 = 1000.0;
 
-/// `slat_flow_img2shape_dit_1_3B_1024_bf16.json`
+// every TRELLIS.2-4B flow's DiT
+const DIT_1_3B: DitSpec = DitSpec {
+    channels: 1536,
+    cond_channels: 1024,
+    blocks: 30,
+    heads: 12,
+    mlp: 8192,
+    share_mod: true,
+};
+
+/// `slat_flow_img2shape_dit_1_3B_{512,1024}_bf16.json`
 pub const SHAPE_FLOW_1024: ShapeFlowSpec = ShapeFlowSpec {
-    dit: DitSpec {
-        channels: 1536,
-        cond_channels: 1024,
-        blocks: 30,
-        heads: 12,
-        mlp: 8192,
-        share_mod: true,
-    },
-    latent: 32,
+    dit: DIT_1_3B,
+    in_channels: 32,
+    out_channels: 32,
+};
+/// `ss_flow_img_dit_1_3B_64_bf16.json`: 8 channels on a 16^3 grid
+pub const STRUCTURE_FLOW: ShapeFlowSpec = ShapeFlowSpec {
+    dit: DIT_1_3B,
+    in_channels: 8,
+    out_channels: 8,
+};
+/// `slat_flow_imgshape2tex_dit_1_3B_{512,1024}_bf16.json`: noise beside the normalized shape latents in
+pub const TEXTURE_FLOW: ShapeFlowSpec = ShapeFlowSpec {
+    dit: DIT_1_3B,
+    in_channels: 64,
+    out_channels: 32,
 };
 
 #[derive(Clone, Copy, Debug)]
 pub struct ShapeFlowSpec {
     pub dit: DitSpec,
-    pub latent: usize,
+    pub in_channels: usize,
+    pub out_channels: usize,
 }
 
 /// `FlowEulerGuidanceIntervalSampler` as `pipeline.json` sets it for the shape latents.
@@ -40,6 +57,9 @@ pub struct SamplerParams {
     pub guidance_interval: (f64, f64),
     pub rescale_t: f64,
     pub sigma_min: f64,
+    /// The guidance rescale's spread: torch's `std` (Bessel-corrected) on a dense latent, the sparse tensors' own
+    /// population spread on cells
+    pub dense: bool,
 }
 
 pub const SHAPE_SAMPLER: SamplerParams = SamplerParams {
@@ -49,6 +69,25 @@ pub const SHAPE_SAMPLER: SamplerParams = SamplerParams {
     guidance_interval: (0.6, 1.0),
     rescale_t: 3.0,
     sigma_min: 1e-5,
+    dense: false,
+};
+pub const STRUCTURE_SAMPLER: SamplerParams = SamplerParams {
+    steps: 12,
+    guidance_strength: 7.5,
+    guidance_rescale: 0.7,
+    guidance_interval: (0.6, 1.0),
+    rescale_t: 5.0,
+    sigma_min: 1e-5,
+    dense: true,
+};
+pub const TEXTURE_SAMPLER: SamplerParams = SamplerParams {
+    steps: 12,
+    guidance_strength: 1.0,
+    guidance_rescale: 0.0,
+    guidance_interval: (0.6, 0.9),
+    rescale_t: 3.0,
+    sigma_min: 1e-5,
+    dense: false,
 };
 
 pub struct ShapeFlow {
@@ -75,7 +114,7 @@ impl ShapeFlow {
             BLOCK_EPS,
         );
         Ok(Self {
-            input: inference_tensor::nn::linear(spec.latent, c, vb.pp("input_layer"))?,
+            input: inference_tensor::nn::linear(spec.in_channels, c, vb.pp("input_layer"))?,
             t_embed: TimestepMlp::load(c, vb.pp("t_embedder"))?,
             shared_mod: inference_tensor::nn::linear(c, 6 * c, vb.pp("adaLN_modulation").pp(1))?,
             blocks: (0..spec.dit.blocks)
@@ -86,7 +125,7 @@ impl ShapeFlow {
                 Tensor::zeros(c, DType::F32, &device)?,
                 OUT_EPS,
             ),
-            out: inference_tensor::nn::linear(c, spec.latent, vb.pp("out_layer"))?,
+            out: inference_tensor::nn::linear(c, spec.out_channels, vb.pp("out_layer"))?,
             head_dim: c / spec.dit.heads,
             dtype,
             device,
@@ -142,17 +181,25 @@ impl ShapeFlow {
         Rope::new(&positions, self.head_dim, &self.device)
     }
 
-    /// Euler sampling from `noise` `[1, cells, latent]` (f32): `kv` holds the condition then the zero condition. Steps
-    /// in the guidance interval run both and mix them (`cfg = s * pos + (1 - s) * neg`), rescaled toward the positive
-    /// prediction's x0 spread; the others run the condition alone.
+    /// Euler sampling from `noise` `[1, cells, out_channels]` (f32): `kv` holds the condition then the zero condition.
+    /// Steps in the guidance interval run both and mix them (`cfg = s * pos + (1 - s) * neg`), rescaled toward the
+    /// positive prediction's x0 spread; the others run the condition alone. `concat` `[1, cells, channels]` is appended
+    /// to the latents' channels at every step (the texture flow's shape latents).
     pub fn sample(
         &self,
         noise: &Tensor,
         rope: &Rope,
         kv: &[CrossKv],
+        concat: Option<&Tensor>,
         params: &SamplerParams,
         progress: &mut dyn FnMut(usize) -> Result<()>,
     ) -> Result<Tensor> {
+        let input = |x: &Tensor| -> Result<Tensor> {
+            match concat {
+                Some(c) => Tensor::cat(&[x, c], 2),
+                None => Ok(x.clone()),
+            }
+        };
         let cond_only: Vec<CrossKv> = kv.iter().map(|k| k.first(1)).collect::<Result<_>>()?;
         let n = params.steps;
         let r = params.rescale_t;
@@ -170,7 +217,7 @@ impl ShapeFlow {
             let (lo, hi) = params.guidance_interval;
             let guided = lo <= t && t <= hi && params.guidance_strength != 1.0;
             let v = if guided {
-                let both = self.forward(&x.repeat((2, 1, 1))?, model_t, rope, kv)?;
+                let both = self.forward(&input(&x)?.repeat((2, 1, 1))?, model_t, rope, kv)?;
                 let (pos, neg) = (both.narrow(0, 0, 1)?, both.narrow(0, 1, 1)?);
                 let s = params.guidance_strength;
                 let cfg = ((&pos * s)? + (&neg * (1.0 - s))?)?;
@@ -179,7 +226,8 @@ impl ShapeFlow {
                     let k = s_min + (1.0 - s_min) * t;
                     let x0 = |v: &Tensor| (&x * (1.0 - s_min))? - (v * k)?;
                     let (x0_pos, x0_cfg) = (x0(&pos)?, x0(&cfg)?);
-                    let ratio = (population_std(&x0_pos)? / population_std(&x0_cfg)?)?;
+                    let spread = |x: &Tensor| spread(x, params.dense);
+                    let ratio = (spread(&x0_pos)? / spread(&x0_cfg)?)?;
                     let rescaled = x0_cfg.broadcast_mul(&ratio)?;
                     let g = params.guidance_rescale;
                     let x0 = ((rescaled * g)? + (x0_cfg * (1.0 - g))?)?;
@@ -189,7 +237,7 @@ impl ShapeFlow {
                     cfg
                 }
             } else {
-                self.forward(&x, model_t, rope, &cond_only)?
+                self.forward(&input(&x)?, model_t, rope, &cond_only)?
             };
             x = (&x - (v * (t - t_prev))?)?;
             progress(i + 1)?;
@@ -198,14 +246,31 @@ impl ShapeFlow {
     }
 }
 
-// sqrt(E[x^2] - E[x]^2) over all of a sample's cells and channels, `[1, 1, 1]`
-fn population_std(x: &Tensor) -> Result<Tensor> {
+// A sample's spread over all its cells and channels, `[1, 1, 1]`: sqrt(E[x^2] - E[x]^2) for sparse latents, torch's
+// Bessel-corrected std for a dense one
+fn spread(x: &Tensor, dense: bool) -> Result<Tensor> {
+    if dense {
+        let n = x.elem_count() as f64;
+        let centered = x.broadcast_sub(&x.mean_all()?)?;
+        return (centered.sqr()?.sum_all()? / (n - 1.0))?
+            .sqrt()?
+            .reshape((1, 1, 1));
+    }
     let mean = x.mean_all()?;
     let mean2 = x.sqr()?.mean_all()?;
     (mean2 - mean.sqr()?)?.sqrt()?.reshape((1, 1, 1))
 }
 
-/// Latents de-normalized by `pipeline.json`'s `shape_slat_normalization`: `x * std + mean` per channel.
+/// Latents normalized by `pipeline.json`'s statistics: `(x - mean) / std` per channel.
+pub fn normalize(x: &Tensor, mean: &[f32], std: &[f32]) -> Result<Tensor> {
+    let device = x.device();
+    let c = mean.len();
+    let mean = Tensor::from_slice(mean, (1, 1, c), device)?;
+    let std = Tensor::from_slice(std, (1, 1, c), device)?;
+    x.broadcast_sub(&mean)?.broadcast_div(&std)
+}
+
+/// Latents de-normalized by `pipeline.json`'s statistics: `x * std + mean` per channel.
 pub fn denormalize(x: &Tensor, mean: &[f32], std: &[f32]) -> Result<Tensor> {
     let device = x.device();
     let c = mean.len();

@@ -442,6 +442,13 @@ class TranscriptionTask(str, Enum):
     TRANSLATE = "translate"
 
 
+class Trellis2Variant(str, Enum):
+    """Which resolutions an image-to-3D job runs TRELLIS.2 at."""
+
+    _1024_CASCADE = "1024_cascade"
+    _512 = "512"
+
+
 class TruncationStrategy(str, Enum):
     """Truncation strategy for input"""
 
@@ -1382,6 +1389,16 @@ class ImageReference:
 
 
 @dataclass(kw_only=True)
+class ImageTo3dJob:
+    """TRELLIS.2's textured mesh of the object in the job's one image."""
+
+    placement: Placement | None = None
+    remove_background: bool | None = None
+    seed: int | None = None
+    variant: Trellis2Variant | None = None
+
+
+@dataclass(kw_only=True)
 class IncompleteDetails:
     """Details about incomplete responses"""
 
@@ -1534,6 +1551,7 @@ class JobsConfig:
     moge: str | None = None
     placement: Placement | None = Placement.FASTEST
     trellis2: str | None = None
+    trellis_large: str | None = None
     wan: str | None = None
     worldmirror: str | None = None
     worldmirror_repo: str | None = "tencent/HY-World-2.0"

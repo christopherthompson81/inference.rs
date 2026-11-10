@@ -161,6 +161,49 @@ pub fn needs_background_removal(image: &Path, remove_background: bool) -> anyhow
     Ok(!decoded.color().has_alpha() || decoded.to_rgba8().pixels().all(|p| p.0[3] == 255))
 }
 
+/// `image` decoded, shrunk to a longest side of 1024 (PIL Lanczos), and its background removed with BiRefNet when it
+/// has no transparency or `remove_background` asks; whether it was removed.
+pub(crate) fn object_image(
+    image: &Path,
+    birefnet: Option<&Path>,
+    remove_background: bool,
+    progress: &dyn Progress,
+    device: &Device,
+) -> anyhow::Result<(Rgba, bool)> {
+    let decoded = inference_recon::read_image(image)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", image.display()))?
+        .to_rgba8();
+    let input = jovox::shrink(&Rgba {
+        width: decoded.width() as usize,
+        height: decoded.height() as usize,
+        pixels: decoded.into_raw(),
+    });
+    let remove = remove_background || !jovox::has_transparency(&input);
+    let input = if remove {
+        let Some(dir) = birefnet else {
+            anyhow::bail!(
+                "the image has no transparent background and no BiRefNet checkpoint is configured to remove it"
+            );
+        };
+        progress.stage("background", 0);
+        let birefnet = BiRefNet::load(dir, device)?;
+        let rgb: Vec<u8> = input
+            .pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|px| [px[0], px[1], px[2]])
+            .collect();
+        Rgba {
+            pixels: birefnet.cut_out(&rgb, (input.width, input.height))?,
+            ..input
+        }
+    } else {
+        input
+    };
+    Ok((input, remove))
+}
+
 /// [`generate_voxels_on`] on the first CUDA device, or the CPU without one.
 pub fn generate_voxels(
     models: &VoxelModels,
@@ -186,37 +229,13 @@ pub fn generate_voxels_on(
 ) -> anyhow::Result<VoxelReport> {
     let start = Instant::now();
     std::fs::create_dir_all(out_dir)?;
-    let decoded = inference_recon::read_image(image)
-        .map_err(|e| anyhow::anyhow!("{}: {e}", image.display()))?
-        .to_rgba8();
-    let input = jovox::shrink(&Rgba {
-        width: decoded.width() as usize,
-        height: decoded.height() as usize,
-        pixels: decoded.into_raw(),
-    });
-    let remove = options.remove_background || !jovox::has_transparency(&input);
-    let input = if remove {
-        let Some(dir) = &models.birefnet else {
-            anyhow::bail!(
-                "the image has no transparent background and no BiRefNet checkpoint is configured to remove it"
-            );
-        };
-        progress.stage("background", 0);
-        let birefnet = BiRefNet::load(dir, device)?;
-        let rgb: Vec<u8> = input
-            .pixels
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .flat_map(|px| [px[0], px[1], px[2]])
-            .collect();
-        Rgba {
-            pixels: birefnet.cut_out(&rgb, (input.width, input.height))?,
-            ..input
-        }
-    } else {
-        input
-    };
+    let (input, remove) = object_image(
+        image,
+        models.birefnet.as_deref(),
+        options.remove_background,
+        progress,
+        device,
+    )?;
     inference_recon::progress::check(progress)?;
     let prepared = jovox::prepare(&input, options.fill)?;
     let prepared_path = out_dir.join(PREPARED_FILE);

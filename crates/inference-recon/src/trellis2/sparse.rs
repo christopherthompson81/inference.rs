@@ -95,6 +95,28 @@ impl SparseConv {
         })
     }
 
+    /// A dense `nn.Conv3d` (kernel 3, padding 1) as a submanifold convolution over a full grid: its weights
+    /// `[out, in, 3, 3, 3]` reordered to the taps' `[out, 3, 3, 3, in]`.
+    pub fn load_dense(
+        cin: usize,
+        cout: usize,
+        dtype: DType,
+        vb: inference_tensor::nn::VarBuilder,
+    ) -> Result<Self> {
+        let weight = vb
+            .get((cout, cin, 3, 3, 3), "weight")?
+            .permute((0, 2, 3, 4, 1))?
+            .reshape((cout, TAPS * cin))?
+            .t()?
+            .contiguous()?
+            .to_dtype(dtype)?;
+        Ok(Self {
+            weight,
+            bias: vb.get(cout, "bias")?.to_dtype(dtype)?,
+            out: cout,
+        })
+    }
+
     /// `feats` `[cells, in]` convolved over `neighbors`: `[cells, out]`, in the weights' dtype.
     pub fn forward(&self, feats: &Tensor, neighbors: &Neighbors) -> Result<Tensor> {
         let feats = feats.to_dtype(self.weight.dtype())?;

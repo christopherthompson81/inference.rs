@@ -2,7 +2,7 @@
 title: "inference bench"
 description: "Run performance benchmarks for base or LoRA model generation"
 sidebar:
-  order: 18
+  order: 19
 ---
 
 <!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->

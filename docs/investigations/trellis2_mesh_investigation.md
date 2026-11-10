@@ -130,3 +130,60 @@ peak 10667 MiB (idle 1189)
 Orthographic shaded views show the robot's surface cleanly (helmet, arms, legs). The deep job test (an opaque photo:
 BiRefNet, voxels, mesh) passes in 33.5 s. The shape flow (~14 s, 12 steps, 9 of them guided) and the host
 simplification lead the time.
+
+## Run 6 - 2026-11-10 17:30
+
+Question: what does the full TRELLIS.2 pipeline add, and does each new stage match?
+
+`trellis2ref/full_ref.py` (scratch) runs `Trellis2ImageTo3DPipeline.run` on the RGBA robot, `1024_cascade`, seed 42,
+recording every sampler's noise, cells and result, the structure decoder's logits, the decoder's upsampled cells and
+the texture volume. TRELLIS-image-large's `ss_dec_conv3d_16l8` (MIT) is the structure decoder TRELLIS.2 reuses.
+```
+structure (dense 16^3 latent, decoded to 64^3, pooled to 32^3)   1912 cells
+shape at 512 on them; the shape decoder's 4 subdivisions          533076 cells at 512^3
+quantized to 64^3 for the 1024 shape flow, then the texture flow  7933 cells
+decoded                                                            2120713 cells (6 PBR channels), 4296742 faces
+80.1 s (SDPA shim), peak allocated 15.2 GB
+```
+Ported: the dense structure flow (the same DiT over the full 16^3 grid's 4096 cells, x-major), the structure decoder
+(dense 3^3 convolutions run as the sparse convolution over a full grid; `nn.Conv3d` weights are `[out, in, 3, 3, 3]`,
+reordered to FlexGEMM's tap layout; channel LayerNorm, conv + 3D pixel shuffle upsampling), the cascade (the shape
+decoder run 4 stages for its cells, `((c + 0.5) / 512 * 64).int()`, unique), the texture flow (noise and the
+normalized shape latents concatenated on channels), the texture decoder (no subdivision predictor: it follows the
+shape decoder's), and FlexGEMM's sparse trilinear `grid_sample_3d` for vertex attributes.
+
+`every_pipeline_stage_matches_the_reference`, each stage fed the reference's inputs:
+```
+structure latent    rms 8.7e-1   (see below)
+structure logits    rms 1.6e-4   cells 1912 = 1912
+shape 512           rms 4.7e-2
+upsampled cells     533103 vs 533076, 532953 shared;  quantized 7933 = 7933
+shape 1024          rms 1.0e-1
+texture latents     rms 3.3e-2
+texture volume      2120739 vs 2120713 cells, attributes rms 3.3e-4 on the shared ones
+vertex attributes   rms 8.7e-8 (the reference's volume at its vertices)
+```
+The structure latent first looked broken. One forward against the reference's (bf16) is at rms 1.1e-2, so the model
+is right; our f32 and bf16 samplings differ from each other by 92%. The reference's sampler in f32 (`ss_sample_f32.py`,
+the checkpoint is bf16 so the weights are the same) against ours in f32: rms 4.8e-4. Its own bf16 against its own f32:
+65%. The dense structure flow under CFG 7.5 with rescale 0.7 over 12 steps amplifies rounding into a different
+sample; bf16 is the reference's setting, so ours stays bf16. The structure decoder and every later stage fed the
+reference's structure agree.
+
+## Run 7 - 2026-11-10 18:20
+
+Question: does `inference image-to-3d` run end to end, and what does it cost?
+
+`inference_recon::trellis2::pipeline::generate` loads each stage's model for it and drops it after (DINOv3, the
+structure flow and decoder, the 512 shape flow, the shape decoder for the cascade's upsampling, the 1024 shape flow,
+the texture flow, the two decoders), then fills holes, simplifies to 1M faces and samples the texture volume at the
+vertices; `trellis2::glb` writes the GLB (`COLOR_0` base color + alpha, `_METALLIC`, `_ROUGHNESS`; material factors
+the means). CUDA dev build, the RGBA robot, seed 42:
+```
+1024_cascade   62.3 s  peak 7469 MiB (idle ~1190)  4071460 faces extracted -> 465755 vertices / 936758 faces
+512            20.4 s  peak 5708 MiB               1048410 faces extracted -> 462332 vertices / 944179 faces
+reference 1024_cascade: 80.1 s (SDPA shim), peak allocated 15.2 GB (every model resident)
+```
+Shaded renders of both GLBs show the robot in its input's colors (red armor, light blue shirt, brown hands, yellow
+accents); metallic ~0, roughness 0.69-0.81. The deep job test (`image_to_3d_job`, the grey-background photo, 512)
+passes in 21.3 s.
