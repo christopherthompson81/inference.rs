@@ -2,6 +2,7 @@
 // rotations in f32, with a bf16 rounding wherever that path casts back.
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include <cmath>
 
 #define LN_BLOCK 256
 
@@ -53,9 +54,10 @@ extern "C" __global__ void ln_mod_bf16(const bf16* x, const float* w, const floa
 }
 
 // one warp a (batch, token, head) row of `d` (a multiple of 64): read at `src + token_row * token_stride + offset +
-// head * d`, F.normalize'd times `gain` [heads, d] (when given) and rounded, then rotated by `cos` / `sin` [tokens, d/2]
+// head * d` plus the linear's `bias` there (rounded), F.normalize'd times `gain` [heads, d] (when given) and rounded, then rotated by `cos` / `sin` [tokens, d/2]
 // (when given, adjacent channel pairs) and rounded, written to `out` [batch, heads, tokens, d]
-extern "C" __global__ void head_norm_rope_bf16(const bf16* src, long token_stride, long offset, const float* gain,
+extern "C" __global__ void head_norm_rope_bf16(const bf16* src, const bf16* bias, long token_stride, long offset,
+                                               const float* gain,
                                                const float* cos_t, const float* sin_t, bf16* out, int batch,
                                                int tokens, int heads, int d, float eps) {
     const long warp = ((long)blockIdx.x * blockDim.x + threadIdx.x) >> 5;
@@ -70,7 +72,8 @@ extern "C" __global__ void head_norm_rope_bf16(const bf16* src, long token_strid
     const int per = d / 32;
     // each lane owns adjacent pairs, so a rotation stays within the lane
     float v[8];
-    for (int k = 0; k < per; k++) v[k] = f(s[lane * per + k]);
+    const bf16* bh = bias + offset + (long)h * d;
+    for (int k = 0; k < per; k++) v[k] = f(__hadd(s[lane * per + k], bh[lane * per + k]));
     if (gain) {
         float sq = 0.0f;
         for (int k = 0; k < per; k++) sq += v[k] * v[k];
@@ -90,16 +93,28 @@ extern "C" __global__ void head_norm_rope_bf16(const bf16* src, long token_strid
     for (int k = 0; k < per; k++) o[lane * per + k] = b(v[k]);
 }
 
-// x + y * gate in bf16 (each product and sum rounded), the gate read from row `row / rows_per_batch` of `mod` at
+// x + (y + bias) * gate in bf16 (each product and sum rounded), the gate read from row `row / rows_per_batch` of `mod` at
 // `gate_at`; x + y when `mod` is null
-extern "C" __global__ void gate_residual_bf16(const bf16* x, const bf16* y, const bf16* mod, int mod_stride, int gate_at,
+extern "C" __global__ void gate_residual_bf16(const bf16* x, const bf16* y, const bf16* bias, const bf16* mod,
+                                              int mod_stride, int gate_at,
                                               bf16* out, long n, int c, int rows_per_batch) {
     const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    float yv = f(y[i]);
+    float yv = f(__hadd(y[i], bias[i % c]));
     if (mod) {
         const long row = i / c;
         yv = f(b(yv * f(mod[(row / rows_per_batch) * (long)mod_stride + gate_at + i % c])));
     }
     out[i] = b(f(x[i]) + yv);
+}
+
+// gelu(x + bias) (tanh form), the sum rounded and the activation from it in f32 as the unary kernel computes it; that
+// kernel builds with FMA contraction and this file without, so its contracted product is an fmaf here
+extern "C" __global__ void bias_gelu_bf16(const bf16* x, const bf16* bias, long n, int c, bf16* out) {
+    const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const float v = f(__hadd(x[i], bias[i % c]));
+    const float cube = v * v * v;
+    const float alpha = fmaf(0.044715f, cube, v);
+    out[i] = b(0.5f * v * (1.0f + tanhf((float)(M_2_SQRTPI * M_SQRT1_2) * alpha)));
 }

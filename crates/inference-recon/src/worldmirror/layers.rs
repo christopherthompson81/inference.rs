@@ -36,6 +36,11 @@ impl AmpLinear {
     pub(crate) fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         self.inner.forward(&xs.to_dtype(self.dtype)?.contiguous()?)
     }
+
+    #[cfg(feature = "cuda")]
+    pub(crate) fn linear(&self) -> &Linear {
+        &self.inner
+    }
 }
 
 /// LayerNorm in f32 whatever the input dtype, as autocast runs it.

@@ -187,6 +187,21 @@ impl CrossKv {
     }
 }
 
+// a linear's product over `[batch, tokens, in]` without its bias, and the bias, for a fused pass to add
+#[cfg(feature = "cuda")]
+fn unbiased<'a>(linear: &'a AmpLinear, x: &Tensor) -> Result<(Tensor, &'a Tensor)> {
+    let linear = linear.linear();
+    let Some(bias) = linear.bias() else {
+        inference_tensor::bail!("the fused block's linears carry a bias");
+    };
+    let (b, n, k) = x.dims3()?;
+    let y = x
+        .contiguous()?
+        .reshape((b * n, k))?
+        .matmul(&linear.weight().t()?)?;
+    Ok((y.reshape((b, n, ()))?, bias))
+}
+
 fn sdpa(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
     let head_dim = q.dim(D::Minus1)?;
     let params = SdpaParams {
@@ -307,7 +322,7 @@ impl Block {
         rope: &Rope,
         kv: &CrossKv,
     ) -> Result<Tensor> {
-        use super::dit_cuda::{heads, ln_mod, residual};
+        use super::dit_cuda::{bias_gelu, heads, ln_mod, residual};
         // chunks of the modulation: shift, scale and gate for attention, then for the MLP
         const SHIFT_MSA: usize = 0;
         const SCALE_MSA: usize = 1;
@@ -319,36 +334,34 @@ impl Block {
         let (ln_eps, rms_eps) = (BLOCK_EPS as f32, RMS_EPS as f32);
         let m = self.modulation(t_emb)?;
         let h = ln_mod(xs, None, Some((&m, SCALE_MSA, SHIFT_MSA)), ln_eps)?;
-        let qkv = self.qkv.forward(&h)?.reshape((b, n, 3, self.heads, ()))?;
+        let (qkv, qkv_bias) = unbiased(&self.qkv, &h)?;
+        let qkv = qkv.reshape((b, n, 3, self.heads, ()))?;
         let rot = Some((&rope.cos, &rope.sin));
-        let q = heads(&qkv, 0, Some(&self.q_norm.scale), rot, rms_eps)?;
-        let k = heads(&qkv, 1, Some(&self.k_norm.scale), rot, rms_eps)?;
-        let v = heads(&qkv, 2, None, None, rms_eps)?;
+        let q = heads(&qkv, qkv_bias, 0, Some(&self.q_norm.scale), rot, rms_eps)?;
+        let k = heads(&qkv, qkv_bias, 1, Some(&self.k_norm.scale), rot, rms_eps)?;
+        let v = heads(&qkv, qkv_bias, 2, None, None, rms_eps)?;
         let attn = sdpa(&q, &k, &v)?;
-        let attn = self
-            .self_out
-            .forward(&attn.transpose(1, 2)?.reshape((b, n, c))?)?;
-        let xs = residual(xs, &attn, Some((&m, GATE_MSA)))?;
+        let (attn, out_bias) =
+            unbiased(&self.self_out, &attn.transpose(1, 2)?.reshape((b, n, c))?)?;
+        let xs = residual(xs, &attn, out_bias, Some((&m, GATE_MSA)))?;
 
         let bias = self
             .norm2
             .bias()
             .expect("the cross-attention norm has a bias");
         let h = ln_mod(&xs, Some((self.norm2.weight(), bias)), None, ln_eps)?;
-        let q = self
-            .cross_q
-            .forward(&h)?
-            .reshape((b, n, 1, self.heads, ()))?;
-        let q = heads(&q, 0, Some(&self.cross_q_norm.scale), None, rms_eps)?;
+        let (q, q_bias) = unbiased(&self.cross_q, &h)?;
+        let q = q.reshape((b, n, 1, self.heads, ()))?;
+        let q = heads(&q, q_bias, 0, Some(&self.cross_q_norm.scale), None, rms_eps)?;
         let attn = sdpa(&q, &kv.k, &kv.v)?;
-        let attn = self
-            .cross_out
-            .forward(&attn.transpose(1, 2)?.reshape((b, n, c))?)?;
-        let xs = residual(&xs, &attn, None)?;
+        let (attn, out_bias) =
+            unbiased(&self.cross_out, &attn.transpose(1, 2)?.reshape((b, n, c))?)?;
+        let xs = residual(&xs, &attn, out_bias, None)?;
 
         let h = ln_mod(&xs, None, Some((&m, SCALE_MLP, SHIFT_MLP)), ln_eps)?;
-        let mlp = self.fc2.forward(&self.fc1.forward(&h)?.gelu()?)?;
-        residual(&xs, &mlp, Some((&m, GATE_MLP)))
+        let (h, fc1_bias) = unbiased(&self.fc1, &h)?;
+        let (mlp, fc2_bias) = unbiased(&self.fc2, &bias_gelu(&h, fc1_bias)?)?;
+        residual(&xs, &mlp, fc2_bias, Some((&m, GATE_MLP)))
     }
 
     // `forward`, handing `inspect` the first norm, the rotated q and the attention and MLP outputs

@@ -272,3 +272,48 @@ and the kernels read a row per batch; a zero row stride for a one-row modulation
 
 Rendered: the same robot and texture quality (bf16 runs differ in detail anyway). Left: the decoders (3.8 s against
 the reference's 1.2 s: sparse convolutions) and attention, whose kernel converts bf16 to f16 first.
+
+## Run 12 - 2026-11-11
+
+Question: the decoders took 3.8 s against the reference's 1.13 s (`decode_shape_slat` 0.57 + `decode_tex_slat` 0.56).
+`decoding_is_timed` (parity.rs, TRELLIS2_FULL_REF's 1024 latents, both decoders, warm, hashed outputs; dev build):
+
+    baseline: shape 2.00 s, texture 1.96 s, 1733367 cells, hashes 478f9538bb6fae22 547ee5961b606464
+
+nsys: `is_u32_f16` (the im2col `index_select`, one element a thread, 64-bit div/mod per element) 1.34 s of the
+decoders' ~2.7 s of kernels; GEMMs ~1.2 s; 2.6 GB of pageable neighbour-table uploads; the rest host gaps (hashing
+1.7M cells for each level's table).
+
+- `gather_rows` (`kernels/cuda/sparse.cu`): whole rows in 16-byte vectors, an inactive tap's index read as zeros (no
+  padded copy of the features): 3.96 -> 2.67 s, same hashes.
+- `child_neighbors`: a subdivided level's table from its parents' (a child's neighbour lies in its parent or one of
+  the parent's 26; `slots` maps a parent's child slot to the kept child): no hash, no upload. GPU case against a
+  freshly hashed table. 2.67 -> 2.03 s, same hashes.
+- Fused passes (`ln_f16` bias + LayerNorm + silu with the tensor kernel's block size and sums, `bias_silu_f16`,
+  `bias_residual_f16`; the tensor kernels build with FMA contraction and these without, so those products are
+  `fmaf`): 2.03 -> 1.83 s, same hashes.
+
+Left per run: GEMMs 1.22 s at ~72 TFLOPS (the 3090's f16-in/f32-accumulate peak), gather 0.24 s, elementwise 0.23 s.
+Active taps per level 0.56/0.73/0.62/0.44/0.42; FLOP-weighted 0.65, so skipping inactive taps (FlexGEMM's masked
+implicit GEMM) would save at most ~0.4 s, at the cost of a per-tap GEMM or a custom implicit GEMM and changed
+roundings. Not taken.
+
+End to end (robot, 1024-cascade): 76.1 -> 68.7 s (generation ~41.5 -> 37.3 s with the cascade's upsampling decode,
+export 31.4 s).
+
+## Run 13 - 2026-11-11
+
+Question: is attention (13 s, `flash_attn_ext_f16`, bf16 converted to f16 first) worth a kernel of our own? nsys over
+the current build, all kernels 34.0 s:
+
+    flash_attn_ext_f16 12.4 s, bf16 GEMMs ~15 s, badd_bf16 1.52 s (9000 calls), gate_residual 0.57, head_norm_rope
+    0.55, ugelu_bf16 0.48, ln_mod 0.43, convert_to_f16 0.38, ...
+
+The shape-1024 self-attention call (batch 2 x 12 heads x 8259 tokens, d 128) takes 10.9 ms for 838 GFLOP: ~77
+TFLOPS, at the card's tensor-core rate. The f16 conversion is 0.38 s. No kernel of our own, then.
+
+The bias adds of the block's six linears were the largest pass left. Each now rides a fused kernel: qkv's and the
+cross q's in `head_norm_rope_bf16`, the three output projections' in `gate_residual_bf16`, fc1's in a new
+`bias_gelu_bf16` (the tanh GELU, its one contracted product an `fmaf`; the GPU case is exact against the ops). End to
+end: 68.7 -> 68.2 s (generation ~36.3 s against the reference's warm 42.4 s), the same mesh (687104 vertices,
+958912 faces).

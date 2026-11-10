@@ -7,6 +7,8 @@ use inference_tensor::{DType, Device, Result, Tensor};
 use rayon::prelude::*;
 
 pub const TAPS: usize = 27;
+#[cfg(feature = "cuda")]
+const CHILDREN: usize = 8;
 // bits a coordinate takes in a cell's hash key: grids up to 2048 a side
 const KEY_BITS: u32 = 11;
 // the most im2col bytes one chunk of a convolution may hold
@@ -68,6 +70,40 @@ impl Neighbors {
     }
 }
 
+impl Neighbors {
+    /// The neighbours of `children`, the cells these cells' subdivision kept at `rows` (parent row * 8 + child slot,
+    /// on the host and as `device_rows` on the device); on CUDA derived from this table, each child's neighbour lying in
+    /// its parent or one of the parent's.
+    #[cfg_attr(not(feature = "cuda"), expect(unused_variables))]
+    pub fn subdivided(
+        &self,
+        children: &[[i32; 3]],
+        rows: &[u32],
+        device_rows: &Tensor,
+    ) -> Result<Self> {
+        let device = device_rows.device();
+        #[cfg(feature = "cuda")]
+        if device.is_cuda() {
+            let mut slots = vec![children.len() as u32; self.cells * CHILDREN];
+            for (k, &r) in rows.iter().enumerate() {
+                slots[r as usize] = k as u32;
+            }
+            let slots = Tensor::from_vec(slots, self.cells * CHILDREN, device)?;
+            return Ok(Self {
+                index: super::sparse_cuda::child_neighbors(
+                    &self.index,
+                    self.cells as u32,
+                    device_rows,
+                    &slots,
+                    children.len(),
+                )?,
+                cells: children.len(),
+            });
+        }
+        Self::new(children, device)
+    }
+}
+
 /// A submanifold sparse convolution, kernel 3, weights `[taps * in, out]` in its dtype.
 pub struct SparseConv {
     weight: Tensor,
@@ -119,18 +155,52 @@ impl SparseConv {
 
     /// `feats` `[cells, in]` convolved over `neighbors`: `[cells, out]`, in the weights' dtype.
     pub fn forward(&self, feats: &Tensor, neighbors: &Neighbors) -> Result<Tensor> {
+        self.product(feats, neighbors)?.broadcast_add(&self.bias)
+    }
+
+    pub fn bias(&self) -> &Tensor {
+        &self.bias
+    }
+
+    /// [`Self::forward`] without the bias.
+    pub fn product(&self, feats: &Tensor, neighbors: &Neighbors) -> Result<Tensor> {
         let feats = feats.to_dtype(self.weight.dtype())?;
         let (cells, cin) = feats.dims2()?;
-        let padded = Tensor::cat(&[&feats, &feats.zeros_like()?.narrow(0, 0, 1)?], 0)?;
+        #[cfg(feature = "cuda")]
+        let gathers = super::sparse_cuda::applies(&feats)?;
+        #[cfg(not(feature = "cuda"))]
+        let gathers = false;
+        let padded = if gathers {
+            None
+        } else {
+            Some(Tensor::cat(
+                &[&feats, &feats.zeros_like()?.narrow(0, 0, 1)?],
+                0,
+            )?)
+        };
         let row_bytes = TAPS * cin * feats.dtype().size_in_bytes();
         let chunk = (CHUNK_BYTES / row_bytes).max(1);
         let mut parts = Vec::with_capacity(cells.div_ceil(chunk));
         let mut start = 0;
         while start < neighbors.cells {
             let n = chunk.min(neighbors.cells - start);
-            let index = neighbors.index.narrow(0, start * TAPS, n * TAPS)?;
-            let cols = padded.index_select(&index, 0)?.reshape((n, TAPS * cin))?;
-            parts.push(cols.matmul(&self.weight)?.broadcast_add(&self.bias)?);
+            let cols = match &padded {
+                Some(padded) => {
+                    padded.index_select(&neighbors.index.narrow(0, start * TAPS, n * TAPS)?, 0)?
+                }
+                #[cfg(feature = "cuda")]
+                None => super::sparse_cuda::gather(
+                    &feats,
+                    &neighbors.index,
+                    start * TAPS,
+                    n * TAPS,
+                    neighbors.cells as u32,
+                )?,
+                #[cfg(not(feature = "cuda"))]
+                None => unreachable!("gathers only on CUDA"),
+            }
+            .reshape((n, TAPS * cin))?;
+            parts.push(cols.matmul(&self.weight)?);
             start += n;
         }
         let out = Tensor::cat(&parts, 0)?;
@@ -200,6 +270,34 @@ mod tests {
                 assert!((got[i][o] - want).abs() < 1e-4, "cell {i} out {o}");
             }
         }
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    inference_tensor::gpu_cases!(cuda_cases, [subdivided_neighbors_match_a_fresh_table]);
+
+    #[cfg(feature = "cuda")]
+    fn subdivided_neighbors_match_a_fresh_table() -> Result<()> {
+        use rand::{Rng, SeedableRng};
+        let Ok(dev) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        // a ragged blob touching the grid's low faces, each cell keeping a random set of children
+        let coords: Vec<[i32; 3]> = (0..6)
+            .flat_map(|x| (0..5).flat_map(move |y| (0..4).map(move |z| [x, y, z])))
+            .filter(|_| rng.random_bool(0.7))
+            .collect();
+        let keep: Vec<[bool; 8]> = (0..coords.len())
+            .map(|_| std::array::from_fn(|_| rng.random_bool(0.5)))
+            .collect();
+        let (children, rows) = subdivide(&coords, &keep);
+        let parent = Neighbors::new(&coords, &dev)?;
+        let device_rows = Tensor::from_slice(&rows, rows.len(), &dev)?;
+        let got = parent.subdivided(&children, &rows, &device_rows)?;
+        let want = Neighbors::new(&children, &dev)?;
+        assert_eq!(got.cells, want.cells);
+        assert_eq!(got.index.to_vec1::<u32>()?, want.index.to_vec1::<u32>()?);
         Ok(())
     }
 

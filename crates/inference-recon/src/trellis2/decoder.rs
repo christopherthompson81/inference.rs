@@ -7,6 +7,8 @@ use inference_tensor::nn::{LayerNorm, Linear, Module, VarBuilder};
 use inference_tensor::{DType, Device, Result, Tensor};
 
 use super::sparse::{Neighbors, Sparse, SparseConv, subdivide};
+#[cfg(feature = "cuda")]
+use super::sparse_cuda;
 use crate::worldmirror::layers::AmpLinear;
 
 const EPS: f64 = 1e-6;
@@ -56,6 +58,31 @@ fn norm(ln: &LayerNorm, xs: &Tensor) -> Result<Tensor> {
     ln.forward(&xs.to_dtype(DType::F32)?)?.to_dtype(xs.dtype())
 }
 
+// `norm` of `xs` (plus `bias`), silu'd when `act`, in one pass
+#[cfg(feature = "cuda")]
+fn fused_norm(ln: &LayerNorm, xs: &Tensor, bias: Option<&Tensor>, act: bool) -> Result<Tensor> {
+    let Some(beta) = ln.bias() else {
+        inference_tensor::bail!("the decoder's norms carry a bias");
+    };
+    sparse_cuda::layer_norm(xs, bias, ln.weight(), beta, EPS as f32, act)
+}
+
+#[cfg(feature = "cuda")]
+fn bias(linear: &Linear) -> Result<&Tensor> {
+    linear
+        .bias()
+        .ok_or_else(|| inference_tensor::Error::Msg("the decoder's MLPs carry a bias".into()))
+}
+
+// norm then silu
+fn norm_silu(ln: &LayerNorm, xs: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if sparse_cuda::fuses(xs) {
+        return fused_norm(ln, xs, None, true);
+    }
+    norm(ln, xs)?.silu()
+}
+
 /// `SparseConvNeXtBlock3d`: conv, LayerNorm, Linear-SiLU-Linear, residual.
 struct ConvNext {
     conv: SparseConv,
@@ -76,6 +103,18 @@ impl ConvNext {
     }
 
     fn forward(&self, xs: &Tensor, neighbors: &Neighbors) -> Result<Tensor> {
+        #[cfg(feature = "cuda")]
+        if sparse_cuda::fuses(xs) {
+            let h = fused_norm(
+                &self.norm,
+                &self.conv.product(xs, neighbors)?,
+                Some(self.conv.bias()),
+                false,
+            )?;
+            let (fc1, fc2) = (self.fc1.linear(), self.fc2.linear());
+            let h = sparse_cuda::bias_silu(&h.matmul(&fc1.weight().t()?)?, bias(fc1)?)?;
+            return sparse_cuda::bias_residual(&h.matmul(&fc2.weight().t()?)?, bias(fc2)?, xs);
+        }
         let h = norm(&self.norm, &self.conv.forward(xs, neighbors)?)?;
         let h = self.fc2.forward(&self.fc1.forward(&h)?.silu()?)?;
         xs + h
@@ -151,27 +190,27 @@ impl ChannelToSpace {
         let keep = self.keep(x, guide)?;
         let (children, rows) = subdivide(&x.coords, &keep);
         let device = x.feats.device();
-        let rows = Tensor::from_vec(rows, children.len(), device)?;
+        let device_rows = Tensor::from_slice(&rows, children.len(), device)?;
         let h = self
             .conv1
-            .forward(&norm(&self.norm1, &x.feats)?.silu()?, neighbors)?;
+            .forward(&norm_silu(&self.norm1, &x.feats)?, neighbors)?;
         let h = h
             .reshape((n * CHILDREN, self.out))?
-            .index_select(&rows, 0)?;
+            .index_select(&device_rows, 0)?;
         let skip = x
             .feats
             .reshape((n * CHILDREN, c / CHILDREN))?
-            .index_select(&rows, 0)?;
+            .index_select(&device_rows, 0)?;
         let m = children.len();
         let repeat = self.out / (c / CHILDREN);
         let skip = skip
             .unsqueeze(2)?
             .broadcast_as((m, c / CHILDREN, repeat))?
             .reshape((m, self.out))?;
-        let neighbors = Neighbors::new(&children, device)?;
+        let neighbors = neighbors.subdivided(&children, &rows, &device_rows)?;
         let h = self
             .conv2
-            .forward(&norm(&self.norm2, &h)?.silu()?, &neighbors)?;
+            .forward(&norm_silu(&self.norm2, &h)?, &neighbors)?;
         Ok((
             Sparse {
                 coords: children,
