@@ -19,7 +19,7 @@ use crate::{
     api_error::{ApiError, ApiErrorKind},
     generation::{
         audio_error, check_beam, decode_audio, render_diarization, render_transcript, run,
-        speaker_turns, unexpected, word_speakers,
+        speaker_turns, unexpected,
     },
     lora_routing::DEFAULT_MODEL_ID,
     model_inventory::{CancelOnDrop, event},
@@ -27,6 +27,7 @@ use crate::{
         DiarizationRequest, DiarizationResponseFormat, TimestampGranularity, TranscriptionRequest,
         TranscriptionResponseFormat, TranscriptionTask,
     },
+    overlap_pass::{PassContext, noting_windows, overlap_pass},
     request_body::parse_json,
     types::SharedInferenceRsState,
 };
@@ -263,50 +264,59 @@ async fn load_audio(
 async fn transcribe(
     state: &SharedInferenceRsState,
     request: TranscriptionRequest,
-    source: Source,
+    mut source: Source,
     bytes: Option<Vec<u8>>,
     events: &mpsc::UnboundedSender<String>,
     canceled: &RequestCancellation,
 ) -> Result<Value, ApiError> {
     let resume_at = (source.from_seconds > 0.0).then_some(source.from_seconds);
     let max_window_seconds = source.max_window_seconds;
-    let spans = source.spans.clone();
+    let spans = source.spans.take();
     let audio = load_audio(source, bytes, false, canceled).await?;
-    let progress = report(events.clone(), canceled.clone());
+    let (progress, windowed) = noting_windows(Some(report(events.clone(), canceled.clone())));
     let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
+    let options = TranscriptionOptions {
+        language: request.language.clone(),
+        beam_size: request.beam_size,
+        translate: request.task == TranscriptionTask::Translate,
+        resume_at,
+        max_window_seconds,
+        spans,
+    };
     let message = |audio| RequestMessage::Transcription {
         audio,
-        options: TranscriptionOptions {
-            language: request.language.clone(),
-            beam_size: request.beam_size,
-            translate: request.task == TranscriptionTask::Translate,
-            resume_at,
-            max_window_seconds,
-            spans: spans.clone(),
-        },
+        options: options.clone(),
         progress: Some(progress.clone()),
     };
-    let (transcript, speakers) = match request.diarization_model.clone() {
-        None => (
-            run(state, &request.model, repr, message(audio)).await?,
-            None,
-        ),
-        Some(diarizer) => {
-            let (transcript, turns) = futures::join!(
-                run(state, &request.model, repr, message(audio.clone())),
-                speaker_turns(state, &diarizer, audio),
-            );
-            let Response::Diarization(turns) = turns? else {
-                return Err(unexpected(state));
-            };
-            (transcript?, Some(turns.segments))
-        }
+    let Some(diarizer) = request.diarization_model.clone() else {
+        let Response::Transcription(transcript) =
+            run(state, &request.model, repr, message(audio)).await?
+        else {
+            return Err(unexpected(state));
+        };
+        let output = render_transcript(&request, transcript, None)?;
+        return serde_json::from_str(&output.body).map_err(|_| ApiError::internal());
     };
-    let Response::Transcription(transcript) = transcript else {
+    let (transcript, turns) = futures::join!(
+        run(state, &request.model, repr.clone(), message(audio.clone())),
+        speaker_turns(state, &diarizer, audio.clone()),
+    );
+    let (Response::Transcription(transcript), Response::Diarization(turns)) = (transcript?, turns?)
+    else {
         return Err(unexpected(state));
     };
-    let speakers = speakers.map(|turns| word_speakers(&transcript.words, &turns));
-    let output = render_transcript(&request, transcript, speakers.as_deref())?;
+    let ctx = PassContext {
+        state,
+        model: &request.model,
+        repr,
+        options: &options,
+        windowed: windowed.load(Ordering::Relaxed),
+        // the caller's own spans are its own second pass
+        canceled: Some(canceled),
+        enabled: request.overlap_pass != Some(false) && options.spans.is_none(),
+    };
+    let (transcript, speakers) = overlap_pass(ctx, audio, transcript, &turns.segments).await?;
+    let output = render_transcript(&request, transcript, Some(&speakers))?;
     serde_json::from_str(&output.body).map_err(|_| ApiError::internal())
 }
 

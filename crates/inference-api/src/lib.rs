@@ -33,6 +33,7 @@ pub mod media_source;
 pub mod model_inventory;
 pub mod model_manager;
 pub mod models;
+mod overlap_pass;
 pub use inference_protocol::openai;
 pub mod operations;
 pub mod registry;

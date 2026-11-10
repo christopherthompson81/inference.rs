@@ -252,3 +252,28 @@ the seconds) with 81% of the new words.
 Implication: diarize alongside the main pass (as `diarization_model` does now), then transcribe only the overlapped
 turns of 1.5 s or more that hold a 1 s gap in the main pass's words. The gap needs the main pass's words, so the
 spans come after it; batching them makes that cheap.
+
+## Run 10 - 2026-11-09 22:00
+
+Question: the second pass in the engine (`diarization_model` on a transcription, `overlap_pass` on unless false):
+turns of 1.5 s or more that another speaker overlaps and that hold a 1 s gap in the first pass's words, as `spans`.
+Does it hold Run 8's gain, at what cost?
+
+Command: `scratchpad/drops/engine_pass.py vulkan:0 <clip> <out> [off]` (one engine with Parakeet + VAD and
+Nemotron-3 added, stream with `max_window_seconds` 15 and `diarization_model`; one warm-up, three timed).
+
+```
+                       words  WER    sub del ins   deleted runs >= 4   time
+overlap_pass false     1498   9.1%   63  29   44   2                   2.36-2.40 s
+overlap_pass (on)      1566  11.9%   61  16  100   0                   3.27-3.47 s
+app's pass (Run 8)     1583  12.3%   56  13  114   0                   +1.8 s in the app
+```
+
+The gap rule keeps most of Run 8's recovered words for half its spans: +0.9 s against the app's +1.8 s.
+
+Side check, from a review of the Sortformer accuracy work in vernacula: its one fix our cache lacks is merging a
+speaker's gaps under 0.5 s (it reported mean DER 17.2 -> 15.4% on far-field meeting audio). Applied by hand to our
+Nemotron-3 turns on this clip: 254 -> 189 segments, 121 -> 101 of 1.5 s or more. The second pass over the merged
+turns: 35 spans, 236 s, 56 new non-filler words (29 confirmed), against 33 spans, 163 s, 64 (29) unmerged.
+Neutral for the pass (longer spans, same confirmed words); its case rests on diarization accuracy, which this
+clip's reference (no speakers) cannot score.

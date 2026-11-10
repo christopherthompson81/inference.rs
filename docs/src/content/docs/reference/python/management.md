@@ -909,6 +909,7 @@ Speech recognition request; the audio itself travels beside it (a multipart `fil
 | `diarization_model` | `str \| None` | optional |
 | `language` | `str \| None` | optional |
 | `model` | `str \| None` | optional |
+| `overlap_pass` | `bool \| None` | optional |
 | `prompt` | `str \| None` | optional |
 | `response_format` | `TranscriptionResponseFormat \| None` | optional |
 | `task` | `TranscriptionTask \| None` | optional |
