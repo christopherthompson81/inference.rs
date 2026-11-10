@@ -34,3 +34,24 @@ Vulkan alike); the decode is innocent. The app's crash after `done` needs some G
 which its log may show (a second stream, a diarization stream for resumed words). Fix candidates: the caller
 cancels its streams and frees the engine before exiting (safe today); and the library stops in-flight work
 itself at exit, from an exit handler registered after the driver's (so it runs first) that cancels and waits.
+
+## Run 2 - 2026-11-10 01:10
+
+Change: a process-wide exit flag and in-flight count in `inference_tensor::utils`. Every model forward
+(`in_precision` in the pipeline step, and CUDA's lookahead step) is counted; once exiting, a new forward parks its
+thread rather than start. Parakeet's window loop and the diarizer's chunk loop stop at their next check. A libc
+`atexit` handler, registered once a model's engine has loaded (so after the driver's, and run before it), sets the
+flag and waits up to 5 s for the count to reach 0.
+
+Command: `scripts/exit_race_check.sh <device> <10-minute recording> 15` (the `stream` mode of Run 1 as a script),
+bundle library at the change.
+
+```
+             before (Run 1)       after
+CUDA         7 of 12 faulted      0 of 15 (and 0 of 30 with the decode thread beside it)
+Vulkan       7 of 10 faulted      0 of 15 (and 0 of 30)
+```
+
+An exit mid-stream takes 1.6 s in all (load included). A tiny-checkpoint test of the same exit passed with the
+handler removed too (5 of 5 and 12 of 12 child runs): its small products never load cuBLAS, whose runtime's exit
+handler is what faulted, so the check stays a script on the real checkpoint.

@@ -377,6 +377,9 @@ impl Parakeet {
             .filter(|&i| !done(windows[i].1))
             .collect();
         for group in self.batches(&todo, windows) {
+            if inference_tensor::utils::exiting() {
+                return Err(msg(TRANSCRIPTION_STOPPED));
+            }
             let encoded = self.encode_windows(pcm, windows, &group, language)?;
             for (index, encoded) in group.into_iter().zip(encoded) {
                 let (start, end) = windows[index];

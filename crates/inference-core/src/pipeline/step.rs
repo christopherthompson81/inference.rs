@@ -789,6 +789,7 @@ impl dyn Pipeline {
             let bf16 = self.get_metadata().bf16_matmuls;
             #[cfg(feature = "cuda")]
             let forward = if cuda_decode_lookahead {
+                let _work = inference_tensor::utils::InFlight::enter();
                 self.forward_step(inputs, ctx.return_raw_logits)
             } else {
                 in_precision(bf16, || self.forward_inputs(inputs, ctx.return_raw_logits))
@@ -1026,8 +1027,9 @@ impl dyn Pipeline {
 }
 
 // a model whose loader measured it to hold under bf16 matmul inputs takes them on the CPU (`bf16_matmuls`), as
-// every model does under `INFERENCE_CPU_BF16` for its measurement
+// every model does under `INFERENCE_CPU_BF16` for its measurement; counted in flight for the exit handler
 fn in_precision<R>(bf16: bool, forward: impl FnOnce() -> R) -> R {
+    let _work = inference_tensor::utils::InFlight::enter();
     if bf16 || inference_tensor::cpu::bf16_forced() {
         inference_tensor::cpu::with_bf16_matmuls(forward)
     } else {
