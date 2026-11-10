@@ -3549,6 +3549,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-xatlas"
+version = "0.0.27"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "intel-mkl-src"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
