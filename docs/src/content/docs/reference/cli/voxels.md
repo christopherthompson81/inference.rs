@@ -1,13 +1,13 @@
 ---
 title: "inference voxels"
-description: "The 64^3 voxel structure of the object in one image with JoVox, written as a cube mesh (voxels.ply) beside the prepared image and a meta.json; an image without a transparent background has it removed with BiRefNet"
+description: "The 3D shape of the object in one image: JoVox's 64^3 voxel structure (voxels.ply, as cubes), meshed by TRELLIS.2's second stage (mesh.ply), beside the prepared image and a meta.json; an image without a transparent background has it removed with BiRefNet"
 sidebar:
   order: 15
 ---
 
 <!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->
 
-The 64^3 voxel structure of the object in one image with JoVox, written as a cube mesh (voxels.ply) beside the prepared image and a meta.json; an image without a transparent background has it removed with BiRefNet
+The 3D shape of the object in one image: JoVox's 64^3 voxel structure (voxels.ply, as cubes), meshed by TRELLIS.2's second stage (mesh.ply), beside the prepared image and a meta.json; an image without a transparent background has it removed with BiRefNet
 
 ```
 inference voxels [OPTIONS] --image <IMAGE> --out <OUT>
@@ -20,6 +20,8 @@ inference voxels [OPTIONS] --image <IMAGE> --out <OUT>
 | `--jovox <JOVOX>` |  | The JoVox-64 folder; fetched from xiangjuntang/JoVox-64 when unset |
 | `--dinov3 <DINOV3>` |  | The DINOv3 ViT-L/16 folder; fetched from facebook/dinov3-vitl16-pretrain-lvd1689m (gated) when unset |
 | `--birefnet <BIREFNET>` |  | The BiRefNet folder; fetched from ZhengPeng7/BiRefNet when unset and the background needs removing |
+| `--trellis2 <TRELLIS2>` |  | The TRELLIS.2-4B folder; its shape stage is fetched from microsoft/TRELLIS.2-4B when unset |
+| `--no-mesh` | `false` | Stop at the voxel structure: no mesh |
 | `--seed <SEED>` | `0` |  |
 | `--steps <STEPS>` | `72` | Sampling steps, 36 to 108 |
 | `--cfg <CFG>` | `1.5` | Classifier-free guidance, at least 1 |

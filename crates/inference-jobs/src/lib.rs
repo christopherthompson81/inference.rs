@@ -48,8 +48,8 @@ const WORLD_DIR: &str = "world";
 const SPLATS_DIR: &str = "splats";
 const RECONSTRUCTION_DIR: &str = "reconstruction";
 const VOXELS_DIR: &str = "voxels";
-// a voxel job's peak above idle: the bf16 flow, f32 DINOv3 and BiRefNet with their activations
-const VOXELS_NEED_BYTES: u64 = 8 << 30;
+// a voxel job's peak above idle: the bf16 flows, f32 DINOv3 and BiRefNet, and the decoder's 1024^3 level
+const VOXELS_NEED_BYTES: u64 = 12 << 30;
 // files read as a video rather than images
 const VIDEO_EXTENSIONS: [&str; 7] = ["mp4", "m4v", "mov", "avi", "mkv", "webm", "gif"];
 // the checkpoints' places under a models root, as their repositories lay them out
@@ -61,10 +61,13 @@ pub(crate) const LPIPS_FILE: &str = "lpips-vgg/lpips_vgg.safetensors";
 pub(crate) const JOVOX_DIR: &str = "JoVox-64";
 pub(crate) const DINOV3_DIR: &str = "dinov3-vitl16-pretrain-lvd1689m";
 pub(crate) const BIREFNET_DIR: &str = "BiRefNet";
+pub(crate) const TRELLIS2_DIR: &str = "TRELLIS.2-4B";
 /// Where JoVox-64 is fetched from when no checkpoint is configured.
 pub const JOVOX_REPO: &str = "xiangjuntang/JoVox-64";
 /// Where DINOv3 ViT-L/16 is fetched from (gated: the token's account needs access).
 pub const DINOV3_REPO: &str = "facebook/dinov3-vitl16-pretrain-lvd1689m";
+/// Where TRELLIS.2's shape stage is fetched from.
+pub const TRELLIS2_REPO: &str = "microsoft/TRELLIS.2-4B";
 /// Where BiRefNet is fetched from.
 pub const BIREFNET_REPO: &str = "ZhengPeng7/BiRefNet";
 /// Where WorldMirror 2.0 is fetched from when no checkpoint is configured.
@@ -133,6 +136,9 @@ pub struct JobsConfig {
     /// BiRefNet, which removes the background of a voxel job's opaque image; fetched from its repository when unset
     #[schema(value_type = Option<String>)]
     pub birefnet: Option<PathBuf>,
+    /// TRELLIS.2-4B, whose second stage meshes a voxel job's structure; fetched from its repository when unset
+    #[schema(value_type = Option<String>)]
+    pub trellis2: Option<PathBuf>,
     /// A Hugging Face repo laid out as a models root, fetched into the hub cache before a job that needs a checkpoint
     /// the fields above leave unset
     pub models_repo: Option<String>,
@@ -158,6 +164,7 @@ impl Default for JobsConfig {
             jovox: None,
             dinov3: None,
             birefnet: None,
+            trellis2: None,
             models_repo: None,
             worldmirror_repo: Some(WORLDMIRROR_REPO.to_string()),
             devices: None,
@@ -185,21 +192,29 @@ impl JobsConfig {
         self.jovox = found(JOVOX_DIR);
         self.dinov3 = found(DINOV3_DIR);
         self.birefnet = found(BIREFNET_DIR);
+        self.trellis2 = found(TRELLIS2_DIR);
         self
     }
 
     // this config with the voxel job's unset checkpoints fetched from their repositories into the hub cache
-    fn fetched_voxels(&self, birefnet: bool, progress: &dyn Progress) -> anyhow::Result<Self> {
+    fn fetched_voxels(
+        &self,
+        birefnet: bool,
+        mesh: bool,
+        progress: &dyn Progress,
+    ) -> anyhow::Result<Self> {
         let models = voxels::fetch_models(
             self.jovox.clone(),
             self.dinov3.clone(),
             birefnet.then(|| self.birefnet.clone()),
+            mesh.then(|| self.trellis2.clone()),
             progress,
         )?;
         Ok(Self {
             jovox: Some(models.jovox),
             dinov3: Some(models.dinov3),
             birefnet: models.birefnet.or_else(|| self.birefnet.clone()),
+            trellis2: models.trellis2.or_else(|| self.trellis2.clone()),
             ..self.clone()
         })
     }
@@ -372,6 +387,9 @@ pub struct VoxelsJob {
     /// has it removed)
     #[serde(default)]
     pub remove_background: Option<bool>,
+    /// Mesh the structure with TRELLIS.2's second stage (on by default)
+    #[serde(default)]
+    pub mesh: Option<bool>,
     /// How much it may displace to run, in place of the server's setting
     #[serde(default)]
     pub placement: Option<Placement>,
@@ -1240,6 +1258,7 @@ fn voxels_work(config: &JobsConfig, job: VoxelsJob) -> Result<(Prepare, Work), A
     s.temperature = job.temperature.unwrap_or(s.temperature);
     options.fill = job.fill.unwrap_or(options.fill);
     options.remove_background = job.remove_background.unwrap_or(false);
+    options.mesh = job.mesh.unwrap_or(true);
     if !crate::voxels::STEPS_RANGE.contains(&s.steps) {
         return Err(ApiError::invalid_request(format!(
             "steps must be in {}..={}",
@@ -1254,14 +1273,14 @@ fn voxels_work(config: &JobsConfig, job: VoxelsJob) -> Result<(Prepare, Work), A
     }
     let fetched = Arc::new(std::sync::OnceLock::new());
     let (base, slot) = (config.clone(), fetched.clone());
-    let remove = options.remove_background;
+    let (remove, mesh) = (options.remove_background, options.mesh);
     let prepare: Prepare = Box::new(move |ctx: &JobContext| {
         let image = ctx.inputs().into_iter().next();
         let birefnet = match &image {
             Some(image) => crate::voxels::needs_background_removal(image, remove)?,
             None => false,
         };
-        let _ = slot.set(base.fetched_voxels(birefnet, ctx)?);
+        let _ = slot.set(base.fetched_voxels(birefnet, mesh, ctx)?);
         Ok(())
     });
     let work: Work = Box::new(move |ctx: &JobContext| {
@@ -1270,6 +1289,7 @@ fn voxels_work(config: &JobsConfig, job: VoxelsJob) -> Result<(Prepare, Work), A
             jovox: fetched_path(&config.jovox, "JoVox-64 checkpoint")?,
             dinov3: fetched_path(&config.dinov3, "DINOv3 checkpoint")?,
             birefnet: config.birefnet.clone(),
+            trellis2: config.trellis2.clone(),
         };
         let device = ctx.device()?.clone();
         let image = ctx
@@ -1282,6 +1302,7 @@ fn voxels_work(config: &JobsConfig, job: VoxelsJob) -> Result<(Prepare, Work), A
             crate::voxels::generate_voxels_on(&models, &image, &out, &options, ctx, &device)?;
         let dir = ctx.dir();
         let outputs = [
+            ("mesh", "voxels/mesh.ply"),
             ("voxels", "voxels/voxels.ply"),
             ("prepared image", "voxels/prepared.png"),
             ("meta", "voxels/meta.json"),

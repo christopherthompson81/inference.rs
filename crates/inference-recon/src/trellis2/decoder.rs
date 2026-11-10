@@ -109,7 +109,9 @@ impl ChannelToSpace {
             .flatten_all()?
             .to_vec1::<u8>()?;
         let keep: Vec<[bool; CHILDREN]> = subdiv
-            .chunks_exact(CHILDREN)
+            .as_chunks::<CHILDREN>()
+            .0
+            .iter()
             .map(|k| std::array::from_fn(|j| k[j] != 0))
             .collect();
         let (children, rows) = subdivide(&x.coords, &keep);
@@ -216,9 +218,18 @@ impl ShapeDecoder {
     }
 }
 
-/// The decoder's outputs as the mesh extraction reads them: each cell's dual vertex within it (`2 sigmoid - 0.5`,
-/// the margin), which of its x/y/z edges the surface crosses, and its quad split weight (softplus).
-pub fn dual_grid(out: &Tensor) -> Result<(Vec<[f32; 3]>, Vec<[bool; 3]>, Vec<f32>)> {
+/// The decoder's outputs as the mesh extraction reads them.
+pub struct DualGrid {
+    /// Each cell's dual vertex within it (`2 sigmoid - 0.5`, the margin)
+    pub vertices: Vec<[f32; 3]>,
+    /// Which of its x/y/z edges the surface crosses
+    pub crossed: Vec<[bool; 3]>,
+    /// Its quad split weight (softplus)
+    pub split: Vec<f32>,
+}
+
+/// [`DualGrid`] from the decoder's 7 outputs a cell.
+pub fn dual_grid(out: &Tensor) -> Result<DualGrid> {
     let scale = (1.0 + 2.0 * VOXEL_MARGIN) as f32;
     let margin = VOXEL_MARGIN as f32;
     let rows = out.to_dtype(DType::F32)?.to_vec2::<f32>()?;
@@ -232,7 +243,11 @@ pub fn dual_grid(out: &Tensor) -> Result<(Vec<[f32; 3]>, Vec<[bool; 3]>, Vec<f32
         .map(|r| std::array::from_fn(|k| r[3 + k] > 0.0))
         .collect();
     let split = rows.iter().map(|r| softplus(r[6])).collect();
-    Ok((vertices, crossed, split))
+    Ok(DualGrid {
+        vertices,
+        crossed,
+        split,
+    })
 }
 
 // torch's softplus (beta 1, threshold 20): log1p(exp(x)), x itself above 20

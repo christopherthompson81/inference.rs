@@ -1,11 +1,13 @@
-//! Image to voxels: JoVox's 64^3 structure of the object in one image, its background removed by BiRefNet unless the
-//! image already carries a transparent one. Writes the prepared image, the voxels as a cube mesh and a `meta.json`.
+//! Image to 3D: JoVox's 64^3 structure of the object in one image (its background removed by BiRefNet unless the
+//! image already carries a transparent one), then TRELLIS.2's second stage meshes it. Writes the prepared image, the
+//! voxels as a cube mesh, the mesh and a `meta.json`.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use inference_recon::birefnet::BiRefNet;
 use inference_recon::jovox::{self, JoVox, Rgba, SampleOptions};
+use inference_recon::trellis2::{self, ShapeStage, cleanup};
 use inference_tensor::{DType, Device};
 use serde::Serialize;
 
@@ -14,6 +16,7 @@ pub use inference_recon::progress::{NoProgress, Progress};
 
 pub const PREPARED_FILE: &str = "prepared.png";
 pub const VOXELS_FILE: &str = "voxels.ply";
+pub const MESH_FILE: &str = "mesh.ply";
 pub const META_FILE: &str = "meta.json";
 
 const WEIGHTS_FILE: &str = "model.safetensors";
@@ -27,6 +30,8 @@ pub struct VoxelModels {
     pub dinov3: PathBuf,
     /// BiRefNet's folder, for images without a transparent background
     pub birefnet: Option<PathBuf>,
+    /// TRELLIS.2-4B's folder (`pipeline.json` and the shape flow and decoder under `ckpts/`), to mesh the structure
+    pub trellis2: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -36,6 +41,8 @@ pub struct VoxelOptions {
     pub fill: f32,
     /// Remove the background even when the image has transparency of its own
     pub remove_background: bool,
+    /// Mesh the structure with TRELLIS.2's second stage
+    pub mesh: bool,
 }
 
 impl Default for VoxelOptions {
@@ -44,8 +51,19 @@ impl Default for VoxelOptions {
             sample: SampleOptions::default(),
             fill: DEFAULT_FILL,
             remove_background: false,
+            mesh: true,
         }
     }
+}
+
+/// The mesh stage's counts and time.
+#[derive(Clone, Debug, Serialize)]
+pub struct MeshReport {
+    /// The mesh as extracted, before hole filling and simplification
+    pub raw_faces: usize,
+    pub vertices: usize,
+    pub faces: usize,
+    pub seconds: f64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -59,15 +77,18 @@ pub struct VoxelReport {
     pub temperature: f32,
     pub fill: f32,
     pub sample_seconds: f64,
+    pub mesh: Option<MeshReport>,
     pub total_seconds: f64,
 }
 
-/// The checkpoints given, the others fetched from their repositories (JoVox-64, the gated DINOv3 ViT-L/16, BiRefNet)
-/// into the hub cache. `birefnet` is `None` when it is not wanted, `Some(None)` to fetch it.
+/// The checkpoints given, the others fetched from their repositories (JoVox-64, the gated DINOv3 ViT-L/16, BiRefNet,
+/// TRELLIS.2-4B's shape stage) into the hub cache. `birefnet` and `trellis2` are `None` when not wanted, `Some(None)`
+/// to fetch them.
 pub fn fetch_models(
     jovox: Option<PathBuf>,
     dinov3: Option<PathBuf>,
     birefnet: Option<Option<PathBuf>>,
+    trellis2: Option<Option<PathBuf>>,
     progress: &dyn Progress,
 ) -> anyhow::Result<VoxelModels> {
     let mut slots = [
@@ -100,10 +121,33 @@ pub fn fetch_models(
         }
     }
     let [(jovox, _), (dinov3, _), (birefnet, _)] = slots;
+    let trellis2 = match trellis2 {
+        Some(None) => {
+            let repo = crate::hub_api()?.model(crate::TRELLIS2_REPO.to_string());
+            progress.stage(crate::DOWNLOAD_STAGE, trellis2::FILES.len());
+            let mut root = None;
+            for (i, file) in trellis2::FILES.iter().enumerate() {
+                inference_recon::progress::check(progress)?;
+                let path = repo
+                    .get(file)
+                    .map_err(|e| anyhow::anyhow!("fetching `{}`: {e}", crate::TRELLIS2_REPO))?;
+                root = root.or_else(|| {
+                    path.ancestors()
+                        .nth(Path::new(file).components().count())
+                        .map(Path::to_path_buf)
+                });
+                progress.advance(i + 1);
+            }
+            root
+        }
+        Some(path) => path,
+        None => None,
+    };
     Ok(VoxelModels {
         jovox: jovox.expect("fetched"),
         dinov3: dinov3.expect("fetched"),
         birefnet,
+        trellis2,
     })
 }
 
@@ -130,8 +174,8 @@ pub fn generate_voxels(
 }
 
 /// The voxel structure of the object in `image` into `out_dir`: `prepared.png` (what the model sees), `voxels.ply`
-/// (the occupied cells as cubes in the unit cube) and `meta.json` (this report). The flow runs in bf16 on a GPU, f32 on
-/// the CPU.
+/// (the occupied cells as cubes in the unit cube), with `options.mesh` `mesh.ply` (TRELLIS.2's surface, holes filled,
+/// at most 1M faces), and `meta.json` (this report). The flows run in bf16 on a GPU, f32 on the CPU.
 pub fn generate_voxels_on(
     models: &VoxelModels,
     image: &Path,
@@ -190,12 +234,38 @@ pub fn generate_voxels_on(
     } else {
         DType::BF16
     };
+    if options.mesh && models.trellis2.is_none() {
+        anyhow::bail!("meshing needs the TRELLIS.2-4B checkpoint");
+    }
     let model = JoVox::load(&models.jovox, &models.dinov3, dtype, device)?;
     let cond = model.condition(&prepared)?;
     let sampled = Instant::now();
     let voxels = model.sample(&cond, &options.sample, progress)?;
     let sample_seconds = sampled.elapsed().as_secs_f64();
     std::fs::write(out_dir.join(VOXELS_FILE), jovox::voxel_ply(&voxels))?;
+    let mesh = match &models.trellis2 {
+        Some(dir) if options.mesh && !voxels.is_empty() => {
+            let meshed = Instant::now();
+            let size = (trellis2::RESOLUTION, trellis2::RESOLUTION);
+            let cond = model.encode_rgb(&trellis2::condition_image(&prepared)?, size)?;
+            drop(model);
+            let stage = ShapeStage::load(dir, device)?;
+            let mut mesh = stage.mesh(&cond, &voxels, options.sample.seed, progress)?;
+            drop(stage);
+            let raw_faces = mesh.faces.len();
+            progress.stage("cleanup", 0);
+            cleanup::fill_holes(&mut mesh, cleanup::MAX_HOLE_PERIMETER);
+            cleanup::simplify(&mut mesh, cleanup::SIMPLIFY_TARGET);
+            std::fs::write(out_dir.join(MESH_FILE), mesh.to_ply())?;
+            Some(MeshReport {
+                raw_faces,
+                vertices: mesh.vertices.len(),
+                faces: mesh.faces.len(),
+                seconds: meshed.elapsed().as_secs_f64(),
+            })
+        }
+        _ => None,
+    };
     let s = options.sample;
     let report = VoxelReport {
         voxels: voxels.len(),
@@ -207,6 +277,7 @@ pub fn generate_voxels_on(
         temperature: s.temperature,
         fill: options.fill,
         sample_seconds,
+        mesh,
         total_seconds: start.elapsed().as_secs_f64(),
     };
     std::fs::write(out_dir.join(META_FILE), serde_json::to_vec_pretty(&report)?)?;

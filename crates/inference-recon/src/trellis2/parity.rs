@@ -156,8 +156,8 @@ fn the_decoder_and_mesh_match_the_reference() -> Result<()> {
 
     // the mesh from the reference's own decoder output, so it is checked apart from the decoder's drift
     let ref_cells = coords(&refs["dec.out.coords"])?;
-    let (dual, crossed, split) = dual_grid(&refs["dec.out"])?;
-    let mesh = dual_grid_mesh(&ref_cells, &dual, &crossed, &split, 1024);
+    let grid = dual_grid(&refs["dec.out"])?;
+    let mesh = dual_grid_mesh(&ref_cells, &grid.vertices, &grid.crossed, &grid.split, 1024);
     let want_v = refs["mesh.v"].to_vec2::<f32>()?;
     let want_f = refs["mesh.f"].to_dtype(DType::I64)?.to_vec2::<i64>()?;
     let worst = mesh
@@ -181,12 +181,148 @@ fn the_decoder_and_mesh_match_the_reference() -> Result<()> {
     );
     assert_eq!(ours, theirs, "faces");
 
-    let (dual, crossed, split) = dual_grid(&out.feats)?;
-    let ours = dual_grid_mesh(&out.coords, &dual, &crossed, &split, 1024);
+    let grid = dual_grid(&out.feats)?;
+    let ours = dual_grid_mesh(
+        &out.coords,
+        &grid.vertices,
+        &grid.crossed,
+        &grid.split,
+        1024,
+    );
     println!(
         "mesh from our decoder: {} vertices, {} faces",
         ours.vertices.len(),
         ours.faces.len()
     );
+    Ok(())
+}
+
+// Mean and 99th-percentile distance from each of `a`'s vertices to the nearest of `b`'s (a grid of `cell` side)
+fn nearest(a: &[[f32; 3]], b: &[[f32; 3]], cell: f32) -> (f32, f32) {
+    let key = |p: &[f32; 3]| p.map(|v| (v / cell).floor() as i32);
+    let mut grid: HashMap<[i32; 3], Vec<usize>> = HashMap::new();
+    for (i, p) in b.iter().enumerate() {
+        grid.entry(key(p)).or_default().push(i);
+    }
+    let mut d: Vec<f32> = a
+        .iter()
+        .map(|p| {
+            let k = key(p);
+            let mut best = f32::INFINITY;
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        if let Some(ids) = grid.get(&[k[0] + dx, k[1] + dy, k[2] + dz]) {
+                            for &i in ids {
+                                let q = b[i];
+                                let dist = ((p[0] - q[0]).powi(2)
+                                    + (p[1] - q[1]).powi(2)
+                                    + (p[2] - q[2]).powi(2))
+                                .sqrt();
+                                best = best.min(dist);
+                            }
+                        }
+                    }
+                }
+            }
+            best.min(cell)
+        })
+        .collect();
+    d.sort_by(f32::total_cmp);
+    let mean = d.iter().sum::<f32>() / d.len() as f32;
+    (mean, d[d.len() * 99 / 100])
+}
+
+fn mesh_of(refs: &HashMap<String, Tensor>, v: &str, f: &str) -> Result<super::mesh::Mesh> {
+    Ok(super::mesh::Mesh {
+        vertices: refs[v]
+            .to_vec2::<f32>()?
+            .iter()
+            .map(|r| [r[0], r[1], r[2]])
+            .collect(),
+        faces: refs[f]
+            .to_dtype(DType::I64)?
+            .to_vec2::<i64>()?
+            .iter()
+            .map(|r| [r[0] as u32, r[1] as u32, r[2] as u32])
+            .collect(),
+    })
+}
+
+#[test]
+#[ignore = "needs a reference dump"]
+fn holes_and_simplification_match_the_reference() -> Result<()> {
+    let Some((_, reference)) = paths() else {
+        return Ok(());
+    };
+    let refs = inference_tensor::safetensors::load(&reference, &Device::Cpu)?;
+    let mut mesh = mesh_of(&refs, "mesh.v", "mesh.f")?;
+    let start = std::time::Instant::now();
+    super::cleanup::fill_holes(&mut mesh, super::cleanup::MAX_HOLE_PERIMETER);
+    let filled = mesh_of(&refs, "filled.v", "filled.f")?;
+    println!(
+        "filled in {:.2} s: {} vertices / {} faces vs {} / {}",
+        start.elapsed().as_secs_f64(),
+        mesh.vertices.len(),
+        mesh.faces.len(),
+        filled.vertices.len(),
+        filled.faces.len()
+    );
+    assert_eq!(mesh.faces.len(), filled.faces.len(), "filled faces");
+    let start = std::time::Instant::now();
+    let mut ours = filled.clone();
+    super::cleanup::simplify(&mut ours, super::cleanup::SIMPLIFY_TARGET);
+    let theirs = mesh_of(&refs, "simple.v", "simple.f")?;
+    let cell = 2.0 / 1024.0;
+    let (ab_mean, ab_99) = nearest(&ours.vertices, &theirs.vertices, cell);
+    let (ba_mean, ba_99) = nearest(&theirs.vertices, &ours.vertices, cell);
+    let (fb_mean, fb_99) = nearest(&ours.vertices, &filled.vertices, cell);
+    println!(
+        "simplified in {:.2} s: {} vertices / {} faces vs {} / {}; nearest vertex ours->ref mean {ab_mean:.2e} p99 \
+         {ab_99:.2e}, ref->ours mean {ba_mean:.2e} p99 {ba_99:.2e}, ours->unsimplified mean {fb_mean:.2e} p99 {fb_99:.2e}",
+        start.elapsed().as_secs_f64(),
+        ours.vertices.len(),
+        ours.faces.len(),
+        theirs.vertices.len(),
+        theirs.faces.len()
+    );
+    Ok(())
+}
+
+// JOVOX_DIR, JOVOX_DINOV3 and JOVOX_E2E (the JoVox dump whose `prep` image TRELLIS2_REF was made from)
+#[test]
+#[ignore = "needs the JoVox and DINOv3 checkpoints, reference dumps and a GPU"]
+fn the_condition_matches_the_reference() -> Result<()> {
+    let (Some((_, reference)), Some(jovox), Some(dino), Some(e2e)) = (
+        paths(),
+        std::env::var_os("JOVOX_DIR"),
+        std::env::var_os("JOVOX_DINOV3"),
+        std::env::var_os("JOVOX_E2E"),
+    ) else {
+        return Ok(());
+    };
+    let device = Device::new_cuda(0)?;
+    let refs = inference_tensor::safetensors::load(&reference, &Device::Cpu)?;
+    let e2e = inference_tensor::safetensors::load(PathBuf::from(e2e), &Device::Cpu)?;
+    let prep = &e2e["prep"];
+    let (h, w, _) = prep.dims3()?;
+    let image = crate::jovox::Rgba {
+        width: w,
+        height: h,
+        pixels: prep.flatten_all()?.to_vec1::<u8>()?,
+    };
+    let (rgb, size) = super::crop_object(&image)?;
+    let want = refs["pre"].flatten_all()?.to_vec1::<u8>()?;
+    let (ph, pw, _) = refs["pre"].dims3()?;
+    assert_eq!(size, (pw, ph), "crop size");
+    assert_eq!(rgb, want, "cropped object");
+    let model = crate::jovox::JoVox::load(jovox.as_ref(), dino.as_ref(), DType::BF16, &device)?;
+    let cond = model.encode_rgb(
+        &super::condition_image(&image)?,
+        (super::RESOLUTION, super::RESOLUTION),
+    )?;
+    let (max, rms) = compare(&cond, &refs["cond"])?;
+    println!("crop {pw}x{ph} equal; condition at 1024: max {max:.3e} rms {rms:.3e}");
+    assert!(rms < 1e-4, "condition relative rms {rms}");
     Ok(())
 }

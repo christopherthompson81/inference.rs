@@ -90,3 +90,43 @@ So the flow and the CFG-interval Euler sampler (with guidance rescale) are the r
 latents differ from its f32 ones by 7.6%, more than ours do from its bf16 ones (6.5%).
 
 Next: hole filling and simplification (CuMesh), then the mesh into the voxels job.
+
+## Run 4 - 2026-11-10 15:20
+
+Question: do hole filling and simplification (`trellis2::cleanup`, CuMesh's algorithms on the host) match?
+
+Hole filling follows CuMesh step for step: boundary edges (one face), joined at manifold boundary vertices (at most two
+boundary edges, none with more than two faces), a component a loop when each edge meets another of it at both ends,
+loops under 0.03 perimeter closed by a vertex at the mean of their edge midpoints and a triangle (high, low, new) per
+edge. On the reference's raw robot mesh: 1804121 vertices / 3636268 faces, CuMesh's counts exactly, 0.66 s.
+
+Simplification follows `simplify_step` (per-vertex quadrics from normalized face planes; edge cost = quadric at the
+collapse point + 0.01 length^2 + 0.001 mean skinniness * length^2, infinite on a flip; each face takes the minimum of
+(cost bits, edge id) over the edges at its vertices; an edge under the threshold collapses when it holds that minimum
+at every face around it; threshold 1e-8, x10 after a round removing under 1%). CuMesh builds its vertex-face lists
+with atomics (no fixed order) and uses `rsqrtf`, so its own runs are not bit-reproducible; compared by geometry, on
+the reference's filled mesh:
+```
+ours   462811 vertices / 933562 faces      CuMesh 470017 / 947409 (target 1M)
+nearest vertex: ours->CuMesh mean 5.5e-4 (p99 1.5e-3), CuMesh->ours 5.4e-4 (p99 1.4e-3); a voxel is 9.8e-4
+```
+25 rounds took 11.7 s on 16 threads (CuMesh: 0.36 s on the GPU). Per round, edge costs (0.35 s) and the edge sort
+(0.2 s) led. Skipping the skinny loop for an edge whose quadric and length terms already exceed the threshold (it
+cannot collapse, and any value above the threshold compares the same against those that can) gave the same 933562
+faces; gathering edges per vertex from the vertex-face lists in chunks instead of sorting 11M keys took the sort from
+0.18 s to 0.06 s. Simplification now 6.2 s.
+
+## Run 5 - 2026-11-10 15:45
+
+Question: does the whole path run, and what does it cost?
+
+The condition: TRELLIS.2's crop (`crop_object`: the square around alpha > 204, PIL's half-to-even crop box, color times
+alpha truncated) equals the reference's 376x376 image byte for byte; DINOv3 at 1024^2 on our Lanczos resize matches
+its tokens at rms 2.4e-6. `inference voxels` (CUDA dev build) on the RGBA robot, JoVox seed 0, mesh stage seeded 0:
+```
+6348 voxels, sampling 5.8 s; mesh 29.9 s: 3475990 faces extracted -> 474785 vertices / 958687 faces; total 36.9 s
+peak 10667 MiB (idle 1189)
+```
+Orthographic shaded views show the robot's surface cleanly (helmet, arms, legs). The deep job test (an opaque photo:
+BiRefNet, voxels, mesh) passes in 33.5 s. The shape flow (~14 s, 12 steps, 9 of them guided) and the host
+simplification lead the time.

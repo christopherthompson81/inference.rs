@@ -164,6 +164,7 @@ impl CrossKv {
     }
 
     /// Batch row `i` alone.
+    #[cfg(test)]
     pub(crate) fn row(&self, i: usize) -> Result<Self> {
         Ok(Self {
             k: self.k.narrow(0, i, 1)?,

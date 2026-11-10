@@ -1533,6 +1533,7 @@ class JobsConfig:
     models_repo: str | None = None
     moge: str | None = None
     placement: Placement | None = Placement.FASTEST
+    trellis2: str | None = None
     wan: str | None = None
     worldmirror: str | None = None
     worldmirror_repo: str | None = "tencent/HY-World-2.0"
@@ -3474,6 +3475,7 @@ class VoxelsJob:
 
     cfg_strength: float | None = None
     fill: float | None = None
+    mesh: bool | None = None
     placement: Placement | None = None
     remove_background: bool | None = None
     seed: int | None = None

@@ -7353,6 +7353,14 @@
             ],
             "default": "fastest"
           },
+          "trellis2": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "TRELLIS.2-4B, whose second stage meshes a voxel job's structure; fetched from its repository when unset",
+            "default": null
+          },
           "wan": {
             "type": [
               "string",
@@ -15667,6 +15675,13 @@
             ],
             "format": "float",
             "description": "The share of the prepared image the object's longest side fills (0.74 by default)"
+          },
+          "mesh": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Mesh the structure with TRELLIS.2's second stage (on by default)"
           },
           "placement": {
             "oneOf": [

@@ -263,6 +263,8 @@ async fn main() -> Result<()> {
             jovox,
             dinov3,
             birefnet,
+            trellis2,
+            no_mesh,
             seed,
             steps,
             cfg,
@@ -278,6 +280,7 @@ async fn main() -> Result<()> {
             let mut options = VoxelOptions {
                 fill,
                 remove_background,
+                mesh: !no_mesh,
                 ..Default::default()
             };
             options.sample.seed = seed;
@@ -285,7 +288,13 @@ async fn main() -> Result<()> {
             options.sample.cfg_strength = cfg;
             options.sample.temperature = temperature;
             let birefnet = needs_background_removal(&image, remove_background)?.then_some(birefnet);
-            let models = fetch_models(jovox, dinov3, birefnet, &NoProgress)?;
+            let models = fetch_models(
+                jovox,
+                dinov3,
+                birefnet,
+                (!no_mesh).then_some(trellis2),
+                &NoProgress,
+            )?;
             let device = if cpu {
                 inference_tensor::Device::Cpu
             } else {

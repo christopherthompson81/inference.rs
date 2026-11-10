@@ -22,7 +22,7 @@ const SPLIT_02: [[usize; 3]; 2] = [[0, 1, 2], [0, 2, 3]];
 const SPLIT_13: [[usize; 3]; 2] = [[0, 1, 3], [3, 1, 2]];
 
 fn key([x, y, z]: [i32; 3]) -> Option<u64> {
-    (x >= 0 && y >= 0 && z >= 0).then(|| ((x as u64) << 42) | ((y as u64) << 21) | z as u64)
+    (x >= 0 && y >= 0 && z >= 0).then_some(((x as u64) << 42) | ((y as u64) << 21) | z as u64)
 }
 
 /// The mesh of cells `coords` on a `grid`^3 grid filling [-0.5, 0.5]^3: their dual vertices (offsets within the cell),
