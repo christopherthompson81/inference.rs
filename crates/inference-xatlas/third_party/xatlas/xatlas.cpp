@@ -3716,9 +3716,20 @@ private:
 		if (m_gridWidth <= 1 || m_gridHeight <= 1)
 			return false;
 		// Insert edges into cells.
-		m_cellDataOffsets.resize(m_gridWidth * m_gridHeight);
-		for (uint32_t i = 0; i < m_cellDataOffsets.size(); i++)
-			m_cellDataOffsets[i] = UINT32_MAX;
+		// inference-xatlas: cells are emptied by bumping a stamp rather than rewriting every offset
+		const uint32_t cellCount = m_gridWidth * m_gridHeight;
+		m_cellDataOffsets.resize(cellCount);
+		if (m_cellStamps.size() < cellCount) {
+			const uint32_t old = m_cellStamps.size();
+			m_cellStamps.resize(cellCount);
+			for (uint32_t i = old; i < cellCount; i++)
+				m_cellStamps[i] = 0;
+		}
+		if (++m_stamp == 0) {
+			for (uint32_t i = 0; i < m_cellStamps.size(); i++)
+				m_cellStamps[i] = 0;
+			m_stamp = 1;
+		}
 		m_cellData.clear();
 		m_cellData.reserve(edgeCount * 2);
 		for (uint32_t i = 0; i < edgeCount; i++) {
@@ -3727,9 +3738,11 @@ private:
 			XA_DEBUG_ASSERT(!m_traversedCellOffsets.isEmpty());
 			for (uint32_t j = 0; j < m_traversedCellOffsets.size(); j++) {
 				const uint32_t cell = m_traversedCellOffsets[j];
-				uint32_t offset = m_cellDataOffsets[cell];
-				if (offset == UINT32_MAX)
+				uint32_t offset = cellOffset(cell);
+				if (offset == UINT32_MAX) {
 					m_cellDataOffsets[cell] = m_cellData.size();
+					m_cellStamps[cell] = m_stamp;
+				}
 				else {
 					for (;;) {
 						uint32_t &nextOffset = m_cellData[offset + 1];
@@ -3747,13 +3760,18 @@ private:
 		return true;
 	}
 
+	uint32_t cellOffset(uint32_t cell) const
+	{
+		return m_cellStamps[cell] == m_stamp ? m_cellDataOffsets[cell] : UINT32_MAX;
+	}
+
 	void computePotentialEdges(Vector2 p1, Vector2 p2)
 	{
 		m_potentialEdges.clear();
 		traverse(p1, p2);
 		for (uint32_t j = 0; j < m_traversedCellOffsets.size(); j++) {
 			const uint32_t cell = m_traversedCellOffsets[j];
-			uint32_t offset = m_cellDataOffsets[cell];
+			uint32_t offset = cellOffset(cell);
 			while (offset != UINT32_MAX) {
 				const uint32_t edge2 = m_cellData[offset];
 				m_potentialEdges.push_back(edge2);
@@ -3854,6 +3872,8 @@ private:
 	Vector2 m_gridOrigin;
 	uint32_t m_gridWidth, m_gridHeight; // in cells
 	Array<uint32_t> m_cellDataOffsets;
+	Array<uint32_t> m_cellStamps;
+	uint32_t m_stamp = 0;
 	Array<uint32_t> m_cellData;
 	Array<uint32_t> m_potentialEdges;
 	Array<uint32_t> m_traversedCellOffsets;

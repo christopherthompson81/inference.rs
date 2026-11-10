@@ -145,3 +145,53 @@ cleanly textured, no black seams; poses differ as separate generations do.
 
 Both GLBs are now y-up as `to_glb` writes them ((x, y, z) -> (x, z, -y)); the vertex-color GLB used to keep the
 z-up frame. The extracted-mesh PLY keeps TRELLIS's frame.
+
+## Run 7 - 2026-11-10 (night)
+
+Question: does a CPU distance query (the bake's BVH, now with an allocation-free stack and a batched
+`unsigned_distance`) and a port of CuMesh's `remesh_narrow_band_dc` (`trellis2::remesh`) match cuBVH and CuMesh?
+
+`remesh_ref.py` (scratch): the 1024 reference mesh hole-filled (4296850 faces), cuBVH distances at 1M random points in
+[-0.55, 0.55]^3, and the remesh as `to_glb` runs it (1024^3, band 1, project back 0.9): 0.27 s on the GPU, 4141500
+vertices / 8284084 faces; CuMesh's simplify to 1M then takes 1.0 s. Test `distances_and_the_remesh_match_the_reference`:
+
+    bvh over 4296850 faces in 1.70 s; 1000000 distances in 5.11 s, worst difference 1.19e-7
+    remeshed in 7.56 s: 4141502 vertices / 8284088 faces vs 4141500 / 8284084; nearest ours->ref mean 4.61e-8 p99
+    1.41e-7
+
+Two extra band voxels (a distance on the band threshold), positions otherwise the same. The remesh is the level set of
+distance - one voxel, so it is a closed shell around both sides of the surface; `--remesh` bakes it single-sided as
+`to_glb` does.
+
+Bug found on the way: `uv_unwrap`'s vertex normals were never filled (an edit that did not apply), so the textured GLB
+declared a NORMAL accessor with no data. Fixed on the PR branch with a test that every accessor fits its buffer view.
+
+## Run 8 - 2026-11-10 (night)
+
+Question: where does the export's time and memory go, and what can be cut without changing its output?
+
+Phase timings (temporary instrumentation, robot, 1024-cascade, CLI on the 3090 box, 16 threads):
+
+    default:  cleanup 16.0 s, unwrap 50.6 s (clusters 3.5 s, xatlas charts ~42 s, pack 0.9 s), raster 0.03 s,
+              projection 0.5 s, sampling 0.6 s, inpainting 9.5 s
+    --remesh: remesh + simplify 39.5 s, unwrap 42.2 s, inpainting 8.9 s
+
+xatlas ran 355 s of CPU in 28.5 s wall: fully parallel, just a lot of work. `perf`: UniformGrid2 (the chart boundary
+self-intersection check, run for every face added to a chart, each time rebuilding a grid of up to 512 cells a side)
+~36%, `addFaceToChart` 10-15%. Changes, each checked by the atlas hash being unchanged:
+
+- xatlas built without `NDEBUG` had its debug checks on (`XA_DEBUG`): defining it, charts 42 -> 30 s.
+- Per-cell tails in `createGrid`'s cell lists: no change (lists are short); dropped.
+- Stamped cells instead of rewriting every offset: 33.5 -> 29.1 s on the 1024 mesh; kept (README lists it). The
+  rest of `createGrid` is the cell loads themselves (`perf annotate`: one compare on the cell stamp takes 43%).
+- The four inpainting fills run side by side: 9.5 -> 4.7 s.
+- The pipeline stopped filling holes, simplifying to 1M and sampling vertex attributes when the result is baked
+  (the bake redoes the cleanup from the extracted mesh); vertex colors do it on request (`Generated::vertex_colored`).
+- Covered texels go straight into byte planes (no 2048^2 array of f32 attributes).
+
+Result: 135 s -> 114.8 s end to end (export ~47 s), `--remesh` 127.7 s. Memory, sampled every 0.5 s: anonymous RSS
+~1.1 GB through generation, peak 2.3 GB at the end of the export; file-backed peak 2.0 GB at 2.5 s (checkpoints
+mapped while loading), which is what `/usr/bin/time`'s 3.9 GB maximum resident counts with the anonymous part.
+
+Next candidates: xatlas's chart growth is the floor here (quadratic in chart size, its output depends on it); our
+simplify (13 s; 25+ s on the remesh's 8.3M faces, against CuMesh's 1 s on the GPU) is the largest piece we own.

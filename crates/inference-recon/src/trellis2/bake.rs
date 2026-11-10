@@ -1,4 +1,4 @@
-//! TRELLIS.2's textured export (o-voxel's `to_glb`, without its remesh): the mesh cleaned and simplified as CuMesh
+//! TRELLIS.2's textured export (o-voxel's `to_glb`, optionally with its remesh): the mesh cleaned and simplified as CuMesh
 //! does, unwrapped into an atlas, and the PBR volume baked into it. Each texel a face covers is placed in 3D on the
 //! simplified mesh, moved to the closest point of the mesh as extracted, and given the volume's trilinear attributes;
 //! the texels no face covers are inpainted (OpenCV's Telea) so seams don't bleed black.
@@ -12,6 +12,8 @@ use super::charts::{Unwrapped, uv_unwrap};
 use super::cleanup;
 use super::glb::{Pbr, sample_attributes};
 use super::mesh::Mesh;
+use super::remesh::{BAND, Domain, PROJECT_BACK, remesh};
+use super::vec3::{V3, dot, mad, sub};
 
 /// `to_glb`'s defaults
 pub const DECIMATION_TARGET: usize = 1_000_000;
@@ -22,18 +24,7 @@ const COLOR_RADIUS: f64 = 3.0;
 const MATERIAL_RADIUS: f64 = 1.0;
 const LEAF_SIZE: usize = 4;
 const RASTER_CHUNK: usize = 4096;
-
-type V3 = [f32; 3];
-
-fn sub(a: V3, b: V3) -> V3 {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-fn dot(a: V3, b: V3) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-fn mad(a: V3, b: V3, s: f32) -> V3 {
-    [a[0] + b[0] * s, a[1] + b[1] * s, a[2] + b[2] * s]
-}
+const STACK_DEPTH: usize = 128;
 
 #[derive(Clone, Copy, Debug)]
 pub struct BakeOptions {
@@ -41,6 +32,8 @@ pub struct BakeOptions {
     pub decimation_target: usize,
     /// Width and height of the textures
     pub texture_size: usize,
+    /// Rebuild the surface by narrow-band dual contouring before simplifying (a closed shell around it)
+    pub remesh: bool,
 }
 
 impl Default for BakeOptions {
@@ -48,6 +41,7 @@ impl Default for BakeOptions {
         Self {
             decimation_target: DECIMATION_TARGET,
             texture_size: TEXTURE_SIZE,
+            remesh: false,
         }
     }
 }
@@ -61,6 +55,8 @@ pub struct Baked {
     pub size: usize,
     /// Texels a face covers
     pub covered: usize,
+    /// Whether the faces' back sides are drawn (not after a remesh, whose shell is closed)
+    pub double_sided: bool,
 }
 
 struct Node {
@@ -150,8 +146,12 @@ impl Bvh {
     /// The face closest to `p` and the point of it nearest `p`.
     pub fn closest_face(&self, p: V3) -> (u32, V3) {
         let mut best = (f32::INFINITY, p, 0);
-        let mut stack = vec![0usize];
-        while let Some(n) = stack.pop() {
+        // median splits keep the tree about log2(faces / LEAF_SIZE) deep, two entries pushed per level
+        let mut stack = [0u32; STACK_DEPTH];
+        let mut top = 1;
+        while top > 0 {
+            top -= 1;
+            let n = stack[top] as usize;
             let node = &self.nodes[n];
             if Self::box_distance2(node, p) >= best.0 {
                 continue;
@@ -174,13 +174,24 @@ impl Bvh {
                 Self::box_distance2(&self.nodes[r], p),
             );
             // the nearer child is searched first
-            if dl < dr {
-                stack.extend([r, l]);
-            } else {
-                stack.extend([l, r]);
-            }
+            let (far, near) = if dl < dr { (r, l) } else { (l, r) };
+            stack[top] = far as u32;
+            stack[top + 1] = near as u32;
+            top += 2;
         }
         (best.2, best.1)
+    }
+
+    /// Each point's distance to the mesh, its closest face and the closest point, queried in parallel.
+    pub fn unsigned_distance(&self, points: &[V3]) -> Vec<(f32, u32, V3)> {
+        points
+            .par_iter()
+            .map(|&p| {
+                let (face, q) = self.closest_face(p);
+                let d = sub(q, p);
+                (dot(d, d).sqrt(), face, q)
+            })
+            .collect()
     }
 }
 
@@ -301,8 +312,22 @@ pub fn bake(
     resolution: usize,
     options: &BakeOptions,
 ) -> Result<Baked, inference_xatlas::Error> {
-    let (cleaned, original) = clean(mesh, options.decimation_target);
-    let bvh = Bvh::new(&original);
+    let (cleaned, bvh) = if options.remesh {
+        let mut filled = mesh.clone();
+        cleanup::fill_holes(&mut filled, cleanup::MAX_HOLE_PERIMETER);
+        let bvh = Bvh::new(&filled);
+        let mut shell = remesh(
+            &bvh,
+            &Domain::unit_cube(resolution as u32),
+            BAND,
+            PROJECT_BACK,
+        );
+        cleanup::simplify(&mut shell, options.decimation_target);
+        (shell, bvh)
+    } else {
+        let (cleaned, original) = clean(mesh, options.decimation_target);
+        (cleaned, Bvh::new(&original))
+    };
     let unwrapped = uv_unwrap(&cleaned)?;
     let size = options.texture_size;
     let texel_faces = rasterize(&unwrapped.mesh.faces, &unwrapped.uvs, size);
@@ -322,25 +347,37 @@ pub fn bake(
         })
         .collect();
     let attrs = sample_attributes(coords, values, &points);
-    let mut texels = vec![Pbr::default(); size * size];
-    for (&t, a) in covered.iter().zip(attrs) {
-        texels[t] = a;
-    }
     let unknown: Vec<bool> = texel_faces.iter().map(|&f| f == 0).collect();
-    let channel = |get: fn(&Pbr) -> f32, radius: f64| {
-        let mut plane: Vec<u8> = texels.iter().map(|p| to_u8(get(p))).collect();
-        inpaint_telea(&mut plane, size, size, 1, &unknown, radius);
+    // planes of the covered texels' values, zero elsewhere
+    let plane = |channels: usize, get: &(dyn Fn(&Pbr) -> [f32; 3] + Sync)| {
+        let mut plane = vec![0u8; size * size * channels];
+        for (&t, a) in covered.iter().zip(&attrs) {
+            let v = get(a);
+            for c in 0..channels {
+                plane[t * channels + c] = to_u8(v[c]);
+            }
+        }
         plane
     };
-    let mut color: Vec<u8> = texels
-        .iter()
-        .flat_map(|p| p.base_color.map(to_u8))
-        .collect();
-    inpaint_telea(&mut color, size, size, 3, &unknown, COLOR_RADIUS);
-    let (metallic, roughness, alpha) = (
-        channel(|p| p.metallic, MATERIAL_RADIUS),
-        channel(|p| p.roughness, MATERIAL_RADIUS),
-        channel(|p| p.alpha, MATERIAL_RADIUS),
+    let fill = |channels: usize, radius: f64, get: &(dyn Fn(&Pbr) -> [f32; 3] + Sync)| {
+        let mut p = plane(channels, get);
+        inpaint_telea(&mut p, size, size, channels, &unknown, radius);
+        p
+    };
+    // the four fills are independent and each runs serially, so they run side by side
+    let ((color, metallic), (roughness, alpha)) = rayon::join(
+        || {
+            rayon::join(
+                || fill(3, COLOR_RADIUS, &|p| p.base_color),
+                || fill(1, MATERIAL_RADIUS, &|p| [p.metallic; 3]),
+            )
+        },
+        || {
+            rayon::join(
+                || fill(1, MATERIAL_RADIUS, &|p| [p.roughness; 3]),
+                || fill(1, MATERIAL_RADIUS, &|p| [p.alpha; 3]),
+            )
+        },
     );
     let base_color = (0..size * size)
         .flat_map(|t| [color[3 * t], color[3 * t + 1], color[3 * t + 2], alpha[t]])
@@ -354,6 +391,7 @@ pub fn bake(
         metallic_roughness,
         size,
         covered: covered.len(),
+        double_sided: !options.remesh,
     })
 }
 

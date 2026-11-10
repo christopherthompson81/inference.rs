@@ -264,6 +264,7 @@ async fn main() -> Result<()> {
             seed,
             vertex_colors,
             texture_size,
+            remesh,
             trellis2,
             trellis_large,
             dinov3,
@@ -287,6 +288,7 @@ async fn main() -> Result<()> {
                 remove_background,
                 bake: (!vertex_colors).then(|| BakeOptions {
                     texture_size,
+                    remesh,
                     ..BakeOptions::default()
                 }),
             };
@@ -300,8 +302,8 @@ async fn main() -> Result<()> {
             let report = generate_3d_on(&models, &image, &out, &options, &NoProgress, &device)?;
             println!(
                 "{} vertices, {} faces ({} extracted) at {}^3{} in {} ({:.1} s)",
-                report.glb_vertices,
-                report.glb_faces,
+                report.vertices,
+                report.faces,
                 report.raw_faces,
                 report.resolution,
                 if report.background_removed {

@@ -407,6 +407,10 @@ pub enum Command {
         #[arg(long, default_value_t = inference_jobs::image_to_3d::BakeOptions::default().texture_size)]
         texture_size: usize,
 
+        /// Rebuild the surface as a closed shell (narrow-band dual contouring) before baking
+        #[arg(long, conflicts_with = "vertex_colors")]
+        remesh: bool,
+
         /// The TRELLIS.2-4B folder; fetched from microsoft/TRELLIS.2-4B when unset
         #[arg(long)]
         trellis2: Option<PathBuf>,

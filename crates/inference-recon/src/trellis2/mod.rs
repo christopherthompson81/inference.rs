@@ -11,9 +11,11 @@ pub mod mesh;
 #[cfg(test)]
 mod parity;
 pub mod pipeline;
+pub mod remesh;
 pub mod shape_flow;
 pub mod sparse;
 pub mod structure;
+pub mod vec3;
 
 use std::path::Path;
 

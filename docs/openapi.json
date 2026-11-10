@@ -6735,6 +6735,13 @@
               }
             ]
           },
+          "remesh": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Rebuild the surface as a closed shell (narrow-band dual contouring) before baking"
+          },
           "remove_background": {
             "type": [
               "boolean",
