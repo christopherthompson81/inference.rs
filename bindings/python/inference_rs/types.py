@@ -407,6 +407,7 @@ class SearchEmbeddingModel(str, Enum):
 class SpeechLoaderType(str, Enum):
     DIA = "dia"
     KOKORO = "kokoro"
+    QWEN3_TTS = "qwen3_tts"
 
 
 class TimestampGranularity(str, Enum):
@@ -3250,6 +3251,8 @@ class SpeechGenerationRequest:
     """Speech generation request"""
 
     input: str
+    instructions: str | None = None
+    language: str | None = None
     model: str | None = None
     phonemes: str | None = None
     response_format: AudioResponseFormat | None = None

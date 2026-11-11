@@ -1,4 +1,4 @@
-//! Speech models: Dia, with its DAC decoder and BS.1770 loudness normalization, and Kokoro to speak; Parakeet and
+//! Speech models: Dia, with its DAC decoder and BS.1770 loudness normalization, Kokoro and Qwen3-TTS to speak; Parakeet and
 //! Whisper to transcribe.
 
 use std::sync::Arc;
@@ -11,6 +11,7 @@ pub mod diarization;
 pub mod kokoro;
 pub mod nemo;
 pub mod parakeet;
+pub mod qwen3_tts;
 pub mod silero;
 mod transcript;
 pub mod utils;
@@ -35,6 +36,9 @@ pub enum SpeechGenerationConfig {
     Kokoro {
         speed: f32,
     },
+    Qwen3Tts {
+        sampling: qwen3_tts::Sampling,
+    },
 }
 
 impl SpeechGenerationConfig {
@@ -51,6 +55,12 @@ impl SpeechGenerationConfig {
     pub fn kokoro_default() -> Self {
         Self::Kokoro { speed: 1. }
     }
+
+    pub fn qwen3_tts_default() -> Self {
+        Self::Qwen3Tts {
+            sampling: qwen3_tts::Sampling::default(),
+        }
+    }
 }
 
 /// What one speech request asks for beyond its input text; each model reads the fields it understands.
@@ -63,6 +73,10 @@ pub struct SpeechOptions {
     pub phonemes: Option<String>,
     /// Seeds the model's sampling noise; unset draws a fresh seed.
     pub seed: Option<u64>,
+    /// How to speak, or for a voice design model the voice itself (Qwen3-TTS).
+    pub instructions: Option<String>,
+    /// The language to speak, by name (Qwen3-TTS); unset lets the model pick.
+    pub language: Option<String>,
 }
 
 #[derive(Clone, Debug)]

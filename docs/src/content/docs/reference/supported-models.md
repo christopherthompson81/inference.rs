@@ -136,6 +136,7 @@ The `Architecture` column is the `config.json` `architectures` value. Per-family
 |---|---|---|
 | `Dia` | Dia | <details><summary><code>nari-labs/Dia-1.6B</code></summary><code>inference run -m nari-labs/Dia-1.6B</code></details> |
 | `Kokoro` | Kokoro | <details><summary><code>hexgrad/Kokoro-82M</code></summary><code>inference run -m hexgrad/Kokoro-82M</code></details> |
+| `Qwen3Tts` | Qwen3-TTS | <details><summary><code>Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice</code></summary><code>inference run -m Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice</code></details> |
 
 ## Transcription
 

@@ -855,6 +855,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | --- | --- |
 | `SpeechLoaderType.DIA` | `'dia'` |
 | `SpeechLoaderType.KOKORO` | `'kokoro'` |
+| `SpeechLoaderType.QWEN3_TTS` | `'qwen3_tts'` |
 
 
 ## `TranscriptionLoaderType`

@@ -17,6 +17,8 @@ inference-json.workspace = true
 inference-tensor.workspace = true
 inference-audio.workspace = true
 tokenizers.workspace = true
+anyhow.workspace = true
+indicatif.workspace = true
 inference-nn.workspace = true
 inference-quant.workspace = true
 rand.workspace = true
@@ -37,6 +39,7 @@ cuda = ["inference-tensor/cuda", "inference-quant/cuda", "inference-nn/cuda"]
 metal = ["inference-tensor/metal", "inference-quant/metal", "inference-nn/metal"]
 
 [dev-dependencies]
+hound.workspace = true
 mimalloc.workspace = true
 tempfile.workspace = true
 anyhow.workspace = true

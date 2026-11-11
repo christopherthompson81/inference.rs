@@ -2161,11 +2161,18 @@ pub struct SpeechGenerationRequest {
         example = "[S1] Dia is an open weights text to dialogue model. [S2] You get full control over scripts and voices. [S1] Wow. Amazing. (laughs) [S2] Try it now on Git hub or Hugging Face."
     )]
     pub input: String,
-    // `instructions` is ignored.
-    /// A voice the model ships (Kokoro: e.g. `af_heart`; several, comma-separated, are blended). Dia ignores it.
+    /// A voice the model ships (Kokoro: e.g. `af_heart`, several comma-separated are blended; Qwen3-TTS CustomVoice:
+    /// e.g. `ryan`). Dia ignores it.
     #[serde(default)]
     #[schema(example = "af_heart")]
     pub voice: Option<String>,
+    /// How to speak: tone, emotion, pace (Qwen3-TTS 1.7B); a VoiceDesign model reads the voice itself from it.
+    /// Other models ignore it.
+    #[serde(default)]
+    pub instructions: Option<String>,
+    /// The language to speak, by name (`english`, `chinese`, ...; Qwen3-TTS). Unset, the model picks it.
+    #[serde(default)]
+    pub language: Option<String>,
     /// Speaking rate, 1.0 being the model's own (Kokoro). Dia ignores it.
     #[serde(default)]
     pub speed: Option<f32>,
@@ -2219,6 +2226,8 @@ impl SpeechGenerationRequest {
             speed: None,
             phonemes: None,
             seed: None,
+            instructions: None,
+            language: None,
             response_format,
             timestamps: false,
         }

@@ -204,6 +204,20 @@ pub fn record_tensors(
     Ok(std::mem::take(&mut weights.0.lock().unwrap().1))
 }
 
+/// Random weights, seeded by name, for two sharded var builders one constructor reads together (a model and its codec).
+pub fn record_sharded_pair(
+    build: impl FnOnce(ShardedVarBuilder, ShardedVarBuilder) -> anyhow::Result<()>,
+) -> anyhow::Result<[HashMap<String, Tensor>; 2]> {
+    let first = RecordingWeights::new(&[], HashMap::new(), true);
+    let second = RecordingWeights::new(&[], HashMap::new(), true);
+    build(
+        ShardedSafeTensors::wrap(first.clone(), DType::F32, Device::Cpu),
+        ShardedSafeTensors::wrap(second.clone(), DType::F32, Device::Cpu),
+    )?;
+    let take = |w: &RecordingWeights| std::mem::take(&mut w.0.lock().unwrap().1);
+    Ok([take(&first), take(&second)])
+}
+
 /// Every file in a committed fixture directory.
 pub fn fixture_files(dir: &str) -> anyhow::Result<Vec<std::path::PathBuf>> {
     Ok(std::fs::read_dir(dir)?
