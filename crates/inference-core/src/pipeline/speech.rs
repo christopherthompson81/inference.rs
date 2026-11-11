@@ -238,9 +238,17 @@ pub(crate) fn local_kokoro_gguf(model_id: &str) -> Option<PathBuf> {
     is_kokoro_gguf(&file).then_some(file)
 }
 
+/// A local Qwen3-TTS GGUF pair: the talker (the file, or the one in a directory) and the mmproj beside it.
+pub(crate) fn local_qwen3_tts_gguf(model_id: &str) -> Option<(PathBuf, PathBuf)> {
+    qwen3_tts::gguf::files(std::path::Path::new(model_id))
+}
+
 fn detect_arch(config: &std::path::Path) -> Result<SpeechLoaderType> {
     if is_kokoro_gguf(config) {
         return Ok(SpeechLoaderType::Kokoro);
+    }
+    if qwen3_tts::gguf::is_qwen3_tts_gguf(config) {
+        return Ok(SpeechLoaderType::Qwen3Tts);
     }
     SpeechLoaderType::auto_detect_from_config(&std::fs::read_to_string(config)?).ok_or_else(|| {
         anyhow::anyhow!(
@@ -266,6 +274,17 @@ impl Loader for SpeechLoader {
             let paths = SpeechModelPaths {
                 weights: vec![gguf.clone()],
                 config: gguf,
+                voices: Vec::new(),
+            };
+            return self.load_model_from_path(&paths, options);
+        }
+        if let Some((talker, mmproj)) = local_qwen3_tts_gguf(&self.model_id) {
+            if let Some(arch) = self.arch.filter(|arch| *arch != SpeechLoaderType::Qwen3Tts) {
+                anyhow::bail!("`{}` is a Qwen3-TTS GGUF, not {arch:?}", talker.display())
+            }
+            let paths = SpeechModelPaths {
+                weights: vec![talker.clone(), mmproj],
+                config: talker,
                 voices: Vec::new(),
             };
             return self.load_model_from_path(&paths, options);
@@ -416,11 +435,17 @@ impl Loader for SpeechLoader {
             let dtype = DeviceMapSetting::dummy()
                 .into_mapper(usize::MAX, device, None, std::slice::from_ref(device))?
                 .get_min_dtype(dtype)?;
-            let dir = paths
-                .config
-                .parent()
-                .ok_or_else(|| anyhow::anyhow!("`{}` has no directory", paths.config.display()))?;
-            let model = Qwen3Tts::load(dir, dtype, device)?;
+            let model = match paths.weights.as_slice() {
+                [talker, mmproj] if qwen3_tts::gguf::is_qwen3_tts_gguf(talker) => {
+                    Qwen3Tts::load_gguf(talker, mmproj, dtype, device)?
+                }
+                _ => {
+                    let dir = paths.config.parent().ok_or_else(|| {
+                        anyhow::anyhow!("`{}` has no directory", paths.config.display())
+                    })?;
+                    Qwen3Tts::load(dir, dtype, device)?
+                }
+            };
             return Ok(Arc::new(Mutex::new(SpeechPipeline::new(
                 self.model_id.clone(),
                 SpeechModel::Qwen3Tts(Box::new(model)),

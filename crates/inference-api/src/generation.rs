@@ -6,8 +6,8 @@ use inference_core::{
     AudioInput, Diarization, DiarizationOptions, DiffusionGenerationParams, ImageChoice,
     ImageGenerationResponse, ImageGenerationResponseFormat, InferenceRs, MAX_REFERENCE_IMAGES,
     NormalRequest, ReferenceImages, Request, RequestMessage, Response, SamplingParams,
-    SegmentOptions, SpeakerSegment, SpeechOptions, TimedText, Transcription, TranscriptionOptions,
-    VoiceActivity, WordTimestampsRequest,
+    SegmentOptions, SpeakerSegment, SpeechOptions, SpeechReference, TimedText, Transcription,
+    TranscriptionOptions, VoiceActivity, WordTimestampsRequest,
     speech_utils::{self, Sample},
 };
 
@@ -407,6 +407,7 @@ async fn generate_speech_inner(
             Some("response_format"),
         ));
     }
+    let reference = speech_reference(&request)?;
     let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
     let messages = RequestMessage::SpeechGeneration {
         prompt: request.input,
@@ -417,6 +418,7 @@ async fn generate_speech_inner(
             seed: request.seed,
             instructions: request.instructions,
             language: request.language,
+            reference,
         },
     };
     match run(state, &request.model, repr, messages).await? {
@@ -1105,6 +1107,38 @@ pub(crate) fn render_diarization(
         body,
         content_type: format.content_type(),
     })
+}
+
+// the voice to clone: `reference_audio` decoded to mono, with `reference_text`
+fn speech_reference(
+    request: &SpeechGenerationRequest,
+) -> Result<Option<std::sync::Arc<SpeechReference>>, ApiError> {
+    let invalid = |message: String| {
+        ApiError::new(
+            ApiErrorKind::InvalidRequest,
+            message,
+            Some("invalid_audio"),
+            Some("reference_audio"),
+        )
+    };
+    let Some(encoded) = &request.reference_audio else {
+        if request.reference_text.is_some() {
+            return Err(invalid(
+                "`reference_text` needs the `reference_audio` it transcribes".to_string(),
+            ));
+        }
+        return Ok(None);
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim())
+        .map_err(|e| invalid(format!("`reference_audio` is not base64: {e}")))?;
+    let audio = AudioInput::from_bytes(&bytes)
+        .map_err(|e| invalid(format!("The reference audio could not be decoded: {e}")))?;
+    Ok(Some(std::sync::Arc::new(SpeechReference {
+        pcm: audio.to_mono(),
+        sample_rate: audio.sample_rate,
+        text: request.reference_text.clone(),
+    })))
 }
 
 pub(crate) fn decode_audio(audio: &[u8]) -> Result<AudioInput, ApiError> {

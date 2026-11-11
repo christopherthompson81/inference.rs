@@ -3207,6 +3207,7 @@ dependencies = [
  "rand_distr",
  "rand_isaac",
  "rayon",
+ "rustfft",
  "serde",
  "serde-saphyr",
  "serde_json",

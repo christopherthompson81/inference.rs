@@ -1,9 +1,13 @@
 //! Qwen3-TTS (12 Hz): a Qwen3 talker predicts each 80 ms frame's first codec code, a small code predictor fills the
-//! other 15, and the codec decoder turns the frames into 24 kHz audio. Preset speakers (CustomVoice) and a voice
-//! described in an instruction (VoiceDesign); the reference is Qwen's `qwen-tts` package.
+//! other 15, and the codec decoder turns the frames into 24 kHz audio. Preset speakers (CustomVoice), a voice
+//! described in an instruction (VoiceDesign), or a voice cloned from a clip (Base); the reference is Qwen's `qwen-tts`
+//! package.
 
 mod codec;
 pub mod config;
+mod encoder;
+pub mod gguf;
+mod speaker;
 mod talker;
 mod tokenizer;
 
@@ -16,10 +20,12 @@ use rand::{Rng, SeedableRng};
 use rand_isaac::Isaac64Rng;
 use tokenizers::Tokenizer;
 
-use crate::{SpeechGenerationOutput, SpeechOptions};
+use crate::{SpeechGenerationOutput, SpeechOptions, SpeechReference};
 use codec::CodecDecoder;
 pub use config::CodecConfig;
 pub use config::Qwen3TtsConfig;
+use encoder::CodecEncoder;
+use speaker::SpeakerEncoder;
 use talker::{StackCache, Talker};
 
 pub const CONFIG: &str = "config.json";
@@ -36,6 +42,10 @@ pub const FILES: [&str; 6] = [
 ];
 const TALKER_PREFIX: &str = "talker";
 const CODEC_PREFIX: &str = "decoder";
+const ENCODER_PREFIX: &str = "encoder";
+const SPEAKER_PREFIX: &str = "speaker_encoder";
+// the reference clip's transcript drops `<|im_end|>\n` as the text drops its tail
+const REF_TAIL_TOKENS: usize = 2;
 // `<|im_start|>assistant\n` before the text, `<|im_end|>\n<|im_start|>assistant\n` after it
 const ROLE_TOKENS: usize = 3;
 const TAIL_TOKENS: usize = 5;
@@ -47,8 +57,12 @@ const LANGUAGE_AUTO: &str = "auto";
 const CHINESE: &str = "chinese";
 const CUSTOM_VOICE: &str = "custom_voice";
 const VOICE_DESIGN: &str = "voice_design";
+const BASE: &str = "base";
 // the 0.6B checkpoints take no instruction
 const SMALL_MODEL: &str = "0b6";
+
+/// Frames of codec codes, a code per codebook each.
+pub type Frames = Vec<Vec<u32>>;
 
 /// Sampling for the talker and the code predictor; a temperature of 0 decodes greedily.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -133,6 +147,29 @@ struct Voice {
     speaker: Option<u32>,
     language: Option<u32>,
     instruction: Option<String>,
+    reference: Option<Arc<SpeechReference>>,
+}
+
+/// A Base model's cloned voice: the clip's x-vector, and with a transcript its codes to continue (in-context).
+struct Cloned {
+    embedding: Tensor,
+    context: Option<(Vec<u32>, Vec<Vec<u32>>)>,
+}
+
+/// The talker's prompt, the text rows each decode step adds until they run out, and the clip's codes the audio
+/// continues (cut from the output).
+struct Prompt {
+    embeds: Tensor,
+    trailing: Option<Tensor>,
+    prefix: Vec<Vec<u32>>,
+}
+
+// the Base checkpoints' cloning parts: the speaker encoder, and the codec's encoder with the codebooks it keeps (none
+// in a GGUF, which clones from the x-vector alone)
+struct Cloner {
+    speaker: SpeakerEncoder,
+    encoder: Option<CodecEncoder>,
+    quantizers: usize,
 }
 
 pub struct Qwen3Tts {
@@ -140,6 +177,7 @@ pub struct Qwen3Tts {
     talker: Talker,
     codec: CodecDecoder,
     tokenizer: Tokenizer,
+    cloner: Option<Cloner>,
     sample_rate: usize,
     device: Device,
 }
@@ -168,7 +206,9 @@ impl Qwen3Tts {
                 DType::F32,
                 device,
                 None,
-                Arc::new(|name: String| name.starts_with(CODEC_PREFIX)),
+                Arc::new(|name: String| {
+                    name.starts_with(CODEC_PREFIX) || name.starts_with(ENCODER_PREFIX)
+                }),
             )?
         };
         Self::new(
@@ -177,6 +217,24 @@ impl Qwen3Tts {
             &vb,
             &codec_vb,
             tokenizer::load(dir)?,
+            device,
+        )
+    }
+
+    /// llama.cpp's talker GGUF with its mmproj; quantized linears keep their GGUF types.
+    pub fn load_gguf(
+        talker: &Path,
+        mmproj: &Path,
+        dtype: DType,
+        device: &Device,
+    ) -> anyhow::Result<Self> {
+        let checkpoint = gguf::read(talker, mmproj, dtype, device)?;
+        Self::new(
+            checkpoint.config,
+            &checkpoint.codec,
+            &checkpoint.weights,
+            &checkpoint.codec_weights,
+            checkpoint.tokenizer,
             device,
         )
     }
@@ -191,11 +249,31 @@ impl Qwen3Tts {
         device: &Device,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
-            cfg.tts_model_type == CUSTOM_VOICE || cfg.tts_model_type == VOICE_DESIGN,
-            "Qwen3-TTS `{}` checkpoints (voice cloning) are not supported yet",
+            [CUSTOM_VOICE, VOICE_DESIGN, BASE].contains(&cfg.tts_model_type.as_str()),
+            "Qwen3-TTS `{}` checkpoints are not supported",
             cfg.tts_model_type
         );
+        let cloner = if cfg.tts_model_type == BASE {
+            let speaker = cfg
+                .speaker_encoder_config
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("a Base config needs `speaker_encoder_config`"))?;
+            Some(Cloner {
+                speaker: SpeakerEncoder::new(speaker, &vb.pp(SPEAKER_PREFIX))?,
+                encoder: codec
+                    .encoder_config
+                    .as_ref()
+                    .map(|cfg| CodecEncoder::new(cfg, &codec_vb.pp(ENCODER_PREFIX), device))
+                    .transpose()?,
+                quantizers: codec
+                    .encoder_valid_num_quantizers
+                    .unwrap_or(codec.decoder_config.num_quantizers),
+            })
+        } else {
+            None
+        };
         Ok(Self {
+            cloner,
             talker: Talker::new(&cfg.talker_config, &vb.pp(TALKER_PREFIX), device)?,
             codec: CodecDecoder::new(&codec.decoder_config, &codec_vb.pp(CODEC_PREFIX), device)?,
             tokenizer,
@@ -228,15 +306,40 @@ impl Qwen3Tts {
                 "this model needs a `voice`: {}",
                 self.speakers().collect::<Vec<_>>().join(", ")
             ),
-            // a voice design model is described by its instruction; OpenAI clients always send some voice
+            // voice design and Base models are described otherwise; OpenAI clients always send some voice
             _ => None,
         };
+        let reference = options.reference.clone();
+        match (self.cfg.tts_model_type.as_str(), &reference) {
+            (BASE, None) => anyhow::bail!(
+                "a Base model clones a voice: send `reference_audio`, and `reference_text` for the closest copy"
+            ),
+            (BASE, Some(clip)) => {
+                anyhow::ensure!(!clip.pcm.is_empty(), "the reference audio has no samples");
+                let continues = clip.text.as_deref().is_some_and(|t| !t.trim().is_empty());
+                let encoder = self.cloner.as_ref().and_then(|c| c.encoder.as_ref());
+                anyhow::ensure!(
+                    !continues || encoder.is_some(),
+                    "this model has no codec encoder to continue the clip (a GGUF has none); send \
+                     `reference_audio` without `reference_text`"
+                );
+            }
+            (_, Some(_)) => {
+                anyhow::bail!("only the Base Qwen3-TTS models clone a voice from `reference_audio`")
+            }
+            (_, None) => {}
+        }
         let instruction = options
             .instructions
             .clone()
             .filter(|i| !i.trim().is_empty());
         if self.cfg.tts_model_type == VOICE_DESIGN && instruction.is_none() {
             anyhow::bail!("a voice design model needs `instructions` describing the voice");
+        }
+        if instruction.is_some() && self.cfg.tts_model_type == BASE {
+            anyhow::bail!(
+                "a Base Qwen3-TTS model takes no `instructions`; its voice is the reference's"
+            );
         }
         if instruction.is_some() && self.cfg.tts_model_size == SMALL_MODEL {
             anyhow::bail!("the 0.6B Qwen3-TTS models take no `instructions`");
@@ -271,6 +374,7 @@ impl Qwen3Tts {
             speaker,
             language,
             instruction,
+            reference,
         })
     }
 
@@ -296,8 +400,70 @@ impl Qwen3Tts {
         Tensor::from_vec(ids.to_vec(), (1, ids.len()), &self.device)
     }
 
-    /// The talker's prompt embeddings `(1, n, hidden)`, as the reference's non-streaming text input lays them out.
-    fn prompt(&self, text: &str, voice: &Voice) -> anyhow::Result<Tensor> {
+    // the reference clip's x-vector `(1, 1, hidden)`, and with a transcript its text ids and codes
+    fn clone_voice(&self, clip: &SpeechReference) -> anyhow::Result<Cloned> {
+        let cloner = self
+            .cloner
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("only Base models clone voices"))?;
+        let at = |rate: u32| -> anyhow::Result<Vec<f32>> {
+            Ok(if clip.sample_rate == rate {
+                clip.pcm.clone()
+            } else {
+                inference_audio::mel::resample(&clip.pcm, clip.sample_rate, rate)?.into_owned()
+            })
+        };
+        let dtype = self.talker.dtype();
+        let embedding = cloner
+            .speaker
+            .embed(&at(cloner.speaker.sample_rate)?, &self.device, dtype)?
+            .to_dtype(dtype)?
+            .reshape((1, 1, ()))?;
+        let context = match clip
+            .text
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            Some(text) => {
+                let ids = self.ids(&format!("<|im_start|>assistant\n{text}<|im_end|>\n"))?;
+                anyhow::ensure!(
+                    ids.len() > ROLE_TOKENS + REF_TAIL_TOKENS,
+                    "the reference text is empty"
+                );
+                let encoder = cloner.encoder.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "this model has no codec encoder to continue the clip (a GGUF has none); \
+                         send `reference_audio` without `reference_text`"
+                    )
+                })?;
+                let rate = u32::try_from(self.sample_rate)?;
+                let codes = encoder.encode(&at(rate)?, cloner.quantizers, &self.device)?;
+                anyhow::ensure!(!codes.is_empty(), "the reference audio is too short");
+                Some((
+                    ids[ROLE_TOKENS..ids.len() - REF_TAIL_TOKENS].to_vec(),
+                    codes,
+                ))
+            }
+            None => None,
+        };
+        Ok(Cloned { embedding, context })
+    }
+
+    // the summed embeddings `(1, frames, hidden)` of whole frames of codes, as each decode step feeds one
+    fn frame_embeds(&self, frames: &[Vec<u32>]) -> anyhow::Result<Tensor> {
+        let groups = frames[0].len();
+        let column = |g: usize| -> Vec<u32> { frames.iter().map(|f| f[g]).collect() };
+        let mut sum = self.talker.codec(&self.tensor(&column(0))?)?;
+        for g in 1..groups {
+            sum = (sum + self.talker.predictor.embed(g, &self.tensor(&column(g))?)?)?;
+        }
+        Ok(sum)
+    }
+
+    /// The talker's prompt, as the reference lays it out: non-streaming text for CustomVoice and VoiceDesign (all of
+    /// it in the prompt), streaming text for Base (one text row per frame, the rest added as frames decode).
+    fn prompt(&self, text: &str, voice: &Voice) -> anyhow::Result<Prompt> {
         let talker = &self.cfg.talker_config;
         let ids = self.ids(&format!(
             "<|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n"
@@ -313,7 +479,12 @@ impl Qwen3Tts {
             specials.narrow(1, 1, 1)?,
             specials.narrow(1, 2, 1)?,
         );
-        let mut codec_ids = match voice.language {
+        let cloned = voice
+            .reference
+            .as_deref()
+            .map(|clip| self.clone_voice(clip))
+            .transpose()?;
+        let tags_ids = match voice.language {
             Some(language) => vec![
                 talker.codec_think_id,
                 talker.codec_think_bos_id,
@@ -326,18 +497,24 @@ impl Qwen3Tts {
                 talker.codec_think_eos_id,
             ],
         };
-        codec_ids.extend(voice.speaker);
-        codec_ids.extend([talker.codec_pad_id, talker.codec_bos_id]);
-        let codec = self.talker.codec(&self.tensor(&codec_ids)?)?;
-        let n = codec_ids.len();
+        let mut codec_parts = vec![self.talker.codec(&self.tensor(&tags_ids)?)?];
+        if let Some(speaker) = voice.speaker {
+            codec_parts.push(self.talker.codec(&self.tensor(&[speaker])?)?);
+        }
+        if let Some(cloned) = &cloned {
+            codec_parts.push(cloned.embedding.clone());
+        }
+        codec_parts.push(
+            self.talker
+                .codec(&self.tensor(&[talker.codec_pad_id, talker.codec_bos_id])?)?,
+        );
+        let codec = Tensor::cat(&codec_parts, 1)?;
+        let n = codec.dim(1)?;
+        let codec_bos = codec.narrow(1, n - 1, 1)?;
         // every codec tag but bos rides on tts_pad, the last of them on tts_bos
         let tags = Tensor::cat(&[tts_pad.repeat((1, n - 2, 1))?, tts_bos], 1)?;
         let tags = (tags + codec.narrow(1, 0, n - 1)?)?;
         let body = &ids[ROLE_TOKENS..ids.len() - TAIL_TOKENS];
-        let text_rows = Tensor::cat(&[self.talker.text(&self.tensor(body)?)?, tts_eos], 1)?;
-        let pads = self
-            .talker
-            .codec(&self.tensor(&vec![talker.codec_pad_id; body.len() + 1])?)?;
         let mut parts = Vec::new();
         if let Some(instruction) = &voice.instruction {
             let ids = self.ids(&format!("<|im_start|>user\n{instruction}<|im_end|>\n"))?;
@@ -345,9 +522,50 @@ impl Qwen3Tts {
         }
         parts.push(self.talker.text(&self.tensor(&ids[..ROLE_TOKENS])?)?);
         parts.push(tags);
-        parts.push((text_rows + pads)?);
-        parts.push((tts_pad + codec.narrow(1, n - 1, 1)?)?);
-        Ok(Tensor::cat(&parts, 1)?)
+        let mut trailing = None;
+        let mut prefix = Vec::new();
+        match cloned.and_then(|c| c.context) {
+            // in-context: the clip's text then ours, beside bos and the clip's frames; text past them trails
+            Some((ref_ids, codes)) => {
+                let all: Vec<u32> = ref_ids.iter().chain(body).copied().collect();
+                let text_rows = Tensor::cat(&[self.talker.text(&self.tensor(&all)?)?, tts_eos], 1)?;
+                let codec_rows = Tensor::cat(&[codec_bos, self.frame_embeds(&codes)?], 1)?;
+                let (text_len, codec_len) = (text_rows.dim(1)?, codec_rows.dim(1)?);
+                if text_len > codec_len {
+                    parts.push((text_rows.narrow(1, 0, codec_len)? + codec_rows)?);
+                    trailing = Some(text_rows.narrow(1, codec_len, text_len - codec_len)?);
+                } else {
+                    let text_rows = Tensor::cat(
+                        &[text_rows, tts_pad.repeat((1, codec_len - text_len, 1))?],
+                        1,
+                    )?;
+                    parts.push((text_rows + codec_rows)?);
+                }
+                prefix = codes;
+            }
+            None if voice.reference.is_some() => {
+                // streaming text: the first token beside bos, the rest one per decoded frame
+                parts.push((self.talker.text(&self.tensor(&body[..1])?)? + &codec_bos)?);
+                trailing = Some(if body.len() > 1 {
+                    Tensor::cat(&[self.talker.text(&self.tensor(&body[1..])?)?, tts_eos], 1)?
+                } else {
+                    tts_eos
+                });
+            }
+            None => {
+                let text_rows = Tensor::cat(&[self.talker.text(&self.tensor(body)?)?, tts_eos], 1)?;
+                let pads = self
+                    .talker
+                    .codec(&self.tensor(&vec![talker.codec_pad_id; body.len() + 1])?)?;
+                parts.push((text_rows + pads)?);
+                parts.push((tts_pad + codec_bos)?);
+            }
+        }
+        Ok(Prompt {
+            embeds: Tensor::cat(&parts, 1)?,
+            trailing,
+            prefix,
+        })
     }
 
     fn logits_vec(logits: &Tensor) -> inference_tensor::Result<Vec<f32>> {
@@ -357,7 +575,7 @@ impl Qwen3Tts {
     /// The frames' codes `(frames, groups)`, row-major.
     fn codes(
         &self,
-        prompt: Tensor,
+        prompt: &Prompt,
         sampling: &Sampling,
         rng: &mut Isaac64Rng,
     ) -> anyhow::Result<Vec<Vec<u32>>> {
@@ -371,8 +589,9 @@ impl Qwen3Tts {
             .text(&self.tensor(&[self.cfg.tts_pad_token_id])?)?;
         let mut cache = self.talker.new_cache();
         let mut sub_cache: StackCache = predictor.new_cache();
-        let mut offset = prompt.dim(1)?;
-        let (mut hidden, mut logits) = self.talker.step(prompt, &mut cache, 0)?;
+        let mut offset = prompt.embeds.dim(1)?;
+        let (mut hidden, mut logits) = self.talker.step(prompt.embeds.clone(), &mut cache, 0)?;
+        let trailing_len = prompt.trailing.as_ref().map_or(Ok(0), |t| t.dim(1))?;
         let mut frames: Vec<Vec<u32>> = Vec::new();
         let mut history: Vec<u32> = Vec::new();
         while frames.len() < sampling.max_frames {
@@ -425,7 +644,13 @@ impl Qwen3Tts {
                 sum = (sum + &input)?;
             }
             frames.push(frame);
-            let next = (sum + &tts_pad)?;
+            // the next text row while any trail, then tts_pad
+            let step = frames.len() - 1;
+            let text = match &prompt.trailing {
+                Some(rows) if step < trailing_len => rows.narrow(1, step, 1)?,
+                _ => tts_pad.clone(),
+            };
+            let next = (sum + text)?;
             (hidden, logits) = self.talker.step(next, &mut cache, offset)?;
             offset += 1;
         }
@@ -442,14 +667,35 @@ impl Qwen3Tts {
     ) -> anyhow::Result<SpeechGenerationOutput> {
         let voice = self.voice(options)?;
         let mut rng = Isaac64Rng::seed_from_u64(seed);
-        let frames = self.codes(self.prompt(text, &voice)?, sampling, &mut rng)?;
-        let pcm = self.decode(&frames)?;
+        let prompt = self.prompt(text, &voice)?;
+        let frames = self.codes(&prompt, sampling, &mut rng)?;
+        let pcm = self.decode_after(&prompt.prefix, &frames)?;
         Ok(SpeechGenerationOutput {
             pcm: Arc::new(pcm),
             rate: self.sample_rate,
             channels: 1,
             words: None,
         })
+    }
+
+    /// A continuation's audio: the clip's frames decoded with it for context, then cut as the reference cuts them.
+    pub fn decode_after(
+        &self,
+        prefix: &[Vec<u32>],
+        frames: &[Vec<u32>],
+    ) -> anyhow::Result<Vec<f32>> {
+        if prefix.is_empty() || frames.is_empty() {
+            return self.decode(frames);
+        }
+        let all: Vec<Vec<u32>> = prefix.iter().chain(frames).cloned().collect();
+        let wav = self.decode(&all)?;
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
+        let cut = (prefix.len() as f64 / all.len() as f64 * wav.len() as f64) as usize;
+        Ok(wav[cut..].to_vec())
     }
 
     /// Frames of codes to audio.
@@ -463,6 +709,20 @@ impl Qwen3Tts {
             .t()?
             .contiguous()?;
         Ok(self.codec.decode(&codes)?)
+    }
+
+    /// A clip's x-vector and, with a transcript, its codes (for parity checks).
+    pub fn clone_parts(
+        &self,
+        clip: &SpeechReference,
+    ) -> anyhow::Result<(Vec<f32>, Option<Frames>)> {
+        let cloned = self.clone_voice(clip)?;
+        let embedding = cloned
+            .embedding
+            .flatten_all()?
+            .to_dtype(DType::F32)?
+            .to_vec1::<f32>()?;
+        Ok((embedding, cloned.context.map(|(_, codes)| codes)))
     }
 
     /// The prompt's text ids, as the reference tokenizes them (for parity checks).
@@ -488,7 +748,7 @@ impl Qwen3Tts {
             ..Sampling::default()
         };
         let mut rng = Isaac64Rng::seed_from_u64(0);
-        self.codes(self.prompt(text, &voice)?, &sampling, &mut rng)
+        self.codes(&self.prompt(text, &voice)?, &sampling, &mut rng)
     }
 }
 

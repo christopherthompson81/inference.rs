@@ -117,3 +117,99 @@ cloning) needs the speaker encoder and, for in-context cloning, the codec's enco
 
 Tiny engine test (`crates/inference/tests/integration/qwen3_tts_tiny.rs`): voices, seeds, languages, instructions,
 voice design, detection and request errors, 5 tests in under 0.1 s each on CPU.
+
+## Run 7 - 2026-11-11 13:58
+
+Question: what does voice cloning (Base) add, and does it match?
+
+Read `generate_voice_clone`, `create_voice_clone_prompt`, `generate_icl_prompt`, the speaker encoder and transformers'
+`MimiModel.encode`:
+- x-vector: an ECAPA-TDNN (TDNN 128->512 k5, three SE-Res2Net blocks k3 at dilations 2/3/4, scale 8, aggregation over
+  their outputs 1536 k1, attentive statistics pooling, 3072->enc_dim; every conv 'same' with reflect padding) over a
+  log-mel (n_fft 1024, hop 256, 128 Slaney mels to 12 kHz, reflect padding (n_fft - hop) / 2 each side, uncentered,
+  `log(clamp(mel, 1e-5))`). enc_dim is the talker width (1024 at 0.6B, 2048 at 1.7B). It takes the speaker id's place
+  in the codec tags.
+- In-context (a transcript given): the clip's codes from the codec's Mimi encoder (causal SEANet, 8-layer transformer,
+  replicate-padded stride-2 downsampler, split RVQ keeping 16 of 32 codebooks, nearest centroid per residual), the
+  clip's text before ours, bos then the clip's frames beside them; text past the frames trails one row per decoded
+  frame. The output is decoded after the clip's frames and cut at `ref_frames / all_frames` of the samples.
+- Cloning defaults to streaming text (`non_streaming_mode=False`): x-vector mode puts only the first text token beside
+  bos, the rest trail. CustomVoice and VoiceDesign default to non-streaming.
+- Mimi's encoder transformer gets a full causal mask: transformers' `create_causal_mask` ignores the config's
+  `sliding_window` (250), so the reference never windows it.
+
+Command: `qwentts_clone_ref.py --model Qwen3-TTS-12Hz-0.6B-Base --ref-audio greedy.wav [--ref-text <run 2's text>]`
+(the clip is run 2's synthetic Ryan output), then the parity example with `--reference-audio [--reference-text]`.
+
+Finding (first pass): x-vector mode exact (cosine 1.000000, 399 greedy frames equal; the reference ran to the 400 cap),
+codec SNR only 33.7 dB. In-context: clip codes 81 of 87 frames equal, the six others first differing at codebooks
+3-14; greedy equal for 15 frames, every first code equal.
+
+## Run 8 - 2026-11-11 14:05
+
+Question: are the six clip frames ours or the reference's numerics?
+
+Command: the reference tokenizer's `encode` of the same clip on CPU, CUDA with TF32 off, and CUDA with TF32 on (the
+default for convolutions: `torch.backends.cudnn.allow_tf32 = True`).
+
+Finding: CPU 81 and CUDA without TF32 81 frames equal to the dump, CUDA with TF32 85 (TF32 is not even
+deterministic run to run). Ours against the CPU reference: 87 of 87, on CUDA and on CPU.
+
+Implication: the dumps must run with TF32 off. Regenerated: 0.6B in-context clip codes 87/87, greedy 399/399, codec
+97.2 dB; x-vector 399/399, codec 79.8 dB (the 33.7 dB was TF32 in the reference's codec convs too). 1.7B Base
+in-context: x-vector cosine 1.000000, clip 87/87, greedy 399/399, codec 84.5 dB.
+
+## Run 9 - 2026-11-11 14:15
+
+Command: the parity example with `--bf16 --seed 4 --sampled-wav ... --similar-to greedy.wav cv17_vivian.wav` for
+0.6B and 1.7B Base in both modes, then Parakeet.
+
+Question: does sampled bf16 cloning speak the text in the clip's voice?
+
+Finding (x-vector cosine of the output to the clip's voice / to another voice, transcript):
+
+| model | mode | audio / time | to clip | to other | transcript |
+|---|---|---|---|---|---|
+| 0.6B | x-vector | 3.68 s / 0.65 s | 0.990 | 0.929 | exact |
+| 0.6B | in-context | 4.16 s / 0.84 s | 0.993 | 0.931 | exact |
+| 1.7B | x-vector | 4.48 s / 0.93 s | 0.992 | 0.946 | exact |
+| 1.7B | in-context | 4.40 s / 1.03 s | 0.991 | 0.945 | exact |
+
+Implication: the clone is nearer the clip's voice than another in every case (the encoder's own space compresses the
+gap). Next: the request fields and engine tests.
+
+## Run 10 - 2026-11-11 14:40
+
+Question: do llama.cpp's GGUFs (ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF: talker `qwen3tts` + mmproj with
+`qwen3tts_spkenc` and `qwen3tts_gen`) load, and how close are they?
+
+Read `conversion/qwen3tts.py` (llama.cpp 970b51ce7): the talker's text projection is folded into `token_embd` (text
+rows) with the codec embedding appended (codec rows, named `<|codec_*|>` after their config keys, so the codec ids,
+languages and voices come back from the token names; which voices speak a dialect does not); SnakeBeta is stored as
+`e^alpha`, `1 / (e^beta + 1e-9)`; codebooks are stored divided by their usage; the code predictor's 15 tables and heads
+are stacked; the codec transformer's heads, head size, RoPE base and window are hardcoded, not stored. No codec encoder
+is converted, so a GGUF cannot clone in-context. The bindings undo the folds (log; -log; usage of ones) except the text
+projection, which the talker now skips when the checkpoint has none.
+
+Command: the parity example with `--model Qwen3-TTS-12Hz-1.7B-Base-bf16.gguf` (f32 compute) against
+`base17_xvec.safetensors` (the release in f32: x-vector cosine 1.000000, codec 116.4 dB, greedy 399/399).
+
+Finding (GGUF bf16 file): prompt ids equal (tokenizer rebuilt from the GGUF's tokens and merges), x-vector cosine
+1.000000, codec 48.3 dB (the GGUF stores the codec's matrices in BF16, the release in F32), greedy 48 frames equal,
+71 first codes, then EOS at 181 frames (the folded text table is rounded to BF16 after folding).
+bf16 sampled, seed 4: bf16 GGUF 4.24 s in 0.90 s, Q8_0 4.80 s in 0.85 s; both transcribe exactly and are nearer the
+clip's voice (0.991) than another (0.943-0.944).
+
+Implication: GGUF loading is right to within the file's own rounding; it is a BF16-class checkpoint.
+
+## Run 11 - 2026-11-11 14:55
+
+Commands: `scripts/qwen3_tts_parity.sh` (now with TF32 off in the reference, and Base clips) on 0.6B Base in-context and
+0.6B CustomVoice; the tiny engine tests (`qwen3_tts_tiny`); `inference serve` with the 1.7B Base Q8_0 GGUF and with the
+1.7B Base release, `/v1/audio/speech` with a base64 `reference_audio` (run 2's synthetic clip).
+
+Finding: Base in-context x-vector 1.000000, clip 87/87, greedy 599/599, codec 94.3 dB; CustomVoice greedy 87/87, codec
+114.7 dB (the 64.5 dB of run 3 was the reference's TF32). The tiny GGUF, written as llama.cpp's converter writes one,
+speaks within 2 PCM16 steps of its checkpoint (the SnakeBeta log/exp round trip). Over HTTP: the Q8_0 GGUF clones
+(200, transcript exact) and answers `reference_text` with a 400 naming the missing codec encoder; the release continues
+the clip (200, transcript exact).

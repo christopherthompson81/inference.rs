@@ -25,15 +25,17 @@ pub const CHUNK_FRAMES: usize = 300;
 pub const CONTEXT_FRAMES: usize = 25;
 
 /// A conv padded on the left only, so each output sees its input's past.
-struct CausalConv {
+pub(super) struct CausalConv {
     weight: Tensor,
-    bias: Tensor,
+    bias: Option<Tensor>,
     stride: usize,
     dilation: usize,
     groups: usize,
     // the dilated kernel's span less the stride
     padding: usize,
     span: usize,
+    // pad with the edge samples instead of zeros (Mimi's downsampler)
+    replicate: bool,
 }
 
 impl CausalConv {
@@ -45,16 +47,36 @@ impl CausalConv {
         groups: usize,
         vb: &ShardedVarBuilder,
     ) -> Result<Self> {
-        let stride = 1;
+        Self::with(
+            in_ch,
+            out_ch,
+            (kernel, 1, dilation, groups),
+            true,
+            false,
+            vb,
+        )
+    }
+
+    /// `shape` is (kernel, stride, dilation, groups).
+    pub(super) fn with(
+        in_ch: usize,
+        out_ch: usize,
+        shape: (usize, usize, usize, usize),
+        bias: bool,
+        replicate: bool,
+        vb: &ShardedVarBuilder,
+    ) -> Result<Self> {
+        let (kernel, stride, dilation, groups) = shape;
         let span = (kernel - 1) * dilation + 1;
         Ok(Self {
             weight: vb.get((out_ch, in_ch / groups, kernel), "weight")?,
-            bias: vb.get(out_ch, "bias")?,
+            bias: bias.then(|| vb.get(out_ch, "bias")).transpose()?,
             stride,
             dilation,
             groups,
             padding: span - stride,
             span,
+            replicate,
         })
     }
 }
@@ -65,9 +87,25 @@ impl Module for CausalConv {
         // the reference's right padding to a whole last frame
         let frames = (len + self.padding - self.span).div_ceil(self.stride) + 1;
         let ideal = (frames - 1) * self.stride + self.span - self.padding;
-        let xs = xs.pad_with_zeros(D::Minus1, self.padding, ideal - len)?;
+        let xs = if self.replicate {
+            let edge = |at: usize, n: usize| xs.narrow(D::Minus1, at, 1)?.repeat((1, 1, n));
+            let mut parts = Vec::with_capacity(3);
+            if self.padding > 0 {
+                parts.push(edge(0, self.padding)?);
+            }
+            parts.push(xs.clone());
+            if ideal > len {
+                parts.push(edge(len - 1, ideal - len)?);
+            }
+            Tensor::cat(&parts, D::Minus1)?
+        } else {
+            xs.pad_with_zeros(D::Minus1, self.padding, ideal - len)?
+        };
         let ys = xs.conv1d(&self.weight, 0, self.stride, self.dilation, self.groups)?;
-        ys.broadcast_add(&self.bias.reshape((1, (), 1))?)
+        match &self.bias {
+            Some(bias) => ys.broadcast_add(&bias.reshape((1, (), 1))?),
+            None => Ok(ys),
+        }
     }
 }
 
@@ -237,7 +275,12 @@ impl Module for DecoderBlock {
     }
 }
 
-fn linear(in_dim: usize, out_dim: usize, bias: bool, vb: &ShardedVarBuilder) -> Result<Linear> {
+pub(super) fn linear(
+    in_dim: usize,
+    out_dim: usize,
+    bias: bool,
+    vb: &ShardedVarBuilder,
+) -> Result<Linear> {
     let weight = vb.get((out_dim, in_dim), "weight")?;
     let bias = bias.then(|| vb.get(out_dim, "bias")).transpose()?;
     Ok(Linear::new(weight, bias))

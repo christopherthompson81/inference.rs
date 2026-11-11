@@ -3255,6 +3255,8 @@ class SpeechGenerationRequest:
     language: str | None = None
     model: str | None = None
     phonemes: str | None = None
+    reference_audio: str | None = None
+    reference_text: str | None = None
     response_format: AudioResponseFormat | None = None
     seed: int | None = None
     speed: float | None = None

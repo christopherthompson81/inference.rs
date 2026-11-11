@@ -167,7 +167,7 @@ pub use inference_mcp::{
 };
 pub use inference_mcp::{McpClient, McpClientConfig, McpServerConfig, McpServerSource};
 pub use inference_models_speech::{
-    ProgressFn, SpeechGenerationConfig, SpeechOptions, TimedText, Transcription,
+    ProgressFn, SpeechGenerationConfig, SpeechOptions, SpeechReference, TimedText, Transcription,
     TranscriptionOptions, TranscriptionProgress,
     diarization::{Diarization, DiarizationOptions, SpeakerSegment},
     parakeet::{PRESETS as ASR_QUANT_PRESETS, QuantPolicy as AsrQuantPolicy},

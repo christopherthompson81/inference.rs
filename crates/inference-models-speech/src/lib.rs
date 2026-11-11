@@ -77,6 +77,19 @@ pub struct SpeechOptions {
     pub instructions: Option<String>,
     /// The language to speak, by name (Qwen3-TTS); unset lets the model pick.
     pub language: Option<String>,
+    /// A clip of the voice to speak in, for a model that clones voices (Qwen3-TTS Base).
+    #[serde(skip)]
+    pub reference: Option<Arc<SpeechReference>>,
+}
+
+/// A voice to clone: a clip of it, and optionally what the clip says.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpeechReference {
+    /// Mono samples.
+    pub pcm: Vec<f32>,
+    pub sample_rate: u32,
+    /// The clip's transcript; with it the model continues the clip, without it it takes the voice alone.
+    pub text: Option<String>,
 }
 
 #[derive(Clone, Debug)]
