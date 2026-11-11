@@ -15,6 +15,7 @@ use super::glb::{Pbr, sample_attributes};
 use super::mesh::Mesh;
 use super::remesh::{BAND, Domain, PROJECT_BACK, remesh};
 use super::vec3::{V3, dot, mad, sub};
+use crate::progress::CANCELLED;
 
 /// `to_glb`'s defaults
 pub const DECIMATION_TARGET: usize = 1_000_000;
@@ -359,7 +360,11 @@ pub fn bake(
     options: &BakeOptions,
     device: &Device,
 ) -> Result<Baked> {
-    finish(prepare(mesh, resolution, options, device)?, coords, values)
+    finish(
+        prepare(mesh, resolution, options, device, &|| false)?,
+        coords,
+        values,
+    )
 }
 
 /// The part of a bake that needs only the shape: the unwrapped mesh, its covered texels and their points in the
@@ -374,13 +379,22 @@ pub struct Prepared {
     double_sided: bool,
 }
 
-/// [`bake`]'s shape half (cleanup, unwrap, rasterization and projection), which can run while the texture is made.
+/// [`bake`]'s shape half (cleanup, unwrap, rasterization and projection), which can run while the texture is made;
+/// it gives up (an error naming [`CANCELLED`]) between its steps, in the unwrap's rounds and in xatlas when `stop`
+/// returns true.
 pub fn prepare(
     mesh: &Mesh,
     resolution: usize,
     options: &BakeOptions,
     device: &Device,
+    stop: &(dyn Fn() -> bool + Sync),
 ) -> Result<Prepared> {
+    let check = || -> Result<()> {
+        if stop() {
+            inference_tensor::bail!("{CANCELLED}");
+        }
+        Ok(())
+    };
     let (cleaned, bvh) = if options.remesh {
         let mut filled = mesh.clone();
         cleanup::fill_holes(&mut filled, cleanup::MAX_HOLE_PERIMETER);
@@ -397,7 +411,10 @@ pub fn prepare(
         let (cleaned, original) = clean(mesh, options.decimation_target, device)?;
         (cleaned, Bvh::new(&original))
     };
-    let unwrapped = uv_unwrap(&cleaned).map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
+    check()?;
+    let unwrapped =
+        uv_unwrap(&cleaned, stop).map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
+    check()?;
     let size = options.texture_size;
     let texel_faces = rasterize(&unwrapped.mesh.faces, &unwrapped.uvs, size);
     let covered: Vec<usize> = (0..size * size).filter(|&t| texel_faces[t] > 0).collect();

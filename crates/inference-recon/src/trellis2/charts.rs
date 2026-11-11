@@ -79,12 +79,186 @@ fn merged_extent(a: (V3, f32), b: (V3, f32)) -> (f32, f32) {
     ((-a.1).min(angle - b.1), a.1.max(angle + b.1))
 }
 
+// a round merging fewer than one in this many charts hands over to `merge_incrementally`
+const TRICKLE_FRACTION: usize = 50;
+
+struct ConeCost {
+    area_penalty: f32,
+    perimeter_penalty: f32,
+    threshold: f32,
+}
+
+impl ConeCost {
+    // the pair's merged cone half-angle plus the area and perimeter^2/area penalties, as a round prices it
+    fn of(&self, (a0, h0): (V3, f32), (a1, h1): (V3, f32), area: f32, perim: f32) -> f32 {
+        let (low, high) = merged_extent((a0, h0), (a1, h1));
+        (high - low) * 0.5
+            + self.area_penalty * area
+            + self.perimeter_penalty * (perim * perim / area)
+    }
+}
+
+// a round's view of the charts: neighbouring pairs (lower id first, ascending) with their shared boundary, and each
+// chart's boundary to other charts, normal sum, area, cone axis and half-angle
+struct Graph {
+    adj: Vec<(u32, u32)>,
+    lengths: Vec<f32>,
+    perims: Vec<f32>,
+    sums: Vec<V3>,
+    areas: Vec<f32>,
+    axes: Vec<V3>,
+    half: Vec<f32>,
+}
+
+// `compute_charts`' rounds carried on from `graph` over `charts`, recomputing only the charts a round merged and their
+// neighbours: the same rule (a pair merges when it is each chart's cheapest, ties to the lower pair, under the
+// threshold), so a tail of one merge a round costs that merge's neighbourhood rather than a pass over the mesh
+fn merge_incrementally(
+    charts: &[u32],
+    normals: &[V3],
+    cone: &ConeCost,
+    graph: Graph,
+    stop: &dyn Fn() -> bool,
+) -> Vec<u32> {
+    let Graph {
+        adj,
+        lengths,
+        mut perims,
+        mut sums,
+        mut areas,
+        mut axes,
+        mut half,
+    } = graph;
+    let count = perims.len();
+    let mut faces_of: Vec<Vec<u32>> = vec![Vec::new(); count];
+    for (f, &c) in charts.iter().enumerate() {
+        faces_of[c as usize].push(f as u32);
+    }
+    let mut nbrs: Vec<Vec<(u32, f32)>> = vec![Vec::new(); count];
+    for (&(c0, c1), &l) in adj.iter().zip(&lengths) {
+        nbrs[c0 as usize].push((c1, l));
+        nbrs[c1 as usize].push((c0, l));
+    }
+    let cost =
+        |c: usize, d: usize, l: f32, perims: &[f32], areas: &[f32], axes: &[V3], half: &[f32]| {
+            let area = areas[c] + areas[d];
+            cone.of(
+                (axes[c], half[c]),
+                (axes[d], half[d]),
+                area,
+                perims[c] + perims[d] - 2.0 * l,
+            )
+        };
+    // each chart's cheapest neighbour: (cost, lower id, higher id), so ties go to the lower pair
+    let cheapest = |c: usize,
+                    nbrs: &[Vec<(u32, f32)>],
+                    perims: &[f32],
+                    areas: &[f32],
+                    axes: &[V3],
+                    half: &[f32]| {
+        nbrs[c]
+            .iter()
+            .map(|&(d, l)| {
+                let k = cost(c, d as usize, l, perims, areas, axes, half);
+                (k, (c as u32).min(d), (c as u32).max(d))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0).then((a.1, a.2).cmp(&(b.1, b.2))))
+    };
+    let mut best: Vec<Option<(f32, u32, u32)>> = (0..count)
+        .map(|c| cheapest(c, &nbrs, &perims, &areas, &axes, &half))
+        .collect();
+    // each face's chart as the merges go
+    let mut owner: Vec<u32> = charts.to_vec();
+    loop {
+        if stop() {
+            break;
+        }
+        let pairs: Vec<(u32, u32, f32)> = (0..count)
+            .filter_map(|c| {
+                let (k, lo, hi) = best[c]?;
+                (lo == c as u32
+                    && k <= cone.threshold
+                    && best[hi as usize].map(|b| (b.1, b.2)) == Some((lo, hi)))
+                .then(|| {
+                    let l = nbrs[c]
+                        .iter()
+                        .find(|&&(d, _)| d == hi)
+                        .map_or(0.0, |&(_, l)| l);
+                    (lo, hi, l)
+                })
+            })
+            .collect();
+        if pairs.is_empty() {
+            break;
+        }
+        let mut touched = Vec::new();
+        for &(c, d, l) in &pairs {
+            let (c, d) = (c as usize, d as usize);
+            let moved = std::mem::take(&mut faces_of[d]);
+            for &f in &moved {
+                owner[f as usize] = c as u32;
+            }
+            faces_of[c].extend(moved);
+            let moved_sum = sums[d];
+            for (total, add) in sums[c].iter_mut().zip(moved_sum) {
+                *total += add;
+            }
+            areas[c] += areas[d];
+            perims[c] += perims[d] - 2.0 * l;
+            // d's neighbours become c's, shared boundaries summed
+            let gone = std::mem::take(&mut nbrs[d]);
+            nbrs[c].retain(|&(n, _)| n != d as u32);
+            for (n, ln) in gone {
+                if n == c as u32 {
+                    continue;
+                }
+                match nbrs[c].iter_mut().find(|e| e.0 == n) {
+                    Some(e) => e.1 += ln,
+                    None => nbrs[c].push((n, ln)),
+                }
+                let list = &mut nbrs[n as usize];
+                let at_d = list
+                    .iter()
+                    .position(|e| e.0 == d as u32)
+                    .expect("symmetric");
+                let (_, ld) = list.swap_remove(at_d);
+                match list.iter_mut().find(|e| e.0 == c as u32) {
+                    Some(e) => e.1 += ld,
+                    None => list.push((c as u32, ld)),
+                }
+            }
+            best[d] = None;
+            touched.push(c);
+        }
+        for &c in &touched {
+            let s = sums[c];
+            let n = norm(s);
+            axes[c] = if n > 0.0 { s.map(|v| v / n) } else { s };
+            half[c] = faces_of[c]
+                .iter()
+                .map(|&f| dot(axes[c], normals[f as usize]).clamp(-1.0, 1.0).acos())
+                .fold(0.0, f32::max);
+        }
+        let mut stale: Vec<usize> = touched
+            .iter()
+            .flat_map(|&c| std::iter::once(c).chain(nbrs[c].iter().map(|&(n, _)| n as usize)))
+            .collect();
+        stale.sort_unstable();
+        stale.dedup();
+        for c in stale {
+            best[c] = cheapest(c, &nbrs, &perims, &areas, &axes, &half);
+        }
+    }
+    owner
+}
+
 /// Each face's chart: the clusters `to_glb` hands xatlas, numbered from 0 in ascending order of their lowest face.
 pub fn compute_charts(
     mesh: &Mesh,
     threshold: f32,
     area_penalty: f32,
     perimeter_penalty: f32,
+    stop: &dyn Fn() -> bool,
 ) -> Vec<u32> {
     let faces = &mesh.faces;
     let verts = &mesh.vertices;
@@ -107,7 +281,11 @@ pub fn compute_charts(
     let adjacency = manifold_adjacency(mesh);
     let mut charts: Vec<u32> = (0..f_count as u32).collect();
     let mut count = f_count;
+    let mut trickle = false;
     loop {
+        if stop() {
+            break;
+        }
         // chart pairs across manifold edges, their shared boundary summed
         let mut pairs: Vec<(u64, f32)> = adjacency
             .par_iter()
@@ -177,6 +355,29 @@ pub fn compute_charts(
                     + perimeter_penalty * (perim * perim / area)
             })
             .collect();
+        if trickle {
+            let cone = ConeCost {
+                area_penalty,
+                perimeter_penalty,
+                threshold,
+            };
+            charts = merge_incrementally(
+                &charts,
+                &normals,
+                &cone,
+                Graph {
+                    adj,
+                    lengths,
+                    perims,
+                    sums,
+                    areas: chart_areas,
+                    axes,
+                    half,
+                },
+                stop,
+            );
+            break;
+        }
         let pack = |e: u32, cost: f32| (u64::from(cost.to_bits()) << 32) | u64::from(e);
         // each chart's cheapest pair, ties to the lower edge
         let best: Vec<u64> = chart_edges
@@ -194,6 +395,7 @@ pub fn compute_charts(
             .collect();
         let mut map: Vec<u32> = (0..count as u32).collect();
         let mut merged = false;
+        let mut merges = 0usize;
         for (e, &(c0, c1)) in adj.iter().enumerate() {
             let cost = costs[e];
             if cost > threshold {
@@ -205,10 +407,13 @@ pub fn compute_charts(
             }
             map[c1 as usize] = c0;
             merged = true;
+            merges += 1;
         }
         if !merged {
             break;
         }
+        // once few charts merge a round, each full pass costs far more than it changes: the rest goes incrementally
+        trickle = merges * TRICKLE_FRACTION < count;
         count = compress(&mut map);
         charts.par_iter_mut().for_each(|c| *c = map[*c as usize]);
     }
@@ -381,29 +586,45 @@ pub struct Unwrapped {
 /// taken by xatlas as one chart (split only where it does not parameterize validly), parameterized and packed. Against
 /// CuMesh's settings ([`uv_unwrap_reference`]): an export at 1024 unwraps in about half the time, with less stretch, a
 /// few more seams and slightly lower atlas coverage.
-pub fn uv_unwrap(mesh: &Mesh) -> Result<Unwrapped, inference_xatlas::Error> {
+pub fn uv_unwrap(
+    mesh: &Mesh,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> Result<Unwrapped, inference_xatlas::Error> {
     uv_unwrap_with(
         mesh,
         UNWRAP_CONE_HALF_ANGLE,
         inference_xatlas::Options { single_chart: true },
+        stop,
     )
 }
 
 /// CuMesh's `uv_unwrap`: degenerate faces dropped, the clusters of [`compute_charts`] each added to xatlas as a mesh,
 /// charted, parameterized and packed with its defaults, the results gathered in cluster order.
 pub fn uv_unwrap_reference(mesh: &Mesh) -> Result<Unwrapped, inference_xatlas::Error> {
-    uv_unwrap_with(mesh, CONE_HALF_ANGLE, inference_xatlas::Options::default())
+    uv_unwrap_with(
+        mesh,
+        CONE_HALF_ANGLE,
+        inference_xatlas::Options::default(),
+        &|| false,
+    )
 }
 
-/// [`uv_unwrap`] with xatlas `options`.
+/// [`uv_unwrap`] with xatlas `options`, giving up (with `inference_xatlas::STOPPED`) when `stop` returns true.
 pub fn uv_unwrap_with(
     mesh: &Mesh,
     cone_half_angle: f32,
     options: inference_xatlas::Options,
+    stop: &(dyn Fn() -> bool + Sync),
 ) -> Result<Unwrapped, inference_xatlas::Error> {
     let mut mesh = mesh.clone();
     remove_degenerate_faces(&mut mesh);
-    let mut charts = compute_charts(&mesh, cone_half_angle, AREA_PENALTY, PERIMETER_AREA_PENALTY);
+    let mut charts = compute_charts(
+        &mesh,
+        cone_half_angle,
+        AREA_PENALTY,
+        PERIMETER_AREA_PENALTY,
+        stop,
+    );
     if options.single_chart {
         charts = split_large_charts(&mesh, &charts, MAX_SINGLE_CHART_FACES);
     }
@@ -420,7 +641,7 @@ pub fn uv_unwrap_with(
             triangles: tris,
         })
         .collect();
-    let atlas = inference_xatlas::unwrap_with(&inputs, options)?;
+    let atlas = inference_xatlas::unwrap_with(&inputs, options, stop)?;
     let mut out = Unwrapped {
         mesh: Mesh {
             vertices: Vec::new(),
@@ -530,13 +751,13 @@ mod tests {
             .collect();
         let mesh = Mesh { vertices, faces };
         // a tight cone keeps the six sides apart; each side's two triangles join
-        let charts = compute_charts(&mesh, 0.1, 0.0, 0.0);
+        let charts = compute_charts(&mesh, 0.1, 0.0, 0.0, &|| false);
         assert_eq!(charts.iter().max(), Some(&5));
         for side in 0..6 {
             assert_eq!(charts[2 * side], charts[2 * side + 1]);
         }
         // a 90 degree cone joins neighbouring sides
-        let wide = compute_charts(&mesh, CONE_HALF_ANGLE, 0.0, 0.0);
+        let wide = compute_charts(&mesh, CONE_HALF_ANGLE, 0.0, 0.0, &|| false);
         assert!(wide.iter().max() < Some(&5));
         let pieces = chart_meshes(&mesh, &charts);
         assert_eq!(pieces.len(), 6);
