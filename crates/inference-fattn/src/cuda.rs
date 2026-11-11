@@ -75,6 +75,7 @@ mod ffi {
         pub window_left: i32,
         pub chunk: i32,
         pub full_lens: *const core::ffi::c_void,
+        pub f32_values: i32,
     }
 
     #[repr(C)]
@@ -612,7 +613,11 @@ impl Fattn<'_> {
             v: v_t,
             mask,
             sinks,
-            uses_lay: sequences || lay.fp8 != 0 || lay.k_bits != 0 || lay.implicit_mask != 0,
+            uses_lay: sequences
+                || lay.fp8 != 0
+                || lay.k_bits != 0
+                || lay.implicit_mask != 0
+                || lay.f32_values != 0,
             lay,
             out_shape,
         })
@@ -813,6 +818,7 @@ fn dense_layout(
         window_left: opts.window_left.map_or(-1, |w| w as i32),
         chunk: opts.chunk.map_or(0, |c| c as i32),
         full_lens: std::ptr::null(),
+        f32_values: opts.f32_values as i32,
     }
 }
 

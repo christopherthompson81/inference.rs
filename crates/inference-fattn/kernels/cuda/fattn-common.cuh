@@ -43,6 +43,8 @@ struct fattn_layout {
     // chunk > 0: kp and qp in the same chunk of absolute positions, row 0 at full_lens[s] - kv_len (or 0)
     int32_t chunk;
     const int32_t * full_lens;   // [n_seq] or null
+    // nonzero: the mma kernel sums the softmax-weighted values in f32 (fattn_mma_f32_values_built), not f16
+    int32_t f32_values;
 };
 
 // Rows of sequence s's Q and dst: its packed start and length, or s's batch slot of ne01 rows.

@@ -3352,6 +3352,7 @@ dependencies = [
  "flate2",
  "half",
  "image",
+ "inference-fattn",
  "inference-json",
  "inference-kernel-build",
  "inference-models-diffusion",

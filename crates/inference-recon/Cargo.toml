@@ -13,6 +13,7 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
+inference-fattn = { workspace = true, optional = true }
 inference-json.workspace = true
 flate2.workspace = true
 half.workspace = true
@@ -38,5 +39,5 @@ anyhow.workspace = true
 tempfile.workspace = true
 
 [features]
-cuda = ["inference-tensor/cuda", "inference-nn/cuda", "inference-models-diffusion/cuda", "dep:inference-kernel-build"]
+cuda = ["inference-tensor/cuda", "inference-nn/cuda", "inference-models-diffusion/cuda", "dep:inference-kernel-build", "dep:inference-fattn", "inference-fattn/cuda"]
 metal = ["inference-tensor/metal", "inference-nn/metal", "inference-models-diffusion/metal"]
