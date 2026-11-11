@@ -589,6 +589,13 @@ fn detect(model_id: &str, artifacts: &ConfigArtifacts) -> Result<Detected> {
         return Ok(Detected::Diffusion(tp));
     }
 
+    if artifacts.contents.is_none() && super::speech::local_qwen3_tts_gguf(model_id).is_some() {
+        info!("Detected a Qwen3-TTS GGUF; routing as Qwen3-TTS.");
+        return Ok(Detected::Speech(
+            crate::pipeline::SpeechLoaderType::Qwen3Tts,
+        ));
+    }
+
     if artifacts.contents.is_none() && super::speech::local_kokoro_gguf(model_id).is_some() {
         info!("Detected a Kokoro GGUF; routing as Kokoro.");
         return Ok(Detected::Speech(crate::pipeline::SpeechLoaderType::Kokoro));

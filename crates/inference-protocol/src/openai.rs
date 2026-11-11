@@ -2173,6 +2173,13 @@ pub struct SpeechGenerationRequest {
     /// The language to speak, by name (`english`, `chinese`, ...; Qwen3-TTS). Unset, the model picks it.
     #[serde(default)]
     pub language: Option<String>,
+    /// A clip of the voice to clone, as a base64-encoded audio file (WAV, FLAC, MP3, OGG; Qwen3-TTS Base).
+    #[serde(default)]
+    pub reference_audio: Option<String>,
+    /// What `reference_audio` says. With it the model continues the clip, which copies the voice most closely;
+    /// without it the model takes the voice alone.
+    #[serde(default)]
+    pub reference_text: Option<String>,
     /// Speaking rate, 1.0 being the model's own (Kokoro). Dia ignores it.
     #[serde(default)]
     pub speed: Option<f32>,
@@ -2228,6 +2235,8 @@ impl SpeechGenerationRequest {
             seed: None,
             instructions: None,
             language: None,
+            reference_audio: None,
+            reference_text: None,
             response_format,
             timestamps: false,
         }

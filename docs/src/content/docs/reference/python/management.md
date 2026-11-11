@@ -811,6 +811,8 @@ Speech generation request
 | `language` | `str \| None` | optional |
 | `model` | `str \| None` | optional |
 | `phonemes` | `str \| None` | optional |
+| `reference_audio` | `str \| None` | optional |
+| `reference_text` | `str \| None` | optional |
 | `response_format` | `AudioResponseFormat \| None` | optional |
 | `seed` | `int \| None` | optional |
 | `speed` | `float \| None` | optional |

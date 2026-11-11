@@ -244,8 +244,8 @@ pub struct Talker {
     stack: DecoderStack,
     head: Linear,
     text_embedding: Embedding,
-    text_fc1: Linear,
-    text_fc2: Linear,
+    // the text projection's two linears; none when the table holds projected rows (llama.cpp's GGUF folds them)
+    text_projection: Option<(Linear, Linear)>,
     text_act: Activation,
     pub predictor: CodePredictor,
     layers: usize,
@@ -279,26 +279,35 @@ impl Talker {
             &AttentionImplementation::Eager,
         )?;
         let projection = vb.pp("text_projection");
+        let text_projection = projection
+            .contains_tensor("linear_fc1.weight")
+            .then(|| -> Result<(Linear, Linear)> {
+                Ok((
+                    linear(
+                        cfg.text_hidden_size,
+                        cfg.text_hidden_size,
+                        true,
+                        &projection.pp("linear_fc1"),
+                    )?,
+                    linear(
+                        cfg.text_hidden_size,
+                        cfg.hidden_size,
+                        true,
+                        &projection.pp("linear_fc2"),
+                    )?,
+                ))
+            })
+            .transpose()?;
+        let text_width = if text_projection.is_some() {
+            cfg.text_hidden_size
+        } else {
+            cfg.hidden_size
+        };
         Ok(Self {
             stack,
             head: linear(cfg.hidden_size, cfg.vocab_size, false, &vb.pp("codec_head"))?,
-            text_embedding: embedding(
-                cfg.text_vocab_size,
-                cfg.text_hidden_size,
-                &vb_m.pp("text_embedding"),
-            )?,
-            text_fc1: linear(
-                cfg.text_hidden_size,
-                cfg.text_hidden_size,
-                true,
-                &projection.pp("linear_fc1"),
-            )?,
-            text_fc2: linear(
-                cfg.text_hidden_size,
-                cfg.hidden_size,
-                true,
-                &projection.pp("linear_fc2"),
-            )?,
+            text_embedding: embedding(cfg.text_vocab_size, text_width, &vb_m.pp("text_embedding"))?,
+            text_projection,
             text_act: cfg.hidden_act,
             predictor: CodePredictor::new(
                 &cfg.code_predictor_config,
@@ -316,11 +325,17 @@ impl Talker {
         StackCache::new(self.layers, self.max_positions)
     }
 
+    pub fn dtype(&self) -> DType {
+        self.head.weight().dtype()
+    }
+
     /// Text ids `(1, n)` through the text embedding and its projection, `(1, n, hidden)`.
     pub fn text(&self, ids: &Tensor) -> Result<Tensor> {
         let xs = self.text_embedding.forward(ids)?;
-        let xs = self.text_act.forward(&self.text_fc1.forward(&xs)?)?;
-        self.text_fc2.forward(&xs)
+        match &self.text_projection {
+            Some((fc1, fc2)) => fc2.forward(&self.text_act.forward(&fc1.forward(&xs)?)?),
+            None => Ok(xs),
+        }
     }
 
     /// Codec ids `(1, n)` through the talker's codec embedding.

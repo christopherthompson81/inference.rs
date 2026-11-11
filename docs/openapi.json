@@ -14912,6 +14912,20 @@
             ],
             "description": "The model's own phoneme string, spoken in place of `input` (Kokoro; without it, `input` is phonemized)."
           },
+          "reference_audio": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A clip of the voice to clone, as a base64-encoded audio file (WAV, FLAC, MP3, OGG; Qwen3-TTS Base)."
+          },
+          "reference_text": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What `reference_audio` says. With it the model continues the clip, which copies the voice most closely;\nwithout it the model takes the voice alone."
+          },
           "response_format": {
             "$ref": "#/components/schemas/AudioResponseFormat",
             "description": "The desired audio format for the generated speech: `wav` or `pcm`, `wav` when unset (OpenAI's default, `mp3`,\nis not encoded)."

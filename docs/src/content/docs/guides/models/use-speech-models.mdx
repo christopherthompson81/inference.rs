@@ -1,6 +1,6 @@
 ---
 title: Speech models
-description: Parakeet, Whisper, Qwen3-ASR, Nemotron 3.5 Transcribe, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime for speech transcription and audio chat, Silero for voice activity, Nemotron-3 and Sortformer for speaker diarization, Dia, Kokoro and Qwen3-TTS for text-to-speech.
+description: Parakeet, Whisper, Qwen3-ASR, Nemotron 3.5 Transcribe, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime for speech transcription and audio chat, Silero for voice activity, Nemotron-3 and Sortformer for speaker diarization, Dia, Kokoro and Qwen3-TTS (with voice cloning) for text-to-speech.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
@@ -34,8 +34,9 @@ inference.rs supports twelve speech-related model families:
   `/v1/chat/completions`.
 - **Dia**: dedicated text-to-speech model served via `/v1/audio/speech`.
 - **Kokoro**: an 82M-parameter text-to-speech model with preset voices, also served via `/v1/audio/speech`.
-- **Qwen3-TTS** (12 Hz, 0.6B and 1.7B): multilingual text-to-speech with preset voices (CustomVoice) or a voice
-  described in words (VoiceDesign), also served via `/v1/audio/speech`.
+- **Qwen3-TTS** (12 Hz, 0.6B and 1.7B): multilingual text-to-speech with preset voices (CustomVoice), a voice
+  described in words (VoiceDesign) or a voice cloned from a clip (Base), from the release or llama.cpp's GGUFs, also
+  served via `/v1/audio/speech`.
 
 Qwen3-ASR, Nemotron 3.5 Transcribe, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime are classified as multimodal models because audio is an input modality. Parakeet and
 Whisper are dedicated transcription models, and Dia, Kokoro and Qwen3-TTS are dedicated speech models.
@@ -661,7 +662,7 @@ curl http://localhost:1234/v1/audio/speech \
 - Output: raw audio bytes.
 - `response_format`: only `wav` and `pcm` are read; `mp3`/`opus`/`aac`/`flac` return a validation error.
 - Dia ignores `voice`, `speed`, `phonemes`, `seed`, `instructions` and `language`; Kokoro reads all but `instructions`
-  and `language`, and Qwen3-TTS reads `voice`, `seed`, `instructions` and `language` (below).
+  and `language`, and Qwen3-TTS reads `voice`, `seed`, `instructions`, `language` and the cloning fields (below).
 
 </TabItem>
 <TabItem label="Python">
@@ -836,14 +837,28 @@ inference serve -m Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
 Qwen3-TTS loads from Qwen's releases: `config.json`, `model.safetensors`, the tokenizer's `vocab.json`, `merges.txt` and
 `tokenizer_config.json`, and the 12 Hz codec under `speech_tokenizer/`. Its talker (a Qwen3 decoder) predicts the first
 code of each 80 ms frame, a small code predictor fills the frame's other 15, and the codec decoder turns the frames into
-24 kHz audio. Two kinds of checkpoint are supported:
+24 kHz audio. Three kinds of checkpoint are supported:
 
 - **CustomVoice** (0.6B and 1.7B): nine preset voices (`aiden`, `dylan`, `eric`, `ono_anna`, `ryan`, `serena`, `sohee`,
   `uncle_fu`, `vivian`). `voice` is required and case-insensitive; an unknown one is rejected with the list.
 - **VoiceDesign** (1.7B): no preset voices; `instructions` describe the voice (`"A deep, gravelly male voice, an old
   sea captain telling a story."`), and `voice` is ignored.
 
-The Base checkpoints, which clone a voice from a reference clip, are not supported yet.
+- **Base** (0.6B and 1.7B): clones the voice of a clip sent with the request (`reference_audio`). Alone, the clip gives
+  a speaker embedding the model speaks with; with its transcript (`reference_text`) the model continues the clip, which
+  copies the voice most closely. `voice` and `instructions` don't apply.
+
+llama.cpp's GGUFs load too (such as `ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF`): the talker GGUF and its mmproj, which
+carries the speaker encoder, the code predictor and the codec decoder.
+
+```bash
+inference serve -m /path/to/Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf
+```
+
+Pass the talker file, or a directory holding just one; the mmproj is the one named after it
+(`mmproj-Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf`), or the directory's only mmproj. The talker's matrices run as the file
+stores them. The GGUFs carry no codec encoder, so they clone from the clip alone and reject `reference_text`; their
+codec is stored in BF16, so the audio differs slightly from the release's.
 
 Request fields Qwen3-TTS reads:
 
@@ -853,6 +868,9 @@ Request fields Qwen3-TTS reads:
 - `language`: the language to speak, by name: `chinese`, `english`, `german`, `italian`, `portuguese`, `spanish`,
   `japanese`, `korean`, `french` or `russian`. Unset, the model picks it from the text. `dylan` and `eric` speak Chinese
   in their dialects (Beijing, Sichuan).
+- `reference_audio`: the clip to clone (Base), a base64-encoded audio file (WAV, FLAC, MP3 or OGG) of a few seconds of
+  clean speech; it is resampled to 24 kHz.
+- `reference_text`: what the clip says (Base), to continue it rather than take only its speaker embedding.
 - `seed`: seeds the sampling, so the same request gives the same audio. Without it each request draws a fresh seed.
 
 Sampling is set when the model loads: a speech model spec's `generation` takes `temperature`, `top_p`, `top_k` and
@@ -929,3 +947,18 @@ std::fs::write("out.wav", &audio.bytes)?;
 
 </TabItem>
 </Tabs>
+
+Cloning with a Base checkpoint, from a clip and its transcript:
+
+```bash
+curl http://localhost:1234/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"model\": \"default\",
+    \"input\": \"Every good story begins with a single step into the unknown.\",
+    \"language\": \"english\",
+    \"reference_audio\": \"$(base64 -w0 clip.wav)\",
+    \"reference_text\": \"What the clip says.\"
+  }" \
+  --output cloned.wav
+```
