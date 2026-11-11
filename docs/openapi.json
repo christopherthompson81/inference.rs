@@ -7337,6 +7337,29 @@
               }
             ],
             "description": "TRELLIS.2's textured mesh of the object in one image"
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TextureMeshJob",
+                "description": "A mesh painted from an image with TRELLIS.2"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "texture_mesh"
+                    ]
+                  }
+                }
+              }
+            ],
+            "description": "A mesh painted from an image with TRELLIS.2"
           }
         ],
         "description": "What a job does."
@@ -15110,6 +15133,74 @@
           }
         ],
         "description": "Text format configuration"
+      },
+      "TextureMeshJob": {
+        "type": "object",
+        "description": "A mesh painted from an image with TRELLIS.2's texturing pipeline; the job takes the mesh (glb, obj or ply) and the\nimage.",
+        "properties": {
+          "placement": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Placement",
+                "description": "How much it may displace to run, in place of the server's setting"
+              }
+            ]
+          },
+          "remove_background": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Remove the background with BiRefNet even when the image has transparency of its own (an opaque image always\nhas it removed)"
+          },
+          "resolution": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The grid the mesh is encoded at, 512 or 1024 (the default)",
+            "minimum": 0
+          },
+          "seed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "texture_sampler": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Trellis2Sampler",
+                "description": "The texture flow's sampler"
+              }
+            ]
+          },
+          "texture_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The baked textures' width and height (2048 by default)",
+            "minimum": 0
+          },
+          "unwrap": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Unwrap the mesh even when it has texture coordinates of its own"
+          }
+        }
       },
       "TimestampGranularity": {
         "type": "string",

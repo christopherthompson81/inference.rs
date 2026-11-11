@@ -1,16 +1,17 @@
 ---
 title: 3D models from an image
-description: TRELLIS.2 turns one image of an object into a textured mesh (GLB); JoVox generates its voxel structure, which TRELLIS.2's second stage can mesh. BiRefNet removes the background first.
+description: TRELLIS.2 turns one image of an object into a textured mesh (GLB), or paints a mesh you supply from an image; JoVox generates its voxel structure, which TRELLIS.2's second stage can mesh. BiRefNet removes the background first.
 ---
 
-Two commands turn one image of an object into 3D:
+Three commands turn an image of an object into 3D:
 
 - `inference image-to-3d` runs TRELLIS.2 end to end: a textured mesh (`model.glb`, its PBR volume baked into base
   color and metallic-roughness textures) from its own sparse structure, shape and texture stages.
+- `inference texture-mesh` paints a mesh you already have from the image, with TRELLIS.2's texturing pipeline.
 - `inference voxels` runs JoVox for the object's voxel structure and meshes it with TRELLIS.2's shape stage
   (geometry only).
 
-Both remove the background of an opaque image with BiRefNet first, and take an object on a transparent background as
+All three remove the background of an opaque image with BiRefNet first, and take an object on a transparent background as
 it is.
 
 ## TRELLIS.2 end to end
@@ -80,6 +81,37 @@ As a server job: `{"kind": "image_to_3d"}` with one image, optionally `seed`, `v
 `structure_sampler`, `shape_sampler` and `texture_sampler` (each with optional `steps`, `guidance_strength`,
 `guidance_rescale` and `rescale_t`); outputs under `model/`. The web UI's 3D tab has these under **Advanced**.
 
+## Painting a mesh
+
+```bash
+inference texture-mesh --mesh chair.glb --image chair.jpg --out chair-painted/
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--mesh` | required | The mesh: `.glb` (every triangle primitive of its default scene, placed by its nodes), `.obj` or `.ply` (ASCII or binary). glTF and OBJ are y up; a PLY is read as written, so give it y up too |
+| `--resolution` | 1024 | The grid the mesh is encoded at, 512 or 1024 (512: about a third of the time, coarser) |
+| `--texture-size` | 2048 | The baked textures' width and height |
+| `--unwrap` | off | Lay out new texture coordinates even when the mesh has its own |
+| `--seed`, `--texture-{steps,guidance,guidance-rescale,rescale-t}` | 0, `pipeline.json`'s | The texture flow's noise and sampler, as in `image-to-3d` |
+| `--remove-background` | off | Run BiRefNet even when the image has transparency of its own |
+
+The mesh is centered in the unit cube with its longest side just inside it and turned z up, as TRELLIS.2's
+`preprocess_mesh` does; its surface becomes a flexible dual grid (o_voxel's `mesh_to_flexible_dual_grid`), which the
+shape encoder turns into latents on the 64^3 cells it occupies. The texture flow samples PBR latents beside those under
+the image's DINOv3 tokens, and the texture decoder unfolds them back onto the mesh's own surface cells. The bake
+samples that volume at every texel of the mesh's texture coordinates, kept when the mesh has one set of them (one
+primitive whose texture coordinates are all given), otherwise from an unwrap, and inpaints between charts. The mesh is
+not cleaned or simplified.
+
+`model.glb` holds the mesh in the unit cube, y up, double-sided, with base color and metallic-roughness textures;
+`prepared.png` and `meta.json` sit beside it. On an RTX 3090, a 950K-face mesh takes 18 s at 1024 (7.8 GB GPU peak)
+and 6.3 s at 512 (5.7 GB); the reference's pipeline takes 40 s at 1024 with a 10.9 GB peak.
+
+As a server job: `{"kind": "texture_mesh"}` with two files, the mesh (by its extension) and the image, optionally
+`seed`, `resolution`, `texture_size`, `unwrap`, `remove_background` and `texture_sampler`; outputs under `model/`. The
+web UI's 3D tab has it as **Texture a mesh**.
+
 ## JoVox voxels
 
 `inference voxels` turns one image of an object into its shape in two stages. JoVox, a discrete flow-matching
@@ -101,7 +133,7 @@ a 1024^3 flexible dual grid and extracts a mesh, its small holes filled and its 
 Each is fetched into the Hugging Face cache on first use unless its folder is given (`--jovox`, `--dinov3`,
 `--birefnet`, `--trellis2`). BiRefNet is only fetched for an image that needs its background removed, and of
 TRELLIS.2-4B only what each command reads: `voxels` the shape stage's two checkpoints (3.5 GB), `image-to-3d` its seven
-(14 GB).
+(14 GB), `texture-mesh` the shape encoder and the texture stage's three (6.8 GB).
 
 ## Run it
 

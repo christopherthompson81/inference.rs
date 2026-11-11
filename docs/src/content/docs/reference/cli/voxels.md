@@ -2,7 +2,7 @@
 title: "inference voxels"
 description: "The 3D shape of the object in one image: JoVox's 64^3 voxel structure (voxels.ply, as cubes), meshed by TRELLIS.2's second stage (mesh.ply), beside the prepared image and a meta.json; an image without a transparent background has it removed with BiRefNet"
 sidebar:
-  order: 15
+  order: 16
 ---
 
 <!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->

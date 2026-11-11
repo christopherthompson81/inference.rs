@@ -606,3 +606,22 @@ vertices differ by ~1e-3 of a cell for most cells (worst a whole cell for a few)
 (intersection planes and the regularization only: 1.53 M cells over 1e-3, 6,348 over 0.1). A double-precision solve
 moves none of that, so it is o_voxel's own f32 noise: its quadrics hold absolute coordinates (~0.5) while a cell is
 1/1024, and the regularized system's condition is ~100. Kept the f64 solve.
+
+## Run 27 - 2026-11-11
+
+Question: do the rest of the texturing pipeline's stages match the reference, and what does a run cost?
+
+Commands: `the_shape_encoder_and_texture_decoder_match_the_reference` (the encoder on the reference's dual grid; the
+texture decoder on the reference's denormalized texture latents, guided by our levels) against `robot_s42`;
+`inference texture-mesh` on the robot GLB with its prepared image (own uvs, `--unwrap`, `--resolution 512`, the same
+mesh as trimesh-written OBJ and binary PLY); `render_pair.py` against the reference's GLB; the web UI's "Texture a
+mesh" under Playwright; time and peaks with nvidia-smi / RssAnon sampled every 0.25 s.
+
+Finding:
+- Encoder latents: relative RMS 5.5e-4 (max 1.7e-2), f16 blocks against f16. Texture decoder: relative RMS 2.8e-4
+  (max 2.2e-3), on exactly the reference's 2,149,107 cells. The first try read 0.157: the dump holds the sampler's
+  output, normalized; the decoder takes it denormalized.
+- Rendered beside the reference: the same materials in the same places; the rest is the sample's noise.
+- 18.2 s at 1024 (reference 40 s), GPU peak 7.8 GB with the LAN server's idle ~1.1 GB (reference 10.9 GB), host
+  1.5 GB; 6.3 s and 5.7 GB at 512. The unwrap path costs nothing extra in wall time (it runs beside the painting).
+- The OBJ copy's texture differs from the GLB's by 0.18 / 255 on average: the OBJ's text coordinates.
