@@ -6724,6 +6724,15 @@
         "type": "object",
         "description": "TRELLIS.2's textured mesh of the object in the job's one image.",
         "properties": {
+          "faces": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Faces the exported mesh is simplified to (1,000,000 by default)",
+            "minimum": 0
+          },
           "placement": {
             "oneOf": [
               {
@@ -6749,6 +6758,15 @@
             ],
             "description": "Remove the background with BiRefNet even when the image has transparency of its own (an opaque image always\nhas it removed)"
           },
+          "samples": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Results to make, 1 to 8 (the `i`th seeded `seed + i`); more than one go in folders `model/1`, `model/2`, ...",
+            "minimum": 0
+          },
           "seed": {
             "type": [
               "integer",
@@ -6756,6 +6774,39 @@
             ],
             "format": "int64",
             "minimum": 0
+          },
+          "shape_sampler": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Trellis2Sampler",
+                "description": "The shape flows' sampler"
+              }
+            ]
+          },
+          "structure_sampler": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Trellis2Sampler",
+                "description": "The sparse structure flow's sampler"
+              }
+            ]
+          },
+          "texture_sampler": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Trellis2Sampler",
+                "description": "The texture flow's sampler"
+              }
+            ]
           },
           "texture_size": {
             "type": [
@@ -15408,12 +15459,53 @@
           }
         }
       },
+      "Trellis2Sampler": {
+        "type": "object",
+        "description": "Changes to one TRELLIS.2 flow's sampler; unset fields keep the checkpoint's `pipeline.json` values.",
+        "properties": {
+          "guidance_rescale": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "How far guidance is rescaled toward the conditioned prediction's spread, 0 to 1"
+          },
+          "guidance_strength": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Classifier-free guidance strength, 1 for none (7.5 for structure and shape, 1 for texture)"
+          },
+          "rescale_t": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "The timestep schedule's shift, above 0 (1: uniform)"
+          },
+          "steps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Sampling steps, 1 to 100 (12 by default)",
+            "minimum": 0
+          }
+        }
+      },
       "Trellis2Variant": {
         "type": "string",
         "description": "Which resolutions an image-to-3D job runs TRELLIS.2 at.",
         "enum": [
           "1024_cascade",
-          "512"
+          "512",
+          "1024",
+          "1536_cascade"
         ]
       },
       "TruncationStrategy": {

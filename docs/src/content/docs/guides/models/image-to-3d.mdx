@@ -22,18 +22,28 @@ inference image-to-3d --image chair.png --out chair/ --variant 512 --seed 3
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--variant` | `1024-cascade` | `1024-cascade`: shape at 512, upsampled and sampled again at 1024, texture at 1024 (the reference's default). `512`: everything at 512, faster and coarser |
+| `--variant` | `1024-cascade` | The reference's pipeline types. `1024-cascade`: shape at 512, upsampled and sampled again at 1024, texture at 1024 (the reference's default). `1536-cascade`: the same at 1536, stepping down by 128 while the upsampled cells number 49152 or more (never below 1024), texture with the 1024 model. `1024`: everything at 1024 on a 64^3 structure. `512`: everything at 512, faster and coarser |
 | `--seed` | 0 | Seeds every stage's noise |
 | `--remove-background` | off | Run BiRefNet even when the image has transparency of its own |
 | `--texture-size` | 2048 | The baked textures' width and height |
 | `--remesh` | off | Rebuild the surface first as a closed shell (narrow-band dual contouring of the distance to it, as `to_glb`'s remesh): watertight, single-sided, but about half its faces go to the inside of the shell |
 | `--vertex-colors` | off | Per-vertex color and material instead of baked textures: no unwrapping or baking, about 5 s faster |
+| `--faces` | 1000000 | Faces the exported mesh is simplified to (1000 to 10 million) |
+| `--samples` | 1 | Results to make, up to 8: the i-th is seeded `--seed` + i and matches a run of one with that seed; each model loads once for all of them, and more than one go in folders `1`, `2`, ... under `--out` |
+| `--{structure,shape,texture}-steps` | 12 | Sampling steps of that flow (1 to 100) |
+| `--{structure,shape,texture}-guidance` | 7.5, 7.5, 1 | Classifier-free guidance strength (1: none) |
+| `--{structure,shape,texture}-guidance-rescale` | 0.7, 0.5, 0 | How far the guided prediction is rescaled toward the conditioned one's spread (0 to 1) |
+| `--{structure,shape,texture}-rescale-t` | 5, 3, 3 | The timestep schedule's shift (1: uniform) |
 | `--trellis2`, `--trellis-large`, `--dinov3`, `--birefnet` | fetched | Local checkpoint folders |
 | `--cpu` | off | Run on the CPU (very slow) |
 
-The stages: DINOv3 conditions at 512^2 (and 1024^2 for the cascade); a dense flow samples a 16^3 structure latent that
-TRELLIS-image-large's decoder turns into occupancy (pooled to 32^3); shape latents are sampled on those cells (at 512,
-then for the cascade on the cells the shape decoder upsamples them to, at 1024); texture latents beside them; the shape
+The sampler defaults are the checkpoint's `pipeline.json`; the guidance applies only within each flow's guidance
+interval (0.6 to 1 of the schedule, 0.6 to 0.9 for texture).
+
+The stages: DINOv3 conditions at 512^2 (and 1024^2 past 512); a dense flow samples a 16^3 structure latent that
+TRELLIS-image-large's decoder turns into occupancy (pooled to 32^3, or 64^3 for `1024`); shape latents are sampled on
+those cells (at 512 or 1024, then for a cascade on the cells the shape decoder upsamples them to, at 1024 or 1536);
+texture latents beside them; the shape
 decoder extracts the surface from a flexible dual grid and the texture decoder, following its subdivisions, a volume
 of base color, metallic, roughness and alpha. The export follows TRELLIS.2's `to_glb` without its remesh: small holes
 filled, the mesh simplified to at most a million faces and its topology cleaned (duplicate faces, non-manifold edges,
@@ -46,7 +56,10 @@ seams don't bleed.
 On an RTX 3090 with an 8-core CPU, the robot example: `1024-cascade` 40 s (the export's cleanup, unwrap and inpainting march
 run on the CPU while the texture is sampled, leaving about 2.5 s after it) at a 6.1 GB GPU peak and 2.5 GB of host
 memory; `--remesh` 45 s at 6.5 GB (its remesh outlasts the texture stage); `--vertex-colors` 38 s. `512` takes
-20 s plus its export.
+20 s plus its export, `1024` 38 s at 6.4 GB. Two samples of `1024-cascade` take 76 s, against 82 s for two runs, at
+the same peaks. `1536-cascade` takes 98 s at 9.4 GB: its 18,700 cells make the second
+shape pass and the texture pass several times longer (attention grows with the square of the cells). The reference's
+`1536_cascade` runs out of memory on the same 24 GB GPU.
 
 ```
 chair/
@@ -61,8 +74,11 @@ The GLB sits in the unit cube centered on the origin, y up as glTF expects (the 
 material is opaque, and double-sided unless remeshed. With `--vertex-colors`, glTF viewers show `COLOR_0`, and the material's metallic
 and roughness factors are the vertices' means.
 
-As a server job: `{"kind": "image_to_3d"}` with one image, optionally `seed`, `variant` (`"1024_cascade"` or `"512"`),
-`remove_background`, `vertex_colors`, `texture_size` and `remesh`; outputs under `model/`.
+As a server job: `{"kind": "image_to_3d"}` with one image, optionally `seed`, `variant` (`"1024_cascade"`,
+`"1536_cascade"`, `"1024"` or `"512"`), `remove_background`, `vertex_colors`, `texture_size`, `remesh`, `faces`, `samples` (several go under `model/1`,
+`model/2`, ..., the report then a `samples` list), and
+`structure_sampler`, `shape_sampler` and `texture_sampler` (each with optional `steps`, `guidance_strength`,
+`guidance_rescale` and `rescale_t`); outputs under `model/`. The web UI's 3D tab has these under **Advanced**.
 
 ## JoVox voxels
 

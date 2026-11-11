@@ -19,6 +19,7 @@
     type JobRecord,
     type JobStatus,
     type Placement,
+    type Trellis2Sampler,
     type Trellis2Variant,
   } from "../services/queuedJobs";
 
@@ -32,6 +33,7 @@
   const RECONSTRUCTION_SPLATS = "reconstruction/gaussians.ply";
   // the image jobs' meshes
   const MODEL_GLB = "model/model.glb";
+  const SAMPLE_GLB = /^model\/(\d+)\/model\.glb$/;
   const VOXELS_PLY = "voxels/voxels.ply";
   const VOXELS_MESH = "voxels/mesh.ply";
   const DEFAULT_VOXEL_STEPS = 72;
@@ -64,6 +66,33 @@
   let textureSize = $state<number | null>(null);
   let vertexColors = $state(false);
   let remesh = $state(false);
+  let faces = $state<number | null>(null);
+  let samples = $state<number | null>(null);
+  // pipeline.json's samplers, shown as placeholders
+  const SAMPLER_STAGES = [
+    { key: "structure", label: "Structure", defaults: [12, 7.5, 0.7, 5] },
+    { key: "shape", label: "Shape", defaults: [12, 7.5, 0.5, 3] },
+    { key: "texture", label: "Texture", defaults: [12, 1, 0, 3] },
+  ] as const;
+  const SAMPLER_FIELDS = [
+    { key: "steps", label: "Steps", step: "1" },
+    { key: "guidance_strength", label: "Guidance", step: "0.1" },
+    { key: "guidance_rescale", label: "Rescale", step: "0.05" },
+    { key: "rescale_t", label: "Time shift", step: "0.5" },
+  ] as const;
+  const blankSampler = (): Trellis2Sampler => ({ steps: null, guidance_strength: null, guidance_rescale: null, rescale_t: null });
+  let samplers = $state<Record<(typeof SAMPLER_STAGES)[number]["key"], Trellis2Sampler>>({
+    structure: blankSampler(),
+    shape: blankSampler(),
+    texture: blankSampler(),
+  });
+  // a sampler with nothing set is left out, and an emptied number input reads as null
+  function changed(sampler: Trellis2Sampler): Trellis2Sampler | null {
+    const clean = Object.fromEntries(
+      Object.entries(sampler).map(([k, v]) => [k, typeof v === "number" && Number.isFinite(v) ? v : null]),
+    ) as unknown as Trellis2Sampler;
+    return Object.values(clean).some((v) => v !== null) ? clean : null;
+  }
   let removeBackground = $state(false);
   let voxelSteps = $state<number | null>(null);
   let voxelMesh = $state(true);
@@ -192,6 +221,11 @@
           vertex_colors: vertexColors || null,
           texture_size: vertexColors ? null : textureSize,
           remesh: remesh || null,
+          faces: typeof faces === "number" && Number.isFinite(faces) ? faces : null,
+          samples: typeof samples === "number" && Number.isFinite(samples) ? samples : null,
+          structure_sampler: changed(samplers.structure),
+          shape_sampler: changed(samplers.shape),
+          texture_sampler: changed(samplers.texture),
           placement: room,
         });
       case "voxels":
@@ -262,6 +296,11 @@
     const made = (file: string) => job.outputs.some((output) => output.file === file);
     const out: { label: string; file: string; format: MeshFormat; flat: boolean }[] = [];
     if (made(MODEL_GLB)) out.push({ label: "View model", file: MODEL_GLB, format: "glb", flat: false });
+    // a job of several samples writes each under model/<n>/
+    for (const output of job.outputs) {
+      const n = output.file.match(SAMPLE_GLB)?.[1];
+      if (n) out.push({ label: `View model ${n}`, file: output.file, format: "glb", flat: false });
+    }
     if (made(VOXELS_PLY)) out.push({ label: "View voxels", file: VOXELS_PLY, format: "ply", flat: true });
     if (made(VOXELS_MESH)) out.push({ label: "View mesh", file: VOXELS_MESH, format: "ply", flat: false });
     return out;
@@ -352,6 +391,8 @@
                 <span class="text-[11px] text-gray-500">Resolution</span>
                 <select class={field} bind:value={variant} disabled={busy}>
                   <option value="1024_cascade">1024 (512, then 1024)</option>
+                  <option value="1536_cascade">1536 (512, then 1536; slower, finer)</option>
+                  <option value="1024">1024 (direct)</option>
                   <option value="512">512 (faster, coarser)</option>
                 </select>
               </label>
@@ -386,11 +427,60 @@
               <span class="text-[11px] text-gray-500">Seed</span>
               <input type="number" class="w-28 {field}" bind:value={seed} placeholder="0" disabled={busy} />
             </label>
+            {#if mode === "image_to_3d"}
+              <label class="flex flex-col gap-1" title="Each result is seeded one past the last; the models load once for all of them">
+                <span class="text-[11px] text-gray-500">Results</span>
+                <input type="number" min="1" max="8" class="w-20 {field}" bind:value={samples} placeholder="1" disabled={busy} />
+              </label>
+            {/if}
             <label class="flex items-center gap-1.5 pb-1.5 text-sm" title="An opaque photo always has its background removed">
               <input type="checkbox" class="accent-blue-600" bind:checked={removeBackground} disabled={busy} />
               Remove the background of a cut-out too
             </label>
           </div>
+          {#if mode === "image_to_3d"}
+            <details class="text-sm">
+              <summary class="cursor-pointer text-gray-600 dark:text-gray-400">Advanced: face count and samplers</summary>
+              <div class="mt-2 flex flex-col gap-3">
+                <label class="flex flex-col gap-1">
+                  <span class="text-[11px] text-gray-500">Faces in the exported mesh</span>
+                  <input type="number" min="1000" max="10000000" step="1000" class="w-36 {field}" bind:value={faces} placeholder="1000000" disabled={busy} />
+                </label>
+                <div class="overflow-x-auto">
+                  <table class="text-left">
+                    <thead>
+                      <tr class="text-[11px] text-gray-500">
+                        <th class="pr-2 font-normal"></th>
+                        {#each SAMPLER_FIELDS as f (f.key)}
+                          <th class="pr-2 font-normal">{f.label}</th>
+                        {/each}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {#each SAMPLER_STAGES as stage (stage.key)}
+                        <tr>
+                          <td class="pr-2 text-gray-600 dark:text-gray-400">{stage.label}</td>
+                          {#each SAMPLER_FIELDS as f, i (f.key)}
+                            <td class="pr-2 pb-1">
+                              <input
+                                type="number"
+                                step={f.step}
+                                class="w-20 {field}"
+                                bind:value={samplers[stage.key][f.key]}
+                                placeholder={String(stage.defaults[i])}
+                                disabled={busy}
+                              />
+                            </td>
+                          {/each}
+                        </tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                </div>
+                <p class="text-[11px] text-gray-500">Blank fields keep the model's defaults. Guidance 1 turns guidance off; steps run 1 to 100.</p>
+              </div>
+            </details>
+          {/if}
         {:else if mode === "world"}
           <p class="text-sm text-gray-600 dark:text-gray-400">
             WorldStereo-2 generates views along camera paths around an equirectangular panorama, WorldMirror 2.0 reconstructs them, and Gaussian splats are trained on the result. It takes the GPU to itself, about half an hour on a 24 GB card.

@@ -1,7 +1,7 @@
 //! TRELLIS.2 end to end (`Trellis2ImageTo3DPipeline.run`): DINOv3 conditions, the sparse structure (a dense flow and
-//! TRELLIS's structure decoder), the shape latents (at 512, or 512 then 1024 on the decoder's upsampled cells), the
-//! texture latents beside them, and their decoding into a mesh with PBR attributes at its vertices. Each model is
-//! loaded for its stage and dropped after it.
+//! TRELLIS's structure decoder), the shape latents (at 512 or 1024, or 512 then 1024 or 1536 on the decoder's
+//! upsampled cells), the texture latents beside them, and their decoding into a mesh with PBR attributes at its
+//! vertices. Each model is loaded for its stage and dropped after it.
 
 use std::path::{Path, PathBuf};
 
@@ -12,7 +12,9 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, StandardNormal};
 
+use super::bake;
 use super::decoder::{SHAPE_DECODER, ShapeDecoder, TEXTURE_DECODER, dual_grid};
+use super::dit::CrossKv;
 use super::glb::{Pbr, sample_attributes};
 use super::mesh::{Mesh, dual_grid_mesh};
 use super::shape_flow::{
@@ -21,7 +23,6 @@ use super::shape_flow::{
 };
 use super::structure::{STRUCTURE_DECODER, StructureDecoder, grid_cells, occupied};
 use super::{PIPELINE_FILE, crop_object};
-use super::{bake, cleanup};
 use crate::dinov3::{Dinov3, Dinov3Spec};
 use crate::jovox::Rgba;
 use crate::progress::{Progress, check};
@@ -51,17 +52,85 @@ const LATENT_SIDE: usize = 16;
 const UPSAMPLES: usize = 4;
 const LOW: usize = 512;
 const HIGH: usize = 1024;
+const HIGHEST: usize = 1536;
+/// A cascade past 1024 steps its resolution down by 128 until its cells number fewer than this
+pub const MAX_TOKENS: usize = 49152;
+const RESOLUTION_STEP: usize = 128;
 // the latents' cells sit at the mesh resolution over 16
 const CELL_SCALE: usize = 16;
 const PBR: usize = 6;
 
-/// Which resolutions the shape and texture run at.
+/// Which resolutions the shape and texture run at (the reference's `pipeline_type`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Variant {
     /// Everything at 512 (a 32^3 structure)
     Res512,
+    /// Everything at 1024, on a 64^3 structure
+    Res1024,
     /// The reference's default: shape at 512, upsampled, again at 1024; texture at 1024
     Cascade1024,
+    /// Shape at 512, upsampled, again at 1536 (lower when that is [`MAX_TOKENS`] cells or more); texture at 1024
+    Cascade1536,
+}
+
+impl Variant {
+    pub const ALL: [Self; 4] = [
+        Self::Res512,
+        Self::Res1024,
+        Self::Cascade1024,
+        Self::Cascade1536,
+    ];
+
+    /// The reference's name for it
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Res512 => "512",
+            Self::Res1024 => "1024",
+            Self::Cascade1024 => "1024_cascade",
+            Self::Cascade1536 => "1536_cascade",
+        }
+    }
+
+    /// From its name, with `-` or `_`
+    pub fn parse(name: &str) -> Option<Self> {
+        let name = name.replace('-', "_");
+        Self::ALL.into_iter().find(|v| v.name() == name)
+    }
+
+    // the occupancy grid the structure is pooled to
+    fn structure_side(self) -> usize {
+        match self {
+            Self::Res1024 => HIGH / CELL_SCALE,
+            _ => LOW / CELL_SCALE,
+        }
+    }
+
+    // the resolution a cascade samples its shape at again, after 512
+    fn cascade(self) -> Option<usize> {
+        match self {
+            Self::Cascade1024 => Some(HIGH),
+            Self::Cascade1536 => Some(HIGHEST),
+            Self::Res512 | Self::Res1024 => None,
+        }
+    }
+}
+
+// the 512 latents' upsampled cells at `target` (lower by RESOLUTION_STEP while MAX_TOKENS or more, down to 1024)
+fn cascade_cells(fine: &[[i32; 3]], target: usize) -> (Vec<[usize; 3]>, usize) {
+    let mut resolution = target;
+    loop {
+        let side = (resolution / CELL_SCALE) as f32;
+        let mut cells: Vec<[usize; 3]> = fine
+            .iter()
+            .map(|c| c.map(|v| ((v as f32 + 0.5) / LOW as f32 * side) as usize))
+            .collect();
+        cells.sort_unstable();
+        cells.dedup();
+        if cells.len() < MAX_TOKENS || resolution <= HIGH {
+            return (cells, resolution);
+        }
+        resolution -= RESOLUTION_STEP;
+    }
 }
 
 /// Where the weights are.
@@ -100,10 +169,10 @@ impl Generated {
     }
 }
 
-/// The extracted `mesh` as the vertex-colored export takes it: the export's cleanup ([`bake::clean`]), simplifying
-/// on `device`; it needs only the shape, so it can run beside the texture stage.
-pub fn vertex_mesh(mesh: &Mesh, device: &Device) -> Result<Mesh> {
-    Ok(bake::clean(mesh, cleanup::SIMPLIFY_TARGET, device)?.0)
+/// The extracted `mesh` as the vertex-colored export takes it: the export's cleanup ([`bake::clean`]), simplifying to
+/// `faces` on `device`; it needs only the shape, so it can run beside the texture stage.
+pub fn vertex_mesh(mesh: &Mesh, faces: usize, device: &Device) -> Result<Mesh> {
+    Ok(bake::clean(mesh, faces, device)?.0)
 }
 
 struct Stats {
@@ -167,36 +236,58 @@ struct Run<'a> {
     flow_dtype: DType,
     decoder_dtype: DType,
     progress: &'a dyn Progress,
+    samples: usize,
+}
+
+// a flow loaded with its condition (then the zero condition) as cross-attention keys and values
+struct LoadedFlow {
+    flow: ShapeFlow,
+    kv: Vec<CrossKv>,
+    name: &'static str,
+    params: SamplerParams,
 }
 
 impl Run<'_> {
-    // one flow's sampling on `cells` under `cond`, the model loaded for it
-    fn flow(
+    fn flow(&self, stage: FlowStage, cond: &Tensor) -> Result<LoadedFlow> {
+        let flow = ShapeFlow::load(
+            stage.spec,
+            self.flow_dtype,
+            weights(&self.paths.trellis2.join(stage.file), self.device)?,
+        )?;
+        let kv = flow.condition(&Tensor::cat(&[cond, &cond.zeros_like()?], 0)?)?;
+        Ok(LoadedFlow {
+            flow,
+            kv,
+            name: stage.name,
+            params: stage.params,
+        })
+    }
+
+    // sample `sample` of `self.samples` with `flow` from `x` on `cells`
+    fn sample(
         &self,
-        stage: FlowStage,
-        cond: &Tensor,
+        flow: &LoadedFlow,
+        sample: usize,
         cells: &[[usize; 3]],
         x: &Tensor,
         concat: Option<&Tensor>,
     ) -> Result<Tensor> {
-        let FlowStage {
-            name,
-            file,
-            spec,
-            params,
-        } = stage;
-        let flow = ShapeFlow::load(
-            spec,
-            self.flow_dtype,
-            weights(&self.paths.trellis2.join(file), self.device)?,
-        )?;
-        let rope = flow.rope(cells)?;
-        let kv = flow.condition(&Tensor::cat(&[cond, &cond.zeros_like()?], 0)?)?;
-        self.progress.stage(name, params.steps);
-        flow.sample(x, &rope, &kv, concat, &params, &mut |step| {
-            self.progress.advance(step);
-            check(self.progress)
-        })
+        let rope = flow.flow.rope(cells)?;
+        self.progress
+            .stage(&self.label(flow.name, sample), flow.params.steps);
+        flow.flow
+            .sample(x, &rope, &flow.kv, concat, &flow.params, &mut |step| {
+                self.progress.advance(step);
+                check(self.progress)
+            })
+    }
+
+    fn label(&self, name: &str, sample: usize) -> String {
+        if self.samples == 1 {
+            name.to_string()
+        } else {
+            format!("{name} {}/{}", sample + 1, self.samples)
+        }
     }
 
     fn decoder(&self, file: &str, spec: super::decoder::DecoderSpec) -> Result<ShapeDecoder> {
@@ -228,52 +319,141 @@ fn condition(
     encoder.forward(&Tensor::from_vec(data, (1, 3, res, res), device)?)
 }
 
-/// The object in `image` (with transparency: its background already removed) as a mesh with PBR vertex attributes.
-/// The flows run in bf16 and the decoders in f16 on a GPU, all in f32 on the CPU; `seed` draws every stage's noise.
+/// Sampling steps past which a flow's sampler is refused
+pub const MAX_STEPS: usize = 100;
+
+/// Changes to one flow's sampler; unset fields keep `pipeline.json`'s values.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SamplerChoice {
+    pub steps: Option<usize>,
+    /// Classifier-free guidance strength (1: none)
+    pub guidance_strength: Option<f64>,
+    /// How far the guided prediction is rescaled toward the conditioned one's spread, 0 to 1
+    pub guidance_rescale: Option<f64>,
+    /// The timestep schedule's shift (1: uniform)
+    pub rescale_t: Option<f64>,
+}
+
+impl SamplerChoice {
+    /// What is wrong with it, if anything
+    pub fn problem(&self) -> Option<String> {
+        if let Some(steps) = self.steps
+            && !(1..=MAX_STEPS).contains(&steps)
+        {
+            return Some(format!("steps must be 1 to {MAX_STEPS}, got {steps}"));
+        }
+        if let Some(g) = self.guidance_strength
+            && !(g.is_finite() && g >= 0.0)
+        {
+            return Some(format!("guidance strength must be 0 or more, got {g}"));
+        }
+        if let Some(r) = self.guidance_rescale
+            && !(0.0..=1.0).contains(&r)
+        {
+            return Some(format!("guidance rescale must be 0 to 1, got {r}"));
+        }
+        if let Some(t) = self.rescale_t
+            && !(t.is_finite() && t > 0.0)
+        {
+            return Some(format!("rescale_t must be above 0, got {t}"));
+        }
+        None
+    }
+
+    fn apply(&self, base: SamplerParams) -> SamplerParams {
+        SamplerParams {
+            steps: self.steps.unwrap_or(base.steps),
+            guidance_strength: self.guidance_strength.unwrap_or(base.guidance_strength),
+            guidance_rescale: self.guidance_rescale.unwrap_or(base.guidance_rescale),
+            rescale_t: self.rescale_t.unwrap_or(base.rescale_t),
+            ..base
+        }
+    }
+}
+
+/// Results one run may make
+pub const MAX_SAMPLES: usize = 8;
+
+/// What a run samples: the variant, how many results (the `i`th drawn from `seed + i`, as a run of one with that seed
+/// would), and each flow's sampler changes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Settings {
+    pub variant: Variant,
+    pub seed: u64,
+    pub samples: usize,
+    pub structure: SamplerChoice,
+    pub shape: SamplerChoice,
+    pub texture: SamplerChoice,
+}
+
+impl Settings {
+    /// `variant` and `seed` with the samplers as `pipeline.json` has them
+    pub fn new(variant: Variant, seed: u64) -> Self {
+        Self {
+            variant,
+            seed,
+            samples: 1,
+            structure: SamplerChoice::default(),
+            shape: SamplerChoice::default(),
+            texture: SamplerChoice::default(),
+        }
+    }
+}
+
+/// The object in `image` (with transparency: its background already removed) as meshes with PBR vertex attributes, one
+/// per sample. The flows run in bf16 and the decoders in f16 on a GPU, all in f32 on the CPU; each model is loaded once
+/// and runs every sample.
 pub fn generate(
     paths: &Trellis2Paths,
     image: &Rgba,
-    variant: Variant,
-    seed: u64,
+    settings: &Settings,
     progress: &dyn Progress,
     device: &Device,
-) -> Result<Generated> {
-    generate_with(
-        paths,
-        image,
-        variant,
-        seed,
-        progress,
-        device,
-        &mut |_, _| {},
-    )
+) -> Result<Vec<Generated>> {
+    generate_with(paths, image, settings, progress, device, &mut |_, _, _| {})
 }
 
-/// [`generate`], handing `shape_ready` the extracted mesh and its resolution before the texture stage, so work on the
-/// shape alone can run beside it.
+// one sample through the stages: its noise, cells and latents
+struct Sample {
+    rng: StdRng,
+    cells: Vec<[usize; 3]>,
+    structure_cells: usize,
+    slat: Tensor,
+    resolution: usize,
+}
+
+/// [`generate`], handing `shape_ready` each sample's index, extracted mesh and resolution before the texture stage, so
+/// work on the shape alone can run beside it.
 pub fn generate_with(
     paths: &Trellis2Paths,
     image: &Rgba,
-    variant: Variant,
-    seed: u64,
+    settings: &Settings,
     progress: &dyn Progress,
     device: &Device,
-    shape_ready: &mut dyn FnMut(&Mesh, usize),
-) -> Result<Generated> {
+    shape_ready: &mut dyn FnMut(usize, &Mesh, usize),
+) -> Result<Vec<Generated>> {
     let (flow_dtype, decoder_dtype) = if device.is_cpu() {
         (DType::F32, DType::F32)
     } else {
         (DType::BF16, DType::F16)
     };
+    let samples = settings.samples;
+    if !(1..=MAX_SAMPLES).contains(&samples) {
+        inference_tensor::bail!("samples must be 1 to {MAX_SAMPLES}, got {samples}");
+    }
     let run = Run {
         paths,
         device,
         flow_dtype,
         decoder_dtype,
         progress,
+        samples,
     };
     let stats = stats(&paths.trellis2)?;
-    let mut rng = StdRng::seed_from_u64(seed);
+    let variant = settings.variant;
+    let mut rngs: Vec<StdRng> = (0..samples as u64)
+        .map(|i| StdRng::seed_from_u64(settings.seed.wrapping_add(i)))
+        .collect();
 
     progress.stage("condition", 0);
     let crop = crop_object(image)?;
@@ -283,31 +463,36 @@ pub fn generate_with(
             weights(&paths.dinov3.join("model.safetensors"), device)?,
         )?;
         let low = condition(&encoder, &crop, LOW, device)?;
-        let high = (variant == Variant::Cascade1024)
+        let high = (variant != Variant::Res512)
             .then(|| condition(&encoder, &crop, HIGH, device))
             .transpose()?;
         (low, high)
     };
 
-    // the structure: a dense 16^3 latent, decoded to 64^3 occupancy and pooled to the latents' grid
+    // the structures: a dense 16^3 latent, decoded to 64^3 occupancy and pooled to the latents' grid
     let grid: Vec<[usize; 3]> = grid_cells(LATENT_SIDE)
         .iter()
         .map(|c| c.map(|v| v as usize))
         .collect();
-    let x = noise(&mut rng, grid.len(), STRUCTURE_FLOW.out_channels, device)?;
-    let z = run.flow(
-        FlowStage {
-            name: "structure",
-            file: STRUCTURE_FLOW_FILE,
-            spec: STRUCTURE_FLOW,
-            params: STRUCTURE_SAMPLER,
-        },
-        &cond_low,
-        &grid,
-        &x,
-        None,
-    )?;
-    let logits = {
+    let latents = {
+        let flow = run.flow(
+            FlowStage {
+                name: "structure",
+                file: STRUCTURE_FLOW_FILE,
+                spec: STRUCTURE_FLOW,
+                params: settings.structure.apply(STRUCTURE_SAMPLER),
+            },
+            &cond_low,
+        )?;
+        rngs.iter_mut()
+            .enumerate()
+            .map(|(i, rng)| {
+                let x = noise(rng, grid.len(), STRUCTURE_FLOW.out_channels, device)?;
+                run.sample(&flow, i, &grid, &x, None)
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
+    let structures = {
         let decoder = StructureDecoder::load(
             STRUCTURE_DECODER,
             LATENT_SIDE,
@@ -317,125 +502,192 @@ pub fn generate_with(
                 device,
             )?,
         )?;
-        decoder.forward(&z.squeeze(0)?)?.to_vec1::<f32>()?
+        latents
+            .iter()
+            .map(|z| {
+                let logits = decoder.forward(&z.squeeze(0)?)?.to_vec1::<f32>()?;
+                let cells = occupied(&logits, 4 * LATENT_SIDE, variant.structure_side());
+                if cells.is_empty() {
+                    inference_tensor::bail!("the structure came out empty");
+                }
+                Ok(cells)
+            })
+            .collect::<Result<Vec<_>>>()?
     };
-    let full = 4 * LATENT_SIDE;
-    let mut cells = occupied(&logits, full, LOW / CELL_SCALE);
-    if cells.is_empty() {
-        inference_tensor::bail!("the structure came out empty");
-    }
-    let structure_cells = cells.len();
     check(progress)?;
 
-    // the shape latents at 512; the cascade upsamples their cells and samples again at 1024
-    let x = noise(&mut rng, cells.len(), SHAPE_FLOW_1024.out_channels, device)?;
-    let mut slat = run.flow(
-        FlowStage {
-            name: "shape",
-            file: SHAPE_512_FILE,
-            spec: SHAPE_FLOW_1024,
-            params: SHAPE_SAMPLER,
-        },
-        &cond_low,
-        &cells,
-        &x,
-        None,
-    )?;
-    slat = denormalize(&slat, &stats.shape.0, &stats.shape.1)?;
-    let (resolution, cond) = match (&cond_high, variant) {
-        (Some(high), Variant::Cascade1024) => {
-            let fine = {
+    // the shape latents at 512 or 1024; a cascade upsamples the 512 ones' cells and samples again on them
+    let shape_stage = |file| FlowStage {
+        name: "shape",
+        file,
+        spec: SHAPE_FLOW_1024,
+        params: settings.shape.apply(SHAPE_SAMPLER),
+    };
+    let (first_res, first_cond, first_file) = match (&cond_high, variant) {
+        (Some(high), Variant::Res1024) => (HIGH, high, SHAPE_1024_FILE),
+        _ => (LOW, &cond_low, SHAPE_512_FILE),
+    };
+    let mut runs: Vec<Sample> = {
+        let flow = run.flow(shape_stage(first_file), first_cond)?;
+        rngs.into_iter()
+            .zip(structures)
+            .enumerate()
+            .map(|(i, (mut rng, cells))| {
+                let x = noise(&mut rng, cells.len(), SHAPE_FLOW_1024.out_channels, device)?;
+                let slat = run.sample(&flow, i, &cells, &x, None)?;
+                Ok(Sample {
+                    rng,
+                    structure_cells: cells.len(),
+                    cells,
+                    slat: denormalize(&slat, &stats.shape.0, &stats.shape.1)?,
+                    resolution: first_res,
+                })
+            })
+            .collect::<Result<_>>()?
+    };
+    let cond = match (&cond_high, variant.cascade()) {
+        (Some(high), Some(target)) => {
+            {
                 let decoder = run.decoder(SHAPE_DECODER_FILE, SHAPE_DECODER)?;
-                let coords: Vec<[i32; 3]> = cells.iter().map(|c| c.map(|v| v as i32)).collect();
-                decoder.upsample(&coords, &slat.squeeze(0)?, UPSAMPLES)?
-            };
-            let side = (HIGH / CELL_SCALE) as f32;
-            let mut quantized: Vec<[usize; 3]> = fine
-                .iter()
-                .map(|c| c.map(|v| ((v as f32 + 0.5) / LOW as f32 * side) as usize))
-                .collect();
-            quantized.sort_unstable();
-            quantized.dedup();
-            cells = quantized;
-            let x = noise(&mut rng, cells.len(), SHAPE_FLOW_1024.out_channels, device)?;
-            slat = run.flow(
-                FlowStage {
-                    name: "shape",
-                    file: SHAPE_1024_FILE,
-                    spec: SHAPE_FLOW_1024,
-                    params: SHAPE_SAMPLER,
-                },
-                high,
-                &cells,
-                &x,
-                None,
-            )?;
-            slat = denormalize(&slat, &stats.shape.0, &stats.shape.1)?;
-            (HIGH, high)
+                for sample in &mut runs {
+                    let coords: Vec<[i32; 3]> =
+                        sample.cells.iter().map(|c| c.map(|v| v as i32)).collect();
+                    let fine = decoder.upsample(&coords, &sample.slat.squeeze(0)?, UPSAMPLES)?;
+                    (sample.cells, sample.resolution) = cascade_cells(&fine, target);
+                }
+            }
+            let flow = run.flow(shape_stage(SHAPE_1024_FILE), high)?;
+            for (i, sample) in runs.iter_mut().enumerate() {
+                let x = noise(
+                    &mut sample.rng,
+                    sample.cells.len(),
+                    SHAPE_FLOW_1024.out_channels,
+                    device,
+                )?;
+                let slat = run.sample(&flow, i, &sample.cells, &x, None)?;
+                sample.slat = denormalize(&slat, &stats.shape.0, &stats.shape.1)?;
+            }
+            high
         }
-        _ => (LOW, &cond_low),
+        _ => first_cond,
     };
     check(progress)?;
 
-    // the shape decoded and its surface extracted, handed on before the texture is made; its subdivisions guide the
-    // texture decoder onto the same cells
-    progress.stage("decode", 0);
-    let coords: Vec<[i32; 3]> = cells.iter().map(|c| c.map(|v| v as i32)).collect();
-    let (shape_out, subs) = run.decoder(SHAPE_DECODER_FILE, SHAPE_DECODER)?.forward(
-        &coords,
-        &slat.squeeze(0)?,
-        None,
-        &mut |_, _| {},
-    )?;
-    let grid = dual_grid(&shape_out.feats)?;
-    let mesh = dual_grid_mesh(
-        &shape_out.coords,
-        &grid.vertices,
-        &grid.crossed,
-        &grid.split,
-        resolution,
-    );
-    drop((shape_out, grid));
-    shape_ready(&mesh, resolution);
-    check(progress)?;
+    // the shapes decoded and their surfaces extracted, handed on before the texture is made; their subdivisions guide
+    // the texture decoder onto the same cells
+    let mut decoded = Vec::with_capacity(samples);
+    {
+        let decoder = run.decoder(SHAPE_DECODER_FILE, SHAPE_DECODER)?;
+        for (i, sample) in runs.iter().enumerate() {
+            progress.stage(&run.label("decode", i), 0);
+            let coords: Vec<[i32; 3]> = sample.cells.iter().map(|c| c.map(|v| v as i32)).collect();
+            let (shape_out, subs) =
+                decoder.forward(&coords, &sample.slat.squeeze(0)?, None, &mut |_, _| {})?;
+            let grid = dual_grid(&shape_out.feats)?;
+            let mesh = dual_grid_mesh(
+                &shape_out.coords,
+                &grid.vertices,
+                &grid.crossed,
+                &grid.split,
+                sample.resolution,
+            );
+            drop((shape_out, grid));
+            shape_ready(i, &mesh, sample.resolution);
+            decoded.push((coords, subs, mesh));
+            check(progress)?;
+        }
+    }
 
     // the texture latents, the normalized shape latents beside the noise
-    let shape_norm = normalize(&slat, &stats.shape.0, &stats.shape.1)?;
-    let x = noise(&mut rng, cells.len(), TEXTURE_FLOW.out_channels, device)?;
-    let texture_file = if resolution == HIGH {
-        TEXTURE_1024_FILE
-    } else {
+    let texture_file = if runs[0].resolution == LOW {
         TEXTURE_512_FILE
+    } else {
+        TEXTURE_1024_FILE
     };
-    let tex = run.flow(
-        FlowStage {
-            name: "texture",
-            file: texture_file,
-            spec: TEXTURE_FLOW,
-            params: TEXTURE_SAMPLER,
-        },
-        cond,
-        &cells,
-        &x,
-        Some(&shape_norm),
-    )?;
-    let tex = denormalize(&tex, &stats.texture.0, &stats.texture.1)?;
+    let textures = {
+        let flow = run.flow(
+            FlowStage {
+                name: "texture",
+                file: texture_file,
+                spec: TEXTURE_FLOW,
+                params: settings.texture.apply(TEXTURE_SAMPLER),
+            },
+            cond,
+        )?;
+        runs.iter_mut()
+            .enumerate()
+            .map(|(i, sample)| {
+                let shape_norm = normalize(&sample.slat, &stats.shape.0, &stats.shape.1)?;
+                let x = noise(
+                    &mut sample.rng,
+                    sample.cells.len(),
+                    TEXTURE_FLOW.out_channels,
+                    device,
+                )?;
+                let tex = run.sample(&flow, i, &sample.cells, &x, Some(&shape_norm))?;
+                denormalize(&tex, &stats.texture.0, &stats.texture.1)
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
 
-    let (tex_out, _) = run
-        .decoder(TEXTURE_DECODER_FILE, TEXTURE_DECODER)?
-        .forward(&coords, &tex.squeeze(0)?, Some(&subs), &mut |_, _| {})?;
-    let values: Vec<[f32; PBR]> = ((tex_out.feats * 0.5)? + 0.5)?
-        .to_vec2::<f32>()?
-        .iter()
-        .map(|r| std::array::from_fn(|k| r[k]))
-        .collect();
-    check(progress)?;
-    Ok(Generated {
-        mesh,
-        voxels: tex_out.coords,
-        voxel_attrs: values,
-        structure_cells,
-        latent_cells: cells.len(),
-        resolution,
-    })
+    let decoder = run.decoder(TEXTURE_DECODER_FILE, TEXTURE_DECODER)?;
+    let mut out = Vec::with_capacity(samples);
+    for ((sample, (coords, subs, mesh)), tex) in runs.into_iter().zip(decoded).zip(textures) {
+        let (tex_out, _) =
+            decoder.forward(&coords, &tex.squeeze(0)?, Some(&subs), &mut |_, _| {})?;
+        let values: Vec<[f32; PBR]> = ((tex_out.feats * 0.5)? + 0.5)?
+            .to_vec2::<f32>()?
+            .iter()
+            .map(|r| std::array::from_fn(|k| r[k]))
+            .collect();
+        check(progress)?;
+        out.push(Generated {
+            mesh,
+            voxels: tex_out.coords,
+            voxel_attrs: values,
+            structure_cells: sample.structure_cells,
+            latent_cells: sample.cells.len(),
+            resolution: sample.resolution,
+        });
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn variants_parse_from_their_names_with_either_separator() {
+        for v in Variant::ALL {
+            assert_eq!(Variant::parse(v.name()), Some(v));
+            assert_eq!(Variant::parse(&v.name().replace('_', "-")), Some(v));
+        }
+        assert_eq!(Variant::parse("2048"), None);
+    }
+
+    #[test]
+    fn a_cascade_steps_its_resolution_down_until_its_cells_fit() {
+        // a 192^3 block of 512 cells: 36^3 = 46656 cells at 1536, under the cap; every 4th along each axis reaches
+        // every cell up to 1536 (16 / 3 apart)
+        let block = |side: i32| -> Vec<[i32; 3]> {
+            let axis: Vec<i32> = (0..side).step_by(4).chain([side - 1]).collect();
+            let mut cells = Vec::new();
+            for &x in &axis {
+                for &y in &axis {
+                    cells.extend(axis.iter().map(|&z| [x, y, z]));
+                }
+            }
+            cells
+        };
+        let (cells, res) = cascade_cells(&block(192), HIGHEST);
+        assert_eq!((cells.len(), res), (36 * 36 * 36, HIGHEST));
+        // 224^3: 42^3 at 1536 and 39^3 at 1408 are over it, 35^3 at 1280 under
+        let fine = block(224);
+        let (cells, res) = cascade_cells(&fine, HIGHEST);
+        assert_eq!((cells.len(), res), (35 * 35 * 35, 1280));
+        // at 1024 the cap never applies
+        let (cells, res) = cascade_cells(&fine, HIGH);
+        assert_eq!((cells.len(), res), (28 * 28 * 28, HIGH));
+    }
 }

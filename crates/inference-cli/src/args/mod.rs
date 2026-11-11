@@ -392,7 +392,9 @@ pub enum Command {
         #[arg(long)]
         out: PathBuf,
 
-        /// `1024-cascade` (shape at 512, then 1024; texture at 1024) or `512` (faster, coarser)
+        /// `1024-cascade` (shape at 512, then 1024; texture at 1024), `1536-cascade` (shape at 512, then 1536, lower
+        /// when that is 49152 cells or more; texture at 1024), `1024` (everything at 1024 on a 64^3 structure) or `512`
+        /// (faster, coarser)
         #[arg(long, default_value = "1024-cascade")]
         variant: String,
 
@@ -410,6 +412,62 @@ pub enum Command {
         /// Rebuild the surface as a closed shell (narrow-band dual contouring) before baking
         #[arg(long, conflicts_with = "vertex_colors")]
         remesh: bool,
+
+        /// Faces the exported mesh is simplified to
+        #[arg(long, default_value_t = inference_jobs::image_to_3d::DECIMATION_TARGET)]
+        faces: usize,
+
+        /// Results to make (up to 8), the i-th seeded seed + i; more than one go in folders 1, 2, ... under --out
+        #[arg(long, default_value_t = 1)]
+        samples: usize,
+
+        /// The sparse structure flow's sampling steps (pipeline.json's when unset)
+        #[arg(long)]
+        structure_steps: Option<usize>,
+
+        /// The sparse structure flow's guidance strength (1: none)
+        #[arg(long)]
+        structure_guidance: Option<f64>,
+
+        /// The sparse structure flow's guidance rescale, 0 to 1
+        #[arg(long)]
+        structure_guidance_rescale: Option<f64>,
+
+        /// The sparse structure flow's timestep shift (1: uniform)
+        #[arg(long)]
+        structure_rescale_t: Option<f64>,
+
+        /// The shape flows' sampling steps (pipeline.json's when unset)
+        #[arg(long)]
+        shape_steps: Option<usize>,
+
+        /// The shape flows' guidance strength (1: none)
+        #[arg(long)]
+        shape_guidance: Option<f64>,
+
+        /// The shape flows' guidance rescale, 0 to 1
+        #[arg(long)]
+        shape_guidance_rescale: Option<f64>,
+
+        /// The shape flows' timestep shift (1: uniform)
+        #[arg(long)]
+        shape_rescale_t: Option<f64>,
+
+        /// The texture flow's sampling steps (pipeline.json's when unset)
+        #[arg(long)]
+        texture_steps: Option<usize>,
+
+        /// The texture flow's guidance strength (1: none)
+        #[arg(long)]
+        texture_guidance: Option<f64>,
+
+        /// The texture flow's guidance rescale, 0 to 1
+        #[arg(long)]
+        texture_guidance_rescale: Option<f64>,
+
+        /// The texture flow's timestep shift (1: uniform)
+        #[arg(long)]
+        texture_rescale_t: Option<f64>,
 
         /// The TRELLIS.2-4B folder; fetched from microsoft/TRELLIS.2-4B when unset
         #[arg(long)]

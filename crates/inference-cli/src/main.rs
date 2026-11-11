@@ -265,6 +265,20 @@ async fn main() -> Result<()> {
             vertex_colors,
             texture_size,
             remesh,
+            faces,
+            samples,
+            structure_steps,
+            structure_guidance,
+            structure_guidance_rescale,
+            structure_rescale_t,
+            shape_steps,
+            shape_guidance,
+            shape_guidance_rescale,
+            shape_rescale_t,
+            texture_steps,
+            texture_guidance,
+            texture_guidance_rescale,
+            texture_rescale_t,
             trellis2,
             trellis_large,
             dinov3,
@@ -274,17 +288,59 @@ async fn main() -> Result<()> {
         } => {
             use inference_jobs::image_to_3d::Variant;
             use inference_jobs::image_to_3d::{
-                BakeOptions, ImageTo3dOptions, NoProgress, fetch_models, generate_3d_on,
+                BakeOptions, FACES_RANGE, ImageTo3dOptions, MAX_SAMPLES, NoProgress, SamplerChoice,
+                Settings, fetch_models, generate_3d_on, sample_dir,
             };
             use inference_jobs::voxels::needs_background_removal;
-            let variant = match variant.as_str() {
-                "1024-cascade" | "1024_cascade" => Variant::Cascade1024,
-                "512" => Variant::Res512,
-                other => anyhow::bail!("--variant must be 1024-cascade or 512, got `{other}`"),
+            let variant = Variant::parse(&variant).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--variant must be 1024-cascade, 1536-cascade, 1024 or 512, got `{variant}`"
+                )
+            })?;
+            let settings = Settings {
+                structure: SamplerChoice {
+                    steps: structure_steps,
+                    guidance_strength: structure_guidance,
+                    guidance_rescale: structure_guidance_rescale,
+                    rescale_t: structure_rescale_t,
+                },
+                shape: SamplerChoice {
+                    steps: shape_steps,
+                    guidance_strength: shape_guidance,
+                    guidance_rescale: shape_guidance_rescale,
+                    rescale_t: shape_rescale_t,
+                },
+                texture: SamplerChoice {
+                    steps: texture_steps,
+                    guidance_strength: texture_guidance,
+                    guidance_rescale: texture_guidance_rescale,
+                    rescale_t: texture_rescale_t,
+                },
+                samples,
+                ..Settings::new(variant, seed)
             };
+            if !(1..=MAX_SAMPLES).contains(&samples) {
+                anyhow::bail!("--samples must be 1 to {MAX_SAMPLES}");
+            }
+            for (stage, choice) in [
+                ("structure", settings.structure),
+                ("shape", settings.shape),
+                ("texture", settings.texture),
+            ] {
+                if let Some(problem) = choice.problem() {
+                    anyhow::bail!("--{stage}-*: {problem}");
+                }
+            }
+            if !FACES_RANGE.contains(&faces) {
+                anyhow::bail!(
+                    "--faces must be in {}..={}",
+                    FACES_RANGE.start(),
+                    FACES_RANGE.end()
+                );
+            }
             let options = ImageTo3dOptions {
-                variant,
-                seed,
+                settings,
+                faces,
                 remove_background,
                 bake: (!vertex_colors).then(|| BakeOptions {
                     texture_size,
@@ -299,21 +355,24 @@ async fn main() -> Result<()> {
             } else {
                 inference_tensor::Device::cuda_if_available(0)?
             };
-            let report = generate_3d_on(&models, &image, &out, &options, &NoProgress, &device)?;
-            println!(
-                "{} vertices, {} faces ({} extracted) at {}^3{} in {} ({:.1} s)",
-                report.vertices,
-                report.faces,
-                report.raw_faces,
-                report.resolution,
-                if report.background_removed {
-                    ", background removed"
-                } else {
-                    ""
-                },
-                out.display(),
-                report.total_seconds
-            );
+            let reports = generate_3d_on(&models, &image, &out, &options, &NoProgress, &device)?;
+            for (i, report) in reports.iter().enumerate() {
+                println!(
+                    "{} vertices, {} faces ({} extracted) at {}^3{}, seed {}, in {} ({:.1} s)",
+                    report.vertices,
+                    report.faces,
+                    report.raw_faces,
+                    report.resolution,
+                    if report.background_removed {
+                        ", background removed"
+                    } else {
+                        ""
+                    },
+                    report.seed,
+                    sample_dir(&out, i, reports.len()).display(),
+                    report.total_seconds
+                );
+            }
         }
 
         Command::Voxels {

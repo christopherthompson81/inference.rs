@@ -420,6 +420,40 @@ pub enum Trellis2Variant {
     /// Everything at 512: faster, coarser
     #[serde(rename = "512")]
     Res512,
+    /// Everything at 1024, on a 64^3 structure
+    #[serde(rename = "1024")]
+    Res1024,
+    /// Shape at 512, then again at 1536 (lower when that is 49152 cells or more); texture at 1024
+    #[serde(rename = "1536_cascade")]
+    Cascade1536,
+}
+
+/// Changes to one TRELLIS.2 flow's sampler; unset fields keep the checkpoint's `pipeline.json` values.
+#[derive(Clone, Copy, Debug, Default, Serialize, inference_json::FromJson, ToSchema)]
+pub struct Trellis2Sampler {
+    /// Sampling steps, 1 to 100 (12 by default)
+    #[serde(default)]
+    pub steps: Option<u32>,
+    /// Classifier-free guidance strength, 1 for none (7.5 for structure and shape, 1 for texture)
+    #[serde(default)]
+    pub guidance_strength: Option<f64>,
+    /// How far guidance is rescaled toward the conditioned prediction's spread, 0 to 1
+    #[serde(default)]
+    pub guidance_rescale: Option<f64>,
+    /// The timestep schedule's shift, above 0 (1: uniform)
+    #[serde(default)]
+    pub rescale_t: Option<f64>,
+}
+
+impl Trellis2Sampler {
+    fn choice(self) -> crate::image_to_3d::SamplerChoice {
+        crate::image_to_3d::SamplerChoice {
+            steps: self.steps.map(|s| s as usize),
+            guidance_strength: self.guidance_strength,
+            guidance_rescale: self.guidance_rescale,
+            rescale_t: self.rescale_t,
+        }
+    }
 }
 
 /// TRELLIS.2's textured mesh of the object in the job's one image.
@@ -442,6 +476,21 @@ pub struct ImageTo3dJob {
     /// Rebuild the surface as a closed shell (narrow-band dual contouring) before baking
     #[serde(default)]
     pub remesh: Option<bool>,
+    /// Faces the exported mesh is simplified to (1,000,000 by default)
+    #[serde(default)]
+    pub faces: Option<u32>,
+    /// Results to make, 1 to 8 (the `i`th seeded `seed + i`); more than one go in folders `model/1`, `model/2`, ...
+    #[serde(default)]
+    pub samples: Option<u32>,
+    /// The sparse structure flow's sampler
+    #[serde(default)]
+    pub structure_sampler: Option<Trellis2Sampler>,
+    /// The shape flows' sampler
+    #[serde(default)]
+    pub shape_sampler: Option<Trellis2Sampler>,
+    /// The texture flow's sampler
+    #[serde(default)]
+    pub texture_sampler: Option<Trellis2Sampler>,
     /// How much it may displace to run, in place of the server's setting
     #[serde(default)]
     pub placement: Option<Placement>,
@@ -1375,14 +1424,49 @@ fn voxels_work(config: &JobsConfig, job: VoxelsJob) -> Result<(Prepare, Work), A
 }
 
 fn image_to_3d_work(config: &JobsConfig, job: ImageTo3dJob) -> Result<(Prepare, Work), ApiError> {
-    use crate::image_to_3d::{BakeOptions, ImageTo3dOptions, fetch_models, generate_3d_on};
-    use inference_recon::trellis2::pipeline::Variant;
+    use crate::image_to_3d::{
+        BakeOptions, DECIMATION_TARGET, FACES_RANGE, ImageTo3dOptions, MAX_SAMPLES, Settings,
+        Variant, fetch_models, generate_3d_on,
+    };
+    let variant = match job.variant.unwrap_or_default() {
+        Trellis2Variant::Cascade1024 => Variant::Cascade1024,
+        Trellis2Variant::Res512 => Variant::Res512,
+        Trellis2Variant::Res1024 => Variant::Res1024,
+        Trellis2Variant::Cascade1536 => Variant::Cascade1536,
+    };
+    let sampler = |s: Option<Trellis2Sampler>| s.unwrap_or_default().choice();
+    let settings = Settings {
+        structure: sampler(job.structure_sampler),
+        shape: sampler(job.shape_sampler),
+        texture: sampler(job.texture_sampler),
+        samples: job.samples.map_or(1, |n| n as usize),
+        ..Settings::new(variant, job.seed.unwrap_or(0))
+    };
+    if !(1..=MAX_SAMPLES).contains(&settings.samples) {
+        return Err(ApiError::invalid_request(format!(
+            "samples must be 1 to {MAX_SAMPLES}"
+        )));
+    }
+    for (stage, choice) in [
+        ("structure_sampler", settings.structure),
+        ("shape_sampler", settings.shape),
+        ("texture_sampler", settings.texture),
+    ] {
+        if let Some(problem) = choice.problem() {
+            return Err(ApiError::invalid_request(format!("{stage}: {problem}")));
+        }
+    }
+    let faces = job.faces.map_or(DECIMATION_TARGET, |f| f as usize);
+    if !FACES_RANGE.contains(&faces) {
+        return Err(ApiError::invalid_request(format!(
+            "faces must be in {}..={}",
+            FACES_RANGE.start(),
+            FACES_RANGE.end()
+        )));
+    }
     let options = ImageTo3dOptions {
-        variant: match job.variant.unwrap_or_default() {
-            Trellis2Variant::Cascade1024 => Variant::Cascade1024,
-            Trellis2Variant::Res512 => Variant::Res512,
-        },
-        seed: job.seed.unwrap_or(0),
+        settings,
+        faces,
         remove_background: job.remove_background.unwrap_or(false),
         bake: (!job.vertex_colors.unwrap_or(false)).then(|| BakeOptions {
             texture_size: job
@@ -1420,21 +1504,37 @@ fn image_to_3d_work(config: &JobsConfig, job: ImageTo3dJob) -> Result<(Prepare, 
             .next()
             .ok_or_else(|| anyhow::anyhow!("an image-to-3D job takes one image"))?;
         let out = ctx.dir().join(IMAGE_TO_3D_DIR);
-        let report = generate_3d_on(models, &image, &out, &options, ctx, &device)?;
+        let reports = generate_3d_on(models, &image, &out, &options, ctx, &device)?;
         let dir = ctx.dir();
-        let outputs = [
-            ("model", "model/model.glb"),
-            ("mesh", "model/mesh.ply"),
-            ("prepared image", "model/prepared.png"),
-            ("meta", "model/meta.json"),
-        ]
+        let samples = reports.len();
+        let mut outputs: Vec<JobOutput> = output(
+            dir,
+            &format!("{IMAGE_TO_3D_DIR}/{}", crate::image_to_3d::PREPARED_FILE),
+            "prepared image",
+        )
         .into_iter()
-        .filter_map(|(name, file)| output(dir, file, name))
         .collect();
-        Ok(JobResult {
-            outputs,
-            report: serde_json::to_value(report)?,
-        })
+        for i in 0..samples {
+            let folder = crate::image_to_3d::sample_dir(Path::new(IMAGE_TO_3D_DIR), i, samples);
+            for (name, file) in [
+                ("model", crate::image_to_3d::GLB_FILE),
+                ("mesh", crate::image_to_3d::MESH_FILE),
+                ("meta", crate::image_to_3d::META_FILE),
+            ] {
+                let name = if samples == 1 {
+                    name.to_string()
+                } else {
+                    format!("{name} {}", i + 1)
+                };
+                let file = folder.join(file).to_string_lossy().replace('\\', "/");
+                outputs.extend(output(dir, &file, &name));
+            }
+        }
+        let report = match <[_; 1]>::try_from(reports) {
+            Ok([one]) => serde_json::to_value(one)?,
+            Err(all) => serde_json::json!({ "samples": all }),
+        };
+        Ok(JobResult { outputs, report })
     });
     Ok((prepare, work))
 }
