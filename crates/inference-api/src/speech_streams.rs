@@ -25,7 +25,7 @@ use crate::{
     model_inventory::{CancelOnDrop, event},
     openai::{
         DiarizationRequest, DiarizationResponseFormat, TimestampGranularity, TranscriptionRequest,
-        TranscriptionResponseFormat, TranscriptionTask,
+        TranscriptionResponseFormat,
     },
     overlap_pass::{PassContext, noting_windows, overlap_pass},
     request_body::parse_json,
@@ -277,12 +277,10 @@ async fn transcribe(
     let (progress, windowed) = noting_windows(Some(report(events.clone(), canceled.clone())));
     let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
     let options = TranscriptionOptions {
-        language: request.language.clone(),
-        beam_size: request.beam_size,
-        translate: request.task == TranscriptionTask::Translate,
         resume_at,
         max_window_seconds,
         spans,
+        ..crate::generation::decode_options(&request)
     };
     let message = |audio| RequestMessage::Transcription {
         audio,

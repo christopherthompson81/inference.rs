@@ -63,11 +63,7 @@ pub(crate) async fn open(
     let op = TranscriptionStreamOp::Open {
         options: TranscriptionOptions {
             language: request.language.clone(),
-            beam_size: None,
-            translate: false,
-            resume_at: None,
-            max_window_seconds: None,
-            spans: None,
+            ..TranscriptionOptions::default()
         },
         sample_rate: request.sample_rate,
     };

@@ -14,13 +14,16 @@ use inference_audio::whisper::{LogMelMax, WhisperLogMel};
 use inference_nn::audio::whisper::WhisperEncoder;
 use inference_quant::{ShardedSafeTensors, ShardedVarBuilder};
 use inference_tensor::{DType, Device, Error, Result, Tensor};
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 use tokenizers::Tokenizer;
 
 pub use config::{WhisperConfig, WhisperGenerationConfig};
 use decode::{
-    SECONDS_PER_TIMESTAMP, SpecialTokens, WindowSegment, apply_rules, argmax, split_segments,
+    SECONDS_PER_TIMESTAMP, SpecialTokens, WindowSegment, apply_rules, argmax, compression_ratio,
+    log_softmax, sample, split_segments,
 };
-use model::Decoder;
+use model::{Decoder, DecoderCache};
 use timing::WordTiming;
 
 use crate::{TimedText, Transcription, TranscriptionOptions};
@@ -41,6 +44,44 @@ const MAX_WINDOW_TOKENS: usize = 224;
 // languages written without spaces between words: word times go per character
 const UNSPACED_LANGUAGES: [&str; 6] = ["zh", "ja", "th", "lo", "my", "yue"];
 const FRAMES_PER_SECOND: f64 = SAMPLE_RATE as f64 / HOP_LENGTH as f64;
+// OpenAI's `transcribe` defaults: a window is redecoded hotter when its text compresses this well or its tokens
+// average this little log-probability, and skipped as silence when its no-speech probability also passes this
+const COMPRESSION_RATIO_THRESHOLD: f64 = 2.4;
+const LOGPROB_THRESHOLD: f32 = -1.0;
+const NO_SPEECH_THRESHOLD: f32 = 0.6;
+const FALLBACK_TEMPERATURES: [f32; 6] = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0];
+// a window decoded hotter than this is not carried into the next one's prompt
+const PROMPT_RESET_TEMPERATURE: f32 = 0.5;
+// the sampling at a fallback temperature draws from this seed, so a transcript repeats
+const SAMPLING_SEED: u64 = 0;
+const START_OF_PREVIOUS: &str = "<|startofprev|>";
+// `<|nocaptions|>` in the first multilingual checkpoints
+const NO_SPEECH: [&str; 2] = ["<|nospeech|>", "<|nocaptions|>"];
+
+/// How one window is decoded.
+#[derive(Clone, Copy, Debug)]
+struct WindowDecoding {
+    temperature: f32,
+    beam_size: usize,
+    patience: f32,
+}
+
+/// One window's decoded tokens (no end token) and what OpenAI judges a decode by.
+struct Decoded {
+    tokens: Vec<u32>,
+    avg_logprob: f32,
+    no_speech: f32,
+    compression_ratio: f64,
+    temperature: f32,
+}
+
+// one beam: its tokens after the prompt, their summed log-probability, its cache and next logits
+struct Beam {
+    tokens: Vec<u32>,
+    sum: f32,
+    cache: DecoderCache,
+    logits: Vec<f32>,
+}
 
 fn msg(error: impl std::fmt::Display) -> Error {
     Error::Msg(error.to_string())
@@ -72,6 +113,8 @@ pub struct Whisper {
     decoder: Decoder,
     tokenizer: Tokenizer,
     special: SpecialTokens,
+    start_of_previous: Option<u32>,
+    no_speech: Option<u32>,
     generation: WhisperGenerationConfig,
     log_mel: WhisperLogMel,
     device: Device,
@@ -109,6 +152,8 @@ impl Whisper {
         Ok(Self {
             encoder: WhisperEncoder::new(&config.encoder(), vb.pp("encoder"))?,
             decoder: Decoder::new(config, vb.pp("decoder"))?,
+            start_of_previous: tokenizer.token_to_id(START_OF_PREVIOUS),
+            no_speech: NO_SPEECH.iter().find_map(|t| tokenizer.token_to_id(t)),
             tokenizer,
             special: SpecialTokens::new(&generation),
             log_mel: WhisperLogMel {
@@ -196,15 +241,75 @@ impl Whisper {
         tokens
     }
 
-    fn decode_window(&self, encoded: &Tensor, prompt: &[u32]) -> Result<Vec<u32>> {
+    // OpenAI's `DecodingTask.run` on one window: `previous` as `<|startofprev|>` context before `start`, then greedy,
+    // sampled or beam decoding under the timestamp rules
+    fn decode_window(
+        &self,
+        encoded: &Tensor,
+        previous: &[u32],
+        start: &[u32],
+        how: WindowDecoding,
+        rng: &mut StdRng,
+    ) -> Result<Decoded> {
+        let mut prompt = Vec::new();
+        if let Some(marker) = self.start_of_previous.filter(|_| !previous.is_empty()) {
+            let keep = self.decoder.max_positions() / 2 - 1;
+            prompt.push(marker);
+            prompt.extend(&previous[previous.len().saturating_sub(keep)..]);
+        }
+        let start_index = prompt.len();
+        prompt.extend(start);
         let mut cache = self.decoder.cache(encoded)?;
-        let mut out = self.decoder.forward(prompt, &mut cache, false)?;
-        let mut generated = Vec::new();
+        let out = self.decoder.forward(&prompt, &mut cache, false)?;
+        let no_speech = match self.no_speech {
+            Some(id) => {
+                let row = out.logits.get(start_index)?.to_vec1::<f32>()?;
+                log_softmax(&row)[id as usize].exp()
+            }
+            None => 0.0,
+        };
+        let logits = Decoder::last_logits(&out)?;
         let budget = MAX_WINDOW_TOKENS.min(self.decoder.max_positions() - prompt.len());
+        let (tokens, sum) = if how.beam_size > 1 && how.temperature == 0.0 {
+            self.beam_search(cache, logits, budget, how)?
+        } else {
+            self.sample_window(cache, logits, budget, how.temperature, rng)?
+        };
+        let text: Vec<u32> = tokens
+            .iter()
+            .copied()
+            .filter(|&t| !self.special.is_timestamp(t))
+            .collect();
+        let compression_ratio = compression_ratio(self.token_text(&text)?.trim());
+        Ok(Decoded {
+            avg_logprob: sum / (tokens.len() + 1) as f32,
+            tokens,
+            no_speech,
+            compression_ratio,
+            temperature: how.temperature,
+        })
+    }
+
+    // OpenAI's `GreedyDecoder`: the likeliest token at 0, a draw at a temperature; the sum counts the end token's
+    // log-probability, as OpenAI's does
+    fn sample_window(
+        &self,
+        mut cache: DecoderCache,
+        mut logits: Vec<f32>,
+        budget: usize,
+        temperature: f32,
+        rng: &mut StdRng,
+    ) -> Result<(Vec<u32>, f32)> {
+        let mut generated = Vec::new();
+        let mut sum = 0.0;
         while generated.len() < budget {
-            let mut logits = Decoder::last_logits(&out)?;
             apply_rules(&self.special, &mut logits, &generated, true);
-            let token = argmax(&logits);
+            let token = if temperature == 0.0 {
+                argmax(&logits)
+            } else {
+                sample(&logits, temperature, rng)
+            };
+            sum += log_softmax(&logits)[token as usize];
             if token == self.special.eot {
                 break;
             }
@@ -212,9 +317,142 @@ impl Whisper {
             if cache.len() >= self.decoder.max_positions() {
                 break;
             }
-            out = self.decoder.forward(&[token], &mut cache, false)?;
+            let out = self.decoder.forward(&[token], &mut cache, false)?;
+            logits = Decoder::last_logits(&out)?;
         }
-        Ok(generated)
+        Ok((generated, sum))
+    }
+
+    // OpenAI's `BeamSearchDecoder` and `MaximumLikelihoodRanker`: each step the best `beam_size` unfinished
+    // continuations go on, finished ones collect until `beam_size * patience` have, and the best finished sequence by
+    // log-probability over its length wins
+    fn beam_search(
+        &self,
+        cache: DecoderCache,
+        logits: Vec<f32>,
+        budget: usize,
+        how: WindowDecoding,
+    ) -> Result<(Vec<u32>, f32)> {
+        let width = how.beam_size;
+        let max_finished = ((width as f32 * how.patience).round() as usize).max(1);
+        let mut beams = vec![Beam {
+            tokens: Vec::new(),
+            sum: 0.0,
+            cache,
+            logits,
+        }];
+        let mut finished: Vec<(Vec<u32>, f32)> = Vec::new();
+        for _ in 0..budget {
+            let mut candidates: Vec<(Vec<u32>, f32, usize)> = Vec::new();
+            for (j, beam) in beams.iter().enumerate() {
+                let mut logits = beam.logits.clone();
+                apply_rules(&self.special, &mut logits, &beam.tokens, true);
+                let logprobs = log_softmax(&logits);
+                let mut order: Vec<usize> = (0..logprobs.len()).collect();
+                let top = (width + 1).min(order.len());
+                order.select_nth_unstable_by(top - 1, |&a, &b| logprobs[b].total_cmp(&logprobs[a]));
+                order.truncate(top);
+                order.sort_by(|&a, &b| logprobs[b].total_cmp(&logprobs[a]));
+                for token in order {
+                    let mut sequence = beam.tokens.clone();
+                    sequence.push(u32::try_from(token).expect("a vocabulary index fits u32"));
+                    let score = beam.sum + logprobs[token];
+                    match candidates.iter_mut().find(|c| c.0 == sequence) {
+                        Some(known) => (known.1, known.2) = (score, j),
+                        None => candidates.push((sequence, score, j)),
+                    }
+                }
+            }
+            candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let mut next = Vec::new();
+            for (sequence, score, source) in candidates {
+                if sequence.last() == Some(&self.special.eot) {
+                    if finished.len() < max_finished {
+                        finished.push((sequence[..sequence.len() - 1].to_vec(), score));
+                    }
+                } else {
+                    next.push((sequence, score, source));
+                    if next.len() == width {
+                        break;
+                    }
+                }
+            }
+            if finished.len() >= max_finished || next.is_empty() {
+                break;
+            }
+            let mut stepped = Vec::with_capacity(next.len());
+            for (tokens, sum, source) in next {
+                let mut cache = beams[source].cache.clone();
+                if cache.len() >= self.decoder.max_positions() {
+                    continue;
+                }
+                let token = tokens[tokens.len() - 1];
+                let out = self.decoder.forward(&[token], &mut cache, false)?;
+                stepped.push(Beam {
+                    tokens,
+                    sum,
+                    cache,
+                    logits: Decoder::last_logits(&out)?,
+                });
+            }
+            if stepped.is_empty() {
+                break;
+            }
+            beams = stepped;
+        }
+        if finished.len() < width {
+            beams.sort_by(|a, b| b.sum.total_cmp(&a.sum));
+            for beam in beams {
+                if finished.len() >= width {
+                    break;
+                }
+                finished.push((beam.tokens, beam.sum));
+            }
+        }
+        let score = |(tokens, sum): &(Vec<u32>, f32)| sum / tokens.len() as f32;
+        let best = (0..finished.len())
+            .fold(None::<usize>, |best, i| match best {
+                Some(b) if score(&finished[b]) >= score(&finished[i]) => Some(b),
+                _ => Some(i),
+            })
+            .expect("a beam search ends with a hypothesis");
+        Ok(finished.swap_remove(best))
+    }
+
+    // OpenAI's `decode_with_fallback`: hotter until the window is neither repetitive nor improbable, unless it is
+    // silence
+    fn decode_with_fallback(
+        &self,
+        encoded: &Tensor,
+        previous: &[u32],
+        start: &[u32],
+        options: &TranscriptionOptions,
+        rng: &mut StdRng,
+    ) -> Result<Decoded> {
+        let fixed = options.temperature.filter(|&t| t > 0.0);
+        let temperatures: &[f32] = match &fixed {
+            Some(t) => std::slice::from_ref(t),
+            None => &FALLBACK_TEMPERATURES,
+        };
+        let mut last = None;
+        for &temperature in temperatures {
+            let how = WindowDecoding {
+                temperature,
+                beam_size: options.beam_size.unwrap_or(1),
+                patience: options.patience.unwrap_or(1.0),
+            };
+            let decoded = self.decode_window(encoded, previous, start, how, rng)?;
+            let silence =
+                decoded.no_speech > NO_SPEECH_THRESHOLD && decoded.avg_logprob < LOGPROB_THRESHOLD;
+            let failed = decoded.compression_ratio > COMPRESSION_RATIO_THRESHOLD
+                || decoded.avg_logprob < LOGPROB_THRESHOLD;
+            let done = silence || !failed;
+            last = Some(decoded);
+            if done {
+                break;
+            }
+        }
+        Ok(last.expect("at least one temperature"))
     }
 
     fn token_text(&self, tokens: &[u32]) -> Result<String> {
@@ -355,10 +593,24 @@ impl Whisper {
         let mut text = String::new();
         let mut seek = 0usize;
         let mut last_speech = 0.0;
+        // the text so far as the next window's context, from `carried` on (OpenAI's `all_tokens`, `prompt_reset_since`)
+        let mut history: Vec<u32> = match options.prompt.as_deref().map(str::trim) {
+            Some(prompt) if !prompt.is_empty() => self
+                .tokenizer
+                .encode(format!(" {prompt}"), false)
+                .map_err(msg)?
+                .get_ids()
+                .to_vec(),
+            _ => Vec::new(),
+        };
+        let mut carried = 0;
+        let condition = options.condition_on_previous_text.unwrap_or(true);
+        let mut rng = StdRng::seed_from_u64(SAMPLING_SEED);
         while seek < content_frames {
             let window_frames = WINDOW_FRAMES.min(content_frames - seek);
+            // OpenAI's `pad_or_trim`: a window short of 30 s is zeros past the audio, not the padding's log-mel
             let mut mel = vec![0.0f32; n_mels * WINDOW_FRAMES];
-            for (t, frame) in frames[seek..seek + WINDOW_FRAMES].iter().enumerate() {
+            for (t, frame) in frames[seek..seek + window_frames].iter().enumerate() {
                 for (m, &value) in frame.iter().enumerate() {
                     mel[m * WINDOW_FRAMES + t] = value;
                 }
@@ -370,7 +622,19 @@ impl Whisper {
                 language = Some(self.detect_language(&encoded)?);
             }
             let start = self.start_sequence(language.as_deref(), task);
-            let generated = self.decode_window(&encoded, &start)?;
+            let decoded = self.decode_with_fallback(
+                &encoded,
+                &history[carried..],
+                &start,
+                options,
+                &mut rng,
+            )?;
+            // silence, unless the text is probable enough despite the no-speech probability
+            if decoded.no_speech > NO_SPEECH_THRESHOLD && decoded.avg_logprob <= LOGPROB_THRESHOLD {
+                seek += window_frames;
+                continue;
+            }
+            let generated = decoded.tokens;
             let window_seconds = window_frames as f64 * HOP_LENGTH as f64 / f64::from(SAMPLE_RATE);
             let (segments, consumed) = split_segments(&self.special, &generated, window_seconds);
             let offset = seek as f64 * HOP_LENGTH as f64 / f64::from(SAMPLE_RATE);
@@ -381,6 +645,13 @@ impl Whisper {
                     .is_some_and(|l| UNSPACED_LANGUAGES.contains(&l));
             for segment in &segments {
                 text.push_str(&self.token_text(&segment.tokens)?);
+                // an instantaneous segment carries nothing forward, as in OpenAI's
+                if segment.end > segment.start {
+                    history.extend(&segment.decoded);
+                }
+            }
+            if !condition || decoded.temperature > PROMPT_RESET_TEMPERATURE {
+                carried = history.len();
             }
             let alignment =
                 self.align_words(&encoded, &start, &segments, window_frames, unspaced)?;

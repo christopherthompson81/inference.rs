@@ -46,8 +46,21 @@ pub const TRANSCRIPTION_STOPPED: &str = "the transcription was stopped";
 pub struct TranscriptionOptions {
     /// The audio's language, for a model that takes one; others identify it themselves.
     pub language: Option<String>,
-    /// Beam search over this many hypotheses for a transducer (RNN-T, TDT); unset or 1 decodes greedily.
+    /// Beam search over this many hypotheses (Whisper, and a transducer: RNN-T, TDT); unset or 1 decodes greedily.
     pub beam_size: Option<usize>,
+    /// Whisper's beam patience: finished hypotheses wait for `beam_size * patience` of them (1 when unset).
+    #[serde(default)]
+    pub patience: Option<f32>,
+    /// Whisper's sampling temperature: unset or 0 decodes at 0 and falls back to 0.2, 0.4, ... 1.0 on a repetitive
+    /// or improbable window, as OpenAI's `transcribe`; above 0, every window at that temperature.
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    /// Text Whisper takes as what came before the audio (OpenAI's `initial_prompt`).
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// Whisper conditions each window on the previous one's text (on unless `false`).
+    #[serde(default)]
+    pub condition_on_previous_text: Option<bool>,
     /// Write an English translation instead of a transcript, for a model that can.
     #[serde(default)]
     pub translate: bool,

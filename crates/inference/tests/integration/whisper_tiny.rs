@@ -1,5 +1,5 @@
 //! Whisper through the engine on a tiny random-weight checkpoint: each response format, a recording past one 30 s
-//! window, and the language rules.
+//! window, the language rules and the decoding options.
 
 use inference::{
     ApiErrorKind, ModelDType, TimestampGranularity, TranscriptionModelBuilder,
@@ -155,5 +155,53 @@ async fn an_unknown_language_is_an_invalid_request() -> anyhow::Result<()> {
         )
         .await
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    Ok(())
+}
+
+// beam search, a prompt, no conditioning and a fixed temperature each decode, and a sampled run repeats itself
+#[tokio::test]
+async fn decoding_options_decode_and_repeat() -> anyhow::Result<()> {
+    let (_checkpoint, model) = model().await?;
+    let wav = chirp_wav(LONG_SECONDS);
+    let variants: [fn(&mut TranscriptionRequest); 4] = [
+        |r| (r.beam_size, r.patience) = (Some(3), Some(1.5)),
+        |r| r.prompt = Some("A tone rising in pitch.".into()),
+        |r| r.condition_on_previous_text = Some(false),
+        |r| r.temperature = Some(0.7),
+    ];
+    for (i, variant) in variants.iter().enumerate() {
+        let mut texts = Vec::new();
+        for _ in 0..2 {
+            let mut request = request(TranscriptionResponseFormat::VerboseJson, Some("en"));
+            variant(&mut request);
+            let output = model
+                .transcription(request, &wav)
+                .await
+                .map_err(|e| anyhow::anyhow!("variant {i}: {e:?}"))?;
+            let parsed: VerboseTranscriptionResponse = serde_json::from_str(&output.body)?;
+            check_words(&parsed, LONG_SECONDS);
+            texts.push(parsed.text);
+        }
+        assert_eq!(texts[0], texts[1], "variant {i} differs between runs");
+    }
+    Ok(())
+}
+
+// a beam of 0, a patience of 0 or a temperature past 1 is the request's error
+#[tokio::test]
+async fn out_of_range_decoding_is_an_invalid_request() -> anyhow::Result<()> {
+    let (_checkpoint, model) = model().await?;
+    let wav = chirp_wav(SECONDS);
+    let invalid: [fn(&mut TranscriptionRequest); 3] = [
+        |r| r.beam_size = Some(0),
+        |r| r.patience = Some(0.0),
+        |r| r.temperature = Some(1.5),
+    ];
+    for (i, change) in invalid.iter().enumerate() {
+        let mut request = request(TranscriptionResponseFormat::Json, None);
+        change(&mut request);
+        let error = model.transcription(request, &wav).await.unwrap_err();
+        assert_eq!(error.kind, ApiErrorKind::InvalidRequest, "{i}: {error:?}");
+    }
     Ok(())
 }

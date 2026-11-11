@@ -2114,7 +2114,6 @@ impl ImageEditRequest {
 #[serde(rename_all = "lowercase")]
 pub enum AudioResponseFormat {
     /// Widely compatible, lossy compression, good for web streaming
-    #[default]
     Mp3,
     /// Good compression efficiency, ideal for real-time communication
     Opus,
@@ -2123,6 +2122,7 @@ pub enum AudioResponseFormat {
     /// Lossless compression, larger file sizes but good audio quality
     Flac,
     /// Uncompressed, largest file sizes but maximum compatibility
+    #[default]
     Wav,
     ///  Raw audio data, requires additional format specification
     Pcm,
@@ -2175,8 +2175,10 @@ pub struct SpeechGenerationRequest {
     /// Seeds the model's sampling noise, so a request repeats exactly (Kokoro).
     #[serde(default)]
     pub seed: Option<u64>,
-    /// The desired audio format for the generated speech.
-    #[schema(example = "mp3")]
+    /// The desired audio format for the generated speech: `wav` or `pcm`, `wav` when unset (OpenAI's default, `mp3`,
+    /// is not encoded).
+    #[schema(example = "wav")]
+    #[serde(default)]
     pub response_format: AudioResponseFormat,
     /// Answers with JSON (`SpeechWithTimestamps`): the audio in `response_format`, base64-encoded, and when each word
     /// of `input` is spoken, with its IPA. Kokoro times words; another model answers with no words.
@@ -2333,20 +2335,29 @@ pub struct TranscriptionRequest {
     /// The audio's language (`de-DE`, `de`), for Nemotron-3.5; unset lets it identify the language. Parakeet ignores it.
     #[serde(default)]
     pub language: Option<String>,
-    /// Text to steer the transcript; Parakeet ignores it.
+    /// Text to steer the transcript, taken as what came before the audio (Whisper); Parakeet ignores it.
     #[serde(default)]
     pub prompt: Option<String>,
     #[serde(default)]
     pub response_format: TranscriptionResponseFormat,
-    /// Parakeet decodes greedily and ignores it.
+    /// 0 to 1. Whisper: unset or 0 decodes at 0 and raises the temperature on a window whose text repeats itself or
+    /// is improbable; above 0, every window at it. Parakeet decodes greedily and ignores it.
     #[serde(default)]
     pub temperature: Option<f32>,
     /// Timestamps `verbose_json` carries; segments are always given, words only when asked for.
     #[serde(default)]
     pub timestamp_granularities: Vec<TimestampGranularity>,
-    /// Beam search over this many hypotheses (1 to 16) for an RNN-T or TDT model; unset decodes greedily.
+    /// Beam search over this many hypotheses (1 to 16) for Whisper or an RNN-T or TDT model; unset decodes greedily.
     #[serde(default)]
     pub beam_size: Option<usize>,
+    /// Whisper's beam patience (above 0, 1 when unset): the search ends once `beam_size * patience` hypotheses
+    /// have finished. An inference.rs extension.
+    #[serde(default)]
+    pub patience: Option<f32>,
+    /// Whisper takes each window's predecessor's text as context (on unless `false`); off keeps a window's
+    /// failure from carrying into the next. An inference.rs extension.
+    #[serde(default)]
+    pub condition_on_previous_text: Option<bool>,
     /// A diarization model to run over the same audio: segments then break where the speaker changes, and segments
     /// and words carry the speaker. Naming the transcription model itself has a model that tags speakers (Nemotron
     /// 3.5 Transcribe) attribute them.
@@ -2374,6 +2385,8 @@ impl TranscriptionRequest {
             temperature: None,
             timestamp_granularities: Vec::new(),
             beam_size: None,
+            patience: None,
+            condition_on_previous_text: None,
             diarization_model: None,
             overlap_pass: None,
             task: TranscriptionTask::Transcribe,
@@ -2964,6 +2977,16 @@ pub struct ResponsesDeltaContent {
 
 #[cfg(test)]
 mod tests {
+    // OpenAI's speech request needs only model, input and voice
+    #[test]
+    fn a_speech_request_without_a_format_answers_in_wav() {
+        let request: super::SpeechGenerationRequest = serde_json::from_value(
+            serde_json::json!({"model": "default", "input": "Hello world.", "voice": "af_heart"}),
+        )
+        .unwrap();
+        assert_eq!(request.response_format, super::AudioResponseFormat::Wav);
+    }
+
     #[test]
     fn a_completion_prompt_is_text_or_token_ids() {
         let parse =

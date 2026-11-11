@@ -103,3 +103,35 @@ clips; OpenAI `transcribe(task="translate", temperature=0, condition_on_previous
   translation, since the output is English whatever the source.
 
 **Next:** full local CI.
+
+## Run 6 - 2026-11-11
+
+**Question:** #785: OpenAI's `transcribe` decoding (temperature fallback, beam search with patience, a prompt and the
+previous windows' text as `<|startofprev|>` context, the no-speech skip). Does the port match OpenAI's package
+with each?
+
+**Command:** `scripts/whisper_parity.py openai/whisper-base.en base.en <clips> --fp32 --decoding <mode>` (the script now
+takes `default`, `greedy-plain`, `beam5`, `prompt`); clips: OpenAI's `tests/jfk.flac` (11 s), and a 108 s Kokoro
+reading of the opening of a public-domain novel, at 16 kHz (ffmpeg), its first 12 s and 29 s, and a copy with
+noise at about -4 dB SNR. A temporary per-window print of each fallback attempt.
+
+**Finding:**
+- First try, default mode: the first window of the 108 s clip came out different. Its greedy tokens and average
+  log-probability equalled OpenAI's (-0.168), but our compression ratio was 2.403 against OpenAI's 2.355: flate2's
+  default backend (miniz) compressed the 471 bytes to 196, zlib to 200, and 2.403 crosses the 2.4 threshold, so we
+  fell back to 0.4. zlib-rs gives miniz's 196 too; flate2's `zlib` feature (the system zlib 1.3, Python's) gives 200.
+  Switched to it (a workspace-wide flate2 backend).
+- A 29 s clip differed in its only window: OpenAI's `pad_or_trim` pads a window short of 30 s with zeros in log-mel,
+  where we took the log-mel of the padded silence. Fixed; this was there before #785, and the 12 s clip's word
+  times went from up to 0.08 s off to exact.
+- After both: jfk, 12 s and 108 s match exactly in text and word times (max |dt| 0.000 s) with `default`, `beam5`
+  and `prompt` (one exception below), and the 12 s and 108 s with `greedy-plain` went from MISMATCH to exact.
+- What still differs is sampling: the 29 s clip's cut-off last window fails at every temperature on both sides and
+  ends sampled at 1.0; the prompt on the 12 s clip loops at 0 on both sides (ratio 8.6), then OpenAI settles at 0.4
+  and we at 0.2. The noisy clip's windows fall back too. Sampled draws come from different generators, so those words
+  differ; the deterministic windows agree.
+- `temperature: 0` from the OpenAI API means fallback (as OpenAI's API documents), so `greedy-plain` on our side is
+  `condition_on_previous_text=false` with the fallback still armed; it only equals OpenAI's plain greedy where no
+  window falls back.
+
+**Next:** CI; larger checkpoints (turbo) when downloaded.
