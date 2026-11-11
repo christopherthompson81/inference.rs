@@ -223,7 +223,7 @@ impl Loader for GGMLLoader {
         let generation_defaults = gen_conf
             .as_ref()
             .and_then(GenerationConfig::generation_defaults);
-        let eos = calculate_eos_tokens(&chat_template, gen_conf.as_ref(), &tokenizer);
+        let eos = calculate_eos_tokens(&chat_template, gen_conf.as_ref(), &tokenizer)?;
         Ok(Arc::new(Mutex::new(GGMLPipeline {
             model,
             tokenizer: tokenizer.into(),

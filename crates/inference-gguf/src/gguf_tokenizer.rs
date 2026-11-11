@@ -124,36 +124,51 @@ impl GgufTokenizerMetadata {
         }
         Ok(result)
     }
-
-    fn token(&self, id: Option<u32>) -> Option<String> {
-        id.map(|id| self.tokens[id as usize].clone())
-    }
 }
 
+// llama.cpp's converter pads a vocabulary out to the embedding's rows with `[PAD<id>]`
+fn is_padding(id: u32, token: &str) -> bool {
+    token == format!("[PAD{id}]")
+}
+
+// the same token, but for llama.cpp's converter writing SentencePiece's space mark (U+2581) as a space
+fn same_token(external: &str, gguf: &str) -> bool {
+    external == gguf || external.replace(SPIECE_SPACE, " ") == gguf
+}
+
+const SPIECE_SPACE: char = '\u{2581}';
+
+/// The external `tokenizer` for a GGUF whose vocabulary is the same: id for id, apart from the padding llama.cpp's
+/// converter appends and its spelling of U+2581 as a space. Special tokens are named as the tokenizer spells them.
 pub fn validate_external_gguf_tokenizer(
     tokenizer: Tokenizer,
     values: &HashMap<String, Value>,
 ) -> Result<GgufTokenizerConversion> {
     let metadata = GgufTokenizerMetadata::from_values(values)?;
+    let size = tokenizer.get_vocab_size(true);
     anyhow::ensure!(
-        tokenizer.get_vocab_size(true) == metadata.tokens.len(),
-        "Tokenizer vocabulary has {} entries, but the GGUF model has {}",
-        tokenizer.get_vocab_size(true),
+        size <= metadata.tokens.len(),
+        "Tokenizer vocabulary has {size} entries, but the GGUF model has {}",
         metadata.tokens.len()
     );
     for (id, expected) in (0u32..).zip(&metadata.tokens) {
         let actual = tokenizer.id_to_token(id);
+        let matches = match actual.as_deref() {
+            Some(actual) => same_token(actual, expected),
+            None => (id as usize) >= size && is_padding(id, expected),
+        };
         anyhow::ensure!(
-            actual.as_deref() == Some(expected),
+            matches,
             "Tokenizer token ID {id} is {:?}, but the GGUF model expects {expected:?}",
             actual
         );
     }
+    let name = |id: Option<u32>| id.and_then(|id| tokenizer.id_to_token(id));
     Ok(GgufTokenizerConversion {
+        bos: name(metadata.bos),
+        eos: name(metadata.eos),
+        unk: name(metadata.unk),
         tokenizer,
-        bos: metadata.token(metadata.bos),
-        eos: metadata.token(metadata.eos),
-        unk: metadata.token(metadata.unk),
     })
 }
 
@@ -1372,15 +1387,34 @@ mod tests {
     #[test]
     fn rejects_external_tokenizer_with_different_vocab_size() {
         let metadata = tokenizer_metadata(&["<eos>", "a", "b", "ab"]);
-        for tokens in [
-            &["<eos>", "a", "b"][..],
-            &["<eos>", "a", "b", "ab", "extra"][..],
-        ] {
-            let error = validate_external_gguf_tokenizer(tokenizer_with_tokens(tokens), &metadata)
-                .err()
-                .expect("different vocabulary size must fail");
-            assert!(error.to_string().contains("vocabulary has"));
-        }
+        let larger = validate_external_gguf_tokenizer(
+            tokenizer_with_tokens(&["<eos>", "a", "b", "ab", "extra"]),
+            &metadata,
+        )
+        .err()
+        .expect("a larger vocabulary must fail");
+        assert!(larger.to_string().contains("vocabulary has"));
+        // a smaller one passes only when the GGUF's rest is padding
+        let smaller = validate_external_gguf_tokenizer(
+            tokenizer_with_tokens(&["<eos>", "a", "b"]),
+            &metadata,
+        )
+        .err()
+        .expect("a smaller vocabulary short of a real token must fail");
+        assert!(smaller.to_string().contains("token ID 3"));
+    }
+
+    // llama.cpp pads to the embedding's rows and writes U+2581 as a space in special tokens
+    #[test]
+    fn accepts_an_external_tokenizer_short_of_the_padding_and_spelling_spaces_as_marks() {
+        let ours = ["<eos>", "<\u{2581}begin\u{2581}>", "b", "ab"];
+        let metadata = tokenizer_metadata(&["<eos>", "< begin >", "b", "ab", "[PAD4]", "[PAD5]"]);
+        let conversion =
+            validate_external_gguf_tokenizer(tokenizer_with_tokens(&ours), &metadata).unwrap();
+        assert_eq!(conversion.bos.as_deref(), Some("<\u{2581}begin\u{2581}>"));
+        assert_eq!(conversion.eos.as_deref(), Some("<eos>"));
+        let shuffled = tokenizer_metadata(&["<eos>", "< begin >", "b", "ab", "[PAD5]", "[PAD4]"]);
+        assert!(validate_external_gguf_tokenizer(tokenizer_with_tokens(&ours), &shuffled).is_err());
     }
 
     #[test]
