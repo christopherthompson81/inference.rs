@@ -14,6 +14,20 @@
   const CLAY_ROUGHNESS = 0.85;
   const BACKGROUND = 0x18181c;
   const ENVIRONMENT_BLUR = 0.04;
+  // the models' albedo sits well below their photos' brightness, so the default exposure lifts it
+  const DEFAULT_BRIGHTNESS = 1.5;
+  const MIN_BRIGHTNESS = 0.5;
+  const MAX_BRIGHTNESS = 3;
+  const BRIGHTNESS_KEY = "meshViewer.brightness";
+
+  function storedBrightness(): number {
+    try {
+      const v = Number(localStorage.getItem(BRIGHTNESS_KEY));
+      return v >= MIN_BRIGHTNESS && v <= MAX_BRIGHTNESS ? v : DEFAULT_BRIGHTNESS;
+    } catch {
+      return DEFAULT_BRIGHTNESS;
+    }
+  }
 
   let {
     url,
@@ -33,7 +47,18 @@
   let canvas = $state<HTMLCanvasElement | null>(null);
   let dialog = $state<HTMLDivElement | null>(null);
   let status = $state("Loading the model...");
+  let brightness = $state(storedBrightness());
+  let renderer: import("three").WebGLRenderer | null = null;
   let stop: (() => void) | null = null;
+
+  $effect(() => {
+    if (renderer) renderer.toneMappingExposure = brightness;
+    try {
+      localStorage.setItem(BRIGHTNESS_KEY, String(brightness));
+    } catch {
+      // storage unavailable: the setting lasts this view
+    }
+  });
 
   onMount(() => {
     dialog?.focus();
@@ -47,12 +72,14 @@
     const { OrbitControls } = await import("three/examples/jsm/controls/OrbitControls.js");
     const { RoomEnvironment } = await import("three/examples/jsm/environments/RoomEnvironment.js");
     if (!canvas) return;
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.toneMapping = THREE.NeutralToneMapping;
+    const view = new THREE.WebGLRenderer({ canvas, antialias: true });
+    view.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    view.toneMapping = THREE.NeutralToneMapping;
+    view.toneMappingExposure = brightness;
+    renderer = view;
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(BACKGROUND);
-    const pmrem = new THREE.PMREMGenerator(renderer);
+    const pmrem = new THREE.PMREMGenerator(view);
     const environment = pmrem.fromScene(new RoomEnvironment(), ENVIRONMENT_BLUR).texture;
     scene.environment = environment;
     const camera = new THREE.PerspectiveCamera(FOV, 1, 0.01, 100);
@@ -79,19 +106,19 @@
     const resize = () => {
       if (!canvas) return;
       const { clientWidth: width, clientHeight: height } = canvas;
-      renderer.setSize(width, height, false);
+      view.setSize(width, height, false);
       camera.aspect = width / Math.max(height, 1);
       camera.updateProjectionMatrix();
     };
     const observer = new ResizeObserver(resize);
     observer.observe(canvas);
     resize();
-    renderer.setAnimationLoop(() => {
+    view.setAnimationLoop(() => {
       controls.update();
-      renderer.render(scene, camera);
+      view.render(scene, camera);
     });
     stop = () => {
-      renderer.setAnimationLoop(null);
+      view.setAnimationLoop(null);
       observer.disconnect();
       controls.dispose();
       model.traverse((node) => {
@@ -105,7 +132,8 @@
       });
       environment.dispose();
       pmrem.dispose();
-      renderer.dispose();
+      view.dispose();
+      renderer = null;
     };
   }
 
@@ -147,7 +175,12 @@
 >
   <div class="flex shrink-0 items-center gap-3 px-4 py-3 text-sm text-white">
     <span class="min-w-0 flex-1 truncate">{title}</span>
-    <span class="hidden text-xs text-white/60 sm:inline">Drag to turn, scroll to zoom, right-drag to move</span>
+    <label class="flex items-center gap-2 text-xs text-white/80">
+      Brightness
+      <input type="range" min={MIN_BRIGHTNESS} max={MAX_BRIGHTNESS} step="0.1" bind:value={brightness} class="w-24 accent-blue-500 sm:w-32" aria-label="Brightness" />
+      <span class="w-6 tabular-nums">{brightness.toFixed(1)}</span>
+    </label>
+    <span class="hidden text-xs text-white/60 lg:inline">Drag to turn, scroll to zoom, right-drag to move</span>
     <button class="rounded-md border border-white/30 px-3 py-1.5 hover:bg-white/10" onclick={onClose} aria-label="Close viewer">Close</button>
   </div>
   <div class="relative min-h-0 flex-1">
