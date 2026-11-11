@@ -14,14 +14,16 @@ use inference_tensor::Device;
 use serde::Serialize;
 
 pub use inference_recon::progress::{NoProgress, Progress};
-pub use inference_recon::trellis2::bake::BakeOptions;
-pub use inference_recon::trellis2::pipeline::Variant;
+pub use inference_recon::trellis2::bake::{BakeOptions, DECIMATION_TARGET};
+pub use inference_recon::trellis2::pipeline::{MAX_STEPS, SamplerChoice, Settings, Variant};
 
 pub const GLB_FILE: &str = "model.glb";
 pub const MESH_FILE: &str = "mesh.ply";
 pub const PREPARED_FILE: &str = "prepared.png";
 pub const META_FILE: &str = "meta.json";
 const WEIGHTS_FILE: &str = "model.safetensors";
+/// The face targets an export accepts
+pub const FACES_RANGE: std::ops::RangeInclusive<usize> = 1_000..=10_000_000;
 
 /// The checkpoints an image-to-3D run reads.
 #[derive(Clone, Debug)]
@@ -33,20 +35,21 @@ pub struct ImageTo3dModels {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ImageTo3dOptions {
-    pub variant: Variant,
-    pub seed: u64,
+    pub settings: Settings,
     /// Remove the background even when the image has transparency of its own
     pub remove_background: bool,
-    /// Bake textures (`None`: per-vertex color and material instead)
+    /// Faces the exported mesh is simplified to
+    pub faces: usize,
+    /// Bake textures (`None`: per-vertex color and material instead); its decimation target is `faces`
     pub bake: Option<BakeOptions>,
 }
 
 impl Default for ImageTo3dOptions {
     fn default() -> Self {
         Self {
-            variant: Variant::Cascade1024,
-            seed: 0,
+            settings: Settings::new(Variant::Cascade1024, 0),
             remove_background: false,
+            faces: DECIMATION_TARGET,
             bake: Some(BakeOptions::default()),
         }
     }
@@ -174,25 +177,28 @@ pub fn generate_3d_on(
     }
     let (out, export, glb, mesh) = std::thread::scope(|scope| -> anyhow::Result<_> {
         let mut shape_half = None;
+        let bake_options = options.bake.map(|b| BakeOptions {
+            decimation_target: options.faces,
+            ..b
+        });
         let out = pipeline::generate_with(
             &models.paths,
             &input,
-            options.variant,
-            options.seed,
+            &options.settings,
             progress,
             device,
             &mut |mesh, resolution| {
                 let mesh = mesh.clone();
-                let bake_options = options.bake.as_ref();
+                let faces = options.faces;
                 shape_half = Some(scope.spawn(move || {
                     match bake_options {
                         Some(bake_options) => {
-                            bake::prepare(&mesh, resolution, bake_options, device, &|| {
+                            bake::prepare(&mesh, resolution, &bake_options, device, &|| {
                                 progress.cancelled()
                             })
                             .map(|p| ShapeHalf::Baked(Box::new(p)))
                         }
-                        None => pipeline::vertex_mesh(&mesh, device).map(ShapeHalf::Colored),
+                        None => pipeline::vertex_mesh(&mesh, faces, device).map(ShapeHalf::Colored),
                     }
                 }));
             },
@@ -220,9 +226,9 @@ pub fn generate_3d_on(
     std::fs::write(out_dir.join(MESH_FILE), mesh.to_ply())?;
     let export_seconds = export.elapsed().as_secs_f64();
     let report = ImageTo3dReport {
-        variant: options.variant.name().to_string(),
+        variant: options.settings.variant.name().to_string(),
         resolution: out.resolution,
-        seed: options.seed,
+        seed: options.settings.seed,
         background_removed: removed,
         structure_cells: out.structure_cells,
         latent_cells: out.latent_cells,

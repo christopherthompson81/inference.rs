@@ -447,6 +447,8 @@ class Trellis2Variant(str, Enum):
 
     _1024_CASCADE = "1024_cascade"
     _512 = "512"
+    _1024 = "1024"
+    _1536_CASCADE = "1536_cascade"
 
 
 class TruncationStrategy(str, Enum):
@@ -1392,10 +1394,14 @@ class ImageReference:
 class ImageTo3dJob:
     """TRELLIS.2's textured mesh of the object in the job's one image."""
 
+    faces: int | None = None
     placement: Placement | None = None
     remesh: bool | None = None
     remove_background: bool | None = None
     seed: int | None = None
+    shape_sampler: Trellis2Sampler | None = None
+    structure_sampler: Trellis2Sampler | None = None
+    texture_sampler: Trellis2Sampler | None = None
     texture_size: int | None = None
     variant: Trellis2Variant | None = None
     vertex_colors: bool | None = None
@@ -3417,6 +3423,16 @@ class TranscriptionWord:
     speaker: int | None = None
     start: float
     word: str
+
+
+@dataclass(kw_only=True)
+class Trellis2Sampler:
+    """Changes to one TRELLIS.2 flow's sampler; unset fields keep the checkpoint's `pipeline.json` values."""
+
+    guidance_rescale: float | None = None
+    guidance_strength: float | None = None
+    rescale_t: float | None = None
+    steps: int | None = None
 
 
 @dataclass(kw_only=True)

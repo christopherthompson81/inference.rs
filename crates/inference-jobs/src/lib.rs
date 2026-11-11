@@ -428,6 +428,34 @@ pub enum Trellis2Variant {
     Cascade1536,
 }
 
+/// Changes to one TRELLIS.2 flow's sampler; unset fields keep the checkpoint's `pipeline.json` values.
+#[derive(Clone, Copy, Debug, Default, Serialize, inference_json::FromJson, ToSchema)]
+pub struct Trellis2Sampler {
+    /// Sampling steps, 1 to 100 (12 by default)
+    #[serde(default)]
+    pub steps: Option<u32>,
+    /// Classifier-free guidance strength, 1 for none (7.5 for structure and shape, 1 for texture)
+    #[serde(default)]
+    pub guidance_strength: Option<f64>,
+    /// How far guidance is rescaled toward the conditioned prediction's spread, 0 to 1
+    #[serde(default)]
+    pub guidance_rescale: Option<f64>,
+    /// The timestep schedule's shift, above 0 (1: uniform)
+    #[serde(default)]
+    pub rescale_t: Option<f64>,
+}
+
+impl Trellis2Sampler {
+    fn choice(self) -> crate::image_to_3d::SamplerChoice {
+        crate::image_to_3d::SamplerChoice {
+            steps: self.steps.map(|s| s as usize),
+            guidance_strength: self.guidance_strength,
+            guidance_rescale: self.guidance_rescale,
+            rescale_t: self.rescale_t,
+        }
+    }
+}
+
 /// TRELLIS.2's textured mesh of the object in the job's one image.
 #[derive(Clone, Debug, Default, Serialize, inference_json::FromJson, ToSchema)]
 pub struct ImageTo3dJob {
@@ -448,6 +476,18 @@ pub struct ImageTo3dJob {
     /// Rebuild the surface as a closed shell (narrow-band dual contouring) before baking
     #[serde(default)]
     pub remesh: Option<bool>,
+    /// Faces the exported mesh is simplified to (1,000,000 by default)
+    #[serde(default)]
+    pub faces: Option<u32>,
+    /// The sparse structure flow's sampler
+    #[serde(default)]
+    pub structure_sampler: Option<Trellis2Sampler>,
+    /// The shape flows' sampler
+    #[serde(default)]
+    pub shape_sampler: Option<Trellis2Sampler>,
+    /// The texture flow's sampler
+    #[serde(default)]
+    pub texture_sampler: Option<Trellis2Sampler>,
     /// How much it may displace to run, in place of the server's setting
     #[serde(default)]
     pub placement: Option<Placement>,
@@ -1381,16 +1421,43 @@ fn voxels_work(config: &JobsConfig, job: VoxelsJob) -> Result<(Prepare, Work), A
 }
 
 fn image_to_3d_work(config: &JobsConfig, job: ImageTo3dJob) -> Result<(Prepare, Work), ApiError> {
-    use crate::image_to_3d::{BakeOptions, ImageTo3dOptions, fetch_models, generate_3d_on};
-    use inference_recon::trellis2::pipeline::Variant;
+    use crate::image_to_3d::{
+        BakeOptions, DECIMATION_TARGET, FACES_RANGE, ImageTo3dOptions, Settings, Variant,
+        fetch_models, generate_3d_on,
+    };
+    let variant = match job.variant.unwrap_or_default() {
+        Trellis2Variant::Cascade1024 => Variant::Cascade1024,
+        Trellis2Variant::Res512 => Variant::Res512,
+        Trellis2Variant::Res1024 => Variant::Res1024,
+        Trellis2Variant::Cascade1536 => Variant::Cascade1536,
+    };
+    let sampler = |s: Option<Trellis2Sampler>| s.unwrap_or_default().choice();
+    let settings = Settings {
+        structure: sampler(job.structure_sampler),
+        shape: sampler(job.shape_sampler),
+        texture: sampler(job.texture_sampler),
+        ..Settings::new(variant, job.seed.unwrap_or(0))
+    };
+    for (stage, choice) in [
+        ("structure_sampler", settings.structure),
+        ("shape_sampler", settings.shape),
+        ("texture_sampler", settings.texture),
+    ] {
+        if let Some(problem) = choice.problem() {
+            return Err(ApiError::invalid_request(format!("{stage}: {problem}")));
+        }
+    }
+    let faces = job.faces.map_or(DECIMATION_TARGET, |f| f as usize);
+    if !FACES_RANGE.contains(&faces) {
+        return Err(ApiError::invalid_request(format!(
+            "faces must be in {}..={}",
+            FACES_RANGE.start(),
+            FACES_RANGE.end()
+        )));
+    }
     let options = ImageTo3dOptions {
-        variant: match job.variant.unwrap_or_default() {
-            Trellis2Variant::Cascade1024 => Variant::Cascade1024,
-            Trellis2Variant::Res512 => Variant::Res512,
-            Trellis2Variant::Res1024 => Variant::Res1024,
-            Trellis2Variant::Cascade1536 => Variant::Cascade1536,
-        },
-        seed: job.seed.unwrap_or(0),
+        settings,
+        faces,
         remove_background: job.remove_background.unwrap_or(false),
         bake: (!job.vertex_colors.unwrap_or(false)).then(|| BakeOptions {
             texture_size: job

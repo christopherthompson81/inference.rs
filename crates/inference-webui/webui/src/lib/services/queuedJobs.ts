@@ -73,6 +73,14 @@ export interface ReconstructOptions {
 /** TRELLIS.2's resolutions: shape at 512 then 1024 or 1536 on the upsampled cells, or everything at 1024 or 512. */
 export type Trellis2Variant = "1024_cascade" | "1536_cascade" | "1024" | "512";
 
+/** Changes to one TRELLIS.2 flow's sampler; null keeps the checkpoint's value. */
+export interface Trellis2Sampler {
+  steps: number | null;
+  guidance_strength: number | null;
+  guidance_rescale: number | null;
+  rescale_t: number | null;
+}
+
 export interface ImageTo3dOptions {
   seed: number | null;
   variant: Trellis2Variant | null;
@@ -80,6 +88,10 @@ export interface ImageTo3dOptions {
   vertex_colors: boolean | null;
   texture_size: number | null;
   remesh: boolean | null;
+  faces: number | null;
+  structure_sampler: Trellis2Sampler | null;
+  shape_sampler: Trellis2Sampler | null;
+  texture_sampler: Trellis2Sampler | null;
   placement: Placement | null;
 }
 

@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use inference::{ModelDType, TextModelBuilder};
 use inference_jobs::{
-    ImageTo3dJob, JobEvent, JobInput, JobQueue, JobRequest, JobStatus, JobsConfig, Trellis2Variant,
+    ImageTo3dJob, JobEvent, JobInput, JobQueue, JobRequest, JobStatus, JobsConfig, Trellis2Sampler,
+    Trellis2Variant,
 };
 
 #[path = "../../../inference/tests/support/llama_tiny.rs"]
@@ -15,6 +16,7 @@ mod support;
 use support::tiny_llama_checkpoint;
 
 const JOB_WAIT: Duration = Duration::from_secs(900);
+const FACES: u32 = 200_000;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_image_to_3d_job_takes_one_image() -> anyhow::Result<()> {
@@ -39,6 +41,21 @@ async fn an_image_to_3d_job_takes_one_image() -> anyhow::Result<()> {
     };
     let two = queue.submit(&model, job(), vec![image(), image()]);
     assert!(two.is_err_and(|e| e.to_string().contains("one image")));
+    let unguided = JobRequest::ImageTo3d(ImageTo3dJob {
+        shape_sampler: Some(Trellis2Sampler {
+            guidance_rescale: Some(1.5),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let refused = queue.submit(&model, unguided, vec![image()]);
+    assert!(refused.is_err_and(|e| e.to_string().contains("shape_sampler: guidance rescale")));
+    let few = JobRequest::ImageTo3d(ImageTo3dJob {
+        faces: Some(10),
+        ..Default::default()
+    });
+    let refused = queue.submit(&model, few, vec![image()]);
+    assert!(refused.is_err_and(|e| e.to_string().contains("faces must be")));
     let parsed: JobRequest =
         serde_json::from_value(serde_json::json!({"kind": "image_to_3d", "variant": "512"}))?;
     assert!(matches!(
@@ -88,6 +105,7 @@ async fn an_image_to_3d_job_writes_a_textured_model() -> anyhow::Result<()> {
     });
     let request = JobRequest::ImageTo3d(ImageTo3dJob {
         variant: Some(Trellis2Variant::Res512),
+        faces: Some(FACES),
         ..Default::default()
     });
     let queued = queue.submit(&model, request, vec![JobInput::Path(photo.into())])?;
@@ -102,7 +120,7 @@ async fn an_image_to_3d_job_writes_a_textured_model() -> anyhow::Result<()> {
     assert_eq!(done.report["background_removed"], true);
     assert_eq!(done.report["resolution"], 512);
     let faces = done.report["faces"].as_u64().unwrap_or(0);
-    assert!(faces > 0 && faces <= 1_000_000, "{faces} faces");
+    assert!(faces > 0 && faces <= FACES as u64, "{faces} faces");
     for name in ["model", "mesh", "prepared image", "meta"] {
         let output = done.outputs.iter().find(|o| o.name == name);
         let output = output.ok_or_else(|| anyhow::anyhow!("no {name} output"))?;

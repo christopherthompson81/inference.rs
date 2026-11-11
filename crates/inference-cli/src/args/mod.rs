@@ -413,6 +413,58 @@ pub enum Command {
         #[arg(long, conflicts_with = "vertex_colors")]
         remesh: bool,
 
+        /// Faces the exported mesh is simplified to
+        #[arg(long, default_value_t = inference_jobs::image_to_3d::DECIMATION_TARGET)]
+        faces: usize,
+
+        /// The sparse structure flow's sampling steps (pipeline.json's when unset)
+        #[arg(long)]
+        structure_steps: Option<usize>,
+
+        /// The sparse structure flow's guidance strength (1: none)
+        #[arg(long)]
+        structure_guidance: Option<f64>,
+
+        /// The sparse structure flow's guidance rescale, 0 to 1
+        #[arg(long)]
+        structure_guidance_rescale: Option<f64>,
+
+        /// The sparse structure flow's timestep shift (1: uniform)
+        #[arg(long)]
+        structure_rescale_t: Option<f64>,
+
+        /// The shape flows' sampling steps (pipeline.json's when unset)
+        #[arg(long)]
+        shape_steps: Option<usize>,
+
+        /// The shape flows' guidance strength (1: none)
+        #[arg(long)]
+        shape_guidance: Option<f64>,
+
+        /// The shape flows' guidance rescale, 0 to 1
+        #[arg(long)]
+        shape_guidance_rescale: Option<f64>,
+
+        /// The shape flows' timestep shift (1: uniform)
+        #[arg(long)]
+        shape_rescale_t: Option<f64>,
+
+        /// The texture flow's sampling steps (pipeline.json's when unset)
+        #[arg(long)]
+        texture_steps: Option<usize>,
+
+        /// The texture flow's guidance strength (1: none)
+        #[arg(long)]
+        texture_guidance: Option<f64>,
+
+        /// The texture flow's guidance rescale, 0 to 1
+        #[arg(long)]
+        texture_guidance_rescale: Option<f64>,
+
+        /// The texture flow's timestep shift (1: uniform)
+        #[arg(long)]
+        texture_rescale_t: Option<f64>,
+
         /// The TRELLIS.2-4B folder; fetched from microsoft/TRELLIS.2-4B when unset
         #[arg(long)]
         trellis2: Option<PathBuf>,

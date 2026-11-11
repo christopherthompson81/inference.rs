@@ -12,6 +12,7 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, StandardNormal};
 
+use super::bake;
 use super::decoder::{SHAPE_DECODER, ShapeDecoder, TEXTURE_DECODER, dual_grid};
 use super::glb::{Pbr, sample_attributes};
 use super::mesh::{Mesh, dual_grid_mesh};
@@ -21,7 +22,6 @@ use super::shape_flow::{
 };
 use super::structure::{STRUCTURE_DECODER, StructureDecoder, grid_cells, occupied};
 use super::{PIPELINE_FILE, crop_object};
-use super::{bake, cleanup};
 use crate::dinov3::{Dinov3, Dinov3Spec};
 use crate::jovox::Rgba;
 use crate::progress::{Progress, check};
@@ -168,10 +168,10 @@ impl Generated {
     }
 }
 
-/// The extracted `mesh` as the vertex-colored export takes it: the export's cleanup ([`bake::clean`]), simplifying
-/// on `device`; it needs only the shape, so it can run beside the texture stage.
-pub fn vertex_mesh(mesh: &Mesh, device: &Device) -> Result<Mesh> {
-    Ok(bake::clean(mesh, cleanup::SIMPLIFY_TARGET, device)?.0)
+/// The extracted `mesh` as the vertex-colored export takes it: the export's cleanup ([`bake::clean`]), simplifying to
+/// `faces` on `device`; it needs only the shape, so it can run beside the texture stage.
+pub fn vertex_mesh(mesh: &Mesh, faces: usize, device: &Device) -> Result<Mesh> {
+    Ok(bake::clean(mesh, faces, device)?.0)
 }
 
 struct Stats {
@@ -296,25 +296,91 @@ fn condition(
     encoder.forward(&Tensor::from_vec(data, (1, 3, res, res), device)?)
 }
 
+/// Sampling steps past which a flow's sampler is refused
+pub const MAX_STEPS: usize = 100;
+
+/// Changes to one flow's sampler; unset fields keep `pipeline.json`'s values.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SamplerChoice {
+    pub steps: Option<usize>,
+    /// Classifier-free guidance strength (1: none)
+    pub guidance_strength: Option<f64>,
+    /// How far the guided prediction is rescaled toward the conditioned one's spread, 0 to 1
+    pub guidance_rescale: Option<f64>,
+    /// The timestep schedule's shift (1: uniform)
+    pub rescale_t: Option<f64>,
+}
+
+impl SamplerChoice {
+    /// What is wrong with it, if anything
+    pub fn problem(&self) -> Option<String> {
+        if let Some(steps) = self.steps
+            && !(1..=MAX_STEPS).contains(&steps)
+        {
+            return Some(format!("steps must be 1 to {MAX_STEPS}, got {steps}"));
+        }
+        if let Some(g) = self.guidance_strength
+            && !(g.is_finite() && g >= 0.0)
+        {
+            return Some(format!("guidance strength must be 0 or more, got {g}"));
+        }
+        if let Some(r) = self.guidance_rescale
+            && !(0.0..=1.0).contains(&r)
+        {
+            return Some(format!("guidance rescale must be 0 to 1, got {r}"));
+        }
+        if let Some(t) = self.rescale_t
+            && !(t.is_finite() && t > 0.0)
+        {
+            return Some(format!("rescale_t must be above 0, got {t}"));
+        }
+        None
+    }
+
+    fn apply(&self, base: SamplerParams) -> SamplerParams {
+        SamplerParams {
+            steps: self.steps.unwrap_or(base.steps),
+            guidance_strength: self.guidance_strength.unwrap_or(base.guidance_strength),
+            guidance_rescale: self.guidance_rescale.unwrap_or(base.guidance_rescale),
+            rescale_t: self.rescale_t.unwrap_or(base.rescale_t),
+            ..base
+        }
+    }
+}
+
+/// What a run samples: the variant, the seed that draws every stage's noise, and each flow's sampler changes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Settings {
+    pub variant: Variant,
+    pub seed: u64,
+    pub structure: SamplerChoice,
+    pub shape: SamplerChoice,
+    pub texture: SamplerChoice,
+}
+
+impl Settings {
+    /// `variant` and `seed` with the samplers as `pipeline.json` has them
+    pub fn new(variant: Variant, seed: u64) -> Self {
+        Self {
+            variant,
+            seed,
+            structure: SamplerChoice::default(),
+            shape: SamplerChoice::default(),
+            texture: SamplerChoice::default(),
+        }
+    }
+}
+
 /// The object in `image` (with transparency: its background already removed) as a mesh with PBR vertex attributes.
-/// The flows run in bf16 and the decoders in f16 on a GPU, all in f32 on the CPU; `seed` draws every stage's noise.
+/// The flows run in bf16 and the decoders in f16 on a GPU, all in f32 on the CPU.
 pub fn generate(
     paths: &Trellis2Paths,
     image: &Rgba,
-    variant: Variant,
-    seed: u64,
+    settings: &Settings,
     progress: &dyn Progress,
     device: &Device,
 ) -> Result<Generated> {
-    generate_with(
-        paths,
-        image,
-        variant,
-        seed,
-        progress,
-        device,
-        &mut |_, _| {},
-    )
+    generate_with(paths, image, settings, progress, device, &mut |_, _| {})
 }
 
 /// [`generate`], handing `shape_ready` the extracted mesh and its resolution before the texture stage, so work on the
@@ -322,8 +388,7 @@ pub fn generate(
 pub fn generate_with(
     paths: &Trellis2Paths,
     image: &Rgba,
-    variant: Variant,
-    seed: u64,
+    settings: &Settings,
     progress: &dyn Progress,
     device: &Device,
     shape_ready: &mut dyn FnMut(&Mesh, usize),
@@ -341,7 +406,8 @@ pub fn generate_with(
         progress,
     };
     let stats = stats(&paths.trellis2)?;
-    let mut rng = StdRng::seed_from_u64(seed);
+    let variant = settings.variant;
+    let mut rng = StdRng::seed_from_u64(settings.seed);
 
     progress.stage("condition", 0);
     let crop = crop_object(image)?;
@@ -368,7 +434,7 @@ pub fn generate_with(
             name: "structure",
             file: STRUCTURE_FLOW_FILE,
             spec: STRUCTURE_FLOW,
-            params: STRUCTURE_SAMPLER,
+            params: settings.structure.apply(STRUCTURE_SAMPLER),
         },
         &cond_low,
         &grid,
@@ -400,7 +466,7 @@ pub fn generate_with(
         name: "shape",
         file,
         spec: SHAPE_FLOW_1024,
-        params: SHAPE_SAMPLER,
+        params: settings.shape.apply(SHAPE_SAMPLER),
     };
     let (resolution, cond) = match (&cond_high, variant) {
         (Some(high), Variant::Res1024) => (HIGH, high),
@@ -467,7 +533,7 @@ pub fn generate_with(
             name: "texture",
             file: texture_file,
             spec: TEXTURE_FLOW,
-            params: TEXTURE_SAMPLER,
+            params: settings.texture.apply(TEXTURE_SAMPLER),
         },
         cond,
         &cells,

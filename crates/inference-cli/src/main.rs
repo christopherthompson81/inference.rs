@@ -265,6 +265,19 @@ async fn main() -> Result<()> {
             vertex_colors,
             texture_size,
             remesh,
+            faces,
+            structure_steps,
+            structure_guidance,
+            structure_guidance_rescale,
+            structure_rescale_t,
+            shape_steps,
+            shape_guidance,
+            shape_guidance_rescale,
+            shape_rescale_t,
+            texture_steps,
+            texture_guidance,
+            texture_guidance_rescale,
+            texture_rescale_t,
             trellis2,
             trellis_large,
             dinov3,
@@ -274,7 +287,8 @@ async fn main() -> Result<()> {
         } => {
             use inference_jobs::image_to_3d::Variant;
             use inference_jobs::image_to_3d::{
-                BakeOptions, ImageTo3dOptions, NoProgress, fetch_models, generate_3d_on,
+                BakeOptions, FACES_RANGE, ImageTo3dOptions, NoProgress, SamplerChoice, Settings,
+                fetch_models, generate_3d_on,
             };
             use inference_jobs::voxels::needs_background_removal;
             let variant = Variant::parse(&variant).ok_or_else(|| {
@@ -282,9 +296,46 @@ async fn main() -> Result<()> {
                     "--variant must be 1024-cascade, 1536-cascade, 1024 or 512, got `{variant}`"
                 )
             })?;
+            let settings = Settings {
+                structure: SamplerChoice {
+                    steps: structure_steps,
+                    guidance_strength: structure_guidance,
+                    guidance_rescale: structure_guidance_rescale,
+                    rescale_t: structure_rescale_t,
+                },
+                shape: SamplerChoice {
+                    steps: shape_steps,
+                    guidance_strength: shape_guidance,
+                    guidance_rescale: shape_guidance_rescale,
+                    rescale_t: shape_rescale_t,
+                },
+                texture: SamplerChoice {
+                    steps: texture_steps,
+                    guidance_strength: texture_guidance,
+                    guidance_rescale: texture_guidance_rescale,
+                    rescale_t: texture_rescale_t,
+                },
+                ..Settings::new(variant, seed)
+            };
+            for (stage, choice) in [
+                ("structure", settings.structure),
+                ("shape", settings.shape),
+                ("texture", settings.texture),
+            ] {
+                if let Some(problem) = choice.problem() {
+                    anyhow::bail!("--{stage}-*: {problem}");
+                }
+            }
+            if !FACES_RANGE.contains(&faces) {
+                anyhow::bail!(
+                    "--faces must be in {}..={}",
+                    FACES_RANGE.start(),
+                    FACES_RANGE.end()
+                );
+            }
             let options = ImageTo3dOptions {
-                variant,
-                seed,
+                settings,
+                faces,
                 remove_background,
                 bake: (!vertex_colors).then(|| BakeOptions {
                     texture_size,

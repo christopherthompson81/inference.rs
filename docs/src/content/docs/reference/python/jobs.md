@@ -10,10 +10,14 @@ TRELLIS.2's textured mesh of the object in the job's one image.
 
 | Field | Type | Default |
 | --- | --- | --- |
+| `faces` | `int \| None` | optional |
 | `placement` | `Placement \| None` | optional |
 | `remesh` | `bool \| None` | optional |
 | `remove_background` | `bool \| None` | optional |
 | `seed` | `int \| None` | optional |
+| `shape_sampler` | `Trellis2Sampler \| None` | optional |
+| `structure_sampler` | `Trellis2Sampler \| None` | optional |
+| `texture_sampler` | `Trellis2Sampler \| None` | optional |
 | `texture_size` | `int \| None` | optional |
 | `variant` | `Trellis2Variant \| None` | optional |
 | `vertex_colors` | `bool \| None` | optional |
@@ -247,6 +251,18 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `SceneKind.OUTDOOR` | `'outdoor'` |
 
 
+## `Trellis2Sampler`
+
+Changes to one TRELLIS.2 flow's sampler; unset fields keep the checkpoint's `pipeline.json` values.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `guidance_rescale` | `float \| None` | optional |
+| `guidance_strength` | `float \| None` | optional |
+| `rescale_t` | `float \| None` | optional |
+| `steps` | `int \| None` | optional |
+
+
 ## `Trellis2Variant`
 
 Which resolutions an image-to-3D job runs TRELLIS.2 at.
@@ -257,6 +273,8 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | --- | --- |
 | `Trellis2Variant._1024_CASCADE` | `'1024_cascade'` |
 | `Trellis2Variant._512` | `'512'` |
+| `Trellis2Variant._1024` | `'1024'` |
+| `Trellis2Variant._1536_CASCADE` | `'1536_cascade'` |
 
 
 ## `VoxelsJob`
