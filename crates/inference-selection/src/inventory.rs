@@ -464,7 +464,8 @@ struct GgufFacts {
     kv_profile: Option<String>,
 }
 
-// a GGUF's shape as the loaded model reports it: block_count counts the MTP layers, a hybrid may list KV heads per layer
+// a GGUF's shape as the loaded model reports it: block_count counts the MTP layers, a hybrid may list KV heads per
+// layer; none for a model without attention heads (Mamba, RWKV), which has no KV cache to profile
 fn gguf_kv_fingerprint(metadata: &HashMap<String, Value>, arch: &str) -> Option<KvFingerprint> {
     let count = |key: &str| {
         let value = metadata.get(&format!("{arch}.{key}"))?;
@@ -475,9 +476,9 @@ fn gguf_kv_fingerprint(metadata: &HashMap<String, Value>, arch: &str) -> Option<
         .map(|n| n as usize)
     };
     let hidden = count("embedding_length")?;
-    let heads = count("attention.head_count")?;
+    let heads = count("attention.head_count").filter(|&h| h > 0)?;
     Some(KvFingerprint {
-        layers: count("block_count")? - count("nextn_predict_layers").unwrap_or(0),
+        layers: count("block_count")?.checked_sub(count("nextn_predict_layers").unwrap_or(0))?,
         hidden,
         heads,
         kv_heads: count("attention.head_count_kv").unwrap_or(heads),
@@ -493,7 +494,7 @@ fn config_kv_fingerprint(config: &serde_json::Value) -> Option<KvFingerprint> {
     };
     let count = |key: &str| text[key].as_u64().map(|n| n as usize);
     let hidden = count("hidden_size")?;
-    let heads = count("num_attention_heads")?;
+    let heads = count("num_attention_heads").filter(|&h| h > 0)?;
     Some(KvFingerprint {
         layers: count("num_hidden_layers")?,
         hidden,
@@ -922,6 +923,16 @@ mod tests {
                 ("qwen3.attention.head_count", Value::U32(16)),
             ],
         );
+        // a state-space model stores no attention heads: no KV cache to profile
+        write_gguf(
+            &dir.path().join("state-space-Q8_0.gguf"),
+            &[
+                ("general.architecture", text("mamba")),
+                ("mamba.block_count", Value::U32(24)),
+                ("mamba.embedding_length", Value::U32(768)),
+                ("mamba.attention.head_count", Value::U32(0)),
+            ],
+        );
         let checkpoint = dir.path().join("small-dense");
         fs::create_dir(&checkpoint).unwrap();
         fs::write(
@@ -939,6 +950,7 @@ mod tests {
         assert_eq!(profile("hybrid-IQ4_XS.gguf"), Some("Qwen3.8 27B"));
         assert_eq!(profile("small-dense"), Some("Qwen3 0.6B"));
         assert_eq!(profile("unmeasured-Q8_0.gguf"), None);
+        assert_eq!(profile("state-space-Q8_0.gguf"), None);
     }
 
     #[test]

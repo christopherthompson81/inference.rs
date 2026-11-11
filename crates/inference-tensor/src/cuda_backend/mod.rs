@@ -551,6 +551,11 @@ impl Map1 for IndexSelect<'_> {
         let src_dim_size = src_l.dims()[self.2];
         let ids_dim_size = ids_shape.elem_count();
         let dst_el = ids_shape.elem_count() * left_size * right_size;
+        // nothing selected: an empty grid is not a launch CUDA accepts
+        if dst_el == 0 {
+            // SAFETY: there is nothing to initialize
+            return Ok(unsafe { dev.alloc::<T>(0)? });
+        }
         let cfg = LaunchConfig::for_num_elems(dst_el as u32);
         let func = dev.get_or_load_func(&kernel_name::<T>(name), &kernels::INDEXING)?;
         // SAFETY: Set later by running the kernel.
