@@ -70,8 +70,8 @@ export interface ReconstructOptions {
   placement: Placement | null;
 }
 
-/** TRELLIS.2's resolutions: shape at 512 then 1024 on the upsampled cells, or everything at 512. */
-export type Trellis2Variant = "1024_cascade" | "512";
+/** TRELLIS.2's resolutions: shape at 512 then 1024 or 1536 on the upsampled cells, or everything at 1024 or 512. */
+export type Trellis2Variant = "1024_cascade" | "1536_cascade" | "1024" | "512";
 
 export interface ImageTo3dOptions {
   seed: number | null;

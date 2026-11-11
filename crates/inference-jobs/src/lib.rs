@@ -420,6 +420,12 @@ pub enum Trellis2Variant {
     /// Everything at 512: faster, coarser
     #[serde(rename = "512")]
     Res512,
+    /// Everything at 1024, on a 64^3 structure
+    #[serde(rename = "1024")]
+    Res1024,
+    /// Shape at 512, then again at 1536 (lower when that is 49152 cells or more); texture at 1024
+    #[serde(rename = "1536_cascade")]
+    Cascade1536,
 }
 
 /// TRELLIS.2's textured mesh of the object in the job's one image.
@@ -1381,6 +1387,8 @@ fn image_to_3d_work(config: &JobsConfig, job: ImageTo3dJob) -> Result<(Prepare, 
         variant: match job.variant.unwrap_or_default() {
             Trellis2Variant::Cascade1024 => Variant::Cascade1024,
             Trellis2Variant::Res512 => Variant::Res512,
+            Trellis2Variant::Res1024 => Variant::Res1024,
+            Trellis2Variant::Cascade1536 => Variant::Cascade1536,
         },
         seed: job.seed.unwrap_or(0),
         remove_background: job.remove_background.unwrap_or(false),

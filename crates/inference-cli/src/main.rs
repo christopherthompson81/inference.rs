@@ -277,11 +277,11 @@ async fn main() -> Result<()> {
                 BakeOptions, ImageTo3dOptions, NoProgress, fetch_models, generate_3d_on,
             };
             use inference_jobs::voxels::needs_background_removal;
-            let variant = match variant.as_str() {
-                "1024-cascade" | "1024_cascade" => Variant::Cascade1024,
-                "512" => Variant::Res512,
-                other => anyhow::bail!("--variant must be 1024-cascade or 512, got `{other}`"),
-            };
+            let variant = Variant::parse(&variant).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--variant must be 1024-cascade, 1536-cascade, 1024 or 512, got `{variant}`"
+                )
+            })?;
             let options = ImageTo3dOptions {
                 variant,
                 seed,

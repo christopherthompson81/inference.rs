@@ -392,7 +392,9 @@ pub enum Command {
         #[arg(long)]
         out: PathBuf,
 
-        /// `1024-cascade` (shape at 512, then 1024; texture at 1024) or `512` (faster, coarser)
+        /// `1024-cascade` (shape at 512, then 1024; texture at 1024), `1536-cascade` (shape at 512, then 1536, lower
+        /// when that is 49152 cells or more; texture at 1024), `1024` (everything at 1024 on a 64^3 structure) or `512`
+        /// (faster, coarser)
         #[arg(long, default_value = "1024-cascade")]
         variant: String,
 

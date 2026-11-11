@@ -220,11 +220,7 @@ pub fn generate_3d_on(
     std::fs::write(out_dir.join(MESH_FILE), mesh.to_ply())?;
     let export_seconds = export.elapsed().as_secs_f64();
     let report = ImageTo3dReport {
-        variant: match options.variant {
-            Variant::Res512 => "512",
-            Variant::Cascade1024 => "1024_cascade",
-        }
-        .to_string(),
+        variant: options.variant.name().to_string(),
         resolution: out.resolution,
         seed: options.seed,
         background_removed: removed,

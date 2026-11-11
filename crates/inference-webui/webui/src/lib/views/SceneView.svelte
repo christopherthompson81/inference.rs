@@ -352,6 +352,8 @@
                 <span class="text-[11px] text-gray-500">Resolution</span>
                 <select class={field} bind:value={variant} disabled={busy}>
                   <option value="1024_cascade">1024 (512, then 1024)</option>
+                  <option value="1536_cascade">1536 (512, then 1536; slower, finer)</option>
+                  <option value="1024">1024 (direct)</option>
                   <option value="512">512 (faster, coarser)</option>
                 </select>
               </label>

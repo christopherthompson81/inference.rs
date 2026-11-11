@@ -516,3 +516,48 @@ large chart takes one of the fragments around it a round. CuMesh runs the same r
 - Cancel never reached the export (it is checked between generation steps). `bake::prepare` now takes a stop check
   (the job's cancel): between its steps, in every clustering round and incremental round, and in xatlas through its
   progress callback, whose false return stops it (`inference_xatlas::STOPPED`; a case checks it gives up).
+
+## Run 23 - 2026-11-11
+
+Question: a server job on a photo of a standing person (background removed by BiRefNet, `1024_cascade`, seed 0) came
+out noticeably darker than the photo. Is that our texture stage, the export, or the model?
+
+Commands: `full_ref.py prepared.png ref_s{0,1,2}.safetensors 1024_cascade {seed}` (the PyTorch reference on the job's
+prepared image) and `inference image-to-3d --image prepared.png --vertex-colors --seed {seed}`; means over the mesh
+vertices (ours: `COLOR_0` back to sRGB, `_METALLIC`, `_ROUGHNESS`); the photo's mean over its alpha > 0.5 pixels.
+
+| seed | reference base color | metallic | roughness | ours base color | metallic | roughness |
+|---|---|---|---|---|---|---|
+| 0 | 0.163 0.135 0.128 | 0.275 | 0.846 | 0.172 0.132 0.116 | 0.012 | 0.683 |
+| 1 | 0.208 0.172 0.143 | 0.003 | 0.795 | 0.239 0.202 0.187 | 0.002 | 0.817 |
+| 2 | 0.185 0.164 0.157 | 0.021 | 0.805 | 0.176 0.148 0.135 | 0.004 | 0.800 |
+
+The photo's mean is 0.318 0.279 0.249. The job's GLB writes the base color as the reference's `to_glb` does (attributes
+times 255 into the PNG, read as sRGB); a flat-lit render of it shows the same dark clothing.
+
+Finding: the base color is the model's albedo estimate with the photo's lighting taken out, about half the photo's
+brightness, in the reference as in ours; metallic swings from seed to seed in the reference too (0.003 to 0.275). Not a
+port or export bug. What we control is the viewer: three.js's RoomEnvironment with neutral tone mapping shows a 0.17
+albedo dark.
+
+## Run 24 - 2026-11-11
+
+Question: do the reference's other two pipeline types, `1024` (shape and texture at 1024 on a 64^3 structure) and
+`1536_cascade` (512, then 1536 on the upsampled cells, stepping down by 128 while 49152 cells or more; texture with the
+1024 model), run here, and at what cost?
+
+Commands: `measure.sh v_<variant> --variant <variant>` on the robot (opaque photo, BiRefNet), 1024 / 1536-cascade /
+1024-cascade; the GPU figures include the LAN server's idle 1.1 GB. Then `time_ref.py prepared.png /dev/null
+1536_cascade 0` for the reference's time.
+
+| variant | latent cells | resolution | extracted faces | total | GPU peak |
+|---|---|---|---|---|---|
+| 1024 | 8154 | 1024 | 4.16 M | 37.6 s | 7.5 GB |
+| 1536-cascade | 18728 | 1536 (under the cap) | 9.74 M | 97.6 s | 10.5 GB |
+| 1024-cascade | 8201 | 1024 | 4.37 M | 40.8 s | 7.6 GB |
+
+The 1536 run's GPU memory sits flat from ~12 s to ~59 s: the second shape flow on 18728 cells, about 5.2x the 1024
+cascade's attention work (cells squared). The reference's `1536_cascade` failed with CUDA out of memory on the 24 GB
+3090, so there is no reference time to set beside ours.
+
+Next: the variants are in the CLI, the job API and the web UI's select.
