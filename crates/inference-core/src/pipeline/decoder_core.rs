@@ -158,7 +158,7 @@ impl DecoderCore {
             &args.chat_template,
             args.generation_config.as_ref(),
             &args.tokenizer,
-        );
+        )?;
 
         Ok(Self {
             metadata: Arc::new(GeneralMetadata {

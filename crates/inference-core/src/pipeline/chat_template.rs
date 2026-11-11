@@ -39,7 +39,7 @@ pub fn calculate_eos_tokens(
     chat_template: &ChatTemplate,
     gen_conf: Option<&GenerationConfig>,
     tokenizer: &Tokenizer,
-) -> Vec<u32> {
+) -> anyhow::Result<Vec<u32>> {
     let mut eos_tok_ids = chat_template.eos_tok().map(|x| vec![x]).unwrap_or_default();
     let mut bos_tok_ids = chat_template.bos_tok().map(|b| vec![b]).unwrap_or_default();
 
@@ -133,9 +133,16 @@ pub fn calculate_eos_tokens(
                     _ => None,
                 }
             });
-        eos_toks.push(id.unwrap_or_else(|| panic!("Unable to extract `{eos_tok}` EOS token.")));
+        match id {
+            Some(id) => eos_toks.push(id),
+            None => warn!("Ignoring end-of-sequence token `{eos_tok}`: not in the tokenizer"),
+        }
     }
-    eos_toks
+    anyhow::ensure!(
+        !eos_toks.is_empty() || eos_render.is_empty(),
+        "none of the end-of-sequence tokens [{eos_render}] is in the tokenizer"
+    );
+    Ok(eos_toks)
 }
 
 #[derive(Debug, Clone, Default, inference_json::FromJson)]
@@ -382,7 +389,10 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(calculate_eos_tokens(&template, None, &tokenizer), vec![1]);
+        assert_eq!(
+            calculate_eos_tokens(&template, None, &tokenizer).unwrap(),
+            vec![1]
+        );
     }
 
     // a byte-level vocabulary keys "\n\n" as "ĊĊ": the generation config's end token is found by its key
@@ -395,7 +405,7 @@ mod tests {
         let gen_conf: GenerationConfig =
             serde_json::from_value(serde_json::json!({ "eos_token_id": 3 })).unwrap();
         assert_eq!(
-            calculate_eos_tokens(&template, Some(&gen_conf), &tokenizer),
+            calculate_eos_tokens(&template, Some(&gen_conf), &tokenizer).unwrap(),
             vec![3]
         );
     }
