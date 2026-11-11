@@ -56,8 +56,8 @@ extern "C" __global__ void ln_mod_bf16(const bf16* x, const float* w, const floa
 // one warp a (batch, token, head) row of `d` (a multiple of 64): read at `src + token_row * token_stride + offset +
 // head * d` plus the linear's `bias` there (rounded), F.normalize'd times `gain` [heads, d] (when given) and rounded, then rotated by `cos` / `sin` [tokens, d/2]
 // (when given, adjacent channel pairs) and rounded, written to `out` [batch, heads, tokens, d]
-extern "C" __global__ void head_norm_rope_bf16(const bf16* src, const bf16* bias, long token_stride, long offset,
-                                               const float* gain,
+extern "C" __global__ void head_norm_rope_bf16(const bf16* src, const bf16* bias, const float* inv_scale,
+                                               long token_stride, long offset, const float* gain,
                                                const float* cos_t, const float* sin_t, bf16* out, int batch,
                                                int tokens, int heads, int d, float eps) {
     const long warp = ((long)blockIdx.x * blockDim.x + threadIdx.x) >> 5;
@@ -90,17 +90,21 @@ extern "C" __global__ void head_norm_rope_bf16(const bf16* src, const bf16* bias
             v[k + 1] = e * sn + od * c;
         }
     }
-    for (int k = 0; k < per; k++) o[lane * per + k] = b(v[k]);
+    // values handed to attention divided by a power of two, exactly (`value_scale_bf16`)
+    const float is = inv_scale ? *inv_scale : 1.0f;
+    for (int k = 0; k < per; k++) o[lane * per + k] = b(v[k] * is);
 }
 
-// x + (y + bias) * gate in bf16 (each product and sum rounded), the gate read from row `row / rows_per_batch` of `mod` at
+// x + (y [times scale] + bias) * gate in bf16 (each product and sum rounded), the gate read from row `row / rows_per_batch` of `mod` at
 // `gate_at`; x + y when `mod` is null
-extern "C" __global__ void gate_residual_bf16(const bf16* x, const bf16* y, const bf16* bias, const bf16* mod,
-                                              int mod_stride, int gate_at,
+extern "C" __global__ void gate_residual_bf16(const bf16* x, const bf16* y, const bf16* bias, const float* scale,
+                                              const bf16* mod, int mod_stride, int gate_at,
                                               bf16* out, long n, int c, int rows_per_batch) {
     const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    float yv = f(__hadd(y[i], bias[i % c]));
+    // y from attention over scaled values is multiplied back, exactly
+    const bf16 yi = scale ? b(f(y[i]) * *scale) : y[i];
+    float yv = f(__hadd(yi, bias[i % c]));
     if (mod) {
         const long row = i / c;
         yv = f(b(yv * f(mod[(row / rows_per_batch) * (long)mod_stride + gate_at + i % c])));
@@ -117,4 +121,42 @@ extern "C" __global__ void bias_gelu_bf16(const bf16* x, const bf16* bias, long 
     const float cube = v * v * v;
     const float alpha = fmaf(0.044715f, cube, v);
     out[i] = b(0.5f * v * (1.0f + tanhf((float)(M_2_SQRTPI * M_SQRT1_2) * alpha)));
+}
+
+// fattn sums softmax-weighted values in f16 before normalizing, which a diffuse row over many keys can overflow; these
+// two find a power of two to divide the values by: the largest per-(batch, head, channel) sum of |v| over the keys,
+// over `limit`, rounded up to a power of two (at least 1). The values are the attention input head_norm_rope_bf16
+// writes: src + bias, rounded, at `offset` of each token row.
+extern "C" __global__ void value_abs_sums_bf16(const bf16* src, const bf16* bias, long token_stride, long offset,
+                                               int tokens, int width, int tokens_per_block, float* sums) {
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= width) return;
+    const int bi = blockIdx.z;
+    const int t0 = blockIdx.y * tokens_per_block;
+    const int t1 = min(t0 + tokens_per_block, tokens);
+    const bf16 bc = bias[offset + c];
+    float sum = 0.0f;
+    for (int t = t0; t < t1; t++) sum += fabsf(f(__hadd(src[((long)bi * tokens + t) * token_stride + offset + c], bc)));
+    atomicAdd(sums + (long)bi * width + c, sum);
+}
+
+// one block: out[0] the scale, out[1] its inverse
+extern "C" __global__ void value_scale_finish(const float* sums, int n, float limit, float* out) {
+    __shared__ float shared[32];
+    float m = 0.0f;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) m = fmaxf(m, sums[i]);
+    for (int o = 16; o > 0; o >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, o));
+    if ((threadIdx.x & 31) == 0) shared[threadIdx.x >> 5] = m;
+    __syncthreads();
+    if (threadIdx.x != 0) return;
+    for (int w = 0; w < (int)(blockDim.x >> 5); w++) m = fmaxf(m, shared[w]);
+    const float x = m / limit;
+    int k = 0;
+    if (x > 1.0f) {
+        int e;
+        const float mant = frexpf(x, &e);
+        k = mant == 0.5f ? e - 1 : e;
+    }
+    out[0] = ldexpf(1.0f, k);
+    out[1] = ldexpf(1.0f, -k);
 }

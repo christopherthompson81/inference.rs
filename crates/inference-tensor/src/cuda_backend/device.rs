@@ -1005,8 +1005,23 @@ mod tests {
 
     crate::gpu_cases!(
         cuda_cases,
-        [a_tensor_dropped_on_a_thread_without_a_context_frees_cleanly]
+        [
+            a_tensor_dropped_on_a_thread_without_a_context_frees_cleanly,
+            selecting_no_rows_gives_an_empty_tensor
+        ]
     );
+
+    fn selecting_no_rows_gives_an_empty_tensor() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let rows = Tensor::zeros((4, 3), DType::F16, &device)?;
+        let none = Tensor::from_vec(Vec::<u32>::new(), 0, &device)?;
+        let picked = rows.index_select(&none, 0)?;
+        assert_eq!(picked.dims(), [0, 3]);
+        assert!(picked.to_vec2::<half::f16>()?.is_empty());
+        Ok(())
+    }
 
     // An engine closed from its embedder's thread drops its tensors where no context is current: their frees bind it
     // rather than fail with CUDA_ERROR_INVALID_CONTEXT, which the context keeps and later calls report.

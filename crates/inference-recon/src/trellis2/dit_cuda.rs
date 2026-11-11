@@ -13,6 +13,8 @@ static IMAGE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dit.fatbin"));
 const LN_BLOCK: u32 = 256;
 const BLOCK: u32 = 256;
 const WARP: u32 = 32;
+// tokens one thread of `value_abs_sums_bf16` sums before adding its partial sum to the column's
+const SUM_TOKENS: u32 = 256;
 // a null device pointer, for an input a kernel goes without
 const NULL: u64 = 0;
 
@@ -61,6 +63,74 @@ fn output(
 // the modulation's row stride: zero when one row serves the whole batch, as a broadcast does
 fn mod_stride(m: &Tensor, c: usize) -> Result<i32> {
     Ok(if m.dim(0)? == 1 { 0 } else { (6 * c) as i32 })
+}
+
+// a device f32 1.0, for a scale left out
+fn unit(dev: &inference_tensor::cuda_backend::CudaDevice) -> Result<Tensor> {
+    Tensor::ones(1, DType::F32, &inference_tensor::Device::Cuda(dev.clone()))
+}
+
+/// The power of two part `part`'s values (as [`heads`] makes them from `src` `[batch, tokens, parts, heads, d]` and
+/// `bias`) are divided by before attention: f32 `[scale, 1 / scale]` on the device, no sync. fattn sums the
+/// softmax-weighted values in f16 before normalizing, so a row spread over many keys can pass f16's 65504; the scale is
+/// the largest per-(batch, head, channel) sum of |v| over the tokens, over `limit`, rounded up to a power of two (1 when
+/// it fits), which divides and multiplies back exactly.
+pub fn value_scale(src: &Tensor, bias: &Tensor, part: usize, limit: f32) -> Result<Tensor> {
+    let (batch, tokens, parts, heads, d) = src.dims5()?;
+    let dev = cuda_device(src)?;
+    let src = src.contiguous()?;
+    view!(src, bf16, sg, sv);
+    view!(bias, bf16, bg, bv);
+    let width = heads * d;
+    let mut sums = dev.alloc_zeros::<f32>(batch * width)?;
+    let (token_stride, offset) = ((parts * width) as i64, (part * width) as i64);
+    let cfg = LaunchConfig {
+        grid_dim: (
+            (width as u32).div_ceil(BLOCK),
+            (tokens as u32).div_ceil(SUM_TOKENS),
+            batch as u32,
+        ),
+        block_dim: (BLOCK, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let (tokens32, width32, per) = (tokens as i32, width as i32, SUM_TOKENS as i32);
+    launch!(
+        dev,
+        "value_abs_sums_bf16",
+        cfg,
+        &sv,
+        &bv,
+        &token_stride,
+        &offset,
+        &tokens32,
+        &width32,
+        &per,
+        &mut sums
+    );
+    drop((sg, bg));
+    let mut out = unsafe { dev.alloc::<f32>(2) }?;
+    let one_block = LaunchConfig {
+        grid_dim: (1, 1, 1),
+        block_dim: (BLOCK, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let n = (batch * width) as i32;
+    launch!(
+        dev,
+        "value_scale_finish",
+        one_block,
+        &sums,
+        &n,
+        &limit,
+        &mut out
+    );
+    Ok(Tensor::from((
+        Storage::Cuda(CudaStorage {
+            slice: CudaStorageSlice::F32(out),
+            device: dev,
+        }),
+        inference_tensor::Shape::from(2),
+    )))
 }
 
 fn cuda_device(t: &Tensor) -> Result<inference_tensor::cuda_backend::CudaDevice> {
@@ -140,14 +210,16 @@ pub fn ln_mod(
     Ok(output(&dev, out, (batch, tokens, c)))
 }
 
-/// Part `part` of `src` `[batch, tokens, parts, heads, d]` as `[batch, heads, tokens, d]`: F.normalize'd times
-/// `gain` `[heads, d]` and rounded when given, then rotated by `rope` `(cos, sin)` `[tokens, d/2]` when given.
+/// Part `part` of `src` `[batch, tokens, parts, heads, d]` (plus `bias`) as `[batch, heads, tokens, d]`: F.normalize'd
+/// times `gain` `[heads, d]` and rounded when given, then rotated by `rope` `(cos, sin)` `[tokens, d/2]` when given,
+/// and times `inv_scale` (f32 `[1]`, a power of two: [`value_scale`]'s second value) when given.
 pub fn heads(
     src: &Tensor,
     bias: &Tensor,
     part: usize,
     gain: Option<&Tensor>,
     rope: Option<(&Tensor, &Tensor)>,
+    inv_scale: Option<&Tensor>,
     eps: f32,
 ) -> Result<Tensor> {
     let (batch, tokens, parts, heads, d) = src.dims5()?;
@@ -155,6 +227,9 @@ pub fn heads(
     let src = src.contiguous()?;
     view!(src, bf16, sg, sv);
     view!(bias, bf16, bg, bv);
+    let one = unit(&dev)?;
+    let inv_scale = inv_scale.unwrap_or(&one);
+    view!(inv_scale, f32, ig, iv);
     let mut out = unsafe { dev.alloc::<bf16>(batch * heads * tokens * d) }?;
     let rows = (batch * tokens * heads) as u32;
     let cfg = LaunchConfig {
@@ -179,6 +254,7 @@ pub fn heads(
                 cfg,
                 &sv,
                 &bv,
+                &iv,
                 &token_stride,
                 &offset,
                 &gv,
@@ -201,6 +277,7 @@ pub fn heads(
                 cfg,
                 &sv,
                 &bv,
+                &iv,
                 &token_stride,
                 &offset,
                 &gv,
@@ -222,6 +299,7 @@ pub fn heads(
                 cfg,
                 &sv,
                 &bv,
+                &iv,
                 &token_stride,
                 &offset,
                 &NULL,
@@ -237,15 +315,17 @@ pub fn heads(
         }
         (None, Some(_)) => inference_tensor::bail!("heads rotates only normalized heads"),
     }
-    drop((sg, bg));
+    drop((sg, bg, ig));
     Ok(output(&dev, out, (batch, heads, tokens, d)))
 }
 
-/// `x + (y + bias) * gate` (`gate` chunk `chunk` of `m` `[batch, 6c]`), or `x + (y + bias)` without one, in bf16.
+/// `x + (y * scale + bias) * gate` (`gate` chunk `chunk` of `m` `[batch, 6c]`), or without the gate, in bf16; `scale`
+/// (f32 `[1]`, a power of two) undoes [`value_scale`] on an attention output, and is 1 when not given.
 pub fn residual(
     x: &Tensor,
     y: &Tensor,
     bias: &Tensor,
+    scale: Option<&Tensor>,
     gate: Option<(&Tensor, usize)>,
 ) -> Result<Tensor> {
     let (batch, tokens, c) = x.dims3()?;
@@ -254,6 +334,9 @@ pub fn residual(
     view!(x, bf16, xg, xv);
     view!(y, bf16, yg, yv);
     view!(bias, bf16, bg, bv);
+    let one = unit(&dev)?;
+    let scale = scale.unwrap_or(&one);
+    view!(scale, f32, scg, scv);
     let n = (batch * tokens * c) as i64;
     let mut out = unsafe { dev.alloc::<bf16>(n as usize) }?;
     let cfg = LaunchConfig {
@@ -274,6 +357,7 @@ pub fn residual(
                 &xv,
                 &yv,
                 &bv,
+                &scv,
                 &mv,
                 &stride,
                 &at,
@@ -292,6 +376,7 @@ pub fn residual(
                 &xv,
                 &yv,
                 &bv,
+                &scv,
                 &NULL,
                 &0i32,
                 &0i32,
@@ -302,7 +387,7 @@ pub fn residual(
             );
         }
     }
-    drop((xg, yg, bg));
+    drop((xg, yg, bg, scg));
     Ok(output(&dev, out, (batch, tokens, c)))
 }
 
@@ -337,6 +422,7 @@ mod tests {
             ln_mod_matches_the_ops,
             heads_match_the_ops,
             residual_matches_the_ops,
+            value_scale_is_the_power_of_two_the_sums_need,
             bias_gelu_matches_the_ops
         ]
     );
@@ -434,7 +520,7 @@ mod tests {
                 .to_dtype(DType::BF16)?
         };
         let want = rope.apply(&normed)?.transpose(1, 2)?;
-        let got = heads(&qkv, &bias, 0, Some(&gain), Some((cos, sin)), 1e-12)?;
+        let got = heads(&qkv, &bias, 0, Some(&gain), Some((cos, sin)), None, 1e-12)?;
         assert!(
             worst(&got, &want)? <= TOLERANCE,
             "rotated: {}",
@@ -442,9 +528,18 @@ mod tests {
         );
         let v = qkv_b.narrow(2, 2, 1)?.squeeze(2)?.transpose(1, 2)?;
         assert_eq!(
-            worst(&heads(&qkv, &bias, 2, None, None, 1e-12)?, &v)?,
+            worst(&heads(&qkv, &bias, 2, None, None, None, 1e-12)?, &v)?,
             0.0,
             "v is copied with its bias"
+        );
+        let eighth = Tensor::new(&[0.125f32], &dev)?;
+        assert_eq!(
+            worst(
+                &heads(&qkv, &bias, 2, None, None, Some(&eighth), 1e-12)?,
+                &(&v / 8.0)?
+            )?,
+            0.0,
+            "v divided by a power of two, exactly"
         );
         Ok(())
     }
@@ -460,21 +555,63 @@ mod tests {
         let gate = m.narrow(1, 2 * c, c)?.unsqueeze(1)?;
         let want = (&x + y.broadcast_mul(&gate)?)?;
         assert_eq!(
-            worst(&residual(&x, &y_raw, &bias, Some((&m, 2)))?, &want)?,
+            worst(&residual(&x, &y_raw, &bias, None, Some((&m, 2)))?, &want)?,
             0.0,
             "gated"
         );
         let m1 = m.narrow(0, 0, 1)?;
         let want = (&x + y.broadcast_mul(&m1.narrow(1, 2 * c, c)?.unsqueeze(1)?)?)?;
         assert_eq!(
-            worst(&residual(&x, &y_raw, &bias, Some((&m1, 2)))?, &want)?,
+            worst(&residual(&x, &y_raw, &bias, None, Some((&m1, 2)))?, &want)?,
             0.0,
             "broadcast gate"
         );
         assert_eq!(
-            worst(&residual(&x, &y_raw, &bias, None)?, &(&x + &y)?)?,
+            worst(&residual(&x, &y_raw, &bias, None, None)?, &(&x + &y)?)?,
             0.0,
             "plain"
+        );
+        // an attention output over values divided by 8 comes back multiplied by 8
+        let eight = Tensor::new(&[8f32], &dev)?;
+        let scaled = (&y_raw / 8.0)?;
+        assert_eq!(
+            worst(
+                &residual(&x, &scaled, &bias, Some(&eight), None)?,
+                &(&x + &y)?
+            )?,
+            0.0,
+            "scaled"
+        );
+        Ok(())
+    }
+
+    fn value_scale_is_the_power_of_two_the_sums_need() -> Result<()> {
+        let Some(dev) = device() else { return Ok(()) };
+        let (b, n, h, d) = (2, 300, 3, 64);
+        // part 2 of each token: |v + bias| = 20 everywhere but one channel of batch 1, head 2 at 50: a column sum of
+        // 15000, which over 2048 needs 8 (7.3 rounded up)
+        let mut values = vec![1f32; b * n * 3 * h * d];
+        for bi in 0..b {
+            for t in 0..n {
+                for k in 0..h * d {
+                    let at = ((bi * n + t) * 3 + 2) * h * d + k;
+                    values[at] = if bi == 1 && k == 2 * d + 5 {
+                        49.0
+                    } else {
+                        -21.0
+                    };
+                }
+            }
+        }
+        let qkv = Tensor::from_vec(values, (b, n, 3, h, d), &dev)?.to_dtype(DType::BF16)?;
+        let bias = Tensor::ones(3 * h * d, DType::BF16, &dev)?;
+        let scales = value_scale(&qkv, &bias, 2, 2048.0)?.to_vec1::<f32>()?;
+        assert_eq!(scales, [8.0, 0.125]);
+        let fits = value_scale(&qkv, &bias, 2, 1.0e6)?.to_vec1::<f32>()?;
+        assert_eq!(
+            fits,
+            [1.0, 1.0],
+            "sums under the limit keep the values as they are"
         );
         Ok(())
     }
