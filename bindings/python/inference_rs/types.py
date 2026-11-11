@@ -3390,6 +3390,7 @@ class TranscriptionDelta:
 class TranscriptionRequest:
     """Speech recognition request; the audio itself travels beside it (a multipart `file` over HTTP)."""
 
+    alignment_model: str | None = None
     beam_size: int | None = None
     condition_on_previous_text: bool | None = None
     diarization_model: str | None = None

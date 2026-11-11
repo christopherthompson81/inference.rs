@@ -109,6 +109,7 @@ fn transcription(language: Option<&str>) -> TranscriptionRequest {
         condition_on_previous_text: None,
         diarization_model: None,
         overlap_pass: None,
+        alignment_model: None,
         task: Default::default(),
     }
 }

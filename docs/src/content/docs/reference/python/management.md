@@ -905,6 +905,7 @@ Speech recognition request; the audio itself travels beside it (a multipart `fil
 
 | Field | Type | Default |
 | --- | --- | --- |
+| `alignment_model` | `str \| None` | optional |
 | `beam_size` | `int \| None` | optional |
 | `condition_on_previous_text` | `bool \| None` | optional |
 | `diarization_model` | `str \| None` | optional |

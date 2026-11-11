@@ -46,12 +46,19 @@ impl MultimodalModelLoader for Qwen3AsrLoader {
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
         let cfg = Qwen3AsrConfig::from_json(config)?;
+        let tokenizer = serde_json::from_str::<serde_json::Value>(config)?
+            .get(inference_nn::loaders::ALIGNMENT_TOKENIZER_KEY)
+            .map(|json| {
+                inference_nn::utils::tokenizer::tokenizer_from_bytes(json.to_string().as_bytes())
+            })
+            .transpose()?;
         Ok(Box::new(Qwen3AsrModel::new(
             &cfg,
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
             normal_loading_metadata,
             attention_mechanism,
+            tokenizer,
         )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
@@ -72,8 +79,14 @@ impl MultimodalModelLoader for Qwen3AsrLoader {
     fn prefixer(&self, _config: &str) -> Arc<dyn MultimodalPromptPrefixer> {
         Arc::new(Qwen3AsrPrefixer)
     }
-    fn audio_transcriber(&self, _config: &str) -> Option<AudioTranscriber> {
-        Some(crate::qwen3_asr::transcription::TRANSCRIBER)
+    // the forced aligner times transcripts; it does not write them
+    fn audio_transcriber(&self, config: &str) -> Option<AudioTranscriber> {
+        Qwen3AsrConfig::from_json(config)
+            .is_ok_and(|cfg| cfg.aligner.is_none())
+            .then_some(crate::qwen3_asr::transcription::TRANSCRIBER)
+    }
+    fn aligns_with_own_tokenizer(&self, config: &str) -> bool {
+        Qwen3AsrConfig::from_json(config).is_ok_and(|cfg| cfg.aligner.is_some())
     }
     fn get_device_for_tensor(
         &self,

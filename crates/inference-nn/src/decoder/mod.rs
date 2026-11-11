@@ -1853,6 +1853,29 @@ impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {
         self.forward_embeds(input_ids, self.stack.embed(input_ids)?, ctx)
     }
 
+    /// The normed hidden states `(1, tokens, hidden)` of `xs` (`input_ids`' embeddings, media spliced in) run alone and
+    /// causally, outside the KV cache: a one-off pass beside the sequences the cache serves (a forced aligner's).
+    pub fn hidden_states(
+        &self,
+        input_ids: &Tensor,
+        xs: Tensor,
+        flash_params: &FlashParams,
+    ) -> Result<Tensor> {
+        let (batch, seq_len) = input_ids.dims2()?;
+        let offsets = vec![0; batch];
+        let context_lens = vec![(0, seq_len); batch];
+        let position_ids = vec![seq_len; batch];
+        let mut ctx =
+            ModelForwardContext::new(&offsets, &context_lens, &position_ids, None, flash_params);
+        let masks = self.stack.masks(
+            input_ids,
+            xs.dtype(),
+            &crate::layers::masker::NotACache,
+            true,
+        )?;
+        self.stack.forward(xs, &masks, None, &mut ctx)
+    }
+
     /// Runs the stack over `xs`, embeddings a multimodal model may have spliced media into.
     pub fn forward_embeds(
         &self,

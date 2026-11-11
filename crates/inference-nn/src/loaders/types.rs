@@ -272,7 +272,11 @@ macro_rules! multimodal_loader_table {
             Gemma3n { cli: "gemma3n", hf: "Gemma3nForConditionalGeneration", loader: Gemma3nLoader, feature: "models-gemma" },
             Qwen3VL { cli: "qwen3vl", hf: "Qwen3VLForConditionalGeneration", loader: Qwen3VLLoader, feature: "models-qwen" },
             Qwen3VLMoE { cli: "qwen3vlmoe", hf: "Qwen3VLMoeForConditionalGeneration", loader: Qwen3VLMoELoader, feature: "models-qwen" },
-            Qwen3Asr { cli: "qwen3_asr", hf: "Qwen3ASRForConditionalGeneration", loader: Qwen3AsrLoader, feature: "models-qwen" },
+            Qwen3Asr {
+                cli: "qwen3_asr",
+                hf: "Qwen3ASRForConditionalGeneration" | "Qwen3ASRForTokenClassification",
+                loader: Qwen3AsrLoader, feature: "models-qwen",
+            },
             Qwen2Audio { cli: "qwen2_audio", hf: "Qwen2AudioForConditionalGeneration", loader: Qwen2AudioLoader, feature: "models-qwen" },
             AudioFlamingo3 { cli: "audioflamingo3", hf: "AudioFlamingo3ForConditionalGeneration", loader: AudioFlamingo3Loader, feature: "models-qwen" },
             Qwen3_5 { cli: "qwen3_5", hf: "Qwen3_5ForConditionalGeneration", loader: Qwen3_5Loader, feature: "models-qwen" },

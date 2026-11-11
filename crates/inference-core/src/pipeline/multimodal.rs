@@ -263,7 +263,12 @@ impl MultimodalLoader {
             )?,
             None => config,
         };
-        let config = match paths.get_alignment_tokenizer() {
+        let alignment_tokenizer = paths.get_alignment_tokenizer().or_else(|| {
+            self.inner
+                .aligns_with_own_tokenizer(&config)
+                .then(|| paths.get_tokenizer_filename())
+        });
+        let config = match alignment_tokenizer {
             Some(tokenizer) => inference_nn::loaders::with_alignment_tokenizer(
                 &config,
                 &fs::read_to_string(tokenizer)?,

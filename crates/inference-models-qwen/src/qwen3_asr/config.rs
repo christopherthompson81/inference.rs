@@ -73,6 +73,23 @@ pub struct ThinkerConfig {
     pub audio_config: AudioConfig,
     pub text_config: TextConfig,
     pub audio_token_id: u32,
+    // the original forced aligner's: `qwen3_forced_aligner`, and its head's classes
+    #[serde(default)]
+    pub model_type: Option<String>,
+    #[serde(default)]
+    pub classify_num: Option<usize>,
+}
+
+const ORIGINAL_ALIGNER: &str = "qwen3_forced_aligner";
+const TRANSFORMERS_ALIGNER: &str = "Qwen3ASRForTokenClassification";
+
+/// Qwen3-ForcedAligner's head: `classes` time steps of `segment_ms` each, read at the `timestamp_token` slots after
+/// each word.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct AlignerConfig {
+    pub classes: usize,
+    pub timestamp_token: u32,
+    pub segment_ms: f64,
 }
 
 /// Where a checkpoint keeps the model's weights.
@@ -116,6 +133,14 @@ impl Layout {
             Self::Transformers => "lm_head",
         }
     }
+
+    // the forced aligner's classifier: the original repo's `lm_head` holds the time classes
+    pub fn aligner_head(self) -> &'static str {
+        match self {
+            Self::Original => "thinker.lm_head",
+            Self::Transformers => "score",
+        }
+    }
 }
 
 #[derive(inference_json::FromJson)]
@@ -124,6 +149,11 @@ struct RawConfig {
     audio_config: Option<AudioConfig>,
     text_config: Option<TextConfig>,
     audio_token_id: Option<u32>,
+    #[serde(default)]
+    architectures: Vec<String>,
+    timestamp_token_id: Option<u32>,
+    timestamp_segment_time: Option<f64>,
+    id2label: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// Either layout's config: the original repos nest the model under `thinker_config`, the `-hf` ones keep it flat.
@@ -131,12 +161,21 @@ struct RawConfig {
 pub struct Config {
     pub thinker_config: ThinkerConfig,
     pub layout: Layout,
+    /// Present for Qwen3-ForcedAligner, which times a transcript's words instead of transcribing
+    pub aligner: Option<AlignerConfig>,
 }
 
 impl Config {
     pub fn from_json(json: &str) -> serde_json::Result<Self> {
         use serde::de::Error;
         let raw: RawConfig = serde_json::from_str(json)?;
+        let aligned = raw.timestamp_token_id.zip(raw.timestamp_segment_time);
+        let transformers_classes = raw
+            .architectures
+            .iter()
+            .any(|a| a == TRANSFORMERS_ALIGNER)
+            .then(|| raw.id2label.as_ref().map(serde_json::Map::len))
+            .flatten();
         let (thinker_config, layout) = match raw {
             RawConfig {
                 thinker_config: Some(thinker),
@@ -152,6 +191,8 @@ impl Config {
                     audio_config,
                     text_config,
                     audio_token_id,
+                    model_type: None,
+                    classify_num: None,
                 },
                 Layout::Transformers,
             ),
@@ -161,6 +202,27 @@ impl Config {
                 ));
             }
         };
+        let classes = match layout {
+            Layout::Original => thinker_config
+                .model_type
+                .as_deref()
+                .filter(|t| *t == ORIGINAL_ALIGNER)
+                .and(thinker_config.classify_num),
+            Layout::Transformers => transformers_classes,
+        };
+        let aligner = match (classes, aligned) {
+            (Some(classes), Some((timestamp_token, segment_ms))) => Some(AlignerConfig {
+                classes,
+                timestamp_token,
+                segment_ms,
+            }),
+            (Some(_), None) => {
+                return Err(serde_json::Error::custom(
+                    "Qwen3-ForcedAligner config needs `timestamp_token_id` and `timestamp_segment_time`",
+                ));
+            }
+            (None, _) => None,
+        };
         if thinker_config.text_config.theta().is_none() {
             return Err(serde_json::Error::custom(
                 "Qwen3-ASR text config needs `rope_theta` or `rope_parameters.rope_theta`",
@@ -169,6 +231,7 @@ impl Config {
         Ok(Self {
             thinker_config,
             layout,
+            aligner,
         })
     }
 }

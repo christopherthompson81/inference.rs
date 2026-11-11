@@ -1,6 +1,7 @@
 //! Qwen3-ASR: the AuT audio encoder in front of a dense Qwen3 decoder, whose `<|audio_pad|>` placeholders take the
 //! encoded audio.
 
+pub mod aligner;
 pub mod audio;
 pub mod config;
 pub mod inputs_processor;
@@ -17,6 +18,7 @@ use crate::{
     paged_attention::{AttentionImplementation, ModelConfigMetadata},
     utils::unvarbuilder::UnVarBuilder,
 };
+use aligner::Aligner;
 use audio::AudioEncoder;
 pub use config::Config;
 
@@ -36,26 +38,46 @@ pub struct Qwen3AsrModel {
     audio: AudioEncoder,
     audio_token: u32,
     layout: config::Layout,
+    audio_config: config::AudioConfig,
+    // Qwen3-ForcedAligner's time classifier, with the tokenizer it reads transcripts with
+    aligner: Option<Aligner>,
 }
 
 impl Qwen3AsrModel {
+    /// `aligner_tokenizer` is the forced aligner's own tokenizer; a transcriber takes none.
     pub fn new(
-        cfg: &Config,
+        config: &Config,
         vb: ShardedVarBuilder,
         is_gptx: bool,
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
+        aligner_tokenizer: Option<tokenizers::Tokenizer>,
     ) -> Result<Self> {
-        let layout = cfg.layout;
-        let cfg = &cfg.thinker_config;
+        let layout = config.layout;
+        let cfg = &config.thinker_config;
         let device = normal_loading_metadata.real_device.clone();
         let audio_vb = vb
             .clone()
             .without_lora_registry()
             .set_device(device.clone());
-        let audio = AudioEncoder::new(&cfg.audio_config, audio_vb, layout, &device)?;
+        let audio = AudioEncoder::new(&cfg.audio_config, audio_vb.clone(), layout, &device)?;
+        let mut text_config = cfg.text_config.qwen3();
+        // the aligner's classifier takes the lm_head's place (the original repo even names it so)
+        text_config.tie_word_embeddings |= config.aligner.is_some();
+        let aligner = match (&config.aligner, aligner_tokenizer) {
+            (Some(head), Some(tokenizer)) => {
+                let weight = audio_vb
+                    .pp(layout.aligner_head())
+                    .get((head.classes, text_config.hidden_size), "weight")?;
+                Some(Aligner::new(weight, tokenizer, head).map_err(inference_tensor::Error::msg)?)
+            }
+            (Some(_), None) => {
+                inference_tensor::bail!("Qwen3-ForcedAligner loads with its tokenizer")
+            }
+            (None, _) => None,
+        };
         let text = crate::qwen3::Model::new_inner(
-            &cfg.text_config.qwen3().decoder_spec(),
+            &text_config.decoder_spec(),
             vb.pp(layout.text_model()),
             vb.pp(layout.lm_head()),
             is_gptx,
@@ -67,7 +89,66 @@ impl Qwen3AsrModel {
             audio,
             audio_token: cfg.audio_token_id,
             layout,
+            audio_config: cfg.audio_config.clone(),
+            aligner,
         })
+    }
+
+    // the forced aligner's pass: the clip's placeholders and the transcript's words with their slots, run once outside
+    // the KV cache, the head read at the slots
+    fn align(
+        &self,
+        aligner: &Aligner,
+        audio: &inference_audio::AudioInput,
+        transcript: &str,
+        language: Option<&str>,
+    ) -> anyhow::Result<Vec<inference_nn::loaders::AlignedWord>> {
+        if let Some(language) = language {
+            anyhow::ensure!(
+                aligner::LANGUAGES
+                    .iter()
+                    .any(|(code, name)| language.eq_ignore_ascii_case(code)
+                        || language.eq_ignore_ascii_case(name)),
+                "Qwen3-ForcedAligner does not time language `{language}`"
+            );
+        }
+        let mono = audio.to_mono();
+        let pcm = if audio.sample_rate == inputs_processor::SAMPLE_RATE {
+            mono
+        } else {
+            inference_audio::mel::resample(&mono, audio.sample_rate, inputs_processor::SAMPLE_RATE)?
+                .into_owned()
+        };
+        #[allow(clippy::cast_precision_loss)]
+        let seconds = pcm.len() as f64 / f64::from(inputs_processor::SAMPLE_RATE);
+        anyhow::ensure!(
+            seconds <= aligner.max_seconds(),
+            "Qwen3-ForcedAligner times clips of up to {} s; this one is {seconds:.1} s",
+            aligner.max_seconds()
+        );
+        let words = aligner::split_words(transcript);
+        if words.is_empty() {
+            return Ok(Vec::new());
+        }
+        let device = self.text.device();
+        let placeholders = inputs_processor::clip_tokens(&self.audio_config, &pcm);
+        let ids = aligner.prompt(&words, self.audio_token, placeholders)?;
+        let input_ids = Tensor::from_vec(ids.clone(), (1, ids.len()), device)?;
+        let clip = inputs_processor::clip_features(&self.audio_config, &pcm, device)?;
+        let encoded = self.audio.forward(&clip.mel, clip.valid_frames)?;
+        let embeds = place_token_features(
+            &self.text.get_input_embeddings(&input_ids)?,
+            &input_ids,
+            self.audio_token,
+            &encoded,
+            "Qwen3-ForcedAligner",
+        )?;
+        let hidden = self.text.hidden_states(
+            &input_ids,
+            embeds,
+            &crate::attention::FlashParams::empty(true),
+        )?;
+        aligner.read(&hidden, &ids, words)
     }
 
     fn forward_inner(
@@ -148,5 +229,17 @@ impl MultimodalModel for Qwen3AsrModel {
 
     fn supports_mixed_media_batches(&self) -> bool {
         true
+    }
+
+    fn word_timestamps(
+        &self,
+        audio: &inference_audio::AudioInput,
+        transcript: &str,
+        language: Option<&str>,
+    ) -> anyhow::Result<Option<Vec<inference_nn::loaders::AlignedWord>>> {
+        match &self.aligner {
+            Some(aligner) => self.align(aligner, audio, transcript, language).map(Some),
+            None => Ok(None),
+        }
     }
 }
