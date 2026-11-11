@@ -77,6 +77,7 @@ struct DecoderLayer {
 }
 
 /// One window's decoder state: each layer's self-attention keys and values so far, and its cross-attention ones.
+#[derive(Clone)]
 pub struct DecoderCache {
     self_kv: Vec<Option<(Tensor, Tensor)>>,
     cross_kv: Vec<(Tensor, Tensor)>,

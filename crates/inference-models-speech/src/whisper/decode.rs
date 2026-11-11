@@ -2,6 +2,10 @@
 //! suppressed tokens, and the timestamp rules (timestamps in pairs, never backwards, forced when their probability
 //! mass beats any text token).
 
+use std::io::Write;
+
+use rand::Rng;
+
 use super::config::WhisperGenerationConfig;
 
 // the time one timestamp token step stands for
@@ -46,7 +50,7 @@ fn mask(logits: &mut [f32], range: std::ops::Range<usize>) {
     }
 }
 
-fn log_softmax(logits: &[f32]) -> Vec<f32> {
+pub(super) fn log_softmax(logits: &[f32]) -> Vec<f32> {
     let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let sum: f32 = logits.iter().map(|value| (value - max).exp()).sum();
     let log_sum = max + sum.ln();
@@ -133,6 +137,36 @@ pub(super) fn apply_rules(
     }
 }
 
+/// A token drawn from `softmax(logits / temperature)`.
+pub(super) fn sample(logits: &[f32], temperature: f32, rng: &mut impl Rng) -> u32 {
+    let scaled: Vec<f32> = logits.iter().map(|l| l / temperature).collect();
+    let max = scaled.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let weights: Vec<f32> = scaled.iter().map(|l| (l - max).exp()).collect();
+    let total: f32 = weights.iter().sum();
+    let mut target = rng.random::<f32>() * total;
+    for (i, &w) in weights.iter().enumerate() {
+        if target < w {
+            return u32::try_from(i).expect("a vocabulary index fits u32");
+        }
+        target -= w;
+    }
+    argmax(logits)
+}
+
+/// OpenAI's `compression_ratio`: the text's UTF-8 length over its zlib-compressed length (default level), how much it
+/// repeats itself.
+pub(super) fn compression_ratio(text: &str) -> f64 {
+    let bytes = text.as_bytes();
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    if encoder.write_all(bytes).is_err() {
+        return 0.0;
+    }
+    match encoder.finish() {
+        Ok(compressed) if !compressed.is_empty() => bytes.len() as f64 / compressed.len() as f64,
+        _ => 0.0,
+    }
+}
+
 pub(super) fn argmax(logits: &[f32]) -> u32 {
     let (index, _) = logits
         .iter()
@@ -143,10 +177,12 @@ pub(super) fn argmax(logits: &[f32]) -> u32 {
     u32::try_from(index).expect("a vocabulary index fits u32")
 }
 
-/// One timestamped span of a window's tokens: its text tokens and its times in seconds from the window's start.
+/// One timestamped span of a window's tokens: its text tokens, the span as decoded (timestamps included, what the
+/// next window's prompt carries) and its times in seconds from the window's start.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct WindowSegment {
     pub tokens: Vec<u32>,
+    pub decoded: Vec<u32>,
     pub start: f64,
     pub end: f64,
 }
@@ -178,12 +214,14 @@ pub(super) fn split_segments(
         let end = last_ts
             .filter(|&t| t > special.timestamp_begin)
             .map_or(window_seconds, time);
+        let decoded = tokens.to_vec();
         let tokens = text(tokens);
         let segments = if tokens.is_empty() {
             Vec::new()
         } else {
             vec![WindowSegment {
                 tokens,
+                decoded,
                 start: 0.0,
                 end,
             }]
@@ -206,6 +244,7 @@ pub(super) fn split_segments(
             if !tokens.is_empty() {
                 segments.push(WindowSegment {
                     tokens,
+                    decoded: span.to_vec(),
                     start: time(first),
                     end: time(end),
                 });
@@ -269,6 +308,15 @@ mod tests {
         logits[5] = 10.0;
         apply_rules(&special(), &mut logits, &[TS + 2, 5, 6, TS + 4], true);
         assert!(allowed(&logits).iter().all(|&t| t == EOT || t >= TS + 4));
+    }
+
+    // zlib's own lengths (Python's `zlib.compress`): 52 bytes to 43, 63 to 15
+    #[test]
+    fn the_compression_ratio_is_zlibs() {
+        let plain = "It was the best of times, it was the worst of times.";
+        let repeated = "the the the the the the the the the the the the the the the the";
+        assert_eq!(compression_ratio(plain), 52.0 / 43.0);
+        assert_eq!(compression_ratio(repeated), 63.0 / 15.0);
     }
 
     #[test]

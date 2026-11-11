@@ -398,21 +398,34 @@ inference serve -m openai/whisper-large-v3-turbo
 Whisper loads from the transformers layout (`config.json` with `model_type` `whisper`, `generation_config.json`,
 `tokenizer.json`, `model.safetensors`); the special token ids, languages and alignment heads come from
 `generation_config.json`, so the v1 to v3 sizes and the English-only `.en` checkpoints load alike. It is decoded as
-OpenAI's `transcribe` does with `temperature=0`, word timestamps on and no previous-text conditioning:
+OpenAI's `transcribe` does by default, with word timestamps on:
 
-- The recording goes in 30 s windows; each window is decoded greedily with timestamp tokens, and the next window
-  starts after the last word of the last complete segment.
+- The recording goes in 30 s windows (the last one zero-padded, as OpenAI's `pad_or_trim` does); each window is
+  decoded with timestamp tokens, and the next window starts after the last word of the last complete segment.
+- **Temperature fallback:** each window is decoded greedily first; when its text compresses better than 2.4 to 1
+  (zlib, so it repeats itself) or its tokens average a log-probability under -1, it is decoded again at 0.2, 0.4, ...
+  1.0 (sampled, from a fixed seed, so a transcript repeats). A window whose no-speech probability is over 0.6 with a
+  low log-probability is skipped as silence. `temperature` above 0 decodes every window at that temperature instead.
+- **Beam search:** `beam_size` (1 to 16) searches that many hypotheses per window at temperature 0, `patience` (an
+  inference.rs extension, 1 by default) lets `beam_size * patience` finish before the best by log-probability over
+  length is taken, as OpenAI's `BeamSearchDecoder`; fallback temperatures sample.
+- **Context:** `prompt` goes before the first window as previous text (`<|startofprev|>`, at most 223 tokens, as
+  OpenAI's `initial_prompt`), and each window takes the previous windows' text the same way;
+  `condition_on_previous_text=false` (an inference.rs extension) turns that off, and a window decoded above 0.5 starts
+  the context afresh, as OpenAI's does.
 - `language` (an ISO-639-1 code such as `de`, or the name, `german`) sets the language token; without one the model
   identifies it from the first window, and `verbose_json` reports it. An English-only checkpoint takes English
   only. A language the checkpoint has no token for is refused.
 - Word times come from the cross-attention of the checkpoint's alignment heads, matched to the audio with dynamic
   time warping, then held to the segment timestamps, as OpenAI's `word_timestamps` does.
 - `/v1/audio/translations` writes an English translation instead (large-v3; turbo was not trained to translate).
-- Not yet: beam search, temperature fallback, a `prompt` as previous text, and loading GGUFs.
+- Not yet: loading GGUFs.
 
-`scripts/whisper_parity.py` checks a build against OpenAI's `whisper` package on given clips. On synthetic speech the
-transcripts match exactly, and word times fall within 0.02 s for large-v3-turbo (FP16), large-v3 and small; base.en
-drifts by up to 0.18 s on a few words of a long clip.
+`scripts/whisper_parity.py` checks a build against OpenAI's `whisper` package on given clips, with `--decoding`
+choosing OpenAI's default, plain greedy, beam 5 or a prompt. On synthetic speech in F32, base.en's transcripts and word
+times match exactly (to 0.000 s, over four windows) in each mode, except where a window falls back to a sampled
+temperature on both sides, whose draws differ; earlier, word times fell within 0.02 s for large-v3-turbo (FP16),
+large-v3 and small.
 
 ## Qwen3-ASR: audio in, transcript out
 

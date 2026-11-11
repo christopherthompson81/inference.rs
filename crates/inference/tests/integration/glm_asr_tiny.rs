@@ -80,6 +80,8 @@ fn transcription() -> TranscriptionRequest {
         temperature: None,
         timestamp_granularities: Vec::new(),
         beam_size: None,
+        patience: None,
+        condition_on_previous_text: None,
         diarization_model: None,
         overlap_pass: None,
         task: Default::default(),

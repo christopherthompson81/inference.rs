@@ -3391,10 +3391,12 @@ class TranscriptionRequest:
     """Speech recognition request; the audio itself travels beside it (a multipart `file` over HTTP)."""
 
     beam_size: int | None = None
+    condition_on_previous_text: bool | None = None
     diarization_model: str | None = None
     language: str | None = None
     model: str | None = None
     overlap_pass: bool | None = None
+    patience: float | None = None
     prompt: str | None = None
     response_format: TranscriptionResponseFormat | None = None
     task: TranscriptionTask | None = None

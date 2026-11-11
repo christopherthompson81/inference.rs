@@ -20,6 +20,7 @@ tokenizers.workspace = true
 inference-nn.workspace = true
 inference-quant.workspace = true
 rand.workspace = true
+flate2 = { workspace = true, features = ["zlib"] }
 rayon.workspace = true
 unicode-normalization.workspace = true
 vernacula-phonemizer = { git = "https://github.com/christopherthompson81/vernacula-phonemizer", rev = "4c660b6e", default-features = false, features = ["en-GB", "es", "fr", "hi", "it", "pt-BR", "ja", "cmn"] }

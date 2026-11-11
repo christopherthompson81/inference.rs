@@ -397,8 +397,15 @@
                           "integer",
                           "null"
                         ],
-                        "description": "Beam search over this many hypotheses (1 to 16) for an RNN-T or TDT model; unset decodes greedily.",
+                        "description": "Beam search over this many hypotheses (1 to 16) for Whisper or an RNN-T or TDT model; unset decodes greedily.",
                         "minimum": 0
+                      },
+                      "condition_on_previous_text": {
+                        "type": [
+                          "boolean",
+                          "null"
+                        ],
+                        "description": "Whisper takes each window's predecessor's text as context (on unless `false`); off keeps a window's\nfailure from carrying into the next. An inference.rs extension."
                       },
                       "diarization_model": {
                         "type": [
@@ -427,12 +434,20 @@
                         ],
                         "description": "With `diarization_model`, a second pass over the long turns another speaker cuts into, where the first pass\ndrops words; on unless `false`. An inference.rs extension."
                       },
+                      "patience": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "format": "float",
+                        "description": "Whisper's beam patience (above 0, 1 when unset): the search ends once `beam_size * patience` hypotheses\nhave finished. An inference.rs extension."
+                      },
                       "prompt": {
                         "type": [
                           "string",
                           "null"
                         ],
-                        "description": "Text to steer the transcript; Parakeet ignores it."
+                        "description": "Text to steer the transcript, taken as what came before the audio (Whisper); Parakeet ignores it."
                       },
                       "response_format": {
                         "$ref": "#/components/schemas/TranscriptionResponseFormat"
@@ -447,7 +462,7 @@
                           "null"
                         ],
                         "format": "float",
-                        "description": "Parakeet decodes greedily and ignores it."
+                        "description": "0 to 1. Whisper: unset or 0 decodes at 0 and raises the temperature on a window whose text repeats itself or\nis improbable; above 0, every window at it. Parakeet decodes greedily and ignores it."
                       },
                       "timestamp_granularities": {
                         "type": "array",
@@ -510,8 +525,15 @@
                           "integer",
                           "null"
                         ],
-                        "description": "Beam search over this many hypotheses (1 to 16) for an RNN-T or TDT model; unset decodes greedily.",
+                        "description": "Beam search over this many hypotheses (1 to 16) for Whisper or an RNN-T or TDT model; unset decodes greedily.",
                         "minimum": 0
+                      },
+                      "condition_on_previous_text": {
+                        "type": [
+                          "boolean",
+                          "null"
+                        ],
+                        "description": "Whisper takes each window's predecessor's text as context (on unless `false`); off keeps a window's\nfailure from carrying into the next. An inference.rs extension."
                       },
                       "diarization_model": {
                         "type": [
@@ -540,12 +562,20 @@
                         ],
                         "description": "With `diarization_model`, a second pass over the long turns another speaker cuts into, where the first pass\ndrops words; on unless `false`. An inference.rs extension."
                       },
+                      "patience": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "format": "float",
+                        "description": "Whisper's beam patience (above 0, 1 when unset): the search ends once `beam_size * patience` hypotheses\nhave finished. An inference.rs extension."
+                      },
                       "prompt": {
                         "type": [
                           "string",
                           "null"
                         ],
-                        "description": "Text to steer the transcript; Parakeet ignores it."
+                        "description": "Text to steer the transcript, taken as what came before the audio (Whisper); Parakeet ignores it."
                       },
                       "response_format": {
                         "$ref": "#/components/schemas/TranscriptionResponseFormat"
@@ -560,7 +590,7 @@
                           "null"
                         ],
                         "format": "float",
-                        "description": "Parakeet decodes greedily and ignores it."
+                        "description": "0 to 1. Whisper: unset or 0 decodes at 0 and raises the temperature on a window whose text repeats itself or\nis improbable; above 0, every window at it. Parakeet decodes greedily and ignores it."
                       },
                       "timestamp_granularities": {
                         "type": "array",
@@ -15360,8 +15390,15 @@
               "integer",
               "null"
             ],
-            "description": "Beam search over this many hypotheses (1 to 16) for an RNN-T or TDT model; unset decodes greedily.",
+            "description": "Beam search over this many hypotheses (1 to 16) for Whisper or an RNN-T or TDT model; unset decodes greedily.",
             "minimum": 0
+          },
+          "condition_on_previous_text": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whisper takes each window's predecessor's text as context (on unless `false`); off keeps a window's\nfailure from carrying into the next. An inference.rs extension."
           },
           "diarization_model": {
             "type": [
@@ -15390,12 +15427,20 @@
             ],
             "description": "With `diarization_model`, a second pass over the long turns another speaker cuts into, where the first pass\ndrops words; on unless `false`. An inference.rs extension."
           },
+          "patience": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Whisper's beam patience (above 0, 1 when unset): the search ends once `beam_size * patience` hypotheses\nhave finished. An inference.rs extension."
+          },
           "prompt": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Text to steer the transcript; Parakeet ignores it."
+            "description": "Text to steer the transcript, taken as what came before the audio (Whisper); Parakeet ignores it."
           },
           "response_format": {
             "$ref": "#/components/schemas/TranscriptionResponseFormat"
@@ -15410,7 +15455,7 @@
               "null"
             ],
             "format": "float",
-            "description": "Parakeet decodes greedily and ignores it."
+            "description": "0 to 1. Whisper: unset or 0 decodes at 0 and raises the temperature on a window whose text repeats itself or\nis improbable; above 0, every window at it. Parakeet decodes greedily and ignores it."
           },
           "timestamp_granularities": {
             "type": "array",

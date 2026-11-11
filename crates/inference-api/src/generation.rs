@@ -535,14 +535,7 @@ async fn transcribe_inner(
         let speakers = word_speakers(&transcript.words, &diarization.segments);
         return render_transcript(&request, transcript, Some(&speakers));
     }
-    let options = TranscriptionOptions {
-        language: request.language.clone(),
-        beam_size: request.beam_size,
-        translate: request.task == TranscriptionTask::Translate,
-        resume_at: None,
-        max_window_seconds: None,
-        spans: None,
-    };
+    let options = decode_options(&request);
     let speech = |audio, progress| RequestMessage::Transcription {
         audio,
         options: options.clone(),
@@ -584,17 +577,49 @@ async fn transcribe_inner(
     render_transcript(&request, transcript, Some(&speakers))
 }
 
+/// The decoding a transcription request asks for, over the whole audio.
+pub(crate) fn decode_options(request: &TranscriptionRequest) -> TranscriptionOptions {
+    TranscriptionOptions {
+        language: request.language.clone(),
+        beam_size: request.beam_size,
+        patience: request.patience,
+        temperature: request.temperature,
+        prompt: request.prompt.clone(),
+        condition_on_previous_text: request.condition_on_previous_text,
+        translate: request.task == TranscriptionTask::Translate,
+        ..TranscriptionOptions::default()
+    }
+}
+
 pub(crate) fn check_beam(request: &TranscriptionRequest) -> Result<(), ApiError> {
+    let invalid = |message: String, field: &'static str| {
+        Err(ApiError::new(
+            ApiErrorKind::InvalidRequest,
+            message,
+            Some("invalid_decoding"),
+            Some(field),
+        ))
+    };
     if request
         .beam_size
         .is_some_and(|b| !(1..=MAX_BEAM_SIZE).contains(&b))
     {
-        return Err(ApiError::new(
-            ApiErrorKind::InvalidRequest,
+        return invalid(
             format!("`beam_size` must be 1 to {MAX_BEAM_SIZE}"),
-            Some("invalid_beam_size"),
-            Some("beam_size"),
-        ));
+            "beam_size",
+        );
+    }
+    if request
+        .patience
+        .is_some_and(|p| !(p.is_finite() && p > 0.0))
+    {
+        return invalid("`patience` must be above 0".to_string(), "patience");
+    }
+    if request
+        .temperature
+        .is_some_and(|t| !(0.0..=1.0).contains(&t))
+    {
+        return invalid("`temperature` must be 0 to 1".to_string(), "temperature");
     }
     Ok(())
 }
@@ -1114,6 +1139,8 @@ mod tests {
             temperature: None,
             timestamp_granularities: Vec::new(),
             beam_size: None,
+            patience: None,
+            condition_on_previous_text: None,
             diarization_model: None,
             overlap_pass: None,
             task: TranscriptionTask::Transcribe,
