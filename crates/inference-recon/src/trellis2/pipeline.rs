@@ -53,7 +53,7 @@ const UPSAMPLES: usize = 4;
 const LOW: usize = 512;
 const HIGH: usize = 1024;
 const HIGHEST: usize = 1536;
-/// A cascade past 1024 steps its resolution down by [`RESOLUTION_STEP`] until its cells number fewer than this
+/// A cascade past 1024 steps its resolution down by 128 until its cells number fewer than this
 pub const MAX_TOKENS: usize = 49152;
 const RESOLUTION_STEP: usize = 128;
 // the latents' cells sit at the mesh resolution over 16
