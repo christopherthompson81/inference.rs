@@ -1468,6 +1468,16 @@ fn the_shape_encoder_and_texture_decoder_match_the_reference() -> Result<()> {
         &coords(&refs["enc.coords"])?,
         &refs["enc.feats"],
     )?;
+    // on our own dual grid of the reference's mesh, whose vertices carry o_voxel's f32 noise differently
+    let ours = super::voxelize::flexible_dual_grid(&reference_mesh(&refs)?, 1024);
+    let own_levels = super::encoder::Hierarchy::new(&ours.cells, &device)?;
+    compare_by_cell(
+        "encoder latents from our dual grid",
+        own_levels.coarsest(),
+        &encoder.forward(&ours, &own_levels, &device)?,
+        &coords(&refs["enc.coords"])?,
+        &refs["enc.feats"],
+    )?;
     // the texture decoder on the reference's texture latents, unfolding onto the encoder's levels
     let tex_cells = coords(&refs["enc.coords"])?;
     let at: HashMap<[i32; 3], usize> = tex_cells.iter().enumerate().map(|(i, &c)| (c, i)).collect();

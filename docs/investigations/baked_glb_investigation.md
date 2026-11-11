@@ -625,3 +625,7 @@ Finding:
 - 18.2 s at 1024 (reference 40 s), GPU peak 7.8 GB with the LAN server's idle ~1.1 GB (reference 10.9 GB), host
   1.5 GB; 6.3 s and 5.7 GB at 512. The unwrap path costs nothing extra in wall time (it runs beside the painting).
 - The OBJ copy's texture differs from the GLB's by 0.18 / 255 on average: the OBJ's text coordinates.
+- The encoder on our own dual grid of the same mesh, against the reference's latents: relative RMS 2.8e-2 (max
+  2.9), against 5.5e-4 on the reference's grid. That is o_voxel's f32 solve noise (Run 26) carried through the
+  encoder; the painted result renders the same. A bit-exact grid would need Eigen's column-pivoting QR in f32 in the
+  same operation order: left for now, noted here if a closer match is ever needed.

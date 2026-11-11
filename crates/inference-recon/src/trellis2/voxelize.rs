@@ -133,8 +133,8 @@ impl Grid {
                         match self.table.get(&coord) {
                             Some(&i) => {
                                 let cell = &mut self.cells[i].1;
-                                for k in 0..3 {
-                                    cell.mean[k] += hit[k];
+                                for (m, h) in cell.mean.iter_mut().zip(hit) {
+                                    *m += h;
                                 }
                                 cell.count += 1.0;
                                 cell.crossed[ax2] |= own;
@@ -298,10 +298,11 @@ fn solve64<const N: usize>(mut a: [[f64; N]; N], mut b: [f64; N]) -> [f64; N] {
         if a[col][col] == 0.0 {
             continue;
         }
+        let pivot_row = a[col];
         for row in col + 1..N {
-            let f = a[row][col] / a[col][col];
-            for k in col..N {
-                a[row][k] -= f * a[col][k];
+            let f = a[row][col] / pivot_row[col];
+            for (x, p) in a[row][col..].iter_mut().zip(&pivot_row[col..]) {
+                *x -= f * p;
             }
             b[row] -= f * b[col];
         }

@@ -578,11 +578,11 @@ fn read_glb(bytes: &[u8]) -> IoResult<ReadMesh> {
                 let det = world[0][0] * (world[1][1] * world[2][2] - world[1][2] * world[2][1])
                     - world[0][1] * (world[1][0] * world[2][2] - world[1][2] * world[2][0])
                     + world[0][2] * (world[1][0] * world[2][1] - world[1][1] * world[2][0]);
-                faces.extend(index.chunks_exact(3).map(|t| {
+                faces.extend(index.as_chunks::<3>().0.iter().map(|&[a, b, c]| {
                     if det < 0.0 {
-                        [base + t[0], base + t[2], base + t[1]]
+                        [base + a, base + c, base + b]
                     } else {
-                        [base + t[0], base + t[1], base + t[2]]
+                        [base + a, base + b, base + c]
                     }
                 }));
                 primitives += 1;
@@ -662,7 +662,7 @@ mod tests {
             "buffers": [{"byteLength": bin.len()}],
         });
         let mut text = serde_json::to_vec(&json).expect("json");
-        while text.len() % 4 != 0 {
+        while !text.len().is_multiple_of(4) {
             text.push(b' ');
         }
         let mut glb = Vec::new();
