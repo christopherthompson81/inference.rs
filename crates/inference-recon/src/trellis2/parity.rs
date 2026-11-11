@@ -1324,3 +1324,203 @@ fn single_chart_unwrap_is_compared() -> Result<()> {
     }
     Ok(())
 }
+
+// TRELLIS2_TEX_REF: `tex_ref.py mesh image out.safetensors` (scratch), the texturing pipeline's stages on a mesh
+fn texturing_reference() -> Option<std::collections::HashMap<String, Tensor>> {
+    let path = std::env::var_os("TRELLIS2_TEX_REF")?;
+    inference_tensor::safetensors::load(path, &Device::Cpu).ok()
+}
+
+fn reference_mesh(refs: &std::collections::HashMap<String, Tensor>) -> Result<super::mesh::Mesh> {
+    let vertices = refs["mesh.v"]
+        .to_vec2::<f32>()?
+        .iter()
+        .map(|r| [r[0], r[1], r[2]])
+        .collect();
+    let faces = refs["mesh.f"]
+        .to_dtype(DType::I64)?
+        .to_vec2::<i64>()?
+        .iter()
+        .map(|r| [r[0] as u32, r[1] as u32, r[2] as u32])
+        .collect();
+    Ok(super::mesh::Mesh { vertices, faces })
+}
+
+#[test]
+#[ignore = "needs a texturing reference dump"]
+fn the_dual_grid_matches_o_voxel() -> Result<()> {
+    let Some(refs) = texturing_reference() else {
+        return Ok(());
+    };
+    let mesh = reference_mesh(&refs)?;
+    let start = std::time::Instant::now();
+    let ours = super::voxelize::flexible_dual_grid(&mesh, 1024);
+    println!(
+        "{} cells in {:.2} s",
+        ours.cells.len(),
+        start.elapsed().as_secs_f64()
+    );
+    let cells = coords(&refs["fdg.voxels"])?;
+    let dual = refs["fdg.dual"].to_vec2::<f32>()?;
+    let crossed = refs["fdg.intersected"]
+        .to_dtype(DType::U32)?
+        .to_vec2::<u32>()?;
+    let theirs: HashMap<[i32; 3], usize> = cells.iter().enumerate().map(|(i, &c)| (c, i)).collect();
+    assert_eq!(ours.cells.len(), cells.len(), "cell counts");
+    let (mut worst, mut sum, mut flags) = (0f32, 0f64, 0usize);
+    for (k, c) in ours.cells.iter().enumerate() {
+        let i = *theirs
+            .get(c)
+            .unwrap_or_else(|| panic!("cell {c:?} not in the reference"));
+        for a in 0..3 {
+            let d = (ours.offsets[k][a] - (dual[i][a] * 1024.0 - c[a] as f32)).abs();
+            worst = worst.max(d);
+            sum += f64::from(d);
+            flags += usize::from(ours.crossed[k][a] != (crossed[i][a] != 0));
+        }
+    }
+    let mut over = [0usize; 4];
+    for (k, c) in ours.cells.iter().enumerate() {
+        let i = theirs[c];
+        let d = (0..3)
+            .map(|a| (ours.offsets[k][a] - (dual[i][a] * 1024.0 - c[a] as f32)).abs())
+            .fold(0f32, f32::max);
+        for (t, n) in [1e-4, 1e-3, 1e-2, 1e-1].iter().zip(&mut over) {
+            *n += usize::from(d > *t);
+        }
+    }
+    println!("cells off by more than 1e-4 / 1e-3 / 1e-2 / 1e-1: {over:?}");
+    println!(
+        "offsets: worst {worst:.2e}, mean {:.2e} (cell units); crossing flags differing {flags}",
+        sum / (3 * cells.len()) as f64
+    );
+    assert_eq!(flags, 0);
+    Ok(())
+}
+
+// the reference's dual grid, as the encoder reads it
+fn reference_grid(
+    refs: &std::collections::HashMap<String, Tensor>,
+) -> Result<super::voxelize::DualGrid> {
+    let cells = coords(&refs["fdg.voxels"])?;
+    let dual = refs["fdg.dual"].to_vec2::<f32>()?;
+    let crossed = refs["fdg.intersected"]
+        .to_dtype(DType::U32)?
+        .to_vec2::<u32>()?;
+    Ok(super::voxelize::DualGrid {
+        offsets: cells
+            .iter()
+            .zip(&dual)
+            .map(|(c, d)| std::array::from_fn(|a| d[a] * 1024.0 - c[a] as f32))
+            .collect(),
+        crossed: crossed
+            .iter()
+            .map(|r| [r[0] != 0, r[1] != 0, r[2] != 0])
+            .collect(),
+        cells,
+    })
+}
+
+// rows of `ours` on `our_cells` against `theirs` on `their_cells`, matched by cell
+fn compare_by_cell(
+    name: &str,
+    our_cells: &[[i32; 3]],
+    ours: &Tensor,
+    their_cells: &[[i32; 3]],
+    theirs: &Tensor,
+) -> Result<()> {
+    let at: HashMap<[i32; 3], usize> = their_cells
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| (c, i))
+        .collect();
+    assert_eq!(our_cells.len(), their_cells.len(), "{name}: cell counts");
+    let index: Vec<u32> = our_cells.iter().map(|c| at[c] as u32).collect();
+    let n = index.len();
+    let theirs = theirs.index_select(&Tensor::from_vec(index, n, &Device::Cpu)?, 0)?;
+    let (max, rms) = compare(ours, &theirs)?;
+    println!("{name}: max |diff| {max:.3e}, relative RMS {rms:.3e}");
+    Ok(())
+}
+
+#[test]
+#[ignore = "needs the TRELLIS.2 checkpoints, a texturing reference dump and a GPU"]
+fn the_shape_encoder_and_texture_decoder_match_the_reference() -> Result<()> {
+    let (Some(refs), Some((dir, _))) = (texturing_reference(), paths_dir()) else {
+        return Ok(());
+    };
+    let device = Device::new_cuda(0)?;
+    let grid = reference_grid(&refs)?;
+    let hierarchy = super::encoder::Hierarchy::new(&grid.cells, &device)?;
+    let encoder = super::encoder::ShapeEncoder::load(
+        super::encoder::SHAPE_ENCODER,
+        DType::F16,
+        vb(
+            dir.join("ckpts/shape_enc_next_dc_f16c32_fp16.safetensors"),
+            &device,
+        )?,
+    )?;
+    let latents = encoder.forward(&grid, &hierarchy, &device)?;
+    compare_by_cell(
+        "encoder latents",
+        hierarchy.coarsest(),
+        &latents,
+        &coords(&refs["enc.coords"])?,
+        &refs["enc.feats"],
+    )?;
+    // the texture decoder on the reference's texture latents, unfolding onto the encoder's levels
+    let tex_cells = coords(&refs["enc.coords"])?;
+    let at: HashMap<[i32; 3], usize> = tex_cells.iter().enumerate().map(|(i, &c)| (c, i)).collect();
+    let index: Vec<u32> = hierarchy.coarsest().iter().map(|c| at[c] as u32).collect();
+    let n = index.len();
+    // the sampler's output is normalized; the decoder reads it denormalized
+    let pipeline: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("texturing_pipeline.json"))?)
+            .map_err(inference_tensor::Error::wrap)?;
+    let stat = |k: &str| -> Vec<f32> {
+        pipeline["args"]["tex_slat_normalization"][k]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_f64())
+                    .map(|v| v as f32)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let tex = super::shape_flow::denormalize(
+        &refs["tex.out"]
+            .index_select(&Tensor::from_vec(index, n, &Device::Cpu)?, 0)?
+            .unsqueeze(0)?,
+        &stat("mean"),
+        &stat("std"),
+    )?
+    .squeeze(0)?
+    .to_device(&device)?;
+    let decoder = ShapeDecoder::load(
+        super::decoder::TEXTURE_DECODER,
+        DType::F16,
+        vb(
+            dir.join("ckpts/tex_dec_next_dc_f16c32_fp16.safetensors"),
+            &device,
+        )?,
+    )?;
+    let (out, _) = decoder.forward(
+        hierarchy.coarsest(),
+        &tex,
+        Some(&hierarchy.subdivisions),
+        &mut |_, _| {},
+    )?;
+    let attrs = ((out.feats * 0.5)? + 0.5)?;
+    compare_by_cell(
+        "texture decoder",
+        &out.coords,
+        &attrs,
+        &coords(&refs["dec.coords"])?,
+        &refs["dec.attrs"],
+    )
+}
+
+fn paths_dir() -> Option<(PathBuf, ())> {
+    Some((std::env::var_os("TRELLIS2_DIR")?.into(), ()))
+}

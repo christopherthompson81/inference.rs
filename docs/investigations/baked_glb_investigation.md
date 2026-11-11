@@ -589,3 +589,20 @@ details the photo has (buttons, belt) and brighten the base color by up to ~14%,
 Finding: the model is not metallic; the dark look is its albedo (about half the photo's brightness, Run 23) under the
 viewer's lighting. A metallic clamp would do nothing here. Levers: the viewer's exposure, and texture guidance 3-5 for
 crisper texture detail.
+
+## Run 26 - 2026-11-11
+
+Question: the texturing pipeline (`Trellis2TexturingPipeline`: paint a given mesh from an image) starts from
+o_voxel's `mesh_to_flexible_dual_grid` (CPU path) on the mesh. Does a Rust port give the same grid?
+
+Commands: `tex_ref.py model.glb prepared.png robot_s42.safetensors 42` (the reference's texturing pipeline on our robot
+GLB and its prepared image, every stage recorded: 40 s, 10.9 GB peak; 2,149,107 surface cells at 1024, 8,231 latent
+cells, and the texture decoder's output on exactly the 2,149,107 cells, so it unfolds onto the encoder's own
+hierarchy); `the_dual_grid_matches_o_voxel` against it; `fdg_variants.py` for o_voxel with the face and boundary terms
+off, against the same switches in ours.
+
+Finding: the cells and every edge-crossing flag match exactly (2.8 s here, o_voxel's CPU path 3.2 s). The dual
+vertices differ by ~1e-3 of a cell for most cells (worst a whole cell for a few): with both optional terms off as well
+(intersection planes and the regularization only: 1.53 M cells over 1e-3, 6,348 over 0.1). A double-precision solve
+moves none of that, so it is o_voxel's own f32 noise: its quadrics hold absolute coordinates (~0.5) while a cell is
+1/1024, and the regularized system's condition is ~100. Kept the f64 solve.
