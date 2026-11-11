@@ -11,7 +11,7 @@ use std::{
     },
 };
 
-use inference_tensor::cuda_backend::cudarc::driver::{CudaStream, sys};
+use inference_tensor::cuda_backend::cudarc::driver::{CudaContext, CudaStream, sys};
 use inference_tensor::{DType, Device, DeviceLocation, Tensor, Var};
 
 use crate::gdn::RecurrentBatchKind;
@@ -860,7 +860,12 @@ fn drop_cuda_graph_entry_output<T>(
     name: &'static str,
     release_result: &mut inference_tensor::Result<()>,
 ) {
-    drop(output);
+    // a graph never launched never backed its outputs' allocations, so their frees fail, as checked below
+    if replay_epoch == 0 {
+        CudaContext::without_drop_logs(|| drop(output));
+    } else {
+        drop(output);
+    }
     if let Err(err) = stream.context().check_err() {
         if unmaterialized_graph_output_drop_error(replay_epoch, err.0) {
             return;

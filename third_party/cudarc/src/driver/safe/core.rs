@@ -45,6 +45,11 @@ pub struct CudaContext {
 unsafe impl Send for CudaContext {}
 unsafe impl Sync for CudaContext {}
 
+thread_local! {
+    // set while this thread drops what it expects to fail and checks the error itself
+    static QUIET_DROPS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 impl Drop for CudaContext {
     fn drop(&mut self) {
         self.record_err(self.bind_to_thread());
@@ -510,11 +515,22 @@ impl CudaContext {
         }
     }
 
+    /// Runs `f` with this thread's drops keeping their errors for the context's next call without logging them, for
+    /// a caller that expects them and reads them with [`Self::check_err`] itself.
+    pub fn without_drop_logs<R>(f: impl FnOnce() -> R) -> R {
+        let before = QUIET_DROPS.with(|q| q.replace(true));
+        let out = f();
+        QUIET_DROPS.with(|q| q.set(before));
+        out
+    }
+
     /// Records a result for later inspection when a Result can be returned.
     pub fn record_err<T>(&self, result: Result<T, DriverError>) {
         if let Err(err) = result {
             // a drop has no caller to return to, so a new error is logged where it happens; repeats of it are not
-            if self.error_state.swap(err.0 as u32, Ordering::Relaxed) != err.0 as u32 {
+            if self.error_state.swap(err.0 as u32, Ordering::Relaxed) != err.0 as u32
+                && !QUIET_DROPS.with(|q| q.get())
+            {
                 tracing::error!(
                     "CUDA error with no caller to return it to, kept for this context's next call: {err:?}"
                 );
