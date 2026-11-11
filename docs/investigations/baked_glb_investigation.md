@@ -481,3 +481,21 @@ on the restarted LAN server, skips the KV profile for a model without attention 
 Run 19's value scaling is superseded: the DiT's attention now sums the values in f32 on CUDA (fattn's f32-values
 variant), which neither overflows nor strays ~3% from the reference on diffuse rows; the scaling is removed. See
 `fattn_f32_values_investigation.md` (Runs 1-4): robot 41.5 s, the house 97.6 s, every stage closer to the reference.
+
+## Run 21 - 2026-11-11
+
+Question: an image-to-3D job on the LAN server (a flat illustration, a cut-out, seed 0) sat in its export stage until
+the server was killed. Reproduced with the CLI: four threads at ~90% CPU, the GPU idle; perf: xatlas's OpenNL
+conjugate gradient (`nlCRSMatrixMult` 59%, `runCreateAndParameterizeChartTask` 24%).
+
+The model drew the flat illustration as a flat card (extent ~0.9 x 0.0002 x 1.0; the PyTorch reference on the same
+image: 0.73 x 0.00008 x 1.0, also a card). Its cleaned mesh, 963554 faces, clusters at 30 degrees into 20 clusters,
+the largest 963520 faces: one legitimate cluster of nearly the whole sheet (the robot: 9006, the largest 12639).
+The single-chart unwrap hands it to xatlas as one chart, whose LSCM is one least-squares system over a million faces.
+CuMesh's settings (90 degree clusters, xatlas growing charts) on the same mesh: still running when a 10-minute limit
+stopped it, so the reference path stalls the same way.
+
+Fix (the single-chart default only; the reference path stays CuMesh's): `split_large_charts` cuts any cluster over
+`MAX_SINGLE_CHART_FACES` (20000) into connected pieces of at most that many faces, grown breadth first over shared
+edges. The flat-sheet unit case checks the cap, connectedness and that small charts pass through. The image: 24.5 s
+end to end (export 3.5 s), its texture whole; the robot's GLB byte-identical (no cluster over the cap), 41.3 s.
