@@ -9,7 +9,7 @@ use inference_tensor::{Device, Result};
 use inference_vision::{TeleaSchedule, telea_schedules};
 use rayon::prelude::*;
 
-use super::charts::{Unwrapped, uv_unwrap};
+use super::charts::{Unwrapped, uv_unwrap, vertex_normals};
 use super::cleanup;
 use super::glb::{Pbr, sample_attributes};
 use super::mesh::Mesh;
@@ -382,6 +382,72 @@ pub struct Prepared {
 /// [`bake`]'s shape half (cleanup, unwrap, rasterization and projection), which can run while the texture is made;
 /// it gives up (an error naming [`CANCELLED`]) between its steps, in the unwrap's rounds and in xatlas when `stop`
 /// returns true.
+// each texel's covering face (1-based, 0 for none), the covered texels, and where each lies on the unwrapped mesh
+fn texels(unwrapped: &Unwrapped, size: usize) -> (Vec<u32>, Vec<usize>, Vec<V3>) {
+    let texel_faces = rasterize(&unwrapped.mesh.faces, &unwrapped.uvs, size);
+    let covered: Vec<usize> = (0..size * size).filter(|&t| texel_faces[t] > 0).collect();
+    let positions = covered
+        .par_iter()
+        .map(|&t| {
+            let f = unwrapped.mesh.faces[texel_faces[t] as usize - 1];
+            let tri = f.map(|v| unwrapped.uvs[v as usize].map(|c| f64::from(c) * size as f64));
+            let p = [(t % size) as f64 + 0.5, (t / size) as f64 + 0.5];
+            let w = barycentric(p, tri).expect("a covered texel lies in its face");
+            (0..3).fold([0f32; 3], |acc, k| {
+                mad(acc, unwrapped.mesh.vertices[f[k] as usize], w[k] as f32)
+            })
+        })
+        .collect();
+    (texel_faces, covered, positions)
+}
+
+// one inpainting march per radius, shared by the planes that fill with it
+fn marches(texel_faces: &[u32], size: usize) -> [TeleaSchedule; 2] {
+    let unknown: Vec<bool> = texel_faces.iter().map(|&f| f == 0).collect();
+    telea_schedules(size, size, &unknown, [COLOR_RADIUS, MATERIAL_RADIUS])
+}
+
+/// [`prepare`] for a mesh taken as it is, the texturing pipeline's: no cleanup, its own `uvs` (row 0 at v = 0) when
+/// given and otherwise unwrapped, each texel sampled where it lies on it.
+pub fn prepare_given(
+    mesh: &Mesh,
+    uvs: Option<Vec<[f32; 2]>>,
+    resolution: usize,
+    texture_size: usize,
+    stop: &(dyn Fn() -> bool + Sync),
+) -> Result<Prepared> {
+    let unwrapped = match uvs {
+        Some(uvs) => Unwrapped {
+            normals: vertex_normals(mesh),
+            source: (0..mesh.vertices.len() as u32).collect(),
+            width: texture_size as u32,
+            height: texture_size as u32,
+            mesh: mesh.clone(),
+            uvs,
+        },
+        None => uv_unwrap(mesh, stop).map_err(|e| inference_tensor::Error::Msg(e.to_string()))?,
+    };
+    if stop() {
+        inference_tensor::bail!("{CANCELLED}");
+    }
+    let (texel_faces, covered, positions) = texels(&unwrapped, texture_size);
+    let res = resolution as f32;
+    let points = positions
+        .iter()
+        .map(|p| p.map(|v| (v + 0.5) * res))
+        .collect();
+    let [color_march, material_march] = marches(&texel_faces, texture_size);
+    Ok(Prepared {
+        unwrapped,
+        size: texture_size,
+        color_march,
+        material_march,
+        covered,
+        points,
+        double_sided: true,
+    })
+}
+
 pub fn prepare(
     mesh: &Mesh,
     resolution: usize,
@@ -416,30 +482,14 @@ pub fn prepare(
         uv_unwrap(&cleaned, stop).map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
     check()?;
     let size = options.texture_size;
-    let texel_faces = rasterize(&unwrapped.mesh.faces, &unwrapped.uvs, size);
-    let covered: Vec<usize> = (0..size * size).filter(|&t| texel_faces[t] > 0).collect();
+    let (texel_faces, covered, positions) = texels(&unwrapped, size);
     let res = resolution as f32;
-    let positions: Vec<V3> = covered
-        .par_iter()
-        .map(|&t| {
-            let f = unwrapped.mesh.faces[texel_faces[t] as usize - 1];
-            let tri = f.map(|v| unwrapped.uvs[v as usize].map(|c| f64::from(c) * size as f64));
-            let p = [(t % size) as f64 + 0.5, (t / size) as f64 + 0.5];
-            let w = barycentric(p, tri).expect("a covered texel lies in its face");
-            (0..3).fold([0f32; 3], |acc, k| {
-                mad(acc, unwrapped.mesh.vertices[f[k] as usize], w[k] as f32)
-            })
-        })
-        .collect();
     let points: Vec<V3> = Distances::new(&bvh, device)?
         .unsigned_distance(&positions)?
         .into_iter()
         .map(|(_, _, c)| c.map(|v| (v + 0.5) * res))
         .collect();
-    let unknown: Vec<bool> = texel_faces.iter().map(|&f| f == 0).collect();
-    // one march per radius, shared by the planes that fill with it
-    let [color_march, material_march] =
-        telea_schedules(size, size, &unknown, [COLOR_RADIUS, MATERIAL_RADIUS]);
+    let [color_march, material_march] = marches(&texel_faces, size);
     Ok(Prepared {
         unwrapped,
         size,

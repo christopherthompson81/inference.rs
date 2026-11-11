@@ -2,7 +2,7 @@
 title: "inference image-to-3d"
 description: "A textured 3D model of the object in one image with TRELLIS.2: model.glb (unwrapped mesh with baked PBR textures, or per-vertex color and material), mesh.ply, the cut-out image and a meta.json; an image without a transparent background has it removed with BiRefNet"
 sidebar:
-  order: 16
+  order: 17
 ---
 
 <!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->

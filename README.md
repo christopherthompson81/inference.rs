@@ -45,7 +45,7 @@ bindings over that ABI, so every surface does the same things.
 | **Image generation** | FLUX.1 and HiDream-O1-Image (text to image, editing and subject references), from safetensors or GGUF |
 | **Embeddings and documents** | EmbeddingGemma, Qwen3 Embedding, BERT-family, ModernBERT and Nomic encoders; cross-encoder rerankers; PP-DocLayoutV3 document layout detection |
 | **Decisions** | Laya, Julia-1 and d1-omni: typed questions about a text (choose, score, true or false), answered in one forward pass with probabilities over the options |
-| **3D** | WorldMirror 2.0 reconstruction (cameras, depth, normals, points and 3D Gaussian splats from photos or a video); HY-World 2.0 world generation from one panorama with WorldStereo-2; 3D models from one image: TRELLIS.2 textured meshes (GLB with baked base color and metallic-roughness textures, or per-vertex colors; a 1024 cascade in about 40 s on one RTX 3090), and JoVox 64^3 voxel structures meshed by TRELLIS.2's second stage, backgrounds removed with BiRefNet |
+| **3D** | WorldMirror 2.0 reconstruction (cameras, depth, normals, points and 3D Gaussian splats from photos or a video); HY-World 2.0 world generation from one panorama with WorldStereo-2; 3D models from one image: TRELLIS.2 textured meshes (GLB with baked base color and metallic-roughness textures, or per-vertex colors; a 1024 cascade in about 40 s on one RTX 3090), TRELLIS.2's texturing of a mesh you supply from an image, and JoVox 64^3 voxel structures meshed by TRELLIS.2's second stage, backgrounds removed with BiRefNet |
 
 The **[supported models reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/supported-models.md)** lists every architecture
 with a copy-paste command. It is generated from the engine's loader registry.
@@ -90,7 +90,7 @@ inference serve -m google/gemma-4-E4B-it
 
 The [web UI](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/serve/with-web-ui.md)
 at `http://localhost:1234/ui` has a tab per job: chat, a coding agent, speech to text, text to speech, images,
-document OCR and 3D (objects and voxels from an image, worlds from a panorama, scenes from photos, each opened in a viewer), each with its own model. Started with no `-m`, the server loads nothing until you pick models in the UI's
+document OCR and 3D (objects and voxels from an image, a mesh textured from an image, worlds from a panorama, scenes from photos, each opened in a viewer), each with its own model. Started with no `-m`, the server loads nothing until you pick models in the UI's
 model manager, which also downloads from the Hugging Face Hub.
 
 The same command serves the other model kinds through their OpenAI-style endpoints:
@@ -122,6 +122,9 @@ inference image-to-3d --image chair.jpg --out chair/
 
 # or its 64^3 voxel structure, meshed
 inference voxels --image chair.jpg --out chair-voxels/
+
+# or paint a mesh you already have from the photo
+inference texture-mesh --mesh chair.glb --image chair.jpg --out chair-painted/
 ```
 
 [3D reconstruction](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-3d-reconstruction.mdx) and
@@ -174,7 +177,7 @@ models at runtime.
 | Images, documents and embeddings | `/v1/images/generations`, `/v1/images/edits`, `/v1/layout/detect`, `/v1/embeddings`, `/v1/rerank` |
 | Decisions | `/v1/decisions` (also answered at `/v1/systemone`) |
 | Agents and files | `/v1/files`, `/v1/containers`, `/v1/skills`, `/v1/sessions`, agent approvals |
-| Long-running jobs | `/v1/jobs` (3D reconstruction, world generation, image to 3D and image to voxels, queued beside the models, with progress events and cancel) |
+| Long-running jobs | `/v1/jobs` (3D reconstruction, world generation, image to 3D, mesh texturing and image to voxels, queued beside the models, with progress events and cancel) |
 | Operations | `/v1/models` (add, unload, reload, alias, tune), `/v1/manager` (inventory, download, load), LoRA adapters (`/v1/lora_adapters`, load and unload), `/metrics` (Prometheus), `/v1/system/doctor` |
 
 - **API keys:** keyed mode gives each client its own sessions and files. Without keys, admin actions are open to
@@ -236,7 +239,7 @@ CUDA build. [Architecture](https://github.com/christopherthompson81/inference.rs
 ## Documentation
 
 - [Quickstart](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/quickstart.mdx): install, first run, first server
-- [CLI reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/cli/index.md): `run`, `serve`, `agent`, `launch`, `reconstruct`, `worldgen`, `image-to-3d`, `voxels`, `bench`, `tune`, `quantize`, `kernels`, `doctor` and the rest
+- [CLI reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/cli/index.md): `run`, `serve`, `agent`, `launch`, `reconstruct`, `worldgen`, `image-to-3d`, `texture-mesh`, `voxels`, `bench`, `tune`, `quantize`, `kernels`, `doctor` and the rest
 - [Speech models](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-speech-models.mdx), [image generation](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-image-generation.mdx), [multimodal input](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/multimodal-input.mdx), [embeddings and reranking](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-embeddings.mdx), [decision models](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-decision-models.mdx)
 - [3D reconstruction](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-3d-reconstruction.mdx), [3D worlds](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/generate-3d-worlds.mdx) and [3D models from an image](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/image-to-3d.mdx)
 - [Quantization types](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/quantization-types.md) and [hardware support](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/hardware-support.md)

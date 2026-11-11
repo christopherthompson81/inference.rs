@@ -2,7 +2,7 @@
 title: "inference splat"
 description: "Train 3D Gaussian splats on a HY-World 2.0 gs_data folder (images, depths, normals, cameras.json, points.ply, sky_points.ply): the 3DGS stage of world generation"
 sidebar:
-  order: 18
+  order: 19
 ---
 
 <!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->

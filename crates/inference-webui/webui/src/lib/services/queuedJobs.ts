@@ -154,6 +154,21 @@ export function submitImageTo3d(image: File, options: ImageTo3dOptions): Promise
   return submit("image_to_3d", options, [image]);
 }
 
+export interface TextureMeshOptions {
+  seed: number | null;
+  resolution: number | null;
+  texture_size: number | null;
+  unwrap: boolean | null;
+  remove_background: boolean | null;
+  texture_sampler: Trellis2Sampler | null;
+  placement: Placement | null;
+}
+
+/** A mesh (glb, obj or ply) painted from an image with TRELLIS.2's texturing pipeline. */
+export function submitTextureMesh(mesh: File, image: File, options: TextureMeshOptions): Promise<JobRecord> {
+  return submit("texture_mesh", options, [mesh, image]);
+}
+
 /** JoVox's 64^3 voxel structure of the object in one image, meshed by TRELLIS.2 unless `mesh` is false. */
 export function submitVoxels(image: File, options: VoxelOptions): Promise<JobRecord> {
   return submit("voxels", options, [image]);

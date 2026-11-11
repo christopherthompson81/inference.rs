@@ -13,6 +13,7 @@
     listJobs,
     submitImageTo3d,
     submitReconstruct,
+    submitTextureMesh,
     submitVoxels,
     submitWorld,
     type JobEvent,
@@ -45,11 +46,12 @@
     failed: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300",
     cancelled: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
   };
-  const KINDS: Record<string, string> = { world: "World", reconstruct: "Reconstruction", image_to_3d: "Image to 3D", voxels: "Voxels" };
-  type Mode = "world" | "reconstruct" | "image_to_3d" | "voxels";
+  const KINDS: Record<string, string> = { world: "World", reconstruct: "Reconstruction", image_to_3d: "Image to 3D", voxels: "Voxels", texture_mesh: "Textured mesh" };
+  type Mode = "world" | "reconstruct" | "image_to_3d" | "voxels" | "texture_mesh";
   const MODES: { id: Mode; label: string }[] = [
     { id: "image_to_3d", label: "Object from an image" },
     { id: "voxels", label: "Voxels from an image" },
+    { id: "texture_mesh", label: "Texture a mesh" },
     { id: "world", label: "World from a panorama" },
     { id: "reconstruct", label: "Scene from photos or a video" },
   ];
@@ -67,6 +69,9 @@
   let vertexColors = $state(false);
   let remesh = $state(false);
   let faces = $state<number | null>(null);
+  let meshFile = $state<File | null>(null);
+  let paintResolution = $state(1024);
+  let unwrap = $state(false);
   let samples = $state<number | null>(null);
   // pipeline.json's samplers, shown as placeholders
   const SAMPLER_STAGES = [
@@ -228,6 +233,16 @@
           texture_sampler: changed(samplers.texture),
           placement: room,
         });
+      case "texture_mesh":
+        return submitTextureMesh(meshFile as File, image as File, {
+          seed,
+          resolution: paintResolution,
+          texture_size: textureSize,
+          unwrap: unwrap || null,
+          remove_background: removeBackground || null,
+          texture_sampler: changed(samplers.texture),
+          placement: room,
+        });
       case "voxels":
         return submitVoxels(image as File, { seed, steps: voxelSteps, remove_background: removeBackground || null, mesh: voxelMesh, placement: room });
     }
@@ -322,7 +337,9 @@
     return new Date(seconds * 1000).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
   }
 
-  let ready = $derived(mode === "world" ? panorama != null : mode === "reconstruct" ? photos.length > 0 : image != null);
+  let ready = $derived(
+    mode === "world" ? panorama != null : mode === "reconstruct" ? photos.length > 0 : mode === "texture_mesh" ? image != null && meshFile != null : image != null,
+  );
   const field = "rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm dark:border-gray-700 dark:bg-gray-950";
   const plain = "rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-100 disabled:opacity-50 dark:border-gray-700 dark:hover:bg-gray-800";
   const primary = "rounded-md bg-blue-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50";
@@ -366,8 +383,16 @@
           {/each}
         </div>
 
-        {#if mode === "image_to_3d" || mode === "voxels"}
-          {#if mode === "image_to_3d"}
+        {#if mode === "image_to_3d" || mode === "voxels" || mode === "texture_mesh"}
+          {#if mode === "texture_mesh"}
+            <p class="text-sm text-gray-600 dark:text-gray-400">
+              TRELLIS.2 paints a mesh you supply from a photo of the object: the mesh is fitted to the unit cube, encoded, given PBR material under the photo, and baked onto its own texture coordinates (or an unwrap) in a GLB. About 20 s at 1024.
+            </p>
+            <label class="flex cursor-pointer items-center justify-center gap-2 rounded-lg border-2 border-dashed border-gray-300 p-3 text-sm text-gray-500 hover:border-blue-400 dark:border-gray-700">
+              <span>{meshFile ? meshFile.name : "Choose the mesh (glb, obj or ply; y up)"}</span>
+              <input type="file" accept=".glb,.obj,.ply" class="hidden" onchange={(e) => (meshFile = e.currentTarget.files?.[0] ?? null)} disabled={busy} />
+            </label>
+          {:else if mode === "image_to_3d"}
             <p class="text-sm text-gray-600 dark:text-gray-400">
               TRELLIS.2 builds a textured mesh of the object in one photo: its background removed with BiRefNet, then a voxel structure, the shape and its PBR material, baked into a GLB. About 40 s at 1024 on a 24 GB card, with a 6 GB GPU peak.
             </p>
@@ -413,7 +438,7 @@
                 <input type="checkbox" class="accent-blue-600" bind:checked={vertexColors} disabled={busy} />
                 Vertex colors
               </label>
-            {:else}
+            {:else if mode === "voxels"}
               <label class="flex flex-col gap-1">
                 <span class="text-[11px] text-gray-500">Sampling steps</span>
                 <input type="number" min="36" max="108" class="w-28 {field}" bind:value={voxelSteps} placeholder={String(DEFAULT_VOXEL_STEPS)} disabled={busy} />
@@ -421,6 +446,28 @@
               <label class="flex items-center gap-1.5 pb-1.5 text-sm">
                 <input type="checkbox" class="accent-blue-600" bind:checked={voxelMesh} disabled={busy} />
                 Mesh it with TRELLIS.2
+              </label>
+            {/if}
+            {#if mode === "texture_mesh"}
+              <label class="flex flex-col gap-1">
+                <span class="text-[11px] text-gray-500">Resolution</span>
+                <select class={field} bind:value={paintResolution} disabled={busy}>
+                  <option value={1024}>1024</option>
+                  <option value={512}>512 (faster, coarser)</option>
+                </select>
+              </label>
+              <label class="flex flex-col gap-1">
+                <span class="text-[11px] text-gray-500">Texture size</span>
+                <select class={field} bind:value={textureSize} disabled={busy}>
+                  <option value={null}>2048 (default)</option>
+                  {#each TEXTURE_SIZES as size (size)}
+                    <option value={size}>{size}</option>
+                  {/each}
+                </select>
+              </label>
+              <label class="flex items-center gap-1.5 pb-1.5 text-sm" title="Lay out new texture coordinates even when the mesh has its own">
+                <input type="checkbox" class="accent-blue-600" bind:checked={unwrap} disabled={busy} />
+                Unwrap it anew
               </label>
             {/if}
             <label class="flex flex-col gap-1">
@@ -438,14 +485,16 @@
               Remove the background of a cut-out too
             </label>
           </div>
-          {#if mode === "image_to_3d"}
+          {#if mode === "image_to_3d" || mode === "texture_mesh"}
             <details class="text-sm">
-              <summary class="cursor-pointer text-gray-600 dark:text-gray-400">Advanced: face count and samplers</summary>
+              <summary class="cursor-pointer text-gray-600 dark:text-gray-400">{mode === "image_to_3d" ? "Advanced: face count and samplers" : "Advanced: texture sampler"}</summary>
               <div class="mt-2 flex flex-col gap-3">
-                <label class="flex flex-col gap-1">
-                  <span class="text-[11px] text-gray-500">Faces in the exported mesh</span>
-                  <input type="number" min="1000" max="10000000" step="1000" class="w-36 {field}" bind:value={faces} placeholder="1000000" disabled={busy} />
-                </label>
+                {#if mode === "image_to_3d"}
+                  <label class="flex flex-col gap-1">
+                    <span class="text-[11px] text-gray-500">Faces in the exported mesh</span>
+                    <input type="number" min="1000" max="10000000" step="1000" class="w-36 {field}" bind:value={faces} placeholder="1000000" disabled={busy} />
+                  </label>
+                {/if}
                 <div class="overflow-x-auto">
                   <table class="text-left">
                     <thead>
@@ -457,7 +506,7 @@
                       </tr>
                     </thead>
                     <tbody>
-                      {#each SAMPLER_STAGES as stage (stage.key)}
+                      {#each SAMPLER_STAGES.filter((s) => mode === "image_to_3d" || s.key === "texture") as stage (stage.key)}
                         <tr>
                           <td class="pr-2 text-gray-600 dark:text-gray-400">{stage.label}</td>
                           {#each SAMPLER_FIELDS as f, i (f.key)}

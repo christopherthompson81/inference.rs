@@ -3338,6 +3338,19 @@ class TextFormatJsonObject:
 
 
 @dataclass(kw_only=True)
+class TextureMeshJob:
+    """A mesh painted from an image with TRELLIS.2's texturing pipeline; the job takes the mesh (glb, obj or ply) and the image."""
+
+    placement: Placement | None = None
+    remove_background: bool | None = None
+    resolution: int | None = None
+    seed: int | None = None
+    texture_sampler: Trellis2Sampler | None = None
+    texture_size: int | None = None
+    unwrap: bool | None = None
+
+
+@dataclass(kw_only=True)
 class TokenizeRequest:
     add_special_tokens: bool | None = True
     model: str | None = None

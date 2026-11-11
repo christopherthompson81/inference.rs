@@ -8,10 +8,12 @@ pub mod decoder;
 pub mod dit;
 #[cfg(feature = "cuda")]
 mod dit_cuda;
+pub mod encoder;
 pub mod glb;
 pub mod mesh;
 #[cfg(feature = "cuda")]
 mod mesh_cuda;
+pub mod mesh_io;
 #[cfg(test)]
 mod parity;
 pub mod pipeline;
@@ -21,7 +23,9 @@ pub mod sparse;
 #[cfg(feature = "cuda")]
 mod sparse_cuda;
 pub mod structure;
+pub mod texturing;
 pub mod vec3;
+pub mod voxelize;
 
 use std::path::Path;
 

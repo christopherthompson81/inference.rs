@@ -13,8 +13,8 @@ use crate::worldmirror::layers::AmpLinear;
 
 const EPS: f64 = 1e-6;
 // the output's final F.layer_norm default
-const OUT_EPS: f64 = 1e-5;
-const CHILDREN: usize = 8;
+pub(super) const OUT_EPS: f64 = 1e-5;
+pub(super) const CHILDREN: usize = 8;
 // a dual vertex sits within its cell grown by this margin on each side
 const VOXEL_MARGIN: f64 = 0.5;
 pub const OUT_CHANNELS: usize = 7;
@@ -42,7 +42,11 @@ pub struct DecoderSpec {
     pub out_channels: usize,
 }
 
-fn layer_norm(c: usize, affine: Option<VarBuilder>, device: &Device) -> Result<LayerNorm> {
+pub(super) fn layer_norm(
+    c: usize,
+    affine: Option<VarBuilder>,
+    device: &Device,
+) -> Result<LayerNorm> {
     Ok(match affine {
         Some(vb) => LayerNorm::new(vb.get(c, "weight")?, vb.get(c, "bias")?, EPS),
         None => LayerNorm::new(
@@ -54,7 +58,7 @@ fn layer_norm(c: usize, affine: Option<VarBuilder>, device: &Device) -> Result<L
 }
 
 // LayerNorm32: in f32, back to the stream's dtype
-fn norm(ln: &LayerNorm, xs: &Tensor) -> Result<Tensor> {
+pub(super) fn norm(ln: &LayerNorm, xs: &Tensor) -> Result<Tensor> {
     ln.forward(&xs.to_dtype(DType::F32)?)?.to_dtype(xs.dtype())
 }
 
@@ -75,7 +79,7 @@ fn bias(linear: &Linear) -> Result<&Tensor> {
 }
 
 // norm then silu
-fn norm_silu(ln: &LayerNorm, xs: &Tensor) -> Result<Tensor> {
+pub(super) fn norm_silu(ln: &LayerNorm, xs: &Tensor) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     if sparse_cuda::fuses(xs) {
         return fused_norm(ln, xs, None, true);
@@ -84,7 +88,7 @@ fn norm_silu(ln: &LayerNorm, xs: &Tensor) -> Result<Tensor> {
 }
 
 /// `SparseConvNeXtBlock3d`: conv, LayerNorm, Linear-SiLU-Linear, residual.
-struct ConvNext {
+pub(super) struct ConvNext {
     conv: SparseConv,
     norm: LayerNorm,
     fc1: AmpLinear,
@@ -92,7 +96,7 @@ struct ConvNext {
 }
 
 impl ConvNext {
-    fn load(c: usize, dtype: DType, vb: VarBuilder) -> Result<Self> {
+    pub(super) fn load(c: usize, dtype: DType, vb: VarBuilder) -> Result<Self> {
         let device = vb.device().clone();
         Ok(Self {
             conv: SparseConv::load(c, c, dtype, vb.pp("conv"))?,
@@ -102,7 +106,7 @@ impl ConvNext {
         })
     }
 
-    fn forward(&self, xs: &Tensor, neighbors: &Neighbors) -> Result<Tensor> {
+    pub(super) fn forward(&self, xs: &Tensor, neighbors: &Neighbors) -> Result<Tensor> {
         #[cfg(feature = "cuda")]
         if sparse_cuda::fuses(xs) {
             let h = fused_norm(

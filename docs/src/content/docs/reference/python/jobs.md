@@ -252,6 +252,21 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `SceneKind.OUTDOOR` | `'outdoor'` |
 
 
+## `TextureMeshJob`
+
+A mesh painted from an image with TRELLIS.2's texturing pipeline; the job takes the mesh (glb, obj or ply) and the image.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `placement` | `Placement \| None` | optional |
+| `remove_background` | `bool \| None` | optional |
+| `resolution` | `int \| None` | optional |
+| `seed` | `int \| None` | optional |
+| `texture_sampler` | `Trellis2Sampler \| None` | optional |
+| `texture_size` | `int \| None` | optional |
+| `unwrap` | `bool \| None` | optional |
+
+
 ## `Trellis2Sampler`
 
 Changes to one TRELLIS.2 flow's sampler; unset fields keep the checkpoint's `pipeline.json` values.
