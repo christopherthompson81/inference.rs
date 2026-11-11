@@ -479,6 +479,9 @@ pub struct ImageTo3dJob {
     /// Faces the exported mesh is simplified to (1,000,000 by default)
     #[serde(default)]
     pub faces: Option<u32>,
+    /// Results to make, 1 to 8 (the `i`th seeded `seed + i`); more than one go in folders `model/1`, `model/2`, ...
+    #[serde(default)]
+    pub samples: Option<u32>,
     /// The sparse structure flow's sampler
     #[serde(default)]
     pub structure_sampler: Option<Trellis2Sampler>,
@@ -1422,8 +1425,8 @@ fn voxels_work(config: &JobsConfig, job: VoxelsJob) -> Result<(Prepare, Work), A
 
 fn image_to_3d_work(config: &JobsConfig, job: ImageTo3dJob) -> Result<(Prepare, Work), ApiError> {
     use crate::image_to_3d::{
-        BakeOptions, DECIMATION_TARGET, FACES_RANGE, ImageTo3dOptions, Settings, Variant,
-        fetch_models, generate_3d_on,
+        BakeOptions, DECIMATION_TARGET, FACES_RANGE, ImageTo3dOptions, MAX_SAMPLES, Settings,
+        Variant, fetch_models, generate_3d_on,
     };
     let variant = match job.variant.unwrap_or_default() {
         Trellis2Variant::Cascade1024 => Variant::Cascade1024,
@@ -1436,8 +1439,14 @@ fn image_to_3d_work(config: &JobsConfig, job: ImageTo3dJob) -> Result<(Prepare, 
         structure: sampler(job.structure_sampler),
         shape: sampler(job.shape_sampler),
         texture: sampler(job.texture_sampler),
+        samples: job.samples.map_or(1, |n| n as usize),
         ..Settings::new(variant, job.seed.unwrap_or(0))
     };
+    if !(1..=MAX_SAMPLES).contains(&settings.samples) {
+        return Err(ApiError::invalid_request(format!(
+            "samples must be 1 to {MAX_SAMPLES}"
+        )));
+    }
     for (stage, choice) in [
         ("structure_sampler", settings.structure),
         ("shape_sampler", settings.shape),
@@ -1495,21 +1504,37 @@ fn image_to_3d_work(config: &JobsConfig, job: ImageTo3dJob) -> Result<(Prepare, 
             .next()
             .ok_or_else(|| anyhow::anyhow!("an image-to-3D job takes one image"))?;
         let out = ctx.dir().join(IMAGE_TO_3D_DIR);
-        let report = generate_3d_on(models, &image, &out, &options, ctx, &device)?;
+        let reports = generate_3d_on(models, &image, &out, &options, ctx, &device)?;
         let dir = ctx.dir();
-        let outputs = [
-            ("model", "model/model.glb"),
-            ("mesh", "model/mesh.ply"),
-            ("prepared image", "model/prepared.png"),
-            ("meta", "model/meta.json"),
-        ]
+        let samples = reports.len();
+        let mut outputs: Vec<JobOutput> = output(
+            dir,
+            &format!("{IMAGE_TO_3D_DIR}/{}", crate::image_to_3d::PREPARED_FILE),
+            "prepared image",
+        )
         .into_iter()
-        .filter_map(|(name, file)| output(dir, file, name))
         .collect();
-        Ok(JobResult {
-            outputs,
-            report: serde_json::to_value(report)?,
-        })
+        for i in 0..samples {
+            let folder = crate::image_to_3d::sample_dir(Path::new(IMAGE_TO_3D_DIR), i, samples);
+            for (name, file) in [
+                ("model", crate::image_to_3d::GLB_FILE),
+                ("mesh", crate::image_to_3d::MESH_FILE),
+                ("meta", crate::image_to_3d::META_FILE),
+            ] {
+                let name = if samples == 1 {
+                    name.to_string()
+                } else {
+                    format!("{name} {}", i + 1)
+                };
+                let file = folder.join(file).to_string_lossy().replace('\\', "/");
+                outputs.extend(output(dir, &file, &name));
+            }
+        }
+        let report = match <[_; 1]>::try_from(reports) {
+            Ok([one]) => serde_json::to_value(one)?,
+            Err(all) => serde_json::json!({ "samples": all }),
+        };
+        Ok(JobResult { outputs, report })
     });
     Ok((prepare, work))
 }

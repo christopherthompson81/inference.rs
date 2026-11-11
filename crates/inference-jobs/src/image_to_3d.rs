@@ -15,7 +15,9 @@ use serde::Serialize;
 
 pub use inference_recon::progress::{NoProgress, Progress};
 pub use inference_recon::trellis2::bake::{BakeOptions, DECIMATION_TARGET};
-pub use inference_recon::trellis2::pipeline::{MAX_STEPS, SamplerChoice, Settings, Variant};
+pub use inference_recon::trellis2::pipeline::{
+    MAX_SAMPLES, MAX_STEPS, SamplerChoice, Settings, Variant,
+};
 
 pub const GLB_FILE: &str = "model.glb";
 pub const MESH_FILE: &str = "mesh.ply";
@@ -140,9 +142,18 @@ pub fn fetch_models(
     })
 }
 
-/// The 3D object in `image` into `out_dir`: `model.glb` (baked: base color and metallic-roughness textures; otherwise
-/// per-vertex base color and alpha as `COLOR_0`, metallic and roughness as custom attributes), `mesh.ply`,
-/// `prepared.png` (the cut-out object) and `meta.json`.
+/// The folder sample `index` of `samples` writes into: `out_dir` itself for a run of one, `out_dir/<index + 1>` otherwise.
+pub fn sample_dir(out_dir: &Path, index: usize, samples: usize) -> PathBuf {
+    if samples == 1 {
+        out_dir.to_path_buf()
+    } else {
+        out_dir.join((index + 1).to_string())
+    }
+}
+
+/// The 3D object in `image` into `out_dir`: `prepared.png` (the cut-out object), and for each sample (see
+/// [`sample_dir`]) `model.glb` (baked: base color and metallic-roughness textures; otherwise per-vertex base color and
+/// alpha as `COLOR_0`, metallic and roughness as custom attributes), `mesh.ply` and `meta.json`. One report per sample.
 pub fn generate_3d_on(
     models: &ImageTo3dModels,
     image: &Path,
@@ -150,7 +161,7 @@ pub fn generate_3d_on(
     options: &ImageTo3dOptions,
     progress: &dyn Progress,
     device: &Device,
-) -> anyhow::Result<ImageTo3dReport> {
+) -> anyhow::Result<Vec<ImageTo3dReport>> {
     let start = Instant::now();
     std::fs::create_dir_all(out_dir)?;
     let (input, removed) = crate::voxels::object_image(
@@ -169,47 +180,69 @@ pub fn generate_3d_on(
     .expect("a whole image")
     .save(&prepared_path)?;
     progress.preview("the object", &prepared_path);
-    // the export's shape half (the bake's preparation, or the vertex-colored mesh's cleanup) runs on its own thread
-    // while the texture is made; the scope joins it on every path
+    // the export's shape half (the bake's preparation, or the vertex-colored mesh's cleanup) runs on a worker thread
+    // while the textures are made, one sample after another; the scope joins it on every path
     enum ShapeHalf {
         Baked(Box<bake::Prepared>),
         Colored(Mesh),
     }
-    let (out, export, glb, mesh) = std::thread::scope(|scope| -> anyhow::Result<_> {
-        let mut shape_half = None;
-        let bake_options = options.bake.map(|b| BakeOptions {
-            decimation_target: options.faces,
-            ..b
-        });
-        let out = pipeline::generate_with(
-            &models.paths,
-            &input,
-            &options.settings,
-            progress,
-            device,
-            &mut |mesh, resolution| {
-                let mesh = mesh.clone();
-                let faces = options.faces;
-                shape_half = Some(scope.spawn(move || {
-                    match bake_options {
+    let samples = options.settings.samples;
+    let bake_options = options.bake.map(|b| BakeOptions {
+        decimation_target: options.faces,
+        ..b
+    });
+    let faces = options.faces;
+    let (outs, export, halves) = std::thread::scope(|scope| -> anyhow::Result<_> {
+        let (shapes, inbox) = std::sync::mpsc::channel::<(usize, Mesh, usize)>();
+        let worker = scope.spawn(move || {
+            inbox
+                .into_iter()
+                .map(|(i, mesh, resolution)| {
+                    let half = match &bake_options {
                         Some(bake_options) => {
-                            bake::prepare(&mesh, resolution, &bake_options, device, &|| {
+                            bake::prepare(&mesh, resolution, bake_options, device, &|| {
                                 progress.cancelled()
                             })
                             .map(|p| ShapeHalf::Baked(Box::new(p)))
                         }
                         None => pipeline::vertex_mesh(&mesh, faces, device).map(ShapeHalf::Colored),
-                    }
-                }));
+                    };
+                    (i, half)
+                })
+                .collect::<Vec<_>>()
+        });
+        let outs = pipeline::generate_with(
+            &models.paths,
+            &input,
+            &options.settings,
+            progress,
+            device,
+            &mut |i, mesh, resolution| {
+                // the worker only stops receiving when it panicked, which the join reports
+                let _ = shapes.send((i, mesh.clone(), resolution));
             },
-        )?;
-        let export = Instant::now();
-        progress.stage("export", 0);
-        let shape_half = shape_half
-            .ok_or_else(|| anyhow::anyhow!("generation never handed on its shape"))?
+        );
+        drop(shapes);
+        let halves = worker
             .join()
-            .map_err(|_| anyhow::anyhow!("the export's shape half panicked"))??;
-        let (glb, mesh) = match shape_half {
+            .map_err(|_| anyhow::anyhow!("the export's shape half panicked"))?;
+        let outs = outs?;
+        Ok((outs, Instant::now(), halves))
+    })?;
+    progress.stage("export", 0);
+    let mut halves: Vec<Option<ShapeHalf>> = {
+        let mut slots: Vec<Option<ShapeHalf>> = (0..samples).map(|_| None).collect();
+        for (i, half) in halves {
+            slots[i] = Some(half?);
+        }
+        slots
+    };
+    let mut reports = Vec::with_capacity(samples);
+    for (i, out) in outs.into_iter().enumerate() {
+        let half = halves[i]
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("generation never handed on sample {i}'s shape"))?;
+        let (glb, mesh) = match half {
             ShapeHalf::Baked(prepared) => {
                 let baked = bake::finish(*prepared, &out.voxels, &out.voxel_attrs)?;
                 (to_textured_glb(&baked), baked.unwrapped.mesh)
@@ -219,26 +252,26 @@ pub fn generate_3d_on(
                 (to_glb(&mesh, &attrs), mesh)
             }
         };
-        Ok((out, export, glb, mesh))
-    })?;
-    let raw_faces = out.mesh.faces.len();
-    std::fs::write(out_dir.join(GLB_FILE), glb)?;
-    std::fs::write(out_dir.join(MESH_FILE), mesh.to_ply())?;
-    let export_seconds = export.elapsed().as_secs_f64();
-    let report = ImageTo3dReport {
-        variant: options.settings.variant.name().to_string(),
-        resolution: out.resolution,
-        seed: options.settings.seed,
-        background_removed: removed,
-        structure_cells: out.structure_cells,
-        latent_cells: out.latent_cells,
-        raw_faces,
-        vertices: mesh.vertices.len(),
-        faces: mesh.faces.len(),
-        texture_size: options.bake.map(|b| b.texture_size),
-        export_seconds,
-        total_seconds: start.elapsed().as_secs_f64(),
-    };
-    std::fs::write(out_dir.join(META_FILE), serde_json::to_vec_pretty(&report)?)?;
-    Ok(report)
+        let dir = sample_dir(out_dir, i, samples);
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join(GLB_FILE), glb)?;
+        std::fs::write(dir.join(MESH_FILE), mesh.to_ply())?;
+        let report = ImageTo3dReport {
+            variant: options.settings.variant.name().to_string(),
+            resolution: out.resolution,
+            seed: options.settings.seed.wrapping_add(i as u64),
+            background_removed: removed,
+            structure_cells: out.structure_cells,
+            latent_cells: out.latent_cells,
+            raw_faces: out.mesh.faces.len(),
+            vertices: mesh.vertices.len(),
+            faces: mesh.faces.len(),
+            texture_size: options.bake.map(|b| b.texture_size),
+            export_seconds: export.elapsed().as_secs_f64(),
+            total_seconds: start.elapsed().as_secs_f64(),
+        };
+        std::fs::write(dir.join(META_FILE), serde_json::to_vec_pretty(&report)?)?;
+        reports.push(report);
+    }
+    Ok(reports)
 }

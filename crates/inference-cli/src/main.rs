@@ -266,6 +266,7 @@ async fn main() -> Result<()> {
             texture_size,
             remesh,
             faces,
+            samples,
             structure_steps,
             structure_guidance,
             structure_guidance_rescale,
@@ -287,8 +288,8 @@ async fn main() -> Result<()> {
         } => {
             use inference_jobs::image_to_3d::Variant;
             use inference_jobs::image_to_3d::{
-                BakeOptions, FACES_RANGE, ImageTo3dOptions, NoProgress, SamplerChoice, Settings,
-                fetch_models, generate_3d_on,
+                BakeOptions, FACES_RANGE, ImageTo3dOptions, MAX_SAMPLES, NoProgress, SamplerChoice,
+                Settings, fetch_models, generate_3d_on, sample_dir,
             };
             use inference_jobs::voxels::needs_background_removal;
             let variant = Variant::parse(&variant).ok_or_else(|| {
@@ -315,8 +316,12 @@ async fn main() -> Result<()> {
                     guidance_rescale: texture_guidance_rescale,
                     rescale_t: texture_rescale_t,
                 },
+                samples,
                 ..Settings::new(variant, seed)
             };
+            if !(1..=MAX_SAMPLES).contains(&samples) {
+                anyhow::bail!("--samples must be 1 to {MAX_SAMPLES}");
+            }
             for (stage, choice) in [
                 ("structure", settings.structure),
                 ("shape", settings.shape),
@@ -350,21 +355,24 @@ async fn main() -> Result<()> {
             } else {
                 inference_tensor::Device::cuda_if_available(0)?
             };
-            let report = generate_3d_on(&models, &image, &out, &options, &NoProgress, &device)?;
-            println!(
-                "{} vertices, {} faces ({} extracted) at {}^3{} in {} ({:.1} s)",
-                report.vertices,
-                report.faces,
-                report.raw_faces,
-                report.resolution,
-                if report.background_removed {
-                    ", background removed"
-                } else {
-                    ""
-                },
-                out.display(),
-                report.total_seconds
-            );
+            let reports = generate_3d_on(&models, &image, &out, &options, &NoProgress, &device)?;
+            for (i, report) in reports.iter().enumerate() {
+                println!(
+                    "{} vertices, {} faces ({} extracted) at {}^3{}, seed {}, in {} ({:.1} s)",
+                    report.vertices,
+                    report.faces,
+                    report.raw_faces,
+                    report.resolution,
+                    if report.background_removed {
+                        ", background removed"
+                    } else {
+                        ""
+                    },
+                    report.seed,
+                    sample_dir(&out, i, reports.len()).display(),
+                    report.total_seconds
+                );
+            }
         }
 
         Command::Voxels {

@@ -14,6 +14,7 @@ TRELLIS.2's textured mesh of the object in the job's one image.
 | `placement` | `Placement \| None` | optional |
 | `remesh` | `bool \| None` | optional |
 | `remove_background` | `bool \| None` | optional |
+| `samples` | `int \| None` | optional |
 | `seed` | `int \| None` | optional |
 | `shape_sampler` | `Trellis2Sampler \| None` | optional |
 | `structure_sampler` | `Trellis2Sampler \| None` | optional |

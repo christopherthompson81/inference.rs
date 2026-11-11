@@ -417,6 +417,10 @@ pub enum Command {
         #[arg(long, default_value_t = inference_jobs::image_to_3d::DECIMATION_TARGET)]
         faces: usize,
 
+        /// Results to make (up to 8), the i-th seeded seed + i; more than one go in folders 1, 2, ... under --out
+        #[arg(long, default_value_t = 1)]
+        samples: usize,
+
         /// The sparse structure flow's sampling steps (pipeline.json's when unset)
         #[arg(long)]
         structure_steps: Option<usize>,

@@ -23,6 +23,7 @@ inference image-to-3d [OPTIONS] --image <IMAGE> --out <OUT>
 | `--texture-size <TEXTURE_SIZE>` | `2048` | The baked textures' width and height |
 | `--remesh` | `false` | Rebuild the surface as a closed shell (narrow-band dual contouring) before baking |
 | `--faces <FACES>` | `1000000` | Faces the exported mesh is simplified to |
+| `--samples <SAMPLES>` | `1` | Results to make (up to 8), the i-th seeded seed + i; more than one go in folders 1, 2, ... under --out |
 | `--structure-steps <STRUCTURE_STEPS>` |  | The sparse structure flow's sampling steps (pipeline.json's when unset) |
 | `--structure-guidance <STRUCTURE_GUIDANCE>` |  | The sparse structure flow's guidance strength (1: none) |
 | `--structure-guidance-rescale <STRUCTURE_GUIDANCE_RESCALE>` |  | The sparse structure flow's guidance rescale, 0 to 1 |

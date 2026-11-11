@@ -33,6 +33,7 @@
   const RECONSTRUCTION_SPLATS = "reconstruction/gaussians.ply";
   // the image jobs' meshes
   const MODEL_GLB = "model/model.glb";
+  const SAMPLE_GLB = /^model\/(\d+)\/model\.glb$/;
   const VOXELS_PLY = "voxels/voxels.ply";
   const VOXELS_MESH = "voxels/mesh.ply";
   const DEFAULT_VOXEL_STEPS = 72;
@@ -66,6 +67,7 @@
   let vertexColors = $state(false);
   let remesh = $state(false);
   let faces = $state<number | null>(null);
+  let samples = $state<number | null>(null);
   // pipeline.json's samplers, shown as placeholders
   const SAMPLER_STAGES = [
     { key: "structure", label: "Structure", defaults: [12, 7.5, 0.7, 5] },
@@ -220,6 +222,7 @@
           texture_size: vertexColors ? null : textureSize,
           remesh: remesh || null,
           faces: typeof faces === "number" && Number.isFinite(faces) ? faces : null,
+          samples: typeof samples === "number" && Number.isFinite(samples) ? samples : null,
           structure_sampler: changed(samplers.structure),
           shape_sampler: changed(samplers.shape),
           texture_sampler: changed(samplers.texture),
@@ -293,6 +296,11 @@
     const made = (file: string) => job.outputs.some((output) => output.file === file);
     const out: { label: string; file: string; format: MeshFormat; flat: boolean }[] = [];
     if (made(MODEL_GLB)) out.push({ label: "View model", file: MODEL_GLB, format: "glb", flat: false });
+    // a job of several samples writes each under model/<n>/
+    for (const output of job.outputs) {
+      const n = output.file.match(SAMPLE_GLB)?.[1];
+      if (n) out.push({ label: `View model ${n}`, file: output.file, format: "glb", flat: false });
+    }
     if (made(VOXELS_PLY)) out.push({ label: "View voxels", file: VOXELS_PLY, format: "ply", flat: true });
     if (made(VOXELS_MESH)) out.push({ label: "View mesh", file: VOXELS_MESH, format: "ply", flat: false });
     return out;
@@ -419,6 +427,12 @@
               <span class="text-[11px] text-gray-500">Seed</span>
               <input type="number" class="w-28 {field}" bind:value={seed} placeholder="0" disabled={busy} />
             </label>
+            {#if mode === "image_to_3d"}
+              <label class="flex flex-col gap-1" title="Each result is seeded one past the last; the models load once for all of them">
+                <span class="text-[11px] text-gray-500">Results</span>
+                <input type="number" min="1" max="8" class="w-20 {field}" bind:value={samples} placeholder="1" disabled={busy} />
+              </label>
+            {/if}
             <label class="flex items-center gap-1.5 pb-1.5 text-sm" title="An opaque photo always has its background removed">
               <input type="checkbox" class="accent-blue-600" bind:checked={removeBackground} disabled={busy} />
               Remove the background of a cut-out too

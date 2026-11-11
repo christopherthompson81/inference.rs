@@ -56,6 +56,12 @@ async fn an_image_to_3d_job_takes_one_image() -> anyhow::Result<()> {
     });
     let refused = queue.submit(&model, few, vec![image()]);
     assert!(refused.is_err_and(|e| e.to_string().contains("faces must be")));
+    let many = JobRequest::ImageTo3d(ImageTo3dJob {
+        samples: Some(9),
+        ..Default::default()
+    });
+    let refused = queue.submit(&model, many, vec![image()]);
+    assert!(refused.is_err_and(|e| e.to_string().contains("samples must be")));
     let parsed: JobRequest =
         serde_json::from_value(serde_json::json!({"kind": "image_to_3d", "variant": "512"}))?;
     assert!(matches!(

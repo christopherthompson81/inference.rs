@@ -89,6 +89,7 @@ export interface ImageTo3dOptions {
   texture_size: number | null;
   remesh: boolean | null;
   faces: number | null;
+  samples: number | null;
   structure_sampler: Trellis2Sampler | null;
   shape_sampler: Trellis2Sampler | null;
   texture_sampler: Trellis2Sampler | null;

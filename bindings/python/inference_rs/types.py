@@ -1398,6 +1398,7 @@ class ImageTo3dJob:
     placement: Placement | None = None
     remesh: bool | None = None
     remove_background: bool | None = None
+    samples: int | None = None
     seed: int | None = None
     shape_sampler: Trellis2Sampler | None = None
     structure_sampler: Trellis2Sampler | None = None

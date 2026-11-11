@@ -6758,6 +6758,15 @@
             ],
             "description": "Remove the background with BiRefNet even when the image has transparency of its own (an opaque image always\nhas it removed)"
           },
+          "samples": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Results to make, 1 to 8 (the `i`th seeded `seed + i`); more than one go in folders `model/1`, `model/2`, ...",
+            "minimum": 0
+          },
           "seed": {
             "type": [
               "integer",

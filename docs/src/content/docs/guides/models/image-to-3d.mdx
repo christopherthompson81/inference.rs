@@ -29,6 +29,7 @@ inference image-to-3d --image chair.png --out chair/ --variant 512 --seed 3
 | `--remesh` | off | Rebuild the surface first as a closed shell (narrow-band dual contouring of the distance to it, as `to_glb`'s remesh): watertight, single-sided, but about half its faces go to the inside of the shell |
 | `--vertex-colors` | off | Per-vertex color and material instead of baked textures: no unwrapping or baking, about 5 s faster |
 | `--faces` | 1000000 | Faces the exported mesh is simplified to (1000 to 10 million) |
+| `--samples` | 1 | Results to make, up to 8: the i-th is seeded `--seed` + i and matches a run of one with that seed; each model loads once for all of them, and more than one go in folders `1`, `2`, ... under `--out` |
 | `--{structure,shape,texture}-steps` | 12 | Sampling steps of that flow (1 to 100) |
 | `--{structure,shape,texture}-guidance` | 7.5, 7.5, 1 | Classifier-free guidance strength (1: none) |
 | `--{structure,shape,texture}-guidance-rescale` | 0.7, 0.5, 0 | How far the guided prediction is rescaled toward the conditioned one's spread (0 to 1) |
@@ -55,7 +56,8 @@ seams don't bleed.
 On an RTX 3090 with an 8-core CPU, the robot example: `1024-cascade` 40 s (the export's cleanup, unwrap and inpainting march
 run on the CPU while the texture is sampled, leaving about 2.5 s after it) at a 6.1 GB GPU peak and 2.5 GB of host
 memory; `--remesh` 45 s at 6.5 GB (its remesh outlasts the texture stage); `--vertex-colors` 38 s. `512` takes
-20 s plus its export, `1024` 38 s at 6.4 GB. `1536-cascade` takes 98 s at 9.4 GB: its 18,700 cells make the second
+20 s plus its export, `1024` 38 s at 6.4 GB. Two samples of `1024-cascade` take 76 s, against 82 s for two runs, at
+the same peaks. `1536-cascade` takes 98 s at 9.4 GB: its 18,700 cells make the second
 shape pass and the texture pass several times longer (attention grows with the square of the cells). The reference's
 `1536_cascade` runs out of memory on the same 24 GB GPU.
 
@@ -73,7 +75,8 @@ material is opaque, and double-sided unless remeshed. With `--vertex-colors`, gl
 and roughness factors are the vertices' means.
 
 As a server job: `{"kind": "image_to_3d"}` with one image, optionally `seed`, `variant` (`"1024_cascade"`,
-`"1536_cascade"`, `"1024"` or `"512"`), `remove_background`, `vertex_colors`, `texture_size`, `remesh`, `faces`, and
+`"1536_cascade"`, `"1024"` or `"512"`), `remove_background`, `vertex_colors`, `texture_size`, `remesh`, `faces`, `samples` (several go under `model/1`,
+`model/2`, ..., the report then a `samples` list), and
 `structure_sampler`, `shape_sampler` and `texture_sampler` (each with optional `steps`, `guidance_strength`,
 `guidance_rescale` and `rescale_t`); outputs under `model/`. The web UI's 3D tab has these under **Advanced**.
 
