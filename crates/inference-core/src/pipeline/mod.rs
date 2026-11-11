@@ -180,8 +180,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 pub use transcription::{
-    DiarizationLoader, DiarizationLoaderType, TranscriptionLoader, TranscriptionLoaderType,
-    TranscriptionPipeline, VoiceActivityLoader, write_asr_gguf,
+    DiarizationLoader, DiarizationLoaderType, LanguageIdLoader, TranscriptionLoader,
+    TranscriptionLoaderType, TranscriptionPipeline, VoiceActivityLoader, write_asr_gguf,
 };
 
 pub type SpeechPreparation = Box<dyn FnOnce() -> std::result::Result<(), String> + Send>;
@@ -1004,6 +1004,7 @@ pub enum ModelCategory {
     Transcription,
     VoiceActivity,
     Diarization,
+    LanguageId,
     Speech,
     Embedding,
 }
@@ -1019,6 +1020,7 @@ impl std::fmt::Debug for ModelCategory {
             ModelCategory::Transcription => write!(f, "ModelCategory::Transcription"),
             ModelCategory::VoiceActivity => write!(f, "ModelCategory::VoiceActivity"),
             ModelCategory::Diarization => write!(f, "ModelCategory::Diarization"),
+            ModelCategory::LanguageId => write!(f, "ModelCategory::LanguageId"),
             ModelCategory::Speech => write!(f, "ModelCategory::Speech"),
             ModelCategory::Embedding => write!(f, "ModelCategory::Embedding"),
         }
@@ -1033,6 +1035,7 @@ impl PartialEq for ModelCategory {
             (Self::Transcription, Self::Transcription) => true,
             (Self::VoiceActivity, Self::VoiceActivity) => true,
             (Self::Diarization, Self::Diarization) => true,
+            (Self::LanguageId, Self::LanguageId) => true,
             (Self::Speech, Self::Speech) => true,
             (Self::Diffusion, Self::Diffusion) => true,
             (Self::Embedding, Self::Embedding) => true,
@@ -1043,6 +1046,7 @@ impl PartialEq for ModelCategory {
                 | Self::Transcription
                 | Self::VoiceActivity
                 | Self::Diarization
+                | Self::LanguageId
                 | Self::Speech
                 | Self::Embedding,
                 _,
@@ -1114,6 +1118,10 @@ pub enum ForwardInputsResult {
     Diarization {
         results: Vec<Result<inference_models_speech::diarization::Diarization, String>>,
     },
+    /// One result per sequence, as for transcripts.
+    LanguageId {
+        results: Vec<Result<inference_models_speech::voxlingua::LanguageIdentification, String>>,
+    },
 }
 
 impl ForwardInputsResult {
@@ -1150,6 +1158,9 @@ impl ForwardInputsResult {
             Self::Diarization { results } => Ok(Self::Diarization {
                 results: vec![results[bs_idx].clone()],
             }),
+            Self::LanguageId { results } => Ok(Self::LanguageId {
+                results: vec![results[bs_idx].clone()],
+            }),
         }
     }
 
@@ -1169,7 +1180,8 @@ impl ForwardInputsResult {
             Self::BlockGeneration { .. }
             | Self::Transcription { .. }
             | Self::VoiceActivity { .. }
-            | Self::Diarization { .. } => Ok(self.clone()),
+            | Self::Diarization { .. }
+            | Self::LanguageId { .. } => Ok(self.clone()),
         }
     }
 

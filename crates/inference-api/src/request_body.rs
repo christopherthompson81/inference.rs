@@ -63,6 +63,7 @@ json_requests!(
     inference_protocol::openai::TranscriptionRequest,
     inference_protocol::openai::TranscriptionSessionRequest,
     inference_protocol::openai::VoiceActivityRequest,
+    inference_protocol::openai::LanguageIdRequest,
     inference_protocol::openai::DiarizationRequest,
     inference_core::SerializedSession,
     crate::agentic::ApprovalDecisionRequest,

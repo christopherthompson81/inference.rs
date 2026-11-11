@@ -480,6 +480,17 @@ voice_activity(
 
 The speech segments of encoded audio; unset request fields keep the reference defaults.
 
+### `Engine.language_id`
+
+```text
+language_id(
+    audio: bytes,
+    request: types.LanguageIdRequest | str = '{}',
+) -> types.LanguageIdResponse
+```
+
+The likeliest spoken languages of encoded audio (five unless the request's top_k says otherwise).
+
 ### `Engine.resolve_approval`
 
 ```text
@@ -1007,6 +1018,14 @@ voice_activity(request_json: str, audio: bytes) -> str
 ```
 
 The speech segments of encoded audio, from a voice activity model.
+
+### `JsonEngine.language_id`
+
+```text
+language_id(request_json: str, audio: bytes) -> str
+```
+
+The likeliest spoken languages of encoded audio, from a language identification model.
 
 ### `JsonEngine._call2`
 

@@ -1,11 +1,11 @@
 ---
 title: Speech models
-description: Parakeet, Whisper, Qwen3-ASR, Nemotron 3.5 Transcribe, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime for speech transcription and audio chat, Silero for voice activity, Nemotron-3 and Sortformer for speaker diarization, Dia, Kokoro and Qwen3-TTS (with voice cloning) for text-to-speech.
+description: Parakeet, Whisper, Qwen3-ASR, Nemotron 3.5 Transcribe, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime for speech transcription and audio chat, Silero for voice activity, VoxLingua107 for spoken language identification, Nemotron-3 and Sortformer for speaker diarization, Dia, Kokoro and Qwen3-TTS (with voice cloning) for text-to-speech.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-inference.rs supports twelve speech-related model families:
+inference.rs supports thirteen speech-related model families:
 
 - **Parakeet**: NVIDIA's FastConformer speech recognisers (CTC, RNN-T and TDT heads), and the cache-aware
   Nemotron streaming ASR, served via `/v1/audio/transcriptions` with word and segment timestamps.
@@ -14,6 +14,8 @@ inference.rs supports twelve speech-related model families:
 - **Nemotron-3 Diarization**: who speaks when (up to 8 speakers), served via `/v1/audio/diarization`.
 - **Streaming Sortformer v2**: who speaks when (up to 4 speakers), from its `.nemo`, also via `/v1/audio/diarization`.
 - **Silero VAD**: voice activity detection, served via `/v1/audio/vad`; it also cuts long recordings for Parakeet.
+- **VoxLingua107**: spoken language identification over 107 languages (SpeechBrain's ECAPA-TDNN), served via
+  `/v1/audio/language`; it also names a transcription's language for the recogniser.
 - **Qwen3-ASR**: an audio-in decoder that transcribes 30 languages, through `/v1/audio/transcriptions`
   (whole-clip segments, no word timestamps) or `/v1/chat/completions`.
 - **Nemotron 3.5 Transcribe**: an audio-in decoder on Nemotron-H (30B-A4B) with a speaker branch, through
@@ -391,6 +393,81 @@ for segment in &activity.segments {
 
 </TabItem>
 </Tabs>
+
+## VoxLingua107: spoken language identification
+
+SpeechBrain's `speechbrain/lang-id-voxlingua107-ecapa` (Apache 2.0, about 85 MB) reads a clip as one of the 107
+languages of the VoxLingua107 corpus: a 60-mel filterbank, an ECAPA-TDNN pooled into a 256-value utterance
+embedding, and a classifier over the languages. It loads from the repo as published (its `hyperparams.yaml`, label
+encoder and two torch checkpoints), from the Hub or a local directory, and runs in F32 on the CPU or a GPU. Audio at
+other rates is resampled to 16 kHz, and a clip past a minute is read for its first minute (accuracy has long leveled
+off by then).
+
+```bash
+inference serve -m speechbrain/lang-id-voxlingua107-ecapa
+```
+
+The response lists the likeliest languages (five unless `top_k` says otherwise; 0 lists all 107) with ISO 639-1
+codes, and marks it `ambiguous` when the top language is under even odds: a short clip, mixed languages, music or
+noise. `return_embedding` adds the pooled embedding, for clustering clips by language. Accuracy rises with the
+length of speech; a few seconds is usually enough, and clips of rule-based synthetic speech (espeak) read poorly.
+
+<Tabs>
+<TabItem label="HTTP">
+
+```bash
+curl http://localhost:1234/v1/audio/language -F file=@clip.wav -F top_k=3
+```
+
+```json
+{"language": "de", "probability": 0.988, "ambiguous": false, "duration": 6.15,
+ "languages": [{"language": "de", "name": "German", "probability": 0.988},
+               {"language": "iw", "name": "Hebrew", "probability": 0.006},
+               {"language": "yi", "name": "Yiddish", "probability": 0.005}]}
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+spec = t.EngineSpec(model=t.ModelSelectedLanguageId(model_id="speechbrain/lang-id-voxlingua107-ecapa"))
+
+with ir.Engine(spec) as engine:
+    with open("clip.wav", "rb") as f:
+        identified = engine.language_id(f.read(), t.LanguageIdRequest(top_k=3))
+    print(identified.language, identified.probability)
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use inference::{LanguageIdModelBuilder, LanguageIdRequest};
+
+let model = LanguageIdModelBuilder::new("speechbrain/lang-id-voxlingua107-ecapa").build().await?;
+let identified = model.language_id(LanguageIdRequest::new(), &std::fs::read("clip.wav")?).await?;
+println!("{} {:.3}", identified.language, identified.probability);
+```
+
+</TabItem>
+</Tabs>
+
+### Naming a transcription's language
+
+A transcription request with `language_model` and no `language` runs the identifier over the first minute of the
+upload, tells the recogniser the language it finds (Whisper, Qwen3-ASR, Nemotron-3.5; `de` names Nemotron-3.5's
+`de-DE`), and returns it as the response's `language` where the recogniser reports none of its own. A language the
+recogniser does not take (an English-only Whisper given German) transcribes as if `language` were unset, and a
+`language` the request names wins over the identifier. Serve both models together, for example with
+`inference from-config` and two `[[models]]` entries:
+
+```bash
+curl http://localhost:1234/v1/audio/transcriptions -F file=@clip.wav -F model=openai/whisper-small \
+  -F language_model=speechbrain/lang-id-voxlingua107-ecapa -F response_format=verbose_json
+```
+
+`scripts/voxlingua_parity.sh` checks a build against SpeechBrain's `EncoderClassifier` on given clips: the
+filterbank, the embedding (cosine) and the posterior (largest difference) must match.
 
 ## Whisper: speech recognition
 

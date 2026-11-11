@@ -574,11 +574,11 @@ impl Whisper {
         padded.resize(padded.len() + WINDOW_SAMPLES, 0.0);
         let frames = self.log_mel.frames(&padded, LogMelMax::Clip);
         let n_mels = self.log_mel.n_mels;
-        let mut language = options
-            .language
-            .as_deref()
-            .map(|l| self.language_code(l))
-            .transpose()?;
+        let mut language = match options.language.as_deref() {
+            Some(l) if options.language_identified => self.language_code(l).ok(),
+            Some(l) => Some(self.language_code(l)?),
+            None => None,
+        };
         if !self.multilingual() {
             language.get_or_insert_with(|| ENGLISH.to_string());
         }

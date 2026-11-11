@@ -174,6 +174,10 @@ pub use inference_models_speech::{
     qwen3_tts::Sampling as Qwen3TtsSampling,
     silero::{SegmentOptions, VoiceActivity},
     utils as speech_utils,
+    voxlingua::{
+        Language, LanguageIdentification, LanguageProbability,
+        MAX_SECONDS as LANGUAGE_ID_MAX_SECONDS,
+    },
 };
 pub use inference_quant::parse_isq_value;
 pub use inference_quant::{IsqBits, IsqType};
@@ -204,8 +208,8 @@ pub use pipeline::{
     DiffusionLoader, DiffusionLoaderBuilder, DiffusionLoaderType, EmbeddingLoader,
     EmbeddingLoaderBuilder, EmbeddingLoaderType, EmbeddingModelPaths, EmbeddingSpecificConfig,
     GGMLLoader, GGMLLoaderBuilder, GGMLSpecificConfig, GGUFLoader, GGUFLoaderBuilder,
-    GGUFSpecificConfig, HfConfigOverrides, IsqOrganization, LoadOptions, Loader, LocalModelPaths,
-    MAX_REFERENCE_IMAGES, Modalities, ModelKind, ModelPaths, MultimodalLoader,
+    GGUFSpecificConfig, HfConfigOverrides, IsqOrganization, LanguageIdLoader, LoadOptions, Loader,
+    LocalModelPaths, MAX_REFERENCE_IMAGES, Modalities, ModelKind, ModelPaths, MultimodalLoader,
     MultimodalLoaderBuilder, MultimodalLoaderType, MultimodalPromptPrefixer,
     MultimodalSpecificConfig, NormalLoader, NormalLoaderBuilder, NormalLoaderType,
     NormalSpecificConfig, ReferenceImages, ResolvedLoraAdapter, SpeechLoader, SpeechLoaderType,

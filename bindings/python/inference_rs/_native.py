@@ -151,6 +151,7 @@ SIGNATURES = {
     "inference_transcription_session_finish": (status, (c_void_p, out, out)),
     "inference_transcription_session_free": (None, (c_void_p,)),
     "inference_voice_activity": (status, (c_void_p, *buffer, *buffer, out)),
+    "inference_language_id": (status, (c_void_p, *buffer, *buffer, out)),
     "inference_diarization": (status, (c_void_p, *buffer, *buffer, out)),
     "inference_diarization_stream_open": (status, (c_void_p, *buffer, *buffer, out)),
     "inference_approval_resolve": (status, (c_void_p, *buffer, *buffer, out)),

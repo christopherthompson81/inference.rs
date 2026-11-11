@@ -46,6 +46,10 @@ pub const TRANSCRIPTION_STOPPED: &str = "the transcription was stopped";
 pub struct TranscriptionOptions {
     /// The audio's language, for a model that takes one; others identify it themselves.
     pub language: Option<String>,
+    /// `language` came from a language identifier rather than the request: one this model does not take transcribes
+    /// as if unset.
+    #[serde(default)]
+    pub language_identified: bool,
     /// Beam search over this many hypotheses (Whisper, and a transducer: RNN-T, TDT); unset or 1 decodes greedily.
     pub beam_size: Option<usize>,
     /// Whisper's beam patience: finished hypotheses wait for `beam_size * patience` of them (1 when unset).

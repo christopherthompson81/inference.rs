@@ -30,6 +30,7 @@ use inference_models_speech::parakeet::{
     self, MODEL_TYPES, Parakeet, ParakeetFiles, ParakeetStream, QuantPolicy, is_asr, is_asr_gguf,
 };
 use inference_models_speech::silero::{SegmentOptions, SileroVad, is_silero_gguf, read_gguf};
+use inference_models_speech::voxlingua::{self, VoxLingua, VoxLinguaFiles};
 use inference_models_speech::whisper::{self, Whisper, WhisperFiles};
 use inference_quant::IsqType;
 use inference_tensor::{Device, Tensor};
@@ -284,6 +285,7 @@ enum AudioModel {
     Whisper(Box<Whisper>),
     Silero(SileroVad),
     Diarizer(Diarizer),
+    LanguageId(Box<VoxLingua>),
 }
 
 impl AudioModel {
@@ -293,6 +295,7 @@ impl AudioModel {
             Self::Whisper(asr) => asr.device(),
             Self::Silero(vad) => vad.device(),
             Self::Diarizer(diarizer) => diarizer.device(),
+            Self::LanguageId(lid) => lid.device(),
         }
     }
 }
@@ -621,6 +624,58 @@ impl Loader for VoiceActivityLoader {
     }
 }
 
+/// Loads a SpeechBrain ECAPA-TDNN language identifier (VoxLingua107): a directory or Hugging Face repo holding its
+/// `hyperparams.yaml`, label encoder and two checkpoints.
+pub struct LanguageIdLoader {
+    pub model_id: String,
+}
+
+impl Loader for LanguageIdLoader {
+    fn load_model_from_hf(
+        &self,
+        revision: Option<String>,
+        token_source: TokenSource,
+        options: LoadOptions<'_>,
+    ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        let _progress_guard = ProgressScopeGuard::new(options.silent);
+        let revision = revision.unwrap_or_else(|| "main".to_string());
+        let api = crate::pipeline::hf::build_api(&token_source, !options.silent)?.repo(
+            Repo::with_revision(self.model_id.clone(), RepoType::Model, revision.clone()),
+        );
+        let id = std::path::Path::new(&self.model_id);
+        let get = |file: &str| crate::pipeline::hf::get_file(&api, id, file, &revision);
+        let files = VoxLinguaFiles {
+            hyperparams: get(voxlingua::HYPERPARAMS)?,
+            labels: get(voxlingua::LABELS)?,
+            embedding_model: get(voxlingua::EMBEDDING_MODEL)?,
+            classifier: get(voxlingua::CLASSIFIER)?,
+        };
+        let model = VoxLingua::load(&files, options.device)?;
+        Ok(Arc::new(Mutex::new(TranscriptionPipeline::new(
+            self.model_id.clone(),
+            AudioModel::LanguageId(Box::new(model)),
+            inference_tensor::DType::F32,
+        )?)))
+    }
+
+    fn load_model_from_path(
+        &self,
+        _paths: &dyn ModelPaths,
+        options: LoadOptions<'_>,
+    ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        crate::pipeline::loading::ensure_cuda_kernels(std::slice::from_ref(options.device))?;
+        self.load_model_from_hf(None, TokenSource::None, options)
+    }
+
+    fn get_id(&self) -> String {
+        self.model_id.clone()
+    }
+
+    fn get_kind(&self) -> ModelKind {
+        ModelKind::Normal
+    }
+}
+
 impl Loader for TranscriptionLoader {
     fn load_model_from_hf(
         &self,
@@ -838,7 +893,9 @@ impl TranscriptionPipeline {
         // a VAD answers with times, not text
         let output = match model {
             AudioModel::Parakeet { .. } | AudioModel::Whisper(_) => vec![SupportedModality::Text],
-            AudioModel::Silero(_) | AudioModel::Diarizer(_) => Vec::new(),
+            AudioModel::Silero(_) | AudioModel::Diarizer(_) | AudioModel::LanguageId(_) => {
+                Vec::new()
+            }
         };
         // the models measured to hold under bf16 matmul inputs (nemo_investigation.md, Runs 46 and 48): Parakeet TDT v3's
         // offline encoder and decoder, its words unchanged over 10 minutes, and Nemotron-3's diarizer, 0.14 % moved
@@ -1110,6 +1167,16 @@ impl Pipeline for TranscriptionPipeline {
                     })
                     .collect(),
             },
+            AudioModel::LanguageId(lid) => ForwardInputsResult::LanguageId {
+                results: audios
+                    .iter()
+                    .map(|input| {
+                        let audio = input.audio();
+                        lid.identify(&audio.mono(), audio.sample_rate)
+                            .map_err(|e| e.to_string())
+                    })
+                    .collect(),
+            },
         })
     }
 
@@ -1132,6 +1199,7 @@ impl Pipeline for TranscriptionPipeline {
             AudioModel::Parakeet { .. } | AudioModel::Whisper(_) => ModelCategory::Transcription,
             AudioModel::Silero(_) => ModelCategory::VoiceActivity,
             AudioModel::Diarizer(_) => ModelCategory::Diarization,
+            AudioModel::LanguageId(_) => ModelCategory::LanguageId,
         }
     }
 }

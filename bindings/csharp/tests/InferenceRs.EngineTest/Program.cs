@@ -25,6 +25,7 @@ internal static class Program
     // a streamed session's pieces: 100 ms of 16-bit samples, across the tiny model's chunks
     private const int PcmPiece = 3200;
     private const string SileroDir = "silero";
+    private const string LanguageIdDir = "language_id";
     private const string DiarizationDir = "diarization";
     private const int ToneRate = 16000;
     private const double ToneHz = 440.0;
@@ -66,6 +67,7 @@ internal static class Program
         StreamedAudioTranscribes(Path.Combine(model, StreamingDir), Path.Combine(model, ParakeetDir));
         VoiceActivityFindsTheSpeech(Path.Combine(model, SileroDir));
         DiarizationNamesWhoSpeaks(Path.Combine(model, DiarizationDir));
+        LanguageIdNamesTheLanguage(Path.Combine(model, LanguageIdDir));
 
         Console.WriteLine(failures == 0 ? "all engine checks passed" : $"{failures} engine checks failed");
         return failures == 0 ? 0 : 1;
@@ -489,6 +491,20 @@ internal static class Program
         // a zero threshold makes every chunk speech, so the clip is one segment whatever the weights
         var activity = JsonNode.Parse(engine.VoiceActivity("""{"threshold": 0.0, "neg_threshold": -1.0}""", ToneWav()))!;
         Check("voice activity finds one segment", (activity["segments"] as JsonArray)?.Count == 1);
+    }
+
+    private static void LanguageIdNamesTheLanguage(string languageId)
+    {
+        var spec = new JsonObject
+        {
+            ["model"] = new JsonObject { ["LanguageId"] = new JsonObject { ["model_id"] = languageId } },
+            ["runtime"] = new JsonObject { ["device"] = "cpu" },
+        }.ToJsonString();
+        using var engine = InferenceEngine.Load(spec);
+        // the fixture's first language wins whatever the audio
+        var identified = JsonNode.Parse(engine.LanguageId("""{"top_k": 0}""", ToneWav()))!;
+        Check("language id names the fixture's language", identified["language"]?.GetValue<string>() == "de");
+        Check("language id lists every language", (identified["languages"] as JsonArray)?.Count == 2);
     }
 
     private static void DiarizationNamesWhoSpeaks(string diarization)

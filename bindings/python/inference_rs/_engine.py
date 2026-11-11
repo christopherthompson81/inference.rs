@@ -498,6 +498,18 @@ class JsonEngine:
             )
         return take_string(response)
 
+    def language_id(self, request_json: str, audio: bytes) -> str:
+        """The likeliest spoken languages of encoded audio, from a language identification model."""
+        request = text_arg(request_json)
+        audio = bytes_arg(audio)
+        response = ctypes.c_void_p()
+        with Lease(self._handle) as engine:
+            check(
+                lib.inference_language_id(engine, request, len(request), audio, len(audio), ctypes.byref(response)),
+                "inference_language_id",
+            )
+        return take_string(response)
+
     def _call2(self, name: str, first: str, second: str) -> str:
         return take_string(self._pair(name, first, second))
 

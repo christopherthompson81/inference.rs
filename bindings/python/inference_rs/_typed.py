@@ -260,6 +260,10 @@ class Engine:
         """The speech segments of encoded audio; unset request fields keep the reference defaults."""
         return from_json(types.VoiceActivityResponse, self.json.voice_activity(to_json(request), audio))
 
+    def language_id(self, audio: bytes, request: types.LanguageIdRequest | str = "{}") -> types.LanguageIdResponse:
+        """The likeliest spoken languages of encoded audio (five unless the request's top_k says otherwise)."""
+        return from_json(types.LanguageIdResponse, self.json.language_id(to_json(request), audio))
+
     def resolve_approval(
         self, approval_id: str, decision: types.ApprovalDecisionRequest | str
     ) -> types.ApprovalDecisionResponse:

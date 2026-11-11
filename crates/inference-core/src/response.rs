@@ -40,6 +40,7 @@ pub enum Response {
     TranscriptionStream(crate::TranscriptionStreamUpdate),
     VoiceActivity(inference_models_speech::silero::VoiceActivity),
     Diarization(inference_models_speech::diarization::Diarization),
+    LanguageId(inference_models_speech::voxlingua::LanguageIdentification),
     // Raw
     Raw {
         logits_chunks: Vec<Tensor>,

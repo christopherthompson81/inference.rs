@@ -85,6 +85,7 @@ fn transcription() -> TranscriptionRequest {
         diarization_model: None,
         overlap_pass: None,
         alignment_model: None,
+        language_model: None,
         task: Default::default(),
     }
 }

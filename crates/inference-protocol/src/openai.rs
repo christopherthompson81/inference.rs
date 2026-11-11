@@ -1379,6 +1379,8 @@ pub enum ModelCategory {
     VoiceActivity,
     /// Speaker diarization
     Diarization,
+    /// Spoken language identification
+    LanguageId,
     /// Speech synthesis
     Speech,
     Embedding,
@@ -2392,6 +2394,12 @@ pub struct TranscriptionRequest {
     #[serde(default)]
     #[schema(example = "aligner")]
     pub alignment_model: Option<String>,
+    /// A language identification model (VoxLingua107) that names the language when `language` is unset; the
+    /// recognizer is told it, and the response's `language` gives it. A language the recognizer does not take
+    /// transcribes as if unset. An inference.rs extension.
+    #[serde(default)]
+    #[schema(example = "language-id")]
+    pub language_model: Option<String>,
     /// `translate` writes an English translation (Whisper); `/v1/audio/translations` sets it. An inference.rs
     /// extension.
     #[serde(default)]
@@ -2414,6 +2422,7 @@ impl TranscriptionRequest {
             diarization_model: None,
             overlap_pass: None,
             alignment_model: None,
+            language_model: None,
             task: TranscriptionTask::Transcribe,
         }
     }
@@ -2592,6 +2601,68 @@ pub struct VoiceActivityResponse {
     /// Speech probability per chunk, when asked for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probabilities: Option<Vec<f32>>,
+}
+
+/// Spoken language identification request; the audio travels beside it (a multipart `file` over HTTP). A clip past
+/// a minute is read for its first minute.
+#[derive(Debug, Clone, inference_json::FromJson, Serialize, ToSchema)]
+pub struct LanguageIdRequest {
+    /// The language identification model to use.
+    #[serde(default = "default_model")]
+    #[schema(example = "default")]
+    pub model: String,
+    /// How many of the likeliest languages to list (5); 0 lists every language the model knows.
+    #[serde(default)]
+    pub top_k: Option<usize>,
+    /// Also return the pooled utterance embedding the classifier reads (256 values for VoxLingua107).
+    #[serde(default)]
+    pub return_embedding: bool,
+}
+
+impl LanguageIdRequest {
+    /// A request for the default model's five likeliest languages.
+    pub fn new() -> Self {
+        Self {
+            model: default_model(),
+            top_k: None,
+            return_embedding: false,
+        }
+    }
+}
+
+impl Default for LanguageIdRequest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A language and how likely the audio is in it.
+#[derive(Debug, Clone, PartialEq, inference_json::FromJson, Serialize, ToSchema)]
+pub struct LanguageScore {
+    /// ISO 639-1 code (639-3 where a language has no two-letter code).
+    #[schema(example = "en")]
+    pub language: String,
+    #[schema(example = "English")]
+    pub name: String,
+    pub probability: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, inference_json::FromJson, Serialize, ToSchema)]
+pub struct LanguageIdResponse {
+    /// The likeliest language's code.
+    #[schema(example = "en")]
+    pub language: String,
+    /// Its probability.
+    pub probability: f32,
+    /// The likeliest language is under even odds: the clip may be another language, mixed, or not speech.
+    pub ambiguous: bool,
+    /// Seconds of audio read.
+    pub duration: f64,
+    /// The likeliest languages, likeliest first.
+    pub languages: Vec<LanguageScore>,
+    /// The pooled utterance embedding, when asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Vec<f32>>,
 }
 
 /// What a diarization answers with.

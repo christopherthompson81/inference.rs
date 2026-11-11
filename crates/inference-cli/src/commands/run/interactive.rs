@@ -9,8 +9,8 @@ use inference_api::{
     engine_chat::ReasoningEffort,
     lora_adapters::ListLoraAdaptersQuery,
     openai::{
-        DiarizationRequest, DiarizationResponseFormat, ImageGenerationRequest, ModelCategory,
-        SpeechGenerationRequest, TranscriptionRequest, TranscriptionResponseFormat,
+        DiarizationRequest, DiarizationResponseFormat, ImageGenerationRequest, LanguageIdRequest,
+        ModelCategory, SpeechGenerationRequest, TranscriptionRequest, TranscriptionResponseFormat,
         VoiceActivityRequest,
     },
 };
@@ -80,6 +80,15 @@ Commands:
 const VOICE_ACTIVITY_INTERACTIVE_HELP: &str = r#"
 Welcome to interactive mode! Because this model is a voice activity model, you can enter the path of an audio
 file (WAV, MP3, FLAC, ...) and the model will list where it speaks.
+
+Commands:
+- `/help`: Display this message.
+- `/exit`: Quit interactive mode.
+"#;
+
+const LANGUAGE_ID_INTERACTIVE_HELP: &str = r#"
+Welcome to interactive mode! Because this model is a language identification model, you can enter the path of an
+audio file (WAV, MP3, FLAC, ...) and the model will list the languages it is likeliest spoken in.
 
 Commands:
 - `/help`: Display this message.
@@ -267,6 +276,7 @@ pub async fn interactive_mode(engine: &Engine, config: InteractiveConfig) {
         Some(ModelCategory::Transcription) => transcription_interactive_mode(engine).await,
         Some(ModelCategory::VoiceActivity) => voice_activity_interactive_mode(engine).await,
         Some(ModelCategory::Diarization) => diarization_interactive_mode(engine).await,
+        Some(ModelCategory::LanguageId) => language_id_interactive_mode(engine).await,
         Some(ModelCategory::Embedding) => error!(
             "Embedding models do not support interactive mode. Use the server or Python/Rust APIs."
         ),
@@ -667,6 +677,45 @@ async fn voice_activity_interactive_mode(engine: &Engine) {
                     activity.segments.len(),
                     activity.duration
                 );
+            }
+            Err(e) => error!("{e}"),
+        }
+        println!();
+    }
+    editor.save_history(&history_file_path()).unwrap();
+}
+
+async fn language_id_interactive_mode(engine: &Engine) {
+    println!("{BANNER}{LANGUAGE_ID_INTERACTIVE_HELP}{BANNER}");
+    let mut editor = open_editor();
+    loop {
+        let path = match read_line(&mut editor, "audio file> ").trim() {
+            "" => continue,
+            HELP_CMD => {
+                println!("{BANNER}{LANGUAGE_ID_INTERACTIVE_HELP}{BANNER}");
+                continue;
+            }
+            EXIT_CMD => break,
+            path => path.to_string(),
+        };
+        let identified = async {
+            let audio = fs::read(&path)?;
+            engine
+                .language_id(LanguageIdRequest::new(), &audio)
+                .await
+                .map_err(anyhow::Error::msg)
+        };
+        match identified.await {
+            Ok(identified) => {
+                for scored in &identified.languages {
+                    println!(
+                        "{:>4} {:<16} {:.3}",
+                        scored.language, scored.name, scored.probability
+                    );
+                }
+                if identified.ambiguous {
+                    println!("(ambiguous: the likeliest language is under even odds)");
+                }
             }
             Err(e) => error!("{e}"),
         }

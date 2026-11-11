@@ -34,6 +34,7 @@
 //! | Speech recognition | [`TranscriptionModelBuilder`] | `examples/rust/models/transcription/` |
 //! | Voice activity detection | [`VoiceActivityModelBuilder`] | `examples/rust/models/voice_activity/` |
 //! | Speaker diarization | [`DiarizationModelBuilder`] | `examples/rust/models/diarization/` |
+//! | Spoken language identification | [`LanguageIdModelBuilder`] | `examples/rust/models/language_id/` |
 //! | Embeddings | [`EmbeddingModelBuilder`] | `examples/rust/getting_started/embedding/` |
 //! | Structured output | [`Model::generate_structured`] | `examples/rust/advanced/json_schema/` |
 //! | Tool calling | [`Tool`], [`ToolChoice`] | `examples/rust/advanced/tools/` |
@@ -213,6 +214,7 @@ mod embedding;
 mod embedding_model;
 pub mod error;
 mod gguf;
+mod language_id_model;
 mod lora_model;
 mod model;
 mod multi_model;
@@ -231,6 +233,7 @@ pub use embedding::EmbeddingRequestBuilder;
 pub use embedding_model::{EmbeddingModelBuilder, UqffEmbeddingModelBuilder};
 pub use gguf::GgufModelBuilder;
 pub use inference_api::transcription_session::TranscriptionSession;
+pub use language_id_model::LanguageIdModelBuilder;
 pub use load::{IsqBits, MemoryGpuConfig, PagedAttentionMetaBuilder, ToolCallback};
 pub use lora_model::LoraModelBuilder;
 pub use model::{ChatEventStream, Model};
@@ -275,12 +278,12 @@ pub use inference_api::{
         DecisionUsage, DiarizationOutput, DiarizationRequest, DiarizationResponse,
         DiarizationResponseFormat, DiarizationSegment, EmbeddingRequest, EmbeddingResponse,
         EmbeddingVector, Grammar, ImageEditRequest, ImageGenerationRequest, ImageReference,
-        OpenAiTool, RerankDocument, RerankRequest, RerankResponse, RerankResult,
-        SpeechGenerationRequest, SpeechSegment, StopTokens, TimestampGranularity,
-        TranscriptionDelta, TranscriptionOutput, TranscriptionRequest, TranscriptionResponse,
-        TranscriptionResponseFormat, TranscriptionSegment, TranscriptionSessionRequest,
-        TranscriptionTask, TranscriptionWord, VerboseTranscriptionResponse, VoiceActivityRequest,
-        VoiceActivityResponse,
+        LanguageIdRequest, LanguageIdResponse, LanguageScore, OpenAiTool, RerankDocument,
+        RerankRequest, RerankResponse, RerankResult, SpeechGenerationRequest, SpeechSegment,
+        StopTokens, TimestampGranularity, TranscriptionDelta, TranscriptionOutput,
+        TranscriptionRequest, TranscriptionResponse, TranscriptionResponseFormat,
+        TranscriptionSegment, TranscriptionSessionRequest, TranscriptionTask, TranscriptionWord,
+        VerboseTranscriptionResponse, VoiceActivityRequest, VoiceActivityResponse,
     },
     response::{
         ChatCompletionChunkResponse, ChatCompletionResponse, ChunkChoice, Delta,

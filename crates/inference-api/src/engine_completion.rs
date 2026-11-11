@@ -331,6 +331,7 @@ impl CompletionStream {
             | Response::Speech { .. }
             | Response::Transcription(_)
             | Response::VoiceActivity(_)
+            | Response::LanguageId(_)
             | Response::Diarization(_)
             | Response::TranscriptionStream(_)
             | Response::Raw { .. }

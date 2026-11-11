@@ -188,6 +188,8 @@ GROUPS = [
                 "VerboseTranscription",
                 "TimestampGranularity",
                 "VoiceActivity",
+                "LanguageId",
+                "LanguageScore",
                 "SpeechSegment",
                 "Diarization",
                 "Calibration",

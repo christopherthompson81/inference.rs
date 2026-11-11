@@ -4,10 +4,11 @@ use base64::Engine as _;
 use futures::future::BoxFuture;
 use inference_core::{
     AudioInput, Diarization, DiarizationOptions, DiffusionGenerationParams, ImageChoice,
-    ImageGenerationResponse, ImageGenerationResponseFormat, InferenceRs, MAX_REFERENCE_IMAGES,
-    NormalRequest, ReferenceImages, Request, RequestMessage, Response, SamplingParams,
-    SegmentOptions, SpeakerSegment, SpeechOptions, SpeechReference, TimedText, Transcription,
-    TranscriptionOptions, VoiceActivity, WordTimestampsRequest,
+    ImageGenerationResponse, ImageGenerationResponseFormat, InferenceRs, LANGUAGE_ID_MAX_SECONDS,
+    LanguageIdentification, MAX_REFERENCE_IMAGES, NormalRequest, ReferenceImages, Request,
+    RequestMessage, Response, SamplingParams, SegmentOptions, SpeakerSegment, SpeechOptions,
+    SpeechReference, TimedText, Transcription, TranscriptionOptions, VoiceActivity,
+    WordTimestampsRequest,
     speech_utils::{self, Sample},
 };
 
@@ -26,11 +27,12 @@ use crate::{
     openai::{
         AudioResponseFormat, DiarizationOutput, DiarizationRequest, DiarizationResponse,
         DiarizationResponseFormat, DiarizationSegment, ImageEditRequest, ImageGenerationRequest,
-        SpeechGenerationRequest, SpeechSegment, SpeechWithTimestamps, SpeechWord,
-        TimestampGranularity, TranscriptionOutput, TranscriptionRequest, TranscriptionResponse,
-        TranscriptionResponseFormat, TranscriptionSegment, TranscriptionTask, TranscriptionWord,
-        VerboseTranscriptionResponse, VoiceActivityRequest, VoiceActivityResponse,
-        diarization_rttm, transcript_srt, transcript_vtt,
+        LanguageIdRequest, LanguageIdResponse, LanguageScore, SpeechGenerationRequest,
+        SpeechSegment, SpeechWithTimestamps, SpeechWord, TimestampGranularity, TranscriptionOutput,
+        TranscriptionRequest, TranscriptionResponse, TranscriptionResponseFormat,
+        TranscriptionSegment, TranscriptionTask, TranscriptionWord, VerboseTranscriptionResponse,
+        VoiceActivityRequest, VoiceActivityResponse, diarization_rttm, transcript_srt,
+        transcript_vtt,
     },
     operations::TokenizeRequest,
     overlap_pass::{PassContext, noting_windows, overlap_pass},
@@ -54,6 +56,10 @@ const SENTENCE_ENDS: [char; 4] = ['.', '?', '!', '\u{3002}'];
 const SEGMENT_PAUSE_SECONDS: f64 = 1.5;
 // unpunctuated transcripts (the English CTC and RNN-T checkpoints) still break into subtitle-sized segments
 const MAX_SEGMENT_SECONDS: f64 = 30.0;
+
+// a language identifier's default list, and the top probability under which its answer is marked ambiguous
+const DEFAULT_LANGUAGE_TOP_K: usize = 5;
+const AMBIGUOUS_BELOW: f32 = 0.5;
 
 // Speech models emit f32 samples; PCM output is signed 16-bit little-endian.
 const PCM_SAMPLE_FORMAT: &str = "s16le";
@@ -480,12 +486,23 @@ async fn transcribe_inner(
 ) -> Result<TranscriptionOutput, ApiError> {
     check_beam(&request)?;
     let audio = decode_audio(audio)?;
+    let mut request = request;
+    let identified = identify_language_of(state, &mut request, &audio).await?;
     let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
     let model = (request.model != DEFAULT_MODEL_ID).then_some(request.model.as_str());
     let transcriber = state
         .audio_transcriber(model)
         .map_err(|error| ApiError::from_error(&error, ApiErrorKind::InvalidRequest))?;
     if let Some(transcriber) = transcriber {
+        // an identified language the decoder's prompt does not take leaves it to identify the language itself
+        if identified
+            && request
+                .language
+                .as_deref()
+                .is_some_and(|l| (transcriber.prompt)(Some(l)).is_err())
+        {
+            request.language = None;
+        }
         if request.task == TranscriptionTask::Translate {
             return Err(ApiError::new(
                 ApiErrorKind::InvalidRequest,
@@ -539,7 +556,10 @@ async fn transcribe_inner(
         let speakers = word_speakers(&transcript.words, &diarization.segments);
         return render_transcript(&request, transcript, Some(&speakers));
     }
-    let options = decode_options(&request);
+    let options = TranscriptionOptions {
+        language_identified: identified,
+        ..decode_options(&request)
+    };
     let speech = |audio, progress| RequestMessage::Transcription {
         audio,
         options: options.clone(),
@@ -579,6 +599,44 @@ async fn transcribe_inner(
     let (transcript, speakers) =
         overlap_pass(ctx, audio, transcript, &diarization.segments).await?;
     render_transcript(&request, transcript, Some(&speakers))
+}
+
+/// With `language_model` and no `language`, the language identified in `audio`'s first minute becomes the request's;
+/// whether it did.
+pub(crate) async fn identify_language_of(
+    state: &SharedInferenceRsState,
+    request: &mut TranscriptionRequest,
+    audio: &AudioInput,
+) -> Result<bool, ApiError> {
+    let (None, Some(model)) = (&request.language, request.language_model.clone()) else {
+        return Ok(false);
+    };
+    let lid_request = LanguageIdRequest {
+        model: model.clone(),
+        ..LanguageIdRequest::new()
+    };
+    let repr = serde_json::to_string(&lid_request).map_err(|_| ApiError::internal())?;
+    let read =
+        LANGUAGE_ID_MAX_SECONDS * audio.sample_rate as usize * usize::from(audio.channels.max(1));
+    let head = AudioInput {
+        samples: audio.samples[..audio.samples.len().min(read)].to_vec(),
+        ..*audio
+    };
+    let identified = spoken_language(state, &model, repr, head)
+        .await
+        .map_err(|error| {
+            ApiError::new(
+                ApiErrorKind::InvalidRequest,
+                format!("`language_model` `{model}`: {}", error.message),
+                Some("language_id_failed"),
+                Some("language_model"),
+            )
+        })?;
+    request.language = identified
+        .languages
+        .first()
+        .map(|top| top.language.code.clone());
+    Ok(true)
 }
 
 /// The decoding a transcription request asks for, over the whole audio.
@@ -1032,6 +1090,63 @@ fn voice_activity_response(activity: VoiceActivity, probabilities: bool) -> Voic
     }
 }
 
+/// The spoken language of encoded `audio`, from a language identification model.
+pub(crate) fn identify_language<'a>(
+    state: &'a SharedInferenceRsState,
+    request: LanguageIdRequest,
+    audio: &'a [u8],
+) -> BoxFuture<'a, Result<LanguageIdResponse, ApiError>> {
+    Box::pin(identify_language_inner(state, request, audio))
+}
+
+async fn identify_language_inner(
+    state: &SharedInferenceRsState,
+    request: LanguageIdRequest,
+    audio: &[u8],
+) -> Result<LanguageIdResponse, ApiError> {
+    let audio = decode_audio(audio)?;
+    let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
+    let identified = spoken_language(state, &request.model, repr, audio).await?;
+    let top_k = match request.top_k.unwrap_or(DEFAULT_LANGUAGE_TOP_K) {
+        0 => identified.languages.len(),
+        k => k,
+    };
+    let top = identified
+        .languages
+        .first()
+        .ok_or_else(ApiError::internal)?;
+    Ok(LanguageIdResponse {
+        language: top.language.code.clone(),
+        probability: top.probability,
+        ambiguous: top.probability < AMBIGUOUS_BELOW,
+        duration: identified.duration,
+        languages: identified
+            .languages
+            .iter()
+            .take(top_k)
+            .map(|scored| LanguageScore {
+                language: scored.language.code.clone(),
+                name: scored.language.name.clone(),
+                probability: scored.probability,
+            })
+            .collect(),
+        embedding: request.return_embedding.then_some(identified.embedding),
+    })
+}
+
+// a language identifier's posterior over decoded audio
+pub(crate) async fn spoken_language(
+    state: &SharedInferenceRsState,
+    model: &str,
+    repr: String,
+    audio: AudioInput,
+) -> Result<LanguageIdentification, ApiError> {
+    match run(state, model, repr, RequestMessage::LanguageId { audio }).await? {
+        Response::LanguageId(identified) => Ok(identified),
+        _ => Err(unexpected(state)),
+    }
+}
+
 /// Who speaks when in encoded `audio`, from a diarization model, as JSON or RTTM.
 pub(crate) fn diarize<'a>(
     state: &'a SharedInferenceRsState,
@@ -1207,21 +1322,7 @@ mod tests {
     // an audio-in decoder's transcript has no word timings: its subtitles are the whole clip as one cue
     #[test]
     fn a_transcript_without_words_is_one_segment() -> anyhow::Result<()> {
-        let request = TranscriptionRequest {
-            model: DEFAULT_MODEL_ID.to_string(),
-            language: None,
-            prompt: None,
-            response_format: TranscriptionResponseFormat::Srt,
-            temperature: None,
-            timestamp_granularities: Vec::new(),
-            beam_size: None,
-            patience: None,
-            condition_on_previous_text: None,
-            diarization_model: None,
-            overlap_pass: None,
-            alignment_model: None,
-            task: TranscriptionTask::Transcribe,
-        };
+        let request = TranscriptionRequest::new(TranscriptionResponseFormat::Srt);
         let transcript = Transcription {
             text: "The quick brown fox.".to_string(),
             tokens: Vec::new(),

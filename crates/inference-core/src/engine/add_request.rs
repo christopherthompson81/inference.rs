@@ -142,6 +142,10 @@ impl MessageExtras {
                 extras.audios = Some(vec![take_audio(audio)]);
                 extras.one_shot = Some(OneShotParams::VoiceActivity(options.clone()));
             }
+            RequestMessage::LanguageId { audio } => {
+                extras.seq_step_type = SeqStepType::OneShot;
+                extras.audios = Some(vec![take_audio(audio)]);
+            }
             RequestMessage::Diarization {
                 audio,
                 options,
@@ -707,6 +711,7 @@ impl Engine {
             ) => Ok(()),
             (ModelCategory::VoiceActivity, RequestMessage::VoiceActivity { .. }) => Ok(()),
             (ModelCategory::Diarization, RequestMessage::Diarization { .. }) => Ok(()),
+            (ModelCategory::LanguageId, RequestMessage::LanguageId { .. }) => Ok(()),
             (ModelCategory::Speech, RequestMessage::SpeechGeneration { .. }) => {
                 options_check.map_err(|err| Box::new(Response::ValidationError(err.into())))
             }
@@ -971,6 +976,7 @@ impl Engine {
             RequestMessage::Transcription { .. }
             | RequestMessage::TranscriptionStream { .. }
             | RequestMessage::VoiceActivity { .. }
+            | RequestMessage::LanguageId { .. }
             | RequestMessage::Diarization { .. } => Ok((vec![u32::MAX], String::new())),
             RequestMessage::EmbeddingPair { .. } => {
                 unreachable!("a pair is encoded by encode_pair")

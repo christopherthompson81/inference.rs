@@ -103,6 +103,10 @@ name = "voice_activity"
 path = "models/voice_activity/main.rs"
 
 [[example]]
+name = "language_id"
+path = "models/language_id/main.rs"
+
+[[example]]
 name = "transcription"
 path = "models/transcription/main.rs"
 

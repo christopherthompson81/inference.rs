@@ -334,6 +334,72 @@
         }
       }
     },
+    "/v1/audio/language": {
+      "post": {
+        "tags": [
+          "inference.rs"
+        ],
+        "summary": "Language identification endpoint handler: the likeliest spoken languages of an upload.",
+        "operationId": "language_id",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "description": "The multipart form `/v1/audio/language` takes.",
+                "required": [
+                  "file",
+                  "request"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "The audio to identify: WAV, MP3, FLAC, OGG and the other formats symphonia decodes."
+                  },
+                  "request": {
+                    "type": "object",
+                    "description": "Spoken language identification request; the audio travels beside it (a multipart `file` over HTTP). A clip past\na minute is read for its first minute.",
+                    "properties": {
+                      "model": {
+                        "type": "string",
+                        "description": "The language identification model to use.",
+                        "example": "default"
+                      },
+                      "return_embedding": {
+                        "type": "boolean",
+                        "description": "Also return the pooled utterance embedding the classifier reads (256 values for VoxLingua107)."
+                      },
+                      "top_k": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ],
+                        "description": "How many of the likeliest languages to list (5); 0 lists every language the model knows.",
+                        "minimum": 0
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Likeliest languages",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LanguageIdResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/audio/speech": {
       "post": {
         "tags": [
@@ -429,6 +495,14 @@
                           "null"
                         ],
                         "description": "The audio's language (`de-DE`, `de`), for Nemotron-3.5; unset lets it identify the language. Parakeet ignores it."
+                      },
+                      "language_model": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "A language identification model (VoxLingua107) that names the language when `language` is unset; the\nrecognizer is told it, and the response's `language` gives it. A language the recognizer does not take\ntranscribes as if unset. An inference.rs extension.",
+                        "example": "language-id"
                       },
                       "model": {
                         "type": "string",
@@ -565,6 +639,14 @@
                           "null"
                         ],
                         "description": "The audio's language (`de-DE`, `de`), for Nemotron-3.5; unset lets it identify the language. Parakeet ignores it."
+                      },
+                      "language_model": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "A language identification model (VoxLingua107) that names the language when `language` is unset; the\nrecognizer is told it, and the response's `language` gives it. A language the recognizer does not take\ntranscribes as if unset. An inference.rs extension.",
+                        "example": "language-id"
                       },
                       "model": {
                         "type": "string",
@@ -7625,6 +7707,102 @@
           "schema": {}
         }
       },
+      "LanguageIdRequest": {
+        "type": "object",
+        "description": "Spoken language identification request; the audio travels beside it (a multipart `file` over HTTP). A clip past\na minute is read for its first minute.",
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "The language identification model to use.",
+            "example": "default"
+          },
+          "return_embedding": {
+            "type": "boolean",
+            "description": "Also return the pooled utterance embedding the classifier reads (256 values for VoxLingua107)."
+          },
+          "top_k": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "How many of the likeliest languages to list (5); 0 lists every language the model knows.",
+            "minimum": 0
+          }
+        }
+      },
+      "LanguageIdResponse": {
+        "type": "object",
+        "required": [
+          "language",
+          "probability",
+          "ambiguous",
+          "duration",
+          "languages"
+        ],
+        "properties": {
+          "ambiguous": {
+            "type": "boolean",
+            "description": "The likeliest language is under even odds: the clip may be another language, mixed, or not speech."
+          },
+          "duration": {
+            "type": "number",
+            "format": "double",
+            "description": "Seconds of audio read."
+          },
+          "embedding": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "number",
+              "format": "float"
+            },
+            "description": "The pooled utterance embedding, when asked for."
+          },
+          "language": {
+            "type": "string",
+            "description": "The likeliest language's code.",
+            "example": "en"
+          },
+          "languages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LanguageScore"
+            },
+            "description": "The likeliest languages, likeliest first."
+          },
+          "probability": {
+            "type": "number",
+            "format": "float",
+            "description": "Its probability."
+          }
+        }
+      },
+      "LanguageScore": {
+        "type": "object",
+        "description": "A language and how likely the audio is in it.",
+        "required": [
+          "language",
+          "name",
+          "probability"
+        ],
+        "properties": {
+          "language": {
+            "type": "string",
+            "description": "ISO 639-1 code (639-3 where a language has no two-letter code).",
+            "example": "en"
+          },
+          "name": {
+            "type": "string",
+            "example": "English"
+          },
+          "probability": {
+            "type": "number",
+            "format": "float"
+          }
+        }
+      },
       "LayoutDetectRequest": {
         "type": "object",
         "description": "A page to find the layout regions of.",
@@ -8042,6 +8220,7 @@
           "transcription",
           "voice_activity",
           "diarization",
+          "language_id",
           "layout"
         ]
       },
@@ -8622,6 +8801,7 @@
           "transcription",
           "voice_activity",
           "diarization",
+          "language_id",
           "speech",
           "embedding"
         ]
@@ -9937,6 +10117,28 @@
               "VoiceActivity": {
                 "type": "object",
                 "description": "Select a voice activity detection model: a Silero VAD GGUF file, a directory or HF repo holding one",
+                "required": [
+                  "model_id"
+                ],
+                "properties": {
+                  "model_id": {
+                    "type": "string",
+                    "description": "Model ID to load from. This may be a HF hub repo or a local path."
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Select a spoken language identifier: a SpeechBrain ECAPA-TDNN classifier (VoxLingua107), a directory or HF repo",
+            "required": [
+              "LanguageId"
+            ],
+            "properties": {
+              "LanguageId": {
+                "type": "object",
+                "description": "Select a spoken language identifier: a SpeechBrain ECAPA-TDNN classifier (VoxLingua107), a directory or HF repo",
                 "required": [
                   "model_id"
                 ],
@@ -15467,6 +15669,14 @@
               "null"
             ],
             "description": "The audio's language (`de-DE`, `de`), for Nemotron-3.5; unset lets it identify the language. Parakeet ignores it."
+          },
+          "language_model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A language identification model (VoxLingua107) that names the language when `language` is unset; the\nrecognizer is told it, and the response's `language` gives it. A language the recognizer does not take\ntranscribes as if unset. An inference.rs extension.",
+            "example": "language-id"
           },
           "model": {
             "type": "string",

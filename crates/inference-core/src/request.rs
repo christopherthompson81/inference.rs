@@ -111,6 +111,10 @@ pub enum RequestMessage {
         audio: AudioInput,
         options: inference_models_speech::silero::SegmentOptions,
     },
+    LanguageId {
+        #[serde(skip)]
+        audio: AudioInput,
+    },
     Diarization {
         #[serde(skip)]
         audio: AudioInput,

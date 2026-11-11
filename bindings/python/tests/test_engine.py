@@ -234,6 +234,7 @@ class EngineTest(unittest.TestCase):
 PARAKEET_DIR = "parakeet"
 STREAMING_DIR = "parakeet_streaming"
 SILERO_DIR = "silero"
+LANGUAGE_ID_DIR = "language_id"
 DIARIZATION_DIR = "diarization"
 TONE_RATE = 16000
 TONE_HZ = 440.0
@@ -337,6 +338,21 @@ class TranscriptionTest(unittest.TestCase):
             activity = json.loads(engine.voice_activity(request, tone_wav()))
             self.assertEqual(len(activity["segments"]), 1)
             self.assertEqual(len(activity["probabilities"]), TONE_RATE // 512 + 1)
+
+    def test_language_id_names_the_language(self):
+        model = os.environ.get(MODEL_VARIABLE)
+        if not model:
+            self.skipTest(f"{MODEL_VARIABLE} is not set")
+        spec = json.dumps(
+            {"model": {"LanguageId": {"model_id": os.path.join(model, LANGUAGE_ID_DIR)}}, "runtime": {"device": "cpu"}}
+        )
+        with ir.JsonEngine(spec) as engine:
+            # the fixture's first language wins whatever the audio
+            identified = json.loads(engine.language_id(json.dumps({"top_k": 0, "return_embedding": True}), tone_wav()))
+            self.assertEqual(identified["language"], "de")
+            self.assertEqual(len(identified["languages"]), 2)
+            self.assertFalse(identified["ambiguous"])
+            self.assertTrue(identified["embedding"])
 
     def test_diarization_names_who_speaks(self):
         model = os.environ.get(MODEL_VARIABLE)

@@ -216,6 +216,13 @@ impl BlockingEngine {
         })
     }
 
+    pub fn language_id_json(&self, request: &[u8], audio: &[u8]) -> Result<String, ApiError> {
+        let audio = audio.to_vec();
+        self.call(request, |engine, request| async move {
+            engine.language_id_json(&request, &audio).await
+        })
+    }
+
     pub fn diarization_json(
         &self,
         request: &[u8],

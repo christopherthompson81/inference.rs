@@ -126,6 +126,8 @@ pub const VOICE_ACTIVITY_ROUTE: RouteInfo =
     RouteInfo::new("/v1/audio/vad", "POST", RouteKind::InferenceRs);
 pub const DIARIZATION_ROUTE: RouteInfo =
     RouteInfo::new("/v1/audio/diarization", "POST", RouteKind::InferenceRs);
+pub const LANGUAGE_ID_ROUTE: RouteInfo =
+    RouteInfo::new("/v1/audio/language", "POST", RouteKind::InferenceRs);
 pub const AGENT_APPROVAL_ROUTE: RouteInfo = RouteInfo::new(
     "/v1/agent/approvals/{approval_id}",
     "POST",
@@ -220,6 +222,7 @@ pub const INFERENCE_RS_API_ROUTES: &[RouteInfo] = &[
     REALTIME_ROUTE,
     VOICE_ACTIVITY_ROUTE,
     DIARIZATION_ROUTE,
+    LANGUAGE_ID_ROUTE,
     FILES_ROUTE,
     FILE_ROUTE,
     FILE_CONTENT_ROUTE,
