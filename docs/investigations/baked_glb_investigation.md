@@ -561,3 +561,31 @@ cascade's attention work (cells squared). The reference's `1536_cascade` failed 
 3090, so there is no reference time to set beside ours.
 
 Next: the variants are in the CLI, the job API and the web UI's select.
+
+## Run 25 - 2026-11-11
+
+Question: does the person's model look "metallic", and do the two suggested fixes help: a higher texture guidance
+(the reference runs the texture flow without guidance) or clamping metallic at export?
+
+Commands: `inference image-to-3d --image prepared.png --samples 4 --seed 0` with the texture sampler at guidance 1
+(default), 2, 3, 5, and 3 with rescale 0.7 (about 125 s each for the four); `measure.py` reads each GLB's textures at
+its vertices' UVs; `shots.py` renders GLBs through the web viewer's three.js setup (RoomEnvironment, neutral tone
+mapping) under Playwright, with overrides for metallic, roughness, exposure and lights.
+
+| texture guidance | base color (seed 0) | metallic, seeds 0-3 | roughness, seeds 0-3 |
+|---|---|---|---|
+| 1 | 0.169 0.131 0.115 | 0.013 0.002 0.005 0.011 | 0.67 0.80 0.78 0.80 |
+| 2 | 0.176 0.136 0.119 | 0.010 0.002 0.008 0.013 | 0.68 0.80 0.78 0.80 |
+| 3 | 0.183 0.140 0.123 | 0.011 0.003 0.010 0.016 | 0.68 0.80 0.78 0.80 |
+| 5 | 0.193 0.149 0.131 | 0.011 0.012 0.013 0.021 | 0.69 0.79 0.78 0.80 |
+| 3, rescale 0.7 | 0.189 0.147 0.129 | 0.011 0.003 0.010 0.016 | 0.68 0.80 0.78 0.80 |
+
+The server job's GLB: metallic 0.017 (0.3% of vertices above 0.5), roughness 0.73, base color 0.174 0.133 0.116.
+
+Rendered: forcing metallic to 0 changes nothing visible; roughness 1 takes off a slight sheen. Exposure 1.6 (or the
+environment at 1.5 with a key light) brings the clothing to about the photo's mid gray. Guidance 3 and 5 sharpen
+details the photo has (buttons, belt) and brighten the base color by up to ~14%, without changing metallic.
+
+Finding: the model is not metallic; the dark look is its albedo (about half the photo's brightness, Run 23) under the
+viewer's lighting. A metallic clamp would do nothing here. Levers: the viewer's exposure, and texture guidance 3-5 for
+crisper texture detail.
