@@ -109,6 +109,11 @@ unsafe extern "C" {
     fn xatlasDestroy(atlas: *mut XAtlas);
     fn xatlasAddMesh(atlas: *mut XAtlas, decl: *const XMeshDecl, mesh_count_hint: u32) -> u32;
     fn xatlasComputeCharts(atlas: *mut XAtlas, options: *const XChartOptions);
+    fn xatlasSetProgressCallback(
+        atlas: *mut XAtlas,
+        func: extern "C" fn(category: i32, progress: i32, user: *mut c_void) -> bool,
+        user: *mut c_void,
+    );
     fn xatlasPackCharts(atlas: *mut XAtlas, options: *const XPackOptions);
     fn xatlasMeshDeclInit(decl: *mut XMeshDecl);
     fn xatlasChartOptionsInit(options: *mut XChartOptions);
@@ -180,11 +185,27 @@ pub struct Options {
 
 /// Charts, parameterizes and packs `meshes` with xatlas's default chart and pack options, as CuMesh does.
 pub fn unwrap(meshes: &[MeshInput]) -> Result<AtlasOutput, Error> {
-    unwrap_with(meshes, Options::default())
+    unwrap_with(meshes, Options::default(), &|| false)
 }
 
-/// [`unwrap`] with `options`.
-pub fn unwrap_with(meshes: &[MeshInput], options: Options) -> Result<AtlasOutput, Error> {
+/// The error an unwrap returns when `stop` asked it to.
+pub const STOPPED: &str = "cancelled";
+
+type Stop<'a> = &'a (dyn Fn() -> bool + Sync);
+
+// xatlas's progress callback, which continues while it returns true; `user` is the caller's `Stop`
+extern "C" fn keep_going(_category: i32, _progress: i32, user: *mut c_void) -> bool {
+    // SAFETY: `unwrap_with` passes a pointer to its `Stop`, which outlives the atlas
+    let stop = unsafe { &*(user as *const Stop) };
+    !stop()
+}
+
+/// [`unwrap`] with `options`, giving up when `stop` returns true (xatlas asks it as it reports progress).
+pub fn unwrap_with(
+    meshes: &[MeshInput],
+    options: Options,
+    stop: Stop,
+) -> Result<AtlasOutput, Error> {
     // SAFETY: the atlas is created here and freed by `Atlas`'s drop; every pointer handed to xatlas outlives the call
     // that reads it (xatlasAddMesh copies the mesh), and the output arrays are read before the atlas is destroyed
     unsafe {
@@ -203,13 +224,21 @@ pub fn unwrap_with(meshes: &[MeshInput], options: Options) -> Result<AtlasOutput
                 return Err(Error(format!("xatlas could not add mesh {i}: error {err}")));
             }
         }
+        let stop_ref: *const Stop = &stop;
+        xatlasSetProgressCallback(atlas.0, keep_going, stop_ref as *mut c_void);
         let mut chart = std::mem::zeroed::<XChartOptions>();
         xatlasChartOptionsInit(&mut chart);
         chart.single_chart = options.single_chart;
         xatlasComputeCharts(atlas.0, &chart);
+        if stop() {
+            return Err(Error(STOPPED.into()));
+        }
         let mut pack = std::mem::zeroed::<XPackOptions>();
         xatlasPackOptionsInit(&mut pack);
         xatlasPackCharts(atlas.0, &pack);
+        if stop() {
+            return Err(Error(STOPPED.into()));
+        }
         let a = &*atlas.0;
         let (w, h) = (a.width as f32, a.height as f32);
         let out_meshes = (0..a.mesh_count as usize)
@@ -279,5 +308,18 @@ mod tests {
         assert_eq!(mesh.invalid_charts, 0);
         assert!(mesh.xref.iter().all(|&x| x < 8));
         assert!(mesh.uvs.iter().flatten().all(|&c| (0.0..=1.0).contains(&c)));
+    }
+
+    #[test]
+    fn a_stop_request_gives_up() {
+        let positions = [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        let triangles = [[0u32, 1, 2]];
+        let input = [MeshInput {
+            positions: &positions,
+            triangles: &triangles,
+        }];
+        let stopped = unwrap_with(&input, Options::default(), &|| true);
+        assert!(matches!(stopped, Err(Error(ref e)) if e == STOPPED));
+        assert!(unwrap_with(&input, Options::default(), &|| false).is_ok());
     }
 }

@@ -361,6 +361,7 @@ fn charts_match_the_reference() -> Result<()> {
         super::charts::CONE_HALF_ANGLE,
         super::charts::AREA_PENALTY,
         super::charts::PERIMETER_AREA_PENALTY,
+        &|| false,
     );
     let count = |c: &[u32]| c.iter().max().map_or(0, |&m| m as usize + 1);
     let (a, b) = (chart_roots(&ours), chart_roots(&theirs));
@@ -1295,9 +1296,13 @@ fn single_chart_unwrap_is_compared() -> Result<()> {
     for (degrees, single_chart) in modes {
         let cone = full * degrees / 90.0;
         let start = std::time::Instant::now();
-        let u =
-            super::charts::uv_unwrap_with(&mesh, cone, inference_xatlas::Options { single_chart })
-                .map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
+        let u = super::charts::uv_unwrap_with(
+            &mesh,
+            cone,
+            inference_xatlas::Options { single_chart },
+            &|| false,
+        )
+        .map_err(|e| inference_tensor::Error::Msg(e.to_string()))?;
         let seconds = start.elapsed().as_secs_f64();
         let (coverage, empty) = uv_coverage(&u.mesh.faces, &u.uvs);
         let (islands, boundary, stretch, worst) = unwrap_measures(&u);

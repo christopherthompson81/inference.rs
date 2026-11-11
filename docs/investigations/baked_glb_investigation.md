@@ -499,3 +499,20 @@ Fix (the single-chart default only; the reference path stays CuMesh's): `split_l
 `MAX_SINGLE_CHART_FACES` (20000) into connected pieces of at most that many faces, grown breadth first over shared
 edges. The flat-sheet unit case checks the cap, connectedness and that small charts pass through. The image: 24.5 s
 end to end (export 3.5 s), its texture whole; the robot's GLB byte-identical (no cluster over the cap), 41.3 s.
+
+## Run 22 - 2026-11-11
+
+Question: another export stuck on the LAN server (the robot at 512, seed 324980, texture 1024), and its Cancel did
+nothing. perf on the server: `compute_charts` (its rounds' closures, the pair sort, `acosf`). A round counter on the
+same mesh (968023 faces): 10315 rounds; the first merge 293772, 157240, 102542, ... pairs, then from ~35K charts one
+merge a round for ~10000 rounds, each a full pass over the mesh. A pair merges only as each chart's cheapest, so a
+large chart takes one of the fragments around it a round. CuMesh runs the same rounds on the GPU.
+
+- Once a round merges fewer than 1 in 50 charts, `merge_incrementally` carries on from that round's graph (pairs,
+  shared boundaries, cones, areas) with the same rule, recomputing only the merged charts and their neighbours.
+  The mesh: 7.3 s for the whole unwrap at 30 degrees, 10.9 s with CuMesh's 90; `charts_match_the_reference` against
+  CuMesh still 67145 vs 67139 charts, seams 566.1 vs 565.6; the robot's GLB byte-identical, 40.4 s. The job end to end:
+  20.7 s.
+- Cancel never reached the export (it is checked between generation steps). `bake::prepare` now takes a stop check
+  (the job's cancel): between its steps, in every clustering round and incremental round, and in xatlas through its
+  progress callback, whose false return stops it (`inference_xatlas::STOPPED`; a case checks it gives up).

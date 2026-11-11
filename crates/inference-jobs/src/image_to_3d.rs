@@ -187,8 +187,10 @@ pub fn generate_3d_on(
                 shape_half = Some(scope.spawn(move || {
                     match bake_options {
                         Some(bake_options) => {
-                            bake::prepare(&mesh, resolution, bake_options, device)
-                                .map(|p| ShapeHalf::Baked(Box::new(p)))
+                            bake::prepare(&mesh, resolution, bake_options, device, &|| {
+                                progress.cancelled()
+                            })
+                            .map(|p| ShapeHalf::Baked(Box::new(p)))
                         }
                         None => pipeline::vertex_mesh(&mesh, device).map(ShapeHalf::Colored),
                     }
