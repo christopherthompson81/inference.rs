@@ -14886,6 +14886,20 @@
             "description": "The text content to convert to speech.",
             "example": "[S1] Dia is an open weights text to dialogue model. [S2] You get full control over scripts and voices. [S1] Wow. Amazing. (laughs) [S2] Try it now on Git hub or Hugging Face."
           },
+          "instructions": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How to speak: tone, emotion, pace (Qwen3-TTS 1.7B); a VoiceDesign model reads the voice itself from it.\nOther models ignore it."
+          },
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The language to speak, by name (`english`, `chinese`, ...; Qwen3-TTS). Unset, the model picks it."
+          },
           "model": {
             "type": "string",
             "description": "The TTS model to use for audio generation.",
@@ -14928,7 +14942,7 @@
               "string",
               "null"
             ],
-            "description": "A voice the model ships (Kokoro: e.g. `af_heart`; several, comma-separated, are blended). Dia ignores it.",
+            "description": "A voice the model ships (Kokoro: e.g. `af_heart`, several comma-separated are blended; Qwen3-TTS CustomVoice:\ne.g. `ryan`). Dia ignores it.",
             "example": "af_heart"
           }
         }
@@ -14950,6 +14964,7 @@
               "integer",
               "null"
             ],
+            "description": "Dia's audio tokens, or Qwen3-TTS's 80 ms frames.",
             "minimum": 0
           },
           "speed": {
@@ -14988,7 +15003,8 @@
         "type": "string",
         "enum": [
           "dia",
-          "kokoro"
+          "kokoro",
+          "qwen3_tts"
         ]
       },
       "SpeechSegment": {

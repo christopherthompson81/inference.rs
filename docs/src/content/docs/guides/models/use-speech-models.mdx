@@ -1,6 +1,6 @@
 ---
 title: Speech models
-description: Parakeet, Whisper, Qwen3-ASR, Nemotron 3.5 Transcribe, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime for speech transcription and audio chat, Silero for voice activity, Nemotron-3 and Sortformer for speaker diarization, Dia and Kokoro for text-to-speech.
+description: Parakeet, Whisper, Qwen3-ASR, Nemotron 3.5 Transcribe, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime for speech transcription and audio chat, Silero for voice activity, Nemotron-3 and Sortformer for speaker diarization, Dia, Kokoro and Qwen3-TTS for text-to-speech.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
@@ -34,9 +34,11 @@ inference.rs supports twelve speech-related model families:
   `/v1/chat/completions`.
 - **Dia**: dedicated text-to-speech model served via `/v1/audio/speech`.
 - **Kokoro**: an 82M-parameter text-to-speech model with preset voices, also served via `/v1/audio/speech`.
+- **Qwen3-TTS** (12 Hz, 0.6B and 1.7B): multilingual text-to-speech with preset voices (CustomVoice) or a voice
+  described in words (VoiceDesign), also served via `/v1/audio/speech`.
 
 Qwen3-ASR, Nemotron 3.5 Transcribe, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime are classified as multimodal models because audio is an input modality. Parakeet and
-Whisper are dedicated transcription models, and Dia and Kokoro are dedicated speech models.
+Whisper are dedicated transcription models, and Dia, Kokoro and Qwen3-TTS are dedicated speech models.
 
 ## Parakeet: speech recognition
 
@@ -658,7 +660,8 @@ curl http://localhost:1234/v1/audio/speech \
 
 - Output: raw audio bytes.
 - `response_format`: only `wav` and `pcm` are read; `mp3`/`opus`/`aac`/`flac` return a validation error.
-- Dia ignores `voice`, `speed`, `phonemes`, `seed` and `instructions`; Kokoro reads all but `instructions` (below).
+- Dia ignores `voice`, `speed`, `phonemes`, `seed`, `instructions` and `language`; Kokoro reads all but `instructions`
+  and `language`, and Qwen3-TTS reads `voice`, `seed`, `instructions` and `language` (below).
 
 </TabItem>
 <TabItem label="Python">
@@ -816,6 +819,109 @@ let audio = model
     .generate_speech(SpeechGenerationRequest {
         voice: Some("af_heart".into()),
         ..SpeechGenerationRequest::new("Hello world.", AudioResponseFormat::Wav)
+    })
+    .await?;
+std::fs::write("out.wav", &audio.bytes)?;
+```
+
+</TabItem>
+</Tabs>
+
+## Qwen3-TTS: text to speech
+
+```bash
+inference serve -m Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+```
+
+Qwen3-TTS loads from Qwen's releases: `config.json`, `model.safetensors`, the tokenizer's `vocab.json`, `merges.txt` and
+`tokenizer_config.json`, and the 12 Hz codec under `speech_tokenizer/`. Its talker (a Qwen3 decoder) predicts the first
+code of each 80 ms frame, a small code predictor fills the frame's other 15, and the codec decoder turns the frames into
+24 kHz audio. Two kinds of checkpoint are supported:
+
+- **CustomVoice** (0.6B and 1.7B): nine preset voices (`aiden`, `dylan`, `eric`, `ono_anna`, `ryan`, `serena`, `sohee`,
+  `uncle_fu`, `vivian`). `voice` is required and case-insensitive; an unknown one is rejected with the list.
+- **VoiceDesign** (1.7B): no preset voices; `instructions` describe the voice (`"A deep, gravelly male voice, an old
+  sea captain telling a story."`), and `voice` is ignored.
+
+The Base checkpoints, which clone a voice from a reference clip, are not supported yet.
+
+Request fields Qwen3-TTS reads:
+
+- `voice`: the preset voice (CustomVoice).
+- `instructions`: how to speak (tone, emotion, pace) on the 1.7B models, or the voice itself on VoiceDesign. The 0.6B
+  models take no instructions and reject them.
+- `language`: the language to speak, by name: `chinese`, `english`, `german`, `italian`, `portuguese`, `spanish`,
+  `japanese`, `korean`, `french` or `russian`. Unset, the model picks it from the text. `dylan` and `eric` speak Chinese
+  in their dialects (Beijing, Sichuan).
+- `seed`: seeds the sampling, so the same request gives the same audio. Without it each request draws a fresh seed.
+
+Sampling is set when the model loads: a speech model spec's `generation` takes `temperature`, `top_p`, `top_k` and
+`max_tokens` (in 80 ms frames) for the talker; the defaults are the checkpoints' own (`temperature` 0.9, `top_k` 50,
+repetition penalty 1.05, the code predictor sampled the same way). On a GPU the talker runs in BF16 and the codec in
+F32; a sentence takes about a fifth of its length to speak on an RTX 3090.
+
+<Tabs>
+<TabItem label="HTTP">
+
+```bash
+curl http://localhost:1234/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "default",
+    "input": "The quick brown fox jumps over the lazy dog.",
+    "voice": "vivian",
+    "language": "english",
+    "instructions": "Speak slowly, in a warm and cheerful tone.",
+    "seed": 7,
+    "response_format": "wav"
+  }' \
+  --output out.wav
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+from pathlib import Path
+
+import inference_rs as ir
+from inference_rs import types as t
+
+spec = t.EngineSpec(
+    model=t.ModelSelectedSpeech(
+        model_id="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        arch=t.SpeechLoaderType.QWEN3_TTS,
+    )
+)
+
+with ir.Engine(spec) as engine:
+    audio = engine.speech_generation(
+        t.SpeechGenerationRequest(
+            input="The quick brown fox jumps over the lazy dog.",
+            voice="vivian",
+            language="english",
+            response_format=t.AudioResponseFormat.WAV,
+        )
+    )
+
+Path("out.wav").write_bytes(audio.data)
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use inference::{AudioResponseFormat, SpeechGenerationRequest, SpeechLoaderType, SpeechModelBuilder};
+
+let model = SpeechModelBuilder::new("Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", SpeechLoaderType::Qwen3Tts)
+    .build()
+    .await?;
+
+let audio = model
+    .generate_speech(SpeechGenerationRequest {
+        voice: Some("vivian".into()),
+        language: Some("english".into()),
+        ..SpeechGenerationRequest::new("The quick brown fox jumps over the lazy dog.", AudioResponseFormat::Wav)
     })
     .await?;
 std::fs::write("out.wav", &audio.bytes)?;

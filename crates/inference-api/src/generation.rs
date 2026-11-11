@@ -415,6 +415,8 @@ async fn generate_speech_inner(
             speed: request.speed,
             phonemes: request.phonemes,
             seed: request.seed,
+            instructions: request.instructions,
+            language: request.language,
         },
     };
     match run(state, &request.model, repr, messages).await? {

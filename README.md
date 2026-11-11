@@ -41,7 +41,7 @@ bindings over that ABI, so every surface does the same things.
 | **Speech recognition** | OpenAI Whisper (tiny to large-v3-turbo) with word timestamps and translation to English; NVIDIA Parakeet (CTC, RNN-T, TDT) and Nemotron streaming ASR, from transformers, `.nemo` or GGUF, with word timestamps and beam search; Nemotron 3.5 Transcribe (30B-A4B), with word timestamps from its CTC head and its own speaker attribution, from NVIDIA's checkpoint or a GGUF pair that fits one 24 GB GPU; Qwen3-ASR (word times from Qwen3-ForcedAligner), GLM-ASR, Voxtral and Voxtral Realtime |
 | **Audio understanding** | Qwen2-Audio, Audio Flamingo 3 and Music Flamingo, MERaLiON-2, Ultravox and Voxtral: questions about speech, sound and music through chat |
 | **Speaker and voice activity** | Nemotron-3 Diarization and Streaming Sortformer (who speaks when), Silero VAD |
-| **Speech synthesis** | Kokoro (9 languages) and Dia |
+| **Speech synthesis** | Kokoro (9 languages), Qwen3-TTS (preset and described voices, 10 languages) and Dia |
 | **Image generation** | FLUX.1 and HiDream-O1-Image (text to image, editing and subject references), from safetensors or GGUF |
 | **Embeddings and documents** | EmbeddingGemma, Qwen3 Embedding, BERT-family, ModernBERT and Nomic encoders; cross-encoder rerankers; PP-DocLayoutV3 document layout detection |
 | **Decisions** | Laya, Julia-1 and d1-omni: typed questions about a text (choose, score, true or false), answered in one forward pass with probabilities over the options |

@@ -237,6 +237,8 @@ pub struct AttentionTemperature {
 pub struct DecoderSpec {
     pub vocab_size: usize,
     pub hidden_size: usize,
+    /// The token embedding's width, when not `hidden_size`: a stack fed projected embeddings (Qwen3-TTS's predictor).
+    pub embed_dim: Option<usize>,
     pub intermediate_size: usize,
     pub num_heads: usize,
     pub num_kv_heads: usize,
@@ -447,6 +449,7 @@ impl DecoderSpec {
         StackShape {
             vocab_size: self.vocab_size,
             hidden_size: self.hidden_size,
+            embed_dim: self.embed_dim,
             rms_norm_eps: self.rms_norm_eps,
             layer_windows: &self.layer_windows,
             tie_word_embeddings: self.tie_word_embeddings,
@@ -712,6 +715,7 @@ pub trait LayerBuilder: Sync {
 pub struct StackShape<'a> {
     pub vocab_size: usize,
     pub hidden_size: usize,
+    pub embed_dim: Option<usize>,
     pub rms_norm_eps: f64,
     pub layer_windows: &'a [Option<usize>],
     pub tie_word_embeddings: bool,
@@ -1444,10 +1448,11 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
         let dtype = vb_m.dtype();
         let names = shape.module_names;
         let embed_vb = mapper.set_nm_device(vb_m.pp(names.embed_tokens), loading_isq);
+        let embed_dim = shape.embed_dim.unwrap_or(shape.hidden_size);
         let embed_tokens = match tied_lm_head {
             Some(head) => embedding_with_legacy_tied_uqff(
                 shape.vocab_size,
-                shape.hidden_size,
+                embed_dim,
                 embed_vb,
                 shape
                     .tie_word_embeddings
@@ -1456,7 +1461,7 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
             )?,
             None => embedding(
                 shape.vocab_size,
-                shape.hidden_size,
+                embed_dim,
                 embed_vb,
                 shape.quantization_config,
             )?,

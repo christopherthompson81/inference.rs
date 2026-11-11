@@ -11,6 +11,7 @@ use inference_core::{
 #[derive(Debug, Clone, Default, PartialEq, inference_json::FromJson, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpeechGenerationSpec {
+    /// Dia's audio tokens, or Qwen3-TTS's 80 ms frames.
     #[serde(default)]
     pub max_tokens: Option<usize>,
     /// Classifier-free guidance strength.
@@ -54,6 +55,18 @@ impl SpeechGenerationSpec {
             (SpeechLoaderType::Kokoro, _, SpeechGenerationConfig::Kokoro { speed }) => {
                 SpeechGenerationConfig::Kokoro {
                     speed: self.speed.unwrap_or(speed),
+                }
+            }
+            (SpeechLoaderType::Qwen3Tts, _, _) => {
+                let sampling = inference_core::Qwen3TtsSampling::default();
+                SpeechGenerationConfig::Qwen3Tts {
+                    sampling: inference_core::Qwen3TtsSampling {
+                        temperature: self.temperature.unwrap_or(sampling.temperature),
+                        top_p: self.top_p.unwrap_or(sampling.top_p),
+                        top_k: self.top_k.unwrap_or(sampling.top_k),
+                        max_frames: self.max_tokens.unwrap_or(sampling.max_frames),
+                        ..sampling
+                    },
                 }
             }
             (_, dia, kokoro) => unreachable!("defaults are {dia:?} and {kokoro:?}"),

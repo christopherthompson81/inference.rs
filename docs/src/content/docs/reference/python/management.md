@@ -807,6 +807,8 @@ Speech generation request
 | Field | Type | Default |
 | --- | --- | --- |
 | `input` | `str` | required |
+| `instructions` | `str \| None` | optional |
+| `language` | `str \| None` | optional |
 | `model` | `str \| None` | optional |
 | `phonemes` | `str \| None` | optional |
 | `response_format` | `AudioResponseFormat \| None` | optional |

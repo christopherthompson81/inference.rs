@@ -171,6 +171,7 @@ pub use inference_models_speech::{
     TranscriptionOptions, TranscriptionProgress,
     diarization::{Diarization, DiarizationOptions, SpeakerSegment},
     parakeet::{PRESETS as ASR_QUANT_PRESETS, QuantPolicy as AsrQuantPolicy},
+    qwen3_tts::Sampling as Qwen3TtsSampling,
     silero::{SegmentOptions, VoiceActivity},
     utils as speech_utils,
 };

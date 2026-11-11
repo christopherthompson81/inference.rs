@@ -42,6 +42,7 @@ mod qwen3_5_text_tiny;
 mod qwen3_5_tool_call;
 mod qwen3_asr_tiny;
 mod qwen3_sliding_window_tiny;
+mod qwen3_tts_tiny;
 mod qwen4exp_text_tiny;
 mod qwen_vl_tiny;
 mod rope_encoder_embedding_tiny;

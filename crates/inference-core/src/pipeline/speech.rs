@@ -20,6 +20,7 @@ use futures::future::BoxFuture;
 use hf_hub::{Repo, RepoType};
 use indexmap::IndexMap;
 use inference_models_speech::kokoro::{GGUF_EXTENSION, KokoroConfig, KokoroTts, is_kokoro_gguf};
+use inference_models_speech::qwen3_tts::{self, Qwen3Tts, Qwen3TtsConfig};
 use inference_models_speech::{DiaConfig, DiaPipeline, SpeechOptions};
 use inference_quant::IsqType;
 use inference_tensor::nn::VarBuilder;
@@ -47,6 +48,8 @@ pub enum SpeechLoaderType {
     Dia,
     #[serde(rename = "kokoro")]
     Kokoro,
+    #[serde(rename = "qwen3_tts")]
+    Qwen3Tts,
 }
 
 impl FromStr for SpeechLoaderType {
@@ -55,8 +58,9 @@ impl FromStr for SpeechLoaderType {
         match s {
             "dia" => Ok(Self::Dia),
             "kokoro" => Ok(Self::Kokoro),
+            "qwen3_tts" => Ok(Self::Qwen3Tts),
             a => Err(format!(
-                "Unknown architecture `{a}`. Possible architectures: `dia`, `kokoro`."
+                "Unknown architecture `{a}`. Possible architectures: `dia`, `kokoro`, `qwen3_tts`."
             )),
         }
     }
@@ -67,6 +71,9 @@ impl SpeechLoaderType {
     pub fn auto_detect_from_config(config: &str) -> Option<Self> {
         if serde_json::from_str::<KokoroConfig>(config).is_ok() {
             return Some(Self::Kokoro);
+        }
+        if Qwen3TtsConfig::from_json(config).is_ok() {
+            return Some(Self::Qwen3Tts);
         }
         if DiaConfig::from_json(config).is_ok() {
             return Some(Self::Dia);
@@ -191,6 +198,7 @@ impl InputsProcessor for SpeechInputsProcessor {
 enum SpeechModel {
     Dia(Box<DiaPipeline>),
     Kokoro(Box<KokoroTts>),
+    Qwen3Tts(Box<Qwen3Tts>),
 }
 
 pub struct SpeechPipeline {
@@ -236,7 +244,7 @@ fn detect_arch(config: &std::path::Path) -> Result<SpeechLoaderType> {
     }
     SpeechLoaderType::auto_detect_from_config(&std::fs::read_to_string(config)?).ok_or_else(|| {
         anyhow::anyhow!(
-            "`{}` is not a Dia or Kokoro config; pass the architecture explicitly",
+            "`{}` is not a Dia, Kokoro or Qwen3-TTS config; pass the architecture explicitly",
             config.display()
         )
     })
@@ -283,6 +291,10 @@ impl Loader for SpeechLoader {
         };
         if arch == SpeechLoaderType::Kokoro {
             let paths = kokoro_paths(&self.model_id, revision, &token_source, silent)?;
+            return self.load_model_from_path(&paths, options);
+        }
+        if arch == SpeechLoaderType::Qwen3Tts {
+            let paths = qwen3_tts_paths(&self.model_id, revision, &token_source, silent)?;
             return self.load_model_from_path(&paths, options);
         }
         let paths: anyhow::Result<Box<dyn ModelPaths>> = {
@@ -392,6 +404,31 @@ impl Loader for SpeechLoader {
                     None => SpeechGenerationConfig::kokoro_default(),
                     Some(cfg @ SpeechGenerationConfig::Kokoro { .. }) => cfg,
                     Some(cfg) => anyhow::bail!("a Kokoro model was given {cfg:?}"),
+                },
+            ))));
+        }
+
+        if arch == SpeechLoaderType::Qwen3Tts {
+            if in_situ_quant.is_some() {
+                anyhow::bail!("Qwen3-TTS does not support in-situ quantization.")
+            }
+            crate::pipeline::loading::ensure_cuda_kernels(std::slice::from_ref(device))?;
+            let dtype = DeviceMapSetting::dummy()
+                .into_mapper(usize::MAX, device, None, std::slice::from_ref(device))?
+                .get_min_dtype(dtype)?;
+            let dir = paths
+                .config
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("`{}` has no directory", paths.config.display()))?;
+            let model = Qwen3Tts::load(dir, dtype, device)?;
+            return Ok(Arc::new(Mutex::new(SpeechPipeline::new(
+                self.model_id.clone(),
+                SpeechModel::Qwen3Tts(Box::new(model)),
+                dtype,
+                match self.cfg {
+                    None => SpeechGenerationConfig::qwen3_tts_default(),
+                    Some(cfg @ SpeechGenerationConfig::Qwen3Tts { .. }) => cfg,
+                    Some(cfg) => anyhow::bail!("a Qwen3-TTS model was given {cfg:?}"),
                 },
             ))));
         }
@@ -559,6 +596,33 @@ fn kokoro_paths(
     })
 }
 
+/// Qwen3-TTS's files, all beside `config.json`: the talker, its tokenizer, and the codec under `speech_tokenizer/`.
+fn qwen3_tts_paths(
+    model_id: &str,
+    revision: Option<String>,
+    token_source: &TokenSource,
+    silent: bool,
+) -> Result<SpeechModelPaths> {
+    let revision = revision.unwrap_or_else(|| "main".to_string());
+    let api = crate::pipeline::hf::build_api(token_source, !silent)?.repo(Repo::with_revision(
+        model_id.to_string(),
+        RepoType::Model,
+        revision.clone(),
+    ));
+    let id = std::path::Path::new(model_id);
+    let get = |file: &str| crate::pipeline::hf::get_file(&api, id, file, &revision);
+    let config = get(qwen3_tts::CONFIG)?;
+    let mut weights = Vec::new();
+    for file in qwen3_tts::FILES {
+        weights.push(get(file)?);
+    }
+    Ok(SpeechModelPaths {
+        weights,
+        config,
+        voices: Vec::new(),
+    })
+}
+
 impl PreProcessingMixin for SpeechPipeline {
     fn get_processor(&self) -> Arc<dyn Processor> {
         Arc::new(SpeechProcessor)
@@ -600,6 +664,7 @@ impl MetadataMixin for SpeechPipeline {
         match &self.model {
             SpeechModel::Dia(model) => model.device().clone(),
             SpeechModel::Kokoro(model) => model.device().clone(),
+            SpeechModel::Qwen3Tts(model) => model.device().clone(),
         }
     }
     fn get_metadata(&self) -> Arc<GeneralMetadata> {
@@ -639,6 +704,19 @@ impl Pipeline for SpeechPipeline {
                 (SpeechModel::Kokoro(_), _) => {
                     inference_tensor::bail!("Kokoro was given another model's speech config")
                 }
+                (SpeechModel::Qwen3Tts(model), SpeechGenerationConfig::Qwen3Tts { sampling }) => {
+                    model
+                        .generate(
+                            prompt,
+                            options,
+                            &sampling,
+                            options.seed.unwrap_or_else(rand::random),
+                        )
+                        .map_err(inference_tensor::Error::msg)?
+                }
+                (SpeechModel::Qwen3Tts(_), _) => {
+                    inference_tensor::bail!("Qwen3-TTS was given another model's speech config")
+                }
             });
         }
 
@@ -671,6 +749,7 @@ impl Pipeline for SpeechPipeline {
             }
             SpeechModel::Dia(_) => Ok(()),
             SpeechModel::Kokoro(model) => model.validate(options).map_err(|err| err.to_string()),
+            SpeechModel::Qwen3Tts(model) => model.validate(options).map_err(|err| err.to_string()),
         }
     }
 

@@ -419,6 +419,7 @@ pub fn new_family_model<T: FamilyAttention>(
     let shape = StackShape {
         vocab_size: cfg.vocab_size,
         hidden_size: cfg.hidden_size,
+        embed_dim: None,
         rms_norm_eps: cfg.rms_norm_eps,
         layer_windows: &layer_windows,
         tie_word_embeddings: cfg.tie_word_embeddings,

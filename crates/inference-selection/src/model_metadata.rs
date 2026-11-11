@@ -742,6 +742,11 @@ impl SupportedArch for SpeechLoaderType {
                 modalities: &[Text, Audio],
                 examples: &[ex!("hexgrad/Kokoro-82M")],
             },
+            Self::Qwen3Tts => ArchMetadata {
+                families: &["Qwen3-TTS"],
+                modalities: &[Text, Audio],
+                examples: &[ex!("Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice")],
+            },
         }
     }
 }
