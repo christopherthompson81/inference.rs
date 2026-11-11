@@ -716,10 +716,14 @@ async fn decode_transcript(
         .map(|choice| choice.text.as_str())
         .unwrap_or_default();
     let parsed = (plan.parse)(answer);
-    // the answer as written: its speaker tags attribute the words
-    let aligned = match aligned {
-        Some(audio) => align_transcript(state, request, audio, answer.trim()).await,
-        None => Vec::new(),
+    let aligned = match (aligned, &request.alignment_model) {
+        // a forced aligner reads the transcript alone
+        (Some(audio), Some(aligner)) => {
+            force_align(state, request, aligner, audio, &parsed.text).await?
+        }
+        // the answer as written: its speaker tags attribute the words
+        (Some(audio), None) => align_transcript(state, request, audio, answer.trim()).await,
+        (None, _) => Vec::new(),
     };
     let tags = aligned.iter().map(|word| word.speaker).collect();
     let words = aligned
@@ -776,6 +780,42 @@ async fn align_transcript(
             Vec::new()
         }
         None => Vec::new(),
+    }
+}
+
+// `transcript` timed by the forced aligner `aligner` names; its failure is the request's, which asked for it
+async fn force_align(
+    state: &SharedInferenceRsState,
+    request: &TranscriptionRequest,
+    aligner: &str,
+    audio: AudioInput,
+    transcript: &str,
+) -> Result<Vec<AlignedWord>, ApiError> {
+    let invalid = |message: String| {
+        ApiError::new(
+            ApiErrorKind::InvalidRequest,
+            message,
+            Some("alignment_failed"),
+            Some("alignment_model"),
+        )
+    };
+    let (response, mut words) = tokio::sync::mpsc::channel(1);
+    let alignment = Request::WordTimestamps(WordTimestampsRequest {
+        audio,
+        transcript: transcript.to_string(),
+        language: request.language.clone(),
+        response,
+    });
+    send_request_with_model(state, alignment, Some(aligner))
+        .await
+        .map_err(|error| invalid(format!("`alignment_model`: {error}")))?;
+    match words.recv().await {
+        Some(Ok(Some(words))) => Ok(words),
+        Some(Ok(None)) => Err(invalid(format!(
+            "`alignment_model` `{aligner}` does not time transcripts"
+        ))),
+        Some(Err(error)) => Err(invalid(format!("{error:#}"))),
+        None => Err(ApiError::internal()),
     }
 }
 
@@ -1143,6 +1183,7 @@ mod tests {
             condition_on_previous_text: None,
             diarization_model: None,
             overlap_pass: None,
+            alignment_model: None,
             task: TranscriptionTask::Transcribe,
         };
         let transcript = Transcription {

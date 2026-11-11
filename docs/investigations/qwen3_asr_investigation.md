@@ -144,3 +144,35 @@ forced-aligner head.
 over the clip) and in chat under the repo's own template (prompts 60 and 277 tokens, as with ChatML).
 
 **Next:** the forced-aligner head.
+
+## Run 7 - 2026-11-11
+
+**Question:** #786: word times for Qwen3-ASR from Qwen3-ForcedAligner-0.6B. Do ours equal transformers'
+`Qwen3ASRForTokenClassification`, in both repo layouts, through the endpoint?
+
+**Command:** `inference from-config` with the Qwen3-ASR-1.7B Q8_0 GGUF pair (`tok_model_id` the original repo), the
+aligner's `-hf` repo, its original repo (`tokenizer` the `-hf` one's) and Nemotron-3-Diarization;
+`/v1/audio/transcriptions` with `alignment_model` on OpenAI's `jfk.flac` (11 s) and a 108 s Kokoro reading of a
+public-domain text; `align_ref.py` (scratch: transformers' processor `prepare_forced_aligner_inputs`, the model in
+F32, `decode_forced_alignment`) on our transcript of each clip.
+
+**Finding:**
+- The model: the Qwen3-ASR encoder and decoder with a 5,000-class head (`score`, or the original repo's
+  `thinker.lm_head`); the prompt is the clip's placeholders, then each word followed by `<timestamp><timestamp>`,
+  with no chat markers. One causal pass outside the KV cache (`CausalLm::hidden_states`, as the embedding models
+  run), the head at the slots, argmax times 80 ms, then the reference's longest-increasing-run repair.
+- jfk: 22 words, all equal to the reference's but one boundary one step apart (5.84 against 5.92). 108 s: 334
+  words, 332 equal, 2 one step apart. Ours ran in BF16, the reference in F32.
+- The original layout gives the same times as `-hf`. Its repo has no `tokenizer.json` (vocab and merges only), as
+  the original Qwen3-ASR repos; a model entry's `tokenizer` covers it.
+- First subtitles were one cue over the clip without punctuation: the aligner's words are stripped to letters, so
+  nothing ended a sentence. Words now come back as the transcript writes them (the text up to the next word), and
+  srt/vtt break at sentences.
+- With `diarization_model` the timed words get speakers (formerly refused). `language=ar` with the aligner, and an
+  `alignment_model` that does not align, are the request's errors (`alignment_failed`).
+- A tiny random-weight aligner (the fixture with a `<timestamp>` token, 64 classes) serves beside the tiny Qwen3-ASR
+  in `qwen3_asr_tiny::an_aligner_times_the_transcript`. The tokenizers library renumbers an added token past the
+  vocabulary to the next free id, so the fixture's token is 265.
+
+**Next:** CI. Not done: clips over 400 s (the reference has no chunking either), Japanese and Korean morphological
+splitting.

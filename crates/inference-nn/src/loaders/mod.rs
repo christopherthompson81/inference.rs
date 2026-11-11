@@ -389,6 +389,11 @@ pub trait MultimodalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedMode
     fn default_bos_eos(&self, _config: &str) -> Option<(String, String)> {
         None
     }
+    /// Whether the model times transcripts with its own tokenizer (a forced aligner), which loading then hands it
+    /// under [`ALIGNMENT_TOKENIZER_KEY`] as an alignment tokenizer.
+    fn aligns_with_own_tokenizer(&self, _config: &str) -> bool {
+        false
+    }
     /// `config` with the config of the text model its `text_model_id` names (`companion`) merged in; `tokenizer` is
     /// the checkpoint's `tokenizer.json`.
     fn with_companion_config(

@@ -10,7 +10,7 @@ use crate::audio_clips::wav;
 
 #[path = "../support/qwen3_asr_tiny.rs"]
 mod support;
-use support::{tiny_checkpoint, tiny_transformers_checkpoint};
+use support::{tiny_aligner_checkpoint, tiny_checkpoint, tiny_transformers_checkpoint};
 
 const PROMPT: &str = "Transcribe it.";
 const MAX_LEN: usize = 6;
@@ -111,6 +111,7 @@ fn transcription(language: Option<&str>) -> TranscriptionRequest {
         condition_on_previous_text: None,
         diarization_model: None,
         overlap_pass: None,
+        alignment_model: None,
         task: Default::default(),
     }
 }
@@ -209,5 +210,70 @@ async fn an_input_audio_part_is_the_clip_an_audio_url_gives() -> anyhow::Result<
         usages.push(body["usage"]["prompt_tokens"].clone());
     }
     assert_eq!(usages[0], usages[1]);
+    Ok(())
+}
+
+// a forced aligner beside the transcriber times its transcript: words in order, within the clip, as written, and
+// subtitles; a language the aligner lacks, or a model that does not align, is the request's error
+#[tokio::test]
+async fn an_aligner_times_the_transcript() -> anyhow::Result<()> {
+    let transcriber = tiny_checkpoint()?;
+    let aligner = tiny_aligner_checkpoint()?;
+    let builder = |dir: &std::path::Path| {
+        MultimodalModelBuilder::new(dir.to_string_lossy())
+            .with_dtype(ModelDType::F32)
+            .with_force_cpu()
+    };
+    let model = inference::MultiModelBuilder::new()
+        .add_model_with_alias("asr", builder(transcriber.path()))
+        .add_model_with_alias("aligner", builder(aligner.path()))
+        .with_default_model("asr")
+        .build()
+        .await?;
+    let audio = wav(&clip());
+    let timed = |language: Option<&str>, aligner: &str| {
+        let mut request = transcription(language);
+        request.timestamp_granularities = vec![inference::TimestampGranularity::Word];
+        request.alignment_model = Some(aligner.to_string());
+        request
+    };
+    let output = model
+        .transcription(timed(Some("en"), "aligner"), &audio)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let body: serde_json::Value = serde_json::from_str(&output.body)?;
+    let words = body["words"].as_array().cloned().unwrap_or_default();
+    let text = body["text"].as_str().unwrap_or_default();
+    let seconds = SAMPLES as f64 / f64::from(SAMPLE_RATE);
+    let mut previous = 0.0;
+    for word in &words {
+        let (start, end) = (
+            word["start"].as_f64().unwrap(),
+            word["end"].as_f64().unwrap(),
+        );
+        assert!(
+            previous <= start && start <= end && end <= seconds + 1e-9,
+            "{word} in {body}"
+        );
+        assert!(
+            text.contains(word["word"].as_str().unwrap()),
+            "{word} not in {text:?}"
+        );
+        previous = end;
+    }
+    let mut subtitles = transcription(Some("en"));
+    subtitles.response_format = TranscriptionResponseFormat::Srt;
+    subtitles.alignment_model = Some("aligner".to_string());
+    model
+        .transcription(subtitles, &audio)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    for (language, aligner) in [(Some("ar"), "aligner"), (Some("en"), "asr")] {
+        let error = model
+            .transcription(timed(language, aligner), &audio)
+            .await
+            .unwrap_err();
+        assert_eq!(error.param.as_deref(), Some("alignment_model"), "{error:?}");
+    }
     Ok(())
 }

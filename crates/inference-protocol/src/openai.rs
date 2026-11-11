@@ -2368,6 +2368,12 @@ pub struct TranscriptionRequest {
     /// drops words; on unless `false`. An inference.rs extension.
     #[serde(default)]
     pub overlap_pass: Option<bool>,
+    /// A forced aligner (Qwen3-ForcedAligner) that times the transcript's words, for a model that writes none itself
+    /// (Qwen3-ASR): words, segments, subtitles and `diarization_model` then work as with a model that times its own.
+    /// An inference.rs extension.
+    #[serde(default)]
+    #[schema(example = "aligner")]
+    pub alignment_model: Option<String>,
     /// `translate` writes an English translation (Whisper); `/v1/audio/translations` sets it. An inference.rs
     /// extension.
     #[serde(default)]
@@ -2389,6 +2395,7 @@ impl TranscriptionRequest {
             condition_on_previous_text: None,
             diarization_model: None,
             overlap_pass: None,
+            alignment_model: None,
             task: TranscriptionTask::Transcribe,
         }
     }

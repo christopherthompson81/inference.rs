@@ -15,6 +15,7 @@ use crate::media_inputs::{
 use crate::paged_attention::PagedAttentionMeta;
 
 use super::audio::audio_token_count;
+use super::config::AudioConfig;
 use super::{AudioClip, Config, Qwen3AsrSpecificArgs};
 
 pub const AUDIO_START: &str = "<|audio_start|>";
@@ -31,34 +32,60 @@ pub struct Qwen3AsrInputsProcessor {
     config: Config,
 }
 
+fn log_mel(audio: &AudioConfig) -> WhisperLogMel {
+    WhisperLogMel {
+        sample_rate: SAMPLE_RATE,
+        n_fft: N_FFT,
+        hop_length: HOP_LENGTH,
+        n_mels: audio.num_mel_bins,
+    }
+}
+
+fn padded(clip: &[f32]) -> Vec<f32> {
+    let mut clip = clip.to_vec();
+    if clip.len() < MIN_SAMPLES {
+        clip.resize(MIN_SAMPLES, 0.0);
+    }
+    clip
+}
+
+fn mel_frames(clip: &[f32]) -> usize {
+    clip.len().max(MIN_SAMPLES) / HOP_LENGTH
+}
+
+/// How many placeholders a 16 kHz clip takes in the prompt.
+pub fn clip_tokens(audio: &AudioConfig, clip: &[f32]) -> usize {
+    audio_token_count(mel_frames(clip), audio.n_window)
+}
+
+/// A 16 kHz clip's `(n_mels, frames)` log-mel, padded with zeros to whole chunks, as the feature extractor pads the
+/// mel axis.
+pub fn clip_features(
+    audio: &AudioConfig,
+    clip: &[f32],
+    device: &Device,
+) -> anyhow::Result<AudioClip> {
+    let log_mel = log_mel(audio);
+    let frames = log_mel.frames(&padded(clip), LogMelMax::Clip);
+    let valid_frames = frames.len();
+    let chunk = 2 * audio.n_window;
+    let padded_frames = valid_frames.div_ceil(chunk) * chunk;
+    let n_mels = log_mel.n_mels;
+    let mut mel = vec![0.0f32; n_mels * padded_frames];
+    for (t, frame) in frames.iter().enumerate() {
+        for (m, &value) in frame.iter().enumerate() {
+            mel[m * padded_frames + t] = value;
+        }
+    }
+    Ok(AudioClip {
+        mel: Tensor::from_vec(mel, (n_mels, padded_frames), device)?,
+        valid_frames,
+    })
+}
+
 impl Qwen3AsrInputsProcessor {
     pub fn new(config: Config) -> Self {
         Self { config }
-    }
-
-    fn log_mel(&self) -> WhisperLogMel {
-        WhisperLogMel {
-            sample_rate: SAMPLE_RATE,
-            n_fft: N_FFT,
-            hop_length: HOP_LENGTH,
-            n_mels: self.config.thinker_config.audio_config.num_mel_bins,
-        }
-    }
-
-    fn chunk(&self) -> usize {
-        2 * self.config.thinker_config.audio_config.n_window
-    }
-
-    fn padded(clip: &[f32]) -> Vec<f32> {
-        let mut clip = clip.to_vec();
-        if clip.len() < MIN_SAMPLES {
-            clip.resize(MIN_SAMPLES, 0.0);
-        }
-        clip
-    }
-
-    fn mel_frames(clip: &[f32]) -> usize {
-        clip.len().max(MIN_SAMPLES) / HOP_LENGTH
     }
 
     fn expand_prompt(
@@ -68,10 +95,10 @@ impl Qwen3AsrInputsProcessor {
         clips: &[Vec<f32>],
         paged_attn_metadata: Option<&mut PagedAttentionMeta>,
     ) -> anyhow::Result<()> {
-        let n_window = self.config.thinker_config.audio_config.n_window;
+        let audio = &self.config.thinker_config.audio_config;
         let counts = clips
             .iter()
-            .map(|clip| audio_token_count(Self::mel_frames(clip), n_window))
+            .map(|clip| clip_tokens(audio, clip))
             .collect::<Vec<_>>();
         let placeholder = AudioPlaceholder {
             model: MODEL,
@@ -79,24 +106,6 @@ impl Qwen3AsrInputsProcessor {
             token: self.config.thinker_config.audio_token_id,
         };
         expand_audio_placeholders(tokenizer, seq, placeholder, &counts, paged_attn_metadata)
-    }
-
-    // (n_mels, frames) padded with zeros to whole chunks, as the feature extractor pads the mel axis
-    fn clip_features(&self, clip: &[f32], device: &Device) -> anyhow::Result<AudioClip> {
-        let frames = self.log_mel().frames(&Self::padded(clip), LogMelMax::Clip);
-        let valid_frames = frames.len();
-        let padded_frames = valid_frames.div_ceil(self.chunk()) * self.chunk();
-        let n_mels = self.log_mel().n_mels;
-        let mut mel = vec![0.0f32; n_mels * padded_frames];
-        for (t, frame) in frames.iter().enumerate() {
-            for (m, &value) in frame.iter().enumerate() {
-                mel[m * padded_frames + t] = value;
-            }
-        }
-        Ok(AudioClip {
-            mel: Tensor::from_vec(mel, (n_mels, padded_frames), device)?,
-            valid_frames,
-        })
     }
 }
 
@@ -155,7 +164,11 @@ impl MultimodalInputsProcessor for Qwen3AsrInputsProcessor {
                 self.expand_prompt(&tokenizer, &mut **seq, &clips, paged_attn_metadata.as_mut())?;
                 let range = active_clip_range(&**seq, clips.len(), MODEL)?;
                 for clip in &clips[range] {
-                    audio.push(self.clip_features(clip, device)?);
+                    audio.push(clip_features(
+                        &self.config.thinker_config.audio_config,
+                        clip,
+                        device,
+                    )?);
                 }
             }
         }

@@ -392,6 +392,14 @@
                     "type": "object",
                     "description": "Speech recognition request; the audio itself travels beside it (a multipart `file` over HTTP).",
                     "properties": {
+                      "alignment_model": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "A forced aligner (Qwen3-ForcedAligner) that times the transcript's words, for a model that writes none itself\n(Qwen3-ASR): words, segments, subtitles and `diarization_model` then work as with a model that times its own.\nAn inference.rs extension.",
+                        "example": "aligner"
+                      },
                       "beam_size": {
                         "type": [
                           "integer",
@@ -520,6 +528,14 @@
                     "type": "object",
                     "description": "Speech recognition request; the audio itself travels beside it (a multipart `file` over HTTP).",
                     "properties": {
+                      "alignment_model": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "A forced aligner (Qwen3-ForcedAligner) that times the transcript's words, for a model that writes none itself\n(Qwen3-ASR): words, segments, subtitles and `diarization_model` then work as with a model that times its own.\nAn inference.rs extension.",
+                        "example": "aligner"
+                      },
                       "beam_size": {
                         "type": [
                           "integer",
@@ -15384,6 +15400,14 @@
         "type": "object",
         "description": "Speech recognition request; the audio itself travels beside it (a multipart `file` over HTTP).",
         "properties": {
+          "alignment_model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A forced aligner (Qwen3-ForcedAligner) that times the transcript's words, for a model that writes none itself\n(Qwen3-ASR): words, segments, subtitles and `diarization_model` then work as with a model that times its own.\nAn inference.rs extension.",
+            "example": "aligner"
+          },
           "beam_size": {
             "type": [
               "integer",

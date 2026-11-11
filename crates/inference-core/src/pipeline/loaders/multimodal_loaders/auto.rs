@@ -93,6 +93,10 @@ impl MultimodalModelLoader for AutoMultimodalLoader {
             .audio_transcriber(config)
     }
 
+    fn aligns_with_own_tokenizer(&self, config: &str) -> bool {
+        Self::get_loader(config).is_ok_and(|loader| loader.aligns_with_own_tokenizer(config))
+    }
+
     fn video_frame_sampling(&self, config: &str) -> crate::VideoFrameSampling {
         Self::get_loader(config)
             .expect("AutoMultimodalLoader")

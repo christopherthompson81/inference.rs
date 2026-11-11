@@ -444,12 +444,46 @@ curl http://localhost:1234/v1/audio/transcriptions -F file=@clip.wav -F model=de
 - `language` (ISO-639-1, or the model's language name) forces the transcript's language, as the reference
   processor does by starting the answer with `language <name><asr_text>`; one of its 30 languages only. Without
   it the model identifies the language, which `verbose_json` reports.
-- The model gives no word timings: `verbose_json`, `srt` and `vtt` carry the whole clip as one segment,
-  `timestamp_granularities[]=word` adds no words, and `diarization_model` is refused.
+- The model gives no word timings of its own: without an aligner, `verbose_json`, `srt` and `vtt` carry the whole
+  clip as one segment, `timestamp_granularities[]=word` adds no words, and `diarization_model` is refused. With
+  one (below), they work as for a model that times its words.
 - The encoder attends within 8 s windows; a clip takes 13 tokens a second, so long recordings fill the context.
 
 Through `/v1/chat/completions`, send the clip as an `audio_url` part; the answer keeps the model's
 `language <name><asr_text>` prefix.
+
+### Word times from Qwen3-ForcedAligner
+
+`Qwen/Qwen3-ForcedAligner-0.6B-hf` (or the original `Qwen/Qwen3-ForcedAligner-0.6B`, whose repo has no
+`tokenizer.json`: give the `-hf` one with the model's `tokenizer`) times a transcript's words on its audio. Load it
+beside Qwen3-ASR and name it in `alignment_model` (an inference.rs extension):
+
+```toml
+command = "serve"
+
+[[models]]
+model_id = "Qwen/Qwen3-ASR-1.7B-hf"
+
+[[models]]
+model_id = "Qwen/Qwen3-ForcedAligner-0.6B-hf"
+```
+
+```bash
+curl http://localhost:1234/v1/audio/transcriptions -F file=@clip.wav -F model=Qwen/Qwen3-ASR-1.7B-hf \
+  -F alignment_model=Qwen/Qwen3-ForcedAligner-0.6B-hf -F response_format=srt
+```
+
+- The aligner reads the clip and the transcript's words (letters, numbers and apostrophes; a CJK character each),
+  each followed by two `<timestamp>` slots, in one pass; its head classifies each slot's time in 80 ms steps, and
+  out-of-order times are mended as Qwen's reference does. Words come back as the transcript writes them, punctuation
+  included, so segments and subtitle cues break at sentences.
+- It covers clips of up to 400 s (its 5,000 steps) and its 11 languages (Chinese, Cantonese, English, German,
+  Spanish, French, Italian, Portuguese, Russian, Korean, Japanese; Japanese and Korean are split at spaces, not by
+  the reference's morphological tokenizers). Another language, a longer clip, or a model that does not align is the
+  request's error.
+- `diarization_model` then attributes the timed words to speakers.
+- On OpenAI's `jfk.flac` and a 108 s reading, the word times equal transformers' `Qwen3ASRForTokenClassification`
+  on the same transcript, except two boundaries in 334 that differ by one 80 ms step (BF16 here, F32 there).
 
 ## Nemotron 3.5 Transcribe: audio in, transcript out
 
