@@ -1300,6 +1300,15 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
                     VKQ_C[i].x[l] *= KQ_max_scale_h2;
                 }
             }
+        } else if constexpr (std::is_same_v<decltype(T_C_VKQ::x), float[T_C_VKQ::ne]>) {
+            // inference-fattn: f32 value sums; element l of a 16x16 float tile is column (l/2) % 2, as in KQ_C
+#pragma unroll
+            for (int i = 0; i < DV/T_C_VKQ::J; ++i) {
+#pragma unroll
+                for (int l = 0; l < T_C_VKQ::ne; ++l) {
+                    VKQ_C[i].x[l] *= KQ_max_scale[(l/2) % 2];
+                }
+            }
         } else {
 #pragma unroll
             for (int col = 0; col < cols_per_thread; ++col) {
@@ -1556,7 +1565,7 @@ template<int DV, int ncols> struct mma_tile_sizes {
 };
 #endif // defined(TURING_MMA_AVAILABLE)
 
-template<int DKQ, int DV, int ncols1, int ncols2, int nwarps, bool use_logit_softcap, bool V_is_K_view, bool use_sparse, bool needs_fixup, bool is_fixup>
+template<int DKQ, int DV, int ncols1, int ncols2, int nwarps, bool use_logit_softcap, bool V_is_K_view, bool use_sparse, bool needs_fixup, bool is_fixup, bool f32_values>
 static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
         const float2 * const __restrict__ Q_f2,
         const half2  * const __restrict__ K_h2,
@@ -1600,7 +1609,9 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
     using     T_C_KQ    = typename mma_tile_sizes<DV, ncols>::T_C_KQ;
     using     T_A_VKQ   = typename mma_tile_sizes<DV, ncols>::T_A_VKQ;
     using     T_B_VKQ   = typename mma_tile_sizes<DV, ncols>::T_B_VKQ;
-    using     T_C_VKQ   = typename mma_tile_sizes<DV, ncols>::T_C_VKQ;
+    // inference-fattn: f32_values sums the softmax-weighted values in f32 (wide Turing tiles only), not f16
+    using     T_C_VKQ   = std::conditional_t<f32_values, tile<16, 16, float>, typename mma_tile_sizes<DV, ncols>::T_C_VKQ>;
+    constexpr bool vkq_f32 = f32_values;
 
     constexpr int  cols_per_warp   = T_B_KQ::I;
     constexpr int  cols_per_thread = get_cols_per_thread();
@@ -1638,7 +1649,8 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
 
     T_B_KQ    Q_B[(Q_in_reg ? DKQ/(2*T_B_KQ::J) : 1)];
 #if defined(TURING_MMA_AVAILABLE)
-    T_C_VKQ VKQ_C[cols_per_warp == 8 ? DV/T_C_VKQ::I : DV/(2*T_C_VKQ::J)];
+    static_assert(!vkq_f32 || cols_per_warp != 8, "f32 value sums need the wide tiles");
+    T_C_VKQ VKQ_C[cols_per_warp == 8 ? DV/T_C_VKQ::I : (vkq_f32 ? DV/T_C_VKQ::J : DV/(2*T_C_VKQ::J))];
 #elif defined(AMD_WMMA_AVAILABLE) && defined(RDNA3)
     T_C_VKQ VKQ_C[DV % 32 != 0       ? DV/T_C_VKQ::J : DV/(2*T_C_VKQ::J)];
 #elif defined(AMD_WMMA_AVAILABLE) || defined(AMD_MFMA_AVAILABLE)
@@ -1846,6 +1858,15 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
                     VKQ_C[i].x[l] *= KQ_max_scale_h2;
                 }
             }
+        } else if constexpr (std::is_same_v<decltype(T_C_VKQ::x), float[T_C_VKQ::ne]>) {
+            // inference-fattn: f32 value sums; element l of a 16x16 float tile is column (l/2) % 2, as in KQ_C
+#pragma unroll
+            for (int i = 0; i < DV/T_C_VKQ::J; ++i) {
+#pragma unroll
+                for (int l = 0; l < T_C_VKQ::ne; ++l) {
+                    VKQ_C[i].x[l] *= KQ_max_scale[(l/2) % 2];
+                }
+            }
         } else {
 #pragma unroll
             for (int col = 0; col < cols_per_thread; ++col) {
@@ -1933,7 +1954,8 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
         // KQ_cmr = KQ combine max rowsum
         // Use the 16 bytes of padding in each Q column to store the meta data: KQ max, KQ rowsum, KQ max scale.
 #if defined(TURING_MMA_AVAILABLE)
-        const int jc_cwm = threadIdx.y*cols_per_warp + T_C_VKQ::get_i(threadIdx.x % 4);
+        // column c of a thread is element c of a half2 tile, element 2c of a float one (inference-fattn: f32 sums)
+        const int jc_cwm = threadIdx.y*cols_per_warp + T_C_VKQ::get_i(vkq_f32 ? 2*(threadIdx.x % 4) : threadIdx.x % 4);
         const float2 KQ_cmr = make_float2(KQ_max[threadIdx.x % cols_per_thread], KQ_rowsum[threadIdx.x % cols_per_thread]);
         const bool thread_should_write = threadIdx.x % 4 < cols_per_thread;
 #elif defined(AMD_WMMA_AVAILABLE) || defined(AMD_MFMA_AVAILABLE)
@@ -1950,7 +1972,8 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
             __syncthreads();
         }
 
-        if (((!needs_fixup && !is_fixup) || np > 1) && thread_should_write) {
+        // inference-fattn: f32 sums are staged per unit row sum, which the final loop reads back from here
+        if (((!needs_fixup && !is_fixup) || np > 1 || vkq_f32) && thread_should_write) {
             ((float2 *) tile_Q)[jc_cwm*(tile_stride/2) + nbatch_combine/2] = KQ_cmr;
         }
 
@@ -1975,6 +1998,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
         float KQ_cmn;
         float KQ_cms[nmeta];
         float KQ_crs;
+        float KQ_rs[nmeta]; // each partial's own row sum (inference-fattn: the weight of f32 sums staged per unit)
 
         const int jc_meta = threadIdx.y*cols_per_warp + (np*cols_per_warp < warp_size ? threadIdx.x % (np*cols_per_warp) : threadIdx.x);
         float2 * const meta_ptr = ((float2 *) tile_Q) + jc_meta*(tile_stride/2) + nbatch_combine/2;
@@ -2002,6 +2026,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
 #pragma unroll
             for (int imeta = 0; imeta < nmeta; ++imeta) {
                 KQ_cms[imeta] = expf(meta[imeta].x - KQ_cmn);
+                KQ_rs[imeta]  = meta[imeta].y;
             }
 
             KQ_crs = KQ_cms[0]*meta[0].y; // KQ combine rowsum, scaled sum of all parallel warps.
@@ -2024,8 +2049,10 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
 #pragma unroll
             for (int imeta = 0; imeta < nmeta; ++imeta) {
                 if (np*cols_per_warp >= warp_size || threadIdx.x < np*cols_per_warp) {
-                    // Combined KQ max scale + rowsum.
-                    meta_ptr[imeta * warp_size * tile_stride/2] = make_float2(KQ_cms[imeta], KQ_crs);
+                    // Combined KQ max scale + rowsum (inference-fattn: f32 sums are staged per unit row sum, so
+                    // their weight carries the partial's own row sum).
+                    const float weight = vkq_f32 ? KQ_cms[imeta]*KQ_rs[imeta] : KQ_cms[imeta];
+                    meta_ptr[imeta * warp_size * tile_stride/2] = make_float2(weight, KQ_crs);
                 }
             }
 
@@ -2097,7 +2124,14 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
                         const int j = j0 + T_C_VKQ::get_i(l);
                         const int k = 2*k1 + T_C_VKQ::get_j(l);
 
+#if defined(TURING_MMA_AVAILABLE)
+                        // inference-fattn: f32 sums can pass half's range; staged per unit row sum (bounded by
+                        // max|v|), and each partial's weight in the final sum carries its row sum instead
+                        const float rowsum = KQ_rowsum[(l/2) % 2];
+                        tile_Q_h[j*(2*tile_stride) + k] = rowsum > 0.0f ? VKQ_C[(k00 + k1)/(T_C_VKQ::J/2)].x[l] / rowsum : 0.0f;
+#else
                         tile_Q_h[j*(2*tile_stride) + k] = VKQ_C[(k00 + k1)/(T_C_VKQ::J/2)].x[l];
+#endif // defined(TURING_MMA_AVAILABLE)
                     }
                 }
             }
@@ -2145,7 +2179,8 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
                         float2 dstk_val = make_float2(0.0f, 0.0f);
 #pragma unroll
                         for (int ip = 0; ip < np; ++ip) {
-                            const float KQ_crs = np == 1 ? 1.0f : meta_j[ip*cols_per_warp * tile_stride + 0];
+                            // inference-fattn: f32 sums are staged per unit row sum; one warp's weight is its row sum
+                            const float KQ_crs = np == 1 ? (vkq_f32 ? meta_j[1] : 1.0f) : meta_j[ip*cols_per_warp * tile_stride + 0];
                             const float2 dstk_val_add = __half22float2(tile_Q[(jc_tile_K + ip*cols_per_warp) * tile_stride + k]);
                             dstk_val.x += dstk_val_add.x*KQ_crs;
                             dstk_val.y += dstk_val_add.y*KQ_crs;
@@ -2181,13 +2216,25 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
 #endif // defined(VOLTA_MMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE) || defined(AMD_MFMA_AVAILABLE)
 }
 
+// inference-fattn: the f32 value sums exist for Turing's wide tiles; other archs build the f16 kernel in their place
+#if defined(TURING_MMA_AVAILABLE)
+static constexpr bool fattn_vkq_f32_compiled = true;
+#else
+static constexpr bool fattn_vkq_f32_compiled = false;
+#endif // defined(TURING_MMA_AVAILABLE)
+
+// inference-fattn: the cases the f32 value sums are built for: head 128 without GQA packing, 16 or more columns
+static constexpr __host__ __device__ bool fattn_mma_f32_values_built(const int DKQ, const int DV, const int ncols1, const int ncols2) {
+    return DKQ == 128 && DV == 128 && ncols2 == 1 && ncols1 >= 16;
+}
+
 static constexpr __host__ __device__ bool ggml_cuda_flash_attn_ext_mma_f16_may_use_sparse(
         const int DKQ, const int DV, const int ncols1, const int ncols2) {
     return (DKQ == 512 && DV == 512 && ncols1 == 1 && ncols2 == 8) ||
            (DKQ == 576 && DV == 512 && ncols1 == 1 && ncols2 == 16);
 }
 
-template<int DKQ, int DV, int ncols1, int ncols2, bool use_logit_softcap, bool V_is_K_view, bool use_sparse>
+template<int DKQ, int DV, int ncols1, int ncols2, bool use_logit_softcap, bool V_is_K_view, bool use_sparse, bool f32_values = false>
 __launch_bounds__(ggml_cuda_fattn_mma_get_nthreads(DKQ, DV, ncols1*ncols2), ggml_cuda_fattn_mma_get_occupancy(DKQ, DV, ncols1*ncols2))
 static __global__ void flash_attn_ext_f16(
         const char * Q_ptr,
@@ -2330,13 +2377,13 @@ static __global__ void flash_attn_ext_f16(
         const bool has_rows = jt*ncols1 < q_rows.y;
         if (has_rows && kb0_start == 0) {
             constexpr bool needs_fixup = false; // CUDA block is working on an entire tile.
-            flash_attn_ext_f16_process_tile<DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, use_sparse, needs_fixup, is_fixup>
+            flash_attn_ext_f16_process_tile<DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, use_sparse, needs_fixup, is_fixup, f32_values && fattn_vkq_f32_compiled>
                 (Q_f2, K_h2, V_h2, mask_h, indices, sinks_f, dstk, dst_meta, scale, slope, logit_softcap,
                  ne01, ne02, gqa_ratio, ne11, stride_Q1, stride_Q2, stride_K, stride_V, stride_mask, jt, zt_gqa, kb0_start, kb0_stop,
                  Q_bf16, dst_bf16, KV_convert, lay, sequence, q_rows.y);
         } else if (has_rows) {
             constexpr bool needs_fixup = true; // CUDA block is missing the beginning of a tile.
-            flash_attn_ext_f16_process_tile<DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, use_sparse, needs_fixup, is_fixup>
+            flash_attn_ext_f16_process_tile<DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, use_sparse, needs_fixup, is_fixup, f32_values && fattn_vkq_f32_compiled>
                 (Q_f2, K_h2, V_h2, mask_h, indices, sinks_f, dstk, dst_meta, scale, slope, logit_softcap,
                  ne01, ne02, gqa_ratio, ne11, stride_Q1, stride_Q2, stride_K, stride_V, stride_mask, jt, zt_gqa, kb0_start, kb0_stop,
                  Q_bf16, dst_bf16, KV_convert, lay, sequence, q_rows.y);
@@ -2384,7 +2431,7 @@ static __global__ void flash_attn_ext_f16(
     }
     constexpr bool is_fixup = true; // Last index writes its data to fixup buffer to avoid data races with other blocks.
     constexpr bool needs_fixup = false;
-    flash_attn_ext_f16_process_tile<DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, use_sparse, needs_fixup, is_fixup>
+    flash_attn_ext_f16_process_tile<DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, use_sparse, needs_fixup, is_fixup, f32_values && fattn_vkq_f32_compiled>
         (Q_f2, K_h2, V_h2, mask_h, indices, sinks_f, dstk, dst_meta, scale, slope, logit_softcap,
          ne01, ne02, gqa_ratio, ne11, stride_Q1, stride_Q2, stride_K, stride_V, stride_mask, jt, zt_gqa, kb0_start, kb0_stop,
          Q_bf16, dst_bf16, KV_convert, lay, sequence, q_rows.y);
@@ -2479,7 +2526,21 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
             }
         } else
 #endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
-        {
+        if (lay.f32_values) {
+            // inference-fattn: f32 value sums, a kernel of its own where built (kernel selection only asks for those)
+            if constexpr (fattn_mma_f32_values_built(DKQ, DV, ncols1, ncols2)) {
+                constexpr bool use_sparse_kernel = false;
+                constexpr bool f32_values = true;
+                fattn_kernel = flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, use_sparse_kernel, f32_values>;
+
+#if !defined(GGML_USE_MUSA)
+                static size_t shared_memory_limit_raised[GGML_CUDA_MAX_DEVICES] = {0};
+                ggml_cuda_raise_shared_memory_limit(reinterpret_cast<fattn_kernel_ptr_t>(fattn_kernel), shared_memory_limit_raised[id], nbytes_shared_total);
+#endif // !defined(GGML_USE_MUSA)
+            } else {
+                GGML_ABORT("f32 value sums are built for head dim 128 without GQA packing at 16 or more columns");
+            }
+        } else {
             constexpr bool use_sparse_kernel = false;
             fattn_kernel = flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, use_sparse_kernel>;
 

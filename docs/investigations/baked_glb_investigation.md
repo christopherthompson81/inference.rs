@@ -475,3 +475,9 @@ nothing measurable.
 Also: a CUDA `index_select` of no rows now returns an empty tensor (a GPU case reproduces the failure without the
 guard), and the model inventory, whose divide by zero on attention-free GGUFs (Mamba, RWKV) made the Models list fail
 on the restarted LAN server, skips the KV profile for a model without attention heads.
+
+## Run 20 - 2026-11-11
+
+Run 19's value scaling is superseded: the DiT's attention now sums the values in f32 on CUDA (fattn's f32-values
+variant), which neither overflows nor strays ~3% from the reference on diffuse rows; the scaling is removed. See
+`fattn_f32_values_investigation.md` (Runs 1-4): robot 41.5 s, the house 97.6 s, every stage closer to the reference.

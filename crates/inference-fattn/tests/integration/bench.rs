@@ -522,3 +522,40 @@ fn long_bidirectional() -> Result<()> {
     }
     Ok(())
 }
+
+// TRELLIS.2's DiT at 1024: (batch, tokens) with 12 heads of 128, the guided batch of two and a large object alone
+const F32_VALUE_RUNS: [(usize, usize); 3] = [(2, 8259), (1, 18171), (2, 4096)];
+
+#[test]
+#[ignore]
+fn f32_values_vs_f16() -> Result<()> {
+    let dev = Device::new_cuda(0)?;
+    let (n_head, head_dim) = (12, 128);
+    for (batch, seq) in F32_VALUE_RUNS {
+        let rand = || -> Result<Tensor> {
+            Ok(
+                Tensor::randn(0f32, 1., (batch, seq, n_head, head_dim), &dev)?
+                    .to_dtype(DType::BF16)?,
+            )
+        };
+        let (q, k, v) = (rand()?, rand()?, rand()?);
+        let f16 = FattnOptions {
+            scale: 1. / (head_dim as f32).sqrt(),
+            ..Default::default()
+        };
+        let f32_values = FattnOptions {
+            f32_values: true,
+            ..f16.clone()
+        };
+        let a = time(&dev, || flash_attn(&q, &k, &v, &f16))?;
+        let b = time(&dev, || flash_attn(&q, &k, &v, &f32_values))?;
+        let tflops = |us: f64| 4.0 * (batch * seq * seq * n_head * head_dim) as f64 / us / 1e6;
+        println!(
+            "batch {batch} seq {seq:>6}: f16 sums {a:9.1} us ({:5.1} TFLOP/s), f32 sums {b:9.1} us ({:5.1} TFLOP/s), x{:.3}",
+            tflops(a),
+            tflops(b),
+            b / a
+        );
+    }
+    Ok(())
+}

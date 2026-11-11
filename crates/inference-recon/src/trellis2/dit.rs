@@ -15,9 +15,6 @@ pub(crate) const BLOCK_EPS: f64 = 1e-6;
 const RMS_EPS: f64 = 1e-12;
 const ROPE_BASE: f32 = 10000.0;
 const AXES: usize = 3;
-// fattn sums softmax-weighted values in f16 (65504 at most); values are scaled so the per-channel sums of |v|, which bound
-// those sums, stay under this
-const F16_VALUE_SUM: f32 = 32768.0;
 
 pub(crate) struct TimestepMlp {
     fc1: Linear,
@@ -164,9 +161,7 @@ pub(crate) struct Block {
 /// A block's cross-attention keys and values over the condition, `[batch, heads, tokens, head_dim]`.
 pub struct CrossKv {
     k: Tensor,
-    // divided by `scale` when there is one (on CUDA: see `value_scale`)
     v: Tensor,
-    scale: Option<Tensor>,
 }
 
 impl CrossKv {
@@ -180,7 +175,6 @@ impl CrossKv {
         Ok(Self {
             k: self.k.narrow(0, i, 1)?,
             v: self.v.narrow(0, i, 1)?,
-            scale: self.scale.clone(),
         })
     }
 
@@ -189,7 +183,6 @@ impl CrossKv {
         Ok(Self {
             k: self.k.narrow(0, 0, n)?,
             v: self.v.narrow(0, 0, n)?,
-            scale: self.scale.clone(),
         })
     }
 }
@@ -209,55 +202,22 @@ fn unbiased<'a>(linear: &'a AmpLinear, x: &Tensor) -> Result<(Tensor, &'a Tensor
     Ok((y.reshape((b, n, ()))?, bias))
 }
 
-/// The power of two values `[batch, heads, keys, d]` are divided by before attention on CUDA, as f32 `[1]` on their
-/// device (`dit_cuda::value_scale` computes the same on the fused path): fattn sums softmax-weighted values in f16, so a
-/// row spread over many keys can pass 65504; the largest per-(batch, head, channel) sum of |v| over the keys, over
-/// F16_VALUE_SUM, rounded up to a power of two and at least 1. Exact both ways (exp of a whole multiple of ln 2 rounds
-/// to that power in bf16). None off CUDA, whose attention sums in f32.
-fn value_scale(v: &Tensor) -> Result<Option<Tensor>> {
-    if !v.device().is_cuda() {
-        return Ok(None);
-    }
-    let bound =
-        (v.abs()?.to_dtype(DType::F32)?.sum_keepdim(2)?.max_all()? / f64::from(F16_VALUE_SUM))?;
-    let power = ((bound.log()? / std::f64::consts::LN_2)?
-        .ceil()?
-        .maximum(0.0)?
-        * std::f64::consts::LN_2)?;
-    Ok(Some(
-        power
-            .exp()?
-            .to_dtype(DType::BF16)?
-            .to_dtype(DType::F32)?
-            .reshape(1)?,
-    ))
-}
-
-// attention over values divided by `scale` (`value_scale`'s, computed here when `v` is not yet divided), multiplied back
-fn attend(q: &Tensor, k: &Tensor, v: &Tensor, divided: Option<Option<&Tensor>>) -> Result<Tensor> {
-    let own;
-    let (v, scale) = match divided {
-        Some(scale) => (v.clone(), scale),
-        None => {
-            own = value_scale(v)?;
-            match &own {
-                Some(s) => (
-                    v.broadcast_div(&s.to_dtype(v.dtype())?.reshape((1, 1, 1, 1))?)?,
-                    Some(s),
-                ),
-                None => (v.clone(), None),
-            }
-        }
-    };
-    let out = sdpa(q, k, &v)?;
-    match scale {
-        Some(s) => out.broadcast_mul(&s.to_dtype(out.dtype())?.reshape((1, 1, 1, 1))?),
-        None => Ok(out),
-    }
-}
-
+// `[batch, heads, tokens, d]` attention; on CUDA fattn sums the softmax-weighted values in f32 (its f16 sums overflow
+// over a row spread across ~18K tokens and stray ~3% from the reference on long diffuse rows), else the shared path
 fn sdpa(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
     let head_dim = q.dim(D::Minus1)?;
+    #[cfg(feature = "cuda")]
+    if q.device().is_cuda() {
+        let opts = inference_fattn::FattnOptions {
+            scale: 1.0 / (head_dim as f32).sqrt(),
+            f32_values: true,
+            ..Default::default()
+        };
+        let (qt, kt, vt) = (q.transpose(1, 2)?, k.transpose(1, 2)?, v.transpose(1, 2)?);
+        if inference_fattn::supported(&qt, &kt, &vt, &opts)? {
+            return inference_fattn::flash_attn(&qt, &kt, &vt, &opts)?.transpose(1, 2);
+        }
+    }
     let params = SdpaParams {
         n_kv_groups: 1,
         softcap: None,
@@ -327,19 +287,10 @@ impl Block {
         let k = self
             .cross_k_norm
             .forward(&kv.narrow(2, 0, 1)?.squeeze(2)?)?;
-        let v = kv
-            .narrow(2, 1, 1)?
-            .squeeze(2)?
-            .transpose(1, 2)?
-            .contiguous()?;
-        let scale = value_scale(&v)?;
+        let v = kv.narrow(2, 1, 1)?.squeeze(2)?;
         Ok(CrossKv {
             k: k.transpose(1, 2)?.contiguous()?,
-            v: match &scale {
-                Some(s) => v.broadcast_div(&s.to_dtype(v.dtype())?.reshape((1, 1, 1, 1))?)?,
-                None => v,
-            },
-            scale,
+            v: v.transpose(1, 2)?.contiguous()?,
         })
     }
 
@@ -385,7 +336,7 @@ impl Block {
         rope: &Rope,
         kv: &CrossKv,
     ) -> Result<Tensor> {
-        use super::dit_cuda::{bias_gelu, heads, ln_mod, residual, value_scale};
+        use super::dit_cuda::{bias_gelu, heads, ln_mod, residual};
         // chunks of the modulation: shift, scale and gate for attention, then for the MLP
         const SHIFT_MSA: usize = 0;
         const SCALE_MSA: usize = 1;
@@ -400,31 +351,13 @@ impl Block {
         let (qkv, qkv_bias) = unbiased(&self.qkv, &h)?;
         let qkv = qkv.reshape((b, n, 3, self.heads, ()))?;
         let rot = Some((&rope.cos, &rope.sin));
-        let q = heads(
-            &qkv,
-            qkv_bias,
-            0,
-            Some(&self.q_norm.scale),
-            rot,
-            None,
-            rms_eps,
-        )?;
-        let k = heads(
-            &qkv,
-            qkv_bias,
-            1,
-            Some(&self.k_norm.scale),
-            rot,
-            None,
-            rms_eps,
-        )?;
-        let scales = value_scale(&qkv, qkv_bias, 2, F16_VALUE_SUM)?;
-        let (scale, inv_scale) = (scales.narrow(0, 0, 1)?, scales.narrow(0, 1, 1)?);
-        let v = heads(&qkv, qkv_bias, 2, None, None, Some(&inv_scale), rms_eps)?;
+        let q = heads(&qkv, qkv_bias, 0, Some(&self.q_norm.scale), rot, rms_eps)?;
+        let k = heads(&qkv, qkv_bias, 1, Some(&self.k_norm.scale), rot, rms_eps)?;
+        let v = heads(&qkv, qkv_bias, 2, None, None, rms_eps)?;
         let attn = sdpa(&q, &k, &v)?;
         let (attn, out_bias) =
             unbiased(&self.self_out, &attn.transpose(1, 2)?.reshape((b, n, c))?)?;
-        let xs = residual(xs, &attn, out_bias, Some(&scale), Some((&m, GATE_MSA)))?;
+        let xs = residual(xs, &attn, out_bias, Some((&m, GATE_MSA)))?;
 
         let bias = self
             .norm2
@@ -433,24 +366,16 @@ impl Block {
         let h = ln_mod(&xs, Some((self.norm2.weight(), bias)), None, ln_eps)?;
         let (q, q_bias) = unbiased(&self.cross_q, &h)?;
         let q = q.reshape((b, n, 1, self.heads, ()))?;
-        let q = heads(
-            &q,
-            q_bias,
-            0,
-            Some(&self.cross_q_norm.scale),
-            None,
-            None,
-            rms_eps,
-        )?;
+        let q = heads(&q, q_bias, 0, Some(&self.cross_q_norm.scale), None, rms_eps)?;
         let attn = sdpa(&q, &kv.k, &kv.v)?;
         let (attn, out_bias) =
             unbiased(&self.cross_out, &attn.transpose(1, 2)?.reshape((b, n, c))?)?;
-        let xs = residual(&xs, &attn, out_bias, kv.scale.as_ref(), None)?;
+        let xs = residual(&xs, &attn, out_bias, None)?;
 
         let h = ln_mod(&xs, None, Some((&m, SCALE_MLP, SHIFT_MLP)), ln_eps)?;
         let (h, fc1_bias) = unbiased(&self.fc1, &h)?;
         let (mlp, fc2_bias) = unbiased(&self.fc2, &bias_gelu(&h, fc1_bias)?)?;
-        residual(&xs, &mlp, fc2_bias, None, Some((&m, GATE_MLP)))
+        residual(&xs, &mlp, fc2_bias, Some((&m, GATE_MLP)))
     }
 
     // `forward`, handing `inspect` the first norm, the rotated q and the attention and MLP outputs
@@ -478,11 +403,10 @@ impl Block {
         let k = rope.apply(&self.k_norm.forward(&qkv.narrow(2, 1, 1)?.squeeze(2)?)?)?;
         let v = qkv.narrow(2, 2, 1)?.squeeze(2)?;
         inspect("q_rope", &q);
-        let attn = attend(
+        let attn = sdpa(
             &q.transpose(1, 2)?,
             &k.transpose(1, 2)?,
             &v.transpose(1, 2)?,
-            None,
         )?;
         let attn = self
             .self_out
@@ -494,7 +418,7 @@ impl Block {
         let q = self
             .cross_q_norm
             .forward(&self.cross_q.forward(&h)?.reshape((b, n, self.heads, ()))?)?;
-        let attn = attend(&q.transpose(1, 2)?, &kv.k, &kv.v, Some(kv.scale.as_ref()))?;
+        let attn = sdpa(&q.transpose(1, 2)?, &kv.k, &kv.v)?;
         let attn = self
             .cross_out
             .forward(&attn.transpose(1, 2)?.reshape((b, n, c))?)?;
@@ -515,35 +439,34 @@ impl Block {
 mod tests {
     use super::*;
 
-    inference_tensor::gpu_cases!(
-        cuda_cases,
-        [diffuse_attention_over_large_values_stays_finite]
-    );
+    inference_tensor::gpu_cases!(cuda_cases, [even_attention_over_large_values_stays_exact]);
 
-    const MEAN_TOLERANCE: f32 = 30.0;
+    // every query attending evenly over 8192 keys valued about 1000: an 8M sum, past f16's 65504
+    const KEYS: usize = 8192;
+    const VALUE: f64 = 1000.0;
+    // the bf16 result's own rounding at 1000 (2^-8 relative)
+    const TOLERANCE: f32 = 4.0;
 
-    // every query attending evenly over 8192 keys valued about 1000: an 8M sum, past f16's 65504 however fattn splits it
-    fn diffuse_attention_over_large_values_stays_finite() -> Result<()> {
+    fn even_attention_over_large_values_stays_exact() -> Result<()> {
         let Ok(dev) = Device::new_cuda(0) else {
             return Ok(());
         };
-        let (b, h, n, d) = (1, 2, 8192, 128);
-        let q = Tensor::zeros((b, h, n, d), DType::BF16, &dev)?;
-        let k = Tensor::randn(0f32, 1.0, (b, h, n, d), &dev)?.to_dtype(DType::BF16)?;
-        let v =
-            ((Tensor::randn(0f32, 10.0, (b, h, n, d), &dev)? + 1000.0)?).to_dtype(DType::BF16)?;
+        let shape = (1, 2, KEYS, 128);
+        let q = Tensor::zeros(shape, DType::BF16, &dev)?;
+        let k = Tensor::randn(0f32, 1.0, shape, &dev)?.to_dtype(DType::BF16)?;
+        let v = (Tensor::randn(0f32, 10.0, shape, &dev)? + VALUE)?.to_dtype(DType::BF16)?;
         let want = v.to_dtype(DType::F32)?.mean_keepdim(2)?;
-        let got = attend(&q, &k, &v, None)?.to_dtype(DType::F32)?;
-        let values = got.flatten_all()?.to_vec1::<f32>()?;
-        assert!(values.iter().all(|x| x.is_finite()), "non-finite attention");
+        let got = sdpa(&q, &k, &v)?.to_dtype(DType::F32)?;
         let worst = got
             .broadcast_sub(&want)?
             .abs()?
             .flatten_all()?
             .max(0)?
             .to_scalar::<f32>()?;
-        // fattn's f16 accumulation leaves perfectly even attention over this many keys about 2% off; not NaN
-        assert!(worst < MEAN_TOLERANCE, "off the mean by {worst}");
+        assert!(
+            worst.is_finite() && worst < TOLERANCE,
+            "off the mean by {worst}"
+        );
         Ok(())
     }
 }

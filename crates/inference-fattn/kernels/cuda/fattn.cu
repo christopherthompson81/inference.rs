@@ -144,8 +144,10 @@ static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1(ggml_backend_cuda_con
     }
 #endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
 
+    // inference-fattn: f32 value sums need the wide (16+ column) tiles
+    const bool f32_values = fattn_get_layout(dst).f32_values != 0;
     if constexpr (ncols2 <= 8) {
-        if (turing_mma_available(cc) && Q->ne[1] <= 8/ncols2) {
+        if (turing_mma_available(cc) && Q->ne[1] <= 8/ncols2 && !f32_values) {
             ggml_cuda_flash_attn_ext_mma_f16_case<DKQ, DV, 8/ncols2, ncols2>(ctx, dst);
             return;
         }
@@ -621,6 +623,12 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
     const fattn_layout lay = fattn_get_layout(dst);
     const bool narrow = fattn_narrow_kv(lay);
+    // inference-fattn: f32 value sums run on the mma kernel's own instances (fattn_mma_f32_values_built), or not at all
+    if (lay.f32_values) {
+        const bool kv_ok = (K->type == GGML_TYPE_F16 || K->type == GGML_TYPE_BF16) && V->type == K->type && !narrow;
+        return kv_ok && GGML_CUDA_CC_IS_NVIDIA(cc) && turing_mma_available(cc) && K->ne[0] == 128 && V->ne[0] == 128
+            && gqa_ratio == 1 && logit_softcap == 0.0f ? BEST_FATTN_KERNEL_MMA_F16 : BEST_FATTN_KERNEL_NONE;
+    }
     if (!narrow && (!ggml_cuda_fattn_kv_type_supported(K->type) || !ggml_cuda_fattn_kv_type_supported(V->type))) {
         return BEST_FATTN_KERNEL_NONE;
     }
