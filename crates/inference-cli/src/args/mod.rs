@@ -319,6 +319,75 @@ pub enum Command {
         cpu: bool,
     },
 
+    /// A mesh painted from an image with TRELLIS.2's texturing pipeline: model.glb (the mesh fitted to the unit cube
+    /// with baked base color and metallic-roughness textures, on its own texture coordinates or an unwrap), the
+    /// cut-out image and a meta.json; an image without a transparent background has it removed with BiRefNet
+    #[command(name = "texture-mesh")]
+    TextureMesh {
+        /// The mesh (glb, obj, ply)
+        #[arg(long)]
+        mesh: PathBuf,
+
+        /// The image to paint it from (png, jpg, webp)
+        #[arg(long)]
+        image: PathBuf,
+
+        /// The output folder, created if missing
+        #[arg(long)]
+        out: PathBuf,
+
+        /// The grid the mesh is encoded at, 512 or 1024
+        #[arg(long, default_value_t = 1024)]
+        resolution: usize,
+
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+
+        /// The baked textures' width and height
+        #[arg(long, default_value_t = inference_jobs::image_to_3d::BakeOptions::default().texture_size)]
+        texture_size: usize,
+
+        /// Unwrap the mesh even when it has texture coordinates of its own
+        #[arg(long)]
+        unwrap: bool,
+
+        /// The texture flow's sampling steps (pipeline.json's when unset)
+        #[arg(long)]
+        texture_steps: Option<usize>,
+
+        /// The texture flow's guidance strength (1: none)
+        #[arg(long)]
+        texture_guidance: Option<f64>,
+
+        /// The texture flow's guidance rescale, 0 to 1
+        #[arg(long)]
+        texture_guidance_rescale: Option<f64>,
+
+        /// The texture flow's timestep shift (1: uniform)
+        #[arg(long)]
+        texture_rescale_t: Option<f64>,
+
+        /// The TRELLIS.2-4B folder; its texturing files are fetched from microsoft/TRELLIS.2-4B when unset
+        #[arg(long)]
+        trellis2: Option<PathBuf>,
+
+        /// The DINOv3 ViT-L/16 folder; fetched from facebook/dinov3-vitl16-pretrain-lvd1689m (gated) when unset
+        #[arg(long)]
+        dinov3: Option<PathBuf>,
+
+        /// The BiRefNet folder; fetched from ZhengPeng7/BiRefNet when unset and the background needs removing
+        #[arg(long)]
+        birefnet: Option<PathBuf>,
+
+        /// Remove the background even when the image has transparency of its own
+        #[arg(long)]
+        remove_background: bool,
+
+        /// Run on the CPU (very slow) instead of the first CUDA device
+        #[arg(long)]
+        cpu: bool,
+    },
+
     /// The 3D shape of the object in one image: JoVox's 64^3 voxel structure (voxels.ply, as cubes), meshed by
     /// TRELLIS.2's second stage (mesh.ply), beside the prepared image and a meta.json; an image without a transparent
     /// background has it removed with BiRefNet

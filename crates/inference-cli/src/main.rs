@@ -375,6 +375,81 @@ async fn main() -> Result<()> {
             }
         }
 
+        Command::TextureMesh {
+            mesh,
+            image,
+            out,
+            resolution,
+            seed,
+            texture_size,
+            unwrap,
+            texture_steps,
+            texture_guidance,
+            texture_guidance_rescale,
+            texture_rescale_t,
+            trellis2,
+            dinov3,
+            birefnet,
+            remove_background,
+            cpu,
+        } => {
+            use inference_jobs::image_to_3d::SamplerChoice;
+            use inference_jobs::texture_mesh::{
+                NoProgress, RESOLUTIONS, TextureMeshOptions, TexturingSettings, fetch_models,
+                texture_mesh_on,
+            };
+            use inference_jobs::voxels::needs_background_removal;
+            if !RESOLUTIONS.contains(&resolution) {
+                anyhow::bail!("--resolution must be 512 or 1024");
+            }
+            let texture = SamplerChoice {
+                steps: texture_steps,
+                guidance_strength: texture_guidance,
+                guidance_rescale: texture_guidance_rescale,
+                rescale_t: texture_rescale_t,
+            };
+            if let Some(problem) = texture.problem() {
+                anyhow::bail!("--texture-*: {problem}");
+            }
+            let options = TextureMeshOptions {
+                settings: TexturingSettings {
+                    resolution,
+                    seed,
+                    texture,
+                },
+                texture_size,
+                unwrap,
+                remove_background,
+            };
+            let birefnet = needs_background_removal(&image, remove_background)?.then_some(birefnet);
+            let models = fetch_models(trellis2, dinov3, birefnet, &NoProgress)?;
+            let device = if cpu {
+                inference_tensor::Device::Cpu
+            } else {
+                inference_tensor::Device::cuda_if_available(0)?
+            };
+            let report =
+                texture_mesh_on(&models, &mesh, &image, &out, &options, &NoProgress, &device)?;
+            println!(
+                "{} vertices, {} faces painted at {}^3 ({}{}) in {} ({:.1} s)",
+                report.vertices,
+                report.faces,
+                report.resolution,
+                if report.own_uvs {
+                    "its own uvs"
+                } else {
+                    "unwrapped"
+                },
+                if report.background_removed {
+                    ", background removed"
+                } else {
+                    ""
+                },
+                out.display(),
+                report.total_seconds
+            );
+        }
+
         Command::Voxels {
             image,
             out,

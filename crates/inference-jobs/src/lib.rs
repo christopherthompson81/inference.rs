@@ -27,6 +27,7 @@ use crate::reconstruction::{
 
 pub mod image_to_3d;
 pub mod reconstruction;
+pub mod texture_mesh;
 pub mod voxels;
 pub mod worldgen_package;
 
@@ -496,6 +497,33 @@ pub struct ImageTo3dJob {
     pub placement: Option<Placement>,
 }
 
+/// A mesh painted from an image with TRELLIS.2's texturing pipeline; the job takes the mesh (glb, obj or ply) and the
+/// image.
+#[derive(Clone, Debug, Default, Serialize, inference_json::FromJson, ToSchema)]
+pub struct TextureMeshJob {
+    #[serde(default)]
+    pub seed: Option<u64>,
+    /// The grid the mesh is encoded at, 512 or 1024 (the default)
+    #[serde(default)]
+    pub resolution: Option<u32>,
+    /// The baked textures' width and height (2048 by default)
+    #[serde(default)]
+    pub texture_size: Option<u32>,
+    /// Unwrap the mesh even when it has texture coordinates of its own
+    #[serde(default)]
+    pub unwrap: Option<bool>,
+    /// Remove the background with BiRefNet even when the image has transparency of its own (an opaque image always
+    /// has it removed)
+    #[serde(default)]
+    pub remove_background: Option<bool>,
+    /// The texture flow's sampler
+    #[serde(default)]
+    pub texture_sampler: Option<Trellis2Sampler>,
+    /// How much it may displace to run, in place of the server's setting
+    #[serde(default)]
+    pub placement: Option<Placement>,
+}
+
 /// What a job does.
 #[derive(Clone, Debug, Serialize, inference_json::FromJson, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -509,6 +537,8 @@ pub enum JobRequest {
     /// TRELLIS.2's textured mesh of the object in one image
     #[serde(rename = "image_to_3d")]
     ImageTo3d(ImageTo3dJob),
+    /// A mesh painted from an image with TRELLIS.2
+    TextureMesh(TextureMeshJob),
 }
 
 impl JobRequest {
@@ -518,6 +548,7 @@ impl JobRequest {
             Self::Reconstruct(_) => "reconstruct",
             Self::Voxels(_) => "voxels",
             Self::ImageTo3d(_) => "image_to_3d",
+            Self::TextureMesh(_) => "texture_mesh",
         }
     }
 }
@@ -1539,6 +1570,89 @@ fn image_to_3d_work(config: &JobsConfig, job: ImageTo3dJob) -> Result<(Prepare, 
     Ok((prepare, work))
 }
 
+// the name a job input was given
+fn input_name(input: &JobInput) -> String {
+    match input {
+        JobInput::Bytes { name, .. } => name.clone(),
+        JobInput::Path(path) => path.to_string_lossy().to_string(),
+    }
+}
+
+fn texture_mesh_work(
+    config: &JobsConfig,
+    job: TextureMeshJob,
+) -> Result<(Prepare, Work), ApiError> {
+    use crate::texture_mesh::{
+        RESOLUTIONS, TextureMeshOptions, TexturingSettings, fetch_models, is_mesh, texture_mesh_on,
+    };
+    let resolution = job.resolution.map_or(1024, |r| r as usize);
+    if !RESOLUTIONS.contains(&resolution) {
+        return Err(ApiError::invalid_request("resolution must be 512 or 1024"));
+    }
+    let texture = job.texture_sampler.unwrap_or_default().choice();
+    if let Some(problem) = texture.problem() {
+        return Err(ApiError::invalid_request(format!(
+            "texture_sampler: {problem}"
+        )));
+    }
+    let defaults = TextureMeshOptions::default();
+    let options = TextureMeshOptions {
+        settings: TexturingSettings {
+            resolution,
+            seed: job.seed.unwrap_or(0),
+            texture,
+        },
+        texture_size: job
+            .texture_size
+            .map_or(defaults.texture_size, |s| s as usize),
+        unwrap: job.unwrap.unwrap_or(false),
+        remove_background: job.remove_background.unwrap_or(false),
+    };
+    // the job's mesh and image, told apart by extension
+    let split = |inputs: Vec<PathBuf>| -> anyhow::Result<(PathBuf, PathBuf)> {
+        let (meshes, images): (Vec<_>, Vec<_>) = inputs.into_iter().partition(|p| is_mesh(p));
+        match (meshes.as_slice(), images.as_slice()) {
+            ([mesh], [image]) => Ok((mesh.clone(), image.clone())),
+            _ => anyhow::bail!("a texture-mesh job takes one mesh and one image"),
+        }
+    };
+    let fetched = Arc::new(std::sync::OnceLock::new());
+    let (base, slot) = (config.clone(), fetched.clone());
+    let prepare: Prepare = Box::new(move |ctx: &JobContext| {
+        let (_, image) = split(ctx.inputs())?;
+        let birefnet = crate::voxels::needs_background_removal(&image, options.remove_background)?;
+        let models = fetch_models(
+            base.trellis2.clone(),
+            base.dinov3.clone(),
+            birefnet.then(|| base.birefnet.clone()),
+            ctx,
+        )?;
+        let _ = slot.set(models);
+        Ok(())
+    });
+    let work: Work = Box::new(move |ctx: &JobContext| {
+        let models = fetched.get().expect("prepared before the work runs");
+        let device = ctx.device()?.clone();
+        let (mesh, image) = split(ctx.inputs())?;
+        let out = ctx.dir().join(IMAGE_TO_3D_DIR);
+        let report = texture_mesh_on(models, &mesh, &image, &out, &options, ctx, &device)?;
+        let dir = ctx.dir();
+        let outputs = [
+            ("model", crate::image_to_3d::GLB_FILE),
+            ("prepared image", crate::image_to_3d::PREPARED_FILE),
+            ("meta", crate::image_to_3d::META_FILE),
+        ]
+        .into_iter()
+        .filter_map(|(name, file)| output(dir, &format!("{IMAGE_TO_3D_DIR}/{file}"), name))
+        .collect();
+        Ok(JobResult {
+            outputs,
+            report: serde_json::to_value(report)?,
+        })
+    });
+    Ok((prepare, work))
+}
+
 impl JobQueue {
     /// Sets where jobs keep their folders and which weights they run; takes effect for jobs submitted afterwards.
     pub fn configure(&self, config: JobsConfig) {
@@ -1590,6 +1704,24 @@ impl JobQueue {
                 }
                 let placement = job.placement;
                 let work = image_to_3d_work(&config, job)?;
+                (JobNeed::Bytes(IMAGE_TO_3D_NEED_BYTES), placement, work)
+            }
+            JobRequest::TextureMesh(job) => {
+                let names: Vec<PathBuf> = inputs
+                    .iter()
+                    .map(|i| PathBuf::from(input_name(i)))
+                    .collect();
+                let meshes = names
+                    .iter()
+                    .filter(|n| crate::texture_mesh::is_mesh(n))
+                    .count();
+                if inputs.len() != 2 || meshes != 1 {
+                    return Err(ApiError::invalid_request(
+                        "a texture-mesh job takes one mesh (glb, obj or ply) and one image",
+                    ));
+                }
+                let placement = job.placement;
+                let work = texture_mesh_work(&config, job)?;
                 (JobNeed::Bytes(IMAGE_TO_3D_NEED_BYTES), placement, work)
             }
         };
@@ -1659,10 +1791,7 @@ impl JobQueue {
         let mut names = Vec::with_capacity(inputs.len());
         let stored = (|| -> Result<(), ApiError> {
             for (i, input) in inputs.into_iter().enumerate() {
-                let given = match &input {
-                    JobInput::Bytes { name, .. } => name.clone(),
-                    JobInput::Path(path) => path.to_string_lossy().to_string(),
-                };
+                let given = input_name(&input);
                 let name = plain_name(&given).unwrap_or_else(|| format!("input_{i}"));
                 if names.contains(&name) {
                     return Err(ApiError::invalid_request(format!(

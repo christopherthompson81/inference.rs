@@ -78,7 +78,11 @@ pub struct ImageTo3dReport {
 }
 
 // a repository's `files` in the hub cache, downloading what is missing; the folder they share
-fn fetch_files(repo: &str, files: &[&str], progress: &dyn Progress) -> anyhow::Result<PathBuf> {
+pub(crate) fn fetch_files(
+    repo: &str,
+    files: &[&str],
+    progress: &dyn Progress,
+) -> anyhow::Result<PathBuf> {
     let api = crate::hub_api()?.model(repo.to_string());
     progress.stage(crate::DOWNLOAD_STAGE, files.len());
     let mut root = None;

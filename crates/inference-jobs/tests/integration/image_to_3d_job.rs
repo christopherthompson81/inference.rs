@@ -1,4 +1,4 @@
-//! Image-to-3D jobs: what a submission must hold, and a TRELLIS.2 run on real weights that skips unless
+//! Image-to-3D and texture-mesh jobs: what a submission must hold, and a TRELLIS.2 run on real weights that skips unless
 //! `INFERENCE_TEST_TRELLIS2_MODEL`, `INFERENCE_TEST_TRELLIS_LARGE_MODEL`, `INFERENCE_TEST_DINOV3_MODEL` and
 //! `INFERENCE_TEST_BIREFNET_MODEL` are the checkpoint folders and `INFERENCE_TEST_JOVOX_IMAGE` a photo of an object on
 //! an opaque background.
@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use inference::{ModelDType, TextModelBuilder};
 use inference_jobs::{
-    ImageTo3dJob, JobEvent, JobInput, JobQueue, JobRequest, JobStatus, JobsConfig, Trellis2Sampler,
-    Trellis2Variant,
+    ImageTo3dJob, JobEvent, JobInput, JobQueue, JobRequest, JobStatus, JobsConfig, TextureMeshJob,
+    Trellis2Sampler, Trellis2Variant,
 };
 
 #[path = "../../../inference/tests/support/llama_tiny.rs"]
@@ -62,6 +62,38 @@ async fn an_image_to_3d_job_takes_one_image() -> anyhow::Result<()> {
     });
     let refused = queue.submit(&model, many, vec![image()]);
     assert!(refused.is_err_and(|e| e.to_string().contains("samples must be")));
+    let texture = |job: TextureMeshJob| JobRequest::TextureMesh(job);
+    let file = |name: &str| JobInput::Bytes {
+        name: name.into(),
+        data: Vec::new(),
+    };
+    let images = queue.submit(
+        &model,
+        texture(TextureMeshJob::default()),
+        vec![image(), file("b.png")],
+    );
+    assert!(images.is_err_and(|e| e.to_string().contains("one mesh")));
+    let alone = queue.submit(
+        &model,
+        texture(TextureMeshJob::default()),
+        vec![file("chair.glb")],
+    );
+    assert!(alone.is_err_and(|e| e.to_string().contains("one mesh")));
+    let coarse = TextureMeshJob {
+        resolution: Some(256),
+        ..Default::default()
+    };
+    let refused = queue.submit(&model, texture(coarse), vec![file("chair.obj"), image()]);
+    assert!(refused.is_err_and(|e| e.to_string().contains("resolution must be")));
+    let parsed: JobRequest =
+        serde_json::from_value(serde_json::json!({"kind": "texture_mesh", "resolution": 512}))?;
+    assert!(matches!(
+        parsed,
+        JobRequest::TextureMesh(TextureMeshJob {
+            resolution: Some(512),
+            ..
+        })
+    ));
     let parsed: JobRequest =
         serde_json::from_value(serde_json::json!({"kind": "image_to_3d", "variant": "512"}))?;
     assert!(matches!(

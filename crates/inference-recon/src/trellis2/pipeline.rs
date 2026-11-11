@@ -30,10 +30,12 @@ use crate::progress::{Progress, check};
 const STRUCTURE_FLOW_FILE: &str = "ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors";
 const SHAPE_512_FILE: &str = "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors";
 const SHAPE_1024_FILE: &str = "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors";
-const TEXTURE_512_FILE: &str = "ckpts/slat_flow_imgshape2tex_dit_1_3B_512_bf16.safetensors";
-const TEXTURE_1024_FILE: &str = "ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors";
+pub(super) const TEXTURE_512_FILE: &str =
+    "ckpts/slat_flow_imgshape2tex_dit_1_3B_512_bf16.safetensors";
+pub(super) const TEXTURE_1024_FILE: &str =
+    "ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors";
 const SHAPE_DECODER_FILE: &str = "ckpts/shape_dec_next_dc_f16c32_fp16.safetensors";
-const TEXTURE_DECODER_FILE: &str = "ckpts/tex_dec_next_dc_f16c32_fp16.safetensors";
+pub(super) const TEXTURE_DECODER_FILE: &str = "ckpts/tex_dec_next_dc_f16c32_fp16.safetensors";
 /// TRELLIS-image-large's structure decoder, which TRELLIS.2 reuses
 pub const STRUCTURE_DECODER_FILE: &str = "ckpts/ss_dec_conv3d_16l8_fp16.safetensors";
 /// The TRELLIS.2-4B files the whole pipeline reads.
@@ -175,12 +177,12 @@ pub fn vertex_mesh(mesh: &Mesh, faces: usize, device: &Device) -> Result<Mesh> {
     Ok(bake::clean(mesh, faces, device)?.0)
 }
 
-struct Stats {
-    shape: (Vec<f32>, Vec<f32>),
-    texture: (Vec<f32>, Vec<f32>),
+pub(super) struct Stats {
+    pub(super) shape: (Vec<f32>, Vec<f32>),
+    pub(super) texture: (Vec<f32>, Vec<f32>),
 }
 
-fn stats(dir: &Path) -> Result<Stats> {
+pub(super) fn stats(dir: &Path) -> Result<Stats> {
     let pipeline: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.join(PIPELINE_FILE))?)
             .map_err(inference_tensor::Error::wrap)?;
@@ -210,12 +212,17 @@ fn stats(dir: &Path) -> Result<Stats> {
     })
 }
 
-fn weights(path: &Path, device: &Device) -> Result<VarBuilder<'static>> {
+pub(super) fn weights(path: &Path, device: &Device) -> Result<VarBuilder<'static>> {
     // SAFETY: the checkpoint files are not modified while the model is loaded
     unsafe { VarBuilder::from_mmaped_safetensors(&[path], DType::F32, device) }
 }
 
-fn noise(rng: &mut StdRng, cells: usize, channels: usize, device: &Device) -> Result<Tensor> {
+pub(super) fn noise(
+    rng: &mut StdRng,
+    cells: usize,
+    channels: usize,
+    device: &Device,
+) -> Result<Tensor> {
     let v: Vec<f32> = (0..cells * channels)
         .map(|_| StandardNormal.sample(rng))
         .collect();
@@ -300,7 +307,7 @@ impl Run<'_> {
 }
 
 /// DINOv3's tokens `[1, tokens, 1024]` for the cropped object `(rgb, size)` resized (PIL Lanczos) to `res`^2.
-fn condition(
+pub(super) fn condition(
     encoder: &Dinov3,
     crop: &(Vec<u8>, (usize, usize)),
     res: usize,
@@ -360,7 +367,7 @@ impl SamplerChoice {
         None
     }
 
-    fn apply(&self, base: SamplerParams) -> SamplerParams {
+    pub(super) fn apply(&self, base: SamplerParams) -> SamplerParams {
         SamplerParams {
             steps: self.steps.unwrap_or(base.steps),
             guidance_strength: self.guidance_strength.unwrap_or(base.guidance_strength),
