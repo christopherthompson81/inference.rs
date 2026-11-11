@@ -13,6 +13,9 @@ use super::vec3::{V3, cross, dot, norm, sub};
 pub const CONE_HALF_ANGLE: f32 = std::f32::consts::FRAC_PI_2;
 // the unwrap's clusters: tight enough that most flatten as one chart without overlaps
 pub const UNWRAP_CONE_HALF_ANGLE: f32 = std::f32::consts::FRAC_PI_6;
+// the most faces one chart may hand xatlas (its least-squares parameterization grows superlinearly; the robot's largest
+// 30 degree cluster is ~12.6K faces)
+pub const MAX_SINGLE_CHART_FACES: usize = 20_000;
 pub const AREA_PENALTY: f32 = 0.1;
 pub const PERIMETER_AREA_PENALTY: f32 = 1e-4;
 // `remove_degenerate_faces` defaults
@@ -233,6 +236,88 @@ pub fn compute_charts(
 
 /// The charts as separate meshes: each chart's vertices (ascending source index) and its triangles over them, charts
 /// in id order and their faces in mesh order.
+/// `charts` with every chart over `max` faces cut into connected pieces of at most `max` faces, grown breadth first
+/// over the faces' shared edges. A nearly flat surface (a thin sheet from a flat drawing) is one legitimate cluster of
+/// the whole mesh, and xatlas parameterizes a chart as one least-squares system, which at a million faces runs for hours.
+pub fn split_large_charts(mesh: &Mesh, charts: &[u32], max: usize) -> Vec<u32> {
+    let count = charts.iter().map(|&c| c as usize + 1).max().unwrap_or(0);
+    let mut sizes = vec![0usize; count];
+    for &c in charts {
+        sizes[c as usize] += 1;
+    }
+    if sizes.iter().all(|&n| n <= max) {
+        return charts.to_vec();
+    }
+    // neighbours within the same chart, as CSR over faces
+    let mut degree = vec![0u32; charts.len() + 1];
+    let pairs: Vec<(u32, u32)> = manifold_adjacency(mesh)
+        .into_iter()
+        .filter(|&(a, b, _, _)| {
+            charts[a as usize] == charts[b as usize] && sizes[charts[a as usize] as usize] > max
+        })
+        .map(|(a, b, _, _)| (a, b))
+        .collect();
+    for &(a, b) in &pairs {
+        degree[a as usize + 1] += 1;
+        degree[b as usize + 1] += 1;
+    }
+    for i in 1..degree.len() {
+        degree[i] += degree[i - 1];
+    }
+    let mut fill = degree.clone();
+    let mut neighbours = vec![0u32; degree[charts.len()] as usize];
+    for &(a, b) in &pairs {
+        neighbours[fill[a as usize] as usize] = b;
+        fill[a as usize] += 1;
+        neighbours[fill[b as usize] as usize] = a;
+        fill[b as usize] += 1;
+    }
+    let mut out = charts.to_vec();
+    let mut assigned = vec![false; charts.len()];
+    let mut next = count as u32;
+    let mut queue = std::collections::VecDeque::new();
+    for seed in 0..charts.len() {
+        if sizes[charts[seed] as usize] <= max || assigned[seed] {
+            continue;
+        }
+        // a piece: the seed's chart grown breadth first until it holds `max` faces or runs out
+        let piece = next;
+        next += 1;
+        let mut taken = 0;
+        assigned[seed] = true;
+        queue.clear();
+        queue.push_back(seed as u32);
+        while let Some(f) = queue.pop_front() {
+            out[f as usize] = piece;
+            taken += 1;
+            if taken == max {
+                // the rest of the frontier seeds later pieces
+                for &g in queue.iter() {
+                    assigned[g as usize] = false;
+                }
+                break;
+            }
+            for &g in &neighbours[degree[f as usize] as usize..degree[f as usize + 1] as usize] {
+                if !assigned[g as usize] {
+                    assigned[g as usize] = true;
+                    queue.push_back(g);
+                }
+            }
+        }
+    }
+    // renumber densely
+    let mut ids = vec![u32::MAX; next as usize];
+    let mut dense = 0;
+    for c in out.iter_mut() {
+        if ids[*c as usize] == u32::MAX {
+            ids[*c as usize] = dense;
+            dense += 1;
+        }
+        *c = ids[*c as usize];
+    }
+    out
+}
+
 pub fn chart_meshes(mesh: &Mesh, charts: &[u32]) -> Vec<(Vec<u32>, Vec<[u32; 3]>)> {
     let count = charts.iter().map(|&c| c as usize + 1).max().unwrap_or(0);
     let mut faces: Vec<Vec<[u32; 3]>> = vec![Vec::new(); count];
@@ -318,7 +403,10 @@ pub fn uv_unwrap_with(
 ) -> Result<Unwrapped, inference_xatlas::Error> {
     let mut mesh = mesh.clone();
     remove_degenerate_faces(&mut mesh);
-    let charts = compute_charts(&mesh, cone_half_angle, AREA_PENALTY, PERIMETER_AREA_PENALTY);
+    let mut charts = compute_charts(&mesh, cone_half_angle, AREA_PENALTY, PERIMETER_AREA_PENALTY);
+    if options.single_chart {
+        charts = split_large_charts(&mesh, &charts, MAX_SINGLE_CHART_FACES);
+    }
     let clusters = chart_meshes(&mesh, &charts);
     let positions: Vec<Vec<V3>> = clusters
         .iter()
@@ -366,6 +454,62 @@ pub fn uv_unwrap_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_flat_sheet_splits_into_connected_pieces_within_the_cap() {
+        // a 100 x 100 quad grid in one plane: 20000 faces
+        let n = 100u32;
+        let vertices: Vec<V3> = (0..=n)
+            .flat_map(|y| (0..=n).map(move |x| [x as f32, 0.0, y as f32]))
+            .collect();
+        let at = |x: u32, y: u32| y * (n + 1) + x;
+        let faces: Vec<[u32; 3]> = (0..n)
+            .flat_map(|y| {
+                (0..n).flat_map(move |x| {
+                    [
+                        [at(x, y), at(x, y + 1), at(x + 1, y)],
+                        [at(x + 1, y), at(x, y + 1), at(x + 1, y + 1)],
+                    ]
+                })
+            })
+            .collect();
+        let mesh = Mesh { vertices, faces };
+        // the whole sheet as one chart, as the clustering leaves a thin sheet from a flat drawing
+        let charts = vec![0u32; mesh.faces.len()];
+        let max = 1500;
+        let pieces = split_large_charts(&mesh, &charts, max);
+        let count = *pieces.iter().max().expect("faces") as usize + 1;
+        assert!(count >= mesh.faces.len() / max, "{count} pieces");
+        // each piece within the cap and connected through shared edges
+        let adjacency = manifold_adjacency(&mesh);
+        for piece in 0..count as u32 {
+            let members: Vec<usize> = (0..pieces.len()).filter(|&f| pieces[f] == piece).collect();
+            assert!(
+                !members.is_empty() && members.len() <= max,
+                "piece {piece}: {}",
+                members.len()
+            );
+            let mut reached = std::collections::HashSet::from([members[0]]);
+            let mut grew = true;
+            while grew {
+                grew = false;
+                for &(a, b, _, _) in &adjacency {
+                    let (a, b) = (a as usize, b as usize);
+                    if pieces[a] == piece
+                        && pieces[b] == piece
+                        && reached.contains(&a) != reached.contains(&b)
+                    {
+                        reached.insert(a);
+                        reached.insert(b);
+                        grew = true;
+                    }
+                }
+            }
+            assert_eq!(reached.len(), members.len(), "piece {piece} is connected");
+        }
+        // charts already within the cap pass through unchanged
+        assert_eq!(split_large_charts(&mesh, &charts, mesh.faces.len()), charts);
+    }
 
     #[test]
     fn a_cube_splits_where_its_faces_turn() {
