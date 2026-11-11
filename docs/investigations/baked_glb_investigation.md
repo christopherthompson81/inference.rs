@@ -435,3 +435,43 @@ The marches depend only on the coverage, known once the atlas is rasterized, so 
 texture stage and `finish` only evaluates. Robot, 1024-cascade: export after generation 4.65 -> 2.52 s, total 43.0 ->
 39.5 s, the GLB byte-identical; host peak 2.46 GB (the schedules are held through the texture stage). `--remesh`
 44.7 s, GPU 6.49 GB: its remesh makes `prepare` outlast the texture stage.
+
+## Run 19 - 2026-11-11
+
+Question: an image-to-3D job on the LAN server (a cut-out of a house, seed 1) failed with
+`DriverError(CUDA_ERROR_INVALID_VALUE)` right after the decode stage. Why?
+
+- `CUDA_LAUNCH_BLOCKING=1` on the CLI with the same image and seed: the failing launch is the generic `index_select`
+  in the decoder's channel-to-space step. Level sizes printed: the 1024 decode's first level kept 0 of 18171 cells,
+  and an empty `index_select` launches an empty grid (`LaunchConfig::for_num_elems(0)`), which CUDA refuses.
+- The shape 1024 latents were all NaN (581472 of 581472); the 512 ones were clean. Same with the fused DiT kernels
+  turned off, so not those.
+- Attention on random inputs at 8192 to 70000 tokens: no NaN, so not length alone.
+- A finiteness check after every block of every step: the first NaN is at t = 375 (an unguided step), block 0,
+  13 tokens. Stage by stage inside the block: q/k/v finite (|q| <= 90, |v| <= 194), the self-attention output NaN in
+  13 query rows, all in head 2.
+- The call dumped and checked against f32 attention in PyTorch: those rows' logits are all near 0 (nearly even over
+  18171 keys), and the unnormalized sums sum_j exp(s_j - max) v_j reach 472444. fattn's mma kernel keeps that
+  accumulator in f16 (`T_C_VKQ = tile<16, 8, half2>` on Turing and later; llama.cpp's choice for speed), 65504 at
+  most. Most heads exceed it too in total but split their keys across blocks combined in f32; head 2's partial sums
+  overflowed.
+
+Fix (in TRELLIS.2, not the shared kernel): the values go into attention divided by a power of two and the output is
+multiplied back. sum_j p_j |v_j| <= sum_j |v_j| per (batch, head, channel), since p_j <= 1, so the largest such sum
+bounds the accumulator; the scale keeps it under 32768 (1 when it fits). The fused path computes it with a kernel from
+qkv (`value_abs_sums_bf16`, `value_scale_finish`) and folds the division into `head_norm_rope_bf16` and the
+multiplication into `gate_residual_bf16`, both exact. A first version bounded by n * max|v| with `max_all` (12.6 ms a
+call over the whole V) scaled the robot's every call and cost 12 s; the per-channel bound with the kernel costs
+nothing measurable.
+
+- On the dumped call: no NaN; error against f32 2.87e-2 relative L2, identical to the unscaled kernel's on its finite
+  rows. That error is fattn's f16 accumulation itself (perfectly even attention over 8192 keys sits ~2% off with or
+  without the scale): a follow-up if TRELLIS.2 ever needs closer agreement, an f32 V accumulator in the kernel.
+- The robot also gets scaled (2 to 64 on most self-attention calls), so its GLB is no longer byte-identical; the
+  reference-parity stages keep their cells, and the latent drifts move both ways within bf16's noise (shape 1024 rms
+  0.099 against 0.105, shape 512 0.047 against 0.039, the chaotic structure flow 0.82 against 0.45 with identical
+  logits and cells). Robot 1024-cascade 39.0 s; the house, seed 1: 1M faces in 86.8 s.
+
+Also: a CUDA `index_select` of no rows now returns an empty tensor (a GPU case reproduces the failure without the
+guard), and the model inventory, whose divide by zero on attention-free GGUFs (Mamba, RWKV) made the Models list fail
+on the restarted LAN server, skips the KV profile for a model without attention heads.
