@@ -119,6 +119,7 @@ impl Qwen3AsrModel {
             inference_audio::mel::resample(&mono, audio.sample_rate, inputs_processor::SAMPLE_RATE)?
                 .into_owned()
         };
+        #[allow(clippy::cast_precision_loss)]
         let seconds = pcm.len() as f64 / f64::from(inputs_processor::SAMPLE_RATE);
         anyhow::ensure!(
             seconds <= aligner.max_seconds(),

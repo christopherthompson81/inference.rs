@@ -95,6 +95,8 @@ fn neighbour(values: &[f64], in_order: &[bool], at: usize, backwards: bool) -> O
 
 /// The reference's `fix_timestamp`: the longest non-decreasing run of times stands; a run of outliers of up to two
 /// snaps to its nearer in-order neighbour, a longer one is interpolated between its neighbours.
+// runs are a transcript's words long, far inside f64's exact integers
+#[allow(clippy::cast_precision_loss)]
 pub fn fix_timestamps(raw: &[f64]) -> Vec<f64> {
     let n = raw.len();
     if n == 0 {
@@ -134,8 +136,8 @@ pub fn fix_timestamps(raw: &[f64]) -> Vec<f64> {
         let left = neighbour(&out, &in_order, start, true);
         let right = neighbour(&out, &in_order, end, false);
         let count = end - start;
-        for pos in start..end {
-            out[pos] = match (left, right) {
+        for (pos, value) in out.iter_mut().enumerate().take(end).skip(start) {
+            *value = match (left, right) {
                 (Some(l), Some(r)) if count <= SNAP_RUN => {
                     if pos + 1 - start <= end - pos {
                         l
@@ -146,7 +148,7 @@ pub fn fix_timestamps(raw: &[f64]) -> Vec<f64> {
                 (Some(l), Some(r)) => l + (r - l) / (count + 1) as f64 * (pos - start + 1) as f64,
                 (Some(l), None) => l,
                 (None, Some(r)) => r,
-                (None, None) => out[pos],
+                (None, None) => *value,
             };
         }
         start = end;
@@ -188,6 +190,7 @@ impl Aligner {
     }
 
     /// The longest clip the head's classes cover, in seconds
+    #[allow(clippy::cast_precision_loss)]
     pub fn max_seconds(&self) -> f64 {
         self.classes as f64 * self.segment_ms / MS_PER_SECOND
     }
@@ -225,8 +228,8 @@ impl Aligner {
             .iter()
             .enumerate()
             .filter(|&(_, &id)| id == self.timestamp_token)
-            .map(|(i, _)| i as u32)
-            .collect();
+            .map(|(i, _)| u32::try_from(i))
+            .collect::<Result<_, _>>()?;
         anyhow::ensure!(
             slots.len() == SLOTS_PER_WORD * words.len(),
             "{} timestamp slots for {} words",
