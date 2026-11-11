@@ -2114,7 +2114,6 @@ impl ImageEditRequest {
 #[serde(rename_all = "lowercase")]
 pub enum AudioResponseFormat {
     /// Widely compatible, lossy compression, good for web streaming
-    #[default]
     Mp3,
     /// Good compression efficiency, ideal for real-time communication
     Opus,
@@ -2123,6 +2122,7 @@ pub enum AudioResponseFormat {
     /// Lossless compression, larger file sizes but good audio quality
     Flac,
     /// Uncompressed, largest file sizes but maximum compatibility
+    #[default]
     Wav,
     ///  Raw audio data, requires additional format specification
     Pcm,
@@ -2175,8 +2175,10 @@ pub struct SpeechGenerationRequest {
     /// Seeds the model's sampling noise, so a request repeats exactly (Kokoro).
     #[serde(default)]
     pub seed: Option<u64>,
-    /// The desired audio format for the generated speech.
-    #[schema(example = "mp3")]
+    /// The desired audio format for the generated speech: `wav` or `pcm`, `wav` when unset (OpenAI's default, `mp3`,
+    /// is not encoded).
+    #[schema(example = "wav")]
+    #[serde(default)]
     pub response_format: AudioResponseFormat,
     /// Answers with JSON (`SpeechWithTimestamps`): the audio in `response_format`, base64-encoded, and when each word
     /// of `input` is spoken, with its IPA. Kokoro times words; another model answers with no words.
@@ -2975,6 +2977,16 @@ pub struct ResponsesDeltaContent {
 
 #[cfg(test)]
 mod tests {
+    // OpenAI's speech request needs only model, input and voice
+    #[test]
+    fn a_speech_request_without_a_format_answers_in_wav() {
+        let request: super::SpeechGenerationRequest = serde_json::from_value(
+            serde_json::json!({"model": "default", "input": "Hello world.", "voice": "af_heart"}),
+        )
+        .unwrap();
+        assert_eq!(request.response_format, super::AudioResponseFormat::Wav);
+    }
+
     #[test]
     fn a_completion_prompt_is_text_or_token_ids() {
         let parse =

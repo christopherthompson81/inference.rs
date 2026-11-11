@@ -3252,7 +3252,7 @@ class SpeechGenerationRequest:
     input: str
     model: str | None = None
     phonemes: str | None = None
-    response_format: AudioResponseFormat
+    response_format: AudioResponseFormat | None = None
     seed: int | None = None
     speed: float | None = None
     timestamps: bool | None = None

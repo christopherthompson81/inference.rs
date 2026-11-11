@@ -809,7 +809,7 @@ Speech generation request
 | `input` | `str` | required |
 | `model` | `str \| None` | optional |
 | `phonemes` | `str \| None` | optional |
-| `response_format` | `AudioResponseFormat` | required |
+| `response_format` | `AudioResponseFormat \| None` | optional |
 | `seed` | `int \| None` | optional |
 | `speed` | `float \| None` | optional |
 | `timestamps` | `bool \| None` | optional |

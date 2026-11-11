@@ -14862,8 +14862,7 @@
         "type": "object",
         "description": "Speech generation request",
         "required": [
-          "input",
-          "response_format"
+          "input"
         ],
         "properties": {
           "input": {
@@ -14885,7 +14884,7 @@
           },
           "response_format": {
             "$ref": "#/components/schemas/AudioResponseFormat",
-            "description": "The desired audio format for the generated speech."
+            "description": "The desired audio format for the generated speech: `wav` or `pcm`, `wav` when unset (OpenAI's default, `mp3`,\nis not encoded)."
           },
           "seed": {
             "type": [
