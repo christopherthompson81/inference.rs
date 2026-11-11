@@ -23,6 +23,8 @@ ignore-hidden = false
 
 [default]
 extend-ignore-re = [
+    # the flate2 crate
+    'flate2',
     # Wan's VAE config key, spelled so upstream
     '"temperal_downsample"',
     # llama.cpp's GGUF tokenizer key, spelled so upstream
