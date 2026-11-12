@@ -74,6 +74,8 @@ pub(crate) mod qwen3_asr;
 pub(crate) mod qwen3_vl;
 #[cfg(feature = "models-llama")]
 pub(crate) mod ultravox;
+#[cfg(feature = "models-qwen")]
+pub(crate) mod vibevoice_asr;
 #[cfg(feature = "models-llama")]
 pub(crate) mod voxtral;
 #[cfg(feature = "models-llama")]

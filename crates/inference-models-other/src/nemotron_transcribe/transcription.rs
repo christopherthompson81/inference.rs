@@ -35,6 +35,7 @@ fn parse_speakers(answer: &str) -> TranscriptText {
 
 fn parse(answer: &str) -> TranscriptText {
     TranscriptText {
+        segments: Vec::new(),
         language: None,
         text: answer.trim().to_string(),
     }

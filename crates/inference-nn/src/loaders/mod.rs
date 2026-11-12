@@ -272,6 +272,17 @@ pub trait NormalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModelLoa
 pub struct TranscriptText {
     pub language: Option<String>,
     pub text: String,
+    /// The spans a model times itself (VibeVoice-ASR), in seconds on the clip; none for a plain transcript.
+    pub segments: Vec<TimedSegment>,
+}
+
+/// A span of a transcript as the model timed it, with the speaker it names.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TimedSegment {
+    pub start: f64,
+    pub end: f64,
+    pub speaker: Option<u32>,
+    pub text: String,
 }
 
 /// A transcript's word, timed on its clip by a model's alignment head; `speaker` the `<spk:N>` tag the transcript gave it.

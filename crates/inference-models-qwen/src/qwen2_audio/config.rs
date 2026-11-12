@@ -73,7 +73,7 @@ pub struct TextConfig {
 
 impl TextConfig {
     /// The Qwen2 text model; the released checkpoints use no sliding window.
-    fn qwen2(&self, quantization_config: Option<QuantizedConfig>) -> qwen2::Config {
+    pub fn qwen2(&self, quantization_config: Option<QuantizedConfig>) -> qwen2::Config {
         qwen2::Config {
             vocab_size: self.vocab_size,
             hidden_size: self.hidden_size,

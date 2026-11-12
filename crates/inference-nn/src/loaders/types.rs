@@ -279,6 +279,7 @@ macro_rules! multimodal_loader_table {
             },
             Qwen2Audio { cli: "qwen2_audio", hf: "Qwen2AudioForConditionalGeneration", loader: Qwen2AudioLoader, feature: "models-qwen" },
             AudioFlamingo3 { cli: "audioflamingo3", hf: "AudioFlamingo3ForConditionalGeneration", loader: AudioFlamingo3Loader, feature: "models-qwen" },
+            VibeVoiceAsr { cli: "vibevoice_asr", hf: "VibeVoiceAsrForConditionalGeneration", loader: VibeVoiceAsrLoader, feature: "models-qwen" },
             Qwen3_5 { cli: "qwen3_5", hf: "Qwen3_5ForConditionalGeneration", loader: Qwen3_5Loader, feature: "models-qwen" },
             Qwen3_5Moe { cli: "qwen3_5moe", hf: "Qwen3_5MoeForConditionalGeneration", loader: Qwen3_5MoeLoader, feature: "models-qwen" },
             Qwen4Exp { cli: "qwen4exp", hf: "Qwen4ExpForConditionalGeneration", loader: Qwen3_5MoeLoader, feature: "models-qwen" },

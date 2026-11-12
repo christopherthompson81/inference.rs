@@ -42,6 +42,7 @@ mod qwen_vl_inputs;
 #[cfg(test)]
 mod qwen_vl_tests;
 mod qwen_vl_vision;
+pub mod vibevoice_asr;
 
 inference_nn::json_config!(
     minicpmo::config::MiniCpmOConfig,
@@ -51,6 +52,7 @@ inference_nn::json_config!(
     qwen2_5_vl::config::Config,
     qwen2_audio::Qwen2AudioConfig,
     qwen2_audio::AudioFlamingo3Config,
+    vibevoice_asr::VibeVoiceAsrConfig,
     qwen2_moe::Config,
     qwen2vl::config::Config,
     qwen3::Config,

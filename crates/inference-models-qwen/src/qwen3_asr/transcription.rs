@@ -66,6 +66,7 @@ fn prompt(language: Option<&str>) -> anyhow::Result<String> {
 fn parse(answer: &str) -> TranscriptText {
     let Some((prefix, text)) = answer.split_once(ASR_TEXT) else {
         return TranscriptText {
+            segments: Vec::new(),
             language: None,
             text: answer.trim().to_string(),
         };
@@ -78,6 +79,7 @@ fn parse(answer: &str) -> TranscriptText {
         .filter(|name| !name.is_empty() && !name.eq_ignore_ascii_case(NO_LANGUAGE))
         .map(str::to_lowercase);
     TranscriptText {
+        segments: Vec::new(),
         language,
         text: text.trim().to_string(),
     }
