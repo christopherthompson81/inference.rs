@@ -13,6 +13,12 @@ const SESSION_EXT: &str = "jsonl";
 const HEADER_TYPE: &str = "session";
 const MESSAGE_TYPE: &str = "message";
 const LABELS_TYPE: &str = "labels";
+const COMPACTION_TYPE: &str = "compaction";
+const REASONING: &str = "reasoning_content";
+// how the folded history opens the model's view of the session, and the reply that closes it before a user turn
+const SUMMARY_HEADER: &str =
+    "[Summary of the earlier part of this session, which no longer fits the context]";
+pub const SUMMARY_ACK: &str = "Understood; continuing from that summary.";
 const FORMAT_VERSION: u64 = 1;
 // how much of the first prompt a listing shows
 const TITLE_CHARS: usize = 60;
@@ -26,12 +32,23 @@ pub fn default_dir() -> PathBuf {
         .join("sessions")
 }
 
+/// The earlier history folded into a summary: the model sees the summary, then `messages[start..]`, without the
+/// reasoning of those before `through` (the session's length when it was folded).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Compaction {
+    pub summary: String,
+    pub start: usize,
+    pub through: usize,
+}
+
 /// A conversation: its messages (system prompt first) and the file they are appended to.
 pub struct Session {
     pub id: String,
     pub path: PathBuf,
     pub root: PathBuf,
+    /// The whole transcript, as shown; [`Session::context`] is what the model is sent.
     pub messages: Vec<Value>,
+    pub compaction: Option<Compaction>,
     /// What each run of tool calls was for, by the id of its first call ([`crate::activity`]).
     pub labels: BTreeMap<String, String>,
     file: File,
@@ -73,6 +90,7 @@ impl Session {
             path,
             root: root.to_path_buf(),
             messages: Vec::new(),
+            compaction: None,
             labels: BTreeMap::new(),
             file,
         };
@@ -90,6 +108,7 @@ impl Session {
         );
         let mut header = None;
         let mut messages = Vec::new();
+        let mut compaction = None;
         let mut labels = BTreeMap::new();
         for line in reader.lines() {
             let line = line?;
@@ -103,6 +122,19 @@ impl Session {
             match entry.get("type").and_then(Value::as_str) {
                 Some(HEADER_TYPE) => header = Some(entry),
                 Some(MESSAGE_TYPE) => messages.extend(entry.get("message").cloned()),
+                Some(COMPACTION_TYPE) => {
+                    let summary = entry.get("summary").and_then(Value::as_str);
+                    let start = entry.get("start").and_then(Value::as_u64);
+                    if let (Some(summary), Some(start)) = (summary, start) {
+                        let start = usize::try_from(start)?;
+                        let through = entry.get("through").and_then(Value::as_u64);
+                        compaction = Some(Compaction {
+                            summary: summary.to_string(),
+                            start,
+                            through: through.map_or(Ok(start), usize::try_from)?,
+                        });
+                    }
+                }
                 Some(LABELS_TYPE) => {
                     if let Some(entries) = entry.get("labels").and_then(Value::as_object) {
                         for (call, label) in entries {
@@ -130,6 +162,7 @@ impl Session {
             path: path.to_path_buf(),
             root: PathBuf::from(field("root")),
             messages,
+            compaction,
             labels,
             file: OpenOptions::new().append(true).open(path)?,
         })
@@ -139,6 +172,58 @@ impl Session {
         self.write_line(&json!({"type": MESSAGE_TYPE, "message": message}))?;
         self.messages.push(message);
         Ok(())
+    }
+
+    /// Folds `messages[1..start]` (and any earlier summary) into `summary`, and drops the reasoning of the kept
+    /// messages from what the model sees; the transcript keeps every message whole.
+    pub fn compact(&mut self, summary: String, start: usize) -> Result<()> {
+        if start == 0 || start > self.messages.len() {
+            bail!("a compaction starting at message {start} is outside the session");
+        }
+        let through = self.messages.len();
+        self.write_line(
+            &json!({"type": COMPACTION_TYPE, "summary": summary, "start": start,
+            "through": through}),
+        )?;
+        self.compaction = Some(Compaction {
+            summary,
+            start,
+            through,
+        });
+        Ok(())
+    }
+
+    /// Where the history the model still sees in full begins: past the system prompt and any compaction.
+    pub fn context_start(&self) -> usize {
+        self.compaction.as_ref().map_or(1, |c| c.start)
+    }
+
+    /// What the model is sent: the system prompt, the summary of what was folded, then the messages since.
+    pub fn context(&self) -> Vec<Value> {
+        let mut context = self.messages.iter().take(1).cloned().collect::<Vec<_>>();
+        if let Some(compaction) = &self.compaction {
+            context.push(summary_message(&compaction.summary));
+            // a summary is a user turn, so a user message after it needs a reply between them
+            if self
+                .messages
+                .get(compaction.start)
+                .is_some_and(|m| m["role"] == "user")
+            {
+                context.push(json!({"role": "assistant", "content": SUMMARY_ACK}));
+            }
+        }
+        let through = self.compaction.as_ref().map_or(0, |c| c.through);
+        for (i, message) in self.messages.iter().enumerate().skip(self.context_start()) {
+            let mut message = message.clone();
+            // the summary stands for the thinking that led here; later turns keep theirs, so their prefix still caches
+            if i < through
+                && let Some(message) = message.as_object_mut()
+            {
+                message.remove(REASONING);
+            }
+            context.push(message);
+        }
+        context
     }
 
     /// Adds activity labels to the session at `path`, through a handle of its own so a prompt running in the session
@@ -229,6 +314,11 @@ impl Session {
     }
 }
 
+/// The message a summary of folded history is sent as.
+pub fn summary_message(summary: &str) -> Value {
+    json!({"role": "user", "content": format!("{SUMMARY_HEADER}\n\n{summary}")})
+}
+
 #[cfg(test)]
 mod tests {
     use super::Session;
@@ -288,5 +378,49 @@ mod tests {
         let reopened = Session::open(&session.path).unwrap();
         assert_eq!(reopened.labels, labels);
         assert_eq!(reopened.messages, session.messages);
+    }
+
+    #[test]
+    fn a_compaction_folds_the_context_but_keeps_the_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = Session::create(dir.path(), dir.path(), "m", "s").unwrap();
+        for (role, content) in [("user", "a"), ("assistant", "b"), ("user", "c")] {
+            session
+                .append(json!({"role": role, "content": content}))
+                .unwrap();
+        }
+        session
+            .append(json!({"role": "assistant", "content": "c2", "reasoning_content": "thought"}))
+            .unwrap();
+        session.compact("asked a, answered b".into(), 3).unwrap();
+        session
+            .append(json!({"role": "assistant", "content": "d", "reasoning_content": "kept"}))
+            .unwrap();
+        let reopened = Session::open(&session.path).unwrap();
+        assert_eq!(reopened.messages.len(), 6);
+        let context = reopened.context();
+        let roles = context
+            .iter()
+            .map(|m| m["role"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        // system, summary, its acknowledgement before the kept user turn, then c, c2 and d
+        assert_eq!(
+            roles,
+            [
+                "system",
+                "user",
+                "assistant",
+                "user",
+                "assistant",
+                "assistant"
+            ]
+        );
+        assert!(context[1]["content"].as_str().unwrap().contains("asked a"));
+        assert_eq!(context[3]["content"], "c");
+        // the thinking folded with the summary goes; the turn after the fold keeps its own
+        assert!(context[4].get("reasoning_content").is_none());
+        assert_eq!(context[5]["reasoning_content"], "kept");
+        assert_eq!(reopened.messages[4]["reasoning_content"], "thought");
+        assert!(session.compact("x".into(), 9).is_err());
     }
 }

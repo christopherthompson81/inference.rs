@@ -15,6 +15,9 @@ export interface CodeSessionInfo {
   modified: number;
 }
 
+/** Typed as a prompt, folds the session's earlier history into a summary instead of asking the model. */
+export const COMPACT_COMMAND = "/compact";
+
 export type PermissionMode = "ask" | "auto" | "read-only";
 export type Decision = "once" | "always" | "deny";
 
@@ -40,9 +43,13 @@ export type CodeEvent =
   | { type: "usage"; usage: Record<string, unknown> }
   /** What a run of thinking and tool calls was for, by the id of its first call; may follow `done`. */
   | { type: "label"; id: string; label: string }
+  /** The history before message `end` is being folded into a summary, to fit the model's context. */
+  | { type: "compacting"; end: number }
+  /** It was: the model now sees the summary and the messages from `start` on (system prompt counted). */
+  | { type: "compacted"; start: number }
   | {
       type: "done";
-      end: "done" | "interrupted" | "round_limit" | "reply_limit";
+      end: "done" | "interrupted" | "round_limit" | "reply_limit" | "compacted" | "nothing_to_compact";
     }
   | { type: "error"; message: string };
 
@@ -86,6 +93,8 @@ export async function openSession(
   messages: CodeMessage[];
   /** What each run of tool calls was for, by the id of its first call. */
   labels: Record<string, string>;
+  /** Where the model's view begins past a summary of the earlier messages, as an index into `messages`. */
+  compacted_before: number | null;
 }> {
   return (await post("open", { project, session_id: sessionId, model })).json();
 }

@@ -78,7 +78,8 @@ inference agent --continue -m ...      # the newest one for this project
 inference agent --resume 1792370089 -m ...
 ```
 
-In the REPL, `/sessions`, `/resume <id>` and `/clear` (start a new session) do the same.
+In the REPL, `/sessions`, `/resume <id>` and `/clear` (start a new session) do the same, and `/compact` folds the
+history into a summary (see [Long sessions](#long-sessions)).
 
 Beside each session file, a `<id>.changes` directory keeps a copy of every file the agent edits or writes, taken just
 before its first change, so the session's changes can be shown as diffs. Once the agent has run a command, any file
@@ -134,6 +135,25 @@ tells the model you declined. **Stop** interrupts the model or the running tool,
 
 Sessions are the same files the terminal uses, so `inference agent --continue` in a project picks up a session started
 in the browser, and the other way round.
+
+## Long sessions
+
+A session's history goes to the model with every round, so a long task eventually fills the model's context. Before
+a round whose prompt would pass 80% of the model's context length (the server's `max_model_len`), the agent folds the
+older history into a summary: the model is asked to summarize it for itself (the goal, instructions, what was done and
+found, decisions, failures, the current state and the next steps), then sees the system prompt, that summary, and the
+most recent tenth of the context word for word, less the reasoning of those messages, which the summary stands for
+(turns after the fold keep theirs). History longer than half the context is summarized a chunk at a
+time, each summary taking in the one before, so even a session already past the limit compacts; tool results over
+16,000 characters show only their head and tail to the summarizer.
+
+`/compact` does the same on request, folding everything before the latest prompt, in the REPL, in the Code tab's
+prompt box, or headless (`inference agent --resume <id> -p /compact`). The transcript keeps every message: the
+compaction is one more line in the session file, and the Code tab marks where the summary begins. `/context` says
+where it begins in the REPL.
+
+On a 27B model, a session of 35 tool rounds (258,000 tokens, past its 262,144-token context) folds to about 20,000
+tokens in a few minutes.
 
 ## Runaway replies
 

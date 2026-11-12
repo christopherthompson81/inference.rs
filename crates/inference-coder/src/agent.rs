@@ -13,7 +13,7 @@ use tokio::sync::Notify;
 use crate::backend::ChatBackend;
 use crate::changes::Changes;
 use crate::permission::{Approval, Decision, Permissions};
-use crate::session::Session;
+use crate::session::{Compaction, SUMMARY_ACK, Session, summary_message};
 use crate::tools::{Tool, ToolContext, ToolKind, ToolOutcome};
 use crate::turn::{ToolCall, Turn};
 
@@ -25,6 +25,27 @@ const LENGTH_FINISH: &str = "length";
 const REPLY_CUT: &str = "the reply was cut at the token limit";
 const INTERRUPTED: &str = "interrupted by the user";
 const DECLINED: &str = "the user declined this call";
+/// What a front end's user types to fold the session's history into a summary now.
+pub const COMPACT_COMMAND: &str = "/compact";
+// past this share of the model's context a round folds the older history into a summary first
+const COMPACT_AT: f64 = 0.8;
+// the recent history a fold keeps word for word, and the most one summary request reads, as shares of the context
+const KEEP_SHARE: f64 = 0.1;
+const CHUNK_SHARE: f64 = 0.5;
+const SUMMARY_TOKENS: usize = 8192;
+// a summary request shows a tool result's head and tail only past this many characters
+const CLIPPED_RESULT_CHARS: usize = 16_000;
+const CLIP_MARK: &str = "\n[... clipped ...]\n";
+// JSON characters per prompt token until a reply's usage says (about what code and tool output run at)
+const DEFAULT_CHARS_PER_TOKEN: f64 = 3.0;
+// a summary request the server still refuses is retried over half as much history, this many times
+const SUMMARY_RETRIES: usize = 3;
+const COMPACT_PROMPT: &str = "Write a summary of this session so far for yourself: the earlier messages are about \
+to leave your context, and you will continue the work from the summary and the most recent messages. Keep the \
+user's goal and every instruction or preference they gave; what has been done and found (files, functions, \
+commands, results, numbers); decisions made and why; what failed and why; the current state and the next steps. \
+If an earlier summary opens the conversation, fold it in. Be specific (paths, names, values) and leave out \
+pleasantries. Write only the summary.";
 
 /// What the agent shows and asks while it works.
 pub trait AgentUi: Send {
@@ -41,6 +62,14 @@ pub trait AgentUi: Send {
     /// One model reply finished; its usage says how full the context is.
     fn round_end(&mut self, turn: &Turn) {
         let _ = turn;
+    }
+    /// The history up to message `end` is being folded into a summary.
+    fn compacting(&mut self, end: usize) {
+        let _ = end;
+    }
+    /// It was; the model now sees the summary and the messages from `compaction.start`.
+    fn compacted(&mut self, compaction: &Compaction) {
+        let _ = compaction;
     }
 }
 
@@ -101,6 +130,9 @@ pub struct Agent {
     pub session: Session,
     config: AgentConfig,
     changes: Arc<Mutex<Changes>>,
+    // the model's context, asked of the backend once per model
+    window: Option<(String, Option<usize>)>,
+    chars_per_token: f64,
 }
 
 impl Agent {
@@ -121,6 +153,8 @@ impl Agent {
             permissions,
             session,
             config,
+            window: None,
+            chars_per_token: DEFAULT_CHARS_PER_TOKEN,
         }
     }
 
@@ -161,7 +195,16 @@ impl Agent {
     ) -> Result<TurnEnd> {
         let mut pending = vec![json!({"role": "user", "content": prompt})];
         for _ in 0..self.config.max_rounds {
+            self.compact_if_full(&pending, ui).await?;
             let (turn, interrupted) = self.stream_turn(&pending, ui, interrupt).await?;
+            let sent = self
+                .session
+                .context()
+                .iter()
+                .chain(&pending)
+                .map(|m| m.to_string().len())
+                .sum();
+            self.learn_ratio(&turn, sent);
             ui.round_end(&turn);
             if interrupted {
                 let mut message = turn.message();
@@ -212,6 +255,185 @@ impl Agent {
         Ok(TurnEnd::RoundLimit)
     }
 
+    /// Folds the history before the latest user prompt into a summary (as much of it as the context needs, when the
+    /// recent part alone is too long); false when there was nothing before it to fold.
+    pub async fn compact(&mut self, ui: &mut dyn AgentUi) -> Result<bool> {
+        let start = self.session.context_start();
+        let last_prompt = (start..self.session.messages.len())
+            .rev()
+            .find(|&i| self.session.messages[i]["role"] == "user")
+            .unwrap_or(start);
+        let window = self.window().await;
+        let end = match window {
+            Some(window) => last_prompt.max(self.fold_end(share(window, KEEP_SHARE))),
+            None => last_prompt,
+        };
+        if end <= start {
+            return Ok(false);
+        }
+        self.fold(end, window, ui).await?;
+        Ok(true)
+    }
+
+    // past COMPACT_AT of the context, the older history is folded down to KEEP_SHARE
+    async fn compact_if_full(&mut self, pending: &[Value], ui: &mut dyn AgentUi) -> Result<()> {
+        let Some(window) = self.window().await else {
+            return Ok(());
+        };
+        let context = self.session.context();
+        let used = self.tokens(context.iter().chain(pending));
+        if used < share(window, COMPACT_AT) {
+            return Ok(());
+        }
+        let end = self.fold_end(share(window, KEEP_SHARE));
+        if end > self.session.context_start() {
+            self.fold(end, Some(window), ui).await?;
+        }
+        Ok(())
+    }
+
+    async fn window(&mut self) -> Option<usize> {
+        match &self.window {
+            Some((model, window)) if *model == self.config.model => *window,
+            _ => {
+                let window = self.backend.context_tokens(&self.config.model).await;
+                self.window = Some((self.config.model.clone(), window));
+                window
+            }
+        }
+    }
+
+    fn tokens<'a>(&self, messages: impl IntoIterator<Item = &'a Value>) -> usize {
+        let chars = messages
+            .into_iter()
+            .map(|m| m.to_string().len())
+            .sum::<usize>();
+        (chars as f64 / self.chars_per_token) as usize
+    }
+
+    // where a run of tool results ends and the next message can open the kept history
+    fn boundaries(&self) -> impl Iterator<Item = usize> + '_ {
+        (self.session.context_start() + 1..self.session.messages.len())
+            .filter(|&i| self.session.messages[i]["role"] != "tool")
+    }
+
+    // the earliest boundary whose history from there fits `keep` tokens: the messages before it fold
+    fn fold_end(&self, keep: usize) -> usize {
+        let messages = &self.session.messages;
+        self.boundaries()
+            .find(|&i| self.tokens(&messages[i..]) <= keep)
+            .unwrap_or(messages.len())
+    }
+
+    // folds messages[context_start..end] a chunk at a time, each chunk's summary taking in the one before
+    async fn fold(
+        &mut self,
+        end: usize,
+        window: Option<usize>,
+        ui: &mut dyn AgentUi,
+    ) -> Result<()> {
+        ui.compacting(end);
+        let mut summary = self.session.compaction.as_ref().map(|c| c.summary.clone());
+        let mut cursor = self.session.context_start();
+        while cursor < end {
+            let mut budget = window.map(|w| share(w, CHUNK_SHARE));
+            let mut attempt = 0;
+            let (next, text) = loop {
+                let next = self.chunk_end(cursor, end, summary.as_deref(), budget);
+                match self.summarize(summary.as_deref(), cursor, next).await {
+                    Ok(text) => break (next, text),
+                    Err(_) if attempt < SUMMARY_RETRIES && budget.is_some() => {
+                        budget = budget.map(|b| b / 2);
+                        attempt += 1;
+                    }
+                    Err(error) => return Err(error.context("summarizing the earlier history")),
+                }
+            };
+            summary = Some(text);
+            cursor = next;
+        }
+        let summary = summary.unwrap_or_default();
+        self.session.compact(summary, end)?;
+        if let Some(compaction) = &self.session.compaction {
+            ui.compacted(compaction);
+        }
+        Ok(())
+    }
+
+    // the furthest boundary up to `end` whose chunk fits `budget`, at least the first round past `cursor`
+    fn chunk_end(
+        &self,
+        cursor: usize,
+        end: usize,
+        summary: Option<&str>,
+        budget: Option<usize>,
+    ) -> usize {
+        let Some(budget) = budget else {
+            return end;
+        };
+        let base = summary.map_or(0, |s| self.tokens([&summary_message(s)]));
+        let messages = &self.session.messages;
+        let mut last = None;
+        for i in (cursor + 1..=end).filter(|&i| i == end || messages[i]["role"] != "tool") {
+            let chunk = messages[cursor..i].iter().map(clipped);
+            if base + self.tokens(chunk.collect::<Vec<_>>().iter()) > budget && last.is_some() {
+                break;
+            }
+            last = Some(i);
+        }
+        last.unwrap_or(end)
+    }
+
+    async fn summarize(&mut self, summary: Option<&str>, from: usize, to: usize) -> Result<String> {
+        let mut messages = self
+            .session
+            .messages
+            .iter()
+            .take(1)
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(summary) = summary {
+            messages.push(summary_message(summary));
+        }
+        let chunk = &self.session.messages[from..to];
+        // two user turns in a row: the summary's and the chunk's first
+        if summary.is_some() && chunk.first().is_some_and(|m| m["role"] == "user") {
+            messages.push(json!({"role": "assistant", "content": SUMMARY_ACK}));
+        }
+        messages.extend(chunk.iter().map(clipped));
+        messages.push(json!({"role": "user", "content": COMPACT_PROMPT}));
+        let chars = messages.iter().map(|m| m.to_string().len()).sum::<usize>();
+        let mut request = self.config.request.clone();
+        request.insert("model".into(), Value::String(self.config.model.clone()));
+        request.insert("messages".into(), Value::Array(messages));
+        request.insert("max_tokens".into(), json!(SUMMARY_TOKENS));
+        request.insert("enable_thinking".into(), json!(false));
+        request.insert("stream".into(), json!(true));
+        let mut stream = self.backend.stream(Value::Object(request)).await?;
+        let mut turn = Turn::default();
+        while let Some(chunk) = stream.next().await {
+            turn.apply(&chunk?);
+        }
+        self.learn_ratio(&turn, chars);
+        let text = turn.content.trim();
+        if text.is_empty() {
+            bail!("the model wrote an empty summary");
+        }
+        Ok(text.to_string())
+    }
+
+    // characters per token, from what the server counted for a request of `chars` characters
+    fn learn_ratio(&mut self, turn: &Turn, chars: usize) {
+        let prompt = turn
+            .usage
+            .as_ref()
+            .and_then(|u| u["prompt_tokens"].as_u64())
+            .filter(|&p| p > 0);
+        if let Some(prompt) = prompt {
+            self.chars_per_token = chars as f64 / prompt as f64;
+        }
+    }
+
     fn commit(&mut self, pending: &mut Vec<Value>) -> Result<()> {
         for message in pending.drain(..) {
             self.session.append(message)?;
@@ -223,10 +445,9 @@ impl Agent {
         let mut request = self.config.request.clone();
         let messages = self
             .session
-            .messages
-            .iter()
-            .chain(pending)
-            .cloned()
+            .context()
+            .into_iter()
+            .chain(pending.iter().cloned())
             .collect();
         request
             .entry("max_tokens")
@@ -325,12 +546,35 @@ impl Agent {
     }
 }
 
+fn share(window: usize, share: f64) -> usize {
+    (window as f64 * share) as usize
+}
+
+// a summary request needs a long tool result's gist, not all of it
+fn clipped(message: &Value) -> Value {
+    let mut message = message.clone();
+    if message["role"] == "tool"
+        && let Some(text) = message["content"].as_str()
+        && text.len() > CLIPPED_RESULT_CHARS
+    {
+        let half = CLIPPED_RESULT_CHARS / 2;
+        let head = text.floor_char_boundary(half);
+        let tail = text.ceil_char_boundary(text.len() - half);
+        message["content"] =
+            Value::String(format!("{}{CLIP_MARK}{}", &text[..head], &text[tail..]));
+    }
+    message
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Agent, AgentConfig, AgentUi, Interrupt, TurnEnd};
+    use super::{
+        Agent, AgentConfig, AgentUi, CLIP_MARK, CLIPPED_RESULT_CHARS, COMPACT_PROMPT, Interrupt,
+        TurnEnd, clipped,
+    };
     use crate::backend::ChatBackend;
     use crate::permission::{Approval, PermissionMode, Permissions};
-    use crate::session::Session;
+    use crate::session::{Compaction, Session, summary_message};
     use crate::tools::{ToolKind, ToolOutcome, default_tools};
     use crate::turn::{ToolCall, Turn};
     use anyhow::Result;
@@ -339,10 +583,26 @@ mod tests {
     use serde_json::{Map, Value, json};
     use std::sync::{Arc, Mutex};
 
-    // replays canned replies and records the requests it was sent
+    // replays canned replies and records the requests it was sent; a summary request gets `summary <n>`
     struct Scripted {
         replies: Mutex<Vec<Vec<Value>>>,
         requests: Mutex<Vec<Value>>,
+        window: Option<usize>,
+    }
+
+    fn scripted(replies: Vec<Vec<Value>>, window: Option<usize>) -> Arc<Scripted> {
+        Arc::new(Scripted {
+            replies: Mutex::new(replies),
+            requests: Mutex::new(Vec::new()),
+            window,
+        })
+    }
+
+    fn is_summary_request(request: &Value) -> bool {
+        request["messages"]
+            .as_array()
+            .and_then(|m| m.last())
+            .is_some_and(|m| m["content"] == COMPACT_PROMPT)
     }
 
     impl ChatBackend for Scripted {
@@ -350,8 +610,18 @@ mod tests {
             &self,
             request: Value,
         ) -> BoxFuture<'_, Result<BoxStream<'static, Result<Value>>>> {
-            self.requests.lock().unwrap().push(request);
-            let chunks = self.replies.lock().unwrap().remove(0);
+            let summary = is_summary_request(&request);
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(request);
+            let chunks = if summary {
+                let n = requests.iter().filter(|r| is_summary_request(r)).count();
+                vec![
+                    json!({"choices": [{"delta": {"content": format!("summary {n}")},
+                    "finish_reason": "stop"}]}),
+                ]
+            } else {
+                self.replies.lock().unwrap().remove(0)
+            };
             Box::pin(async move {
                 Ok(Box::pin(futures::stream::iter(chunks.into_iter().map(Ok))) as BoxStream<_>)
             })
@@ -360,6 +630,11 @@ mod tests {
         fn describe(&self) -> String {
             "scripted".into()
         }
+
+        fn context_tokens<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Option<usize>> {
+            let window = self.window;
+            Box::pin(async move { window })
+        }
     }
 
     #[derive(Default)]
@@ -367,6 +642,7 @@ mod tests {
         text: String,
         tools: Vec<(String, bool)>,
         approvals: usize,
+        compactions: Vec<Compaction>,
     }
 
     impl AgentUi for Recorder {
@@ -388,6 +664,9 @@ mod tests {
             Box::pin(async { Approval::Once })
         }
         fn round_end(&mut self, _: &Turn) {}
+        fn compacted(&mut self, compaction: &Compaction) {
+            self.compactions.push(compaction.clone());
+        }
     }
 
     fn call(id: &str, name: &str, args: Value) -> Value {
@@ -402,8 +681,8 @@ mod tests {
         let root = dir.path().join("project");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("notes.txt"), "old\n").unwrap();
-        let backend = Arc::new(Scripted {
-            replies: Mutex::new(vec![
+        let backend = scripted(
+            vec![
                 vec![call("c1", "read", json!({"path": "notes.txt"}))],
                 vec![call(
                     "c2",
@@ -413,9 +692,9 @@ mod tests {
                 vec![
                     json!({"choices": [{"delta": {"content": "Done."}, "finish_reason": "stop"}]}),
                 ],
-            ]),
-            requests: Mutex::new(Vec::new()),
-        });
+            ],
+            None,
+        );
         let session = Session::create(&dir.path().join("sessions"), &root, "m", "sys").unwrap();
         let config = AgentConfig {
             model: "m".into(),
@@ -482,13 +761,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("project");
         std::fs::create_dir_all(&root).unwrap();
-        let backend = Arc::new(Scripted {
-            replies: Mutex::new(vec![vec![json!({"choices": [{"delta": {
+        let backend = scripted(
+            vec![vec![json!({"choices": [{"delta": {
                 "reasoning_content": "let me think. let me think.",
                 "tool_calls": [{"index": 0, "id": "c1", "function": {"name": "read", "arguments": "{\"pa"}}]},
-                "finish_reason": "length"}]})]]),
-            requests: Mutex::new(Vec::new()),
-        });
+                "finish_reason": "length"}]})]],
+            None,
+        );
         let session = Session::create(&dir.path().join("sessions"), &root, "m", "sys").unwrap();
         let config = AgentConfig {
             model: "m".into(),
@@ -515,5 +794,109 @@ mod tests {
         assert_eq!(last["role"], "assistant");
         assert!(last.get("tool_calls").is_none() && last.get("reasoning_content").is_none());
         assert!(last["content"].as_str().unwrap().contains("token limit"));
+    }
+
+    // a session of `exchanges` user prompts and answers, each about `chars` long
+    fn long_session(dir: &std::path::Path, exchanges: usize, chars: usize) -> Session {
+        let mut session = Session::create(&dir.join("sessions"), dir, "m", "sys").unwrap();
+        for i in 0..exchanges {
+            let text = format!("{i} {}", "x".repeat(chars));
+            session
+                .append(json!({"role": "user", "content": text}))
+                .unwrap();
+            session
+                .append(json!({"role": "assistant", "content": text}))
+                .unwrap();
+        }
+        session
+    }
+
+    fn agent(backend: Arc<Scripted>, session: Session) -> Agent {
+        let config = AgentConfig {
+            model: "m".into(),
+            max_rounds: 10,
+            max_reply_tokens: 64,
+            request: Map::new(),
+        };
+        Agent::new(
+            backend,
+            default_tools(),
+            Permissions::new(PermissionMode::Auto),
+            session,
+            config,
+        )
+    }
+
+    fn answer(text: &str) -> Vec<Value> {
+        vec![json!({"choices": [{"delta": {"content": text}, "finish_reason": "stop"}]})]
+    }
+
+    // past most of the window the older history folds a chunk at a time (each summary taking in the last) before
+    // the round, the transcript keeps everything, and the round is sent the summary and the recent messages
+    #[tokio::test]
+    async fn a_full_context_folds_the_older_history_before_the_round() {
+        let dir = tempfile::tempdir().unwrap();
+        // 12 messages of about 200 tokens against a 1000-token window: a chunk is a few messages, the kept tail one
+        let session = long_session(dir.path(), 6, 600);
+        let backend = scripted(vec![answer("ok")], Some(1000));
+        let mut agent = agent(backend.clone(), session);
+        let mut ui = Recorder::default();
+        let end = agent
+            .send("next", &mut ui, &Interrupt::default())
+            .await
+            .unwrap();
+        assert_eq!(end, TurnEnd::Done);
+        let requests = backend.requests.lock().unwrap();
+        let summaries = requests.iter().filter(|r| is_summary_request(r)).count();
+        assert!(summaries > 1, "{summaries} summary requests");
+        // the second summary request opens with the first summary
+        let second = requests
+            .iter()
+            .filter(|r| is_summary_request(r))
+            .nth(1)
+            .unwrap();
+        assert_eq!(second["messages"][1], summary_message("summary 1"));
+        let round = requests.last().unwrap()["messages"].as_array().unwrap();
+        assert_eq!(round[1], summary_message(&format!("summary {summaries}")));
+        assert_eq!(round.last().unwrap()["content"], "next");
+        assert_eq!(ui.compactions.len(), 1);
+        // 12 old messages, the prompt and its answer, all still in the transcript and on disk
+        assert_eq!(agent.session.messages.len(), 15);
+        let reopened = Session::open(&agent.session.path).unwrap();
+        assert_eq!(reopened.compaction, agent.session.compaction);
+        assert_eq!(reopened.context(), agent.session.context());
+    }
+
+    // asked to, it folds everything before the latest prompt even with no window known
+    #[tokio::test]
+    async fn compacting_on_request_folds_all_before_the_latest_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = long_session(dir.path(), 3, 10);
+        let mut agent = agent(scripted(Vec::new(), None), session);
+        let mut ui = Recorder::default();
+        assert!(agent.compact(&mut ui).await.unwrap());
+        let context = agent.session.context();
+        let roles = context
+            .iter()
+            .map(|m| m["role"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(roles, ["system", "user", "assistant", "user", "assistant"]);
+        assert_eq!(context[1], summary_message("summary 1"));
+        assert!(context[3]["content"].as_str().unwrap().starts_with("2 "));
+        // nothing before the latest prompt is left to fold
+        assert!(!agent.compact(&mut ui).await.unwrap());
+    }
+
+    #[test]
+    fn a_summary_request_clips_long_tool_results_only() {
+        let long = "y".repeat(CLIPPED_RESULT_CHARS * 2);
+        let tool = clipped(&json!({"role": "tool", "content": long}));
+        let text = tool["content"].as_str().unwrap();
+        assert!(
+            text.contains(CLIP_MARK.trim())
+                && text.len() < CLIPPED_RESULT_CHARS + CLIP_MARK.len() + 1
+        );
+        let user = json!({"role": "user", "content": long});
+        assert_eq!(clipped(&user), user);
     }
 }
