@@ -10,8 +10,9 @@ use crate::layers::{Activation, RmsNorm, linear_b};
 
 /// Where a checkpoint keeps the encoder's parts: transformers' port, or Microsoft's own layout (the streaming
 /// checkpoints), whose convs sit one wrapper deeper and whose stem is its first downsampling layer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum EncoderNames {
+    #[default]
     Transformers,
     Upstream,
 }

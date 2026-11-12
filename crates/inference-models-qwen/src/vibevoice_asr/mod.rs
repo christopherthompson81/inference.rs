@@ -93,7 +93,7 @@ impl AudioEmbedder {
             acoustic: &cfg.acoustic_tokenizer_encoder_config,
             semantic: &cfg.semantic_tokenizer_encoder_config,
             hidden: cfg.text().hidden_size,
-            names: EncoderNames::Transformers,
+            names: cfg.names,
         };
         Self::from_spec(&spec, vb)
     }
@@ -163,6 +163,7 @@ pub struct VibeVoiceAsrModel {
     text: Qwen2,
     audio: AudioEmbedder,
     audio_token: u32,
+    stack: &'static str,
 }
 
 impl VibeVoiceAsrModel {
@@ -177,16 +178,19 @@ impl VibeVoiceAsrModel {
             .clone()
             .without_lora_registry()
             .set_device(normal_loading_metadata.real_device.clone());
+        let (stack, head) = cfg.text_prefixes();
         Ok(Self {
             audio: AudioEmbedder::new(cfg, &audio_vb)?,
-            text: Qwen2::new(
+            text: Qwen2::new_inner(
                 &cfg.text().decoder_spec()?,
-                vb.pp("language_model"),
+                vb.pp(stack),
+                vb.pp(head),
                 is_gptx,
                 normal_loading_metadata,
                 attention_mechanism,
             )?,
             audio_token: cfg.audio_token_id,
+            stack,
         })
     }
 
@@ -213,10 +217,7 @@ impl VibeVoiceAsrModel {
 impl IsqModel for VibeVoiceAsrModel {
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
-        uvb.extend(
-            self.text
-                .residual_tensors_m(uvb.pp("language_model").pp("model")),
-        );
+        uvb.extend(self.text.residual_tensors_m(uvb.pp(self.stack)));
         uvb.to_safetensors()
     }
 }

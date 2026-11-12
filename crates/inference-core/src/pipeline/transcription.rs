@@ -136,7 +136,46 @@ pub struct VibeVoiceStreamingFiles {
     config: PathBuf,
     preprocessor_config: PathBuf,
     tokenizer: PathBuf,
-    weights: Vec<PathBuf>,
+    weights: CheckpointWeights,
+}
+
+/// Where a checkpoint's tensors are: its safetensors files, or an audio.cpp GGUF holding them under the same names.
+#[derive(Clone, Debug)]
+pub enum CheckpointWeights {
+    Safetensors(Vec<PathBuf>),
+    AudioCpp(PathBuf),
+}
+
+impl CheckpointWeights {
+    fn files(&self) -> &[PathBuf] {
+        match self {
+            Self::Safetensors(files) => files,
+            Self::AudioCpp(gguf) => std::slice::from_ref(gguf),
+        }
+    }
+
+    // a GGUF's quantized weights stay quantized; everything else loads in `dtype`
+    fn var_builder(
+        &self,
+        dtype: inference_tensor::DType,
+        device: &Device,
+    ) -> Result<inference_quant::ShardedVarBuilder> {
+        match self {
+            // SAFETY: the weights are read-only for the model's life; a file changed underneath it is undefined
+            Self::Safetensors(files) => Ok(unsafe {
+                inference_quant::ShardedSafeTensors::sharded(
+                    files,
+                    dtype,
+                    device,
+                    None,
+                    Arc::new(|_| true),
+                )?
+            }),
+            Self::AudioCpp(gguf) => {
+                inference_gguf::audiocpp::AudioCppGguf::open(gguf)?.var_builder(None, dtype, device)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -170,7 +209,7 @@ impl ModelPaths for TranscriptionModelPaths {
             AsrCheckpoint::Transformers(files) => &files.weights,
             AsrCheckpoint::Whisper(files) => &files.weights,
             AsrCheckpoint::CohereAsr(files) => &files.weights,
-            AsrCheckpoint::VibeVoiceStreaming(files) => &files.weights,
+            AsrCheckpoint::VibeVoiceStreaming(files) => files.weights.files(),
             AsrCheckpoint::Nemo(file) | AsrCheckpoint::Gguf(file) => std::slice::from_ref(file),
         }
     }
@@ -845,7 +884,11 @@ impl Loader for TranscriptionLoader {
         let api = crate::pipeline::hf::build_api(&token_source, !options.silent)?.repo(
             Repo::with_revision(self.model_id.clone(), RepoType::Model, revision.clone()),
         );
-        let id = std::path::Path::new(&self.model_id);
+        let package = inference_gguf::audiocpp::unpack(std::path::Path::new(&self.model_id))?;
+        // an audio.cpp GGUF reads as the checkpoint directory it unpacks to
+        let id = package
+            .as_ref()
+            .map_or(std::path::Path::new(&self.model_id), |p| p.dir.as_path());
         let get = |file: &str| crate::pipeline::hf::get_file(&api, id, file, &revision);
         let detected = (self.arch.is_none() && !id.is_file())
             .then(|| get(CONFIG).ok())
@@ -853,6 +896,14 @@ impl Loader for TranscriptionLoader {
             .and_then(|config| std::fs::read_to_string(config).ok())
             .and_then(|config| TranscriptionLoaderType::auto_detect_from_config(&config));
         let arch = self.arch.or(detected);
+        if let Some(package) = &package
+            && arch != Some(TranscriptionLoaderType::VibeVoiceStreaming)
+        {
+            anyhow::bail!(
+                "{} is an audio.cpp GGUF of a model that does not load from one yet ({arch:?})",
+                package.gguf.display()
+            );
+        }
         if arch == Some(TranscriptionLoaderType::CohereAsr) {
             let paths = TranscriptionModelPaths {
                 checkpoint: AsrCheckpoint::CohereAsr(CohereAsrFiles {
@@ -870,7 +921,10 @@ impl Loader for TranscriptionLoader {
                     config: get(CONFIG)?,
                     preprocessor_config: get(PREPROCESSOR_CONFIG)?,
                     tokenizer: get(TOKENIZER)?,
-                    weights: checkpoint_weights(&get)?,
+                    weights: match &package {
+                        Some(package) => CheckpointWeights::AudioCpp(package.gguf.clone()),
+                        None => CheckpointWeights::Safetensors(checkpoint_weights(&get)?),
+                    },
                 }),
                 vad: None,
             };
@@ -1050,16 +1104,7 @@ fn load_vibevoice_streaming(
     let config: StreamingConfig = serde_json::from_str(&read(&files.config)?)?;
     let frames: StreamingFrames = serde_json::from_str(&read(&files.preprocessor_config)?)?;
     let tokenizer = Tokenizer::from_file(&files.tokenizer).map_err(anyhow::Error::msg)?;
-    // SAFETY: the weights are read-only for the model's life; a file changed underneath it is undefined
-    let vb = unsafe {
-        inference_quant::ShardedSafeTensors::sharded(
-            &files.weights,
-            dtype,
-            device,
-            None,
-            Arc::new(|_| true),
-        )?
-    };
+    let vb = files.weights.var_builder(dtype, device)?;
     Ok(AudioModel::VibeVoiceStreaming(Box::new(
         VibeVoiceStreaming::new(&config, &frames, tokenizer, vb)?,
     )))

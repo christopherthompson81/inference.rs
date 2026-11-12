@@ -8,7 +8,7 @@ use crate::pipeline::MessagesAction;
 use crate::vision_models::media_host::media_processor;
 
 processor_factory!(VibeVoiceAsrLoader => |model_config, _, _, _| {
-    let cfg = VibeVoiceAsrConfig::from_json(model_config).expect("Failed to parse VibeVoice-ASR config");
+    let cfg = VibeVoiceAsrConfig::parse(model_config).expect("Failed to parse VibeVoice-ASR config");
     // the repo's template writes the clip's placeholder and its duration for each audio part
     media_processor(
         VibeVoiceAsrInputsProcessor::new(cfg.audio_token_id, cfg.hop_length()),

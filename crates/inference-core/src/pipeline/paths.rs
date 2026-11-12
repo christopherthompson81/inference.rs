@@ -156,6 +156,7 @@ pub fn get_model_paths(
             }
             Ok(files)
         }
+        None if let Some(gguf) = crate::pipeline::hf::audiocpp_weights(model_id) => Ok(vec![gguf]),
         None => {
             let safetensor_match = Regex::new(SAFETENSOR_MATCH)?;
             let quant_safetensor_match = Regex::new(QUANT_SAFETENSOR_MATCH)?;

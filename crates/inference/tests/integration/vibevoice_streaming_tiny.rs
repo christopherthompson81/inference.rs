@@ -1,5 +1,6 @@
 //! A tiny random-weight VibeVoice-ASR Streaming: a recording transcribes window by window through the engine, a
-//! session fed in pieces writes the same transcript, and a pass past its cache budget starts afresh.
+//! session fed in pieces writes the same transcript, a pass past its cache budget starts afresh, and the checkpoint
+//! repacked as an audio.cpp GGUF transcribes as its safetensors do.
 
 use inference::{
     ModelDType, TranscriptionModelBuilder, TranscriptionRequest, TranscriptionResponseFormat,
@@ -118,5 +119,61 @@ fn a_context_joins_the_prompt() -> anyhow::Result<()> {
     let plain = model.start(None)?.offset();
     assert_eq!(model.start(Some("  "))?.offset(), plain);
     assert!(model.start(Some("tone, hum"))?.offset() > plain);
+    Ok(())
+}
+
+async fn verbose_text(model_id: &std::path::Path, wav: &[u8]) -> anyhow::Result<String> {
+    let model = TranscriptionModelBuilder::new(model_id.to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .with_force_cpu()
+        .build()
+        .await?;
+    let out = model
+        .transcription(
+            TranscriptionRequest::new(TranscriptionResponseFormat::VerboseJson),
+            wav,
+        )
+        .await?;
+    Ok(out.body)
+}
+
+#[tokio::test]
+async fn an_audiocpp_gguf_transcribes_as_its_checkpoint() -> anyhow::Result<()> {
+    let checkpoint = tiny_checkpoint()?;
+    let mut tensors = Vec::new();
+    for entry in std::fs::read_dir(checkpoint.path())? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|e| e == "safetensors") {
+            tensors.extend(inference_tensor::safetensors::load(
+                &path,
+                &inference_tensor::Device::Cpu,
+            )?);
+        }
+    }
+    tensors.sort_by(|a, b| a.0.cmp(&b.0));
+    let stored: Vec<_> = tensors
+        .iter()
+        .map(|(name, t)| {
+            (
+                name.as_str(),
+                t,
+                inference_tensor::quantized::GgmlDType::F32,
+            )
+        })
+        .collect();
+    let files = ["config.json", "preprocessor_config.json", "tokenizer.json"]
+        .map(|name| std::fs::read(checkpoint.path().join(name)).map(|bytes| (name, bytes)));
+    let files = files.into_iter().collect::<std::io::Result<Vec<_>>>()?;
+    let files: Vec<_> = files.iter().map(|(n, b)| (*n, b.as_slice())).collect();
+    let dir = tempfile::tempdir()?;
+    let gguf = dir.path().join("tiny-f32.gguf");
+    inference_gguf::audiocpp::write_package(&gguf, "vibevoice_asr_streaming", &stored, &files)?;
+
+    let mut wav = Vec::new();
+    inference_models_speech::utils::write_pcm_as_wav(&mut wav, &pcm(), RATE, 1)?;
+    let expected = verbose_text(checkpoint.path(), &wav).await?;
+    assert_eq!(verbose_text(&gguf, &wav).await?, expected);
+    // a directory holding the GGUF names it too
+    assert_eq!(verbose_text(dir.path(), &wav).await?, expected);
     Ok(())
 }

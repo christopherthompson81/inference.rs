@@ -33,8 +33,7 @@ fn main() -> anyhow::Result<()> {
         Device::Cpu
     };
     let dir = std::path::Path::new(dir);
-    let cfg: VibeVoiceAsrConfig =
-        serde_json::from_str(&std::fs::read_to_string(dir.join("config.json"))?)?;
+    let cfg = VibeVoiceAsrConfig::parse(&std::fs::read_to_string(dir.join("config.json"))?)?;
     let shards: Vec<_> = std::fs::read_dir(dir)?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|e| e == "safetensors"))
