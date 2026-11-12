@@ -1,12 +1,80 @@
-//! Whisper's text decoder: learned positions, pre-norm layers of causal self-attention, cross-attention over the
-//! encoder output and a two-layer FFN, a final LayerNorm, and the LM head tied to the token embedding.
+//! An encoder-decoder's text decoder (Whisper, Cohere Transcribe): a position table added to the token embedding,
+//! pre-norm layers of causal self-attention, cross-attention over the encoder output and a two-layer FFN, a final
+//! LayerNorm, and an LM head of its own or tied to the token embedding.
 
 use inference_nn::layers::{Activation, layer_norm, linear_b};
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::nn::{LayerNorm, Linear, Module};
 use inference_tensor::{DType, Result, Tensor};
 
-use super::config::WhisperConfig;
+const LAYER_NORM_EPS: f64 = 1e-5;
+
+/// Where a checkpoint keeps each part, under the decoder's prefix.
+pub struct DecoderNames {
+    pub layers: &'static str,
+    pub self_attn: &'static str,
+    pub self_attn_norm: &'static str,
+    pub cross_attn: &'static str,
+    pub cross_attn_norm: &'static str,
+    pub ffn_in: &'static str,
+    pub ffn_out: &'static str,
+    pub ffn_norm: &'static str,
+    pub final_norm: &'static str,
+    pub embed_tokens: &'static str,
+    pub embed_positions: &'static str,
+    /// A LayerNorm over the embedding plus positions, before the layers.
+    pub embed_norm: Option<&'static str>,
+    /// Query, key, value and output projections.
+    pub projections: [&'static str; 4],
+}
+
+pub const WHISPER_NAMES: DecoderNames = DecoderNames {
+    layers: "layers",
+    self_attn: "self_attn",
+    self_attn_norm: "self_attn_layer_norm",
+    cross_attn: "encoder_attn",
+    cross_attn_norm: "encoder_attn_layer_norm",
+    ffn_in: "fc1",
+    ffn_out: "fc2",
+    ffn_norm: "final_layer_norm",
+    final_norm: "layer_norm",
+    embed_tokens: "embed_tokens.weight",
+    embed_positions: "embed_positions.weight",
+    embed_norm: None,
+    projections: ["q_proj", "k_proj", "v_proj", "out_proj"],
+};
+
+/// NeMo's `TransformerDecoder`, as Cohere Transcribe keeps it.
+pub const NEMO_NAMES: DecoderNames = DecoderNames {
+    layers: "_decoder.layers",
+    self_attn: "first_sub_layer",
+    self_attn_norm: "layer_norm_1",
+    cross_attn: "second_sub_layer",
+    cross_attn_norm: "layer_norm_2",
+    ffn_in: "third_sub_layer.dense_in",
+    ffn_out: "third_sub_layer.dense_out",
+    ffn_norm: "layer_norm_3",
+    final_norm: "_decoder.final_layer_norm",
+    embed_tokens: "_embedding.token_embedding.weight",
+    embed_positions: "_embedding.position_embedding.pos_enc",
+    embed_norm: Some("_embedding.layer_norm"),
+    projections: ["query_net", "key_net", "value_net", "out_projection"],
+};
+
+pub struct DecoderConfig {
+    pub d_model: usize,
+    pub num_layers: usize,
+    pub num_heads: usize,
+    pub ffn_dim: usize,
+    pub vocab_size: usize,
+    pub max_positions: usize,
+    pub activation: Activation,
+    /// Whisper's key projections have no bias.
+    pub key_bias: bool,
+    pub names: &'static DecoderNames,
+    /// What the model is called in errors.
+    pub model: &'static str,
+}
 
 struct Attention {
     q_proj: Linear,
@@ -18,14 +86,16 @@ struct Attention {
 }
 
 impl Attention {
-    fn new(d: usize, num_heads: usize, vb: ShardedVarBuilder) -> Result<Self> {
+    fn new(cfg: &DecoderConfig, vb: ShardedVarBuilder) -> Result<Self> {
+        let d = cfg.d_model;
+        let [q, k, v, out] = cfg.names.projections;
         Ok(Self {
-            q_proj: linear_b(d, d, true, vb.pp("q_proj"))?,
-            k_proj: linear_b(d, d, false, vb.pp("k_proj"))?,
-            v_proj: linear_b(d, d, true, vb.pp("v_proj"))?,
-            out_proj: linear_b(d, d, true, vb.pp("out_proj"))?,
-            num_heads,
-            head_dim: d / num_heads,
+            q_proj: linear_b(d, d, true, vb.pp(q))?,
+            k_proj: linear_b(d, d, cfg.key_bias, vb.pp(k))?,
+            v_proj: linear_b(d, d, true, vb.pp(v))?,
+            out_proj: linear_b(d, d, true, vb.pp(out))?,
+            num_heads: cfg.num_heads,
+            head_dim: d / cfg.num_heads,
         })
     }
 
@@ -93,10 +163,14 @@ impl DecoderCache {
 pub struct Decoder {
     embed_tokens: Tensor,
     positions: Tensor,
+    embed_norm: Option<LayerNorm>,
     layers: Vec<DecoderLayer>,
     layer_norm: LayerNorm,
+    // none ties the head to the token embedding
+    head: Option<Linear>,
     activation: Activation,
     max_positions: usize,
+    model: &'static str,
 }
 
 /// A step's logits for each token, and, when asked, each layer's cross-attention scores `(heads, tokens, frames)`.
@@ -106,34 +180,45 @@ pub struct DecoderOutput {
 }
 
 impl Decoder {
-    pub fn new(cfg: &WhisperConfig, vb: ShardedVarBuilder) -> Result<Self> {
+    /// `head` is the LM head; none ties it to the token embedding.
+    pub fn new(cfg: &DecoderConfig, vb: ShardedVarBuilder, head: Option<Linear>) -> Result<Self> {
         let d = cfg.d_model;
-        let eps = cfg.layer_norm_eps();
-        let layers = (0..cfg.decoder_layers)
+        let names = cfg.names;
+        let layers = (0..cfg.num_layers)
             .map(|i| {
-                let vb = vb.pp("layers").pp(i);
+                let vb = vb.pp(names.layers).pp(i);
                 Ok(DecoderLayer {
-                    self_attn: Attention::new(d, cfg.decoder_attention_heads, vb.pp("self_attn"))?,
-                    self_attn_layer_norm: layer_norm(d, eps, vb.pp("self_attn_layer_norm"))?,
-                    encoder_attn: Attention::new(
+                    self_attn: Attention::new(cfg, vb.pp(names.self_attn))?,
+                    self_attn_layer_norm: layer_norm(
                         d,
-                        cfg.decoder_attention_heads,
-                        vb.pp("encoder_attn"),
+                        LAYER_NORM_EPS,
+                        vb.pp(names.self_attn_norm),
                     )?,
-                    encoder_attn_layer_norm: layer_norm(d, eps, vb.pp("encoder_attn_layer_norm"))?,
-                    fc1: linear_b(d, cfg.decoder_ffn_dim, true, vb.pp("fc1"))?,
-                    fc2: linear_b(cfg.decoder_ffn_dim, d, true, vb.pp("fc2"))?,
-                    final_layer_norm: layer_norm(d, eps, vb.pp("final_layer_norm"))?,
+                    encoder_attn: Attention::new(cfg, vb.pp(names.cross_attn))?,
+                    encoder_attn_layer_norm: layer_norm(
+                        d,
+                        LAYER_NORM_EPS,
+                        vb.pp(names.cross_attn_norm),
+                    )?,
+                    fc1: linear_b(d, cfg.ffn_dim, true, vb.pp(names.ffn_in))?,
+                    fc2: linear_b(cfg.ffn_dim, d, true, vb.pp(names.ffn_out))?,
+                    final_layer_norm: layer_norm(d, LAYER_NORM_EPS, vb.pp(names.ffn_norm))?,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
-            embed_tokens: vb.get((cfg.vocab_size, d), "embed_tokens.weight")?,
-            positions: vb.get((cfg.max_target_positions, d), "embed_positions.weight")?,
+            embed_tokens: vb.get((cfg.vocab_size, d), names.embed_tokens)?,
+            positions: vb.get((cfg.max_positions, d), names.embed_positions)?,
+            embed_norm: names
+                .embed_norm
+                .map(|name| layer_norm(d, LAYER_NORM_EPS, vb.pp(name)))
+                .transpose()?,
             layers,
-            layer_norm: layer_norm(d, eps, vb.pp("layer_norm"))?,
-            activation: cfg.activation_function,
-            max_positions: cfg.max_target_positions,
+            layer_norm: layer_norm(d, LAYER_NORM_EPS, vb.pp(names.final_norm))?,
+            head,
+            activation: cfg.activation,
+            max_positions: cfg.max_positions,
+            model: cfg.model,
         })
     }
 
@@ -167,7 +252,8 @@ impl Decoder {
         let t = tokens.len();
         if start + t > self.max_positions {
             inference_tensor::bail!(
-                "Whisper's decoder takes {} tokens; this window reached {}",
+                "{}'s decoder takes {} tokens; this window reached {}",
+                self.model,
                 self.max_positions,
                 start + t
             );
@@ -178,6 +264,9 @@ impl Decoder {
             .index_select(&ids, 0)?
             .broadcast_add(&self.positions.narrow(0, start, t)?)?
             .unsqueeze(0)?;
+        if let Some(norm) = &self.embed_norm {
+            xs = norm.forward(&xs)?;
+        }
         // each new token sees the cache and the new tokens up to itself
         let mask = (t > 1)
             .then(|| {
@@ -226,10 +315,12 @@ impl Decoder {
         }
         cache.len += t;
         let hidden = self.layer_norm.forward(&xs)?;
-        let logits = hidden
-            .squeeze(0)?
-            .matmul(&self.embed_tokens.t()?)?
-            .to_dtype(DType::F32)?;
+        let hidden = hidden.squeeze(0)?;
+        let logits = match &self.head {
+            Some(head) => head.forward(&hidden)?,
+            None => hidden.matmul(&self.embed_tokens.t()?)?,
+        }
+        .to_dtype(DType::F32)?;
         Ok(DecoderOutput {
             logits,
             cross_scores: scores,

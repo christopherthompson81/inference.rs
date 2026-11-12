@@ -218,6 +218,24 @@ pub fn record_sharded_pair(
     Ok([take(&first), take(&second)])
 }
 
+/// Random weights, seeded by name, behind a plain and a sharded var builder over the same tensors, for a model that
+/// reads parts through each (Cohere Transcribe's Parakeet encoder and its decoder); `absent` names stay missing.
+pub fn record_plain_and_sharded(
+    absent: &[&str],
+    build: impl FnOnce(inference_tensor::nn::VarBuilder, ShardedVarBuilder) -> CandleResult<()>,
+) -> anyhow::Result<HashMap<String, Tensor>> {
+    let weights = RecordingWeights::new(absent, HashMap::new(), true);
+    build(
+        inference_tensor::nn::VarBuilder::from_backend(
+            Box::new(weights.clone()),
+            DType::F32,
+            Device::Cpu,
+        ),
+        ShardedSafeTensors::wrap(weights.clone(), DType::F32, Device::Cpu),
+    )?;
+    Ok(std::mem::take(&mut weights.0.lock().unwrap().1))
+}
+
 /// Every file in a committed fixture directory.
 pub fn fixture_files(dir: &str) -> anyhow::Result<Vec<std::path::PathBuf>> {
     Ok(std::fs::read_dir(dir)?

@@ -1,0 +1,253 @@
+{
+ "version": "1.0",
+ "truncation": null,
+ "padding": null,
+ "added_tokens": [
+  {
+   "id": 0,
+   "content": "<unk>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 1,
+   "content": "<|nospeech|>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 2,
+   "content": "<pad>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 3,
+   "content": "<|endoftext|>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 4,
+   "content": "<|startoftranscript|>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 5,
+   "content": "<|pnc|>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 6,
+   "content": "<|nopnc|>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 7,
+   "content": "<|startofcontext|>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 8,
+   "content": "<|itn|>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 9,
+   "content": "<|noitn|>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 10,
+   "content": "<|timestamp|>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 11,
+   "content": "<|notimestamp|>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 12,
+   "content": "<|diarize|>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 13,
+   "content": "<|nodiarize|>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 14,
+   "content": "<|emo:undefined|>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 15,
+   "content": "<|en|>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 16,
+   "content": "<|de|>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 17,
+   "content": "<|ja|>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  }
+ ],
+ "normalizer": null,
+ "pre_tokenizer": {
+  "type": "Metaspace",
+  "replacement": "\u2581",
+  "prepend_scheme": "always",
+  "split": true
+ },
+ "post_processor": null,
+ "decoder": {
+  "type": "Metaspace",
+  "replacement": "\u2581",
+  "prepend_scheme": "always",
+  "split": true
+ },
+ "model": {
+  "type": "WordLevel",
+  "vocab": {
+   "<unk>": 0,
+   "<|nospeech|>": 1,
+   "<pad>": 2,
+   "<|endoftext|>": 3,
+   "<|startoftranscript|>": 4,
+   "<|pnc|>": 5,
+   "<|nopnc|>": 6,
+   "<|startofcontext|>": 7,
+   "<|itn|>": 8,
+   "<|noitn|>": 9,
+   "<|timestamp|>": 10,
+   "<|notimestamp|>": 11,
+   "<|diarize|>": 12,
+   "<|nodiarize|>": 13,
+   "<|emo:undefined|>": 14,
+   "<|en|>": 15,
+   "<|de|>": 16,
+   "<|ja|>": 17,
+   "\u2581": 18,
+   "\u2581the": 19,
+   "\u2581a": 20,
+   "\u2581of": 21,
+   "\u2581and": 22,
+   "\u2581to": 23,
+   "\u2581in": 24,
+   "\u2581is": 25,
+   "\u2581it": 26,
+   "\u2581you": 27,
+   "\u2581that": 28,
+   "\u2581was": 29,
+   "\u2581for": 30,
+   "\u2581on": 31,
+   "\u2581are": 32,
+   "\u2581with": 33,
+   "\u2581as": 34,
+   "\u2581his": 35,
+   "\u2581they": 36,
+   "\u2581be": 37,
+   "\u2581at": 38,
+   "\u2581one": 39,
+   "\u2581have": 40,
+   "\u2581this": 41,
+   "\u2581from": 42,
+   "\u2581or": 43,
+   "\u2581had": 44,
+   "\u2581by": 45,
+   "\u2581hot": 46,
+   "\u2581word": 47,
+   "\u2581but": 48,
+   "\u2581what": 49,
+   "\u2581some": 50,
+   "\u2581we": 51,
+   "\u2581can": 52,
+   "\u2581out": 53,
+   "\u2581other": 54,
+   "\u2581were": 55,
+   "\u2581all": 56,
+   "\u2581there": 57,
+   "\u2581when": 58,
+   "\u2581up": 59,
+   "\u2581use": 60,
+   "\u2581your": 61,
+   "\u2581how": 62,
+   "\u2581said": 63
+  },
+  "unk_token": "<unk>"
+ }
+}

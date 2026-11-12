@@ -5,6 +5,7 @@
 mod audio_clips;
 mod audio_flamingo3_tiny;
 mod bert_embedding_tiny;
+mod cohere_asr_tiny;
 mod decision_label_tiny;
 mod decision_tiny;
 mod embedding_tiny;

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use inference_nn::{attention, layers, ops, utils as nn_utils};
 
 mod bs1770;
+pub mod cohere_asr;
 mod dia;
 pub mod diarization;
 pub mod ecapa;
@@ -14,6 +15,7 @@ pub mod nemo;
 pub mod parakeet;
 pub mod qwen3_tts;
 pub mod silero;
+mod text_decoder;
 mod transcript;
 pub mod utils;
 pub mod voxlingua;

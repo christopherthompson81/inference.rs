@@ -1,0 +1,89 @@
+{
+  "architectures": [
+    "CohereAsrForConditionalGeneration"
+  ],
+  "model_type": "cohere_asr",
+  "is_encoder_decoder": true,
+  "sample_rate": 16000,
+  "prompt_format": "cohere_asr",
+  "encoder": {
+    "att_context_size": [
+      -1,
+      -1
+    ],
+    "causal_downsampling": false,
+    "conv_context_size": null,
+    "conv_kernel_size": 3,
+    "conv_norm_type": "batch_norm",
+    "d_model": 16,
+    "dropout": 0,
+    "dropout_att": 0,
+    "dropout_emb": 0,
+    "dropout_pre_encoder": 0,
+    "feat_in": 16,
+    "feat_out": -1,
+    "ff_expansion_factor": 2,
+    "n_heads": 2,
+    "n_layers": 2,
+    "pos_emb_max_len": 512,
+    "reduction": null,
+    "reduction_factor": 1,
+    "reduction_position": null,
+    "self_attention_model": "rel_pos",
+    "subsampling": "dw_striding",
+    "subsampling_conv_channels": 4,
+    "subsampling_factor": 8,
+    "untie_biases": true,
+    "xscaling": false
+  },
+  "preprocessor": {
+    "dither": 1e-05,
+    "features": 16,
+    "frame_splicing": 1,
+    "log": true,
+    "n_fft": 512,
+    "normalize": "per_feature",
+    "pad_to": 0,
+    "pad_value": 0.0,
+    "sample_rate": 16000,
+    "window": "hann",
+    "window_size": 0.025,
+    "window_stride": 0.01
+  },
+  "transf_decoder": {
+    "config_dict": {
+      "attn_layer_dropout": 0,
+      "attn_score_dropout": 0,
+      "embedding_dropout": 0,
+      "ffn_dropout": 0,
+      "hidden_act": "relu",
+      "hidden_size": 12,
+      "inner_size": 24,
+      "learn_positional_encodings": false,
+      "lm_dec_hidden": 16,
+      "max_sequence_length": 64,
+      "num_attention_heads": 2,
+      "num_layers": 2,
+      "num_token_types": 0,
+      "pre_ln": true,
+      "vocab_size": "None"
+    }
+  },
+  "head": {
+    "activation": "relu",
+    "dropout": 0,
+    "hidden_size": 12,
+    "log_softmax": true,
+    "num_classes": 64,
+    "num_layers": 1,
+    "use_transformer_init": true
+  },
+  "vocab_size": 64,
+  "supported_languages": [
+    "en",
+    "de",
+    "ja"
+  ],
+  "max_audio_clip_s": 4,
+  "overlap_chunk_second": 1
+}

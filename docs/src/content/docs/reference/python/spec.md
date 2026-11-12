@@ -875,6 +875,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | --- | --- |
 | `TranscriptionLoaderType.PARAKEET` | `'parakeet'` |
 | `TranscriptionLoaderType.WHISPER` | `'whisper'` |
+| `TranscriptionLoaderType.COHERE_ASR` | `'cohere_asr'` |
 
 
 ## `UqffWriteSpec`

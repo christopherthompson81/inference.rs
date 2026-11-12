@@ -1,16 +1,18 @@
 ---
 title: Speech models
-description: Parakeet, Whisper, Qwen3-ASR, Nemotron 3.5 Transcribe, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime for speech transcription and audio chat, Silero for voice activity, VoxLingua107 for spoken language identification, Nemotron-3 and Sortformer for speaker diarization, Dia, Kokoro and Qwen3-TTS (with voice cloning) for text-to-speech.
+description: Parakeet, Whisper, Cohere Transcribe, Qwen3-ASR, Nemotron 3.5 Transcribe, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime for speech transcription and audio chat, Silero for voice activity, VoxLingua107 for spoken language identification, Nemotron-3 and Sortformer for speaker diarization, Dia, Kokoro and Qwen3-TTS (with voice cloning) for text-to-speech.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-inference.rs supports thirteen speech-related model families:
+inference.rs supports fourteen speech-related model families:
 
 - **Parakeet**: NVIDIA's FastConformer speech recognisers (CTC, RNN-T and TDT heads), and the cache-aware
   Nemotron streaming ASR, served via `/v1/audio/transcriptions` with word and segment timestamps.
 - **Whisper**: OpenAI's encoder-decoder speech recogniser (large-v3-turbo, large-v3, tiny to large, `.en`), served via
   `/v1/audio/transcriptions` with word and segment timestamps, up to 100 languages identified or forced.
+- **Cohere Transcribe**: a FastConformer encoder-decoder recogniser for 14 languages, each request naming its
+  language (or a language identifier), served via `/v1/audio/transcriptions`.
 - **Nemotron-3 Diarization**: who speaks when (up to 8 speakers), served via `/v1/audio/diarization`.
 - **Streaming Sortformer v2**: who speaks when (up to 4 speakers), from its `.nemo`, also via `/v1/audio/diarization`.
 - **Silero VAD**: voice activity detection, served via `/v1/audio/vad`; it also cuts long recordings for Parakeet.
@@ -40,8 +42,8 @@ inference.rs supports thirteen speech-related model families:
   described in words (VoiceDesign) or a voice cloned from a clip (Base), from the release or llama.cpp's GGUFs, also
   served via `/v1/audio/speech`.
 
-Qwen3-ASR, Nemotron 3.5 Transcribe, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime are classified as multimodal models because audio is an input modality. Parakeet and
-Whisper are dedicated transcription models, and Dia, Kokoro and Qwen3-TTS are dedicated speech models.
+Qwen3-ASR, Nemotron 3.5 Transcribe, GLM-ASR, Audio Flamingo 3, MERaLiON-2, Ultravox, Voxtral and Voxtral Realtime are classified as multimodal models because audio is an input modality. Parakeet,
+Whisper and Cohere Transcribe are dedicated transcription models, and Dia, Kokoro and Qwen3-TTS are dedicated speech models.
 
 ## Parakeet: speech recognition
 
@@ -506,6 +508,35 @@ choosing OpenAI's default, plain greedy, beam 5 or a prompt. On synthetic speech
 times match exactly (to 0.000 s, over four windows) in each mode, except where a window falls back to a sampled
 temperature on both sides, whose draws differ; earlier, word times fell within 0.02 s for large-v3-turbo (FP16),
 large-v3 and small.
+
+## Cohere Transcribe: speech recognition in 14 languages
+
+```bash
+inference serve -m CohereLabs/cohere-transcribe-03-2026
+```
+
+Cohere Transcribe (2B, Apache 2.0, gated: accept its terms on Hugging Face first) is a FastConformer encoder,
+Parakeet's, feeding a transformer decoder, Whisper's shape. It loads from the release's own layout (`config.json`
+with `model_type` `cohere_asr`, `tokenizer.json`, `model.safetensors`) and transcribes English, French, German,
+Spanish, Italian, Portuguese, Dutch, Polish, Greek, Arabic, Japanese, Chinese, Vietnamese and Korean, with
+punctuation.
+
+- **It does not identify the language**: a request names one (`language=de`; `de-DE` also works), or names a
+  language identifier with `language_model` (see [naming a transcription's language](#naming-a-transcriptions-language)).
+  A request without either, or with a language outside the 14, is refused.
+- A recording past 35 s is cut into chunks of at most 35 s, each ending at the quietest tenth of a second of its last
+  5 s, as the reference's feature extractor does; the chunks' texts join with a space (none for Japanese and Chinese).
+- The transcript comes as one segment: the model gives no word times. It decodes greedily (no `beam_size`) and
+  transcribes only (no translation).
+
+```bash
+curl http://localhost:1234/v1/audio/transcriptions -F file=@clip.wav -F language=fr -F response_format=verbose_json
+```
+
+`scripts/cohere_asr_parity.sh` checks a build against transformers' `CohereAsrForConditionalGeneration` on given
+clips: the log-mel features, the encoder output and every chunk's greedy token ids (exact in f32, bf16 and f16 on the
+clips tried, a 70 s chunked recording among them). The reference's feature extractor adds a 1e-5 dither from torch's
+generator, which this does not; it is off on both sides for the comparison.
 
 ## Qwen3-ASR: audio in, transcript out
 
