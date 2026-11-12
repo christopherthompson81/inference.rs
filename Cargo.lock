@@ -3202,6 +3202,7 @@ dependencies = [
  "inference-nn",
  "inference-quant",
  "inference-tensor",
+ "libz-sys",
  "mimalloc",
  "rand 0.9.4",
  "rand_distr",
