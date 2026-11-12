@@ -133,6 +133,22 @@ Calls that need approval show as cards with the edit's old and new text, the fil
 runs the call once, **Always allow** covers that tool inside the project for the rest of the session, and **Deny**
 tells the model you declined. **Stop** interrupts the model or the running tool, as Ctrl-C does in the terminal.
 
+With a model that reads images (its input modalities include vision), the prompt box takes images too: paste them, drop
+them on it, or pick them with the paperclip. They go to the model with the prompt's text and stay in the session file.
+
+Under the prompt box, a ring shows how full the model's context is, as tokens used of its context length (the ring
+turns amber at 80%, where the agent summarizes the history). Beside it are the agent's time on the prompt (HH:MM:SS.S,
+less time spent waiting on an approval), the prefill time, the decode rate and the cached prompt tokens. While a reply
+streams, the context, prefill and rate are estimates (marked `~`) from the harness's prompt count and the text so far;
+the server's own figures replace them when each request ends. The cached count only comes with those figures.
+
+The log follows new output while it is scrolled to the bottom. Scroll up and it stays where you put it; scroll back
+down and it follows again.
+
+A prompt keeps running when you leave the tab, reload the page or open it on another device. Opening its session again
+shows the conversation as the prompt found it, replays what the prompt has done since, then follows it live, approval
+cards included.
+
 Sessions are the same files the terminal uses, so `inference agent --continue` in a project picks up a session started
 in the browser, and the other way round.
 
@@ -149,7 +165,8 @@ time, each summary taking in the one before, so even a session already past the 
 
 `/compact` does the same on request, folding everything before the latest prompt, in the REPL, in the Code tab's
 prompt box, or headless (`inference agent --resume <id> -p /compact`). The transcript keeps every message: the
-compaction is one more line in the session file, and the Code tab marks where the summary begins. `/context` says
+compaction is one more line in the session file, and the Code tab marks where the summary begins, with a spinner while
+it is being written and the time it was made. `/context` says
 where it begins in the REPL.
 
 On a 27B model, a session of 35 tool rounds (258,000 tokens, past its 262,144-token context) folds to about 20,000

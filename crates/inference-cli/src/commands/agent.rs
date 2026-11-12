@@ -243,7 +243,7 @@ impl AgentUi for Headless {
         eprintln!("* summarizing the first {} messages", end - 1);
     }
 
-    fn compacted(&mut self, compaction: &Compaction) {
+    fn compacted(&mut self, compaction: &Compaction, _: usize) {
         eprintln!(
             "* the model now sees a summary and the messages from {} on",
             compaction.start
@@ -366,7 +366,7 @@ impl AgentUi for Repl {
         println!("{DIM}summarizing the first {} messages...{RESET}", end - 1);
     }
 
-    fn compacted(&mut self, compaction: &Compaction) {
+    fn compacted(&mut self, compaction: &Compaction, _: usize) {
         println!(
             "{DIM}the model now sees a summary and the messages from {} on{RESET}",
             compaction.start

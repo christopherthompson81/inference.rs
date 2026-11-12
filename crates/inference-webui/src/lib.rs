@@ -100,6 +100,8 @@ pub(crate) const UI_CODE_SEND_ROUTE: RouteInfo =
     RouteInfo::new("/api/code/send", "POST", RouteKind::Ui);
 pub(crate) const UI_CODE_APPROVE_ROUTE: RouteInfo =
     RouteInfo::new("/api/code/approve", "POST", RouteKind::Ui);
+pub(crate) const UI_CODE_ATTACH_ROUTE: RouteInfo =
+    RouteInfo::new("/api/code/attach", "POST", RouteKind::Ui);
 pub(crate) const UI_CODE_INTERRUPT_ROUTE: RouteInfo =
     RouteInfo::new("/api/code/interrupt", "POST", RouteKind::Ui);
 pub(crate) const UI_CODE_DEMO_ROUTE: RouteInfo =
@@ -335,6 +337,7 @@ async fn build_ui_router(engine: &Engine, options: UiOptions) -> Result<Router> 
         .route(UI_CODE_SESSIONS_ROUTE.path, get(code::list_sessions))
         .route(UI_CODE_OPEN_ROUTE.path, post(code::open_session))
         .route(UI_CODE_SEND_ROUTE.path, post(code::send))
+        .route(UI_CODE_ATTACH_ROUTE.path, post(code::attach))
         .route(UI_CODE_APPROVE_ROUTE.path, post(code::approve))
         .route(UI_CODE_INTERRUPT_ROUTE.path, post(code::interrupt))
         .route(UI_CODE_DEMO_ROUTE.path, post(code::start_demo))

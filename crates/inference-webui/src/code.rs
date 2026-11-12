@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use axum::Json;
 use inference_json::QueryParams;
@@ -15,6 +15,7 @@ use axum::extract::Extension;
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
+use futures::StreamExt;
 use futures::future::BoxFuture;
 use indexmap::IndexMap;
 use inference_coder::{
@@ -24,15 +25,18 @@ use inference_coder::{
     activity::{Run, RunTracker},
     default_tools,
     prompt::system_prompt,
+    session::user_content,
 };
 use serde_json::{Map, Value, json};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::types::AppState;
 
 // sessions kept loaded at once; the least recently opened idle one goes first
 const MAX_LIVE_SESSIONS: usize = 32;
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
+// how a usage event's JSON opens ("type" sorts before "usage")
+const USAGE_EVENT: &str = r#"{"type":"usage""#;
 const DEMO_DIR_PREFIX: &str = "inference-code-demo-";
 const DEMO_PROMPT: &str = "The test suite fails. Fix the stockroom package so \
 `python3 -m unittest discover -s tests -t .` passes. The tests and README.md describe the intended behaviour; \
@@ -75,6 +79,95 @@ struct LiveSession {
     // activity labels by their group's first call, also outside the lock, and the file they are kept in
     labels: Mutex<BTreeMap<String, String>>,
     path: PathBuf,
+    // the running prompt's events, or the last one's
+    run: Mutex<Option<Arc<RunLog>>>,
+}
+
+/// A prompt's events as it streams them, kept so a page that left (another tab, a reload) can attach and catch up.
+struct RunLog {
+    events: Mutex<Vec<String>>,
+    // the count of events, closed when the prompt and its labels are done
+    count: watch::Receiver<usize>,
+    started: Instant,
+    /// The session as the prompt found it, for a page that opens it meanwhile.
+    history: Value,
+}
+
+impl RunLog {
+    // the last request's usage, for a page reopening the session
+    fn last_usage(&self) -> Option<Value> {
+        let events = self.events.lock().unwrap();
+        let event = events
+            .iter()
+            .rev()
+            .find(|event| event.starts_with(USAGE_EVENT))?;
+        serde_json::from_str::<Value>(event)
+            .ok()
+            .map(|event| event["usage"].clone())
+    }
+
+    fn event(&self, index: usize) -> Option<String> {
+        self.events.lock().unwrap().get(index).cloned()
+    }
+
+    /// The events from the first, then one marking where a late page caught up, then the rest as they come.
+    fn stream(self: Arc<Self>) -> impl futures::Stream<Item = String> {
+        let caught_up = self.events.lock().unwrap().len();
+        let count = self.count.clone();
+        futures::stream::unfold(
+            (self, count, 0),
+            move |(log, mut count, index)| async move {
+                if index == caught_up {
+                    let elapsed = log.started.elapsed().as_millis() as u64;
+                    let event = json!({"type": "caught_up", "elapsed_ms": elapsed}).to_string();
+                    return Some((event, (log, count, index + 1)));
+                }
+                let at = if index > caught_up { index - 1 } else { index };
+                loop {
+                    count.borrow_and_update();
+                    if let Some(event) = log.event(at) {
+                        return Some((event, (log, count, index + 1)));
+                    }
+                    if count.changed().await.is_err() {
+                        return log.event(at).map(|event| (event, (log, count, index + 1)));
+                    }
+                }
+            },
+        )
+    }
+}
+
+// the forwarder keeps the log until every sender (the prompt's and any label request's) is gone
+fn record(
+    log: Arc<RunLog>,
+    count: watch::Sender<usize>,
+    mut receiver: mpsc::UnboundedReceiver<Value>,
+) {
+    tokio::spawn(async move {
+        while let Some(event) = receiver.recv().await {
+            let len = {
+                let mut events = log.events.lock().unwrap();
+                events.push(event.to_string());
+                events.len()
+            };
+            count.send_replace(len);
+        }
+    });
+}
+
+/// What the page shows of a session: its messages without the system prompt, where a summary begins and the context.
+fn history(agent: &Agent, context_tokens: Option<usize>) -> Value {
+    let session = &agent.session;
+    json!({
+        "session_id": session.id,
+        "project": session.root,
+        "messages": session.messages.iter().skip(1).collect::<Vec<_>>(),
+        // counted as `messages` is (without the system prompt)
+        "compacted_before": session.compaction.as_ref().map(|c| c.start - 1),
+        "compacted_at": session.compaction.as_ref().and_then(|c| c.at),
+        "context_tokens": context_tokens,
+        "context_estimate": agent.context_estimate(),
+    })
 }
 
 impl CodeState {
@@ -284,20 +377,33 @@ pub(crate) async fn open_session(
             }
         }
     };
-    let Ok(agent) = live.agent.try_lock() else {
-        return (StatusCode::CONFLICT, "a prompt is running in that session").into_response();
+    // a running session opens as the prompt found it, and the page attaches to the prompt's events
+    let (mut body, running) = match live.agent.try_lock() {
+        Ok(mut agent) => {
+            if let Some(model) = request.model.as_deref().filter(|model| !model.is_empty()) {
+                agent.set_model(model);
+            }
+            let window = agent.context_window().await;
+            (history(&agent, window), false)
+        }
+        Err(_) => match live.run.lock().unwrap().as_ref() {
+            Some(run) => (run.history.clone(), true),
+            None => {
+                return (StatusCode::CONFLICT, "a prompt is starting in that session")
+                    .into_response();
+            }
+        },
     };
-    let session = &agent.session;
-    Json(json!({
-        "session_id": session.id,
-        "project": session.root,
-        // the system prompt is the harness's, not part of the conversation shown
-        "messages": session.messages.iter().skip(1).collect::<Vec<_>>(),
-        // where the model's view begins past a summary, counted as `messages` is (without the system prompt)
-        "compacted_before": session.compaction.as_ref().map(|c| c.start - 1),
-        "labels": *live.labels.lock().unwrap(),
-    }))
-    .into_response()
+    body["running"] = Value::Bool(running);
+    body["usage"] = live
+        .run
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|run| run.last_usage())
+        .unwrap_or(Value::Null);
+    body["labels"] = json!(*live.labels.lock().unwrap());
+    Json(body).into_response()
 }
 
 /// Makes a demo project in the temp directory (a small package whose tests fail) and opens a session there; the page
@@ -398,6 +504,7 @@ async fn load(
         agent: Arc::new(tokio::sync::Mutex::new(agent)),
         interrupt: Interrupt::default(),
         approvals: Mutex::new(IndexMap::new()),
+        run: Mutex::new(None),
     });
     code.insert(id, live.clone());
     Ok(live)
@@ -413,12 +520,16 @@ pub(crate) struct SendRequest {
     enable_thinking: Option<bool>,
     #[serde(default)]
     model: Option<String>,
+    /// Images the prompt shows the model, as data URLs.
+    #[serde(default)]
+    images: Vec<String>,
     /// Label each run of thinking and tool calls as it closes, with the session's model.
     #[serde(default)]
     describe_activity: bool,
 }
 
-/// Runs a prompt to its answer, streaming the agent's text, tool calls and approval requests as SSE.
+/// Runs a prompt to its answer, streaming the agent's text, tool calls and approval requests as SSE. The prompt goes
+/// on if the page leaves; [`attach`] picks its events up again.
 pub(crate) async fn send(
     Extension(code): Extension<Arc<CodeState>>,
     Extension(app): Extension<Arc<AppState>>,
@@ -443,6 +554,8 @@ pub(crate) async fn send(
         )
             .into_response();
     };
+    // a page opening the session from here on waits for the new log, not the last prompt's
+    *live.run.lock().unwrap() = None;
     agent.permissions.mode = mode;
     let labeller = request.describe_activity.then(|| Labeller {
         backend: agent.shared_backend(),
@@ -452,7 +565,20 @@ pub(crate) async fn send(
     agent.set_model(model);
     agent.set_request_field("enable_thinking", request.enable_thinking.map(Value::Bool));
     live.interrupt.reset();
+    let window = agent.context_window().await;
     let (events, receiver) = mpsc::unbounded_channel::<Value>();
+    let (count, counted) = watch::channel(0);
+    let log = Arc::new(RunLog {
+        events: Mutex::new(Vec::new()),
+        count: counted,
+        started: Instant::now(),
+        history: history(&agent, window),
+    });
+    *live.run.lock().unwrap() = Some(log.clone());
+    record(log.clone(), count, receiver);
+    let _ =
+        events.send(json!({"type": "prompt", "text": request.prompt, "images": request.images}));
+    let _ = events.send(json!({"type": "context", "tokens": window}));
     tokio::spawn(async move {
         let mut ui = WebUi {
             events: events.clone(),
@@ -468,7 +594,8 @@ pub(crate) async fn send(
                 Err(error) => json!({"type": "error", "message": format!("{error:#}")}),
             }
         } else {
-            let result = agent.send(&request.prompt, &mut ui, &live.interrupt).await;
+            let prompt = user_content(&request.prompt, &request.images);
+            let result = agent.send(prompt, &mut ui, &live.interrupt).await;
             if let Some(run) = ui.runs.finish() {
                 ui.label(run);
             }
@@ -484,16 +611,35 @@ pub(crate) async fn send(
         };
         let _ = events.send(event);
     });
-    let stream = futures::stream::unfold(receiver, |mut receiver| async move {
-        let event = receiver.recv().await?;
-        Some((
-            Ok::<_, Infallible>(Event::default().data(event.to_string())),
-            receiver,
-        ))
-    });
-    Sse::new(stream)
+    events_response(log)
+}
+
+fn events_response(log: Arc<RunLog>) -> Response {
+    let events = log
+        .stream()
+        .map(|event| Ok::<_, Infallible>(Event::default().data(event)));
+    Sse::new(events)
         .keep_alive(KeepAlive::new().interval(KEEP_ALIVE))
         .into_response()
+}
+
+#[derive(inference_json::FromJson)]
+pub(crate) struct AttachRequest {
+    session_id: String,
+}
+
+/// The running (or last) prompt's events from its first, for a page that opened the session while it ran.
+pub(crate) async fn attach(
+    Extension(code): Extension<Arc<CodeState>>,
+    JsonBody(request): JsonBody<AttachRequest>,
+) -> Response {
+    let Some(live) = code.live(&request.session_id) else {
+        return not_found(&request.session_id);
+    };
+    let Some(log) = live.run.lock().unwrap().clone() else {
+        return (StatusCode::NOT_FOUND, "no prompt has run in that session").into_response();
+    };
+    events_response(log)
 }
 
 #[derive(inference_json::FromJson)]
@@ -552,7 +698,7 @@ pub(crate) async fn interrupt(
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// Forwards the agent's progress to the SSE stream; a closed stream (the page went away) interrupts the prompt.
+/// Forwards the agent's progress to the prompt's event log.
 struct WebUi {
     events: mpsc::UnboundedSender<Value>,
     live: Arc<LiveSession>,
@@ -596,12 +742,8 @@ impl WebUi {
         });
     }
 
-    fn emit(&self, event: Value) -> bool {
-        let sent = self.events.send(event).is_ok();
-        if !sent {
-            self.live.interrupt.trigger();
-        }
-        sent
+    fn emit(&self, event: Value) {
+        let _ = self.events.send(event);
     }
 }
 
@@ -650,18 +792,16 @@ impl AgentUi for WebUi {
                 ToolKind::Edit => "edit",
                 ToolKind::Execute => "execute",
             };
-            let event = json!({"type": "approval", "approval_id": approval_id, "id": call.id,
-                "name": call.name, "args": args, "kind": kind});
-            if !self.emit(event) {
-                self.live
-                    .approvals
-                    .lock()
-                    .unwrap()
-                    .shift_remove(&approval_id);
-                return Approval::Deny;
-            }
+            self.emit(
+                json!({"type": "approval", "approval_id": approval_id, "id": call.id,
+                "name": call.name, "args": args, "kind": kind}),
+            );
             receiver.await.unwrap_or(Approval::Deny)
         })
+    }
+
+    fn round_start(&mut self, prompt_tokens: usize) {
+        self.emit(json!({"type": "round_start", "prompt_tokens": prompt_tokens}));
     }
 
     fn round_end(&mut self, turn: &Turn) {
@@ -674,8 +814,11 @@ impl AgentUi for WebUi {
         self.emit(json!({"type": "compacting", "end": end}));
     }
 
-    fn compacted(&mut self, compaction: &Compaction) {
-        self.emit(json!({"type": "compacted", "start": compaction.start}));
+    fn compacted(&mut self, compaction: &Compaction, context_tokens: usize) {
+        self.emit(
+            json!({"type": "compacted", "start": compaction.start, "at": compaction.at,
+            "context_estimate": context_tokens}),
+        );
     }
 }
 
@@ -741,7 +884,44 @@ pub(crate) async fn tree(
 
 #[cfg(test)]
 mod tests {
-    use super::make_demo_project;
+    use super::{RunLog, make_demo_project, record};
+    use futures::StreamExt;
+    use serde_json::{Value, json};
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+    use tokio::sync::{mpsc, watch};
+
+    #[tokio::test]
+    async fn a_late_page_replays_the_run_then_follows_it_to_the_end() {
+        let (events, receiver) = mpsc::unbounded_channel();
+        let (count, counted) = watch::channel(0);
+        let log = Arc::new(RunLog {
+            events: Mutex::new(Vec::new()),
+            count: counted,
+            started: Instant::now(),
+            history: Value::Null,
+        });
+        record(log.clone(), count, receiver);
+        events.send(json!({"type": "prompt"})).unwrap();
+        events.send(json!({"type": "text", "delta": "a"})).unwrap();
+        while log.events.lock().unwrap().len() < 2 {
+            tokio::task::yield_now().await;
+        }
+        let stream = log.clone().stream();
+        events.send(json!({"type": "done"})).unwrap();
+        drop(events);
+        let types = stream
+            .map(|event| serde_json::from_str::<Value>(&event).unwrap()["type"].clone())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(types, ["prompt", "text", "caught_up", "done"]);
+        assert!(log.last_usage().is_none());
+        log.events
+            .lock()
+            .unwrap()
+            .push(json!({"type": "usage", "usage": {"total_tokens": 9}}).to_string());
+        assert_eq!(log.last_usage().unwrap()["total_tokens"], 9);
+    }
 
     #[test]
     fn the_demo_project_fails_its_tests_as_planted() {

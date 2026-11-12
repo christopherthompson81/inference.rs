@@ -692,12 +692,14 @@ async fn only_an_admin_reaches_the_code_tab_and_only_under_its_roots() -> anyhow
             StatusCode::NOT_FOUND
         );
     }
-    let interrupt = json!({"session_id": "missing"});
-    let (code, _) = status_and_body(
-        &ui,
-        send_json("POST", "/ui/api/code/interrupt", BETA, interrupt),
-    )
-    .await?;
-    assert_eq!(code, StatusCode::FORBIDDEN);
+    for route in ["interrupt", "attach"] {
+        let path = format!("/ui/api/code/{route}");
+        let missing = json!({"session_id": "missing"});
+        let (code, _) =
+            status_and_body(&ui, send_json("POST", &path, BETA, missing.clone())).await?;
+        assert_eq!(code, StatusCode::FORBIDDEN);
+        let (code, _) = status_and_body(&ui, send_json("POST", &path, ALPHA, missing)).await?;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+    }
     Ok(())
 }
