@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 
 HASH = re.compile(r"-([0-9a-f]{16})(?:[.-]|$)")
+UNIT_HASH = re.compile(r"[0-9a-f]{16}")
 DWO_SUFFIX = b".rcgu.dwo"
 ELF_MAGIC = b"\x7fELF"
 AR_MAGIC = b"!<arch>\n"
@@ -152,6 +153,15 @@ def delete(stale, root, dry_run):
     print(f"sweep: {verb} {freed / 2**30:.1f} GiB in {len(stale)} entries under {root}")
 
 
+def unit_dirs(parent):
+    # a build unit is `build/<pkg>-<hash>`, or `build/<pkg>/<hash>` since Cargo 1.100
+    for d in parent.glob("*"):
+        if not d.is_dir():
+            continue
+        units = [u for u in d.iterdir() if u.is_dir() and UNIT_HASH.fullmatch(u.name)]
+        yield from units or [d]
+
+
 def lock_target(root):
     # cargo holds this for every build, so nothing can write the dir while it is swept
     lock = open(root / ".cargo-lock", "a")
@@ -241,11 +251,7 @@ def main():
             if f.is_file() and h and h not in live_hashes:
                 stale.append(f)
     for sub in ("build", "cuda-kernels"):
-        stale += [
-            d
-            for d in (root / sub).glob("*")
-            if d.is_dir() and d.resolve() not in live_dirs
-        ]
+        stale += [d for d in unit_dirs(root / sub) if d.resolve() not in live_dirs]
     units_per_crate = collections.Counter(crate for crate, _ in live_units)
     by_crate = collections.defaultdict(list)
     for d in (root / "incremental").glob("*"):
