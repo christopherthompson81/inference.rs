@@ -132,6 +132,11 @@ impl Whisper {
                 std::sync::Arc::new(|_| true),
             )?
         };
+        Self::load_with(files, vb)
+    }
+
+    /// `files`' configs and tokenizer over weights `vb` reads (its `weights` unused).
+    pub fn load_with(files: &WhisperFiles, vb: ShardedVarBuilder) -> Result<Self> {
         Self::new(
             &read_json(&files.config)?,
             read_json(&files.generation_config)?,

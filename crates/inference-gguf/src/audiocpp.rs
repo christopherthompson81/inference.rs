@@ -3,13 +3,16 @@
 //! A package unpacks those files once into a cache directory, so a loader reads it as it reads a checkpoint directory.
 
 use std::collections::HashMap;
-use std::io::{BufReader, Read, Seek};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use inference_quant::{GgufArchive, GgufTensorBinding, GgufWeightSource, ShardedVarBuilder};
-use inference_tensor::quantized::gguf_file::{self, Content, Value, peek_architecture};
+use inference_quant::{
+    GgufArchive, GgufTensorBackend, GgufTensorBinding, GgufWeightSource, ShardedVarBuilder,
+};
+use inference_tensor::nn::VarBuilder;
+use inference_tensor::quantized::gguf_file::{self, Header, ReadSeek, Value, peek_architecture};
 use inference_tensor::quantized::{GgmlDType, QTensor};
 use inference_tensor::{DType, Device, Tensor};
 
@@ -31,6 +34,8 @@ const UNPACK_DIR: &str = "audiocpp";
 // written last, so a directory without it is an interrupted unpack
 const COMPLETE_MARKER: &str = ".unpacked";
 const ARCHITECTURE_KEY: &str = "general.architecture";
+// GGML's integer types (I8, I16, I32, I64): BatchNorm's step counters and the like, which no model reads as weights
+const INTEGER_TYPES: std::ops::RangeInclusive<u32> = 24..=27;
 // GGML's `GGML_MAX_NAME`: a name this long or longer is stored under an alias
 const MAX_STORED_NAME: usize = 64;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -136,11 +141,11 @@ pub struct AudioCppGguf {
 }
 
 fn values<T>(
-    content: &Content,
+    header: &Header,
     key: &str,
     get: fn(&Value) -> inference_tensor::Result<T>,
 ) -> Result<Vec<T>> {
-    let Some(value) = content.metadata.get(key) else {
+    let Some(value) = header.metadata.get(key) else {
         bail!("the audio.cpp GGUF has no `{key}`")
     };
     Ok(value
@@ -150,8 +155,8 @@ fn values<T>(
         .collect::<inference_tensor::Result<_>>()?)
 }
 
-fn strings(content: &Content, key: &str) -> Result<Vec<String>> {
-    values(content, key, |v| v.to_string().cloned())
+fn strings(header: &Header, key: &str) -> Result<Vec<String>> {
+    values(header, key, |v| v.to_string().cloned())
 }
 
 // the name a tensor is stored under when its own is too long or repeats
@@ -162,32 +167,33 @@ fn alias(index: usize) -> String {
 impl AudioCppGguf {
     pub fn open(path: &Path) -> Result<Self> {
         let mut file = BufReader::new(std::fs::File::open(path)?);
-        let content =
-            Content::read(&mut file).with_context(|| format!("reading {}", path.display()))?;
-        match content.metadata.get(ARCHITECTURE_KEY) {
+        // the header alone: a package may hold tensors of types no model reads (BatchNorm's I64 counters)
+        let header =
+            Header::read(&mut file).with_context(|| format!("reading {}", path.display()))?;
+        match header.metadata.get(ARCHITECTURE_KEY) {
             Some(Value::String(a)) if a == ARCHITECTURE => {}
             other => bail!(
                 "{} is not an audio.cpp GGUF (architecture {other:?})",
                 path.display()
             ),
         }
-        let family = content
+        let family = header
             .metadata
             .get(FAMILY_KEY)
             .map(|v| v.to_string().cloned())
             .transpose()?
             .unwrap_or_default();
-        let sources = strings(&content, SOURCE_NAMES_KEY).unwrap_or_default();
-        let names = strings(&content, TENSOR_NAMES_KEY)?;
-        if names.len() != content.tensor_infos.len() {
+        let sources = strings(&header, SOURCE_NAMES_KEY).unwrap_or_default();
+        let names = strings(&header, TENSOR_NAMES_KEY)?;
+        if names.len() != header.tensor_infos.len() {
             bail!(
                 "{} tensor names for {} tensors",
                 names.len(),
-                content.tensor_infos.len()
+                header.tensor_infos.len()
             );
         }
-        let ranks = values(&content, TENSOR_RANKS_KEY, Value::to_i32)?;
-        let dims = values(&content, TENSOR_SHAPES_KEY, Value::to_i64)?;
+        let ranks = values(&header, TENSOR_RANKS_KEY, Value::to_i32)?;
+        let dims = values(&header, TENSOR_SHAPES_KEY, Value::to_i64)?;
         if ranks.len() != names.len() {
             bail!("{} tensor ranks for {} tensors", ranks.len(), names.len());
         }
@@ -195,8 +201,8 @@ impl AudioCppGguf {
         let mut tensors = Vec::with_capacity(names.len());
         for (index, (name, rank)) in names.into_iter().zip(ranks).enumerate() {
             let stored = match alias(index) {
-                aliased if content.tensor_infos.contains_key(&aliased) => aliased,
-                _ if content.tensor_infos.contains_key(&name) => name.clone(),
+                aliased if header.tensor_infos.contains_key(&aliased) => aliased,
+                _ if header.tensor_infos.contains_key(&name) => name.clone(),
                 _ => bail!("the audio.cpp GGUF stores no tensor for `{name}`"),
             };
             let rank = usize::try_from(rank)?;
@@ -248,8 +254,8 @@ impl AudioCppGguf {
         let _ = std::fs::remove_dir_all(&staging);
         std::fs::create_dir_all(&staging)?;
         let mut file = BufReader::new(std::fs::File::open(&self.path)?);
-        let content = Content::read(&mut file)?;
-        for (name, bytes) in embedded_files(&content, &mut file)? {
+        let header = Header::read(&mut file)?;
+        for (name, bytes) in embedded_files(&header, &mut file)? {
             let target = staging.join(&name);
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -282,6 +288,34 @@ impl AudioCppGguf {
         dtype: DType,
         device: &Device,
     ) -> Result<ShardedVarBuilder> {
+        Ok(self
+            .weight_source(source, dtype, None)?
+            .sharded_var_builder(device.clone()))
+    }
+
+    /// The same tensors for a model built on plain `VarBuilder`s, each dequantized into `dtype` as it loads, under
+    /// `rename`'s names where the model reads its own.
+    pub fn dense_var_builder(
+        &self,
+        source: Option<&str>,
+        dtype: DType,
+        device: &Device,
+        rename: Option<fn(&str) -> String>,
+    ) -> Result<VarBuilder<'static>> {
+        let backend = GgufTensorBackend::new(self.weight_source(source, dtype, rename)?);
+        Ok(VarBuilder::from_backend(
+            Box::new(backend),
+            dtype,
+            device.clone(),
+        ))
+    }
+
+    fn weight_source(
+        &self,
+        source: Option<&str>,
+        dtype: DType,
+        rename: Option<fn(&str) -> String>,
+    ) -> Result<Arc<GgufWeightSource>> {
         let archive = Arc::new(GgufArchive::open([&self.path])?);
         let prefix = source.map(|s| format!("{s}{SOURCE_SEPARATOR}"));
         let mut bindings = HashMap::new();
@@ -293,7 +327,11 @@ impl AudioCppGguf {
                 },
                 None => tensor.name.as_str(),
             };
-            let stored = archive.tensor_info(&tensor.stored)?.shape().to_vec();
+            let info = archive.tensor_info(&tensor.stored)?;
+            if INTEGER_TYPES.contains(&info.stored_dtype().raw()) {
+                continue;
+            }
+            let stored = info.shape().to_vec();
             let binding = GgufTensorBinding::tensor(tensor.stored.clone());
             let binding = if stored == tensor.shape {
                 binding
@@ -303,7 +341,10 @@ impl AudioCppGguf {
                     dims: tensor.shape.clone(),
                 }
             };
-            bindings.insert(name.to_string(), binding);
+            bindings.insert(
+                rename.map_or_else(|| name.to_string(), |r| r(name)),
+                binding,
+            );
         }
         if bindings.is_empty() {
             bail!(
@@ -312,21 +353,17 @@ impl AudioCppGguf {
                 self.sources
             );
         }
-        let weights = Arc::new(GgufWeightSource::new(archive, &bindings, dtype)?);
-        Ok(weights.sharded_var_builder(device.clone()))
+        Ok(Arc::new(GgufWeightSource::new(archive, &bindings, dtype)?))
     }
 }
 
 /// The embedded files: names, and n + 1 offsets into one byte blob.
-fn embedded_files<R: Read + Seek>(
-    content: &Content,
-    reader: &mut R,
-) -> Result<Vec<(PathBuf, Vec<u8>)>> {
-    let names = strings(content, FILE_NAMES_KEY).unwrap_or_default();
+fn embedded_files(header: &Header, reader: &mut dyn ReadSeek) -> Result<Vec<(PathBuf, Vec<u8>)>> {
+    let names = strings(header, FILE_NAMES_KEY).unwrap_or_default();
     if names.is_empty() {
         return Ok(Vec::new());
     }
-    let offsets = values(content, FILE_OFFSETS_KEY, Value::to_u64)?;
+    let offsets = values(header, FILE_OFFSETS_KEY, Value::to_u64)?;
     if offsets.len() != names.len() + 1 {
         bail!(
             "{} embedded files need {} offsets, got {}",
@@ -335,7 +372,7 @@ fn embedded_files<R: Read + Seek>(
             offsets.len()
         );
     }
-    let inline = match content.metadata.get(FILE_DATA_KEY) {
+    let inline = match header.metadata.get(FILE_DATA_KEY) {
         Some(value) => Some(
             value
                 .to_vec()?
@@ -362,7 +399,7 @@ fn embedded_files<R: Read + Seek>(
                     .get(usize::try_from(range[0])?..usize::try_from(range[1])?)
                     .with_context(|| format!("`{name}` is past the embedded data"))?
                     .to_vec(),
-                None => content.read_large_array(reader, FILE_DATA_KEY, range[0]..range[1])?,
+                None => header.read_large_array(reader, FILE_DATA_KEY, range[0]..range[1])?,
             };
             Ok((relative.to_path_buf(), bytes))
         })
@@ -463,6 +500,11 @@ mod tests {
         let back = vb.get((2, 3, 4), LONG_NAME)?;
         assert_eq!(back.to_vec3::<f32>()?, conv.to_vec3::<f32>()?);
         assert_eq!(vb.get((), "model.scale")?.to_scalar::<f32>()?, 0.5);
+        let dense = package.dense_var_builder(None, DType::F32, &device, None)?;
+        assert_eq!(
+            dense.get((2, 3, 4), LONG_NAME)?.to_vec3::<f32>()?,
+            conv.to_vec3::<f32>()?
+        );
         // Q8_0 rounds each value to one of 127 steps of its block's largest
         let step = 63.0 / 127.0;
         let error = (vb.get((2, 32), "lm_head.weight")? - &matrix)?
@@ -476,6 +518,53 @@ mod tests {
             b"tokens"
         );
         assert_eq!(unpack(&path)?.map(|p| p.dir), Some(unpacked));
+        Ok(())
+    }
+
+    // GGML's I64 id, and the bytes of an F32 pair, which reread as one I64 counter
+    const I64_TYPE: u32 = 27;
+    const COUNTER: &str = "model.norm.num_batches_tracked";
+
+    // Parakeet's package: BatchNorm counters stored as I64, and the file ending at its last tensor's bytes, unpadded
+    #[test]
+    fn a_package_skips_integer_tensors_and_reads_without_trailing_padding() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("tiny.gguf");
+        let device = Device::Cpu;
+        let pair = Tensor::new(&[0f32, 0.0], &device)?;
+        let scalar = Tensor::new(0.5f32, &device)?;
+        write_package(
+            &path,
+            "tiny_family",
+            &[
+                (COUNTER, &pair, GgmlDType::F32),
+                ("model.scale", &scalar, GgmlDType::F32),
+            ],
+            &[],
+        )?;
+        let mut bytes = std::fs::read(&path)?;
+        // the counter's table entry (after the name table, which names it too): its name, one dim, the dim, its type
+        let name = COUNTER.as_bytes();
+        let at = bytes
+            .windows(name.len())
+            .rposition(|w| w == name)
+            .expect("the counter's entry")
+            + name.len();
+        let (dim, dtype) = (at + 4, at + 4 + 8);
+        bytes[dim..dim + 8].copy_from_slice(&1u64.to_le_bytes());
+        bytes[dtype..dtype + 4].copy_from_slice(&I64_TYPE.to_le_bytes());
+        let header = Header::read(&mut std::io::Cursor::new(&bytes))?;
+        let last = &header.tensor_infos["model.scale"];
+        let end = header.tensor_data_offset + last.offset + std::mem::size_of::<f32>() as u64;
+        let end = usize::try_from(end)?;
+        assert!(end < bytes.len(), "the writer pads its last tensor");
+        bytes.truncate(end);
+        std::fs::write(&path, &bytes)?;
+
+        let package = AudioCppGguf::open(&path)?;
+        let vb = package.var_builder(None, DType::F32, &device)?;
+        assert_eq!(vb.get((), "model.scale")?.to_scalar::<f32>()?, 0.5);
+        assert!(!vb.contains_tensor(COUNTER));
         Ok(())
     }
 }

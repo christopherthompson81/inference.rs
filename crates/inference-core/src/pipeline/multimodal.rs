@@ -24,7 +24,7 @@ use inference_protocol::chat_template::BeginEndUnkPadTok;
 use inference_quant::IsqType;
 use inference_tensor::Device;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use tokenizers::AddedToken;
 use tokio::sync::Mutex;
@@ -255,11 +255,17 @@ impl MultimodalLoader {
             self.config.hf_config_overrides.as_ref(),
             self.mtp,
         )?;
+        // as `tokenizer.json` text, whichever file the tokenizer was built from
+        let tokenizer_json = |path: &Path| -> Result<String> {
+            get_tokenizer(path, None)?
+                .to_string(false)
+                .map_err(anyhow::Error::msg)
+        };
         let config = match paths.get_companion_config() {
             Some(companion) => self.inner.with_companion_config(
                 &config,
                 &fs::read_to_string(companion)?,
-                &fs::read_to_string(paths.get_tokenizer_filename())?,
+                &tokenizer_json(paths.get_tokenizer_filename())?,
             )?,
             None => config,
         };
@@ -271,7 +277,7 @@ impl MultimodalLoader {
         let config = match alignment_tokenizer {
             Some(tokenizer) => inference_nn::loaders::with_alignment_tokenizer(
                 &config,
-                &fs::read_to_string(tokenizer)?,
+                &tokenizer_json(tokenizer)?,
             )?,
             None => config,
         };

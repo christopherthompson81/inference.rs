@@ -638,9 +638,27 @@ embedded. Pass the file, or a directory holding just that GGUF, as the model:
 inference serve -m ~/models/VibeVoice-ASR-Streaming-7B-GGUF/vibevoice-asr-streaming-7b-q4_k.gguf
 ```
 
-The embedded files are unpacked once into `~/.cache/inference-rs/audiocpp/`. Quantized weights run as the file
-stores them. These load so far: VibeVoice-ASR and VibeVoice-ASR Streaming (both sizes). Other families' GGUFs do
-not load yet.
+The embedded files are unpacked once into `~/.cache/inference-rs/audiocpp/`. Each loads as the checkpoint it packs,
+through the same request fields. Models that keep quantized matrices (the decoders: VibeVoice, Qwen3-ASR, Voxtral,
+Qwen3-TTS's talker, Cohere's text decoder) run them as stored; the speech encoders and Kokoro read their weights
+dequantized into the model's dtype, so their package saves disk rather than GPU memory. These load, each checked
+against its own release on the same clips:
+
+| Package | Against the release |
+|---|---|
+| VibeVoice-ASR, VibeVoice-ASR Streaming 1.5B / 7B | see the sections above |
+| Parakeet-TDT-0.6B-v3 | the same transcripts |
+| Nemotron-3.5-ASR-Streaming-0.6B | 2 words in 864 apart over five minutes |
+| Cohere-Transcribe | the same transcripts |
+| Qwen3-ASR 0.6B / 1.7B | the same transcripts |
+| Qwen3-ForcedAligner-0.6B | the same word times |
+| Voxtral-Mini-4B-Realtime (q4_k) | the same transcripts, in 11.1 GB instead of 16.3 and about half the time |
+| Kokoro-82M (both files) | speaks the same text |
+| Qwen3-TTS 0.6B / 1.7B (Base, CustomVoice, VoiceDesign) | speaks the same text; Base packages keep the codec encoder, so they clone with `reference_text` |
+
+Not loaded: Sortformer's package is the offline v1, not the streaming Sortformer this runs, and Nemotron-3
+Diarization's is audio.cpp's own conversion of the `.nemo` (its own config and tensor names), not a release's
+layout.
 
 ## Qwen3-ASR: audio in, transcript out
 
@@ -649,7 +667,8 @@ inference serve -m Qwen/Qwen3-ASR-1.7B-hf
 ```
 
 Qwen3-ASR loads from the transformers `-hf` repos, from the original ones (`Qwen/Qwen3-ASR-1.7B`, weights under
-`thinker.`), and from llama.cpp's GGUFs (see the [model family notes](/guides/models/model-family-notes/#qwen3-asr)).
+`thinker.`, the tokenizer built from `vocab.json` and `merges.txt`), from llama.cpp's GGUFs (see the
+[model family notes](/guides/models/model-family-notes/#qwen3-asr)) and from [audio.cpp's](#audiocpp-ggufs).
 `/v1/audio/transcriptions` decodes the model's transcription prompt greedily and returns its transcript:
 
 ```bash
@@ -669,9 +688,9 @@ Through `/v1/chat/completions`, send the clip as an `audio_url` part; the answer
 
 ### Word times from Qwen3-ForcedAligner
 
-`Qwen/Qwen3-ForcedAligner-0.6B-hf` (or the original `Qwen/Qwen3-ForcedAligner-0.6B`, whose repo has no
-`tokenizer.json`: give the `-hf` one with the model's `tokenizer`) times a transcript's words on its audio. Load it
-beside Qwen3-ASR and name it in `alignment_model` (an inference.rs extension):
+`Qwen/Qwen3-ForcedAligner-0.6B-hf` (or the original `Qwen/Qwen3-ForcedAligner-0.6B`, whose tokenizer is built from
+its `vocab.json` and `merges.txt`) times a transcript's words on its audio. Load it beside Qwen3-ASR and name it in
+`alignment_model` (an inference.rs extension):
 
 ```toml
 command = "serve"
@@ -757,9 +776,14 @@ as transformers keeps it (the speech encoder's quantized matrices excepted).
 inference serve -m mistralai/Voxtral-Mini-4B-Realtime-2602
 ```
 
-The auto-loader recognizes the Voxtral Realtime layout from `params.json`,
-`consolidated.safetensors`, and `tekken.json`. The earlier `VoxtralForConditionalGeneration`
-architecture is not supported.
+The auto-loader recognizes the Voxtral Realtime layout from `params.json` and `tekken.json`, with Mistral's
+`consolidated.safetensors` or transformers' `model.safetensors` (the same weights under transformers' names, which
+audio.cpp's GGUF packs). The earlier Voxtral Mini and Small (`VoxtralForConditionalGeneration`) load too, as
+`voxtral-chat` (see the [model family notes](/guides/models/model-family-notes/#voxtral)).
+
+By default the KV cache holds one sequence at the model's full 131,072-token context, sized to the free memory, which
+can leave the audio encoder too little for a long clip (bf16 ran out of memory on a 105 s clip on a 24 GB GPU).
+`--pa-context-len 16384` holds over five minutes of audio and its transcript.
 
 Voxtral Realtime uses the multimodal chat request shape: audio is an input content part and the
 response is its transcription. The supported checkpoint is intended for transcription; the text
@@ -935,11 +959,12 @@ Kokoro loads from its PyTorch release: `config.json`, `kokoro-v1_0.pth` (or a `m
 the same tensor names), and every voice pack under `voices/` (`.pt` from the release, or raw
 little-endian f32 `.bin` packs of 510 x 256 values). It speaks at 24 kHz.
 
-It also loads [audio.cpp](https://github.com/0xShug0/audio.cpp)'s Kokoro GGUF (architecture `kokoro_tts`,
-such as the multilingual `kokoro-82m-q8_0.gguf`), which carries its config and all 54 voices:
+It also loads [audio.cpp](https://github.com/0xShug0/audio.cpp)'s Kokoro GGUFs, which carry the config and all 54
+voices: `kokoro-82m-multilingual-q8_0.gguf` (architecture `kokoro_tts`) and `kokoro-82m-q8_0.gguf` (an
+[audio.cpp checkpoint GGUF](#audiocpp-ggufs)):
 
 ```bash
-inference serve -m /path/to/kokoro-82m-q8_0.gguf
+inference serve -m /path/to/kokoro-82m-multilingual-q8_0.gguf
 ```
 
 Pass the file, or a directory holding just that GGUF; the auto loader recognizes it. Its matrices are Q8_0 and its

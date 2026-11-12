@@ -37,14 +37,19 @@ impl KokoroTts {
             let gguf = read_kokoro_gguf(weights, device)?;
             return Self::new(&gguf.config, gguf.weights, gguf.voices);
         }
-        let cfg: KokoroConfig = serde_json::from_str(&std::fs::read_to_string(config)?)
-            .map_err(inference_tensor::Error::wrap)?;
         let vb = if weights.extension().is_some_and(|e| e == "safetensors") {
             // SAFETY: the weight file is mmapped read-only and not modified while the model is alive.
             unsafe { VarBuilder::from_mmaped_safetensors(&[weights], DType::F32, device)? }
         } else {
             pth_var_builder(weights, device)?
         };
+        Self::load_with(config, vb, voices)
+    }
+
+    /// `config` and the `voices` packs over weights `vb` reads under the release's names, in F32.
+    pub fn load_with(config: &Path, vb: VarBuilder, voices: &[PathBuf]) -> Result<Self> {
+        let cfg: KokoroConfig = serde_json::from_str(&std::fs::read_to_string(config)?)
+            .map_err(inference_tensor::Error::wrap)?;
         let mut packs = BTreeMap::new();
         for path in voices {
             let name = path

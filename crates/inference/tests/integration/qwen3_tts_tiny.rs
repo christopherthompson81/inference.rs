@@ -6,6 +6,8 @@ use inference::{
     SpeechLoaderType, SpeechModelBuilder,
 };
 
+#[path = "../support/audiocpp_package.rs"]
+mod package;
 #[path = "../support/qwen3_tts_tiny.rs"]
 mod support;
 use support::{
@@ -324,6 +326,39 @@ fn pcm16(bytes: &[u8]) -> Vec<i32> {
         .iter()
         .map(|b| i32::from(i16::from_le_bytes(*b)))
         .collect()
+}
+
+// audio.cpp's package of it (the talker and the codec as two sources, the configs and tokenizer embedded) speaks as the
+// checkpoint, cloning from the clip and its transcript
+#[tokio::test]
+async fn an_audiocpp_package_speaks_as_its_checkpoint() -> anyhow::Result<()> {
+    let checkpoint = tiny_qwen3_tts_checkpoint(BASE, SMALL)?;
+    let dir = tempfile::tempdir()?;
+    let gguf = package::repack_all(
+        checkpoint.path(),
+        "qwen3_tts",
+        &[
+            ("model_weights", "model.safetensors"),
+            (
+                "speech_tokenizer_weights",
+                "speech_tokenizer/model.safetensors",
+            ),
+        ],
+        &dir.path().join("tiny-f32.gguf"),
+    )?;
+    let clip = tone_base64(220.0);
+    let speak = |path: std::path::PathBuf, clip: String| async move {
+        anyhow::Ok(
+            load(&path)
+                .await?
+                .generate_speech(clone_request(Some(clip), Some(CLIP_TEXT)))
+                .await?
+                .bytes,
+        )
+    };
+    let want = speak(checkpoint.path().to_path_buf(), clip.clone()).await?;
+    assert_eq!(speak(gguf, clip).await?, want);
+    Ok(())
 }
 
 // llama.cpp's conversion of the tiny checkpoint speaks as the checkpoint, named or detected, and cannot continue a clip

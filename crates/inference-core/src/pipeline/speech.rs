@@ -19,6 +19,7 @@ use anyhow::Result;
 use futures::future::BoxFuture;
 use hf_hub::{Repo, RepoType};
 use indexmap::IndexMap;
+use inference_gguf::audiocpp::AudioCppGguf;
 use inference_models_speech::kokoro::{GGUF_EXTENSION, KokoroConfig, KokoroTts, is_kokoro_gguf};
 use inference_models_speech::qwen3_tts::{self, Qwen3Tts, Qwen3TtsConfig};
 use inference_models_speech::{DiaConfig, DiaPipeline, SpeechOptions};
@@ -40,6 +41,13 @@ const DIA_DAC_MODEL: &str = "EricB/dac_44khz";
 const KOKORO_VOICES_DIR: &str = "voices";
 const KOKORO_SAFETENSORS: &str = "model.safetensors";
 const KOKORO_CONFIG: &str = "config.json";
+// audio.cpp's family name for a Kokoro package, which names its tensors `kokoro/<name>`
+const AUDIOCPP_KOKORO: &str = "kokoro_tts";
+const AUDIOCPP_KOKORO_SOURCE: &str = "kokoro";
+// a Qwen3-TTS package's sources: the talker's weights and its speech tokenizer's (the codec)
+const AUDIOCPP_QWEN3_TTS: &str = "qwen3_tts";
+const AUDIOCPP_QWEN3_TTS_TALKER: &str = "model_weights";
+const AUDIOCPP_QWEN3_TTS_CODEC: &str = "speech_tokenizer_weights";
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Clone, Copy, Debug, inference_json::FromJson, Serialize, PartialEq, strum::EnumIter)]
@@ -267,6 +275,36 @@ impl Loader for SpeechLoader {
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
         let silent = options.silent;
         let _progress_guard = ProgressScopeGuard::new(silent);
+        if let Some(package) =
+            inference_gguf::audiocpp::unpack(std::path::Path::new(&self.model_id))?
+        {
+            let family = AudioCppGguf::open(&package.gguf)?.family().to_string();
+            let (arch, voices) = match family.as_str() {
+                AUDIOCPP_KOKORO => (
+                    SpeechLoaderType::Kokoro,
+                    std::fs::read_dir(package.dir.join(KOKORO_VOICES_DIR))?
+                        .map(|e| Ok(e?.path()))
+                        .collect::<std::io::Result<Vec<_>>>()?,
+                ),
+                AUDIOCPP_QWEN3_TTS => (SpeechLoaderType::Qwen3Tts, Vec::new()),
+                other => anyhow::bail!(
+                    "`{}` is an audio.cpp `{other}` GGUF, not a speech model this loads",
+                    package.gguf.display()
+                ),
+            };
+            if let Some(given) = self.arch.filter(|given| *given != arch) {
+                anyhow::bail!(
+                    "`{}` is a {arch:?} GGUF, not {given:?}",
+                    package.gguf.display()
+                )
+            }
+            let paths = SpeechModelPaths {
+                weights: vec![package.gguf],
+                config: package.dir.join(KOKORO_CONFIG),
+                voices,
+            };
+            return self.load_model_from_path(&paths, options);
+        }
         if let Some(gguf) = local_kokoro_gguf(&self.model_id) {
             if let Some(arch) = self.arch.filter(|arch| *arch != SpeechLoaderType::Kokoro) {
                 anyhow::bail!("`{}` is a Kokoro GGUF, not {arch:?}", gguf.display())
@@ -408,7 +446,17 @@ impl Loader for SpeechLoader {
                     paths.weights.len()
                 )
             };
-            let model = KokoroTts::load(&paths.config, weights, &paths.voices, device)?;
+            let model = if inference_gguf::audiocpp::is_audiocpp_gguf(weights) {
+                let vb = AudioCppGguf::open(weights)?.dense_var_builder(
+                    Some(AUDIOCPP_KOKORO_SOURCE),
+                    inference_tensor::DType::F32,
+                    device,
+                    None,
+                )?;
+                KokoroTts::load_with(&paths.config, vb, &paths.voices)?
+            } else {
+                KokoroTts::load(&paths.config, weights, &paths.voices, device)?
+            };
             // the data repo is public, and text input is optional: a failure here leaves `phonemes` requests working
             if let Err(err) = super::phonemizer_data::install(&TokenSource::None, !silent)
                 .and_then(|()| Ok(model.prepare_text_input()?))
@@ -438,6 +486,22 @@ impl Loader for SpeechLoader {
             let model = match paths.weights.as_slice() {
                 [talker, mmproj] if qwen3_tts::gguf::is_qwen3_tts_gguf(talker) => {
                     Qwen3Tts::load_gguf(talker, mmproj, dtype, device)?
+                }
+                [gguf] if inference_gguf::audiocpp::is_audiocpp_gguf(gguf) => {
+                    let package = AudioCppGguf::open(gguf)?;
+                    let dir = paths.config.parent().ok_or_else(|| {
+                        anyhow::anyhow!("`{}` has no directory", paths.config.display())
+                    })?;
+                    Qwen3Tts::load_with(
+                        dir,
+                        &package.var_builder(Some(AUDIOCPP_QWEN3_TTS_TALKER), dtype, device)?,
+                        &package.var_builder(
+                            Some(AUDIOCPP_QWEN3_TTS_CODEC),
+                            inference_tensor::DType::F32,
+                            device,
+                        )?,
+                        device,
+                    )?
                 }
                 _ => {
                     let dir = paths.config.parent().ok_or_else(|| {

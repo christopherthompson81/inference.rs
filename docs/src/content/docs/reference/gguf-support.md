@@ -225,7 +225,7 @@ Base-model loading is unaffected.
 Beyond the text and multimodal families above, GGUF also loads:
 
 - Encoder embedders and rerankers as llama.cpp's converter writes them (`bert`, `nomic-bert`, `jina-bert-v3`, `eurobert` and others); see [embeddings](/guides/models/use-embeddings/#gguf-embedders).
-- Speech: Parakeet ASR GGUFs (NVIDIA's own, or written by `inference quantize asr`), Qwen3-ASR from a `qwen3vl` text GGUF with its `qwen3a` projector, Silero VAD, audio.cpp's Kokoro GGUF, and audio.cpp's checkpoint GGUFs (architecture `audiocpp`) for VibeVoice-ASR and VibeVoice-ASR Streaming; see [speech models](/guides/models/use-speech-models/). Whisper does not load from GGUF.
+- Speech: Parakeet ASR GGUFs (NVIDIA's own, or written by `inference quantize asr`), Qwen3-ASR from a `qwen3vl` text GGUF with its `qwen3a` projector, Silero VAD, audio.cpp's Kokoro GGUF, and audio.cpp's checkpoint GGUFs (architecture `audiocpp`) for VibeVoice-ASR (offline and streaming), Parakeet, Nemotron-3.5 streaming ASR, Cohere Transcribe, Qwen3-ASR, Qwen3-ForcedAligner, Voxtral Realtime, Kokoro and Qwen3-TTS; see [speech models](/guides/models/use-speech-models/). Whisper does not load from GGUF.
 - Image generation: FLUX transformers (with a T5 encoder GGUF) and HiDream-O1 in ComfyUI-GGUF's layout; see [image generation](/guides/models/use-image-generation/).
 - World generation: WorldStereo-2 and the umT5 text encoder; see [3D worlds](/guides/models/generate-3d-worlds/).
 - Decision models, from llama.cpp's GGUFs of them; see [decision models](/guides/models/use-decision-models/).

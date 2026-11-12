@@ -108,3 +108,110 @@ parakeet-tdt-0.6b-v3-q8_0    reading the header: unknown dtype for tensor 27
 
 Phase 2 work: a tokenizer built from `vocab.json` + `merges.txt` where a package has no `tokenizer.json`, the GGML
 types our reader lacks (tensor 27 of the Parakeet file), and each family's names checked against its loader.
+
+## Run 5 - 2026-11-12 07:15
+
+Question: what do the current uploads hold? The September copies predate audio.cpp's 2026-10-19 refresh ("Refresh
+embedded GGUF specs for v0.9.2"), so the q8_0 (q4_k for Voxtral) of each family we run was fetched again:
+`hf download audio-cpp/audio.cpp-gguf <folder>/<file>...` and `audio-cpp/Nemotron-3-Diarization-GGUF`.
+
+```
+Parakeet-TDT-0.6B-v3       transformers layout (ParakeetForTDT): config, processor_config, tokenizer.json; 24 I64
+                           tensors (BatchNorm's num_batches_tracked); the last tensor's padding left off the file
+Nemotron-3.5-ASR-Streaming transformers layout (Nemotron3_5AsrForRNNT) with its tokenizer.json
+Cohere-Transcribe          the release's files and names
+Qwen3-ASR 0.6B / 1.7B      Qwen's repo: vocab.json + merges.txt, no tokenizer.json
+Qwen3-ForcedAligner-0.6B   Qwen's original repo (no tokenizer.json, the time classes in lm_head)
+Qwen3-TTS (4 packages)     two sources, `model_weights/` and `speech_tokenizer_weights/` (the codec, encoder included)
+Kokoro-82M q8_0            `audiocpp` now, one source `kokoro/` over the .pth names, config and voices/*.bin embedded
+Kokoro-82M multilingual    still the older `kokoro_tts` architecture, which we already read
+Voxtral-Mini-4B-Realtime   transformers' names (audio_tower, language_model, multi_modal_projector) beside Mistral's
+                           params.json and tekken.json
+Sortformer-Diar-4spk-v1    the offline v1 (SortformerOffline), not the streaming v2.1 we run
+Nemotron-3-Diarization     audio.cpp's own conversion from the .nemo: its own config (chunk 264, no FIFO), NeMo names
+```
+
+Each failure on the way, in order: `Content::read` refuses the I64 type (GGML 27), so the reader takes the header
+alone (`gguf_file::Header`, raw type ids) and binds no integer-typed tensor; the archive refused the unpadded last
+tensor ("padded storage ... ends at byte 915735776, beyond file length 915735760"), which llama.cpp's loader accepts,
+so the storage range now ends at the file; the transcription loader still bailed for every family but VibeVoice.
+
+## Run 6 - 2026-11-12 07:50
+
+Question: does each family transcribe from its package as from its release? `/v1/audio/transcriptions` verbose_json,
+the 12.7 s dialogue and the 305 s clip (the 36-word dialogue 24 times over, so 864 words is all of it), CUDA, bf16.
+Speech loaders now take a `VarBuilder` from core (`load_with`): plain-`VarBuilder` models (Parakeet, Cohere's
+encoder, Kokoro) read the package dequantized tensor by tensor (`dense_var_builder`), the rest through
+`GgufWeightSource` with quantized matrices kept.
+
+```
+Parakeet q8_0 vs nvidia/parakeet-tdt-0.6b-v3   dialogue identical; 305 s: the package has all 864 words, the
+                                               release 838 (one 26-word sentence missing from a window)
+Nemotron-3.5 q8_0 vs the release               dialogue identical; 305 s: 2 words apart, both toward the script
+                                               ("a" -> "the", a dropped "Great" back)
+Cohere q8_0 vs CohereLabs release              identical on both
+Qwen3-ASR 0.6B q8_0 vs Qwen/Qwen3-ASR-0.6B     identical on both (792 words each)
+Qwen3-ASR 1.7B q8_0 vs Qwen/Qwen3-ASR-1.7B     identical on both (4233 words each: both loop on the 305 s clip in
+                                               one pass)
+```
+
+Qwen's repos carry no `tokenizer.json`: a `Qwen2Tokenizer` now builds from `vocab.json` + `merges.txt` + the config's
+added tokens, as transformers converts it (NFC, Qwen's split, byte-level BPE; settings checked against
+`AutoTokenizer`'s `backend_tokenizer`). That also loads `Qwen/Qwen3-ASR-0.6B` and the original
+`Qwen/Qwen3-ForcedAligner-0.6B` from their own repos, which failed before ("Could not find `tokenizer.json`").
+
+Qwen3-ForcedAligner q8_0 against `Qwen/Qwen3-ForcedAligner-0.6B-hf`, beside Qwen3-ASR 0.6B, word timestamps: equal
+on the dialogue (36 words) and the 105 s reading (147 words). On the 305 s clip 628 of 792 equal, and from word 685
+both break down: the transcript has lost repeats there, the reference collapses the words onto 216.64 s and the
+package spreads them 0.15 s apart. The aligner first failed with "expected `,` or `}` at line 1 column 5": the loader
+handed it the tokenizer file's text as `tokenizer.json`; it now gets the loaded tokenizer serialized.
+
+## Run 7 - 2026-11-12 08:10
+
+Question: the speech models. `/v1/audio/speech`, each output transcribed by Parakeet.
+
+```
+Kokoro q8_0 vs hexgrad/Kokoro-82M (af_heart)   6.67 s vs 6.72 s, same transcript; two reference runs agree only to
+                                               20 dB SNR (decoder noise), so no sample-level comparison
+Kokoro multilingual (ff_siwis, French)         transcribes back exactly
+Qwen3-TTS, seed 7, q8_0 package vs release:
+  1.7B CustomVoice (vivian)                    6.24 s vs 6.56 s   both say the text
+  1.7B VoiceDesign (instructions)              5.92 s vs 6.96 s   both say the text
+  0.6B Base (clip + reference_text)            5.04 s vs 4.80 s   both say the text
+  1.7B Base (clip + reference_text)            5.28 s vs 5.68 s   both say the text
+GPU, package vs release: 5.2 vs 6.5, 5.1 vs 6.6, 5.2 vs 5.7, 6.3 vs 7.7 GB
+```
+
+The packages keep the codec encoder, so cloning with `reference_text` works, which llama.cpp's Qwen3-TTS GGUFs
+cannot. Sampled audio diverges between q8_0 and bf16 from the first frames, so only the transcripts compare.
+
+Not loaded, and why: Sortformer's package is the offline v1, a model we do not run; Nemotron-3 Diarization's is
+audio.cpp's own conversion (NeMo names, its own config and streaming settings) of a 0.1 GB model, little gained
+over the release. Voxtral Realtime needs transformers' layout (next run).
+
+## Run 8 - 2026-11-12 09:30
+
+Question: Voxtral Realtime from its package, whose weights are transformers' `model.safetensors` (the repo ships it
+beside `consolidated.safetensors`)? The first load failed on `mm_streams_embeddings...conv_layers.0.conv.weight`.
+
+Range reads of both files' layer 0 (`scratchpad` script over the Hub, no full download) showed the layouts hold the
+same values except every Q and K projection, encoder and decoder, Q's bias included: transformers' rows are each
+head de-interleaved (`consolidated == model.reshape(h, 2, d/2, ...).swapaxes(1, 2)`), the HF half-split order. So the
+model reads either layout from one names table (`voxtral::names`, picked by which encoder conv the checkpoint holds,
+since ISQ hides the embedding from `contains_tensor`) and rotates half-split pairs for transformers'.
+
+`/v1/chat/completions` "Transcribe this.", greedy, against `consolidated.safetensors` in bf16:
+
+```
+                     q4_k package          consolidated bf16
+12.7 s dialogue      identical text
+105 s reading        189 words identical   (bf16 ran out of memory here at first: see below)
+305 s clip           864 words identical (all of it)
+                     26.8 s, 11.1 GB       47.2 s, 16.3 GB
+```
+
+Both with `--pa-context-len 16384`: by default the KV cache holds one sequence at the full 131,072 context fitted to
+the free memory, and the bf16 load then has no room for the encoder on a 105 s clip (CUDA out of memory); the q4_k
+package fit there in 19.3 GB. Tests: a tiny checkpoint renamed and re-laid as transformers' decodes as the
+consolidated one (and fails with adjacent RoPE), an ISQ load of it writes a UQFF that reloads alike (residual names),
+and its audio.cpp repack decodes as its safetensors (`voxtral_tiny`).

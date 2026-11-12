@@ -503,7 +503,13 @@ fn native_or_hf_tokenizer(repo: &RepoFiles<'_>) -> Result<PathBuf> {
             .into_iter()
             .find(|name| repo.has(name))
     {
-        return repo.get(native);
+        let tokenizer = repo.get(native)?;
+        // its merges and config land beside it
+        if native == super::tokenizer::BPE_VOCAB {
+            repo.get(super::tokenizer::BPE_MERGES)?;
+            repo.get("tokenizer_config.json")?;
+        }
+        return Ok(tokenizer);
     }
     repo.get("tokenizer.json")
 }
